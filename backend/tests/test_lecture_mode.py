@@ -378,73 +378,71 @@ class TestLectureModels:
 
 
 # ---------------------------------------------------------------------------
-# 6. 適応的セグメント分類テスト
+# 6. 「以前に触れた区画」の注記判定テスト（是正 F3。旧 _classify_segment は撤去済み）
 # ---------------------------------------------------------------------------
 
-class TestClassifySegment:
-    """_classify_segment による full / summary / skip 分類ロジック。"""
+class TestPreviouslyTouchedNote:
+    """_is_previously_touched は注記フラグ（bool）だけを返す。
 
-    def test_no_mastered_returns_full(self):
-        from core.lecture import _classify_segment
+    2026-09-10（六つのレンズ 提案1 / 是正 F3）に沈黙適応を撤去し、
+    旧 `_classify_segment`（full / summary / skip）を注記専用の bool 判定へ縮小した。
+    判定条件（旧 skip / summary 条件の和）は引き継いでいるが、判定結果は提示内容に
+    影響しない。
+    """
 
-        result = _classify_segment("Some text about linear algebra", set(), set())
-        assert result == "full"
+    def test_no_mastered_is_not_touched(self):
+        from core.lecture import _is_previously_touched
 
-    def test_short_chunk_with_mastered_prereq_returns_skip(self):
-        from core.lecture import _classify_segment
+        assert _is_previously_touched("Some text about linear algebra", set(), set()) is False
+
+    def test_short_chunk_with_mastered_prereq_is_touched(self):
+        from core.lecture import _is_previously_touched
 
         text = "線形代数の基本的な定義です。"  # short (<= 200 chars)
-        mastered = {"線形代数"}
-        prereqs = {"線形代数"}
-        result = _classify_segment(text, mastered, prereqs)
-        assert result == "skip"
+        assert _is_previously_touched(text, {"線形代数"}, {"線形代数"}) is True
 
-    def test_medium_chunk_with_multiple_prereqs_returns_summary(self):
-        from core.lecture import _classify_segment
+    def test_medium_chunk_with_multiple_prereqs_is_touched(self):
+        from core.lecture import _is_previously_touched
 
-        # 201-500 chars: triggers "summary" instead of "skip"
         text = "線形代数と微分積分はどちらも重要な基礎科目です。これらの概念は高度な数学の基盤となります。" * 5
         assert 200 < len(text) <= 500, f"text len={len(text)}"
-        mastered = {"線形代数", "微分積分"}
-        prereqs = {"線形代数", "微分積分"}
-        result = _classify_segment(text, mastered, prereqs)
-        assert result == "summary"
+        assert _is_previously_touched(
+            text, {"線形代数", "微分積分"}, {"線形代数", "微分積分"},
+        ) is True
 
-    def test_long_chunk_returns_full(self):
-        from core.lecture import _classify_segment
+    def test_long_chunk_is_not_touched(self):
+        from core.lecture import _is_previously_touched
 
         text = "線形代数の応用について。" * 100  # > 500 chars
-        mastered = {"線形代数"}
-        prereqs = {"線形代数"}
-        result = _classify_segment(text, mastered, prereqs)
-        assert result == "full"
+        assert _is_previously_touched(text, {"線形代数"}, {"線形代数"}) is False
 
     def test_mastered_but_not_prereq_short(self):
-        from core.lecture import _classify_segment
+        from core.lecture import _is_previously_touched
 
-        text = "量子力学の基本です。"
-        mastered = {"量子力学"}
-        prereqs = set()  # not a prerequisite
-        result = _classify_segment(text, mastered, prereqs)
-        # matched_prereq == 0, so won't skip even though short
-        assert result == "full"
+        # matched_prereq == 0 なので注記しない
+        assert _is_previously_touched("量子力学の基本です。", {"量子力学"}, set()) is False
 
-    def test_no_concept_match_returns_full(self):
-        from core.lecture import _classify_segment
+    def test_no_concept_match_is_not_touched(self):
+        from core.lecture import _is_previously_touched
 
         text = "This text has no matching concepts at all."
-        mastered = {"量子力学", "線形代数"}
-        prereqs = {"量子力学", "線形代数"}
-        result = _classify_segment(text, mastered, prereqs)
-        assert result == "full"
+        assert _is_previously_touched(
+            text, {"量子力学", "線形代数"}, {"量子力学", "線形代数"},
+        ) is False
+
+    def test_classify_segment_is_removed(self):
+        """沈黙適応の分類関数は復活させない（是正 F3）。"""
+        import core.lecture as lecture_mod
+
+        assert not hasattr(lecture_mod, "_classify_segment")
 
 
 # ---------------------------------------------------------------------------
-# 7. 習得済み概念を考慮したレクチャーシーケンス構築テスト
+# 7. 習得済み概念は注記のみ（内容改変ゼロ）のシーケンス構築テスト
 # ---------------------------------------------------------------------------
 
 class TestBuildLectureSequenceWithMastery:
-    """mastered_concepts を渡した場合の build_lecture_sequence 動作。"""
+    """mastered_concepts を渡しても内容が変わらないこと（是正 F3）。"""
 
     def test_no_mastery_all_full(self):
         from core.lecture import build_lecture_sequence
@@ -456,8 +454,10 @@ class TestBuildLectureSequenceWithMastery:
         result = build_lecture_sequence("topic-1", {"topics": []}, chunks, mastered_concepts=None)
         assert len(result) == 2
         assert all(s["segment_mode"] == "full" for s in result)
+        assert all(s["previously_touched"] is False for s in result)
 
-    def test_skip_short_mastered_prereq_chunk(self):
+    def test_short_mastered_prereq_chunk_is_kept_and_noted(self):
+        """旧実装で skip されていた短いチャンクも落とさず、注記だけを立てる。"""
         from core.lecture import build_lecture_sequence
 
         course_data = {
@@ -475,11 +475,16 @@ class TestBuildLectureSequenceWithMastery:
         result = build_lecture_sequence(
             "topic-1", course_data, chunks, mastered_concepts={"線形代数"},
         )
-        # c1 is short and about a mastered prereq -> skipped
-        assert len(result) == 1
-        assert result[0]["chunk_id"] == "c2"
+        assert [s["chunk_id"] for s in result] == ["c1", "c2"]
+        assert result[0]["previously_touched"] is True
+        assert result[1]["previously_touched"] is False
+        # 本文・読み上げは無改変
+        assert result[0]["text"] == "線形代数の基本定義"
+        assert result[0]["spoken_text"] == "線形代数の基本定義"
+        assert all(s["segment_mode"] == "full" for s in result)
 
-    def test_summary_medium_mastered_prereq_chunk(self):
+    def test_medium_mastered_prereq_chunk_spoken_is_not_replaced(self):
+        """旧実装で summary 置換されていた中程度のチャンクも読み上げを書き換えない。"""
         from core.lecture import build_lecture_sequence
 
         course_data = {
@@ -492,7 +497,6 @@ class TestBuildLectureSequenceWithMastery:
                 ],
             }],
         }
-        # 201-500 chars to trigger "summary" (not "skip")
         text = "線形代数と微分積分の基礎を復習します。これらの概念は高度な数学の基盤となり、応用分野で活用されます。" * 5
         assert 200 < len(text) <= 500, f"text len={len(text)}"
         chunks = [
@@ -502,7 +506,10 @@ class TestBuildLectureSequenceWithMastery:
             "topic-1", course_data, chunks, mastered_concepts={"線形代数", "微分積分"},
         )
         assert len(result) == 1
-        assert result[0]["segment_mode"] == "summary"
+        assert result[0]["segment_mode"] == "full"
+        assert result[0]["previously_touched"] is True
+        assert result[0]["spoken_text"] == text
+        assert "習得済み" not in result[0]["spoken_text"]
 
     def test_segment_mode_in_output(self):
         from core.lecture import build_lecture_sequence
@@ -513,14 +520,15 @@ class TestBuildLectureSequenceWithMastery:
         result = build_lecture_sequence("topic-1", {"topics": []}, chunks)
         assert "segment_mode" in result[0]
         assert result[0]["segment_mode"] == "full"
+        assert result[0]["previously_touched"] is False
 
 
 # ---------------------------------------------------------------------------
-# 8. スキーマの segment_mode / skipped_segments / summary_segments テスト
+# 8. スキーマの segment_mode / previously_touched テスト
 # ---------------------------------------------------------------------------
 
 class TestLectureSchemasAdaptive:
-    """適応的シーケンス関連の Pydantic フィールド。"""
+    """セグメント注記関連の Pydantic フィールド。"""
 
     def test_segment_mode_default(self):
         from schemas import LectureSegment
@@ -539,16 +547,34 @@ class TestLectureSchemasAdaptive:
         )
         assert seg.segment_mode == "summary"
 
-    def test_sequence_response_skipped_and_summary(self):
+    def test_previously_touched_default_false(self):
+        from schemas import LectureSegment
+
+        seg = LectureSegment(
+            chunk_id="abc", chunk_index=0, text="t", spoken_text="t",
+        )
+        assert seg.previously_touched is False
+
+    def test_previously_touched_can_be_set(self):
+        from schemas import LectureSegment
+
+        seg = LectureSegment(
+            chunk_id="abc", chunk_index=0, text="t", spoken_text="t",
+            previously_touched=True,
+        )
+        assert seg.previously_touched is True
+
+    def test_sequence_response_has_no_omission_counts(self):
+        """省略件数（skipped_segments / summary_segments）は撤去済み（是正 F3）。
+
+        サーバは省略しないので数えるものが無い。件数を返せば「何かが省かれた」という
+        誤った印象だけが残る。
+        """
         from schemas import LectureSequenceResponse
 
-        resp = LectureSequenceResponse(
-            course_id="c1", topic_id="t1",
-            total_segments=5, total_duration_ms=0,
-            skipped_segments=2, summary_segments=1,
-        )
-        assert resp.skipped_segments == 2
-        assert resp.summary_segments == 1
+        fields = set(LectureSequenceResponse.model_fields.keys())
+        assert "skipped_segments" not in fields
+        assert "summary_segments" not in fields
 
 
 # ---------------------------------------------------------------------------

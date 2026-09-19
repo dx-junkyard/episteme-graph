@@ -32,6 +32,9 @@ class _FakeSession:
         self.sql.append(str(statement))
         return _FakeResult(self.rows)
 
+    def close(self):
+        pass
+
 
 def test_resolve_artifact_runs_prefers_active_then_completed():
     session = _FakeSession([
@@ -47,6 +50,62 @@ def test_resolve_artifact_runs_prefers_active_then_completed():
 
 def test_resolve_artifact_runs_empty_documents():
     assert persistence.resolve_artifact_runs(_FakeSession([]), []) == {}
+
+
+def test_resolve_artifact_runs_latest_policy_ignores_status():
+    """``policy="latest"`` は resume / 進捗表示 専用（成果物には使わない。C-8）。"""
+    session = _FakeSession([("doc-1", "run-running", {"_artifacts": {}}, "running")])
+    out = persistence.resolve_artifact_runs(session, ["doc-1"], policy="latest")
+    assert out["doc-1"]["run_id"] == "run-running"
+    targets_cte = session.sql[0].split("SELECT t.document_id")[0]
+    assert "active_analysis_run_id" not in targets_cte
+    assert "status" not in targets_cte
+
+
+def test_resolve_artifact_runs_exposes_cartridge_id_when_selected():
+    session = _FakeSession([
+        ("doc-1", "run-1", {"_artifacts": {}}, "completed", "particle_physics"),
+    ])
+    out = persistence.resolve_artifact_runs(session, ["doc-1"])
+    assert out["doc-1"]["cartridge_id"] == "particle_physics"
+
+
+def test_resolve_artifact_runs_tolerates_short_rows():
+    """列を増やしても既存の短い行（fake session 等）で壊れないこと。"""
+    session = _FakeSession([("doc-1", "run-1", {"_artifacts": {}}, "completed")])
+    assert persistence.resolve_artifact_runs(session, ["doc-1"])["doc-1"]["cartridge_id"] == ""
+
+
+def test_document_run_artifacts_returns_artifacts_dict(monkeypatch):
+    monkeypatch.setattr(
+        persistence, "resolve_artifact_runs",
+        lambda session, ids, *, policy="adopted": {
+            ids[0]: {"stage_outputs": {"_artifacts": {"equation_semantics": {"equations": []}}}},
+        },
+    )
+    monkeypatch.setattr(persistence, "_pg_session", lambda: _FakeSession([]))
+    assert "equation_semantics" in persistence.document_run_artifacts("doc-1")
+
+
+def test_document_run_artifacts_empty_without_run(monkeypatch):
+    monkeypatch.setattr(
+        persistence, "resolve_artifact_runs",
+        lambda session, ids, *, policy="adopted": {},
+    )
+    monkeypatch.setattr(persistence, "_pg_session", lambda: _FakeSession([]))
+    assert persistence.document_run_artifacts("doc-1") == {}
+    # 空 document_id は SQL を発行しない。
+    assert persistence.document_run_artifacts("  ") == {}
+
+
+def test_document_run_cartridge_id_reads_the_same_run(monkeypatch):
+    monkeypatch.setattr(
+        persistence, "resolve_artifact_runs",
+        lambda session, ids, *, policy="adopted": {ids[0]: {"cartridge_id": "astrophysics"}},
+    )
+    monkeypatch.setattr(persistence, "_pg_session", lambda: _FakeSession([]))
+    assert persistence.document_run_cartridge_id("doc-1") == "astrophysics"
+    assert persistence.document_run_cartridge_id("") == ""
 
 
 def test_resolve_artifact_runs_parses_json_string_stage_outputs():

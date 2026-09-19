@@ -6,6 +6,7 @@ from pathlib import Path
 
 from episteme_graph.agents.landscape_placement.input_builder import (
     LandscapePlacementInputBuilder,
+    PREFILTER_NOTE,
     MAX_CLAIMS,
     MAX_CLAIM_CHARS,
     MAX_DOMAINS,
@@ -116,6 +117,42 @@ class TestPromptBounds:
         )
         prepared = BUILDER.prepare_for_prompt(item)
         assert [d["domain_key"] for d in prepared["domains"]] == ["astrophysics"]
+
+
+class TestPrefilterNote:
+    """前段絞り込み（atlas_vector_anchoring_design.md §6）の正直な提示。"""
+
+    def _prepared(self, *, prefiltered):
+        item = _input(
+            domains=[
+                DomainOption(
+                    domain_key="astrophysics",
+                    nodes=[SkeletonNodeOption("cosmology", "宇宙論", "region", "")],
+                    prefiltered=prefiltered,
+                )
+            ]
+        )
+        return BUILDER.prepare_for_prompt(item)["domains"][0]
+
+    def test_no_note_when_the_skeleton_was_presented_in_full(self):
+        assert "note" not in self._prepared(prefiltered=False)
+
+    def test_note_is_added_when_nodes_were_trimmed(self):
+        assert self._prepared(prefiltered=True)["note"] == PREFILTER_NOTE
+
+    def test_note_says_the_list_is_not_the_whole_skeleton(self):
+        assert "全ノードではありません" in PREFILTER_NOTE
+
+    def test_flag_survives_the_dict_round_trip(self):
+        payload = DomainOption(
+            domain_key="astrophysics",
+            nodes=[SkeletonNodeOption("cosmology")],
+            prefiltered=True,
+        ).to_dict()
+        assert payload["prefiltered"] is True
+        assert DomainOption.from_dict(payload).prefiltered is True
+        # 呼び出し側が付けなければ従来どおり False（既定は全提示）。
+        assert DomainOption.from_dict({"domain_key": "d"}).prefiltered is False
 
 
 class TestHaystack:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from episteme_graph.agents.validation import ValidationIssue
 
 GRAPH_SCHEMA_VERSION = "0.1.0"
 COMPONENT_GRAPH_VERSION = "v1"
@@ -147,6 +148,16 @@ _EDGE_TYPE_TO_STAGE = {
     "constrains": THEORY_STAGE_CONSISTENCY_RELATION,
     "diagnoses": THEORY_STAGE_DIAGNOSTIC_APPLICATION,
     "compares": THEORY_STAGE_DIAGNOSTIC_APPLICATION,
+    # ``transforms`` is produced by the *non-generic* full-map operations
+    # ``apply_equation`` / ``apply_measurement_or_update``. Applying an equation or a
+    # measurement update manipulates the equation system, so it belongs to the same
+    # stage as linearizes / approximates / substitutes. Without this entry
+    # ``_group_records`` fell back to the edge type itself as a pseudo-stage and the
+    # main node was labelled "Transforms" — outside ``THEORY_STAGE_LABELS`` and thus
+    # in breach of the #308 rule that a main label is a canonical stage label
+    # (generic operations are filtered out before this map is consulted, so this
+    # entry never promotes a generic step to the main graph).
+    "transforms": THEORY_STAGE_EQUATION_SYSTEM,
 }
 
 
@@ -438,13 +449,6 @@ class ComponentGraphEdge:
     # visualised from the field, never guessed from the relation label string.
     polarity: str = ""
 
-
-@dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str
-    message: str
-    field: str | None = None
 
 
 @dataclass

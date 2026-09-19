@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from core.deliberation.standardization.input_builder import StandardizationTargetContext
+from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE
 
 _INSTRUCTION = """あなたは学術分野の「標準化判定」を補助するアシスタントです。
 
@@ -52,7 +53,13 @@ def build_instruction() -> str:
 
 def build_content(context: StandardizationTargetContext) -> str:
     """instruction + 対象（共通部品の名称・別名・要約・本文）を user ロール1本に連結する。"""
-    lines = [build_instruction(), "", "# 対象（共通部品）"]
+    # 信頼境界（正本: docs/architecture/trust_boundary_pdf_input.md）: 共通部品の
+    # name / summary / body は論文由来テキストの再構成物 = untrusted。
+    lines = [
+        build_instruction(), "",
+        "# 信頼境界", UNTRUSTED_SOURCE_NOTICE, "",
+        "# 対象（共通部品）",
+    ]
     lines.append(f"- domain: {context.domain_key}")
     lines.append(f"- entry_type: {context.entry_type}")
     lines.append(f"- name: {context.name}")

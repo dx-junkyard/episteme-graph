@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from episteme_graph.agents.validation import ValidationIssue
 from typing import Optional
 
 from episteme_graph.agents.cartridge_context import CartridgeContext
@@ -63,13 +64,6 @@ class LogicalBlock:
     reason: str
     confidence: float
 
-
-@dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str  # "error" | "warning"
-    message: str
-    field: str | None = None
 
 
 @dataclass

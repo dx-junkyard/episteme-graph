@@ -31,7 +31,7 @@ BEGIN
     IF EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'element_explanations_element_type_check'
-          AND pg_get_constraintdef(oid) NOT LIKE '%%document%%'
+          AND pg_get_constraintdef(oid) NOT LIKE '%document%'
     ) THEN
         ALTER TABLE element_explanations
             DROP CONSTRAINT element_explanations_element_type_check;

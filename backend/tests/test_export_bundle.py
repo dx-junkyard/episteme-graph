@@ -145,7 +145,9 @@ class TestExportManifest:
         )
 
         assert "export_schema_version" in manifest
-        assert manifest["export_schema_version"] == "0.2.0"
+        # 0.2.0 → 0.3.0（knowledge_transfer_design.md §4.1）: JSON-LD 記述子と
+        # 各項目の stable_key が増え、取り込み（import）がこの版を前提にする。
+        assert manifest["export_schema_version"] == "0.3.0"
         assert "exported_at" in manifest
         assert "scope" in manifest
         assert manifest["scope"]["type"] == "course"
@@ -289,6 +291,33 @@ class TestExportClaimsAndComponents:
         assert "evidence_text" in c
         assert "support_status" in c
         assert "review_status" in c
+        # origin / parent_claim_id は無いときは載せない（束を嘘の値で埋めない）。
+        assert "origin" not in c
+        assert "parent_claim_id" not in c
+
+    def test_exported_claims_carry_origin_and_parent(self):
+        """V-11: 由来と親子は内容列。束に載せないと往復で失われる。"""
+        mod = _get_export_helpers()
+        raw_rows = [
+            (
+                "uuid-claim-parent", "doc_001", json.dumps({}), "relation",
+                "parent", "parent", json.dumps([]), json.dumps({}),
+                "source_backed", "", "teacher_review_required", None,
+                "span", None,
+            ),
+            (
+                "uuid-claim-child", "doc_001", json.dumps({}), "relation",
+                "child", "child", json.dumps([]), json.dumps({}),
+                "source_backed", "", "teacher_review_required", None,
+                "atomic_rewrite", "uuid-claim-parent",
+            ),
+        ]
+        claims = mod._rows_to_claims(raw_rows)
+        assert claims[0]["origin"] == "span"
+        assert "parent_claim_id" not in claims[0]
+        assert claims[1]["origin"] == "atomic_rewrite"
+        # 親は束の中の claim_id 空間で書かれる（取り込み側が写像で張り直す）。
+        assert claims[1]["parent_claim_id"] == "uuid-claim-parent"
 
     def test_exported_components_include_evidence_claims(self):
         mod = _get_export_helpers()

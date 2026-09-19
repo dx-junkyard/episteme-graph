@@ -45,6 +45,7 @@ from core.postgres import get_session
 from core import learner_context_common
 from core.learner_context_common import (  # noqa: F401  (旧名の再エクスポート)
     PROVENANCE_COURSE_FREEZE,
+    is_symbol_like_concept as _is_symbol_like_concept,
     is_uuid as _is_uuid,
     json_dict as _json_dict,
     json_list as _json_list,
@@ -52,6 +53,7 @@ from core.learner_context_common import (  # noqa: F401  (旧名の再エクス�
     project_item,
     scoped_id_match_sql,
     strip_confidence,
+    visible_concept_names,
 )
 from core.deliberation import context_lens as context_lens_mod
 from core.deliberation import identity_links as identity_links_mod
@@ -122,11 +124,11 @@ def _resolve_component_row(component_id: str, course_document_ids: set[str]) -> 
         row = session.execute(
             sa_text(
                 f"""
-                SELECT id::text AS id, document_id, course_id, name, component_type,
-                       component_type_text, summary, status, review_status,
+                SELECT id::text AS id, document_id::text AS document_id, course_id, name,
+                       component_type, component_type_text, summary, status, review_status,
                        source_scope, thesis_context
-                FROM theory_components
-                WHERE document_id = ANY(:doc_ids) AND ({where_clause})
+                FROM theory_components_live
+                WHERE document_id = ANY(CAST(:doc_ids AS uuid[])) AND ({where_clause})
                 ORDER BY (id::text = :raw_id) DESC
                 LIMIT 1
                 """
@@ -210,7 +212,7 @@ def _load_graph_narrative(document_id: str) -> dict:
             sa_text(
                 """
                 SELECT graph_json FROM theory_component_graphs
-                WHERE document_id = :doc ORDER BY updated_at DESC LIMIT 1
+                WHERE document_id = CAST(NULLIF(:doc, '') AS uuid) ORDER BY updated_at DESC LIMIT 1
                 """
             ),
             {"doc": document_id},

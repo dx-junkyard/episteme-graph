@@ -67,7 +67,10 @@ from core.deliberation.schema import (
     ElementRef,
     ElementResolutionError,
 )
-from core.library.schema import STANDARDIZATION_STATUSES
+from core.library.schema import (
+    JUSTIFICATION_LLM as MAPPING_JUSTIFICATION_LLM,
+    STANDARDIZATION_STATUSES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -245,7 +248,7 @@ def _commit_interpretation(annotation: dict, current_user_id: str | None) -> dic
     session = get_session()
     try:
         row = session.execute(
-            sa_text("SELECT course_id FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1"),
+            sa_text("SELECT course_id FROM theory_components_live WHERE id = CAST(:id AS uuid) LIMIT 1"),
             {"id": component_id},
         ).fetchone()
     finally:
@@ -380,6 +383,9 @@ def _commit_identity(annotation: dict, current_user_id: str | None) -> dict:
         reason=annotation.get("reason") or "",
         confidence=annotation.get("confidence"),
         created_by=current_user_id,
+        # KR4: この候補は W層の対話（LLM）から立った提案なので、出所は llm_candidate。
+        # 教員の commit は「候補をリンク行にする」操作で、根拠の出所を書き換えない。
+        mapping_justification=MAPPING_JUSTIFICATION_LLM,
     )
     return {"type": "identity_link", "id": link["id"], "status": link["status"]}
 

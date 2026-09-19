@@ -70,6 +70,7 @@
           '実測(reported)と推計(estimated)は常に分けて表示します（合算した単一数値は作りません）。' +
           '価格表が設定されている場合のみ費用(概算)の列に金額が入ります。' +
         '</p>' +
+        '<div id="llm-usage-indicator-fact"></div>' +
         '<div id="llm-usage-range-note" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:4px"></div>' +
         '<div id="llm-usage-price-note" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:4px"></div>' +
         '<div id="llm-usage-dropped-note" style="font-size:12px;margin-bottom:10px"></div>' +
@@ -89,6 +90,13 @@
     }
     var refreshBtn = document.getElementById("llm-usage-refresh");
     if (refreshBtn) refreshBtn.addEventListener("click", loadMetrics);
+
+    // 制度指標カタログの事実文（IG1）。取得できないときは何も描かれない（fail-soft）。
+    if (window.AdminIndicators) {
+      window.AdminIndicators.mount(
+        document.getElementById("llm-usage-indicator-fact"), "llm-usage-metrics"
+      );
+    }
   }
 
   function loadMetrics() {

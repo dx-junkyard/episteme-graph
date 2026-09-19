@@ -841,6 +841,135 @@ class TestStageWiring:
 
 
 # ---------------------------------------------------------------------------
+# 9.5 配置の前段絞り込み（``docs/features/atlas_vector_anchoring_design.md`` §6）
+# ---------------------------------------------------------------------------
+
+
+class _FakeAnchor:
+    """``core.atlas_vectors.store.AnchorVector`` の最小形（query は属性しか見ない）。"""
+
+    def __init__(self, node_id, vector, *, kind="concept", label=""):
+        self.node_id = node_id
+        self.node_kind = kind
+        self.label = label or node_id
+        self.vector = list(vector)
+        self.region_label = ""
+
+
+def _rich_skeleton() -> _FakeSkeleton:
+    """概念が2件ある骨格（top_k=1 で確実に間引きが起きる形）。"""
+    return _FakeSkeleton(
+        regions=[
+            _FakeRegion(
+                "cosmology",
+                "宇宙論・大規模構造",
+                [_FakeConcept("cmb", "宇宙背景放射"), _FakeConcept("bao", "バリオン音響振動")],
+            ),
+            _FakeRegion("observation_methods", "観測・装置・データ解析"),
+        ]
+    )
+
+
+def _prefilter_env(monkeypatch, *, top_k=1, centroid=(1.0, 0.0), anchors=None):
+    from core import atlas_store
+
+    monkeypatch.setattr(
+        atlas_store,
+        "load_learner_skeleton",
+        lambda key, _s=None: _rich_skeleton() if key == "astrophysics" else None,
+    )
+    monkeypatch.setattr(lb, "_vector_prefilter_topk", lambda: top_k)
+    monkeypatch.setattr(
+        "core.paper_discovery.ranking.document_centroid",
+        lambda _session, _document_id, **_kwargs: (
+            list(centroid) if centroid is not None else None
+        ),
+    )
+    if anchors is None:
+        anchors = {
+            "astrophysics": [
+                _FakeAnchor("cmb", [1.0, 0.0]),
+                _FakeAnchor("bao", [0.0, 1.0]),
+            ]
+        }
+    monkeypatch.setattr(
+        "core.atlas_vectors.store.anchors_for_domains",
+        lambda _session, _domains: dict(anchors),
+    )
+
+
+def _agent_node_ids() -> list[str]:
+    domain = _FakeAgent.last_payload["domains"][0]
+    return [n["node_id"] for n in domain["nodes"]]
+
+
+class TestVectorPrefilter:
+    """VA7: 間引きは必ず記録する（黙って提示範囲を狭めない）。"""
+
+    def test_facts_are_recorded_even_when_the_prefilter_is_off(self, monkeypatch, stage_env):
+        monkeypatch.setattr(lb, "_vector_prefilter_topk", lambda: 0)
+        payload = _run()
+        assert payload["vector_prefilter"] == {"applied": False, "omitted": 0, "domains": {}}
+        # 骨格は従来どおり全提示（region + concept）。
+        assert _agent_node_ids() == ["cosmology", "cmb", "observation_methods"]
+
+    def test_trims_concepts_and_records_the_omission(self, monkeypatch, stage_env):
+        _prefilter_env(monkeypatch, top_k=1)
+        payload = _run()
+        assert payload["vector_prefilter"] == {
+            "applied": True,
+            "omitted": 1,
+            "domains": {"astrophysics": 1},
+        }
+        # region は常に残り、重心から遠い概念（bao）だけが落ちる。
+        assert _agent_node_ids() == ["cosmology", "cmb", "observation_methods"]
+        assert _FakeAgent.last_payload["domains"][0]["prefiltered"] is True
+
+    def test_no_centroid_leaves_the_skeleton_untouched(self, monkeypatch, stage_env):
+        _prefilter_env(monkeypatch, top_k=1, centroid=None)
+        payload = _run()
+        assert payload["vector_prefilter"] == {"applied": False, "omitted": 0, "domains": {}}
+        assert _agent_node_ids() == ["cosmology", "cmb", "bao", "observation_methods"]
+
+    def test_no_anchor_vectors_leaves_the_skeleton_untouched(self, monkeypatch, stage_env):
+        _prefilter_env(monkeypatch, top_k=1, anchors={})
+        payload = _run()
+        assert payload["vector_prefilter"]["applied"] is False
+        assert _agent_node_ids() == ["cosmology", "cmb", "bao", "observation_methods"]
+
+    def test_vector_layer_failure_is_fail_soft(self, monkeypatch, stage_env):
+        _prefilter_env(monkeypatch, top_k=1)
+
+        def _boom(_session, _domains):
+            raise RuntimeError("vector layer down")
+
+        monkeypatch.setattr("core.atlas_vectors.store.anchors_for_domains", _boom)
+        payload = _run()
+        assert payload["vector_prefilter"] == {"applied": False, "omitted": 0, "domains": {}}
+        assert _agent_node_ids() == ["cosmology", "cmb", "bao", "observation_methods"]
+        # 配置そのものは従来どおり成立する（VA4）。
+        assert payload["status"] == "completed"
+        assert payload["placements_total"] == 2
+
+    def test_unmeasurable_concepts_are_kept(self, monkeypatch, stage_env):
+        """比較できない概念（アンカーなし）は落とさない — 慎重側（設計書 §6）。"""
+        _prefilter_env(
+            monkeypatch, top_k=1, anchors={"astrophysics": [_FakeAnchor("cmb", [1.0, 0.0])]}
+        )
+        payload = _run()
+        assert payload["vector_prefilter"]["applied"] is False
+        assert "bao" in _agent_node_ids()
+
+    def test_topk_setting_falls_back_to_off(self, monkeypatch):
+        """設定を読めないときは絞り込まない（従来動作へ倒す）。"""
+        def _boom():
+            raise RuntimeError("settings unavailable")
+
+        monkeypatch.setattr("core.config.get_settings", _boom)
+        assert lb._vector_prefilter_topk() == 0
+
+
+# ---------------------------------------------------------------------------
 # 10. core/landscape が FastAPI を import しないこと（設計書 §8）
 # ---------------------------------------------------------------------------
 

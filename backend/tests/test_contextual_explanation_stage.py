@@ -1130,6 +1130,11 @@ class TestDeletionCascade:
         src = (BACKEND / "core" / "versioning" / "deletion.py").read_text(encoding="utf-8")
         assert "DELETE FROM element_explanations" in src
 
-    def test_delete_material_route_deletes_element_explanations(self):
+    def test_delete_material_route_delegates_to_purge_document(self):
+        """知識オブジェクト層 §8.1（KO9）: delete_material は DB 削除本体を
+        ``_purge_document`` に委譲する（element_explanations の明示 DELETE は上の
+        テストが ``_purge_document`` 側で固定している）。自前の DELETE を書き戻すと
+        削除範囲の正本が2つに割れる。"""
         src = (BACKEND / "api" / "routes" / "admin.py").read_text(encoding="utf-8")
-        assert "DELETE FROM element_explanations" in src
+        body = src.split("def delete_material")[1].split("\n@router")[0]
+        assert "_purge_document(" in body

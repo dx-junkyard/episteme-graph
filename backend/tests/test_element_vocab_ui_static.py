@@ -254,19 +254,45 @@ class TestConsumersDelegate:
             src = _read(path)
             assert "window.ElementVocab" in src, path.name
 
+    #: **別の DB 列**の語彙で、たまたま同じトークン（`theory_component` 等）を含むため
+    #: 上の正規表現に引っかかるミラー表。それぞれ自分のサーバ正本と逐語一致テストを持つので、
+    #: element-vocab.js（W層 `element_type`）への集約対象ではない。
+    #: 追加するときは「別の列であること」と「自分のミラーテストがあること」を必ず書く。
+    FOREIGN_VOCAB_MIRRORS = [
+        # L層 `library_entries.entry_type`（正本 `core/library/schema.py::ENTRY_TYPE_LABELS`、
+        # 固定は `test_library_vocab_mirror.py::TestConceptRegistryVocabulary`）。
+        # W層の `element_type` とは列が違い、同じ `theory_component` でも
+        # 「理論コンポーネント」（ライブラリのエントリ種別）と「論理要素」（検討対象の要素種別）で
+        # 意味が異なる。
+        ("admin.js", "_libraryEntryTypeLabels"),
+    ]
+
+    def _strip_foreign_vocab_mirrors(self, path: Path, src: str) -> str:
+        for filename, var_name in self.FOREIGN_VOCAB_MIRRORS:
+            if path.name != filename:
+                continue
+            marker = "var " + var_name + " = {"
+            if marker not in src:
+                continue
+            start = src.index(marker)
+            end = src.index("};", start) + 2
+            src = src[:start] + src[end:]
+        return src
+
     def test_no_inline_type_label_literals_reappear(self):
         """種別 → **日本語表示名** のインライン辞書リテラル（theory_component: "論理要素" 等）を
         参照側に書き戻さない。値が ASCII のみの写像（kind ⇄ element_type の変換表など）は
-        表示名ではないので対象外。"""
+        表示名ではないので対象外。別の DB 列の語彙表（`FOREIGN_VOCAB_MIRRORS`）も対象外。"""
         pattern = re.compile(
             r"(theory_component|theory_claim|shared_part|derivation)\s*:\s*\"([^\"]*)\""
         )
         for path in CONSUMER_JS:
             if not path.exists():
                 continue
+            src = self._strip_foreign_vocab_mirrors(path, _read(path))
             hits = [
                 key + ': "' + value + '"'
-                for key, value in pattern.findall(_read(path))
+                for key, value in pattern.findall(src)
                 if not value.isascii()
             ]
             assert hits == [], path.name + " に種別表示名の辞書リテラルが再出現: " + str(hits)

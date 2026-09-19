@@ -67,7 +67,7 @@ def detect_gap_clusters(session, course_id: str = "") -> list[GapCluster]:
 
     rows = session.execute(
         sa_text(f"""
-            SELECT document_id, graph_json
+            SELECT document_id::text AS document_id, graph_json
             FROM theory_component_graphs
             WHERE {' AND '.join(filters)}
         """),

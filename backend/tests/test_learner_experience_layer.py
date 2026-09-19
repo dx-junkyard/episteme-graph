@@ -5,12 +5,16 @@
   approved_chunk_ids のフォールバック・OutOfSourceGuard の非断定文
 - L2 位置: build_position_anchor / origin の segment・scroll 保持
 - L3 資産化: build_traces_view（status主役の並び・再訪のころ合い算出）
-- 契約変更(§3.3): chat.search_chunks() が tier 付き dict のリストを返すこと
+
+（旧 §3.3 の ``chat.search_chunks()`` 契約テストは、呼び出し元ゼロのまま残っていた
+``core/chat.py`` の撤去に伴って削除した。実 RAG 検索は
+``services.search_chunks_with_metadata``（可視性ゲート必須）が正本。）
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+
 
 from core.learning_experience import (
     TIER_APPROVED,
@@ -182,52 +186,3 @@ def test_build_traces_view_no_cue_when_all_resolved_or_recent():
 
 # InterestDashboard 集計 (aggregate_interest_dashboard) は DB バインドのため
 # Docker 結合テストで検証する（本ユニットでは純関数 build_traces_view までを対象）。
-
-
-# ---------------------------------------------------------------------------
-# 契約変更(§3.3): chat.search_chunks は tier 付き dict のリストを返す
-# ---------------------------------------------------------------------------
-
-def test_search_chunks_returns_tiered_dicts():
-    from core import chat
-
-    # 新契約: SELECT は id を先頭に含む 5 カラム。
-    fake_rows = [
-        ("id-A", "本文A", "論文タイトル", "a.pdf", 0.81),
-        ("id-B", "本文B", "", "b.pdf", 0.20),
-    ]
-    fake_session = MagicMock()
-    fake_session.execute.return_value.fetchall.return_value = fake_rows
-
-    with patch.object(chat, "_embed_query", return_value=[0.0] * 8), \
-         patch.object(chat, "get_embedding_dim", return_value=8), \
-         patch.object(chat, "get_session", return_value=fake_session), \
-         patch.object(chat, "approved_chunk_ids", return_value=set()):  # 承認なし
-        result = chat.search_chunks("質問", "material-1", top_k=5)
-
-    assert isinstance(result, list)
-    assert all(isinstance(r, dict) for r in result)
-    # 契約: 各要素は id/text/source_title/source_file/score/approved/tier を持つ
-    for r in result:
-        assert {"id", "text", "source_title", "source_file", "score", "approved", "tier"} <= set(r)
-    assert result[0]["tier"] == TIER_SOURCE       # 高類似度・未承認 → source
-    assert result[1]["tier"] == TIER_OUT_OF_SOURCE  # 低類似度 → 未踏
-    # 承認なしなので approved は出ない（不可侵の一線）
-    assert all(r["tier"] != TIER_APPROVED for r in result)
-
-
-def test_search_chunks_approved_when_teacher_reviewed():
-    from core import chat
-
-    fake_rows = [("id-A", "本文A", "論文タイトル", "a.pdf", 0.81)]
-    fake_session = MagicMock()
-    fake_session.execute.return_value.fetchall.return_value = fake_rows
-
-    with patch.object(chat, "_embed_query", return_value=[0.0] * 8), \
-         patch.object(chat, "get_embedding_dim", return_value=8), \
-         patch.object(chat, "get_session", return_value=fake_session), \
-         patch.object(chat, "approved_chunk_ids", return_value={"id-A"}):  # 承認済み
-        result = chat.search_chunks("質問", "material-1", top_k=5)
-
-    assert result[0]["approved"] is True
-    assert result[0]["tier"] == TIER_APPROVED

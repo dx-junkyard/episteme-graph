@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core.knowledge_objects.schema import VIEW_CLAIMS_LIVE, VIEW_COMPONENTS_LIVE
 from core.postgres import get_session
 from core.deliberation.schema import (
     ELEMENT_DERIVATION,
@@ -21,6 +22,7 @@ from core.deliberation.schema import (
     ELEMENT_EVIDENCE,
     ELEMENT_FIGURE,
     ELEMENT_SHARED_PART,
+    ELEMENT_SYMBOL,
     ELEMENT_THEORY_CLAIM,
     ELEMENT_THEORY_COMPONENT,
     SCOPE_DOCUMENT,
@@ -29,8 +31,9 @@ from core.deliberation.schema import (
     ElementResolutionError,
 )
 
-# document_analysis_runs.stage_outputs の artifact ルートキー（persistence.ARTIFACTS_KEY）
-_ARTIFACTS_KEY = "_artifacts"
+# NOTE: artifact ルートキー（``"_artifacts"``）の正本は
+# ``core.document_pipeline.persistence.ARTIFACTS_KEY``。本モジュールは
+# ``document_run_artifacts`` の委譲でそちらを通すため、独自の定数は持たない。
 
 
 def _is_uuid(value: str) -> bool:
@@ -42,33 +45,24 @@ def _is_uuid(value: str) -> bool:
 
 
 def document_run_artifacts(document_id: str) -> dict[str, Any]:
-    """最新の completed run（無ければ最新 run）の ``stage_outputs._artifacts`` を返す。
+    """採用 run（``documents.active_analysis_run_id`` → 最新 completed）の
+    ``stage_outputs._artifacts`` を返す。run が無ければ空 dict。
 
     equation の解決・内訳、および positioning（面②）の intra-document レンズが
-    共有で使う。run が無ければ空 dict。
+    共有で使う。
+
+    実装は :func:`core.document_pipeline.persistence.document_run_artifacts` への
+    **委譲**（外部シグネチャは不変）。以前はここで独自に
+    「completed 優先・無ければ status 不問の最新」の SQL を書いていたが、成果物 run の
+    選び方が全体で4種に分裂していた（知識構造の見直し 2026-09-12 C-8）ため、
+    ``resolve_artifact_runs`` と同じ **adopted** ポリシに寄せた。意味の変化は
+    「走行中・失敗中の run の成果物を成果物表示に使わない」こと。
     """
-    if not str(document_id or "").strip():
-        return {}
-    session = get_session()
-    try:
-        row = session.execute(
-            sa_text(
-                """
-                SELECT stage_outputs
-                FROM document_analysis_runs
-                WHERE document_id = :document_id
-                ORDER BY (status = 'completed') DESC, updated_at DESC
-                LIMIT 1
-                """
-            ),
-            {"document_id": document_id},
-        ).fetchone()
-    finally:
-        session.close()
-    if not row or not isinstance(row[0], dict):
-        return {}
-    artifacts = row[0].get(_ARTIFACTS_KEY)
-    return artifacts if isinstance(artifacts, dict) else {}
+    from core.document_pipeline.persistence import (
+        document_run_artifacts as _document_run_artifacts,
+    )
+
+    return _document_run_artifacts(document_id)
 
 
 def equation_records(
@@ -156,7 +150,7 @@ def _resolve_theory_claim(element_id: str) -> ElementRef:
     try:
         row = session.execute(
             sa_text(
-                "SELECT document_id, chunk_id FROM theory_claims "
+                "SELECT document_id, chunk_id FROM theory_claims_live "
                 "WHERE id = CAST(:id AS uuid) LIMIT 1"
             ),
             {"id": element_id},
@@ -181,7 +175,7 @@ def _resolve_theory_component(element_id: str) -> ElementRef:
     try:
         row = session.execute(
             sa_text(
-                "SELECT course_id, source_scope FROM theory_components "
+                "SELECT course_id, source_scope FROM theory_components_live "
                 "WHERE id = CAST(:id AS uuid) LIMIT 1"
             ),
             {"id": element_id},
@@ -208,7 +202,7 @@ def _resolve_figure(element_id: str) -> ElementRef:
     try:
         row = session.execute(
             sa_text(
-                "SELECT document_id, run_id, figure_key FROM document_figures "
+                "SELECT document_id::text, run_id, figure_key FROM document_figures "
                 "WHERE id = CAST(:id AS uuid) LIMIT 1"
             ),
             {"id": element_id},
@@ -303,6 +297,33 @@ def _resolve_derivation(element_id: str, document_id: str | None) -> ElementRef:
     )
 
 
+def _resolve_symbol(element_id: str, document_id: str | None) -> ElementRef:
+    # symbol も独立テーブルを持たない扱い（概念レジストリ §4.7）。element_id は
+    # symbol_registry の ``symbol_id``（``sym_{document_id}_{symbol}``）で、artifact 内に
+    # 実在するかだけを確かめる。v1 の用途は同一性リンクの source のみで、W層モーダルの
+    # 対象にはしない（``DIALOGUE_SESSION_ELEMENT_TYPES`` に入れていない）。
+    if not str(document_id or "").strip():
+        raise ElementResolutionError(
+            "symbol ElementRef requires document_id", kind="not_found"
+        )
+    for record in symbol_records(document_id):
+        if str(record.get("symbol_id") or "") != str(element_id):
+            continue
+        return ElementRef(
+            scope=SCOPE_DOCUMENT,
+            element_type=ELEMENT_SYMBOL,
+            element_id=str(element_id),
+            document_id=str(document_id),
+            provenance={
+                "canonical_symbol": str(record.get("canonical_symbol") or "") or None,
+                "definition_status": str(record.get("definition_status") or "") or None,
+            },
+        )
+    raise ElementResolutionError(
+        f"symbol not found in document {document_id}: {element_id}", kind="not_found"
+    )
+
+
 def _resolve_shared_part(element_id: str) -> ElementRef:
     if not _is_uuid(element_id):
         raise ElementResolutionError(f"invalid shared_part id: {element_id!r}", kind="invalid")
@@ -342,9 +363,11 @@ def _resolve_shared_part(element_id: str) -> ElementRef:
 # 後付けの Python フィルタではなく SQL の WHERE 句で絞り、コース外・別論文の同名要素へ
 # 誤って一致する余地を断つ）。document_id が無い agent 側 ID は解決しない。
 
+# 読み手なので live ビューを読む（KO5）。基表を索くと、再解析で supersede された
+# 旧世代の行に legacy_ids が残っているため、既に置き換わった要素へ解決してしまう。
 _LEGACY_ID_TABLES = {
-    ELEMENT_THEORY_COMPONENT: "theory_components",
-    ELEMENT_THEORY_CLAIM: "theory_claims",
+    ELEMENT_THEORY_COMPONENT: VIEW_COMPONENTS_LIVE,
+    ELEMENT_THEORY_CLAIM: VIEW_CLAIMS_LIVE,
 }
 
 
@@ -437,6 +460,8 @@ def resolve(
         ref = _resolve_evidence(element_id, document_id)
     elif element_type == ELEMENT_DERIVATION:
         ref = _resolve_derivation(element_id, document_id)
+    elif element_type == ELEMENT_SYMBOL:
+        ref = _resolve_symbol(element_id, document_id)
     elif element_type == ELEMENT_SHARED_PART:
         ref = _resolve_shared_part(element_id)
     else:

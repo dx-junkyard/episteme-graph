@@ -235,12 +235,17 @@ class DomainOption:
     domain_key: str
     domain_name: str = ""
     nodes: list[SkeletonNodeOption] = field(default_factory=list)
+    #: 呼び出し側（``core/landscape/builder.py`` のベクトル前段絞り込み）が
+    #: このドメインのノードを間引いたか（``docs/features/atlas_vector_anchoring_design.md``
+    #: §6）。真のときプロンプトは「全ノードではない」と正直に告げる（VA7 / VA8）。
+    prefiltered: bool = False
 
     def to_dict(self) -> dict:
         return {
             "domain_key": self.domain_key,
             "domain_name": self.domain_name,
             "nodes": [n.to_dict() for n in self.nodes],
+            "prefiltered": self.prefiltered,
         }
 
     @classmethod
@@ -254,6 +259,7 @@ class DomainOption:
                 for n in (d.get("nodes") or [])
                 if _clean((n or {}).get("node_id"))
             ],
+            prefiltered=bool(d.get("prefiltered")),
         )
 
 

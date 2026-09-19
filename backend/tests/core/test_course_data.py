@@ -124,6 +124,20 @@ class TestCourseTopics:
         data = {"chapters": [{"topics": [{"id": "nested"}]}], "topics": [{"id": "flat"}]}
         assert cd.course_topics(data) == [{"id": "flat"}]
 
+    def test_filters_non_dict_elements(self):
+        """非 dict 要素は除外する（``course_sources`` / ``iter_all_topics`` の章側と同じ）。
+
+        回帰: フラット側だけが素通しで、``None`` / 数値 / 文字列がそのまま
+        呼び出し側へ流れ、``topic.get(...)`` を呼ぶ各層で AttributeError になった。
+        トピックは位置ではなく topic_id / title で参照するので位置保存は不要。
+        """
+        data = {"topics": [None, 3, "junk", {"id": "t1"}, [], {"id": "t2"}]}
+        assert cd.course_topics(data) == [{"id": "t1"}, {"id": "t2"}]
+
+    def test_declared_return_type_holds_for_broken_data(self):
+        data = {"topics": [None, "junk"]}
+        assert all(isinstance(t, dict) for t in cd.course_topics(data))
+
 
 # ---------------------------------------------------------------------------
 # iter_all_topics
@@ -155,6 +169,11 @@ class TestIterAllTopics:
         assert {"id": "n1"} in result
         assert {"id": "f1"} in result
         assert len(result) == 2
+
+    def test_flat_non_dict_elements_are_filtered_too(self):
+        """章ネスト側とフラット側で非 dict の扱いを揃える。"""
+        data = {"chapters": [{"topics": [None, {"id": "nested"}]}], "topics": ["junk", {"id": "flat"}]}
+        assert cd.iter_all_topics(data) == [{"id": "nested"}, {"id": "flat"}]
 
     def test_defensive_against_non_dict_chapter_and_topic(self):
         data = {"chapters": ["not a dict", {"topics": ["not a dict", {"id": "ok"}]}], "topics": None}

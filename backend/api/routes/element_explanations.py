@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from dependencies import _require_teacher
+from core import decision_context
 from core import element_explanations as store
 from core import teacher_triage
 from core.deliberation.context_lens import _claim_id_lookup, _component_id_lookup
@@ -49,6 +50,16 @@ _BULK_ACTION_TO_STATUS = {
     "approve": store.STATUS_APPROVED,
     "dismiss": store.STATUS_DISMISSED,
 }
+
+# --- 確定文脈（decision_context, vision §4 改訂原則1 / DC1〜DC4）------------------
+#: 承認済みの行を覆す経路。本文編集は旧行を superseded にして新 revision を作るので
+#: 履歴が残る（``store.update_body``）。**status を candidate へ戻す経路は無い**ので
+#: ``reopen_statuses`` は空のまま記帳する（戻せると偽らない — DC2）。
+_BULK_REOPEN_PATH_APPROVE = "PATCH /api/admin/element-explanations/{explanation_id}"
+#: 却下済みの行は編集対象にならない（``_EDITABLE_STATUSES`` は candidate / approved のみ）。
+#: 却下を覆す実際の経路は再解析による**新しい candidate の再生成**なので、承認と同じ
+#: PATCH を書かずにこちらを記帳する（DC2: 使えない経路を再審経路として残さない）。
+_BULK_REOPEN_PATH_DISMISS = "POST /api/admin/documents/{document_id}/reanalyze"
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +377,11 @@ class ElementExplanationBulkReview(BaseModel):
     explanation_ids: list[str]
     # どの並び順の下で一括確定したかの来歴申告（TT3。任意・未指定は監査に載せない）。
     sort_order: str | None = None
+    # 是正 F7（2026-09-10・六つのレンズ §4 第1波 #5）: 根拠（逐語引用）が実際に
+    # 画面に描かれていた行の id。**クライアントの来歴申告**で、サーバは検証できない
+    # ので `client_reported` に隔離する（DC4）。未指定は監査に載せない
+    # （「根拠が出ていた」とサーバが断言しない）。
+    evidence_rendered_ids: list[str] | None = None
 
 
 @router.post("/documents/{document_id}/element-explanations/bulk-review")
@@ -433,6 +449,58 @@ def bulk_review_element_explanations(
         session.close()
 
     action_label = f"element_explanation.{body.action}"
+
+    # 確定文脈（DC1）。提示された集合 = 教員がキューで選んだ ids（正規化済み）、適用は
+    # 実際に遷移した行。一致の判定は core 側の集合比較に委ねる（DC2）。
+    # 代替（DC3）: チェックボックスの選択解除は常に、承認時は行ごとの [却下] が、
+    # 本文編集は開幕素材（document スコープ）行のみ出ている（deliberation.js
+    # ``_explanationReviewCardHtml``）。出ていない代替を「あった」と書かない。
+    alternatives = [decision_context.ALT_DESELECT]
+    if body.action == "approve":
+        alternatives.append(decision_context.ALT_DISMISS)
+    updated_rows = result["updated"]
+    if updated_rows and all(
+        str(r.get("element_type") or "") == store.ELEMENT_TYPE_DOCUMENT
+        for r in updated_rows
+    ):
+        alternatives.append(decision_context.ALT_EDIT)
+    # 是正 F7（DC4）: 「根拠が画面に出ていた」はクライアントの来歴申告であって
+    # サーバが検証できる事実ではない。以前は「キューの各行は本文と evidence_quote を
+    # 描いている」というコード上の観察を根拠に、サーバが根拠提示を真と断言して
+    # いたが、それは「描画するコードがある」ことしか意味せず、
+    # 記帳が形だけ整う（六つのレンズ 02_teacher.md 提案7）。申告は専用キーに隔離し、
+    # 未申告なら載せない。
+    client_reported: dict = {}
+    if body.sort_order:
+        client_reported["sort_order"] = body.sort_order
+    if body.evidence_rendered_ids is not None:
+        client_reported["evidence_rendered_ids"] = sorted(
+            {
+                str(eid or "").strip()
+                for eid in body.evidence_rendered_ids
+                if str(eid or "").strip()
+            }
+        )[:decision_context.PRESENTED_IDS_MAX]
+
+    ctx = decision_context.build_decision_context(
+        basis=decision_context.BASIS_EXPLANATION_REVIEW_BULK,
+        presented_ids=ids,
+        applied_ids=[r.get("id") for r in updated_rows],
+        alternatives=alternatives,
+        reopen_path=(
+            _BULK_REOPEN_PATH_APPROVE
+            if body.action == "approve"
+            else _BULK_REOPEN_PATH_DISMISS
+        ),
+        # 却下は再解析による新しい candidate が唯一の復帰経路（同じ行は却下のまま保持）。
+        reopen_statuses=(
+            () if body.action == "approve" else (store.STATUS_CANDIDATE,)
+        ),
+        # 是正 F7: サーバは「根拠が出ていたか」を検証できないので None（＝不明）。
+        # クライアントの申告は上の client_reported に隔離する（DC4）。
+        evidence_shown=None,
+        client_reported=(client_reported or None),
+    )
     for row in result["updated"]:
         record_review_event(
             AUDIT_ENTITY_ELEMENT_EXPLANATION,
@@ -440,22 +508,26 @@ def bulk_review_element_explanations(
             "candidate",
             row.get("status", ""),
             current_user.get("id"),
-            teacher_triage.sort_metadata(
-                {
-                    "action": action_label,
-                    "document_id": row.get("document_id"),
-                    "element_type": row.get("element_type"),
-                    "element_id": row.get("element_id"),
-                    "kind": row.get("kind"),
-                    "bulk": True,
-                },
-                body.sort_order,
+            decision_context.attach_decision_context(
+                teacher_triage.sort_metadata(
+                    {
+                        "action": action_label,
+                        "document_id": row.get("document_id"),
+                        "element_type": row.get("element_type"),
+                        "element_id": row.get("element_id"),
+                        "kind": row.get("kind"),
+                        "bulk": True,
+                    },
+                    body.sort_order,
+                ),
+                ctx,
             ),
         )
 
     return {
         "updated": [_public_row(r) for r in result["updated"]],
         "skipped": result["skipped"],
+        "decision_context": ctx,
     }
 
 

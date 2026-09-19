@@ -74,21 +74,31 @@ class _CaptureSession:
         pass
 
 
-def test_update_revision_status_sql_deep_merges_artifacts(monkeypatch):
+def test_update_revision_status_writes_artifacts_to_the_generation_log(monkeypatch):
+    """artifact は stage_outputs の blob ではなく生成ログ表へ（§6 / KO6）。
+
+    1 run × 1 ステージ = 1 行になったので、兄弟 artifact を守るための jsonb_set
+    deep merge（#410 P0）は不要になった。stage_outputs 側は浅マージのみ。
+    """
     session = _CaptureSession()
     monkeypatch.setattr(persistence, "_pg_session", lambda: session)
     persistence.update_revision_status(
         run_id="rev-1", revision_status="auditing",
-        stage_outputs={"_artifacts": {"audit_results": {"x": 1}}},
+        stage_outputs={"_artifacts": {"audit_results": {"x": 1}}, "progress": 10},
     )
-    sql = session.sql[0]
-    # must jsonb_set the _artifacts path, not replace the whole object
-    assert "jsonb_set" in sql
-    assert "'{_artifacts}'" in sql
-    assert "stage_outputs->'_artifacts'" in sql
-    # payload split: artifacts delta separate from other keys
-    assert session.params[0]["artifacts"]
-    assert "audit_results" in session.params[0]["artifacts"]
+    run_sql = session.sql[0]
+    assert "jsonb_set" not in run_sql
+    # stage_outputs には _artifacts を書かない。
+    assert "_artifacts" not in session.params[0].get("other", "")
+    assert "progress" in session.params[0]["other"]
+    artifact_calls = [
+        (sql, params) for sql, params in zip(session.sql, session.params)
+        if "document_analysis_artifacts" in sql
+    ]
+    assert len(artifact_calls) == 1
+    assert artifact_calls[0][1]["stage"] == "audit_results"
+    assert artifact_calls[0][1]["run_id"] == "rev-1"
+    assert "ON CONFLICT (run_id, stage) DO UPDATE" in artifact_calls[0][0]
 
 
 # --- full in-memory lifecycle ----------------------------------------------

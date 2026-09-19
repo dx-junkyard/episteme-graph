@@ -306,28 +306,36 @@ class TestDeleteMaterial:
         # 応答は呼び出し順（n 番目）ではなく **SQL の内容** で決める。孤児掃除の
         # DELETE が増えるたびに番号がずれて壊れるのを避けるため（教材図の掃除
         # （teaching_figure_studio_design.md §3.1）追加時に実際にずれた）。
-        course_data_by_id = {
-            "course-1": {"sources": [{"material_id": "mat-001", "title": "テスト教材"}]},
-            "course-2": {"sources": [{"material_id": "mat-999", "title": "別の教材"}]},
-        }
+        #
+        # 知識オブジェクト層 §8.1（KO9）以降、DB 削除本体は _purge_document に
+        # 委譲される。巻き添えコースの絞り込みは Python 側の走査ではなく
+        # ``data->'sources' @> ...`` の JSONB 条件（1クエリ）になったので、fake は
+        # 「その条件を満たすコースだけ」を返す。
 
         def side_effect_execute(*args, **kwargs):
             sql = " ".join(str(args[0]).split()) if args else ""
             params = args[1] if len(args) > 1 else (kwargs.get("params") or {})
             result = MagicMock()
-            if "FROM documents" in sql and "SELECT" in sql:
+            if "SELECT source_path, uploaded_by::text FROM documents" in sql:
+                # _purge_document が読む (source_path, uploaded_by)
+                result.fetchone.return_value = ("mat-001", "test-teacher-id")
+            elif "FROM documents" in sql and "SELECT" in sql:
                 result.fetchone.return_value = (
                     "doc-uuid-1", "テスト教材", "test.pdf", "mat-001"
                 )
             elif "SELECT id FROM learning_courses" in sql:
-                result.fetchall.return_value = [("course-1",), ("course-2",)]
-            elif "SELECT data FROM learning_courses" in sql:
-                cid = (params or {}).get("cid")
-                result.fetchone.return_value = (json.dumps(course_data_by_id.get(cid, {})),)
+                # @> の JSONB 条件で mat-001 を含むコースだけが返る（course-2 は返らない）
+                assert "data->'sources' @> " in sql
+                result.fetchall.return_value = [("course-1",)]
             elif "DELETE FROM course_teaching_figures" in sql:
+                result.fetchall.return_value = []
+            elif "SELECT minio_key FROM document_figures" in sql:
+                result.fetchall.return_value = []
+            elif sql.startswith("SELECT id::text FROM theory_claims"):
                 result.fetchall.return_value = []
             else:
                 result.rowcount = 1
+                result.fetchall.return_value = []
             return result
 
         mock_pg.execute.side_effect = side_effect_execute
@@ -346,6 +354,68 @@ class TestDeleteMaterial:
         assert "course-1" in data["deleted_courses"]
         assert "course-2" not in data["deleted_courses"]
         mock_pg.commit.assert_called_once()
+
+    @patch("routes.admin.record_review_event")
+    @patch("routes.admin._pg_session")
+    def test_delete_material_is_audited(
+        self, mock_session, mock_record, client, auth_headers
+    ):
+        """原則14（是正 F11）: 教材の物理削除は不可逆なので必ず記帳する。
+
+        削除は学習者に届いている教材・チャンク・解析成果をまとめて消す。記帳が
+        無ければ「誰がいつ何を消したか」を後から再構成できない。
+        """
+        from core.schema import AUDIT_ENTITY_MATERIAL
+
+        mock_pg = MagicMock()
+        mock_pg.execute.return_value.fetchone.return_value = (
+            "doc-uuid-1", "テスト教材", "test.pdf", "mat-001",
+        )
+        mock_pg.execute.return_value.fetchall.return_value = []
+        mock_session.return_value = mock_pg
+
+        resp = client.request(
+            "DELETE",
+            "/api/admin/materials/mat-001",
+            json={"confirm_name": "テスト教材"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert mock_record.call_count == 1
+        entity_type, entity_id, old_status, new_status, actor, metadata = (
+            mock_record.call_args[0]
+        )
+        assert entity_type == AUDIT_ENTITY_MATERIAL
+        assert entity_id == "mat-001"
+        assert (old_status, new_status) == ("active", "deleted")
+        assert actor == "test-teacher-id"
+        assert metadata["action"] == "deleted"
+        assert metadata["document_id"] == "doc-uuid-1"
+        assert metadata["deleted_course_ids"] == []
+        assert metadata["confirm_name_matched"] is True
+        # 資料本文・タイトルは監査に載せない（監査は内容の写しではない）。
+        assert "テスト教材" not in json.dumps(metadata, ensure_ascii=False)
+
+    @patch("routes.admin.record_review_event")
+    @patch("routes.admin._pg_session")
+    def test_nothing_is_audited_when_the_name_does_not_match(
+        self, mock_session, mock_record, client, auth_headers
+    ):
+        """起きなかった削除を記帳しない（400 の確認ゲートで止まった場合）。"""
+        mock_pg = MagicMock()
+        mock_pg.execute.return_value.fetchone.return_value = (
+            "doc-uuid-1", "テスト教材", "test.pdf", "mat-001",
+        )
+        mock_session.return_value = mock_pg
+
+        resp = client.request(
+            "DELETE",
+            "/api/admin/materials/mat-001",
+            json={"confirm_name": "間違った名前"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+        assert mock_record.call_count == 0
 
     def test_delete_material_requires_auth(self, client):
         """認証なしで401/403が返ること。"""

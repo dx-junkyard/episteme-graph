@@ -152,6 +152,18 @@ class TestReviewAffordances:
     def test_unplaced_domains_are_shown_as_facts(self):
         assert "の地図に配置できませんでした" in SRC
 
+    def test_evidence_is_available_per_row(self):
+        """確定文脈（decision_context_design.md §5）: 何を見て確認したかを再構成できる
+        ように、判断の材料（逐語引用）を各行に畳んで置く。引用が無い行もその事実を書く。"""
+        assert 'data-ui-anchor="release-review.evidence"' in SRC
+        assert "根拠を見る" in SRC
+        assert "この配置には論文からの引用が残っていません。" in SRC
+
+    def test_reopen_path_is_stated_next_to_the_meaning_of_next(self):
+        """RR2 の解釈補足: 確定の後に再審の経路が見えている（release_review §6.1）。"""
+        assert "NOTICE_REOPEN" in SRC
+        assert "個別に再検討・却下へ戻せます。" in SRC
+
 
 class TestNoNumbersAndNoPolling:
     def test_no_raw_weight_or_confidence_is_read(self):

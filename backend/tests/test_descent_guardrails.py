@@ -238,3 +238,33 @@ class TestDashboardExclusion:
             "aggregate_interest_dashboard の除外リテラルに 'backstage_question' が"
             "現れない（楽屋の質問が教員向け集団集計に数えられてしまう。SD4）"
         )
+
+
+# ===========================================================================
+# 7. 楽屋の質問は unanswered_query_logs にも残さない（2026-09-05 ビジョン監査 C1）
+# ===========================================================================
+
+
+class TestBackstageUnansweredQueryGuard:
+    """楽屋（backstage）の質問は本人専用（SD4 / vision 原則5）。
+
+    `unanswered_query_logs` は `interest_traces` とは別テーブルで、痕跡登録簿
+    （core/trace_registry.py）の除外機構が届かない。ここに書かれた質問原文は
+    `GET /api/admin/courses/{id}/unanswered-queries` から氏名付きで教員に表示される
+    ため、`_learning_chat_core` の RAG ゼロ件経路は楽屋のとき記録してはならない。
+    """
+
+    def test_every_unanswered_query_log_call_is_guarded_by_backstage(self):
+        import re
+
+        body = extract_function_source(_LEARNING_SRC, "_learning_chat_core")
+        calls = [m.start() for m in re.finditer(r"log_unanswered_query\(", body)]
+        assert calls, "_learning_chat_core に log_unanswered_query 呼び出しが見つからない"
+        for pos in calls:
+            # 直前の非空行が楽屋ガードであること（if not _is_backstage: の直下で呼ぶ）。
+            preceding = [ln.strip() for ln in body[:pos].splitlines() if ln.strip()]
+            assert preceding and preceding[-1] == "if not _is_backstage:", (
+                "log_unanswered_query が楽屋ガード（if not _is_backstage:）の直下以外で"
+                "呼ばれている（楽屋の質問原文が教員の「未回答の質問」表に氏名付きで出る。"
+                "SD4 / 原則5）"
+            )

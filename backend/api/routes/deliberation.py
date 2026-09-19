@@ -61,25 +61,40 @@ context / sessions / annotations の各経路で「中心にできる」よう�
 語彙の正本は `core.deliberation.schema.IDENTITY_LINKABLE_ELEMENT_TYPES`）。面②位置づけは
 両型に対応するレンズを持たないため空レーン + 事実文へ縮退する（v1・§16）。
 
+agent 側 ID の受け口（2026-09 是正、`graph_dialogue_review_design.md` §11）: theory_claim /
+theory_component は `overview` / `annotations`（一覧）/ `sessions`（作成）でも agent 側 ID
+（`comp_001` 等）を受け付ける（`refs.resolve_with_agent_id`。**`document_id` スコープ必須の
+fail-closed**）。理論操作グラフの main / equation_detail ノードは graph-native ID
+（`theory_op_0001` / `eq_op_0001`）で theory_components の行を持たないため、グラフレビューの
+「深く検討」はノードの `representative_component_id`（agent 側 ID）を渡す。永続化される
+`ref.element_id` は常に DB UUID なので、`POST .../sessions/{id}/messages` は厳格な
+`refs.resolve` のままで解決できる。
+
 core 側（`core.deliberation`）は FastAPI を import しない。
 """
 
 from __future__ import annotations
 
+import base64
 import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
-from dependencies import _require_teacher
+from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
 from core.config import get_settings
+from core.label_vocab import AI_READING_LABEL
+from core.llm import transcribe_audio
+from core.llm_usage import usage_context
+from core.tts import generate_tts_audio, strip_text_for_speech
 from core.deliberation import (
     annotations as delib_annotations,
     context_lens,
     decomposition,
     dialogue,
+    graph_dialogue,
     identity_links,
     inventory,
     positioning,
@@ -94,13 +109,26 @@ from core.llm_worker.history import window_history
 from core.deliberation.schema import (
     ELEMENT_FIGURE,
     ELEMENT_SHARED_PART,
+    DIALOGUE_SESSION_ELEMENT_TYPES,
     IDENTITY_LINKABLE_ELEMENT_TYPES,
     IDENTITY_LINK_STATUS_CONFIRMED,
     IDENTITY_LINK_STATUS_REJECTED,
     SCOPE_DOCUMENT,
     ElementResolutionError,
 )
+from core.assistant_context import (
+    normalize_screen_context,
+    render_block,
+    resolve as resolve_screen_context,
+)
+# 画面文脈の受け口（Phase 1 = W層 / Phase 4 = 学習チャット）は schemas.py が正本。
+# ここでは後方互換のために再エクスポートするだけで、定義を二重化しない
+# （上限は core 側の定数が正本 = SA7）。
+from schemas import ScreenContextPayload
 from core.schema import AUDIT_ENTITY_DELIBERATION
+from core.library.schema import (
+    JUSTIFICATION_MANUAL as MAPPING_JUSTIFICATION_MANUAL,
+)
 from routes.theory_components import _ensure_document_editable, _ensure_document_viewable
 from services import record_review_event, resolve_document_access
 
@@ -109,9 +137,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/deliberation", tags=["deliberation"])
 
 
+# 要素解決の失敗をユーザーに伝える事実文（W3: 断定・煽りを足さない / 内部 ID・英語の
+# 例外メッセージ・内部語彙を教員 UI に出さない）。原因の詳細は logger 側に残す。
+_RESOLUTION_ERROR_DETAILS = {
+    # 例: agent 側 ID でも DB UUID でもない graph-native ID（theory_op_0001 等）、未知の要素型。
+    "invalid": "この要素は指定の形式が正しくないため開けません。",
+    # 例: 行が無い / この教材の解析結果に含まれない / document_id が必要な要素型で未指定。
+    "not_found": "この要素は見つかりませんでした。",
+}
+
+
 def _http_from_resolution_error(exc: ElementResolutionError) -> HTTPException:
-    status = 422 if getattr(exc, "kind", "not_found") == "invalid" else 404
-    return HTTPException(status_code=status, detail=str(exc))
+    kind = str(getattr(exc, "kind", "not_found") or "not_found")
+    status = 422 if kind == "invalid" else 404
+    logger.info("deliberation element resolution failed (%s): %s", kind, exc)
+    return HTTPException(
+        status_code=status,
+        detail=_RESOLUTION_ERROR_DETAILS.get(kind, _RESOLUTION_ERROR_DETAILS["not_found"]),
+    )
 
 
 def _require_identity_linkable(element_type: str) -> None:
@@ -310,7 +353,7 @@ def get_element_overview(
     document_id: str | None = Query(
         default=None,
         description="equation / evidence / derivation 要素で必須（独立テーブルを持たないため document で一意化）。"
-        "他型では無視される。",
+        "theory_claim / theory_component は agent 側 ID（comp_001 等）の解決スコープにも使う。",
     ),
     current_user: dict = Depends(_require_teacher),
 ) -> dict[str, Any]:
@@ -320,12 +363,18 @@ def get_element_overview(
       ``_ensure_document_viewable`` を通す（fail-closed・W5）。
     - domain-scoped（shared_part）は L層方針で本文テキストを教員全体に開示するため
       ``_require_teacher`` のみ（画像含有等の狭い開示は本エンドポイントの対象外）。
+    - theory_claim / theory_component は agent 側 ID（``comp_001`` 等）でも呼べる
+      （``refs.resolve_with_agent_id``。context ルートと同じ規約で、agent 側 ID は必ず
+      ``document_id`` スコープ内で解決され、スコープ外の同名要素には一致しない）。
+      グラフ対話レビューの「深く検討」は理論操作グラフのノードから
+      ``representative_component_id``（component_assembly の agent 側 ID）を渡すため、
+      この経路が無いと集約ノード由来の要素が一切開けなかった。
     - 数値（confidence 等）は返さない（W8）。
     - 面②の cross_corpus レンズ（§4.2、Phase 1）は他 document の候補を返しうるため、
       閲覧不可 document 由来の候補をこの route 層でフィルタする（``_apply_cross_corpus_gate``）。
     """
     try:
-        ref = refs.resolve(element_type, element_id, document_id=document_id)
+        ref = refs.resolve_with_agent_id(element_type, element_id, document_id=document_id)
     except ElementResolutionError as exc:
         raise _http_from_resolution_error(exc) from exc
 
@@ -537,6 +586,8 @@ def create_identity_link(
         evidence=body.evidence,
         reason=body.reason,
         created_by=current_user.get("id"),
+        # KR4（概念レジストリ §4.6）: W層 UI からの手動作成は教員の判断そのもの。
+        mapping_justification=MAPPING_JUSTIFICATION_MANUAL,
     )
     record_review_event(
         AUDIT_ENTITY_DELIBERATION,
@@ -770,10 +821,56 @@ class SelectedFigureContext(BaseModel):
 class MessageCreateRequest(BaseModel):
     content: str
     selected_context: SelectedFigureContext | None = None
+    # 応答文体の改訂（§15）: 音声モードは読み上げ用の spoken を**同じ1コールで**
+    # 受け取る（新エンドポイント・追加コールを作らない）。既定は従来どおり text。
+    response_mode: Literal["text", "spoken"] = "text"
+    # 画面文脈アダプター（§4.2）: 参照だけの optional フィールド。未指定は従来動作。
+    screen_context: ScreenContextPayload | None = None
     # M層 Phase 3（llm_model_selection_design.md §6.5）: この実行だけのモデル上書き
     # （scene "deliberation"。figure 要素は "deliberation:vision" として vision
     # capability を必須検証する）。未指定は従来どおり resolve_model()。
     model: str | None = None
+
+
+def _screen_context_block(body: Any, document_id: str) -> str:
+    """``body.screen_context`` を事実文ブロックへ解決する（§4.4・両対話経路の共通経路）。
+
+    - セッションの document と ``selection.document_id`` が一致するときだけ解決する
+      （不一致は無視 = 他文書の参照で越境させない）。
+    - sources の取得は ``GET .../paper-layer`` と同じ ``build_paper_layer_for_document``
+      （二重実装しない）。import は遅延させて route 間の循環 import を避ける。
+    - どこで失敗しても空文字を返す（SA2 fail-soft: 対話は止めない・「見えないものが
+      ある」と言わない）。**保存する message content には決して混ぜない**（SA6）。
+    """
+    payload = getattr(body, "screen_context", None)
+    if payload is None:
+        return ""
+    doc_id = str(document_id or "").strip()
+    if not doc_id:
+        return ""
+    try:
+        ctx = normalize_screen_context(payload.model_dump())
+    except Exception:  # pragma: no cover - 防御的（正規化は例外を出さない契約）
+        return ""
+    if ctx is None:
+        return ""
+    if str(ctx.selection.get("document_id") or "") != doc_id:
+        return ""
+
+    sources: dict[str, Any] = {}
+    try:
+        from routes.theory_components import build_paper_layer_for_document
+
+        sources = {"paper_layer": build_paper_layer_for_document(doc_id)}
+    except Exception:
+        logger.debug("screen_context: paper layer unavailable for %s", doc_id, exc_info=True)
+        sources = {}
+
+    try:
+        return render_block(resolve_screen_context(ctx, sources))
+    except Exception:  # pragma: no cover - 防御的（resolve/render は例外を出さない契約）
+        logger.debug("screen_context: resolution failed for %s", doc_id, exc_info=True)
+        return ""
 
 
 def _session_response(session: dict[str, Any]) -> dict[str, Any]:
@@ -831,15 +928,31 @@ def create_deliberation_session(
 
     ゲート: document-scoped 要素は ``_ensure_document_viewable``（fail-closed・W5）。
     domain-scoped（shared_part）は L層方針により ``_require_teacher`` のみ。
+
+    ID 解決は overview と同じ規約（``refs.resolve_with_agent_id``。agent 側 ID は
+    ``document_id`` スコープ必須の fail-closed）。永続化するのは解決後の
+    ``ref.element_id``（常に DB UUID）なので、以降の ``POST .../messages`` は
+    厳格な ``refs.resolve`` のままで解決できる。
     """
     try:
-        ref = refs.resolve(body.element_type, body.element_id, document_id=body.document_id)
+        ref = refs.resolve_with_agent_id(
+            body.element_type, body.element_id, document_id=body.document_id
+        )
     except ElementResolutionError as exc:
         raise _http_from_resolution_error(exc) from exc
     if ref.scope != body.scope:
         raise HTTPException(
             status_code=422,
             detail=f"scope {body.scope!r} does not match the resolved element (scope={ref.scope!r})",
+        )
+    if ref.element_type not in DIALOGUE_SESSION_ELEMENT_TYPES:
+        # deliberation_sessions.element_type の CHECK（migration 049 / 064 / 075）と同じ
+        # 集合をコード側でも fail-closed に強制する。概念レジストリが同一性リンクの
+        # source として足した ``symbol`` は W層モーダルの対象ではない（§4.7 の非スコープ）
+        # ので、DB エラーで 500 になる前に事実文の 422 へ倒す。
+        raise HTTPException(
+            status_code=422,
+            detail="この要素では対話セッションを開始できません",
         )
     if ref.scope == SCOPE_DOCUMENT:
         _ensure_document_viewable(ref.document_id or "", current_user)
@@ -930,6 +1043,12 @@ def post_deliberation_message(
             f"kind={context.kind}; id={context.id}; label={context.label}\n\n"
             + user_content
         )
+    # 画面文脈（§4.4）: 独立ブロックとして当該ターンの入力の先頭にだけ足す。
+    # document scope の要素だけが対象（domain scope の共通部品は論文層を持たない）。
+    if ref.scope == SCOPE_DOCUMENT:
+        screen_block = _screen_context_block(body, ref.document_id or "")
+        if screen_block:
+            llm_user_content = screen_block + "\n\n" + llm_user_content
 
     images: list[bytes] | None = None
     if ref.element_type == ELEMENT_FIGURE:
@@ -956,6 +1075,7 @@ def post_deliberation_message(
         images=images,
         model=requested_model,
         user_id=current_user.get("id"),
+        response_mode=body.response_mode,
     )
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -983,10 +1103,176 @@ def post_deliberation_message(
             {"action": "annotation.candidate_generated", "kind": annotation["kind"], "session_id": session_id},
         )
 
+    # spoken / stance_label は**保存しない**（永続化するのは reply のみ = SA6 と同型）。
+    # ラベルは対話結果（共通骨格 chat_turn.TurnResult 由来）から素通しする。
     return {
         "reply": result.reply,
         "annotations": [_annotation_response(a) for a in created_annotations],
         "degraded": result.degraded,
+        "spoken": result.spoken,
+        "stance_label": result.stance_label or AI_READING_LABEL,
+    }
+
+
+# ---------------------------------------------------------------------------
+# グラフ対話レビュー: グラフ全体対話（graph_dialogue_review_design.md §5）
+# ---------------------------------------------------------------------------
+#
+# 疑似要素型 ``document_graph`` のセッション（migration 075）。要素単位の対話と違い
+# ElementRef を経由せず（refs.py 非改変）、grounding は最新の theory_component_graphs
+# から core/deliberation/graph_dialogue.py が決定論的に組み立てる。**候補注釈は生成
+# しない**（GR — 確定につながる操作は要素単位に降りてから）。コスト上限は要素対話と
+# 同じ CostGate に相乗り（GR5）。閲覧できれば対話できる（W5 と同水準・GR6）。
+
+
+class GraphMessageCreateRequest(BaseModel):
+    content: str
+    # 応答文体の改訂（§15）: 要素対話と同じ読み上げモード（既定は text）。
+    response_mode: Literal["text", "spoken"] = "text"
+    # 画面文脈アダプター（§4.2）: 要素対話と同じ optional フィールド・同じ解決経路。
+    screen_context: ScreenContextPayload | None = None
+    # M層: この実行だけのモデル上書き（scene "deliberation" として検証。vision なし）。
+    model: str | None = None
+
+
+def _resolve_graph_document(document_id: str, current_user: dict) -> str:
+    """document_id / material_id を正規化し閲覧ゲートを通す（inventory と同じ fail-closed）。
+
+    SYSTEM_ADMIN は存在すれば閲覧可（承認・却下側の ``_ensure_document_editable`` の
+    ロール分岐と対称にする — 2026-08-29 レビュー是正。存在しない document は誰でも 404）。
+    """
+    access = resolve_document_access(current_user.get("id"), document_id)
+    if not access.found:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if not access.can_view and current_user.get("role") != ROLE_SYSTEM_ADMIN:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return access.document_id
+
+
+@router.post("/documents/{document_id}/graph-sessions")
+def open_graph_dialogue_session(
+    document_id: str,
+    force_new: bool = Query(
+        default=False,
+        description="既存セッションを再開せず常に新しいセッションを作る（セッション上限到達後の再開手段）。",
+    ),
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """グラフ全体対話セッションの get-or-create（本人 × document で最新を再開）。
+
+    グラフ未構築（ノード0）はセッションを作らず 422 の事実文（GR5 — 根拠の無い
+    対話を開始しない）。``force_new=true`` は再開せず新規作成する — CostGate の
+    セッション上限（in-memory・セッションID単位）に達した対話をやり直す唯一の口
+    （2026-08-29 レビュー是正。履歴は旧セッションに残る = GR7）。
+    """
+    doc_id = _resolve_graph_document(document_id, current_user)
+    graph = graph_dialogue.load_latest_graph(doc_id)
+    try:
+        graph_dialogue.build_graph_grounding(graph)
+    except graph_dialogue.GraphNotAvailableError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    session = None if force_new else graph_dialogue.find_latest_graph_session(doc_id, current_user.get("id"))
+    created = False
+    if not session:
+        session = graph_dialogue.create_graph_session(doc_id, created_by=current_user.get("id"))
+        created = True
+        record_review_event(
+            AUDIT_ENTITY_DELIBERATION,
+            session["id"],
+            "",
+            "session_started",
+            current_user.get("id"),
+            {
+                "action": "graph_session.create",
+                "element_type": graph_dialogue.ELEMENT_DOCUMENT_GRAPH,
+                "element_id": doc_id,
+            },
+        )
+    return {"session": _session_response(session), "created": created}
+
+
+@router.post("/documents/{document_id}/graph-sessions/{session_id}/messages")
+def post_graph_dialogue_message(
+    document_id: str,
+    session_id: str,
+    body: GraphMessageCreateRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """グラフ全体対話の1ターン（1 LLM コール・W6。候補注釈なし）。"""
+    doc_id = _resolve_graph_document(document_id, current_user)
+    session = _ensure_session_owner(delib_store.get_session_by_id(session_id), current_user)
+    if (
+        session.get("element_type") != graph_dialogue.ELEMENT_DOCUMENT_GRAPH
+        or session.get("element_id") != doc_id
+    ):
+        raise HTTPException(status_code=404, detail="deliberation session not found")
+
+    user_content = (body.content or "").strip()
+    if not user_content:
+        raise HTTPException(status_code=422, detail="content is required")
+
+    requested_model = (body.model or "").strip() or None
+    if requested_model:
+        reason = llm_policy.validate_model_for_scene(llm_policy.SCENE_DELIBERATION, requested_model)
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
+
+    graph = graph_dialogue.load_latest_graph(doc_id)
+    try:
+        grounding = graph_dialogue.build_graph_grounding(graph)
+    except graph_dialogue.GraphNotAvailableError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    grounding_text = graph_dialogue.graph_grounding_to_text(grounding)
+
+    # CostGate の消費は全 422 経路（モデル検証・グラフ不在）の**後**に置く —
+    # 失敗するリクエストで上限を焼かない（2026-08-29 レビュー是正）。
+    if not dialogue.check_and_count_llm_call(session_id, current_user.get("id")):
+        raise HTTPException(
+            status_code=429,
+            detail="本日またはこのセッションでの対話回数の上限に達しました。しばらくしてから再度お試しください。",
+        )
+
+    prior_messages = [
+        {"role": str(m.get("role") or "user"), "content": str(m.get("content") or "")}
+        for m in (session.get("messages") or [])
+        if isinstance(m, dict)
+    ]
+    # 要素対話と同じウィンドウ規約（16/4000/head_keep=1 — 先頭 user に grounding が乗る）。
+    prior_messages = window_history(prior_messages, max_messages=16, max_chars=4000, head_keep=1)
+
+    # 画面文脈（§4.4）: 当該ターンの LLM 入力にだけ足す。保存する content は
+    # 生の user_content のまま（SA6）。
+    llm_user_content = user_content
+    screen_block = _screen_context_block(body, doc_id)
+    if screen_block:
+        llm_user_content = screen_block + "\n\n" + llm_user_content
+
+    result = graph_dialogue.run_graph_turn(
+        doc_id,
+        prior_messages=prior_messages,
+        user_content=llm_user_content,
+        grounding_text=grounding_text,
+        model=requested_model,
+        user_id=current_user.get("id"),
+        response_mode=body.response_mode,
+    )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    delib_store.append_messages(
+        session_id,
+        [
+            {"role": "user", "content": user_content, "created_at": now_iso},
+            {"role": "assistant", "content": result.reply, "created_at": now_iso},
+        ],
+    )
+
+    # spoken / stance_label は保存しない（append_messages は reply のみ）。
+    # ラベルは対話結果（共通骨格 chat_turn.TurnResult 由来）から素通しする。
+    return {
+        "reply": result.reply,
+        "degraded": result.degraded,
+        "spoken": result.spoken,
+        "stance_label": result.stance_label or AI_READING_LABEL,
     }
 
 
@@ -997,13 +1283,18 @@ def list_element_annotations(
     document_id: str | None = Query(
         default=None,
         description="equation / evidence / derivation 要素で必須（独立テーブルを持たないため document で一意化)。"
-        "他型では無視される。",
+        "theory_claim / theory_component は agent 側 ID（comp_001 等）の解決スコープにも使う。",
     ),
     current_user: dict = Depends(_require_teacher),
 ) -> dict[str, Any]:
-    """要素に付いた候補/確定/却下注釈の一覧（confidence はラベル・W8）。"""
+    """要素に付いた候補/確定/却下注釈の一覧（confidence はラベル・W8）。
+
+    overview と同じ解決規約（``refs.resolve_with_agent_id``）を使う — モーダルは
+    overview より先にこの一覧を取るため、agent 側 ID で開いたときに既存注釈だけが
+    復元されない非対称が生じないようにする（W4）。
+    """
     try:
-        ref = refs.resolve(element_type, element_id, document_id=document_id)
+        ref = refs.resolve_with_agent_id(element_type, element_id, document_id=document_id)
     except ElementResolutionError as exc:
         raise _http_from_resolution_error(exc) from exc
     if ref.scope == SCOPE_DOCUMENT:
@@ -1191,3 +1482,86 @@ def get_document_element_inventory(
     if not access.found or not access.can_view:
         raise HTTPException(status_code=404, detail="Document not found")
     return inventory.build(access.document_id)
+
+
+# ---------------------------------------------------------------------------
+# 音声対話（グラフレビュー画面のハンズフリー入出力）
+# ---------------------------------------------------------------------------
+#
+# グラフ対話レビュー（`docs/features/graph_dialogue_review_design.md`）のチャットを
+# 音声で進めるための入出力2本。学習側の `/api/learning/voice/{transcribe,speak}`
+# （`routes/learning.py`）と同型だが、教員専用（`_require_teacher`・fail-closed）で
+# コスト上限を持つ点が異なる。
+#
+# 音声は**チャットの入出力手段**であって判断の経路ではない（GR1）— ここから承認・
+# 却下 API を呼ぶ経路は作らない。文字起こし結果は既存の graph-sessions / sessions の
+# messages 経路にフロントが渡すだけで、本エンドポイントは DB を変更しない。
+#
+# 共通規約（`docs/features/assistant_common_infra_design.md`）に従い、同期・単発の
+# AI 呼び出しにも CostGate(day-only) を置く（STT/TTS 共通の日次カウンタ。正本は
+# `core.deliberation.dialogue.check_and_count_voice_call`）。上限到達は 429 +
+# 数値を含まない日本語事実文。
+
+# アップロード音声の上限（無音区切りの1発話分。学習側の `_VOICE_MAX_AUDIO_BYTES` と同値）
+_VOICE_MAX_AUDIO_BYTES = 10 * 1024 * 1024
+
+_VOICE_LIMIT_DETAIL = "本日の音声対話の利用上限に達しました。しばらくしてから再度お試しください。"
+
+
+class DeliberationVoiceSpeakRequest(BaseModel):
+    text: str
+
+
+@router.post("/voice/transcribe")
+async def deliberation_voice_transcribe_route(
+    audio: UploadFile = File(...),
+    language: str = "ja",
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """音声（1発話分）を文字起こしする（管理画面の音声対話用）。
+
+    フロントの無音検知が区切った短い音声チャンクを受ける。openai プロバイダ以外では
+    ``transcribe_audio`` が RuntimeError を投げるため 503（未対応を正直に返す）。
+    """
+    data = await audio.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="音声データが空です。")
+    if len(data) > _VOICE_MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="音声データが大きすぎます。")
+    if not dialogue.check_and_count_voice_call(current_user.get("id")):
+        raise HTTPException(status_code=429, detail=_VOICE_LIMIT_DETAIL)
+    try:
+        with usage_context("deliberation:voice_stt", user_id=current_user.get("id")):
+            text = transcribe_audio(data, audio.filename or "audio.webm", language=language)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("deliberation voice transcribe failed")
+        raise HTTPException(status_code=500, detail="音声の文字起こしに失敗しました。") from exc
+    return {"text": text}
+
+
+@router.post("/voice/speak")
+def deliberation_voice_speak_route(
+    body: DeliberationVoiceSpeakRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """応答テキストを TTS で MP3(base64) に変換する（読み上げ用）。
+
+    読み上げ前に LaTeX・markdown 記号・出典マーカーを除去する
+    （`core.tts.strip_text_for_speech`）。除去後に読み上げる文が残らなければ 400。
+    """
+    spoken = strip_text_for_speech(body.text)
+    if not spoken:
+        raise HTTPException(status_code=400, detail="読み上げるテキストがありません。")
+    if not dialogue.check_and_count_voice_call(current_user.get("id")):
+        raise HTTPException(status_code=429, detail=_VOICE_LIMIT_DETAIL)
+    try:
+        with usage_context("deliberation:voice_tts", user_id=current_user.get("id")):
+            audio_bytes = generate_tts_audio(spoken)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("deliberation voice speak failed")
+        raise HTTPException(status_code=500, detail="音声の生成に失敗しました。") from exc
+    if audio_bytes is None:
+        raise HTTPException(status_code=503, detail="読み上げ用の音声プロバイダを利用できません。")
+    return {"audio_base64": base64.b64encode(audio_bytes).decode("ascii"), "format": "mp3"}

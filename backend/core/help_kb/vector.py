@@ -345,14 +345,13 @@ def _open_session() -> Any:
 def _embed_texts(texts: list[str]) -> list[list[float]]:
     """埋め込み生成を ``usage_context(feature="admin:help_kb_embed")`` 配下で行う。
 
-    ベンダ依存 (``core.llm``) の import をこの関数内に閉じ込める
-    （``core/library/search.py::_embed_query`` と同型の遅延 import）。
+    遅延 import と計測の張り方は共通実装
+    （``core/llm_worker/embedding.py::embed_with_context``）へ委譲する。ベンダ依存
+    （``core.llm``）を入口に持ち込まない性質も共通実装側で保たれる。
     """
-    from core.llm import generate_embeddings
-    from core.llm_usage.context import usage_context
+    from core.llm_worker.embedding import embed_with_context
 
-    with usage_context("admin:help_kb_embed"):
-        return generate_embeddings(texts)
+    return embed_with_context(texts, feature="admin:help_kb_embed")
 
 
 __all__ = ["sync_manual_vectors", "vector_search_manual"]

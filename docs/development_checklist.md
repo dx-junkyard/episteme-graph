@@ -20,8 +20,9 @@
       fail-closed — 未登録の操作は Copilot が説明も代行もしない仕様であることを踏まえ、
       「今回は登録しない」の判断も PR に書く）
 - [ ] **操作 KB**: `docs/admin_operations/*.md` に手順書を追加/更新したか？
-      （front-matter `capability` / `role` / `screen` 付き。KB に無い操作は Copilot が
-      「未整備」と答える）
+      （front-matter は `screen:` / `role:` の 2 キーのみ。**`capability` キーは存在しない** —
+      capability との結び付けは capability 側の `howto_doc` → `{#anchor}` が担う。
+      KB に無い操作は Copilot が「未整備」と答える）
 - [ ] **G層 next_steps ルール**: 新機能に「次にやること」として案内すべき状態遷移が
       あるか？（`backend/core/admin_assistant/next_steps.py` のルールカタログ。
       G4「押し付けない」に反するルールは追加しない判断も明記）
@@ -144,7 +145,8 @@ Copilot の道案内（Locate & Spotlight）は、capability の `locate_steps[]
 ### 5-5. リポジトリ外正本の禁止
 
 `field_atlas_overlay_spec.md`（8文書が §番号付きで参照する「正本」）が一度もコミットされて
-いなかった事故の再発防止。
+いなかった事故の再発防止（当該事故自体は 2026-08-14 の再構成版で解消済み — 旧§番号との
+対応は保証されない、という但し書き付きで `docs/features/` に実在する）。
 
 - [ ] 「正本」と呼ぶ文書は `docs/` 配下に**コミットされて実在**するか
       （バッククォート参照・§番号付き参照も対象。リンク実在検査は
@@ -159,6 +161,35 @@ CLAUDE.md 内でアンカー件数の 4 値（228/244/248/255）が併存した�
 - [ ] **(a) テスト固定値を参照**（「正確な件数は `backend/tests/test_xxx.py` が正」）か、
       **(b) 時点付き表記**（「2026-08-14 時点 N」）のどちらかになっているか
 - [ ] 裸の数値（時点もテスト参照も無い「260件」）を新規に書いていないか
+
+## 6. 課題ナレッジへの記帳（2026-09-18 追加）
+
+調査記録・レビュー文書・是正リストに課題を**新しく載せたとき**、および**解消したとき**は、
+[課題ナレッジ](issue_knowledge/README.md) に 1 課題 = 1 エントリで記帳する（正本は起票元の文書の
+まま。エントリは「原因の性質による分類・発見観点・解決観点・型」を引くための索引層）。
+
+- [ ] **設計時（pre-mortem）**: 変更に「再実行・削除・既定値・AI の判定・段階間の受け渡し・
+      派生物・ID や版・語彙表の新設・外部呼び出し」が含まれるなら、
+      [課題ナレッジ README §3.3b](issue_knowledge/README.md) の表で該当する族の型の「見分け方」を
+      先に当て、該当しないなら「該当なし」と PR に書く
+- [ ] 新しい課題に `docs/issue_knowledge/entries/IK-NNNN-*.md` を作り、4 軸の座標を
+      [taxonomy.md §1.2](issue_knowledge/taxonomy.md) の手順（**原因の性質**。無い軸は none、
+      見ていない軸は unknown）で決めたか。症状の場所・修正行数・修正手段で決めていないか
+- [ ] 原因が未確定なら `cause_status: hypothesis` + 「仮説:」で始まる basis にしたか
+- [ ] 4 軸それぞれに確信度を付け、低い軸には「新しい値か軸が要るか」を問って `proposals` に答えたか（要らなければ空）
+- [ ] `discovery.perspective`（どの見方で見えたか）と `feature_context.realizing`（どの機能を
+      実現するときに出るか）・`general_form`（機能名を剥がした型）を書いたか
+- [ ] 解消時に `status: resolved` / `resolution.perspective`（最大 2・先頭が主）/ `landed_in`（実在する
+      コードのパスかコミットを最低 1 つ）を書き、分類が変わったなら `history` に残したか
+      （起票元への解消注記 §5-3 とは別に）
+- [ ] AI が起こしたエントリは `classification.review: candidate` のままか。人が確定したなら
+      `confirmed` + `reviewed_by` + `reviewed_at` を書いたか
+- [ ] `backend/scripts/issue_knowledge_index.py` で index.md を再生成し、
+      `backend/tests/test_issue_knowledge_guardrails.py` が green か
+- [ ] **サイクルを閉じるとき（振り返り）**: [改善サイクル §3](architecture/improvement_cycle.md) の起票条件
+      （段を飛ばした／検証後に見つかった欠陥／同じ型の再発／検証経路の欠落／手順の正本がリポジトリ外）に
+      当たるなら、サイクル層（`cycle_*`）を付けた振り返りエントリを 1 件起票したか。当たらないなら
+      「該当なし」と PR に書く。飛ばした段（E2E・敵対的レビュー・pre-mortem）は「未実施」と明記したか
 
 ---
 

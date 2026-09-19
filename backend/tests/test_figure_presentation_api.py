@@ -391,7 +391,7 @@ def _patch_figures_get(routes, monkeypatch, *, figures=None, records=None, is_ow
         lambda *_args, **_kwargs: [{"document_id": "doc-canonical"}],
     )
     monkeypatch.setattr(routes, "load_document_figures", lambda _doc: list(figures or []))
-    monkeypatch.setattr(routes, "_latest_records", lambda _doc: dict(records or {}))
+    monkeypatch.setattr(routes, "_adopted_records", lambda _doc: dict(records or {}))
     monkeypatch.setattr(
         routes,
         "resolve_document_access",

@@ -137,28 +137,58 @@ def extract_function_source(src: str, fn_name: str) -> str:
     return src[start:end]
 
 
+class _PrefixedRoute:
+    """遅延ラッパーの中のルートに、include 時の prefix を合成した ``path`` を持たせる薄い代理。
+
+    FastAPI 0.139 以降、``app.include_router(router, prefix="/api/admin")`` の prefix は
+    ``_IncludedRouter.include_context.prefix`` に保持され、中の ``APIRoute.path`` には**付かない**
+    （マッチ時に合成される）。素の ``route.path`` を読む検査は prefix 抜きのパスを見て空振りする。
+    ``path`` / ``path_format`` 以外の属性（``methods`` / ``endpoint`` / ``dependant`` /
+    ``dependencies`` / ``name`` …）は元のルートへ委譲する。
+    """
+
+    __slots__ = ("_route", "path", "path_format")
+
+    def __init__(self, route, prefix: str):
+        object.__setattr__(self, "_route", route)
+        object.__setattr__(self, "path", prefix + (getattr(route, "path", "") or ""))
+        object.__setattr__(self, "path_format", prefix + (getattr(route, "path_format", None) or getattr(route, "path", "") or ""))
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_route"), name)
+
+    def __repr__(self) -> str:  # pragma: no cover - デバッグ用
+        return f"<_PrefixedRoute {self.path} -> {self._route!r}>"
+
+
 def iter_app_routes(app) -> list:
-    """FastAPI アプリに登録済みのルートオブジェクトを平坦化して返す。
+    """FastAPI アプリに登録済みのルートオブジェクトを**prefix 込みの実パスで**平坦化して返す。
 
     FastAPI 0.139 以降、``app.include_router(...)`` は子ルーターの route を
-    ``app.routes`` へ展開せず遅延ラッパー（``_IncludedRouter``）のまま保持する。
-    そのため ``for route in app.routes`` を素朴に走査する検査は、登録済みの
-    エンドポイントを1件も見つけられずに**空振り**する（実際に
-    ``test_account_lifecycle_guardrails.py`` の経路契約が落ち、他の同型検査は
-    無言で無効化されていた）。ここでラッパーを再帰的に開いて、版に依存しない
-    平坦なルート一覧を単一の正本として提供する。
+    ``app.routes`` へ展開せず遅延ラッパー（``_IncludedRouter``）のまま保持し、include 時の
+    ``prefix`` もラッパー側（``include_context.prefix``）に持つ。そのため
+    ``for route in app.routes`` を素朴に走査する検査は登録済みエンドポイントを 1 件も
+    見つけられず、ラッパーを開くだけの走査は prefix の無いパスを見て空振りする
+    （2026-09-19 の CI で FastAPI 0.141 により登録検査 10 件が落ちた。ローカルは 0.136 で
+    平坦のまま）。ここでラッパーを再帰的に開き、prefix を連結した ``path`` を持つ代理を
+    返すことで、版に依存しない平坦なルート一覧を単一の正本として提供する。
+    0.139 未満（平坦な ``app.routes``）でも同じ結果になる。
     """
     collected: list = []
 
-    def _walk(routes) -> None:
+    def _walk(routes, prefix: str) -> None:
         for route in routes:
             inner = getattr(route, "original_router", None)
             if inner is not None:
-                _walk(inner.routes)
+                ctx = getattr(route, "include_context", None)
+                sub_prefix = getattr(ctx, "prefix", "") or ""
+                _walk(inner.routes, prefix + sub_prefix)
+            elif prefix:
+                collected.append(_PrefixedRoute(route, prefix))
             else:
                 collected.append(route)
 
-    _walk(app.routes)
+    _walk(app.routes, "")
     return collected
 
 

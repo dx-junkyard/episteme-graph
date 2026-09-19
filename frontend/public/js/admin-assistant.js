@@ -143,6 +143,12 @@
 
     bodyEl = panelEl.querySelector(".admin-assistant-body");
     inputEl = panelEl.querySelector(".admin-assistant-input");
+    // 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2）: 入力欄の
+    // ある足元に1行だけ置く。文言はサーバ（GET /api/disclosure）が正本で、取得できない
+    // ときは何も描かない（fail-soft）。同意ボタン・モーダルは作らない（DA5）。
+    if (window.DisclosureNote) {
+      window.DisclosureNote.mount(panelEl.querySelector(".admin-assistant-foot"), "course_materials");
+    }
     undoBtn = panelEl.querySelector(".admin-assistant-undo");
     var sendBtn = panelEl.querySelector(".admin-assistant-send");
     var closeBtn = panelEl.querySelector(".admin-assistant-close");

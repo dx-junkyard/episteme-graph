@@ -169,6 +169,60 @@ class TestAtlasAdminFlow:
         )
         assert resp.json()["draft"] is None
 
+    def test_freeze_audit_carries_the_decision_context(
+        self, client, teacher_headers, sandbox_cartridges, monkeypatch
+    ):
+        """DC1（是正 A-04 / F-18）: 凍結は確定文脈なしに記帳しない。
+
+        凍結版は不変（AB3）＝後戻りが最も効かない確定なので、提示・適用・代替・
+        再審経路を残す。プレビューで見せた影響も隣接キーに事実として残る。
+        """
+        from core import decision_context as dc
+        from routes import atlas as atlas_routes
+
+        events: list[tuple] = []
+        monkeypatch.setattr(
+            atlas_routes.services,
+            "record_review_event",
+            lambda *args, **kwargs: events.append(args),
+        )
+
+        client.put(
+            "/api/admin/cartridges/particle_physics/atlas/skeleton/draft",
+            headers=teacher_headers,
+            json={"skeleton": _sample_draft_dict()},
+        )
+        resp = client.post(
+            "/api/admin/cartridges/particle_physics/atlas/skeleton/freeze",
+            headers=teacher_headers,
+            json={"version": "2027.2"},
+        )
+        assert resp.status_code == 200, resp.text
+        # レスポンスは非改変（記帳のみ）。
+        assert set(resp.json()) == {"cartridge_id", "frozen", "impact", "notified"}
+
+        freeze_events = [e for e in events if (e[5] or {}).get("action") == "freeze"]
+        assert len(freeze_events) == 1
+        metadata = freeze_events[0][5]
+        ctx = metadata[dc.DECISION_CONTEXT_KEY]
+        assert ctx["basis"] == dc.BASIS_ATLAS_SKELETON_FREEZE
+        # 提示 = プレビューの対象になった draft の node / 適用 = 版に入った node。
+        assert set(ctx["presented"]["ids"]) == {"region_a", "concept_a"}
+        assert ctx["applied"]["ids"] == ctx["presented"]["ids"]
+        assert ctx["presented_matches_applied"] is True
+        assert ctx["alternatives_available"] == ["edit", "skip_step"]
+        assert ctx["decline_possible"] is True
+        assert "draft/from-frozen" in ctx["reopen"]["path"]
+        # 凍結版に「戻せる status」は無い（偽らない — DC2）。
+        assert ctx["reopen"]["statuses"] == []
+        assert ctx["evidence_shown"] is None
+        assert ctx["client_reported"] is None
+        # 既存キーは不変（additive）+ プレビューで提示した影響。
+        assert metadata["version"] == "2027.2"
+        assert "impact_removed_node_ids" in metadata
+        assert "impact_added_node_ids" in metadata
+        assert "impact_affected_course_ids" in metadata
+
     def test_invalid_draft_is_rejected(self, client, teacher_headers, sandbox_cartridges):
         bad = _sample_draft_dict()
         bad["atlas_skeleton"]["regions"][0]["layout"]["x"] = 5.0

@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import logging
 
+from episteme_graph.agents.cartridge_loader import load_cartridge_or_none
+
 from .cartridge_loader import CartridgeContext, CartridgeLoader
 from .input_builder import DiscussOpeningInputBuilder
 from .llm_client import DiscussOpeningLLMClient
@@ -150,10 +152,4 @@ class DiscussOpeningAgent:
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:
         if not cartridge_id:
             return None
-        try:
-            return self._cartridge_loader.load(cartridge_id)
-        except FileNotFoundError:
-            logger.warning(
-                "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
-            )
-            return None
+        return load_cartridge_or_none(self._cartridge_loader, cartridge_id)

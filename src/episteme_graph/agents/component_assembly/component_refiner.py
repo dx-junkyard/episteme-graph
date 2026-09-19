@@ -41,6 +41,7 @@ from .schema import (
     ComponentAssemblyLLMInput,
     ComponentAssemblyResult,
     ComponentRecord,
+    concept_name_list,
 )
 from .split_recommendation import (
     normalize_split_recommendation,
@@ -1543,7 +1544,9 @@ def _claim_index(llm_input) -> dict[str, dict]:
         atomicity = str(row.get("atomicity", "atomic") or "atomic")
         entry = index.setdefault(cid, {
             "text": str(row.get("text") or ""),
-            "concepts": [str(c) for c in (row.get("concepts") or []) if c],
+            # P0-3: concepts の型契約は schema.concept_name_list が正本。
+            # 素の反復は str を 1 文字ずつに割る（F0-6）。
+            "concepts": concept_name_list(row.get("concepts")),
             "atomicity": atomicity,
             "is_atomic": bool(row.get("is_atomic", atomicity == "atomic")),
             "claim_type": str(row.get("claim_type") or row.get("claim_type_candidate") or ""),
@@ -1564,14 +1567,10 @@ def _claim_is_atomic(cid: str, claim_index: dict[str, dict]) -> bool:
     return bool(info.get("is_atomic", True)) and str(info.get("atomicity", "atomic")) == "atomic"
 
 
-def _equation_symbols(eq: dict) -> list[str]:
-    symbols: list[str] = []
-    for sym in eq.get("defined_symbols") or []:
-        name = sym.get("symbol") if isinstance(sym, dict) else sym
-        if name:
-            symbols.append(str(name).strip())
-    symbols.extend(str(s).strip() for s in (eq.get("used_symbols") or []) if str(s).strip())
-    return _ordered_unique(symbols)
+# P0-3: 式の記号を子 component の concepts に混ぜていた _equation_symbols は
+# 撤去した（enrichment._equation_symbol_index と同じ根拠 — F-6 / K-2）。記号の
+# 正本は symbol_registry artifact で、子 component からは linked_equation_ids
+# 経由で式に辿れるため情報は失われない。
 
 
 def _is_review_required_status(status: object) -> bool:
@@ -2272,17 +2271,20 @@ def _redistribute_links(
 
 def _recompute_concepts(
     claim_ids: list[str],
-    eq_ids: list[str],
-    eq_index: dict[str, dict],
     claim_index: dict[str, dict],
 ) -> list[str]:
+    """子 component の concepts を atomic claim の概念から作り直す。
+
+    P0-3（knowledge_structure_review_2026-09-12 §4 / F-6 / K-2）: 式の記号は
+    concepts に混ぜない。記号層の正本は symbol_registry artifact であり、子
+    component からは equation_ids リンクで式に辿れるため情報は失われない。
+    非 atomic claim の概念は確定した裏付けとして使わない（従来どおり）。
+    """
     concepts: list[str] = []
     for cid in claim_ids:
         if _claim_is_atomic(cid, claim_index):
             concepts.extend(claim_index.get(cid, {}).get("concepts") or [])
-    for eq_id in eq_ids:
-        concepts.extend(_equation_symbols(eq_index.get(eq_id) or {}))
-    return _ordered_unique(concepts)
+    return concept_name_list(concepts)
 
 
 def _assign_introduced_reused_children(
@@ -2355,7 +2357,7 @@ def _build_suggested_component(
     evidence_ids = list(spec.get("evidence_ids") or [])
     derivation_ids = list(spec.get("derivation_ids") or [])
 
-    concepts = _recompute_concepts(claim_ids, eq_ids, eq_index, claim_index)
+    concepts = _recompute_concepts(claim_ids, claim_index)
 
     blocked = _blocked_equation_ids(eq_ids, eq_index)
     review_eqs = _review_required_equation_ids(eq_ids, eq_index)

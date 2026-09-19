@@ -124,7 +124,7 @@ def resolve_claim_labels(
             sa_text(
                 """
                 SELECT id::text, text
-                  FROM theory_claims
+                  FROM theory_claims_live
                  WHERE id::text = ANY(:ids)
                 """
             ),

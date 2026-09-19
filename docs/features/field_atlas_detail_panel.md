@@ -6,6 +6,13 @@
 > 注記 (2026-08-14): `field_atlas_overlay_spec.md` の原本は消失している。現存するのは
 > 2026-08-14 の**再構成版**で、**旧§番号との対応は保証されない**。
 
+> **実装状況 (2026-09-03 時点・コード照合):** Issue C は実装済み。下表の実装ファイル・
+> `LearningChatRequest.atlas_context` / `LearningChatResponse.atlas_path_card`・
+> `core/atlas_path.py`・`POST /api/learning/courses/{id}/atlas/path-decision` はいずれも現存する。
+> その後オーバーレイには、同じ 3 フック契約（`mountControls` / `onLevelRendered` /
+> `onOverlayClosed`）で重なる層が追加された（`personal-map.js` / `landscape-layer.js` /
+> `atlas-threads-layer.js`）。いずれも本書の詳細パネル・チャット遷移の挙動は変えない。
+
 ## 実装ファイル
 
 | ファイル | 役割 |

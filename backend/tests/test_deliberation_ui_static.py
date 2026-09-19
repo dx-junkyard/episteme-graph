@@ -323,6 +323,45 @@ class TestDeliberationDialoguePhase2:
         card_end = src.index("function _buildAnnotationCard")
         assert src[card_start:card_end].count("escHtml(") >= 3
 
+    def test_assistant_bubble_shows_stance_chip(self):
+        """W2: AI 応答は候補。留保を本文に散らす代わりに、非対話の立場チップ1枚が
+        「AI の読みであって確定ではない」ことを引き受ける。文言の正はサーバの
+        stance_label で、返らないときだけ定数のフォールバックへ落ちる。"""
+        src = _read(DELIBERATION_JS)
+        msg_start = src.index("function _appendChatMessage")
+        msg_end = src.index("function _appendChatNote")
+        block = src[msg_start:msg_end]
+        assert "deliberation-chat-stance" in block
+        assert "STANCE_LABEL_FALLBACK" in block
+        assert 'var STANCE_LABEL_FALLBACK = "AIの読み（未確認）";' in src
+        assert src.count("AIの読み（未確認）") == 1
+        # 応答の stance_label をそのまま渡す（画面側で言い換えない）。
+        assert '_appendChatMessage("ai", (data && data.reply) || "", data && data.stance_label);' in src
+        # 事実の1行であって操作要素ではない。
+        assert "<button" not in block
+        assert "data-ui-anchor" not in block
+        css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")
+        assert ".deliberation-chat-stance" in css
+
+    def test_assistant_bubble_renders_inline_math(self):
+        """応答本文の $…$ は数式として描く（生 TeX を教員に読ませない）。描画は
+        原稿スタジオの正本 graphView.inlineMathHtml に委譲し、レンダラを増やさない。"""
+        src = _read(DELIBERATION_JS)
+        assert "function _chatRichText" in src
+        rich_start = src.index("function _chatRichText")
+        rich_end = src.index("function _appendChatMessage")
+        rich = src[rich_start:rich_end]
+        assert "window.LectureStudio" in rich and "graphView" in rich
+        assert "inlineMathHtml" in rich
+        # 未ロード時は素のエスケープへ縮退する（描画できないより素で出す）。
+        assert "return escHtml(text);" in rich
+        msg_start = src.index("function _appendChatMessage")
+        msg_end = src.index("function _appendChatNote")
+        block = src[msg_start:msg_end]
+        assert "_chatRichText(text)" in block
+        # 教員の発話は素のエスケープのまま（入力を数式として解釈しない）。
+        assert "escHtml(text)" in block
+
 
 class TestAdminHtmlIntegration:
     def test_script_tag_present_before_admin_js(self):
@@ -1719,3 +1758,70 @@ class TestIterativeAnalysisUi:
         assert re.search(r"\bconst\s+\w", block) is None
         assert re.search(r"\blet\s+\w", block) is None
         assert "`" not in block
+
+
+# ---------------------------------------------------------------------------
+# 要素解決の誤表示是正（2026-09、正本: graph_dialogue_review_design.md §11）。
+#
+# グラフ対話レビューの「深く検討」は理論操作グラフの集約ノードから代表要素の
+# agent 側 ID（comp_003 等）を渡す。deliberation.js 側の受け入れ条件:
+#   - agent 側 ID のときは document_id を必ずクエリに載せる（backend は
+#     document スコープが無いと解決しない fail-closed）
+#   - overview が返す正準 ref（DB UUID）で以降の呼び出しを行う
+#   - エラー表示はサーバの detail（事実文）を出し、原因と無関係の固定文言
+#     （「equation は document_id が必要です」）を 422 に被せない
+# ---------------------------------------------------------------------------
+
+
+class TestElementResolutionErrorMessaging:
+    def test_stale_422_fixed_message_is_gone(self):
+        src = _read(DELIBERATION_JS)
+        assert "この要素の指定が不正です" not in src
+
+    def test_render_error_prefers_server_detail(self):
+        src = _read(DELIBERATION_JS)
+        assert "function _renderError(status, detail)" in src
+        block = src[src.index("function _renderError(status, detail)"):]
+        block = block[: block.index("\n  }\n") + 4]
+        assert 'typeof detail === "string"' in block
+        # detail が無いときだけ status 由来の汎用文言へ縮退する。
+        assert "この要素は見つかりませんでした" in block
+        assert "内訳の読み込みに失敗しました" in block
+
+    def test_overview_failure_passes_detail_to_render_error(self):
+        src = _read(DELIBERATION_JS)
+        block = src[src.index("function _loadAndRenderElement()"):]
+        block = block[: block.index("\n  }\n") + 4]
+        assert "_parseJsonResponse" in block  # detail を保持した Error を投げる共通処理
+        assert "_renderError(err && err.status, err && err.detail)" in block
+
+
+class TestAgentSideElementIdScoping:
+    def test_agent_id_resolvable_types_declared(self):
+        src = _read(DELIBERATION_JS)
+        assert "AGENT_ID_RESOLVABLE_ELEMENT_TYPES" in src
+        block = src[src.index("var AGENT_ID_RESOLVABLE_ELEMENT_TYPES"):]
+        block = block[: block.index("};") + 2]
+        assert "theory_component: true" in block
+        assert "theory_claim: true" in block
+
+    def test_document_id_is_sent_for_non_uuid_ids(self):
+        src = _read(DELIBERATION_JS)
+        block = src[src.index("function _refNeedsDocumentId(ref)"):]
+        block = block[: block.index("\n  }\n") + 4]
+        assert "_isDbUuid(ref.elementId)" in block
+        query = src[src.index("function _documentIdQuery(ref)"):]
+        query = query[: query.index("\n  }\n") + 4]
+        assert "_refNeedsDocumentId(ref)" in query
+
+    def test_overview_ref_is_canonicalized_for_later_calls(self):
+        src = _read(DELIBERATION_JS)
+        assert "function _syncRefFromOverview(data)" in src
+        block = src[src.index("function _syncRefFromOverview(data)"):]
+        block = block[: block.index("\n  }\n") + 4]
+        assert "resolved.element_id" in block
+        assert "chatState.ref.elementId = canonicalId" in block
+        for caller in ("function _reloadOverview()", "function _loadAndRenderElement()"):
+            body = src[src.index(caller):]
+            body = body[: body.index("\n  }\n") + 4]
+            assert "_syncRefFromOverview(data)" in body, caller

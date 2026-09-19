@@ -3,6 +3,12 @@ from __future__ import annotations
 
 import logging
 
+from episteme_graph.agents.llm_step import (
+    MAX_REPAIR_ATTEMPTS,
+    attach_issues,
+    run_repair_loop,
+)
+
 from .schema import (
     EdgeNarrative,
     NARRATIVE_VERSION,
@@ -13,7 +19,7 @@ from .schema import (
 
 logger = logging.getLogger(__name__)
 
-_MAX_REPAIR_ATTEMPTS = 2
+_MAX_REPAIR_ATTEMPTS = MAX_REPAIR_ATTEMPTS
 
 
 def _parse_raw(raw: dict, llm_input: NarrativeLLMInput) -> NarrativeAnnotationResult:
@@ -69,26 +75,24 @@ class NarrativeRepairer:
         prompt_factory,
         validator,
     ) -> NarrativeAnnotationResult:
-        for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
-            logger.info(
-                "Narrative annotation repair attempt %d/%d", attempt, _MAX_REPAIR_ATTEMPTS
+        def _on_exhausted(_issues: list) -> NarrativeAnnotationResult:
+            # Unlike most agents the fallback carries no validation_issues.
+            return NarrativeAnnotationResult.make_fallback(
+                llm_input.document_id,
+                llm_input.cartridge_id,
+                "Repair failed after max attempts",
             )
-            messages = prompt_factory.build_repair_messages(
-                llm_input, raw_output, validation_issues, cartridge
-            )
-            try:
-                raw_output = llm_client.generate(messages)
-            except Exception as exc:
-                logger.warning("Narrative repair LLM call failed: %s", exc)
-                break
-            result = _parse_raw(raw_output, llm_input)
-            remaining = validator.validate(result, llm_input)
-            if not [i for i in remaining if i.severity == "error"]:
-                result.validation_issues = remaining
-                return result
-            validation_issues = remaining
-        return NarrativeAnnotationResult.make_fallback(
-            llm_input.document_id,
-            llm_input.cartridge_id,
-            "Repair failed after max attempts",
+
+        return run_repair_loop(
+            build_messages=lambda raw, issues: prompt_factory.build_repair_messages(
+                llm_input, raw, issues, cartridge
+            ),
+            generate=lambda messages: llm_client.generate(messages),
+            parse=lambda raw: _parse_raw(raw, llm_input),
+            validate=lambda result: validator.validate(result, llm_input),
+            on_success=attach_issues,
+            on_exhausted=_on_exhausted,
+            raw_output=raw_output,
+            validation_issues=validation_issues,
+            log_label="Narrative annotation",
         )

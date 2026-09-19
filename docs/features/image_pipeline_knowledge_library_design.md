@@ -59,6 +59,16 @@
    （装置同定・パーツ分解）は常に `review_status='review_required'` 系で保持し、
    教員の確定なしに source_backed / ライブラリ入りしない。
    **LLM がライブラリへ直接書き込む経路を作らない**（昇格 API は人間の操作のみ）。
+
+   > **オーナー裁定待ち（O-6, 2026-09-13 — 概念レジストリ Phase 3 の P3-R1）**
+   > 概念レジストリ（`concept_registry_design.md`）はこの条項を
+   > 「**candidate 行はパイプラインが作る・可視化（凍結）は人間のみ**」と読み替えて
+   > 実装している（`library_entries.review_status='candidate'` の行を
+   > `atlas_links` / `identity_candidates` が起こす。`freeze_entry` は
+   > `review_status='confirmed'` でなければ 409 = KR2）。この読み替えの可否は
+   > オーナー判断 **O-6** に上げており、**裁定まで実装は現状を維持**する。
+   > 弁は凍結の 409 ゲート — 候補行はパイプライン retrieval にも学習者にも届かない。
+   > 裁定後、本項の文言をそのまま維持するか読み替えを明文化するかを決める。
 3. **情報を落とさない (P4)**: 同定できない装置は `match_status='unknown'` で保持。
    チェックボックス off でスキップした工程は `skipped_by_option: true` を
    `stage_outputs` に正直に記録する（無言スキップ・エラー化のどちらもしない）。
@@ -355,6 +365,14 @@ CREATE TABLE library_entry_versions (
   `import_bundled_library()` で「無い (domain_key, name, entry_type) のみ」冪等取込。
   カートリッジファイルの無い新分野でも DB だけでライブラリが成立する
   （atlas の `domain_key` と同じ流儀。デプロイ不要で新分野を育てられる）。
+  **取込直後に初版を凍結する（2026-09-12 追補、知識構造の見直し P0-7）**: draft のままでは
+  `library_entry_versions` が 0 行で、凍結版しか読まない retrieval（§6-5）からライブラリが
+  構造的に不可視だった（同梱シード 3 件・凍結版 0 の実測）。`seed.py` は `create_entry` の直後に
+  `freeze_entry(published_by="bundled_import")` を呼び、`created_by='bundled_import'` かつ
+  `latest_version_no = 0` かつ active の既存行も起動時に一度だけバックフィルする（冪等・fail-soft。
+  戻り値に `frozen` / `freeze_failed`）。同梱 JSON は人間が書いたデータで LLM 出力ではないため
+  「昇格は人間の操作のみ」（§6-4）に反しない。凍結は `revision` を進めない append なので編集中
+  draft の楽観ロックを壊さない。
 - **削除しない**: `status='retired'` 遷移のみ（P4）。retired エントリは retrieval
   対象から外れるが、履歴・provenance・監査は残る。
 

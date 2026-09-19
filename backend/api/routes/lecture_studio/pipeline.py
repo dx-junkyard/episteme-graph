@@ -97,6 +97,7 @@ DOCUMENT_PIPELINE_STAGE_LABELS: dict[str, str] = {
     "blueprint": "コース設計案の生成",
     "export_validation": "整合性の最終チェック",
     "persist_claims_components_graph": "解析結果の保存",
+    "identity_candidates": "共通する概念の候補づくり",
 }
 
 
@@ -364,7 +365,9 @@ def _material_pipeline_status(material_id: str, document_id: str) -> dict:
                 """
                 SELECT status, current_stage, error_message, stage_outputs
                 FROM document_analysis_runs
-                WHERE (document_id = :document_id OR material_id = :material_id)
+                -- migration 080 以降 document_id は uuid（空文字は NULLIF で倒す）。
+                WHERE (document_id = CAST(NULLIF(:document_id, '') AS uuid)
+                       OR material_id = :material_id)
                   AND (run_type IS NULL OR run_type <> 'revision')
                 ORDER BY created_at DESC
                 LIMIT 1

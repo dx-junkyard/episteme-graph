@@ -44,6 +44,16 @@ from types import MappingProxyType
 from core.status import schema as status_schema
 
 __all__ = [
+    "AI_READING_LABEL",
+    "ANCHOR_LANDING_SCALE",
+    "ANCHOR_LANDING_THRESHOLD_MID",
+    "ANCHOR_LANDING_THRESHOLD_NEAR",
+    "ANCHOR_NEARNESS_SCALE",
+    "ANCHOR_NEARNESS_THRESHOLD_MID",
+    "ANCHOR_NEARNESS_THRESHOLD_NEAR",
+    "CHALLENGE_MODE_LABELS",
+    "CITATION_INTENT_LABELS",
+    "COMPLEMENT_SKY_THRESHOLD",
     "AUDIO_STATUS_LABELS",
     "CONFIDENCE_LABELS_LOW_MED_HIGH",
     "CONFIDENCE_LABEL_HIGH",
@@ -56,8 +66,23 @@ __all__ = [
     "CONFIDENCE_TENTATIVE_REFERENCE_HIGH",
     "CONFIDENCE_THRESHOLD_HIGH",
     "CONFIDENCE_THRESHOLD_MEDIUM",
+    "DISCOVERY_RELEVANCE_LABEL_HIGH",
+    "DISCOVERY_RELEVANCE_LABEL_LOW",
+    "DISCOVERY_RELEVANCE_LABEL_MEDIUM",
+    "DISCOVERY_RELEVANCE_SCALE",
+    "DISCOVERY_RELEVANCE_THRESHOLD_HIGH",
+    "DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM",
+    "EDGE_KIND_LABELS",
+    "EVIDENCE_LINE_KIND_LABELS",
     "GradedScale",
+    "LEARNING_STANCE_LABELS",
     "MATERIAL_STATE_LABELS",
+    "RADAR_DISTANCE_LABEL_FAR",
+    "RADAR_DISTANCE_LABEL_MID",
+    "RADAR_DISTANCE_LABEL_NEAR",
+    "RADAR_DISTANCE_SCALE",
+    "RADAR_DISTANCE_THRESHOLD_MID",
+    "RADAR_DISTANCE_THRESHOLD_NEAR",
     "SCRIPT_STATUS_LABELS",
     "SUPPORT_SECTION_LABELS",
     "TRACE_STATUS_LABELS",
@@ -156,6 +181,133 @@ CONFIDENCE_TENTATIVE_REFERENCE_HIGH = GradedScale(
         CONFIDENCE_LABEL_REFERENCE,
         CONFIDENCE_LABEL_TENTATIVE,
     ),
+)
+
+
+# ── 論文ディスカバリーの関連度（PD4: 数値スコアを教員にも見せない）──────────────
+# 候補論文のアブストラクト埋め込みと、分野の取り込み済みコーパス重心との
+# **cosine 類似度**（-1〜1）の段階化。生値は API / UI へ出さず、並び順とこのラベル
+# だけを見せる（``core/paper_discovery/ranking.py``、設計書 §6）。
+#
+# 閾値は発明値（実測データ非由来）。参考にしたのは help_kb ベクトル補助層の
+# ``_MAX_COSINE_DISTANCE = 0.55``（= cosine 類似度 0.45 未満は「なんとなく関連」で
+# 捏造に見えるため足切りする、という同一モデル族での保守的な判断）。ここでは
+# 足切りはせず（PD6 — 候補を黙って消さない）、
+#   * 0.45 以上 = help_kb が「提示してよい」とした水準       → 「関連: 高」
+#   * 0.30 以上 = 同語彙圏だが主題が離れうる水準             → 「関連: 中」
+#   * それ未満・未測定                                       → 「関連: 低」
+# とする。実測での見直し前提（変えるときは設計書 §6 も更新する）。
+DISCOVERY_RELEVANCE_THRESHOLD_HIGH = 0.45
+DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM = 0.30
+
+DISCOVERY_RELEVANCE_LABEL_HIGH = "関連: 高"
+DISCOVERY_RELEVANCE_LABEL_MEDIUM = "関連: 中"
+DISCOVERY_RELEVANCE_LABEL_LOW = "関連: 低"
+
+DISCOVERY_RELEVANCE_SCALE = GradedScale(
+    (DISCOVERY_RELEVANCE_THRESHOLD_HIGH, DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM),
+    (
+        DISCOVERY_RELEVANCE_LABEL_HIGH,
+        DISCOVERY_RELEVANCE_LABEL_MEDIUM,
+        DISCOVERY_RELEVANCE_LABEL_LOW,
+    ),
+)
+
+
+# ── 論文レーダーの距離帯（PR2: 段階ラベルのみ・測れないものにラベルを付けない）────
+# seed 教材のチャンク重心（または seed 論文要旨）と候補アブストラクトの **cosine
+# 類似度**の段階化（``core/paper_discovery/ranking.py::band_candidates``、正本
+# ``docs/features/paper_radar_design.md`` §5.2）。分野重心の代わりに教材1件の重心を
+# 使うだけで、写す数値の意味は :data:`DISCOVERY_RELEVANCE_SCALE` と同じなので、
+# **閾値も同じ 0.45 / 0.30 を初期値に採用する**（発明値・実測見直し前提。ヒストグラムを
+# 見て変えるときは設計書 §9 も更新する）。
+#
+# **未測定（``None``）はこのスケールに通さない**（PR2）。:class:`GradedScale` の慎重側
+# フォールバックはここでは偽装になる — 「測れなかった」と「遠い」は別の事実であり、
+# 未測定候補には ``distance_label`` キー自体を付けない（呼び出し側
+# ``ranking.band_candidates`` が ``None`` を弾いてからラベルを引く）。
+RADAR_DISTANCE_THRESHOLD_NEAR = 0.45
+RADAR_DISTANCE_THRESHOLD_MID = 0.30
+
+RADAR_DISTANCE_LABEL_NEAR = "近い"
+RADAR_DISTANCE_LABEL_MID = "中間"
+RADAR_DISTANCE_LABEL_FAR = "遠い"
+
+RADAR_DISTANCE_SCALE = GradedScale(
+    (RADAR_DISTANCE_THRESHOLD_NEAR, RADAR_DISTANCE_THRESHOLD_MID),
+    (
+        RADAR_DISTANCE_LABEL_NEAR,
+        RADAR_DISTANCE_LABEL_MID,
+        RADAR_DISTANCE_LABEL_FAR,
+    ),
+)
+
+
+# ── コーパスを補う論文 — 検証記録の無い前提との近さ（CC4: 数値非表示）─────────
+# 台帳で ``untested`` かつスコープ空欄の前提文（assumption / claim 本文）と候補
+# アブストラクトの **cosine 類似度**の足切り（``core/paper_discovery/complement.py``、
+# 正本 ``docs/features/corpus_complement_design.md`` §5.2）。段階ラベルは作らず
+# 「近い内容を扱っている可能性がある」の**有無だけ**を判定する（表は持たない）。
+# 自然文×自然文の同一レジームなので :data:`DISCOVERY_RELEVANCE_THRESHOLD_HIGH`
+# （help_kb が「提示してよい」とした水準）と同じ 0.45 を初期値に採用する（発明値・
+# 実測見直し前提。変えるときは設計書 §5.2 も更新する）。未測定（``None``）は不一致扱い。
+COMPLEMENT_SKY_THRESHOLD = 0.45
+
+
+# ── 骨格アンカーへの近さ（分野マップのベクトル係留層 VA2）──────────────────────
+# 骨格ノード（region / concept）の**プロトタイプベクトル**と、論文重心 / 候補
+# アブストラクト / ギャップ候補ラベルとの **cosine 類似度**の段階化（正本
+# ``docs/features/atlas_vector_anchoring_design.md`` §9、算出は
+# ``core/atlas_vectors/query.py``）。cosine の生値は DB / 内部計算に留め、外へ出るのは
+# このスケールのラベルだけ（VA2 数値非表示）。
+#
+# 閾値は :data:`DISCOVERY_RELEVANCE_SCALE` より**高く**取る（0.55 / 0.40）。あちらは
+# 「候補を捨てずに並べ替える」ための相対順位づけだが、こちらは「地図のこのノードの
+# 近くに落ちる」という**係留の言明**であり、外すと閉世界の正直さ（VA8）を損なうため。
+# 0.55 は help_kb ベクトル補助層の保守的足切り（``_MAX_COSINE_DISTANCE = 0.55``）と
+# 同じ「提示してよい」水準に合わせた発明値で、実測での見直し前提
+# （変えるときは設計書 §9 も更新する）。
+#
+# 使い分け（設計書 §9）: ギャップ近傍注記は最上位帯（NEAR 以上）のみ表示、着地予測は
+# 上位2帯（MID 以上）を表示し、最下帯は表示しない（「なんとなく関連」を出さない）。
+ANCHOR_NEARNESS_THRESHOLD_NEAR = 0.55
+ANCHOR_NEARNESS_THRESHOLD_MID = 0.40
+
+ANCHOR_NEARNESS_SCALE = GradedScale(
+    (ANCHOR_NEARNESS_THRESHOLD_NEAR, ANCHOR_NEARNESS_THRESHOLD_MID),
+    ("かなり近い", "近い可能性", "遠い"),
+)
+
+# ── アンカー着地予測（論文テキスト × アンカープロトタイプ）───────────────────
+#
+# :data:`ANCHOR_NEARNESS_SCALE` と**レジームが違う**ための別表。あちらは
+# ラベル×ラベル（gap クラスタ label とアンカー合成テキスト — 双方日本語の短文）で、
+# 0.55/0.40 が妥当。こちらは論文由来テキスト（英語アブスト・チャンク重心）×
+# アンカープロトタイプ（日本語ラベル中心の合成テキスト）の**言語間・長短文比較**で、
+# cosine の絶対水準が一段下がる。2026-08-29 の実測校正（astrophysics 骨格 59 アンカー ×
+# 実レーダー候補20件）: 主題が合う候補の最良アンカー cosine は 0.34〜0.38 で、
+# 最近接アンカーは意味的に正しかった（CMB複屈折→cmb / LSS重力→cosmology）。
+# 主題が違う候補は 0.21〜0.29。旧閾値 0.55/0.40 ではこのレジームで一度も発火しない。
+# 閾値は境界の雑音帯（0.28〜0.34）を「近い可能性」止まりにする保守側で置く。
+# 実測での見直し前提は継承（変えるときは atlas_vector_anchoring_design.md §9 も更新）。
+ANCHOR_LANDING_THRESHOLD_NEAR = 0.36
+ANCHOR_LANDING_THRESHOLD_MID = 0.30
+
+ANCHOR_LANDING_SCALE = GradedScale(
+    (ANCHOR_LANDING_THRESHOLD_NEAR, ANCHOR_LANDING_THRESHOLD_MID),
+    ("かなり近い", "近い可能性", "遠い"),
+)
+
+# ── 骨格の辺種別（SkeletonEdge.kind → 日本語）──────────────────────────────────
+#
+# 正本は core/atlas.py::EDGE_KINDS（adjacent / depends / related）。表示語彙は
+# ここが唯一の定義（atlas_relation_edges_design.md §8。フロントはミラー規律で追随）。
+EDGE_KIND_LABELS = MappingProxyType(
+    {
+        "adjacent": "隣接",
+        "depends": "依存",
+        "related": "関連",
+    }
 )
 
 
@@ -291,4 +443,95 @@ AUDIO_STATUS_LABELS = MappingProxyType({
     status_schema.AUDIO_STATUS_NONE: "未生成",
     status_schema.AUDIO_STATUS_PARTIAL: "一部生成",
     status_schema.AUDIO_STATUS_GENERATED: "生成済み",
+})
+
+
+# ---------------------------------------------------------------------------
+# 対話応答の姿勢ラベル（W層 / グラフ対話レビュー）
+# ---------------------------------------------------------------------------
+#
+# 文ごとの留保（「〜の可能性があります」の反復）をやめ、**返答全体に1つ付く固定
+# ラベル**で不確かさを示す（オーナー裁定 2026-09-10。正本は
+# ``docs/features/graph_dialogue_review_design.md`` §15）。段階スケールではなく
+# 単一の固定文字列なので表を作らない — この1箇所だけが正本で、
+# ``core/deliberation/{dialogue,graph_dialogue}.py`` と route 層は import して使う。
+
+AI_READING_LABEL = "AIの読み（未確認）"
+
+
+# ---------------------------------------------------------------------------
+# 学習チャットの様相ラベル（Phase 1 入口統合）
+# ---------------------------------------------------------------------------
+#
+# 語彙（enum）の正本は ``core/learning_stance/schema.py`` の ``STANCES``、
+# **表示ラベルの正本はここ**（正本設計書
+# ``docs/features/learning_chat_entry_unification_design.md`` §5）。
+# フロントは ``label + "答えました。"`` を描くだけで日本語表を持たない
+# （JS 側にこの表をミラーしない = サーバが解決済みの文字列を返す）。
+# 数値・confidence は持たない（LC7）。
+
+LEARNING_STANCE_LABELS = MappingProxyType({
+    "tutor": "ふつうの質問として",
+    "casual_light": "気軽な調子で",
+    "discuss": "議論として",
+    "cycle_elicit": "予想を先に聞く形で",
+    "cycle_diff": "予想と照らし合わせる形で",
+})
+
+
+# ---------------------------------------------------------------------------
+# 学ぶ単位の種別ラベル（Phase 2 / learning_units）
+# ---------------------------------------------------------------------------
+#
+# 語彙（enum）の正本は ``core/schema.py::LEARNING_UNIT_KINDS``、**表示ラベルの
+# 正本はここ**（正本設計書 ``docs/features/learning_units_design.md`` §4.1）。
+# migration 081 の ``knowledge_unit_kinds`` シードもこの文字列と一致させる
+# （一致は ``backend/tests/test_learning_units_guardrails.py`` が固定する）。
+# 数値・confidence は持たない（LU5）。
+
+LEARNING_UNIT_KIND_LABELS = MappingProxyType({
+    "section_block": "章立ての論理ブロック",
+    "thesis_support": "中心命題と支持構造",
+    "parent_component": "理論の部品（原案）",
+    "dsl_node": "概念ノード",
+    "figure": "図",
+})
+
+
+# ---------------------------------------------------------------------------
+# D層・C層の表現語彙（知識の転用層 Phase 4 / migration 083）
+# ---------------------------------------------------------------------------
+#
+# 語彙（enum）の正本は
+#   - ``core/doubt/schema.py::CHALLENGE_MODES``（疑義の向き・X-6）
+#   - ``core/doubt/schema.py::EVIDENCE_LINE_KINDS``（根拠の線・X-5）
+#   - ``core/schema.py::CITATION_INTENTS``（引用の意図・X-7）
+# **表示ラベルの正本はここ**（正本設計書
+# ``docs/features/knowledge_transfer_design.md`` §8）。migration 083 の CHECK も
+# 同じ文字列で書く（一致は ``backend/tests/test_doubt_citation_vocab_*.py`` が固定）。
+# 数値・confidence は持たない（KT7）。フロント（doubt-atlas.js /
+# admin-lecture-studio.js）は逐語ミラー + mirror テストで固定する（第2波）。
+
+#: 疑義の向き（direct = 主張そのもの / undercut = 主張と根拠のつながり）。
+#: 主語は常に「どこへ向けた疑義か」であって人ではない（D層 §8-3 を継承）。
+CHALLENGE_MODE_LABELS = MappingProxyType({
+    "direct": "主張そのものへ",
+    "undercut": "主張と根拠のつながりへ",
+})
+
+#: 根拠の線の種別（どの経路で支えられているか）。
+EVIDENCE_LINE_KIND_LABELS = MappingProxyType({
+    "observation": "観測",
+    "derivation": "導出",
+    "external_reference": "外部文献",
+    "consistency": "整合性",
+})
+
+#: 引用の意図（CiTO の最小語彙）。NULL = 記録なし（ラベルを持たない）。
+CITATION_INTENT_LABELS = MappingProxyType({
+    "uses_as_evidence": "根拠として使う",
+    "extends": "発展させる",
+    "qualifies": "条件を付ける",
+    "contrasts_with": "対比する",
+    "cites_for_background": "背景として引く",
 })

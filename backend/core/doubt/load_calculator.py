@@ -79,7 +79,7 @@ def recompute_load_scores(course_id: str = "", document_id: str = "") -> dict:
             filters.append("course_id = :course")
             params["course"] = course_id
         if document_id:
-            filters.append("document_id = :doc")
+            filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
             params["doc"] = document_id
         if not filters:
             filters.append("TRUE")

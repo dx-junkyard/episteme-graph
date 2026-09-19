@@ -30,6 +30,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user, _require_system_admin, _require_teacher
+# オブジェクトスコープ権限（P0）の正本ゲート。`_require_teacher` は「TEACHER 以上」しか
+# 保証しないため、course_id 直指定の経路は編集権限ゲートを必ず通す
+# （不在・権限なしはどちらも 404・detail 同一。admin.py の既存5経路と同型）。
+from routes.admin import _require_editable_course_or_404, _require_editable_document_or_404
 from core.doubt.assumption_mining.corpus_audit import run_corpus_audit
 from core.doubt.assumption_mining.worker import maybe_schedule_assumption_mining
 from core.doubt.counterfactual import compute_counterfactual, snapshot_subgraphs
@@ -40,6 +44,8 @@ from core.doubt.naive_signal import aggregate_naive_signals, has_naive_signal
 from core.doubt.observation_targets import observation_claim_targets
 from core.doubt.open_assumptions import compile_open_assumptions, target_label
 from core.doubt.schema import (
+    CHALLENGE_MODES,
+    EVIDENCE_LINE_KINDS,
     ChallengeStatus,
     ChallengeType,
     FALSIFICATION_KIND_LABELS,
@@ -53,8 +59,17 @@ from core.doubt.schema import (
     scope_coverage_level,
 )
 from core.doubt.scope_candidates.worker import maybe_schedule_scope_candidates
+# 学習者向け投影の生数値遮断は、ゼミ前ブリーフ（SB2）と**同じ語彙**を使う
+# （数値キーの表を二重に持たない。正本は core/doubt/seminar_brief.py）。
+from core.doubt.seminar_brief import (
+    _FORBIDDEN_NUMERIC_KEYS as LEARNER_FORBIDDEN_NUMERIC_KEYS,
+    _strip_numeric_keys as strip_learner_numeric_keys,
+)
 from core.doubt.support_paths import compute_support_lines
 from core.label_vocab import VERIFICATION_STATUS_LABELS_LEDGER
+# P4-5（知識の転用層 §8）の表示ラベル。語彙（enum）の正本は core/doubt/schema.py /
+# core/schema.py、ラベルの正本は core/label_vocab.py（ここでは再定義しない）。
+from core.label_vocab import CHALLENGE_MODE_LABELS, EVIDENCE_LINE_KIND_LABELS
 from core.postgres import get_session as _pg_session
 from core.status import cross_layer_notify
 from core.schema import (
@@ -151,12 +166,14 @@ def _jsonb_dict(value: Any) -> dict:
 def _fetch_ledger_row(session, target_type: str, target_id: str):
     # falsification_conditions（row[13]）/ falsification_candidates（row[14]）は
     # SL-1（賭け金の台帳）用に末尾へ追加（既存インデックス 0-12 は不変）。
+    # evidence_lines（row[15]）は P4-5（根拠の線・migration 083）用にさらに末尾へ追加。
     return session.execute(
         sa_text("""
-            SELECT id::text, target_id, target_type, document_id, course_id,
+            SELECT id::text, target_id, target_type, document_id::text AS document_id, course_id,
                    verification_status, verification_scopes, scope_candidates,
                    consensus_explicit, consensus_behavioral, load_score,
-                   created_at, updated_at, falsification_conditions, falsification_candidates
+                   created_at, updated_at, falsification_conditions, falsification_candidates,
+                   evidence_lines
             FROM epistemic_ledger
             WHERE target_id = :tid AND target_type = :ttype
         """),
@@ -265,6 +282,66 @@ def _validate_falsification_condition_fields(
         )
     if reachability not in REACHABILITY_LEVELS:
         raise HTTPException(status_code=422, detail=f"invalid reachability: {reachability}")
+
+
+_TARGET_ELEMENT_REF_KEYS = ("element_type", "element_id", "document_id")
+
+
+def _normalize_target_element_ref(value: Any) -> dict:
+    """疑義の対象要素参照（P4-5 / X-6）を許可キーだけに絞る。
+
+    グラフ上の位置は任意（空 ``{}`` = 位置の記録なし）。想定外のキー（confidence 等の
+    数値や自由記述）は**捨てる**（KT7: 数値・内部情報の混入口を作らない）。
+    """
+    if not isinstance(value, dict):
+        return {}
+    normalized = {}
+    for key in _TARGET_ELEMENT_REF_KEYS:
+        raw = value.get(key)
+        if isinstance(raw, str) and raw.strip():
+            normalized[key] = raw.strip()
+    return normalized
+
+
+def _evidence_line_out(line: dict) -> dict:
+    """根拠の線（P4-5 / X-5）の教員向け API 表現。実 JSONB と同じ形 + 種別ラベル。"""
+    kind = str(line.get("line_kind") or "")
+    return {
+        "line_id": str(line.get("line_id") or ""),
+        "line_kind": kind,
+        "line_kind_label": EVIDENCE_LINE_KIND_LABELS.get(kind, kind),
+        "evidence_ids": [str(e) for e in line.get("evidence_ids") or []],
+        "claim_ids": [str(c) for c in line.get("claim_ids") or []],
+        "equation_ids": [str(e) for e in line.get("equation_ids") or []],
+        "recorded_by": str(line.get("recorded_by") or ""),
+        "reason": str(line.get("reason") or ""),
+        "recorded_at": str(line.get("recorded_at") or ""),
+    }
+
+
+def _validate_evidence_line_fields(
+    line_kind: str,
+    reason: str,
+    evidence_ids: list[str],
+    claim_ids: list[str],
+    equation_ids: list[str],
+) -> None:
+    """根拠の線（手動記帳 / 訂正）に共通する必須項目の検証（P4-5）。
+
+    ``line_kind`` は語彙内・``reason`` は非空・根拠 ID は 3 系統のいずれか 1 つ以上。
+    「経路が分からない」を根拠なしで記帳できてしまうと、検証記録の不在
+    （空配列 = 発見）と区別が付かなくなる（SL-1 の not_formulable と同じ理由で、
+    こちらは**空の記帳を許さない**側に倒す）。
+    """
+    if line_kind not in EVIDENCE_LINE_KINDS:
+        raise HTTPException(status_code=422, detail=f"invalid line_kind: {line_kind}")
+    if not reason.strip():
+        raise HTTPException(status_code=422, detail="reason が必要です")
+    if not evidence_ids and not claim_ids and not equation_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="根拠（evidence_ids / claim_ids / equation_ids のいずれか）が必要です",
+        )
 
 
 def _endorsement_label(consensus_explicit: dict) -> str:
@@ -387,6 +464,10 @@ def get_ledger_entry(
             _falsification_candidate_out(c) for c in _jsonb_list(row[14])
             if isinstance(c, dict) and str(c.get("status") or "candidate") == "candidate"
         ]
+        # P4-5: 根拠の線（人間の記帳のみ。教員向けは帰属つきの一覧を返す）。
+        evidence_lines = [
+            _evidence_line_out(line) for line in _jsonb_list(row[15]) if isinstance(line, dict)
+        ]
         # SL-3: 独立支持経路（数値非公開・導出失敗はキー自体を付けない fail-soft）。
         support_lines = None
         try:
@@ -402,7 +483,8 @@ def get_ledger_entry(
         challenge_rows = session.execute(
             sa_text("""
                 SELECT c.id::text, c.challenge_type, c.reason, c.status,
-                       COALESCE(u.display_name, ''), c.created_at
+                       COALESCE(u.display_name, ''), c.created_at,
+                       c.challenge_mode, c.target_element_ref
                 FROM challenges c
                 LEFT JOIN users u ON u.id = c.challenger_id
                 WHERE c.target_type = :ttype AND c.target_id = :tid
@@ -439,9 +521,15 @@ def get_ledger_entry(
                     "reason": str(c[2]),
                     "status": str(c[3]),
                     "challenger_name": str(c[4]),
+                    "challenge_mode": str(c[6] or "direct"),
+                    "challenge_mode_label": CHALLENGE_MODE_LABELS.get(
+                        str(c[6] or "direct"), str(c[6] or "direct")
+                    ),
+                    "target_element_ref": _normalize_target_element_ref(_jsonb_dict(c[7])),
                 }
                 for c in challenge_rows
             ],
+            "evidence_lines": evidence_lines,
             "falsification_conditions": falsification_conditions,
             "falsification_candidates": falsification_candidates,
             **({"support_lines": support_lines} if support_lines is not None else {}),
@@ -1161,7 +1249,11 @@ def get_observation_targets(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """観測系 claim の一覧（「観測を仮に倒す」の選択肢。identified_via 併記・数値なし）。"""
+    """観測系 claim の一覧（「観測を仮に倒す」の選択肢。identified_via 併記・数値なし）。
+
+    course_id 直指定なので、集約の前に編集権限ゲートを通す（P0 fail-closed）。
+    """
+    _require_editable_course_or_404(course_id, current_user)
     session = _pg_session()
     try:
         targets = observation_claim_targets(session, course_id=course_id)
@@ -1180,7 +1272,12 @@ def get_naive_signals(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """anchor 単位の k-匿名集計（k=3, n<3 セル非表示、件数はレンジ表示のみ）。"""
+    """anchor 単位の k-匿名集計（k=3, n<3 セル非表示、件数はレンジ表示のみ）。
+
+    学習痕跡由来の集約なので、k-匿名の前に編集権限ゲートを通す（P0 fail-closed。
+    無関係な教員が他コースの学習者信号を読めないようにする）。
+    """
+    _require_editable_course_or_404(course_id, current_user)
     return aggregate_naive_signals(course_id)
 
 
@@ -1537,6 +1634,241 @@ def get_assumption_atlas(
 
 
 # ---------------------------------------------------------------------------
+# P4-5: 根拠の線（Evidence Lines, migration 083 / X-5）
+#
+# 正本: docs/features/knowledge_transfer_design.md §8。
+# verification_scopes（どこで確かめられたか）/ falsification_conditions（何が起これば
+# 覆るか）に続く第3の軸「どの経路で支えられているか」。**人間の記帳専用**で、
+# LLM worker / ledger_builder からの書き込み経路は作らない（SL3 と同型）。
+# 削除 API を作らず、訂正は PATCH（KT5: 情報を落とさない）。
+# ---------------------------------------------------------------------------
+
+
+#: 台帳対象 → その対象が属する document を引く SQL（live 行のみ）。
+#: assumption は複数 document にまたがり得るので配列列を読む（下の解決関数を参照）。
+_TARGET_DOCUMENT_SQL: dict[str, str] = {
+    "claim": "SELECT document_id::text FROM theory_claims_live WHERE id::text = :tid",
+    "component": "SELECT document_id::text FROM theory_components_live WHERE id::text = :tid",
+    "equation": (
+        "SELECT document_id::text FROM knowledge_equations "
+        "WHERE id::text = :tid AND superseded_at IS NULL"
+    ),
+}
+
+#: 権限が確かめられない書き込みは、不在と同じ 404 に畳む（detail も同一）。
+_LEDGER_TARGET_NOT_FOUND = "Ledger target not found"
+
+
+def _target_document_ids(session, target_type: str, target_id: str) -> list[str]:
+    """台帳対象が属する document の id を引く（解決できなければ空）。"""
+    ids: list[str] = []
+    sql = _TARGET_DOCUMENT_SQL.get(target_type)
+    if sql:
+        try:
+            row = session.execute(sa_text(sql), {"tid": target_id}).fetchone()
+        except Exception:  # noqa: BLE001 — id 形が UUID でない等。解決できない = 空。
+            logger.debug("ledger target document lookup failed", exc_info=True)
+            row = None
+        if row and row[0]:
+            ids.append(str(row[0]))
+    elif target_type == "assumption":
+        try:
+            row = session.execute(
+                sa_text("SELECT document_ids FROM assumption_nodes WHERE id::text = :tid"),
+                {"tid": target_id},
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            logger.debug("assumption document lookup failed", exc_info=True)
+            row = None
+        if row and row[0]:
+            ids.extend(str(v) for v in _jsonb_list(row[0]) if str(v or "").strip())
+    # 台帳行に document_id が刻まれていればそれも候補にする（後付けの対象で使う）。
+    ledger = _fetch_ledger_row(session, target_type, target_id)
+    if ledger is not None and ledger[3]:
+        ids.append(str(ledger[3]))
+    seen: set[str] = set()
+    return [i for i in ids if i and not (i in seen or seen.add(i))]
+
+
+def _require_editable_ledger_target(target_type: str, target_id: str, current_user: dict) -> str:
+    """根拠の線の書き込み権限（P4-R8）。
+
+    `_require_teacher` は「TEACHER 以上」しか保証しない。台帳への記帳は対象の
+    **教材単位の編集権限**を要求する（doubt.py 冒頭の規律。course 直指定の経路が
+    `_require_editable_course_or_404` を通すのと同型）。対象が解決できない・
+    編集できないはどちらも同一の 404（存在の有無を漏らさない = fail-closed）。
+
+    Returns:
+        権限を確かめた document_id（監査には使わない。ログ用）。
+    """
+    session = _pg_session()
+    try:
+        document_ids = _target_document_ids(session, target_type, target_id)
+    finally:
+        session.close()
+    if not document_ids:
+        raise HTTPException(status_code=404, detail=_LEDGER_TARGET_NOT_FOUND)
+    for document_id in document_ids:
+        try:
+            _require_editable_document_or_404(document_id, current_user)
+        except HTTPException:
+            continue
+        return document_id
+    raise HTTPException(status_code=404, detail=_LEDGER_TARGET_NOT_FOUND)
+
+
+class EvidenceLineCreateRequest(BaseModel):
+    line_kind: str = ""
+    reason: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+    claim_ids: list[str] = Field(default_factory=list)
+    equation_ids: list[str] = Field(default_factory=list)
+
+
+class EvidenceLinePatchRequest(BaseModel):
+    line_kind: str | None = None
+    reason: str | None = None
+    evidence_ids: list[str] | None = None
+    claim_ids: list[str] | None = None
+    equation_ids: list[str] | None = None
+
+
+@admin_router.post("/ledger/{target_type}/{target_id}/evidence-lines")
+def add_evidence_line(
+    target_type: str,
+    target_id: str,
+    body: EvidenceLineCreateRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """根拠の線の手動記帳（人間専用の記帳先, P4-5）。帰属は認証ユーザー。"""
+    _require_ledger_target_type(target_type)
+    # 形の検証は DB を開く前（不正な本文は対象の有無に関わらず 422）。
+    _validate_evidence_line_fields(
+        body.line_kind, body.reason, body.evidence_ids, body.claim_ids, body.equation_ids,
+    )
+    # P4-R8: TEACHER であることだけでは足りない（対象教材の編集権限を要求する）。
+    _require_editable_ledger_target(target_type, target_id, current_user)
+    line = {
+        "line_id": str(uuid.uuid4()),
+        "line_kind": body.line_kind,
+        "evidence_ids": [str(e) for e in body.evidence_ids],
+        "claim_ids": [str(c) for c in body.claim_ids],
+        "equation_ids": [str(e) for e in body.equation_ids],
+        # 帰属は常にサーバ側で認証ユーザーから採る（body の申告は受け取らない）。
+        "recorded_by": str(current_user.get("id") or ""),
+        "reason": body.reason.strip(),
+        "recorded_at": _now_iso(),
+    }
+    session = _pg_session()
+    try:
+        row = _get_or_create_ledger_row(session, target_type, target_id)
+        if row is None:
+            raise HTTPException(status_code=500, detail="Failed to create ledger entry")
+        session.execute(
+            sa_text("""
+                UPDATE epistemic_ledger
+                SET evidence_lines = evidence_lines || CAST(:line AS jsonb),
+                    updated_at = now()
+                WHERE target_id = :tid AND target_type = :ttype
+            """),
+            {"line": json.dumps([line], ensure_ascii=False), "tid": target_id, "ttype": target_type},
+        )
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to add evidence line for %s/%s", target_type, target_id)
+        raise HTTPException(status_code=500, detail="Failed to add evidence line")
+    finally:
+        session.close()
+
+    _record_doubt_event(
+        AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "", "evidence_line_added",
+        current_user.get("id"),
+        {"action": "evidence_line_add", "line_id": line["line_id"], "line_kind": line["line_kind"]},
+    )
+    return {"ok": True, "evidence_line": _evidence_line_out(line)}
+
+
+@admin_router.patch("/ledger/{target_type}/{target_id}/evidence-lines/{line_id}")
+def patch_evidence_line(
+    target_type: str,
+    target_id: str,
+    line_id: str,
+    body: EvidenceLinePatchRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """根拠の線の訂正（訂正後も必須項目を再検証する。削除はしない, KT5）。"""
+    _require_ledger_target_type(target_type)
+    # P4-R8: 記帳と同じ編集権限ゲート（訂正も書き込み）。
+    _require_editable_ledger_target(target_type, target_id, current_user)
+    session = _pg_session()
+    try:
+        row = _fetch_ledger_row(session, target_type, target_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Ledger entry not found")
+        lines = [line for line in _jsonb_list(row[15]) if isinstance(line, dict)]
+        target_line = None
+        for line in lines:
+            if str(line.get("line_id") or "") == line_id:
+                target_line = line
+                break
+        if target_line is None:
+            raise HTTPException(status_code=404, detail="Evidence line not found")
+
+        old_line = dict(target_line)
+        if body.line_kind is not None:
+            target_line["line_kind"] = str(body.line_kind).strip()
+        if body.reason is not None:
+            target_line["reason"] = str(body.reason).strip()
+        for field_name, value in (
+            ("evidence_ids", body.evidence_ids),
+            ("claim_ids", body.claim_ids),
+            ("equation_ids", body.equation_ids),
+        ):
+            if value is not None:
+                target_line[field_name] = [str(v) for v in value]
+
+        _validate_evidence_line_fields(
+            str(target_line.get("line_kind") or ""),
+            str(target_line.get("reason") or ""),
+            list(target_line.get("evidence_ids") or []),
+            list(target_line.get("claim_ids") or []),
+            list(target_line.get("equation_ids") or []),
+        )
+
+        session.execute(
+            sa_text("""
+                UPDATE epistemic_ledger
+                SET evidence_lines = CAST(:lines AS jsonb), updated_at = now()
+                WHERE target_id = :tid AND target_type = :ttype
+            """),
+            {
+                "lines": json.dumps(lines, ensure_ascii=False),
+                "tid": target_id,
+                "ttype": target_type,
+            },
+        )
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to patch evidence line for %s/%s", target_type, target_id)
+        raise HTTPException(status_code=500, detail="Failed to patch evidence line")
+    finally:
+        session.close()
+
+    _record_doubt_event(
+        AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "evidence_line_updated",
+        "evidence_line_updated", current_user.get("id"),
+        {"action": "evidence_line_patch", "line_id": line_id, "old": old_line},
+    )
+    return {"ok": True, "evidence_line": _evidence_line_out(target_line)}
+
+
+# ---------------------------------------------------------------------------
 # D3-1: 疑義（Challenge）
 # ---------------------------------------------------------------------------
 
@@ -1545,6 +1877,10 @@ class ChallengeCreateRequest(BaseModel):
     challenge_type: str
     reason: str
     course_id: str = ""
+    # P4-5（knowledge_transfer_design.md §8 / X-6）: 疑義の**向き**と対象要素。
+    # 既定は direct = 主張そのものへ（既存クライアントの body は不変で動く）。
+    challenge_mode: str = "direct"
+    target_element_ref: dict = Field(default_factory=dict)
 
 
 @admin_router.post("/targets/{target_type}/{target_id}/challenges")
@@ -1559,17 +1895,22 @@ def create_challenge(
         raise HTTPException(status_code=422, detail=f"invalid target_type: {target_type}")
     if body.challenge_type not in _CHALLENGE_TYPES:
         raise HTTPException(status_code=422, detail=f"invalid challenge_type: {body.challenge_type}")
+    if body.challenge_mode not in CHALLENGE_MODES:
+        raise HTTPException(status_code=422, detail=f"invalid challenge_mode: {body.challenge_mode}")
     if not body.reason.strip():
         raise HTTPException(status_code=422, detail="reason（本人の言葉）が必要です")
+    element_ref = _normalize_target_element_ref(body.target_element_ref)
 
     session = _pg_session()
     try:
         row = session.execute(
             sa_text("""
                 INSERT INTO challenges
-                    (target_id, target_type, challenger_id, challenge_type, reason, course_id)
+                    (target_id, target_type, challenger_id, challenge_type, reason, course_id,
+                     challenge_mode, target_element_ref)
                 VALUES
-                    (:tid, :ttype, CAST(:uid AS uuid), :ctype, :reason, :course)
+                    (:tid, :ttype, CAST(:uid AS uuid), :ctype, :reason, :course,
+                     :cmode, CAST(:element_ref AS jsonb))
                 RETURNING id
             """),
             {
@@ -1579,6 +1920,8 @@ def create_challenge(
                 "ctype": body.challenge_type,
                 "reason": body.reason.strip(),
                 "course": body.course_id or "",
+                "cmode": body.challenge_mode,
+                "element_ref": json.dumps(element_ref, ensure_ascii=False),
             },
         ).fetchone()
         session.commit()
@@ -1596,7 +1939,7 @@ def create_challenge(
         AUDIT_ENTITY_CHALLENGE, challenge_id, "", "open",
         current_user.get("id"),
         {"action": "create", "target_type": target_type, "target_id": target_id,
-         "challenge_type": body.challenge_type},
+         "challenge_type": body.challenge_type, "challenge_mode": body.challenge_mode},
     )
     # 横断インボックス fan-out（N14, best-effort）: 対象を記帳・確定した教員へ「疑義が
     # 起票された」通知。主語は疑義の型（人格対立にしない）。起票者本人が記帳者なら
@@ -1614,7 +1957,16 @@ def create_challenge(
             )
     except Exception:  # noqa: BLE001 — 通知失敗は疑義の起票そのものを止めない
         logger.debug("cross-layer notify (challenge) skipped for %s/%s", target_type, target_id, exc_info=True)
-    return {"ok": True, "challenge_id": challenge_id, "status": "open"}
+    return {
+        "ok": True,
+        "challenge_id": challenge_id,
+        "status": "open",
+        "challenge_mode": body.challenge_mode,
+        "challenge_mode_label": CHALLENGE_MODE_LABELS.get(
+            body.challenge_mode, body.challenge_mode
+        ),
+        "target_element_ref": element_ref,
+    }
 
 
 @admin_router.get("/targets/{target_type}/{target_id}/challenges")
@@ -1631,7 +1983,8 @@ def list_challenges(
         rows = session.execute(
             sa_text("""
                 SELECT c.id::text, c.challenge_type, c.reason, c.status,
-                       COALESCE(u.display_name, ''), c.created_at::text
+                       COALESCE(u.display_name, ''), c.created_at::text,
+                       c.challenge_mode, c.target_element_ref
                 FROM challenges c
                 LEFT JOIN users u ON u.id = c.challenger_id
                 WHERE c.target_type = :ttype AND c.target_id = :tid
@@ -1650,6 +2003,12 @@ def list_challenges(
                     "status": str(r[3]),
                     "challenger_name": str(r[4]),
                     "created_at": str(r[5]),
+                    # P4-5: 疑義の向き（既存行は DB の DEFAULT どおり direct）。
+                    "challenge_mode": str(r[6] or "direct"),
+                    "challenge_mode_label": CHALLENGE_MODE_LABELS.get(
+                        str(r[6] or "direct"), str(r[6] or "direct")
+                    ),
+                    "target_element_ref": _normalize_target_element_ref(_jsonb_dict(r[7])),
                 }
                 for r in rows
             ],
@@ -2000,7 +2359,7 @@ def save_counterfactual_session(
                      collapsed_subgraph, surviving_subgraph, indeterminate_subgraph,
                      notes, shared_scope, group_id)
                 VALUES
-                    (CAST(:uid AS uuid), :course, :doc, CAST(:toggled AS jsonb),
+                    (CAST(:uid AS uuid), :course, CAST(NULLIF(:doc, '') AS uuid), CAST(:toggled AS jsonb),
                      CAST(:toggled_obs AS jsonb),
                      CAST(:collapsed AS jsonb), CAST(:surviving AS jsonb),
                      CAST(:indeterminate AS jsonb),
@@ -2067,7 +2426,7 @@ def _counterfactual_session_out(row) -> dict:
 
 _CF_SELECT = """
     SELECT s.id::text, s.owner_id::text, COALESCE(u.display_name, ''),
-           s.course_id, s.document_id, s.toggled_assumption_ids,
+           s.course_id, s.document_id::text AS document_id, s.toggled_assumption_ids,
            s.collapsed_subgraph, s.surviving_subgraph, s.indeterminate_subgraph,
            s.notes, s.shared_scope, COALESCE(s.group_id::text, ''), s.created_at::text,
            s.toggled_observations
@@ -2172,7 +2531,10 @@ def get_doubt_metrics(
     current_user: dict = Depends(_require_system_admin),
 ) -> dict:
     """運用判断用の内部 KPI（数値をユーザーに見せる API・UI は作らない）。"""
-    return collect_doubt_metrics()
+    metrics = collect_doubt_metrics()
+    # 制度指標カタログへの参照（IG1）。定義は GET /api/indicators/doubt-metrics。
+    metrics["indicator_id"] = "doubt-metrics"
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -2222,6 +2584,90 @@ def _learner_falsification_conditions(conditions: list[dict]) -> list[dict]:
     return result
 
 
+def _learner_evidence_lines_fact(lines: list[dict]) -> str:
+    """P4-5 の学習者向け投影。**事実文 1 行**だけ（KT7）。
+
+    記帳者（``recorded_by``）・根拠の ID 群・件数は出さない。種別は記帳された
+    ものだけを記帳順の重複なしで並べる（無い種別は言わない = 閉世界）。
+    記帳ゼロなら空文字（呼び出し側がキー自体を付けない）。
+    """
+    kinds: list[str] = []
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        kind = str(line.get("line_kind") or "")
+        label = EVIDENCE_LINE_KIND_LABELS.get(kind)
+        if label and label not in kinds:
+            kinds.append(label)
+    if not kinds:
+        return ""
+    return f"根拠の線が記帳されています（種類: {'・'.join(kinds)}）。"
+
+
+def learner_ledger_line(
+    session,
+    target_type: str,
+    target_id: str,
+    *,
+    include_support_lines: bool = True,
+) -> dict | None:
+    """台帳の学習者向け投影1件（読み取り専用）。台帳行が無ければ ``None``。
+
+    ``get_learner_ledger_line``（エンドポイント）と、画面文脈アダプター Phase 4
+    （``assistant_screen_adapter_design.md`` §11.3 kind ``verification``）の共通正本。
+    **学習者向けの遮断を2箇所に書かない**ため、投影はここだけに置く:
+    記帳者 ID を落とし・生スコアを返さず・SL1 の閉世界語彙をそのまま運ぶ。
+
+    ``session`` の open/close は呼び出し側の責務（既存エンドポイントの
+    ``try/finally`` 規約をそのまま使う）。
+    """
+    row = _fetch_ledger_row(session, target_type, target_id)
+    if row is None:
+        return None
+    status = str(row[5] or "unknown")
+    scopes = [_scope_out(s) for s in _jsonb_list(row[6]) if isinstance(s, dict)]
+    # 学習者へは記帳者 ID を出さない（帰属は教員向け表示のみ）
+    learner_scopes = [
+        {k: v for k, v in scope.items() if k in ("condition", "domain", "precision", "system")}
+        for scope in scopes
+    ]
+    falsification_conditions = _learner_falsification_conditions(
+        [c for c in _jsonb_list(row[13]) if isinstance(c, dict)]
+    )
+    # P4-5: 根拠の線は事実文 1 行に畳む（記帳者 ID・根拠 ID・件数を出さない）。
+    evidence_lines_fact = _learner_evidence_lines_fact(
+        [line for line in _jsonb_list(row[15]) if isinstance(line, dict)]
+    )
+    # SL-3: 支持線は事実文のみ（内部の構成要素の列挙・記帳者情報は出さない）。
+    support_fact_line = ""
+    if include_support_lines:
+        try:
+            support_lines = compute_support_lines(
+                session, target_type, target_id,
+                course_id=str(row[4] or ""), document_id=str(row[3] or ""),
+            )
+            if support_lines:
+                support_fact_line = str(support_lines.get("fact_line") or "")
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "learner support lines computation failed for %s/%s", target_type, target_id,
+                exc_info=True,
+            )
+            support_fact_line = ""
+    return {
+        "target_id": target_id,
+        "target_type": target_type,
+        "verification_status": status,
+        "verification_status_label": _VERIFICATION_STATUS_LABELS.get(status, status),
+        "scopes": learner_scopes,
+        "scope_coverage": scope_coverage_level(len(scopes)),
+        "fact_line": _learner_fact_line(target_type, status, scopes),
+        "falsification_conditions": falsification_conditions,
+        **({"support_fact_line": support_fact_line} if support_fact_line else {}),
+        **({"evidence_lines_fact": evidence_lines_fact} if evidence_lines_fact else {}),
+    }
+
+
 @learning_router.get("/courses/{course_id}/ledger/{target_type}/{target_id}")
 def get_learner_ledger_line(
     course_id: str,
@@ -2240,45 +2686,10 @@ def get_learner_ledger_line(
         raise HTTPException(status_code=404, detail="Course not found")
     session = _pg_session()
     try:
-        row = _fetch_ledger_row(session, target_type, target_id)
-        if row is None:
+        line = learner_ledger_line(session, target_type, target_id)
+        if line is None:
             raise HTTPException(status_code=404, detail="Ledger entry not found")
-        status = str(row[5] or "unknown")
-        scopes = [_scope_out(s) for s in _jsonb_list(row[6]) if isinstance(s, dict)]
-        # 学習者へは記帳者 ID を出さない（帰属は教員向け表示のみ）
-        learner_scopes = [
-            {k: v for k, v in scope.items() if k in ("condition", "domain", "precision", "system")}
-            for scope in scopes
-        ]
-        falsification_conditions = _learner_falsification_conditions(
-            [c for c in _jsonb_list(row[13]) if isinstance(c, dict)]
-        )
-        # SL-3: 支持線は事実文のみ（内部の構成要素の列挙・記帳者情報は出さない）。
-        support_fact_line = ""
-        try:
-            support_lines = compute_support_lines(
-                session, target_type, target_id,
-                course_id=str(row[4] or ""), document_id=str(row[3] or ""),
-            )
-            if support_lines:
-                support_fact_line = str(support_lines.get("fact_line") or "")
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "learner support lines computation failed for %s/%s", target_type, target_id,
-                exc_info=True,
-            )
-            support_fact_line = ""
-        return {
-            "target_id": target_id,
-            "target_type": target_type,
-            "verification_status": status,
-            "verification_status_label": _VERIFICATION_STATUS_LABELS.get(status, status),
-            "scopes": learner_scopes,
-            "scope_coverage": scope_coverage_level(len(scopes)),
-            "fact_line": _learner_fact_line(target_type, status, scopes),
-            "falsification_conditions": falsification_conditions,
-            **({"support_fact_line": support_fact_line} if support_fact_line else {}),
-        }
+        return line
     finally:
         session.close()
 
@@ -2288,13 +2699,20 @@ def get_learner_open_assumptions(
     course_id: str,
     current_user: dict = Depends(_get_current_user),
 ) -> dict:
-    """未検証合意リストの閲覧（読み取り専用）。疑義者の氏名は含めない。"""
+    """未検証合意リストの閲覧（読み取り専用）。疑義者の氏名は含めない。
+
+    D層「煽らない・数値を見せない」: ``compile_open_assumptions`` は教員向けに
+    ``dependent_count``（下流到達数の生値）を載せるため、学習者へ返す前に
+    ゼミ前ブリーフ（SB2）と同じ語彙の安全網で落とす。段階は既に
+    ``load_level`` / ``scope_coverage`` / 各事実文が持っており、生数値は不要。
+    教員向けルート（``/api/admin/doubt/courses/{id}/open-assumptions``）は不変。
+    """
     course = get_accessible_course_data(str(current_user.get("id")), course_id)
     if course is None:
         raise HTTPException(status_code=404, detail="Course not found")
     session = _pg_session()
     try:
         items = compile_open_assumptions(session, course_id, include_challenger_names=False)
-        return {"course_id": course_id, "items": items}
+        return strip_learner_numeric_keys({"course_id": course_id, "items": items})
     finally:
         session.close()

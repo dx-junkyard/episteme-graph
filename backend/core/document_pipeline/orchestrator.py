@@ -18,6 +18,7 @@ artifact/resume/report/finish_target_stage の呼び出し順序・payload・非
 """
 from __future__ import annotations
 
+import copy
 import inspect
 import logging
 import os
@@ -34,6 +35,10 @@ from core.llm_policy import (
 )
 from core.llm_usage.context import bind_usage_context, set_current_feature
 from core.llm_worker.cost_gate import CostGate, today_str
+from episteme_graph.agents.coverage_report import (
+    COVERAGE_REPORT_KEY,
+    build_coverage_report,
+)
 
 from .chunker import build_source_chunks
 from .dsl_text import dsl_result_to_search_text
@@ -48,6 +53,8 @@ from .persistence import (
     persist_components,
     persist_document_embedding,
     persist_equation_previews_to_chunks,
+    persist_knowledge_objects,
+    persist_learning_units,
     persist_qualified_claims,
     persist_source_chunks,
     upsert_analysis_run,
@@ -154,6 +161,57 @@ def _stage_artifact_indicates_llm_skip(artifact_value: Any) -> bool:
     return False
 
 
+def _attach_coverage(
+    payload: dict,
+    *,
+    population: int,
+    processed: int,
+    reasons: list[str] | tuple[str, ...] | None = None,
+    unit: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict:
+    """ステージの done payload に「取りこぼしの量」報告を additive で足す（P0-10 / F-18）。
+
+    形式の正本は ``episteme_graph.agents.coverage_report.build_coverage_report``。
+    orchestrator 内で ``coverage`` キーを組み立てるのは**この関数だけ**にして、
+    ステージごとに自前 dict を書かない（ガードレール
+    ``backend/tests/test_pipeline_coverage_report.py`` が構造的に固定する）。
+
+    既存キー（``truncated_count`` / ``skipped_by_limit`` / ``unplaced_domains`` 等）は
+    一切変更せず、読み手が段階的に移行できるようにする（後方互換）。
+
+    呼び出し規約:
+    - **resume で artifact を再利用したステージには足さない**（前回 run の母集合を
+      今回の報告として捏造しない）。
+    - 母集合・処理数が事実として導けないステージには足さない（でっち上げない）。
+    - 報告の組み立てで例外を出してステージを落とさない（fail-soft）。
+    """
+    try:
+        payload[COVERAGE_REPORT_KEY] = build_coverage_report(
+            population=population,
+            processed=processed,
+            reasons=reasons,
+            unit=unit,
+            details=details,
+        )
+    except Exception:  # pragma: no cover - 防御的（報告でステージを止めない）
+        logger.warning("failed to build coverage report (non-fatal)", exc_info=True)
+    return payload
+
+
+def _blocks_of_type(structure: Any, block_type: str) -> list[Any]:
+    """``document_structure`` の blocks から指定 block_type だけを取り出す。
+
+    coverage の母集合（式ブロック数・caption ブロック数）を数えるためのごく薄い
+    ヘルパ。structure が無い / blocks を持たない場合は空リスト（fail-soft）。
+    """
+    blocks = getattr(structure, "blocks", None) or []
+    try:
+        return [b for b in blocks if getattr(b, "block_type", None) == block_type]
+    except Exception:  # pragma: no cover - 防御的
+        return []
+
+
 # contextual_explanation stage (hierarchical_context_explanation_design.md §5.1):
 # a single process-lifetime CostGate for the daily LLM-call budget, matching
 # figure_reanalysis.py's "CostGate + resolve_model only" partial-adoption of the
@@ -201,6 +259,10 @@ PIPELINE_STAGES = [
     "blueprint",
     "export_validation",
     "persist_claims_components_graph",
+    # 概念レジストリ P3-6（concept_registry_design.md §6.2）。永続化の**後**に置く
+    # ことで、同一性候補は確定済みの component 行・stable_key を材料にできる。
+    # 決定論・非LLM・非致命。
+    "identity_candidates",
     "completed",
 ]
 
@@ -405,8 +467,13 @@ def run_document_pipeline(
         document_id: documents.id。後続で chunks/claims 等の document_id に使う。
         material_id: 教材 ID（chunks.material_id）。
         filename: 元ファイル名（任意・ログ用）。
-        cartridge_id: 使用カートリッジ。指定なしなら EPISTEME_DEFAULT_CARTRIDGE_ID
-            から決定。
+        cartridge_id: 使用カートリッジ（分野）。解決順は **引数 > env > None**。
+            ``None``（未指定）なら ``EPISTEME_DEFAULT_CARTRIDGE_ID`` を見て、それも
+            空なら ``None`` のまま = **分野中立の解析**（A層 agent は cartridge_id が
+            ``None`` のとき分野語彙・分野検証を読まずに単独動作する）。空文字は
+            「教員が明示的に『指定しない』を選んだ」の意味で、env へフォールバック
+            **しない**（入口の正直さ: 画面が「指定しない」と言っているのに env の
+            分野が黙って効く、を作らない）。
         course_id: 任意。指定された場合のみ component graph を course にも紐づける。
         user_id: 任意。この実行を起こした教員の users.id。U層の帰属（``usage_context``）に
             bind され、M層のモデル解決（``core.llm_policy.resolve_scene_model`` の
@@ -423,7 +490,12 @@ def run_document_pipeline(
         PipelineStageError: 任意 stage で復旧不能な失敗が起きた場合。
     """
     if cartridge_id is None:
-        cartridge_id = os.getenv("EPISTEME_DEFAULT_CARTRIDGE_ID") or None
+        # 未指定: env（空なら None = 分野中立）。既定の出荷値は空
+        # （.env.example: 「素粒子物理の検証用。他分野・混在コーパスでは空にする」）。
+        cartridge_id = (os.getenv("EPISTEME_DEFAULT_CARTRIDGE_ID") or "").strip() or None
+    else:
+        # 明示指定: 空文字は「指定しない」。env へは戻さない。
+        cartridge_id = cartridge_id.strip() or None
 
     if target_stage is not None and target_stage not in PIPELINE_STAGES:
         raise ValueError(f"unknown pipeline stage: {target_stage}")
@@ -516,6 +588,10 @@ def run_document_pipeline(
         course_id=str(course_id) if course_id else None,
     )
 
+    # restart（start_stage 指定）で artifact が欠けていたため live 実行で補完した
+    # earlier stage 名（追加順）。note_backfilled_stage が積む。
+    backfilled_stages: list[str] = []
+
     def report(stage: str, payload: dict | None = None, *, run_status: str = "running") -> None:
         payload = payload or {}
         if progress_callback:
@@ -561,7 +637,12 @@ def run_document_pipeline(
         report(stage, done_payload, run_status=run_status)
 
     def save_artifact(stage: str, value: Any) -> None:
-        previous_artifacts[stage] = _to_plain_data(value)
+        # in-memory の全 artifact は resume / should_use_artifact のために保つが、
+        # DB へ渡すのは **その1ステージだけ**（artifact は 1 run × 1 stage = 1 行の
+        # 生成ログ。knowledge_objects_design.md §6 / KO6。従来は全 artifact を毎回
+        # 書き戻しており、run の stage_outputs が単調増加していた = S-9）。
+        plain = _to_plain_data(value)
+        previous_artifacts[stage] = plain
         upsert_analysis_run(
             run_id=run_id,
             document_id=document_id,
@@ -569,21 +650,66 @@ def run_document_pipeline(
             cartridge_id=cartridge_id,
             status="running",
             current_stage=stage,
-            stage_outputs={ARTIFACTS_KEY: previous_artifacts},
+            stage_outputs={ARTIFACTS_KEY: {stage: plain}},
         )
 
     def artifact(stage: str) -> Any | None:
         return previous_artifacts.get(stage)
+
+    def note_backfilled_stage(stage: str) -> None:
+        """restart 時に artifact が欠けていた earlier stage を記録する。
+
+        正直さの原則: 「前回 run に無かったので今回 live 実行で補完した」ことを
+        ログと run の ``stage_outputs.resume.backfilled_stages`` に残す（無音で
+        埋めない）。``stage_outputs`` は upsert 側で top-level の shallow merge
+        （``||``）なので、``resume`` キーは丸ごと置き換わる。既存の
+        ``{"resumed": True}`` も併せて書き直すことで情報を落とさない。
+        """
+        if stage in backfilled_stages:
+            return
+        backfilled_stages.append(stage)
+        logger.warning(
+            "restart 対象より前のステージ '%s' の artifact が無いため live 実行で補完する"
+            " (document=%s material=%s start_stage=%s)",
+            stage, document_id, material_id, start_stage,
+        )
+        try:
+            upsert_analysis_run(
+                run_id=run_id,
+                document_id=document_id,
+                material_id=material_id,
+                cartridge_id=cartridge_id,
+                status="running",
+                current_stage=stage,
+                stage_outputs={
+                    "resume": {
+                        "resumed": True,
+                        "backfilled_stages": list(backfilled_stages),
+                    }
+                },
+            )
+        except Exception:
+            logger.warning(
+                "failed to record backfilled stage '%s' on run %s (non-fatal)",
+                stage, run_id, exc_info=True,
+            )
 
     def should_use_artifact(stage: str) -> bool:
         has_artifact = artifact(stage) is not None
         if start_index is not None:
             if stage_order[stage] < start_index:
                 if not has_artifact:
-                    raise PipelineStageError(
-                        stage,
-                        f"required artifact '{stage}' is missing for restart from '{start_stage}'",
-                    )
+                    # ステージは後から追加される（例: figure_image_extraction は
+                    # 2026-07 追加）ため、それ以前に解析された run には当該
+                    # artifact が構造的に存在しない。ここで hard error にすると
+                    # 「新ステージが増えるたびに古い run が restart 不能になる」
+                    # ので、live 実行へフォールバックする（各ステージ本体は
+                    # live 経路を持ち、ctx.pdf_bytes は常に供給される）。
+                    # 欠落＝そのステージ追加前の run なので、再利用する後続
+                    # artifact が当該ステージ出力を参照していることはなく、
+                    # live 補完は additive で整合する。
+                    note_backfilled_stage(stage)
+                    return False
                 return True
             return False
         if target_stage is not None and target_stage != stage and not has_artifact:
@@ -829,7 +955,8 @@ def _stage_figure_image_extraction(ctx: PipelineContext) -> bool:
     # ため直後に置く。チェックボックス (options.analyze_images) に関係なく常時
     # 実行する（決定 0-4-2）。非致命: 失敗しても pipeline は継続する。
     figure_extraction_artifact = ctx.artifact("figure_image_extraction")
-    if ctx.should_use_artifact("figure_image_extraction"):
+    resumed_from_artifact = ctx.should_use_artifact("figure_image_extraction")
+    if resumed_from_artifact:
         ctx.figure_extraction_summary = figure_extraction_artifact or {}
         logger.info(
             "Resuming document pipeline: loaded figure_image_extraction artifact for document %s",
@@ -857,8 +984,23 @@ def _stage_figure_image_extraction(ctx: PipelineContext) -> bool:
                 )
                 ctx.figure_extraction_summary = {"status": "completed", "error": str(exc)}
         ctx.save_artifact("figure_image_extraction", ctx.figure_extraction_summary)
-    ctx.report_done("figure_image_extraction", dict(ctx.figure_extraction_summary or {}))
-    return ctx.finish_target_stage("figure_image_extraction", dict(ctx.figure_extraction_summary or {}))
+    figure_done_payload = dict(ctx.figure_extraction_summary or {})
+    if not resumed_from_artifact and isinstance(figure_done_payload.get("figures"), int):
+        # P0-10: 母集合 = 抽出を試みた図（caption 対応 + 残余 embedded）、処理数 =
+        # そのうち保存まで通った図。図単位の失敗（`status='failed'` 行）だけが
+        # 取りこぼしで、PDF でない / PyMuPDF 不在で抽出自体が走らなかった run は
+        # `figures` キーを持たないので報告しない（母集合を推測しない）。
+        attempted = int(figure_done_payload.get("figures") or 0)
+        failed = int(figure_done_payload.get("failed") or 0)
+        _attach_coverage(
+            figure_done_payload,
+            population=attempted,
+            processed=max(attempted - failed, 0),
+            reasons=["failed"],
+            unit="figures",
+        )
+    ctx.report_done("figure_image_extraction", figure_done_payload)
+    return ctx.finish_target_stage("figure_image_extraction", figure_done_payload)
 
 
 def _stage_source_chunking(ctx: PipelineContext) -> bool:
@@ -975,7 +1117,8 @@ def _stage_claim_qualification(ctx: PipelineContext) -> bool:
 def _stage_equation_semantics(ctx: PipelineContext) -> bool:
     # ── Stage 8: equation_semantics ────────────────────────────────────
     equations_artifact = ctx.artifact("equation_semantics")
-    if ctx.should_use_artifact("equation_semantics"):
+    resumed_from_artifact = ctx.should_use_artifact("equation_semantics")
+    if resumed_from_artifact:
         ctx.equations = _from_agent_dict("equation_semantics", equations_artifact)
         logger.info("Resuming document pipeline: loaded equation_semantics artifact for document %s", ctx.document_id)
     else:
@@ -999,8 +1142,36 @@ def _stage_equation_semantics(ctx: PipelineContext) -> bool:
                 ctx.document_id,
                 exc_info=True,
             )
-    ctx.report_done("equation_semantics", {"equations": len(getattr(ctx.equations, "equations", []) or [])})
-    return ctx.finish_target_stage("equation_semantics", {"equations": len(getattr(ctx.equations, "equations", []) or [])})
+    equation_done_payload: dict[str, Any] = {
+        "equations": len(getattr(ctx.equations, "equations", []) or []),
+    }
+    if not resumed_from_artifact:
+        # P0-10: 母集合 = document_structure の式ブロック、処理数 = そのうち
+        # 候補化まで到達したブロック（EquationSemanticsInputBuilder は式ブロックを
+        # 先頭から順に候補化し `max_equations`（既定 64）で打ち切る）。上限に当たった
+        # 論文では「原本 176 式 → records 64」の切断がここまでどこにも現れなかった
+        # （F-18 / 定量サマリ）。inline math 由来の候補は式ブロック母集合の外なので
+        # 数えない（母集合と処理数の単位を混ぜない）。
+        equation_block_ids = {
+            str(getattr(b, "block_id", "") or "")
+            for b in _blocks_of_type(ctx.structure, "equation_block")
+        }
+        equation_block_ids.discard("")
+        covered_block_ids: set[str] = set()
+        for candidate in getattr(ctx.equations, "equation_candidates", []) or []:
+            location = getattr(candidate, "source_location", None) or {}
+            block_id = str((location.get("block_id") if isinstance(location, dict) else "") or "")
+            if block_id in equation_block_ids:
+                covered_block_ids.add(block_id)
+        _attach_coverage(
+            equation_done_payload,
+            population=len(equation_block_ids),
+            processed=len(covered_block_ids),
+            reasons=["max_equations"],
+            unit="equation_blocks",
+        )
+    ctx.report_done("equation_semantics", equation_done_payload)
+    return ctx.finish_target_stage("equation_semantics", equation_done_payload)
 
 
 def _stage_evidence_registry(ctx: PipelineContext) -> bool:
@@ -1057,6 +1228,32 @@ def _stage_evidence_registry(ctx: PipelineContext) -> bool:
     return ctx.finish_target_stage("evidence_registry", {"records": len(getattr(ctx.evidence, "records", []) or []), "total": 1, "processed": 1})
 
 
+def _hook_equation_evidence_backfill(ctx: PipelineContext) -> bool:
+    """Between evidence_registry and claim_object_builder: resume に関係なく毎回実行。
+
+    ── Stage 8b.1: equation ⇄ evidence back-fill ────────────────────────
+    式ブロックの逐語 evidence を式レコードへ決定論的に還流させる
+    （``_backfill_equation_evidence_refs`` の docstring が根本原因の記録）。
+    非致命: 失敗しても以降のステージはそのまま進む（evidence 未結線の従来動作）。
+    """
+    try:
+        report = _backfill_equation_evidence_refs(
+            equations=ctx.equations, evidence=ctx.evidence,
+        )
+        if report["equations_changed"]:
+            ctx.save_artifact("equation_semantics", ctx.equations)
+            logger.info(
+                "Back-filled equation evidence refs for document %s: equations=%d added=%d",
+                ctx.document_id, report["equations_changed"], report["refs_added"],
+            )
+    except Exception:
+        logger.warning(
+            "equation evidence back-fill failed (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
+    return False
+
+
 def _stage_claim_object_builder(ctx: PipelineContext) -> bool:
     # ── Stage 8c: claim_object_builder (deterministic claims.json) ─────
     claim_object_artifact = ctx.artifact("claim_object_builder")
@@ -1065,6 +1262,13 @@ def _stage_claim_object_builder(ctx: PipelineContext) -> bool:
         logger.info("Resuming document pipeline: loaded claim_object_builder artifact for document %s", ctx.document_id)
     else:
         ctx.report_start("claim_object_builder", total=1, unit="builder")
+        # 主張の概念接地 前段（claim_concept_grounding_design.md §5・案 B）:
+        # builder は概念を自分で決めず外から渡された辞書で本文を照合する設計なので、
+        # レジストリの確定ラベル + カートリッジ別名から辞書を組み、既存の注入口
+        # ``concept_resolver`` / ``cartridge_ontology`` へ渡す（DSL はまだ無いので
+        # ①（DSL ノード名）は後段フックが足す）。辞書が空なら **None のまま** =
+        # 従来動作。A層のコードは触らない（CG1）。
+        concept_resolver, cartridge_ontology = _claim_concept_inputs(ctx)
         try:
             ctx.claim_objects = _build_claim_objects(
                 agent_classes=ctx.agent_classes,
@@ -1074,6 +1278,8 @@ def _stage_claim_object_builder(ctx: PipelineContext) -> bool:
                 equations=ctx.equations,
                 evidence=ctx.evidence,
                 document_structure=ctx.structure,
+                concept_resolver=concept_resolver,
+                cartridge_ontology=cartridge_ontology,
             )
         except Exception as exc:
             logger.exception(
@@ -1242,6 +1448,27 @@ def _stage_derivation_chain(ctx: PipelineContext) -> bool:
             "derivation claim-ref canonicalization failed (non-fatal): document=%s",
             ctx.document_id, exc_info=True,
         )
+    # Defensive evidence back-fill: the agent copies each step's evidence from the
+    # equation record, so a chain built before the equation ⇄ evidence back-fill
+    # (Stage 8b.1) — i.e. any resumed derivation_chain artifact — still carries
+    # empty ``source_evidence_ids`` and produces graph nodes flagged
+    # ``missing_evidence_link``. Deterministic, additive, idempotent, non-fatal.
+    try:
+        evidence_backfill = _backfill_derivation_evidence_refs(
+            derivations=ctx.derivations, equations=ctx.equations,
+        )
+        if evidence_backfill["steps_changed"]:
+            ctx.save_artifact("derivation_chain", ctx.derivations)
+            logger.info(
+                "Back-filled derivation step evidence refs for document %s: steps=%d added=%d",
+                ctx.document_id, evidence_backfill["steps_changed"],
+                evidence_backfill["refs_added"],
+            )
+    except Exception:
+        logger.warning(
+            "derivation evidence back-fill failed (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
     ctx.report_done("derivation_chain", {
         "chains": len(getattr(ctx.derivations, "chains", []) or []),
         "total": 1,
@@ -1259,6 +1486,7 @@ def _hook_equation_claim_synthesis(ctx: PipelineContext) -> bool:
     # propositions. Additive and non-fatal: synthesised claims are appended to
     # the claim_object_builder artifact (and to claim_objects so downstream
     # component assembly can cite them).
+    synthesis_ok = False
     try:
         synthesized = _synthesize_equation_claims(
             equations=ctx.equations, derivations=ctx.derivations, claim_objects=ctx.claim_objects,
@@ -1270,9 +1498,48 @@ def _hook_equation_claim_synthesis(ctx: PipelineContext) -> bool:
                 "Synthesised %d equation/derivation-backed claims for document %s",
                 len(synthesized), ctx.document_id,
             )
+        synthesis_ok = True
     except Exception:
         logger.warning(
             "equation claim synthesis failed (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
+
+    # ── Stage 8d.2: derivation step ⇄ claim back-fill ────────────────
+    # derivation_chain runs *before* the synthesis above, so any claim that only
+    # exists as an equation-derived synth claim can never be linked to a step by
+    # the agent itself — on a document whose prose claims carry no `equation_ids`
+    # that leaves every step with an empty `required_claim_ids` and the
+    # theory-operation graph with claim-less nodes. Re-link the already-built
+    # chains against the final claim set here (idempotent: a second pass rewrites
+    # nothing and saves no artifact). This restores the *claim link*, not strong
+    # backing: synth claims are `equation_backed`, so `missing_atomic_claim`
+    # stays on the node by design (#306).
+    #
+    # Gated on `synthesis_ok`: when the synthesis above raised, the claim set is
+    # not the final one, so re-linking against it could drop live refs and save a
+    # damaged derivation_chain artifact. In that case leave the artifact alone.
+    if not synthesis_ok:
+        logger.warning(
+            "skipping derivation claim back-fill because claim synthesis failed: document=%s",
+            ctx.document_id,
+        )
+        return False
+    try:
+        backfill = _backfill_derivation_claim_refs(
+            derivations=ctx.derivations, claim_objects=ctx.claim_objects,
+        )
+        if backfill["steps_changed"]:
+            ctx.save_artifact("derivation_chain", ctx.derivations)
+            logger.info(
+                "Back-filled derivation step claim refs for document %s: "
+                "steps=%d added=%d dropped=%d",
+                ctx.document_id, backfill["steps_changed"],
+                backfill["refs_added"], backfill["refs_dropped"],
+            )
+    except Exception:
+        logger.warning(
+            "derivation claim back-fill failed (non-fatal): document=%s",
             ctx.document_id, exc_info=True,
         )
     return False
@@ -1281,7 +1548,8 @@ def _hook_equation_claim_synthesis(ctx: PipelineContext) -> bool:
 def _stage_figure_table_semantics(ctx: PipelineContext) -> bool:
     # ── Stage 8e: figure_table_semantics (caption-first deterministic) ─
     fig_tbl_artifact = ctx.artifact("figure_table_semantics")
-    if ctx.should_use_artifact("figure_table_semantics"):
+    resumed_from_artifact = ctx.should_use_artifact("figure_table_semantics")
+    if resumed_from_artifact:
         ctx.fig_tbl = _from_agent_dict("figure_table_semantics", fig_tbl_artifact)
         logger.info("Resuming document pipeline: loaded figure_table_semantics artifact for document %s", ctx.document_id)
     else:
@@ -1305,13 +1573,33 @@ def _stage_figure_table_semantics(ctx: PipelineContext) -> bool:
             )
             ctx.fig_tbl = _empty_figure_table_result(ctx.document_id, ctx.cartridge_id)
         ctx.save_artifact("figure_table_semantics", ctx.fig_tbl)
-    ctx.report_done("figure_table_semantics", {
+    fig_tbl_done_payload: dict[str, Any] = {
         "figures": len(getattr(ctx.fig_tbl, "figures", []) or []),
         "tables": len(getattr(ctx.fig_tbl, "tables", []) or []),
         "total": 1,
         "processed": 1,
-    })
-    return ctx.finish_target_stage("figure_table_semantics", {"figures": len(getattr(ctx.fig_tbl, "figures", []) or []), "tables": len(getattr(ctx.fig_tbl, "tables", []) or []), "total": 1, "processed": 1})
+    }
+    if not resumed_from_artifact:
+        # P0-10: caption-first の決定論ステージなので、母集合 = document_structure の
+        # figure_caption / table_caption ブロック、処理数 = 生成した figure / table
+        # レコード（agent は caption ブロック1つから1レコードを作る）。0/0 は
+        # 「caption ブロックが構造化されなかった」ことを上流へ指し示す正直な報告で、
+        # 図0件の論文でこの事実が読めるようにする（F-18 の定量サマリ）。
+        caption_population = (
+            len(_blocks_of_type(ctx.structure, "figure_caption"))
+            + len(_blocks_of_type(ctx.structure, "table_caption"))
+        )
+        _attach_coverage(
+            fig_tbl_done_payload,
+            population=caption_population,
+            processed=(
+                fig_tbl_done_payload["figures"] + fig_tbl_done_payload["tables"]
+            ),
+            reasons=["caption_unresolved"],
+            unit="captions",
+        )
+    ctx.report_done("figure_table_semantics", fig_tbl_done_payload)
+    return ctx.finish_target_stage("figure_table_semantics", fig_tbl_done_payload)
 
 
 def _stage_apparatus_semantics(ctx: PipelineContext) -> bool:
@@ -1340,6 +1628,24 @@ def _stage_apparatus_semantics(ctx: PipelineContext) -> bool:
         if not ctx.effective_options.get("analyze_images"):
             ctx.apparatus_result = None
             apparatus_done_payload = {"status": "completed", "skipped_by_option": True}
+            # P0-10: オプション off は「図が無い」ではなく「見ていない」。母集合は
+            # figure_image_extraction が保存できた図（試行 - 失敗）から導き、処理数 0 と
+            # 理由 `skipped_by_option` を残す。抽出が走らなかった run（`figures` キー
+            # 不在）は母集合を推測せず報告しない。
+            figure_summary = ctx.figure_extraction_summary or {}
+            if isinstance(figure_summary.get("figures"), int):
+                extracted = max(
+                    int(figure_summary.get("figures") or 0)
+                    - int(figure_summary.get("failed") or 0),
+                    0,
+                )
+                _attach_coverage(
+                    apparatus_done_payload,
+                    population=extracted,
+                    processed=0,
+                    reasons=["skipped_by_option"],
+                    unit="figures",
+                )
             ctx.save_artifact("apparatus_semantics", {"skipped_by_option": True})
         else:
             try:
@@ -1423,6 +1729,56 @@ def _stage_dsl_linking(ctx: PipelineContext) -> bool:
         "nodes": len(ctx.dsl.nodes), "edges": len(ctx.dsl.edges), "total": 1, "processed": 1,
     })
     return ctx.finish_target_stage("dsl_linking", {"nodes": len(ctx.dsl.nodes), "edges": len(ctx.dsl.edges), "total": 1, "processed": 1})
+
+
+_CLAIM_CONCEPT_GROUNDING_ARTIFACT = "claim_concept_grounding"
+
+
+def _hook_claim_concept_grounding(ctx: PipelineContext) -> bool:
+    """Between dsl_linking and dsl_embedding: resume に関係なく毎回実行。
+
+    主張の概念接地（``claim_concept_grounding_design.md`` §5・案 B の後段 + 案 A）。
+    ``dsl_linking`` の直後に置くのは、DSL ノード名を辞書に足して本文を照合し（①）、
+    ``source_refs.claim_ids`` の直接参照からも概念を付ける（①'）ため。決定論・
+    LLM 0 回・embedding 0 回（CG2）。``concept_assignment_status`` は触らない（CG3）。
+
+    **生成ログ（artifact）は書き換えない（KO6）**: 接地の結果は専用キー
+    ``claim_concept_grounding`` にだけ保存し、``claim_object_builder`` artifact は
+    ``claim_object_builder`` ステージが書いたまま残す（「どの agent が何を出したか」の
+    記録に後段の加工を混ぜない）。知識行への反映は persist 側が同 artifact を join して
+    ``theory_claims.concepts`` に additive マージする（CG §6 = 既存経路）。in-memory の
+    ``ctx.claim_objects`` は従来どおり接地済みの値を持つ（本フックは resume でも毎回走る
+    ため、新規実行と resume で後段ステージが見る値は一致する）。
+
+    非致命: 失敗しても以降のステージはそのまま進む（概念が増えないだけ）。
+    """
+    try:
+        from core.library import claim_concept_grounding as _grounding
+        from core.library import concept_dictionary as _concept_dictionary
+
+        dictionary = _concept_dictionary.build_concept_dictionary(
+            cartridge_id=ctx.cartridge_id, dsl=ctx.dsl,
+        )
+        result = _grounding.ground_claims(ctx.claim_objects, ctx.dsl, dictionary)
+        payload = result.to_dict()
+        _attach_coverage(
+            payload,
+            population=result.population,
+            processed=result.processed,
+            reasons=result.reasons,
+            unit="claims",
+        )
+        ctx.save_artifact(_CLAIM_CONCEPT_GROUNDING_ARTIFACT, payload)
+        logger.info(
+            "Grounded claim concepts for document %s: claims_changed=%d dictionary=%d",
+            ctx.document_id, result.claims_changed, len(dictionary),
+        )
+    except Exception:
+        logger.warning(
+            "claim concept grounding failed (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
+    return False
 
 
 def _stage_dsl_embedding(ctx: PipelineContext) -> bool:
@@ -1518,6 +1874,111 @@ def _stage_component_assembly(ctx: PipelineContext) -> bool:
     return ctx.finish_target_stage("component_assembly", component_done_payload)
 
 
+def _evidence_text_index(evidence: Any) -> dict[str, str]:
+    """``evidence_id -> evidence_text`` (built once per stage, never per claim).
+
+    Records with empty text are skipped so a blank duplicate cannot hide a later
+    record that actually carries the quote.
+    """
+    index: dict[str, str] = {}
+    for record in (getattr(evidence, "records", []) or []):
+        ev_id = str(getattr(record, "evidence_id", "") or "").strip()
+        if not ev_id or ev_id in index:
+            continue
+        text = str(getattr(record, "evidence_text", "") or "")
+        if not text.strip():
+            continue
+        index[ev_id] = text
+    return index
+
+
+# Only these ``ClaimObjectRecord.support_status`` values may carry evidence text
+# into the graph. The normalizer promotes *any* atomic claim with non-empty
+# ``evidence_text`` to ``source_backed``, which D層 ledger_builder in turn maps to
+# a learner-facing verification label — so a claim whose evidence link was judged
+# weak (``partially_source_backed``) or broken (``review_required``), or that is
+# not source-text backed at all (``derived`` / ``inferred`` / ``external`` /
+# ``unknown``), must not be able to reach that tier. A層 gates its own confirmed
+# tier on the same single status (``ClaimObjectBuilder._concept_assignment_status``).
+_STRONG_BACKING_SUPPORT_STATUSES = frozenset({"source_backed"})
+
+
+def _claim_may_back_strongly(claim: Any) -> bool:
+    """Whether this claim is allowed to supply ``evidence_text`` (strong backing)."""
+    from episteme_graph.agents.claim_object_builder.schema import normalize_atomicity
+
+    # A missing/blank support_status means the legacy artifact predates the field;
+    # ClaimObjectRecord's own default is source_backed, so keep that reading.
+    # Every other value has to be on the allowlist (fail-closed on unknown vocabulary).
+    status = str(getattr(claim, "support_status", "") or "").strip().lower() or "source_backed"
+    if status not in _STRONG_BACKING_SUPPORT_STATUSES:
+        return False
+    # Defence against legacy artifacts whose is_atomic contradicts atomicity
+    # (e.g. is_atomic=True alongside "non_atomic"): the stricter signal wins.
+    raw_atomicity = str(getattr(claim, "atomicity", "") or "").strip()
+    if raw_atomicity and normalize_atomicity(raw_atomicity) != "atomic":
+        return False
+    return True
+
+
+def _component_graph_claims(ctx: PipelineContext) -> list[dict[str, Any]]:
+    """Flatten claims for ComponentGraphAgent (Material 4 + atomic-claim backing).
+
+    ``ComponentGraphAgent._build_claim_index`` reads ``text`` / ``evidence_text`` /
+    ``is_atomic`` and the normalizer's ``_atomic_claim_ids`` only counts a claim as
+    strong (atomic) backing when ``is_atomic`` is not False **and** ``evidence_text``
+    is non-empty (issue #306 / #317). ``ClaimObjectRecord`` stores the evidence by
+    reference (``source_evidence_ids``), so the registry text has to be resolved here
+    — otherwise every node ends up with ``missing_atomic_claim`` and no node can ever
+    reach ``source_backed``.
+
+    Evidence text is only supplied for claims that may become strong backing
+    (see ``_claim_may_back_strongly``); every other claim is still forwarded with
+    its id / text / ``is_atomic`` but keeps an empty ``evidence_text``, so the node
+    stays on the cautious side with ``missing_atomic_claim``. Unresolvable evidence
+    likewise stays empty (no placeholder text).
+    """
+    evidence_texts = _evidence_text_index(getattr(ctx, "evidence", None))
+    flat_claims: list[dict[str, Any]] = []
+    eligible = 0
+    resolved = 0
+    for claim in (getattr(ctx.claim_objects, "claims", []) or []):
+        evidence_ids = [
+            ev_id for ev_id in
+            (str(raw or "").strip() for raw in (getattr(claim, "source_evidence_ids", []) or []))
+            if ev_id
+        ]
+        evidence_text = ""
+        if evidence_ids and _claim_may_back_strongly(claim):
+            eligible += 1
+            for ev_id in evidence_ids:
+                text = evidence_texts.get(ev_id, "")
+                if text.strip():
+                    evidence_text = text
+                    resolved += 1
+                    break
+        entry: dict[str, Any] = {
+            "claim_id": getattr(claim, "claim_id", ""),
+            "text": getattr(claim, "text", "") or "",
+            "evidence_text": evidence_text,
+        }
+        # ClaimObjectRecord has no `claim_level`; only the fields it really owns
+        # are forwarded (do not invent metadata the record does not carry).
+        # `atomicity` is not forwarded either — `_build_claim_index` never reads it.
+        is_atomic = getattr(claim, "is_atomic", None)
+        if is_atomic is not None:
+            entry["is_atomic"] = is_atomic
+        flat_claims.append(entry)
+    if eligible and not resolved:
+        logger.warning(
+            "component_graph claim enrichment resolved no evidence text: "
+            "document=%s material=%s claims=%d eligible=%d evidence_records=%d",
+            getattr(ctx, "document_id", None), getattr(ctx, "material_id", None),
+            len(flat_claims), eligible, len(evidence_texts),
+        )
+    return flat_claims
+
+
 def _stage_component_graph(ctx: PipelineContext) -> bool:
     # ── Stage 12a: component_graph (hybrid deterministic/LLM edge builder) ─
     component_graph_artifact = ctx.artifact("component_graph")
@@ -1528,11 +1989,8 @@ def _stage_component_graph(ctx: PipelineContext) -> bool:
         ctx.report_start("component_graph", total=1, unit="llm_call")
         try:
             cg_agent = _instantiate(ctx.agent_classes["ComponentGraphAgent"])
-            # Flatten claims for Material 4 context
-            flat_claims = [
-                {"claim_id": c.claim_id, "text": c.text}
-                for c in (getattr(ctx.claim_objects, "claims", []) or [])
-            ]
+            # Flatten claims for Material 4 context + atomic-claim backing
+            flat_claims = _component_graph_claims(ctx)
             # Flatten evidence records for Material 4 context
             flat_evidence = [
                 {"evidence_id": r.evidence_id, "evidence_text": r.evidence_text}
@@ -1934,13 +2392,40 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                 qualified_result=ctx.qualified,
                 chunk_index=ctx.chunk_index,
                 thesis_result=ctx.thesis,
+                # legacy_ids の一意化（知識構造の見直し 2026-09-12 P0-6 / S-3 / F-4）:
+                # claim object の ID を span 行に載せるため、対応付けに必要な
+                # claim_object_builder と evidence_registry の成果を渡す。
+                claim_objects=ctx.claim_objects,
+                evidence_registry=ctx.evidence,
+                # equation.equation_stable_keys の材料（純計算・DB を読まない）。
+                equations=ctx.equations,
+                # 主張の概念接地（CG §6）: 概念ごとの出所（source / entry_id /
+                # mapping_justification / canonical）を concepts の各要素へ additive に
+                # マージする材料。フックが走っていなければ None = 従来どおり。
+                concept_grounding=ctx.artifact(_CLAIM_CONCEPT_GROUNDING_ARTIFACT),
+                run_id=ctx.run_id,
             )
             claim_id_map: dict[str, str] = {}
             for saved in saved_claims:
-                for key in _claim_legacy_keys(saved):
+                # 突合キー（span_id / claim_{span} / block:span / agent claim ID）を
+                # すべて同じ UUID に向ける。知識オブジェクト層では claim object も
+                # 1行ずつ保存されるので、この map は **全 claim の agent ID** を覆う。
+                keys = set(_claim_legacy_keys(saved)) | set(saved.get("legacy_ids") or [])
+                for key in keys:
                     claim_id_map[key] = saved["claim_id"]
             ctx.result.claim_count = len(saved_claims)
             ctx.report_item("persist_claims_components_graph", 1, 3, "tables")
+
+            # equation / evidence / derivation step / symbol を専用テーブルへ
+            # （KO4: artifact にしか無い知識を残さない）。素材が無い種別だけスキップする。
+            knowledge_stats = persist_knowledge_objects(
+                document_id=ctx.document_id,
+                run_id=ctx.run_id,
+                equations=ctx.equations,
+                evidence_registry=ctx.evidence,
+                derivations=ctx.derivations,
+                symbol_registry=ctx.symbol_registry,
+            )
 
             id_map: dict[str, str] = {}
             if ctx.skip_component_persist:
@@ -1954,8 +2439,43 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                     component_result=ctx.component_result,
                     course_id=ctx.course_id,
                     claim_id_map=claim_id_map,
+                    # stable_key の材料（出典 block 集合）の解決に使う。
+                    evidence_registry=ctx.evidence,
+                    run_id=ctx.run_id,
                 )
             ctx.report_item("persist_claims_components_graph", 2, 3, "tables")
+
+            # 学ぶ単位（P2-1）。component の id_map が要るので components の**後**に呼ぶ。
+            # components をスキップした run でも単位そのものは保存する（原案・章立て・
+            # 中心命題・図は component の成否と独立に読める）。
+            #
+            # 派生表なので失敗しても run 全体を failed にしない（P2-R7）: claims /
+            # components は既に別トランザクションで commit 済みで、それを「解析失敗」に
+            # 見せると教員が再解析を回し、直前に確定した review_status まで巻き込む。
+            # 失敗は ``skipped_kinds`` と同じ作法で artifact に正直に残す。
+            try:
+                knowledge_stats["learning_units"] = persist_learning_units(
+                    document_id=ctx.document_id,
+                    run_id=ctx.run_id,
+                    skeleton=ctx.skeleton,
+                    thesis=ctx.thesis,
+                    component_result=ctx.component_result,
+                    dsl=ctx.dsl,
+                    figures=ctx.fig_tbl,
+                    claim_id_map=claim_id_map,
+                    component_id_map=id_map,
+                    evidence_registry=ctx.evidence,
+                )
+            except Exception as exc:  # noqa: BLE001 - 派生表の失敗で run を落とさない
+                logger.warning(
+                    "learning_units persist failed (non-fatal): document=%s error=%s",
+                    ctx.document_id, exc, exc_info=True,
+                )
+                knowledge_stats["learning_units"] = {
+                    "units": 0,
+                    "failed": True,
+                    "error": str(exc),
+                }
 
             if ctx.skip_graph_persist or ctx.skip_component_persist:
                 logger.warning(
@@ -1982,6 +2502,7 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                     component_graph_result=ctx.component_graph_result,
                     claim_id_map=claim_id_map,
                     narrative_result=ctx.narrative,
+                    run_id=ctx.run_id,
                 )
             ctx.save_artifact("persist_claims_components_graph", {
                 "claims": ctx.result.claim_count,
@@ -1989,6 +2510,8 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                 "graph_skipped": ctx.skip_graph_persist or ctx.skip_component_persist,
                 "components_skipped": ctx.skip_component_persist,
                 "degraded_stages": ctx.degraded_stages,
+                # 知識オブジェクト（式・根拠・導出・記号）の保存件数（KO4）。
+                "knowledge_objects": knowledge_stats,
             })
         except Exception as exc:
             logger.exception("persist_claims_components_graph stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
@@ -2004,6 +2527,71 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
     return ctx.finish_target_stage("persist_claims_components_graph", {"claims": ctx.result.claim_count, "components": ctx.result.component_count, "total": 3, "processed": 3})
 
 
+def _stage_identity_candidates(ctx: PipelineContext) -> bool:
+    # ── Stage 30: identity_candidates (concept_registry_design.md §6.2).
+    # Registered at the very end, after persist_claims_components_graph: the
+    # component rows / stable_keys / knowledge_symbols must already exist before
+    # we can propose "this component is the same concept as that one". The stage
+    # is deterministic (no LLM, no embedding calls — it reads stored vectors) and
+    # non-fatal: a failure here never invalidates the analysis run, and every
+    # candidate it writes is `candidate` for a teacher to confirm (KR2).
+    identity_artifact = ctx.artifact("identity_candidates")
+    if ctx.should_use_artifact("identity_candidates"):
+        identity_payload = dict(identity_artifact or {})
+        logger.info(
+            "Resuming document pipeline: loaded identity_candidates artifact for document %s",
+            ctx.document_id,
+        )
+    else:
+        ctx.report_start("identity_candidates", total=1, unit="builder")
+        try:
+            from core.library.identity_candidates import run_identity_candidates
+
+            identity_payload = run_identity_candidates(
+                document_id=ctx.document_id, run_id=ctx.run_id
+            )
+            identity_payload.setdefault("status", "completed")
+        except Exception as exc:
+            logger.warning(
+                "identity_candidates stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc, exc_info=True,
+            )
+            identity_payload = {"status": "completed", "error": str(exc)}
+        ctx.save_artifact("identity_candidates", identity_payload)
+    ctx.report_done("identity_candidates", dict(identity_payload))
+    return ctx.finish_target_stage("identity_candidates", dict(identity_payload))
+
+
+def _reference_health_snapshot(document_id: str) -> dict:
+    """参照の健全性の検査時点の事実（知識の転用層 P4-3 / §6）。
+
+    **新しいステージにはしない**（``_PIPELINE_STEPS`` を増やさない）。完了記録の
+    直前に走る best-effort の後処理で、失敗しても「未確認」という事実を残すだけ
+    （KT5: 解決済みフラグではない）。
+    """
+    from core.postgres import get_session as _pg_session
+    from core.reference_health import check_document_references, unchecked_result
+
+    session = None
+    try:
+        session = _pg_session()
+        return check_document_references(session, document_id)
+    except Exception:  # noqa: BLE001 — 検査は pipeline を止めない
+        logger.warning(
+            "reference health check skipped for document=%s", document_id, exc_info=True
+        )
+        try:
+            return unchecked_result()
+        except Exception:  # noqa: BLE001
+            return {"status": "unchecked", "facts": [], "details": {}}
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _stage_completed(ctx: PipelineContext) -> None:
     # ── Stage 14: completed ────────────────────────────────────────────
     upsert_analysis_run(
@@ -2013,13 +2601,18 @@ def _stage_completed(ctx: PipelineContext) -> None:
         cartridge_id=ctx.cartridge_id,
         status="completed",
         current_stage="completed",
-        stage_outputs={"completed": {
-            "chunks": ctx.result.chunk_count,
-            "claims": ctx.result.claim_count,
-            "components": ctx.result.component_count,
-            "dsl_nodes": ctx.result.dsl_node_count,
-            "dsl_edges": ctx.result.dsl_edge_count,
-        }},
+        stage_outputs={
+            "completed": {
+                "chunks": ctx.result.chunk_count,
+                "claims": ctx.result.claim_count,
+                "components": ctx.result.component_count,
+                "dsl_nodes": ctx.result.dsl_node_count,
+                "dsl_edges": ctx.result.dsl_edge_count,
+            },
+            # 参照の健全性（P4-3）。stage_outputs は top-level shallow merge なので
+            # 既存キーは壊さない。
+            "reference_health": _reference_health_snapshot(ctx.document_id),
+        },
     )
     # 初回 (initial) pipeline 完了時は、この Run を採用 (active) Run とする。
     # 再解析でも最新の completed initial run を active に進める（従来の
@@ -2113,6 +2706,7 @@ _PIPELINE_STEPS: list[PipelineStageDef] = [
         vision_optional=True,
     ),
     PipelineStageDef("evidence_registry", _stage_evidence_registry, progress_unit="builder"),
+    PipelineStageDef(None, _hook_equation_evidence_backfill),
     PipelineStageDef("claim_object_builder", _stage_claim_object_builder, progress_unit="builder"),
     PipelineStageDef(None, _hook_claim_equation_canonicalization),
     PipelineStageDef("symbol_registry", _stage_symbol_registry, progress_unit="builder"),
@@ -2133,6 +2727,7 @@ _PIPELINE_STEPS: list[PipelineStageDef] = [
         "dsl_linking", _stage_dsl_linking,
         llm_kind=LLM_KIND_TEXT, model_policy=True, progress_unit="llm_call",
     ),
+    PipelineStageDef(None, _hook_claim_concept_grounding),
     PipelineStageDef(
         "dsl_embedding", _stage_dsl_embedding,
         llm_kind=LLM_KIND_EMBEDDING, progress_unit="embedding",
@@ -2173,6 +2768,11 @@ _PIPELINE_STEPS: list[PipelineStageDef] = [
     PipelineStageDef(
         "persist_claims_components_graph", _stage_persist_claims_components_graph,
         progress_unit="tables",
+    ),
+    # 概念レジストリ P3-6。決定論（llm_kind=none / model_policy=False）で、読むのは
+    # 保存済みベクトルだけ（embedding API を呼ばない = KR5）。
+    PipelineStageDef(
+        "identity_candidates", _stage_identity_candidates, progress_unit="builder",
     ),
 ]
 
@@ -2499,9 +3099,7 @@ def _build_evidence_registry(
 
     # Register evidence for each equation block.
     for record in getattr(equations, "equations", []) or []:
-        src = getattr(record, "source_extraction", None)
-        loc = getattr(src, "source_location", None) if src else None
-        block_id = (loc.get("block_id") if isinstance(loc, dict) else None) or getattr(record, "block_id", None)
+        block_id = _equation_block_id(record)
         if not block_id or block_id in seen_block_ids:
             continue
         builder.add_for_block(block_id, evidence_role="equation_quote")
@@ -2540,6 +3138,46 @@ def _empty_evidence_registry(document_id: str, cartridge_id: str | None):
     )
 
 
+def _claim_concept_inputs(ctx: PipelineContext) -> tuple[Any, dict | None]:
+    """``ClaimObjectBuilder`` へ渡す ``(concept_resolver, cartridge_ontology)``。
+
+    主張の概念接地（``claim_concept_grounding_design.md`` §5・案 B の前段）。辞書が
+    空なら ``(None, None)`` を返して**従来どおり**（辞書なし）に縮退する。
+    ``cartridge_ontology`` は cartridge が実際に解決できたときだけ渡す（builder の
+    ``_concepts_are_cartridge_backed`` が従来の設計どおり効く。空 cartridge では
+    読まない = 既定カートリッジへ縮退させない規律）。辞書の組み立てで落ちても
+    解析は止めない（fail-soft）。
+    """
+    try:
+        from core.library import concept_dictionary as _concept_dictionary
+
+        dictionary = _concept_dictionary.build_concept_dictionary(
+            cartridge_id=ctx.cartridge_id
+        )
+        if not dictionary:
+            return None, None
+        ontology = _concept_dictionary.cartridge_ontology_for(ctx.cartridge_id)
+        if ontology is None:
+            # CG3（概念は候補・確定は人間）: A層 builder の既存規則
+            # ``_concepts_are_cartridge_backed`` は「ontology が空で resolver がある」
+            # と無条件に True を返し、atomic × source_backed の claim の
+            # concept_assignment_status を source_backed へ上げる。レジストリ辞書だけ
+            # の run でそれが起きないよう、別名・型が空で出所だけを持つ**非空**の
+            # ontology を渡す（既知集合が空 → inferred に留まる）。A層は非改変。
+            ontology = _concept_dictionary.REGISTRY_ONLY_ONTOLOGY
+        logger.info(
+            "Claim concept dictionary ready for document %s: %d concept(s)",
+            ctx.document_id, len(dictionary),
+        )
+        return _concept_dictionary.make_concept_resolver(dictionary), copy.deepcopy(ontology)
+    except Exception:
+        logger.warning(
+            "claim concept dictionary unavailable (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
+        return None, None
+
+
 def _build_claim_objects(
     *,
     agent_classes: dict,
@@ -2549,6 +3187,8 @@ def _build_claim_objects(
     equations: Any,
     evidence: Any,
     document_structure: Any = None,
+    concept_resolver: Any = None,
+    cartridge_ontology: dict | None = None,
 ):
     from episteme_graph.agents.claim_object_builder.builder import ClaimObjectBuilder
 
@@ -2562,9 +3202,10 @@ def _build_claim_objects(
     builder = builder_cls(
         evidence_registry=evidence,
         equation_index=equation_index,
-        cartridge_ontology=None,
+        cartridge_ontology=cartridge_ontology,
         equation_semantics_result=equations,
         document_structure=document_structure,
+        concept_resolver=concept_resolver,
     )
     spans = list(getattr(qualified, "qualified_spans", []) or [])
     return builder.build(
@@ -2585,6 +3226,28 @@ def _empty_claim_object_result(document_id: str, cartridge_id: str | None):
     )
 
 
+def _claim_equation_link_index(claim_objects: Any) -> dict[str, list[str]]:
+    """``equation_id -> [claim_id, ...]`` from claim_object_builder.
+
+    Single source of truth for the DerivationChainAgent's ``claim_link_index``
+    contract: the agent joins a step's *output* equation ids through this index
+    to fill ``required_claim_ids``. Built both when the agent runs
+    (``_build_derivation_chains``) and when the synthesis hook back-fills the
+    already-built chains (``_backfill_derivation_claim_refs``, which also joins
+    the *input* equation ids so ``system_level`` steps — whose output list can be
+    empty — are covered) — the index itself must stay identical, so do not
+    re-implement it inline.
+    """
+    index: dict[str, list[str]] = {}
+    for claim in getattr(claim_objects, "claims", []) or []:
+        cid = getattr(claim, "claim_id", None)
+        if not cid:
+            continue
+        for eq_id in getattr(claim, "equation_ids", []) or []:
+            index.setdefault(eq_id, []).append(cid)
+    return index
+
+
 def _build_derivation_chains(
     *,
     agent_classes: dict,
@@ -2599,14 +3262,7 @@ def _build_derivation_chains(
         agent_classes, "DerivationChainAgent", DerivationChainAgent
     )
 
-    # equation_id -> [claim_id, ...] from claim_object_builder.
-    claim_link_index: dict[str, list[str]] = {}
-    for claim in getattr(claim_objects, "claims", []) or []:
-        cid = getattr(claim, "claim_id", None)
-        if not cid:
-            continue
-        for eq_id in getattr(claim, "equation_ids", []) or []:
-            claim_link_index.setdefault(eq_id, []).append(cid)
+    claim_link_index = _claim_equation_link_index(claim_objects)
 
     return agent.run(
         equations=equations,
@@ -2690,24 +3346,246 @@ def _synthesize_equation_claims(*, equations: Any, derivations: Any, claim_objec
     """Synthesise equation/derivation-backed atomic claims (issue #388).
 
     Returns new ClaimObjectRecord objects to append to the claim artifact. The
-    next synth index continues past any synthesised claims already present so a
-    resumed run does not collide IDs.
+    previously synthesised claims are rebuilt deterministically from index 1
+    instead of being duplicated, so a resumed run does not collide IDs.
+
+    ``claim_objects`` is only mutated once the synthesis has actually produced a
+    replacement set: stripping the old ``synth_claim_*`` records up front would
+    leave the context (and everything downstream, notably the step ⇄ claim
+    back-fill) reading a claim set with live references missing whenever the
+    synthesiser raises or returns nothing.
     """
     from episteme_graph.agents.claim_object_builder.equation_claim_synthesis import (
         synthesize_equation_claims,
     )
 
     existing = list(getattr(claim_objects, "claims", []) or [])
-    # Drop any previously synthesised claims so a resumed run rebuilds them
-    # deterministically instead of duplicating, then re-synthesise from index 1.
     prose_claims = [c for c in existing if not str(getattr(c, "claim_id", "")).startswith("synth_claim_")]
-    claim_objects.claims = prose_claims
-    return synthesize_equation_claims(
+    synthesized = synthesize_equation_claims(
         equations,
         derivations=derivations,
         existing_claims=prose_claims,
         start_index=1,
     )
+    if synthesized:
+        claim_objects.claims = prose_claims
+    return synthesized
+
+
+def _step_claim_ref_snapshot(step: Any, fields: tuple[str, ...]) -> tuple:
+    """Comparable snapshot of a step's claim reference fields (change detection)."""
+    return tuple(
+        tuple(str(v) for v in (getattr(step, name, None) or []))
+        for name in fields
+    )
+
+
+def _backfill_derivation_claim_refs(*, derivations: Any, claim_objects: Any) -> dict[str, int]:
+    """Re-link derivation steps to the *final* claim set (鶏と卵の順序欠陥の是正).
+
+    ``derivation_chain`` は ``claim_object_builder`` の直後・equation claim 合成の
+    **前**に走るため、式由来の合成 claim（``synth_claim_*``）は agent 自身には
+    決して結べない。散文 claim に ``equation_ids`` が付かない文書では、その結果
+    全 step の ``required_claim_ids`` が空のままになり、理論操作グラフのノードが
+    claim 未接続で出る（restart 時だけ、前回 artifact に残った合成 claim で
+    偶然結べていた）。
+
+    2段で処理する:
+
+    1. **追加**: 合成後の claim 集合で作った ``equation_id -> claim_id`` 索引
+       （``_claim_equation_link_index``）から、step の出力式**および入力式**に
+       紐づく claim を ``required_claim_ids`` へ additive に足す。agent の
+       ``_walk_back`` 規則は出力式のみだが、``chain_type="system_level"`` の step は
+       出力式が空になり得るため入力式からも引く（既存参照の保持と同じく additive
+       なので害がない）。本関数が**追加**するのは ``required_claim_ids`` だけで、
+       ``input_claim_ids`` / ``output_claim_ids`` には書き足さない（それらは
+       ``_build_claim_chains`` / system_derivation が埋める agent 側の領分）。
+    2. **掃除**: ``_canonicalize_derivation_claim_refs`` に委譲し、legacy 形式 id
+       （``claim:blk:span``）の正規 id への remap と、最終 claim 集合に解決できない
+       参照（旧版合成の stale な ID 等）の除去を行う。掃除は step の claim 参照
+       4フィールドすべてに及び、落とした参照は canonicalization と同じ
+       ``unresolved_claim_ref_dropped`` の ValidationIssue として記録される
+       （黙って捨てない = P4）。
+
+    このバックフィルが回復するのはノードの **claim 接続**（``linked_claim_ids``）
+    であって強い backing ではない。合成 claim は ``support_status="equation_backed"``
+    で ``_STRONG_BACKING_SUPPORT_STATUSES``（``source_backed`` のみ）の外なので
+    ``evidence_text`` が供給されず、ノードには ``missing_atomic_claim`` が残る。
+    これは「空の evidence を強い backing にしない」#306 設計の意図した帰結。
+
+    既知の限界: 位置決めの synth id（``synth_claim_0001`` など）が別の式へ再割り当て
+    された場合、id としては解決してしまうので検出できない（canonicalization 自体と
+    同じ限界）。
+
+    Returns a report dict (``{"steps_changed", "refs_added", "refs_dropped"}``);
+    ``steps_changed == 0`` means nothing was rewritten (2回目の呼び出しは no-op)。
+    """
+    # 掃除対象フィールドの正本は id_canonicalization 側（ここで別表を作らない）。
+    from episteme_graph.agents.id_canonicalization import (
+        _DERIVATION_STEP_CLAIM_FIELDS as CLAIM_REF_FIELDS,
+    )
+
+    report = {"steps_changed": 0, "refs_added": 0, "refs_dropped": 0}
+    steps = [
+        step
+        for chain in (getattr(derivations, "chains", []) or [])
+        for step in (getattr(chain, "steps", []) or [])
+    ]
+    if not steps:
+        return report
+
+    before = [_step_claim_ref_snapshot(step, CLAIM_REF_FIELDS) for step in steps]
+
+    # ① 追加（出力式 ∪ 入力式 → claim）
+    claim_link_index = _claim_equation_link_index(claim_objects)
+    for step in steps:
+        linked: list[str] = []
+        equation_ids = (
+            list(getattr(step, "output_equation_ids", []) or [])
+            + list(getattr(step, "input_equation_ids", []) or [])
+        )
+        for eq_id in equation_ids:
+            linked.extend(claim_link_index.get(eq_id, []))
+        if not linked:
+            continue
+        current = [str(cid) for cid in (getattr(step, "required_claim_ids", []) or [])]
+        updated = sorted(set(current) | set(linked))
+        if updated != current:
+            step.required_claim_ids = updated
+            report["refs_added"] += len(set(updated) - set(current))
+
+    # ② 掃除（legacy remap + 未解決の除去 + ValidationIssue 記録）
+    for entry in _canonicalize_derivation_claim_refs(derivations, claim_objects):
+        report["refs_dropped"] += len(entry.get("dropped_claim_ids") or [])
+
+    for step, snapshot in zip(steps, before):
+        if _step_claim_ref_snapshot(step, CLAIM_REF_FIELDS) != snapshot:
+            report["steps_changed"] += 1
+    return report
+
+
+def _evidence_ids_by_block(evidence: Any) -> dict[str, list[str]]:
+    """``block_id -> [evidence_id, ...]``（EvidenceRegistry の実 ID 索引）。
+
+    figure/table の caption リンク（``_build_figure_table_semantics``）と式 ⇄ evidence の
+    バックフィル（``_backfill_equation_evidence_refs``）が同じ索引を使う。
+    ``EquationSemanticsResult.to_equations_export`` の enrichment 規則と同一
+    （block 単位・出現順）なので、export と graph が別の evidence を見ることはない。
+    """
+    index: dict[str, list[str]] = {}
+    for record in getattr(evidence, "records", []) or []:
+        block_id = str(getattr(getattr(record, "source", None), "block_id", "") or "").strip()
+        ev_id = str(getattr(record, "evidence_id", "") or "").strip()
+        if block_id and ev_id and ev_id not in index.setdefault(block_id, []):
+            index[block_id].append(ev_id)
+    return index
+
+
+def _equation_block_id(record: Any) -> str:
+    """EquationRecord の出所 block_id（``source_extraction.source_location`` が正）。"""
+    src = getattr(record, "source_extraction", None)
+    loc = getattr(src, "source_location", None) if src else None
+    block_id = (loc.get("block_id") if isinstance(loc, dict) else None) or getattr(
+        record, "block_id", None
+    )
+    return str(block_id or "").strip()
+
+
+def _backfill_equation_evidence_refs(*, equations: Any, evidence: Any) -> dict[str, int]:
+    """式 ⇄ evidence の結線を決定論的に補う（LLM を呼ばない）。
+
+    ``EquationSemantics.source_evidence_ids`` は LLM 出力フィールドだが
+    ``equation_semantics`` の prompt / validator はこの項目を一切要求しないため、
+    実際には**常に空**で agent を出る（``_make_provisional_record`` も空固定）。
+    式ブロックの逐語 evidence（``evidence_role="equation_quote"``、
+    ``_build_evidence_registry`` が式ブロックごとに必ず登録する）は
+    ``to_equations_export(evidence_index=...)`` の中でしか結ばれておらず、
+    その enrichment は **export ルートにしか流れていなかった**。
+
+    結果として derivation_chain の step（``current_record.semantics.source_evidence_ids``
+    をそのまま持つ）と、そこから作られる理論操作グラフの全ノードが
+    ``linked_evidence_ids`` 空 = ``missing_evidence_link`` で出ていた（本来
+    evidence は登録済みで、結線だけが欠けている＝処理の欠陥）。
+
+    ここで export と同じ block 単位の索引を使って式レコード側に還流させるので、
+    以降の consumer（derivation_chain / symbol_registry / component_assembly /
+    equation claim 合成 / component_graph）が同じ evidence を見る。既存値は
+    保持（additive・union）で、索引に無い式は空のまま（捏造しない）。
+
+    Returns ``{"equations_changed", "refs_added"}``; 2回目の呼び出しは no-op。
+    """
+    report = {"equations_changed": 0, "refs_added": 0}
+    records = list(getattr(equations, "equations", []) or [])
+    if not records:
+        return report
+    index = _evidence_ids_by_block(evidence)
+    if not index:
+        return report
+    for record in records:
+        sem = getattr(record, "semantics", None)
+        if sem is None:
+            continue
+        block_id = _equation_block_id(record)
+        linked = index.get(block_id) or []
+        if not linked:
+            continue
+        current = [str(v) for v in (getattr(sem, "source_evidence_ids", None) or [])]
+        updated = sorted(set(current) | set(linked))
+        if updated != current:
+            sem.source_evidence_ids = updated
+            report["equations_changed"] += 1
+            report["refs_added"] += len(set(updated) - set(current))
+    return report
+
+
+def _backfill_derivation_evidence_refs(*, derivations: Any, equations: Any) -> dict[str, int]:
+    """derivation step ⇄ evidence の結線を式経由で補う（決定論・LLM 非使用）。
+
+    step の ``source_evidence_ids`` は ``DerivationChainAgent`` が式レコードの
+    ``semantics.source_evidence_ids`` から写すだけなので、①その式側が空だった run
+    （``_backfill_equation_evidence_refs`` 以前の artifact からの resume）②claim 由来の
+    chain 以外は、step の evidence が空のまま残る。step の入出力式の逐語 evidence を
+    additive に補い、理論操作グラフのノードが ``missing_evidence_link`` のまま出るのを
+    防ぐ。式が evidence を持たない step は空のまま（捏造しない）。
+
+    Returns ``{"steps_changed", "refs_added"}``; 2回目の呼び出しは no-op。
+    """
+    report = {"steps_changed": 0, "refs_added": 0}
+    steps = [
+        step
+        for chain in (getattr(derivations, "chains", []) or [])
+        for step in (getattr(chain, "steps", []) or [])
+    ]
+    if not steps:
+        return report
+    evidence_by_equation: dict[str, list[str]] = {}
+    for record in getattr(equations, "equations", []) or []:
+        eq_id = str(getattr(record, "equation_id", "") or "").strip()
+        sem = getattr(record, "semantics", None)
+        if not eq_id or sem is None:
+            continue
+        ev_ids = [str(v) for v in (getattr(sem, "source_evidence_ids", None) or []) if str(v or "").strip()]
+        if ev_ids:
+            evidence_by_equation[eq_id] = ev_ids
+    if not evidence_by_equation:
+        return report
+    for step in steps:
+        linked: list[str] = []
+        equation_ids = (
+            list(getattr(step, "output_equation_ids", None) or [])
+            + list(getattr(step, "input_equation_ids", None) or [])
+        )
+        for eq_id in equation_ids:
+            linked.extend(evidence_by_equation.get(str(eq_id), []))
+        if not linked:
+            continue
+        current = [str(v) for v in (getattr(step, "source_evidence_ids", None) or [])]
+        updated = sorted(set(current) | set(linked))
+        if updated != current:
+            step.source_evidence_ids = updated
+            report["steps_changed"] += 1
+            report["refs_added"] += len(set(updated) - set(current))
+    return report
 
 
 def _build_figure_table_semantics(
@@ -2728,12 +3606,7 @@ def _build_figure_table_semantics(
     )
 
     # block_id -> [evidence_id, ...] for caption blocks.
-    evidence_index: dict[str, list[str]] = {}
-    for record in getattr(evidence, "records", []) or []:
-        block_id = getattr(getattr(record, "source", None), "block_id", None)
-        ev_id = getattr(record, "evidence_id", None)
-        if block_id and ev_id:
-            evidence_index.setdefault(block_id, []).append(ev_id)
+    evidence_index = _evidence_ids_by_block(evidence)
 
     # claim_link_index: block_id -> [claim_id, ...] (F1 cross-link contract).
     #
@@ -3105,6 +3978,23 @@ def _build_apparatus_semantics(
     }
     if iterative_enabled:
         done_payload["convergence"] = convergence_counts
+    # P0-10: 母集合 = 抽出済み（`status='extracted'`）の図、処理数 = agent に渡した図。
+    # 上限で外した図は既存キー `skipped_by_limit`（図キーの列）に残っており、ここでは
+    # 理由コードだけを共通形式で足す。1 document あたりの上限と日次 vision 予算は
+    # どちらも「見ていない図」を生むので、効いた方を理由として並べる。
+    coverage_reasons: list[str] = []
+    if skipped_by_limit:
+        if allowed_images >= max_images:
+            coverage_reasons.append("skipped_by_limit")
+        else:
+            coverage_reasons.append("daily_call_limit_reached")
+    _attach_coverage(
+        done_payload,
+        population=len(figure_rows),
+        processed=len(figure_inputs),
+        reasons=coverage_reasons,
+        unit="figures",
+    )
     return result, done_payload
 
 
@@ -3216,7 +4106,32 @@ def _build_contextual_explanation(
         "agent_skipped": [],
     }
 
+    # P0-10 の母集合: 入力化できた候補（considered）+ 入力化できずに skipped として
+    # 記録した候補。処理数は「説明が1つ以上得られた要素」を後段で数える。
+    ctxexpl_population = int(meta.get("considered") or 0) + len(meta.get("skipped") or [])
+
+    def _ctxexpl_attach_coverage(explained: int) -> None:
+        reasons: list[str] = []
+        if int(payload.get("truncated_count") or 0) or payload.get("truncated"):
+            reasons.append("max_elements")
+        for entry in meta.get("skipped") or []:
+            code = str((entry or {}).get("reason") or "").strip()
+            if code:
+                reasons.append(code)
+        if payload.get("skipped_by_limit"):
+            reasons.append("skipped_by_limit")
+        if payload.get("agent_skipped"):
+            reasons.append("agent_skipped")
+        _attach_coverage(
+            payload,
+            population=ctxexpl_population,
+            processed=explained,
+            reasons=reasons,
+            unit="elements",
+        )
+
     if not elements:
+        _ctxexpl_attach_coverage(0)
         return payload
 
     daily_limit = _ctxexpl_max_calls_per_day()
@@ -3229,6 +4144,7 @@ def _build_contextual_explanation(
             "LLM generation for document=%s (%d element(s) considered)",
             daily_limit, document_id, len(elements),
         )
+        _ctxexpl_attach_coverage(0)
         return payload
 
     from episteme_graph.agents.contextual_explanation.agent import ContextualExplanationAgent
@@ -3246,6 +4162,7 @@ def _build_contextual_explanation(
 
     items: list[dict] = []
     agent_skipped: list[dict] = []
+    explained_elements: set[tuple[str, str]] = set()
     for element_result in result.elements:
         if element_result.skipped_reason:
             agent_skipped.append({
@@ -3259,6 +4176,12 @@ def _build_contextual_explanation(
             "reason": element_result.reason,
             "confidence": element_result.confidence,
         }
+        if element_result.contextual_explanation or element_result.generic_explanation:
+            # P0-10: 説明が1つでも得られた要素を「処理できた」と数える
+            # （contextual / generic の2行は同じ要素の2面なので二重に数えない）。
+            explained_elements.add(
+                (str(element_result.element_type), str(element_result.element_id))
+            )
         if element_result.contextual_explanation:
             items.append({
                 "element_type": element_result.element_type,
@@ -3278,6 +4201,7 @@ def _build_contextual_explanation(
                 "created_by": "pipeline",
             })
     payload["agent_skipped"] = agent_skipped
+    _ctxexpl_attach_coverage(len(explained_elements))
 
     if items:
         from core.postgres import get_session as _pg_session
@@ -3453,8 +4377,25 @@ def _build_discuss_opening(
     payload["assumption_count"] = len(agent_input.get("untested_assumptions") or [])
     payload["author_choice_count"] = len(agent_input.get("author_choices") or [])
 
+    # P0-10: このステージは 1 document = 1 コールで素材全体を見るので、母集合 =
+    # 組み立てた素材（未検証前提 + 著者の選択）、処理数 = 実際に LLM へ渡せたか
+    # （0 か全部）。素材ゼロは「取りこぼし」ではなく素材が無いという事実なので
+    # population=0 / truncated=0 のまま正直に残る。種（seed）の上限による
+    # 打ち切りは出力側の話で、既存キー ``truncated_count`` がそのまま持つ。
+    discuss_population = int(payload["assumption_count"]) + int(payload["author_choice_count"])
+
+    def _discuss_attach_coverage(processed: int, reasons: list[str] | None = None) -> None:
+        _attach_coverage(
+            payload,
+            population=discuss_population,
+            processed=processed,
+            reasons=reasons,
+            unit="source_items",
+        )
+
     if max_items <= 0:
         payload["skipped_reason"] = "item_limit_is_zero"
+        _discuss_attach_coverage(0, ["item_limit_is_zero"])
         return payload
 
     if not (payload["assumption_count"] or payload["author_choice_count"]):
@@ -3464,6 +4405,7 @@ def _build_discuss_opening(
             "skipping generation",
             document_id,
         )
+        _discuss_attach_coverage(0, ["no_source_material"])
         return payload
 
     daily_limit = _discuss_opening_max_calls_per_day()
@@ -3479,6 +4421,7 @@ def _build_discuss_opening(
             "for document=%s",
             daily_limit, document_id,
         )
+        _discuss_attach_coverage(0, ["daily_call_limit_reached"])
         return payload
 
     from episteme_graph.agents.discuss_opening.agent import DiscussOpeningAgent
@@ -3498,6 +4441,13 @@ def _build_discuss_opening(
         payload["skipped_reason"] = result.skipped_reason
     if result.review_notes:
         payload["review_notes"] = list(result.review_notes)
+
+    # LLM が素材全体を1コールで見た run は processed = 母集合。agent 自身が
+    # 生成を見送った（``skipped_reason``）run は素材を活かせなかったので 0 に倒す。
+    if result.skipped_reason and not payload["llm_calls"]:
+        _discuss_attach_coverage(0, [str(result.skipped_reason)])
+    else:
+        _discuss_attach_coverage(discuss_population)
 
     if not result.seeds:
         return payload
@@ -3565,11 +4515,48 @@ def _build_landscape_placement(ctx: PipelineContext) -> dict:
     """
     from core.landscape.builder import build_and_store_placements
 
-    return build_and_store_placements(
+    payload = build_and_store_placements(
         document_id=ctx.document_id,
         artifacts=ctx.all_artifacts(),
         run_id=ctx.run_id,
     )
+    if isinstance(payload, dict):
+        # P0-10: 母集合 = 照合した凍結骨格ドメイン（``domains_checked``）、処理数 =
+        # そのうち配置が付いたドメイン。配置できなかったドメインは既存キー
+        # ``unplaced_domains`` が理由付きで持っており（LS: 配置不能は失敗でなく信号）、
+        # ここでは共通形式の3値と理由コードだけを additive に足す。生成前に降りた run
+        # （骨格なし / 素材なし / 日次上限 / 上限0）は processed=0 + その理由コード。
+        domains_checked = [str(d) for d in (payload.get("domains_checked") or [])]
+        unplaced = payload.get("unplaced_domains") or []
+        unplaced_keys = [
+            str((u or {}).get("domain_key") or "")
+            for u in unplaced
+            if isinstance(u, dict) and (u or {}).get("domain_key")
+        ]
+        skipped_reason = str(payload.get("skipped_reason") or "").strip()
+        reasons: list[str] = []
+        details: dict[str, Any] = {}
+        if skipped_reason and not payload.get("llm_calls"):
+            processed = 0
+            reasons.append(skipped_reason)
+        else:
+            processed = max(len(domains_checked) - len(unplaced_keys), 0)
+            if unplaced_keys:
+                reasons.append("unplaced_domain")
+                details["unplaced_domain_keys"] = unplaced_keys
+            if payload.get("truncated"):
+                reasons.append("max_placements")
+            if skipped_reason:
+                reasons.append(skipped_reason)
+        _attach_coverage(
+            payload,
+            population=len(domains_checked),
+            processed=processed,
+            reasons=reasons,
+            unit="domains",
+            details=details or None,
+        )
+    return payload
 
 
 def _build_course_mapping(

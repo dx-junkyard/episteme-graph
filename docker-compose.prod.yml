@@ -1,13 +1,18 @@
 version: "3.9"
 
-# ローカル開発用オーバーライドファイル
-# 使用方法: docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+# 本番補助オーバーライドファイル（ngrok トンネル）
+# 使用方法: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 #
-# このファイルは本番用の docker-compose.yml を「上書き」する形で機能します。
-# 開発時のみ必要なポート公開や ngrok トンネルをここで定義します。
+# このファイルはベースの docker-compose.yml に「重ねる」形で機能します。
+# 本番で外部公開トンネルが要るときだけ ngrok サービスを追加します。
 #
 # ※ api-server のポートはここでも開放しません。
 #   すべての API アクセスは必ず Nginx (frontend:3000) 経由にしてください。
+#
+# ※ api-server の環境変数（`env_file: .env` を含む）はベースの docker-compose.yml で
+#   宣言済みで、オーバーライド側にも自動的に引き継がれます。ここで api-server を
+#   再宣言して env_file を重ねると、同じ .env を二重に読み込むだけなので行いません
+#   （2026-09-03 時点で本ファイルは api-server サービスを定義していない）。
 
 services:
   # ── ngrok トンネル ───────────────────────────────────────────────

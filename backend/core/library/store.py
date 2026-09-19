@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Any
 
 from sqlalchemy import text as sa_text
@@ -53,7 +54,9 @@ _ENTRY_COLUMNS_SQL = """
     id::text, domain_key, entry_type, name, aliases, summary, body,
     exemplar_images, source_component_ids, source_document_ids,
     status, standardization_status, revision, latest_version_no, created_by, updated_by,
-    created_at, updated_at
+    created_at, updated_at,
+    review_status, review_note, mapping_justification, candidate_key,
+    decided_by::text, decided_at
 """
 
 _SELECT_ENTRY_SQL = f"SELECT {_ENTRY_COLUMNS_SQL} FROM library_entries"
@@ -83,6 +86,13 @@ def _row_to_entry(row: Any) -> dict:
         updated_by=row[15],
         created_at=row[16].isoformat() if row[16] else "",
         updated_at=row[17].isoformat() if row[17] else "",
+        # 概念レジストリのガバナンス列（migration 082）。
+        review_status=row[18] or schema.REVIEW_STATUS_CONFIRMED,
+        review_note=row[19] or "",
+        mapping_justification=row[20],
+        candidate_key=row[21],
+        decided_by=row[22],
+        decided_at=row[23].isoformat() if row[23] else None,
     )
     return entry.to_dict()
 
@@ -104,6 +114,98 @@ def _json_param(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _uuid_or_none(value: Any) -> str | None:
+    """UUID として解釈できる文字列だけを返す（それ以外は ``None``）。
+
+    ``library_entries.created_by`` は TEXT で、シード取込は ``'bundled_import'`` の
+    ような非 UUID を入れる（``core/library/seed.py``）。概念レジストリ側の新表は
+    帰属列が UUID なので、非 UUID をそのままキャストすると取込ごと落ちる。
+    「誰か分からない」は NULL で正直に残す（偽の帰属を作らない）。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        uuid.UUID(text)
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return text
+
+
+# ---------------------------------------------------------------------------
+# aliases → library_entry_labels の片方向ミラー（概念レジストリ §4.3）
+# ---------------------------------------------------------------------------
+
+
+def mirror_aliases_to_labels(
+    session: Any,
+    entry_id: str,
+    aliases: Any,
+    *,
+    created_by: str | None = None,
+) -> int:
+    """``aliases`` JSONB を ``kind='alternate'`` のラベル行へ**片方向**ミラーする。
+
+    呼び出し側（``create_entry`` / ``update_entry``）と**同一トランザクション**で実行する
+    こと（編集面 = ``aliases``、読み手 = ラベル表、という二面が食い違わないため）。
+
+    規約（§4.3 / KR7）:
+
+    - ミラーは片方向。ラベル表側で足した別名を ``aliases`` へ書き戻さない。
+    - **既存の ``dismissed`` 行は復帰させない**（教員が「この別名は使わない」と判断した
+      ものを、本文編集のついでに黙って戻さない）。
+    - 行は消さない。``aliases`` から別名が消えても対応するラベル行は残す
+      （消したい場合は教員が明示的に見送る = ``registry.dismiss_label``）。
+    - 正規化が空になる別名（空白のみ等）と重複はスキップする。
+
+    Returns:
+        upsert を試みた別名の件数（0 なら SQL を発行していない）。
+    """
+    values = schema.as_list(aliases)
+    seen: set[str] = set()
+    pending: list[tuple[str, str]] = []
+    for raw in values:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        normalized = schema.normalize_label(text)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        pending.append((text, normalized))
+    if not pending:
+        return 0
+
+    for label, normalized in pending:
+        session.execute(
+            sa_text(
+                """
+                INSERT INTO library_entry_labels (
+                    entry_id, kind, label, normalized_label,
+                    mapping_justification, created_by
+                ) VALUES (
+                    CAST(:entry_id AS uuid), :kind, :label, :normalized_label,
+                    :justification, CAST(NULLIF(:created_by, '') AS uuid)
+                )
+                ON CONFLICT (entry_id, kind, normalized_label) DO UPDATE
+                   SET label = EXCLUDED.label,
+                       updated_at = now()
+                 WHERE library_entry_labels.status = :confirmed
+                """
+            ),
+            {
+                "entry_id": entry_id,
+                "kind": schema.LABEL_KIND_ALTERNATE,
+                "label": label,
+                "normalized_label": normalized,
+                "justification": schema.JUSTIFICATION_MANUAL,
+                "created_by": _uuid_or_none(created_by) or "",
+                "confirmed": schema.LABEL_STATUS_CONFIRMED,
+            },
+        )
+    return len(pending)
+
+
 # ---------------------------------------------------------------------------
 # 作成・取得・一覧
 # ---------------------------------------------------------------------------
@@ -121,14 +223,36 @@ def create_entry(
     source_component_ids: list[str] | None = None,
     source_document_ids: list[str] | None = None,
     created_by: str | None = None,
+    review_status: str = schema.REVIEW_STATUS_CONFIRMED,
+    mapping_justification: str | None = schema.JUSTIFICATION_MANUAL,
+    candidate_key: str | None = None,
 ) -> dict:
-    """draft エントリを新規作成する（昇格 / 手動作成 / シード取込の共通経路）。"""
+    """draft エントリを新規作成する（昇格 / 手動作成 / シード取込 / 候補生成の共通経路）。
+
+    既定は「人間が作った確定済みの行」（``review_status='confirmed'`` /
+    ``mapping_justification='manual_curation'``）で、既存の呼び出し側は無変更で
+    従来どおり動く。**AI 由来の候補**を作る経路（§6.1 / §6.2）は
+    ``review_status='candidate'`` と導出の種類（``lexical_match`` 等）を明示的に渡す
+    こと（KR2: 候補は凍結できない = パイプライン retrieval にも学習者にも届かない）。
+
+    ``candidate_key``（``schema.build_candidate_key``）を渡すと部分 UNIQUE により
+    同じ候補の再提案が同一行に畳まれる。手動作成では ``None`` のまま。
+
+    ``aliases`` は同一トランザクションで ``library_entry_labels``（``alternate``）へ
+    片方向ミラーされる（§4.3）。
+    """
     if not domain_key:
         raise ValueError("domain_key is required")
     if not schema.is_valid_entry_type(entry_type):
         raise ValueError(f"invalid entry_type: {entry_type!r}")
     if not name:
         raise ValueError("name is required")
+    if not schema.is_valid_review_status(review_status):
+        raise ValueError(f"invalid review_status: {review_status!r}")
+    if mapping_justification is not None and not schema.is_valid_justification(
+        mapping_justification
+    ):
+        raise ValueError(f"invalid mapping_justification: {mapping_justification!r}")
 
     session = get_session()
     try:
@@ -138,12 +262,14 @@ def create_entry(
                 INSERT INTO library_entries
                     (domain_key, entry_type, name, aliases, summary, body,
                      exemplar_images, source_component_ids, source_document_ids,
-                     created_by, updated_by)
+                     created_by, updated_by,
+                     review_status, mapping_justification, candidate_key)
                 VALUES
                     (:domain_key, :entry_type, :name, CAST(:aliases AS jsonb),
                      :summary, CAST(:body AS jsonb), CAST(:exemplar_images AS jsonb),
                      CAST(:source_component_ids AS jsonb), CAST(:source_document_ids AS jsonb),
-                     :created_by, :created_by)
+                     :created_by, :created_by,
+                     :review_status, :mapping_justification, :candidate_key)
                 RETURNING {_ENTRY_COLUMNS_SQL}
                 """
             ),
@@ -158,15 +284,23 @@ def create_entry(
                 "source_component_ids": _json_param(list(source_component_ids or [])),
                 "source_document_ids": _json_param(list(source_document_ids or [])),
                 "created_by": created_by or None,
+                "review_status": review_status,
+                "mapping_justification": mapping_justification,
+                "candidate_key": candidate_key or None,
             },
         ).fetchone()
+        entry = _row_to_entry(row)
+        # 同一トランザクションでラベル表へミラーする（§4.3。読み手はラベル表を読む）。
+        mirror_aliases_to_labels(
+            session, entry["id"], entry.get("aliases"), created_by=created_by
+        )
         session.commit()
     except Exception:
         session.rollback()
         raise
     finally:
         session.close()
-    return _row_to_entry(row)
+    return entry
 
 
 def get_entry(entry_id: str) -> dict | None:
@@ -182,14 +316,41 @@ def get_entry(entry_id: str) -> dict | None:
     return _row_to_entry(row) if row else None
 
 
+def get_entry_by_candidate_key(candidate_key: str) -> dict | None:
+    """``candidate_key`` でエントリを1件取得する（無ければ ``None``）。
+
+    候補生成（§6.1 / §6.2）が「この候補は既に提案済みか／既に見送られているか」を
+    確かめるための読み口。``dismissed`` の行もそのまま返す — 呼び出し側が
+    「見送られた候補は再提案しない」（LS3 と同じ規則）を判断できるようにするため。
+    """
+    key = str(candidate_key or "").strip()
+    if not key:
+        return None
+    session = get_session()
+    try:
+        row = session.execute(
+            sa_text(f"{_SELECT_ENTRY_SQL} WHERE candidate_key = :candidate_key LIMIT 1"),
+            {"candidate_key": key},
+        ).fetchone()
+    finally:
+        session.close()
+    return _row_to_entry(row) if row else None
+
+
 def list_entries(
     *,
     domain_key: str | None = None,
     entry_type: str | None = None,
     q: str | None = None,
     include_retired: bool = False,
+    include_candidates: bool = False,
 ) -> list[dict]:
-    """エントリ一覧（既定は status='active' のみ。q は name/aliases/summary の部分一致）。"""
+    """エントリ一覧（既定は status='active' かつ review_status='confirmed' のみ）。
+
+    ``q`` は name/aliases/summary の部分一致。``include_candidates=True`` で
+    ``candidate`` / ``dismissed``（= 教員がまだ確定していない・見送った候補）も返す
+    （既定が confirmed のみ、が後方互換の側 — §4.2）。
+    """
     if entry_type is not None and not schema.is_valid_entry_type(entry_type):
         raise ValueError(f"invalid entry_type: {entry_type!r}")
 
@@ -197,6 +358,9 @@ def list_entries(
     params: dict[str, Any] = {}
     if not include_retired:
         conditions.append("status = 'active'")
+    if not include_candidates:
+        conditions.append("review_status = :confirmed_review")
+        params["confirmed_review"] = schema.REVIEW_STATUS_CONFIRMED
     if domain_key:
         conditions.append("domain_key = :domain_key")
         params["domain_key"] = domain_key
@@ -204,8 +368,20 @@ def list_entries(
         conditions.append("entry_type = :entry_type")
         params["entry_type"] = entry_type
     if q:
-        conditions.append("(name ILIKE :q OR aliases::text ILIKE :q OR summary ILIKE :q)")
+        # P3-R7: ラベル表（別名・隠しラベル）も検索対象にする。ラベル側は
+        # **正規化の完全一致**だけを使う（部分一致は `SM` が `cosmological` に当たる
+        # F-7 の再発源）。`hidden` ラベル（OCR ノイズ・旧表記）は検索には当たるが、
+        # 一覧に出るのはエントリ行なので表示テキストには現れない = SKOS hiddenLabel。
+        conditions.append(
+            "(name ILIKE :q OR aliases::text ILIKE :q OR summary ILIKE :q"
+            " OR EXISTS (SELECT 1 FROM library_entry_labels lbl"
+            "             WHERE lbl.entry_id = library_entries.id"
+            "               AND lbl.status = :label_confirmed"
+            "               AND lbl.normalized_label = :q_normalized))"
+        )
         params["q"] = f"%{q}%"
+        params["label_confirmed"] = schema.LABEL_STATUS_CONFIRMED
+        params["q_normalized"] = schema.normalize_label(q)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     session = get_session()
@@ -293,13 +469,19 @@ def update_entry(entry_id: str, *, expected_revision: int, updated_by: str | Non
             revision_default=1,
         )
         row = result.fetchone()
+        updated = _row_to_entry(row)
+        if "aliases" in fields:
+            # 編集面（aliases）を触ったときだけラベル表へミラーする（§4.3・同一トランザクション）。
+            mirror_aliases_to_labels(
+                session, updated["id"], updated.get("aliases"), created_by=updated_by
+            )
         session.commit()
     except Exception:
         session.rollback()
         raise
     finally:
         session.close()
-    return _row_to_entry(row)
+    return updated
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +521,13 @@ def freeze_entry(
         if entry["status"] == schema.STATUS_RETIRED:
             raise LibraryRetiredError(
                 "retired のエントリは凍結できません。復元してから凍結してください"
+            )
+        # KR2: 確定は人間。未確定（candidate）・見送り（dismissed）の概念は凍結できない。
+        # 凍結版はパイプラインの retrieval・学習者に届く面なので、ここが「AI 由来の概念が
+        # 教員確定を通らずに届く」経路を構造的に塞ぐ唯一の弁である。
+        if entry["review_status"] != schema.REVIEW_STATUS_CONFIRMED:
+            raise LibraryConflictError(
+                "確定していない概念は凍結できません。先に確定してください"
             )
         version_no = int(entry["latest_version_no"]) + 1
         content = entry

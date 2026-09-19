@@ -1,0 +1,774 @@
+# グラフ対話レビュー（Graph Dialogue Review, 教材起点のグラフ確認・承認画面）
+
+> **状態: 実装済み（正本）**（2026-08-29 起票・同日実装。migration **075**
+> — `deliberation_sessions.element_type` CHECK への `'document_graph'` 追加のみ。
+> 新テーブルなし。実装記録は §11。**音声対話の追補は §12**（2026-08-29・
+> migration なし・API 2本と `admin-voice-chat.js` の追加のみ））
+
+**正本**: 本ドキュメント。
+**関連**: [要素検討ワークスペース（W層）](element_deliberation_workspace_design.md)
+（W1〜W9 — 対話・注釈・コスト・権限の基盤を全面的に再利用する）/
+[要素中心コンテキストレンズ](element_context_lens_design.md)（ノード対話の grounding に
+1-hop 文脈が入る根拠）/ [要素インベントリ](element_inventory_design.md)（教材行からの
+成果閲覧の姉妹入口 — インベントリ=一覧・本層=グラフ）/
+[再構成ループ（R層）](reconstruction_loop_design.md)（claim 承認フックの下流）/
+[承認・共有レイヤー（C層）](../features/component_evidence_redesign.md)（承認済み成果の
+学習者向け配信）/ [LLM トークン使用量推計（U層）](llm_usage_metering_design.md) /
+[場面別 LLM モデル選択（M層）](llm_model_selection_design.md)。
+
+---
+
+## 1. 目的 — パイプライン成果のレビューを「グラフを歩きながら」行う
+
+パイプラインが生成した `theory_components` / `theory_claims` /
+`theory_component_graphs` は全て承認ステータス（`status` / `review_status`）を持つが、
+2026-08-29 時点でレビューの導線は次の状態だった:
+
+- **component の承認/却下**は原稿スタジオの論理要素カードにのみ存在し、到達には
+  「コース作成 → スタジオでコース選択 → チャンク/セクション選択 → 論理要素ビュー」が
+  必要（教材アップロード直後＝コース未作成では入口自体がない）。
+- **claim の承認は UI が存在しない**。`PATCH /api/admin/claims/{id}` は監査・却下伝播・
+  承認時の R層 item 自動オーサリング起動まで実装済みだが、フロントの呼び出し元ゼロ。
+- 要素インベントリ（教材行「検出要素」）は review_status をバッジ表示するだけの閲覧専用。
+
+本層は教材管理「アップロード済み教材」の各行から起動する**グラフ対話レビュー画面**を
+追加する。理論操作グラフ（TheoryOperationGraph）を見取り図に、教員が
+
+1. **構造を見る** — main 層バックボーン（theory stage 5〜8個）から式の詳細層まで、
+   source_backing / review_status の視覚区別つきで歩く
+2. **AI と確かめる** — ノードを選んで既存 W層対話（隣接ノード・backing claim・evidence が
+   grounding に入る）で内容を検討する。ノード未選択ではグラフ全体を文脈にした対話
+   （「このグラフで裏付けが弱いのはどこか」等）ができる
+3. **その場で確定する** — component の承認/却下、backing claim の承認を画面内で実行し、
+   「未レビューのみ」フィルタと「次の未レビューへ」ナビで作業を進める
+
+の3つを1画面で行えるようにする。**確定は常に人間**であり、AI は候補・仮説の提示に
+限定される（W2 継承）。
+
+## 2. 不変条項（GR1〜GR8）
+
+- **GR1 確定は人間のみ**: AI 対話・注釈は常に candidate 止まり。AI の応答から承認 API を
+  呼ぶ経路を作らない。承認・却下は教員の明示ボタン操作のみ。
+- **GR2 A層非改変**: `src/episteme_graph/agents/` と成果テーブルのスキーマに手を入れない
+  （読む + 既存の status 遷移 API を呼ぶだけ）。
+- **GR3 数値非表示**: confidence・スコアの生値を出さない（W8 継承。段階表示は既存
+  ElementCard / ラベル語彙に従う）。教員向けの未レビュー**件数**は事実として表示可
+  （R層レビューキューのバッジ前例）。
+- **GR4 監査必須**: 承認・却下・claim レビュー遷移は既存の `_record_review_event`
+  経路（`AUDIT_ENTITY_COMPONENT` / `AUDIT_ENTITY_CLAIM`）に記帳する。新しい
+  entity_type を作らない。
+- **GR5 同期1コール・コスト相乗り**: グラフ全体対話も1応答=1 LLM コール（W6）。
+  CostGate は W層の `DELIBERATION_MAX_CALLS_PER_SESSION` / `_PER_DAY` に**相乗り**
+  （専用上限を作らない）。U層 feature は `deliberation:graph_chat` を分離し、M層 scene
+  は `deliberation`（既存）にマップする。
+- **GR6 権限 fail-closed**: 閲覧・対話 = `_ensure_document_viewable`（W層対話と同水準）。
+  承認・却下・claim レビュー = `_ensure_document_editable`。編集権限が無いユーザーには
+  承認ボタンを非活性 + 事実文で提示する（強制はサーバ側）。
+- **GR7 情報を落とさない**: 却下も status 遷移（既存 API のセマンティクスのまま）。
+  グラフ全体対話のセッション・メッセージは追記のみ（W4 継承）。
+- **GR8 グラフ描画の正本一元化**: グラフのレイアウト・vis-network 構築・backing 別
+  スタイル・ラベル語彙の正本は原稿スタジオの `lsGraph*` 純関数群であり、
+  `window.LectureStudio.graphView` として公開して本画面が使う。**描画ロジックを
+  二重実装しない**（スライド分割の「クライアント側に再実装しない」規約と同型）。
+  ※起票時は新ファイル `component-graph-view.js` への抽出を想定したが、既存の
+  静的ガードレール群（`test_issue_447_449_graph_labels.py` /
+  `test_issue_451_452_graph_viz.py` / `test_graph_detail_card_ui_static.py` 等）が
+  スタジオ内の関数本体を正本として固定しているため、関数は移設せず公開面だけを
+  設ける方式に変更した（不変条項の実質 — 単一実装 — は同じ）。
+
+## 3. 画面構成
+
+教材管理の各行 `⋯` メニューに「🕸 グラフレビュー…」を追加（`data-ui-anchor:
+materials.row-graph-review`。`document_id` を持つ行のみ表示 — 検出要素ボタンと同条件）。
+
+> **2026-09-06 追補（オーナー指示）**: 入口を `⋯` メニュー項目から**行のアイコンボタン**へ
+> 昇格した（📡 論文レーダーと並べ、「パイプラインを実行 ▼」の右隣）。アイコンは inline SVG の
+> ノード・辺図形（`currentColor`・`aria-hidden`）— 🕸 は「蜘蛛の巣」、📊 は「統計グラフ」に
+> 読めるため採用しない。ラベルは `title` / `aria-label`（「グラフレビュー」）。`data-ui-anchor` /
+> ハンドラ / document_id ガード / モーダル側の見出しは不変。Copilot 道案内
+> （`graph_review.open` / `graph_review.paper_layer`）は `material_row_menu` ステップを外し
+> `material_graph_review_button` を `material_selected` 前提で直接点灯する。決定の記録は
+> `docs/architecture/admin_ux_issues_2026-08-01.md` §2.3 追補。
+押下でフルスクリーンモーダル（`admin-graph-review.js`、ES5・`window.GraphReview`・
+admin.js から DI 注入）:
+
+```
+┌───────────────────────────────────────────────────────┐
+│ 🕸 グラフレビュー — <教材タイトル>                  [×] │
+│ [主グラフ|式の詳細|すべて] [☐未レビューのみ] 未レビュー N件 [次の未レビューへ] │
+├──────────────────────┬────────────────────────────────┤
+│                      │ ノード詳細（ElementCard 再利用）│
+│   グラフ             │  backing claims（各行に承認）   │
+│  （ComponentGraph    │  [承認] [却下] [深く検討]       │
+│    View 共有描画）   ├────────────────────────────────┤
+│                      │ AI対話                          │
+│                      │  ノード選択中: この要素について │
+│                      │  未選択: グラフ全体について     │
+└──────────────────────┴────────────────────────────────┘
+```
+
+- **グラフペイン**: 既定は main 層。層トグル・backing 別スタイル（source_backed=通常 /
+  partially=細線 / review_required=点線 / inferred=薄色+⚠）は共有描画モジュールの責務。
+  未レビューフィルタ ON のときは `review_status` が承認済み以外のノードのみ強調表示する
+  （非該当ノードは薄く残す — 構造の文脈を消さない）。
+- **ノード詳細ペイン**: 選択ノードの ElementCard（スタジオのグラフ詳細と同じ DTO 変換を
+  共有）。`component_id` が `theory_components` 行に解決できるノードには
+  [承認][却下]、backing claim（DB UUID に解決できたもの）には行ごとの [承認] を出す。
+  解決できないノード・claim は操作なしで表示だけする（GR7 — 情報は落とさない）。
+  承認不能（inputs/outputs 欠落・出典未設定）はサーバが 422 の事実文で返し、UI は
+  そのまま提示する。
+- **AI対話ペイン**: ノード選択中は W層セッション（`element_type='theory_component'` /
+  `'theory_claim'`、既存 `POST /api/admin/deliberation/sessions` + `/messages`）。
+  候補注釈が返れば既存 annotations API（commit/dismiss）のカードを出す。
+  ノード未選択（またはタブ切替）では**グラフ全体対話**（§5）。どちらの対話も
+  「深く検討」ボタンで既存 W層モーダル（deliberation.js）へ遷移できる。
+
+## 4. 承認 API（新設2本 — 既存遷移ロジックの抽出）
+
+原稿スタジオの component 承認は「フルオブジェクト PUT」で実現されているが、グラフ
+レビュー画面から同じことをすると**画面が持っていない編集中フィールドを巻き戻す事故経路**
+になる。却下に専用 `POST /theory-components/{id}/reject` がある前例に合わせ、
+内容を触らない遷移専用エンドポイントを追加する:
+
+1. **`POST /api/admin/theory-components/{component_id}/approve`**
+   - `_ensure_document_editable`。`status='teacher_reviewed'` /
+     `review_status='teacher_approved'` に遷移（内容フィールドは一切変更しない）。
+   - **サーバ側の承認可能性チェック**: inputs / outputs が空でない、かつ各 item に
+     `source_refs` または `evidence_claims` があること（スタジオのクライアント側
+     ゲート `lsTheoryCanApprove` と同基準をサーバで強制）。満たさなければ 422 +
+     日本語事実文。
+   - 監査は既存 PUT と同じ `_record_review_event(AUDIT_ENTITY_COMPONENT, ...)`。
+2. **`POST /api/admin/claims/{claim_id}/review`**（body: `{"review_status": ...}`）
+   - 許可語彙は `teacher_approved | rejected | needs_revision | teacher_review_required`
+     のみ（それ以外は 422）。`_ensure_document_editable`。
+   - 本文フィールドは一切変更しない。遷移の副作用（監査・`rejected` の伝播
+     `_propagate_rejected_claim`・承認時の R層 `maybe_schedule_item_authoring` 起動）は
+     既存 `update_claim` から**共通関数に抽出して両者が使う**（二重実装しない）。
+
+既存の `PUT /theory-components/{id}` / `PATCH /claims/{id}`（フル upsert）は非改変。
+
+## 5. グラフ全体対話（element_type='document_graph'）
+
+- **セッションの格納は W層の `deliberation_sessions` に相乗り**する（migration 075 で
+  element_type CHECK に `'document_graph'` を追加。`element_id` = document の正規化済み
+  UUID）。`element_annotations` の CHECK は**変更しない** — グラフ全体対話は
+  **注釈を生成しない**（対話のみ。要素単位の候補注釈はノード対話の責務）。
+- **grounding は非LLM・決定論**（`backend/core/deliberation/graph_dialogue.py`、
+  FastAPI 非 import）: 最新の component graph から main 層バックボーン
+  （label / description / theory stage / source_backing_status / review_reasons）、
+  edge の関係（edge_type / backing）、equation_detail 層の規模（件数）、未レビュー
+  ノードの一覧、validation_results、narrative 注釈（あれば）をテキスト整形する。
+  グラフ未構築（ノード0）はセッションを作らず 422 の事実文。
+- **プロンプト制約**: 仮説文体（「〜の可能性があります」）・grounding に現れる関係のみを
+  語る・承認/却下の実行や推奨の断定をしない（GR1。「承認すべき」ではなく「裏付けの
+  状態はこうである」の事実提示に留める）。数値 confidence を出させない。
+- **実行**: `run_turn` は W層 dialogue と同型（1コール・失敗時は degraded 固定文 + 200・
+  `run_with_repair` 不使用 = W6）。履歴ウィンドウは `window_history`（W層と同じ
+  16/4000/head_keep=1）。CostGate は W層の session+daily を共有し、U層 feature のみ
+  `deliberation:graph_chat` で分離（`KNOWN_FEATURES` / `scene_for_feature` に登録、
+  scene は `deliberation` を共用 — 専用 env を増やさない）。
+- **API**（`routes/deliberation.py`）:
+  - `POST /api/admin/deliberation/documents/{document_id}/graph-sessions` —
+    get-or-create（本人 × document で最新セッション再開）。`_ensure_document_viewable`。
+  - `POST /api/admin/deliberation/documents/{document_id}/graph-sessions/{session_id}/messages`
+    — 1ターン実行。セッション所有者のみ。
+  - 既存の `GET /sessions/{session_id}` で履歴取得（element_type を問わない既存挙動）。
+  - ElementRef リゾルバ（`refs.py`）は**変更しない**。`document_graph` は overview /
+    context / annotations / identity の対象外（該当ルートに到達しても既存の未知
+    element_type 拒否がそのまま効く）。
+
+## 6. グラフ描画の共有化（LectureStudio.graphView）
+
+原稿スタジオの `lsGraph*` 群のうち **lsState 非依存の純関数**を
+`window.LectureStudio.graphView` として公開し、グラフレビュー画面が同じ描画で使う
+（GR8。関数は移設しない — 既存静的テストが本体を固定しているため）:
+
+- `filterByLayer(graph, filter)` — 層フィルタの純粋版（`lsGraphForCurrentLayer` は
+  これへの薄い委譲に変更） / `layerOptions(nodes)` — 層トグルの選択肢+件数
+- `layoutPositions(nodes, edges)` / `displayEdges(edges)` — レイアウト・エッジ集約
+- `visNodeSpec(node, index, layoutPositions, pathOrder)` /
+  `visEdgeSpec(edge, index, pathOrder)` / `networkOptions()` —
+  vis-network 構築の正本（`lsInitComponentGraphNetwork` 内のインライン実装を
+  名前付き関数へ抽出し、スタジオ側もこれを通す）
+- `semanticLabel` / `detailHeading` / `nodeTooltip` / `roleLabel` /
+  `sourceBackingLabel` / `reviewReasonLabel` / `edgeLabel` — ラベル語彙
+
+原稿スタジオはツールバー・詳細ペイン（ElementCard）・読み順パス・D層反実仮想
+デコレーションを自分に残す（挙動不変のリファクタ）。グラフレビュー画面の
+ノード詳細ペインはレビュー専用の投影（承認状態・backing claims・操作）で、
+ラベル語彙は上記 graphView から引く（辞書の二重化をしない）。
+
+## 7. UI アンカー・マニュアル（3点セット）
+
+- `ADMIN_UI_ANCHORS` 追加（値の正確な数はテストが正）: `materials.row-graph-review` /
+  `graph-review.modal` / `graph-review.layer` / `graph-review.filter-unreviewed` /
+  `graph-review.next-unreviewed` / `graph-review.approve` / `graph-review.reject` /
+  `graph-review.claim-approve` / `graph-review.chat` / `graph-review.graph-chat`
+  （+ §11.1 で `graph-review.open-deliberation` / `graph-review.new-chat`、
+  §12 で `graph-review.voice`）。
+- マニュアル: `docs/manual/teacher/26-admin-graph-review.md`（新設。操作要素1つ=1節、
+  無効化され得る要素は「無効になっている場合」の節を持つ）。
+- フロントの `data-ui-anchor` は上記と1:1（双方向網羅テストが落ちないこと）。
+
+## 8. テスト・ガードレール
+
+- `test_graph_review_core.py`: grounding の決定論構築（層分割・display_order 順・
+  未レビュー抽出）/ テキスト整形（語彙・上限の省略注記・confidence 非漏洩）/
+  grounding の最初の user メッセージ限定注入 / degraded 縮退。
+- `test_graph_review_api.py`: approve のサーバ側ゲート（inputs/outputs・出典欠落 → 422）/
+  遷移が内容フィールドを触らないこと / claim review の語彙 422 / 副作用の共通化
+  （監査・却下伝播・R層フック）/ graph-session の get-or-create・所有者ゲート・
+  グラフ未構築 422・CostGate 429（数値非漏洩）。
+- `test_graph_review_guardrails.py`: `core/deliberation/graph_dialogue.py` が FastAPI 非
+  import / グラフ全体対話が注釈を書かない（`element_annotations` への INSERT 不在）/
+  AI 応答経路から承認 API を呼ぶコードが無い / プロンプトの仮説文体・断定禁止の契約
+  フレーズ / confidence 生値非漏洩 / CostGate 相乗り（専用 env 定数を作っていない）。
+- `test_graph_review_ui_static.py`: モーダル構造 / 承認・却下・claim 承認ボタンと
+  data-ui-anchor / ES5（アロー関数・const 不使用）/ graphView への委譲
+  （レイアウト・spec 生成・オプションは graphView から取得。`vis.DataSet` /
+  `vis.Network` の**構築自体**は各画面が行う — スタジオも同じ分担。スタイル定数の
+  二重実装が無いことを検証する）。
+- 既存網羅: `test_admin_help_ui_anchors.py`（アンカー3点セット）・
+  `test_docs_registry_guardrails.py`（migration 075・本設計書の索引）・
+  スタジオ回帰（既存 studio ui_static テスト群）。
+
+## 9. 非スコープ（v1）
+
+- **一括承認**（説明レビューキューの bulk-review 同型の拡張は Phase 2 候補。v1 は
+  1件ずつ + 「次の未レビューへ」ナビ）
+- **edge の承認操作**（edge の review_status は導出値 — 元の component / claim /
+  derivation 側を確定するのが筋）
+- **equation / evidence / derivation ノードの承認**（承認ステータスを持つのは
+  component / claim のみ）
+- **G層 To-Do ルール（`material.components_unreviewed`）** — 解析直後は常に全件
+  未レビューで恒常点灯するため、運用実測後に判断（カテゴリギャップ §4.6 と同じ姿勢）
+- **学習者向け表示** / グラフ全体対話からの候補注釈生成 / レビュー担当の分担・割当
+
+## 10. 設計判断の記録
+
+- **なぜ承認をフル PUT でなく遷移専用 API にするか**: グラフレビュー画面は component の
+  編集フォームを持たない。フル PUT を使うと「画面が読み込んだ時点のオブジェクト」で
+  上書きすることになり、スタジオでの同時編集を巻き戻す。`/reject` の前例に合わせ、
+  遷移だけを行う API に分離した。
+- **なぜグラフ全体対話は注釈なしか**: 候補注釈（element_annotations）は要素単位の
+  commit ルーティング（C層 explanation / summary / teacher_notes）を前提にしており、
+  「グラフ全体」には返す先がない。全体対話は見取り図の検討に限定し、確定につながる
+  操作は必ずノード（要素）単位に降りてから行う。
+- **なぜ CostGate を W層と共有するか**: 本画面の対話は W層対話の別入口であり、同一
+  教員の同一作業文脈で消費される。上限を分けると「どちらの上限に当たったか」の説明
+  コストが増えるだけで保護は増えない。U層 feature の分離で計測上の区別は保たれる。
+
+## 11. 実装記録（2026-08-29）
+
+同日、本設計のとおり v1 を全実装した。設計からの変更点・確定事項:
+
+- **GR8 の実装方式変更**（§2/§6 に反映済み）: 新ファイルへの描画ロジック抽出ではなく、
+  原稿スタジオが `window.LectureStudio.graphView` として純関数群を公開する方式にした。
+  既存の静的ガードレール群がスタジオ内の関数本体を固定していたため（単一実装という
+  不変条項の実質は同じ）。スタジオ側は `lsGraphForCurrentLayer` →
+  `lsGraphFilterByLayer(graph, filter)` の純粋化と、`lsInitComponentGraphNetwork` からの
+  `lsGraphVisNodeSpec` / `lsGraphVisEdgeSpec` / `lsGraphNetworkOptions` の抽出のみ
+  （挙動不変。studio 系静的テスト全通過で確認）。
+- **API パスは `graph-sessions`（複数形）**: W層ガードレール
+  （`test_deliberation_guardrails.py` の POST 許可リスト）に整合させた。
+- **既存 `/reject` の権限ゲートを是正**: 従来は `_ensure_editable(course_id)` のみで、
+  course_id を持たないパイプライン生成 component が常に 404 だった。新設の
+  `_ensure_component_editable`（document 単位が主経路・course フォールバック付き）を
+  approve / reject の両方が使う。
+- **`reference_index.claims` に `review_status` を追加**（additive）: レビュー画面の
+  claim 行が承認ボタンの活性判定に使う。
+- **U層/M層登録**: `deliberation:graph_chat` を `KNOWN_FEATURES` +
+  `_FEATURE_ENV_SETTINGS`（`deliberation_llm_model` / fast）に登録。scene は
+  `deliberation:` prefix で SCENE_DELIBERATION に自動的に束ねられる。
+- **実装ファイル**: migration `backend/db/075_graph_dialogue_sessions.sql` /
+  `backend/core/deliberation/graph_dialogue.py` / `routes/deliberation.py`
+  （graph-sessions 2本）/ `routes/theory_components.py`（approve・claim review・
+  `_apply_claim_review_side_effects` 抽出）/ `frontend/public/js/admin-graph-review.js`
+  （ES5・`window.GraphReview`）/ admin.js（行ボタン・DI・アンカー解決）/
+  admin.html / styles.css（テーマ変数のみ）。
+- **3点セット**: マニュアル `docs/manual/teacher/26-admin-graph-review.md` +
+  `ADMIN_UI_ANCHORS`（graph-review.* + materials.row-graph-review。正確な件数は
+  `backend/tests/test_admin_help_ui_anchors.py` が正）+ data-ui-anchor。
+- **テスト**: `test_graph_review_{core,api,guardrails,ui_static}.py` +
+  既存網羅（anchors / docs registry / studio 静的群）。
+- **残課題**: docker 実機 E2E（グラフ描画・対話・承認の通し確認）。原稿スタジオ側の
+  論理要素カードの承認（フル PUT 経路）は非改変のまま — 将来 approve エンドポイントへ
+  寄せるかは別判断。
+
+### §11.1 実装レビューと是正（2026-08-29 同日・Opus 3系統の敵対的レビュー）
+
+初回実装（8cdead7）に対し独立レビュー（backend / frontend / integration）を実施し、
+確認された欠陥を全て是正した:
+
+- **[critical] approve/reject を遷移専用 UPDATE に変更**（`_transition_component_review`）:
+  旧実装の `_dump_model(existing)` → `_update_component` 往復には ①`_row_to_out` が
+  `component_type` に自由語彙（component_type_text）を投影するため CHECK 制約違反で
+  500 ②`TheorySourceScope` が extra を落とすため `source_scope.legacy_ids` /
+  `figure_id` / `figure_key` を破壊、の2欠陥があった。遷移は status / review_status
+  （承認時は maturity_source / validation_warnings も）だけを UPDATE し、監査は
+  **実行者 user_id 付き**で記帳する（`_update_component` 内の記帳は changed_by=NULL
+  だった）。却下伝播は従来同等。
+- **[critical] 集約 main ノード（graph-native ID）の 500 防止**: `theory_op_0001` 等は
+  theory_components 行を持たず `CAST(:id AS uuid)` が DataError → 500 だった。
+  `_get_component` / `review_claim` に UUID 事前判定（`_is_db_uuid`）を追加して 404 化し、
+  UI は非 UUID ノードに承認/却下ボタンを出さず事実文で案内（設計 §3 の規定どおり）。
+- **[critical] レビューループの閉塞是正**: stored graph の焼き込み `review_status` が
+  常に優先され、承認しても再取得に反映されなかった。**人間の判断**
+  （approved/rejected/needs_revision 系）は live の `theory_components.review_status`
+  を優先する（`_normalize_stored_component_graph` + core 側
+  `merge_live_review_statuses` — 導出語彙 source_backed 等は焼き込み値を保つ）。
+- **[major] narrative キー是正**: 永続キーは `graph_summary`（旧 `summary` 参照は本番で
+  常に空 — テスト fixture のキー誤りが隠していた）。
+- **[major] セッション上限後の再開手段**: graph-sessions に `force_new=true` を追加し、
+  UI はグラフ全体対話の 429 時のみ「新しい対話を開始」（`graph-review.new-chat`）を出す
+  （旧対話の記録は残る = GR7）。
+- **[minor 一式]**: CostGate 消費を全 422 経路の後へ移動 / `_resolve_graph_document` に
+  SYSTEM_ADMIN 分岐（編集ゲートと対称）/ 承認可能性チェックに name・source_chunks を
+  追加（PUT 経路 `_validate_for_review` と同基準）/ `_NODE_CLAIM_ID_KEYS` を UI と同じ
+  4キーに拡張 / claim レビューの TOCTOU 404 化。
+- **[frontend 一式]**: チャット送受信のセッションキャッシュ書き戻し（タブ往復で会話が
+  消えない）/ 送信時のモード・ノード固定（作成中の切替で別対象へ grounding される競合の
+  解消）/ グラフ未ロード時の null ガード / vis 不在の事実文 / 操作結果メッセージの
+  再描画持ち越し / 未解決 claim の内部 ID 非表示 / 承認後再読み込みでのズーム・パン維持 /
+  「深く検討」にアンカー付与。アンカーは +2（`graph-review.open-deliberation` /
+  `graph-review.new-chat`）。
+
+## 12. 音声対話追補（2026-08-29）
+
+同日、グラフレビュー画面のチャットをハンズフリー音声で進められるようにした
+（migration なし・新テーブルなし・新しい判断経路なし）。
+
+- **目的**: 学習画面のハンズフリー音声会話と同等の操作感を、教員のレビュー画面にも
+  持ち込む。グラフを見ながら発話し、応答を聞きながら次を考える — キーボードから手を
+  離してレビューを進めるための入出力手段であって、判断の経路ではない。
+- **学習側資産を流用しない判断**: 学習画面の音声ループは `app.js` にベタ書きで、既存の
+  静的テストが本文の文字列を直接検査している（学習側の改変は回帰の危険が大きい）。
+  そこで **DOM 非依存のエンジン `frontend/public/js/admin-voice-chat.js`**
+  （ES5・`window.AdminVoiceChat`・VAD 定数とセグメント方式は学習側と同一）を新設し、
+  画面・API・文言はすべて呼び出し側がコールバックで注入する形にした。**学習側
+  （`app.js` / `index.html` / `routes/learning.py`）は非改変**。
+- **API 2本**: `POST /api/admin/deliberation/voice/transcribe`（multipart・1発話分・
+  上限10MB）/ `POST /api/admin/deliberation/voice/speak`（MP3 base64）。いずれも
+  `_require_teacher` の fail-closed で、**DB を変更しない**。読み上げ前に
+  `core.tts.strip_text_for_speech` で LaTeX・markdown 記号・出典マーカーを除去する。
+  openai プロバイダ以外では STT が 503（未対応を正直に返す）。
+- **コスト上限（day-only CostGate）**: 正本は
+  `core/deliberation/dialogue.py::check_and_count_voice_call`。STT / TTS 共通の
+  1ユーザー日次カウンタ1本で、env は `DELIBERATION_VOICE_MAX_CALLS_PER_DAY`（既定
+  200）。**GR5 の対話上限（W層 `DELIBERATION_MAX_CALLS_*`）とは独立**  — 音声は
+  入出力の手段であって対話ターンそのものではないため、セッション単位の上限は持たない。
+  上限到達は 429 + 数値を含まない日本語事実文。
+- **U層 feature の分離**: `deliberation:voice_stt` / `deliberation:voice_tts` を
+  `KNOWN_FEATURES` に追加（学習側 `learning:voice_*` と混ぜない）。scene は
+  **読み取り専用の音声場面**へ束ねる（STT は `settings.llm_transcribe_model` 直参照・
+  TTS は provider 固定で、どちらも policy の解決経路を通らない。設定できるのに何も
+  起きない場面を増やさない — M4/M5）。`llm_policy.scene_for_feature` の音声分岐は
+  `deliberation:` prefix の分岐より前に置く。
+- **GR1 の維持**: 音声からできるのはチャットの送受信だけで、承認・却下 API を呼ぶ経路は
+  作らない。文字起こし結果は既存のテキスト送信経路（`sendChatText`）にそのまま渡り、
+  表示・セッション・上限の扱いはテキスト入力と同一になる。確定は従来どおり教員の
+  ボタン操作のみ。
+- **停止条件と数値非表示**: 429（音声上限・対話上限のいずれも）を受けたらループを止め、
+  事実文だけを残す（回し続けない）。画面を閉じたとき・再度開いたときも必ず停止して
+  マイクを解放する。残回数・上限値・秒数などの数値は UI に出さない（GR3）。
+- **実装ファイル**: `frontend/public/js/admin-voice-chat.js`（新設）/
+  `frontend/public/js/admin-graph-review.js`（🎤 トグル・状態表示・`sendChat` →
+  `sendChatText(content, cb)` の分離・音声配線）/ `frontend/public/js/admin.js`
+  （`getAuthToken()` 新設と DI — multipart は JSON 前提の `apiFetch` を通せないため
+  素の fetch に Bearer を載せる）/ `frontend/public/admin.html`（読み込み順は
+  lecture-studio < voice-chat < graph-review < admin.js）/ `css/styles.css` /
+  `backend/api/routes/deliberation.py` / `backend/core/deliberation/dialogue.py` /
+  `backend/core/config.py` / `backend/core/llm_usage/schema.py` /
+  `backend/core/llm_policy.py` / `.env.example`。
+- **3点セット**: マニュアル節
+  `docs/manual/teacher/26-admin-graph-review.md#voice-chat`（音声で対話する）+
+  `ADMIN_UI_ANCHORS` の `graph-review.voice` + フロントの
+  `data-ui-anchor="graph-review.voice"`（正確な件数は
+  `backend/tests/test_admin_help_ui_anchors.py` が正）。
+- **テスト**: `test_graph_review_voice_api.py`（権限 fail-closed・空/過大音声・上限 429 の
+  数値非漏洩・`strip_text_for_speech` 適用・U層 feature の帰属・DB 非変更）+
+  `test_graph_review_ui_static.py::TestVoiceChat`（エンジンの ES5・`window.AdminVoiceChat`・
+  DOM 非依存＝`data-ui-anchor` 不在・読み込み順・音声区画から承認/却下 API を呼ばない
+  こと・429 でのループ停止・close での停止）+ 既存網羅（anchors / docs registry）。
+- **残課題**: docker 実機 E2E（マイク許可・無音区切り・読み上げの通し確認）。
+
+## 13. 「深く検討」の要素解決の是正（2026-09-01）
+
+グラフレビューでノードを選び「深く検討」を押すと、ほぼ全てのノードで
+「この要素の指定が不正です（equation は document_id が必要です）」と表示され、
+W層モーダルが開けなかった。原因と是正:
+
+- **根本原因（ID の層のずれ）**: 理論操作グラフのノード ID は **graph-native**
+  （`normalizer.py` が付ける `theory_op_0001` = 集約 main ノード / `eq_op_0001` =
+  式の詳細層）で、`persistence.persist_component_graph` の
+  `component_id_map.get(agent_id, agent_id)` にも一致しないため、そのまま
+  `theory_component_graphs.graph_json` に残る。つまり main / equation_detail の
+  **全ノードは theory_components の行を持たない**（DB UUID になるのは、derivation が
+  空でフォールバックした component ノードと debug 層の component ノードだけ）。
+  旧 `openDeliberation` はこのノード ID を `theory_component` の element_id として
+  そのまま渡していたため、overview（厳格な `refs.resolve`）が
+  `ElementResolutionError(kind="invalid")` → 422 を返し続けていた。
+- **表示の二重の誤り**: フロント `deliberation.js::_renderError` は 422 を一律
+  「equation は document_id が必要です」と表示していたため、原因と無関係の文言が出ていた。
+- **是正1（受け口）**: `overview` / `annotations`（一覧）/ `sessions`（作成）を
+  `refs.resolve_with_agent_id` に切り替え、theory_component / theory_claim の
+  **agent 側 ID（`comp_003` 等）を `document_id` スコープで解決**できるようにした
+  （context ルートと同じ規約。document_id が無ければ解決しない fail-closed）。
+  永続化・後続呼び出しに載るのは常に解決後の DB UUID なので
+  `POST .../sessions/{id}/messages` は厳格な `resolve` のまま。
+- **是正2（渡す ID）**: `admin-graph-review.js` に `deliberationTargetId(node)` を追加し、
+  DB UUID → `representative_component_id` → `linked_component_ids[0]` の順で代表要素へ
+  解決する。どれも無いノードでは **ボタンを出さず事実文で案内**する（承認・却下ボタンの
+  `isDbUuid` 分岐と同じ流儀。422 の裏に隠さない）。集約ノードでは「深く検討は集約元の
+  代表要素を開く」ことを事実文で明示する。ノード対話（W層 sessions）も同じ解決規則を
+  使い、解決できないノードではリクエストせず事実文だけを出す。
+- **是正3（事実文）**: `_http_from_resolution_error` の detail を日本語の事実文に統一し
+  （内部 ID・英語の例外メッセージを教員 UI に出さない。原因は logger 側へ）、
+  `_renderError(status, detail)` はサーバの detail をそのまま表示する（無いときだけ
+  status 由来の汎用文言へ縮退）。agent 側 ID のときは `_documentIdQuery` が
+  `document_id` を必ず載せ、overview の応答 `ref` で `chatState.ref` を正準化する。
+- **テスト**: `test_graph_review_api.py`（agent 側 ID の解決・document スコープ外は 404・
+  document_id なしは DB を触らず 404・graph-native ID は解決しない・detail の事実文性と
+  内部 ID 非漏洩・sessions/annotations が正準 DB UUID を使うこと）+
+  `test_graph_review_ui_static.py::TestDeliberationTargetResolution` +
+  `test_deliberation_ui_static.py`（旧固定文言の不在・detail 優先・agent 側 ID の
+  document スコープ・ref の正準化）。
+- **非変更**: A層（`src/episteme_graph/agents/`）・承認 API・グラフ描画・stored graph の
+  ノード ID（既存グラフを書き換えない）。集約 main ノードそのものを承認対象にはしない
+  （v1 の非スコープ）。
+
+### §13 追補（同日・統合時）
+
+- **原稿スタジオの同根修正**: `admin-lecture-studio.js` のグラフ詳細カード
+  （`lsGraphNodeCardOpts`）も生ノード ID を `openElement("theory_component", ...)` に
+  渡していたため、同じ規則の `lsGraphDeliberationTargetId(node, nodeId)`
+  （DB UUID → 代表 component → linked 先頭）に切り替え、解決できないノードでは
+  「深く検討」ボタンを出さない。回帰は
+  `test_graph_review_ui_static.py::TestStudioDeliberationTargetResolution`。
+- **review_reasons の表示是正（グラフレビュー詳細ペイン）**: サーバの読み時射影
+  （`theory_components.py::_normalize_stored_component_graph`）に合わせて、
+  ①レビュー要求（従来どおり「要確認の理由: 」・警告色）②`source_backed` ノードの
+  warning（「解析メモ（参考）: 」・非警告色）③承認済みノードの解析時点メモ
+  （`review_reasons_at_analysis` を「解析時点のメモ（承認済みのため確認は不要です）: 」・
+  非警告色）を見出しと色で区別する。ヘッダーに `graph_updated_at` の事実文
+  「（YYYY-MM-DD の解析結果を表示しています）」を常時表示し、焼き込みグラフの鮮度を
+  隠さない。回帰は `test_graph_review_ui_static.py::TestReviewReasonPresentation`。
+
+## 14. 根拠 claim の読み時 artifact フォールバック（2026-09-02）
+
+**症状**: ノード詳細ペインの「根拠 claim」行が「未解決の根拠（本文を取得できません）」
+＋チップ「未解決」になり、根拠の中身が読めない。
+
+**構造的な原因（承認ステータスのフィルタではない）**: グラフのノードが参照する
+`linked_claim_ids` / `input_claim_ids` / `output_claim_ids` / `required_claim_ids` /
+`evidence_claim_ids` には、**`theory_claims` に行が存在しない claim ID** が含まれる。
+`persist_qualified_claims`（`core/document_pipeline/persistence.py`）が永続化するのは
+ClaimQualification の `qualified_spans` だけで、
+
+- ClaimObjectBuilder の atomic rewrite 子 claim（親 ID + 連番サフィックス。
+  `claim_object_builder/builder.py::_make_claim_id` / `_dedup_id`）
+- orchestrator の `_hook_equation_claim_synthesis` が作る式由来の合成 claim
+  （`synth_claim_*`）
+
+は DB へ落ちない。`_resolve_claim_reference_index` は `theory_claims` だけを索いていた
+ため、これらが常に未解決になっていた。**claim_objects の claim を `theory_claims` へ
+永続化するかどうかはオーナー判断の別件**（A層・persistence の変更を伴う）なので、
+本修正は読み時のフォールバックに留める。
+
+**修正（`api/routes/theory_components.py` のみ・migration なし・A層非改変）**:
+`_resolve_claim_reference_index(document_id, ref_ids, artifacts=None)` を2段解決にした。
+第1段は従来どおり `theory_claims`（DB UUID / `source_scope.span_id` / `legacy_ids`）。
+第2段は DB で解決できなかった ID を `claim_object_builder` artifact
+（`ClaimObjectBuildResult.to_dict()`）から解決する。artifact は
+`_build_graph_reference_index` が claim / evidence / derivation で**1回だけ**読み、
+以降へ渡す（追加 SELECT を増やさない）。artifact が無い古い run では第1段の結果が
+そのまま返る（fail-soft。例外は log + 継続）。
+
+**`reference_index.claims[ref_id]` の契約（additive。既存キーは不変）**:
+
+| 経路 | 内容 |
+|---|---|
+| DB 解決 | `{"claim_id": <DB uuid>, "text": 本文, "review_status": <語彙>, "resolution": "db"}` |
+| artifact 解決 | `{"claim_id": "", "text": 本文, "review_status": "", "resolution": "artifact", "origin": ..., "support_status": ..., "is_atomic": ..., "parent_claim_id": ..., "parent_review_status": ...}` |
+
+- `claim_id` が空 = DB 行が無く**承認 API の対象にならない**ことの明示（UI はこれで
+  承認ボタンの有無を判断する。本文は出したうえで「未承認（解析結果）」と正直に見せる）。
+- `origin`: `synth_claim_` 接頭辞 → `equation_synthesis` / `parent_claim_id` を持つか
+  「artifact 内に実在する親 ID + 連番サフィックス」 → `atomic_rewrite` / それ以外 →
+  `claim_object`。
+- `parent_claim_id` / `parent_review_status`: artifact 側の `parent_claim_id` および
+  `source_span_ids` を、**第1段で取得済みの同一 document の `theory_claims` 行**
+  （span_id / legacy_ids キー）へ突き合わせて解決する。claim ごとの追加 SQL は発行
+  しない。解決できなければ空文字。
+- **GR3**: confidence 等の生数値と LLM の `reason` / `qualification_reason` は載せない。
+  索引のキー以外に agent 側 ID を露出させない。
+
+**テスト**: `test_component_graph_reference_index.py`（`TestArtifactClaimFallback` =
+synth claim の origin・atomic 子 claim の親 UUID と review_status・DB 解決の優先・
+未解決 ID は索引に載らない・数値非漏洩・壊れた artifact で例外を出さない、および
+`TestBuildGraphReferenceIndex` の結線と artifact 単一ロード）。既存の DB 解決テストは
+`"resolution": "db"` の追加のみ。
+
+**非変更**: A層（`src/episteme_graph/agents/`）・`persistence.py`・DB スキーマ・
+承認 API・グラフ描画。
+
+### 14.1 追補: 式由来 claim の数式表示（2026-09-03）
+
+**症状**: 上記フォールバックで本文が出るようになった結果、式由来の合成 claim
+（`origin="equation_synthesis"`）が
+`In equation (delta-fourier), F_n(\mathbf{k}_1,\ldots,\mathbf{k}_n) depends on ...` /
+`Equation (eq_tex_b55) defines P_{\rm L}(k).` のように**生 LaTeX がそのまま散文に
+埋まった状態**で表示される。区切り子が無いため数式として描画できない。
+
+**原因**: `src/episteme_graph/agents/claim_object_builder/equation_claim_synthesis.py`
+が `sem.defined_symbols[].symbol` / `sem.used_symbols` / derivation の
+`eliminated_symbols` / `retained_symbols` を f-string へ素のまま補間していた。
+本文中のインライン数式の記法は `$...$`（原稿スタジオの `preserveMath` が扱う記法）。
+
+**修正1 — 生成側（決定論・LLM なし）**: 同ファイルに `_math(symbol)` /
+`_math_list(symbols, limit=4)` を追加し、**全テンプレート**（`Equation ({label})
+defines ...` / `In equation ({label}), ... depends on ...`（入力記号は個別に包んで
+`", "` 結合）/ `... to eliminate ...` / `while retaining ...` / `... relating ...`）が
+記号を `$...$` で包むようにした。`_math` は冪等（既に `$...$` / `\(...\)` の記号は
+二重に包まない・前後の空白は除去・空文字は空文字）。`relating` のフォールバック文言
+`the listed quantities` は記号ではないので**包まない**。`normalized_text == text` の
+関係と、`concepts[].name`（下流で概念名・記号名として使う）が**素の記号のまま**で
+あることは不変。
+
+**修正2 — 読み時の旧 artifact 投影**: 既存 run の artifact には区切り子の無い本文が
+残っている。`api/routes/theory_components.py` に純関数
+`_delimit_synth_claim_math(text, concept_names)` を追加し、
+`_resolve_artifact_claim_reference_index` が `origin == "equation_synthesis"` かつ
+本文に `$` も `\(` も無いレコードにだけ適用する（`atomic_rewrite` / `claim_object` は
+対象外）。規則は決定論:
+
+- 対象は当該レコードの `concepts[].name`。長い名前から順に走査し、包んだ区間は
+  以降の走査対象にしない（二重包み・入れ子が起きない）。
+- `\ _ ^ { } ( )` を含む名前（LaTeX 記号）は部分一致。それ以外は**独立トークン**
+  （前後が非英数字）でのみ一致。さらに純 ASCII アルファベットの語は4文字以上と
+  テンプレート語（`a` / `in` / `the` / `system` / `equation` …）を除外する
+  （`n` が "In equation" に当たる類の誤包みを構造的に防ぐ。包み損ねは表示の劣化に
+  留まるので慎重側へ倒す）。
+- スニペット丸め（`_REFERENCE_TEXT_SNIPPET_MAX = 200`）は `_truncate_reference_text`
+  へ切り出し、**`$...$` の途中で切らない**（切り口の `$` が奇数個なら直前の開き `$`
+  の手前で切る）。投影は丸めの**前**に適用する。
+
+**旧 artifact の自然解消**: `_hook_equation_claim_synthesis`（`core/document_pipeline/
+orchestrator.py`）は `_PIPELINE_STEPS` に `PipelineStageDef(None, ...)` として登録された
+**フック**で、ステージ名を持たないため `should_use_artifact` による resume スキップの
+対象にならず、ランナーループがそこへ到達する限り**毎回実行される**。その中の
+`_synthesize_equation_claims` は既存の `synth_claim_*` を claim 集合から外して
+（`prose_claims`）index 1 から作り直し、生成物があれば
+`ctx.save_artifact("claim_object_builder", ...)` で artifact を上書き保存する
+（resume 時も `ctx.equations` / `ctx.claim_objects` は artifact から再水和されるので
+入力は揃う）。よって**再解析（restart）が合成フックまで到達すれば、その run の
+artifact は `$` 付きの本文で作り直される**。逆に、合成が例外を投げた場合・合成結果が
+空の場合は artifact を保存しない（既存の live 参照を壊さないための既存挙動）ので、
+その run では旧本文が残り、読み時投影が受け持つ。
+
+**テスト**: `src/tests/agents/claim_object_builder/test_equation_claim_synthesis.py`
+（各テンプレートの厳密文言・LaTeX 記号の `$` 付与・二重包みなし・concept 名に `$` が
+付かないこと・フォールバック文言・`_math` の冪等性）/
+`backend/tests/test_component_graph_reference_index.py`
+（`TestLegacySynthClaimMathDelimiting` = 旧本文への付与・テンプレート語の非包み・
+既に `$` 付きの本文は不変・`atomic_rewrite` / `claim_object` は不変・丸めが数式を
+割らない）。
+
+**非変更**: DB スキーマ・migration・LLM 呼び出し・A層の他 agent・承認 API。
+
+## 15. 応答文体の改訂 — 留保はラベルで（2026-09-10）
+
+グラフレビューのチャット（テキスト・音声とも）で、オーナーから3点の不具合報告が
+あった。①応答に生 LaTeX（`\(\delta(t,\bm{x})\)`）と `[0m`（ANSI カラーリセットの
+残骸）がそのまま出る ②音声モードが書き言葉の応答をそのまま読み上げる（箇条書き・
+記号・聞き手を想定しない言い回し）③**すべての文が「〜の可能性があります」で終わる**
+（プロンプト契約が文ごとの留保を要求していたため）。
+
+**オーナー裁定（確定・拘束的）**: 留保は**返答全体に1つ付く固定ラベル**にする。
+文ごとの仮説文体はやめ、応答は簡潔な断定調で書く。**GR1（承認・却下の推奨をしない）・
+捏造ガード（grounding に無い関係・根拠を作らない）・数値の確信度を出さない**の3点は
+一切変えない — 変えるのは**文体**であって、AI が確定に関与しない構造ではない。
+
+> 実装番号の注記: 本節は当初「§13」として起票されたが、§13（要素解決の是正）・
+> §14（根拠 claim の artifact フォールバック）が先に埋まっていたため §15 とした。
+
+### 15.1 プロンプト契約の変更（両対話モジュール）
+
+`core/deliberation/graph_dialogue.py::_INSTRUCTION_HEADER` と
+`core/deliberation/dialogue.py::_INSTRUCTION_HEADER` の**文ごとの留保の指示を撤去**し、
+以下の**新しい固定文**へ置き換えた（両ヘッダに同文を置く。ガードレールが原文 grep する）。
+
+```
+文ごとに「〜の可能性があります」のような留保を繰り返さず、簡潔な断定調で書いてください。
+不確かさは返答全体に付く「AIの読み（未確認）」のラベルで示されます。
+```
+
+併せて数式の表記契約を両ヘッダに足した（生 LaTeX 漏れの再発防止）。
+
+```
+数式は必ず `$…$` で区切ってください（`\(…\)` は使わない）。
+```
+
+撤去した旧文言は、graph_dialogue が
+「内容の正しさについては断定せず、「〜の可能性があります」のような仮説の文体で述べてください。」、
+dialogue が「断定は避け「〜の可能性がある」「〜と考えられる」のような仮説的な言い回しに
+してください。」。**逐語で維持した契約フレーズ**は
+「承認・却下の判断は教員が行います」/
+「グラフに現れていない関係・根拠を作らないでください（無い場合は「グラフには現れていません」と述べる）」/
+「数値の確信度・スコアを述べないでください」の3つ。
+
+**ラベル定数の正本は1箇所**: `core/label_vocab.py::AI_READING_LABEL = "AIの読み（未確認）"`。
+段階スケールではなく単一の固定文字列なので表は作らない。両対話モジュールと route 層は
+これを import し、リテラルを重複させない（ガードレールが重複を検出する）。
+
+### 15.2 読み上げモード（`response_mode` / `spoken`）
+
+**LLM コールは1ターン1回のまま**（GR5 のコスト相乗り・W6 を崩さない）。
+
+- `dialogue.run_turn` / `graph_dialogue.run_graph_turn`（および両者の
+  `build_llm_messages`）に `response_mode: str = "text"` を追加した。
+  `"spoken"` のときだけヘッダ末尾に読み上げ契約を足す。
+
+  ```
+  音声で読み上げるための spoken を別に返してください。結論を先に、3〜5文、
+  箇条書き・見出し・記号・LaTeX を使わず、数式は言葉で読み下してください
+  （例: 密度ゆらぎ デルタ、波数 k のフーリエ変換）。
+  ```
+
+- `spoken` は**同じ structured output コール**で受け取る。text 経路のスキーマを
+  一切変えないため、出力モデルは継承で分けた（`_DialogueTurnOutput` /
+  `_DialogueTurnOutputSpoken`、`_GraphTurnOutput` / `_GraphTurnOutputSpoken`）。
+  **`response_mode="text"` のときの LLM 入力（メッセージ列・スキーマ）は改訂前と
+  バイト同一**（回帰テストで固定）。
+- **サーバ側検証**: `dialogue.resolve_spoken_text(spoken, reply)` が
+  `core.text_hygiene.strip_control_sequences` → `core.tts.strip_text_for_speech`
+  （読み上げ整形の既存正本。二重実装しない）を通す。LLM が `spoken` を省いた場合は
+  `reply` から決定論的に生成する（読み上げが無音にならない）。
+- 結果 DTO は `DialogueTurnResult.spoken` / `GraphTurnResult.spoken`（text 経路は
+  `None`）。degraded 応答でも spoken モードなら固定文の読み上げ用テキストを返す。
+
+### 15.3 テキスト衛生層（`core/text_hygiene.py`）
+
+新設の純粋モジュール（FastAPI / DB / LLM を import しない）。
+`strip_control_sequences(text)` が ANSI エスケープ（`\x1b[...m`）・ESC が落ちた裸の
+SGR 残骸（`[0m` / `[1;32m`）・`\n` `\t` 以外の C0 制御文字を除去する。適用箇所は3つ:
+
+1. 両 `run_turn` 経路の LLM 応答（`reply` / `spoken`）— 画面へ出す前。
+2. `core/assistant_context/registry.py::render_block` の各事実文 — grounding が
+   制御残骸を運ぶと LLM の応答へ転写されるため、入口で落とす（SA層は非改変・
+   解決器の契約は不変）。
+3. `core/graph_paper_layer/schema.py::truncate_snippet` — artifact 由来のスニペット。
+
+`core/tts.py::strip_text_for_speech` も同じ除去に加えて `\(…\)` / `\[…\]` 形式の
+LaTeX を落とすようにした（シグネチャ・既存の除去規則は不変）。
+
+### 15.4 API
+
+`MessageCreateRequest` / `GraphMessageCreateRequest` に
+`response_mode: Literal["text","spoken"] = "text"`（未指定は完全な従来動作）。両
+メッセージ応答に `spoken`（str|None）と `stance_label`（常に `AI_READING_LABEL`）を
+追加した。**永続化するのは従来どおり `reply` のみ** — `spoken` もラベルも
+`deliberation_sessions.messages` に書かない（SA6 と同型: 表示のための派生物は保存しない。
+ラベルはサーバ定数なので過去メッセージにも同じものが付く）。音声 `speak` ルートの
+`strip_text_for_speech` 適用は不変。
+
+### 15.5 テスト
+
+`test_graph_review_guardrails.py`（新契約文の原文存在・**旧の文ごと留保指示の不在**・
+ラベル定数の単一正本＝リテラル重複の禁止）/ `test_graph_review_core.py`（spoken 経路の
+出力・text 経路のメッセージ列がバイト同一）/ `test_graph_review_api.py`・
+`test_deliberation_api.py`（`stance_label` / `spoken` の返却・保存は reply のみ）/
+`test_deliberation_dialogue.py`（`resolve_spoken_text` の縮退）/ `test_text_hygiene.py`
+（新設）/ `test_tts_strip_text_for_speech.py`（新設）。
+
+**非変更**: migration・DB スキーマ・CostGate・U層 feature・M層 scene・承認 API・
+grounding の構築規則・A層。
+
+---
+
+## 16. 解析時の警告を承認で消さない（是正 F6・2026-09-10）
+
+[六つのレンズ調査](../architecture/vision_ux_gap_six_lenses_2026-09-10.md) §4 第1波 #5
+（`six_lenses_2026-09-10/05_ai.md` 提案2 の前半・`02_teacher.md` §1-8）の是正。
+migration なし・LLM コールなし・承認可能性の判定は非改変。
+
+**問題**: component の承認時に `theory_components.validation_warnings` を空配列で上書きして
+いた（`_transition_component_review` の UPDATE と `_normalize_payload`）。承認ゲート
+（`_component_approval_problems`）は出典を `source_refs` **または** `evidence_claims` で
+認めるのに対し、警告の導出（`_validation_warnings`）は `source_refs` のみを見るため、
+**承認できる component にも解析時の警告が残る**。それを消すと「何を見て承認したか」を
+後から再構成できない（vision §4 改訂原則1 / 原則3 = 情報を落とさない）。
+
+**是正**:
+
+- 消去をやめ、承認後も列にそのまま**退避**する（ノードの `review_reasons_at_analysis` と
+  同じ流儀。graph_json は書き換えない）。
+- `ComponentGraphNode` に additive キー `validation_warnings`（`{"field", "message"}` の
+  配列）。読み時射影 `_node_validation_warnings(component)` が live component から作り、
+  数値（`confidence` / `weight`）は落とす（GR3 / PL4）。component 行を持たない集約 main
+  ノードは空配列（キーは常に出す）。
+- レビュー画面（`admin-graph-review.js`）はノード詳細の**承認ボタンより前**に事実文として
+  並置する（`ANALYSIS_WARNING_HEADING` =「解析時点の警告（承認は止めません。内容を確認の
+  うえ判断してください）:」）。件数バッジは作らず、警告があっても承認ボタンは活性のまま
+  （弁を増やさない・確定を止めない）。CSS は警告色を使わない
+  （`.graph-review-detail-analysis-warnings`）。
+
+**非スコープ（この波では入れない）**: 05_ai.md 提案2 の後半（否定側だけを見る検査 worker と
+`element_annotations.kind='inspection'` の追加）は LLM 系統・migration を伴うため別件。
+本是正は「既にある警告を消さない・見えるところに置く」までを担う。
+
+**テスト**: `test_graph_review_guardrails.py::TestApprovalKeepsAnalysisWarnings`（空配列
+代入の不在・承認ゲート非改変・射影に数値が無いこと）/ `test_graph_review_api.py::
+TestNodeAnalysisWarningProjection` + 遷移 SQL に `validation_warnings` が現れないこと /
+`test_graph_review_ui_static.py`（見出しの原文・承認ボタンより前・承認を無効化しないこと）。
+
+---
+
+## 17. グラフの読みやすさ — 層状レイアウトと配置の記憶（2026-09-17）
+
+教員の指摘 2 点への是正。migration なし・新 API なし・LLM コールなし・承認の意味論は非改変。
+
+**問題**
+
+1. **ノードが一直線に並ぶ**。`lsGraphLayoutPositions`（graphView の正本）は、ノードの初期段
+   をラベルの語彙（`assumption` / `method` / `conclusion` …）から決め、辺で伝播させる段に
+   `Math.min(4, …)` の上限を掛けていた。上位理論構成のラベルは語彙上ほとんどが `relation`
+   に落ちるため全ノードが同じ段から始まり、さらに深さが 4 で頭打ちになる。式の詳細層では
+   30 ノード中 28 個が同じ段に入り、横一列に伸びて構造が読めなかった。段内の並び順
+   （`lsGraphNodeSortKey`）も特定論文の語彙の正規表現で、domain-independent の原則にも
+   反していた。
+2. **動かした位置が保たれない**。`physics: false` + 固定座標なので教員はノードをドラッグで
+   動かせるが、層の切替・承認後の再読み込み・開き直しのたびに自動レイアウトで組み直され、
+   配置が元に戻っていた。
+
+**是正**
+
+- **層状レイアウト（`lsGraphLayoutPositions` の書き換え・graphView 経由で原稿スタジオと共有）**:
+  段は構造（辺）だけから決める。①向きが前後関係を表さない辺（`UNCERTAIN_DUE_TO` /
+  `RELATED_TO`）は段の決定に使わず並び順にだけ使う ②反復 DFS で後退辺を落として DAG にし、
+  トポロジカル順の最長路で段を決める（**深さに上限を置かない**・循環があっても止まらない）
+  ③段内の並びはバリセンタ法を 4 往復（初期順は `display_order` / 出現順。特定分野・特定論文の
+  語彙は使わない）④連結成分ごとにまとめて横に並べる（別々の導出チェーンを重ねない）
+  ⑤辺を持たないノードは格子に畳む（横一列に伸ばして一直線に戻さない）。ノード幅はラベルの
+  最長行からの概算で、重なりを避けるためだけに使う。語彙依存の `lsGraphNodeLevel` /
+  `lsGraphNodeSortKey` は撤去。
+- **配置の記憶（`admin-graph-review.js`）**: ドラッグ終了（`dragEnd`）で動かしたノードの座標
+  だけを控え、`localStorage` に `eg_graph_review_layout:{document_id}` として教材単位で置く
+  （node_id は層をまたいで一意なので層では分けない）。描画時は自動レイアウトの上に保存済みの
+  位置だけを重ねる。**サーバへは送らない**（位置はその端末で見るときの都合であって共有物では
+  ない — 保存 API も新しい列も作らない）。`localStorage` が使えない環境では黙って自動配置の
+  まま動く。上限 600 ノードで古いものから落とす。
+- **出口**: ツールバーに「配置を元に戻す」（アンカー `graph-review.reset-layout`）。動かした
+  位置をすべて捨てて自動の並びへ戻す。まだ動かしていないときは無効。ドラッグできること・
+  位置が端末に残ることは、ツールバーの事実文 1 行で常時示す（操作要素ではないので
+  `data-ui-anchor` は付けない）。
+
+**非スコープ**: 原稿スタジオのグラフパネルへの配置の記憶（レイアウト改善は graphView 共有で
+両方に効くが、位置の保存はレビュー画面だけに置く）/ 教員間での配置の共有 / 端末をまたいだ同期 /
+辺のルーティングの手動調整。
+
+**テスト**: `test_graph_review_ui_static.py::TestGraphLayout`（深さの上限が無いこと・段が構造
+由来であること・特定論文の語彙で並べないこと・成分の分離と孤立ノードの格子）/
+`::TestNodePositionPersistence`（教材単位の保存・`dragEnd` の記録・自動レイアウトへの重ね方・
+保存失敗を黙って流すこと・戻す出口・サーバへ送らないこと）/
+`test_admin_help_ui_anchors.py`（アンカー 353 件）。

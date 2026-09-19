@@ -13,6 +13,8 @@ from episteme_graph.agents.id_canonicalization import (
     claim_aliases_from_accepted_claims,
 )
 
+from episteme_graph.agents.cartridge_loader import load_cartridge_or_none
+
 from .apparatus_components import build_apparatus_components
 from .cartridge_loader import CartridgeLoader
 from .component_refiner import ComponentRefiner
@@ -263,13 +265,7 @@ class ComponentAssemblyAgent:
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:
         if not cartridge_id:
             return None
-        try:
-            return self._cartridge_loader.load(cartridge_id)
-        except FileNotFoundError:
-            logger.warning(
-                "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
-            )
-            return None
+        return load_cartridge_or_none(self._cartridge_loader, cartridge_id)
 
 
 _REFINER_INTERNAL_FLOW_OPERATIONS = {

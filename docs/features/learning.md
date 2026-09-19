@@ -6,10 +6,16 @@
 > 検証状態の事実併記（§3.10）を追補した。他の節は 2026-07-18 時点の記述で、
 > 残る差分は CLAUDE.md の該当節を参照。
 > **更新注記（2026-08-15）:** わたしの記録（§6.5、主権台帳v1）と帰還の扉（§3.11）を追補した。
+> **更新注記（2026-09-03）:** 実装（`frontend/public/index.html` / `app.js` / 各モジュール）と
+> 照合し、論文の海（§5.5）・論文の位置と推定の糸（§5）・共有版の削除予定バナー（§2.4）を
+> 追補、わたしの地図のタブ構成（§6、4→3 タブ）と音声・レクチャーのボタン表記を実装に合わせた。
 
 学生向け学習 UI の機能を、画面と裏側の API の両面から解説します。
-実装: `frontend/public/index.html` + `frontend/public/js/app.js`（ES6+ SPA）。
-バックエンドは `/api/learning/*`（[API](../backend/api.md)）。
+実装: `frontend/public/index.html` + `frontend/public/js/app.js`（ES6+ SPA）+ 分離モジュール
+（`discuss.js` / `reconstruction.js` / `personal-map.js` / `personal-map-home.js` /
+`my-records.js` / `corpus-sea.js` / `landscape-layer.js` / `atlas-threads-layer.js` /
+`atlas-overlay.js` ほか。読み込み順は `index.html` 末尾が正）。
+バックエンドは `/api/learning/*` と `/api/me/*`（[API](../backend/api.md)）。
 
 ---
 
@@ -22,6 +28,40 @@
 | 右パネル（300px） | Context / Progress / Sources タブ（前提知識・誤解・学習支援ヒント、章進捗、PDF 出典） |
 
 主要 state（`app.js`）: `token / role / courseId / course(マスター) / personalLayer(誤解・アンカー) / currentTopicId / chatMessages / topicMaterial / learningSupport` に加え、`lastGrounding / lastSources / lastOverallTier`（出所・出典表示）、`interestTraces`（問いの軌跡）、`tensionDigest / tensionDeferred`（違和感ダイジェスト）、`topicHasAudio`（レクチャー音声の有無）。
+
+### 1.1 トップバー
+
+| ボタン | UI アンカー | 内容 |
+|---|---|---|
+| グループ | — | グループ一覧・招待の承諾（未処理の招待があるとバッジ） |
+| 地図 | `topbar.atlas` | 分野の地図オーバーレイ（§5） |
+| わたしの地図 | `topbar.my-map` | 個人知識ネットワークの最上位パネル（§6） |
+| わたしの記録 | `topbar.my-records` | 痕跡の主権台帳（§6.5） |
+| ❓ 使い方 | `topbar.inspect` | **インスペクト・モード**の ON/OFF トグル |
+
+「❓ 使い方」は押した瞬間に質問を送るボタンではなく、ON の間だけ `[data-ui-anchor]` を
+持つ UI 部品にホバーするとマニュアル節をツールチップ表示するモードになる（正本:
+[learning_ui_inspect_hover_design.md](learning_ui_inspect_hover_design.md)）。
+配信は `GET /api/learning/help/ui-anchors`（ログイン後 1 回だけ取得）、対応節が無い部品への
+ホバーは `POST /api/learning/help/ui-anchor-events` に記録して未整備の発見に回す
+（捏造で埋めない）。アンカー ID の正本は `backend/core/help_kb/ui_anchors.py`
+（値は必ず `docs/manual/student/` の節を指す。teacher / system_admin 側は構造的に参照しない）。
+インスペクト ON のまま入力欄・音声で発話すると、その発話は無条件に使い方ルート
+（`support_action="usage_help"`）へ確定し、マニュアル本文の素通し + 出典（`manual_citations`）で
+答える（テキスト経路は **LLM 0 回・利用回数を消費しない**）。OFF のときも、使い方らしい
+質問は非 LLM の pre-route で同じ経路に入る。無ヒットは固定文で正直に返す（捏造しない）。
+
+### 1.2 概念マップ — 記号は出さない
+
+左サイドバーの概念マップ（`app.js` の `course.concepts` 描画）に**数式の記号は出さない**。
+コース登録時（`POST /api/learning/courses`）に `name` / `children[]` を記号判定
+（A層 `is_symbol_like_concept_name` = P0-3 に委譲する `core/course_data.py::
+is_symbol_concept_name`）で振り分け、記号は概念マップから外す。**外した名前は捨てず**
+`learning_courses.data.excluded_symbol_concepts` に残るが、学習者向け DTO
+（`LearningCourseDetail`）には出ない。記号そのものは `knowledge_symbols` /
+symbol_registry が正本で、教材の数式をタップすれば §3.13 の「直前の定義」から辿れる。
+
+正本: [claim_concept_grounding_design.md](claim_concept_grounding_design.md) §8 / CG5・CG6。
 
 ---
 
@@ -44,45 +84,75 @@
 「受講する / キャンセル」）を経てから `POST .../enroll` を呼ぶ。キャンセル時は
 select を元の値へ戻し、失敗時はモーダル内にエラー表示して再試行できる。
 
-### 2.2 コース完了カード（サーバー正本の完了判定）
+### 2.2 コース完了カード（サーバー正本の完了判定・確定は本人）
 
-確認問題（`POST .../topics/{tid}/check-question` → `.../check`）に合格すると、サーバーが
-`services.record_topic_check_pass()` で **`learning_states.progress_data`** に永続化する:
+確認問題（設問は `GET .../topics/{tid}/material` の `check_questions` から選ぶ）の
+`POST .../topics/{tid}/check` は**合否を返さない**（2026-09-10 是正 F1。正本は
+`backend/core/check_review.py`）。LLM は `answer_requirements` の各要素について「回答で触れられて
+いる / 触れられていない可能性 / 不明」の観点を並置し、模範解答・解説を開示するだけで、
+`passed` フィールドは存在しない。トピック完了の確定は本人の 1 タップ
+`POST .../topics/{tid}/check/self-check`（body `self_check ∈ {agreed, disagreed, verdict_wrong}`、
+語彙外は 422）に移り、`agreed` / `disagreed`（＝本人が見比べて先へ進むと決めた）のときだけ
+サーバーが `services.record_topic_check_pass()` で **`learning_states.progress_data`** に永続化する:
 
-- `progress_data.completed_topics`（topic_id → 合格時刻 ISO8601。既存タイムスタンプは上書きしない）
-- 全トピック合格時に `progress_data.course_completed_at` を一度だけ設定
+- `progress_data.completed_topics`（topic_id → 確認を終えた時刻 ISO8601。既存タイムスタンプは上書きしない）
+- 全トピックを終えたときに `progress_data.course_completed_at` を一度だけ設定
 
-`/check` レスポンスの `course_completed` / `completed_topic_ids` が**サーバー正本**で、
+`verdict_wrong`（「観点がおかしい」）は完了させず進行も止めない（本人が改めて他の 2 択を押せば
+進める）。LLM 失敗時は 200 + `degraded: true` + 固定文「AI の観点提示ができませんでした。出題の
+要件と自分の回答を見比べてください。」に縮退し、**判定を生まない**（旧「40 字以上で合格」の
+フォールバックは撤去）。不合格時に回答逐語を `student_stumble_events` へ記帳していた経路も撤去した
+（AI の判定を学習者の属性として書かない）。
+
+self-check レスポンスの `course_completed` / `completed_topic_ids` が**サーバー正本**で、
 フロント（`app.js` の `showCourseCompletionCard`）は `course_completed === true` のときだけ
 「全トピックを学習しました」と断定する（「次のトピックが無い」ことだけで完走と断定しない。
 未確認なら「まだ確認を終えていないトピックがあります」に縮退 — fail-closed）。カードは
 事実文のみ（数値・スコア・祝祭演出なし）で、「他のコースを見る」「わたしの地図を見る」
 （`PersonalMapHome.open()`）への導線を添える。
 
-### 2.3 確認問題の採点結果（合格時も講評を出す）
+### 2.3 確認問題の並置と自己確認（採点しない）
 
-`/check` は**合否に関わらず** `feedback` / `model_answer` / `explanation` /
-`answer_requirements` を返す。かつてフロントは合格時に `overlay.remove()` → 即
-`selectTopic(next)` としていたため、サーバーが作った講評が一度も表示されずに捨てられて
-いた。現在は合格時も講評をモーダル内に出し、前進はもう一段の操作にする
-（`app.js::applyCheckPassState`）:
+確認問題モーダル（`app.js::openCheckModal`）の出口は3つ — 「回答する」／
+「AIと議論して理解を深める」（UI アンカー `check.discuss`。書きかけの回答と並置結果を捨てずに
+議論へ持ち出す）／弱いリンク「今回は確認せず次へ進む」（同 `check.skip`。押し付けないための
+逃げ道なので API を呼ばず痕跡も残さない）。
 
-- 一等地は**講評だけ**。解答例・解説は `<details>`（「解答例と解説を読む」）に畳む
-  — 合格した回答の直後に長文を積み上げない。
-- 主ボタンは `data-advance="true"` の「次へ進む」／最終トピックでは「確認を終える」に
-  切り替え、既存の data-advance 経路（地図 cue・完了カード）に合流させる。**自動遷移しない**。
-- 提出した回答は `readOnly` で残す。合格の記録（`record_topic_check_pass`）は送信時点で
-  永続化済みなので、閉じても確認済みの事実は失われない。
-- 確認したあとに「今回は確認せず次へ進む」は事実でなくなるため、スキップ導線は取り除く。
-- 講評・解答例・解説がすべて空（採点フォールバック等）のときだけ、従来どおり即前進する
-  （空の枠を見せない）。
-- 合格結果は `state.lastCheckPass`（トピック単位・`selectTopic` で破棄）に保持し、議論から
-  「確認問題に戻る」で開き直したときは白紙のフォームに戻さず講評を再提示する（P4）。
+`/check` の応答は `{advisory: true, observations[{requirement, status, statement}], covered[],
+not_mentioned[], statements[], model_answer, explanation, answer_requirements, degraded,
+self_check_required, ...}`。フロントは要件との並置（触れられている / 触れられていない可能性）を
+一等地に出し、解答例・解説は `<details>`（「解答例と解説を読む」）に畳む。その下に R層の
+自己確認と同型の問いかけ「あなたの見立てはどうでしたか？」と 3 択
+**「合っていた」／「違っていた」／「観点がおかしい」**を置く（前 2 つはどちらを選んでも
+「この確認を終えた」という同じ記録になることを補足行で明記）。
 
-**合格後の深掘りは壁打ちモードにしない。** `check_scaffold`（解答そのものを出さず要素の
+- 3 択を押すまで完了せず、押す前の主ボタンは「もう一度答える」（REVISE）。押した後は
+  `data-advance="true"` の「次へ進む」／最終トピックでは「確認を終える」に切り替え、既存の
+  data-advance 経路（地図 cue・完了カード）に合流させる。**自動遷移しない**。
+- 提出した回答は `readOnly` で残す。確認を終えたあとに「今回は確認せず次へ進む」は事実で
+  なくなるため、スキップ導線は取り除く。
+- UI 文言から「合格 / 不合格 / 正解 / 採点」の語彙を使わない
+  （`test_check_juxtaposition_ui_static.py` が固定）。
+
+**確認後の深掘りは壁打ちモードにしない。** `check_scaffold`（解答そのものを出さず要素の
 説明と問いかけに留める拘束）は「まだ答えを組み立てていない学習者」のための拘束なので、
-合格後の議論では `state.checkScaffoldActive = false` として通常のチャット（教材にもとづく
-RAG 応答）で送る。持ち出す材料の見出しも合否で分ける（合格=「講評:」／不合格=「指摘された点:」）。
+自己確認後の議論では `state.checkScaffoldActive = false` として通常のチャット（教材にもとづく
+RAG 応答）で送る。
+
+### 2.4 共有版の削除予定バナー（V層）
+
+受講中のコースが削除予約されている場合、コース読込時に主カラム（`.mn`）先頭へ
+一行バナーを出す（`app.js::showVersionNoticeBanner`）。取得は
+`GET /api/learning/courses/{id}/version-notice` で、`lifecycle === 'pending_deletion'`
+のときだけ描画する。
+
+- 文面は事実文のみ（「このコースは {日付} 以降に削除される予定です。それまでは通常どおり
+  学習できます。」＋所有者が入力した理由。期限が取れないときは「近日中に」へ縮退）。
+- コース本体の削除予約に加え、**元教材の削除予約**（教材の purge はそれを参照するコースを
+  巻き添えにする）もサーバー側で検出して同じ通知に載せる。
+- 取得失敗・版未発行は何も出さない（fail-open。学習を止めない）。学習者側に版のピン留め
+  （adopt）UI は無い — 版の取り込みは教員側の操作（[管理機能](admin.md)）。
+- ログアウト・コース離脱で必ず除去する（`removeVersionNoticeBanner`）。
 
 ---
 
@@ -96,10 +166,27 @@ RAG 応答）で送る。持ち出す材料の見出しも合否で分ける（�
   - `next_actions`（「学習に戻る」「詳細を続ける」などをボタン化）
   - `support_mode` / `status_label` / `origin`
   - `content_grounding`（出所: 教材 / 別の資料 / モデル生成 — 下記）
+  - `stance`（どの様相で答えたか — 下記。RAG 応答のみ）
   - `course_update.personal_layer`（`misconceptions_by_topic`, `chat_anchors`）
-- **誤解検出**: 回答に訂正シグナルが含まれると個人レイヤーに記録され、トピックに誤解バッジが付く。
-- **前提知識チェック**: 未習得の前提があれば逆質問（`mode="prerequisite_review"`）。
-- **理解度チェック**: `POST .../topics/{tid}/check-question` で習得を確認し次トピックへ。
+- **誤解検出（AI は候補まで・是正 F5, 2026-09-10）**: 回答に訂正シグナル（`訂正：` 等の
+  文字列一致・非LLM）が含まれると個人レイヤーへ **`status="candidate"`** で記録される
+  （`services.detect_and_record_misconception` → `core/personal_graph/graph_data.py`）。
+  「誤解」として確定するのは本人の3択
+  `POST /api/learning/courses/{id}/topics/{tid}/misconceptions/{entry_id}/review`
+  （`decision ∈ {agreed, disagreed, verdict_wrong}` — R層の自己確認と同じ語彙。語彙外は 422）
+  だけで、却下は行を消さず `dismissed` へ遷移する（P4）。遷移の可否判定・監査は
+  `core/candidate_flow.py`（`entity_type='misconception'`）。トピックのバッジは
+  確定件数（`⚑ N`）と未確認の候補あり（数字なしの `⚑`）を区別し、進捗の
+  「確定した誤解メモ」には confirmed だけが入る。**per-topic 5件の上限は撤廃**
+  （古い行を黙って消さない。表示は古い順に畳む）。
+- **前提知識チェック**: 本人が「理解している」と答えていない前提があれば逆質問
+  （`mode="prerequisite_review"`）。判定に使うのは本人の明示的な答えの記帳だけで、
+  チャット履歴（接触の痕跡）は使わない。前提の**説明**は
+  ①同コースのトピック → ②本人が閲覧できる資料 → ③どちらにも無ければ AI の説明
+  （`content_grounding="model_generated"` + 閉世界の事実文）の3段で解決する
+  （詳細は [../backend/rag-chat.md](../backend/rag-chat.md) §①/①-b）。
+- **確認問題**: `POST .../topics/{tid}/check`（設問は `GET .../topics/{tid}/material` の
+  `check_questions`）で要件との並置を得て、`POST .../check/self-check` の本人の 1 タップで確認を終える（§2.2）。
 
 ### 回答の出所表示（content_grounding）
 回答バブル下部と出典タブのバナーに、回答が何に基づくかをバッジで表示します
@@ -113,18 +200,106 @@ RAG 応答）で送る。持ち出す材料の見出しも合否で分ける（�
 
 `tier`（教員承認状況のバッジ）とは別軸です。判定ロジックは [RAG チャットフロー](../backend/rag-chat.md#4-出所判定content_grounding)。
 
+### 様相（stance）— どう話すかを選ばせない
+
+話しかける前に「話し方」を UI の語彙で選ばせるのをやめ、**会話の調子（様相）は当該発話から
+サーバが読みます**（正本:
+[learning_chat_entry_unification_design.md](learning_chat_entry_unification_design.md) LC1〜LC8）。
+入力欄は 1 つのままで、`intent_mode` の値集合も増えていません。
+
+- **雑談は拒否しません**。雑談めいた発話には、根拠の一線（RAG 検索・tier・
+  OutOfSourceGuard・`content_grounding`）を保ったまま**気軽な調子で**応じます。
+  テキストでは数式（LaTeX）と `[出典N]` もそのまま使います。
+- **推定するのは調子だけ**です。検索範囲（discuss のスコープ）・予想を先に聞く形
+  （理解サイクル）・楽屋（記録の私有化）・確認問題の壁打ちは、**本人の明示操作のまま**
+  切り替わりません。「議論として続ける」も推定では起きません（入口は二枚看板のまま）。
+- **推定したことは隠しません**。応答の `stance` に
+  `{stance, source, label}` が入り（`source` は `explicit` = 明示 / `inferred` = 推定、
+  `label` の正本は `core/label_vocab.py` の `LEARNING_STANCE_LABELS`）、
+  推定で調子が変わった往復だけ回答の下に事実の 1 行が出て、1 タップで聞き直せます。
+  **確信度・当たり外れのような数値は出しません**。
+- **学習者モデルは作りません**。推定の入力は当該発話と画面の明示状態だけで、過去の
+  産出・正答率・滞在時間・前の往復の様相は使わず、セッションを跨いで持ち越しません
+  （UC5 沈黙適応をしない）。
+
+### いま画面で見ているものを踏まえて答える（構造 grounding）
+
+教材上で範囲選択した箇所と、いま開いている ⚓ チップ（論理要素 / 主張 / 式 / 図）が、
+回答を作るときの手がかりとして使われます（正本:
+[assistant_screen_adapter_design.md](assistant_screen_adapter_design.md) §11 / 実装記録 §11.15。
+裏側の合流点は [../backend/rag-chat.md](../backend/rag-chat.md) §④-b）。
+
+- 画面が送るのは**参照だけ**（種別と ID・表示中のトピックとスライド・表示モード・チップの
+  題名まで）。**画面に描かれた本文を送りません**。中身はサーバが、これまでと同じ
+  学習者向けの見え方（数値・内部 ID を出さない／本人が読める資料だけ）で組み立てます。
+- 範囲選択した文はそのまま引用として渡り、**表示中の教材と一致したかどうかが必ず併記**
+  されます（一致しなくても、選んだ事実は落としません）。
+- **検索の範囲は広がりません**。「論文と議論する」のスコープ・予想を先に聞く形・楽屋・
+  確認問題の壁打ちは、これまでどおり本人の明示操作のままです。
+- **予想を先に聞く場面（理解サイクルの Elicit）では、主張や検証の事実は渡しません**
+  （答えを先に手渡さないため）。気軽な調子の応答でも構造の事実は足さず、選択した箇所だけを渡します。
+- 検証記録について言えるのは「このコーパスの中では検証記録がありません」までで、分野全体の
+  話には広げません。AI が推定した位置づけは「AIによる推定（未確認）」のラベル付きのまま渡ります。
+- **画面で何を見ていたかは保存しません**（履歴にも痕跡にも残りません）。外部の AI に何が
+  送られるかは [マニュアルの §18](../manual/student/02-student.md#disclosure) にも明記しています。
+
+#### 検索で当たった箇所の構造
+
+質問に答えるために教材から探し出した箇所（回答の下に出る〈出典N〉）について、その箇所に
+**解析で切り出してある主張**と、それが**論文の理論の骨格のどの段階に置かれているか**も、
+同じやり方で手がかりとして渡ります（正本:
+[knowledge_transfer_design.md](knowledge_transfer_design.md) §5）。画面で何も選んでいなくても
+働きます — 入口が「何を見ているか」ではなく「どこが検索に当たったか」だからです。
+
+- 渡るのは、出典ごとに**主張の本文（先頭だけ）とその種類**が最大2つ、それが骨格に
+  掛かるときは**段階の名前**が1行。件数・一致度のような数値は出しません。
+- **探した範囲は広がりません**。「論文と議論する」でスコープを広げていないかぎり、
+  構造も同じ範囲の資料からしか引きません。
+- **予想を先に聞く場面（Elicit）と気軽な調子の往復では渡しません**（答えを先に手渡さない
+  ため／短い会話と事実の列挙が衝突するため）。
+- **AI への問い合わせ回数は増えません**。見え方も、これまでの回答・出典の出方と変わりません。
+
+### 回答の逐次表示と停止（ストリーミング）
+
+回答を**書かれている途中から読める**経路があります（正本:
+[llm_response_streaming_design.md](llm_response_streaming_design.md) ST1〜ST9 / §12 実装記録。
+裏側は [../backend/rag-chat.md](../backend/rag-chat.md) §④⑤）。**運用の既定は off**
+（`LEARNING_CHAT_STREAMING_ENABLED`）で、off のときは従来どおり完成した回答が一度に出ます。
+サーバがこの経路を配っているかは `GET /api/learning/client-features` の 1 値で決まり、
+学習者に設定項目は出しません。
+
+- **逐次表示中はプレーンテキスト**です。数式・出典チップ・ドリルダウン・鏡ブロック・
+  帰属確認の 1 タップは、**回答が届き切った後に一度だけ**従来と同じ形で描き直されます
+  （途中の半端なマークダウンを見せないため）。
+- **送信ボタンが生成中だけ「停止」になります**。押すと生成を止め、**その往復は記録に
+  残りません**（履歴にも問いの軌跡にも残らず、書いた文面は入力欄へ戻ります）。
+  画面には「途中で止めました。この応答は記録に残していません。」とだけ出ます。
+- **止めても回答が届き切っていた場合は、その回答が残ります**（サーバ側で保存が済んでいる
+  往復を、画面の都合だけで消さないため）。
+- **読み返している最中に画面を引き戻しません**。自動スクロールは、すでに一番下の近くを
+  見ているときだけ働きます。
+- **経路が変わっても答えの中身は変わりません**。出所バッジ・出典・`out_of_source` の注意書き・
+  誤解メモ・痕跡の記録は、完成した回答に対してこれまでどおり行われます。
+- **音声（ハンズフリー）・気軽な調子の往復・書き直し（✏️）・ボタンからの質問は従来どおり**
+  一度に届きます。途中でつまずいたときも、これまでと同じ 1 つの吹き出しが
+  「AI 応答を生成できませんでした…」に置き換わります。
+- **速度・残り回数・かかった時間のような数値は出しません。**
+
 裏側の流れの詳細は [RAG チャットフロー](../backend/rag-chat.md)。
 
 ---
 
 ## 3.5 ハンズフリー音声会話（カジュアル対話モード）
 
-チャット入力欄の 🤖 ボタンで「気軽に話せる先生」との音声会話を開始します（`app.js`）。
+チャット入力欄の「🎤 音声で話す」ボタン（`#voice-mode-btn`、UI アンカー `composer.voice`）で
+「気軽に話せる先生」との音声会話を開始します（`app.js`）。
 
 1. MediaRecorder + WebAudio の無音検知（発話後 ~1.4 秒の沈黙）で発話を自動区切り
 2. `POST /api/learning/voice/transcribe` で Whisper 文字起こし
-3. `intent_mode='casual'` でチャット送信（雑談拒否・前提知識ゲート・誤解検出をバイパスし、
-   短い会話調で応答。RAG 検索・tier・OutOfSourceGuard はそのまま → [RAG チャットフロー](../backend/rag-chat.md#3-インテントモードon_path--explore--casual--discuss)）
+3. `intent_mode='casual'` でチャット送信（意図分類・前提知識ゲート・誤解検出をバイパスし、
+   短い会話調で応答。RAG 検索・tier・OutOfSourceGuard はそのまま → [RAG チャットフロー](../backend/rag-chat.md#3-インテントモードon_path--explore--casual--discuss)）。
+   読み上げ向きの本文（2〜4 文・記号なし・LaTeX なし）になるのは**音声モードのときだけ**で、
+   テキストで気軽な調子になった往復は数式・出典をそのまま使います（上記「様相」）
 4. 応答を `POST /api/learning/voice/speak`（TTS, MP3）で再生（再生中はマイク停止、終了で聞き取り再開）
 5. 応答の第 1 根拠チャンク（`sources[0].chunk_id`）を `GET .../source-chunk/{chunk_id}` で取得し、
    ボイスパネルに「いま話している題材」として教材表示
@@ -178,7 +353,8 @@ DM1〜DM8 / 対話の進め方は
 新テーブル・新チャットエンドポイントは持たない。
 
 ### 入口 — 二枚看板
-サイドバー最上部に「**順番に学ぶ**」（現行の逐次型・無変更）と「**論文と議論**」を
+サイドバー上部（コース非依存の「🌊 論文の海」入口の直下。§5.5）に
+「**順番に学ぶ**」（現行の逐次型・無変更）と「**論文と議論**」を
 同じ視覚的重みで並べたセグメントコントロール（`app.js` の `discuss-mode-switch`。
 UI アンカー `sidebar.mode-sequential` / `sidebar.mode-discuss`）。入口はここに一本化されており、
 チャット欄の常設リンク「もっと自由に話す」は重複のため廃止済み。discuss は
@@ -392,14 +568,79 @@ discuss 専用のシステムプロンプト（`_get_discuss_system_prompt`）�
 
 ---
 
+## 3.13 数式の記号の「直前の定義」（概念レジストリ P3-5）
+
+教材に描画された数式の中の**記号そのもの**をタップすると、その位置より**前**で最も近い
+定義を論文の逐語で返すポップオーバー（正本:
+[concept_registry_design.md](concept_registry_design.md) §7 / KR1〜KR10。migration 082 は
+担当 A の範囲で、本機能自体は読み取りのみ）。ScholarPhi の「直前の定義を出す」規則を、
+Phase 1 で行になった `knowledge_symbols` / `knowledge_equations` / `knowledge_evidence`
+から**決定論的に**導出する。**LLM を 1 度も呼ばず、quota も消費しない。**
+
+- **API**: `GET /api/learning/courses/{course_id}/symbols/lookup?symbol=&equation_id=&chunk_id=`
+  （`routes/learning.py::get_symbol_lookup_route` → `core/symbol_lookup.py::
+  lookup_symbol_definition`）。fail-closed は既存の学習者向け文脈 API と同じ3段 —
+  受講ゲート（`get_accessible_course_data`）→ コースの sources
+  （`list_course_source_document_ids`。**全域可視集合へ広げない**）→ core の SQL 内
+  `document_id = ANY(CAST(:doc_ids AS uuid[]))`。sources が空なら SQL を 1 本も発行せず
+  `available:false`。記号が空文字のときだけ 422。
+- **記号の一致は完全一致のみ**: `core/concept_normalizer.py::normalize_key` で正規化した
+  `canonical_symbol` / `notation_variants` との完全一致（部分一致をしない — `SM` が
+  `cosmological` に当たった F-7 / P0-2 の再発防止）。フロントは添字を `V_cb` の形に
+  組み直して送るので、`V_{cb}` と同じキーに畳まれる。
+- **位置の解決（ScholarPhi 規則）**: タップ位置は `equation_id` →
+  `knowledge_equations` の `block_id`、無ければ `chunk_id` → `chunks.block_ids`。
+  順序は `chunks.block_ids` を chunk 順に並べた連番（＝配信された本文の順）で、
+  それが引けないときだけ `page` を使う。**異なる順序空間どうしは比較しない**。
+  前に定義があればそれ、無ければ後ろの最初を「この位置より後で定義されています。」
+  付きで、位置が解けなければ「位置を特定できないため、最初の定義を表示しています。」
+  付きで返す（黙って先頭を出さない）。
+- **定義が無いとき**: `element_vocab.DEFINITION_STATUS_LABELS` のラベル（「定義なし」等）+
+  「この論文には定義の記述が見つかりませんでした。」。**主語は常に「この論文」**で、
+  分野レベルの不在は言わない（KR8 / SL1 の閉世界語彙）。
+- **概念参照（`concept_ref`）**: `element_identity_links` の `instance_element_type='symbol'`
+  かつ `status='confirmed'`、かつエントリが `active` のときだけ `{entry_id, name,
+  entry_type}` を 1 件返す（**candidate は出さない** = KR2。A層の `SymbolRecord` は不変
+  = KR1 — 読み時の join で実現する）。
+- **返さないもの**: `confidence` / `stable_key` / `produced_by_run_id` / 内部 ID
+  （`sym_…` / `eq_op_*` / `ev_*`）。返すのは `unit` / `scope_label`（`element_vocab`）と
+  出所（論文タイトル）。表示前に `core/text_hygiene.py::strip_control_sequences` を通す。
+- **UI**（`app.js` の `initSymbolLookup` / `openSymbolLookup` / `renderSymbolLookupPopover`）:
+  `#material-body` 内の KaTeX 描画済み数式（`.katex`）の記号トークン（1〜3文字のラテン /
+  ギリシャ文字）クリックで `#symbol-lookup-popover` を出す。**自動では出さない**
+  （タップのみ・ポーリングなし）。位置は最近傍の `[data-equation-id]`（数式カードに付く
+  追加属性）と `[data-chunk-id]`。既存の教材導線（テキスト選択の「ここについて質問」・
+  ホバーツールチップ・数式カードの「文脈を見る」）とは `stopPropagation` を使わずに
+  併存する。Escape / 外クリックで閉じる。
+- UI アンカーは `material.symbol-lookup`（マニュアル節
+  `student/02-student.md#symbol-lookup`）。ガードレールは
+  `backend/tests/test_symbol_lookup_{core,api,ui_static}.py`。
+
+---
+
 ## 4. インタラクティブ・レクチャーモード
 
-論文チャンクを **セミナー形式の音声講義**に変換する没入型機能。「🎙️ レクチャー」ボタンで起動。
+論文チャンクを **セミナー形式の音声講義**に変換する没入型機能。教材ヘッダの表示形式
+セグメント `[📖 読む | 🎙 講義]`（`#lecture-toggle`、UI アンカー `material.lecture-toggle`）で
+切り替える（ラベルは静的固定。discuss モード中・コース未選択時はセグメントごと隠す）。
+スライド分割・音声・言語の規約は
+[lecture_slide_sync_design.md](lecture_slide_sync_design.md) が正本。
 
 ### シーケンス構築
 - `GET /api/learning/lecture/courses/{id}/topics/{tid}/sequence`
 - 返り値: `{segments: [{text, formulas: [{latex, spoken, is_display}], ...}]}`
-- **適応的**: 習得済み概念のセグメントはスキップ、部分理解は要約版に変換（`lecture.py`、習得状態は `learner_mastered_concepts`）。
+- **内容は学習者の状態で変えない（是正 F3、2026-09-10）**: かつて習得済み概念によるセグメントの
+  スキップ・要約版への置換（沈黙適応）を行っていたが、vision §3.6（沈黙適応をしない・UC5）と
+  §6 原則8 に抵触するため撤去した。`build_lecture_sequence` は**入力チャンクと同数のセグメントを
+  必ず返し**、`spoken_text` を書き換えない（`segment_mode` は `full` のみ。省略件数を返す
+  `skipped_segments` / `summary_segments` も撤去済み）。習得状態
+  （`learner_mastered_concepts` + course_data の `status="mastered"`。**チャット履歴からの推定は
+  しない**）は注記フラグ `previously_touched` の生成にだけ使う。
+- **畳むのは本人のトグル**: 再生バーの「短く聴く」（既定 OFF・localStorage
+  `eg_lecture_condensed:<courseId>`・UI アンカー `material.lecture-condensed`）が ON のときだけ
+  `previously_touched` のスライドを畳み、畳んだ位置に「前に触れた箇所（開く）」の1行を残す
+  （消さずに畳む。畳まれたスライドは音声を再生せず次へ送る）。設計の根拠は
+  `docs/architecture/six_lenses_2026-09-10/01_learner.md` §2 提案1。
 
 ### 再生・カラオケ風ハイライト
 - プレイヤーバー（前/再生/次、進捗バー、タイムスタンプ）
@@ -435,7 +676,43 @@ discuss 専用のシステムプロンプト（`_get_discuss_system_prompt`）�
   見せる UI は無い）。
 - **データ取得**: `GET /api/atlas`（`atlas-data.js`。状態判定はサーバー側のみ）。
   骨格の無いコース・カートリッジでは 404 → 地図領域ごと非表示（fail-closed。フィクスチャへの
-  自動退避はしない）。
+  自動退避はしない）。コース文脈も明示 `cartridge` も無ければ**取得せず null**
+  （既定カートリッジへのフォールバックは廃止済み）。
+
+### 5.1 オーバーレイに重なる 3 つのレイヤー
+
+骨格の描画（領域・概念ノード・状態ドット・霧・足あと）には手を入れず、
+`mountControls / onLevelRendered / onOverlayClosed` の同じ 3 フック契約で重なる薄い層が
+3 つある。いずれも既定オフ・取得失敗時はその層ごと静かに消える（fail-closed）。
+
+| レイヤー | 実装 | トグル | 内容 |
+|---|---|---|---|
+| 自分の記録 | `personal-map.js` | 「わたしの地図」 | 本人の確定痕跡を骨格に重ねる（§6） |
+| 論文の位置 | `landscape-layer.js` | 「論文の位置」 | 論文（document）の配置を L1 の概念ノード横に 📄 マーカーで置く。表示は段階ラベル（`weight_label`）と出所ラベル（「AIによる推定（未確認）」／「教員確認済み」）のみで、weight・confidence の生値は API にも UI にも出ない（正本: [knowledge_landscape_design.md](knowledge_landscape_design.md) LS1〜LS10）。出典タブの「分野の中の位置づけ」（UI アンカー `sources.paper-placement`）は同じ `getData(courseId)` を共有する。地図の改訂後に対応する場所が無い位置づけは、位置に置かず事実文で示す（位置の解決は `current_node_id || node_id`。正本: [atlas_node_correspondence_design.md](atlas_node_correspondence_design.md) NC5 / NC6） |
+| 推定の糸 | `atlas-threads-layer.js` | 「推定の糸」（UI アンカー `atlas.relation-threads`） | 骨格 L2 の概念間に「まだ凍結されていない関係」を**点線**で重ねる。`GET /api/atlas` の optional キー `threads` をそのまま読むだけで追加フェッチをしない。必ず「AIによる推定（未確認）」＋骨格版を伴い、実線の凍結エッジと視覚的に混ざらない。教員が見送った辺はサーバーが返さない（正本: [atlas_relation_edges_design.md](atlas_relation_edges_design.md) RE1〜RE8） |
+
+---
+
+## 5.5 論文の海（コーパス回遊）
+
+コースの外から、閲覧できる論文コーパスを歩ける常設の入口（正本:
+[corpus_roaming_design.md](corpus_roaming_design.md) CR1〜CR10）。サイドバー最上部の
+「🌊 論文の海」（UI アンカー `sidebar.corpus-sea`、`corpus-sea.js` / `window.CorpusSea`）から
+オーバーレイで開く。**自動では開かない・ポーリングしない**。コース未選択でも押せる。
+
+- **可視性が唯一のゲート**（CR1）: 見えるのは本人が閲覧できる document だけ。コース学習の
+  挙動は一切変えない（CR2。atlas-overlay は流用せず自前の簡易 SVG で描く）。
+- **コーパス地図**: `GET /api/learning/corpus/{domains,landscape,documents}`。骨格そのものは
+  返さず（骨格は既存 `GET /api/atlas?cartridge=`）、配置・縁・外だけを返す。地図は領域の塗りと
+  アンカーごとの円で**厚みの段階**だけを示し、件数・比例した連続量・閾値は描かない（CR3）。
+- **コース無しの論文議論**: 論文を選ぶとその論文に直付けした discuss ができる
+  （`GET/POST /api/learning/documents/{ref}/discuss/{opening,chat,history}`。ゲートは document の
+  閲覧可否のみで、不可視と不在は同じ 404）。コース経路の discuss（§3.8）は非改変。
+- **地図の端**: 縁（現行凍結版に実在する領域の事実文）と外（教員の購読条件で新着があったか
+  という集約 1 ビット）を事実文で示す。教員の判断内容は学習者に出さない（CR4）。
+- **この先を知りたい**: 端への関心は**明示タップのときだけ**送る（`POST /api/learning/corpus/
+  frontier-interest`、取り消しは `.../withdraw` の状態遷移）。バッジ・督促・連続日数は作らない
+  （CR5/CR6）。学習者起点で外部 API（arXiv 等）を呼ぶ経路は無い（CR7）。
 
 ---
 
@@ -446,7 +723,9 @@ discuss 専用のシステムプロンプト（`_get_discuss_system_prompt`）�
 保存物ではなく導出・**本人のみ可視**・candidate は数えない・数値を見せない。
 
 - **最上位パネル**（`personal-map-home.js`、ヘッダ「わたしの地図」ボタン `#my-map-btn`）:
-  「いまここの周り / いまの地図 / 問いからの旅 / 振り返り」の 4 タブ（既定は先頭）。
+  「いまここの周り / いまの地図 / 問いからの旅」の 3 タブ（既定は先頭）。
+  ※「振り返り」タブは月別の再掲でしかなく独自の情報価値が無いため 2026-08-22 に削除済み
+  （設計書 §17）。
   データソースは正本 API `GET /api/me/personal-network`
   （+ `GET /api/me/personal-network/journey?node_id=` / `GET /api/me/personal-network/nearby`）のみ。
   常設注記「この地図はあなたにだけ表示されます。成績評価には使用されません。」
@@ -546,6 +825,9 @@ TR1〜TR7）。ヘッダの「わたしの記録」ボタン（`#my-records-btn`
 1. ログイン `POST /api/auth/login` → JWT 取得
 2. `localStorage["eg_token"]` に保存
 3. 以降のリクエストに `Authorization: Bearer {token}`
+
+アカウントが停止された場合や管理者がパスワードをリセットした場合は、期限内のトークンでも
+サーバー側の世代照合（`gen` クレーム）で 401 になる（学習画面はログイン画面へ戻る）。
 
 → ロール・権限の詳細は [認証・権限・開示範囲](auth-visibility.md)。
 

@@ -58,6 +58,7 @@ from core import lecture_wm
 from core import llm_policy
 from core.llm import generate_text, get_llm_params
 from core.llm_usage.context import bind_usage_context, usage_context
+from core.llm_worker.single_shot import extract_json
 from core.personas import course_persona_settings, normalize_persona_id, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.tts import TtsFatalError, generate_tts_audio
@@ -765,7 +766,7 @@ _REWRITE_PROMPT = """あなたは大学講義の音声原稿を改善するア�
 - display_text（画面に表示する教材本文）と spoken_text（音声で読み上げるナレーション）は役割が異なります。同じ文をそのまま両方に入れないでください
 - **display_text = 教材本文**: 学習者が画面で読む教科書・スライドの記述体本文。原文の内容・構造・用語に忠実に整え、話しかけ・ナレーション調（「〜しましょう」等）は使わない
 - **spoken_text = 読み上げ**: display_text の教材を先生が口頭で説明するナレーション。display_text をそのまま読み上げず、噛み砕いた説明・補足・つなぎを加える。ただし display_text の範囲・順序に沿って説明する
-- 教員の指示に従い、必要に応じて一般的な物理学・数学の知識を補足してください
+- 教員の指示に従い、必要に応じてソーステキストが扱う分野で一般的とされる知識を補足してください（分野はソーステキストから判断し、書かれていない分野の話に広げないでください）
 - ソーステキストに限定されず、教員が指示する内容を反映させてください
 - display_text では数式を `[[FORMULA_0]]`, `[[FORMULA_1]]` のようなプレースホルダーで表現してください。`$...$` や `$$...$$` は使わないでください
 - spoken_text では LaTeX 数式を自然言語に変換してください（例: `E = mc^2` → 「Eイコールmcの二乗」）
@@ -807,7 +808,7 @@ _THEORY_ASSIST_PROMPT = """あなたは原稿スタジオの理論コンポー�
 - 既存コンポーネントの inputs / outputs は維持してください。
 - summary, preconditions, constraints, invalid_conditions, dependencies, teacher_notes を改善してください。
 - ソース本文・DSL・既存JSONを優先してください。
-- 一般的な素粒子物理学・場の理論・有効理論の知識で妥当に補える場合は補ってください。
+- ソース本文が扱っている分野で一般的とされる知識で妥当に補える場合は補ってください（分野は本文から判断し、書かれていない分野の話に広げないでください）。
 - 一般知識で補った項目は needs_source: true, source_refs: [] にしてください。
 - 推測にしかならない場合、label は「未確定」にしてください。
 - 「DSLから生成した候補」のような実装説明は summary に入れないでください。
@@ -1032,12 +1033,9 @@ def rewrite_lecture_script(
                 model=effective_model,
                 reasoning_effort=effective_effort,
             )
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            lines = [ln for ln in lines if not ln.strip().startswith("```")]
-            cleaned = "\n".join(lines)
-        result = _normalize_rewrite_result(json.loads(cleaned, strict=False), studio_view)
+        # 取り出しは共通実装（``core/llm_worker/single_shot.py::extract_json``）。
+        # 失敗は下の except が拾って 500（明示操作なので degraded にしない）。
+        result = _normalize_rewrite_result(extract_json(raw), studio_view)
         theory_components = result.get("theory_components", [])
         display_text = result.get("display_text") or current_display
         spoken_text = result.get("spoken_text", current_spoken)

@@ -56,6 +56,7 @@ from core.lecture import (
 )
 from core.learning_support_agent import extract_inline_actions
 from core.llm import generate_text, get_llm_params
+from core.llm_usage.context import usage_context
 # 教材図スタジオ（teaching_figure_studio_design.md §7.1）: 採用済み生成図を既存の
 # figures_by_id マップへ合流させる（記法・解決・配信は既存資産に相乗り・FG9）。
 from core.teaching_figures.store import adopted_figures_map
@@ -213,7 +214,8 @@ def get_lecture_sequence(
     if chunks_to_update:
         _persist_spoken_text(chunks_to_update)
 
-    # 受講者の習得済み概念を取得し、適応的シーケンスを構築
+    # 習得済み概念は「以前に触れた区画」の注記フラグにだけ使う（是正 F3）。
+    # 内容の省略・要約は行わない — シーケンスは常に全チャンクを返す。
     mastered_concepts = get_user_mastered_concepts(
         current_user["id"], course_id, course_data,
     )
@@ -242,13 +244,10 @@ def get_lecture_sequence(
             segment_mode=segment_mode,
             slides=slides,
             language=language_by_chunk_id.get(s["chunk_id"], "ja"),
+            previously_touched=bool(s.get("previously_touched")),
         ))
 
     total_duration = sum(s.duration_ms for s in lecture_segments)
-    summary_count = sum(1 for s in lecture_segments if s.segment_mode == "summary")
-    # skipped segments were already removed by build_lecture_sequence;
-    # compute how many were dropped
-    skipped_count = len(chunks) - len(segments)
 
     return LectureSequenceResponse(
         course_id=course_id,
@@ -256,8 +255,6 @@ def get_lecture_sequence(
         segments=lecture_segments,
         total_segments=len(lecture_segments),
         total_duration_ms=total_duration,
-        skipped_segments=skipped_count,
-        summary_segments=summary_count,
         total_slides=total_slides,
     )
 
@@ -561,7 +558,14 @@ def lecture_interrupt_chat(
     messages.append({"role": "user", "content": body.message})
 
     try:
-        answer = generate_text(messages=messages, temperature=0.3)
+        # U層計測（U3）: 計測点は core/llm.py に一元化されているが、帰属は呼び出し側が
+        # 張る。ここを張らないと講義中の割込み質問が unattributed に落ちる。
+        with usage_context(
+            "learning:lecture_interrupt",
+            user_id=current_user["id"],
+            course_id=course_id,
+        ):
+            answer = generate_text(messages=messages, temperature=0.3)
     except Exception as exc:
         logger.exception("Lecture interrupt chat failed for topic %s", topic_id)
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
@@ -701,11 +705,12 @@ def _course_figures_index(
 
     session = _pg_session()
     try:
-        placeholders = ", ".join(f":did_{i}" for i in range(len(document_ids)))
+        # migration 080 以降 document_figures.document_id は uuid（バインドを明示キャストする）。
+        placeholders = ", ".join(f"CAST(:did_{i} AS uuid)" for i in range(len(document_ids)))
         params: dict = {f"did_{i}": did for i, did in enumerate(document_ids)}
         rows = session.execute(
             sa_text(f"""
-                SELECT id::text, caption_text, document_id
+                SELECT id::text, caption_text, document_id::text AS document_id
                 FROM document_figures
                 WHERE document_id IN ({placeholders}) AND status = 'extracted'
             """),

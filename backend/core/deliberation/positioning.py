@@ -350,27 +350,16 @@ def _figure_caption_block_id(figure_id: str) -> str | None:
 
 
 def _document_cartridge_id(document_id: str) -> str | None:
-    """document の最新 analysis run から cartridge_id を引く（refs.document_run_artifacts と同型）。"""
-    if not str(document_id or "").strip():
-        return None
-    session = get_session()
-    try:
-        row = session.execute(
-            sa_text(
-                """
-                SELECT cartridge_id
-                FROM document_analysis_runs
-                WHERE document_id = :document_id
-                  AND cartridge_id IS NOT NULL AND cartridge_id <> ''
-                ORDER BY (status = 'completed') DESC, updated_at DESC
-                LIMIT 1
-                """
-            ),
-            {"document_id": document_id},
-        ).fetchone()
-    finally:
-        session.close()
-    return str(row[0]) if row and row[0] else None
+    """document の**採用** analysis run から cartridge_id を引く。
+
+    実装は :func:`core.document_pipeline.persistence.document_run_cartridge_id` への
+    委譲（成果物 run と同一ポリシ）。知識構造の見直し 2026-09-12 C-8 で run 選択を
+    一本化するまでは、ここが「completed 優先・無ければ status 不問の最新」という
+    6種目の独自 SQL を持っていた。分野が引けないときは従来どおり ``None``。
+    """
+    from core.document_pipeline.persistence import document_run_cartridge_id
+
+    return document_run_cartridge_id(document_id) or None
 
 
 def _concept_labels_for_element(ref: ElementRef) -> list[str]:
@@ -384,7 +373,7 @@ def _concept_labels_for_element(ref: ElementRef) -> list[str]:
         session = get_session()
         try:
             row = session.execute(
-                sa_text("SELECT concepts FROM theory_claims WHERE id = CAST(:id AS uuid) LIMIT 1"),
+                sa_text("SELECT concepts FROM theory_claims_live WHERE id = CAST(:id AS uuid) LIMIT 1"),
                 {"id": ref.element_id},
             ).fetchone()
         finally:
@@ -396,7 +385,7 @@ def _concept_labels_for_element(ref: ElementRef) -> list[str]:
         session = get_session()
         try:
             row = session.execute(
-                sa_text("SELECT name FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1"),
+                sa_text("SELECT name FROM theory_components_live WHERE id = CAST(:id AS uuid) LIMIT 1"),
                 {"id": ref.element_id},
             ).fetchone()
         finally:
@@ -595,7 +584,7 @@ def _cross_corpus_parts_claim(element_id: str) -> dict[str, Any]:
     try:
         row = session.execute(
             sa_text(
-                "SELECT text, normalized_text FROM theory_claims WHERE id = CAST(:id AS uuid) LIMIT 1"
+                "SELECT text, normalized_text FROM theory_claims_live WHERE id = CAST(:id AS uuid) LIMIT 1"
             ),
             {"id": element_id},
         ).fetchone()
@@ -610,7 +599,7 @@ def _cross_corpus_parts_component(element_id: str) -> dict[str, Any]:
     session = get_session()
     try:
         row = session.execute(
-            sa_text("SELECT name, summary FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1"),
+            sa_text("SELECT name, summary FROM theory_components_live WHERE id = CAST(:id AS uuid) LIMIT 1"),
             {"id": element_id},
         ).fetchone()
     finally:

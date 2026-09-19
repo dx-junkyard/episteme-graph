@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core.llm import generate_text
+from core.llm_worker.single_shot import json_call
 from core.postgres import get_session as _pg_session
 from core.schema_registry import (
     build_ontology_type_prompt,
@@ -105,18 +106,18 @@ def _select_similar_documents(target_doc_ids: list[str]) -> list[dict]:
     session = _pg_session()
     try:
         # Target と同じコースに紐づく別のドキュメントを取得
-        placeholders = ", ".join(f"'{did}'" for did in target_doc_ids)
+        # 除外IDは必ずバインドパラメータで渡す（SQL 文字列へ値を埋め込まない）
         rows = session.execute(
-            sa_text(f"""
+            sa_text("""
                 SELECT DISTINCT d.id, d.title, d.filename, d.knowledge_graph
                 FROM documents d
                 WHERE d.status = 'completed'
                   AND d.knowledge_graph IS NOT NULL
-                  AND CAST(d.id AS text) NOT IN ({placeholders})
+                  AND CAST(d.id AS text) <> ALL(:exclude_ids)
                 ORDER BY d.updated_at DESC
                 LIMIT :limit
             """),
-            {"limit": _MAX_SIMILAR_DOCS},
+            {"exclude_ids": [str(did) for did in target_doc_ids], "limit": _MAX_SIMILAR_DOCS},
         ).fetchall()
     finally:
         session.close()
@@ -142,21 +143,21 @@ def _select_control_documents(exclude_ids: list[str]) -> list[dict]:
 
     session = _pg_session()
     try:
-        placeholders = ", ".join(f"'{did}'" for did in exclude_ids)
+        # 除外IDは必ずバインドパラメータで渡す（SQL 文字列へ値を埋め込まない）
         rows = session.execute(
-            sa_text(f"""
+            sa_text("""
                 SELECT d.id, d.title, d.filename, d.knowledge_graph,
                        COUNT(c.id) as chunk_count
                 FROM documents d
                 LEFT JOIN chunks c ON c.document_id = d.id
                 WHERE d.status = 'completed'
                   AND d.knowledge_graph IS NOT NULL
-                  AND CAST(d.id AS text) NOT IN ({placeholders})
+                  AND CAST(d.id AS text) <> ALL(:exclude_ids)
                 GROUP BY d.id, d.title, d.filename, d.knowledge_graph
                 ORDER BY chunk_count DESC
                 LIMIT :limit
             """),
-            {"limit": _MAX_CONTROL_DOCS},
+            {"exclude_ids": [str(did) for did in exclude_ids], "limit": _MAX_CONTROL_DOCS},
         ).fetchall()
     finally:
         session.close()
@@ -351,18 +352,14 @@ def _simulate_extraction_for_doc(
         "- JSONのみで回答してください。"
     )
 
-    try:
-        raw = generate_text(messages=[{"role": "user", "content": prompt}])
-        # JSONを抽出
-        import re
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if match:
-            sim_result = json.loads(match.group())
-        else:
-            sim_result = {}
-    except Exception:
-        logger.warning("Simulation extraction failed for doc %s", doc.get("doc_id", ""))
-        sim_result = {}
+    # 抽出は共通実装へ委譲（フェンス付き応答も読めるようになる。取り出せなければ
+    # 従来どおり空 dict へ縮退し、差分ゼロのシミュレーション結果として返す）。
+    sim_result = json_call(
+        prompt,
+        call=generate_text,
+        degraded={},
+        log_label=f"schema simulation doc={doc.get('doc_id', '')}",
+    )
 
     return {
         "doc_id": doc["doc_id"],
@@ -540,6 +537,38 @@ def approve_with_scope(
         }
 
 
+def _canary_target_document_ids(course_ids: list[str]) -> list[str]:
+    """カナリアリリースの対象コースに紐づく document.id（テキスト表現）を返す。
+
+    件数カウントと実際の再抽出対象を**同じクエリ**から導くことで、承認 API が返す
+    ``total_docs`` と実行対象が食い違わないようにする（``scope="canary"`` が
+    「一部コースだけに適用される」と読める以上、実際に絞る必要がある）。
+
+    コースID は TEACHER 権限のリクエストボディ由来のためバインドパラメータで渡す
+    （SQL 文字列へ値を埋め込まない）。``course_ids`` が空なら SQL を発行せず空リスト。
+    """
+    if not course_ids:
+        return []
+
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT DISTINCT CAST(d.id AS text)
+                FROM documents d
+                JOIN chunks c ON c.document_id = d.id
+                JOIN learning_courses lc ON lc.data::text LIKE '%%' || c.material_id || '%%'
+                WHERE CAST(lc.id AS text) = ANY(:course_ids)
+                  AND d.status = 'completed'
+            """),
+            {"course_ids": [str(cid) for cid in course_ids]},
+        ).fetchall()
+    finally:
+        session.close()
+
+    return [str(r[0]) for r in rows if r and r[0]]
+
+
 def _enqueue_canary_reextraction(
     proposal_id: str,
     course_ids: list[str],
@@ -547,25 +576,12 @@ def _enqueue_canary_reextraction(
     """カナリアリリース用の再抽出ジョブをキューに追加する。"""
     import threading
 
+    # 対象ドキュメントを先に解決し、件数と実行対象を一致させる
+    document_ids = _canary_target_document_ids(course_ids)
+    total_docs = len(document_ids)
+
     session = _pg_session()
     try:
-        # 対象コースに紐づくドキュメント数を取得
-        if course_ids:
-            placeholders = ", ".join(f"'{cid}'" for cid in course_ids)
-            count_row = session.execute(
-                sa_text(f"""
-                    SELECT COUNT(DISTINCT d.id)
-                    FROM documents d
-                    JOIN chunks c ON c.document_id = d.id
-                    JOIN learning_courses lc ON lc.data::text LIKE '%%' || c.material_id || '%%'
-                    WHERE lc.id IN ({placeholders})
-                      AND d.status = 'completed'
-                """),
-            ).fetchone()
-            total_docs = count_row[0] if count_row else 0
-        else:
-            total_docs = 0
-
         job_id = str(uuid.uuid4())[:12]
         session.execute(
             sa_text("""
@@ -581,10 +597,10 @@ def _enqueue_canary_reextraction(
     finally:
         session.close()
 
-    # バックグラウンドスレッドで実行
+    # バックグラウンドスレッドで実行（解決済みドキュメントIDをそのまま渡す）
     thread = threading.Thread(
         target=_run_canary_reextraction,
-        args=(job_id, course_ids),
+        args=(job_id, course_ids, document_ids),
         daemon=True,
     )
     thread.start()
@@ -598,10 +614,20 @@ def _enqueue_canary_reextraction(
     }
 
 
-def _run_canary_reextraction(job_id: str, course_ids: list[str]) -> None:
-    """カナリアリリース用の再抽出を実行する。"""
+def _run_canary_reextraction(
+    job_id: str,
+    course_ids: list[str],
+    document_ids: list[str] | None = None,
+) -> None:
+    """カナリアリリース用の再抽出を実行する（対象コース由来のドキュメントのみ）。
+
+    ``document_ids`` が未指定なら ``course_ids`` から解決する。解決結果が 0 件の場合は
+    全件へフォールバックせず、0 件のまま完了させる（``scope="canary"`` の応答が
+    ``target_courses`` を返す以上、対象外のドキュメントを触ってはならない）。
+    """
     from core.reextractor import _run_reextraction_job
 
-    # 現状は通常の再抽出ジョブと同じロジックを使用
-    # TODO: course_ids によるフィルタリングを追加
-    _run_reextraction_job(job_id)
+    if document_ids is None:
+        document_ids = _canary_target_document_ids(course_ids)
+
+    _run_reextraction_job(job_id, document_ids=document_ids)

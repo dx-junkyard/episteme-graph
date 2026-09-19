@@ -34,7 +34,10 @@
   var INACTIVITY_MS = 15 * 60 * 1000; // 無活動タイムアウト（トリガー③）
   var SUPPRESS_MS = 10 * 60 * 1000;   // 直近表示済みの抑制窓（うるさくしない）
 
-  var ctx = { courseId: "" };
+  // 会話コンテキスト。既定はコース文脈（従来どおり）。コーパス回遊層（Phase B、
+  // docs/features/corpus_roaming_design.md §5）の document 直付け議論では kind が
+  // "document" になり、開幕画面の取得口と送信口だけが切り替わる。
+  var ctx = { courseId: "", kind: "course", documentId: "", onAsk: null, onSeed: null };
   var turnCount = 0;
   var lastShownAt = 0;
   var inactivityTimer = null;
@@ -82,7 +85,11 @@
   // discuss 観測基盤（docs/features/discuss_observation_design.md §3）: UI イベントの
   // fire-and-forget 送信。await しない・失敗は握りつぶす（DO6）。レスポンス
   // （{recorded:n}）は学習者に見せないため中身を読まない・DOM にも出さない（DO3）。
+  // コーパス回遊層の document 直付け議論では ctx.courseId が空のため、この経路からは
+  // 何も送らない（観測イベントは course_id をキーに持つ計器で、document 直付けの
+  // 語彙はサーバ側の実装マター — corpus_roaming_design.md §5.5）。
   function sendDiscussMetric(event, payload) {
+    if (ctx.kind === "document") return;
     if (!ctx.courseId) return;
     apiFetch("/learning/discuss/metric-events", {
       method: "POST",
@@ -101,6 +108,59 @@
   function stillInDiscussContext() {
     var body = document.getElementById("material-body");
     return !!body && body.dataset.discussActive === "true";
+  }
+
+  // ── 会話コンテキストの正規化（コーパス回遊層 Phase B, corpus_roaming_design.md §5）──
+  // renderOpening の第2引数は、従来どおりの courseId 文字列（コース文脈。挙動は完全に
+  // 不変）か、{ documentId, onAsk?, onSeed? } の文脈オブジェクト（document 直付け）。
+  // 取得口の組み立てをここ一箇所に閉じ込め、他所で分岐を増やさない。
+  function normalizeOpeningContext(arg) {
+    if (arg && typeof arg === "object") {
+      var docId = String(arg.documentId || "");
+      return {
+        kind: "document",
+        courseId: "",
+        documentId: docId,
+        // キャッシュ・重複計測用のキー。センチネル course_id はサーバ側の正本
+        // （backend/core/discuss/context.py）だけが組み立てる — ここでは作らない。
+        key: docId ? "document:" + docId : "",
+        openingPath: "/learning/documents/" + encodeURIComponent(docId) + "/discuss/opening",
+        onAsk: typeof arg.onAsk === "function" ? arg.onAsk : null,
+        onSeed: typeof arg.onSeed === "function" ? arg.onSeed : null,
+      };
+    }
+    var cid = arg || "";
+    return {
+      kind: "course",
+      courseId: cid,
+      documentId: "",
+      key: cid,
+      openingPath: "/learning/courses/" + encodeURIComponent(cid) + "/discuss/opening",
+      onAsk: null,
+      onSeed: null,
+    };
+  }
+
+  // document 直付けの文脈から抜ける（コーパス回遊層が議論ビューを閉じたとき）。
+  // コース側の状態（ctx.courseId・往復回数・無活動タイマー）には触らない — 回遊の
+  // 閲覧が、進行中のコース discuss セッションを終わらせないため（CR2）。
+  function exitDocumentContext() {
+    if (ctx.kind !== "document") return;
+    ctx.kind = "course";
+    ctx.documentId = "";
+    ctx.onAsk = null;
+    ctx.onSeed = null;
+  }
+
+  // 非同期応答が戻った時点でも、まだ同じ開幕画面が生きているか。コース文脈は従来どおり
+  // #material-body の合図を見る。document 文脈では呼び出し側（corpus-sea.js）が
+  // 差し込んだ容器そのものに合図が立っているかを見る。
+  function stillInOpeningContext(containerEl) {
+    if (ctx.kind === "document") {
+      return !!containerEl && containerEl.getAttribute("data-discuss-active") === "true" &&
+        !!containerEl.parentNode;
+    }
+    return stillInDiscussContext();
   }
 
   // ── 理解サイクル Phase 1（OPEN / ELICIT / DIFF, docs/features/understanding_cycle_design.md
@@ -204,6 +264,8 @@
     html += '</div>';
     diffArea.innerHTML = html;
     diffArea.hidden = false;
+    // 外部 AI 転送の常設事実文（DA2）: 「AIに違いの観点を出してもらう」の近傍に1行。
+    if (window.DisclosureNote) window.DisclosureNote.mount(diffArea, "learning_chat");
     sendDiscussMetric("cycle_diff_viewed", {});
     var saveBtn = document.getElementById("cycle-diff-reflect-save");
     if (saveBtn) {
@@ -267,6 +329,10 @@
     html += '<div class="cycle-diff-area" id="cycle-diff-area" hidden></div>';
     area.innerHTML = html;
     area.hidden = false;
+    // 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2）: この枠には
+    // AI に問い・観点を求めるボタンがあるので、入力欄のそばに1行置く（文言はサーバが
+    // 正本・取得できなければ何も描かない fail-soft）。同意ボタンは作らない（DA5）。
+    if (window.DisclosureNote) window.DisclosureNote.mount(area, "learning_chat");
     // 理解サイクル Phase 2（AI Elicit モード, 設計書 §8）: 答えを提示せず、予測を立てる
     // ための問いを一つだけもらう。既存 learning_chat の1コール地点に
     // cycle_mode="elicit" を添えて相乗りする（新エンドポイントを作らない）。
@@ -486,6 +552,55 @@
         esc(goal) + '</div>';
     }
     html += '</div>';
+    return html;
+  }
+
+  // 「論文の骨格（章の流れ）」（P0-9。主語=論文）。paper_skeleton の logical_blocks を
+  // サーバがそのまま射影したものを出す（要約・和訳・並べ替えはしない）。
+  //
+  // なぜ出すのか: 構造化成果（claim / component）は論文の一部の章しか覆わないことが
+  // あるのに対し、この骨格は第1章から最終章までを覆っている（調査A F-14）。
+  // 「見えているのに届いていない」層をそのまま読めるようにするのが目的で、新しい
+  // 単位を作ったわけではない。
+  //
+  // - block_type は A層の内部語彙なので、label / summary を主に見せて補助表示に留める。
+  // - 開幕画面の一等地を長い一覧で埋めないよう、既定は畳んだ details にする（押せば
+  //   同じ画面から到達できる = OA7）。
+  // - 骨格が無い論文ではキー自体がサーバから来ないので、区画ごと出ない（催促しない）。
+  function renderChapterSkeletonSection(doc) {
+    var blocks = (doc && Array.isArray(doc.chapter_skeleton)) ? doc.chapter_skeleton : [];
+    var usable = blocks.filter(function (b) {
+      return b && (String(b.label || "").trim() || String(b.summary || "").trim());
+    });
+    if (!usable.length) return "";
+    var html = '<details class="discuss-section discuss-section-chapters">';
+    html += '<summary class="discuss-section-hd">論文の骨格（章の流れ）</summary>';
+    html += '<div class="discuss-section-sub">この論文が、どんな順に組み立てられているかです。</div>';
+    html += '<ol class="discuss-chapter-list">';
+    usable.forEach(function (b) {
+      var label = String(b.label || "").trim();
+      var summary = String(b.summary || "").trim();
+      var kind = String(b.block_type || "").trim();
+      var titles = Array.isArray(b.section_titles) ? b.section_titles : [];
+      html += '<li class="discuss-chapter-item">';
+      if (label) html += '<span class="discuss-chapter-label">' + esc(label) + '</span>';
+      if (kind) html += '<span class="discuss-chapter-type">' + esc(kind) + '</span>';
+      if (summary) html += '<div class="discuss-chapter-summary">' + esc(summary) + '</div>';
+      if (titles.length) {
+        html += '<div class="discuss-chapter-sections">';
+        titles.forEach(function (t) {
+          html += '<span class="discuss-chapter-section">' + esc(String(t)) + '</span>';
+        });
+        html += '</div>';
+      }
+      html += '</li>';
+    });
+    html += '</ol>';
+    if (doc && doc.chapter_skeleton_truncated) {
+      html += '<div class="discuss-muted discuss-truncated-note">' +
+        'この一覧は主要なものに絞って表示しています。</div>';
+    }
+    html += '</details>';
     return html;
   }
 
@@ -732,6 +847,9 @@
       html += '<div class="discuss-opening-doc">';
       if (multi) html += '<div class="discuss-opening-doc-title">' + esc(doc.title || "") + '</div>';
       html += renderQuestionSection(doc);
+      // 問いの直後に論文の骨格（章の流れ）を置く。既定は畳まれているので一等地の
+      // 密度は変わらない（P0-9）。
+      html += renderChapterSkeletonSection(doc);
       html += renderThesisSection(doc);
       // 承認済みの「議論のきっかけ」は一等地（折りたたみの外）に置く。無ければ何も出ない。
       html += renderDiscussionSeedsSection(doc);
@@ -767,6 +885,10 @@
         } else {
           sendDiscussMetric("opening_starter_clicked", {});
         }
+        // コーパス回遊層 Phase B: document 直付け議論では、コース会話ではなく
+        // 呼び出し側（corpus-sea.js）の会話欄へ送る。構造帰属（経路A）はコースの
+        // 痕跡機構に載る仕組みなので、document 直付けでは添えない（§5.4 の縮退）。
+        if (ctx.kind === "document" && ctx.onAsk) { if (text) ctx.onAsk(text); return; }
         if (!text || !window.sendPrompt) return;
         // 構造帰属（経路A・明示アンカー, DM3 / 設計 §3.4）: 元要素の id があれば
         // 既存の element_id / element_type / element_label で添える。これで
@@ -789,6 +911,7 @@
       btn.addEventListener("click", function () {
         var text = this.getAttribute("data-discuss-seed-ask");
         sendDiscussMetric("opening_starter_clicked", {});
+        if (ctx.kind === "document" && ctx.onSeed) { if (text) ctx.onSeed(text); return; }
         if (text && window.discussPostSeedPrompt) window.discussPostSeedPrompt(text);
       });
     });
@@ -865,15 +988,25 @@
   // fail-closed に縮退する）。
   async function renderOpening(containerEl, courseId) {
     if (!containerEl) return;
-    courseId = courseId || "";
-    ctx.courseId = courseId;
+    // 第2引数はコース文脈では courseId 文字列（従来どおり）、コーパス回遊層の
+    // document 直付け議論では文脈オブジェクト。以降の courseId は「文脈キー」で、
+    // コース文脈では courseId 文字列そのものなので挙動は変わらない。
+    var cx = normalizeOpeningContext(courseId);
+    ctx.kind = cx.kind;
+    ctx.documentId = cx.documentId;
+    ctx.onAsk = cx.onAsk;
+    ctx.onSeed = cx.onSeed;
+    courseId = cx.key;
+    // document 文脈では ctx.courseId を触らない（CR2: 進行中のコース discuss
+    // セッション＝着地判定・無活動タイマーの文脈を、回遊の閲覧で壊さない）。
+    if (cx.kind === "course") ctx.courseId = cx.courseId;
     if (!courseId) return;
 
-    // 既に同じコースで取得済みなら再フェッチせず即描画する（送信のたびに
+    // 既に同じ文脈で取得済みなら再フェッチせず即描画する（送信のたびに
     // renderMaterialRegion が呼ばれても毎回ネットワーク往復させないため）。
     if (openingCache.courseId === courseId && openingCache.data) {
       var cachedHtml = buildOpeningHtml(openingCache.data);
-      if (cachedHtml && stillInDiscussContext()) {
+      if (cachedHtml && stillInOpeningContext(containerEl)) {
         containerEl.innerHTML = cachedHtml;
         bindOpeningEvents(containerEl);
         notifyOpeningShown(courseId);
@@ -883,7 +1016,7 @@
 
     var reqId = ++openingReqSeq;
     try {
-      var res = await apiFetch("/learning/courses/" + encodeURIComponent(courseId) + "/discuss/opening");
+      var res = await apiFetch(cx.openingPath);
       if (!res.ok) return; // fail-closed: プレースホルダのまま
       var data = await res.json();
       if (reqId !== openingReqSeq) return; // 遅延応答ガード（別コースへ切替済み）
@@ -891,7 +1024,7 @@
       var html = buildOpeningHtml(data);
       if (!html) return; // documents 空 → プレースホルダのまま
       openingCache = { courseId: courseId, data: data };
-      if (stillInDiscussContext()) {
+      if (stillInOpeningContext(containerEl)) {
         containerEl.innerHTML = html;
         bindOpeningEvents(containerEl);
         notifyOpeningShown(courseId);
@@ -1563,6 +1696,8 @@
   window.Discuss = {
     init: init,
     renderOpening: renderOpening,
+    // コーパス回遊層 Phase B: document 直付けの議論ビューを閉じたときに呼ぶ。
+    exitDocumentContext: exitDocumentContext,
     maybeShowLanding: maybeShowLanding,
     notifyActivity: notifyActivity,
     renderBranchChips: renderBranchChips,
@@ -1577,6 +1712,11 @@
       lastShownAt = 0;
       openingShownCourseId = "";
       ctx.courseId = "";
+      // コーパス回遊層 Phase B: document 直付けの文脈も残さない（コース文脈へ戻す）。
+      ctx.kind = "course";
+      ctx.documentId = "";
+      ctx.onAsk = null;
+      ctx.onSeed = null;
       _cycleLandingCandidates = [];
       invalidateOpeningCache();
       closeLanding();

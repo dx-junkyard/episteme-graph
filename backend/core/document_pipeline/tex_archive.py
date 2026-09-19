@@ -7,6 +7,7 @@ disk.
 """
 from __future__ import annotations
 
+import gzip
 import io
 import os
 import posixpath
@@ -165,6 +166,38 @@ def load_tex_archive(archive_bytes: bytes, *, source_file: str) -> TexArchiveSou
     )
 
 
+#: 単一ファイル投稿（tar ではなく素の gzip）で復元した .tex に与える名前。
+_SINGLE_MEMBER_NAME = "main.tex"
+
+#: 素の gzip を「TeX ソースである」と判断するための印。拡張子も member 名も無いので、
+#: 中身そのものに LaTeX の骨格があることだけを根拠にする（PDF や画像を .tex として
+#: 取り込まないための fail-closed）。
+_TEX_DOCUMENT_MARKERS = ("\\documentclass", "\\begin{document}", "\\documentstyle")
+
+
+def _read_single_gzip_member(archive_bytes: bytes) -> dict[str, str]:
+    """tar ではない素の gzip を「1ファイルの TeX ソース」として読む。
+
+    arXiv の TeX Source（``/src/<id>``）は、**複数ファイルの投稿なら .tar.gz、
+    単一ファイルの投稿なら .tex を gzip しただけのバイト列**を返す。後者を
+    :func:`tarfile.open` は開けないので、ここで畳んでおかないと「TeX ソースを選んだのに
+    単一ファイル投稿の論文だけ解析できない」という取りこぼしになる。
+
+    LaTeX の骨格が見当たらないバイト列は**受け取らない**（空 dict を返し、呼び出し側が
+    ``.tar.gz`` として不正である旨のエラーに落とす）。
+    """
+    try:
+        raw = gzip.decompress(archive_bytes)
+    except Exception:  # noqa: BLE001 — zlib.error / EOFError / BadGzipFile を一様に畳む
+        return {}
+    if len(raw) > _MAX_MEMBER_BYTES:
+        return {}
+    text = _decode_tex(raw)
+    if not any(marker in text for marker in _TEX_DOCUMENT_MARKERS):
+        return {}
+    return {_SINGLE_MEMBER_NAME: text}
+
+
 def _read_archive_members(archive_bytes: bytes) -> tuple[dict[str, str], dict[str, str]]:
     tex_members: dict[str, str] = {}
     bib_members: dict[str, str] = {}
@@ -192,7 +225,11 @@ def _read_archive_members(archive_bytes: bytes) -> tuple[dict[str, str], dict[st
                 else:
                     bib_members[safe_name] = _decode_tex(raw)
     except tarfile.TarError as exc:
-        raise ValueError("invalid .tar.gz TeX archive") from exc
+        # tar として読めないバイト列は、単一ファイル投稿（素の gzip）の可能性がある。
+        single = _read_single_gzip_member(archive_bytes)
+        if not single:
+            raise ValueError("invalid .tar.gz TeX archive") from exc
+        return single, {}
     return tex_members, bib_members
 
 

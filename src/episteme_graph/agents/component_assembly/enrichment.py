@@ -1,8 +1,24 @@
 """Deterministic enrichment for ComponentAssemblyAgent outputs."""
 from __future__ import annotations
 
-from .schema import ComponentAssemblyLLMInput, ComponentAssemblyResult, ComponentRecord
+from episteme_graph.agents.alias_matching import text_mentions_any
+
+from .schema import (
+    ComponentAssemblyLLMInput,
+    ComponentAssemblyResult,
+    ComponentRecord,
+    concept_name_list,
+    is_symbol_like_concept_name,
+)
 from .claim_centered_planner import infer_support_metadata
+
+# concepts の型契約・記号除外の正本は schema.concept_name_list（P0-3）。
+# enrichment 由来の import 元としても使えるよう再エクスポートする。
+__all__ = [
+    "enrich_component_assembly",
+    "concept_name_list",
+    "is_symbol_like_concept_name",
+]
 
 
 _DERIVATION_TYPES = {"RelationComponent", "PaperRelationComponent", "MethodComponent"}
@@ -31,7 +47,6 @@ def enrich_component_assembly(
         if _requires_review(eq)
     }
     claim_index = _claim_concept_index(llm_input)
-    eq_symbol_index = _equation_symbol_index(eq_index)
     concept_vocab = _concept_vocab(llm_input, claim_index)
 
     for component in result.components:
@@ -44,7 +59,7 @@ def enrich_component_assembly(
         _fill_thesis_support_refs(component, llm_input)
         _fill_role_in_thesis(component)
         _fill_teaching_takeaway(component)
-        _fill_concepts(component, claim_index, eq_symbol_index, concept_vocab)
+        _fill_concepts(component, claim_index, concept_vocab)
         _propagate_review_status(component)
         _fill_internal_flow(component)
 
@@ -70,6 +85,16 @@ def _normalize_component_lists(component: ComponentRecord) -> None:
         "linked_dsl_edge_ids",
     ):
         setattr(component, field_name, _unique(getattr(component, field_name, []) or []))
+
+    # P0-3: concept 系フィールドは必ず型契約（str は 1 要素・記号と短い名前は
+    # 除外）を通す。LLM や repair 経路が str を入れても 1 文字ずつに割らない。
+    for field_name in (
+        "concepts",
+        "prerequisite_concepts",
+        "introduced_concepts",
+        "reused_concepts",
+    ):
+        setattr(component, field_name, concept_name_list(getattr(component, field_name, [])))
 
 
 def _fill_equation_roles(
@@ -313,14 +338,23 @@ def _fill_teaching_takeaway(component: ComponentRecord) -> None:
 def _fill_concepts(
     component: ComponentRecord,
     claim_index: dict[str, dict],
-    eq_symbol_index: dict[str, list[str]],
     concept_vocab: dict[str, list[str]],
 ) -> None:
     """Derive component concepts deterministically (issue #8).
 
-    Concepts come from linked atomic-claim concepts, equation symbols, and
-    cartridge / claim concept terms mentioned in the component text. Concepts from
+    Concepts come from linked atomic-claim concepts and from cartridge / claim
+    concept terms **mentioned as words** in the component text. Concepts from
     non-atomic claims are not used as confirmed concept backing.
+
+    P0-2（語境界付き照合）: 語の照合は :mod:`alias_matching` に委ねる。以前は
+    ``needle in body`` の部分文字列一致だったため、alias ``"SM"`` が
+    ``"cosmological"`` に当たり、原本に 0 回の概念が 28 ノード中 25 に注入された
+    （F-7 / K-3）。
+
+    P0-3（概念層と記号層の分離）: 式の defined/used symbols を concepts に
+    混ぜるのをやめた。記号の正本は symbol_registry artifact であり、component
+    からは ``linked_equation_ids`` 経由で式に辿れるので情報は失われない
+    （F-6 / K-2）。
     """
     concepts: list[str] = []
     for cid in _component_claim_ids(component):
@@ -330,21 +364,18 @@ def _fill_concepts(
         if info.get("is_atomic") and str(info.get("atomicity", "atomic")) == "atomic":
             concepts.extend(info.get("concepts") or [])
 
-    for eq_id in _all_component_equation_ids(component):
-        concepts.extend(eq_symbol_index.get(eq_id, []))
-
     body = _component_text(component)
-    for canonical, needles in concept_vocab.items():
-        if any(needle in body for needle in needles):
+    for canonical, names in concept_vocab.items():
+        if text_mentions_any(body, names):
             concepts.append(canonical)
-    component.concepts = _unique(concepts)
+    component.concepts = concept_name_list(concepts)
 
     prereq_text = _precondition_text(component)
     prerequisites = [
-        canonical for canonical, needles in concept_vocab.items()
-        if any(needle in prereq_text for needle in needles)
+        canonical for canonical, names in concept_vocab.items()
+        if text_mentions_any(prereq_text, names)
     ]
-    component.prerequisite_concepts = _unique(prerequisites)
+    component.prerequisite_concepts = concept_name_list(prerequisites)
 
 
 def _assign_introduced_reused(components: list[ComponentRecord]) -> None:
@@ -386,6 +417,12 @@ def _component_claim_ids(component: ComponentRecord) -> list[str]:
 
 
 def _component_text(component: ComponentRecord) -> str:
+    """concept 照合に使う component 本文。
+
+    P0-2: **lowercase しない**。3 文字以下の短い alias は大文字小文字を区別した
+    単語一致で照合するため（``SM`` は ``SM`` にだけ当たる）、照合対象の大小を
+    潰すとその規律が効かなくなる。
+    """
     return " ".join(
         str(part or "")
         for part in (
@@ -394,7 +431,7 @@ def _component_text(component: ComponentRecord) -> str:
             component.reason,
             getattr(component, "teaching_takeaway", ""),
         )
-    ).lower()
+    )
 
 
 def _precondition_text(component: ComponentRecord) -> str:
@@ -404,7 +441,8 @@ def _precondition_text(component: ComponentRecord) -> str:
             parts.append(str(item.get("condition") or item.get("name") or item.get("text") or ""))
         elif isinstance(item, str):
             parts.append(item)
-    return " ".join(parts).lower()
+    # P0-2: _component_text と同じ理由で lowercase しない。
+    return " ".join(parts)
 
 
 def _claim_concept_index(llm_input: ComponentAssemblyLLMInput) -> dict[str, dict]:
@@ -416,7 +454,9 @@ def _claim_concept_index(llm_input: ComponentAssemblyLLMInput) -> dict[str, dict
         cid = str(row.get("claim_id") or "")
         if not cid:
             continue
-        concepts = [str(c) for c in (row.get("concepts") or []) if c]
+        # P0-3: str / dict / ClaimConcept のどれで来ても概念名の list へ。
+        # concept_type="symbol" と 2 文字以下の名前はここで落ちる。
+        concepts = concept_name_list(row.get("concepts"))
         atomicity = str(row.get("atomicity", "atomic") or "atomic")
         entry = index.setdefault(cid, {
             "concepts": [],
@@ -431,42 +471,42 @@ def _claim_concept_index(llm_input: ComponentAssemblyLLMInput) -> dict[str, dict
     return index
 
 
-def _equation_symbol_index(eq_index: dict[str, dict]) -> dict[str, list[str]]:
-    index: dict[str, list[str]] = {}
-    for eq_id, eq in eq_index.items():
-        symbols: list[str] = []
-        for sym in eq.get("defined_symbols") or []:
-            if isinstance(sym, dict):
-                name = str(sym.get("symbol") or "").strip()
-            else:
-                name = str(sym or "").strip()
-            if name:
-                symbols.append(name)
-        symbols.extend(str(s).strip() for s in (eq.get("used_symbols") or []) if str(s).strip())
-        if symbols:
-            index[eq_id] = _unique(symbols)
-    return index
+# P0-3: 式の記号を concepts に注入していた _equation_symbol_index は撤去した。
+# 記号の正本は symbol_registry artifact、component からの参照は
+# linked_equation_ids / input_equation_ids 等の式リンクで保たれる（F-6 / K-2）。
 
 
 def _concept_vocab(
     llm_input: ComponentAssemblyLLMInput,
     claim_index: dict[str, dict],
 ) -> dict[str, list[str]]:
-    """Map a canonical concept name to the lowercased needles that imply it."""
+    """canonical 概念名 → その概念を含意する「照合名の列」（canonical + alias）。
+
+    P0-2: 値は **生文字列**（lowercase しない）。照合は
+    :func:`alias_matching.text_mentions_any` が語境界付きで行い、3 文字以下の
+    短い alias は大文字小文字を区別した単語完全一致になる。
+
+    canonical 側（= 成果へ書き戻される概念名）には概念名の書式規則
+    （:func:`schema.is_symbol_like_concept_name`）を課す。alias 側は照合のための
+    needle なので短くても記号でもよい（``SM`` は語として現れたときだけ canonical
+    ``Standard Model`` を意味する）。
+    """
     vocab: dict[str, list[str]] = {}
     for term in llm_input.normalized_terms or []:
         if not isinstance(term, dict):
             continue
         canonical = str(term.get("canonical") or "").strip()
-        if not canonical:
+        if not canonical or is_symbol_like_concept_name(canonical):
             continue
-        needles = [canonical.lower()] + [str(a).lower() for a in (term.get("aliases") or []) if a]
-        vocab[canonical] = _unique(needles)
+        names = [canonical] + [
+            str(a).strip() for a in (term.get("aliases") or []) if str(a or "").strip()
+        ]
+        vocab[canonical] = _unique(names)
     for info in claim_index.values():
-        for name in info.get("concepts") or []:
-            canonical = str(name).strip()
+        # claim 側の concepts は _claim_concept_index で正規化済み。
+        for canonical in info.get("concepts") or []:
             if canonical and canonical not in vocab:
-                vocab[canonical] = [canonical.lower()]
+                vocab[canonical] = [canonical]
     return vocab
 
 

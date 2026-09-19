@@ -1197,7 +1197,8 @@ def _role_mismatch_reasons(result, comp_id):
     ]
 
 
-def test_derivation_component_without_math_concept_is_role_mismatch():
+def test_derivation_component_without_math_concept_or_equation_is_role_mismatch():
+    # (b) P0-3 後も規則は維持: 式も手続的概念も無い導出 component は warning。
     comp = _ComponentRecord(
         "comp_deriv",
         {"claim_ids": [], "evidence_ids": []},
@@ -1208,6 +1209,21 @@ def test_derivation_component_without_math_concept_is_role_mismatch():
     reasons = _role_mismatch_reasons(result, "comp_deriv")
     assert any("mathematical or procedural" in r for r in reasons)
     assert "COMPONENT_CONCEPT_ROLE_MISMATCH" in [w.code for w in result.warnings]
+
+
+def test_derivation_component_with_equation_link_has_no_role_mismatch():
+    # (a) P0-3（F-6 / K-2）: 記号が概念層から外れた後、導出 component の数学性は
+    # 式リンクが担う。記号ジャンクを concepts に持たなくても warning は出ない。
+    comp = _ComponentRecord(
+        "comp_deriv_eq",
+        {"claim_ids": [], "evidence_ids": []},
+        primary_operation="eliminate_bias",
+        linked_equation_ids=["eq_1"],
+    )
+    comp.concepts = ["Galaxy survey", "Gravity model"]
+    result = _run_gate(component_result=_ComponentResult([comp]))
+    assert _role_mismatch_reasons(result, "comp_deriv_eq") == []
+    assert "COMPONENT_CONCEPT_ROLE_MISMATCH" not in [w.code for w in result.warnings]
 
 
 def test_observable_component_without_named_concept_is_role_mismatch():
@@ -1237,10 +1253,11 @@ def test_comparison_component_without_theory_class_is_role_mismatch():
 def test_well_tagged_components_have_no_role_mismatch():
     comp = _ComponentRecord(
         "comp_ok",
-        {"claim_ids": [], "evidence_ids": []},
+        # P0-3: 数学性の根拠は記号ジャンクではなく式リンク（evidence_refs 経由）。
+        {"claim_ids": [], "evidence_ids": [], "equation_ids": ["eq_1"]},
         primary_operation="eliminate_bias",
     )
-    comp.concepts = ["b_1", "consistency relation"]  # symbol + named
+    comp.concepts = ["consistency relation", "galaxy bias"]  # named concepts only
     result = _run_gate(component_result=_ComponentResult([comp]))
     assert result.concept_validation["concept_role_mismatch"] == []
 

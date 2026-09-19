@@ -35,14 +35,21 @@ def _safe_len(value: Any) -> int:
         return 0
 
 
-# 音声読み上げ前のテキスト整形: LaTeX・markdown 記号・システムマーカーを除去する。
+# 音声読み上げ前のテキスト整形: LaTeX・markdown 記号・システムマーカー・制御シーケンスを
+# 除去する。``\(...\)`` / ``\[...\]`` 形式の LaTeX と ANSI 残骸（``[0m`` 等）は
+# 2026-09-10 の追補（graph_dialogue_review_design.md §15）。
 _SPEECH_STRIP_PATTERNS = (
+    re.compile(r"\x1b\[[0-9;]*[A-Za-z]"),            # ANSI エスケープ（ESC 付き）
     re.compile(r"\$\$.*?\$\$", re.DOTALL),          # ディスプレイ数式
     re.compile(r"\$[^$\n]+\$"),                      # インライン数式
+    re.compile(r"\\\[.*?\\\]", re.DOTALL),           # LaTeX ディスプレイ数式 \[...\]
+    re.compile(r"\\\(.*?\\\)", re.DOTALL),           # LaTeX インライン数式 \(...\)
     re.compile(r"\[ACTION_BUTTON:[^\]]*\]"),         # アクションボタン記法
     re.compile(r"\[[^\]]*について詳しく聞く\]"),      # ドリルダウンマーカー
     re.compile(r"\[出典\d+\]"),                      # 出典マーカー
+    re.compile(r"\[[0-9;]{1,6}m"),                   # ESC が落ちた裸の SGR 残骸（[0m 等）
     re.compile(r"[*_#`>|]+"),                        # markdown 記号
+    re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"), # C0 制御文字（\n \t は残す）
 )
 
 

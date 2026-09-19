@@ -150,19 +150,39 @@
     return text;
   }
 
+  // K-6: 地図の改訂で現行版に対応する場所が無くなった位置づけの事実文。サーバが
+  // domains[].facts[] に入れてよこす文をそのまま描く（言い換えない・件数を足さない・
+  // 旧 node_id や対応の経路は学習者に出さない）。無ければ何も足さない。
+  function domainFactLines(data) {
+    const lines = [];
+    ((data && data.domains) || []).forEach((domain) => {
+      ((domain && domain.facts) || []).forEach((fact) => {
+        if (fact && lines.indexOf(String(fact)) === -1) lines.push(String(fact));
+      });
+    });
+    return lines;
+  }
+
   // -------------------------------------------------------------------
   // 配置のノード別グルーピング
   // -------------------------------------------------------------------
 
   // node_id -> [{ title, node_label, node_kind, placements: [...] }]（論文単位）
+  //
+  // K-6（atlas_node_correspondence_design.md §6）: 地図を改訂しても位置づけが切れない
+  // ように、位置の解決は現行版の `current_node_id` を優先する（サーバが版間の対応表を
+  // 辿って付ける。無ければ従来どおり `node_id`）。現行版に対応する場所が無い配置
+  // （node_status = "unmapped"）は位置に置かず、事実文でだけ示す（NC5 / NC6）。
   function groupByNode(data) {
     const groups = {};
     ((data && data.documents) || []).forEach((doc) => {
       const byNode = {};
       ((doc && doc.placements) || []).forEach((p) => {
-        if (!p || !p.node_id) return;
-        if (!byNode[p.node_id]) byNode[p.node_id] = [];
-        byNode[p.node_id].push(p);
+        if (!p || p.node_status === "unmapped") return;
+        const nodeId = p.current_node_id || p.node_id;
+        if (!nodeId) return;
+        if (!byNode[nodeId]) byNode[nodeId] = [];
+        byNode[nodeId].push(p);
       });
       Object.keys(byNode).forEach((nodeId) => {
         const first = byNode[nodeId][0];
@@ -405,7 +425,14 @@
     }
     const data = cachedData(state.courseId);
     if (!data) { state.factEl.hidden = true; return; }
-    state.factEl.textContent = corpusFactText(data);
+    // 既存の事実行に K-6 の事実文を足すだけ（新しい帯を作らない）。
+    state.factEl.textContent = "";
+    [corpusFactText(data)].concat(domainFactLines(data)).forEach((line) => {
+      if (!line) return;
+      const row = document.createElement("div");
+      row.textContent = line;
+      state.factEl.appendChild(row);
+    });
     state.factEl.hidden = false;
   }
 

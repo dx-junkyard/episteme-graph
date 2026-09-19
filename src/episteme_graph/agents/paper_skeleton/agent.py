@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 
+from episteme_graph.agents.cartridge_loader import load_cartridge_or_none
 from episteme_graph.agents.document_structure.schema import DocumentStructureResult
 
 from .cartridge_loader import CartridgeLoader
@@ -62,14 +63,9 @@ class PaperSkeletonAgent:
             オプション設定（max_sections: int など）。
         """
         # Step 1: Load cartridge (optional)
-        cartridge: CartridgeContext | None = None
-        if cartridge_id:
-            try:
-                cartridge = self._cartridge_loader.load(cartridge_id)
-            except FileNotFoundError:
-                logger.warning(
-                    "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
-                )
+        cartridge: CartridgeContext | None = load_cartridge_or_none(
+            self._cartridge_loader, cartridge_id
+        )
 
         # Step 2: Build LLM input from structure
         llm_input = self._input_builder.build(structure, cartridge=cartridge, config=config)

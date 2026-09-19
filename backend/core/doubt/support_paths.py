@@ -80,7 +80,7 @@ def _qualified_adjacency(
         filters.append("course_id = :course")
         params["course"] = course_id
     if document_id:
-        filters.append("document_id = :doc")
+        filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
         params["doc"] = document_id
     if not filters:
         filters.append("TRUE")

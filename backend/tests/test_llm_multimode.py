@@ -1,13 +1,16 @@
-"""Issue #57: LLMマルチモード設定および LangGraph ノードアーキテクチャのテスト。
+"""Issue #57: LLMマルチモード設定のテスト。
 
 - pydantic-settings による環境変数からの LLM 設定読み込み
 - get_llm_params() が適切なモデルと推論レベルを返すこと
-- StudentGraph の構造検証
+
+（旧 StudentGraph（LangGraph）の構造検証は、本番ルートへ未接続のまま残っていた
+``core/graphs/`` の撤去に伴って削除した。学生向け対話の本番実装は
+``api/routes/learning.py::learning_chat``。）
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -177,88 +180,3 @@ class TestReasoningEffortPassthrough:
 
         kwargs = _build_api_kwargs("gpt-4o", reasoning_effort="high")
         assert "reasoning_effort" not in kwargs
-
-
-# ---------------------------------------------------------------------------
-# 4. StudentGraph 構造テスト
-# ---------------------------------------------------------------------------
-
-
-class TestStudentGraphStructure:
-    """StudentGraph が正しいノードとエッジで構成されていること。"""
-
-    @pytest.fixture()
-    def graph(self):
-        from core.graphs.student_graph import build_student_graph
-
-        return build_student_graph()
-
-    def test_graph_compiles(self, graph):
-        """グラフがエラーなくコンパイルされること。"""
-        assert graph is not None
-
-    def test_student_graph_no_chunks_bypass(self):
-        """チャンク0件の場合に LLM をスキップしてエラー応答を返すこと。"""
-        from core.graphs.student_graph import no_chunks_response_node
-
-        result = no_chunks_response_node({"question": "テスト"})
-        assert "answer" in result
-        assert "教材" in result["answer"]
-        assert result.get("error") == "no_relevant_chunks"
-
-    def test_query_analyzer_fallback(self):
-        """QueryAnalyzer の LLM 呼び出しが失敗しても安全にフォールバックすること。"""
-        from core.graphs.student_graph import query_analyzer_node
-
-        with patch("core.graphs.student_graph.generate_text", side_effect=Exception("LLM error")):
-            result = query_analyzer_node({"question": "量子力学とは"})
-            assert result["intent"] == "other"
-            assert result["search_keywords"] == ["量子力学とは"]
-
-    def test_retrieval_no_chunks(self):
-        """search_chunks_with_metadata が空を返した場合に no_relevant_chunks=True。"""
-        import sys
-        mock_services = MagicMock()
-        mock_services.search_chunks_with_metadata = MagicMock(return_value=[])
-        original_services = sys.modules.get("services")
-        sys.modules["services"] = mock_services
-        try:
-            from core.graphs.student_graph import retrieval_node
-            result = retrieval_node({"question": "テスト"})
-            assert result["no_relevant_chunks"] is True
-            assert result["chunks"] == []
-        finally:
-            if original_services is None:
-                sys.modules.pop("services", None)
-            else:
-                sys.modules["services"] = original_services
-
-    def test_retrieval_with_chunks(self):
-        """閾値以上のチャンクがある場合に no_relevant_chunks=False。"""
-        import sys
-        mock_chunks = [
-            {"text": "チャンク1", "source_title": "教材A", "source_file": "a.pdf", "score": 0.8},
-            {"text": "チャンク2", "source_title": "教材B", "source_file": "b.pdf", "score": 0.2},
-        ]
-        mock_services = MagicMock()
-        mock_services.search_chunks_with_metadata = MagicMock(return_value=mock_chunks)
-        original_services = sys.modules.get("services")
-        sys.modules["services"] = mock_services
-        try:
-            from core.graphs.student_graph import retrieval_node
-            result = retrieval_node({"question": "テスト"})
-            assert result["no_relevant_chunks"] is False
-            assert len(result["chunks"]) == 1  # score >= 0.35 のみ
-        finally:
-            if original_services is None:
-                sys.modules.pop("services", None)
-            else:
-                sys.modules["services"] = original_services
-
-    def test_format_guard_fallback(self):
-        """FormatGuard の LLM 呼び出しが失敗しても raw_answer をそのまま返すこと。"""
-        from core.graphs.student_graph import format_guard_node
-
-        with patch("core.graphs.student_graph.generate_text", side_effect=Exception("LLM error")):
-            result = format_guard_node({"raw_answer": "テスト回答"})
-            assert result["answer"] == "テスト回答"

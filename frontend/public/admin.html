@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Episteme Graph — 管理画面</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <link rel="stylesheet" href="/css/styles.css?v=figure-course-flow-20260719-1">
+  <link rel="stylesheet" href="/css/styles.css?v=graph-layout-20260917-1">
   <script defer src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
@@ -217,7 +217,7 @@
               <option value="merged">重複統合</option>
               <option value="">すべて</option>
             </select>
-            <button id="atlas-reports-refresh" class="admin-action-btn">更新</button>
+            <button id="atlas-reports-refresh" class="admin-action-btn" data-ui-anchor="atlas.reports-refresh">更新</button>
           </div>
         </div>
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:10px">
@@ -304,6 +304,10 @@
           <p style="margin-top:8px">
             <button type="button" id="url-upload-link" data-ui-anchor="materials.url-upload"
                     style="background:none;border:none;padding:0;font-size:12px;color:var(--color-accent, #2563eb);text-decoration:underline;cursor:pointer">URLから取得（arXiv など）</button>
+            <!-- 論文ディスカバリー: 押すとモーダル（#paper-discovery-modal）が開く。
+                 候補の一覧までが機械の仕事で、取り込みは教員の明示承認のみ（PD1）。 -->
+            <button type="button" id="paper-discovery-link" data-ui-anchor="materials.arxiv-discovery"
+                    style="background:none;border:none;padding:0 0 0 12px;font-size:12px;color:var(--color-accent, #2563eb);text-decoration:underline;cursor:pointer">arXivから探す</button>
           </p>
         </div>
         <!-- 画像読み取りパイプライン（migration 041）: 既定 off。vision LLM は明示オプトインのみで呼ぶ -->
@@ -311,6 +315,15 @@
           <input type="checkbox" id="upload-analyze-images">
           図面・画像を解析する（装置図の同定に vision AI を使用）
         </label>
+        <!-- 分野（提案 C1「教材の入口に分野を置く」）: 既定は「指定しない」。
+             指定しない = 分野固有の語彙・検証を注入しない分野中立の解析。
+             必須入力にしない（原則12）。選択はこの解析だけに効く（既定として保存しない）。 -->
+        <div id="upload-domain-summary" data-ui-anchor="materials.upload-domain" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:8px">
+          分野: <span id="upload-domain-value">指定しない</span>
+          <button type="button" id="upload-domain-change-btn" data-ui-anchor="materials.upload-domain" class="admin-action-btn" style="padding:1px 8px;font-size:11px;margin-left:6px">変更</button>
+          <span id="upload-domain-note" style="color:var(--color-text-tertiary);font-size:11.5px;margin-left:6px" hidden></span>
+        </div>
+        <div id="upload-domain-panel" hidden></div>
         <!-- M層（LLM モデル選択, migration 061）: 解析モデルの1行サマリ + 変更パネル。
              中身は admin-llm-models.js が描画（AdminLlmModels.initMaterialsPanel）。 -->
         <div id="llm-model-summary" data-ui-anchor="materials.llm-model-change" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:8px">
@@ -392,6 +405,10 @@
               例：「〇〇の教材を使って場の量子論の基礎コースを作って」
             </div>
           </div>
+          <!-- 外部 AI 転送の常設事実文（disclosure_axes_design.md, DA2/DA5）: 入力欄の
+               直上に1行。文言は GET /api/disclosure が正本（provider はサーバが実行時の
+               設定から差し込む）。同意ボタンは作らず、取得できないときは何も描かない。 -->
+          <div class="disclosure-note-slot" data-disclosure-note="course_materials"></div>
           <div class="ia">
             <input type="text" id="cb-chat-input" placeholder="コースの要件を入力してください...">
             <button id="cb-send-btn" data-ui-anchor="course-builder.send-btn">送信</button>
@@ -638,10 +655,11 @@
                 <div id="ls-component-graph" class="ls-theory-components"></div>
               </section>
 
-              <label id="ls-sync-row" class="ls-sync-row" hidden>
-                <input type="checkbox" id="ls-sync-spoken" checked>
-                <span>読み上げテキストを表示テキストと同期</span>
-              </label>
+              <!-- 2026-09-05: 「読み上げテキストを表示テキストと同期」チェックボックス
+                   （#ls-sync-spoken）を撤去した。表示条件が view === "audio" だったが、
+                   lsNormalizeViewForCurrentMode() が "audio" を常に "edit" へ畳むため
+                   到達不能で、既定の同期 ON のまま一度も切り替えられなかった。
+                   チャンクの読み上げ文は表示テキストに追随する（挙動は変更なし）。 -->
             </template>
           </div>
         </div>
@@ -740,9 +758,18 @@
           閲覧・編集は教員全員が可能です（wiki型）。凍結版のみが解析パイプラインの参照対象になります。
           削除はできません（廃止＝status遷移のみ、履歴は保持されます）。
         </p>
+        <!-- 概念レジストリ（migration 082）: パイプラインが決定論的に見つけた同一性の候補。
+             確定は教員の明示操作のみ（KR2）。件数バッジは出さない（KR6）。 -->
+        <div id="library-identity-section" style="margin-bottom:14px">
+          <div style="font-size:12.5px;font-weight:600;margin-bottom:4px">同一性の候補</div>
+          <div id="library-identity-candidates" data-ui-anchor="knowledge-library.identity-candidates" style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--color-text-tertiary)">
+            <div>読み込み中...</div>
+          </div>
+        </div>
         <div id="library-body" style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
           <div id="library-domains-panel" style="min-width:180px;max-width:220px;flex:0 0 200px">
             <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">分野</div>
+            <button type="button" id="library-atlas-derive-btn" data-ui-anchor="knowledge-library.identity-derive" class="admin-action-btn" style="width:100%;margin-bottom:6px;font-size:11.5px;padding:3px 8px">地図との対応を導出</button>
             <div id="library-domains-list" data-ui-anchor="knowledge-library.domains-list" style="display:flex;flex-direction:column;gap:4px">
               <div style="padding:8px;color:var(--color-text-tertiary);font-size:12.5px">読み込み中...</div>
             </div>
@@ -775,7 +802,7 @@
       <div class="admin-section">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
           <h3 class="admin-section-title" style="margin-bottom:0">グループ管理</h3>
-          <button id="groups-refresh" class="admin-action-btn">更新</button>
+          <button id="groups-refresh" class="admin-action-btn" data-ui-anchor="groups.refresh">更新</button>
         </div>
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:16px">
           教材・コースをグループ内限定で共有したり、ゼミ生にアカウント招待を送ることができます。
@@ -853,6 +880,10 @@
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:12px">
           クラス全体の関心傾向を、個人を特定しない集団集計で表示します（点数・ランキングではなく問いの深まりを見せる設計）。
         </p>
+        <!-- 制度指標カタログの事実文（indicator_governance_design.md, IG1）。
+             admin-indicators.js が /api/indicators から label / purpose を入れる。
+             カタログを取得できないときは空のまま（捏造しない）。 -->
+        <div id="interest-dashboard-indicator-fact"></div>
         <div id="interest-dashboard-body" class="interest-dashboard" data-ui-anchor="interest-dashboard.dashboard-body">
           <div style="color:var(--color-text-tertiary)">コースを選択してください</div>
         </div>
@@ -972,10 +1003,19 @@
   <!-- 教材図スタジオ（Teaching Figure Studio）— 図の生成・調整・挿入モーダル。
        原稿スタジオ（admin-lecture-studio.js）の init() から init される。 -->
   <script src="/js/admin-figure-studio.js?v=teaching-figure-studio-20260731-1"></script>
+  <!-- 可視性6軸の常設事実文（disclosure_axes_design.md, DA2）— AI 対話の入力欄のそばに
+       「何が外部の AI プロバイダへ送られるか」を1行で置く共通部品。Copilot・W層・
+       グラフレビュー・コースビルダーが window.DisclosureNote.mount() を呼ぶため、
+       それらより前に読み込む。 -->
+  <script src="/js/disclosure-note.js?v=disclosure-20260910-1"></script>
   <!-- 原稿スタジオ（Lecture Script Studio, Issue #70）— admin.js から分離（Tier 3-17b） -->
-  <script src="/js/admin-lecture-studio.js?v=teaching-figure-studio-20260731-1"></script>
+  <script src="/js/admin-lecture-studio.js?v=graph-layout-20260917-1"></script>
   <!-- W層（要素検討ワークスペース, Phase 0）— 「深く検討」統合パネル -->
   <script src="/js/deliberation.js?v=gap-fixes-20260716-1"></script>
+  <!-- 制度指標カタログ（indicator_governance_design.md, IG1）— 計器の定義の1行表示。
+       計器パネル（admin-llm-usage / admin-discuss-observation / admin.js の関心集約）が
+       window.AdminIndicators.mount() を呼ぶため、それらより前に読み込む。 -->
+  <script src="/js/admin-indicators.js?v=indicators-init-order-20260906-1"></script>
   <!-- U層（LLM トークン使用量推計, migration 043）管理 UI — SYSTEM_ADMIN メトリクス + TEACHER 事前見積り -->
   <script src="/js/admin-llm-usage.js?v=gap-fixes-20260716-2"></script>
   <!-- 利用者マニュアル KB（help_kb）draft/freeze 管理 UI（manual_help_kb_design.md Phase 3 ②）— SYSTEM_ADMIN のみ -->
@@ -984,9 +1024,27 @@
   <script src="/js/admin-discuss-observation.js?v=discuss-observation-20260725-1"></script>
   <!-- M層（LLM モデル選択, migration 061）— 教材管理の解析モデル選択 + 運用タブ「AIモデル」 -->
   <script src="/js/admin-llm-models.js?v=llm-model-select-20260728-3"></script>
+  <!-- 分野の適合（概念レジストリ P3-7, concept_registry_design.md §8）— 再解析モーダルの
+       「分野の適合」区画。admin.js から mount() されるため admin.js より前に読み込む。 -->
+  <script src="/js/admin-cartridge-fit.js?v=cartridge-fit-20260913-1"></script>
   <!-- リリース前の確認（release_review_flow_design.md）— AI が作った地図を提示し
        「次へ」で承認、そのまま公開まで進めるウィザード。admin.js から init/open される。 -->
   <script src="/js/admin-release-review.js?v=release-review-20260805-1"></script>
-  <script src="/js/admin.js?v=llm-model-select-20260728-1"></script>
+  <!-- 論文ディスカバリー層（paper_discovery_design.md PD1〜PD8）— arXiv 分野購読と
+       候補一覧。取り込みは教員の明示承認のみで、受理後は既存アップロード経路へ合流する。 -->
+  <script src="/js/admin-paper-discovery.js?v=paper-discovery-20260916-1"></script>
+  <!-- 論文レーダー（paper_radar_design.md PR1〜PR8）— 教材1件を起点に距離を選んで
+       arXiv から候補を探す。取り込みはディスカバリーと同じ既存の弁へ合流する。 -->
+  <script src="/js/admin-paper-radar.js?v=paper-radar-20260916-1"></script>
+  <!-- 管理画面向けハンズフリー音声対話エンジン（DOM 非依存）。これを使う
+       admin-graph-review.js より前に読み込む。 -->
+  <script src="/js/admin-voice-chat.js?v=admin-voice-chat-20260829-1"></script>
+  <!-- グラフ対話レビュー（graph_dialogue_review_design.md）。LectureStudio.graphView に
+       依存するため admin-lecture-studio.js より後・admin.js より前に読み込む -->
+  <script src="/js/admin-graph-review.js?v=graph-layout-20260917-1"></script>
+  <!-- 束の取り込み（knowledge_transfer_design.md §4.3）— 教材行の「⋯」から開く
+       dry-run → 確定の 2 段モーダル。admin.js から DI 注入するため admin.js より前。 -->
+  <script src="/js/admin-knowledge-import.js?v=knowledge-transfer-20260913-1"></script>
+  <script src="/js/admin.js?v=material-domain-entry-20260910-1"></script>
 </body>
 </html>

@@ -154,7 +154,11 @@ class TestOverviewContext:
     PATH = "/api/admin/deliberation/elements/theory_claim/c1/overview"
 
     def _patch_decomposition_and_positioning(self, monkeypatch, route_mod):
-        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        # overview / annotations / sessions は agent 側 ID も受ける経路（route が
+        # refs.resolve_with_agent_id を呼ぶ。graph_dialogue_review_design.md §11）。
+        monkeypatch.setattr(
+            route_mod.refs, "resolve_with_agent_id", lambda *a, **k: _fake_document_ref()
+        )
         monkeypatch.setattr(route_mod, "_ensure_document_viewable", lambda *a, **k: None)
         monkeypatch.setattr(
             route_mod.decomposition, "build",
@@ -236,7 +240,11 @@ class TestOverviewExplanations:
     PATH = "/api/admin/deliberation/elements/theory_claim/c1/overview"
 
     def _patch_decomposition_and_positioning(self, monkeypatch, route_mod):
-        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        # overview / annotations / sessions は agent 側 ID も受ける経路（route が
+        # refs.resolve_with_agent_id を呼ぶ。graph_dialogue_review_design.md §11）。
+        monkeypatch.setattr(
+            route_mod.refs, "resolve_with_agent_id", lambda *a, **k: _fake_document_ref()
+        )
         monkeypatch.setattr(route_mod, "_ensure_document_viewable", lambda *a, **k: None)
         monkeypatch.setattr(
             route_mod.decomposition, "build",
@@ -334,7 +342,11 @@ class TestCreateSessionHappyPath:
         client, _s, teacher = client_and_tokens
         import routes.deliberation as route_mod
 
-        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        # overview / annotations / sessions は agent 側 ID も受ける経路（route が
+        # refs.resolve_with_agent_id を呼ぶ。graph_dialogue_review_design.md §11）。
+        monkeypatch.setattr(
+            route_mod.refs, "resolve_with_agent_id", lambda *a, **k: _fake_document_ref()
+        )
         monkeypatch.setattr(route_mod, "_ensure_document_viewable", lambda *a, **k: None)
         monkeypatch.setattr(
             route_mod.delib_store, "create_session",
@@ -360,7 +372,11 @@ class TestCreateSessionHappyPath:
         client, _s, teacher = client_and_tokens
         import routes.deliberation as route_mod
 
-        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        # overview / annotations / sessions は agent 側 ID も受ける経路（route が
+        # refs.resolve_with_agent_id を呼ぶ。graph_dialogue_review_design.md §11）。
+        monkeypatch.setattr(
+            route_mod.refs, "resolve_with_agent_id", lambda *a, **k: _fake_document_ref()
+        )
 
         response = client.post(
             "/api/admin/deliberation/sessions",
@@ -505,6 +521,67 @@ class TestPostMessageFlow:
         assert "kind=part; id=sensor-1; label=センサー" in seen["llm_user_content"]
         assert "not as evidence" in seen["llm_user_content"]
         assert seen["persisted_messages"][0]["content"] == "これは何ですか？"
+        # §15: 留保は返答全体のラベル。既定は text モードなので spoken は None。
+        from core.label_vocab import AI_READING_LABEL
+
+        assert body["stance_label"] == AI_READING_LABEL
+        assert body["spoken"] is None
+        for message in seen["persisted_messages"]:
+            assert "spoken" not in message and "stance_label" not in message
+
+    def test_spoken_mode_returns_spoken_and_persists_only_reply(self, client_and_tokens, monkeypatch):
+        """§15: 読み上げ用テキストは返すが保存しない（1 LLM コールのまま）。"""
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+        from core.deliberation.dialogue import DialogueTurnResult
+
+        seen = {}
+        self._patch_owned_session(monkeypatch, route_mod)
+        monkeypatch.setattr(route_mod.dialogue, "check_and_count_llm_call", lambda *a, **k: True)
+        monkeypatch.setattr(
+            route_mod.dialogue, "build_grounding",
+            lambda ref: {"breakdown": {}, "positioning": {"available": False}},
+        )
+        monkeypatch.setattr(route_mod.dialogue, "grounding_to_text", lambda g: "GROUNDING")
+
+        def fake_run_turn(*args, **kwargs):
+            seen["response_mode"] = kwargs.get("response_mode")
+            return DialogueTurnResult(
+                reply="本文です。", annotations=[], degraded=False, spoken="結論から言うと 本文です。",
+            )
+
+        monkeypatch.setattr(route_mod.dialogue, "run_turn", fake_run_turn)
+        monkeypatch.setattr(
+            route_mod.delib_store, "append_messages",
+            lambda _sid, messages: seen.__setitem__("persisted_messages", messages),
+        )
+        monkeypatch.setattr(
+            route_mod.delib_annotations, "create_candidates_from_dialogue", lambda *a, **k: []
+        )
+        monkeypatch.setattr(route_mod, "record_review_event", lambda *a, **k: None)
+
+        response = client.post(
+            "/api/admin/deliberation/sessions/s1/messages",
+            json={"content": "これは何ですか？", "response_mode": "spoken"},
+            headers=_auth(teacher),
+        )
+        assert response.status_code == 200
+        assert seen["response_mode"] == "spoken"
+        body = response.json()
+        assert body["spoken"] == "結論から言うと 本文です。"
+        assert [m["content"] for m in seen["persisted_messages"]] == ["これは何ですか？", "本文です。"]
+
+    def test_invalid_response_mode_is_rejected(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+
+        self._patch_owned_session(monkeypatch, route_mod)
+        response = client.post(
+            "/api/admin/deliberation/sessions/s1/messages",
+            json={"content": "q", "response_mode": "song"},
+            headers=_auth(teacher),
+        )
+        assert response.status_code == 422
 
 
 class TestListAnnotations:
@@ -512,7 +589,11 @@ class TestListAnnotations:
         client, _s, teacher = client_and_tokens
         import routes.deliberation as route_mod
 
-        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        # overview / annotations / sessions は agent 側 ID も受ける経路（route が
+        # refs.resolve_with_agent_id を呼ぶ。graph_dialogue_review_design.md §11）。
+        monkeypatch.setattr(
+            route_mod.refs, "resolve_with_agent_id", lambda *a, **k: _fake_document_ref()
+        )
         monkeypatch.setattr(route_mod, "_ensure_document_viewable", lambda *a, **k: None)
         monkeypatch.setattr(
             route_mod.delib_store, "list_annotations_for_element",

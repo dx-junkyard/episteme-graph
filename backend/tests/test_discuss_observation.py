@@ -163,6 +163,8 @@ class TestDumpProjectionDoesNotLeakFreeText:
             "overall_tier": "source",
             "content_grounding": "course_material",
             "discuss_scope": "course_sources",
+            "stance": "discuss",
+            "stance_source": "explicit",
             "tension_hint": True,
             "structure_anchor_present": False,
             "map_excluded": False,
@@ -184,6 +186,8 @@ class TestDumpProjectionDoesNotLeakFreeText:
             "overall_tier": "source",
             "content_grounding": "course_material",
             "discuss_scope": "course_sources",
+            "stance": "discuss",
+            "stance_source": "explicit",
             "tension_hint": True,
             "structure_anchor_present": False,
             "map_excluded": False,
@@ -379,17 +383,31 @@ class TestMetricEventVocabAndPayloadWhitelist:
         "cycle_carryover_saved",
         "cycle_revisit_answered",
         "cycle_anchor_quick",
+        # コーパス回遊 Phase B（corpus_roaming_design.md §5.5）: document 直付け discuss の
+        # 分離集計2語彙（サーバ側 best-effort 記録）。
+        "document_discuss_opened",
+        "document_discuss_turn",
+        # 入口統合 Phase 1（learning_chat_entry_unification_design.md §7）:
+        # 様相チップの訂正タップ（推定された様相を学習者が覆した回数）。
+        "stance_corrected",
+        # 画面文脈アダプター Phase 4（assistant_screen_adapter_design.md §11.7）:
+        # 構造 grounding が回答プロンプトに載ったターンの1ビット（サーバ側 best-effort 記録）。
+        "structured_grounding_present",
     }
 
-    def test_vocab_matches_design_doc_20_events(self):
+    def test_vocab_matches_design_doc_24_events(self):
         assert observation.METRIC_EVENT_VOCAB == self._EXPECTED_VOCAB
-        assert len(observation.METRIC_EVENT_VOCAB) == 20
+        assert len(observation.METRIC_EVENT_VOCAB) == 24
 
     def test_sanitize_event_payload_keeps_only_whitelisted_keys(self):
         out = observation.sanitize_event_payload(
-            {"scope": "course_sources", "reason": "topic_switch", "kind": "tension", "text": "leak", "extra": 1}
+            {"scope": "course_sources", "reason": "topic_switch", "kind": "tension",
+             "stance": "tutor", "text": "leak", "extra": 1}
         )
-        assert out == {"scope": "course_sources", "reason": "topic_switch", "kind": "tension"}
+        assert out == {
+            "scope": "course_sources", "reason": "topic_switch", "kind": "tension",
+            "stance": "tutor",
+        }
 
     def test_sanitize_event_payload_handles_non_dict_input(self):
         assert observation.sanitize_event_payload(None) == {}

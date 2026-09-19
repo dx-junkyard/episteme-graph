@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
+from core.llm_worker.single_shot import extract_json
+
 # checkpoint target_type -> inventory entity bucket
 _BUCKET = {
     "claim": "claims", "equation": "equations", "evidence": "evidence",
@@ -42,14 +44,17 @@ def llm_enabled() -> bool:
 
 
 def _extract_json(text: str) -> dict:
-    text = (text or "").strip()
-    if text.startswith("```"):
-        text = text.split("```", 2)[1] if "```" in text[3:] else text
-        text = text.replace("json", "", 1).strip("` \n")
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        raise ValueError("no JSON object in LLM audit response")
-    return json.loads(text[start:end + 1])
+    """LLM 監査応答から JSON を取り出す（共通実装へ委譲）。
+
+    正本は ``core/llm_worker/single_shot.py::extract_json``（フェンス除去 →
+    ``json.loads`` → 最外 ``{...}``）。従来どおり**取り出せなければ送出**し、
+    呼び出し側（``LLMAuditClient.__call__``）が「LLM 出力が使えない監査は
+    確定しない」規約どおりに扱う。
+    """
+    try:
+        return extract_json(text)
+    except ValueError as exc:
+        raise ValueError("no JSON object in LLM audit response") from exc
 
 
 class LLMAuditClient:

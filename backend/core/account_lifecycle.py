@@ -159,6 +159,7 @@ RETAIN_TABLES: tuple[RetainNote, ...] = (
     RetainNote("assumption_nodes", "暗黙前提（D層）。確定・却下の判断は共同体の記録"),
     RetainNote("atlas_correction_reports", "分野の地図への修正報告。共同体の記録"),
     RetainNote("atlas_gap_decisions", "カテゴリギャップ候補への教員判断（版非依存の台帳）"),
+    RetainNote("atlas_edge_decisions", "辺候補への教員判断（版非依存の台帳。decided_by は SET NULL）"),
     RetainNote("schema_proposals", "スキーマ提案・査読の記録"),
     # --- A層/W層の生成物と査読の帰属 ---
     RetainNote("theory_components", "A層成果。created_by は帰属表示のみ"),

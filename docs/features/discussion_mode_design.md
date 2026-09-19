@@ -1,7 +1,11 @@
 # 「論文と話す」— 係留付きディスカッションモード（discuss モード）設計書
 
 - 対象: episteme-graph（ura-dev）
-- ステータス: 討議確定（2026-07-25）→ **Phase 0〜2 実装済み（2026-07-25、§9 実装記録参照）**。Phase 3（v2）は未着手
+- ステータス: 討議確定（2026-07-25）→ **Phase 0〜2 実装済み（2026-07-25、§9 実装記録参照）**。
+  **Phase 3（v2）の本体（document 直付け入口）は別層で実装済み** — 専用設計書
+  [`corpus_roaming_design.md`](corpus_roaming_design.md) Phase B（2026-08-27・migration 073）が
+  §6.4 の予約を引き受けた（§6.4 / §8 の解消注記も参照）。§6.4 が併記した「教員向け k-匿名集約」
+  「音声版」「学習者向け W層簡易パネル」は未実装のまま
 - 関連正本: `docs/features/personal_knowledge_network_design.md` / `component_evidence_redesign.md` /
   `reconstruction_loop_design.md` / `assistant_common_infra_design.md` / `manual_help_kb_design.md`（§1-1 が
   本書 Phase 0 と同じ全域検索の事実を独立に確認済み）
@@ -302,6 +306,20 @@ casual 音声パイプライン・個人知識ネットワーク導出。
 
 ### 6.4 Phase 3（v2）— コース非依存の正面突破
 
+> → **2026-08-27 に別層で実装済み**（解消注記 2026-09-10）。専用設計書
+> [corpus_roaming_design.md](corpus_roaming_design.md) Phase B（migration 073）が本節の予約を
+> 引き受け、同日 Phase A〜D まで実装された。会話キーは想定どおり migration ではなくセンチネル
+> `course_id = "_doc:{document_id}"` 方式で、**その唯一の正本は
+> `backend/core/discuss/context.py`**（`learning_chat_history.course_id` が TEXT・FK なしのため
+> 新テーブルは不要だった）。以下の本文は起票時の想定として残す（下記の「migration 058 想定」
+> `interest_traces.course_id` の nullable 化・`document_id` 列追加・新ルーター
+> `routes/discuss.py` はいずれも**採用されなかった** — 実装は既存 `routes/learning.py` 内の
+> `/api/learning/documents/{document_ref}/discuss/{opening,chat,history,messages}` 4本と、
+> `learning_chat` を `_learning_chat_core` へ分離した1行委譲である）。
+> **未実装の残差**は「教員向け k-匿名集約（anchor-insights 同型）」「専用
+> `DISCUSS_MAX_CALLS_PER_DAY`（既存の `LEARNING_CHAT_MAX_CALLS_PER_DAY` に相乗り中）」
+> 「音声版」「学習者向け W層簡易パネル」の4点。
+
 Phase 1/2 の U層実測でモードの価値を確認してから、専用の設計文書を切って着手する
 （interest_traces の読み手全域 — worker・digest・k-匿名集計・personal_graph derive — に及ぶ
 準破壊的変更のため）。
@@ -346,6 +364,13 @@ Phase 1/2 の U層実測でモードの価値を確認してから、専用の�
 
 ## 8. 非スコープ（v1〜v2 で意図的にやらないこと）
 
+> **解消注記（2026-09-10）**: 本節に列挙した「意図的にやらないこと」は現行も有効だが、
+> §6.4 の Phase 3（コース非依存の正面突破）**だけは別層で実装済み**である →
+> [corpus_roaming_design.md](corpus_roaming_design.md) Phase B（migration 073）。
+> 本節の「教員による discuss 個別履歴の閲覧（k-匿名集約のみ）」は Phase B でも維持されて
+> いる（document 直付けの観測はサーバ側の `document_discuss_{opened,turn}` のみで、
+> 教員向けの個別履歴閲覧は存在しない）。
+
 - 開アンカー上限・係留集合の統制 UI（裁定 #4）
 - 事前知識の自動推定・診断ラベル・足場の自動調整（裁定 #5）
 - Socratic-first / 開示遅延の既定化（裁定 #3）
@@ -353,6 +378,18 @@ Phase 1/2 の U層実測でモードの価値を確認してから、専用の�
 - 学習者への研究引用の権威づけ表示・スコア表示・ゲーミフィケーション
 - 教員による discuss 個別履歴の閲覧（k-匿名集約のみ）
 - explore（寄り道）語彙・UI の既存動作変更（discuss とは独立に維持）
+
+> **追補（2026-09-12、入口統合 Phase 1）**: 学習チャットの「様相（会話の調子）」を
+> サーバが読む層を積んだ（正本:
+> [learning_chat_entry_unification_design.md](learning_chat_entry_unification_design.md)
+> LC1〜LC8）が、**discuss は推定の対象外のまま**である。`intent_mode='discuss'` は
+> 常に明示（`stance.source = "explicit"`）で、推定器は discuss を提案すらしない —
+> discuss は検索スコープの意味変更を伴うため、無断のスコープ変更は DM1 違反になる。
+> discuss セッション中に casual_light が推定されることも構造的に無い（`_is_discuss` が
+> 真なら推定器を呼ばない）。**音声版 discuss（§6.4 近傍）は依然として非スコープ**で、
+> discuss 中の音声 fail-closed（`app.js` の `updateVoiceAvailability`）も維持している。
+> `_get_discuss_system_prompt` の DM4 必須要素・DA6 契約フレーズ・`entry_mode` の
+> 書き込み条件・`discuss_scope` の 2 段解決はいずれも無改変（LC8）。
 
 ---
 

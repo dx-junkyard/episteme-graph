@@ -108,7 +108,11 @@ def get_discuss_observation_status(
     参考目安（``criteria`` / ``ready_for_analysis``）は表示専用（DO5）。到達状況を
     返すだけで、これを見て何かが自動的に切り替わることはない — 判断は常にオーナー。
     """
-    return observation.build_observation_status()
+    status = observation.build_observation_status()
+    # 制度指標カタログへの参照（IG1）。定義は
+    # GET /api/indicators/discuss-observation-status。
+    status["indicator_id"] = "discuss-observation-status"
+    return status
 
 
 @admin_router.get("/discuss/observation-dump")

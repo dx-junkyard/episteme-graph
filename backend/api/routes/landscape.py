@@ -32,7 +32,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 import services
+from core import atlas_correspondence
 from core import atlas_store
+from core import decision_context
 from core.course_data import course_cartridge_id, course_source_material_ids
 from core.landscape import builder as landscape_builder
 from core.landscape import projection
@@ -203,6 +205,52 @@ def _load_skeletons(session, domain_keys: Iterable[str]) -> dict[str, Any]:
     return skeletons
 
 
+def _node_resolve(session, domain_keys: Iterable[str]):
+    """``(domain_key, node_id) -> {"current_node_id", "node_status", "via"}`` を作る。
+
+    正本: ``docs/features/atlas_node_correspondence_design.md`` §6（NC5 / NC8）。
+    骨格の全凍結版（``atlas_store.load_frozen_history``）の ``id_migrations`` を版順に
+    辿って旧 node_id を現行 node_id へ**読み替える**だけで、``landscape_placements`` の
+    ``node_id`` は書き換えない。
+
+    履歴が読めないドメインは「何も分からない」解決器になり、呼び出し側（projection）は
+    生の node_id を引く従来動作へ縮退する（fail-soft）。
+    """
+    resolvers: dict[str, Any] = {}
+    for key in domain_keys:
+        domain_key = str(key or "").strip()
+        if not domain_key or domain_key in resolvers:
+            continue
+        try:
+            history = atlas_store.load_frozen_history(session, domain_key)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "landscape: failed to load frozen history for %s (non-fatal)",
+                domain_key, exc_info=True,
+            )
+            # 実 DB では失敗した文がトランザクションを中断させる。以降の読み取り
+            # （タイトル解決など）を巻き添えにしないよう巻き戻す（全て読み取り）。
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                logger.debug("landscape: rollback failed (non-fatal)", exc_info=True)
+            history = []
+        resolvers[domain_key] = atlas_correspondence.build_node_resolver(history)
+
+    def _resolve(domain_key: str, node_id: str) -> dict:
+        resolver = resolvers.get(str(domain_key or ""))
+        if resolver is None:
+            return {"current_node_id": node_id, "node_status": "", "via": []}
+        resolved = resolver.resolve(node_id)
+        return {
+            "current_node_id": resolved.get("current_node_id") or "",
+            "node_status": resolved.get("status") or "",
+            "via": list(resolved.get("via") or []),
+        }
+
+    return _resolve
+
+
 def _domain_facts(
     skeletons: Mapping[str, Any], names: Mapping[str, str]
 ) -> list[dict]:
@@ -349,6 +397,7 @@ def list_document_landscape_placements(
         domain_keys = {str(r.get("domain_key") or "") for r in rows}
         domain_keys.update(str(u.get("domain_key") or "") for u in unplaced)
         skeletons = _load_skeletons(session, {k for k in domain_keys if k})
+        resolve = _node_resolve(session, {k for k in domain_keys if k})
     finally:
         session.close()
 
@@ -360,7 +409,9 @@ def list_document_landscape_placements(
         "document_id": document_id,
         "title": titles.get(document_id, ""),
         "placements": [
-            projection.admin_placement_dto(row, node_index, domain_names=names)
+            projection.admin_placement_dto(
+                row, node_index, domain_names=names, resolve=resolve
+            )
             for row in rows
         ],
         "unplaced_domains": unplaced,
@@ -434,12 +485,13 @@ def update_landscape_placement_status(
     try:
         names = _domain_names(session)
         skeletons = _load_skeletons(session, [str(updated.get("domain_key") or "")])
+        resolve = _node_resolve(session, [str(updated.get("domain_key") or "")])
     finally:
         session.close()
     node_index = projection.skeleton_node_index(skeletons)
     return {
         "placement": projection.admin_placement_dto(
-            updated, node_index, domain_names=names
+            updated, node_index, domain_names=names, resolve=resolve
         )
     }
 
@@ -499,13 +551,30 @@ def propose_landscape_placements(
 
 
 class AcceptPlacementsRequest(BaseModel):
-    """一括確認 body。v1 は入力パラメータを持たない（空 body / body なしを許す）。"""
+    """一括確認 body。
+
+    いずれも**来歴申告**（DC4）で、サーバの判断には使わない（提示集合の正本は
+    サーバが click 時点の live 状態から取り直す）。空 body / body なしも許す。
+    """
+
+    #: 画面に描かれていた未確認配置の id（クライアント申告。サーバ導出値とは混ぜない）。
+    presented_placement_ids: list[str] | None = None
+    #: 根拠（逐語引用）の折りたたみを**実際に開いた**行の id（DOM の toggle イベント
+    #: 由来の事実。是正 F7 / 2026-09-10 — 「根拠を描くコードがある」ことを
+    #: 「根拠が出ていた」と申告しない）。
+    evidence_expanded_placement_ids: list[str] | None = None
+    #: 旧: 根拠（逐語引用）の折りたたみを各行に出していたか。
+    #: 是正 F7 以降も後方互換で受けるが、**サーバ導出値としては使わない**
+    #: （`client_reported` にだけ載せる）。
+    evidence_shown: bool | None = None
 
 
 #: RR3: 「次へ」経由の確認を個別レビューと区別するための事実文（review_note に残す）。
 RELEASE_ACCEPT_NOTE = "リリース前の確認画面で一括確認"
 #: RR3: 監査の action。個別レビュー（"review"）と混ぜない。
 RELEASE_ACCEPT_ACTION = "accept_on_release"
+#: DC1/改訂原則1: 一括確認を覆せる経路（個別 PATCH）。監査に事実として残す。
+RELEASE_REOPEN_PATH = "PATCH /api/admin/landscape/placements/{placement_id}"
 
 
 def _course_source_access(
@@ -575,6 +644,7 @@ def list_course_landscape_placements(
         for entries in unplaced_by_document.values():
             domain_keys.update(str(u.get("domain_key") or "") for u in entries)
         skeletons = _load_skeletons(session, {k for k in domain_keys if k})
+        resolve = _node_resolve(session, {k for k in domain_keys if k})
     finally:
         session.close()
 
@@ -584,7 +654,9 @@ def list_course_landscape_placements(
     for row in rows:
         document_id = str(row.get("document_id") or "")
         by_document.setdefault(document_id, []).append(
-            projection.admin_placement_dto(row, node_index, domain_names=names)
+            projection.admin_placement_dto(
+                row, node_index, domain_names=names, resolve=resolve
+            )
         )
         if str(row.get("status") or "") == landscape_schema.STATUS_INFERRED:
             pending += 1
@@ -626,8 +698,11 @@ def accept_course_landscape_placements(
     - 教員が個別に却下・再検討した行は動かさない（``store`` 側で ``inferred`` 限定。RR4）。
     - 監査は1件ごとに ``theory_review_events``（``action='accept_on_release'``）で、
       個別レビューと区別できる形で残す（RR3）。
+    - 各記帳には**確定文脈**（``decision_context``）を必ず添える（DC1 / vision §4 改訂
+      原則1）。提示された配置（更新前に取り直した live の ``inferred``）と実際に適用した
+      配置を分けて残し、その一致は ``core.decision_context`` が集合比較で導出する
+      （呼び出し側が「一致した」と申告しない — DC2）。
     """
-    del body  # v1 はパラメータなし（将来の拡張のために受け口だけ残す）
     _, viewable, editable_ids, hidden = _course_source_access(course_id, current_user)
     # edit できないソース論文は確認の対象外（除外件数として正直に返す — RR7）。
     skipped_documents = hidden + len([d for d in viewable if d not in editable_ids])
@@ -635,6 +710,14 @@ def accept_course_landscape_placements(
 
     session = _session()
     try:
+        # DC2: 「提示されていたもの」はサーバが更新前に取り直す（クライアント申告に
+        # 依存しない）。edit できる document の live な inferred が「次へ」の対象として
+        # 画面に出ていた集合である。
+        presented_rows = landscape_store.list_for_documents(
+            session,
+            sorted(editable_ids),
+            statuses=[landscape_schema.STATUS_INFERRED],
+        )
         updated = landscape_store.accept_inferred_for_documents(
             session,
             sorted(editable_ids),
@@ -651,6 +734,53 @@ def accept_course_landscape_placements(
     finally:
         session.close()
 
+    client_reported: dict | None = None
+    if body is not None:
+        # DC4: 来歴申告はサーバ導出値と混ぜず、専用キーに隔離する（未指定は載せない）。
+        reported: dict = {}
+        if body.presented_placement_ids is not None:
+            reported["presented_placement_ids"] = sorted(
+                {
+                    str(pid or "").strip()
+                    for pid in body.presented_placement_ids
+                    if str(pid or "").strip()
+                }
+            )[:decision_context.PRESENTED_IDS_MAX]
+        # 是正 F7（2026-09-10）: 根拠を**実際に開いた**行だけを申告として残す。
+        if body.evidence_expanded_placement_ids is not None:
+            reported["evidence_expanded_placement_ids"] = sorted(
+                {
+                    str(pid or "").strip()
+                    for pid in body.evidence_expanded_placement_ids
+                    if str(pid or "").strip()
+                }
+            )[:decision_context.PRESENTED_IDS_MAX]
+        if body.evidence_shown is not None:
+            reported["evidence_shown"] = bool(body.evidence_shown)
+        client_reported = reported or None
+
+    ctx = decision_context.build_decision_context(
+        basis=decision_context.BASIS_RELEASE_REVIEW_PLACEMENTS,
+        presented_ids=[str(r.get("id") or "") for r in presented_rows],
+        applied_ids=[str(r.get("id") or "") for r in updated],
+        # RR4: 各行の [却下] [再検討] と、ステップの「あとで」が常に出ている。
+        alternatives=(
+            decision_context.ALT_REJECT,
+            decision_context.ALT_RECONSIDER,
+            decision_context.ALT_SKIP_STEP,
+        ),
+        reopen_path=RELEASE_REOPEN_PATH,
+        reopen_statuses=(
+            landscape_schema.STATUS_REJECTED,
+            landscape_schema.STATUS_REVIEW_REQUIRED,
+        ),
+        # 是正 F7（DC4）: サーバは「根拠が出ていたか」を検証できないので常に None
+        # （＝不明）。クライアントの申告は client_reported にだけ残す
+        # （以前は body.evidence_shown をそのままサーバ導出値の位置に載せていた）。
+        evidence_shown=None,
+        client_reported=client_reported,
+    )
+
     for row in updated:
         services.record_review_event(
             AUDIT_ENTITY_LANDSCAPE_PLACEMENT,
@@ -658,17 +788,22 @@ def accept_course_landscape_placements(
             landscape_schema.STATUS_INFERRED,
             landscape_schema.STATUS_CONFIRMED,
             current_user.get("id"),
-            {
-                "action": RELEASE_ACCEPT_ACTION,
-                "course_id": course_id,
-                "document_id": str(row.get("document_id") or ""),
-            },
+            decision_context.attach_decision_context(
+                {
+                    "action": RELEASE_ACCEPT_ACTION,
+                    "course_id": course_id,
+                    "document_id": str(row.get("document_id") or ""),
+                },
+                ctx,
+            ),
         )
 
     return {
         "course_id": course_id,
         "confirmed": len(updated),
         "skipped_documents": skipped_documents,
+        # 画面が「提示と適用が一致したか」を事実文で出せるように同じ dict を返す。
+        "decision_context": ctx,
     }
 
 
@@ -707,6 +842,7 @@ def get_landscape_overview(
             if document_id and document_id not in placed_ids:
                 placed_ids.append(document_id)
         titles = _document_titles(session, placed_ids)
+        resolve = _node_resolve(session, [key])
     except HTTPException:
         raise
     finally:
@@ -716,11 +852,14 @@ def get_landscape_overview(
     grouped: dict[str, list[dict]] = {}
     for row in rows:
         node_id = str(row.get("node_id") or "")
-        if (key, node_id) not in node_index:
+        # 旧版の node_id は対応表で現行版へ読み替えてから集約する（NC5: 行は変えない）。
+        resolved = resolve(key, node_id)
+        target = str(resolved.get("current_node_id") or "") or node_id
+        if (key, target) not in node_index:
             continue
         document_id = str(row.get("document_id") or "")
         status = str(row.get("status") or "")
-        grouped.setdefault(node_id, []).append(
+        grouped.setdefault(target, []).append(
             {
                 "document_id": document_id,
                 "title": titles.get(document_id, ""),
@@ -730,6 +869,13 @@ def get_landscape_overview(
                 # LS5: 生 weight は返さない（段階ラベルのみ）。
                 "weight_label": landscape_schema.weight_label(row.get("weight")),
                 "status": status,
+                # 読み替えた配置であることは事実として残す（旧 node_id は出さない）。
+                # 判定は索引の実在で決める（履歴が読めないときは current へ縮退する）。
+                "node_status": (
+                    atlas_correspondence.NODE_STATUS_CURRENT
+                    if target == node_id
+                    else atlas_correspondence.NODE_STATUS_MIGRATED
+                ),
             }
         )
 
@@ -793,6 +939,22 @@ def get_course_landscape(
         raise HTTPException(status_code=404, detail="コースが見つかりません")
 
     document_ids = services.list_course_source_document_ids(course_data)
+    return {"course_id": course_id, **learner_landscape_for_documents(course_data, document_ids)}
+
+
+def learner_landscape_for_documents(course_data: dict, document_ids) -> dict:
+    """学習者向け「論文の位置づけ」DTO（``course_id`` 付与前）を組み立てる。
+
+    ``get_course_landscape``（受講ゲート済み）と、画面文脈アダプター Phase 4
+    （``assistant_screen_adapter_design.md`` §11.3 kind ``placement``）の共通正本。
+    **権限判定はしない**（呼び出し側が受講ゲートと document スコープを解決済みである
+    ことが前提。``document_ids`` がそのスコープの正本）。
+
+    投影の遮断（weight / confidence / claim_id を落とす・
+    ``LEARNER_VISIBLE_STATUSES`` のみ・現行凍結骨格に無いノードは出さない）は
+    ``projection.learner_landscape_dto`` が持つ — ここで再実装しない（LS5 / §9.2）。
+    """
+    document_ids = list(document_ids or [])
     course_domain_key = course_cartridge_id(course_data) or ""
 
     session = _session()
@@ -806,6 +968,7 @@ def get_course_landscape(
         if course_domain_key:
             domain_keys.add(course_domain_key)
         skeletons = _load_skeletons(session, {k for k in domain_keys if k})
+        resolve = _node_resolve(session, {k for k in domain_keys if k})
         names = _domain_names(session)
         rows = _document_rows(session, document_ids)
     finally:
@@ -831,6 +994,7 @@ def get_course_landscape(
         course_domain_key or None,
         document_titles=titles,
         source_document_count=len(document_ids),
+        resolve=resolve,
     )
 
     # 配置ゼロの論文（LS10 / AB1）。DTO の documents に載らなかったソース論文がそれで、
@@ -845,7 +1009,6 @@ def get_course_landscape(
     ]
 
     return {
-        "course_id": course_id,
         **dto,
         "unplaced_documents": unplaced_documents,
         "skeleton_version": _displayed_skeleton_version(dto.get("domains") or []),

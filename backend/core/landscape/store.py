@@ -31,6 +31,10 @@ from typing import Any, Iterable
 from sqlalchemy import text as sa_text
 
 from core.landscape import schema
+from core.landscape.schema import (
+    JUSTIFICATION_MANUAL,
+    justification_for_provenance,
+)
 
 _COLUMNS_SQL = """
     id::text, document_id::text, domain_key, skeleton_version, node_id, node_kind,
@@ -231,11 +235,12 @@ def supersede_and_insert_candidates(
                 INSERT INTO landscape_placements (
                     document_id, domain_key, skeleton_version, node_id, node_kind,
                     perspective, weight, reason, evidence, status, provenance,
-                    run_id, created_by
+                    mapping_justification, run_id, created_by
                 ) VALUES (
                     CAST(:document_id AS uuid), :domain_key, :skeleton_version, :node_id,
                     :node_kind, :perspective, :weight, :reason, CAST(:evidence AS jsonb),
-                    :status, :provenance, CAST(:run_id AS uuid), :created_by
+                    :status, :provenance, :mapping_justification,
+                    CAST(:run_id AS uuid), :created_by
                 )
                 RETURNING {_COLUMNS_SQL}
                 """
@@ -253,6 +258,9 @@ def supersede_and_insert_candidates(
                 # LS3: AI 由来の投入は必ず inferred（confirmed を書く経路を作らない）。
                 "status": schema.STATUS_INFERRED,
                 "provenance": item["provenance"],
+                # 「なぜここに置けたか」（概念レジストリ KR4・migration 082）。生成手段
+                # （provenance）から決定論的に導く — migration のバックフィルと同じ写像。
+                "mapping_justification": justification_for_provenance(item["provenance"]),
                 "run_id": run_id or None,
                 "created_by": item["created_by"],
             },
@@ -390,6 +398,9 @@ def update_status(
                    reviewed_by = CAST(:reviewer_id AS uuid),
                    reviewed_at = now(),
                    review_note = CASE WHEN :note <> '' THEN :note ELSE review_note END,
+                   -- 教員が確認 / 却下 / 再検討した時点で、この行の根拠は「教員の判断」に
+                   -- なる（概念レジストリ KR4・§4.6）。provenance（生成手段）は触らない。
+                   mapping_justification = :mapping_justification,
                    updated_at = now()
              WHERE id = CAST(:id AS uuid) AND status <> :superseded
             RETURNING {_COLUMNS_SQL}
@@ -401,6 +412,7 @@ def update_status(
             "reviewer_id": reviewer_id,
             "note": str(note or ""),
             "superseded": schema.STATUS_SUPERSEDED,
+            "mapping_justification": JUSTIFICATION_MANUAL,
         },
     ).fetchone()
     if row is None:

@@ -16,11 +16,14 @@ override :meth:`load`, reusing :meth:`_cartridge_dir` and :meth:`_load_json`.
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 from episteme_graph.agents.cartridge_paths import resolve_cartridge_base_dir
 
 from .cartridge_context import CartridgeContext
+
+logger = logging.getLogger(__name__)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # src/episteme_graph/agents/ の3階層上がプロジェクトルート
@@ -69,3 +72,37 @@ class CartridgeLoader:
             return {}
         with open(path, encoding="utf-8") as f:
             return json.load(f)
+
+
+def load_cartridge_or_none(
+    loader: object,
+    cartridge_id: str | None,
+    *,
+    log_context: str = "",
+) -> CartridgeContext | None:
+    """Load a cartridge, degrading to ``None`` instead of raising.
+
+    Every LLM-first agent must run without a cartridge (design principle #1), so
+    each one wrapped ``loader.load()`` in the same try/except. That body lives
+    here now; the agents' ``_load_cartridge`` methods delegate to it.
+
+    ``cartridge_id`` of ``None``/``""`` returns ``None`` without touching the
+    loader — the shared :class:`CartridgeLoader` deliberately does *not*
+    special-case a missing id (see ``tests/agents/test_cartridge_loader.py``).
+    Callers keep their own visible ``if not cartridge_id: return None`` guard as
+    well: ``backend/tests/test_material_domain_entry.py`` pins the "runs without
+    a cartridge" contract per agent, at the call site.
+
+    ``log_context`` is appended to the warning to identify the caller.
+    """
+    if not cartridge_id:
+        return None
+    try:
+        return loader.load(cartridge_id)  # type: ignore[attr-defined]
+    except FileNotFoundError:
+        logger.warning(
+            "Cartridge '%s' not found; proceeding without cartridge%s",
+            cartridge_id,
+            log_context,
+        )
+        return None

@@ -6,7 +6,7 @@
 相乗りする（020_interest_trace.sql 確認済み）。
 
 - ``intention``: OPEN（初回動機・持ち越し問い再回答）・LEAVE（持ち越し問い選択）の痕跡。
-  ``role`` は ``INTENTION_ROLES`` の3値。carryover は本人×コースにつき常に active 最大
+  ``role`` は ``INTENTION_ROLES`` の4値（帰還の扉の ``leave_note`` を含む）。carryover は本人×コースにつき常に active 最大
   1件で、新しい carryover を書いたら旧行を ``superseded`` に遷移させる（UC6）。
 - ``anchor_mark``: ANCHOR（軽量4ボタン）の痕跡。既存 ``structure_anchor`` 経路A
   （``attribution_source='learner_selected'``・同期・非LLM）へ相乗りし、

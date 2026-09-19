@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
 
 from core.document_pipeline import persistence  # noqa: E402
 from core.document_pipeline.persistence import RevisionConflictError  # noqa: E402
+from tests.knowledge_object_fakes import FakeKnowledgeSession  # noqa: E402
 
 
 class _Res:
@@ -25,6 +26,13 @@ class _Res:
         if self._session.ids:
             return (self._session.ids.pop(0),)
         return None
+
+    # 知識オブジェクト同期は live 行を mappings().all() で読む（§5.2）。
+    def mappings(self):
+        return self
+
+    def all(self):
+        return []
 
 
 class _RebuildSession:
@@ -70,20 +78,47 @@ class _FixedRow:
 
 # --- direct rebuilders -----------------------------------------------------
 
-def test_rebuild_claims_maps_ids_and_deletes_first():
-    session = _RebuildSession(ids=["db1", "db2"])
+def test_rebuild_claims_syncs_without_deleting():
+    """accept 経路も DELETE ではなく stable_key 同期（KO3）。"""
+    session = FakeKnowledgeSession(id_prefix="db")
     id_map = persistence._rebuild_theory_claims_in_session(session, "doc-1", [
         {"claim_id": "clm_1", "text": "A", "claim_type": "result"},
         {"claim_id": "clm_2", "text": "B", "claim_type": "weird_type"},
     ])
-    assert id_map == {"clm_1": "db1", "clm_2": "db2"}
-    assert "DELETE FROM theory_claims" in session.sql[0]
-    # invalid claim_type coerced to diagnostic_claim
-    assert session.params[2]["claim_type"] == "diagnostic_claim"
+    assert id_map == {"clm_1": "db-1", "clm_2": "db-2"}
+    assert not any("DELETE FROM theory_claims" in sql for sql in session.sql)
+    rows = session.inserted_into("theory_claims")
+    # 語彙外の自称は unknown に丸め、自称そのものは claim_type_text に残す（KO7）。
+    assert rows[1]["claim_type"] == "unknown"
+    assert rows[1]["claim_type_text"] == "weird_type"
+    assert all(row["stable_key"].startswith("k1:") for row in rows)
+
+
+def test_rebuild_claims_keeps_uuid_when_stable_key_matches():
+    from core.knowledge_objects.stable_key import claim_stable_key
+
+    key = claim_stable_key("doc-1", "A", [])
+    session = FakeKnowledgeSession(live_rows=[
+        {"id": "kept-uuid", "stable_key": key, "agent_id": "clm_old",
+         "review_status": "teacher_approved", "created_by": None},
+        {"id": "gone-uuid", "stable_key": "k1:stale", "agent_id": "clm_stale",
+         "review_status": "teacher_review_required", "created_by": None},
+    ])
+    id_map = persistence._rebuild_theory_claims_in_session(
+        session, "doc-1", [{"claim_id": "clm_1", "text": "A", "claim_type": "result"}],
+        run_id="run-1",
+    )
+    assert id_map == {"clm_1": "kept-uuid"}
+    assert session.inserted_into("theory_claims") == []
+    # 人間の確定列（review_status）は上書きしない。
+    updated = [values for table, _w, values in session.updates if table == "theory_claims"]
+    assert all("review_status" not in values for values in updated)
+    # 一致しなかった旧 live 行は supersede される（行は残る）。
+    assert session.superseded == ["gone-uuid"]
 
 
 def test_rebuild_components_inserts_links_and_remaps_claims():
-    session = _RebuildSession(ids=["cdb1", "cdb2"])
+    session = FakeKnowledgeSession(id_prefix="cdb")
     id_map = persistence._rebuild_theory_components_in_session(
         session, "doc-1",
         [
@@ -95,12 +130,13 @@ def test_rebuild_components_inserts_links_and_remaps_claims():
     )
     assert set(id_map) == {"cmp_1", "cmp_2"}
     joined = "\n".join(session.sql)
+    # links だけが DELETE → 再作成の明示例外。components は DELETE しない（KO3）。
     assert "DELETE FROM theory_component_links" in joined
-    assert "DELETE FROM theory_components" in joined
+    assert "DELETE FROM theory_components" not in joined
     assert "INSERT INTO theory_component_links" in joined
     # linked claim remapped to db id in evidence_claims
-    comp1_params = session.params[2]  # 0,1 are deletes; 2 is first component insert
-    assert "dbclaim1" in comp1_params["evidence_claims"]
+    comp1 = session.inserted_into("theory_components")[0]
+    assert "dbclaim1" in comp1["evidence_claims"]
 
 
 def test_revision_graph_remaps_component_claim_and_edge_ids():
@@ -224,14 +260,20 @@ def test_accept_rebuilds_all_projections_in_one_transaction(monkeypatch):
     assert out["accepted"] is True
     assert session.committed is True
     joined = "\n".join(session.sql)
-    for marker in ("UPDATE documents", "DELETE FROM theory_claims",
-                   "DELETE FROM theory_components", "theory_component_graphs",
+    for marker in ("UPDATE documents", "INSERT INTO theory_claims",
+                   "INSERT INTO theory_components", "theory_component_graphs",
                    "revision_status = 'accepted'", "theory_review_events"):
         assert marker in joined
-    promoted = next(
-        params["promoted"] for params in session.params if "promoted" in params
-    )
-    assert json.loads(promoted)["claim_object_builder"]["claims"][0]["text"] == "A"
+    # 投影は DELETE ではなく stable_key 同期（KO3）。
+    assert "DELETE FROM theory_claims" not in joined
+    assert "DELETE FROM theory_components" not in joined
+    # promoted artifacts は生成ログ表へ（stage_outputs の jsonb_set は撤去。§6 / KO6）。
+    promoted = {
+        params["stage"]: json.loads(params["payload"])
+        for sql, params in zip(session.sql, session.params)
+        if "document_analysis_artifacts" in sql
+    }
+    assert promoted["claim_object_builder"]["claims"][0]["text"] == "A"
     graph_params = next(
         params for sql, params in zip(session.sql, session.params)
         if "theory_component_graphs" in sql
@@ -241,8 +283,8 @@ def test_accept_rebuilds_all_projections_in_one_transaction(monkeypatch):
 
 
 def test_accept_deletes_stale_graph_when_candidate_has_no_graph(monkeypatch):
-    # 候補に component_graph が無い場合: components は作り直される（新UUID）が
-    # グラフは作り直せない → 旧UUIDを指す stale グラフを残さないよう、明示的に
+    # 候補に component_graph が無い場合: components は同期される（新規は新 UUID）が
+    # グラフは作り直せない → 旧 UUID を指す stale グラフを残さないよう、明示的に
     # DELETE FROM theory_component_graphs を発行して整合させる。
     candidate = _candidate()
     candidate.pop("component_graph")
@@ -294,5 +336,5 @@ def test_accept_conflict_skips_projection(monkeypatch):
         )
     joined = "\n".join(session.sql)
     # conflict detected before any projection write
-    assert "DELETE FROM theory_claims" not in joined
+    assert "INSERT INTO theory_claims" not in joined
     assert session.rolled_back is True

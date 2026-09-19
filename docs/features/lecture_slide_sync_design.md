@@ -218,7 +218,9 @@ display_text = スライド本文、spoken_text = そのスライドのナレー
 
 - `#ls-display-text` / `#ls-spoken-text` の間に **「スライド区切りを挿入」ボタン**:
   両 textarea のカーソル位置（spoken 側は対応する区切り番目の末尾）に `===` 行を挿入。
-- `syncSpoken`（表示⇄読み上げ同期チェック）はマーカー行を同期対象に含める。
+- 表示テキストの編集は読み上げ文へ無条件に追随し、マーカー行も同期対象に含める
+  （旧 `syncSpoken` チェックボックス `#ls-sync-spoken` は audio ビューの廃止で到達不能に
+  なっていたため 2026-09-05 に撤去。既定 ON だった挙動を無条件化しただけで挙動は不変）。
 - コーストピックドラフト（`#ls-course-material-text` / `#ls-course-spoken-script`）にも
   同じ挿入ボタンと整合インジケータを付ける。
 
@@ -336,8 +338,15 @@ ALTER TABLE chunks
   （将来: `word_timestamps` を書き込むようになれば精密化。v1 非スコープ）
 - コントロールの意味を変更: ◀/▶ = **スライド移動**（チャンク境界をまたいで連続）、
   進捗表示 = 「スライド N / M」+ プログレスバー。頭出し・一時停止は従来どおり。
-- `segment_mode` の扱い: `skip` はスライドも出さない、`summary` は要約 spoken_text
-  1件 = 1スライド（display は従来どおりセグメント本文の要約表示）。
+- ~~`segment_mode` の扱い: `skip` はスライドも出さない、`summary` は要約 spoken_text
+  1件 = 1スライド（display は従来どおりセグメント本文の要約表示）。~~
+  **2026-09-10（是正 F3 / 六つのレンズ 提案1）に沈黙適応を撤去したため、`skip` /
+  `summary` は発生しない**（`segment_mode` の語彙と `_build_slides_for_segment` の
+  `summary` 分岐は互換のため残置。実挙動は常に `full`）。学習者の状態で内容を変えるのは
+  やめ、注記フラグ `previously_touched` と再生バーの「短く聴く」トグル（本人の操作・
+  既定 OFF・畳んだ位置に「前に触れた箇所（開く）」を残す）に置き換えた。詳細は
+  [learning.md](learning.md) §4 と
+  `docs/architecture/six_lenses_2026-09-10/01_learner.md` §2 提案1。
 
 ### 6-4. 音声が無いスライド
 

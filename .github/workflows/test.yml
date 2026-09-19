@@ -42,16 +42,44 @@ jobs:
       - name: Install dependencies
         run: pip install -r api/requirements.txt
 
-      # 正本は backend/db/*.sql（core/migrations.py::run_migrations() が起動時に
-      # 番号順に全ファイルを適用するのと同じ手順）。個別ファイルの決め打ちではなく
-      # 全件を番号順に流すことで、CI が「フレッシュ DB への番号順全適用」を毎回
-      # 実地検証する回帰ゲートになる（2026-07 の main.py インライン DDL 撤去に伴い変更）。
-      - name: Initialize PostgreSQL schema (apply all migrations in order)
+      # 依存の版はローカルと CI でずれ得る（2026-09-19: FastAPI 0.141 で app.routes の形が変わり
+      # 登録検査 10 件が CI だけ落ちた）。再現のためにログへ主要な版と node の有無を残す。
+      - name: Show tool versions
+        run: |
+          python --version
+          pip list 2>/dev/null | grep -iE "^(fastapi|starlette|pydantic|sqlalchemy|psycopg2)" || true
+          node --version || echo "node: not available"
+          psql --version
+
+      # 正本は backend/db/*.sql。2 つの実行経路の両方で流す:
+      #  1) psql — ファイルが plain SQL として読めること（docker の initdb と同じ経路）と、
+      #     フレッシュ DB への番号順全適用を検証する。
+      #  2) core/migrations.py::run_migrations() — 本番の起動時経路。psycopg2 の `%` 二重化を
+      #     ランナーが行うことと、**2 回目の適用（冪等再実行）**が通ることを検証する。
+      # 2026-09-19: psql 経路だけだったため、ファイル側の `%%` 規約（psycopg2 前提）が CI で
+      # 078 の RAISE NOTICE を落とした。片方の経路だけで検証しない。
+      - name: Apply all migrations with psql (fresh DB, plain SQL)
         run: |
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/init.sql
           for f in $(ls db/[0-9][0-9][0-9]_*.sql | sort); do
             psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
           done
 
-      - name: Run tests
-        run: python -m pytest tests/ -v
+      - name: Re-apply all migrations with the runtime runner (idempotency + driver path)
+        run: |
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine
+          from core.migrations import run_migrations
+          applied = run_migrations(engine=create_engine(os.environ["DATABASE_URL"]))
+          print(f"re-applied {len(applied)} migration files via run_migrations()")
+          PY
+
+      - name: Run backend tests
+        run: python -m pytest tests/ -q
+
+      # src/tests（PDF 解析 agent 群）。CLAUDE.md の「テスト実行（全件 / agents）」と同じ経路。
+      # 2026-09-19 まで CI に含まれていなかった。
+      - name: Run agent tests (src)
+        working-directory: src
+        run: python -m pytest tests -q

@@ -124,9 +124,13 @@ class TestCourseCompletionCard:
         assert "if (!next) return" not in body
 
     def test_submit_check_answer_shows_completion_card_when_no_next(self):
-        """合格時・直接前進時ともに、次トピックが無ければ完了カードを出すこと。"""
+        """前進（data-advance）時に次トピックが無ければ完了カードを出すこと。
+
+        是正 F1 以降、前進はすべて本人の明示操作なので呼び出し口は1箇所（AI 応答の
+        合否で自動遷移する経路が無くなった）。
+        """
         body = _extract_function(_read(APP_JS), "submitCheckAnswer")
-        assert body.count("showCourseCompletionCard(") >= 2
+        assert body.count("showCourseCompletionCard(") >= 1
 
     def test_lecture_complete_routes_to_check_modal_even_at_final_topic(self):
         """レクチャー完了バナーは最終トピックでも「確認して完了」で同じ確認フローへ合流する。"""
@@ -162,16 +166,17 @@ class TestCourseCompletionCardServerGating:
         for word in FORBIDDEN_WORDS:
             assert word not in body
 
-    def test_submit_check_answer_stores_and_uses_server_course_completed(self):
-        """合格経路: data.course_completed===true のときだけ true を渡し、応答受信時に
-        state.lastCheckCourseCompleted へ現況を保存する（data-advance 経路が参照する）。"""
+    def test_submit_check_answer_stores_server_course_completed(self):
+        """並置の応答受信時に state.lastCheckCourseCompleted へ現況を保存し、
+        自己確認の応答でも更新する（data-advance 経路が参照する）。"""
         body = _extract_function(_read(APP_JS), "submitCheckAnswer")
         assert "state.lastCheckCourseCompleted = !!data.course_completed" in body
-        assert "showCourseCompletionCard(completedTopic, data.course_completed === true)" in body
+        self_check_body = _extract_function(_read(APP_JS), "submitCheckSelfCheck")
+        assert "state.lastCheckCourseCompleted = !!data.course_completed" in self_check_body
 
     def test_submit_check_answer_direct_advance_uses_last_check_flag(self):
-        """不合格→「理解したので次へ」の data-advance 経路（サーバー応答なし）は、
-        直前の check 応答が保存した state.lastCheckCourseCompleted を渡す。"""
+        """「次へ進む」の data-advance 経路（サーバー応答なし）は、直前の
+        /check・self-check 応答が保存した state.lastCheckCourseCompleted を渡す。"""
         body = _extract_function(_read(APP_JS), "submitCheckAnswer")
         assert "showCourseCompletionCard(directCompleted, state.lastCheckCourseCompleted)" in body
 
@@ -588,3 +593,37 @@ class TestLockedTopicFactToast:
     def test_fact_toast_styles_exist(self):
         css = _read(STYLES_CSS)
         assert ".fact-toast" in css
+
+
+# ---------------------------------------------------------------------------
+# 是正 F1（六つのレンズ §4 第1波 #1）: 確認問題は AI が合否を決めるゲートではない
+#   - 学習画面の文言に合否・採点の語彙を残さない
+#   - 詳細な UI 契約は test_check_juxtaposition_ui_static.py が固定する
+# ---------------------------------------------------------------------------
+
+
+class TestNoVerdictVocabularyInLearnerUi:
+    #: 合否・採点の語彙（学習画面の文言に出してはならない）。
+    VERDICT_WORDS = ("合格", "不合格", "採点", "正解率", "点数をつけ")
+
+    def test_check_related_functions_have_no_verdict_wording(self):
+        src = _read(APP_JS)
+        bodies = "\n".join(
+            _extract_function(src, name) for name in (
+                "openCheckModal", "submitCheckAnswer", "submitCheckSelfCheck",
+                "applyCheckReviewState", "checkSelfCheckHtml", "showCourseCompletionCard",
+                "onLectureComplete",
+            )
+        )
+        hits = [w for w in self.VERDICT_WORDS if w in bodies]
+        assert not hits, f"合否・採点の語彙が見つかりました: {hits}"
+
+    def test_reconstruction_card_has_no_verdict_vocabulary_either(self):
+        """R層は元から採点しない（既存の不変条項の再確認）。"""
+        src = _read(RECONSTRUCTION_JS)
+        hits = [w for w in self.VERDICT_WORDS if w in src]
+        assert not hits, f"合否・採点の語彙が見つかりました: {hits}"
+
+    def test_verdict_flag_is_gone_from_the_client(self):
+        src = _read(APP_JS)
+        assert "data.passed" not in src

@@ -75,7 +75,7 @@ def build_document_snapshot(document_id: str) -> dict:
             ).fetchone()
             cartridge_id = (run[0] if run else "") or ""
 
-        # manifest（表示用の件数。best-effort。document_id は UUID / material_id 両形を許容）
+        # manifest（表示用の件数。best-effort。document_id は UUID・migration 080）
         manifest = _document_manifest(session, document_id, source_path)
     finally:
         session.close()
@@ -88,19 +88,23 @@ def build_document_snapshot(document_id: str) -> dict:
 
 
 def _document_manifest(session, document_id: str, source_path: str) -> dict:
-    """成果物の件数を数える（表示用。失敗しても空で返す）。"""
+    """成果物の件数を数える（表示用。失敗しても空で返す）。
+
+    migration 080 以降 document_id は UUID なので、material_id 形（source_path）との
+    両形突合はしない（``source_path`` は呼び出し側の互換のため引数に残す）。
+    """
     try:
-        params = {"a": document_id, "b": source_path or document_id}
+        params = {"a": document_id}
         n_claims = session.execute(
-            sa_text("SELECT count(*) FROM theory_claims WHERE document_id IN (:a, :b)"),
+            sa_text("SELECT count(*) FROM theory_claims_live WHERE document_id = CAST(:a AS uuid)"),
             params,
         ).scalar() or 0
         n_components = session.execute(
-            sa_text("SELECT count(*) FROM theory_components WHERE document_id IN (:a, :b)"),
+            sa_text("SELECT count(*) FROM theory_components_live WHERE document_id = CAST(:a AS uuid)"),
             params,
         ).scalar() or 0
         has_graph = bool(session.execute(
-            sa_text("SELECT 1 FROM theory_component_graphs WHERE document_id IN (:a, :b) LIMIT 1"),
+            sa_text("SELECT 1 FROM theory_component_graphs WHERE document_id = CAST(:a AS uuid) LIMIT 1"),
             params,
         ).fetchone())
         return {"n_claims": int(n_claims), "n_components": int(n_components), "has_graph": has_graph}

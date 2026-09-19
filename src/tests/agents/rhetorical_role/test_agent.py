@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from episteme_graph.agents.coverage_report import is_coverage_report
 from episteme_graph.agents.document_structure.schema import (
     DocumentMetadata,
     DocumentStructureResult,
@@ -251,3 +252,69 @@ def test_compound_sentence_can_return_multiple_spans():
     assert spans[0].is_claim_candidate is True
     assert "figure_narration" in spans[1].role_labels
     assert spans[1].is_reject_candidate is True
+
+
+def test_summary_stats_include_coverage_report(monkeypatch):
+    """P0-1 / F-18: 取りこぼしの量が summary_stats["coverage"] に載る。"""
+    monkeypatch.delenv("RHETORICAL_ROLE_MAX_BLOCKS", raising=False)
+    agent = RhetoricalRoleAgent()
+    responses = [
+        _mock_response_for_text(
+            "We assume that NP contributes only to b -> c tau nu.",
+            "b1",
+            ["assumption"],
+            True,
+            False,
+        ),
+        _mock_response_for_text(
+            "In figure 1, we show the probability distribution of R Lambda c.",
+            "b2",
+            ["figure_narration", "meta_discourse"],
+            False,
+            True,
+        ),
+    ]
+    with patch.object(agent._llm_client, "generate", side_effect=responses):
+        result = agent.run(_structure(), _skeleton())
+
+    coverage = result.summary_stats["coverage"]
+    assert is_coverage_report(coverage)
+    assert coverage["population"] == 2
+    assert coverage["processed"] == 2
+    assert coverage["truncated"] == 0
+    assert coverage["reasons"] == []
+    assert coverage["unit"] == "blocks"
+
+
+def test_summary_stats_coverage_reports_truncation(monkeypatch):
+    monkeypatch.delenv("RHETORICAL_ROLE_MAX_BLOCKS", raising=False)
+    agent = RhetoricalRoleAgent()
+    response = _mock_response_for_text(
+        "We assume that NP contributes only to b -> c tau nu.",
+        "b1",
+        ["assumption"],
+        True,
+        False,
+    )
+    with patch.object(agent._llm_client, "generate", side_effect=[response]):
+        result = agent.run(_structure(), _skeleton(), config={"max_blocks": 1})
+
+    coverage = result.summary_stats["coverage"]
+    assert coverage["population"] == 2
+    assert coverage["processed"] == 1
+    assert coverage["truncated"] == 1
+    assert coverage["reasons"] == ["max_blocks"]
+
+
+def test_fallback_result_still_reports_coverage(monkeypatch):
+    """対象ブロックゼロでも population=0 の報告を残す（「見た」ことの記録）。"""
+    monkeypatch.delenv("RHETORICAL_ROLE_MAX_BLOCKS", raising=False)
+    agent = RhetoricalRoleAgent()
+    structure = _structure()
+    structure.blocks = [_typed("h1", "1 Introduction", block_type="section_heading")]
+    result = agent.run(structure, _skeleton())
+
+    assert result.role_annotations == []
+    coverage = result.summary_stats["coverage"]
+    assert is_coverage_report(coverage)
+    assert coverage["population"] == 0

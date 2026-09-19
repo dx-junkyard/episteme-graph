@@ -23,7 +23,7 @@ from sqlalchemy import text as sa_text
 from core import element_explanations as element_explanations_store
 from core.postgres import get_session
 from core.figure_presentation import presentation_payload
-from core.document_pipeline.persistence import get_latest_analysis_run
+from core.document_pipeline.persistence import document_run_artifacts
 from core.deliberation import identity_links as identity_links_mod
 from core.deliberation import refs as refs_mod
 from core.deliberation.schema import (
@@ -96,9 +96,9 @@ def _agent_id_candidates_for_focus(session: Any, ref: ElementRef) -> set[str]:
     """
     match_ids = {str(ref.element_id)}
     if ref.element_type == ELEMENT_THEORY_COMPONENT:
-        sql = "SELECT source_scope FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1"
+        sql = "SELECT source_scope FROM theory_components_live WHERE id = CAST(:id AS uuid) LIMIT 1"
     elif ref.element_type == ELEMENT_THEORY_CLAIM:
-        sql = "SELECT source_scope FROM theory_claims WHERE id = CAST(:id AS uuid) LIMIT 1"
+        sql = "SELECT source_scope FROM theory_claims_live WHERE id = CAST(:id AS uuid) LIMIT 1"
     else:
         # figure / equation / evidence / derivation / shared_part: element_explanations は
         # 既に正準 ID なので（evidence / derivation は element_explanations の語彙自体に
@@ -173,7 +173,7 @@ def _decompose_theory_claim(ref: ElementRef) -> dict[str, Any]:
                 """
                 SELECT claim_type, text, normalized_text, concepts, equation,
                        support_status, evidence_text, review_status
-                FROM theory_claims WHERE id = CAST(:id AS uuid) LIMIT 1
+                FROM theory_claims_live WHERE id = CAST(:id AS uuid) LIMIT 1
                 """
             ),
             {"id": ref.element_id},
@@ -253,7 +253,7 @@ def _decompose_theory_component(ref: ElementRef) -> dict[str, Any]:
                 """
                 SELECT name, component_type, summary, status,
                        inputs, outputs, preconditions, constraints, dependencies
-                FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1
+                FROM theory_components_live WHERE id = CAST(:id AS uuid) LIMIT 1
                 """
             ),
             {"id": ref.element_id},
@@ -296,7 +296,7 @@ def _decompose_figure(ref: ElementRef) -> dict[str, Any]:
             sa_text(
                 """
                 SELECT figure_label, caption_text, page, status,
-                       extraction_method, caption_block_id, document_id, figure_key,
+                       extraction_method, caption_block_id, document_id::text AS document_id, figure_key,
                        suggested_mode, reviewed_mode, mode_reason, mode_review_status,
                        analysis_profile, bbox, inner_labels,
                        reviewed_analysis_mode, reviewed_analysis_profile,
@@ -312,7 +312,7 @@ def _decompose_figure(ref: ElementRef) -> dict[str, Any]:
             sa_text(
                 """
                 SELECT id, name, component_type, status, summary
-                FROM theory_components
+                FROM theory_components_live
                 WHERE source_scope->>'document_id' = :document_id
                   AND component_type IN ('apparatus','instrument','part')
                 ORDER BY created_at ASC
@@ -341,8 +341,9 @@ def _decompose_figure(ref: ElementRef) -> dict[str, Any]:
         notes.append("caption 対応なし（caption_block_id=NULL でも保持・P4）")
     artifact_record: dict[str, Any] = {}
     try:
-        latest_run = get_latest_analysis_run(document_id=ref.document_id or "")
-        artifacts = (((latest_run or {}).get("stage_outputs") or {}).get("_artifacts") or {})
+        # 成果物 run の選び方は document_run_artifacts（adopted）に一本化する
+        # （知識構造の見直し 2026-09-12 C-8）。
+        artifacts = document_run_artifacts(ref.document_id or "")
         for record in (artifacts.get("apparatus_semantics") or {}).get("apparatus_records") or []:
             if isinstance(record, dict) and str(record.get("figure_id") or "") == ref.element_id:
                 artifact_record = record

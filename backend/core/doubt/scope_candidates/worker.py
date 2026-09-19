@@ -22,8 +22,9 @@ from sqlalchemy import text as sa_text
 from core.config import get_settings
 from core.doubt.scope_candidates.agent import ScopeCandidateAgent
 from core.doubt.scope_candidates.input_builder import build_target_context
+from core.doubt.scope_candidates.system import SYSTEM
 from core.llm_usage.context import bind_usage_context
-from core.llm_worker.cost_gate import CostGate
+from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session
 
 logger = logging.getLogger(__name__)
@@ -31,23 +32,22 @@ logger = logging.getLogger(__name__)
 # 1 回の worker 起動で処理する対象数の上限
 _BATCH_LIMIT = 10
 
-# 実装は core/llm_worker/cost_gate.py の CostGate に共通化済み（daily のみ・過去日の
-# カウンタは古い方から破棄=prune_stale_daily。daily_call_counts は同じ dict のエイリアス）。
-_cost_gate = CostGate()
+# 実装は core/llm_worker/cost_gate.py の CostGate（core/doubt/scope_candidates/system.py
+# の WorkerSystem が1個だけ持つ。daily のみ・過去日のカウンタは破棄）。
+# daily_call_counts は同じ dict オブジェクトへのエイリアス。
+_cost_gate: CostGate = SYSTEM.gate
 _daily_call_counts: dict[str, int] = _cost_gate.daily_counts
 
-
-def _today_key() -> str:
-    return datetime.date.today().isoformat()
+_today_key = today_str
 
 
 def _check_and_count_llm_call() -> bool:
-    """日次上限内なら加算して True。上限超過なら False。"""
-    settings = get_settings()
-    per_day = int(getattr(settings, "doubt_scope_max_calls_per_day", 10))
-    return _cost_gate.check_and_count(
-        daily_limit=per_day, daily_key=_today_key(), prune_stale_daily=True,
-    )
+    """日次上限内なら加算して True。上限超過なら False。
+
+    上限値の正本は core/doubt/scope_candidates/system.py の CostSpec
+    （doubt_scope_max_calls_per_day を settings から読む）。
+    """
+    return SYSTEM.check_and_count(gate=_cost_gate, settings=get_settings())
 
 
 def _claim_pending_targets(session, document_id: str, course_id: str) -> list[tuple[str, str]]:
@@ -55,7 +55,7 @@ def _claim_pending_targets(session, document_id: str, course_id: str) -> list[tu
     filters = ["scope_candidates_analyzed_at IS NULL"]
     params: dict = {"limit": _BATCH_LIMIT}
     if document_id:
-        filters.append("document_id = :doc")
+        filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
         params["doc"] = document_id
     if course_id:
         filters.append("course_id = :course")
@@ -161,11 +161,10 @@ def run_scope_candidate_mining(document_id: str = "", course_id: str = "") -> di
 
 def maybe_schedule_scope_candidates(document_id: str = "", course_id: str = "") -> bool:
     """非同期バッチをデーモンスレッドで起動する（P6: 同期パスに LLM を入れない）。"""
-    thread = threading.Thread(
-        target=run_scope_candidate_mining,
-        kwargs={"document_id": document_id, "course_id": course_id},
-        name="doubt-scope-candidates",
-        daemon=True,
+    return SYSTEM.spawn(
+        run_scope_candidate_mining,
+        thread_factory=threading.Thread,
+        thread_name="doubt-scope-candidates",
+        document_id=document_id,
+        course_id=course_id,
     )
-    thread.start()
-    return True

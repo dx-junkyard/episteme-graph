@@ -541,8 +541,8 @@ class TestCollectIdentityCandidates:
     def test_document_scoped_ref_collects_frozen_entries(self, monkeypatch):
         self._patch_settings(monkeypatch)
         monkeypatch.setattr(
-            dialogue, "get_latest_analysis_run",
-            lambda **k: {"cartridge_id": "particle_physics"},
+            dialogue, "document_run_cartridge_id",
+            lambda *a, **k: "particle_physics",
         )
         captured: dict = {}
 
@@ -574,7 +574,7 @@ class TestCollectIdentityCandidates:
     def test_figure_element_filters_apparatus_entries(self, monkeypatch):
         self._patch_settings(monkeypatch)
         monkeypatch.setattr(
-            dialogue, "get_latest_analysis_run", lambda **k: {"cartridge_id": "pp"}
+            dialogue, "document_run_cartridge_id", lambda *a, **k: "pp"
         )
         captured: dict = {}
 
@@ -602,7 +602,7 @@ class TestCollectIdentityCandidates:
 
     def test_unresolved_domain_key_returns_empty_without_search(self, monkeypatch):
         self._patch_settings(monkeypatch)
-        monkeypatch.setattr(dialogue, "get_latest_analysis_run", lambda **k: None)
+        monkeypatch.setattr(dialogue, "document_run_cartridge_id", lambda *a, **k: "")
         called = {"search": False}
         monkeypatch.setattr(
             dialogue, "search_frozen_entries",
@@ -617,7 +617,7 @@ class TestCollectIdentityCandidates:
     def test_zero_top_k_skips_search(self, monkeypatch):
         self._patch_settings(monkeypatch, top_k=0)
         monkeypatch.setattr(
-            dialogue, "get_latest_analysis_run", lambda **k: {"cartridge_id": "pp"}
+            dialogue, "document_run_cartridge_id", lambda *a, **k: "pp"
         )
         called = {"search": False}
         monkeypatch.setattr(
@@ -630,7 +630,7 @@ class TestCollectIdentityCandidates:
     def test_search_failure_degrades_to_empty(self, monkeypatch):
         self._patch_settings(monkeypatch)
         monkeypatch.setattr(
-            dialogue, "get_latest_analysis_run", lambda **k: {"cartridge_id": "pp"}
+            dialogue, "document_run_cartridge_id", lambda *a, **k: "pp"
         )
 
         def boom(**kwargs):
@@ -648,7 +648,7 @@ class TestBuildGroundingIdentitySupply:
         )
         monkeypatch.setattr(dialogue.positioning, "build", lambda ref: {})
         monkeypatch.setattr(
-            dialogue, "get_latest_analysis_run", lambda **k: {"cartridge_id": "pp"}
+            dialogue, "document_run_cartridge_id", lambda *a, **k: "pp"
         )
         monkeypatch.setattr(
             dialogue, "search_frozen_entries",
@@ -706,3 +706,81 @@ class TestGroundingToTextIdentityGuard:
         header = dialogue._INSTRUCTION_HEADER
         assert "一覧が無いときは identity を使わないでください" in header
         assert "同一性の気づき" not in header
+
+
+# ---------------------------------------------------------------------------
+# 応答文体の改訂（graph_dialogue_review_design.md §15）
+# ---------------------------------------------------------------------------
+
+
+class TestStanceContractAndSpokenMode:
+    def test_header_uses_the_label_contract_not_per_sentence_hedging(self):
+        header = dialogue._INSTRUCTION_HEADER
+        from core.label_vocab import AI_READING_LABEL
+
+        assert "文ごとに「〜の可能性があります」のような留保を繰り返さず、簡潔な断定調で書いてください。" in header
+        assert AI_READING_LABEL in header
+        assert "仮説的な言い回しにしてください" not in header
+        assert "数式は必ず `$…$` で区切ってください" in header
+
+    def test_text_mode_messages_are_byte_identical_to_the_default(self):
+        assert dialogue.build_llm_messages([], "q", "G") == dialogue.build_llm_messages(
+            [], "q", "G", response_mode="text"
+        )
+        assert "spoken" not in dialogue.build_llm_messages([], "q", "G")[0]["content"]
+
+    def test_spoken_mode_appends_the_listener_contract(self):
+        content = dialogue.build_llm_messages([], "q", "G", response_mode="spoken")[0]["content"]
+        assert "音声で読み上げるための spoken を別に返してください。" in content
+
+    def test_run_turn_text_mode_uses_the_original_schema_and_returns_no_spoken(self, monkeypatch):
+        seen = {}
+
+        def fake_generate(messages, response_format, *, images=None, model=None):
+            seen["schema"] = response_format
+            seen["messages"] = messages
+            return SimpleNamespace(reply="本文", annotations=[])
+
+        monkeypatch.setattr(dialogue, "generate_conversation_turn", fake_generate)
+        result = dialogue.run_turn(
+            _sample_ref(), prior_messages=[], user_content="q", grounding_text="G", user_id="u1",
+        )
+        assert seen["schema"] is dialogue._DialogueTurnOutput
+        assert seen["messages"] == dialogue.build_llm_messages([], "q", "G")
+        assert result.spoken is None
+
+    def test_run_turn_spoken_mode_returns_listener_text(self, monkeypatch):
+        seen = {}
+
+        def fake_generate(messages, response_format, *, images=None, model=None):
+            seen["schema"] = response_format
+            return SimpleNamespace(
+                reply=r"密度ゆらぎ $\delta$ が鍵です。",
+                annotations=[],
+                spoken="- 結論から言うと 密度ゆらぎ デルタ が鍵です。",
+            )
+
+        monkeypatch.setattr(dialogue, "generate_conversation_turn", fake_generate)
+        result = dialogue.run_turn(
+            _sample_ref(), prior_messages=[], user_content="q", grounding_text="G",
+            user_id="u1", response_mode="spoken",
+        )
+        assert seen["schema"] is dialogue._DialogueTurnOutputSpoken
+        assert result.spoken
+        assert "$" not in result.spoken
+        assert "\\(" not in result.spoken
+        assert not result.spoken.startswith("- ")
+
+    def test_resolve_spoken_text_falls_back_to_reply(self):
+        assert dialogue.resolve_spoken_text("", "本文です。") == "本文です。"
+        assert dialogue.resolve_spoken_text(None, r"式 $x$ です。") == "式 です。"
+
+    def test_reply_is_scrubbed_of_control_residue(self, monkeypatch):
+        monkeypatch.setattr(
+            dialogue, "generate_conversation_turn",
+            lambda *a, **k: SimpleNamespace(reply="\x1b[0m本文[0m", annotations=[]),
+        )
+        result = dialogue.run_turn(
+            _sample_ref(), prior_messages=[], user_content="q", grounding_text="G", user_id="u1",
+        )
+        assert result.reply == "本文"

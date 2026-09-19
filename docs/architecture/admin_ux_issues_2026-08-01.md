@@ -188,6 +188,27 @@ capability の突合は別途要確認。
 `data-ui-anchor` は menu-item へ**付け替える**（§2.2 の双方向網羅テストを満たすため
 担体を消さない）。マニュアル3点セットも同時更新する。
 
+#### 2.3 追補（2026-09-06 オーナー指示）— 高頻度2入口をアイコンで行に戻す
+
+「2つだけ」の原則は維持したうえで、利用頻度が高い **グラフレビュー** と **近い論文を探す
+（論文レーダー）** の2入口だけを `⋯` メニューから**行のアイコンボタン**へ昇格した。
+行に常に出るのは「パイプラインを実行 ▼」→ グラフアイコン → 📡 → `⋯` の4つ（2アイコンは
+document_id のある行のみ）。
+
+- **アイコン**: レーダーは従来どおり 📡。グラフレビューは inline SVG のノード・辺図形
+  （`currentColor`、`.material-row-icon`）。候補に挙げた 🕸（蜘蛛の巣に読める）・⚛（物理の
+  記号に読める）・🔗（URL に読める）・📊（統計グラフに読める）は意味の取り違えが起きるため
+  採用しなかった。ラベルは `title` / `aria-label` で持つ（アイコンのみのボタンにテキストを
+  併記しない）。
+- **不変**: `data-ui-anchor`（`materials.row-graph-review` / `materials.row-radar`）・
+  クリックハンドラ・document_id ガード・モーダル側。`⋯` メニューは残りの操作をそのまま持つ。
+- **Copilot 道案内**: 行アイコンを指す capability は `material_row_menu` ステップを挟まない
+  （`test_admin_assistant.py::test_row_icon_capabilities_do_not_require_the_menu`）。
+  レーダーの論理アンカーは `paper_radar_row_menu` → `paper_radar_row_button` に改名。
+- **3点セット**: `docs/manual/teacher/11-admin-materials.md`（`#row-actions` / `#row-more-menu` /
+  `#radar-open`）・`26-admin-graph-review.md#graph-review-open`・`docs/admin_operations/materials.md`
+  を同時更新。ADMIN_UI_ANCHORS の ID・件数は変えていない。
+
 ---
 
 ## §3 (I3) パーツ表示の統一 — 理論グラフのノード詳細ペインを起点に

@@ -64,74 +64,7 @@ def _qualified_span(
     )
 
 
-class _FakeRow:
-    def __init__(self, value):
-        self._value = value
-
-    def __getitem__(self, idx):
-        return self._value
-
-
-class _FakeExec:
-    def __init__(self, row):
-        self._row = row
-
-    def fetchone(self):
-        return self._row
-
-
-class _FakeClaimsSession:
-    """Captures every INSERT's params, assigning incrementing fake UUIDs.
-
-    The DELETE-by-document_id statement (params == {"doc_id": ...}) is not an
-    INSERT so it is not captured and returns a row-less exec.
-    """
-
-    def __init__(self):
-        self.inserted: list[dict] = []
-        self._counter = 0
-
-    def execute(self, _stmt, params=None):
-        params = params or {}
-        if "claim_type" in params:
-            self._counter += 1
-            uid = f"claim-uuid-{self._counter}"
-            self.inserted.append(dict(params))
-            return _FakeExec(_FakeRow(uid))
-        return _FakeExec(_FakeRow(None))
-
-    def commit(self):
-        pass
-
-    def rollback(self):
-        pass
-
-    def close(self):
-        pass
-
-
-class _FakeComponentsSession:
-    def __init__(self):
-        self.inserted: list[dict] = []
-        self._counter = 0
-
-    def execute(self, _stmt, params=None):
-        params = params or {}
-        if "maturity_source" in params:
-            self._counter += 1
-            uid = f"component-uuid-{self._counter}"
-            self.inserted.append(dict(params))
-            return _FakeExec(_FakeRow(uid))
-        return _FakeExec(_FakeRow(None))
-
-    def commit(self):
-        pass
-
-    def rollback(self):
-        pass
-
-    def close(self):
-        pass
+from tests.knowledge_object_fakes import FakeKnowledgeSession  # noqa: E402
 
 
 def _apparatus_like_component(component_id="comp_1", label="widget", **overrides):
@@ -316,7 +249,7 @@ def test_component_thesis_context_dict_when_only_distance_nonzero():
 def _run_persist_qualified_claims(spans, thesis_result=None):
     qualified_result = types.SimpleNamespace(qualified_spans=spans)
     chunk_index = [{"chunk_id": "chunk-1", "block_ids": ["b1"]}]
-    session = _FakeClaimsSession()
+    session = FakeKnowledgeSession(id_prefix="claim-uuid")
     with patch.object(persistence, "_pg_session", return_value=session):
         saved = persistence.persist_qualified_claims(
             document_id="doc-1",
@@ -332,8 +265,8 @@ def test_persist_qualified_claims_writes_thesis_refs_for_matching_span():
     saved, session = _run_persist_qualified_claims(
         [_qualified_span(span_id="s1")], thesis_result=thesis
     )
-    assert len(session.inserted) == 1
-    params = session.inserted[0]
+    assert len(session.inserted_into("theory_claims")) == 1
+    params = session.inserted_into("theory_claims")[0]
     assert params["thesis_refs"] is not None
     thesis_refs = json.loads(params["thesis_refs"])
     assert thesis_refs == [{
@@ -348,7 +281,7 @@ def test_persist_qualified_claims_thesis_refs_null_when_no_thesis_result():
     saved, session = _run_persist_qualified_claims(
         [_qualified_span(span_id="s1")], thesis_result=None
     )
-    assert session.inserted[0]["thesis_refs"] is None
+    assert session.inserted_into("theory_claims")[0]["thesis_refs"] is None
 
 
 def test_persist_qualified_claims_thesis_refs_null_when_no_matching_claim():
@@ -356,7 +289,7 @@ def test_persist_qualified_claims_thesis_refs_null_when_no_matching_claim():
     _saved, session = _run_persist_qualified_claims(
         [_qualified_span(span_id="s1")], thesis_result=thesis
     )
-    assert session.inserted[0]["thesis_refs"] is None
+    assert session.inserted_into("theory_claims")[0]["thesis_refs"] is None
 
 
 def test_persist_qualified_claims_rejected_span_is_skipped_and_not_indexed():
@@ -365,7 +298,7 @@ def test_persist_qualified_claims_rejected_span_is_skipped_and_not_indexed():
         [_qualified_span(span_id="s1", decision="rejected")], thesis_result=thesis
     )
     assert saved == []
-    assert session.inserted == []
+    assert session.inserted_into("theory_claims") == []
 
 
 def test_persist_qualified_claims_multiple_spans_only_matching_one_gets_refs():
@@ -377,7 +310,7 @@ def test_persist_qualified_claims_multiple_spans_only_matching_one_gets_refs():
     assert len(saved) == 2
     by_span_id = {
         json.loads(p["source_scope"])["span_id"]: p["thesis_refs"]
-        for p in session.inserted
+        for p in session.inserted_into("theory_claims")
     }
     assert by_span_id["s1"] is not None
     assert by_span_id["s2"] is None
@@ -390,7 +323,7 @@ def test_persist_qualified_claims_multiple_spans_only_matching_one_gets_refs():
 
 def _run_persist_components(components):
     component_result = types.SimpleNamespace(components=components)
-    session = _FakeComponentsSession()
+    session = FakeKnowledgeSession(id_prefix="component-uuid")
     with patch.object(persistence, "_pg_session", return_value=session):
         id_map = persistence.persist_components(
             document_id="doc-1", component_result=component_result
@@ -408,8 +341,8 @@ def test_persist_components_thesis_context_included_when_present():
         support_distance_to_headline_claim=1,
     )
     _id_map, session = _run_persist_components([comp])
-    assert len(session.inserted) == 1
-    params = session.inserted[0]
+    assert len(session.inserted_into("theory_components")) == 1
+    params = session.inserted_into("theory_components")[0]
     assert params["thesis_context"] is not None
     ctx = json.loads(params["thesis_context"])
     assert ctx == {
@@ -423,7 +356,7 @@ def test_persist_components_thesis_context_included_when_present():
 def test_persist_components_thesis_context_null_when_absent():
     comp = _apparatus_like_component(component_id="comp_2", label="plain")
     _id_map, session = _run_persist_components([comp])
-    params = session.inserted[0]
+    params = session.inserted_into("theory_components")[0]
     assert params["thesis_context"] is None
 
 
@@ -447,7 +380,7 @@ def test_persist_components_thesis_context_does_not_disturb_f2_source_scope_merg
         support_role="application",
     )
     _id_map, session = _run_persist_components([comp])
-    params = session.inserted[0]
+    params = session.inserted_into("theory_components")[0]
     scope = json.loads(params["source_scope"])
     assert scope["source"] == "apparatus_semantics"
     assert scope["figure_id"] == "fig-uuid-1"

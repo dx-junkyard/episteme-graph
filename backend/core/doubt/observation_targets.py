@@ -81,14 +81,14 @@ def _fetch_graph_rows(session, course_id: str, document_id: str) -> list[tuple[s
         filters.append("course_id = :course")
         params["course"] = course_id
     if document_id:
-        filters.append("document_id = :doc")
+        filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
         params["doc"] = document_id
     if not filters:
         filters.append("TRUE")
     try:
         rows = session.execute(
             sa_text(f"""
-                SELECT document_id, graph_json
+                SELECT document_id::text AS document_id, graph_json
                 FROM theory_component_graphs
                 WHERE {' AND '.join(filters)}
             """),
@@ -159,7 +159,7 @@ def _claim_labels(session, claim_ids: set[str]) -> dict[str, str]:
         rows = session.execute(
             sa_text("""
                 SELECT id::text, COALESCE(NULLIF(normalized_text, ''), text)
-                FROM theory_claims
+                FROM theory_claims_live
                 WHERE id::text = ANY(:ids)
             """),
             {"ids": list(claim_ids)},
@@ -207,8 +207,10 @@ def observation_claim_targets(
             rows = session.execute(
                 sa_text("""
                     SELECT id::text
-                    FROM theory_claims
-                    WHERE document_id = ANY(:docs)
+                    FROM theory_claims_live
+                    -- docs は明示 document_id（material_id 形もあり得る）と
+                    -- グラフ由来 ID の混在なので text 比較で突き合わせる（080）。
+                    WHERE document_id::text = ANY(CAST(:docs AS text[]))
                       AND claim_type = ANY(:ctypes)
                 """),
                 {"docs": doc_ids, "ctypes": list(_OBSERVATION_CLAIM_TYPES)},

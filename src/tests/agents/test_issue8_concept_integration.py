@@ -253,14 +253,24 @@ def _export(build_result, components, course):
 # ---------------------------------------------------------------------------
 
 def test_happy_path_concepts_flow_through_every_stage():
-    build = _build_claims("Skewness and kurtosis are observables.", ontology=_ONTOLOGY)
+    # P0-3（knowledge_structure_review_2026-09-12 §4 / F-6 / K-2）で式の記号が
+    # concepts から外れたため、導出コンポーネントの「数学的・手続的な概念」は
+    # 記号ではなく**概念層**（cartridge 語彙）から来る必要がある。
+    ontology = {
+        "aliases": dict(_ONTOLOGY["aliases"], **{"Elimination": ["elimination"]}),
+        "concept_types": dict(_ONTOLOGY["concept_types"], **{"Elimination": "operation"}),
+    }
+    build = _build_claims(
+        "Skewness and kurtosis are observables after elimination of nuisance bias.",
+        ontology=ontology,
+    )
     claim = build.claims[0]
     assert claim.is_atomic
     assert {c.normalized for c in claim.concepts} >= {"Skewness", "Kurtosis"}
     assert claim.concept_assignment_status == "source_backed"
 
-    # A derivation component with a linked equation symbol (math concept) plus the
-    # claim's named concepts -> well-formed, no role mismatch.
+    # A derivation component with a linked equation plus the claim's named
+    # concepts -> well-formed, no role mismatch.
     components = _enrich(
         [_component("comp_1", linked_claim_ids=[claim.claim_id])],
         _available_claims(build),
@@ -268,9 +278,12 @@ def test_happy_path_concepts_flow_through_every_stage():
                    {"equation_id": "eq_d", "defined_symbols": [], "used_symbols": ["b_2"]}],
     )
     comp = components.components[0]
-    # claim concepts + equation symbol propagated into the component
+    # claim concepts propagated into the component
     assert {"Skewness", "Kurtosis"} <= set(comp.concepts)
-    assert "b_2" in comp.concepts
+    # P0-3（knowledge_structure_review_2026-09-12 §4 / F-6 / K-2）: 式の記号は
+    # concepts に混ぜない。記号層の正本は symbol_registry で、component からは
+    # linked_equation_ids 経由で式に辿れるため情報は失われない。
+    assert "b_2" not in comp.concepts
     assert {"Skewness", "Kurtosis"} <= set(comp.introduced_concepts)
 
     # component graph rollup

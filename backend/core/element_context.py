@@ -76,6 +76,7 @@ from core.learner_context_common import (  # noqa: F401  (旧名の再エクス�
     equation_focus_label as _equation_focus_label,
     generic_item_label as _generic_item_label,
     is_internal_id_label as _is_internal_id_label,
+    is_symbol_like_concept as _is_symbol_like_concept,
     is_uuid as _is_uuid,
     json_list as _json_list,
     learner_navigable as _learner_navigable,
@@ -85,6 +86,7 @@ from core.learner_context_common import (  # noqa: F401  (旧名の再エクス�
     safe_text as _safe_text,
     scoped_id_match_sql,
     strip_confidence,
+    visible_concept_names,
 )
 from core.text_excerpt import excerpt, looks_like_tex_math
 from core.deliberation import context_lens as context_lens_mod
@@ -193,9 +195,10 @@ def _resolve_claim(element_id: str, course_document_ids: set[str]) -> tuple[str,
         rows = session.execute(
             sa_text(
                 f"""
-                SELECT id::text AS id, document_id, (id::text = :raw_id) AS id_match
-                FROM theory_claims
-                WHERE document_id = ANY(:doc_ids) AND ({where_clause})
+                SELECT id::text AS id, document_id::text AS document_id,
+                       (id::text = :raw_id) AS id_match
+                FROM theory_claims_live
+                WHERE document_id = ANY(CAST(:doc_ids AS uuid[])) AND ({where_clause})
                 ORDER BY (id::text = :raw_id) DESC, document_id ASC, created_at ASC, id::text ASC
                 LIMIT {_CLAIM_CANDIDATE_LIMIT}
                 """

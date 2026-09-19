@@ -109,7 +109,10 @@ END $$;
 -- Backfill: document ごとの最新 completed Run を暫定 active にする。
 --   - failed Run は active にしない
 --   - 既に active が設定済みの document は変更しない
---   - document_analysis_runs.document_id は TEXT、documents.id は UUID のため text 比較
+--   - 比較は必ず**両辺 ::text**にする。document_analysis_runs.document_id は本 migration の
+--     時点では TEXT だが、migration 080 で UUID + FK に変わる（KO9）。全ファイルは毎起動
+--     番号順に再実行されるため、080 適用済みの DB では片側だけ ::text だと
+--     `operator does not exist: text = uuid` で 019 が落ち、API が起動しなくなる。
 --
 -- バックフィル対象（active_analysis_run_id が未設定の document）が無ければ
 -- 何もしない DO $$ ガードで包み、埋まった後の再実行を静かにする。
@@ -130,7 +133,7 @@ BEGIN
                      created_at DESC,
                      id DESC
         ) sub
-        WHERE d.id::text = sub.document_id
+        WHERE d.id::text = sub.document_id::text
           AND d.active_analysis_run_id IS NULL;
     END IF;
 END $$;

@@ -28,6 +28,7 @@ from core.label_vocab import (
     CONFIDENCE_TENTATIVE_REFERENCE_HIGH,
 )
 from core.postgres import get_session
+from core.schema import MAPPING_JUSTIFICATIONS
 from core.deliberation.schema import (
     ElementRef,
     ElementResolutionError,
@@ -62,9 +63,11 @@ def _dump_json(value: Any) -> str:
 
 
 _COLUMNS_SQL = """
-    id::text, instance_element_type, instance_element_id, instance_document_id,
+    id::text, instance_element_type, instance_element_id,
+    instance_document_id::text AS instance_document_id,
     shared_part_id::text, status, local_expression, evidence, reason, confidence,
-    created_by::text, decided_by::text, decided_at, created_at, updated_at
+    created_by::text, decided_by::text, decided_at, created_at, updated_at,
+    mapping_justification
 """
 
 
@@ -85,6 +88,9 @@ def _row_to_dict(row: Any) -> dict:
         "decided_at": row[12].isoformat() if row[12] else None,
         "created_at": row[13].isoformat() if row[13] else "",
         "updated_at": row[14].isoformat() if row[14] else "",
+        # 「なぜ同じと言えたか」（概念レジストリ KR4 / migration 082）。既存行は
+        # 導出できないので None = 「記録なし」のまま（推測で埋めない）。
+        "mapping_justification": row[15] if len(row) > 15 else None,
     }
 
 
@@ -97,6 +103,7 @@ def create_candidate(
     reason: str = "",
     confidence: float | None = None,
     created_by: str | None = None,
+    mapping_justification: str | None = None,
 ) -> dict:
     """同一性リンクの候補を1件作成する（常に ``status='candidate'``、KN-3）。
 
@@ -111,6 +118,11 @@ def create_candidate(
     要素型では ``element_id``（例: ``eq_1``）が論文間で衝突しうるため（レビュー指摘
     2026-07-15）。document_id を含めないと、別論文からの候補作成が別論文の既存行を
     返してしまう（衝突・情報漏えい）。
+
+    ``mapping_justification``（概念レジストリ KR4・migration 082）は「なぜ同じと
+    言えたか」の記録で、**新規作成では必須**（``core.schema.MAPPING_JUSTIFICATIONS``
+    の語彙内。未指定・語彙外は ``ValueError`` → route が 422）。W層 UI からの手動作成は
+    ``manual_curation``、決定論の候補導出は ``lexical_match`` / ``vector_similarity``。
     """
     if instance_ref.scope != SCOPE_DOCUMENT:
         raise ElementResolutionError(
@@ -129,6 +141,13 @@ def create_candidate(
         )
     if not str(shared_part_id or "").strip():
         raise ValueError("shared_part_id is required")
+    # KR4: 「なぜ同じと言えたか」の無い同一性候補は作らない。要素型・スコープの検査より
+    # **後**に置く（不正な source は従来どおり ElementResolutionError で返す）。
+    justification = str(mapping_justification or "").strip()
+    if not justification:
+        raise ValueError("mapping_justification is required")
+    if justification not in MAPPING_JUSTIFICATIONS:
+        raise ValueError(f"invalid mapping_justification: {mapping_justification!r}")
 
     session = get_session()
     try:
@@ -138,12 +157,12 @@ def create_candidate(
                 INSERT INTO element_identity_links (
                     instance_element_type, instance_element_id, instance_document_id,
                     shared_part_id, status, local_expression, evidence, reason,
-                    confidence, created_by
+                    confidence, created_by, mapping_justification
                 ) VALUES (
-                    :element_type, :element_id, :document_id,
+                    :element_type, :element_id, CAST(:document_id AS uuid),
                     CAST(:shared_part_id AS uuid), :status,
                     CAST(:local_expression AS jsonb), CAST(:evidence AS jsonb),
-                    :reason, :confidence, CAST(:created_by AS uuid)
+                    :reason, :confidence, CAST(:created_by AS uuid), :mapping_justification
                 )
                 ON CONFLICT (instance_element_type, instance_element_id, instance_document_id, shared_part_id)
                 DO NOTHING
@@ -153,7 +172,10 @@ def create_candidate(
             {
                 "element_type": instance_ref.element_type,
                 "element_id": instance_ref.element_id,
-                "document_id": instance_ref.document_id or "",
+                # migration 080 以降 instance_document_id は uuid NOT NULL。空文字を
+                # そのまま入れると例外になる（identity link は必ず document 由来の
+                # instance に張るので、空なら NOT NULL 違反として失敗するのが正しい）。
+                "document_id": instance_ref.document_id or None,
                 "shared_part_id": shared_part_id,
                 # status は引数として受け取らず、常にこの定数を束縛する（KN-3固定）。
                 "status": IDENTITY_LINK_STATUS_CANDIDATE,
@@ -162,6 +184,7 @@ def create_candidate(
                 "reason": reason or "",
                 "confidence": confidence,
                 "created_by": created_by,
+                "mapping_justification": justification,
             },
         ).fetchone()
         if row is None:
@@ -173,7 +196,7 @@ def create_candidate(
                     SELECT {_COLUMNS_SQL} FROM element_identity_links
                     WHERE instance_element_type = :element_type
                       AND instance_element_id = :element_id
-                      AND instance_document_id = :document_id
+                      AND instance_document_id = CAST(NULLIF(:document_id, '') AS uuid)
                       AND shared_part_id = CAST(:shared_part_id AS uuid)
                     """
                 ),
@@ -266,7 +289,7 @@ def list_for_instance(element_type: str, element_id: str, document_id: str) -> l
                 SELECT {_COLUMNS_SQL} FROM element_identity_links
                 WHERE instance_element_type = :element_type
                   AND instance_element_id = :element_id
-                  AND instance_document_id = :document_id
+                  AND instance_document_id = CAST(NULLIF(:document_id, '') AS uuid)
                 ORDER BY created_at ASC
                 """
             ),
@@ -296,6 +319,36 @@ def list_for_shared_part(shared_part_id: str) -> list[dict]:
     return [_row_to_dict(r) for r in rows]
 
 
+def list_for_shared_parts(shared_part_ids: list[str]) -> dict[str, list[dict]]:
+    """複数の共通部品の同一性リンクをまとめて 1 クエリで引く（P3-R11: N+1 の解消）。
+
+    戻り値は ``{shared_part_id: [link, ...]}``。リンクの無い id はキー自体を持たない
+    （呼び出し側は ``.get(id, [])``）。``list_for_shared_part`` と同じ内容・同じ順序。
+    """
+    keys = [str(i or "") for i in shared_part_ids if str(i or "")]
+    if not keys:
+        return {}
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                f"""
+                SELECT {_COLUMNS_SQL} FROM element_identity_links
+                WHERE shared_part_id = ANY(CAST(:shared_part_ids AS uuid[]))
+                ORDER BY created_at ASC
+                """
+            ),
+            {"shared_part_ids": keys},
+        ).fetchall()
+    finally:
+        session.close()
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        link = _row_to_dict(row)
+        grouped.setdefault(str(link.get("shared_part_id") or ""), []).append(link)
+    return grouped
+
+
 def confirmed_links_for_document(document_id: str) -> list[dict]:
     """document 内で確定済みの同一性リンクのみを返す。
 
@@ -309,7 +362,7 @@ def confirmed_links_for_document(document_id: str) -> list[dict]:
             sa_text(
                 f"""
                 SELECT {_COLUMNS_SQL} FROM element_identity_links
-                WHERE instance_document_id = :document_id AND status = 'confirmed'
+                WHERE instance_document_id = CAST(NULLIF(:document_id, '') AS uuid) AND status = 'confirmed'
                 ORDER BY created_at ASC
                 """
             ),

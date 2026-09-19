@@ -90,7 +90,10 @@ def _course_scope(session, course_data: dict, topic_id: str | None = None) -> di
     持つため、claim → course のブリッジは chunks.material_id を主に使う。
     """
     material_ids = course_source_material_ids(course_data)
-    doc_refs = list(material_ids)
+    # migration 080 以降 theory_claims / reconstruction_items の document_id は uuid なので、
+    # doc_refs には解決済みの documents.id だけを入れる（material_id 形は一致しないうえ、
+    # uuid[] へのキャストで例外になる）。material_id 側の照合は chunks.material_id が担う。
+    doc_refs: list[str] = []
     if material_ids:
         try:
             rows = session.execute(
@@ -130,7 +133,7 @@ def _claim_row_to_dict(row: Any) -> dict:
 
 
 _CLAIM_COLS = (
-    "c.id::text, c.document_id, c.claim_type, c.text, c.normalized_text, "
+    "c.id::text, c.document_id::text, c.claim_type, c.text, c.normalized_text, "
     "c.concepts, c.equation, c.source_scope, c.evidence_text, "
     "c.support_status, c.review_status"
 )
@@ -140,11 +143,11 @@ def _fetch_item_and_claim(session, item_id: str) -> tuple[dict | None, dict | No
     """item + その claim を取得する（deliverable / 出題対象条件は呼び出し側で判定）。"""
     row = session.execute(
         sa_text(f"""
-            SELECT i.id::text, i.claim_id::text, i.document_id, i.elicit_mode, i.prompt,
+            SELECT i.id::text, i.claim_id::text, i.document_id::text, i.elicit_mode, i.prompt,
                    i.response_space, i.expected, i.author, i.status,
                    {_CLAIM_COLS}
             FROM reconstruction_items i
-            JOIN theory_claims c ON c.id = i.claim_id
+            JOIN theory_claims_live c ON c.id = i.claim_id
             WHERE i.id = CAST(:item_id AS uuid)
         """),
         {"item_id": item_id},
@@ -175,16 +178,16 @@ def _claim_in_course_scope(session, claim_id: str, scope: dict) -> bool:
     row = session.execute(
         sa_text("""
             SELECT 1
-            FROM theory_claims c
+            FROM theory_claims_live c
             LEFT JOIN chunks ch ON ch.id = c.chunk_id
             WHERE c.id = CAST(:claim_id AS uuid)
-              AND (ch.material_id = ANY(:mids) OR c.document_id = ANY(:doc_refs))
+              AND (ch.material_id = ANY(:mids) OR c.document_id = ANY(CAST(:doc_refs AS uuid[])))
             LIMIT 1
         """),
         {
             "claim_id": claim_id,
             "mids": scope.get("material_ids") or [""],
-            "doc_refs": scope.get("doc_refs") or [""],
+            "doc_refs": scope.get("doc_refs") or [],
         },
     ).fetchone()
     return row is not None
@@ -265,7 +268,8 @@ def get_next_item(
             "uid": current_user["id"],
         }
         params["mids"] = scope["material_ids"] or [""]
-        params["doc_refs"] = scope["doc_refs"] or [""]
+        # uuid[] へキャストするので空は [] のまま渡す（"" は uuid に変換できない）。
+        params["doc_refs"] = scope["doc_refs"] or []
 
         order_clause = "i.author_confidence DESC, i.created_at ASC"
         if deprioritize_derivation:
@@ -277,11 +281,11 @@ def get_next_item(
         def _next_row(extra_clause: str):
             return session.execute(
                 sa_text(f"""
-                    SELECT i.id::text, i.claim_id::text, i.document_id, i.elicit_mode, i.prompt,
+                    SELECT i.id::text, i.claim_id::text, i.document_id::text, i.elicit_mode, i.prompt,
                            i.response_space, i.expected, i.author, i.status,
                            {_CLAIM_COLS}
                     FROM reconstruction_items i
-                    JOIN theory_claims c ON c.id = i.claim_id
+                    JOIN theory_claims_live c ON c.id = i.claim_id
                     LEFT JOIN chunks ch ON ch.id = c.chunk_id
                     WHERE {' AND '.join(conditions + [extra_clause])}
                     ORDER BY {order_clause}
@@ -296,7 +300,7 @@ def get_next_item(
             params["topic_chunks"] = scope["topic_chunk_ids"]
             row = _next_row("ch.id::text = ANY(:topic_chunks)")
         if row is None:
-            row = _next_row("(ch.material_id = ANY(:mids) OR c.document_id = ANY(:doc_refs))")
+            row = _next_row("(ch.material_id = ANY(:mids) OR c.document_id = ANY(CAST(:doc_refs AS uuid[])))")
     finally:
         session.close()
 
@@ -474,7 +478,7 @@ def descend_reconstruction(
             sa_text(f"""
                 SELECT r.item_id::text, {_CLAIM_COLS}
                 FROM learner_reconstructions r
-                JOIN theory_claims c ON c.id = r.claim_id
+                JOIN theory_claims_live c ON c.id = r.claim_id
                 WHERE r.id = CAST(:rid AS uuid) AND r.user_id = CAST(:uid AS uuid)
             """),
             {"rid": recon_id, "uid": current_user["id"]},
@@ -515,7 +519,7 @@ def descend_reconstruction(
                     INSERT INTO reconstruction_items
                     (claim_id, document_id, elicit_mode, prompt, response_space, expected,
                      claim_fields_used, author, author_confidence, status)
-                    VALUES (CAST(:cid AS uuid), :doc, 'symbol', :prompt,
+                    VALUES (CAST(:cid AS uuid), CAST(NULLIF(:doc, '') AS uuid), 'symbol', :prompt,
                             '[]'::jsonb, '{}'::jsonb, CAST(:fields AS jsonb),
                             'system', 0.0, 'auto')
                     RETURNING id::text
@@ -647,6 +651,14 @@ def review_queue(
         # fail-closed で {"items": [], ...} を返す（全件フォールバックしない）。
         payload = get_review_queue(document_ids=scope["doc_refs"])
     else:
+        if document_id:
+            # P0: document_id 直指定にもオブジェクトスコープゲートを通す
+            # （course_id 経由だけ守っても、教材 ID を直接指定されれば
+            #  無関係な教員が他人の教材の item / つまづき集約を読めてしまう）。
+            # 不在・権限なしはどちらも 404（detail 同一）。
+            from routes.theory_components import _ensure_document_editable
+
+            _ensure_document_editable(document_id, current_user)
         payload = get_review_queue(document_id)
     if sort == teacher_triage.SORT_LOAD:
         return _apply_load_sort_to_queue(payload)
@@ -670,7 +682,7 @@ def patch_item(
     try:
         existing = session.execute(
             sa_text(
-                "SELECT status, claim_id::text, document_id FROM reconstruction_items "
+                "SELECT status, claim_id::text, document_id::text FROM reconstruction_items "
                 "WHERE id = CAST(:id AS uuid)"
             ),
             {"id": item_id},
@@ -769,4 +781,8 @@ def document_stumble_summary(
     from routes.theory_components import _ensure_document_viewable
 
     _ensure_document_viewable(document_id, current_user)
-    return get_stumble_summary(document_id)
+    summary = get_stumble_summary(document_id)
+    # 制度指標カタログへの参照（IG1）。定義は
+    # GET /api/indicators/claims-stumble-summary。
+    summary["indicator_id"] = "claims-stumble-summary"
+    return summary

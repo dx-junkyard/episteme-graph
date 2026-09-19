@@ -209,7 +209,6 @@ class TestQuotaNotConsumedWithoutLLM:
             },
         )
         monkeypatch.setattr(learning_mod, "_resolve_course_document_ids", lambda *a, **k: ["doc-1"])
-        monkeypatch.setattr(learning_mod, "record_student_stumble_event", lambda *a, **k: None)
         monkeypatch.setattr(learning_mod, "persist_chat_history", lambda *a, **k: {"user_message_id": "m1"})
 
         ref = (element_explanations.ELEMENT_TYPE_EQUATION, "eq_1")
@@ -301,7 +300,6 @@ class TestHistoryWindowing:
                 "related_chunks": [{"source_title": "論文", "text": "関連文"}],
             },
         )
-        monkeypatch.setattr(learning_mod, "record_student_stumble_event", lambda *a, **k: None)
         monkeypatch.setattr(learning_mod, "persist_chat_history", lambda *a, **k: {"user_message_id": "m1"})
         monkeypatch.setattr(learning_mod, "get_personal_layer", lambda *a, **k: {})
 
@@ -442,15 +440,15 @@ class TestUnderstandingCheckUsageContext:
         monkeypatch.setattr(learning_mod, "get_course_data", lambda user_id, course_id: _course_data())
         monkeypatch.setattr(
             learning_mod,
-            "record_topic_check_pass",
-            lambda *a, **k: {"topic_completed": True, "course_completed": False, "completed_topic_ids": []},
+            "get_course_completion",
+            lambda *a, **k: {"course_completed": False, "completed_topic_ids": []},
         )
 
         captured: dict = {}
 
         def _fake_generate_text(**kwargs):
             captured["feature"] = current_usage_context().feature
-            return '{"passed": true, "feedback": "ok", "model_answer": "ans", "explanation": ""}'
+            return '{"observations": [], "model_answer": "ans", "explanation": ""}'
 
         monkeypatch.setattr(learning_mod, "generate_text", _fake_generate_text)
 
@@ -460,7 +458,11 @@ class TestUnderstandingCheckUsageContext:
         )
 
         assert captured["feature"] == "learning:understanding_check"
-        assert resp.passed is True
+        # 是正 F1: 応答に合否は無い（並置の事実文と現況だけ）。
+        assert resp.advisory is True
+        assert resp.degraded is False
+        assert resp.statements
+        assert resp.topic_completed is False
 
     def test_feature_registered_in_known_features(self):
         from core.llm_usage.schema import KNOWN_FEATURES

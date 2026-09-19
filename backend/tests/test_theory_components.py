@@ -118,7 +118,9 @@ class TestTheoryExtractionPrompt:
 
     def test_prompt_marks_general_knowledge_as_needing_source(self):
         source = _read(CORE)
-        assert "一般的な素粒子物理学" in source
+        # 分野非依存化（2026-09-05）: かつては「一般的な素粒子物理学・場の理論・有効理論の
+        # 知識で補ってください」と分野名を直書きしていた。分野は本文から判断させる。
+        assert "分野で一般的とされる知識" in source
         assert "一般知識で補った項目は needs_source: true" in source
         assert "needs_source: true" in source
         assert "JSONのみを出力してください" in source

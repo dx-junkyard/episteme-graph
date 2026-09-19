@@ -1,25 +1,18 @@
 """Stage 1 — LLM 呼び出しの薄いラッパ。
 
-規約準拠: LLM 呼び出しは必ず core/llm.py の公開 API 経由（ベンダ SDK 直接利用禁止）。
-`system` ロール・`temperature` は使わず、instruction + 入力を user ロール1本に連結する。
-モデルは fast tier 既定（settings.tension_llm_model で上書き可）。
-
-共通実装は core/llm_worker/client.py（5系統で90-95%同一だったクライアントを集約）。
+実体は core/llm_worker/client.py の BaseJSONLLMClient（規約・モデル解決はそちらが正本）。
+設定キーは core/tension/system.py の WorkerSystem 宣言が正本で、このクラスは
+「テストがモックに差し替える名前」を保つためのサブクラス。
 """
 
 from __future__ import annotations
 
-from core.llm_worker.client import BaseJSONLLMClient, parse_json_response
-from core.llm_worker.client import resolve_model as _resolve_model
+from core.llm_worker.client import BaseJSONLLMClient
+from core.tension.system import SYSTEM
 
-_MODEL_SETTING_KEY = "tension_llm_model"
+_MODEL_SETTING_KEY = SYSTEM.model_setting_key
 
-__all__ = ["resolve_model", "parse_json_response", "TensionLLMClient"]
-
-
-def resolve_model() -> str:
-    """TENSION_LLM_MODEL があればそれを、無ければ fast tier のモデルを使う。"""
-    return _resolve_model(_MODEL_SETTING_KEY)
+__all__ = ["TensionLLMClient"]
 
 
 class TensionLLMClient(BaseJSONLLMClient):

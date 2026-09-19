@@ -1,0 +1,78 @@
+{
+  "_comment": "カートリッジの『形の宣言』（concept_registry_design.md §8 / P3-7）。人間が書く宣言で、A層（src/episteme_graph/agents/）はこのファイルを読まない。covers / does_not_cover は自然言語の主題語（照合は core/cartridge_shape.py が語境界付きで行う）。expects.* は core/schema.py の語彙のみ。",
+  "covers": [
+    "flavor physics",
+    "semileptonic B decay",
+    "heavy quark effective theory",
+    "HQET",
+    "form factor",
+    "Vcb",
+    "lepton flavor universality",
+    "operator product expansion",
+    "QCD sum rules",
+    "quark-hadron duality",
+    "lattice QCD",
+    "hadron spectroscopy",
+    "effective field theory",
+    "Wilson coefficient",
+    "branching ratio",
+    "zero-recoil limit",
+    "heavy quark expansion",
+    "dispersion relation",
+    "CKM matrix element"
+  ],
+  "does_not_cover": [
+    "cosmology",
+    "large-scale structure",
+    "galaxy formation",
+    "stellar evolution",
+    "condensed matter",
+    "climate modeling",
+    "molecular biology",
+    "accelerator hardware design"
+  ],
+  "expects": {
+    "entry_types": [
+      "theory",
+      "concept",
+      "observable",
+      "quantity",
+      "method",
+      "assumption",
+      "process"
+    ],
+    "component_types": [
+      "DomainTheoryComponent",
+      "DomainConceptComponent",
+      "DomainMethodComponent",
+      "DomainAssumptionComponent",
+      "DomainObservableComponent",
+      "PaperClaimComponent",
+      "PaperRelationComponent",
+      "PaperCorrectionComponent",
+      "PaperUncertaintyComponent",
+      "operator",
+      "theory",
+      "concept"
+    ],
+    "claim_types": [
+      "definition",
+      "assumption",
+      "approximation",
+      "equation_relation",
+      "equation_definition",
+      "equation_transformation",
+      "equation_approximation",
+      "equation_constraint",
+      "observable_definition",
+      "correction",
+      "uncertainty",
+      "derivation_step",
+      "derivation_result",
+      "main_result",
+      "comparison",
+      "limitation"
+    ]
+  },
+  "atlas_domain_key": "particle_physics"
+}

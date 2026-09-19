@@ -385,11 +385,17 @@ class TestExplicitDeleteReplacesLostCascade:
     """
 
     def test_delete_material_cleans_up_course_and_document_permissions(self):
+        """知識オブジェクト層 §8.1（KO9）以降、delete_material は DB 削除本体を
+        ``_purge_document`` に委譲する。object_group_permissions の掃除（course 側 +
+        document 側）はそこで行われるので、委譲していることと委譲先の掃除を固定する。"""
         src = ADMIN_PY.read_text(encoding="utf-8")
         body = src.split("def delete_material")[1].split("\n@router")[0]
-        assert body.count("DELETE FROM object_group_permissions") >= 2
-        assert "object_type = 'course'" in body
-        assert "object_type = 'document'" in body
+        assert "_purge_document(" in body
+        deletion_src = (BACKEND_DIR / "core" / "versioning" / "deletion.py").read_text(encoding="utf-8")
+        purge = deletion_src.split("def _purge_document")[1].split("\ndef ")[0]
+        assert purge.count("DELETE FROM object_group_permissions") >= 2
+        assert "object_type = 'course'" in purge
+        assert "object_type = 'document'" in purge
 
     def test_delete_course_endpoint_cleans_up_permissions(self):
         src = ADMIN_PY.read_text(encoding="utf-8")

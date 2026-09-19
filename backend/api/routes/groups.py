@@ -28,7 +28,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text as sa_text
 
-from dependencies import _get_current_user
+from dependencies import ROLE_SYSTEM_ADMIN, _get_current_user
 from schemas import (
     GroupCreateRequest,
     GroupDetailOut,
@@ -186,7 +186,12 @@ def get_group_detail(
     group_id: str,
     current_user: dict = Depends(_get_current_user),
 ) -> GroupDetailOut:
-    """グループ詳細（メンバーリスト付き）を返す。メンバーのみアクセス可能。"""
+    """グループ詳細（メンバーリスト付き）を返す。メンバーのみアクセス可能。
+
+    メールアドレス（是正 B4①）: 連絡先はグループ運営に必要な者だけに返す。
+    グループ admin と SYSTEM_ADMIN には返し、一般メンバーには**返さない**
+    （表示名・ロール・参加日のみ）。UI の非表示は開示制御の根拠にしない。
+    """
     session = _pg_session()
     try:
         my_role = _require_member(session, group_id, current_user["id"])
@@ -214,11 +219,12 @@ def get_group_detail(
     finally:
         session.close()
 
+    show_email = my_role == "admin" or current_user.get("role") == ROLE_SYSTEM_ADMIN
     members = [
         GroupMemberOut(
             user_id=str(mr[0]),
             username=mr[1] or "",
-            email=mr[2] or "",
+            email=(mr[2] or "") if show_email else "",
             role=mr[3],
             joined_at=mr[4].isoformat() if mr[4] else "",
         )

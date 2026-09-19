@@ -11,7 +11,6 @@ core に属するため api/services.py に依存しない（永続化はここ�
 
 from __future__ import annotations
 
-import datetime
 import json
 import logging
 import threading
@@ -21,7 +20,7 @@ from sqlalchemy import text as sa_text
 
 from core.config import get_settings
 from core.llm_usage.context import bind_usage_context
-from core.llm_worker.cost_gate import CostGate
+from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session as _pg_session
 from core.reconstruction.derivation_source import collect_derivation_probes
 from core.reconstruction.input_builder import build_user_content
@@ -35,29 +34,29 @@ from core.reconstruction.schema import (
     SOURCE_BACKED,
     ItemAuthoringResult,
 )
+from core.reconstruction.system import SYSTEM
 
 # derivation_source が生成する非LLM モード（CostGate/LLM 日次上限の対象外。symbol と同じ扱い）。
 _DERIVATION_ELICIT_MODES = ("regime", "next_step")
 
 logger = logging.getLogger(__name__)
 
-# 実装は core/llm_worker/cost_gate.py の CostGate に共通化済み（daily のみ・session
-# 上限は使わない）。daily_call_counts は同じ dict オブジェクトへのエイリアス。
-_cost_gate = CostGate()
+# 実装は core/llm_worker/cost_gate.py の CostGate（core/reconstruction/system.py の
+# WorkerSystem が1個だけ持つ。daily のみ・session 上限は使わない）。
+# daily_call_counts は同じ dict オブジェクトへのエイリアス。
+_cost_gate: CostGate = SYSTEM.gate
 _daily_call_counts: dict[str, int] = _cost_gate.daily_counts
 
-
-def _today() -> str:
-    return datetime.date.today().isoformat()
+_today = today_str
 
 
 def _check_and_count_llm_call() -> bool:
-    """1 日あたりのオーサリング LLM コール上限内なら True。上限超過なら False。"""
-    per_day = int(getattr(get_settings(), "recon_max_calls_per_day", 10))
-    ok = _cost_gate.check_and_count(daily_limit=per_day, daily_key=_today())
-    if not ok:
-        logger.info("recon item authoring skipped: per-day cap reached")
-    return ok
+    """1 日あたりのオーサリング LLM コール上限内なら True。上限超過なら False。
+
+    上限値の正本は core/reconstruction/system.py の CostSpec
+    （recon_max_calls_per_day を settings から読む）。
+    """
+    return SYSTEM.check_and_count(gate=_cost_gate, settings=get_settings())
 
 
 def _fetch_authorable_claims(session, document_id: str, limit: int) -> list[dict]:
@@ -71,10 +70,10 @@ def _fetch_authorable_claims(session, document_id: str, limit: int) -> list[dict
     approved = list(APPROVED_REVIEW_STATUSES)
     rows = session.execute(
         sa_text("""
-            SELECT c.id::text, c.document_id, c.claim_type, c.text, c.normalized_text,
+            SELECT c.id::text, c.document_id::text, c.claim_type, c.text, c.normalized_text,
                    c.concepts, c.equation, c.source_scope, c.evidence_text,
                    c.support_status, c.review_status
-            FROM theory_claims c
+            FROM theory_claims_live c
             WHERE c.document_id = :doc
               AND c.support_status = :backed
               AND c.review_status = ANY(:approved)
@@ -131,7 +130,7 @@ def _persist_item(session, claim: dict, result: ItemAuthoringResult) -> str | No
             INSERT INTO reconstruction_items
             (claim_id, document_id, elicit_mode, prompt, response_space, expected,
              claim_fields_used, author, author_confidence, status)
-            VALUES (CAST(:claim_id AS uuid), :document_id, :elicit_mode, :prompt,
+            VALUES (CAST(:claim_id AS uuid), CAST(NULLIF(:document_id, '') AS uuid), :elicit_mode, :prompt,
                     CAST(:response_space AS jsonb), CAST(:expected AS jsonb),
                     CAST(:claim_fields_used AS jsonb), 'llm', :author_confidence, 'auto')
             RETURNING id::text
@@ -161,7 +160,7 @@ def _persist_derivation_item(session, probe: dict) -> str | None:
             INSERT INTO reconstruction_items
             (claim_id, document_id, elicit_mode, prompt, response_space, expected,
              claim_fields_used, author, author_confidence, status)
-            VALUES (CAST(:claim_id AS uuid), :document_id, :elicit_mode, :prompt,
+            VALUES (CAST(:claim_id AS uuid), CAST(NULLIF(:document_id, '') AS uuid), :elicit_mode, :prompt,
                     CAST(:response_space AS jsonb), CAST(:expected AS jsonb),
                     CAST(:claim_fields_used AS jsonb), 'system', :author_confidence, 'auto')
             RETURNING id::text
@@ -323,16 +322,11 @@ def maybe_schedule_item_authoring(document_id: str) -> bool:
     """バックグラウンドスレッドでオーサリングを起動する（best-effort・非同期）。"""
     if not document_id:
         return False
-    try:
-        threading.Thread(
-            target=run_item_authoring_for_document,
-            args=(document_id,),
-            daemon=True,
-        ).start()
-        return True
-    except Exception as exc:
-        logger.warning("maybe_schedule_item_authoring failed: %s", exc)
-        return False
+    return SYSTEM.spawn(
+        run_item_authoring_for_document,
+        thread_factory=threading.Thread,
+        args=(document_id,),
+    )
 
 
 def _record_item_event(

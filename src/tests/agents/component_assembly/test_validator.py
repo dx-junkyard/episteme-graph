@@ -555,21 +555,54 @@ def test_component_with_two_named_concepts_has_no_insufficient_warning():
     assert not any(i.rule_id == "component_insufficient_concepts" for i in issues)
 
 
-def test_derivation_component_without_math_concept_warns():
+def test_derivation_component_without_math_concept_or_equation_warns():
+    # (b) 式も手続的概念も無い導出 component は warning に残る（P0-3 後も規則は維持）。
     component = _component(
         support_role="derivation_core",
         operation="eliminate_bias",
         concepts=["Galaxy survey", "Gravity model"],
+        inputs=[{"text": "heavy quark limit", "claim_ids": ["claim:b1:s1"]}],
+        outputs=[{"text": "sum rule"}],
+        evidence_refs={
+            "claim_ids": ["claim:b1:s1"],
+            "equation_ids": [],
+            "thesis_refs": ["central_thesis"],
+            "dsl_refs": {"node_ids": ["n1"], "edge_ids": ["e1"]},
+        },
+        internal_flow=[],
     )
     issues = VALIDATOR.validate(_result(components=[component]))
     assert any(i.rule_id == "derivation_component_missing_math_concept" for i in issues)
 
 
-def test_derivation_component_with_symbol_concept_passes():
+def test_derivation_component_with_equation_link_passes():
+    # (a) P0-3: 記号が concepts から外れた後、導出 component の数学性は式リンクが
+    # 担う。記号ジャンクを concepts に持たなくても warning は出ない。
     component = _component(
         support_role="derivation_core",
         operation="eliminate_bias",
-        concepts=["b_1", "consistency relation"],
+        concepts=["Galaxy survey", "Consistency relation"],
+        linked_equation_ids=["eq_1"],
+    )
+    issues = VALIDATOR.validate(_result(components=[component]))
+    assert not any(i.rule_id == "derivation_component_missing_math_concept" for i in issues)
+
+
+def test_derivation_component_with_procedural_concept_passes():
+    # 式が無くても、概念層が操作を名指していれば合格（もう一方の根拠）。
+    component = _component(
+        support_role="derivation_core",
+        operation="eliminate_bias",
+        concepts=["Galaxy survey", "elimination"],
+        inputs=[{"text": "heavy quark limit", "claim_ids": ["claim:b1:s1"]}],
+        outputs=[{"text": "sum rule"}],
+        evidence_refs={
+            "claim_ids": ["claim:b1:s1"],
+            "equation_ids": [],
+            "thesis_refs": ["central_thesis"],
+            "dsl_refs": {"node_ids": ["n1"], "edge_ids": ["e1"]},
+        },
+        internal_flow=[],
     )
     issues = VALIDATOR.validate(_result(components=[component]))
     assert not any(i.rule_id == "derivation_component_missing_math_concept" for i in issues)

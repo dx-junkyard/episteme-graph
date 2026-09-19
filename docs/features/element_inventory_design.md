@@ -1,8 +1,9 @@
 # 要素インベントリ（Element Inventory / 検出要素の一覧）設計
 
-> **状態: 実装着手（2026-07-17。§13 の未決 1〜3 はオーナー決定済み: 1=クライアントサイド
-> フィルタで確定 / 2=図・画像ボタンと並置で確定 / 3=原稿スタジオ側にも入口を置く（v1 スコープ入り、
-> §9-3））**。本書が本機能の設計の正本。
+> **状態: 実装済み（正本・凍結）**（2026-07-17 起票・同日実装、コミット `15a1319`。
+> §13 の未決 1〜3 はオーナー決定済み: 1=クライアントサイドフィルタで確定 /
+> 2=図・画像ボタンと並置で確定 / 3=原稿スタジオ側にも入口を置く（v1 スコープ入り、§9-3）。
+> §15 実装記録を参照）。本書が本機能の設計の正本。
 > 親ドキュメントは `element_deliberation_workspace_design.md`（W層）。本機能は W層の
 > **教材単位の統合入口**であり、新しい層ではない（W層の導線拡張 + 読み取り専用 API 1本）。
 
@@ -264,3 +265,18 @@ SELECT instance_element_type, instance_element_id, status, COUNT(*) FROM element
   `test_deliberation_ui_static.py` 拡張。I-1 マージ後に着手。
 
 （I-1/I-2 は小さいため1 issue・1 PR に束ねても良い。分けるなら API 契約＝§4/§5 を先に固定する。）
+
+---
+
+## §15 実装記録（2026-07-17 実装 / 2026-09-03 コード照合）
+
+- **API**: `GET /api/admin/deliberation/documents/{document_id}/elements`
+  （`backend/api/routes/deliberation.py`）。`_require_teacher` +
+  `services.resolve_document_access` による document 単位の閲覧ゲート1回のみで、
+  不在・非閲覧はともに 404（403 を使わない fail-closed）。クエリパラメータは無い
+  （フィルタは §6 のとおり全面クライアントサイド）。
+- **組み立て**: `backend/core/deliberation/inventory.py`（`build_inventory` / `build`。
+  非LLM・DB 書き込みゼロ）。
+- **UI**: 教材管理の行 `⋯` メニュー「検出要素」（UI アンカー `materials.row-inventory`、
+  `admin.js`）。一覧から W層「深く検討」（`deliberation.js`）へ渡す。
+- migration は無い（既存テーブルの読みのみ）。

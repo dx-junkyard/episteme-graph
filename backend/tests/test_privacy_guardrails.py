@@ -106,4 +106,6 @@ class TestFourSitesDelegateToCommonImplementation:
         assert "_TENSION_K_ANONYMITY" not in src
         assert "_ANCHOR_K_ANONYMITY" not in src
         body = src.split("def aggregate_interest_dashboard")[1].split("\ndef ")[0]
-        assert body.count("learners < K_ANONYMITY") == 2
+        # tension / anchor ヒートマップ + hotspots（2026-09-05 C3 是正で追加）の3箇所。
+        # いずれも core/privacy.py の K_ANONYMITY を比較に使う（リテラル再定義なし）。
+        assert body.count("learners < K_ANONYMITY") == 3

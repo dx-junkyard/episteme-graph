@@ -92,8 +92,9 @@ class TestCues:
 
     def test_four_entrypoints_wired(self):
         app = _read(APP_JS)
-        # 導線1・2: トピック完了直後 (章末判定を含む)
-        assert "showAtlasCueAfterAdvance(completedTopic, next)" in app
+        # 導線1・2: トピック完了直後 (章末判定を含む)。
+        # 是正 F1 以降、確認問題の前進はすべて本人の明示操作（data-advance 経路）なので
+        # cue の呼び出し口もそこ1箇所になる（AI 応答の合否では前進しない）。
         assert "showAtlasCueAfterAdvance(directCompleted, directNext)" in app
         # 導線2: 講義の章末 (完了バナー末尾)
         assert '"chapter_end"' in app

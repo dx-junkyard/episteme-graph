@@ -32,6 +32,16 @@
   // RR1/RR2: 「次へ」の意味を画面上で明示する（黙って承認扱いにしない）。
   var NOTICE_NEXT_MEANING =
     "「次へ」を押すと、表示されている内容を確認したものとして記録します。個別に直したいものは各行の[却下][再検討]で変更できます。";
+  // 改訂原則1（vision.md §4）: 確定は「後から再構成・異議申立できる手続」にのみ与える。
+  // 「次へ」の意味（NOTICE_NEXT_MEANING）に続けて、確定を覆せる経路を画面に書く。
+  var NOTICE_REOPEN =
+    "確認後も、教材管理の「位置づけ（分野マップ）」から個別に再検討・却下へ戻せます。";
+  // 記録した結果、提示されていたものと確認したものが一致したかの事実文（数値は出さない）。
+  var NOTICE_ACCEPT_MATCHED = "表示されていた配置と確認した配置は一致しています";
+  var NOTICE_ACCEPT_MISMATCH =
+    "表示と確認した配置に差がありました（画面を再読み込みしてください）";
+  var EVIDENCE_SUMMARY = "根拠を見る";
+  var EVIDENCE_EMPTY = "この配置には論文からの引用が残っていません。";
   var LANDSCAPE_EMPTY =
     "この論文の分野マップ上の位置づけはまだありません。このまま公開できます。";
   var LANDSCAPE_INTRO =
@@ -57,7 +67,13 @@
     busy: false,
     landscape: null,
     mapSaved: false,
-    published: false
+    published: false,
+    // 是正 F7（2026-09-10・六つのレンズ §4 第1波 #5 / 02_teacher.md 提案7）:
+    // 「根拠（逐語引用）の折りたたみを実際に開いた行」を DOM の toggle イベントから
+    // だけ集める。開いた/開かなかったの2値のみで、滞在時間・視線などは測らない
+    // （原則5: 監視しない）。値は来歴申告としてサーバへ渡し、サーバは検証しない
+    // （DC4）。「根拠を描くコードがある」ことを「根拠が出ていた」と申告しない。
+    evidenceExpanded: {}
   };
 
   function esc(text) {
@@ -110,6 +126,8 @@
     state.landscape = null;
     state.mapSaved = false;
     state.published = false;
+    // 是正 F7: 開き直しは前回の「開いた」を引き継がない（この確定の来歴だけを申告する）。
+    state.evidenceExpanded = {};
 
     close();
     var overlay = document.createElement("div");
@@ -298,6 +316,59 @@
     );
   }
 
+  // 根拠（逐語引用）の折りたたみ。引用が無い行でも「根拠を見る」は出し、無いことを
+  // 事実文で書く（無い行だけ静かに欠けると「見た/見ていない」が再構成できない）。
+  function evidenceHtml(placement) {
+    var items = (placement && placement.evidence) || [];
+    var inner = "";
+    for (var i = 0; i < items.length; i++) {
+      var quote = (items[i] && items[i].quote) || "";
+      if (!quote) continue;
+      inner +=
+        '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-top:3px">' +
+        "&quot;" +
+        esc(quote) +
+        "&quot;</div>";
+    }
+    if (!inner) {
+      inner =
+        '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:3px">' +
+        esc(EVIDENCE_EMPTY) +
+        "</div>";
+    }
+    return (
+      '<details class="release-review-evidence" data-ui-anchor="release-review.evidence"' +
+      ' data-placement-id="' +
+      esc((placement && placement.id) || "") +
+      '" style="margin-top:3px">' +
+      '<summary style="font-size:11.5px;color:var(--color-text-tertiary);cursor:pointer">' +
+      esc(EVIDENCE_SUMMARY) +
+      "</summary>" +
+      inner +
+      "</details>"
+    );
+  }
+
+  // ノード版間対応（K-6 / atlas_node_correspondence_design.md §7）のチップ。
+  // node_status が無い（旧サーバ・導出不能）ときは描かない fail-soft。
+  // current は無表示。件数・一致率は出さない（NC6）。
+  var NODE_STATUS_LABELS = {
+    migrated: "前の版から対応づけ",
+    unmapped: "現行版に対応する場所なし",
+  };
+
+  function nodeStatusChipHtml(placement) {
+    var label = NODE_STATUS_LABELS[(placement && placement.node_status) || ""];
+    if (!label) return "";
+    return (
+      '<span class="release-review-node-status" data-node-status="' +
+      esc((placement && placement.node_status) || "") +
+      '" style="font-size:11px;color:var(--color-text-secondary)">' +
+      esc(label) +
+      "</span>"
+    );
+  }
+
   function placementRowHtml(placement) {
     var meta = [];
     if (placement && placement.perspective_label) meta.push(placement.perspective_label);
@@ -319,6 +390,7 @@
       '<span style="font-size:11px;color:var(--color-text-secondary)">' +
       esc(statusLabel(placement)) +
       "</span>" +
+      nodeStatusChipHtml(placement) +
       "</div>";
     if (placement && placement.reason) {
       html +=
@@ -326,6 +398,10 @@
         esc(placement.reason) +
         "</div>";
     }
+    // 改訂原則1（確定文脈）: 何を見て判断したかを再構成できるように、判断の材料
+    // （論文からの逐語引用）を各行に畳んで置く。既定は閉じたまま（RR1: 画面を
+    // 重くしない）で、開けば原文がそのまま出る。
+    html += evidenceHtml(placement);
     // RR4: 個別の修正手段（却下・再検討）を常に出す。
     if (placement && placement.status !== "rejected") {
       html += '<div style="margin-top:4px;display:flex;gap:6px">';
@@ -394,7 +470,7 @@
 
     var facts = el("release-review-facts");
     if (facts) {
-      var parts = [NOTICE_NEXT_MEANING];
+      var parts = [NOTICE_NEXT_MEANING, NOTICE_REOPEN];
       var pending = Number((data && data.pending_count) || 0);
       if (pending) parts.push("未確認 " + pending + "件");
       var hidden = Number((data && data.hidden_document_count) || 0);
@@ -411,6 +487,17 @@
         if (versions.length) parts.push("使用した骨格: " + versions.join(" ・ "));
       }
       facts.textContent = parts.join(" ・ ");
+    }
+
+    // 是正 F7: 根拠を開いた事実だけを DOM の toggle イベントから拾う（開いた行の
+    // id を記録するだけ。閉じた操作・回数・滞在時間は記録しない）。
+    var evidenceDetails = node.querySelectorAll("details.release-review-evidence");
+    for (var e = 0; e < evidenceDetails.length; e++) {
+      evidenceDetails[e].addEventListener("toggle", function () {
+        if (!this.open) return;
+        var placementId = this.getAttribute("data-placement-id");
+        if (placementId) state.evidenceExpanded[placementId] = true;
+      });
     }
 
     var rowButtons = node.querySelectorAll(".release-review-row-btn");
@@ -469,6 +556,31 @@
       .catch(function () {});
   }
 
+  // 是正 F7: この確定までに根拠の折りたたみを開いた行の id（DOM の toggle イベント
+  // 由来の事実。開いていなければ空配列で、それがそのまま監査に残る）。
+  function expandedEvidencePlacementIds() {
+    var ids = [];
+    var map = state.evidenceExpanded || {};
+    for (var key in map) {
+      if (Object.prototype.hasOwnProperty.call(map, key) && map[key]) ids.push(key);
+    }
+    return ids;
+  }
+
+  // いま画面に「未確認（AI推定）」として描かれている配置の id（来歴申告用）。
+  function pendingPlacementIds() {
+    var ids = [];
+    var documents = (state.landscape && state.landscape.documents) || [];
+    for (var i = 0; i < documents.length; i++) {
+      var placements = (documents[i] && documents[i].placements) || [];
+      for (var j = 0; j < placements.length; j++) {
+        var p = placements[j] || {};
+        if (p.status === "inferred" && p.id) ids.push(p.id);
+      }
+    }
+    return ids;
+  }
+
   function acceptPlacements(btn) {
     if (state.busy) return;
     var pending = Number((state.landscape && state.landscape.pending_count) || 0);
@@ -483,7 +595,17 @@
       "/admin/landscape/courses/" +
         encodeURIComponent(state.courseId) +
         "/placements/accept",
-      { method: "POST" }
+      {
+        method: "POST",
+        // 来歴申告（サーバ側の提示集合の正本はサーバが取り直す）。是正 F7:
+        // 「根拠を描いている」という固定の申告はやめ、
+        // 実際に折りたたみを開いた行の id だけを送る（1件も開いていなければ空配列
+        // ＝「開かずに確定した」が正直に残る）。確定は止めない（RR7）。
+        body: JSON.stringify({
+          presented_placement_ids: pendingPlacementIds(),
+          evidence_expanded_placement_ids: expandedEvidencePlacementIds()
+        })
+      }
     )
       .then(function (res) {
         if (!res.ok) {
@@ -493,9 +615,21 @@
         }
         return res.json();
       })
-      .then(function () {
+      .then(function (data) {
         state.busy = false;
+        // RR7: 記録の結果に関わらず先へ進める。事実文は次ステップの描画
+        // （renderStep が notice を空にする）の後に出す。
         advance();
+        // 提示と確認の一致を事実文で残す（DC2: 一致を偽らない）。
+        var ctx = data && data.decision_context;
+        if (ctx) {
+          setNotice(
+            ctx.presented_matches_applied
+              ? NOTICE_ACCEPT_MATCHED
+              : NOTICE_ACCEPT_MISMATCH,
+            !ctx.presented_matches_applied
+          );
+        }
       })
       .catch(function (err) {
         // RR7: 記録に失敗しても公開は止めない（未確認のまま配信される）。

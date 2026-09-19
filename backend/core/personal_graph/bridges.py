@@ -85,7 +85,7 @@ def collect_bridge_entries(traces: list[dict]) -> list[tuple[str, str, str]]:
         user_id = str(trace.get("user_id") or "")
         if not user_id:
             continue
-        payload = trace.get("payload") or {}
+        payload = _payload_dict(trace.get("payload"))
         refs = payload.get("connected_refs")
         if not isinstance(refs, dict):
             # connected_refs を持たない connected 行（本機能導入前のデータ等）は
@@ -174,7 +174,7 @@ def _fetch_component_names(component_ids: list[str]) -> dict[str, str]:
         try:
             rows = session.execute(
                 sa_text(
-                    f"SELECT id::text, name FROM theory_components WHERE id IN ({placeholders})"
+                    f"SELECT id::text, name FROM theory_components_live WHERE id IN ({placeholders})"
                 ),
                 {f"id_{i}": component_id for i, component_id in enumerate(ids)},
             ).fetchall()

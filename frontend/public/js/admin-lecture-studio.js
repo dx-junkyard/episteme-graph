@@ -59,7 +59,6 @@
     evidenceView: "pdf",
     displayView: "preview",
     courseDraftView: "preview",
-    syncSpoken: true,
     pdfObjectUrl: null,
     pdfUrl: null,
     settings: {
@@ -1554,23 +1553,18 @@
       lsState.displayView = btn.getAttribute("data-ls-display") || "preview";
       lsRenderWorkspace();
     });
-    document.getElementById("ls-sync-spoken").addEventListener("change", function () {
-      lsState.syncSpoken = this.checked;
-      if (this.checked) {
-        document.getElementById("ls-spoken-text").value = document.getElementById("ls-display-text").value;
-      }
-      lsRenderWorkspace();
-    });
     document.getElementById("ls-display-text").addEventListener("input", function () {
       var chunk = lsGetSelectedChunk();
       if (chunk) {
         chunk.display_text = this.value;
         chunk.text = this.value;
       }
-      if (lsState.syncSpoken) {
-        document.getElementById("ls-spoken-text").value = this.value;
-        if (chunk) chunk.spoken_text = this.value;
-      }
+      // チャンクの読み上げ文は表示テキストに追随する。かつては #ls-sync-spoken で
+      // 切り替えられる想定だったが、そのチェックボックスは到達不能（表示条件の
+      // view === "audio" に入る経路が無い）で既定 ON のままだったため、2026-09-05 に
+      // 撤去して従来の実挙動をそのまま定数化した。
+      document.getElementById("ls-spoken-text").value = this.value;
+      if (chunk) chunk.spoken_text = this.value;
       lsRenderDisplayPreview();
     });
     document.getElementById("ls-spoken-text").addEventListener("input", function () {
@@ -1686,7 +1680,6 @@
     document.getElementById("ls-theory-panel").hidden = false;
     document.getElementById("ls-claims-panel").hidden = true;
     document.getElementById("ls-graph-panel").hidden = true;
-    document.getElementById("ls-sync-row").hidden = true;
     document.getElementById("ls-display-preview").hidden = true;
     document.getElementById("ls-pdf-view").hidden = true;
     if (formulasEl) formulasEl.hidden = true;
@@ -1753,7 +1746,6 @@
     document.getElementById("ls-theory-panel").hidden = true;
     document.getElementById("ls-claims-panel").hidden = true;
     document.getElementById("ls-graph-panel").hidden = true;
-    document.getElementById("ls-sync-row").hidden = true;
     document.getElementById("ls-pdf-view").hidden = true;
     document.getElementById("ls-source-text").hidden = false;
     document.getElementById("ls-display-preview").hidden = false;
@@ -2577,12 +2569,23 @@
       } else if (lsReconReviewSortOrder === "load") {
         loadLabel = ' · 影響度を導出できない候補';
       }
-      var actions = withActions
-        ? '<div class="ls-stumble-item-actions">' +
-            '<button type="button" class="ls-stumble-mini" data-recon-item-status="retired" data-recon-item-id="' + escHtml(it.item_id) + '">配信停止（retire）</button>' +
-            '<button type="button" class="ls-stumble-mini" data-recon-item-status="confirmed" data-recon-item-id="' + escHtml(it.item_id) + '">追認（confirm）</button>' +
-          '</div>'
-        : '';
+      // status 遷移ボタン。auto（未処理）は [配信停止][追認]、処理済み
+      // （confirmed / retired / flagged）は [自動配信に戻す] を出す。API は
+      // PATCH の status で auto への遷移も受けるが、UI に戻し口が無く「一度
+      // retire したら二度と戻せない」ように見えていた（2026-09-05 是正）。
+      // 行は削除されず状態遷移だけで動く（P4）ので、戻す操作も同じ経路でよい。
+      var actions = "";
+      if (withActions && it.status === "auto") {
+        actions = '<div class="ls-stumble-item-actions">' +
+          '<button type="button" class="ls-stumble-mini" data-recon-item-status="retired" data-recon-item-id="' + escHtml(it.item_id) + '">配信停止（retire）</button>' +
+          '<button type="button" class="ls-stumble-mini" data-recon-item-status="confirmed" data-recon-item-id="' + escHtml(it.item_id) + '">追認（confirm）</button>' +
+          '</div>';
+      } else if (withActions) {
+        actions = '<div class="ls-stumble-item-actions">' +
+          '<button type="button" class="ls-stumble-mini" data-recon-item-status="auto" data-recon-item-id="' + escHtml(it.item_id) + '"' +
+            ' data-ui-anchor="lecture-studio.recon-item-restore">自動配信に戻す（auto）</button>' +
+          '</div>';
+      }
       return '<div class="ls-stumble-item" data-recon-item="' + escHtml(it.item_id) + '">' +
         '<div class="ls-stumble-item-tier">' + escHtml(it.rank_tier || "") + ' · ' + escHtml(it.elicit_mode || "") +
           (it.status ? ' · ' + escHtml(it.status) : '') + loadLabel + '</div>' +
@@ -2603,8 +2606,10 @@
       '</div>';
     html += '<div class="ls-recon-review-section">' +
       '<h4 class="ls-recon-review-section-title">その他（情報不足・処理済み）</h4>' +
+      // 情報不足の auto は従来どおり [配信停止][追認]、処理済みは [自動配信に戻す]。
+      // どちらも操作可（履歴表示のみの行き止まりにしない）。
       (others.length
-        ? others.map(function (it) { return itemCardHtml(it, it.status === "auto"); }).join("")
+        ? others.map(function (it) { return itemCardHtml(it, true); }).join("")
         : '<div class="ls-course-muted">該当する item はありません。</div>') +
       '</div>';
     list.innerHTML = html;
@@ -3039,6 +3044,20 @@
     equation_quote: "数式引用",
     figure: "図",
   };
+  // 引用の意図（CiTO の最小語彙。knowledge_transfer_design.md §8 / X-7）。
+  // 正本は backend/core/label_vocab.py::CITATION_INTENT_LABELS（逐語ミラー）。
+  // NULL（未選択）= 記録なしなので、この表に「記録しない」は入れない。
+  var LS_CITATION_INTENT_LABELS = {
+    uses_as_evidence: "根拠として使う",
+    extends: "発展させる",
+    qualifies: "条件を付ける",
+    contrasts_with: "対比する",
+    cites_for_background: "背景として引く",
+  };
+  //: select の並び順（Object.keys の順序に依存しない明示の順序）。
+  var LS_CITATION_INTENT_ORDER = [
+    "uses_as_evidence", "extends", "qualifies", "contrasts_with", "cites_for_background",
+  ];
   // トピック↔CourseMapping の**照合来歴**（course_content_builder._best_mapping）。
   // CP9（element_context_presentation_redesign.md §3.2）: これは要素の性質ではなく
   // トピックの属性なので、各根拠カードのメタ行には出さず（誤読の原因）、
@@ -4368,6 +4387,10 @@
     spokenEl.disabled = false;
 
     var isStructure = lsState.view === "structure";
+    // 2026-09-05 の調査メモ: isAudio / isCompare は現状どちらも常に false。
+    // lsRenderWorkspace() は冒頭で lsUpdateWorkTabActive() を呼び、そこで
+    // lsNormalizeViewForCurrentMode() が "audio" を "edit" に畳む。"compare" は
+    // どの data-ls-view にも無い。以下の分岐は残置（削除は別途の整理で）。
     var isAudio = lsState.view === "audio";
     var isCompare = lsState.view === "compare";
     var isTheory = lsState.view === "theory";
@@ -4379,8 +4402,6 @@
     document.getElementById("ls-theory-panel").hidden = !isTheory;
     document.getElementById("ls-claims-panel").hidden = !isClaims;
     document.getElementById("ls-graph-panel").hidden = !isGraph;
-    document.getElementById("ls-sync-row").hidden = !isAudio;
-    document.getElementById("ls-sync-spoken").checked = lsState.syncSpoken;
 
     document.getElementById("ls-left-pane").hidden = isStructure || isAudio || isTheory || isClaims || isGraph;
     document.getElementById("ls-right-pane").hidden = isStructure || isTheory || isClaims || isGraph;
@@ -4435,7 +4456,7 @@
       if (slidesEl) slidesEl.hidden = true;
       if (slideToolsRow) slideToolsRow.hidden = false;
       spokenEl.hidden = false;
-      spokenEl.disabled = lsState.syncSpoken;
+      spokenEl.disabled = true;  // 読み上げ文は表示テキストに追随する（同期の切り替えは無い）
     } else {
       document.getElementById("ls-right-title").textContent = lsState.displayView === "formulas" ? "数式一覧" :
         lsState.displayView === "slides" ? "スライド" : "表示テキスト";
@@ -5008,7 +5029,9 @@
     lsBindGraphLayerToolbar(documentId);
     lsBindGraphReadingPathToggle(documentId);
     if (window.DoubtAtlas) {
-      window.DoubtAtlas.bindCounterfactualToolbar(container, { documentId: documentId });
+      // courseId を渡す — 「観測を仮に倒す」は course 単位の observation-targets API を叩く
+      // （未渡しだと URL が /courses//observation-targets になり常に失敗する。2026-09-05 是正）。
+      window.DoubtAtlas.bindCounterfactualToolbar(container, { documentId: documentId, courseId: lsState.courseId || "" });
     }
 
     if (!window.vis || !window.vis.Network) {
@@ -5084,7 +5107,13 @@
   // Return a graph filtered to the currently selected layer. Edges are kept
   // only when both endpoints remain visible.
   function lsGraphForCurrentLayer(graph) {
-    var filter = lsState.graphLayerFilter || "main";
+    return lsGraphFilterByLayer(graph, lsState.graphLayerFilter || "main");
+  }
+
+  // 純粋な層フィルタ（graph_dialogue_review_design.md §6 / GR8: グラフレビュー画面と
+  // 共有するため lsState 非依存に分離。window.LectureStudio.graphView から公開）。
+  function lsGraphFilterByLayer(graph, filter) {
+    filter = filter || "main";
     var nodes = graph.nodes || [];
     var edges = graph.edges || [];
     if (filter === "all") return graph;
@@ -5262,98 +5291,79 @@
     return true;
   }
 
-  function lsInitComponentGraphNetwork(graph, readingPath) {
-    var networkEl = document.getElementById("ls-component-network");
-    if (!networkEl) return;
-    lsActiveComponentGraph = graph;
-    // Issue #452: ordered reading-path overlay (id -> 1-based step).
-    var pathOrder = {};
-    (readingPath || []).forEach(function (id, i) { pathOrder[id] = i + 1; });
+  // vis-network のノード/エッジ仕様とオプションの正本（graph_dialogue_review_design.md
+  // §6 / GR8）。スタジオのグラフパネルとグラフレビュー画面（admin-graph-review.js）の
+  // 両方がここを通る — 描画スタイルを二重実装しない。
+  function lsGraphVisNodeSpec(node, index, layoutPositions, pathOrder) {
+    pathOrder = pathOrder || {};
+    var id = lsGraphNodeId(node) || ("node-" + index);
+    var group = lsGraphNodeGroup(node);
+    var pos = (layoutPositions || {})[id] || { x: 0, y: index * 160 };
+    var backing = String((node && node.source_backing_status) || "").toLowerCase();
+    var visNode = {
+      id: id,
+      label: lsGraphNodeDisplayLabel(node, id),
+      x: pos.x,
+      y: pos.y,
+      group: group,
+      title: lsGraphNodeTooltip(node),
+    };
+    if (lsGraphNodeDashed(node, group) || backing === "review_required") {
+      visNode.shapeProperties = { borderDashes: [6, 5] };
+    }
+    if (backing === "partially_source_backed") {
+      visNode.borderWidth = 1;
+    }
+    if (lsGraphNodeFaded(node, backing)) {
+      visNode.opacity = 0.55;
+    }
+    // Issue #449: thesis-anchor nodes (the goal of the argument) must always be
+    // visually distinguishable. Emphasis comes from the node's own
+    // is_thesis_anchor flag — never from ID string matching — so it works
+    // regardless of any prefix mismatch between artifacts (#443 is separate).
+    if (node && node.is_thesis_anchor) {
+      visNode.label = "★ " + visNode.label;
+      visNode.borderWidth = 4;
+      visNode.borderWidthSelected = 5;
+      visNode.font = { multi: true, color: "#b45309" };
+      visNode.shadow = { enabled: true, color: "rgba(245, 158, 11, 0.45)", size: 16, x: 0, y: 0 };
+    }
+    // Issue #452: number path nodes in reading order and emphasise their border.
+    if (pathOrder[id]) {
+      visNode.label = lsCircledNumber(pathOrder[id]) + " " + visNode.label;
+      if (!(node && node.is_thesis_anchor)) {
+        visNode.borderWidth = Math.max(visNode.borderWidth || 2, 3);
+      }
+    }
+    return visNode;
+  }
 
-    var nodes = graph.nodes || [];
-    var edges = graph.edges || [];
-    var graphEdges = lsGraphDisplayEdges(edges);
-    var layoutPositions = lsGraphLayoutPositions(nodes, graphEdges);
-    var nodeById = {};
-    nodes.forEach(function (node) {
-      var id = lsGraphNodeId(node);
-      if (id) nodeById[id] = node;
-    });
-    // Issue #450: map vis edge id -> edge so edge selection can render its detail.
-    var edgeById = {};
-    graphEdges.forEach(function (edge, index) {
-      edgeById[edge.edge_id || ("edge-" + index)] = edge;
-    });
+  function lsGraphVisEdgeSpec(edge, index, pathOrder) {
+    pathOrder = pathOrder || {};
+    var from = edge.source_component_id || edge.source || edge.from;
+    var to = edge.target_component_id || edge.target || edge.to;
+    var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
+    var visEdge = {
+      id: edge.edge_id || ("edge-" + index),
+      from: from,
+      to: to,
+      label: lsGraphEdgeLabel(relation),
+      arrows: "to",
+      dashes: lsGraphEdgeDashed(edge),
+      width: Math.max(1, Math.min(4, Number(edge.confidence || 0.7) * 4)),
+      color: { color: lsGraphEdgeColor(edge) },
+    };
+    // Issue #452: highlight forward edges that lie on the recommended path.
+    if (pathOrder[from] && pathOrder[to] && pathOrder[to] > pathOrder[from]) {
+      visEdge.color = { color: "#4f46e5", highlight: "#4338ca" };
+      visEdge.width = 4;
+      visEdge.dashes = false;
+    }
+    return visEdge;
+  }
 
-    var visNodes = new window.vis.DataSet(nodes.map(function (node, index) {
-      var id = lsGraphNodeId(node) || ("node-" + index);
-      var group = lsGraphNodeGroup(node);
-      var pos = layoutPositions[id] || { x: 0, y: index * 160 };
-      var backing = String((node && node.source_backing_status) || "").toLowerCase();
-      var visNode = {
-        id: id,
-        label: lsGraphNodeDisplayLabel(node, id),
-        x: pos.x,
-        y: pos.y,
-        group: group,
-        title: lsGraphNodeTooltip(node),
-      };
-      if (lsGraphNodeDashed(node, group) || backing === "review_required") {
-        visNode.shapeProperties = { borderDashes: [6, 5] };
-      }
-      if (backing === "partially_source_backed") {
-        visNode.borderWidth = 1;
-      }
-      if (lsGraphNodeFaded(node, backing)) {
-        visNode.opacity = 0.55;
-      }
-      // Issue #449: thesis-anchor nodes (the goal of the argument) must always be
-      // visually distinguishable. Emphasis comes from the node's own
-      // is_thesis_anchor flag — never from ID string matching — so it works
-      // regardless of any prefix mismatch between artifacts (#443 is separate).
-      if (node && node.is_thesis_anchor) {
-        visNode.label = "★ " + visNode.label;
-        visNode.borderWidth = 4;
-        visNode.borderWidthSelected = 5;
-        visNode.font = { multi: true, color: "#b45309" };
-        visNode.shadow = { enabled: true, color: "rgba(245, 158, 11, 0.45)", size: 16, x: 0, y: 0 };
-      }
-      // Issue #452: number path nodes in reading order and emphasise their border.
-      if (pathOrder[id]) {
-        visNode.label = lsCircledNumber(pathOrder[id]) + " " + visNode.label;
-        if (!(node && node.is_thesis_anchor)) {
-          visNode.borderWidth = Math.max(visNode.borderWidth || 2, 3);
-        }
-      }
-      return visNode;
-    }));
-
-    var visEdges = new window.vis.DataSet(graphEdges.map(function (edge, index) {
-      var from = edge.source_component_id || edge.source || edge.from;
-      var to = edge.target_component_id || edge.target || edge.to;
-      var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
-      var visEdge = {
-        id: edge.edge_id || ("edge-" + index),
-        from: from,
-        to: to,
-        label: lsGraphEdgeLabel(relation),
-        arrows: "to",
-        dashes: lsGraphEdgeDashed(edge),
-        width: Math.max(1, Math.min(4, Number(edge.confidence || 0.7) * 4)),
-        color: { color: lsGraphEdgeColor(edge) },
-      };
-      // Issue #452: highlight forward edges that lie on the recommended path.
-      if (pathOrder[from] && pathOrder[to] && pathOrder[to] > pathOrder[from]) {
-        visEdge.color = { color: "#4f46e5", highlight: "#4338ca" };
-        visEdge.width = 4;
-        visEdge.dashes = false;
-      }
-      return visEdge;
-    }).filter(function (edge) {
-      return edge.from && edge.to;
-    }));
-
-    var network = new window.vis.Network(networkEl, { nodes: visNodes, edges: visEdges }, {
+  function lsGraphNetworkOptions() {
+    return {
       layout: {
         hierarchical: false,
       },
@@ -5379,7 +5389,43 @@
         uncertainty: { color: { background: "#fff7ed", border: "#f97316", highlight: { background: "#ffedd5", border: "#ea580c" } }, shape: "ellipse" },
       },
       interaction: { hover: true, tooltipDelay: 180 },
+    };
+  }
+
+  function lsInitComponentGraphNetwork(graph, readingPath) {
+    var networkEl = document.getElementById("ls-component-network");
+    if (!networkEl) return;
+    lsActiveComponentGraph = graph;
+    // Issue #452: ordered reading-path overlay (id -> 1-based step).
+    var pathOrder = {};
+    (readingPath || []).forEach(function (id, i) { pathOrder[id] = i + 1; });
+
+    var nodes = graph.nodes || [];
+    var edges = graph.edges || [];
+    var graphEdges = lsGraphDisplayEdges(edges);
+    var layoutPositions = lsGraphLayoutPositions(nodes, graphEdges);
+    var nodeById = {};
+    nodes.forEach(function (node) {
+      var id = lsGraphNodeId(node);
+      if (id) nodeById[id] = node;
     });
+    // Issue #450: map vis edge id -> edge so edge selection can render its detail.
+    var edgeById = {};
+    graphEdges.forEach(function (edge, index) {
+      edgeById[edge.edge_id || ("edge-" + index)] = edge;
+    });
+
+    var visNodes = new window.vis.DataSet(nodes.map(function (node, index) {
+      return lsGraphVisNodeSpec(node, index, layoutPositions, pathOrder);
+    }));
+
+    var visEdges = new window.vis.DataSet(graphEdges.map(function (edge, index) {
+      return lsGraphVisEdgeSpec(edge, index, pathOrder);
+    }).filter(function (edge) {
+      return edge.from && edge.to;
+    }));
+
+    var network = new window.vis.Network(networkEl, { nodes: visNodes, edges: visEdges }, lsGraphNetworkOptions());
     lsActiveComponentNetwork = network;
 
     var fitBtn = document.getElementById("ls-component-graph-fit");
@@ -5476,6 +5522,17 @@
     return s.length > limit ? s.slice(0, limit - 1) + "…" : s;
   }
 
+  // claim 本文には数式が $…$ / \(…\) 付きで入る。ElementCard のラベルは
+  // 記号（element_type=symbol）以外は数式レンダリングしない仕様なので、
+  // ラベルに使うときは **区切り記号だけ**を外して TeX ソースを残す
+  // （$P_{\rm L}(k)$ → P_{\rm L}(k)）。ElementCard 側に数式描画を足さない。
+  function lsGraphStripMathDelimiters(text) {
+    return String(text || "")
+      .replace(/\$\$([\s\S]+?)\$\$/g, "$1")
+      .replace(/\\\(([\s\S]+?)\\\)/g, "$1")
+      .replace(/\$([^\$\n]+?)\$/g, "$1");
+  }
+
   // kind: "component" | "equation" | "claim" | "evidence" | "derivation"
   function lsGraphResolveRef(resolver, kind, id) {
     var ref = { id: id, kind: kind, resolved: false, label: id, navNodeId: "", latex: "" };
@@ -5498,12 +5555,12 @@
       var claim = resolver.claimMap[id];
       if (claim) {
         ref.resolved = true;
-        ref.label = lsGraphSnippet(claim.text || claim.normalized_text || id);
+        ref.label = lsGraphSnippet(lsGraphStripMathDelimiters(claim.text || claim.normalized_text || id));
       } else {
         var refClaim = (resolver.refClaims || {})[id];
         if (refClaim) {
           ref.resolved = true;
-          ref.label = lsGraphSnippet(refClaim.text || id);
+          ref.label = lsGraphSnippet(lsGraphStripMathDelimiters(refClaim.text || id));
         }
       }
     } else if (kind === "evidence") {
@@ -5839,17 +5896,42 @@
       reviewNotes: (node.review_reasons || []).map(lsGraphReviewReasonLabel),
       onCenter: lsGraphCenterOnItem
     };
+    // 「深く検討」の対象は実体要素へ解決する（admin-graph-review.js の
+    // deliberationTargetId と同じ規則）。main / equation_detail の graph-native
+    // ノード ID（theory_op_* / eq_op_*）は theory_components の行を持たず、
+    // そのまま渡すとサーバ 422 になるため、代表要素に解決できないノードでは
+    // ボタン自体を出さない。
+    var deliberationTarget = lsGraphDeliberationTargetId(node, nodeId);
     if (window.Deliberation) {
-      opts.deliberateAnchor = "lecture-studio.component-deliberate";
-      opts.onDeliberate = function () {
-        if (!nodeId) return;
-        window.Deliberation.openElement("theory_component", nodeId, {
-          documentId: lsGraphActiveDocumentId(),
-          title: lsGraphDetailHeading(node, nodeId)
-        });
-      };
+      if (deliberationTarget) {
+        opts.deliberateAnchor = "lecture-studio.component-deliberate";
+        opts.onDeliberate = function () {
+          window.Deliberation.openElement("theory_component", deliberationTarget, {
+            documentId: lsGraphActiveDocumentId(),
+            title: lsGraphDetailHeading(node, nodeId)
+          });
+        };
+      }
     }
     return opts;
+  }
+
+  // 「深く検討」が指す実体要素の ID（DB UUID → 代表 component → linked 先頭）。
+  function lsGraphDeliberationTargetId(node, nodeId) {
+    if (!node) return "";
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(nodeId || ""))) {
+      return String(nodeId);
+    }
+    var representative = String(node.representative_component_id || "").trim();
+    if (representative) return representative;
+    var linked = node.linked_component_ids;
+    if (linked && linked.length) {
+      for (var i = 0; i < linked.length; i++) {
+        var candidate = String(linked[i] || "").trim();
+        if (candidate) return candidate;
+      }
+    }
+    return "";
   }
 
   function lsRenderGraphNodeDetail(node, graph) {
@@ -5990,17 +6072,6 @@
     if (/diagnostic|constraint|law|check|diagnosis|検証|制約|診断/.test(haystack)) return "diagnostic";
     if (/conclusion|result|output|claim|incompleteness inference|final|結論|出力|主張|最終/.test(haystack)) return "conclusion";
     return "relation";
-  }
-
-  function lsGraphNodeLevel(node, fallbackIndex) {
-    var group = lsGraphNodeGroup(node);
-    var label = String((node && (node.label || node.name)) || "").toLowerCase();
-    if (/uniform-coordinate|単一粒子/.test(label)) return 0;
-    if (group === "assumption") return 0;
-    if (group === "method" || group === "uncertainty") return 1;
-    if (group === "relation" || group === "diagnostic") return 2;
-    if (group === "conclusion") return 3;
-    return Math.min(3, Math.max(0, Number(fallbackIndex || 0)));
   }
 
   function lsGraphNodeDashed(node, group) {
@@ -6260,16 +6331,26 @@
     return labels[String(status || "").toLowerCase()] || status || "";
   }
 
+  // review_reasons 語彙の日本語表示（正本の語彙は
+  // src/episteme_graph/agents/component_graph/schema.py::REVIEW_REASONS）。
+  // 「未紐付け」系の内部語（atomic claim / evidence / equation）をそのまま出すと、
+  // 解析が何を取れていないかの事実が「結線に失敗した不具合」に読めるため、何が
+  // 特定できていないかを平易に述べる（学習者向けの平易化は
+  // backend/core/discuss/opening.py 側が別に持つ）。未知コードはコードのまま出す
+  // （情報を落とさない）。
   function lsGraphReviewReasonLabel(reason) {
     var labels = {
-      missing_atomic_claim: "atomicなclaim未紐付け",
-      missing_evidence_link: "evidence未紐付け",
-      missing_equation_link: "equation未紐付け",
-      missing_derivation_link: "derivation未紐付け",
+      missing_atomic_claim: "根拠となる最小の主張が未特定",
+      missing_evidence_link: "原文の該当箇所が未特定",
+      missing_equation_link: "関係する式が未特定",
+      missing_derivation_link: "導出の過程が未特定",
       equation_needs_math_review: "数式の確認が必要",
-      edge_not_source_backed: "edgeに出典がない",
-      fallback_or_inferred_node: "fallback / 推論ノード",
-      source_span_missing: "原文spanがない",
+      edge_not_source_backed: "関係の出典が未確認",
+      fallback_or_inferred_node: "解析が推定で補った箇所",
+      source_span_missing: "原文の位置が未特定",
+      generic_operation: "操作の種類が一般的なまま",
+      orphan_detail_node: "主グラフの集約先が未対応",
+      empty_main_node: "集約された式ステップがない",
     };
     return labels[String(reason || "")] || reason || "";
   }
@@ -6348,78 +6429,266 @@
     return Object.keys(byPair).map(function (key) { return byPair[key]; });
   }
 
-  function lsGraphLayoutPositions(nodes, edges) {
-    var nodeById = {};
-    var levels = {};
-    (nodes || []).forEach(function (node, index) {
-      var id = lsGraphNodeId(node) || ("node-" + index);
-      nodeById[id] = node;
-      levels[id] = lsGraphNodeLevel(node, index);
-    });
+  // ---------------------------------------------------------------------------
+  // 層状レイアウト（graph_dialogue_review_design.md GR8 — グラフレビューと共有）
+  //
+  // 旧実装は「ラベルの語彙から初期段を決め、辺で伝播させる段に Math.min(4, …) の
+  // 上限を掛ける」方式だった。上位理論構成のラベルは語彙上ほとんどが relation に
+  // 落ちて全ノードが同じ段から始まり、さらに深さが 4 で頭打ちになるため、数十個の
+  // ノードが一段に横並びになって構造が読めなくなっていた（= 一直線に並ぶ）。
+  //
+  // 現実装は構造（辺）だけから段を決める:
+  //   1. 弱い辺（UNCERTAIN_DUE_TO / RELATED_TO）は段の決定に使わず、並び順にだけ使う
+  //   2. 後退辺を落として DAG にし、最長路で段を決める（深さに上限を置かない）
+  //   3. 段内の並びはバリセンタ法で辺の交差を減らす（初期順は display_order / 出現順）
+  //   4. 連結成分ごとにまとめ、成分は横に並べる（別々の導出チェーンを重ねない）
+  //   5. 辺を持たないノードは格子状にまとめる（横一列に伸ばさない）
+  // 特定分野・特定論文の語彙は使わない（domain-independent）。
+  // ---------------------------------------------------------------------------
+  var LS_GRAPH_LAYOUT = {
+    rowGap: 190,       // 段の間隔（ノード高 + 辺ラベルの余白）
+    nodeGap: 48,       // 同じ段のノード間の余白
+    componentGap: 150, // 連結成分の間の余白
+    charWidth: 8.4,    // ラベル1文字あたりの概算幅（幅の見積りにだけ使う）
+    minWidth: 120,
+    maxWidth: 260,
+    sweeps: 4,         // バリセンタ法の往復回数
+  };
 
-    for (var pass = 0; pass < 12; pass += 1) {
-      var changed = false;
-      (edges || []).forEach(function (edge) {
-        var relation = String(edge.relation || edge.edge_type || edge.type || "").toUpperCase();
-        if (relation === "UNCERTAIN_DUE_TO" || relation === "RELATED_TO") return;
-        var source = edge.source_component_id || edge.source || edge.from;
-        var target = edge.target_component_id || edge.target || edge.to;
-        if (!nodeById[source] || !nodeById[target]) return;
-        var nextLevel = Math.min(4, (levels[source] || 0) + 1);
-        if ((levels[target] || 0) < nextLevel) {
-          levels[target] = nextLevel;
-          changed = true;
+  // 段の決定に使わない辺（向きが構造の前後関係を表さない関係）。
+  function lsGraphWeakRelation(edge) {
+    var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toUpperCase();
+    return relation === "UNCERTAIN_DUE_TO" || relation === "RELATED_TO";
+  }
+
+  // ノード幅の概算（vis の box はラベルに合わせて伸びる）。重なりを避けるためだけの
+  // 見積りで、描画そのものには使わない。
+  function lsGraphNodeWidthHint(node, id) {
+    var label = String(lsGraphNodeDisplayLabel(node, id) || id || "");
+    var longest = label.split("\n").reduce(function (max, line) {
+      return Math.max(max, line.length);
+    }, 0);
+    return Math.min(
+      LS_GRAPH_LAYOUT.maxWidth,
+      Math.max(LS_GRAPH_LAYOUT.minWidth, (longest * LS_GRAPH_LAYOUT.charWidth) + 40)
+    );
+  }
+
+  // 後退辺を落として DAG にし、最長路で段を決める。循環があっても止まらない。
+  // 返り値: { ranks: {id: 段}, edges: [{from, to}] }（edges は後退辺を除いたもの）
+  function lsGraphRankNodes(ids, strongEdges) {
+    var outgoing = {};
+    ids.forEach(function (id) { outgoing[id] = []; });
+    strongEdges.forEach(function (edge) { outgoing[edge.from].push(edge.to); });
+
+    // 反復 DFS（再帰しない = 深いチェーンでもスタックを溢れさせない）。
+    // 探索中（state=1）のノードへ戻る辺が後退辺で、これだけを落とす。
+    var visitState = {};  // 未訪問 = undefined / 1 = 探索中 / 2 = 完了
+    var acyclic = [];
+    ids.forEach(function (root) {
+      if (visitState[root]) return;
+      visitState[root] = 1;
+      var stack = [{ id: root, next: 0 }];
+      while (stack.length) {
+        var frame = stack[stack.length - 1];
+        var children = outgoing[frame.id];
+        if (frame.next >= children.length) {
+          visitState[frame.id] = 2;
+          stack.pop();
+          continue;
         }
-      });
-      if (!changed) break;
-    }
-
-    (nodes || []).forEach(function (node, index) {
-      var id = lsGraphNodeId(node) || ("node-" + index);
-      var group = lsGraphNodeGroup(node);
-      if (group === "uncertainty") levels[id] = Math.min(2, Math.max(1, levels[id] || 1));
-      if (group === "conclusion") levels[id] = Math.max(4, levels[id] || 4);
-      if (lsGraphNodeDashed(node, group)) levels[id] = 0;
+        var child = children[frame.next];
+        frame.next += 1;
+        if (visitState[child] === 1) continue; // 後退辺
+        acyclic.push({ from: frame.id, to: child });
+        if (!visitState[child]) {
+          visitState[child] = 1;
+          stack.push({ id: child, next: 0 });
+        }
+      }
     });
 
-    var buckets = {};
+    var indegree = {};
+    var dag = {};
+    ids.forEach(function (id) { indegree[id] = 0; dag[id] = []; });
+    acyclic.forEach(function (edge) {
+      dag[edge.from].push(edge.to);
+      indegree[edge.to] += 1;
+    });
+
+    var ranks = {};
+    var queue = [];
+    ids.forEach(function (id) {
+      ranks[id] = 0;
+      if (!indegree[id]) queue.push(id);
+    });
+    for (var head = 0; head < queue.length; head += 1) {
+      var id = queue[head];
+      dag[id].forEach(function (child) {
+        if (ranks[child] < ranks[id] + 1) ranks[child] = ranks[id] + 1;
+        indegree[child] -= 1;
+        if (!indegree[child]) queue.push(child);
+      });
+    }
+    return { ranks: ranks, edges: acyclic };
+  }
+
+  // 連結成分（弱い辺も含めた無向の連結）。成分ごとに離して置く。
+  function lsGraphConnectedComponents(ids, adjacency) {
+    var seen = {};
+    var components = [];
+    ids.forEach(function (root) {
+      if (seen[root]) return;
+      seen[root] = true;
+      var queue = [root];
+      var members = [];
+      for (var head = 0; head < queue.length; head += 1) {
+        var id = queue[head];
+        members.push(id);
+        (adjacency[id] || []).forEach(function (next) {
+          if (seen[next]) return;
+          seen[next] = true;
+          queue.push(next);
+        });
+      }
+      components.push(members);
+    });
+    return components;
+  }
+
+  // バリセンタ法の1掃き。隣接段の相手の平均位置で並べ替える（相手がいないノードは
+  // 現在の位置を保つ = 並びを壊さない）。
+  function lsGraphSweepLayers(layers, neighbors, downward) {
+    var indexOf = {};
+    layers.forEach(function (layer) {
+      layer.forEach(function (id, i) { indexOf[id] = i; });
+    });
+    var order = [];
+    for (var i = 0; i < layers.length; i += 1) order.push(i);
+    if (!downward) order.reverse();
+    order.forEach(function (li) {
+      var decorated = layers[li].map(function (id, i) {
+        var linked = (neighbors[id] || []).filter(function (other) {
+          return indexOf[other] !== undefined;
+        });
+        var key = i;
+        if (linked.length) {
+          key = linked.reduce(function (sum, other) { return sum + indexOf[other]; }, 0) / linked.length;
+        }
+        return { id: id, key: key, seq: i };
+      });
+      decorated.sort(function (a, b) { return (a.key - b.key) || (a.seq - b.seq); });
+      layers[li] = decorated.map(function (d) { return d.id; });
+      layers[li].forEach(function (id, i) { indexOf[id] = i; });
+    });
+  }
+
+  function lsGraphLayoutPositions(nodes, edges) {
+    var ids = [];
+    var nodeById = {};
+    var orderIndex = {};
     (nodes || []).forEach(function (node, index) {
       var id = lsGraphNodeId(node) || ("node-" + index);
-      var level = levels[id] || 0;
-      if (!buckets[level]) buckets[level] = [];
-      buckets[level].push(node);
+      if (nodeById[id]) return; // 同じ id は先勝ち（重複で段が壊れない）
+      ids.push(id);
+      nodeById[id] = node;
+      var declared = Number(node && node.display_order);
+      orderIndex[id] = isFinite(declared) ? declared : index;
+    });
+    if (!ids.length) return {};
+
+    var strongEdges = [];
+    var adjacency = {};
+    var linked = {};
+    ids.forEach(function (id) { adjacency[id] = []; });
+    (edges || []).forEach(function (edge) {
+      var source = edge.source_component_id || edge.source || edge.from;
+      var target = edge.target_component_id || edge.target || edge.to;
+      if (!nodeById[source] || !nodeById[target] || source === target) return;
+      adjacency[source].push(target);
+      adjacency[target].push(source);
+      linked[source] = true;
+      linked[target] = true;
+      if (!lsGraphWeakRelation(edge)) strongEdges.push({ from: source, to: target });
+    });
+
+    var ranked = lsGraphRankNodes(ids, strongEdges);
+    var ranks = ranked.ranks;
+    var predecessors = {};
+    var successors = {};
+    ids.forEach(function (id) { predecessors[id] = []; successors[id] = []; });
+    ranked.edges.forEach(function (edge) {
+      successors[edge.from].push(edge.to);
+      predecessors[edge.to].push(edge.from);
     });
 
     var positions = {};
-    Object.keys(buckets).forEach(function (levelKey) {
-      var level = Number(levelKey);
-      var bucket = buckets[levelKey].sort(function (a, b) {
-        return lsGraphNodeSortKey(a) - lsGraphNodeSortKey(b);
+    var components = lsGraphConnectedComponents(ids, adjacency).filter(function (members) {
+      return members.length > 1 || linked[members[0]];
+    });
+    var isolated = ids.filter(function (id) { return !linked[id]; });
+    // 成分は「最初に現れたノード」の順に左から並べる（決定論的）。
+    var firstIndexOf = function (members) {
+      return members.reduce(function (min, id) { return Math.min(min, orderIndex[id]); }, Infinity);
+    };
+    components.sort(function (a, b) { return firstIndexOf(a) - firstIndexOf(b); });
+
+    var offsetX = 0;
+    components.forEach(function (members) {
+      var layers = [];
+      var depth = 0;
+      members.forEach(function (id) { depth = Math.max(depth, ranks[id] || 0); });
+      for (var r = 0; r <= depth; r += 1) layers.push([]);
+      members.forEach(function (id) { layers[ranks[id] || 0].push(id); });
+      layers.forEach(function (layer) {
+        layer.sort(function (a, b) { return orderIndex[a] - orderIndex[b]; });
       });
-      var spacing = bucket.length > 3 ? 280 : 340;
-      var totalWidth = (bucket.length - 1) * spacing;
-      bucket.forEach(function (node, index) {
-        var id = lsGraphNodeId(node);
+      for (var pass = 0; pass < LS_GRAPH_LAYOUT.sweeps; pass += 1) {
+        lsGraphSweepLayers(layers, predecessors, true);
+        lsGraphSweepLayers(layers, successors, false);
+      }
+      var widths = layers.map(function (layer) {
+        return layer.reduce(function (sum, id, i) {
+          return sum + lsGraphNodeWidthHint(nodeById[id], id) + (i ? LS_GRAPH_LAYOUT.nodeGap : 0);
+        }, 0);
+      });
+      var componentWidth = widths.reduce(function (max, w) { return Math.max(max, w); }, 0);
+      layers.forEach(function (layer, r) {
+        var cursor = offsetX + ((componentWidth - widths[r]) / 2);
+        layer.forEach(function (id) {
+          var width = lsGraphNodeWidthHint(nodeById[id], id);
+          positions[id] = {
+            x: Math.round(cursor + (width / 2)),
+            y: r * LS_GRAPH_LAYOUT.rowGap,
+          };
+          cursor += width + LS_GRAPH_LAYOUT.nodeGap;
+        });
+      });
+      offsetX += componentWidth + LS_GRAPH_LAYOUT.componentGap;
+    });
+
+    // 辺を持たないノードは格子に畳む（横一列に伸ばして「一直線」に戻さない）。
+    if (isolated.length) {
+      isolated.sort(function (a, b) { return orderIndex[a] - orderIndex[b]; });
+      var columns = Math.max(1, Math.ceil(Math.sqrt(isolated.length)));
+      var cellWidth = isolated.reduce(function (max, id) {
+        return Math.max(max, lsGraphNodeWidthHint(nodeById[id], id));
+      }, 0) + LS_GRAPH_LAYOUT.nodeGap;
+      isolated.forEach(function (id, i) {
         positions[id] = {
-          x: (index * spacing) - (totalWidth / 2),
-          y: level * 185,
+          x: Math.round(offsetX + ((i % columns) * cellWidth) + (cellWidth / 2)),
+          y: Math.floor(i / columns) * LS_GRAPH_LAYOUT.rowGap,
         };
       });
+      offsetX += (columns * cellWidth) + LS_GRAPH_LAYOUT.componentGap;
+    }
+
+    // 全体を原点まわりへ寄せる（初期の fit が偏らない）。
+    var shift = Math.round((offsetX - LS_GRAPH_LAYOUT.componentGap) / 2);
+    ids.forEach(function (id) {
+      if (positions[id]) positions[id].x -= shift;
     });
     return positions;
-  }
-
-  function lsGraphNodeSortKey(node) {
-    var label = String((node && (node.label || node.name)) || "").toLowerCase();
-    if (/completeness|完全性/.test(label)) return 10;
-    if (/reality criterion|実在.*基準/.test(label)) return 20;
-    if (/no-disturbance|no-real-change|分離/.test(label)) return 30;
-    if (/uniform|coordinate|単一粒子|座標/.test(label)) return 40;
-    if (/remote|遠隔/.test(label)) return 50;
-    if (/criterion-of-reality|scope|limitation|uncertain|射程|不確実/.test(label)) return 60;
-    if (/wave function|diagnos|診断/.test(label)) return 70;
-    if (/disjunctive|incompleteness|結論/.test(label)) return 80;
-    return Number(node && node.display_order) || 99;
   }
 
   function lsGraphRelationPriority(edge) {
@@ -6959,17 +7228,29 @@
           area.innerHTML = '<span class="ls-theory-muted">引用先にできる編集可能な別コースがありません。</span>';
           return;
         }
+        // P4-5（knowledge_transfer_design.md §8 / X-7）: 引用の意図（任意）。
+        // 既定は「記録しない」— 選ばなければ citation_intent を送らない（NULL = 記録なし）。
+        var intentOptions = '<option value="">記録しない</option>' +
+          LS_CITATION_INTENT_ORDER.map(function (k) {
+            return '<option value="' + escHtml(k) + '">' + escHtml(LS_CITATION_INTENT_LABELS[k]) + '</option>';
+          }).join("");
         area.innerHTML = '<span>引用先コース:</span>' +
           '<select data-cite-select>' + options.map(function (c) {
             return '<option value="' + escHtml(c.id) + '">' + escHtml(c.title || c.id) + '</option>';
           }).join("") + '</select>' +
+          '<span>引用の意図（任意）:</span>' +
+          '<select data-cite-intent data-ui-anchor="lecture-studio.cite-intent">' + intentOptions + '</select>' +
           '<button class="admin-action-btn" data-cite-run>引用する</button>' +
           '<button class="admin-action-btn" data-cite-cancel>キャンセル</button>';
         area.querySelector("[data-cite-run]").addEventListener("click", function () {
           var sel = area.querySelector("[data-cite-select]");
           var target = sel ? sel.value : "";
           if (!target) return;
-          lsCallExplanation(component, "/admin/explanations/" + expId + "/cite", "POST", { citing_course_id: target }, "引用しました");
+          var intentSel = area.querySelector("[data-cite-intent]");
+          var intent = intentSel ? intentSel.value : "";
+          var body = { citing_course_id: target };
+          if (intent) body.citation_intent = intent;
+          lsCallExplanation(component, "/admin/explanations/" + expId + "/cite", "POST", body, "引用しました");
         });
         area.querySelector("[data-cite-cancel]").addEventListener("click", function () {
           area.hidden = true;
@@ -7382,6 +7663,47 @@
     });
     if (!items.length) return "";
     return '<div class="ls-extracted-formulas-block">' + items.join("") + '</div>';
+  }
+
+  // 「地の文に TeX が混ざる短い文字列」（claim 本文・ノードの説明など）を HTML にする。
+  //
+  // - 地の文は必ず escHtml でエスケープする（数式区切りの外は常に平文扱い）
+  // - $$…$$ はブロック、$…$（改行を挟まない）と \(…\) はインラインとして
+  //   lsRenderKatex に渡す（window.katex 不在時は同関数が <code> チップへ縮退する）
+  // - 閉じない $ は数式にせず、そのまま文字として出す（勝手に食わない）
+  //
+  // 教材本文のプレビュー系（lsRenderMaterialPreview 等）は [[FORMULA]] 埋め込みや
+  // markdown も解決する別パイプラインなので、この関数はそちらを置き換えない。
+  // グラフレビュー画面（admin-graph-review.js）は graphView.inlineMathHtml として
+  // **この1本だけ**を使う（GR8: 数式描画の実装を画面ごとに増やさない）。
+  function lsInlineMathHtml(text) {
+    var source = String(text === null || text === undefined ? "" : text);
+    if (!source) return "";
+    var mathBlocks = [];
+    function hold(expr, display) {
+      var idx = mathBlocks.length;
+      mathBlocks.push({ expr: expr, display: display });
+      return "@@EG_INLINE_MATH_" + idx + "@@";
+    }
+    var preserved = source.replace(/\$\$([\s\S]+?)\$\$/g, function (_m, expr) {
+      return hold(expr, true);
+    });
+    preserved = preserved.replace(/\\\(([\s\S]+?)\\\)/g, function (_m, expr) {
+      return hold(expr, false);
+    });
+    preserved = preserved.replace(/\$([^\$\n]+?)\$/g, function (_m, expr) {
+      return hold(expr, false);
+    });
+    var html = escHtml(preserved);
+    return html.replace(/@@EG_INLINE_MATH_(\d+)@@/g, function (marker, idx) {
+      var block = mathBlocks[parseInt(idx, 10)];
+      if (!block) return marker;
+      var rendered = lsRenderKatex(block.expr, block.display);
+      // 空式など描画できないものは記述を落とさず元の区切り付きで平文表示する。
+      if (rendered) return rendered;
+      var delimiter = block.display ? "$$" : "$";
+      return escHtml(delimiter + block.expr + delimiter);
+    });
   }
 
   function lsRenderKatex(expr, display) {
@@ -8900,6 +9222,28 @@
   window.LectureStudio = {
     init: init,
     openExportModal: openExportModal,
-    getScreenContext: getScreenContext
+    getScreenContext: getScreenContext,
+    // グラフ描画の正本の公開面（graph_dialogue_review_design.md §6 / GR8）。
+    // グラフレビュー画面（admin-graph-review.js）が同じレイアウト・スタイル・語彙で
+    // 描画するために使う。ここに列挙するのは lsState 非依存の純関数のみ。
+    graphView: {
+      nodeId: lsGraphNodeId,
+      filterByLayer: lsGraphFilterByLayer,
+      layerOptions: lsGraphLayerOptions,
+      layoutPositions: lsGraphLayoutPositions,
+      displayEdges: lsGraphDisplayEdges,
+      visNodeSpec: lsGraphVisNodeSpec,
+      visEdgeSpec: lsGraphVisEdgeSpec,
+      networkOptions: lsGraphNetworkOptions,
+      semanticLabel: lsGraphSemanticLabel,
+      detailHeading: lsGraphDetailHeading,
+      nodeTooltip: lsGraphNodeTooltip,
+      roleLabel: lsGraphRoleLabel,
+      sourceBackingLabel: lsGraphSourceBackingLabel,
+      reviewReasonLabel: lsGraphReviewReasonLabel,
+      edgeLabel: lsGraphEdgeLabel,
+      // 地の文に混ざる TeX（$…$ / \(…\) / $$…$$）を数式として描画する共通口。
+      inlineMathHtml: lsInlineMathHtml
+    }
   };
 })();

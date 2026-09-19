@@ -401,7 +401,6 @@ class TestTypedActionPathsUnaffected:
             learning_mod, "_generate_graph_element_explanation",
             lambda **kwargs: LearningChatResponse(answer="説明します"),
         )
-        monkeypatch.setattr(learning_mod, "record_student_stumble_event", lambda *a, **k: None)
 
         spy = MagicMock(side_effect=AssertionError("EXPLAIN_GRAPH_ELEMENT 経路で呼ばれてはならない"))
         monkeypatch.setattr(learning_mod, "_build_anchor_ladder_hint", spy)
@@ -448,5 +447,8 @@ class TestCallSitePlacement:
 
     def test_ladder_hint_call_is_in_learning_chat_function(self):
         src = LEARNING_SOURCE_PATH.read_text(encoding="utf-8")
-        body_src = extract_function_source(src, "learning_chat(")
+        # コーパス回遊 Phase B（corpus_roaming_design.md §5.3）で learning_chat の本体は
+        # 共通コア `_learning_chat_core` へ移った（コース経路 / document 直付け経路が
+        # 同じコアを通る）。ラダーヒントの呼び出し配線はコア本体にある。
+        body_src = extract_function_source(src, "_learning_chat_core(")
         assert "_build_anchor_ladder_hint(body, body.history)" in body_src

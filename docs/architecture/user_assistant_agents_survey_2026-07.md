@@ -352,6 +352,8 @@
 
 ### デッドコード
 
+→ 2026-09-10 解消: 下記 ⚪ 3件のうち `core/chat.py` と `_llm_retry_policy` 系は削除済み（`agent_inventory_and_refactoring_2026-09-10.md` §6）。`chat_sessions` / `chat_messages` テーブルは DB 側のため未着手。
+
 - ⚪ レガシー `chat_sessions` / `chat_messages`（`db/init.sql:180-199`、
   `core/models.py:261,274` — どこからも参照なし）。
 - ⚪ `core/chat.py::search_chunks`（学習チャットは `services.search_chunks_with_metadata`

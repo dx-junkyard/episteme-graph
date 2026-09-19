@@ -69,7 +69,7 @@ def run_corpus_audit(course_id: str = "") -> dict:
             params["course"] = course_id
         rows = session.execute(
             sa_text(f"""
-                SELECT document_id, graph_json
+                SELECT document_id::text AS document_id, graph_json
                 FROM theory_component_graphs
                 WHERE {' AND '.join(filters)}
             """),

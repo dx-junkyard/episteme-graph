@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 
+from episteme_graph.agents.llm_step import MAX_REPAIR_ATTEMPTS, run_repair_loop
+
 from .context_lint import apply_context_lint
 from .llm_client import ClaimQualificationLLMClient
 from .prompt import ClaimQualificationPromptFactory
@@ -16,7 +18,7 @@ from .schema import (
 
 logger = logging.getLogger(__name__)
 
-_MAX_REPAIR_ATTEMPTS = 2
+_MAX_REPAIR_ATTEMPTS = MAX_REPAIR_ATTEMPTS
 
 
 class ClaimQualificationRepairer:
@@ -30,25 +32,27 @@ class ClaimQualificationRepairer:
         prompt_factory: ClaimQualificationPromptFactory,
         validator: object,
     ) -> QualifiedSpanRecord:
-        for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
-            logger.info("Claim qualification repair attempt %d/%d", attempt, _MAX_REPAIR_ATTEMPTS)
-            messages = prompt_factory.build_repair_messages(
-                llm_input, raw_output, validation_issues, cartridge
-            )
-            try:
-                raw_output = llm_client.generate(messages)
-            except Exception as exc:
-                logger.warning("Repair LLM call failed: %s", exc)
-                break
-
-            record = _parse_record(raw_output, llm_input)
+        def _validate(record: QualifiedSpanRecord) -> list[ValidationIssue]:
+            # The validator works on a whole result, so wrap the single record.
             partial = _single_result(llm_input, record)
-            remaining = validator.validate(partial, cartridge)  # type: ignore[attr-defined]
-            if not [i for i in remaining if i.severity == "error"]:
-                return record
-            validation_issues = remaining
+            return validator.validate(partial, cartridge)  # type: ignore[attr-defined]
 
-        return _fallback_record(llm_input, "Repair failed after max attempts")
+        return run_repair_loop(
+            build_messages=lambda raw, issues: prompt_factory.build_repair_messages(
+                llm_input, raw, issues, cartridge
+            ),
+            generate=lambda messages: llm_client.generate(messages),
+            parse=lambda raw: _parse_record(raw, llm_input),
+            validate=_validate,
+            # Success yields the bare record (no validation_issues field).
+            on_success=lambda record, _remaining: record,
+            on_exhausted=lambda _issues: _fallback_record(
+                llm_input, "Repair failed after max attempts"
+            ),
+            raw_output=raw_output,
+            validation_issues=validation_issues,
+            log_label="Claim qualification",
+        )
 
 
 def _parse_record(raw: dict, llm_input: QualificationLLMInput) -> QualifiedSpanRecord:

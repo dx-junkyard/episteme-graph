@@ -630,7 +630,7 @@ def _ir_result(mode: str = "functional_diagram"):
 def _patch_ir_dependencies(monkeypatch, *, settings_overrides=None):
     monkeypatch.setattr(figure_reanalysis, "load_document_figures", lambda _doc: [_ir_row()])
     monkeypatch.setattr(
-        figure_reanalysis, "_latest_context", lambda _doc, _row: (None, None, None),
+        figure_reanalysis, "_adopted_context", lambda _doc, _row: (None, None, None),
     )
     monkeypatch.setattr(
         figure_reanalysis,

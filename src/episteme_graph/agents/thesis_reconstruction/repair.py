@@ -3,6 +3,12 @@ from __future__ import annotations
 
 import logging
 
+from episteme_graph.agents.llm_step import (
+    MAX_REPAIR_ATTEMPTS,
+    attach_issues,
+    run_repair_loop,
+)
+
 from .llm_client import ThesisReconstructionLLMClient
 from .prompt import ThesisReconstructionPromptFactory
 from .schema import (
@@ -15,7 +21,7 @@ from .schema import (
 )
 
 logger = logging.getLogger(__name__)
-_MAX_REPAIR_ATTEMPTS = 2
+_MAX_REPAIR_ATTEMPTS = MAX_REPAIR_ATTEMPTS
 
 
 class ThesisReconstructionRepairer:
@@ -29,27 +35,28 @@ class ThesisReconstructionRepairer:
         prompt_factory: ThesisReconstructionPromptFactory,
         validator: object,
     ) -> ThesisReconstructionResult:
-        for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
-            logger.info("Thesis reconstruction repair attempt %d/%d", attempt, _MAX_REPAIR_ATTEMPTS)
-            messages = prompt_factory.build_repair_messages(
-                llm_input, raw_output, validation_issues, cartridge
+        def _on_exhausted(issues: list[ValidationIssue]) -> ThesisReconstructionResult:
+            fallback = ThesisReconstructionResult.make_fallback(
+                llm_input.document_id, llm_input.cartridge_id, "Repair failed after max attempts"
             )
-            try:
-                raw_output = llm_client.generate(messages)
-            except Exception as exc:
-                logger.warning("Repair LLM call failed: %s", exc)
-                break
-            result = _parse_raw(raw_output, llm_input.document_id, llm_input.cartridge_id)
-            remaining = validator.validate(result, cartridge)  # type: ignore[attr-defined]
-            if not [i for i in remaining if i.severity == "error"]:
-                result.validation_issues = remaining
-                return result
-            validation_issues = remaining
-        fallback = ThesisReconstructionResult.make_fallback(
-            llm_input.document_id, llm_input.cartridge_id, "Repair failed after max attempts"
+            fallback.validation_issues = issues
+            return fallback
+
+        return run_repair_loop(
+            build_messages=lambda raw, issues: prompt_factory.build_repair_messages(
+                llm_input, raw, issues, cartridge
+            ),
+            generate=lambda messages: llm_client.generate(messages),
+            parse=lambda raw: _parse_raw(
+                raw, llm_input.document_id, llm_input.cartridge_id
+            ),
+            validate=lambda result: validator.validate(result, cartridge),  # type: ignore[attr-defined]
+            on_success=attach_issues,
+            on_exhausted=_on_exhausted,
+            raw_output=raw_output,
+            validation_issues=validation_issues,
+            log_label="Thesis reconstruction",
         )
-        fallback.validation_issues = validation_issues
-        return fallback
 
 
 def _parse_raw(

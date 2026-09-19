@@ -301,9 +301,9 @@ def _as_json(value: Any) -> Any:
 
 
 _COMPONENTS_SQL = """
-    SELECT DISTINCT tc.id::text, tc.name, tc.document_id, tc.review_status,
+    SELECT DISTINCT tc.id::text, tc.name, tc.document_id::text AS document_id, tc.review_status,
            tc.status, tc.evidence_claims, tc.source_scope
-      FROM theory_components tc
+      FROM theory_components_live tc
       JOIN document_analysis_runs r
         ON r.document_id = tc.document_id
        AND r.cartridge_id = :cartridge_id
@@ -312,9 +312,9 @@ _COMPONENTS_SQL = """
 """
 
 _CLAIMS_SQL = """
-    SELECT DISTINCT c.id::text, c.document_id, c.claim_type, c.concepts, c.equation,
+    SELECT DISTINCT c.id::text, c.document_id::text AS document_id, c.claim_type, c.concepts, c.equation,
            c.support_status, c.evidence_text, c.review_status, c.source_scope
-      FROM theory_claims c
+      FROM theory_claims_live c
       JOIN document_analysis_runs r
         ON r.document_id = c.document_id
        AND r.cartridge_id = :cartridge_id
@@ -323,13 +323,13 @@ _CLAIMS_SQL = """
 """
 
 _GRAPHS_SQL = """
-    SELECT DISTINCT g.document_id, g.graph_json
+    SELECT DISTINCT g.document_id::text AS document_id, g.graph_json
       FROM theory_component_graphs g
       JOIN document_analysis_runs r
         ON r.document_id = g.document_id
        AND r.cartridge_id = :cartridge_id
        AND r.status = 'completed'
-     ORDER BY g.document_id
+     ORDER BY document_id
 """
 
 _EXPLANATIONS_SQL = """
@@ -342,7 +342,7 @@ _EXPLANATIONS_SQL = """
       LEFT JOIN users u ON u.id = e.author_id
       LEFT JOIN component_explanation_endorsement_summary s ON s.explanation_id = e.id
      WHERE e.component_id IN (
-           SELECT tc.id FROM theory_components tc
+           SELECT tc.id FROM theory_components_live tc
              JOIN document_analysis_runs r
                ON r.document_id = tc.document_id
               AND r.cartridge_id = :cartridge_id
@@ -353,7 +353,7 @@ _EXPLANATIONS_SQL = """
 
 _VECTORS_SQL = """
     SELECT DISTINCT tc.id::text, ch.embedding::text
-      FROM theory_components tc
+      FROM theory_components_live tc
       JOIN document_analysis_runs r
         ON r.document_id = tc.document_id
        AND r.cartridge_id = :cartridge_id
@@ -680,22 +680,22 @@ _SIGNATURE_SQL = """
          FROM document_analysis_runs r
         WHERE r.cartridge_id = :cartridge_id AND r.status = 'completed'),
       (SELECT COALESCE(max(tc.updated_at)::text, '')
-         FROM theory_components tc
+         FROM theory_components_live tc
          JOIN document_analysis_runs r ON r.document_id = tc.document_id
         WHERE r.cartridge_id = :cartridge_id AND r.status = 'completed'),
       (SELECT COALESCE(max(c.updated_at)::text, '')
-         FROM theory_claims c
+         FROM theory_claims_live c
          JOIN document_analysis_runs r ON r.document_id = c.document_id
         WHERE r.cartridge_id = :cartridge_id AND r.status = 'completed'),
       (SELECT COALESCE(max(e.updated_at)::text, '')
          FROM component_explanations e
-         JOIN theory_components tc ON tc.id = e.component_id
+         JOIN theory_components_live tc ON tc.id = e.component_id
          JOIN document_analysis_runs r ON r.document_id = tc.document_id
         WHERE r.cartridge_id = :cartridge_id AND r.status = 'completed'),
       (SELECT COALESCE(max(en.updated_at)::text, '')
          FROM component_endorsements en
          JOIN component_explanations e ON e.id = en.explanation_id
-         JOIN theory_components tc ON tc.id = e.component_id
+         JOIN theory_components_live tc ON tc.id = e.component_id
          JOIN document_analysis_runs r ON r.document_id = tc.document_id
         WHERE r.cartridge_id = :cartridge_id AND r.status = 'completed')
 """
@@ -926,7 +926,7 @@ def build_component_concept_map(snapshot: CorpusSnapshot, skeleton) -> dict[str,
 
 _TOPIC_COMPONENTS_SQL = """
     SELECT DISTINCT tc.id::text, tc.name
-      FROM theory_components tc
+      FROM theory_components_live tc
       JOIN document_analysis_runs r
         ON r.document_id = tc.document_id
        AND r.cartridge_id = :cartridge_id

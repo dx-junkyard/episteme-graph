@@ -1,0 +1,1152 @@
+"""グラフ対話レビュー — フロントエンドの静的検証。
+
+正本: ``docs/features/graph_dialogue_review_design.md`` §3/§6/§7。
+admin-graph-review.js（ES5・GraphReview）・admin.js の導線・admin.html の読み込み順・
+CSS の存在を、Node 実行なしのソース検査で確認する。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+JS_SRC = (ROOT / "frontend" / "public" / "js" / "admin-graph-review.js").read_text(encoding="utf-8")
+VOICE_SRC = (ROOT / "frontend" / "public" / "js" / "admin-voice-chat.js").read_text(encoding="utf-8")
+ADMIN_SRC = (ROOT / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
+STUDIO_SRC = (ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js").read_text(encoding="utf-8")
+HTML_SRC = (ROOT / "frontend" / "public" / "admin.html").read_text(encoding="utf-8")
+CSS_SRC = (ROOT / "frontend" / "public" / "css" / "styles.css").read_text(encoding="utf-8")
+
+
+class TestEs5Compat:
+    def test_no_es6_syntax(self):
+        # 管理画面 JS は ES5 互換（開発ルール5）。
+        assert "=>" not in JS_SRC
+        assert not re.search(r"\bconst\s", JS_SRC)
+        assert not re.search(r"\blet\s", JS_SRC)
+        assert "`" not in JS_SRC  # テンプレートリテラル禁止
+
+    def test_iife_and_public_api(self):
+        assert "window.GraphReview" in JS_SRC
+        assert '"use strict"' in JS_SRC
+
+
+class TestAnchors:
+    def test_all_screen_anchors_present(self):
+        for anchor in (
+            "graph-review.modal",
+            "graph-review.layer",
+            "graph-review.filter-unreviewed",
+            "graph-review.next-unreviewed",
+            "graph-review.approve",
+            "graph-review.reject",
+            "graph-review.claim-approve",
+            "graph-review.chat",
+            "graph-review.graph-chat",
+            "graph-review.open-deliberation",
+            "graph-review.new-chat",
+            "graph-review.voice",
+        ):
+            assert 'data-ui-anchor="' + anchor + '"' in JS_SRC, anchor
+
+    def test_row_button_anchor_in_admin_js(self):
+        assert 'data-ui-anchor="materials.row-graph-review"' in ADMIN_SRC
+
+
+class TestAdminWiring:
+    def test_row_button_requires_document_id(self):
+        # 検出要素ボタンと同条件: document_id を持つ行のみ出す。
+        idx = ADMIN_SRC.index("admin-graph-review-btn")
+        assert "m.document_id" in ADMIN_SRC[max(0, idx - 600):idx]
+
+    def test_row_button_is_an_icon_button_outside_the_menu(self):
+        """2026-09-06: ⋯ メニュー項目ではなく、行に直接出るアイコンボタン。
+
+        アイコンは inline SVG のノード・辺図形（currentColor）。ラベルは aria-label / title。
+        """
+        start = ADMIN_SRC.index("var graphReviewBtn = ")
+        block = ADMIN_SRC[start : ADMIN_SRC.index(': "";', start)]
+        assert 'class="admin-action-btn material-row-icon-btn admin-graph-review-btn"' in block
+        assert "ls-menu-item" not in block
+        assert '<svg class="material-row-icon"' in block
+        assert 'aria-label="グラフレビュー"' in block
+        assert 'data-ui-anchor="materials.row-graph-review"' in block
+        assert "🕸" not in block
+
+    def test_click_opens_graph_review(self):
+        assert "window.GraphReview.open(" in ADMIN_SRC
+
+    def test_init_injected(self):
+        assert (
+            "window.GraphReview.init({ apiFetch: apiFetch, escHtml: escHtml, getToken: getAuthToken })"
+            in ADMIN_SRC
+        )
+
+    def test_assistant_anchor_resolver_registered(self):
+        assert "material_graph_review_button" in ADMIN_SRC
+
+
+class TestGraphViewDelegation:
+    def test_uses_lecture_studio_graph_view(self):
+        assert "window.LectureStudio && window.LectureStudio.graphView" in JS_SRC
+        for api in ("filterByLayer", "layerOptions", "layoutPositions", "displayEdges",
+                    "visNodeSpec", "visEdgeSpec", "networkOptions", "detailHeading",
+                    "sourceBackingLabel", "reviewReasonLabel"):
+            assert api in JS_SRC, api
+
+    def test_studio_delegates_layer_filter(self):
+        # lsGraphForCurrentLayer は純粋版への薄い委譲（挙動不変のリファクタ）。
+        idx = STUDIO_SRC.index("function lsGraphForCurrentLayer")
+        body = STUDIO_SRC[idx: STUDIO_SRC.index("}", idx) + 1]
+        assert "lsGraphFilterByLayer(graph, lsState.graphLayerFilter" in body
+
+
+class TestReviewSemantics:
+    def test_unreviewed_filter_keeps_context(self):
+        # 未レビュー強調は非該当ノードを消さず薄くする（構造の文脈を保つ）。
+        assert "opacity = 0.22" in JS_SRC
+
+    def test_component_actions_present(self):
+        assert ">承認</button>" in JS_SRC
+        assert ">却下</button>" in JS_SRC
+        assert "深く検討" in JS_SRC
+
+    def test_claim_approve_uses_transition_api(self):
+        assert '"/review"' in JS_SRC or "/review\"" in JS_SRC
+        assert "teacher_approved" in JS_SRC
+
+    def test_component_actions_use_transition_endpoints(self):
+        # フル PUT を使わない（同時編集の巻き戻し防止 — 設計書 §4）。
+        assert '"/admin/theory-components/" + encodeURIComponent(componentId) + "/" + action' in JS_SRC
+        assert 'method: "PUT"' not in JS_SRC
+
+    def test_reload_after_decision(self):
+        # 承認・却下後はサーバの状態で再描画（楽観更新でズレを残さない）。
+        assert "loadGraph(true)" in JS_SRC
+
+
+class TestChat:
+    def test_graph_chat_uses_graph_sessions_api(self):
+        assert "/graph-sessions" in JS_SRC
+
+    def test_node_chat_uses_w_layer_sessions(self):
+        assert '"/admin/deliberation/sessions"' in JS_SRC
+        assert '"theory_component"' in JS_SRC or "element_type: \"theory_component\"" in JS_SRC
+
+    def test_degraded_reply_is_labeled(self):
+        assert "縮退応答" in JS_SRC
+
+    def test_send_body_carries_screen_context(self):
+        """画面文脈アダプター（assistant_screen_adapter_design.md §5.1）。
+
+        ノード対話・グラフ全体対話は同じ送信関数を通るため、ボディの組み立ては
+        1箇所。音声経路も `sendChatText` に合流しているので同じものが載る。
+        """
+        start = JS_SRC.index("function sendChatText(")
+        block = JS_SRC[start:]
+        block = block[: block.index("\n  // ---")]
+        assert "screen_context: getScreenContext()" in block
+        assert "JSON.stringify(requestBody)" in block
+        # content は従来どおり素の発話のみ（画面文脈を本文に混ぜない）。
+        assert "content: content" in block
+
+    def test_voice_path_shares_the_same_send_function(self):
+        # 音声発話は sendChatText へ委譲する（送信ボディを二重実装しない）。
+        start = JS_SRC.index("function voiceUtterance(")
+        block = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert "sendChatText(" in block
+        assert "JSON.stringify" not in block
+
+
+class TestChatBubbleAndStance:
+    """応答バブルの数式描画と立場ラベル。
+
+    留保を応答本文に散らす代わりに、1枚の非対話チップが「AI の読みであって確定では
+    ない」ことを引き受ける（GR1）。数式は共通の richText 一本で描く（GR8）。
+    """
+
+    def _chat_log_block(self) -> str:
+        start = JS_SRC.index("function renderChatLog(")
+        return JS_SRC[start: JS_SRC.index("\n  function ", start)]
+
+    def test_assistant_bubble_uses_rich_text(self):
+        # 生の $P_{\\rm L}(k)$ を教員に読ませない（右ペインと同じ描画に揃える）。
+        block = self._chat_log_block()
+        assert "richText(m.content)" in block
+        # 教員の発話は素のエスケープのまま（入力を数式として解釈しない）。
+        assert "esc(m.content)" in block
+
+    def test_no_second_math_renderer(self):
+        # 数式描画の実装は graphView.inlineMathHtml 一本（richText 経由）だけ。
+        block = self._chat_log_block()
+        assert "katex" not in block.lower()
+        # 呼ぶのは richText だけ（graphView へ直接触らない）。
+        assert "inlineMathHtml(" not in block
+        assert "gv()" not in block
+
+    def test_stance_chip_rendered_with_single_fallback_literal(self):
+        block = self._chat_log_block()
+        assert "graph-review-chat-stance" in block
+        assert "STANCE_LABEL_FALLBACK" in block
+        # 文言の正はサーバの stance_label。フォールバック文字列は1箇所（定数）のみ。
+        assert 'var STANCE_LABEL_FALLBACK = "AIの読み（未確認）";' in JS_SRC
+        assert JS_SRC.count("AIの読み（未確認）") == 1
+        assert "m.stance" in block and "state.chatStanceLabel" in block
+
+    def test_stance_chip_is_not_interactive(self):
+        # 事実の1行であって操作要素ではない（button・data-ui-anchor を足さない）。
+        block = self._chat_log_block()
+        assert "<button" not in block
+        assert "data-ui-anchor" not in block
+
+    def test_stance_label_stored_from_response(self):
+        start = JS_SRC.index("function sendChatText(")
+        block = JS_SRC[start: JS_SRC.index("\n  // ---", start)]
+        assert "data.stance_label" in block
+        assert "state.chatStanceLabel = stanceLabel" in block
+        # タブ往復（履歴の再流し込み）でもチップの文言を落とさない。
+        session_map = JS_SRC[JS_SRC.index("function sessionMessages("):]
+        session_map = session_map[: session_map.index("\n  function ")]
+        assert "stance:" in session_map
+
+    def test_css_class_defined_and_muted(self):
+        assert ".graph-review-chat-stance" in CSS_SRC
+        rule = CSS_SRC[CSS_SRC.index(".graph-review-chat-stance"):]
+        rule = rule[: rule.index("}")]
+        # 控えめな注記であって警告ではない（警告色を使わない）。
+        assert "red" not in rule and "#ef4444" not in rule
+
+    def test_es5_in_chat_blocks(self):
+        block = self._chat_log_block()
+        assert "=>" not in block
+        assert not re.search(r"\bconst\s", block)
+        assert not re.search(r"\blet\s", block)
+        assert "`" not in block
+
+
+class TestSpokenResponseMode:
+    """音声のときだけ話し言葉の応答を求め、読み上げにはそれを使う。"""
+
+    def _send_block(self) -> str:
+        start = JS_SRC.index("function sendChatText(")
+        return JS_SRC[start: JS_SRC.index("\n  // ---", start)]
+
+    def test_response_mode_is_opt_in_from_the_caller(self):
+        block = self._send_block()
+        assert "function sendChatText(content, cb, opts)" in block
+        assert "opts.responseMode" in block
+        # 既定（テキスト送信）はキー自体を載せない。
+        assert "if (responseMode) requestBody.response_mode = responseMode;" in block
+
+    def test_spoken_literal_only_on_the_voice_path(self):
+        # "spoken" を渡すのは音声ループの配線1箇所だけ（テキスト送信は素のまま）。
+        start = JS_SRC.index("function voiceUtterance(")
+        voice = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert '{ responseMode: "spoken" }' in voice
+        assert JS_SRC.count('responseMode: "spoken"') == 1
+        assert "sendChat()" not in voice
+
+    def test_tts_text_prefers_spoken_reply(self):
+        block = self._send_block()
+        # バブルは書き言葉の reply、読み上げは話し言葉の spoken（あれば）。
+        assert "finish(null, data.spoken || replyMessage.content);" in block
+        assert 'content: data.reply || ""' in block
+
+    def test_stance_label_is_not_spoken(self):
+        # 立場ラベルは画面のチップが引き受ける。読み上げ文へ混ぜない。
+        block = self._send_block()
+        assert "stanceLabel + " not in block
+        start = JS_SRC.index("function voiceUtterance(")
+        voice = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert "STANCE_LABEL_FALLBACK" not in voice
+        assert "stance" not in voice
+
+
+class TestScreenContext:
+    """画面文脈アダプター（assistant_screen_adapter_design.md §4.1 / SA1）。
+
+    画面が渡すのは**参照だけ**（選択の ID・表示モード・見えているノードの ID と
+    40字以内の題名）。描画されたテキスト・論文層 DTO の本体は渡さない。
+    """
+
+    def _block(self) -> str:
+        start = JS_SRC.index("function getScreenContext(")
+        return JS_SRC[start: JS_SRC.index("\n  function ", start)]
+
+    def test_public_api_exposes_getter(self):
+        assert "getScreenContext: getScreenContext" in JS_SRC
+
+    def test_contract_shape(self):
+        block = self._block()
+        for key in (
+            'screen: SCREEN_CONTEXT_SCREEN',
+            "document_id:",
+            "node_id:",
+            "component_id:",
+            "graph_layer:",
+            "visible_entities:",
+        ):
+            assert key in block, key
+        assert 'SCREEN_CONTEXT_SCREEN = "graph_review"' in JS_SRC
+        # 表示モードは "graph" | "paper"、層は "main" | "detail" | "all"。
+        assert '"paper" : "graph"' in block
+        assert 'layer: screenContextLayer()' in block
+        layer_fn = JS_SRC[JS_SRC.index("function screenContextLayer("):]
+        layer_fn = layer_fn[: layer_fn.index("\n  function ")]
+        assert '"detail"' in layer_fn and '"all"' in layer_fn and '"main"' in layer_fn
+
+    def test_component_id_uses_existing_resolver(self):
+        assert "deliberationTargetId(node) || null" in self._block()
+
+    def test_no_dto_body_text_is_sent(self):
+        """SA1: 本文・DTO 本体を渡さない（参照と短い題名だけ）。"""
+        source = (
+            self._block()
+            + JS_SRC[JS_SRC.index("function screenContextEntities("): JS_SRC.index("function getScreenContext(")]
+        )
+        for forbidden in (
+            "display_text",
+            "plain_text",
+            "caption",
+            "summary",
+            "body",
+            "description",
+            "latex",
+            "evidence",
+            "paperLayer",
+        ):
+            assert forbidden not in source, forbidden
+
+    def test_visible_entities_are_bounded(self):
+        assert "SCREEN_CONTEXT_MAX_ENTITIES = 20" in JS_SRC
+        assert "SCREEN_CONTEXT_MAX_TITLE_CHARS = 40" in JS_SRC
+        entities = JS_SRC[JS_SRC.index("function screenContextEntities("):]
+        entities = entities[: entities.index("\n  function ")]
+        assert "slice(0, SCREEN_CONTEXT_MAX_ENTITIES)" in entities
+        title_fn = JS_SRC[JS_SRC.index("function screenContextTitle("):]
+        title_fn = title_fn[: title_fn.index("\n  function ")]
+        assert "SCREEN_CONTEXT_MAX_TITLE_CHARS" in title_fn
+        assert "slice(0, SCREEN_CONTEXT_MAX_TITLE_CHARS)" in title_fn
+
+    def test_screen_context_block_is_es5(self):
+        start = JS_SRC.index("function screenContextTitle(")
+        block = JS_SRC[start: JS_SRC.index("\n  function sendChat(", start)]
+        assert "=>" not in block
+        assert not re.search(r"\bconst\s", block)
+        assert not re.search(r"\blet\s", block)
+        assert "`" not in block
+
+
+class TestVoiceChat:
+    """音声対話追補（設計書 §12）— エンジンの独立性と GR1 の維持を静的に固定する。"""
+
+    def _voice_section(self) -> str:
+        # 音声配線の区画（ハンズフリー音声対話 〜 公開 API の直前）。
+        start = JS_SRC.index("ハンズフリー音声対話")
+        end = JS_SRC.index("公開 API", start)
+        return JS_SRC[start:end]
+
+    def test_engine_is_es5(self):
+        # 管理画面 JS は ES5 互換（開発ルール5）。
+        assert "=>" not in VOICE_SRC
+        assert not re.search(r"\bconst\s", VOICE_SRC)
+        assert not re.search(r"\blet\s", VOICE_SRC)
+        assert "`" not in VOICE_SRC
+
+    def test_engine_public_api(self):
+        assert "window.AdminVoiceChat" in VOICE_SRC
+        assert '"use strict"' in VOICE_SRC
+
+    def test_engine_is_dom_independent(self):
+        # エンジンは画面を知らない（アンカー担体は admin-graph-review.js 側）。
+        assert "data-ui-anchor" not in VOICE_SRC
+
+    def test_script_order_engine_before_review(self):
+        voice = HTML_SRC.index('src="/js/admin-voice-chat.js')
+        review = HTML_SRC.index('src="/js/admin-graph-review.js')
+        assert voice < review
+
+    def test_voice_section_never_calls_decision_api(self):
+        # GR1: 音声は対話の入出力手段のみ。承認・却下 API を呼ぶ経路を作らない。
+        section = self._voice_section()
+        assert "/approve" not in section
+        assert "/reject" not in section
+
+    def test_voice_loop_stops_on_rate_limit(self):
+        # 上限（429）に達したら回し続けない。
+        idx = JS_SRC.index("function voiceUtterance")
+        body = JS_SRC[idx: JS_SRC.index("function voiceTranscribe", idx)]
+        assert "429" in body
+        assert "stopVoice(" in body
+
+    def test_close_stops_voice(self):
+        # 画面を閉じたらマイクを解放する（見えない場所で録音を続けない）。
+        idx = JS_SRC.index("function close()")
+        assert "stopVoice()" in JS_SRC[idx: idx + 600]
+
+
+class TestHtmlAndCss:
+    def test_script_loaded_between_studio_and_admin(self):
+        studio = HTML_SRC.index("admin-lecture-studio.js")
+        review = HTML_SRC.index("admin-graph-review.js")
+        admin = HTML_SRC.index("/js/admin.js")
+        assert studio < review < admin
+
+    def test_css_defined(self):
+        assert ".graph-review-modal" in CSS_SRC
+        assert ".graph-review-modal[hidden]" in CSS_SRC
+
+
+class TestDeliberationTargetResolution:
+    """「深く検討」・ノード対話の要素解決（2026-09 是正、設計書 §11）。
+
+    理論操作グラフの main / equation_detail ノードは graph-native ID
+    （theory_op_0001 / eq_op_0001）で theory_components の行を持たない。ノード ID を
+    そのまま渡すとサーバ 422 になるため、代表要素（representative_component_id =
+    component_assembly の agent 側 ID）へ解決し、解決できないノードではボタンを
+    出さずに事実文で案内する（GR3: 数値を出さない・原因を偽らない）。
+    """
+
+    def _block(self, name: str) -> str:
+        start = JS_SRC.index("function " + name + "(")
+        return JS_SRC[start: JS_SRC.index("\n  }\n", start) + 4]
+
+    def test_target_resolver_prefers_db_uuid_then_representative(self):
+        block = self._block("deliberationTargetId")
+        assert "isDbUuid(nodeId)" in block
+        assert "representative_component_id" in block
+        assert "linked_component_ids" in block
+
+    def test_open_deliberation_uses_resolved_target(self):
+        block = self._block("openDeliberation")
+        assert "deliberationTargetId(node)" in block
+        assert 'openElement("theory_component", targetId' in block
+        # 生のノード ID を要素 ID として渡さない（422 の原因）。
+        assert 'openElement("theory_component", g.nodeId(node)' not in JS_SRC
+
+    def test_button_hidden_when_node_has_no_resolvable_element(self):
+        # 解決できないノードは 422 の裏に隠さず、事実文で案内する。
+        assert "集約元の要素を特定できないため" in JS_SRC
+        assert "「深く検討」は集約元の代表要素を開きます。" in JS_SRC
+        assert "var deliberateBtn = deliberationTarget" in JS_SRC
+
+    def test_node_chat_uses_same_target(self):
+        block = self._block("ensureSession")
+        assert "deliberationTargetId(node)" in block
+        assert "element_id: componentId" in block
+
+
+class TestReviewReasonPresentation:
+    """review_reasons の表示是正（2026-09-01）。
+
+    サーバの読み時射影（theory_components.py::_normalize_stored_component_graph）が
+    ①承認済みノードの理由を review_reasons_at_analysis へ移し、②source_backed の
+    warning を review_reasons_advisory と宣言する。UI はレビュー要求（要確認の理由）と
+    参考メモ・解析時点メモを見出しと色で区別し、承認済みノードにレビューを促す
+    表示を残さない。
+    """
+
+    def test_advisory_reasons_use_non_review_heading(self):
+        assert "review_reasons_advisory" in JS_SRC
+        assert "解析メモ（参考）: " in JS_SRC
+        assert "要確認の理由: " in JS_SRC
+
+    def test_archived_reasons_rendered_without_review_prompt(self):
+        assert "review_reasons_at_analysis" in JS_SRC
+        assert "解析時点のメモ（承認済みのため確認は不要です）: " in JS_SRC
+
+    def test_advisory_and_archived_styles_are_not_warning_colored(self):
+        assert ".graph-review-detail-reasons-advisory" in CSS_SRC
+        assert ".graph-review-detail-reasons-archived" in CSS_SRC
+
+    def test_analysis_warnings_are_placed_before_the_review_actions(self):
+        """是正 F6（2026-09-10・六つのレンズ §4 第1波 #5）。
+
+        承認時に消していた解析時の警告を並置する。承認ボタンより前に描き、押す前に
+        「疑う材料」が目に入るようにする。件数バッジは作らない（GR3）。
+        """
+        assert "node.validation_warnings" in JS_SRC
+        assert "解析時点の警告（承認は止めません。内容を確認のうえ判断してください）:" in JS_SRC
+        assert ".graph-review-detail-analysis-warnings" in CSS_SRC
+        detail = JS_SRC[JS_SRC.index("function renderDetail") :]
+        warnings_at = detail.index("graph-review-detail-analysis-warnings")
+        actions_at = detail.index("graph-review-detail-actions")
+        assert warnings_at < actions_at
+
+    def test_analysis_warnings_do_not_disable_approval(self):
+        """警告があっても承認ボタンは活性のまま（弁を増やさない・確定は止めない）。"""
+        detail = JS_SRC[JS_SRC.index("function renderDetail") :]
+        assert "var approveDisabled = isApproved(status)" in detail
+        assert 'analysisWarnings.length ? " disabled"' not in detail
+
+    def test_graph_updated_at_fact_line(self):
+        # いつの解析結果を見ているかを隠さない（焼き込みグラフの鮮度の事実文）。
+        assert "graph_updated_at" in JS_SRC
+        assert "の解析結果を表示しています" in JS_SRC
+        assert ".graph-review-graph-updated" in CSS_SRC
+
+
+class TestArtifactResolvedClaims:
+    """解析結果由来の根拠 claim の表示（2026-09-02 是正）。
+
+    atomic rewrite の細分化 claim / 式から合成した claim は theory_claims の行を
+    持たないため、従来は本文ごと「未解決の根拠（本文を取得できません）」に落ちていた。
+    バックエンドが reference_index を artifact 解決へ拡張したので、UI は本文を出し、
+    承認行が無いことを「未承認（解析結果）」と明示する（隠さない・偽らない）。
+    """
+
+    def test_artifact_labels_present(self):
+        assert "未承認（解析結果）" in JS_SRC
+        assert '"式から合成"' in JS_SRC
+        assert '"主張の細分化"' in JS_SRC
+        assert "元の主張: " in JS_SRC
+        assert ">元の主張を承認</button>" in JS_SRC
+        assert "解析結果のみの根拠で、承認対象の行はありません。" in JS_SRC
+
+    def test_unresolved_fallback_kept(self):
+        # 参照インデックスに無い ID は従来どおり正直に未解決と告げる。
+        assert "未解決の根拠（本文を取得できません）" in JS_SRC
+        assert '"未解決"' in JS_SRC
+
+    def test_parent_approval_reuses_existing_anchor_and_attribute(self):
+        # 新しいアンカー ID を作らない（ADMIN_UI_ANCHORS の網羅テストと二重管理にしない）。
+        block = JS_SRC[JS_SRC.index("function claimRowHtml("):]
+        block = block[: block.index("\n  function ")]
+        assert 'data-ui-anchor="graph-review.claim-approve"' in block
+        assert 'data-graph-review-claim="' in block
+        assert "isApproved(claim.parent_review_status)" in block
+
+    def test_agent_ids_never_interpolated_into_row(self):
+        # 内部 ID（synth_claim_0001 等）は教員 UI に出さない。
+        block = JS_SRC[JS_SRC.index("function claimRowHtml("):]
+        block = block[: block.index("\n  function ")]
+        assert "agent_id" not in block
+
+    def test_es5_in_new_block(self):
+        block = JS_SRC[JS_SRC.index("function claimRowHtml("):]
+        block = block[: block.index("\n  function ")]
+        assert "=>" not in block
+        assert not re.search(r"\bconst\s", block)
+        assert not re.search(r"\blet\s", block)
+        assert "`" not in block
+
+
+_CLAIM_ROW_HARNESS = r"""
+const fs = require("fs");
+const src = fs.readFileSync(process.argv[2], "utf8");
+function extractFrom(s0, name){
+  const s = s0.indexOf("function " + name + "(");
+  if (s<0) throw new Error("missing "+name);
+  let d=0, started=false;
+  for(let j=s0.indexOf("{",s); j<s0.length; j++){
+    const c=s0[j];
+    if(c==="{"){d++;started=true;}
+    else if(c==="}"){d--;if(started&&d===0)return s0.slice(s,j+1);}
+  }
+  throw new Error("unbalanced "+name);
+}
+function extractObjVar(s0, name){
+  const s = s0.indexOf("var " + name + " = {");
+  if (s<0) throw new Error("missing var "+name);
+  const e = s0.indexOf("\n  };\n", s);
+  if (e<0) throw new Error("unbalanced var "+name);
+  return s0.slice(s, e + 6);
+}
+function extractLineVar(s0, name){
+  const m = new RegExp("var " + name + " = \\{[^\\n]*\\};").exec(s0);
+  if (!m) throw new Error("missing line var "+name);
+  return m[0];
+}
+var deps = { escHtml: function (t) {
+  return String(t == null ? "" : t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+} };
+// 原稿スタジオ未ロードの縮退経路（richText → esc）を検証するため window は空にする。
+var window = {};
+var state = { graph: { reference_index: { claims: {
+  "claim_uuid_ref": { claim_id: "11111111-2222-3333-4444-555555555555",
+                      text: "DB 由来の主張", review_status: "teacher_review_required",
+                      resolution: "db" },
+  "synth_claim_0001": { claim_id: "", text: "式から合成された主張", review_status: "",
+                        resolution: "artifact", origin: "equation_synthesis",
+                        support_status: "source_backed", is_atomic: true,
+                        parent_claim_id: "", parent_review_status: "" },
+  "claim_span_001_13_sub04": { claim_id: "", text: "細分化された主張", review_status: "",
+                               resolution: "artifact", origin: "atomic_rewrite",
+                               support_status: "source_backed", is_atomic: true,
+                               parent_claim_id: "99999999-8888-7777-6666-555555555555",
+                               parent_review_status: "teacher_review_required" },
+  "legacy_ref": { claim_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", text: "旧グラフの主張",
+                  review_status: "teacher_approved" }
+} } } };
+eval(extractObjVar(src, "REVIEW_STATUS_LABELS"));
+eval(extractLineVar(src, "APPROVED_STATUSES"));
+eval(extractObjVar(src, "CLAIM_ORIGIN_LABELS"));
+eval(extractFrom(src, "esc"));
+eval(extractFrom(src, "gv"));
+eval(extractFrom(src, "richText"));
+eval(extractFrom(src, "reviewStatusLabel"));
+eval(extractFrom(src, "isApproved"));
+eval(extractFrom(src, "collectClaimRefs"));
+eval(extractFrom(src, "claimRowHtml"));
+
+const refs = collectClaimRefs({ linked_claim_ids: [
+  "claim_uuid_ref", "synth_claim_0001", "claim_span_001_13_sub04", "legacy_ref", "ghost_claim_42"
+] });
+const byAgent = {};
+refs.forEach(function (r) { byAgent[r.agent_id] = r; });
+const rows = {};
+refs.forEach(function (r) { rows[r.agent_id] = claimRowHtml(r); });
+const all = refs.map(function (r) { return rows[r.agent_id]; }).join("");
+
+process.stdout.write(JSON.stringify({
+  dbResolution: byAgent["claim_uuid_ref"].resolution,
+  legacyInferredDb: byAgent["legacy_ref"].resolution,
+  artifactResolution: byAgent["synth_claim_0001"].resolution,
+  missingResolution: byAgent["ghost_claim_42"].resolution,
+  synthShowsText: rows["synth_claim_0001"].indexOf("式から合成された主張") >= 0,
+  synthUnapprovedChip: rows["synth_claim_0001"].indexOf("未承認（解析結果）") >= 0,
+  synthOriginChip: rows["synth_claim_0001"].indexOf("式から合成") >= 0,
+  synthHasNoButton: rows["synth_claim_0001"].indexOf("<button") < 0,
+  synthHasNote: rows["synth_claim_0001"].indexOf("承認対象の行はありません") >= 0,
+  subShowsText: rows["claim_span_001_13_sub04"].indexOf("細分化された主張") >= 0,
+  subOriginChip: rows["claim_span_001_13_sub04"].indexOf("主張の細分化") >= 0,
+  subParentChip: rows["claim_span_001_13_sub04"].indexOf("元の主張: 未レビュー") >= 0,
+  subParentButton:
+    rows["claim_span_001_13_sub04"].indexOf(
+      'data-graph-review-claim="99999999-8888-7777-6666-555555555555"') >= 0 &&
+    rows["claim_span_001_13_sub04"].indexOf(">元の主張を承認</button>") >= 0,
+  subParentButtonEnabled: rows["claim_span_001_13_sub04"].indexOf("disabled") < 0,
+  subHasNoNote: rows["claim_span_001_13_sub04"].indexOf("承認対象の行はありません") < 0,
+  dbRowUnchanged:
+    rows["claim_uuid_ref"].indexOf(">承認</button>") >= 0 &&
+    rows["claim_uuid_ref"].indexOf("未レビュー") >= 0 &&
+    rows["claim_uuid_ref"].indexOf("未承認（解析結果）") < 0,
+  legacyApprovedDisabled: rows["legacy_ref"].indexOf("disabled") >= 0,
+  missingRowFallback:
+    rows["ghost_claim_42"].indexOf("未解決の根拠（本文を取得できません）") >= 0 &&
+    rows["ghost_claim_42"].indexOf("<button") < 0,
+  noAgentIdLeak:
+    all.indexOf("synth_claim_0001") < 0 &&
+    all.indexOf("claim_span_001_13_sub04") < 0 &&
+    all.indexOf("ghost_claim_42") < 0
+}));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node unavailable")
+def test_claim_row_rendering_behaviour_node(tmp_path):
+    """DB 由来 / 解析結果由来 / 未解決 の3系統が期待どおり描き分けられること。"""
+    harness = tmp_path / "claim_row.js"
+    harness.write_text(_CLAIM_ROW_HARNESS, encoding="utf-8")
+    js_path = ROOT / "frontend" / "public" / "js" / "admin-graph-review.js"
+    proc = subprocess.run(["node", str(harness), str(js_path)],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["dbResolution"] == "db"
+    assert out["legacyInferredDb"] == "db", "旧グラフ（resolution 無し）は claim_id で DB 判定"
+    assert out["artifactResolution"] == "artifact"
+    assert out["missingResolution"] == ""
+    assert out["synthShowsText"], "解析結果由来でも本文を隠さない"
+    assert out["synthUnapprovedChip"]
+    assert out["synthOriginChip"]
+    assert out["synthHasNoButton"], "式から合成した claim は単体では承認できない"
+    assert out["synthHasNote"]
+    assert out["subShowsText"]
+    assert out["subOriginChip"]
+    assert out["subParentChip"]
+    assert out["subParentButton"], "元の主張へ承認を導く"
+    assert out["subParentButtonEnabled"]
+    assert out["subHasNoNote"]
+    assert out["dbRowUnchanged"], "DB 由来の行は従来どおり"
+    assert out["legacyApprovedDisabled"], "承認済みは再承認させない"
+    assert out["missingRowFallback"], "本当に解決できない参照は正直に未解決と告げる"
+    assert out["noAgentIdLeak"], "内部 ID を教員 UI に出さない"
+
+
+class TestInlineMathInClaimText:
+    """根拠 claim 本文・ノード説明の数式描画（2026-09-03）。
+
+    claim 本文はインライン数式を ``$…$`` で持つ（バックエンドの合成・修復とも同規約）。
+    生の ``$P_{\\rm L}(k)$`` を教員に読ませないため KaTeX で描画するが、描画の実装は
+    原稿スタジオの正本に一本化する（GR8: 画面ごとに数式パイプラインを増やさない）。
+    """
+
+    def _claim_row_block(self) -> str:
+        block = JS_SRC[JS_SRC.index("function claimRowHtml("):]
+        return block[: block.index("\n  function ")]
+
+    def _studio_helper_block(self) -> str:
+        block = STUDIO_SRC[STUDIO_SRC.index("function lsInlineMathHtml("):]
+        return block[: block.index("\n  function lsRenderKatex(")]
+
+    def test_claim_text_rendered_through_inline_math_helper(self):
+        block = self._claim_row_block()
+        assert "richText(claim.text)" in block
+        assert "esc(claim.text)" not in block
+        # 未解決の正直な事実文は残す。
+        assert "未解決の根拠（本文を取得できません）" in block
+
+    def test_rich_text_delegates_to_graph_view_with_esc_fallback(self):
+        block = JS_SRC[JS_SRC.index("function richText("):]
+        block = block[: block.index("\n  function ")]
+        assert "gv()" in block
+        assert "view.inlineMathHtml" in block
+        assert "return esc(text);" in block, "graphView 未ロード時は素のエスケープへ縮退"
+
+    def test_node_description_uses_same_helper(self):
+        assert 'graph-review-detail-desc">\' + richText(node.description)' in JS_SRC
+
+    def test_review_js_has_no_own_math_pipeline(self):
+        # 4本目の preserveMath / KaTeX 直呼びを作らない。
+        assert "katex" not in JS_SRC.replace("inlineMathHtml", "")
+        assert "preserveMath" not in JS_SRC
+
+    def test_helper_defined_and_exported_on_graph_view(self):
+        assert "function lsInlineMathHtml(" in STUDIO_SRC
+        assert "inlineMathHtml: lsInlineMathHtml" in STUDIO_SRC
+        # graphView オブジェクトの中に載っていること（既存キーの隣）。
+        view_block = STUDIO_SRC[STUDIO_SRC.index("graphView: {"):]
+        view_block = view_block[: view_block.index("}")]
+        assert "inlineMathHtml: lsInlineMathHtml" in view_block
+        assert "nodeId: lsGraphNodeId" in view_block, "既存キーを落とさない"
+
+    def test_helper_reuses_ls_render_katex(self):
+        block = self._studio_helper_block()
+        assert "lsRenderKatex(block.expr, block.display)" in block
+        assert "renderToString" not in block, "KaTeX 直呼びを増やさない"
+        assert "escHtml(" in block, "地の文は必ずエスケープする"
+
+    def test_helper_is_es5(self):
+        block = self._studio_helper_block()
+        assert "=>" not in block
+        assert not re.search(r"\bconst\s", block)
+        assert not re.search(r"\blet\s", block)
+        assert "`" not in block
+
+    def test_studio_claim_labels_strip_math_delimiters(self):
+        # ElementCard は symbol 以外のラベルを数式描画しない（element-card.js の
+        # renderMathGated は element_type=symbol のみ）。ラベルでは区切りだけ外す。
+        assert "function lsGraphStripMathDelimiters(" in STUDIO_SRC
+        assert "lsGraphSnippet(lsGraphStripMathDelimiters(claim.text" in STUDIO_SRC
+        assert "lsGraphSnippet(lsGraphStripMathDelimiters(refClaim.text" in STUDIO_SRC
+
+    def test_css_aligns_inline_math_with_row_text(self):
+        assert ".graph-review-claim-text .katex" in CSS_SRC
+        assert ".graph-review-detail-desc .katex" in CSS_SRC
+
+
+_INLINE_MATH_HARNESS = r"""
+const fs = require("fs");
+const src = fs.readFileSync(process.argv[2], "utf8");
+function extractFrom(s0, name){
+  const s = s0.indexOf("function " + name + "(");
+  if (s<0) throw new Error("missing "+name);
+  let d=0, started=false;
+  for(let j=s0.indexOf("{",s); j<s0.length; j++){
+    const c=s0[j];
+    if(c==="{"){d++;started=true;}
+    else if(c==="}"){d--;if(started&&d===0)return s0.slice(s,j+1);}
+  }
+  throw new Error("unbalanced "+name);
+}
+var deps = { escHtml: function (t) {
+  return String(t == null ? "" : t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+} };
+var window = { katex: { renderToString: function (formula, opts) {
+  return '<span class="katex-fake" data-display="' + (opts.displayMode ? "1" : "0") + '">' +
+    String(formula) + "</span>";
+} } };
+eval(extractFrom(src, "escHtml"));
+eval(extractFrom(src, "lsNormalizeKatexFormula"));
+eval(extractFrom(src, "lsRenderKatex"));
+eval(extractFrom(src, "lsInlineMathHtml"));
+eval(extractFrom(src, "lsGraphStripMathDelimiters"));
+
+const inline = lsInlineMathHtml("Equation defines $P_{\\rm L}(k)$ here.");
+const display = lsInlineMathHtml("before $$a = b$$ after");
+const paren = lsInlineMathHtml("value \\(x_i\\) end");
+const unbalanced = lsInlineMathHtml("costs $5 per <unit> & more");
+const noKatex = (function () {
+  const saved = window.katex; window.katex = null;
+  const out = lsInlineMathHtml("see $\\alpha$ now");
+  window.katex = saved; return out;
+})();
+
+process.stdout.write(JSON.stringify({
+  inlineWrapped: inline.indexOf('class="lecture-formula visible"') >= 0,
+  inlineKeepsTex: inline.indexOf("P_{\\rm L}(k)") >= 0,
+  inlineNoDollar: inline.indexOf("$") < 0,
+  inlineProseKept: inline.indexOf("Equation defines ") >= 0 && inline.indexOf(" here.") >= 0,
+  displayWrapped: display.indexOf('class="lecture-formula-block visible"') >= 0,
+  parenWrapped: paren.indexOf('class="lecture-formula visible"') >= 0 &&
+    paren.indexOf("x_i") >= 0 && paren.indexOf("\\(") < 0,
+  unbalancedLiteral: unbalanced.indexOf("$5 per") >= 0,
+  unbalancedEscaped: unbalanced.indexOf("&lt;unit&gt;") >= 0 &&
+    unbalanced.indexOf("&amp;") >= 0,
+  unbalancedNoMath: unbalanced.indexOf("lecture-formula") < 0,
+  noKatexChip: noKatex.indexOf("ls-formula-chip") >= 0 &&
+    noKatex.indexOf("\\alpha") >= 0,
+  emptyStays: lsInlineMathHtml("") === "",
+  stripKeepsTex: lsGraphStripMathDelimiters("defines $P_{\\rm L}(k)$ here") ===
+    "defines P_{\\rm L}(k) here"
+}));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node unavailable")
+def test_inline_math_helper_behaviour_node(tmp_path):
+    """$…$ / \\(…\\) / $$…$$ の描画と、閉じない $ の literal 維持。"""
+    harness = tmp_path / "inline_math.js"
+    harness.write_text(_INLINE_MATH_HARNESS, encoding="utf-8")
+    js_path = ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js"
+    proc = subprocess.run(["node", str(harness), str(js_path)],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["inlineWrapped"], "$…$ は lecture-formula ラッパで描画"
+    assert out["inlineKeepsTex"]
+    assert out["inlineNoDollar"], "区切りの $ は出力に残さない"
+    assert out["inlineProseKept"]
+    assert out["displayWrapped"], "$$…$$ はブロック"
+    assert out["parenWrapped"]
+    assert out["unbalancedLiteral"], "閉じない $ は数式にしない"
+    assert out["unbalancedEscaped"], "地の文は必ずエスケープ"
+    assert out["unbalancedNoMath"]
+    assert out["noKatexChip"], "window.katex 不在時は <code> チップへ縮退"
+    assert out["emptyStays"]
+    assert out["stripKeepsTex"], "ラベルでは区切りだけ外して TeX ソースを残す"
+
+
+class TestStudioDeliberationTargetResolution:
+    """原稿スタジオのグラフ詳細も同じ要素解決規則を使う（同根の 422 の再発防止）。"""
+
+    def test_studio_resolves_target_before_open_element(self):
+        assert "function lsGraphDeliberationTargetId(" in STUDIO_SRC
+        assert 'openElement("theory_component", deliberationTarget' in STUDIO_SRC
+        # 生のグラフノード ID を要素 ID として渡す旧形が存在しない。
+        assert 'openElement("theory_component", nodeId' not in STUDIO_SRC
+
+    def test_studio_resolver_order(self):
+        start = STUDIO_SRC.index("function lsGraphDeliberationTargetId(")
+        block = STUDIO_SRC[start: STUDIO_SRC.index("\n  }\n", start) + 4]
+        assert "representative_component_id" in block
+        assert "linked_component_ids" in block
+
+
+class TestPaperLayer:
+    """グラフの論文層（graph_paper_layer_design.md §3/§4.1/§7）。
+
+    フレーム（理論操作グラフ）を触らず、論文側の骨格と各ノードの「論文での対応」を
+    読み時射影で足す層。UI 側の不変条項は PL2（LLM を呼ばない = 生成しない）・
+    PL3（リンクの無いものに位置を推定しない）・PL4（数値・件数を出さない）・
+    PL7（内部 ID を描かない）・PL8（欠落は事実文で明示）。
+    """
+
+    MANUAL_SRC = (ROOT / "docs" / "manual" / "teacher" / "26-admin-graph-review.md").read_text(
+        encoding="utf-8"
+    )
+
+    def test_anchors_present(self):
+        for anchor in ("graph-review.paper-view", "graph-review.paper-facing"):
+            assert 'data-ui-anchor="' + anchor + '"' in JS_SRC, anchor
+
+    def test_paper_layer_fetch_path_and_stale_guard(self):
+        start = JS_SRC.index("function loadPaperLayer(")
+        block = JS_SRC[start: JS_SRC.index("\n  }\n", start) + 4]
+        assert '"/admin/documents/" + encodeURIComponent(documentId) + "/paper-layer"' in block
+        # グラフ取得と同型の stale-response ガード（別教材へ切替済みの応答は破棄）。
+        assert "state.documentId !== documentId" in block
+        # 取得失敗はグラフ・レビュー操作を止めず、事実文だけを残す（PL8）。
+        assert "state.paperLayerError" in block
+
+    def test_view_toggle_attribute_and_state(self):
+        assert 'data-graph-review-view="graph"' in JS_SRC
+        assert 'data-graph-review-view="paper"' in JS_SRC
+        assert "function setView(" in JS_SRC
+        # 切替では network インスタンスを捨てず、包みの hidden を切り替える。
+        assert "graph-review-network-wrap" in JS_SRC
+
+    def test_outline_and_facing_class_names(self):
+        assert "graph-review-paper-section" in JS_SRC
+        assert "graph-review-paper-facing" in JS_SRC
+        assert "graph-review-paper-chip" in JS_SRC
+
+    def test_fact_sentences_present(self):
+        # PL3: 位置を推定せず、特定できない事実をそのまま出す。
+        assert "論文上の位置を特定できませんでした（式・根拠・claim へのリンクがありません）" in JS_SRC
+        # PL8: 掛かっていない章・取得失敗の事実文。
+        assert "このフレームには掛かっていません" in JS_SRC
+        assert "論文層を取得できませんでした。" in JS_SRC
+
+    def test_coverage_block_has_no_counts_or_warning(self):
+        start = JS_SRC.index("function paperCoverageHtml(")
+        block = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert "フレームに掛かっていない要素" in block
+        # 件数バッジ・警告色を作らない（PL4 / 設計書 §3.2）。
+        assert ".length +" not in block
+        assert "警告" not in block
+        assert "is-error" not in block
+
+    def test_node_chips_never_print_internal_ids(self):
+        start = JS_SRC.index("function paperNodeLabel(")
+        block = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        # detailHeading が nodeId へ縮退したら DTO の label、それも無ければ表示名なし。
+        assert "detailHeading" in block
+        assert "heading !== nodeId" in block
+        assert "（表示名なし）" in block
+
+    def test_no_local_math_pipeline(self):
+        # 数式は共通の richText（graphView.inlineMathHtml）経由のみ（GR8）。
+        assert "katex" not in JS_SRC.lower()
+        assert 'richText("$" + latex + "$")' in JS_SRC
+
+    def test_paper_layer_block_is_es5(self):
+        block = JS_SRC[JS_SRC.index("function renderPaperOutline("):]
+        block = block[: block.index("\n  function markSelectedPaperChips(")]
+        assert "=>" not in block
+        assert not re.search(r"\bconst\s", block)
+        assert not re.search(r"\blet\s", block)
+
+    def test_css_defined(self):
+        assert ".graph-review-paper-" in CSS_SRC
+        assert ".graph-review-paper[hidden]" in CSS_SRC
+
+    def test_manual_sections_exist(self):
+        assert "{#paper-view}" in self.MANUAL_SRC
+        assert "{#paper-facing}" in self.MANUAL_SRC
+
+    # --- Phase 1 表示の是正（設計書 §11 / 画面文脈アダプター §5.3）------------
+
+    def test_canvas_cue_is_a_discrete_mark_without_counts(self):
+        # ラベルに1文字足すだけの離散マーク（★ / ① と同じ流儀）。件数は出さない（PL4）。
+        assert 'PAPER_CUE_GLYPH = "¶"' in JS_SRC
+        assert "PAPER_CUE_LEGEND_TEXT" in JS_SRC
+        assert '"¶ 論文要素あり"' in JS_SRC
+        kinds = JS_SRC[JS_SRC.index("function paperNodeElementKinds("):]
+        kinds = kinds[: kinds.index("\n  function ")]
+        # 種別だけを集める（長さは真偽判定にしか使わず、外へ出さない）。
+        assert ".length +" not in kinds
+        assert "kinds.push(kind.label)" in kinds
+        legend = JS_SRC[JS_SRC.index("function renderPaperCueLegend("):]
+        legend = legend[: legend.index("\n  function ")]
+        assert "件" not in legend
+
+    def test_canvas_cue_applied_in_vis_node_spec_path(self):
+        start = JS_SRC.index("function renderNetwork(")
+        block = JS_SRC[start: JS_SRC.index("\n  function selectNode(", start)]
+        assert "paperNodeElementKinds(" in block
+        assert "PAPER_CUE_GLYPH" in block
+
+    def test_canvas_cue_rerendered_when_paper_layer_arrives(self):
+        # 論文層はグラフより後に届く（並行取得）。届いた時点で描き直す。
+        start = JS_SRC.index("function loadPaperLayer(")
+        block = JS_SRC[start: JS_SRC.index("\n  // ---", start)]
+        assert "renderNetwork()" in block
+        assert "renderPaperCueLegend()" in block
+        # 見ている範囲は動かさない。
+        assert "state.preserveViewOnce = true" in block
+
+    def test_node_claims_rendered_with_labels_not_raw_codes(self):
+        start = JS_SRC.index("var paperClaims = ")
+        block = JS_SRC[start: JS_SRC.index("var equations = entry.equations", start)]
+        assert "entry.claims" in JS_SRC[JS_SRC.index("function paperFacingHtml("):]
+        assert "論文側の主張" in block
+        # 生の status コード・resolution 値をそのまま描かない（既存のラベル関数を使う）。
+        assert "reviewStatusLabel(claim.review_status)" in block
+        assert "未承認（解析結果）" in block
+        assert "esc(claim.resolution)" not in block
+        assert "esc(String(claim.resolution" not in block
+
+    def test_empty_detail_pane_points_at_paper_and_chat(self):
+        assert "ノードを選ぶと、論文側の対応（章・式・引用・図表）と対話が使えます。" in JS_SRC
+        # レビュー操作の案内も残す（既存の役割を落とさない）。
+        assert "詳細とレビュー操作（承認・却下）も同じ場所に表示されます。" in JS_SRC
+
+    def test_facts_rendered_in_paper_facing_block(self):
+        # PL8: available:true でも欠落の事実文（グラフ未構築など）は出す。
+        start = JS_SRC.index("function paperFacingHtml(")
+        block = JS_SRC[start: JS_SRC.index("var titles = paperSectionTitles();", start)]
+        assert "var factsHtml = paperFactLines(data.facts" in block
+        assert "paperFacingHead(entry) + factsHtml" in block
+        # 論文の順ビュー側は従来どおり先頭に facts を描く。
+        outline = JS_SRC[JS_SRC.index("function renderPaperOutline("):]
+        outline = outline[: outline.index("\n  function markSelectedPaperChips(")]
+        assert "paperFactLines(data.facts" in outline
+
+    def test_bidirectional_highlight(self):
+        # グラフ表示中でも、選択ノードの章チップが「論文での対応」の見出しに出る。
+        head = JS_SRC[JS_SRC.index("function paperFacingHead("):]
+        head = head[: head.index("\n  function paperFacingHtml(")]
+        assert "graph-review-paper-facing-head" in head
+        assert "entry.sections" in head
+        # 論文の順でチップを押すと、グラフへ戻ったときにその視点へ合わせる。
+        assert "state.focusNodeOnce = nodeId" in JS_SRC
+        network = JS_SRC[JS_SRC.index("function renderNetwork("):]
+        network = network[: network.index("\n  function selectNode(")]
+        assert "network.focus(focusOnce" in network
+
+    def test_new_css_classes_defined(self):
+        assert ".graph-review-paper-facing-head" in CSS_SRC
+        assert ".graph-review-paper-cue-legend" in CSS_SRC
+        # 凡例は事実の1行。警告色にしない（PL4）。
+        legend_css = CSS_SRC[CSS_SRC.index(".graph-review-paper-cue-legend"):]
+        legend_css = legend_css[: legend_css.index("}")]
+        assert "red" not in legend_css and "#ef4444" not in legend_css
+
+    # --- P0-9 文章層（支持構造）と DSL 層 ----------------------------------
+    #
+    # 正本: docs/architecture/knowledge_structure_review_2026-09-12.md §4 の P0-9
+    # （A_fidelity.md の F-12 / F-14）。読み時射影で足した2区画を、既存の論文層と
+    # 同じ規律（PL4 数値なし / PL7 内部 ID なし / 空なら区画ごと非表示）で描く。
+
+    def test_support_structure_and_dsl_are_rendered_in_the_paper_view(self):
+        outline = JS_SRC[JS_SRC.index("function renderPaperOutline("):]
+        outline = outline[: outline.index("\n  function markSelectedPaperChips(")]
+        idx_backbone = outline.index("paperBackboneHtml(paper.backbone)")
+        idx_support = outline.index("paperSupportStructureHtml(paper.support_structure)")
+        idx_dsl = outline.index("paperDslHtml(paper.dsl)")
+        idx_coverage = outline.index("paperCoverageHtml(data.coverage)")
+        assert idx_backbone < idx_support < idx_dsl < idx_coverage
+
+    def test_support_structure_block_reuses_the_existing_chips(self):
+        block = JS_SRC[JS_SRC.index("function paperSupportStructureHtml("):]
+        block = block[: block.index("\n  // 概念関係")]
+        assert "中心命題の支持構造" in block
+        assert "sec.section_label" in block
+        # 式は印字番号チップ、ノードは既存のノードチップ（クリックで移動）を再利用する。
+        assert "entry.equation_labels" in block
+        assert "paperNodeChips(" in block
+        # 空なら区画ごと出さない。件数バッジ・警告色を作らない（PL4）。
+        assert 'if (!list.length) return ""' in block
+        assert ".length +" not in block
+        assert "警告" not in block
+
+    def test_dsl_block_shows_values_not_internal_ids(self):
+        block = JS_SRC[JS_SRC.index("function paperDslHtml("):]
+        block = block[: block.index("\n  function renderPaperOutline(")]
+        assert "概念関係（DSL）" in block
+        # 主語は node_value。node_id は照合キーとしてしか使わない（PL7）。
+        assert "node.node_value" in block
+        assert "esc(String(node.node_id))" not in block
+        assert "valueById[String(edge.from_node_id)]" in block
+        # 関係は A —[verb / PREDICATE]→ B の1行表記。極性は記号ではなく語（サーバ製）。
+        assert "domain_verb" in block and "core_predicate" in block
+        assert "edge.polarity_label" in block
+        assert 'if (!nodes.length) return ""' in block
+
+    def test_unbound_backbone_is_part_of_the_coverage_block(self):
+        block = JS_SRC[JS_SRC.index("function paperCoverageHtml("):]
+        block = block[: block.index("\n  // 中心命題の支持構造")]
+        assert "coverage.unbound_backbone" in block
+        assert "掛かっていない骨格" in block
+
+    def test_new_paper_blocks_are_es5(self):
+        block = JS_SRC[JS_SRC.index("function paperSupportStructureHtml("):]
+        block = block[: block.index("\n  function renderPaperOutline(")]
+        assert "=>" not in block
+        assert not re.search(r"\bconst\s", block)
+        assert not re.search(r"\blet\s", block)
+
+    def test_no_new_ui_anchor_was_introduced(self):
+        """既存 graph-review.paper-view の中の描画追加に留める（マニュアル3点セットを
+        増やさない）。アンカー一覧の正本は test_admin_help_ui_anchors.py。"""
+        anchors = set(re.findall(r'data-ui-anchor="([^"]+)"', JS_SRC))
+        assert "graph-review.paper-support" not in anchors
+        assert "graph-review.paper-dsl" not in anchors
+
+    def test_dsl_relation_style_is_defined_and_not_a_warning(self):
+        assert ".graph-review-paper-rel" in CSS_SRC
+        rel_css = CSS_SRC[CSS_SRC.index(".graph-review-paper-rel"):]
+        rel_css = rel_css[: rel_css.index("}")]
+        assert "red" not in rel_css and "#ef4444" not in rel_css
+
+
+class TestGraphLayout:
+    """層状レイアウト（graphView.layoutPositions）— 一段に潰して一直線にしない。
+
+    旧実装は語彙から初期段を決め、辺の伝播に ``Math.min(4, …)`` の上限を掛けていた。
+    上位理論構成のラベルは語彙上ほとんどが relation に落ちるため全ノードが同じ段から
+    始まり、深さが 4 で頭打ちになって数十個のノードが一段に横並びになっていた。
+    """
+
+    def _layout_source(self) -> str:
+        start = STUDIO_SRC.index("  function lsGraphLayoutPositions(nodes, edges) {")
+        end = STUDIO_SRC.index("  function lsGraphRelationPriority(edge) {")
+        return STUDIO_SRC[start:end]
+
+    def test_no_depth_cap(self):
+        # 段の深さに上限を置かない（置くと深いチェーンが一段に潰れる）。
+        layout = self._layout_source()
+        assert "Math.min(4," not in layout
+        assert "Math.min(3, Math.max(0," not in STUDIO_SRC
+
+    def test_rank_from_structure_not_vocabulary(self):
+        # 段は辺（構造）から決める。語彙で初期段を決める関数は残さない。
+        assert "function lsGraphNodeLevel" not in STUDIO_SRC
+        assert "function lsGraphRankNodes" in STUDIO_SRC
+
+    def test_no_paper_specific_ordering(self):
+        # 段内の並びは交差を減らすバリセンタ法で決める。特定論文の語彙で並べない
+        # （domain-independent）。
+        assert "function lsGraphNodeSortKey" not in STUDIO_SRC
+        assert "function lsGraphSweepLayers" in STUDIO_SRC
+        for token in ("reality criterion", "no-disturbance", "incompleteness"):
+            assert token not in self._layout_source().lower(), token
+
+    def test_components_separated(self):
+        # つながっていない塊は重ねず横に並べ、辺を持たないノードは格子に畳む。
+        layout = self._layout_source()
+        assert "lsGraphConnectedComponents" in layout
+        assert "componentGap" in layout
+        assert "Math.ceil(Math.sqrt(isolated.length))" in layout
+
+    def test_weak_relations_do_not_rank(self):
+        # 向きが前後関係を表さない辺は段の決定に使わない。
+        assert "function lsGraphWeakRelation" in STUDIO_SRC
+        assert "UNCERTAIN_DUE_TO" in STUDIO_SRC
+
+
+class TestNodePositionPersistence:
+    """教員が動かしたノードの位置を覚える（層の切替・再読み込みで戻さない）。"""
+
+    def test_positions_saved_per_document(self):
+        assert 'POSITION_STORAGE_PREFIX = "eg_graph_review_layout:"' in JS_SRC
+        assert "function loadNodePositions" in JS_SRC
+        assert "function persistNodePositions" in JS_SRC
+
+    def test_drag_end_remembers_positions(self):
+        assert 'network.on("dragEnd"' in JS_SRC
+        assert "rememberDraggedNodes(network" in JS_SRC
+        assert "network.getPositions(" in JS_SRC
+
+    def test_saved_positions_override_auto_layout(self):
+        # 自動レイアウトの上に、保存済みの位置だけを重ねる。
+        assert "withSavedPositions(gv().layoutPositions(nodes, displayEdges), nodes)" in JS_SRC
+
+    def test_loaded_on_open(self):
+        assert "state.nodePositions = loadNodePositions(documentId)" in JS_SRC
+
+    def test_reset_available(self):
+        # 動かした配置を捨てて自動の並びへ戻す出口を必ず用意する。
+        assert 'id="graph-review-reset-layout"' in JS_SRC
+        assert 'data-ui-anchor="graph-review.reset-layout"' in JS_SRC
+        assert "function resetNodePositions" in JS_SRC
+
+    def test_storage_failures_are_silent(self):
+        # localStorage が使えない環境でも画面を止めない（自動配置のまま動く）。
+        for fn in ("function loadNodePositions", "function persistNodePositions"):
+            idx = JS_SRC.index(fn)
+            body = JS_SRC[idx: JS_SRC.index("\n  }", idx)]
+            assert "catch (e)" in body, fn
+
+    def test_positions_are_local_and_not_sent(self):
+        # 位置は端末の都合。サーバへ送らない（保存 API も新しい列も作らない）。
+        assert "/positions" not in JS_SRC
+        assert not re.search(r"apiFetch\([^)]*position", JS_SRC, re.IGNORECASE)

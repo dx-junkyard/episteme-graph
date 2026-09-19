@@ -223,3 +223,87 @@ class TestEmptyScopeIsNormal:
         assert "検証スコープの記帳なし" in src
         # 警告色クラスを空欄表示に使わない（doubt-muted の静かな表示）
         assert "doubt-muted" in src
+
+
+class TestLearnerOpenAssumptionsHideRawNumbers:
+    """学習者向け未検証合意リストに生数値を出さない（D層「数値を見せない」）。
+
+    ``compile_open_assumptions`` は教員向けに ``dependent_count``（下流到達数の生値、
+    ``core/doubt/open_assumptions.py``）を載せる。学習者ルートはその投影をそのまま
+    返していたため、ゼミ前ブリーフ（SB2）と**同じ語彙**の安全網で遮断する。
+    教員向けルートは不変（段階ラベルと併せて生値を使う画面がある）。
+    """
+
+    _FORBIDDEN = frozenset({"dependent_count", "load_score", "confidence", "score"})
+
+    @staticmethod
+    def _walk(value, seen):
+        if isinstance(value, dict):
+            seen.update(value.keys())
+            for v in value.values():
+                TestLearnerOpenAssumptionsHideRawNumbers._walk(v, seen)
+        elif isinstance(value, list):
+            for v in value:
+                TestLearnerOpenAssumptionsHideRawNumbers._walk(v, seen)
+
+    def _call_learner_route(self, monkeypatch, items):
+        import sys
+
+        sys.path.insert(0, str(_BACKEND / "api"))
+        from api.routes import doubt as doubt_module
+
+        monkeypatch.setattr(
+            doubt_module, "get_accessible_course_data", lambda _uid, _cid: {"title": "c"}
+        )
+        monkeypatch.setattr(
+            doubt_module, "compile_open_assumptions", lambda *_a, **_k: items
+        )
+
+        class _Session:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(doubt_module, "_pg_session", lambda: _Session())
+        return doubt_module.get_learner_open_assumptions(
+            "course-1", current_user={"id": "u1", "role": "STUDENT"}
+        )
+
+    def test_dependent_count_is_stripped_from_learner_payload(self, monkeypatch):
+        payload = self._call_learner_route(
+            monkeypatch,
+            [
+                {
+                    "target_id": "t1",
+                    "target_type": "assumption",
+                    "statement": "前提",
+                    "load_level": "high",
+                    "dependent_count": 17,
+                    "scope_coverage": "none",
+                }
+            ],
+        )
+        seen: set[str] = set()
+        self._walk(payload, seen)
+        assert not (self._FORBIDDEN & seen), f"生数値キーが学習者へ漏れている: {sorted(seen)}"
+        # 段階ラベルは落とさない（情報を落とさずに数値だけ落とす）。
+        assert payload["items"][0]["load_level"] == "high"
+        assert payload["items"][0]["statement"] == "前提"
+
+    def test_learner_route_uses_the_shared_numeric_vocabulary(self):
+        """数値キーの表を二重に持たない（正本は seminar_brief の SB2 安全網）。"""
+        import re as _re
+
+        block = _re.search(
+            r"def get_learner_open_assumptions[\s\S]+?(?=\n\n\n|\Z)", _ROUTES_SRC
+        ).group(0)
+        assert "strip_learner_numeric_keys(" in block
+        assert "_FORBIDDEN_NUMERIC_KEYS as LEARNER_FORBIDDEN_NUMERIC_KEYS" in _ROUTES_SRC
+
+    def test_teacher_route_is_unchanged(self):
+        """教員向けの一覧は投影を変えない（是正の対象は学習者ルートのみ）。"""
+        import re as _re
+
+        block = _re.search(
+            r"def get_open_assumptions[\s\S]+?\n\n\n", _ROUTES_SRC
+        ).group(0)
+        assert "strip_learner_numeric_keys(" not in block
