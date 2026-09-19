@@ -179,6 +179,28 @@ class TestEntries:
             listed = set(re.findall(r"`([a-z0-9-]+)`", block.split("| 含む型 |", 1)[1].split("\n", 1)[0]))
             assert listed == set(types), f"族 `{fam}` の「含む型」と #### 見出しが食い違う: {listed ^ set(types)}"
 
+    def test_cycle_stage_layers_are_declared(self):
+        """改善サイクルの段の層（cycle_*）は layers.md に全部あり、モジュールの宣言と一致する。"""
+        slugs = set(ik.layer_vocabulary())
+        missing = [s for s in ik.CYCLE_STAGE_LAYERS if s not in slugs]
+        assert missing == [], f"layers.md にサイクル層が無い: {missing}"
+        extra = sorted(s for s in slugs if s.startswith(ik.CYCLE_LAYER_PREFIX) and s not in ik.CYCLE_STAGE_LAYERS)
+        assert extra == [], f"モジュールに宣言されていない cycle_ 層: {extra}（段を足すなら CYCLE_STAGE_LAYERS にも）"
+        cycle_doc = ik.IMPROVEMENT_CYCLE_DOC.read_text(encoding="utf-8")
+        for s in ik.CYCLE_STAGE_LAYERS:
+            assert f"`{s}`" in cycle_doc, f"改善サイクル文書 §3 にサイクル層 `{s}` が挙がっていない"
+
+    def test_improvement_cycle_doc_exists_and_is_indexed(self):
+        """改善サイクルの正本はリポジトリにあり、状態行を持ち、索引と課題ナレッジ README から参照される。"""
+        assert ik.IMPROVEMENT_CYCLE_DOC.exists(), "docs/architecture/improvement_cycle.md が無い（手順の正本をリポジトリ外に置かない）"
+        head = ik.IMPROVEMENT_CYCLE_DOC.read_text(encoding="utf-8")[:1500]
+        assert re.search(r"(?m)^.*(状態|ステータス):", head)
+        for path in (ROOT / "docs" / "README.md", ROOT / "CLAUDE.md", README_DOC, ROOT / "docs" / "development_checklist.md"):
+            assert "improvement_cycle.md" in path.read_text(encoding="utf-8"), f"{path.relative_to(ROOT)} が改善サイクル文書を参照していない"
+        text = ik.IMPROVEMENT_CYCLE_DOC.read_text(encoding="utf-8")
+        for needle in ("## 3.", "## 4.", "index.md", "再帰"):
+            assert needle in text, f"改善サイクル文書に「{needle}」が無い（自己適用・線引き・計器の節）"
+
     def test_layers_doc_rows_map_to_layer_registry(self):
         """layers.md の各行は、レイヤー索引表 §1 の層に対応するか「（索引表外）」と明記する。"""
         registry = (ROOT / "docs" / "architecture" / "layer_registry.md").read_text(encoding="utf-8")

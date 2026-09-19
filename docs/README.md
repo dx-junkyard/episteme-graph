@@ -19,7 +19,8 @@
 | **なぜこのシステムが必要か**を知りたい（外部ステークホルダー向け） | [サービスデザイン](service_design.md) — 現状認識 → 課題 → gap → UX → 機能への対応表 |
 | **どの層が何の機能で、どの migration か**を知りたい | [レイヤー索引表](architecture/layer_registry.md) |
 | 開発ルール・各層の実装規約を知りたい | [CLAUDE.md](../CLAUDE.md)（リポジトリルート） |
-| 過去の課題が**どんな原因の型**で、**どう見つかり・どう解かれたか**を引きたい | [課題ナレッジ](issue_knowledge/README.md) — 2 群 4 主分類（局所 / 構造・接続・統制）・発見観点・解決観点・型の辞書・索引 |
+| 過去の課題が**どんな原因の型**で、**どう見つかり・どう解かれたか**を引きたい | [課題ナレッジ](issue_knowledge/README.md) — 4 軸の座標（処理・構造・接続・統制）・発見観点・解決観点・型の辞書・索引 |
+| コーディングエージェントが回す**改善サイクル**の段・規律・自律と人の線引きを知りたい | [改善サイクル（運用規約）](architecture/improvement_cycle.md) — 発見 → 選別 → 設計 → 実装 → 検証 → 是正 → 記録 → 体系の育成。サイクル自身の課題も課題ナレッジへ |
 
 ---
 
@@ -131,6 +132,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
 - [candidate → confirm 共通プリミティブ](features/candidate_flow_design.md) — 候補→確定ワークフローの共通制御フロー（`core/candidate_flow.py`）
 - [段階ラベル辞書の正本](features/label_vocab_design.md) — 生値→段階ラベルの境界と共有語彙表（`core/label_vocab.py`）
 - [新機能 PR チェックリスト](development_checklist.md) — docs 3点セット・境界回帰テスト・アンカー整合
+- [改善サイクル（コーディングエージェントの運用規約）](architecture/improvement_cycle.md) — 段の宣言・各段の規律・サイクル自身の課題の記帳・自律と人の線引き・索引 §14 の計器の読み方
 
 ### バックエンド
 

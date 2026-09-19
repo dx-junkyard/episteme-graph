@@ -184,6 +184,20 @@ DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 PATTERN_HEADING_RE = re.compile(r"(?m)^#### ([a-z0-9]+(?:-[a-z0-9]+)*)\s*$")
 FAMILY_HEADING_RE = re.compile(r"(?m)^### ([a-z0-9]+(?:-[a-z0-9]+)*)\s*$")
 LAYER_ROW_RE = re.compile(r"(?m)^\| `([a-z0-9_]+)` \|")
+
+# 改善サイクルの段の層（docs/architecture/improvement_cycle.md §1 / layers.md）。
+# 索引 §14 はこの接頭辞を持つ層のエントリを「サイクル自身の課題」として並べる。
+CYCLE_LAYER_PREFIX = "cycle_"
+CYCLE_STAGE_LAYERS: tuple[str, ...] = (
+    "cycle_discovery",
+    "cycle_triage",
+    "cycle_design",
+    "cycle_implementation",
+    "cycle_verification",
+    "cycle_remediation",
+    "cycle_recording",
+)
+IMPROVEMENT_CYCLE_DOC = ROOT / "docs" / "architecture" / "improvement_cycle.md"
 COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{7,40}$")
 TYPICAL_COORD_RE = re.compile(r"\| 典型的な座標 \| (.+?) \|")
 
@@ -1026,6 +1040,74 @@ def render_index(entries: list[Entry], dictionary_text: str) -> str:
     else:
         lines.append("暫定の値はない（新設候補は §12）。")
         lines.append("")
+
+    lines.append("## 14. サイクルの計器（次のサイクルで弱い段を選ぶための分布。目標値・KPI にしない）")
+    lines.append("")
+    lines.append(
+        "読み方の正本は [改善サイクル §5](../architecture/improvement_cycle.md)。月は `recorded_at` の年月。"
+        "件数は本索引だけが持ち、エントリ・辞書・規約文書には書かない。"
+    )
+    lines.append("")
+    months = sorted({str(e.meta.get("recorded_at"))[:7] for e in entries if e.meta.get("recorded_at")})
+
+    lines.append("### 14.1 型の再発（月をまたいで出る型）")
+    lines.append("")
+    pattern_months: dict[str, Counter] = defaultdict(Counter)
+    for e in entries:
+        m = str(e.meta.get("recorded_at"))[:7] if e.meta.get("recorded_at") else None
+        if m:
+            pattern_months[str(e.meta.get("pattern"))][m] += 1
+    recurring = sorted(
+        (pat for pat, c in pattern_months.items() if len(c) >= 2),
+        key=lambda pat: (-len(pattern_months[pat]), -sum(pattern_months[pat].values()), pat),
+    )
+    if recurring:
+        lines.append("| 型 | " + " | ".join(months) + " |")
+        lines.append("|---|" + "---|" * len(months))
+        for pat in recurring:
+            c = pattern_months[pat]
+            lines.append(f"| `{pat}` | " + " | ".join(str(c.get(m, "")) for m in months) + " |")
+    else:
+        lines.append("（月をまたいで出る型はない）")
+    lines.append("")
+    single = sorted(pat for pat, c in pattern_months.items() if len(c) == 1)
+    lines.append("単一の月にだけ出た型: " + (", ".join(f"`{p}`" for p in single) if single else "（なし）"))
+    lines.append("")
+
+    lines.append("### 14.2 発見観点の月別分布（偏りを見る）")
+    lines.append("")
+    disc_months: dict[str, Counter] = defaultdict(Counter)
+    for e in entries:
+        m = str(e.meta.get("recorded_at"))[:7] if e.meta.get("recorded_at") else None
+        if not m:
+            continue
+        for pp in _as_list((e.meta.get("discovery") or {}).get("perspective")):
+            disc_months[str(pp)][m] += 1
+    lines.append("| 発見観点 | " + " | ".join(months) + " |")
+    lines.append("|---|" + "---|" * len(months))
+    for pp in DISCOVERY_PERSPECTIVES:
+        c = disc_months.get(pp, Counter())
+        lines.append(f"| `{pp}` | " + " | ".join(str(c.get(m, "")) for m in months) + " |")
+    lines.append("")
+    unused = [pp for pp in DISCOVERY_PERSPECTIVES if not disc_months.get(pp)]
+    lines.append("一度も使われていない観点: " + (", ".join(f"`{p}`" for p in unused) if unused else "（なし）"))
+    lines.append("")
+
+    lines.append("### 14.3 サイクル層のエントリ（改善サイクル自身の課題）")
+    lines.append("")
+    cycle_entries = [
+        e for e in entries
+        if any(str(l).startswith(CYCLE_LAYER_PREFIX) for l in _as_list((e.meta.get("feature_context") or {}).get("layers")))
+    ]
+    if cycle_entries:
+        lines.append(_table(cycle_entries))
+        lines.append("")
+        for stage in CYCLE_STAGE_LAYERS:
+            items = [e for e in cycle_entries if stage in _as_list((e.meta.get("feature_context") or {}).get("layers"))]
+            lines.append(f"- `{stage}`: " + (", ".join(_link(e) for e in items) if items else "（該当なし）"))
+    else:
+        lines.append("（該当なし）")
+    lines.append("")
 
     lines.append("## 10. 出典文書の被覆（調査・レビュー系文書ごとのエントリ有無）")
     lines.append("")

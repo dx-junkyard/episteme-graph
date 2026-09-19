@@ -186,6 +186,10 @@ CLAUDE.md 内でアンカー件数の 4 値（228/244/248/255）が併存した�
       `confirmed` + `reviewed_by` + `reviewed_at` を書いたか
 - [ ] `backend/scripts/issue_knowledge_index.py` で index.md を再生成し、
       `backend/tests/test_issue_knowledge_guardrails.py` が green か
+- [ ] **サイクルを閉じるとき（振り返り）**: [改善サイクル §3](architecture/improvement_cycle.md) の起票条件
+      （段を飛ばした／検証後に見つかった欠陥／同じ型の再発／検証経路の欠落／手順の正本がリポジトリ外）に
+      当たるなら、サイクル層（`cycle_*`）を付けた振り返りエントリを 1 件起票したか。当たらないなら
+      「該当なし」と PR に書く。飛ばした段（E2E・敵対的レビュー・pre-mortem）は「未実施」と明記したか
 
 ---
 
