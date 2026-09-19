@@ -99,8 +99,8 @@
 | 典型的な座標 | 処理=logic / 構造=representation（エントリの過半が持つ値。none の軸は省略） |
 | 一般化レベル | `general` |
 | 典型的な発見観点 | `data_inspection` / `reproduction` / `adversarial_review` |
-| 典型的な解決観点 | `representation_change`（キーの材料に外側の文脈を足す）+ `guardrail_fix` |
-| 見分け方 | 「〜の中で N 番目」という局所の名前を全体のキーにしていないか。`id-not-stable-across-versions` は版をまたぐ安定性、本型は同一版内の一意性の範囲 |
+| 典型的な解決観点 | `representation_change` — 処方は 2 つ: ①キーの材料に外側の文脈を足して一意にする（識別子側）②ID で引く写像をやめ、入力と同じ並びの列で結果を配る（配り方側。ID の一意化を上流に要求せず書き手が防御する）+ `guardrail_fix` |
+| 見分け方 | 「〜の中で N 番目」という局所の名前を全体のキーにしていないか。`id-not-stable-across-versions` は版をまたぐ安定性、本型は同一版内の一意性の範囲。ID を辞書のキーに使う処理では「その ID はどのスコープで一意か」を問う |
 
 #### id-namespace-conflated
 

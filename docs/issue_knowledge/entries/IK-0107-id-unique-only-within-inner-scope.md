@@ -54,7 +54,7 @@ resolution:
     - backend/core/knowledge_objects/stable_key.py
     - backend/core/document_pipeline/persistence.py
 related: [IK-0106]
-view_of: []
+view_of: [IK-0323]
 history:
   - date: '2026-09-19'
     field: classification
