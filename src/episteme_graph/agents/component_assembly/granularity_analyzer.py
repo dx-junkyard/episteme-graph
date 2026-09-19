@@ -289,12 +289,37 @@ def _suggested_split(component: ComponentRecord, responsibilities: set[str]) -> 
                 candidate_map[resp].append(eid)
     return [
         {
-            "name": responsibility.replace("_", " ").title(),
+            "name": suggested_child_name(component.label, responsibility),
             "responsibility_type": responsibility,
             "linked_equation_ids": candidate_map[responsibility],
         }
         for responsibility in ordered
     ]
+
+
+def responsibility_label(responsibility: str) -> str:
+    """``"equation_system"`` → ``"equation system"`` (a role, not a name)."""
+    return str(responsibility or "").replace("_", " ").strip()
+
+
+def suggested_child_name(parent_label: str, responsibility: str) -> str:
+    """Name a suggested child ``"<parent label> — <responsibility>"`` (2026-09-19).
+
+    The name used to be the bare responsibility (``"Definition"`` /
+    ``"Application"`` / ``"Equation System"``), which erased the parent's
+    meaningful label ("Kernel normalization constraint", "Limber reduction
+    step") — it survived only inside ``refinement_report.split_actions`` — and
+    put those machine words into course topic titles, twice over when two
+    parents produced the same responsibility. The parent label carries the
+    theory object; the responsibility only says which part of it this child is.
+    """
+    role = responsibility_label(responsibility)
+    parent = str(parent_label or "").strip()
+    if not parent:
+        return role.title() if role else ""
+    if not role:
+        return parent
+    return f"{parent} — {role}"
 
 
 def _component_derivation_step_index(derivations) -> dict[str, list]:

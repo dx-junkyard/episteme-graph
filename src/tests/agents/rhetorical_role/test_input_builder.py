@@ -250,3 +250,27 @@ def test_coverage_report_for_empty_population(monkeypatch):
     assert is_coverage_report(coverage)
     assert coverage["population"] == 0
     assert coverage["truncated"] == 0
+
+
+# ---------------------------------------------------------------------------
+# R-4（2026-09-19 レビュー）: 表本体（raw.in_table）は役割判定の母集合に入れない
+# ---------------------------------------------------------------------------
+
+
+def test_table_body_blocks_are_excluded_from_the_population():
+    para = _typed("b1", "We assume the noise is stationary.", "body_paragraph", 0)
+    table = _typed("t1", "0.1 | 0.2 | 0.3\n0.4 | 0.5 | 0.6", "body_paragraph", 1)
+    table.raw = {"parser_source": "grobid_tei", "container_type": "table", "in_table": True}
+    inputs, coverage = BUILDER.build_with_coverage(_structure([para, table]), _skeleton())
+
+    assert [i.block_id for i in inputs] == ["b1"]
+    assert coverage["population"] == 1
+    assert coverage["processed"] == 1
+    assert coverage["details"]["excluded_table_block_ids"] == ["t1"]
+    assert is_coverage_report(coverage)
+
+
+def test_no_table_bodies_means_no_exclusion_detail():
+    para = _typed("b1", "We assume the noise is stationary.", "body_paragraph", 0)
+    _, coverage = BUILDER.build_with_coverage(_structure([para]), _skeleton())
+    assert "excluded_table_block_ids" not in (coverage.get("details") or {})

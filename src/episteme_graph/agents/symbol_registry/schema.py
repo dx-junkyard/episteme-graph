@@ -40,6 +40,22 @@ REVIEW_REASONS = [
     "definition_missing",
 ]
 
+# 候補が記号として登録されない理由（2026-09-19）。上流の used_symbols /
+# defined_symbols には数値リテラル・語句・LaTeX 環境が混ざるため、書式だけで
+# 判定して弾く。弾いた候補は捨てずに coverage.details.excluded に理由付きで残す
+# （P4: 情報を落とさない）。分野語はハードコードしない。
+EXCLUSION_REASONS = [
+    "numeric_literal",      # 0.015 / 1 / 10^-2 / 2! / (3,2)
+    "expression",           # (2π)^3 — 括弧で始まる式・組であって記号ではない
+    "phrase",               # "radial derivative" / "angular variables / basis functions"
+    "latex_environment",    # \begin{pmatrix} … \end{pmatrix}
+    "document_reference",   # Eq. (3.7) / Equation 12 / Fig. 2 / Table 3
+    "too_long",             # 40 字超
+]
+
+#: 記号候補の最大長（正規化後）。
+MAX_SYMBOL_LENGTH = 40
+
 # Provisional enrichment markers (LLM never finalises maturity).
 MATURITY_SOURCES = ["deterministic", "llm_proposed", "teacher_approved"]
 
@@ -77,6 +93,11 @@ class SymbolRegistryResult:
     cartridge_id: str | None
     records: list[SymbolRecord]
     validation_issues: list[ValidationIssue] = field(default_factory=list)
+    # 取りこぼし報告（coverage_report.py の共通形式）。population = 走査した
+    # 候補キー数、processed = 登録した記号数、reasons = EXCLUSION_REASONS の
+    # 部分列、details["excluded"] = 弾いた候補そのもの（raw / normalized /
+    # reason / equation_ids）。
+    coverage: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -94,4 +115,5 @@ class SymbolRegistryResult:
             cartridge_id=d.get("cartridge_id"),
             records=records,
             validation_issues=issues,
+            coverage=dict(d.get("coverage") or {}),
         )

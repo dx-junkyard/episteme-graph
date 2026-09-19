@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 
 from ..theory_operations import operation_family as _generic_operation_family
 from .equation_role_classifier import EquationRoleClassifier
+from .granularity_analyzer import suggested_child_name
 from .responsibility import CANONICAL_RESPONSIBILITY_TYPES, canonical_responsibility_type
 from .schema import (
     ComponentAssemblyLLMInput,
@@ -2323,10 +2324,38 @@ def _suggested_io(direction: str, spec: dict, eq_ids: list[str], parent: Compone
     return [{"name": f"{name} {direction}".strip(), "role": f"responsibility_{direction}"}]
 
 
+def _suggested_child_label(spec: dict, parent: ComponentRecord) -> str:
+    """Label for a suggested child — the parent's theory object stays visible.
+
+    ``suggested_split`` names its children after the responsibility alone
+    (``"Definition"`` / ``"Application"`` / ``"Equation System"``). Used as-is
+    that erases the parent's meaningful label and puts machine words into course
+    topic titles. A bare responsibility name is therefore qualified with the
+    parent label here as well, so a plan coming from anywhere else (an LLM
+    ``split_recommendation``) gets the same treatment as the analyzer's
+    (2026-09-19).
+    """
+    name = str(spec.get("name") or "").strip()
+    responsibility = canonical_responsibility_type(spec.get("responsibility_type"))
+    if not name:
+        return suggested_child_name(parent.label, responsibility) or str(parent.label or "")
+    if _is_bare_responsibility_name(name):
+        return suggested_child_name(parent.label, responsibility or name) or name
+    return name
+
+
+def _is_bare_responsibility_name(name: str) -> bool:
+    normalized = str(name or "").strip().lower().replace("_", " ")
+    return normalized in {
+        str(responsibility).replace("_", " ") for responsibility in RESPONSIBILITY_TYPES
+    }
+
+
 def _suggested_summary(spec: dict, parent: ComponentRecord) -> str:
     return (
-        f"{spec.get('name') or parent.label} isolated as a reusable "
-        f"{spec.get('responsibility_type')} component (#324)."
+        f"{_suggested_child_label(spec, parent)} isolated as a reusable "
+        f"{spec.get('responsibility_type')} component within "
+        f"{str(parent.label or '').strip() or 'the parent theory unit'} (#324)."
     )
 
 
@@ -2399,7 +2428,7 @@ def _build_suggested_component(
     return ComponentRecord(
         component_id=component_id,
         component_type=parent.component_type,
-        label=str(spec.get("name") or parent.label),
+        label=_suggested_child_label(spec, parent),
         summary=_suggested_summary(spec, parent),
         inputs=_suggested_io("input", spec, eq_ids, parent),
         outputs=_suggested_io("output", spec, eq_ids, parent),

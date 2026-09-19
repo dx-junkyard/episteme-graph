@@ -17,7 +17,12 @@ from .cartridge_loader import CartridgeLoader
 from .input_builder import RhetoricalRoleInputBuilder
 from .llm_client import RhetoricalRoleLLMClient
 from .prompt import RhetoricalRolePromptFactory
-from .repair import RhetoricalRoleRepairer, _fallback_annotation, _parse_block_annotation
+from .repair import (
+    RhetoricalRoleRepairer,
+    _fallback_annotation,
+    _parse_block_annotation,
+    is_repair_failed_annotation,
+)
 from .schema import (
     BlockRoleAnnotation,
     CartridgeContext,
@@ -67,6 +72,14 @@ class RhetoricalRoleAgent:
 
         annotations: list[BlockRoleAnnotation] = []
         block_text_by_id = {i.block_id: i.block_text for i in llm_inputs}
+        # Repair losses are counted per block: a block that ends on the
+        # whole-block fallback contributes exactly one ``unknown`` span, which the
+        # coverage report (population/processed of *blocks*) cannot express — it
+        # counts the block as processed, and it was. These counters make the
+        # silent loss legible in ``summary_stats``.
+        llm_error_blocks = 0
+        repair_failed_blocks = 0
+        repaired_blocks = 0
 
         total = len(llm_inputs)
         for idx, llm_input in enumerate(llm_inputs, start=1):
@@ -81,6 +94,7 @@ class RhetoricalRoleAgent:
                     llm_input.cartridge_id,
                 )
                 annotations.append(_fallback_annotation(llm_input, str(exc)))
+                llm_error_blocks += 1
                 if progress_callback:
                     progress_callback(idx, total)
                 continue
@@ -111,6 +125,10 @@ class RhetoricalRoleAgent:
                     prompt_factory=self._prompt_factory,
                     validator=self._validator,
                 )
+                if is_repair_failed_annotation(annotation):
+                    repair_failed_blocks += 1
+                else:
+                    repaired_blocks += 1
             annotations.append(annotation)
             if progress_callback:
                 progress_callback(idx, total)
@@ -120,6 +138,12 @@ class RhetoricalRoleAgent:
             cartridge_id=cartridge.cartridge_id if cartridge else cartridge_id,
             annotations=annotations,
             coverage=coverage,
+            extra_stats={
+                "blocks_processed": total,
+                "llm_error_blocks": llm_error_blocks,
+                "repaired_blocks": repaired_blocks,
+                "repair_failed_blocks": repair_failed_blocks,
+            },
         )
         result.validation_issues = self._validator.validate(
             result, block_text_by_id, cartridge
@@ -137,23 +161,24 @@ class RhetoricalRoleAgent:
         cartridge_id: str | None,
         annotations: list[BlockRoleAnnotation],
         coverage: dict | None = None,
+        extra_stats: dict | None = None,
     ) -> RhetoricalRoleResult:
-        claim_count = sum(
-            1
-            for annotation in annotations
-            for span in annotation.span_annotations
-            if span.is_claim_candidate
-        )
-        reject_count = sum(
-            1
-            for annotation in annotations
-            for span in annotation.span_annotations
-            if span.is_reject_candidate
-        )
+        spans = [span for a in annotations for span in a.span_annotations]
+        claim_count = sum(1 for span in spans if span.is_claim_candidate)
+        reject_count = sum(1 for span in spans if span.is_reject_candidate)
         summary_stats: dict = {
             "claim_candidate_spans": claim_count,
             "reject_candidate_spans": reject_count,
         }
+        if extra_stats is not None:
+            summary_stats.update(extra_stats)
+            summary_stats["total_spans"] = len(spans)
+            summary_stats["unknown_role_spans"] = sum(
+                1 for span in spans if list(span.role_labels) == ["unknown"]
+            )
+            summary_stats["offset_corrected_spans"] = sum(
+                1 for span in spans if span.offset_correction
+            )
         if coverage is not None:
             summary_stats["coverage"] = coverage
         return RhetoricalRoleResult(

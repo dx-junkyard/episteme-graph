@@ -93,6 +93,12 @@ class SpanAnnotation:
     is_reject_candidate: bool
     confidence: float
     reason: str
+    # How ``char_start`` / ``char_end`` were obtained when the LLM's own offsets
+    # did not quote ``text`` verbatim: ``None`` = the LLM's numbers were used as
+    # given, otherwise one of the ``repair.OFFSET_CORRECTION_*`` markers
+    # (the offsets were recomputed deterministically from ``text``). Recorded so
+    # the rewrite is visible instead of silent (P4).
+    offset_correction: str | None = None
 
 
 @dataclass

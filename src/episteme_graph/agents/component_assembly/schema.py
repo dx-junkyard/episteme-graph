@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re as _re
 from dataclasses import asdict, dataclass, field
 
 from episteme_graph.agents.validation import ValidationIssue as SharedValidationIssue
@@ -144,6 +145,19 @@ _LATEX_MARKUP_CHARS = frozenset("{}$")
 _SUBSCRIPT_SEPARATORS = ("_", "^")
 _MAX_SUBSCRIPT_SEGMENT_LENGTH = 2
 
+# 波括弧付きの添字・上付き（``N_{side}`` / ``x^{2}``）。``{`` を含む時点で
+# _LATEX_MARKUP_CHARS に掛かるが、書式規則として明示しておく。
+_BRACED_SCRIPT_MARKERS = ("_{", "^{")
+
+# 英字 1〜3 文字の頭 + 括弧引数（``w(\theta)`` / ``n(z, \theta)`` / ``C(l)``）。
+# 関数形の記号は概念名ではない。頭が識別子（英数字だけ）であることを要求するので、
+# ``Eq. (3.7)`` のような参照語や ``power spectrum (linear)`` は掛からない。
+_FUNCTION_FORM_RE = _re.compile(r"^[A-Za-z][A-Za-z0-9]{0,2}\s*\(.+\)$")
+
+# 概念名の最大長。これを超える文字列は語ではなく命題文（DSL の node_value が
+# そのまま概念名として流れてくる経路がある）なので概念層に載せない。
+MAX_CONCEPT_NAME_LENGTH = 60
+
 # claim 側 concept の型のうち、概念層に載せないもの。equation_claim_synthesis が
 # 生成する claim concept は全件 ``concept_type="symbol"`` で、これがそのまま
 # component.concepts / prerequisite_concepts に流れていた（K-2）。
@@ -155,12 +169,18 @@ def is_symbol_like_concept_name(name: str) -> bool:
 
     判定は分野語をハードコードせず、書式だけで行う:
 
-    - LaTeX 制御記法を含む（先頭が ``\\`` / ``{ } $`` を含む）→ 記号
-      （``\\lambda`` は ASCII 7 文字なので長さ規則では落ちない）。
+    - LaTeX 制御記法を含む（``\\`` を**どこかに**含む / ``{ } $`` を含む）→ 記号
+      （``\\lambda`` は ASCII 7 文字なので長さ規則では落ちない。2026-09-19: 先頭
+      判定だけだと ``n(z, \\theta)`` のように途中に制御綴りがある形を通していた）。
+    - 波括弧付きの添字・上付き（``N_{side}`` / ``x^{2}``）→ 記号。
+    - 関数形（``w(\\theta)`` / ``C(l)``: 英字 1〜3 文字の頭 + 括弧引数）→ 記号。
+      頭が識別子であることを要求するので ``power spectrum (linear)`` は残る。
     - 添字記法（``b_1`` / ``R_D`` / ``x^2``）→ 記号。``_`` ``^`` の混入だけで
       切ると ``zero_recoil_limit`` のような snake_case の概念名まで落ちるため、
       区切られた各部分が :data:`_MAX_SUBSCRIPT_SEGMENT_LENGTH` 以下か数字だけの
       ときに限る。
+    - :data:`MAX_CONCEPT_NAME_LENGTH` を超える → 概念名ではなく命題文（DSL の
+      node_value がそのまま流れてくる経路がある）なので概念層に載せない。
     - 非 ASCII の文字を含む名前は :data:`MIN_UNICODE_CONCEPT_NAME_LENGTH` 未満 →
       記号（``λ`` は落ち、``重力`` は残る）。
     - それ以外（ASCII のみ）は :data:`MIN_CONCEPT_NAME_LENGTH` 未満 → 記号
@@ -173,9 +193,15 @@ def is_symbol_like_concept_name(name: str) -> bool:
     token = str(name or "").strip()
     if not token:
         return True
-    if token.startswith("\\") or any(ch in _LATEX_MARKUP_CHARS for ch in token):
+    if "\\" in token or any(ch in _LATEX_MARKUP_CHARS for ch in token):
+        return True
+    if any(marker in token for marker in _BRACED_SCRIPT_MARKERS):
+        return True
+    if _FUNCTION_FORM_RE.match(token):
         return True
     if any(sep in token for sep in _SUBSCRIPT_SEPARATORS) and _is_subscripted_symbol(token):
+        return True
+    if len(token) > MAX_CONCEPT_NAME_LENGTH:
         return True
     if any(ord(ch) > 127 for ch in token):
         return len(token) < MIN_UNICODE_CONCEPT_NAME_LENGTH
