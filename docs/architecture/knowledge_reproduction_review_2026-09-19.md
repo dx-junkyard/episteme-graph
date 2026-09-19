@@ -258,8 +258,8 @@ migration は 0 本・新テーブル 0・新エンドポイント 0・LLM 呼�
   意図的な置き換えは `test_pipeline_coverage_report.py`（resume の報告を artifact 由来に）・`test_landscape_ui_static.py`
   （CSS 版文字列の固定を解除）・`test_reference_health_core.py`（委譲先の検査に更新）・`test_next_steps_material_gaps.py`
   （ingest_incomplete を optional に）。
-- **第 2 波の残り（未実施）**: 教員 UI（`admin-graph-review.js`）で説明の出所 `explanation_element` と item 単位の説明を
-  描く / 辺の `graph_layer` をトグルに使う / `materials.rerun_pipeline` capability と道案内 / マニュアル節。
+- **第 2 波の残り（2026-09-19 実施済み・§7.2）**: 教員 UI（`admin-graph-review.js`）で説明の出所 `explanation_element` と
+  item 単位の説明を描く / 辺の `graph_layer` をトグルに使う / `materials.rerun_pipeline` capability と道案内 / マニュアル節。
   再解析後の実測（式の救済本数・主張の被覆・図表の回収）は次のサイクルの発見段に回す。
 
 ### 7.1 敵対的レビューの是正（2026-09-19・同日）
@@ -280,6 +280,15 @@ migration は 0 本・新テーブル 0・新エンドポイント 0・LLM 呼�
 | 🟡 | CSS 版検査の緩和（`?v=` の存在だけ） | 日付 8 桁を取り出して landscape の版以上であることを検査 |
 
 - **テスト**: backend 16,443 passed / src 2,134 passed（是正後の実行結果。正本はテスト実行）。
+
+### 7.2 第 2 波の残り（2026-09-19・同日）
+
+| 項目 | 着地 |
+|---|---|
+| 説明の出所と item 単位の説明 | `admin-graph-review.js` の「論文での対応」: 「この論文での説明」に出所行（「出所: 論理要素に付いた説明」。要素種別の表示名は `element-vocab.js`、引けなければ出所行を出さない = PL7）、論文側の主張・式の各行に `claims[].explanation` / `equations[].explanation` を「説明: …」+ 状態チップで描く |
+| 辺の `graph_layer` | 正本 `admin-lecture-studio.js::lsGraphFilterByLayer`（レビュー画面は委譲）: 層を持つ辺はその層で判定し、持たない旧グラフの辺は端点の可視性だけで判定（後方互換） |
+| `materials.rerun_pipeline` | capability（guidance_only・`howto_doc` = `admin_operations/materials.md#rerun-pipeline`・道案内は行 → 「パイプラインを実行 ▼」の論理アンカー `material_pipeline_run_button`）。G層 `material.explanations_skipped` / `material.ingest_incomplete` の `capability_id` を付け替え。再実行は LLM を多数回呼ぶので代行に載せない（P8） |
+| マニュアル | `teacher/26-admin-graph-review.md`（層の切り替え・論文での対応）/ `teacher/11-admin-materials.md`（パイプラインを実行 = G層 2 ルールの解消手段）。新しい `data-ui-anchor` は増やさない（既存の `materials.row-pipeline-run` の上に道案内を置く） |
 
 **再構成できなかった🟡**: 死にコードの指摘は差分に含まれる関数・定数の未参照走査（backend / src / frontend）で
 該当を見つけられなかった。他の🟡もレビュー本文が残っていないため、次のサイクルの発見段で改めて読む。

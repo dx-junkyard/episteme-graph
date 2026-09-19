@@ -3350,7 +3350,10 @@ Phase 0〜4 実装後の**再照合**（実論文 12 本の原本 ⇄ 成果）�
   主グラフに吊られていない式の詳細ノード `detail_node_parent` — 破断ではなく欠落なので status を変えない、R-5）の
   事実文（`core/coverage_facts.py`）。「ok」の文言は「検査した参照はすべて解決しています」で、旧文言のスナップ
   ショットは未確認扱い（教材行チップも同じ）。永続化の要約は `stage_outputs.knowledge_objects` に必ず書く。
-  G層 `material.explanations_skipped`（recommended）/ `material.ingest_incomplete`（optional）。
+  G層 `material.explanations_skipped`（recommended）/ `material.ingest_incomplete`（optional）— 道案内先は
+  capability `materials.rerun_pipeline`（guidance_only・行の「パイプラインを実行 ▼」。再実行は代行しない）。
+  グラフレビューは説明の出所 `explanation_element` と主張・式の行単位の説明を描き、辺は自分の `graph_layer` で
+  層トグルに従う（第 2 波・§7.2）。
 - **LLM 回数の計器**（R-6）: 上限を撤廃したステージは呼び出し回数が母集合に比例する。共通 JSON クライアント
   `ProviderJSONLLMClient.calls` を計器に、claim_qualification は `summary_stats.llm_calls` / stage payload `llm_calls`
   に run ごとの回数を残す（実測の正本は U層）。学習者向けの復元式の印は `label_vocab.RECONSTRUCTED_EQUATION_MARK` を
