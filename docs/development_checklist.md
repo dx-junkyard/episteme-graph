@@ -182,6 +182,9 @@ CLAUDE.md 内でアンカー件数の 4 値（228/244/248/255）が併存した�
 - [ ] 解消時に `status: resolved` / `resolution.perspective`（最大 2・先頭が主）/ `landed_in`（実在する
       コードのパスかコミットを最低 1 つ）を書き、分類が変わったなら `history` に残したか
       （起票元への解消注記 §5-3 とは別に）
+- [ ] 解消時に `resolution.verification`（確かめた方法 `methods` / 確かめていない範囲 `unverified`。語彙は
+      [taxonomy.md §8](issue_knowledge/taxonomy.md)）を書いたか。飛ばした検証（E2E・同時実行・旧形式データ）を
+      `unverified` に残し、確かめていないなら `not_verified` と書いたか（省略は「記録なし」）
 - [ ] AI が起こしたエントリは `classification.review: candidate` のままか。人が確定したなら
       `confirmed` + `reviewed_by` + `reviewed_at` を書いたか
 - [ ] `backend/scripts/issue_knowledge_index.py` で index.md を再生成し、

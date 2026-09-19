@@ -1023,6 +1023,19 @@
 - `cycle_remediation`: （該当なし）
 - `cycle_recording`: [IK-0325](entries/IK-0325-improvement-cycle-canonical-outside-repo.md)
 
+### 14.4 型ごとの確かめ方（型 × 発見観点 × 解決観点 × 検証方法）
+
+解決済みエントリの `resolution.verification`（taxonomy §8）から導出する。同じ型を次に直すときの検証計画の下書きで、選ぶのは人。未確認の範囲は前回覆わなかったところ。件数は書かない。
+
+| 型 | 発見観点 | 解決観点 | 検証方法 | 未確認のまま残った範囲 | エントリ |
+|---|---|---|---|---|---|
+| `contract-changed-one-side` | guardrail_failure, trace_walk | canonical_source, guardrail_fix | guardrail, ci_all_paths | docker compose 起動時の initdb 経路（psql）での実機適用 | [IK-0324](entries/IK-0324-sql-percent-escape-written-for-one-consumer.md) |
+| `guardrail-does-not-cover-new-path` | guardrail_failure, reproduction, trace_walk | canonical_source, guardrail_fix, carry_through | guardrail, ci_all_paths, reproduction_rerun | FastAPI 0.139 未満の版での再実行（同じ結果になる設計だが、venv を最新版に上げた後は走らせていない） / docker で組み上げた実機での E2E / node が無い開発機での既定実行（pip 配布の node で代替して走らせた） | [IK-0326](entries/IK-0326-route-registry-tests-walk-app-routes-across-fastapi-versions.md), [IK-0327](entries/IK-0327-ci-only-tests-invisible-locally-and-blocked-by-earlier-step.md) |
+
+確かめていないと記録されたエントリ（`not_verified`）: （なし）
+
+解決済みエントリがあるのに検証の記録が 1 件も無い型（記録なし。確かめていない、ではない）: `ai-decides-instead-of-human`, `available-but-unwired`, `completion-defined-by-proxy`, `condition-not-propagated`, `context-lost-across-execution-boundary`, `default-hides-choice`, `delete-cascade-loses-derived-records`, `destructive-action-without-confirmation`, `disclosure-not-declared`, `doc-drifts-from-code`, `domain-vocabulary-hardcoded`, `duplicate-canonical-sources`, `entry-scope-mismatch`, `external-budget-exceeded`, `failure-reported-as-success`, `fallback-fabricates-missing-link`, `full-update-clobbers-unrelated-fields`, `gate-position-wrong`, `id-namespace-conflated`, `id-not-stable-across-versions`, `id-unique-only-within-inner-scope`, `information-dropped-as-unrepresentable`, `last-mile-missing`, `permission-and-affordance-asymmetric`, `projection-mistaken-for-source`, `reexecution-overwrites-human-decision`, `referenced-source-does-not-exist`, `replay-conflicts-with-history`, `scope-widened-silently`, `stale-derivative-served`, `substring-match-false-positive`, `test-pins-implementation-text`, `threshold-reused-across-regimes`, `unaudited-write-path`, `unchecked-type-contract-at-boundary`, `unit-of-work-undefined`, `wording-mismatch`
+
 ## 10. 出典文書の被覆（調査・レビュー系文書ごとのエントリ有無）
 
 | 出典文書 | エントリ |

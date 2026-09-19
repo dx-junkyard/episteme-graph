@@ -72,7 +72,7 @@ class TestVocabularyMirrorsTaxonomy:
 
     @staticmethod
     def _backticked(text: str) -> set[str]:
-        return set(re.findall(r"`([a-z_]+(?:\.[a-z_]+)?)`", text))
+        return set(re.findall(r"`([a-z0-9_]+(?:\.[a-z_]+)?)`", text))
 
     def test_every_module_token_is_defined_in_taxonomy(self, taxonomy_text):
         defined = self._backticked(taxonomy_text)
@@ -88,6 +88,7 @@ class TestVocabularyMirrorsTaxonomy:
             ik.GENERALIZATION_LEVELS,
             ik.DISCOVERY_PERSPECTIVES,
             ik.RESOLUTION_PERSPECTIVES,
+            ik.VERIFICATION_METHODS,
         ):
             missing = [t for t in group if t not in defined]
             assert missing == [], f"taxonomy.md に定義の無い語彙（モジュール側だけにある）: {missing}"
@@ -114,6 +115,17 @@ class TestVocabularyMirrorsTaxonomy:
             f"解決観点が食い違う: doc-only={res - set(ik.RESOLUTION_PERSPECTIVES)} "
             f"module-only={set(ik.RESOLUTION_PERSPECTIVES) - res}"
         )
+
+    def test_every_taxonomy_verification_method_is_known_to_module(self, taxonomy_text):
+        """検証方法（taxonomy §8）の表とモジュールの語彙は一致する。§5 の解決観点とは別の節に置く（混ぜない）。"""
+        ver = set(re.findall(r"(?m)^\| `([a-z0-9_]+)` \|", ik_section(taxonomy_text, "## 8.")))
+        assert ver == set(ik.VERIFICATION_METHODS), (
+            f"検証方法が食い違う: doc-only={ver - set(ik.VERIFICATION_METHODS)} "
+            f"module-only={set(ik.VERIFICATION_METHODS) - ver}"
+        )
+        assert ik.VERIFICATION_NOT_VERIFIED in ik.VERIFICATION_METHODS
+        res = set(re.findall(r"(?m)^\| `([a-z_]+)` \|", ik_section(taxonomy_text, "## 5.")))
+        assert not (res & set(ik.VERIFICATION_METHODS)), "検証方法の語彙が解決観点の節に混入している"
 
 
 def ik_section(text: str, heading_prefix: str) -> str:
@@ -297,3 +309,77 @@ class TestModulePurity:
         for forbidden in ("fastapi", "sqlalchemy", "core", "api", "openai"):
             hits = [ln for ln in import_lines if re.search(rf"\b{forbidden}\b", ln)]
             assert hits == [], f"issue_knowledge_index.py はアプリコード（{forbidden}）を import しない: {hits}"
+
+
+class TestVerificationRecord:
+    """`resolution.verification`（taxonomy §8）— 未観測と良好を分ける欄。省略は記録なし、確かめていないなら not_verified。"""
+
+    @staticmethod
+    def _resolved_meta(entries) -> dict:
+        import copy
+        base = next(e for e in entries if e.meta.get("status") == "resolved")
+        meta = copy.deepcopy(base.meta)
+        meta["resolution"].pop("verification", None)
+        return meta
+
+    @staticmethod
+    def _errors(entries, dictionary_text, meta, **overrides) -> list[str]:
+        import copy
+        meta = copy.deepcopy(meta)
+        meta.update(overrides)
+        base = next(e for e in entries if e.meta.get("status") == "resolved")
+        entry = ik.Entry(path=base.path, meta=meta, body=base.body)
+        patterns = set(ik.dictionary_patterns(dictionary_text))
+        known = {str(e.meta.get("id")) for e in entries}
+        errs = ik.validate_entry(entry, patterns=patterns, known_ids=known, layers=set(ik.layer_vocabulary()))
+        return [e for e in errs if "verification" in e]
+
+    def test_absent_verification_is_allowed_as_no_record(self, entries, dictionary_text):
+        meta = self._resolved_meta(entries)
+        assert self._errors(entries, dictionary_text, meta) == []
+
+    def test_well_formed_verification_passes(self, entries, dictionary_text):
+        meta = self._resolved_meta(entries)
+        meta["resolution"]["verification"] = {"methods": ["scratch_db", "guardrail"], "unverified": ["同時実行"]}
+        assert self._errors(entries, dictionary_text, meta) == []
+        meta["resolution"]["verification"] = {"methods": ["not_verified"], "unverified": []}
+        assert self._errors(entries, dictionary_text, meta) == []
+
+    def test_verification_only_on_resolved(self, entries, dictionary_text):
+        meta = self._resolved_meta(entries)
+        meta["status"] = "open"
+        meta["resolved_at"] = None
+        meta["resolution"]["perspective"] = ["pending"]
+        meta["resolution"]["verification"] = {"methods": ["guardrail"], "unverified": []}
+        assert any("status=resolved" in e for e in self._errors(entries, dictionary_text, meta))
+
+    def test_vocabulary_and_shape_are_enforced(self, entries, dictionary_text):
+        meta = self._resolved_meta(entries)
+        cases = {
+            "語彙外": {"methods": ["eyeballed"], "unverified": []},
+            "not_verified 単独": {"methods": ["not_verified", "guardrail"], "unverified": []},
+            "methods 空": {"methods": [], "unverified": []},
+            "unverified 欠落": {"methods": ["guardrail"]},
+            "数値の記述": {"methods": ["guardrail"], "unverified": ["3 件のケースは未確認"]},
+            "未知キー": {"methods": ["guardrail"], "unverified": [], "coverage": 0.8},
+        }
+        for label, ver in cases.items():
+            meta["resolution"]["verification"] = ver
+            assert self._errors(entries, dictionary_text, meta), f"{label} が通ってしまう: {ver}"
+
+    def test_dictionary_types_declare_how_to_verify(self, dictionary_text):
+        """辞書の型は「確かめ方」（処方）を持つ。実績は索引 §14.4。"""
+        for slug in ik.dictionary_patterns(dictionary_text):
+            table = ik_section(dictionary_text, f"#### {slug}").split("\n###", 1)[0]
+            m = re.search(r"(?m)^\| 確かめ方 \| (.+?) \|\s*$", table)
+            assert m and m.group(1).strip(), f"dictionary.md の型 `{slug}` に「確かめ方」の行が無い"
+            assert not re.search(r"\d+\s*(件|%|％)", m.group(1)), f"型 `{slug}` の確かめ方に件数・率がある"
+
+    def test_index_renders_verification_cooccurrence(self, entries, dictionary_text):
+        rendered = ik.render_index(entries, dictionary_text)
+        assert "### 14.4 型ごとの確かめ方" in rendered
+        verified = [e for e in entries if e.meta.get("status") == "resolved" and ik.verification_of(e)]
+        for e in verified:
+            assert e.rel in rendered.split("### 14.4", 1)[1].split("## 10.", 1)[0], f"{e.id} が §14.4 に載っていない"
+        assert "確かめていないと記録されたエントリ" in rendered
+

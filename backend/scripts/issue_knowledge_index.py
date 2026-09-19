@@ -1,6 +1,6 @@
 """課題ナレッジ（docs/issue_knowledge/）の読み込み・検証・索引生成。
 
-正本: docs/issue_knowledge/taxonomy.md（語彙の定義）/ TEMPLATE.md（記入様式）。
+正本: docs/issue_knowledge/taxonomy.md（語彙の定義。検証方法は §8）/ TEMPLATE.md（記入様式）。
 本モジュールの語彙定数は taxonomy.md と一致していることを
 ``backend/tests/test_issue_knowledge_guardrails.py`` が固定する（片方だけ変えると落ちる）。
 
@@ -151,6 +151,18 @@ RESOLUTION_PERSPECTIVES: tuple[str, ...] = (
     "deferred_decision",
     "pending",
 )
+
+# 検証方法（taxonomy §8 `resolution.verification.methods`）。省略は「記録なし」、確かめていないなら not_verified 単独。
+VERIFICATION_METHODS: tuple[str, ...] = (
+    "guardrail",
+    "ci_all_paths",
+    "scratch_db",
+    "docker_e2e",
+    "manual_ui",
+    "reproduction_rerun",
+    "not_verified",
+)
+VERIFICATION_NOT_VERIFIED = "not_verified"
 
 STATUS_LABELS = {"open": "未解決", "resolved": "解決済み", "deferred": "保留", "rejected": "不成立"}
 REVIEW_LABELS = {"candidate": "候補", "confirmed": "確定"}
@@ -322,6 +334,13 @@ def _looks_like_code_landing(item: str, root: Path) -> bool:
 # 検証
 # ---------------------------------------------------------------------------
 
+def verification_of(entry: "Entry") -> dict | None:
+    """エントリの `resolution.verification`（無ければ None = 記録なし）。"""
+    res = entry.meta.get("resolution") or {}
+    ver = res.get("verification") if isinstance(res, dict) else None
+    return ver if isinstance(ver, dict) else None
+
+
 def _as_list(value) -> list:
     if value is None:
         return []
@@ -374,6 +393,42 @@ def _resolve_source(root: Path, source: str) -> Path:
     # パス本体は最初の空白・§・# まで。
     plain = re.split(r"\s|§|#", plain, maxsplit=1)[0].strip().strip("`")
     return root / plain
+
+
+def _validate_verification(ver, *, status: str) -> list[str]:
+    """`resolution.verification`（taxonomy §8）の規約違反。キーが無い＝記録なし、なので呼び出し側で有無を見る。"""
+    errs: list[str] = []
+    if status != "resolved":
+        errs.append("resolution.verification は status=resolved のときだけ書ける（未解決の課題に検証は無い）")
+    if not isinstance(ver, dict):
+        errs.append("resolution.verification が mapping ではない（methods / unverified）")
+        return errs
+    for key in ("methods", "unverified"):
+        if key not in ver:
+            errs.append(f"resolution.verification.{key} が無い（unverified は無いと判断したなら []）")
+    methods = [str(v) for v in _as_list(ver.get("methods"))]
+    if "methods" in ver and not methods:
+        errs.append("resolution.verification.methods が空（確かめていないなら [not_verified]）")
+    for v in methods:
+        if v not in VERIFICATION_METHODS:
+            errs.append(f"resolution.verification.methods `{v}` は語彙外（taxonomy §8）")
+    if VERIFICATION_NOT_VERIFIED in methods and len(methods) > 1:
+        errs.append(f"resolution.verification.methods の {VERIFICATION_NOT_VERIFIED} は単独で置く: {methods}")
+    if len(set(methods)) != len(methods):
+        errs.append(f"resolution.verification.methods に重複: {methods}")
+    unv = ver.get("unverified")
+    if "unverified" in ver:
+        if not isinstance(unv, list):
+            errs.append("resolution.verification.unverified はリスト（無いと判断したなら []）")
+        else:
+            for item in unv:
+                if not isinstance(item, str) or not item.strip():
+                    errs.append("resolution.verification.unverified の要素は空でない文字列")
+                elif re.search(r"\d+\s*(件|%|％|秒|分|時間|回)", item):
+                    errs.append(f"resolution.verification.unverified に数値の記述: `{item}`（件数・率・所要時間は書かない）")
+    for extra in set(ver) - {"methods", "unverified"}:
+        errs.append(f"resolution.verification に未知のキー `{extra}`")
+    return errs
 
 
 def validate_entry(
@@ -635,6 +690,8 @@ def validate_entry(
                 errs.append("status=deferred の resolution.perspective は deferred_decision か pending を含める")
         if not isinstance(res.get("note"), str) or not res["note"].strip():
             errs.append("resolution.note が空（未解決なら何が分かれば解けるか）")
+        if "verification" in res:
+            errs.extend(_validate_verification(res.get("verification"), status=status))
 
     for rid in _as_list(m["related"]):
         if rid not in known_ids:
@@ -1109,6 +1166,61 @@ def render_index(entries: list[Entry], dictionary_text: str) -> str:
         lines.append("（該当なし）")
     lines.append("")
 
+    lines.append("### 14.4 型ごとの確かめ方（型 × 発見観点 × 解決観点 × 検証方法）")
+    lines.append("")
+    lines.append(
+        "解決済みエントリの `resolution.verification`（taxonomy §8）から導出する。同じ型を次に直すときの"
+        "検証計画の下書きで、選ぶのは人。未確認の範囲は前回覆わなかったところ。件数は書かない。"
+    )
+    lines.append("")
+    verified = [e for e in entries if e.meta.get("status") == "resolved" and verification_of(e) is not None]
+    by_pattern: dict[str, list[Entry]] = defaultdict(list)
+    for e in verified:
+        by_pattern[str(e.meta.get("pattern"))].append(e)
+    if by_pattern:
+        lines.append("| 型 | 発見観点 | 解決観点 | 検証方法 | 未確認のまま残った範囲 | エントリ |")
+        lines.append("|---|---|---|---|---|---|")
+        for pat in sorted(by_pattern):
+            items = by_pattern[pat]
+            disc_seen: list[str] = []
+            res_seen: list[str] = []
+            methods_seen: set[str] = set()
+            unverified_seen: list[str] = []
+            for e in items:
+                for pp in _as_list((e.meta.get("discovery") or {}).get("perspective")):
+                    if str(pp) not in disc_seen:
+                        disc_seen.append(str(pp))
+                for pp in _as_list((e.meta.get("resolution") or {}).get("perspective")):
+                    if str(pp) not in res_seen:
+                        res_seen.append(str(pp))
+                ver = verification_of(e) or {}
+                methods_seen.update(str(v) for v in _as_list(ver.get("methods")))
+                for u in _as_list(ver.get("unverified")):
+                    if str(u) not in unverified_seen:
+                        unverified_seen.append(str(u))
+            methods = [v for v in VERIFICATION_METHODS if v in methods_seen]
+            lines.append(
+                f"| `{pat}` | {_cell(', '.join(disc_seen))} | {_cell(', '.join(res_seen))} | "
+                f"{_cell(', '.join(methods))} | {_cell(' / '.join(unverified_seen)) or '—'} | "
+                f"{', '.join(_link(e) for e in items)} |"
+            )
+    else:
+        lines.append("（検証の記録を持つ解決済みエントリはまだ無い）")
+    lines.append("")
+    not_verified = [e for e in verified if VERIFICATION_NOT_VERIFIED in _as_list((verification_of(e) or {}).get("methods"))]
+    lines.append(
+        "確かめていないと記録されたエントリ（`not_verified`）: "
+        + (", ".join(_link(e) for e in not_verified) if not_verified else "（なし）")
+    )
+    lines.append("")
+    resolved_patterns = {str(e.meta.get("pattern")) for e in entries if e.meta.get("status") == "resolved"}
+    unrecorded = sorted(resolved_patterns - set(by_pattern))
+    lines.append(
+        "解決済みエントリがあるのに検証の記録が 1 件も無い型（記録なし。確かめていない、ではない）: "
+        + (", ".join(f"`{p}`" for p in unrecorded) if unrecorded else "（なし）")
+    )
+    lines.append("")
+
     lines.append("## 10. 出典文書の被覆（調査・レビュー系文書ごとのエントリ有無）")
     lines.append("")
     src_count: Counter = Counter()
@@ -1198,6 +1310,7 @@ def _print_stats(entries: list[Entry]) -> int:
     show("型", Counter(str(e.meta.get("pattern")) for e in entries))
     show("発見観点（主）", Counter((_as_list((e.meta.get("discovery") or {}).get("perspective")) or [None])[0] for e in entries))
     show("解決観点（主）", Counter((_as_list((e.meta.get("resolution") or {}).get("perspective")) or [None])[0] for e in entries))
+    show("検証方法", Counter(v for e in entries for v in _as_list((verification_of(e) or {}).get("methods"))))
     show("層", Counter(l for e in entries for l in _as_list((e.meta.get("feature_context") or {}).get("layers"))))
     return 0
 

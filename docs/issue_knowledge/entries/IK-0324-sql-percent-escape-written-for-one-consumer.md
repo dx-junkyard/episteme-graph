@@ -58,6 +58,10 @@ resolution:
     - backend/tests/test_migrations_runner.py
     - .github/workflows/test.yml
     - backend/db/078_knowledge_objects.sql
+  verification:
+    methods: [ci_all_paths, guardrail]
+    unverified:
+      - docker compose 起動時の initdb 経路（psql）での実機適用
 related: [IK-0315, IK-0212]
 view_of: []
 history: []
