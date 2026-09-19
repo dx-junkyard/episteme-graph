@@ -12098,6 +12098,9 @@ button.element-card-item:focus-visible .element-card-item-label {
 .graph-review-paper-subtitle { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
 .graph-review-paper-strong { font-weight: 600; }
 .graph-review-paper-note { color: var(--color-text-secondary, #64748b); font-size: 12px; }
+.graph-review-paper-explanation-source { font-style: normal; }
+.graph-review-paper-item-explanation { margin-top: 4px; padding-left: 8px; border-left: 2px solid var(--color-border, #e2e8f0); font-size: 12.5px; color: var(--color-text-secondary, #64748b); }
+.graph-review-paper-explanation-lead { font-weight: 600; }
 /* 概念関係（DSL 層。P0-9）の述語表記 `A —[verb / PREDICATE]→ B` を主語より弱く出す。 */
 .graph-review-paper-rel { color: var(--color-text-tertiary, #6b7280); font-size: 11.5px; }
 .graph-review-paper-flow { font-size: 12px; }

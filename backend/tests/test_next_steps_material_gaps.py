@@ -90,6 +90,10 @@ class TestCatalog:
             assert cap is not None
             assert cap.kind == "guidance_only"  # 代行しない（G8: 誘導まで）
             assert caps.can_access(rule["capability_id"], "TEACHER")
+            # 第 2 波: 解消手段は行の「パイプラインを実行 ▼」なので専用 capability へ道案内する
+            # （アップロード領域や「⋯」メニューを指さない）。
+            assert rule["capability_id"] == "materials.rerun_pipeline"
+            assert any(step.anchor_id == "material_pipeline_run_button" for step in cap.locate_steps)
 
     def test_rules_have_evaluators(self):
         assert set(ns.RULE_CATALOG) == set(ns._RULE_EVALUATORS)

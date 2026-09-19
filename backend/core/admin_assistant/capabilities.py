@@ -176,6 +176,28 @@ _REGISTRY: list[Capability] = [
                   precondition="material_selected"),
         ),
     ),
+    # 再現性レビュー 第 2 波（knowledge_reproduction_review_2026-09-19.md §7）: G層の
+    # material.explanations_skipped / material.ingest_incomplete の解消手段は「パイプラインを
+    # 再実行する」こと。再実行は LLM を数百回呼ぶ操作なので Copilot の代行には載せず、
+    # 行の「パイプラインを実行 ▼」までの道案内に留める（P8: 誘導まで。押すのは本人）。
+    Capability(
+        id="materials.rerun_pipeline",
+        screen="materials",
+        title="解析パイプラインを再実行する（全実行 / 個別ステージ）",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#rerun-pipeline",
+        description="解析済みの教材に対して、行の「パイプラインを実行 ▼」から全実行または個別ステージの"
+                    "再実行を選ぶ。要素の説明が日次上限で作られなかった教材や、取り込みの完全性チェックが"
+                    "「完全ではない」と記録した教材の解消手段。再実行は LLM を多数回呼ぶため、開始は教員の操作だけ。",
+        api={"method": "POST", "path": "/api/admin/materials/{material_id}/document-pipeline/run"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_pipeline_run_button",
+                  "行の「パイプラインを実行 ▼」を押し、全実行か個別ステージを選びます",
+                  precondition="material_selected"),
+        ),
+    ),
     # 知識ランドスケープ（knowledge_landscape_design.md LS2）: AI 配置は inferred 止まりで、
     # 確定は教員の操作だけ。代行は登録せず道案内に留める。
     Capability(

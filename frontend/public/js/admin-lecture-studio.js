@@ -5130,7 +5130,13 @@
     var visibleEdges = edges.filter(function (edge) {
       var source = edge.source_component_id || edge.source || edge.from;
       var target = edge.target_component_id || edge.target || edge.to;
-      return visibleIds[source] && visibleIds[target];
+      if (!(visibleIds[source] && visibleIds[target])) return false;
+      // 辺自身の層（2026-09-19 再現性レビュー E-8 で辺に graph_layer が付いた）。層を
+      // 持つ辺はその層で判定し、持たない旧グラフの辺は端点の可視性だけで判定する。
+      var edgeLayer = String((edge && edge.graph_layer) || "").toLowerCase();
+      if (!edgeLayer) return true;
+      if (filter === "main") return edgeLayer === "main";
+      return edgeLayer === "equation_detail" || edgeLayer === "debug";
     });
     return Object.assign({}, graph, { nodes: visible, edges: visibleEdges });
   }

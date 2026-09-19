@@ -12761,6 +12761,11 @@
       material_graph_review_button: function (id) {
         return _matRowActionAnchor(id, ".admin-graph-review-btn");
       },
+      // 再現性レビュー 第 2 波: 行の「パイプラインを実行 ▼」（⋯メニュー外）。G層の
+      // material.explanations_skipped / ingest_incomplete の道案内先。開くのは本人。
+      material_pipeline_run_button: function (id) {
+        return _matRowActionAnchor(id, ".material-pipeline-trigger");
+      },
       // ゼミ前ブリーフ: 教材行の「ゼミ前ブリーフ…」ボタン（⋯メニュー内）。
       seminar_brief_button: function (id) {
         return _matRowActionAnchor(id, ".admin-seminar-brief-btn");

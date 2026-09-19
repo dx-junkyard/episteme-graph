@@ -1150,3 +1150,42 @@ class TestNodePositionPersistence:
         # 位置は端末の都合。サーバへ送らない（保存 API も新しい列も作らない）。
         assert "/positions" not in JS_SRC
         assert not re.search(r"apiFetch\([^)]*position", JS_SRC, re.IGNORECASE)
+
+
+class TestPaperLayerExplanations:
+    """第 2 波（2026-09-19）: 説明の出所と、主張・式の行単位の説明を描く。"""
+
+    def test_explanation_source_uses_element_vocab_not_raw_type(self):
+        start = JS_SRC.index("function explanationSourceHtml(")
+        block = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert "explanation_element" in JS_SRC
+        assert "window.ElementVocab" in block and "elementTypeLabel" in block
+        # 表示名が引けない種別は出所行ごと出さない（生の element_type・内部 ID を漏らさない）。
+        assert 'if (!typeLabel) return "";' in block
+        assert "element_id" not in block
+
+    def test_item_level_explanations_are_rendered_for_claims_and_equations(self):
+        assert "itemExplanationHtml(claim.explanation)" in JS_SRC
+        assert "itemExplanationHtml(equation.explanation)" in JS_SRC
+        start = JS_SRC.index("function itemExplanationHtml(")
+        block = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert "explanationChipsHtml" in block
+        assert "richText(" in block  # 数式は richText のみ（独自の数式描画を作らない）
+
+    def test_node_explanation_block_shows_source(self):
+        start = JS_SRC.index('block("この論文での説明"')
+        block = JS_SRC[start: start + 400]
+        assert "explanationSourceHtml(entry.explanation_element)" in block
+
+
+class TestEdgeLayerFilter:
+    """辺の graph_layer を層トグルに使う（E-8 で辺に層が付いた）。"""
+
+    def test_edges_follow_their_own_layer_when_present(self):
+        start = STUDIO_SRC.index("function lsGraphFilterByLayer(")
+        block = STUDIO_SRC[start: STUDIO_SRC.index("\n  }\n", start) + 4]
+        assert "edge.graph_layer" in block
+        # 層の無い旧グラフの辺は端点の可視性だけで判定する（後方互換）。
+        assert 'if (!edgeLayer) return true;' in block
+        assert 'if (filter === "main") return edgeLayer === "main";' in block
+        assert 'edgeLayer === "equation_detail" || edgeLayer === "debug"' in block

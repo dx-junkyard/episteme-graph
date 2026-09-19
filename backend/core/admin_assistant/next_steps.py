@@ -145,16 +145,18 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
     # 2026-09-19: どちらも解消手段は「その教材の行でパイプラインを実行し直す」。
     # 専用 capability は作らず、教材行そのものへ案内する既存 capability を再利用する
     # （G3: registry を単一の真実源に保ち、道案内の粒度で新規登録を増やさない）。
+    # 解消手段は行の「パイプラインを実行 ▼」（要素の説明だけなら個別ステージ）。第 2 波で
+    # 専用 capability materials.rerun_pipeline（道案内のみ）を足した（2026-09-19）。
     RULE_MATERIAL_EXPLANATIONS_SKIPPED: {
         "severity": SEVERITY_RECOMMENDED,
-        "capability_id": "materials.row_actions_menu",  # 道案内のみ
+        "capability_id": "materials.rerun_pipeline",  # 道案内のみ
     },
     RULE_MATERIAL_INGEST_INCOMPLETE: {
         # optional: PDF 経路はページ被覆の理由でほぼ全教材が complete=false になるため、
         # recommended にすると上限 10 件の一覧を埋め尽くして他の To-Do を押し出す
         # （2026-09-19 再現性レビュー §7）。事実は計器（reference_health の facts）にも出る。
         "severity": SEVERITY_OPTIONAL,
-        "capability_id": "materials.row_actions_menu",  # 道案内のみ
+        "capability_id": "materials.rerun_pipeline",  # 道案内のみ（全実行 / PDF再登録）
     },
     RULE_COURSE_DISCUSS_OPENING_UNREVIEWED: {
         "severity": SEVERITY_RECOMMENDED,

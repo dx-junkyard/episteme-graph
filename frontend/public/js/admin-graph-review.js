@@ -1237,6 +1237,7 @@
             return '<span class="graph-review-chip">' + esc(chip) + "</span>";
           }).join("") +
           (source ? '<div class="graph-review-paper-note">' + esc(source) + "</div>" : "") +
+          itemExplanationHtml(claim.explanation) +
           "</li>";
       }).join("") + "</ul>");
     }
@@ -1258,6 +1259,7 @@
             }).join("") +
           "</div>" +
           '<div class="graph-review-paper-item-body">' + body + "</div>" +
+          itemExplanationHtml(equation.explanation) +
           "</div>";
       }).join(""));
     }
@@ -1323,9 +1325,12 @@
     }
 
     if (entry.explanation && String(entry.explanation.body || "").trim()) {
-      var statusLabel = EXPLANATION_STATUS_LABELS[String(entry.explanation.status || "")] || "";
+      // 説明の出所（DTO の explanation_element）。component に説明が無い論文では claim /
+      // 式に付いた説明で代えるので、どの要素の説明かを隠さない（PL7: 内部 ID は出さず
+      // 要素種別の表示名だけ。表示名の正本は element-vocab.js）。
       block("この論文での説明",
-        (statusLabel ? '<span class="graph-review-chip">' + esc(statusLabel) + "</span>" : "") +
+        explanationChipsHtml(entry.explanation) +
+        explanationSourceHtml(entry.explanation_element) +
         '<div class="graph-review-paper-item-body">' + richText(String(entry.explanation.body)) + "</div>");
     }
 
@@ -1351,6 +1356,34 @@
   // -------------------------------------------------------------------------
   // ノード詳細ペイン（レビュー専用の投影。語彙は graphView から引く）
   // -------------------------------------------------------------------------
+
+  // 説明（二層説明の contextual）の状態チップ。生の status コードは出さない。
+  function explanationChipsHtml(explanation) {
+    if (!explanation) return "";
+    var statusLabel = EXPLANATION_STATUS_LABELS[String(explanation.status || "")] || "";
+    return statusLabel ? '<span class="graph-review-chip">' + esc(statusLabel) + "</span>" : "";
+  }
+
+  // 説明の出所（どの要素に付いた説明か）。要素種別の表示名は element-vocab.js が正本で、
+  // 引けない種別は出所行ごと出さない（内部 ID・生の element_type を漏らさない）。
+  function explanationSourceHtml(element) {
+    if (!element || !element.element_type) return "";
+    var vocab = window.ElementVocab;
+    var typeLabel = vocab && vocab.elementTypeLabel ? vocab.elementTypeLabel(String(element.element_type)) : "";
+    if (!typeLabel) return "";
+    return '<div class="graph-review-paper-note graph-review-paper-explanation-source">' +
+      esc("出所: " + typeLabel + "に付いた説明") + "</div>";
+  }
+
+  // 論文側の主張・式の行に付く、その要素自身の説明（DTO の claims[].explanation /
+  // equations[].explanation）。ノード全体の「この論文での説明」とは別に、行単位で出す。
+  function itemExplanationHtml(explanation) {
+    if (!explanation || !String(explanation.body || "").trim()) return "";
+    return '<div class="graph-review-paper-item-explanation">' +
+      explanationChipsHtml(explanation) +
+      '<span class="graph-review-paper-explanation-lead">説明: </span>' +
+      richText(String(explanation.body)) + "</div>";
+  }
 
   function collectClaimRefs(node) {
     var ids = [].concat(node.linked_claim_ids || [])
