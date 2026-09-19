@@ -204,12 +204,16 @@ derivation_step の `derivation_id` / `step_index` は **KO2「出現順・agent
 
 derivation_step の **agent ID は `{derivation_id}:{step_id}`**（正本は
 `stable_key.derivation_step_agent_id`）。agent 側の `step_001` はチェーン内でしか一意でなく、
-`dedupe_stable_keys` は `{agent_id: key}` で引くため、別チェーンの同名 step が 1 件に潰れて
-部分一意索引違反になっていた（V-2）。書き手（`persistence._derivation_items`）と取り込み
+別チェーンの同名 step が同じ ID を名乗ると参照の解決先が曖昧になる（部分一意索引違反の
+原因でもあった = V-2）。書き手（`persistence._derivation_items`）と取り込み
 （`core/knowledge_import/rows.py`）が同じ関数を使う。
 
-同一 run 内の衝突は `dedupe_stable_keys(items, key=agent_id)` が agent ID 昇順で `#2` … を付ける
-（`sync_live_rows` の冒頭でも同じ処理を通す = 最後の砦。P1-R9）。
+同一 run 内の衝突は **`assign_stable_keys(items)`**（項目ごとに最終キーを返す）が
+「agent ID 昇順 → 入力順」で `#2` … を付ける（`sync_live_rows` の冒頭でも同じ処理を通す =
+最後の砦。P1-R9）。**行に配るキーを `{agent_id: key}` の写像で配らない** — A層は agent ID の
+一意性を保証せず（式 ID は印字番号由来で `eq_7` が別ブロックに再び現れる）、写像で配ると
+同じ ID の項目が全部同じキーを受け取って部分一意索引違反になる（V-6）。`dedupe_stable_keys`
+（写像を返す旧 API）は ID が一意な呼び出し側（`backfill` の行 id）専用。
 `content_hash`（agent 側）は別列に保存するだけで、同一性判定には使わない（synth claim で空・
 equation で衝突があるため — S-5）。
 
@@ -418,7 +422,7 @@ UUID へ正規化する（§4.3 ①）。
 **設計からの逸脱・解釈**（本文は不変・ここに記す）:
 
 - §4.2「GIN」は張らない（1 payload が数 MB で索引コストが利益を上回る。検索は知識行側で行う）。
-- §5.4-2 の「重ならない span だけ残す」は claim object との衝突にだけ適用し、span × span の同キーは `dedupe_stable_keys` の `#2` で区別する（同キー 2 span を 1 行に潰すと片方の痕跡が消える）。
+- §5.4-2 の「重ならない span だけ残す」は claim object との衝突にだけ適用し、span × span の同キーは `assign_stable_keys` の `#2` で区別する（同キー 2 span を 1 行に潰すと片方の痕跡が消える）。
 - 078 は FK 化の前に、旧 CHECK が外れた状態で書かれた語彙外値を `unknown` / `theory` に丸める自己収束 UPDATE を DO ガード内に持つ（自称は `*_type_text` へ退避。開発 DB では 0 件）。013 / 041 は「FK 制約が在れば CHECK を作り直さない」条件を足した（毎起動再実行で CHECK ⇄ FK の往復を防ぐ）。
 - 080 は `format('%I')` ではなく `quote_ident() || ...` で組む。ランナーが `exec_driver_sql` に空パラメータを渡すため psycopg2 が `%` を補間しようとする（**SQL コメント内の `%` も同様に落ちる** — 実機検証で判明し `%%` に修正。`RAISE NOTICE` も `%%`）。
 - `challenges` は `document_id` 列を持たないため、同じ対象の `epistemic_ledger` 行が当該論文に在るときだけ再係留する（絞れない疑義は書き換えない）。
@@ -466,7 +470,7 @@ UUID へ正規化する（§4.3 ①）。
 | P1-R5 | `load_run_artifacts` の except が `rollback()` せず、同じセッションの後続 SELECT が "current transaction is aborted" で全滅し得た | except 内で `session.rollback()`（それ自体も握って fail-open） |
 | P1-R6 | 079 の `_artifacts` 剥がしが、表へ移せなかった**非 object の blob も消していた** | UPDATE に `jsonb_typeof(...) = 'object'` を追加（§8.3 の破壊ステップ表②） |
 | P1-R7 | 起動時バックフィルが advisory lock の外にあり、複数レプリカ同時起動で同じ `#n` を取り合って部分一意索引に当たり得た | migration とは**別キー**の `pg_advisory_lock(BACKFILL_LOCK_KEY)` 配下へ（unlock は finally） |
-| P1-R9 | `sync_live_rows` が incoming の stable_key 重複を前提にせず、`learning_units` 経路は dedupe を通っていなかった | `sync_live_rows` の冒頭で `dedupe_stable_keys` を通す（**最後の砦**。呼び出し側の dedupe は残す） |
+| P1-R9 | `sync_live_rows` が incoming の stable_key 重複を前提にせず、`learning_units` 経路は dedupe を通っていなかった | `sync_live_rows` の冒頭で同じ衝突解消を通す（**最後の砦**。呼び出し側の dedupe は残す） |
 | Phase 3 A層⚠ | `_hook_claim_concept_grounding` が接地結果で `claim_object_builder` artifact を**上書き**していた（KO6 の「生成ログ」を後段が書き換える） | 上書きを撤去。接地結果は専用 artifact `claim_concept_grounding` にだけ残し、知識行への反映は persist 側の join（CG §6 = 既存経路）。フックは resume でも毎回走るので、後段ステージが見る in-memory の値は新規実行と resume で一致する |
 | P2-R7 | `persist_learning_units` の失敗が run 全体を failed にしていた（claims / components は commit 済みなのに「解析失敗」に見え、教員が再解析を回す） | 派生表の同期を try/except で包み、`stage_outputs` の `knowledge_objects.learning_units` に `{"failed": true, "error": ...}` を正直に残して completed を維持 |
 
@@ -503,3 +507,28 @@ claim 本文保護 2 本・第2段突合 1 本・V-1 / V-3 / V-2 の回帰 3 本
   resurrect ではない**）。KO3 とは整合するが往復で行が単調増加する。un-supersede の分岐は後続判断。
 - **W-4（対応不要）**: 残る `claim_type='unknown'`（A 13 / B 18）は artifact 側の値で、永続化の取りこぼしではない。
 
+### 12.4 2026-09-17 — 重複 agent ID で永続化が落ちる欠陥（V-6・migration なし）
+
+実 PDF（`2609.15385v1.pdf`）の解析が `persist_claims_components_graph` で
+`uq_knowledge_equations_stable_key_live` 違反により失敗した。
+
+**原因**: 衝突解消 `dedupe_stable_keys` が `{agent_id: final_key}` の**写像**を返し、呼び出し側
+（`persistence` の 5 経路 / `learning_units` / `knowledge_import.rows` / `sync._dedupe_incoming_keys`）が
+`final_keys[item["agent_id"]]` で行にキーを配っていた。A層は agent ID の一意性を保証せず、式 ID は
+印字番号由来（`EquationNormalizer.equation_id_from_label`: ラベル `7` → `eq_7`）なので、**同じ番号が
+別ブロックにも印字されていれば `eq_7` のレコードが 2 件できる**。写像は 1 件に潰れるため両方の行が
+同じ stable_key を受け取り、2 本目の INSERT が部分一意索引に当たって run 全体が落ちた
+（`_equation_stable_key_map` も同じ写像で、後勝ちのキーを両方の行に配っていた）。
+
+**是正**（A層は非改変。ID の一意化は A層の責務にしない）:
+
+| 対象 | 是正 |
+|---|---|
+| `core/knowledge_objects/stable_key.py` | **`assign_stable_keys(items)` を新設**（`items` と同じ並びの最終キー列を返す = 項目ごと）。並びは「agent ID 昇順 → 入力順」で従来と同じ決定論。`dedupe_stable_keys` はこれを包む薄い写像 API として残す（ID が一意な `backfill` 専用と明記） |
+| `core/document_pipeline/persistence.py` | 5 経路の配り方を `_assign_item_stable_keys(items)` に統一（衝突が起きた事実は `logger.info` に残す）。`_equation_items` は **そのレコード自身の内容**からキーを引く（写像を経由しない）。`_equation_stable_key_map` は**先頭勝ち**にし、曖昧な ID の参照が素のキーを持つ行に着地するようにした |
+| `core/knowledge_objects/sync.py` | 最後の砦 `_dedupe_incoming_keys` も項目ごとに（従来は agent ID をトークンにしていたため、同じ ID の 2 件が潰れて砦が効かなかった） |
+| `core/knowledge_objects/learning_units.py` / `core/knowledge_import/rows.py` | 同じ配り方へ |
+
+**回帰**: `test_knowledge_objects_persist.py::test_same_equation_id_in_two_blocks_does_not_collide` ほか 5 件
+（是正前のコードで全件落ちることを確認済み）。DELETE は増えず、既存文書の stable_key も変わらない
+（agent ID が一意な文書では従来と同じキーになる）。

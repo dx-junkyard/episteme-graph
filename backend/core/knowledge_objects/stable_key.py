@@ -82,9 +82,9 @@ def derivation_step_agent_id(derivation_id: str, step_id: str) -> str:
     """derivation step の **文書内一意な agent ID**（``"{derivation_id}:{step_id}"``）。
 
     agent 側の ``step_id``（``step_001`` 等）はチェーン内でしか一意でなく、別チェーンの
-    同名 step が同じ ID を名乗る。``dedupe_stable_keys`` は ``{agent_id: key}`` で引くため、
-    そのままだと 2 件が 1 件に潰れて ``uq_knowledge_derivation_steps_stable_key_live``
-    違反になる（2026-09-13 の実データ検証 V-2）。書き手（パイプライン）と取り込み
+    同名 step が同じ ID を名乗る。ID が衝突したままだと参照の解決先が曖昧になるので
+    （``uq_knowledge_derivation_steps_stable_key_live`` 違反の原因でもあった。2026-09-13 の
+    実データ検証 V-2）、ここで文書内一意にする。書き手（パイプライン）と取り込み
     （``core/knowledge_import/rows.py``）が**同じ規則**を使うため、ここを正本にする。
     """
     chain = _clean(derivation_id)
@@ -160,6 +160,43 @@ def learning_unit_stable_key(
 # ---------------------------------------------------------------------------
 
 
+def assign_stable_keys(
+    items: Sequence[T],
+    *,
+    key_of: Callable[[T], str],
+    agent_id_of: Callable[[T], str],
+) -> list[str]:
+    """同一 run 内の stable_key 衝突を **項目ごとに** 解いて ``#2`` ``#3`` … を付ける。
+
+    ``items`` と同じ長さ・同じ並びの最終キー列を返す。並び順の規則は
+    「agent ID 昇順 → 入力順」で、1 番目が素のキー、2 番目以降が ``#n``。
+
+    **agent ID が重複していても項目は潰れない**のがこの関数の要点（A層は agent ID の
+    一意性を保証しない。例: 数式 ID は印字番号由来なので ``eq_7`` が別ブロックで再び
+    現れ得る）。agent ID をキーにした写像で配ると、同じ ID の項目が全部同じキーを
+    受け取り ``uq_<table>_stable_key_live`` に当たって同期全体が落ちる。行に配るキーは
+    必ずこの関数で決める（:func:`dedupe_stable_keys` は ID が一意な呼び出し側専用）。
+
+    agent ID が空の項目は ID 持ちの後ろに入力順で回す（位置で代用しない）。
+    """
+    groups: dict[str, list[int]] = {}
+    for index, item in enumerate(items):
+        groups.setdefault(_clean(key_of(item)), []).append(index)
+    out: list[str] = [""] * len(items)
+    for key, indexes in groups.items():
+        ordered = sorted(
+            indexes,
+            key=lambda index: (
+                0 if _clean(agent_id_of(items[index])) else 1,
+                _clean(agent_id_of(items[index])),
+                index,
+            ),
+        )
+        for rank, index in enumerate(ordered):
+            out[index] = key if rank == 0 else f"{key}#{rank + 1}"
+    return out
+
+
 def dedupe_stable_keys(
     items: Sequence[T],
     *,
@@ -172,13 +209,14 @@ def dedupe_stable_keys(
         ``{agent_id: final_stable_key}``。衝突が無い項目は元のキーのまま。衝突した組は
         agent ID 昇順で 1 番目が素のキー、2 番目以降が ``#n``。agent ID が空の項目は
         位置で代用しない（その項目は ``agent_id_of`` の戻り値 ``""`` をキーに1件だけ載る）。
+
+    **agent ID が一意な呼び出し側専用**（例: DB の行 id をキーにする backfill）。同じ ID の
+    項目が2件以上あると1件に潰れるので、行に配るキーには :func:`assign_stable_keys` を使う。
     """
-    groups: dict[str, list[str]] = {}
-    for item in items:
-        groups.setdefault(_clean(key_of(item)), []).append(_clean(agent_id_of(item)))
+    finals = assign_stable_keys(items, key_of=key_of, agent_id_of=agent_id_of)
     out: dict[str, str] = {}
-    for key, agent_ids in groups.items():
-        ordered = sorted(dict.fromkeys(agent_ids))
-        for index, agent_id in enumerate(ordered):
-            out[agent_id] = key if index == 0 else f"{key}#{index + 1}"
+    for item, final in zip(items, finals):
+        agent_id = _clean(agent_id_of(item))
+        if agent_id not in out:
+            out[agent_id] = final
     return out

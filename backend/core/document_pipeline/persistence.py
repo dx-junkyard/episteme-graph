@@ -232,6 +232,35 @@ def _apply_remaps(
     return summary
 
 
+def _assign_item_stable_keys(items: list[dict]) -> list[dict]:
+    """同一 run 内の stable_key 衝突を項目ごとに解く（KO2）。``items`` を破壊的に更新する。
+
+    **agent ID をキーにした写像で配らない**こと。A層は agent ID の一意性を保証せず
+    （数式 ID は印字番号由来なので ``eq_7`` が別ブロックで再び現れ得る）、写像で配ると
+    同じ ID の項目が全部同じ stable_key を受け取り ``uq_<table>_stable_key_live`` に
+    当たって同期全体が落ちる。
+    """
+    finals = ko_keys.assign_stable_keys(
+        items,
+        key_of=lambda item: item["stable_key"],
+        agent_id_of=lambda item: item["agent_id"],
+    )
+    renumbered = [
+        item["agent_id"]
+        for item, final in zip(items, finals)
+        if final != item["stable_key"]
+    ]
+    for item, final in zip(items, finals):
+        item["stable_key"] = final
+    if renumbered:
+        # 衝突は落とさず #n で分けるが、素材側の ID・内容が重複している事実は残す。
+        logger.info(
+            "stable_key collision resolved for %d item(s): agent ids=%s",
+            len(renumbered), sorted(set(renumbered))[:10],
+        )
+    return items
+
+
 # ---------------------------------------------------------------------------
 # equation の stable_key（claim / derivation / symbol のキー材料にもなる）
 # ---------------------------------------------------------------------------
@@ -280,24 +309,34 @@ def _equation_fields(record: Any) -> dict:
     }
 
 
+def _equation_key_for_fields(document_id: str, fields: dict) -> str:
+    """1 件の式レコードの stable_key（純計算・DB を読まない）。"""
+    return ko_keys.equation_stable_key(
+        document_id,
+        fields.get("latex"),
+        fields.get("plain_text") or fields.get("raw_text"),
+        fields.get("block_id"),
+        fields.get("label"),
+    )
+
+
 def _equation_stable_key_map(document_id: str, equations: Any) -> dict[str, str]:
     """``agent equation_id -> stable_key``（純計算・DB を読まない）。
 
     claim の ``equation_stable_keys`` / derivation step / symbol のキー材料に使う。
+
+    式 ID は印字番号由来（``eq_7``）なので **同じ ID のレコードが2件以上あり得る**。
+    その場合は最初のレコードのキーを採る（``assign_stable_keys`` が素のキーを渡すのも
+    先頭の項目なので、参照は素のキーを持つ行に着地する）。曖昧な ID の参照を推測で
+    分けることはしない。
     """
     out: dict[str, str] = {}
     for record in _equation_records(equations):
         fields = _equation_fields(record)
         agent_id = fields.get("equation_id") or ""
-        if not agent_id:
+        if not agent_id or agent_id in out:
             continue
-        out[agent_id] = ko_keys.equation_stable_key(
-            document_id,
-            fields.get("latex"),
-            fields.get("plain_text") or fields.get("raw_text"),
-            fields.get("block_id"),
-            fields.get("label"),
-        )
+        out[agent_id] = _equation_key_for_fields(document_id, fields)
     return out
 
 
@@ -1255,7 +1294,7 @@ def _build_claim_items(
     items: list[dict] = []
     # claim object の item だけを stable_key で索く（span 同士は合流させない。
     # 同じキーの span が2本あるのは「同じ命題が2箇所にある」ので、行は分けたまま
-    # dedupe_stable_keys が #2 … で区別する = KO2）。
+    # _assign_item_stable_keys が #2 … で区別する = KO2）。
     by_key: dict[str, dict] = {}
 
     def _register(item: dict, *, indexed: bool = False) -> None:
@@ -1416,13 +1455,7 @@ def _build_claim_items(
         })
 
     # 同一 run 内の stable_key 衝突は agent ID 昇順で #2 … を付ける（KO2）。
-    final_keys = ko_keys.dedupe_stable_keys(
-        items,
-        key_of=lambda item: item["stable_key"],
-        agent_id_of=lambda item: item["agent_id"],
-    )
-    for item in items:
-        item["stable_key"] = final_keys.get(item["agent_id"], item["stable_key"])
+    _assign_item_stable_keys(items)
     return items
 
 
@@ -1854,13 +1887,7 @@ def persist_components(
             },
         })
 
-    final_keys = ko_keys.dedupe_stable_keys(
-        items,
-        key_of=lambda item: item["stable_key"],
-        agent_id_of=lambda item: item["agent_id"],
-    )
-    for item in items:
-        item["stable_key"] = final_keys.get(item["agent_id"], item["stable_key"])
+    _assign_item_stable_keys(items)
 
     session = _pg_session()
     try:
@@ -2005,7 +2032,7 @@ _KNOWLEDGE_PRESERVED_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _equation_items(document_id: str, equations: Any, equation_keys: dict[str, str]) -> list[dict]:
+def _equation_items(document_id: str, equations: Any) -> list[dict]:
     items: list[dict] = []
     for record in _equation_records(equations):
         fields = _equation_fields(record)
@@ -2014,7 +2041,9 @@ def _equation_items(document_id: str, equations: Any, equation_keys: dict[str, s
             continue
         items.append({
             "agent_id": agent_id,
-            "stable_key": equation_keys.get(agent_id, ""),
+            # キーは **そのレコード自身の内容**から引く（同じ agent ID のレコードが
+            # 2件以上あるとき、写像から配ると全件が同じキーになってしまう）。
+            "stable_key": _equation_key_for_fields(document_id, fields),
             "values": {
                 "label": fields.get("label") or "",
                 "latex": fields.get("latex") or "",
@@ -2202,7 +2231,7 @@ def persist_knowledge_objects(
     if equations is not None:
         plans.append((
             "equations", TABLE_EQUATIONS, "agent_equation_id",
-            _EQUATION_CONTENT_COLUMNS, _equation_items(document_id, equations, equation_keys),
+            _EQUATION_CONTENT_COLUMNS, _equation_items(document_id, equations),
         ))
     else:
         skipped.append("equations")
@@ -2237,13 +2266,7 @@ def persist_knowledge_objects(
     session = _pg_session()
     try:
         for kind, table, agent_id_column, content_columns, items in plans:
-            final_keys = ko_keys.dedupe_stable_keys(
-                items,
-                key_of=lambda item: item["stable_key"],
-                agent_id_of=lambda item: item["agent_id"],
-            )
-            for item in items:
-                item["stable_key"] = final_keys.get(item["agent_id"], item["stable_key"])
+            _assign_item_stable_keys(items)
             sync = sync_live_rows(
                 session,
                 table=table,
@@ -3690,13 +3713,7 @@ def _rebuild_theory_claims_in_session(
             },
         })
 
-    final_keys = ko_keys.dedupe_stable_keys(
-        items,
-        key_of=lambda item: item["stable_key"],
-        agent_id_of=lambda item: item["agent_id"],
-    )
-    for item in items:
-        item["stable_key"] = final_keys.get(item["agent_id"], item["stable_key"])
+    _assign_item_stable_keys(items)
 
     sync = sync_live_rows(
         session,
@@ -3810,13 +3827,7 @@ def _rebuild_theory_components_in_session(
             },
         })
 
-    final_keys = ko_keys.dedupe_stable_keys(
-        items,
-        key_of=lambda item: item["stable_key"],
-        agent_id_of=lambda item: item["agent_id"],
-    )
-    for item in items:
-        item["stable_key"] = final_keys.get(item["agent_id"], item["stable_key"])
+    _assign_item_stable_keys(items)
 
     sync = sync_live_rows(
         session,

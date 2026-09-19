@@ -575,11 +575,11 @@ def derivation_step_rows(
 
 def dedupe(items: list[dict]) -> list[dict]:
     """同一取り込み内で衝突した stable_key に ``#2`` … を付ける（Phase 1 と同じ規則）。"""
-    final = ko_keys.dedupe_stable_keys(
+    finals = ko_keys.assign_stable_keys(
         items,
         key_of=lambda item: item["stable_key"],
         agent_id_of=lambda item: item["agent_id"],
     )
-    for item in items:
-        item["stable_key"] = final.get(item["agent_id"], item["stable_key"])
+    for item, final in zip(items, finals):
+        item["stable_key"] = final
     return items

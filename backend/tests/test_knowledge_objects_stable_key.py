@@ -26,6 +26,7 @@ from core.knowledge_objects.schema import STABLE_KEY_VERSION_PREFIX  # noqa: E40
 from core.knowledge_objects.stable_key import (  # noqa: E402
     claim_stable_key,
     component_stable_key,
+    assign_stable_keys,
     dedupe_stable_keys,
     derivation_step_stable_key,
     equation_stable_key,
@@ -200,3 +201,37 @@ class TestDedupe:
     def test_same_agent_id_twice_is_one_entry(self):
         out = _dedupe([_Item("a", "k1:x"), _Item("a", "k1:x")])
         assert out == {"a": "k1:x"}
+
+
+class TestAssignStableKeys:
+    """行に配るキーは **項目ごと**（agent ID が重複しても潰れない）。"""
+
+    def _assign(self, items):
+        return assign_stable_keys(
+            items, key_of=lambda i: i.key, agent_id_of=lambda i: i.agent_id
+        )
+
+    def test_no_collision_keeps_plain_keys(self):
+        assert self._assign([_Item("a", "k1:aaa"), _Item("b", "k1:bbb")]) == [
+            "k1:aaa", "k1:bbb",
+        ]
+
+    def test_collision_numbered_by_agent_id_ascending(self):
+        items = [_Item("c_3", "k1:x"), _Item("c_1", "k1:x"), _Item("c_2", "k1:x")]
+        assert self._assign(items) == ["k1:x#3", "k1:x", "k1:x#2"]
+
+    def test_same_agent_id_twice_yields_two_distinct_keys(self):
+        """A層は agent ID の一意性を保証しない（``eq_7`` が2ブロックに出る）。"""
+        assert self._assign([_Item("a", "k1:x"), _Item("a", "k1:x")]) == [
+            "k1:x", "k1:x#2",
+        ]
+
+    def test_empty_agent_ids_come_after_named_ones_in_input_order(self):
+        items = [_Item("", "k1:x"), _Item("z", "k1:x"), _Item("", "k1:x")]
+        assert self._assign(items) == ["k1:x#2", "k1:x", "k1:x#3"]
+
+    def test_input_order_does_not_matter_for_named_ids(self):
+        forward = self._assign([_Item("a", "k1:x"), _Item("b", "k1:x")])
+        backward = self._assign([_Item("b", "k1:x"), _Item("a", "k1:x")])
+        assert forward == ["k1:x", "k1:x#2"]
+        assert backward == ["k1:x#2", "k1:x"]

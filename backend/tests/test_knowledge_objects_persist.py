@@ -488,3 +488,63 @@ def test_audit_row_is_recorded_for_the_run():
     assert audit["entity_id"] == "doc-1"
     assert audit["new_status"] == "synced"
     assert json.loads(audit["metadata"])["run_id"] == "run-1"
+
+
+def _equation_record(equation_id, *, label, latex, block_id="b1"):
+    return types.SimpleNamespace(
+        equation_id=equation_id, label=label, content_hash="",
+        source_extraction=types.SimpleNamespace(
+            raw_text=latex, latex=latex, plain_text=latex,
+            source_location={"block_id": block_id, "section_id": "sec1", "page": 1},
+            needs_math_review=False,
+        ),
+        reconstruction=types.SimpleNamespace(latex=None, plain_text=None),
+        semantics=types.SimpleNamespace(
+            equation_type="definition", semantic_status="source_backed",
+            defined_symbols=[], used_symbols=[], input_equation_ids=[],
+            output_equation_ids=[], linked_claim_ids=[], source_evidence_ids=[],
+        ),
+    )
+
+
+def test_same_equation_id_in_two_blocks_does_not_collide():
+    """式 ID は印字番号由来（``eq_7``）で文書内一意ではない（2026-09-17 の回帰）。
+
+    同じ ID の2件が同じ stable_key で INSERT されると
+    ``uq_knowledge_equations_stable_key_live`` に当たって解析全体が落ちていた。
+    """
+    equations = types.SimpleNamespace(equations=[
+        _equation_record("eq_7", label="7", latex="a=b", block_id="b1"),
+        _equation_record("eq_7", label="7", latex="c=d", block_id="b2"),
+    ])
+    summary, session = _knowledge_session(equations=equations)
+    rows = session.inserted_into("knowledge_equations")
+    assert len(rows) == 2
+    assert summary["equations"]["inserted"] == 2
+    keys = [row["stable_key"] for row in rows]
+    assert len(set(keys)) == 2, keys
+    # 行ごとのキーは **その行自身の内容**から引く（片方の内容で両方を名乗らせない）。
+    assert keys[0] == ko_keys.equation_stable_key("doc-1", "a=b", "a=b", "b1", "7")
+    assert keys[1] == ko_keys.equation_stable_key("doc-1", "c=d", "c=d", "b2", "7")
+
+
+def test_identical_duplicate_equation_records_are_renumbered():
+    """内容まで同じ重複レコードでも ``#2`` で行を分ける（情報を落とさない）。"""
+    equations = types.SimpleNamespace(equations=[
+        _equation_record("eq_7", label="7", latex="a=b"),
+        _equation_record("eq_7", label="7", latex="a=b"),
+    ])
+    _summary, session = _knowledge_session(equations=equations)
+    keys = [row["stable_key"] for row in session.inserted_into("knowledge_equations")]
+    base = ko_keys.equation_stable_key("doc-1", "a=b", "a=b", "b1", "7")
+    assert keys == [base, f"{base}#2"]
+
+
+def test_duplicate_equation_id_references_resolve_to_the_first_record():
+    """曖昧な ID の参照は先頭レコード（素のキーを持つ行）に着地させる。"""
+    equations = types.SimpleNamespace(equations=[
+        _equation_record("eq_7", label="7", latex="a=b", block_id="b1"),
+        _equation_record("eq_7", label="7", latex="c=d", block_id="b2"),
+    ])
+    keys = persistence._equation_stable_key_map("doc-1", equations)
+    assert keys["eq_7"] == ko_keys.equation_stable_key("doc-1", "a=b", "a=b", "b1", "7")

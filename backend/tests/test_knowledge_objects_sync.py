@@ -237,6 +237,26 @@ def test_duplicate_incoming_keys_without_agent_ids_are_not_collapsed():
     assert keys == ["k1:a", "k1:a#2"]
 
 
+def test_same_agent_id_twice_is_not_collapsed():
+    """agent ID は一意とは限らない（数式 ID は印字番号由来で ``eq_7`` が再び現れ得る）。
+
+    同じ ID の2件が同じキーのまま INSERT されると
+    ``uq_<table>_stable_key_live`` に当たって同期全体が落ちる（2026-09-17 の回帰）。
+    """
+    session = FakeKnowledgeSession()
+    result = _sync(session, [_item("eq_7", "k1:a"), _item("eq_7", "k1:a")])
+    keys = [row["stable_key"] for row in session.inserted_into(TABLE)]
+    assert keys == ["k1:a", "k1:a#2"]
+    assert result.stats["inserted"] == 2
+
+
+def test_same_agent_id_with_different_keys_keeps_both_keys():
+    session = FakeKnowledgeSession()
+    _sync(session, [_item("eq_7", "k1:a"), _item("eq_7", "k1:b")])
+    keys = [row["stable_key"] for row in session.inserted_into(TABLE)]
+    assert keys == ["k1:a", "k1:b"]
+
+
 def test_unique_keys_are_left_alone():
     session = FakeKnowledgeSession()
     _sync(session, [_item("a1", "k1:a"), _item("a2", "k1:b")])

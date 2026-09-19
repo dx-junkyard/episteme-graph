@@ -3015,7 +3015,9 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - **stable_key の正本は `core/knowledge_objects/stable_key.py`**（純関数。`digest = "k1:" + sha256[:32]`、材料は
   `document_id` + 正規化テキスト + 出典 block_id 集合 + 種別固有の少数の構造項。正規化は agent 側 `content_hash`
   と同じ `episteme_graph.agents.content_normalization`。run_id・出現順・agent ID・confidence を材料にしない。
-  同一 run 内の衝突は `dedupe_stable_keys` が agent ID 昇順で `#2`…）。既存行は起動時 `backfill_stable_keys`
+  同一 run 内の衝突は `assign_stable_keys` が **項目ごとに** agent ID 昇順で `#2`… を付ける — 行に配る
+  キーを `{agent_id: key}` の写像で配らない（式 ID は印字番号由来で `eq_7` が別ブロックにも現れる。
+  写像だと同じ ID の行が同じキーを受け取り部分一意索引違反になる = V-6）。既存行は起動時 `backfill_stable_keys`
   （lifespan・fail-open・NULL 行のみ）で近似キーを埋める。
 - **再解析は DELETE しない（KO3）**: `core/knowledge_objects/sync.py::sync_live_rows` が「stable_key 一致 → 同 UUID で
   内容列を更新（`review_status` / `status` / `teacher_notes` / `created_by`、人間が触った component の

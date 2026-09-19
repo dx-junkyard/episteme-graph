@@ -95,33 +95,28 @@ def _dedupe_incoming_keys(incoming: Sequence[Mapping[str, Any]]) -> list[Mapping
     同じキーの2件目以降をそのまま INSERT すると
     ``uq_<table>_stable_key_live``（``(document_id, stable_key)`` の部分一意索引）に
     当たって同期全体が落ちる。呼び出し側（``persistence`` の claim / component 経路）は
-    既に :func:`~.stable_key.dedupe_stable_keys` を通しているが、``learning_units`` の
-    ように通していない経路があるため、**最後の砦としてここでも通す**（衝突が無ければ
+    既に :func:`~.stable_key.assign_stable_keys` を通しているが、通し忘れた経路や
+    呼び出し側で潰れた組に備えて、**最後の砦としてここでも通す**（衝突が無ければ
     何も起きない）。
 
-    順位付けは agent ID 昇順（``dedupe_stable_keys`` と同じ決定論）。agent ID が空の
-    項目は入力順の最後に回し、名乗る ID を持つ項目から素のキーを取る。
+    順位付けは agent ID 昇順 → 入力順（``assign_stable_keys`` と同じ決定論）。agent ID が
+    空の項目・**同じ agent ID を名乗る項目が2件以上**ある場合も1件に潰さない（A層は
+    agent ID の一意性を保証しない。例: 数式 ID は印字番号由来なので ``eq_7`` が別ブロックで
+    再び現れ得る）。
     """
-    from .stable_key import dedupe_stable_keys
+    from .stable_key import assign_stable_keys
 
     if not incoming:
         return []
     items = list(incoming)
-    # agent ID が空の項目にも一意な並び順トークンを与える（空 ID 同士が1件に潰れないように）。
-    ordering: list[str] = []
-    for index, item in enumerate(items):
-        agent_id = _clean(item.get("agent_id"))
-        ordering.append(agent_id or f"￿#{index:06d}")
-    final = dedupe_stable_keys(
-        list(zip(ordering, items)),
-        key_of=lambda pair: _clean(pair[1].get("stable_key")),
-        agent_id_of=lambda pair: pair[0],
+    finals = assign_stable_keys(
+        items,
+        key_of=lambda item: _clean(item.get("stable_key")),
+        agent_id_of=lambda item: _clean(item.get("agent_id")),
     )
     out: list[Mapping[str, Any]] = []
-    for token, item in zip(ordering, items):
-        stable_key = _clean(item.get("stable_key"))
-        assigned = final.get(token, stable_key)
-        if assigned == stable_key:
+    for item, assigned in zip(items, finals):
+        if assigned == _clean(item.get("stable_key")):
             out.append(item)
             continue
         updated = dict(item)

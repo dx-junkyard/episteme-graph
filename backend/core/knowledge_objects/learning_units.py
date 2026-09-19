@@ -617,7 +617,7 @@ def build_learning_unit_items(
     Returns:
         ``sync_live_rows`` の ``incoming`` 形の並び。並びは
         (``LEARNING_UNIT_KINDS`` の順, ``order_index``) で決定論。同一 run 内で
-        ``stable_key`` が衝突した組には ``#2`` … が付く（:func:`dedupe_stable_keys`）。
+        ``stable_key`` が衝突した組には ``#2`` … が付く（:func:`assign_stable_keys`）。
     """
     claim_id_map = dict(claim_id_map or {})
     component_id_map = dict(component_id_map or {})
@@ -640,13 +640,13 @@ def build_learning_unit_items(
     for kind in LEARNING_UNIT_KINDS:
         items.extend(by_kind.get(kind, []))
 
-    final_keys = ko_keys.dedupe_stable_keys(
+    finals = ko_keys.assign_stable_keys(
         items,
         key_of=lambda item: item["stable_key"],
         agent_id_of=lambda item: item["agent_id"],
     )
-    for item in items:
-        item["stable_key"] = final_keys.get(item["agent_id"], item["stable_key"])
+    for item, final in zip(items, finals):
+        item["stable_key"] = final
     return items
 
 
