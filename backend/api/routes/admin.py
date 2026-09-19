@@ -1117,6 +1117,12 @@ def _material_reference_health(stage_outputs: dict | None) -> dict:
     snapshot = (stage_outputs or {}).get("reference_health")
     if not isinstance(snapshot, dict):
         return {"status": reference_health_core.STATUS_UNCHECKED}
+    # 2026-09-19 以前の「参照の切れはありません。」は検査対象が 6 種しか無かった頃の
+    # 記録で、層が空でも ok と言っていた。詳細 API と同じく再検査対象＝未確認として
+    # 出す（旧 ok を根拠に「壊れていない」と読ませない。再解析か「再確認」で更新される）。
+    facts = snapshot.get("facts")
+    if isinstance(facts, (list, tuple)) and reference_health_core.LEGACY_FACT_OK in facts:
+        return {"status": reference_health_core.STATUS_UNCHECKED}
     status = str(snapshot.get("status") or "").strip()
     if status not in (
         reference_health_core.STATUS_OK,

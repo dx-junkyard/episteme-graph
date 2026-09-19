@@ -29,6 +29,7 @@ from typing import Any, Optional
 from sqlalchemy import text as sa_text
 
 from core import atlas_store
+from core import coverage_facts
 from core import element_explanations as element_explanations_store
 from core import privacy
 from core.admin_assistant import capabilities as caps
@@ -62,6 +63,16 @@ RULE_COURSE_AUDIO_MISSING = "course.audio_missing"
 # `material.inventory_unvisited` は「見たかどうか」の押し付けになるため意図的に
 # 実装しない（vision_ux_gap_survey_2026-07-17.md §5-5 の見送り推奨, G4）。
 RULE_FIGURE_UNREVIEWED_MODES = "figure.unreviewed_modes"
+
+# 計器の空振り是正（2026-09-19 実測）: 解析は「completed」で終わっているのに、
+# 上流が黙って欠けている 2 つの状態を教員に見せる。どちらも参照の健全性
+# （core/reference_health.py）では ok と読める（参照は解決しているため）。
+#   - material.explanations_skipped: 要素の二層説明が日次上限で 1 件も生成されなかった
+#     （実測 8/11 本。stage_outputs に skipped_by_limit が残るだけで誰にも見えない）。
+#   - material.ingest_incomplete: 取り込みの完全性チェックが complete=false
+#     （実測 11/12 本。document_completeness artifact 止まりで画面に出ない）。
+RULE_MATERIAL_EXPLANATIONS_SKIPPED = "material.explanations_skipped"
+RULE_MATERIAL_INGEST_INCOMPLETE = "material.ingest_incomplete"
 
 # discuss_opening_authoring_design.md §6.2: 生成は document 単位だが、添削の動機は
 # コースを作るときに生まれる。所有コースのソース論文に未確認の「議論のきっかけ」
@@ -131,6 +142,20 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "severity": SEVERITY_RECOMMENDED,
         "capability_id": "materials.review_figures",  # 道案内のみ（図モーダルへ, #496）
     },
+    # 2026-09-19: どちらも解消手段は「その教材の行でパイプラインを実行し直す」。
+    # 専用 capability は作らず、教材行そのものへ案内する既存 capability を再利用する
+    # （G3: registry を単一の真実源に保ち、道案内の粒度で新規登録を増やさない）。
+    RULE_MATERIAL_EXPLANATIONS_SKIPPED: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "materials.row_actions_menu",  # 道案内のみ
+    },
+    RULE_MATERIAL_INGEST_INCOMPLETE: {
+        # optional: PDF 経路はページ被覆の理由でほぼ全教材が complete=false になるため、
+        # recommended にすると上限 10 件の一覧を埋め尽くして他の To-Do を押し出す
+        # （2026-09-19 再現性レビュー §7）。事実は計器（reference_health の facts）にも出る。
+        "severity": SEVERITY_OPTIONAL,
+        "capability_id": "materials.row_actions_menu",  # 道案内のみ
+    },
     RULE_COURSE_DISCUSS_OPENING_UNREVIEWED: {
         "severity": SEVERITY_RECOMMENDED,
         "capability_id": "course.discuss_opening_review",  # 道案内のみ（説明レビューキューへ）
@@ -167,6 +192,10 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
 _HELP_GAP_NO_HIT_BUCKET = "no_hit"
 
 MAX_STEPS = 10
+
+#: 取り込みの完全性レポートが保存される artifact の stage 名
+#: （``core/document_pipeline/orchestrator.py::_record_document_completeness``）。
+_COMPLETENESS_STAGE = "document_completeness"
 
 # §8: 操作アシスタント初回ログイン cue の一度きりフラグ。専用テーブルを増やさず
 # assistant_step_dismissals の 1 行で代用する（step_key はどのルールとも衝突しない）。
@@ -596,6 +625,128 @@ def _eval_figure_unreviewed_modes(session, uid: str) -> list[tuple[NextStep, str
             target_id=doc_id,
             title=f"教材『{title}』の図・画像の分類を確認する",
             reason=f"教材『{title}』に AI が分類した図・画像が {count} 件あり、まだ確認されていません。",
+            target={"material_id": doc_id},
+            ctx={"material_id": material_row_id},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
+#: 成果物 run（採用 run）の解決。``persistence.resolve_artifact_runs`` の "adopted"
+#: ポリシと同じ式を SQL 断片として持つ（core/admin_assistant は persistence を import
+#: しない。ポリシの意味は P0-8 の1語彙「adopted」で、latest は使わない）。
+_ADOPTED_RUN_SQL = """
+    SELECT d.id AS document_id, d.source_path, d.title, d.created_at,
+           COALESCE(
+               d.active_analysis_run_id,
+               (SELECT r2.id FROM document_analysis_runs r2
+                 WHERE r2.document_id = d.id AND r2.status = 'completed'
+                 ORDER BY r2.completed_at DESC NULLS LAST, r2.created_at DESC, r2.id DESC
+                 LIMIT 1)
+           ) AS run_id
+    FROM documents d
+    WHERE d.uploaded_by = CAST(:uid AS uuid)
+"""
+
+#: 事実文に並べる完全性の理由の上限（件数は書かない — 名前だけを列挙する, G6）。
+_COMPLETENESS_MAX_REASONS_IN_REASON = 2
+
+
+def _eval_material_explanations_skipped(session, uid: str) -> list[tuple[NextStep, str]]:
+    """要素の二層説明が、日次上限に達したため 1 件も生成されていない教材（2026-09-19）。
+
+    - 点灯: 採用 run の ``stage_outputs.contextual_explanation.skipped_by_limit`` が真で、
+      かつその教材に生きた要素の説明（``kind='contextual'`` / 議論のきっかけを除く /
+      ``candidate`` または ``approved``）が1件も無い。
+    - 消滅: 説明が1件でも生成されれば導出されなくなる（G1: 完了フラグを持たない）。
+    - 事実文に件数・残回数を書かない（G6 / 原則4）。上限の意味論は変えない — **見えるようにする**。
+    """
+    rows = session.execute(
+        sa_text(f"""
+            WITH adopted AS ({_ADOPTED_RUN_SQL})
+            SELECT a.document_id::text AS id, a.source_path, a.title, a.created_at
+            FROM adopted a
+            JOIN document_analysis_runs r ON r.id = a.run_id
+            WHERE (r.stage_outputs -> 'contextual_explanation' ->> 'skipped_by_limit') = 'true'
+              AND NOT EXISTS (
+                  SELECT 1 FROM element_explanations e
+                  WHERE e.document_id = a.document_id
+                    AND e.kind = :kind AND e.role IS NULL
+                    AND e.status IN (:candidate, :approved)
+              )
+            ORDER BY a.created_at ASC
+        """),
+        {
+            "uid": uid,
+            "kind": element_explanations_store.KIND_CONTEXTUAL,
+            "candidate": element_explanations_store.STATUS_CANDIDATE,
+            "approved": element_explanations_store.STATUS_APPROVED,
+        },
+    ).mappings().fetchall()
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        doc_id = row["id"]
+        title = row["title"] or doc_id
+        material_row_id = row["source_path"] or doc_id
+        step = _make_step(
+            rule_id=RULE_MATERIAL_EXPLANATIONS_SKIPPED,
+            target_id=doc_id,
+            title=f"教材『{title}』の要素の説明を確認する",
+            reason=(
+                f"教材『{title}』は解析が完了していますが、要素の説明は当日の実行上限に達したため"
+                "生成されていません。"
+            ),
+            target={"material_id": doc_id},
+            ctx={"material_id": material_row_id},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
+def _eval_material_ingest_incomplete(session, uid: str) -> list[tuple[NextStep, str]]:
+    """取り込みの完全性チェックが「完全ではない」と記録している教材（2026-09-19）。
+
+    - 点灯: 採用 run の ``document_completeness`` artifact が ``complete=false``。
+    - 消滅: 取り込み直しで ``complete=true`` になれば導出されなくなる
+      （G1: 完了フラグを持たない）。見送りは既存の dismiss（G5）で保持される。
+    - 理由は ``core/coverage_facts.py`` の事実文をそのまま並べる（数字を書かない, G6）。
+    """
+    rows = session.execute(
+        sa_text(f"""
+            WITH adopted AS ({_ADOPTED_RUN_SQL})
+            SELECT a.document_id::text AS id, a.source_path, a.title, a.created_at,
+                   art.payload AS payload
+            FROM adopted a
+            JOIN document_analysis_artifacts art
+              ON art.run_id = a.run_id AND art.stage = :stage
+            WHERE (art.payload ->> 'complete') = 'false'
+            ORDER BY a.created_at ASC
+        """),
+        {"uid": uid, "stage": _COMPLETENESS_STAGE},
+    ).mappings().fetchall()
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        payload = row["payload"] if isinstance(row["payload"], dict) else {}
+        reasons = payload.get("review_reasons")
+        reasons = [str(r) for r in reasons] if isinstance(reasons, (list, tuple)) else []
+        facts: list[str] = []
+        for reason in reasons:
+            fact = coverage_facts.completeness_fact(reason)
+            if fact not in facts:
+                facts.append(fact)
+        doc_id = row["id"]
+        title = row["title"] or doc_id
+        material_row_id = row["source_path"] or doc_id
+        detail = "".join(facts[:_COMPLETENESS_MAX_REASONS_IN_REASON])
+        if len(facts) > _COMPLETENESS_MAX_REASONS_IN_REASON:
+            detail += "ほかにも記録があります。"
+        step = _make_step(
+            rule_id=RULE_MATERIAL_INGEST_INCOMPLETE,
+            target_id=doc_id,
+            title=f"教材『{title}』の取り込み状況を確認する",
+            reason=(
+                f"教材『{title}』は、原本のすべてを取り込めたとは確認できていません。{detail}"
+            ),
             target={"material_id": doc_id},
             ctx={"material_id": material_row_id},
         )
@@ -1144,6 +1295,8 @@ _RULE_EVALUATORS = {
     RULE_COURSE_ATLAS_BINDING_STALE: _eval_course_atlas_binding_stale,
     RULE_COURSE_AUDIO_MISSING: _eval_course_audio_missing,
     RULE_FIGURE_UNREVIEWED_MODES: _eval_figure_unreviewed_modes,
+    RULE_MATERIAL_EXPLANATIONS_SKIPPED: _eval_material_explanations_skipped,
+    RULE_MATERIAL_INGEST_INCOMPLETE: _eval_material_ingest_incomplete,
     RULE_COURSE_DISCUSS_OPENING_UNREVIEWED: _eval_course_discuss_opening_unreviewed,
     RULE_COURSE_PREREQUISITE_UNCOVERED: _eval_course_prerequisite_uncovered,
     RULE_COURSE_DELIVERED_UNREVIEWED: _eval_course_delivered_unreviewed,

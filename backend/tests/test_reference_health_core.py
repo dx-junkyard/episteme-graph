@@ -297,10 +297,22 @@ class TestDbLayer:
         assert result["facts"] == [FACT_NOT_CHECKED]
 
     def test_document_id_is_cast_to_uuid(self):
+        """発行する SQL はすべて1つの document にスコープされる。
+
+        本モジュール自身のクエリは ``CAST(:document_id AS uuid)``。run の選択だけは
+        自前 SQL を書かず ``persistence.resolve_artifact_runs`` に委譲しており（C-8:
+        run 選択ポリシを分裂させない）、そちらは ``d.id::text IN (:doc_0)`` で
+        同じく document 単位にスコープする。
+        """
         session = FakeSession()
         check_document_references(session, "doc-uuid")
-        for sql in session.statements:
+        own = [sql for sql in session.statements if "WITH targets AS" not in sql]
+        assert own, "本モジュール自身のクエリが1本も発行されていない（走査の健全性）"
+        for sql in own:
             assert "CAST(:document_id AS uuid)" in sql
+        for sql in session.statements:
+            if "WITH targets AS" in sql:
+                assert "d.id::text IN (:doc_0)" in sql
 
 
 class TestSynthesizedClaimsAreNotBroken:
