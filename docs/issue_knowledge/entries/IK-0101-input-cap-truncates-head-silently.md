@@ -61,7 +61,7 @@ resolution:
     - src/episteme_graph/agents/coverage_report.py
     - docs/architecture/knowledge_structure_review_2026-09-12.md §4 Phase 0 実装記録
 related: [IK-0102, IK-0113]
-view_of: []
+view_of: [IK-0329]
 history:
   - date: '2026-09-19'
     field: classification

@@ -3309,6 +3309,56 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   （`_require_editable_ledger_target`）が必要 — `_require_teacher` だけでは足りない。⑧SA層 `retrieved_structure` の
   事実文は `learner_context_common.safe_text` を通し生 TeX を出さない。nginx の `client_max_body_size` は 55m。
 
+### 論文の再現性レビューと是正（migration なし, 2026-09-19）
+
+Phase 0〜4 実装後の**再照合**（実論文 12 本の原本 ⇄ 成果）。正本は
+`docs/architecture/knowledge_reproduction_review_2026-09-19.md`（E-0〜E-12・判断 J-1〜J-4・
+§5.2 改善しきれないものの理由・§7 実装記録。課題ナレッジ IK-0328〜IK-0343）。結論: 文章層と
+学ぶ単位（section_block）は忠実、**式・導出・図表の層は PDF 経路で未再現**だった。以下は現行の姿。
+
+- **打ち切りの既定は「上限なし」**（E-2 / J-3）。並び順・節単位の層化サンプリング・上限解決の正本は
+  `src/episteme_graph/agents/stratified_sampling.py`（rhetorical_role は委譲）。上限を敷く運用は env
+  `CLAIM_QUALIFICATION_MAX_SPANS` / `EQUATION_SEMANTICS_MAX_EQUATIONS` /
+  `EQUATION_SEMANTICS_MAX_INLINE_EQUATIONS`（inline だけ既定 32）/ `PAPER_SKELETON_MAX_SECTIONS` で明示
+  （`RHETORICAL_ROLE_MAX_BLOCKS` と同じ「値の正本は env」パターン）。**新しい入力 builder に `_MAX_*` の
+  先頭切り捨てを書かない**。paper_skeleton / claim_qualification / equation_semantics（母集合 = 式ブロック +
+  inline 候補）/ thesis_reconstruction に coverage が付き、**resume 経路でも artifact 由来の被覆を
+  `details.source="artifact"` 付きで報告する**（E-7。`upsert_analysis_run` は stage の dict を丸ごと置換する）。
+- **PDF 由来の数式の信頼連鎖**（E-1）: prompt は原文を隠さず untrusted 区画で提示（J-2）。導出の veto は
+  その式固有の疑い（mismatch / ラベル不一致 / corrupted）に限定し、`pdf_text_layer_untrusted` だけなら既存の
+  救済条件（`reconstruction.confidence >= 0.7` 等）で判定（J-1。`EquationConsistency.untrusted_pdf_only()`）。
+  救われても `must_not_treat_as_source_extracted` / `can_support_claim=False` は不変で、復元由来しか backing の
+  無い node / edge / step は **`partially_source_backed` 止まり**（`RECONSTRUCTION_BACKED_REASON`。正本は
+  `derivation_chain/schema.py`、印はローカル chain と system 導出の**両方**の step が書く — R-1）。mismatch かつ
+  低信頼の record は label を退避し `semantic_status='unknown'` に降格。導出は式 chain と claim chain の併走。
+  `chunks.formulas[].reconstructed` / `latex_source`、学習者向け事実文は `label_vocab.RECONSTRUCTED_EQUATION_NOTE`
+  （DTO `latex_note` / `label_note`・JS にミラーしない）。
+- **文書構造**（E-4）: GROBID の `<back>/annex` を歩く・body/back 直下の `<figure>` / `<figure type="table">` を
+  caption block に・表本体は行テキストで保持・`head/@n` から level / parent・REVTeX `FIG. 1.` caption・走り込み
+  見出し。`Section.section_number` / `is_appendix`、`metadata.structure_recovery`。
+- **役割判定**（E-3）: span のオフセットは LLM に要求せずサーバ側で決定論解決（`repair.py::resolve_span_offsets`、
+  検証基準は不変。訂正したときは本文のスライスを `span.text` にする — R-2）。修復失敗・unknown 比率は `summary_stats`。
+  表本体（`raw.in_table`）は役割判定・主張採否の母集合に入れない（R-4）。
+- **接続**（E-8〜E-10）: node↔部品は claim 交差でも突合。辺に `graph_layer`。導出 step は裸 ID と合成 ID
+  `{derivation_id}:{step_id}` を併記（A層は `knowledge` 層の語を書かない・一致はテストで固定）。claim 参照の
+  `claim:` 正規化の正本は `backend/core/knowledge_objects/references.py`（discuss opening / theory_components /
+  export gate が使う）。承認ゲートは `claim_ids` / `equation_ids` を出典として読み時受理し `source_chunks` は
+  根拠 claim の chunk から導出（弁は維持）。**PUT 経路（`_validate_for_review`）と approve 経路
+  （`_component_approval_problems`）は同じ補助関数で読む**。復元由来の式（採用 run の `equation_semantics`
+  artifact の `must_not_treat_as_source_extracted`）だけを指す `equation_ids` は出典に数えない（R-3）。学ぶ単位は 3 種別に `section_ids` を伝播し候補順は章順。
+- **計器**（E-5 / E-6 / E-11）: `reference_health` は破断の検査種別 9 + 欠落（空層・打ち切り・skip・完全性理由・
+  主グラフに吊られていない式の詳細ノード `detail_node_parent` — 破断ではなく欠落なので status を変えない、R-5）の
+  事実文（`core/coverage_facts.py`）。「ok」の文言は「検査した参照はすべて解決しています」で、旧文言のスナップ
+  ショットは未確認扱い（教材行チップも同じ）。永続化の要約は `stage_outputs.knowledge_objects` に必ず書く。
+  G層 `material.explanations_skipped`（recommended）/ `material.ingest_incomplete`（optional）。
+- **LLM 回数の計器**（R-6）: 上限を撤廃したステージは呼び出し回数が母集合に比例する。共通 JSON クライアント
+  `ProviderJSONLLMClient.calls` を計器に、claim_qualification は `summary_stats.llm_calls` / stage payload `llm_calls`
+  に run ごとの回数を残す（実測の正本は U層）。学習者向けの復元式の印は `label_vocab.RECONSTRUCTED_EQUATION_MARK` を
+  `core/lecture.annotate_reconstructed_formulas` が `reconstructed_mark` / `reconstructed_note` として載せる
+  （JS に直書きしない）。
+- **改善しきれないもの**（§5.2）: 表のセル構造化 / PDF 数式の vision OCR / main グラフの集約粒度 /
+  日次予算の run 按分（O-A）/ 既定 cartridge の運用 / 旧 run の再生（再解析はオーナー操作）/ TeX 図の画像化。
+
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
 同型実装のコピペ増殖を止めるための正本モジュール群。**新機能で同種の処理を書くときは

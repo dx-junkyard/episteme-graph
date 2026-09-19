@@ -167,12 +167,29 @@ PDF
 （`truncated` は `population - processed` の導出値。`reasons` は理由コードの列で数値を載せない。
 `details` に件数キーを入れない）。orchestrator では `_attach_coverage` だけがこのキーを組み立てる
 （ガードレール `backend/tests/test_pipeline_coverage_report.py`）。対象は rhetorical_role
-（agent の `summary_stats.coverage` がそのまま落ちる）/ figure_image_extraction / equation_semantics /
-figure_table_semantics / apparatus_semantics / contextual_explanation / discuss_opening /
-landscape_placement / identity_candidates（母集合 = 当該 document の live 親 component 数。
-`core/library/identity_candidates.py` が組み立てる）。`claim_qualification` は母集合を事実で
-導けないため未付与（保留）。
-resume で artifact を再利用したステージには新規計算しない。
+（agent の `summary_stats.coverage` がそのまま落ちる）/ **paper_skeleton**（母集合 = level-1 節・reasons
+`max_sections` / `appendix_excluded`）/ **claim_qualification**（母集合 = 役割判定済み span・reasons
+`max_spans`。agent の `summary_stats.coverage`。2026-09-19 追加）/ equation_semantics（母集合 =
+式ブロック **+ inline 候補**・unit `equation_candidates`・reasons `max_equations` / `max_inline_equations`）/
+**thesis_reconstruction**（文脈サンプリングの上限 32/16/16 を unit `context_items` で報告）/
+figure_image_extraction / figure_table_semantics / apparatus_semantics / contextual_explanation /
+discuss_opening / landscape_placement / identity_candidates（母集合 = 当該 document の live 親 component 数。
+`core/library/identity_candidates.py` が組み立てる）。
+**打ち切りの既定は「上限なし」**（2026-09-19 [再現性レビュー](../architecture/knowledge_reproduction_review_2026-09-19.md)
+E-2 / J-3。上限を敷く運用は env `RHETORICAL_ROLE_MAX_BLOCKS` / `CLAIM_QUALIFICATION_MAX_SPANS` /
+`EQUATION_SEMANTICS_MAX_EQUATIONS` / `EQUATION_SEMANTICS_MAX_INLINE_EQUATIONS`（inline だけは既定 32）/
+`PAPER_SKELETON_MAX_SECTIONS` で明示し、上限があるときは先頭切り捨てではなく節単位の層化サンプリング —
+正本 `src/episteme_graph/agents/stratified_sampling.py`）。
+**resume で artifact を再利用したステージ**には今回の母集合を捏造せず、**前回 run の artifact から導ける
+事実だけ**を `details.source="artifact"` 付きで報告する（`upsert_analysis_run` は stage の dict を丸ごと
+置換するため、無報告だと前回の coverage が消える — 同レビュー E-7）。
+**`reasons` は実際に効いた弁だけ**を書く（equation_semantics で inline 上限だけが効いたときに `max_equations` を
+並べない。2026-09-19 レビュー是正）。**表本体**（GROBID の表を行テキストで残した `body_paragraph`・`raw.in_table`）
+は役割判定・主張採否の母集合に入れず、除外した block ID を `details.excluded_table_block_ids` に残す（件数なし）。
+**LLM 呼び出し回数**: 上限を撤廃したステージでは呼び出し回数が母集合に比例する（主張採否は 1 span = 1 コール +
+修復・参照再試行）。共通 JSON クライアント `ProviderJSONLLMClient.calls` を計器に、claim_qualification は
+`summary_stats.llm_calls`（run ごとの差分）に残し、orchestrator が stage payload の `llm_calls` に写す
+（実測の正本は U層 `llm_usage_events` — こちらは agent 側の自己申告）。
 
 ### artifact の run 選択（2026-09-12 P0-8）
 
