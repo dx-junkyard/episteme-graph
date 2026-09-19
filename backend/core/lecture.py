@@ -23,6 +23,7 @@ from core.course_data import (
     iter_all_topics,
     lecture_studio_settings as _lecture_studio_settings,
 )
+from core.label_vocab import RECONSTRUCTED_EQUATION_MARK, RECONSTRUCTED_EQUATION_NOTE
 from core.llm import generate_text, get_llm_params
 from core.llm_worker.single_shot import extract_json
 from core.personas import persona_prompt
@@ -365,6 +366,27 @@ def _fallback_spoken_text(chunk_text: str) -> dict:
 _PLACEHOLDER_RE = re.compile(r"\[\[FORMULA_\d+\]\]")
 
 
+def annotate_reconstructed_formulas(formulas: list[dict]) -> list[dict]:
+    """復元由来（``reconstructed``）の式に、サーバ文言の印と事実文を載せる。
+
+    ``chunks.formulas[].reconstructed``（PDF 由来で AI が文脈から復元した LaTeX）を
+    学習者に抽出結果と同じ顔で出さないための目印。文言の正本は ``label_vocab``
+    （``RECONSTRUCTED_EQUATION_MARK`` / ``RECONSTRUCTED_EQUATION_NOTE``）で、JS は
+    ``reconstructed_mark`` / ``reconstructed_note`` を素通しで描く。入力を mutate せず、
+    dict でない要素はそのまま返す。
+    """
+    out: list[dict] = []
+    for formula in formulas or []:
+        if isinstance(formula, dict) and formula.get("reconstructed"):
+            annotated = dict(formula)
+            annotated.setdefault("reconstructed_mark", RECONSTRUCTED_EQUATION_MARK)
+            annotated.setdefault("reconstructed_note", RECONSTRUCTED_EQUATION_NOTE)
+            out.append(annotated)
+        else:
+            out.append(formula)
+    return out
+
+
 def normalize_to_placeholder_format(
     display_text: str,
     formulas: list[dict],
@@ -385,6 +407,7 @@ def normalize_to_placeholder_format(
     tuple[str, list[dict]]
         正規化済みの (display_text, formulas)
     """
+    formulas = annotate_reconstructed_formulas(formulas)
     if not display_text:
         return display_text, formulas
 

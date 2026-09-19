@@ -33,6 +33,7 @@ import re
 import uuid
 from typing import Any, Callable
 
+from core.label_vocab import RECONSTRUCTED_EQUATION_NOTE
 from core.text_excerpt import looks_like_tex_math
 from core.deliberation.schema import (
     CONTEXT_STATUS_CANDIDATE,
@@ -428,6 +429,37 @@ def equation_focus_label(label: str, element_id: str) -> str:
     if raw_id and _EQUATION_NUMBER_LABEL_RE.match(raw_id):
         return raw_id
     return ""
+
+
+def equation_latex_is_reconstructed(record: Any) -> bool:
+    """この式の LaTeX が「AI が文脈から復元したもの」か（決定論・非LLM）。
+
+    ``record`` は equations.json の export 形・``equation_semantics`` artifact の
+    レコード形のどちらでもよい（どちらも ``reconstruction.status`` を持つ）。
+    ``status`` が ``none`` 以外で、復元本文（latex / plain_text）が実在するときだけ
+    True。復元が空（= 復元できなかった）なら False で、事実文も付かない
+    （「復元した式」と言えるものが無いため）。
+    """
+    data = json_dict(record)
+    reconstruction = json_dict(data.get("reconstruction"))
+    status = str(reconstruction.get("status") or "none").strip()
+    if not status or status == "none":
+        return False
+    return bool(
+        str(reconstruction.get("latex") or "").strip()
+        or str(reconstruction.get("plain_text") or "").strip()
+    )
+
+
+def reconstructed_equation_note(record: Any) -> str | None:
+    """復元式に添える学習者向けの事実文（1行・数値なし）。該当しなければ ``None``。
+
+    文言の正本は ``core/label_vocab.RECONSTRUCTED_EQUATION_NOTE``（JS 側にミラー
+    しない）。confidence・一致度などの数値は**出さない** — 出るのはこの1文だけ。
+    """
+    if not equation_latex_is_reconstructed(record):
+        return None
+    return RECONSTRUCTED_EQUATION_NOTE
 
 
 def learner_navigable(element_type: Any, element_id: Any) -> bool:

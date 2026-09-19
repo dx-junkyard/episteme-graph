@@ -195,6 +195,85 @@ def record_knowledge_audit(
     )
 
 
+#: run の ``stage_outputs`` に知識オブジェクト保存の結果要約を置くキー。
+#: 読み手（調査・G層・教員向けの状態表示）が「何件入って・何件が supersede され・
+#: どこが失敗したか」を artifact を開かずに run 行だけで読めるようにする。
+KNOWLEDGE_OBJECTS_STAGE_OUTPUT_KEY = "knowledge_objects"
+
+
+def _record_knowledge_stage_output(
+    session,
+    *,
+    run_id: str | None,
+    summary: dict | None,
+) -> None:
+    """``document_analysis_runs.stage_outputs.knowledge_objects`` に要約を合流させる。
+
+    既存キーを消さないよう **浅いマージ**（``||``）で足す。呼び出し元のトランザクション
+    に同乗するので、保存が巻き戻れば要約も巻き戻る（「入ったことになっている」不整合を
+    作らない）。``run_id`` が無いとき（単体テスト・旧経路）は何もしない。
+
+    例外は握らない（:func:`_record_knowledge_audit` と同じ理由 — PostgreSQL では
+    失敗した文の後の commit がどのみち通らないので、黙って続ける方が事故になる）。
+    失敗したときの記録は :func:`record_knowledge_stage_output_failure` が別セッションで
+    行う。
+    """
+    if not run_id or not summary:
+        return
+    session.execute(
+        sa_text(
+            """
+            UPDATE document_analysis_runs
+            SET stage_outputs = COALESCE(stage_outputs, '{}'::jsonb)
+                || jsonb_build_object(
+                    :key,
+                    COALESCE(stage_outputs -> :key, '{}'::jsonb) || CAST(:payload AS jsonb)
+                )
+            WHERE id = CAST(:run_id AS uuid)
+            """
+        ),
+        {
+            "key": KNOWLEDGE_OBJECTS_STAGE_OUTPUT_KEY,
+            "payload": _json_dumps(dict(summary)),
+            "run_id": run_id,
+        },
+    )
+
+
+def record_knowledge_stage_output_failure(
+    *,
+    run_id: str | None,
+    kind: str,
+    error: str,
+) -> None:
+    """保存が失敗した事実を run の ``stage_outputs.knowledge_objects`` に残す。
+
+    失敗経路は呼び出し元のトランザクションが巻き戻っているので、別セッションで
+    1行だけ書く。ここは本当に fail-soft（記録の失敗で解析を落とさない）。
+    """
+    if not run_id or not kind:
+        return
+    session = _pg_session()
+    try:
+        _record_knowledge_stage_output(
+            session,
+            run_id=run_id,
+            summary={kind: {"failed": True, "error": str(error)[:500]}},
+        )
+        session.commit()
+    except Exception:  # noqa: BLE001 - 記録の失敗で解析を落とさない
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning(
+            "failed to record knowledge stage output failure (non-fatal): run=%s kind=%s",
+            run_id, kind, exc_info=True,
+        )
+    finally:
+        session.close()
+
+
 def _apply_remaps(
     session,
     *,
@@ -833,11 +912,12 @@ def persist_equation_previews_to_chunks(document_id: str, equations: Any) -> int
 
     session = _pg_session()
     updated = 0
+    allow_page_fallback = _page_fallback_allowed(previews)
     try:
         rows = session.execute(
             sa_text(
                 """
-                SELECT id, display_text, spoken_text, formulas, page_start, page_end
+                SELECT id, display_text, spoken_text, formulas, page_start, page_end, block_ids
                 FROM chunks
                 WHERE document_id = CAST(:doc_id AS uuid)
                 ORDER BY chunk_index
@@ -852,8 +932,16 @@ def persist_equation_previews_to_chunks(document_id: str, equations: Any) -> int
             formulas = row[3] if isinstance(row[3], list) else []
             page_start = row[4]
             page_end = row[5]
+            chunk_block_ids = _chunk_block_ids(row[6]) if len(row) > 6 else []
 
-            merged = _merge_equation_previews_for_chunk(formulas, previews, page_start, page_end)
+            merged = _merge_equation_previews_for_chunk(
+                formulas,
+                previews,
+                page_start,
+                page_end,
+                chunk_block_ids=chunk_block_ids,
+                allow_page_fallback=allow_page_fallback,
+            )
             patched_display = _replace_equation_preview_text(display_text, merged)
             patched_spoken = _spoken_text_from_formulas(patched_display, merged)
             if patched_display == display_text and _json_dumps(merged) == _json_dumps(formulas):
@@ -894,6 +982,12 @@ def persist_equation_previews_to_chunks(document_id: str, equations: Any) -> int
         session.close()
 
 
+#: ``chunks.formulas[].latex_source`` の語彙（列は増やさない・migration を切らない）。
+#: ``reconstruction`` = LLM が文脈から復元した式 / ``extraction`` = 抽出できた式。
+EQUATION_LATEX_SOURCE_RECONSTRUCTION = "reconstruction"
+EQUATION_LATEX_SOURCE_EXTRACTION = "extraction"
+
+
 def _equation_previews(equations: Any) -> list[dict]:
     records = getattr(equations, "equations", []) or []
     previews: list[dict] = []
@@ -904,8 +998,9 @@ def _equation_previews(equations: Any) -> list[dict]:
             continue
         source_location = dict(getattr(src, "source_location", {}) or {})
         source_image = getattr(src, "source_image", None)
-        latex = getattr(rec, "latex", None) if rec and getattr(rec, "status", "none") != "none" else getattr(src, "latex", None)
-        plain_text = getattr(rec, "plain_text", None) if rec and getattr(rec, "status", "none") != "none" else getattr(src, "plain_text", None)
+        reconstructed = bool(rec and getattr(rec, "status", "none") != "none")
+        latex = getattr(rec, "latex", None) if reconstructed else getattr(src, "latex", None)
+        plain_text = getattr(rec, "plain_text", None) if reconstructed else getattr(src, "plain_text", None)
         previews.append({
             "id": getattr(record, "equation_id", "") or f"eq_{len(previews)}",
             "latex": latex or "",
@@ -918,6 +1013,13 @@ def _equation_previews(equations: Any) -> list[dict]:
             "raw_text": getattr(src, "raw_text", "") or "",
             "needs_math_review": bool(getattr(src, "needs_math_review", False)),
             "review_reason": list(getattr(src, "review_reason", []) or []),
+            # latex の出所（列は増やさず、この投影に事実として持たせる）。PDF 由来の
+            # 式はほぼ全件が「AI が文脈から復元した式」で、原文の数式と照合できて
+            # いない。読み手（チャンク表示・学習者向け射影）がそれを黙って
+            # 抽出結果と同じ顔で出さないための目印。
+            "reconstructed": reconstructed,
+            "latex_source": EQUATION_LATEX_SOURCE_RECONSTRUCTION if reconstructed
+            else EQUATION_LATEX_SOURCE_EXTRACTION,
         })
     return previews
 
@@ -927,12 +1029,32 @@ def _merge_equation_previews_for_chunk(
     previews: list[dict],
     page_start: int | None,
     page_end: int | None,
+    *,
+    chunk_block_ids: list[str] | None = None,
+    allow_page_fallback: bool = True,
 ) -> list[dict]:
+    """1 チャンクに載せる式プレビューを選ぶ。
+
+    **第一条件は block_id の一致**（``block_id ∈ chunk.block_ids``）。ページ一致は
+    block_id が引けないときだけの保険で、しかも ``allow_page_fallback`` が False
+    （= ページ番号が信用できない文書）なら使わない。
+
+    以前はページ一致だけで判定していたため、GROBID 経路で ``page=1`` が誤って大量に
+    付く文書では文書中のほぼ全式が1つのチャンクに流れ込んでいた（実測: 当該チャンクの
+    ``block_ids`` 外の式が 87〜94%）。
+    """
     merged = [dict(f) for f in formulas if isinstance(f, dict)]
     by_block = {str(f.get("block_id")): f for f in merged if f.get("block_id")}
     by_id = {str(f.get("id")): f for f in merged if f.get("id")}
+    block_ids = {str(b) for b in (chunk_block_ids or []) if b}
     for preview in previews:
-        if not _preview_matches_page(preview, page_start, page_end):
+        if not _preview_matches_chunk(
+            preview,
+            block_ids,
+            page_start,
+            page_end,
+            allow_page_fallback=allow_page_fallback,
+        ):
             continue
         target = by_block.get(str(preview.get("block_id") or "")) or by_id.get(str(preview.get("id") or ""))
         if target is None:
@@ -940,6 +1062,58 @@ def _merge_equation_previews_for_chunk(
         else:
             target.update({k: v for k, v in preview.items() if v not in (None, "", [])})
     return merged
+
+
+def _chunk_block_ids(value: Any) -> list[str]:
+    """``chunks.block_ids``（jsonb）を文字列リストに正規化する（形が違えば空）。"""
+    raw = value
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if item]
+
+
+def _preview_matches_chunk(
+    preview: dict,
+    chunk_block_ids: set[str],
+    page_start: int | None,
+    page_end: int | None,
+    *,
+    allow_page_fallback: bool = True,
+) -> bool:
+    """式プレビューがこのチャンクのものか（block_id 優先・page はフォールバック）。"""
+    preview_block_id = str(preview.get("block_id") or "").strip()
+    if preview_block_id and chunk_block_ids:
+        # 出所の block が分かっていて、チャンクも block を持っているなら、それが答え。
+        # ページ一致で拾い直さない（拾い直すと誤付与ページの事故が戻る）。
+        return preview_block_id in chunk_block_ids
+    if not allow_page_fallback:
+        return False
+    return _preview_matches_page(preview, page_start, page_end)
+
+
+def _page_fallback_allowed(previews: list[dict]) -> bool:
+    """ページ番号をフォールバックに使ってよいか（2種類以上のページが実在するか）。
+
+    抽出した式が全部同じページ番号（典型的には GROBID 既定の ``page=1``）なら、その
+    番号は「どこにあるか」を何も言っていないので、フォールバックに使わない。
+    """
+    pages: set[int] = set()
+    for preview in previews:
+        loc = preview.get("source_location") if isinstance(preview.get("source_location"), dict) else {}
+        try:
+            page = int(loc.get("page"))
+        except (TypeError, ValueError):
+            continue
+        if page > 0:
+            pages.add(page)
+        if len(pages) >= 2:
+            return True
+    return False
 
 
 def _preview_matches_page(preview: dict, page_start: int | None, page_end: int | None) -> bool:
@@ -1578,6 +1752,11 @@ def persist_qualified_claims(
             run_id=run_id,
             stats={"claim": sync.stats, "remap": remap_summary},
         )
+        _record_knowledge_stage_output(
+            session,
+            run_id=run_id,
+            summary={"claims": {**dict(sync.stats), "remap": remap_summary.get("recorded", 0)}},
+        )
 
         saved: list[dict] = []
         for item in items:
@@ -1975,6 +2154,11 @@ def persist_components(
             run_id=run_id,
             stats={"component": sync.stats, "remap": remap_summary},
         )
+        _record_knowledge_stage_output(
+            session,
+            run_id=run_id,
+            summary={"components": {**dict(sync.stats), "remap": remap_summary.get("recorded", 0)}},
+        )
         session.commit()
         logger.info(
             "Synced theory_components for document %s: %s (remap=%s)",
@@ -2291,13 +2475,17 @@ def persist_knowledge_objects(
         _record_knowledge_audit(
             session, document_id=document_id, run_id=run_id, stats=summary,
         )
+        _record_knowledge_stage_output(session, run_id=run_id, summary=summary)
         session.commit()
         logger.info(
             "Synced knowledge objects for document %s: %s", document_id, summary
         )
         return summary
-    except Exception:
+    except Exception as exc:
         session.rollback()
+        record_knowledge_stage_output_failure(
+            run_id=run_id, kind="knowledge_objects_sync", error=str(exc)
+        )
         raise
     finally:
         session.close()
@@ -2396,13 +2584,21 @@ def persist_learning_units(
             run_id=run_id,
             stats={"learning_units": summary},
         )
+        _record_knowledge_stage_output(
+            session, run_id=run_id, summary={"learning_units": summary},
+        )
         session.commit()
         logger.info(
             "Synced learning_units for document %s: %s", document_id, summary
         )
         return summary
-    except Exception:
+    except Exception as exc:
         session.rollback()
+        # 派生表の失敗は run を落とさない（P2-R7）が、**黙って completed にしない**。
+        # 呼び出し側（orchestrator）は artifact に残すので、run 行にも同じ事実を残す。
+        record_knowledge_stage_output_failure(
+            run_id=run_id, kind="learning_units", error=str(exc)
+        )
         raise
     finally:
         session.close()

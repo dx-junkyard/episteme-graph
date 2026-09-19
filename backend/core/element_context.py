@@ -83,6 +83,7 @@ from core.learner_context_common import (  # noqa: F401  (旧名の再エクス�
     normalized_document_ids as _normalized_document_ids,
     normalized_group as _normalized_group,
     project_item as _project_item,
+    reconstructed_equation_note as _reconstructed_equation_note,
     safe_text as _safe_text,
     scoped_id_match_sql,
     strip_confidence,
@@ -288,6 +289,12 @@ def _equation_explanatory_fields(record: Any) -> dict:
         return {}
     semantics = record.get("semantics") if isinstance(record.get("semantics"), dict) else {}
     out: dict[str, Any] = {}
+    # PDF 由来の式はほぼ全件が「AI が文脈から復元した LaTeX」で、原文の数式とは
+    # 照合できていない。抽出した式と同じ顔で出さず、1行の事実として添える
+    # （文言の正本は core/label_vocab.py・数値は出さない）。
+    note = _reconstructed_equation_note(record)
+    if note:
+        out["latex_note"] = note
     role = str(record.get("role_in_argument") or semantics.get("role_in_argument") or "").strip()
     if role:
         out["role_in_argument"] = role

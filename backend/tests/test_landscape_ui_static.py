@@ -120,7 +120,12 @@ class TestScriptLoading:
         atlas.css / styles.css の ?v= を更新する（古い CSS のままだと効かない）。"""
         html = _read(INDEX_HTML)
         assert "/css/atlas.css?v=knowledge-landscape-20260804" in html
-        assert "/css/styles.css?v=knowledge-landscape-20260804" in html
+        # styles.css は以降の追加（復元式の注記 2026-09-19 等）でも上げる。ここは
+        # 「landscape の版（20260804）以上の日付に更新されている」ことを見る
+        # （版文字列は固定しないが、日付が巻き戻っていないことは検査する）。
+        m = re.search(r'/css/styles\.css\?v=[A-Za-z0-9_-]*?(\d{8})"', html)
+        assert m, "styles.css の ?v= に8桁の日付が見つかりません"
+        assert m.group(1) >= "20260804"
 
     def test_landscape_layer_file_exists(self):
         assert LANDSCAPE_JS.is_file(), "frontend/public/js/landscape-layer.js がありません"

@@ -83,6 +83,8 @@ __all__ = [
     "RADAR_DISTANCE_SCALE",
     "RADAR_DISTANCE_THRESHOLD_MID",
     "RADAR_DISTANCE_THRESHOLD_NEAR",
+    "RECONSTRUCTED_EQUATION_NOTE",
+    "RECONSTRUCTED_EQUATION_MARK",
     "SCRIPT_STATUS_LABELS",
     "SUPPORT_SECTION_LABELS",
     "TRACE_STATUS_LABELS",
@@ -457,6 +459,28 @@ AUDIO_STATUS_LABELS = MappingProxyType({
 # ``core/deliberation/{dialogue,graph_dialogue}.py`` と route 層は import して使う。
 
 AI_READING_LABEL = "AIの読み（未確認）"
+
+
+# ---------------------------------------------------------------------------
+# 復元された数式の事実文（学習者向け）
+# ---------------------------------------------------------------------------
+#
+# PDF から取り出した数式テキストは記号・添字が壊れているため、パイプラインは
+# LLM に LaTeX を**復元**させる（``src/episteme_graph/agents/equation_semantics``）。
+# 復元式は原文の数式と機械照合できていないので、学習者に出すときは同じ顔で出さず
+# 1行の事実として添える。数値（confidence）は出さない — 出るのはこの1文だけ。
+#
+# AI_READING_LABEL と同じく単一の固定文字列なので表は作らない。ここが正本で、
+# ``core/{element_context,component_context,learner_context_common}.py`` が import
+# して使う（JS 側に日本語をミラーしない）。
+
+RECONSTRUCTED_EQUATION_NOTE = "AI が文脈から復元した式です（原文の数式とは未照合）"
+
+#: 教材本文の式に添える短い印（バッジ）。文は ``RECONSTRUCTED_EQUATION_NOTE`` が言う。
+#: ``core/lecture.py::annotate_reconstructed_formulas`` が chunks.formulas の投影に
+#: ``reconstructed_mark`` / ``reconstructed_note`` として載せ、JS は素通しで描く
+#: （JS に日本語を直書きしない — 2026-09-19 レビュー）。
+RECONSTRUCTED_EQUATION_MARK = "AI復元"
 
 
 # ---------------------------------------------------------------------------

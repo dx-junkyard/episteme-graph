@@ -6580,6 +6580,19 @@ button.ls-course-evidence-head {
   font-size: 10px;
   font-weight: 700;
 }
+.evidence-chip-popover-equation-note,
+.ls-material-formula-reconstructed-mark {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.ls-material-formula-reconstructed-mark {
+  border: 1px solid var(--color-border, #d2d2d7);
+  border-radius: 999px;
+  padding: 0 6px;
+  vertical-align: middle;
+}
 .evidence-chip-popover-footer {
   margin-top: 10px;
   padding-top: 8px;

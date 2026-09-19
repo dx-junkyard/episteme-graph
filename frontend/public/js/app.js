@@ -5222,6 +5222,10 @@
     var text = src.explanation || src.summary || src.semantic_kind || src.intrinsic_summary
       || src.caption || "";
     if (text && text !== skipText) lines.push(text);
+    // 復元由来の式の事実文（サーバが latex_note に載せる。文言は label_vocab が正本で
+    // JS にミラーしない。数値は来ない）。
+    var reconstructedNote = src["latex_note"];
+    if (reconstructedNote) lines.push(reconstructedNote);
     // 記号の意味（意味が解決できている記号だけ。最大4件）。
     var symbols = [];
     var rawSymbols = src.symbols || [];
@@ -8144,7 +8148,10 @@
         (roleLabel ? '<span class="evidence-chip-popover-equation-role">' + escHtml(roleLabel) + '</span>' : "") +
         '<span class="evidence-chip-popover-equation-body">' +
         (latex ? renderMaterialKatex(latex, true) : escHtml(eq.label || eq.id || "")) +
-        '</span></div>';
+        '</span>' +
+        // 復元由来の式の事実文（サーバの label_note を素通し。JS に文言を持たない）。
+        (eq.label_note ? '<span class="evidence-chip-popover-equation-note">' + escHtml(eq.label_note) + '</span>' : "") +
+        '</div>';
     }).join("");
     if (!items) return "";
     return '<div class="evidence-chip-popover-section">' +
@@ -8811,7 +8818,25 @@
   function renderMaterialEquationBody(formula) {
     if (!formula) return "";
     var latex = formula.latex || formula.summary || "";
-    if (latex) return renderMaterialKatex(latex, true);
+    if (latex) {
+      var rendered = renderMaterialKatex(latex, true);
+      // chunks.formulas[].reconstructed（PDF 由来で AI が文脈から復元した LaTeX）は
+      // 抽出した式と同じ顔で出さず、控えめな印を添える。印の文字と事実文は
+      // サーバ（label_vocab → core/lecture.annotate_reconstructed_formulas）が
+      // reconstructed_mark / reconstructed_note に載せる — JS に日本語を直書きしない。
+      // 印が来ていなければ（旧 DTO）文字無しの目印だけにする。
+      if (rendered && formula.reconstructed) {
+        var mark = formula.reconstructed_mark || "";
+        var note = formula.reconstructed_note || "";
+        return '<span class="ls-material-formula-reconstructed" data-latex-source="reconstruction"' +
+          (note ? ' title="' + escHtml(note) + '"' : "") + '>' +
+          rendered +
+          (mark ? '<span class="ls-material-formula-reconstructed-mark"' +
+            (note ? ' aria-label="' + escHtml(note) + '"' : "") + '>' + escHtml(mark) + '</span>' : "") +
+          '</span>';
+      }
+      return rendered;
+    }
     var plain = formula.plain_text || "";
     if (plain) return '<span class="ls-material-formula-plain">' + escHtml(plain) + '</span>';
     var raw = formula.raw_text || "";

@@ -149,3 +149,79 @@ def test_agent_run_appends_system_level_chain():
     result = DerivationChainAgent().run(_result(eqs))
     system_chains = [c for c in result.chains if c.chain_type == "system_level"]
     assert system_chains, "agent.run should append system-level derivations"
+
+
+# ---------------------------------------------------------------------------
+# R-1（2026-09-19 レビュー）: 復元式に支えられた system 導出 step にも印が付く
+# ---------------------------------------------------------------------------
+
+
+def _reconstructed(record: EquationRecord) -> EquationRecord:
+    """PDF 由来で AI が文脈から復元した式（導出には使えるが引用ではない）にする。"""
+    import dataclasses
+
+    record.reconstruction = dataclasses.replace(
+        record.reconstruction,
+        status="inferred_from_context",
+        latex="x = y",
+        plain_text="x equals y",
+        confidence=0.9,
+    )
+    record.semantics.semantic_status = "reconstruction_based"
+    record.confidence_policy = EquationConfidencePolicy.derive(
+        record.source_extraction, record.reconstruction, record.semantics
+    )
+    assert record.confidence_policy.must_not_treat_as_source_extracted
+    assert record.confidence_policy.can_be_used_in_derivation
+    return record
+
+
+def _elimination_system(*, reconstructed: bool) -> list[EquationRecord]:
+    eqs = [
+        _make_eq("eq_1", role="relation", defined=["S3"], used=["b1", "b2"],
+                 summary="linearized skewness bias dependence", evidence=["ev_1"]),
+        _make_eq("eq_2", role="relation", defined=["K4"], used=["b1", "b2"],
+                 summary="linearized kurtosis bias dependence", evidence=["ev_2"]),
+        _make_eq("eq_3", role="result", defined=["S3"], used=["b1"],
+                 summary="eliminate b2 to derive consistency relation", evidence=["ev_3"]),
+    ]
+    if reconstructed:
+        eqs = [_reconstructed(e) for e in eqs]
+    return eqs
+
+
+def test_system_step_marks_reconstruction_backed_equations():
+    from episteme_graph.agents.derivation_chain.schema import RECONSTRUCTION_BACKED_REASON
+
+    chains = detect_system_level_derivations(_result(_elimination_system(reconstructed=True)))
+    assert chains
+    step = chains[0].steps[0]
+    assert step.review_reason == RECONSTRUCTION_BACKED_REASON
+    # 復元は「疑い」ではなく事実なので chain の review_reasons には積まない（J-1）。
+    assert RECONSTRUCTION_BACKED_REASON not in chains[0].review_reasons
+
+
+def test_system_step_of_extracted_equations_has_no_mark():
+    chains = detect_system_level_derivations(_result(_elimination_system(reconstructed=False)))
+    assert chains
+    assert chains[0].steps[0].review_reason == ""
+
+
+def test_local_and_system_steps_share_the_same_reason_constant():
+    """理論操作グラフは step.review_reason の1語だけを見るので、2 経路の値は同じでなければならない。"""
+    from episteme_graph.agents.component_graph.schema import RECONSTRUCTION_BACKED_STEP_REASON
+    from episteme_graph.agents.derivation_chain import agent as local_agent
+    from episteme_graph.agents.derivation_chain.schema import RECONSTRUCTION_BACKED_REASON
+
+    assert local_agent.RECONSTRUCTION_BACKED_REASON == RECONSTRUCTION_BACKED_REASON
+    assert RECONSTRUCTION_BACKED_STEP_REASON == RECONSTRUCTION_BACKED_REASON
+
+
+def test_reconstruction_only_system_node_is_capped_by_the_graph_normalizer():
+    """復元式だけの system 導出は理論操作グラフで source_backed に到達しない。"""
+    from episteme_graph.agents.component_graph.normalizer import _is_reconstruction_backed
+
+    chains = detect_system_level_derivations(_result(_elimination_system(reconstructed=True)))
+    assert _is_reconstruction_backed(chains[0].steps[0]) is True
+    chains = detect_system_level_derivations(_result(_elimination_system(reconstructed=False)))
+    assert _is_reconstruction_backed(chains[0].steps[0]) is False

@@ -352,7 +352,14 @@ class EquationSemanticsValidator:
                     message=f"{eid} has equation_consistency.review_required but can_support_claim is true",
                     field=f"{eid}.confidence_policy.can_support_claim",
                 ))
-            if record.confidence_policy.can_be_used_in_derivation:
+            # review_required の理由が「PDF テキスト層は信用しない」という一律の前提
+            # だけのときは、確度の高い復元を導出に使ってよい（``EquationConfidencePolicy
+            # .derive`` の救済分岐と同じ線。指揮者判断 2026-09-19）。その式固有の疑い
+            # （raw↔latex の mismatch・ラベルの食い違い・corrupted な出典スパン・
+            # fidelity guard の理由コード）が1つでもあれば従来どおり hard error。
+            if record.confidence_policy.can_be_used_in_derivation and not (
+                record.equation_consistency.untrusted_pdf_only()
+            ):
                 issues.append(ValidationIssue(
                     rule_id="inconsistent_equation_used_in_derivation",
                     severity="error",

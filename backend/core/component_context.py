@@ -51,6 +51,7 @@ from core.learner_context_common import (  # noqa: F401  (旧名の再エクス�
     json_list as _json_list,
     normalized_document_ids as _normalized_document_ids,
     project_item,
+    reconstructed_equation_note as _reconstructed_equation_note,
     scoped_id_match_sql,
     strip_confidence,
     visible_concept_names,
@@ -332,7 +333,13 @@ def _build_equations(record: dict, equations_by_id: dict[str, dict]) -> list[dic
     for eq_id, role in _equation_role_map(record).items():
         eq_record = equations_by_id.get(eq_id)
         label = _equation_label(eq_record) if eq_record else eq_id
-        items.append({"id": eq_id, "label": label, "role": role})
+        item = {"id": eq_id, "label": label, "role": role}
+        # 復元由来の式には事実文を1行添える（`_equation_label` は reconstruction を
+        # 優先して本文にするため、ここを黙って抽出結果と同じ顔で出さない）。
+        note = _reconstructed_equation_note(eq_record) if eq_record else None
+        if note:
+            item["label_note"] = note
+        items.append(item)
     return items
 
 

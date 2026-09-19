@@ -16,12 +16,17 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Optional
 
+from episteme_graph.agents.coverage_report import (
+    COVERAGE_REPORT_KEY,
+    build_coverage_report,
+)
 from episteme_graph.agents.equation_semantics.schema import (
     EquationRecord,
     EquationSemanticsResult,
 )
 
 from .schema import (
+    RECONSTRUCTION_BACKED_REASON as _RECONSTRUCTION_BACKED_REASON,
     CONTROLLED_OPERATIONS,
     DEFAULT_OPERATION,
     OPERATION_ONTOLOGY,
@@ -30,7 +35,10 @@ from .schema import (
     DerivationStep,
     ValidationIssue,
 )
-from .system_derivation import detect_system_level_derivations
+from .system_derivation import (
+    detect_system_level_derivations,
+    reconstruction_backed_reason,
+)
 
 
 def _system_chain_issues(system_chains: list[DerivationChainRecord]) -> list[ValidationIssue]:
@@ -95,26 +103,40 @@ class DerivationChainAgent:
         claim_build_result: object | None = None,
         evidence_registry: object | None = None,
     ) -> DerivationChainResult:
-        records: list[EquationRecord] = list(equations.equations)
-        all_records_by_id: dict[str, EquationRecord] = {r.equation_id: r for r in records}
+        all_records: list[EquationRecord] = list(equations.equations)
+        all_records_by_id: dict[str, EquationRecord] = {r.equation_id: r for r in all_records}
         blocked_equation_ids = {
             r.equation_id
-            for r in records
+            for r in all_records
             if not getattr(r.confidence_policy, "can_be_used_in_derivation", False)
         }
-        records = [r for r in records if r.equation_id not in blocked_equation_ids]
+        records = [r for r in all_records if r.equation_id not in blocked_equation_ids]
 
-        # When no equations available, fall back to claim-based chain (issue #261)
+        blocked_issues = [
+            ValidationIssue(
+                rule_id="derivation_excludes_inconsistent_equation",
+                severity="warning",
+                message=f"equation {eq_id!r} cannot be used in derivations due to confidence/consistency policy",
+                field=eq_id,
+            )
+            for eq_id in sorted(blocked_equation_ids)
+        ]
+        summary_stats = self._summary_stats(all_records, records, blocked_equation_ids)
+
+        # 式が1本も使えないときだけ claim chain 単独になる（従来の挙動）。1本でも
+        # 使えるなら式の chain を組み、claim chain は**その chain が触れていない節**を
+        # 補う（併走）。全式が使えなかった事実は summary_stats と validation_issues の
+        # 両方に理由付きで残す。
         if not records:
-            blocked_issues = [
-                ValidationIssue(
-                    rule_id="derivation_excludes_inconsistent_equation",
+            if all_records:
+                blocked_issues.append(ValidationIssue(
+                    rule_id="derivation_all_equations_blocked",
                     severity="warning",
-                    message=f"equation {eq_id!r} cannot be used in derivations due to confidence/consistency policy",
-                    field=eq_id,
-                )
-                for eq_id in sorted(blocked_equation_ids)
-            ]
+                    message=(
+                        "every equation is blocked from derivation use by the "
+                        "confidence/consistency policy; only claim-based chains remain"
+                    ),
+                ))
             claim_chains = self._build_claim_chains(
                 equations.document_id,
                 claim_build_result,
@@ -129,8 +151,9 @@ class DerivationChainAgent:
                     validation_issues=blocked_issues + [ValidationIssue(
                         rule_id="derivation_equation_only_fallback",
                         severity="info",
-                        message="No equations; derivation chains built from claim source order.",
+                        message="No usable equations; derivation chains built from claim source order.",
                     )],
+                    summary_stats=summary_stats,
                 )
             return DerivationChainResult(
                 document_id=equations.document_id,
@@ -141,6 +164,7 @@ class DerivationChainAgent:
                     severity="warning",
                     message="No equations in input; nothing to chain.",
                 )],
+                summary_stats=summary_stats,
             )
 
         eq_by_id: dict[str, EquationRecord] = {r.equation_id: r for r in records}
@@ -174,15 +198,7 @@ class DerivationChainAgent:
             leaf_ids = [r.equation_id for r in records if from_map.get(r.equation_id)]
 
         chains: list[DerivationChainRecord] = []
-        issues: list[ValidationIssue] = [
-            ValidationIssue(
-                rule_id="derivation_excludes_inconsistent_equation",
-                severity="warning",
-                message=f"equation {eq_id!r} cannot be used in derivations due to confidence/consistency policy",
-                field=eq_id,
-            )
-            for eq_id in sorted(blocked_equation_ids)
-        ]
+        issues: list[ValidationIssue] = list(blocked_issues)
         seen_pairs: set[tuple[str, str]] = set()
         chain_counter = 0
 
@@ -303,12 +319,65 @@ class DerivationChainAgent:
             chains.extend(system_chains)
             issues.extend(_system_chain_issues(system_chains))
 
+        # 併走（2026-09-19）: 式の chain が触れていない節を claim chain で補う。
+        # 以前は「使える式が1本でもあれば claim chain を作らない」だったため、式が
+        # 数本だけ生き残った論文では本文の論理の大半が chain から落ちていた。
+        # 逆に式 chain が覆っている節を claim chain でもう一度なぞると同じ論理が
+        # 二重に出るので、節単位で重複を避ける（推測での接続はしない）。
+        covered_sections = {
+            str(section_id)
+            for chain in chains
+            for section_id in (chain.source_section_ids or [])
+            if section_id
+        }
+        complement_chains = self._build_claim_chains(
+            equations.document_id,
+            claim_build_result,
+            evidence_registry,
+            cartridge_id,
+            exclude_section_ids=covered_sections,
+        )
+        if complement_chains:
+            chains.extend(complement_chains)
+            issues.append(ValidationIssue(
+                rule_id="derivation_claim_chain_complement",
+                severity="info",
+                message=(
+                    "claim-based chains were added for sections that the equation "
+                    "chains do not cover"
+                ),
+            ))
+
         return DerivationChainResult(
             document_id=equations.document_id,
             cartridge_id=cartridge_id,
             chains=chains,
             validation_issues=issues,
+            summary_stats=summary_stats,
         )
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _summary_stats(
+        all_records: list[EquationRecord],
+        usable_records: list[EquationRecord],
+        blocked_equation_ids: set[str],
+    ) -> dict:
+        """「式のうち何本を導出に使えたか」を共通形式で報告する（P0-10 / F-18）。
+
+        ``population`` = 入力の式レコード全件 / ``processed`` = 導出に使えた式。
+        件数は report の3値で言い尽くし、``details`` には件数ではなく**どの式か**を
+        入れる（黙って claim chain に落ちるのを防ぐための材料）。
+        """
+        return {
+            COVERAGE_REPORT_KEY: build_coverage_report(
+                population=len(all_records),
+                processed=len(usable_records),
+                reasons=["equation_confidence_policy"],
+                unit="equations",
+                details={"blocked_equation_ids": sorted(blocked_equation_ids)},
+            ),
+        }
 
     # ------------------------------------------------------------------
     def _walk_back(
@@ -371,7 +440,10 @@ class DerivationChainAgent:
                 assumption_ids=assumptions,
                 source_evidence_ids=ev_ids,
                 review_status="teacher_review_required",
-                review_reason="",
+                # 復元由来の式に支えられた step であることを残す（2026-09-19）。
+                # PDF 由来の式は「AI が文脈から復元した LaTeX」なので、この step を
+                # 強い（source_backed な）根拠として扱ってはいけない。
+                review_reason=_reconstruction_backed_reason([current] + list(sources), eq_by_id),
                 confidence_gate=_confidence_gate([]),
             )
             steps.append(step)
@@ -392,8 +464,13 @@ class DerivationChainAgent:
         claim_build_result: object | None,
         evidence_registry: object | None,
         cartridge_id: str | None,
+        exclude_section_ids: set[str] | None = None,
     ) -> list[DerivationChainRecord]:
-        """Claim type/source order ベースで軽量な chain を生成する (issue #261)."""
+        """Claim type/source order ベースで軽量な chain を生成する (issue #261).
+
+        ``exclude_section_ids`` に入っている節は飛ばす（式の chain が既に覆っている節を
+        claim でもう一度なぞらないための併走用フィルタ。2026-09-19）。
+        """
         if not claim_build_result:
             return []
         claims = getattr(claim_build_result, "claims", []) or []
@@ -422,7 +499,10 @@ class DerivationChainAgent:
         chains: list[DerivationChainRecord] = []
         chain_counter = 0
 
+        excluded = {str(s) for s in (exclude_section_ids or set())}
         for section_id, section_claims in section_groups.items():
+            if str(section_id) in excluded:
+                continue
             if len(section_claims) < 2:
                 continue
             chain_counter += 1
@@ -571,6 +651,18 @@ class DerivationChainAgent:
         if has_definition:
             return "apply_definition"
         return operation
+
+
+#: 正本は ``schema.RECONSTRUCTION_BACKED_REASON``（system 導出と共有）。後方互換の再エクスポート。
+RECONSTRUCTION_BACKED_REASON = _RECONSTRUCTION_BACKED_REASON
+
+
+def _reconstruction_backed_reason(
+    equation_ids: list[str],
+    eq_by_id: dict[str, EquationRecord],
+) -> str:
+    """step に関わる式のどれかが復元由来なら理由コードを返す（でなければ空文字）。"""
+    return reconstruction_backed_reason(equation_ids, eq_by_id)
 
 
 def _confidence_gate(blocked_eqs: list[str]) -> dict:

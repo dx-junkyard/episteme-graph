@@ -385,6 +385,17 @@ class EquationReconstruction:
 # EquationConsistency — raw/source ↔ reconstructed math consistency
 # ---------------------------------------------------------------------------
 
+#: ``EquationConsistency.review_required`` を立てたが、**それ自体は矛盾の証拠では
+#: ない**理由コード。「PDF テキスト層は信用しない」という一律の前提（
+#: ``reconstruction_layer.UNTRUSTED_PDF_REASON``）から機械的に派生するものだけを
+#: 並べる。allowlist 方式なので、後から足された理由コード（fidelity guard の
+#: ``latex_is_prose`` など）は自動的に「一律ではない = 本物の疑い」に倒れる。
+_BLANKET_PDF_REVIEW_REASONS = frozenset({
+    # raw / latex のどちらかに比較できる記号が無い。食い違いの証拠ではない。
+    "raw_text_latex_symbol_overlap_uncertain",
+})
+
+
 @dataclass
 class EquationConsistency:
     raw_text_latex_match: str
@@ -393,6 +404,32 @@ class EquationConsistency:
     source_span_quality: str
     review_required: bool
     review_reason: list[str] = field(default_factory=list)
+
+    def untrusted_pdf_only(self) -> bool:
+        """review_required の理由が「PDF テキスト層は信用しない」一律の前提だけか。
+
+        PDF 由来の式は ``reconstruction_layer`` が無条件に ``needs_math_review=True`` /
+        ``extraction_status="partial"`` にするので、``source_span_quality`` は必ず
+        ``partial`` になり ``review_required`` が常に立つ。これを「式ごとの疑い」と
+        同一視すると PDF の全式が導出から外れる（実測: 10 本すべてで式リンク 0）。
+
+        ここで True を返すのは **一律の前提だけが理由**のときで、raw↔latex の
+        ``mismatch``・ラベルの食い違い・``corrupted`` な出典スパン、および allowlist に
+        無い理由コードが1つでもあれば False（fail-closed）。判定は事実の分類だけで、
+        レビュー要求そのものは解除しない（``review_required`` は True のまま）。
+        """
+        if not self.review_required:
+            return False
+        if self.raw_text_latex_match == "mismatch":
+            return False
+        if self.label_location_match == "mismatch":
+            return False
+        if self.source_span_quality != "partial":
+            return False
+        return all(
+            str(reason) in _BLANKET_PDF_REVIEW_REASONS
+            for reason in (self.review_reason or [])
+        )
 
     @classmethod
     def derive(
@@ -595,7 +632,16 @@ class EquationConfidencePolicy:
                 and semantics.semantic_status in ("reconstruction_based", "context_inferred")
             )
         )
-        if consistency_review:
+        # review_required を「導出に使わせない」根拠にしてよいのは、それが**その式
+        # 固有の疑い**のときだけ。PDF 由来という一律の前提（needs_math_review /
+        # extraction_status=partial）しか理由が無いなら veto しない — さもないと直前の
+        # 「復元の確度が高ければ救う」分岐が常に潰れ、PDF 論文の式が1本も導出に
+        # 使えなくなる（指揮者判断 2026-09-19）。救われた式でも
+        # ``must_not_treat_as_source_extracted`` は True のままなので、下流の backing は
+        # ``partially_source_backed`` 止まり・レビュー要求も残る。
+        if consistency_review and not (
+            equation_consistency and equation_consistency.untrusted_pdf_only()
+        ):
             can_derivation = False
         display_note = must_not or source_extraction.needs_math_review
         can_render_final = (
@@ -650,6 +696,90 @@ class EquationRecord:
     # "" / 0 on legacy artifacts that predate hashing.
     content_hash: str = ""
     content_hash_version: int = 0
+
+
+#: 復元の確度が低いまま raw↔latex が食い違っている式から、印字番号（label）を
+#: 退避させたことを示す理由コード。退避した値は ``:`` の後ろに続けて残す
+#: （情報を落とさない = P4）。``FIDELITY_REVIEW_CODES`` には入れない —
+#: ``export_validation_gate`` の集計語彙は完全一致で引くので、値付きのこのコードは
+#: そちらの表に載せず review_reason の事実としてだけ残す。
+LABEL_WITHHELD_REASON = "label_withheld_low_fidelity_reconstruction"
+
+#: 印字番号の退避・semantic_status 降格を行う復元確度のしきい値。
+#: ``EquationConfidencePolicy.derive`` の救済分岐と同じ 0.7（同じ「信じてよい復元か」の
+#: 線を2箇所で別々に決めない）。
+LOW_FIDELITY_RECONSTRUCTION_CONFIDENCE = 0.7
+
+
+def demote_unverifiable_equation_label(record: EquationRecord) -> bool:
+    """食い違ったまま確度も低い復元式から、印字番号と semantic_status を降格する。
+
+    条件（決定論・LLM の自己申告を信じない）:
+
+    * ``equation_consistency.raw_text_latex_match == "mismatch"``
+      （PDF 原文の記号集合と復元 LaTeX の記号集合がほとんど重ならない）**かつ**
+    * ``reconstruction.confidence < 0.7``
+
+    このとき
+
+    1. ``record.label``（= 論文の印字番号）を ``None`` にし、退避した値を
+       ``equation_consistency.review_reason`` に ``label_withheld_...:(2)`` の形で残す。
+       食い違った創作に「式 (2)」を名乗らせない（学習者にも教員にも、別の式が
+       その番号として出てしまう事故を防ぐ）。``equation_id`` は触らない — 既存参照が
+       切れるため。
+    2. ``semantics.semantic_status`` を ``unknown`` に落とし、元の値を
+       ``semantics.reason`` に事実として書き残す（情報は落とさない）。
+    3. ``confidence_policy`` を derive し直す（降格後の値で下流の可否を決める）。
+
+    冪等。戻り値は降格したかどうか。
+    """
+    consistency = record.equation_consistency
+    reconstruction = record.reconstruction
+    if consistency is None or consistency.raw_text_latex_match != "mismatch":
+        return False
+    if reconstruction is None or reconstruction.status == "none":
+        return False
+    try:
+        confidence = float(reconstruction.confidence)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence >= LOW_FIDELITY_RECONSTRUCTION_CONFIDENCE:
+        return False
+
+    changed = False
+    label = str(record.label or "").strip()
+    if label:
+        reason = f"{LABEL_WITHHELD_REASON}:{label}"
+        if reason not in consistency.review_reason:
+            consistency.review_reason.append(reason)
+        consistency.review_required = True
+        record.label = None
+        changed = True
+
+    semantics = record.semantics
+    previous_status = str(getattr(semantics, "semantic_status", "") or "")
+    if previous_status and previous_status != "unknown":
+        semantics.semantic_status = "unknown"
+        note = (
+            f"[demoted semantic_status from {previous_status}: "
+            "reconstruction disagrees with the extracted equation text and its "
+            "confidence is low]"
+        )
+        if note not in (semantics.reason or ""):
+            semantics.reason = f"{semantics.reason} {note}".strip()
+        changed = True
+    if "low_confidence" not in semantics.review_flags:
+        semantics.review_flags.append("low_confidence")
+        changed = True
+
+    if changed:
+        record.confidence_policy = EquationConfidencePolicy.derive(
+            record.source_extraction,
+            reconstruction,
+            semantics,
+            consistency,
+        )
+    return changed
 
 
 # ---------------------------------------------------------------------------
