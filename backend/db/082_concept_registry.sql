@@ -31,8 +31,7 @@
 --     コード側（core/library/store.create_entry）が明示的に 'candidate' を渡す。
 --   - **版非依存キー**（KR9）。library_atlas_node_links は skeleton_version を持たない。
 --   - **confidence を表に出さない**（KR6）。列としては持つが API / UI へは出さない。
---   - 書式指定子（パーセント記号）は LIKE の中でだけ '%%' と二重に書く（ランナーは
---     exec_driver_sql に空のパラメータを渡すため psycopg2 が補間しようとする。064 / 078 と
+--   - SQL 本文は psql で読める plain SQL（`%` は 1 個）。psycopg2 向けの二重化はランナーが行う。
 --     同じ理由）。
 
 -- ============================================================================
@@ -175,7 +174,7 @@ BEGIN
      WHERE entry_type NOT IN (SELECT entry_type FROM knowledge_entry_types);
     GET DIAGNOSTICS rounded = ROW_COUNT;
     IF rounded > 0 THEN
-        RAISE NOTICE 'migration 082: rounded %% library_entries row(s) to entry_type=concept', rounded;
+        RAISE NOTICE 'migration 082: rounded % library_entries row(s) to entry_type=concept', rounded;
     END IF;
 
     ALTER TABLE library_entries
@@ -353,7 +352,7 @@ BEGIN
     IF EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'element_identity_links_instance_element_type_check'
-          AND pg_get_constraintdef(oid) NOT LIKE '%%symbol%%'
+          AND pg_get_constraintdef(oid) NOT LIKE '%symbol%'
     ) THEN
         ALTER TABLE element_identity_links
             DROP CONSTRAINT element_identity_links_instance_element_type_check;

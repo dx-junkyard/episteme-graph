@@ -24,9 +24,9 @@
 --   - 013 / 041 の claim_type / component_type の CHECK を作り直す DO ブロックには、
 --     「本 migration の FK が在るときは CHECK を作らない」条件を足してある（毎起動の
 --     DROP ↔ ADD の往復を止めるため。過去に適用済みの意味は変えていない）。
---   - RAISE NOTICE の書式指定子は ``%%`` と書く（ランナーは exec_driver_sql に空の
---     パラメータを渡すため、psycopg2 が ``%%`` を補間対象とみなして落ちる。013 / 041 の
---     ``LIKE '%%...%%'`` と同じ理由）。
+--   - SQL 本文は psql で読める plain SQL で書く（`RAISE NOTICE '... %'` の `%` は 1 個）。
+--     psycopg2 向けの `%` の二重化はランナー core/migrations.py::escape_percent_for_driver が
+--     1 箇所で行う（2026-09-19。以前の「二重に書く」規約は CI の psql で落ちたため廃止）。
 
 -- ============================================================================
 -- 1. 型語彙表（KO7）— FK の参照先なので最初に作る
@@ -340,7 +340,7 @@ BEGIN
          WHERE claim_type NOT IN (SELECT value FROM knowledge_claim_types);
         GET DIAGNOSTICS rounded = ROW_COUNT;
         IF rounded > 0 THEN
-            RAISE NOTICE 'migration 078: rounded %% theory_claims row(s) to claim_type=unknown', rounded;
+            RAISE NOTICE 'migration 078: rounded % theory_claims row(s) to claim_type=unknown', rounded;
         END IF;
 
         ALTER TABLE theory_claims
@@ -362,7 +362,7 @@ BEGIN
          WHERE component_type NOT IN (SELECT value FROM knowledge_component_types);
         GET DIAGNOSTICS rounded = ROW_COUNT;
         IF rounded > 0 THEN
-            RAISE NOTICE 'migration 078: rounded %% theory_components row(s) to component_type=theory', rounded;
+            RAISE NOTICE 'migration 078: rounded % theory_components row(s) to component_type=theory', rounded;
         END IF;
 
         ALTER TABLE theory_components

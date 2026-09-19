@@ -3656,6 +3656,11 @@ Neo4j 非依存で、コースデータの `topic.prerequisites` のみを参照
   再実行されるため、非冪等な DDL は次回起動でエラーになるか、既存データを壊す
   （例: 無ガードの `CREATE INDEX` を伴う次元変更は再起動ごとに embedding を全消失させ得る）。
 - **`main.py` に DDL を書き戻さない**（DDL の正本を2箇所に増やさない）。
+- **SQL ファイルは psql で読める plain SQL で書く**（`RAISE NOTICE '... %'` / `LIKE '%x%'` / `format('%I')` の
+  `%` は 1 個）。psycopg2 のパラメータ補間で `%` が壊れる問題は、ランナー
+  `core/migrations.py::escape_percent_for_driver` が **1 箇所で** `%` → `%%` に直して吸収する。ファイル側に
+  `%%` を書かない（2026-09-19 まで逆の規約で、CI の psql 経路と両立せず 078 が落ちた。ガードレールは
+  `test_migrations_runner.py::TestPercentEscapeLint`）。CI は psql 経路とランナー経路の**両方**で適用する。
 - ガードレールは `backend/tests/test_migrations_runner.py`（冪等性 lint・番号連続性・
   main.py への DDL 再侵入禁止）が構造的に守る。
 - 統合系マイグレーション（複数の旧テーブルを1枚に集約するもの。例: migration 044/045）は、

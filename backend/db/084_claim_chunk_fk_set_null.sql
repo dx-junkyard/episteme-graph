@@ -28,9 +28,8 @@
 --   - FK 名は 013 の inline 定義（自動命名 `theory_claims_chunk_id_fkey`）だが、
 --     環境によって名前が違い得るので **pg_constraint から動的に引く**。
 --     既に SET NULL（confdeltype = 'n'）なら何もしない（毎起動の DROP ↔ ADD を作らない）。
---   - RAISE NOTICE の書式指定子は ``%%`` と書く（ランナーは exec_driver_sql に空の
---     パラメータを渡すため、psycopg2 が ``%%`` を補間対象とみなして落ちる。078 / 080 と同じ）。
-
+--   - SQL 本文は psql で読める plain SQL で書く（`%` は 1 個）。psycopg2 向けの二重化は
+--     ランナー core/migrations.py::escape_percent_for_driver が 1 箇所で行う（2026-09-19）。
 -- ============================================================================
 -- 1. theory_claims.chunk_id: ON DELETE CASCADE → ON DELETE SET NULL
 -- ============================================================================
@@ -60,7 +59,7 @@ BEGIN
         -- 既に SET NULL。2回目以降の起動はここに来る。
         NULL;
     ELSE
-        EXECUTE format('ALTER TABLE theory_claims DROP CONSTRAINT %%I', fk_name);
+        EXECUTE format('ALTER TABLE theory_claims DROP CONSTRAINT %I', fk_name);
         ALTER TABLE theory_claims
             ADD CONSTRAINT theory_claims_chunk_fk
             FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE SET NULL;
@@ -92,7 +91,7 @@ BEGIN
            ) AS d;
 
     IF duplicates > 0 THEN
-        RAISE NOTICE 'migration 084: skipped uq_chunks_document_chunk_index (%% duplicate (document_id, chunk_index) group(s) present)', duplicates;
+        RAISE NOTICE 'migration 084: skipped uq_chunks_document_chunk_index (% duplicate (document_id, chunk_index) group(s) present)', duplicates;
     ELSE
         CREATE UNIQUE INDEX IF NOT EXISTS uq_chunks_document_chunk_index
             ON chunks (document_id, chunk_index);

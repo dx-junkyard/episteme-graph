@@ -41,10 +41,9 @@
 --     本 migration が張る `document_analysis_runs.document_id → documents(id) ON DELETE CASCADE`
 --     は相互参照になるが、`DELETE FROM documents` 1文で解消される（NO ACTION の参照チェックは
 --     文末に行われ、そのときには参照元の documents 行も一緒に消えている）。
---   - **`%%` を書かない**。ランナーは exec_driver_sql に空のパラメータを渡すため psycopg2 が
---     `%%` を補間対象とみなす（013 / 041 / 078 / 079 の `%%` と同じ理由）。動的 SQL は
---     `format('%%I', ...)` ではなく `quote_ident()` + `||` で組む。RAISE NOTICE の書式指定子
---     だけは `%%` と書く（psycopg2 が `%%` に戻す）。
+--   - SQL 本文は psql で読める plain SQL で書く（`%` は 1 個。psycopg2 向けの二重化は
+--     ランナー core/migrations.py::escape_percent_for_driver が行う。2026-09-19）。動的 SQL は
+--     `format('%I', ...)` でも `quote_ident()` + `||` でもよい。
 --   - 14 の (テーブル, 列) は 2 つの DO ブロックで**同じ順・同じ並び**に書く（型変更と FK を
 --     別ガードにしてあるのは、型が既に uuid の DB でも FK だけを後から張れるようにするため）。
 
@@ -132,8 +131,8 @@ BEGIN
 
         IF normalized > 0 OR orphaned > 0 OR blanked > 0 THEN
             RAISE NOTICE
-                'migration 080: %% — normalized %% material_id-form row(s), '
-                'deleted %% orphan row(s), nulled %% blank row(s)',
+                'migration 080: % — normalized % material_id-form row(s), '
+                'deleted % orphan row(s), nulled % blank row(s)',
                 rec.tbl, normalized, orphaned, blanked;
         END IF;
     END LOOP;
@@ -193,6 +192,6 @@ BEGIN
              || ' ADD CONSTRAINT ' || quote_ident(fk)
              || ' FOREIGN KEY (' || quote_ident(rec.col) || ')'
              || ' REFERENCES documents(id) ON DELETE CASCADE';
-        RAISE NOTICE 'migration 080: added %% on %%', fk, rec.tbl;
+        RAISE NOTICE 'migration 080: added % on %', fk, rec.tbl;
     END LOOP;
 END $$;

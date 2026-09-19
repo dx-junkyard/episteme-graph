@@ -637,53 +637,66 @@ class TestMainPyHasNoInlineDdl:
 # ---------------------------------------------------------------------------
 # `%` エスケープ lint（2026-09-13 追加）
 #
-# ランナーは各ファイルを `conn.exec_driver_sql(sql_text)` で流す。psycopg2 はこのとき
-# `%` をパラメータ補間の記号とみなすので、SQL 本文の `%` は必ず `%%` と書く
-# （080 / 084 のヘッダコメントが明記する規約）。084 の初版は `format('... %I', ...)` の
-# `%` が 1 個で、全環境で `TypeError: immutabledict is not a sequence` → 起動失敗
-# （scratch DB 検証 W-1）。実行型 CI より安くこれを捕まえるため、コメント行を除いた本文に
-# **奇数個の `%` 連**が無いことを固定する。
+# migration SQL は **psql でそのまま流せる plain SQL** を正とする（CI と docker の initdb が
+# psql で流す）。psycopg2 のパラメータ補間で `%` が壊れる問題は、ランナー
+# `core/migrations.py::escape_percent_for_driver` が **1 箇所で** `%` → `%%` に直して吸収する。
+# したがってファイル側に `%%` が残っていると、ランナー経由では `%%%%` → literal `%%` となり
+# `RAISE NOTICE` が「too many parameters」で落ちる（逆に psql では `%%` がそのまま literal になり
+# 同じエラー。2026-09-19 に CI で 078 が実際に落ちた）。ファイル側の `%%` を構造的に禁じる。
 # ---------------------------------------------------------------------------
 
-_PERCENT_RUN_RE = re.compile(r"%+")
+_DOUBLE_PERCENT_RE = re.compile(r"%%")
 
 
 def _strip_line_comments(sql: str) -> str:
     return "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
 
 
-def _collect_odd_percent_runs(directory: Path) -> list[str]:
+def _collect_double_percents(directory: Path) -> list[str]:
     violations: list[str] = []
     for path in discover_migration_files(directory):
         body = _strip_line_comments(path.read_text(encoding="utf-8"))
-        for match in _PERCENT_RUN_RE.finditer(body):
-            if len(match.group(0)) % 2 == 1:
-                violations.append(f"{path.name}:{_line_of(body, match.start())}: {match.group(0)!r}")
+        for match in _DOUBLE_PERCENT_RE.finditer(body):
+            violations.append(f"{path.name}:{_line_of(body, match.start())}")
     return violations
 
 
 class TestPercentEscapeLint:
-    """SQL 本文の `%` は `%%` で書く（psycopg2 の補間規約）。"""
+    """SQL 本文は plain SQL。`%%`（psycopg2 向けの手書きエスケープ）を残さない。"""
 
-    def test_no_odd_percent_runs_in_real_files(self):
-        violations = _collect_odd_percent_runs(MIGRATIONS_DIR)
+    def test_no_double_percent_in_real_files(self):
+        violations = _collect_double_percents(MIGRATIONS_DIR)
         assert violations == [], (
-            "migration SQL に奇数個の `%` があります（psycopg2 が補間記号と誤認し起動時に失敗する）。"
-            "`%%` と書くか quote_ident() + || で組み直すこと: " + "; ".join(violations)
+            "migration SQL に `%%` があります。ファイルは psql で読める plain SQL（`%` は 1 個）とし、"
+            "psycopg2 向けの二重化はランナー escape_percent_for_driver に任せること: " + "; ".join(violations)
         )
 
-    def test_lint_detects_single_percent_in_format(self, tmp_path: Path):
+    def test_lint_detects_double_percent(self, tmp_path: Path):
         (tmp_path / "init.sql").write_text("SELECT 1;\n", encoding="utf-8")
         (tmp_path / "001_bad.sql").write_text(
-            "-- comment with % is fine\nDO $$ BEGIN EXECUTE format('DROP CONSTRAINT %I', 'x'); END $$;\n",
+            "-- comment with %% is fine\nDO $$ BEGIN RAISE NOTICE 'n=%%', 1; END $$;\n",
             encoding="utf-8",
         )
         (tmp_path / "002_good.sql").write_text(
-            "DO $$ BEGIN EXECUTE format('DROP CONSTRAINT %%I', 'x'); RAISE NOTICE 'n=%%', 1; END $$;\n",
+            "DO $$ BEGIN EXECUTE format('DROP CONSTRAINT %I', 'x'); RAISE NOTICE 'n=%', 1; END $$;\n"
+            "SELECT 1 WHERE 'a' LIKE '%a%';\n",
             encoding="utf-8",
         )
-        violations = _collect_odd_percent_runs(tmp_path)
-        assert len(violations) == 1 and violations[0].startswith("001_bad.sql:2")
+        violations = _collect_double_percents(tmp_path)
+        assert violations == ["001_bad.sql:2"]
+
+    def test_runner_doubles_percent_for_driver(self):
+        from core.migrations import escape_percent_for_driver
+
+        assert escape_percent_for_driver("RAISE NOTICE 'n=%', 1; LIKE '%a%'") == "RAISE NOTICE 'n=%%', 1; LIKE '%%a%%'"
+        assert escape_percent_for_driver("no percent") == "no percent"
+
+    def test_run_migrations_sends_escaped_sql_to_driver(self, tmp_path: Path):
+        (tmp_path / "init.sql").write_text("SELECT 'a' LIKE '%a%';\n", encoding="utf-8")
+        conn = _FakeConnection()
+        run_migrations(engine=_FakeEngine(conn), directory=tmp_path)
+        sent = [s for s in conn.executed if "LIKE" in s]
+        assert sent == ["SELECT 'a' LIKE '%%a%%';\n"]
 
 
 # ---------------------------------------------------------------------------

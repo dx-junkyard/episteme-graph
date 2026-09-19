@@ -97,6 +97,22 @@ def discover_migration_files(directory: Optional[Path] = None) -> list[Path]:
     return [init_path] + [numbered[n] for n in sorted(numbered)]
 
 
+def escape_percent_for_driver(sql_text: str) -> str:
+    """psql でそのまま流せる **plain SQL** を、psycopg2 のパラメータ補間を通る形に直す。
+
+    ``exec_driver_sql`` は DBAPI に空のパラメータを渡すため、psycopg2 は SQL 本文の
+    ``%`` を補間記号とみなす（``RAISE NOTICE '... %'`` / ``LIKE '%x%'`` / ``format('%I')`` が
+    ``TypeError`` や「too many parameters」で落ちる）。かつては SQL ファイル側に ``%%`` と
+    書く規約で吸収していたが、CI や docker の initdb（psql）は同じファイルを素で流すため
+    両立せず、078 の ``RAISE NOTICE '%%'`` が psql で落ちた（2026-09-19）。
+
+    ファイルは psql で読める plain SQL を正とし、ドライバ都合の二重化は**ここ 1 箇所**で
+    行う。ファイル側に ``%%`` を書くと ``%%%%`` になり literal ``%%`` として壊れるので、
+    ``backend/tests/test_migrations_runner.py`` が ``%%`` の残存を禁じる。
+    """
+    return sql_text.replace("%", "%%")
+
+
 def run_migrations(engine=None, directory: Optional[Path] = None) -> list[str]:
     """``directory``（既定 ``MIGRATIONS_DIR``）配下の migration ファイルを順番に適用する。
 
@@ -106,7 +122,8 @@ def run_migrations(engine=None, directory: Optional[Path] = None) -> list[str]:
       （:data:`MIGRATION_LOCK_KEY`）を握ってから実行する。複数プロセス/レプリカが
       同時に起動しても DDL が競合しないためのガード。
     - ファイルごとに ``exec_driver_sql`` で SQL 全体を1回で流し、成功したら
-      ``commit()``（ファイル単位トランザクション）。``sqlalchemy.text()`` は使わない
+      ``commit()``（ファイル単位トランザクション）。SQL 本文は psql で読める plain SQL
+      で、psycopg2 向けの ``%`` の二重化は :func:`escape_percent_for_driver` が行う。``sqlalchemy.text()`` は使わない
       （bind パラメータ扱いされる ``:xxx`` 記法が SQL 本文に含まれていても
       誤解釈されないようにするため）。
     - 失敗したファイルは ``rollback()`` した上で、どのファイルで失敗したかを
@@ -140,7 +157,7 @@ def run_migrations(engine=None, directory: Optional[Path] = None) -> list[str]:
                 continue
 
             try:
-                conn.exec_driver_sql(sql_text)
+                conn.exec_driver_sql(escape_percent_for_driver(sql_text))
                 conn.commit()
             except Exception as exc:
                 conn.rollback()

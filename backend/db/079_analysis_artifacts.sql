@@ -61,6 +61,6 @@ BEGIN
     GET DIAGNOSTICS cleared = ROW_COUNT;
 
     IF moved > 0 OR cleared > 0 THEN
-        RAISE NOTICE 'migration 079: moved %% artifact row(s) out of %% run blob(s)', moved, cleared;
+        RAISE NOTICE 'migration 079: moved % artifact row(s) out of % run blob(s)', moved, cleared;
     END IF;
 END $$;

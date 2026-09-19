@@ -35,7 +35,7 @@ BEGIN
     IF EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'deliberation_sessions_element_type_check'
-          AND pg_get_constraintdef(oid) NOT LIKE '%%derivation%%'
+          AND pg_get_constraintdef(oid) NOT LIKE '%derivation%'
     ) THEN
         ALTER TABLE deliberation_sessions
             DROP CONSTRAINT deliberation_sessions_element_type_check;
@@ -65,7 +65,7 @@ BEGIN
     IF EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'element_annotations_element_type_check'
-          AND pg_get_constraintdef(oid) NOT LIKE '%%derivation%%'
+          AND pg_get_constraintdef(oid) NOT LIKE '%derivation%'
     ) THEN
         ALTER TABLE element_annotations
             DROP CONSTRAINT element_annotations_element_type_check;

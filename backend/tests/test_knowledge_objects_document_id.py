@@ -102,14 +102,23 @@ class TestMigrationCoversEveryTargetColumn:
     def test_material_id_form_is_normalized_not_deleted(self, migration_080: str):
         assert "= d.source_path" in migration_080
 
-    def test_migration_writes_no_percent_outside_raise_notice(self, migration_080: str):
-        """``%`` は psycopg2 が補間しようとするため、RAISE NOTICE の ``%%`` 以外に書かない。"""
+    def test_migration_writes_percent_only_in_raise_notice_and_never_doubled(self, migration_080: str):
+        """SQL は plain SQL（psycopg2 向けの ``%`` 二重化はランナー ``escape_percent_for_driver`` の
+        責務。2026-09-19 に規約を反転）。080 では ``%`` を RAISE NOTICE の書式にだけ使い、
+        ``%%`` は書かない。"""
         stripped = re.sub(r"--[^\n]*", "", migration_080)
-        singles = [
-            m.start()
-            for m in re.finditer(r"(?<!%)%(?!%)", stripped)
+        assert "%%" not in stripped, "psycopg2 向けの手書きエスケープ %% が残っている（ランナーが二重化する）"
+        raise_spans = [
+            # 書式文字列は隣接リテラルの連結（'a' 改行 'b'）で複数行に割れていてよい
+            m.span()
+            for m in re.finditer(r"RAISE\s+NOTICE\s+'(?:[^']|'')*'(?:\s*'(?:[^']|'')*')*", stripped, re.S)
         ]
-        assert singles == [], f"エスケープされていない % がある: {singles}"
+        stray = [
+            m.start()
+            for m in re.finditer(r"%", stripped)
+            if not any(a <= m.start() < b for a, b in raise_spans)
+        ]
+        assert stray == [], f"RAISE NOTICE の書式以外に % がある: {stray}"
 
 
 # ---------------------------------------------------------------------------
