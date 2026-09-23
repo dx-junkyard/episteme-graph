@@ -36,6 +36,11 @@ ELEMENT_DERIVATION = "derivation"
 # knowledge_symbols）を共通部品（概念）へ結ぶための instance 型。v1 では
 # **同一性リンクの source としてだけ**使う（W層モーダルの対象化は非スコープ）。
 ELEMENT_SYMBOL = "symbol"
+# 理論モジュール層 Phase 1（theory_module_layer_design.md §13.8・migration 086）。保存行
+# ``knowledge_theory_modules``（live ビュー）の行 UUID を指す instance 型。記号と同じく
+# **同一性リンクの source としてだけ**使い、``refs.resolve`` にも対話セッションにも足さない
+# （W層の経路に渡すと既存の ``unknown element_type`` で 422 = fail-closed）。
+ELEMENT_THEORY_MODULE = "theory_module"
 
 DOCUMENT_ELEMENT_TYPES = (
     ELEMENT_FIGURE,
@@ -45,6 +50,7 @@ DOCUMENT_ELEMENT_TYPES = (
     ELEMENT_EVIDENCE,
     ELEMENT_DERIVATION,
     ELEMENT_SYMBOL,
+    ELEMENT_THEORY_MODULE,
 )
 DOMAIN_ELEMENT_TYPES = (ELEMENT_SHARED_PART,)
 ELEMENT_TYPES = DOCUMENT_ELEMENT_TYPES + DOMAIN_ELEMENT_TYPES
@@ -87,6 +93,9 @@ IDENTITY_LINKABLE_ELEMENT_TYPES = (
     # 概念レジストリ Phase 3（migration 082 が CHECK に 'symbol' を足す）。記号 →
     # 概念の参照は確定済みの同一性リンクとして持ち、``SymbolRecord`` 自体は不変（KR1）。
     ELEMENT_SYMBOL,
+    # 理論モジュール層 Phase 1（migration 086 が CHECK に 'theory_module' を足す）。構造の
+    # 指紋の一致から作る候補の instance 側（§13.8）。
+    ELEMENT_THEORY_MODULE,
 )
 
 # ── 同一性リンク状態語彙（Phase W-β。知識ネットワークビジョン §4 KN-3 / W層設計 §5.5）───────

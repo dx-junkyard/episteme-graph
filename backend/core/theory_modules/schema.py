@@ -15,12 +15,13 @@
 **閾値はコード定数であって環境変数から読まない**（§5.4 / SA7 と同じ扱い）。値を変える
 ときは設計書 §3 に実測を足して変え、規則を変えたら ``RULE_VERSION`` を上げる。
 
-モジュールの読み時キー ``module_key``（§5.7）について: 本来の材料は「成員 step が生む式の
-**equation stable_key**（KO2・内容由来）の昇順列」である。Phase 0 の入力（採用 run の
-artifact）には式の stable_key が載っていないため、**Phase 0 は ``equation_id`` の昇順列を
-材料にする**。Phase 1 で理論モジュールを knowledge object として保存する（設計書 §9 O-1 (c)）
-ときに、式の stable_key（``knowledge_equations`` の ``stable_key``）に差し替える。差し替えは
-規則の変更なので ``RULE_VERSION`` を上げる（Phase 0 は保存しないので旧キーとの対応は取らない）。
+モジュールの読み時キー ``module_key``（§5.7 / §13.3）について: 材料は「document_id + 成員 step が
+生む式の **equation stable_key**（KO2・内容由来）の昇順列 + level」である。式の stable_key は
+呼び出し側（route とパイプラインステージ）が ``persistence.equation_stable_key_map`` で計算して
+builder に渡す（builder は DB も persistence も import しない）。写像に無い式は
+``EQUATION_ID_KEY_PREFIX + equation_id`` を材料にする。Phase 0（``m1``）は ``equation_id`` の
+昇順列を材料にしていた。差し替えに合わせて ``RULE_VERSION`` を ``m2`` に上げた（旧キーとの対応は
+取らない）。
 """
 
 from __future__ import annotations
@@ -34,8 +35,11 @@ from core.text_hygiene import strip_control_sequences
 # 規則の版と閾値（env から読まない）
 # ---------------------------------------------------------------------------
 
-#: 導出規則の版（§5.7）。§5.2〜5.5 の規則や閾値を変えたら上げる。
-RULE_VERSION = "m1"
+#: 導出規則の版（§5.7 / §13.3）。§5.2〜5.5 の規則や閾値を変えたら上げる。
+#: ``m2``（Phase 1・2026-09-23）: ``module_key`` の材料を式の ``equation_id`` から
+#: **equation stable_key**（KO2・内容由来）へ差し替えた。保存行の stable_key も規則の版を
+#: 材料に含むので、版を上げると保存済みの行は全て superseded になる（旧キーとの対応は取らない）。
+RULE_VERSION = "m2"
 
 #: 外枠モジュールの接点の上限 k（§5.4）。
 OUTER_INTERFACE_LIMIT = 3
@@ -52,6 +56,20 @@ INNER_HUB_MIN_CONSUMERS = 2
 
 #: 共有の基礎とみなす「消費する成員 step の数」の下限（§5.3。入次数は問わない）。
 SHARED_FOUNDATION_MIN_CONSUMERS = 4
+
+#: 構造の指紋による同一性候補（規則 ⑤）の対象とする外枠の、成員 step の下限（§13.4）。
+MODULE_IDENTITY_MIN_MEMBERS = 3
+
+#: 同上。汎用でない（``generic == false``）工程の型（``edge_type``）の種類の下限（§13.4）。
+MODULE_IDENTITY_MIN_PROCESS_KINDS = 2
+
+#: ``module_key`` / 保存行の材料で、equation stable_key が引けない式に付ける接頭辞（§13.3）。
+#: 内容由来のキーでないことが材料の字面で分かるようにする。
+EQUATION_ID_KEY_PREFIX = "eqid:"
+
+#: 構造の指紋で、A層の語彙が読めず工程の型が分類できない手順の表記（§13.4）。
+#: この値を含む指紋のモジュールは同一性候補の対象にしない。
+UNCLASSIFIED_EDGE_TYPE = "unclassified"
 
 # ---------------------------------------------------------------------------
 # 語彙（DTO の列挙値）
@@ -138,6 +156,15 @@ FACT_CYCLE_PREFIX = "導出のつながりに循環があるため、次の式�
 FACT_INTERFACE_TOO_WIDE = "受け渡す式が多く、隣の手順とまとめられなかった手順を単独のモジュールとして残しています。"
 FACT_SINKS = "論文全体をまとめる手順は、モジュールではなく結果の吸い込み口として別に示します。"
 FACT_BUILD_FAILED = "理論モジュールの導出に失敗したため表示できません。"
+
+# ---------------------------------------------------------------------------
+# 保存用出力（build_theory_module_records）の skip 語彙（§13.4 / TM14）
+# ---------------------------------------------------------------------------
+
+#: builder が例外を出した（保存しない）。
+RECORDS_SKIP_BUILD_FAILED = "build_failed"
+#: 導出の解析結果（derivation_chain artifact）が無い（保存しない = 素材欠落を「全部消えた」と読まない）。
+RECORDS_SKIP_NO_DERIVATIONS = "no_derivations"
 
 # ---------------------------------------------------------------------------
 # 純関数

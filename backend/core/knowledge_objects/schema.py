@@ -41,6 +41,9 @@ TABLE_COMPONENT_TYPES = "knowledge_component_types"
 #: 学ぶ単位（Phase 2 / migration 081。learning_units_design.md §4.1）
 TABLE_LEARNING_UNITS = "learning_units"
 TABLE_UNIT_KINDS = "knowledge_unit_kinds"
+#: 理論モジュール（theory_module_layer_design.md §13.2 / migration 086）。基表を SQL で触るのは
+#: ``core/document_pipeline/persistence.py`` だけ（``test_theory_module_store.py`` が固定する）。
+TABLE_THEORY_MODULES = "knowledge_theory_modules"
 
 #: live ビュー（読み手はこちらを読む。KO5）
 VIEW_CLAIMS_LIVE = "theory_claims_live"
@@ -49,6 +52,8 @@ VIEW_LEARNING_UNITS_LIVE = "learning_units_live"
 #: 記号の live ビュー（Phase 3 / migration 082。concept_registry_design.md §4.8）。
 #: 学習者向けの「直前の定義」と同一性候補の導出はこのビューを読む。
 VIEW_SYMBOLS_LIVE = "knowledge_symbols_live"
+#: 理論モジュールの live ビュー（§13.2）。同一性候補（規則 ⑤）と related はこちらを読む。
+VIEW_THEORY_MODULES_LIVE = "knowledge_theory_modules_live"
 
 #: learning_units.review_status の既定値（人間が触っていない = 候補）。
 DEFAULT_UNIT_REVIEW_STATUS = "candidate"

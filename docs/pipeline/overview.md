@@ -2,6 +2,10 @@
 
 [← ドキュメント目次](../README.md)
 
+> **更新注記（2026-09-23）:** §2 に理論モジュールの保存ステージ `theory_modules`（30 番・
+> `persist_claims_components_graph` の直後、`identity_candidates` の直前）を追記し、名前付き
+> 31 ステージ・`_PIPELINE_STEPS` 35 要素に更新した（正本は `theory_module_layer_design.md` §13.5 / §12.4）。
+>
 > **更新注記（2026-09-13）:** §2 に主張の概念接地のフック `_hook_claim_concept_grounding`
 > （`dsl_linking` の直後）を追記し、フック列を 4 件・`_PIPELINE_STEPS` を 34 要素に更新した
 > （正本は `claim_concept_grounding_design.md`）。
@@ -35,10 +39,10 @@
 
 ---
 
-## 2. パイプライン 30 ステージ
+## 2. パイプライン 31 ステージ
 
-`orchestrator.py` の `_PIPELINE_STEPS` は 34 要素 = **名前付き 30 ステージ**（`PIPELINE_STAGES`
-の 31 要素から終端マーカー `completed` を除いた分）+ between-stage 決定論的後処理の
+`orchestrator.py` の `_PIPELINE_STEPS` は 35 要素 = **名前付き 31 ステージ**（`PIPELINE_STAGES`
+の 32 要素から終端マーカー `completed` を除いた分）+ between-stage 決定論的後処理の
 `_hook_*` フック 4 件（`PIPELINE_STAGES` に対応エントリを持たない = `name=None`。
 `report_start` / `finish_target_stage` を持たず、artifact ゲートも通らない）。
 
@@ -87,7 +91,8 @@
 | 27 | `blueprint` | **BlueprintAgent** ナラティブアーク合成 | Det | Blueprint |
 | 28 | `export_validation` | **ExportValidationGate** 最終検証ゲート | Det | 検証結果 |
 | 29 | `persist_claims_components_graph` | claims/components/graph を PostgreSQL へ永続化 | Det | — |
-| 30 | `identity_candidates` | 同一性候補の生成（概念レジストリ P3-6。正規化ラベル一致・他 document の live 親 component・**保存済み** `chunks.embedding` の近傍だけを見る決定論。LLM / embedding 0 回・非致命） | Det | `library_entries`（candidate）/ `element_identity_links`（candidate）/ `theory_components.duplicate_candidates` |
+| 30 | `theory_modules` | 理論モジュール（外枠・内側）の保存（理論モジュール層 Phase 1・`theory_module_layer_design.md` §13.5）。採用 run の artifact と保存済み `graph_json` を `build_theory_module_records` に通し、`knowledge_theory_modules` へ `sync_live_rows` で同期（DELETE なし・supersede）。素材欠落（導出の解析結果が無い・今回グラフを保存していない）は SQL を発行しない。保存行は表示の正本ではない（画面は読み時導出のまま）。LLM / embedding 0 回・非致命 | Det | `knowledge_theory_modules`（`stage_outputs.theory_modules` に件数と `rule_version`） |
+| 31 | `identity_candidates` | 同一性候補の生成（概念レジストリ P3-6。正規化ラベル一致・他 document の live 親 component・**保存済み** `chunks.embedding` の近傍だけを見る決定論。LLM / embedding 0 回・非致命） | Det | `library_entries`（candidate）/ `element_identity_links`（candidate）/ `theory_components.duplicate_candidates` |
 | — | `completed` | ラン完了マーク | — | — |
 
 > **入力の種別**: `source_kind` は `"pdf"` と `"tex_archive"`（arXiv の TeX ソース `.tar.gz`）の

@@ -14,6 +14,7 @@ from sqlalchemy import text as sa_text
 from core.knowledge_objects import learning_units as ko_units
 from core.knowledge_objects import remap as ko_remap
 from core.knowledge_objects import stable_key as ko_keys
+from core.knowledge_objects import theory_modules as ko_modules
 from core.knowledge_objects.schema import (
     DEFAULT_REVIEW_STATUS,
     TABLE_ARTIFACTS,
@@ -24,6 +25,7 @@ from core.knowledge_objects.schema import (
     TABLE_EVIDENCE,
     TABLE_LEARNING_UNITS,
     TABLE_SYMBOLS,
+    TABLE_THEORY_MODULES,
     normalize_claim_type,
     normalize_component_type,
 )
@@ -399,10 +401,14 @@ def _equation_key_for_fields(document_id: str, fields: dict) -> str:
     )
 
 
-def _equation_stable_key_map(document_id: str, equations: Any) -> dict[str, str]:
+def equation_stable_key_map(document_id: str, equations: Any) -> dict[str, str]:
     """``agent equation_id -> stable_key``（純計算・DB を読まない）。
 
     claim の ``equation_stable_keys`` / derivation step / symbol のキー材料に使う。
+    理論モジュールの ``module_key`` / 保存行の材料（theory_module_layer_design.md §13.3）にも
+    使い、**route（``GET .../theory-modules``）とパイプラインステージ ``theory_modules`` の両方が
+    この関数を呼ぶ**（写像の計算を二重実装しない。同じ run の同じ ``equation_semantics`` を
+    渡せば画面の ``module_key`` と保存行の ``agent_module_key`` が一致する）。
 
     式 ID は印字番号由来（``eq_7``）なので **同じ ID のレコードが2件以上あり得る**。
     その場合は最初のレコードのキーを採る（``assign_stable_keys`` が素のキーを渡すのも
@@ -417,6 +423,10 @@ def _equation_stable_key_map(document_id: str, equations: Any) -> dict[str, str]
             continue
         out[agent_id] = _equation_key_for_fields(document_id, fields)
     return out
+
+
+#: 旧名（知識オブジェクト層の内部呼び出しとテストが使う）。正本は :func:`equation_stable_key_map`。
+_equation_stable_key_map = equation_stable_key_map
 
 
 def _resolved_equation_keys(agent_ids: Any, key_map: dict[str, str]) -> list[str]:
@@ -2598,6 +2608,149 @@ def persist_learning_units(
         # 呼び出し側（orchestrator）は artifact に残すので、run 行にも同じ事実を残す。
         record_knowledge_stage_output_failure(
             run_id=run_id, kind="learning_units", error=str(exc)
+        )
+        raise
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 理論モジュール（theory_module_layer_design.md §13.2 / §13.5・migration 086）
+# ---------------------------------------------------------------------------
+
+
+def load_stored_component_graph_json(document_id: str) -> dict:
+    """``theory_component_graphs`` の最新行の ``graph_json`` をそのまま返す（読むだけ）。
+
+    パイプラインステージ ``theory_modules`` が builder に渡す入力。route の
+    ``_stored_component_graph`` + ``_normalize_stored_component_graph`` と同じ行を読むが、
+    正規化は掛けない（builder が読む 5 つのフィールド — ``graph_layer`` /
+    ``linked_derivation_ids`` / 入出力式 / ``source_backing_status`` — を正規化は変えない。
+    同じ fixture で両経路の ``module_key`` 集合が一致することは
+    ``test_theory_module_store.py`` が固定する）。行が無い・JSON でないときは ``{}``。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                SELECT graph_json
+                FROM theory_component_graphs
+                WHERE document_id = :document_id
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            ),
+            {"document_id": document_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return {}
+    graph = row[0]
+    if isinstance(graph, str):
+        try:
+            graph = json.loads(graph)
+        except (TypeError, ValueError):
+            return {}
+    return graph if isinstance(graph, dict) else {}
+
+
+def sync_theory_modules(
+    session,
+    *,
+    document_id: str,
+    run_id: str | None,
+    records: Any,
+    rule_version: str,
+) -> dict:
+    """理論モジュールの live 行を ``records`` に同期する（呼び出し側のセッション・commit しない）。
+
+    ``sync_live_rows`` 経由（**DELETE を書かない**。stable_key 一致 = 同 UUID で内容更新 /
+    不一致 = ``superseded_at`` 刻印 / 新規 = INSERT）。人間の確定列を持たないので
+    ``preserved_columns`` は空、近似キーのバックフィルもしないので ``fallback_match_column`` も
+    使わない（設計書 §13.2）。``records`` が空なら全 live 行が superseded になる（TM14 の後半 —
+    呼び出し側は「式の手順が 0 だった」ときだけ空で呼ぶ）。
+
+    Returns:
+        ``{"updated", "inserted", "superseded", "outer", "inner", "rule_version"}``（件数は内部報告）。
+    """
+    items = ko_modules.build_theory_module_items(
+        document_id, list(records or []), rule_version=rule_version,
+    )
+    sync = sync_live_rows(
+        session,
+        table=TABLE_THEORY_MODULES,
+        document_id=document_id,
+        run_id=run_id,
+        incoming=items,
+        content_columns=ko_modules.THEORY_MODULE_CONTENT_COLUMNS,
+        preserved_columns=(),
+        agent_id_column=ko_modules.AGENT_ID_COLUMN,
+    )
+    return {
+        "updated": int(sync.stats.get("updated", 0)),
+        "inserted": int(sync.stats.get("inserted", 0)),
+        "superseded": int(sync.stats.get("superseded", 0)),
+        **ko_modules.level_counts(items),
+        "rule_version": rule_version,
+    }
+
+
+def persist_theory_modules(
+    *,
+    document_id: str,
+    run_id: str | None = None,
+    module_records: Any,
+) -> dict:
+    """理論モジュールを ``knowledge_theory_modules`` へ**同期**する（§13.5・migration 086）。
+
+    ``module_records`` は ``core.theory_modules.build_theory_module_records`` の戻り値そのもの。
+    ``persistable`` が False（builder の例外 / 導出の解析結果が無い・導出に失敗した）なら
+    **SQL を一切発行しない**（素材が無いことを「モジュールが全部消えた」と解釈しない = TM14）。
+
+    監査は run 単位の要約 1 行（``AUDIT_ENTITY_KNOWLEDGE_OBJECT``・件数のみ）、run 行には
+    ``stage_outputs.knowledge_objects.theory_modules`` に同じ要約を残す。失敗は巻き戻して
+    ``record_knowledge_stage_output_failure(kind="theory_modules")`` で事実を残し、例外を
+    呼び出し側（非致命のステージ）へ返す。
+
+    Returns:
+        同期したとき ``{"updated", "inserted", "superseded", "outer", "inner", "rule_version"}``。
+        保存しなかったとき ``{"skipped_reason", "rule_version"}``。
+    """
+    payload = module_records if isinstance(module_records, dict) else {}
+    rule_version = _text(payload.get("rule_version"))
+    if not payload.get("persistable"):
+        return {
+            "skipped_reason": _text(payload.get("skip_reason")) or "not_persistable",
+            "rule_version": rule_version,
+        }
+
+    session = _pg_session()
+    try:
+        summary = sync_theory_modules(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            records=payload.get("records") or [],
+            rule_version=rule_version,
+        )
+        _record_knowledge_audit(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            stats={"theory_modules": summary},
+        )
+        _record_knowledge_stage_output(
+            session, run_id=run_id, summary={"theory_modules": summary},
+        )
+        session.commit()
+        logger.info("Synced theory_modules for document %s: %s", document_id, summary)
+        return summary
+    except Exception as exc:
+        session.rollback()
+        record_knowledge_stage_output_failure(
+            run_id=run_id, kind="theory_modules", error=str(exc)
         )
         raise
     finally:

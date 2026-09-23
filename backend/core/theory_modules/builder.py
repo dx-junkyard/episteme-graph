@@ -24,7 +24,7 @@ import re
 
 import hashlib
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from core.element_vocab import THEORY_STAGE_LABELS as _ELEMENT_STAGE_LABELS
 from core.element_vocab import operation_label as _vocab_operation_label
@@ -34,6 +34,7 @@ from core.theory_modules.schema import (
     BACKING_ORDER,
     CLAIM_CHAIN_TYPES,
     DETAIL_GRAPH_LAYERS,
+    EQUATION_ID_KEY_PREFIX,
     EQUATION_ID_TOKEN_RE,
     FACT_BUILD_FAILED,
     FACT_CLAIM_CHAINS_ONLY,
@@ -55,12 +56,17 @@ from core.theory_modules.schema import (
     LEVEL_INNER,
     LEVEL_OUTER,
     MEMBER_CHAIN_TYPES,
+    MODULE_IDENTITY_MIN_MEMBERS,
+    MODULE_IDENTITY_MIN_PROCESS_KINDS,
     OUTER_INTERFACE_LIMIT,
+    RECORDS_SKIP_BUILD_FAILED,
+    RECORDS_SKIP_NO_DERIVATIONS,
     RULE_VERSION,
     SHARED_FOUNDATION_MIN_CONSUMERS,
     SINK_CHAIN_TYPES,
     THEORY_OBJECT_LABELS_MAX,
     THEORY_OBJECT_MAX,
+    UNCLASSIFIED_EDGE_TYPE,
     clean_text,
     contains_internal_id,
     equation_display_label,
@@ -106,6 +112,23 @@ def _stage_for_operation(operation: str) -> str:
         return str(cg.stage_for_edge_type(edge_type) or "")
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _classify_operation(operation: str) -> tuple[str, bool]:
+    """``(edge_type, generic)``。A層が読めない環境では ``("", False)``（§13.4 の縮退）。
+
+    ``edge_type`` は ``component_graph.schema.classify_operation`` の第 2 要素（汎用は
+    ``requires_review``、未知は ``transforms``）。保存用出力の構造の指紋と同一性候補の対象判定に
+    だけ使い、分割には使わない（TM4）。
+    """
+    cg = _a_layer()
+    if cg is None:
+        return "", False
+    try:
+        _verb, edge_type, generic = cg.classify_operation(operation)
+        return str(edge_type or ""), bool(generic)
+    except Exception:  # noqa: BLE001
+        return "", False
 
 
 def _stage_order() -> list[str]:
@@ -182,6 +205,8 @@ class _Step:
     node_ids: list[str] = field(default_factory=list)
     backing: str = ""
     stage: str = ""
+    edge_type: str = ""
+    generic: bool = False
 
 
 @dataclass
@@ -312,6 +337,7 @@ def _collect_steps(chains: list[dict], graph: _GraphIndex) -> tuple[list[_Step],
         entry.node_ids = _dedup(_node_id(n) for n in usable)
         entry.backing = _weakest_backing(str(n.get("source_backing_status") or "") for n in usable)
         entry.stage = _stage_for_operation(entry.operation)
+        entry.edge_type, entry.generic = _classify_operation(entry.operation)
         kept.append(entry)
     for index, entry in enumerate(kept):
         entry.order = index
@@ -808,9 +834,25 @@ class _Labels:
         return out
 
 
-def _module_key(document_id: str, produced: list[str], level: str, taken: set[str]) -> str:
-    """§5.7 の読み時キー（Phase 0 は equation_id の昇順列。schema の docstring 参照）。"""
-    material = "\x1f".join([document_id, ",".join(sorted(produced)), level])
+def _equation_key_material(produced: list[str], equation_stable_keys: Mapping[str, str]) -> list[str]:
+    """生む式ごとのキーの材料（§13.3）。写像に無い式は ``eqid:`` + equation_id。"""
+    out: list[str] = []
+    for eq in produced:
+        key = str(equation_stable_keys.get(eq) or "").strip()
+        out.append(key if key else EQUATION_ID_KEY_PREFIX + eq)
+    return out
+
+
+def _module_key(
+    document_id: str,
+    produced: list[str],
+    level: str,
+    taken: set[str],
+    equation_stable_keys: Mapping[str, str],
+) -> str:
+    """§5.7 / §13.3 の読み時キー（材料 = 生む式の equation stable_key の昇順列 + level）。"""
+    material_keys = _equation_key_material(produced, equation_stable_keys)
+    material = "\x1f".join([document_id, ",".join(sorted(material_keys)), level])
     base = RULE_VERSION + ":" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
     key = base
     suffix = 2
@@ -901,6 +943,109 @@ def _module_dto(
     }
 
 
+def _structure_fingerprint(level: str, steps: list[_Step], inputs: list[str], outputs: list[str], premise: bool) -> str:
+    """構造の指紋（§13.4）。**内部表現**で DTO・API・監査・候補の文面に出さない（TM12）。
+
+    ``{rule_version}|{level}|ops={edge_type}:{多重度},…|in={本数}|out={本数}|premise={0|1}``。
+    共有の基礎は入れない（§6）。A層が読めず分類できない手順は ``UNCLASSIFIED_EDGE_TYPE``。
+    """
+    multiplicity: dict[str, int] = {}
+    for step in steps:
+        edge_type = step.edge_type or UNCLASSIFIED_EDGE_TYPE
+        multiplicity[edge_type] = multiplicity.get(edge_type, 0) + 1
+    ops = ",".join(f"{edge_type}:{multiplicity[edge_type]}" for edge_type in sorted(multiplicity))
+    return (
+        f"{RULE_VERSION}|{level}|ops={ops}|in={len(inputs)}|out={len(outputs)}"
+        f"|premise={1 if premise else 0}"
+    )
+
+
+def _identity_eligible(level: str, steps: list[_Step]) -> bool:
+    """規則 ⑤ の対象か（§13.4）: 外枠・成員の下限・汎用でない工程の型の種類の下限・全手順が分類済み。"""
+    if level != LEVEL_OUTER or len(steps) < MODULE_IDENTITY_MIN_MEMBERS:
+        return False
+    if any(not step.edge_type for step in steps):
+        return False  # 分類できない工程で一致を言わない
+    kinds = {step.edge_type for step in steps if not step.generic}
+    return len(kinds) >= MODULE_IDENTITY_MIN_PROCESS_KINDS
+
+
+def _module_record(
+    *,
+    flow: _Flow,
+    members: frozenset[int],
+    dto: dict,
+    equation_stable_keys: Mapping[str, str],
+) -> dict:
+    """保存用の 1 行（§13.4）。DTO とは別の dict で、指紋・式の stable_key はここにだけ載る。"""
+    ordered = [flow.steps[index] for index in sorted(members)]
+    inputs, outputs, to_sink = flow.interface(members)
+    produced = flow.produced(members)
+    used_foundation = [eq for eq in flow.consumed(members) if eq in flow.foundation]
+    required_ids = _dedup(cid for step in ordered for cid in step.required_claim_ids)
+    assumptions = _dedup(a for step in ordered for a in step.assumptions)
+    level = str(dto.get("level") or "")
+    return {
+        "module_key": dto.get("module_key"),
+        "level": level,
+        "parent_module_key": dto.get("parent_module_key"),
+        "produced_equation_ids": list(produced),
+        "produced_equation_keys": _equation_key_material(produced, equation_stable_keys),
+        "label": dto.get("label") or "",
+        "visual_label": dto.get("visual_label") or "",
+        "theory_object": dto.get("theory_object") or "",
+        "process_verbs": list(dto.get("process_verbs") or []),
+        "stage_keys": list(dto.get("stage_keys") or []),
+        "dominant_stage": dto.get("dominant_stage") or "",
+        "source_backing_status": dto.get("source_backing_status") or "",
+        "isolated_reason": dto.get("isolated_reason"),
+        "input_equation_ids": list(inputs),
+        "output_equation_ids": list(outputs),
+        "foundation_equation_ids": list(used_foundation),
+        "sink_equation_ids": list(to_sink),
+        "required_claim_ids": list(required_ids),
+        "assumptions": list(assumptions),
+        "members": [
+            {
+                "step_refs": [_step_ref(did, sid) for did, sid in step.occurrences],
+                "node_ids": list(step.node_ids),
+                "operation": step.operation,
+                "edge_type": step.edge_type,
+                "generic": bool(step.generic),
+                "stage_key": step.stage,
+                "input_equation_ids": list(step.inputs),
+                "output_equation_ids": list(step.outputs),
+            }
+            for step in ordered
+        ],
+        "structure_fingerprint": _structure_fingerprint(
+            level, ordered, inputs, outputs, bool(required_ids or assumptions)
+        ),
+        "identity_eligible": _identity_eligible(level, ordered),
+        "components_for_comparison": [
+            str(item.get("name") or "") for item in (dto.get("components_for_comparison") or [])
+            if isinstance(item, dict) and item.get("name")
+        ],
+    }
+
+
+def _records_payload(
+    *,
+    persistable: bool,
+    skip_reason: str = "",
+    records: list[dict] | None = None,
+    equations_without_stable_key: list[str] | None = None,
+) -> dict:
+    return {
+        "persistable": persistable,
+        "skip_reason": skip_reason if not persistable else "",
+        "rule_version": RULE_VERSION,
+        "records": list(records or []),
+        # 内部の報告: equation stable_key が引けず ``eqid:`` を材料にした式（facts には出さない）。
+        "equations_without_stable_key": list(equations_without_stable_key or []),
+    }
+
+
 def _unavailable(document_id: str, facts: list[str], claim_sequence: list[str]) -> dict:
     return {
         "document_id": document_id,
@@ -950,19 +1095,73 @@ def _claim_sequence_node_ids(graph_json: dict, chains: list[dict]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def build_theory_modules(*, document_id: str, artifacts: dict, graph_json: dict) -> dict:
+def build_theory_modules(
+    *,
+    document_id: str,
+    artifacts: dict,
+    graph_json: dict,
+    equation_stable_keys: Mapping[str, str] | None = None,
+) -> dict:
     """理論モジュール DTO（設計書 §8.1）を組み立てる。入力は一切 mutate しない。
 
-    例外を外に出さない（TM8）。導出に失敗したら ``available: false`` + 事実文を返す。
+    ``equation_stable_keys``（agent equation ID → equation stable_key。§13.3）は
+    ``module_key`` の材料にだけ使う。呼び出し側は ``persistence.equation_stable_key_map`` で
+    作る（写像の計算を二重実装しない）。例外を外に出さない（TM8）。導出に失敗したら
+    ``available: false`` + 事実文を返す。
     """
     doc_id = str(document_id or "")
     try:
-        return _build(doc_id, _mapping(artifacts), _mapping(graph_json))
+        dto, _records = _build(doc_id, _mapping(artifacts), _mapping(graph_json), _key_map(equation_stable_keys))
+        return dto
     except Exception:  # noqa: BLE001 — 読み時射影の失敗で画面を壊さない
         return _unavailable(doc_id, [FACT_BUILD_FAILED], [])
 
 
-def _build(document_id: str, artifacts: dict, graph_json: dict) -> dict:
+def build_theory_module_records(
+    *,
+    document_id: str,
+    artifacts: dict,
+    graph_json: dict,
+    equation_stable_keys: Mapping[str, str] | None = None,
+) -> dict:
+    """保存用の出力（設計書 §13.4）。DTO（:func:`build_theory_modules`）とは別の戻り値。
+
+    構造の指紋・式の stable_key・工程の型はここにだけ載り、DTO には混ぜない（TM12）。
+    呼ぶのはパイプラインステージ ``theory_modules`` だけで、route は import しない。
+
+    戻り値: ``{"persistable", "skip_reason", "rule_version", "records",
+    "equations_without_stable_key"}``。``persistable`` が False のとき（builder の例外 =
+    ``build_failed`` / 導出の解析結果が無い・導出に失敗した = ``no_derivations``）は呼び出し側が
+    SQL を発行しない（TM14）。式の手順が 0（主張の並びだけ）のときは ``persistable: True`` かつ
+    ``records: []``（それが今回の解析の結果なので、旧行を superseded にする）。
+    """
+    doc_id = str(document_id or "")
+    try:
+        _dto, records = _build(doc_id, _mapping(artifacts), _mapping(graph_json), _key_map(equation_stable_keys))
+        return records
+    except Exception:  # noqa: BLE001 — 保存用出力の失敗は「保存しない」に倒す
+        return _records_payload(persistable=False, skip_reason=RECORDS_SKIP_BUILD_FAILED)
+
+
+def _key_map(value: Mapping[str, str] | None) -> dict[str, str]:
+    """写像を複製して正規化する（入力を mutate しない。空キー・空値は落とす）。"""
+    if not isinstance(value, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    for key, item in value.items():
+        k, v = str(key or "").strip(), str(item or "").strip()
+        if k and v:
+            out[k] = v
+    return out
+
+
+def _build(
+    document_id: str,
+    artifacts: dict,
+    graph_json: dict,
+    equation_stable_keys: Mapping[str, str],
+) -> tuple[dict, dict]:
+    """(DTO, 保存用出力) を組み立てる。両者は同じ内部結果から作り、``module_key`` が一致する。"""
     facts: list[str] = []
 
     def _add_fact(text: str) -> None:
@@ -972,7 +1171,12 @@ def _build(document_id: str, artifacts: dict, graph_json: dict) -> dict:
     chains = _dicts(_mapping(artifacts.get("derivation_chain")).get("chains"))
     claim_sequence = _claim_sequence_node_ids(graph_json, chains)
     if not chains:
-        return _unavailable(document_id, [FACT_NO_DERIVATIONS], claim_sequence)
+        # 導出の解析結果が無い・導出に失敗した（失敗時もステージは空の chains を残す）。
+        # 素材が無いことを「モジュールが全部消えた」と読まない（TM14）。
+        return (
+            _unavailable(document_id, [FACT_NO_DERIVATIONS], claim_sequence),
+            _records_payload(persistable=False, skip_reason=RECORDS_SKIP_NO_DERIVATIONS),
+        )
 
     graph = _GraphIndex(graph_json)
     steps, sinks, excluded_inferred = _collect_steps(chains, graph)
@@ -982,7 +1186,8 @@ def _build(document_id: str, artifacts: dict, graph_json: dict) -> dict:
             facts.append(FACT_CLAIM_CHAINS_ONLY)
         if excluded_inferred:
             facts.append(FACT_INFERRED_STEPS_EXCLUDED)
-        return _unavailable(document_id, facts, claim_sequence)
+        # 式の手順が 0 = 今回の解析の結果。保存側は旧行を superseded にする（TM14 の後半）。
+        return _unavailable(document_id, facts, claim_sequence), _records_payload(persistable=True)
 
     labels = _Labels(artifacts)
     if not labels.equation_records:
@@ -1036,6 +1241,7 @@ def _build(document_id: str, artifacts: dict, graph_json: dict) -> dict:
 
     taken_keys: set[str] = set()
     modules: list[dict] = []
+    records: list[dict] = []
     outer_keys: list[tuple[frozenset[int], str]] = []
     inner_keys: list[tuple[frozenset[int], str]] = []
     too_wide = False
@@ -1050,14 +1256,18 @@ def _build(document_id: str, artifacts: dict, graph_json: dict) -> dict:
         return None
 
     for members in outer:
-        key = _module_key(document_id, flow.produced(members), LEVEL_OUTER, taken_keys)
+        key = _module_key(document_id, flow.produced(members), LEVEL_OUTER, taken_keys, equation_stable_keys)
         reason = _isolated_reason(members, OUTER_INTERFACE_LIMIT)
         if reason == ISOLATED_INTERFACE_TOO_WIDE:
             too_wide = True
         outer_keys.append((members, key))
-        modules.append(_module_dto(
+        outer_dto = _module_dto(
             flow=flow, labels=labels, members=members, level=LEVEL_OUTER, key=key,
             parent_key=None, isolated_reason=reason, stage_order=stage_order,
+        )
+        modules.append(outer_dto)
+        records.append(_module_record(
+            flow=flow, members=members, dto=outer_dto, equation_stable_keys=equation_stable_keys,
         ))
         if len(members) < 2:
             continue
@@ -1067,15 +1277,21 @@ def _build(document_id: str, artifacts: dict, graph_json: dict) -> dict:
             continue  # 内側が割れない外枠には内側を持たせない（§5.4）
         inner_handoffs = _inner_handoffs(flow, inner, members)
         for index, inner_members in enumerate(inner):
-            inner_key = _module_key(document_id, flow.produced(inner_members), LEVEL_INNER, taken_keys)
+            inner_key = _module_key(
+                document_id, flow.produced(inner_members), LEVEL_INNER, taken_keys, equation_stable_keys,
+            )
             inner_keys.append((inner_members, inner_key))
-            modules.append(_module_dto(
+            inner_dto = _module_dto(
                 flow=flow, labels=labels, members=inner_members, level=LEVEL_INNER, key=inner_key,
                 parent_key=key,
                 isolated_reason=_isolated_reason(
                     inner_members, INNER_INTERFACE_LIMIT, _inner_width(inner_handoffs, {index}),
                 ),
                 stage_order=stage_order,
+            )
+            modules.append(inner_dto)
+            records.append(_module_record(
+                flow=flow, members=inner_members, dto=inner_dto, equation_stable_keys=equation_stable_keys,
             ))
     if too_wide:
         _add_fact(FACT_INTERFACE_TOO_WIDE)
@@ -1131,7 +1347,10 @@ def _build(document_id: str, artifacts: dict, graph_json: dict) -> dict:
             ),
         })
 
-    return {
+    without_key = sorted({
+        eq for step in steps for eq in step.outputs if not equation_stable_keys.get(eq)
+    })
+    dto = {
         "document_id": document_id,
         "available": True,
         "facts": facts,
@@ -1142,3 +1361,6 @@ def _build(document_id: str, artifacts: dict, graph_json: dict) -> dict:
         "foundations": foundation_rows,
         "claim_sequence_node_ids": claim_sequence,
     }
+    return dto, _records_payload(
+        persistable=True, records=records, equations_without_stable_key=without_key,
+    )

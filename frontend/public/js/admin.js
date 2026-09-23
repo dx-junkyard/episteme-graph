@@ -2744,6 +2744,7 @@
     cartridge_declared: "分野の宣言",
     corpus_cooccurrence: "コーパス内の共起",
     llm_candidate: "AI の候補",
+    structural_match: "構造の一致",
   };
   var _libraryReviewStatusLabels = {
     candidate: "候補",

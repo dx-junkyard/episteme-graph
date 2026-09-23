@@ -788,3 +788,210 @@ class TestSynthesizedClaimLabels:
             # 合成主張の定型文（"In an equation of this paper" / "defines"）を理論対象に並べない
             assert "of this paper" not in module["theory_object"]
             assert " defines " not in module["theory_object"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: module_key の材料（§13.3）と保存用出力・構造の指紋（§13.4）
+# ---------------------------------------------------------------------------
+
+
+def _records(chains, *, equation_stable_keys=None, document_id="doc-1", graph=None, **kwargs):
+    from core.theory_modules import build_theory_module_records
+
+    return build_theory_module_records(
+        document_id=document_id,
+        artifacts=_artifacts(chains, **kwargs),
+        graph_json=graph or {"nodes": [], "edges": []},
+        equation_stable_keys=equation_stable_keys,
+    )
+
+
+def _fixture_records(fixture: dict) -> dict:
+    from core.theory_modules import build_theory_module_records
+
+    return build_theory_module_records(
+        document_id=fixture["document_id"], artifacts=fixture["artifacts"], graph_json=fixture["graph_json"],
+    )
+
+
+class TestModuleKeyMaterial:
+    CHAINS = [_chain("d1", [_step("s1", "define_x", ["a"], ["b"]), _step("s2", "substitute_y", ["b"], ["c"])])]
+
+    def test_rule_version_is_m2(self):
+        assert RULE_VERSION == "m2"
+
+    def test_deterministic_with_and_without_the_map(self):
+        keys = {"b": "k1:bbb", "c": "k1:ccc"}
+        with_map = [m["module_key"] for m in _run(self.CHAINS)["modules"]]
+        again = [m["module_key"] for m in _run(copy.deepcopy(self.CHAINS))["modules"]]
+        assert with_map == again
+        mapped = build_theory_modules(
+            document_id="doc-1", artifacts=_artifacts(self.CHAINS), graph_json={}, equation_stable_keys=keys,
+        )
+        mapped_again = build_theory_modules(
+            document_id="doc-1", artifacts=_artifacts(self.CHAINS), graph_json={}, equation_stable_keys=dict(keys),
+        )
+        assert [m["module_key"] for m in mapped["modules"]] == [m["module_key"] for m in mapped_again["modules"]]
+        assert all(m["module_key"].startswith("m2:") for m in mapped["modules"])
+
+    def test_material_is_the_equation_stable_key_not_the_equation_id(self):
+        """同じ式の stable_key なら equation_id が変わってもキーは同じ（KO2 の内容由来）。"""
+        renamed = [_chain("d1", [_step("s1", "define_x", ["a"], ["B"]), _step("s2", "substitute_y", ["B"], ["C"])])]
+        first = build_theory_modules(
+            document_id="doc-1", artifacts=_artifacts(self.CHAINS), graph_json={},
+            equation_stable_keys={"b": "k1:bbb", "c": "k1:ccc"},
+        )
+        second = build_theory_modules(
+            document_id="doc-1", artifacts=_artifacts(renamed), graph_json={},
+            equation_stable_keys={"B": "k1:bbb", "C": "k1:ccc"},
+        )
+        assert [m["module_key"] for m in first["modules"]] == [m["module_key"] for m in second["modules"]]
+
+    def test_equation_without_a_key_falls_back_to_eqid_material(self):
+        from core.theory_modules.schema import EQUATION_ID_KEY_PREFIX
+
+        result = _records(self.CHAINS, equation_stable_keys={"b": "k1:bbb"})
+        assert result["equations_without_stable_key"] == ["c"]
+        record = result["records"][0]
+        assert sorted(record["produced_equation_keys"]) == sorted(["k1:bbb", EQUATION_ID_KEY_PREFIX + "c"])
+
+    def test_map_is_not_mutated(self):
+        keys = {"b": "k1:bbb"}
+        _records(self.CHAINS, equation_stable_keys=keys)
+        assert keys == {"b": "k1:bbb"}
+
+    def test_dto_has_no_fact_about_missing_keys(self):
+        result = build_theory_modules(
+            document_id="doc-1", artifacts=_artifacts(self.CHAINS), graph_json={}, equation_stable_keys={},
+        )
+        assert not any("stable" in fact or "eqid" in fact for fact in result["facts"])
+
+
+class TestRecords:
+    def test_persistable_flags(self):
+        from core.theory_modules.schema import RECORDS_SKIP_NO_DERIVATIONS
+
+        assert _records([])["persistable"] is False
+        assert _records([])["skip_reason"] == RECORDS_SKIP_NO_DERIVATIONS
+        claims_only = _records([_chain("d1", [_step("s1", "support", ["a"], ["b"])], chain_type="claim_chain")])
+        assert claims_only["persistable"] is True and claims_only["records"] == []
+        assert claims_only["skip_reason"] == ""
+
+    def test_builder_exception_is_not_persistable(self, monkeypatch):
+        from core.theory_modules import builder
+        from core.theory_modules.schema import RECORDS_SKIP_BUILD_FAILED
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("x")
+
+        monkeypatch.setattr(builder, "_build", _boom)
+        result = builder.build_theory_module_records(document_id="d", artifacts={}, graph_json={})
+        assert result["persistable"] is False and result["skip_reason"] == RECORDS_SKIP_BUILD_FAILED
+
+    def test_record_keys_and_members(self):
+        chains = [_chain("d1", [
+            _step("s1", "define_x", ["a"], ["b"], required_claim_ids=["c1"]),
+            _step("s2", "substitute_y", ["b"], ["c"]),
+        ])]
+        record = _records(chains)["records"][0]
+        assert set(record) == {
+            "module_key", "level", "parent_module_key", "produced_equation_ids", "produced_equation_keys",
+            "label", "visual_label", "theory_object", "process_verbs", "stage_keys", "dominant_stage",
+            "source_backing_status", "isolated_reason", "input_equation_ids", "output_equation_ids",
+            "foundation_equation_ids", "sink_equation_ids", "required_claim_ids", "assumptions", "members",
+            "structure_fingerprint", "identity_eligible", "components_for_comparison",
+        }
+        assert record["produced_equation_ids"] == ["b", "c"]
+        assert record["input_equation_ids"] == ["a"]
+        assert record["required_claim_ids"] == ["c1"]
+        assert [m["edge_type"] for m in record["members"]] == ["defines", "substitutes"]
+        assert [m["step_refs"] for m in record["members"]] == [["d1:s1"], ["d1:s2"]]
+
+    def test_fingerprint_format_and_determinism(self):
+        chains = [_chain("d1", [
+            _step("s1", "define_x", ["a"], ["b"]),
+            _step("s2", "substitute_y", ["b"], ["c"]),
+            _step("s3", "substitute_z", ["c"], ["d"], assumption_ids=["仮定"]),
+        ])]
+        first = _records(chains)["records"][0]["structure_fingerprint"]
+        second = _records(copy.deepcopy(chains), document_id="another")["records"][0]["structure_fingerprint"]
+        assert first == second == "m2|outer|ops=defines:1,substitutes:2|in=1|out=1|premise=1"
+
+    def test_fingerprint_ignores_equation_ids_and_order_of_multiset(self):
+        a = [_chain("d1", [_step("s1", "define_x", ["a"], ["b"]), _step("s2", "substitute_y", ["b"], ["c"])])]
+        b = [_chain("d9", [_step("t1", "define_p", ["p"], ["q"]), _step("t2", "substitute_r", ["q"], ["r"])])]
+        assert _records(a)["records"][0]["structure_fingerprint"] == _records(b)["records"][0]["structure_fingerprint"]
+
+    def test_identity_eligibility_thresholds(self):
+        from core.theory_modules.schema import MODULE_IDENTITY_MIN_MEMBERS, MODULE_IDENTITY_MIN_PROCESS_KINDS
+
+        assert (MODULE_IDENTITY_MIN_MEMBERS, MODULE_IDENTITY_MIN_PROCESS_KINDS) == (3, 2)
+        three_two = [_chain("d1", [
+            _step("s1", "define_x", ["a"], ["b"]),
+            _step("s2", "substitute_y", ["b"], ["c"]),
+            _step("s3", "substitute_z", ["c"], ["d"]),
+        ])]
+        assert _records(three_two)["records"][0]["identity_eligible"] is True
+        two = [_chain("d1", [_step("s1", "define_x", ["a"], ["b"]), _step("s2", "substitute_y", ["b"], ["c"])])]
+        assert _records(two)["records"][0]["identity_eligible"] is False
+        one_kind = [_chain("d1", [
+            _step("s1", "substitute_x", ["a"], ["b"]),
+            _step("s2", "substitute_y", ["b"], ["c"]),
+            _step("s3", "substitute_z", ["c"], ["d"]),
+        ])]
+        assert _records(one_kind)["records"][0]["identity_eligible"] is False
+        generic_second_kind = [_chain("d1", [
+            _step("s1", "substitute_x", ["a"], ["b"]),
+            _step("s2", "transform", ["b"], ["c"]),
+            _step("s3", "substitute_z", ["c"], ["d"]),
+        ])]
+        assert _records(generic_second_kind)["records"][0]["identity_eligible"] is False
+
+    def test_unclassifiable_steps_are_never_eligible(self, monkeypatch):
+        from core.theory_modules import builder
+        from core.theory_modules.schema import UNCLASSIFIED_EDGE_TYPE
+
+        monkeypatch.setattr(builder, "_a_layer", lambda: None)
+        chains = [_chain("d1", [
+            _step("s1", "define_x", ["a"], ["b"]),
+            _step("s2", "substitute_y", ["b"], ["c"]),
+            _step("s3", "approximate_z", ["c"], ["d"]),
+        ])]
+        record = _records(chains)["records"][0]
+        assert record["identity_eligible"] is False
+        assert f"ops={UNCLASSIFIED_EDGE_TYPE}:3" in record["structure_fingerprint"]
+
+    def test_inner_records_are_never_eligible(self, tex_2609):
+        records = _fixture_records(tex_2609)["records"]
+        assert [r for r in records if r["level"] == "inner"]
+        assert not any(r["identity_eligible"] for r in records if r["level"] == "inner")
+
+    def test_fixture_eligibility_matches_the_design_estimate(self, tex_2407, tex_2609):
+        """§13.4 の見込み: 2407 は計算本体 1、2609 は 3 が下限を満たし、両論文の指紋は一致しない。"""
+        r2407 = [r for r in _fixture_records(tex_2407)["records"] if r["identity_eligible"]]
+        r2609 = [r for r in _fixture_records(tex_2609)["records"] if r["identity_eligible"]]
+        assert len(r2407) == 1 and len(r2609) == 3
+        assert not {r["structure_fingerprint"] for r in r2407} & {r["structure_fingerprint"] for r in r2609}
+
+    def test_records_align_with_dto_modules(self, tex_2407):
+        records = _fixture_records(tex_2407)["records"]
+        dto = _build(tex_2407)
+        assert [r["module_key"] for r in records] == [m["module_key"] for m in dto["modules"]]
+        assert [r["parent_module_key"] for r in records] == [m["parent_module_key"] for m in dto["modules"]]
+        assert [r["visual_label"] for r in records] == [m["visual_label"] for m in dto["modules"]]
+
+
+class TestFingerprintNeverInDto:
+    @pytest.mark.parametrize("name", [
+        "arxiv_2407_01221v2_tex.json", "arxiv_2609_15375v1_tex.json", "arxiv_2609_15375v1_pdf.json",
+    ])
+    def test_dto_has_no_fingerprint_stable_key_or_edge_type(self, name):
+        fixture = _load(name)
+        dto = build_theory_modules(
+            document_id=fixture["document_id"], artifacts=fixture["artifacts"], graph_json=fixture["graph_json"],
+            equation_stable_keys={"eq_tex_b14": "k1:deadbeef"},
+        )
+        text = json.dumps(dto, ensure_ascii=False)
+        for term in ("fingerprint", "structure_fingerprint", "stable_key", "produced_equation_keys",
+                     "identity_eligible", "edge_type", "k1:", "eqid:", "ops="):
+            assert term not in text, term

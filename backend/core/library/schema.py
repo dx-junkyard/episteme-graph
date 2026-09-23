@@ -12,6 +12,7 @@ docs/features/image_pipeline_knowledge_library_design.md §6 を正本とする�
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -209,6 +210,8 @@ JUSTIFICATION_VECTOR = "vector_similarity"
 JUSTIFICATION_CARTRIDGE = "cartridge_declared"
 JUSTIFICATION_COOCCURRENCE = "corpus_cooccurrence"
 JUSTIFICATION_LLM = "llm_candidate"
+#: 理論モジュールの構造の指紋の完全一致（theory_module_layer_design.md §13.8）。
+JUSTIFICATION_STRUCTURAL = "structural_match"
 JUSTIFICATIONS = MAPPING_JUSTIFICATIONS
 
 
@@ -335,6 +338,33 @@ def build_candidate_key(domain_key: str, name: str) -> str:
     )
 
 
+#: 構造エントリ（理論モジュールの構造の一致・§13.8）の ``candidate_key`` の接頭辞。
+STRUCTURAL_CANDIDATE_KEY_PREFIX = "tm"
+#: 指紋の sha256 のうち ``candidate_key`` に使う桁数。
+STRUCTURAL_CANDIDATE_DIGEST_CHARS = 32
+
+
+def build_structural_candidate_key(structure_fingerprint: str) -> str:
+    """理論モジュールの構造エントリの ``candidate_key`` を導出する（§13.8）。
+
+    形式: ``cand|tm|{sha256(structure_fingerprint)[:32]}``。**指紋を平文で持たない**
+    （TM12: 指紋は内部表現）。``domain_key`` を含めないのは、分野をまたいだ同じ構造を
+    1 行に畳むため（構造の型は分野中立 = TM5）。空の指紋からキーを作らない（呼び出し側が
+    空を渡したら ``ValueError``）。
+    """
+    fingerprint = str(structure_fingerprint or "").strip()
+    if not fingerprint:
+        raise ValueError("structure_fingerprint is required")
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+    return KEY_SEPARATOR.join(
+        (
+            CANDIDATE_KEY_PREFIX,
+            STRUCTURAL_CANDIDATE_KEY_PREFIX,
+            digest[:STRUCTURAL_CANDIDATE_DIGEST_CHARS],
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # 日本語ラベル（フロント3表と同じく admin.js のミラー正本）
 #
@@ -380,6 +410,7 @@ JUSTIFICATION_LABELS = {
     "cartridge_declared": "分野の宣言",
     "corpus_cooccurrence": "コーパス内の共起",
     "llm_candidate": "AI の候補",
+    "structural_match": "構造の一致",
 }
 
 REVIEW_STATUS_LABELS = {

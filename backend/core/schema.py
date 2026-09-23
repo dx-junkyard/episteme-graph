@@ -725,6 +725,8 @@ CONCEPT_RELATION_KINDS: tuple[str, ...] = (
 MAPPING_JUSTIFICATIONS: tuple[str, ...] = (
     "manual_curation", "lexical_match", "vector_similarity",
     "cartridge_declared", "corpus_cooccurrence", "llm_candidate",
+    # 理論モジュールの構造の指紋の完全一致（theory_module_layer_design.md §13.8・migration 086）。
+    "structural_match",
 )
 
 

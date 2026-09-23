@@ -265,6 +265,9 @@ _NON_INDICATOR_ROUTES: dict[str, str] = {
     # 1 論文の式の導出を「接点の狭さ」で区切った読み時射影（論文層と同じ扱い）。件数・接点の本数・
     # 閾値を返さない（theory_module_layer_design.md TM6）。
     "/api/admin/documents/{document_id}/theory-modules": _R_OBJECT,
+    # 同じ構造のモジュールを持つ論文のタイトル列挙（§13.7）。集約ではなく 1 論文の事実で、数値は
+    # hidden（真偽値）以外に返さない。
+    "/api/admin/documents/{document_id}/theory-modules/related": _R_OBJECT,
     "/api/admin/documents/{document_id}/revisions/{revision_id}": _R_OBJECT,
     "/api/admin/documents/{document_id}/revisions/{revision_id}/report": _R_OBJECT,
     "/api/admin/documents/{document_id}/revisions/{revision_id}/run-status": _R_STATE,

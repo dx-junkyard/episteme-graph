@@ -774,6 +774,154 @@ b64 / b97 を通してしかつながらない）、基礎を導く手順が単�
 上限を超える境目は採らない / 基礎は結び付けない / 決定論）を足し、Phase 0 の内側の合成テストを新規則に合わせて
 書き換えた。理論モジュール 4 ファイルで 143 件（Phase 0 の 132 件 + 11 件）。
 
+### 12.4 保存ステージ（Phase 1, 2026-09-23）
+
+§13.2〜§13.6 の「保存」側を実装した（§13.7 の `related` と §13.8 の規則 ⑤ は別の担当。§13 の本文は変えていない）。
+migration は 086（§13.10 の下書きのまま・変更なし）。LLM 0 回・embedding 0 回。
+
+**作ったもの**
+
+| ファイル | 中身 |
+|---|---|
+| `backend/core/theory_modules/schema.py` | `RULE_VERSION = "m2"`、`MODULE_IDENTITY_MIN_MEMBERS = 3` / `MODULE_IDENTITY_MIN_PROCESS_KINDS = 2`（コード定数・env から読まない）、`EQUATION_ID_KEY_PREFIX = "eqid:"`、`UNCLASSIFIED_EDGE_TYPE`、保存用出力の skip 語彙 `RECORDS_SKIP_BUILD_FAILED` / `RECORDS_SKIP_NO_DERIVATIONS` |
+| `backend/core/theory_modules/builder.py` | `build_theory_modules(..., equation_stable_keys=None)`（additive）と `build_theory_module_records(...)`（§13.4 の保存用出力）。両者は同じ `_build` の結果から作るので `module_key` が一致する。`module_key` の材料は生む式の equation stable_key の昇順列（写像に無い式は `eqid:` + equation_id）。構造の指紋・工程の型（`edge_type` / `generic`）・式の stable_key は保存用出力にだけ載る（TM12） |
+| `backend/core/knowledge_objects/stable_key.py` | `theory_module_stable_key(document_id, rule_version, level, produced_equation_keys)` |
+| `backend/core/knowledge_objects/schema.py` | `TABLE_THEORY_MODULES` / `VIEW_THEORY_MODULES_LIVE` |
+| `backend/core/knowledge_objects/theory_modules.py`（新設） | 保存用出力 → `sync_live_rows` の incoming への純変換（`build_theory_module_items`）。外枠を先に確定し、内側の `parent_stable_key` に親の確定済みキー（衝突の `#n` 込み）を入れる。内容列の正本 `THEORY_MODULE_CONTENT_COLUMNS` |
+| `backend/core/document_pipeline/persistence.py` | `equation_stable_key_map`（旧 `_equation_stable_key_map` を公開名にした。旧名は別名で残す）/ `load_stored_component_graph_json` / `sync_theory_modules(session, ...)`（呼び出し側のセッション・commit しない）/ `persist_theory_modules(*, document_id, run_id, module_records)`（`persistable: false` なら SQL 非発行・監査 1 行・`stage_outputs.knowledge_objects.theory_modules`・失敗は巻き戻して `record_knowledge_stage_output_failure(kind="theory_modules")`） |
+| `backend/core/document_pipeline/orchestrator.py` | ステージ `theory_modules`（`persist_claims_components_graph` と `identity_candidates` の間・`llm_kind=none` / `model_policy=False` / `progress_unit="builder"`・非致命）。`stage_outputs.theory_modules` は `status` / `updated` / `inserted` / `superseded` / `outer` / `inner` / `rule_version`、skip は `skipped_reason`（`graph_not_persisted` / `no_derivations` / `build_failed`）、失敗は `failed` + `error` |
+| `backend/api/routes/theory_components.py` | `build_theory_modules_for_document` が `equation_stable_key_map(document_id, artifacts["equation_semantics"])` を builder に渡す（`_build_theory_modules_payload` に optional 引数を 1 つ足した）。保存行は読まない（TM11） |
+| 登録箇所 | `PIPELINE_STAGES` / `_PIPELINE_STEPS` / `KNOWN_FEATURES`（`pipeline:theory_modules`）/ `DOCUMENT_PIPELINE_STAGE_LABELS` と `coverage_facts.EXTRA_STAGE_LABELS`（「理論モジュールの保存」）/ `docs/pipeline/overview.md` §2 |
+
+**fixture での保存行**（`equation_stable_key_map` で写像を作った場合。fixture の `equation_semantics` は切り詰め版で
+`records` キーなので、テストは実 artifact と同じ `equations` キーに載せ替えて写像を作る）
+
+| fixture | 外枠 | 内側 | 規則 ⑤ の対象（`identity_eligible`） |
+|---|---|---|---|
+| 2407.01221v2（TeX） | 8 | 5 | 1（計算本体 10 step） |
+| 2609.15375v1（TeX） | 10 | 4 | 3（5 step / 3 step / 計算本体 17 step） |
+| 2609.15375v1（PDF） | 0 | 0 | —（主張の並びだけ = `persistable: true` かつ `records: []` なので、旧行があれば superseded にする） |
+
+§13.4 の見込み（2407 は 1、2609 は 3、両論文の指紋は一致しない）どおり。指紋の例:
+
+- 2407 の計算本体: `m2|outer|ops=approximates:1,defines:3,normalizes:1,substitutes:5|in=3|out=0|premise=1`
+- 2609 の 3 step の外枠（面密度まわり）: `m2|outer|ops=defines:1,normalizes:2|in=3|out=0|premise=1`
+
+観察（規則 ⑤ の調整の材料）: 2 論文とも全外枠で `out=0`（結果の式は sink へ渡すか共有の基礎に数えられ、外へ出す式に
+ならない）、`premise=1`（全手順が前提を持つ）で、この 2 項は現状ほとんど区別に効かない。区別しているのは `ops` と `in`。
+
+**設計からの逸脱**
+
+1. **書き手の置き場**: 依頼時は `core/theory_modules/store.py` に sqlalchemy を使う書き手を置く案だったが、
+   `core/theory_modules/` は FastAPI / sqlalchemy / SQL を持たない（TM2 のガードレール
+   `test_theory_module_guardrails.py::TestImportBoundary` / `TestNoWriteSurface`）ので置かなかった。§13.5 / §13.11 の
+   とおり SQL は `persistence.py` だけが持ち、incoming への純変換は `learning_units.py` ⇄ `persist_learning_units` と
+   同じ分担で `core/knowledge_objects/theory_modules.py` に置いた。
+2. **`fallback_match_column` は使わない**（§13.2 のとおり）。依頼時の「`agent_module_key` で第 2 段突合」は、
+   `module_key` と stable_key が同じ材料（生む式の stable_key 集合 + 段）の関数なので結べる組が増えず、かつ
+   `sync_live_rows` は agent 側 ID 列を `agent_id` の別名で SELECT するため、その列を第 2 段の列に指定しても一致を
+   引けない（空振りする）。
+3. `no_derivations` は「`derivation_chain` artifact が無い」に加えて「chains が空」も含める。導出ステージは失敗時に
+   空の chains を artifact に残すので、空と失敗を区別できない（TM14 の「導出に失敗した」側に倒す）。
+4. `persist_theory_modules` は builder の戻り値そのもの（`module_records`）を受け、`persistable` を writer 側でも見る
+   （ステージと二重の弁）。
+5. 保存用出力に内部フィールド `equations_without_stable_key`（写像が無く `eqid:` を材料にした式）を足した。事実文には
+   出さない。
+6. A層が読めない環境の指紋は工程の型を `UNCLASSIFIED_EDGE_TYPE` と書き、その行は `identity_eligible = false`。
+7. route は受け取った `document_id` をそのまま材料にする（管理 UI は documents.id を渡す）。material_id 形で呼ばれると
+   `module_key` が保存行と一致しないので、`related` の側は documents.id に解決してから引く。
+8. 管理 UI の「パイプラインを実行 ▼」の選択肢（`admin.js` の `materialPipelineStageGroups`）には `theory_modules` を
+   足していない（`identity_candidates` も載っていない。受理側 `DOCUMENT_PIPELINE_STAGES` は `PIPELINE_STAGES` からの
+   導出なので、API の個別ステージ実行 `target_stage=theory_modules` は受理される）。
+
+**テスト**: `test_theory_module_store.py`（新設・40 件: 基表の規律 / migration 086 の形 / stable_key の決定性 /
+incoming の組み立て / fake session での同期と supersede / persistable=false で SQL 非発行 / ステージの登録・skip・
+非致命・resume / route 経路とステージ経路の `module_key` 集合の一致）、`test_theory_module_core.py` に m2 のキー材料と
+保存用出力・指紋・対象判定・DTO 非漏洩、`test_theory_module_guardrails.py` に m2・下限定数・`api/` が保存用出力を
+import しない・core が persistence を import しない。既存の追随は `test_knowledge_objects_guardrails.py::_KO_TERMS` /
+`test_version_semantics_docs.py::VERSION_BEARING_STRUCTURES` / `test_concept_registry_stage.py`（`identity_candidates`
+の直前が `theory_modules` になった）/ `test_theory_module_api.py`（builder の受け取り引数）。
+
+### 12.5 同一性候補と related（Phase 1, 2026-09-23）
+
+§13.7 / §13.8 の実装記録。migration は 086 のまま（列・CHECK・語彙のシードは §13.10 の下書きどおり）。
+LLM 0 回・embedding 0 回・A層非改変。
+
+**規則 ⑤**（`core/library/identity_candidates.py`）
+
+- `run_identity_candidates` の規則 ①〜④ を `_run_component_and_claim_rules` に切り出し、その後で
+  `run_structural_module_rule` を呼ぶ。**規則 ①〜④ の上限が 0 でも規則 ⑤ は走る**（旧実装は上限 0 で早期 return
+  していたため、別枠の上限を成立させるために構造を分けた）。規則 ⑤ の例外は非致命で、`coverage_modules.reasons`
+  に `module_rule_failed` を残して ①〜④ の結果を返す。
+- **母集合の判定**（`module_meets_identity_floor`・純関数）: 保存時の判定 `identity_eligible` を正とし、そのうえで
+  保存された列から下限を確かめ直す（二重の fail-closed）。見る列は `level`（`outer`）/ `rule_version`（現在の
+  `RULE_VERSION`）/ `structure_fingerprint`（空でない）/ `member_steps`（件数が `MODULE_IDENTITY_MIN_MEMBERS` 以上、
+  かつ `generic` でなく `edge_type` が空でない step の `edge_type` の種類が `MODULE_IDENTITY_MIN_PROCESS_KINDS`
+  以上）。**`process_verbs` は判定に使わない**（表示用の訳語で、汎用の工程も訳されて並び得る）。指紋の文字列も
+  パースしない（書式に依存しない）。定数は `core/theory_modules/schema.py` から関数内 import で読む（env 非依存）。
+- 照合は他 document の live 外枠行（`identity_eligible` かつ同じ版・指紋の完全一致）を 1 クエリで引き、相手側にも
+  同じ下限の再確認を掛ける。状態を問わずリンクを持つモジュール（`_linked_module_ids`）は再提案しない。構造エントリが
+  `dismissed` なら何もしない。当該モジュールがリンク未済で、相手が全員リンク済みでも**既存の構造エントリがあれば**
+  当該モジュールだけをそのエントリへ結ぶ（同じ document に同じ構造の外枠が 2 つある場合の取りこぼし防止）。
+- 構造エントリ: `candidate_key = core/library/schema.py::build_structural_candidate_key(指紋)`（`cand|tm|` +
+  sha256 の先頭 32 桁・空の指紋は `ValueError`）/ `domain_key='unassigned'` / `entry_type` は `dominant_stage ==
+  "theory_basis"` なら `theory`、それ以外は `method` / `name` は `process_verbs`（重複除去・最大 6 語）を「・」で
+  つないで「の構造」、訳語が無ければ「理論モジュールの構造」/ `source_component_ids=[]` / `source_document_ids` は
+  当該 document + リンクした相手 document。リンクの `reason` は固定文 `STRUCTURAL_LINK_REASON`、
+  `local_expression = {"name": visual_label}`、`confidence` なし。
+- 上限 `IDENTITY_MODULE_CANDIDATES_MAX_PER_DOCUMENT`（`core/config.py`・既定 10・`.env.example` に追記）。予算は
+  「新しいエントリ 1 + 当該モジュール 1 + 相手 n」で数え、相手は残りの予算で切る。相手を切り詰めたモジュールは
+  `processed` に数えない（共通報告形式は `truncated == 0` のとき理由を落とすため、切り詰めを `truncated` に出す）。
+- 戻り値に `module_entries_created` / `module_links_created` / `coverage_modules`（`unit="theory_modules"`）を追加。
+  監査の要約 1 行は `identity_candidates.modules = {"entries", "links"}` を持つ（件数のみ）。
+
+**`related`**（`GET /api/admin/documents/{document_id}/theory-modules/related`）
+
+- route は `routes/theory_components.py` 末尾（TEACHER + `_ensure_document_viewable`）。`_resolve_document` で
+  UUID に解決し（material_id でも可）、解決できなければ「まだ保存されていない」の事実文で 200。相手 document の
+  可視性は `routes/library.py::_document_access_checker` を関数内 import で共用する（二重実装しない）。照合の読み出しが
+  例外を出したときは 500（UI は区画ごと出さない fail-soft）。
+- 見送り・却下の扱い（§13.7 ③を具体化）: この指紋の構造エントリが `dismissed` → その外枠の相手を全部外す /
+  当該モジュールのリンクが `rejected` → 相手を全部外す / 相手モジュールのリンクが `rejected` → その相手だけ外す。
+  相手は document 単位で重複を除き、タイトルが空の教材は「題名のない教材」で列挙する（黙って欠かさない）。
+  閲覧できない相手のタイトルは引かない（`documents` への問い合わせを可視な id に限る）。
+
+**語彙・要素型**
+
+- `core/schema.py::MAPPING_JUSTIFICATIONS` と `core/library/schema.py::JUSTIFICATION_LABELS`（「構造の一致」=
+  086 のシードと逐語一致）、`admin.js::_libraryJustificationLabels` に 1 行（`test_library_vocab_mirror.py` の
+  ミラー）。`core/deliberation/schema.py::ELEMENT_THEORY_MODULE` を `DOCUMENT_ELEMENT_TYPES` と
+  `IDENTITY_LINKABLE_ELEMENT_TYPES` に足した（`DIALOGUE_SESSION_ELEMENT_TYPES` と `refs.resolve` には足さない）。
+- `routes/library.py::list_identity_candidates` は `_live_module_ids`（`knowledge_theory_modules_live` の実在）で
+  superseded 行へのリンクを落とし、既存の事実文「解析がやり直されたなどの理由で…」で報告する。表示名はリンクの
+  `local_expression.name`（= 行の `visual_label`）。
+- `core/personal_graph/queries.py::fetch_confirmed_links_for_shared_part` は `theory_module` 型のリンクを返さない
+  （旅 [3] の相手 document 列挙に構造エントリのリンクを使わない。教員が component を構造エントリへ手動で結んだ場合も
+  学習者の列挙へ漏らさない = §13.8 末尾のガードレールを型の絞り込みで実装）。
+
+**設計からの逸脱**
+
+1. **`related` の core を 2 つに分けた**。`core/theory_modules/` は SQL / sqlalchemy を持たない（TM2 のガードレール
+   `test_theory_module_guardrails.py::TestNoWriteSurface` / `TestImportBoundary`）ので、組み立て（純関数）と事実文は
+   `core/theory_modules/related.py`、live ビューの読み出しは `core/library/structural_matches.py` に置き、route が
+   合成する。
+2. **`related` の事実文 3 つは `core/theory_modules/related.py` に置いた**（§13.7 は schema.py とする）。保存ステージの
+   担当が同時に schema.py を編集していたため。移すときは定数名を変えずに schema.py へ移し related から再エクスポートする。
+3. **要素型の訳語「理論モジュール」はサーバ側に足していない**。Python に要素型の訳語表は無く（`element_vocab.py` は
+   theory stage・operation 等の表だけ）、新しい訳語表を作らない規律に従った。訳語は §13.9 どおり
+   `frontend/public/js/element-vocab.js::ELEMENT_TYPE_LABELS` に UI 工程で足す（`test_element_vocab_ui_static.py::
+   test_element_type_labels` の期待値も同時に直す）。
+4. `related` は「構造エントリの `dismissed`」も見送りとして扱う（§13.7 はリンクの `rejected` だけを書く）。教員が
+   構造そのものを見送った事実を、事実の列挙より優先した。
+
+**テスト**: `test_theory_module_identity.py`（新設・51 件: 規則 ⑤ の一致・種別・母集合の下限 6 通り・再提案しない・
+既存エントリの再利用・`candidate_key` と文面の非漏洩・別枠の上限と `coverage_modules`・live ビューのみ・`related` の
+3 事実文と可視性 fail-closed・見送り / 却下の除外・数値と指紋の再帰非漏洩・route の 403 / fail-closed・学習者向けの
+読み手の除外）。既存の追随は `test_concept_registry_vocab.py`（シードを 082 と 086 の和で読む）/
+`test_deliberation_evidence_derivation.py`（CHECK の突き合わせに 086）/ `test_concept_registry_identity_candidates.py`
+（監査の `modules`）/ `test_concept_registry_candidates_api.py`（superseded モジュールへのリンク）/
+`test_indicator_catalog_guardrails.py`（`related` を `_R_OBJECT` の除外に登録）。
+
 ---
 
 ## 13. Phase 1 設計 — 保存（knowledge object 化）と構造の指紋による同一性候補

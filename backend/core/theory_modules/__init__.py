@@ -6,6 +6,6 @@ FastAPI / sqlalchemy / LLM / embedding を import しない純関数だけを置
 
 from __future__ import annotations
 
-from core.theory_modules.builder import build_theory_modules
+from core.theory_modules.builder import build_theory_module_records, build_theory_modules
 
-__all__ = ["build_theory_modules"]
+__all__ = ["build_theory_module_records", "build_theory_modules"]

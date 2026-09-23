@@ -32,6 +32,7 @@ from dependencies import _require_teacher
 from core.schema import AUDIT_ENTITY_LIBRARY_ENTRY
 from core.deliberation import identity_links as _identity_links
 from core.deliberation.schema import ELEMENT_THEORY_COMPONENT as _ELEMENT_THEORY_COMPONENT
+from core.deliberation.schema import ELEMENT_THEORY_MODULE as _ELEMENT_THEORY_MODULE
 from core import atlas_correspondence
 from core import atlas_store
 from core.library import atlas_links as library_atlas_links
@@ -979,11 +980,52 @@ def _live_component_ids(links_by_entry: dict[str, list[dict]]) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
-def _link_resolves_to_live_component(link: dict, live_component_ids: set[str]) -> bool:
-    """component へのリンクだけを live 実在で絞る（他の要素型はそのまま通す）。"""
-    if str(link.get("instance_element_type") or "") != _ELEMENT_THEORY_COMPONENT:
-        return True
-    return str(link.get("instance_element_id") or "") in live_component_ids
+def _live_module_ids(links_by_entry: dict[str, list[dict]]) -> set[str]:
+    """候補リンクが指す理論モジュール行のうち、いま ``knowledge_theory_modules_live`` にある id。
+
+    理論モジュール層 Phase 1（theory_module_layer_design.md §13.8）。再解析・規則の版の
+    引き上げで superseded になった行へのリンクは、component と同じく教員が判断できないので
+    落として事実文で報告する（P3-R9 と同じ規律）。判定できない（DB 不達）ときは
+    :func:`_live_component_ids` と同じく**全部あるものとして扱う**（fail-open）。
+    読むのは live ビューだけ（基表 ``knowledge_theory_modules`` は読まない）。
+    """
+    ids = {
+        str(link.get("instance_element_id") or "")
+        for links in links_by_entry.values()
+        for link in links
+        if str(link.get("instance_element_type") or "") == _ELEMENT_THEORY_MODULE
+        and str(link.get("instance_element_id") or "")
+    }
+    if not ids:
+        return set()
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                "SELECT id::text FROM knowledge_theory_modules_live "
+                "WHERE id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"ids": sorted(ids)},
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 判定できないときは落とさない（fail-open）
+        logger.debug("live theory module lookup failed", exc_info=True)
+        return ids
+    finally:
+        session.close()
+    return {str(row[0]) for row in rows}
+
+
+def _link_resolves_to_live_component(
+    link: dict, live_component_ids: set[str], live_module_ids: set[str] | None = None
+) -> bool:
+    """component / 理論モジュールへのリンクを live 実在で絞る（他の要素型はそのまま通す）。"""
+    element_type = str(link.get("instance_element_type") or "")
+    element_id = str(link.get("instance_element_id") or "")
+    if element_type == _ELEMENT_THEORY_COMPONENT:
+        return element_id in live_component_ids
+    if element_type == _ELEMENT_THEORY_MODULE:
+        return element_id in (live_module_ids or set())
+    return True
 
 
 @router.get("/identity-candidates")
@@ -1021,6 +1063,7 @@ def list_identity_candidates(
     # P3-R11: エントリ 1 件ごとに 1 クエリ（N+1）を投げず、まとめて 1 回で引く。
     links_by_entry = _identity_links.list_for_shared_parts([entry["id"] for entry in entries])
     live_components = _live_component_ids(links_by_entry)
+    live_modules = _live_module_ids(links_by_entry)
 
     candidates: list[dict] = []
     hidden_unresolved_any = False
@@ -1034,7 +1077,7 @@ def list_identity_candidates(
             if not _can_view(document_id):
                 hidden += 1
                 continue
-            if not _link_resolves_to_live_component(link, live_components):
+            if not _link_resolves_to_live_component(link, live_components, live_modules):
                 # P3-R9: live に解決できない component へのリンクは教員が判断できない
                 # （消えた要素の名前だけが残る）。落として事実文で報告する。
                 hidden_unresolved = True

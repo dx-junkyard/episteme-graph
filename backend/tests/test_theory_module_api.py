@@ -58,10 +58,11 @@ def _install(monkeypatch, *, artifacts=None, stored=None, normalized=None, build
             return {"derivation_chain": {"chains": []}} if artifacts is None else artifacts
     monkeypatch.setattr(tc, "document_run_artifacts", _artifacts)
 
-    def _default_builder(document_id, artifacts_arg, graph_arg):
+    def _default_builder(document_id, artifacts_arg, graph_arg, equation_stable_keys=None):
         captured["document_id"] = document_id
         captured["artifacts"] = artifacts_arg
         captured["graph"] = graph_arg
+        captured["equation_stable_keys"] = equation_stable_keys
         return {"document_id": document_id, "available": True, "facts": [], "modules": []}
 
     monkeypatch.setattr(tc, "_build_theory_modules_payload", builder or _default_builder)
@@ -114,6 +115,26 @@ class TestBuilderInputs:
         assert captured["document_id"] == _DOC
         assert captured["artifacts"] == {"derivation_chain": {"chains": [{"x": 1}]}}
         assert captured["graph"] == {"nodes": [{"component_id": "n1"}]}
+
+    def test_builder_receives_equation_stable_keys_from_the_shared_map(self, monkeypatch):
+        """§13.3: route は persistence.equation_stable_key_map（ステージと同じ関数）で写像を作る。"""
+        from core.document_pipeline.persistence import equation_stable_key_map
+
+        equations = {"equations": [{"equation_id": "eq_1", "label": "1",
+                                    "source_extraction": {"latex": "a=b", "source_location": {"block_id": "b1"}}}]}
+        captured = _install(monkeypatch, artifacts={"derivation_chain": {"chains": []}, "equation_semantics": equations})
+        tc.get_document_theory_modules(_DOC, current_user=_TEACHER)
+        assert captured["equation_stable_keys"] == equation_stable_key_map(_DOC, equations)
+        assert captured["equation_stable_keys"]["eq_1"].startswith("k1:")
+
+    def test_equation_key_failure_passes_empty_map(self, monkeypatch):
+        import core.document_pipeline.persistence as persistence
+
+        captured = _install(monkeypatch)
+        monkeypatch.setattr(persistence, "equation_stable_key_map", lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
+        result = tc.get_document_theory_modules(_DOC, current_user=_TEACHER)
+        assert result["available"] is True
+        assert captured["equation_stable_keys"] == {}
 
     def test_artifacts_failure_passes_empty_dict(self, monkeypatch):
         captured = _install(monkeypatch, artifacts=RuntimeError("db down"))

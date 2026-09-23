@@ -27,6 +27,10 @@ from core.knowledge_objects.schema import VIEW_SYMBOLS_LIVE
 
 BACKEND = Path(__file__).resolve().parents[1]
 MIGRATION = BACKEND / "db" / "082_concept_registry.sql"
+#: 語彙表のシードを足す後続 migration（082 のシード文は編集しない規律なので、語彙を
+#: 足すときは新しい migration が同じ表へ ``ON CONFLICT DO NOTHING`` で 1 行足す）。
+#: 086 = 理論モジュール層 Phase 1 の ``structural_match``（theory_module_layer_design.md §13.10）。
+SEED_MIGRATIONS = (MIGRATION, BACKEND / "db" / "086_theory_modules.sql")
 
 _PAIR_RE = re.compile(r"\('([^']+)',\s*'([^']*)'\)")
 
@@ -36,14 +40,23 @@ def _sql() -> str:
 
 
 def _seeded_pairs(table: str) -> list[tuple[str, str]]:
-    """``INSERT INTO <table> (...) VALUES (...) ON CONFLICT`` の (値, ラベル) を返す。"""
-    match = re.search(
+    """``INSERT INTO <table> (...) VALUES (...) ON CONFLICT`` の (値, ラベル) を返す。
+
+    082 と、同じ語彙表へ行を足す後続 migration（:data:`SEED_MIGRATIONS`）の和を返す。
+    082 には必ずシードがあること（語彙表の初版）。
+    """
+    pattern = re.compile(
         rf"INSERT\s+INTO\s+{table}\s*\([^)]*\)\s*VALUES(.*?)ON\s+CONFLICT",
-        _sql(),
         re.IGNORECASE | re.DOTALL,
     )
-    assert match, f"seed INSERT for {table} not found in {MIGRATION.name}"
-    return _PAIR_RE.findall(match.group(1))
+    pairs: list[tuple[str, str]] = []
+    for path in SEED_MIGRATIONS:
+        found = pattern.findall(path.read_text(encoding="utf-8"))
+        if path == MIGRATION:
+            assert found, f"seed INSERT for {table} not found in {MIGRATION.name}"
+        for block in found:
+            pairs.extend(_PAIR_RE.findall(block))
+    return pairs
 
 
 # ---------------------------------------------------------------------------

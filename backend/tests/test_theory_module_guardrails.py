@@ -136,7 +136,10 @@ class TestConstantsAreCode:
         assert tm_schema.OUTER_INTERFACE_LIMIT == 3
         assert tm_schema.INNER_INTERFACE_LIMIT == 2
         assert tm_schema.SHARED_FOUNDATION_MIN_CONSUMERS == 4
-        assert tm_schema.RULE_VERSION == "m1"
+        assert tm_schema.MODULE_IDENTITY_MIN_MEMBERS == 3
+        assert tm_schema.MODULE_IDENTITY_MIN_PROCESS_KINDS == 2
+        # Phase 1（§13.3）: module_key の材料を equation stable_key に差し替えたので m2。
+        assert tm_schema.RULE_VERSION == "m2"
 
     def test_thresholds_not_read_from_environment(self):
         assert_module_tree_forbids(
@@ -146,7 +149,10 @@ class TestConstantsAreCode:
 
     def test_threshold_assignments_are_int_literals(self):
         tree = ast.parse((CORE_DIR / "schema.py").read_text(encoding="utf-8"))
-        wanted = {"OUTER_INTERFACE_LIMIT", "INNER_INTERFACE_LIMIT", "SHARED_FOUNDATION_MIN_CONSUMERS"}
+        wanted = {
+            "OUTER_INTERFACE_LIMIT", "INNER_INTERFACE_LIMIT", "SHARED_FOUNDATION_MIN_CONSUMERS",
+            "MODULE_IDENTITY_MIN_MEMBERS", "MODULE_IDENTITY_MIN_PROCESS_KINDS",
+        }
         found = {}
         for node in tree.body:
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
@@ -190,3 +196,40 @@ class TestNoWriteSurface:
         assert '@router.get("/documents/{document_id}/theory-modules"' in src
         for method in ("post", "put", "patch", "delete"):
             assert f'@router.{method}("/documents/{{document_id}}/theory-modules' not in src
+
+
+class TestPersistenceBoundary:
+    """Phase 1（§13.4 / §13.11）: 保存用出力はパイプラインステージだけが呼ぶ。"""
+
+    def test_api_does_not_import_the_records_builder(self):
+        """import 文（関数内の遅延 import を含む）と属性参照の両方で見る。docstring の言及は数えない。"""
+        offending = []
+        for path in sorted((BACKEND / "api").rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                names: list[str] = []
+                if isinstance(node, ast.ImportFrom):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.Attribute):
+                    names = [node.attr]
+                elif isinstance(node, ast.Name):
+                    names = [node.id]
+                if "build_theory_module_records" in names:
+                    offending.append(path.relative_to(BACKEND).as_posix())
+        assert offending == []
+
+    def test_records_builder_is_called_by_the_orchestrator(self):
+        src = (BACKEND / "core" / "document_pipeline" / "orchestrator.py").read_text(encoding="utf-8")
+        assert "build_theory_module_records(" in src
+
+    @pytest.mark.parametrize("name", FIXTURE_NAMES)
+    def test_dto_keys_do_not_include_the_fingerprint(self, name):
+        result = _build(_load(name))
+        keys = {key for key, _path in _walk_keys(result)}
+        assert not keys & {"structure_fingerprint", "fingerprint", "identity_eligible",
+                           "produced_equation_keys", "stable_key", "edge_type"}
+
+    def test_core_does_not_import_persistence(self):
+        assert_module_tree_does_not_import(
+            CORE_DIR, ["core.document_pipeline", "core.knowledge_objects"],
+        )

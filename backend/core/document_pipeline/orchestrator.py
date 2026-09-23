@@ -40,6 +40,8 @@ from episteme_graph.agents.coverage_report import (
     build_coverage_report,
     is_coverage_report,
 )
+from core.theory_modules import build_theory_module_records
+from core.theory_modules.schema import RULE_VERSION as THEORY_MODULE_RULE_VERSION
 
 from .chunker import build_source_chunks
 from .dsl_text import dsl_result_to_search_text
@@ -50,6 +52,8 @@ from .persistence import (
     set_active_analysis_run,
     load_source_chunk_index,
     delete_component_graph,
+    equation_stable_key_map,
+    load_stored_component_graph_json,
     persist_component_graph,
     persist_components,
     persist_document_embedding,
@@ -58,6 +62,7 @@ from .persistence import (
     persist_learning_units,
     persist_qualified_claims,
     persist_source_chunks,
+    persist_theory_modules,
     upsert_analysis_run,
 )
 from .tex_archive import build_structure_from_tex_archive
@@ -358,6 +363,9 @@ PIPELINE_STAGES = [
     "blueprint",
     "export_validation",
     "persist_claims_components_graph",
+    # 理論モジュール層 Phase 1（theory_module_layer_design.md §13.5）。保存済みグラフを読むので
+    # 永続化の**後**、規則 ⑤ が live 行を読むので identity_candidates の**前**。決定論・非LLM・非致命。
+    "theory_modules",
     # 概念レジストリ P3-6（concept_registry_design.md §6.2）。永続化の**後**に置く
     # ことで、同一性候補は確定済みの component 行・stable_key を材料にできる。
     # 決定論・非LLM・非致命。
@@ -2745,8 +2753,97 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
     return ctx.finish_target_stage("persist_claims_components_graph", {"claims": ctx.result.claim_count, "components": ctx.result.component_count, "total": 3, "processed": 3})
 
 
+#: パイプラインステージ ``theory_modules`` が builder に渡す artifact（§13.5）。
+_THEORY_MODULE_INPUT_ARTIFACTS: tuple[str, ...] = (
+    "derivation_chain",
+    "equation_semantics",
+    "claim_object_builder",
+    "component_assembly",
+)
+
+#: ``theory_modules`` の skip 語彙（``persistable: false`` の ``skip_reason`` に加わるもの）。
+THEORY_MODULES_SKIP_GRAPH_NOT_PERSISTED = "graph_not_persisted"
+
+
+def _build_and_persist_theory_modules(ctx: PipelineContext) -> dict:
+    """``theory_modules`` の本体（非致命）。戻り値はステージの artifact / stage_outputs。
+
+    - 今回グラフが保存されていない（``skip_graph_persist`` / ``skip_component_persist``）→
+      保存済みグラフは古い run のものなので SQL を発行しない（TM14）。
+    - builder が ``persistable: false`` → その ``skip_reason`` で SQL を発行しない。
+    - それ以外は ``persist_theory_modules`` で同期（``records: []`` なら全 live 行を superseded）。
+    - 例外は warning に落として ``failed`` を記録し、run は completed のまま。
+
+    件数は内部の報告で、教員 UI には出さない（既存の知識行と同じ）。構造の指紋は載せない（TM12）。
+    """
+    if ctx.skip_graph_persist or ctx.skip_component_persist:
+        return {
+            "status": "completed",
+            "skipped_reason": THEORY_MODULES_SKIP_GRAPH_NOT_PERSISTED,
+            "rule_version": THEORY_MODULE_RULE_VERSION,
+        }
+    try:
+        artifacts = {
+            name: ctx.artifact(name)
+            for name in _THEORY_MODULE_INPUT_ARTIFACTS
+            if ctx.artifact(name) is not None
+        }
+        equation_keys = equation_stable_key_map(ctx.document_id, artifacts.get("equation_semantics"))
+        graph_json = load_stored_component_graph_json(ctx.document_id)
+        module_records = build_theory_module_records(
+            document_id=ctx.document_id,
+            artifacts=artifacts,
+            graph_json=graph_json,
+            equation_stable_keys=equation_keys,
+        )
+        if not module_records.get("persistable"):
+            return {
+                "status": "completed",
+                "skipped_reason": str(module_records.get("skip_reason") or ""),
+                "rule_version": str(module_records.get("rule_version") or THEORY_MODULE_RULE_VERSION),
+            }
+        summary = persist_theory_modules(
+            document_id=ctx.document_id,
+            run_id=ctx.run_id,
+            module_records=module_records,
+        )
+        return {"status": "completed", **summary}
+    except Exception as exc:  # noqa: BLE001 - 派生表の失敗で run を落とさない
+        logger.warning(
+            "theory_modules stage failed (non-fatal): document=%s material=%s error=%s",
+            ctx.document_id, ctx.material_id, exc, exc_info=True,
+        )
+        return {
+            "status": "completed",
+            "failed": True,
+            "error": str(exc)[:500],
+            "rule_version": THEORY_MODULE_RULE_VERSION,
+        }
+
+
+def _stage_theory_modules(ctx: PipelineContext) -> bool:
+    # ── Stage 30: theory_modules (theory_module_layer_design.md §13.5).
+    # Deterministic, non-LLM, non-fatal. Reads the stored graph_json (so it must
+    # run after persist_claims_components_graph) and writes live rows that rule ⑤
+    # of identity_candidates reads (so it must run before identity_candidates).
+    # The stored rows are NOT the display source (TM11): GET .../theory-modules
+    # stays a read-time derivation.
+    if ctx.should_use_artifact("theory_modules"):
+        payload = dict(ctx.artifact("theory_modules") or {})
+        logger.info(
+            "Resuming document pipeline: loaded theory_modules artifact for document %s",
+            ctx.document_id,
+        )
+    else:
+        ctx.report_start("theory_modules", total=1, unit="builder")
+        payload = _build_and_persist_theory_modules(ctx)
+        ctx.save_artifact("theory_modules", payload)
+    ctx.report_done("theory_modules", dict(payload))
+    return ctx.finish_target_stage("theory_modules", dict(payload))
+
+
 def _stage_identity_candidates(ctx: PipelineContext) -> bool:
-    # ── Stage 30: identity_candidates (concept_registry_design.md §6.2).
+    # ── Stage 31: identity_candidates (concept_registry_design.md §6.2).
     # Registered at the very end, after persist_claims_components_graph: the
     # component rows / stable_keys / knowledge_symbols must already exist before
     # we can propose "this component is the same concept as that one". The stage
@@ -2986,6 +3083,11 @@ _PIPELINE_STEPS: list[PipelineStageDef] = [
     PipelineStageDef(
         "persist_claims_components_graph", _stage_persist_claims_components_graph,
         progress_unit="tables",
+    ),
+    # 理論モジュール層 Phase 1（§13.5）。決定論（llm_kind=none / model_policy=False）。
+    # 保存済みグラフを読み、規則 ⑤ のために identity_candidates より前に live 行を揃える。
+    PipelineStageDef(
+        "theory_modules", _stage_theory_modules, progress_unit="builder",
     ),
     # 概念レジストリ P3-6。決定論（llm_kind=none / model_policy=False）で、読むのは
     # 保存済みベクトルだけ（embedding API を呼ばない = KR5）。

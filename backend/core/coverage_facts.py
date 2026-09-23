@@ -142,6 +142,7 @@ EXTRA_STAGE_LABELS: dict[str, str] = {
     "derivation_chain": "導出関係の構築",
     "figure_table_semantics": "図表の意味復元",
     "component_graph": "理論操作グラフの構築",
+    "theory_modules": "理論モジュールの保存",
     "identity_candidates": "共通する概念の候補づくり",
 }
 

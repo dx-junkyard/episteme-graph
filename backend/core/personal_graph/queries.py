@@ -788,7 +788,20 @@ def fetch_confirmed_links_for_shared_part(shared_part_id: str) -> list[dict]:
         rows = list_for_shared_part(shared_part_id)
     except Exception:
         return []
-    return [row for row in rows if row.get("status") == "confirmed"]
+    # 理論モジュール（instance 型 ``theory_module``・theory_module_layer_design.md §13.8）への
+    # リンクは旅の「相手 document の列挙」に使わない。構造エントリは教員向けの構造の一致で
+    # あって学習者の旅のハブではない（規則 ⑤ は構造エントリにしかリンクを張らないが、教員が
+    # 手動で component を構造エントリへ結んだ場合にも学習者の列挙へ漏らさない = 型で絞る）。
+    return [
+        row
+        for row in rows
+        if row.get("status") == "confirmed"
+        and row.get("instance_element_type") != LEARNER_EXCLUDED_IDENTITY_ELEMENT_TYPE
+    ]
+
+
+#: 学習者向けの旅の列挙から外す同一性リンクの instance 型（§13.8）。
+LEARNER_EXCLUDED_IDENTITY_ELEMENT_TYPE = "theory_module"
 
 
 def fetch_component_ledger_statuses(component_ids: list[str]) -> dict[str, str]:

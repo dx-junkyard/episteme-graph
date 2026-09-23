@@ -403,7 +403,9 @@ class TestDomainResolutionAndCoverage:
         ic.run_identity_candidates(document_id=DOC, run_id="run-9", session=session)
         assert len(env["audits"]) == 1
         stats = env["audits"][0]["stats"]["identity_candidates"]
-        assert set(stats) == {"entries", "links", "components"}
+        # 規則 ⑤（theory_module_layer_design.md §13.8）の件数は同じ 1 行の modules に入る。
+        assert set(stats) == {"entries", "links", "components", "modules"}
+        assert set(stats["modules"]) == {"entries", "links"}
 
 
 # ---------------------------------------------------------------------------

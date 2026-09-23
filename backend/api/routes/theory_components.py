@@ -3553,15 +3553,26 @@ def build_paper_layer_for_document(document_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _build_theory_modules_payload(document_id: str, artifacts: dict, graph_json: dict) -> dict:
+def _build_theory_modules_payload(
+    document_id: str,
+    artifacts: dict,
+    graph_json: dict,
+    equation_stable_keys: dict | None = None,
+) -> dict:
     """core の純関数 ``build_theory_modules`` への薄い間接層（論文層と同じ作法）。
 
     import は遅延させる（route モジュールの import が core の着地に依存しないように）。
-    テストはこの関数を monkeypatch して builder を差し替える。
+    テストはこの関数を monkeypatch して builder を差し替える。保存用出力
+    （``build_theory_module_records``）は import しない — 呼ぶのはパイプラインステージだけ（§13.4）。
     """
     from core.theory_modules import build_theory_modules
 
-    return build_theory_modules(document_id=document_id, artifacts=artifacts, graph_json=graph_json)
+    return build_theory_modules(
+        document_id=document_id,
+        artifacts=artifacts,
+        graph_json=graph_json,
+        equation_stable_keys=equation_stable_keys,
+    )
 
 
 def _theory_modules_unavailable(document_id: str) -> dict:
@@ -3607,6 +3618,12 @@ def build_theory_modules_for_document(document_id: str) -> dict:
     経路で、保存済みグラフが無いときは component 一覧からの読み時組み立てに**落とさない**
     （組み立てたグラフは詳細ノードを持たないため、step との対応に使えない。builder が
     事実文で欠落を言う）。
+
+    ``module_key`` の材料になる式の stable_key は ``persistence.equation_stable_key_map`` で
+    計算する（パイプラインステージ ``theory_modules`` と同じ関数・同じ run の
+    ``equation_semantics`` なので、画面の ``module_key`` と保存行の ``agent_module_key`` が
+    一致する。設計書 §13.3）。保存行との版の食い違い・保存行の有無は ``related`` 側の責務で、
+    この DTO は保存行を読まない（TM11）。
     """
     try:
         components = _components_for_document(document_id)
@@ -3626,7 +3643,14 @@ def build_theory_modules_for_document(document_id: str) -> dict:
         logger.debug("theory_modules: artifacts unavailable for document %s", document_id, exc_info=True)
         artifacts = {}
     try:
-        return _build_theory_modules_payload(document_id, artifacts or {}, graph)
+        from core.document_pipeline.persistence import equation_stable_key_map
+
+        equation_keys = equation_stable_key_map(document_id, (artifacts or {}).get("equation_semantics"))
+    except Exception:
+        logger.debug("theory_modules: equation stable keys unavailable for document %s", document_id, exc_info=True)
+        equation_keys = {}
+    try:
+        return _build_theory_modules_payload(document_id, artifacts or {}, graph, equation_keys)
     except Exception:
         logger.debug("theory_modules: build failed for document %s", document_id, exc_info=True)
         return _theory_modules_unavailable(document_id)
@@ -5067,3 +5091,58 @@ def create_candidates_from_query(
             "backing_claims": backing,
         })
     return {"course_id": body.course_id, "candidates": created, "claims_considered": len(existing_claims)}
+
+
+# ---------------------------------------------------------------------------
+# 同じ構造のモジュールを持つ論文（theory_module_layer_design.md §13.7・Phase 1）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/documents/{document_id}/theory-modules/related", response_model=None)
+def get_document_theory_modules_related(
+    document_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """保存済みの外枠モジュールごとに、構造の指紋が完全一致する他の論文のタイトルを列挙する。
+
+    正本は設計書 §13.7。読み取り専用・LLM 0 回・監査なし。読むのは
+    ``knowledge_theory_modules_live``（保存行）だけで、``GET .../theory-modules`` の読み時
+    導出には触れない（TM11）。相手の論文は**閲覧できるものだけ**をタイトルで出し、閲覧できない
+    論文にも同じ構造があることは ``hidden``（真偽値）と事実文でだけ言う（件数は出さない）。
+    相手 document の可視性判定は概念レジストリの一覧と同じ ``_document_access_checker``
+    （fail-closed）を共用する。
+    """
+    _ensure_document_viewable(document_id, current_user)  # TM9
+    # 関数内 import: routes.library はモジュール読み込み時に本モジュールを import しないが、
+    # ルーター登録順に依存しないよう遅延させる（可視性判定を二重実装しない）。
+    from routes.library import _document_access_checker
+    from core.library import schema as library_schema
+    from core.library import structural_matches
+    from core.theory_modules import related as tm_related
+    from core.theory_modules.schema import RULE_VERSION
+
+    resolved = _resolve_document(document_id)
+    canonical_id = str((resolved or {}).get("id") or "")
+    if not canonical_id:
+        return {
+            "document_id": document_id,
+            "available": False,
+            "facts": [tm_related.FACT_RELATED_NOT_SAVED],
+            "modules": [],
+            "hidden": False,
+        }
+    can_view = _document_access_checker(str(current_user.get("id") or ""))
+    session = _pg_session()
+    try:
+        return structural_matches.build_related_for_document(
+            session,
+            canonical_id,
+            rule_version=RULE_VERSION,
+            can_view=can_view,
+            candidate_key_for=library_schema.build_structural_candidate_key,
+        )
+    except Exception:
+        logger.debug("theory_modules related: lookup failed for document %s", document_id, exc_info=True)
+        raise HTTPException(status_code=500, detail="同じ構造の論文を照合できませんでした。")
+    finally:
+        session.close()

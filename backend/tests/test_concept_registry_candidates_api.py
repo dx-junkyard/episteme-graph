@@ -347,6 +347,48 @@ class TestIdentityCandidates:
         assert sorted(calls[0]) == sorted([_ENTRY_ID, second])
         assert len(body["candidates"]) == 2
 
+    def test_links_to_superseded_theory_modules_are_dropped_with_a_fact(
+        self, client_and_tokens, candidates_env, monkeypatch
+    ):
+        """理論モジュール層 §13.8: superseded になったモジュール行へのリンクも P3-R9 と同じく落とす。
+
+        live の行へのリンクは表示名（``local_expression.name`` = 行の ``visual_label``）付きで残る。
+        """
+        monkeypatch.setattr(
+            candidates_env.library_store, "list_entries", lambda **kwargs: [_entry()]
+        )
+        alive = {
+            **_link("l1", _DOC_OK),
+            "instance_element_type": "theory_module",
+            "instance_element_id": "mod-live",
+            "local_expression": {"name": "定義・代入で組む対象"},
+            "mapping_justification": "structural_match",
+        }
+        dead = {
+            **_link("l2", _DOC_OK),
+            "instance_element_type": "theory_module",
+            "instance_element_id": "mod-superseded",
+            "mapping_justification": "structural_match",
+        }
+        monkeypatch.setattr(
+            candidates_env._identity_links,
+            "list_for_shared_parts",
+            lambda entry_ids: {_ENTRY_ID: [alive, dead]},
+        )
+        monkeypatch.setattr(
+            candidates_env, "_live_module_ids", lambda links_by_entry: {"mod-live"}
+        )
+        client, _student, teacher = client_and_tokens
+        body = client.get(_CANDIDATES, headers=_auth(teacher)).json()
+        candidate = body["candidates"][0]
+        assert [item["link_id"] for item in candidate["links"]] == ["l1"]
+        item = candidate["links"][0]
+        assert item["instance"]["element_type"] == "theory_module"
+        assert item["local_expression"] == {"name": "定義・代入で組む対象"}
+        assert item["mapping_justification"] == "structural_match"
+        assert candidate["hidden_unresolved"] is True
+        assert any("参照できない要素" in f for f in body["facts"])
+
     def test_links_to_dead_components_are_dropped_with_a_fact(
         self, client_and_tokens, candidates_env, monkeypatch
     ):

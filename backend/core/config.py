@@ -402,6 +402,13 @@ class Settings(BaseSettings):
         default=20,
         validation_alias=AliasChoices("IDENTITY_CANDIDATES_MAX_PER_DOCUMENT"),
     )
+    # 規則 ⑤（理論モジュールの構造の一致・theory_module_layer_design.md §13.8）の上限。
+    # 規則 ①〜④ の上限とは**別枠**（合算しない — ①〜④ が先に走るので、合算すると
+    # 規則 ⑤ が常に予算切れになる）。0 で規則 ⑤ だけを止める。超過は coverage_modules。
+    identity_module_candidates_max_per_document: int = Field(
+        default=10,
+        validation_alias=AliasChoices("IDENTITY_MODULE_CANDIDATES_MAX_PER_DOCUMENT"),
+    )
 
     # --- 分野マップのベクトル係留層（VA層, migration 074） ---
     # 正本: docs/features/atlas_vector_anchoring_design.md §5
