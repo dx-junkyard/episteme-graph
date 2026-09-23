@@ -22,7 +22,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（2026-09-14 時点で **086 以降**。044〜085 は使用済み — §3 参照。
+  着手時は次の空き番号（2026-09-23 時点で **087 以降**。044〜086 は使用済み — §3 参照。
   採番前に必ず `ls backend/db/` で確認する）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
@@ -121,7 +121,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   `backend/tests/test_admin_help_ui_anchors.py`（管理側の網羅・双方向整合は同テストと
   `test_admin_help_inspect_ui_static.py` が構造的に守る）。
 
-## 3. migration 帰属一覧（init〜085、2026-09-14 時点）
+## 3. migration 帰属一覧（init〜086、2026-09-23 時点）
 
 `backend/db/` の実ファイルを正とした全 migration の帰属。
 
@@ -194,8 +194,9 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 083 | `083_doubt_citation_vocab` | **知識の転用層（P4-5）**（`challenges.challenge_mode` / `target_element_ref`・`epistemic_ledger.evidence_lines`・`component_citations.citation_intent` の列追加のみ。新テーブルなし） |
 | 084 | `084_claim_chunk_fk_set_null` | **知識オブジェクト層の是正**（`theory_claims.chunk_id` の FK を `ON DELETE SET NULL` に張り替え = 再解析の chunks 掃除で claim 行が消えていた穴を塞ぐ。`chunks(document_id, chunk_index)` の一意索引つき） |
 | 085 | `085_paper_discovery_arxiv_metadata_cache` | **論文ディスカバリー層 / 論文レーダー**（arXiv メタデータの外部事実キャッシュ1表。候補・教員の判断は保存しない。正本は `docs/features/paper_radar_design.md` §14） |
+| 086 | `086_theory_modules` | **理論モジュール層 Phase 1**（新表 `knowledge_theory_modules` + `knowledge_theory_modules_live`、`element_identity_links` の instance 型に `theory_module`、`knowledge_mapping_justifications` に `structural_match`。保存行は表示の正本ではない。正本は `docs/features/theory_module_layer_design.md` §13） |
 
-次の空き番号は **086**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **087**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。
 
@@ -216,10 +217,11 @@ PROV-O の 2 語で宣言する。**コード変更はゼロ**（宣言だけ）
 | `atlas_skeletons`（`domain_key`, `version`）の凍結版 + `id_migrations` | revision | 分野の地図（骨格）の凍結版。`id_migrations` は revision 間の node 対応（K-6。`atlas_node_correspondence_design.md`）。`atlas_overlay_cache` / `atlas_anchor_embeddings.skeleton_version` はその版への刻印 | `field_atlas_overlay_spec.md` |
 | `library_entry_versions`（L層の凍結版） | revision | ナレッジライブラリ エントリの凍結版。パイプラインが読むのは凍結版だけ | `image_pipeline_knowledge_library_design.md` §6 |
 | 知識行の `produced_by_run_id` / `superseded_at` / `superseded_by_run_id`（`theory_claims` / `theory_components` / `knowledge_*` / `learning_units`） | revision | 解析 run による改訂。**同一性は `stable_key`、版は run**。live ビューは「現在の版」の射影 | `knowledge_objects_design.md`（KO3） |
+| `knowledge_theory_modules`（`stable_key` / `superseded_at`・`rule_version`） | revision | 理論モジュール（外枠・内側）の解析 run による改訂。同一性は `stable_key`（材料は生む式の stable_key 集合 + 段 + **規則の版**）で、規則の版を上げたときも revision として旧行を残す（確定済み同一性リンクの付け替えはしない前提 — 設計書 §9 O-5）。保存行は同一性リンクの参照先と構造の指紋の照合の索引で、**表示の正本ではない**（表示は読み時導出） | `theory_module_layer_design.md` §13 |
 | `element_explanations` / `landscape_placements` / `landscape_gap_signals` / `element_annotations` の `superseded` 遷移 | revision | 候補の改訂（再解析で inferred / candidate だけが倒れ、確定は残る） | 各層の設計書（LS3 / OA 系） |
 | `document_analysis_runs`（同一 document の run 列・`documents.active_analysis_run_id`） | revision | 解析そのものの改訂。採用 run が「現在の版」。artifact は 1 run × 1 stage の生成ログ | `knowledge_objects_design.md`（KO6） |
 | `element_id_remap` | revision 間の対応表 | 旧 ID → 新 ID（同一 stable_key の別 run）。「解決済み」フラグではなく事実の記録 | `knowledge_objects_design.md`（KO8） |
-| `element_identity_links`（instance ↔ shared_part / symbol） | **alternate** | 同じ概念の別表現（論文側の局所表現と共通部品）。統合・書き換えなし | `knowledge_network_vision.md`（KN-2） |
+| `element_identity_links`（instance ↔ shared_part / symbol / theory_module） | **alternate** | 同じ概念の別表現（論文側の局所表現と共通部品）。統合・書き換えなし | `knowledge_network_vision.md`（KN-2） |
 | `library_entry_relations`（`exact_match` / `close_match`） | **alternate** | 2 つのレジストリ行を並存させたまま「同じ / 近いが別」を記録する SKOS の関係語彙（`broader` / `related` は版でも同一性でもない構造語） | `concept_registry_design.md`（KR3） |
 | `library_atlas_node_links` | **alternate** | レジストリ行と骨格 node の同一概念関係。版非依存キー（`skeleton_version` を持たない） | `concept_registry_design.md`（KR9） |
 | `atlas_anchor_aliases` | **alternate** | 骨格 node の教員確定別名（版非依存） | `atlas_vector_anchoring_design.md`（VA6） |

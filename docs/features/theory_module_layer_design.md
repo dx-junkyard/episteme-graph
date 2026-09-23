@@ -252,8 +252,15 @@ vision §6 の 14 原則（[vision.md](../vision.md) §6）に照らして置く
   （`(derivation_id, step_index)` の最小値）が早い の順で割る（TM2）。
 - 併合によってモジュール間に循環ができる対は候補にしない。
 - 候補が無くなるまで繰り返す。
-- **外枠**は `OUTER_INTERFACE_LIMIT = 3`、**内側**は外枠モジュールごとにその成員だけで
-  `INNER_INTERFACE_LIMIT = 2` で同じ手続を回す。内側が 2 つ以上に割れた外枠モジュールだけに内側を持たせる。
+- **外枠**は `OUTER_INTERFACE_LIMIT = 3` で上の手続を回す。**内側**は併合ではなく外枠の中に**境目を入れる**
+  （Phase 1 で改訂。試した候補と実測は §12.3）: ①外枠の中の初期モジュール（循環は縮約済み）どうしを、共有の
+  基礎を除く式の受け渡しで結ぶ（外枠そのものの入出力は内側から見て所与なので数えない）②**循環のまとまり**と、
+  生む式が外枠の中の `INNER_HUB_MIN_CONSUMERS = 2` 個以上の他の初期モジュールに使われる手順（**分岐点**）を
+  内側モジュールの**先頭**とする ③先頭へ入る受け渡しを、出現順に先頭を 1 つずつ試して切る。切ったあとの全ての
+  内側モジュールの接点（外枠の中で他の内側モジュールと受け渡す式の本数）が `INNER_INTERFACE_LIMIT = 2` 以下の
+  ときだけ採る ④残った受け渡しの連結成分が内側モジュール。共有の基礎だけでつながる手順（基礎を導く手順・基礎だけ
+  から結果を出す手順）は単独の内側モジュールになる。内側が 2 つ以上に割れた外枠モジュールだけに内側を持たせる。
+  分岐点も循環も無い一本道は割らない（接点だけでは境目が決まらないため）。
 - k は環境変数で緩めないコード定数とする（SA7 と同じ扱い）。値を変えるときは本書に実測を足して変える。
 
 試作（§3.2）との一致は Phase 0 のゴールデンテストで確かめる。arXiv-2407.01221v2 の artifact を
@@ -297,18 +304,24 @@ Phase 0 は保存しないが、画面の選択状態と Phase 1 の参照のた
 
 ## 6. 転用 — 構造の指紋と同一性候補（Phase 1）
 
-- **構造の指紋** = （工程の型の多重集合, 外から受ける式の本数, 外へ出す式の本数, 前提の有無）。
-  分野語を含まない。内部でだけ使い、UI・DTO に出さない（TM6）。
-- 別論文のモジュールと指紋が一致したら、同一性の**候補**にする。受け皿は既存の
-  `library_entries`（`entry_type` は `theory` か `method`）と `identity_candidates` の経路で、新しい
-  格納庫を作らない。`mapping_justification` には構造の一致を表す語彙を 1 つ足す（語彙表への追加。
-  `core/schema.py::MAPPING_JUSTIFICATIONS` と語彙表シードを同じ変更で揃える）。
-- 小さすぎるモジュール（成員が少ない・工程の型が 1 種類）は一致しやすく情報が少ないので候補にしない。
-  下限はコード定数にし、実測で決める。
-- 候補は `review_status='candidate'` で始まり、確定は教員の操作だけ（TM7）。候補行を `library_entries`
-  に置いてよいかは概念レジストリの O-6（裁定待ち）に従う（§9 O-4）。
-- 同一性リンクは確定した人間の判断を指すので、参照先のモジュールが再解析で黙って消えると判断が宙に
-  浮く（辞書の `reexecution-overwrites-human-decision` 族）。保存の要否はこの点で決まる（§9 O-1）。
+- **構造の指紋** = （工程の型の多重集合, 外から受ける式の本数, 外へ出す式の本数, 前提の有無）を、規則の版と段
+  （外枠 / 内側）を頭に付けて決定論で文字列化したもの（書式は §13.4）。分野語を含まない。**内部表現**であって、
+  DTO・API 応答・監査・候補の文面に出さない（TM6 / TM12）。共有の基礎は指紋に入れない（基礎の有無は論文ごとの
+  記法・章立てに引きずられ、構造の比較をかえって粗くするため）。
+- 指紋は保存行（`knowledge_theory_modules`・§13.2）の列として持ち、別論文の保存行と**完全一致**したら同一性の
+  **候補**にする（概念レジストリの同一性候補ステージに規則 ⑤ を足す = §13.8）。受け皿は既存の `library_entries`
+  （`entry_type` は主たる段階が理論の土台なら `theory`、それ以外は `method`）と `element_identity_links`
+  （instance 型 `theory_module`）で、新しい格納庫を作らない。`mapping_justification` は語彙に `structural_match`
+  （構造の一致）を 1 つ足す（`core/schema.py::MAPPING_JUSTIFICATIONS` と migration 086 のシードを同じ変更で揃える）。
+- 小さすぎるモジュールは一致しやすく情報が少ないので候補にしない。下限はコード定数
+  `MODULE_IDENTITY_MIN_MEMBERS = 3`（成員 step）と `MODULE_IDENTITY_MIN_PROCESS_KINDS = 2`（汎用でない工程の型の
+  種類）で、外枠だけを対象にする。値は 2 例からの暫定で、変えるときは本書に実測を足す（§5.4 の k と同じ扱い）。
+- 指紋が同じことは**事実**（工程の型と受け渡す式の形が同じ）なので、グラフレビューには「同じ構造のモジュールを持つ
+  論文」をタイトルの列挙で出す（§13.7）。それが同じ理論の部品か（同一性）は候補で、確定は教員の操作だけ（TM7）。
+- 候補行を `library_entries` に置いてよいかは概念レジストリの O-6（裁定待ち）に従う（§9 O-4）。
+- 同一性リンクは確定した人間の判断を指すので、参照先のモジュールが再解析で黙って消えると判断が宙に浮く（辞書の
+  `reexecution-overwrites-human-decision` 族）。これを受けて、同一性候補の前に理論モジュールを knowledge object
+  として保存する（§9 O-1 (c)・§13）。規則の版を上げたときの確定済みリンクの扱いは §9 O-5。
 
 ---
 
@@ -456,15 +469,20 @@ DTO の骨子（数値キー・confidence・指紋を持たない）:
 **開発チェックリスト §5-1**: 既存ルーターへのエンドポイント追加なので `docs/backend/api.md` に 1 行足す。
 パイプラインステージ・migration の追加は無い。
 
-### 8.2 Phase 1 — 内側 2 段目の磨き込みと、工程の型による同一性候補
+### 8.2 Phase 1 — 内側 2 段目の磨き込みと、保存・工程の型による同一性候補
 
-- 実測 3 と Phase 0 の運用を見て、k・共有の基礎の閾値・同点規則を本書に実測付きで調整する。
-- 構造の指紋（§6）の計算と、別論文のモジュールとの一致による同一性候補の生成。候補は
-  `identity_candidates` の経路に規則を 1 本足す形にし、非LLM・非致命のまま保つ。
-- 保存の要否（§9 O-1）を着手前に決める。保存するなら knowledge object の作法（stable_key・supersede・
-  `_live` ビュー・再係留）に従う。
-- ナレッジライブラリタブの「同一性の候補」区画に、モジュール由来の候補を出す（既存の区画・アンカーを
-  使い、新しい画面を作らない）。
+- **内側 2 段目**: 実装済み（§12.3。外枠の k・共有の基礎の閾値は不変）。
+- **保存（knowledge object 化）**: §9 O-1 (c) に従い、同一性候補の着手前に `knowledge_theory_modules`
+  （migration 086）へ保存する。新ステージ `theory_modules`（非LLM・非致命）を `persist_claims_components_graph` と
+  `identity_candidates` の間に置き、`RULE_VERSION` を `m2` に上げて `module_key` の材料を式の stable_key に差し替える。
+  表示は読み時導出のまま（TM11）。設計は §13.2〜§13.6。
+- **構造の指紋と同一性候補**: 指紋（§6）の完全一致を `identity_candidates` ステージの規則 ⑤ として足す
+  （非LLM・非致命・上限は別枠）。§13.8。
+- **画面**: ナレッジライブラリタブの「同一性の候補」区画にモジュール由来の候補を出し（既存の区画・アンカー）、
+  グラフレビューのモジュール詳細ペインに「同じ構造のモジュールを持つ論文」をタイトルで列挙する（新エンドポイント
+  `GET .../theory-modules/related`）。§13.7 / §13.9。
+- **着手の順序**: 第 1 波（UI なし）= 語彙と 086 に合わせた既存テストの追随 / builder の保存用出力と `module_key` /
+  保存とステージ / 規則 ⑤ と一覧 API / `related` API。第 2 波（1 体に集約）= UI・マニュアル・`?v=`。§13.12。
 
 ### 8.3 非スコープ
 
@@ -484,6 +502,7 @@ DTO の骨子（数値キー・confidence・指紋を持たない）:
 k の値・同点規則・ラベルの組み方）は本書で決め、問わない。
 
 **裁定（2026-09-23）**: O-1〜O-3 は下表の推奨どおり採用。O-4 は O-6 の裁定に従属（新しい判断を立てない）。
+O-5 は Phase 1 の保存の設計（§13）で追加した判断で、**裁定待ち**（裁定までは推奨 (a) の前提で実装してよい — (a) は何も付け替えない側なので、(b) の裁定が出ても後から足せる）。
 
 | # | 判断 | 種別 | 選択肢 | 推奨 |
 |---|---|---|---|---|
@@ -491,6 +510,15 @@ k の値・同点規則・ラベルの組み方）は本書で決め、問わな
 | O-2 | claim チェーンの扱い | ③（`graph_layer` の意味は約 10 の消費者との契約）+ ①（A層を触るか） | §7.2 の (a-読) / (a-A) / (b-読) / (b-A) / (c) | **(b-読) を Phase 0 で採り、(b-A)（claim チェーンが順序を `required_claim_ids` に書くのをやめ、グラフのノードにもしない）は実測 3 の後に改めて問う**。理由は §7.3 |
 | O-3 | 主グラフ（stage）を残すか置き換えるか | ①（#308「main は theory stage のバックボーン」の解釈）+ ③（main 層を読む消費者） | (a) main をそのまま残し、モジュールは追加の表示にする / (b) main を残したうえで、グラフレビューの初期表示をモジュール図にする（モジュールが導出できる教材だけ。導出できなければ従来どおり main）/ (c) main をモジュールに置き換える | **(b)**。`graph_json` の main 層・#308 のラベル規律・他の消費者（discuss 開幕・近傍関係ビュー・文脈レンズ・参照の健全性）は変えない。構造を読む画面では、境目を持つモジュール図の方が目的（構造を見抜く）に合う。(c) は消費者の全面追随が要り、PDF 経路の論文では置き換え先が空になる |
 | O-4 | 構造の指紋から作る同一性候補を `library_entries` の candidate 行に置いてよいか | ①（L層「昇格は人間の操作のみ」の読み替え） | 概念レジストリの **O-6（裁定待ち）に従属させる**。新しい判断を立てない | O-6 の裁定に従う。O-6 が否なら、候補を別表に置く設計に差し替える（影響は Phase 1 の保存先だけ） |
+| O-5 | 規則の版（`RULE_VERSION`）を上げたとき、確定済みの同一性リンクを新しい版の行へ引き継ぐか（Phase 1 の保存 §13 で生じる。**裁定待ち**） | ①（KO8「再係留は stable_key 一致でのみ」の読み替え）+ ②（教員の確定判断の扱い） | (a) 引き継がない。旧版の行は superseded として残り、リンクもそのまま残る。同一性の候補一覧は既存の事実文（「解析がやり直されたなどの理由で、いま参照できない要素への候補は表示していません。」）で知らせ、教員が新しい版で改めて判断する / (b) 生む式の集合と構造の指紋がともに変わらないモジュールに限り、`element_identity_links.instance_element_id` を新しい行の UUID へ書き換える（KO8 の「stable_key 一致」を「規則の版を除いた材料と指紋の一致」に読み替える） | **(a)**。確定は教員がそのとき見た構造（工程の型と接点）への判断で、規則が変われば成員・接点・理論対象が変わり得る。指紋が同じでも中の手順が入れ替わっていれば、人が見ていない内容に判断を付け替えることになる（原則 1 改訂）。(a) でも旧行とリンクは残るので、運用を見て (b) を後から足せる（逆は難しい）。規則の版は本書に実測を足して上げる運用（§5.7）なので頻度は低い |
+
+**Phase 1 の設計（§13）で検討し、3 種に当たらないため本書で決めたもの**:
+
+- モジュール行を W層の要素（`refs.resolve` で解決し、対話・注釈・文脈レンズ・説明の対象にする）にするか —
+  **v1 はしない**（§13.8）。同一性リンクの instance 型としてだけ登録する記号（`symbol`）の前例に揃える。しないことで
+  後戻りの難しさは生じず（後から足せる）、不変条項の読み替えも人の権利も伴わない。
+- 既存教材のバックフィルを起動時に走らせるか — **走らせない**（§13.6）。作った行は supersede で置き換わるので
+  後戻りでき、教員の判断にも触れない。規則が暫定の間に全教材へ行を作る理由が無く、再解析と個別ステージ実行で足りる。
 
 ---
 
@@ -652,3 +680,484 @@ component-graph 不変）。backend 全件 16,601 passed / 27 skipped。
 - **ガードレール**: `backend/tests/test_theory_module_ui_static.py`（ES5・graphView 委譲・新描画経路なし・内部 ID 非描画・
   件数非表示・縮退文言の逐語・目印の適用と fail-to-current・フロントで chain_type を判定しない・初期表示の規則・
   成員 step の遷移・`getScreenContext` 非変更・アンカー担体・マニュアル節・`?v=`）。
+
+### 12.3 内側 2 段目（Phase 1, 2026-09-23）
+
+§8.2 の最初の項目。`builder.py` の内側の規則を差し替えた（外枠の規則・結果・DTO のキー集合・`module_key` の材料は
+不変。migration なし・LLM 0 回）。試行は読み取りのみのスクリプトで、fixture 2 本（2407.01221v2 / 2609.15375v1 の
+TeX 版）に同じ入力を与えて比べた。
+
+**Phase 0 の内側（素の貪欲併合・接点 ≤ 2）の問題**
+
+- 2407 の計算本体（10 step）は 5 つに割れたが、中身は `{b97 の基礎・S の定義・L の定義・結果}`（5 step が接点 2 で
+  1 つ）+ 単独 3（変数変換 / 接点 4 の b76 / 接点 3 の b85）+ 循環のまとまり 1 で、角度積分の機構・核の陽な形・結果の
+  区切りと合わなかった。接点超過の単独（不格好な断片）が 2 つ出た。
+- 2609 の計算本体（17 step）は共有の基礎（§5.3 改訂後）と外の入出力を除くと**接点 0 で閉じている**ため、併合を
+  止める条件が効かず丸ごと 1 つに戻り、**内側を持たなかった**（§3.3 の「15 個前後に割れた」は §5.3 改訂前の数）。
+  一方で 3 step の外枠（面密度まわり）は 1 step ずつ 3 つに割れた。
+- 「接点が上限以下なら併合する」手続は、閉じた部分ほど丸ごと併合され、開いた部分ほど断片になる。内側に必要なのは
+  上限の値ではなく**どこで切るか**の規則だった。
+
+**試した候補**（計算本体の内側モジュール数と成員数の分布。2407 の他の外枠は (d) を除きどの候補でも割れない）
+
+| 候補 | 2407 計算本体（10） | 2609 計算本体（17） | 2609 の 3 step の外枠 |
+|---|---|---|---|
+| (a) Phase 0: 貪欲併合・接点 ≤ 2（全体の接点） | 5（1,1,1,2,5） | 1（割れない） | 3（1,1,1） |
+| (b) 貪欲併合・接点 ≤ 3・外枠の入力と共有の基礎を接点に数えない | 1（割れない） | 1（割れない） | 1 |
+| (b') (b) + 隣接を基礎以外の受け渡しに限る（上限 2 でも 3 でも同じ） | 4（1,1,2,6） | 2（1,16） | 1 |
+| (c) **分岐点と循環を先頭にして手前で切る**（採用。接点 ≤ 2 の検査付き） | **5（1,1,2,3,3）** | **4（1,5,5,6）** | 1 |
+| (c') (c) で分岐点が末尾（切るのは分岐点から出る受け渡し） | 5（1,1,1,2,5） | 6（1,1,2,3,5,5） | 1（別の 5 step の外枠が 1,1,3 に割れる） |
+| (c'') (c) から循環を先頭に数えない | 4（1,1,2,6） | 4（1,5,5,6） | 1 |
+| (c+) (c) + 基礎を導く単独手順を最初の消費者の内側へ寄せる | 4（1,3,3,3） | 3（5,5,7） | 1 |
+| (d) stage の連なりで切る（TM4 に触れる） | 7（1,1,1,1,1,2,3） | 14（1 が 12 個） | 2 |
+| (e) (c) のあと (b') の併合を掛ける | 4（1,1,2,6） | 2（1,16） | 1 |
+
+**採った規則**: (c)。§5.4 の内側の記述のとおり（先頭 = 循環のまとまりと、外枠の中の 2 つ以上の他の初期モジュールに
+使われる式を生む手順。先頭へ入る受け渡しを出現順に切り、切ったあとの内側の接点が全て 2 以下のときだけ採る）。
+定数は `INNER_HUB_MIN_CONSUMERS = 2` を足し、`INNER_INTERFACE_LIMIT = 2` は「内側の接点（外枠の中で他の内側
+モジュールと受け渡す式の本数）の上限＝境目の採否の検査」に意味を変えた（どちらもコード定数・env から読まない）。
+内側の `isolated_reason` は、循環のまとまりがそのまま単独で残ったときに `cycle`、単独 1 step の内側の接点が上限を
+超えるときに `interface_too_wide`（採否の検査があるので fixture では出ない）。事実文の扱いは Phase 0 と同じ。
+
+**2 論文での結果**（成員 step が生む式で示す。ラベルは DTO の `visual_label`）
+
+2407.01221v2 の計算本体 → 内側 5:
+
+| 内側 | 成員 | 生む式 | 読み |
+|---|---|---|---|
+| 代入 | 1 | b97 | 共有の基礎を導く手順（b97 は計算本体の 5 手順に使われる基礎なので結び付きに数えない） |
+| 正規化・代入 | 2 | b66, b68 | 角度核 S^(a) の定義と、代入後のスケーリング |
+| 定義・定義を適用・代入 | 3 | b72, b74, b76 | 補助角度積分 L^(a) の定義・変数変換・代入後のスケーリング |
+| 定義・代入 | 3 | b78, b80, b85 | 核 Z_2（↔ 係数 h の循環）と Z_3 の陽な形。循環のまとまりが先頭 |
+| 近似 | 1 | skewness-bias-ex | 歪度の結果 |
+
+2609.15375v1 の計算本体 → 内側 4:
+
+| 内側 | 成員 | 生む式 | 読み |
+|---|---|---|---|
+| 正規化・代入 | 6 | b186〜b196 | 相互相関の定義の書き換え（循環 b190 → b192 → b186 を含む。循環のまとまりが先頭） |
+| 定義・代入・定義を適用・変換 | 5 | b198〜b206 | V ρ̄ を N_c に置き換えた式（2 手順に使われる分岐点）を先頭に、平均密度と面密度の定義 |
+| 代入 | 1 | b210 | 線形バイアス関係の導入 = 共有の基礎を導く手順 |
+| 代入・正規化・近似 | 5 | b208, pairs, b220〜b224 | ペア数の観測量（b208 が 2 手順に使われる分岐点）への変換と推定量 |
+
+事前の目安（2407 は角度積分の機構 / 核の陽な形 / 結果の 3 前後、2609 は相互相関の書き換え / 平均密度と面密度 /
+ペア数の観測量の 3 前後）に対し、2609 は目安の 3 区切りと境目が一致し（b196 → b198 と b206 → b208 の受け渡しで
+切れる）、基礎を導く手順が 1 つ単独で残った。2407 は角度積分の機構が S^(a) と L^(a) の 2 つに分かれ（両者は基礎
+b64 / b97 を通してしかつながらない）、基礎を導く手順が単独で残った。内側の接点はどの内側モジュールでも 2 以下で、
+接点超過の単独は出ない。2609 の 3 step の外枠は一本道なので割らない（Phase 0 の 1 step × 3 の断片が消えた）。
+外枠は 8 / 10 のまま。
+
+**採らなかった候補の理由**
+
+- (a) / (b) / (b') / (e): 接点の上限による併合は、共有の基礎と外の入出力を除くと閉じる本体で止まらない（(b) は
+  丸ごと 1 つ、(b') と (e) は 2609 で 16 step が 1 つ）。開いた箇所では単独の断片を残す（(a)）。
+- (c'): 分岐点で**終える**と、分岐点の直後の手順が 1 step の断片になり（2609 の b208 の後の `pairs`、5 step の外枠の
+  1 step × 2）、分岐点の式を土台にする手順群と分岐点が別れる。分岐点は「以降の手順が共通に土台にする式を置く手順」
+  なので、続く手順と同じまとまりの先頭にするほうが読める。
+- (c''): 循環を先頭に数えないと 2407 で L^(a) の機構と核の陽な形が 6 step の 1 つに混ざる。循環は互いに定める式の組
+  （定義の体系）で、外枠でも 1 つの初期モジュールに縮約している（§5.5）ので、内側でも区切りとして扱う。
+- (c+): 数は目安に近づく（4 / 3）が、寄せる先が「最初に使う手順」という出現順の偶然で決まる（2407 の b97 は S の定義
+  と結果の両方に使われ、S 側に寄る理由が構造に無い）。共有の基礎は接点にも結び付きにも数えない（§5.3）規律と
+  そろえ、基礎を導く手順は単独のまま示す。
+- (d): stage は色分けであって分割単位ではない（TM4）。単独の断片が多数出る。
+
+**規則の版**: `RULE_VERSION` は `m1` のまま（§5.7 は「規則を変えたら上げる」だが、外枠の結果とキーは不変で、
+内側のキーは成員が変われば材料が変わる。Phase 0 は保存しないので旧キーとの対応は要らない。版の固定は
+`test_theory_module_guardrails.py` が持つ）。保存（§9 O-1）に着手するときに、式の stable_key への差し替えと
+合わせて版を上げる。
+
+**限界**: 分岐点も循環も無い長い一本道は割らない。接点だけでは境目が決まらない形で、fixture には現れなかった
+（2 論文とも本体は分岐点を持つ）。一本道の長い本体が出たら、実測を足してこの節を改める。
+
+**テスト**: `test_theory_module_core.py` に内側のゴールデン（2 論文の内側の成員が生む式の集合と、3 step の外枠を
+割らないこと）と `TestInnerRule`（一本道は割らない / 分岐点が先頭 / 循環が先頭 / 循環だけが残れば `cycle` / 接点が
+上限を超える境目は採らない / 基礎は結び付けない / 決定論）を足し、Phase 0 の内側の合成テストを新規則に合わせて
+書き換えた。理論モジュール 4 ファイルで 143 件（Phase 0 の 132 件 + 11 件）。
+
+---
+
+## 13. Phase 1 設計 — 保存（knowledge object 化）と構造の指紋による同一性候補
+
+> **状態: 設計（2026-09-23）**。実装は次の工程。DDL の下書きは `backend/db/086_theory_modules.sql`
+> （`backend/db/` に置いた時点で起動時に適用される。中身は表・ビュー・CHECK の拡張・語彙 1 行で、
+> コードが無くても害は無い）。§9 O-1 (c)（同一性候補の前に保存）と O-4（候補の置き場は O-6 に従属）を前提にする。
+> 新しいオーナー判断は O-5 の 1 件（§9）。
+
+### 13.1 追加の不変条項（TM11〜TM15）
+
+| # | 条項 | 照らす原則・帰結 |
+|---|---|---|
+| TM11 | **保存行は表示の正本ではない**。`GET .../theory-modules` は artifact と `graph_json` からの読み時導出のまま（正本は §5 の規則とコード）。保存行 `knowledge_theory_modules` は ①同一性リンクの参照先 ②論文をまたいだ構造の指紋の照合の索引、の 2 つの用途だけを持ち、画面は保存行からモジュールを描かない | O-1 (c) / TM2 |
+| TM12 | **構造の指紋は内部表現**。DB 列 `structure_fingerprint` にだけ持ち、DTO・API 応答・監査・`stage_outputs`・候補エントリの `name` / `reason`・`candidate_key` の平文に出さない（`candidate_key` は指紋の sha256 で持つ）。新しい応答にも `schema.FORBIDDEN_KEYS` の再帰走査を掛ける | TM6 / 原則 4 |
+| TM13 | **指紋の一致は候補であって同一性の確定ではない**（TM7 の具体化）。候補エントリは `review_status='candidate'` で凍結できない（概念レジストリの 409 ゲート）ので、パイプラインの retrieval（凍結版のみ・`entry_type` 既定 `apparatus`）・学習者・keyphrase 供給に届かない。同一性リンクは `candidate` 始まりで、確定は既存の `POST /api/admin/deliberation/identity-links/{id}/confirm|reject` だけ | 原則 1 改訂 / KR2 |
+| TM14 | **素材が無いことを「モジュールが全部消えた」と解釈しない**。builder の入力が欠ける（導出の解析結果が無い・導出に失敗した・今回の run でグラフが保存されなかった）ときは SQL を発行しない。式の手順が 0 だった（主張の並びだけ）ときは、それが今回の解析の結果なので同期して旧行を superseded にする | 原則 3 / 8・`persist_learning_units` と同じ作法 |
+| TM15 | **候補の文面に論文の中身を入れない**。候補エントリの `name` / `reason` は工程の型の訳語と固定文だけで組む（理論対象・式番号・相手論文の名前を入れない = 概念レジストリ P3-R3 / KR10）。論文由来の表示（`visual_label`）は、可視性ゲートを通る同一性リンクの `local_expression` と `related` のタイトル列挙にだけ置く | 原則 11 / KR10 |
+
+### 13.2 保存の対象と粒度
+
+**外枠・内側の両方を行にする**（`level` 列）。同一性候補の対象は外枠だけだが、次の 2 点で両方を持つ。
+
+- DTO（`modules[]`）と保存行を 1 対 1 に保つ。`related`（§13.7）は `module_key` の一致だけで読み時モジュールと
+  保存行を結べ、内側だけ対応が無いという欠け方をしない。
+- 内側の境目は §12.3 で規則が決まったばかりで、次に「内側どうしの構造の一致」を見るときの材料を再解析なしに持てる。
+  行数は外枠の数倍程度で、`knowledge_derivation_steps` より少ない。
+
+**表 `knowledge_theory_modules`**（migration 086。列の意味は SQL のコメントが正本）
+
+| 列 | 中身 | 出所（builder の保存用出力 §13.4） |
+|---|---|---|
+| `id` UUID | 行の同一性。同一性リンクの `instance_element_id` はこれを指す | — |
+| `document_id` UUID FK CASCADE | KO9 | — |
+| `stable_key` | 下記の材料で `core/knowledge_objects/stable_key.py::theory_module_stable_key`（新設）が作る。同一 run 内の衝突は `assign_stable_keys`（`agent_id_of` = `module_key`）で `#2`… | 生む式の stable_key 集合 |
+| `agent_module_key` | 読み時 DTO の `module_key`（§5.7・§13.3 で材料を差し替え）。`sync_live_rows` の `agent_id_column` | `module_key` |
+| `rule_version` | `RULE_VERSION`（Phase 1 で `m2`） | `rule_version` |
+| `level` | `outer` / `inner`（CREATE TABLE 内の CHECK。構造の段であって型語彙ではないので語彙表 FK にしない） | `level` |
+| `parent_stable_key` | 内側の親（外枠）の stable_key。外枠は NULL。UUID FK にしない（081 の `parent_component_id` と同じ判断） | 親の stable_key |
+| `label` / `visual_label` / `theory_object` / `process_verbs` / `dominant_stage` / `stage_keys` / `source_backing_status` / `isolated_reason` | DTO と同じ値 | DTO と同じ |
+| `structure_fingerprint` | §13.4 の書式。内部表現（TM12） | `structure_fingerprint` |
+| `identity_eligible` | 規則 ⑤ の対象か（§13.4） | `identity_eligible` |
+| `member_steps` JSONB | 成員 step ごとに `step_refs` / `node_ids` / `operation` / `edge_type` / `generic` / `stage_key` / `input_equation_ids` / `output_equation_ids`（依頼時の `member_step_refs` を、step ごとの属性を持つ形にした） | `members` |
+| `produced_equation_ids` / `produced_equation_keys` | 成員 step が生む式の agent ID と、その equation stable_key（stable_key の材料そのもの） | `produced_*` |
+| `input_equation_ids` / `output_equation_ids` / `foundation_equation_ids` / `sink_equation_ids` | 外から受ける式 / 外へ出す式 / 使う共有の基礎 / sink へ渡す式（agent 側 ID。読み手は `knowledge_equations_*` の stable_key で結ぶ） | `interface` |
+| `required_claim_ids` / `assumptions` | 要求される前提（`assumptions` は本文。DTO の `assumption_ids` と同じ中身） | 同左 |
+| `agent_payload` JSONB | 部品との照合名（`components_for_comparison`）など列に昇格させない残り | 同左 |
+| `produced_by_run_id` / `superseded_at` / `superseded_by_run_id` / `created_at` / `updated_at` | KO3 / KO6 | — |
+
+- **stable_key の材料** = `["theory_module", document_id, rule_version, level, 生む式の equation stable_key の昇順列]`
+  （`digest` の `k1:` 接頭辞）。式の stable_key は内容由来（KO2）なので、再解析で同じ式を生むモジュールは同じ
+  UUID を保つ。derivation step の stable_key は位置を材料に含む（KO2 の明示例外）ので使わない（§5.7 と同じ）。
+  **規則の版を材料に含むので、規則の版を上げると全行が superseded になる**（§5.7「旧キーとの対応は取らない」の
+  帰結。同一性リンクの扱いは §9 O-5）。
+- **人間の確定列を持たない**。承認オブジェクトを増やさない（PL5 の継承）。同一性の判断は `element_identity_links`
+  側に残り、モジュール行は参照先になるだけ。したがって `sync_live_rows` の `preserved_columns` は空、
+  `fallback_match_column` も使わない（近似キーのバックフィルをしないため）。
+- **数値の列を持たない**。成員数・接点の本数・工程の型の多重度は `structure_fingerprint` の文字列と
+  `member_steps` の中にだけあり、`identity_eligible` はその判定結果のブール。
+- **`KNOWLEDGE_OBJECT_KINDS` には足さない**。この語彙は実体として `element_id_remap.object_kind` の CHECK と
+  対になっており、再係留（KO8）の対象種別を表す。モジュールは同一性リンクから **UUID** で指されるので
+  stable_key が一致すれば書き換え不要で（KO8 の「UUID 参照は KO3 により書き換え不要」）、agent 側 ID
+  （`module_key`）を他表が参照することも無い。学ぶ単位（`learning_units`）と同じく、一級の知識行だが
+  再係留の語彙には入らない。§9 O-1 の「`KNOWLEDGE_OBJECT_KINDS` を 1 つ増やすか」は「知識オブジェクトの
+  種類を 1 つ増やすか」の意味で、その裁定 (c) はこの表を足すことで満たす。
+- 表名・ビュー名の定数は `core/knowledge_objects/schema.py` に `TABLE_THEORY_MODULES` /
+  `VIEW_THEORY_MODULES_LIVE` として足す。
+- **削除**: `documents(id) ON DELETE CASCADE` で追随する。`_purge_document` の変更は要らない。users(id) を
+  参照しないので account_lifecycle の PURGE / RETAIN 宣言も要らない。export bundle・`knowledge_import`・
+  `reference_health` の対象にはしない（v1）。
+
+### 13.3 規則の版と `module_key` の差し替え
+
+- `RULE_VERSION` を `m1` → **`m2`** に上げる（§12.3 の予告どおり。`module_key` の材料が変わるため）。
+- builder に additive な引数 `equation_stable_keys: Mapping[str, str] | None = None`（agent equation ID →
+  equation stable_key）を足す。`module_key` の材料は「document_id + 生む式の **equation stable_key** の昇順列 +
+  level」になる（`m2:` 接頭辞）。写像に無い式は `"eqid:" + equation_id` を材料にし（内容由来でないことが材料の
+  字面で分かる）、式の解析結果そのものが無いときは既存の事実文 `FACT_NO_EQUATIONS` が出る。
+- 写像は `persistence._equation_stable_key_map(document_id, equations)`（純計算・DB を読まない・同じ ID が
+  複数あれば先頭のレコードのキー）を公開名 `equation_stable_key_map` として出し、**route とステージの両方がこれを
+  呼ぶ**（写像の計算を二重実装しない）。route は `artifacts["equation_semantics"]` を、ステージは
+  `ctx.artifact("equation_semantics")` を渡す。どちらも同じ run の同じ artifact なので、画面の `module_key` と
+  保存行の `agent_module_key` は一致する。
+- builder は純関数のまま（写像を受け取るだけで、DB も persistence も import しない）。
+- Phase 0 のテストのうち `module_key` の決定性・材料を固定しているものは、写像あり / 写像なしの両方で
+  決定的であることに書き換える（外枠・内側の成員と結果は不変）。
+
+### 13.4 builder の保存用出力と構造の指紋
+
+**新しい公開関数** `build_theory_module_records(*, document_id, artifacts, graph_json, equation_stable_keys) -> dict`
+を `core/theory_modules/builder.py` に足す。`_build` の内部結果を共有し、DTO（`build_theory_modules`）とは
+**別の戻り値**にする（DTO に指紋を混ぜない = TM12）。戻り値:
+
+```jsonc
+{
+  "persistable": true,            // false のときステージは SQL を発行しない（TM14）
+  "skip_reason": "",              // "no_derivations" | "build_failed"（persistable=false のときだけ）
+  "rule_version": "m2",
+  "records": [                    // 外枠 → その内側 の順。空リストもあり得る（式の手順が 0 のとき）
+    {
+      "module_key": "m2:…", "level": "outer", "parent_module_key": null,
+      "produced_equation_ids": ["…"], "produced_equation_keys": ["k1:…"],
+      "label": "…", "visual_label": "…", "theory_object": "…", "process_verbs": ["定義", "代入"],
+      "stage_keys": ["…"], "dominant_stage": "…", "source_backing_status": "…", "isolated_reason": null,
+      "input_equation_ids": [], "output_equation_ids": [], "foundation_equation_ids": [], "sink_equation_ids": [],
+      "required_claim_ids": [], "assumptions": [],
+      "members": [ { "step_refs": [], "node_ids": [], "operation": "…", "edge_type": "…", "generic": false,
+                     "stage_key": "…", "input_equation_ids": [], "output_equation_ids": [] } ],
+      "structure_fingerprint": "m2|outer|…",
+      "identity_eligible": true,
+      "components_for_comparison": ["…"]
+    }
+  ]
+}
+```
+
+- `persistable` の判定: builder 内の例外 → `false` / `build_failed`。`derivation_chain` artifact が無い →
+  `false` / `no_derivations`。式の手順が 0（主張の並びだけ）→ `true` かつ `records: []`（TM14）。グラフが
+  無い（`FACT_NO_GRAPH`）場合でも構造は組めるので `true`（裏付けは `review_required` に倒れる = §12.1 の逸脱 8）。
+- **route はこの関数を import しない**（ガードレールで固定）。呼ぶのはパイプラインステージだけ。
+
+**構造の指紋**（`structure_fingerprint`）の書式:
+
+```
+{rule_version}|{level}|ops={edge_type}:{多重度},{edge_type}:{多重度},…|in={外から受ける式の本数}|out={外へ出す式の本数}|premise={0|1}
+```
+
+- `edge_type` は成員 step ごとに `component_graph.schema.classify_operation(operation)` の第 2 要素
+  （`defines` / `substitutes` / … / 汎用は `requires_review`、未知は `transforms`）。辞書順に並べる。
+- `in` / `out` は §5.4 の接点（共有の基礎を除く）。`premise` は要求される前提（`required_claim_ids` か
+  `assumptions`）が 1 つでもあれば `1`。
+- 共有の基礎は指紋に入れない（基礎の有無は論文ごとの記法・章立てに引きずられ、比較を粗くするため。§6）。
+- A層の語彙が読めない環境（§12.1 の関数内 import の縮退）では `edge_type` が空になるので、`identity_eligible`
+  を `false` にする（分類できない工程で一致を言わない）。
+
+**候補の対象**（`identity_eligible`）= `level == "outer"` かつ 成員 step が `MODULE_IDENTITY_MIN_MEMBERS = 3` 以上
+かつ 汎用でない（`generic == false`）`edge_type` が `MODULE_IDENTITY_MIN_PROCESS_KINDS = 2` 種以上。どちらも
+`core/theory_modules/schema.py` のコード定数で env から読まない（§5.4 の k と同じ扱い）。現在の fixture 2 本では
+外枠 18 のうち 2407 の計算本体 1 と 2609 の 3 つだけが下限を満たす見込みで、両論文の指紋は一致しない見込み
+（規則 ⑤ が候補を出すのはコーパスが増えてから）。実装時に実測を §13 の実装記録へ足す。
+
+**候補エントリの種別**: 主たる段階（`dominant_stage`）が `theory_basis` なら `theory`、それ以外は `method`。
+指紋が同じなら `edge_type` の多重集合が同じ → 段階の集計が同じ → 主たる段階も同じなので、種別は指紋の関数に
+なる（同じ指紋のモジュールが論文ごとに別の種別へ割れない）。
+
+### 13.5 保存の経路 — 新ステージ `theory_modules`
+
+**推奨: 新ステージ `theory_modules`（非LLM・非致命）を `persist_claims_components_graph` の直後、
+`identity_candidates` の直前に置く。** 学ぶ単位（`persist_learning_units`）のように永続化ステージの中へ入れる案は
+採らない。理由:
+
+1. **単独で実行し直せる**。規則の版を上げた直後や、既存教材に行を作るとき（§13.6）に、行の
+   「パイプラインを実行 ▼」の個別ステージ実行（`target_stage` / `start_stage`。受理集合は
+   `lecture_studio/pipeline.py::DOCUMENT_PIPELINE_STAGES` = `PIPELINE_STAGES` からの導出）で、主張・コンポーネント・
+   グラフの保存を回さずにモジュールだけを作り直せる。永続化ステージの中に入れると、それだけのために
+   claims / components の同期（人間の確定列の保護はあるが、supersede と再係留が走る）まで回すことになる。
+2. **順序が要る**。規則 ⑤（§13.8）は live 行を読むので、`identity_candidates` より前に行が揃っていなければならない。
+   ステージの並びで順序を宣言すれば、コードの呼び出し順に埋もれない。
+3. **入力が永続化の後にしか揃わない**。builder は保存済みの `graph_json`（詳細ノードの `graph_layer` /
+   `linked_derivation_ids` / 入出力式 / `source_backing_status`）を読む。
+4. **失敗と進捗が独立して見える**。`stage_outputs` と進捗表示にステージとして出る。
+
+ステージ本体（`orchestrator._stage_theory_modules(ctx)`・`_stage_identity_candidates` と同じ骨格）:
+
+- resume: `ctx.should_use_artifact("theory_modules")` なら artifact を読むだけ（再同期しない）。
+- skip（SQL を発行しない・`skipped_reason` を artifact に記録）:
+  - `ctx.skip_graph_persist or ctx.skip_component_persist` → `graph_not_persisted`（今回グラフが保存されていない
+    ので、保存済みグラフは古い run のもの）。
+  - builder が `persistable: false` → その `skip_reason`。
+- 入力: `artifacts = {name: ctx.artifact(name) for name in ("derivation_chain", "equation_semantics",
+  "claim_object_builder", "component_assembly")}`（`save_artifact` が今回の run の値を in-memory に保つので、
+  `GET .../theory-modules` が読む採用 run の artifact と同じ値になる）。`graph_json` は
+  `persistence.load_stored_component_graph_json(document_id)`（新設・`theory_component_graphs` の最新行の
+  `graph_json` をそのまま返す読み手）。route の `_normalize_stored_component_graph` は builder が読む 5 つの
+  フィールドを変えないが、**同じ fixture で route 経路とステージ経路が同じ `module_key` の集合を出す**ことを
+  テストで固定する。
+- 同期: `persistence.persist_theory_modules(*, document_id, run_id, records)`（新設・書き手は persistence.py に置く）。
+  `sync_live_rows(table=TABLE_THEORY_MODULES, agent_id_column="agent_module_key", content_columns=<id と
+  stable_key 以外の全列>, preserved_columns=())`。stable_key は外枠を先に確定し、内側の `parent_stable_key` に
+  親の確定済みキーを入れる。`records: []` は全 live 行の superseded 刻印になる（TM14 の後半）。
+- 記録: `_record_knowledge_audit`（`AUDIT_ENTITY_KNOWLEDGE_OBJECT`・件数だけ）と
+  `_record_knowledge_stage_output(summary={"theory_modules": {"updated", "inserted", "superseded", "modules",
+  "rule_version"}})`。`stage_outputs` の件数は内部の報告で、教員 UI には出さない（既存の知識行と同じ）。
+- 失敗: 非致命（`identity_candidates` と同じ）。`record_knowledge_stage_output_failure(kind="theory_modules")` で
+  run 行に事実を残し、run は `completed` のまま。
+
+**登録箇所**（ステージを 1 本足すと効く網）: `_PIPELINE_STEPS`（`PipelineStageDef("theory_modules",
+_stage_theory_modules, progress_unit="builder")`・`llm_kind` なし・`model_policy=False`）/ `PIPELINE_STAGES` /
+`core/llm_usage/schema.py::KNOWN_FEATURES` に `pipeline:theory_modules`（非LLM ステージも帰属語彙として登録する
+規律 = 概念レジストリのレビュー是正 ⑨）/ `lecture_studio/pipeline.py::DOCUMENT_PIPELINE_STAGE_LABELS` に
+`"theory_modules": "理論モジュールの保存"` / `docs/pipeline/overview.md` §2 の表（30 番を `theory_modules` に、
+`identity_candidates` を 31 番に）。`test_docs_registry_guardrails.py` と `test_pipeline_stage_registry.py` と
+`test_lecture_studio.py::TestDocumentPipelineStageRegistry` がこれらの網羅を固定する。
+
+### 13.6 既存教材のバックフィル
+
+**起動時のバックフィルはしない。** 既存教材に行を作る経路は ①再解析 ②個別ステージ実行（`target_stage=theory_modules`）
+の 2 つ。理由:
+
+- 規則はまだ暫定（§5.3 の閾値・§13.4 の下限は 2 例からの値）で、版を上げれば全行が superseded になる。規則が
+  固まる前に全教材へ行を作る理由が無い。
+- 起動時の全件導出は、教材ごとに artifact と保存済みグラフを読んで builder を回す重さがあり、毎起動の lifespan に
+  載せる性質の処理ではない（知識オブジェクト層の `backfill_stable_keys` は NULL 行のキーを埋めるだけの軽い処理）。
+- 行が無い教材は `related` が事実文で言う（§13.7）ので、黙って欠けない。
+
+作った行は supersede で置き換わるので後戻りでき、教員の権利にも触れない（オーナー判断にしない理由は §9 の注記）。
+運用で一括作成が要るようになったら、個別ステージ実行を教材ごとに回す管理スクリプトを足す（dry-run 既定）。
+
+### 13.7 `GET /theory-modules` との関係と `related`
+
+- `GET .../theory-modules` の DTO は変えない（`module_key` の材料だけが §13.3 で変わる）。保存行を読まない（TM11）。
+- **新エンドポイント** `GET /api/admin/documents/{document_id}/theory-modules/related`
+  （`routes/theory_components.py`・TEACHER + `_ensure_document_viewable`）。グラフレビューのモジュール詳細ペインが
+  遅延取得する。LLM 0 回・書き込みなし・監査なし。
+- 手順: ①当該 document の live 外枠行（`knowledge_theory_modules_live`）を読む ②`identity_eligible` の行について、
+  他 document の live 行のうち `(rule_version, structure_fingerprint)` が一致し `identity_eligible` のものを引く
+  ③**教員が見送った組は出さない**: この指紋の構造エントリ（`candidate_key` §13.8）へのリンクが、当該モジュール側
+  か相手側のどちらかで `rejected` なら、その相手を外す ④相手 document の閲覧可否を route 層で判定する
+  （`library.py::_document_access_checker` と同じ fail-closed の判定。共通化して使う）⑤タイトルだけを返す。
+- 応答（数値キーなし・指紋なし・status なし）:
+
+```jsonc
+{
+  "document_id": "…",
+  "available": true,
+  "facts": ["…"],
+  "modules": [                                   // 保存済みの外枠行すべて（documents が空のものも含む）
+    { "module_key": "m2:…",                      // = agent_module_key。表示しない
+      "documents": [ { "title": "…" } ] }        // 閲覧できる論文のタイトルだけ
+  ],
+  "hidden": false                                // 閲覧できない論文にも同じ構造があるか（件数は出さない）
+}
+```
+
+- **食い違いの事実文**（`facts[]` に 1 行。定数は `core/theory_modules/schema.py`）:
+  - 保存行が 1 つも無い → `available: false` +「この教材の理論モジュールはまだ保存されていないため、同じ構造の論文を
+    照合できません。再解析すると照合できます。」
+  - 保存行の `rule_version` が現在の `RULE_VERSION` と違う → `available: false` +「保存済みの理論モジュールは以前の
+    規則で組んだもので、表示中のモジュールと対応が取れません。再解析すると照合できます。」
+  - `hidden: true` →「閲覧できない論文にも、同じ構造のモジュールがあります。」
+- 表示中の読み時モジュールの `module_key` が `modules[]` に無い（採用 run と保存行の run がずれた等）ときは、UI が
+  詳細ペインにだけ「このモジュールは保存済みのモジュールと対応が取れないため、同じ構造の論文を示していません。」を
+  出す（固定文は UI 側。サーバは表示中のキー集合を知らないため）。
+- 「同じ構造」は**事実**（工程の型と受け渡す式の形が同じ）であって同一性の候補ではない（TM13）。だから候補の
+  status は出さず、未確定の候補も確定済みも同じ扱いで列挙する。空のときは何も描かない（閉世界の言明を足さない）。
+
+### 13.8 同一性候補 — 規則 ⑤（構造の一致）
+
+`core/library/identity_candidates.py::run_identity_candidates` に、規則 ④ の後で **規則 ⑤** を足す。同じ
+ステージ（`identity_candidates`）の中で動き、非LLM・embedding 0 回・非致命のまま（KR5）。
+
+- **母集合**: 当該 document の `knowledge_theory_modules_live` のうち `level='outer'` かつ `identity_eligible` かつ
+  `rule_version` が現在の版のもの。
+- **照合**: 他 document の live 行で、`(rule_version, structure_fingerprint)` が完全一致し `identity_eligible` のもの
+  （索引 `idx_knowledge_theory_modules_fingerprint_live`）。並びは `(document_id, created_at, id)`。
+- **既に扱ったものは再提案しない**: 状態を問わず同一性リンクを持つモジュール（`instance_element_type='theory_module'`）
+  は対象外（却下 `rejected` を毎回作り直さない = KR7。規則 ②③ の `_linked_component_ids` と同型の
+  `_linked_module_ids`）。構造エントリが `dismissed` なら何も作らない。
+- **候補エントリ**（置き場 (i)。O-6 の読み替えのもとで規則 ①〜③ と同じ）:
+  - `candidate_key = "cand|tm|" + sha256(structure_fingerprint)[:32]`（`core/library/schema.py::
+    build_structural_candidate_key` を新設。指紋を平文で持たない = TM12。`domain_key` を含めない — 分野をまたいだ
+    同じ構造を 1 行に畳むため）。既存行があれば再利用する（`get_entry_by_candidate_key`）。確定済みでも再利用し、
+    リンクだけ候補として足す（規則 ① と同じ）。
+  - `domain_key = DOMAIN_KEY_UNASSIGNED`（`unassigned`）。構造の型は分野中立（TM5）で、分野の名前空間に置くと
+    分野をまたいだ同じ構造が別エントリに割れる。
+  - `entry_type` = §13.4 の規則（`theory` / `method`）。
+  - `name` = 当該モジュールの `process_verbs` を「・」でつないだ語 +「の構造」（例「定義・代入・近似の構造」）。
+    動詞が 1 つも訳せなければ「理論モジュールの構造」。論文の中身（理論対象・式番号）を入れない（TM15）。
+    最初に見つけた論文の動詞の並びで名付けるので、教員が確定時に直してよい（既存の draft 編集）。
+  - `source_component_ids = []`、`source_document_ids` = 当該 document + リンクを作った相手 document（候補エントリ
+    一覧の可視性判定 `_apply_candidate_visibility` の材料）。`mapping_justification = "structural_match"`。
+- **同一性リンク**（`element_identity_links` candidate）: 当該モジュールと、まだリンクを持たない各相手モジュールを
+  構造エントリへ。`instance_element_type = "theory_module"` / `instance_element_id` = モジュール行の UUID /
+  `instance_document_id` = その document / `local_expression = {"name": visual_label}` / `reason` = 固定文
+  「別の論文のモジュールと、工程の型と受け渡す式の形が一致しました。」/ `mapping_justification = "structural_match"` /
+  `confidence` なし。ElementRef は既存 `_element_ref` と同じく dataclass 直組み（live ビューから読んだ行なので
+  実在は確認済み）。
+- **上限は別枠**: 新しい env `IDENTITY_MODULE_CANDIDATES_MAX_PER_DOCUMENT`（既定 10・0 で規則 ⑤ だけを止める）。
+  規則 ①〜④ の `IDENTITY_CANDIDATES_MAX_PER_DOCUMENT` と合算しない。理由: ①〜④ が先に走るので、合算すると
+  コンポーネント・主張の候補が多い教材で規則 ⑤ が常に予算切れになる / 下限が暫定の新しい規則を、既存の規則に
+  触れずに止められる。取りこぼしは戻り値の `coverage_modules`（共通報告形式・`population` = 母集合の行数・
+  `unit="theory_modules"`）で正直に報告する（教員 UI には出さない）。
+- **戻り値**: 既存キーに `module_entries_created` / `module_links_created` / `coverage_modules` を足す（既存キーは不変）。
+  監査は既存の run 単位の要約 1 行に `identity_candidates.modules` を足す（件数のみ）。
+- **O-6 の裁定で差し替える範囲**: O-6 が否なら、候補エントリを `library_entries` の行にせず別表に置く設計へ差し替える。
+  影響は規則 ⑤ の「候補エントリ」の書き込み先と、一覧 API がその別表を読むことだけで、`knowledge_theory_modules`・
+  指紋・`related` は変わらない。
+
+**要素型の登録**（`core/deliberation/schema.py`。記号 `symbol` の前例に揃える）:
+
+- `ELEMENT_THEORY_MODULE = "theory_module"` を `DOCUMENT_ELEMENT_TYPES` と `IDENTITY_LINKABLE_ELEMENT_TYPES` に足す
+  （`ElementRef.validate()` と `identity_links.create_candidate` の検査を通すため）。
+- `DIALOGUE_SESSION_ELEMENT_TYPES` には足さない。`refs.resolve` にも分岐を足さないので、W層の経路（overview・
+  文脈レンズ・対話・注釈・説明）に `theory_module` を渡すと既存の `unknown element_type` で 422 になる（fail-closed）。
+  **W層モーダルの対象化はしない**（§9 の注記）。
+- 同一性リンクの一覧（`routes/library.py::list_identity_candidates`）の `_live_component_ids` /
+  `_link_resolves_to_live_component` を、`theory_module` についても `knowledge_theory_modules_live` の実在で絞るよう
+  一般化する（supersede された行へのリンクは既存の事実文「解析がやり直されたなどの理由で、いま参照できない要素への
+  候補は表示していません。」で報告 = P3-R9）。
+- 確定済みリンクの他の読み手は型で絞っている（`personal_graph` の旅・近傍、`contextual_explanation_inputs`、
+  W層 `decomposition` の共通部品インスタンス一覧）。旅 [3] の「相手 document の列挙」（`fetch_confirmed_links_for_shared_part`）
+  は型で絞っていないが、旅 [2] が component / claim のリンクからしか共通部品へ入らないので、`theory_module` だけを
+  instance に持つ構造エントリは学習者の旅のハブにならない。構造エントリに component のリンクが混ざる形は v1 の
+  規則からは生じない（構造エントリには規則 ⑤ しかリンクを張らない）。実装時に「学習者向けの読み手が
+  `theory_module` 型のリンクを列挙に使わない」ことをガードレールで固定する。
+
+### 13.9 UI（次の工程への実装指示）
+
+- **ナレッジライブラリタブ「同一性の候補」区画**（`admin.js`・既存の区画とアンカー `knowledge-library.identity-candidates` /
+  `knowledge-library.entry-review` を使う・新しい画面を作らない）: リンク行に要素型の訳語を出す。訳語は
+  `frontend/public/js/element-vocab.js` の `ELEMENT_TYPE_LABELS` に `theory_module: "理論モジュール"` を足して
+  `ElementVocab` から引く（新しい訳語表を作らない。この表は JS 側だけの表示語彙で、Python のミラー対象ではない）。
+  リンク行の表記は `local_expression.name`（現在の描画は `local_expression` をそのまま文字列にしているので、`name` を
+  取り出す形に直す）。`mapping_justification` の訳語「構造の一致」は `core/library/schema.py::JUSTIFICATION_LABELS` と
+  `admin.js::_libraryJustificationLabels` の両方に足す（`test_library_vocab_mirror.py`）。
+- **グラフレビューのモジュール詳細ペイン**（`admin-graph-review.js`・ES5）: 外枠モジュールを選んだとき、
+  `GET .../theory-modules/related` を教材ごとに 1 回だけ遅延取得（モーダルを開いた後の最初の外枠選択時・ポーリング
+  なし・別教材の遅延応答は破棄）し、選択中の `module_key` の `documents` があれば区画「同じ構造のモジュールを持つ
+  論文」にタイトルを列挙する。区画の説明文は「工程の型と、受け渡す式の形が同じモジュールを持つ論文です（閲覧できる
+  論文だけを示します）。」。件数・指紋・候補の status は出さない。`hidden: true` と `facts[]` はサーバの文をそのまま
+  事実文として描く。`module_key` が `modules[]` に無いときの固定文は §13.7。取得失敗は区画ごと出さない（fail-soft。
+  モジュール図と承認操作は止めない）。タイトルはリンクにしない（v1）ので、この区画は操作要素ではなく事実の区画で
+  `data-ui-anchor` は付けない（`admin-indicators.js` と同じ規律）。タイトルを押して他教材へ移る操作を足すなら、
+  そのときにアンカーの 3 点セットを揃える。
+- **マニュアル**: `docs/manual/teacher/26-admin-graph-review.md` の `{#theory-modules}` 節に「同じ構造のモジュールを
+  持つ論文」の段落を、`docs/manual/teacher/19-admin-knowledge-library.md` の同一性の候補の節に「理論モジュール由来の
+  候補（構造の一致）」の段落を足す（新しいアンカー節は作らない）。
+- **キャッシュ**: `admin.html` の `admin-graph-review.js` / `admin.js` / `element-vocab.js` の `?v=` を上げる。
+
+### 13.10 migration 086 の中身
+
+| 対象 | 変更 |
+|---|---|
+| `knowledge_mapping_justifications` | `('structural_match', '構造の一致')` を `ON CONFLICT DO NOTHING` でシード（082 のシード文は編集しない） |
+| `knowledge_theory_modules`（新表） | §13.2 の列。`document_id` UUID FK CASCADE・`level` の CHECK（`knowledge_theory_modules_level_check`）・DELETE 文なし |
+| 索引 | `idx_knowledge_theory_modules_document` / `_agent_key`（document_id, agent_module_key）/ `_run` / `_fingerprint_live`（rule_version, structure_fingerprint）WHERE live かつ `identity_eligible` / 部分一意 `uq_knowledge_theory_modules_stable_key_live` |
+| `knowledge_theory_modules_live`（新ビュー） | `SELECT * … WHERE superseded_at IS NULL` |
+| `element_identity_links.instance_element_type` の CHECK | 定義に `theory_module` が無いときだけ DROP → 無ければ `'figure', 'theory_component', 'theory_claim', 'equation', 'symbol', 'theory_module'` で ADD（082 の DROP ガードは「`symbol` が無いとき」なので毎起動の往復は起きない） |
+
+### 13.11 ガードレール（候補名）
+
+- `test_theory_module_store.py`（新設）: 基表 `knowledge_theory_modules` を `FROM` / `JOIN` / `INTO` / `UPDATE` で触る
+  ファイルは `core/document_pipeline/persistence.py` だけ（`test_learning_units_guardrails.py` と同型の走査。読み手は
+  `knowledge_theory_modules_live`）/ migration 086 の列・部分一意索引・live ビューの定義形 / DELETE 文なし /
+  `persist_theory_modules` の同期（stable_key 一致で同 UUID・`records: []` で全 superseded・`persistable: false` で SQL
+  非発行・`parent_stable_key` が確定済みキー）/ `theory_module_stable_key` の決定性（位置・run_id・agent ID を材料に
+  しない・生む式の集合の順序に依存しない・規則の版で変わる）/ ステージの skip 条件と非致命 / route 経路とステージ経路の
+  `module_key` 集合の一致（fixture 2 本）。
+- `test_theory_module_identity.py`（新設）: 規則 ⑤ の母集合（外枠・`identity_eligible`・現在の版）/ 完全一致だけ /
+  リンク済みと `dismissed` を再提案しない / `candidate_key` に指紋の平文が無い / エントリの `name` / `reason` に
+  理論対象・式ラベル・相手論文の語が無い / 上限が別枠で 0 なら規則 ⑤ だけ止まる / `coverage_modules` / `related` の
+  可視性ゲート・`rejected` の組の除外・食い違いの事実文 3 種・応答に数値キーと指紋が再帰的に無い
+  （`schema.FORBIDDEN_KEYS`）/ 一覧 API が superseded モジュールへのリンクを `hidden_unresolved` に落とす /
+  学習者向けの読み手が `theory_module` 型のリンクを列挙に使わない。
+- `test_theory_module_guardrails.py`（既存に追加）: `build_theory_module_records` を `api/` が import しない /
+  `structure_fingerprint` が DTO に出ない / 下限定数が env から読まれない / `RULE_VERSION == "m2"`。
+- 既存テストの追随（実装時に同じ変更で直す）:
+  - `test_knowledge_objects_guardrails.py::TestAgentLayerIsUntouched._KO_TERMS` に `knowledge_theory_modules` /
+    `knowledge_theory_modules_live` を足す（A層に持ち込まない = KO1）。KO5 の `BASE_TABLE_ALLOWLIST` は claims /
+    components の基表だけを見る仕組みなので触らない（新表の基表規律は `test_theory_module_store.py` が持つ）。
+  - `test_concept_registry_vocab.py`: シードの走査対象を 082 と 086 の和にする（`structural_match` のシードが 086 に
+    あるため。`MAPPING_JUSTIFICATIONS` / `JUSTIFICATION_LABELS` との両方向一致はそのまま）。
+  - `test_deliberation_evidence_derivation.py::test_identity_linkable_matches_migration_048_check`: 突き合わせる SQL に
+    086 を足す。
+  - `test_version_semantics_docs.py::VERSION_BEARING_STRUCTURES` に `knowledge_theory_modules` を足す（§4 の行は本書と
+    同時に足した）。
+  - `test_docs_registry_guardrails.py` / `test_pipeline_stage_registry.py` / `test_lecture_studio.py::
+    TestDocumentPipelineStageRegistry`: ステージの網羅（§13.5 の登録箇所）。
+  - `test_llm_usage_attribution.py`（全ステージの `pipeline:<stage>` が `KNOWN_FEATURES` にあること）。
+  - `test_library_vocab_mirror.py`（`structural_match` の訳語）。
+
+### 13.12 着手の順序と開発チェックリスト §5
+
+- **第 1 波（UI なし・並列可）**: ①語彙（`MAPPING_JUSTIFICATIONS` / `JUSTIFICATION_LABELS` / `ELEMENT_THEORY_MODULE`）と
+  086 に合わせた既存テストの追随 ②builder の `equation_stable_keys`・`RULE_VERSION = "m2"`・
+  `build_theory_module_records`・指紋・下限定数 ③`theory_module_stable_key`・`persist_theory_modules`・
+  `load_stored_component_graph_json`・ステージと登録箇所 ④規則 ⑤ と一覧 API の一般化 ⑤`related` API。②→③→④ は
+  依存があるので同じ担当か順に。①と⑤は並列可。
+- **第 2 波（1 体に集約）**: §13.9 の UI・マニュアル・`?v=`。
+- **ドキュメント（§5-1）**: `docs/backend/api.md`（`related` 1 行）/ `docs/pipeline/overview.md` §2（ステージ行）/
+  `docs/architecture/data-model.md`（新表と CHECK の拡張の記述を実装時に詳しくする）/ `docs/architecture/layer_registry.md`
+  §3・§4（本書と同時に足した）/ `docs/features/concept_registry_design.md` §6.2 に規則 ⑤ の 1 行（正本は本書）。
+- **pre-mortem**（§10 の族を Phase 1 に当て直した）: 同一性の表現 = stable_key は生む式の stable_key と規則の版から
+  作り、位置由来の材料を使わない（`id-not-stable-across-versions`）/ 再実行と削除 = 素材欠落で旧行を倒さない（TM14）・
+  規則の版の変更で確定済みリンクを黙って付け替えない（O-5）/ 確定の担当 = 指紋の一致を確定にしない（TM13）/
+  正本の分裂 = 写像 `equation_stable_key_map` と要素型の訳語を二重に持たない / 派生物と配線 = `related` と一覧の
+  描画を同じ波で出す（`available-but-unwired`）。
