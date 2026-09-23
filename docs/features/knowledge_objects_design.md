@@ -279,9 +279,15 @@ fail-open で呼ぶ（`stable_key IS NULL` の live 行だけ・冪等）。clai
 agent 側と同じ材料が揃わない旧行では近似キーになる（label / 本文が変わらなければ次の再解析で一致する）。
 `agent_component_id` は `source_scope.legacy_ids[0]` から補う。
 
-バックフィルは migration と同じく **`pg_advisory_lock`（専用キー `BACKFILL_LOCK_KEY`）配下**で
+バックフィルは migration と同じく **advisory lock（専用キー `BACKFILL_LOCK_KEY`）配下**で
 走らせる。複数レプリカが同時起動すると、同じ NULL 行に同じ `#n` を割り当てて部分一意索引
-`uq_*_stable_key_live` で片方が落ちるため。
+`uq_*_stable_key_live` で片方が落ちるため。ロックは **`pg_advisory_xact_lock`（トランザクション
+スコープ）** で取り、バックフィルを含む単一トランザクションの commit / rollback で解放する
+（2026-09-21 是正・IK-0351）。ORM Session は commit のたびに接続をプールへ返すため、セッション
+スコープの `pg_advisory_lock` + 後段の `pg_advisory_unlock` は解放が別の接続に乗り、Postgres の
+`WARNING: you don't own a lock of type ExclusiveLock` とロックの残留（別レプリカの起動待ち）を
+起こす。`backfill_stable_keys` が内部で commit しないこと（xact lock が commit まで生きる前提）は
+`test_knowledge_objects_backfill.py::TestStartupLockDiscipline` が固定する。
 
 **第2段突合（近似キーの取りこぼし）**: 近似キーは agent 側の計算結果と一致しないことがあり、
 そのままだと「同じ主張が supersede + 新規 INSERT に割れる」（教員の `review_status` が
@@ -469,7 +475,7 @@ UUID へ正規化する（§4.3 ①）。
 | P1-R4 | claim の保護列が `review_status` / `created_by` だけで、**教員がレビュー済みの claim 本文を再解析が上書き**できた（component は保護済み） | `_claim_human_touched` + `protected_when_touched=("text", "normalized_text")`（component と同型。§5.3） |
 | P1-R5 | `load_run_artifacts` の except が `rollback()` せず、同じセッションの後続 SELECT が "current transaction is aborted" で全滅し得た | except 内で `session.rollback()`（それ自体も握って fail-open） |
 | P1-R6 | 079 の `_artifacts` 剥がしが、表へ移せなかった**非 object の blob も消していた** | UPDATE に `jsonb_typeof(...) = 'object'` を追加（§8.3 の破壊ステップ表②） |
-| P1-R7 | 起動時バックフィルが advisory lock の外にあり、複数レプリカ同時起動で同じ `#n` を取り合って部分一意索引に当たり得た | migration とは**別キー**の `pg_advisory_lock(BACKFILL_LOCK_KEY)` 配下へ（unlock は finally） |
+| P1-R7 | 起動時バックフィルが advisory lock の外にあり、複数レプリカ同時起動で同じ `#n` を取り合って部分一意索引に当たり得た | migration とは**別キー**の advisory lock（`BACKFILL_LOCK_KEY`）配下へ。当初は `pg_advisory_lock` + finally の unlock だったが、ORM Session の commit で接続がプールへ返り unlock が別接続に乗る不具合（起動ログの `WARNING: you don't own a lock`・ロック残留）が 2026-09-21 に実測されたため `pg_advisory_xact_lock` に置き換え（§5.6・IK-0351） |
 | P1-R9 | `sync_live_rows` が incoming の stable_key 重複を前提にせず、`learning_units` 経路は dedupe を通っていなかった | `sync_live_rows` の冒頭で同じ衝突解消を通す（**最後の砦**。呼び出し側の dedupe は残す） |
 | Phase 3 A層⚠ | `_hook_claim_concept_grounding` が接地結果で `claim_object_builder` artifact を**上書き**していた（KO6 の「生成ログ」を後段が書き換える） | 上書きを撤去。接地結果は専用 artifact `claim_concept_grounding` にだけ残し、知識行への反映は persist 側の join（CG §6 = 既存経路）。フックは resume でも毎回走るので、後段ステージが見る in-memory の値は新規実行と resume で一致する |
 | P2-R7 | `persist_learning_units` の失敗が run 全体を failed にしていた（claims / components は commit 済みなのに「解析失敗」に見え、教員が再解析を回す） | 派生表の同期を try/except で包み、`stage_outputs` の `knowledge_objects.learning_units` に `{"failed": true, "error": ...}` を正直に残して completed を維持 |

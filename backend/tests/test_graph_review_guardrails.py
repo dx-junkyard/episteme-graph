@@ -69,6 +69,54 @@ class TestPromptContract:
         assert "グラフに現れていない関係・根拠を作らないでください" in CORE_SRC
         assert "数値の確信度・スコアを述べないでください" in CORE_SRC
 
+    def test_label_and_caveats_are_screen_side_not_body_side(self):
+        """§18: 立場ラベルと網羅性の但し書きは画面が持ち、本文には書かせない。
+
+        以前は応答の冒頭にラベルが二重で出て読み上げもそこから始まり、末尾に
+        「未レビューのノードや式詳細は多数ありますが……」という但し書きが付いていた
+        （2026-09-22 オーナー指摘）。
+        """
+        label_ban = "このラベルは画面が自動で表示します。返答本文にラベルを書かないでください。"
+        assert label_ban in CORE_SRC
+        assert label_ban in DIALOGUE_SRC
+        # 材料の分離が先（プロンプトの禁止はその後）。既定で使うのは論文側の区画だけ。
+        assert "既定では前者だけを使って答えてください。" in CORE_SRC
+        assert "但し書きとして添えないでください" in CORE_SRC
+        # この画面の目的は概要をつかむこと（細部の網羅ではない）。
+        assert "グラフの全体像をおおづかみに掴むこと" in CORE_SRC
+
+    def test_grounding_separates_paper_facts_from_processing_records(self):
+        """§18: 混ざる材料を渡さない（禁止文はその後の保険）。
+
+        論文の事実の行にレビュー状態を混ぜず、処理側（未レビュー・検証記録・展開しなかった
+        層・省略）は専用の区画に集める。件数は渡さない（「多数ありますが」の出所）。
+        """
+        body = extract_function_source(CORE_SRC, "graph_grounding_to_text")
+        assert "process_lines" in body
+        assert "[この論文の理論構成]" in body
+        assert "解析・レビューの記録" in body
+        # 論文側の行に付くのは原文の裏付けだけ（レビュー状態は付けない）。
+        paper_line = body[body.index('line += f"（原文の裏付け'):]
+        assert "review_status" not in paper_line.split("\n")[0]
+        # 件数・残り件数を渡さない（f-string に len(...) を埋めない）。
+        for forbidden in ("len(main_nodes) -", "len(main_edges) -", "len(unreviewed) -",
+                          "{detail_count}", "{debug_count}"):
+            assert forbidden not in body, forbidden
+
+    def test_label_is_also_stripped_on_receipt(self):
+        """生成の従順さに依存しない — 受け取り側（共通骨格）でも先頭ラベルを落とす。"""
+        from core.label_vocab import AI_READING_LABEL
+        from core.llm_worker import chat_turn
+
+        assert chat_turn.strip_stance_prefix(
+            AI_READING_LABEL + "：本文", AI_READING_LABEL
+        ) == "本文"
+        body = extract_function_source(
+            (BACKEND / "core" / "llm_worker" / "chat_turn.py").read_text(encoding="utf-8"),
+            "structured_turn",
+        )
+        assert body.count("strip_stance_prefix(") == 2  # reply と spoken の両方
+
     def test_per_sentence_hedging_instruction_is_gone(self):
         # 旧契約（文ごとの留保を要求する指示）が復活していないこと（§15 のオーナー裁定）。
         for forbidden in (

@@ -85,6 +85,7 @@ __all__ = [
     "RADAR_DISTANCE_THRESHOLD_NEAR",
     "RECONSTRUCTED_EQUATION_NOTE",
     "RECONSTRUCTED_EQUATION_MARK",
+    "REVIEW_PENDING_LABEL",
     "SCRIPT_STATUS_LABELS",
     "SUPPORT_SECTION_LABELS",
     "TRACE_STATUS_LABELS",
@@ -459,6 +460,17 @@ AUDIO_STATUS_LABELS = MappingProxyType({
 # ``core/deliberation/{dialogue,graph_dialogue}.py`` と route 層は import して使う。
 
 AI_READING_LABEL = "AIの読み（未確認）"
+
+#: 「このグラフにはまだ人が見ていない要素が残っている」ことを示す短いラベル
+#: （2026-09-22・オーナー指摘。graph_dialogue_review_design.md §18）。
+#:
+#: 以前は AI が応答の末尾に「未レビューのノードや式詳細は多数ありますが……」という
+#: 但し書きを散文で書いていた。この画面の目的はグラフの概要をつかむことなので、
+#: 網羅性の但し書きは本文から外し、画面の1枚のラベルが引き受ける（件数は出さない = GR3）。
+#: AI_READING_LABEL と同じく単一の固定文字列なので表は作らない。JS 側は逐語ミラー
+#: （``frontend/public/js/admin-graph-review.js``。一致は ui_static テストが固定）。
+
+REVIEW_PENDING_LABEL = "未レビューの要素あり"
 
 
 # ---------------------------------------------------------------------------

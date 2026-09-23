@@ -184,11 +184,20 @@ async def _lifespan(application: FastAPI):
             # fail-open — 失敗しても起動は続ける（旧行は stable_key NULL のまま残り、
             # 次回起動か次の再解析で付く）。対象ゼロなら何もしない（冪等）。
             #
-            # migration と同じく **pg_advisory_lock（専用キー）配下**で走らせる（P1-R7）:
+            # migration と同じく **advisory lock（専用キー）配下**で走らせる（P1-R7）:
             # 複数レプリカ（uvicorn worker / 複数コンテナ）が同時起動すると、同じ NULL 行に
             # 対して両方がキーを計算し、同じ ``#n`` を取り合って部分一意索引
             # （uq_*_stable_key_live）で片方が落ちる。ロックを取れなかった側は待つ
             # （他プロセスが終われば対象ゼロになり、即座に抜ける）。
+            #
+            # ロックは **トランザクションスコープ（pg_advisory_xact_lock）** で取る。
+            # ORM Session は commit のたびに接続をプールへ返すため、セッションスコープの
+            # ``pg_advisory_lock`` を取って commit 後に ``pg_advisory_unlock`` を呼ぶと、
+            # 解放が別の接続に乗って Postgres が
+            # ``WARNING: you don't own a lock of type ExclusiveLock`` を出し、ロック本体は
+            # 元の接続に握られたまま残る（2026-09-21 に起動ログで実測）。xact lock なら
+            # バックフィルを含む単一トランザクションの commit / rollback で必ず外れ、
+            # unlock の呼び出し自体が要らない（atlas_store / help_kb と同じ作法）。
             try:
                 from core.knowledge_objects.backfill import (
                     BACKFILL_LOCK_KEY,
@@ -198,7 +207,8 @@ async def _lifespan(application: FastAPI):
                 ko_session = _pg_session()
                 try:
                     ko_session.execute(
-                        sa_text("SELECT pg_advisory_lock(:key)"), {"key": BACKFILL_LOCK_KEY}
+                        sa_text("SELECT pg_advisory_xact_lock(:key)"),
+                        {"key": BACKFILL_LOCK_KEY},
                     )
                     counts = backfill_stable_keys(ko_session)
                     ko_session.commit()
@@ -210,14 +220,6 @@ async def _lifespan(application: FastAPI):
                     ko_session.rollback()
                     logger.warning("knowledge_objects: stable_key backfill skipped", exc_info=True)
                 finally:
-                    # advisory lock はセッションに紐づくので、close の前に必ず外す。
-                    try:
-                        ko_session.execute(
-                            sa_text("SELECT pg_advisory_unlock(:key)"), {"key": BACKFILL_LOCK_KEY}
-                        )
-                        ko_session.commit()
-                    except Exception:  # noqa: BLE001
-                        logger.debug("knowledge_objects: backfill advisory unlock failed", exc_info=True)
                     ko_session.close()
             except Exception:  # noqa: BLE001
                 logger.warning("knowledge_objects: stable_key backfill unavailable", exc_info=True)

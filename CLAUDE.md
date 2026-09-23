@@ -2684,8 +2684,27 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   一意なので層で分けない・上限600）に控え、描画時に自動レイアウトへ重ねる。**サーバへ送らない**
   （端末で見るときの都合であって共有物ではない — 保存 API も列も作らない）。出口は
   「配置を元に戻す」（アンカー `graph-review.reset-layout`）。保存できない環境では黙って自動配置。
+- **対話の読みやすさ — 論文の事実と処理の記録を分ける（§18 追補・2026-09-22・migration / API /
+  LLM コールいずれも増やさない）**: 応答冒頭に「AIの読み（未確認）：」が二重に出て読み上げも
+  そこから始まり、末尾に「未レビューのノードや式詳細は多数ありますが…」が付いていた
+  （オーナー報告）。原因は**材料の混在** — grounding が「論文自体についての事実」と「システムが
+  論文を処理したときの記録」（レビュー状態・検証記録・展開しなかった層・省略・件数）を1つの
+  平らな一覧で渡し、未レビュー欄には式の詳細層のノード名まで数十行並べていた。**混ざる材料を
+  渡さないのが先で、プロンプトの禁止はその後**。①`graph_grounding_to_text` を2区画に分割 —
+  `[この論文の理論構成]` / `[構成どうしの関係]` / `[グラフの読み方]`（**原文の裏付けはここに
+  残す** = 推定を確定として語らせない）と `[解析・レビューの記録（…教員がこの点を尋ねたときだけ
+  使ってください）]`。名前で挙げる未レビューは**論文区画と同じ母集合（主グラフ）だけ**、詳細層は
+  1行に集約、**数（ノード数・残り件数）は渡さない**（「多数ありますが」の出所）。②プロンプトは
+  禁止の列挙ではなく区画の使い分けを宣言（「既定では前者だけを使って答えてください」+ 概要志向
+  「全体像をおおづかみに」「5文程度」）。§15 の契約フレーズは逐語のまま。③ラベルは「画面が
+  自動で表示します。返答本文にラベルを書かないでください」+ `core/llm_worker/chat_turn.py::
+  strip_stance_prefix` が `reply` / `spoken` の**先頭**の `stance_label` を落とす（要素対話にも
+  効く・文中は残す）。④網羅性の常在表示は会話の最後の1枚のラベル
+  `label_vocab.REVIEW_PENDING_LABEL` =「未レビューの要素あり」（JS は逐語ミラー・グラフ状態
+  からの読み時導出・保存しない・件数なし）。**新しい AI 対話の grounding を作るときは、論文の
+  事実と処理・レビューの記録を同じ区画に混ぜない。**
 - **ガードレール**: `test_graph_review_{core,api,guardrails,ui_static}.py` +
-  `test_graph_review_voice_api.py`。
+  `test_graph_review_voice_api.py` + `test_llm_worker_stance_prefix.py`。
 - **非スコープ（v1）**: 一括承認 / edge の承認 / equation・evidence ノードの承認 /
   G層 To-Do ルール（恒常点灯するため運用実測後に判断）/ 学習者向け表示。
 
@@ -3081,7 +3100,9 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   `protected_when_touched=("text","normalized_text")`（教員が直した本文を AI 出力で上書きしない）。
   ⑧**KO6 の読み替え**: artifact は「1 run × 1 stage・最後の書き込みが勝つ」生成ログ。**後段のステージ・フックは
   他ステージの artifact を書き換えない**（概念接地フックの `claim_object_builder` 上書きは撤去）。
-  ⑨起動時 backfill は `BACKFILL_LOCK_KEY` の advisory lock 配下、`load_run_artifacts` の except は rollback、
+  ⑨起動時 backfill は `BACKFILL_LOCK_KEY` の advisory lock 配下（**`pg_advisory_xact_lock`**。ORM Session で
+  セッションスコープの `pg_advisory_lock` / `unlock` を使うと commit 後の unlock が別接続に乗ってロックが残留する —
+  2026-09-21 是正）、`load_run_artifacts` の except は rollback、
   079 の blob 剥がしは `jsonb_typeof = 'object'` の行のみ。⑩`persist_learning_units` の失敗は
   `stage_outputs.knowledge_objects.learning_units.failed` に記録し run は completed を維持。
   後続課題: sync の N+1・3 系統の別トランザクション（設計書 §12.2）。

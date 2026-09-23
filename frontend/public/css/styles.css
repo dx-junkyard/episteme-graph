@@ -11974,6 +11974,18 @@ button.element-card-item:focus-visible .element-card-item-label {
   color: var(--color-text-tertiary, #6b7280);
   white-space: nowrap;
 }
+/* 会話の最後に置く注記ラベル（未レビューの要素あり）。警告色にしない・件数を出さない。 */
+.graph-review-chat-notes {
+  display: inline-block;
+  border: 1px solid var(--color-border, #cbd5e1);
+  border-radius: 999px;
+  padding: 0 7px;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--color-text-tertiary, #6b7280);
+  white-space: nowrap;
+}
 /* 応答本文に混ざるインライン数式（graphView.inlineMathHtml）を地の文に揃える。 */
 .graph-review-chat-msg .katex { font-size: 1.05em; }
 .graph-review-chat-msg .lecture-formula { margin: 0; vertical-align: baseline; }

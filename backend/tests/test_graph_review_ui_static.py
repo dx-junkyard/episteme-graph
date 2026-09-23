@@ -222,6 +222,38 @@ class TestChatBubbleAndStance:
         # 控えめな注記であって警告ではない（警告色を使わない）。
         assert "red" not in rule and "#ef4444" not in rule
 
+    def test_pending_review_label_replaces_the_prose_caveat(self):
+        """§18: 網羅性の但し書きは本文ではなく、会話の最後の1枚のラベルが引き受ける。"""
+        from core.label_vocab import REVIEW_PENDING_LABEL
+
+        block = self._chat_log_block()
+        assert "graph-review-chat-notes" in block
+        assert "REVIEW_PENDING_LABEL" in block
+        # 現在のグラフ状態からの導出（保存しない・承認が進めば消える）。
+        assert "hasPendingReviewElements()" in block
+        assert 'state.chatMode === "graph"' in block
+        # 文言の正本はサーバの label_vocab で、JS は逐語ミラー1箇所だけ。
+        assert 'var REVIEW_PENDING_LABEL = "' + REVIEW_PENDING_LABEL + '";' in JS_SRC
+        assert JS_SRC.count(REVIEW_PENDING_LABEL) == 1
+        # 件数は出さない（GR3）。
+        notes = block[block.index("graph-review-chat-notes"):]
+        assert "length" not in notes[: notes.index("\n")]
+
+    def test_pending_review_label_uses_the_grounding_population(self):
+        """AI が読む grounding と同じ母集合（debug 層を除く全ノード）で判定する。"""
+        start = JS_SRC.index("function hasPendingReviewElements(")
+        block = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert '"debug"' in block
+        assert "isUnreviewedNode(node)" in block
+        # 層トグル（filterByLayer）には依らない — 見えていない層の未レビューも数に入る。
+        assert "filterByLayer" not in block
+
+    def test_notes_css_is_muted_and_not_a_warning(self):
+        assert ".graph-review-chat-notes" in CSS_SRC
+        rule = CSS_SRC[CSS_SRC.index(".graph-review-chat-notes"):]
+        rule = rule[: rule.index("}")]
+        assert "red" not in rule and "#ef4444" not in rule
+
     def test_es5_in_chat_blocks(self):
         block = self._chat_log_block()
         assert "=>" not in block

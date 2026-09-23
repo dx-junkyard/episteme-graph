@@ -7,6 +7,7 @@ DB / LLM への実接続なしで検証する。
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -98,12 +99,68 @@ class TestGroundingToText:
             }],
         ))
         text = gd.graph_grounding_to_text(grounding)
-        assert "[主グラフ（理論構成のバックボーン）]" in text
+        assert "[この論文の理論構成]" in text
         assert "Theory basis" in text and "基礎方程式の前提" in text
         assert "部分的な裏付け" in text
-        assert "[主グラフの関係]" in text and "derives" in text
-        assert "[未レビューのノード]" in text and "missing_atomic_claim" in text
+        assert "[構成どうしの関係]" in text and "derives" in text
+        assert "まだ教員が確認していない構成" in text and "missing_atomic_claim" in text
         assert "0.87" not in text  # 数値 confidence 非漏洩
+
+    def test_paper_facts_and_processing_records_are_separate_blocks(self):
+        """§18: 論文についての事実と、システムが処理したときの記録を混ぜない。
+
+        以前は1つの平らな一覧だったため、論文の概要を尋ねた応答の末尾に「未レビューの
+        ノードや式詳細は多数ありますが……」という処理側の但し書きが混入していた。
+        """
+        grounding = gd.build_graph_grounding(_graph(
+            nodes=[
+                _node("m1", label="Theory basis", description="基礎方程式の前提"),
+                _node("d1", graph_layer="equation_detail"),
+                _node("x1", graph_layer="debug"),
+            ],
+            validation_results=[{"severity": "warning", "message": "generic_operation"}],
+        ))
+        text = gd.graph_grounding_to_text(grounding)
+        head, _, processing = text.partition("[解析・レビューの記録")
+        assert processing, "処理側の区画が独立していること"
+        # 論文区画にレビュー状態・検証記録・層の事情を混ぜない。
+        assert "未レビュー" not in head and "確認していない" not in head
+        assert "検証記録" not in head
+        assert "式の詳細層" not in head and "debug" not in head
+        # 処理側の区画には「尋ねられたときだけ使う」ことが見出しに書いてある。
+        assert "教員がこの点を尋ねたときだけ" in text
+        # 処理側の事実はここに入る。
+        assert "式単位のステップ" in processing
+        assert "generic_operation" in processing
+
+    def test_unreviewed_names_only_the_population_shown_as_paper_facts(self):
+        """§18: 名前で挙げるのは論文区画に出ている構成（主グラフ）だけ。
+
+        式の詳細層まで名前で並べると、論文の事実 2〜3 行に対して処理側が数十行になり、
+        材料の量そのものが「未レビューのノードや式詳細は多数ありますが」の混入圧になる。
+        """
+        nodes = [_node("m1", label="Theory basis")]
+        nodes += [_node("d%d" % i, graph_layer="equation_detail", label="eq %d" % i)
+                  for i in range(28)]
+        text = gd.graph_grounding_to_text(gd.build_graph_grounding(_graph(nodes=nodes)))
+        assert "Theory basis" in text
+        assert "eq 0" not in text and "eq 27" not in text
+        # 詳細層に未レビューが残っている事実は、件数なしの1行で残す。
+        assert "式の詳細層にも、まだ確認していないステップがあります。" in text
+
+    def test_all_main_reviewed_says_so_without_listing(self):
+        nodes = [_node("m1", review_status="teacher_approved"),
+                 _node("d1", graph_layer="equation_detail")]
+        text = gd.graph_grounding_to_text(gd.build_graph_grounding(_graph(nodes=nodes)))
+        assert "理論構成はすべて教員が確認済みか却下済みです。" in text
+
+    def test_processing_block_has_no_counts(self):
+        """GR3: 「式詳細は多数ありますが」の出所だったノード数・残り件数を渡さない。"""
+        nodes = [_node("n%d" % i, display_order=i) for i in range(45)]
+        nodes += [_node("d%d" % i, graph_layer="equation_detail") for i in range(7)]
+        text = gd.graph_grounding_to_text(gd.build_graph_grounding(_graph(nodes=nodes)))
+        processing = text.partition("[解析・レビューの記録")[2]
+        assert not re.search(r"\d", processing), processing
 
     def test_main_node_cap_reports_omission(self):
         nodes = [_node("n%d" % i, display_order=i) for i in range(45)]

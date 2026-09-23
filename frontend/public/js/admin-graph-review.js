@@ -1745,7 +1745,7 @@
         "</div>";
       return;
     }
-    log.innerHTML = state.chatMessages.map(function (m) {
+    var bubbles = state.chatMessages.map(function (m) {
       var isAssistant = m.role === "assistant";
       var roleClass = isAssistant ? "assistant" : "user";
       // 学習者の発話は素のエスケープ、AI 応答は本文の数式を数式として出す
@@ -1758,6 +1758,12 @@
         : "";
       return '<div class="graph-review-chat-msg is-' + roleClass + '">' + stance + body + "</div>";
     }).join("");
+    // 網羅性の但し書きは本文に書かせず（プロンプト側で禁止）、会話の最後に1枚の
+    // ラベルとして置く。承認が進めば自動的に消える（状態からの導出・保存しない）。
+    var notes = state.chatMode === "graph" && hasPendingReviewElements()
+      ? '<div class="graph-review-chat-notes">' + esc(REVIEW_PENDING_LABEL) + "</div>"
+      : "";
+    log.innerHTML = bubbles + notes;
     log.scrollTop = log.scrollHeight;
   }
 

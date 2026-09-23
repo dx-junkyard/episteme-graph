@@ -76,8 +76,23 @@ _INSTRUCTION_HEADER = (
     "以下は1本の論文からパイプラインが構築した理論操作グラフの事実の一覧です。"
     "この一覧に現れているノード・関係・裏付け状態だけを根拠に答え、"
     "グラフに現れていない関係・根拠を作らないでください（無い場合は「グラフには現れていません」と述べる）。"
+    # 概要をつかむための画面（2026-09-22 オーナー指摘・§18）。細部の網羅ではなく
+    # 見取り図を返す — 長い列挙は教員が求めたときだけ。
+    "この画面の目的は、グラフの全体像をおおづかみに掴むことです。"
+    "結論を先に、全体で5文程度の短さに収め、要素の列挙は求められたときだけにしてください。"
     "文ごとに「〜の可能性があります」のような留保を繰り返さず、簡潔な断定調で書いてください。"
     "不確かさは返答全体に付く「" + AI_READING_LABEL + "」のラベルで示されます。"
+    # ラベルは画面のチップが引き受ける表示専用の留保。本文に書かれると画面で二重に出て、
+    # 読み上げもラベルから始まる（受け取り側でも chat_turn.strip_stance_prefix が落とす）。
+    "このラベルは画面が自動で表示します。返答本文にラベルを書かないでください。"
+    # 論文の事実と処理の記録を混ぜない（§18）。材料自体を2区画に分けたうえで、既定で
+    # 使うのは論文側だけだと宣言する。網羅性の但し書きは画面のラベルが引き受ける。
+    "一覧は2つの区画に分かれています。「この論文の理論構成」「構成どうしの関係」"
+    "「グラフの読み方」は論文についての事実で、「解析・レビューの記録」はこのシステムが"
+    "この論文を処理したときの状態です。既定では前者だけを使って答えてください。"
+    "後者（未レビューの有無・検証記録・展開していない層・省略した範囲）は、教員がその点を"
+    "尋ねたときだけ述べ、聞かれていない応答に但し書きとして添えないでください"
+    "（画面がラベルで示します）。"
     + _MATH_DELIMITER_INSTRUCTION +
     "承認・却下の判断は教員が行います。「承認すべき」「却下すべき」のような指示・推奨はせず、"
     "裏付けの状態と考えられる論点を事実として示すに留めてください。"
@@ -289,25 +304,39 @@ def build_graph_grounding(graph: dict[str, Any]) -> dict[str, Any]:
 
 
 def graph_grounding_to_text(grounding: dict[str, Any]) -> str:
-    """grounding dict を LLM prompt 用のテキストへ整形する（純粋関数・テスト容易）。"""
+    """grounding dict を LLM prompt 用のテキストへ整形する（純粋関数・テスト容易）。
+
+    **2区画に分ける**（2026-09-22 オーナー指摘・§18）。以前は1つの平らな一覧に
+    「論文の理論構成」と「このシステムが論文を処理したときの記録」（レビュー状態・検証記録・
+    展開しなかった層・省略）を混ぜて渡していたため、論文の概要を尋ねた応答の末尾に処理側の
+    状態が但し書きとして混入していた。**混ざる材料を渡さないのが先で、プロンプトの禁止は
+    その後**という順序で直す。
+
+    - ``[この論文の理論構成]`` / ``[構成どうしの関係]`` / ``[グラフの読み方…]``:
+      論文についての事実。**原文の裏付け**はその事実の確からしさを限定するものなので、
+      各行に付けたまま残す（推定を確定として語らせないため = GR1）。
+    - ``[解析・レビューの記録 …]``: 人とシステムの作業の状態。**尋ねられたときだけ**使う
+      区画であることを見出しに明示する。数（ノード数・残り件数）は書かない（GR3。
+      「式詳細は多数ありますが」の出所だった）。
+    """
     lines: list[str] = []
     label_by_id: dict[str, str] = grounding.get("label_by_id") or {}
     main_ids: set = grounding.get("main_ids") or set()
+    #: 処理側（人・システムの作業の記録）。論文の事実とは別区画にまとめて最後に置く。
+    process_lines: list[str] = []
 
     main_nodes = grounding.get("main_nodes") or []
-    lines.append("[主グラフ（理論構成のバックボーン）]")
+    lines.append("[この論文の理論構成]")
     for node in main_nodes[:_MAX_MAIN_NODE_LINES]:
         line = f"- {_node_label(node)}"
         description = str(node.get("description") or "").strip()
         if description:
             line += f"：{description}"
-        line += (
-            f"（裏付け: {_backing_label(node.get('source_backing_status'))}"
-            f" / レビュー: {_review_label(node.get('review_status'))}）"
-        )
+        # レビュー状態はここに書かない（処理側の区画へ）。原文の裏付けだけを残す。
+        line += f"（原文の裏付け: {_backing_label(node.get('source_backing_status'))}）"
         lines.append(line)
     if len(main_nodes) > _MAX_MAIN_NODE_LINES:
-        lines.append(f"(注記) 主グラフの残り {len(main_nodes) - _MAX_MAIN_NODE_LINES} ノードは省略。")
+        process_lines.append("- 理論構成の一部は、この一覧では省略しています。")
 
     edges = grounding.get("edges") or []
     main_edges = [
@@ -316,46 +345,17 @@ def graph_grounding_to_text(grounding: dict[str, Any]) -> str:
         and str(e.get("target_component_id") or e.get("to") or "") in main_ids
     ]
     if main_edges:
-        lines.append("[主グラフの関係]")
+        lines.append("[構成どうしの関係]")
         for edge in main_edges[:_MAX_EDGE_LINES]:
             src = str(edge.get("source_component_id") or edge.get("from") or "")
             dst = str(edge.get("target_component_id") or edge.get("to") or "")
             relation = str(edge.get("edge_type") or edge.get("relation") or "").strip()
             lines.append(
                 f"- {label_by_id.get(src, src)} →({relation}) {label_by_id.get(dst, dst)}"
-                f"（裏付け: {_backing_label(edge.get('source_backing_status'))}）"
+                f"（原文の裏付け: {_backing_label(edge.get('source_backing_status'))}）"
             )
         if len(main_edges) > _MAX_EDGE_LINES:
-            lines.append(f"(注記) 関係の残り {len(main_edges) - _MAX_EDGE_LINES} 本は省略。")
-
-    detail_count = int(grounding.get("detail_node_count") or 0)
-    debug_count = int(grounding.get("debug_node_count") or 0)
-    if detail_count or debug_count:
-        lines.append(
-            f"[式の詳細層] 式単位のステップが {detail_count} ノード"
-            + (f"、debug 層（推定のみ）が {debug_count} ノード" if debug_count else "")
-            + "あります（この一覧には展開していません）。"
-        )
-
-    unreviewed = grounding.get("unreviewed_nodes") or []
-    if unreviewed:
-        lines.append("[未レビューのノード]")
-        for node in unreviewed[:_MAX_UNREVIEWED_LINES]:
-            reasons = [str(r) for r in (node.get("review_reasons") or []) if str(r or "").strip()]
-            reason_text = f"（理由: {'、'.join(reasons)}）" if reasons else ""
-            lines.append(f"- {_node_label(node)}: {_review_label(node.get('review_status'))}{reason_text}")
-        if len(unreviewed) > _MAX_UNREVIEWED_LINES:
-            lines.append(f"(注記) 未レビューの残り {len(unreviewed) - _MAX_UNREVIEWED_LINES} ノードは省略。")
-
-    validations = grounding.get("validation_results") or []
-    if validations:
-        lines.append("[構築時の検証記録]")
-        for item in validations[:_MAX_VALIDATION_LINES]:
-            severity = str(item.get("severity") or item.get("level") or "").strip()
-            message = str(item.get("message") or item.get("detail") or "").strip()
-            if not message:
-                continue
-            lines.append(f"- ({severity or 'info'}) {message}")
+            process_lines.append("- 関係の一部は、この一覧では省略しています。")
 
     narrative = grounding.get("narrative") or {}
     # NarrativeAnnotator の永続キーは graph_summary（persistence.py の _narrative_payload）。
@@ -363,6 +363,52 @@ def graph_grounding_to_text(grounding: dict[str, Any]) -> str:
     summary = str(narrative.get("graph_summary") or narrative.get("summary") or "").strip()
     if summary:
         lines.append(f"[グラフの読み方（AI提案・未確認）] {summary}")
+
+    # --- ここから処理側（論文の事実ではない） ---------------------------------
+    if int(grounding.get("detail_node_count") or 0):
+        process_lines.append("- 式単位のステップ（式の詳細層）は、この一覧に展開していません。")
+    if int(grounding.get("debug_node_count") or 0):
+        process_lines.append("- 裏付けのない推定だけの層（debug）は、この一覧から除いています。")
+
+    # 未レビューは**論文区画に出ている構成（主グラフ）と同じ母集合**だけ名前で挙げる。
+    # 式の詳細層まで名前で並べると、論文の事実3行に対して処理側が数十行になり、材料の量が
+    # そのまま「未レビューのノードや式詳細は多数ありますが」の混入圧になっていた（§18）。
+    unreviewed = grounding.get("unreviewed_nodes") or []
+    unreviewed_main = [n for n in unreviewed if _node_id(n) in main_ids]
+    unreviewed_detail = [n for n in unreviewed if _node_id(n) not in main_ids]
+    if unreviewed_main:
+        process_lines.append("- まだ教員が確認していない構成:")
+        for node in unreviewed_main[:_MAX_UNREVIEWED_LINES]:
+            reasons = [str(r) for r in (node.get("review_reasons") or []) if str(r or "").strip()]
+            reason_text = f"（理由: {'、'.join(reasons)}）" if reasons else ""
+            process_lines.append(f"  - {_node_label(node)}{reason_text}")
+        if len(unreviewed_main) > _MAX_UNREVIEWED_LINES:
+            process_lines.append("  - （ほかにもあります）")
+    if unreviewed:
+        process_lines.append(
+            "- ここに挙がっていない構成は、教員が確認済みか却下済みです。"
+            if unreviewed_main
+            else "- 理論構成はすべて教員が確認済みか却下済みです。"
+        )
+    if unreviewed_detail:
+        process_lines.append("- 式の詳細層にも、まだ確認していないステップがあります。")
+
+    validations = grounding.get("validation_results") or []
+    if validations:
+        process_lines.append("- 構築時の検証記録:")
+        for item in validations[:_MAX_VALIDATION_LINES]:
+            severity = str(item.get("severity") or item.get("level") or "").strip()
+            message = str(item.get("message") or item.get("detail") or "").strip()
+            if not message:
+                continue
+            process_lines.append(f"  - ({severity or 'info'}) {message}")
+
+    if process_lines:
+        lines.append(
+            "[解析・レビューの記録（論文の内容ではなく、このシステムが論文を処理したときの"
+            "状態です。教員がこの点を尋ねたときだけ使ってください）]"
+        )
+        lines.extend(process_lines)
 
     return "\n".join(lines)
 

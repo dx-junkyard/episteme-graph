@@ -128,6 +128,10 @@ W層は A層成果（`theory_components` / `theory_claims` / `theory_component_g
   `core/label_vocab.py::AI_READING_LABEL`）で示し、本文は簡潔な断定調で書く。
   `evidence` / `reason` 必須と confidence の数値非表示（W8）は**不変**。詳細は
   [グラフ対話レビュー §15](graph_dialogue_review_design.md#15-応答文体の改訂--留保はラベルで2026-09-10)。
+  **追補（2026-09-22）**: このラベルは**画面が付ける表示専用の留保**なので、ヘッダで
+  「返答本文にラベルを書かないでください」と明示し、受け取り側（`chat_turn.strip_stance_prefix`）
+  でも本文・読み上げの先頭から落とす。詳細は
+  [グラフ対話レビュー §18](graph_dialogue_review_design.md#18-対話の読みやすさ--ラベルは画面本文は概要2026-09-22)。
 - **W4 情報を落とさない（P4）**: 対話ログ・候補注釈・却下は削除しない。status 遷移
   （`candidate → committed` / `candidate → dismissed`）で保持。行削除 API を作らない。
 - **W5 権限 fail-closed（スコープで分岐）**: document-scoped 要素は `_ensure_document_viewable`
