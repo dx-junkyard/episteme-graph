@@ -271,3 +271,184 @@ class TestAnchorsAndAssets:
         fact_css = CSS_SRC[CSS_SRC.index(".graph-review-canvas-fact"):]
         fact_css = fact_css[: fact_css.index("}")]
         assert "red" not in fact_css and "#ef4444" not in fact_css
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 UI（設計書 §13.9 / §12.6）: 同じ構造のモジュールを持つ論文・同一性候補の
+# リンク行・教材行のパイプライン再実行メニュー。
+# ---------------------------------------------------------------------------
+
+ADMIN_JS_SRC = (ROOT / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
+VOCAB_JS_SRC = (ROOT / "frontend" / "public" / "js" / "element-vocab.js").read_text(encoding="utf-8")
+LIBRARY_MANUAL_SRC = (
+    ROOT / "docs" / "manual" / "teacher" / "19-admin-knowledge-library.md"
+).read_text(encoding="utf-8")
+MATERIALS_MANUAL_SRC = (
+    ROOT / "docs" / "manual" / "teacher" / "11-admin-materials.md"
+).read_text(encoding="utf-8")
+
+
+def _admin_function_block(name: str) -> str:
+    start = ADMIN_JS_SRC.index("  function " + name + "(")
+    end = ADMIN_JS_SRC.find("\n  function ", start + 1)
+    return ADMIN_JS_SRC[start: end if end >= 0 else len(ADMIN_JS_SRC)]
+
+
+class TestRelatedModules:
+    """§13.7 / §13.9: 外枠を初めて選んだときに 1 回だけ取得し、タイトルと事実文だけを描く。"""
+
+    def test_related_fetched_once_per_open_and_lazily(self):
+        block = _function_block("loadRelatedModules")
+        assert '"/theory-modules/related"' in block
+        assert "if (state.relatedModulesRequested) return;" in block
+        assert "state.relatedModulesRequested = true;" in block
+        # 別教材の遅延応答は破棄する。
+        assert "state.documentId !== documentId" in block
+        # 開くたびに状態を戻す（別教材のキャッシュを持ち越さない）。
+        opener = _function_block("open")
+        for reset in (
+            "state.relatedModules = null;",
+            "state.relatedModulesRequested = false;",
+            "state.relatedModulesFailed = false;",
+        ):
+            assert reset in opener, reset
+        # モーダルを開いただけでは取らない（外枠モジュールの選択時だけ）。
+        assert "loadRelatedModules" not in opener
+        select = _function_block("selectModule")
+        assert "loadRelatedModules();" in select
+        assert '!== "inner"' in select
+        assert JS_SRC.count('"/theory-modules/related"') == 1
+
+    def test_related_is_fail_soft(self):
+        block = _function_block("loadRelatedModules")
+        assert "state.relatedModulesFailed = true;" in block
+        html = _function_block("relatedModulesHtml")
+        assert "if (state.relatedModulesFailed) return \"\";" in html
+        assert "if (!data) return \"\";" in html
+        # 失敗の事実文を新設しない（区画ごと出さない）。
+        assert "MODULE_ERROR_TEXT" not in html
+
+    def test_related_renders_titles_and_server_facts_only(self):
+        html = _function_block("relatedModulesHtml")
+        assert "doc && doc.title" in html
+        assert "data.facts" in html
+        assert "paperFactLines(facts" in html
+        assert "data.available === false" in html
+        assert "MODULE_RELATED_UNMATCHED_TEXT" in html
+        # 区画の説明文と固定文は設計書 §13.7 / §13.9 の逐語。
+        assert '"同じ構造のモジュールを持つ論文"' in JS_SRC
+        assert (
+            '"工程の型と、受け渡す式の形が同じモジュールを持つ論文です（閲覧できる論文だけを示します）。"'
+            in JS_SRC
+        )
+        assert (
+            '"このモジュールは保存済みのモジュールと対応が取れないため、同じ構造の論文を示していません。"'
+            in JS_SRC
+        )
+        # 表示は外枠モジュールの詳細にだけ足す。
+        assert "moduleDetailHtml(module) + relatedModulesHtml(module)" in _function_block("renderModuleDetail")
+
+    def test_related_draws_no_counts_keys_or_status(self):
+        for name in ("relatedModulesHtml", "relatedEntryFor", "loadRelatedModules"):
+            block = _function_block(name)
+            assert "件" not in block, name
+            assert ".length +" not in block, name
+            assert "structure_fingerprint" not in block, name
+            assert "review_status" not in block, name
+            assert "esc(wanted" not in block, name
+            assert "esc(entry.module_key" not in block, name
+            assert "data.hidden" not in block, name  # hidden はサーバの事実文で語る
+
+    def test_related_section_has_no_ui_anchor(self):
+        # 事実の区画（タイトルはリンクにしない v1）なので data-ui-anchor を付けない。
+        for name in ("relatedModulesHtml", "relatedEntryFor", "loadRelatedModules"):
+            assert "data-ui-anchor" not in _function_block(name), name
+            assert "<button" not in _function_block(name), name
+            assert "<a " not in _function_block(name), name
+
+    def test_manual_describes_related(self):
+        assert "同じ構造のモジュールを持つ論文" in MANUAL_SRC
+        assert "この教材の理論モジュールはまだ保存されていないため、同じ構造の論文を照合できません。" in MANUAL_SRC
+        assert "理論モジュールの保存" in MANUAL_SRC
+
+
+class TestIdentityCandidateTheoryModule:
+    """§13.9: 同一性候補のリンク行に要素型の訳語と local_expression.name を出す。"""
+
+    def test_element_type_label_registered_in_vocab(self):
+        assert 'theory_module: "理論モジュール"' in VOCAB_JS_SRC
+
+    def test_link_row_uses_vocab_and_expression_name(self):
+        label = _admin_function_block("_libraryInstanceTypeLabel")
+        assert "vocab.elementTypeLabel(type)" in label
+        # 未知の型で生の element_type を出さない。
+        assert "label !== type" in label
+        expression = _admin_function_block("_libraryLocalExpressionText")
+        assert "localExpression.name" in expression
+        render = _admin_function_block("renderLibraryIdentityCandidates")
+        assert "_libraryInstanceTypeLabel(inst.element_type)" in render
+        assert "_libraryLocalExpressionText(link.local_expression)" in render
+        # オブジェクトをそのまま文字列にしない（旧実装の "[object Object]"）。
+        assert "escHtml(link.local_expression)" not in render
+
+    def test_justification_label_structural_match(self):
+        assert 'structural_match: "構造の一致"' in ADMIN_JS_SRC
+
+    def test_manual_describes_structural_candidates(self):
+        assert "理論モジュール由来の候補（構造の一致）" in LIBRARY_MANUAL_SRC
+        assert "工程の型" in LIBRARY_MANUAL_SRC
+
+
+class TestPipelineMenuStages:
+    """§13.5: 教材行「パイプラインを実行 ▼」に保存後の 2 ステージを足す。"""
+
+    def _groups_source(self) -> str:
+        start = ADMIN_JS_SRC.index("var materialPipelineStageGroups = [")
+        end = ADMIN_JS_SRC.index("var materialPipelineStages =", start)
+        return ADMIN_JS_SRC[start:end]
+
+    def test_stages_listed_with_server_labels(self):
+        groups = self._groups_source()
+        assert '["theory_modules", "理論モジュールの保存"]' in groups
+        assert '["identity_candidates", "共通する概念の候補づくり"]' in groups
+        # 実行順（theory_modules → identity_candidates）でメニューにも並べる。
+        assert groups.index('"theory_modules"') < groups.index('"identity_candidates"')
+        assert groups.index('"export_validation"') < groups.index('"theory_modules"')
+
+    def test_labels_match_server_progress_labels(self):
+        # import せずソースから読む（FastAPI 依存を UI 静的テストに持ち込まない）。
+        pipeline_src = (
+            ROOT / "backend" / "api" / "routes" / "lecture_studio" / "pipeline.py"
+        ).read_text(encoding="utf-8")
+        groups = self._groups_source()
+        for stage in ("theory_modules", "identity_candidates"):
+            match = re.search(r'"' + stage + r'":\s*"([^"]+)"', pipeline_src)
+            assert match, stage
+            label = match.group(1)
+            assert '["' + stage + '", "' + label + '"]' in groups, stage
+
+    def test_menu_items_carry_no_new_anchor(self):
+        # 個別ステージの項目は親メニューのアンカー（materials.row-pipeline-run）の内側で、
+        # 項目ごとのアンカーを持たない（既存の流儀）。
+        menu = _admin_function_block("materialPipelineMenuHtml")
+        assert 'data-ui-anchor="materials.row-pipeline-run"' in menu
+        assert "data-ui-anchor=\"materials.row-pipeline-stage" not in menu
+
+    def test_manual_describes_both_stages(self):
+        start = MATERIALS_MANUAL_SRC.index("{#pipeline-run}")
+        end = MATERIALS_MANUAL_SRC.index("\n### ", start)
+        section = MATERIALS_MANUAL_SRC[start:end]
+        assert "理論モジュールの保存" in section
+        assert "共通する概念の候補づくり" in section
+
+
+class TestPhase1CacheBusting:
+    def test_versions_bumped(self):
+        for path, old in (
+            ("element-vocab.js", "element-vocab-20260801-2"),
+            ("admin.js", "reproduction-wave2-20260919-1"),
+            ("admin-graph-review.js", "theory-modules-20260923-1"),
+        ):
+            match = re.search(r'/js/' + re.escape(path) + r'\?v=([^"]+)"', HTML_SRC)
+            assert match, path
+            assert match.group(1) != old, path

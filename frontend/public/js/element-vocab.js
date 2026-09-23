@@ -50,7 +50,9 @@
     thesis: "中心命題",
     symbol: "記号",
     stage: "理論ステージ",
-    part: "パーツ"
+    part: "パーツ",
+    // 理論モジュール（theory_module_layer_design.md §13.9）。同一性候補のリンク行に出す。
+    theory_module: "理論モジュール"
   };
 
   // 関係・役割の裏付け状態（context_lens ITEM の relation_status /

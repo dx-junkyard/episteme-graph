@@ -331,6 +331,16 @@
         ["export_validation", "整合性の最終チェック"],
       ],
     },
+    {
+      // 保存済みの結果を読む後段（theory_module_layer_design.md §13.5）。表示名は
+      // サーバの進捗ラベル表（lecture_studio/pipeline.py の DOCUMENT_PIPELINE_STAGE_LABELS）と同じ。
+      // 「理論モジュールの保存」から始めると、続けて同一性の候補づくりも走る。
+      label: "保存した結果を照合する",
+      stages: [
+        ["theory_modules", "理論モジュールの保存"],
+        ["identity_candidates", "共通する概念の候補づくり"],
+      ],
+    },
   ];
   var materialPipelineStages = materialPipelineStageGroups.reduce(function (stages, group) {
     return stages.concat(group.stages);
@@ -2798,6 +2808,28 @@
     return reason;
   }
 
+  // 同一性リンク行の要素型の訳語（theory_module_layer_design.md §13.9）。訳語表は
+  // element-vocab.js（ElementVocab.elementTypeLabel）が正本（新しい表を作らない）。未ロード・
+  // 空の型では何も出さない（生の element_type を画面に出さない）。
+  function _libraryInstanceTypeLabel(elementType) {
+    var type = String(elementType || "");
+    if (!type) return "";
+    var vocab = window.ElementVocab;
+    var label = vocab && vocab.elementTypeLabel ? String(vocab.elementTypeLabel(type) || "") : "";
+    return label && label !== type ? label : "";
+  }
+
+  // リンク行の表記。local_expression はオブジェクト（{"name": ...}）で届くので name を
+  // 取り出す（旧実装はオブジェクトをそのまま文字列にしていた）。文字列の旧データも受ける。
+  function _libraryLocalExpressionText(localExpression) {
+    if (!localExpression) return "";
+    if (typeof localExpression === "string") return localExpression.trim();
+    if (typeof localExpression === "object" && localExpression.name != null) {
+      return String(localExpression.name).trim();
+    }
+    return "";
+  }
+
   function _librarySectionTitleHtml(title, anchorId, note) {
     return '<div data-ui-anchor="' + anchorId + '" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--color-border-tertiary)">' +
       '<div style="font-size:12px;font-weight:600;margin-bottom:2px">' + escHtml(title) + '</div>' +
@@ -2858,9 +2890,12 @@
       }
       links.forEach(function (link) {
         var inst = link.instance || {};
+        var typeLabel = _libraryInstanceTypeLabel(inst.element_type);
+        var expression = _libraryLocalExpressionText(link.local_expression);
         html += '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;font-size:11.5px;padding:3px 0">' +
           '<span>' + escHtml(link.document_title || inst.document_id || "") +
-            (link.local_expression ? '「' + escHtml(link.local_expression) + '」' : '') +
+            (typeLabel ? ' <span style="color:var(--color-text-tertiary)">' + escHtml(typeLabel) + '</span>' : '') +
+            (expression ? '「' + escHtml(expression) + '」' : '') +
             _libraryStatusChipHtml(link.status) + ' ' + _libraryJustificationHtml(link.mapping_justification) +
           '</span>' +
           '<span style="display:flex;gap:4px">' +

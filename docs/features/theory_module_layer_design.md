@@ -832,7 +832,8 @@ migration は 086（§13.10 の下書きのまま・変更なし）。LLM 0 回�
    `module_key` が保存行と一致しないので、`related` の側は documents.id に解決してから引く。
 8. 管理 UI の「パイプラインを実行 ▼」の選択肢（`admin.js` の `materialPipelineStageGroups`）には `theory_modules` を
    足していない（`identity_candidates` も載っていない。受理側 `DOCUMENT_PIPELINE_STAGES` は `PIPELINE_STAGES` からの
-   導出なので、API の個別ステージ実行 `target_stage=theory_modules` は受理される）。
+   導出なので、API の個別ステージ実行 `target_stage=theory_modules` は受理される）。→ **§12.6 で解消**（2 ステージとも
+   メニューに追加）。
 
 **テスト**: `test_theory_module_store.py`（新設・40 件: 基表の規律 / migration 086 の形 / stable_key の決定性 /
 incoming の組み立て / fake session での同期と supersede / persistable=false で SQL 非発行 / ステージの登録・skip・
@@ -921,6 +922,51 @@ LLM 0 回・embedding 0 回・A層非改変。
 `test_deliberation_evidence_derivation.py`（CHECK の突き合わせに 086）/ `test_concept_registry_identity_candidates.py`
 （監査の `modules`）/ `test_concept_registry_candidates_api.py`（superseded モジュールへのリンク）/
 `test_indicator_catalog_guardrails.py`（`related` を `_R_OBJECT` の除外に登録）。
+
+### 12.6 UI（Phase 1, 2026-09-23）
+
+§13.9 の実装記録。backend（`backend/api/**` / `backend/core/**`）は変更していない。ES5・件数・指紋・内部 ID・
+候補の status を描かない。
+
+- **要素型の訳語**: `frontend/public/js/element-vocab.js::ELEMENT_TYPE_LABELS` に `theory_module: "理論モジュール"`
+  （JS 側だけの表示語彙・Python のミラー対象ではない = §12.5 逸脱 3 の解消）。`test_element_vocab_ui_static.py::
+  test_element_type_labels` の期待値を追随。
+- **ナレッジライブラリ「同一性の候補」**（`admin.js::renderLibraryIdentityCandidates`）: リンク行に要素型の訳語
+  （`_libraryInstanceTypeLabel` = `ElementVocab.elementTypeLabel` から引く。未ロード・未知の型では何も出さず、生の
+  `element_type` を出さない）と、`local_expression.name`（`_libraryLocalExpressionText`。旧実装は `local_expression`
+  のオブジェクトをそのまま文字列にしており、全型で「[object Object]」になっていた — 型を問わず直る）を出す。根拠の訳
+  「構造の一致」は第 1 波で `_libraryJustificationLabels` に追加済み。候補の文面はサーバの素通し（TM15 はサーバ側で保証）。
+  新しいアンカーは作らない（既存 `knowledge-library.identity-candidates` / `entry-review` の範囲）。
+- **グラフレビューのモジュール詳細**（`admin-graph-review.js`）: `selectModule` が外枠モジュール（`level != "inner"`）を
+  選んだときだけ `loadRelatedModules()` を呼び、`GET .../theory-modules/related` を**教材ごとに 1 回だけ**取得する
+  （`state.relatedModulesRequested`・`open()` で 3 つの状態を戻す・別教材の遅延応答は破棄・ポーリングなし）。
+  `relatedModulesHtml(module)` を `moduleDetailHtml` の後ろに足し、区画「同じ構造のモジュールを持つ論文」に
+  説明文（§13.9 の逐語）+ タイトルの列挙 + サーバの `facts[]` を描く。`available: false` は事実文だけ、表示中の
+  `module_key` が `modules[]` に無いときは §13.7 の固定文（UI 側の定数 `MODULE_RELATED_UNMATCHED_TEXT`）、列挙も
+  事実文も無ければ区画を出さない。`hidden` は真偽値を直接見ず、サーバの事実文（`FACT_RELATED_HIDDEN`）で語る。
+  取得前・取得失敗・内側のまとまりでは何も描かない（fail-soft。失敗の事実文も新設しない）。タイトルはリンクに
+  しない（v1）ので事実の区画で、`data-ui-anchor` は付けない。
+  - 既知の限界: `hidden` / `facts[]` は教材全体の値なので、「閲覧できない論文にも、同じ構造のモジュールがあります。」は
+    モジュールごとではなく、どの外枠モジュールの詳細にも同じ文として出る（サーバの DTO がモジュール単位の `hidden` を
+    持たないため。モジュール単位にするなら §13.7 の DTO を additive に変える）。
+- **教材行「パイプラインを実行 ▼」**（`admin.js::materialPipelineStageGroups`）: 末尾に群「保存した結果を照合する」を
+  足し、`theory_modules`（「理論モジュールの保存」）と `identity_candidates`（「共通する概念の候補づくり」）を実行順に
+  並べた。表示名はサーバの進捗ラベル表 `routes/lecture_studio/pipeline.py::DOCUMENT_PIPELINE_STAGE_LABELS` の既存訳と
+  同一（メニューと進捗表示で食い違わせない。一致はテストで固定）。個別ステージは `start_stage` 実行なので、前者から
+  始めると後者も走る。個別ステージの項目は親メニューのアンカー `materials.row-pipeline-run` の内側で項目ごとの
+  アンカーを持たない既存の流儀に従い、**新しいアンカーは足していない**（マニュアル `11-admin-materials.md#pipeline-run`
+  に 2 項目の説明を追記）。
+- **マニュアル**: `19-admin-knowledge-library.md#identity-candidates`（理論モジュール由来の候補・「構造の一致」の意味・
+  名前は直してよい・確定は教員）/ `26-admin-graph-review.md#theory-modules`（「同じ構造のモジュールを持つ論文」・
+  3 つの事実文ごとの解消方法）/ `11-admin-materials.md#pipeline-run`（2 ステージ）。新しいアンカー節は作らない。
+- **キャッシュ**: `admin.html` の `element-vocab.js?v=theory-modules-20260923-1` / `admin-graph-review.js?v=
+  theory-modules-related-20260923-1` / `admin.js?v=theory-modules-ui-20260923-1`。`element-vocab.js` は学習画面
+  （`index.html`）も読むので同じ値に上げた。
+- **テスト**: `test_theory_module_ui_static.py` に `TestRelatedModules`（1 回取得・遅延・別教材破棄・fail-soft・
+  タイトルと事実文だけ・数と status と module_key を描かない・アンカーなし・マニュアル）/
+  `TestIdentityCandidateTheoryModule`（訳語の登録・リンク行の委譲と `name` の取り出し・「構造の一致」・マニュアル）/
+  `TestPipelineMenuStages`（2 ステージの順序・サーバ訳との一致・項目アンカーなし・マニュアル）/
+  `TestPhase1CacheBusting` を追加。
 
 ---
 

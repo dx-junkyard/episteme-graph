@@ -3330,11 +3330,12 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   （`_require_editable_ledger_target`）が必要 — `_require_teacher` だけでは足りない。⑧SA層 `retrieved_structure` の
   事実文は `learner_context_common.safe_text` を通し生 TeX を出さない。nginx の `client_max_body_size` は 55m。
 
-### 理論モジュール層（グラフの中間層 — 式の操作に「接点の狭さ」で境目を入れる, migration なし, 2026-09-23）
+### 理論モジュール層（グラフの中間層 — 式の操作に「接点の狭さ」で境目を入れる, migration 086, 2026-09-23）
 
 グラフレビューの「主グラフ（stage 固定語彙で最大 7）」と「式の詳細（数百）」の間を埋める**読み時導出・
-非LLM の中間層**。正本は `docs/features/theory_module_layer_design.md`（TM1〜TM10・§5 導出規則・
-§7 claim チェーンの位置づけ・§9 オーナー判断・§12 実装記録）。目的は**理論の構造を見抜き、共通構造を
+非LLM の中間層**。正本は `docs/features/theory_module_layer_design.md`（TM1〜TM15・§5 導出規則・
+§7 claim チェーンの位置づけ・§9 オーナー判断・§12 実装記録・§13 Phase 1 設計）。Phase 0（表示）と
+Phase 1（保存・同一性候補）は同日に実装済み。目的は**理論の構造を見抜き、共通構造を
 抽象化して他への転用を楽にする**こと（コース側で束ねる用途 = 学ぶ単位や、論文の章立て = 論文層とは別）。
 
 - **実測が出発点**: 2609.15375v1（PDF 経路）の「式の詳細 470」は全部 claim チェーン（章ごとに主張を出現順に
@@ -3345,10 +3346,12 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - **モジュール = 少数の入力式と前提を受けて少数の結果式を返す部分系**。式操作 DAG（重複除去済み・`chain_type ∈
   {equation_chain, mixed_chain}` の step のみ・claim_chain は成員にしない）で、隣接 step を「接点（外から受ける式 +
   外へ出す式）≤ k」を保つ限り接点最小の対から貪欲に併合する。外枠 `OUTER_INTERFACE_LIMIT = 3`・内側
-  `INNER_INTERFACE_LIMIT = 2` の 2 段。**共有の基礎**（入次数を問わず 4 step 以上に消費される式 =
-  `SHARED_FOUNDATION_MIN_CONSUMERS`）は接点に数えない（配線でいう電源レール）。system_level の一括操作は成員でなく
-  **結果の吸い込み口（sink）**。循環は強連結成分ごとに 1 初期モジュールにまとめて事実文で報告。k と閾値はコード
-  定数で env から読まない（値を変えるときは設計書に実測を足す）。
+  内側は**分岐点と循環で切る**（外枠の中で 2 つ以上の単位に消費される式を生む単位と循環群を起点にし、起点へ入る
+  受け渡しを切る。`INNER_HUB_MIN_CONSUMERS = 2` / `INNER_INTERFACE_LIMIT = 2`。接点 ≤ 2 の貪欲併合は閉じた本体で
+  止まらず開いた本体で 1 step に割れた — §12.3 の 9 候補比較）。**共有の基礎**（入次数を問わず 4 step 以上に消費
+  される式 = `SHARED_FOUNDATION_MIN_CONSUMERS`）は接点に数えない（配線でいう電源レール）。system_level の一括操作
+  は成員でなく**結果の吸い込み口（sink）**。循環は強連結成分ごとに 1 初期モジュールにまとめて事実文で報告。k と
+  閾値はコード定数で env から読まない（値を変えるときは設計書に実測を足す）。
 - **正本**: `backend/core/theory_modules/{schema,builder}.py`（FastAPI / sqlalchemy / LLM 非 import の純関数
   `build_theory_modules(document_id=, artifacts=, graph_json=)`。入力を mutate しない・例外を外に出さない・式 step 0
   は `available:false` + 事実文）。API は `GET /api/admin/documents/{document_id}/theory-modules`
@@ -3369,13 +3372,36 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   / 内側モジュール / 成員 step → 式の詳細へ `focusNodeOnce`）。描画は `graphView` 委譲（GR8）。アンカーは
   `graph-review.module-view` / `graph-review.module-member` + `docs/manual/teacher/26-admin-graph-review.md#theory-modules`
   （件数の正本は `test_admin_help_ui_anchors.py`）。
-- **保存しない（O-1 = (c)）**: Phase 0 は読み時導出。Phase 1 で工程の型 + 接点の本数（内部指紋）から同一性候補を作る
-  前に stable_key 付きの knowledge object として保存する（候補の置き場は概念レジストリの O-6 に従属）。
-- **ガードレール**: `test_theory_module_{core,guardrails,api,ui_static}.py`。fixture は
-  `backend/tests/fixtures/theory_modules/`（arXiv-2407.01221v2 = 外枠 8 / 2609.15375v1 TeX = 外枠 10 /
-  同 PDF = `available:false` のゴールデン）。
-- **非スコープ（v1）**: 内側 2 段目の磨き込み・同一性候補（Phase 1）/ モジュールの保存 / 学習者向け表示 / SA層解決器
-  （`view.layer = "module"`）/ 辺の承認。
+- **保存（Phase 1・O-1 = (c)・§13.2〜13.6）**: 表示は読み時導出のまま（保存行は表示の正本ではない = TM11）、
+  同一性の参照先として外枠・内側の両方を `knowledge_theory_modules`（migration 086・`_live` ビュー・DELETE なし）に
+  行で持つ。stable_key の材料は document_id + 規則版 + 段 + **生む式の stable_key 集合**（`RULE_VERSION = "m2"`。
+  `module_key` も同材料で、route は `equation_stable_key_map` を builder に渡す）。書くのは新ステージ
+  **`theory_modules`**（`_PIPELINE_STEPS` の `persist_claims_components_graph` と `identity_candidates` の間・
+  非LLM・非致命）だけで、純関数は `core/knowledge_objects/theory_modules.py`、SQL は
+  `persistence.sync_theory_modules`（`sync_live_rows` 経由）。式の手順 0 は「それが今回の結果」として旧行を
+  superseded に（TM14）。**起動時バックフィルなし** — 既存教材の行は再解析か `target_stage=theory_modules`
+  （教材行「パイプラインを実行 ▼」）で作る。基表を読むのは persistence のみ（KO5 の allowlist）。
+- **構造の指紋と同一性候補（Phase 1・§13.4 / §13.8）**: 指紋 = 工程の型の多重集合 + 外から受ける式の本数 + 外へ出す式の
+  本数 + 前提の有無（`m2|outer|ops=…|in=…|out=…|premise=…`）。**内部表現で DTO・UI に出さない（TM12）**。
+  `identity_candidates` ステージの規則 ⑤（`core/library/identity_candidates.py::run_structural_module_rule`）が
+  当該 document の live 外枠（`identity_eligible` = 成員 ≥ 3・汎用でない工程の型 ≥ 2 種）と他 document の指紋
+  **完全一致**を candidate entry（`candidate_key = "cand|tm|" + sha256`・`domain_key='unassigned'`・名前は工程の
+  動詞のみ = TM15）+ `element_identity_links` candidate 2 本（`instance_element_type='theory_module'`・
+  `mapping_justification='structural_match'`）にする。上限は別枠 env `IDENTITY_MODULE_CANDIDATES_MAX_PER_DOCUMENT`
+  （既定 10）。見送り・リンク済みは再提案しない。候補の置き場は概念レジストリの **O-6 に従属**（否なら書き込み先と
+  一覧の読み先だけ差し替え）。**確定は人間**（TM7・TM13）。`theory_module` は W層 ElementRef の要素型にしない
+  （symbol の前例どおり identity link の instance 型だけ）。学習者の旅の相手 document 列挙からは除外。
+- **related（§13.7）**: `GET /api/admin/documents/{id}/theory-modules/related` が外枠モジュールごとに「同じ構造の
+  外枠を持つ論文」を**タイトル列挙**（可視性 fail-closed・`hidden` は真偽値のみ・保存行なし / 規則版不一致 /
+  閲覧不可の相手にもある の 3 事実文・教員が見送った組は出さない）。組み立ては `core/theory_modules/related.py`
+  （SQL なし）、読み出しは `core/library/structural_matches.py`（`_live` ビューのみ）。
+- **オーナー判断の残り**: O-5（規則版を上げたとき確定済み同一性リンクを新版の行へ付け替えるか — 推奨「付け替えない」で
+  実装）/ O-4 は O-6 従属。
+- **ガードレール**: `test_theory_module_{core,guardrails,api,ui_static,store,identity}.py`。fixture は
+  `backend/tests/fixtures/theory_modules/`（arXiv-2407.01221v2 = 外枠 8・内側 5 / 2609.15375v1 TeX = 外枠 10・内側 4 /
+  同 PDF = `available:false` のゴールデン。2 論文間に指紋一致なし）。
+- **非スコープ**: 学習者向け表示 / SA層解決器（`view.layer = "module"`）/ 辺の承認 / LLM による命名・境目提案 /
+  全論文横断の一枚図（原則 6）/ 直線チェーン（分岐も循環も無い長い連なり）の内側分割。
 
 ### 論文の再現性レビューと是正（migration なし, 2026-09-19）
 

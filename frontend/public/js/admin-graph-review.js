@@ -54,6 +54,11 @@
     theoryModulesError: null, // 取得失敗の事実文（グラフ・レビュー操作は止めない）
     layerChosenByUser: false, // 教員が層を選んだら、初期表示の自動切替をしない
     moduleAutoDecided: false, // 初期表示（O-3 (b)）の判定は開くたびに一度だけ
+    // 同じ構造のモジュールを持つ論文（theory_module_layer_design.md §13.7 / §13.9）。
+    // 最初に外枠モジュールを選んだときに教材ごと 1 回だけ取得する（ポーリングしない）。
+    relatedModules: null,          // theory-modules/related DTO（取得前・失敗時は null）
+    relatedModulesRequested: false, // この教材で取得を始めたか（開くたびに戻す）
+    relatedModulesFailed: false,   // 取得失敗（区画ごと出さない fail-soft）
   };
 
   // -------------------------------------------------------------------------
@@ -253,6 +258,12 @@
     cycle: "導出のつながりに循環があるため単独にしています",
     interface_too_wide: "隣の手順と接点が多く、まとめていません",
   };
+  // 同じ構造のモジュールを持つ論文（§13.9）。「同じ構造」は事実で、同一性の候補ではない
+  // （TM13）ので候補の status は出さない。件数・指紋は描かない。タイトルはリンクにしない
+  // （v1）ので操作要素ではなく事実の区画 — data-ui-anchor は付けない。
+  var MODULE_RELATED_HEADING = "同じ構造のモジュールを持つ論文";
+  var MODULE_RELATED_NOTE = "工程の型と、受け渡す式の形が同じモジュールを持つ論文です（閲覧できる論文だけを示します）。";
+  var MODULE_RELATED_UNMATCHED_TEXT = "このモジュールは保存済みのモジュールと対応が取れないため、同じ構造の論文を示していません。";
   var MODULE_SINK_PREFIX = "sink:"; // 合成ノードの vis id（表示しない）
   var MODULE_CANVAS_LABEL_MAX_CHARS = 48;
   var MODULE_CANVAS_LABEL_LINE_CHARS = 16;
@@ -515,6 +526,9 @@
     state.theoryModulesError = null;
     state.layerChosenByUser = false;
     state.moduleAutoDecided = false;
+    state.relatedModules = null;
+    state.relatedModulesRequested = false;
+    state.relatedModulesFailed = false;
     var modal = ensureModal();
     modal.hidden = false;
     stopVoice(); // 前回の音声セッションを持ち越さない
@@ -1853,6 +1867,9 @@
 
   function selectModule(key) {
     state.selectedModuleKey = String(key || "");
+    // 外枠モジュールを初めて選んだときだけ「同じ構造の論文」を取りに行く（§13.9）。
+    var selected = state.selectedModuleKey ? moduleByKey(state.selectedModuleKey) : null;
+    if (selected && String(selected.level || "outer") !== "inner") loadRelatedModules();
     renderDetail();
     if (state.network) {
       try {
@@ -1927,6 +1944,73 @@
         moduleBlock("外へ出す式", moduleEquationChips(module.outputs)) +
         "</div>";
     }).join("");
+  }
+
+  // 同じ構造のモジュールを持つ論文（GET .../theory-modules/related。§13.7 / §13.9）。
+  // 教材ごとに 1 回だけ取得し、別教材の遅延応答は破棄する。失敗しても区画ごと出さない
+  // だけで、モジュール図・承認操作は止めない（fail-soft）。
+  function loadRelatedModules() {
+    if (state.relatedModulesRequested) return;
+    var documentId = state.documentId;
+    if (!documentId) return;
+    state.relatedModulesRequested = true;
+    deps.apiFetch("/admin/documents/" + encodeURIComponent(documentId) + "/theory-modules/related")
+      .then(function (res) {
+        if (!res.ok) throw new Error("related unavailable");
+        return res.json();
+      })
+      .then(function (data) {
+        if (state.documentId !== documentId) return; // 別教材へ切替済みの遅延応答は破棄
+        state.relatedModules = data || {};
+        state.relatedModulesFailed = false;
+        if (state.moduleView) renderDetail();
+      })
+      .catch(function () {
+        if (state.documentId !== documentId) return;
+        state.relatedModules = null;
+        state.relatedModulesFailed = true;
+        if (state.moduleView) renderDetail();
+      });
+  }
+
+  function relatedEntryFor(module) {
+    var data = state.relatedModules;
+    var list = (data && Array.isArray(data.modules)) ? data.modules : [];
+    var wanted = String((module && module.module_key) || "");
+    if (!wanted) return null;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && String(list[i].module_key || "") === wanted) return list[i];
+    }
+    return null;
+  }
+
+  // タイトルの列挙とサーバの事実文だけを描く（数・指紋・status・module_key は描かない）。
+  // 取得前・失敗時・内側のまとまりでは何も描かない。列挙も事実文も無ければ区画を出さない
+  // （閉世界の言明を足さない）。
+  function relatedModulesHtml(module) {
+    if (!module || String(module.level || "outer") === "inner") return "";
+    if (state.relatedModulesFailed) return "";
+    var data = state.relatedModules;
+    if (!data) return "";
+    var facts = (data.facts || []).filter(function (fact) { return String(fact || "").trim(); });
+    if (data.available === false) return moduleBlock(MODULE_RELATED_HEADING, paperFactLines(facts, ""));
+    var entry = relatedEntryFor(module);
+    var body = "";
+    if (!entry) {
+      body = paperFactLine(MODULE_RELATED_UNMATCHED_TEXT);
+    } else {
+      var titles = [];
+      (entry.documents || []).forEach(function (doc) {
+        var title = String((doc && doc.title) || "").trim();
+        if (title) titles.push(title);
+      });
+      if (titles.length) {
+        body = '<div class="graph-review-paper-note">' + esc(MODULE_RELATED_NOTE) + "</div>" +
+          "<ul>" + titles.map(function (title) { return "<li>" + esc(title) + "</li>"; }).join("") + "</ul>";
+      }
+    }
+    body += paperFactLines(facts, "");
+    return moduleBlock(MODULE_RELATED_HEADING, body);
   }
 
   function moduleDetailHtml(module) {
@@ -2018,7 +2102,7 @@
       if (sink) body = sinkDetailHtml(sink);
     } else if (key) {
       var module = moduleByKey(key);
-      if (module) body = moduleDetailHtml(module);
+      if (module) body = moduleDetailHtml(module) + relatedModulesHtml(module);
     }
     if (!body) {
       container.innerHTML = '<div class="graph-review-empty">' + esc(MODULE_EMPTY_DETAIL_TEXT) + "</div>" + factsHtml;
