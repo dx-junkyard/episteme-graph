@@ -46,6 +46,14 @@
     voiceLoop: null,    // AdminVoiceChat のコントローラ（起動中のみ）
     voicePlayer: null,  // 読み上げ中の Audio（停止時に止める）
     nodePositions: {},  // 教員が動かしたノードの位置 {node_id: {x, y}}（端末に保存）
+    // 理論モジュール層（theory_module_layer_design.md §8.1）。層トグルの1つだが
+    // state.layer には入れない（getScreenContext の layer 語彙と画面の層フィルタを変えない）。
+    moduleView: false,        // true = キャンバスにモジュール図を描く
+    selectedModuleKey: "",    // モジュール図で選択中のモジュール（または sink）の読み時キー
+    theoryModules: null,      // theory-modules DTO（読み時導出。取得前は null）
+    theoryModulesError: null, // 取得失敗の事実文（グラフ・レビュー操作は止めない）
+    layerChosenByUser: false, // 教員が層を選んだら、初期表示の自動切替をしない
+    moduleAutoDecided: false, // 初期表示（O-3 (b)）の判定は開くたびに一度だけ
   };
 
   // -------------------------------------------------------------------------
@@ -224,6 +232,31 @@
   // stance_label で、履歴の再読み込み（サーバ応答を伴わない描画）だけがここへ落ちる。
   var STANCE_LABEL_FALLBACK = "AIの読み（未確認）";
 
+  // 網羅性の但し書き（「未レビューのノードや式詳細は多数ありますが…」）を AI 応答の
+  // 本文から外し、会話の最後の1枚のラベルが引き受ける（§18）。この画面の目的は
+  // 概要を掴むことで、網羅性は教員がここから正確に判断するものではない。件数は
+  // 出さない（GR3）。文字列の正本はサーバの core/label_vocab.py::REVIEW_PENDING_LABEL
+  // で、ここは逐語ミラー（一致は ui_static テストが固定）。
+  var REVIEW_PENDING_LABEL = "未レビューの要素あり";
+
+  // 理論モジュール層（theory_module_layer_design.md §7.3 / §8.1）の事実文と見出し。
+  // 件数・接点の本数・閾値は描かない（TM6）。内部 ID（module_key / eq_op_ 等）は
+  // 描かず、DTO の label / display_label だけを出す（TM10）。
+  var MODULE_LAYER_LABEL = "理論モジュール";
+  var MODULE_LOADING_TEXT = "理論モジュールを読み込んでいます…";
+  var MODULE_ERROR_TEXT = "理論モジュールを取得できませんでした。";
+  var MODULE_UNAVAILABLE_TEXT = "この教材では式の導出が再現されていないため、理論モジュールを組めません。";
+  var MODULE_CLAIM_SEQUENCE_EMPTY_TEXT = "この教材では式の導出を再現できていません。主張の並びは『論文の順』で見られます。";
+  var MODULE_EMPTY_DETAIL_TEXT = "モジュールを選ぶと、何を受けて何を返すか（外から受ける式・外へ出す式）と、中の手順が表示されます。";
+  var MODULE_COMPARISON_HEADING = "照合用（AI の原案）";
+  var MODULE_ISOLATED_TEXTS = {
+    cycle: "導出のつながりに循環があるため単独にしています",
+    interface_too_wide: "隣の手順と接点が多く、まとめていません",
+  };
+  var MODULE_SINK_PREFIX = "sink:"; // 合成ノードの vis id（表示しない）
+  var MODULE_CANVAS_LABEL_MAX_CHARS = 48;
+  var MODULE_CANVAS_LABEL_LINE_CHARS = 16;
+
   function esc(text) {
     return deps.escHtml ? deps.escHtml(text == null ? "" : String(text)) : String(text == null ? "" : text);
   }
@@ -269,10 +302,24 @@
     return null;
   }
 
+  // 「まだ人が見ていない要素が残っているか」だけを返す（層トグルに依らず、AI が読む
+  // grounding と同じ母集合 = debug 層を除く全ノード。件数・内訳は出さない）。
+  function hasPendingReviewElements() {
+    var nodes = graphNodes();
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      if (String((node && node.graph_layer) || "main").toLowerCase() === "debug") continue;
+      if (isUnreviewedNode(node)) return true;
+    }
+    return false;
+  }
+
   function unreviewedNodesInView() {
     // グラフ未ロード・読み込み失敗中は空扱い（filterByLayer に null を渡さない）。
     if (!state.graph) return [];
-    var view = gv().filterByLayer(state.graph, state.layer);
+    // モジュール図はレビュー対象のノードを描かない（承認は式の詳細層・主グラフで行う）。
+    if (state.moduleView) return [];
+    var view = visibleGraphView();
     return (view.nodes || []).filter(isUnreviewedNode);
   }
 
@@ -462,6 +509,12 @@
     state.view = "graph";
     state.paperLayer = null;
     state.paperLayerError = null;
+    state.moduleView = false;
+    state.selectedModuleKey = "";
+    state.theoryModules = null;
+    state.theoryModulesError = null;
+    state.layerChosenByUser = false;
+    state.moduleAutoDecided = false;
     var modal = ensureModal();
     modal.hidden = false;
     stopVoice(); // 前回の音声セッションを持ち越さない
@@ -477,6 +530,9 @@
     // 論文層はグラフと並行して遅延取得する（設計書 §4.1）。失敗してもグラフ表示・
     // レビュー操作は止めない（PL8）。
     loadPaperLayer(documentId);
+    // 理論モジュールも並行して遅延取得する（theory_module_layer_design.md §8.1）。
+    // 届くまでは従来どおり主グラフを描く（ちらつきより正直さ。ポーリングしない）。
+    loadTheoryModules(documentId);
   }
 
   function close() {
@@ -512,6 +568,8 @@
         }
         // レビュー確定後の再読み込みでは、見ている範囲（ズーム・パン）を保つ。
         if (keepSelection) state.preserveViewOnce = true;
+        // 理論モジュールが先に届いていれば、ここで初期表示を決める（O-3 (b)）。
+        maybeStartWithModuleView();
         render();
       })
       .catch(function (err) {
@@ -552,6 +610,60 @@
         renderPaperOutline();
         renderDetail();
       });
+  }
+
+  // 理論モジュール（読み時導出・LLM 0回。theory_module_layer_design.md §8.1）。
+  // 取得の成否はグラフ表示・承認操作に影響させない。失敗時は (b-読) の目印を
+  // 適用せず従来どおり全部描く（fail-to-current）。
+  function loadTheoryModules(documentId) {
+    deps.apiFetch("/admin/documents/" + encodeURIComponent(documentId) + "/theory-modules")
+      .then(function (res) {
+        if (!res.ok) throw new Error(MODULE_ERROR_TEXT);
+        return res.json();
+      })
+      .then(function (data) {
+        if (state.documentId !== documentId) return; // 別教材へ切替済みの遅延応答は破棄
+        state.theoryModules = data || {};
+        state.theoryModulesError = null;
+        afterTheoryModulesArrived();
+      })
+      .catch(function () {
+        if (state.documentId !== documentId) return;
+        state.theoryModules = null;
+        state.theoryModulesError = MODULE_ERROR_TEXT;
+        afterTheoryModulesArrived();
+      });
+  }
+
+  function afterTheoryModulesArrived() {
+    if (!state.graph) return; // グラフ到着時（loadGraph）に初期表示を決める
+    var switched = maybeStartWithModuleView();
+    // 目印（claim_sequence_node_ids）はこの時点で初めて決まるので描き直す。
+    // 自動で切り替えないときは見ている範囲を動かさない。
+    if (!switched) state.preserveViewOnce = true;
+    renderLayerToolbar();
+    renderUnreviewedCount();
+    renderNetwork();
+    renderPaperCueLegend();
+    renderDetail();
+    if (switched) renderChatShell();
+  }
+
+  // 初期表示（O-3 (b)）: モジュールが導出できる教材だけモジュール図から始める。
+  // 導出できない・取得に失敗した・教員が先に層を選んだ場合は従来どおり（主グラフ）。
+  // グラフと理論モジュールの両方が届いた時点で、開くたびに一度だけ判定する。
+  function maybeStartWithModuleView() {
+    if (state.moduleAutoDecided || state.layerChosenByUser) return false;
+    if (!state.graph) return false;
+    if (!state.theoryModules && !state.theoryModulesError) return false; // まだ届いていない
+    state.moduleAutoDecided = true;
+    if (state.selectedNodeId) return false; // 教員がもうノードを見ている — 画面を奪わない
+    if (!moduleMapAvailable()) return false;
+    if (!gv().layerOptions(graphNodes()).length) return false; // 層トグルが無い単層グラフ
+    state.moduleView = true;
+    state.selectedNodeId = "";
+    state.selectedModuleKey = "";
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -615,15 +727,20 @@
     // layerOptions は単層グラフ（main のみ）では空配列を返す = トグル不要。
     var options = gv().layerOptions(graphNodes());
     container.innerHTML = options.map(function (opt) {
-      var active = opt.value === state.layer ? " is-active" : "";
+      var active = !state.moduleView && opt.value === state.layer ? " is-active" : "";
       return '<button type="button" class="graph-review-layer-btn' + active + '" data-graph-review-layer="' +
         esc(opt.value) + '">' + esc(opt.label) +
         ' <span class="graph-review-layer-count">' + esc(String(opt.count)) + "</span></button>";
-    }).join("");
+    }).join("") + moduleLayerButtonHtml(options);
+    var moduleBtn = container.querySelector("[data-graph-review-module-view]");
+    if (moduleBtn) moduleBtn.addEventListener("click", enterModuleView);
     container.querySelectorAll("[data-graph-review-layer]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var layer = this.getAttribute("data-graph-review-layer");
-        if (layer === state.layer) return;
+        state.layerChosenByUser = true;
+        if (layer === state.layer && !state.moduleView) return;
+        state.moduleView = false;
+        state.selectedModuleKey = "";
         state.layer = layer;
         state.selectedNodeId = "";
         renderLayerToolbar();
@@ -642,8 +759,8 @@
   function renderPaperCueLegend() {
     var el = document.getElementById("graph-review-paper-cue-legend");
     if (!el) return;
-    if (state.view !== "graph" || !state.graph || !paperData()) { el.textContent = ""; return; }
-    var view = gv().filterByLayer(state.graph, state.layer);
+    if (state.view !== "graph" || !state.graph || !paperData() || state.moduleView) { el.textContent = ""; return; }
+    var view = visibleGraphView();
     var nodes = view.nodes || [];
     var marked = false;
     for (var i = 0; i < nodes.length; i++) {
@@ -655,7 +772,7 @@
   function renderUnreviewedCount() {
     var el = document.getElementById("graph-review-unreviewed-count");
     if (!el) return;
-    if (!state.graph || !graphNodes().length) { el.textContent = ""; return; }
+    if (!state.graph || !graphNodes().length || state.moduleView) { el.textContent = ""; return; }
     el.textContent = "未レビュー " + unreviewedNodesInView().length + " 件";
   }
 
@@ -690,8 +807,21 @@
       );
       return;
     }
-    var view = gv().filterByLayer(state.graph, state.layer);
+    // 理論モジュール図（theory_module_layer_design.md §8.1）。描画は同じ graphView の
+    // 関数へ合成ノードを渡すだけ（GR8: 新しい描画経路を作らない）。
+    if (state.moduleView) {
+      renderModuleNetwork(container, savedPosition, savedScale);
+      return;
+    }
+    var view = visibleGraphView();
     var nodes = view.nodes || [];
+    if (!nodes.length && view.claimSequenceHidden) {
+      // (b-読) の目印を外したら式の詳細層に何も残らない = 式の導出が再現されていない。
+      // 空のキャンバスを出さず、主張の並びの受け皿（論文の順）を事実文で示す。
+      container.innerHTML = canvasFactHtml([MODULE_CLAIM_SEQUENCE_EMPTY_TEXT]);
+      return;
+    }
+    container.innerHTML = ""; // 直前の事実文を残さない
     var displayEdges = gv().displayEdges(view.edges || []);
     var positions = withSavedPositions(gv().layoutPositions(nodes, displayEdges), nodes);
     var g = gv();
@@ -774,6 +904,21 @@
   }
 
   function selectNode(nodeId) {
+    if (state.moduleView) {
+      // モジュール図を見ている間に「論文の順」のノードチップが押された。モジュール図は
+      // 理論操作グラフのノードを持たないので、そのノードの層へ切り替えてから選ぶ。
+      var target = nodeById(nodeId);
+      var targetLayer = String((target && target.graph_layer) || "main").toLowerCase();
+      state.moduleView = false;
+      state.selectedModuleKey = "";
+      state.layerChosenByUser = true;
+      state.layer = targetLayer === "main" ? "main" : (targetLayer === "equation_detail" ? "equation_detail" : "all");
+      state.selectedNodeId = nodeId;
+      renderLayerToolbar();
+      renderUnreviewedCount();
+      renderNetwork();
+      renderPaperCueLegend();
+    }
     state.selectedNodeId = nodeId;
     renderDetail();
     markSelectedPaperChips(); // 論文の順で見ているときの選択強調（描き直さず class のみ）
@@ -786,6 +931,12 @@
   }
 
   function gotoNextUnreviewed() {
+    if (state.moduleView) {
+      setStatus("graph-review-graph-status",
+        "理論モジュールの表示にはレビュー対象のノードがありません。層を「主グラフ」か「式の詳細」に切り替えてください。",
+        "info");
+      return;
+    }
     var pending = unreviewedNodesInView();
     if (!pending.length) {
       setStatus("graph-review-graph-status", "この層に未レビューのノードはありません。", "info");
@@ -1354,6 +1505,534 @@
   }
 
   // -------------------------------------------------------------------------
+  // 理論モジュール層（theory_module_layer_design.md §4 / §7.3 / §8.1）
+  //
+  // backend の読み時導出（GET .../theory-modules）が返すモジュール・受け渡し・sink・
+  // (b-読) の目印を描くだけで、境目の判定・claim チェーンの判定をフロントに再実装
+  // しない。件数・接点の本数・閾値は描かない（TM6）。表示するのは label /
+  // display_label / text / name だけで、読み時キーや式の内部 ID は描かない（TM10）。
+  // -------------------------------------------------------------------------
+
+  function theoryModulesData() {
+    return state.theoryModules || null;
+  }
+
+  function moduleList() {
+    var data = theoryModulesData();
+    return (data && Array.isArray(data.modules)) ? data.modules : [];
+  }
+
+  function outerModules() {
+    return moduleList().filter(function (module) {
+      return module && module.module_key && String(module.level || "outer") !== "inner";
+    });
+  }
+
+  function innerModulesOf(parentKey) {
+    var key = String(parentKey || "");
+    if (!key) return [];
+    return moduleList().filter(function (module) {
+      return module && String(module.level || "") === "inner" &&
+        String(module.parent_module_key || "") === key;
+    });
+  }
+
+  function moduleByKey(key) {
+    var list = moduleList();
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && String(list[i].module_key || "") === String(key || "")) return list[i];
+    }
+    return null;
+  }
+
+  function moduleSinks() {
+    var data = theoryModulesData();
+    return (data && Array.isArray(data.sinks)) ? data.sinks : [];
+  }
+
+  function moduleFacts() {
+    var data = theoryModulesData();
+    return ((data && data.facts) || []).filter(function (fact) { return String(fact || "").trim(); });
+  }
+
+  // モジュール図を描けるか（available:false・外枠モジュールなしは描けない）。
+  function moduleMapAvailable() {
+    var data = theoryModulesData();
+    if (!data || data.available === false) return false;
+    return outerModules().length > 0;
+  }
+
+  // (b-読) の目印: キャンバスから外す詳細ノード（claim チェーン由来）。判定は
+  // サーバの射影が行い、ここは目印を読むだけ。available:false の教材でも目印は
+  // 付く（式の層が無い論文ほど主張の列で埋まっている）。取得前・失敗時は null
+  // = 従来どおり全部描く（fail-to-current）。
+  function claimSequenceNodeIndex() {
+    var data = theoryModulesData();
+    var ids = (data && Array.isArray(data.claim_sequence_node_ids)) ? data.claim_sequence_node_ids : [];
+    var index = null;
+    ids.forEach(function (id) {
+      var key = String(id || "");
+      if (!key) return;
+      if (!index) index = {};
+      index[key] = true;
+    });
+    return index;
+  }
+
+  // 表示中の層のノードと辺（graphView.filterByLayer + (b-読) の目印）。
+  // 目印は「式の詳細」「すべて」の層にだけ適用する（主グラフには詳細ノードが無い）。
+  function visibleGraphView() {
+    var view = gv().filterByLayer(state.graph, state.layer);
+    if (state.layer !== "equation_detail" && state.layer !== "all") return view;
+    var hidden = claimSequenceNodeIndex();
+    if (!hidden) return view;
+    var g = gv();
+    var allNodes = view.nodes || [];
+    var nodes = allNodes.filter(function (node) { return !hidden[g.nodeId(node)]; });
+    var edges = (view.edges || []).filter(function (edge) {
+      var source = edge.source_component_id || edge.source || edge.from;
+      var target = edge.target_component_id || edge.target || edge.to;
+      return !hidden[source] && !hidden[target];
+    });
+    return { nodes: nodes, edges: edges, claimSequenceHidden: nodes.length !== allNodes.length };
+  }
+
+  // キャンバスの位置に出す事実文（空のキャンバスを見せない — TM8）。
+  function canvasFactHtml(lines) {
+    return '<div class="graph-review-canvas-fact">' + paperFactLines(lines, "") + "</div>";
+  }
+
+  function stageLabelJa(stageKey) {
+    var vocab = window.ElementVocab;
+    if (!vocab || !vocab.theoryStageLabel) return "";
+    return vocab.theoryStageLabel(String(stageKey || "")) || "";
+  }
+
+  // キャンバスのラベル（vis は数式を描けないので $ 区切りだけ外し、長いものは
+  // 切り詰めて折り返す）。文字列は DTO の label そのもので、内部 ID は含まない。
+  function moduleCanvasLabel(text) {
+    var value = String(text == null ? "" : text).replace(/\$/g, "").replace(/\s+/g, " ").trim();
+    if (!value) return "（表示名なし）";
+    if (value.length > MODULE_CANVAS_LABEL_MAX_CHARS) {
+      value = value.slice(0, MODULE_CANVAS_LABEL_MAX_CHARS) + "…";
+    }
+    var lines = [];
+    for (var i = 0; i < value.length; i += MODULE_CANVAS_LABEL_LINE_CHARS) {
+      lines.push(value.slice(i, i + MODULE_CANVAS_LABEL_LINE_CHARS));
+    }
+    return lines.join("\n");
+  }
+
+  function moduleDisplayLabel(module) {
+    // ノードのラベルはプレーンテキストなので、$…$ を落とした visual_label を先に使う
+    //（詳細ペインは label / theory_object を richText で数式として描く）。
+    var label = String((module && (module.visual_label || module.label)) || "").trim();
+    if (label) return label;
+    var verbs = (module && module.process_verbs) || [];
+    return verbs.length ? verbs.join(" → ") : "（表示名なし）";
+  }
+
+  function sinkDisplayLabel(sink) {
+    var op = String((sink && sink.operation_label) || "").trim();
+    var outputs = ((sink && sink.output_labels) || []).filter(function (label) {
+      return String(label || "").trim();
+    });
+    if (op && outputs.length) return op + " → " + outputs.join(", ");
+    return op || outputs.join(", ") || "（表示名なし）";
+  }
+
+  // モジュール1つ → 理論操作グラフのノードと同じ形の合成ノード。色は dominant_stage
+  // （stage 名を label に置いて graphView の既存の配色規則に通す）、枠は
+  // source_backing_status（通常 / 細線 / 点線）の既存表現をそのまま使う。
+  function moduleSyntheticNode(module, index) {
+    return {
+      component_id: String(module.module_key),
+      component_type: "TheoryModule",
+      label: String(module.dominant_stage || "").replace(/_/g, " "),
+      display_label: moduleDisplayLabel(module),
+      source_backing_status: String(module.source_backing_status || ""),
+      graph_layer: "main",
+      display_order: index,
+    };
+  }
+
+  function sinkSyntheticNode(sink, index, order) {
+    return {
+      component_id: MODULE_SINK_PREFIX + index,
+      component_type: "TheoryModuleSink",
+      label: "",
+      display_label: sinkDisplayLabel(sink),
+      source_backing_status: "",
+      graph_layer: "main",
+      display_order: order,
+    };
+  }
+
+  function renderModuleNetwork(container, savedPosition, savedScale) {
+    var data = theoryModulesData();
+    if (state.theoryModulesError) {
+      container.innerHTML = canvasFactHtml([state.theoryModulesError]);
+      return;
+    }
+    if (!data) {
+      container.innerHTML = canvasFactHtml([MODULE_LOADING_TEXT]);
+      return;
+    }
+    if (!moduleMapAvailable()) {
+      container.innerHTML = canvasFactHtml([MODULE_UNAVAILABLE_TEXT].concat(moduleFacts()));
+      return;
+    }
+    container.innerHTML = "";
+    var g = gv();
+    var outer = outerModules();
+    var sinks = moduleSinks();
+    var nodes = [];
+    var labels = {};
+    var titles = {};
+    var drawn = {};
+    outer.forEach(function (module, index) {
+      var node = moduleSyntheticNode(module, index);
+      nodes.push(node);
+      drawn[node.component_id] = "module";
+      labels[node.component_id] = moduleCanvasLabel(node.display_label);
+      var stageLabel = stageLabelJa(module.dominant_stage);
+      var backingLabel = g.sourceBackingLabel(module.source_backing_status);
+      titles[node.component_id] = [MODULE_LAYER_LABEL, stageLabel, backingLabel]
+        .filter(Boolean).join("\n");
+    });
+    sinks.forEach(function (sink, index) {
+      var node = sinkSyntheticNode(sink, index, outer.length + index);
+      nodes.push(node);
+      drawn[node.component_id] = "sink";
+      labels[node.component_id] = moduleCanvasLabel(node.display_label);
+      titles[node.component_id] = "結果の吸い込み口（論文全体の結果をまとめる手順）";
+    });
+
+    var edges = [];
+    ((data && data.edges) || []).forEach(function (edge, index) {
+      var source = String((edge && edge.source) || "");
+      var target = String((edge && edge.target) || "");
+      if (!drawn[source] || !drawn[target] || source === target) return;
+      edges.push({
+        edge_id: "module-edge-" + index,
+        source: source,
+        target: target,
+        relation: "FEEDS",
+        equation_labels: (edge.equation_labels || []).filter(function (label) {
+          return String(label || "").trim();
+        }),
+      });
+    });
+    // 共通に使う式のうち、あるモジュールが導いて他のモジュールが使うもの（DTO の
+    // foundations[] の producer / consumer）も受け渡しとして描く。境目の数え方には入らない
+    // 式なので、点線で通常の受け渡しと区別する。導くモジュールの無い（論文の出発点の）
+    // 共通の式は辺にせず、詳細ペインの「共通に使う式」に出す。
+    var foundationPairs = {};
+    var foundationOrder = [];
+    ((data && data.foundations) || []).forEach(function (foundation) {
+      var label = String((foundation && foundation.display_label) || "").trim();
+      ((foundation && foundation.producer_module_keys) || []).forEach(function (producer) {
+        ((foundation && foundation.consumer_module_keys) || []).forEach(function (consumer) {
+          var source = String(producer || "");
+          var target = String(consumer || "");
+          if (drawn[source] !== "module" || drawn[target] !== "module" || source === target) return;
+          var pair = source + "\n" + target;
+          if (!foundationPairs[pair]) {
+            foundationPairs[pair] = { source: source, target: target, labels: [] };
+            foundationOrder.push(pair);
+          }
+          if (label && foundationPairs[pair].labels.indexOf(label) < 0) foundationPairs[pair].labels.push(label);
+        });
+      });
+    });
+    foundationOrder.forEach(function (pair, index) {
+      var entry = foundationPairs[pair];
+      edges.push({
+        edge_id: "module-foundation-edge-" + index,
+        source: entry.source,
+        target: entry.target,
+        relation: "FEEDS",
+        equation_labels: entry.labels,
+        via_foundation: true,
+      });
+    });
+    // sink への受け渡しは、DTO が渡し元のモジュールを明示したときだけ描く
+    // （表示ラベルの一致で結び付けを推測しない — TM3）。
+    sinks.forEach(function (sink, index) {
+      ((sink && sink.source_module_keys) || []).forEach(function (key, j) {
+        var source = String(key || "");
+        if (drawn[source] !== "module") return;
+        edges.push({
+          edge_id: "module-sink-edge-" + index + "-" + j,
+          source: source,
+          target: MODULE_SINK_PREFIX + index,
+          relation: "FEEDS",
+          equation_labels: [],
+        });
+      });
+    });
+
+    var positions = withSavedPositions(g.layoutPositions(nodes, edges), nodes);
+    var nodeSpecs = nodes.map(function (node, index) {
+      var spec = g.visNodeSpec(node, index, positions, {});
+      var id = node.component_id;
+      spec.label = labels[id];
+      spec.title = titles[id];
+      if (drawn[id] === "sink") spec.shape = "database"; // sink は別の形で描く
+      if (id === state.selectedModuleKey) {
+        spec.borderWidth = Math.max(spec.borderWidth || 2, 4);
+      }
+      return spec;
+    });
+    var edgeSpecs = edges.map(function (edge, index) {
+      var spec = g.visEdgeSpec(edge, index, {});
+      // 辺のラベルは受け渡す式の印字番号だけ（関係の語は付けない）。
+      if (edge.equation_labels.length) spec.label = edge.equation_labels.join(" / ");
+      else delete spec.label;
+      if (edge.via_foundation) spec.dashes = true; // 共通に使う式の受け渡し
+      return spec;
+    }).filter(function (edge) { return edge.from && edge.to; });
+
+    var network = new window.vis.Network(container, {
+      nodes: new window.vis.DataSet(nodeSpecs),
+      edges: new window.vis.DataSet(edgeSpecs),
+    }, g.networkOptions());
+    state.network = network;
+    var keepView = !!(state.preserveViewOnce && savedPosition && typeof savedScale === "number");
+    state.preserveViewOnce = false; // フラグは一度きり
+    state.focusNodeOnce = "";       // モジュール図には詳細ノードが無い
+    network.once("afterDrawing", function () {
+      if (keepView) {
+        try {
+          network.moveTo({ position: savedPosition, scale: savedScale, animation: false });
+          return;
+        } catch (e) { /* 失敗時は fit へ落とす */ }
+      }
+      network.fit({ animation: false });
+    });
+    network.on("dragEnd", function (params) {
+      rememberDraggedNodes(network, (params && params.nodes) || []);
+    });
+    network.on("click", function (params) {
+      if (params.nodes && params.nodes.length && drawn[params.nodes[0]]) {
+        selectModule(params.nodes[0]);
+        return;
+      }
+      selectModule("");
+    });
+    if (state.selectedModuleKey && drawn[state.selectedModuleKey]) {
+      try { network.selectNodes([state.selectedModuleKey]); } catch (e) { /* noop */ }
+    }
+  }
+
+  // 層トグルの「理論モジュール」ボタン。件数は付けない（TM6）。層トグル自体が無い
+  // 単層グラフでは出さない（戻り先のボタンが無くなるため）。
+  function moduleLayerButtonHtml(options) {
+    if (!options || !options.length) return "";
+    var active = state.moduleView ? " is-active" : "";
+    return '<button type="button" class="graph-review-layer-btn graph-review-module-btn' + active +
+      '" data-graph-review-module-view="1" data-ui-anchor="graph-review.module-view">' +
+      esc(MODULE_LAYER_LABEL) + "</button>";
+  }
+
+  function enterModuleView() {
+    state.layerChosenByUser = true;
+    if (state.moduleView) return;
+    state.moduleView = true;
+    state.selectedNodeId = "";
+    state.selectedModuleKey = "";
+    renderLayerToolbar();
+    renderUnreviewedCount();
+    renderNetwork();
+    renderPaperCueLegend();
+    renderDetail();
+    markSelectedPaperChips();
+    // ノードの選択が外れたのでノード対話タブは維持しない。
+    switchChatMode("graph");
+  }
+
+  function selectModule(key) {
+    state.selectedModuleKey = String(key || "");
+    renderDetail();
+    if (state.network) {
+      try {
+        if (state.selectedModuleKey) state.network.selectNodes([state.selectedModuleKey]);
+        else state.network.unselectAll();
+      } catch (e) { /* noop */ }
+    }
+  }
+
+  // 成員の step から式の詳細層の当該ノードへ（論文層の章チップと同じ focusNodeOnce の経路）。
+  function focusModuleMemberStep(nodeId) {
+    if (!nodeId) return;
+    state.moduleView = false;
+    state.selectedModuleKey = "";
+    state.layerChosenByUser = true;
+    state.layer = "equation_detail";
+    state.focusNodeOnce = nodeId;
+    state.selectedNodeId = nodeId;
+    renderLayerToolbar();
+    renderUnreviewedCount();
+    renderNetwork();
+    renderPaperCueLegend();
+    renderDetail();
+    markSelectedPaperChips();
+    renderChatShell();
+  }
+
+  function moduleBlock(title, body) {
+    if (!body) return "";
+    return '<div class="graph-review-paper-block"><div class="graph-review-paper-subtitle">' +
+      esc(title) + "</div>" + body + "</div>";
+  }
+
+  function moduleEquationChips(items) {
+    return paperStaticChips(items);
+  }
+
+  function moduleFlowText(inputs, outputs) {
+    var from = (inputs || []).filter(function (label) { return String(label || "").trim(); }).join(" , ");
+    var to = (outputs || []).filter(function (label) { return String(label || "").trim(); }).join(" , ");
+    if (!from && !to) return "";
+    return from + " → " + to;
+  }
+
+  function moduleMembersHtml(members) {
+    var rows = (members || []).map(function (member) {
+      if (!member) return "";
+      var op = String(member.operation_label || "").trim() || "（操作名なし）";
+      var flow = moduleFlowText(member.input_labels, member.output_labels);
+      var text = flow ? op + "： " + flow : op;
+      var nodeIds = (member.node_ids || []).filter(function (id) { return String(id || "").trim(); });
+      if (!nodeIds.length) {
+        return '<li><span class="graph-review-paper-chip is-static">' + esc(text) + "</span></li>";
+      }
+      return '<li><button type="button" class="graph-review-paper-chip graph-review-module-member" ' +
+        'data-graph-review-module-member="' + esc(String(nodeIds[0])) + '" ' +
+        'data-ui-anchor="graph-review.module-member">' + esc(text) + "</button></li>";
+    }).join("");
+    return rows ? '<ul class="graph-review-module-members">' + rows + "</ul>" : "";
+  }
+
+  function moduleInnerHtml(parentKey) {
+    var inner = innerModulesOf(parentKey);
+    if (!inner.length) return "";
+    return inner.map(function (module) {
+      var verbs = (module.process_verbs || []).join(" → ");
+      return '<div class="graph-review-paper-item">' +
+        '<div class="graph-review-paper-item-head"><span class="graph-review-paper-strong">' +
+          richText(moduleDisplayLabel(module)) + "</span></div>" +
+        (verbs ? '<div class="graph-review-paper-note">' + esc(verbs) + "</div>" : "") +
+        moduleBlock("外から受ける式", moduleEquationChips(module.inputs)) +
+        moduleBlock("外へ出す式", moduleEquationChips(module.outputs)) +
+        "</div>";
+    }).join("");
+  }
+
+  function moduleDetailHtml(module) {
+    var g = gv();
+    var backing = String(module.source_backing_status || "");
+    var level = String(module.level || "outer") === "inner" ? "内側のまとまり" : MODULE_LAYER_LABEL;
+    var stageLabels = [];
+    (module.stage_keys || []).forEach(function (key) {
+      var label = stageLabelJa(key);
+      if (label && stageLabels.indexOf(label) < 0) stageLabels.push(label);
+    });
+    var html = '<div class="graph-review-detail-head">' +
+      '<div class="graph-review-detail-title">' + richText(moduleDisplayLabel(module)) + "</div>" +
+      '<div class="graph-review-detail-chips">' +
+        '<span class="graph-review-chip">' + esc(level) + "</span>" +
+        (backing ? '<span class="graph-review-chip">裏付け: ' + esc(g.sourceBackingLabel(backing)) + "</span>" : "") +
+      "</div></div>";
+    var isolated = MODULE_ISOLATED_TEXTS[String(module.isolated_reason || "")];
+    if (isolated) html += paperFactLine(isolated);
+    var verbs = (module.process_verbs || []).filter(function (verb) { return String(verb || "").trim(); });
+    html += moduleBlock("工程", verbs.length ? '<div class="graph-review-paper-flow">' + esc(verbs.join(" → ")) + "</div>" : "");
+    var theoryObject = String(module.theory_object || "").trim();
+    html += moduleBlock("理論対象", theoryObject ? '<div class="graph-review-paper-item-body">' + richText(theoryObject) + "</div>" : "");
+    html += moduleBlock("含まれる段階", stageLabels.length
+      ? paperStaticChips(stageLabels.map(function (label) { return { display_label: label }; }))
+      : "");
+    html += moduleBlock("外から受ける式", moduleEquationChips(module.inputs));
+    html += moduleBlock("外へ出す式", moduleEquationChips(module.outputs));
+    html += moduleBlock("共通に使う式", moduleEquationChips(module.foundation));
+    var claims = (module.required_claims || []).filter(function (claim) {
+      return claim && String(claim.text || "").trim();
+    });
+    // DTO の assumption_ids は名前に反して前提の本文（derivation_chain の記録を200字で
+    // 丸めたもの）なので、主張と並べて本文として出す（ID ではないので TM10 に触れない）。
+    var premiseItems = claims.map(function (claim) { return String(claim.text); });
+    (module.assumption_ids || []).forEach(function (text) {
+      var value = String(text || "").trim();
+      if (value && premiseItems.indexOf(value) < 0) premiseItems.push(value);
+    });
+    html += moduleBlock("要求される前提", premiseItems.length
+      ? "<ul>" + premiseItems.map(function (text) { return "<li>" + richText(text) + "</li>"; }).join("") + "</ul>"
+      : "");
+    var components = (module.components_for_comparison || []).filter(function (item) {
+      return item && String(item.name || "").trim();
+    });
+    html += moduleBlock(MODULE_COMPARISON_HEADING, components.length
+      ? '<div class="graph-review-paper-note">部品の原案との照合用に並べています（一致の判定はしていません）。</div>' +
+        "<ul>" + components.map(function (item) { return "<li>" + richText(String(item.name)) + "</li>"; }).join("") + "</ul>"
+      : "");
+    html += moduleBlock("内側のまとまり", moduleInnerHtml(module.module_key));
+    html += moduleBlock("中の手順（押すと式の詳細でそのノードへ移ります）", moduleMembersHtml(module.members));
+    return html;
+  }
+
+  function sinkDetailHtml(sink) {
+    var html = '<div class="graph-review-detail-head">' +
+      '<div class="graph-review-detail-title">' + esc(sinkDisplayLabel(sink)) + "</div>" +
+      '<div class="graph-review-detail-chips"><span class="graph-review-chip">結果の吸い込み口</span></div>' +
+      "</div>";
+    html += paperFactLine("論文全体の結果をまとめる手順です。まとまりの境目を広げないよう、モジュールの中には入れていません。");
+    html += moduleBlock("受け取る式", paperStaticChips(((sink && sink.input_labels) || []).map(function (label) {
+      return { display_label: label };
+    })));
+    html += moduleBlock("結果の式", paperStaticChips(((sink && sink.output_labels) || []).map(function (label) {
+      return { display_label: label };
+    })));
+    return html;
+  }
+
+  function renderModuleDetail(container) {
+    if (state.theoryModulesError) {
+      container.innerHTML = paperFactLine(state.theoryModulesError);
+      return;
+    }
+    if (!theoryModulesData()) {
+      container.innerHTML = paperFactLine(MODULE_LOADING_TEXT);
+      return;
+    }
+    var facts = moduleFacts();
+    if (!moduleMapAvailable()) {
+      container.innerHTML = paperFactLines([MODULE_UNAVAILABLE_TEXT].concat(facts), "");
+      return;
+    }
+    var factsHtml = paperFactLines(facts, "");
+    var key = String(state.selectedModuleKey || "");
+    var body = "";
+    if (key.indexOf(MODULE_SINK_PREFIX) === 0) {
+      var sink = moduleSinks()[parseInt(key.slice(MODULE_SINK_PREFIX.length), 10)];
+      if (sink) body = sinkDetailHtml(sink);
+    } else if (key) {
+      var module = moduleByKey(key);
+      if (module) body = moduleDetailHtml(module);
+    }
+    if (!body) {
+      container.innerHTML = '<div class="graph-review-empty">' + esc(MODULE_EMPTY_DETAIL_TEXT) + "</div>" + factsHtml;
+      return;
+    }
+    container.innerHTML = body + factsHtml;
+    container.querySelectorAll("[data-graph-review-module-member]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        focusModuleMemberStep(this.getAttribute("data-graph-review-module-member"));
+      });
+    });
+  }
+
+  // -------------------------------------------------------------------------
   // ノード詳細ペイン（レビュー専用の投影。語彙は graphView から引く）
   // -------------------------------------------------------------------------
 
@@ -1479,6 +2158,11 @@
     if (!state.graph || !graphNodes().length) {
       container.innerHTML = '<div class="graph-review-empty">グラフがありません。</div>';
       state.detailNotice = null; // 表示先が無くなったので持ち越さない
+      return;
+    }
+    if (state.moduleView) {
+      state.detailNotice = null; // モジュールにはレビュー操作が無い
+      renderModuleDetail(container);
       return;
     }
     var node = state.selectedNodeId ? nodeById(state.selectedNodeId) : null;

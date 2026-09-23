@@ -649,6 +649,7 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 | GET | `/api/admin/documents/{id}/sections/{sid}/components` | TEACHER + document 閲覧権 | セクション単位の theory_components（0件ならドキュメント全体にフォールバック） |
 | GET | `/api/admin/documents/{id}/component-graph` | TEACHER + document 閲覧権 | 保存済み TheoryOperationGraph の正規化返却（無ければ決定論的に構築） |
 | GET | `/api/admin/documents/{id}/paper-layer` | TEACHER + document 閲覧権 | 理論操作グラフの論文層（フレーム→論文 / 論文→フレーム / 被覆）の読み時射影。LLM 0回・保存なし |
+| GET | `/api/admin/documents/{id}/theory-modules` | TEACHER + document 閲覧権 | 理論モジュール（式の操作に「接点の狭さ」で境目を入れた外枠・内側のモジュール・共有の基礎・結果の吸い込み口・主張の並びの目印）の読み時導出。LLM 0回・保存なし。導出できない教材は `available:false` + 事実文で 200。正本は [理論モジュール層](../features/theory_module_layer_design.md) |
 | PATCH | `/api/admin/claims/{claim_id}` | TEACHER + document 編集権 | claim の全項目更新（review_status 遷移は監査、rejected は伝播、承認時は R層 item オーサリングを非同期起動） |
 | POST | `/api/admin/claims/{claim_id}/review` | TEACHER + document 編集権 | **遷移専用**（本文フィールドを一切変更しない）。グラフ対話レビュー画面の claim 承認の実体で、フル upsert の PATCH を画面から使うと同時編集を巻き戻すため分離した。`review_status` は許可4語彙のみ（語彙外 422）、非 UUID の claim_id は 404。副作用（監査 / 却下伝播 / 承認時の R層オーサリング起動）は PATCH と共通 |
 

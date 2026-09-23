@@ -3330,6 +3330,53 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   （`_require_editable_ledger_target`）が必要 — `_require_teacher` だけでは足りない。⑧SA層 `retrieved_structure` の
   事実文は `learner_context_common.safe_text` を通し生 TeX を出さない。nginx の `client_max_body_size` は 55m。
 
+### 理論モジュール層（グラフの中間層 — 式の操作に「接点の狭さ」で境目を入れる, migration なし, 2026-09-23）
+
+グラフレビューの「主グラフ（stage 固定語彙で最大 7）」と「式の詳細（数百）」の間を埋める**読み時導出・
+非LLM の中間層**。正本は `docs/features/theory_module_layer_design.md`（TM1〜TM10・§5 導出規則・
+§7 claim チェーンの位置づけ・§9 オーナー判断・§12 実装記録）。目的は**理論の構造を見抜き、共通構造を
+抽象化して他への転用を楽にする**こと（コース側で束ねる用途 = 学ぶ単位や、論文の章立て = 論文層とは別）。
+
+- **実測が出発点**: 2609.15375v1（PDF 経路）の「式の詳細 470」は全部 claim チェーン（章ごとに主張を出現順に
+  並べた 15 本の path）で式チェーンは 0 本。式 64 個は consistency policy で全件除外。**構造がデータに無いので
+  構造で切っても章分けに戻る**。同一論文を TeX（arXiv e-print）で取り込み直すと式チェーン 13 本・一意な式 step
+  35 が立ち、claim チェーン由来のノードが detail の約 300 を占めたまま残る（§3.1〜3.3）。**構造層の議論・試作は
+  TeX 経路の教材で行い、PDF 経路の detail 数を式の量と読まない。**
+- **モジュール = 少数の入力式と前提を受けて少数の結果式を返す部分系**。式操作 DAG（重複除去済み・`chain_type ∈
+  {equation_chain, mixed_chain}` の step のみ・claim_chain は成員にしない）で、隣接 step を「接点（外から受ける式 +
+  外へ出す式）≤ k」を保つ限り接点最小の対から貪欲に併合する。外枠 `OUTER_INTERFACE_LIMIT = 3`・内側
+  `INNER_INTERFACE_LIMIT = 2` の 2 段。**共有の基礎**（入次数を問わず 4 step 以上に消費される式 =
+  `SHARED_FOUNDATION_MIN_CONSUMERS`）は接点に数えない（配線でいう電源レール）。system_level の一括操作は成員でなく
+  **結果の吸い込み口（sink）**。循環は強連結成分ごとに 1 初期モジュールにまとめて事実文で報告。k と閾値はコード
+  定数で env から読まない（値を変えるときは設計書に実測を足す）。
+- **正本**: `backend/core/theory_modules/{schema,builder}.py`（FastAPI / sqlalchemy / LLM 非 import の純関数
+  `build_theory_modules(document_id=, artifacts=, graph_json=)`。入力を mutate しない・例外を外に出さない・式 step 0
+  は `available:false` + 事実文）。API は `GET /api/admin/documents/{document_id}/theory-modules`
+  （`routes/theory_components.py`・TEACHER + `_ensure_document_viewable`・既存 `component-graph` 不変）。ラベルは
+  「工程の動詞列（`element_vocab.OPERATION_LABELS`）+ 理論対象」。理論対象は本文由来の atomic claim を先に、無ければ
+  式から合成した主張（`equation_claim_synthesis` の定型文）から**記号だけ**を取り出して列挙（実測では本文由来の主張は
+  `equation_ids` を持たないため実際は記号になる）。ノード用 `visual_label` は `$…$` をプレーンテキストに落としたもの。
+  内部 ID（`eq_op_*` / `eq_tex_*` / `module_key`）を表示しない（TM10）。k・接点本数・モジュール数・指紋は DTO と
+  UI に出さない（TM6）。
+- **claim チェーンの位置づけ（O-2 = (b-読)・A層非改変）**: DTO の `claim_sequence_node_ids` を目印に、グラフ
+  レビューの「式の詳細」「すべて」層は claim チェーン由来の詳細ノードとその辺をキャンバスから外す（主張の並びは論文層
+  「論文の順」で見る）。判定はサーバの射影で、フロントは目印だけを見る。`graph_json` と他の消費者は不変。A層側で順序を
+  `required_claim_ids` に書くのをやめる案（b-A）は別の判断として保留。
+- **主グラフは残す（O-3 = (b)）**: `graph_json` の main 層と #308 のラベル規律は不変。グラフレビューの初期表示だけ、
+  モジュールが導出できる教材ではモジュール図（`state.moduleView`。`getScreenContext` は非変更）。UI は
+  `admin-graph-review.js` の層トグル「理論モジュール」（件数なし）・モジュール図（共有の基礎の受け渡しは点線・sink への
+  辺）・詳細ペイン（工程 / 理論対象 / 段階 / 接点 / 共通に使う式 / 要求される前提 / 部品との照合「照合用（AI の原案）」
+  / 内側モジュール / 成員 step → 式の詳細へ `focusNodeOnce`）。描画は `graphView` 委譲（GR8）。アンカーは
+  `graph-review.module-view` / `graph-review.module-member` + `docs/manual/teacher/26-admin-graph-review.md#theory-modules`
+  （件数の正本は `test_admin_help_ui_anchors.py`）。
+- **保存しない（O-1 = (c)）**: Phase 0 は読み時導出。Phase 1 で工程の型 + 接点の本数（内部指紋）から同一性候補を作る
+  前に stable_key 付きの knowledge object として保存する（候補の置き場は概念レジストリの O-6 に従属）。
+- **ガードレール**: `test_theory_module_{core,guardrails,api,ui_static}.py`。fixture は
+  `backend/tests/fixtures/theory_modules/`（arXiv-2407.01221v2 = 外枠 8 / 2609.15375v1 TeX = 外枠 10 /
+  同 PDF = `available:false` のゴールデン）。
+- **非スコープ（v1）**: 内側 2 段目の磨き込み・同一性候補（Phase 1）/ モジュールの保存 / 学習者向け表示 / SA層解決器
+  （`view.layer = "module"`）/ 辺の承認。
+
 ### 論文の再現性レビューと是正（migration なし, 2026-09-19）
 
 Phase 0〜4 実装後の**再照合**（実論文 12 本の原本 ⇄ 成果）。正本は

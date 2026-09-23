@@ -215,6 +215,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
   ／[要素インベントリ](features/element_inventory_design.md)
   ／[グラフ対話レビュー（教材起点のグラフ確認・承認画面）](features/graph_dialogue_review_design.md)
   ／[グラフの論文層（フレームに論文を肉付けする層）](features/graph_paper_layer_design.md)
+  ／[理論モジュール層（式の操作に「接点の狭さ」で境目を入れる中間層）と claim チェーンの位置づけ（**設計中**・オーナー判断待ち）](features/theory_module_layer_design.md)
   ／[知識オブジェクト層（構造化成果を stable_key 付きの一級の行にし、再解析を supersede 遷移にする層。知識構造の見直し Phase 1）](features/knowledge_objects_design.md)
   ／[学ぶ単位の一級化（論文の「教える単位」を `learning_units` の行にし、コース topic をその並びにする層。知識構造の見直し Phase 2）](features/learning_units_design.md)
   ／[概念レジストリ（`library_entries` を軸に、概念を SKOS 語彙でリンクする層。同一性候補・別名・関係・地図との対応。知識構造の見直し Phase 3）](features/concept_registry_design.md)

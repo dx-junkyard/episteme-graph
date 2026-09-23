@@ -3548,6 +3548,90 @@ def build_paper_layer_for_document(document_id: str) -> dict:
         }
 
 
+# ---------------------------------------------------------------------------
+# 理論モジュール層（Theory Module Layer） — 正本: docs/features/theory_module_layer_design.md
+# ---------------------------------------------------------------------------
+
+
+def _build_theory_modules_payload(document_id: str, artifacts: dict, graph_json: dict) -> dict:
+    """core の純関数 ``build_theory_modules`` への薄い間接層（論文層と同じ作法）。
+
+    import は遅延させる（route モジュールの import が core の着地に依存しないように）。
+    テストはこの関数を monkeypatch して builder を差し替える。
+    """
+    from core.theory_modules import build_theory_modules
+
+    return build_theory_modules(document_id=document_id, artifacts=artifacts, graph_json=graph_json)
+
+
+def _theory_modules_unavailable(document_id: str) -> dict:
+    """builder の失敗時の縮退 DTO（500 にしない = TM8）。"""
+    try:
+        from core.theory_modules.schema import FACT_BUILD_FAILED, RULE_VERSION
+    except Exception:  # pragma: no cover - 防御的（事実文が引けなくても 200 で返す）
+        FACT_BUILD_FAILED, RULE_VERSION = "理論モジュールの導出に失敗したため表示できません。", ""
+    return {
+        "document_id": document_id,
+        "available": False,
+        "facts": [FACT_BUILD_FAILED],
+        "rule_version": RULE_VERSION,
+        "modules": [],
+        "edges": [],
+        "sinks": [],
+        "foundations": [],
+        "claim_sequence_node_ids": [],
+    }
+
+
+# DTO の契約は設計書 §8.1（core の純関数が正本）。response_model は持たない（論文層と同じ）。
+@router.get("/documents/{document_id}/theory-modules", response_model=None)
+def get_document_theory_modules(
+    document_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """理論モジュール（読み時導出・LLM 0回・保存なし）。
+
+    正本は ``docs/features/theory_module_layer_design.md`` §5（導出規則）/ §8.1（DTO）。
+    既存 ``GET .../component-graph`` のレスポンスには一切触れない（別経路・遅延取得）。
+    """
+    _ensure_document_viewable(document_id, current_user)  # TM9
+    return build_theory_modules_for_document(document_id)
+
+
+def build_theory_modules_for_document(document_id: str) -> dict:
+    """理論モジュール DTO を組み立てる（**権限ゲートは呼び出し側の責務**）。
+
+    ``GET .../theory-modules`` の本体。画面文脈アダプター等から使うときも、呼び出す前に
+    必ず ``_ensure_document_viewable`` 等の閲覧ゲートを通すこと（TM9 / SA2）。
+    artifact と ``graph_json`` の取り方は論文層（``build_paper_layer_for_document``）と同じ
+    経路で、保存済みグラフが無いときは component 一覧からの読み時組み立てに**落とさない**
+    （組み立てたグラフは詳細ノードを持たないため、step との対応に使えない。builder が
+    事実文で欠落を言う）。
+    """
+    try:
+        components = _components_for_document(document_id)
+    except Exception:
+        logger.debug("theory_modules: components unavailable for document %s", document_id, exc_info=True)
+        components = []
+    try:
+        graph = _normalize_stored_component_graph(
+            document_id, _stored_component_graph(document_id), components
+        ) or {}
+    except Exception:
+        logger.debug("theory_modules: stored graph unavailable for document %s", document_id, exc_info=True)
+        graph = {}
+    try:
+        artifacts = document_run_artifacts(document_id)
+    except Exception:
+        logger.debug("theory_modules: artifacts unavailable for document %s", document_id, exc_info=True)
+        artifacts = {}
+    try:
+        return _build_theory_modules_payload(document_id, artifacts or {}, graph)
+    except Exception:
+        logger.debug("theory_modules: build failed for document %s", document_id, exc_info=True)
+        return _theory_modules_unavailable(document_id)
+
+
 @router.get("/courses/{course_id}/theory-components", response_model=list[TheoryComponentOut])
 def list_theory_components(
     course_id: str,

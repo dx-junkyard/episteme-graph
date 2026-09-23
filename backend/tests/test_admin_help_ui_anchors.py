@@ -222,7 +222,11 @@ class TestAdminUiAnchorsModule:
         #    doubt-atlas.evidence-lines / doubt-atlas.evidence-line-add /
         #    lecture-studio.cite-intent。
         #   docs/features/knowledge_transfer_design.md §4.3 / §6 / §8。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 353
+        # + 2026-09-23: 理論モジュール層（Phase 0 UI）の2件 —
+        #   graph-review.module-view（層トグルの「理論モジュール」。件数なし = TM6）/
+        #   graph-review.module-member（モジュール詳細の成員 step → 式の詳細の当該ノードへ）。
+        #   docs/features/theory_module_layer_design.md §8.1。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 355
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""
