@@ -121,6 +121,19 @@ def _member_refs(result: dict, level: str = "outer") -> list[list[str]]:
     ]
 
 
+def _inner_outputs(fixture: dict, result: dict) -> list[frozenset[str]]:
+    """内側モジュールごとの「成員 step が生む式」の集合（出現順）。step_ref → 出力式は fixture から引く。"""
+    outputs_by_ref: dict[str, list[str]] = {}
+    for chain in fixture["artifacts"]["derivation_chain"]["chains"]:
+        for step in chain.get("steps") or []:
+            ref = f"{chain['derivation_id']}:{step['step_id']}"
+            outputs_by_ref[ref] = list(step.get("output_equation_ids") or [])
+    return [
+        frozenset(eq for member in m["members"] for ref in member["step_refs"] for eq in outputs_by_ref[ref])
+        for m in _inner(result)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # ゴールデン（§3.2 / §3.3 の試作との一致）
 # ---------------------------------------------------------------------------
@@ -155,12 +168,33 @@ class TestGolden2407:
         result = _build(tex_2407)
         cycle_facts = [f for f in result["facts"] if f.startswith(FACT_CYCLE_PREFIX)]
         assert len(cycle_facts) == 1
-        # 循環 b78 ↔ b80 の2手順は同じ外枠（計算本体）に入り、内側では1まとまり（cycle）
+        # 循環 b78 ↔ b80 の2手順は同じ外枠（計算本体）に入り、内側では同じ内側モジュールの先頭になる。
+        # 後続の b85 がつながるので単独（isolated_reason = cycle）にはならない（§12.3）。
+        holders = [out for out in _inner_outputs(tex_2407, result) if {"eq_tex_b78", "eq_tex_b80"} & out]
+        assert holders == [frozenset({"eq_tex_b78", "eq_tex_b80", "eq_tex_b85"})]
+        assert not [m for m in _inner(result) if m["isolated_reason"] == "cycle"]
+
+    def test_inner_golden(self, tex_2407):
+        """計算本体（10 step）の内側 = 基礎を導く手順 / S の機構 / L の機構と変数変換 / 核の陽な形 / 結果（§12.3）。"""
+        result = _build(tex_2407)
+        assert _inner_outputs(tex_2407, result) == [
+            frozenset({"eq_tex_b97"}),
+            frozenset({"eq_tex_b66", "eq_tex_b68"}),
+            frozenset({"eq_tex_b72", "eq_tex_b74", "eq_tex_b76"}),
+            frozenset({"eq_tex_b78", "eq_tex_b80", "eq_tex_b85"}),
+            frozenset({"eq_skewness_bias_ex"}),
+        ]
+        assert all(m["isolated_reason"] is None for m in _inner(result))
+        # 内側どうしの受け渡し: 角度積分の機構 → 核の陽な形（b76）は内側の辺として残る
+        inner_edges = [e for e in result["edges"] if e["level"] == "inner"]
+        assert inner_edges
+        assert all(e["source"] != e["target"] for e in inner_edges)
+
+    def test_small_outers_have_no_inner(self, tex_2407):
+        result = _build(tex_2407)
+        parents = {m["parent_module_key"] for m in _inner(result)}
         body = max(_outer(result), key=lambda m: len(m["members"]))
-        cycle_inner = [m for m in _inner(result) if m["isolated_reason"] == "cycle"]
-        assert len(cycle_inner) == 1
-        assert cycle_inner[0]["parent_module_key"] == body["module_key"]
-        assert len(cycle_inner[0]["members"]) == 2
+        assert parents == {body["module_key"]}
 
     def test_system_level_is_a_sink_not_a_member(self, tex_2407):
         result = _build(tex_2407)
@@ -231,6 +265,27 @@ class TestGolden2609Tex:
     def test_cycle_fact(self, tex_2609):
         result = _build(tex_2609)
         assert any(f.startswith(FACT_CYCLE_PREFIX) for f in result["facts"])
+
+    def test_inner_golden(self, tex_2609):
+        """計算本体（17 step・接点 0）の内側 = 相互相関の書き換え / 平均密度と面密度 / 基礎を導く手順 /
+        ペア数の観測量（§12.3）。閉じた本体でも丸ごと 1 つに戻らない。"""
+        result = _build(tex_2609)
+        body = max(_outer(result), key=lambda m: len(m["members"]))
+        assert {m["parent_module_key"] for m in _inner(result)} == {body["module_key"]}
+        assert _inner_outputs(tex_2609, result) == [
+            frozenset({"eq_tex_b186", "eq_tex_b188", "eq_tex_b190", "eq_tex_b192", "eq_tex_b194", "eq_tex_b196"}),
+            frozenset({"eq_tex_b198", "eq_tex_b200", "eq_tex_b202", "eq_tex_b204", "eq_tex_b206"}),
+            frozenset({"eq_tex_b210"}),
+            frozenset({"eq_eqn_pairs", "eq_tex_b208", "eq_tex_b220", "eq_tex_b222", "eq_tex_b224"}),
+        ]
+        assert sum(len(m["members"]) for m in _inner(result)) == 17
+
+    def test_three_step_outer_is_not_split_into_singletons(self, tex_2609):
+        # Phase 0（接点 ≤ 2 の貪欲併合）は面密度まわりの 3 手順の外枠を 1 手順ずつ 3 つに割っていた。
+        result = _build(tex_2609)
+        three = [m for m in _outer(result) if len(m["members"]) == 3]
+        assert len(three) == 1
+        assert not [m for m in _inner(result) if m["parent_module_key"] == three[0]["module_key"]]
 
 
 class TestGolden2609Pdf:
@@ -434,17 +489,17 @@ class TestDeterminismCycleLevels:
         assert any({"d1:s1", "d1:s2"} <= set(refs) for refs in members)
 
     def test_inner_only_when_outer_splits(self):
-        # 外枠 k=3 では1つにまとまり、内側 k=2 では2つに割れる。
-        # 全体: 外から a, x / 外へ d = 3（外枠で1つ）。内側: s1+s2 は a → c の接点 2 で併合、
-        # そこに s3 を足すと 3 > 2 なので {s1,s2} と {s3} に割れる。
+        # 外枠は1つ（外から a / 外へ e, f）。s2 が生む c を s3 と s4 の 2 手順が使うので s2 が分岐点
+        # = 内側の先頭になり、s1 → s2 の受け渡しで切れる（切ったあとの接点は {s1}=1・{s2,s3,s4}=1）。
         result = _run([_chain("d1", [
             _step("s1", "define", ["a"], ["b"]),
             _step("s2", "substitute", ["b"], ["c"]),
-            _step("s3", "substitute", ["c", "x"], ["d"]),
+            _step("s3", "substitute", ["c"], ["e"]),
+            _step("s4", "substitute", ["c"], ["f"]),
         ])])
         assert len(_outer(result)) == 1
         inner = _inner(result)
-        assert sorted(_member_refs(result, "inner")) == [["d1:s1", "d1:s2"], ["d1:s3"]]
+        assert sorted(_member_refs(result, "inner")) == [["d1:s1"], ["d1:s2", "d1:s3", "d1:s4"]]
         assert len(inner) == 2
         parent = _outer(result)[0]["module_key"]
         assert all(m["parent_module_key"] == parent for m in inner)
@@ -456,6 +511,92 @@ class TestDeterminismCycleLevels:
         ])])
         assert len(_outer(result)) == 1
         assert _inner(result) == []
+
+
+class TestInnerRule:
+    """内側 2 段目の規則（設計書 §5.4 / §12.3）を合成データで1つずつ固定する。"""
+
+    def test_straight_chain_without_hub_is_not_split(self):
+        # 分岐点も循環も無い一本道は、接点だけでは境目が決まらないので割らない。
+        result = _run([_chain("d1", [
+            _step("s1", "define", ["a"], ["b"]),
+            _step("s2", "substitute", ["b"], ["c"]),
+            _step("s3", "substitute", ["c", "x"], ["d"]),
+        ])])
+        assert len(_outer(result)) == 1
+        assert _inner(result) == []
+
+    def test_hub_producer_starts_an_inner_module(self):
+        # b を生む s1 は外枠の中の 2 手順（s3, s4）に使われる分岐点。s0 → s1 の受け渡しで切る。
+        result = _run([_chain("d1", [
+            _step("s0", "define", ["a"], ["z"]),
+            _step("s1", "substitute", ["z"], ["b"]),
+            _step("s3", "substitute", ["b"], ["c"]),
+            _step("s4", "substitute", ["b", "c"], ["d"]),
+        ])])
+        assert sorted(_member_refs(result, "inner")) == [["d1:s0"], ["d1:s1", "d1:s3", "d1:s4"]]
+
+    def test_cycle_group_starts_an_inner_module(self):
+        # s2 ↔ s3 は循環（p と q を互いに定める）。循環のまとまりは内側の先頭になり、手前の s1 と切れる。
+        result = _run([_chain("d1", [
+            _step("s0", "define", ["a"], ["m"]),
+            _step("s1", "substitute", ["m"], ["n"]),
+            _step("s2", "define", ["n", "q"], ["p"]),
+            _step("s3", "substitute", ["p"], ["q"]),
+            _step("s4", "substitute", ["q"], ["r"]),
+        ])])
+        assert any(f.startswith(FACT_CYCLE_PREFIX) for f in result["facts"])
+        assert sorted(_member_refs(result, "inner")) == [
+            ["d1:s0", "d1:s1"],
+            ["d1:s2", "d1:s3", "d1:s4"],
+        ]
+
+    def test_cycle_alone_is_marked(self):
+        # 循環のまとまりに何もつながらなければ、その内側モジュールは isolated_reason = cycle。
+        result = _run([_chain("d1", [
+            _step("s0", "define", ["a"], ["m"]),
+            _step("s1", "substitute", ["m"], ["n"]),
+            _step("s2", "define", ["n", "q"], ["p"]),
+            _step("s3", "substitute", ["p"], ["q"]),
+        ])])
+        reasons = {tuple(refs): m["isolated_reason"] for refs, m in zip(_member_refs(result, "inner"), _inner(result))}
+        assert reasons == {("d1:s0", "d1:s1"): None, ("d1:s2", "d1:s3"): "cycle"}
+
+    def test_wide_cut_is_not_taken(self):
+        # s3 は c を s4, s5 に配る分岐点だが、s3 の手前で切ると {s3,s4,s5} が p, q, r の 3 本を
+        # 外枠の中で受け取ることになり、内側の接点の上限 2 を超える。境目は採らない（g は共有の基礎）。
+        result = _run([_chain("d1", [
+            _step("s0", "define", ["g"], ["p"]),
+            _step("s1", "define", ["g"], ["q"]),
+            _step("s2", "define", ["g"], ["r"]),
+            _step("s3", "substitute", ["p", "q", "r"], ["c"]),
+            _step("s4", "substitute", ["c", "g"], ["e"]),
+            _step("s5", "substitute", ["c"], ["f"]),
+        ])])
+        assert len(_outer(result)) == 1
+        assert _inner(result) == []
+
+    def test_foundation_does_not_glue_inner_modules(self):
+        # g は外枠の中の 4 手順に使われる共有の基礎。基礎だけでつながる手順（g を導く s0、g だけから
+        # 結果を出す s5）は単独の内側モジュールになり、基礎は内側の接点にも結び付きにも数えない。
+        result = _run([_chain("d1", [
+            _step("s0", "define", ["a"], ["g"]),
+            _step("s1", "substitute", ["g"], ["b"]),
+            _step("s2", "substitute", ["b", "g"], ["c"]),
+            _step("s3", "substitute", ["c", "g"], ["d"]),
+            _step("s4", "substitute", ["c", "d"], ["e"]),
+            _step("s5", "approximate", ["g"], ["h"]),
+        ])])
+        assert len(_outer(result)) == 1
+        # c を生む s2 は s3・s4 の 2 手順に使われる分岐点なので、s1 → s2 で切れる
+        assert _member_refs(result, "inner") == [["d1:s0"], ["d1:s1"], ["d1:s2", "d1:s3", "d1:s4"], ["d1:s5"]]
+        assert all(m["isolated_reason"] is None for m in _inner(result))
+
+    def test_inner_rule_is_deterministic(self, tex_2609):
+        first = _build(tex_2609)
+        second = _build(copy.deepcopy(tex_2609))
+        assert _member_refs(first, "inner") == _member_refs(second, "inner")
+        assert [m["module_key"] for m in _inner(first)] == [m["module_key"] for m in _inner(second)]
 
     def test_module_key_is_deterministic_and_versioned(self, tex_2407):
         first = _build(tex_2407)

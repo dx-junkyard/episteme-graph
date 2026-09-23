@@ -48,6 +48,7 @@ from core.theory_modules.schema import (
     FACT_NO_GRAPH,
     FACT_SINKS,
     GRAPH_LAYER_DEBUG,
+    INNER_HUB_MIN_CONSUMERS,
     INNER_INTERFACE_LIMIT,
     ISOLATED_CYCLE,
     ISOLATED_INTERFACE_TOO_WIDE,
@@ -505,6 +506,121 @@ def _merge_modules(
 
 
 # ---------------------------------------------------------------------------
+# 内側 2 段目（§5.4 / 実装記録 §12.3）
+# ---------------------------------------------------------------------------
+
+
+def _inner_handoffs(
+    flow: _Flow, units: list[frozenset[int]], outer_members: frozenset[int]
+) -> dict[tuple[int, int], list[str]]:
+    """外枠の中の初期モジュール間の受け渡し ``(生む側, 使う側) -> 式``。共有の基礎は数えない。
+
+    外枠そのものの入出力（外枠の外で生まれる式・外枠の外で使われる式・sink へ渡す式）は、
+    内側から見れば所与なので受け渡しに含めない。
+    """
+    unit_of: dict[int, int] = {}
+    for index, unit in enumerate(units):
+        for order in unit:
+            unit_of[order] = index
+    handoffs: dict[tuple[int, int], list[str]] = {}
+    for index, unit in enumerate(units):
+        for eq in flow.produced(unit):
+            if eq in flow.foundation:
+                continue
+            for consumer in sorted(set(flow.consumers.get(eq, []))):
+                if consumer not in outer_members:
+                    continue
+                target = unit_of[consumer]
+                if target == index:
+                    continue
+                passed = handoffs.setdefault((index, target), [])
+                if eq not in passed:
+                    passed.append(eq)
+    return handoffs
+
+
+def _components(size: int, links: Iterable[tuple[int, int]]) -> list[list[int]]:
+    """無向の連結成分（決定論: 各成分は昇順、成分の並びは最小の添字の順）。"""
+    parent = list(range(size))
+
+    def _find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    for a, b in links:
+        root_a, root_b = _find(a), _find(b)
+        if root_a != root_b:
+            parent[max(root_a, root_b)] = min(root_a, root_b)
+    groups: dict[int, list[int]] = {}
+    for node in range(size):
+        groups.setdefault(_find(node), []).append(node)
+    return sorted(groups.values(), key=lambda group: group[0])
+
+
+def _inner_width(handoffs: dict[tuple[int, int], list[str]], group: set[int]) -> int:
+    """内側の接点の本数 = 外枠の中で、group の外の初期モジュールと受け渡す式の本数。"""
+    received: set[str] = set()
+    sent: set[str] = set()
+    for (source, target), equations in handoffs.items():
+        if source in group and target not in group:
+            sent |= set(equations)
+        elif target in group and source not in group:
+            received |= set(equations)
+    return len(received) + len(sent)
+
+
+def _inner_modules(
+    flow: _Flow,
+    units: list[frozenset[int]],
+    outer_members: frozenset[int],
+    cycle_groups: list[frozenset[int]],
+) -> list[frozenset[int]]:
+    """外枠を内側モジュールに分ける（§5.4 / 実装記録 §12.3）。
+
+    外枠の中は共有の基礎と外の入出力を除けば閉じていることが多く（2609.15375v1 の計算本体は
+    接点 0）、「接点が上限以下なら併合する」外枠の手続を小さな上限で回し直しても、閉じた本体は
+    丸ごと 1 つに戻るか、1〜2 手順の断片に割れるだけになる。内側は併合ではなく**境目を入れる**:
+
+    1. 外枠の中の初期モジュール（循環は縮約済み）どうしを、共有の基礎を除く受け渡しで結ぶ。
+    2. **先頭になる初期モジュール**を決める — 循環のまとまり（互いに定める式の組）と、
+       生む式が外枠の中の ``INNER_HUB_MIN_CONSUMERS`` 個以上の他の初期モジュールに使われる
+       もの（以降の手順が共通に土台にする式を置く手順）。
+    3. 先頭へ入る受け渡しを切る。出現順に先頭を 1 つずつ試し、切ったあとの全ての内側モジュールの
+       接点（外枠の中で他と受け渡す式の本数）が ``INNER_INTERFACE_LIMIT`` 以下のときだけ採る。
+    4. 残った受け渡しの連結成分が内側モジュール。共有の基礎だけでつながる手順（基礎を導く手順・
+       基礎だけから結果を出す手順）は単独の内側モジュールになる（基礎は接点にも結び付きにも
+       数えない = §5.3 と同じ扱い）。
+
+    stage・章・部品は使わない（TM4）。
+    """
+    ordered = sorted(units, key=lambda unit: min(unit))
+    handoffs = _inner_handoffs(flow, ordered, outer_members)
+    cycle_set = set(cycle_groups)
+    users: dict[tuple[int, str], set[int]] = {}
+    for (source, target), equations in handoffs.items():
+        for eq in equations:
+            users.setdefault((source, eq), set()).add(target)
+    leaders = sorted(
+        {index for index, unit in enumerate(ordered) if unit in cycle_set}
+        | {source for (source, _eq), targets in users.items() if len(targets) >= INNER_HUB_MIN_CONSUMERS}
+    )
+
+    def _groups(cut: set[int]) -> list[list[int]]:
+        links = [pair for pair in handoffs if pair[1] not in cut]
+        return _components(len(ordered), links)
+
+    accepted: set[int] = set()
+    for leader in leaders:
+        trial = accepted | {leader}
+        if all(_inner_width(handoffs, set(group)) <= INNER_INTERFACE_LIMIT for group in _groups(trial)):
+            accepted = trial
+    modules = [frozenset().union(*(ordered[i] for i in group)) for group in _groups(accepted)]
+    return sorted(modules, key=lambda members: min(members))
+
+
+# ---------------------------------------------------------------------------
 # 表示の組み立て
 # ---------------------------------------------------------------------------
 
@@ -924,12 +1040,12 @@ def _build(document_id: str, artifacts: dict, graph_json: dict) -> dict:
     inner_keys: list[tuple[frozenset[int], str]] = []
     too_wide = False
 
-    def _isolated_reason(members: frozenset[int], limit: int) -> str | None:
+    def _isolated_reason(members: frozenset[int], limit: int, width: int | None = None) -> str | None:
         if any(members == group for group in cycle_groups):
             return ISOLATED_CYCLE  # 循環の縮約だけで閉じ、隣とまとまらなかった
         if len(members) != 1:
             return None
-        if flow.width(members) > limit:
+        if (flow.width(members) if width is None else width) > limit:
             return ISOLATED_INTERFACE_TOO_WIDE
         return None
 
@@ -945,15 +1061,20 @@ def _build(document_id: str, artifacts: dict, graph_json: dict) -> dict:
         ))
         if len(members) < 2:
             continue
-        inner = _merge_modules(flow, _initial_units(members), INNER_INTERFACE_LIMIT)
+        outer_units = _initial_units(members)
+        inner = _inner_modules(flow, outer_units, members, cycle_groups)
         if len(inner) < 2:
             continue  # 内側が割れない外枠には内側を持たせない（§5.4）
-        for inner_members in inner:
+        inner_handoffs = _inner_handoffs(flow, inner, members)
+        for index, inner_members in enumerate(inner):
             inner_key = _module_key(document_id, flow.produced(inner_members), LEVEL_INNER, taken_keys)
             inner_keys.append((inner_members, inner_key))
             modules.append(_module_dto(
                 flow=flow, labels=labels, members=inner_members, level=LEVEL_INNER, key=inner_key,
-                parent_key=key, isolated_reason=_isolated_reason(inner_members, INNER_INTERFACE_LIMIT),
+                parent_key=key,
+                isolated_reason=_isolated_reason(
+                    inner_members, INNER_INTERFACE_LIMIT, _inner_width(inner_handoffs, {index}),
+                ),
                 stage_order=stage_order,
             ))
     if too_wide:
