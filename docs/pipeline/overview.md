@@ -61,7 +61,7 @@
 | 1 | `save_pdf` | 入力バイト列を一時ファイルへ | Det | — |
 | 2 | `grobid_parse` | GROBID で TEI-XML 抽出（失敗時 PyMuPDF へフォールバック、非致命的） | Det | TEI-XML |
 | 3 | `document_structure` | **DocumentStructureAgent** 文書構造復元 | Det（structure-first） | DocumentStructureResult（blocks, sections, metadata） |
-| 4 | `figure_image_extraction` | PyMuPDF 埋め込み画像抽出 + caption 近傍の領域レンダリング fallback（常時実行） | Det | document_figures（MinIO `figure-images`） |
+| 4 | `figure_image_extraction` | caption ごとに障害物（本文・見出し・柱）に挟まれた帯のインク連結成分から図領域を決め、埋め込み画像が図のほぼ全体を覆うときだけ embedded・それ以外は領域レンダリング（情報量の乏しい画像は提示しない。常時実行・設計書 §17） | Det | document_figures（MinIO `figure-images`） |
 | 5 | `source_chunking` | ブロックからチャンク生成 | Det | チャンク |
 | 6 | `source_embedding` | チャンクを pgvector へ保存 | Emb | — |
 | 7 | `paper_skeleton` | **PaperSkeletonAgent** 論文 backbone 仮説化 | LLM | PaperSkeletonResult |

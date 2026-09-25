@@ -109,7 +109,7 @@ from core.course_units import (
     unit_concept_terms_by_document,
     unit_kind_label,
 )
-from core.document_pipeline.figure_images import load_document_figures
+from core.document_pipeline.figure_images import is_listed_figure, load_document_figures
 from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE, strip_control_sequences
 from core.document_pipeline.orchestrator import PIPELINE_STAGES, VISION_STAGE_NAMES
 from core.document_pipeline.persistence import (
@@ -3432,7 +3432,7 @@ def list_document_figures(
     chunks = _ensure_document_viewable(document_id, current_user)
     canonical_document_id = _canonical_document_id(chunks, document_id)
 
-    rows = load_document_figures(canonical_document_id)
+    rows = [row for row in load_document_figures(canonical_document_id) if is_listed_figure(row)]
 
     # 採用 run の apparatus_semantics artifact から figure_id 単位の候補を拾う
     # （無ければ空リスト。apparatus_semantics は常に review_required 系の

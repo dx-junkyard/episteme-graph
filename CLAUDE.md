@@ -1544,8 +1544,22 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   `analyze_images`（既定 false）。`document_analysis_runs.options JSONB`（migration 041）に
   run 単位で保存（`stage_outputs` への相乗り禁止）。
 - **`figure_image_extraction`**（`core/document_pipeline/figure_images.py`、非LLM・**常時実行**、
-  `document_structure` 直後）: PyMuPDF 埋め込み画像抽出 + caption 近傍の領域レンダリング
-  fallback（`extraction_method='embedded'|'region_render'`）。MinIO `figure-images` バケット +
+  `document_structure` 直後）: 図領域は `figure_regions.py` が決める（2026-09-24 改訂・設計書 §17）—
+  障害物（本文・見出し・番号付き式・他の caption・柱）を**組版と幾何から**判定し（reading order を
+  使わない）、caption の上（空なら下）の障害物に挟まれた帯に掛かる**インクの連結成分**を集める。
+  成分は帯の外へはみ出してよい（切り抜き境界の向こうへ連続する要素を取り込む）。「図 → 短い文字塊 →
+  図」と連続していれば文字塊を障害物から外してやり直し、阻まれたままの辺は artifact の
+  `quality[].truncated_edges` に残す。図領域の 90% 以上を1つの画像配置が覆うときだけ `embedded`、
+  それ以外（ベクター図・部品画像入りの図）は `region_render`（どちらも配置を描き直す・180dpi 以上）。
+  情報量（インク比・エッジ密度）の乏しい画像は図として提示しない（caption 付きは画像なしの failed 行、
+  caption 無しは保存せず `skipped` に数える）。**caption 幅や reading order で図領域を決める実装に
+  戻さない**（`extraction_method='embedded'|'region_render'`）。
+  **2026-09-25 追補（設計書 §18・migration 087）**: 絵の無いものは行を作らない（`skipped` / `not_saved`
+  に残す）。抽出が最後まで通ったら今回作られなかった前回までの行を `status='superseded'` にし（行は
+  消さない）、図・画像一覧・検出要素・G層・二層説明の入力は `figure_images.is_listed_figure`
+  （`status='extracted'`）だけを使う。**caption の位置の正本は PDF の文字層**
+  （`figure_regions.anchor_caption`。構造化の頁・位置は当てにしない — GROBID 経路は頁違い・本文段落の
+  誤認・bbox なしが起こる）。文書構造に無い caption は文字層から足す（`caption_block_id` なし）。MinIO `figure-images` バケット +
   `document_figures` テーブル（`UNIQUE(document_id, figure_key)` upsert）。caption 対応が
   取れない画像も `caption_block_id=NULL` で保持（P4）。図単位の失敗は `status='failed'` で
   非致命。**図中ラベル抽出（migration 051）**: 図領域内のテキストスパンを

@@ -165,7 +165,7 @@ def build_figure_db_maps(document_id: str) -> tuple[dict[str, dict], dict[str, d
     normalize the same way on lookup (``_resolve_figure_db_row`` does).
     """
     try:
-        from .figure_images import load_document_figures, normalize_figure_join_key
+        from .figure_images import is_listed_figure, load_document_figures, normalize_figure_join_key
     except Exception:  # noqa: BLE001
         logger.warning(
             "contextual_explanation: could not import figure_images (non-fatal)",
@@ -173,7 +173,8 @@ def build_figure_db_maps(document_id: str) -> tuple[dict[str, dict], dict[str, d
         )
         return {}, {}
     try:
-        rows = load_document_figures(document_id)
+        # 最新の抽出で作られた絵のある行だけ（superseded / failed に説明候補を作らない。§18）
+        rows = [row for row in load_document_figures(document_id) if is_listed_figure(row)]
     except Exception:  # noqa: BLE001
         logger.warning(
             "contextual_explanation: failed to load document_figures document=%s (non-fatal)",

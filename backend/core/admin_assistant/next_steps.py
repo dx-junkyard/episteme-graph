@@ -607,6 +607,7 @@ def _eval_figure_unreviewed_modes(session, uid: str) -> list[tuple[NextStep, str
             -- documents.id とそのまま突き合わせる（文字列化しない）。
             JOIN document_figures f ON f.document_id = d.id
             WHERE d.uploaded_by = CAST(:uid AS uuid)
+              AND f.status = 'extracted'
               AND f.mode_review_status = 'pending'
               AND f.suggested_mode <> 'unknown'
             GROUP BY d.id, d.source_path, d.title, d.created_at

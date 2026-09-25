@@ -231,6 +231,7 @@ purge 誤削除を防止する。`kind` に DB CHECK は付けず、V層側の4�
 | `document_figures.inner_labels`（051, ALTER） | 図領域内のテキストラベル抽出結果を追加（`JSONB`配列、`[{"text","bbox"}]`、決定論的・非LLM）。`apparatus_semantics` の `label_ref` 突合に使用 |
 | `document_figures`（052, ALTER, #496） | 図の提示モード分類。vision 提案（`suggested_mode`/`mode_reason`/`analysis_profile`）と教員レビュー確定（`reviewed_mode`/`mode_review_status`/`mode_reviewed_by`/`mode_reviewed_at`）を分離して保持 |
 | `document_figures`（053, ALTER） | モード別詳細分析（functions/ports/connections 等）の教員レビュー確定を分離保存（`reviewed_analysis_mode`/`reviewed_analysis_profile`/`analysis_review_status`/`analysis_reviewed_by`/`analysis_reviewed_at`/`analysis_review_source_annotation_id`）。再解析は AI 候補（`analysis_profile`）のみ更新し、レビュー済み内容は上書きしない |
+| `document_figures.status`（087, CHECK 拡張） | `extracted` / `failed`（画像の保存に失敗）/ `superseded`（最新の抽出で作られなかった前回までの行。行は残し、一覧・検出要素・G層は `extracted` だけを数える） |
 
 ### 分野別ナレッジライブラリ（L層, マイグレーション 042・050）
 `atlas_skeletons`（027）と同じ「draft が正本・凍結版が履歴・カートリッジ同梱シードを起動時に
@@ -555,6 +556,7 @@ claim 紐づけの最終確定は必ず教員が行い、AI 候補は `backing_c
 | `084_claim_chunk_fk_set_null.sql` | 知識オブジェクト層の是正（P1-R1）— `theory_claims.chunk_id` の FK を `ON DELETE CASCADE` → **`ON DELETE SET NULL`**（再解析の `DELETE FROM chunks` が claim の live 行を物理削除していた = KO3 の穴。制約名は pg_constraint から動的に引き、CASCADE のときだけ張り替える）。併せて `chunks(document_id, chunk_index)` の一意索引（既存重複が在れば作らず `RAISE NOTICE`。書き手は索引の有無に依存しない）。DELETE 文なし |
 | `085_paper_discovery_arxiv_metadata_cache.sql` | 論文ディスカバリー層 — `paper_discovery_arxiv_metadata_cache`（`arxiv_id` 主キー = version 抜きの正規化 ID・`title` / `summary` / `categories JSONB` / `primary_category` / `authors JSONB` / `published_at` / `updated_at` / `abs_url` / `pdf_url` / `fetched_at` + `fetched_at` 索引）。**arXiv API が公開しているメタデータの写し**であり、候補・教員判断のスナップショットではない（077 と同じ CC3 型の設計明示例外）。教員の一連の操作（開く → 検索 → 比較）での arXiv 呼び出しを最大2回に抑える read-through キャッシュで、正本は `docs/features/paper_radar_design.md` §14。FK なし・users 参照なし・**シード行を入れない**・DELETE 文なし（更新は upsert・陳腐化は `DISCOVERY_ARXIV_METADATA_TTL_DAYS` 既定30日で抑える）。**失敗は保存しない**（429 の抑制は `arxiv_client` のクールダウンの責務） |
 | `086_theory_modules.sql` | 理論モジュール層 Phase 1 — 新表 `knowledge_theory_modules`（外枠・内側の理論モジュールを一級の行にする。`stable_key`（生む式の stable_key 集合 + 段 + 規則の版）/ `agent_module_key`（読み時 DTO の `module_key`）/ `level` の CHECK / 表示用の組み立て結果 / 内部表現の `structure_fingerprint` と判定結果 `identity_eligible` / 成員 step と接点の式の JSONB・`document_id` は UUID + FK CASCADE・部分 UNIQUE・人間の確定列なし・users 参照なし）+ `knowledge_theory_modules_live`、`element_identity_links.instance_element_type` の CHECK に `theory_module`（定義に無いときだけ張り直す）、語彙表 `knowledge_mapping_justifications` に `structural_match`（`ON CONFLICT DO NOTHING`）。DELETE 文なし。保存行は同一性リンクの参照先と構造の指紋の照合の索引で、表示の正本ではない（正本は `docs/features/theory_module_layer_design.md` §13） |
+| `087_document_figures_superseded.sql` | L層 図画像レジストリ — `document_figures.status` の CHECK に `superseded` を追加（定義に無いときだけ張り直す・冪等）。図の抽出が最後まで通ったとき、その回に作られなかった前回までの行を `superseded` にし、図・画像一覧・検出要素・G層の To-Do は `extracted` の行だけを数える。行・教員のレビュー列・画像は消さない（正本は `docs/features/image_pipeline_knowledge_library_design.md` §18） |
 
 > 注（2026-07 アーキテクチャ整理 Tier 3-13 で更新）: マイグレーションの実行方式を一本化した。
 > かつては `backend/db/*.sql` を正本リファレンスとしつつ、実際の適用は `backend/api/main.py` の

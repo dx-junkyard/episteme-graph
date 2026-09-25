@@ -22,7 +22,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（2026-09-23 時点で **087 以降**。044〜086 は使用済み — §3 参照。
+  着手時は次の空き番号（2026-09-25 時点で **088 以降**。044〜087 は使用済み — §3 参照。
   採番前に必ず `ls backend/db/` で確認する）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
@@ -121,7 +121,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   `backend/tests/test_admin_help_ui_anchors.py`（管理側の網羅・双方向整合は同テストと
   `test_admin_help_inspect_ui_static.py` が構造的に守る）。
 
-## 3. migration 帰属一覧（init〜086、2026-09-23 時点）
+## 3. migration 帰属一覧（init〜087、2026-09-25 時点）
 
 `backend/db/` の実ファイルを正とした全 migration の帰属。
 
@@ -195,8 +195,9 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 084 | `084_claim_chunk_fk_set_null` | **知識オブジェクト層の是正**（`theory_claims.chunk_id` の FK を `ON DELETE SET NULL` に張り替え = 再解析の chunks 掃除で claim 行が消えていた穴を塞ぐ。`chunks(document_id, chunk_index)` の一意索引つき） |
 | 085 | `085_paper_discovery_arxiv_metadata_cache` | **論文ディスカバリー層 / 論文レーダー**（arXiv メタデータの外部事実キャッシュ1表。候補・教員の判断は保存しない。正本は `docs/features/paper_radar_design.md` §14） |
 | 086 | `086_theory_modules` | **理論モジュール層 Phase 1**（新表 `knowledge_theory_modules` + `knowledge_theory_modules_live`、`element_identity_links` の instance 型に `theory_module`、`knowledge_mapping_justifications` に `structural_match`。保存行は表示の正本ではない。正本は `docs/features/theory_module_layer_design.md` §13） |
+| 087 | `087_document_figures_superseded` | **L層 図画像レジストリ**（`document_figures.status` の CHECK に `superseded` を追加。最新の抽出で作られなかった前回までの行を消さずに一覧から外す。正本は `docs/features/image_pipeline_knowledge_library_design.md` §18） |
 
-次の空き番号は **087**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **088**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。
 

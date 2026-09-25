@@ -36,7 +36,7 @@
 | 族の名 | 単一処理の不良 |
 | 一般形 | 入力・契約・前提はすべて妥当で、単一の照合・例外処理・文言だけが誤っている |
 | 主に効く軸 | `local` |
-| 含む型 | `substring-match-false-positive` / `failure-reported-as-success` / `wording-mismatch` |
+| 含む型 | `substring-match-false-positive` / `failure-reported-as-success` / `wording-mismatch` / `extent-decided-by-proxy-signal` |
 
 #### substring-match-false-positive
 
@@ -49,6 +49,18 @@
 | 典型的な解決観点 | `single_point_fix`（語境界付き一致）+ `canonical_source`（照合器を 1 本に）+ `guardrail_fix`（`in text` の禁止） |
 | 見分け方 | 照合対象に短い語（数文字の略号）が含まれるか。含まれるなら部分一致は必ず誤検出する |
 | 確かめ方 | 短い略号を含む語彙表で照合器を走らせ、無関係な語の内部に当たらないことを実データの表記一覧で見る。部分文字列一致を禁じる検査を置く |
+
+#### extent-decided-by-proxy-signal
+
+| 項目 | 内容 |
+|---|---|
+| 一般形 | 対象の範囲・実体を、近くにある手がかり（隣の要素の幅・並び順・最寄りの候補）から決め、実際に描かれ・書かれている中身で確かめないため、一部だけ・余計なもの・無関係な部品を対象として出す |
+| 典型的な座標 | 処理=logic / 接続=meaning（エントリの過半が持つ値。none の軸は省略） |
+| 一般化レベル | `general` |
+| 典型的な発見観点 | `data_inspection`（実物の出力を目で見る）/ `symptom_report` |
+| 典型的な解決観点 | `single_point_fix`（中身そのもの＝インク・本文・値から範囲を決める）+ `fail_closed`（中身が無ければ出さない）|
+| 見分け方 | 範囲を決めている量は、対象そのものの性質か、対象の隣にあるものの性質か。後者なら本型 |
+| 確かめ方 | 手がかりと中身が食い違う入力（caption より広い図・並び順と位置がずれた頁・部品だけの画像）を作り、出力の範囲が中身に一致し、中身の無い候補が出ないことを実物で見る |
 
 #### failure-reported-as-success
 
