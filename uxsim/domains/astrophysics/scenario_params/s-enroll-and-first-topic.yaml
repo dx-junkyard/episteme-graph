@@ -1,0 +1,15 @@
+# 経路 s-enroll-and-first-topic の穴を宇宙物理で埋める値
+scenario: s-enroll-and-first-topic
+domain: astrophysics
+params:
+  goal_text: ゼミで読む宇宙論の論文の予習
+  topic_hint: 宇宙膨張と距離の測り方
+  first_question: この節で出てくる「光度距離」は、ふつうの意味での距離と何が違うんですか？
+per_archetype:
+  non_native:
+    goal_text: preparing for the lab seminar on a cosmology paper
+    first_question: What is the difference between luminosity distance and the ordinary distance in this section?
+  voice_first:
+    first_question: えっと、光度距離ってふつうの距離とどう違うの？
+  confident_theorist:
+    first_question: 光度距離は (1+z) が二乗で効くと理解していますが、この論文ではどの宇宙論模型を仮定して換算していますか？

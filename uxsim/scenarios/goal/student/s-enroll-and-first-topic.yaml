@@ -1,0 +1,39 @@
+id: s-enroll-and-first-topic
+population: students
+runner: [api, browser]
+goal: "{{goal_text}} のために、受講できるコースを見つけて受講を始め、最初のトピック（{{topic_hint}}）の教材を読んで、気になった引用を開く"
+params_required: [goal_text, topic_hint, first_question]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+    note: 受講できるコースの中から、目標に合いそうなものを探す
+  - do: learning.course.enroll
+  - do: learning.course.open
+  - do: learning.topic.open
+    note: 最初のトピックを開き、教材の本文を読む
+  - choose:
+      - do: learning.element.context
+        note: 本文中の ⚓（引用）を 1 つ開いて、何の根拠かを確かめる
+      - do: learning.source_chunk.open
+        note: 出典の原文を開いて読む
+  - do: learning.chat.ask
+    with: {message: "{{first_question}}"}
+  - choose:
+      - do: learning.source_chunk.open
+        note: 回答に付いた出典を開く
+      - do: learning.help.inspect
+        with: {anchor_id: rightpanel.tab-sources}
+        note: 回答の出典の欄が何を意味するのかを「使い方」で確かめる
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: student/02-student.md#enroll-course
+  - manual: student/02-student.md#screen-overview
+  - manual: student/02-student.md#material-element-anchor
+  - manual: student/02-student.md#answer-origin-badge
+watch_for:
+  - 受講できるコースの一覧で、どのコースが目標に合うかを判断できる説明が出ている
+  - 受講を始めた直後に、どのトピックから読めばよいかが画面から分かる
+  - 教材本文の ⚓ を開くと、何の根拠であるかが内部 ID ではなく読める言葉で出る
+  - 回答の出所の表示（教材から・別の資料から・AI の生成）が付き、その意味がマニュアルの説明と一致している
+  - 出典を開けないときは、開けない理由が事実文で出て、空白や汎用エラーにならない

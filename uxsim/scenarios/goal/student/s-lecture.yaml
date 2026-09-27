@@ -1,0 +1,40 @@
+id: s-lecture
+population: students
+runner: [api, browser]
+goal: "{{goal_text}} のために、{{topic_hint}} のレクチャーを聴き、途中で分からないところを質問し、残りを短く聴く"
+params_required: [goal_text, topic_hint, interrupt_questions]
+steps:
+  - do: auth.login
+  - do: learning.course.open
+  - do: learning.topic.open
+  - do: learning.lecture.audio_status
+    note: 音声が用意されているかを確かめる
+  - do: learning.lecture.sequence
+    note: レクチャーを最初から再生する
+  - repeat:
+      until: "persona_decides_to_stop or steps > 3"
+      max: 3
+      do: learning.chat.ask
+      with: {message: "{{interrupt_questions | next}}"}
+      note: 再生を止めて、いま聴いたところについて質問する
+  - do: learning.lecture.sequence
+    note: 続きから聴く。前に質問した箇所が短くされていないかを気にする
+  - choose:
+      - do: learning.help.inspect
+        with: {anchor_id: material.lecture-condensed}
+        note: 短くされた箇所があれば、何が畳まれたのかを確かめる
+      - do: learning.voice.speak
+        with: {text: "{{interrupt_questions | current}}"}
+        note: 質問への答えを読み上げで聴く
+    optional: true
+  - do: learning.progress
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: student/02-student.md#interactive-lecture
+  - manual: student/02-student.md#lecture-condensed
+  - manual: student/02-student.md#lecture-finished
+watch_for:
+  - スライドの表示と読み上げが同じ箇所を指している
+  - 音声が生成されていないスライドには「音声未生成」の表示が出て、無音のまま止まらない
+  - 前に触れた箇所を畳んだときは、畳んだことが告知され、本人が開ける
+  - レクチャーを途中で止めて質問した後、どこから再開するのかが分かる

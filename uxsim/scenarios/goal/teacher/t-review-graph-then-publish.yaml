@@ -1,0 +1,56 @@
+id: t-review-graph-then-publish
+population: teachers
+runner: [api, browser]
+preconditions:
+  - 砂場に解析済みの教材が入っていて、このペルソナがその教材を編集できる（snapshot corpus-astro-v1）
+goal: "教材の理論の構造をグラフで確かめてから、{{persona.teaching.course_subject}} のコースを作って公開する"
+params_required: [graph_questions, reject_reason_examples, course_title, builder_messages]
+steps:
+  - do: auth.login
+  - do: admin.next_steps.list
+  - do: admin.materials.list
+  - do: admin.graph_review.open
+    note: 教材行のグラフのアイコンからグラフ画面を開く
+  - do: admin.graph_review.chat
+    with: {message: "{{graph_questions | next}}"}
+    note: まずグラフ全体について AI に聞き、全体像をつかむ
+  - repeat:
+      until: "persona_decides_to_stop or steps > 8"
+      max: 8
+      steps:
+        - choose:
+            - do: admin.graph_review.approve_component
+              note: 根拠を開いて原文と照らし、納得したノードを承認する
+            - do: admin.graph_review.reject_component
+              with: {reason: "{{reject_reason_examples | next}}"}
+              note: 根拠が弱いノードを理由を書いて却下する
+            - do: admin.graph_review.chat
+              with: {message: "{{graph_questions | next}}"}
+              note: 選んだノードについて AI に確かめる
+  - do: admin.discuss_opening_review.list
+    note: 議論のきっかけの候補を確かめる
+  - do: admin.course_builder.session_create
+    with: {title: "{{course_title}}"}
+  - repeat:
+      until: "persona_decides_to_stop or steps > 3"
+      max: 3
+      do: admin.course_builder.chat
+      with: {message: "{{builder_messages | next}}"}
+  - do: admin.course_builder.register
+  - do: admin.release_review.placements
+  - do: admin.release_review.accept
+  - do: admin.course.visibility
+    with: {visibility: public}
+  - do: admin.next_steps.list
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/26-admin-graph-review.md#graph-review-open
+  - manual: teacher/26-admin-graph-review.md#node-approve
+  - manual: teacher/26-admin-graph-review.md#node-reject
+  - manual: teacher/26-admin-graph-review.md#graph-chat
+watch_for:
+  - 承認できないノードには、何が足りないのかが事実文で示され、承認ボタンを押して初めて分かるのではない
+  - 却下には理由が必須で、却下したノードは消えずに状態が変わるだけである
+  - グラフ全体の AI 対話の冒頭に「AIの読み（未確認）」が二重に出ず、未レビューの件数を本文で並べない
+  - グラフで承認した結果が、その後のコース作成とリリース前の確認で「教員確認済み」として区別される
+  - 確認をせず「次へ」を続けて押した場合も、何が一括で確定されたかが後から分かる記録になる

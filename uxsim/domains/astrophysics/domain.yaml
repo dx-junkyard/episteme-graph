@@ -1,0 +1,18 @@
+# 分野パック: 宇宙物理（正本: docs/architecture/persona_enactment_testing_design.md §5・§11）
+domain_key: astrophysics
+display_name: 宇宙物理
+cartridge_id: ""                 # 空 = 「指定しない」（分野中立経路。2026-09-10 是正 F9 を踏む）
+atlas_domain_key: astrophysics   # backend/atlas_domains/astrophysics（凍結版の骨格。10 領域）
+language_default: ja
+audience: |
+  宇宙物理・天文学を専攻する大学院生（修士 1 年〜博士 3 年）と、その指導教員・ゼミ担当教員。
+  学生は観測・理論・数値計算・装置開発と立場が分かれ、隣接分野（素粒子物理・情報科学）から
+  移ってきた者、英語で学ぶ留学生、仕事を持つ社会人院生を含む。
+  教員は研究室のゼミ準備や入門講義の補助として、arXiv の論文を教材に取り込みコースを作る。
+knowledge:
+  concepts: knowledge/concepts.yaml
+  misconceptions: knowledge/misconceptions.yaml
+  goals: knowledge/goals.yaml
+corpus:
+  manifest: corpus/manifest.yaml
+  course_briefs: corpus/course_briefs/

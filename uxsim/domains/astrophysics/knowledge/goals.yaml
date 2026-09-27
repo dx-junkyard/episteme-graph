@@ -1,0 +1,33 @@
+# 受講目標の候補。ペルソナの goals はここの id を参照する（campaign が上書きしてよい）。
+# kind: seminar | report | research_prereq | curiosity | exam
+goals:
+  - id: seminar_present_main_result
+    kind: seminar
+    text: 来週のゼミ発表のために、担当論文の主結果とそれを支える前提を、自分の言葉で説明できるようになる
+  - id: seminar_journal_club_questions
+    kind: seminar
+    text: 輪講で他の人の発表に的を射た質問ができるよう、論文のどこが確かめられていないかを把握しておく
+  - id: english_seminar
+    kind: seminar
+    text: 英語で行う研究室のゼミで、教材の内容を英語で説明し質問に答えられるようにする
+  - id: report_course_assignment
+    kind: report
+    text: 講義のレポート課題で、観測結果と理論予測の食い違いを整理して書けるようにする
+  - id: thesis_intro_writing
+    kind: report
+    text: 学位論文の序論で、自分の研究を分野の中にどう位置づけるかを書けるようにする
+  - id: research_prereq_new_topic
+    kind: research_prereq
+    text: 来月から始める研究テーマの前提知識を、手元の論文を足場にして埋める
+  - id: research_prereq_method
+    kind: research_prereq
+    text: 自分の解析に使う統計手法や計算手法が論文でどう使われているかを理解し、自分の解析で真似できるようにする
+  - id: quals_exam
+    kind: exam
+    text: 博士課程の資格試験に向けて、分野の基礎事項を一通り口頭で説明できる状態にする
+  - id: curiosity_other_field
+    kind: curiosity
+    text: 研究会でよく話題になる自分の専門外の話について、何が問題になっているのかだけでも掴む
+  - id: curiosity_casual
+    kind: curiosity
+    text: 移動や休憩の合間に気になった話題を気軽に聞いて、理解を少しずつ広げる

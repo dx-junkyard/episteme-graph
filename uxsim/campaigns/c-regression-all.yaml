@@ -1,0 +1,15 @@
+id: c-regression-all
+domain: "*"                          # 全分野の scenarios/regression/ を対象にする
+snapshot: per_scenario               # 各回帰経路が起票時の snapshot を指定する
+personas: per_scenario               # 各回帰経路が起票時のペルソナを指定する
+scenarios:
+  regression: all                    # scenarios/regression/IK-NNNN-*.yaml 全件
+runner: api
+replay: true                         # ペルソナ LLM を呼ばず、起票時の行為列を再演する（§7.3）。cache miss した地点から live に切り替え、分岐点を記録する
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 300, persona_llm_calls: 60, wall_clock_minutes: 120}
+notes: |
+  直した課題ごとの回帰経路をまとめて再演し、消えるべき症状が消えたかを審判ルールで確かめる。
+  結果は課題エントリの resolution.verification（reproduction_rerun）を書く材料にする。
+  回帰経路がまだ 1 本も無いあいだは、走らせても「対象なし」と記録するだけになる。

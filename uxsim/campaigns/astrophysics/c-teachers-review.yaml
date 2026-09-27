@@ -1,0 +1,17 @@
+id: c-astro-teachers-review
+domain: astrophysics
+snapshot: corpus-astro-v1
+personas:
+  teachers: [te-02-veteran-intro, te-03-meticulous-seminar, te-04-copilot-intro, te-05-delegator-lab]
+scenarios:
+  teacher: [t-review-graph-then-publish]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 160, persona_llm_calls: 240, wall_clock_minutes: 60}
+notes: |
+  同じ経路を行動型の違う 4 名の教員で走らせ、読まずに押す・全部読む・アシスタントに聞く・段取り優先で、
+  グラフの承認・却下とリリース前の確認の記録がどう違って残るかを見る。
+  各教員は snapshot の教材を編集できる必要がある（snapshot 作成時に教員ペルソナ全員を含む教員グループへ
+  editor で共有しておく前提。満たさない run では承認系の行為を「未実施」と記録する）。
+  教員ごとに snapshot を復元し直し、ある教員の承認が別の教員の画面に混ざらないようにする。

@@ -1,0 +1,30 @@
+scenario: s-quota-edge
+domain: astrophysics
+params:
+  goal_text: 暗黒物質と暗黒エネルギーの違いを納得すること
+  topic_hint: 宇宙の中身（暗黒物質と暗黒エネルギー）
+  seed_questions:
+    - 暗黒物質と暗黒エネルギーは、どちらも見えないという点以外で何が違うんですか？
+    - 暗黒物質があると分かるのは、どういう観測からですか？
+    - 銀河の回転曲線が平らになるのは、暗黒物質以外では説明できないんですか？
+    - 暗黒エネルギーが宇宙定数だとすると、密度は膨張しても変わらないんですか？
+    - 状態方程式 w が -1 からずれているかは、どうやって測るんですか？
+    - 重力レンズの観測で、暗黒物質の分布まで分かるんですか？
+    - 暗黒物質の正体の候補は、どのくらい絞られているんですか？
+    - 宇宙の加速膨張は、修正重力理論でも説明できるんですか？
+    - 結局、暗黒エネルギーは物質なんですか？
+    - もう一度最初から、二つの違いを一言でまとめてもらえますか？
+  usage_question: 急に質問できなくなりました。何回まで質問できるんですか？いつからまた使えますか？
+per_archetype:
+  non_native:
+    goal_text: understanding the difference between dark matter and dark energy
+    seed_questions:
+      - Apart from both being invisible, how do dark matter and dark energy differ?
+      - Which observations tell us that dark matter exists?
+      - Can flat rotation curves be explained without dark matter?
+      - If dark energy is a cosmological constant, does its density stay constant as the universe expands?
+      - How do we measure whether the equation of state w deviates from -1?
+      - Can gravitational lensing map the distribution of dark matter?
+      - How narrow are the candidates for dark matter now?
+      - Can modified gravity explain the accelerated expansion?
+    usage_question: I suddenly cannot ask questions any more. How many questions can I ask, and when can I use it again?

@@ -1,0 +1,28 @@
+id: veteran_clicks_through
+population: teachers
+summary: 画面を読まず勘で押す。確認は続けて押す
+habits:
+  reads_manual: never
+  patience: low
+  device: desktop
+  session_length: short
+  returns_later: "no"
+  language_mix: ja_only
+  demands_out_of_principle: sometimes
+  uses_copilot: never
+  follows_next_steps: "no"
+  reviews_before_publish: clicks_through
+  edits_explanations: never
+  rejects_candidates: never
+  reads_confirmations: skips
+  manages_accounts: rarely
+voice: |
+  忙しい。似た画面を何度も使ってきたので、ボタンの位置で操作を決める。説明文は読まない。
+  確認のダイアログは中身を見ずに進む。「とりあえず公開して、問題があれば後で直す」が方針。
+  エラーが出ると「なんで止まるの」と一言だけ書く。
+gives_up_when: |
+  押したボタンで何も起きないように見えるとき（2 回まで押す）。
+  確認のダイアログが続けて 3 回出たとき。
+asks_out_of_principle:
+  - 確認を全部飛ばして、一度で公開できるようにしてほしい
+  - 学生の成績に使えるように、正答率を出してほしい

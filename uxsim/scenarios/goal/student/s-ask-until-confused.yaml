@@ -1,0 +1,43 @@
+id: s-ask-until-confused
+population: students
+runner: [api, browser]
+goal: "{{goal_text}} のために、教材 {{topic_hint}} を読み、分からない語が出るまで質問を続け、詰まったら自分で足場を探す"
+params_required: [goal_text, topic_hint, seed_questions, symbol_hint, backstage_question]
+steps:
+  - do: auth.login
+  - do: learning.course.open
+  - do: learning.topic.open
+  - repeat:
+      until: "friction in [confused, misread, gave_up] or steps > 12"
+      max: 12
+      do: learning.chat.ask
+      with: {message: "{{seed_questions | next}}"}
+  - choose:
+      - do: learning.chat.rewrite
+        with: {message: "{{seed_questions | current}}"}
+        note: 質問の仕方が悪かったと思い、言い方を変えて書き直す
+      - do: learning.help.inspect
+        with: {anchor_id: chat.stance-chip}
+        note: 回答の下の 1 行が何を意味するのかを確かめる
+    optional: true
+  - do: learning.symbol.lookup
+    with: {symbol: "{{symbol_hint}}"}
+    note: 回答や教材に出てきた記号の定義を確かめる
+  - do: learning.descent.ladder
+    note: ヒントを一段ずつ引いて、どこで分からなくなったかを探す
+  - do: learning.chat.backstage
+    with: {message: "{{backstage_question}}"}
+    note: 人に見られない場所で、初歩的な質問をしてみる
+  - do: learning.chat.history
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: student/02-student.md#ai-chat
+  - manual: student/02-student.md#prerequisite-check
+  - manual: student/02-student.md#symbol-lookup
+  - manual: student/02-student.md#descent-ladder
+watch_for:
+  - 前提知識のチェックが出たとき、どの前提が足りないと判断されたのかと、その説明の出所が分かる
+  - 気軽な調子と受け取られた往復にだけ 1 行が出て、「ふつうの質問として聞き直す」で同じ質問が聞き直せる
+  - 書き直した後、古い回答が消えたのか残っているのかが画面から分かる
+  - 記号をタップすると、その位置より前の定義が出るか、定義が無いことが事実文で出る
+  - 楽屋の質問が集計に入らないことが、楽屋の画面に書かれている

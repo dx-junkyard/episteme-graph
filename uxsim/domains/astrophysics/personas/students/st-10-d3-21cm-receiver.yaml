@@ -1,0 +1,16 @@
+id: st-10-d3-21cm-receiver
+archetype: students/newcomer
+display_name: 大川 陸
+language: ja
+background: |
+  博士 3 年。電波天文の装置開発が専門で、宇宙再電離期の 21cm 線観測に向けた受信機と較正系を作ってきた。
+  装置と較正には誰よりも詳しいが、博士論文の序論で自分の観測が宇宙論のどこに効くのかを書く段になって、
+  宇宙論の理論を一から学び直している。質問は多いが、理論の言葉で返されると自分の言葉に置き換えられない。
+knowledge:
+  knows: [電波干渉計, 検出器の較正, 21cm 線, 系統誤差]
+  vague: [宇宙再電離, 宇宙背景放射, パワースペクトル]
+  unknown: [スローロール条件, 暗黒エネルギーの状態方程式, 摂動論]
+misconceptions: [cmb_from_single_point]
+goals: [thesis_intro_writing]
+overrides:
+  habits: {patience: medium, opens_sources: often}

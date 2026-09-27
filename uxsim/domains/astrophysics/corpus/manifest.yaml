@@ -1,0 +1,61 @@
+# 教材コーパスの manifest（正本: docs/architecture/persona_enactment_testing_design.md §5）
+#
+# - 論文は arXiv astro-ph のうち **CC-BY ライセンス表示のある論文だけ**を使う（§14 D2。arXiv の既定ライセンスは
+#   再配布を許さないため使わない）。目安 6 本: レビュー 1・観測 2・理論 2・手法 1。
+# - snapshot の実体（pg_dump と MinIO の mirror）は**リポジトリの外**に置く（砂場 MinIO の別バケット
+#   `uxsim-snapshots` か、オーナーの手元ディレクトリ）。ここには arXiv ID・ライセンス・sha256・作成時の
+#   コミットと migration 先頭番号だけを書く（§5.3）。
+# - 論文は一度だけ解析し、以後は snapshot を復元して使う。campaign 中に arXiv を呼ばない（P-0007）。
+# - papers / snapshots は snapshot を実際に作った時点で埋める。いまは空。
+#   papers の各要素: {arxiv_id, title, license, kind: review|observation|theory|method, sha256}
+#   snapshots の各要素: {name, created_at, git_commit, migration_head, papers: [arxiv_id...], accounts: [...], courses: [...], notes}
+name: corpus-astro-v1
+papers:
+  # 2026-09-27 に arXiv OAI-PMH（metadataPrefix=arXiv・1 回）で license が CC BY 4.0 の astro-ph 論文を列挙し、
+  # 分野の広がり（宇宙論 / 重力波・高エネルギー / コンパクト天体 / 星間物質・星形成）と長さで 4 本を選んだ
+  # （第 1 周は費用を抑えて 4 本。目安 6 本には 2 本足りない）。sha256 は snapshot 作成時に埋める。
+  - arxiv_id: "2606.00411"
+    title: The sound of dynamical dark energy and modified gravity
+    license: CC BY 4.0
+    kind: theory
+    categories: astro-ph.CO
+    sha256: ""
+  - arxiv_id: "2606.02318"
+    title: The First Detection of Sub-Populations in the Delay-Time Distribution of Binary Black Hole Mergers
+    license: CC BY 4.0
+    kind: observation
+    categories: astro-ph.HE astro-ph.CO gr-qc
+    sha256: ""
+  - arxiv_id: "2605.31198"
+    title: Neutron Star Equation of State via Physics Informed Neural Network
+    license: CC BY 4.0
+    kind: method
+    categories: astro-ph.HE
+    sha256: ""
+  - arxiv_id: "2605.26810"
+    title: Magnetic field Topology and Star Formation in the Cepheus B Filamentary cloud under External Feedback
+    license: CC BY 4.0
+    kind: observation
+    categories: astro-ph.GA
+    sha256: ""
+snapshots:
+  - name: corpus-astro-v1
+    created_at: "2026-09-27 03:27:26+00:00"
+    git_commit: "fd9454e"
+    migration_head: "087"
+    papers: ["2606.00411", "2606.02318", "2605.31198", "2605.26810"]
+    accounts: [Administrator, uxsim-bootstrap-teacher]
+    courses: []
+    location: uxsim/snapshots/corpus-astro-v1/（db.dump + minio.tgz・git 管理外）
+    notes: >-
+      4 本とも解析完了・visibility は public（教員ペルソナ全員が使えるように）。cartridge は「指定しない」。
+      reference_health は 2 本が ok・2 本が broken（2605.31198 / 2606.02318。審判 E の材料）。
+      解析は IK-0360 の是正前イメージ（overlay で psycopg2 を明示）で行った。
+# campaign が参照してよい snapshot 名（作成前の予約。作成したら snapshots に実体の記録を足す）。
+planned_snapshots:
+  - name: corpus-astro-v1
+    contents: 論文 6 本を解析済み（教材のみ・コース無し）
+    made_by: 教員ペルソナか人が URL 取得・アップロードで投入し、解析完了を待つ
+  - name: course-astro-v1
+    contents: corpus-astro-v1 に加えて、教員ペルソナが作った公開コース 1〜2 本
+    made_by: c-corpus-to-course の教員段が成功した run の末尾を snapshot 化する

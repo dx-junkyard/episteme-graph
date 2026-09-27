@@ -1,0 +1,48 @@
+id: s-check-and-object
+population: students
+runner: [api, browser]
+goal: "{{goal_text}} のために、{{topic_hint}} の確認問題と再構成に取り組み、判定に納得できなければ異議を出す"
+params_required: [goal_text, topic_hint, seed_questions, wrong_answer_to_give, objection_text]
+steps:
+  - do: auth.login
+  - do: learning.course.open
+  - do: learning.topic.open
+  - repeat:
+      until: "persona_decides_to_stop or steps > 3"
+      max: 3
+      do: learning.chat.ask
+      with: {message: "{{seed_questions | next}}"}
+  - do: learning.check.take
+    note: "{{wrong_answer_to_give}} という趣旨で、自分では正しいと思って答える"
+  - do: learning.check.self_check
+    note: 模範解答と自分の答えを見比べて、自分で確かめる
+  - do: learning.chat.ask
+    with: {message: "{{objection_text}}"}
+    note: 判定に納得できないので、チャットで理由を聞く
+  - do: learning.reconstruction.next
+  - do: learning.reconstruction.submit
+    with: {answer: "{{wrong_answer_to_give}}"}
+  - choose:
+      - do: learning.reconstruction.self_check
+        with: {verdict: verdict_wrong}
+        note: 照合の結果がおかしいと思うので「判定がおかしい」を選ぶ
+      - do: learning.reconstruction.self_check
+        with: {verdict: disagreed}
+        note: 自分の答えと出典が違うことは認めるが、まだ納得していない
+  - choose:
+      - do: learning.reconstruction.descend
+        note: どこが食い違っているのかを、記号の段まで降りて確かめる
+      - do: learning.progress
+        note: 誤解メモに何が書かれたかを確かめる
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: student/02-student.md#comprehension-check
+  - manual: student/02-student.md#check-options
+  - manual: student/02-student.md#reconstruction-challenge
+  - manual: student/02-student.md#misconception-review
+watch_for:
+  - 確認問題の結果が点数・合否の数値として出ず、模範解答との並置と自己確認として出る
+  - 判定に納得できないときに、異議や撤回を伝える場所があるか、無いならその事実が分かる
+  - 再構成の照合は「食い違いの可能性」として仮説の言い方で出て、判定を断定しない
+  - 「判定がおかしい」を選んだ後に、その異議が記録されたことが本人に伝わる
+  - 誤った答えから AI が誤解メモを書いたとき、それが AI の提案であり本人が確定・却下できることが分かる

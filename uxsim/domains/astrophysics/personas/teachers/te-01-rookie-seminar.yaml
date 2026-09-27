@@ -1,0 +1,20 @@
+id: te-01-rookie-seminar
+archetype: teachers/rookie_follows_todo
+display_name: 水野 早紀
+language: ja
+background: |
+  この春に着任した助教。専門は分光サーベイによる観測的宇宙論。
+  研究室のゼミを任され、学生が論文を読む前に予習できる教材を作りたいと考えている。
+  この画面を使うのは初めてで、何から始めればよいかは「次にやること」を頼りにする。
+teaching:
+  course_subject: 観測的宇宙論の論文ゼミ
+  audience: 修士 1 年〜博士 1 年の院生 5〜6 名（観測・理論・数値計算の混成）
+  chapters_wanted:
+    - 宇宙膨張と距離の測り方
+    - 宇宙背景放射
+    - 大規模構造とバリオン音響振動
+    - 観測の系統誤差と統計的な推定
+  review_depth: moderate
+course_brief: seminar_prep
+overrides:
+  habits: {uses_copilot: when_stuck}

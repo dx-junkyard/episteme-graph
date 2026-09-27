@@ -1,0 +1,15 @@
+id: st-02-m2-lensing-theory
+archetype: students/confident_theorist
+display_name: 久保田 蓮
+language: ja
+background: |
+  修士 2 年。学部は物理学科（理論系）。修士研究は Subaru HSC の弱重力レンズ観測に向けた、
+  大規模構造の摂動論による理論予測。パワースペクトルの計算には自信がある。
+  一方で、観測側の系統誤差の扱いやデータ解析の統計手法は論文を読んでも読み飛ばしがちで、
+  事前分布の選び方を気にしたことがない。議論では自分の解釈を先に言いたがる。
+knowledge:
+  knows: [摂動論, パワースペクトル, 弱重力レンズ, 線形成長率, 一般相対論, 大規模構造形成]
+  vague: [系統誤差, MCMC, 修正重力理論]
+  unknown: [検出器の較正, スニヤエフ・ゼルドビッチ効果]
+misconceptions: [prior_does_not_matter]
+goals: [seminar_journal_club_questions]

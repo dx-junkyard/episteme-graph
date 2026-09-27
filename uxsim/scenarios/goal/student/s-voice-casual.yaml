@@ -1,0 +1,38 @@
+id: s-voice-casual
+population: students
+runner: [api]
+goal: "{{goal_text}} のために、手がふさがったまま {{topic_hint}} について気軽に話しかけ、答えを耳で聞いて分かるかを確かめる"
+params_required: [goal_text, topic_hint, casual_utterances, followup_question]
+steps:
+  - do: auth.login
+  - do: learning.course.open
+  - do: learning.topic.open
+  - repeat:
+      until: "persona_decides_to_stop or friction in [confused, gave_up] or steps > 6"
+      max: 6
+      steps:
+        - do: learning.chat.casual
+          with: {message: "{{casual_utterances | next}}"}
+        - do: learning.voice.speak
+          with: {text: "{{casual_utterances | current}}"}
+          note: 返ってきた答えを読み上げで聞く
+  - do: learning.chat.ask
+    with: {message: "{{followup_question}}"}
+    note: 画面の前に戻り、ふつうの質問として詳しく聞き直す
+  - choose:
+      - do: learning.help.inspect
+        with: {anchor_id: composer.voice}
+        note: 音声ボタンで何が外部に送られるのかを確かめる
+      - do: learning.help.inspect
+        with: {anchor_id: chat.stance-chip}
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: student/02-student.md#voice-mode
+  - manual: student/02-student.md#stance-chip
+  - manual: student/02-student.md#disclosure-external
+watch_for:
+  - 読み上げに式の記号・記法や出典の印がそのまま混ざらない
+  - 気軽な調子の答えにも、答えの出所の表示が同じように付く
+  - 気軽な調子と受け取られたことを示す 1 行が出て、ふつうの質問として聞き直せる
+  - 音声が外部の AI に送られることが、音声を使う画面の近くに事実として書かれている

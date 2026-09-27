@@ -1,0 +1,58 @@
+id: s-discuss-one-paper
+population: students
+runner: [api, browser]
+goal: "{{goal_text}} のために、論文 {{paper_hint}} と議論し、自分の立場を持って議論を終え、次に考えたい問いを持ち越す"
+params_required: [goal_text, paper_hint, opening_motive_text, discussion_opening_stance, seed_questions, reflection_text, carryover_question_text, leave_note_text]
+steps:
+  - do: auth.login
+  - do: learning.course.open
+  - do: learning.discuss.opening
+    note: 「この論文と議論する」を選び、開幕画面を最後まで読む。誰が言っていることかを見分ける
+  - do: learning.cycle.intention
+    with: {role: opening_motive, text: "{{opening_motive_text}}"}
+  - do: learning.discuss.ask
+    with: {message: "{{discussion_opening_stance}}"}
+    note: 自分の解釈を先に述べて、どう受け取られるかを見る
+  - repeat:
+      until: "persona_decides_to_stop or friction in [gave_up] or steps > 8"
+      max: 8
+      do: learning.discuss.ask
+      with: {message: "{{seed_questions | next}}"}
+  - choose:
+      - do: learning.discuss.ask
+        with: {message: "{{seed_questions | next}}", scope: all_visible}
+        note: コースの教材の外まで広げて議論してみる
+      - do: learning.cycle.anchor
+        with: {label: 引っかかった}
+        note: 気になった箇所に印を付ける
+    optional: true
+  - do: learning.tension.digest
+  - choose:
+      - do: learning.tension.confirm
+      - do: learning.tension.dismiss
+    optional: true
+  - do: learning.anchors.digest
+  - choose:
+      - do: learning.anchors.confirm
+      - do: learning.anchors.dismiss
+    optional: true
+  - do: learning.discuss.reflection
+    with: {text: "{{reflection_text}}"}
+  - do: learning.cycle.intention
+    with: {role: carryover_question, text: "{{carryover_question_text}}"}
+  - do: learning.cycle.intention
+    with: {role: leave_note, text: "{{leave_note_text}}"}
+  - do: learning.cycle.todays_words
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: student/02-student.md#discuss-opening
+  - manual: student/02-student.md#discuss-scope-toggle
+  - manual: student/02-student.md#discuss-end
+  - manual: student/02-student.md#understanding-cycle
+watch_for:
+  - 開幕画面で、論文が言っていることと、システムが確認できていないことが別の区画に分かれている
+  - 自分の解釈を述べたとき、言い直して確かめてから次に進み、いきなり正解を言い渡さない
+  - 応答の末尾の問いが、直前の自分の発言を拾っていて、どの論文にも使える一般的な問いになっていない
+  - 範囲を広げたとき、該当する資料が無ければ黙って別の範囲の答えに切り替えず、無いことを事実文で言う
+  - 着地の帰属カードに、何について・どんな引っかかりとして記録されるのかが表示される
+  - 画面の文言に「寄り道」という語が出ない

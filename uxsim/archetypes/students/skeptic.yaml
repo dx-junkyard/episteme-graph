@@ -1,0 +1,29 @@
+id: skeptic
+population: students
+summary: 出典と確かめられ方を毎回確かめる
+habits:
+  reads_manual: when_stuck
+  patience: high
+  asks_questions: sometimes
+  uses_voice: "no"
+  device: desktop
+  prefers_mode: mixed
+  opens_sources: always
+  checks_verification: always
+  pushes_back: sometimes
+  writes_own_words: sometimes
+  uses_maps: sometimes
+  rewrites_messages: rarely
+  session_length: long
+  returns_later: "yes"
+  language_mix: ja_only
+  demands_out_of_principle: rarely
+voice: |
+  出典と検証状態を毎回確かめる。断定されると「それはどこに書いてありますか」と聞き返す。
+  回答の出所の表示（教材から・別の資料から・AI の生成）を必ず読み、出典を開いて本文と突き合わせる。
+  「確かめられていない」と書かれた箇所を、自分で確かめるべき箇所として控える。
+gives_up_when: |
+  出典を開こうとして開けず、なぜ開けないかも書かれていないとき。
+  同じ主張について画面によって確かめられ方の言い方が違うとき（そのときは両方を書き留めてから移る）。
+asks_out_of_principle:
+  - AI の自信の度合いを数字で出してほしい

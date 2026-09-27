@@ -1,0 +1,47 @@
+id: s-free-wander
+population: students
+runner: [api, browser]
+goal: "{{goal_text}}。{{wander_hint}}"
+params_required: [goal_text, wander_hint, seed_questions, symbol_hint]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - repeat:
+      until: "goal_reached or persona_decides_to_stop or friction in [gave_up]"
+      max: 25
+      steps:
+        - choose:
+            - do: learning.course.open
+            - do: learning.topic.open
+            - do: learning.chat.ask
+              with: {message: "{{seed_questions | next}}"}
+            - do: learning.discuss.opening
+            - do: learning.discuss.ask
+              with: {message: "{{seed_questions | next}}"}
+            - do: learning.element.context
+            - do: learning.source_chunk.open
+            - do: learning.symbol.lookup
+              with: {symbol: "{{symbol_hint}}"}
+            - do: learning.lecture.sequence
+            - do: learning.reconstruction.next
+            - do: learning.atlas.view
+            - do: learning.landscape.view
+            - do: learning.corpus.documents
+            - do: learning.personal_network.mine
+            - do: learning.records.mine
+            - do: learning.cycle.anchor
+              with: {label: 気になる}
+            - do: learning.help.inspect
+              with: {anchor_id: topbar.inspect}
+            - do: learning.progress
+stop_when: [goal_reached, gave_up, blocked, budget_exhausted]
+expects:
+  - manual: student/02-student.md#screen-overview
+  - manual: student/02-student.md#learning-mode
+  - manual: student/02-student.md#inspect-mode
+  - manual: student/02-student.md#disclosure
+watch_for:
+  - 押せるのに押しても何も変わらない要素や、押した結果が画面から読み取れない要素がある
+  - どの画面からでも、いま何のコースのどこにいるのかが分かる
+  - ペルソナが原則に反する要求（点数・順位・進捗率）をしたとき、製品が理由を添えて事実文で応じる
+  - 想定していなかった順で操作したとき、前の画面の状態が壊れたり混ざったりしない

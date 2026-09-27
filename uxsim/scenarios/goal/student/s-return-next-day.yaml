@@ -1,0 +1,48 @@
+id: s-return-next-day
+population: students
+runner: [api, browser]
+session: 2
+preconditions:
+  - 前のセッションでこのペルソナが書き置き（leave_note）と持ち越しの問い（carryover_question）を残している
+goal: "{{goal_text}} の続きをするために、翌日あらためてログインし、前回どこまで考えたかを思い出して、持ち越した問いに答える"
+params_required: [goal_text, carryover_answer, seed_questions]
+steps:
+  - do: auth.login
+    note: 前回のことはほとんど覚えていない状態でログインする
+  - do: learning.course.open
+  - do: learning.cycle.return_door
+    note: 画面の上部の扉を読み、前回の自分が何を書き置いたかを確かめる
+  - do: learning.cycle.todays_words
+  - do: learning.discuss.opening
+    note: 持ち越した問いが示されていれば、それに答えるつもりで開く
+  - do: learning.discuss.ask
+    with: {message: "{{carryover_answer}}"}
+    note: 持ち越した問いに、いまの自分の考えで答える
+  - repeat:
+      until: "persona_decides_to_stop or steps > 3"
+      max: 3
+      do: learning.discuss.ask
+      with: {message: "{{seed_questions | next}}"}
+  - do: learning.personal_network.mine
+    note: わたしの地図を開き、前回からの変化が見えるかを確かめる
+  - choose:
+      - do: learning.personal_network.journey
+        note: 自分の問いの一つから旅をたどる
+      - do: learning.personal_network.nearby
+        note: いま考えている場所の周りを見る
+  - choose:
+      - do: learning.records.mine
+        note: 前回の問いや書き置きが記録に残っているかを確かめる
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: student/02-student.md#return-door
+  - manual: student/02-student.md#return-door-inlay
+  - manual: student/02-student.md#understanding-cycle
+  - manual: student/02-student.md#personal-map
+watch_for:
+  - 扉に前回の書き置きが本人の言葉のまま出て、前回から何日空いたかのような数値は出ない
+  - 持ち越した問いに答えた後、前回との違いが肯定形の事実文で示される
+  - わたしの地図に本人にだけ見えることと成績評価に使われないことの注記が常に出ている
+  - 旅の手がかりが無いときも、カードが黙って消えず、何が足りないかと精密化の出口が事実文で出る
+  - 督促・連続日数・未消化件数のような表示がどこにも出ない

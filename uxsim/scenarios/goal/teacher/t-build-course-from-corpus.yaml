@@ -1,0 +1,61 @@
+id: t-build-course-from-corpus
+population: teachers
+runner: [api, browser]
+preconditions:
+  - 砂場に解析済みの教材が入っていて、このペルソナがそれを閲覧できる（snapshot corpus-astro-v1）
+goal: "{{persona.teaching.course_subject}} のコースを、取り込み済みの教材から作って学生に公開する（依頼文: {{persona.course_brief}}）"
+params_required: [course_title, builder_messages, copilot_question]
+steps:
+  - do: auth.login
+  - do: admin.next_steps.list
+    note: 次にやることを開く。道案内に従う癖があればその順で進む
+  - choose:
+      - do: admin.copilot.chat
+        with: {message: "{{copilot_question}}"}
+        note: 何から始めればよいかを操作アシスタントに聞く
+      - do: admin.help.inspect
+        with: {anchor_id: header.next-steps}
+    optional: true
+  - do: admin.materials.list
+  - do: admin.materials.get
+    note: コースに使う教材を 1 本選び、解析が終わっているかを確かめる
+  - do: admin.course_builder.session_create
+    with: {title: "{{course_title}}"}
+  - do: admin.course_builder.chat
+    with: {message: "{{persona.course_brief}}"}
+    note: 依頼文をそのまま貼って、章立ての案を出してもらう
+  - repeat:
+      until: "persona_decides_to_stop or steps > 5"
+      max: 5
+      do: admin.course_builder.chat
+      with: {message: "{{builder_messages | next}}"}
+      note: 学ぶ単位の候補と章立てを見比べ、希望の章立て（{{persona.teaching.chapters_wanted}}）に近づける
+  - do: admin.course_builder.register
+  - do: admin.release_review.placements
+    note: リリース前の確認で、論文の位置づけを見る（読むか「次へ」を押すかは癖に従う）
+  - do: admin.atlas_binding.propose
+  - do: admin.atlas_binding.save
+  - do: admin.release_review.accept
+    note: 「この配置で次へ」を押す
+  - do: admin.course.visibility
+    with: {visibility: public}
+  - choose:
+      - do: admin.lecture_studio.scripts
+        note: 1 トピックの原稿を開き、音声を作れる状態かを確かめる
+      - do: admin.discuss_opening_review.list
+        note: 議論のきっかけの候補が残っていないかを見る
+    optional: true
+  - do: admin.next_steps.list
+    note: 公開した後に、次にやることがどう変わったかを見る
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/10-admin-common.md#next-steps
+  - manual: teacher/12-admin-course-builder.md#chat
+  - manual: teacher/12-admin-course-builder.md#approve-btn
+  - manual: teacher/13-admin-course-management.md#release-review-next
+watch_for:
+  - 次にやることの案内が、教材登録からコース作成・公開へと一歩ずつ現れ、実施したものは消える
+  - コースビルダーが示す学ぶ単位の候補が、内部の記号ではなく読める名前で示される
+  - リリース前の確認の「次へ」が何を確定するのかが画面に書かれ、根拠の引用が開ける
+  - 論文に無い説明を足した箇所が、論文由来の箇所と区別できる
+  - 公開後、原稿の音声を作れないときに、その理由と次にやる操作が近くに出る

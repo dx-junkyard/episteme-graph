@@ -1,0 +1,54 @@
+# ペルソナ通し受講テスト（uxsim）の砂場 overlay。
+# 使い方（リポジトリルートで・プロジェクト名を必ず分ける）:
+#   docker compose -p episteme-uxsim -f docker-compose.yml -f uxsim/sandbox/docker-compose.uxsim.yml up -d --build
+# プロジェクト名 episteme-uxsim により volume / network / container が開発スタック（episteme-graph）と
+# 完全に分かれる（PE1）。公開ポートは frontend の 3100 と、審判 E が読むための postgres 5433 だけ。
+# api-server は開発スタックと同じく publish しない。
+services:
+  grobid: {}
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - uxsim_postgres_data:/var/lib/postgresql/data
+      - ./backend/db/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ./backend/db/002_a1_a2_a3.sql:/docker-entrypoint-initdb.d/02_a1_a2_a3.sql
+      - ./backend/db/003_unanswered_queries.sql:/docker-entrypoint-initdb.d/03_unanswered_queries.sql
+    networks:
+      - episteme
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    volumes: !override
+      - uxsim_minio_data:/data
+
+  api-server:
+    # .env（開発用）の上に砂場専用の値を重ねる（後のファイルが勝つ）。
+    env_file:
+      - path: .env
+        required: false
+      - path: uxsim/sandbox/.env.uxsim
+        required: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  frontend:
+    ports: !override
+      - "3100:3000"
+
+volumes:
+  uxsim_postgres_data:
+  uxsim_minio_data:

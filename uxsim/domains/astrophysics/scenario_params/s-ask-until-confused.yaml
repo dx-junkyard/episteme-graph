@@ -1,0 +1,44 @@
+scenario: s-ask-until-confused
+domain: astrophysics
+params:
+  goal_text: ゼミで担当する論文の主結果を説明できるようになること
+  topic_hint: 大規模構造とバリオン音響振動
+  seed_questions:
+    - バリオン音響振動って、そもそも何が振動しているんですか？
+    - 音響振動のスケールが「標準ものさし」になるのはなぜですか？
+    - 相関関数にある山の位置は、どの時代の何で決まっているんですか？
+    - 赤方偏移空間ゆがみというのは、観測のどこに効いてくるんですか？
+    - 線形成長率 f と σ8 をかけたものを測るのはなぜですか？
+    - この図の縦軸の fσ8 が大きいと、重力が強いという意味になりますか？
+    - 摂動論が使えなくなるのは、だいたいどのくらいのスケールからですか？
+    - 論文では宇宙分散をどう見積もっていますか？
+  symbol_hint: "f\\sigma_8"
+  backstage_question: すごく初歩的な質問ですが、「スケール」というのは長さのことですか、それとも波数のことですか？
+per_archetype:
+  non_native:
+    goal_text: being able to explain the main result of the paper I present at the seminar
+    seed_questions:
+      - What exactly is oscillating in baryon acoustic oscillations?
+      - Why can the acoustic scale be used as a standard ruler?
+      - What sets the position of the peak in the correlation function?
+      - How do redshift-space distortions enter the measurement?
+      - Why do people measure f times sigma_8 instead of f alone?
+      - Does a larger f sigma_8 mean that gravity is stronger?
+      - At which scales does perturbation theory stop working?
+    backstage_question: This may be a very basic question, but does "scale" mean a length or a wavenumber here?
+  adjacent_field:
+    seed_questions:
+      - バリオン音響振動は、素粒子でいうと何かの共鳴のようなものだと思っていいですか？
+      - 音響振動の「音速」は、光子とバリオンの流体の何で決まるんですか？
+      - 相関関数とパワースペクトルは、フーリエ変換の関係にあると考えていいですか？
+      - 赤方偏移空間ゆがみは、観測の系統誤差のようなものですか、それとも物理の信号ですか？
+      - 線形成長率 f は、重力の理論を変えるとどう変わるんですか？
+      - fσ8 の測定値は、どの程度の精度で宇宙論模型を区別できるんですか？
+  confident_theorist:
+    seed_questions:
+      - この論文は非線形の減衰をどう扱っていますか。再構成をかけた後の相関関数ですか？
+      - 音響スケールの測定は、宇宙背景放射の音速地平の事前情報に依存していませんか？
+      - 赤方偏移空間ゆがみの模型に、どの程度の摂動論の次数を使っていますか？
+      - fσ8 の制約は、バイアスの扱いの仮定を変えるとどれくらい動きますか？
+      - この論文の主結果は、修正重力理論を排除するほど強いと言えるんでしょうか？
+      - 宇宙分散の見積もりは、模擬カタログの数が足りているんですか？

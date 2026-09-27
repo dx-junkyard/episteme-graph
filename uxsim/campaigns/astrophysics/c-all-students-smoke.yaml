@@ -1,0 +1,24 @@
+id: c-astro-all-students-smoke
+domain: astrophysics
+snapshot: course-astro-v1
+personas:
+  students:
+    - st-01-m1-radio
+    - st-02-m2-lensing-theory
+    - st-03-d1-from-particle
+    - st-04-intl-exoplanet
+    - st-05-night-solarwind
+    - st-06-skeptic-bao
+    - st-07-m1-grb-voice
+    - st-08-m1-rprocess-lecture
+    - st-09-d2-from-datasci
+    - st-10-d3-21cm-receiver
+scenarios:
+  student: [s-enroll-and-first-topic]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 60, persona_llm_calls: 150, wall_clock_minutes: 45}
+notes: |
+  全ペルソナで受講の入口だけを通す煙試験。ペルソナの定義（行動型 × 分野パック）が合成でき、
+  立場の違いで入口の見え方が分かれるかを安く確かめる。

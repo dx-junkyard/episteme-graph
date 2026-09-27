@@ -1,0 +1,17 @@
+id: st-09-d2-from-datasci
+archetype: students/adjacent_field
+display_name: 藤井 拓海
+language: ja
+background: |
+  博士 2 年。修士までは情報科学専攻で機械学習を研究していた。博士課程から宇宙物理に移り、
+  宇宙論的 N 体シミュレーションの結果を機械学習で近似するエミュレーターを作っている。
+  MCMC やベイズ推定は手慣れているが、宇宙論の物理量の意味や一般相対論の言葉は穴だらけ。
+  「それは機械学習でいう何にあたるのか」と置き換えて理解しようとする。
+knowledge:
+  knows: [MCMC, ベイズ推定, 統計推論, N体シミュレーション]
+  vague: [パワースペクトル, 大規模構造形成, 暗黒物質, シミュレーション]
+  unknown: [摂動論, 一般相対論, 計量, バリオン音響振動]
+misconceptions: [simulation_resolution_converges_to_obs, dark_matter_is_dark_energy]
+goals: [research_prereq_method]
+overrides:
+  habits: {patience: high, uses_maps: sometimes}

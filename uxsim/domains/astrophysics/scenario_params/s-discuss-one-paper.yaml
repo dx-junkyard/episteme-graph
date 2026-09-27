@@ -1,0 +1,38 @@
+scenario: s-discuss-one-paper
+domain: astrophysics
+params:
+  goal_text: 担当論文の主結果とその前提を、自分の立場から説明できるようになること
+  paper_hint: 分光サーベイによるバリオン音響振動と赤方偏移空間ゆがみの測定
+  opening_motive_text: ゼミで担当するので、この論文の主結果が何に支えられているのかを自分で説明できるようにしたい
+  discussion_opening_stance: 私はこの論文の一番の主張は「暗黒エネルギーは宇宙定数で矛盾しない」ことだと読みました。合っていますか？
+  seed_questions:
+    - その主張は、どの観測量のどの範囲から言えるんですか？
+    - 音響スケールの測定と成長率の測定は、別々の確かめ方になっているんですか？
+    - この結論を覆すとしたら、どういう観測結果が出たときですか？
+    - 著者が確かめていない前提は何ですか？
+    - 宇宙背景放射の結果と組み合わせたときに、何が新しく言えるようになるんですか？
+    - 私は系統誤差の見積もりが一番弱いところだと思うんですが、どう思いますか？
+    - 別の分光サーベイの結果と食い違っているところはありますか？
+    - 自分で言い直すと「距離と成長の両方で宇宙定数と矛盾しない」ということでいいですか？
+  reflection_text: 距離の物差しとしての音響スケールと、重力の強さとしての成長率は別の確かめ方で、この論文は両方が宇宙定数と矛盾しないことを示している。ただし成長率のほうは模型の仮定に依存しているところがまだよく分かっていない。
+  carryover_question_text: 成長率の測定は、バイアスの模型を変えるとどのくらい動くのか
+  leave_note_text: 次は成長率の節の式を追う。バイアスの扱いが自分の説明の弱いところ。
+per_archetype:
+  non_native:
+    goal_text: being able to explain the main result of my paper and its assumptions from my own point of view
+    opening_motive_text: I will present this paper at the seminar, so I want to explain what supports its main result
+    discussion_opening_stance: I read the main claim of this paper as "dark energy is consistent with a cosmological constant". Is that right?
+    seed_questions:
+      - Which observable and which range support that claim?
+      - Are the acoustic scale and the growth rate independent tests?
+      - What kind of observation would overturn this conclusion?
+      - Which assumptions did the authors not test?
+      - What becomes new when this is combined with the CMB results?
+      - I think the estimate of systematic errors is the weakest part. What do you think?
+    reflection_text: The acoustic scale works as a ruler for distance and the growth rate tests the strength of gravity; this paper shows both are consistent with a cosmological constant, but I still do not understand how the growth rate depends on the model assumptions.
+    carryover_question_text: How much does the growth-rate measurement move when the bias model is changed?
+    leave_note_text: Next time, follow the equations in the growth-rate section. The bias treatment is the weak point of my explanation.
+  confident_theorist:
+    discussion_opening_stance: この論文は宇宙定数を支持すると書いていますが、私は成長率の制約は修正重力理論を排除できるほど強くないと考えています。
+  skeptic:
+    discussion_opening_stance: この論文の主張のうち、実際に観測で確かめられている部分と、模型の仮定から出ている部分を分けて考えたいです。

@@ -1,0 +1,44 @@
+id: s-quota-edge
+population: students
+runner: [api]
+preconditions:
+  - campaign の flags で学習チャットの日次上限を砂場だけ小さくしてある（製品コードは変えない）
+goal: "{{goal_text}} のために、{{topic_hint}} について納得できるまで質問を続け、使えなくなったら理由を知りたい"
+params_required: [goal_text, topic_hint, seed_questions, usage_question]
+steps:
+  - do: auth.login
+  - do: learning.course.open
+  - do: learning.topic.open
+  - repeat:
+      until: "response is 429 or friction in [blocked, gave_up]"
+      max: 40
+      do: learning.chat.ask
+      with: {message: "{{seed_questions | next}}"}
+  - do: learning.chat.ask
+    with: {message: "{{seed_questions | next}}"}
+    note: 上限に当たった直後に、もう一度だけ送ってみる
+  - choose:
+      - do: learning.chat.usage_help
+        with: {message: "{{usage_question}}"}
+        note: なぜ質問できなくなったのかを使い方として聞く
+      - do: learning.help.inspect
+        with: {anchor_id: composer.send}
+        note: 送信ボタンの「使い方」を開いて、上限の説明があるかを探す
+  - choose:
+      - do: learning.chat.casual
+        with: {message: "{{seed_questions | next}}"}
+        note: 気軽な調子なら話せるのかを試す
+      - do: learning.records.mine
+        note: これまでの質問が記録に残っているかを確かめる
+    optional: true
+stop_when: [quota_exhausted, gave_up, budget_exhausted]
+expects:
+  - manual: student/02-student.md#ai-chat
+  - manual: student/02-student.md#inspect-mode
+  - manual: student/02-student.md#disclosure
+watch_for:
+  - 上限に達したとき、上限に達したことが本人に伝わる事実文が出て、汎用のエラー文に潰れない
+  - 上限の案内に、残りの回数・上限の数値・いつ戻るかの秒数のような数値が出ない
+  - 使い方の質問は上限に達した後でも答えが返り、マニュアルのどの節に基づくかが示される
+  - マニュアルに上限の説明があるか、無いならその事実を文書の欠落として記録する
+  - 上限に達するまでの質問と回答が、上限に当たったことで消えない
