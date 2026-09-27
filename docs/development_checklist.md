@@ -171,7 +171,8 @@ CLAUDE.md 内でアンカー件数の 4 値（228/244/248/255）が併存した�
 - [ ] **設計時（pre-mortem）**: 変更に「再実行・削除・既定値・AI の判定・段階間の受け渡し・
       派生物・ID や版・語彙表の新設・外部呼び出し」が含まれるなら、
       [課題ナレッジ README §3.3b](issue_knowledge/README.md) の表で該当する族の型の「見分け方」を
-      先に当て、該当しないなら「該当なし」と PR に書く
+      先に当て、該当しないなら「該当なし」と PR に書く。当てた型に [解決原理](issue_knowledge/principles.md)
+      が結びついていれば（索引 §15）、併用する部品・派生形・非適用を読み、採る部品と見送る派生形を設計書に書く
 - [ ] 新しい課題に `docs/issue_knowledge/entries/IK-NNNN-*.md` を作り、4 軸の座標を
       [taxonomy.md §1.2](issue_knowledge/taxonomy.md) の手順（**原因の性質**。無い軸は none、
       見ていない軸は unknown）で決めたか。症状の場所・修正行数・修正手段で決めていないか
@@ -185,6 +186,9 @@ CLAUDE.md 内でアンカー件数の 4 値（228/244/248/255）が併存した�
 - [ ] 解消時に `resolution.verification`（確かめた方法 `methods` / 確かめていない範囲 `unverified`。語彙は
       [taxonomy.md §8](issue_knowledge/taxonomy.md)）を書いたか。飛ばした検証（E2E・同時実行・旧形式データ）を
       `unverified` に残し、確かめていないなら `not_verified` と書いたか（省略は「記録なし」）
+- [ ] 解消時に解決原理（[principles.md](issue_knowledge/principles.md)）に当たるなら `resolution.principles`
+      （`principle` / `use` = 設計前に読んだ `consulted` か後付けの `extracted` / `note` = 採った部品と固有の差分）を
+      書いたか。原理に無い解き方なら書かない
 - [ ] AI が起こしたエントリは `classification.review: candidate` のままか。人が確定したなら
       `confirmed` + `reviewed_by` + `reviewed_at` を書いたか
 - [ ] `backend/scripts/issue_knowledge_index.py` で index.md を再生成し、

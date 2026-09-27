@@ -53,6 +53,11 @@ resolution:
     - backend/api/routes/export.py
     - backend/api/routes/groups.py
     - docs/architecture/vision_ux_gap_six_lenses_2026-09-10.md §4 第1波 8
+  principles:
+    - principle: enforce-condition-in-query-with-required-argument
+      use: extracted
+      note: >-
+        採った部品は ②対象単位の閲覧判定 ④不可視を存在しない扱いに。固有の差分: 持ち出し・連絡先開示という境界越えを伴うため、判定に加えて監査記帳と開示範囲の絞り込みを併せた。
   verification:
     methods: [guardrail]
     unverified:

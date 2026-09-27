@@ -14,6 +14,8 @@
 - モジュール側の語彙定数と taxonomy.md の語彙表が一致する（片方だけ変えると落ちる）。
 - 分類の確定状態（candidate / confirmed）・観点は最大 2・層は layers.md の語彙・
   解決済みの着地先にコードが 1 つ以上・辞書は族（###）→ 型（####）の 2 段。
+- 解決原理（principles.md / taxonomy §9）: 参照の無い原理は置かない・行の見出しは固定・
+  「当たる型」は辞書に実在・``resolution.principles`` の原理は実在し ``use`` は語彙内。
 """
 
 from __future__ import annotations
@@ -48,12 +50,12 @@ def taxonomy_text() -> str:
 
 class TestLayout:
     def test_core_documents_exist(self):
-        for path in (README_DOC, TEMPLATE_DOC, ik.TAXONOMY_DOC, ik.DICTIONARY_DOC, ik.INDEX_DOC, ik.LAYERS_DOC):
+        for path in (README_DOC, TEMPLATE_DOC, ik.TAXONOMY_DOC, ik.DICTIONARY_DOC, ik.INDEX_DOC, ik.LAYERS_DOC, ik.PRINCIPLES_DOC):
             assert path.exists(), f"{path.relative_to(ROOT)} が無い"
         assert ik.ENTRIES_DIR.is_dir()
 
     def test_reference_documents_declare_state(self):
-        for path in (README_DOC, ik.TAXONOMY_DOC, ik.DICTIONARY_DOC, ik.INDEX_DOC, ik.LAYERS_DOC):
+        for path in (README_DOC, ik.TAXONOMY_DOC, ik.DICTIONARY_DOC, ik.INDEX_DOC, ik.LAYERS_DOC, ik.PRINCIPLES_DOC):
             head = path.read_text(encoding="utf-8")[:1500]
             assert re.search(r"(?m)^.*(状態|ステータス):", head), (
                 f"{path.relative_to(ROOT)} の冒頭にラベル付き状態行が無い（development_checklist §5-2）"
@@ -89,6 +91,7 @@ class TestVocabularyMirrorsTaxonomy:
             ik.DISCOVERY_PERSPECTIVES,
             ik.RESOLUTION_PERSPECTIVES,
             ik.VERIFICATION_METHODS,
+            ik.PRINCIPLE_USES,
         ):
             missing = [t for t in group if t not in defined]
             assert missing == [], f"taxonomy.md に定義の無い語彙（モジュール側だけにある）: {missing}"
@@ -383,3 +386,132 @@ class TestVerificationRecord:
             assert e.rel in rendered.split("### 14.4", 1)[1].split("## 10.", 1)[0], f"{e.id} が §14.4 に載っていない"
         assert "確かめていないと記録されたエントリ" in rendered
 
+
+class TestSolutionPrinciples:
+    """principles.md（taxonomy §9）— 型を横断する条件付きの解決知識。参照の無い原理は置かない。"""
+
+    @pytest.fixture(scope="class")
+    def principles_text(self) -> str:
+        return ik.PRINCIPLES_DOC.read_text(encoding="utf-8")
+
+    def test_principles_doc_has_at_least_one_principle(self, principles_text):
+        assert ik.principle_slugs(principles_text), "principles.md に原理（#### 見出し）が無い"
+
+    def test_every_principle_declares_required_rows_and_existing_types(self, principles_text, dictionary_text):
+        patterns = set(ik.dictionary_patterns(dictionary_text))
+        sections = ik.principle_sections(principles_text)
+        for slug in ik.principle_slugs(principles_text):
+            body = sections[slug]
+            for row in ik.PRINCIPLE_REQUIRED_ROWS:
+                m = re.search(rf"(?m)^\| {re.escape(row)} \| (.+?) \|\s*$", body)
+                assert m and m.group(1).strip(), f"原理 `{slug}` に「{row}」の行が無い"
+            types = ik.principle_types(principles_text)[slug]
+            assert types, f"原理 `{slug}` の「当たる型」が空"
+            assert set(types) <= patterns, f"原理 `{slug}` の「当たる型」に辞書に無い型: {set(types) - patterns}"
+            principle_row = re.search(r"(?m)^\| 原理 \| (.+?) \|\s*$", body).group(1)
+            for pat in ik.FORBIDDEN_GENERAL_FORM_PATTERNS:
+                assert not pat.search(principle_row), f"原理 `{slug}` の「原理」行にファイル名・パス・コード片（{pat.pattern}）"
+            assert not re.search(r"\d+\s*(件|%|％)", principle_row), f"原理 `{slug}` の「原理」行に件数・率"
+
+    def test_every_principle_is_referenced_by_an_entry(self, entries, principles_text):
+        used = {str(x.get("principle")) for e in entries for x in ik.principles_of(e)}
+        missing = sorted(set(ik.principle_slugs(principles_text)) - used)
+        assert missing == [], f"参照するエントリの無い原理: {missing}"
+
+    def test_entry_references_are_validated(self, entries, dictionary_text):
+        import copy
+        base = next(e for e in entries if ik.principles_of(e))
+        good = copy.deepcopy(base.meta)
+        patterns = set(ik.dictionary_patterns(dictionary_text))
+        known = {str(x.meta.get("id")) for x in entries}
+        principles = set(ik.principle_slugs(ik.PRINCIPLES_DOC.read_text(encoding="utf-8")))
+
+        def errors(meta) -> list[str]:
+            entry = ik.Entry(path=base.path, meta=meta, body=base.body)
+            return [
+                err for err in ik.validate_entry(entry, patterns=patterns, known_ids=known, principles=principles)
+                if "principles" in err
+            ]
+
+        assert errors(good) == []
+        cases = {
+            "原理が実在しない": [{"principle": "no-such-principle", "use": "consulted", "note": "x"}],
+            "use が語彙外": [{"principle": good["resolution"]["principles"][0]["principle"], "use": "applied", "note": "x"}],
+            "note が空": [{"principle": good["resolution"]["principles"][0]["principle"], "use": "consulted", "note": ""}],
+            "note に件数": [{"principle": good["resolution"]["principles"][0]["principle"], "use": "consulted", "note": "3 件で確認"}],
+            "重複": [
+                {"principle": good["resolution"]["principles"][0]["principle"], "use": "consulted", "note": "x"},
+                {"principle": good["resolution"]["principles"][0]["principle"], "use": "extracted", "note": "y"},
+            ],
+            "未知キー": [{"principle": good["resolution"]["principles"][0]["principle"], "use": "consulted", "note": "x", "score": 1}],
+        }
+        for label, items in cases.items():
+            meta = copy.deepcopy(good)
+            meta["resolution"]["principles"] = items
+            assert errors(meta), f"{label} が通ってしまう: {items}"
+
+    def test_index_renders_principles_section(self, entries, dictionary_text, principles_text):
+        rendered = ik.render_index(entries, dictionary_text, principles_text)
+        assert "## 15. 解決原理別" in rendered
+        section = rendered.split("## 15.", 1)[1].split("## 10.", 1)[0]
+        for slug in ik.principle_slugs(principles_text):
+            assert f"#### `{slug}`" in section
+        for e in entries:
+            if ik.principles_of(e):
+                assert e.rel in section, f"{e.id} が §15 に載っていない"
+        assert "`consulted`" in section
+
+    def test_taxonomy_and_docs_describe_the_principles_layer(self, taxonomy_text):
+        assert "## 9. 解決原理" in taxonomy_text
+        readme = README_DOC.read_text(encoding="utf-8")
+        assert "principles.md" in readme
+        checklist = (ROOT / "docs" / "development_checklist.md").read_text(encoding="utf-8")
+        assert "principles.md" in checklist
+        cycle = ik.IMPROVEMENT_CYCLE_DOC.read_text(encoding="utf-8")
+        assert "principles.md" in cycle
+
+    def test_establishment_is_derived_from_forward_use_not_human_confirmation(self, entries, principles_text):
+        """成立 = consulted が別々の型から 2 件以上・適用後の同型の見逃しなし（taxonomy §9）。review: confirmed は条件にしない。"""
+        import copy
+        slug = ik.principle_slugs(principles_text)[0]
+        base = next(e for e in entries if e.meta.get("status") == "resolved")
+
+        def fake(ident: str, pattern: str, use: str | None, *, recorded: str, resolved: str | None, related=()) -> ik.Entry:
+            meta = copy.deepcopy(base.meta)
+            meta.update({"id": ident, "pattern": pattern, "recorded_at": recorded, "resolved_at": resolved,
+                         "related": list(related), "view_of": [], "status": "resolved" if resolved else "open"})
+            meta["classification"]["review"] = "candidate"
+            meta["resolution"]["principles"] = [{"principle": slug, "use": use, "note": "x"}] if use else []
+            return ik.Entry(path=base.path, meta=meta, body=base.body)
+
+        # 後付けだけ → 暫定（確定エントリがあっても成立しない）
+        only_extracted = [fake("IK-9001", "a", "extracted", recorded="2026-01-01", resolved="2026-01-02"),
+                          fake("IK-9002", "b", "extracted", recorded="2026-01-01", resolved="2026-01-02")]
+        for e in only_extracted:
+            e.meta["classification"]["review"] = "confirmed"
+        assert ik.principle_state(slug, only_extracted)[0].startswith("暫定")
+        # 同じ型から 2 件 → 暫定
+        same_type = [fake("IK-9001", "a", "consulted", recorded="2026-01-01", resolved="2026-01-02"),
+                     fake("IK-9002", "a", "consulted", recorded="2026-01-03", resolved="2026-01-04")]
+        assert ik.principle_state(slug, same_type)[0].startswith("暫定")
+        # 別々の型から 2 件・見逃しなし → 成立（review は candidate のまま）
+        two_types = [fake("IK-9001", "a", "consulted", recorded="2026-01-01", resolved="2026-01-02"),
+                     fake("IK-9002", "b", "consulted", recorded="2026-01-03", resolved="2026-01-04")]
+        assert ik.principle_state(slug, two_types)[0] == "成立"
+        # 適用後に同型の見逃し（consulted を related で指す同じ型の後発エントリ）→ 暫定
+        miss = two_types + [fake("IK-9003", "a", None, recorded="2026-02-01", resolved=None, related=["IK-9001"])]
+        state, _, misses = ik.principle_state(slug, miss)
+        assert state.startswith("暫定") and [m.id for m in misses] == ["IK-9003"]
+        # 別の型からの後発参照は見逃しに数えない
+        other = two_types + [fake("IK-9003", "c", None, recorded="2026-02-01", resolved=None, related=["IK-9001"])]
+        assert ik.principle_state(slug, other)[0] == "成立"
+
+    def test_docs_do_not_say_humans_select_principles(self, taxonomy_text):
+        readme = README_DOC.read_text(encoding="utf-8")
+        cycle = ik.IMPROVEMENT_CYCLE_DOC.read_text(encoding="utf-8")
+        for name, text in {"taxonomy": taxonomy_text, "README": readme, "improvement_cycle": cycle}.items():
+            # 訂正の記録行（旧文を引用する行）は除く
+            live = [ln for ln in text.splitlines() if "訂正" not in ln and "撤回" not in ln]
+            hits = [ln for ln in live if "選ぶのは人" in ln]
+            assert hits == [], f"{name}: 人は選ばない（問題が明らかになったときだけ介入する）: {hits}"
+        assert "問題が明らかになったとき" in taxonomy_text

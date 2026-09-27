@@ -52,6 +52,11 @@ resolution:
     - backend/core/course_units.py
     - backend/core/library/identity_candidates.py
     - backend/api/routes/doubt.py
+  principles:
+    - principle: enforce-condition-in-query-with-required-argument
+      use: extracted
+      note: >-
+        採った部品は ①必須引数 ②問い合わせ内の集合強制 ③空集合は落として件数だけ返す。固有の差分: 候補表・文脈組み立て・記帳という新設 3 経路への後付けで、素材集合と可視集合の積を取る形にした。
   verification:
     methods: [guardrail]
     unverified:

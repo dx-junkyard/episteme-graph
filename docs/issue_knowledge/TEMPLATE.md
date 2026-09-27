@@ -1,6 +1,6 @@
 # 課題エントリの記入様式
 
-[← 課題ナレッジの入口](README.md) ｜ [分類体系](taxonomy.md) ｜ [辞書](dictionary.md)
+[← 課題ナレッジの入口](README.md) ｜ [分類体系](taxonomy.md) ｜ [辞書](dictionary.md) ｜ [解決原理](principles.md)
 
 1 課題 = 1 ファイル。`docs/issue_knowledge/entries/IK-NNNN-*.md`（`NNNN` は 4 桁ゼロ埋め・`*` は slug・
 連番・欠番可。slug は英小文字とハイフン）。front-matter は YAML で、機械検査
@@ -51,6 +51,10 @@ resolution:
   landed_in:            # 着地先。resolved は実在するコードのパスかコミットハッシュを最低 1 つ（文書だけは不可）
     - backend/core/knowledge_objects/sync.py
     - docs/features/knowledge_objects_design.md §12
+  # principles:          # 解決原理（principles.md / taxonomy §9）に当たるときだけ。省略 = 該当なし
+  #   - principle: sync-by-stable-key-and-protect-human-decisions   # principles.md の #### 見出しの slug
+  #     use: consulted    # consulted = 直す前に読んで選んだ / extracted = 直した後に抽出・後付け
+  #     note: 採った部品・派生形と固有の差分（件数・率は書かない）
   # verification:        # 解決済みのときだけ書ける（taxonomy §8）。省略 = 記録なし
   #   methods: [scratch_db, guardrail]   # 確かめた方法。確かめていなければ [not_verified] 単独
   #   unverified:                        # 確かめていない範囲（無いと判断したなら []）。件数・率は書かない

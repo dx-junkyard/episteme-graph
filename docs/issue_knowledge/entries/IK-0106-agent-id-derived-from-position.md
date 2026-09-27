@@ -51,6 +51,11 @@ resolution:
   landed_in:
     - backend/core/knowledge_objects/stable_key.py
     - backend/core/knowledge_objects/remap.py
+  principles:
+    - principle: sync-by-stable-key-and-protect-human-decisions
+      use: extracted
+      note: >-
+        採った部品は ①安定キー ④再係留（対応の変化を表に記録して参照を結び直す）。固有の差分: 出現順 ID は捨てず別列に残し、同一性だけを安定キーに移した。
   verification:
     methods: [guardrail, scratch_db]
     unverified:

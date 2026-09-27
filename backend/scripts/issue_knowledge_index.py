@@ -32,6 +32,7 @@ LAYERS_DOC = IK_DIR / "layers.md"
 ARCH_DIR = ROOT / "docs" / "architecture"
 TEMPLATE_DOC = IK_DIR / "TEMPLATE.md"
 DICTIONARY_DOC = IK_DIR / "dictionary.md"
+PRINCIPLES_DOC = IK_DIR / "principles.md"
 INDEX_DOC = IK_DIR / "index.md"
 
 # ---------------------------------------------------------------------------
@@ -116,6 +117,13 @@ CAUSE_STATUSES: tuple[str, ...] = ("confirmed", "hypothesis")
 REVIEW_STATES: tuple[str, ...] = ("candidate", "confirmed")
 MAX_PERSPECTIVES = 2            # 観点は最大 2・先頭が主（taxonomy §5）
 TYPE_ESTABLISHED_MIN_CONFIRMED = 2  # 型の成立 = 確定エントリ 2 件以上（taxonomy §6.1）
+# 解決原理（principles.md / taxonomy §9）。エントリは resolution.principles[].use で
+# 「直す前に読んで選んだ（consulted）／直した後に抽出した（extracted）」を分ける。
+PRINCIPLE_USES: tuple[str, ...] = ("consulted", "extracted")
+PRINCIPLE_ESTABLISHED_MIN_CONSULTED = 2  # 成立 = consulted が別々の型から 2 件以上・適用後の同型の見逃しなし
+PRINCIPLE_REQUIRED_ROWS: tuple[str, ...] = (
+    "原理", "守る条件", "破られる条件", "当たる型", "併用する部品", "派生形", "非適用", "反例", "正本",
+)
 STATUSES: tuple[str, ...] = ("open", "resolved", "deferred", "rejected")
 GENERALIZATION_LEVELS: tuple[str, ...] = ("instance", "repo_pattern", "general")
 
@@ -212,6 +220,7 @@ CYCLE_STAGE_LAYERS: tuple[str, ...] = (
 IMPROVEMENT_CYCLE_DOC = ROOT / "docs" / "architecture" / "improvement_cycle.md"
 COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{7,40}$")
 TYPICAL_COORD_RE = re.compile(r"\| 典型的な座標 \| (.+?) \|")
+PRINCIPLE_TYPES_RE = re.compile(r"(?m)^\| 当たる型 \| (.+?) \|\s*$")
 
 # 分類の根拠に使ってはならない書き方（taxonomy §1.2）。症状の場所・修正量・修正手段。
 FORBIDDEN_BASIS_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -313,6 +322,71 @@ def dictionary_typical_coordinates(dictionary_text: str) -> dict[str, str]:
         if tm:
             out[m.group(1)] = tm.group(1)
     return out
+
+
+def principles_text_or_empty(principles_text: str | None = None) -> str:
+    if principles_text is not None:
+        return principles_text
+    return PRINCIPLES_DOC.read_text(encoding="utf-8") if PRINCIPLES_DOC.exists() else ""
+
+
+def principle_slugs(principles_text: str) -> list[str]:
+    """principles.md の原理 slug（`#### ` 見出し・出現順）。"""
+    return PATTERN_HEADING_RE.findall(principles_text)
+
+
+def principle_sections(principles_text: str) -> dict[str, str]:
+    """{原理 slug: 見出し直後の本文（次の見出しまで）}。"""
+    out: dict[str, str] = {}
+    for m in re.finditer(r"(?ms)^#### ([a-z0-9-]+)\s*$(.*?)(?=^#### |^### |^## |\Z)", principles_text):
+        out[m.group(1)] = m.group(2)
+    return out
+
+
+def principle_types(principles_text: str) -> dict[str, list[str]]:
+    """{原理 slug: [当たる型 slug, ...]}（「当たる型」行のバッククォート語）。"""
+    out: dict[str, list[str]] = {}
+    for slug, body in principle_sections(principles_text).items():
+        tm = PRINCIPLE_TYPES_RE.search(body)
+        out[slug] = re.findall(r"`([a-z0-9-]+)`", tm.group(1)) if tm else []
+    return out
+
+
+def principle_state(slug: str, entries: list["Entry"]) -> tuple[str, list["Entry"], list["Entry"]]:
+    """原理の成立/暫定（taxonomy §9）。人の確定を条件にしない。
+
+    成立 = `use: consulted` のエントリが別々の型から PRINCIPLE_ESTABLISHED_MIN_CONSULTED 件以上あり、
+    そのどれについても「適用後の同型の見逃し」（その consulted エントリを related / view_of で指す、
+    同じ型の、後から起票されたエントリ）が無い。戻り値は (状態文字列, consulted 一覧, 見逃し一覧)。
+    """
+    consulted = [
+        e for e in entries
+        if any(str(x.get("principle")) == slug and x.get("use") == "consulted" for x in principles_of(e))
+    ]
+    misses: list[Entry] = []
+    for c in consulted:
+        after = str(c.meta.get("resolved_at") or c.meta.get("recorded_at") or "")
+        for e in entries:
+            if e.id == c.id:
+                continue
+            refs = {str(r) for r in _as_list(e.meta.get("related"))} | {str(r) for r in _as_list(e.meta.get("view_of"))}
+            if c.id in refs and str(e.meta.get("pattern")) == str(c.meta.get("pattern")) and str(e.meta.get("recorded_at") or "") > after:
+                if e not in misses:
+                    misses.append(e)
+    patterns = {str(e.meta.get("pattern")) for e in consulted}
+    if not consulted:
+        return "暫定（前向きの適用なし）", consulted, misses
+    if misses:
+        return "暫定（適用後に同型の見逃し）", consulted, misses
+    if len(consulted) >= PRINCIPLE_ESTABLISHED_MIN_CONSULTED and len(patterns) >= 2:
+        return "成立", consulted, misses
+    return "暫定（別々の型からの適用が足りない）", consulted, misses
+
+
+def principles_of(entry: "Entry") -> list[dict]:
+    res = entry.meta.get("resolution") or {}
+    items = res.get("principles") if isinstance(res, dict) else None
+    return [x for x in _as_list(items) if isinstance(x, dict)]
 
 
 def layer_vocabulary(layers_text: str | None = None) -> list[str]:
@@ -431,6 +505,38 @@ def _validate_verification(ver, *, status: str) -> list[str]:
     return errs
 
 
+def _validate_principles(items, *, principles: set[str] | None) -> list[str]:
+    """`resolution.principles`（taxonomy §9）。原理の実在・use の語彙・note の有無・重複。"""
+    errs: list[str] = []
+    if not isinstance(items, list):
+        return ["resolution.principles はリスト（{principle, use, note} の mapping の列）"]
+    known = principles if principles is not None else set(principle_slugs(principles_text_or_empty()))
+    seen: list[str] = []
+    for item in items:
+        if not isinstance(item, dict) or not {"principle", "use", "note"} <= set(item):
+            errs.append("resolution.principles の要素は {principle, use, note} を持つ mapping")
+            continue
+        slug = item.get("principle")
+        if not isinstance(slug, str) or not SLUG_RE.match(slug):
+            errs.append(f"resolution.principles.principle `{slug}` が slug ではない")
+        elif slug not in known:
+            errs.append(f"resolution.principles.principle `{slug}` が principles.md の `#### ` 見出しに無い")
+        elif slug in seen:
+            errs.append(f"resolution.principles に同じ原理 `{slug}` が重複")
+        else:
+            seen.append(slug)
+        if item.get("use") not in PRINCIPLE_USES:
+            errs.append(f"resolution.principles.use `{item.get('use')}` は語彙外 {PRINCIPLE_USES}（taxonomy §9）")
+        note = item.get("note")
+        if not isinstance(note, str) or not note.strip():
+            errs.append("resolution.principles.note が空（採った部品・派生形と固有の差分を書く）")
+        elif re.search(r"\d+\s*(件|%|％|秒|分|時間|回)", note):
+            errs.append(f"resolution.principles.note に数値の記述: `{note}`")
+        for extra in set(item) - {"principle", "use", "note"}:
+            errs.append(f"resolution.principles に未知のキー `{extra}`")
+    return errs
+
+
 def validate_entry(
     entry: Entry,
     *,
@@ -438,6 +544,7 @@ def validate_entry(
     known_ids: set[str],
     root: Path = ROOT,
     layers: set[str] | None = None,
+    principles: set[str] | None = None,
 ) -> list[str]:
     """1 エントリの規約違反を人が読める文で返す（空なら合格）。"""
     errs = list(entry.errors)
@@ -692,6 +799,8 @@ def validate_entry(
             errs.append("resolution.note が空（未解決なら何が分かれば解けるか）")
         if "verification" in res:
             errs.extend(_validate_verification(res.get("verification"), status=status))
+        if "principles" in res:
+            errs.extend(_validate_principles(res.get("principles"), principles=principles))
 
     for rid in _as_list(m["related"]):
         if rid not in known_ids:
@@ -715,15 +824,17 @@ def validate_entry(
 
 
 def validate_all(
-    entries: list[Entry], dictionary_text: str, *, root: Path = ROOT
+    entries: list[Entry], dictionary_text: str, *, root: Path = ROOT, principles_text: str | None = None
 ) -> tuple[dict[str, list[str]], list[str]]:
     """(エントリ別の違反, 全体の違反) を返す。"""
     patterns = set(dictionary_patterns(dictionary_text))
+    principles_text = principles_text_or_empty(principles_text)
+    principles = set(principle_slugs(principles_text))
     known_ids = {str(e.meta.get("id")) for e in entries if e.meta.get("id")}
     layers = set(layer_vocabulary()) if LAYERS_DOC.exists() else None
     per_entry: dict[str, list[str]] = {}
     for e in entries:
-        errs = validate_entry(e, patterns=patterns, known_ids=known_ids, root=root, layers=layers)
+        errs = validate_entry(e, patterns=patterns, known_ids=known_ids, root=root, layers=layers, principles=principles)
         if errs:
             per_entry[e.path.name] = errs
 
@@ -744,6 +855,31 @@ def validate_all(
     for fam, types in families.items():
         if fam and not types:
             global_errs.append(f"dictionary.md の族 `{fam}` に型が無い")
+    # 解決原理（principles.md）: 参照の無い原理は置かない・行の見出しは固定・当たる型は辞書に実在
+    used_principles = {str(x.get("principle")) for e in entries for x in principles_of(e)}
+    for slug in sorted(principles - used_principles):
+        global_errs.append(f"principles.md の原理 `{slug}` を参照するエントリが無い（参照の無い原理は置かない）")
+    for slug, n in Counter(principle_slugs(principles_text)).items():
+        if n > 1:
+            global_errs.append(f"principles.md の原理 `{slug}` が重複している")
+    sections = principle_sections(principles_text)
+    for slug in principles:
+        body = sections.get(slug, "")
+        for row in PRINCIPLE_REQUIRED_ROWS:
+            m = re.search(rf"(?m)^\| {re.escape(row)} \| (.+?) \|\s*$", body)
+            if not m or not m.group(1).strip():
+                global_errs.append(f"principles.md の原理 `{slug}` に「{row}」の行が無い")
+        pm = re.search(r"(?m)^\| 原理 \| (.+?) \|\s*$", body)
+        if pm:
+            for pat in FORBIDDEN_GENERAL_FORM_PATTERNS:
+                if pat.search(pm.group(1)):
+                    global_errs.append(f"principles.md の原理 `{slug}` の「原理」行にファイル名・パス・コード片が含まれる（{pat.pattern}）")
+    for slug, types in principle_types(principles_text).items():
+        if not types:
+            global_errs.append(f"principles.md の原理 `{slug}` の「当たる型」に辞書の型が 1 つも無い")
+        for t in types:
+            if t not in patterns:
+                global_errs.append(f"principles.md の原理 `{slug}` の「当たる型」`{t}` が dictionary.md に無い")
     # view_of は対称に張る（片方向だと束が索引で割れる）
     by_id = {str(e.meta.get("id")): e for e in entries if e.meta.get("id")}
     for e in entries:
@@ -798,7 +934,8 @@ def _table(entries: list[Entry]) -> str:
     return "\n".join([_TABLE_HEADER, *(_row(e) for e in entries)])
 
 
-def render_index(entries: list[Entry], dictionary_text: str) -> str:
+def render_index(entries: list[Entry], dictionary_text: str, principles_text: str | None = None) -> str:
+    principles_text = principles_text_or_empty(principles_text)
     entries = sorted(entries, key=lambda e: e.id)
     lines: list[str] = []
     lines.append("# 課題ナレッジ — 索引（機械生成）")
@@ -1170,7 +1307,7 @@ def render_index(entries: list[Entry], dictionary_text: str) -> str:
     lines.append("")
     lines.append(
         "解決済みエントリの `resolution.verification`（taxonomy §8）から導出する。同じ型を次に直すときの"
-        "検証計画の下書きで、選ぶのは人。未確認の範囲は前回覆わなかったところ。件数は書かない。"
+        "検証計画の下書きで、読んで選ぶのはエージェント（点数による自動選択はしない）。未確認の範囲は前回覆わなかったところ。件数は書かない。"
     )
     lines.append("")
     verified = [e for e in entries if e.meta.get("status") == "resolved" and verification_of(e) is not None]
@@ -1220,6 +1357,58 @@ def render_index(entries: list[Entry], dictionary_text: str) -> str:
         + (", ".join(f"`{p}`" for p in unrecorded) if unrecorded else "（なし）")
     )
     lines.append("")
+
+    lines.append("## 15. 解決原理別（principles.md — 型を横断する条件付きの解決知識）")
+    lines.append("")
+    lines.append(
+        f"原理の成立 = `consulted`（直す前に原理を読んで選んだ）のエントリが**別々の型**から {PRINCIPLE_ESTABLISHED_MIN_CONSULTED} 件以上あり、"
+        "適用後に同型の見逃し（その事例を related / view_of で指す同じ型の後発エントリ）が無いこと。人の確定は条件にしない。"
+        "`extracted`（直した後に抽出した）は成立に数えない。読んで当てるのはエージェントで、人は問題が明らかになったときだけ介入する"
+        "（規則は [taxonomy §9](taxonomy.md)）。"
+    )
+    lines.append("")
+    p_types = principle_types(principles_text)
+    for slug in principle_slugs(principles_text):
+        refs: list[tuple[Entry, dict]] = []
+        for e in entries:
+            for x in principles_of(e):
+                if str(x.get("principle")) == slug:
+                    refs.append((e, x))
+        state, consulted, misses = principle_state(slug, entries)
+        lines.append(f"#### `{slug}`（{state}）")
+        lines.append("")
+        lines.append(f"→ [原理の定義](principles.md#{slug})")
+        lines.append("")
+        lines.append("当たる型（宣言）: " + (" / ".join(f"`{t}`" for t in p_types.get(slug, [])) or "—"))
+        lines.append("")
+        lines.append(
+            "直す前に読んで選んだ事例（`consulted`）: "
+            + (", ".join(_link(e) for e in consulted) if consulted else "（まだ無い — 後付けの抽出だけ）")
+        )
+        lines.append("")
+        if misses:
+            lines.append("適用後に同型の見逃し（人の介入の入口）: " + ", ".join(_link(e) for e in misses))
+            lines.append("")
+        if refs:
+            lines.append("| エントリ | 型 | 分類 | 利用 | 採った部品・派生形と固有の差分 |")
+            lines.append("|---|---|---|---|---|")
+            for e, x in refs:
+                review = REVIEW_LABELS.get((e.meta.get("classification") or {}).get("review"), "—")
+                lines.append(
+                    f"| {_link(e)} | `{e.meta.get('pattern')}` | {review} | `{x.get('use')}` | {_cell(x.get('note'))} |"
+                )
+        else:
+            lines.append("（参照するエントリが無い — ガードレール違反）")
+        lines.append("")
+    stray_p = sorted(
+        {str(x.get("principle")) for e in entries for x in principles_of(e)} - set(principle_slugs(principles_text))
+    )
+    if stray_p:
+        lines.append("### （principles.md に無い原理 — ガードレール違反）")
+        lines.append("")
+        for slug in stray_p:
+            lines.append(f"- `{slug}`")
+        lines.append("")
 
     lines.append("## 10. 出典文書の被覆（調査・レビュー系文書ごとのエントリ有無）")
     lines.append("")
@@ -1312,6 +1501,7 @@ def _print_stats(entries: list[Entry]) -> int:
     show("解決観点（主）", Counter((_as_list((e.meta.get("resolution") or {}).get("perspective")) or [None])[0] for e in entries))
     show("検証方法", Counter(v for e in entries for v in _as_list((verification_of(e) or {}).get("methods"))))
     show("層", Counter(l for e in entries for l in _as_list((e.meta.get("feature_context") or {}).get("layers"))))
+    show("解決原理（原理/利用）", Counter(f"{x.get('principle')}/{x.get('use')}" for e in entries for x in principles_of(e)))
     return 0
 
 

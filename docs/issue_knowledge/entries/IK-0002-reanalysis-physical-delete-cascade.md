@@ -55,6 +55,11 @@ resolution:
     - backend/core/knowledge_objects/stable_key.py
     - backend/core/knowledge_objects/sync.py
     - docs/features/knowledge_objects_design.md §12
+  principles:
+    - principle: sync-by-stable-key-and-protect-human-decisions
+      use: extracted
+      note: >-
+        採った部品は ①安定キー ②同期（更新・superseded・INSERT）④読み手を live ビューに限定。固有の差分: 派生記録（学習者の痕跡・教員の確定）が成果の行を FK で参照していたため、②の「削除しない」が連鎖の遮断を兼ねる。
   verification:
     methods: [guardrail, scratch_db]
     unverified:

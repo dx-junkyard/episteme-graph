@@ -53,6 +53,11 @@ resolution:
   landed_in:
     - backend/core/knowledge_objects/sync.py
     - docs/features/knowledge_objects_design.md §12.1
+  principles:
+    - principle: sync-by-stable-key-and-protect-human-decisions
+      use: extracted
+      note: >-
+        採った部品は ②同期 ③人が触った列の保護。固有の差分: 成果と人の確定が同じ行に同居する表なので、保護は列単位（審査状態・訂正本文）で、空入力でも同期を走らせて結果次第にしない。
   verification:
     methods: [guardrail, scratch_db]
     unverified:
