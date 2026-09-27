@@ -614,6 +614,7 @@ class TestZoneVocabulary:
         "stage": "positioning",
         "thesis": "positioning",
         "claim": "positioning",
+        "mention_claim": "positioning",
         "section": "positioning",
         "symbol_defined": "composition",
         "symbol_used": "composition",
@@ -679,6 +680,7 @@ class TestZoneVocabulary:
             "section": "掲載",
             "thesis": "中心命題",
             "claim": "支える主張",
+            "mention_claim": "この図を参照している本文の主張",
             "operation": "式の詳細層",
         }
 
@@ -705,6 +707,115 @@ class TestZoneVocabulary:
         published = src[src.index("global.ElementVocab = {"):]
         for name in ("zoneForGroup", "zoneHeading", "groupHeading", "qualifierLabel"):
             assert name + ": " + name in published, name
+
+
+class TestFigureContextReadability:
+    """docs/features/element_context_presentation_redesign.md §11（図の文脈の可読性）。
+    語順「ITEM → 関係語」（RC-F5）・主張の全文（full_text）・「本文での言及」行・
+    「不明」チップを描かないこと・主張の階層の訳語ミラー。"""
+
+    def _item_inner(self) -> str:
+        src = _read(CARD_JS)
+        start = src.index("function itemInnerHtml(item, ctx) {")
+        return src[start : src.index("\n  }", start)]
+
+    def test_label_is_emitted_before_the_relation(self):
+        """関係語はすべて後置の動詞句なので、ラベル → 関係語 の順に描く。"""
+        block = self._item_inner()
+        # 関係語は relationHtml として先に組み立て、主文の**後ろ**に連結する
+        # （通常行 = label span + relationHtml / 全文行 = 『全文』+ relationHtml を同じ span に）。
+        assert "var relationHtml = textOf(item.relation_label)" in block
+        assert "+ labelHtml + \"</span>\" + relationHtml" in block
+        assert "FULLTEXT_OPEN + labelHtml + FULLTEXT_CLOSE +" in block
+        kind = block.index("element-card-item-kind")
+        main = block.index("mainHtml +")
+        qualifier = block.index('\'<span class="element-card-item-qualifier">')
+        status = block.index("statusBadgeHtml(item.relation_status")
+        sub = block.index("element-card-item-sub")
+        assert kind < main < qualifier < status < sub
+        # 関係語がラベルより前に出る旧構造（relation span → label span の順）に戻っていない。
+        assert block.index("var relationHtml") < block.index("var mainHtml")
+        assert block.index("var mainHtml") < block.index("mainHtml +")
+
+    def test_full_text_is_the_main_text_and_falls_back_to_label(self):
+        block = self._item_inner()
+        assert "textOf(item.full_text)" in block
+        assert 'if (fullText === label) fullText = "";' in block
+        assert "element-card-item-fulltext" in block
+        # 全文があれば全文、無ければ従来どおりラベル（記号はゲート経由）。
+        assert "labelHtml = ctx.esc(fullText);" in block
+        assert "if (!labelHtml) labelHtml = ctx.esc(label);" in block
+        # 主文は element-card-item-label クラスを保つ（ナビゲーションの下線が効く）。
+        assert 'var labelCls = "element-card-item-label";' in block
+        # label 自体は書き換えない（他の消費者と共有の見出し）。
+        assert "item.label =" not in block
+
+    def test_mentions_row_uses_placement_mentions_and_does_not_truncate(self):
+        src = _read(CARD_JS)
+        assert 'var INTRINSIC_LABEL_MENTIONS = "本文での言及";' in src
+        intrinsic = src[src.index("function intrinsicHtml(focus, ctx) {") :]
+        intrinsic = intrinsic[: intrinsic.index("\n  }")]
+        assert "placementMentionsHtml(placement.mentions, ctx)" in intrinsic
+        assert "INTRINSIC_LABEL_MENTIONS" in intrinsic
+        # 掲載行の後に置く。
+        assert intrinsic.index("INTRINSIC_LABEL_SECTION") < intrinsic.index(
+            "INTRINSIC_LABEL_MENTIONS"
+        )
+        start = src.index("function placementMentionsHtml(mentions, ctx) {")
+        block = src[start : src.index("\n  }", start)]
+        for cls in ("element-card-mentions", "element-card-mention", "element-card-mention-meta"):
+            assert cls in block, cls
+        assert "SOURCE_LANGUAGE_NOTE" in block
+        # 逐語・切り詰めない（slice / substring / 省略記号を使わない）。
+        for forbidden in (".slice(", ".substring(", ".substr(", "…"):
+            assert forbidden not in block, forbidden
+        meta = src[src.index("function mentionMetaText(mention) {") :]
+        meta = meta[: meta.index("\n  }")]
+        # 値の無い部分は書かない（空の括弧・undefined を出さない）。
+        assert "if (section) parts.push(section);" in meta
+        assert "if (page) parts.push(" in meta
+        assert 'if (!parts.length) return "";' in meta
+
+    def test_unknown_keys_are_not_drawn_as_chips_or_roles(self):
+        vocab = _read(VOCAB_JS)
+        start = vocab.index("function qualifierLabel(elementType, key) {")
+        block = vocab[start : vocab.index("\n  }", start)]
+        assert 'if (!raw || raw === QUALIFIER_UNKNOWN) return "";' in block
+        assert 'var QUALIFIER_UNKNOWN = "unknown";' in vocab
+        # 訳語表のミラー自体は残す（test_element_vocab_mirror.py が固定）。
+        assert 'unknown: "不明"' in vocab
+        card = _read(CARD_JS)
+        term = card[card.index("function vocabTermLabel(elementType, key) {") :]
+        term = term[: term.index("\n  }")]
+        assert 'vocabCall("isUnknownKey", raw)' in term
+
+    def test_claim_tier_labels_are_mirrored_and_published(self):
+        vocab = _read(VOCAB_JS)
+        assert "var CLAIM_TIER_LABELS = {" in vocab
+        published = vocab[vocab.index("global.ElementVocab = {") :]
+        assert "claimTierLabel: claimTierLabel" in published
+        start = vocab.index("function claimTierLabel(key) {")
+        block = vocab[start : vocab.index("\n  }", start)]
+        assert "strictLookup(CLAIM_TIER_LABELS, key)" in block
+        # Python ⇄ JS の訳語一致は test_element_vocab_mirror.py の MIRRORED_TABLES が守る。
+        mirror = _read(Path(__file__).with_name("test_element_vocab_mirror.py"))
+        tables = mirror[mirror.index("MIRRORED_TABLES = [") :]
+        tables = tables[: tables.index("]")]
+        assert '"CLAIM_TIER_LABELS"' in tables
+
+    def test_new_styles_exist(self):
+        css = _read(STYLES_CSS)
+        for selector in (
+            ".element-card-item-fulltext {",
+            ".element-card-mentions {",
+            ".element-card-mention {",
+            ".element-card-mention-meta {",
+        ):
+            assert selector in css, selector
+        start = css.index(".element-card-item-fulltext {")
+        rule = css[start : css.index("}", start)]
+        assert "flex: 1 1 100%;" in rule
+        assert "white-space: normal;" in rule
 
 
 # ---------------------------------------------------------------------------

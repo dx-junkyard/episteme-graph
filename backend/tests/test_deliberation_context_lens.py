@@ -1264,6 +1264,202 @@ class TestBuildFigureThesisViaLinkedClaim:
 
 
 # ---------------------------------------------------------------------------
+# §11: 図の文脈の可読性（メンション文・関係語の強さ・親子の畳み込み・掲載節の補い）
+# ---------------------------------------------------------------------------
+
+
+_MENTION_SENTENCE = "Figure 3 .1 shows a classification of dark matter candidates by mass, including WIMPs."
+
+
+def _mention_artifacts(*, caption_in_section: bool) -> dict:
+    blocks = [
+        {"block_id": "cap-3-1", "block_type": "figure_caption", "page": 4, "order": 1,
+         "section_id": "sec-cap" if caption_in_section else None,
+         "text": "Figure 3.1: Candidates for dark matter."},
+        {"block_id": "para-1", "block_type": "body_paragraph", "page": 3, "order": 9,
+         "section_id": "sec-cand",
+         "text": "Dark matter is abundant. " + _MENTION_SENTENCE + " The possible mass range is wide."},
+    ]
+    sections = [
+        {"section_id": "sec-cand", "title": "Candidates for dark matter"},
+        {"section_id": "sec-cap", "title": "Introduction"},
+    ]
+    return {
+        "document_structure": {"blocks": blocks, "sections": sections},
+        "figure_table_semantics": {
+            "figures": [{
+                "figure_id": "fig_3.1",
+                "figure_key": "fig_3_1",
+                "linked_claim_ids": ["raw-parent", "raw-child-1", "raw-child-2", "raw-caption", "raw-other"],
+                "linked_component_candidates": [],
+            }]
+        },
+    }
+
+
+_LONG_PARENT = (
+    "The lower limit arises from the requirement that the de Broglie wavelength fits in a galaxy, "
+    "while the upper limit arises from microlensing."
+)
+
+
+def _mention_claim_rows() -> dict:
+    return {
+        "db-parent": {"text": _LONG_PARENT, "claim_type": "unknown", "claim_tier": "background",
+                      "parent_claim_id": None, "source_scope": {"block_id": "para-1"}},
+        "db-child-1": {"text": "The lower bound is set by the de Broglie wavelength.",
+                       "claim_type": "unknown", "claim_tier": "background",
+                       "parent_claim_id": "db-parent", "source_scope": {"block_id": "para-1"}},
+        "db-child-2": {"text": "The upper bound is set by microlensing.",
+                       "claim_type": "unknown", "claim_tier": "background",
+                       "parent_claim_id": "db-parent", "source_scope": {"block_id": "para-1"}},
+        "db-caption": {"text": "Candidates span many orders of magnitude.", "claim_type": "background",
+                       "parent_claim_id": None, "source_scope": {"block_id": "cap-3-1"}},
+        "db-other": {"text": "A child whose parent is not linked here.", "claim_type": "unknown",
+                     "claim_tier": "paper_core", "parent_claim_id": "db-unlinked-parent",
+                     "source_scope": {"block_id": "para-1"}},
+    }
+
+
+def _build_mention_figure(monkeypatch, *, caption_block_id="cap-3-1", caption_in_section=False, annotations=None):
+    figure_id = "99999999-9999-9999-9999-999999999999"
+    figure_row = dict(_base_figure_row(figure_id), caption_block_id=caption_block_id)
+    _patch_build_figure_common(
+        monkeypatch, figure_row, _mention_artifacts(caption_in_section=caption_in_section), [],
+        claim_lookup={
+            "raw-parent": "db-parent", "raw-child-1": "db-child-1", "raw-child-2": "db-child-2",
+            "raw-caption": "db-caption", "raw-other": "db-other",
+        },
+        claims_by_id=_mention_claim_rows(),
+    )
+    if annotations is not None:
+        monkeypatch.setattr(context_lens, "_annotations_for", lambda *_a, **_k: annotations)
+    return context_lens._build_figure(ElementRef(
+        scope="document", element_type=ELEMENT_FIGURE, element_id=figure_id, document_id="doc-1",
+    ))
+
+
+class TestBuildFigureMentionReadability:
+    def _claims(self, result):
+        return [i for i in result["upper"] if i["element_type"] == "theory_claim"]
+
+    def test_relation_follows_the_claim_block_caption_vs_mention(self, monkeypatch):
+        result = _build_mention_figure(monkeypatch)
+        by_id = {i["element_id"]: i for i in self._claims(result)}
+        assert by_id["db-caption"]["relation"] == "provides_evidence_for"
+        assert by_id["db-caption"]["group"] == context_lens.GROUP_CLAIM
+        for db in ("db-parent", "db-other"):
+            assert by_id[db]["relation"] == "cited_for_claim"
+            assert by_id[db]["relation_label"] == "を述べる本文で参照される"
+            assert by_id[db]["group"] == context_lens.GROUP_MENTION_CLAIM
+            assert by_id[db]["relation_status"] == CONTEXT_STATUS_SOURCE_BACKED
+
+    def test_atomic_children_fold_into_their_linked_parent(self, monkeypatch):
+        result = _build_mention_figure(monkeypatch)
+        ids = [i["element_id"] for i in self._claims(result)]
+        assert ids == ["db-parent", "db-caption", "db-other"]  # 元の linked 順・子は行にしない
+        parent = self._claims(result)[0]
+        assert "細分化した主張 2 件を含む" in parent["sublabel"]
+        assert parent["sublabel"].startswith("背景")
+        assert "不明" not in parent["sublabel"]
+        # 親が一覧にいない子は畳まない。
+        other = self._claims(result)[2]
+        assert "細分化" not in other["sublabel"]
+        assert other["sublabel"] == "論文の中心となる主張"
+
+    def test_long_claim_carries_full_text(self, monkeypatch):
+        parent = self._claims(_build_mention_figure(monkeypatch))[0]
+        assert parent["label"].endswith("…")
+        assert parent["full_text"] == _LONG_PARENT
+        caption = self._claims(_build_mention_figure(monkeypatch))[1]
+        assert caption["full_text"] == ""
+
+    def test_placement_mentions_and_section_fallback_to_the_mention_paragraph(self, monkeypatch):
+        result = _build_mention_figure(monkeypatch)
+        placement = result["focus"]["placement"]
+        assert placement["mentions"] == [
+            {"text": _MENTION_SENTENCE, "section_label": "Candidates for dark matter", "page": 3}
+        ]
+        # caption block が section を持たない → メンション段落の節で補う。
+        assert placement["section_label"] == "Candidates for dark matter"
+        assert placement["section_source"] == "mention"
+        assert not any(i["element_type"] == "section" for i in result["upper"])
+
+    def test_caption_section_wins_when_available(self, monkeypatch):
+        result = _build_mention_figure(monkeypatch, caption_in_section=True)
+        placement = result["focus"]["placement"]
+        assert placement["section_label"] == "Introduction"
+        assert placement["section_source"] == "caption"
+
+    def test_role_text_says_where_the_figure_is_referenced(self, monkeypatch):
+        focus = _build_mention_figure(monkeypatch)["focus"]
+        assert focus["contextual_role"] == "Candidates for dark matterの本文で参照されている"
+        assert focus["contextual_role_status"] == CONTEXT_STATUS_SOURCE_BACKED
+        assert focus["contextual_role_source"] == context_lens.ROLE_SOURCE_STRUCTURAL
+
+    def test_committed_annotation_still_wins_over_the_mention_role(self, monkeypatch):
+        annotations = [{
+            "status": ANNOTATION_STATUS_COMMITTED, "kind": ANNOTATION_KIND_MEANING,
+            "body": {"text": "教員が確定した役割"},
+        }]
+        focus = _build_mention_figure(monkeypatch, annotations=annotations)["focus"]
+        assert focus["contextual_role"] == "教員が確定した役割"
+        assert focus["contextual_role_source"] == context_lens.ROLE_SOURCE_COMMITTED
+
+    def test_no_mentions_keeps_the_existing_ladder_and_omits_optional_keys(self, monkeypatch):
+        figure_id = "12121212-1212-1212-1212-121212121212"
+        figure_row = _base_figure_row(figure_id)
+        artifacts = {
+            "figure_table_semantics": {
+                "figures": [{
+                    "figure_id": "fig_3.1", "figure_key": "fig_3_1",
+                    "linked_claim_ids": ["claim-raw-1"], "linked_component_candidates": [],
+                }]
+            },
+        }
+        _patch_build_figure_common(
+            monkeypatch, figure_row, artifacts, [],
+            claim_lookup={"claim-raw-1": "claim-db-1"},
+            claims_by_id={"claim-db-1": {"text": "運動量は保存される", "claim_type": "background"}},
+        )
+        result = context_lens._build_figure(ElementRef(
+            scope="document", element_type=ELEMENT_FIGURE, element_id=figure_id, document_id="doc-1",
+        ))
+        placement = result["focus"]["placement"]
+        assert "mentions" not in placement
+        assert "section_source" not in placement
+        assert placement["section_label"] == ""
+        # caption block を持たない主張は mention 扱い → メンション文が取れなくても
+        # 「本文で参照されている」（節が無いので節なしの定型文）。切り詰めた主張を
+        # 役割文に流用しない（§11.2）。
+        assert result["focus"]["contextual_role"] == "本文で参照されている"
+        assert result["focus"]["contextual_role_status"] == "source_backed"
+
+    def test_mention_sentence_already_shown_as_a_claim_is_not_repeated(self, monkeypatch):
+        """主張行と同じ文は「本文での言及」に重ねない（§11.6 追補）。"""
+        result = _build_mention_figure(monkeypatch)
+        placement = result["focus"]["placement"]
+        claim_texts = {
+            context_lens._mention_compare_key(i.get("full_text") or i.get("label"))
+            for i in result["upper"] if i["element_type"] == "theory_claim"
+        }
+        for m in placement.get("mentions", []):
+            assert context_lens._mention_compare_key(m["text"]) not in claim_texts
+        assert context_lens._mention_compare_key("Fig. 1 shows  X.") == \
+            context_lens._mention_compare_key("fig. 1 shows x")
+        # atomic 化で文の一部だけが主張になった場合も、その文は主張行に含まれるとみなす
+        # （十分に長い包含のみ。短い語句の偶然の包含では落とさない）。
+        long_part = "the s-and p-polarizations separated by the GLP are detected by photodetectors"
+        sentence = "In this experiment, as shown in Fig. 5.21, " + long_part + " PDs and PDp."
+        assert context_lens._mention_covered_by_claims(
+            sentence, {context_lens._mention_compare_key(long_part)}
+        )
+        assert not context_lens._mention_covered_by_claims(
+            sentence, {context_lens._mention_compare_key("in this experiment")}
+        )
+
+
+# ---------------------------------------------------------------------------
 # F3: claim レンズ側の既存 fallback（linked_claim_ids 逆引き → 図が lower に出る）
 # ---------------------------------------------------------------------------
 

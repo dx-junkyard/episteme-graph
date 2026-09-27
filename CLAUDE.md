@@ -2589,6 +2589,11 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   禁止）。UI は `deliberation.js` の上位/中心/下位レーン＋パンくず中心移動（モーダル非破棄）。
   dialogue grounding にも同じ focus/upper/lower を注入する。文脈上の役割は要素の固定属性に
   保存しない。
+- **図の文脈の可読性（2026-09-25・migration なし）**: 図を参照する本文の文（メンション文）を
+  `placement.mentions` で出して主役にする（抽出は `core/deliberation/figure_mentions.py`・A層非改変）。
+  段落メンション由来の主張は `cited_for_claim`「を述べる本文で参照される」・group `mention_claim`
+  （証拠関係 `provides_evidence_for` は caption 由来のみ）/ 親子 claim は親へ畳む / ITEM `full_text` /
+  カードの語順は「ITEM → 関係語」（全要素共通）。正本は `element_context_presentation_redesign.md` §11。
 - **ガードレール**: `test_deliberation_guardrails.py` / `test_deliberation_positioning.py` /
   `test_deliberation_ui_static.py` / `test_deliberation_annotations.py`（FastAPI 非 import・
   candidate-only・削除 API 不在・権限ゲート・confidence 生値非漏洩・A層非改変）。

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 __all__ = [
     "CHAIN_TYPE_LABELS",
+    "CLAIM_TIER_LABELS",
     "CLAIM_TYPE_LABELS",
     "DEFINITION_STATUS_LABELS",
     "EQUATION_ROLE_LABELS",
@@ -35,6 +36,7 @@ __all__ = [
     "THEORY_STAGE_LABELS",
     "THEORY_STAGE_DISPLAY_TO_KEY",
     "chain_type_label",
+    "claim_tier_label",
     "claim_type_label",
     "definition_missing_fact",
     "definition_status_label",
@@ -296,6 +298,24 @@ CLAIM_TYPE_LABELS: dict[str, str] = {
 
 def claim_type_label(key: object) -> str:
     return _lookup(CLAIM_TYPE_LABELS, key)
+
+
+# ── 主張の階層（core/schema.py の CLAIM_TIERS と1対1。
+#    claim_qualification の tier 語彙）─────────────────────────────────────────
+# `claim_type='unknown'`（atomic 子主張に多い）の補足行を「不明」と裸で出さず、
+# 階層の訳へ落とすための表（§11.2「意味の無いラベルを裸で出さない」）。
+
+CLAIM_TIER_LABELS: dict[str, str] = {
+    "paper_core": "論文の中心となる主張",
+    "paper_supporting": "論文を支える主張",
+    "background": "背景",
+    "prior_work": "先行研究",
+    "meta": "メタ",
+}
+
+
+def claim_tier_label(key: object) -> str:
+    return _lookup(CLAIM_TIER_LABELS, key)
 
 
 # ── 数式の論証における役割（equation_semantics の ROLE_IN_ARGUMENT_VOCAB）───────

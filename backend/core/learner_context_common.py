@@ -222,6 +222,7 @@ ITEM_GROUPS = (
     "stage",
     "thesis",
     "claim",
+    "mention_claim",
     "section",
     "symbol_defined",
     "symbol_used",

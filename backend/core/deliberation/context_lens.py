@@ -94,9 +94,10 @@ from core.library import schema as library_schema
 from core.library import store as library_store_mod
 from core.deliberation import identity_links as identity_links_mod
 from core.deliberation import labels as labels_mod
+from core.deliberation.figure_mentions import find_figure_mentions
 from core.deliberation import refs as refs_mod
 from core.deliberation import store as store_mod
-from core.text_excerpt import excerpt, first_sentence, looks_like_tex_math
+from core.text_excerpt import excerpt, first_sentence, looks_like_tex_math, normalize_whitespace
 from core.deliberation.schema import (
     ANNOTATION_KIND_INTERPRETATION,
     ANNOTATION_KIND_MEANING,
@@ -178,6 +179,11 @@ RELATION_LABELS: dict[str, str] = {
     "belongs_to_stage": "の理論段階に属する",
     "used_in_operation_step": "の操作ステップで使われる",
     "defines_symbol": "で記号を定義する",
+    # ── 図の文脈の可読性（§11.2「関係は事実の強さどおりに言う」）。────────────
+    # crosslink の段落メンション由来の主張は「図が主張に証拠を与える」ではなく
+    # 「図は『主張』を述べる本文で参照される」。provides_evidence_for は caption
+    # block 由来（claim の block_id が caption block）の場合にだけ残す。
+    "cited_for_claim": "を述べる本文で参照される",
 }
 
 # ── 区画キー（group, 設計書 §4.3）───────────────────────────────────────────────
@@ -187,6 +193,8 @@ RELATION_LABELS: dict[str, str] = {
 GROUP_STAGE = "stage"
 GROUP_THESIS = "thesis"
 GROUP_CLAIM = "claim"
+# 図を参照する本文の段落に含まれる主張（§11.3。ゾーン = positioning）。
+GROUP_MENTION_CLAIM = "mention_claim"
 GROUP_SECTION = "section"
 GROUP_SYMBOL_DEFINED = "symbol_defined"
 GROUP_SYMBOL_USED = "symbol_used"
@@ -205,6 +213,7 @@ ITEM_GROUPS: tuple[str, ...] = (
     GROUP_STAGE,
     GROUP_THESIS,
     GROUP_CLAIM,
+    GROUP_MENTION_CLAIM,
     GROUP_SECTION,
     GROUP_SYMBOL_DEFINED,
     GROUP_SYMBOL_USED,
@@ -404,6 +413,7 @@ def _item(
     group: str = GROUP_RELATED,
     unresolved: bool = False,
     label_source: str = "",
+    full_text: str = "",
 ) -> dict[str, Any]:
     """ITEM を1件組み立てる（upper/lower 共通。設計書 §5 → §4.1 の ITEM v2）。
 
@@ -418,12 +428,18 @@ def _item(
 
     sublabel は「1行の区別材料・事実文」で、``label`` と同一文字列にはしない（CP1）。
     内部 ID 形の sublabel は捨てる（EC3′: 遮断は最後の砦であって、生成側で先に弾く）。
+
+    ``full_text``（§11.3）は ``label`` が切り詰めのときだけ全文を持つ（同一文字列なら
+    空）。キーは契約の安定のため常に載せる（空文字 = 全文なし）。
     """
     navigable = bool(element_id) and element_type in _NAVIGABLE_ELEMENT_TYPES
     head = str(label or "")
     sub = str(sublabel or "").strip()
     if sub and (sub == head or labels_mod.is_internal_id_like(sub)):
         sub = ""
+    whole = str(full_text or "").strip()
+    if whole == head or labels_mod.is_internal_id_like(whole):
+        whole = ""
     return {
         "element_type": element_type,
         "element_id": element_id,
@@ -439,6 +455,7 @@ def _item(
         "group": str(group or GROUP_RELATED),
         "unresolved": bool(unresolved),
         "label_source": str(label_source or ""),
+        "full_text": whole,
     }
 
 
@@ -453,6 +470,7 @@ def _item_from_label(
     group: str = GROUP_RELATED,
     evidence_refs: list[str] | None = None,
     qualifier: str | None = None,
+    sublabel: str | None = None,
 ) -> dict[str, Any]:
     """``labels.Label``（ラベルラダーの結果）から ITEM を1件組み立てる。"""
     return _item(
@@ -463,11 +481,12 @@ def _item_from_label(
         relation,
         relation_status,
         evidence_refs=evidence_refs,
-        sublabel=label.sublabel,
+        sublabel=label.sublabel if sublabel is None else sublabel,
         qualifier=label.qualifier if qualifier is None else qualifier,
         group=group,
         unresolved=label.unresolved,
         label_source=label.label_source,
+        full_text=label.full_text,
     )
 
 
@@ -526,15 +545,16 @@ def _committed_contextual_role(annotations: list[dict[str, Any]]) -> tuple[str |
 _STRUCTURAL_ROLE_TEMPLATES: dict[str, str] = {
     GROUP_STAGE: "{label}の段階に位置づけられる",
     GROUP_THESIS: "{label}を支える",
-    GROUP_CLAIM: "{label}を裏づける",
+    GROUP_CLAIM: "『{label}』を裏づける",
+    GROUP_MENTION_CLAIM: "『{label}』を述べる本文で参照される",
 }
-_STRUCTURAL_ROLE_GROUP_ORDER = (GROUP_STAGE, GROUP_THESIS, GROUP_CLAIM)
+_STRUCTURAL_ROLE_GROUP_ORDER = (GROUP_STAGE, GROUP_THESIS, GROUP_CLAIM, GROUP_MENTION_CLAIM)
 
 
 def _structural_role(upper_items: list[dict[str, Any]]) -> tuple[str | None, str]:
     """上位項目から「この文脈での役割」の事実文を合成する（設計書 §4.4 ③）。
 
-    素材は ``group ∈ {stage, thesis, claim}`` かつ ``unresolved=False`` かつ
+    素材は ``group ∈ {stage, thesis, claim, mention_claim}`` かつ ``unresolved=False`` かつ
     ``relation_status='source_backed'`` の項目に限る（AI 候補・解決失敗ラベルを
     役割文にしない）。該当が無ければ ``(None, unidentified)``。
     """
@@ -1492,7 +1512,11 @@ def _claims_by_id(ids: list[str]) -> dict[str, dict[str, Any]]:
     session = get_session()
     try:
         rows = session.execute(
-            sa_text("SELECT id::text AS id, text, claim_type FROM theory_claims_live WHERE id::text = ANY(:ids)"),
+            sa_text(
+                "SELECT id::text AS id, text, normalized_text, claim_type, claim_tier,"
+                " parent_claim_id::text AS parent_claim_id, source_scope"
+                " FROM theory_claims_live WHERE id::text = ANY(:ids)"
+            ),
             {"ids": ids},
         ).mappings().all()
     finally:
@@ -2555,14 +2579,31 @@ def _build_figure(ref: ElementRef) -> dict[str, Any] | None:
     upper: list[dict[str, Any]] = []
     lower: list[dict[str, Any]] = []
 
+    # §11: 図を参照する本文の文（メンション文）。図の文脈の主役で、掲載節の補い・
+    # 役割文・主張の関係語の判定に使う（読み時導出・A層非改変）。
+    structure_artifact = artifacts.get("document_structure")
+    mentions, mention_notes = _safe(
+        lambda: find_figure_mentions(
+            structure_artifact if isinstance(structure_artifact, dict) else {}, fig
+        ),
+        ([], []),
+    )
+
     caption_block_id = fig.get("caption_block_id")
+    caption_section_label = ""
     if caption_block_id:
         block = _blocks_by_id(artifacts).get(str(caption_block_id))
         if block:
             section = _sections_by_id(artifacts).get(str(block.get("section_id") or ""))
             label = _section_label(section)
             if label:
-                upper.append(_item("section", None, document_id, label, "appears_in_section", _status_for_link("explicit")))
+                caption_section_label = label
+                upper.append(
+                    _item(
+                        "section", None, document_id, label, "appears_in_section",
+                        _status_for_link("explicit"), group=GROUP_SECTION,
+                    )
+                )
 
     fig_records = _list(artifacts.get("figure_table_semantics"), "figures")
     matched_record = _matching_figure_record(fig_records, fig)
@@ -2576,18 +2617,16 @@ def _build_figure(ref: ElementRef) -> dict[str, Any] | None:
 
     linked_claim_db_ids: list[str] = []
     if matched_record:
-        for cid in matched_record.get("linked_claim_ids") or []:
-            claim_db = claim_lookup.get(str(cid))
-            claim_row = _safe(lambda: _claims_by_id([claim_db]), {}).get(claim_db) if claim_db else None
-            upper.append(
-                _item_from_label(
-                    "theory_claim", claim_db, document_id,
-                    labels_mod.claim_label(claim_row or {"text": str(cid)}),
-                    "provides_evidence_for", _status_for_link("explicit"),
-                    evidence_refs=[str(cid)] if not claim_row else [], group=GROUP_CLAIM,
-                )
-            )
-            if claim_db:
+        raw_claim_ids = [str(cid) for cid in (matched_record.get("linked_claim_ids") or [])]
+        resolved = [(cid, claim_lookup.get(cid)) for cid in raw_claim_ids]
+        wanted = [db for _cid, db in resolved if db]
+        claim_rows = _safe(lambda: _claims_by_id(wanted), {}) if wanted else {}
+        for item in _figure_claim_items(
+            resolved, claim_rows, document_id, caption_block_id=str(caption_block_id or "")
+        ):
+            upper.append(item)
+        for _cid, claim_db in resolved:
+            if claim_db and claim_db not in linked_claim_db_ids:
                 linked_claim_db_ids.append(claim_db)
 
         for comp_raw in matched_record.get("linked_component_candidates") or []:
@@ -2670,9 +2709,18 @@ def _build_figure(ref: ElementRef) -> dict[str, Any] | None:
 
     upper = _cap_lane(_dedupe_items(upper), notes, "上位構造")
     lower = _cap_lane(_dedupe_items(lower), notes, "下位構造")
+    notes.extend(mention_notes)
+
+    section_label = caption_section_label
+    section_source = "caption" if caption_section_label else ""
+    if not section_label:
+        section_label = next((m["section_label"] for m in mentions if m.get("section_label")), "")
+        section_source = "mention" if section_label else ""
 
     annotations = _annotations_for(ELEMENT_FIGURE, ref.element_id, document_id)
-    role_text, role_status, role_source = _derive_contextual_role(upper, annotations)
+    role_text, role_status, role_source = _figure_contextual_role(
+        upper, annotations, mentions=mentions, section_label=section_label
+    )
 
     provenance = [f"document_figures:{ref.element_id}"]
     if matched_record:
@@ -2698,13 +2746,7 @@ def _build_figure(ref: ElementRef) -> dict[str, Any] | None:
             "summary_is_source_language": _is_source_language(caption),
             "facts": [],
         },
-        "placement": {
-            "section_label": next(
-                (i["label"] for i in upper if i["element_type"] == "section"), ""
-            ),
-            "stage": None,
-            "thesis_role": next((i["label"] for i in upper if i["element_type"] == "thesis"), ""),
-        },
+        "placement": _figure_placement(upper, mentions, section_label, section_source),
         "contextual_role": role_text,
         "contextual_role_status": role_status,
         "contextual_role_source": role_source,
@@ -2712,6 +2754,165 @@ def _build_figure(ref: ElementRef) -> dict[str, Any] | None:
         "provenance": provenance,
     }
     return {"focus": focus, "upper": upper, "lower": lower, "notes": notes}
+
+
+# ── 図の文脈の可読性（§11）の純粋ヘルパ ─────────────────────────────────────────
+
+_FOLDED_SUBCLAIMS_FACT = "細分化した主張 {count} 件を含む"
+_FIGURE_MENTION_ROLE_WITH_SECTION = "{section}の本文で参照されている"
+_FIGURE_MENTION_ROLE = "本文で参照されている"
+
+
+def _claim_block_id(row: dict[str, Any] | None) -> str:
+    scope = (row or {}).get("source_scope")
+    if isinstance(scope, str):
+        try:
+            scope = json.loads(scope)
+        except ValueError:
+            scope = {}
+    return str(scope.get("block_id") or "").strip() if isinstance(scope, dict) else ""
+
+
+def _figure_claim_items(
+    resolved: list[tuple[str, str | None]],
+    claim_rows: dict[str, dict[str, Any]],
+    document_id: str,
+    *,
+    caption_block_id: str,
+) -> list[dict[str, Any]]:
+    """図にリンクされた主張の ITEM 列（§11.2 / §11.3、純関数）。
+
+    * 関係語は事実の強さどおり: claim の block_id が図の caption block なら
+      ``provides_evidence_for`` / ``claim``、それ以外（crosslink の段落メンション由来）は
+      ``cited_for_claim`` / ``mention_claim``。どちらも A層の明示リンク = source_backed。
+    * 親が同じ一覧にいる atomic 子主張は行にせず、親の補足行に「細分化した主張 N 件を
+      含む」と事実で書く（RC-F3）。並びは元の linked 順。
+    """
+    linked_db_ids = {db for _cid, db in resolved if db}
+    folded: dict[str, int] = {}
+    for db in linked_db_ids:
+        parent = str((claim_rows.get(db) or {}).get("parent_claim_id") or "").strip()
+        if parent and parent != db and parent in linked_db_ids:
+            folded[parent] = folded.get(parent, 0) + 1
+
+    items: list[dict[str, Any]] = []
+    emitted: set[str] = set()
+    for cid, claim_db in resolved:
+        claim_row = claim_rows.get(claim_db) if claim_db else None
+        if claim_db:
+            parent = str((claim_row or {}).get("parent_claim_id") or "").strip()
+            if parent and parent != claim_db and parent in linked_db_ids:
+                continue
+            if claim_db in emitted:
+                continue
+            emitted.add(claim_db)
+        label = labels_mod.claim_label(claim_row or {"text": cid})
+        sublabel = label.sublabel
+        if claim_db and folded.get(claim_db):
+            sublabel = labels_mod._joined(
+                [sublabel, _FOLDED_SUBCLAIMS_FACT.format(count=folded[claim_db])]
+            )
+        from_caption = bool(caption_block_id) and _claim_block_id(claim_row) == caption_block_id
+        items.append(
+            _item_from_label(
+                "theory_claim", claim_db, document_id, label,
+                "provides_evidence_for" if from_caption else "cited_for_claim",
+                _status_for_link("explicit"),
+                evidence_refs=[cid] if not claim_row else [],
+                group=GROUP_CLAIM if from_caption else GROUP_MENTION_CLAIM,
+                sublabel=sublabel,
+            )
+        )
+    return items
+
+
+def _figure_contextual_role(
+    upper_items: list[dict[str, Any]],
+    annotations: list[dict[str, Any]],
+    *,
+    mentions: list[dict[str, Any]],
+    section_label: str,
+) -> tuple[str | None, str, str]:
+    """図の文脈上の役割（§11.3）: committed 注釈 → 本文での参照 → 従来のラダー。"""
+    committed_text, committed_status = _committed_contextual_role(annotations)
+    if committed_text:
+        return committed_text, committed_status, ROLE_SOURCE_COMMITTED
+    # メンション文が取れなくても、段落メンション由来の主張（mention_claim）があれば
+    # 「本文で参照されている」は A層のクロスリンクが示す事実。切り詰めた主張を
+    # 役割文に流用しない（§11.2 — 役割文は section 基準の 1 文に固定）。
+    referenced = bool(mentions) or any(
+        item.get("group") == GROUP_MENTION_CLAIM and not item.get("unresolved")
+        for item in upper_items
+    )
+    if referenced:
+        section = str(section_label or "").strip()
+        text = (
+            _FIGURE_MENTION_ROLE_WITH_SECTION.format(section=section)
+            if section
+            else _FIGURE_MENTION_ROLE
+        )
+        return text, CONTEXT_STATUS_SOURCE_BACKED, ROLE_SOURCE_STRUCTURAL
+    return _derive_contextual_role(upper_items, annotations)
+
+
+def _figure_placement(
+    upper_items: list[dict[str, Any]],
+    mentions: list[dict[str, Any]],
+    section_label: str,
+    section_source: str,
+) -> dict[str, Any]:
+    """図の ``focus.placement``（§11.3。mentions / section_source は省略可キー）。"""
+    placement: dict[str, Any] = {
+        "section_label": section_label,
+        "stage": None,
+        "thesis_role": next((i["label"] for i in upper_items if i["element_type"] == "thesis"), ""),
+    }
+    if section_source:
+        placement["section_source"] = section_source
+    # 主張として既に行になっている文は「本文での言及」に重ねて出さない（同じ文を
+    # 2 度読ませない）。主張行は関係語「を述べる本文で参照される」で参照の事実を
+    # 保っているので情報は落ちない（P4）。比較は空白正規化 + casefold の完全一致。
+    claim_texts = {
+        _mention_compare_key(item.get("full_text") or item.get("label"))
+        for item in upper_items
+        if item.get("element_type") == ELEMENT_THEORY_CLAIM
+    }
+    shown = [
+        {"text": m.get("text", ""), "section_label": m.get("section_label", ""), "page": m.get("page")}
+        for m in mentions
+        if isinstance(m, dict)
+        and str(m.get("text") or "").strip()
+        and not _mention_covered_by_claims(m.get("text"), claim_texts)
+    ]
+    if shown:
+        placement["mentions"] = shown
+    return placement
+
+
+# 主張が文の一部（atomic 化で節だけ残った主張）でも同じ文と見なす最短長。短い語句の
+# 偶然の包含で言及文を落とさないための下限。
+_MENTION_COVER_MIN_CHARS = 40
+
+
+def _mention_covered_by_claims(text: Any, claim_keys: set[str]) -> bool:
+    """メンション文が主張行と同じ内容か（完全一致、または十分に長い一方が他方を含む）。"""
+    key = _mention_compare_key(text)
+    if not key:
+        return False
+    for claim_key in claim_keys:
+        if not claim_key:
+            continue
+        if key == claim_key:
+            return True
+        shorter, longer = (key, claim_key) if len(key) <= len(claim_key) else (claim_key, key)
+        if len(shorter) >= _MENTION_COVER_MIN_CHARS and shorter in longer:
+            return True
+    return False
+
+
+def _mention_compare_key(text: Any) -> str:
+    """メンション文と主張本文の同一判定キー（空白正規化 + casefold・末尾の句点を無視）。"""
+    return normalize_whitespace(text).casefold().rstrip(".。 ")
 
 
 def _build_evidence(ref: ElementRef) -> dict[str, Any] | None:

@@ -10827,6 +10827,39 @@ button.element-card-item:focus-visible .element-card-item-label {
   color: var(--color-text-primary);
 }
 
+/* 主張の全文（ITEM.full_text、§11.3）。文として1行を占有させ、関係語・裏付けは
+   次の行へ回す（語順は「主張 → 関係語」）。 */
+.element-card-item-fulltext {
+  flex: 1 1 100%;
+  white-space: normal;
+}
+
+.element-card-item-fulltext .element-card-item-relation {
+  margin-left: 2px;
+}
+
+/* 「本文での言及」（focus.placement.mentions）。メンション文は逐語・切り詰めない。 */
+.element-card-mentions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.element-card-mention {
+  color: var(--color-text-primary);
+  font-weight: 400;
+  line-height: 1.6;
+}
+
+.element-card-mention-meta {
+  margin-left: 4px;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
 .element-card-notes,
 .element-card-review {
   margin: 8px 0 0;

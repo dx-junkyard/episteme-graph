@@ -15,6 +15,7 @@ from core.text_excerpt import (
     first_sentence,
     looks_like_tex_math,
     normalize_whitespace,
+    split_sentences,
 )
 
 
@@ -166,6 +167,34 @@ class TestFirstSentence:
 
     def test_empty(self):
         assert first_sentence(None) == ""
+
+
+class TestSplitSentences:
+    """§11: first_sentence と同じ文境界規則で全文を文に分ける。"""
+
+    def test_english_and_japanese(self):
+        assert split_sentences("First one. Second one.") == ["First one.", "Second one."]
+        assert split_sentences("最初の文です。次の文です。") == ["最初の文です。", "次の文です。"]
+
+    def test_abbreviation_and_numbers_are_not_boundaries(self):
+        assert split_sentences("Fig. 5.2 shows the setup at 3.14 K. Next one.") == [
+            "Fig. 5.2 shows the setup at 3.14 K.", "Next one.",
+        ]
+
+    def test_grobid_spaced_figure_number_stays_in_one_sentence(self):
+        text = "Dark matter.  Figure 1 .1 shows candidates,\nincluding WIMPs. Tail"
+        assert split_sentences(text) == [
+            "Dark matter.", "Figure 1 .1 shows candidates, including WIMPs.", "Tail",
+        ]
+
+    def test_no_boundary_and_empty(self):
+        assert split_sentences("no terminator here") == ["no terminator here"]
+        assert split_sentences(None) == []
+        assert split_sentences("   ") == []
+
+    def test_first_sentence_is_the_head_of_split_sentences(self):
+        for text in ("First one. Second one.", "Fig. 5.2 shows the setup. Next.", "最初の文です。次。"):
+            assert first_sentence(text) == split_sentences(text)[0]
 
 
 # ---------------------------------------------------------------------------

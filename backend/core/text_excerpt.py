@@ -26,6 +26,7 @@ __all__ = [
     "first_sentence",
     "looks_like_tex_math",
     "normalize_whitespace",
+    "split_sentences",
 ]
 
 
@@ -198,6 +199,31 @@ def first_sentence(text: object) -> str:
             continue
         return body[: match.end()].strip()
     return body
+
+
+def split_sentences(text: object) -> list[str]:
+    """空白正規化した ``text`` を文に分ける（各文は文末記号を含む）。
+
+    文境界の規則は ``first_sentence`` / ``excerpt`` と同じ ``_is_sentence_boundary``
+    （数値表記・略語ピリオド・``Fig. 1.1`` の番号を文末にしない）で、第2の文境界
+    実装を作らない。文境界が無ければ全体を1文として返す。空なら空リスト。
+    """
+    body = normalize_whitespace(text)
+    if not body:
+        return []
+    sentences: list[str] = []
+    start = 0
+    for match in _SENTENCE_END_RE.finditer(body):
+        if not _is_sentence_boundary(body, match.start(), match.group()):
+            continue
+        sentence = body[start : match.end()].strip()
+        if sentence:
+            sentences.append(sentence)
+        start = match.end()
+    tail = body[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
 
 
 # ── TeX 数式判定（course_content_builder から移設した正本）────────────────────

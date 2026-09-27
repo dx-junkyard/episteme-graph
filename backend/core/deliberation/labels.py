@@ -31,6 +31,7 @@ from typing import Any, Callable
 
 from core.element_vocab import (
     chain_type_label,
+    claim_tier_label,
     claim_type_label,
     definition_missing_fact,
     definition_status_label,
@@ -97,6 +98,9 @@ class Label:
         来歴。教員向けにのみ出す（学習者射影で落とす）。
     unresolved
         ラダーが尽き一般名で代替したことの明示（カードが淡色表示に使う）。
+    full_text
+        ``text`` が切り詰めのときだけ持つ全文（空白正規化のみ）。同一なら空（§11.3）。
+        現在は主張（``claim_label``）だけが設定する。
     """
 
     text: str = ""
@@ -104,6 +108,7 @@ class Label:
     qualifier: str = ""
     label_source: str = ""
     unresolved: bool = False
+    full_text: str = ""
 
 
 # ── 内部 ID / 式番号の判定 ────────────────────────────────────────────────────
@@ -245,18 +250,23 @@ def _finalize(
     qualifier: str = "",
     label_source: str = "",
     unresolved: bool = False,
+    full_text: str = "",
 ) -> Label:
     """``text == sublabel`` を作らない（CP1）で Label を組み立てる。"""
     head = _text(text)
     sub = _text(sublabel)
     if sub and sub == head:
         sub = ""
+    whole = _text(full_text)
+    if whole == head:
+        whole = ""
     return Label(
         text=head,
         sublabel=sub,
         qualifier=_text(qualifier),
         label_source=_text(label_source),
         unresolved=bool(unresolved),
+        full_text=whole,
     )
 
 
@@ -820,17 +830,49 @@ _CLAIM_QUOTE_LIMIT = 70
 _GENERIC_CLAIM_LABEL = "主張"
 
 
+def _claim_full_text(data: dict[str, Any]) -> str:
+    """ラベルの元になった主張の全文（``text`` → ``normalized_text`` の最初の可用文）。"""
+    for candidate in (data.get("text"), data.get("normalized_text")):
+        raw = _text(candidate)
+        if _usable(raw):
+            return normalize_whitespace(raw)
+    return ""
+
+
+def _claim_kind_label(data: dict[str, Any]) -> str:
+    """補足行の種別語（§11.3）: claim_type 訳 → claim_tier 訳 → ""。
+
+    ``claim_type='unknown'`` は「不明」と訳さない（意味の無いラベルを裸で出さない —
+    §11.2。atomic 子主張は unknown でも tier を持っている）。
+    """
+    claim_type = _text(data.get("claim_type"))
+    if claim_type and claim_type != "unknown":
+        translated = claim_type_label(claim_type)
+        if translated:
+            return translated
+    return claim_tier_label(data.get("claim_tier"))
+
+
 def claim_label(row_or_record: dict[str, Any] | None) -> Label:
-    """主張のラベル（§5.5）。``theory_claims`` の DB 行と ClaimObjectRecord の両対応。"""
+    """主張のラベル（§5.5 / §11.3）。``theory_claims`` の DB 行と ClaimObjectRecord の両対応。
+
+    ``text`` は 60 字の見出し（他画面の互換）。切り詰めたときだけ ``full_text`` に全文を
+    載せる（カードは全文を主文に描く）。
+    """
     data = _dict(row_or_record)
     text = _first_usable([data.get("text"), data.get("normalized_text")], _CLAIM_TEXT_LIMIT)
     unresolved = False
     source = LABEL_SOURCE_TEXT
+    full_text = ""
     if not text:
         text, source, unresolved = _GENERIC_CLAIM_LABEL, LABEL_SOURCE_GENERIC, True
+    else:
+        whole = _claim_full_text(data)
+        if whole and whole != text:
+            full_text = whole
 
     claim_type = _text(data.get("claim_type"))
-    parts = [claim_type_label(claim_type)]
+    parts = [_claim_kind_label(data)]
     quote = first_sentence(data.get("evidence_text") or data.get("evidence_quote"))
     if _usable(quote):
         cut = excerpt(quote, _CLAIM_QUOTE_LIMIT)
@@ -843,6 +885,7 @@ def claim_label(row_or_record: dict[str, Any] | None) -> Label:
         qualifier=claim_type,
         label_source=source,
         unresolved=unresolved,
+        full_text=full_text,
     )
 
 

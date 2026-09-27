@@ -23,6 +23,11 @@
  *   focus に headline / intrinsic / placement / derivations が増える。
  *   derivations（equation focus）は「入力 →[操作]→ 出力」のストーリーカードで描く。
  *
+ * 図の文脈の可読性（同設計書 §11.3、additive）:
+ *   ITEM.full_text（theory_claim・ラベルが切り詰めのときだけ）を行の主文に描く。
+ *   focus.placement.mentions（[{text, section_label, page}]）を「本文での言及」行に
+ *   逐語のまま描く。group "mention_claim"（図を参照する本文段落の主張）は位置づけ区画。
+ *
  * 学習者向け投影（core/element_context.py）は ITEM のキーが element_id ではなく
  * id で、relation / evidence_refs / focus.provenance を落としている。
  * 本カードは両方の形を受ける（element_id → id の順に見る）。
@@ -103,6 +108,18 @@
   var INTRINSIC_LABEL_SECTION = "掲載";
   var INTRINSIC_LABEL_STAGE = "理論の段階";
   var INTRINSIC_LABEL_THESIS = "中心命題での役割";
+  // 図を参照する本文の文（focus.placement.mentions。論文自身の言明・逐語）。
+  // docs/features/element_context_presentation_redesign.md §11.2 / §11.3。
+  // 全文で描く主張の引用記号（関係語が後置で続く）。
+  var FULLTEXT_OPEN = "『";
+  var FULLTEXT_CLOSE = "』";
+  var INTRINSIC_LABEL_MENTIONS = "本文での言及";
+  var MENTION_QUOTE_OPEN = "『";
+  var MENTION_QUOTE_CLOSE = "』";
+  var MENTION_META_OPEN = "（";
+  var MENTION_META_CLOSE = "）";
+  var MENTION_META_JOIN = "・";
+  var MENTION_PAGE_PREFIX = "p.";
   // 英語自由文はそのまま完全表示し、出所だけ注記する（§2.4 / Q3）。
   var SOURCE_LANGUAGE_NOTE = "（論文の原文）";
   var SYMBOL_DEFINED_HERE = "（この式で定義）";
@@ -187,6 +204,9 @@
   function vocabTermLabel(elementType, key) {
     var raw = textOf(key);
     if (!raw) return "";
+    // 「不明」は訳語表を総当たりすると CLAIM_TYPE_LABELS.unknown が当たってしまう。
+    // 意味の無いラベルを裸で出さない（§11.2）ので、先に弾く。
+    if (vocabCall("isUnknownKey", raw)) return "";
     var direct = vocabQualifierLabel(elementType, raw);
     if (direct) return direct;
     for (var i = 0; i < TERM_LOOKUPS.length; i++) {
@@ -457,6 +477,41 @@
     return parts.join("");
   }
 
+  // 本文での言及（focus.placement.mentions = [{text, section_label, page}]）。
+  // text はメンション文の逐語で、**切り詰めない**（読み手の問い「この図は本文のどこで
+  // 何のために参照されているか」に論文自身の文で答える。§11.2）。英語自由文なので
+  // 一覧の末尾に出所注記を1回だけ付ける（§2.4）。節・頁は値があるときだけ書く。
+  function mentionMetaText(mention) {
+    var parts = [];
+    var section = textOf(mention.section_label);
+    if (section) parts.push(section);
+    var page = textOf(mention.page);
+    if (page) parts.push(MENTION_PAGE_PREFIX + page);
+    if (!parts.length) return "";
+    return MENTION_META_OPEN + parts.join(MENTION_META_JOIN) + MENTION_META_CLOSE;
+  }
+
+  function placementMentionsHtml(mentions, ctx) {
+    var arr = asArray(mentions);
+    var parts = [];
+    for (var i = 0; i < arr.length; i++) {
+      var mention = arr[i];
+      if (!isPlainObject(mention)) continue;
+      var text = textOf(mention.text);
+      if (!text) continue;
+      var meta = mentionMetaText(mention);
+      parts.push('<li class="element-card-mention">' +
+        ctx.esc(MENTION_QUOTE_OPEN + text + MENTION_QUOTE_CLOSE) +
+        (meta
+          ? '<span class="element-card-mention-meta">' + ctx.esc(meta) + "</span>"
+          : "") +
+        "</li>");
+    }
+    if (!parts.length) return "";
+    return '<ul class="element-card-mentions">' + parts.join("") + "</ul>" +
+      '<span class="element-card-source-note">' + ctx.esc(SOURCE_LANGUAGE_NOTE) + "</span>";
+  }
+
   function intrinsicHtml(focus, ctx) {
     var intrinsic = isPlainObject(focus.intrinsic) ? focus.intrinsic : null;
     var placement = isPlainObject(focus.placement) ? focus.placement : null;
@@ -490,6 +545,8 @@
     if (placement) {
       var section = textOf(placement.section_label);
       if (section) rows.push(defRowHtml(INTRINSIC_LABEL_SECTION, ctx.esc(section), ctx));
+      var mentionsHtml = placementMentionsHtml(placement.mentions, ctx);
+      if (mentionsHtml) rows.push(defRowHtml(INTRINSIC_LABEL_MENTIONS, mentionsHtml, ctx));
       var stage = isPlainObject(placement.stage) ? placement.stage : null;
       if (stage) {
         var stageLabel = vocabCall("theoryStageLabel", stage.key);
@@ -555,16 +612,27 @@
   }
 
   // ITEM 1行の中身。DTO v2 では
-  //   1行目 = 種別チップ / 関係語 / ラベル / qualifier チップ / 裏付けバッジ
+  //   1行目 = 種別チップ / ラベル（全文） / 関係語 / qualifier チップ / 裏付けバッジ
   //   2行目 = sublabel（1行の区別材料・事実文。**readonly でも描く**）
+  // 語順は「ITEM → 関係語」（§11.2 / RC-F5）。関係語（RELATION_LABELS）はすべて後置の
+  // 動詞句（「に証拠を与える」「の導出で得られる」）で、主語は常に focus（§3.2）なので、
+  // 「主張『…』を述べる本文で参照される」「数式 X の導出で得られる」と読める並びにする。
+  // ラベルは他画面と共有の 60 字見出しのまま。ITEM.full_text（theory_claim のみ・
+  // 切り詰めたときだけ載る）があれば、行の主文は全文にする（§11.3。label は変えない）。
   // 記号（symbol）のラベルは読解の部品なのでゲート付きでレンダリングする。
   function itemInnerHtml(item, ctx) {
     var label = textOf(item.label);
+    var fullText = textOf(item.full_text);
+    if (fullText === label) fullText = "";
     // 種別チップとラベルが同じ文字列のときはチップを出さない（「中心命題 中心命題」を防ぐ）。
     var typeLabel = textOf(vocabElementTypeLabel(item.element_type));
     if (typeLabel === label) typeLabel = "";
     var labelHtml = "";
-    if (textOf(item.element_type) === ELEMENT_TYPE_SYMBOL) {
+    var labelCls = "element-card-item-label";
+    if (fullText) {
+      labelHtml = ctx.esc(fullText);
+      labelCls += " element-card-item-fulltext";
+    } else if (textOf(item.element_type) === ELEMENT_TYPE_SYMBOL) {
       labelHtml = renderMathGated(ctx, label, false, true);
     }
     if (!labelHtml) labelHtml = ctx.esc(label);
@@ -573,14 +641,20 @@
     // qualifier が段階キーなので訳すと一致する）。
     if (qualifier === label) qualifier = "";
     var sublabel = textOf(item.sublabel);
+    var relationHtml = textOf(item.relation_label)
+      ? '<span class="element-card-item-relation">' +
+        ctx.esc(textOf(item.relation_label)) + "</span>"
+      : "";
+    // 全文の主張は 1 行に収まらないので、後置の関係語が次の行に取り残されないよう
+    // 『全文』と関係語を同じ span に入れてインラインで流す（関係語は必ず文の直後に付く）。
+    var mainHtml = fullText
+      ? '<span class="' + labelCls + '">' + FULLTEXT_OPEN + labelHtml + FULLTEXT_CLOSE +
+        relationHtml + "</span>"
+      : '<span class="' + labelCls + '">' + labelHtml + "</span>" + relationHtml;
     return (typeLabel
         ? '<span class="element-card-item-kind">' + ctx.esc(typeLabel) + "</span>"
         : "") +
-      (textOf(item.relation_label)
-        ? '<span class="element-card-item-relation">' +
-          ctx.esc(textOf(item.relation_label)) + "</span>"
-        : "") +
-      '<span class="element-card-item-label">' + labelHtml + "</span>" +
+      mainHtml +
       (qualifier
         ? '<span class="element-card-item-qualifier">' + ctx.esc(qualifier) + "</span>"
         : "") +

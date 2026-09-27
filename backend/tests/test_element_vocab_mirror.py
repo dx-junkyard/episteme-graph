@@ -28,6 +28,7 @@ MIRRORED_TABLES = [
     "DEFINITION_STATUS_LABELS",
     "SYMBOL_SCOPE_LABELS",
     "CLAIM_TYPE_LABELS",
+    "CLAIM_TIER_LABELS",
     "EQUATION_ROLE_LABELS",
 ]
 
@@ -40,6 +41,7 @@ MIRRORED_FUNCTIONS = [
     "definitionStatusLabel",
     "symbolScopeLabel",
     "claimTypeLabel",
+    "claimTierLabel",
 ]
 
 _ENTRY_RE = re.compile(r"(?:\"([^\"]+)\"|([A-Za-z_][\w$]*))\s*:\s*\"([^\"]*)\"")
@@ -131,6 +133,12 @@ class TestVocabularyCoverage:
         ):
             assert element_vocab.claim_type_label(db_type), db_type
 
+    def test_claim_tier_keys_match_the_core_schema(self):
+        """§11.3: CLAIM_TIER_LABELS のキーは core.schema.CLAIM_TIERS と完全一致。"""
+        from core.schema import CLAIM_TIERS  # noqa: PLC0415
+
+        assert set(element_vocab.CLAIM_TIER_LABELS) == set(CLAIM_TIERS)
+
     def test_symbol_and_link_and_chain_vocabularies(self):
         from episteme_graph.agents.equation_semantics.schema import (  # noqa: PLC0415
             LINK_STATUSES,
@@ -164,6 +172,7 @@ class TestFailClosed:
             element_vocab.definition_status_label,
             element_vocab.symbol_scope_label,
             element_vocab.claim_type_label,
+            element_vocab.claim_tier_label,
             element_vocab.equation_role_label,
         ):
             assert func("no_such_key_zzz") == ""

@@ -908,18 +908,28 @@ class TestRL8RelationLabelsAreReachable:
         ):
             assert relation in context_lens.RELATION_LABELS, relation
 
+    def test_figure_mention_relation_is_registered(self):
+        """§11.2: 段落メンション由来の主張は「証拠を与える」ではなく「参照される」。"""
+        assert context_lens.RELATION_LABELS["cited_for_claim"] == "を述べる本文で参照される"
+        assert context_lens.GROUP_MENTION_CLAIM in context_lens.ITEM_GROUPS
+
     def test_uses_symbol_label_no_longer_says_the_symbol_of(self):
         # ITEM が記号そのものなので「の記号を用いる」→「を用いる」（§4.1）。
         assert context_lens.RELATION_LABELS["uses_symbol"] == "を用いる"
 
 
 class TestRL9ItemContractV2:
-    """§4.1 ITEM v2: 既存9キー不変 + 追加5キーが常に載ること。"""
+    """§4.1 ITEM v2: 既存9キー不変 + 追加5キー + §11.3 の full_text が常に載ること。
+
+    ``full_text`` は §11（図の文脈の可読性）で additive に足したキー。label が
+    切り詰めの主張だけが非空で、それ以外は空文字（キーは契約の安定のため常在）。
+    """
 
     _REQUIRED_KEYS = {
         "element_type", "element_id", "document_id", "label", "relation", "relation_label",
         "relation_status", "evidence_refs", "navigable",
         "sublabel", "qualifier", "group", "unresolved", "label_source",
+        "full_text",
     }
 
     def test_every_item_has_the_full_v2_contract(self, lens):
@@ -942,6 +952,8 @@ class TestRL9ItemContractV2:
                 assert isinstance(item["group"], str)
                 assert isinstance(item["unresolved"], bool)
                 assert isinstance(item["label_source"], str)
+                assert isinstance(item["full_text"], str)
+                assert item["full_text"] != item["label"] or item["full_text"] == ""
 
 
 class TestRL10DistinguishableLabels:

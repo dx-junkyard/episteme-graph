@@ -514,12 +514,29 @@ def grounding_to_text(grounding: dict[str, Any]) -> str:
                 generic_line += f"（標準化状態: {generic.get('standardization_status')}）"
             lines.append(generic_line)
 
+        # element_context_presentation_redesign.md §11: 図を参照する本文の文
+        # （メンション文・論文の逐語）。図が何を示すかを論文自身が述べる文なので、
+        # 上位構造より先に置く。
+        placement = focus.get("placement") if isinstance(focus.get("placement"), dict) else {}
+        mentions = [m for m in (placement.get("mentions") or []) if isinstance(m, dict)]
+        mention_lines = []
+        for mention in mentions:
+            mention_text = str(mention.get("text") or "").strip()
+            if not mention_text:
+                continue
+            section = str(mention.get("section_label") or "").strip()
+            mention_lines.append(f"- {section}: {mention_text}" if section else f"- {mention_text}")
+        if mention_lines:
+            lines.append("[文脈: 本文での言及]")
+            lines.extend(mention_lines)
+
+        # 主張は切り詰めの見出しではなく全文（full_text）を渡す（§11.3）。
         upper_items = [i for i in (context.get("upper") or []) if isinstance(i, dict)]
         if upper_items:
             lines.append("[文脈: 上位構造]")
             for item in upper_items:
                 lines.append(
-                    f"- {item.get('relation_label', '')}: {item.get('label', '')}"
+                    f"- {item.get('relation_label', '')}: {item.get('full_text') or item.get('label', '')}"
                     f"（{_context_status_label(item.get('relation_status'))}）"
                 )
 
@@ -528,7 +545,7 @@ def grounding_to_text(grounding: dict[str, Any]) -> str:
             lines.append("[文脈: 下位構造]")
             for item in lower_items:
                 lines.append(
-                    f"- {item.get('relation_label', '')}: {item.get('label', '')}"
+                    f"- {item.get('relation_label', '')}: {item.get('full_text') or item.get('label', '')}"
                     f"（{_context_status_label(item.get('relation_status'))}）"
                 )
 
