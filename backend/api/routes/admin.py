@@ -1443,6 +1443,23 @@ def list_materials(
     return materials
 
 
+
+def _material_has_source_object(material_id: str) -> bool:
+    """原本（PDF / TeX 束）が MinIO にあるか。一覧側の existing_pdf_ids と同じ判定を 1 件に絞って行う。
+
+    MinIO 不達は False（一覧と同じ縮退）。
+    """
+    if not material_id:
+        return False
+    try:
+        for obj_name in get_storage_client().list_objects("raw-papers", f"uploads/{material_id}"):
+            if obj_name in (f"uploads/{material_id}.pdf", f"uploads/{material_id}.tar.gz", f"uploads/{material_id}.tgz"):
+                return True
+    except Exception:  # noqa: BLE001 — 一覧側と同じく MinIO 不達は has_pdf=False
+        return False
+    return False
+
+
 @router.get("/materials/{material_id}", response_model=MaterialOut)
 def get_material(
     material_id: str,
@@ -1497,7 +1514,8 @@ def get_material(
             sa_text(f"""
                 SELECT d.source_path, d.filename, d.title, d.status, d.created_at, d.knowledge_graph,
                        COALESCE(d.visibility, 'private'), d.group_id,
-                       COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count
+                       COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count,
+                       d.id::text AS document_id
                 FROM documents d
                 LEFT JOIN (
                     SELECT material_id, COUNT(*) AS chunk_count
@@ -1540,6 +1558,9 @@ def get_material(
     uploaded_at = record[4].isoformat() if record[4] else ""
     return MaterialOut(
         material_id=record[0] or "",
+        # 一覧（list_materials）と同じく document_id / has_pdf を返す（IK-0361 / IK-0367: 詳細だけ欠けていた）
+        document_id=(str(record[9]) if len(record) > 9 and record[9] else None),
+        has_pdf=_material_has_source_object(record[0] or ""),
         filename=record[1] or "",
         title=record[2] or "",
         status=status,

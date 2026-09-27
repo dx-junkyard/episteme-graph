@@ -4226,9 +4226,16 @@ def _learning_chat_core(
         allowed_document_ids = list_course_source_document_ids(course_data)
     else:
         allowed_document_ids = list_visible_document_ids(current_user["id"])
-    chunk_results = search_chunks_with_metadata(
-        body.message, top_k=8, allowed_document_ids=allowed_document_ids,
+    # IK-0364: 質問文の埋め込み（RAG 検索）も当該ターンの feature に帰属させる。分岐の正本は後段の
+    # `_chat_feature` の決定（cycle > discuss > casual > chat）で、ここはそれを同じ順序で先取りする
+    # （test_llm_usage_attribution が両者の一致を固定する）。generator の yield はこの with の外にある。
+    _retrieval_feature = _cycle_chat_feature or (
+        "learning:chat_discuss" if _is_discuss else ("learning:chat_casual" if _is_casual else "learning:chat")
     )
+    with usage_context(_retrieval_feature, user_id=current_user["id"], course_id=course_id):
+        chunk_results = search_chunks_with_metadata(
+            body.message, top_k=8, allowed_document_ids=allowed_document_ids,
+        )
     cited_chunks = []
     cited_sources: list[dict] = []  # L1: 文脈に採用した根拠の tier 一覧
     has_topic_material = False
