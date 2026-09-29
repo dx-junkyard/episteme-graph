@@ -34,7 +34,7 @@ steps:
       - do: learning.records.mine
         note: 前回の問いや書き置きが記録に残っているかを確かめる
     optional: true
-stop_when: [gave_up, blocked, budget_exhausted]
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
 expects:
   - manual: student/02-student.md#return-door
   - manual: student/02-student.md#return-door-inlay

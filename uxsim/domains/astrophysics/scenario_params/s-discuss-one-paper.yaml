@@ -2,7 +2,7 @@ scenario: s-discuss-one-paper
 domain: astrophysics
 params:
   goal_text: 担当論文の主結果とその前提を、自分の立場から説明できるようになること
-  paper_hint: 分光サーベイによるバリオン音響振動と赤方偏移空間ゆがみの測定
+  paper_hint: コースに入っている論文のうち、自分の関心に一番近いもの
   opening_motive_text: ゼミで担当するので、この論文の主結果が何に支えられているのかを自分で説明できるようにしたい
   discussion_opening_stance: 私はこの論文の一番の主張は「暗黒エネルギーは宇宙定数で矛盾しない」ことだと読みました。合っていますか？
   seed_questions:

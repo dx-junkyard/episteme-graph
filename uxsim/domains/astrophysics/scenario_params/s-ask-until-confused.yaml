@@ -2,7 +2,8 @@ scenario: s-ask-until-confused
 domain: astrophysics
 params:
   goal_text: ゼミで担当する論文の主結果を説明できるようになること
-  topic_hint: 大規模構造とバリオン音響振動
+  topic_hint: 暗黒エネルギーと修正重力の音速を扱う章のトピック（その論文の主結果を支える式や図）
+  topic_hint_terms: [暗黒エネルギー, 修正重力, 音速]
   seed_questions:
     - バリオン音響振動って、そもそも何が振動しているんですか？
     - 音響振動のスケールが「標準ものさし」になるのはなぜですか？

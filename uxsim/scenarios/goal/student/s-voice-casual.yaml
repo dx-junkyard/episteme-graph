@@ -26,7 +26,7 @@ steps:
       - do: learning.help.inspect
         with: {anchor_id: chat.stance-chip}
     optional: true
-stop_when: [gave_up, blocked, budget_exhausted]
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
 expects:
   - manual: student/02-student.md#voice-mode
   - manual: student/02-student.md#stance-chip

@@ -61,6 +61,8 @@ def test_principle_denylist_internal_id_numbers_control():
         _step(4, "learning.chat.ask", body={"answer": "色付き\x1b[0m文字"}),
         _step(5, "learning.chat.ask", body={"answer": "式 (12) と 2026年 と arXiv 2407.01221 の話"}),
         _step(6, "admin.materials.list", screen="admin", body={"answer": "ADMIN_PASSWORD"}),
+        # 論文の内容の百分率（68% CL・1% 精度）は製品の指標ではない（第 11 周の誤検出）
+        _step(7, "learning.chat.ask", body={"answer": "68% 信頼区間で w0 が制約され、距離は 1% 精度です"}),
     ]
     found = principle.check(steps, _factory())
     by_seq = {f.evidence.transcript_steps[0]: f.hypothesis for f in found}
@@ -69,6 +71,7 @@ def test_principle_denylist_internal_id_numbers_control():
     assert "数値" in by_seq[3]
     assert "制御文字" in by_seq[4]
     assert 5 not in by_seq and 6 not in by_seq  # 除外パターン・管理画面は対象外
+    assert 7 not in by_seq  # 裸の百分率は当てない
     assert all(f.oracle == "B" and f.severity_label == "principle" for f in found)
 
 

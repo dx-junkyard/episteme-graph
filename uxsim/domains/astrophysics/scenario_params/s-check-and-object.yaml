@@ -1,25 +1,30 @@
 scenario: s-check-and-object
 domain: astrophysics
 params:
-  goal_text: 宇宙膨張の節を読み終えたので、理解を確かめること
-  topic_hint: 宇宙膨張と赤方偏移
+  goal_text: 暗黒エネルギーと修正重力の音速の章を読み終えたので、理解を確かめること
+  topic_hint: 音速で模型を見分ける（µ(a) と音速への制約）
+  topic_hint_terms:
+  - 音速
+  - µ(a)
+  - 暗黒エネルギー
+  - 修正重力
   seed_questions:
-    - 遠い銀河ほど速く遠ざかっているというのは、ハッブルの法則のことですか？
-    - 赤方偏移 z が 1 のとき、光が出たときの宇宙の大きさは今の何倍ですか？
-    - 宇宙膨張で銀河そのものの大きさも伸びているんですか？
-    - 光が届くまでの間に宇宙が膨張すると、波長が伸びるのはなぜですか？
-    - 近くの銀河でも、青方偏移しているものがあるのはなぜですか？
-    - 赤方偏移から距離を出すときに、宇宙論模型を仮定する必要があるのはなぜですか？
-  wrong_answer_to_give: 赤方偏移は銀河が空間の中を遠ざかる速さによるドップラー効果で、速さが分かれば z が決まる
-  objection_text: 確認問題で私の答えが違うとされましたが、赤方偏移がドップラー効果だというのは教科書にも書いてあります。どこが違うんですか？
+  - 暗黒エネルギーの「音速」というのは、何が何の中を伝わる速さのことですか？
+  - 音速が 1（光速）より小さいと、密度ゆらぎの成長にどう効いてくるんですか？
+  - µ(a) というパラメータは、一般相対論からのずれのどこを測っているんですか？
+  - 観測量への影響が GR と修正重力で違うと言えるのは、どのスケールの話ですか？
+  - 論文の主結果は、音速をどの範囲に制限したことになりますか？
+  - この結果は、模型を簡略化した前提にどれくらい依存していますか？
+  wrong_answer_to_give: 音速は模型を区別しない。µ(a) への制約は音速に依存せず、GR と修正重力の違いは成長率だけで決まる
+  objection_text: 確認問題で私の答えが違うとされましたが、成長率が同じなら観測量は同じになるはずです。音速がどこに効くのか、どこが違うんですか？
 per_archetype:
   non_native:
-    goal_text: checking my understanding after reading the section on cosmic expansion
+    goal_text: checking my understanding after reading the chapter on the sound speed of dynamical dark energy and modified gravity
     seed_questions:
-      - Is the statement that farther galaxies recede faster the same as Hubble's law?
-      - When z equals 1, how large was the universe compared with now when the light was emitted?
-      - Do galaxies themselves expand with the universe?
-    wrong_answer_to_give: Redshift is the Doppler effect caused by galaxies moving away through space, so the velocity determines z
-    objection_text: The check says my answer is wrong, but textbooks describe redshift as a Doppler effect. What exactly is wrong?
+    - What exactly is the "sound speed" of dark energy the speed of?
+    - If the sound speed is below the speed of light, how does that change the growth of density perturbations?
+    - Which part of the deviation from general relativity does the parameter µ(a) measure?
+    wrong_answer_to_give: 'The sound speed cannot distinguish the models: the constraint on µ(a) does not depend on it, and the GR versus modified gravity difference is set by the growth rate alone'
+    objection_text: The check says my answer is wrong, but if the growth rate is the same the observables should be the same. Where does the sound speed enter?
   confident_theorist:
-    objection_text: 判定がおかしいと思います。低赤方偏移ではドップラーの式で近似できるはずで、それを誤りとするのは言い過ぎではないですか？
+    objection_text: 判定がおかしいと思います。準静的近似の範囲では音速の効果は落ちるはずで、それを誤りとするのは言い過ぎではないですか？

@@ -43,7 +43,7 @@ steps:
   - do: learning.cycle.intention
     with: {role: leave_note, text: "{{leave_note_text}}"}
   - do: learning.cycle.todays_words
-stop_when: [gave_up, blocked, budget_exhausted]
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
 expects:
   - manual: student/02-student.md#discuss-opening
   - manual: student/02-student.md#discuss-scope-toggle

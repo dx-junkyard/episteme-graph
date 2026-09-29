@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import httpx
 
+from uxsim.runner.digest import response_digest
 from uxsim.schema import HttpTrace
 
 EXCERPT_CHARS = 2000
@@ -19,7 +20,7 @@ EXCERPT_CHARS = 2000
 class EpistemeClient:
     """ログイン済みの bearer を持つ薄い HTTP クライアント。"""
 
-    def __init__(self, base_url: str, timeout_s: float = 130.0, transport: Optional[httpx.BaseTransport] = None) -> None:
+    def __init__(self, base_url: str, timeout_s: float = 930.0, transport: Optional[httpx.BaseTransport] = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.token: str = ""
         self.count_429 = 0
@@ -72,7 +73,7 @@ class EpistemeClient:
             self.count_429 += 1
         body = _decode(resp)
         self.traces.append(HttpTrace(method=method, path=path, status=resp.status_code, elapsed_ms=elapsed,
-                                     response_excerpt=_excerpt(body)))
+                                     response_excerpt=_excerpt(body), digest=_digest(body)))
         return resp.status_code, body, elapsed
 
     def wait_task(self, task_id: str, timeout_s: float = 1800.0, poll_s: float = 10.0,
@@ -105,6 +106,13 @@ def _decode(resp: httpx.Response) -> Any:
     if ctype.startswith(("audio/", "image/", "application/octet-stream")):
         return {"_binary": ctype, "_bytes": len(resp.content)}
     return resp.text
+
+
+def _digest(body: Any) -> dict:
+    try:
+        return response_digest(body)
+    except Exception:  # noqa: BLE001 — 要約の失敗で記録を落とさない
+        return {}
 
 
 def _excerpt(body: Any) -> str:

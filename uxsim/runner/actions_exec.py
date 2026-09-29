@@ -146,21 +146,78 @@ def _course_enroll(ctx: _Ctx) -> None:
         ctx.session.remember("courses", cid)
 
 
-def _load_course(ctx: _Ctx, course_id: str) -> tuple[Optional[int], Any]:
+def runner_note(session: PersonaSession, note: str) -> None:
+    """runner が自分で補ったこと（ペルソナの判断ではない）を次に書くステップへ残す。"""
+    session.scratch.setdefault("runner_notes", []).append(note)
+
+
+def default_topic_id(topics: dict[str, dict]) -> str:
+    """最初の ``in_progress`` のトピック（無ければ先頭）。学習画面がコースを開いたときに選ぶトピック。"""
+    for tid, t in topics.items():
+        if isinstance(t, dict) and t.get("status") == "in_progress":
+            return tid
+    return next(iter(topics), "")
+
+
+def _load_course(ctx: _Ctx, course_id: str, *, default_topic: bool = True) -> tuple[Optional[int], Any]:
     status, body = ctx.call("GET", "/api/learning/courses/{course_id}", overrides={"course_id": course_id})
     if status == 200 and isinstance(body, dict):
         master = body.get("master_course") if isinstance(body.get("master_course"), dict) else body
-        ctx.session.course_id = course_id
-        ctx.session.topics = {str(t.get("id")): t for t in master.get("topics") or [] if isinstance(t, dict)}
-        ctx.session.topic_ids = list(ctx.session.topics)
-        for s in master.get("sources") or []:
-            if isinstance(s, dict) and s.get("material_id"):
-                ctx.session.remember("materials", s["material_id"])
+        s = ctx.session
+        switched = s.course_id != course_id
+        s.course_id = course_id
+        s.topics = {str(t.get("id")): t for t in master.get("topics") or [] if isinstance(t, dict)}
+        s.topic_ids = list(s.topics)
+        s.scratch["chapter_titles"] = [str(c.get("title") or "") if isinstance(c, dict) else str(c)
+                                       for c in master.get("chapters") or []]
+        for src in master.get("sources") or []:
+            if isinstance(src, dict) and src.get("material_id"):
+                s.remember("materials", src["material_id"])
+        # topic_id が無い（または別のコースのもの）なら、画面と同じく最初の in_progress を既定にする
+        # （第 7 周: トピックを開く前のチャットが precondition:topic_id で止まった）
+        if default_topic and s.topics and (switched or not s.topic_id or s.topic_id not in s.topics):
+            tid = default_topic_id(s.topics)
+            if tid and tid != s.topic_id:
+                s.topic_id = tid
+                runner_note(s, f"runner_default: topic_id={tid}（コースを開いたときの最初の in_progress トピック）")
     return status, body
 
 
+def prefetch_courses(session: PersonaSession, client: EpistemeClient) -> tuple[list[HttpTrace], list[str]]:
+    """学生のセッション開始時に ``GET /api/learning/courses`` を 1 回呼び、コース ID を覚える（runner の手）。
+
+    既定のコースは ①受講中・所有（一覧の ``is_enrollable`` が偽 — 製品は own / enrolled を
+    ``is_enrollable=False`` で返す）の先頭 ②無ければ受講可能（``is_enrollable`` 真）の先頭。①は
+    ``session.course_id`` に置き、②は候補として ``scratch["default_course_id"]`` に置くだけで受講登録はしない。
+    前のセッションから引き継いだ course_id があれば変えない。
+    """
+    traces = execute("learning.course.list", {}, session, client)
+    notes = ["runner_driven: セッション開始時にコース一覧を取得した（ペルソナの判断ではない）"]
+    rows = [c for c in _items(session.last_body, "courses") if isinstance(c, dict) and c.get("id")]
+    own = [str(c["id"]) for c in rows if not c.get("is_enrollable")]
+    avail = [str(c["id"]) for c in rows if c.get("is_enrollable")]
+    pinned = str(session.scratch.get("pinned_course_id") or "")
+    if pinned and pinned in own:
+        session.course_id = pinned
+        notes.append(f"runner_default: campaign の course_id={pinned}（受講中）を使う")
+    elif pinned and pinned in avail:
+        session.scratch["default_course_id"] = pinned
+        notes.append(f"runner_default: campaign の course_id={pinned} を受講可能な候補にした（受講登録はしていない）")
+    elif session.course_id:
+        notes.append(f"runner_default: 前のセッションの course_id={session.course_id} を引き継いだ")
+    elif own:
+        session.course_id = own[0]
+        notes.append(f"runner_default: course_id={own[0]}（受講中・所有のコースの先頭）")
+    elif avail:
+        session.scratch["default_course_id"] = avail[0]
+        notes.append(f"runner_default: 受講可能なコース {avail[0]} を既定の候補にした（受講登録はしていない）")
+    return traces, notes
+
+
 def _course_open(ctx: _Ctx) -> None:
-    cid = ctx.args.get("course_id") or ctx.session.course_id or ctx.session.latest("courses")
+    s = ctx.session
+    cid = (ctx.args.get("course_id") or s.course_id or s.latest("courses") or s.scratch.get("default_course_id")
+           or s.latest("enrollable"))
     if not cid:
         ctx.call("GET", "/api/learning/courses/{course_id}")  # precondition を記録させる
         return
@@ -175,11 +232,35 @@ def _next_topic(session: PersonaSession) -> str:
     return session.topic_ids[0] if session.topic_ids else ""
 
 
+def _topic_by_hint(session: PersonaSession, terms: Any) -> str:
+    """経路の材料 ``topic_hint_terms``（語の列）に題名か章題が当たる最初のトピック。無ければ空。
+
+    分野の材料（質問の種）がコースの特定の章を前提にしているとき、既定の「最初の in_progress」では
+    材料とトピックが噛み合わない（第 8 周: 宇宙論の質問を Cep B のトピックで投げていた）。
+    """
+    if not terms or not session.topics:
+        return ""
+    words = [str(t).strip() for t in (terms if isinstance(terms, list) else str(terms).split("、")) if str(t).strip()]
+    if not words:
+        return ""
+    chapters = session.scratch.get("chapter_titles") or []
+    for tid, t in session.topics.items():
+        if not isinstance(t, dict):
+            continue
+        title = str(t.get("title") or "")
+        ci = t.get("chapter_index")
+        chapter = str(chapters[ci]) if isinstance(ci, int) and 0 <= ci < len(chapters) else ""
+        if any(w in title or w in chapter for w in words):
+            runner_note(session, f"runner_default: topic_id={tid}（材料 topic_hint_terms に合う最初のトピック）")
+            return tid
+    return ""
+
+
 def _topic_open(ctx: _Ctx) -> None:
     s = ctx.session
     if s.course_id and not s.topic_ids:
-        _load_course(ctx, s.course_id)
-    tid = ctx.args.get("topic_id") or _next_topic(s)
+        _load_course(ctx, s.course_id, default_topic=False)  # このあと開くトピックが決まるので既定は置かない
+    tid = ctx.args.get("topic_id") or _topic_by_hint(s, ctx.args.get("topic_hint_terms")) or _next_topic(s)
     status, body = ctx.main(overrides={"topic_id": tid} if tid else None)
     if status == 200 and tid:
         s.topic_id = tid
@@ -226,9 +307,12 @@ def _chat(ctx: _Ctx, *, topic_id: Optional[str] = None, template: Optional[str] 
         history.append({"role": "assistant", "content": str(resp.get("answer", ""))})
         s.remember("user_messages", msg_id)
         s.last_answer = str(resp.get("answer", ""))
+        s.scratch["last_sources"] = {}
         for src in resp.get("sources") or []:
             if isinstance(src, dict):
                 s.remember("chunks", src.get("chunk_id"))
+                if src.get("chunk_id"):
+                    s.scratch["last_sources"][str(src.get("index") or len(s.scratch["last_sources"]) + 1)] = str(src["chunk_id"])
         confirm = resp.get("anchor_confirm")
         if isinstance(confirm, dict):
             s.remember("anchor_traces", confirm.get("trace_id"))
@@ -278,10 +362,47 @@ def _check_take(ctx: _Ctx) -> None:
         return ctx.missing("topic_id")
     topic = s.topics.get(s.topic_id) or {}
     qs = [q for q in topic.get("check_questions") or [] if q]
-    q0 = qs[0] if qs else None
-    question = ctx.args.get("question") or (q0.get("question", "") if isinstance(q0, dict) else (q0 or ""))
+    wanted = str(ctx.args.get("question") or "").strip()
+    chosen = None
+    if wanted:
+        # ペルソナが指定した問いに対応する check_question を選ぶ（第 9 周: 2 問目を指定したのに 1 問目の要件で並置された）
+        for q in qs:
+            qt = q.get("question", "") if isinstance(q, dict) else str(q)
+            if qt and (qt.strip() == wanted or wanted in qt or qt in wanted):
+                chosen = q
+                break
+    if chosen is None:
+        chosen = qs[0] if qs else None
+    question = wanted or (chosen.get("question", "") if isinstance(chosen, dict) else (chosen or ""))
     ctx.main(json={"answer": str(ctx.args.get("answer", "")), "question": str(question),
-                   "check_question": q0 if isinstance(q0, dict) else None})
+                   "check_question": chosen if isinstance(chosen, dict) else None})
+
+
+_SELF_CHECK_LABELS = {"合っていた": "agreed", "違っていた": "disagreed", "観点がおかしい": "verdict_wrong",
+                      "agreed": "agreed", "disagreed": "disagreed", "verdict_wrong": "verdict_wrong"}
+
+
+def _check_self_check(ctx: _Ctx) -> None:
+    """自己確認。画面のボタン名（合っていた / 違っていた / 観点がおかしい）でも受け、API の語彙へ写す
+    （第 9 周: ペルソナが画面の語で送り 422 になった）。"""
+    body = ctx.body_args()
+    raw = str(body.get("self_check") or "").strip()
+    body["self_check"] = _SELF_CHECK_LABELS.get(raw, _SELF_CHECK_LABELS.get(raw.strip("「」"), raw))
+    ctx.main(json=body)
+
+
+def _source_chunk_open(ctx: _Ctx) -> None:
+    """出典の本文を開く。画面の番号（「出典3」「3」）で指定されたら直前の回答の sources[].index から chunk を引く
+    （第 10 周: 番号指定が最新のチャンクに化けて別の出典が開いていた）。"""
+    s = ctx.session
+    raw = str(ctx.args.get("chunk_id") or "").strip()
+    m = re.fullmatch(r"(?:出典\s*)?(\d+)", raw)
+    cid = raw
+    if m:
+        cid = (s.scratch.get("last_sources") or {}).get(m.group(1), "")
+        if not cid:
+            return ctx.missing("chunk_id")
+    ctx.main(overrides={"chunk_id": cid} if cid else None)
 
 
 def _discuss_opening(ctx: _Ctx) -> None:
@@ -297,9 +418,24 @@ def _cycle_intention(ctx: _Ctx) -> None:
         ctx.session.remember("intention_traces", _first(body, "trace_id", "id"))
 
 
+_QUICK_LABELS = {"気になる": "curious", "まだ分からない": "not_yet", "あとで戻る": "return_later",
+                 "何かとつながりそう": "connects"}
+
+
 def _cycle_anchor(ctx: _Ctx) -> None:
     body = ctx.body_args()
     body.setdefault("topic_id", ctx.session.topic_id)
+    raw = str(body.get("quick_label") or "").strip().strip("「」")
+    # 画面のボタン名で送られたら API の語彙へ写す（第 9 周: 語彙が画面に無く 422 になった）。
+    # 言い換え（「あとで確かめる」等）は先頭の語で最も近いボタンに寄せる
+    mapped = _QUICK_LABELS.get(raw)
+    if mapped is None:
+        for key, val in (("あとで", "return_later"), ("戻", "return_later"), ("気にな", "curious"),
+                         ("分から", "not_yet"), ("わから", "not_yet"), ("つなが", "connects"), ("関係", "connects")):
+            if key in raw:
+                mapped = val
+                break
+    body["quick_label"] = mapped or raw
     ctx.main(json=body)
 
 
@@ -503,7 +639,9 @@ def _cb_chat(ctx: _Ctx) -> None:
     message = str(ctx.args.get("message") or "")
     # ペルソナが引数で指定 > 詳細を開いて選んだ教材 > 一覧の全件（画面の「選択」に相当。第 1 周は常に全件で
     # 「選択が勝手に広がる」観測になった）
-    selected = ctx.args.get("selected_material_ids") or getattr(s, "cb_selected", None) or s.all("materials_selected") or s.all("materials")
+    # 画面の既定は「一覧の全件を選択」に相当させる。詳細を開いた 1 本だけに絞る推定はしない
+    # （第 5 周: 詳細を 1 本開いた教員の course builder が 1 教材だけの文脈になり「4 本と書いたのに 1 本」と混乱した）。
+    selected = ctx.args.get("selected_material_ids") or getattr(s, "cb_selected", None) or s.all("materials")
     # 画面の「選択中の教材」に相当。一度決めた選択は次の turn と登録まで同じ集合を使う
     # （第 4 周: turn ごとに集合が変わり、handle が別の候補表で解決されて誤った単位が付いた）。
     setattr(s, "cb_selected", list(selected))
@@ -520,16 +658,38 @@ _COURSE_CREATE_KEYS = ("title", "chapters", "topics", "concepts", "sources", "de
 
 
 
-def _unit_handles(topic: Any) -> list[str]:
-    """admin.js の cbDraftUnitHandles と同じ（"U3" 等の handle を重複なく取り出す）。"""
+def _unit_handles(topic: Any, draft: Any = None) -> list:
+    """admin.js の cbDraftUnitHandles と同じ（IK-0371 以降）。
+
+    要素は "U3" 等の文字列 handle か ``{"handle", "stable_key"}``。参照キーは ①要素自身の
+    stable_key ②草案に同梱された ``draft["unit_candidate_keys"]``（handle → 参照キー）から取り、
+    どちらも無い handle は文字列のまま渡す。重複は参照キー（無ければ handle）で落とす。
+    """
     if not isinstance(topic, dict) or not isinstance(topic.get("units"), list):
         return []
-    out: list[str] = []
+    table = draft.get("unit_candidate_keys") if isinstance(draft, dict) else None
+    table = table if isinstance(table, dict) else {}
+    out: list = []
+    seen: list[str] = []
     for item in topic["units"]:
-        handle = item if isinstance(item, str) else (item.get("handle") or item.get("unit") or "") if isinstance(item, dict) else ""
-        handle = str(handle or "").strip()
-        if handle and handle not in out:
-            out.append(handle)
+        handle, key = "", ""
+        if isinstance(item, str):
+            handle = item
+        elif isinstance(item, dict):
+            handle = item.get("handle") or item.get("unit") or ""
+            key = item.get("stable_key") if isinstance(item.get("stable_key"), str) else ""
+        handle, key = str(handle or "").strip(), str(key or "").strip()
+        if not key and handle:
+            mapped = table.get(handle.upper())
+            if isinstance(mapped, str) and mapped:
+                key = mapped
+        if not handle and not key:
+            continue
+        ident = f"k:{key}" if key else f"h:{handle.upper()}"
+        if ident in seen:
+            continue
+        seen.append(ident)
+        out.append({"handle": handle, "stable_key": key} if key else handle)
     return out
 
 
@@ -558,14 +718,14 @@ def _draft_to_course_create(draft: dict, s: Any) -> dict:
                         prereqs.append({"name": name, "status": "not_started"})
             payload["topics"].append({"id": f"t{idx}", "title": title, "chapter_index": ci,
                                       "status": "in_progress" if idx == 0 else "locked",
-                                      "prerequisites": prereqs, "misconceptions": [], "units": _unit_handles(t)})
+                                      "prerequisites": prereqs, "misconceptions": [], "units": _unit_handles(t, draft)})
             idx += 1
     for c in draft.get("concepts") or []:
         name = c if isinstance(c, str) else (c.get("name") if isinstance(c, dict) else "")
         if name:
             payload["concepts"].append({"name": name, "status": "future",
                                         "children": (c.get("children") if isinstance(c, dict) else None) or [], "expanded": False})
-    selected = list(getattr(s, "cb_selected", None) or []) or list(s.all("materials_selected") or []) or list(s.all("materials") or [])
+    selected = list(getattr(s, "cb_selected", None) or []) or list(s.all("materials") or [])
     titles = getattr(s, "material_titles", {}) or {}
     if selected:
         payload["sources"] = [{"title": titles.get(m, ""), "subtitle": "", "license": "", "used_section": "", "material_id": m} for m in selected]
@@ -687,6 +847,8 @@ _HANDLERS: dict[str, Callable[[_Ctx], None]] = {
     "learning.discuss.ask": _discuss_ask,
     "learning.corpus.discuss_ask": _corpus_discuss,
     "learning.check.take": _check_take,
+    "learning.source_chunk.open": _source_chunk_open,
+    "learning.check.self_check": _check_self_check,
     "learning.discuss.opening": _discuss_opening,
     "learning.cycle.intention": _cycle_intention,
     "learning.cycle.anchor": _cycle_anchor,

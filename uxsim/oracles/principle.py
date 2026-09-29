@@ -9,9 +9,10 @@
 5. 制御文字・ANSI 残骸 — ``core/text_hygiene.py::strip_control_sequences`` を掛けて差分があれば
 
 限界（意図して単純にしている）:
-- 数値の検査は「数字 + % / 件 / 回 / 点 / スコア」と「スコア / 正答率 / 一致度 + 数字」だけを見る。
-  式番号（式 (12)）・年（2026年）・arXiv ID・「第 N 回」は除外する。本文中の物理量（z = 0.5 等）は
-  数値の欠陥として扱わない（単位語が付かないので当たらない）。
+- 数値の検査は「数字 + 件 / 回 / 点 / スコア」と「スコア / 正答率 / 一致度 / 理解度 / 進捗 + 数字（% を含む）」
+  だけを見る。式番号（式 (12)）・年（2026年）・arXiv ID・「第 N 回」は除外する。本文中の物理量（z = 0.5 等）は
+  数値の欠陥として扱わない（単位語が付かないので当たらない）。**裸の百分率（68% CL・1% 精度）は論文の内容**
+  なので当てない（第 11 周で A/B の誤検出 6 件の原因 — 製品指標の百分率は必ず指標語を伴う）。
 - 表示欄の判定はキー名による近似（``DISPLAY_KEYS``）。UI が実際に描かない欄も入りうる。
 - 応答の抜粋は先頭 2000 字なので、それより後ろの露出は見えない（browser runner が補う）。
 """
@@ -44,8 +45,8 @@ NUMBER_KEYS = frozenset({"answer", "facts", "fact_line", "notice", "statements",
                          "status_label", "summary"})
 LABEL_KEYS = frozenset({"label", "title", "name", "node_label", "region_label", "anchor_label"})
 
-_NUMBER_WITH_UNIT = re.compile(r"(?<![\w.])\d+(?:\.\d+)?\s*(?:%|％|件|回|点|スコア)")
-_SCORE_WORD = re.compile(r"(?:スコア|得点|正答率|一致度|理解度)\s*[:：は]?\s*\d")
+_NUMBER_WITH_UNIT = re.compile(r"(?<![\w.])\d+(?:\.\d+)?\s*(?:件|回|点|スコア)")
+_SCORE_WORD = re.compile(r"(?:スコア|得点|正答率|一致度|理解度|進捗|達成率)\s*[:：は]?\s*\d+(?:\.\d+)?\s*[%％]?")
 _EXCLUDE = re.compile(r"第\s*\d+\s*回|式\s*[（(]\s*\d+|\b(?:19|20)\d{2}\s*年|\b\d{4}\.\d{4,5}(?:v\d+)?")
 _ID_PATTERNS = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b|\beq_op_\w+|\btheory_op_\w+|\bev_\w{3,}"

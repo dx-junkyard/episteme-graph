@@ -37,6 +37,9 @@ class HttpTrace(BaseModel):
     elapsed_ms: Optional[int] = None
     error: str = ""
     response_excerpt: str = ""  # 先頭 2000 字程度。数値の検査に使うため生のまま
+    # 応答全体から決定論で取った要約（抜粋の 2000 字では届かない後ろの欄を審判が読むため）。
+    # 形は ``uxsim/runner/digest.py::response_digest``（numeric_keys / chat）。古い transcript には無い。
+    digest: dict[str, Any] = Field(default_factory=dict)
 
 
 class TranscriptStep(BaseModel):
@@ -55,6 +58,8 @@ class TranscriptStep(BaseModel):
     console_errors: list[str] = Field(default_factory=list)  # browser runner のみ
     screenshot: str = ""
     replay_divergence: bool = False
+    # runner が自分で行ったこと（ペルソナの判断ではない — セッション開始時の一覧取得・既定 ID の補完など）
+    runner_notes: list[str] = Field(default_factory=list)
 
 
 class Evidence(BaseModel):

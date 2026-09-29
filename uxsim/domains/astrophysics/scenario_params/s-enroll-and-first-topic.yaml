@@ -2,12 +2,12 @@
 scenario: s-enroll-and-first-topic
 domain: astrophysics
 params:
-  goal_text: ゼミで読む宇宙論の論文の予習
-  topic_hint: 宇宙膨張と距離の測り方
+  goal_text: ゼミで読む論文（取り込み済みの宇宙物理の論文）の予習
+  topic_hint: コースの最初のトピック（論文の問題設定と主結果）
   first_question: この節で出てくる「光度距離」は、ふつうの意味での距離と何が違うんですか？
 per_archetype:
   non_native:
-    goal_text: preparing for the lab seminar on a cosmology paper
+    goal_text: preparing for the lab seminar on one of the astrophysics papers in the course
     first_question: What is the difference between luminosity distance and the ordinary distance in this section?
   voice_first:
     first_question: えっと、光度距離ってふつうの距離とどう違うの？

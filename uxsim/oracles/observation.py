@@ -61,11 +61,16 @@ def check(meta: Optional[RunMeta], factory: FindingFactory, database_url: str = 
     except Exception as exc:  # noqa: BLE001 — 読めなかった事実を残す
         return [], {"note": f"審判 E は砂場 DB を読めなかったため未実施: {type(exc).__name__}"}
     findings: list[Finding] = []
+    # 同じ原因（error_type）の失敗は 1 件に束ねる（第 1 周: 課金切れ 1 原因で findings 5 件が量産された）。
+    by_error: dict[str, list] = {}
     for r in rows["llm_failed"]:
+        by_error.setdefault(str(r.get("error_type") or "種別なし"), []).append(r)
+    for error_type, group in by_error.items():
+        features = sorted({str(r.get("feature") or "") for r in group})
         findings.append(factory.make(
-            oracle="E", severity="inconsistent", screen="", affordance=str(r.get("feature") or ""),
-            hypothesis=f"製品側の LLM 呼び出しが失敗している（{r.get('feature')} / {r.get('error_type') or '種別なし'}）",
-            server_rows={"llm_usage_events": [r]}, layers=["usage_metering_u"]))
+            oracle="E", severity="inconsistent", screen="", affordance="",
+            hypothesis=f"製品側の LLM 呼び出しが失敗している（原因: {error_type}。影響した機能: {', '.join(features)}）",
+            server_rows={"llm_usage_events": group}, layers=["usage_metering_u"]))
     if rows["llm_unattributed"]:
         findings.append(factory.make(
             oracle="E", severity="inconsistent", screen="", affordance="",

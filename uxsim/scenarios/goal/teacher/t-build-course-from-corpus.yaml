@@ -31,6 +31,8 @@ steps:
       with: {message: "{{builder_messages | next}}"}
       note: 学ぶ単位の候補と章立てを見比べ、希望の章立て（{{persona.teaching.chapters_wanted}}）に近づける
   - do: admin.course_builder.register
+    with: {title: "{{course_title}}"}
+    note: 登録する（題は自分で決めた題にする。第 6 周で教員 2 名が同じ題のコースを作り、学生が見分けられなかった）
   - do: admin.release_review.placements
     note: リリース前の確認で、論文の位置づけを見る（読むか「次へ」を押すかは癖に従う）
   - do: admin.atlas_binding.propose

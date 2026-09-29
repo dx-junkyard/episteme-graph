@@ -97,6 +97,7 @@ _LEARNING: list[Action] = [
     _a("learning.cycle.anchor", "教材の箇所に軽い印を付ける", "learning", "material.quick-anchor",
        ("POST", "/api/learning/courses/{course_id}/cycle/anchor"),
        args={"quick_label": "str", "selection_text": "str?"}, precondition="トピックの教材を読んでいる",
+       note="quick_label は 気になる | まだ分からない | あとで戻る | 何かとつながりそう のどれか",
        manual=_ST + "quick-anchor"),
     _a("learning.tension.digest", "引っかかりの候補を見る", "learning", _ST + "tension-digest",
        ("GET", "/api/learning/courses/{course_id}/tension/digest"), manual=_ST + "tension-digest"),

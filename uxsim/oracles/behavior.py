@@ -2,7 +2,12 @@
 
 前処理（決定論）で候補を拾う:
 - think-aloud の friction が confused / blocked / gave_up / misread
-- 同じ行為の 3 回連続失敗（HTTP 4xx/5xx・接続断・precondition 未達）
+- 同じ行為の 3 回連続失敗（HTTP 4xx/5xx・接続断。precondition だけで終わった手は数えない — runner の
+  状態の穴なので ``dialogue.py`` の e がハーネスの発見として 1 件にまとめる）
+
+指紋は原因で取る（``cause_key`` = 詰まり方 × 行為）。同じ行為で同じ詰まり方をしたペルソナは 1 件に束ね、
+``evidence.server_rows["occurrences"]`` に全員のペルソナ・ステップ・反応を並べる（仮説の言い回しは
+``hypotheses`` に残す）。
 - 行為レジストリに無い操作を選ぼうとした（unsupported）
 - 使い方の検索が空振りした（help no_hit — マニュアルの穴）
 
@@ -41,9 +46,16 @@ class StepGroup:
     steps: list[TranscriptStep] = field(default_factory=list)
 
 
+def _precondition_only(step: TranscriptStep) -> bool:
+    """HTTP を出さず precondition で終わっただけのステップ（runner の状態の穴。審判 dialogue の e が見る）。"""
+    return bool(step.http) and all((t.error or "").startswith("precondition:") for t in step.http)
+
+
 def _failed(step: TranscriptStep) -> bool:
     if step.action_id.startswith("unsupported"):
         return True
+    if _precondition_only(step):
+        return False  # 製品の失敗ではない（連鎖はハーネスの発見として dialogue.check が 1 件にまとめる）
     return any(t.status is None or (t.status or 0) >= 400 for t in step.http)
 
 
@@ -84,6 +96,14 @@ def _deterministic_hypothesis(group: StepGroup) -> str:
     return f"{s.action_id} の後、利用者が{what.get(group.reason, '詰まった')}"
 
 
+def cause_key(group: StepGroup) -> str:
+    """原因の鍵（指紋の材料）。同じ行為 × 同じ詰まり方はペルソナをまたいで 1 件に束ねる。
+
+    仮説の文（LLM 審判の言い回しはペルソナごとに揺れる）ではなく、行為と詰まり方で束ねる。
+    """
+    return f"cause|{group.reason}|{group.steps[0].action_id}"
+
+
 def judge(group: StepGroup, llm: PersonaLLM) -> Optional[dict]:
     """LLM 審判で 3 択の仮説を付ける（失敗したら None）。"""
     lines = []
@@ -117,7 +137,12 @@ def check(steps: list[TranscriptStep], factory: FindingFactory, llm: Optional[Pe
             hypothesis = f"仮説（{verdict['verdict']}）: {verdict.get('hypothesis', '')}".strip()
         out.append(factory.make(oracle="C", severity=severity, step=s, hypothesis=hypothesis,
                                 quote=s.think.gave_up_reason or s.think.reaction,
-                                steps=[x.seq for x in g.steps]))
+                                steps=[x.seq for x in g.steps], fingerprint_key=cause_key(g),
+                                server_rows={"occurrences": [{"persona_id": s.persona_id, "session": s.session,
+                                                              "steps": [x.seq for x in g.steps],
+                                                              "reaction": (s.think.gave_up_reason
+                                                                           or s.think.reaction)[:200]}],
+                                             "hypotheses": [hypothesis]}))
     for aid in unsupported:
         out.append(factory.make(oracle="C", severity="confused", screen="", affordance="",
                                 hypothesis=f"利用者が画面に無い操作（{aid}）をしようとした", layers=[]))

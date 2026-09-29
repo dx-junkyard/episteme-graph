@@ -69,8 +69,13 @@ async def chat_completions(request: Request):
     STATS["chat"] += 1
     note = _schema_note(body.get("response_format"))
     try:
-        data = BOX.ask("product", {"model": body.get("model"), "messages": messages,
-                                   "response_format": body.get("response_format"), "note": note})
+        # mailbox の待ちはブロッキングなのでスレッドへ逃がす（第 5 周: 直列化されて学生 4 名の要求が
+        # 1 本ずつしか流れず、2 体目の頭脳が遊んだ）。
+        import asyncio
+
+        data = await asyncio.to_thread(
+            BOX.ask, "product", {"model": body.get("model"), "messages": messages,
+                                 "response_format": body.get("response_format"), "note": note})
     except (MailboxTimeout, MailboxError) as exc:
         STATS["errors"] += 1
         return JSONResponse(status_code=502, content={"error": {"message": f"uxsim brain: {exc}", "type": "server_error"}})

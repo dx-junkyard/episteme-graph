@@ -28,7 +28,7 @@ steps:
         note: 質問への答えを読み上げで聴く
     optional: true
   - do: learning.progress
-stop_when: [gave_up, blocked, budget_exhausted]
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
 expects:
   - manual: student/02-student.md#interactive-lecture
   - manual: student/02-student.md#lecture-condensed

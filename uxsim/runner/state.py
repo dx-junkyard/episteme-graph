@@ -95,7 +95,7 @@ def _str(v: Any) -> str:
     return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
 
 
-def _generic(body: Any, depth: int = 0, max_lines: int = 40) -> list[str]:
+def _generic(body: Any, depth: int = 0, max_lines: int = 160) -> list[str]:
     """DTO を「項目: 値」の行に平たく並べる（深さ 2 まで・リストは先頭 8 件）。"""
     lines: list[str] = []
     pad = "  " * depth
@@ -112,14 +112,44 @@ def _generic(body: Any, depth: int = 0, max_lines: int = 40) -> list[str]:
         for i, v in enumerate(body[:8]):
             if isinstance(v, (dict, list)) and depth < 2:
                 lines.append(f"{pad}- ({i + 1})")
-                lines.extend(_generic(v, depth + 1, max_lines - len(lines)))
+                # 1 項目あたりの行数に上限を置き、後ろの項目が空行「- (3)」にならないようにする
+                # （第 5 周: 教材一覧の 3・4 本目が空に見え、教員が選べなかった — ハーネス側の欠陥）
+                lines.extend(_generic(v, depth + 1, min(14, max_lines - len(lines))))
             else:
                 lines.append(f"{pad}- {_str(v)[:200]}")
         if len(body) > 8:
             lines.append(f"{pad}- …ほか")
     else:
-        lines.append(pad + _str(body)[:400])
+        lines.append(pad + _str(body)[:1500])
     return lines
+
+
+_FORMULA_PLACEHOLDER_RE = __import__("re").compile(r"\[\[(FORMULA_\d+)\]\]")
+
+
+def resolve_formula_placeholders(text: str, formulas: Any) -> str:
+    """``[[FORMULA_N]]`` を ``chunk.formulas`` の latex で置き換える（画面の renderMaterialChunk と同じ規則:
+    ``formula.id`` か位置 ``FORMULA_<idx>`` で引く）。引けないものは**そのまま残す**。"""
+    if not text or not isinstance(formulas, list) or not formulas:
+        return text
+    by_id: dict[str, str] = {}
+    for idx, f in enumerate(formulas):
+        if not isinstance(f, dict):
+            continue
+        latex = str(f.get("latex") or f.get("tex") or "").strip()
+        if not latex:
+            continue
+        by_id[f"FORMULA_{idx}"] = latex
+        fid = str(f.get("id") or "").strip()
+        if fid:
+            by_id[fid] = latex
+            by_id[fid.replace("[[", "").replace("]]", "")] = latex
+
+    def _sub(m: "re.Match[str]") -> str:  # noqa: F821
+        latex = by_id.get(m.group(1))
+        return f"${latex}$" if latex else m.group(0)
+
+    return _FORMULA_PLACEHOLDER_RE.sub(_sub, text)
 
 
 def _chat(body: dict) -> list[str]:
@@ -133,7 +163,9 @@ def _chat(body: dict) -> list[str]:
         out.append(f"〔出所: {grounding}〕")
     for i, s in enumerate(body.get("sources") or [], 1):
         if isinstance(s, dict):
-            out.append(f"出典{i}: {s.get('source_title') or s.get('title') or ''} {s.get('meta') or ''}".rstrip())
+            # 番号は DTO の index（セッション内で安定・不連続あり = IK-0432）。位置番号で描くと本文の [出典N] とずれる
+            n = s.get("index") or i
+            out.append(f"出典{n}: {s.get('source_title') or s.get('title') or ''} {s.get('meta') or ''}".rstrip())
     if isinstance(body.get("mirror"), dict):
         out.append(f"〔鏡〕{body['mirror'].get('text', '')}")
     confirm = body.get("anchor_confirm")
@@ -172,8 +204,18 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
         lines = _chat(body)
         if action_id == "admin.course_builder.chat" and isinstance(body.get("course_draft"), dict):
             draft = body["course_draft"]
-            titles = [t.get("title", "") for t in draft.get("topics") or [] if isinstance(t, dict)]
-            lines.append(f"コースの下書き: {draft.get('title', '')}（トピック: {'、'.join(titles[:12])}）")
+            # 画面（admin.js）と同じく章の中のトピックも数える。第 5 周で上位の topics だけを見て
+            # 「トピック: 空」と投影し、教員ペルソナが 4 ターン混乱して諦めた（ハーネス側の欠陥）。
+            chapters = [c for c in (draft.get("chapters") or []) if isinstance(c, dict)]
+            top_titles = [t.get("title", "") if isinstance(t, dict) else str(t) for t in (draft.get("topics") or [])]
+            if chapters:
+                parts = []
+                for c in chapters:
+                    tps = [t.get("title", "") if isinstance(t, dict) else str(t) for t in (c.get("topics") or [])]
+                    parts.append(f"{c.get('title', '')}〔{'、'.join(tps[:8]) or 'トピックなし'}〕")
+                lines.append(f"コースの下書き: {draft.get('title', '')}（章: {' / '.join(parts)}）")
+            else:
+                lines.append(f"コースの下書き: {draft.get('title', '')}（トピック: {'、'.join(top_titles[:12]) or 'なし'}）")
         return _clip("\n".join(lines))
     if isinstance(body, dict) and body.get("_binary"):
         return f"音声・画像が返ってきた（{body['_binary']}）。"
@@ -184,11 +226,66 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
                 tag = "（受講可能）" if c.get("is_enrollable") else ""
                 lines.append(f"- {c.get('title', '')}{tag} id={c.get('id', '')}")
         return _clip("\n".join(lines) if len(lines) > 1 else "コースが 1 つも表示されていない。")
+    if action_id == "learning.course.open" and isinstance(body, dict):
+        master = body.get("master_course") if isinstance(body.get("master_course"), dict) else body
+        topics = [t for t in (master.get("topics") or []) if isinstance(t, dict)]
+        if topics:
+            # 画面のサイドバーと同じく章とトピックを全部並べる（_generic の 8 件上限で第 4 章が「…ほか」に
+            # 隠れ、ペルソナが後半のトピックを選べなかった — 第 8 周のハーネス側の欠陥）
+            chapters = [c.get("title", "") if isinstance(c, dict) else str(c) for c in (master.get("chapters") or [])]
+            lines = [f"コース: {master.get('title', '')}"]
+            current = None
+            for t in topics:
+                ci = t.get("chapter_index")
+                if ci != current:
+                    current = ci
+                    if isinstance(ci, int) and 0 <= ci < len(chapters):
+                        lines.append(f"{chapters[ci]}:")
+                mark = "（確認問題あり）" if t.get("check_questions") else ""
+                lines.append(f"- {t.get('id', '')} {t.get('title', '')} [{t.get('status', '')}]{mark}")
+            rest = {k: v for k, v in master.items() if k not in ("topics", "chapters", "title")}
+            lines.extend(_generic(rest, max_lines=60))
+            return _clip("\n".join(lines))
+    if action_id == "learning.landscape.view" and isinstance(body, dict) and isinstance(body.get("documents"), list):
+        # 画面の「分野の中の位置づけ」と同じ粒度: 論文ごとに（分野 / 概念 / 観点 / 関連の強さ / 出所ラベル / 理由）。
+        # _generic の 1 項目 14 行の上限で placements が途中で切れ、出所ラベル（AI推定 / 教員確認）が読めなかった（第 10 周）
+        lines = ["分野の中の位置づけ:"]
+        for d in body.get("domains") or []:
+            if isinstance(d, dict):
+                lines.append(f"- 分野: {d.get('domain_name', '')}（骨格 版 {d.get('frozen_version', '')}）"
+                             + ("（このコースの地図）" if d.get("is_course_map") else ""))
+                for f in d.get("facts") or []:
+                    lines.append(f"  {f}")
+        for doc in body["documents"]:
+            if not isinstance(doc, dict):
+                continue
+            lines.append(f"論文: {doc.get('title', '')}")
+            pls = [p for p in (doc.get("placements") or []) if isinstance(p, dict)]
+            if not pls:
+                lines.append("  （配置なし）")
+            for p in pls:
+                lines.append(f"  - {p.get('node_label', '')}（{p.get('perspective_label', '')}・{p.get('weight_label', '')}・"
+                             f"{p.get('provenance_label', '')}）: {str(p.get('reason', ''))[:160]}")
+        for key in ("unplaced_documents", "facts"):
+            for x in body.get(key) or []:
+                lines.append(f"{'配置されていない論文' if key == 'unplaced_documents' else '注記'}: "
+                             f"{x.get('title', '') if isinstance(x, dict) else x}")
+        rest = {k: v for k, v in body.items() if k not in ("documents", "domains", "unplaced_documents", "facts")}
+        lines.extend(_generic(rest, max_lines=30))
+        return _clip("\n".join(lines))
     if action_id == "learning.topic.open" and isinstance(body, dict):
         lines = ["教材:"]
+        # 準備中／未生成の事実文（IK-0375）は画面と同じく本文の上に出す（第 6 周: DTO にはあったが投影が落としていた）
+        notice = body.get("preparation_notice")
+        if isinstance(notice, str) and notice.strip():
+            lines.append(f"（お知らせ: {notice.strip()}）")
         for ch in body.get("chunks") or []:
             if isinstance(ch, dict):
-                lines.append(str(ch.get("text") or ch.get("content") or "")[:500])
+                # 画面は本文を切り詰めない。投影で切ると「途中で切れている」という偽の friction が出る（第 7 周）
+                text = str(ch.get("text") or ch.get("content") or "")
+                # 画面（app.js renderMaterialChunk）と同じく [[FORMULA_N]] を chunk.formulas で解決する。
+                # formulas に無いものは置換しない（製品側の未解決 = IK-0389 を審判から隠さない）。
+                lines.append(resolve_formula_placeholders(text, ch.get("formulas"))[:3000])
         return _clip("\n".join(lines))
     lines = _generic(body)
     return _clip("\n".join(lines) if lines else "（画面に何も表示されなかった）")

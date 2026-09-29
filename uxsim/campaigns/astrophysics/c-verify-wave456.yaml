@@ -1,0 +1,19 @@
+id: c-astro-verify-wave456
+domain: astrophysics
+snapshot: corpus-astro-v1
+course_id: 1bad7d9f
+personas:
+  teachers: []
+  students: [st-01-m1-radio, st-06-skeptic-bao, st-04-intl-exoplanet]
+scenarios:
+  teacher: []
+  student: [s-enroll-and-first-topic, s-ask-until-confused, s-check-and-object, s-discuss-one-paper, s-maps-and-records]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 400, persona_llm_calls: 600, wall_clock_minutes: 180}
+notes: |
+  第 9 周（2026-09-28）: 第 4〜6 波（IK-0378〜0411）と第 7 波の是正を砂場で再現する検証。教員段なし（コース 1bad7d9f は
+  第 6 周のものを、内容再生成のうえ再利用）。学生 3 名（入門者・懐疑派・英語話者）× 5 経路 × 1 セッション。
+  見るもの: t0 の根拠（⚓）/ 出典チップの節・冒頭 / 出所ラベルと注意書きの整合 / 前提ゲートの脱出 / 確認問題の提示と
+  「違っていた」の非完了 / discuss の鏡と本文 / 記号 lookup の事実文 / 地図・位置づけ・記録の内部値非露出。

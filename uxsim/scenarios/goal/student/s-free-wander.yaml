@@ -34,7 +34,7 @@ steps:
             - do: learning.help.inspect
               with: {anchor_id: topbar.inspect}
             - do: learning.progress
-stop_when: [goal_reached, gave_up, blocked, budget_exhausted]
+stop_when: [goal_reached, gave_up, blocked, budget_exhausted, persona_stop]
 expects:
   - manual: student/02-student.md#screen-overview
   - manual: student/02-student.md#learning-mode

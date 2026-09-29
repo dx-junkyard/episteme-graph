@@ -31,7 +31,7 @@ steps:
       - do: learning.records.mine
         note: これまでの質問が記録に残っているかを確かめる
     optional: true
-stop_when: [quota_exhausted, gave_up, budget_exhausted]
+stop_when: [quota_exhausted, gave_up, budget_exhausted, persona_stop]
 expects:
   - manual: student/02-student.md#ai-chat
   - manual: student/02-student.md#inspect-mode

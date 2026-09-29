@@ -53,7 +53,7 @@ class Settings:
     persona_llm_api_key: str = ""
     runs_dir: Path = field(default_factory=lambda: UXSIM_ROOT / "runs")
     sandbox_database_url: str = ""
-    http_timeout_s: float = 130.0
+    http_timeout_s: float = 930.0
 
     @property
     def has_sandbox_db(self) -> bool:
@@ -84,5 +84,5 @@ def get_settings(env: Optional[Mapping[str, str]] = None, env_file: Optional[Pat
         persona_llm_api_key=get("UXSIM_PERSONA_LLM_API_KEY"),
         runs_dir=runs,
         sandbox_database_url=get("UXSIM_SANDBOX_DATABASE_URL"),
-        http_timeout_s=float(get("UXSIM_HTTP_TIMEOUT_S", "130")),
+        http_timeout_s=float(get("UXSIM_HTTP_TIMEOUT_S", "930")),
     )

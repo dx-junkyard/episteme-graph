@@ -25,7 +25,7 @@ steps:
         with: {anchor_id: rightpanel.tab-sources}
         note: 回答の出典の欄が何を意味するのかを「使い方」で確かめる
     optional: true
-stop_when: [gave_up, blocked, budget_exhausted]
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
 expects:
   - manual: student/02-student.md#enroll-course
   - manual: student/02-student.md#screen-overview

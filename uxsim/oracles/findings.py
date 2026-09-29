@@ -96,14 +96,16 @@ class FindingFactory:
 
     def make(self, *, oracle: str, severity: str, hypothesis: str, step: Optional[TranscriptStep] = None,
              screen: str = "", affordance: str = "", quote: str = "", server_rows: Optional[dict] = None,
-             layers: Optional[list[str]] = None, steps: Optional[list[int]] = None) -> Finding:
+             layers: Optional[list[str]] = None, steps: Optional[list[int]] = None,
+             fingerprint_key: str = "") -> Finding:
+        """``fingerprint_key`` を渡すと仮説の文ではなくその鍵で指紋を取る（原因で束ねる — 審判 C）。"""
         self._seq += 1
         run_id = self.meta.run_id if self.meta else ""
         scr = screen or (step.screen if step else "")
         aff = affordance or (step.affordance if step else "")
         return Finding(
             finding_id=f"f-{run_id}-{self._seq:04d}",
-            fingerprint=fingerprint(oracle, scr, aff, hypothesis),
+            fingerprint=fingerprint(oracle, scr, aff, fingerprint_key or hypothesis),
             oracle=oracle,  # type: ignore[arg-type]
             severity_label=severity,  # type: ignore[arg-type]
             reproducibility="reproduced_in_replay" if (self.meta and self.meta.replay_of) else "observed_once",
@@ -118,7 +120,7 @@ class FindingFactory:
 
 
 def dedupe(findings: Iterable[Finding]) -> list[Finding]:
-    """同じ指紋を 1 件に束ねる（根拠のステップと引用を合わせる）。"""
+    """同じ指紋を 1 件に束ねる（根拠のステップ・ペルソナ・一覧の根拠を合わせる）。"""
     merged: dict[str, Finding] = {}
     for f in findings:
         if f.fingerprint not in merged:
@@ -128,7 +130,12 @@ def dedupe(findings: Iterable[Finding]) -> list[Finding]:
         steps = sorted(set(keep.evidence.transcript_steps) | set(f.evidence.transcript_steps))
         keep.evidence.transcript_steps = steps
         for k, v in f.evidence.server_rows.items():
-            keep.evidence.server_rows.setdefault(k, v)
+            cur = keep.evidence.server_rows.get(k)
+            if isinstance(cur, list) and isinstance(v, list):
+                # 一覧（出現箇所・仮説など）は束ねるときに足し合わせる（重複は落とす）
+                keep.evidence.server_rows[k] = cur + [x for x in v if x not in cur]
+            else:
+                keep.evidence.server_rows.setdefault(k, v)
         if f.persona_id and f.persona_id not in keep.persona_id.split(","):
             keep.persona_id = ",".join(x for x in (keep.persona_id, f.persona_id) if x)
     return list(merged.values())

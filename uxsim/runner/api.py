@@ -10,6 +10,8 @@ run ディレクトリ: ``<runs_dir>/<campaign_id>/<run_id>/``
 """
 from __future__ import annotations
 
+import os
+
 import argparse
 import json
 import sys
@@ -27,7 +29,7 @@ from uxsim.llm import (CachingPersonaLLM, PersonaLLM, ReplayPersonaLLM, ReplayTh
                        load_cache_jsonl, make_live_llm)
 from uxsim.persona.agent import PersonaAgent, StepDecision
 from uxsim.persona.compose import PersonaSpec, compose_persona, course_brief
-from uxsim.runner.actions_exec import execute
+from uxsim.runner.actions_exec import execute, prefetch_courses
 from uxsim.runner.client import EpistemeClient
 from uxsim.runner.scenario import (SKIP_ACTION_ID, Scenario, ScenarioParams, StepSpec, evaluate_until, load_params,
                                    load_scenario)
@@ -192,7 +194,9 @@ class ScenarioRunner:
         self.max_steps = max_steps
         self.divergence = divergence
         self.history: list[str] = []
-        self.observation = ""
+        # 同じセッションの前の経路で最後に見た画面を引き継ぐ（第 9 周: 経路の最後の操作の結果をペルソナが
+        # 一度も見ずに次の経路へ移り、「結果が出なかった」と記録していた）
+        self.observation = str(session.scratch.get("last_observation") or "")
         self.pending: Optional[TranscriptStep] = None
         self.outcome = ScenarioOutcome()
         self._carry: Optional[StepDecision] = None
@@ -220,12 +224,23 @@ class ScenarioRunner:
             self.outcome.gave_up_reason = d.gave_up_reason
             if "gave_up" in stop_when:
                 raise _Stop("gave_up")
-        if d.prev_friction == "blocked" and "blocked" in stop_when:
+        # blocked 1 回で経路を終えない（第 4 周: ⚓ が無い 1 回の blocked でチャットの手前で経路が終わり、
+        # トピック内チャットが 4 周とも未検証だった）。HTTP エラーが伴うか、連続 2 回の blocked で止める。
+        if d.prev_friction == "blocked":
+            self._blocked_streak = getattr(self, "_blocked_streak", 0) + 1
+        else:
+            self._blocked_streak = 0
+        http_error = (self.session.last_status or 0) >= 400
+        if "blocked" in stop_when and (self._blocked_streak >= 2 or (d.prev_friction == "blocked" and http_error)):
             raise _Stop("blocked")
         if d.goal_reached and "goal_reached" in stop_when:
             raise _Stop("goal_reached")
         if d.stop and self.session.last_status == 429 and "quota_exhausted" in stop_when:
             raise _Stop("quota_exhausted")
+        # 繰り返しの外で「この流れをやめたい」と言ったら経路を終える（第 8 周: stop=true の後も台本が続き、
+        # ペルソナが去った後の操作を演じさせていた）。繰り返しの中では until の材料として扱う。
+        if d.stop and self._until is None and "persona_stop" in stop_when:
+            raise _Stop("persona_stop")
 
     def _decide(self, spec: StepSpec, allowed, suggested, exhausted) -> StepDecision:
         notes = {o.action: str(self.params.render(o.note)) for o in spec.options if o.note}
@@ -301,6 +316,13 @@ class ScenarioRunner:
         if valid and action.llm_cost == "product":
             self.budget.product_calls += 1
         observation = project_observation(action_id, self.session.last_status, self.session.last_body)
+        if action_id == "learning.topic.open" and self.session.last_status == 200:
+            # 画面はトピックの末尾に確認問題を出す。投影に無いと、ペルソナは問題文を見ずに答える（第 8 周）
+            topic = self.session.topics.get(self.session.topic_id) or {}
+            qs = [q.get("question", "") if isinstance(q, dict) else str(q) for q in (topic.get("check_questions") or [])]
+            qs = [q for q in qs if q]
+            if qs:
+                observation += "\n確認問題: " + " ／ ".join(qs)
         self.pending = TranscriptStep(
             seq=self.writer.next_seq(), persona_id=self.session.persona_id, session=self.session.session_no,
             scenario_id=self.scenario.id, action_id=action_id, args=decision.args,
@@ -308,8 +330,10 @@ class ScenarioRunner:
             screen=action.screen if action else self.scenario.screen,
             affordance=action.affordance if action else "", http=http, observation=observation,
             replay_divergence=bool(self.divergence and self.divergence.diverged),
+            runner_notes=list(self.session.scratch.pop("runner_notes", None) or []),
         )
         self.observation = observation
+        self.session.scratch["last_observation"] = observation
         self.outcome.steps += 1
         if self.max_steps and self.outcome.steps >= self.max_steps:
             raise _Stop("max_steps")
@@ -373,6 +397,22 @@ def _provision(settings: Settings, specs: list[PersonaSpec], writer: RunWriter) 
     return notes
 
 
+def _prefetch_courses_step(session: PersonaSession, client: EpistemeClient, writer: RunWriter) -> None:
+    """学生のセッション開始時のコース一覧（runner の手・ペルソナの判断ではない）を transcript に残す。
+
+    経路が ``learning.course.list`` を経ずに ``learning.course.open`` から始まっても
+    ``precondition:course_id`` で止まらないようにする（第 7 周）。ペルソナへの観測（最初のプロンプト）には
+    流さない（replay のキャッシュ鍵を変えない）。
+    """
+    http, notes = prefetch_courses(session, client)
+    action = registry.REGISTRY["learning.course.list"]
+    writer.write_step(TranscriptStep(
+        seq=writer.next_seq(), persona_id=session.persona_id, session=session.session_no,
+        action_id="learning.course.list", screen=action.screen, affordance=action.affordance, http=http,
+        observation=project_observation("learning.course.list", session.last_status, session.last_body),
+        runner_notes=notes + list(session.scratch.pop("runner_notes", None) or [])))
+
+
 def _make_llm(settings: Settings, run_dir: Path, replay_dir: Optional[Path]):
     live: Optional[PersonaLLM] = None
     if settings.persona_llm_provider != "replay":
@@ -407,7 +447,8 @@ def run_campaign(
     settings = settings or get_settings()
     campaign = load_campaign(campaign_path)
     cid, domain = str(campaign["id"]), str(campaign["domain"])
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # 同じ秒に複数プロセスが起動すると run ディレクトリが衝突する（第 5 周: 学生 4 名を並列起動）。pid を足す
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{os.getpid()}"
     run_dir = settings.runs_dir / cid / run_id
     writer = RunWriter(run_dir)
     replay_dir = (settings.runs_dir / cid / replay_of) if replay_of else None
@@ -473,6 +514,10 @@ def run_campaign(
         session = PersonaSession(persona_id=pid, username=persona_username(pid), password=settings.persona_password,
                                  role="TEACHER" if role_key == "teacher" else "STUDENT", session_no=session_no,
                                  course_id=carried.get(pid, ""))
+        # campaign の course_id（検証したいコースの固定。第 9 周: 同名コース 2 本のうち再生成していない方を
+        # 「受講中の先頭」で拾い、内容依存の是正が確認できなかった）
+        if campaign.get("course_id"):
+            session.scratch["pinned_course_id"] = str(campaign["course_id"])
         ok, trace = client.login(session.username, session.password)
         writer.write_step(TranscriptStep(
             seq=writer.next_seq(), persona_id=pid, session=session_no, action_id="auth.login",
@@ -484,6 +529,8 @@ def run_campaign(
             client.close()
             continue
         session.token = client.token
+        if role_key == "student":
+            _prefetch_courses_step(session, client, writer)
         agent = PersonaAgent(spec, llm)
         try:
             for scenario in runnable:

@@ -11,10 +11,10 @@
 |---|---|
 | `archetypes/` `domains/` `scenarios/` `campaigns/` | データ（行動型・分野パック・経路・演目）。形はそれぞれの `README.md` |
 | `actions/registry.py` | 行為レジストリ（ペルソナができる操作 = 画面の部品 + 製品の実ルート — PE9） |
-| `runner/` | `client.py`（httpx・JWT）/ `state.py`（既知 ID と画面の投影）/ `actions_exec.py` / `scenario.py` / `api.py`（campaign 実行 CLI） |
+| `runner/` | `client.py`（httpx・JWT）/ `digest.py`（応答全体の要約 = `HttpTrace.digest`。抜粋の 2000 字に入らない出典・数の欄を審判が読む）/ `state.py`（既知 ID と画面の投影）/ `actions_exec.py` / `scenario.py` / `api.py`（campaign 実行 CLI。学生はセッション開始時に runner がコース一覧を 1 回取り、`runner_notes` に残す） |
 | `persona/` | `compose.py`（行動型 × 分野パック）/ `prompt.py` / `agent.py`（1 ステップ 1 コール） |
 | `llm.py` | ペルソナ・審判側 LLM（OpenAI / Anthropic / replay。製品の `core/llm.py` は import しない） |
-| `oracles/` | 審判 A 契約 / B 原則 / C 行動 / D 文書 / E 観測差分 + `findings.py` + `run_all.py` |
+| `oracles/` | 審判 A 契約 / B 原則 / C 行動（原因 = 行為 × 詰まり方で束ねる）/ D 文書 / E 観測差分 / `dialogue.py`（往復をまたぐ A・B: 出典番号の振り直し・区別できない出典・古い回答の再送・学習者向け応答の数の欄・precondition の連鎖 =「ハーネス:」）+ `findings.py` + `run_all.py` |
 | `report/` | `campaign_report.py` / `issue_knowledge_bridge.py`（課題ナレッジ候補）/ `map_draft.py`（着手の地図の下書き） |
 | `runs/` | run の生ログ（git 管理外）: `<campaign_id>/<run_id>/{meta.json, transcript.jsonl, cache/, logs/, findings.jsonl, report.md}` |
 

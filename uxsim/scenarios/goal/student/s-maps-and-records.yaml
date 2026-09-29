@@ -23,7 +23,7 @@ steps:
   - do: learning.records.mine
     note: わたしの記録を開き、自分が残したものを読み返す
   - do: learning.progress
-stop_when: [gave_up, blocked, budget_exhausted]
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
 expects:
   - manual: student/02-student.md#field-atlas
   - manual: student/02-student.md#paper-placement

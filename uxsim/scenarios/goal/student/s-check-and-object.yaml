@@ -7,6 +7,8 @@ steps:
   - do: auth.login
   - do: learning.course.open
   - do: learning.topic.open
+    with: {topic_hint_terms: "{{topic_hint_terms}}"}
+    note: 材料の質問に合う章のトピックを開く（分野に topic_hint_terms が無ければ既定のトピック）
   - repeat:
       until: "persona_decides_to_stop or steps > 3"
       max: 3
@@ -34,7 +36,7 @@ steps:
         note: どこが食い違っているのかを、記号の段まで降りて確かめる
       - do: learning.progress
         note: 誤解メモに何が書かれたかを確かめる
-stop_when: [gave_up, blocked, budget_exhausted]
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
 expects:
   - manual: student/02-student.md#comprehension-check
   - manual: student/02-student.md#check-options

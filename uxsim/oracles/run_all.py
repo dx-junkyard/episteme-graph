@@ -1,6 +1,6 @@
 """審判を全部かける: ``python -m uxsim.oracles.run_all runs/<campaign>/<run_id> [--judge]``。
 
-A・B・E は決定論（LLM 0 回）。C・D の LLM 審判は ``--judge`` のときだけ（ペルソナと同じ
+A・B・E と対話の往復をまたぐ検査（``dialogue``）は決定論（LLM 0 回）。C・D の LLM 審判は ``--judge`` のときだけ（ペルソナと同じ
 プロバイダ・別プロンプト）。出力: ``findings.jsonl`` / ``oracle_notes.json`` / ``document_pairs.jsonl``。
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Optional
 
 from uxsim.config import UXSIM_ROOT, get_settings
 from uxsim.llm import PersonaLLM, make_live_llm
-from uxsim.oracles import behavior, contract, document, observation, principle
+from uxsim.oracles import behavior, contract, dialogue, document, observation, principle
 from uxsim.oracles.findings import FindingFactory, dedupe, load_meta, load_transcript, write_findings
 from uxsim.schema import Finding
 
@@ -28,6 +28,7 @@ def run_oracles(run_dir: Path, *, judge_llm: Optional[PersonaLLM] = None, databa
     found: list[Finding] = []
     found += contract.check(steps, factory)
     found += principle.check(steps, factory)
+    found += dialogue.check(steps, factory)
     c, notes["behavior"] = behavior.check(steps, factory, judge_llm)
     found += c
     d, notes["document"] = document.check(steps, factory, judge_llm, out_dir=run_dir)

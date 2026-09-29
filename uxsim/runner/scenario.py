@@ -168,8 +168,16 @@ class ScenarioParams:
 
     def render_args(self, template: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         """引数の材料を解決する。材料切れのキーは落とし、その名前を返す。"""
-        rendered = self.render(template or {})
-        exhausted = [k for k, v in rendered.items() if v is EXHAUSTED]
+        rendered: dict[str, Any] = {}
+        exhausted: list[str] = []
+        for k, v in (template or {}).items():
+            try:
+                rendered[k] = self.render(v)
+            except ScenarioError:
+                # 分野側に無い材料（任意の穴）はその引数を渡さない（第 8 周: topic_hint_terms のような
+                # 分野依存の任意材料を経路に書けるようにする。必須材料は params_required で守る）
+                exhausted.append(k)
+        exhausted += [k for k, v in rendered.items() if v is EXHAUSTED]
         return {k: v for k, v in rendered.items() if v is not EXHAUSTED}, exhausted
 
 

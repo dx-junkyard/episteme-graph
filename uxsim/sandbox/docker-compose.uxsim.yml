@@ -48,6 +48,11 @@ services:
   frontend:
     ports: !override
       - "3100:3000"
+    # 砂場だけ nginx の proxy_read_timeout を 900s にする（製品は 120s）。LLM を Claude Code の頭脳が
+    # 肩代わりすると 1 応答に数十秒〜数分かかり、学習チャットが nginx の 504 で切れる（第 5 周）。
+    # 製品の nginx.conf を sed で写したもの。製品側の値は変えない。
+    volumes:
+      - ./uxsim/sandbox/nginx.uxsim.conf:/etc/nginx/conf.d/default.conf:ro
 
 volumes:
   uxsim_postgres_data:

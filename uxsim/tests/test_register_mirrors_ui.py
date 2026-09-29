@@ -12,7 +12,7 @@ def _session() -> PersonaSession:
     s = PersonaSession("st-test")
     s.remember("materials", "m1")
     s.remember("materials", "m2")
-    s.remember("materials_selected", "m2")
+    setattr(s, "cb_selected", ["m2"])
     setattr(s, "material_titles", {"m2": "論文 B"})
     return s
 
