@@ -10,6 +10,8 @@
    組む。数値（件数・confidence・order_index）は書かない（LU5）。
 3. ``resolve_unit_handles`` — LLM が返した handle を候補表で引き当てて
    ``topic.units[]`` の要素に写す。**候補に無い handle は捨てる**（捏造ガード = LU3）。
+   草案が ``{"handle", "stable_key"}`` を持つときは stable_key で引く（IK-0371: handle は
+   候補表の位置なので、登録時の教材集合が草案のターンと違うと別の単位を指す）。
 
 加えて freeze（``course_content_builder``）が ``topic.units[].stable_key`` から
 live 行を読むための ``load_units_by_keys`` を置く。
@@ -331,43 +333,146 @@ def candidate_keys(candidates: list[UnitCandidate]) -> list[str]:
     return list(dict.fromkeys(c.stable_key for c in (candidates or []) if c.stable_key))
 
 
-def resolve_unit_handles(candidates: list[UnitCandidate], handles: object) -> list[dict]:
-    """LLM / クライアントが返した handle を ``topic.units[]`` の要素へ写す。
+def candidate_key_table(candidates: list[UnitCandidate]) -> dict[str, str]:
+    """候補表の ``{handle: stable_key}``（IK-0371）。
 
-    - 候補表に無い handle は**捨てる**（捏造ガード = LU3）。
-    - 既に解決済みの dict（``stable_key`` 付き）が来た場合も、候補表に同じ
-      ``stable_key`` があるときだけ通す（同じ弁を通す）。
-    - 重複は先勝ちで落とす。順序は入力順。
+    handle（``U3``）は「そのターンの教材集合を material_ids 順に並べた候補表の位置」で、
+    別の教材集合の候補表では別の単位を指す。コースビルダーはこの対応表を草案に同梱し
+    （``course_draft["unit_candidate_keys"]``）、登録は位置ではなく stable_key で解決する。
+    数値は含まない（LU5）。教員向け経路だけが使う（学習者 DTO には出さない = KO10）。
     """
+    table: dict[str, str] = {}
+    for candidate in candidates or []:
+        handle = str(candidate.handle or "").strip().upper()
+        key = str(candidate.stable_key or "").strip()
+        if handle and key and handle not in table:
+            table[handle] = key
+    return table
+
+
+def normalize_draft_unit_refs(
+    candidates: list[UnitCandidate], units: object
+) -> list:
+    """草案の ``topic.units`` を、その草案を出したターンの候補表で同一性付きに直す（IK-0371）。
+
+    - 文字列 handle が候補表にあれば ``{"handle", "stable_key"}`` にする。
+    - 候補表に無い文字列 handle は**文字列のまま**残す（stable_key を作らない = 捏造ガード。
+      登録側の候補表照合が最終の弁）。
+    - ``stable_key`` 付き dict は key が候補表にあれば handle をこのターンの handle に揃え、
+      無ければ（前のターンの草案から持ち越した参照）そのまま残す。
+    - ``stable_key`` の無い dict は handle として扱う。
+    - 非 list 入力は空。順序保持・重複除去。
+    """
+    if not isinstance(units, list):
+        return []
+    by_handle = {c.handle.upper(): c for c in candidates or []}
+    by_key = {c.stable_key: c for c in candidates or []}
+    out: list = []
+    seen: set[str] = set()
+    for raw in units:
+        entry: object = None
+        if isinstance(raw, str):
+            handle = raw.strip()
+            candidate = by_handle.get(handle.upper()) if handle else None
+            entry = (
+                {"handle": candidate.handle, "stable_key": candidate.stable_key}
+                if candidate is not None else (handle or None)
+            )
+        elif isinstance(raw, dict):
+            key = str(raw.get("stable_key") or "").strip()
+            handle = str(raw.get("handle") or raw.get("unit") or "").strip()
+            if key:
+                candidate = by_key.get(key)
+                entry = {
+                    "handle": candidate.handle if candidate is not None else handle,
+                    "stable_key": key,
+                }
+            elif handle:
+                candidate = by_handle.get(handle.upper())
+                entry = (
+                    {"handle": candidate.handle, "stable_key": candidate.stable_key}
+                    if candidate is not None else handle
+                )
+        if entry is None:
+            continue
+        ident = (
+            "k:" + entry["stable_key"] if isinstance(entry, dict)
+            else "h:" + str(entry).upper()
+        )
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(entry)
+    return out
+
+
+def resolve_unit_refs(candidates: list[UnitCandidate], handles: object) -> tuple[list[dict], dict]:
+    """``resolve_unit_handles`` の本体。解決結果と「落とした理由」の事実を返す。
+
+    解決の規則（IK-0371 で **stable_key を主経路**にした）:
+
+    - ``stable_key`` 付きの dict は **stable_key だけで**引く。候補表に無ければ捨てる
+      — handle へフォールバックしない（handle は別の教材集合の候補表の位置なので、
+      引けば別の単位を黙って付ける）。捨てた事実は ``key_missing`` に立てる
+      （その単位の論文が登録時の sources に無い、などの状況）。
+    - ``stable_key`` の無い dict / 文字列 handle は従来どおり候補表の位置で引く
+      （対応表を持たない旧い草案・API 直叩きの後方互換）。候補に無い handle は捨てる（LU3）。
+    - 重複は先勝ちで落とす。順序は入力順。
+
+    戻り値の第2要素は ``{"dropped": bool, "key_missing": bool}``（件数は載せない = LU5）。
+    """
+    stats = {"dropped": False, "key_missing": False}
     by_handle = {c.handle.upper(): c for c in candidates or []}
     by_key = {c.stable_key: c for c in candidates or []}
     if not isinstance(handles, list):
-        return []
+        return [], stats
     resolved: list[dict] = []
     seen: set[str] = set()
     for raw in handles:
         candidate: UnitCandidate | None = None
         if isinstance(raw, str):
+            if not raw.strip():
+                continue
             candidate = by_handle.get(raw.strip().upper())
         elif isinstance(raw, dict):
             key = str(raw.get("stable_key") or "").strip()
             if key:
                 candidate = by_key.get(key)
-            if candidate is None:
+                if candidate is None:
+                    stats["key_missing"] = True
+            else:
                 handle = str(raw.get("handle") or raw.get("unit") or "").strip().upper()
                 if handle:
                     candidate = by_handle.get(handle)
-        if candidate is None or candidate.stable_key in seen:
+        else:
+            continue
+        if candidate is None:
+            stats["dropped"] = True
+            continue
+        if candidate.stable_key in seen:
             continue
         seen.add(candidate.stable_key)
         resolved.append(candidate.as_topic_unit())
+    return resolved, stats
+
+
+def resolve_unit_handles(candidates: list[UnitCandidate], handles: object) -> list[dict]:
+    """LLM / クライアントが返した handle を ``topic.units[]`` の要素へ写す。
+
+    - 候補表に無い handle は**捨てる**（捏造ガード = LU3）。
+    - ``stable_key`` 付きの dict は stable_key で引き、候補表に無ければ捨てる
+      （handle の位置へはフォールバックしない = IK-0371）。
+    - 重複は先勝ちで落とす。順序は入力順。
+    """
+    resolved, _stats = resolve_unit_refs(candidates, handles)
     return resolved
 
 
 _UNIT_ROW_COLUMNS = """
             SELECT id::text, document_id::text, stable_key, unit_kind, label, summary,
                    linked_claim_ids, linked_equation_ids, linked_component_ids,
-                   linked_figure_ids, agent_payload, order_index
+                   linked_figure_ids, agent_payload, order_index,
+                   section_ids, source_block_ids
             FROM learning_units_live
 """
 
@@ -436,6 +541,11 @@ def _units_from_rows(rows) -> dict[str, dict]:
             "linked_figure_ids": _as_str_list(row[9]),
             "agent_payload": agent_payload,
             "order_index": int(row[11]) if isinstance(row[11], int) else 0,
+            # 章・出典 block（IK-0388）。section_block の単位は component を束ねないので、
+            # コース側はこの2つから「その章に載っている主張・式・図」を引く。
+            # 旧形の行（12 列）でも読めるように長さを見る。
+            "section_ids": _as_str_list(row[12]) if len(row) > 12 else [],
+            "source_block_ids": _as_str_list(row[13]) if len(row) > 13 else [],
         }
     return units
 
@@ -452,6 +562,20 @@ def unit_component_agent_ids(unit_row: dict | None) -> list[str]:
     payload = unit_row.get("agent_payload")
     payload = payload if isinstance(payload, dict) else {}
     return list(dict.fromkeys(_as_str_list(payload.get("linked_component_agent_ids"))))
+
+
+def unit_section_ids(unit_row: dict | None) -> list[str]:
+    """unit が掛かる章の ID（``document_structure`` の section_id。順序保持・重複除去）。"""
+    if not isinstance(unit_row, dict):
+        return []
+    return list(dict.fromkeys(_as_str_list(unit_row.get("section_ids"))))
+
+
+def unit_source_block_ids(unit_row: dict | None) -> list[str]:
+    """unit の出典 block（``document_structure`` の block_id。順序保持・重複除去）。"""
+    if not isinstance(unit_row, dict):
+        return []
+    return list(dict.fromkeys(_as_str_list(unit_row.get("source_block_ids"))))
 
 
 def unit_equation_agent_ids(unit_row: dict | None) -> list[str]:

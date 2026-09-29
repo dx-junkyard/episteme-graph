@@ -23,7 +23,13 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["strip_control_sequences", "UNTRUSTED_SOURCE_NOTICE"]
+__all__ = [
+    "strip_control_sequences",
+    "UNTRUSTED_SOURCE_NOTICE",
+    "scrub_internal_placeholders",
+    "INTERNAL_FORMULA_PLACEHOLDER_TEXT",
+    "INTERNAL_FIGURE_PLACEHOLDER_TEXT",
+]
 
 #: 資料本文（PDF・URL 取得・arXiv 由来 = untrusted）を LLM へ渡す経路が、指示側に
 #: 必ず添える固定文。**この文はガードレールテストが原文 grep で固定する** ——
@@ -59,3 +65,36 @@ def strip_control_sequences(text: str) -> str:
     cleaned = _BARE_SGR_RE.sub("", cleaned)
     cleaned = _C0_CONTROL_RE.sub("", cleaned)
     return cleaned
+
+
+# --- 内部参照プレースホルダーの除去（IK-0403）------------------------------------
+#
+# チャンク本文・教材本文には、表示側で解決する内部参照が残っていることがある:
+# ``[[FORMULA_0]]``（数式の差し込み位置）、``[[eq_eqcand_inline_blk_015_…]]``（抽出段の式 ID）、
+# ``![[equation:eq_3]]`` / ``[[FIGURE_1]]`` / ``![[figure:<uuid>]]``。バックグラウンドの
+# 帰属・違和感抽出の LLM には描画器が無いので、これをそのまま渡すと内部 ID を
+# 読ませることになり（ID を語や anchor_label に書き写しうる）、中身の無い記号にもなる。
+# LLM 入力の衛生として「（数式）」「（図）」の事実語に置き換える（描画・表示には使わない —
+# 表示は各画面の解決器が正本）。
+
+#: 数式の内部参照を置き換える語（api/services.py の FORMULA_UNRESOLVED_TEXT と同じ語）。
+INTERNAL_FORMULA_PLACEHOLDER_TEXT = "（数式）"
+#: 図の内部参照を置き換える語。
+INTERNAL_FIGURE_PLACEHOLDER_TEXT = "（図）"
+
+_INTERNAL_FORMULA_REF_RE = re.compile(
+    r"!?\[\[\s*(?:FORMULA_\d+|eq_[A-Za-z0-9_.:\-]+|equation:[^\]\n]+)\s*\]\]",
+    re.IGNORECASE,
+)
+_INTERNAL_FIGURE_REF_RE = re.compile(
+    r"!?\[\[\s*(?:FIGURE_\d+|figure:[^\]\n]+)\s*\]\]",
+    re.IGNORECASE,
+)
+
+
+def scrub_internal_placeholders(text: str) -> str:
+    """LLM に渡す本文から内部参照プレースホルダーを事実語に置き換える（純関数）。"""
+    if not text or "[[" not in str(text):
+        return str(text or "")
+    out = _INTERNAL_FORMULA_REF_RE.sub(INTERNAL_FORMULA_PLACEHOLDER_TEXT, str(text))
+    return _INTERNAL_FIGURE_REF_RE.sub(INTERNAL_FIGURE_PLACEHOLDER_TEXT, out)

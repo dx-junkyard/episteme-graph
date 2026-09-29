@@ -11,8 +11,9 @@
 - **KR1 A層非改変**: ``SymbolRecord`` に ``concept_ref`` を足すのではなく、
   確定済み同一性リンク（``element_identity_links``）を**読み時に join** する。
 - **KR5 決定論・非LLM**: ``core.llm`` を import しない。embedding も呼ばない。
-  記号の一致は :func:`core.concept_normalizer.normalize_key` の**完全一致**のみ
-  （部分一致は P0-2 の F-7（``SM`` が ``cosmological`` に当たる）と同じ事故を招く）。
+  記号の一致は :func:`symbol_key` の**完全一致**のみ（大文字小文字を区別する —
+  ``λ`` と ``Λ`` は別の記号。IK-0387）。部分一致は P0-2 の F-7（``SM`` が
+  ``cosmological`` に当たる）と同じ事故を招く。
 - **KR6 / KO10 数値を見せない**: ``confidence`` / ``stable_key`` /
   ``produced_by_run_id`` / 内部 ID（``sym_…`` / ``eq_op_*`` / ``ev_*``）を DTO に
   載せない。載せるのは ``unit`` / ``scope_label`` / 出所（論文タイトル）。
@@ -30,12 +31,12 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 from sqlalchemy import text as sa_text
 
 from core import element_vocab
-from core.concept_normalizer import normalize_key
 from core.learner_context_common import is_uuid
 from core.text_hygiene import strip_control_sequences
 
@@ -43,9 +44,14 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "FACT_DEFINED_LATER",
+    "FACT_DEFINITION_FROM",
+    "FACT_DEFINITION_FROM_OTHER_DOCUMENT",
     "FACT_NO_DEFINITION",
+    "FACT_NO_SOURCE_DOCUMENTS",
     "FACT_POSITION_UNKNOWN",
+    "FACT_SYMBOL_NOT_REGISTERED",
     "lookup_symbol_definition",
+    "symbol_key",
 ]
 
 # ---------------------------------------------------------------------------
@@ -60,6 +66,33 @@ FACT_NO_DEFINITION = "この論文には定義の記述が見つかりません�
 
 #: タップ位置の順序が解けなかったとき（黙って先頭を出さない）。
 FACT_POSITION_UNKNOWN = "位置を特定できないため、最初の定義を表示しています。"
+
+#: 記号レジストリに当該記号の行が1つも無いとき（IK-0386。``available=False`` を
+#: 事実文なしで返さない）。主語は「このコースの論文」— 分野レベルの不在は言わない（KR8）。
+FACT_SYMBOL_NOT_REGISTERED = "このコースの論文には、この記号の登録がありません。"
+
+#: 照会できる論文（コースの sources で解析済みのもの）が1つも無いとき（IK-0386）。
+FACT_NO_SOURCE_DOCUMENTS = "このコースには、記号を照会できる論文がありません。"
+
+#: タップ位置が与えられず（または解けず）どの論文の記述かが画面から分からないとき、
+#: 出所の論文タイトルを添える（IK-0387。タイトルのみ・内部 ID は入れない）。
+FACT_DEFINITION_FROM = "論文『{title}』の記述です。"
+
+#: タップした論文に定義が無く、同じコースの別の論文の定義へ倒したとき（IK-0387）。
+#: 論文をまたいで「前／後」を比べない（順序は論文の中でしか意味を持たない）ので、
+#: 位置の事実文ではなくこの1文だけを添える。
+FACT_DEFINITION_FROM_OTHER_DOCUMENT = (
+    "この論文にはこの記号の定義が見つからなかったため、"
+    "同じコースの論文『{title}』で最初に現れる定義を表示しています。"
+)
+
+#: タップ位置の論文に対して相対的な意味しか持たない有効範囲（「この節の中」
+#: 「この式の中だけ」）。タップ位置がその論文に無いときは表示しない（IK-0387）。
+_RELATIVE_SCOPES = frozenset({"section", "equation_local"})
+
+# 定義の逐語が見つからなかったとき（FACT_NO_DEFINITION）にも並べてよい定義状態のキー。
+# 訳語は element_vocab.DEFINITION_STATUS_LABELS が正本（ここはキーの集合だけ）。
+_STATUSES_CONSISTENT_WITH_NO_DEFINITION = frozenset({"definition_missing"})
 
 #: 定義の逐語の上限（読み手が1画面で読める長さ。数値は表示しない）。
 _MAX_DEFINITION_CHARS = 400
@@ -170,11 +203,56 @@ def _uuid_only(document_ids: Any) -> list[str]:
     return sorted(out)
 
 
+# 記号の照合キー（IK-0387）。``concept_normalizer.normalize_key`` は**概念名**の
+# 正規化で、大文字小文字を畳み ``Λ`` と ``λ`` を同じ ``lambda`` にする。記号では
+# ``λ``（質量対磁束比）と ``Λ``（別の量）、``B`` と ``b`` は別物なので、ここでは
+# 大文字小文字を保ったまま表記の揺れ（TeX ⇄ Unicode・波括弧・書体指定・空白）だけを畳む。
+_TEX_GREEK: dict[str, str] = {
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
+    "varepsilon": "ε", "zeta": "ζ", "eta": "η", "theta": "θ", "vartheta": "θ",
+    "iota": "ι", "kappa": "κ", "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ",
+    "omicron": "ο", "pi": "π", "varpi": "π", "rho": "ρ", "varrho": "ρ",
+    "sigma": "σ", "varsigma": "σ", "tau": "τ", "upsilon": "υ", "phi": "φ",
+    "varphi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω",
+    "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ",
+    "Pi": "Π", "Sigma": "Σ", "Upsilon": "Υ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
+}
+# Unicode の異体字を基本字へ（ϵ→ε など。大文字小文字は変えない）。
+_UNICODE_VARIANTS = {"ϵ": "ε", "ϑ": "θ", "ϖ": "π", "ϱ": "ρ", "ς": "σ", "ϕ": "φ"}
+# 書体だけを変える命令（KaTeX の textContent は書体を区別しないので畳む）。
+_FONT_COMMANDS_RE = re.compile(
+    r"\\(?:mathrm|rm|textrm|text|mathit|it|mathcal|mathbb|mathbf|bf|boldsymbol|bm|operatorname)(?![A-Za-z])"
+)
+_TEX_COMMAND_RE = re.compile(r"\\([A-Za-z]+)")
+
+
+def symbol_key(value: Any) -> str:
+    """記号の照合キー（決定論・大文字小文字を区別する）。
+
+    ``\\lambda`` と ``λ`` は同じキー、``\\Lambda`` / ``Λ`` はそれとは別のキー。
+    ``V_{cb}`` / ``V_cb``、``B_{\\rm 3D}`` / ``B_{3D}`` / ``B_3D`` は同じキー。
+    部分一致はしない（キーの完全一致だけで照合する — P0-2 / F-7）。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = text.replace("$", "")
+    text = _FONT_COMMANDS_RE.sub("", text)
+    text = _TEX_COMMAND_RE.sub(lambda m: _TEX_GREEK.get(m.group(1), "\\" + m.group(1)), text)
+    for src, dst in _UNICODE_VARIANTS.items():
+        text = text.replace(src, dst)
+    text = text.replace("{", "").replace("}", "")
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"_+", "_", text)
+    text = re.sub(r"\^+", "^", text)
+    return text.strip("_^")
+
+
 def _symbol_matches(row: dict, wanted: str) -> bool:
-    """``canonical_symbol`` / ``notation_variants`` の**完全一致**（正規化後）。"""
-    if normalize_key(row.get("canonical_symbol")) == wanted:
+    """``canonical_symbol`` / ``notation_variants`` の**完全一致**（:func:`symbol_key` 後）。"""
+    if symbol_key(row.get("canonical_symbol")) == wanted:
         return True
-    return any(normalize_key(v) == wanted for v in _as_list(row.get("notation_variants")))
+    return any(symbol_key(v) == wanted for v in _as_list(row.get("notation_variants")))
 
 
 # ---------------------------------------------------------------------------
@@ -427,22 +505,29 @@ def _resolve_tap_order(
     document_ids: list[str],
     equations: dict[tuple[str, str], dict],
     block_order: dict[str, int],
-) -> Optional[tuple[int, int]]:
-    """タップ位置の順序。式 → チャンクの順に解決し、解けなければ ``None``。"""
+) -> tuple[Optional[tuple[int, int]], str]:
+    """タップ位置の ``(順序, 論文)``。式 → チャンクの順に解決する。
+
+    順序が解けなくても、式・チャンクがどの論文のものかが分かれば論文は返す
+    （同じ論文の記号を先に当てるため — IK-0387）。どちらも解けなければ
+    ``(None, "")``。
+    """
+    tap_document_id = ""
     if equation_id:
         for document_id in document_ids:
             row = equations.get((document_id, equation_id))
             if row:
+                tap_document_id = tap_document_id or document_id
                 key = _order_key(row.get("block_id"), row.get("page"), block_order)
                 if key is not None:
-                    return key
+                    return key, document_id
     if chunk_id and is_uuid(chunk_id):
         try:
             row = (
                 session.execute(
                     sa_text(
                         """
-                        SELECT chunk_index, block_ids
+                        SELECT document_id::text AS document_id, chunk_index, block_ids
                           FROM chunks
                          WHERE id = CAST(:chunk_id AS uuid)
                            AND document_id = ANY(CAST(:doc_ids AS uuid[]))
@@ -457,11 +542,13 @@ def _resolve_tap_order(
             logger.warning("symbol_lookup: chunk position unavailable", exc_info=True)
             row = None
         if row:
+            chunk_document_id = str(row.get("document_id") or "")
+            tap_document_id = tap_document_id or chunk_document_id
             for block_id in _as_list(row.get("block_ids")):
                 key = _order_key(block_id, None, block_order)
                 if key is not None:
-                    return key
-    return None
+                    return key, (chunk_document_id or tap_document_id)
+    return None, tap_document_id
 
 
 def _choose_definition(
@@ -521,30 +608,35 @@ def lookup_symbol_definition(
         ``confidence`` / ``stable_key`` / ``produced_by_run_id`` / 内部 ID は
         載せない（KR6 / KO10）。
     """
-    wanted = normalize_key(symbol)
+    wanted = symbol_key(symbol)
     display_symbol = _clean(symbol, limit=40)
     doc_ids = _uuid_only(document_ids)
 
-    empty: dict[str, Any] = {
-        "available": False,
-        "symbol": display_symbol,
-        "facts": [],
-        "definition": None,
-        "concept_ref": None,
-    }
-    if not wanted or not doc_ids:
-        return empty
+    def _unavailable(fact: str) -> dict[str, Any]:
+        # IK-0386: ``available=False`` を事実文なしで返さない（何が無いのかを1文で言う）。
+        return {
+            "available": False,
+            "symbol": display_symbol,
+            "facts": [fact],
+            "definition": None,
+            "concept_ref": None,
+        }
+
+    if not doc_ids:
+        return _unavailable(FACT_NO_SOURCE_DOCUMENTS)
+    if not wanted:
+        return _unavailable(FACT_SYMBOL_NOT_REGISTERED)
 
     symbol_rows = [
         row for row in _load_symbol_rows(session, doc_ids) if _symbol_matches(row, wanted)
     ][:_MAX_SYMBOL_ROWS]
     if not symbol_rows:
-        return empty
+        return _unavailable(FACT_SYMBOL_NOT_REGISTERED)
 
     block_order = _load_block_order(session, doc_ids)
     equations = _load_equation_positions(session, doc_ids)
     evidence = _load_evidence_positions(session, doc_ids)
-    tap_order = _resolve_tap_order(
+    tap_order, tap_document_id = _resolve_tap_order(
         equation_id=str(equation_id or "").strip(),
         chunk_id=str(chunk_id or "").strip(),
         session=session,
@@ -554,13 +646,6 @@ def lookup_symbol_definition(
     )
 
     # タップ位置の論文を優先する（同名記号が複数論文にあるときの決定論的な優先順）。
-    tap_document_id = ""
-    eq_key = str(equation_id or "").strip()
-    if eq_key:
-        for document_id in doc_ids:
-            if (document_id, eq_key) in equations:
-                tap_document_id = document_id
-                break
     symbol_rows.sort(
         key=lambda r: (
             0 if str(r.get("document_id") or "") == tap_document_id else 1,
@@ -572,21 +657,56 @@ def lookup_symbol_definition(
     titles = _load_document_titles(session, doc_ids)
 
     for row in symbol_rows:
+        row_document_id = str(row.get("document_id") or "")
         candidates = _definition_candidates(
             row, equations=equations, evidence=evidence, block_order=block_order
         )
-        chosen, fact = _choose_definition(candidates, tap_order)
+        same_document = bool(tap_document_id) and row_document_id == tap_document_id
+        if tap_document_id and not same_document:
+            # 別の論文の定義へ倒す: 論文をまたいで「前／後」は比べない（IK-0387）。
+            chosen, _ = _choose_definition(candidates, None)
+            fact = _title_fact(FACT_DEFINITION_FROM_OTHER_DOCUMENT, titles.get(row_document_id, ""))
+        else:
+            chosen, fact = _choose_definition(candidates, tap_order if same_document else None)
         if chosen is None:
             continue
+        extra: list[str] = []
+        if not tap_document_id:
+            # どの論文の記述かが画面から分からない（タップ位置なし）ので出所を添える。
+            source_fact = _title_fact(FACT_DEFINITION_FROM, titles.get(row_document_id, ""))
+            if source_fact:
+                extra.append(source_fact)
         return _build_result(
-            session, row, chosen=chosen, fact=fact, titles=titles, display_symbol=display_symbol
+            session,
+            row,
+            chosen=chosen,
+            fact=fact,
+            titles=titles,
+            display_symbol=display_symbol,
+            extra_facts=extra,
+            relative_scope_ok=same_document,
         )
 
     # 一致する記号行はあるが、定義の逐語がどこにも無い（KR8: 主語は「この論文」）。
     row = symbol_rows[0]
     return _build_result(
-        session, row, chosen=None, fact=FACT_NO_DEFINITION, titles=titles, display_symbol=display_symbol
+        session,
+        row,
+        chosen=None,
+        fact=FACT_NO_DEFINITION,
+        titles=titles,
+        display_symbol=display_symbol,
+        relative_scope_ok=bool(tap_document_id)
+        and str(row.get("document_id") or "") == tap_document_id,
     )
+
+
+def _title_fact(template: str, title: str) -> str:
+    """論文タイトル入りの事実文。タイトルが引けなければ空（推測で埋めない）。"""
+    title = _clean(title, limit=120)
+    if not title:
+        return ""
+    return template.format(title=title)
 
 
 def _build_result(
@@ -597,6 +717,8 @@ def _build_result(
     fact: str,
     titles: dict[str, str],
     display_symbol: str,
+    extra_facts: Optional[list[str]] = None,
+    relative_scope_ok: bool = True,
 ) -> dict:
     document_id = str(row.get("document_id") or "")
     agent_symbol_id = str(row.get("agent_symbol_id") or "").strip()
@@ -604,6 +726,9 @@ def _build_result(
     facts: list[str] = []
     if fact:
         facts.append(fact)
+    for line in extra_facts or []:
+        if line and line not in facts:
+            facts.append(line)
 
     definition: Optional[dict] = None
     if chosen is not None:
@@ -612,9 +737,14 @@ def _build_result(
             # 論文の印字番号（``(12)``）は読者に可読な出所。内部 ID は入れない（PL7）。
             definition["equation_label"] = chosen["equation_label"]
     else:
-        status_label = element_vocab.definition_status_label(row.get("definition_status"))
-        if status_label:
-            facts.insert(0, status_label)
+        # 定義の逐語が見つからないときに添える定義状態は、「この論文に定義が無い」と
+        # 食い違わないもの（``definition_missing``）だけ。``used`` の「定義は別の箇所」や
+        # ``defined`` の「この論文で定義」は FACT_NO_DEFINITION と含意が逆になる（IK-0380）。
+        status_key = str(row.get("definition_status") or "").strip()
+        if status_key in _STATUSES_CONSISTENT_WITH_NO_DEFINITION:
+            status_label = element_vocab.definition_status_label(status_key)
+            if status_label:
+                facts.insert(0, status_label)
 
     result: dict[str, Any] = {
         "available": True,
@@ -630,7 +760,11 @@ def _build_result(
     unit = _clean(row.get("unit"), limit=40)
     if unit:
         result["unit"] = unit
-    scope_label = element_vocab.symbol_scope_label(row.get("scope"))
-    if scope_label:
-        result["scope_label"] = scope_label
+    scope_key = str(row.get("scope") or "").strip()
+    # 「この節の中」「この式の中だけ」はタップ位置の論文に対して相対的な言葉。
+    # タップ位置が無い・別の論文の記号へ倒したときは、どの節かを指せないので出さない（IK-0387）。
+    if scope_key not in _RELATIVE_SCOPES or relative_scope_ok:
+        scope_label = element_vocab.symbol_scope_label(scope_key)
+        if scope_label:
+            result["scope_label"] = scope_label
     return result

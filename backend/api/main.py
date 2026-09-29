@@ -180,6 +180,34 @@ async def _lifespan(application: FastAPI):
             except Exception:  # noqa: BLE001
                 logger.warning("bundled library seed import skipped", exc_info=True)
 
+            # IK-0419: 題名の書き戻し（IK-0366）より前に解析された教材は、題名が
+            # ファイル名・arXiv ID のまま残っている。採用 run の文書構造から題名が採れる
+            # 教材だけを1回直す（冪等・人が付けた題名は上書きしない）。stable_key と同じく
+            # 専用キーの advisory xact lock 配下で走らせ、失敗しても起動は止めない。
+            try:
+                from core.document_pipeline.persistence import (
+                    DOCUMENT_TITLE_BACKFILL_LOCK_KEY,
+                    backfill_document_titles_from_structure,
+                )
+
+                title_session = _pg_session()
+                try:
+                    title_session.execute(
+                        sa_text("SELECT pg_advisory_xact_lock(:key)"),
+                        {"key": DOCUMENT_TITLE_BACKFILL_LOCK_KEY},
+                    )
+                    fixed = backfill_document_titles_from_structure(title_session)
+                    title_session.commit()
+                    if fixed:
+                        logger.info("documents: title backfill updated %d row(s)", fixed)
+                except Exception:  # noqa: BLE001
+                    title_session.rollback()
+                    logger.warning("documents: title backfill skipped", exc_info=True)
+                finally:
+                    title_session.close()
+            except Exception:  # noqa: BLE001
+                logger.warning("documents: title backfill unavailable", exc_info=True)
+
             # 知識オブジェクト層（migration 078）: live 行の stable_key バックフィル。
             # fail-open — 失敗しても起動は続ける（旧行は stable_key NULL のまま残り、
             # 次回起動か次の再解析で付く）。対象ゼロなら何もしない（冪等）。

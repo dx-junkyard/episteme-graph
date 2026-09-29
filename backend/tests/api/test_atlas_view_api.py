@@ -803,3 +803,39 @@ class TestTopicAttributionGap1:
             {}, {"id": "t", "title": "全く無関係な題目zzz9"}
         )
         assert out is None
+
+
+class TestLearnerLedgerHonesty:
+    """IK-0412: ledger_status は検証行と食い違わない・パンくずに内部キーを出さない。"""
+
+    def test_ledger_status_agrees_with_verify_line(self, client, warm_cache):
+        res = client.get("/api/atlas?cartridge=particle_physics", headers=_headers())
+        assert res.status_code == 200
+        data = res.json()
+        for node_id, node in data["nodes"].items():
+            verify = node.get("verify") or ""
+            if "記帳なし" in verify or "記帳がありません" in verify:
+                assert node["ledger_status"] in ("unrecorded", "fog"), (node_id, node)
+            if node["ledger_status"] == "verified":
+                assert "記帳なし" not in verify and "記録されていません" not in verify
+
+    def test_crumbs_use_display_name_not_domain_key(self, client, warm_cache):
+        res = client.get("/api/atlas?cartridge=particle_physics", headers=_headers())
+        data = res.json()
+        for crumb in data["crumbs"].values():
+            assert "particle_physics" not in crumb
+        assert data["domain_name"]
+        assert data["domain_name"] != "particle_physics"
+        # フロントの取得キーは互換のまま残る
+        assert data["cartridge"] == "particle_physics"
+
+    def test_assumed_pill_has_fact_note(self, client, warm_cache):
+        from core import label_vocab
+
+        res = client.get("/api/atlas?cartridge=particle_physics", headers=_headers())
+        data = res.json()
+        assumed = [n for n in data["nodes"].values() if n.get("status") == "assumed"]
+        for node in assumed:
+            assert node["pill_note"] == label_vocab.ATLAS_PILL_NOTES["assumed"]
+        for entry in data["nodes_list"]:
+            assert "pill_note" in entry["panel"]

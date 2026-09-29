@@ -60,8 +60,15 @@ SELF_CHECK_LABELS = {
     "verdict_wrong": "観点がおかしい",
 }
 
-#: 自己確認のうち「本人が見比べて先へ進むと決めた」もの（完了の確定に使う）。
-SELF_CHECK_ADVANCING = ("agreed", "disagreed")
+#: 自己確認のうち完了の確定に使うもの。IK-0399 で ``disagreed``（「違っていた」= 本人の
+#: 見立てが要件と合わなかったという申告）を外した — 是正 F1 当初の「違っていたが先へ進むと
+#: 決めた」という読みは、ボタンの文言（「違っていた」）からは読み取れず、押した直後に
+#: 「完了」と表示されて学習者の申告と食い違っていた。先へ進むのは「合っていた」だけで、
+#: 「違っていた」は記録して事実文を返す（進行は止めない — トピックはいつでも開ける）。
+SELF_CHECK_ADVANCING = ("agreed",)
+
+#: 観点が1件も返らなかった要素に置く事実文（IK-0409。要素を黙って落とさない）。
+MISSING_OBSERVATION_STATEMENT = "この要素についての観点は得られませんでした。"
 
 
 # --- 純関数 ---------------------------------------------------------------
@@ -69,6 +76,13 @@ SELF_CHECK_ADVANCING = ("agreed", "disagreed")
 
 #: 「80点」「70%」のような採点表記（語彙だけでは拾えないので数値パターンでも落とす）。
 _SCORE_PATTERN = re.compile(r"\d+\s*(?:点|%|％)")
+#: 英語の判定・採点語（IK-0409 で観点を回答の言語で書かせるようにしたため、日本語の
+#: denylist だけでは英語の観点の判定語を落とせない）。語境界で照合する。
+_VERDICT_EN_PATTERN = re.compile(
+    r"\b(?:correct(?:ly)?|incorrect(?:ly)?|wrong|passed|failed|grade[ds]?|scor(?:e|ed|es|ing)|"
+    r"\d+\s*points?)\b",
+    re.IGNORECASE,
+)
 
 
 def sanitize_statement(text: object) -> str:
@@ -80,6 +94,8 @@ def sanitize_statement(text: object) -> str:
         if word in s:
             return ""
     if _SCORE_PATTERN.search(s):
+        return ""
+    if _VERDICT_EN_PATTERN.search(s):
         return ""
     return s
 
@@ -137,6 +153,33 @@ def normalize_observations(
         if not requirement and not statement:
             continue
         out.append({"requirement": requirement, "status": status, "statement": statement})
+    return out
+
+
+def fill_missing_requirements(
+    observations: list[dict[str, str]],
+    answer_requirements: list[str],
+) -> list[dict[str, str]]:
+    """出題の要素のうち観点が返らなかったものを ``unclear`` + 事実文で補う（IK-0409）。
+
+    LLM が要素5つのうち3つだけに観点を付けても、残り2つを黙って落とさない。補うのは
+    判定ではなく「観点が得られなかった」という事実だけ（status は ``unclear`` — 合否側へ
+    倒さない）。返った観点の並びはそのまま保ち、補った要素を出題の要素の順で後ろに足す。
+    要素が未設定の出題では何もしない。
+    """
+    requirements = [str(r).strip() for r in (answer_requirements or []) if str(r).strip()]
+    out = list(observations or [])
+    if not requirements:
+        return out
+    present = {str(obs.get("requirement") or "").strip() for obs in out}
+    for req in requirements:
+        if req not in present:
+            out.append({
+                "requirement": req,
+                "status": OBSERVATION_UNCLEAR,
+                "statement": MISSING_OBSERVATION_STATEMENT,
+            })
+            present.add(req)
     return out
 
 
@@ -198,8 +241,13 @@ def build_statements(
     return statements
 
 
-def parsed_observations(parsed: dict[str, Any], answer_requirements: list[str]) -> list[dict[str, str]]:
+def parsed_observations(
+    parsed: dict[str, Any],
+    answer_requirements: list[str],
+    *,
+    limit: int = MAX_OBSERVATIONS,
+) -> list[dict[str, str]]:
     """LLM の JSON（`observations` キー）から観点列を取り出す薄いヘルパ。"""
     if not isinstance(parsed, dict):
         return []
-    return normalize_observations(parsed.get("observations"), answer_requirements)
+    return normalize_observations(parsed.get("observations"), answer_requirements, limit=limit)

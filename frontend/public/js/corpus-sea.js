@@ -82,6 +82,8 @@
     landscape: null,
     skeleton: null,
     documents: [],
+    // 一覧に出ない閲覧可能な論文についてのサーバの事実文（IK-0414・optional）。
+    documentFacts: [],
     selectedDocumentId: "",
     // 地図のアンカー円を押したときの論文リスト絞り込み。null で全件。
     // 押しても地図の見え方は変わらない（右のリストの範囲が変わるだけ）。
@@ -300,6 +302,7 @@
     state.landscape = null;
     state.skeleton = null;
     state.documents = [];
+    state.documentFacts = [];
     state.loading = true;
     renderDomains();
     renderMap();
@@ -319,6 +322,10 @@
     state.landscape = landscape;
     state.skeleton = skeleton;
     state.documents = (documents && Array.isArray(documents.documents)) ? documents.documents : [];
+    // facts は optional。無い・形が違うときは何も出さない（fail-soft）。
+    state.documentFacts = (documents && Array.isArray(documents.facts))
+      ? documents.facts.filter(function (f) { return typeof f === "string" && f; })
+      : [];
     renderMap();
     renderPapers();
     renderDetail();
@@ -515,6 +522,16 @@
   // Phase A: 論文リストと詳細パネル
   // -------------------------------------------------------------------
 
+  // 一覧の下に置くサーバの事実文（この分野の地図に結びついていない閲覧可能な論文の題名）。
+  // 文言はサーバが組む（JS で語彙・件数を足さない）。地図の位置には置かない。
+  function documentFactsHtml() {
+    const facts = state.documentFacts || [];
+    if (!facts.length) return "";
+    return facts.map(function (f) {
+      return '<div class="corpus-sea-doc-fact">' + esc(f) + "</div>";
+    }).join("");
+  }
+
   function renderPapers() {
     const box = el("corpus-sea-papers");
     if (!box) return;
@@ -527,7 +544,8 @@
       return;
     }
     if (!state.documents.length) {
-      box.innerHTML = '<div class="corpus-sea-empty">この分野で閲覧できる論文はまだありません。</div>';
+      box.innerHTML = '<div class="corpus-sea-empty">この分野で閲覧できる論文はまだありません。</div>' +
+        documentFactsHtml();
       return;
     }
     const filter = state.anchorFilter;
@@ -560,6 +578,7 @@
       }
       html += "</button>";
     });
+    html += documentFactsHtml();
     box.innerHTML = html;
     const clearBtn = box.querySelector("#corpus-sea-filter-clear");
     if (clearBtn) clearBtn.addEventListener("click", clearAnchorFilter);

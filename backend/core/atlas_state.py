@@ -39,6 +39,7 @@ from sqlalchemy import bindparam
 from sqlalchemy import text as sa_text
 
 from core import atlas_placement
+from core import label_vocab
 from core.course_data import course_cartridge_id, course_source_material_ids, course_topics
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,8 @@ STATUS_ASSUMED = "assumed"      # 暗黙の前提
 STATUS_CONTESTED = "contested"  # 解釈が分かれる
 STATUS_VERIFIED = "verified"    # ソースバッキング + evidence
 STATUS_UNKNOWN = "unknown"      # コーパス由来の状態なし (seed も無い)
+# 学習者に返す ledger_status の「台帳に記帳なし」(IK-0412。値の正本は label_vocab)
+STATUS_UNRECORDED = label_vocab.ATLAS_LEDGER_STATUS_UNRECORDED
 
 NODE_STATUSES = (STATUS_GAP, STATUS_ASSUMED, STATUS_CONTESTED, STATUS_VERIFIED, STATUS_UNKNOWN)
 
@@ -108,11 +111,86 @@ PILL_LABELS = {
     STATUS_UNKNOWN: "記帳なし",
     "unvisited": "未訪問",
     "now": "いまここ",
+    # IK-0412: 台帳に記帳が無い場所（骨格 seed の初期表示・コーパス由来の状態なし）。
+    STATUS_UNRECORDED: label_vocab.ATLAS_PILL_UNRECORDED,
 }
+
+
+def learner_ledger_status(
+    status: str, status_source: str | None = None, evidence_count: int | None = None
+) -> str:
+    """学習者に返す ``ledger_status``（台帳の状態）を、検証行の文と食い違わない値にする。
+
+    IK-0412: 骨格 seed の ``display_seed_status``（教員レビュー済みの骨格が付けた初期表示）
+    は台帳の記帳ではない。seed 由来の行・コーパス由来の状態が無い行・原文の引用が 0 本の
+    verified は、検証行が「台帳に記帳なし」と言うのに ``ledger_status`` だけ ``verified``
+    を名乗っていた。これらを :data:`STATUS_UNRECORDED` に寄せる。表示状態（``status``）と
+    ノードの色はフロント互換のため変えない（色は骨格の初期表示のまま）。
+    """
+    if status_source == STATUS_SOURCE_SEED:
+        return STATUS_UNRECORDED
+    if status == STATUS_UNKNOWN:
+        return STATUS_UNRECORDED
+    if status == STATUS_VERIFIED and evidence_count is not None and evidence_count <= 0:
+        return STATUS_UNRECORDED
+    return status
+
+
+def learner_pill(status: str, ledger_status: str) -> str:
+    """詳細パネルのピル文言。seed が「原文に裏付け」を初期表示に使う場所を言い換える。"""
+    if status == STATUS_VERIFIED and ledger_status == STATUS_UNRECORDED:
+        return label_vocab.ATLAS_PILL_SEED_VERIFIED
+    return PILL_LABELS.get(status, status)
+
+
+def pill_note_for(status: str, ledger_status: str) -> str:
+    """ピルの意味を1行で言う事実文（無ければ空文字）。正本は ``label_vocab.ATLAS_PILL_NOTES``。"""
+    notes = label_vocab.ATLAS_PILL_NOTES
+    return notes.get(status) or notes.get(ledger_status) or ""
+
+
+def domain_display_name(session, domain_key: str) -> str:
+    """分野（atlas ドメイン）の学習者向け表示名。内部キーを表示名の代わりに出さない。
+
+    順に ``atlas_domain_meta.name`` → 同梱 ``atlas_domains/<key>/domain.json`` の name。
+    どちらも無ければ ``label_vocab.ATLAS_DOMAIN_UNNAMED_LABEL``。fail-soft（例外は握る）。
+    """
+    key = str(domain_key or "").strip()
+    if not key:
+        return label_vocab.ATLAS_DOMAIN_UNNAMED_LABEL
+    try:
+        from core import atlas_store
+
+        meta = atlas_store.load_domain_meta(session, key) if session is not None else None
+        name = str((meta or {}).get("name") or "").strip()
+        if not name:
+            bundled = atlas_store._bundled_domain_meta(key) or {}
+            name = str(bundled.get("name") or "").strip()
+    except Exception:  # noqa: BLE001 — 表示名が引けないだけで地図は出す
+        logger.warning("atlas domain display name lookup failed for %s", key, exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        name = ""
+    return learner_domain_label(name, key)
+
+
+def learner_domain_label(name: str | None, domain_key: str | None) -> str:
+    """表示名が空・内部キーそのものなら、登録なしの呼び名に倒す（純関数）。"""
+    text = str(name or "").strip()
+    if not text or text == str(domain_key or "").strip():
+        return label_vocab.ATLAS_DOMAIN_UNNAMED_LABEL
+    return text
 
 # 霧領域の定型文 (§6.2 — 事実の提示のみ。投入の指示・催促はしない)
 FOG_VERIFY_LINE = "この領域はAIの一般知識による地形。台帳に根拠の記帳がありません。"
 FOG_ENDORSE_LINE = "論文を追加すると、この領域に灯りがつきます。"
+
+# 骨格 seed 由来の検証行 (コーパス由来の状態が無い概念の弱い初期表示)
+SEED_VERIFY_LINE = "検証: 台帳に記帳なし。骨格（教員レビュー済）の初期表示。"
+# verified だが原文の引用が 0 本のとき (IK-0368 — 「原文0本に裏付け」を組まない)
+VERIFIED_WITHOUT_EVIDENCE_LINE = "検証: 原文の引用は台帳に記録されていません。"
 
 # 行間ステップの定型文 (§12)
 GAP_VERIFY_LINE = "原文に対応する記述が見つからず、導出を繋ぐためにAIが補完した行間です。"
@@ -239,12 +317,21 @@ def verify_line_for(status: str, signals: ConceptSignals) -> str:
             line += f"原文{signals.evidence_count}本に記帳あり{_refs_fragment(signals.evidence_refs)}。"
         return line
     if status == STATUS_VERIFIED:
-        line = f"検証: 原文{signals.evidence_count}本に裏付け{_refs_fragment(signals.evidence_refs)}。"
+        if signals.evidence_count <= 0:
+            # IK-0368: 根拠 0 本で verified になるのは、コーパス由来の状態が無い概念に
+            # 骨格（教員レビュー済）の seed_status=verified を弱い初期表示として使った場合。
+            # 「原文0本に裏付け」という自己矛盾の文を組まず、verified の由来を事実で書く。
+            if signals.seed_status and not signals.has_corpus_state:
+                line = SEED_VERIFY_LINE
+            else:
+                line = VERIFIED_WITHOUT_EVIDENCE_LINE
+        else:
+            line = f"検証: 原文{signals.evidence_count}本に裏付け{_refs_fragment(signals.evidence_refs)}。"
         if signals.scope_text:
             line += f"スコープ: {signals.scope_text}。"
         return line
     if signals.seed_status and not signals.has_corpus_state:
-        return "検証: 台帳に記帳なし。骨格（教員レビュー済）の初期表示。"
+        return SEED_VERIFY_LINE
     return "検証: 台帳に記帳がありません。"
 
 

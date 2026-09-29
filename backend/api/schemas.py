@@ -230,6 +230,10 @@ class ChunkContent(BaseModel):
 class TopicMaterialResponse(BaseModel):
     topic_id: str
     chunks: list[ChunkContent]
+    # IK-0375: 解説（student_material）がまだ無く、論文の本文をそのまま返すときだけ
+    # 付く事実文（正本 ``core/label_vocab.py`` の MATERIAL_PREPARING_NOTICE /
+    # MATERIAL_NOT_GENERATED_NOTICE）。数字を含まない。解説があるときは None。
+    preparation_notice: str | None = None
 
 
 class LearningChapter(BaseModel):
@@ -305,6 +309,19 @@ class LearningCourseOut(BaseModel):
     visibility: str = "private"
     group_id: str | None = None
     description: str = ""
+
+
+class LearningEnrollOut(LearningCourseOut):
+    """受講登録（``POST /courses/{id}/enroll``）の応答（IK-0385）。
+
+    一覧行と同じ投影（``LearningCourseOut``）に、登録が成立した事実を足す。
+    ``is_enrollable`` は「まだ受講していない公開コースか」の意味なので登録後は False に
+    なり、それだけを見た読み手は「受講できなかった」と読む。成否は ``enrolled`` と
+    ``notice``（正本 ``core/label_vocab.py::COURSE_ENROLLED_NOTICE``・数字なし）で言う。
+    """
+
+    enrolled: bool = True
+    notice: str = ""
 
 
 class LearningCourseDetail(BaseModel):
@@ -446,7 +463,8 @@ class SourceTierItem(BaseModel):
     chunk_id: str = ""  # 該当チャンク（ポップアップで全文取得）
     source_title: str = ""
     tier: str = "out_of_source"  # approved | source | out_of_source
-    score: float = 0.0
+    # 類似度（cosine）の生値は学習者に返さない（IK-0433・数値非表示の原則）。tier の判定は
+    # search_chunks_with_metadata の内側で済んでいる。旧履歴の "score" キーは読み捨てる。
     quote: str = ""   # 根拠本文の抜粋（出典カードの引用）
     meta: str = ""    # 出典メタ（ファイル名/節など）
     origin: str = "other_material"  # course_material（このコースの教材）| other_material（別の資料）
@@ -562,10 +580,13 @@ class LearningCheckSelfCheckRequest(BaseModel):
 
 class LearningCheckSelfCheckResponse(BaseModel):
     self_check: str
-    #: agreed / disagreed のときだけトピック完了を記録する（verdict_wrong は記録のみ）。
+    #: agreed のときだけトピック完了を記録する（IK-0399: disagreed / verdict_wrong は記録のみ）。
     topic_completed: bool = False
     course_completed: bool = False
     completed_topic_ids: list[str] = Field(default_factory=list)
+    #: 完了にしなかった理由の事実文（``disagreed`` のとき。正本
+    #: ``core/label_vocab.py::CHECK_SELF_CHECK_DISAGREED_NOTICE``・数字なし）。それ以外は空。
+    notice: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -801,6 +822,11 @@ class LectureSegment(BaseModel):
     segment_mode: str = "full"
     slides: list[LectureSlide] = []
     language: str = "ja"  # このセグメントの spoken_language（無指定は "ja"）
+    # IK-0458: 受講画面（ChunkContent.evidence_items）と同じ読み取り専用 evidence DTO
+    # （core.course_content_builder.build_topic_evidence_items）。スライド本文の
+    # ``![[component|claim|source|equation|figure:id]]`` を受講画面と同じ規則で解決する材料。
+    # トピック教材経路のセグメントだけが持つ（チャンク経路は従来どおり空）。
+    evidence_items: list[dict] = []
     # 注記フラグ（是正 F3）: この区画が「以前に触れた前提概念だけを扱う短い区画」と
     # 判定された事実。提示内容は変わらない。画面側の「短く聴く」トグル（既定 OFF）が
     # ON のときだけ、本人の操作でこの区画を畳める（消さずに畳む）。

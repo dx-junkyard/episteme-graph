@@ -7,7 +7,7 @@
 | turn_ids ⊆ 入力窓の turn id 集合 | hard |
 | target_refs の全 id が context blocks に存在 | hard |
 | tension_type ∈ タクソノミー | hard |
-| paraphrase に断定形を含まず、推量末尾を持つ | hard |
+| paraphrase に断定形を含まず、推量末尾を持つ（英語の学習者は推量の助動詞・副詞） | hard |
 | paraphrase ≤ 120字 | hard |
 | is_tension_not_gap == false のエントリが candidates に混入していない | hard |
 | candidates 件数 ≤ max_candidates | hard |
@@ -40,6 +40,34 @@ _ASSERTIVE_PATTERNS = (
 # 推量末尾（末尾の句点は許容）
 _TENTATIVE_ENDINGS = ("かもしれません", "ように見えます", "のかも")
 
+# 英語の学習者向け（プロンプト規則4「学習者の言語で」、IK-0401）: 英語は推量が文末でなく
+# 文中の助動詞・副詞に出るので、末尾一致ではなく語境界付きの含有で判定する。
+_ENGLISH_TENTATIVE_RE = re.compile(
+    r"\b(?:may|might|could|perhaps|possibly|seems?|seem to|appears?|appear to)\b",
+    re.IGNORECASE,
+)
+# 英語の断定形（P2: 学習者の心的状態・結論を言い切らない）。両言語で常に検査する。
+_ENGLISH_ASSERTIVE_PATTERNS = (
+    re.compile(r"\byou (?:feel|think|believe)\b", re.IGNORECASE),
+    re.compile(r"\b(?:definitely|certainly|undoubtedly|surely)\b", re.IGNORECASE),
+    re.compile(r"\bmust (?:be|feel|have)\b", re.IGNORECASE),
+)
+# 学習者発話の言語判定: かな・漢字と英字の比。英字がかな漢字の4倍を超えれば英語とみなす
+# （日本語の発話にも LaTeX・英語の術語は混じるので、単純な英字の有無では決めない）。
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+_ENGLISH_DOMINANCE_RATIO = 4
+
+
+def learner_language(learner_texts: list[str]) -> str:
+    """学習者発話が主に英語なら ``"en"``、それ以外は ``"ja"``（空なら ``"ja"``）。"""
+    joined = "\n".join(str(t or "") for t in learner_texts or [])
+    cjk = len(_CJK_RE.findall(joined))
+    latin = len(_LATIN_RE.findall(joined))
+    if latin and latin > cjk * _ENGLISH_DOMINANCE_RATIO:
+        return "en"
+    return "ja"
+
 # confidence キャリブレーション警告用: reason が言及するシグナル種別の素朴カウント
 _SIGNAL_KEYWORD_GROUPS = (
     ("hedge", ("hedge", "なんとなく", "腑に落ち", "気持ち悪", "しっくり", "違和感", "unease")),
@@ -52,7 +80,14 @@ _SIGNAL_KEYWORD_GROUPS = (
 )
 
 
-def _paraphrase_errors(paraphrase: str, idx: int) -> list[str]:
+def _paraphrase_errors(paraphrase: str, idx: int, language: str = "ja") -> list[str]:
+    """paraphrase の文体検査（P2）。``language`` は :func:`learner_language` の結果。
+
+    日本語の学習者: 推量末尾（かもしれません / ように見えます / のかも）必須（従来どおり）。
+    英語の学習者: 推量の助動詞・副詞（may / might / seems 等）の含有を必須にし、日本語の
+    推量末尾も受ける（学習者の言語で書けと指示している以上、英語の推量形を不合格にしない）。
+    断定形の検査は両言語で常に行う。
+    """
     errors: list[str] = []
     p = (paraphrase or "").strip()
     if not p:
@@ -60,15 +95,22 @@ def _paraphrase_errors(paraphrase: str, idx: int) -> list[str]:
         return errors
     if len(p) > PARAPHRASE_MAX_LEN:
         errors.append(f"candidates[{idx}].paraphrase exceeds {PARAPHRASE_MAX_LEN} characters")
-    for pat in _ASSERTIVE_PATTERNS:
+    for pat in _ASSERTIVE_PATTERNS + _ENGLISH_ASSERTIVE_PATTERNS:
         if pat.search(p):
             errors.append(
                 f"candidates[{idx}].paraphrase uses an assertive form (pattern: {pat.pattern}); "
-                "use a tentative register such as 「〜かもしれません」"
+                "use a tentative register such as 「〜かもしれません」 or 'may / might / seems'"
             )
             break
-    stripped = p.rstrip("。 　")
-    if not any(stripped.endswith(e) for e in _TENTATIVE_ENDINGS):
+    stripped = p.rstrip("。 　.")
+    japanese_ok = any(stripped.endswith(e) for e in _TENTATIVE_ENDINGS)
+    if language == "en":
+        if not (japanese_ok or _ENGLISH_TENTATIVE_RE.search(p)):
+            errors.append(
+                f"candidates[{idx}].paraphrase must use a tentative form "
+                "(may / might / seems / perhaps / possibly / could / appears)"
+            )
+    elif not japanese_ok:
         errors.append(
             f"candidates[{idx}].paraphrase must end with a tentative form "
             "(かもしれません / ように見えます / のかも)"
@@ -118,6 +160,7 @@ def validate_output(
 
     turn_ids = window.turn_ids()
     learner_texts = window.learner_texts()
+    language = learner_language(learner_texts)
     allowed_components = window.allowed_component_ids()
     allowed_chunks = window.allowed_chunk_ids()
 
@@ -157,7 +200,7 @@ def validate_output(
         if bad_chunks:
             errors.append(f"candidates[{idx}].target_refs.chunk_ids contains invented ids: {bad_chunks}")
 
-        errors.extend(_paraphrase_errors(cand.paraphrase, idx))
+        errors.extend(_paraphrase_errors(cand.paraphrase, idx, language))
 
         if raw.get("is_tension_not_gap") is False:
             errors.append(

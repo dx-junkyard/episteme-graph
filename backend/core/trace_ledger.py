@@ -29,9 +29,14 @@ import json
 
 from sqlalchemy import text as sa_text
 
-from core.label_vocab import TRACE_STATUS_LABELS
+from core.label_vocab import (
+    INTENTION_ROLE_LABELS,
+    TRACE_STATUS_LABELS,
+    TRACE_STATUS_LABELS_BY_KIND,
+)
 from core.postgres import get_session as _pg_session
 from core.privacy import K_ANONYMITY
+from core.topic_labels import reserved_topic_label
 from core.trace_registry import TRACE_KINDS
 
 # ---------------------------------------------------------------------------
@@ -53,9 +58,13 @@ PUBLICITY_PRIVATE = "あなた以外には表示されません。"
 #: 全体注記（TR5）。包含来歴の記録基盤は提案1 v2（手渡しチャネル）の専用設計書で
 #: 確定する — ここで先取りしない。
 PROVENANCE_NOTE = (
-    "集約への包含の来歴は現在記録されていません。手渡しの仕組み（実装予定）と同時に、"
-    "どの集約に含まれたかを記録する仕組みを追加します。"
+    "集約への包含の来歴は現在記録されていません。"
+    "どの記録がどの匿名集計に含まれたかは、この画面からは確かめられません。"
 )
+
+#: 書き込み経路が現存しない系統（登録簿の ``dead``）に既存の行があるときの事実文。
+#: ``dead`` という内部フラグ自体は学習者 DTO に出さない（IK-0415）。
+RETIRED_SYSTEM_NOTE = "この種類の記録は、いまは新しく作られません。以前の記録だけを表示しています。"
 
 #: 持ち出し JSON の注記（TR5: 「完全」を無条件に断言しない — ごく大量の記録がある
 #: 場合は読み出し上限までになる。TR6: 上限の数値は出さない）。
@@ -67,6 +76,9 @@ EXPORT_NOTE = (
 #: 未知 status の表示ラベル（素通しにしない — 語彙の正本にない値をそのまま UI 語彙に
 #: 昇格させない。行自体は落とさず保持する。P4）。
 UNKNOWN_STATUS_LABEL = "その他"
+
+#: 登録簿に無い kind の系統見出し（内部の kind 名を見出しにしない）。
+UNREGISTERED_SYSTEM_LABEL = "その他の記録（種類不明）"
 
 #: 台帳一覧の既定上限（超過は truncated=True で正直に返す。持ち出しは常に全件、
 #: の意味論は呼び出し側が limit を十分大きく取ることで担保する — v1 は一覧と同じ
@@ -195,6 +207,23 @@ def _row_publicity(status: str, spec) -> str:
     return PUBLICITY_PRIVATE
 
 
+def status_label_for(kind: str, status: str, payload: dict | None = None) -> str:
+    """status の日本語ラベル（IK-0415）。
+
+    ``open`` を一律「未解決」と読ませない — kind ごとの上書き
+    （``label_vocab.TRACE_STATUS_LABELS_BY_KIND``）→ 学習の意図は役割のラベル
+    （``INTENTION_ROLE_LABELS``）→ 共通表 → 未知は「その他」の順に引く。
+    """
+    if kind == "intention" and status == "open":
+        role = str((payload or {}).get("role") or "")
+        if role in INTENTION_ROLE_LABELS:
+            return INTENTION_ROLE_LABELS[role]
+    by_kind = TRACE_STATUS_LABELS_BY_KIND.get(kind) or {}
+    if status in by_kind:
+        return by_kind[status]
+    return TRACE_STATUS_LABELS.get(status, UNKNOWN_STATUS_LABEL)
+
+
 def _project_item(row: dict, spec, course_labels: dict) -> dict:
     """1行を台帳表示用に射影する。
 
@@ -205,14 +234,17 @@ def _project_item(row: dict, spec, course_labels: dict) -> dict:
     payload = row.get("payload") or {}
     status = row.get("status") or ""
     course_id = row.get("course_id") or ""
+    kind = row.get("kind") or ""
+    context_label = payload.get("context_label") or ""
     return {
         "id": row.get("id") or "",
-        "kind": row.get("kind") or "",
-        "kind_label": spec.label if spec is not None else (row.get("kind") or ""),
+        "kind": kind,
+        "kind_label": spec.label if spec is not None else UNREGISTERED_SYSTEM_LABEL,
         "status": status,
-        "status_label": TRACE_STATUS_LABELS.get(status, UNKNOWN_STATUS_LABEL),
+        "status_label": status_label_for(kind, status, payload),
         "text": payload.get("text") or "",
-        "context_label": payload.get("context_label") or "",
+        # 旧行の予約 topic id（``_discussion``）は読み時に表示名へ（行は書き換えない）。
+        "context_label": reserved_topic_label(course_id, context_label) or context_label,
         "created_at": row.get("created_at") or "",
         "course_id": course_id,
         "course_label": course_labels.get(course_id, ""),
@@ -243,19 +275,25 @@ def build_ledger_overview(
         items = [
             _project_item(row, spec, course_labels) for row in by_kind.pop(kind, [])
         ]
-        systems.append({
+        if spec.dead and not items:
+            # 書き込み経路の無い系統は、行が無ければ系統ごと出さない（IK-0415）。
+            # 行があれば落とさず、事実文を添えて出す（P4）。
+            continue
+        system = {
             "kind": kind,
             "label": spec.label,
-            "dead": spec.dead,
             "publicity_note": _system_publicity_note(spec),
             "items": items,
-        })
+        }
+        if spec.dead:
+            system["publicity_note"] = RETIRED_SYSTEM_NOTE + system["publicity_note"]
+        systems.append(system)
     # 登録簿に無い kind（実行時の異常系でのみ生じうる）— 情報を落とさない（P4）。
+    # 見出しに内部の kind 名を出さず「その他の記録」とする（IK-0415）。
     for kind, kind_rows in by_kind.items():
         systems.append({
             "kind": kind,
-            "label": kind,
-            "dead": False,
+            "label": UNREGISTERED_SYSTEM_LABEL,
             "publicity_note": PUBLICITY_DASHBOARD,
             "items": [_project_item(row, None, course_labels) for row in kind_rows],
         })

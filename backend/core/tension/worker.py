@@ -26,12 +26,24 @@ import threading
 from sqlalchemy import text as sa_text
 
 from core.config import get_settings
-from core.course_data import course_chapters, course_topics
+from core.course_data import (
+    course_chapters,
+    course_source_material_ids,
+    course_sources,
+    course_topics,
+)
+from core.topic_labels import reserved_topic_label
 from core.llm_usage.context import bind_usage_context
 from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session as _pg_session
 from core.tension.agent import DEFAULT_MAX_CANDIDATES, TensionMiningAgent
-from core.tension.input_builder import select_window_turns, turns_from_history
+from core.tension.input_builder import (
+    MAX_CONTEXT_COMPONENTS,
+    build_context_blocks,
+    cited_chunk_ids_from_hints,
+    select_window_turns,
+    turns_from_history,
+)
 from core.tension.schema import (
     DETECTOR_VERSION,
     ConversationWindow,
@@ -180,6 +192,12 @@ def run_tension_mining(user_id: str, course_id: str, topic_id: str | None) -> in
             sa_text("SELECT data FROM learning_courses WHERE id = :cid"),
             {"cid": course_id},
         ).fetchone()
+        hint_payloads = [r[1] if isinstance(r[1], dict) else json.loads(r[1] or "{}") for r in hints]
+        context_components, context_chunks = _collect_context_blocks(
+            session,
+            course_row[0] if course_row else None,
+            cited_chunk_ids_from_hints(hint_payloads),
+        )
     except Exception as exc:
         session.rollback()
         logger.warning("run_tension_mining setup failed: %s", exc)
@@ -196,8 +214,9 @@ def run_tension_mining(user_id: str, course_id: str, topic_id: str | None) -> in
     if not history:
         return 0
 
-    topic_title, context_label = _topic_labels(course_row[0] if course_row else None, topic_id)
-    hint_payloads = [r[1] if isinstance(r[1], dict) else json.loads(r[1] or "{}") for r in hints]
+    topic_title, context_label = _topic_labels(
+        course_row[0] if course_row else None, topic_id, course_id=course_id,
+    )
     hint_texts = [p.get("text", "") for p in hint_payloads if p.get("text")]
     overall_tier = next(
         (p.get("overall_tier", "") for p in reversed(hint_payloads) if p.get("overall_tier")), "",
@@ -209,8 +228,10 @@ def run_tension_mining(user_id: str, course_id: str, topic_id: str | None) -> in
         topic_id=topic_id or "",
         topic_title=topic_title,
         turns=select_window_turns(turns),
-        components=[],  # 窓内で参照が確定している component/chunk のみ渡す（現状は未収集）
-        chunks=[],
+        # 窓内で参照された chunk とその component（無ければ出典論文の親 component）。
+        # 以前は常に空で、target_refs が必ず空になっていた（IK-0402）。
+        components=context_components,
+        chunks=context_chunks,
     )
 
     agent = TensionMiningAgent()
@@ -257,6 +278,93 @@ def run_tension_mining(user_id: str, course_id: str, topic_id: str | None) -> in
     return saved
 
 
+def _course_source_document_ids(session, course_data) -> list[str]:
+    """コースの出典（sources）が指す document.id（``services.list_course_source_document_ids``
+    と同じ意味論: 明示 document_id ∪ material_id → documents.source_path の解決）。"""
+    data = course_data
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            data = None
+    if not isinstance(data, dict):
+        return []
+    ids = [str(s["document_id"]) for s in course_sources(data) if isinstance(s, dict) and s.get("document_id")]
+    material_ids = list(course_source_material_ids(data))
+    if material_ids:
+        rows = session.execute(
+            sa_text("SELECT id::text FROM documents WHERE source_path = ANY(:mids)"),
+            {"mids": material_ids},
+        ).fetchall()
+        ids.extend(str(r[0]) for r in rows if r and r[0])
+    out: list[str] = []
+    for doc_id in ids:
+        if doc_id not in out:
+            out.append(doc_id)
+    return out
+
+
+def _collect_context_blocks(session, course_data, cited_chunk_ids: list[str]) -> tuple[list[dict], list[dict]]:
+    """context blocks（target_refs に書いてよい実在 id）を best-effort で集める（IK-0402）。
+
+    - chunks: ヒント痕跡の ``cited_chunk_ids``（窓で実際に引用された chunk）。
+    - components: その chunk を ``primary_chunk_id`` に持つ live component。1件も無ければ
+      コースの出典論文の親 component（``parent_agent_component_id IS NULL``）に縮退する
+      （予約疑似トピックや根拠の結び付かないトピックでも候補を空にしない）。
+    DB 障害は空のまま返す（従来の挙動＝空の context blocks に縮退・解析は止めない）。
+    """
+    chunk_rows: list = []
+    component_rows: list = []
+    if cited_chunk_ids:
+        try:
+            chunk_rows = session.execute(
+                sa_text("""
+                    SELECT id::text, LEFT(COALESCE(NULLIF(display_text, ''), text), 400)
+                    FROM chunks WHERE id::text = ANY(:ids)
+                """),
+                {"ids": cited_chunk_ids},
+            ).fetchall()
+            order = {cid: i for i, cid in enumerate(cited_chunk_ids)}
+            chunk_rows = sorted(chunk_rows, key=lambda r: order.get(str(r[0]), len(order)))
+        except Exception as exc:
+            session.rollback()
+            logger.info("tension context: chunk lookup skipped: %s", exc)
+            chunk_rows = []
+        try:
+            component_rows = session.execute(
+                sa_text("""
+                    SELECT id::text, name FROM theory_components_live
+                    WHERE primary_chunk_id::text = ANY(:ids)
+                    ORDER BY name
+                    LIMIT :lim
+                """),
+                {"ids": cited_chunk_ids, "lim": MAX_CONTEXT_COMPONENTS},
+            ).fetchall()
+        except Exception as exc:
+            session.rollback()
+            logger.info("tension context: component lookup skipped: %s", exc)
+            component_rows = []
+    if not component_rows:
+        try:
+            doc_ids = _course_source_document_ids(session, course_data)
+            if doc_ids:
+                component_rows = session.execute(
+                    sa_text("""
+                        SELECT id::text, name FROM theory_components_live
+                        WHERE document_id::text = ANY(:docs)
+                          AND parent_agent_component_id IS NULL
+                        ORDER BY name
+                        LIMIT :lim
+                    """),
+                    {"docs": doc_ids, "lim": MAX_CONTEXT_COMPONENTS},
+                ).fetchall()
+        except Exception as exc:
+            session.rollback()
+            logger.info("tension context: source component fallback skipped: %s", exc)
+            component_rows = []
+    return build_context_blocks(chunk_rows, component_rows)
+
+
 def _insert_candidate(session, user_id: str, course_id: str, topic_id: str | None, payload: dict) -> None:
     """候補1件を kind='tension' / status='candidate' で保存する（P1: 確定は本人のみ）。"""
     session.execute(
@@ -272,8 +380,16 @@ def _insert_candidate(session, user_id: str, course_id: str, topic_id: str | Non
     )
 
 
-def _topic_labels(course_data, topic_id: str | None) -> tuple[str, str]:
-    """course_data からトピック表示名と context_label（章·トピック）を引く。"""
+def _topic_labels(
+    course_data, topic_id: str | None, *, course_id: str | None = None,
+) -> tuple[str, str]:
+    """course_data からトピック表示名と context_label（章·トピック）を引く。
+
+    予約疑似トピックは内部 id のまま出さない（``core.topic_labels``・IK-0403）。
+    """
+    pseudo = reserved_topic_label(course_id, topic_id)
+    if pseudo:
+        return pseudo, pseudo
     data = course_data
     if isinstance(data, str):
         try:

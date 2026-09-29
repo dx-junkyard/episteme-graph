@@ -16,7 +16,20 @@ from core.course_data import course_chapters
 # 本文に埋め込まれたクリック候補マーカー。フロント側でのパース（\x00 センチネル方式）を
 # 廃し、ここ（サーバ側）の1か所で構造化アクションへ正規化する。
 _ACTION_BUTTON_RE = re.compile(r"\[ACTION_BUTTON:\s*([^\]\n]{1,120})\]")
-_DRILLDOWN_RE = re.compile(r"\[([^\]\n]{2,80}?について(?:詳しく)?(?:聞く|教えて|教えてください|知りたい))\]")
+#: IK-0477: マーカーの中に引用番号（``[98]`` / ``[17, 19–21]`` / ``[出典3]``）が1段入れ子になっても
+#: 1個のマーカーとして読む（``[^\]]`` だと内側の ``]`` で切れ、ボタンが「… reference [98」、
+#: 本文に「 found about μ]」が残っていた）。
+_MARKER_BODY = r"(?:[^\[\]\n]|\[[^\[\]\n]{1,24}\])"
+_DRILLDOWN_RE = re.compile(
+    r"\[(" + _MARKER_BODY + r"{2,80}?について(?:詳しく)?(?:聞く|教えて|教えてください|知りたい))\]"
+)
+#: IK-0425: 英語で答えた回答のドリルダウン（``[Ask more about X]`` / ``[Ask about X]`` /
+#: ``[Tell me more about X]``）。日本語形と同じく ``next_actions`` の drilldown にし、本文から除く
+#: （認識しないと角括弧の行がそのまま本文に残っていた）。
+_DRILLDOWN_EN_RE = re.compile(
+    r"\[((?:ask(?:\s+more)?\s+about|tell\s+me\s+more\s+about)\s+" + _MARKER_BODY + r"{2,80}?)\]",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -205,10 +218,57 @@ class LearningSupportAgent:
         return "前提知識" in msg and ("確認" in msg or "復習" in msg or "必要" in msg)
 
 
+_MATH_DELIMITED_RE = re.compile(r"\$\$(.+?)\$\$|\$(.+?)\$|\\\((.+?)\\\)|\\\[(.+?)\\\]", re.DOTALL)
+
+
+#: IK-0478: 区切りの無い生の LaTeX 制御綴り（``\alpha_K>0 implies \mu\ge1``）をボタン向けの
+#: 平文に直す表。表に無い綴りは名前だけ残す（``\rm`` のような書体指定は捨てる）。
+_LATEX_PLAIN = {
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε", "varepsilon": "ε",
+    "zeta": "ζ", "eta": "η", "theta": "θ", "kappa": "κ", "lambda": "λ", "mu": "μ", "nu": "ν",
+    "xi": "ξ", "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ", "phi": "φ", "varphi": "φ",
+    "chi": "χ", "psi": "ψ", "omega": "ω", "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ",
+    "Lambda": "Λ", "Sigma": "Σ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
+    "ge": "≥", "geq": "≥", "le": "≤", "leq": "≤", "ne": "≠", "neq": "≠", "approx": "≈",
+    "sim": "∼", "simeq": "≃", "propto": "∝", "times": "×", "cdot": "·", "pm": "±",
+    "infty": "∞", "partial": "∂", "nabla": "∇", "to": "→", "rightarrow": "→",
+}
+_LATEX_DROP = frozenset({"rm", "mathrm", "text", "mathit", "mathbf", "bf", "it", "left", "right", "displaystyle"})
+_LATEX_CMD_RE = re.compile(r"\\([A-Za-z]+)")
+_SOURCE_MARKER_IN_LABEL_RE = re.compile(r"\s*\[出典\s*\d+\]")
+_REF_NUMBER_IN_LABEL_RE = re.compile(r"\[(\d[\d,\s–\-]*)\]")
+
+
+def _latex_to_plain(text: str) -> str:
+    def _cmd(match: re.Match) -> str:
+        name = match.group(1)
+        if name in _LATEX_DROP:
+            return ""
+        return _LATEX_PLAIN.get(name, name)
+
+    out = _LATEX_CMD_RE.sub(_cmd, text or "")
+    out = out.replace("{", "").replace("}", "")
+    out = re.sub(r"([_^]) +", r"\1", out)
+    return re.sub(r"[ \t]{2,}", " ", out)
+
+
+def _strip_math_delimiters(text: str) -> str:
+    """``$…$`` / ``$$…$$`` / ``\\(…\\)`` / ``\\[…\\]`` の区切りを外し、中身だけを残す（IK-0451）。
+
+    IK-0478: 区切りの無い生の制御綴り（``\\alpha_K``・``\\ge``）も平文に直す。ボタンの文字と
+    送信する問いの両方に使う（書き直しの往復も同じ ``extract_inline_actions`` を通る）。
+    """
+    unwrapped = _MATH_DELIMITED_RE.sub(
+        lambda m: next(g for g in m.groups() if g is not None).strip(), text or ""
+    )
+    return _latex_to_plain(unwrapped)
+
+
 def extract_inline_actions(text: str) -> tuple[str, list[LearningSupportAction]]:
     """LLM 本文中のクリック候補マーカーを構造化アクションへ変換し、本文から除去する。
 
-    対象は ``[ACTION_BUTTON: 〇〇]`` と ``[〇〇について(詳しく)?聞く/教えて]`` の2形式。
+    対象は ``[ACTION_BUTTON: 〇〇]`` と ``[〇〇について(詳しく)?聞く/教えて]`` と、英語の
+    ``[Ask more about X]`` / ``[Ask about X]`` / ``[Tell me more about X]``（IK-0425）。
     本文側のフラグメント解析はここ（サーバ側・決定論的）に一元化し、フロントは
     ``next_actions`` のみを描画する（型付き送信）。日本語ラベルを再び intent 分類へ
     通さないよう、抽出したアクションは ``type="drilldown"`` を付与する。
@@ -222,7 +282,13 @@ def extract_inline_actions(text: str) -> tuple[str, list[LearningSupportAction]]
     seen: set[str] = set()
 
     def _add(label: str) -> None:
-        label = (label or "").strip()
+        # IK-0451: ボタンの文字は数式の区切り（``$…$`` / ``\(…\)``）を外して中身だけ残す
+        # （``[Ask more about $\mu$]`` のボタンに生の ``$`` を出さない）。
+        label = _strip_math_delimiters(label or "").strip()
+        # IK-0477: ボタンの文字に文中の引用番号（``[98]`` / ``[出典3]``）を持ち込まない。
+        # 出典マーカーは落とし、文献番号（``[98]``）は角括弧だけ外して番号を残す。
+        label = _SOURCE_MARKER_IN_LABEL_RE.sub("", label)
+        label = _REF_NUMBER_IN_LABEL_RE.sub(lambda m: m.group(1).strip(), label).strip()
         if not label or label in seen:
             return
         seen.add(label)
@@ -236,6 +302,7 @@ def extract_inline_actions(text: str) -> tuple[str, list[LearningSupportAction]]
 
     clean = _ACTION_BUTTON_RE.sub(_sub, text or "")
     clean = _DRILLDOWN_RE.sub(_sub, clean)
+    clean = _DRILLDOWN_EN_RE.sub(_sub, clean)
     # マーカー除去で生じた空行を畳む。
     clean = re.sub(r"[ \t]+\n", "\n", clean)
     clean = re.sub(r"\n{3,}", "\n\n", clean).strip()

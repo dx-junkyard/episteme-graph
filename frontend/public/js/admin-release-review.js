@@ -97,6 +97,16 @@
       : "var(--color-text-secondary)";
   }
 
+  // IK-0376: 一括確認で対象外になった論文があったときの事実文（サーバの skipped_note を
+  // そのまま描く。文言をここに書き写さない）。色で強調しない・操作要素ではないので
+  // data-ui-anchor を付けない。空なら隠す。
+  function setSkippedNote(message) {
+    var node = el("release-review-skipped-note");
+    if (!node) return;
+    node.textContent = message || "";
+    node.hidden = !message;
+  }
+
   function errorDetail(res, fallback) {
     return res
       .json()
@@ -146,6 +156,7 @@
         '<div id="release-review-steps" style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:6px"></div>' +
         '<p id="release-review-intro" style="font-size:12px;color:var(--color-text-secondary);margin:0 0 8px"></p>' +
         '<div id="release-review-notice" style="font-size:12px;color:var(--color-text-secondary);margin:0 0 8px"></div>' +
+        '<div id="release-review-skipped-note" class="release-review-skipped-note" hidden></div>' +
         '<div id="release-review-body" style="overflow-y:auto;flex:1;min-height:180px"></div>' +
         '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px;padding-top:10px;border-top:1px solid var(--color-border-tertiary)">' +
           '<div id="release-review-facts" style="font-size:11px;color:var(--color-text-tertiary)"></div>' +
@@ -180,6 +191,7 @@
   function renderStep() {
     renderStepBar();
     setNotice("");
+    setSkippedNote("");
     var body = el("release-review-body");
     var actions = el("release-review-actions");
     var facts = el("release-review-facts");
@@ -630,6 +642,10 @@
             !ctx.presented_matches_applied
           );
         }
+        // IK-0376: 対象外にした論文があったときだけ、その事実を件数の隣に1行で残す。
+        setSkippedNote(
+          data && typeof data.skipped_note === "string" ? data.skipped_note : ""
+        );
       })
       .catch(function (err) {
         // RR7: 記録に失敗しても公開は止めない（未確認のまま配信される）。

@@ -40,6 +40,8 @@ from core.reconstruction.schema import (
     DELIVERABLE_STATUSES,
     ENTITY_ITEM,
     ENTITY_RESPONSE,
+    FACT_NO_DELIVERABLE_ITEM,
+    FACT_NO_SOURCE_MATERIAL,
     ITEM_STATUSES,
     SELF_CHECK_VALUES,
     SOURCE_BACKED,
@@ -232,7 +234,7 @@ def get_next_item(
     try:
         scope = _course_scope(session, course_data, topic_id)
         if not scope["material_ids"] and not scope["doc_refs"]:
-            return {"item": None, "exhausted": True}
+            return {"item": None, "exhausted": True, "facts": [FACT_NO_SOURCE_MATERIAL]}
 
         deprioritize_derivation = False
         try:
@@ -305,7 +307,8 @@ def get_next_item(
         session.close()
 
     if not row:
-        return {"item": None, "exhausted": True}
+        # IK-0410: exhausted だけでは「無い」理由が読めない。事実文を1つ持たせる（数値なし）。
+        return {"item": None, "exhausted": True, "facts": [FACT_NO_DELIVERABLE_ITEM]}
 
     item = {
         "id": row[0],

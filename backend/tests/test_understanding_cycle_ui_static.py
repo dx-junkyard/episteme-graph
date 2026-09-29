@@ -31,6 +31,7 @@
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -313,9 +314,12 @@ class TestStylesCssClassesDefined:
 
 
 class TestIndexHtmlScriptTagUnchanged:
-    def test_discuss_js_script_tag_has_no_version_query(self):
+    def test_discuss_js_script_tag_present(self):
+        # discuss.js の読み込みタグは1本だけ残す。キャッシュバスター（``?v=...``）は
+        # JS 変更時に上げるもので、付いていてよい（IK-0399 の改修で付与）。
         html = _read(INDEX_HTML)
-        assert '<script src="/js/discuss.js"></script>' in html
+        tags = re.findall(r'<script src="/js/discuss\.js(?:\?v=[^"]*)?"></script>', html)
+        assert len(tags) == 1
 
 
 class TestDiscussJsForbiddenVocabulary:

@@ -74,6 +74,17 @@ RULE_FIGURE_UNREVIEWED_MODES = "figure.unreviewed_modes"
 RULE_MATERIAL_EXPLANATIONS_SKIPPED = "material.explanations_skipped"
 RULE_MATERIAL_INGEST_INCOMPLETE = "material.ingest_incomplete"
 
+# IK-0362（2026-09-27 ペルソナ通し受講）: 解析の途中で AI 提供元の呼び出しが失敗した
+# （課金残高切れ・利用上限など）のに、各ステージが縮退として吸収して run は completed に
+# なる。採用 run の ``stage_outputs.llm_failures``（orchestrator が完了時に U層の失敗行から
+# 書く事実ブロック）があれば、成果の一部が欠けている可能性を事実文で伝え、再実行へ道案内する。
+RULE_MATERIAL_ANALYSIS_LLM_FAILED = "material.analysis_llm_failed"
+
+# IK-0363（2026-09-27 ペルソナ通し受講）: 本人所有の教材がゼロでも、公開・グループ共有された
+# 教材からコースを作れる。そのとき「登録されている教材がまだありません」とだけ案内すると
+# 次の一歩（コース作成）を隠すので、所有ゼロ・利用可能ありの状態を別ルールで案内する。
+RULE_MATERIALS_SHARED_AVAILABLE = "materials.shared_available"
+
 # discuss_opening_authoring_design.md §6.2: 生成は document 単位だが、添削の動機は
 # コースを作るときに生まれる。所有コースのソース論文に未確認の「議論のきっかけ」
 # （element_explanations の element_type='document' / role='discussion_seed'）が残っている。
@@ -109,6 +120,11 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
     RULE_MATERIALS_NONE: {
         "severity": SEVERITY_REQUIRED,
         "capability_id": "materials.upload",
+    },
+    # IK-0363: 所有ゼロでも共有教材でコースを作れる。道案内はコース構築（material.no_course と同じ）。
+    RULE_MATERIALS_SHARED_AVAILABLE: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "course_builder.open",
     },
     RULE_MATERIAL_ANALYSIS_FAILED: {
         "severity": SEVERITY_REQUIRED,
@@ -157,6 +173,11 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         # （2026-09-19 再現性レビュー §7）。事実は計器（reference_health の facts）にも出る。
         "severity": SEVERITY_OPTIONAL,
         "capability_id": "materials.rerun_pipeline",  # 道案内のみ（全実行 / PDF再登録）
+    },
+    # IK-0362: 解消手段は同じく「パイプラインを実行し直す」。既存 capability を再利用する（G3）。
+    RULE_MATERIAL_ANALYSIS_LLM_FAILED: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "materials.rerun_pipeline",  # 道案内のみ
     },
     RULE_COURSE_DISCUSS_OPENING_UNREVIEWED: {
         "severity": SEVERITY_RECOMMENDED,
@@ -306,18 +327,124 @@ def _course_needs_atlas_binding(data: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _eval_materials_none(session, uid: str) -> list[tuple[NextStep, str]]:
-    count = session.execute(
-        sa_text("SELECT count(*) FROM documents WHERE uploaded_by = CAST(:uid AS uuid)"),
+#: 教員がコース構築で使える教材（= 教材一覧に出る教材）の可視性条件。
+#: ``api/routes/admin.py::list_materials`` の WHERE と同じ意味論を SQL 断片として持つ
+#: （core は api.services を import しない。グループ所属は SQL 内で group_members に当てる）:
+#:   - 本人所有（uploaded_by）
+#:   - visibility='public'
+#:   - visibility='group' かつ本人がその group に所属
+#:   - object_group_permissions（object_type='document', viewer/editor）のグループに所属
+#: ``list_materials`` の「共有コースの sources 経由」の開示は、コース構築の素材選択で
+#: 教材そのものを選べる根拠ではない（コースへのアクセス = sources の閲覧）ため含めない。
+_USABLE_MATERIAL_SQL = """
+    d.filename IS NOT NULL
+    AND (
+        d.uploaded_by = CAST(:uid AS uuid)
+        OR COALESCE(d.visibility, 'private') = 'public'
+        OR (
+            COALESCE(d.visibility, 'private') = 'group'
+            AND d.group_id IS NOT NULL
+            AND EXISTS (
+                SELECT 1 FROM group_members gm
+                WHERE gm.group_id = d.group_id AND gm.user_id = CAST(:uid AS uuid)
+            )
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM object_group_permissions dgp
+            JOIN group_members gm2 ON gm2.group_id = dgp.group_id
+            WHERE dgp.object_type = 'document'
+              AND dgp.object_id = d.id::text
+              AND dgp.permission IN ('viewer', 'editor')
+              AND gm2.user_id = CAST(:uid AS uuid)
+        )
+    )
+"""
+
+
+def _material_availability(session, uid: str) -> tuple[bool, bool]:
+    """(本人所有の教材があるか, 本人がコース構築で使える教材があるか) を返す。
+
+    「使える」は所有を含む（所有している教材は使える教材でもある）。1 文の SQL で両方を読む。
+    """
+    row = session.execute(
+        sa_text(f"""
+            SELECT
+                EXISTS (
+                    SELECT 1 FROM documents WHERE uploaded_by = CAST(:uid AS uuid)
+                ) AS owns_any,
+                EXISTS (
+                    SELECT 1 FROM documents d WHERE {_USABLE_MATERIAL_SQL}
+                ) AS usable_any
+        """),
         {"uid": uid},
-    ).scalar() or 0
-    if count > 0:
+    ).mappings().fetchone()
+    if not row:
+        return (False, False)
+    owns_any = bool(row["owns_any"])
+    usable_any = bool(row["usable_any"]) or owns_any
+    return (owns_any, usable_any)
+
+
+def _eval_materials_none(session, uid: str) -> list[tuple[NextStep, str]]:
+    """本人がコース構築で使える教材が1件も無い（所有も公開・共有も無い）。
+
+    IK-0363: 以前は所有だけを数えていたため、公開・共有教材でコースを作れる教員にも
+    「登録されている教材がまだありません」と案内していた。判定の対象集合を「使える教材」
+    （教材一覧と同じ可視性）に広げる。所有ゼロ・利用可能ありは
+    ``materials.shared_available`` が案内する。
+    """
+    _owns_any, usable_any = _material_availability(session, uid)
+    if usable_any:
         return []
     step = _make_step(
         rule_id=RULE_MATERIALS_NONE,
         target_id="global",
         title="教材をアップロードする",
         reason="登録されている教材がまだありません。",
+        target={},
+    )
+    return [(step, "")]
+
+
+
+def _owns_any_course(session, uid: str) -> bool:
+    """本人が所有するコースが 1 件以上あるか（無ければ False。読めなければ False = 案内を消さない側に倒さない）。"""
+    try:
+        row = session.execute(
+            sa_text("SELECT EXISTS (SELECT 1 FROM learning_courses WHERE user_id = CAST(:uid AS uuid)) AS owns_course"),
+            {"uid": uid},
+        ).mappings().fetchone()
+    except Exception:  # noqa: BLE001
+        return False
+    if not row:
+        return False
+    try:
+        return bool(row.get("owns_course", False))
+    except AttributeError:
+        return False
+
+
+def _eval_materials_shared_available(session, uid: str) -> list[tuple[NextStep, str]]:
+    """本人所有の教材は無いが、公開・共有された教材からコースを作れる（IK-0363）。
+
+    - 点灯: 所有ゼロ かつ 使える教材（公開・グループ共有・教材の直接共有）が1件以上。
+    - 消滅: 本人が教材を登録するか、使える教材が無くなれば導出されなくなる（G1）。
+    - 事実文に件数を書かない（G6）。
+    """
+    owns_any, usable_any = _material_availability(session, uid)
+    if owns_any or not usable_any:
+        return []
+    if _owns_any_course(session, uid):
+        # 共有教材から既にコースを作っている教員には出さない（第 5 周: 公開まで終えた教員の一番上に残り続けた）
+        return []
+    step = _make_step(
+        rule_id=RULE_MATERIALS_SHARED_AVAILABLE,
+        target_id="global",
+        title="共有されている教材からコースを作成する",
+        reason=(
+            "あなたが登録した教材はまだありませんが、共有されている教材からコースを作れます。"
+        ),
         target={},
     )
     return [(step, "")]
@@ -749,6 +876,53 @@ def _eval_material_ingest_incomplete(session, uid: str) -> list[tuple[NextStep, 
             title=f"教材『{title}』の取り込み状況を確認する",
             reason=(
                 f"教材『{title}』は、原本のすべてを取り込めたとは確認できていません。{detail}"
+            ),
+            target={"material_id": doc_id},
+            ctx={"material_id": material_row_id},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
+def _eval_material_analysis_llm_failed(session, uid: str) -> list[tuple[NextStep, str]]:
+    """解析中に AI 提供元の呼び出しが失敗した記録が残る教材（IK-0362）。
+
+    - 点灯: 採用 run の ``stage_outputs.llm_failures`` が存在する（orchestrator が完了時に
+      U層 ``llm_usage_events`` の失敗行から書く。失敗が無い run にはキー自体が無い）。
+    - 消滅: 再実行して失敗の無い run が採用されれば導出されなくなる（G1）。
+    - 事実文に件数・提供元の生メッセージ・URL を書かない（G6 / 原則4）。利用上限・残高の
+      制限による失敗は ``rate_limited`` を見て言い分ける。
+    """
+    rows = session.execute(
+        sa_text(f"""
+            WITH adopted AS ({_ADOPTED_RUN_SQL})
+            SELECT a.document_id::text AS id, a.source_path, a.title, a.created_at,
+                   r.stage_outputs -> 'llm_failures' AS llm_failures
+            FROM adopted a
+            JOIN document_analysis_runs r ON r.id = a.run_id
+            WHERE jsonb_typeof(r.stage_outputs -> 'llm_failures') = 'object'
+            ORDER BY a.created_at ASC
+        """),
+        {"uid": uid},
+    ).mappings().fetchall()
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        block = row["llm_failures"] if isinstance(row["llm_failures"], dict) else {}
+        rate_limited = block.get("rate_limited") is True
+        doc_id = row["id"]
+        title = row["title"] or doc_id
+        material_row_id = row["source_path"] or doc_id
+        if rate_limited:
+            cause = "AI 提供元の利用上限または残高の制限により呼び出しが受け付けられず"
+        else:
+            cause = "AI 提供元の呼び出しが失敗し"
+        step = _make_step(
+            rule_id=RULE_MATERIAL_ANALYSIS_LLM_FAILED,
+            target_id=doc_id,
+            title=f"教材『{title}』の解析をやり直す",
+            reason=(
+                f"教材『{title}』の解析中に{cause}、成果の一部が欠けている可能性があります。"
+                "再実行で補えます。"
             ),
             target={"material_id": doc_id},
             ctx={"material_id": material_row_id},
@@ -1290,6 +1464,7 @@ def _eval_manual_todo_unresolved(session, uid: str) -> list[tuple[NextStep, str]
 
 _RULE_EVALUATORS = {
     RULE_MATERIALS_NONE: _eval_materials_none,
+    RULE_MATERIALS_SHARED_AVAILABLE: _eval_materials_shared_available,
     RULE_MATERIAL_ANALYSIS_FAILED: _eval_material_analysis_failed,
     RULE_MATERIAL_NO_COURSE: _eval_material_no_course,
     RULE_COURSE_NOT_PUBLISHED: _eval_course_not_published,
@@ -1300,6 +1475,7 @@ _RULE_EVALUATORS = {
     RULE_FIGURE_UNREVIEWED_MODES: _eval_figure_unreviewed_modes,
     RULE_MATERIAL_EXPLANATIONS_SKIPPED: _eval_material_explanations_skipped,
     RULE_MATERIAL_INGEST_INCOMPLETE: _eval_material_ingest_incomplete,
+    RULE_MATERIAL_ANALYSIS_LLM_FAILED: _eval_material_analysis_llm_failed,
     RULE_COURSE_DISCUSS_OPENING_UNREVIEWED: _eval_course_discuss_opening_unreviewed,
     RULE_COURSE_PREREQUISITE_UNCOVERED: _eval_course_prerequisite_uncovered,
     RULE_COURSE_DELIVERED_UNREVIEWED: _eval_course_delivered_unreviewed,

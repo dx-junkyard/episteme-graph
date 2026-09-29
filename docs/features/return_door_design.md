@@ -49,9 +49,13 @@ migration: **不要**（`interest_traces` の kind 追加なし。`intention` �
 - サーバ API `GET /api/learning/courses/{id}/cycle/todays-words` は
   `learning_chat_history` から**本人・user ロールのみ**を返す（assistant 行を返す
   経路を作らない — ガードレールで role フィルタを固定）。「当日」の実装は
-  **直近24時間窓（`updated_at >= now() - interval '24 hours'`、TZ 非依存）**の近似
-  （`CURRENT_DATE` だと DB タイムゾーン（UTC想定）の暦日で切れ、JST 学習者の朝の発話が
-  同日昼に消える）。
+  **日本時間の今日の 0 時以降（`core/learner_time.py::learner_today_start_utc`）**で、
+  発話の時刻は**その発話が記録した痕跡（`interest_traces.payload.message_id`）の
+  `created_at`**（2026-09-28 是正・IK-0417。旧実装の「直近24時間 × 行 `updated_at`」は
+  行内の前日の発話を混ぜ、全発話に同じ時刻を付けていた）。痕跡の無い発話は時刻が
+  分からないので載せない。相づち・了解だけの発話（「はい、理解しています。」等。
+  語彙の正本は `core/cycle/schema.py` の `FILLER_*`）は並べない。DTO は `topic_id` を
+  出さず `topic_label`（題名 / 予約疑似トピックの表示名）を返す。
 - 表示には常に「あなたの言葉」ラベルを付す。
 - これは UC7 が唯一許す個人化「本人の産出物を本人に見せる」に該当する（migration 0・LLM 0）。
 
@@ -103,6 +107,11 @@ migration: **不要**（`interest_traces` の kind 追加なし。`intention` �
   ③最後の確定 tension は `TENSION_OWNED_STATUSES` 正本を使用
   （リテラル再掲禁止を優先 — dead status `abstracted` も形式上対象）。
   ④扉 DTO は非空時 `empty: false` を同梱・carryover には `trace_id` を含む。
+  空の扉は `{"empty": true, "fact", "hint"}`（2026-09-28・IK-0418。何が無いのか・
+  どうすれば残せるかの事実文。正本は `core/cycle/schema.py::EMPTY_DOOR_*`。画面は RD3
+  どおり空の扉を描かない。導出失敗時は `{"empty": true}` のまま — 「残っていない」と
+  言い切らない）。開いた動機（`opening_motive`）は扉の3部品に入らない（設計どおり）。
+  ②の「直近24時間窓」は 2026-09-28 に日本時間の今日 × 痕跡時刻へ置き換えた（§2.2）。
 - 設計判断の明文化（2026-08-15 レビュー是正時に追記）:
   - **扉の last_tension は `payload.map_excluded` を意図的に尊重しない。**
     `map_excluded` は「わたしの地図」スコープの訂正操作（地図に反映しない）であり、

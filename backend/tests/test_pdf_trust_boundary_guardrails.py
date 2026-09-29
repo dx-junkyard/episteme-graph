@@ -258,7 +258,8 @@ class TestNoticeReachesTheAssembledPrompt:
         )
         # TB1: 出典は連番ラベル + `---` 区切りで隔離される。
         assert '"\\n---\\n".join(cited_chunks)' in window
-        assert '[出典{_n}] 『' in src
+        # IK-0432: 番号は会話の中で固定した採番（_adopted_source_entry の index）を使う。
+        assert "[出典{_source['index']}] 『" in src
 
 
 # ---------------------------------------------------------------------------

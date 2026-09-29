@@ -92,14 +92,22 @@ select を元の値へ戻し、失敗時はモーダル内にエラー表示し�
 いる / 触れられていない可能性 / 不明」の観点を並置し、模範解答・解説を開示するだけで、
 `passed` フィールドは存在しない。トピック完了の確定は本人の 1 タップ
 `POST .../topics/{tid}/check/self-check`（body `self_check ∈ {agreed, disagreed, verdict_wrong}`、
-語彙外は 422）に移り、`agreed` / `disagreed`（＝本人が見比べて先へ進むと決めた）のときだけ
-サーバーが `services.record_topic_check_pass()` で **`learning_states.progress_data`** に永続化する:
+語彙外は 422）に移り、`agreed`（「合っていた」）のときだけサーバーが
+`services.record_topic_check_pass()` で **`learning_states.progress_data`** に永続化する
+（2026-09-28 是正 IK-0399: `disagreed`「違っていた」は本人の見立てが要件と合わなかったという申告で、
+完了にしない。レスポンスの `notice` に事実文 `label_vocab.CHECK_SELF_CHECK_DISAGREED_NOTICE` を返す。
+当初の「違っていたが先へ進むと決めた」という読みはボタンの文言から読み取れなかった）:
 
 - `progress_data.completed_topics`（topic_id → 確認を終えた時刻 ISO8601。既存タイムスタンプは上書きしない）
 - 全トピックを終えたときに `progress_data.course_completed_at` を一度だけ設定
 
-`verdict_wrong`（「観点がおかしい」）は完了させず進行も止めない（本人が改めて他の 2 択を押せば
-進める）。LLM 失敗時は 200 + `degraded: true` + 固定文「AI の観点提示ができませんでした。出題の
+`disagreed` / `verdict_wrong`（「観点がおかしい」）は完了させず進行も止めない（トピックはロック
+表示でも開ける。本人が書き直して改めて「合っていた」を押せば完了する）。観点は出題の**全要素に
+1件ずつ**付く（IK-0409: LLM が一部しか返さなくても `check_review.fill_missing_requirements` が
+`unclear` +「この要素についての観点は得られませんでした。」で補う）。観点文・解答例・解説は受講者の
+回答と同じ言語で書かせ（ラテン文字が大半の回答には「英語で書く」を明示）、英語の判定語
+（correct / wrong / score / grade 等）も日本語の判定語と同じく観点文から落とす。並置の固定文
+（「あなたは「…」と述べました。」等）は UI の言語（日本語）のまま。LLM 失敗時は 200 + `degraded: true` + 固定文「AI の観点提示ができませんでした。出題の
 要件と自分の回答を見比べてください。」に縮退し、**判定を生まない**（旧「40 字以上で合格」の
 フォールバックは撤去）。不合格時に回答逐語を `student_stumble_events` へ記帳していた経路も撤去した
 （AI の判定を学習者の属性として書かない）。

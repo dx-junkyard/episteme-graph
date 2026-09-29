@@ -94,13 +94,15 @@ class TestGroundingClassificationWiring:
 
     def test_origin_assigned_per_cited_source(self):
         source = _read(LEARNING)
-        assert '_origin = "course_material" if r.get("material_id") in course_material_ids else "other_material"' in source
-        assert '"origin": _origin,' in source
+        # IK-0432: 出典1件の組み立ては _adopted_source_entry に一本化（本体 RAG と前提知識の説明）。
+        assert '"course_material" if result.get("material_id") in course_material_ids else "other_material"' in source
+        assert "_source = _adopted_source_entry(_citation_numbers, r, course_material_ids)" in source
 
     def test_grounding_precedence_course_over_other_over_model(self):
         source = _read(LEARNING)
         block = source.split("# 回答内容の出所分類")[1].split("\n\n")[0]
-        assert 'if has_topic_material or any(s["origin"] == "course_material" for s in cited_sources):' in block
+        # IK-0382: トピック教材は「注入した」だけでは根拠に数えず、問いに関わるときだけ数える。
+        assert 'if topic_material_grounds or any(s["origin"] == "course_material" for s in cited_sources):' in block
         assert 'content_grounding = "course_material"' in block
         assert 'elif cited_sources:' in block
         assert 'content_grounding = "other_material"' in block
@@ -110,6 +112,9 @@ class TestGroundingClassificationWiring:
         source = _read(LEARNING)
         assert "has_topic_material = False" in source
         assert "has_topic_material = True" in source
+        # IK-0382: 注入したトピック教材が根拠になるのは問いに関わるときだけ（決定論の判定）。
+        # IK-0396: 前提確認の往復では元の質問（_turn_question）で判定する。
+        assert "topic_material_grounds = _topic_material_engages_message(body, topic_material, message=_turn_question)" in source
 
     def test_topic_material_floors_overall_tier_to_source(self):
         """トピック教材を注入した回答を out_of_source にしない（grounding との矛盾表示防止）。
@@ -124,7 +129,10 @@ class TestGroundingClassificationWiring:
         # どちらも「トピック教材を注入したら tier を source まで引き上げる」を持つこと。
         for block in blocks:
             window = block[:600]
-            assert "if has_topic_material:" in window or "if has_course_topic_material:" in window
+            assert (
+                "if topic_material_grounds:" in window
+                or "if has_course_topic_material:" in window
+            )
             assert "overall_tier = tier_floor(overall_tier, TIER_SOURCE)" in window
 
     def test_response_includes_content_grounding(self):

@@ -804,3 +804,61 @@ class TestResolveTopicConceptViaCorpus:
             FakeSession(route), _skeleton(), "particle_physics", topic
         )
         assert out is None
+
+
+class TestLearnerLedgerStatus:
+    """IK-0412: ledger_status と検証行を食い違わせない・ピルの意味の1行・表示名。"""
+
+    def test_seed_rows_are_unrecorded(self):
+        from core import atlas_state as st
+
+        assert st.learner_ledger_status(st.STATUS_VERIFIED, st.STATUS_SOURCE_SEED, 0) == (
+            st.STATUS_UNRECORDED
+        )
+        assert st.learner_ledger_status(st.STATUS_ASSUMED, st.STATUS_SOURCE_SEED, 0) == (
+            st.STATUS_UNRECORDED
+        )
+
+    def test_derived_statuses_pass_through_and_zero_evidence_verified_is_unrecorded(self):
+        from core import atlas_state as st
+
+        assert st.learner_ledger_status(st.STATUS_VERIFIED, st.STATUS_SOURCE_DERIVED, 2) == (
+            st.STATUS_VERIFIED
+        )
+        assert st.learner_ledger_status(st.STATUS_VERIFIED, st.STATUS_SOURCE_DERIVED, 0) == (
+            st.STATUS_UNRECORDED
+        )
+        assert st.learner_ledger_status(st.STATUS_UNKNOWN, st.STATUS_SOURCE_DERIVED, 0) == (
+            st.STATUS_UNRECORDED
+        )
+        assert st.learner_ledger_status(st.STATUS_GAP, st.STATUS_SOURCE_DERIVED, 0) == st.STATUS_GAP
+
+    def test_seed_verified_pill_does_not_claim_source_backing(self):
+        from core import atlas_state as st
+
+        pill = st.learner_pill(st.STATUS_VERIFIED, st.STATUS_UNRECORDED)
+        assert pill != st.PILL_LABELS[st.STATUS_VERIFIED]
+        assert "記帳なし" in pill
+
+    def test_pill_notes_are_factual(self):
+        from core import atlas_state as st
+        from core import label_vocab
+
+        for note in label_vocab.ATLAS_PILL_NOTES.values():
+            assert st.find_evaluative_language(note) == []
+            assert not any(ch.isdigit() for ch in note)
+        assert st.pill_note_for(st.STATUS_ASSUMED, st.STATUS_UNRECORDED) == (
+            label_vocab.ATLAS_PILL_NOTES["assumed"]
+        )
+
+    def test_domain_label_never_falls_back_to_key(self):
+        from core import atlas_state as st
+        from core import label_vocab
+
+        assert st.learner_domain_label("宇宙物理", "astrophysics") == "宇宙物理"
+        assert st.learner_domain_label("", "particle_physics") == label_vocab.ATLAS_DOMAIN_UNNAMED_LABEL
+        assert st.learner_domain_label("particle_physics", "particle_physics") == (
+            label_vocab.ATLAS_DOMAIN_UNNAMED_LABEL
+        )
+        # 同梱 domain.json の名前は DB に行が無くても引ける
+        assert st.domain_display_name(None, "astrophysics") == "宇宙物理"

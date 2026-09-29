@@ -33,8 +33,10 @@ from sqlalchemy import text as sa_text
 
 import services
 from core import atlas_correspondence
+from core import atlas_state
 from core import atlas_store
 from core import decision_context
+from core import label_vocab
 from core.course_data import course_cartridge_id, course_source_material_ids
 from core.landscape import builder as landscape_builder
 from core.landscape import projection
@@ -705,7 +707,10 @@ def accept_course_landscape_placements(
     """
     _, viewable, editable_ids, hidden = _course_source_access(course_id, current_user)
     # edit できないソース論文は確認の対象外（除外件数として正直に返す — RR7）。
-    skipped_documents = hidden + len([d for d in viewable if d not in editable_ids])
+    not_editable = len([d for d in viewable if d not in editable_ids])
+    skipped_documents = hidden + not_editable
+    # IK-0376: 件数だけだと失敗と読まれるので、飛ばした理由を事実文で添える。
+    skipped_note = _release_skipped_note(not_editable=not_editable, hidden=hidden)
     reviewer_id = str(current_user.get("id") or "").strip()
 
     session = _session()
@@ -798,13 +803,31 @@ def accept_course_landscape_placements(
             ),
         )
 
-    return {
+    result: dict = {
         "course_id": course_id,
         "confirmed": len(updated),
         "skipped_documents": skipped_documents,
         # 画面が「提示と適用が一致したか」を事実文で出せるように同じ dict を返す。
         "decision_context": ctx,
     }
+    if skipped_note:
+        # 飛ばした教材があるときだけキーを足す（無いときは従来のレスポンスと同じ形）。
+        result["skipped_note"] = skipped_note
+    return result
+
+
+def _release_skipped_note(*, not_editable: int, hidden: int) -> str:
+    """accept で対象外にした教材の理由を事実文にする（IK-0376）。
+
+    理由ごとに1文（``core/label_vocab.py`` が正本）で、数字は入れない。該当が無ければ
+    ``""``。
+    """
+    parts: list[str] = []
+    if not_editable > 0:
+        parts.append(label_vocab.RELEASE_SKIPPED_NOT_EDITABLE_NOTE)
+    if hidden > 0:
+        parts.append(label_vocab.RELEASE_SKIPPED_NOT_VISIBLE_NOTE)
+    return "".join(parts)
 
 
 @router.get("/overview")
@@ -987,10 +1010,16 @@ def learner_landscape_for_documents(course_data: dict, document_ids) -> dict:
             ordered.append(document_id)
     titles = {document_id: title_by_id.get(document_id, "") for document_id in ordered}
 
+    # IK-0413: 学習者には分野の内部キー（domain_key）を表示名の代わりに見せない。
+    # 表示名が未登録の分野は「名前が登録されていない分野」と正直に言う（教員側の
+    # 一覧は従来どおり key へ縮退する — ここは学習者投影だけ）。
+    learner_names = {
+        key: atlas_state.learner_domain_label(names.get(key), key) for key in skeletons
+    }
     dto = projection.learner_landscape_dto(
         placements,
         projection.skeleton_node_index(skeletons),
-        _domain_facts(skeletons, names),
+        _domain_facts(skeletons, learner_names),
         course_domain_key or None,
         document_titles=titles,
         source_document_count=len(document_ids),

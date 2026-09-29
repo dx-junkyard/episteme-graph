@@ -5274,30 +5274,51 @@
   }
 
   // ── 学ぶ単位（learning_units_design.md §6.2）─────────────────────────
-  // 下書きの topic が持つ units を「候補 handle の文字列配列」に正規化する。
-  // AI が dict を返した場合は handle / unit キーを拾い、それ以外（数値・オブジェクト）は
-  // **捨てる**（サーバ側の候補表照合が最終の弁だが、ここでも型を絞る）。
-  function cbDraftUnitHandles(topic) {
+  // 下書きの topic が持つ units を登録ペイロード用に正規化する。
+  // 要素は ①文字列 handle（"U3"）か ②{handle, stable_key}。handle は「草案を出した
+  // ターンの候補表の位置」で、登録時の教材集合が違うと別の単位を指す（IK-0371）ため、
+  // 参照キー（stable_key）を知っているときは必ず添えて渡す。参照キーの出所は
+  // ①要素自身の stable_key ②下書きに同梱された対応表 draft.unit_candidate_keys
+  // （サーバがそのターンの候補表から作ったもの）。どちらも無い handle は文字列のまま
+  // 渡す（参照キーを作らない = 捏造ガード。最終の弁はサーバ側の候補表照合）。
+  // それ以外（数値・オブジェクト）は **捨てる**。
+  function cbDraftUnitHandles(topic, draft) {
     if (!topic || typeof topic !== "object") return [];
     var raw = topic.units;
     if (!raw || !Array.isArray(raw)) return [];
+    var src = draft || state.courseDraft || {};
+    var keyTable = (src && src.unit_candidate_keys && typeof src.unit_candidate_keys === "object")
+      ? src.unit_candidate_keys : {};
     var handles = [];
+    var seen = [];
     raw.forEach(function (item) {
       var handle = "";
+      var stableKey = "";
       if (typeof item === "string") {
         handle = item;
       } else if (item && typeof item === "object") {
         handle = item.handle || item.unit || "";
+        stableKey = typeof item.stable_key === "string" ? item.stable_key : "";
       }
       handle = String(handle || "").trim();
-      if (handle && handles.indexOf(handle) === -1) handles.push(handle);
+      stableKey = String(stableKey || "").trim();
+      if (!stableKey && handle) {
+        var mapped = keyTable[handle.toUpperCase()];
+        if (typeof mapped === "string" && mapped) stableKey = mapped;
+      }
+      if (!handle && !stableKey) return;
+      var ident = stableKey ? ("k:" + stableKey) : ("h:" + handle.toUpperCase());
+      if (seen.indexOf(ident) !== -1) return;
+      seen.push(ident);
+      handles.push(stableKey ? { handle: handle, stable_key: stableKey } : handle);
     });
     return handles;
   }
 
-  // handle（U3）を候補表の名前に直す。候補表が無い / 載っていない handle は
-  // **handle のまま**返す（存在しない名前を作らない = 捏造ガード）。
+  // handle（U3、または {handle, stable_key}）を候補表の名前に直す。候補表が無い /
+  // 載っていない handle は **handle のまま**返す（存在しない名前を作らない = 捏造ガード）。
   function cbUnitDisplayName(handle) {
+    if (handle && typeof handle === "object") handle = handle.handle || "";
     var key = String(handle || "").trim().toUpperCase();
     var table = state.unitCandidatesByHandle || {};
     var found = table[key];

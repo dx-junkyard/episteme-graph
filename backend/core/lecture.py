@@ -23,7 +23,11 @@ from core.course_data import (
     iter_all_topics,
     lecture_studio_settings as _lecture_studio_settings,
 )
-from core.label_vocab import RECONSTRUCTED_EQUATION_MARK, RECONSTRUCTED_EQUATION_NOTE
+from core.label_vocab import (
+    RECONSTRUCTED_EQUATION_MARK,
+    RECONSTRUCTED_EQUATION_NOTE,
+    UNRESOLVED_FORMULA_PLACEHOLDER_TEXT,
+)
 from core.llm import generate_text, get_llm_params
 from core.llm_worker.single_shot import extract_json
 from core.personas import persona_prompt
@@ -886,37 +890,159 @@ def lecture_uses_topic_material(topic: dict) -> bool:
     return bool(topic_student_material(topic) or topic_spoken_script(topic))
 
 
+_PLACEHOLDER_INDEX_RE = re.compile(r"\[\[\s*FORMULA_(\d+)\s*\]\]", re.IGNORECASE)
+
+
+def _topic_block_formula_items(topic: dict) -> list[dict]:
+    """``topic.content_blocks`` の equations 項目を出現順に返す（学習画面の formulas と同じ母集合）。
+
+    ``routes/learning.py::_topic_formulas_from_content_blocks`` / ``course_content_builder.
+    _topic_content_block_formulas`` と同じ規則（latex が無くても plain_text / raw_text が
+    あれば残す。描画材料が何も無い項目だけ除く）。
+    """
+    items: list[dict] = []
+    for block in (topic or {}).get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "equations":
+            continue
+        for item in block.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if not (item.get("latex") or item.get("plain_text") or item.get("raw_text")):
+                continue
+            items.append(item)
+    return items
+
+
+def _normalize_formula_key(value: object) -> str:
+    """数式 id の照合キー（app.js ``normalizeMaterialEvidenceId`` と同じ: 空白と外側の
+    ``[[`` / ``]]`` を剥がして大文字化）。"""
+    key = str(value if value is not None else "").strip()
+    for _ in range(2):
+        if key.startswith("[["):
+            key = key[2:]
+        if key.endswith("]]"):
+            key = key[:-2]
+    return key.strip().upper()
+
+
+def resolve_topic_formula_placeholders(
+    text: str,
+    topic: dict,
+) -> tuple[str, list[dict]]:
+    """本文に既に入っている ``[[FORMULA_N]]`` を、トピックの content_blocks の数式で解決する。
+
+    保存済みコースの本文は ``[[FORMULA_N]]`` のまま残っていることがあり、従来はここで
+    formulas が空のまま流れて、レクチャーでは生のプレースホルダーが見えていた（IK-0404。
+    学習画面は content_blocks の数式で引いていたので、同じトピックが画面によって違って
+    見えた）。照合は学習画面（app.js ``formulaById``）と同じ: id が ``FORMULA_N`` と一致する
+    項目を優先し、無ければ出現順の N 番目。引けないものは
+    ``label_vocab.UNRESOLVED_FORMULA_PLACEHOLDER_TEXT`` の事実文に置き換える（生の記号を
+    見せない）。返す formulas の id は ``[[FORMULA_N]]``（スライド割り当ての照合キー）。
+    """
+    if not text or not _PLACEHOLDER_INDEX_RE.search(text):
+        return text or "", []
+    items = _topic_block_formula_items(topic)
+    by_id: dict[str, dict] = {}
+    for item in items:
+        key = _normalize_formula_key(item.get("equation_id") or item.get("id"))
+        if key:
+            by_id.setdefault(key, item)
+
+    formulas: list[dict] = []
+    seen: set[int] = set()
+
+    def _replace(match: re.Match) -> str:
+        index = int(match.group(1))
+        item = by_id.get(f"FORMULA_{index}")
+        if item is None and 0 <= index < len(items):
+            item = items[index]
+        if item is None:
+            return UNRESOLVED_FORMULA_PLACEHOLDER_TEXT
+        placeholder = f"[[FORMULA_{index}]]"
+        if index not in seen:
+            seen.add(index)
+            latex = str(item.get("latex") or "")
+            plain_text = str(item.get("plain_text") or "")
+            raw_text = str(item.get("raw_text") or "")
+            formulas.append({
+                "id": placeholder,
+                "latex": latex or plain_text or raw_text,
+                # 読み上げは人間向けテキストを優先する（生 TeX を読み上げない）。
+                "spoken": plain_text or latex or raw_text,
+                "is_display": True,
+                "label": str(item.get("label") or ""),
+                "plain_text": plain_text,
+                "raw_text": raw_text,
+            })
+        return placeholder
+
+    resolved = _PLACEHOLDER_INDEX_RE.sub(_replace, text)
+    return resolved, annotate_reconstructed_formulas(formulas)
+
+
 def _resolve_equation_embeds(
     text: str,
     evidence_links: list[dict],
     existing_formulas: list[dict],
+    block_items: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
     """![[equation:xxx]] / [[equation:xxx]] 埋め込みを [[FORMULA_N]] プレースホルダーに変換する。
 
-    evidence_links から LaTeX を取得できる場合はそれを使い、取得できない場合は
-    埋め込みを空文字列に除去する（生テキストをフロントに渡さない）。
+    描画用の本体は evidence_links の ``latex`` → content_blocks の式（``block_items``）の
+    ``latex`` の順。どちらにも latex が無く、短い原文（``plain_text`` / ``raw_text``）が
+    あれば、その原文を本文へ直接書く（IK-0455。学習画面の latex → plain_text → raw_text と
+    同じ規則 ``course_content_builder.inline_formula_text``。inline 式候補の
+    「Equation semantics could not be inferred.」のような英語の要約を数式として
+    描かない）。それも無いときだけ従来どおり summary を使い、何も無ければ埋め込みを
+    除去する（生テキスト・内部 ID をフロントに渡さない）。
     """
+    from core.course_content_builder import inline_formula_text  # 循環 import を避ける
+    from core.text_excerpt import looks_like_tex_math
+
     eq_by_id: dict[str, dict] = {}
     for link in (evidence_links or []):
         if link.get("kind") == "equation":
             tid = str(link.get("target_id") or "").strip()
             if tid:
                 eq_by_id[tid] = link
+    block_by_key: dict[str, dict] = {}
+    for item in block_items or []:
+        if isinstance(item, dict):
+            key = _normalize_formula_key(item.get("equation_id") or item.get("id"))
+            if key:
+                block_by_key.setdefault(key, item)
 
     formulas = list(existing_formulas)
-    formula_offset = len(formulas)
+    # 既存の [[FORMULA_N]] と番号がぶつからないよう、使用済みの最大番号の次から振る
+    # （本文に元からある placeholder は番号が飛ぶことがある — IK-0404）。
+    used_indices = [
+        int(m.group(1))
+        for f in formulas if isinstance(f, dict)
+        for m in [_PLACEHOLDER_INDEX_RE.fullmatch(str(f.get("id") or "").strip())] if m
+    ]
+    formula_offset = max([len(formulas)] + [i + 1 for i in used_indices])
 
     def _replace(m: re.Match) -> str:
         eq_id = m.group(1).strip()
         link = eq_by_id.get(eq_id)
+        block = block_by_key.get(_normalize_formula_key(eq_id)) or {}
         latex = str(link.get("latex") or "") if link else ""
+        if not latex:
+            latex = str(block.get("latex") or "")
         summary = str(link.get("summary") or "") if link else ""
-        plain_text = str(link.get("plain_text") or "") if link else ""
+        plain_text = (str(link.get("plain_text") or "") if link else "") or str(block.get("plain_text") or "")
+        if not latex:
+            inline = inline_formula_text(block) or inline_formula_text(link or {})
+            if inline:
+                return inline
         idx = formula_offset + len(formulas) - len(existing_formulas)
         placeholder = f"[[FORMULA_{idx}]]"
         # 描画用 LaTeX は link.latex を最優先する。summary は意味要約（散文）の
-        # 場合があり、それを LaTeX として埋め込むと数式描画が壊れる。
-        body = latex or summary
+        # 場合があり、それを LaTeX として埋め込むと数式描画が壊れる — summary を本体に
+        # 使うのは、それ自体が式に見えるときだけ（IK-0455。「Equation semantics could not
+        # be inferred.」「No recoverable equation is present; …」のような英語の要約を
+        # KaTeX で描かない）。
+        body = latex or (summary if looks_like_tex_math(summary) else "")
         if body:
             formulas.append({
                 "id": placeholder,
@@ -1060,8 +1186,13 @@ def build_topic_slides(
     evidence_links = topic.get("evidence_links") or []
     normalized, formulas = normalize_to_placeholder_format(display_text or spoken_text, [])
     display_text = normalized
+    if not formulas:
+        # 本文に元から入っている [[FORMULA_N]] を content_blocks の数式で解決する（IK-0404）。
+        display_text, formulas = resolve_topic_formula_placeholders(display_text, topic)
     # ![[equation:xxx]] 埋め込みを [[FORMULA_N]] プレースホルダーに解決する
-    display_text, formulas = _resolve_equation_embeds(display_text, evidence_links, formulas)
+    display_text, formulas = _resolve_equation_embeds(
+        display_text, evidence_links, formulas, _topic_block_formula_items(topic)
+    )
     display_text, formulas = normalize_to_placeholder_format(display_text or spoken_text, formulas)
 
     # ![[figure:xxx]] 埋め込みを [[FIGURE_N]] プレースホルダーに解決する（Phase 4 §7.2）。
@@ -1071,6 +1202,52 @@ def build_topic_slides(
 
     slide_dicts, _mismatch = auto_paginate_slides(display_text, spoken_text, formulas, figures=figures)
     return slide_dicts, display_text, spoken_text, formulas
+
+
+def topic_material_delivery_segments(
+    topic: dict,
+    figures_by_id: dict[str, dict] | None,
+    whole_text: str,
+    whole_formulas: list[dict],
+    evidence_items: list[dict],
+) -> tuple[list[str], list[dict]]:
+    """受講画面の教材区画（本文と、その本文が引く formulas）を返す（IK-0455）。
+
+    区画の粒度の正本は :func:`build_topic_slides`（P2-R3）。2区画以上に割れるときの本文は
+    ``build_topic_slides`` が式を ``[[FORMULA_N]]`` に置き換えた display_text なので、
+    **同じ関数が返した formulas** を一緒に渡す（従来は content_blocks の式を渡しており、
+    ``$w$`` から振られた ``[[FORMULA_0]]`` が content_blocks の0番目の式＝別の式に
+    引かれたり、「この数式は教材に載せられていません」に置き換わったりしていた）。
+    割れないときは ``whole_text`` / ``whole_formulas``（呼び出し側が図を解決した全文と
+    content_blocks の式）をそのまま使う。
+
+    どちらの場合も、引けない ``[[FORMULA_N]]`` は事実の文へ、引けない
+    ``![[component|claim|source:id]]`` は外す（学習者に生の埋め込み記法・内部 ID を
+    見せない）。保存データは書き換えない。
+    """
+    from core.course_content_builder import (  # 循環 import を避ける
+        drop_unresolved_evidence_embeds,
+        replace_unresolved_formula_placeholders,
+    )
+
+    texts: list[str] = []
+    formulas = list(whole_formulas or [])
+    try:
+        slides, _display, _spoken, slide_formulas = build_topic_slides(topic or {}, figures_by_id)
+    except Exception:  # noqa: BLE001 - 区画が決まらないだけ（配信は止めない）
+        logger.warning("topic material segmentation failed", exc_info=True)
+        slides, slide_formulas = [], []
+    if len(slides) >= 2:
+        texts = [str((slide or {}).get("display_text") or "") for slide in slides]
+        formulas = list(slide_formulas or [])
+    else:
+        texts = [str(whole_text or "")]
+    out: list[str] = []
+    for text in texts:
+        text = replace_unresolved_formula_placeholders(text, formulas)[0]
+        text = drop_unresolved_evidence_embeds(text, evidence_items)[0]
+        out.append(text)
+    return out, formulas
 
 
 # ---------------------------------------------------------------------------

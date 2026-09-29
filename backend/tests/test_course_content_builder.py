@@ -211,15 +211,11 @@ def test_detailed_check_questions_fills_legacy_question_fields():
         {
             "question": "この節の中心を説明してください。",
             "model_answer": "摂動カーネルは観測量と理論パラメータの対応を整理する。",
-            "answer_requirements": [
-                "物質密度揺らぎ",
-                "カーネルの役割を説明できる",
-                "数式 eq:kernel の意味または役割に触れる",
-            ],
-            "explanation": (
-                "根拠となる数式を単独で読むのではなく、各記号が何を表し、"
-                "その式が次の議論にどのように使われるかを確認する。"
-            ),
+            # IK-0428: 問いが式を参照していないので数式の要件は足さない（内部 ID・
+            # 式のラベルを要件に書かない）。
+            # IK-0462: 重要概念・学習目標で要件を埋めない（要件の無い問いは固定文1つ）。
+            "answer_requirements": ["この節の中心概念を自分の言葉で説明する"],
+            "explanation": "用語の暗記ではなく、前提、中心概念、結論のつながりを確認する。",
         },
     ]
 
@@ -247,7 +243,8 @@ def test_normalized_legacy_check_question_is_filled_with_topic_context():
     _ensure_check_question_details(result, topic)
 
     assert result["check_questions"][0]["model_answer"] == "この節では式を使って観測量を定義する。"
-    assert "数式 eq:observable の意味または役割に触れる" in result["check_questions"][0]["answer_requirements"]
+    # IK-0428: 問い「問い」は式を参照していないので、数式の要件（旧: 「数式 eq:observable …」）は足さない。
+    assert not any("eq:observable" in req for req in result["check_questions"][0]["answer_requirements"])
 
 
 def test_detailed_check_questions_preserves_and_fills_partial_dict():
@@ -261,7 +258,8 @@ def test_detailed_check_questions_preserves_and_fills_partial_dict():
     )
 
     assert questions[0]["question"] == "定義は何か"
-    assert questions[0]["answer_requirements"] == ["既存要素", "定義を確認する"]
+    # IK-0462: 学習目標で要件を埋めない（問いの答えの要点だけ）。
+    assert questions[0]["answer_requirements"] == ["既存要素"]
     assert questions[0]["model_answer"] == "定義を確認する"
     assert questions[0]["explanation"] == "用語の暗記ではなく、前提、中心概念、結論のつながりを確認する。"
 
@@ -605,13 +603,14 @@ def test_topic_evidence_for_prompt_derives_available_references_from_links():
 
     refs = _topic_evidence_for_prompt(topic)["available_references"]
 
-    assert {"kind": "component", "id": "comp_001"} in refs
-    assert {"kind": "equation", "id": "eq_kernel"} in refs
-    assert {"kind": "claim", "id": "clm_1"} in refs
+    assert ("component", "comp_001") in {(r["kind"], r["id"]) for r in refs}  # IK-0438: 各項目は短い本文 text も持つ
+    assert ("equation", "eq_kernel") in {(r["kind"], r["id"]) for r in refs}  # IK-0438: 各項目は短い本文 text も持つ
+    assert ("claim", "clm_1") in {(r["kind"], r["id"]) for r in refs}  # IK-0438: 各項目は短い本文 text も持つ
     # 特定の source span も解決可能な参照として提示される。
-    assert {"kind": "source", "id": "ev_1"} in refs
-    # source_excerpt がある場合は汎用の topic_summary 参照も含まれる。
-    assert {"kind": "source", "id": "topic_summary"} in refs
+    assert ("source", "ev_1") in {(r["kind"], r["id"]) for r in refs}  # IK-0438: 各項目は短い本文 text も持つ
+    # source_excerpt がある場合は原文抜粋の参照が含まれる（IK-0455: 配信と同じ id）。
+    assert ("source", "excerpt") in {(r["kind"], r["id"]) for r in refs}  # IK-0455: 原文抜粋は配信と同じ id
+    assert ("source", "topic_summary") not in {(r["kind"], r["id"]) for r in refs}
 
 
 def test_topic_evidence_for_prompt_omits_source_reference_without_excerpt():
@@ -620,7 +619,7 @@ def test_topic_evidence_for_prompt_omits_source_reference_without_excerpt():
     topic = {"evidence_links": [{"kind": "component", "target_id": "comp_001", "summary": "..."}]}
     refs = _topic_evidence_for_prompt(topic)["available_references"]
 
-    assert {"kind": "component", "id": "comp_001"} in refs
+    assert ("component", "comp_001") in {(r["kind"], r["id"]) for r in refs}  # IK-0438: 各項目は短い本文 text も持つ
     assert all(ref["kind"] != "source" for ref in refs)
 
 
@@ -1005,7 +1004,7 @@ def test_topic_evidence_for_prompt_includes_figure_reference():
     }
 
     refs = _topic_evidence_for_prompt(topic)["available_references"]
-    assert {"kind": "figure", "id": "fig-uuid-1"} in refs
+    assert ("figure", "fig-uuid-1") in {(r["kind"], r["id"]) for r in refs}  # IK-0438: 各項目は短い本文 text も持つ
 
 
 def test_course_content_draft_prompt_documents_figure_embed_syntax():

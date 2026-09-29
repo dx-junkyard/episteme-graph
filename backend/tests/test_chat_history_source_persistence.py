@@ -246,7 +246,8 @@ class TestLearningChatPersistsSources:
             current_user=CURRENT_USER,
         )
         meta = _persisted_meta(chat_env.persist_mock)
-        assert set(meta["sources"][0]) == {"index", "chunk_id", "source_title", "tier", "score"}
+        # IK-0433: 類似度の生値（score）は学習者向け DTO・履歴のどちらにも載せない。
+        assert set(meta["sources"][0]) == {"index", "chunk_id", "source_title", "tier"}
 
     def test_no_matching_chunks_persists_no_sources(self, chat_env):
         """該当チャンクなし（score 足切り）は空のまま — 空値は保存されない。"""

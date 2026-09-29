@@ -26,6 +26,7 @@ from sqlalchemy import text as sa_text
 
 from core.config import get_settings
 from core.course_data import course_chapters, course_topics
+from core.topic_labels import reserved_topic_label
 from core.llm_usage.context import bind_usage_context
 from core.llm_worker.cost_gate import CostGate, InMemoryCounterGate, today_str
 from core.postgres import get_session as _pg_session
@@ -103,6 +104,8 @@ def _fetch_pending_questions(session, user_id: str, course_id: str, topic_id: st
               AND status <> 'superseded'
               AND payload->'structure_anchor' IS NULL
               AND payload->>'anchor_analyzed_at' IS NULL
+              -- IK-0470: 教材内容の問いでない往復（お礼・雑談・予想の表明）は帰属しない
+              AND payload->>'anchor_skip_reason' IS NULL
             ORDER BY created_at ASC
         """),
         {"uid": user_id, "cid": course_id, "tid": topic_id},
@@ -271,7 +274,9 @@ def run_anchor_mining(user_id: str, course_id: str, topic_id: str | None) -> int
     if not questions:
         return 0
 
-    topic_title, _context_label = _topic_labels(course_row[0] if course_row else None, topic_id)
+    topic_title, _context_label = _topic_labels(
+        course_row[0] if course_row else None, topic_id, course_id=course_id,
+    )
     context = AnchorContext(
         course_id=course_id,
         topic_id=topic_id or "",
@@ -344,8 +349,17 @@ def run_anchor_mining(user_id: str, course_id: str, topic_id: str | None) -> int
     return saved
 
 
-def _topic_labels(course_data, topic_id: str | None) -> tuple[str, str]:
-    """course_data からトピック表示名と context_label（章·トピック）を引く。"""
+def _topic_labels(
+    course_data, topic_id: str | None, *, course_id: str | None = None,
+) -> tuple[str, str]:
+    """course_data からトピック表示名と context_label（章·トピック）を引く。
+
+    予約疑似トピックは内部 id のまま出さず、``core.topic_labels.reserved_topic_label`` の
+    表示名にする（IK-0403）。
+    """
+    pseudo = reserved_topic_label(course_id, topic_id)
+    if pseudo:
+        return pseudo, pseudo
     data = course_data
     if isinstance(data, str):
         try:

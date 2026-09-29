@@ -21,10 +21,36 @@ from __future__ import annotations
 
 __all__ = [
     "DOCUMENT_CONTEXT_PREFIX",
+    "DISCUSSION_TOPIC_ID",
+    "DISCUSSION_TOPIC_LABEL",
+    "DOCUMENT_DISCUSSION_TOPIC_LABEL",
+    "discussion_topic_label",
     "document_context_id",
     "is_document_context",
     "parse_document_context",
 ]
+
+# discuss モードの予約疑似トピック（``routes/learning.py`` の同名定数と同じ値。
+# core から api を import できないので、バックグラウンド worker（structure_anchor /
+# tension）が表示名へ変換するときの正本をここに置く — IK-0403。値を変えるときは
+# ``routes/learning.py`` の DISCUSSION_TOPIC_ID / DISCUSSION_TOPIC_LABEL /
+# DOCUMENT_DISCUSSION_TOPIC_LABEL も同時に直す（``test_wave6_tension_worker_inputs.py::
+# TestReservedTopicLabel`` が一致を固定）。
+DISCUSSION_TOPIC_ID = "_discussion"
+DISCUSSION_TOPIC_LABEL = "論文との議論"
+DOCUMENT_DISCUSSION_TOPIC_LABEL = "論文との議論（コース外）"
+
+
+def discussion_topic_label(course_id: str | None, topic_id: str | None) -> str | None:
+    """予約疑似トピックなら表示名を返す（そうでなければ ``None``）。
+
+    コース経路は「論文との議論」、document 直付け（``_doc:`` センチネル）は
+    「論文との議論（コース外）」。内部 id ``_discussion`` を LLM 入力・表示に出さないための
+    変換で、learning.py の topic_title 決定と同じ分岐。
+    """
+    if str(topic_id or "") != DISCUSSION_TOPIC_ID:
+        return None
+    return DOCUMENT_DISCUSSION_TOPIC_LABEL if is_document_context(course_id) else DISCUSSION_TOPIC_LABEL
 
 # センチネルの接頭辞。実在コース id は UUID 由来（`learning_courses.id` は TEXT だが
 # 生成は uuid4）のため、この接頭辞と衝突しない。

@@ -38,6 +38,7 @@ from typing import Any, Iterable, Sequence
 from sqlalchemy import text as sa_text
 
 from core import atlas_correspondence
+from core import atlas_state
 from core import atlas_store
 from core.atlas_gaps import schema as gap_schema
 from core.landscape import schema as landscape_schema
@@ -52,7 +53,9 @@ __all__ = [
     "build_corpus_landscape",
     "list_corpus_domains",
     "list_corpus_documents",
+    "list_unrelated_visible_titles",
     "outer_fact_line",
+    "unrelated_documents_fact",
 ]
 
 
@@ -206,7 +209,10 @@ def list_corpus_domains(
         out.append(
             {
                 "domain_key": domain_key,
-                "domain_name": _clean(entry.get("domain_name")) or domain_key,
+                # IK-0413: 内部キーを表示名の代わりに出さない（未登録は正直にそう言う）。
+                "domain_name": atlas_state.learner_domain_label(
+                    _clean(entry.get("domain_name")), domain_key
+                ),
                 "frozen_version": frozen_version,
                 "has_visible_papers": domain_key in placed,
             }
@@ -516,3 +522,81 @@ def list_corpus_documents(
         }
         for row in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# 論文リストの外側（IK-0414 / CR4 閉世界の正直さ）
+# ---------------------------------------------------------------------------
+
+#: 論文リストに出ない閲覧可能な論文を、題名で並べるときの上限（件数は言わない）。
+UNRELATED_TITLES_LIMIT = 8
+
+#: 論文リストの外側の事実文。「この分野の論文ではない」とは言わない（関係づけの記録が
+#: 無いだけ — 解析が届いていない論文を分野から外したと読ませない）。件数を出さない。
+_FACT_UNRELATED_TEMPLATE = (
+    "閲覧できる論文のうち、次の論文はこの分野の地図との関係づけが記録されていないため、"
+    "この一覧と地図には出ていません: {titles}"
+)
+
+
+def unrelated_documents_fact(titles: Sequence[str], more: bool) -> str:
+    """論文リストの外側の事実文（題名の列挙・件数なし）。題名が無ければ空文字。"""
+    shown = [f"「{t}」" for t in titles if str(t or "").strip()]
+    if not shown:
+        return ""
+    text = "".join(shown)
+    if more:
+        text += "ほか"
+    return _FACT_UNRELATED_TEMPLATE.format(titles=text)
+
+
+def list_unrelated_visible_titles(
+    session: Any,
+    domain_key: str,
+    visible_doc_ids: Iterable[str] | None,
+    *,
+    limit: int = UNRELATED_TITLES_LIMIT,
+) -> tuple[list[str], bool]:
+    """本人が閲覧できるのに、この分野の論文リストに出ない論文の題名（新しい順）。
+
+    ``list_corpus_documents`` の母集合（配置あり ∪ gap 信号あり）の**補集合**を、
+    同じ可視集合の中で引く。地図の位置には置かない（位置の捏造をしない — LS1）。
+    ``(titles, more)`` を返し、``more`` は上限を超えたかの bool（件数は数えない）。
+    可視集合・domain_key が空なら SQL を発行しない（CR1）。
+    """
+    key = _clean(domain_key)
+    doc_ids = _visible_ids(visible_doc_ids)
+    if not key or not doc_ids:
+        return [], False
+    rows = session.execute(
+        sa_text(
+            """
+            SELECT COALESCE(NULLIF(d.title, ''), NULLIF(d.filename, ''), '') AS title
+              FROM documents d
+             WHERE d.id::text = ANY(:doc_ids)
+               AND NOT EXISTS (
+                   SELECT 1 FROM landscape_placements p
+                    WHERE p.document_id = d.id
+                      AND p.domain_key = :domain_key
+                      AND p.status = ANY(:statuses)
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM landscape_gap_signals s
+                    WHERE s.document_id = d.id
+                      AND s.domain_key = :domain_key
+                      AND s.status = :active
+               )
+             ORDER BY d.created_at DESC, d.id
+             LIMIT :lim
+            """
+        ),
+        {
+            "domain_key": key,
+            "doc_ids": list(doc_ids),
+            "statuses": list(landscape_schema.LEARNER_VISIBLE_STATUSES),
+            "active": gap_schema.SIGNAL_STATUS_ACTIVE,
+            "lim": int(limit) + 1,
+        },
+    ).fetchall()
+    titles = [_title(r[0]) for r in rows if _title(r[0])]
+    return titles[:limit], len(rows) > limit

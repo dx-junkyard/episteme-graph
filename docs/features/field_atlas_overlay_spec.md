@@ -640,3 +640,16 @@ index.html を **200 で**返し、フロントの `res.ok` 判定をすり抜�
 `routes/atlas_vectors.py`（vectors status / refresh・aliases）と
 `routes/atlas_edges.py`（edge-candidates 系）が加わっている。本数を数え直す場合は
 `backend/api/routes/atlas*.py` の実定義を一次情報とすること。
+
+## 14. 追補（2026-09-28 ペルソナ通し受講 第 8 周・IK-0412）
+
+- `GET /api/atlas` の `ledger_status` は検証行と食い違わない値にする
+  （`atlas_state.learner_ledger_status`）。骨格 seed 由来（`status_source='seed'`）・
+  コーパス由来の状態なし（`unknown`）・引用 0 本の `verified` は **`unrecorded`**
+  （語の正本 `label_vocab.ATLAS_LEDGER_STATUS_UNRECORDED`）。表示状態 `status` とノードの色は
+  フロント互換のため不変。seed の「原文に裏付け」ピルは「骨格の初期表示（台帳に記帳なし）」。
+- ノードに `pill_note`（ピルの意味の1行。正本 `label_vocab.ATLAS_PILL_NOTES`、nodes_list は
+  `panel.pill_note`）。**フロント（`atlas-panel.js` / `atlas-overlay.js`）はまだ描いていない**。
+- パンくずは分野の表示名（`atlas_domain_meta.name` → 同梱 `domain.json`）。無ければ
+  「名前が登録されていない分野」。トップレベルに `domain_name` を追加（`cartridge` は取得キー
+  として互換のまま）。

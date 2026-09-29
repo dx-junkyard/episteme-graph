@@ -136,7 +136,37 @@ def _tex_safe_cut(body: str, cut: int) -> int:
     return cut
 
 
-def excerpt(text: object, limit: int, *, ellipsis: str = "…") -> str:
+def _dollar_safe_cut(body: str, cut: int) -> int:
+    """``body[:cut]`` が ``$…$`` の数式区間の内側で終わるなら、区間の開始位置へ戻す。
+
+    ``\\$``（エスケープされた ``$``）は区切りに数えない。``$$`` も同じ扱い（開始の
+    ``$`` の並びの手前まで戻す）。後退の結果 0 なら「安全に切れる位置が無い」。
+    """
+    count = 0
+    index = 0
+    while index < cut:
+        char = body[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "$":
+            count += 1
+        index += 1
+    if count % 2 == 0:
+        return cut
+    opening = body.rfind("$", 0, cut)
+    while opening > 0 and body[opening - 1] == "$":
+        opening -= 1
+    return opening
+
+
+def excerpt(
+    text: object,
+    limit: int,
+    *,
+    ellipsis: str = "…",
+    keep_dollar_math: bool = False,
+) -> str:
     """``text`` を最大 ``limit`` 文字へ切り詰める（CP5 の唯一の実装）。
 
     手順:
@@ -150,6 +180,8 @@ def excerpt(text: object, limit: int, *, ellipsis: str = "…") -> str:
       5. どの位置も TeX コマンドトークンの途中に掛かる場合は、そのトークンの手前へ
          後退させる。安全に切れる位置が無ければ**空文字**を返す（壊れた TeX を
          出すくらいなら何も出さない）。
+      6. ``keep_dollar_math=True`` のときは ``$…$`` の数式区間の途中でも切らない
+         （区間の手前へ後退させる。既定 False = 従来どおり）。
     """
     body = normalize_whitespace(text)
     if not body:
@@ -177,6 +209,8 @@ def excerpt(text: object, limit: int, *, ellipsis: str = "…") -> str:
 
     for candidate in candidates:
         safe = _tex_safe_cut(body, candidate)
+        if keep_dollar_math and safe > 0:
+            safe = _dollar_safe_cut(body, safe)
         if safe <= 0:
             continue
         head = body[:safe].rstrip(_TRAILING_STRIP_CHARS)

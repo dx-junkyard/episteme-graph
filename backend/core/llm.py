@@ -777,6 +777,37 @@ def _gemini_generate_embeddings(
 # 公開 API: テキスト生成
 # ---------------------------------------------------------------------------
 
+def _messages_mention_json(messages: list[dict[str, Any]]) -> bool:
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text", "")) for part in content if isinstance(part, dict)
+            )
+        if "json" in str(content or "").lower():
+            return True
+    return False
+
+
+def json_mode_response_format(
+    messages: list[dict[str, Any]], response_format: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """JSON モードの要求を OpenAI の規則に照らして通すか落とす（IK-0452）。
+
+    ``json_object`` は messages のどこにも "JSON" の語が無いと API が 400 を返す。
+    プロンプトを黙って書き換えず、要求の方を落として従来のテキスト経路に戻す
+    （呼び出しを止めない）。``json_object`` 以外の値はそのまま返す。
+    """
+    if not isinstance(response_format, dict):
+        return None
+    if response_format.get("type") == "json_object" and not _messages_mention_json(messages):
+        logger.warning("json_object requested without the word JSON in messages; dropping JSON mode")
+        return None
+    return response_format
+
+
 def generate_text(
     messages: list[dict[str, str]],
     *,
@@ -785,6 +816,7 @@ def generate_text(
     max_tokens: int | None = None,
     reasoning_effort: str | None = None,
     timeout: float | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> str:
     """チャット補完でテキストを生成する。
 
@@ -801,6 +833,12 @@ def generate_text(
         Reasoning モデルでは max_completion_tokens に変換される。
     reasoning_effort : str | None
         Reasoning モデルの推論レベル (``"low"`` / ``"medium"`` / ``"high"``)。
+    response_format : dict | None
+        JSON モード（``{"type": "json_object"}``）の要求（IK-0452）。openai 経路でのみ
+        API へ渡す（openai 互換 proxy もそのまま受ける）。他プロバイダ経路では無視する
+        （テキストとして返り、呼び出し側の JSON 取り出しは従来どおり）。OpenAI の規則
+        （messages のどこかに "JSON" の語が必要・無いと 400）を満たさない呼び出しでは
+        :func:`json_mode_response_format` が要求を落とす。
 
     Returns
     -------
@@ -808,6 +846,7 @@ def generate_text(
         LLM のレスポンステキスト。
     """
     settings = get_settings()
+    response_format = json_mode_response_format(messages, response_format)
     if model is not None:
         model_name = model
     else:
@@ -853,6 +892,7 @@ def generate_text(
         temperature=temperature,
         max_tokens=max_tokens,
         reasoning_effort=reasoning_effort,
+        extra_kwargs={"response_format": response_format} if response_format else None,
     )
 
     started = time.monotonic()

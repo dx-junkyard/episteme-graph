@@ -54,6 +54,10 @@ from core.lecture import (
     normalize_to_placeholder_format,
     split_slides,
 )
+from core.course_content_builder import (
+    build_topic_evidence_items,
+    drop_unresolved_evidence_embeds,
+)
 from core.learning_support_agent import extract_inline_actions
 from core.llm import generate_text, get_llm_params
 from core.llm_usage.context import usage_context
@@ -872,12 +876,19 @@ def _build_topic_draft_segment(
         figures_by_id,
     )
 
+    # IK-0458: 受講画面（get_topic_material）と同じ読み取り専用 evidence DTO を運ぶ。
+    # スライド本文の ``![[component|claim|source:id]]`` をフロントが受講画面と同じ規則で
+    # 解決できるようにし、引けない埋め込みは表示本文から外す（学習者に内部 ID を見せない）。
+    # 外すのはスライド分割の**後**の表示本文だけ（build_topic_slides のページ境界・
+    # slide_index・読み上げ原稿は変えない）。
+    evidence_items = build_topic_evidence_items(topic or {})
+
     # 各スライドの音声は topic_lecture_audio_cache から解決する（教員が生成済みなら has_audio=True）。
     topic_audio_map = _get_topic_slide_audio_map(course_id, topic_id)
     slides = [
         LectureSlide(
             slide_index=sd["slide_index"],
-            display_text=sd["display_text"],
+            display_text=drop_unresolved_evidence_embeds(sd["display_text"], evidence_items)[0],
             spoken_text=sd["spoken_text"],
             formulas=[LectureFormulaItem(**f) for f in sd["formulas"]],
             figures=[LectureFigureItem(**f) for f in sd.get("figures", [])],
@@ -894,10 +905,11 @@ def _build_topic_draft_segment(
     return LectureSegment(
         chunk_id=f"topic:{topic_id}",
         chunk_index=int(topic.get("topic_index") or 0),
-        text=display_text,
+        text=drop_unresolved_evidence_embeds(display_text, evidence_items)[0],
         spoken_text=spoken_text,
         formulas=[LectureFormulaItem(**f) for f in formulas],
         figures=[LectureFigureItem(**f) for f in segment_figures],
+        evidence_items=evidence_items,
         has_audio=bool(topic_audio_map),
         duration_ms=0,
         segment_mode="full",

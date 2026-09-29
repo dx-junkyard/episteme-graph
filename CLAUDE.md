@@ -1409,7 +1409,10 @@ docs/manual を AI アシスタントの知識源にする非ベクトル KB。�
 - **エンジン**: `backend/core/admin_assistant/next_steps.py`（FastAPI / LLM 非 import）。
   `compute_next_steps(session, user)` がルールカタログ（**正本は同ファイルの `RULE_CATALOG` /
   `_RULE_EVALUATORS`** — 件数をここに書き写さない）を本人所有の教材・コースに対して評価:
-  `materials.none` / `material.analysis_failed` / `material.no_course`（required）、
+  `materials.none`（本人所有ゼロかつ可視な教材もゼロのときだけ）/ `material.analysis_failed` / `material.no_course`（required）、
+  `materials.shared_available`（所有ゼロ・共有教材あり → コースビルダーへ。IK-0363）/ `material.analysis_llm_failed`
+  （採用 run の `stage_outputs.llm_failures` あり = 解析中に AI 提供元の呼び出しが失敗。IK-0362。要約は
+  `core/llm_usage/run_failures.py`、orchestrator が完了時に書く）、
   `course.not_published` / `course.no_atlas_binding` / `course.atlas_binding_ready` /
   `course.atlas_binding_stale` / `figure.unreviewed_modes`（未レビューの図分類が残る教材）/
   `course.discuss_opening_unreviewed` / `manual.help_gaps_pending`（recommended）、

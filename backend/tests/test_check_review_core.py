@@ -29,8 +29,10 @@ class TestVocabulary:
         assert check_review.SELF_CHECK_VALUES is SELF_CHECK_VALUES
         assert check_review.SELF_CHECK_VALUES == ("agreed", "disagreed", "verdict_wrong")
 
-    def test_only_two_values_advance_completion(self):
-        assert check_review.SELF_CHECK_ADVANCING == ("agreed", "disagreed")
+    def test_only_agreed_advances_completion(self):
+        # IK-0399: 「違っていた」は完了にしない（先へ進むのは「合っていた」だけ）。
+        assert check_review.SELF_CHECK_ADVANCING == ("agreed",)
+        assert "disagreed" not in check_review.SELF_CHECK_ADVANCING
         assert "verdict_wrong" not in check_review.SELF_CHECK_ADVANCING
 
     def test_self_check_question_matches_reconstruction_wording(self):

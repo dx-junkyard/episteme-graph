@@ -26,6 +26,7 @@ from episteme_graph.agents.content_normalization import (
 )
 
 from episteme_graph.agents.alias_matching import text_mentions_alias
+from episteme_graph.agents.sentence_split import split_sentences
 
 from .schema import (
     CLAIM_TYPE_ONTOLOGY,
@@ -1048,7 +1049,10 @@ class ClaimObjectBuilder:
             if len(roles) >= 3:
                 return "non_atomic", "contains multiple rhetorical roles; split required"
         # 1. Multiple full sentences.
-        sentences = [s for s in re.split(r"[.!?]+\s+", t) if len(s.split()) >= 3]
+        # Abbreviation-aware (IK-0393): "(Houde et al. 2009)" is not two sentences.
+        sentences = [
+            s for s in split_sentences(t, terminators=".!?") if len(s.split()) >= 3
+        ]
         if len(sentences) >= 2:
             return "non_atomic", "contains multiple sentences; split required"
         # 2. Semicolon-joined clauses.
@@ -1095,7 +1099,7 @@ class ClaimObjectBuilder:
 
         # 1. Sentence + semicolon segmentation.
         segments: list[str] = []
-        for sent in re.split(r"(?<=[.!?])\s+", t):
+        for sent in split_sentences(t, terminators=".!?"):
             sent = sent.strip()
             if not sent:
                 continue

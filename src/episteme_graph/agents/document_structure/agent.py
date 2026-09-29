@@ -23,6 +23,7 @@ from .cartridge_loader import CartridgeLoader
 from .classifier import BlockClassifier
 from .hierarchy import SectionHierarchyBuilder
 from .parser import PDFBlockExtractor
+from .title_extraction import build_title_extraction, extract_title_from_layout
 from .schema import (
     CartridgeContext,
     DocumentMetadata,
@@ -196,6 +197,34 @@ class DocumentStructureAgent:
         metadata.author_extraction = resolved.to_metadata()
 
     # ------------------------------------------------------------------
+    # Title provenance (IK-0420)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_title(
+        metadata: DocumentMetadata, raw_blocks, page_heights
+    ) -> None:
+        """題名を TEI → 1頁目の最大フォント → None の順で決め、出所を記録する。
+
+        TEI 由来の題名が既にあれば（grobid_parser が選んだもの）そのまま使い、
+        レイアウトは読まない。レイアウトの失敗は題名なしに縮退する（解析は止めない）。
+        """
+        prior = metadata.title_extraction or {}
+        tei_candidates = list((prior.get("candidate_sources") or {}).get("tei") or [])
+        if metadata.title and prior.get("source") == "tei":
+            return
+        try:
+            font_size_title = extract_title_from_layout(raw_blocks, page_heights)
+        except Exception:
+            logger.warning("title layout fallback failed; leaving title empty", exc_info=True)
+            font_size_title = None
+        title, extraction = build_title_extraction(
+            tei_candidates=tei_candidates, font_size_title=font_size_title
+        )
+        metadata.title = title
+        metadata.title_extraction = extraction
+
+    # ------------------------------------------------------------------
     # PyMuPDF backend (既存ロジック)
     # ------------------------------------------------------------------
 
@@ -232,6 +261,10 @@ class DocumentStructureAgent:
         front_matter = extract_authors_from_front_matter(typed_blocks)
         metadata.authors = list(front_matter.authors)
         metadata.author_extraction = front_matter.to_metadata()
+
+        # Title (IK-0420): the PyMuPDF path has no TEI header, so the title comes
+        # from the first-page largest-font run (provisional) or stays None.
+        self._resolve_title(metadata, raw_blocks, page_heights)
 
         # pymupdf provenance
         for b in typed_blocks:
@@ -315,6 +348,10 @@ class DocumentStructureAgent:
         metadata.parser_reached_eof = (
             pages_processed >= total_pages if total_pages else None
         )
+
+        # Title (IK-0420): TEI header first; when GROBID's header has no usable
+        # title, fall back to the first-page largest-font run from PyMuPDF.
+        self._resolve_title(metadata, pymupdf_blocks, page_heights)
 
         if pymupdf_blocks:
             self._align_grobid_blocks_to_pdf_blocks(typed_blocks, pymupdf_blocks)

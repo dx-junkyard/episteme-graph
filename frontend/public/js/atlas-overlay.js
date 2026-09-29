@@ -136,6 +136,9 @@
     panelHead.appendChild(el("span", { class: "atlas-panel-name", id: "atlas-panel-name" }));
     panelHead.appendChild(el("span", { class: "atlas-panel-pill", id: "atlas-panel-pill" }));
     panel.appendChild(panelHead);
+    // ピルの意味の1行（サーバの pill_note。「暗黙の前提」とは何か等）。本文ではなく
+    // ピルの注記なので body の外に置く（atlas-panel.js の body 差し替えで消えない）。
+    panel.appendChild(el("p", { class: "atlas-panel-pill-note", id: "atlas-panel-pill-note" }));
     panel.appendChild(el("div", { class: "atlas-panel-body", id: "atlas-panel-body" }));
     sheet.appendChild(panel);
 
@@ -514,6 +517,13 @@
     pill.style.background = style.bg;
     pill.style.color = style.fg;
     pill.style.border = style.dashed ? "1px dashed " + C.assumedStroke : "none";
+    // サーバの事実文をそのまま出す（語彙・数値を JS で足さない）。無ければ空のまま隠す。
+    const pillNote = ov.querySelector("#atlas-panel-pill-note");
+    if (pillNote) {
+      const noteText = typeof info.pill_note === "string" ? info.pill_note : "";
+      pillNote.textContent = noteText;
+      pillNote.hidden = !noteText;
+    }
     if (!(opts && opts.silent)) {
       // C-1 (詳細パネル) / C-2 (チャット遷移) / D-1 (修正報告) の接続点
       document.dispatchEvent(new CustomEvent("atlas:nodeselect", {

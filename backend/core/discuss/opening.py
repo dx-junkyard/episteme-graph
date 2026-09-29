@@ -478,8 +478,17 @@ def project_backbone(
     def _node_id(node: dict[str, Any]) -> str:
         return str(node.get("component_id") or node.get("id") or node.get("node_id") or "")
 
+    def _stage_of(node: dict[str, Any]) -> str:
+        # IK-0426: A層の main ノードは stage キーを持たず、label が stage の英語表示名
+        # そのもの（#308）。stage が無ければ label から stage キーを逆引きする
+        # （element_vocab.theory_stage_key が正本。未知は ""）。
+        explicit = str(node.get("stage") or "").strip()
+        if explicit:
+            return explicit
+        return element_vocab.theory_stage_key(node.get("label"))
+
     def _sort_key(node: dict[str, Any]) -> tuple[int, str]:
-        stage = str(node.get("stage") or "")
+        stage = _stage_of(node)
         idx = _STAGE_ORDER.index(stage) if stage in _STAGE_ORDER else len(_STAGE_ORDER)
         return (idx, _node_id(node))
 
@@ -488,13 +497,23 @@ def project_backbone(
 
     projected: list[dict[str, Any]] = []
     for node in main_nodes[:limit]:
-        stage = str(node.get("stage") or "")
+        stage = _stage_of(node)
         node_id = _node_id(node)
         review_reasons = [str(r) for r in (node.get("review_reasons") or []) if str(r or "").strip()]
+        raw_label = str(node.get("label") or "").strip()
+        # 英語の stage 表示名だけの label（"Theory basis" 等）は日本語の stage ラベルに置き換える。
+        # 内部 ID（node_id）を表示ラベルへ縮退させない（PL7）。
+        if not raw_label or (stage and element_vocab.theory_stage_key(raw_label) == stage
+                             and raw_label.lower() in element_vocab.THEORY_STAGE_DISPLAY_TO_KEY):
+            display = _stage_label(stage) or str(node.get("display_label") or "").strip() or raw_label
+        else:
+            display = raw_label
         projected.append(
             {
+                # node_id は表示しない。学習画面が「ここから話す」の構造帰属（経路A）の
+                # anchor id として送り返す参照キー（discuss.js anchorAttrs）なので DTO に残す。
                 "node_id": node_id,
-                "label": str(node.get("label") or "").strip() or _stage_label(stage) or node_id,
+                "label": display,
                 "stage": stage,
                 "stage_label": _stage_label(stage),
                 "description": str(node.get("description") or ""),
@@ -688,7 +707,8 @@ def project_fragile_points(
         for node in nodes or []:
             if not isinstance(node, dict) or not _is_fragile_backbone_node(node):
                 continue
-            label = str(node.get("label") or node.get("node_id") or "").strip()
+            # IK-0426: 表示ラベルを内部 ID（node_id）へ縮退させない（PL7）。
+            label = str(node.get("label") or node.get("stage_label") or "").strip()
             if not label:
                 continue
             backbone_points.append(
@@ -1080,3 +1100,65 @@ def build_opening(
         "truncated": fragile_truncated,
     }
     return _strip_numeric_keys(result)
+
+
+# ---------------------------------------------------------------------------
+# document 直付け議論の要旨ブロック（IK-0436）
+# ---------------------------------------------------------------------------
+#
+# 「この論文の最も重要な結果は？」のような要約の問いは、チャンク検索では当たらないことが
+# ある（本文のどの一節とも近くない）。開幕画面が既に出している論文の問い・目的・主張
+# （``project_thesis`` の投影）を、会話の文脈にも事実行として渡す。読み取りのみ・LLM 0 回。
+# 番号付き出典ではない（``cited_sources`` に数えない）。言語は変換しない（DM8）。
+
+#: 事実行の見出し（主語=論文。解析結果であることを明示する）。
+_THESIS_FACT_LABELS = (
+    ("central_question", "この論文が答えようとした問い"),
+    ("paper_goal", "この論文の目的"),
+    ("central_thesis_text", "この論文の主張（解析で再構成した文）"),
+)
+#: 支持構造から添える文の上限（要旨ブロックを有界にする）。
+_MAX_THESIS_SUPPORT_LINES = 3
+_MAX_THESIS_FACT_CHARS = 400
+
+
+def _clip_fact(text: str) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= _MAX_THESIS_FACT_CHARS else text[: _MAX_THESIS_FACT_CHARS - 1] + "…"
+
+
+def document_thesis_fact_lines(document_id: str) -> list[str]:
+    """1 document の問い・目的・主張を事実行にする（fail-soft・無ければ空リスト）。"""
+    doc_id = str(document_id or "").strip()
+    if not doc_id:
+        return []
+    try:
+        artifacts = document_run_artifacts(doc_id)
+        artifacts = artifacts if isinstance(artifacts, dict) else {}
+    except Exception:  # noqa: BLE001
+        logger.warning("discuss thesis facts: artifact read failed for %s", doc_id, exc_info=True)
+        return []
+    thesis_artifact = artifacts.get("thesis_reconstruction")
+    skeleton_artifact = artifacts.get("paper_skeleton")
+    if not isinstance(thesis_artifact, dict) and not isinstance(skeleton_artifact, dict):
+        return []
+    thesis = project_thesis(
+        thesis_artifact if isinstance(thesis_artifact, dict) else {},
+        {},
+        {},
+        skeleton_artifact if isinstance(skeleton_artifact, dict) else None,
+    ) or {}
+    lines: list[str] = []
+    for key, label in _THESIS_FACT_LABELS:
+        value = _clip_fact(thesis.get(key) or "")
+        if value:
+            lines.append(f"- {label}: {value}")
+    support_lines = 0
+    for section in thesis.get("support_sections") or []:
+        for entry in section.get("entries") or []:
+            text = _clip_fact(entry.get("text") or "")
+            if not text or support_lines >= _MAX_THESIS_SUPPORT_LINES:
+                continue
+            lines.append(f"- {section.get('label') or ''}: {text}")
+            support_lines += 1
+    return lines

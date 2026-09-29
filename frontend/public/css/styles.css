@@ -1361,6 +1361,17 @@ html.learn-page > body {
   border-color: var(--color-text-info);
 }
 
+/* 受講登録が成立した事実文（IK-0405）。警告色にしない・通常の二次テキスト。 */
+.course-enroll-notice {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 360px;
+}
+#course-enroll-notice[hidden] { display: none !important; }
+
 /* ── No-course empty state ─────────────────────────────────────── */
 .no-course-message {
   display: flex;
@@ -1443,6 +1454,17 @@ html.learn-page > body {
   color: var(--color-text-tertiary, #8899bb);
   text-transform: uppercase;
   margin-bottom: 10px;
+}
+
+/* IK-0375: 教材が準備中・未生成で PDF 由来チャンクを出しているときの事実文1行。
+   警告色・枠の強調にしない（事実の段落であって注意喚起ではない）。
+   #material-body の中に置くので、画面全体の縦幅は増やさない（1画面レイアウトの規律）。 */
+.material-notice {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary, #aab4cc);
+  margin: 0 0 8px;
 }
 
 .material-chunk {
@@ -1711,6 +1733,20 @@ html.learn-page > body {
   margin-top: 8px;
   font-size: 11px;
   color: var(--color-text-tertiary);
+}
+
+/* 自己確認の応答に付くサーバの事実文（IK-0399。警告色にしない）。 */
+.check-selfcheck-notice {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+/* 帰属の確定・外したときのサーバの事実文（IK-0411）。 */
+.lx-digest-notice {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
 }
 
 /* 解答例・解説は畳んで出す（一等地は並置の事実文だけ）。 */
@@ -12232,4 +12268,29 @@ button.element-card-item:focus-visible .element-card-item-label {
 /* 学習画面の composer 直上の担体（1行のみ・区切り線は composer 側が持つ）。 */
 .disclosure-note-slot {
   flex: 0 0 auto;
+}
+
+/* IK-0376: リリース前の確認で一括確認の対象外になった論文の事実文（色で強調しない）。 */
+.release-review-skipped-note {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin: 0 0 8px;
+}
+
+.release-review-skipped-note[hidden] {
+  display: none;
+}
+
+/* 分野の地図: ピルの意味の1行（atlas-overlay.js がサーバの pill_note を textContent で入れる）。 */
+.atlas-panel-pill-note {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--color-text-tertiary, #94a3b8);
+}
+
+/* 論文の海: 一覧の下の事実文（corpus-sea.js がサーバの facts をそのまま出す。IK-0414）。 */
+.corpus-sea-doc-fact {
+  margin: 8px 4px 0;
+  font-size: 11.5px;
+  color: var(--color-text-tertiary, #94a3b8);
 }

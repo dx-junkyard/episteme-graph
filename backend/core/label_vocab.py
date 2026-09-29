@@ -496,6 +496,165 @@ RECONSTRUCTED_EQUATION_MARK = "AI復元"
 
 
 # ---------------------------------------------------------------------------
+# 教材がまだ解説になっていないときの事実文（IK-0375）
+# ---------------------------------------------------------------------------
+#
+# ``GET /api/learning/courses/{id}/topics/{tid}/material`` は、トピックの解説
+# （``student_material``）がまだ無いと論文の本文（PDF 由来チャンク）をそのまま返す。
+# 何の説明も無く論文の表紙が出ると学習者はコースが壊れていると読むので、DTO の
+# ``preparation_notice`` にどちらか1文を添える（数字を入れない）。
+# 書き分けはコースの ``course_content_status.status`` だけで決める:
+#   - 生成中（``COURSE_CONTENT_PREPARING_STATUSES``）→ 準備中
+#   - それ以外（未記録・完了だがこのトピックの解説が無い・パイプライン待ち・失敗）→ 未生成
+# 読み手は ``api/routes/learning.py::get_topic_material``。JS に日本語をミラーしない
+# （サーバの文をそのまま描く）。
+
+MATERIAL_PREPARING_NOTICE = (
+    "この教材は準備中です。解説ができるまで、論文の本文をそのまま表示しています。"
+)
+MATERIAL_NOT_GENERATED_NOTICE = (
+    "解説は生成されていません。論文の本文をそのまま表示しています。"
+)
+
+#: 教材本文の数式プレースホルダー（``[[FORMULA_N]]``）が、そのトピックに結びついた式の
+#: どれにも引けなかったときに置き換える文（IK-0389。学習者に生のプレースホルダーを
+#: 見せない）。数値・内部 ID は入れない。
+UNRESOLVED_FORMULA_PLACEHOLDER_TEXT = "（この数式は教材に載せられていません）"  # 第 9 周: 「出典の区画」は画面に無い場所を指していた
+
+#: 上の置き換えをしたトピックに残す事実文（``topic.grounding_note`` / ``coverage``）。
+UNRESOLVED_FORMULA_GROUNDING_NOTE = (
+    "本文の数式の一部は、このトピックに結びついた式から引けなかったため、"
+    "出典の区画を参照する表示にしています。"
+)
+
+#: 教材本文の ``![[component:…]]`` / ``![[claim:…]]`` / ``![[source:…]]`` が、そのトピックに
+#: 結びついた根拠のどれにも引けず、埋め込みを外したトピックに残す事実文（IK-0455。
+#: 学習者に生の埋め込み記法・内部 ID を見せない）。件数・内部 ID は入れない。
+UNRESOLVED_EMBED_GROUNDING_NOTE = (
+    "本文が参照していた根拠の一部は、このトピックに結びついた根拠から引けなかったため、"
+    "参照を外して表示しています。"
+)
+
+#: 教員が選んだ学ぶ単位のうち、論文の解析結果の主張・式・図・部品のどれにも
+#: 結びつかなかったものがあるトピックに残す事実文（IK-0456）。章の本文（出典の区画）は
+#: 結びついていても、構造化された根拠は無いことを正直に言う。件数は入れない。
+UNITS_WITHOUT_KNOWLEDGE_NOTE = (
+    "選んだ学ぶ単位の一部には、論文の解析結果の主張・式・図が対応付けられていません"
+    "（その部分は原文の区画だけを根拠にしています）。"
+)
+
+
+# ---------------------------------------------------------------------------
+# 受講登録が成立した事実文（IK-0385）
+# ---------------------------------------------------------------------------
+#
+# ``POST /api/learning/courses/{id}/enroll`` の応答は一覧行と同じ投影で、登録後は
+# ``is_enrollable: false`` になる（「まだ受講していない公開コース」ではなくなるため）。
+# その値だけを見ると「受講できなかった」と読めるので、成立した事実を1文で添える。
+# 読み手は ``api/routes/learning.py::enroll_course``（``LearningEnrollOut.notice``）。
+
+COURSE_ENROLLED_NOTICE = "受講を開始しました。コースの最初のトピックから読めます。"
+
+
+# ---------------------------------------------------------------------------
+# 学習チャットの事実文（IK-0396 / IK-0397）
+# ---------------------------------------------------------------------------
+#
+# 読み手は ``api/routes/learning.py``（学習チャット本体）。
+# JS に日本語をミラーしない（サーバの文をそのまま描く）。数値を入れない。
+
+#: 前提確認の逆質問に「理解している」と答えた往復で、記帳したうえで元の質問に答える
+#: ときに回答の先頭へ添える1行（IK-0396）。
+PREREQUISITE_ACK_RESUME_NOTICE = "前提の確認を記録しました。元の質問に答えます。"
+#: 同上の英語（発話にかな・漢字を含まない往復だけ。IK-0450）。
+PREREQUISITE_ACK_RESUME_NOTICE_EN = (
+    "Your confirmation of the prerequisite has been recorded. Here is the answer to your original question."
+)
+
+#: 逆質問は (トピック, セッション) につき1回（IK-0422）。同じトピックで既に逆質問を出した
+#: あと（書き直しを含む）、前提の確認が記録されていないまま次の問いが来たとき、逆質問を
+#: 出し直さずに答える往復の先頭へ添える1行。``{prerequisite}`` は前提の表示名。
+PREREQUISITE_GATE_SKIPPED_NOTICE = "前提「{prerequisite}」の確認はまだ記録していません。そのまま答えます。"
+#: 同上の英語（発話の大半がラテン文字の往復だけ。IK-0424）。
+PREREQUISITE_GATE_SKIPPED_NOTICE_EN = (
+    'The prerequisite "{prerequisite}" has not been confirmed yet, so this answers your question directly.'
+)
+#: 逆質問（日本語の定型文は ``services.check_prerequisites`` が正本）に英語の発話で
+#: 来たとき、末尾へ添える英語の1文（IK-0424）。答え方の例は英語の確認判定が受理する形。
+PREREQUISITE_GATE_EN = (
+    'This topic builds on the prerequisite "{prerequisite}" — reply "Yes, I understand" to continue, '
+    'or "No, please explain {prerequisite} first".'
+)
+
+#: 学習者が自分の理解度を点数・割合で求めたときの固定応答（IK-0397。非LLM・
+#: 数値非表示の原則を事実として述べる）。
+UNDERSTANDING_SCORE_REQUEST_REPLY = (
+    "このシステムは理解度を点数や割合では示しません。代わりに、いま説明できることを"
+    "自分の言葉で書いてみると、どこが曖昧かが見えます。"
+)
+#: 同上の英語（発話にかな・漢字を含まない往復だけ。IK-0450）。
+UNDERSTANDING_SCORE_REQUEST_REPLY_EN = (
+    "This system does not express understanding as a score or percentage. Instead, try writing "
+    "down in your own words what you can explain now; that shows where things are still unclear."
+)
+
+#: お礼・締めくくりだけの発話（「ありがとうございました、今日はここまでにします」
+#: "Thank you, that is very helpful!"）への固定応答（IK-0434。非LLM・検索なし・出典なし）。
+#: 問い返しを付けない（学習者が終えると言っている往復に次の問いを課さない）。
+CLOSING_UTTERANCE_REPLY = "お疲れさまでした。続きはいつでも同じ画面から再開できます。"
+#: 同上の英語（発話の大半がラテン文字の往復だけ。IK-0424 と同じ基準）。
+CLOSING_UTTERANCE_REPLY_EN = "Thank you for today. You can pick up where you left off from this same screen at any time."
+
+#: 引っかかりの候補（tension digest）が1件も無いときの事実文（IK-0437）。候補は会話の
+#: あとに非同期で作られるので、「無い」ことと「これから作られうる」ことだけを言う（数値なし）。
+TENSION_DIGEST_EMPTY_FACT = (
+    "いま確認を待っている引っかかりの候補はありません。候補は会話のあと、少し時間をおいて作られることがあります。"
+)
+#: 問いの帰属の候補（anchors digest）が1件も無いときの事実文（IK-0437）。
+ANCHOR_DIGEST_EMPTY_FACT = (
+    "いま確認を待っている「問いがどこについてだったか」の候補はありません。"
+    "候補は会話のあと、少し時間をおいて作られることがあります。"
+)
+
+#: 構造帰属（「この疑問は◯◯についてでしたか？」）を本人が確定・外したときの応答の
+#: 事実文（IK-0411。数値・内部 ID・AI の理由文を返さない代わりに、何が起きたかだけを言う）。
+ANCHOR_CONFIRMED_NOTICE = "この問いがどこについてだったかを記録しました。"
+ANCHOR_DISMISSED_NOTICE = "この候補を外しました。問いそのものは残っています。"
+
+#: 確認問題の自己確認で「違っていた」を押したときの事実文（IK-0399）。
+#: 「違っていた」は本人の見立てが要件と合わなかったという申告で、完了の確定には使わない。
+CHECK_SELF_CHECK_DISAGREED_NOTICE = (
+    "見立てが違っていたことを記録しました。このトピックはまだ完了にしていません。"
+    "要件と見比べて書き直すと、もう一度確かめられます。"
+)
+#: 同上の英語（このトピックの直近の発話にかな・漢字を含まない学習者だけ。IK-0450）。
+CHECK_SELF_CHECK_DISAGREED_NOTICE_EN = (
+    "Recorded that your reading did not match. This topic is not marked as complete yet. "
+    "Compare it with the requirements and rewrite it to check again."
+)
+
+
+# ---------------------------------------------------------------------------
+# リリース前の確認で「確認しなかった教材」がある理由の事実文（IK-0376）
+# ---------------------------------------------------------------------------
+#
+# ``POST /api/admin/landscape/courses/{id}/placements/accept`` は、edit 権限の無い
+# ソース論文を 403 にせず静かに対象外にする（RR7）。件数（``skipped_documents``）だけ
+# だと「確認済み 0・飛ばし 2」を失敗と読まれるので、理由ごとの1文を
+# ``skipped_note`` に添える（該当する理由があるときだけ・数字を入れない）。
+# 読み手は ``api/routes/landscape.py::accept_course_landscape_placements``。
+
+#: 閲覧はできるが編集権限の無い教材（例: 他の教員が所有する公開教材）を飛ばしたとき。
+RELEASE_SKIPPED_NOT_EDITABLE_NOTE = (
+    "あなたに編集権限の無い教材の位置づけは、ここでは確認できません（教材の所有者が確認します）。"
+)
+#: 閲覧できない、または見つからないソース教材を飛ばしたとき。
+RELEASE_SKIPPED_NOT_VISIBLE_NOTE = (
+    "閲覧できない教材、または見つからない教材の位置づけは、ここでは確認できません。"
+)
+
+
+# ---------------------------------------------------------------------------
 # 学習チャットの様相ラベル（Phase 1 入口統合）
 # ---------------------------------------------------------------------------
 #
@@ -571,3 +730,117 @@ CITATION_INTENT_LABELS = MappingProxyType({
     "contrasts_with": "対比する",
     "cites_for_background": "背景として引く",
 })
+
+
+# ---------------------------------------------------------------------------
+# 分野の地図（atlas）学習者向けの語彙（IK-0412。ペルソナ通し受講 第 8 周）
+# ---------------------------------------------------------------------------
+# 台帳（コーパスの論文からの記帳）に何も無い場所の状態語。骨格 seed 由来の弱い
+# 初期表示（``status_source='seed'``）と、コーパス由来の状態が無い場所をこの1語に
+# 寄せ、「検証: 台帳に記帳なし」の文と ``ledger_status`` の値を食い違わせない。
+#: ``GET /api/atlas`` の ``ledger_status`` に載る値（語彙の正本は ``core/atlas_state.py``）。
+ATLAS_LEDGER_STATUS_UNRECORDED = "unrecorded"
+#: 上の状態のピル表示。
+ATLAS_PILL_UNRECORDED = "台帳に記帳なし"
+#: 骨格 seed が「原文に裏付け」を初期表示に使っている場所のピル（台帳に引用が無いのに
+#: 「原文に裏付け」と読ませない）。
+ATLAS_PILL_SEED_VERIFIED = "骨格の初期表示（台帳に記帳なし）"
+
+#: ピルの意味を1行で言う事実文（表示状態 → 文）。評価語・誘導を含めない
+#: （``atlas_state.find_evaluative_language`` の対象）。
+ATLAS_PILL_NOTES = MappingProxyType({
+    "assumed": (
+        "この概念を前提として使う議論がありますが、その前提自体を直接確かめた記録は"
+        "台帳にありません。"
+    ),
+    "gap": "原文に対応する記述が無く、導出をつなぐために AI が補った箇所です。",
+    "contested": "この概念について、帰属つきの解釈が複数並んでいます。",
+    "unrecorded": "この場所について、コーパスの論文からの記帳はまだありません。",
+    "fog": "この領域には、まだコーパスの論文が関係づけられていません。",
+})
+
+#: 分野（atlas ドメイン）の表示名が登録されていないときの学習者向けの呼び名。
+#: domain_key（内部キー）を表示名の代わりに出さない。
+ATLAS_DOMAIN_UNNAMED_LABEL = "名前が登録されていない分野"
+
+
+# ---------------------------------------------------------------------------
+# わたしの記録（主権台帳）の kind 別 status ラベル（IK-0415）
+# ---------------------------------------------------------------------------
+# ``TRACE_STATUS_LABELS`` は status 語だけで決まる共通表で、``open`` を一律「未解決」と
+# 読ませていた。kind によって ``open`` の意味が違う（誤解の記録 = 回答が訂正を示した /
+# 学習の意図 = 残してある / 軽量アンカー = 付けた）ため、kind ごとの上書きをここに置く。
+# 載っていない (kind, status) は共通表へ落ちる。
+TRACE_STATUS_LABELS_BY_KIND = MappingProxyType({
+    "misconception": MappingProxyType({
+        # 誤解の記録は、回答が訂正を示したときに残る AI 検出の記録。本人が確かめた
+        # 「訂正済み」ではない（是正 F5 — 本人確定は誤解メモの側）。
+        "open": "回答で訂正の指摘あり（あなたの確認前）",
+    }),
+    "intention": MappingProxyType({
+        "open": "残してある",
+        "superseded": "新しい記録で差し替え",
+    }),
+    "anchor_mark": MappingProxyType({"open": "付けた印"}),
+    "frontier_interest": MappingProxyType({"open": "関心を記録"}),
+    "help_usage": MappingProxyType({"open": "記録済み"}),
+    "raw": MappingProxyType({"open": "記録済み"}),
+})
+
+#: 学習の意図（``interest_traces.kind='intention'``）の役割ラベル。役割語彙の正本は
+#: ``core/cycle/schema.py::INTENTION_ROLES``（一致はテストで固定）。
+INTENTION_ROLE_LABELS = MappingProxyType({
+    "opening_motive": "開いた動機",
+    "carryover_question": "持ち越した問い",
+    "revisit_answer": "持ち越した問いへの答え",
+    "leave_note": "次の自分への書き置き",
+})
+
+
+# ---------------------------------------------------------------------------
+# 授業用ドラフトの事実文（IK-0440 / IK-0441 / IK-0443）
+# ---------------------------------------------------------------------------
+#
+# 書き手は ``core/course_content_builder.py``。数値・内部 ID を入れない。いずれも生成の
+# たびにいまのトピックから付け直す文で、次の生成の「現在の下書き」からは外す
+# （``course_content_builder.GENERATED_DRAFT_NOTES``）。
+
+#: トピックに結びついた式に AI が文脈から復元した式が含まれ、部品の注意書きがそれを
+#: 述べているのに、生成された注意点に含まれていなかったときに足す1文（IK-0443）。
+RECONSTRUCTED_TOPIC_CAUTION = (
+    "このトピックの式には、AI が文脈から復元した式が含まれます（原文の数式とは未照合）。"
+)
+
+#: コース内の別のトピックとトピックの要約が同じ文のときに ``topic.coverage`` へ残す
+#: 事実文（IK-0441。件数は書かない）。
+DUPLICATE_TOPIC_SUMMARY_NOTE = (
+    "この項目の要約は、コース内の別の項目と同じ文です。題名に沿って書き分けてください。"
+)
+
+#: 式の候補として取り込まれたが式として読めないもの（見出し行・軸ラベル・断片等）を
+#: 授業用ドラフトの材料から外したときの事実文（IK-0459。件数・ID は書かない）。
+EXCLUDED_EQUATION_CANDIDATES_NOTE = (
+    "式として取り込まれたが式として読めない候補を、数式の一覧から外しています"
+)
+
+#: 外した理由の語 → 日本語（``course_content_builder.JUNK_EQUATION_REASONS`` とキー一致）。
+JUNK_EQUATION_REASON_LABELS = MappingProxyType({
+    "axis_ticks": "図の目盛り・短い断片",
+    "document_header": "論文の見出し行",
+    "axis_label": "図の軸ラベル",
+    "empty_body": "式番号だけで本体が無いもの",
+    "replacement_char": "文字化けを含む断片",
+    "no_relation": "式の記号を含まない語句",
+    "prose": "本文の文",
+    "split_fragment": "1つの式が割れた断片",
+})
+
+#: 原文（PDF の文字層）は短いのに、復元された LaTeX がその先まで書かれている式に
+#: 添える事実文（IK-0460）。
+RECONSTRUCTED_BEYOND_RAW_NOTE = (
+    "原文の該当箇所は raw_text の文字だけで、LaTeX は AI が文脈から復元したものです（原文とは未照合）"
+)
+
+#: 根拠候補の種類ごとの有無（IK-0461。件数は書かない。``{kind}`` は「主張」「図」等）。
+GROUNDING_KIND_SUPPLIED_FACT = "このトピックには{kind}が根拠候補として供給されています。"
+GROUNDING_KIND_NOT_SUPPLIED_FACT = "このトピックには{kind}が根拠候補として供給されていません。"

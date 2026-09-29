@@ -50,7 +50,8 @@ class TestCasualModeRouting:
     def test_casual_skips_visible_notice_but_keeps_guard(self):
         """OutOfSourceGuard の system 注入は維持し、可視プレフィックスのみ省略する。"""
         source = _read(LEARNING)
-        assert "if overall_tier == TIER_OUT_OF_SOURCE and not _is_casual:" in source
+        # IK-0378: 付与条件は model_generated（採用根拠ゼロ）。casual で省くのは不変。
+        assert "if _no_adopted_grounding and not _is_casual and not degraded" in source
         # guard 注入は casual 分岐の外（無条件）にある
         guard_idx = source.find('_system_prompt += "\\n\\n" + out_of_source_guard_instruction()')
         assert guard_idx > 0

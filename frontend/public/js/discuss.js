@@ -1530,15 +1530,39 @@
   }
 
   // doubtType を渡すとその様相に訂正して確定する（空文字なら候補どおり確定）。
+  // 帰属の確定・却下の応答は学習者向けに射影済み（IK-0411: ok / trace_id / status /
+  // notice / 各ラベル / related_assumption.statement）。サーバの事実文 notice があれば
+  // それをそのまま（textContent で）出し、無ければ従来の短い事実文に留める。
+  async function readAnchorDecisionNotice(res) {
+    if (!res || !res.ok) return "";
+    try {
+      var data = await res.json();
+      return (data && typeof data.notice === "string") ? data.notice : "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function setAnchorCardDone(card, text) {
+    if (!card) return;
+    card.innerHTML = "";
+    var done = document.createElement("div");
+    done.className = "discuss-landing-card-done";
+    done.textContent = text;
+    card.appendChild(done);
+  }
+
   async function confirmAnchorCard(traceId, doubtType) {
     var card = document.querySelector('[data-discuss-anchor-card="' + traceId + '"]');
     sendDiscussMetric("landing_confirmed", { kind: "anchor" });
+    var notice = "";
     try {
-      await apiFetch("/learning/anchors/" + encodeURIComponent(traceId) + "/confirm", {
+      var res = await apiFetch("/learning/anchors/" + encodeURIComponent(traceId) + "/confirm", {
         method: "POST", body: JSON.stringify({ doubt_type: doubtType || "" }),
       });
+      notice = await readAnchorDecisionNotice(res);
     } catch (e) { /* best-effort */ }
-    if (card) card.innerHTML = '<div class="discuss-landing-card-done">地図に置きました。</div>';
+    setAnchorCardDone(card, notice || "地図に置きました。");
   }
 
   // 「今日の理解を自分の言葉で」の保存。候補の confirm と違い、失敗を握りつぶすと
@@ -1579,12 +1603,16 @@
   async function dismissAnchorCard(traceId) {
     var card = document.querySelector('[data-discuss-anchor-card="' + traceId + '"]');
     sendDiscussMetric("landing_dismissed", { kind: "anchor" });
+    var notice = "";
     try {
-      await apiFetch("/learning/anchors/" + encodeURIComponent(traceId) + "/dismiss", {
+      var res = await apiFetch("/learning/anchors/" + encodeURIComponent(traceId) + "/dismiss", {
         method: "POST", body: JSON.stringify({}),
       });
+      notice = await readAnchorDecisionNotice(res);
     } catch (e) { /* best-effort */ }
-    if (card) card.remove();
+    // 外したことの事実文があればカードの位置に残す（問いそのものは残っていると伝える）。
+    if (notice) setAnchorCardDone(card, notice);
+    else if (card) card.remove();
   }
 
   function buildLandingBodyHtml(tensionItems, anchorItems, reconItem) {

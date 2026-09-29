@@ -264,6 +264,28 @@ def get_cycle_return_door_route(
         return {"empty": True}
 
 
+def _topic_labels(course_id: str, course_data, rows) -> dict[str, str]:
+    """``{topic_id: 表示名}``（IK-0417）。実在トピックは題名、予約疑似トピック
+    （``_discussion``）は ``core.topic_labels`` の表示名。内部 id を学習者に出さない。"""
+    from core.course_data import iter_all_topics
+    from core.topic_labels import reserved_topic_label
+
+    labels: dict[str, str] = {}
+    try:
+        for topic in iter_all_topics(course_data or {}):
+            if isinstance(topic, dict) and topic.get("id"):
+                labels[str(topic["id"])] = str(topic.get("title") or "")
+    except Exception:  # noqa: BLE001 — 見出しが引けないだけで発話は返す
+        logger.warning("todays-words topic labels unavailable", exc_info=True)
+    for row in rows or []:
+        topic_id = str((row or {}).get("topic_id") or "")
+        if topic_id and topic_id not in labels:
+            reserved = reserved_topic_label(course_id, topic_id)
+            if reserved:
+                labels[topic_id] = reserved
+    return labels
+
+
 @learning_router.get("/courses/{course_id}/cycle/todays-words")
 def get_cycle_todays_words_route(
     course_id: str,
@@ -281,7 +303,7 @@ def get_cycle_todays_words_route(
 
     try:
         rows = fetch_todays_user_words(current_user["id"], course_id)
-        return build_todays_words(rows)
+        return build_todays_words(rows, topic_labels=_topic_labels(course_id, course_data, rows))
     except Exception:
         logger.warning("Failed to build todays words", exc_info=True)
         return {"words": [], "truncated": False}

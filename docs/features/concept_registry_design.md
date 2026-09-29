@@ -256,11 +256,11 @@ API `POST /api/admin/library/atlas-links/derive?domain_key=`（TEACHER・retired
 - **学習者 API** `GET /api/learning/courses/{course_id}/symbols/lookup?symbol=&equation_id=&chunk_id=`
   （`core/symbol_lookup.py::lookup_symbol_definition`。受講ゲート `get_accessible_course_data` → `list_course_source_document_ids` →
   `knowledge_symbols_live` を `document_id = ANY(:doc_ids)` で読む。**LLM 0 回・既存データのみ**）:
-  1. `canonical_symbol` または `notation_variants` に一致する live 行を集める（一致は `normalize_key`（`concept_normalizer`）の完全一致・部分一致なし）。
+  1. `canonical_symbol` または `notation_variants` に一致する live 行を集める（一致は記号専用キー `symbol_lookup.symbol_key` の完全一致・部分一致なし。**大文字小文字を区別する** — `λ` と `Λ` は別の記号。TeX ⇄ Unicode・波括弧・書体指定だけを畳む。旧実装は概念名向けの `normalize_key` を流用して `λ` / `Λ` を同じキーにしていた = IK-0387）。タップ位置の論文（式またはチャンクから）の記号を先に当て、別の論文へ倒したときと、タップ位置が無いときは出所の論文タイトルを事実文で添える。「この節の中」「この式の中だけ」はタップ位置の論文の記号でだけ出す。`available: false` は必ず事実文を1つ持つ（IK-0386）。
   2. **ScholarPhi 規則 = 直前の定義**: タップ位置（`equation_id` → `knowledge_equations_live` の `block_id` / `section_id` の順序、
      無ければ `chunk_id` の `chunk_index`）より**前**にある `defining_equation_ids` / `source_evidence_ids` の定義のうち最も近いものを 1 件
      （`definition_evidence_texts` の逐語）。前に無ければ後方の最初の定義を「この位置より後で定義されています」の事実文付きで返す。
-     定義が無ければ `definition_status` のラベル（`element_vocab.DEFINITION_STATUS_LABELS`）と「この論文には定義の記述が見つかりませんでした」。
+     定義が無ければ「この論文には定義の記述が見つかりませんでした」（`definition_status` のラベルは、これと食い違わない `definition_missing` =「定義なし」のときだけ添える。`used` の「定義は別の箇所」等は含意が逆になるため出さない — IK-0380）。
   3. `concept_ref`: 当該 symbol に `confirmed` の識別リンクがあれば `{entry_id, name, entry_type_label}`、無ければ `null`（candidate は出さない）。
   4. DTO に `confidence` / `stable_key` / 内部 ID を載せない（KO10 / PL7）。`unit` / `scope_label` は載せる。
 - **UI（`app.js`）**: 教材の KaTeX 描画済み数式（`.katex`）内の記号トークン（`.mord.mathnormal` / `.mop` / `.mord` の textContent）クリックで

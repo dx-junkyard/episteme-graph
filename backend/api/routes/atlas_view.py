@@ -255,6 +255,9 @@ def get_atlas(
                 topic_info, skeleton, bound_concept_id=bound
             )
 
+        # --- 分野の表示名 (IK-0412。パンくずに内部キーを出さない) ---
+        domain_label = atlas_state.domain_display_name(session, cartridge_id)
+
         # --- 推定の糸 (RE層 §6。optional トップレベルキー threads) ---
         # 付加物なので、導出できないときはキーごと落とす (fail-soft = RE2/RE6)。
         # セッションが要るので取得はここで行い、レスポンスへのマージは組み立て後に行う。
@@ -308,15 +311,22 @@ def get_atlas(
     nodes: dict[str, dict] = {}
     nodes_list: list[dict] = []
     for entry_id, row in node_rows.items():
-        ledger_status = row["status"]
-        display_status = ledger_status
-        pill = atlas_state.PILL_LABELS.get(ledger_status, ledger_status)
+        node_status = row["status"]
+        # IK-0412: ledger_status は検証行（「台帳に記帳なし」等）と食い違わない値にする。
+        # seed 由来・コーパス状態なし・引用 0 本の verified は unrecorded。表示状態と色は不変。
+        ledger_status = atlas_state.learner_ledger_status(
+            node_status,
+            row.get("status_source"),
+            (row.get("evidence") or {}).get("evidence_count"),
+        )
+        display_status = node_status
+        pill = atlas_state.learner_pill(node_status, ledger_status)
         verify = row["verify_line"]
         if now_id == entry_id:
             display_status = "now"
             pill = atlas_state.PILL_LABELS["now"]
             verify = verify + "あなたの学習の現在地。"
-        elif entry_id not in visited and ledger_status in (
+        elif entry_id not in visited and node_status in (
             atlas_state.STATUS_VERIFIED,
             atlas_state.STATUS_UNKNOWN,
         ):
@@ -324,9 +334,13 @@ def get_atlas(
             # 減衰させるが、検証行には台帳状態をそのまま残す。
             display_status = "unvisited"
             pill = atlas_state.PILL_LABELS["unvisited"]
+        # ピルの意味の1行（「暗黙の前提」とは何か等）。台帳の状態で引く（表示が
+        # 未訪問・いまここに変わっても意味の説明は台帳の状態に付く）。
+        pill_note = atlas_state.pill_note_for(node_status, ledger_status)
         node_view = {
             "label": row["label"],
             "pill": pill,
+            "pill_note": pill_note,
             "status": display_status,
             "ledger_status": ledger_status,
             "verify": verify,
@@ -359,6 +373,7 @@ def get_atlas(
                 "region_id": row["region_id"],
                 "personal": {"visited": entry_id in visited},
                 "panel": {
+                    "pill_note": pill_note,
                     "verify": verify,
                     "endorse": row["endorse_line"],
                     "actions": {"learn": row["learn_enabled"], "evid": row["evid_enabled"]},
@@ -409,6 +424,9 @@ def get_atlas(
                 {
                     "label": f"{region.label}（霧の領域）",
                     "pill": atlas_state.PILL_LABELS[atlas_state.STATUS_FOG],
+                    "pill_note": atlas_state.pill_note_for(
+                        atlas_state.STATUS_FOG, atlas_state.STATUS_FOG
+                    ),
                     "status": atlas_state.STATUS_FOG,
                     "ledger_status": atlas_state.STATUS_FOG,
                     "verify": atlas_state.FOG_VERIFY_LINE,
@@ -497,7 +515,9 @@ def get_atlas(
         "3": focus_id if focus_id in chain else default_gap,
     }
 
-    cartridge_label = skeleton.cartridge or cartridge_id
+    # IK-0412: パンくずは分野の表示名（atlas_domain_meta / domain.json）。内部キー
+    # （cartridge_id）を表示名の代わりに出さない。名前が無ければ「名前が登録されていない分野」。
+    cartridge_label = domain_label
     crumbs = {
         "1": f"{cartridge_label} › 全体　—　ノードを選ぶと下に詳細",
         "2": f"{cartridge_label} › コース（概念マップ）",
@@ -507,6 +527,7 @@ def get_atlas(
     payload: dict = {
         "skeleton_version": skeleton.version,
         "cartridge": cartridge_id,
+        "domain_name": domain_label,
         "provenance": "AI生成・教員レビュー済",
         "level": level,
         "focus": focus_id,

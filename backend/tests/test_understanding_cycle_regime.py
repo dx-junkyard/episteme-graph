@@ -596,7 +596,8 @@ class TestGetNextItemDeprioritization:
 
         result = route_mod.get_next_item("c1", "t1", current_user={"id": "u1"})
 
-        assert result == {"item": None, "exhausted": True}
+        assert result["item"] is None and result["exhausted"] is True
+        assert result["facts"] and all(isinstance(f, str) and f for f in result["facts"])
         assert fake.main_queries
         assert all(
             "CASE WHEN i.elicit_mode IN ('regime', 'next_step') THEN 1 ELSE 0 END ASC" in q

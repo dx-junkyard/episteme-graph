@@ -101,6 +101,12 @@
   landscape`）は非改変で並置。
 - `GET /api/learning/corpus/documents?domain_key=` — 可視論文のリスト（title / authors /
   year / 配置済みか / 出所ラベル / 議論入口の可否）。ソートは新しい順のみ（数値スコアなし）。
+  **一覧に出ない閲覧可能な論文**（この分野の地図との関係づけ — 配置・gap 信号 — が無い論文。
+  学習中のコースの論文を含みうる）は optional キー `facts` に題名の列挙1行で言う
+  （2026-09-28・IK-0414 / CR4。上限8題名 +「ほか」・件数なし・地図の位置には置かない。
+  正本は `corpus_view.list_unrelated_visible_titles` / `unrelated_documents_fact`）。
+  `domains[].domain_name` は表示名が未登録なら内部キーでなく「名前が登録されていない分野」
+  （IK-0413。`atlas_state.learner_domain_label`）。
 
 実装は `backend/core/corpus_view.py`（FastAPI 非 import・読み時導出・保存物なし）+
 `backend/api/routes/corpus.py`（main.py 直接登録・認証は学習者本人）。可視性交差は SQL 内

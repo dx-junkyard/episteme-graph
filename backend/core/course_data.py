@@ -473,6 +473,32 @@ def course_focus(data: dict | None) -> str:
     return str(data.get("course_focus") or "").strip()
 
 
+#: 解説の生成がまだ終わっていない（走っている・順番待ち）ことを表す
+#: ``course_content_status.status`` の値。書き手は
+#: ``core/course_content_builder.py::_set_content_status`` とコース登録経路。
+COURSE_CONTENT_PREPARING_STATUSES = frozenset({"pending", "queued", "processing"})
+
+
+def course_content_state(data: dict | None) -> str:
+    """``data.course_content_status.status`` を trim 済み文字列で返す（無ければ ``""``）。
+
+    ``course_content_status`` は ``_set_content_status()`` が任意キーを足す free-form
+    dict（``CourseData`` の docstring 参照）なので、ここでは ``status`` だけを読む。
+    ``""`` は「記録が無い」であって「完了」ではない（読み手が推測で補わない）。
+    """
+    if not isinstance(data, dict):
+        return ""
+    status = data.get("course_content_status")
+    if not isinstance(status, dict):
+        return ""
+    return str(status.get("status") or "").strip()
+
+
+def course_content_is_preparing(data: dict | None) -> bool:
+    """コースの解説生成がまだ終わっていないと記録されているときだけ True。"""
+    return course_content_state(data) in COURSE_CONTENT_PREPARING_STATUSES
+
+
 def excluded_symbol_concepts(data: dict | None) -> list[str]:
     """``data.excluded_symbol_concepts`` を list[str] で返す（無ければ ``[]``）。
 

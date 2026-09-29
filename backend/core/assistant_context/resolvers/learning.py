@@ -30,6 +30,7 @@ from typing import Any, Mapping
 
 from core.element_vocab import claim_type_label, theory_stage_key, theory_stage_label
 from core.learner_context_common import is_internal_id_label, safe_text
+from core.text_excerpt import excerpt as _excerpt
 
 from ..registry import register
 from ..schema import (
@@ -68,9 +69,14 @@ def _list(value: Any) -> list:
 
 
 def _text(value: Any, limit: int | None = None) -> str:
+    """前後の空白を除いた文字列。``limit`` を超えるときは語境界・文境界で切る（IK-0393）。
+
+    素のスライス（``text[:limit]``）は英文を語の途中で切り（``…indicating tha``）、
+    プロンプトへ壊れた語を渡していた。切り詰めの正本は ``core.text_excerpt.excerpt``。
+    """
     text = str(value or "").strip()
     if limit is not None and len(text) > limit:
-        return text[:limit]
+        return _excerpt(text, limit)
     return text
 
 
@@ -86,6 +92,17 @@ def _safe(value: Any, limit: int | None = None) -> str:
     if not text:
         return ""
     return safe_text(text)
+
+
+def is_fragment_claim_text(value: Any) -> bool:
+    """主張の本文が数値・記号の断片だけか（IK-0393 (c)）。
+
+    ``≈9.3`` / ``(2)`` / ``B = 3`` のような断片は、主張行として A層に残っていても
+    （P4 = 行は消さない）学習者向けの構造の手がかりにはしない。判定は「字母（ラテン
+    文字・漢字・かな等、``str.isalpha``）が2字未満」だけ（短い日本語の主張や略語は残す）。
+    """
+    text = str(value or "").strip()
+    return sum(1 for ch in text if ch.isalpha()) < 2
 
 
 def _join(items: list[str], *, truncated: bool = False) -> str:
@@ -173,11 +190,13 @@ def _component_facts(context: Mapping[str, Any]) -> list[str]:
 
     for claim in _list(supports.get("claims"))[:MAX_LEARNING_SUPPORT_ITEMS]:
         row = _dict(claim)
-        excerpt = _safe(
+        if is_fragment_claim_text(row.get("excerpt") or row.get("text")):
+            continue
+        claim_text = _safe(
             row.get("excerpt") or row.get("text"), MAX_LEARNING_CLAIM_EXCERPT_CHARS
         )
-        if excerpt:
-            facts.append(f"「{label}」を支える主張: 「{excerpt}」")
+        if claim_text:
+            facts.append(f"「{label}」を支える主張: 「{claim_text}」")
 
     explanation = _dict(instance.get("explanation"))
     body = _safe(explanation.get("body") or explanation.get("text"), MAX_TEXT_CHARS)
@@ -421,10 +440,12 @@ def resolve_view(ctx: ScreenContext, sources: Mapping[str, Any]) -> list[str]:
 def _retrieved_claim_fact(index: str, claim: Mapping[str, Any]) -> str:
     """1つの主張の事実文（出典番号に結ぶ）。出せないものは空文字。"""
     row = _dict(claim)
-    excerpt = _safe(row.get("text"), MAX_LEARNING_RETRIEVED_CLAIM_CHARS)
-    if not excerpt:
+    if is_fragment_claim_text(row.get("text")):
         return ""
-    fact = f"[出典{index}] の箇所には次の主張が構造化されています: 「{excerpt}」"
+    claim_text = _safe(row.get("text"), MAX_LEARNING_RETRIEVED_CLAIM_CHARS)
+    if not claim_text:
+        return ""
+    fact = f"[出典{index}] の箇所には次の主張が構造化されています: 「{claim_text}」"
     type_label = claim_type_label(row.get("claim_type"))
     if type_label:
         fact += f"（主張の種類: {type_label}）"

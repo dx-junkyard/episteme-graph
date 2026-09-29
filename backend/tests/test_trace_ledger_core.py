@@ -59,16 +59,29 @@ def _all_items(overview) -> list[dict]:
 
 class TestSystemGrouping:
     def test_systems_follow_registry_declaration_order(self):
+        """宣言順。書き込み経路の無い系統（dead）は行が無ければ出さない（IK-0415）。"""
         overview = _overview([])
-        assert [s["kind"] for s in overview["systems"]] == list(TRACE_KINDS)
+        assert [s["kind"] for s in overview["systems"]] == [
+            k for k, spec in TRACE_KINDS.items() if not spec.dead
+        ]
 
-    def test_labels_and_dead_come_from_registry(self):
+    def test_labels_come_from_registry_and_dead_flag_is_not_exposed(self):
         overview = _overview([])
         by_kind = {s["kind"]: s for s in overview["systems"]}
         assert by_kind["question"]["label"] == "問い"
         assert by_kind["tension"]["label"] == "引っかかり"
-        assert by_kind["detour"]["dead"] is True
-        assert all(not s["dead"] for k, s in by_kind.items() if k != "detour")
+        assert "detour" not in by_kind
+        assert all("dead" not in s for s in overview["systems"])
+
+    def test_dead_system_with_rows_is_kept_with_fact_note(self):
+        """P4: dead 系統に既存行があれば落とさず、事実文を添えて出す。"""
+        from core.trace_ledger import RETIRED_SYSTEM_NOTE
+
+        overview = _overview([_row(id="t-d", kind="detour")])
+        by_kind = {s["kind"]: s for s in overview["systems"]}
+        assert [i["id"] for i in by_kind["detour"]["items"]] == ["t-d"]
+        assert by_kind["detour"]["publicity_note"].startswith(RETIRED_SYSTEM_NOTE)
+        assert "dead" not in by_kind["detour"]
 
     def test_rows_are_grouped_into_their_kind(self):
         rows = [
@@ -115,6 +128,48 @@ class TestRowRetentionAndProjection:
         assert by_id["t-1"]["status_label"] == "未解決"
         assert by_id["t-2"]["status_label"] == "書き直しで差し替え"
         assert by_id["t-3"]["status_label"] == "見送り（保持）"
+
+    def test_open_is_not_read_as_unresolved_for_misconception_and_intention(self):
+        """IK-0415: 誤解の記録・学習の意図の open を「未解決」と読ませない。"""
+        from core.label_vocab import INTENTION_ROLE_LABELS, TRACE_STATUS_LABELS_BY_KIND
+
+        rows = [
+            _row(id="m-1", kind="misconception", status="open"),
+            _row(id="i-1", kind="intention", status="open",
+                 payload={"role": "opening_motive", "text": "動機"}),
+            _row(id="i-2", kind="intention", status="open",
+                 payload={"role": "carryover_question", "text": "問い"}),
+            _row(id="a-1", kind="anchor_mark", status="open"),
+        ]
+        by_id = {i["id"]: i for i in _all_items(_overview(rows))}
+        assert by_id["m-1"]["status_label"] == TRACE_STATUS_LABELS_BY_KIND["misconception"]["open"]
+        assert by_id["i-1"]["status_label"] == INTENTION_ROLE_LABELS["opening_motive"]
+        assert by_id["i-2"]["status_label"] == INTENTION_ROLE_LABELS["carryover_question"]
+        for item in by_id.values():
+            assert item["status_label"] != "未解決"
+
+    def test_intention_role_labels_cover_cycle_roles(self):
+        from core.cycle.schema import INTENTION_ROLES
+        from core.label_vocab import INTENTION_ROLE_LABELS
+
+        assert set(INTENTION_ROLE_LABELS) == set(INTENTION_ROLES)
+
+    def test_reserved_topic_context_label_is_translated_at_read_time(self):
+        rows = [_row(id="q-1", payload={"text": "問い", "context_label": "_discussion"})]
+        items = _all_items(_overview(rows))
+        assert items[0]["context_label"] == "論文との議論"
+
+    def test_provenance_note_has_no_promise(self):
+        from core.trace_ledger import PROVENANCE_NOTE
+
+        assert "実装予定" not in PROVENANCE_NOTE
+        assert "追加します" not in PROVENANCE_NOTE
+
+    def test_unregistered_system_label_is_not_the_raw_kind(self):
+        overview = _overview([_row(id="t-x", kind="legacy_kind")])
+        tail = overview["systems"][-1]
+        assert tail["label"] != "legacy_kind"
+        assert tail["items"][0]["kind_label"] != "legacy_kind"
 
     def test_unknown_status_is_labeled_sonota_not_passed_through(self):
         items = _all_items(_overview([_row(status="weird_status")]))

@@ -114,11 +114,24 @@ def get_corpus_documents(
 
     visible = list_visible_document_ids(current_user["id"])
     session = _session()
+    facts: list[str] = []
     try:
         documents = corpus_view.list_corpus_documents(session, key, visible)
+        # IK-0414（CR4）: 一覧に出ない閲覧可能な論文（学習中のコースの論文を含む）を
+        # 題名で言う。地図の位置には置かない。取れなければ事実文だけ落とす（fail-soft）。
+        try:
+            titles, more = corpus_view.list_unrelated_visible_titles(session, key, visible)
+            fact = corpus_view.unrelated_documents_fact(titles, more)
+            if fact:
+                facts.append(fact)
+        except Exception:  # noqa: BLE001
+            logger.warning("corpus unrelated titles unavailable", exc_info=True)
     finally:
         session.close()
-    return {"documents": documents}
+    result: dict = {"documents": documents}
+    if facts:
+        result["facts"] = facts
+    return result
 
 
 class FrontierInterestRequest(BaseModel):

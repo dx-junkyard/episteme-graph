@@ -34,6 +34,9 @@ class RawBlock:
     font_name: str | None = None
     is_bold: bool = False
     is_centered: bool = False
+    # 文字数で重み付けした最頻の文字サイズ（題名の大きさの判定用・IK-0420）。
+    # ``font_size`` は span の単純平均なので、題名に付く小さな脚注記号で下がる。
+    dominant_font_size: float | None = None
 
 
 @dataclass
@@ -82,6 +85,12 @@ class DocumentMetadata:
     # authors came from (grobid_tei / tex_author / pdf_front_matter / none),
     # with confidence + needs_review. None for legacy artifacts.
     author_extraction: dict | None = None
+    # Title provenance (IK-0420): which deterministic signal the title came from
+    # (tei / font_size / none), mirroring ``author_extraction``'s shape
+    # (source / confidence / needs_review / review_reasons / candidate_sources).
+    # ``title`` itself is always a single-line string or None. None for legacy
+    # artifacts.
+    title_extraction: dict | None = None
     # TeX equation inventory (issue #420): a deterministic count of display math
     # blocks + symbolic labels computed from the expanded TeX at ingest time, so
     # completeness / coverage can detect TeX math without re-storing the (large)

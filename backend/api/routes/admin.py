@@ -104,7 +104,9 @@ from core.course_data import (
     is_symbol_concept_name,
 )
 from core.course_units import (
+    candidate_key_table,
     list_unit_candidates,
+    normalize_draft_unit_refs,
     render_unit_candidates_block,
     unit_concept_terms_by_document,
     unit_kind_label,
@@ -2180,12 +2182,83 @@ _MAX_GRAPH_EDGES_PER_MATERIAL = 80
 _MAX_CONCEPT_TERMS_PER_MATERIAL = 12
 
 
+def _graph_edge_endpoint(edge: dict, *keys: str) -> str:
+    for key in keys:
+        value = edge.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _component_dependency_lines(
+    graph_json: dict,
+    *,
+    component_names: dict[str, str] | None = None,
+    limit: int = _MAX_GRAPH_EDGES_PER_MATERIAL,
+) -> list[str]:
+    """理論操作グラフの辺を「名前 (ID) -> 名前 (ID)」の行にする（IK-0379）。
+
+    - 端点は保存形 ``source_component_id`` / ``target_component_id`` を先に読み、
+      旧形・テスト形の ``source`` / ``from`` / ``target`` / ``to`` へ落とす。
+    - 名前はグラフ自身のノード（``display_label`` → ``label``）→ theory_components の
+      ``name`` の順で引く。名前が引けなければ ID だけを書く（推測で埋めない）。
+    - 両端のどちらかが空のままの辺は行にしない。
+    """
+    if not isinstance(graph_json, dict):
+        return []
+    names: dict[str, str] = {
+        str(k): str(v).strip()
+        for k, v in (component_names or {}).items()
+        if k and v and str(v).strip()
+    }
+    for node in graph_json.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        label = _graph_edge_endpoint(node, "display_label", "label", "name")
+        if not label:
+            continue
+        for key in ("component_id", "id", "agent_component_id"):
+            node_id = node.get(key)
+            if node_id and str(node_id).strip():
+                names.setdefault(str(node_id).strip(), label)
+
+    def render(endpoint_id: str) -> str:
+        name = names.get(endpoint_id, "")
+        if name and name != endpoint_id:
+            return f"{name} ({endpoint_id})"
+        return endpoint_id
+
+    lines: list[str] = []
+    for edge in graph_json.get("edges") or []:
+        if len(lines) >= limit:
+            break
+        if not isinstance(edge, dict):
+            continue
+        src = _graph_edge_endpoint(edge, "source_component_id", "source", "from")
+        tgt = _graph_edge_endpoint(edge, "target_component_id", "target", "to")
+        if not src or not tgt:
+            continue
+        etype = _graph_edge_endpoint(edge, "type", "relation", "edge_type")
+        evidence = edge.get("evidence") if isinstance(edge.get("evidence"), dict) else {}
+        reason = _graph_edge_endpoint(edge, "reason", "label") or _graph_edge_endpoint(
+            evidence, "reason"
+        )
+        line = f"- {render(src)} -> {render(tgt)}"
+        if etype:
+            line += f"  (Type: {etype})"
+        if reason:
+            line += f"  Reason: {reason}"
+        lines.append(line)
+    return lines
+
+
 def _build_material_context(
     material_ids: list[str],
     pg_session_factory=None,
     *,
     user_id: str | None = None,
     unit_candidates_out: list | None = None,
+    unit_candidate_objects_out: list | None = None,
 ) -> str | None:
     """選択された教材のAgent解析済み理論コンポーネントを主入力としてコンテキスト文字列を構築する。
 
@@ -2201,6 +2274,10 @@ def _build_material_context(
     ``unit_candidates_out`` を渡すと、そこに「学ぶ単位」の候補
     （``{"handle", "kind", "kind_label", "label"}``）を追記する。戻り値の型は
     変えない（呼び出し面・パッチ面を保つ）。
+
+    ``unit_candidate_objects_out`` を渡すと、同じ候補表を ``UnitCandidate`` のまま
+    追記する（IK-0371: 草案に handle → 参照キーの対応表を同梱するための材料。
+    プレビュー用の ``unit_candidates_out`` の形は変えない）。
 
     Returns None if no usable context could be built.
     """
@@ -2418,22 +2495,17 @@ def _build_material_context(
         # ---- 主入力: コンポーネント依存関係グラフ ----
         if doc_graphs:
             graph_json = doc_graphs[0][1] if isinstance(doc_graphs[0][1], dict) else {}
-            edges = graph_json.get("edges", [])
-            if edges:
+            # IK-0379: 端点は保存形（``source_component_id`` / ``target_component_id``。
+            # persistence.persist_component_graph）から読み、名前へ解決する。端点が
+            # 空のまま残る辺は行にしない（``-  ->   (Type: derives)`` を渡さない）。
+            dependency_lines = _component_dependency_lines(
+                graph_json,
+                component_names={str(c[0]): str(c[2] or "") for c in doc_components},
+                limit=_MAX_GRAPH_EDGES_PER_MATERIAL,
+            )
+            if dependency_lines:
                 sections.append("#### コンポーネント依存関係")
-                for edge in edges[:_MAX_GRAPH_EDGES_PER_MATERIAL]:
-                    if not isinstance(edge, dict):
-                        continue
-                    src = edge.get("source", edge.get("from", ""))
-                    tgt = edge.get("target", edge.get("to", ""))
-                    etype = edge.get("type", edge.get("relation", ""))
-                    reason = edge.get("reason", edge.get("label", ""))
-                    line = f"- {src} -> {tgt}"
-                    if etype:
-                        line += f"  (Type: {etype})"
-                    if reason:
-                        line += f"  Reason: {reason}"
-                    sections.append(line)
+                sections.extend(dependency_lines)
 
         # ---- 補助入力: 根拠Claim ----
         doc_claims = [r for r in claim_rows if r[1] == doc_uuid]
@@ -2551,6 +2623,8 @@ def _build_material_context(
     # 候補表（handle → 種別・名前）を呼び出し側へ返す。プレビューで ``U3`` ではなく
     # 単位の名前を出すための材料（P2-R10）。数値（件数・order_index・confidence）は
     # 載せない（LU5）。表示テキストは untrusted 由来なので制御シーケンスを落とす。
+    if unit_candidate_objects_out is not None:
+        unit_candidate_objects_out.extend(unit_candidates)
     if unit_candidates_out is not None:
         for candidate in unit_candidates:
             unit_candidates_out.append({
@@ -2588,6 +2662,81 @@ _COURSE_BUILDER_DEGRADED_MESSAGE = (
     "AI 応答を生成できませんでした。しばらくしてからもう一度お試しください。"
 )
 
+# IK-0365: 提供元の利用上限・残高切れは待っても直らない（恒常的な失敗）。教員向けの
+# コースビルダーだけ、取るべき行動（管理者に知らせる）が分かる事実文に分ける。
+# 数値・提供元の生メッセージ・URL は載せない。学習者向けの文面は変えない。
+_COURSE_BUILDER_PROVIDER_QUOTA_MESSAGE = (
+    "AI 提供元の利用上限または残高の制限で応答を生成できませんでした。"
+    "システム管理者に提供元の設定・残高の確認を依頼してください。"
+)
+
+#: 提供元の利用上限・残高切れを示すメッセージ断片（小文字で照合）。
+_PROVIDER_QUOTA_MESSAGE_MARKERS = ("insufficient_quota", "credit", "billing")
+
+
+def _is_provider_quota_error(exc: BaseException | None) -> bool:
+    """LLM 提供元の利用上限・残高切れによる失敗か（IK-0365）。
+
+    判定は例外の型名に ``RateLimit`` を含むか、メッセージに
+    ``insufficient_quota`` / ``credit`` / ``billing`` を含むか。``core.llm`` が包んで
+    投げ直す場合に備え、``__cause__`` / ``__context__`` を数段たどる。判定材料の
+    生メッセージは画面へ出さない（呼び出し側は固定の事実文を返す）。
+    """
+    seen: set[int] = set()
+    current = exc
+    depth = 0
+    while current is not None and depth < 6 and id(current) not in seen:
+        seen.add(id(current))
+        if "ratelimit" in type(current).__name__.lower():
+            return True
+        try:
+            message = str(current).lower()
+        except Exception:  # noqa: BLE001 — str() が落ちる例外は判定材料にしない
+            message = ""
+        if any(marker in message for marker in _PROVIDER_QUOTA_MESSAGE_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+        depth += 1
+    return False
+
+
+def _course_builder_degraded_message(exc: BaseException | None) -> str:
+    """コースビルダーの縮退文（失敗の種類で分ける。IK-0365）。"""
+    if _is_provider_quota_error(exc):
+        return _COURSE_BUILDER_PROVIDER_QUOTA_MESSAGE
+    return _COURSE_BUILDER_DEGRADED_MESSAGE
+
+
+def _attach_unit_identity_to_draft(course_draft: dict, candidates: list) -> None:
+    """草案に「このターンの候補表」の handle → 参照キーを同梱する（IK-0371）。
+
+    handle（``U3``）はこのターンの教材集合を並べた候補表の位置で、登録時の sources が
+    違うと別の単位を指す。そこで ①``course_draft["unit_candidate_keys"]`` に対応表を置き
+    ②``chapters[].topics[].units``（と ``topics[].units``）の handle を、このターンの
+    候補表で引けるものだけ ``{"handle", "stable_key"}`` に直す。引けない handle は文字列の
+    まま残す（参照キーを作らない = 捏造ガード）。LLM が履歴から写した
+    ``unit_candidate_keys`` は信用せず、サーバの候補表で上書きする（候補表が無いターンは
+    キーごと外す）。入力 dict をその場で更新する。
+    """
+    course_draft.pop("unit_candidate_keys", None)
+    if not candidates:
+        return
+    course_draft["unit_candidate_keys"] = candidate_key_table(candidates)
+
+    def _normalize_topics(topics: object) -> None:
+        if not isinstance(topics, list):
+            return
+        for topic in topics:
+            if isinstance(topic, dict) and isinstance(topic.get("units"), list):
+                topic["units"] = normalize_draft_unit_refs(candidates, topic["units"])
+
+    chapters = course_draft.get("chapters")
+    if isinstance(chapters, list):
+        for chapter in chapters:
+            if isinstance(chapter, dict):
+                _normalize_topics(chapter.get("topics"))
+    _normalize_topics(course_draft.get("topics"))
+
 
 @router.post(
     "/course-builder/chat",
@@ -2624,12 +2773,14 @@ def course_builder_chat(
 
     # 選択教材のナレッジグラフ・チャンクテキストを含む詳細コンテキストを注入
     unit_candidates_out: list[dict] = []
+    unit_candidate_objects: list = []
     if body.selected_material_ids:
         try:
             material_context = _build_material_context(
                 body.selected_material_ids,
                 user_id=current_user["id"],
                 unit_candidates_out=unit_candidates_out,
+                unit_candidate_objects_out=unit_candidate_objects,
             )
             if material_context:
                 messages.append({
@@ -2663,12 +2814,19 @@ def course_builder_chat(
                 temperature=0.4,
                 model=resolve_model("course_builder_llm_model", fallback="analysis"),
             )
-    except Exception:
+    except Exception as exc:
         logger.exception("Course builder chat LLM call failed")
         degraded = True
-        answer = _COURSE_BUILDER_DEGRADED_MESSAGE
+        answer = _course_builder_degraded_message(exc)
     else:
         answer, course_draft = _extract_course_draft_from_answer(raw_answer)
+
+        # IK-0371: 草案の handle をこのターンの候補表の参照キーに結び付けて運ぶ。
+        if course_draft is not None:
+            try:
+                _attach_unit_identity_to_draft(course_draft, unit_candidate_objects)
+            except Exception:  # noqa: BLE001 — 失敗しても草案は返す（登録側が最終の弁）
+                logger.warning("Failed to attach unit identity to course_draft", exc_info=True)
 
         # 選択教材の正しい material_id を確定的に course_draft["sources"] に注入する
         if course_draft is not None and body.selected_material_ids:

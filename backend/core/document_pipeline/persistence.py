@@ -3205,6 +3205,232 @@ def persist_document_embedding(
 
 
 # ---------------------------------------------------------------------------
+# documents.title の書き戻し（IK-0366）
+# ---------------------------------------------------------------------------
+
+#: 構造化が取り出した題名を ``documents.title`` に採る上限（これ以上は題名でない断片とみなす）。
+DOCUMENT_TITLE_MAX_CHARS = 300
+_TITLE_SOURCE_SUFFIXES = (".tar.gz", ".tgz", ".pdf")
+
+
+def _filename_stem(filename: Any) -> str:
+    """アップロード時の仮題名と同じ規則でファイル名の語幹を返す。
+
+    ``api/routes/admin.py::_source_title`` と同じ規則（core から API 層を import しない
+    ため写しで持つ）: ``.tar.gz`` / ``.tgz`` / ``.pdf`` を落とし、それ以外は最後の拡張子を落とす。
+    """
+    name = _text(filename)
+    if not name:
+        return ""
+    lower = name.lower()
+    for suffix in _TITLE_SOURCE_SUFFIXES:
+        if lower.endswith(suffix):
+            return name[: -len(suffix)]
+    base, dot, _ext = name.rpartition(".")
+    return base if dot and base else name
+
+
+def extracted_document_title(artifacts: Any) -> str:
+    """``document_structure`` artifact の ``metadata.title`` を題名として採れる形で返す。
+
+    採らない（空文字を返す）のは: artifact / metadata が無い・題名が空・改行を含む・
+    ``DOCUMENT_TITLE_MAX_CHARS`` 以上。改行を含む題名は組版ヘッダ等の断片である
+    ことが多いので、つなぎ直して推測しない。
+    """
+    if not isinstance(artifacts, dict):
+        return ""
+    structure = _plain(artifacts.get("document_structure"))
+    if not isinstance(structure, dict):
+        return ""
+    metadata = structure.get("metadata")
+    if not isinstance(metadata, dict):
+        return ""
+    raw = metadata.get("title")
+    if not isinstance(raw, str):
+        return ""
+    if "\n" in raw or "\r" in raw:
+        return ""
+    title = raw.strip()
+    if not title or len(title) >= DOCUMENT_TITLE_MAX_CHARS:
+        return ""
+    return title
+
+
+def document_title_is_placeholder(
+    current_title: Any, *, filename: Any = None, source_path: Any = None
+) -> bool:
+    """``documents.title`` がまだ入口の仮の値か（人が付けた題名ではないか）。
+
+    仮の値 = 空 / ファイル名の語幹 / ファイル名そのもの / ``source_path``（material_id）/
+    アップロードの既定名 ``document``。これ以外は人が編集した可能性があるので上書きしない。
+    """
+    title = _text(current_title)
+    if not title:
+        return True
+    placeholders = {
+        _filename_stem(filename),
+        _text(filename),
+        _text(source_path),
+        "document",
+    }
+    placeholders.discard("")
+    return title in placeholders
+
+
+def sync_document_title_from_structure(document_id: Any, artifacts: Any) -> bool:
+    """構造化が取り出した題名を、仮の題名のままの ``documents.title`` に書き戻す（IK-0366）。
+
+    - 書き戻すのは ``extracted_document_title`` が非空で、現在の題名が
+      ``document_title_is_placeholder`` のときだけ（人が編集した題名は上書きしない）。
+    - 冪等: 同じ題名が入っていれば何もしない。UPDATE は読んだ題名との一致を条件にし、
+      読んでから書くまでに誰かが題名を変えていたら書かない。
+    - fail-soft: 例外は握りつぶして False（解析 run を止めない）。自前のセッションで
+      行い、呼び出し側のトランザクションに乗らない。
+
+    Returns:
+        書き戻したら True。
+    """
+    doc_id = _text(document_id)
+    title = extracted_document_title(artifacts)
+    if not doc_id or not title:
+        return False
+    session = None
+    try:
+        session = _pg_session()
+        row = session.execute(
+            sa_text(
+                """
+                SELECT title, filename, source_path
+                FROM documents
+                WHERE id = CAST(:id AS uuid)
+                """
+            ),
+            {"id": doc_id},
+        ).fetchone()
+        if row is None:
+            return False
+        current_title, filename, source_path = row[0], row[1], row[2]
+        if _text(current_title) == title:
+            return False
+        if not document_title_is_placeholder(
+            current_title, filename=filename, source_path=source_path
+        ):
+            return False
+        result = session.execute(
+            sa_text(
+                """
+                UPDATE documents
+                SET title = :title
+                WHERE id = CAST(:id AS uuid)
+                  AND title IS NOT DISTINCT FROM :current_title
+                """
+            ),
+            {"id": doc_id, "title": title, "current_title": current_title},
+        )
+        session.commit()
+        return bool(getattr(result, "rowcount", 0))
+    except Exception:  # noqa: BLE001 — 題名が仮のまま残るだけ（run は止めない）
+        logger.warning("document title sync failed for %s", doc_id, exc_info=True)
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                logger.debug("document title sync rollback failed", exc_info=True)
+        return False
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("document title sync close failed", exc_info=True)
+
+
+#: 題名バックフィル（IK-0419）の advisory lock キー。stable_key バックフィル
+#: （``knowledge_objects.backfill.BACKFILL_LOCK_KEY``）とは別のキー。
+DOCUMENT_TITLE_BACKFILL_LOCK_KEY = 4155251703
+
+
+def backfill_document_titles_from_structure(session) -> int:
+    """題名の書き戻し（IK-0366）より前に解析された教材の題名を、1回だけ直す（IK-0419）。
+
+    ``documents.title`` がまだ入口の仮の値（``document_title_is_placeholder`` — ファイル名・
+    arXiv ID 等）の教材について、**採用 run**（``_ARTIFACT_RUN_SELECT_SQL["adopted"]`` =
+    ``resolve_artifact_runs`` と同じ選び方）の ``document_structure`` artifact だけを読み、
+    ``extracted_document_title`` が採れれば書き戻す。
+
+    - 冪等: 題名が直った教材は次回から仮の値でなくなり対象から外れる。題名が採れない
+      教材は仮のまま残る（推測で題名を作らない）。
+    - 人が付けた題名は上書きしない（UPDATE は読んだ題名との一致を条件にする）。
+    - 呼び出し側のセッション・トランザクションで動く（commit は呼び出し側。lifespan は
+      advisory xact lock の配下で呼ぶ）。
+    - artifact は ``document_structure`` 段だけを読む（全段の payload を起動時に読まない）。
+
+    Returns:
+        書き戻した教材の数（ログ用。学習者・教員には出さない）。
+    """
+    rows = session.execute(
+        sa_text("SELECT id::text, title, filename, source_path FROM documents")
+    ).fetchall()
+    targets = {
+        str(row[0]): row[1]
+        for row in rows
+        if row[0] and document_title_is_placeholder(
+            row[1], filename=row[2], source_path=row[3]
+        )
+    }
+    if not targets:
+        return 0
+    ids = sorted(targets)
+    placeholders = ", ".join(f":doc_{i}" for i in range(len(ids)))
+    params = {f"doc_{i}": did for i, did in enumerate(ids)}
+    run_rows = session.execute(
+        sa_text(
+            f"""
+            WITH targets AS (
+                SELECT d.id::text AS document_id,
+                       {_ARTIFACT_RUN_SELECT_SQL["adopted"]} AS run_id
+                FROM documents d
+                WHERE d.id::text IN ({placeholders})
+            )
+            SELECT t.document_id, a.payload
+            FROM targets t
+            JOIN {TABLE_ARTIFACTS} a
+              ON a.run_id = t.run_id AND a.stage = 'document_structure'
+            """
+        ),
+        params,
+    ).fetchall()
+    updated = 0
+    for row in run_rows:
+        doc_id = str(row[0] or "")
+        payload = row[1]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                continue
+        title = extracted_document_title({"document_structure": payload})
+        if not doc_id or not title or doc_id not in targets:
+            continue
+        current_title = targets[doc_id]
+        if _text(current_title) == title:
+            continue
+        result = session.execute(
+            sa_text(
+                """
+                UPDATE documents
+                SET title = :title
+                WHERE id = CAST(:id AS uuid)
+                  AND title IS NOT DISTINCT FROM :current_title
+                """
+            ),
+            {"id": doc_id, "title": title, "current_title": current_title},
+        )
+        updated += int(getattr(result, "rowcount", 0) or 0)
+    return updated
+
+
+# ---------------------------------------------------------------------------
 # document_analysis_runs
 # ---------------------------------------------------------------------------
 
@@ -3271,6 +3497,7 @@ def upsert_analysis_run(
             new_run_id = str(row[0])
             _upsert_run_artifacts(session, new_run_id, artifacts)
             session.commit()
+            _maybe_sync_document_title(document_id, artifacts)
             return new_run_id
         else:
             session.execute(
@@ -3300,12 +3527,19 @@ def upsert_analysis_run(
             )
             _upsert_run_artifacts(session, run_id, artifacts)
             session.commit()
+            _maybe_sync_document_title(document_id, artifacts)
             return run_id
     except Exception:
         session.rollback()
         raise
     finally:
         session.close()
+
+
+def _maybe_sync_document_title(document_id: Any, artifacts: Any) -> None:
+    """``document_structure`` を書いた upsert のときだけ題名の書き戻しを試す（IK-0366）。"""
+    if isinstance(artifacts, dict) and "document_structure" in artifacts:
+        sync_document_title_from_structure(document_id, artifacts)
 
 
 def get_latest_analysis_run(

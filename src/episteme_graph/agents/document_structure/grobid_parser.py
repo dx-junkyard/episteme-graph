@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .schema import DocumentMetadata, Section, TypedBlock
+from .title_extraction import build_title_extraction, tei_title_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -152,14 +153,13 @@ class GROBIDTEIParser:
     # ------------------------------------------------------------------
 
     def _parse_metadata(self, soup) -> DocumentMetadata:
-        title = None
-        title_tag = soup.find("titleStmt")
-        if title_tag:
-            t = title_tag.find("title", level="a")
-            if t is None:
-                t = title_tag.find("title")
-            if t:
-                title = t.get_text(strip=True) or None
+        # IK-0420: ヘッダの題名候補を全部読み（type="main" 優先・analytic も見る）、
+        # 組版スタンプに見えるものは採らない。採れなければ agent がレイアウトの
+        # 最大フォントへ落とす（候補は title_extraction.candidate_sources に残る）。
+        tei_candidates = tei_title_candidates(soup)
+        title, title_extraction = build_title_extraction(
+            tei_candidates=tei_candidates, font_size_title=None
+        )
 
         # Issue #372: extract authors ONLY from the front-matter <teiHeader>
         # (fileDesc/sourceDesc/titleStmt). GROBID records citation authors under
@@ -201,6 +201,7 @@ class GROBIDTEIParser:
             authors=authors,
             pages=0,
             author_extraction=author_extraction,
+            title_extraction=title_extraction,
         )
 
     # ------------------------------------------------------------------

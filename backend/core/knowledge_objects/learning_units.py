@@ -399,7 +399,15 @@ def _thesis_nodes(thesis: Any) -> list[dict]:
     """
     if not thesis:
         return []
-    central = getattr(thesis, "central_thesis", None)
+
+    def _field(name: str) -> Any:
+        # 保存済み artifact（dict）と agent の結果（オブジェクト）の両方を読む
+        # （IK-0453。コース側は artifact の dict から同じノードを組み直す）。
+        if isinstance(thesis, dict):
+            return thesis.get(name)
+        return getattr(thesis, name, None)
+
+    central = _plain(_field("central_thesis"))
     if not isinstance(central, dict):
         central = {}
     nodes: list[dict] = [{
@@ -410,7 +418,7 @@ def _thesis_nodes(thesis: Any) -> list[dict]:
         "equation_ids": _id_list(central.get("equation_ids")),
         "evidence_block_ids": _id_list(central.get("evidence_block_ids")),
     }]
-    support_structure = getattr(thesis, "support_structure", None)
+    support_structure = _plain(_field("support_structure"))
     if isinstance(support_structure, dict):
         for section, entries in support_structure.items():
             if not isinstance(entries, list):
@@ -428,6 +436,35 @@ def _thesis_nodes(thesis: Any) -> list[dict]:
                     "evidence_block_ids": _id_list(data.get("evidence_block_ids")),
                 })
     return nodes
+
+
+def thesis_support_nodes(thesis: Any) -> list[dict]:
+    """``thesis_support`` の単位を作る元になるノード（中身の無いものは除く）。
+
+    各ノードは ``thesis_ref`` / ``kind`` / ``text`` / ``claim_ids`` /
+    ``equation_ids`` / ``evidence_block_ids`` を持つ。``claim_ids`` は thesis 側の
+    綴り（``"claim:{block_id}:{span_id}"``）のまま。コース側はこれを
+    :func:`thesis_support_stable_key` で単位の行と突き合わせ、単位が参照する主張を
+    引く（IK-0453。単位の行は claim を DB UUID でしか持たないため）。
+    """
+    return [
+        node for node in _thesis_nodes(thesis)
+        if node["text"] or node["claim_ids"] or node["equation_ids"]
+    ]
+
+
+def thesis_support_stable_key(document_id: str, node: Mapping[str, Any]) -> str:
+    """:func:`thesis_support_nodes` の1ノードに対応する単位の stable_key（衝突接尾辞なし）。"""
+    return ko_keys.learning_unit_stable_key(
+        document_id,
+        KIND_THESIS_SUPPORT,
+        _text(node.get("text")),
+        [
+            _text(node.get("thesis_ref")),
+            *_id_list(node.get("claim_ids")),
+            *_id_list(node.get("equation_ids")),
+        ],
+    )
 
 
 def _thesis_support_units(

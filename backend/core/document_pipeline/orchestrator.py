@@ -34,6 +34,7 @@ from core.llm_policy import (
     resolve_scene_model,
 )
 from core.llm_usage.context import bind_usage_context, set_current_feature
+from core.llm_usage.run_failures import LLM_FAILURES_KEY
 from core.llm_worker.cost_gate import CostGate, today_str
 from episteme_graph.agents.coverage_report import (
     COVERAGE_REPORT_KEY,
@@ -837,7 +838,11 @@ def run_document_pipeline(
             cartridge_id=cartridge_id,
             status="completed",
             current_stage=stage,
-            stage_outputs={stage: payload or {"status": "completed", "progress": 100}},
+            stage_outputs={
+                # IK-0362: 単一ステージ実行でも、この run の提供元障害の事実を残す。
+                **_completion_llm_failures_outputs(run_id),
+                stage: payload or {"status": "completed", "progress": 100},
+            },
         )
         return True
 
@@ -981,8 +986,10 @@ def _stage_save_pdf(ctx: PipelineContext) -> bool:
 def _stage_grobid_parse(ctx: PipelineContext) -> bool:
     # ── Stage 2: grobid_parse ──────────────────────────────────────────
     grobid_artifact = ctx.artifact("grobid_parse")
+    fallback_reason: str | None = None
     if ctx.should_use_artifact("grobid_parse"):
         ctx.tei_xml = (grobid_artifact or {}).get("tei_xml") or None
+        fallback_reason = (grobid_artifact or {}).get("fallback_reason")
         logger.info("Resuming document pipeline: loaded grobid_parse artifact for document %s", ctx.document_id)
     elif ctx.source_kind == "tex_archive":
         ctx.save_artifact("grobid_parse", {
@@ -993,25 +1000,24 @@ def _stage_grobid_parse(ctx: PipelineContext) -> bool:
         })
     else:
         ctx.report_start("grobid_parse", total=1, unit="document")
-        try:
-            ctx.tei_xml = _run_grobid_parse(ctx.pdf_bytes)
-        except Exception:
-            logger.warning(
-                "grobid_parse failed (non-fatal); will use PyMuPDF fallback: document=%s",
-                ctx.document_id,
-                exc_info=True,
-            )
-            ctx.tei_xml = None
+        ctx.tei_xml, fallback_reason, attempts = _grobid_parse_with_retry(ctx.pdf_bytes, ctx.document_id)
         ctx.save_artifact("grobid_parse", {
             "status": "ok" if ctx.tei_xml else "fallback",
             "tei_bytes": len(ctx.tei_xml.encode()) if ctx.tei_xml else 0,
             "tei_xml": ctx.tei_xml,
+            # 落ちた理由を残す（IK-0421: 砂場の 4 論文中 3 本が理由不明の fallback で、題名・式・図の層が
+            # 丸ごと PyMuPDF 経路になっていた）。secrets を含まない例外の型と先頭だけ
+            "fallback_reason": fallback_reason,
+            "attempts": attempts,
         })
     grobid_status = "skipped" if ctx.source_kind == "tex_archive" else ("ok" if ctx.tei_xml else "fallback")
-    ctx.report_done("grobid_parse", {
+    done_payload: dict[str, Any] = {
         "status": grobid_status,
         "tei_bytes": len(ctx.tei_xml.encode()) if ctx.tei_xml else 0,
-    })
+    }
+    if grobid_status == "fallback":
+        done_payload["fallback_reason"] = fallback_reason
+    ctx.report_done("grobid_parse", done_payload)
     return ctx.finish_target_stage("grobid_parse", {"status": grobid_status})
 
 
@@ -2907,8 +2913,50 @@ def _reference_health_snapshot(document_id: str) -> dict:
                 pass
 
 
+def _llm_failures_snapshot(run_id: str | None) -> dict | None:
+    """この run で失敗した LLM 呼び出しの事実（IK-0362）。失敗が無ければ ``None``。
+
+    各ステージは AI 提供元の障害（課金残高切れ・利用上限など）を自分の縮退語彙で吸収し、
+    run は completed になる。**完了判定は変えず**、U層の台帳（``llm_usage_events``）に
+    残ったこの run の失敗行を集計して ``stage_outputs["llm_failures"]`` に残すだけ。
+    G層 ``material.analysis_llm_failed`` がこれを読んで教員に再実行を道案内する。
+
+    ``_reference_health_snapshot`` と同じく新しいステージにはしない best-effort の後処理で、
+    どんな例外も run の状態を変えない（``None`` = 何も書かない）。
+    """
+    from core.llm_usage.run_failures import summarize_run_llm_failures
+    from core.postgres import get_session as _pg_session
+
+    session = None
+    try:
+        session = _pg_session()
+        return summarize_run_llm_failures(session, run_id)
+    except Exception:  # noqa: BLE001 — 要約は pipeline を止めない
+        logger.warning("llm failure summary skipped for run=%s", run_id, exc_info=True)
+        return None
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _completion_llm_failures_outputs(run_id: str | None) -> dict:
+    """完了記録の ``stage_outputs`` に足すブロック（失敗があるときだけ ``llm_failures`` キー）。"""
+    try:
+        block = _llm_failures_snapshot(run_id)
+    except Exception:  # noqa: BLE001
+        block = None
+    if not block:
+        return {}
+    return {LLM_FAILURES_KEY: block}
+
+
 def _stage_completed(ctx: PipelineContext) -> None:
     # ── Stage 14: completed ────────────────────────────────────────────
+    # IK-0362: AI 提供元の障害で欠けた呼び出しの事実（失敗が無ければ空 dict = 何も書かない）。
+    llm_failures_outputs = _completion_llm_failures_outputs(ctx.run_id)
     upsert_analysis_run(
         run_id=ctx.run_id,
         document_id=ctx.document_id,
@@ -2917,6 +2965,7 @@ def _stage_completed(ctx: PipelineContext) -> None:
         status="completed",
         current_stage="completed",
         stage_outputs={
+            **llm_failures_outputs,
             "completed": {
                 "chunks": ctx.result.chunk_count,
                 "claims": ctx.result.claim_count,
@@ -4942,6 +4991,53 @@ def _empty_blueprint_result(document_id: str, course_id: str | None):
         review_notes=[],
         validation_issues=[],
     )
+
+
+# GROBID は同時要求がプールを超えると 503 を返す（砂場の一括投入で 4 本中 3 本が fallback になった原因の
+# 有力候補）。接続失敗・5xx は短い間隔で数回だけやり直し、理由を artifact に残す。
+GROBID_RETRY_DELAYS_S: tuple[float, ...] = (5.0, 20.0)
+
+
+def _grobid_failure_reason(exc: BaseException) -> str:
+    text = str(exc).strip().replace("\n", " ")
+    return f"{type(exc).__name__}: {text[:200]}" if text else type(exc).__name__
+
+
+def _grobid_retryable(exc: BaseException) -> bool:
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int):
+        return status in (429, 502, 503, 504)
+    # requests 系の接続失敗・タイムアウトだけを対象にする（組み込み ConnectionError 等は即縮退）
+    module = type(exc).__module__ or ""
+    return module.startswith("requests") and type(exc).__name__ in (
+        "ConnectionError", "Timeout", "ReadTimeout", "ConnectTimeout")
+
+
+def _grobid_parse_with_retry(pdf_bytes: bytes, document_id: str, *, sleep=None) -> tuple[str | None, str | None, int]:
+    """GROBID を呼び、(tei_xml, fallback_reason, attempts) を返す。失敗は非致命（PyMuPDF 経路へ）。"""
+    import time as _time
+
+    _sleep = sleep or _time.sleep
+    reason: str | None = None
+    attempts = 0
+    for i in range(len(GROBID_RETRY_DELAYS_S) + 1):
+        attempts = i + 1
+        try:
+            tei = _run_grobid_parse(pdf_bytes)
+            if tei:
+                return tei, None, attempts
+            reason = "empty_response"
+        except Exception as exc:  # noqa: BLE001 — 理由を artifact に残して縮退する
+            reason = _grobid_failure_reason(exc)
+            if not _grobid_retryable(exc):
+                break
+        if i < len(GROBID_RETRY_DELAYS_S):
+            _sleep(GROBID_RETRY_DELAYS_S[i])
+    logger.warning(
+        "grobid_parse failed (non-fatal); will use PyMuPDF fallback: document=%s reason=%s attempts=%d",
+        document_id, reason, attempts,
+    )
+    return None, reason, attempts
 
 
 def _run_grobid_parse(pdf_bytes: bytes) -> str | None:

@@ -317,3 +317,36 @@ class TestTeacherAggregation:
         )
         assert response.status_code == 200
         assert env["aggregate_calls"] == [None]
+
+
+class TestDocumentsUnrelatedFact:
+    """IK-0414: 一覧の外側の閲覧可能な論文を題名の事実文で返す（位置には置かない）。"""
+
+    def test_facts_key_lists_unrelated_titles(self, env, monkeypatch):
+        import routes.corpus as corpus_routes
+
+        monkeypatch.setattr(
+            corpus_routes.corpus_view, "list_unrelated_visible_titles",
+            lambda session, key, visible: (["Cep B の論文"], False),
+        )
+        response = env["client"].get(
+            "/api/learning/corpus/documents?domain_key=astrophysics", headers=_auth(env)
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["documents"] == []
+        assert len(body["facts"]) == 1
+        assert "「Cep B の論文」" in body["facts"][0]
+
+    def test_failure_drops_only_the_fact(self, env, monkeypatch):
+        import routes.corpus as corpus_routes
+
+        def _boom(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(corpus_routes.corpus_view, "list_unrelated_visible_titles", _boom)
+        response = env["client"].get(
+            "/api/learning/corpus/documents?domain_key=astrophysics", headers=_auth(env)
+        )
+        assert response.status_code == 200
+        assert "facts" not in response.json()

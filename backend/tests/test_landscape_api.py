@@ -969,6 +969,27 @@ class TestLearnerLandscape:
         ]
         assert body["documents"] == []
 
+    def test_unnamed_domain_is_not_shown_by_its_key(self, client_and_tokens, env):
+        """IK-0413: 表示名が未登録の分野は内部キーでなく「名前が登録されていない分野」。"""
+        from core import label_vocab
+
+        client, student, _teacher = client_and_tokens
+        routes = env["routes"]
+        self._patch_course(env, {"cartridge_id": _DOMAIN, "sources": []}, set())
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "list_for_documents", lambda *a, **k: []
+        )
+        env["monkeypatch"].setattr(
+            routes.atlas_store, "list_domains",
+            lambda _session: [{"domain_key": _DOMAIN, "domain_name": ""}],
+        )
+        response = client.get(
+            "/api/learning/courses/course-1/landscape", headers=_auth(student)
+        )
+        body = response.json()
+        assert body["domains"][0]["domain_name"] == label_vocab.ATLAS_DOMAIN_UNNAMED_LABEL
+        assert body["domains"][0]["domain_key"] == _DOMAIN  # 取得キーは互換のまま
+
     def test_placements_on_missing_skeleton_nodes_are_dropped(
         self, client_and_tokens, env
     ):

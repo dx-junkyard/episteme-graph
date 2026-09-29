@@ -136,7 +136,9 @@ class TestReturnDoorRoute:
 
         result = cycle.get_cycle_return_door_route("course-1", current_user={"id": "u1"})
 
-        assert result == {"empty": True}
+        from core.cycle.schema import EMPTY_DOOR_FACT, EMPTY_DOOR_HINT
+
+        assert result == {"empty": True, "fact": EMPTY_DOOR_FACT, "hint": EMPTY_DOOR_HINT}
 
     def test_fetch_failure_is_fail_open_empty(self, monkeypatch):
         from api.routes import cycle
@@ -162,18 +164,27 @@ class TestTodaysWordsRoute:
     def test_returns_built_words(self, monkeypatch):
         from api.routes import cycle
 
-        monkeypatch.setattr(cycle, "get_accessible_course_data", lambda uid, cid: {"id": cid})
+        monkeypatch.setattr(
+            cycle, "get_accessible_course_data",
+            lambda uid, cid: {"id": cid, "topics": [{"id": "t1", "title": "トピック1"}]},
+        )
         monkeypatch.setattr(
             cycle, "fetch_todays_user_words",
             lambda uid, cid: [
                 {"role": "user", "text": "今日の発話", "topic_id": "t1", "created_at": "a"},
+                {"role": "user", "text": "議論での発話", "topic_id": "_discussion",
+                 "created_at": "b"},
             ],
         )
 
         result = cycle.get_cycle_todays_words_route("course-1", current_user={"id": "u1"})
 
+        # IK-0417: topic_id ではなく表示名（題名 / 予約疑似トピックの表示名）。
         assert result == {
-            "words": [{"text": "今日の発話", "topic_id": "t1", "created_at": "a"}],
+            "words": [
+                {"text": "今日の発話", "topic_label": "トピック1", "created_at": "a"},
+                {"text": "議論での発話", "topic_label": "論文との議論", "created_at": "b"},
+            ],
             "truncated": False,
         }
 
@@ -216,19 +227,28 @@ class TestTodaysWordsRoute:
         assert "AI回答" not in str(result)
         assert result["words"][0]["text"] == "本人発話"
 
-    def test_day_filter_is_rolling_24h_window_tz_independent(self):
-        """「当日」判定は直近24時間窓 × 行 updated_at の近似（TZ 非依存）。
-        CURRENT_DATE（DB タイムゾーンの暦日）に戻すと JST 学習者の朝の発話が
-        同日昼に消える — fetch_landing_candidates と同型の相対窓を固定する。
-        近似であることを docstring で正直に宣言していること。"""
+    def test_day_filter_is_jst_today_by_message_trace_time(self):
+        """IK-0417: 「今日」は日本時間の 0 時以降、発話の時刻は発話が記録した痕跡
+        （payload.message_id）の created_at。行の updated_at を全発話の時刻にしない
+        （前日の発話が混ざり、同じ時刻が並ぶ）。DB タイムゾーン依存の CURRENT_DATE も使わない。"""
         body = extract_function_source(_QUERIES_SRC, "fetch_todays_user_words")
-        assert "updated_at >= now() - interval '24 hours'" in body
-        # SQL 述語としての CURRENT_DATE 比較の再侵入を禁止する
-        # （docstring 内の「なぜ使わないか」説明での言及は許容）。
-        assert "updated_at >= CURRENT_DATE" not in body, (
-            "当日判定が DB タイムゾーン依存の CURRENT_DATE に戻っている"
+        assert "learner_today_start_utc" in body
+        assert "t.payload->>'message_id' = m.msg->>'id'" in body
+        assert "tr.created_at >= :today_start" in body
+        assert "interval '24 hours'" not in body
+        assert "updated_at >= CURRENT_DATE" not in body
+        assert "h.updated_at AS" not in body
+
+    def test_learner_today_start_is_jst_midnight(self):
+        import datetime as dt
+
+        from core.learner_time import learner_today_start_utc
+
+        # 2026-09-27 21:55 UTC = 2026-09-28 06:55 JST → 今日の 0 時 = 2026-09-27 15:00 UTC
+        now = dt.datetime(2026, 9, 27, 21, 55, tzinfo=dt.timezone.utc)
+        assert learner_today_start_utc(now) == dt.datetime(
+            2026, 9, 27, 15, 0, tzinfo=dt.timezone.utc
         )
-        assert "近似" in body
 
     def test_blank_words_are_excluded_in_sql_for_accurate_truncation(self):
         """空白のみの発話は SQL 段階（btrim）で除外する — limit+1 方式の truncated

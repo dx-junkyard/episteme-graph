@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from core.text_excerpt import excerpt as _excerpt
+
 from ..registry import register
 from ..schema import (
     EQUATION_ROLE_LABELS,
@@ -58,9 +60,10 @@ def _list(value: Any) -> list:
 
 
 def _text(value: Any, limit: int | None = None) -> str:
+    """``limit`` を超えるときは語境界・文境界で切る（IK-0393。正本は ``core.text_excerpt``）。"""
     text = str(value or "").strip()
     if limit is not None and len(text) > limit:
-        return text[:limit]
+        return _excerpt(text, limit)
     return text
 
 

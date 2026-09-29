@@ -152,7 +152,8 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
 | GET | `/api/learning/courses/{cid}/topics/{tid}/material` | 所有者 or 受講者 | トピック教材（`student_material` 最優先 → content/summary → PDF チャンク） |
-| POST | `/api/learning/courses/{cid}/topics/{tid}/check` | 所有者 or 受講者 | 確認問題の LLM 採点（不合格は誤解記録、合格はトピック完了を永続化） |
+| POST | `/api/learning/courses/{cid}/topics/{tid}/check` | 所有者 or 受講者 | 確認問題の回答を出題の要件と並置（合否を返さない・完了も確定しない — 是正 F1。観点は全要素に1件ずつ = IK-0409） |
+| POST | `/api/learning/courses/{cid}/topics/{tid}/check/self-check` | 所有者 or 受講者 | 自己確認の1タップ。`agreed` のときだけトピック完了を永続化（`disagreed` / `verdict_wrong` は記録のみ・`disagreed` は `notice` に事実文 = IK-0399） |
 | POST | `/api/learning/courses/{cid}/topics/{tid}/chat` | 所有者 or 受講者 | RAG チャット（意図分類・casual モード・書き直し `replace_message_id`・tier/grounding 判定・tension/anchor 痕跡記録を内包） |
 | POST | `/api/learning/courses/{cid}/topics/{tid}/chat/stream` | 所有者 or 受講者（上の `/chat` と同一ゲート） | 同じコア（`_learning_chat_core`）の SSE 版。`start`（`stance` のみ）→ `delta`（本文の部分文字列）→ `final`（`LearningChatResponse` と同値）。`LEARNING_CHAT_STREAMING_ENABLED`（既定 false）が off なら **404**。権限・422・429 は最初のバイトより前に通常の HTTP ステータスで返る。中断した往復は履歴・痕跡に残さない（quota は消費済みのまま） |
 | GET | `/api/learning/client-features` | 要ログイン | クライアントが使ってよい経路の配布。`{"chat_streaming": <bool>}` の bool 1キーのみ（数値・上限・モデル名は載せない）。取得失敗時フロントは false 扱い |
@@ -226,6 +227,12 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
 | GET | `/api/learning/courses/{cid}/anchors/digest` | 本人のみ | llm_candidate の帰属候補（最大3件・数値なし）+ 遅延マイニング起動 |
 | POST | `/api/learning/anchors/{trace_id}/confirm` | 本人の行のみ | 帰属の確定/訂正（未生成なら segment 縮退アンカーを新規作成） |
 | POST | `/api/learning/anchors/{trace_id}/dismiss` | 本人の llm_candidate 帰属のみ | `structure_anchor.status='dismissed'`（問い自体は保持） |
+
+confirm / dismiss の応答は許可リストの射影（IK-0411, 2026-09-28）: `{ok, trace_id, status, notice,
+anchor_label?, anchor_type_label?, doubt_type?, doubt_type_label?, related_assumption?: {statement}}`。
+保存した `structure_anchor` の `confidence`（生の数値）・`reason`（LLM の理由文）・`anchor_id`・
+`detector_version`・前提の ID は返さない（P3 / P7 / KO10）。tension の confirm / dismiss / connect も
+`{ok, trace_id, status}` の許可リスト。
 
 #### ハンズフリー音声会話・インスペクト・C層学習者向け
 

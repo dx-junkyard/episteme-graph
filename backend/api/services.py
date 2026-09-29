@@ -9,6 +9,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -1552,6 +1553,42 @@ def list_visible_document_ids(user_id: str) -> set[str]:
         return set()
 
 
+def topic_source_document_ids(topic: dict | None) -> set[str]:
+    """トピックが束ねる論文（document.id のテキスト表現）の集合（IK-0472・読み取り専用）。
+
+    ``topic.document_id`` / ``topic.units[].document_id`` / ``topic.evidence_links[].document_id``
+    の明示値と、``topic.material_chunk_ids`` のチャンクが属する document の和集合。
+    取れなければ空集合（呼び出し側は並べ替えをしない — fail-soft）。
+    """
+    if not isinstance(topic, dict):
+        return set()
+    ids: set[str] = set()
+    explicit = [topic.get("document_id")]
+    for key in ("units", "evidence_links"):
+        for item in topic.get(key) or []:
+            if isinstance(item, dict):
+                explicit.append(item.get("document_id"))
+    ids.update(str(v).strip() for v in explicit if v and str(v).strip())
+    chunk_ids = [str(c).strip() for c in (topic.get("material_chunk_ids") or []) if str(c or "").strip()]
+    if chunk_ids:
+        try:
+            session = _pg_session()
+            try:
+                rows = session.execute(
+                    sa_text("""
+                        SELECT DISTINCT document_id::text FROM chunks
+                        WHERE id::text = ANY(:ids) AND document_id IS NOT NULL
+                    """),
+                    {"ids": chunk_ids[:200]},
+                ).fetchall()
+            finally:
+                session.close()
+            ids.update(str(r[0]) for r in rows if r and r[0])
+        except Exception:  # noqa: BLE001 — 並べ替えは補助。読めなければ並べ替えない。
+            logger.debug("topic_source_document_ids failed", exc_info=True)
+    return ids
+
+
 def list_course_source_document_ids(course_data: dict | None) -> set[str]:
     """コースの ``sources[]`` が指す document.id（テキスト表現）の集合を返す
     （discuss モード設計書 §6.2 Phase 1: discuss_scope='course_sources' の既定検索範囲の正本）。
@@ -1637,6 +1674,233 @@ def resolve_course_source_titles(course_data: dict | None) -> dict[str, str]:
     }
 
 
+_FORMULA_PLACEHOLDER_RE = re.compile(r"\[\[FORMULA_\d+\]\]")
+_LOCATION_SECTION_CHARS = 30
+_LOCATION_HEAD_CHARS = 40
+# 小文字・句読点で始まる短い ASCII 断片（前のチャンクから続く語の後半）+ 直後の空白
+_LEADING_WORD_FRAGMENT_RE = re.compile(r"^[a-z0-9,;:'\)\]\.-]{1,12}\s+")
+
+
+def chunk_location_hint(*, section_title: object, text: object) -> str:
+    """出典チャンクの「論文の中のどこか」を表す短い手がかり（IK-0381）。
+
+    同じ論文から複数の出典が引かれると、文書の題名だけでは区別できない。chunk 行が
+    既に持つ情報だけで作る（追加クエリなし）: 節の見出し（``source_metadata.section_title``。
+    あれば）と、その区画の冒頭の文。数値（類似度・順位・区画番号）は入れない。
+    PDF 由来の文字列なので表示前に制御文字を除く（信頼境界 TB）。切り詰めは
+    ``core.text_excerpt.excerpt`` の1実装を使う。
+    """
+    from core.course_content_builder import section_title_rejection_reason
+    from core.text_excerpt import excerpt
+
+    # 見出しの妥当性は IK-0370 と同じ判定（GROBID 由来の「K」「DE」のような断片を節名にしない）
+    raw_section = strip_control_sequences(str(section_title or ""))
+    if section_title_rejection_reason(raw_section) is not None:
+        raw_section = ""
+    section = excerpt(raw_section, _LOCATION_SECTION_CHARS)
+    body = _FORMULA_PLACEHOLDER_RE.sub("（数式）", strip_control_sequences(str(text or ""))).lstrip()
+    # チャンクの切れ目が語の途中のことがある（'s was assumed…'）。ラテン文字の断片で始まるときは
+    # 最初の空白まで捨ててから「冒頭」を取る（第 9 周: 語の途中から始まる冒頭が出典ラベルに出た）
+    body = _LEADING_WORD_FRAGMENT_RE.sub("", body, count=1)
+    head = excerpt(body, _LOCATION_HEAD_CHARS)
+    parts: list[str] = []
+    if section:
+        parts.append(f"節「{section}」")
+    if head:
+        parts.append(f"冒頭「{head}」")
+    return "・".join(parts)
+
+
+#: 検索結果から外す「本文ではない節」の見出し（IK-0390）。
+#:
+#: 参考文献・データの所在・謝辞は、論文の内容についての問いの出典にならない（書誌の
+#: 羅列を「出典1」として学習者に見せ、``[出典N]`` の引用先にしてしまう）。照合は
+#: 見出しを ``btrim`` → 先頭の節番号（``6`` / ``6.1.`` など）を除去 → ``lower`` した
+#: **完全一致**と、``acknowledg`` / ``data availability`` の前方一致だけ。部分一致は
+#: 使わない（「References to prior work」のような本文見出しを誤って落とさないため）。
+#: 付録（Appendix）は本文の続きなので対象にしない。見出しの無いチャンク（空文字）は
+#: **落とさない**（見出し不明を非本文と見なさない）。分野語は含めない。
+NON_CONTENT_SECTION_TITLES: tuple[str, ...] = (
+    "references",
+    "reference",
+    "bibliography",
+    "literature cited",
+    "works cited",
+    "data availability",
+    "data availability statement",
+    "acknowledgements",
+    "acknowledgments",
+    "acknowledgement",
+    "acknowledgment",
+    "参考文献",
+    "引用文献",
+    "文献",
+    "謝辞",
+)
+#: 前方一致で落とす見出し（``Acknowledgements and funding`` / ``Data Availability Statement`` 等）。
+NON_CONTENT_SECTION_PREFIXES: tuple[str, ...] = ("acknowledg", "data availability")
+
+# 見出しの正規化（SQL 側）。節番号の除去は数字と点だけ（ローマ数字は ``i`` 始まりの語を
+# 壊すので扱わない）。
+_SECTION_TITLE_NORMALIZED_SQL = (
+    r"lower(regexp_replace(btrim(COALESCE(c.source_metadata->>'section_title', '')), "
+    r"'^[0-9]+(\.[0-9]+)*\.?\s*', ''))"
+)
+_NON_CONTENT_SECTION_FILTER_SQL = (
+    f"AND NOT ({_SECTION_TITLE_NORMALIZED_SQL} = ANY(CAST(:non_content_titles AS text[])) "
+    + " ".join(
+        f"OR {_SECTION_TITLE_NORMALIZED_SQL} LIKE :non_content_prefix_{i}"
+        for i in range(len(NON_CONTENT_SECTION_PREFIXES))
+    )
+    + ")"
+)
+
+_YEAR_RE = re.compile(r"\b(?:1[6-9]|20)\d{2}[a-z]?\b")
+_VOLUME_PAGE_RE = re.compile(r"\b\d{1,4},\s*[A-Z]?\d{1,6}\b")
+_ET_AL_RE = re.compile(r"\bet\s+al\.?", re.IGNORECASE)
+_NUMERIC_TOKEN_RE = re.compile(r"^[-−+±~≈<>]?\d+(?:[.,]\d+)*(?:[%°′″hms]|deg)?$")
+_URL_RE = re.compile(r"(?:https?://|www\.|doi\.org/)\S+", re.IGNORECASE)
+#: IK-0445: 番号付き書誌の項目の頭（行頭の ``[12] A. Name``）。
+_REF_ENTRY_RE = re.compile(r"(?m)^\s*\[\d{1,3}\]\s+\S")
+#: IK-0445: 書誌にだけ現れる形（``(2022)`` の括弧年・``arXiv:2203.06142`` の ID）。本文の引用
+#: ``(Houde et al. 2009)`` / ``[1–6]`` はどちらにも当たらない。
+_REF_SIGNAL_RE = re.compile(
+    r"\(\s*(?:1[6-9]|20)\d{2}[a-z]?\s*\)|\barXiv:\s*\d{4}\.\d{4,5}", re.IGNORECASE
+)
+#: IK-0445: 所属機関の行（表題・著者の区画）。
+_AFFILIATION_LINE_RE = re.compile(
+    r"\b(?:University|Universit[àäé]|Institute|Institut|Department|Dept\.|Observatory|"
+    r"Laborator(?:y|ies)|Cent(?:er|re) for|School of|Faculty of|College)\b|@[\w.-]+\.\w+|"
+    r"\bzip\b|大学|研究所|研究科|学部",
+)
+#: IK-0445: チャンクの先頭に現れたら本文ではない区画とみなす見出し（節の見出しが
+#: ``section_title`` に入らず本文の先頭に残った場合）。:data:`NON_CONTENT_SECTION_TITLES` に加える。
+_NON_CONTENT_HEAD_TITLES: tuple[str, ...] = (
+    "software", "code availability", "funding", "author contributions", "conflict of interest",
+    "conflicts of interest", "competing interests",
+)
+_HEAD_NUMBERING_RE = re.compile(r"^(?:[0-9]+(?:\.[0-9]+)*\.?|(?:[IVXLC]+|[A-Z])\.)(?:\s+|$)")
+
+
+def _non_content_heading_at_head(raw: str) -> bool:
+    """チャンク先頭の数行に、参考文献・データの所在・謝辞などの見出しがあるか（IK-0445）。"""
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    for line in lines[:3]:
+        normalized = _HEAD_NUMBERING_RE.sub("", line).strip().lower()
+        if not normalized:
+            continue  # ``V.`` のような番号だけの行
+        # 「Data Availability Statement: …」のように見出しと本文が同じ行でも、前方一致は効かせる。
+        if any(normalized.startswith(prefix) for prefix in NON_CONTENT_SECTION_PREFIXES):
+            return True
+        if len(line.split()) > 6:
+            return False
+        normalized = normalized.rstrip(":.：").strip()
+        if normalized in NON_CONTENT_SECTION_TITLES or normalized in _NON_CONTENT_HEAD_TITLES:
+            return True
+    return False
+
+
+def non_content_chunk_reason(text: object) -> str | None:
+    """見出しでは捕まらない「本文ではないチャンク」の判定（IK-0390・決定論・安価）。
+
+    返り値は理由の語（``bibliography`` / ``numeric_labels`` / ``url_only``）か None。
+    どれも「多数派が非文」のときだけ真にする（引用の多い本文段落・数値を含む本文を
+    落とさない）:
+
+    * ``bibliography`` — 年の表記が4つ以上・語数に対する密度が高い・かつ
+      「巻, ページ」形（``846, 122``）が2つ以上（書誌の列。本文の ``(Houde et al. 2009)``
+      型の引用は巻・ページを伴わないので当たらない）。
+    * ``numeric_labels`` — 8語以上で半数以上が数値だけの語（軸の目盛り・一語一行に
+      割れた図のキャプション）。
+    * ``url_only`` — 空白以外の文字の半分以上が URL（脚注の URL だけの区画）。
+    """
+    raw = str(text or "")
+    tokens = raw.split()
+    if not tokens:
+        return None
+    words = len(tokens)
+    years = len(_YEAR_RE.findall(raw))
+    volume_pages = len(_VOLUME_PAGE_RE.findall(raw))
+    et_al = len(_ET_AL_RE.findall(raw))
+    if years >= 4 and years / words >= 0.05 and volume_pages >= 2 and (et_al + volume_pages) >= 4:
+        return "bibliography"
+    # IK-0445: 番号付き書誌の連なり。項目の頭が2つ以上・書誌だけの形（括弧年・arXiv ID）が
+    # 3つ以上で、最初の項目から後ろがチャンクの過半を占めるとき（付録の段落や図の説明の
+    # 末尾に書誌がつながった区画も、書誌が大半なら落とす）。本文の引用はどちらの形も伴わない。
+    entries = list(_REF_ENTRY_RE.finditer(raw))
+    ref_signals = len(_REF_SIGNAL_RE.findall(raw))
+    if len(entries) >= 2 and ref_signals >= 3:
+        tail = raw[entries[0].start():]
+        if len(tail.split()) / words >= 0.5:
+            return "bibliography"
+    # 項目の頭が1つ以下でも（途中から始まる書誌の区画）、書誌だけの形が密なら書誌とみなす。
+    if ref_signals >= 5 and ref_signals / words >= 0.02 and (et_al + volume_pages) >= 3:
+        return "bibliography"
+    if _non_content_heading_at_head(raw):
+        return "non_content_heading"
+    # IK-0445: 表題・著者・所属の区画（所属機関の行が3つ以上・行の4分の1以上）。
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    affiliation_lines = sum(1 for ln in lines if _AFFILIATION_LINE_RE.search(ln))
+    if affiliation_lines >= 3 and affiliation_lines / max(1, len(lines)) >= 0.25:
+        return "affiliation"
+    numeric = sum(1 for tok in tokens if _NUMERIC_TOKEN_RE.match(tok.strip("()[],;:")))
+    if words >= 8 and numeric / words >= 0.5:
+        return "numeric_labels"
+    compact = "".join(tokens)
+    url_chars = sum(len(m.group(0)) for m in _URL_RE.finditer(raw))
+    if compact and url_chars / len(compact) >= 0.5:
+        return "url_only"
+    return None
+
+
+_FORMULA_REF_RE = re.compile(r"\[\[\s*FORMULA_(\d+)\s*\]\]")
+#: 数式の LaTeX が引けなかったプレースホルダーの置き換え（IK-0391）。
+FORMULA_UNRESOLVED_TEXT = "（数式）"
+_LATEX_ERROR_MARKER = "[LaTeX extraction error"
+
+
+def resolve_formula_placeholders(text: object, formulas: object) -> str:
+    """チャンク本文の ``[[FORMULA_i]]`` を ``$<latex>$`` に解決する（IK-0391）。
+
+    ``chunks.formulas`` は ``[{"id": "[[FORMULA_0]]", "latex": ...}, ...]``。``id`` が
+    一致する要素を優先し、``id`` の無い要素は位置で引く。LaTeX が空・抽出エラーの
+    目印のとき・対応する要素が無いときは :data:`FORMULA_UNRESOLVED_TEXT` に置き換え、
+    LLM に中身の無い記号を読ませない。LaTeX は PDF 由来の untrusted 入力なので制御文字を
+    除き、改行を含む式は1行に畳む（一つの式が行ごとに割れて渡るのを防ぐ）。
+    """
+    body = str(text or "")
+    if "FORMULA_" not in body:
+        return body
+    items = formulas
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except Exception:  # noqa: BLE001
+            items = []
+    if not isinstance(items, list):
+        items = []
+    by_id: dict[int, str] = {}
+    by_index: dict[int, str] = {}
+    for position, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        latex = " ".join(strip_control_sequences(str(item.get("latex") or "")).split())
+        latex = latex.strip().strip("$").strip()
+        if not latex or latex.startswith(_LATEX_ERROR_MARKER):
+            latex = ""
+        by_index.setdefault(position, latex)
+        match = _FORMULA_REF_RE.fullmatch(str(item.get("id") or "").strip())
+        if match:
+            by_id.setdefault(int(match.group(1)), latex)
+
+    def _replace(match: re.Match) -> str:
+        index = int(match.group(1))
+        latex = by_id[index] if index in by_id else by_index.get(index, "")
+        return f"${latex}$" if latex else FORMULA_UNRESOLVED_TEXT
+
+    return _FORMULA_REF_RE.sub(_replace, body)
+
+
 def search_chunks_with_metadata(
     query: str,
     top_k: int = 8,
@@ -1654,6 +1918,13 @@ def search_chunks_with_metadata(
 
     `allowed_document_ids` が空集合（非 None）の場合は SQL を発行せず即座に `[]` を返す
     （fail-closed）。
+
+    IK-0390: 参考文献・データの所在・謝辞の節（:data:`NON_CONTENT_SECTION_TITLES`）は
+    同じ1本の SQL の述語で除外し、見出しで捕まらない書誌の列・数値ラベル・URL だけの
+    区画は :func:`non_content_chunk_reason` で後段で落とす（そのため ``top_k * 2`` 件を
+    引いてから ``top_k`` 件に詰める）。
+    IK-0391: 返す ``text`` は ``[[FORMULA_i]]`` を ``chunks.formulas`` の LaTeX で解決した
+    本文（:func:`resolve_formula_placeholders`）。解決前の本文は ``raw_text`` に残す。
     """
     if allowed_document_ids is not None and len(allowed_document_ids) == 0:
         return []
@@ -1668,7 +1939,14 @@ def search_chunks_with_metadata(
         session = _pg_session()
         try:
             dim = get_embedding_dim()
-            params: dict = {"query_vector": str(query_vector), "limit": top_k}
+            params: dict = {
+                "query_vector": str(query_vector),
+                # 後段の非本文フィルタで減る分を見込んで多めに引く（IK-0390）。
+                "limit": max(int(top_k), 0) * 2,
+                "non_content_titles": list(NON_CONTENT_SECTION_TITLES),
+            }
+            for _i, _prefix in enumerate(NON_CONTENT_SECTION_PREFIXES):
+                params[f"non_content_prefix_{_i}"] = f"{_prefix}%"
             doc_filter_sql = ""
             if allowed_document_ids is not None:
                 # chunks.document_id は UUID 列（theory_components.document_id 等の TEXT 列とは
@@ -1683,11 +1961,15 @@ def search_chunks_with_metadata(
                            COALESCE(d.title, '') AS source_title,
                            COALESCE(d.filename, '') AS source_file,
                            1 - (c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))) AS score,
-                           c.material_id
+                           c.material_id,
+                           COALESCE(c.source_metadata->>'section_title', '') AS section_title,
+                           c.formulas,
+                           c.document_id
                     FROM chunks c
                     LEFT JOIN documents d ON c.document_id = d.id
                     WHERE c.embedding IS NOT NULL
                     {doc_filter_sql}
+                    {_NON_CONTENT_SECTION_FILTER_SQL}
                     ORDER BY c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))
                     LIMIT :limit
                 """),
@@ -1695,17 +1977,32 @@ def search_chunks_with_metadata(
             ).fetchall()
             from core.learning_experience import attach_tiers, approved_chunk_ids
 
+            kept_rows = [
+                row for row in rows
+                if row[1] and non_content_chunk_reason(row[1]) is None
+            ][: max(int(top_k), 0)]
             results = [
                 {
                     "id": str(row[0]),
-                    "text": row[1],
+                    # IK-0391: LLM と出典表示が読むのは数式を解決した本文。
+                    "text": resolve_formula_placeholders(
+                        row[1], row[7] if len(row) > 7 else None
+                    ),
+                    "raw_text": row[1],
                     "source_title": row[2] or row[3] or "不明な教材",
                     "source_file": row[3],
                     "score": float(row[4]),
                     "material_id": str(row[5]) if row[5] else "",
+                    "section_title": (row[6] if len(row) > 6 else "") or "",
+                    # IK-0472: トピックの論文を優先する並べ替えに使う（学習者 DTO には載せない）。
+                    "document_id": str(row[8]) if len(row) > 8 and row[8] else "",
+                    # 同じ論文の出典どうしを見分ける箇所の手がかり（IK-0381）。
+                    "location_hint": chunk_location_hint(
+                        section_title=(row[6] if len(row) > 6 else "") or "",
+                        text=row[1],
+                    ),
                 }
-                for row in rows
-                if row[1]
+                for row in kept_rows
             ]
             # L1 信頼性: 教員承認(teacher_reviewed)に紐づく chunk へ approved を付与してから tier 判定。
             approved = approved_chunk_ids(session, [r["id"] for r in results])
@@ -2056,44 +2353,66 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
     )
 
     sessions_list = []
+    # IK-0416: コースのソース論文に直付けした議論（``_doc:{document_id}``。コース外の
+    # 会話コンテキスト）も、その論文の題名付きでこのコースの履歴に並べる。
+    from core.discuss.context import document_context_id, parse_document_context
+
+    doc_context_ids: list[str] = []
+    try:
+        for doc_id in sorted(list_course_source_document_ids(course_data)):
+            if str(doc_id or "").strip():
+                doc_context_ids.append(document_context_id(str(doc_id)))
+    except Exception:  # noqa: BLE001 — 直付け議論が引けないだけでコースの履歴は出す
+        logger.warning("calculate_progress: course source documents unavailable", exc_info=True)
+        doc_context_ids = []
+    doc_titles: dict[str, str] = {}
     pg_session = _pg_session()
     try:
         records = pg_session.execute(
             sa_text("""
-                SELECT topic_id, history, updated_at
+                SELECT topic_id, history, updated_at, course_id
                 FROM learning_chat_history
-                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                WHERE user_id = CAST(:user_id AS uuid)
+                  AND (course_id = :course_id OR course_id = ANY(:doc_context_ids))
                 ORDER BY updated_at DESC
                 LIMIT 10
             """),
-            {"user_id": user_id, "course_id": course_id},
+            {
+                "user_id": user_id,
+                "course_id": course_id,
+                "doc_context_ids": doc_context_ids,
+            },
         ).fetchall()
+        doc_ids_in_rows = sorted({
+            parse_document_context(r[3]) for r in records
+            if len(r) > 3 and parse_document_context(r[3])
+        })
+        if doc_ids_in_rows:
+            title_rows = pg_session.execute(
+                sa_text("""
+                    SELECT id::text, COALESCE(NULLIF(title, ''), NULLIF(filename, ''), '')
+                    FROM documents WHERE id::text = ANY(:ids)
+                """),
+                {"ids": doc_ids_in_rows},
+            ).fetchall()
+            doc_titles = {str(t[0]): str(t[1] or "") for t in title_rows}
     finally:
         pg_session.close()
 
     for r in records:
         topic_id_val = r[0]
         history = r[1] if isinstance(r[1], list) else []
+        row_course_id = r[3] if len(r) > 3 else course_id
 
-        topic_name = topic_id_val
-        for t in topics:
-            if t.get("id") == topic_id_val:
-                topic_name = t.get("title", topic_name)
-                break
+        topic_name = _progress_session_topic_label(
+            topics, row_course_id, topic_id_val, doc_titles
+        )
 
         msg_count = len(history)
         duration_min = max(5, msg_count * 2)
 
-        date_str = ""
-        if r[2]:
-            try:
-                dt = r[2]
-                date_str = f"{dt.month}/{dt.day}"
-            except Exception:
-                pass
-
         sessions_list.append({
-            "date": date_str or "---",
+            "date": learner_date_label(r[2]) or "---",
             "topic": topic_name,
             "duration": f"{duration_min}分",
         })
@@ -2107,6 +2426,44 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
         "completed_topic_ids": completion["completed_topic_ids"],
         "course_completed": completion["course_completed"],
     }
+
+
+def _progress_session_topic_label(
+    topics: list, row_course_id, topic_id_val, doc_titles: dict[str, str]
+) -> str:
+    """進捗の学習履歴1行の見出し（IK-0416）。内部 id を学習者に出さない。
+
+    順に: 実在トピックの題名 → 予約疑似トピック（``_discussion``）の表示名
+    （``core.topic_labels`` が正本・直付け議論なら「論文との議論（コース外）」）に
+    論文の題名を添える → 見つからなければ予約語でない topic_id をそのまま（旧挙動）。
+    """
+    from core.discuss.context import parse_document_context
+    from core.topic_labels import reserved_topic_label
+
+    for t in topics or []:
+        if isinstance(t, dict) and t.get("id") == topic_id_val:
+            return str(t.get("title") or topic_id_val or "")
+    reserved = reserved_topic_label(row_course_id, topic_id_val)
+    if reserved:
+        doc_id = parse_document_context(row_course_id)
+        title = doc_titles.get(str(doc_id or ""), "") if doc_id else ""
+        return f"{reserved}: {title}" if title else reserved
+    return str(topic_id_val or "")
+
+
+def learner_date_label(value) -> str:
+    """学習者向けの日付表示「M/D」を日本時間（JST, UTC+9）で作る（IK-0416）。
+
+    DB の timestamptz は UTC で返るため、そのまま月日を取ると日本の朝の学習が前日に
+    見える。JST は夏時間が無いので固定オフセットで変換する（新しい env は足さない）。
+    naive datetime は UTC とみなす。取れなければ空文字。
+    """
+    from core.learner_time import to_learner_local
+
+    local = to_learner_local(value)
+    if local is None:
+        return ""
+    return f"{local.month}/{local.day}"
 
 
 # 2026-09-05: `calculate_streak`（連続学習日数）を撤去した。理解サイクルの不変条項
@@ -2143,6 +2500,41 @@ _PREREQ_ACK_PHRASES = (
     "学習済み",
 )
 _PREREQ_ACK_NEGATIONS = ("ない", "ません", "無い", "不安")
+#: IK-0424: 英語で答えた受講者の「理解している」（逆質問に英語で答えた往復が記帳されず、
+#: 同じ逆質問が後で戻っていた）。小文字化した発話に語として含まれるかで見る。
+_PREREQ_ACK_PHRASES_EN = (
+    "i understand",
+    "i think i understand",
+    "i already understand",
+    "i know that",
+    "i know this",
+    "i know it",
+    "i already know",
+    "i'm familiar with",
+    "i am familiar with",
+    "understood",
+)
+#: 英語の否定形（含むなら記帳しない。``n't`` は don't / haven't / isn't 等を覆う）。
+_PREREQ_ACK_NEGATIONS_EN_RE = re.compile(
+    r"n't\b|n’t\b|\b(?:no|not|never|cannot|dont|please explain)\b"
+)
+
+
+#: IK-0469: 逆質問への「はい、〜は読みました／学びました」。完了形の動詞だけでは
+#: 「私は…と読みました。合っていますか？」（解釈の表明）と区別できないので、発話が
+#: 肯定の返事で**始まる**ときだけ認める（否定形を含む発話は従来どおり記帳しない）。
+_PREREQ_ACK_AFFIRMATIVE_LEADS = ("はい", "ええ", "うん", "yes", "yeah", "yep")
+_PREREQ_ACK_COMPLETION_PHRASES = (
+    "読みました", "読んでいます", "読みます", "学びました", "学んでいます", "学習しました",
+    "勉強しました", "習いました", "理解しました", "わかります", "分かります", "大丈夫です",
+)
+#: IK-0469: 英語の「読んだ・学んだ」（``i read`` は現在形とも読めるので肯定の返事で始まる
+#: ときだけ。完了形 ``i have read`` / ``i've studied`` などは単独でも認める）。
+_PREREQ_ACK_PHRASES_EN_PERFECT = (
+    "i have read", "i've read", "i have studied", "i've studied", "i have learned",
+    "i've learned", "i have learnt", "i've learnt", "i already read", "i already studied",
+)
+_PREREQ_ACK_PHRASES_EN_AFTER_YES = ("i read", "i studied", "i learned", "i learnt", "i know")
 
 
 def normalize_prerequisite_name(name: str) -> str:
@@ -2157,7 +2549,28 @@ def _is_explicit_prerequisite_acknowledgement(message: str) -> bool:
         return False
     if any(neg in msg for neg in _PREREQ_ACK_NEGATIONS):
         return False
-    return any(phrase in msg for phrase in _PREREQ_ACK_PHRASES)
+    if any(phrase in msg for phrase in _PREREQ_ACK_PHRASES):
+        return True
+    lowered = msg.casefold()
+    affirmative_lead = any(
+        re.match(re.escape(lead) + r"(?![a-z])", lowered) for lead in _PREREQ_ACK_AFFIRMATIVE_LEADS
+    )
+    if affirmative_lead and any(phrase in msg for phrase in _PREREQ_ACK_COMPLETION_PHRASES):
+        return True
+    if _PREREQ_ACK_NEGATIONS_EN_RE.search(lowered):
+        return False
+    en_phrases = _PREREQ_ACK_PHRASES_EN + _PREREQ_ACK_PHRASES_EN_PERFECT + (
+        _PREREQ_ACK_PHRASES_EN_AFTER_YES if affirmative_lead else ()
+    )
+    return any(
+        re.search(r"(?<![a-z])" + re.escape(phrase) + r"(?![a-z])", lowered)
+        for phrase in en_phrases
+    )
+
+
+def prerequisite_topic_key(topic_id: str) -> str:
+    """topic_id で結ばれた前提の記帳キー（IK-0469。名前のキーと並べて持つ追加の鍵）。"""
+    return f"topic:{str(topic_id or '').strip()}"
 
 
 def get_acknowledged_prerequisites(user_id: str, course_id: str) -> set[str]:
@@ -2294,6 +2707,9 @@ def check_prerequisites(
         # 名前で別の topic_id を指す前提が2つあるとき後勝ちで片方の題名が消える。
         # 記帳キー（名前）が重複していても、要素ごとの対応は失わない）。
         prereq_entries: list[tuple[str, str]] = []  # (記帳・突合キー, 表示名)
+        # IK-0469: topic_id で結ばれた前提は、名前のほかに ``topic:{id}`` の鍵も記帳・突合する
+        # （同じトピックを別の名前で前提にする別トピックでも、本人の「理解している」を守る）。
+        prereq_topic_keys: dict[str, str] = {}
         for prereq in prereqs:
             if isinstance(prereq, dict):
                 prereq_name = str(prereq.get("name") or "").strip()
@@ -2312,6 +2728,8 @@ def check_prerequisites(
             if not prereq_name:
                 continue
             prereq_entries.append((prereq_name, display or prereq_name))
+            if prereq_topic_id:
+                prereq_topic_keys[prereq_name] = prerequisite_topic_key(prereq_topic_id)
 
         if not prereq_entries:
             return None
@@ -2327,7 +2745,12 @@ def check_prerequisites(
         # なくこの記帳だけを根拠にする）。記帳に失敗しても会話は止めない。
         if _is_explicit_prerequisite_acknowledgement(user_message):
             try:
-                record_prerequisite_acknowledgement(user_id, course_id, prereq_names)
+                record_prerequisite_acknowledgement(
+                    user_id, course_id,
+                    prereq_names
+                    + [display for _name, display in prereq_entries if display not in prereq_names]
+                    + list(prereq_topic_keys.values()),
+                )
             except Exception:
                 logger.warning("Failed to record prerequisite acknowledgement", exc_info=True)
             return None
@@ -2342,10 +2765,43 @@ def check_prerequisites(
             return None
 
         acknowledged = get_acknowledged_prerequisites(user_id, course_id)
+        # IK-0398: 前提が同コースのトピック（topic_id で結ばれる、または題名が一致する）で、
+        # 本人がそのトピックを確認問題で完了しているなら、その前提は聞き直さない
+        # （本人の明示的な確認の記録 = 完了も、接触の痕跡ではなく本人の判断に基づく）。
+        # 記帳キーは変えない（読み時の判定だけ）。完了の取得に失敗しても会話は止めない。
+        try:
+            completed_ids = set(
+                get_course_completion(user_id, course_id, course_data).get("completed_topic_ids") or []
+            )
+        except Exception:
+            logger.warning("Failed to read course completion for prerequisites", exc_info=True)
+            completed_ids = set()
+        completed_titles = {
+            normalize_prerequisite_name(str(t.get("title") or ""))
+            for t in course_topics(course_data)
+            if str(t.get("id") or "") in completed_ids and t.get("title")
+        }
+        completed_linked: set[str] = set()
+        for prereq in prereqs:
+            if isinstance(prereq, dict) and str(prereq.get("topic_id") or "").strip() in completed_ids:
+                completed_linked.add(str(prereq.get("name") or "").strip())
 
         unlearned: list[str] = []
         for prereq_name, display in prereq_entries:
-            if normalize_prerequisite_name(prereq_name) in acknowledged:
+            if (
+                normalize_prerequisite_name(prereq_name) in acknowledged
+                or normalize_prerequisite_name(display) in acknowledged
+                or (
+                    prereq_name in prereq_topic_keys
+                    and normalize_prerequisite_name(prereq_topic_keys[prereq_name]) in acknowledged
+                )
+            ):
+                continue
+            if (
+                prereq_name in completed_linked
+                or normalize_prerequisite_name(prereq_name) in completed_titles
+                or normalize_prerequisite_name(display) in completed_titles
+            ):
                 continue
             if display not in unlearned:  # 表示の重複は並べない（順序は保存順）
                 unlearned.append(display)
@@ -2448,6 +2904,38 @@ def persist_chat_history(
     }
 
 
+def load_stored_chat_history(user_id: str, course_id: str, topic_id: str) -> list[dict]:
+    """サーバが保存している (user, course, topic) の会話履歴を読む（IK-0432・読み取り専用）。
+
+    出典番号を会話の中で安定させるために、保存済み assistant メッセージの ``sources``
+    （``persist_chat_history`` の ``assistant_meta``）を引く。クライアントが履歴を
+    ``{role, content}`` だけで送り返しても、番号の対応を失わないための読み出し。
+    失敗・行なし・形の崩れは空リスト（fail-soft — 会話を止めない）。
+    """
+    try:
+        session = _pg_session()
+        try:
+            record = session.execute(
+                sa_text("""
+                    SELECT history FROM learning_chat_history
+                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id AND topic_id = :topic_id
+                    LIMIT 1
+                """),
+                {"user_id": user_id, "course_id": course_id, "topic_id": topic_id},
+            ).fetchone()
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — 番号の安定化は補助。読めなければ従来の連番に倒れる。
+        logger.debug("load_stored_chat_history failed for topic=%s", topic_id, exc_info=True)
+        return []
+    if not record:
+        return []
+    history = record[0]
+    if not isinstance(history, list):
+        return []
+    return [m for m in history if isinstance(m, dict)]
+
+
 def _split_history_at(history: list, from_message_id: str):
     """``history`` を ``from_message_id`` の位置で分割する（純粋関数・DB非依存）。
 
@@ -2465,6 +2953,65 @@ def _split_history_at(history: list, from_message_id: str):
     truncated = history[:index]
     removed_ids = [m.get("id") for m in removed if isinstance(m, dict) and m.get("id")]
     return truncated, removed, removed_ids
+
+
+#: assistant ターンに焼き込む累積の「チャンク → 出典番号」の対応表のキー（IK-0444）。
+#: 正本はここ（routes/learning.py は import して使う）。
+CITATION_MAP_KEY = "citation_map"
+
+
+def merged_citation_map(history: list | None) -> dict[str, int]:
+    """履歴の全 assistant ターンから「チャンク → 出典番号」を集める（純関数・IK-0466）。
+
+    各ターンの ``citation_map``（累積の控え）と ``sources`` を読み、同じチャンクは最初に
+    見た番号を正とする。**別のチャンクがすでに持つ番号は割り当てない**（番号→チャンクの
+    一対一を保つ）。履歴を切り詰める前にこれを取り、切り詰め後の履歴に控えとして残せば、
+    取り除いた往復で出した番号が後で別のチャンクへ振り直されない。
+    """
+    by_chunk: dict[str, int] = {}
+    owner: dict[int, str] = {}
+
+    def _take(chunk_id: object, raw_index: object) -> None:
+        try:
+            index = int(raw_index or 0)
+        except (TypeError, ValueError):
+            return
+        cid = str(chunk_id or "").strip()
+        if index <= 0 or not cid or cid in by_chunk or index in owner:
+            return
+        by_chunk[cid] = index
+        owner[index] = cid
+
+    for turn in history or []:
+        if not isinstance(turn, dict) or turn.get("role") != "assistant":
+            continue
+        citation_map = turn.get(CITATION_MAP_KEY)
+        if isinstance(citation_map, dict):
+            for chunk_id, raw_index in citation_map.items():
+                _take(chunk_id, raw_index)
+        for source in turn.get("sources") or []:
+            if isinstance(source, dict):
+                _take(source.get("chunk_id"), source.get("index"))
+    return by_chunk
+
+
+def _carry_citation_map_onto(truncated: list, mapping: dict[str, int]) -> list:
+    """切り詰め後の履歴の最後の assistant ターンに対応表の控えを載せる（IK-0466）。"""
+    if not mapping:
+        return truncated
+    out = list(truncated)
+    for i in range(len(out) - 1, -1, -1):
+        turn = out[i]
+        if isinstance(turn, dict) and turn.get("role") == "assistant":
+            carried = dict(turn)
+            existing = carried.get(CITATION_MAP_KEY)
+            merged = dict(existing) if isinstance(existing, dict) else {}
+            for chunk_id, index in mapping.items():
+                merged.setdefault(chunk_id, index)
+            carried[CITATION_MAP_KEY] = merged
+            out[i] = carried
+            break
+    return out
 
 
 def truncate_chat_and_supersede(
@@ -2499,6 +3046,9 @@ def truncate_chat_and_supersede(
         truncated, removed, removed_ids = _split_history_at(history, from_message_id)
         if truncated is None:
             return None
+        # IK-0466: 取り除く往復で出した出典番号も会話の対応表に残す（番号は単調増加で、
+        # 一度出した番号を別のチャンクへ振り直さない）。控えは残る最後の assistant ターンへ。
+        truncated = _carry_citation_map_onto(truncated, merged_citation_map(history))
 
         if truncated:
             session.execute(
@@ -2540,6 +3090,8 @@ def truncate_chat_and_supersede(
             "truncated_history": truncated,
             "removed_ids": removed_ids,
             "removed_count": len(removed),
+            # IK-0466: 採番器が取り除いた往復の番号も予約できるように返す（読み取り専用）。
+            "removed_history": removed,
         }
     except Exception:
         session.rollback()
@@ -3343,7 +3895,8 @@ def get_chunk_passage(
             params["doc_ids"] = list(allowed_document_ids)
         row = session.execute(
             sa_text(f"""
-                SELECT c.text, c.display_text, c.formulas, c.chapter, c.section,
+                SELECT c.text, c.display_text, c.formulas, c.chapter,
+                       COALESCE(NULLIF(c.section, ''), c.source_metadata->>'section_title') AS section,
                        COALESCE(d.title, d.filename, '') AS source_title, d.filename
                 FROM chunks c
                 LEFT JOIN documents d ON c.document_id = d.id
@@ -3367,7 +3920,9 @@ def get_chunk_passage(
     raw_text = strip_control_sequences(row[1] or row[0] or "")
     raw_formulas = row[2] if row[2] else []
     text, formulas = _normalize_formulas(raw_text, raw_formulas)
-    section = " · ".join([s for s in [row[3], row[4]] if s])
+    # 節はパイプライン経路では chunks.source_metadata.section_title にしか無い（旧 section 列は
+    # 空）ため、出典チップの箇所の手がかり（IK-0381）と同じ出所で補う。PDF 由来なので衛生を通す。
+    section = " · ".join([strip_control_sequences(str(s)) for s in [row[3], row[4]] if s])
     return {
         "chunk_id": str(chunk_id),
         "text": text,
@@ -3538,9 +4093,19 @@ def get_tension_digest(user_id: str, course_id: str) -> dict:
             "paraphrase": payload.get("paraphrase", ""),
             "evidence_quote": payload.get("text", ""),
             "tension_type_label": TENSION_TYPE_LABELS.get(ttype, TENSION_TYPE_LABELS["unclassified"]),
-            "context_label": payload.get("context_label", ""),
+            # 旧行は予約 topic id（``_discussion``）を context_label に焼き込んでいる。
+            # 読み時に表示名へ変換する（行は書き換えない）。
+            "context_label": _learner_context_label(course_id, payload.get("context_label", "")),
         })
     return {"course_id": course_id, "items": items}
+
+
+def _learner_context_label(course_id: str | None, label) -> str:
+    """学習者向け context_label の読み時変換（予約 topic id を表示名へ。行は書き換えない）。"""
+    from core.topic_labels import reserved_topic_label
+
+    text = str(label or "")
+    return reserved_topic_label(course_id, text) or text
 
 
 def confirm_tension_trace(user_id: str, trace_id: str, learner_text: str = "") -> dict | None:

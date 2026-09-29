@@ -73,7 +73,12 @@ class _FakeSession:
 
 class TestBuildReturnDoorNullBranches:
     def test_all_none_returns_empty(self):
-        assert build_return_door(None, None, None) == {"empty": True}
+        from core.cycle.schema import EMPTY_DOOR_FACT, EMPTY_DOOR_HINT
+
+        # IK-0418: 空の扉も「何が無いか」と「どう残せるか」の事実文を持つ。
+        assert build_return_door(None, None, None) == {
+            "empty": True, "fact": EMPTY_DOOR_FACT, "hint": EMPTY_DOOR_HINT,
+        }
 
     def test_blank_texts_count_as_absent(self):
         result = build_return_door(
@@ -81,7 +86,8 @@ class TestBuildReturnDoorNullBranches:
             {"id": "c1", "text": "", "created_at": "2026-08-15T00:00:00+00:00"},
             {"id": "t1", "text": "  ", "created_at": "2026-08-15T00:00:00+00:00"},
         )
-        assert result == {"empty": True}
+        assert result["empty"] is True
+        assert "leave_note" not in result
 
     def test_leave_note_only(self):
         result = build_return_door(
@@ -182,9 +188,10 @@ class TestBuildTodaysWords:
             {"role": "assistant", "text": "AIの回答文", "topic_id": "t1", "created_at": "a"},
             {"role": "user", "text": "わたしの質問", "topic_id": "t1", "created_at": "a"},
         ]
-        result = build_todays_words(rows)
+        result = build_todays_words(rows, topic_labels={"t1": "トピック1"})
+        # IK-0417: 内部の topic_id ではなく表示名を返す。
         assert result["words"] == [
-            {"text": "わたしの質問", "topic_id": "t1", "created_at": "a"}
+            {"text": "わたしの質問", "topic_label": "トピック1", "created_at": "a"}
         ]
         assert "AIの回答文" not in str(result)
 
@@ -220,6 +227,28 @@ class TestBuildTodaysWords:
         ]
         result = build_todays_words(rows)
         assert [w["text"] for w in result["words"]] == ["本文あり"]
+
+    def test_filler_acknowledgements_are_skipped(self):
+        """IK-0417: 相づち・了解だけの発話は逐語トレイに並べない（中身のある発話は残す）。"""
+        rows = [
+            {"role": "user", "text": "はい、理解しています。", "topic_id": "t1", "created_at": "a"},
+            {"role": "user", "text": "ありがとうございます！", "topic_id": "t1", "created_at": "a"},
+            {"role": "user", "text": "はい、でもなぜ線形化できるのですか？", "topic_id": "t1",
+             "created_at": "a"},
+            {"role": "user", "text": "はい、そう読みました。それで、この読みは合っているんですか。",
+             "topic_id": "t1", "created_at": "a"},
+        ]
+        texts = [w["text"] for w in build_todays_words(rows)["words"]]
+        assert "はい、理解しています。" not in texts
+        assert "ありがとうございます！" not in texts
+        assert "はい、でもなぜ線形化できるのですか？" in texts
+        assert "はい、そう読みました。それで、この読みは合っているんですか。" in texts
+
+    def test_topic_id_is_not_exposed(self):
+        rows = [{"role": "user", "text": "問い", "topic_id": "_discussion", "created_at": "a"}]
+        word = build_todays_words(rows, topic_labels={"_discussion": "論文との議論"})["words"][0]
+        assert "topic_id" not in word
+        assert word["topic_label"] == "論文との議論"
 
 
 # ===========================================================================
