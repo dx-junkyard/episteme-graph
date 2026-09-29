@@ -1,9 +1,9 @@
 ---
 id: IK-0363
 title: G層の「教材をアップロードする」ルールは本人所有の教材だけを数えるため、公開・共有された教材でコースを作れる教員にも「登録されている教材がまだありません」と案内し、次の一歩（コース作成）を隠す
-status: open
+status: resolved
 recorded_at: 2026-09-27
-resolved_at: null
+resolved_at: 2026-09-28
 sources:
   - docs/architecture/persona_enactment_testing_design.md §17
 feature_context:
@@ -39,11 +39,16 @@ discovery:
   perspective: [reproduction]
   note: 所有しない教員ペルソナで通し受講を始めた最初の画面（次にやること）で見えた。
 resolution:
-  perspective: [pending]
+  perspective: [carry_through, explicit_contract]
   note: >-
-    判定を「可視な教材がゼロ」に広げるか、所有ゼロ・可視あり のときは別の事実文（「共有された教材から
-    コースを作れます」）と capability course_builder.open を案内する。
-  landed_in: []
+    判定の対象集合を「本人が使える教材」（所有・公開・グループ共有・教材の直接共有）に広げ、所有ゼロ・共有ありの状態には別の案内（materials.shared_available → コースビルダー）を出す。
+  landed_in:
+    - backend/core/admin_assistant/next_steps.py
+    - backend/tests/test_ik0363_materials_shared_available.py
+  verification:
+    methods: [reproduction_rerun, docker_e2e, guardrail]
+    unverified:
+      - コース経由でのみ見える教材（共有コースの sources）は対象外のまま
 related: []
 view_of: []
 history: []

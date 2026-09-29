@@ -1,9 +1,9 @@
 ---
 id: IK-0371
 title: "学ぶ単位の handle（U3 等）は候補表の位置番号で、草案を出したターンの教材集合と登録時の sources が違うと、登録は別の候補表に対して handle を解決し、トピックに違う論文の単位が黙って付く"
-status: open
+status: resolved
 recorded_at: 2026-09-27
-resolved_at: null
+resolved_at: 2026-09-28
 sources:
   - docs/architecture/persona_enactment_testing_design.md §17
 feature_context:
@@ -44,11 +44,20 @@ discovery:
     実ペルソナの教員段でターンごとに教材の選択が変わったまま登録し、登録後の topic.evidence と sources を
     砂場 DB と学生段の観測で突き合わせた。
 resolution:
-  perspective: [pending]
+  perspective: [representation_change, carry_through]
   note: >-
-    草案に handle → stable_key（candidate_keys）の対応表をターンごとに同梱し、登録は stable_key で解決する
-    （位置に依らない）。対応表が無い草案は、sources が草案のターンと違うとき 422 で止める。
-  landed_in: []
+    草案に handle → stable_key の対応表（unit_candidate_keys）をターンごとに同梱し、units を {handle, stable_key} に正規化。登録は stable_key で解決し、無ければ捨てて監査に unit_refs_outside_sources を残す。画面（admin.js）とハーネスも同じ形を送る。
+  landed_in:
+    - backend/api/routes/admin.py
+    - backend/core/course_units.py
+    - backend/api/routes/learning.py
+    - frontend/public/js/admin.js
+    - backend/tests/test_ik0371_unit_identity.py
+  verification:
+    methods: [reproduction_rerun, docker_e2e, guardrail]
+    unverified:
+      - 対応表の無い旧草案で sources が違うときの 422（採らなかった）
+      - 登録応答で「外した単位」を教員に見せること（監査のみ）
 related: []
 view_of: []
 history: []

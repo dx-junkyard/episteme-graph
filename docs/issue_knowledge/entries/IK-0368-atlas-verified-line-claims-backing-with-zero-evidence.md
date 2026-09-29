@@ -1,9 +1,9 @@
 ---
 id: IK-0368
 title: "分野の地図の検証行は status が verified なら「検証: 原文N本に裏付け」と書くため、根拠 0 本で verified になったノードで「原文0本に裏付け」という自己矛盾の文が学習者に出る"
-status: open
+status: resolved
 recorded_at: 2026-09-27
-resolved_at: null
+resolved_at: 2026-09-28
 sources:
   - docs/architecture/persona_enactment_testing_design.md §17
 feature_context:
@@ -39,9 +39,17 @@ discovery:
   perspective: [reproduction]
   note: 実ペルソナ（学生）が分野の地図を開いた観測を頭脳エージェントが読み、矛盾として報告した。
 resolution:
-  perspective: [pending]
-  note: 0 本のときは「裏付け」と書かず、verified の由来（教員の記帳・骨格の初期表示など）を事実で書き分ける。verified が 0 本で立つ経路自体も別途確かめる。
-  landed_in: []
+  perspective: [explicit_contract]
+  note: >-
+    根拠 0 本の verified は「裏付け」と書かず、骨格（教員レビュー済）の初期表示である事実文にした。DTO の ledger_status（verified）と文の食い違いは懐疑派ペルソナがなお指摘（表示の pill ラベルは別ファイルで未変更）。
+  landed_in:
+    - backend/core/atlas_state.py
+    - backend/tests/test_ik0368_atlas_verified_zero_evidence.py
+  verification:
+    methods: [reproduction_rerun, docker_e2e, guardrail]
+    unverified:
+      - atlas_view.py の pill ラベル「原文に裏付け」（seed-verified でも同じ）
+      - verified が 0 本で立つ経路そのものの妥当性
 related: []
 view_of: []
 history: []

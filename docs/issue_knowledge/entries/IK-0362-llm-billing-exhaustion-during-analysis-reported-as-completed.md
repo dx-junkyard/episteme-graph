@@ -1,9 +1,9 @@
 ---
 id: IK-0362
 title: 解析の途中で LLM 提供元の課金残高が尽き数百回の呼び出しが失敗しても、各ステージが縮退・修復失敗として吸収し、run と教材は「解析完了」になるため、教員にも G層にも「提供元の障害で成果が欠けた」事実が届かない
-status: open
+status: resolved
 recorded_at: 2026-09-27
-resolved_at: null
+resolved_at: 2026-09-28
 sources:
   - docs/architecture/persona_enactment_testing_design.md §17
 feature_context:
@@ -47,13 +47,19 @@ discovery:
     ペルソナ通し受講の砂場で解析中に提供元の課金が尽きた。教材一覧は「解析完了」、審判 E が砂場 DB の
     `llm_usage_events` を読んで失敗行の山を見つけ、run の stage_outputs と突き合わせた。
 resolution:
-  perspective: [pending]
+  perspective: [first_class_state, explicit_contract]
   note: >-
-    候補: ①run の完了時に U層の失敗行を集計し、`stage_outputs` に「提供元の障害で欠けた呼び出し」の事実を
-    残す（数値は run 内部のみ）②教材の状態に「成果が欠けている」を表す事実文と G層ルール（道案内は再実行）
-    ③縮退理由の語彙に provider_failure を足し、repair_failed / fallback と区別する。数値・提供元の生メッセージを
-    教員に出さない。
-  landed_in: []
+    run 完了時に U層の失敗行を要約して stage_outputs.llm_failures に事実として残し（数値は run 内部のみ）、G層 material.analysis_llm_failed が採用 run のそれを読んで再実行を案内する。縮退語彙の 3 分割（provider_failure）は未実施。
+  landed_in:
+    - backend/core/llm_usage/run_failures.py
+    - backend/core/document_pipeline/orchestrator.py
+    - backend/core/admin_assistant/next_steps.py
+    - backend/tests/test_ik0362_llm_failures.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 提供元の失敗を含む解析 run の砂場での再現（残高ゼロの状態で新規解析を走らせていない）
+      - 再試行で回復した一過性の失敗まで点灯する副作用
 related: [IK-0365]
 view_of: []
 history: []

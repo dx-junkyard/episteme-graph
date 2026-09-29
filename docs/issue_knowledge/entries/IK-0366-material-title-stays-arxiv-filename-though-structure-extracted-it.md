@@ -1,9 +1,9 @@
 ---
 id: IK-0366
 title: 文書構造の解析が論文の題名を取り出しても documents.title へ運ばれず、教材一覧・コースビルダー・学習者のコース情報では題名が arXiv 番号のファイル名（2605.26810v1）のままになるため、教員は一覧のどれがどの論文か分からない
-status: open
+status: resolved
 recorded_at: 2026-09-27
-resolved_at: null
+resolved_at: 2026-09-28
 sources:
   - docs/architecture/persona_enactment_testing_design.md §17
 feature_context:
@@ -42,11 +42,17 @@ discovery:
     実ペルソナの通し受講（run 20260927T044913Z）で教員ペルソナが教材一覧を読んで混乱し、砂場 DB で成果物と
     documents.title を突き合わせた。
 resolution:
-  perspective: [pending]
+  perspective: [carry_through]
   note: >-
-    document_structure 完了時に metadata.title が非空で documents.title がファイル名語幹と一致するなら書き戻す
-    （教員が編集した題名は上書きしない）。題名抽出が None になる 3 本は別課題。
-  landed_in: []
+    document_structure の保存時に metadata.title を documents.title へ書き戻す（題名がファイル名語幹などの仮の値のときだけ・冪等・fail-soft）。
+  landed_in:
+    - backend/core/document_pipeline/persistence.py
+    - backend/tests/test_ik0366_document_title_writeback.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 砂場での再解析（snapshot は是正前に解析したので題名は arXiv 番号のまま）
+      - metadata.title が None になる 3 本（題名抽出そのものは別課題）
 related: [IK-0361]
 view_of: []
 history: []

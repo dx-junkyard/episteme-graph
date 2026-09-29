@@ -1,9 +1,9 @@
 ---
 id: IK-0370
 title: "コース内容の生成が「学ぶ単位が立っていない章」として列挙する uncovered_sections に、図の軸目盛（'40'', '100', 'S8'）・表のセル・論文ヘッダ・参考文献行がそのまま入り、学習者のコース画面と教員の草案に章名として表示される"
-status: open
+status: resolved
 recorded_at: 2026-09-27
-resolved_at: null
+resolved_at: 2026-09-28
 sources:
   - docs/architecture/persona_enactment_testing_design.md §17
 feature_context:
@@ -39,11 +39,17 @@ discovery:
   perspective: [reproduction, data_inspection]
   note: 実ペルソナの学生段でコース画面の「学ぶ単位が立っていない章」を読み、砂場 DB の course_content_status と突き合わせた。
 resolution:
-  perspective: [pending]
+  perspective: [fail_closed, guardrail_fix]
   note: >-
-    uncovered_sections を組むときに節名の妥当性（数字・単位だけ、改行を含む、既知のヘッダ／参考文献パターン）で除き、
-    除いた事実は run の記録に残す。根本は文書構造側の節判定（GROBID / PDF 経路の見出し誤認）で、そちらは別課題。
-  landed_in: []
+    節名の妥当性検査（改行・数字と単位だけ・短すぎ・定型のヘッダ／参考文献／表の列名）を後段に置き、落とした文字列は run 内部の uncovered_sections_dropped に残す。根本の節判定は別課題。
+  landed_in:
+    - backend/core/course_content_builder.py
+    - backend/tests/test_ik0370_uncovered_section_title_filter.py
+  verification:
+    methods: [reproduction_rerun, docker_e2e, guardrail]
+    unverified:
+      - 文書構造側の節判定（GROBID / PDF 経路の見出し誤認）
+      - 学習者向け DTO に course_content_status を出すこと自体の妥当性（別途）
 related: []
 view_of: []
 history: []

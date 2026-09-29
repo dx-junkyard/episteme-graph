@@ -1,9 +1,9 @@
 ---
 id: IK-0365
 title: LLM 提供元の課金残高切れ（恒常的な失敗）でも、コースビルダー・学習チャットの縮退文は「しばらくしてからもう一度」と一時的な障害の文面を返し、教員・学習者は待てば直ると読む
-status: open
+status: resolved
 recorded_at: 2026-09-27
-resolved_at: null
+resolved_at: 2026-09-28
 sources:
   - docs/architecture/persona_enactment_testing_design.md §17
 feature_context:
@@ -39,11 +39,17 @@ discovery:
   perspective: [reproduction]
   note: 課金切れの状態でペルソナが台本どおりコースビルダーとチャットを叩いた応答を読んだ。
 resolution:
-  perspective: [pending]
+  perspective: [explicit_contract]
   note: >-
-    学習者向けは文面を変えず、教員向け（コースビルダー・Copilot・G層）に「提供元の設定・残高の確認が必要」の事実文を
-    分ける案。数値・提供元の生メッセージは出さない。
-  landed_in: []
+    コースビルダー（教員向け）だけ、提供元の上限・残高の失敗（RateLimit / insufficient_quota / credit / billing）を判別して別の事実文を返す。学習者向けの文は変えない。
+  landed_in:
+    - backend/api/routes/admin.py
+    - backend/tests/test_ik0365_provider_quota_message.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 砂場での再現（残高ゼロの状態で course builder を叩いていない）
+      - 一過性の RateLimit も同じ文になること
 related: [IK-0362]
 view_of: []
 history: []

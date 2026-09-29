@@ -1,9 +1,9 @@
 ---
 id: IK-0369
 title: "受講登録 API の応答は id と title だけを埋めた LearningCourseOut を返すため、is_published / is_enrollable / visibility が既定値（false / private）のまま届き、公開コースに登録した直後の画面が「非公開・受講不可」と読める"
-status: open
+status: resolved
 recorded_at: 2026-09-27
-resolved_at: null
+resolved_at: 2026-09-28
 sources:
   - docs/architecture/persona_enactment_testing_design.md §17
 feature_context:
@@ -37,9 +37,16 @@ discovery:
   perspective: [reproduction]
   note: 実ペルソナの学生段で一覧 → 受講登録の応答を並べて読んだ。
 resolution:
-  perspective: [pending]
-  note: enroll の応答を一覧と同じ投影で埋めるか、応答を id / title だけの専用 DTO にする（既定値を事実に見せない）。
-  landed_in: []
+  perspective: [single_point_fix]
+  note: >-
+    受講登録の応答を一覧と同じ投影（is_template / is_published / visibility / group_id / description の実値、is_enrollable=false）で埋めた。
+  landed_in:
+    - backend/api/routes/learning.py
+    - backend/tests/test_ik0369_enroll_response.py
+  verification:
+    methods: [reproduction_rerun, docker_e2e, guardrail]
+    unverified:
+      - 受講直後の「受講を始めました」の確認文（応答は実値になったが、確認の文は未設計）
 related: [IK-0361, IK-0367]
 view_of: []
 history: []
