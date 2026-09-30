@@ -35,6 +35,12 @@ def build_report(run_dir: Path) -> str:
                   f"- 予算: {json.dumps(meta.budget, ensure_ascii=False)} ／ 使用: {json.dumps(meta.spent, ensure_ascii=False)}"]
         if meta.flags:
             lines.append(f"- flags（宣言）: {json.dumps(meta.flags, ensure_ascii=False)}")
+        if meta.pinned_course_id:
+            lines.append(f"- 固定したコース: {meta.pinned_course_id}")
+        if meta.pinned_course_mismatch:
+            who = "、".join(f"{m.get('persona_id', '')}→{m.get('actual', '')}" for m in meta.pinned_course_mismatch)
+            lines.append(f"- **注意: 固定したコースとは別のコースを開いたペルソナがいる（{who}）。その内容依存の検証は"
+                         "固定したコースを見ていない**（IK-0506・砂場準備 `uxsim/sandbox/pin_course.py`）")
     lines.append("")
     lines.append("## ペルソナごとの歩み")
     by_persona: dict[str, list] = defaultdict(list)

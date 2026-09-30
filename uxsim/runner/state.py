@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -152,6 +153,170 @@ def resolve_formula_placeholders(text: str, formulas: Any) -> str:
     return _FORMULA_PLACEHOLDER_RE.sub(_sub, text)
 
 
+# 根拠リンク系 kind の表示名（frontend/public/js/element-vocab.js KIND_LABELS の逐語ミラー。
+# 画面の materialEvidenceKindLabel と同じく未知キーはそのまま返す）
+MATERIAL_KIND_LABELS = {
+    "component": "論理要素", "claim": "主張", "equation": "数式", "figure": "図", "source": "出典",
+    "evidence": "根拠箇所", "derivation": "導出", "shared_part": "共通部品",
+}
+MISSING_EMBED_SUMMARY = "このIDに対応する教材要素を取得できませんでした。"
+_EMBED_BLOCK_RE = re.compile(r"!\[\[([a-z_]+):([^\]]+)\]\]")
+_EMBED_INLINE_RE = re.compile(r"\[\[([a-z_]+):([^\]]+)\]\]")
+_PLACEHOLDER_RE = re.compile(r"\[\[([^\[\]:]+)\]\]")
+_SENTINEL_RE = re.compile("\x00(EMBED|MATH|FIGURE)_(\\d+)\x00")
+
+
+def _norm_evidence_id(value: Any) -> str:
+    """画面の normalizeMaterialEvidenceId と同じ正規化（外側の [[ ]] を 2 重まで外す・eq_eq_ → eq_）。"""
+    s = str(value if value is not None else "").strip()
+    for _ in range(2):
+        if s.startswith("[["):
+            s = s[2:]
+        if s.endswith("]]"):
+            s = s[:-2]
+    return re.sub(r"^(?:eq_){2,}", "eq_", s.strip(), flags=re.IGNORECASE)
+
+
+def _short_summary(text: Any) -> str:
+    """画面の shortMaterialEvidenceSummary（空白を畳み 260 字で切る）。"""
+    t = re.sub(r"\s+", " ", str(text if text is not None else "")).strip()
+    return t[:260].strip() + "..." if len(t) > 260 else t
+
+
+def _equation_body(formula: Optional[dict]) -> str:
+    """画面の renderMaterialEquationBody の文字版（LaTeX → plain_text → raw_text）。"""
+    if not isinstance(formula, dict):
+        return ""
+    latex = str(formula.get("latex") or formula.get("summary") or "")
+    if latex:
+        mark = str(formula.get("reconstructed_mark") or "") if formula.get("reconstructed") else ""
+        return f"$${latex}$$" + (f"{mark}" if mark else "")
+    for key in ("plain_text", "raw_text"):
+        if formula.get(key):
+            return str(formula[key])
+    return ""
+
+
+def _figure_card(figure: dict) -> str:
+    """画面の renderMaterialFigureCard の文字版。"""
+    caption = str(figure.get("caption") or "")
+    explanation = str(figure.get("explanation") or "")
+    head = "〔図〕" if figure.get("image_url") else "〔図: この図の画像を取得できませんでした。〕"
+    return head + (f" {caption}" if caption else "") + (f"（{explanation}）" if explanation else "")
+
+
+def _missing_embed(kind: str, raw_id: str) -> str:
+    # 画面の renderMaterialMissingEmbed と同じく kind:id をそのまま見せる（製品の未解決を隠さない）
+    return f"〔未解決 {kind}:{raw_id} — {MISSING_EMBED_SUMMARY}〕"
+
+
+def render_material_text(chunk: Any) -> str:
+    """教材区画 1 つを画面（app.js ``renderMaterialChunk``）と同じ規則で文字に投影する。
+
+    - ``![[kind:id]]`` / ``[[kind:id]]`` は ``chunk.evidence_items``（"kind:id" 優先・同一 ID の別 kind へ
+      フォールバック）で解決: component / claim → ⚓ チップ、equation → 数式（無ければ「数式は準備中です」）、
+      figure → 画像なしの図カード、source 等 → 種別付きカード。解決できないものは**未解決カード**（kind:id を出す）。
+    - ``[[X]]``（コロンなし）は ``chunk.formulas``（id / 位置 FORMULA_i）→ ``chunk.figures``（FIGURE_(i+1) / figure_id）で
+      解決し、どちらにも無ければ**そのまま残す**（画面と同じ — IK-0389 を審判から隠さない）。
+    - ``drop_unresolved_embeds`` が真なら未解決カードを描かない（画面のレクチャースライドと同じ）。
+    """
+    if not isinstance(chunk, dict):
+        return ""
+    text = str(chunk.get("text") or chunk.get("content") or "")
+    drop_unresolved = bool(chunk.get("drop_unresolved_embeds"))
+    formula_by_id: dict[str, dict] = {}
+    for idx, f in enumerate(chunk.get("formulas") or []):
+        if not isinstance(f, dict):
+            continue
+        fid = str(f.get("id") or f"FORMULA_{idx}")
+        norm = _norm_evidence_id(fid)
+        for key in (fid, norm, f"[[{norm}]]", f"FORMULA_{idx}", f"[[FORMULA_{idx}]]"):
+            formula_by_id[key] = f
+    figure_by_id: dict[str, dict] = {}
+    for idx, fig in enumerate(chunk.get("figures") or []):
+        if not isinstance(fig, dict):
+            continue
+        figure_by_id[f"FIGURE_{idx + 1}"] = fig
+        figure_by_id[f"[[FIGURE_{idx + 1}]]"] = fig
+        if fig.get("figure_id"):
+            figure_by_id[str(fig["figure_id"])] = fig
+    by_ref: dict[str, dict] = {}
+    by_id: dict[str, dict] = {}
+    for item in chunk.get("evidence_items") or []:
+        if not isinstance(item, dict) or not item.get("kind"):
+            continue
+        norm = _norm_evidence_id(item.get("id"))
+        by_ref[f"{item['kind']}:{norm}"] = item
+        by_id.setdefault(norm, item)
+
+    def lookup(kind: str, norm: str) -> Optional[dict]:
+        return by_ref.get(f"{kind}:{norm}") or by_id.get(norm)
+
+    embeds: list[tuple[str, str]] = []
+    maths: list[str] = []
+    figs: list[dict] = []
+
+    def keep_embed(m: "re.Match[str]") -> str:
+        embeds.append((m.group(1), m.group(2)))
+        return f"\x00EMBED_{len(embeds) - 1}\x00"
+
+    def keep_placeholder(m: "re.Match[str]") -> str:
+        raw, pid = m.group(0), m.group(1)
+        formula = formula_by_id.get(raw) or formula_by_id.get(pid) or formula_by_id.get(_norm_evidence_id(pid))
+        if formula is not None:
+            maths.append(str(formula.get("latex") or formula.get("summary") or pid))
+            return f"\x00MATH_{len(maths) - 1}\x00"
+        figure = figure_by_id.get(raw) or figure_by_id.get(pid)
+        if figure is not None:
+            figs.append(figure)
+            return f"\x00FIGURE_{len(figs) - 1}\x00"
+        return raw
+
+    out = text.replace("\r\n", "\n").replace("\r", "\n")
+    out = re.sub(r"<br\s*/?>", "\n", out, flags=re.IGNORECASE)
+    out = re.sub(r"!\[\[equation:\s*\[\[([^\]]+)\]\]\s*\]\]", r"![[equation:\1]]", out)
+    out = re.sub(r"\[\[equation:\s*\[\[([^\]]+)\]\]\s*\]\]", r"[[equation:\1]]", out)
+    out = _EMBED_BLOCK_RE.sub(keep_embed, out)
+    out = _EMBED_INLINE_RE.sub(keep_embed, out)
+    out = _PLACEHOLDER_RE.sub(keep_placeholder, out)
+
+    def render_embed(kind: str, raw_id: str) -> str:
+        norm = _norm_evidence_id(raw_id)
+        item = lookup(kind, norm)
+        if kind == "equation":
+            formula = formula_by_id.get(raw_id) or formula_by_id.get(norm)
+            if formula is None and item and (item.get("latex") or item.get("plain_text") or item.get("raw_text")):
+                formula = item
+            body = _equation_body(formula)
+            return body if body else "〔数式は準備中です〕"
+        if kind == "figure":
+            if item and item.get("kind") == "figure":
+                title = item.get("title") or f"図: {item.get('caption') or norm}"
+                summary = _short_summary(item.get("caption") or item.get("summary")) or "この図の画像は現在配信対象ではありません。"
+                return f"〔{MATERIAL_KIND_LABELS['figure']}: {title}〕{summary}"
+            return "" if drop_unresolved else _missing_embed(kind, raw_id)
+        if kind in ("component", "claim"):
+            if item:
+                return f"〔⚓ {item.get('title') or item.get('label') or item.get('id') or norm}〕"
+            return "" if drop_unresolved else _missing_embed(kind, raw_id)
+        if item:
+            label = MATERIAL_KIND_LABELS.get(str(item.get("kind")), str(item.get("kind")))
+            body = f"$${item['latex']}$$" if item.get("latex") else (
+                _short_summary(item.get("summary")) or "この教材要素に紐づく根拠です。")
+            return f"〔{label}: {item.get('title') or item.get('id')}〕{body}"
+        return "" if drop_unresolved else _missing_embed(kind, raw_id)
+
+    def expand(m: "re.Match[str]") -> str:
+        kind, idx = m.group(1), int(m.group(2))
+        if kind == "EMBED":
+            return render_embed(*embeds[idx])
+        if kind == "MATH":
+            return f"${maths[idx]}$"
+        return _figure_card(figs[idx])
+
+    return _SENTINEL_RE.sub(expand, out)
+
+
 def _chat(body: dict) -> list[str]:
     out = ["AI の回答:", str(body.get("answer", ""))]
     stance = body.get("stance") or {}
@@ -285,7 +450,10 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
                 text = str(ch.get("text") or ch.get("content") or "")
                 # 画面（app.js renderMaterialChunk）と同じく [[FORMULA_N]] を chunk.formulas で解決する。
                 # formulas に無いものは置換しない（製品側の未解決 = IK-0389 を審判から隠さない）。
-                lines.append(resolve_formula_placeholders(text, ch.get("formulas"))[:3000])
+                # 画面（app.js renderMaterialChunk）と同じ規則で [[FORMULA_N]] / [[FIGURE_N]] / ![[kind:id]] を
+                # chunk の formulas / figures / evidence_items で解決する。引けない埋め込みは画面と同じ未解決カード
+                # （kind:id を出す）にし、引けないプレースホルダーは残す（製品側の未解決 = IK-0389 を隠さない）。
+                lines.append(render_material_text({**ch, "text": text})[:3000])
         return _clip("\n".join(lines))
     lines = _generic(body)
     return _clip("\n".join(lines) if lines else "（画面に何も表示されなかった）")

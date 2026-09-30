@@ -14,6 +14,9 @@ d. 学習者向け応答の数値の欄（B）: 学習画面の応答で、値�
    数は見ない — 教材の引用を拾わない）。ペルソナごとに 1 件。UI に描かれるかは browser runner の範囲。
 e. precondition の連鎖（A・ハーネス）: 同じペルソナの 3 手以上が続けて ``precondition:*`` で終わった —
    runner の状態解決の穴で、製品の欠陥と取り違えないよう仮説の頭に「ハーネス:」を付ける。
+f. 固定コースの取り違え（A・ハーネス）: campaign が ``course_id`` を固定しているのに、ペルソナが別のコースを
+   受講登録・表示した（runner_note ``pinned_course_mismatch:``）。その週の内容依存の検証は固定したコースを
+   見ていない（第 12 周 = IK-0506）。ペルソナ・セッションごとに 1 件。
 
 応答の要約は ``HttpTrace.digest``（runner が応答全体から取る）を優先し、無い古い transcript では
 ``response_excerpt`` から読める範囲で代える（抜粋に出典が入っていなければ a・b は見送る）。
@@ -260,6 +263,24 @@ def _check_precondition_chain(seq: list[TranscriptStep], factory: FindingFactory
     return emit() if len(chain) >= PRECONDITION_CHAIN else []
 
 
+# ----------------------------------------------------------------------------
+# f. 固定コースの取り違え
+# ----------------------------------------------------------------------------
+
+PINNED_MISMATCH_PREFIX = "pinned_course_mismatch:"
+HYP_PINNED_MISMATCH = ("ハーネス: campaign が固定したコースではなく別のコースを受講・表示したため、このセッションの"
+                       "内容依存の検証（是正の再現）は固定したコースを見ていない — 発見を是正の成否として読まない")
+
+
+def _check_pinned_mismatch(seq: list[TranscriptStep], factory: FindingFactory) -> list[Finding]:
+    hits = [(s, n) for s in seq for n in s.runner_notes if n.startswith(PINNED_MISMATCH_PREFIX)]
+    if not hits:
+        return []
+    return [factory.make(oracle="A", severity="inconsistent", step=hits[0][0], hypothesis=HYP_PINNED_MISMATCH,
+                         affordance="", quote=" ／ ".join(n for _, n in hits)[:400],
+                         steps=sorted({s.seq for s, _ in hits}), layers=["cycle_verification"])]
+
+
 def check(steps: list[TranscriptStep], factory: FindingFactory) -> list[Finding]:
     out: list[Finding] = []
     flagged_renumber: set[str] = set()
@@ -275,6 +296,7 @@ def check(steps: list[TranscriptStep], factory: FindingFactory) -> list[Finding]
             if step.action_id.startswith(CHAT_ACTIONS):
                 out += _check_indistinct(step, factory)
         out += _check_stale(seq, factory)
+        out += _check_pinned_mismatch(seq, factory)
         if persona not in flagged_numeric:
             found = _check_numeric_keys(seq, factory)
             if found:

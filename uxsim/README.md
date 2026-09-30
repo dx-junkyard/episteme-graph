@@ -47,6 +47,16 @@
        [--persona st-01-m1-radio] [--scenario s-ask-until-confused] [--max-steps 20] [--no-oracles]
    ```
 
+   campaign が `course_id` を固定しているなら、先に同名の別コースを受講できなくする（固定しないと、学生ペルソナが
+   同じ題名の古いコースを選んで検証が丸ごと別コースを見ることがある — IK-0506）。runner はペルソナの選択を
+   差し替えず、取り違えたら runner_note `pinned_course_mismatch:`・`meta.json` の `pinned_course_mismatch`・
+   審判 A（「ハーネス:」）・報告の注意行に残す:
+
+   ```bash
+   backend/.venv/bin/python -m uxsim.sandbox.pin_course --campaign <campaign.yaml>        # dry-run
+   backend/.venv/bin/python -m uxsim.sandbox.pin_course --campaign <campaign.yaml> --yes  # 同名の公開コースを private に（製品 API）
+   ```
+
    教員段 → 学生段の順に走り、`sessions_per_student` が 2 以上なら 2 回目は再ログインで「翌日」を近似する（§7.4）。
    終わると決定論の審判（A・B・C の前処理・D の組・E）が自動でかかる。
 

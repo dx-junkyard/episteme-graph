@@ -102,3 +102,7 @@ class RunMeta(BaseModel):
     spent: dict[str, int] = Field(default_factory=dict)  # product_llm_calls / persona_llm_calls / http_429
     replay_of: str = ""
     notes: list[str] = Field(default_factory=list)  # 事実文（snapshot の版ずれ・未実施の検査など）
+    # campaign が固定したコース（``course_id``）と、ペルソナが実際に受講・表示した別コースの記録（IK-0506）。
+    # 空でなければ、その週の内容依存の検証は固定したコースを見ていない
+    pinned_course_id: str = ""
+    pinned_course_mismatch: list[dict[str, Any]] = Field(default_factory=list)

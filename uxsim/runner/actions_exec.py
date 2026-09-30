@@ -144,11 +144,38 @@ def _course_enroll(ctx: _Ctx) -> None:
     if status and status < 300 and cid:
         ctx.session.course_id = cid
         ctx.session.remember("courses", cid)
+        note_pinned_course_mismatch(ctx.session, cid, "learning.course.enroll")
 
 
 def runner_note(session: PersonaSession, note: str) -> None:
     """runner が自分で補ったこと（ペルソナの判断ではない）を次に書くステップへ残す。"""
     session.scratch.setdefault("runner_notes", []).append(note)
+
+
+PINNED_MISMATCH_MARK = "pinned_course_mismatch"
+
+
+def note_pinned_course_mismatch(session: PersonaSession, course_id: str, action_id: str) -> bool:
+    """campaign が ``course_id`` を固定しているのに、ペルソナが別のコースを受講登録・表示したら記録する。
+
+    ペルソナの選択は差し替えない（それ自体が画面の観測 — 同名コースが並べば人も取り違える）。
+    代わりに runner_note（``pinned_course_mismatch:`` で始まる）と ``scratch["pinned_course_mismatch"]``
+    に残し、api.py が meta に、審判（dialogue f）が発見に上げる。これが無いと、固定したコースを
+    一度も読んでいない週が「是正が効いていない」という偽の検証結果として読まれる（第 12 周 = IK-0506）。
+    同じ (固定, 実際) の組は 1 セッション 1 回だけ記録する。
+    """
+    pinned = str(session.scratch.get("pinned_course_id") or "")
+    cid = str(course_id or "")
+    if not pinned or not cid or cid == pinned:
+        return False
+    seen = session.scratch.setdefault("pinned_course_mismatch", [])
+    if any(m.get("actual") == cid for m in seen):
+        return False
+    seen.append({"pinned": pinned, "actual": cid, "action_id": action_id})
+    runner_note(session, f"{PINNED_MISMATCH_MARK}: campaign が固定した course_id={pinned} ではなく {cid} を"
+                         f"ペルソナが選んだ（{action_id}）。選択は差し替えていない — このセッションの内容依存の検証は"
+                         "固定したコースを見ていない")
+    return True
 
 
 def default_topic_id(topics: dict[str, dict]) -> str:
@@ -166,6 +193,7 @@ def _load_course(ctx: _Ctx, course_id: str, *, default_topic: bool = True) -> tu
         s = ctx.session
         switched = s.course_id != course_id
         s.course_id = course_id
+        note_pinned_course_mismatch(s, course_id, "learning.course.open")
         s.topics = {str(t.get("id")): t for t in master.get("topics") or [] if isinstance(t, dict)}
         s.topic_ids = list(s.topics)
         s.scratch["chapter_titles"] = [str(c.get("title") or "") if isinstance(c, dict) else str(c)

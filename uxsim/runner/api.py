@@ -29,7 +29,7 @@ from uxsim.llm import (CachingPersonaLLM, PersonaLLM, ReplayPersonaLLM, ReplayTh
                        load_cache_jsonl, make_live_llm)
 from uxsim.persona.agent import PersonaAgent, StepDecision
 from uxsim.persona.compose import PersonaSpec, compose_persona, course_brief
-from uxsim.runner.actions_exec import execute, prefetch_courses
+from uxsim.runner.actions_exec import PINNED_MISMATCH_MARK, execute, prefetch_courses
 from uxsim.runner.client import EpistemeClient
 from uxsim.runner.scenario import (SKIP_ACTION_ID, Scenario, ScenarioParams, StepSpec, evaluate_until, load_params,
                                    load_scenario)
@@ -413,6 +413,19 @@ def _prefetch_courses_step(session: PersonaSession, client: EpistemeClient, writ
         runner_notes=notes + list(session.scratch.pop("runner_notes", None) or [])))
 
 
+def record_pinned_mismatch(meta: RunMeta, session: PersonaSession) -> bool:
+    """セッションで記録した固定コースの取り違え（IK-0506）を meta に移す。記録があれば True。"""
+    found = list(session.scratch.pop("pinned_course_mismatch", None) or [])
+    for m in found:
+        meta.pinned_course_mismatch.append({**m, "persona_id": session.persona_id, "session": session.session_no})
+        meta.notes.append(
+            f"{PINNED_MISMATCH_MARK}: {session.persona_id}（セッション {session.session_no}）は campaign が固定した"
+            f"コース {m.get('pinned')} ではなく {m.get('actual')} を開いた（{m.get('action_id')}）。この週の"
+            "内容依存の検証（是正の再現）は固定したコースを見ていないため、結果を是正の成否として読まない"
+            "（砂場準備: uxsim/sandbox/pin_course.py）。")
+    return bool(found)
+
+
 def _make_llm(settings: Settings, run_dir: Path, replay_dir: Optional[Path]):
     live: Optional[PersonaLLM] = None
     if settings.persona_llm_provider != "replay":
@@ -460,6 +473,7 @@ def run_campaign(
                    git_commit=read_git_commit(), base_url=settings.base_url,
                    flags={str(k): str(v) for k, v in (campaign.get("flags") or {}).items()},
                    budget={k: int(v) for k, v in (campaign.get("budget") or {}).items()}, replay_of=replay_of or "")
+    meta.pinned_course_id = str(campaign.get("course_id") or "")
     if meta.flags:
         meta.notes.append("flags は砂場の api-server の環境変数で設定する。runner は設定していない（宣言の記録のみ）。")
     writer.write_meta(meta)
@@ -555,6 +569,8 @@ def run_campaign(
                     break
         finally:
             carried[pid] = session.course_id
+            if record_pinned_mismatch(meta, session):
+                writer.write_meta(meta)  # 途中で止まった run でも meta に残す（第 12 周の meta は finished_at が空だった）
             meta.spent["http_429"] = meta.spent.get("http_429", 0) + client.count_429
             client.close()
     meta.spent.update(budget.spent())
