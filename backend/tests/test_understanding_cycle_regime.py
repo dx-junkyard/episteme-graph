@@ -371,13 +371,13 @@ class TestNextStepProbeLabels:
         assert "式 (3.1)" in step1_next["prompt"]
         assert "式 (3.2)" in step1_next["prompt"]
 
-    def test_prompt_falls_back_to_generic_labels_when_unresolvable(self, monkeypatch):
+    def test_no_next_step_probe_when_equations_unnamed(self, monkeypatch):
+        # TRIAGE14: 式を名指しできない「前の式→次の式」の問いは出題しない。
         chain = _chain_fixture()
         _patch_common(monkeypatch, chains=[chain], equations=[], claim_rows=_claim_rows_fixture())
         probes = derivation_source.collect_derivation_probes("doc1")
-        step1_next = next(p for p in probes if p["elicit_mode"] == "next_step" and p["expected"]["step_id"] == "step_1")
-        assert "前の式" in step1_next["prompt"]
-        assert "次の式" in step1_next["prompt"]
+        assert not [p for p in probes if p["elicit_mode"] == "next_step"]
+        assert not any("前の式" in p["prompt"] or "次の式" in p["prompt"] for p in probes)
 
 
 class TestDistractorOperations:

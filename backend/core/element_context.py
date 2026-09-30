@@ -197,7 +197,8 @@ def _resolve_claim(element_id: str, course_document_ids: set[str]) -> tuple[str,
             sa_text(
                 f"""
                 SELECT id::text AS id, document_id::text AS document_id,
-                       (id::text = :raw_id) AS id_match
+                       (id::text = :raw_id) AS id_match,
+                       parent_claim_id::text AS parent_claim_id
                 FROM theory_claims_live
                 WHERE document_id = ANY(CAST(:doc_ids AS uuid[])) AND ({where_clause})
                 ORDER BY (id::text = :raw_id) DESC, document_id ASC, created_at ASC, id::text ASC
@@ -213,6 +214,13 @@ def _resolve_claim(element_id: str, course_document_ids: set[str]) -> tuple[str,
         return None
     first = candidates[0]
     if not first.get("id_match") and len(candidates) > 1:
+        # 親 claim（claim_object）は atomic 子の agent ID も legacy_ids に持つ
+        # （TRIAGE14: ``claim_span_001_112_sub02`` が子と親の2行に当たり 404 になった）。
+        # 候補のうち別の候補の親である行を外し、1行に絞れればそれを採る。
+        parents = {str(c.get("parent_claim_id") or "") for c in candidates}
+        narrowed = [c for c in candidates if str(c.get("id") or "") not in parents]
+        if len(narrowed) == 1:
+            return str(narrowed[0]["id"]), str(narrowed[0]["document_id"] or "")
         # agent 側 ID が複数行に一致した = どの claim を指すか決められない（fail-closed）。
         logger.info(
             "element_context: ambiguous agent claim id %r matched %d rows in course scope",
@@ -223,7 +231,11 @@ def _resolve_claim(element_id: str, course_document_ids: set[str]) -> tuple[str,
     return str(first["id"]), str(first["document_id"] or "")
 
 
-def _resolve_equation(element_id: str, course_document_ids: set[str]) -> tuple[str, str] | None:
+def _resolve_equation(
+    element_id: str,
+    course_document_ids: set[str],
+    preferred_document_ids: set[str] | None = None,
+) -> tuple[str, str] | None:
     """equation を ``(equation_id, document_id)`` に解決する。
 
     equation は独立テーブルを持たない（W層設計 §2）ため、コースの document 集合を
@@ -237,7 +249,11 @@ def _resolve_equation(element_id: str, course_document_ids: set[str]) -> tuple[s
     ``equation_records(doc, artifacts=...)`` に渡して再取得を省く。
     """
     raw_id = str(element_id)
-    for document_id in _normalized_document_ids(course_document_ids):
+    all_ids = _normalized_document_ids(course_document_ids)
+    preferred = [d for d in _normalized_document_ids(preferred_document_ids or set()) if d in all_ids]
+    others = [d for d in all_ids if d not in preferred]
+
+    def _has(document_id: str) -> bool:
         try:
             records = equation_records(
                 document_id, artifacts=document_run_artifacts(document_id)
@@ -248,20 +264,42 @@ def _resolve_equation(element_id: str, course_document_ids: set[str]) -> tuple[s
                 document_id,
                 exc_info=True,
             )
-            continue
-        for record in records:
-            if isinstance(record, dict) and str(record.get("equation_id") or "") == raw_id:
-                return raw_id, document_id
+            return False
+        return any(
+            isinstance(record, dict) and str(record.get("equation_id") or "") == raw_id
+            for record in records
+        )
+
+    # 第 15 周: 式 ID は印字番号由来（``eq_5``）で論文をまたいで衝突する。⚓ の属する
+    # トピックの論文を先に見て、そこで見つかればそれを採る。
+    for document_id in preferred:
+        if _has(document_id):
+            return raw_id, document_id
+    # トピックの論文に無いときは、コースの中で **ちょうど1論文** にだけある場合に限り
+    # 解決する（複数論文に同じ ID があれば、どの論文の式か決められない — fail-closed）。
+    hits = [d for d in others if _has(d)]
+    if len(hits) == 1:
+        return raw_id, hits[0]
+    if len(hits) > 1:
+        logger.info("element_context: ambiguous equation id %r in %d documents", raw_id, len(hits))
     return None
 
 
 def _resolve_element(
-    element_type: str, element_id: str, course_document_ids: set[str]
+    element_type: str,
+    element_id: str,
+    course_document_ids: set[str],
+    preferred_document_ids: set[str] | None = None,
 ) -> tuple[str, str] | None:
     if element_type == ELEMENT_TYPE_CLAIM:
+        preferred = set(preferred_document_ids or set()) & set(course_document_ids)
+        if preferred:
+            hit = _resolve_claim(element_id, preferred)
+            if hit is not None:
+                return hit
         return _resolve_claim(element_id, course_document_ids)
     if element_type == ELEMENT_TYPE_EQUATION:
-        return _resolve_equation(element_id, course_document_ids)
+        return _resolve_equation(element_id, course_document_ids, preferred_document_ids)
     return None
 
 
@@ -534,6 +572,10 @@ def _project_focus(
     intrinsic_summary = _safe_text(intrinsic_summary)
 
     headline = _safe_text(focus.get("headline")) or label
+    # TRIAGE14: label / headline / 要約が同じ原文の 3 重表示にならないよう、label と
+    # 同文の要約は空にする（label と headline は描画側の既存契約のため両方残す）。
+    if element_type == ELEMENT_TYPE_CLAIM and intrinsic_summary and intrinsic_summary.strip() == label.strip():
+        intrinsic_summary = ""
 
     result: dict[str, Any] = {
         "element_type": element_type,
@@ -548,6 +590,8 @@ def _project_focus(
         result.update(_equation_explanatory_fields(equation_record))
 
     intrinsic = _project_intrinsic(focus.get("intrinsic"))
+    if element_type == ELEMENT_TYPE_CLAIM and intrinsic and str(intrinsic.get("summary") or "").strip() in (label.strip(), headline.strip()):
+        intrinsic = {k: v for k, v in intrinsic.items() if k not in ("summary", "summary_is_source_language")}
     if intrinsic:
         result["intrinsic"] = intrinsic
     placement = _project_placement(focus.get("placement"))
@@ -626,7 +670,11 @@ def _is_degenerate_lens(lens: dict, resolved_id: str) -> bool:
 
 
 def build_element_context(
-    element_type: str, element_id: str, course_document_ids: set[str]
+    element_type: str,
+    element_id: str,
+    course_document_ids: set[str],
+    *,
+    preferred_document_ids: set[str] | None = None,
 ) -> dict | None:
     """学習者向け claim / equation 文脈 DTO を組み立てる。
 
@@ -641,7 +689,9 @@ def build_element_context(
     if element_type not in SUPPORTED_ELEMENT_TYPES:
         return None
 
-    resolved = _resolve_element(element_type, element_id, course_document_ids)
+    resolved = _resolve_element(
+        element_type, element_id, course_document_ids, preferred_document_ids
+    )
     if resolved is None:
         return None
     resolved_id, document_id = resolved

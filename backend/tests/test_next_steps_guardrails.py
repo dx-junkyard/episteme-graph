@@ -172,7 +172,7 @@ class TestFigureUnreviewedModesRule:
         assert step.severity == next_steps_mod.SEVERITY_RECOMMENDED
         assert step.step_key == "figure.unreviewed_modes:d-uuid-1"
         assert step.target == {"material_id": "d-uuid-1"}
-        assert "3 件" in step.reason
+        assert not re.search(r"[0-9]+ 件", step.reason)  # G6: 件数を書かない
         assert "レーザー分光の基礎" in step.title
         # locate の行アンカーは data-material-id（= source_path）で解決される
         anchors = [s["anchor_id"] for s in step.locate_plan["steps"]]
@@ -532,7 +532,7 @@ class TestCourseAtlasBindingStaleRule:
         step, _sort_ts = out[0]
         assert step.rule_id == next_steps_mod.RULE_COURSE_ATLAS_BINDING_STALE
         assert step.step_key == "course.atlas_binding_stale:course1"
-        assert "1 件" in step.reason
+        assert not re.search(r"[0-9]+ 件", step.reason)  # G6: 件数を書かない
         assert "コースA" in step.reason
         # 版数・数値スコア（confidence 等）は出さない（事実としての件数のみ, G6）
         assert "revision" not in step.reason
@@ -984,7 +984,7 @@ class TestDiscussOpeningUnreviewedEvaluator:
         assert step.target["course_id"] == "c1"
         assert step.target["material_id"] == "doc-1"
         assert "未確認の議論のきっかけ" in step.reason
-        assert "2 件" in step.reason
+        assert not re.search(r"[0-9]+ 件", step.reason)  # G6: 件数を書かない
         assert sort_ts == "2026-07-01T00:00:00+00:00"
         # 道案内は教材一覧の行アンカー（data-material-id = source_path）で解決する。
         anchors = [s["anchor_id"] for s in step.locate_plan["steps"]]
@@ -1034,7 +1034,7 @@ class TestDiscussOpeningUnreviewedEvaluator:
         )
         out = next_steps_mod._eval_course_discuss_opening_unreviewed(session, "u1")
         assert len(out) == 1
-        assert "1 件" in out[0][0].reason
+        assert not re.search(r"[0-9]+ 件", out[0][0].reason)  # G6
 
     def test_course_without_sources_skips_further_queries(self):
         session = _ScriptedSession(
@@ -1055,7 +1055,7 @@ class TestDiscussOpeningUnreviewedEvaluator:
         )
         out = next_steps_mod._eval_course_discuss_opening_unreviewed(session, "u1")
         assert len(out) == 1
-        assert "2 件" in out[0][0].reason  # 4 件（重複計上）にならない
+        assert not re.search(r"[0-9]+ 件", out[0][0].reason)  # G6
 
     def test_only_own_courses_are_scanned(self):
         session = _ScriptedSession(

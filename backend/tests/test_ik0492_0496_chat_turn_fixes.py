@@ -160,10 +160,11 @@ class TestDisplayedSourcesAreCitedOnly:
         ]
         f = learning_mod._displayed_sources_for
         # 引用が無く出所が教材 → 出所を決めた course_material の出典だけ並べる。
-        assert f("引用なし", sources, "course_material") == [sources[1]]
-        assert f("引用なし", sources, "other_material") == [sources[0]]
+        # 第 14 周: 引用していない出典は cited=False で区別する。
+        assert f("引用なし", sources, "course_material") == [dict(sources[1], cited=False)]
+        assert f("引用なし", sources, "other_material") == [dict(sources[0], cited=False)]
         # 引用があれば引用したものだけ。
-        assert f("x [出典1]", sources, "course_material") == [sources[0]]
+        assert f("x [出典1]", sources, "course_material") == [dict(sources[0], cited=True)]
         # 出所が無い・AI の説明なら空。
         assert f("引用なし", sources, None) == []
         assert f("引用なし", sources, "model_generated") == []
@@ -172,9 +173,10 @@ class TestDisplayedSourcesAreCitedOnly:
         _search(chat_env, _chunk(1), _chunk(2))
         _answer(chat_env, "引用を付けずに説明しました。")
         resp = _ask("BAO について教えてください")
-        assert resp.content_grounding == "course_material"
-        # 帯は「教材に基づく」なのに出典が空、という食い違いを作らない。
-        assert [s.chunk_id for s in resp.sources] == ["chunk-1", "chunk-2"]
+        # TRIAGE14（裁定）: 本文が何も引用せず表示中教材も問いに関わらなければ model_generated。
+        # 帯（model_generated）と一覧（空）は食い違わない。
+        assert resp.content_grounding == "model_generated"
+        assert list(resp.sources) == []
 
     def test_numbering_stays_stable_after_filtering(self, chat_env):
         _search(chat_env, _chunk(1), _chunk(2))
@@ -263,7 +265,8 @@ class TestPreviousCitationsCarried:
         _search(chat_env, _chunk(1))
         _answer(chat_env, "回答 [出典1]")
         _ask("二つ目", history=history)
-        assert calls == []
+        # 第 15 周: 直前の引用は検索の前に id 指定で読み出す（議論中の論文の優先に使う）が、
+        # 今回の検索に既にあるチャンクを文脈へ二重に置かない。
         assert str(chat_env.prompts[-1][1]["content"]).count("[出典1]") == 1
 
     def test_invisible_chunk_dropped(self, chat_env):
@@ -306,7 +309,7 @@ class TestPreviousCitationsCarried:
     def test_elicit_does_not_carry(self):
         source = Path(learning_mod.__file__).read_text(encoding="utf-8")
         idx = source.index("_carry_previous_cited_sources(\n            body.history")
-        assert 'if _cycle_mode != "elicit":' in source[idx - 400:idx]
+        assert 'if _cycle_mode != "elicit"' in source[idx:idx + 400]
 
 
 class TestGetChunksForPromptFailClosed:

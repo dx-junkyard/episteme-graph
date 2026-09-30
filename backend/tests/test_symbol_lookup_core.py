@@ -558,6 +558,8 @@ class TestCoreGuardrails:
 from core.symbol_lookup import (  # noqa: E402
     FACT_DEFINITION_FROM,
     FACT_DEFINITION_FROM_OTHER_DOCUMENT,
+    FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS,
+    FACT_SYMBOL_NOT_IN_THIS_DOCUMENT,
     FACT_NO_SOURCE_DOCUMENTS,
     FACT_SYMBOL_NOT_REGISTERED,
     symbol_key,
@@ -693,16 +695,19 @@ class TestDocumentAndScopeFacts:
         assert FACT_POSITION_UNKNOWN in result["facts"]
 
     def test_fallback_to_other_paper_is_stated(self):
-        """タップした論文（DOC）に λ が無く、別の論文の定義へ倒すとき。"""
+        """タップした論文（DOC）に λ が無いとき、別の論文の定義は持ってこない（第 15 周）。
+
+        記号は論文ごとに意味が違う。題名だけを事実文で並べ、定義は出さない。
+        """
         result = lookup_symbol_definition(
             self._session(), symbol="λ", document_ids=[DOC, OTHER_DOC], chunk_id=CHUNK_1
         )
-        assert result["available"] is True
+        assert result["available"] is False
+        assert result["definition"] is None
         assert result["facts"] == [
-            FACT_DEFINITION_FROM_OTHER_DOCUMENT.format(title="Binary black holes")
+            FACT_SYMBOL_NOT_IN_THIS_DOCUMENT,
+            FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS.format(titles="『Binary black holes』"),
         ]
-        assert "scope_label" not in result
-        assert result["source"] == "Binary black holes"
 
     def test_same_paper_row_is_preferred(self):
         session = self._session()
@@ -714,8 +719,12 @@ class TestDocumentAndScopeFacts:
         )
         assert "mass-to-flux" in result["definition"]["text"]
         assert result["scope_label"] == "この節の中"
-        # 所在の残っていない定義文なので位置の事実文だけ（同じ論文なのでタイトルは足さない）。
-        assert result["facts"] == [FACT_POSITION_UNKNOWN]
+        # 所在の残っていない定義文なので位置の事実文（同じ論文なのでタイトルは足さない）。
+        # 別の論文にも同じ記号があることは題名だけ添える（定義は持ってこない・第 15 周）。
+        assert result["facts"] == [
+            FACT_POSITION_UNKNOWN,
+            FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS.format(titles="『Binary black holes』"),
+        ]
 
     def test_titles_carry_no_internal_ids(self):
         result = lookup_symbol_definition(
@@ -724,3 +733,87 @@ class TestDocumentAndScopeFacts:
         for value in result["facts"]:
             assert not contains_internal_id(value), value
             assert OTHER_DOC not in value
+
+
+# ---------------------------------------------------------------------------
+# 第 14 周: レジストリに行が無いときの式フォールバック（PDF 経路の取り逃がし）
+# ---------------------------------------------------------------------------
+
+
+class TestFormulaFallback:
+    def _session(self):
+        chunks = [
+            {
+                "id": CHUNK_1, "document_id": DOC, "chunk_index": 0, "block_ids": ["b1"],
+                "formulas": [
+                    {"label": "17", "latex": r"\mu (a) = \Sigma(a) = 1 + \alpha 2 B 2c2"},
+                    {"label": "", "latex": r"D = \alpha K + 3 \alpha B"},
+                ],
+            }
+        ]
+        return FakeSession(chunks=chunks, documents=_documents())
+
+    def test_lhs_match_reports_printed_label_without_tex(self):
+        result = lookup_symbol_definition(self._session(), symbol=r"\mu(a)", document_ids=[DOC])
+        assert result["available"] is True
+        assert result["registered"] is False
+        assert result["definition"] is None
+        assert "式 (17)" in result["facts"][0] and "左辺" in result["facts"][0]
+        assert not any("\\" in f for f in result["facts"])
+
+    def test_micro_sign_is_mu(self):
+        result = lookup_symbol_definition(self._session(), symbol="µ", document_ids=[DOC])
+        assert "式 (17)" in result["facts"][0]
+
+    def test_subscript_lost_in_pdf_is_found_as_use(self):
+        result = lookup_symbol_definition(self._session(), symbol=r"\alpha_B", document_ids=[DOC])
+        assert result["available"] is True
+        assert "の中に現れます" in result["facts"][0]
+
+    def test_no_boundary_no_hit(self):
+        result = lookup_symbol_definition(self._session(), symbol="Bx", document_ids=[DOC])
+        assert result["available"] is False
+
+
+# ---------------------------------------------------------------------------
+# 第 15 周: 表示中トピックの論文に限定する（chunk_id / equation_id が無いとき）
+# ---------------------------------------------------------------------------
+
+
+class TestTopicFocus:
+    def _session(self):
+        return FakeSession(
+            symbols=[
+                _symbol_row(OTHER_DOC, "c_s^2", texts=["c_s^2 = dP/d epsilon is the sound speed."]),
+            ],
+            chunks=_chunks(),
+            documents=[
+                {"id": DOC, "title": "Dark energy"},
+                {"id": OTHER_DOC, "title": "Neutron stars"},
+            ],
+        )
+
+    def test_topic_document_without_symbol_does_not_borrow_other_definition(self):
+        result = lookup_symbol_definition(
+            self._session(), symbol="c_s^2", document_ids=[DOC, OTHER_DOC],
+            focus_document_ids=[DOC],
+        )
+        assert result["definition"] is None
+        assert all("dP" not in f for f in result["facts"])
+        assert FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS.format(titles="『Neutron stars』") in result["facts"]
+
+    def test_topic_document_with_symbol_uses_it(self):
+        result = lookup_symbol_definition(
+            self._session(), symbol="c_s^2", document_ids=[DOC, OTHER_DOC],
+            focus_document_ids=[OTHER_DOC],
+        )
+        assert "sound speed" in result["definition"]["text"]
+        assert not any("別の論文" in f for f in result["facts"])
+
+    def test_focus_outside_course_is_ignored(self):
+        result = lookup_symbol_definition(
+            self._session(), symbol="c_s^2", document_ids=[OTHER_DOC],
+            focus_document_ids=[DOC],
+        )
+        # 焦点がコースの sources 外なら従来どおりコース全体（広げも狭めもしない）。
+        assert "sound speed" in result["definition"]["text"]

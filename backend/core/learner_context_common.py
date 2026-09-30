@@ -520,6 +520,10 @@ def project_item(
 
     label = str(item.get("label") or "")
     unresolved = bool(item.get("unresolved"))
+    # TRIAGE14: claim / equation レーン（ITEM v2）にも agent 側 ID トークンの遮断を広げる
+    # （component レーンは従来どおり呼び出し側が指定する）。
+    if not legacy_keys_only:
+        include_agent_id_tokens = True
     # EC1/EC2: レーンの相手ラベルにも生 TeX が混ざり得る（equation は式番号があれば
     # それを、無ければ一般ラベルへ）。記号だけは TeX でも遮断しない（§5.4）。
     is_symbol = element_type == ITEM_TYPE_SYMBOL
@@ -547,18 +551,58 @@ def project_item(
             "relation_status": item.get("relation_status"),
             "navigable": learner_navigable(element_type, element_id),
         }
+    navigable = learner_navigable(element_type, element_id)
+    sublabel = safe_text(item.get("sublabel"))
+    if element_type == ELEMENT_DERIVATION:
+        # W層の導出ノードの label は英語の生成文と件数（"Logical progression through
+        # 41 claims in section…"）、sublabel は操作名の全列挙になる（TRIAGE14）。
+        # 学習者には一般ラベル + 重複を畳んだ操作名（先頭から最大
+        # ``DERIVATION_OPERATION_LIMIT``）だけを出す（件数は出さない）。
+        if not _CJK_RE.search(label):
+            label = generic_item_label(element_type)
+        sublabel = _condensed_operation_line(sublabel)
     return {
-        "id": element_id,
+        # 学習者が開けない項目の内部 ID（ev_0280 / fig_6 / derivation_claim_0014）は出さない（KO10）。
+        "id": element_id if navigable or not _looks_like_internal_item_id(element_id) else None,
         "element_type": item.get("element_type"),
         "label": label,
-        "sublabel": safe_text(item.get("sublabel")),
+        "sublabel": sublabel,
         "qualifier": qualifier,
         "group": normalized_group(item.get("group")),
         "unresolved": unresolved,
         "relation_label": item.get("relation_label"),
         "relation_status": item.get("relation_status"),
-        "navigable": learner_navigable(element_type, element_id),
+        "navigable": navigable,
     }
+
+
+#: 導出ノードの操作名を学習者に並べる上限。
+DERIVATION_OPERATION_LIMIT = 4
+
+_OPERATION_PREFIX = "操作:"
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
+_ITEM_ID_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+$")
+
+
+def _condensed_operation_line(sublabel: str) -> str:
+    """「操作: a → b → a → c …」を重複なしの先頭 N 件（「操作: a → b → c」）に畳む。"""
+    text = str(sublabel or "").strip()
+    if not text:
+        return ""
+    body = text[len(_OPERATION_PREFIX):] if text.startswith(_OPERATION_PREFIX) else text
+    ops = [op.strip() for op in body.split("→") if op.strip()]
+    if len(ops) <= 1 and not text.startswith(_OPERATION_PREFIX):
+        return "" if re.search(r"[0-9]", text) else text
+    unique = list(dict.fromkeys(ops))[:DERIVATION_OPERATION_LIMIT]
+    return _OPERATION_PREFIX + " " + " → ".join(unique) if unique else ""
+
+
+def _looks_like_internal_item_id(value: Any) -> bool:
+    """ITEM の id が内部 ID 形か（UUID / ``snake_case_数字`` 形の agent ID）。"""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return bool(_UUID_LABEL_RE.match(text) or _ITEM_ID_TOKEN_RE.match(text) or contains_internal_id(text))
 
 
 def is_learner_visible_relation(item: Any) -> bool:

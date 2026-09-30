@@ -81,6 +81,13 @@ FACT_DEFINITION_FROM = "論文『{title}』の記述です。"
 #: タップした論文に定義が無く、同じコースの別の論文の定義へ倒したとき（IK-0387）。
 #: 論文をまたいで「前／後」を比べない（順序は論文の中でしか意味を持たない）ので、
 #: 位置の事実文ではなくこの1文だけを添える。
+#: 表示中の論文にこの記号の登録が無いとき（第 15 周。別の論文の定義は持ってこない）。
+FACT_SYMBOL_NOT_IN_THIS_DOCUMENT = "この論文には、この記号の登録がありません。"
+
+#: 同じ記号がコースの別の論文にもあるとき（定義は出さず、題名だけを並べる）。
+FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS = "別の論文にも同じ記号があります（{titles}）。"
+_MAX_OTHER_TITLES = 3
+
 FACT_DEFINITION_FROM_OTHER_DOCUMENT = (
     "この論文にはこの記号の定義が見つからなかったため、"
     "同じコースの論文『{title}』で最初に現れる定義を表示しています。"
@@ -218,7 +225,7 @@ _TEX_GREEK: dict[str, str] = {
     "Pi": "Π", "Sigma": "Σ", "Upsilon": "Υ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
 }
 # Unicode の異体字を基本字へ（ϵ→ε など。大文字小文字は変えない）。
-_UNICODE_VARIANTS = {"ϵ": "ε", "ϑ": "θ", "ϖ": "π", "ϱ": "ρ", "ς": "σ", "ϕ": "φ"}
+_UNICODE_VARIANTS = {"µ": "μ", "ϵ": "ε", "ϑ": "θ", "ϖ": "π", "ϱ": "ρ", "ς": "σ", "ϕ": "φ"}
 # 書体だけを変える命令（KaTeX の textContent は書体を区別しないので畳む）。
 _FONT_COMMANDS_RE = re.compile(
     r"\\(?:mathrm|rm|textrm|text|mathit|it|mathcal|mathbb|mathbf|bf|boldsymbol|bm|operatorname)(?![A-Za-z])"
@@ -430,6 +437,56 @@ def _entry_type_label(entry_type: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_focus_documents(
+    session: Any,
+    doc_ids: list[str],
+    *,
+    chunk_id: str,
+    focus_document_ids: Any,
+) -> list[str]:
+    """「この論文」の集合: タップ位置のチャンクの論文 → 表示中トピックの論文。
+
+    どちらもコースの sources（``doc_ids``）との積だけを採る（広げない）。空なら
+    従来どおりコース全体（呼び出し側の後方互換）。
+    """
+    allowed = set(doc_ids)
+    if chunk_id and is_uuid(chunk_id):
+        try:
+            row = (
+                session.execute(
+                    sa_text(
+                        """
+                        SELECT document_id::text AS document_id
+                          FROM chunks
+                         WHERE id = CAST(:chunk_id AS uuid)
+                           AND document_id = ANY(CAST(:doc_ids AS uuid[]))
+                        """
+                    ),
+                    {"chunk_id": chunk_id, "doc_ids": doc_ids},
+                )
+                .mappings()
+                .fetchone()
+            )
+        except Exception:  # noqa: BLE001 - fail-soft（トピックの論文へ）
+            logger.debug("symbol_lookup: chunk document unavailable", exc_info=True)
+            row = None
+        chunk_document_id = str((row or {}).get("document_id") or "")
+        if chunk_document_id in allowed:
+            return [chunk_document_id]
+    return sorted(set(_uuid_only(focus_document_ids)) & allowed)
+
+
+def _other_documents_fact(titles: dict[str, str], other_docs: list[str]) -> str:
+    names = [
+        f"『{_clean(titles.get(d, ''), limit=80)}』"
+        for d in other_docs
+        if _clean(titles.get(d, ""), limit=80)
+    ][:_MAX_OTHER_TITLES]
+    if not names:
+        return ""
+    return FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS.format(titles="・".join(names))
+
+
 def _definition_candidates(
     symbol_row: dict,
     *,
@@ -592,8 +649,15 @@ def lookup_symbol_definition(
     document_ids: list[str] | set[str] | None,
     equation_id: str | None = None,
     chunk_id: str | None = None,
+    focus_document_ids: list[str] | set[str] | None = None,
 ) -> dict:
     """記号の「直前の定義」を返す（LLM 0 回・既存データのみ）。
+
+    ``focus_document_ids``（第 15 周）: 表示中トピックが束ねる論文。タップ位置の
+    チャンクが解ければその論文、無ければこの集合を「この論文」とみなし、定義は
+    **その中からだけ**引く。コースの別の論文に同じ記号があっても定義は持ってこず、
+    「別の論文にも同じ記号があります（題名列挙）」の事実文に留める（記号は論文ごとに
+    意味が違う — 暗黒エネルギー論文の ``c_s^2`` に中性子星論文の定義を出さない）。
 
     Args:
         session: 呼び出し側が開閉する DB セッション。
@@ -627,10 +691,40 @@ def lookup_symbol_definition(
     if not wanted:
         return _unavailable(FACT_SYMBOL_NOT_REGISTERED)
 
-    symbol_rows = [
+    focus = _resolve_focus_documents(
+        session, doc_ids, chunk_id=str(chunk_id or "").strip(), focus_document_ids=focus_document_ids
+    )
+    all_symbol_rows = [
         row for row in _load_symbol_rows(session, doc_ids) if _symbol_matches(row, wanted)
-    ][:_MAX_SYMBOL_ROWS]
+    ]
+    other_fact = ""
+    if focus:
+        other_docs = sorted(
+            {str(r.get("document_id") or "") for r in all_symbol_rows} - set(focus)
+        )
+        if other_docs:
+            other_fact = _other_documents_fact(_load_document_titles(session, other_docs), other_docs)
+        all_symbol_rows = [r for r in all_symbol_rows if str(r.get("document_id") or "") in focus]
+        search_doc_ids = sorted(focus)
+    else:
+        search_doc_ids = doc_ids
+    symbol_rows = all_symbol_rows[:_MAX_SYMBOL_ROWS]
     if not symbol_rows:
+        if focus:
+            fallback = _formula_fallback(
+                session, search_doc_ids, symbol=symbol, display_symbol=display_symbol
+            )
+            if fallback is None:
+                fallback = _unavailable(FACT_SYMBOL_NOT_IN_THIS_DOCUMENT)
+            if other_fact:
+                fallback["facts"] = list(fallback.get("facts") or []) + [other_fact]
+            return fallback
+        # IK（第 14 周）: PDF 経路では symbol_registry が式の断片化で主記号を取り逃がす
+        # （A層の欠落・非改変）。配信済みの式（chunks.formulas）から、この記号が
+        # **左辺に立つ式**と**現れる式**を印字番号で示す決定論フォールバック。
+        fallback = _formula_fallback(session, doc_ids, symbol=symbol, display_symbol=display_symbol)
+        if fallback is not None:
+            return fallback
         return _unavailable(FACT_SYMBOL_NOT_REGISTERED)
 
     block_order = _load_block_order(session, doc_ids)
@@ -640,7 +734,8 @@ def lookup_symbol_definition(
         equation_id=str(equation_id or "").strip(),
         chunk_id=str(chunk_id or "").strip(),
         session=session,
-        document_ids=doc_ids,
+        # 式 ID は印字番号由来で論文をまたいで衝突する（``eq_5``）— 焦点の論文の中で引く。
+        document_ids=search_doc_ids,
         equations=equations,
         block_order=block_order,
     )
@@ -661,7 +756,9 @@ def lookup_symbol_definition(
         candidates = _definition_candidates(
             row, equations=equations, evidence=evidence, block_order=block_order
         )
-        same_document = bool(tap_document_id) and row_document_id == tap_document_id
+        same_document = (bool(tap_document_id) and row_document_id == tap_document_id) or (
+            bool(focus) and not tap_document_id and len(focus) == 1
+        )
         if tap_document_id and not same_document:
             # 別の論文の定義へ倒す: 論文をまたいで「前／後」は比べない（IK-0387）。
             chosen, _ = _choose_definition(candidates, None)
@@ -671,11 +768,13 @@ def lookup_symbol_definition(
         if chosen is None:
             continue
         extra: list[str] = []
-        if not tap_document_id:
+        if not tap_document_id and not (focus and len(focus) == 1):
             # どの論文の記述かが画面から分からない（タップ位置なし）ので出所を添える。
             source_fact = _title_fact(FACT_DEFINITION_FROM, titles.get(row_document_id, ""))
             if source_fact:
                 extra.append(source_fact)
+        if other_fact:
+            extra.append(other_fact)
         return _build_result(
             session,
             row,
@@ -696,9 +795,143 @@ def lookup_symbol_definition(
         fact=FACT_NO_DEFINITION,
         titles=titles,
         display_symbol=display_symbol,
+        extra_facts=[other_fact] if other_fact else None,
         relative_scope_ok=bool(tap_document_id)
         and str(row.get("document_id") or "") == tap_document_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# 記号レジストリに行が無いときのフォールバック（配信済みの式から・決定論）
+# ---------------------------------------------------------------------------
+
+#: 登録は無いが、この記号を左辺に持つ式が見つかったとき（生 TeX は出さず印字番号だけ）。
+FACT_FORMULA_DEFINES = (
+    "記号の登録はありませんが、この記号は{where}の左辺に現れます"
+    "（定義の式である可能性があります）。"
+)
+#: 登録は無いが、この記号を含む式が見つかったとき。
+FACT_FORMULA_USES = "記号の登録はありませんが、この記号は{where}の中に現れます。"
+#: フォールバックの出所（式の読み取りが PDF からの復元であることを隠さない）。
+FACT_FORMULA_FALLBACK_NOTE = (
+    "記号の対応はシステムが式の表記から機械的に照合したもので、"
+    "PDF からの式の読み取りには崩れが含まれることがあります。"
+)
+_MAX_FALLBACK_LABELS = 3
+_ARGUMENT_TAIL_RE = re.compile(r"\([^()]*\)$")
+_LATIN_RE = re.compile(r"[A-Za-z]")
+
+
+def _loose_symbol_key(value: Any) -> str:
+    """PDF 復元式で添字記号が落ちる（``\\alpha_B`` → ``\\alpha B``）ことを吸収するキー。
+
+    :func:`symbol_key` の後で ``_`` / ``^`` を除くだけ（大文字小文字は保つ）。
+    フォールバック専用で、レジストリ照合（完全一致）には使わない。
+    """
+    return symbol_key(value).replace("_", "").replace("^", "")
+
+
+def _strip_argument(key: str) -> str:
+    return _ARGUMENT_TAIL_RE.sub("", key)
+
+
+def _contains_symbol(haystack: str, needle: str) -> bool:
+    """語境界付きの包含（前後が英字でないこと）。部分文字列一致の F-7 を避ける。"""
+    start = 0
+    while needle:
+        idx = haystack.find(needle, start)
+        if idx < 0:
+            return False
+        before = haystack[idx - 1] if idx > 0 else ""
+        after = haystack[idx + len(needle)] if idx + len(needle) < len(haystack) else ""
+        if not _LATIN_RE.match(before or " ") and not _LATIN_RE.match(after or " "):
+            return True
+        start = idx + 1
+    return False
+
+
+def _where_text(labels: list[str], unlabeled: bool) -> str:
+    parts = [f"式 ({label})" for label in labels[:_MAX_FALLBACK_LABELS]]
+    if unlabeled and len(parts) < _MAX_FALLBACK_LABELS:
+        parts.append("番号の無い式")
+    return "・".join(parts)
+
+
+def _formula_fallback(
+    session: Any, document_ids: list[str], *, symbol: str, display_symbol: str
+) -> Optional[dict]:
+    wanted = _loose_symbol_key(symbol)
+    wanted_bare = _strip_argument(wanted)
+    if not wanted_bare:
+        return None
+    try:
+        rows = (
+            session.execute(
+                sa_text(
+                    """
+                    SELECT document_id::text AS document_id, chunk_index, formulas
+                      FROM chunks
+                     WHERE document_id = ANY(CAST(:doc_ids AS uuid[]))
+                     ORDER BY document_id, chunk_index
+                    """
+                ),
+                {"doc_ids": document_ids},
+            )
+            .mappings()
+            .fetchall()
+        )
+    except Exception:  # noqa: BLE001 - fail-soft（登録なしの事実文へ落とす）
+        logger.debug("symbol formula fallback failed", exc_info=True)
+        return None
+
+    defines: dict[str, dict] = {}
+    uses: dict[str, dict] = {}
+    for row in rows or []:
+        document_id = str(row.get("document_id") or "")
+        for formula in _as_list(row.get("formulas")):
+            if not isinstance(formula, dict):
+                continue
+            latex = str(formula.get("latex") or "")
+            if not latex.strip():
+                continue
+            label = _clean(formula.get("label"), limit=12)
+            lhs = latex.split("=", 1)[0] if "=" in latex else ""
+            lhs_key = _strip_argument(_loose_symbol_key(lhs))
+            bucket = None
+            if lhs_key and lhs_key == wanted_bare:
+                bucket = defines
+            elif len(wanted_bare) >= 2 and _contains_symbol(_loose_symbol_key(latex), wanted_bare):
+                bucket = uses
+            if bucket is None:
+                continue
+            entry = bucket.setdefault(document_id, {"labels": [], "unlabeled": False})
+            if label:
+                if label not in entry["labels"]:
+                    entry["labels"].append(label)
+            else:
+                entry["unlabeled"] = True
+
+    chosen_bucket, template = (defines, FACT_FORMULA_DEFINES) if defines else (uses, FACT_FORMULA_USES)
+    if not chosen_bucket:
+        return None
+    # 印字番号のある論文を優先（決定論: 番号あり → document_id 順）。
+    document_id = sorted(chosen_bucket, key=lambda d: (0 if chosen_bucket[d]["labels"] else 1, d))[0]
+    entry = chosen_bucket[document_id]
+    titles = _load_document_titles(session, document_ids)
+    facts = [template.format(where=_where_text(entry["labels"], entry["unlabeled"]))]
+    source_fact = _title_fact(FACT_DEFINITION_FROM, titles.get(document_id, ""))
+    if source_fact:
+        facts.append(source_fact)
+    facts.append(FACT_FORMULA_FALLBACK_NOTE)
+    return {
+        "available": True,
+        "symbol": display_symbol,
+        "definition": None,
+        "facts": facts,
+        "source": titles.get(document_id, ""),
+        "concept_ref": None,
+        "registered": False,
+    }
 
 
 def _title_fact(template: str, title: str) -> str:

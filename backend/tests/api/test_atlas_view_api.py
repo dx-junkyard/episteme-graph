@@ -459,11 +459,16 @@ class TestGetAtlas:
     def test_relation_threads_key_is_absent_without_the_edges_layer(
         self, client, warm_cache
     ):
-        """推定の糸 (RE層 §6) は導出できないときキー自体を付けない (RE2 の fail-closed)。"""
+        """推定の糸 (RE層 §6) は導出できないとき items を持たず、理由の事実文だけを返す
+        (RE2: フロントは available !== true でレイヤーを出さない。第 14 周で note を追加)。"""
         data = client.get(
             "/api/atlas?cartridge=particle_physics", headers=_headers()
         ).json()
-        assert "threads" not in data
+        threads = data.get("threads")
+        if threads is not None:
+            assert threads["available"] is False
+            assert set(threads) == {"available", "note"}
+            assert threads["note"]
 
     def test_relation_threads_are_merged_when_available(
         self, client, warm_cache, monkeypatch

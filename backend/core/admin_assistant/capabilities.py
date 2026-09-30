@@ -940,6 +940,27 @@ _REGISTRY: list[Capability] = [
                   precondition="material_menu_open"),
         ),
     ),
+    # --- 図を深く検討する（W層・materials。第 14 周: 分類確認と別の入口が無かった） ---
+    Capability(
+        id="materials.deliberate_figure",
+        screen="materials",
+        title="図を深く検討する（要素検討モーダル）",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#deliberate-figure",
+        description="教材の図を1つ選び、内訳・文脈を確かめながら AI と対話する要素検討モーダルを開く。"
+                    "対話の解釈は候補のまま（確定は教員）。",
+        api={"method": "POST", "path": "/api/admin/deliberation/sessions"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材を選びます"),
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
+                  precondition="material_selected"),
+            _step("materials", "material_figures_button", "「図・画像」を押して図モーダルを開きます",
+                  precondition="material_menu_open"),
+            _step("materials", "figure_deliberate_button", "検討したい図の「深く検討」を押します",
+                  precondition="figures_modal_open"),
+        ),
+    ),
     # discuss_opening_authoring_design.md §6.2: 開幕素材（議論のきっかけ）のレビュー。
     # キューは教材管理タブの「検出要素」→「説明レビュー」にあるため screen は materials。
     # v1 は道案内のみ（承認・編集は既存 element-explanations API を UI から行う）。

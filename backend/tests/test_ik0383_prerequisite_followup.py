@@ -103,6 +103,13 @@ def chat_env(monkeypatch):
         return {"message": _gate_text(), "first_prerequisite": PREREQ, "unlearned": [PREREQ]}
 
     monkeypatch.setattr(learning_mod, "check_prerequisites", _gate)
+    presented: set[str] = set()
+    monkeypatch.setattr(
+        learning_mod, "get_prerequisite_gate_presented", lambda uid, cid, tid: tid in presented
+    )
+    monkeypatch.setattr(
+        learning_mod, "record_prerequisite_gate_presented", lambda uid, cid, tid: presented.add(tid)
+    )
     prompts: list[str] = []
 
     def _generate_text(**kwargs):
@@ -112,7 +119,10 @@ def chat_env(monkeypatch):
     monkeypatch.setattr(learning_mod, "generate_text", _generate_text)
     persist_mock = MagicMock(return_value={"user_message_id": "msg-1"})
     monkeypatch.setattr(learning_mod, "persist_chat_history", persist_mock)
-    return SimpleNamespace(gate_calls=gate_calls, prompts=prompts, trace_mock=trace_mock)
+    return SimpleNamespace(
+        gate_calls=gate_calls, prompts=prompts, trace_mock=trace_mock,
+        presented=presented, persist_mock=persist_mock,
+    )
 
 
 def _chat(message: str, history=None, **extra):

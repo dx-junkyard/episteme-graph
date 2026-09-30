@@ -970,3 +970,25 @@ class TestSharedPartCandidates:
         assert "見つかりません" in body["note"]
         assert "ラベルL" in captured["text"]
         assert "本文T" in captured["text"]
+
+
+class TestAggregatedMainNodeSession:
+    """第 14 周: 主グラフの集約ノードでセッションを開こうとしたら、開き方を事実文で返す。"""
+
+    def test_main_node_id_returns_fact(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+        from core.deliberation.refs import ElementResolutionError
+
+        def _raise(*a, **k):
+            raise ElementResolutionError("no row", kind="not_found")
+
+        monkeypatch.setattr(route_mod.refs, "resolve_with_agent_id", _raise)
+        response = client.post(
+            "/api/admin/deliberation/sessions",
+            json={"scope": "document", "element_type": "theory_component",
+                  "element_id": "theory_op_0005", "document_id": "d1"},
+            headers=_auth(teacher),
+        )
+        assert response.status_code == 404
+        assert response.json()["detail"] == route_mod.FACT_AGGREGATED_MAIN_NODE

@@ -523,3 +523,33 @@ class TestEndToEnd:
     def test_empty_sources_render_to_an_empty_block(self):
         ctx = normalize_screen_context({"screen": "graph_review", "selection": {}, "view": {}})
         assert render_block(resolve(ctx, {})) == ""
+
+
+class TestDocumentGraphNodeLocations:
+    """第 14 周: グラフ全体対話で主グラフのノードごとの章・式番号を渡す。"""
+
+    def test_main_node_location_fact(self):
+        from core.assistant_context.resolvers import graph_review as gr
+        from core.assistant_context.schema import normalize_screen_context
+
+        dto = {
+            "available": True,
+            "facts": [],
+            "nodes": {
+                "theory_op_0001": {
+                    "graph_layer": "main",
+                    "label": "Theory basis",
+                    "sections": [{"title": "2. METHODS"}, {"title": "z"}],
+                    "equations": [{"display_label": "式 (3)"}, {"display_label": "番号なし: x"}],
+                },
+                "theory_op_0002": {"graph_layer": "main", "label": "Elimination", "sections": [], "equations": []},
+            },
+            "paper": {"sections": []},
+        }
+        ctx = normalize_screen_context({"screen": "graph_review", "selection": {"document_id": "d"}})
+        facts = gr.resolve_document_graph(ctx, {"paper_layer": dto})
+        joined = "\n".join(facts)
+        assert "ノード「Theory basis」の論文での所在: 章 「2. METHODS」、式 (3)" in joined
+        assert "「z」" not in joined
+        assert "theory_op_" not in joined
+        assert gr.FACT_MAIN_NODE_NO_LOCATION in joined

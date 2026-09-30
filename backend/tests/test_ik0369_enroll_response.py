@@ -75,3 +75,19 @@ def test_enroll_response_states_success_explicitly(monkeypatch):
                 "visibility", "group_id", "description"):
         assert key in dumped
     assert out.is_enrollable is False
+
+
+
+def test_enroll_already_enrolled_notice(monkeypatch):
+    """TRIAGE14: 既に受講中（新しい行が作られなかった）なら「受講を開始しました」と言わない。"""
+    from core import label_vocab
+
+    monkeypatch.setattr(
+        learning_routes, "_pg_session",
+        lambda: _session_with(("宇宙物理入門", "public", None, True, True, "")),
+    )
+    monkeypatch.setattr(learning_routes, "enroll_user_in_course", lambda u, c: False)
+    out = learning_routes.enroll_course("c-1", current_user={"id": "u-1"})
+    assert out.enrolled is True
+    assert out.notice == label_vocab.COURSE_ALREADY_ENROLLED_NOTICE
+    assert out.notice != label_vocab.COURSE_ENROLLED_NOTICE

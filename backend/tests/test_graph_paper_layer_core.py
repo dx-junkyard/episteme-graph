@@ -1012,3 +1012,26 @@ class TestExtraFacts:
         assert out["available"] is False
         assert pl_schema.FACT_NO_GRAPH in out["facts"]
         assert pl_schema.FACT_NO_STORED_GRAPH in out["facts"]
+
+
+class TestHeadingMisdetection:
+    """第 14 周: 見出しの誤認（式・1 語・テンプレート文）を章として立てない（中身は直前の章へ畳む）。"""
+
+    def test_misdetected_headings_are_folded(self):
+        import copy
+        from core.graph_paper_layer.builder import UNTITLED_FRONT_SECTION_LABEL
+
+        artifacts = copy.deepcopy(_full_artifacts())
+        artifacts["document_structure"]["sections"] = [
+            {"section_id": "s0", "title": "Draft version June 2, 2026\nTypeset using LATEX", "level": 1, "order": 0},
+            {"section_id": "s1", "title": "Introduction", "level": 1, "order": 1},
+            {"section_id": "s1z", "title": "z", "level": 1, "order": 2},
+            {"section_id": "s2", "title": "Method", "level": 1, "order": 3},
+            {"section_id": "s2r", "title": "RSFR(z)/RSFR,0", "level": 1, "order": 4},
+        ]
+        out = build_paper_layer(_graph([_node("theory_op_0001")]), artifacts)
+        titles = [s["title"] for s in out["paper"]["sections"]]
+        assert titles == [UNTITLED_FRONT_SECTION_LABEL, "Introduction", "Method"]
+        by_id = {s["section_id"]: s for s in out["paper"]["sections"]}
+        assert by_id["s1"]["folded_section_ids"] == ["s1z"]
+        assert by_id["s2"]["folded_section_ids"] == ["s2r"]

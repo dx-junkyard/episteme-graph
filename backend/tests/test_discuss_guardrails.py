@@ -91,12 +91,16 @@ class TestSingleFilteredSearchFeedsCitedSources:
         assert "search_chunks_with_metadata(" not in between
         # 2つ目は _carry_previous_cited_sources の結果だけを回し、可視集合を差し替えない。
         second_idx = body.index("cited_sources.append(", append_idx + 1)
+        # 第 15 周: 直前の引用は検索の前に id 指定で読み出す（議論中の論文の優先に使う）。
         carry_idx = body.index("_carry_previous_cited_sources(")
-        assert append_idx < carry_idx < second_idx
-        carry_call = body[carry_idx:second_idx]
+        search_idx = body.index("search_chunks_with_metadata(")
+        assert carry_idx < search_idx
+        carry_call = body[carry_idx:search_idx]
         assert "allowed_document_ids=allowed_document_ids" in carry_call
-        assert "for r in _carried:" in carry_call
         assert "list_visible_document_ids" not in carry_call
+        loop_idx = body.index("for r in _carried:")
+        assert append_idx < loop_idx < second_idx
+        assert "_previous_cited_rows" in body[append_idx:loop_idx]
 
     def test_no_second_search_or_scope_widening_after_initial_call(self):
         """最初の（唯一の）検索呼び出しより後ろに、2回目の検索呼び出しや

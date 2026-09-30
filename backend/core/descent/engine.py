@@ -109,6 +109,13 @@ _STAGE_DESCRIPTION_LIMIT = 160
 # 出典リビールの事実文（素材ゼロを隠さない — 空は沈黙ではない）。
 REVEAL_NOTE_WITH_ITEMS = "出典の導出チェーンの記述を逐語で示しています。"
 REVEAL_NOTE_EMPTY = "この要素に対応する導出ステップは出典から同定できていません。"
+# 空になった理由（第 14 周: 「同定できていません」で終わらせない）。
+REVEAL_REASON_NO_EQUATION_LINK = (
+    "この要素は解析で式に結び付いていないため、式をたどる導出ステップを探せませんでした。"
+)
+REVEAL_REASON_NO_STEP = (
+    "式には結び付いていますが、その式を含む導出ステップが解析結果にありません。"
+)
 
 # graph_layer の語彙（component_graph/schema.py と同じ3層）。
 _GRAPH_LAYER_MAIN = "main"
@@ -330,11 +337,14 @@ def _reveal_rung(
                         ],
                     }
                 )
-    return {
+    reveal: dict[str, Any] = {
         "kind": "reveal",
         "items": items,
         "note": REVEAL_NOTE_WITH_ITEMS if items else REVEAL_NOTE_EMPTY,
     }
+    if not items:
+        reveal["reason"] = REVEAL_REASON_NO_STEP if eq_set else REVEAL_REASON_NO_EQUATION_LINK
+    return reveal
 
 
 def compose_ladder(
@@ -344,6 +354,7 @@ def compose_ladder(
     stage_description: str,
     symbol_items: list[dict[str, Any]],
     reveal: dict[str, Any],
+    target_label: str = "",
 ) -> dict[str, Any]:
     """素材から梯子を決定論的に組む純粋関数（テスト可能な合成部）。
 
@@ -362,7 +373,11 @@ def compose_ladder(
     if symbol_items:
         rungs.append({"kind": "symbols", "items": symbol_items})
     rungs.append(reveal)
-    return {"available": True, "rungs": rungs}
+    result: dict[str, Any] = {"available": True, "rungs": rungs}
+    if target_label:
+        # どの要素の段かを示す（主張本文 80 字 / 部品名 / 式の印字番号。内部 ID は入れない）。
+        result["target_label"] = target_label
+    return result
 
 
 def build_ladder(
@@ -397,6 +412,7 @@ def build_ladder(
         stage_description=stage_description,
         symbol_items=symbol_items,
         reveal=reveal,
+        target_label=resolved.label,
     )
 
 

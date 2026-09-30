@@ -120,6 +120,62 @@ def _derive_course_id(session, document_id: str) -> str:
     return ""
 
 
+class _ReadableLabels:
+    """ブリーフの事実文から内部 ID を外すための読み時辞書（第 15 周 te-05 seq29）。
+
+    式 ID は ``equation_semantics`` の記録から「式 (N)」/「番号なしの式（左辺 X）」に、
+    グラフノード ID は依存グラフのノード表示名に、それ以外は「（本文を特定できない要素）」に
+    置き換える。取得失敗は fail-soft（置換語だけで ID は出さない）。
+    """
+
+    def __init__(self, session, document_id: str, course_id: str = "") -> None:
+        self.equation_records: dict = {}
+        self.node_labels: dict[str, str] = {}
+        try:
+            from core.document_pipeline.persistence import document_run_artifacts
+
+            artifacts = document_run_artifacts(document_id) or {}
+            payload = artifacts.get("equation_semantics")
+            payload = payload if isinstance(payload, dict) else {}
+            for record in payload.get("records") or payload.get("equations") or []:
+                if isinstance(record, dict) and record.get("equation_id"):
+                    self.equation_records.setdefault(str(record["equation_id"]), record)
+        except Exception:  # noqa: BLE001
+            logger.debug("seminar brief equation records unavailable for %s", document_id, exc_info=True)
+        try:
+            from core.doubt.dependency import build_dependency_graph
+
+            graph = build_dependency_graph(session, course_id=course_id, document_id=document_id)
+            self.node_labels = dict(graph.node_labels)
+        except Exception:  # noqa: BLE001
+            logger.debug("seminar brief node labels unavailable for %s", document_id, exc_info=True)
+
+    def text(self, value: Any) -> str:
+        from core.theory_modules.schema import (
+            UNIDENTIFIED_ELEMENT_TEXT,
+            contains_internal_id,
+            mask_internal_ids_readable,
+        )
+
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        node_label = self.node_labels.get(raw)
+        if node_label and node_label != raw:
+            raw = node_label
+        if raw in self.equation_records or not contains_internal_id(raw):
+            return mask_internal_ids_readable(raw, self.equation_records)
+        masked = mask_internal_ids_readable(raw, self.equation_records)
+        return masked or UNIDENTIFIED_ELEMENT_TEXT
+
+
+def _readable_items(items: list[dict], labels: "_ReadableLabels", keys: tuple[str, ...]) -> None:
+    for item in items:
+        for key in keys:
+            if key in item:
+                item[key] = labels.text(item.get(key))
+
+
 def _project_fragile_item(item: dict) -> dict:
     """区画①の1件をホワイトリスト投影する（SB2）。
 
@@ -247,6 +303,33 @@ def _clear_skies(assumption_items: list[dict]) -> list[dict]:
     return out
 
 
+REASON_NO_LEDGER = (
+    "この教材には、前提や主張の検証状態を記す台帳の行がまだ作られていないため、"
+    "ブリーフを合成できません。台帳は解析の最後に作られます。解析が完了しているのに"
+    "この表示が続く場合は、教材行の「パイプラインを実行」から再実行すると作られます。"
+)
+
+
+def _ledger_course_for_document(session, document_id: str) -> tuple[bool, str]:
+    """台帳にこの document の行があるか・あればその course_id（空でもよい）。"""
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT DISTINCT course_id
+                FROM epistemic_ledger
+                WHERE document_id = CAST(NULLIF(:doc, '') AS uuid)
+                ORDER BY course_id DESC
+            """),
+            {"doc": document_id},
+        ).fetchall()
+    except Exception:
+        logger.warning("seminar brief ledger course lookup failed for %s", document_id, exc_info=True)
+        return False, ""
+    if not rows:
+        return False, ""
+    return True, str(rows[0][0] or "")
+
+
 def build_seminar_brief(session, document_ref: str) -> dict:
     """ゼミ前ブリーフを読み時合成する（書き込みなし・LLM 0回）。
 
@@ -261,14 +344,17 @@ def build_seminar_brief(session, document_ref: str) -> dict:
         }
     course_id = _derive_course_id(session, document_id)
     if not course_id:
-        return {
-            "available": False,
-            "document_id": document_id,
-            "reason": (
-                "この文献にはまだ解析グラフ由来のコース対応が無いため、"
-                "ブリーフを合成できません。解析パイプラインの完了後にもう一度お試しください。"
-            ),
-        }
+        # パイプライン由来の解析グラフはコースに依らない（course_id が空）。台帳もその
+        # document の行を course_id='' で持つので、コース対応が無いことを「解析未完了」と
+        # 言わず、台帳の有無で判定する（第 14 周 brain-te03 / te-05 seq20 の食い違い）。
+        has_ledger, ledger_course = _ledger_course_for_document(session, document_id)
+        if not has_ledger:
+            return {
+                "available": False,
+                "document_id": document_id,
+                "reason": REASON_NO_LEDGER,
+            }
+        course_id = ledger_course
 
     # 区画①の投影元（教員向けブリーフだが疑義者名は載せない — include_challenger_names=False 固定）
     assumption_items = compile_open_assumptions(
@@ -277,6 +363,13 @@ def build_seminar_brief(session, document_ref: str) -> dict:
     fragile = [_project_fragile_item(i) for i in assumption_items[:_MAX_FRAGILE_ASSUMPTIONS]]
     _attach_stumble_axes(document_id, fragile)
 
+    labels = _ReadableLabels(session, document_id, course_id)
+    single_lines = _single_support_lines(session, course_id, document_id)
+    skies = _clear_skies(assumption_items)
+    _readable_items(fragile, labels, ("statement",))
+    _readable_items(single_lines, labels, ("statement", "fact_line"))
+    _readable_items(skies, labels, ("statement",))
+
     brief = {
         "available": True,
         "document_id": document_id,
@@ -284,9 +377,9 @@ def build_seminar_brief(session, document_ref: str) -> dict:
         # ① 脆い前提（未検証 × 下流影響「高」— 段階ラベルのみ）
         "fragile_assumptions": fragile,
         # ② 一点吊りの支持線（level=single の事実文）
-        "single_support_lines": _single_support_lines(session, course_id, document_id),
+        "single_support_lines": single_lines,
         # ③ 晴れ間（閉世界の固定事実文）
-        "clear_skies": _clear_skies(assumption_items),
+        "clear_skies": skies,
         # ④ 学習者からの問い — v1 は空欄で予約（SB3）
         "learner_handoff": {"reserved": True, "note": LEARNER_HANDOFF_RESERVED_NOTE},
     }

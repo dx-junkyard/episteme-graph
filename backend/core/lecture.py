@@ -370,6 +370,27 @@ def _fallback_spoken_text(chunk_text: str) -> dict:
 _PLACEHOLDER_RE = re.compile(r"\[\[FORMULA_\d+\]\]")
 
 
+_BROKEN_LATEX_CHARS = frozenset("\ufffd")
+
+
+def is_broken_reconstructed_latex(latex: object) -> bool:
+    """AI 復元の LaTeX が表示に耐えない壊れ方をしているか（決定論・TRIAGE14）。
+
+    置換文字（U+FFFD）・C0 制御文字を含む / 数式本体が空で ``\\tag{..}`` や句読点の
+    断片だけ、を壊れているとみなす。判断に迷うものは壊れていない側に倒す（情報を落とさない）。
+    """
+    text = str(latex or "")
+    if not text.strip():
+        return True
+    if any(ch in _BROKEN_LATEX_CHARS for ch in text):
+        return True
+    if any(ord(ch) < 32 and ch not in "\n\t\r" for ch in text):
+        return True
+    body = re.sub(r"\\tag\*?\{[^}]*\}", "", text)
+    body = re.sub(r"[\s;,.:]", "", body)
+    return not body
+
+
 def annotate_reconstructed_formulas(formulas: list[dict]) -> list[dict]:
     """復元由来（``reconstructed``）の式に、サーバ文言の印と事実文を載せる。
 
@@ -385,6 +406,10 @@ def annotate_reconstructed_formulas(formulas: list[dict]) -> list[dict]:
             annotated = dict(formula)
             annotated.setdefault("reconstructed_mark", RECONSTRUCTED_EQUATION_MARK)
             annotated.setdefault("reconstructed_note", RECONSTRUCTED_EQUATION_NOTE)
+            # 壊れた復元は式として描かせない（事実文 reconstructed_note だけを残す）。
+            if is_broken_reconstructed_latex(annotated.get("latex")):
+                annotated["latex"] = ""
+                annotated["latex_withheld"] = True
             out.append(annotated)
         else:
             out.append(formula)

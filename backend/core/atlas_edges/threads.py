@@ -158,7 +158,42 @@ def threads_for_domain(session: Any, domain_key: str) -> dict:
         return {"available": False}
 
 
+# 糸が出ない理由の事実文（第 14 周。数値なし・学習者向け。RE 設計書 §11.x）。
+NOTE_NO_FROZEN_SKELETON = "この分野の地図は、まだ公開された版がないため、推定の糸を表示できません。"
+NOTE_VECTORS_NOT_BUILT = (
+    "この分野の地図の版（版 {version}）では、概念どうしの近さの索引がまだ作られていないため、"
+    "推定の糸を表示できません。"
+)
+NOTE_NO_CANDIDATES = (
+    "この分野の地図の版（版 {version}）では、推定の糸として示せる概念の組がありません。"
+)
+NOTE_UNKNOWN = "推定の糸を、いまは表示できません。"
+
+
+def threads_unavailable_note(session: Any, domain_key: str) -> str:
+    """糸が ``available: False`` になった理由を1文で返す（例外は送出しない）。"""
+    domain = _clean(domain_key)
+    if not domain:
+        return NOTE_NO_FROZEN_SKELETON
+    try:
+        from core import atlas_store
+        from core.atlas_vectors import builder
+
+        skeleton = atlas_store.load_frozen_skeleton(session, domain)
+        version = _clean(getattr(skeleton, "version", "")) if skeleton is not None else ""
+        if not version:
+            return NOTE_NO_FROZEN_SKELETON
+        anchors, anchor_version = builder.anchors_with_labels(session, domain, version)
+        if not anchors or _clean(anchor_version) != version:
+            return NOTE_VECTORS_NOT_BUILT.format(version=version)
+        return NOTE_NO_CANDIDATES.format(version=version)
+    except Exception:  # noqa: BLE001 — 理由文も付加物（fail-soft）
+        logger.debug("atlas_edges: failed to explain missing threads", exc_info=True)
+        return NOTE_UNKNOWN
+
+
 __all__ = [
     "reset_cache",
     "threads_for_domain",
+    "threads_unavailable_note",
 ]

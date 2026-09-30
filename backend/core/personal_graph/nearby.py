@@ -153,6 +153,13 @@ FACT_RANGE_COURSE_FALLBACK = (
     "かわりに、このコースのソース論文の理論構成を表示しています。"
 )
 
+#: 範囲表示の対象になり得たコース sources の論文のうち、理論構成のグラフがまだ無いもの
+#: （第 14 周: 聞いた論文が黙って欠けて見えないようにする。タイトルのみ・件数なし）。
+_FACT_RANGE_NO_GRAPH_TEMPLATE = (
+    "論文『{title}』は、理論構成のグラフがまだ作られていないため、ここには表示していません。"
+)
+_MAX_NO_GRAPH_FACTS = 3
+
 #: 装置2（共通部品の糸）の事実文テンプレート。
 _SHARED_PART_FACT_TEMPLATE = "共通部品『{name}』は、論文『{title}』にも現れます。"
 
@@ -738,6 +745,7 @@ def build_topic_range(
     atlas_concept_context: dict | None = None,
     fallback_fact: str = "",
     claim_summaries: dict[str, dict] | None = None,
+    missing_graph_titles: list[str] | None = None,
 ) -> dict:
     """範囲モード（topic アンカーの事実ベース粗表示）の DTO を組み立てる（純関数）。
 
@@ -815,6 +823,8 @@ def build_topic_range(
         facts.append("このトピックの教材が触れている理論構成：" + _enumerate(ordered_labels))
     if not fallback_fact:
         facts.append(FACT_RANGE_UNKNOWN_POINT)
+    for title in [t for t in (missing_graph_titles or []) if t][:_MAX_NO_GRAPH_FACTS]:
+        facts.append(_FACT_RANGE_NO_GRAPH_TEMPLATE.format(title=title))
     if verification_suppressed:
         facts.append(FACT_NO_VERIFICATION_RECORDS)
     facts.append(FACT_RANGE_SHARPEN)
@@ -1067,14 +1077,19 @@ def _nearby_for_topic_anchor(
         )
 
     fallback_fact = ""
+    missing_graph_ids: list[str] = [d for d in document_ids if d not in doc_to_claims or not any(
+        doc["document_id"] == d for doc in documents
+    )]
     if not documents:
         # コース範囲フォールバック: touched は立てず、粗いことを事実文で明示する。
         fallback_fact = FACT_RANGE_COURSE_FALLBACK
+        missing_graph_ids = []
         for document_id in _documents_for_anchor(
             start, can_view_document=can_view_document, user_id=user_id
         ):
             graph = queries.fetch_component_graph(document_id)
             if not graph:
+                missing_graph_ids.append(document_id)
                 continue
             all_main_ids.extend(
                 str(n.get("component_id") or "") for n in main_nodes(graph)
@@ -1090,9 +1105,12 @@ def _nearby_for_topic_anchor(
     if not documents:
         return unavailable(mode, NOTICE_TOPIC_NO_MAPPING, facts=[FACT_RANGE_SHARPEN])
 
-    titles = queries.fetch_document_titles([d["document_id"] for d in documents])
+    titles = queries.fetch_document_titles(
+        [d["document_id"] for d in documents] + list(missing_graph_ids)
+    )
     for doc in documents:
         doc["title"] = titles.get(doc["document_id"], "")
+    missing_graph_titles = [titles.get(d, "") for d in missing_graph_ids]
 
     ledger = queries.fetch_component_ledger_statuses(all_main_ids)
     atlas_concept_context = _resolve_range_atlas_context(
@@ -1109,6 +1127,7 @@ def _nearby_for_topic_anchor(
         atlas_concept_context=atlas_concept_context,
         fallback_fact=fallback_fact,
         claim_summaries=claim_summaries,
+        missing_graph_titles=missing_graph_titles,
     )
 
 

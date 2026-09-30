@@ -266,6 +266,13 @@ def get_atlas(
                 from core.atlas_edges.threads import threads_for_domain
 
                 relation_threads = threads_for_domain(session, cartridge_id)
+                if isinstance(relation_threads, dict) and not relation_threads.get("available"):
+                    from core.atlas_edges.threads import threads_unavailable_note
+
+                    relation_threads = {
+                        "available": False,
+                        "note": threads_unavailable_note(session, cartridge_id),
+                    }
             except Exception:  # noqa: BLE001 — 糸の失敗で地図を壊さない
                 logger.warning(
                     "atlas relation threads unavailable for %s (non-fatal)",
@@ -575,6 +582,10 @@ def get_atlas(
     # (フロントはコントロールごと非表示 = RE2 の fail-closed)。
     if isinstance(relation_threads, dict) and relation_threads.get("available"):
         payload["threads"] = relation_threads
+    elif isinstance(relation_threads, dict) and relation_threads.get("note"):
+        # 第 14 周: 糸が出ない理由を事実文で返す（フロントは available !== true で
+        # レイヤーを出さないまま、理由文だけを読める）。
+        payload["threads"] = {"available": False, "note": str(relation_threads["note"])}
     return payload
 
 

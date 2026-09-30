@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
@@ -145,6 +146,15 @@ _RESOLUTION_ERROR_DETAILS = {
     # 例: 行が無い / この教材の解析結果に含まれない / document_id が必要な要素型で未指定。
     "not_found": "この要素は見つかりませんでした。",
 }
+
+
+#: 主グラフの集約ノード（graph-native ID）。theory_components の行を持たない。
+_AGGREGATED_MAIN_NODE_RE = re.compile(r"^theory_op_\d+$")
+FACT_AGGREGATED_MAIN_NODE = (
+    "主グラフのノードは複数の手順をまとめたもので、単独の部品ではないため、このノードのまま対話は開けません。"
+    "ノードの代表の部品か、「式の詳細」層の手順を選んで開いてください。"
+    "論文全体について尋ねるときは「グラフ全体」の対話をご利用ください。"
+)
 
 
 def _http_from_resolution_error(exc: ElementResolutionError) -> HTTPException:
@@ -939,6 +949,10 @@ def create_deliberation_session(
             body.element_type, body.element_id, document_id=body.document_id
         )
     except ElementResolutionError as exc:
+        if _AGGREGATED_MAIN_NODE_RE.match(str(body.element_id or "")):
+            # 主グラフの集約ノードは部品の行を持たない（設計どおり）。何をすれば開けるかを
+            # 事実で返す（第 14 周 brain-te03 seq16: 理由の無い「見つかりませんでした」）。
+            raise HTTPException(status_code=404, detail=FACT_AGGREGATED_MAIN_NODE) from exc
         raise _http_from_resolution_error(exc) from exc
     if ref.scope != body.scope:
         raise HTTPException(

@@ -65,6 +65,24 @@ _CJK_RE = re.compile(r"[　-ヿ一-鿿＀-￯]")
 _ASCII_WORD_RE = re.compile(r"[A-Za-z]+")
 
 
+_LINE_HYPHEN_RE = re.compile(r"([A-Za-z])-[ \t]*\n[ \t]*([a-z])")
+_SINGLE_NEWLINE_RE = re.compile(r"(?<!\n)[ \t]*\n(?!\n)[ \t]*")
+
+
+def normalize_source_line_breaks(text: object) -> str:
+    """PDF 由来テキストの行分割を表示用に畳む（翻訳・言い換えはしない）。
+
+    - 行末ハイフン + 改行 + 小文字（``Interest-\ningly``）は語の分割なので結合する。
+    - 段落区切り（空行）は残し、単独の改行は半角空白にする（1 語ごとの改行を畳む）。
+    改行を失ったあとのハイフン（``Interest-ingly``）は複合語と区別できないので触らない。
+    """
+    raw = str(text if text is not None else "")
+    if "\n" not in raw:
+        return raw
+    joined = _LINE_HYPHEN_RE.sub(r"\1\2", raw)
+    return _SINGLE_NEWLINE_RE.sub(" ", joined).strip()
+
+
 def normalize_whitespace(text: object) -> str:
     """改行・連続空白を1個の半角空白へ潰し、前後を strip する。"""
     return _WHITESPACE_RE.sub(" ", str(text if text is not None else "")).strip()

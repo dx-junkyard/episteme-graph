@@ -554,6 +554,8 @@ UNITS_WITHOUT_KNOWLEDGE_NOTE = (
 # 読み手は ``api/routes/learning.py::enroll_course``（``LearningEnrollOut.notice``）。
 
 COURSE_ENROLLED_NOTICE = "受講を開始しました。コースの最初のトピックから読めます。"
+# 既に受講中のコースに再度登録したとき（新しい受講記録は作られていない）。
+COURSE_ALREADY_ENROLLED_NOTICE = "このコースはすでに受講中です。これまでの学習の続きから読めます。"
 
 
 # ---------------------------------------------------------------------------

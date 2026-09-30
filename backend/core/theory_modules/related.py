@@ -43,6 +43,9 @@ FACT_RELATED_RULE_VERSION_STALE = (
     "再解析すると照合できます。"
 )
 FACT_RELATED_HIDDEN = "閲覧できない論文にも、同じ構造のモジュールがあります。"
+#: 保存行はあるが、どの外枠モジュールにも同じ構造の相手が見つからないとき（閉世界の言明。
+#: 列挙が空のまま黙らない — 第 14 周 brain-te03 seq9）。
+FACT_RELATED_NONE = "このコーパスの中では、同じ構造のモジュールを持つ他の論文は見つかっていません。"
 
 #: タイトルが空の教材を列挙するときの表示（空文字で黙って欠かさない）。
 UNTITLED_DOCUMENT_LABEL = "題名のない教材"
@@ -88,6 +91,7 @@ def build_related_payload(
 
     hidden = False
     modules: list[dict] = []
+    checked_keys: list[str] = []
     for row in own_rows:
         if row.get("level") != _LEVEL_OUTER:
             continue
@@ -111,16 +115,34 @@ def build_related_payload(
                     documents.append(
                         {"title": titles.get(other) or UNTITLED_DOCUMENT_LABEL}
                     )
-        modules.append({"module_key": row.get("agent_module_key") or "", "documents": documents})
+        key = row.get("agent_module_key") or ""
+        if key and key not in checked_keys:
+            checked_keys.append(key)
+        if not documents:
+            continue
+        # 外枠 1 つ = 1 行（同じ module_key の保存行が複数あっても 1 行に畳む。第 15 周 te-02/03）。
+        existing = next((m for m in modules if key and m["module_key"] == key), None)
+        if existing is not None:
+            for doc in documents:
+                if doc not in existing["documents"]:
+                    existing["documents"].append(doc)
+            continue
+        modules.append({"module_key": key, "documents": documents})
 
     facts: list[str] = []
     if hidden:
         facts.append(FACT_RELATED_HIDDEN)
+    elif not modules:
+        # 相手ゼロなら区画全体で事実文 1 行（空欄の行を並べない — 第 15 周 te-02 seq17）。
+        facts.append(FACT_RELATED_NONE)
     return {
         "document_id": document_id,
         "available": True,
         "facts": facts,
+        # 相手のある外枠モジュールだけ（内側・相手なしは行にしない）。
         "modules": modules,
+        # 照合した外枠の module_key（UI が「照合したが相手なし」と「対応が取れない」を分ける）。
+        "checked_module_keys": checked_keys,
         "hidden": hidden,
     }
 
@@ -131,6 +153,7 @@ def _unavailable(document_id: str, fact: str) -> dict:
         "available": False,
         "facts": [fact],
         "modules": [],
+        "checked_module_keys": [],
         "hidden": False,
     }
 

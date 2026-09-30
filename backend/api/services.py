@@ -378,11 +378,14 @@ def user_is_enrolled(user_id: str, course_id: str) -> bool:
         session.close()
 
 
-def enroll_user_in_course(user_id: str, course_id: str) -> None:
-    """learning_states に受講レコードを作成する（UNIQUE で二重受講を防止）。"""
+def enroll_user_in_course(user_id: str, course_id: str) -> bool:
+    """learning_states に受講レコードを作成する（UNIQUE で二重受講を防止）。
+
+    戻り値は「新しい受講記録を作ったか」。既に受講中なら False（ON CONFLICT DO NOTHING）。
+    """
     session = _pg_session()
     try:
-        session.execute(
+        result = session.execute(
             sa_text("""
                 INSERT INTO learning_states (id, user_id, course_id)
                 VALUES (gen_random_uuid(), CAST(:user_id AS uuid), :course_id)
@@ -391,6 +394,8 @@ def enroll_user_in_course(user_id: str, course_id: str) -> None:
             {"user_id": user_id, "course_id": course_id},
         )
         session.commit()
+        rowcount = getattr(result, "rowcount", None)
+        return not (isinstance(rowcount, int) and rowcount == 0)
     except Exception:
         session.rollback()
         raise
@@ -1800,6 +1805,27 @@ def _non_content_heading_at_head(raw: str) -> bool:
     return False
 
 
+#: 謝辞の定型（語境界付き）。2つ以上で謝辞の区画とみなす。
+_ACK_SIGNAL_RE = re.compile(
+    r"\b(?:we\s+(?:gratefully\s+)?acknowledge|(?:are|is|am)\s+grateful\s+to|we\s+thank|"
+    r"(?:is|was|were|are)\s+(?:partly\s+|partially\s+)?supported\s+by|funded\s+by|"
+    r"grant\s+(?:no\.|number|nos?\.)|project\s+identification|acknowledg(?:e|es|ing)\s+(?:the\s+)?support)\b",
+    re.IGNORECASE,
+)
+#: 表題行（組版の刻印）。
+_TITLE_BLOCK_RE = re.compile(
+    r"\b(?:typeset\s+using\s+latex|draft\s+version\s+\w+\s+\d{1,2},\s*\d{4}|preprint\s+typeset)\b",
+    re.IGNORECASE,
+)
+#: 論文の構成を述べる文（章立て文）。
+_OUTLINE_SENTENCE_RE = re.compile(
+    r"\b(?:this\s+paper\s+is\s+organi[sz]ed\s+as\s+follows|the\s+(?:rest|remainder)\s+of\s+"
+    r"(?:this|the)\s+paper|the\s+paper\s+is\s+structured\s+as\s+follows)\b|本論文の構成|以下の構成",
+    re.IGNORECASE,
+)
+_SECTION_REF_RE = re.compile(r"\bSec(?:tion)?s?\.?\s*\d|第\s*\d+\s*章|\d+\s*節", re.IGNORECASE)
+
+
 def non_content_chunk_reason(text: object) -> str | None:
     """見出しでは捕まらない「本文ではないチャンク」の判定（IK-0390・決定論・安価）。
 
@@ -1813,12 +1839,21 @@ def non_content_chunk_reason(text: object) -> str | None:
     * ``numeric_labels`` — 8語以上で半数以上が数値だけの語（軸の目盛り・一語一行に
       割れた図のキャプション）。
     * ``url_only`` — 空白以外の文字の半分以上が URL（脚注の URL だけの区画）。
+    * ``too_short`` — 4語以下かつ空白以外が 40 字未満（「2」「II. THEORY」のような見出し・
+      ページ番号だけの区画。第 14 周: 本文「2」だけのチャンクが出典1 に採用された）。
+      和文の短い文（かな・漢字 10 字以上）は落とさない。
     """
     raw = str(text or "")
     tokens = raw.split()
     if not tokens:
         return None
     words = len(tokens)
+    if (
+        words <= 4
+        and len("".join(tokens)) < 40
+        and len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", raw)) < 10
+    ):
+        return "too_short"
     years = len(_YEAR_RE.findall(raw))
     volume_pages = len(_VOLUME_PAGE_RE.findall(raw))
     et_al = len(_ET_AL_RE.findall(raw))
@@ -1838,6 +1873,13 @@ def non_content_chunk_reason(text: object) -> str | None:
         return "bibliography"
     if _non_content_heading_at_head(raw):
         return "non_content_heading"
+    # 第 15 周: 見出しの無い謝辞・表題行・論文の構成の説明文（本文の内容を持たない区画）。
+    if words <= 150 and len(_ACK_SIGNAL_RE.findall(raw)) >= 2:
+        return "acknowledgments"
+    if words <= 80 and _TITLE_BLOCK_RE.search(raw):
+        return "title_block"
+    if words <= 90 and _OUTLINE_SENTENCE_RE.search(raw) and len(_SECTION_REF_RE.findall(raw)) >= 2:
+        return "outline"
     # IK-0445: 表題・著者・所属の区画（所属機関の行が3つ以上・行の4分の1以上）。
     lines = [ln for ln in raw.splitlines() if ln.strip()]
     affiliation_lines = sum(1 for ln in lines if _AFFILIATION_LINE_RE.search(ln))
@@ -2666,6 +2708,89 @@ def get_acknowledged_prerequisites(user_id: str, course_id: str) -> set[str]:
     if not isinstance(acknowledged, dict):
         return set()
     return {normalize_prerequisite_name(k) for k in acknowledged.keys() if str(k).strip()}
+
+
+PROGRESS_PREREQUISITE_GATES_PRESENTED_KEY = "prerequisite_gates_presented"
+
+
+def get_prerequisite_gate_presented(user_id: str, course_id: str, topic_key: str) -> bool:
+    """このトピックの前提確認を本人に既に一度提示したか（読み取り専用・TRIAGE14）。
+
+    「提示した」という事実の記録であって、理解度・能力の推定ではない（UC5）。
+    読めないときは False（従来どおり1回は提示される側に倒す）。
+    """
+    key = str(topic_key or "").strip()
+    if not key:
+        return False
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT progress_data FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    progress_raw = row[0] if row and row[0] is not None else {}
+    progress = progress_raw if isinstance(progress_raw, dict) else json.loads(progress_raw)
+    presented = progress.get(PROGRESS_PREREQUISITE_GATES_PRESENTED_KEY) or {}
+    return isinstance(presented, dict) and key in presented
+
+
+def record_prerequisite_gate_presented(user_id: str, course_id: str, topic_key: str) -> None:
+    """前提確認をこのトピックで提示した事実を記帳する（upsert のみ・既存値は上書きしない, P4）。"""
+    key = str(topic_key or "").strip()
+    if not key:
+        return
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO learning_states (id, user_id, course_id)
+                VALUES (gen_random_uuid(), CAST(:user_id AS uuid), :course_id)
+                ON CONFLICT (user_id, course_id) DO NOTHING
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        )
+        row = session.execute(
+            sa_text("""
+                SELECT progress_data FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+        progress_raw = row[0] if row and row[0] is not None else {}
+        progress = progress_raw if isinstance(progress_raw, dict) else json.loads(progress_raw)
+        presented_raw = progress.get(PROGRESS_PREREQUISITE_GATES_PRESENTED_KEY) or {}
+        presented = dict(presented_raw) if isinstance(presented_raw, dict) else {}
+        if key in presented:
+            return
+        presented[key] = now_iso
+        progress[PROGRESS_PREREQUISITE_GATES_PRESENTED_KEY] = presented
+        session.execute(
+            sa_text("""
+                UPDATE learning_states
+                SET progress_data = CAST(:progress AS jsonb),
+                    updated_at = now()
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+            """),
+            {
+                "user_id": user_id,
+                "course_id": course_id,
+                "progress": json.dumps(progress, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def record_prerequisite_acknowledgement(

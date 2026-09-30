@@ -238,8 +238,12 @@ def _next_step_probe(
 
     step_id = str(step.get("step_id") or "")
     derivation_id = str(chain.get("derivation_id") or "")
-    input_label = _equation_display(label_index, step.get("input_equation_ids") or [], "前の式")
-    output_label = _equation_display(label_index, step.get("output_equation_ids") or [], "次の式")
+    input_label = _equation_display(label_index, step.get("input_equation_ids") or [], "")
+    output_label = _equation_display(label_index, step.get("output_equation_ids") or [], "")
+    if not input_label or not output_label:
+        # TRIAGE14(st-06 seq23): 式を名指しできない問い（「前の式」から「次の式」へ）は、
+        # 画面に式が無い学習者には答えようがない。名指しできる step だけを出題する。
+        return None
     prompt = (
         "この導出で、『" + input_label + "』から『" + output_label +
         "』へ進むためにこの論文が使った操作はどれだと思いますか？"

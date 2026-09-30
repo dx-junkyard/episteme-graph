@@ -188,7 +188,7 @@ class TestStableNumberingAcrossTurns:
             learning_mod, "search_chunks_with_metadata", lambda *a, **k: [_chunk(3), _chunk(2)],
         )
         second = _ask("二つ目の質問", history=client_history)
-        assert [(s.index, s.chunk_id) for s in second.sources] == [(3, "chunk-3"), (2, "chunk-2")]
+        assert [(s.index, s.chunk_id) for s in second.sources] == [(2, "chunk-2"), (3, "chunk-3")]  # 表示は番号順（第 14 周）
 
         # プロンプトの出典ラベルも振った番号と一致する（位置の 1..k ではない）。
         context = second_prompt_context(chat_env.prompts[-1])

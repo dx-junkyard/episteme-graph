@@ -24,6 +24,7 @@ for _path in (str(BACKEND), str(ROOT / "src")):
         sys.path.insert(0, _path)
 
 from core.theory_modules import build_theory_modules  # noqa: E402
+from core.theory_modules import builder as builder_mod  # noqa: E402
 from core.theory_modules.schema import (  # noqa: E402
     FACT_CLAIM_CHAINS_ONLY,
     FACT_CYCLE_PREFIX,
@@ -722,9 +723,18 @@ class TestPurityAndDisplay:
         ])], claims=claims, records=records)
         module = _outer(result)[0]
         assert module["required_claims"] == [
-            {"claim_id": "synth_claim_0001", "text": "Equation (式 (3)) defines $y$."}
+            {"claim_id": "synth_claim_0001", "text": "Equation (式 (3)) defines $y$.",
+             "origin_label": builder_mod.CLAIM_ORIGIN_SYNTHESIZED_LABEL}
         ]
         assert module["assumption_ids"] == ["An assumption."]
+        assert module["assumptions"] == [
+            {"text": "An assumption.", "origin_label": builder_mod.ASSUMPTION_ORIGIN_PAPER_LABEL}
+        ]
+
+    def test_assumption_origin_separates_hedges_and_figure_notes(self):
+        assert builder_mod.assumption_origin_label("Likely part of a product") == builder_mod.ASSUMPTION_ORIGIN_INFERRED_LABEL
+        assert builder_mod.assumption_origin_label("Applies in panel (c)") == builder_mod.ASSUMPTION_ORIGIN_FIGURE_LABEL
+        assert builder_mod.assumption_origin_label("Ideal gas") == builder_mod.ASSUMPTION_ORIGIN_PAPER_LABEL
 
     def test_available_payload_keys(self, tex_2407):
         result = _build(tex_2407)
@@ -736,7 +746,7 @@ class TestPurityAndDisplay:
         module_keys = {
             "module_key", "level", "parent_module_key", "label", "visual_label", "process_verbs", "theory_object",
             "stage_keys", "dominant_stage", "source_backing_status", "inputs", "outputs", "foundation",
-            "required_claims", "assumption_ids", "members", "components_for_comparison", "isolated_reason",
+            "required_claims", "assumption_ids", "assumptions", "subtitle", "members", "components_for_comparison", "isolated_reason",
         }
         for module in result["modules"]:
             assert set(module) == module_keys
@@ -995,3 +1005,13 @@ class TestFingerprintNeverInDto:
         for term in ("fingerprint", "structure_fingerprint", "stable_key", "produced_equation_keys",
                      "identity_eligible", "edge_type", "k1:", "eqid:", "ops="):
             assert term not in text, term
+
+
+class TestPlainMathRemnants:
+    """第 14 周: visual_label の TeX 変換の残骸（二重バックスラッシュ・\\mid）。"""
+
+    def test_doubled_backslashes_collapse(self):
+        assert builder_mod.plain_math(r"\\Theta^2_{\\rm GW}\\") == "Θ^2_GW"
+
+    def test_mid_becomes_bar(self):
+        assert builder_mod.plain_math(r"z\mid \Lambda") == "z | Λ"

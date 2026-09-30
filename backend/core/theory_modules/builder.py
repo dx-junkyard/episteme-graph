@@ -705,6 +705,11 @@ def plain_math(text: str) -> str:
     ``theory_object`` の ``$…$`` を数式として描く。
     """
     out = str(text or "").replace("$", "")
+    # 二重化した区切り（JSON 由来の ``\\Theta`` / TeX の改行 ``\\``）を先に畳む
+    # （第 14 周: 「\Θ^2_GW\」の残骸）。関係記号は読める記号へ（``z\mid Λ`` →「z | Λ」）。
+    out = re.sub(r"\\\\+(?=[A-Za-z])", r"\\", out)
+    out = re.sub(r"\\\\+", " ", out)
+    out = re.sub(r"\\(?:mid|vert)\b", " | ", out)
     # 記号名の置換は装飾コマンドを剥がす前に行う（剥がした後だと ``\\cdot\\vec{k}`` が
     # ``\\cdotk`` になって名前の境界が消える）。
     out = re.sub(r"\\([A-Za-z]+)", lambda m: _PLAIN_GREEK.get(m.group(1), m.group(0)), out)
@@ -760,6 +765,12 @@ class _Labels:
         if failed or contains_internal_id(replaced):
             return ""
         return replaced
+
+    def claim_origin_label(self, claim_id: str) -> str:
+        claim = self.claims_by_id.get(claim_id)
+        if claim is None:
+            return ""
+        return CLAIM_ORIGIN_SYNTHESIZED_LABEL if _is_synthesized_claim(claim) else CLAIM_ORIGIN_PAPER_LABEL
 
     def claim_text(self, claim_id: str) -> str:
         claim = self.claims_by_id.get(claim_id) or {}
@@ -934,13 +945,63 @@ def _module_dto(
         "outputs": [labels.equation_item(eq) for eq in outputs],
         "foundation": [labels.equation_item(eq) for eq in used_foundation],
         "required_claims": [
-            {"claim_id": cid, "text": labels.claim_text(cid)} for cid in required_ids
+            {
+                "claim_id": cid,
+                "text": labels.claim_text(cid),
+                "origin_label": labels.claim_origin_label(cid),
+            }
+            for cid in required_ids
         ],
         "assumption_ids": assumptions,
+        # 前提の本文に出所の種別を添える（第 14 周 brain-te03 seq4/seq8: 図の注釈や「Likely…」の
+        # 推測文が論文の前提と区別なく並んでいた）。assumption_ids は互換のため残す。
+        "assumptions": [
+            {"text": text, "origin_label": assumption_origin_label(text)} for text in assumptions
+        ],
+        # 同名のモジュールが並んでも区別できる副題（生む式の印字番号・内部 ID なし）。
+        "subtitle": _module_subtitle(labels, outputs or representative),
         "members": member_rows,
         "components_for_comparison": labels.components_for(representative),
         "isolated_reason": isolated_reason,
     }
+
+
+CLAIM_ORIGIN_PAPER_LABEL = "本文の主張"
+CLAIM_ORIGIN_SYNTHESIZED_LABEL = "式から機械的に組んだ文（本文の引用ではありません）"
+ASSUMPTION_ORIGIN_PAPER_LABEL = "導出の記録にある前提"
+ASSUMPTION_ORIGIN_FIGURE_LABEL = "図の注記に由来する前提"
+ASSUMPTION_ORIGIN_INFERRED_LABEL = "解析が推測で補った前提（未確認）"
+
+_FIGURE_NOTE_RE = re.compile(r"\b(?:panel|fig\.?|figure|subplot)\b|図", re.IGNORECASE)
+_HEDGE_RE = re.compile(r"^\s*(?:likely|probably|possibly|presumably|perhaps|may|might|assum(?:e|ed|ing))\b", re.IGNORECASE)
+
+
+def assumption_origin_label(text: str) -> str:
+    """前提の本文の出所の種別（決定論・分野中立。推測文と図の注記を論文の前提と分ける）。"""
+    value = str(text or "")
+    if _HEDGE_RE.search(value):
+        return ASSUMPTION_ORIGIN_INFERRED_LABEL
+    if _FIGURE_NOTE_RE.search(value):
+        return ASSUMPTION_ORIGIN_FIGURE_LABEL
+    return ASSUMPTION_ORIGIN_PAPER_LABEL
+
+
+def _module_subtitle(labels: "_Labels", equations: list[str]) -> str:
+    printed = _dedup(
+        labels.equation_label(eq) for eq in equations
+        if has_printed_label(labels.equation_records.get(eq))
+    )
+    if printed:
+        return "生む式: " + "、".join(printed[:THEORY_OBJECT_LABELS_MAX])
+    # 番号なしの式は左辺の記号を添えて区別する（第 15 周 te-03 seq4: 同名の内側モジュール）。
+    from core.theory_modules.schema import equation_display_name
+
+    unnumbered = _dedup(
+        equation_display_name(labels.equation_records.get(eq)) for eq in equations
+    )
+    if unnumbered:
+        return "生む式: " + "、".join(unnumbered[:THEORY_OBJECT_LABELS_MAX])
+    return ""
 
 
 def _structure_fingerprint(level: str, steps: list[_Step], inputs: list[str], outputs: list[str], premise: bool) -> str:

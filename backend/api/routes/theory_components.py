@@ -3340,6 +3340,87 @@ def list_section_components(
 
 
 
+_NODE_LABEL_KEYS = ("label", "display_label", "visual_label")
+
+
+def mask_equation_ids_in_label(text: str, equation_records: dict) -> str:
+    """ノードの表示ラベル中の式 ID（``eq_…``）を印字番号「式 (12)」/「番号なしの式」に置き換える。
+
+    PL7 / #308: 式の詳細層のラベルは A層が ``Define eq_blk_004_0084`` の形で焼き込むため、
+    graph_json は書き換えず読み時に表示だけを直す（第 14 周 brain-te03 seq3/seq7）。
+    """
+    from core.theory_modules.schema import mask_internal_ids_readable
+
+    # 番号なしの式は左辺の記号を添え、同名の「Define 番号なしの式」を区別できるようにする
+    # （第 15 周 te-02 seq15）。途中切れの ID も末尾ごと置き換える。
+    return mask_internal_ids_readable(text, equation_records)
+
+
+def _mask_node_equation_ids(document_id: str, graph: dict) -> None:
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    from core.theory_modules.schema import EQUATION_ID_TOKEN_RE
+
+    if not any(
+        isinstance(n, dict) and any(EQUATION_ID_TOKEN_RE.search(str(n.get(k) or "")) for k in _NODE_LABEL_KEYS)
+        for n in nodes
+    ):
+        return
+    try:
+        artifacts = document_run_artifacts(document_id) or {}
+    except Exception:
+        logger.debug("component-graph: artifacts unavailable for label masking", exc_info=True)
+        artifacts = {}
+    payload = artifacts.get("equation_semantics") if isinstance(artifacts.get("equation_semantics"), dict) else {}
+    records: dict = {}
+    for record in (payload.get("records") or payload.get("equations") or []):
+        if isinstance(record, dict) and record.get("equation_id"):
+            records.setdefault(str(record["equation_id"]), record)
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        for key in _NODE_LABEL_KEYS:
+            value = node.get(key)
+            if isinstance(value, str) and EQUATION_ID_TOKEN_RE.search(value):
+                node[key] = mask_equation_ids_in_label(value, records)
+
+
+def _attach_main_stage_display_labels(graph: dict, components: list) -> None:
+    """主グラフのノードに日本語の段名の ``display_label`` と全文の ``description`` を付ける。
+
+    #308 の規律で main の ``label`` は英語の stage 名のまま（不変）。表示用に
+    ``element_vocab.THEORY_STAGE_LABELS`` の訳語を ``display_label`` に置き、A層が 80 字で
+    切った説明の代わりに代表部品の要約の全文を ``description`` に載せる（切り詰めは UI 側。
+    第 15 周 product seq146）。graph_json は書き換えない（読み時の射影）。
+    """
+    from core.element_vocab import THEORY_STAGE_DISPLAY_TO_KEY, THEORY_STAGE_LABELS
+    from core.theory_modules.schema import mask_internal_ids_readable
+
+    summary_by_id: dict[str, str] = {}
+    for component in components or []:
+        cid = str(getattr(component, "id", "") or "")
+        summary = str(getattr(component, "summary", "") or "").strip()
+        if cid and summary:
+            summary_by_id[cid] = summary
+        scope = getattr(component, "source_scope", None)
+        legacy_ids = scope.get("legacy_ids") if isinstance(scope, dict) else getattr(scope, "legacy_ids", None)
+        for legacy in (legacy_ids if isinstance(legacy_ids, list) else []):
+            if summary and legacy:
+                summary_by_id.setdefault(str(legacy), summary)
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict) or str(node.get("graph_layer") or "main") != "main":
+            continue
+        key = THEORY_STAGE_DISPLAY_TO_KEY.get(str(node.get("label") or "").strip().lower())
+        stage_ja = THEORY_STAGE_LABELS.get(key or str(node.get("theory_stage") or ""))
+        if stage_ja:
+            theory_object = mask_internal_ids_readable(node.get("theory_object") or "")
+            node["display_label"] = f"{stage_ja}: {theory_object}" if theory_object else stage_ja
+        rep = str(node.get("representative_component_id") or "")
+        full = summary_by_id.get(rep, "")
+        current = str(node.get("description") or "").strip()
+        if full and (not current or (len(full) > len(current) and full.startswith(current.rstrip(".…")[:40]))):
+            node["description"] = full
+
+
 @router.get("/documents/{document_id}/component-graph", response_model=ComponentGraphResponse)
 def get_component_graph(
     document_id: str,
@@ -3349,6 +3430,8 @@ def get_component_graph(
     components = _components_for_document(document_id)
     stored_graph = _normalize_stored_component_graph(document_id, _stored_component_graph(document_id), components)
     if stored_graph:
+        _mask_node_equation_ids(document_id, stored_graph)
+        _attach_main_stage_display_labels(stored_graph, components)
         stored_graph["reference_index"] = _build_graph_reference_index(document_id, stored_graph)
         return ComponentGraphResponse(**stored_graph)
     payload = _build_component_graph_payload(document_id, components)

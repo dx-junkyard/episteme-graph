@@ -82,18 +82,14 @@ class TestGetCourseElementContextGating:
     @patch("api.routes.learning.build_element_context", return_value=None)
     @patch("api.routes.learning._course_document_ids", return_value=["doc-1"])
     @patch("api.routes.learning.get_accessible_course_data")
-    def test_core_returns_none_yields_404(self, mock_course, _mock_doc_ids, _mock_build):
-        """要素が解決できない（コース外 document / 未知の element_id）場合は core が
-        None を返し、ルートは 404 にマッピングする（fail-closed）。"""
-        from fastapi import HTTPException
-
-        from api.routes.learning import get_course_element_context
+    def test_core_returns_none_yields_unavailable_fact(self, mock_course, _mock_doc_ids, _mock_build):
+        """要素が特定できない（コース外 / 曖昧 / 未知）場合は 200 + available:false の事実文
+        （TRIAGE14: 英語の「Element not found」を学習者に見せない。コース外と不在は同じ応答）。"""
+        from api.routes.learning import ELEMENT_CONTEXT_UNRESOLVED_NOTE, get_course_element_context
 
         mock_course.return_value = _course_data()
-        with pytest.raises(HTTPException) as exc:
-            get_course_element_context("c1", "claim", "claim-1", {"id": "u1"})
-        assert exc.value.status_code == 404
-        assert exc.value.detail == "Element not found"
+        out = get_course_element_context("c1", "claim", "claim-1", {"id": "u1"})
+        assert out == {"available": False, "note": ELEMENT_CONTEXT_UNRESOLVED_NOTE}
 
     @patch("api.routes.learning.build_element_context")
     @patch("api.routes.learning._course_document_ids")
@@ -112,8 +108,7 @@ class TestGetCourseElementContextGating:
         mock_doc_ids.return_value = ["doc-a", "doc-b"]
         mock_build.return_value = None
 
-        with pytest.raises(HTTPException):
-            get_course_element_context("c1", "equation", "eq_1", {"id": "u1"})
+        assert get_course_element_context("c1", "equation", "eq_1", {"id": "u1"})["available"] is False
 
         mock_doc_ids.assert_called_once_with(course_data)
         mock_build.assert_called_once_with("equation", "eq_1", {"doc-a", "doc-b"})

@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import re
+
 from typing import Any, Iterable
 
 from core.label_vocab import SUPPORT_SECTION_LABELS
@@ -123,6 +125,80 @@ def _label_sort_key(label: str) -> tuple:
 # ---------------------------------------------------------------------------
 # artifact の索引化
 # ---------------------------------------------------------------------------
+
+
+UNTITLED_FRONT_SECTION_LABEL = "冒頭（見出しなし）"
+
+_TEMPLATE_TITLE_RE = re.compile(
+    r"draft version|typeset using|preprint typeset|accepted for publication|arxiv:\s*\d", re.IGNORECASE
+)
+_MATH_CHARS_RE = re.compile(r"[()/=^_\\,<>+*|]")
+HEADING_TITLE_MAX_CHARS = 120
+
+
+def is_heading_like_title(title: str) -> bool:
+    """構造化が見出しと判定した文字列が、章の見出しとして読めるか（決定論・分野中立）。
+
+    式（空白を含まず演算記号を含む）・1〜2 文字・テンプレート文（「Draft version…Typeset using
+    LATEX」）・改行を含む長文は見出しにしない。判定できないものは見出しとして残す（慎重側）。
+    """
+    value = str(title or "").strip()
+    if len(value) <= 2:
+        return False
+    if _TEMPLATE_TITLE_RE.search(value):
+        return False
+    if " " not in value and _MATH_CHARS_RE.search(value):
+        return False
+    if "\n" in value and len(value) > 40:
+        return False
+    if _looks_like_table_header(value):
+        return False
+    return len(value) <= HEADING_TITLE_MAX_CHARS
+
+
+#: 表の列名に現れる語（「No. of」「Events」の型。分野中立の列見出し語だけ）。
+_TABLE_COLUMN_WORD_RE = re.compile(r"\bno\.\s*of\b|^#\s*of\b", re.IGNORECASE)
+
+
+def _looks_like_table_header(value: str) -> bool:
+    """表の見出し行（列名の並び）か（第 15 周 te-02 seq18「Case Cut No. of Events」）。
+
+    改行で区切られた 3 行以上がすべて短い（列名の並び）か、「No. of」型の列語を含み
+    改行を含むものを表の見出しとみなす。判定できないものは見出しとして残す（慎重側）。
+    """
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    if len(lines) >= 3 and all(len(line) <= 15 for line in lines):
+        return True
+    return len(lines) >= 2 and bool(_TABLE_COLUMN_WORD_RE.search(" ".join(lines)))
+
+
+def _reattach_orphan_parents(sections: list[dict], source_sections: list[dict]) -> None:
+    """一覧に無い親（畳んだ節・構造に無い ID）を指す ``parent_section_id`` を直す。
+
+    畳んだ節が親なら畳み先へ、一覧に無い ID なら直近の上位（level が小さい直前の節）へ、
+    それも無ければ ``None``（第 15 周 te-02 seq18: 2.2 節の親が一覧に無い sec_9）。
+    """
+    emitted = {section["section_id"] for section in sections}
+    folded_into: dict[str, str] = {}
+    for section in sections:
+        for folded in section.get("folded_section_ids") or []:
+            folded_into[folded] = section["section_id"]
+    for idx, section in enumerate(sections):
+        parent = section.get("parent_section_id")
+        if not parent or parent in emitted:
+            continue
+        if parent in folded_into and folded_into[parent] != section["section_id"]:
+            section["parent_section_id"] = folded_into[parent]
+            continue
+        level = _int_or(section.get("level"), 1)
+        section["parent_section_id"] = next(
+            (
+                prev["section_id"]
+                for prev in reversed(sections[:idx])
+                if _int_or(prev.get("level"), 1) < level
+            ),
+            None,
+        )
 
 
 class _PaperIndex:
@@ -1169,9 +1245,21 @@ def _build_paper(
     sections: list[dict] = []
     for section in index.sections:
         section_id = section["section_id"]
+        if sections and not is_heading_like_title(section["title"]):
+            # 見出しの誤認（式・1 語・テンプレート文）は章として立てず、直前の章へ中身を
+            # 畳む（情報を落とさない・A層非改変。第 14 周 brain-te03 seq10）。
+            host = sections[-1]
+            host["node_ids"] = _dedup(host["node_ids"] + section_nodes.get(section_id, []))
+            host["equations"] = host["equations"] + equations_by_section.get(section_id, [])
+            host["figures"] = host["figures"] + figures_by_section.get(section_id, [])
+            host["tables"] = host["tables"] + tables_by_section.get(section_id, [])
+            host["claims"] = host["claims"] + claims_by_section.get(section_id, [])
+            host.setdefault("folded_section_ids", []).append(section_id)
+            continue
+        title = section["title"] if is_heading_like_title(section["title"]) else UNTITLED_FRONT_SECTION_LABEL
         sections.append({
             "section_id": section_id,
-            "title": section["title"],
+            "title": title,
             "level": section["level"],
             "order": section["order"],
             "page_start": section["page_start"],
@@ -1183,6 +1271,8 @@ def _build_paper(
             "tables": tables_by_section.get(section_id, []),
             "claims": claims_by_section.get(section_id, []),
         })
+
+    _reattach_orphan_parents(sections, index.sections)
 
     backbone: list[dict] = []
     for block in _dicts(index.skeleton.get("logical_blocks")):

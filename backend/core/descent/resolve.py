@@ -58,6 +58,9 @@ class ResolvedElement:
     element_id: str
     document_id: str
     match_ids: set[str] = field(default_factory=set)
+    #: 学習者に「どの要素の段か」を示す表示ラベル（主張本文 80 字 / 部品名 / 式の印字番号）。
+    #: 引けなければ空（推測で埋めない）。
+    label: str = ""
 
 
 def course_document_ids(course_data: dict | None) -> set[str]:
@@ -118,13 +121,35 @@ def _resolve_equation(element_id: str, document_ids: list[str]) -> ResolvedEleme
                     element_id=raw_id,
                     document_id=document_id,
                     match_ids={raw_id},
+                    label=_equation_display_label(record),
                 )
     return None
 
 
+_LABEL_LIMIT = 80
+
+
+def _clip_label(value: object) -> str:
+    from core.text_hygiene import strip_control_sequences
+
+    text = " ".join(strip_control_sequences(str(value or "")).split())
+    if len(text) > _LABEL_LIMIT:
+        text = text[: _LABEL_LIMIT - 1].rstrip() + "…"
+    return text
+
+
+def _equation_display_label(record: dict) -> str:
+    try:
+        from core.deliberation.labels import equation_label
+
+        return _clip_label(equation_label(record).text)
+    except Exception:  # noqa: BLE001 - ラベルは補助情報（fail-soft）
+        return ""
+
+
 def _resolve_row(
     table: str, element_id: str, document_ids: list[str]
-) -> tuple[str, str, dict] | None:
+) -> tuple[str, str, dict, str] | None:
     """live ビュー（component / claim）を1行解決する（DB UUID / legacy_ids 両対応）。
 
     ``core/component_context.py::_resolve_component_row`` と同じ
@@ -132,12 +157,15 @@ def _resolve_row(
     戻り値は ``(db_uuid, document_id, source_scope)``。
     """
     where_clause, params = scoped_id_match_sql(element_id, document_ids)
+    # 表示ラベルの列（claim = 本文 / component = 名前）。table は呼び出し元の定数のみ。
+    label_column = "text" if table == VIEW_CLAIMS_LIVE else "name"
     session = _pg_session()
     try:
         row = session.execute(
             sa_text(
                 f"""
-                SELECT id::text AS id, document_id::text AS document_id, source_scope
+                SELECT id::text AS id, document_id::text AS document_id, source_scope,
+                       {label_column} AS display_label
                 FROM {table}
                 WHERE document_id = ANY(CAST(:doc_ids AS uuid[])) AND ({where_clause})
                 ORDER BY (id::text = :raw_id) DESC, created_at ASC, id::text ASC
@@ -151,7 +179,8 @@ def _resolve_row(
     if not row:
         return None
     scope = row[2] if isinstance(row[2], dict) else {}
-    return str(row[0]), str(row[1] or ""), scope
+    label = _clip_label(row[3]) if len(row) > 3 else ""
+    return str(row[0]), str(row[1] or ""), scope, label
 
 
 def _match_ids_from_scope(db_uuid: str, scope: dict) -> set[str]:
@@ -184,10 +213,11 @@ def resolve_element(
     resolved = _resolve_row(table, element_id, document_ids)
     if resolved is None:
         return None
-    db_uuid, document_id, scope = resolved
+    db_uuid, document_id, scope, label = resolved
     return ResolvedElement(
         element_type=element_type,
         element_id=db_uuid,
         document_id=document_id,
         match_ids=_match_ids_from_scope(db_uuid, scope),
+        label=label,
     )

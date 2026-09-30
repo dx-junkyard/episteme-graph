@@ -68,7 +68,8 @@ class TestGateOncePerSession:
         monkeypatch.setattr(learning_mod, "_classify_intent", lambda *a, **k: "DOMAIN_RAG")
         resp = _chat("主結果の数式はどう読むのですか", _gate_then_answer_history())
         assert learning_mod.PREREQUISITE_GATE_MARKER not in resp.answer
-        assert _SKIPPED + "\n\n説明本文" in resp.answer
+        # TRIAGE14: 内部都合の前置き（確認はまだ記録していません）は出さない。
+        assert _SKIPPED not in resp.answer
         assert resp.answer.endswith("説明本文")
         # 記帳の責務は check_prerequisites に残る（呼ばれている）。
         assert chat_env.gate_calls == ["主結果の数式はどう読むのですか"]
@@ -94,7 +95,7 @@ class TestGateOncePerSession:
         )
         resp = _chat("主結果をもう一度教えて", [], replace_message_id="m1")
         assert learning_mod.PREREQUISITE_GATE_MARKER not in resp.answer
-        assert _SKIPPED + "\n\n説明本文" in resp.answer
+        assert _SKIPPED not in resp.answer
 
     def test_first_gate_still_appears_without_history(self, chat_env, monkeypatch):
         monkeypatch.setattr(learning_mod, "_classify_intent", lambda *a, **k: "DOMAIN_RAG")
@@ -255,7 +256,7 @@ class TestEnglishRoute:
         resp = _chat(
             "Where exactly does the sound speed enter the constraints?", _gate_then_answer_history()
         )
-        assert label_vocab.PREREQUISITE_GATE_SKIPPED_NOTICE_EN.format(prerequisite=PREREQ) in resp.answer
+        assert label_vocab.PREREQUISITE_GATE_SKIPPED_NOTICE_EN.format(prerequisite=PREREQ) not in resp.answer
         assert _SKIPPED not in resp.answer
 
 

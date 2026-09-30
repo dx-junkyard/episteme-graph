@@ -231,3 +231,57 @@ def has_printed_label(record: Any) -> bool:
     rec = record if isinstance(record, dict) else {}
     label = clean_text(rec.get("label")).strip("()").strip()
     return bool(label) and not contains_internal_id(label)
+
+
+# ---------------------------------------------------------------------------
+# 表示文字列の内部 ID 置換（第 15 周 te-02/te-05・PL7 / TM10）
+# ---------------------------------------------------------------------------
+
+#: 途中で切れた式 ID（``eq_eqcand_inline_blk_3df32664_``）も末尾の区切りごと拾う。
+_EQUATION_ID_WITH_TAIL_RE = re.compile(r"\beq_(?!op_)[0-9A-Za-z_.\-]*")
+#: その他の内部 ID（途中切れの末尾区切り込み）。
+_OTHER_INTERNAL_ID_WITH_TAIL_RE = re.compile(
+    r"\b(?:eq_op|theory_op|synth_claim|claim_span|claim|ev|comp|derivation|system_derivation)_[0-9A-Za-z_.:\-]*",
+)
+#: 式の左辺として添える記号列の上限（長い式は添えない）。
+_LHS_MAX_CHARS = 24
+UNIDENTIFIED_ELEMENT_TEXT = "（本文を特定できない要素）"
+UNNUMBERED_EQUATION_TEXT = "番号なしの式"
+
+
+def equation_lhs_symbol(record: Any) -> str:
+    """式の左辺の短い記号列（``=`` の手前）。取れない・長いときは空。"""
+    rec = record if isinstance(record, dict) else {}
+    latex = clean_text(rec.get("latex") or rec.get("normalized_latex") or rec.get("raw_text") or "")
+    if "=" not in latex:
+        return ""
+    lhs = " ".join(latex.split("=", 1)[0].split()).strip().strip("&").strip()
+    if not lhs or len(lhs) > _LHS_MAX_CHARS or contains_internal_id(lhs):
+        return ""
+    return lhs
+
+
+def equation_display_name(record: Any) -> str:
+    """式の表示名: 印字番号があれば「式 (N)」、無ければ「番号なしの式（左辺 X）」。"""
+    rec = record if isinstance(record, dict) else {}
+    if has_printed_label(rec):
+        return f"式 ({clean_text(rec.get('label')).strip('()').strip()})"
+    lhs = equation_lhs_symbol(rec)
+    return f"{UNNUMBERED_EQUATION_TEXT}（左辺 {lhs}）" if lhs else UNNUMBERED_EQUATION_TEXT
+
+
+def mask_internal_ids_readable(text: Any, equation_records: dict | None = None) -> str:
+    """表示文字列中の内部 ID を読める語に置き換える（ID を出さない）。
+
+    式 ID → :func:`equation_display_name`（記録が無ければ「番号なしの式」）、
+    その他の内部 ID → 「（本文を特定できない要素）」。途中切れの ID も末尾ごと置き換える。
+    """
+    records = equation_records or {}
+
+    def _eq(match: "re.Match[str]") -> str:
+        token = match.group(0)
+        record = records.get(token) or records.get(token.rstrip("_.-"))
+        return equation_display_name(record) if record else UNNUMBERED_EQUATION_TEXT
+
+    masked = _EQUATION_ID_WITH_TAIL_RE.sub(_eq, str(text or ""))
+    return _OTHER_INTERNAL_ID_WITH_TAIL_RE.sub(UNIDENTIFIED_ELEMENT_TEXT, masked).strip()

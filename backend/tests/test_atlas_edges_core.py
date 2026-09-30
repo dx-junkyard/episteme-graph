@@ -867,6 +867,17 @@ class TestThreads:
     def test_empty_domain_is_unavailable(self):
         assert threads.threads_for_domain(FakeSession(), "") == {"available": False}
 
+    def test_unavailable_note_explains_reason_without_numbers(self, monkeypatch):
+        """第 14 周: 糸が出ない理由（骨格なし / 索引未構築）を事実文で言い分ける。"""
+        import re as _re
+
+        patch_sources(monkeypatch, sk=None, anchors=[])
+        assert threads.threads_unavailable_note(FakeSession(), DOMAIN) == threads.NOTE_NO_FROZEN_SKELETON
+        patch_sources(monkeypatch, sk=SKELETON, anchors=[])
+        note = threads.threads_unavailable_note(FakeSession(), DOMAIN)
+        assert "索引がまだ作られていない" in note
+        assert not _re.search(r"\d+\s*(件|本|個|%)", note)
+
     def test_pairs_are_cached_per_domain_and_version(self, monkeypatch):
         calls = {"n": 0}
         real = derive.derive_vector_pairs

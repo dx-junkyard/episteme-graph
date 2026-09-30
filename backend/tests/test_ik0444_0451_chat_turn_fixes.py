@@ -93,7 +93,7 @@ class TestCitationMapSurvivesClientCopy:
         _search(chat_env, 1, 4, 2)
         third = _ask("三つ目", history=_client_copy(chat_env.stored["history"], window=2, mutate=True))
         assert [(s.index, s.chunk_id) for s in third.sources] == [
-            (1, "chunk-1"), (4, "chunk-4"), (2, "chunk-2"),
+            (1, "chunk-1"), (2, "chunk-2"), (4, "chunk-4"),  # 番号順（第 14 周）
         ]
         # 保存された最新の assistant ターンに会話全体の対応表が残る。
         last = [m for m in chat_env.stored["history"] if m["role"] == "assistant"][-1]
@@ -109,7 +109,7 @@ class TestCitationMapSurvivesClientCopy:
         _ask("ありがとうございます", history=_client_copy(chat_env.stored["history"], mutate=True))
         _search(chat_env, 5, 1)
         third = _ask("三つ目", history=_client_copy(chat_env.stored["history"], window=2))
-        assert [(s.index, s.chunk_id) for s in third.sources] == [(2, "chunk-5"), (1, "chunk-1")]
+        assert [(s.index, s.chunk_id) for s in third.sources] == [(1, "chunk-1"), (2, "chunk-5")]  # 番号順（第 14 周）
 
     def test_rehydrate_matches_text_without_drilldown_markers(self):
         stored = [{

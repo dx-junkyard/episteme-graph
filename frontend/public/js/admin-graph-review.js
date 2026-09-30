@@ -263,6 +263,7 @@
   // （v1）ので操作要素ではなく事実の区画 — data-ui-anchor は付けない。
   var MODULE_RELATED_HEADING = "同じ構造のモジュールを持つ論文";
   var MODULE_RELATED_NOTE = "工程の型と、受け渡す式の形が同じモジュールを持つ論文です（閲覧できる論文だけを示します）。";
+  var MODULE_RELATED_NONE_TEXT = "このモジュールと同じ構造のモジュールを持つ他の論文は、このコーパスの中では見つかっていません。";
   var MODULE_RELATED_UNMATCHED_TEXT = "このモジュールは保存済みのモジュールと対応が取れないため、同じ構造の論文を示していません。";
   var MODULE_SINK_PREFIX = "sink:"; // 合成ノードの vis id（表示しない）
   var MODULE_CANVAS_LABEL_MAX_CHARS = 48;
@@ -1711,7 +1712,8 @@
       labels[node.component_id] = moduleCanvasLabel(node.display_label);
       var stageLabel = stageLabelJa(module.dominant_stage);
       var backingLabel = g.sourceBackingLabel(module.source_backing_status);
-      titles[node.component_id] = [MODULE_LAYER_LABEL, stageLabel, backingLabel]
+      titles[node.component_id] = [MODULE_LAYER_LABEL, stageLabel, backingLabel,
+        String(module.subtitle || "").trim()]
         .filter(Boolean).join("\n");
     });
     sinks.forEach(function (sink, index) {
@@ -1938,7 +1940,10 @@
       var verbs = (module.process_verbs || []).join(" → ");
       return '<div class="graph-review-paper-item">' +
         '<div class="graph-review-paper-item-head"><span class="graph-review-paper-strong">' +
-          richText(moduleDisplayLabel(module)) + "</span></div>" +
+          richText(moduleDisplayLabel(module)) + "</span>" +
+          (String(module.subtitle || "").trim()
+            ? ' <span class="graph-review-chip">' + esc(String(module.subtitle)) + "</span>" : "") +
+          "</div>" +
         (verbs ? '<div class="graph-review-paper-note">' + esc(verbs) + "</div>" : "") +
         moduleBlock("外から受ける式", moduleEquationChips(module.inputs)) +
         moduleBlock("外へ出す式", moduleEquationChips(module.outputs)) +
@@ -1997,7 +2002,16 @@
     var entry = relatedEntryFor(module);
     var body = "";
     if (!entry) {
-      body = paperFactLine(MODULE_RELATED_UNMATCHED_TEXT);
+      // 相手のないモジュールは DTO の行にならない（区画全体の事実文 1 行で伝える）。
+      // 照合したが相手なし = 事実文があればそれだけ・無ければ「見つかっていません」。
+      // 照合の対象に入っていない（保存行と対応が取れない）ときだけ対応不能の文を出す。
+      var checked = Array.isArray(data.checked_module_keys) ? data.checked_module_keys : null;
+      var wanted = String((module && module.module_key) || "");
+      if (checked && checked.indexOf(wanted) >= 0) {
+        body = facts.length ? "" : paperFactLine(MODULE_RELATED_NONE_TEXT);
+      } else {
+        body = paperFactLine(MODULE_RELATED_UNMATCHED_TEXT);
+      }
     } else {
       var titles = [];
       (entry.documents || []).forEach(function (doc) {
@@ -2007,6 +2021,8 @@
       if (titles.length) {
         body = '<div class="graph-review-paper-note">' + esc(MODULE_RELATED_NOTE) + "</div>" +
           "<ul>" + titles.map(function (title) { return "<li>" + esc(title) + "</li>"; }).join("") + "</ul>";
+      } else if (!facts.length) {
+        body = paperFactLine(MODULE_RELATED_NONE_TEXT);
       }
     }
     body += paperFactLines(facts, "");
@@ -2024,6 +2040,8 @@
     });
     var html = '<div class="graph-review-detail-head">' +
       '<div class="graph-review-detail-title">' + richText(moduleDisplayLabel(module)) + "</div>" +
+      (String(module.subtitle || "").trim()
+        ? '<div class="graph-review-paper-note">' + esc(String(module.subtitle)) + "</div>" : "") +
       '<div class="graph-review-detail-chips">' +
         '<span class="graph-review-chip">' + esc(level) + "</span>" +
         (backing ? '<span class="graph-review-chip">裏付け: ' + esc(g.sourceBackingLabel(backing)) + "</span>" : "") +
@@ -2045,13 +2063,26 @@
     });
     // DTO の assumption_ids は名前に反して前提の本文（derivation_chain の記録を200字で
     // 丸めたもの）なので、主張と並べて本文として出す（ID ではないので TM10 に触れない）。
-    var premiseItems = claims.map(function (claim) { return String(claim.text); });
-    (module.assumption_ids || []).forEach(function (text) {
-      var value = String(text || "").trim();
-      if (value && premiseItems.indexOf(value) < 0) premiseItems.push(value);
+    // 出所の種別（本文の主張 / 式から組んだ文 / 図の注記 / 推測で補った前提）をサーバの
+    // origin_label のまま添える（第 14 周: 合成文・推測文が本文の前提と区別なく並んでいた）。
+    var premiseItems = claims.map(function (claim) {
+      return { text: String(claim.text), origin: String(claim.origin_label || "") };
+    });
+    var seenPremise = premiseItems.map(function (item) { return item.text; });
+    var assumptionRows = Array.isArray(module.assumptions) ? module.assumptions
+      : (module.assumption_ids || []).map(function (text) { return { text: text, origin_label: "" }; });
+    assumptionRows.forEach(function (row) {
+      var value = String((row && row.text) || "").trim();
+      if (value && seenPremise.indexOf(value) < 0) {
+        seenPremise.push(value);
+        premiseItems.push({ text: value, origin: String((row && row.origin_label) || "") });
+      }
     });
     html += moduleBlock("要求される前提", premiseItems.length
-      ? "<ul>" + premiseItems.map(function (text) { return "<li>" + richText(text) + "</li>"; }).join("") + "</ul>"
+      ? "<ul>" + premiseItems.map(function (item) {
+          return "<li>" + richText(item.text) +
+            (item.origin ? ' <span class="graph-review-chip">' + esc(item.origin) + "</span>" : "") + "</li>";
+        }).join("") + "</ul>"
       : "");
     var components = (module.components_for_comparison || []).filter(function (item) {
       return item && String(item.name || "").trim();

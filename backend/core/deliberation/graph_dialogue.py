@@ -241,10 +241,19 @@ def _node_id(node: dict[str, Any]) -> str:
     return str(node.get("component_id") or node.get("id") or "").strip()
 
 
+def _mask_internal_ids(text: str) -> str:
+    """表示文字列に混ざった内部 ID を事実文へ置き換える（PL7。第 15 周 product seq146）。"""
+    from core.theory_modules.schema import mask_internal_ids_readable
+
+    return mask_internal_ids_readable(text)
+
+
 def _node_label(node: dict[str, Any]) -> str:
-    return str(
-        node.get("display_label") or node.get("label") or node.get("name") or _node_id(node)
-    ).strip()
+    for key in ("display_label", "label", "name"):
+        value = _mask_internal_ids(str(node.get(key) or ""))
+        if value and value != "（本文を特定できない要素）":
+            return value
+    return "（本文を特定できない要素）"
 
 
 def _node_layer(node: dict[str, Any]) -> str:
@@ -328,13 +337,37 @@ def graph_grounding_to_text(grounding: dict[str, Any]) -> str:
     main_nodes = grounding.get("main_nodes") or []
     lines.append("[この論文の理論構成]")
     for node in main_nodes[:_MAX_MAIN_NODE_LINES]:
-        line = f"- {_node_label(node)}"
-        description = str(node.get("description") or "").strip()
+        description = _mask_internal_ids(str(node.get("description") or ""))
+        head = _node_label(node)
+        if description:
+            # display_label は「段: 説明の先頭（途中切れ）」の形のことがあり、説明を併記すると
+            # 同じ文が二重に並ぶ（第 14 周 mailbox seq89/91）。説明があるときは短い label を使う。
+            short = str(node.get("label") or "").strip()
+            _, _, tail = head.partition(": ")
+            if short and tail and description.startswith(tail.rstrip(".…").strip()[:40]):
+                head = short
+        line = f"- {head}"
         if description:
             line += f"：{description}"
         # レビュー状態はここに書かない（処理側の区画へ）。原文の裏付けだけを残す。
         line += f"（原文の裏付け: {_backing_label(node.get('source_backing_status'))}）"
         lines.append(line)
+    # 同じ説明文（= 同じ主張文）を根拠に持つ主ノードは、別々の段に見えても根拠が同じで
+    # あることを事実として書く（第 15 周 product seq146/150。graph_json は非改変）。
+    by_description: dict[str, list[str]] = {}
+    for node in main_nodes[:_MAX_MAIN_NODE_LINES]:
+        description = _mask_internal_ids(str(node.get("description") or ""))
+        if description:
+            by_description.setdefault(description, []).append(
+                str(node.get("label") or _node_label(node)).strip()
+            )
+    for heads in by_description.values():
+        unique_heads = list(dict.fromkeys(h for h in heads if h))
+        if len(unique_heads) >= 2:
+            lines.append(
+                "- " + "」と「".join(unique_heads).join(("「", "」"))
+                + "は、同じ主張文を根拠に持ちます。"
+            )
     if len(main_nodes) > _MAX_MAIN_NODE_LINES:
         process_lines.append("- 理論構成の一部は、この一覧では省略しています。")
 
@@ -346,10 +379,30 @@ def graph_grounding_to_text(grounding: dict[str, Any]) -> str:
     ]
     if main_edges:
         lines.append("[構成どうしの関係]")
+        pairs = {
+            (
+                str(e.get("source_component_id") or e.get("from") or ""),
+                str(e.get("target_component_id") or e.get("to") or ""),
+            )
+            for e in main_edges
+        }
+        emitted_undirected: set[frozenset] = set()
         for edge in main_edges[:_MAX_EDGE_LINES]:
             src = str(edge.get("source_component_id") or edge.get("from") or "")
             dst = str(edge.get("target_component_id") or edge.get("to") or "")
             relation = str(edge.get("edge_type") or edge.get("relation") or "").strip()
+            if src != dst and (dst, src) in pairs:
+                # 双方向の辺は「どちらがどちらを前提にするか」が読めない。一方向の関係として
+                # 渡さず、向きが確定していない関係として1行にまとめる（graph_json は非改変）。
+                key = frozenset((src, dst))
+                if key in emitted_undirected:
+                    continue
+                emitted_undirected.add(key)
+                lines.append(
+                    f"- {label_by_id.get(src, src)} ↔ {label_by_id.get(dst, dst)}"
+                    "（向きが確定していない関係。どちらが前提かはグラフからは読めません）"
+                )
+                continue
             lines.append(
                 f"- {label_by_id.get(src, src)} →({relation}) {label_by_id.get(dst, dst)}"
                 f"（原文の裏付け: {_backing_label(edge.get('source_backing_status'))}）"

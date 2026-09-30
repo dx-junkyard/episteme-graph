@@ -12810,6 +12810,8 @@
       material_figures_button: function (id) {
         return _matRowActionAnchor(id, ".admin-figures-btn");
       },
+      // 図を深く検討（materials.deliberate_figure）: 図モーダル内の最初の「深く検討」。
+      figure_deliberate_button: function () { return document.querySelector(".figure-deliberate-btn"); },
       // W層/開幕素材レビュー: 教材行の「検出要素」ボタン（要素インベントリを開く）。
       material_inventory_button: function (id) {
         return _matRowActionAnchor(id, ".admin-inventory-btn");

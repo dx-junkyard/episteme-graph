@@ -537,14 +537,25 @@ class TestRelatedPayload:
         assert body["available"] is True
         assert body["modules"] == [
             {"module_key": "k1", "documents": [{"title": "Paper B"}]},
-            {"module_key": "k2", "documents": []},
         ]
+        # 相手のないモジュールは行にしない（第 15 周 te-02 seq17）。照合した key は別キーで残す。
+        assert body["checked_module_keys"] == ["k1", "k2"]
         assert body["hidden"] is True
         assert body["facts"] == [tm_related.FACT_RELATED_HIDDEN]
 
     def test_inner_rows_are_not_listed(self):
         body = _payload([_own("m1", key="k1"), _own("i1", level="inner", key="ki")], [])
+        assert body["modules"] == []
+        assert body["checked_module_keys"] == ["k1"]
+        assert body["facts"] == [tm_related.FACT_RELATED_NONE]
+
+    def test_duplicate_outer_rows_fold_into_one_line(self):
+        body = _payload(
+            [_own("m1", key="k1"), _own("m1b", key="k1")],
+            [_match("x1", OTHER_DOC)],
+        )
         assert [m["module_key"] for m in body["modules"]] == ["k1"]
+        assert body["checked_module_keys"] == ["k1"]
 
     def test_untitled_document_is_not_silently_dropped(self):
         body = _payload([_own("m1")], [_match("x1", OTHER_DOC)], titles={OTHER_DOC: ""})
@@ -556,7 +567,7 @@ class TestRelatedPayload:
             [_own("m1")], [_match("x1", OTHER_DOC)],
             decisions={key: {"dismissed": True, "rejected_module_ids": set()}},
         )
-        assert body["modules"][0]["documents"] == []
+        assert body["modules"] == []
         assert body["hidden"] is False
 
     def test_rejected_own_link_hides_all_partners(self):
@@ -565,7 +576,7 @@ class TestRelatedPayload:
             [_own("m1")], [_match("x1", OTHER_DOC)],
             decisions={key: {"dismissed": False, "rejected_module_ids": {"m1"}}},
         )
-        assert body["modules"][0]["documents"] == []
+        assert body["modules"] == []
 
     def test_rejected_partner_link_hides_only_that_partner(self):
         key = library_schema.build_structural_candidate_key(FP)
@@ -650,7 +661,7 @@ class TestRelatedForDocument:
             session, DOC, rule_version=RULE, can_view=lambda d: False
         )
         assert not any("FROM documents" in sql for sql in session.statements)
-        assert body["modules"][0]["documents"] == []
+        assert body["modules"] == []
         assert body["hidden"] is True
 
     def test_no_saved_rows_issues_no_matching_query(self):
@@ -797,3 +808,17 @@ class TestLearnerReadersIgnoreModuleLinks:
         with pytest.raises(ElementResolutionError) as excinfo:
             refs.resolve("theory_module", "m1", document_id=DOC)
         assert excinfo.value.kind == "invalid"
+
+
+class TestRelatedNoneFact:
+    """第 14 周: 相手が 1 件も無いとき、列挙を空のまま黙らない（閉世界の事実文）。"""
+
+    def test_none_fact_when_no_partner(self):
+        body = _payload([_own("m1", key="k1")], [])
+        assert body["available"] is True
+        assert body["facts"] == [tm_related.FACT_RELATED_NONE]
+        assert "m2:" not in "".join(body["facts"])
+
+    def test_no_none_fact_when_partner_listed(self):
+        body = _payload([_own("m1")], [_match("x1", OTHER_DOC)])
+        assert tm_related.FACT_RELATED_NONE not in body["facts"]

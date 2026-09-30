@@ -163,7 +163,7 @@ class LLMIntentResponse(BaseModel):
     capability_id を返しても、サーバ側 registry で再検証して fail-closed に落とす（P1）。
     """
 
-    intent: str = Field(default=INTENT_CLARIFY, description="guidance | locate | action | clarify")
+    intent: str = Field(default=INTENT_CLARIFY, description="guidance | locate | action | clarify | status_query")
     capability_id: str = Field(default="", description="解決した capability id（無ければ空）")
     answer: str = Field(default="", description="ユーザーへの自然言語応答")
     needs_clarification: bool = Field(default=False)

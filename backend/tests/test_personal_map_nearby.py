@@ -1836,3 +1836,14 @@ class TestGuardrails:
             & (set(THEORY_STAGE_LABELS.values()) | set(VERIFICATION_STATUS_LABELS_LEDGER.values()))
         )
         assert duplicated == [], f"訳語をリテラルで再定義している: {duplicated}"
+
+
+def test_range_lists_papers_without_graph_by_title():
+    """第 14 周: グラフの無い論文を黙って欠かさず、タイトルで事実文にする。"""
+    from core.personal_graph.nearby import build_topic_range
+
+    dto = build_topic_range(
+        [], personal_nodes=[], ledger={}, topic_label="論文との議論",
+        fallback_fact="x", missing_graph_titles=["2606.00411v1"],
+    )
+    assert any("2606.00411v1" in f and "グラフがまだ作られていない" in f for f in dto["facts"])

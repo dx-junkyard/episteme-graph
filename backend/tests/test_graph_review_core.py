@@ -342,3 +342,15 @@ class TestSpokenMode:
             "doc-1", prior_messages=[], user_content="q", grounding_text="G",
         )
         assert result.reply == "結論です"
+
+
+def test_main_node_line_does_not_repeat_truncated_description():
+    """第 14 周: 「Theory basis: The delay…forma：The delay…channels.」の二重出力をしない。"""
+    from core.deliberation import graph_dialogue as gd
+
+    desc = "The delay-time distribution is a diagnostic signature of binary-black-hole formation channels."
+    graph = {"nodes": [{"component_id": "n1", "graph_layer": "main", "label": "Theory basis",
+                        "display_label": "Theory basis: " + desc[:60], "description": desc}], "edges": []}
+    text = gd.graph_grounding_to_text(gd.build_graph_grounding(graph))
+    assert f"- Theory basis：{desc}" in text
+    assert text.split("[解析")[0].count("The delay-time") == 1

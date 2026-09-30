@@ -180,7 +180,12 @@ class TestBuildReturnDoorVerbatim:
 
 class TestBuildTodaysWords:
     def test_empty_rows(self):
-        assert build_todays_words([]) == {"words": [], "truncated": False}
+        from core.cycle.schema import EMPTY_TODAYS_WORDS_FACT
+
+        # TRIAGE14: 空のときは事実文 note を添える（数字なし）。
+        assert build_todays_words([]) == {
+            "words": [], "truncated": False, "note": EMPTY_TODAYS_WORDS_FACT,
+        }
 
     def test_assistant_rows_are_excluded_even_if_present(self):
         """二重防御: SQL が user に絞っていても derive 側でも assistant を弾く。"""

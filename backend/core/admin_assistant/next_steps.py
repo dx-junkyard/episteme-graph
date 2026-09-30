@@ -674,7 +674,7 @@ def _eval_course_atlas_binding_stale(session, uid: str) -> list[tuple[NextStep, 
             target_id=cid,
             title=f"コース『{title}』の学習マップ対応を確認する",
             reason=(
-                f"コース『{title}』のトピック対応 {stale_count} 件が、"
+                f"コース『{title}』のトピック対応の一部が、"
                 "現在の地図に存在しない概念を指しています。"
             ),
             target={"course_id": cid},
@@ -754,7 +754,7 @@ def _eval_figure_unreviewed_modes(session, uid: str) -> list[tuple[NextStep, str
             rule_id=RULE_FIGURE_UNREVIEWED_MODES,
             target_id=doc_id,
             title=f"教材『{title}』の図・画像の分類を確認する",
-            reason=f"教材『{title}』に AI が分類した図・画像が {count} 件あり、まだ確認されていません。",
+            reason=f"教材『{title}』に、AI が分類してまだ確認されていない図・画像があります。",
             target={"material_id": doc_id},
             ctx={"material_id": material_row_id},
         )
@@ -1034,7 +1034,7 @@ def _eval_course_discuss_opening_unreviewed(session, uid: str) -> list[tuple[Nex
             target_id=cid,
             title=f"コース『{title}』の議論のきっかけを確認する",
             reason=(
-                f"コース『{title}』のソース論文に、未確認の議論のきっかけが {pending} 件あります。"
+                f"コース『{title}』のソース論文に、未確認の議論のきっかけがあります。"
             ),
             target={"course_id": cid, "material_id": ref_to_doc.get(anchor_ref, "")},
             # locate の行アンカーは教材一覧の data-material-id（= source_path）で

@@ -70,6 +70,9 @@ _KEYWORDS: dict[str, tuple] = {
     # N13/N31: 図分類レビュー・stumbles・schema-proposals（いずれも guidance_only）。
     # 「図」「提案」単体は他語（地図・検証提案 等）に部分一致するため複合語のみを使う。
     "materials.review_figures": ("図・画像", "図の分類", "画像の分類", "図分類"),
+    # 第 14 周 brain-te03 / product-1 seq109・114: 「図を深く検討」が分類確認へ誤ルーティング
+    # していた（深く検討への capability が無かった）。
+    "materials.deliberate_figure": ("図を深く検討", "図の深く検討", "深く検討", "図を検討", "図について対話"),
     "stumbles.view": ("つまづき", "つまずき", "未回答", "答えられなかった"),
     "schema_proposals.review": ("スキーマ提案", "スキーマ拡張", "shadow testing", "シャドーテスト"),
 }

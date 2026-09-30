@@ -468,6 +468,8 @@ class SourceTierItem(BaseModel):
     quote: str = ""   # 根拠本文の抜粋（出典カードの引用）
     meta: str = ""    # 出典メタ（ファイル名/節など）
     origin: str = "other_material"  # course_material（このコースの教材）| other_material（別の資料）
+    # 回答本文が [出典N] で引用したか（第 14 周）。False は「出所を決めたが本文では引用していない」。
+    cited: bool = True
 
 
 class LearningChatResponse(BaseModel):
@@ -1336,7 +1338,7 @@ class ComponentGraphResponse(BaseModel):
     # Reference index for evidence-link resolution: node/edge payloads carry
     # pipeline-internal IDs (atomic claim IDs, ev_NNNN evidence IDs,
     # derivation/step IDs) that have no DB table of their own and cannot be
-    # resolved by the frontend on its own. This maps only the referenced IDs
+    # resolved by the frontend on its own. This maps only the cited IDs
     # (never the whole stage_outputs) to a short human-readable snippet:
     # {"claims": {id: {"claim_id", "text"}}, "evidence": {id: {"text",
     # "block_id"}}, "derivations": {id: {"label", "kind", "operation"}}}.

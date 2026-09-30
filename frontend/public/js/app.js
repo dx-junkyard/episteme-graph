@@ -2895,7 +2895,8 @@
             escHtml(s.source_title || "不明な教材") +
             // 同じ論文からの出典を見分ける箇所の手がかり（節・冒頭。IK-0381）。
             (s.meta ? "・" + escHtml(s.meta) : "") +
-            (s.tier === "out_of_source" ? "（根拠なし）" : "") + '</span>';
+            (s.tier === "out_of_source" ? "（根拠なし）" : "") +
+            (s.cited === false ? "（本文では引用していません）" : "") + '</span>';
           if (i === weakestIdx && overall !== "approved") {
             html += '<span class="lx-weakest">← 全体格はこれに合わせる</span>';
           }
@@ -2924,6 +2925,7 @@
           html += '<span class="lx-src-badges">';
           if (s.origin) html += '<span class="lx-origin-badge">' + escHtml(ORIGIN_LABEL[s.origin] || s.origin) + '</span>';
           html += '<span class="lx-badge ' + c + '">' + escHtml(TIER_LABEL[s.tier] || s.tier) + '</span></span></div>';
+          if (s.cited === false) html += '<div class="lx-src-meta">この出典は回答本文では引用していません（回答の出所を決めた資料です）。</div>';
           if (s.meta) html += '<div class="lx-src-meta">' + escHtml(s.meta) +
             (s.tier === "source" ? "（未承認）" : "") + '</div>';
           if (s.tier === "out_of_source") {
@@ -5529,6 +5531,8 @@
     const chunkEl = token.closest ? token.closest("[data-chunk-id]") : null;
     const equationEl = token.closest ? token.closest("[data-equation-id]") : null;
     const params = new URLSearchParams({ symbol: symbolText });
+    // 第 15 周: 表示中トピックの論文から定義を引く（別の論文の同名記号を出さない）。
+    if (state.currentTopicId) params.set("topic_id", state.currentTopicId);
     if (equationEl) {
       const eqId = equationEl.getAttribute("data-equation-id") || "";
       if (eqId) params.set("equation_id", eqId);
@@ -8371,14 +8375,17 @@
   function elementContextApiPath(elementType, elementId) {
     var seg = MATERIAL_ELEMENT_CONTEXT_PATHS[elementType];
     if (!seg || !elementId || !state.courseId) return "";
-    return "/learning/courses/" + state.courseId + seg + encodeURIComponent(elementId) + "/context";
+    // 第 15 周: 式 ID は印字番号由来で論文をまたいで衝突する（eq_5）— 表示中トピックの
+    // 論文で先に解決させる（別論文の「式 (5)」の文脈を出さない）。
+    var q = state.currentTopicId ? "?topic_id=" + encodeURIComponent(state.currentTopicId) : "";
+    return "/learning/courses/" + state.courseId + seg + encodeURIComponent(elementId) + "/context" + q;
   }
 
   async function fetchElementContextAndRender(pop, body, elementType, elementId) {
     if (!body) return;
     var path = elementContextApiPath(elementType, elementId);
     if (!path) { body.textContent = MATERIAL_ELEMENT_CONTEXT_UNAVAILABLE; return; }
-    var cacheKey = elementType + ":" + elementId;
+    var cacheKey = elementType + ":" + elementId + ":" + (state.currentTopicId || "");
     if (Object.prototype.hasOwnProperty.call(materialElementContextCache, cacheKey)) {
       renderElementContextPanel(pop, body, elementType, materialElementContextCache[cacheKey]);
       return;
@@ -8561,6 +8568,13 @@
             return;
           }
           ladder = data;
+          if (data.target_label) {
+            // どの要素の段かを先頭に示す（サーバが解決した表示ラベルの素通し）。
+            const target = document.createElement("div");
+            target.className = "descent-target";
+            target.textContent = "対象: " + data.target_label;
+            rungsBox.parentNode.insertBefore(target, rungsBox);
+          }
         } catch (_) {
           frame.remove();
           return;
@@ -8632,6 +8646,7 @@
         node.appendChild(row);
       });
       addLine(node, "descent-rung-note", rung.note);
+      addLine(node, "descent-rung-note", rung.reason);
     } else {
       // recall_prompt（1段目の想起プロンプト）と未知 kind は text をそのまま出す。
       addLine(node, "descent-rung-text", rung.text);

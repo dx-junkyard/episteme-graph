@@ -400,11 +400,33 @@ def generate_tts(
     )
 
 
+AUDIO_NOT_GENERATED_NOTE = (
+    "このトピックの読み上げ音声はまだ用意されていません。レクチャーは表示だけで進みます。"
+)
+AUDIO_STALE_LANGUAGE_NOTE = (
+    "このトピックの読み上げ音声は、いまの講義言語に合わせてまだ作り直されていません。"
+)
+
+
 @router.get("/courses/{course_id}/topics/{topic_id}/audio-status")
 def get_topic_audio_status(
     course_id: str,
     topic_id: str,
     current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """音声の有無に、無いときの事実文 ``note`` を添える（TRIAGE14 st-08・数値でなく文）。"""
+    payload = _topic_audio_status_payload(course_id, topic_id, current_user)
+    if not payload.get("has_audio"):
+        payload["note"] = (
+            AUDIO_STALE_LANGUAGE_NOTE if payload.get("stale_language") else AUDIO_NOT_GENERATED_NOTE
+        )
+    return payload
+
+
+def _topic_audio_status_payload(
+    course_id: str,
+    topic_id: str,
+    current_user: dict,
 ) -> dict:
     """トピックに再生可能（キャッシュ済み）な音声があるかを軽量に判定する。
 

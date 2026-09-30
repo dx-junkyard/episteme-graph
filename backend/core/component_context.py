@@ -498,7 +498,135 @@ def _visible_lane(items: Any) -> list[dict]:
     return learner_context_common.visible_lane_items(items, project=_project_context_item)
 
 
-def _build_graph(component_db_id: str, document_id: str) -> dict | None:
+#: 依存先 component の関係語（W層 ``context_lens`` の ``requires`` と同じ語）。
+_DEPENDENCY_RELATION_LABEL = "を前提とする"
+_DEPENDENCY_RELATION_STATUS = "source_backed"
+
+
+def _dependency_agent_refs(assembly_record: dict) -> list[str]:
+    refs: list[str] = []
+    for dep in _json_list(assembly_record.get("dependencies")):
+        if not isinstance(dep, dict):
+            continue
+        for ref in _json_list(dep.get("component_refs")):
+            key = str(ref or "").strip()
+            if key and key not in refs:
+                refs.append(key)
+    return refs
+
+
+def _resolve_live_components(document_id: str, agent_refs: list[str]) -> dict[str, dict]:
+    """agent 側 component ID → 同じ論文の live component 行（``{id, name}``）。
+
+    ``document_id`` を WHERE に直接含める（agent ID は論文ごとに独立採番され衝突する）。
+    1つの ref が複数行に当たるときは解決しない（どれを指すか決められない — fail-closed）。
+    """
+    if not document_id or not agent_refs:
+        return {}
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT id::text AS id, name, source_scope
+                FROM theory_components_live
+                WHERE document_id = CAST(:document_id AS uuid)
+                  AND source_scope->'legacy_ids' ?| CAST(:refs AS text[])
+                """
+            ),
+            {"document_id": document_id, "refs": list(agent_refs)},
+        ).mappings().fetchall()
+    finally:
+        session.close()
+    hits: dict[str, list[dict]] = {}
+    wanted = set(agent_refs)
+    for row in rows or []:
+        row = dict(row)
+        for legacy_id in _json_list(_json_dict(row.get("source_scope")).get("legacy_ids")):
+            key = str(legacy_id or "").strip()
+            if key in wanted:
+                hits.setdefault(key, []).append(row)
+    return {k: v[0] for k, v in hits.items() if len({r["id"] for r in v}) == 1}
+
+
+def _dependency_lane_items(
+    component_db_id: str, document_id: str, assembly_record: dict
+) -> tuple[list[dict], bool]:
+    """第 15 周: 依存先 component を同じ論文の live 行へ解決し、辿れる項目にする。
+
+    W層の依存項目はグラフのノードに無い component を ``id=None``（「関連する論理要素」）
+    で出すため、学習者の 1 hop が成立しなかった。A層の ``dependencies`` の
+    agent ID を当該論文の live component に解決できたものだけを navigable で足す。
+    """
+    refs = _dependency_agent_refs(assembly_record)
+    if not refs:
+        return [], False
+    try:
+        resolved = _resolve_live_components(document_id, refs)
+    except Exception:  # noqa: BLE001 - fail-soft（W層の項目のまま）
+        logger.warning("component_context: dependency resolve failed for %s", document_id, exc_info=True)
+        return [], False
+    items: list[dict] = []
+    for ref in refs:
+        row = resolved.get(ref)
+        if not row or str(row.get("id")) == component_db_id:
+            continue
+        entry = _project_context_item(
+            {
+                "element_type": ELEMENT_THEORY_COMPONENT,
+                "element_id": str(row["id"]),
+                "label": str(row.get("name") or ""),
+                "relation_label": _DEPENDENCY_RELATION_LABEL,
+                "relation_status": _DEPENDENCY_RELATION_STATUS,
+            }
+        )
+        if entry is not None:
+            items.append(entry)
+    return items, all(ref in resolved for ref in refs)
+
+
+def _merge_lane(
+    lane: list[dict], extra: list[dict], *, drop_unresolved_components: bool = False
+) -> list[dict]:
+    """辿れる依存項目を足し、重複（同じ種別・ID・ラベル・関係語）を畳む。
+
+    ``drop_unresolved_components``: 依存先をすべて live 行へ解決できたときだけ、
+    W層が出した id なしの component 項目（「関連する論理要素」= 同じ依存の未解決版）を
+    外す。一部しか解けないときは残す（情報を落とさない）。
+    """
+    resolved_ids = {str(e.get("id")) for e in extra if e.get("id")}
+    merged: list[dict] = []
+    seen: set[tuple] = set()
+    for entry in list(extra) + list(lane):
+        is_component = entry.get("element_type") == ELEMENT_THEORY_COMPONENT
+        if (
+            is_component
+            and drop_unresolved_components
+            and not entry.get("navigable")
+            and not entry.get("id")
+        ):
+            # 解決済みの依存項目で置き換えられた「関連する論理要素」（id なし）。
+            continue
+        if entry.get("id") and str(entry.get("id")) in resolved_ids and entry not in extra:
+            continue
+        key = (
+            entry.get("element_type"),
+            str(entry.get("id") or ""),
+            str(entry.get("label") or ""),
+            str(entry.get("relation_label") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(entry)
+        if len(merged) >= learner_context_common.LANE_MAX:
+            break
+    return merged
+
+
+def _build_graph(
+    component_db_id: str, document_id: str, assembly_record: dict | None = None
+) -> dict | None:
     try:
         ref = ElementRef(
             scope=SCOPE_DOCUMENT,
@@ -515,10 +643,15 @@ def _build_graph(component_db_id: str, document_id: str) -> dict | None:
     if not result:
         return None
     focus = _json_dict(result.get("focus"))
+    extra, all_resolved = _dependency_lane_items(
+        component_db_id, document_id, assembly_record or {}
+    )
     return {
         "focus": {"id": component_db_id, "label": str(focus.get("label") or "")},
-        "upper": _visible_lane(result.get("upper")),
-        "lower": _visible_lane(result.get("lower")),
+        "upper": _merge_lane(_visible_lane(result.get("upper")), []),
+        "lower": _merge_lane(
+            _visible_lane(result.get("lower")), extra, drop_unresolved_components=all_resolved
+        ),
     }
 
 
@@ -611,6 +744,6 @@ def build_component_context(
         "component_id": component_db_id,
         "instance": instance,
         "shared_part": _build_shared_part(component_db_id, document_id, agent_ids),
-        "graph": _build_graph(component_db_id, document_id),
+        "graph": _build_graph(component_db_id, document_id, assembly_record),
     }
     return _strip_confidence(result)

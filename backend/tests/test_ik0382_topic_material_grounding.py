@@ -98,7 +98,7 @@ def chat_env(monkeypatch):
 
     def _generate_text(**kwargs):
         captured["messages"] = kwargs.get("messages")
-        return "回答本文"
+        return "回答本文 [出典1]"
 
     monkeypatch.setattr(learning_mod, "generate_text", _generate_text)
     persist_mock = MagicMock(return_value={"user_message_id": "msg-1"})
@@ -183,3 +183,15 @@ class TestRouteGrounding:
         )
         resp = _ask("空間が伸びるなら、銀河そのものの大きさも伸びているんですか。")
         assert resp.content_grounding == "other_material"
+
+
+class TestUncitedAnswerIsModelGenerated:
+    """TRIAGE14: 検索で出典を採用しても本文が1つも引用していなければ model_generated。"""
+
+    def test_uncited_course_chunk_answer_is_model_generated(self, chat_env, monkeypatch):
+        monkeypatch.setattr(
+            learning_mod, "search_chunks_with_metadata", lambda *a, **k: [_chunk("mat-course")]
+        )
+        monkeypatch.setattr(learning_mod, "generate_text", lambda **k: "一般的な説明です")
+        resp = _ask("空間が伸びるなら、銀河そのものの大きさも伸びているんですか。")
+        assert resp.content_grounding == "model_generated"

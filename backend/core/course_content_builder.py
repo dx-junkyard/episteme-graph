@@ -32,7 +32,7 @@ from core.llm import generate_text, generate_text_with_structured_output, get_ll
 from core.llm_usage.context import usage_context
 from core.llm_worker.single_shot import structured_call
 from core.postgres import get_session as _pg_session
-from core.text_excerpt import excerpt, looks_like_tex_math
+from core.text_excerpt import excerpt, looks_like_tex_math, normalize_source_line_breaks
 from core.text_hygiene import (
     INTERNAL_FORMULA_PLACEHOLDER_TEXT,
     UNTRUSTED_SOURCE_NOTICE,
@@ -1797,6 +1797,40 @@ def _section_unit_refs(
     )
 
 
+#: 単位の主張から引く部品（component）の上限（1 トピックに並べて読める量）。
+_CLAIM_LINKED_COMPONENT_LIMIT = 4
+
+
+def _components_linked_to_claims(
+    claim_refs: list[tuple[str, str]],
+    scope: "_BundleScope",
+    *,
+    exclude: set[int] | None = None,
+) -> list[dict]:
+    """``(document_id, claim_id)`` を ``linked_claim_ids`` に持つ component（同じ論文の中だけ）。
+
+    並びは主張の並び → artifact の並び。上限を超えた分は落とすだけ（件数は外に出さない）。
+    """
+    wanted: dict[str, list[str]] = {}
+    for doc, claim_id in claim_refs or []:
+        wanted.setdefault(doc, []).append(str(claim_id))
+    picked: list[dict] = []
+    seen = set(exclude or set())
+    for doc, claim_ids in wanted.items():
+        order = {cid: i for i, cid in enumerate(claim_ids)}
+        ranked: list[tuple[int, int, dict]] = []
+        for pos, (_cid, component) in enumerate(scope.iter_kind("components", doc)):
+            if id(component) in seen:
+                continue
+            hits = [order[c] for c in (str(x) for x in _as_list(component.get("linked_claim_ids"))) if c in order]
+            if hits:
+                ranked.append((min(hits), pos, component))
+        for _rank, _pos, component in sorted(ranked, key=lambda e: (e[0], e[1])):
+            seen.add(id(component))
+            picked.append(component)
+    return picked[:_CLAIM_LINKED_COMPONENT_LIMIT]
+
+
 def _thesis_text_key(text: object) -> str:
     """thesis ノードを本文で引くキー（空白を畳んだ本文。空なら空文字）。"""
     normalized = " ".join(str(text or "").split())
@@ -2160,6 +2194,15 @@ def _enrich_topics(
                     continue
                 known_equation_ids.add(eq_id)
                 equations.append(equation)
+        # 章立て・支持構造・図の単位は component を束ねない。単位から引いた主張を
+        # ``linked_claim_ids`` に持つ component（同じ論文の中だけ）を、根拠チップ・
+        # content_blocks の部品投影に足す（TRIAGE14: 部品 ⚓ が 1 つも出ず、部品の
+        # 文脈へ入れなかった）。結びつきは A層の claim 参照だけ（推定しない）。
+        # 散文（summary / content）は変えない — 教員が選んだ単位の説明を保つ。
+        claim_linked_components = _components_linked_to_claims(
+            section_claim_refs, scope, exclude=seen_components
+        ) if unit_rows and not components else []
+        projected_components = components + claim_linked_components
         # 選んだ単位の document が決まらない（行に document が無い / コースの解析結果に
         # その document が無い）ときは、別論文から式・主張・原文を借りない — 空のまま
         # 事実を残す（IK-0377。原則8）。
@@ -2194,7 +2237,7 @@ def _enrich_topics(
         teaching_takeaways = _as_str_list([c.get("teaching_takeaway") for c in components if c.get("teaching_takeaway")])
         evidence_ids = _linked_ids(components, "linked_evidence_ids")
         evidence_links = _topic_evidence_links(
-            components,
+            projected_components,
             equations,
             bundle.get("claims") or {},
             bundle.get("evidence") or {},
@@ -2282,6 +2325,7 @@ def _enrich_topics(
                 assessment_prompts,
                 relevant_formulas,
                 display_labels=display_labels,
+                projected_components=claim_linked_components,
                 component_label_for=lambda doc, cid: (
                     (scope.get("components", doc, cid) or {}).get("label") or ""
                 ),
@@ -2293,7 +2337,10 @@ def _enrich_topics(
             "expected_misconceptions": _as_str_list(
                 mapping_for_prose.get("expected_misconceptions") if mapping_for_prose else []
             ),
-            "linked_component_ids": component_ids,
+            "linked_component_ids": list(dict.fromkeys(
+                component_ids
+                + [str(c.get("component_id") or "") for c in claim_linked_components if c.get("component_id")]
+            )),
             "linked_equation_ids": [str(e.get("equation_id") or e.get("id")) for e in equations if e.get("equation_id") or e.get("id")],
             "linked_claim_ids": list(dict.fromkeys(
                 _linked_ids(components, "linked_claim_ids")
@@ -3008,6 +3055,13 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
             continue
         seen.add(key)
         deduped.append(item)
+    # 原文の行分割（図キャプションの 1 語ごとの改行・行末ハイフン）を表示前に畳む
+    # （TRIAGE14。LLM を呼ばない決定論の正規化・式の latex には触れない）。
+    for item in deduped:
+        for field in ("title", "summary", "caption"):
+            value = item.get(field)
+            if isinstance(value, str) and value:
+                item[field] = normalize_source_line_breaks(value)
     return deduped
 
 
@@ -3841,8 +3895,12 @@ def _content_blocks(
     *,
     display_labels: dict[str, str] | None = None,
     component_label_for: Any = None,
+    projected_components: list[dict] | None = None,
 ) -> list[dict]:
     """トピックの構造化本文ブロック。
+
+    ``projected_components`` は単位の主張から引いた部品（散文には使わず、部品の
+    投影 = ⚓ チップの材料にだけ足す）。
 
     ``fallback_formulas`` はチャンク由来の数式（equation_semantics を通っていない
     もの）の補充枠。**そのトピックが参照する式だけ**を渡すこと（正本は
@@ -3900,10 +3958,13 @@ def _content_blocks(
         blocks.append({"type": "summary", "text": summary})
     if learning_objectives:
         blocks.append({"type": "learning_objectives", "items": learning_objectives})
-    if components:
+    projected = list(components) + [
+        c for c in (projected_components or []) if not any(c is x for x in components)
+    ]
+    if projected:
         blocks.append({
             "type": "components",
-            "items": [_component_item(c) for c in components[:5]],
+            "items": [_component_item(c) for c in projected[:5]],
         })
     equation_items = [
         {
@@ -5500,6 +5561,7 @@ def _ensure_required_equations_in_material(result: dict, topic: dict) -> None:
     missing = [
         item for item in required
         if item.get("equation_id") and f"![[equation:{item['equation_id']}]]" not in source_text
+        and not _is_unmentioned_parameter_value(item, source_text)
     ]
     if not missing:
         material["source_text"] = source_text
@@ -5526,6 +5588,25 @@ def _ensure_required_equations_in_material(result: dict, topic: dict) -> None:
         if renderable:
             lines.append(f"![[equation:{eq_id}]]")
     material["source_text"] = "\n".join(line for line in lines if line is not None).strip()
+
+
+_PARAMETER_VALUE_RE = re.compile(r"^([A-Za-z])(?:_\{?[A-Za-z0-9]\}?)?=[0-9.]+$")
+
+
+def _is_unmentioned_parameter_value(item: dict, source_text: str) -> bool:
+    """第 15 周: 1 文字記号に数値を置いただけの式（``N = 15``）で、本文がその記号に
+    触れていないものは付録「この節で使う数式」に足さない。
+
+    式自体は正しい式として残す（IK-0429 の判定・content_blocks は非改変）。付録は
+    「本文で使う式」の一覧なので、本文に出てこない設定値を末尾に貼らない。
+    """
+    compact = _compact_math(_equation_body_text(item)).rstrip(".,;:")
+    match = _PARAMETER_VALUE_RE.match(compact)
+    if not match:
+        return False
+    symbol = match.group(1)
+    body = re.sub(r"!\[\[[^\]]*\]\]", " ", str(source_text or ""))
+    return not re.search(r"(?<![A-Za-z\\])" + re.escape(symbol) + r"(?![A-Za-z])", body)
 
 
 def _appendix_equation_label(item: dict, eq_id: str, inline: str = "") -> str:

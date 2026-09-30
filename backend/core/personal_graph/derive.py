@@ -79,6 +79,12 @@ def _tension_label(payload: dict) -> str:
     return _truncate(payload.get("text"))
 
 
+# discuss の予約疑似トピック（正本 core/discuss/context.py。derive は純関数なので
+# 定数だけを持つ — 一致は test_personal_graph_derive.py が固定する）。
+_DISCUSSION_TOPIC_ID = "_discussion"
+_DISCUSSION_TOPIC_LABEL = "論文との議論"
+
+
 def _topic_anchor(
     topic_id: str,
     topic_atlas: dict[str, str],
@@ -91,10 +97,15 @@ def _topic_anchor(
     {topic_id: title}）。題名が引けない topic（コース削除済み・title 未設定）は
     従来どおり空文字のまま — 発話原文などの別テキストで埋めない（捏造しない・P4）。
     """
+    label = (topic_labels or {}).get(topic_id, "")
+    if not label and topic_id == _DISCUSSION_TOPIC_ID:
+        # 第 14 周: discuss の予約疑似トピックはコースの topics[] に無いので題名が
+        # 引けない。表示名の正本（core/discuss/context.py）と同じ語を入れる。
+        label = _DISCUSSION_TOPIC_LABEL
     return PersonalAnchor(
         anchor_type=ANCHOR_TYPE_TOPIC,
         anchor_id=topic_id,
-        anchor_label=(topic_labels or {}).get(topic_id, ""),
+        anchor_label=label,
         atlas_node_id=topic_atlas.get(topic_id),
     )
 

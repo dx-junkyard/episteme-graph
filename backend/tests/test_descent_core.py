@@ -509,3 +509,35 @@ class TestBackstagePath:
         blob = str(path)
         for hidden in ("候補の説明", "文脈説明", "議論のきっかけ"):
             assert hidden not in blob, f"非承認/対象外の説明 {hidden!r} が漏れている"
+
+
+class TestLadderTargetAndEmptyReason:
+    """第 14 周: どの要素の段か（target_label）と、導出が空になった理由を出す。"""
+
+    def test_target_label_is_returned_when_given(self):
+        reveal = {"kind": "reveal", "items": [], "note": REVEAL_NOTE_EMPTY}
+        ladder = compose_ladder(
+            "claim", stage_label="", stage_description="", symbol_items=[],
+            reveal=reveal, target_label="暗黒エネルギーは修正重力で記述できる",
+        )
+        assert ladder["target_label"].startswith("暗黒エネルギー")
+
+    def test_no_target_label_key_when_empty(self):
+        reveal = {"kind": "reveal", "items": [], "note": REVEAL_NOTE_EMPTY}
+        ladder = compose_ladder(
+            "claim", stage_label="", stage_description="", symbol_items=[], reveal=reveal,
+        )
+        assert "target_label" not in ladder
+
+    def test_empty_reveal_reason_distinguishes_missing_equation_link(self):
+        from core.descent.engine import (
+            REVEAL_REASON_NO_EQUATION_LINK, REVEAL_REASON_NO_STEP, _reveal_rung,
+        )
+        assert _reveal_rung([], [], {})["reason"] == REVEAL_REASON_NO_EQUATION_LINK
+        assert _reveal_rung([], ["eq_1"], {})["reason"] == REVEAL_REASON_NO_STEP
+
+    def test_reveal_with_items_has_no_reason(self):
+        from core.descent.engine import _reveal_rung
+        chains = [{"steps": [{"input_equation_ids": ["eq_1"], "output_equation_ids": [],
+                              "operation": "derive", "reason": "r"}]}]
+        assert "reason" not in _reveal_rung(chains, ["eq_1"], {})

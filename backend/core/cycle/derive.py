@@ -11,6 +11,7 @@ from typing import Any
 
 from core.cycle.schema import (
     EMPTY_DOOR_FACT,
+    EMPTY_TODAYS_WORDS_FACT,
     EMPTY_DOOR_HINT,
     FILLER_PREFIXES,
     FILLER_SHORT_MAX_CHARS,
@@ -252,7 +253,10 @@ def build_todays_words(
             "topic_label": labels.get(str(row.get("topic_id") or ""), ""),
             "created_at": row.get("created_at", ""),
         })
-    return {"words": words, "truncated": truncated}
+    result: dict = {"words": words, "truncated": truncated}
+    if not words:
+        result["note"] = EMPTY_TODAYS_WORDS_FACT
+    return result
 
 
 def build_intention_dto(carryover_row: dict | None, has_any_intention: bool) -> dict[str, Any]:

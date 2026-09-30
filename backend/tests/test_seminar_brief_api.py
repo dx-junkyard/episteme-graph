@@ -261,11 +261,28 @@ class TestAvailabilityDegrade:
         assert brief["reason"]
 
     def test_document_without_course_mapping_degrades_honestly(self):
-        session = _FakeSession(course_rows=[("",)])
+        session = _FakeSession(course_rows=[("",)], ledger_rows=())
         brief = sb.build_seminar_brief(session, "doc-1")
         assert brief["available"] is False
         assert brief["document_id"] == "doc-1"
-        assert brief["reason"]
+        assert brief["reason"] == sb.REASON_NO_LEDGER
+        assert "完了後にもう一度" not in brief["reason"]
+
+    def test_course_less_document_with_ledger_rows_is_available(self, monkeypatch):
+        """第 14 周: パイプライン由来（course_id 空）でも台帳があればブリーフを出す。"""
+        session = _FakeSession(course_rows=[("",)], ledger_rows=[("",)])
+        seen = {}
+
+        def _compile(_s, course_id, **kw):
+            seen["course"] = course_id
+            seen["doc"] = kw.get("document_id")
+            return []
+
+        monkeypatch.setattr(sb, "compile_open_assumptions", _compile)
+        monkeypatch.setattr(sb, "_single_support_lines", lambda *a, **k: [])
+        brief = sb.build_seminar_brief(session, "doc-1")
+        assert brief["available"] is True
+        assert seen == {"course": "", "doc": "doc-1"}
 
     def test_empty_ref_degrades_honestly(self):
         brief = sb.build_seminar_brief(_FakeSession(), "")

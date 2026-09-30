@@ -1524,7 +1524,7 @@ def get_material(
                     FROM chunks
                     GROUP BY material_id
                 ) cs ON cs.material_id = d.source_path
-                WHERE d.source_path = :material_id
+                WHERE (d.source_path = :material_id OR d.id::text = :material_id)
                   AND (
                       d.uploaded_by = CAST(:user_id AS uuid)
                       OR d.visibility = 'public'
@@ -1532,10 +1532,15 @@ def get_material(
                       OR {course_mat_clause}
                       OR {doc_perm_clause}
                   )
+                ORDER BY (d.source_path = :material_id) DESC
                 LIMIT 1
             """),
             params,
         ).fetchone()
+        # 教材一覧の document_id（UUID）でも開けるよう、以降は material_id（source_path）に揃える
+        # （第 15 周 te-04 seq25: 一覧の ID で詳細が 404 になった）。
+        if record and record[0]:
+            material_id = str(record[0])
         # Tier3-16: list_materials と同じ projector 導出で run を反映する
         # （従来 get_material は run を一切見ておらず、一覧と詳細の status が
         # 食い違うバグがあった。同一セッション内で1回だけ追加で投影する）。
@@ -1544,7 +1549,10 @@ def get_material(
         session.close()
 
     if not record:
-        raise HTTPException(status_code=404, detail="Material not found")
+        raise HTTPException(
+            status_code=404,
+            detail="指定された教材が見つからないか、閲覧できる教材ではありません。",
+        )
 
     kg = record[5] if record[5] else None
 

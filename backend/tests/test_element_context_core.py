@@ -76,6 +76,7 @@ class _ClaimTableFakeSession:
                         "id": row.get("id"),
                         "document_id": row.get("document_id"),
                         "id_match": str(row.get("id")) == raw_id,
+                        "parent_claim_id": row.get("parent_claim_id"),
                     }
                 )
         # ORDER BY (id::text = :raw_id) DESC, document_id ASC, created_at ASC, id::text ASC
@@ -195,6 +196,18 @@ class TestResolveClaim:
         element_context._resolve_claim("claim_span_007", {_DOC_A})
 
         assert "uuid_id" not in fake.execute_calls[0]
+
+
+class TestResolveClaimParentChild:
+    def test_atomic_child_wins_over_parent_holding_its_id(self, monkeypatch):
+        """親 claim が子の agent ID を legacy_ids に持っていても、子に解決する（TRIAGE14）。"""
+        rows = [
+            _claim_row(id="parent-uuid", legacy_ids=["claim_span_001_112", "claim_span_001_112_sub02"]),
+            _claim_row(id="child-uuid", legacy_ids=["claim_span_001_112_sub02"], parent_claim_id="parent-uuid"),
+        ]
+        fake = _ClaimTableFakeSession(rows)
+        monkeypatch.setattr(element_context, "get_session", lambda: fake)
+        assert element_context._resolve_claim("claim_span_001_112_sub02", {_DOC_A}) == ("child-uuid", _DOC_A)
 
 
 class TestResolveClaimAmbiguity:
@@ -1693,3 +1706,32 @@ class TestLearnerDtoHasNoInternalIdsOrTex:
 
         assert "contextual_role" not in result["focus"]
         assert "contextual_role_source" not in result["focus"]
+
+
+class TestResolveEquationCrossPaperCollision:
+    """第 15 周: 式 ID は印字番号由来（eq_5）で論文をまたいで衝突する。"""
+
+    def _records(self):
+        return {_DOC_A: [{"equation_id": "eq_5"}], _DOC_B: [{"equation_id": "eq_5"}]}
+
+    def test_topic_document_wins(self, monkeypatch):
+        records = self._records()
+        _patch_equation_lookup(monkeypatch, lambda doc: records.get(doc, []))
+        assert element_context._resolve_equation(
+            "eq_5", {_DOC_A, _DOC_B}, {_DOC_B}
+        ) == ("eq_5", _DOC_B)
+        assert element_context._resolve_equation(
+            "eq_5", {_DOC_A, _DOC_B}, {_DOC_A}
+        ) == ("eq_5", _DOC_A)
+
+    def test_ambiguous_without_preference_is_not_resolved(self, monkeypatch):
+        records = self._records()
+        _patch_equation_lookup(monkeypatch, lambda doc: records.get(doc, []))
+        assert element_context._resolve_equation("eq_5", {_DOC_A, _DOC_B}) is None
+
+    def test_preference_outside_course_is_ignored(self, monkeypatch):
+        records = {_DOC_A: [{"equation_id": "eq_5"}]}
+        _patch_equation_lookup(monkeypatch, lambda doc: records.get(doc, []))
+        assert element_context._resolve_equation(
+            "eq_5", {_DOC_A}, {_DOC_B}
+        ) == ("eq_5", _DOC_A)
