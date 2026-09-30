@@ -164,7 +164,7 @@
 | 族の名 | 正本の分裂 |
 | 一般形 | 同じ事実・判定・部品の正本が複数あり、または投影が正本を名乗る |
 | 主に効く軸 | `structure.aggregation` / `structure.responsibility` |
-| 含む型 | `duplicate-canonical-sources` / `projection-mistaken-for-source` / `destructive-action-without-confirmation` |
+| 含む型 | `duplicate-canonical-sources` / `projection-mistaken-for-source` / `destructive-action-without-confirmation` / `rule-enforced-per-surface` |
 
 #### duplicate-canonical-sources
 
@@ -201,6 +201,18 @@
 | 典型的な解決観点 | `canonical_source`（確認部品を境界の外へ公開）+ `guardrail_fix` |
 | 見分け方 | 同じ重大度の操作を横に並べたとき確認水準が揃っているか。削除は丁寧で凍結は素、なら本型 |
 | 確かめ方 | 不可逆操作を全列挙し、各経路で同じ確認部品が呼ばれることを経路単位に見る（画面は 1 経路ずつ手動操作） |
+
+#### rule-enforced-per-surface
+
+| 項目 | 内容 |
+|---|---|
+| 一般形 | 同じ規則（遮断・対象の選び方・出力の組み立て）を全経路が通る 1 箇所に置かず消費面ごとに書き足すため、面ごとに語彙と優先順位が食い違い、規則を持たない新しい面から同型の欠陥が出続ける |
+| 典型的な座標 | 構造=aggregation+responsibility / 接続=contract / 統制=review（エントリの過半が持つ値。none の軸は省略） |
+| 一般化レベル | `general` |
+| 典型的な発見観点 | `inventory`（同型の是正を面ごとに並べて束ねる）/ `symptom_report`（別の画面から同じ症状が出続ける） |
+| 典型的な解決観点 | `canonical_source`（全経路が必ず通る 1 箇所に規則を置く）+ `guardrail_fix`（新しい面が 1 箇所を迂回できないことを全経路の走査で固定） |
+| 見分け方 | 同じ是正（同じマスク・同じ優先条件・同じ固定文）を別の面に書き足そうとしているか。`duplicate-canonical-sources` は正本が複数あって片方だけ更新される型、本型は正本が無く各面が自前で規則を持つ型 |
+| 確かめ方 | 規則を持たない新しい経路を試しに足して、横断ガードレールが赤になること（1 箇所を通らないと落ちること）を見る。旧来の面ごとの実装が 1 箇所への委譲だけになっている（同一オブジェクトを参照する）ことを検査する |
 
 ### missing-representation
 
@@ -427,7 +439,7 @@
 | 族の名 | 派生物と配線 |
 | 一般形 | 前段の更新が派生物に届かない、または素材・装置が呼び出し側に配線されず到達不能 |
 | 主に効く軸 | `connection.information` / `connection.version` |
-| 含む型 | `stale-derivative-served` / `available-but-unwired` / `last-mile-missing` / `context-lost-across-execution-boundary` |
+| 含む型 | `stale-derivative-served` / `available-but-unwired` / `last-mile-missing` / `context-lost-across-execution-boundary` / `upstream-loss-masked-downstream` |
 
 #### stale-derivative-served
 
@@ -476,6 +488,18 @@
 | 典型的な解決観点 | `carry_through`（値渡し）/ `order_and_budget`（境界の位置を決める） |
 | 見分け方 | 同じコードが同期呼び出しでは動き、非同期・ストリームでだけ落ちる |
 | 確かめ方 | 同期呼び出しではなく実際の非同期・ストリーム・別スレッドの経路で走らせ、帰属・上書きが保たれることを見る |
+
+#### upstream-loss-masked-downstream
+
+| 項目 | 内容 |
+|---|---|
+| 一般形 | 上流の段が入力の形式や条件のために失った情報を、下流の各面が読み替え・除外・代替表示で補うため、失われた情報そのものは戻らず、面を足すたびに同じ損失が別の症状で現れる |
+| 典型的な座標 | 処理=input_handling / 接続=information+condition（エントリの過半が持つ値。none の軸は省略） |
+| 一般化レベル | `general` |
+| 典型的な発見観点 | `inventory`（下流の是正を並べて上流の同じ段に遡る）/ `data_inspection`（同一の入力を別の形式で通して成果を比べる） |
+| 典型的な解決観点 | `carry_through`（損失の少ない入力と生成条件を上流から運ぶ）+ `order_and_budget`（倒し先への切り替えを同期で確かめ、呼び出しに上限を置く） |
+| 見分け方 | 下流の是正を外すと症状が戻り、同じ入力を上流で別の形式・条件で通すと症状が出ないか。出ないなら上流の損失を下流で隠している |
+| 確かめ方 | 同じ入力を上流の既定経路と倒し先の経路で通し、成果（構造の数・欠落・言語）を比べる。倒し先への切り替えが受理前に判定されること、外部への呼び出しが上限内に収まることを検査する |
 
 ## 統制
 

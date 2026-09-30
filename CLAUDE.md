@@ -402,6 +402,15 @@ class CartridgeContext:
   `detail` に載せない。UI アンカーは `materials.url-upload{,-modal,-submit}` +
   `llm-models.url-fetch-domain{s,-add,-remove}` の6件（件数の正はテスト）。
 - ガードレールは `test_url_fetch_{core,api,guardrails,ui_static}.py`。
+- **arXiv は TeX が既定・PDF は同期フォールバック（2026-09-30、`paper_radar_design.md` §15.9）**:
+  `pd_schema.DEFAULT_SOURCE_FORMAT = "tex"`。取得方針の正本は `api/source_resolution.py`
+  （`/src/` → マジックが PDF なら 1 回で終わり / gzip は `tex_archive.load_tex_archive` で**受理前に**
+  読めるか確かめ、読めない・404 のときだけ `/pdf/` = **1 件あたり最大 2 回**・**429
+  （`url_fetch.RateLimitedError`）では 2 回目を取らない**）。`/ingest`・キュー worker・汎用
+  「URLから取得」の arXiv URL（abs / pdf / src を書き換え）が通る。`documents.source_url` は実際に
+  バイト列を返した URL、応答に `effective_format` / `fell_back`。解析 run の生成言語
+  `options.language`（`ja` / `en`、再解析は継承）は discuss_opening・contextual_explanation の
+  指示だけを変え LLM 呼び出しを増やさない（`discuss_opening_authoring_design.md` §14）。
 
 ### 論文ディスカバリー層（arXiv 分野購読, migration 071/072, 2026-08-27）
 
@@ -1859,6 +1868,8 @@ role/confidence（`_best_mapping` の照合来歴 `exact_title|title_similarity|
   confidence キーは再帰除去（W8 相当）。
 - **トピック優先解決（2026-09-30）**: 式 ⚓ などの要素文脈は表示中トピックの論文で優先解決し、複数の論文に当たれば未解決にする
   （IK-0553）。component 文脈の依存先は同一論文の live component に解決して辿れる項目にする（IK-0554）。
+  **2026-09-30 以降この優先は焦点論文（下記「焦点論文」節・`core/focus_document.py`）に一本化** — 部品本体の
+  解決もコース横断 `LIMIT 1` をやめ、焦点の論文 → スコープ内で一意 → それ以外は未解決（FD4）。
 - **ガバナンス**: コース公開（freeze）= ソース文書内 1-hop 近傍の露出承認（設計書 §6）。
 - ガードレール: `test_component_context_{core,api}.py` /
   `test_component_evidence_chips_ui_static.py` / `test_component_evidence_admin_ui_static.py`。
@@ -1966,6 +1977,26 @@ DO1〜DO6: 本文非含有/仮名化/学習者に数値非表示/削除APIなし
   `test_discuss_phase2_ui_static.py`（可視性 fail-closed・無断フォールバック禁止・
   生成プロンプト必須要素・数値非表示・`_discussion` 痕跡動作・U層タグ分離・k=3 正本）。
 
+### 応答の骨格（Dialogue Response Shape, migration なし, 2026-09-30）
+
+学習チャット RAG 応答の**区画**（答え → 確認 → 問い返し 1 つ → 前提の逆質問）を生成後にサーバが組み立てる層。
+正本は `docs/features/dialogue_response_shape_design.md`（RS1〜RS5・課題 IK-0548 / IK-0575 / IK-0576）。
+
+- **RS1 先に答える / RS2 確認は後ろ・1 往復に 1 つまで**（前提の逆質問か鏡があれば `anchor_confirm` を出さない）/
+  **RS3 問い返しは 1 つまで**（末尾に連なる問いは最後の 1 つだけ・確認のあるターンは問い返しなし・本文が問いだけなら
+  組み替えない）/ **RS4 鏡は核心語のみ**（同意・挨拶・前置きは映さない・核心語が残らなければ鏡を出さない）/
+  **RS5 保存文の形は不変**（本文 → `\n\n---\n\n` + `PREREQUISITE_GATE_ANSWERED_MARKER` + 逆質問。履歴の判定器 4 本が依存）。
+- 正本は `backend/core/dialogue_shape.py`（純関数・FastAPI / LLM 非 import。`assemble` / `render_answer_text` /
+  `split_closing_question` / `mirror_core` / `shape_dto` / `previous_correction_fact`）。`_learning_chat_core` は
+  `assemble` を `persist_chat_history` の前で 1 回だけ呼び、鏡は既存 `extract_mirror` の直後に `mirror_core`（冪等）。
+- DTO `LearningChatResponse.shape = {closing_question, has_gate, mirror_kept}`（数値なし）。フロントは `renderAiContent` が
+  末尾の問い返しを `.closing-question` の独立段落に切り分ける。ストリーミングは `final` が区画済み本文で置き換える。
+- IK-0576: 直前の assistant 往復の訂正文（逐語・200 字）を `[前の往復での訂正]` として system 末尾に持ち越し、
+  撤回するなら撤回と明示させる（`_anchor_ladder_hint` の直後。casual / elicit では持ち越さない）。
+- **応答の順序・問いの数・鏡の範囲を新しい固定文の継ぎ足しで制御しない — `core/dialogue_shape.py` を通す**。
+  プロンプトは区画の中身を埋めるだけ（discuss ルール 2 の核心語の 1 文・ルール 6 の「問いは 1 つ」の 1 文は同じことを言う補助）。
+- ガードレール: `test_dialogue_shape_{core,guardrails,route}.py`。
+
 ### discuss 開幕素材のオーサリング（投影是正 + AI生成 + 教員添削, migration 062, 2026-07-30）
 
 discuss 開幕画面の情報を「主語で分けて全部出す」層。正本は
@@ -2072,6 +2103,30 @@ Phase 1。Phase 2 = 構造 grounding（SA層 §11）/ Phase 3 = ストリーミ�
   再構成・楽屋の入口統合 / ストリーミング（= Phase 3）。**Phase 2（学習チャットへの構造
   grounding）は 2026-09-12 実装済み** — 上記「画面文脈アダプター（SA層）」節の Phase 4。
   **Phase 3 の 3-a も同日実装済み** — 下記「LLM 応答のストリーミング」節。
+
+### 焦点論文（Focus Document, migration なし, 2026-09-30）
+
+「いまの会話・操作はどの論文についてか」を**1つの解決器と1つの優先規則**で決める層。正本は
+`docs/features/focus_document_design.md`（FD1〜FD5）。**「どの論文か」を決める条件式を新しく書かない —
+`core/focus_document.py` を通す。**
+
+- **段順（FD1）**: `resolve_focus_document` = ①明示（document 直付け discuss の単一 document・タップ位置のチャンク）→
+  ②トピックの論文 → ③直前の回答が引用した論文 → ④画面で選んだ論文（discuss 開幕の起点チップ / トピック教材の
+  `TopicMaterialResponse.document_id`）。各段はスコープとの積だけ（FD2 = DM1。範囲を広げない）。
+- **優先規則（FD3）**: `prefer_focus` — 採用の下限（`>= 0.30`）を満たす焦点の行があれば、焦点の外は焦点内の最良より
+  **厳密に高い（`>`）**ものだけ残す。旧 `_prefer_topic_documents` / `_drop_off_topic_chunks` は薄い委譲。
+- **ID 衝突（FD4）**: `resolve_in_focus` — 焦点の段をまとまりで見て候補を持つ焦点の論文がちょうど1つ → 焦点に無ければ
+  スコープ内で一意 → それ以外は `None`（2本束ねたトピックの両方に `eq_5` があれば `None`。コース横断 `LIMIT 1` 禁止）。element_context / component_context / descent / symbol_lookup が使う。
+- **配線**: chat core は `resolve_focus_document(` を**1回だけ**呼び、RAG の並べ替え・画面文脈の要素解決・痕跡の
+  `cited_chunk_ids` が同じ値を受け取る。前提の説明と非チャットの操作（記号・要素/部品文脈・降下路。`topic_id` /
+  `document_id` クエリ）は `services.learner_focus_document`（③段は `services.previous_cited_document_ids` =
+  保存済み出典メタの `document_id`）。チャット内の前提の説明（LEARNING_ADVICE）は chat core の1回とは別に
+  `learner_focus_document` を呼ぶが、④段（`screen_context.selection.document_id`）まで同じ段順を渡す。
+  **段の条件（FD-note）**: document 直付けで `all_visible` を明示したときは単一 document を①段に入れない /
+  ③段は議論（discuss・`_discussion`）だけ。範囲表示（`nearby`）は③段で `_discussion` の痕跡をコース全体へ広げない。
+- **FD5**: 痕跡に焦点の document_id 列を焼かない（記録してよいのは `source` の enum のみ）。
+- 対応する課題: IK-0513 / 0552 / 0553 / 0554 / 0556（前提の説明が議論中の論文を受け取っていなかった件を含む）。
+- ガードレール: `test_focus_document_{guardrails,core}.py`（1回呼び出し・独自比較の禁止・消費者の import・段順・衝突）。
 
 ### LLM 応答のストリーミング（Phase 3-a, migration なし, 2026-09-12）
 
@@ -2935,6 +2990,36 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   （引き受けの段）・第2軸の帰属と開示の分離・第3軸の条件付き再利用（**宣言**の層であって
   可視性の選択肢を増やす層ではない）。
 
+### 表示投影層（Display Projection, migration なし, 2026-09-30）
+
+学習者向けの全ルートの戻り値を**1つの射影**に通し、解析層の内部 ID（`eq_blk_*` / `eq_tex_*` /
+`claim_span_*` / `theory_op_*` / `ev_*` / `synth_claim_*` / `sym_N` / `k1:` / UUID ラベル）・生の数値
+（confidence / weight / score / 件数）・英語の生成ラベル文を画面に出さない層。正本は
+`docs/features/display_projection_design.md`（DP1〜DP6・§6 実装記録）。
+
+- **語彙の正本は `backend/core/display_projection.py`**（FastAPI / sqlalchemy / LLM / pydantic 非 import）:
+  統合語彙 `INTERNAL_ID_TOKEN_RE`（論文の式番号 `eq_12` / `eq_2_7` は除外）・`FORBIDDEN_KEYS_LEARNER` /
+  `FORBIDDEN_KEYS_TEACHER`・番地キー `ID_KEY_RE`（値を遮断しない）・表示キー・`LABEL_KEYS`（英語生成文の
+  置換対象）・`UNIDENTIFIED_ELEMENT_TEXT`・`project_for_learner` / `project_for_teacher`。旧遮断器
+  （learner_context_common / deliberation.labels / theory_modules.schema / graph_paper_layer.schema /
+  course_content_builder / reference_health / discuss.opening / doubt.seminar_brief）は判定を変えずに
+  ここの系統別定数を参照する（ガードレールが同一オブジェクトを検査）。
+- **`backend/api/display_route.py::LearnerDisplayRoute`**: ルーター 15 本が `route_class=` に持ち、
+  エンドポイントの戻り値を直列化の前に射影する（Response・None は素通し・射影失敗は元の値 = DP6）。
+  SSE の `final` は `project_learner_model` を通す（`_sse_frame("final", response.model_dump())` の字面は不変）。
+- 値全体が 1 トークンの内部 ID は**表示キーでだけ**置き換え、`chain` / `edges` / `footprints` のような
+  番地の列は残す（DP3）。本文中の埋め込み参照（`![[component:comp_001]]` / `![[equation: [[eq_x]] ]]` /
+  `[[FORMULA_3]]`、`EMBED_MARKER_RE`）の内側と、`*_url` / `*_src` / `*_href` / `*_path` キー・`/api/` か
+  `http(s)://` で始まる値は番地として遮断しない（図の画像・教材の埋め込みが引けなくなるため）。
+  英語生成文の置換は `LABEL_KEYS` かつ定型の目印を持ち、既知の `element_type` を持つ項目だけ
+  （論文タイトルは残す・`response_space` / `next_actions` / `sources` / `options` の選択肢は畳まない）。
+  応答本文が置き換わるため、履歴の出典メタの復元（`_rehydrate_history_sources`）は assistant `id` →
+  `reply_to_id` → 本文の順に突き合わせる。
+- **新しい学習者向けルートは `LearnerDisplayRoute` を持つルーターに置く・遮断語彙（内部 ID の正規表現・
+  禁止キー集合）を再定義しない**。対象外は auth / groups / export / indicators / disclosure。
+- ガードレール: `test_display_projection_{guardrails,core}.py`（全学習者ルートの route class・
+  response_model・語彙・純粋性・委譲の同一性・リーク走査）。
+
 ### 画面文脈アダプター（Assistant Screen Adapter, SA層, migration なし, 2026-09-06）
 
 各画面の AI 対話（テキスト・音声）に「教員がいま画面で選んでいるもの」を渡す層。**画面は
@@ -3226,7 +3311,7 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   `GET /api/learning/courses/{id}/symbols/lookup?symbol=&equation_id=&chunk_id=`（`core/symbol_lookup.py`・コース sources に `ANY(:doc_ids)` 強制・
   **ScholarPhi 規則 = タップ位置より前の最も近い定義**・無ければ後方 / 定義なしを事実文・LLM 0 回・quota 非消費）。UI は `app.js` の KaTeX 記号
   クリック → `#symbol-lookup-popover`（アンカー `material.symbol-lookup`）。記号は互換字形（µ→μ 等）を正規化して照合し、
-  レジストリに無い記号は `chunks.formulas` から決定論フォールバック（`registered:false`・印字番号のみ・IK-0518）。探索は**「この論文」に限る**（chunk の document → 表示中トピックの論文。`topic_id` を受ける。別論文の同記号・不在は事実文・IK-0552）。
+  レジストリに無い記号は `chunks.formulas` から決定論フォールバック（`registered:false`・印字番号のみ・IK-0518）。探索は**「この論文」に限る**（chunk の document → 焦点論文（`core/focus_document.py`: トピック → 議論で直前に引用した論文）。`topic_id` を受ける。別論文の同記号・不在は事実文・IK-0552）。
 - **P3-7 cartridge の形の宣言**: `backend/cartridges/<id>/shape.json`（`covers` / `does_not_cover` / `expects.{entry_types,component_types,
   claim_types}` / `atlas_domain_key`。読み手は `core/cartridge_shape.py`・A層は読まない・起動時 validator は fail-open）。`particle_physics` は
   `description` / `target_domain` を実内容（フレーバー物理）に訂正（`cartridge_id` は不変）。適合事実 `GET /api/admin/cartridges/{id}/fit?

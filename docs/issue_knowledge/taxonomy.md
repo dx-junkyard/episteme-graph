@@ -381,3 +381,5 @@ resolution:
   参照した事例と `note` は残す（情報を落とさない）。
 - 原理の追加・改訂は本書と principles.md の両方に記録する。同じ解決原理の本文を複数の原理で繰り返す
   ようになったら、共有定義への分離を検討する（それまで独立のカタログは作らない）。
+
+原理の追加記録: 2026-09-30 `route-all-surfaces-through-one-point`（同型の是正を面ごとに塞がず全経路が通る 1 箇所と横断検査に置く。起点は IK-0579〜IK-0582 と `docs/architecture/root_cause_consolidation_2026-09-30.md`）。
