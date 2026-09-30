@@ -375,7 +375,7 @@ def _submit_response(
                 (user_id, course_id, item_id, claim_id, response, machine_verdict, revision_of)
                 VALUES (CAST(:uid AS uuid), :cid, CAST(:item_id AS uuid), CAST(:claim_id AS uuid),
                         CAST(:response AS jsonb), :verdict,
-                        CASE WHEN :rev = '' THEN NULL ELSE CAST(:rev AS uuid) END)
+                        CAST(NULLIF(:rev, '') AS uuid))
                 RETURNING id::text
             """),
             {

@@ -2016,6 +2016,78 @@ def search_chunks_with_metadata(
         return []
 
 
+def get_chunks_for_prompt(
+    chunk_ids: "list[str]",
+    *,
+    allowed_document_ids: "set[str] | list[str] | None",
+) -> list[dict]:
+    """指定したチャンクを ``search_chunks_with_metadata`` と同じ形で返す（IK-0475・読み取り専用）。
+
+    前の往復で回答が引用したチャンクを、次の往復の文脈へ元の番号で戻すための読み出し。
+    可視性は検索と同じ意味論で SQL 内に強制する（``allowed_document_ids`` 必須・空集合は
+    SQL 非発行で ``[]`` = fail-closed・``None`` はテスト専用）。返す順は ``chunk_ids`` の順で、
+    見つからない・見えない id は黙って落とす。``score`` は持たない（検索ではない）。
+    失敗は ``[]``（会話を止めない）。
+    """
+    ids = [str(c).strip() for c in (chunk_ids or []) if str(c or "").strip()]
+    if not ids:
+        return []
+    if allowed_document_ids is not None and len(allowed_document_ids) == 0:
+        return []
+    try:
+        session = _pg_session()
+        try:
+            params: dict = {"ids": ids}
+            doc_filter_sql = ""
+            if allowed_document_ids is not None:
+                doc_filter_sql = "AND c.document_id = ANY(CAST(:doc_ids AS uuid[]))"
+                params["doc_ids"] = list(allowed_document_ids)
+            rows = session.execute(
+                sa_text(f"""
+                    SELECT c.id,
+                           c.text,
+                           COALESCE(d.title, '') AS source_title,
+                           COALESCE(d.filename, '') AS source_file,
+                           c.material_id,
+                           COALESCE(c.source_metadata->>'section_title', '') AS section_title,
+                           c.formulas,
+                           c.document_id
+                    FROM chunks c
+                    LEFT JOIN documents d ON c.document_id = d.id
+                    WHERE c.id = ANY(CAST(:ids AS uuid[]))
+                    {doc_filter_sql}
+                """),
+                params,
+            ).fetchall()
+            from core.learning_experience import attach_tiers, approved_chunk_ids
+
+            by_id = {}
+            for row in rows:
+                if not row[1]:
+                    continue
+                by_id[str(row[0])] = {
+                    "id": str(row[0]),
+                    "text": resolve_formula_placeholders(row[1], row[6]),
+                    "raw_text": row[1],
+                    "source_title": row[2] or row[3] or "不明な教材",
+                    "source_file": row[3],
+                    "material_id": str(row[4]) if row[4] else "",
+                    "section_title": row[5] or "",
+                    "document_id": str(row[7]) if row[7] else "",
+                    "location_hint": chunk_location_hint(section_title=row[5] or "", text=row[1]),
+                }
+            results = [by_id[c] for c in ids if c in by_id]
+            approved = approved_chunk_ids(session, [r["id"] for r in results])
+            for r in results:
+                r["approved"] = r["id"] in approved
+            return attach_tiers(results)
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning("get_chunks_for_prompt failed: %s", exc)
+        return []
+
+
 def _json_obj(value: object) -> dict:
     if isinstance(value, dict):
         return value

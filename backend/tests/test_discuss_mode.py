@@ -248,7 +248,7 @@ class TestDiscussScaffoldMessages:
 
     def test_scaffold_branches_on_discuss(self):
         branch = self._scaffold_branch()
-        assert "_scaffold_assistant_ack" in branch
+        assert "_scaffold_user_instruction" in branch
         assert "else:" in branch
 
     def test_discuss_scaffold_is_not_a_qa_frame(self):
@@ -262,13 +262,19 @@ class TestDiscussScaffoldMessages:
     def test_non_discuss_scaffold_is_unchanged(self):
         else_part = self._scaffold_branch().split("else:")[1]
         assert "以下の質問に答えてください" in else_part
-        assert "はい、「{topic_title}」についてですね。お答えします。" in else_part
 
     def test_messages_use_the_scaffold_variables(self):
         source = _read(LEARNING)
         block = source.split(self._BRANCH_END)[1][:700]
         assert 'f"{_scaffold_user_instruction}"' in block
-        assert '"content": _scaffold_assistant_ack' in block
+
+    def test_no_fabricated_assistant_ack_turn(self):
+        """IK-0495: 足場の直後にモデルが言っていない assistant ターン（「お答えします」）を置かない。"""
+        source = _read(LEARNING)
+        assert "_scaffold_assistant_ack" not in source
+        assert "についてですね。お答えします。" not in source
+        block = source.split(self._BRANCH_END)[1].split("window_history(")[0]
+        assert '"role": "assistant"' not in block
 
     def test_history_window_unchanged(self):
         """履歴ウィンドウは 20 messages のまま。1件の上限は IK-0394（2026-09-28）で

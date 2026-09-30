@@ -90,6 +90,7 @@ from services import (
     delete_course_data,
     list_course_source_document_ids,
     list_visible_document_ids,
+    get_chunks_for_prompt,
     search_chunks_with_metadata,
     user_can_access_group,
     user_can_view_course,
@@ -146,11 +147,13 @@ from core.llm_worker.history import window_history
 from core.llm_worker.single_shot import json_call
 from core.text_hygiene import (
     UNTRUSTED_SOURCE_NOTICE,
+    sanitize_source_text_for_prompt,
     scrub_internal_placeholders,
     strip_control_sequences,
 )
 from core.tts import generate_tts_audio, strip_text_for_speech
 from core.learning_experience import (
+    TIER_APPROVED,
     TIER_OUT_OF_SOURCE,
     TIER_SOURCE,
     aggregate_overall_tier,
@@ -1777,7 +1780,7 @@ def _resolve_prerequisite_context(
                 cited_sources.append(_source)
                 blocks.append(
                     f"[出典{_source['index']}] 『{r.get('source_title', '')}』\n"
-                    f"{_scrub_excerpt_embeds(text)}"
+                    f"{sanitize_source_text_for_prompt(_scrub_excerpt_embeds(text))}"
                 )
                 matched_text.append(text)
             # 「その前提を扱っている」の判定は逐語一致だけ（決定論・追加コストなし）。
@@ -2524,6 +2527,111 @@ def _chunk_ids_cited_in_answer(answer: str, cited_sources: list[dict]) -> list[s
     return out
 
 
+def _sources_cited_in_answer(answer: str, sources: list[dict]) -> list[dict]:
+    """学習者に見せる出典を、回答本文が ``[出典N]`` で実際に引用したものだけに絞る（IK-0494）。
+
+    文脈に採用した出典（``sources``）のうち本文が引いていないもの（別の論文の近いチャンク等）は
+    出典の一覧に並べない。番号は振り直さない（会話の採番器の番号のまま = IK-0432/0444）。
+    並びは ``sources`` の順。本文が1つも引用していなければ空。入力は変更しない。
+    """
+    cited = {int(m.group(1)) for m in _CITED_MARKER_RE.finditer(answer or "")}
+    if not cited:
+        return []
+    out: list[dict] = []
+    for s in sources or []:
+        try:
+            index = int(s.get("index"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if index in cited:
+            out.append(s)
+    return out
+
+
+def _displayed_sources_for(answer: str, sources: list[dict], content_grounding: str | None) -> list[dict]:
+    """学習者に見せる出典（IK-0494）。出所の帯（content_grounding）と食い違わないようにする。
+
+    ①本文が引用した出典があればそれだけ。②本文が1つも引用していないのに出所が
+    course_material / other_material のときは、その出所を決めた出典（origin が出所と同じもの）を
+    並べる — 出所の判定（IK-0382）は「文脈に置いて問いに関わった資料」で決まり引用の有無では
+    決まらないので、帯だけ「教材に基づく」で出典が空、という食い違いを作らない。
+    トピック教材だけで course_material になった往復は番号付き出典が無いので空のまま（従来どおり）。
+    """
+    cited = _sources_cited_in_answer(answer, sources)
+    if cited or content_grounding not in ("course_material", "other_material"):
+        return cited
+    return [s for s in sources or [] if isinstance(s, dict) and s.get("origin") == content_grounding]
+
+
+#: IK-0475: 直前の回答の引用を次の往復の文脈へ戻す上限（件数・1件の字数）。
+_CARRIED_CHUNK_MAX = 3
+_CARRIED_CHUNK_MAX_CHARS = 1200
+
+
+def _previous_turn_cited_refs(history: list | None) -> list[dict]:
+    """直前の assistant ターンが本文で引用した出典 ``{index, chunk_id, tier}`` を引用順に返す。
+
+    本文の ``[出典N]`` と、そのターンに焼き込まれた ``sources`` の両方にある番号だけ
+    （推測で結ばない）。直前の assistant ターンが無い・出典が無ければ空。
+    """
+    for turn in reversed(list(history or [])):
+        if not isinstance(turn, dict) or turn.get("role") != "assistant":
+            continue
+        by_index: dict[int, dict] = {}
+        for source in turn.get("sources") or []:
+            if not isinstance(source, dict):
+                continue
+            try:
+                index = int(source.get("index"))
+            except (TypeError, ValueError):
+                continue
+            chunk_id = str(source.get("chunk_id") or "").strip()
+            if index > 0 and chunk_id and index not in by_index:
+                by_index[index] = {"index": index, "chunk_id": chunk_id, "tier": source.get("tier")}
+        out: list[dict] = []
+        for match in _CITED_MARKER_RE.finditer(str(turn.get("content") or "")):
+            ref = by_index.get(int(match.group(1)))
+            if ref and ref not in out:
+                out.append(ref)
+        return out
+    return []
+
+
+def _carry_previous_cited_sources(
+    history: list | None,
+    numbers: "_SessionCitationNumbers",
+    *,
+    exclude_chunk_ids: set,
+    allowed_document_ids,
+) -> list[dict]:
+    """直前の回答が引用したチャンクを、次の往復の文脈へ戻す検索結果の形で返す（IK-0475）。
+
+    - 今回の検索に既にあるチャンク（``exclude_chunk_ids``）は戻さない（二重にしない）。
+    - 会話の採番器の番号と履歴の番号が一致するものだけ（元の番号で戻せないものは戻さない）。
+    - 可視性は ``get_chunks_for_prompt`` が ``allowed_document_ids`` を SQL 内で強制する。
+    - 上限 :data:`_CARRIED_CHUNK_MAX` 件。tier は保存時の値を使う（類似度が無いので再判定しない）。
+    """
+    mapping = numbers.mapping()
+    refs = [
+        ref for ref in _previous_turn_cited_refs(history)
+        if ref["chunk_id"] not in exclude_chunk_ids and mapping.get(ref["chunk_id"]) == ref["index"]
+    ][:_CARRIED_CHUNK_MAX]
+    if not refs:
+        return []
+    rows = get_chunks_for_prompt(
+        [ref["chunk_id"] for ref in refs], allowed_document_ids=allowed_document_ids
+    )
+    tier_by_chunk = {ref["chunk_id"]: ref.get("tier") for ref in refs}
+    out: list[dict] = []
+    for row in rows or []:
+        row = dict(row)
+        stored_tier = tier_by_chunk.get(str(row.get("id") or ""))
+        if stored_tier in (TIER_APPROVED, TIER_SOURCE, TIER_OUT_OF_SOURCE):
+            row["tier"] = stored_tier
+        out.append(row)
+    return out
+
+
 def _adopted_source_entry(
     numbers: _SessionCitationNumbers, result: dict, course_material_ids: set
 ) -> dict:
@@ -2532,7 +2640,7 @@ def _adopted_source_entry(
     類似度の生値（cosine）は載せない（IK-0433: 学習者に数値を返さない。tier の判定は
     ``search_chunks_with_metadata`` の内側で済んでいる）。
     """
-    quote = (result.get("text") or "").strip().replace("\n", " ")
+    quote = sanitize_source_text_for_prompt(result.get("text") or "").strip().replace("\n", " ")
     return {
         "index": numbers.assign(result.get("id", "")),
         "chunk_id": result.get("id", ""),
@@ -3728,8 +3836,17 @@ _CLOSING_PHRASES_EN = (
     "see you next time", "see you", "goodbye", "bye", "have a nice day", "cheers",
 )
 #: 定型句を強めるだけで内容を持たない語（定型句を取り除いた残りに現れてよい）。
-_CLOSING_FILLER_JA = ("本当に", "ほんとうに", "とても", "大変", "すごく", "では", "じゃあ", "それでは")
-_CLOSING_FILLER_EN = ("really", "very", "so", "much", "ok", "okay", "great", "and", "for", "today")
+#: IK-0493: 「なるほど、ありがとうございます。」のような相づち＋お礼も定型句だけの発話として拾う
+#: （相づちは内容を持たない。問いの形・内容が残る発話は従来どおり拾わない）。
+_CLOSING_FILLER_JA = (
+    "本当に", "ほんとうに", "とても", "大変", "すごく", "では", "じゃあ", "それでは",
+    "なるほど", "分かりました", "わかりました", "了解しました", "了解です", "承知しました",
+    "よくわかりました", "よく分かりました", "はい",
+)
+_CLOSING_FILLER_EN = (
+    "really", "very", "so", "much", "ok", "okay", "great", "and", "for", "today",
+    "i", "see", "got", "it", "understood", "ah", "oh", "alright", "right",
+)
 _CLOSING_PUNCT_RE = re.compile(r"[\s。．.!！?？、,，〜~…・'’\"「」😊🙏]+")
 
 
@@ -5361,7 +5478,10 @@ def _learning_chat_core(
                 origin=support_origin,
                 extra_actions=inline_actions,
             )
-            _prereq_sources = prereq_context["cited_sources"]
+            # IK-0494: 見せる出典は本文が引用したものだけ（番号は振り直さない）。
+            _prereq_sources = _displayed_sources_for(
+                result.answer, prereq_context["cited_sources"], prereq_context["content_grounding"]
+            )
             _prereq_grounding = prereq_context["content_grounding"]
             _prereq_tier = prereq_context["overall_tier"]
             persist_chat_history(
@@ -5510,13 +5630,37 @@ def _learning_chat_core(
         if topic_material:
             has_topic_material = True
             topic_material_grounds = _topic_material_engages_message(body, topic_material, message=_turn_question)
-            cited_chunks.append(f"[現在表示中の教材]\n{topic_material[:5000]}")
+            cited_chunks.append(
+                f"[現在表示中の教材]\n{sanitize_source_text_for_prompt(topic_material[:5000])}"
+            )
     for r in chunk_results:
         if r["score"] >= 0.30:
             # 出典番号は会話の中で固定（IK-0432）。cited_sources と 1 対 1 のまま。
             _source = _adopted_source_entry(_citation_numbers, r, course_material_ids)
             cited_sources.append(_source)
-            cited_chunks.append(f"[出典{_source['index']}] 『{r['source_title']}』\n{r['text']}")
+            # IK-0492: 文脈に置く写しだけを整える（U+FFFD・arXiv の版の刻印。保存データは不変）。
+            cited_chunks.append(
+                f"[出典{_source['index']}] 『{r['source_title']}』\n"
+                f"{sanitize_source_text_for_prompt(r['text'])}"
+            )
+    # IK-0475: 直前の回答が本文で引用したチャンクのうち今回の検索に無いものを、元の番号の
+    # まま文脈へ戻す（最大3件・1件1200字）。番号の対応は会話の採番器（IK-0432/0444）と一致する
+    # ものだけ、可視性は今回の allowed_document_ids を SQL 内で強制する（範囲を広げない）。
+    # 予想を引き出す往復（elicit）では前の回答の根拠を手渡さない。
+    if _cycle_mode != "elicit":
+        _carried = _carry_previous_cited_sources(
+            body.history,
+            _citation_numbers,
+            exclude_chunk_ids={s["chunk_id"] for s in cited_sources},
+            allowed_document_ids=allowed_document_ids,
+        )
+        for r in _carried:
+            _source = _adopted_source_entry(_citation_numbers, r, course_material_ids)
+            cited_sources.append(_source)
+            cited_chunks.append(
+                f"[出典{_source['index']}] 『{r['source_title']}』（前の回答で引用した箇所）\n"
+                f"{sanitize_source_text_for_prompt(r['text'])[:_CARRIED_CHUNK_MAX_CHARS]}"
+            )
 
     # L1: 回答全体の格を最弱根拠へ安全側集約。採用根拠が無ければ未踏(out_of_source)。
     overall_tier = aggregate_overall_tier([s["tier"] for s in cited_sources])
@@ -5646,27 +5790,26 @@ def _learning_chat_core(
     # 確認問題の壁打ちモードも同型の問題を抱える（system で「解答そのものを出さない」と
     # 指示した直後に、足場の「以下の質問に答えてください」が直答を再誘導する）ため、
     # discuss より優先して足場を中立化する。
+    # IK-0495: 以前は足場の user ターンの直後に「はい、（トピック名）について…答えます」
+    # のような assistant ターンを**作り話で**置いていた（モデルが言っていない発話を履歴に混ぜる・
+    # 日本語固定で英語の会話にも入る）。応じ方の指示は足場の user ターンの指示文に含め、
+    # assistant ターンは作らない（足場の直後は実際の会話履歴か、今回の発話が続く）。
     if body.check_scaffold:
         _scaffold_user_instruction = (
             "上記のコンテキストを踏まえ（不足している場合は補完して）、"
             "壁打ちモードの規則に従って学習者の発話に応じてください。"
-        )
-        _scaffold_assistant_ack = (
-            "はい。答えの組み立ては学習者に委ね、構成要素の説明と問いかけで支援します。"
+            "答えの組み立ては学習者に委ね、構成要素の説明と問いかけで支援してください。"
         )
     elif _is_discuss:
         _scaffold_user_instruction = (
             "上記のコンテキストを踏まえ（不足している場合は補完して）、"
             "発話タイプ別の応答ルールに従って、以下の学生の発話に応じてください。"
-        )
-        _scaffold_assistant_ack = (
-            "はい。学生の発話のタイプ（質問 / 解釈・立場の表明 / 詰まり）を見きわめて応じます。"
+            "学生の発話のタイプ（質問 / 解釈・立場の表明 / 詰まり）を見きわめて応じてください。"
         )
     else:
         _scaffold_user_instruction = (
             "上記のコンテキストを踏まえ（不足している場合は補完して）、以下の質問に答えてください。"
         )
-        _scaffold_assistant_ack = f"はい、「{topic_title}」についてですね。お答えします。"
     messages: list[dict] = [
         {"role": "system", "content": _system_prompt},
         {"role": "user", "content": (
@@ -5675,7 +5818,6 @@ def _learning_chat_core(
             f"{context_block}\n\n"
             f"{_scaffold_user_instruction}"
         )},
-        {"role": "assistant", "content": _scaffold_assistant_ack},
     ]
     # チャット型AI支援の共通基盤整理 §2-2: 直近20メッセージへウィンドウ化
     # （教材・RAGコンテキストは上の messages で毎回別途注入されるため先頭保護は不要, head_keep=0）。
@@ -5853,6 +5995,21 @@ def _learning_chat_core(
     # レスポンス・履歴焼き込み・関心痕跡のすべてに同じ本文が流れる。
     if not degraded:
         answer = _reconcile_citation_markers(answer, {s["index"] for s in cited_sources})
+    # IK-0494: 学習者に見せる出典（応答の sources・履歴の焼き込み）は、本文が実際に引用した
+    # ものだけ。文脈に採用しただけの別論文のチャンクを一覧に並べない。番号は振り直さない
+    # （採番器の対応表 CITATION_MAP_KEY は採用した全チャンクの番号を控え続ける）。
+    # tier・出所の分類は文脈に採用した出典から決めたまま（ガードの判定と揃える）。
+    # IK-0493: お礼・締めくくりで始まる発話への返答が何も引用していなければ、内容の説明
+    # ではないので出所の分類を付けない（IK-0447 の定型文と同じ扱い。model_generated にすると
+    # 「出典を追えない AI の説明」の出所行が付く）。
+    if (
+        not degraded
+        and not _sources_cited_in_answer(answer, cited_sources)
+        and _is_closing_led_statement(body.message)
+    ):
+        content_grounding = None
+    # 引用が無いのに出所が教材・別の資料のときは、その出所を決めた出典を並べる（帯と一覧を揃える）。
+    _displayed_sources = _displayed_sources_for(answer, cited_sources, content_grounding)
 
     # L1 OutOfSourceGuard: 未踏なら断定せず、根拠が弱い旨を先頭に明示する。
     # casual では可視プレフィックスのみ省略（音声で毎回読み上げると会話が壊れるため）。
@@ -5919,7 +6076,7 @@ def _learning_chat_core(
         # 保存するのはチップ描画とポップアップ起動に要る最小フィールドのみ（quote / meta /
         # origin は「いまの回答」を扱う出典タブ専用で、復元メッセージからは参照されない）。
         assistant_meta={
-            "sources": _history_source_meta(cited_sources),
+            "sources": _history_source_meta(_displayed_sources),
             "overall_tier": overall_tier,
             "content_grounding": content_grounding,
             # IK-0444: 会話全体の対応表の控え（このターンで振った番号を含む）。
@@ -6096,7 +6253,7 @@ def _learning_chat_core(
     return LearningChatResponse(
         **result.model_dump(),
         course_update=course_update,
-        sources=cited_sources,
+        sources=_displayed_sources,
         overall_tier=overall_tier,
         content_grounding=content_grounding,
         position_anchor=position_anchor,

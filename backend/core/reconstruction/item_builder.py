@@ -8,6 +8,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.reconstruction.claim_context import (
+    RELATION_WITHHELD_FEW_SYMBOLS,
+    RELATION_WITHHELD_NOT_RELATIONAL,
+    RELATION_WITHHELD_NOT_SOURCE_EXTRACTED,
+    symbol_names,
+)
 from core.reconstruction.schema import (
     ResponseOption,
     is_relational_claim_type,
@@ -15,21 +21,48 @@ from core.reconstruction.schema import (
 )
 
 
-def preferred_elicit_mode(claim: dict[str, Any]) -> str:
-    """claim から検討すべき出題モードを決める（LLM はここから mode を下げられる）。
+#: predict を下地にしない理由（IK-0483。記帳・報告用の語彙）。
+RESTATE_CLAIM_TYPE_NOT_RELATIONAL = "claim_type_not_relational"
+RESTATE_NO_CONCEPTS_OR_EQUATION = "fewer_than_two_concepts_and_no_equation"
+RESTATE_EQUATION_NOT_SOURCE_EXTRACTED = RELATION_WITHHELD_NOT_SOURCE_EXTRACTED
+RESTATE_EQUATION_NOT_RELATIONAL = RELATION_WITHHELD_NOT_RELATIONAL
+RESTATE_EQUATION_FEW_SYMBOLS = RELATION_WITHHELD_FEW_SYMBOLS
 
-    predict: 関係を構造化できそう（関係型 claim + 2 概念以上、または関係型の式）。
-    それ以外は restate（言い直し）へ縮退する。
+RESTATE_REASONS = (
+    RESTATE_CLAIM_TYPE_NOT_RELATIONAL,
+    RESTATE_NO_CONCEPTS_OR_EQUATION,
+    RESTATE_EQUATION_NOT_SOURCE_EXTRACTED,
+    RESTATE_EQUATION_NOT_RELATIONAL,
+    RESTATE_EQUATION_FEW_SYMBOLS,
+)
+
+
+def elicit_mode_decision(claim: dict[str, Any]) -> tuple[str, str | None]:
+    """下地の出題モードと、restate にした理由（predict なら None）。
+
+    predict: 関係型 claim で、概念 2 個以上 または 関係型の式（``equation.relation_type``。
+    ``claim_context.pick_equation`` が PDF からそのまま抽出できた関係型の式にだけ付ける）。
+    それ以外は restate（言い直し）へ縮退し、理由を返す。predict を無理に選ばない。
     """
+    if not is_relational_claim_type(claim.get("claim_type", "")):
+        return "restate", RESTATE_CLAIM_TYPE_NOT_RELATIONAL
     concepts = subject_driver_concepts(claim)
     equation = claim.get("equation") if isinstance(claim.get("equation"), dict) else {}
     has_relational_equation = bool(
         (equation.get("relation_type") or "").strip()
-        and (equation.get("defined_symbols") or equation.get("latex"))
+        and (equation.get("defined_symbols") or equation.get("symbols") or equation.get("latex"))
     )
-    if is_relational_claim_type(claim.get("claim_type", "")) and (len(concepts) >= 2 or has_relational_equation):
-        return "predict"
-    return "restate"
+    if len(concepts) >= 2 or has_relational_equation:
+        return "predict", None
+    withheld = str(equation.get("relation_withheld") or "").strip()
+    if withheld in RESTATE_REASONS:
+        return "restate", withheld
+    return "restate", RESTATE_NO_CONCEPTS_OR_EQUATION
+
+
+def preferred_elicit_mode(claim: dict[str, Any]) -> str:
+    """claim から predict 可否を決定論的に判定する（理由は ``elicit_mode_decision``）。"""
+    return elicit_mode_decision(claim)[0]
 
 
 def visible_claim_fields(claim: dict[str, Any]) -> dict:
@@ -90,9 +123,8 @@ def symbol_probe(claim: dict[str, Any]) -> dict:
     """
     symbols: list[str] = []
     equation = claim.get("equation") if isinstance(claim.get("equation"), dict) else {}
-    for s in equation.get("defined_symbols") or []:
-        s = str(s).strip()
-        if s and s not in symbols:
+    for s in symbol_names(equation.get("defined_symbols")):
+        if s not in symbols:
             symbols.append(s)
     for name in subject_driver_concepts(claim):
         if name and name not in symbols:

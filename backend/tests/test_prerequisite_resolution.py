@@ -264,6 +264,8 @@ class TestAdviceSourceContextWiring:
             learning_mod, "search_chunks_with_metadata",
             lambda *a, **k: [_chunk("mat-other", "グリーン関数の定義。")],
         )
+        # IK-0494: 見せる出典は本文が引用したものだけ。
+        monkeypatch.setattr(learning_mod, "generate_text", lambda **kwargs: "前提知識の説明本文 [出典1]")
 
         body = LearningChatRequest(
             message="前提知識を確認したい", history=[], support_action="check_prerequisites",

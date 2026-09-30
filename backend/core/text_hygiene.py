@@ -29,6 +29,7 @@ __all__ = [
     "scrub_internal_placeholders",
     "INTERNAL_FORMULA_PLACEHOLDER_TEXT",
     "INTERNAL_FIGURE_PLACEHOLDER_TEXT",
+    "sanitize_source_text_for_prompt",
 ]
 
 #: 資料本文（PDF・URL 取得・arXiv 由来 = untrusted）を LLM へ渡す経路が、指示側に
@@ -98,3 +99,43 @@ def scrub_internal_placeholders(text: str) -> str:
         return str(text or "")
     out = _INTERNAL_FORMULA_REF_RE.sub(INTERNAL_FORMULA_PLACEHOLDER_TEXT, str(text))
     return _INTERNAL_FIGURE_REF_RE.sub(INTERNAL_FIGURE_PLACEHOLDER_TEXT, out)
+
+
+# --- 資料本文を LLM の文脈へ置く直前の衛生（IK-0492）-------------------------------
+#
+# PDF の文字層から取り出したチャンク本文には、①フォントに字形が無かった文字の置換文字
+# （U+FFFD。積分記号・括弧などの脱落の痕）と、②arXiv が各ページ余白に押す版の刻印
+# （``arXiv:2606.00411v1 [astro-ph.CO] 28 May 2026``。本文ではない）が混ざる。これを
+# そのまま文脈に置くと、モデルが刻印を本文として読んだり置換文字を書き写したりする。
+# 保存データ（chunks）は変えない — 文脈へ置く直前の写しだけを整える。
+#
+# 刻印は「ID + 分類 + 日付」の3つが揃う形だけを取り除く。参考文献の
+# ``arXiv:2203.06142 [astro-ph.CO].`` のような日付の無い引用は本文の一部なので残す。
+
+_MONTHS = (
+    "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
+)
+_ARXIV_STAMP_RE = re.compile(
+    r"\$?[ \t]*arXiv:\d{4}\.\d{4,5}(?:v\d+)?[ \t]*\[[A-Za-z][A-Za-z\-.]*\][ \t]*"
+    r"\d{1,2}[ \t]+(?:" + _MONTHS + r")[a-z]*\.?[ \t]+\d{4}[ \t]*\$?",
+    re.IGNORECASE,
+)
+_REPLACEMENT_CHAR = "\ufffd"
+
+
+def sanitize_source_text_for_prompt(text: str) -> str:
+    """資料本文を LLM の文脈に置く直前の写しを整える（純関数・保存データは変えない）。
+
+    制御シーケンスの除去（:func:`strip_control_sequences`）に加えて、置換文字 U+FFFD と
+    arXiv の版の刻印を取り除き、刻印だけが残った行を詰める。None・非文字列は空文字。
+    """
+    cleaned = strip_control_sequences(text)
+    if not cleaned:
+        return cleaned
+    if _REPLACEMENT_CHAR in cleaned:
+        cleaned = cleaned.replace(_REPLACEMENT_CHAR, "")
+    if "arxiv:" in cleaned.casefold():
+        cleaned = _ARXIV_STAMP_RE.sub("", cleaned)
+        # 刻印だけの行が空行として残るので、3行以上の空行を2行へ詰める。
+        cleaned = re.sub(r"\n[ \t]*\n(?:[ \t]*\n)+", "\n\n", cleaned)
+    return cleaned

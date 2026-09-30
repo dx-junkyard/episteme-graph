@@ -217,33 +217,120 @@ def pick_evidence_text(
     return best_text if best_score >= EVIDENCE_OVERLAP_MIN else ""
 
 
-def pick_equation(claim: dict[str, Any], equations: Iterable[dict[str, Any]], parent: dict | None = None) -> dict:
-    """``linked_claim_ids`` が claim（UUID / agent ID / 親の ID）を指す式を 1 つ選ぶ。"""
-    refs = {
-        str(claim.get("id") or ""),
-        str(claim.get("agent_claim_id") or ""),
-    }
+#: 量どうしの関係を表す式の種類（equation_semantics の EQUATION_TYPES のうち、
+#: 「X は Y に対してどう振る舞うか」を予測させる下地になるもの）。definition（記号の
+#: 定義）・transformation（式の書き換え）・unknown は関係の予測にならないので含めない。
+RELATIONAL_EQUATION_TYPES = ("relation", "result", "approximation", "constraint")
+
+#: 式を予測の下地にしない理由（IK-0483。``equation.relation_withheld`` に残す）。
+RELATION_WITHHELD_NOT_SOURCE_EXTRACTED = "equation_not_source_extracted"
+RELATION_WITHHELD_NOT_RELATIONAL = "equation_type_not_relational"
+RELATION_WITHHELD_FEW_SYMBOLS = "equation_fewer_than_two_symbols"
+
+
+def symbol_names(values: Any) -> list[str]:
+    """式の記号欄（``["x"]`` / ``[{"symbol": "x", ...}]`` の両形）から記号名だけを取る。
+
+    ``knowledge_equations.defined_symbols`` は ``DefinedSymbol`` の dict で保存される。
+    ``str(dict)`` を記号として扱うと「この記号「{'symbol': ...}」」の問いになる。
+    """
+    out: list[str] = []
+    for value in values or []:
+        if isinstance(value, dict):
+            name = str(value.get("symbol") or value.get("name") or "").strip()
+        else:
+            name = str(value or "").strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _claim_equation_refs(claim: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """claim 自身が指す式（``equation.equation_ids`` / ``equation_stable_keys``）。"""
+    equation = claim.get("equation") if isinstance(claim.get("equation"), dict) else {}
+    ids = {str(x) for x in (equation.get("equation_ids") or []) if str(x or "").strip()}
+    keys = {str(x) for x in (equation.get("equation_stable_keys") or []) if str(x or "").strip()}
+    return ids, keys
+
+
+def _claim_refs(claim: dict[str, Any], parent: dict | None) -> set[str]:
+    refs = {str(claim.get("id") or ""), str(claim.get("agent_claim_id") or "")}
+    scope = claim.get("source_scope") if isinstance(claim.get("source_scope"), dict) else {}
+    refs |= {str(x) for x in (scope.get("legacy_ids") or []) if x}
     if parent:
         refs |= {str(parent.get("id") or ""), str(parent.get("agent_claim_id") or "")}
     refs.discard("")
-    if not refs:
-        return {}
-    linked = []
-    for eq in equations or ():
-        ids = {str(x) for x in (eq.get("linked_claim_ids") or []) if x}
-        if ids & refs and (eq.get("latex") or eq.get("label")):
-            linked.append(eq)
+    return refs
+
+
+def _relation_of(eq: dict[str, Any], symbols: list[str]) -> tuple[str, str]:
+    """式が予測の下地になる関係型か。``(relation_type, withheld_reason)`` を返す。
+
+    関係型を付けるのは、PDF から**そのまま抽出できた**式（``confidence_policy`` が
+    ``can_support_claim`` かつ ``must_not_treat_as_source_extracted`` でない）で、
+    種類が関係型、記号が 2 つ以上あるときだけ。復元した式や方針が残っていない式を
+    答えキーにすると、選択肢の正解が原文に無い関係になり得る（推測で埋めない）。
+    """
+    policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+    if not policy or policy.get("must_not_treat_as_source_extracted", True) or not policy.get("can_support_claim"):
+        return "", RELATION_WITHHELD_NOT_SOURCE_EXTRACTED
+    equation_type = str(eq.get("equation_type") or "").strip().lower()
+    if equation_type not in RELATIONAL_EQUATION_TYPES:
+        return "", RELATION_WITHHELD_NOT_RELATIONAL
+    if len(symbols) < 2:
+        return "", RELATION_WITHHELD_FEW_SYMBOLS
+    return equation_type, ""
+
+
+def pick_equation(claim: dict[str, Any], equations: Iterable[dict[str, Any]], parent: dict | None = None) -> dict:
+    """claim の式を 1 つ選ぶ（無ければ空）。
+
+    優先順（IK-0483）:
+    1. claim 自身が指す式（``theory_claims.equation.equation_ids`` / ``equation_stable_keys``
+       — 永続化が書く形。式の本文は持たないので knowledge_equations で解決する）。
+       claim が式を指していなければ親 claim の式。
+    2. ``linked_claim_ids`` が claim（UUID / agent ID / ``source_scope.legacy_ids`` / 親）を
+       指す式。
+    """
+    own_ids, own_keys = _claim_equation_refs(claim)
+    if not (own_ids or own_keys) and parent:
+        # atomic 子は式を持たず、親（元の文）が式を指していることがある。
+        own_ids, own_keys = _claim_equation_refs(parent)
+    refs = _claim_refs(claim, parent)
+    rows = [eq for eq in (equations or ()) if eq.get("latex") or eq.get("label")]
+    linked = [
+        eq for eq in rows
+        if (own_ids and str(eq.get("agent_equation_id") or "") in own_ids)
+        or (own_keys and str(eq.get("stable_key") or "") in own_keys)
+    ]
+    source = "claim_equation_ids"
+    if not linked and refs:
+        linked = [
+            eq for eq in rows
+            if {str(x) for x in (eq.get("linked_claim_ids") or []) if x} & refs
+        ]
+        source = "knowledge_equations"
     if not linked:
         return {}
     linked.sort(key=lambda e: (str(e.get("label") or ""), str(e.get("agent_equation_id") or "")))
     eq = linked[0]
-    return {
+    defined = symbol_names(eq.get("defined_symbols"))
+    symbols = list(defined)
+    for name in symbol_names(eq.get("used_symbols")):
+        if name not in symbols:
+            symbols.append(name)
+    relation_type, withheld = _relation_of(eq, symbols)
+    out = {
         "label": str(eq.get("label") or ""),
         "latex": str(eq.get("latex") or ""),
-        "defined_symbols": [str(s) for s in (eq.get("defined_symbols") or []) if str(s).strip()],
-        "relation_type": "",
-        "source": "knowledge_equations",
+        "defined_symbols": defined,
+        "symbols": symbols,
+        "relation_type": relation_type,
+        "source": source,
     }
+    if withheld:
+        out["relation_withheld"] = withheld
+    return out
 
 
 SECTION_TITLE_MIN_CHARS = 3

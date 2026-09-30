@@ -86,6 +86,8 @@ def chat_env(monkeypatch):
     monkeypatch.setattr(learning_mod, "record_interest_trace", MagicMock(return_value="trace-1"))
     monkeypatch.setattr(learning_mod, "detect_and_record_misconception", MagicMock(return_value=None))
     monkeypatch.setattr(learning_mod, "document_thesis_fact_lines", lambda *a, **k: [])
+    # IK-0475: 直前の回答の引用を戻す読み出しは既定で何も返さない（DB に触れない）。
+    monkeypatch.setattr(learning_mod, "get_chunks_for_prompt", lambda *a, **k: [])
 
     stored: dict = {"history": []}
     monkeypatch.setattr(learning_mod, "load_stored_chat_history", lambda *a, **k: list(stored["history"]))
@@ -176,7 +178,9 @@ class TestStableNumberingAcrossTurns:
             learning_mod, "search_chunks_with_metadata", lambda *a, **k: [_chunk(1), _chunk(2)],
         )
         first = _ask("一つ目の質問")
-        assert [(s.index, s.chunk_id) for s in first.sources] == [(1, "chunk-1"), (2, "chunk-2")]
+        # IK-0494: 見せる出典は本文が引用したもの（[出典2]）だけ。[出典1] は文脈に採用した
+        # だけなので一覧に出ないが、番号は採番器の対応表に控えられ続ける。
+        assert [(s.index, s.chunk_id) for s in first.sources] == [(2, "chunk-2")]
 
         # クライアントは {role, content} だけを送り返す（uxsim の API runner と同じ形）。
         client_history = [{"role": m["role"], "content": m["content"]} for m in chat_env.stored["history"]]
@@ -195,7 +199,9 @@ class TestStableNumberingAcrossTurns:
         assert "[出典2]" in second.answer and "[出典3]" in second.answer
         # 保存される履歴は1往復目の sources を失わない（描画メタを戻した）。
         assistant_turns = [m for m in chat_env.stored["history"] if m["role"] == "assistant"]
-        assert assistant_turns[0]["sources"][0]["chunk_id"] == "chunk-1"
+        assert assistant_turns[0]["sources"][0]["chunk_id"] == "chunk-2"
+        # 引用されなかった chunk-1 の番号も対応表に残る（番号を別のチャンクへ振り直さない）。
+        assert assistant_turns[-1][learning_mod.CITATION_MAP_KEY]["chunk-1"] == 1
 
 
 def second_prompt_context(messages: list) -> str:
@@ -214,7 +220,7 @@ class TestNoRawScoreInLearnerDto:
 
     def test_chat_response_sources_have_no_score(self, chat_env):
         chat_env.monkeypatch.setattr(
-            learning_mod, "search_chunks_with_metadata", lambda *a, **k: [_chunk(1)],
+            learning_mod, "search_chunks_with_metadata", lambda *a, **k: [_chunk(1), _chunk(2)],
         )
         resp = _ask("質問です")
         dumped = resp.model_dump()

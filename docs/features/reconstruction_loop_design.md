@@ -360,10 +360,15 @@ backend/core/reconstruction/
   `worker.last_authoring_report(document_id)` とログに残す（行は消さない）。
   ④同じ文書のオーサリングはプロセス内で直列化し、INSERT は claim 単位の advisory lock 下で
   非 retired item の不在を再確認する。同じ本文・親子の claim には 1 件だけ（atomic child 優先）。
-- predict の下地（`item_builder.preferred_elicit_mode`）は関係型 claim + 役割付き概念 2 個以上か
-  関係型の式を要する。分野未指定の解析では claim の `concepts` / `equation` が空のまま残るため、
-  predict は選ばれない（IK-0483・未解決）。同じ文書の別 claim を誤答に使う案は、誤答が論文中の
-  正しい主張になり選択肢の排他性と非LLM DIFF の意味を壊すので採らない。
+- predict の下地（`item_builder.elicit_mode_decision`）は関係型 claim + 役割付き概念 2 個以上か
+  関係型の式を要する。式は claim 行の `equation.equation_ids` / `equation_stable_keys`（無ければ親、
+  次に式側の `linked_claim_ids`）で `knowledge_equations` から解決し、**PDF からそのまま抽出できた**
+  式（`confidence_policy`）で種類が relation / result / approximation / constraint・記号 2 つ以上の
+  ときだけ `relation_type` を付ける（復元した式は答えキーにしない。付けない理由は
+  `equation.relation_withheld`）。restate にした理由は item 生成の監査 metadata `restate_reason` と
+  `last_authoring_report` の `restate_reasons` に残す（IK-0483 / IK-0502）。分野未指定の解析では
+  概念の枝は空のまま。同じ文書の別 claim を誤答に使う案は、誤答が論文中の正しい主張になり
+  選択肢の排他性と非LLM DIFF の意味を壊すので採らない。
 
 ### 4.3 API
 

@@ -36,7 +36,7 @@ from core.reconstruction.claim_context import (
 )
 from core.reconstruction.derivation_source import collect_derivation_probes
 from core.reconstruction.input_builder import build_user_content
-from core.reconstruction.item_builder import preferred_elicit_mode, response_options_to_dicts
+from core.reconstruction.item_builder import elicit_mode_decision, response_options_to_dicts
 from core.reconstruction.llm_client import ReconstructionLLMClient
 from core.reconstruction.prompt import build_instruction
 from core.reconstruction.repair import run_with_repair
@@ -222,17 +222,23 @@ def _enrich_claims(session, document_id: str, claims: list[dict]) -> list[dict]:
                 {"ids": chunk_ids},
             ).fetchall():
                 sections[r[0]] = str(r[1] or "").strip()
+        # 式は claim 自身の ``equation.equation_ids`` からも引く（IK-0483）ので、
+        # linked_claim_ids の有無で絞らない。``confidence_policy`` は「PDF からそのまま
+        # 抽出できた式か」の判定（関係型を付けてよいか）に使う。
         equations = [
             {
                 "agent_equation_id": r[0] or "", "label": r[1] or "", "latex": r[2] or "",
                 "defined_symbols": _json(r[3], []), "linked_claim_ids": _json(r[4], []),
+                "stable_key": r[5] or "", "equation_type": r[6] or "",
+                "used_symbols": _json(r[7], []), "confidence_policy": _json(r[8], {}),
             }
             for r in session.execute(
                 sa_text("""
-                    SELECT agent_equation_id, label, latex, defined_symbols, linked_claim_ids
+                    SELECT agent_equation_id, label, latex, defined_symbols, linked_claim_ids,
+                           stable_key, equation_type, used_symbols,
+                           agent_payload->'confidence_policy'
                     FROM knowledge_equations
                     WHERE document_id = :doc AND superseded_at IS NULL
-                      AND jsonb_array_length(linked_claim_ids) > 0
                 """),
                 {"doc": document_id},
             ).fetchall()
@@ -271,7 +277,7 @@ def author_item_for_claim(claim: dict, llm_client=None) -> ItemAuthoringResult:
     claim = dict(claim)
     for field in ("text", "normalized_text"):
         claim[field] = normalize_claim_text(claim.get(field))
-    mode = preferred_elicit_mode(claim)
+    mode, _reason = elicit_mode_decision(claim)
     content = build_instruction(mode) + "\n\n" + build_user_content(claim)
     return run_with_repair(client, content, claim)
 
@@ -492,13 +498,43 @@ def _run_llm_item_authoring_for_document(document_id: str) -> int:
                 session.close()
             if item_id:
                 created += 1
-                _record_item_event(item_id, claim["id"], "", "auto", None, {"author": "llm", "mode": result.elicit_mode})
+                _record_item_event(
+                    item_id, claim["id"], "", "auto", None,
+                    _authoring_event_metadata(claim, result.elicit_mode),
+                )
+                reason = _restate_reason(claim, result.elicit_mode)
+                if reason:
+                    restate = _last_reports[document_id].setdefault("restate_reasons", {})
+                    restate[reason] = restate.get(reason, 0) + 1
             else:
                 report_skipped = _last_reports[document_id]["skipped"]
                 report_skipped["already_authored"] = report_skipped.get("already_authored", 0) + 1
         _last_reports[document_id]["created"] = created
         logger.info("recon item authoring done: document=%s created=%d", document_id, created)
         return created
+
+
+#: 下地は predict だったが、出題者（LLM）が選択肢に構造化できず restate に下げた。
+RESTATE_AUTHOR_DOWNGRADED = "author_downgraded_to_restate"
+
+
+def _restate_reason(claim: dict, mode: str) -> str | None:
+    """restate の item になった理由（predict なら None）。IK-0483。"""
+    if mode != "restate":
+        return None
+    preferred, reason = elicit_mode_decision(claim)
+    if preferred == "predict":
+        return RESTATE_AUTHOR_DOWNGRADED
+    return reason
+
+
+def _authoring_event_metadata(claim: dict, mode: str) -> dict:
+    """item 生成の監査 metadata。restate なら理由を残す（数値は載せない）。"""
+    meta: dict = {"author": "llm", "mode": mode}
+    reason = _restate_reason(claim, mode)
+    if reason:
+        meta["restate_reason"] = reason
+    return meta
 
 
 def maybe_schedule_item_authoring(document_id: str) -> bool:

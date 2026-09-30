@@ -78,15 +78,25 @@ class TestSingleFilteredSearchFeedsCitedSources:
 
     def test_cited_sources_appended_exactly_once_from_chunk_results_loop(self):
         body = self._learning_chat_body()
-        # cited_sources へ書き込むのは1箇所のみ（他ソースからの混入経路が無い）。
-        assert body.count("cited_sources.append(") == 1
-        # その1箇所が `for r in chunk_results:` ループの内側にあること。
+        # cited_sources へ書き込むのは2箇所だけ: ①検索結果のループ ②直前の回答が引用した
+        # チャンクを戻すループ（IK-0475）。②は検索ではなく id 指定の読み出しで、当該往復の
+        # allowed_document_ids をそのまま渡す（範囲を広げない = DM1/DM2）。
+        assert body.count("cited_sources.append(") == 2
+        # 1つ目が `for r in chunk_results:` ループの内側にあること。
         loop_start = body.index("for r in chunk_results:")
         append_idx = body.index("cited_sources.append(")
         assert loop_start < append_idx
         # ループと append の間に別の検索呼び出しが挟まっていないこと。
         between = body[loop_start:append_idx]
         assert "search_chunks_with_metadata(" not in between
+        # 2つ目は _carry_previous_cited_sources の結果だけを回し、可視集合を差し替えない。
+        second_idx = body.index("cited_sources.append(", append_idx + 1)
+        carry_idx = body.index("_carry_previous_cited_sources(")
+        assert append_idx < carry_idx < second_idx
+        carry_call = body[carry_idx:second_idx]
+        assert "allowed_document_ids=allowed_document_ids" in carry_call
+        assert "for r in _carried:" in carry_call
+        assert "list_visible_document_ids" not in carry_call
 
     def test_no_second_search_or_scope_widening_after_initial_call(self):
         """最初の（唯一の）検索呼び出しより後ろに、2回目の検索呼び出しや

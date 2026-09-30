@@ -44,6 +44,20 @@ def _search(chat_env, *ids):
     )
 
 
+def _cite_all(chat_env):
+    """回答が文脈の [出典N] をすべて引用する LLM（IK-0494 以降、見せる出典は引用したものだけ）。"""
+    import re as _re
+
+    def _generate(**kwargs):
+        messages = kwargs.get("messages") or []
+        chat_env.prompts.append(messages)
+        context = str(messages[1].get("content") or "") if len(messages) > 1 else ""
+        labels = list(dict.fromkeys(_re.findall(r"\[出典\d+\]", context)))
+        return "回答です " + "".join(labels)
+
+    chat_env.monkeypatch.setattr(learning_mod, "generate_text", _generate)
+
+
 def _client_copy(stored: list, *, window: int | None = None, mutate: bool = False) -> list:
     """uxsim の API runner と同じ形: {role, content} だけ・窓で切る・（任意で）本文を変える。"""
     turns = [{"role": m["role"], "content": m["content"]} for m in stored]
@@ -65,6 +79,7 @@ def _client_copy(stored: list, *, window: int | None = None, mutate: bool = Fals
 
 class TestCitationMapSurvivesClientCopy:
     def test_modified_windowed_history_keeps_first_numbers(self, chat_env):
+        _cite_all(chat_env)
         _search(chat_env, 1, 2)
         first = _ask("一つ目")
         assert [(s.index, s.chunk_id) for s in first.sources] == [(1, "chunk-1"), (2, "chunk-2")]
@@ -87,6 +102,7 @@ class TestCitationMapSurvivesClientCopy:
         }
 
     def test_turn_without_sources_carries_map_forward(self, chat_env):
+        _cite_all(chat_env)
         _search(chat_env, 1)
         _ask("一つ目")
         # 締めくくりの定型文（出典なしの経路）を挟んでも対応表は失われない。

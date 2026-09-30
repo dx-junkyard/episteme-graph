@@ -446,10 +446,56 @@ def _retrieved_claim_fact(index: str, claim: Mapping[str, Any]) -> str:
     if not claim_text:
         return ""
     fact = f"[出典{index}] の箇所には次の主張が構造化されています: 「{claim_text}」"
-    type_label = claim_type_label(row.get("claim_type"))
+    # ``claim_type='unknown'`` は「種類が決まっていない」という記録で、学習者に渡しても
+    # 情報が無い（「主張の種類: 不明」は雑音 — IK-0500）。種類の行ごと出さない。
+    claim_type = str(row.get("claim_type") or "").strip().lower()
+    type_label = "" if claim_type in _UNINFORMATIVE_CLAIM_TYPES else claim_type_label(claim_type)
     if type_label:
         fact += f"（主張の種類: {type_label}）"
     return fact
+
+
+#: 種類の行を出さない claim_type（「決まっていない」ことしか言えない値）。
+_UNINFORMATIVE_CLAIM_TYPES = frozenset({"", "unknown"})
+
+_CLAIM_TEXT_TRAILING = " \t.。．…"
+
+
+def _claim_dedupe_key(value: Any) -> str:
+    """主張本文の包含判定キー（空白を畳み casefold・末尾の句読点と省略記号を落とす）。"""
+    text = " ".join(str(value or "").split()).casefold()
+    while text.endswith("..."):
+        text = text[:-3]
+    return text.rstrip(_CLAIM_TEXT_TRAILING)
+
+
+def _dedupe_claims(claims: list[Any]) -> list[dict]:
+    """同じ出典の主張のうち、本文が他の主張に丸ごと含まれるものを畳む（IK-0501）。
+
+    同じ引用文の全文と途中で切れた版が並ぶと、同じことを 2 度言う事実文になる。
+    含む側（長い方）を**先に出た位置**に残す。行は消さない（この 1 回の表示から外すだけ）。
+    """
+    kept: list[tuple[str, dict]] = []
+    for claim in claims:
+        row = _dict(claim)
+        key = _claim_dedupe_key(row.get("text"))
+        if not key:
+            kept.append((key, row))
+            continue
+        absorbed = False
+        for position, (kept_key, _kept_row) in enumerate(kept):
+            if not kept_key:
+                continue
+            if key in kept_key:
+                absorbed = True
+                break
+            if kept_key in key:
+                kept[position] = (key, row)
+                absorbed = True
+                break
+        if not absorbed:
+            kept.append((key, row))
+    return [row for _, row in kept]
 
 
 def _retrieved_node_fact(claim: Mapping[str, Any]) -> str:
@@ -499,7 +545,7 @@ def resolve_retrieved_structure(
         index = _text(row.get("index"))
         if not index:
             continue
-        claims = _list(row.get("claims"))[:MAX_LEARNING_RETRIEVED_CLAIMS_PER_SOURCE]
+        claims = _dedupe_claims(_list(row.get("claims")))[:MAX_LEARNING_RETRIEVED_CLAIMS_PER_SOURCE]
         for claim in claims:
             if len(facts) >= MAX_LEARNING_RETRIEVED_FACTS:
                 return facts

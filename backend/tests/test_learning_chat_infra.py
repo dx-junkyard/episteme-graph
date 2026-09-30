@@ -251,8 +251,9 @@ class TestQuotaNotConsumedWithoutLLM:
 
 class TestHistoryWindowing:
     def test_main_chat_history_capped_to_20_messages(self, chat_env, monkeypatch):
-        """本体RAGの generate_text に渡る messages は、固定の3件(system/user/assistant)
-        + 直近20件の履歴 + 最新のユーザー発言1件、の合計24件に制限される。"""
+        """本体RAGの generate_text に渡る messages は、固定の2件(system/user の足場)
+        + 直近20件の履歴 + 最新のユーザー発言1件、の合計23件に制限される。
+        IK-0495: 足場の直後に作り話の assistant ターンを置かない。"""
         captured: dict = {}
 
         def _fake_generate_text(**kwargs):
@@ -269,8 +270,9 @@ class TestHistoryWindowing:
         learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
 
         messages = captured["messages"]
-        assert len(messages) == 3 + 20 + 1
-        history_slice = messages[3:-1]
+        assert len(messages) == 2 + 20 + 1
+        assert [m["role"] for m in messages[:2]] == ["system", "user"]
+        history_slice = messages[2:-1]
         history_contents = {m["content"] for m in history_slice}
         assert history_contents == {f"メッセージ{i}" for i in range(30, 50)}
         assert history_slice[0]["content"] == "メッセージ30"

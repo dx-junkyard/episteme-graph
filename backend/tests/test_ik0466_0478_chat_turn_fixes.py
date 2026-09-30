@@ -108,6 +108,9 @@ class TestCitationNumbersMonotone:
         chat_env.monkeypatch.setattr(
             learning_mod, "search_chunks_with_metadata", lambda *a, **k: [_chunk(1), _chunk(2)],
         )
+        chat_env.monkeypatch.setattr(
+            learning_mod, "generate_text", lambda **k: "回答です [出典1][出典3]",
+        )
         response = _ask("rewritten", replace_message_id="u2")
         indices = {s.chunk_id: s.index for s in response.sources}
         assert indices["chunk-1"] == 1

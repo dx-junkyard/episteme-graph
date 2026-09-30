@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from core.reconstruction.claim_context import normalize_claim_text
+from core.reconstruction.claim_context import normalize_claim_text, symbol_names
 from core.reconstruction.schema import subject_driver_concepts
 
 
@@ -26,7 +26,8 @@ def build_user_content(claim: dict[str, Any]) -> str:
         "equation": {
             "label": str(equation.get("label") or ""),
             "latex": str(equation.get("latex") or ""),
-            "defined_symbols": [str(s) for s in (equation.get("defined_symbols") or [])],
+            "defined_symbols": symbol_names(equation.get("defined_symbols")),
+            "symbols": symbol_names(equation.get("symbols")),
             "relation_type": str(equation.get("relation_type") or ""),
         },
         "source_scope": _scope_context(claim.get("source_scope")),
