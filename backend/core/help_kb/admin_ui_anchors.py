@@ -297,6 +297,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.arxiv-discovery-order",
         # 取得する形式（TeX ソース / PDF）— レーダー側の materials.radar-format と同型。
         "materials.arxiv-discovery-format",
+        # 生成する言語（同期の取り込みだけに効く）— レーダー側の materials.radar-language と同型。
+        "materials.arxiv-discovery-language",
         "materials.arxiv-discovery-queue",
         "materials.arxiv-discovery-queue-refresh",
         "materials.arxiv-discovery-search",
@@ -317,6 +319,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.radar-distance",
         # 取得する形式（TeX ソース / PDF）— arXiv の「Access Paper」の選択肢に対応。
         "materials.radar-format",
+        "materials.radar-language",
         "materials.radar-ingest",
         "materials.radar-modal",
         "materials.radar-provenance",
@@ -357,8 +360,10 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-version",
         "materials.seminar-brief-modal",
         "materials.upload-domain",
+        "materials.upload-language",
         "materials.upload-zone",
         "materials.url-upload",
+        "materials.url-upload-format",
         "materials.url-upload-modal",
         "materials.url-upload-submit",
         "release-review.evidence",
@@ -933,6 +938,7 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # 取得する形式（TeX ソース / PDF）— 既定は TeX ソース。TeX を公開していない
     # 論文では arXiv が返した PDF をそのまま取り込む（形式の判定はサーバ側）
     "materials.arxiv-discovery-format": "teacher/11-admin-materials.md#arxiv-discovery-format",
+    "materials.arxiv-discovery-language": "teacher/11-admin-materials.md#arxiv-discovery-language",
     # 選択した論文を取り込む（許可ドメイン未設定・未選択のときは無効）
     "materials.arxiv-discovery-ingest": "teacher/11-admin-materials.md#arxiv-discovery-ingest",
     # 学習者の関心（コーパス回遊 Phase D。k-匿名レンジの事実行だけ・行が無ければ区画ごと非表示）
@@ -976,6 +982,7 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # 取得する形式（TeX ソース / PDF）— 既定は TeX ソース。TeX を公開していない
     # 論文では arXiv が返した PDF をそのまま取り込む（形式の判定はサーバ側）
     "materials.radar-format": "teacher/11-admin-materials.md#radar-format",
+    "materials.radar-language": "teacher/11-admin-materials.md#radar-language",
     # 選択した論文を取り込む（レーダー）— 取り込みの弁は既存 ingest と同一
     "materials.radar-ingest": "teacher/11-admin-materials.md#radar-ingest",
     # 論文レーダーモーダル（起点の教材 / 距離と検索条件 / 候補一覧 / 取り込み）
@@ -1049,10 +1056,14 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.seminar-brief-modal": "teacher/11-admin-materials.md#seminar-brief-modal",
     # 分野（この教材をどの分野として解析するか。既定は「指定しない」= 分野中立）
     "materials.upload-domain": "teacher/11-admin-materials.md#upload-domain",
+    # 生成する言語（解析が生成する文章の言語。既定は「指定しない」。再解析モーダルにも同じ担体）
+    "materials.upload-language": "teacher/11-admin-materials.md#upload-language",
     # アップロードゾーン（ドラッグ&ドロップ / ファイルを選択）
     "materials.upload-zone": "teacher/11-admin-materials.md#upload-zone",
     # URLから取得（arXiv など）— アップロードゾーン内のリンク（migration 070）
     "materials.url-upload": "teacher/11-admin-materials.md#url-upload",
+    # URLから取得モーダルの「取得する形式」（arXiv の論文 URL のときだけ出る。既定 TeX）
+    "materials.url-upload-format": "teacher/11-admin-materials.md#url-upload-format",
     # URLから教材を取得モーダル
     "materials.url-upload-modal": "teacher/11-admin-materials.md#url-upload-modal",
     # モーダルの「アップロード」（許可リストが空のときは無効）

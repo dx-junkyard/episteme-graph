@@ -226,7 +226,14 @@ class TestAdminUiAnchorsModule:
         #   graph-review.module-view（層トグルの「理論モジュール」。件数なし = TM6）/
         #   graph-review.module-member（モジュール詳細の成員 step → 式の詳細の当該ノードへ）。
         #   docs/features/theory_module_layer_design.md §8.1。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 355
+        # + 2026-09-30: arXiv の TeX 既定と生成言語の2件 —
+        #   materials.url-upload-format（URLから取得モーダルの取得形式。arXiv の論文 URL のときだけ）/
+        #   materials.upload-language（生成する言語。アップロード欄と再解析モーダル）。
+        #   docs/features/paper_radar_design.md §15.9 / discuss_opening_authoring_design.md §14。
+        # + 2026-10-01: 論文の取り込みモーダルの生成言語の2件 —
+        #   materials.arxiv-discovery-language / materials.radar-language（同期の取り込みだけに効く）。
+        #   docs/features/paper_radar_design.md §15.9。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 359
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

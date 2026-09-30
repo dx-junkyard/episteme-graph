@@ -66,12 +66,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 import services
+import source_resolution
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
 from services import aggregate_frontier_interest, record_review_event
 
@@ -283,9 +284,13 @@ class IngestRequest(BaseModel):
     models: Optional[dict] = None
     domain_key: str = ""
     #: 取得する配信形式（``tex`` / ``pdf``）。**空は「指定なし」**で
-    #: ``pd_schema.DEFAULT_SOURCE_FORMAT`` に落ちる（既存の呼び出し側の挙動は不変）。
+    #: ``pd_schema.DEFAULT_SOURCE_FORMAT``（2026-09-30 以降 TeX）に落ちる。TeX が使えない
+    #: 論文は ``source_resolution`` が同期で PDF に倒す（最大 2 回の取得）。
     #: 語彙外は 422（:data:`_DETAIL_INVALID_SOURCE_FORMAT`）。
     source_format: str = ""
+    #: 生成物の言語（``ja`` / ``en``。``None`` = 指定なし）。意味は
+    #: ``POST /api/admin/materials/upload`` の ``language`` と同一（run options に入る）。
+    language: Optional[Literal["ja", "en"]] = None
 
 
 class IngestBatchItem(BaseModel):
@@ -663,8 +668,16 @@ def ingest_candidates(
     ``NoDomainsConfiguredError``（許可ドメインが1件も無い）は**どの item も
     成功し得ない**ので、リクエスト全体を 422 にする。
 
-    ``documents.source_url`` に PDF の取得 URL を保存し、次回以降の「取り込み済み」
-    判定を読み時導出できるようにする（PD5）。
+    ``documents.source_url`` に**実際にバイト列を返した URL**（TeX なら ``/src/``、
+    PDF へ倒したなら ``/pdf/``）を保存し、次回以降の「取り込み済み」判定を読み時導出
+    できるようにする（PD5）。各 accepted 行には ``effective_format``（実バイトの形式）と
+    ``fell_back``（TeX を取りに行って PDF を取り直したか）を添える。
+
+    arXiv が 429 を返したら**そこで取得を止め**、残りの item は取得せずに
+    ``rate_limited`` の事実文で ``failed`` に積む（設計書 §15.9 の 429 停止規則）。
+
+    アイテム間の 3 秒間隔（worker の ``INTER_ITEM_SLEEP_SECONDS``）は同期経路では
+    置かない（上限5件・教員が待つ同期リクエストのため。設計書 §15.9 の非スコープ）。
     """
     items = list(body.items or [])
     if not items:
@@ -677,6 +690,7 @@ def ingest_candidates(
     models_option: dict | None = None
     if body.models:
         models_option = _validate_models_option(body.models)
+    language_option = body.language
 
     session = _pg_session()
     try:
@@ -686,6 +700,9 @@ def ingest_candidates(
 
     accepted: list[dict] = []
     failed: list[dict] = []
+    # 429 を一度受けたら、残りの item では arXiv を呼ばない（制限中に叩き続けると
+    # ブロックが延びる — P-0007 / 設計書 §15.9 の 429 停止規則。2026-10-01 レビュー M6）。
+    rate_limited = False
 
     for item in items:
         raw_id = str(getattr(item, "arxiv_id", "") or "")
@@ -693,10 +710,21 @@ def ingest_candidates(
         if not arxiv_id:
             failed.append({"arxiv_id": raw_id, "detail": _DETAIL_INVALID_ARXIV_ID})
             continue
+        if rate_limited:
+            # 取得していない事実を、429 を受けた item と同じ事実文で残す。
+            failed.append({
+                "arxiv_id": arxiv_id,
+                "detail": source_resolution.DETAIL_ARXIV_RATE_LIMITED,
+                "rate_limited": True,
+            })
+            continue
 
-        source_url = pd_schema.source_url_for(arxiv_id, source_format)
+        # TeX → PDF の同期フォールバック（1件あたり arXiv への取得は最大 2 回・429 では
+        # 2 回目を取らない）。方針の正本は api/source_resolution.py。
         try:
-            fetched = url_fetch.fetch_source_from_url(source_url, allowed)
+            resolved = source_resolution.fetch_arxiv_source(
+                arxiv_id, source_format=source_format, allowed_domains=allowed,
+            )
         except url_fetch.NoDomainsConfiguredError as exc:
             # 許可リストが空 = どの item も成功し得ない。個別の失敗として黙らせず、
             # 設定が必要な事実を全体のエラーとして返す（fail-closed / UF1）。
@@ -713,9 +741,15 @@ def ingest_candidates(
                 "arXiv ingest fetch rejected (%s) for user=%s: %s",
                 type(exc).__name__, current_user["id"], exc,
             )
-            failed.append({"arxiv_id": arxiv_id, "detail": str(exc)})
+            entry = {"arxiv_id": arxiv_id, "detail": str(exc)}
+            if isinstance(exc, url_fetch.RateLimitedError):
+                # 機械可読の目印（制限中は PDF への切り替えも試みていない事実）。
+                entry["rate_limited"] = True
+                rate_limited = True
+            failed.append(entry)
             continue
 
+        fetched = resolved.fetched
         try:
             result = _accept_material_source(
                 source_bytes=fetched.content,
@@ -724,7 +758,9 @@ def ingest_candidates(
                 analyze_images=body.analyze_images,
                 models_option=models_option,
                 current_user=current_user,
-                source_url=source_url,
+                # 実際にバイト列を返した URL を出所として記帳する（フォールバック時は /pdf/）。
+                source_url=resolved.source_url,
+                language=language_option,
             )
         except HTTPException as exc:
             # 保存・受理の失敗も1件分に閉じる（残りの取り込みを巻き添えにしない）。
@@ -737,6 +773,8 @@ def ingest_candidates(
 
         payload = dict(result or {})
         payload["arxiv_id"] = arxiv_id
+        payload["effective_format"] = resolved.effective_format
+        payload["fell_back"] = bool(resolved.fell_back)
         accepted.append(payload)
 
     record_review_event(
@@ -749,6 +787,13 @@ def ingest_candidates(
             "action": "ingest",
             "source_format": source_format,
             "arxiv_ids": [entry.get("arxiv_id", "") for entry in accepted],
+            "effective_formats": {
+                entry.get("arxiv_id", ""): entry.get("effective_format", "")
+                for entry in accepted
+            },
+            "fell_back_arxiv_ids": [
+                entry.get("arxiv_id", "") for entry in accepted if entry.get("fell_back")
+            ],
             "failed_arxiv_ids": [entry.get("arxiv_id", "") for entry in failed],
             "accepted": len(accepted),
             "failed": len(failed),

@@ -614,7 +614,7 @@ class TestIngest:
         assert "許可リストに登録" in res.json()["detail"]
         assert env["accepted"] == []
         # 許可リストの判定は core が正本（ルートは空リストをそのまま渡す）
-        assert env["fetches"] == [("https://arxiv.org/pdf/2608.20293", [])]
+        assert env["fetches"] == [("https://arxiv.org/src/2608.20293", [])]
 
     def test_partial_failure_keeps_the_batch_alive(self, env):
         env["session"].domains = ["arxiv.org"]
@@ -647,8 +647,8 @@ class TestIngest:
         body = res.json()
         assert [f["arxiv_id"] for f in body["failed"]] == ["これはIDではない"]
         assert len(body["accepted"]) == 1
-        # 不正 ID では取得を試みない
-        assert env["fetches"] == [("https://arxiv.org/pdf/2608.20293", ["arxiv.org"])]
+        # 不正 ID では取得を試みない（既定は TeX = /src/。PDF のみの投稿は 1 回で終わる）
+        assert env["fetches"] == [("https://arxiv.org/src/2608.20293", ["arxiv.org"])]
 
     def test_source_url_is_persisted(self, env):
         env["session"].domains = ["arxiv.org"]
@@ -657,8 +657,9 @@ class TestIngest:
             headers=_auth(env, "teacher"),
         )
         accepted = env["accepted"][0]
-        # PD5: 取り込み済み判定の材料。version は正規化で落ちる
-        assert accepted["source_url"] == "https://arxiv.org/pdf/2608.20293"
+        # PD5: 取り込み済み判定の材料。version は正規化で落ちる。既定は TeX（/src/）で、
+        # arXiv が /src/ で PDF を返した（PDF のみの投稿）ときも、バイト列を返した URL を記帳する。
+        assert accepted["source_url"] == "https://arxiv.org/src/2608.20293"
         assert accepted["source_bytes"] == PDF_BYTES
         assert accepted["source_kind"] == "pdf"
 
@@ -671,8 +672,12 @@ class TestIngest:
         assert set(item) == {
             "task_id", "material_id", "filename", "title", "source_kind",
             "status", "uploaded_at", "analyze_images", "arxiv_id",
+            "effective_format", "fell_back",
         }
         assert item["arxiv_id"] == "2608.20293"
+        # /src/ が PDF を返した = PDF のみの投稿。取り直していない（1 回で終わり）。
+        assert item["effective_format"] == "pdf"
+        assert item["fell_back"] is False
 
     def test_analyze_images_is_forwarded(self, env):
         env["session"].domains = ["arxiv.org"]
@@ -713,7 +718,7 @@ class TestIngest:
             self.PATH, json={"items": _items("2608.20293")}, headers=_auth(env, "teacher"),
         )
         assert env["fetches"] == [
-            ("https://arxiv.org/pdf/2608.20293", ["arxiv.org", "example.com"])
+            ("https://arxiv.org/src/2608.20293", ["arxiv.org", "example.com"])
         ]
 
     def test_audit_lists_the_targets(self, env):
@@ -862,8 +867,12 @@ class TestIngestGoesThroughUrlFetch:
 
     def test_fetch_is_delegated_to_url_fetch(self):
         source = _read(ROUTE_SOURCE)
-        assert "url_fetch.fetch_source_from_url(" in source
+        # 取得は source_resolution（TeX → PDF の同期フォールバック）経由で、その中が
+        # url_fetch の唯一の公開取得関数を呼ぶ（ディスカバリー専用の取得経路を作らない）。
+        assert "source_resolution.fetch_arxiv_source(" in source
         assert "url_fetch.list_url_fetch_domains(" in source
+        resolution = _read(BACKEND / "api" / "source_resolution.py")
+        assert "url_fetch.fetch_source_from_url(" in resolution
 
     def test_ingest_limit_constant_exists(self):
         import routes.paper_discovery as routes
@@ -921,7 +930,8 @@ class TestSourceUrlPersistence:
         import routes.admin as admin_routes
 
         body = inspect.getsource(admin_routes.upload_material_from_url)
-        assert "source_url=body.url" in body
+        # 実際にバイト列を返した URL（arXiv 以外は body.url そのもの — source_resolution）。
+        assert "source_url=resolved.source_url" in body
 
     def test_multipart_upload_does_not_pass_a_source_url(self):
         import inspect
@@ -943,8 +953,8 @@ class TestIngestSourceFormat:
     形式の分岐点は ``pd_schema.source_url_for`` の1箇所だけで、route が組み立てた
     URL がそのまま ``url_fetch`` と ``documents.source_url`` へ渡る。ここで固定するのは:
 
-    - 既定（未指定）は **PDF**。この API の既定を変えると、形式スイッチを持たない
-      分野購読モーダルの取り込みまで黙って変わる（画面の既定 = TeX はフロントが送る）。
+    - 既定（未指定）は **TeX**（2026-09-30 変更 — 設計書 §15.9）。TeX が使えない
+      論文は ``source_resolution`` が同期で PDF に倒す（最大 2 回の取得）。
     - 語彙外は 422 で、取得を1件も試みない（選んだ形式と実際に取る形式を食い違わせない）。
     - TeX を選んだときの ``documents.source_url`` は ``/src/<id>``。この URL も
       ``normalize_arxiv_id`` で同じ ID へ畳まれるので「取り込み済み」判定は効き続ける。
@@ -952,13 +962,13 @@ class TestIngestSourceFormat:
 
     PATH = "/api/admin/discovery/ingest"
 
-    def test_default_is_pdf(self, env):
+    def test_default_is_tex(self, env):
         env["session"].domains = ["arxiv.org"]
         res = env["client"].post(
             self.PATH, json={"items": _items("2608.20293")}, headers=_auth(env, "teacher"),
         )
         assert res.status_code == 202
-        assert env["fetches"] == [("https://arxiv.org/pdf/2608.20293", ["arxiv.org"])]
+        assert env["fetches"] == [("https://arxiv.org/src/2608.20293", ["arxiv.org"])]
 
     def test_tex_fetches_the_source_url(self, env):
         env["session"].domains = ["arxiv.org"]
@@ -1021,14 +1031,14 @@ class TestIngestSourceFormat:
         assert res.status_code == 202
         assert env["enqueue_calls"][0][1]["source_format"] == "tex"
 
-    def test_batch_default_is_pdf(self, env):
+    def test_batch_default_is_tex(self, env):
         env["session"].domains = ["arxiv.org"]
         env["client"].post(
             "/api/admin/discovery/ingest-batch",
             json={"items": [{"arxiv_id": "2608.20293"}]},
             headers=_auth(env, "teacher"),
         )
-        assert env["enqueue_calls"][0][1]["source_format"] == "pdf"
+        assert env["enqueue_calls"][0][1]["source_format"] == "tex"
 
     def test_batch_unknown_format_is_422_and_queues_nothing(self, env):
         env["session"].domains = ["arxiv.org"]
@@ -1507,3 +1517,49 @@ class TestSearchWhileArxivBlocked:
         )
         self._post(env)
         assert env["search_calls"][0][1]["arxiv_blocked_note"] == ""
+
+
+class TestIngestStopsAtRateLimit:
+    """429 を受けたら残りの item では arXiv を呼ばない（2026-10-01 レビュー M6 / §15.9）。"""
+
+    PATH = "/api/admin/discovery/ingest"
+
+    def test_second_item_429_stops_further_fetches(self, env):
+        import source_resolution
+
+        env["session"].domains = ["arxiv.org"]
+        env["fetch_errors"] = {
+            "2608.20292": env["routes"].url_fetch.RateLimitedError("取得先からアクセスを制限されています"),
+        }
+        res = env["client"].post(
+            self.PATH,
+            json={"items": _items("2608.20291", "2608.20292", "2608.20293",
+                                  "2608.20294", "2608.20295")},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 202
+        body = res.json()
+        # 取得は 1 件目（成功）と 2 件目（429）の 2 回だけ。
+        assert [url for url, _ in env["fetches"]] == [
+            "https://arxiv.org/src/2608.20291",
+            "https://arxiv.org/src/2608.20292",
+        ]
+        assert [a["arxiv_id"] for a in body["accepted"]] == ["2608.20291"]
+        assert [f["arxiv_id"] for f in body["failed"]] == [
+            "2608.20292", "2608.20293", "2608.20294", "2608.20295",
+        ]
+        for entry in body["failed"]:
+            assert entry["rate_limited"] is True
+            assert entry["detail"] == source_resolution.DETAIL_ARXIV_RATE_LIMITED
+
+    def test_invalid_ids_after_the_block_keep_their_own_fact(self, env):
+        env["session"].domains = ["arxiv.org"]
+        env["fetch_error"] = env["routes"].url_fetch.RateLimitedError("制限")
+        res = env["client"].post(
+            self.PATH, json={"items": _items("2608.20291", "not-an-id")},
+            headers=_auth(env, "teacher"),
+        )
+        failed = res.json()["failed"]
+        assert len(env["fetches"]) == 1
+        assert failed[1].get("rate_limited") is None
+        assert failed[1]["arxiv_id"] == "not-an-id"

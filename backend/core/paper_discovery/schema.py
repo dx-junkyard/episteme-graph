@@ -64,9 +64,11 @@ SOURCE_FORMAT_TEX = "tex"
 SOURCE_FORMAT_PDF = "pdf"
 SOURCE_FORMATS = (SOURCE_FORMAT_TEX, SOURCE_FORMAT_PDF)
 
-#: 形式が指定されなかったときの落とし所。**既存の呼び出し側の挙動を変えないための値**で、
-#: 「この画面の既定」ではない（レーダー画面の既定は TeX で、フロントが明示的に送る）。
-DEFAULT_SOURCE_FORMAT = SOURCE_FORMAT_PDF
+#: 形式が指定されなかったときの落とし所。**2026-09-30 に TeX へ変更**（論文レーダー設計書
+#: §15.9）: PDF 経路は組版結果から式・導出・図表を復元する損失が上流にあり、表示側では
+#: 隠せない（理論モジュール層の実測では同一論文の式チェーンが PDF 0 本 / TeX 13 本）。
+#: TeX が使えない論文は取得層（``api/source_resolution.py``）が同期で PDF に倒す。
+DEFAULT_SOURCE_FORMAT = SOURCE_FORMAT_TEX
 
 #: 引用グラフ API の宛先ホスト（Phase 3 / 設計書 §6。PD7 — arXiv と同じ規律で固定値。
 #: スロットルは**ホストごとに独立**なので arxiv_client とは共有しない）。

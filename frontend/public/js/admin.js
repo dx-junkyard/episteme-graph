@@ -1204,6 +1204,32 @@
     return _reanalyzeDomain.value || "";
   }
 
+  // 再解析モーダルの「生成する言語」区画。previous は前回 run の options.language。
+  function _reanalyzeLanguageInit(lastOpts) {
+    var row = document.getElementById("reanalyze-language-row");
+    if (!row) return;
+    var previous = (lastOpts && GENERATION_LANGUAGE_LABELS[lastOpts.language]) ? lastOpts.language : "";
+    row.innerHTML =
+      '<div>前回の解析の生成する言語: ' + escHtml(generationLanguageLabel(previous)) + '</div>' +
+      '<label style="display:block;margin-top:4px">この解析の生成する言語' +
+        '<select id="reanalyze-language-select" style="margin-left:6px;font-size:12.5px">' +
+          '<option value="">前回と同じ</option>' +
+          '<option value="none">指定しない</option>' +
+          '<option value="ja">日本語</option>' +
+          '<option value="en">英語</option>' +
+        '</select>' +
+      '</label>';
+  }
+
+  // 再解析リクエストに載せる生成言語。「前回と同じ」なら null（送らない＝前回から継承）、
+  // 「指定しない」なら ""（明示的な解除として送る — 分野の cartridge_id と同じ約束）。
+  function getReanalyzeLanguage() {
+    var el = document.getElementById("reanalyze-language-select");
+    var value = el ? String(el.value || "") : "";
+    if (value === "none") return "";
+    return GENERATION_LANGUAGE_LABELS[value] ? value : null;
+  }
+
   // 「解析再開」ボタンのフローにもアップロード時と同じチェックボックスを出す。
   function openReanalyzeOptionsModal(docId, filename, triggerBtn) {
     var existing = document.getElementById("reanalyze-options-modal");
@@ -1226,6 +1252,8 @@
         /* 分野の適合（概念レジストリ P3-7）: 選択中の分野の「形の宣言」と、この論文の
            解析結果との適合を事実文で示す。中身は admin-cartridge-fit.js が描く。 */
         '<div id="reanalyze-domain-fit-row" data-ui-anchor="materials.reanalyze-domain-fit" style="font-size:11.5px;color:var(--color-text-tertiary);margin-bottom:10px"></div>' +
+        /* 生成する言語（run options.language）: 前回値を事実文で示し、この解析だけ変更できる */
+        '<div id="reanalyze-language-row" data-ui-anchor="materials.upload-language" style="font-size:12.5px;color:var(--color-text-secondary);margin-bottom:10px"></div>' +
         '<div id="reanalyze-llm-model-row" style="margin-bottom:16px"></div>' +
         '<div style="display:flex;gap:8px;justify-content:flex-end">' +
           '<button id="reanalyze-cancel-btn" class="admin-action-btn">キャンセル</button>' +
@@ -1243,6 +1271,10 @@
     // 分野（提案 C1）: 前回 run の分野を事実文で示し、この解析だけ選び直せる。
     // 触らなければ cartridge_id を送らず、サーバ側が前回 run の分野を継承する。
     _reanalyzeDomainInit(lastMaterial);
+
+    // 生成する言語: 前回 run の options.language を事実文で示す。「前回と同じ」のままなら
+    // language を送らず、サーバ側が前回 run の値を引き継ぐ。
+    _reanalyzeLanguageInit(lastOpts);
 
     // 分野の適合（概念レジストリ P3-7 / concept_registry_design.md §8）: 選択中の
     // 分野の形の宣言（shape.json）と、この論文の解析結果との適合を事実文で示す。
@@ -1271,6 +1303,7 @@
       var analyzeImages = document.getElementById("reanalyze-analyze-images").checked;
       var llmModels = window.AdminLlmModels ? window.AdminLlmModels.getReanalyzeModels(lastOpts, analyzeImages) : null;
       var reanalyzeCartridgeId = getReanalyzeCartridgeId();
+      var reanalyzeLanguage = getReanalyzeLanguage();
       // N6残: 前回 run が analyze_images=true で、今回チェックを外して実行する場合は
       // 未レビューの AI 図分類・装置候補が失われることを明示確認してから実行する
       // （明示 OFF はユーザーの意思なのでブロックはしないが、警告なしには通さない）。
@@ -1280,14 +1313,14 @@
         if (confirmBtn) confirmBtn.disabled = true; // 件数取得中の二重クリック防止
         _confirmExplicitImagesOff(docId, function () {
           overlay.remove();
-          performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels, reanalyzeCartridgeId);
+          performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels, reanalyzeCartridgeId, reanalyzeLanguage);
         }, function () {
           if (confirmBtn) confirmBtn.disabled = false; // キャンセル時は選び直せる
         });
         return;
       }
       overlay.remove();
-      performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels, reanalyzeCartridgeId);
+      performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels, reanalyzeCartridgeId, reanalyzeLanguage);
     });
   }
 
@@ -1342,7 +1375,7 @@
       });
   }
 
-  function performReanalyze(docId, filename, btn, analyzeImages, models, cartridgeId) {
+  function performReanalyze(docId, filename, btn, analyzeImages, models, cartridgeId, language) {
     if (btn) { btn.disabled = true; btn.textContent = "再開中..."; }
     var body = { analyze_images: !!analyzeImages };
     // M層（LLM モデル選択, migration 061）: 未指定（null）なら前回 run の options から自動継承される。
@@ -1350,6 +1383,9 @@
     // 分野（提案 C1）: null（教員が触っていない）なら送らず、サーバ側が前回 run の
     // 分野を引き継ぐ。"" は「指定しない」への明示的な解除として送る。
     if (cartridgeId !== null && cartridgeId !== undefined) body.cartridge_id = cartridgeId;
+    // 生成する言語: 選び直したときだけ送る（null はサーバ側で前回 run から継承、
+    // "" は「指定しない」への明示的な解除）。
+    if (language !== null && language !== undefined) body.language = language;
     apiFetch("/admin/documents/" + docId + "/reanalyze", {
       method: "POST",
       body: JSON.stringify(body),
@@ -4142,6 +4178,22 @@
     return _uploadDomain.value || "";
   }
 
+  // ── 生成する言語（run options.language, discuss_opening_authoring_design.md §14）──
+  // 解析が生成する文章（議論のきっかけ・二層説明）の言語。語彙はサーバが正本（ja / en）。
+  // 「指定しない」は送らない（サーバ側の既定 = 議論のきっかけは env、説明は素材の言語）。
+  // 選択は run 単位（ユーザー既定として保存しない）。LLM の呼び出し回数は変わらない。
+  var GENERATION_LANGUAGE_LABELS = { ja: "日本語", en: "英語" };
+
+  function getUploadLanguage() {
+    var el = document.getElementById("upload-language-select");
+    var value = el ? String(el.value || "") : "";
+    return GENERATION_LANGUAGE_LABELS[value] ? value : "";
+  }
+
+  function generationLanguageLabel(value) {
+    return GENERATION_LANGUAGE_LABELS[value] || "指定しない";
+  }
+
   // ── Task Polling State ──────────────────────────────────────────
   var _activePollingTimers = {};
 
@@ -4170,6 +4222,9 @@
     // （サーバ側で分野中立の解析になる）。
     var uploadCartridgeId = getUploadCartridgeId();
     if (uploadCartridgeId) formData.append("cartridge_id", uploadCartridgeId);
+    // 生成する言語: 選ばれていれば run へ渡す。「指定しない」は送らない。
+    var uploadLanguage = getUploadLanguage();
+    if (uploadLanguage) formData.append("language", uploadLanguage);
 
     apiFetchRaw("/admin/materials/upload", {
       method: "POST",
@@ -4321,6 +4376,45 @@
   // 受理後は既存のファイルアップロードと同じ経路（handleUploadAccepted）へ合流する。
   var _urlUploadSubmitting = false;
 
+  // arXiv の論文 URL のときだけ出す「取得する形式」（論文レーダー / arXivから探す と同型。
+  // paper_radar_design.md §15.9）。語彙の正本はサーバ（SOURCE_FORMATS）で、ここは値を
+  // 送る担体。クライアントで arXiv の URL を組み立てない（書き換えはサーバが行う）。
+  var URL_FORMAT_OPTIONS = [
+    { value: "tex", label: "TeX ソース" },
+    { value: "pdf", label: "PDF" }
+  ];
+  var URL_DEFAULT_SOURCE_FORMAT = "tex";
+  // 逐語でレーダー / arXivから探す の FORMAT_NOTICE と揃える（テストで固定）。
+  var URL_FORMAT_NOTICE =
+    "TeX ソースが公開されていない論文や、TeX ソースとして読めない論文では、PDF を取り込みます。";
+  var _urlUploadFormat = URL_DEFAULT_SOURCE_FORMAT;
+
+  // 形式スイッチを出すかどうかの判定（表示のためだけ。書き換えの判定はサーバが正本）。
+  function _isArxivPaperUrl(url) {
+    return /^https?:\/\/(www\.|export\.)?arxiv\.org\/(abs|pdf|src|e-print)\//i.test(String(url || "").trim());
+  }
+
+  function _urlUploadFormatRadiosHtml() {
+    var html = "";
+    for (var i = 0; i < URL_FORMAT_OPTIONS.length; i++) {
+      var option = URL_FORMAT_OPTIONS[i];
+      html +=
+        '<label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--color-text-secondary)">' +
+          '<input type="radio" name="url-upload-format-choice" class="url-upload-format-choice" value="' + escHtml(option.value) + '"' +
+          (option.value === _urlUploadFormat ? " checked" : "") + ">" +
+          escHtml(option.label) +
+        "</label>";
+    }
+    return html;
+  }
+
+  function _urlUploadSyncFormatRow() {
+    var row = document.getElementById("url-upload-format-row");
+    var input = document.getElementById("url-upload-input");
+    if (!row) return;
+    row.hidden = !_isArxivPaperUrl(input ? input.value : "");
+  }
+
   function initUrlUpload() {
     var link = document.getElementById("url-upload-link");
     if (!link) return;
@@ -4348,6 +4442,8 @@
   function openUrlUploadModal() {
     closeUrlUploadModal();
     _urlUploadSubmitting = false;
+    // 形式はモーダルを開くたびに既定（TeX）へ戻す（保存しない — PR1）。
+    _urlUploadFormat = URL_DEFAULT_SOURCE_FORMAT;
 
     var overlay = document.createElement("div");
     overlay.id = "url-upload-modal";
@@ -4362,6 +4458,16 @@
         '<label for="url-upload-input" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:4px">教材のURL</label>' +
         '<input type="text" id="url-upload-input" placeholder="https://arxiv.org/pdf/2401.00001" ' +
           'style="padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-primary);color:var(--color-text-primary)">' +
+        /* arXiv の論文 URL のときだけ出す取得形式（既定 TeX・保存しない・§15.9） */
+        '<div id="url-upload-format-row" data-ui-anchor="materials.url-upload-format" hidden style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:8px">' +
+          '<span style="font-size:12px;color:var(--color-text-secondary)">取得する形式</span>' +
+          _urlUploadFormatRadiosHtml() +
+          '<span style="font-size:11.5px;color:var(--color-text-tertiary)">' + escHtml(URL_FORMAT_NOTICE) + '</span>' +
+        '</div>' +
+        /* 生成する言語は教材管理のアップロード欄の選択を引き継ぐ（分野と同じ流儀） */
+        '<div id="url-upload-language-note" style="font-size:12px;color:var(--color-text-tertiary);margin-top:8px">' +
+          '生成する言語: ' + escHtml(generationLanguageLabel(getUploadLanguage())) + '（教材管理の「生成する言語」の選択を使います）' +
+        '</div>' +
         '<div id="url-upload-domains-note" style="font-size:12px;color:var(--color-text-tertiary);margin-top:8px">許可ドメインを確認しています。</div>' +
         '<div id="url-upload-status" class="upload-status" style="display:none;margin-top:10px"></div>' +
         '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">' +
@@ -4376,6 +4482,13 @@
     document.getElementById("url-upload-cancel").addEventListener("click", closeUrlUploadModal);
     document.getElementById("url-upload-submit").addEventListener("click", submitUrlUpload);
     var input = document.getElementById("url-upload-input");
+    input.addEventListener("input", _urlUploadSyncFormatRow);
+    var formatNodes = overlay.querySelectorAll(".url-upload-format-choice");
+    for (var fi = 0; fi < formatNodes.length; fi++) {
+      formatNodes[fi].addEventListener("change", function () {
+        if (this.checked) _urlUploadFormat = this.value;
+      });
+    }
     input.addEventListener("keydown", function (e) {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -4455,6 +4568,11 @@
     // 分野（提案 C1）: ファイル選択時と同じ「分野」行の選択を引き継ぐ。
     var urlCartridgeId = getUploadCartridgeId();
     if (urlCartridgeId) payload.cartridge_id = urlCartridgeId;
+    // arXiv の論文 URL のときだけ取得形式を送る（書き換え・PDF への切り替えはサーバ）。
+    if (_isArxivPaperUrl(url)) payload.source_format = _urlUploadFormat;
+    // 生成する言語: アップロード欄の選択を引き継ぐ。「指定しない」は送らない。
+    var urlLanguage = getUploadLanguage();
+    if (urlLanguage) payload.language = urlLanguage;
 
     _urlUploadSubmitting = true;
     if (btn) btn.disabled = true;

@@ -479,3 +479,29 @@ stale を付けない・D層非改変・repair 指示と validator の整合）/
 - UI（`discuss.js`）: 「この論文が答えようとした問い」の直後に「論文の骨格（章の流れ）」。既定は畳んだ
   `<details>`（一等地の密度を変えない・展開すれば同じ画面から到達可 = OA7）。数値・件数・「寄り道」語彙なし。
 - テスト: `test_discuss_opening_p09.py`（18 件）。既存の projection / guardrails / ui_static は無改変で通る。
+
+## 14. 追補 — 生成言語の run オプション（2026-09-30・migration なし）
+
+> **状態: 実装済み**。§4.1 の「生成言語は env `DISCUSS_OPENING_LANGUAGE` 1つで決める」を、
+> run options → env の順に拡張した。
+
+- **何を足したか**: 解析 run の options に `language`（`ja` / `en`）。入口は multipart
+  アップロード（Form `language`・語彙外 422）/ `upload-from-url`（`language: Literal["ja","en"]`）/
+  arXiv 取り込み `/ingest`（`IngestRequest.language`）/ 再解析（`ReanalyzeRequest.language` —
+  `None` は前回 run の `options.language` を継承、`models` / `analyze_images` と同じ流儀）。
+  保存先は既存の `document_analysis_runs.options.language`（列を増やさない）。未指定はキー自体を
+  入れない。
+- **orchestrator**: `_run_generation_language(effective_options)` が語彙内の値だけを返し、
+  `_stage_discuss_opening` → `_build_discuss_opening(language=)` → `_discuss_opening_language(run_language)`
+  が **run options > env > "ja"** の順で決める。`contextual_explanation` には指定があるときだけ
+  `ContextualExplanationAgent(language=)` を渡し、prompt の `## Language` 節を「その言語で書く・
+  逐語引用は翻訳しない」に差し替える（未指定の prompt は従来の「素材の言語に合わせる」と逐語で同じ）。
+  `lecture_language` は引き続き使わない（同じ論文が言語設定の違うコースに載りうる — §4.1 の理由は不変）。
+- **LLM 呼び出しは増えない**（同じ 1 コールの指示が変わるだけ）。CostGate も不変。
+- **UI**: 教材管理のアップロード欄「生成する言語: 指定しない / 日本語 / 英語」（既定「指定しない」・
+  保存しない）、URL から取得はその選択を引き継ぐ、再解析モーダルは前回値の事実文 +「前回と同じ /
+  日本語 / 英語」。アンカー `materials.upload-language`。
+- **非スコープ**: バッチ取り込みキュー（migration 072 の `paper_discovery_ingest_items` に options 列が
+  無いので言語を運べない — 取り込み後に再解析で選ぶ）/ arXivから探す・論文レーダーのモーダルに言語の
+  選択を出すこと（API は受けるが UI は未配線）/ 言語の教員ごとの既定値の保存 / 既存の生成物の翻訳。
+- ガードレール: `test_generation_language_option.py`。

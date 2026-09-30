@@ -7,12 +7,12 @@ disk.
 """
 from __future__ import annotations
 
-import gzip
 import io
 import os
 import posixpath
 import re
 import tarfile
+import zlib
 from dataclasses import dataclass
 
 from episteme_graph.agents.document_structure.schema import (
@@ -29,6 +29,11 @@ _TEX_EXT = ".tex"
 _BIB_EXT = ".bib"
 _MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
 _MAX_MEMBER_BYTES = 10 * 1024 * 1024
+#: tar を走査するときに読み進めてよい展開後バイト数の上限（gzip 爆弾で CPU を焼かない）。
+#: 個々の member は :data:`_MAX_MEMBER_BYTES` で縛る。ここは「読み飛ばし」も含めた総量。
+_MAX_TAR_SCAN_BYTES = 200 * 1024 * 1024
+#: tar に並べてよい member 数の上限（ヘッダだけの爆弾で TarInfo を溜め込まない）。
+_MAX_ARCHIVE_MEMBERS = 5_000
 _MAX_EXPANDED_CHARS = 2_000_000
 _INPUT_RE = re.compile(r"\\(?:input|include)\s*\{([^}]+)\}")
 _BRACED_ARG = r"((?:[^{}]|\{[^{}]*\})*)"
@@ -175,6 +180,33 @@ _SINGLE_MEMBER_NAME = "main.tex"
 _TEX_DOCUMENT_MARKERS = ("\\documentclass", "\\begin{document}", "\\documentstyle")
 
 
+class TexArchiveTooLargeError(ValueError):
+    """展開後のサイズが上限を超えた（gzip 爆弾を含む）。``ValueError`` の部分型。"""
+
+
+def _bounded_gunzip(data: bytes, limit: int) -> bytes | None:
+    """gzip を **展開しながら** 上限で打ち切る（``gzip.decompress`` を丸ごと呼ばない）。
+
+    ``gzip.decompress`` は展開し終えてからでないと大きさを確かめられないため、
+    数百 KB の gzip 爆弾で数百 MB〜GB のメモリを確保してしまう（2026-10-01 レビュー M3）。
+    ここは ``zlib.decompressobj(16 + MAX_WBITS)`` に ``max_length = limit + 1`` を渡し、
+    上限を 1 バイトでも超えたら :class:`TexArchiveTooLargeError` を投げる。
+
+    gzip として壊れているときは ``None``（呼び出し側が「読めない」として扱う）。
+    """
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        raw = decompressor.decompress(data, limit + 1)
+    except zlib.error:
+        return None
+    if len(raw) <= limit and not decompressor.eof:
+        # 途中で切れた gzip（旧 ``gzip.decompress`` は EOFError）— 読めないものとして扱う。
+        return None
+    if len(raw) > limit or decompressor.unconsumed_tail:
+        raise TexArchiveTooLargeError("TeX source is too large when decompressed")
+    return raw
+
+
 def _read_single_gzip_member(archive_bytes: bytes) -> dict[str, str]:
     """tar ではない素の gzip を「1ファイルの TeX ソース」として読む。
 
@@ -186,11 +218,8 @@ def _read_single_gzip_member(archive_bytes: bytes) -> dict[str, str]:
     LaTeX の骨格が見当たらないバイト列は**受け取らない**（空 dict を返し、呼び出し側が
     ``.tar.gz`` として不正である旨のエラーに落とす）。
     """
-    try:
-        raw = gzip.decompress(archive_bytes)
-    except Exception:  # noqa: BLE001 — zlib.error / EOFError / BadGzipFile を一様に畳む
-        return {}
-    if len(raw) > _MAX_MEMBER_BYTES:
+    raw = _bounded_gunzip(archive_bytes, _MAX_MEMBER_BYTES)
+    if raw is None:
         return {}
     text = _decode_tex(raw)
     if not any(marker in text for marker in _TEX_DOCUMENT_MARKERS):
@@ -203,7 +232,13 @@ def _read_archive_members(archive_bytes: bytes) -> tuple[dict[str, str], dict[st
     bib_members: dict[str, str] = {}
     try:
         with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tf:
-            for member in tf.getmembers():
+            # getmembers() は全ヘッダを先に読み切って溜め込むので使わない（member 数と
+            # 読み進める総量の両方を縛る — gzip 爆弾で CPU とメモリを焼かない）。
+            for index, member in enumerate(tf):
+                if index >= _MAX_ARCHIVE_MEMBERS:
+                    raise TexArchiveTooLargeError("TeX archive has too many members")
+                if member.offset_data + max(0, member.size) > _MAX_TAR_SCAN_BYTES:
+                    raise TexArchiveTooLargeError("TeX archive is too large when decompressed")
                 if not member.isfile():
                     continue
                 lower_name = member.name.lower()

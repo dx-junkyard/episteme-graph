@@ -162,7 +162,8 @@ class TestEnqueueItems:
             if "INSERT INTO paper_discovery_ingest_items" in sql
         )
         assert insert["arxiv_id"] == "2608.20293"
-        assert insert["source_url"] == "https://arxiv.org/pdf/2608.20293"
+        # 2026-09-30 以降、形式の指定が無いときの既定は TeX（論文レーダー設計書 §15.9）。
+        assert insert["source_url"] == "https://arxiv.org/src/2608.20293"
         assert insert["domain_key"] == "astrophysics"
 
     def test_source_format_selects_the_stored_url(self):
@@ -178,10 +179,18 @@ class TestEnqueueItems:
         insert = next(params for sql, params in session.calls if "INSERT INTO" in sql)
         assert insert["source_url"] == "https://arxiv.org/src/2608.20293"
 
-    def test_unspecified_source_format_stays_on_pdf(self):
+    def test_unspecified_source_format_defaults_to_tex(self):
+        """既定は TeX（§15.9）。TeX が使えない論文は worker の取得時に PDF へ倒す。"""
         q = self._queue()
         session = FakeSession()
         q.enqueue_items(session, [{"arxiv_id": "2608.20293"}])
+        insert = next(params for sql, params in session.calls if "INSERT INTO" in sql)
+        assert insert["source_url"] == "https://arxiv.org/src/2608.20293"
+
+    def test_explicit_pdf_is_stored_as_pdf(self):
+        q = self._queue()
+        session = FakeSession()
+        q.enqueue_items(session, [{"arxiv_id": "2608.20293"}], source_format="pdf")
         insert = next(params for sql, params in session.calls if "INSERT INTO" in sql)
         assert insert["source_url"] == "https://arxiv.org/pdf/2608.20293"
 
@@ -431,11 +440,20 @@ class TestWorkerIsolation:
         assert_source_does_not_import(
             _WORKER_SRC, ["requests", "httpx", "urllib.request"], context="api/ingest_worker.py"
         )
-        assert "url_fetch.fetch_source_from_url" in _WORKER_SRC
+        # 取得は source_resolution 経由（TeX → PDF の同期フォールバック）。その中で
+        # url_fetch の唯一の公開取得関数を呼ぶ。
+        assert "source_resolution.fetch_url_source(" in _WORKER_SRC
+        resolution_src = (WORKER_SOURCE.parent / "source_resolution.py").read_text(encoding="utf-8")
+        assert "url_fetch.fetch_source_from_url(" in resolution_src
+        assert_source_does_not_import(
+            resolution_src, ["requests", "httpx", "urllib.request"],
+            context="api/source_resolution.py",
+        )
 
     def test_worker_calls_the_existing_acceptance_path(self):
         assert "_accept_material_source" in _WORKER_SRC
-        assert "source_url=source_url" in _WORKER_SRC
+        # 出所は実際にバイト列を返した URL（フォールバック時は /pdf/）。
+        assert "source_url=resolved.source_url" in _WORKER_SRC
 
     def test_no_delete_from_in_queue_or_worker(self):
         assert_source_forbids(_QUEUE_SRC, ["DELETE FROM"], context="ingest_queue.py")
@@ -533,10 +551,15 @@ def worker_env(monkeypatch):
         return session
 
     monkeypatch.setattr(ingest_worker, "get_session", _session)
-    monkeypatch.setattr(
-        ingest_worker, "_claim_next",
-        lambda: state["claims"].pop(0) if state["claims"] else None,
-    )
+    # 429 の backoff はモジュール状態 — テスト間で持ち越さない。
+    monkeypatch.setattr(ingest_worker, "_backoff_until", None)
+    state["claim_calls"] = 0
+
+    def _claim():
+        state["claim_calls"] += 1
+        return state["claims"].pop(0) if state["claims"] else None
+
+    monkeypatch.setattr(ingest_worker, "_claim_next", _claim)
     monkeypatch.setattr(
         ingest_worker, "_allowed_domains",
         lambda: list(state["domains"][0]),
@@ -688,6 +711,77 @@ class TestDrainLoop:
         worker_env["accept_error"] = RuntimeError("boom")
         assert mod.drain_once(sleep=worker_env["sleeps"].append) == 2
         assert all(entry[1] is None for entry in worker_env["finished"])
+
+
+class TestRateLimitBackoff:
+    """429 を受けたら周を止め、クールダウンの間は取り出さない（2026-10-01 レビュー M6）。"""
+
+    def _clock(self, start=1000.0):
+        now = {"t": start}
+        return now, (lambda: now["t"])
+
+    def test_default_backoff_matches_the_search_client_default(self):
+        import ingest_worker
+        from core.paper_discovery import arxiv_client
+
+        assert ingest_worker.DEFAULT_RATE_LIMIT_BACKOFF_SECONDS == (
+            arxiv_client.DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
+        )
+
+    def test_429_stops_the_pass_and_records_backoff(self, worker_env, monkeypatch):
+        mod = worker_env["module"]
+        monkeypatch.setattr(mod, "_rate_limit_backoff_seconds", lambda: 600.0)
+        now, clock = self._clock()
+        worker_env["claims"] = [_item(item_id=f"i-{i}") for i in range(4)]
+        worker_env["fetch_error"] = mod.url_fetch.RateLimitedError("制限")
+
+        processed = mod.drain_once(sleep=worker_env["sleeps"].append, clock=clock)
+
+        assert processed == 1
+        assert worker_env["claim_calls"] == 1
+        assert len(worker_env["fetches"]) == 1  # 429 では PDF にも倒さない
+        assert len(worker_env["claims"]) == 3  # 残りは queued のまま（claim していない）
+        assert worker_env["finished"][0][0] == "i-0"
+        assert worker_env["finished"][0][1] is None
+        assert mod._backoff_until == pytest.approx(1600.0)
+
+    def test_next_pass_honours_the_backoff_then_resumes(self, worker_env, monkeypatch):
+        mod = worker_env["module"]
+        monkeypatch.setattr(mod, "_rate_limit_backoff_seconds", lambda: 600.0)
+        now, clock = self._clock()
+        worker_env["claims"] = [_item(item_id="i-0"), _item(item_id="i-1")]
+        worker_env["fetch_error"] = mod.url_fetch.RateLimitedError("制限")
+        mod.drain_once(sleep=worker_env["sleeps"].append, clock=clock)
+        calls_after_first = worker_env["claim_calls"]
+
+        now["t"] = 1599.0
+        assert mod.drain_once(sleep=worker_env["sleeps"].append, clock=clock) == 0
+        assert worker_env["claim_calls"] == calls_after_first
+        assert len(worker_env["fetches"]) == 1
+
+        now["t"] = 1600.0
+        worker_env["fetch_error"] = None
+        assert mod.drain_once(sleep=worker_env["sleeps"].append, clock=clock) == 1
+        assert mod._backoff_until is None
+        assert worker_env["finished"][-1][0] == "i-1"
+
+    def test_zero_cooldown_disables_the_backoff(self, worker_env, monkeypatch):
+        mod = worker_env["module"]
+        monkeypatch.setattr(mod, "_rate_limit_backoff_seconds", lambda: 0.0)
+        worker_env["claims"] = [_item(item_id="i-0")]
+        worker_env["fetch_error"] = mod.url_fetch.RateLimitedError("制限")
+        mod.drain_once(sleep=worker_env["sleeps"].append)
+        assert mod._backoff_until is None
+
+    def test_backoff_seconds_read_the_shared_setting(self, monkeypatch):
+        import ingest_worker
+        from core import config
+
+        class _S:
+            arxiv_rate_limit_cooldown_seconds = 42
+
+        monkeypatch.setattr(config, "get_settings", lambda: _S())
+        assert ingest_worker._rate_limit_backoff_seconds() == 42.0
 
 
 # ===========================================================================

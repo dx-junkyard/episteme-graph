@@ -10,6 +10,7 @@ import threading
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
@@ -27,6 +28,7 @@ from dependencies import (
     ROLE_TEACHER,
 )
 from quota import consume_daily_quota
+import source_resolution
 from schemas import (
     ApproveWithScopeRequest,
     AuthEventOut,
@@ -92,6 +94,7 @@ from core import account_lifecycle
 from core import account_status
 from core import auth_events as auth_events_module
 from core import decision_context
+from core.paper_discovery import schema as pd_schema
 from core.config import get_settings
 from core.course_data import (
     course_cartridge_id,
@@ -532,6 +535,23 @@ def _validate_cartridge_option(value: str | None) -> str | None:
     return text
 
 
+#: 生成物の言語（run options ``language``）の語彙。表示ラベルはフロントの select が持つ。
+#: 正本はここ（``api/schemas.py`` の lecture_language と同じ ``ja`` / ``en``）。
+GENERATION_LANGUAGES = ("ja", "en")
+
+
+def _validate_language_option(value: str | None) -> str | None:
+    """multipart で届く ``language`` を語彙へ畳む（空・未指定は None、語彙外は 422）。"""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text not in GENERATION_LANGUAGES:
+        raise HTTPException(status_code=422, detail="生成する言語は日本語（ja）か英語（en）を指定してください。")
+    return text
+
+
 def _accept_material_source(
     *,
     source_bytes: bytes,
@@ -542,6 +562,7 @@ def _accept_material_source(
     current_user: dict,
     source_url: str | None = None,
     cartridge_id: str | None = None,
+    language: str | None = None,
 ) -> dict:
     """教材ソース（実バイト）を受理して解析パイプラインを起動する共通処理。
 
@@ -611,6 +632,10 @@ def _accept_material_source(
     upload_options: dict = {"analyze_images": bool(analyze_images)}
     if models_option:
         upload_options["models"] = models_option
+    # 生成物の言語（run 単位・``ja`` / ``en``）。未指定はキー自体を入れない
+    # （orchestrator は env → 既定の順で決める。値の検証は入口の Literal / _validate_language_option）。
+    if language:
+        upload_options["language"] = language
 
     thread = threading.Thread(
         target=process_material_background,
@@ -644,6 +669,7 @@ def upload_material(
     analyze_images: bool = Form(False),
     models: str | None = Form(None),
     cartridge_id: str | None = Form(None),
+    language: str | None = Form(None),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """PDF/TeX教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
@@ -685,6 +711,8 @@ def upload_material(
     # 分野（提案 C1）: 未指定/空は None に畳む（アップロードは継承元が無いので
     # 「未指定」と「指定しない」を区別する必要がなく、env 既定の余地を残す）。
     cartridge_option = _validate_cartridge_option(cartridge_id) or None
+    # 生成物の言語（run 単位）。未指定は env → 既定（原則12: 必須入力にしない）。
+    language_option = _validate_language_option(language)
 
     source_bytes = file.file.read()
     if len(source_bytes) == 0:
@@ -698,6 +726,7 @@ def upload_material(
         models_option=models_option,
         current_user=current_user,
         cartridge_id=cartridge_option,
+        language=language_option,
     )
 
 
@@ -729,6 +758,11 @@ class UploadFromUrlRequest(BaseModel):
     analyze_images: bool = False
     models: dict[str, str] | None = None
     cartridge_id: str | None = None
+    #: arXiv の論文 URL のときだけ効く取得形式（``tex`` / ``pdf``）。空・未指定は
+    #: URL のパスが示す形式 → 既定（TeX）の順。arXiv 以外の URL では無視する。
+    source_format: str = ""
+    #: 生成物の言語（``ja`` / ``en``。``None`` = 指定なし → env → 既定）。
+    language: Literal["ja", "en"] | None = None
 
 
 @router.get("/url-fetch-domains")
@@ -816,6 +850,8 @@ _URL_FETCH_ERROR_STATUS: dict[type, int] = {
     url_fetch.UnsupportedContentError: 422,
     url_fetch.TooLargeError: 413,
     url_fetch.FetchFailedError: 502,
+    # 上流のアクセス制限。本アプリ自身のコスト上限（429）と同じ形にしない（§13）。
+    url_fetch.RateLimitedError: 502,
 }
 
 
@@ -833,6 +869,15 @@ def upload_material_from_url(
     if body.models:
         models_option = _validate_models_option(body.models)
     cartridge_option = _validate_cartridge_option(body.cartridge_id) or None
+    source_format_text = str(body.source_format or "").strip()
+    source_format: str | None = None
+    if source_format_text:
+        source_format = pd_schema.normalize_source_format(source_format_text)
+        if source_format is None:
+            raise HTTPException(
+                status_code=422,
+                detail="取得する形式は TeX ソース（tex）か PDF（pdf）を指定してください。",
+            )
 
     session = _pg_session()
     try:
@@ -840,8 +885,13 @@ def upload_material_from_url(
     finally:
         session.close()
 
+    # arXiv の論文 URL（abs / pdf / src）は形式を解決して取り直す（TeX 既定・PDF への
+    # 同期フォールバック・最大 2 回・429 では 2 回目を取らない）。それ以外の URL は
+    # 従来どおり 1 回取得する。方針の正本は api/source_resolution.py。
     try:
-        fetched = url_fetch.fetch_source_from_url(body.url, allowed)
+        resolved = source_resolution.fetch_url_source(
+            body.url, source_format=source_format, allowed_domains=allowed,
+        )
     except url_fetch.UrlFetchError as exc:
         status = _URL_FETCH_ERROR_STATUS.get(type(exc), 502)
         logger.info(
@@ -850,16 +900,23 @@ def upload_material_from_url(
         )
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
-    return _accept_material_source(
+    fetched = resolved.fetched
+    result = _accept_material_source(
         source_bytes=fetched.content,
         filename=fetched.filename,
         source_kind=fetched.source_kind,
         analyze_images=body.analyze_images,
         models_option=models_option,
         current_user=current_user,
-        source_url=body.url,
+        # 実際にバイト列を返した URL を出所として記帳する（arXiv 以外は body.url そのもの）。
+        source_url=resolved.source_url,
         cartridge_id=cartridge_option,
+        language=body.language,
     )
+    payload = dict(result or {})
+    payload["effective_format"] = resolved.effective_format
+    payload["fell_back"] = bool(resolved.fell_back)
+    return payload
 
 
 class ReanalyzeRequest(BaseModel):
@@ -884,6 +941,10 @@ class ReanalyzeRequest(BaseModel):
     analyze_images: bool | None = None
     models: dict[str, str] | None = None
     cartridge_id: str | None = None
+    #: 生成物の言語（``ja`` / ``en``）。``None`` は前回 run の ``options.language`` を
+    #: 引き継ぐ（``models`` / ``analyze_images`` と同じ流儀）。空文字 ``""`` は
+    #: 「指定しない」への**解除**（``cartridge_id`` と同じ約束 — 2026-10-01 レビュー m6）。
+    language: Literal["ja", "en", ""] | None = None
 
 
 def _previous_run_options(document_id: str, material_id: str) -> dict:
@@ -1032,6 +1093,7 @@ def reanalyze_document(
     models_option: dict | None = None
     if body is not None and body.models:
         models_option = _validate_models_option(body.models)
+    language_option = body.language if body is not None else None
 
     # 分野（提案 C1）: 明示があれば上書き（"" = 「指定しない」への解除）、無ければ
     # 前回 run の分野を引き継ぐ。継承値は env へフォールバックさせない
@@ -1047,7 +1109,7 @@ def reanalyze_document(
     # （レビュー指摘 J1: models 未指定 + analyze_images 明示のとき、前回 run の
     # `options.models` が黙って捨てられ、モーダルが「前回と同じ」と表示しながら
     # 実 run はモデル指定を失っていた。逆方向だけ温存されている非対称も解消する）。
-    if models_option is None and analyze_images is None:
+    if models_option is None and analyze_images is None and language_option is None:
         # どちらも未指定: options=None を渡し、orchestrator の「前回 run の options を
         # そのまま引き継ぐ」分岐に委ねる（従来どおり・DB 読み出しも増やさない）。
         options = None
@@ -1060,6 +1122,12 @@ def reanalyze_document(
         if models_option is not None:
             options["models"] = models_option
         # models 未指定なら前回 run の `models` はそのまま温存される（コピー済み）。
+        if language_option == "":
+            # 「指定しない」への解除: 前回 run の言語を持ち越さない（env → 既定で決まる）。
+            options.pop("language", None)
+        elif language_option is not None:
+            options["language"] = language_option
+        # language 未指定なら前回 run の `language` はそのまま温存される（コピー済み）。
 
     thread = threading.Thread(
         target=process_material_background,

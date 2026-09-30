@@ -147,9 +147,10 @@ class TestSourceFormat:
 
     def test_unspecified_and_unknown_fall_back_to_the_default(self):
         # 取り込みを止めないための fail-safe（語彙の妥当性は API 層が 422 で返す）。
-        assert schema.DEFAULT_SOURCE_FORMAT == "pdf"
-        assert schema.source_url_for("2608.20293") == "https://arxiv.org/pdf/2608.20293"
-        assert schema.source_url_for("2608.20293", "html") == "https://arxiv.org/pdf/2608.20293"
+        # 2026-09-30 に既定を TeX へ変更（論文レーダー設計書 §15.9）。
+        assert schema.DEFAULT_SOURCE_FORMAT == "tex"
+        assert schema.source_url_for("2608.20293") == "https://arxiv.org/src/2608.20293"
+        assert schema.source_url_for("2608.20293", "html") == "https://arxiv.org/src/2608.20293"
 
     def test_both_formats_normalize_back_to_the_same_id(self):
         # PD5: 「取り込み済み」は documents.source_url からの読み時導出。TeX で

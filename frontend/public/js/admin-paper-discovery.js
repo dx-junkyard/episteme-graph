@@ -40,7 +40,16 @@
   var DEFAULT_SOURCE_FORMAT = "tex";
   // PD6: 選んだ形式が必ず得られるとは限らない事実を、選ぶ前に言っておく。
   var FORMAT_NOTICE =
-    "TeX ソースが公開されていない論文では、arXiv が返した PDF をそのまま取り込みます。";
+    "TeX ソースが公開されていない論文や、TeX ソースとして読めない論文では、PDF を取り込みます。";
+  // 生成する言語はキュー登録（6件以上）には載らない事実を、選ぶ前に言っておく。
+  var LANGUAGE_NOTICE = "キュー登録（6件以上）の取り込みには適用されません。";
+  var GENERATION_LANGUAGES = { ja: true, en: true };
+
+  function selectedLanguage() {
+    var node = el("pd-language-select");
+    var value = node ? String(node.value || "") : "";
+    return GENERATION_LANGUAGES[value] ? value : "";
+  }
 
   // PD1: 取り込み前に必ず出す事実文（何が起きるかを省略しない）。
   var INGEST_NOTICE_TAIL =
@@ -436,6 +445,19 @@
             formatRadiosHtml() +
             '<span style="font-size:11.5px;color:var(--color-text-tertiary)">' +
               esc(FORMAT_NOTICE) +
+            "</span>" +
+          "</div>" +
+          // 生成する言語（run options.language）。既定は「指定しない」。同期の取り込み（5件以下）
+          // にだけ効く — キュー登録（6件以上）は言語を持たない（migration なしの非スコープ）。
+          '<div id="pd-language-row" data-ui-anchor="materials.arxiv-discovery-language" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">' +
+            '<label for="pd-language-select" style="font-size:12px;color:var(--color-text-secondary)">生成する言語</label>' +
+            '<select id="pd-language-select" style="font-size:12px">' +
+              '<option value="" selected>指定しない</option>' +
+              '<option value="ja">日本語</option>' +
+              '<option value="en">英語</option>' +
+            '</select>' +
+            '<span style="font-size:11.5px;color:var(--color-text-tertiary)">' +
+              esc(LANGUAGE_NOTICE) +
             "</span>" +
           "</div>" +
           '<div id="pd-ingest-summary" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
@@ -1999,6 +2021,9 @@
     payload.items = items;
     // 取得する形式は教員が選んだ値をそのまま送る（サーバが語彙を検証する）。
     payload.source_format = state.sourceFormat;
+    // 生成する言語: 選んだときだけ送る（同期の /ingest のみ。キューは言語を持たない）。
+    var ingestLanguage = selectedLanguage();
+    if (!batch && ingestLanguage) payload.language = ingestLanguage;
     if (batch && state.domainKey) payload.domain_key = state.domainKey;
 
     state.ingesting = true;

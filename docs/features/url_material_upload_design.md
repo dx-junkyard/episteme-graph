@@ -1,7 +1,8 @@
 # URL指定による教材取得（URL Material Upload）
 
 > **状態: 実装済み（正本）**（2026-08-25 起票・同日実装。migration は **070**
-> `url_fetch_domains` で採番済み。以後は §8 実装記録のみ追記する）
+> `url_fetch_domains` で採番済み。以後は §8 実装記録のみ追記する。2026-09-30 の
+> arXiv URL の書き換えとフォールバックは §10）
 
 **正本**: 本ドキュメント。
 **関連**: `docs/features/image_pipeline_knowledge_library_design.md`（`analyze_images`
@@ -206,3 +207,30 @@ v1 を同日中に実装した。
 - **非同期取得（バックグラウンドジョブ化）**: v1 はリクエスト内同期。大きなファイルで
   タイムアウトが問題になるなら別途検討する。
 - **取得先ごとの取得回数・帯域の上限**: 許可リスト自体が主要な制御で、レート制限は設けない。
+
+## 10. 追補 — arXiv URL の書き換えとフォールバック（2026-09-30・migration / env なし）
+
+> **状態: 実装済み**。正本の詳細は `paper_radar_design.md` §15.9。
+
+- `UploadFromUrlRequest.source_format`（`tex` / `pdf`・空は指定なし・語彙外 422）と
+  `language`（`ja` / `en`）を追加。
+- URL が arXiv の論文 URL（ホスト `arxiv.org` / `www.arxiv.org` / `export.arxiv.org`・パス
+  `abs` / `pdf` / `src` / `e-print`）のときだけ、`api/source_resolution.fetch_url_source` が
+  形式を「明示の `source_format` > URL のパス > 既定（TeX）」で決め、同じ論文の `/src/` か
+  `/pdf/` を取り直す。TeX が読めなければ同じリクエストの中で `/pdf/` へ倒す。
+  **呼び出し予算は 1 件あたり ≤ 2 回**（429 では 2 回目を取らない）。
+- arXiv 以外の URL は従来どおり 1 回そのまま取る（UF1〜UF6 は非改変。取得は引き続き
+  `fetch_source_from_url` の唯一の公開関数 — 許可リスト照合・各ホップの再検証・マジック判定）。
+- `url_fetch` の公開面に `RateLimitedError`（HTTP 429・`FetchFailedError` の部分型）を追加。
+  写像は 502（上流の制限を本アプリのコスト上限 429 と同じ形にしない）。
+- `documents.source_url` は実際にバイト列を返した URL。レスポンスに `effective_format` /
+  `fell_back` を足した（アップロード API と同形のキーは不変・追加のみ）。
+- **ホストを保つ（2026-10-01 是正 m10）**: 書き換えるのは**パスだけ**で、ホストは貼られた URL の
+  ものを保つ（`export.arxiv.org/abs/<id>` → `export.arxiv.org/src/<id>`、フォールバックも
+  `export.arxiv.org/pdf/<id>`）。許可リストが `export.arxiv.org` だけのとき、元の URL なら通るのに
+  書き換えで不許可になる食い違いを作らない。
+- **429 停止規則（2026-10-01 是正 M6）**: 429 を受けたら同じ操作の中で arXiv を再び呼ばない
+  （URL 指定取得は 1 件なので 2 回目を取らないだけ。複数件の `/ingest`・キューの扱いは
+  `paper_radar_design.md` §15.9 のレビュー是正）。
+- UI: モーダルは arXiv の URL を入力したときだけ「取得する形式」を出す
+  （アンカー `materials.url-upload-format`）。生成する言語はアップロード欄の選択を引き継ぐ。

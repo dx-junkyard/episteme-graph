@@ -324,6 +324,16 @@
           <span id="upload-domain-note" style="color:var(--color-text-tertiary);font-size:11.5px;margin-left:6px" hidden></span>
         </div>
         <div id="upload-domain-panel" hidden></div>
+        <!-- 生成する言語（run options.language, discuss_opening_authoring_design.md §14）:
+             既定は「指定しない」。選択はこの解析にだけ効く（保存しない）。 -->
+        <div id="upload-language-summary" data-ui-anchor="materials.upload-language" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:6px">
+          <label for="upload-language-select">生成する言語:</label>
+          <select id="upload-language-select" style="margin-left:6px;font-size:12.5px">
+            <option value="" selected>指定しない</option>
+            <option value="ja">日本語</option>
+            <option value="en">英語</option>
+          </select>
+        </div>
         <!-- M層（LLM モデル選択, migration 061）: 解析モデルの1行サマリ + 変更パネル。
              中身は admin-llm-models.js が描画（AdminLlmModels.initMaterialsPanel）。 -->
         <div id="llm-model-summary" data-ui-anchor="materials.llm-model-change" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:8px">
@@ -1032,10 +1042,10 @@
   <script src="/js/admin-release-review.js?v=ik0376-20260927"></script>
   <!-- 論文ディスカバリー層（paper_discovery_design.md PD1〜PD8）— arXiv 分野購読と
        候補一覧。取り込みは教員の明示承認のみで、受理後は既存アップロード経路へ合流する。 -->
-  <script src="/js/admin-paper-discovery.js?v=paper-discovery-20260916-1"></script>
+  <script src="/js/admin-paper-discovery.js?v=paper-discovery-20261001-1"></script>
   <!-- 論文レーダー（paper_radar_design.md PR1〜PR8）— 教材1件を起点に距離を選んで
        arXiv から候補を探す。取り込みはディスカバリーと同じ既存の弁へ合流する。 -->
-  <script src="/js/admin-paper-radar.js?v=paper-radar-20260916-1"></script>
+  <script src="/js/admin-paper-radar.js?v=paper-radar-20261001-1"></script>
   <!-- 管理画面向けハンズフリー音声対話エンジン（DOM 非依存）。これを使う
        admin-graph-review.js より前に読み込む。 -->
   <script src="/js/admin-voice-chat.js?v=admin-voice-chat-20260829-1"></script>
@@ -1045,6 +1055,6 @@
   <!-- 束の取り込み（knowledge_transfer_design.md §4.3）— 教材行の「⋯」から開く
        dry-run → 確定の 2 段モーダル。admin.js から DI 注入するため admin.js より前。 -->
   <script src="/js/admin-knowledge-import.js?v=knowledge-transfer-20260913-1"></script>
-  <script src="/js/admin.js?v=theory-modules-ui-20260923-1"></script>
+  <script src="/js/admin.js?v=tex-default-language-20261001-1"></script>
 </body>
 </html>

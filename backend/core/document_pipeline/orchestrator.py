@@ -2386,6 +2386,8 @@ def _stage_discuss_opening(ctx: PipelineContext) -> bool:
                 artifacts=ctx.all_artifacts(),
                 derivations=ctx.derivations,
                 equations=ctx.equations,
+                # 解析 run の生成言語（options.language）。env より優先する。
+                language=_run_generation_language(ctx.effective_options),
             )
         except Exception as exc:
             logger.warning(
@@ -4518,7 +4520,15 @@ def _build_contextual_explanation(
 
     from episteme_graph.agents.contextual_explanation.agent import ContextualExplanationAgent
 
-    agent = ContextualExplanationAgent(llm_model=_ctxexpl_model(effective_options))
+    run_language = _run_generation_language(effective_options)
+    if run_language:
+        # 生成言語が run で指定されたときだけ渡す（未指定は従来どおり素材の言語に合わせる）。
+        agent = ContextualExplanationAgent(
+            llm_model=_ctxexpl_model(effective_options), language=run_language
+        )
+        payload["language"] = run_language
+    else:
+        agent = ContextualExplanationAgent(llm_model=_ctxexpl_model(effective_options))
     result = agent.run(elements, cartridge_id=cartridge_id)
     # Real usage is only known after the batched+repaired run completes (a
     # single stage run may cost more than 1 LLM call); book it post-hoc
@@ -4609,9 +4619,26 @@ def _discuss_opening_max_calls_per_day() -> int:
         return 20
 
 
-def _discuss_opening_language() -> str:
-    """生成言語（設計書 §4.1）。``lecture_language`` は使わない — 同じ論文が言語設定の
-    違うコースに載りうるため、document 単位の生成物は env 1つで決める。"""
+#: 解析 run の生成言語（``document_analysis_runs.options.language``）の語彙。
+RUN_GENERATION_LANGUAGES = ("ja", "en")
+
+
+def _run_generation_language(effective_options: dict | None) -> str | None:
+    """run options の ``language``（``ja`` / ``en``）。語彙外・未指定は ``None``。
+
+    教員がアップロード / URL 取得 / 再解析で選んだ生成物の言語。``None`` のときは
+    各ステージの従来の既定（discuss_opening = env、contextual_explanation = 素材の言語）。
+    """
+    raw = (effective_options or {}).get("language")
+    text = str(raw or "").strip().lower()
+    return text if text in RUN_GENERATION_LANGUAGES else None
+
+
+def _discuss_opening_language(run_language: str | None = None) -> str:
+    """生成言語（設計書 §4.1 / §14）。``lecture_language`` は使わない — 同じ論文が言語設定の
+    違うコースに載りうるため、document 単位の生成物は run options → env の順で決める。"""
+    if run_language in RUN_GENERATION_LANGUAGES:
+        return str(run_language)
     return (os.getenv("DISCUSS_OPENING_LANGUAGE", "") or "ja").strip() or "ja"
 
 
@@ -4640,6 +4667,7 @@ def _build_discuss_opening(
     artifacts: dict,
     derivations: Any,
     equations: Any,
+    language: str | None = None,
 ) -> dict:
     """discuss_opening ステージ本体（``discuss_opening_authoring_design.md`` §4.1）。
 
@@ -4669,7 +4697,7 @@ def _build_discuss_opening(
     )
 
     max_items = _discuss_opening_max_items_per_document()
-    language = _discuss_opening_language()
+    language = _discuss_opening_language(language)
 
     payload: dict[str, Any] = {
         "status": "completed",

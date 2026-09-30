@@ -4,7 +4,8 @@
 > 新テーブル・新列ゼロ。実装記録は §10、出所の後付け登録の追補は §11、
 > 重なり・差分提示の追補（2026-08-29）は §12、縮退の事実文の是正（2026-09-13）は §13、
 > arXiv 呼び出しの上限（2026-09-14）は §14、取得する形式（TeX / PDF）と取り込み済み
-> ラベル（2026-09-16）は §15）
+> ラベル（2026-09-16）は §15、**API の既定を TeX に変更し PDF への同期フォールバックを
+> 足した改訂（2026-09-30）は §15.9** — §15.3 の「API の既定は PDF」は §15.9 で置き換えた）
 
 **正本**: 本ドキュメント。
 **関連**: [論文ディスカバリー層](paper_discovery_design.md)（PD1〜PD8 — 本層はその
@@ -1018,7 +1019,8 @@ arXiv を呼ばずに 200 の事実として返す。
 ```
 
 - **語彙の正本**は `core/paper_discovery/schema.py::SOURCE_FORMATS = ("tex", "pdf")`。
-  `DEFAULT_SOURCE_FORMAT = "pdf"` は**この API の既定**（＝形式を送らない古い
+  （**2026-09-30 改訂: 以下の「API の既定は PDF」の理由づけは §15.9 で置き換えた。現行の
+  既定は TeX**。）`DEFAULT_SOURCE_FORMAT = "pdf"` は**この API の既定**（＝形式を送らない古い
   クライアントの挙動）で、「画面の既定」ではない。画面の既定 = TeX は**フロントが
   明示的に送る**。両モーダル（レーダー / `arXivから探す`）とも既定 TeX で、
   同じ語彙・同じ事実文を使う（§15.5b）。API の既定まで TeX にしないのは、
@@ -1122,3 +1124,98 @@ arXiv の TeX Source は、**複数ファイルの投稿なら `.tar.gz`、単�
 - 同じ論文を形式違いで取り直す導線（現状は古い教材を削除してから取り直す）。
 - `e-print` / `format` など `/src/` 以外の arXiv 配信 URL の使い分け。
 - HTML 配信（arXiv の `Access Paper → HTML`）の取り込み。
+
+### 15.9 2026-09-30 既定を TeX に変更（PDF への同期フォールバックと呼び出し予算）
+
+> **状態: 実装済み**（2026-09-30。migration / env なし。新しい外部呼び出しは「TeX が使えない
+> ときの PDF 取得 1 回」だけで、1件あたりの arXiv への取得は最大 2 回。LLM 呼び出しの増加ゼロ。
+> UI アンカー +2（`materials.url-upload-format` / `materials.upload-language`））
+
+**なぜ変えたか（オーナー指摘の根因 #3）**: PDF 経路の解析品質は、表示側では隠せない**上流の根**
+である。PDF は組版結果から式・導出・図表を復元するので、復元の損失が以降の全ステージに乗る。
+理論モジュール層の実測（CLAUDE.md「理論モジュール層」・`theory_module_layer_design.md` §3.1〜3.3）
+では、同一論文（2609.15375v1）の式チェーンが **PDF 経路で 0 本 / TeX 経路で 13 本**、PDF 経路の
+「式の詳細」は全部 claim の並びだった。§15.3 は「形式を送らない経路が黙って変わるのを避ける」ため
+API の既定を PDF に据えたが、その結果、形式を送らない経路（キュー・古いクライアント・汎用の
+「URLから取得」）ほど質の低い経路に落ちていた。黙って変わるのを避ける理由は、下の同期
+フォールバックで「TeX が無い論文でも取り込みが止まらない」ことを保証すれば消える。
+
+**何を変えたか**:
+
+1. `schema.DEFAULT_SOURCE_FORMAT = SOURCE_FORMAT_TEX`。`source_url_for` の分岐点・語彙外 422・
+   キュー行への畳み込みは不変。
+2. **同期フォールバックは API 層の `api/source_resolution.py`**（`url_fetch` にも
+   `core/paper_discovery/` にも置かない — 前者は「1 URL を取る」以上の方針を持たず、後者は
+   `url_fetch` を import しない規約）。`fetch_arxiv_source(arxiv_id, *, source_format,
+   allowed_domains) -> ResolvedSource{fetched, source_url, effective_format, fell_back, attempts}`:
+   - `/src/<id>` を取る。マジックが PDF なら終わり（PDF のみの投稿 — **1 回**）。
+   - gzip なら `tex_archive.load_tex_archive`（純関数・ネットワークなし）で**受理前に**読めるか
+     確かめる。解析パイプラインは 202 の後で同じ関数を呼ぶので、ここで確かめないと TeX を含まない
+     gzip は PDF に倒す機会が無いまま解析が失敗していた。
+   - 読めない gzip・404 等の取得失敗・サイズ超過・形式不一致のときだけ `/pdf/<id>` を取る（**2 回目**）。
+   - **HTTP 429 では 2 回目を取らない**。`url_fetch.RateLimitedError`（`FetchFailedError` の部分型・
+     公開面の表に 1 行追加）で区別し、事実文 `DETAIL_ARXIV_RATE_LIMITED`（先頭の文は
+     `radar.NOTE_ARXIV_BLOCKED` と逐語一致・数値なし）を返す。ステータスは §13 どおり 502。
+   - 許可リスト由来の拒否（未設定・不許可・内部アドレス）では倒さない（同じ理由で落ちるだけ）。
+3. **出所の正直さ**: `documents.source_url` は**実際にバイト列を返した URL**（フォールバック時は
+   `/pdf/`）。`/ingest` の accepted 行と `upload-from-url` のレスポンスに `effective_format`
+   （実バイトの形式）/ `fell_back` を足し、監査 metadata に `effective_formats` /
+   `fell_back_arxiv_ids`、429 の failed 行に `rate_limited: true`。
+4. 適用先: `/ingest`（`ingest_candidates`）/ キュー worker（`ingest_worker.process_item` —
+   キュー行の `source_url` のパスから形式を読む）/ **汎用の「URLから取得」**
+   （`upload_material_from_url` — arXiv の論文 URL（abs / pdf / src / e-print）なら
+   `fetch_url_source` が「明示の `source_format` > URL のパス > 既定（TeX）」で形式を決めて
+   取り直す。arXiv 以外の URL は従来どおり 1 回そのまま取る）。モーダルは arXiv の URL を
+   入力したときだけ §15.5b と同型のスイッチ（既定 TeX・保存しない・`FORMAT_NOTICE` 逐語一致）を出す。
+5. `FORMAT_NOTICE` を「TeX ソースが公開されていない論文や、TeX ソースとして読めない論文では、
+   PDF を取り込みます。」に改めた（3 画面で逐語一致・テストで固定）。
+
+**呼び出し予算（P-0007）**: 1件あたり arXiv への取得は **1 回（TeX が読めた / PDF のみの投稿）
+または 2 回（PDF へ倒した）**。429 のときは 1 回で止まる。`MAX_FETCH_ATTEMPTS = 2` をテストが縛る。
+キュー worker のアイテム間 3 秒は不変。
+
+**非スコープ**: 同期 `/ingest`（上限 5 件）のアイテム間 3 秒の間隔（教員が待つ同期リクエストの
+ため置かない）/ `arxiv_client.cooldown_active()`（検索 API の 429 クールダウン）を取り込みの
+取得にも効かせること（宛先ホストが別で、取り込みを巻き添えで止めない判断。ただし取り込み側の
+429 では 2 回目を取らない）/ フォールバックの事実をキュー行に列として残すこと（migration 072 は
+列を持たず、ログと `documents.source_url` から読める）。
+
+**レビュー是正（2026-10-01・migration なし）**:
+
+- **429 停止規則（M6）**: 1 件で 429 を受けたら、**同じ操作の残りの item でも arXiv を呼ばない**。
+  同期 `/ingest` は最初の 429 でループの取得を止め、残りの item を取得せずに
+  `failed[]` へ `rate_limited: true` + 同じ事実文 `DETAIL_ARXIV_RATE_LIMITED` で積む（不正な ID は
+  従来どおり不正 ID の事実文）。キュー worker は 429 を受けた item を事実文で `failed` にしたうえで
+  **その周の取り出しを止め**、`ARXIV_RATE_LIMIT_COOLDOWN_SECONDS`（既定 600・検索クライアントの
+  抑制窓と同じ設定。worker は `arxiv_client` を import しないので既定値 600 を
+  `ingest_worker.DEFAULT_RATE_LIMIT_BACKOFF_SECONDS` に同じ値で持つ — 一致はテストで固定）の間は
+  次の周でも claim しない。止まっている間の行は `queued` のまま（状態を書き換えない・プロセス内の
+  期限だけ）。旧実装は 429 の後も同期で最大 4 件・worker で 3 秒ごとに取得を続け、制限中に
+  最大 10 回叩いていた。
+- **展開量の上限（M3）**: `_is_readable_tex` は同期経路で走るため、`tex_archive` の素の gzip を
+  `gzip.decompress` で丸ごと展開していた（398 KB の gzip で約 930 MB）。
+  `zlib.decompressobj(16 + MAX_WBITS).decompress(data, _MAX_MEMBER_BYTES + 1)` で展開しながら
+  打ち切り、超過は `TexArchiveTooLargeError`（`ValueError` の部分型）。tar 経路は `getmembers()` を
+  やめて逐次走査にし、member 数（`_MAX_ARCHIVE_MEMBERS`）と読み進める展開後の総量
+  （`_MAX_TAR_SCAN_BYTES`）を縛る（member 本体は従来どおり `read(limit + 1)`）。
+- **ホストを保つ書き換え（m10）**: URL 指定取得で arXiv の URL を `/src/` `/pdf/` に書き換えるとき、
+  **パスだけ**を書き換えてホストは貼られたものを保つ（`export.arxiv.org/abs/...` →
+  `export.arxiv.org/src/...`）。許可リストが `export.arxiv.org` だけのとき、元の URL は通るのに
+  書き換えた URL が不許可になる食い違いを塞いだ。ID からの取り込み（`/ingest`・キュー）は従来どおり
+  `arxiv.org`。
+- **生成言語（m6）**: 再解析の `language` は `""` で「指定しない」への解除（`None` = 前回 run を継承。
+  `cartridge_id` と同じ約束）。モーダルは「前回と同じ / 指定しない / 日本語 / 英語」。
+  分野購読・レーダーの両モーダルに「生成する言語」（既定 指定しない）を置き、同期 `/ingest` にだけ
+  送る（キュー登録は言語を持たない — migration なしの非スコープ。選択の横に事実文）。アンカー +2
+  （`materials.arxiv-discovery-language` / `materials.radar-language`）。
+
+ガードレール: `test_source_resolution.py`（フォールバック・429 で 2 回目なし・PDF のみの投稿は
+1 回・呼び出し ≤ 2・URL の書き換え・事実文の逐語一致）/ `test_url_fetch_api.py::
+TestUploadFromUrlArxivRewriting` / `test_tex_default_language_ui_static.py` / 既定を固定していた
+3 本（`test_paper_discovery_api.py` の `test_default_is_tex` / `test_batch_default_is_tex`、
+`test_paper_discovery_worker.py::test_unspecified_source_format_defaults_to_tex`）。
+2026-10-01 是正分: `test_tex_archive_bounds.py` / `test_source_resolution.py::TestHostPreservingRewrite` /
+`test_paper_discovery_api.py::TestIngestStopsAtRateLimit` /
+`test_paper_discovery_worker.py::TestRateLimitBackoff` /
+`test_generation_language_option.py::TestReanalyzeLanguage::test_empty_string_resets_to_unspecified` /
+`test_paper_discovery_ui_static.py::TestIngestLanguageSelect`。

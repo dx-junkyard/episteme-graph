@@ -1127,8 +1127,8 @@ class TestCacheBuster:
     def test_admin_html_bumps_both_arxiv_script_cache_busters(self):
         """JS を直しても `?v=` を上げ忘れると、教員のブラウザは古い JS のまま。"""
         src = _read(ADMIN_HTML)
-        assert "js/admin-paper-discovery.js?v=paper-discovery-20260916-1" in src
-        assert "js/admin-paper-radar.js?v=paper-radar-20260916-1" in src
+        assert "js/admin-paper-discovery.js?v=paper-discovery-20261001-1" in src
+        assert "js/admin-paper-radar.js?v=paper-radar-20261001-1" in src
 
 
 # ---------------------------------------------------------------------------
@@ -1194,3 +1194,21 @@ class TestSourceFormatSwitch:
     def test_no_client_side_url_building(self):
         assert "arxiv.org/src" not in self.code
         assert "arxiv.org/pdf" not in self.code
+
+
+import pytest  # noqa: E402
+
+
+class TestIngestLanguageSelect:
+    """取り込みモーダルの生成言語（2026-10-01 レビュー m6）— 同期の /ingest だけに送る。"""
+
+    @pytest.mark.parametrize("path,prefix,anchor", [
+        (DISCOVERY_JS, "pd", "materials.arxiv-discovery-language"),
+        (FRONTEND_DIR / "js" / "admin-paper-radar.js", "pr", "materials.radar-language"),
+    ])
+    def test_select_defaults_to_unspecified_and_is_sent_only_for_sync_ingest(self, path, prefix, anchor):
+        src = _read(path)
+        assert f'id="{prefix}-language-row" data-ui-anchor="{anchor}"' in src
+        assert f'<select id="{prefix}-language-select"' in src
+        assert '<option value="" selected>指定しない</option>' in src
+        assert "if (!batch && ingestLanguage) payload.language = ingestLanguage;" in src

@@ -23,6 +23,9 @@
   外した直後から止まる）。ディスカバリー専用の取得経路を作らない。
 - **PD7 の同族（外部 API への行儀）**: アイテム間に
   :data:`INTER_ITEM_SLEEP_SECONDS` 秒の間隔を置く。
+- **429 停止規則（P-0007）**: 取得先が HTTP 429 を返したら、その周の取り出しを止め、
+  ``ARXIV_RATE_LIMIT_COOLDOWN_SECONDS``（既定 600 秒）のあいだ次の周でも取り出さない。
+  止まっている間の行は ``queued`` のまま（状態を書き換えない）。
 - **P4 情報を落とさない**: 失敗は行を消さず ``status='failed'`` + 日本語の事実文で
   残す。再試行は教員の明示操作だけ（worker は自動リトライしない）。
 - ``detail`` にスタックトレース・解決した IP 等の内部情報を入れない（UF6 継承）。
@@ -41,6 +44,9 @@ from fastapi import HTTPException
 from core import url_fetch
 from core.paper_discovery import ingest_queue
 from core.postgres import get_session
+
+# 取得形式の解決（TeX → PDF の同期フォールバック・最大 2 回・429 では 2 回目を取らない）。
+import source_resolution
 
 # PD2: 受理は既存アップロード経路をそのまま呼ぶ（専用の教材種別を作らない）。
 from routes.admin import _accept_material_source
@@ -68,8 +74,18 @@ MAX_ITEMS_PER_CYCLE = 50
 #: 想定外の失敗に付ける事実文（内部情報を載せない — UF6 継承）。
 DETAIL_UNEXPECTED = "取り込み処理に失敗しました。時間をおいて再試行してください。"
 
+#: 429 を受けたあとキューを取り出さない時間（秒）の既定値。正本は env
+#: ``ARXIV_RATE_LIMIT_COOLDOWN_SECONDS``（``core.config`` — 検索クライアントの抑制窓と同じ
+#: 設定を読む）。worker は検索クライアントを import しない（PD1）ので、既定値だけを
+#: ここに同じ値で置く（``test_paper_discovery_worker`` が一致を固定）。
+DEFAULT_RATE_LIMIT_BACKOFF_SECONDS = 600.0
+
 _started = False
 _lock = threading.Lock()
+
+#: 429 を受けて止まっている期限（``time.monotonic()`` の値）。``None`` は止まっていない。
+#: 行には書かない（キュー行の状態は変えない — 止まっている間は claim しないだけ）。
+_backoff_until: float | None = None
 
 
 def _enabled() -> bool:
@@ -82,6 +98,34 @@ def _interval_seconds() -> int:
         return max(5, int(raw))
     except (TypeError, ValueError):
         return DEFAULT_INTERVAL_SECONDS
+
+
+def _rate_limit_backoff_seconds() -> float:
+    """429 のあと取り出しを止める秒数（0 以下なら止めない）。設定を読めなければ既定値。"""
+    try:
+        from core.config import get_settings
+
+        value = float(get_settings().arxiv_rate_limit_cooldown_seconds)
+    except Exception:  # noqa: BLE001 — 読めなければ抑制側に倒す（安全側）
+        return DEFAULT_RATE_LIMIT_BACKOFF_SECONDS
+    return max(0.0, value)
+
+
+def _begin_backoff(clock=time.monotonic) -> None:
+    """429 を受けた事実を記録し、以後しばらくキューを取り出さない（M6）。"""
+    global _backoff_until
+    seconds = _rate_limit_backoff_seconds()
+    _backoff_until = clock() + seconds if seconds > 0 else None
+
+
+def _backoff_active(clock=time.monotonic) -> bool:
+    global _backoff_until
+    if _backoff_until is None:
+        return False
+    if clock() >= _backoff_until:
+        _backoff_until = None
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +202,7 @@ def requeue_stale() -> int:
 # ---------------------------------------------------------------------------
 
 
-def process_item(item: dict) -> bool:
+def process_item(item: dict, *, clock=time.monotonic) -> bool:
     """1件を取得 → 受理する。成功なら True。
 
     例外はすべてここで捕捉し、``failed`` + 事実文に落とす（1件の失敗が worker を
@@ -176,7 +220,18 @@ def process_item(item: dict) -> bool:
         return False
 
     try:
-        fetched = url_fetch.fetch_source_from_url(source_url, allowed)
+        # キュー行の source_url には投入時の形式が畳まれている（/src/ = TeX・/pdf/ = PDF）。
+        # URL のパスから形式を読み、TeX が使えなければ同じ1件の処理の中で PDF に倒す。
+        resolved = source_resolution.fetch_url_source(
+            source_url, source_format=None, allowed_domains=allowed,
+        )
+    except url_fetch.RateLimitedError as exc:
+        # arXiv からアクセスを制限されている。この1件は事実文で failed に残し、
+        # 以後しばらくキューを取り出さない（制限中に叩き続けるとブロックが延びる — M6）。
+        logger.info("ingest worker: rate limited by the source for item %s; backing off", item_id)
+        _begin_backoff(clock)
+        _finish(item_id, detail=str(exc))
+        return False
     except url_fetch.UrlFetchError as exc:
         # 許可リスト未設定 / 未許可ドメイン / 形式不一致 等。サーバの事実文をそのまま
         # 残す（独自文で上書きしない — UF6）。再試行は教員の明示操作のみ。
@@ -190,6 +245,7 @@ def process_item(item: dict) -> bool:
         _finish(item_id, detail=DETAIL_UNEXPECTED)
         return False
 
+    fetched = resolved.fetched
     try:
         result = _accept_material_source(
             source_bytes=fetched.content,
@@ -198,7 +254,8 @@ def process_item(item: dict) -> bool:
             analyze_images=bool(item.get("analyze_images")),
             models_option=item.get("models") or None,
             current_user={"id": requested_by},
-            source_url=source_url,
+            # 実際にバイト列を返した URL を出所として記帳する（フォールバック時は /pdf/）。
+            source_url=resolved.source_url,
         )
     except HTTPException as exc:
         logger.warning("ingest worker: acceptance failed for item %s: %s", item_id, exc.detail)
@@ -209,9 +266,13 @@ def process_item(item: dict) -> bool:
         _finish(item_id, detail=DETAIL_UNEXPECTED)
         return False
 
-    _finish(item_id, accepted=dict(result or {}))
+    accepted = dict(result or {})
+    accepted["effective_format"] = resolved.effective_format
+    accepted["fell_back"] = bool(resolved.fell_back)
+    _finish(item_id, accepted=accepted)
     logger.info(
-        "ingest worker: accepted %s (item=%s)", item.get("arxiv_id"), item_id
+        "ingest worker: accepted %s (item=%s format=%s fell_back=%s)",
+        item.get("arxiv_id"), item_id, resolved.effective_format, resolved.fell_back,
     )
     return True
 
@@ -221,13 +282,19 @@ def process_item(item: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def drain_once(*, max_items: int = MAX_ITEMS_PER_CYCLE, sleep=time.sleep) -> int:
+def drain_once(
+    *, max_items: int = MAX_ITEMS_PER_CYCLE, sleep=time.sleep, clock=time.monotonic,
+) -> int:
     """キューを一巡処理する。戻り値は処理した件数（成功・失敗の合計）。
 
     アイテム間には :data:`INTER_ITEM_SLEEP_SECONDS` 秒の間隔を置く（PD7 の同族）。
+    429 を受けたらその周はそこで止め、``ARXIV_RATE_LIMIT_COOLDOWN_SECONDS`` 秒は
+    次の周でも取り出さない（行は ``queued`` のまま残る — M6）。
     """
     processed = 0
     while processed < max(1, int(max_items)):
+        if _backoff_active(clock):
+            break
         try:
             item = _claim_next()
         except Exception:
@@ -237,7 +304,7 @@ def drain_once(*, max_items: int = MAX_ITEMS_PER_CYCLE, sleep=time.sleep) -> int
             break
         if processed:
             sleep(INTER_ITEM_SLEEP_SECONDS)
-        process_item(item)
+        process_item(item, clock=clock)
         processed += 1
     return processed
 
