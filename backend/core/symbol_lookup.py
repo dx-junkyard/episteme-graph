@@ -37,6 +37,7 @@ from typing import Any, Optional
 from sqlalchemy import text as sa_text
 
 from core import element_vocab
+from core.focus_document import resolve_focus_document
 from core.learner_context_common import is_uuid
 from core.text_hygiene import strip_control_sequences
 
@@ -444,12 +445,12 @@ def _resolve_focus_documents(
     chunk_id: str,
     focus_document_ids: Any,
 ) -> list[str]:
-    """「この論文」の集合: タップ位置のチャンクの論文 → 表示中トピックの論文。
+    """「この論文」の集合: タップ位置のチャンクの論文 → 呼び出し側の焦点論文。
 
     どちらもコースの sources（``doc_ids``）との積だけを採る（広げない）。空なら
     従来どおりコース全体（呼び出し側の後方互換）。
     """
-    allowed = set(doc_ids)
+    chunk_document_id = ""
     if chunk_id and is_uuid(chunk_id):
         try:
             row = (
@@ -471,9 +472,14 @@ def _resolve_focus_documents(
             logger.debug("symbol_lookup: chunk document unavailable", exc_info=True)
             row = None
         chunk_document_id = str((row or {}).get("document_id") or "")
-        if chunk_document_id in allowed:
-            return [chunk_document_id]
-    return sorted(set(_uuid_only(focus_document_ids)) & allowed)
+    # 段の解決は焦点論文の正本（FD1）: タップ位置の論文 = 明示段、呼び出し側の焦点
+    # （トピック → 直前の引用）がその次。スコープ（コースの sources）との積だけを採る。
+    focus = resolve_focus_document(
+        allowed_document_ids=doc_ids,
+        explicit_document_id=chunk_document_id or None,
+        topic_document_ids=_uuid_only(focus_document_ids),
+    )
+    return list(focus.document_ids)
 
 
 def _other_documents_fact(titles: dict[str, str], other_docs: list[str]) -> str:

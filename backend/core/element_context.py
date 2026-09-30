@@ -67,6 +67,7 @@ from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
 from core import learner_context_common
+from core.focus_document import resolve_in_focus
 from core.learner_context_common import (  # noqa: F401  (旧名の再エクスポート)
     ITEM_GROUP_FALLBACK,
     ITEM_GROUPS,
@@ -250,39 +251,56 @@ def _resolve_equation(
     """
     raw_id = str(element_id)
     all_ids = _normalized_document_ids(course_document_ids)
-    preferred = [d for d in _normalized_document_ids(preferred_document_ids or set()) if d in all_ids]
-    others = [d for d in all_ids if d not in preferred]
+    preferred = _ordered_preferred(preferred_document_ids, all_ids)
 
-    def _has(document_id: str) -> bool:
-        try:
-            records = equation_records(
-                document_id, artifacts=document_run_artifacts(document_id)
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "element_context: equation records read failed for document %s",
-                document_id,
-                exc_info=True,
-            )
-            return False
-        return any(
-            isinstance(record, dict) and str(record.get("equation_id") or "") == raw_id
-            for record in records
-        )
+    def _lookup(doc_ids: list[str]) -> list[tuple[str, tuple[str, str]]]:
+        hits: list[tuple[str, tuple[str, str]]] = []
+        for document_id in doc_ids:
+            try:
+                records = equation_records(
+                    document_id, artifacts=document_run_artifacts(document_id)
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "element_context: equation records read failed for document %s",
+                    document_id,
+                    exc_info=True,
+                )
+                continue
+            if any(
+                isinstance(record, dict) and str(record.get("equation_id") or "") == raw_id
+                for record in records
+            ):
+                hits.append((document_id, (raw_id, document_id)))
+                if len(hits) > 1:
+                    break  # 2論文に当たった時点で曖昧（それ以上読まない）
+        return hits
 
-    # 第 15 周: 式 ID は印字番号由来（``eq_5``）で論文をまたいで衝突する。⚓ の属する
-    # トピックの論文を先に見て、そこで見つかればそれを採る。
-    for document_id in preferred:
-        if _has(document_id):
-            return raw_id, document_id
-    # トピックの論文に無いときは、コースの中で **ちょうど1論文** にだけある場合に限り
-    # 解決する（複数論文に同じ ID があれば、どの論文の式か決められない — fail-closed）。
-    hits = [d for d in others if _has(d)]
-    if len(hits) == 1:
-        return raw_id, hits[0]
-    if len(hits) > 1:
-        logger.info("element_context: ambiguous equation id %r in %d documents", raw_id, len(hits))
-    return None
+    # 式 ID は印字番号由来（``eq_5``）で論文をまたいで衝突する。焦点の論文を先に見て、
+    # 無ければコースの中で**ちょうど1論文**にだけある場合に限り解決する（FD4 —
+    # ``core.focus_document.resolve_in_focus``。複数論文なら fail-closed）。
+    hit = resolve_in_focus(_lookup, preferred, scope_document_ids=all_ids)
+    if hit is None:
+        logger.info("element_context: equation id %r not resolved uniquely in course scope", raw_id)
+    return hit
+
+
+def _ordered_preferred(preferred_document_ids, all_ids: list[str]) -> list[str]:
+    """焦点論文（段順）をコースの document 集合との積にする（set は決定論のためソート）。"""
+    if not preferred_document_ids:
+        return []
+    allowed = set(all_ids)
+    values = (
+        sorted(preferred_document_ids)
+        if isinstance(preferred_document_ids, (set, frozenset))
+        else list(preferred_document_ids)
+    )
+    out: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text in allowed and text not in out:
+            out.append(text)
+    return out
 
 
 def _resolve_element(
@@ -292,12 +310,20 @@ def _resolve_element(
     preferred_document_ids: set[str] | None = None,
 ) -> tuple[str, str] | None:
     if element_type == ELEMENT_TYPE_CLAIM:
-        preferred = set(preferred_document_ids or set()) & set(course_document_ids)
-        if preferred:
-            hit = _resolve_claim(element_id, preferred)
-            if hit is not None:
-                return hit
-        return _resolve_claim(element_id, course_document_ids)
+        all_ids = _normalized_document_ids(course_document_ids)
+
+        def _lookup(doc_ids: list[str]):
+            # ``_resolve_claim`` 自身が集合内の曖昧一致を None にする（集合内で一意か
+            # UUID 完全一致のときだけ返す）ので、1回の読みがそのまま「一意解」になる。
+            hit = _resolve_claim(element_id, set(doc_ids)) if doc_ids else None
+            return [(hit[1], hit)] if hit else []
+
+        # 焦点の論文で先に解決し、焦点の外ではコース内で一意のときだけ（FD4）。
+        return resolve_in_focus(
+            _lookup,
+            _ordered_preferred(preferred_document_ids, all_ids),
+            scope_document_ids=all_ids,
+        )
     if element_type == ELEMENT_TYPE_EQUATION:
         return _resolve_equation(element_id, course_document_ids, preferred_document_ids)
     return None

@@ -234,6 +234,10 @@ class TopicMaterialResponse(BaseModel):
     # 付く事実文（正本 ``core/label_vocab.py`` の MATERIAL_PREPARING_NOTICE /
     # MATERIAL_NOT_GENERATED_NOTICE）。数字を含まない。解説があるときは None。
     preparation_notice: str | None = None
+    # 焦点論文（docs/features/focus_document_design.md）: このトピックの教材が束ねる論文が
+    # **ちょうど1つ**のときだけその document_id（画面文脈 ``selection.document_id`` の入力）。
+    # 複数・不明なら None（推測で1つに決めない）。
+    document_id: str | None = None
 
 
 class LearningChapter(BaseModel):
@@ -501,6 +505,11 @@ class LearningChatResponse(BaseModel):
     # AI 由来であることを本人発話と視覚区別して描画するための構造化フィールドで、
     # 痕跡・専用テーブルへは保存しない（窓外持ち出しの禁止）。
     mirror: dict | None = None
+    # 応答の骨格（docs/features/dialogue_response_shape_design.md RS1〜RS5）: サーバが
+    # 区画へ分けた結果の事実だけ。キーは固定 3 つ（closing_question: 末尾に残した
+    # 問い返し 1 つ or None / has_gate: 前提の逆質問を添えたか / mirror_kept: 鏡を出したか）。
+    # 数値（落とした問いの数など）は載せない。RAG 応答の最終 return だけが設定する。
+    shape: dict | None = None
     # 学生 HELP ルート（設計 docs/features/manual_help_kb_design.md §1-3）: docs/manual の
     # 出典（ヒット時のみ設定）。各要素は {file, anchor, title}。既存 sources/tier には
     # 相乗りしない（_TIER_STRENGTH が未知 tier を out_of_source=0 に落とすため）。

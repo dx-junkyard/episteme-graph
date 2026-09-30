@@ -17,7 +17,16 @@ from dataclasses import dataclass
 from sqlalchemy import text as sa_text
 
 from core import candidate_flow
-from core.course_data import course_llm_models, course_source_material_ids, course_sources, course_topics
+from core.course_data import (
+    course_llm_models,
+    course_source_material_ids,
+    course_sources,
+    course_topics,
+    find_course_topic,
+)
+from core.display_projection import mask_internal_ids
+from core.element_vocab import claim_type_label
+from core.focus_document import FocusDocument, resolve_focus_document
 from core.lecture import normalize_to_placeholder_format as _normalize_formulas
 from core.llm import generate_text, generate_text_with_structured_output, generate_embeddings, get_embedding_dim
 from core.llm_worker.single_shot import json_call
@@ -3133,6 +3142,104 @@ def load_stored_chat_history(user_id: str, course_id: str, topic_id: str) -> lis
     return [m for m in history if isinstance(m, dict)]
 
 
+def previous_cited_document_ids(user_id: str, course_id: str, topic_id: str) -> list[str]:
+    """保存済みの会話で直前の回答が引用した論文（焦点論文の「直前の引用」段の入力）。
+
+    正本設計書 ``docs/features/focus_document_design.md``（FD1）。直前の assistant ターンの
+    ``sources``（本文で引用していない ``cited: False`` は除く）を引用順に見て、保存時に
+    焼き込んだ ``document_id`` を使う。旧履歴で ``document_id`` を持たない出典だけ、
+    チャンク id から1回の SQL で解決する。読み取り専用・失敗は空リスト（fail-soft）。
+    スコープとの積は呼び出し側（``core.focus_document.resolve_focus_document``）が取る。
+    """
+    history = load_stored_chat_history(user_id, course_id, topic_id)
+    turn = next(
+        (m for m in reversed(history) if isinstance(m, dict) and m.get("role") == "assistant"),
+        None,
+    )
+    if not turn:
+        return []
+    ordered: list[str] = []
+    missing_chunks: list[str] = []
+    slots: list[tuple[str, str]] = []  # (document_id or "", chunk_id)
+    for source in turn.get("sources") or []:
+        if not isinstance(source, dict) or source.get("cited") is False:
+            continue
+        document_id = str(source.get("document_id") or "").strip()
+        chunk_id = str(source.get("chunk_id") or "").strip()
+        slots.append((document_id, chunk_id))
+        if not document_id and chunk_id:
+            missing_chunks.append(chunk_id)
+    resolved: dict[str, str] = {}
+    if missing_chunks:
+        try:
+            session = _pg_session()
+            try:
+                rows = session.execute(
+                    sa_text("""
+                        SELECT id::text, document_id::text FROM chunks
+                        WHERE id::text = ANY(:ids) AND document_id IS NOT NULL
+                    """),
+                    {"ids": missing_chunks[:50]},
+                ).fetchall()
+            finally:
+                session.close()
+            resolved = {str(r[0]): str(r[1]) for r in rows if r and r[1]}
+        except Exception:  # noqa: BLE001 — 焦点は補助。読めなければ段を空にする。
+            logger.debug("previous_cited_document_ids: chunk resolution failed", exc_info=True)
+    for document_id, chunk_id in slots:
+        value = document_id or resolved.get(chunk_id, "")
+        if value and value not in ordered:
+            ordered.append(value)
+    return ordered
+
+
+def learner_focus_document(
+    current_user: dict,
+    course_data: dict,
+    course_id: str,
+    topic_id: str | None,
+    *,
+    explicit_document_id: "str | None" = None,
+    allowed_document_ids: "set[str] | list[str] | None" = None,
+    opening_document_id: "str | None" = None,
+) -> FocusDocument:
+    """学習者の非チャット操作（記号・要素文脈・部品文脈・降下路・前提の説明）の焦点論文。
+
+    正本は ``core.focus_document.resolve_focus_document``（FD1）。スコープは既定で
+    コースの sources（``allowed_document_ids`` で差し替え可・広げない = FD2）。段の入力:
+    明示（タップ位置の論文など）→ 表示中トピックの論文 → 保存済みの会話で直前の回答が
+    引用した論文（**``_discussion`` の議論のときだけ** — 通常のトピックでは使わない
+    FD-note 2）→ 画面で選んだ論文（``opening_document_id``。チャット内の前提の説明が
+    ``screen_context.selection.document_id`` を渡す）。直前の引用は上位の段が空のときだけ
+    読む（保存済み履歴の読み出しを必要な操作に限る）。
+    """
+    allowed = (
+        set(allowed_document_ids)
+        if allowed_document_ids is not None
+        else set(list_course_source_document_ids(course_data))
+    )
+    tid = str(topic_id or "").strip()
+    topic = find_course_topic(course_data, tid) if tid and tid != "_discussion" else None
+    topic_docs = topic_source_document_ids(topic) if isinstance(topic, dict) else set()
+    previous: list[str] = []
+    explicit_inside = bool(explicit_document_id) and str(explicit_document_id) in allowed
+    # FD-note 2: 直前の引用の段は議論（``_discussion``）だけ。通常のトピックで束ねる論文が
+    # スコープに無いときに前回引用した論文へ張り付かせない。
+    if tid == "_discussion" and not explicit_inside and not (topic_docs & allowed):
+        try:
+            previous = previous_cited_document_ids(current_user["id"], course_id, tid)
+        except Exception:  # noqa: BLE001 — 焦点は補助（段を空にする）
+            logger.debug("learner focus: previous citation unavailable", exc_info=True)
+            previous = []
+    return resolve_focus_document(
+        allowed_document_ids=allowed,
+        explicit_document_id=explicit_document_id,
+        topic_document_ids=topic_docs,
+        previous_cited_document_ids=previous,
+        opening_document_id=opening_document_id,
+    )
+
+
 def _split_history_at(history: list, from_message_id: str):
     """``history`` を ``from_message_id`` の位置で分割する（純粋関数・DB非依存）。
 
@@ -4194,7 +4301,10 @@ def get_chunk_claim_refs(
         claims.append({
             "id": str(row[0]),
             "claim_type": row[1] or "",
-            "label": label,
+            # 表示は日本語の種別名（語彙表の正本は core/element_vocab。未知は空）。
+            "claim_type_label": claim_type_label(row[1]),
+            # 内部 ID が混ざった本文は読める語に置き換える（表示投影層 DP2）。
+            "label": mask_internal_ids(label),
         })
     return claims
 

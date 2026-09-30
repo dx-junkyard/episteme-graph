@@ -186,10 +186,26 @@ def _collect_context_blocks(session, course_id: str, cited_chunk_ids: list[str])
         except Exception as exc:
             logger.info("anchor context: theory_claims lookup skipped: %s", exc)
     try:
-        rows = session.execute(
-            sa_text("SELECT id, name FROM theory_components_live WHERE course_id = :cid LIMIT :lim"),
-            {"cid": course_id, "lim": _MAX_CONCEPT_BLOCKS},
-        ).fetchall()
+        if cited_chunk_ids:
+            # 焦点論文（docs/features/focus_document_design.md）: 回答が引用したチャンクの
+            # 論文の概念だけを候補にする（コース全体の別論文の概念へ帰属させない）。
+            # cited_chunk_ids は記録時に焦点の論文へ絞り済み（core.focus_document）。
+            rows = session.execute(
+                sa_text("""
+                    SELECT id, name FROM theory_components_live
+                    WHERE document_id IN (
+                        SELECT document_id FROM chunks
+                        WHERE id::text = ANY(:ids) AND document_id IS NOT NULL
+                    )
+                    LIMIT :lim
+                """),
+                {"ids": cited_chunk_ids, "lim": _MAX_CONCEPT_BLOCKS},
+            ).fetchall()
+        else:
+            rows = session.execute(
+                sa_text("SELECT id, name FROM theory_components_live WHERE course_id = :cid LIMIT :lim"),
+                {"cid": course_id, "lim": _MAX_CONCEPT_BLOCKS},
+            ).fetchall()
         blocks["concepts"] = [{"id": str(r[0]), "label": r[1] or ""} for r in rows]
     except Exception as exc:
         logger.info("anchor context: theory_components lookup skipped: %s", exc)

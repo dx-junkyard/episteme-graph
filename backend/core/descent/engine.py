@@ -381,7 +381,12 @@ def compose_ladder(
 
 
 def build_ladder(
-    course_data: dict | None, course_id: str, element_type: str, element_id: str
+    course_data: dict | None,
+    course_id: str,
+    element_type: str,
+    element_id: str,
+    *,
+    preferred_document_ids: "tuple[str, ...] | list[str]" = (),
 ) -> dict[str, Any]:
     """足場ダイヤルの梯子を組む（設計書 §2。全段を一度に返す — 開示順制御はフロント）。
 
@@ -389,7 +394,13 @@ def build_ladder(
     エラーにしない）。``course_id`` は呼び出し文脈の記録用引数で、スコープの実体は
     ``course_data``（受講ゲート通過済みの版ビュー）から導く。
     """
-    resolved = resolve_element(element_type, element_id, course_data)
+    resolved = (
+        resolve_element(
+            element_type, element_id, course_data, preferred_document_ids=preferred_document_ids
+        )
+        if preferred_document_ids
+        else resolve_element(element_type, element_id, course_data)
+    )
     if resolved is None:
         return {"available": False}
 
@@ -512,7 +523,12 @@ def compose_backstage_path(
 
 
 def build_backstage_path(
-    course_data: dict | None, course_id: str, element_type: str, element_id: str
+    course_data: dict | None,
+    course_id: str,
+    element_type: str,
+    element_id: str,
+    *,
+    preferred_document_ids: "tuple[str, ...] | list[str]" = (),
 ) -> dict[str, Any]:
     """楽屋の降下路（設計書 §4: 規約差 → 記号定義 → 前提概念の generic 説明）。
 
@@ -524,7 +540,13 @@ def build_backstage_path(
 
     symbol_items: list[dict[str, Any]] = []
     generic_items: list[dict[str, Any]] = []
-    resolved = resolve_element(element_type, element_id, course_data)
+    resolved = (
+        resolve_element(
+            element_type, element_id, course_data, preferred_document_ids=preferred_document_ids
+        )
+        if preferred_document_ids
+        else resolve_element(element_type, element_id, course_data)
+    )
     if resolved is not None:
         artifacts = document_run_artifacts(resolved.document_id)
         nodes = _graph_nodes(fetch_component_graph(resolved.document_id))

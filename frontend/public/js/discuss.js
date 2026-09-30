@@ -844,7 +844,9 @@
     // 最初に取れる操作が折り返し線の外にあった。
     html += renderFirstMoveSection();
     docs.forEach(function (doc) {
-      html += '<div class="discuss-opening-doc">';
+      // 焦点論文（focus_document_design.md）: 起点チップを押したらその論文を「画面で選んだ
+      // 論文」として申告する（サーバはスコープとの積でしか使わない）。
+      html += '<div class="discuss-opening-doc" data-discuss-doc-id="' + esc(doc.document_id || "") + '">';
       if (multi) html += '<div class="discuss-opening-doc-title">' + esc(doc.title || "") + '</div>';
       html += renderQuestionSection(doc);
       // 問いの直後に論文の骨格（章の流れ）を置く。既定は畳まれているので一等地の
@@ -875,10 +877,20 @@
     return html;
   }
 
+  // 起点チップが属する論文を「議論で選んだ論文」として app.js に伝える（FD1 の画面の選択段）。
+  function noteChosenDocument(el) {
+    var holder = el && el.closest ? el.closest("[data-discuss-doc-id]") : null;
+    var docId = holder ? (holder.getAttribute("data-discuss-doc-id") || "") : "";
+    if (docId && window.LearningScreen && typeof window.LearningScreen.setDiscussFocusDocument === "function") {
+      window.LearningScreen.setDiscussFocusDocument(docId);
+    }
+  }
+
   function bindOpeningEvents(containerEl) {
     containerEl.querySelectorAll("[data-discuss-ask]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var text = this.getAttribute("data-discuss-ask");
+        noteChosenDocument(this);
         // 観測: バックボーンノードと、それ以外の起点チップ（中心命題・最初の一手）を区別する。
         if (this.classList.contains("discuss-backbone-node")) {
           sendDiscussMetric("opening_backbone_clicked", {});
@@ -910,6 +922,7 @@
     containerEl.querySelectorAll("[data-discuss-seed-ask]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var text = this.getAttribute("data-discuss-seed-ask");
+        noteChosenDocument(this);
         sendDiscussMetric("opening_starter_clicked", {});
         if (ctx.kind === "document" && ctx.onSeed) { if (text) ctx.onSeed(text); return; }
         if (text && window.discussPostSeedPrompt) window.discussPostSeedPrompt(text);

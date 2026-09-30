@@ -677,6 +677,44 @@ def fetch_course_document_ids(course_id: str) -> set[str]:
         session.close()
 
 
+def fetch_trace_cited_document_ids(trace_id: str) -> list[str]:
+    """痕跡 ``payload.cited_chunk_ids``（その問いへの回答が本文で引用したチャンク）の論文。
+
+    焦点論文（``core.focus_document`` FD1）の「直前の引用」段の入力。引用順を保ち重複を
+    除く。読み取り専用・失敗は空リスト（範囲表示は補助 — fail-soft）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT payload FROM interest_traces WHERE id::text = :tid"),
+            {"tid": str(trace_id)},
+        ).fetchone()
+        if not row:
+            return []
+        payload = _payload_dict(row[0])
+        chunk_ids = [
+            str(c).strip() for c in (payload.get("cited_chunk_ids") or []) if str(c or "").strip()
+        ][:10]
+        if not chunk_ids:
+            return []
+        rows = session.execute(
+            sa_text("""
+                SELECT id::text, document_id::text FROM chunks
+                WHERE id::text = ANY(:ids) AND document_id IS NOT NULL
+            """),
+            {"ids": chunk_ids},
+        ).fetchall()
+    finally:
+        session.close()
+    by_chunk = {str(r[0]): str(r[1]) for r in rows if r and r[1]}
+    out: list[str] = []
+    for chunk_id in chunk_ids:
+        document_id = by_chunk.get(chunk_id)
+        if document_id and document_id not in out:
+            out.append(document_id)
+    return out
+
+
 def fetch_library_entry_names(entry_ids: list[str]) -> dict[str, str]:
     """library_entries.name を id → name で返す（``status='active'`` のみ。retired は除外）。"""
     ids = [str(e) for e in entry_ids if e]

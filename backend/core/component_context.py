@@ -43,6 +43,7 @@ from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
 from core import learner_context_common
+from core.focus_document import resolve_in_focus, unique_row_lookup
 from core.learner_context_common import (  # noqa: F401  (旧名の再エクスポート)
     PROVENANCE_COURSE_FREEZE,
     is_symbol_like_concept as _is_symbol_like_concept,
@@ -100,7 +101,11 @@ _strip_confidence = strip_confidence
 # ---------------------------------------------------------------------------
 
 
-def _resolve_component_row(component_id: str, course_document_ids: set[str]) -> dict | None:
+def _resolve_component_row(
+    component_id: str,
+    course_document_ids: set[str],
+    preferred_document_ids: "tuple[str, ...] | list[str] | set[str] | None" = None,
+) -> dict | None:
     """component_id を、コースの document 集合内に限定して1行解決する。
 
     ``document_id = ANY(course_document_ids)`` を SQL の WHERE 句に直接含めることで
@@ -110,14 +115,37 @@ def _resolve_component_row(component_id: str, course_document_ids: set[str]) -> 
     ``learner_context_common.scoped_id_match_sql``（claim 側の
     ``element_context._resolve_claim`` と共有する正本）に委ねる。
 
-    複数行に一致した場合は ``ORDER BY (id::text = :raw_id) DESC`` + ``LIMIT 1`` で
-    先頭 1 行を採る（agent 側 ID の曖昧一致を 404 にする claim 側とは意図的に挙動が
-    違う。現行挙動の維持であり、変更はオーナー判断の別課題）。
+    論文をまたぐ一致の扱いは焦点論文の規則（FD4 — ``core.focus_document.resolve_in_focus``）:
+    ``preferred_document_ids``（焦点の論文・段順）で先に解決し、焦点の外ではコース内で
+    **ちょうど1論文**に当たるときだけ解決する（以前はコース全体の ``LIMIT 1`` で
+    別論文の同名 component を拾い得た — IK-0554 の残り）。DB UUID の完全一致は一意なので
+    即決。同じ論文の中の複数一致は ``ORDER BY (id::text = :raw_id) DESC`` の先頭行。
     """
     document_ids = _normalized_document_ids(course_document_ids)
     if not document_ids:
         return None
 
+    raw_id = str(component_id)
+
+    def _fetch_one(doc_ids: list[str]):
+        row = _query_component_row(component_id, doc_ids)
+        return (str(row.get("document_id") or ""), row) if row else None
+
+    allowed = set(document_ids)
+    if isinstance(preferred_document_ids, (set, frozenset)):
+        preferred_values = sorted(preferred_document_ids)
+    else:
+        preferred_values = list(preferred_document_ids or ())
+    focus = [str(d) for d in preferred_values if str(d) in allowed]
+    return resolve_in_focus(
+        unique_row_lookup(_fetch_one, is_exact=lambda row: str(row.get("id")) == raw_id),
+        focus,
+        scope_document_ids=document_ids,
+    )
+
+
+def _query_component_row(component_id: str, document_ids: list[str]) -> dict | None:
+    """``document_ids`` の中で component を1行引く（UUID 完全一致を優先・読み取り専用）。"""
     where_clause, params = scoped_id_match_sql(component_id, document_ids)
 
     session = get_session()
@@ -661,7 +689,11 @@ def _build_graph(
 
 
 def build_component_context(
-    component_id: str, course_id: str, course_document_ids: set[str]
+    component_id: str,
+    course_id: str,
+    course_document_ids: set[str],
+    *,
+    preferred_document_ids: "tuple[str, ...] | list[str] | set[str] | None" = None,
 ) -> dict | None:
     """コーススコープ component 文脈 DTO を組み立てる。
 
@@ -675,7 +707,9 @@ def build_component_context(
     を含まない — C層の承認済み説明の取得・マージは呼び出し側
     （``routes/learning.py``）の責務とする（core は routes を import しない）。
     """
-    component_row = _resolve_component_row(component_id, course_document_ids)
+    component_row = _resolve_component_row(
+        component_id, course_document_ids, preferred_document_ids
+    )
     if component_row is None:
         return None
 

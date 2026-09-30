@@ -18,6 +18,11 @@
     editingMessageId: null, // 機能3: 書き直し中の user メッセージ id（送信で replace_message_id として使う）
     topicMaterial: [], // {id, text, chunk_index, chapter, section}
     topicMaterialNotice: null, // IK-0375: サーバの preparation_notice（事実文）。無ければ null
+    // 焦点論文（docs/features/focus_document_design.md）: トピック教材が束ねる論文が1つのときの
+    // document_id（サーバの TopicMaterialResponse.document_id）と、discuss 開幕で選んだ論文。
+    // どちらも画面文脈の参照で、サーバはスコープとの積でしか使わない。
+    topicMaterialDocumentId: null,
+    discussFocusDocumentId: null,
     learningSupport: null, // {mode, status_label, origin}
     sending: false,
     checkingUnderstanding: false,
@@ -826,6 +831,7 @@
         var seedHint = msg.discuss_prompt
           ? '<div class="discuss-prompt-hint">この問いに、あなたの考えを書いてください。</div>'
           : "";
+        // 応答の骨格（RS3）: 末尾の問い返しの独立段落は renderAiContent が描く。
         html += '<div class="mg ai' + seedCls + '"' + idAttr + '>' + renderMirrorBlock(msg) +
           renderAiContent(msg.content, msg) +
           seedHint + renderAnchorConfirmPrompt(msg) + "</div>";
@@ -1743,7 +1749,29 @@
     return out.join("");
   }
 
+  // 応答の骨格（RS3）: msg.shape.closing_question が本文の末尾にあれば切り分ける。
+  // 見つからない（本文が組み替えられた・履歴復元で shape が無い）ときは本文をそのまま返す。
+  function splitClosingQuestion(msg, text) {
+    var content = text || "";
+    var q = msg && msg.shape && msg.shape.closing_question;
+    if (!q) return { body: content, question: "" };
+    var trimmed = content.replace(/\s+$/, "");
+    if (trimmed.slice(-q.length) !== q) return { body: content, question: "" };
+    var body = trimmed.slice(0, trimmed.length - q.length).replace(/\s+$/, "");
+    if (!body) return { body: content, question: "" };
+    return { body: body, question: q };
+  }
+
   function renderAiContent(text, msg) {
+    // 応答の骨格（dialogue_response_shape_design.md RS3）: サーバが残した末尾の問い返し
+    // 1 つ（msg.shape.closing_question）を本文から分け、独立した最後の段落として描く
+    // （本文と二重に出さない）。問い返し自体は shape を持たない msg で描く（再帰で分けない・出典チップは生かす）。
+    var closingHtml = "";
+    var shaped = splitClosingQuestion(msg, text);
+    if (shaped.question) {
+      text = shaped.body;
+      closingHtml = '<div class="closing-question">' + renderAiContent(shaped.question, { sources: (msg && msg.sources) || [] }) + "</div>";
+    }
     // Preserve LaTeX expressions before HTML escaping
     var latexBlocks = [];
     var preserved = text || "";
@@ -1862,7 +1890,7 @@
     }
 
     // 本文中の連番出典 [出典N] を、該当チャンクをポップアップ表示できる span に変換する。
-    return linkifyCitations(html, msg);
+    return linkifyCitations(html, msg) + closingHtml;
   }
 
   // [出典N] → クリック可能な出典チップ（対応する根拠が無ければそのまま素通し）。
@@ -3556,12 +3584,13 @@
         return {
           chunks: data.chunks || [],
           notice: (typeof data.preparation_notice === "string" && data.preparation_notice) ? data.preparation_notice : null,
+          documentId: (typeof data.document_id === "string" && data.document_id) ? data.document_id : null,
         };
       }
     } catch (err) {
       // ネットワークエラー時は空を返す（UIを壊さない）
     }
-    return { chunks: [], notice: null };
+    return { chunks: [], notice: null, documentId: null };
   }
 
   // detour（寄り道）を終了し、元の学習パス（アンカー）へ復帰する。
@@ -3626,6 +3655,7 @@
     state.checkScaffoldActive = false; // トピックを移ったら壁打ちは終わり、通常チャットに戻る
     state.topicMaterial = [];
     state.topicMaterialNotice = null;
+    state.topicMaterialDocumentId = null;
     // claim / equation 文脈（learner element context）のメモリキャッシュはトピック単位。
     // 教材が入れ替わると担体（教材内ジャンプの対象）も変わるため持ち越さない。
     clearMaterialElementContextCache();
@@ -3669,6 +3699,7 @@
         ]);
         state.topicMaterial = material.chunks;
         state.topicMaterialNotice = material.notice;
+        state.topicMaterialDocumentId = material.documentId || null;
         state.chatMessages = history;
         renderChat();
       }
@@ -4437,6 +4468,13 @@
       if (elementId) selection.element_id = elementId;
       if (elementType) selection.element_type = elementType;
       if (p.chunk_id) selection.chunk_id = String(p.chunk_id);
+      // 焦点論文の参照（FD1 の「画面で選んだ論文」段）: discuss では開幕で選んだ論文、
+      // それ以外は表示中トピックの教材が束ねる論文（1つのときだけ）。サーバはスコープとの
+      // 積でしか使わない（FD2）。分からなければ載せない。
+      const focusDocumentId = (state.currentTopicId === DISCUSS_TOPIC_ID)
+        ? state.discussFocusDocumentId
+        : state.topicMaterialDocumentId;
+      if (focusDocumentId) selection.document_id = String(focusDocumentId);
       const view = {
         mode: resolveScreenMode(),
         precision_reading: isPrecisionReadingOn(state.courseId),
@@ -4456,7 +4494,13 @@
   }
 
   // 画面文脈アダプターの契約（window.<Screen>.getScreenContext）。
-  window.LearningScreen = { getScreenContext: getScreenContext };
+  window.LearningScreen = {
+    getScreenContext: getScreenContext,
+    // discuss 開幕の起点チップが属する論文（焦点論文の「画面で選んだ論文」段・参照のみ）。
+    setDiscussFocusDocument: function (documentId) {
+      state.discussFocusDocumentId = documentId ? String(documentId) : null;
+    },
+  };
 
   // ══════════════════════════════════════════════════════════════════
   // LLM 応答のストリーミング Phase 3-a
@@ -4896,6 +4940,9 @@
           // 入口統合 Phase 1（§5/§6）: この往復をどの様相で答えたかの事実
           // （{stance, source, label}。数値は含まない）。推定のときだけ 1 行描く。
           stance: data.stance || null,
+          // 応答の骨格（RS1〜RS5）: {closing_question, has_gate, mirror_kept}（数値なし）。
+          // 末尾の問い返しを独立段落で描くのに使う。
+          shape: data.shape || null,
           // 訂正（聞き直し）で「同じ位置から」再処理するための元 user メッセージ id。
           reply_to_id: userMsgId,
           mock: isMock(data),
@@ -6486,6 +6533,7 @@
       ]);
       state.topicMaterial = material.chunks;
       state.topicMaterialNotice = material.notice;
+      state.topicMaterialDocumentId = material.documentId || null;
       state.chatMessages = history;
     }
     renderChat();
@@ -8107,6 +8155,19 @@
     fetchComponentContextAndRender(pop, body, item.id, resolver);
   }
 
+  // 焦点論文（docs/features/focus_document_design.md FD1/FD4）: 論文をまたいで衝突する
+  // ID（comp_001 / eq_5）を「この論文」で先に解決させるため、表示中トピックと discuss 開幕で
+  // 選んだ論文を参照として添える（サーバはスコープとの積でしか使わない）。
+  function focusQuerySuffix(lead) {
+    var parts = [];
+    if (state.currentTopicId) parts.push("topic_id=" + encodeURIComponent(state.currentTopicId));
+    var doc = (state.currentTopicId === DISCUSS_TOPIC_ID)
+      ? state.discussFocusDocumentId
+      : state.topicMaterialDocumentId;
+    if (doc) parts.push("document_id=" + encodeURIComponent(doc));
+    return parts.length ? (lead + parts.join("&")) : "";
+  }
+
   async function fetchComponentContextAndRender(pop, body, componentId, resolver) {
     if (!componentId || !state.courseId) {
       body.textContent = "詳細情報を取得できませんでした。";
@@ -8114,7 +8175,7 @@
     }
     try {
       var res = await apiFetch("/learning/courses/" + state.courseId +
-        "/components/" + encodeURIComponent(componentId) + "/context");
+        "/components/" + encodeURIComponent(componentId) + "/context" + focusQuerySuffix("?"));
       if (!res.ok) { body.textContent = "詳細情報を取得できませんでした。"; return; }
       var data = await res.json();
       renderComponentContextPanel(pop, body, data, resolver);
@@ -8558,7 +8619,7 @@
         try {
           const res = await apiFetch("/learning/courses/" + state.courseId +
             "/descent/ladder?element_type=" + encodeURIComponent(elementType) +
-            "&element_id=" + encodeURIComponent(elementId));
+            "&element_id=" + encodeURIComponent(elementId) + focusQuerySuffix("&"));
           if (!res.ok) { frame.remove(); return; }
           const data = await res.json();
           if (!data || data.available !== true ||
@@ -8701,7 +8762,7 @@
     try {
       const res = await apiFetch("/learning/courses/" + state.courseId +
         "/descent/backstage-path?element_type=" + encodeURIComponent(elementType) +
-        "&element_id=" + encodeURIComponent(elementId));
+        "&element_id=" + encodeURIComponent(elementId) + focusQuerySuffix("&"));
       if (!res.ok) return; // 失敗しても楽屋は開いたまま（宣言・質問欄・戻るは生きる）
       const data = await res.json();
       if (data && typeof data.declaration === "string" && data.declaration) {

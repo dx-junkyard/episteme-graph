@@ -27,6 +27,7 @@ from sqlalchemy import text as sa_text
 
 from core.course_data import course_source_material_ids, course_sources
 from core.deliberation.refs import document_run_artifacts, equation_records
+from core.focus_document import resolve_in_focus, unique_row_lookup
 from core.knowledge_objects.schema import VIEW_CLAIMS_LIVE, VIEW_COMPONENTS_LIVE
 from core.learner_context_common import normalized_document_ids, scoped_id_match_sql
 from core.postgres import get_session as _pg_session
@@ -97,33 +98,55 @@ def course_document_ids(course_data: dict | None) -> set[str]:
     return explicit_ids | {str(r[0]) for r in rows if r[0]}
 
 
-def _resolve_equation(element_id: str, document_ids: list[str]) -> ResolvedElement | None:
-    """equation をコース document 集合の走査で解決する（fail-soft に次の document へ進む）。"""
+def _resolve_equation(
+    element_id: str,
+    document_ids: list[str],
+    preferred_document_ids: "tuple[str, ...] | list[str]" = (),
+) -> ResolvedElement | None:
+    """equation をコース document 集合の走査で解決する（fail-soft に次の document へ進む）。
+
+    式 ID は印字番号由来（``eq_5``）で論文をまたいで衝突する。焦点の論文を先に見て、
+    無ければコースの中で**ちょうど1論文**にだけある場合に限り解決する（FD4 —
+    ``core.focus_document.resolve_in_focus``。複数論文なら fail-closed）。
+    """
     raw_id = str(element_id or "").strip()
     if not raw_id:
         return None
-    for document_id in document_ids:
-        try:
-            records = equation_records(
-                document_id, artifacts=document_run_artifacts(document_id)
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "descent: equation records read failed for document %s",
-                document_id,
-                exc_info=True,
-            )
-            continue
-        for record in records:
-            if isinstance(record, dict) and str(record.get("equation_id") or "") == raw_id:
-                return ResolvedElement(
-                    element_type=ELEMENT_TYPE_EQUATION,
-                    element_id=raw_id,
-                    document_id=document_id,
-                    match_ids={raw_id},
-                    label=_equation_display_label(record),
+
+    def _lookup(doc_ids: list[str]):
+        hits = []
+        for document_id in doc_ids:
+            try:
+                records = equation_records(
+                    document_id, artifacts=document_run_artifacts(document_id)
                 )
-    return None
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "descent: equation records read failed for document %s",
+                    document_id,
+                    exc_info=True,
+                )
+                continue
+            for record in records:
+                if isinstance(record, dict) and str(record.get("equation_id") or "") == raw_id:
+                    hits.append((document_id, (document_id, record)))
+                    break
+            if len(hits) > 1:
+                break  # 2論文に当たった時点で曖昧（それ以上読まない）
+        return hits
+
+    focus = [d for d in (preferred_document_ids or ()) if d in set(document_ids)]
+    hit = resolve_in_focus(_lookup, focus, scope_document_ids=document_ids)
+    if hit is None:
+        return None
+    document_id, record = hit
+    return ResolvedElement(
+        element_type=ELEMENT_TYPE_EQUATION,
+        element_id=raw_id,
+        document_id=document_id,
+        match_ids={raw_id},
+        label=_equation_display_label(record),
+    )
 
 
 _LABEL_LIMIT = 80
@@ -197,20 +220,38 @@ def _match_ids_from_scope(db_uuid: str, scope: dict) -> set[str]:
 
 
 def resolve_element(
-    element_type: str, element_id: str, course_data: dict | None
+    element_type: str,
+    element_id: str,
+    course_data: dict | None,
+    *,
+    preferred_document_ids: "tuple[str, ...] | list[str]" = (),
 ) -> ResolvedElement | None:
-    """要素をコース sources 内限定で解決する（解決不能は ``None`` — fail-closed）。"""
+    """要素をコース sources 内限定で解決する（解決不能は ``None`` — fail-closed）。
+
+    ``preferred_document_ids`` は焦点論文（``core.focus_document`` FD1）。論文をまたいで
+    衝突する ID は焦点の論文で先に解決し、焦点の外では一意のときだけ解決する（FD4）。
+    """
     if element_type not in SUPPORTED_ELEMENT_TYPES:
         return None
     document_ids = normalized_document_ids(course_document_ids(course_data))
     if not document_ids:
         return None
+    focus = [d for d in (preferred_document_ids or ()) if d in set(document_ids)]
     if element_type == ELEMENT_TYPE_EQUATION:
-        return _resolve_equation(element_id, document_ids)
+        return _resolve_equation(element_id, document_ids, focus)
     # 読み手なので live ビューを読む（KO5）。supersede 済みの旧行に解決すると、
     # 既に置き換わった要素の説明を「いまの教材の要素」として見せてしまう。
     table = VIEW_COMPONENTS_LIVE if element_type == ELEMENT_TYPE_COMPONENT else VIEW_CLAIMS_LIVE
-    resolved = _resolve_row(table, element_id, document_ids)
+
+    def _fetch_one(doc_ids: list[str]):
+        row = _resolve_row(table, element_id, doc_ids)
+        return (row[1], row) if row else None
+
+    resolved = resolve_in_focus(
+        unique_row_lookup(_fetch_one, is_exact=lambda row: row[0] == str(element_id)),
+        focus,
+        scope_document_ids=document_ids,
+    )
     if resolved is None:
         return None
     db_uuid, document_id, scope, label = resolved

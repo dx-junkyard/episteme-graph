@@ -9747,6 +9747,13 @@ body.admin-inspect-mode textarea:disabled {
   padding: 8px 10px;
   margin-bottom: 10px;
 }
+/* 応答の骨格（dialogue_response_shape_design.md RS3）: 末尾の問い返し 1 つを独立段落に。
+   本文と区別できる程度の控えめな区切り（強調色・バッジは使わない）。 */
+.closing-question {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--color-border-secondary);
+}
 .mirror-label {
   font-size: 11px;
   color: var(--color-text-tertiary);

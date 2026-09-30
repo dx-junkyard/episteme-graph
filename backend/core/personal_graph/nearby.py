@@ -61,6 +61,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from core.element_vocab import theory_stage_key, theory_stage_label
+from core.focus_document import resolve_focus_document
 from core.label_vocab import VERIFICATION_STATUS_LABELS_LEDGER
 from core.personal_graph import queries
 from core.personal_graph.derive import derive_person_network
@@ -151,6 +152,14 @@ FACT_RANGE_SHARPEN = (
 FACT_RANGE_COURSE_FALLBACK = (
     "このトピックと論文の対応はまだ記録されていません。"
     "かわりに、このコースのソース論文の理論構成を表示しています。"
+)
+
+#: 焦点論文の「直前の引用」段（``core.focus_document`` FD1）: トピック⇄claim の対応が
+#: 引けないとき、コース全体の前に**この問いへの回答が引用した論文**へ絞る（議論中の
+#: ``_discussion`` の痕跡がコース全体へ広がらない）。粗さは隠さずラベルする（PMN-1）。
+FACT_RANGE_CITED_DOCUMENTS = (
+    "このトピックと論文の対応はまだ記録されていません。"
+    "かわりに、この問いへの回答が引用した論文の理論構成を表示しています。"
 )
 
 #: 範囲表示の対象になり得たコース sources の論文のうち、理論構成のグラフがまだ無いもの
@@ -1081,26 +1090,44 @@ def _nearby_for_topic_anchor(
         doc["document_id"] == d for doc in documents
     )]
     if not documents:
-        # コース範囲フォールバック: touched は立てず、粗いことを事実文で明示する。
-        fallback_fact = FACT_RANGE_COURSE_FALLBACK
-        missing_graph_ids = []
-        for document_id in _documents_for_anchor(
+        # 焦点論文の「直前の引用」段（FD1）: コース全体へ広げる前に、この問いへの回答が
+        # 引用した論文（コース sources ∩ 閲覧可能）に絞る。引けなければコース範囲。
+        course_candidates = _documents_for_anchor(
             start, can_view_document=can_view_document, user_id=user_id
-        ):
-            graph = queries.fetch_component_graph(document_id)
-            if not graph:
-                missing_graph_ids.append(document_id)
-                continue
-            all_main_ids.extend(
-                str(n.get("component_id") or "") for n in main_nodes(graph)
-            )
-            documents.append(
-                {
-                    "document_id": document_id,
-                    "graph": graph,
-                    "touched_claim_ids": set(),
-                }
-            )
+        )
+        try:
+            cited_docs = queries.fetch_trace_cited_document_ids(start.id)
+        except Exception:  # noqa: BLE001 — 補助（コース範囲へ縮退）
+            cited_docs = []
+        focus = resolve_focus_document(
+            allowed_document_ids=course_candidates,
+            previous_cited_document_ids=cited_docs,
+        )
+        # コース範囲フォールバック: touched は立てず、粗いことを事実文で明示する。
+        tiers = []
+        if focus:
+            tiers.append((FACT_RANGE_CITED_DOCUMENTS, list(focus.document_ids)))
+        tiers.append((FACT_RANGE_COURSE_FALLBACK, course_candidates))
+        for tier_fact, tier_documents in tiers:
+            fallback_fact = tier_fact
+            missing_graph_ids = []
+            for document_id in tier_documents:
+                graph = queries.fetch_component_graph(document_id)
+                if not graph:
+                    missing_graph_ids.append(document_id)
+                    continue
+                all_main_ids.extend(
+                    str(n.get("component_id") or "") for n in main_nodes(graph)
+                )
+                documents.append(
+                    {
+                        "document_id": document_id,
+                        "graph": graph,
+                        "touched_claim_ids": set(),
+                    }
+                )
+            if documents:
+                break
 
     if not documents:
         return unavailable(mode, NOTICE_TOPIC_NO_MAPPING, facts=[FACT_RANGE_SHARPEN])
