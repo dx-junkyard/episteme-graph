@@ -118,6 +118,19 @@
 トピック → `in_progress`、章は全完了 → `completed` / 一部 → `in_progress`。保存データは変えず、
 取得に失敗したらマスターの値のまま = fail-open）。
 
+#### ①-a 逆質問は1トピック1回・質問は落とさない（第 14 周 是正, 2026-09-30）
+
+- 逆質問は **1 コース × 1 トピック × 1 学習者につき一度だけ**。提示した事実を
+  `learning_states.progress_data.prerequisite_gates_presented`（topic_id → ISO8601）に残し
+  （`services.record_prerequisite_gate_presented` / `get_prerequisite_gate_presented`）、以後は出さない。
+  提示の記録であって理解度・能力の推定ではない（UC5）。
+- 逆質問を出すターンでも**元の質問に通常の RAG 経路で答え**、逆質問は回答の後ろに
+  `PREREQUISITE_GATE_ANSWERED_MARKER`（「ご質問には上で答えました。」）付きで添える（LLM は通常の往復と同じ1回）。
+  はい/いいえの選択肢は `next_actions` に足す。
+- 目印付きの逆質問に「理解している」とだけ答えた往復は、記帳のうえ固定文（`PREREQUISITE_ACK_ONLY_REPLY`・LLM 0 回）。
+  元の質問は答え直さない（IK-0396 の resume は目印の無い旧形式の逆質問だけに効く）。
+- 「前提「X」の確認はまだ記録していません。そのまま答えます。」の前置き（IK-0422/0446）は内部都合なので廃止。
+
 ### ①-b 前提知識の説明（3段解決 / `routes/learning.py`）
 前提の**説明**（`support_action ∈ _PREREQUISITE_ACTIONS` または「前提知識…確認/復習/必要」の
 発話、または IK-0383 の説明要求 → `LEARNING_ADVICE`）は、`_resolve_prerequisite_context()` が段階的に解決する。
@@ -573,6 +586,18 @@ explore）」の 3 軸を 1 つの enum に畳んでいました。入口統合 
 
 ---
 
+- 引用ゼロ × 表示中教材が問いに無関係なら model_generated（第 14 周の裁定。採用した出典があっても本文が1つも引用しなければ資料に基づく回答とは名乗らない）。
+
+### 4.x 出典の並びと採用の絞り込み（第 15 波 = ペルソナ通し受講 第 14 周 c-astro-structure-30 の是正・2026-09-30。課題ナレッジ IK-0512〜0514）
+
+- `sources` は出典番号の順に並べ、各項目 `SourceTierItem.cited` で本文が引用したかを示す（引用していない出典は画面で
+  「本文では引用していません」と区別）。番号と出典の対応は正しく、同番号が別チャンクに見えるのは LLM の誤帰属（検査は未実装・IK-0545）。
+- 採用前に `_drop_off_topic_chunks` が表示中トピックの論文外のチャンクを落とし、`non_content_chunk_reason` は見出しだけの
+  短すぎるチャンクを `too_short` として除外する。
+- 出典本文（source-chunk）は途中始まり・途中終わりに「…」を付け、`text_excerpt.normalize_source_line_breaks` で PDF の行末改行を
+  畳む。見つからないときの 404 は日本語の事実文。
+
+
 ## 5. tension プレフィルタと TensionMiningAgent（B層）
 
 チャット応答を遅延させないため、同期パスに置くのは非 LLM のプレフィルタだけです。
@@ -659,3 +684,12 @@ UI 側の扱いは [学習機能](../features/learning.md)・[フロントエン
 ---
 
 [← コアエンジン](core-engine.md) ｜ 次へ: [パイプライン概要 →](../pipeline/overview.md)
+
+## 追補（2026-09-30・ペルソナ通し受講 第 16 波）
+
+- **議論中の論文の優先**（IK-0556）: `_discussed_document_ids` を前提説明の `prefer_document_ids` と痕跡 cited_chunk_ids の document スコープへ渡す。
+- **否定文中の出典は引用に数えない**（IK-0557）: `_affirmative_citation_indices` が「出典N は…述べていません」型の [出典N] を除く。
+- **直前の引用チャンクを id で読み出す**（IK-0558）: 「さっきの出典」への問い返しは検索せず、直前の cited chunk を id 指定で読む。
+- **無内容チャンク 3 種**（IK-0559）: `non_content_chunk_reason` に acknowledgments / title_block / outline。
+- **ゲート後の分岐**（IK-0560）: 「まだ」「わからん」「むずい」等の口語の否定を否定の返事に含め、前提トピックの教材本文を説明の入力に渡す。
+  英語話者にも日本語のゲート文が出る件は未解決（IK-0574）。

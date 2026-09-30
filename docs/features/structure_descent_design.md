@@ -126,6 +126,11 @@ v1 の中段は「定義・スコープ・表記ゆれ」で構成する。単�
     明示 id のみ段が出る）+ `test_descent_guardrails.py`（entry_mode ガード・前倒しガードの
     位置検査・anchor_confirm ガードのソース構造固定）。
 
+### 7.x 対象名と空段の理由（第 15 波 = ペルソナ通し受講 第 14 周 c-astro-structure-30 の是正・2026-09-30。課題ナレッジ IK-0519）
+
+ladder DTO に `target_label` を足し、開示段が空のときは `reason`（式リンクなし `REVEAL_REASON_NO_EQUATION_LINK` / 手順なし
+`REVEAL_REASON_NO_STEP`）を返す。フロントは段の注記として描く。
+
 ## 8. 非スコープ（v2）
 
 - フェルミの点検口（桁出題・JOLチップ・DIFF→楽屋導線）

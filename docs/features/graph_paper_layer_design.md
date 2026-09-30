@@ -423,3 +423,14 @@ DTO 契約（§3）・core・route・migration・アンカーはいずれも変�
   （既存 `graph-review.paper-view` 内の描画追加）。
 - テスト: `test_graph_paper_layer_p09.py`（23 件）+ `test_graph_paper_layer_core.py` /
   `test_graph_review_ui_static.py` の追随。
+
+## 13. 追補 — 見出し誤認の畳み込み（第 15 波 = ペルソナ通し受講 第 14 周 c-astro-structure-30 の是正・2026-09-30。課題ナレッジ IK-0526・IK-0527）
+
+`builder.is_heading_like_title` が見出しらしくない節題（式・長文・テンプレート題）を判定し、その節を直前の章へ畳んで
+`folded_section_ids` に残す（冒頭に章が無い場合は「冒頭（見出しなし）」）。SA層 document_graph 解決器は主ノードごとの章・式の所在を
+事実文にし、無いときは「章・番号付きの式との対応は解析結果にありません」。
+
+## 追補（2026-09-30・ペルソナ通し受講 第 16 波）
+
+- **表の見出しは章にしない**（IK-0567）: `_looks_like_table_header` で表の見出し行を章候補から外し、親を失った要素は
+  `_reattach_orphan_parents` で付け直す。

@@ -677,3 +677,8 @@ overview 非 500・commit 422・identity 422）+ 既存
 `test_deliberation_guardrails.py` / `test_deliberation_context_lens.py` /
 `test_element_context_core.py` / `test_deliberation_ui_static.py` /
 `test_lecture_evidence_context_ui_static.py` / `test_graph_reference_resolution_ui_static.py`。
+
+## 追補（2026-09-30・ペルソナ通し受講 第 16 波）
+
+- 学習者向け要素文脈のトピック優先解決と依存先の解決は `component_evidence_redesign.md` 追補（IK-0553 / IK-0554）。context_lens の
+  上位レーン項目が id=None で辿れない件は未解決（IK-0570）。

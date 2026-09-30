@@ -1857,6 +1857,8 @@ role/confidence（`_best_mapping` の照合来歴 `exact_title|title_similarity|
   null で枠ごと非表示）+ `graph`（W層 context_lens の 1-hop を candidate 除外で射影・
   失敗時 null 縮退。フロントは SVG 表示 + component ノードクリックで再フェッチ=「旅」）。
   confidence キーは再帰除去（W8 相当）。
+- **トピック優先解決（2026-09-30）**: 式 ⚓ などの要素文脈は表示中トピックの論文で優先解決し、複数の論文に当たれば未解決にする
+  （IK-0553）。component 文脈の依存先は同一論文の live component に解決して辿れる項目にする（IK-0554）。
 - **ガバナンス**: コース公開（freeze）= ソース文書内 1-hop 近傍の露出承認（設計書 §6）。
 - ガードレール: `test_component_context_{core,api}.py` /
   `test_component_evidence_chips_ui_static.py` / `test_component_evidence_admin_ui_static.py`。
@@ -2967,7 +2969,7 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
 - **Phase 4 = 学習チャット（`screen="learning"`, 2026-09-12 実装・migration なし・新エンドポイント
   なし・LLM 回数不変）**: 正本は同設計書 §11（実装記録 §11.15）。段階導入のうち **4-a（選択
   テキストの注入）/ 4-b（`element` + `view`）/ 4-d（`verification` + `placement`）が出荷済みで、
-  4-c（`topic` / `visible`）は保留**（ガードレールが「登録 kind は element/verification/
+  4-c（`topic` / `visible`）は保留（2026-09-30 再確認: スライド位置・復元式の印が grounding に載らない件は IK-0577 で未解決）**（ガードレールが「登録 kind は element/verification/
   placement/view の4つだけ・`resolve_topic` / `resolve_visible` が定義されていない」ことを AST で
   固定。フロントは `visible_entities` を契約どおり送るがサーバは正規化して捨てる）。
   core は `resolvers/learning.py`（4解決器。`learner_context_common` からは
@@ -3223,7 +3225,8 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - **P3-5 記号 → 概念**: 概念参照は `symbol` instance の `element_identity_links`（confirmed のみ DTO に載る）。学習者 API
   `GET /api/learning/courses/{id}/symbols/lookup?symbol=&equation_id=&chunk_id=`（`core/symbol_lookup.py`・コース sources に `ANY(:doc_ids)` 強制・
   **ScholarPhi 規則 = タップ位置より前の最も近い定義**・無ければ後方 / 定義なしを事実文・LLM 0 回・quota 非消費）。UI は `app.js` の KaTeX 記号
-  クリック → `#symbol-lookup-popover`（アンカー `material.symbol-lookup`）。
+  クリック → `#symbol-lookup-popover`（アンカー `material.symbol-lookup`）。記号は互換字形（µ→μ 等）を正規化して照合し、
+  レジストリに無い記号は `chunks.formulas` から決定論フォールバック（`registered:false`・印字番号のみ・IK-0518）。探索は**「この論文」に限る**（chunk の document → 表示中トピックの論文。`topic_id` を受ける。別論文の同記号・不在は事実文・IK-0552）。
 - **P3-7 cartridge の形の宣言**: `backend/cartridges/<id>/shape.json`（`covers` / `does_not_cover` / `expects.{entry_types,component_types,
   claim_types}` / `atlas_domain_key`。読み手は `core/cartridge_shape.py`・A層は読まない・起動時 validator は fail-open）。`particle_physics` は
   `description` / `target_domain` を実内容（フレーバー物理）に訂正（`cartridge_id` は不変）。適合事実 `GET /api/admin/cartridges/{id}/fit?
@@ -3591,7 +3594,7 @@ Phase 0〜4 実装後の**再照合**（実論文 12 本の原本 ⇄ 成果）�
   レーン上限・ITEM 射影・内部 ID / 生 TeX 遮断・`navigable` fail-closed・
   `strip_confidence`）。`component_context.py` / `element_context.py` は再エクスポートで
   これに委譲する。**学習者向け文脈の射影・遮断を再実装しない**（agent ID トークン遮断は
-  component レーンのみ＝claim/equation への拡張はオーナー判断待ち。DTO は component=旧6キー /
+  2026-09-30 の第 15 波で claim / equation レーンにも拡張済み（IK-0517）。DTO は component=旧6キー /
   element=ITEM v2 の意図的世代差を維持）。
 - **`backend/core/course_units.py` / `core/course_prerequisites.py` / `core/knowledge_objects/learning_units.py`**（2026-09-13 新設、
   正本設計書 `docs/features/learning_units_design.md`） — 学ぶ単位の候補提示・handle 解決・freeze 向けの読み / 前提の ID 解決と
@@ -3817,7 +3820,8 @@ Neo4j 非依存で、コースデータの `topic.prerequisites` のみを参照
 
 （※**2026-09-10 是正 F4**（六つのレンズ 提案6・migration 不要）: 上記2の「チャット履歴の有無で
 習得を判定」は撤去した。接触の痕跡（質問した・開いた）は理解の根拠にならず、履歴による自動
-スキップは沈黙適応（UC5 / §3.6）だったため。現行の判定は**本人が明示的に「理解している」と
+スキップは沈黙適応（UC5 / §3.6）だったため。逆質問は 1 コース×トピック×学習者で一度だけ
+（`progress_data.prerequisite_gates_presented`）・ゲートのターンでも元の質問に答える（2026-09-30・IK-0509）。現行の判定は**本人が明示的に「理解している」と
 答えた記録**（`learning_states.progress_data.acknowledged_prerequisites`。書き込みは
 `services.record_prerequisite_acknowledgement`・否定形を含む発話は記帳しない）だけを見る。
 前提の**説明**は3段解決 — ①同コース topic → ②本人が閲覧できる document のチャンク

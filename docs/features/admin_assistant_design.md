@@ -448,6 +448,11 @@ AdminAssistant.registerUiAnchors("materials", {
 
 ---
 
+### 11.x capability 追加 `materials.deliberate_figure`（第 15 波 = ペルソナ通し受講 第 14 周 c-astro-structure-30 の是正・2026-09-30。課題ナレッジ IK-0530）
+
+教材管理の図モーダルから「深く検討」する手順を guidance_only capability として登録し、KB は
+`docs/admin_operations/materials.md#deliberate-figure`。intent に図の検討を問う言い回し 5 種を足した。
+
 ## 12. テスト方針
 
 `backend/tests/`（FastAPI/core）に追加。

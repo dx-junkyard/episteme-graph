@@ -485,3 +485,9 @@ Phase 3 の敵対的レビューで挙がった P3-R1〜R14 のうち、本層�
 **行は消さない**（P4）— 出さないだけで DB の値も symbol_registry からの辿りも失われない。
 既存行の接地バックフィルは orchestrator / grounding hook 側の担当（本班の所有外）。
 ガードレールは `test_concept_registry_dictionary.py::TestLearnerConceptGate`。
+
+## 追補（2026-09-30・ペルソナ通し受講 第 16 波）
+
+- **P3-5 記号 lookup は「この論文」に限る**（IK-0552）: 探索範囲は chunk の document、無ければ表示中トピックの論文（`topic_id` を受ける）。
+  コースの別論文の定義は持ってこない。別論文に同じ記号があるときは `FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS`、この論文に無いときは
+  `FACT_SYMBOL_NOT_IN_THIS_DOCUMENT` の事実文を返す。式本文は返さない（位置の事実文まで・IK-0578 で未決）。

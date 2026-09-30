@@ -296,3 +296,10 @@ backend フルスイート 5,237 pass / 20 skipped(node あり環境では 5,248
 - docker 実機での E2E(実コース+実パイプライン成果での表示確認)
 - 中期課題: component_assembly の日本語 teaching_takeaway(英語露出の根治)
 - document 成果閲覧の版ピン留め(V層)と context API の整合は現状 HEAD 読み(既知の限界)
+
+## 追補（2026-09-30・ペルソナ通し受講 第 16 波）
+
+- **要素文脈はトピックの論文で優先解決する**（IK-0553）: 式 ⚓ の `equation_id` は文書内でしか一意でないため、`_resolve_equation` は
+  表示中トピックの論文を先に引き、なお複数の論文に当たるときは未解決（`available:false`）にする。記号・要素文脈の要求は `topic_id` を持つ。
+- **依存先を辿れる項目にする**（IK-0554）: component 文脈の依存先は同一論文の live component に解決し（`_dependency_lane_items` /
+  `_merge_lane`）、navigable な項目として返す。上位レーン（中心命題・支持構造）の項目が id を持たない件は未解決（IK-0570）。

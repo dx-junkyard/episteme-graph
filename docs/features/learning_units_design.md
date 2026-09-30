@@ -347,3 +347,9 @@ LLM 呼び出し回数は不変**。
 `test_next_steps_delivered_unreviewed.py` / `test_pdf_trust_boundary_guardrails.py` への追加。
 
 ---
+
+### 12.3 2026-09-30 — section_block トピックへの部品の束ね直し（第 15 波 = ペルソナ通し受講 第 14 周 c-astro-structure-30 の是正・2026-09-30。課題ナレッジ IK-0515）
+
+section_block 単位のトピックは component を直接持たないため ⚓ が出なかった。`course_content_builder._components_linked_to_claims`
+がトピックの主張に結ぶ同一論文の live component を上限 4 まで束ねる（決定論・順序は主張順）。A層が comp_fallback しか出さない教材
+（IK-0540）はこの経路でも部品が出ない。

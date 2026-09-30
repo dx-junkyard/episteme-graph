@@ -1355,3 +1355,17 @@ _stage_theory_modules, progress_unit="builder")`・`llm_kind` なし・`model_po
   規則の版の変更で確定済みリンクを黙って付け替えない（O-5）/ 確定の担当 = 指紋の一致を確定にしない（TM13）/
   正本の分裂 = 写像 `equation_stable_key_map` と要素型の訳語を二重に持たない / 派生物と配線 = `related` と一覧の
   描画を同じ波で出す（`available-but-unwired`）。
+
+## 14. 追補 — 出所の表示と読み時マスク（第 15 波 = ペルソナ通し受講 第 14 周 c-astro-structure-30 の是正・2026-09-30。課題ナレッジ IK-0523〜0525）
+
+- モジュールの詳細に `subtitle`（生む式の印字番号）、`required_claims[].origin_label`（本文の主張 / 式から機械的に組んだ文）、
+  `assumptions[]` の 3 出所ラベル（導出の記録 / 図の注記 / 解析の推測）を付ける。plain_math の二重バックスラッシュ・`\mid` を直した。
+- related で同じ構造の論文が無いときは `FACT_RELATED_NONE`（閉世界の事実文）を返す。
+- `component-graph` 応答のノードラベル中の式の内部 ID は、読み時に `mask_equation_ids_in_label` で「式 (N)」に置き換える
+  （graph_json は非改変）。
+
+## 追補（2026-09-30・ペルソナ通し受講 第 16 波）
+
+- **番号なしの式の副題**（IK-0564）: 印字番号の無い式は「番号なしの式（左辺 X）」、内側モジュールにも subtitle を付ける。左辺が同じ内側
+  モジュールが並んで見える件は未解決（IK-0551）。
+- **related の契約**（IK-0568）: 相手のいる外枠だけを返し、確認済みの外枠は `checked_module_keys`（内部キー・表示しない）で別に返す。

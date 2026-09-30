@@ -240,3 +240,14 @@ Fable 5 指揮 + Opus 5 サブエージェント4体（core / 管理UI / 学習�
   ペア集合は再起動まで版キーで保持 — 凍結版不変なので問題にならない）②co_occurrence
   は配置の質（inferred 込み）に依存 — 教員候補のみで学習者には出さない（RE8/§10）
   ③Docker E2E（migration 076 実適用・freeze 実走）未実施。
+
+### 11.x 糸が出ない理由の事実文（2026-09-30 追補・ペルソナ通し受講 第 14 周・migration なし）
+
+学習者が「推定の糸が表示されていない」と受け取り、理由が画面から分からなかった（砂場では
+`atlas_anchor_embeddings` が 0 行 = VA層の索引が未構築で、`threads_for_domain` は
+`{"available": False}` を返しキーごと落ちていた）。`GET /api/atlas` は導出できないときも
+`threads: {"available": false, "note": <事実文>}` を返す。理由文は
+`core/atlas_edges/threads.py::threads_unavailable_note` の3種（公開版なし / 当該版の近さの
+索引が未構築 / 示せる組なし）で、数値を含まない（RE4）。`threads_for_domain` の戻り値契約
+（`{"available": False}` のみ）は不変で、理由文は route 層で合流する。フロントの
+`threads.available !== true` によるレイヤー非表示（RE2）も不変。
