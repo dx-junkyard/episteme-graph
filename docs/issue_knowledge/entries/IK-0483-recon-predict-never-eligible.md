@@ -1,9 +1,9 @@
 ---
 id: IK-0483
 title: "再構成の問いで予測（predict）が一度も選ばれない（下地の判定が役割付きの概念 2 個以上か関係型の式を要するが、分野未指定の解析では主張の概念と式が空のまま）"
-status: open
+status: resolved
 recorded_at: 2026-09-28
-resolved_at: null
+resolved_at: 2026-09-29
 sources:
   - docs/architecture/persona_enactment_testing_design.md §17
   - docs/features/reconstruction_loop_design.md §4.2
@@ -39,15 +39,30 @@ discovery:
   perspective: [data_inspection, trace_walk]
   note: "砂場の出題依頼 10 件がすべて restate を下地にしていること、承認済み主張の種類・概念・式の列を読み取り専用で数えた。"
 resolution:
-  perspective: [pending]
+  perspective: [carry_through, explicit_contract]
   note: >-
-    未着手。同じ文書の別の主張（同じ種類）を誤答にする案は採らない — 誤答が論文中の正しい主張になり、
-    選択肢の排他性と非LLM の照合の意味（外れ＝食い違いの可能性）を壊す。入力側で直す案: 主張の概念接地
-    （登録簿の確定ラベル・DSL ノード名）を主張の概念に役割付きで届ける、または主張を指す式の対応
-    （linked_claim_ids）を解析で埋める。どちらも上流の設計を切ってから直す。IK-0479 の親からの概念の引き継ぎは
-    親に概念があるときだけ効く。
-  landed_in: []
-related: [IK-0479]
+    予測の下地を捏造せずに作れる入力を 2 つ調べた。①概念: 分野未指定の解析では主張の概念接地（登録簿の確定ラベル・
+    DSL ノード名）は既存の概念に出所を付けるだけで、空の概念欄を埋めない。役割（subject / driver）を付ける
+    決定論の根拠も無いので、概念の枝はこの変更では埋めない。②式: 主張の行は式の参照（equation.equation_ids）を
+    持っていたのに補完が読まず、関係型を付ける経路も無かった（IK-0502）。主張が指す式を knowledge_equations で
+    解決し、PDF からそのまま抽出できた関係型の式（confidence_policy で判定・記号 2 つ以上）にだけ関係型を付ける。
+    復元した式は答えキーにしない。予測にできない主張は restate のまま、理由（claim_type_not_relational /
+    fewer_than_two_concepts_and_no_equation / equation_not_source_extracted / equation_type_not_relational /
+    equation_fewer_than_two_symbols / 出題者が下げた author_downgraded_to_restate）を item 生成の監査 metadata
+    （restate_reason）とオーサリング報告（restate_reasons）に残す（item_builder.elicit_mode_decision）。
+    同じ文書の別の主張を誤答にする案は採らない（誤答が論文中の正しい主張になり、選択肢の排他性と非LLM の照合の
+    意味を壊す）。
+  landed_in:
+    - backend/core/reconstruction/claim_context.py
+    - backend/core/reconstruction/item_builder.py
+    - backend/core/reconstruction/worker.py
+    - backend/tests/test_ik0502_recon_predict_inputs.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "砂場での再演（砂場の承認済み主張が指す式が信頼の条件を満たすか・predict が実際に選ばれるかは見ていない。PDF 経路の式は復元由来が多く、restate のまま理由だけが残る可能性がある）"
+      - "概念の枝（役割付きの概念 2 個以上）は分野未指定の解析では引き続き空"
+related: [IK-0479, IK-0502, IK-0503]
 view_of: []
 history: []
 ---
@@ -62,7 +77,7 @@ history: []
 
 ## 解決の観点
 
-未着手。同じ文書の別の主張を誤答にする案は採らない（誤答が論文中の正しい主張になり、選択肢の排他性と照合の意味を壊す）。主張の概念接地を役割付きで届けるか、主張を指す式の対応を解析で埋める案を、上流の設計を切ってから検討する。
+主張が指す式（主張の行の式の参照）を解決し、PDF からそのまま抽出できた関係型の式にだけ関係型を付けて予測の下地にする（IK-0502）。概念の枝は分野未指定では埋めない。予測にできない主張は restate のまま理由を記帳する。別の主張を誤答にする案は採らない。
 
 ## 一般化
 
