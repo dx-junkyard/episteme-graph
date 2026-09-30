@@ -1122,3 +1122,194 @@ proxy が学生を区別できる手を足すまでは製品頭脳 1 体で直�
 - 2026-09-27 起草。前提となる現物調査（テスト基盤・CI・compose・シード・fixture・アカウント／コース API・
   学習側 API 全ルート・観測テーブル・指標カタログ・フロント計測・固定事実文・CostGate・G層・課題ナレッジの規約・
   マニュアル構成）は本書 §16 に要約。以後の実装記録は Phase ごとに本節へ追記する。
+
+## 18. 増強: 論理構造の見やすさ・辿れる理解・対話支援の 30 場面（2026-09-30 起草）
+
+第 13 周までの campaign は「受講の一通り」を歩く経路が中心で、**論文の論理構造がどう見えるか・分からなかったときに
+関係を辿って理解を深められるか・AI との対話がそれを支えるか**は、各経路の一部として偶然踏まれるだけだった。本節は
+この 3 つを主題にした 30 の場面（story）を定義し、campaign `c-astro-structure-30` として走らせる。場面は
+「ペルソナ（行動型）× 経路（新設 13 本 + 既存 2 本）× 見るもの」の組で、1 行 = 1 場面。**経路は分野の語を書かず**
+（§11.5）、分野固有の値は `scenario_params` に置く。
+
+### 18.1 主題と見るもの
+
+| 主題 | 見るもの（審判 B・C の watch_for に落とす平叙文） |
+|---|---|
+| A 構造の見やすさ | 中心命題→支持構造→式・図の順に読める / 主グラフ・式の詳細・理論モジュール・論文の順の切替で全体像が掴める / 内部 ID（`eq_op_`・`ev_`・`sec_runin`・UUID）や英語の生成文が学習者・教員の画面に出ない / 数（件数・confidence）が出ない |
+| B わかりやすさ | 式は印字番号と記号で語られ、復元由来の式にはその印が付く / 記号の定義がタップ位置より前から引ける / 二層説明（一般・この論文での意味）が同じ要素で区別して読める / 固定文が読み手の言語で出る |
+| C 辿って深める | ⚓ → 要素文脈 → 上位・下位レーン → 隣の要素 → 旅 の 1 hop 移動が途切れない / 出典チップ → 原文 → 主張への参照が往復できる / 降下路・楽屋・記号・近傍（いまここの周り）が「どこで分からなくなったか」を絞れる / 分野の地図 → 位置づけ → 論文の海 → document 直付け discuss が接続する |
+| D 対話による支援 | 「この式はどこから」「前の回答のどこが根拠」に構造（主張・段階）で答える / 選択箇所の一致確認文が出る / 誤解の訂正で鏡（言い直し）が本人の言葉を引く / 足場かけは一点だけ / 教員のグラフ全体対話が論文の事実と処理の記録を分ける / ノード対話から根拠 claim の承認に閉じる |
+
+### 18.2 新設する行為（PE9 — 画面の部品かマニュアル節に対応づける）
+
+| 行為 id | 画面の部品 / マニュアル | 製品ルート |
+|---|---|---|
+| `learning.component.context` | `material-element-anchor`（⚓ の component チップ） | `GET /api/learning/courses/{course_id}/components/{component_id}/context` |
+| `learning.component.context_hop` | 文脈 SVG の component ノードクリック（「旅」） | 同上（直前の `graph` の隣接 component を中心に再取得） |
+| `learning.chunk.claim_refs` | 出典本文の主張参照 | `GET /api/learning/courses/{course_id}/chunks/{chunk_id}/claim-refs` |
+| `learning.chat.ask_selection` | `selection-ask`（テキスト選択→「ここについて質問」） | learning chat（`selection_text` + `screen_context`） |
+| `learning.chat.cycle` | `understanding-cycle`（予想→並置） | learning chat（`cycle_mode: elicit|diff`） |
+| `learning.atlas.threads` | `atlas.relation-threads` | `GET /api/atlas?...`（`threads` キーの有無を見る） |
+| `learning.atlas.neighbors` | わたしの地図「いまの地図」の霧 | `GET /api/me/personal-network/atlas-neighbors` |
+| `admin.paper_layer.view` | `graph-review.paper-view` | `GET /api/admin/documents/{document_id}/paper-layer` |
+| `admin.theory_modules.view` | `graph-review.module-view` | `GET /api/admin/documents/{document_id}/theory-modules` |
+| `admin.theory_modules.related` | 同・詳細ペイン | `GET .../theory-modules/related` |
+| `admin.graph_review.node_chat` | `graph-review.open-deliberation`（ノード対話 = W層セッション） | `POST /api/admin/deliberation/sessions` + `.../messages`（`screen_context` に `graph_node`） |
+| `admin.deliberation.overview` | `deliberation.open`（深く検討） | `GET /api/admin/deliberation/elements/{element_type}/{element_id}/overview` |
+| `admin.graph_review.approve_claim` | `graph-review.claim-approve` | `POST /api/admin/claims/{claim_id}/review` |
+| `admin.seminar_brief.view` | 教材行 ⋯「ゼミ前ブリーフ…」 | `GET /api/admin/documents/{document_ref}/seminar-brief` |
+
+runner が API に送る引数は行為の `args` だけ。ペルソナは画面に出た ID（既知 ID）しか使えない。
+
+### 18.3 30 場面
+
+記法: `S` 学生 / `T` 教員。ペルソナは `domains/astrophysics/personas/`。経路 id は `scenarios/goal/`。「見るもの」は
+経路の `watch_for` に平叙文で写す（点数・閾値を書かない）。
+
+| # | 主題 | 誰 | 経路 | 場面（story） | 見るもの |
+|---|---|---|---|---|---|
+| 1 | A | S st-01 newcomer | `s-read-backbone` | 教材の ⚓ を順に開き「この論文は何を主張し何で支えているか」を掴もうとする | 要素文脈の在り方（中心命題での役割・位置）が読める / 内部 ID 非露出 |
+| 2 | A | S st-06 skeptic | `s-read-backbone` | 同じ経路を出典と検証状態を確かめながら歩く | 検証の事実文が閉世界語彙 / 出典が開ける |
+| 3 | A | S st-02 confident_theorist | `s-discuss-backbone` | discuss 開幕の中心命題→支持構造→「確かめていないこと」を読み、支持構造の一つを議論する | 開幕の 2 区画の主語が分かれる / 議論が構造に係留する |
+| 4 | A | T te-03 meticulous | `t-structure-layers` | グラフレビューで主グラフ→式の詳細→理論モジュール→論文の順を切替えて全体像を掴む | 層ごとにラベルが短い stage 名 / 内部 ID 非露出 / 件数非表示 |
+| 5 | A | T te-02 veteran | `t-structure-layers` | 同じ経路をクリックスルーで急いで歩く | 初期表示（モジュール図）で迷わない |
+| 6 | A | T te-01 rookie | `t-paper-order-coverage` | 論文の順で章→ノードを追い「掛かっていない章」を見つける | 被覆の事実文 / 章見出しで語る |
+| 7 | B | S st-10 newcomer | `s-symbols-chain` | 式の多いトピックで記号を順にタップし、定義→前提の説明へ進む | ScholarPhi 規則（前の定義）/ 定義なしの事実文 / 別論文を探さない |
+| 8 | B | S st-04 non_native | `s-symbols-chain` | 英語で同じことをする | 固定文の言語 / 英語での記号説明 |
+| 9 | B | S st-08 lecture_listener | `s-lecture-then-trace` | レクチャーを聴き、分からない箇所で止めて記号→⚓→質問 | スライド分割で論理の流れが追える / 復元式の印 |
+| 10 | B | S st-01 newcomer | `s-two-layer-explanation` | 同じ component の一般説明とこの論文での意味を読み比べる | 二層が区別されて出る / 承認済みだけが出る |
+| 11 | B | S st-09 adjacent_field | `s-two-layer-explanation` | データ科学の語彙で読み替えながら同じことをする | 一般説明が分野外の読者に通じる |
+| 12 | B | S st-06 skeptic | `s-check-then-reconstruct` | 確認問題→違っていた→再構成 next_step で式が画面に出るか | 出題文が式そのものを示す / 採点語彙が出ない |
+| 13 | C | S st-01 newcomer | `s-trace-one-hop` | 分からない語の ⚓ → 要素文脈 → 上位レーン → 隣の component → 旅、と 1 hop ずつ辿る | 各 hop で前の文脈が失われない / navigable の fail-closed |
+| 14 | C | S st-03 adjacent_field | `s-trace-one-hop` | 素粒子の語彙で同じ hop を辿る | 上位関係ゼロが unidentified で出る（推測穴埋めなし） |
+| 15 | C | S st-06 skeptic | `s-source-roundtrip` | 出典チップ→原文→主張参照→教材へ戻る往復 | 出典番号が安定 / claim-refs が原文の位置を指す |
+| 16 | C | S st-05 night_parttime | `s-source-roundtrip` | 短時間で同じ往復（途中で止める） | 途中で止めても記録の欠落が事実文で分かる |
+| 17 | C | S st-01 newcomer | `s-descend-and-nearby` | 降下路→楽屋→「いまここの周り」で分からなくなった場所を絞る | 依存の向きだけが描かれ推測辺が無い / 台帳ゼロの縮退 |
+| 18 | C | S st-02 confident_theorist | `s-descend-and-nearby` | 同じ道具を「確かめられているか」の枠で読む | 検証ラベルが差分のときだけ出る |
+| 19 | C | S st-06 skeptic | `s-map-to-sea-to-discuss` | 分野の地図→推定の糸→論文の位置づけ→論文の海→document 直付け discuss | 糸は点線 + 骨格版の事実文 / 位置づけの出所ラベル / discuss の縮退明示 |
+| 20 | C | S st-04 non_native | `s-map-to-sea-to-discuss` | 英語で同じ道を歩く | 地図・海の固定文の言語 |
+| 21 | C | S st-07 voice_first | `s-return-and-journey`（session 2） | 翌日、扉→持ち越し→わたしの地図→旅→「この場所の周りを見る」 | 旅の縮退が notice + 精密化の出口 / 別コースの兄弟の事実文 |
+| 22 | D | S st-01 newcomer | `s-ask-where-from` | 「この式はどこから出てきた？」「前の回答のどこが根拠？」と構造を問う | 構造 1 hop（主張・段階）で答える / 出典番号の持ち越し |
+| 23 | D | S st-06 skeptic | `s-ask-where-from` | 同じ問いを「それはどこに書いてありますか」で押す | 出所ラベルと本文が食い違わない |
+| 24 | D | S st-03 adjacent_field | `s-select-and-ask` | 教材の一文を選択して「ここが分からない」 | 一致確認文 / 帰属カードの anchor_label |
+| 25 | D | S st-06 skeptic | `s-misconception-mirror` | 自分の誤解（宇宙分散＝装置誤差）を前提に質問し、訂正を受ける | 鏡が本人の言葉を逐語で引く / 訂正が断定でなく出典を示す |
+| 26 | D | S st-05 night_parttime | `s-stuck-scaffold` | 「わからない」と短く言い続ける | 足場かけが一点だけ / 前提ゲートが繰り返さない |
+| 27 | D | S st-02 confident_theorist | `s-elicit-diff` | 予想を書いてから並置（elicit→diff）で自分の理解を確かめる | 正誤・点数の語彙が出ない / 並置が事実の並び |
+| 28 | D | T te-03 meticulous | `t-graph-dialogue-to-approve` | グラフ全体対話「理論構成をおおづかみに」→ノード対話→根拠 claim の承認 | 論文の事実と処理の記録が混ざらない / ラベル二重出力なし / 承認は人の操作だけ |
+| 29 | D | T te-04 copilot_dependent | `t-deliberation-figure` | 図を深く検討し、本文での言及→主張→component を読み、Copilot に手順を聞く | メンション文が主役 / ITEM→関係語の語順 / Copilot は道案内まで |
+| 30 | D | T te-05 delegator | `t-seminar-brief` | ゼミ前ブリーフを開き、学生の詰まりの引き継ぎを読む | 閉世界語彙 / k-匿名 / 数値非表示 |
+
+`s-return-and-journey` は `s-return-next-day` に旅の「この場所の周りを見る」を足した経路。既存の `s-check-and-object`・
+`s-discuss-one-paper` は本 campaign では新経路に置き換える（重複を避ける）。
+
+### 18.4 運転
+
+campaign `c-astro-structure-30` は学生段のみ（教員場面は教材 `7ef9e487` / `7954db7d`（グラフ・論文層あり）を既存の
+まま読む）。頭脳は P-0011 のとおり Claude Code の子エージェントが mailbox で肩代わりする。**製品頭脳は要求ごとに
+その `messages` だけから答え、前の要求の内容を持ち込まない**（第 13 周の「頭脳側の持ち込み」の再発防止。学生ごとに
+分けられない proxy の制約はこの規律で吸収する）。周の前に `reset_learner_state --yes` → `pin_course --yes`。
+結果は審判 → 報告 → 課題ナレッジ候補 → 是正（波）→ 再演の順で、本節の末尾に周ごとの記録を足す。
+
+### 18.5 第 14 周（2026-09-30）
+
+- **運転の順**: `reset_learner_state --yes` → 受講登録の抜け（固定コース 1bad7d9f への受講が一部ペルソナで欠けていた）→ 砂場の再起動 →
+  c-astro-structure-30 の 30 場面（§18.3）を api runner で運転。ペルソナの頭脳は mailbox の子エージェント 8 体（学生 6・教員 1・
+  製品 proxy 1）、製品の LLM 呼び出しは proxy 経由で 56 要求。
+- **審判の件数**: A 8 / B 15 / C 130。A の 8 件はすべて nginx の 120 秒超えで、製品の LLM 呼び出しが頭脳（mailbox）で待たされた
+  遅延だった。
+- **ハーネス側の是正**（uxsim/ のみ）:
+  - 教材の投影に画面の ⚓ を番号付きで列挙し、`learning.element.context` に `element_ref`（番号か要素 id）を足した。
+    これまでは常に最後に覚えた要素が開き、ペルソナが別の ⚓ を選べなかった。
+  - `learning.source_chunk.open` に `source_no`（直前の回答の「出典N」）を足した。直前の回答に出典が無いときは製品を呼ばず
+    precondition で止める。
+  - `learning.personal_network.nearby` / `journey` / `learning.atlas.neighbors` は、ノードを覚えていなければ画面と同じく先に
+    「わたしの地図」を読み込んでからノードを選ぶ。nearby に `center_component_id` を足した（範囲表示から点表示へ移る）。
+  - 受講応答の投影を画面（`enrollCourse`）に合わせ、題名と notice だけにした（is_template / is_enrollable / visibility を出さない）。
+  - `admin.graph_review.node_chat` は `deliberationTargetId`（DB UUID → 代表要素 → linked_component_ids）でノードから実体要素を
+    解決し、解決できないノードでは製品を呼ばない（主グラフのノード id をそのまま送り 404 になっていた）。
+  - `learning.chat.ask_selection` は教材に実在する文だけを送る（`selection_ref` = 区画番号:文番号、または本文に含まれる
+    `selection_text`。無い文は precondition で止める）。
+  - 場面パラメータの `topic_hint` と選択文をコース 1bad7d9f の実トピック・本文に合わせた（s-misconception-mirror を t18 へ、
+    s-lecture-then-trace の題名、s-select-and-ask の選択文）。
+  - 審判 A は、製品の LLM が頭脳で動いている周では、製品 LLM を呼ぶ行為の 120 秒超えを「ハーネス:」印で出す（数値の検査は残す = PE7）。
+- 第 15 波の製品側の報告を受けたハーネスの追加是正:
+  - `admin.graph_review.chat` も画面（`getScreenContext`）と同じ形の `screen_context` を送る（node_chat と組み立てを共有）。
+  - s-elicit-diff の予想のあとの発話は、画面と同じ議論の会話（`learning.discuss.ask`）へ送る。
+  - 教材一覧の投影に参照の健全性チップの文言（「参照: 問題なし」等）を出す。理論モジュール related の投影は題名と事実文だけにし、
+    内部のモジュールキーを出さない。
+  - 確認問題は、表示中の問いの本文とその `check_question` を対で送る（ペルソナの言い換えで先頭の問いと組み合わさっていた）。
+    再構成の選択肢は label だけを投影し、ペルソナが選んだ label か番号を option_id に写す。
+  - 「辿る」系の 6 場面（s-read-backbone / s-trace-one-hop / s-two-layer-explanation / s-descend-and-nearby / s-ask-where-from /
+    s-source-roundtrip）を、部品とグラフのある 2 論文（PINN の中性子星 EOS・連星ブラックホールの DTD）のトピックへ向け直した。
+    暗黒エネルギーの論文と Cep B の論文は部品が fallback だけでグラフも無い（A層の欠落）。
+  - 部品 ⚓ を出すためのコースの再 freeze は、製品 API に内容再生成（`POST /api/admin/courses/{id}/course-content/generate`・
+    LLM を呼ぶ）以外の経路が無い（content_blocks は `build_course_content` だけが作る）ため、`regenerate_content.py` を使う。
+- 製品側の欠陥と是正は第 15 波（別記）。
+
+### 18.6 第 15 波（製品側の是正・2026-09-30）
+
+第 14 周（§18.5）の発見のうち製品側の欠陥を 6 担当で是正した。ハーネス側は §18.5 が正本で課題ナレッジに起票しない。
+各課題は candidate 起票・検証はユニット / ガードレールのみで、砂場の再演は未実施（第 15 周で確かめる）。
+
+- **学習チャット経路**: 前提の逆質問を 1 コース×トピック×学習者で一度だけにし、ゲートのターンでも元の質問に答える・内部都合の
+  前置きを廃止（IK-0509）/ 予想（elicit）の入力から採用チャンク本文を外す（IK-0510）/ 引用ゼロ×教材無関係は model_generated（IK-0511）。
+- **出典**: 番号順 + `cited` フラグ（IK-0512）/ トピック外・短すぎるチャンクの除外（IK-0513）/ 本文の途中始まり・終わりの「…」、
+  行末改行の正規化、404 の日本語事実文（IK-0514）。同番号が別チャンクに見えた件は LLM の誤帰属（番号対応は正常）→ IK-0545 に残す。
+- **要素文脈と部品 ⚓**: section_block トピックに主張経由の部品を束ねる（IK-0515）/ 主張の親子曖昧解消と未解決の `available:false`
+  （IK-0516）/ ITEM v2 の agent ID 遮断を claim・equation に拡張（IK-0517）。
+- **記号・降下路・近傍・糸**: lookup の字形正規化と `chunks.formulas` フォールバック（IK-0518）/ 降下路の target_label と空段の理由
+  （IK-0519）/ `_discussion` の表示名（IK-0520）/ グラフ未構築論文の事実文（IK-0521）/ 糸の `{available:false, note}`（IK-0522）。
+- **教員側構造**: related の FACT_RELATED_NONE（IK-0523）/ 式 ID の読み時マスク（IK-0524）/ モジュールの出所ラベル・subtitle・
+  plain_math（IK-0525）/ 見出し誤認の畳み込み（IK-0526）/ SA層 document_graph に章・式の所在（IK-0527）/ grounding の二重出力
+  （IK-0528）/ 集約ノードの事実文（IK-0529）/ Copilot capability `materials.deliberate_figure`（IK-0530）/ ゼミ前ブリーフの台帳合成
+  （IK-0531）/ 次にやることの件数除去（IK-0532）。
+- **再構成・受講・表示**: 確認問題の照合順（IK-0533）/ 既受講の文言（IK-0534）/ 名指せない step を出題しない（IK-0535）/
+  今日の言葉の空の事実文（IK-0536）/ audio-status の note（IK-0537）/ カートリッジ骨格の domain.json（IK-0538）/
+  壊れた復元式の非描画（IK-0539）。
+- **未解決（open）**: A層の comp_fallback のみ（IK-0540）/ PDF 経路の主記号欠落（IK-0541）/ 自己確認 1 問で完了（IK-0542）/
+  再構成 submit・descend の DTO（IK-0543）/ 出典の所在が書き出し（IK-0544）/ 引用と本文の一致検査なし（IK-0545）/
+  主グラフ stage 名が英語（IK-0546）/ 1 手順の外枠モジュール（IK-0547）/ discuss 鏡の規則の矛盾（IK-0548）/
+  target.material_id の ID 体系（IK-0550）。
+- **オーナー判断候補**: 学習者向けの件数表示を LS8（コーパス事実行）と CR3（数値非表示）のどちらで読むか（IK-0549。
+  不変条項の解釈の衝突に当たる）。
+
+### 18.7 第 15 周（是正後の再演・2026-09-30）
+
+- **運転**: 第 15 波（§18.6）の是正後、c-astro-structure-30 の 30 場面を同じ固定コースで再運転し、trace 系 2 場面は
+  ハーネス是正のあとに再演した（無効になった run は `uxsim/runs/archive_run15_invalid_trace/` に退避）。第 14 周の run は
+  `uxsim/runs/archive_run14_structure30/runs/`。頭脳は子エージェント 8 体（学生 6・教員 1・製品 proxy 1）+ trace 再演用 2 体。
+  途中で使用量の上限に当たって中断し、同じ場面から復帰した。
+- **審判**: 件数は run とレポートだけに置く。A はほぼ消え、B は審判 B の誤検出 3 種（「N 点」の列挙・viewBox とレクチャー契約・
+  `$…$` 区切りの数式）を是正してから数え直した。C は減ったが残る。ハーネス印の所見は製品の課題に数えない。
+- **GONE（第 15 波の是正が再演で効いた）**: 前提ゲートの繰り返しと質問の取りこぼし（IK-0509）/ 出典の番号順（IK-0512）/
+  記号 lookup の字形・フォールバック（IK-0518・部分）/ 降下路の空段の理由（IK-0519）/ related の事実文（IK-0523）/ 式 ID の
+  マスク（IK-0524）/ 見出し誤認（IK-0526）/ ブリーフの台帳合成（IK-0531）/ 既受講の文言（IK-0534）/ audio-status の note
+  （IK-0537）/ カートリッジ骨格の分野名（IK-0538）。各エントリの `resolution.verification` に `reproduction_rerun` を足した。
+- **STILL / NEW（第 16 波で是正したもの）**: 記号 lookup が別論文の定義を持ってくる / 式 ⚓ の論文またぎ衝突 / 部品の依存先が
+  辿れない / 付録の無関係な式 / 議論中の論文が前提説明・痕跡に効かない / 否定文中の出典を引用に数える / 直前の出典の読み直しで
+  別チャンク / 謝辞・題名・概要チャンクの採用 / ゲート後の口語の否定 / 相槌の帰属 / anchor_confirm の手掛かり欠落 / ブリーフの
+  内部 ID / 番号なし式の副題 / grounding の同文重複 / 主ノードの日本語表示名 / 表の見出しの章誤認 / 相手のいない related /
+  教材詳細の document_id → §18.8。
+- **STILL / NEW（未解決・open 起票）**: 上位レーンが id=None（IK-0570）/ A層由来の英語生成文・英語 ⚓（IK-0571・構造課題）/
+  ⚓ 一覧が全部区画 0（IK-0572）/ t12 の本文が Phase 1 だけ（IK-0573）/ 英語話者にも日本語のゲート（IK-0574）/ 鏡が同意の前置きを
+  復唱（IK-0575）/ 訂正の再訂正（IK-0576）/ grounding にスライド位置・復元式の印なし（IK-0577・SA層 4-c 保留）/ 記号 lookup が
+  式本文を返さない（IK-0578・設計判断）/ 内側モジュールの左辺同一の重複（IK-0551）/ 出典の場所が書き出し（既存 IK-0544）。
+- **ハーネス側の是正**（uxsim/ のみ・起票しない）: 審判 B の誤検出 3 種 / ⚓ 番号を component_id に送っていた
+  `_component_context` の解決 / element_type `theory_claim → claim` の写し / 記号・要素文脈の要求に `topic_id` / anchor_confirm の
+  投影（発言全文の再掲をやめ prompt と選択肢）/ trace 場面の再演。
+- **残るオーナー判断候補**: 学習者向けの件数表示を LS8 と CR3 のどちらで読むか（IK-0549）/ `target.material_id` の ID 体系
+  （IK-0550。第 16 波で `get_material` は両形を受けるようにしたが、体系の一本化は未決）。
+
+### 18.8 第 16 波（第 15 周で見えた欠陥の是正・2026-09-30）
+
+3 担当で是正した。各課題は candidate 起票・検証はユニット / ガードレールのみで、砂場の再演は未実施（次の周で確かめる）。
+
+- **範囲と 1 hop（g1）**: 記号 lookup を「この論文」（chunk の document → 表示中トピックの論文）に限定し `topic_id` を受ける・
+  別論文の同記号と不在を事実文で返す（IK-0552）/ 式 ⚓ をトピックの論文で優先解決し複数なら未解決（IK-0553）/ 部品の文脈の
+  依存先を同一論文の live component に解決（IK-0554）/ 付録から本文が触れない 1 文字記号＝数値の式を除く（IK-0555）。
+- **チャットの検索と帰属（g2）**: 議論中の論文の優先（IK-0556）/ 否定文中の [出典N] を引用に数えない（IK-0557）/ 直前の引用
+  チャンクを id で読み出す（IK-0558）/ 無内容チャンク 3 種の除外（IK-0559）/ ゲート後の口語の否定と前提トピックの教材本文
+  （IK-0560）/ 相槌を帰属対象から外す（IK-0561）/ anchor_confirm の `excerpt` と `prompt`（IK-0562）。
+- **教員側の漏れ（g3）**: ブリーフの内部 ID を表示ラベルへ（IK-0563）/ 番号なし式・内側モジュールの副題（IK-0564）/ grounding の
+  同文・双方向の畳み込み（IK-0565）/ 主ノードの日本語 `display_label`（IK-0566）/ 表の見出しの章誤認と親の付け直し（IK-0567）/
+  related は相手のいる外枠だけ + `checked_module_keys`（IK-0568）/ `get_material` が document_id でも解決（IK-0569）。

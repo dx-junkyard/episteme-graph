@@ -12,7 +12,7 @@ from typing import Any, Callable, Optional
 
 from uxsim.actions import registry
 from uxsim.runner.client import EpistemeClient
-from uxsim.runner.state import PersonaSession
+from uxsim.runner.state import PersonaSession, material_anchors, material_sentences
 from uxsim.schema import HttpTrace
 
 DISCUSSION_TOPIC_ID = "_discussion"  # 製品 routes/learning.py の予約疑似トピック
@@ -401,7 +401,9 @@ def _check_take(ctx: _Ctx) -> None:
                 break
     if chosen is None:
         chosen = qs[0] if qs else None
-    question = wanted or (chosen.get("question", "") if isinstance(chosen, dict) else (chosen or ""))
+    # 画面（app.js）は表示中の問いの本文と、その問いの check_question を対で送る。ペルソナの言い換えを
+    # question に入れると別の問い（先頭の問い）の要件と組み合わさる（第 15 波: 前回の問いが添えられていた）
+    question = (chosen.get("question", "") if isinstance(chosen, dict) else str(chosen or "")) or wanted
     ctx.main(json={"answer": str(ctx.args.get("answer", "")), "question": str(question),
                    "check_question": chosen if isinstance(chosen, dict) else None})
 
@@ -423,7 +425,10 @@ def _source_chunk_open(ctx: _Ctx) -> None:
     """出典の本文を開く。画面の番号（「出典3」「3」）で指定されたら直前の回答の sources[].index から chunk を引く
     （第 10 周: 番号指定が最新のチャンクに化けて別の出典が開いていた）。"""
     s = ctx.session
-    raw = str(ctx.args.get("chunk_id") or "").strip()
+    raw = str(ctx.args.get("source_no") or ctx.args.get("chunk_id") or "").strip()
+    if ctx.args.get("source_no") not in (None, "") and not s.scratch.get("last_sources"):
+        # 直前の回答に出典が無い（画面に出典の番号が無い）— 製品を叩かない
+        return ctx.missing("source_no")
     m = re.fullmatch(r"(?:出典\s*)?(\d+)", raw)
     cid = raw
     if m:
@@ -489,12 +494,24 @@ def _recon_next(ctx: _Ctx) -> None:
     if isinstance(body, dict):
         item = body.get("item") if isinstance(body.get("item"), dict) else body
         ctx.session.remember("recon_items", _first(item, "item_id", "id"))
+        ctx.session.scratch["recon_space"] = [o for o in item.get("response_space") or [] if isinstance(o, dict)]
 
 
 def _recon_submit(ctx: _Ctx) -> None:
     resp = ctx.args.get("response")
     if not isinstance(resp, dict):
         resp = {"text": str(resp or "")}
+    # 選択式（画面はラジオの value = option_id を送る）。ペルソナはラベルか番号で選ぶ
+    space = ctx.session.scratch.get("recon_space") or []
+    pick = str(resp.get("option") or resp.get("option_id") or ctx.args.get("option") or "").strip()
+    if space and "text" in resp and not pick:
+        pick = str(resp.get("text") or "").strip()
+    if space and pick:
+        hit = next((o for i, o in enumerate(space, 1)
+                    if pick in (str(i), str(o.get("id")), str(o.get("label")))), None)
+        if hit is None:
+            hit = next((o for o in space if str(o.get("label")) and str(o.get("label")) in pick), None)
+        resp = {"option_id": str(hit["id"])} if hit else resp
     status, body = ctx.main(json={"course_id": ctx.session.course_id, "response": resp,
                                   "revision_of": ctx.args.get("revision_of")})
     if isinstance(body, dict):
@@ -511,7 +528,9 @@ def _symbol_lookup(ctx: _Ctx) -> None:
         return ctx.missing("symbol")
     ctx.main(params={"symbol": ctx.args.get("symbol") or s.latest("symbols_seen"),
                      "equation_id": ctx.args.get("equation_id") or s.latest("equations"),
-                     "chunk_id": ctx.args.get("chunk_id") or s.latest("chunks")})
+                     "chunk_id": ctx.args.get("chunk_id") or s.latest("chunks"),
+                     # 実フロント（openSymbolLookup）と同じく表示中トピックを添える（第 15 周: 別論文の定義を返す取り違えの是正が効く条件）
+                     "topic_id": getattr(s, "topic_id", None)})
 
 
 def _descent_ladder(ctx: _Ctx) -> None:
@@ -522,15 +541,39 @@ def _descent_ladder(ctx: _Ctx) -> None:
                      "element_id": ctx.args.get("element_id") or s.latest("elements")})
 
 
+def _pick_anchor(ctx: _Ctx) -> Optional[dict]:
+    """``element_ref``（⚓ の番号 / 「⚓3」/ 要素 id）を教材の ⚓ 一覧から引く。"""
+    ref = str(ctx.args.get("element_ref") or "").strip()
+    if not ref:
+        return None
+    anchors = material_anchors(ctx.session.material)
+    m = re.fullmatch(r"(?:⚓\s*)?(\d+)", ref)
+    for a in anchors:
+        if (m and a["no"] == int(m.group(1))) or a["id"] == ref:
+            return a
+    return {}
+
+
 def _element_context(ctx: _Ctx) -> None:
     s = ctx.session
+    picked = _pick_anchor(ctx)
+    if picked == {}:
+        return ctx.missing("element_ref")
+    if picked:
+        ctx.args.setdefault("element_type", picked["kind"])
+        ctx.args.setdefault("element_id", picked["id"])
     etype = ctx.args.get("element_type") or s.latest("element_types") or "claim"
     eid = ctx.args.get("element_id") or s.latest("elements")
+    # 画面（app.js）と同じ写し: theory_component → component（部品の文脈へ）/ theory_claim → claim（API の型）。
+    # 第 15 周: theory_claim のまま呼んで 404 になっていた（製品欠陥ではない）
+    etype = {"theory_component": "component", "theory_claim": "claim"}.get(etype, etype)
     if etype == "component":
         ctx.call("GET", "/api/learning/courses/{course_id}/components/{component_id}/context",
                  overrides={"component_id": eid})
     else:
-        ctx.main(overrides={"element_type": etype, "element_id": eid})
+        # 実フロントは表示中トピックを添える（式 ID の論文またぎの衝突をトピックの論文で解く）
+        ctx.main(overrides={"element_type": etype, "element_id": eid},
+                 params={"topic_id": s.topic_id} if getattr(s, "topic_id", None) else None)
 
 
 def _network(ctx: _Ctx) -> None:
@@ -542,6 +585,12 @@ def _network(ctx: _Ctx) -> None:
 
 def _network_node(extra: tuple[str, ...]) -> Callable[[_Ctx], None]:
     def run(ctx: _Ctx) -> None:
+        if not (ctx.args.get("node_id") or ctx.session.latest("nodes")):
+            # 画面はタブの前に「わたしの地図」を読み込む（personal-map-home.js）。それを写してノードを得る
+            _, body = ctx.call("GET", "/api/me/personal-network")
+            for n in _items(body, "nodes"):
+                if isinstance(n, dict):
+                    ctx.session.remember("nodes", _first(n, "id", "node_id"))
         params = {"node_id": ctx.args.get("node_id") or ctx.session.latest("nodes")}
         if not params["node_id"]:
             return ctx.missing("node_id")
@@ -633,9 +682,32 @@ def _graph_open(ctx: _Ctx) -> None:
     if status == 200 and doc:
         ctx.session.remember("graph_documents", doc)
     graph = body.get("graph") if isinstance(body, dict) and isinstance(body.get("graph"), dict) else body
+    targets = ctx.session.maps.setdefault("node_targets", {})
     for n in _items(graph, "nodes"):
         if isinstance(n, dict):
             ctx.session.remember("components", _first(n, "db_id", "component_db_id", "component_id", "id"))
+            nid = _first(n, "id", "node_id")
+            tgt = deliberation_target_id(n)
+            if nid:
+                targets[nid] = tgt
+
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def deliberation_target_id(node: dict) -> str:
+    """admin-graph-review.js ``deliberationTargetId`` の写し: DB UUID → 代表要素 → linked_component_ids の先頭。
+    どれも無ければ空（画面はリクエストせず事実文を出す）。第 14 周: main ノード id をそのまま送り 404 になった。"""
+    nid = _first(node, "id", "node_id")
+    if nid and _UUID_RE.match(nid):
+        return nid
+    rep = str(node.get("representative_component_id") or "").strip()
+    if rep:
+        return rep
+    for c in node.get("linked_component_ids") or []:
+        if str(c or "").strip():
+            return str(c).strip()
+    return ""
 
 
 def _graph_chat(ctx: _Ctx) -> None:
@@ -650,8 +722,18 @@ def _graph_chat(ctx: _Ctx) -> None:
         if not sid:
             return
         s.maps["graph_sessions"][doc] = sid
-    ctx.main(json={"content": str(ctx.args.get("content") or ctx.args.get("message") or "")},
+    ctx.main(json={"content": str(ctx.args.get("content") or ctx.args.get("message") or ""),
+                   "screen_context": graph_screen_context(doc, layer=str(ctx.args.get("layer") or "main"))},
              overrides={"document_id": doc, "session_id": sid})
+
+
+def graph_screen_context(doc: str, *, node_id: str = "", component_id: Optional[str] = None,
+                         layer: str = "main", mode: str = "graph") -> dict:
+    """admin-graph-review.js ``getScreenContext`` と同じ形（ノード未選択なら node_id 空・component_id null）。"""
+    return {"screen": "graph_review",
+            "selection": {"document_id": str(doc or ""), "node_id": node_id or "",
+                          "component_id": component_id or None, "graph_layer": "main" if node_id else ""},
+            "view": {"mode": mode, "layer": layer}, "visible_entities": []}
 
 
 def _cb_session_create(ctx: _Ctx) -> None:
@@ -862,6 +944,229 @@ def _discuss_review(ctx: _Ctx) -> None:
     ctx.main(params={"role": "discussion_seed"}, overrides={"document_id": doc} if doc else None)
 
 
+# ----------------------------------------------------------------------------
+# §18.2 論理構造を辿る行為（2026-09-30）
+# ----------------------------------------------------------------------------
+
+_COMPONENT_CONTEXT = "/api/learning/courses/{course_id}/components/{component_id}/context"
+
+
+def _remember_component_graph(s: PersonaSession, body: Any) -> None:
+    """文脈応答の graph（focus / upper / lower）から、画面で移動できる部品を覚える。"""
+    graph = body.get("graph") if isinstance(body, dict) else None
+    s.scratch["last_component_graph"] = graph if isinstance(graph, dict) else None
+    if not isinstance(graph, dict):
+        return
+    for lane in ("upper", "lower"):
+        for it in graph.get(lane) or []:
+            if isinstance(it, dict) and it.get("element_type") == "theory_component" and it.get("navigable"):
+                s.remember("components", it.get("id"))
+
+
+def _component_context(ctx: _Ctx) -> None:
+    s = ctx.session
+    cid = str(ctx.args.get("component_id") or "").strip()
+    # 第 15 周: ペルソナは ⚓ の番号（"1" / "⚓1"）や element_ref で部品を指すことがある。
+    # 番号・一覧の id を教材の ⚓ 一覧から部品 id に引き直す（画面のチップと同じ対象）。製品を素の番号で叩かない。
+    ref = cid or str(ctx.args.get("element_ref") or "").strip()
+    if ref:
+        anchors = [a for a in material_anchors(s.material) if a.get("kind") in ("component", "theory_component")]
+        m = re.fullmatch(r"(?:⚓\s*)?(\d+)", ref)
+        hit = next((a for a in material_anchors(s.material) if (m and a["no"] == int(m.group(1))) or a["id"] == ref), None)
+        if hit is not None:
+            if hit.get("kind") not in ("component", "theory_component"):
+                return ctx.missing("component_anchor")  # 主張・式の ⚓ は部品の文脈では開けない
+            cid = hit["id"]
+        elif m:
+            return ctx.missing("component_anchor")  # 一覧に無い番号
+        elif not anchors and not s.latest("components"):
+            return ctx.missing("component_id")
+    cid = cid or s.latest("components")
+    if not cid:
+        return ctx.missing("component_id")
+    status, body = ctx.main(overrides={"component_id": cid})
+    if status == 200:
+        s.scratch["component_center"] = str(cid)
+        _remember_component_graph(s, body)
+
+
+def _hop_target(graph: Any, wanted: str = "") -> str:
+    """直前の文脈図で移動できる隣の部品（画面の「旅」と同じく navigable な theory_component だけ）。"""
+    if not isinstance(graph, dict):
+        return ""
+    focus = str((graph.get("focus") or {}).get("id") or "") if isinstance(graph.get("focus"), dict) else ""
+    cands = [str(it["id"]) for lane in ("upper", "lower") for it in graph.get(lane) or []
+             if isinstance(it, dict) and it.get("element_type") == "theory_component" and it.get("navigable")
+             and it.get("id") and str(it["id"]) != focus]
+    if wanted:
+        return wanted if wanted in cands else ""
+    return cands[0] if cands else ""
+
+
+def _component_context_hop(ctx: _Ctx) -> None:
+    s = ctx.session
+    graph = s.scratch.get("last_component_graph")
+    target = _hop_target(graph, str(ctx.args.get("component_id") or ""))
+    if not target:
+        return ctx.missing("adjacent_component")
+    status, body = ctx.main(overrides={"component_id": target})
+    if status == 200:
+        s.scratch["component_center"] = target
+        _remember_component_graph(s, body)
+
+
+def _claim_refs(ctx: _Ctx) -> None:
+    cid = ctx.args.get("chunk_id") or ctx.session.latest("chunks")
+    if not cid:
+        return ctx.missing("chunk_id")
+    status, body = ctx.main(overrides={"chunk_id": cid})
+    for c in _items(body, "claims"):
+        if isinstance(c, dict):
+            ctx.session.remember("elements", _first(c, "id", "claim_id"))
+            if _first(c, "id", "claim_id"):
+                ctx.session.remember("element_types", "claim")
+
+
+def _chat_ask_selection(ctx: _Ctx) -> None:
+    """画面では教材に実在する文しか選べない。``selection_ref``（「区画番号:文番号」）で投影の文を選ぶか、
+    ``selection_text`` が教材本文に含まれることを確かめる（第 14 周: 本文に無い文を選んだことになっていた）。"""
+    sents = material_sentences(ctx.session.material)
+    ref = str(ctx.args.get("selection_ref") or "").strip()
+    if ref:
+        m = re.fullmatch(r"(\d+)\s*[:：-]\s*(\d+)", ref)
+        if not m or int(m.group(1)) >= len(sents) or not (1 <= int(m.group(2)) <= len(sents[int(m.group(1))])):
+            return ctx.missing("selection_ref")
+        ctx.args["selection_text"] = sents[int(m.group(1))][int(m.group(2)) - 1]
+        ctx.args["selection_segment_id"] = int(m.group(1))
+    text = str(ctx.args.get("selection_text") or "").strip()
+    if not text:
+        return ctx.missing("selection_text")
+    norm = lambda x: re.sub(r"[\s*$]+", "", x)  # 画面で選ぶ文は描画後（強調・数式の区切りは見えない）
+    hits = [i for i, ss in enumerate(sents) if norm(text) in norm("".join(ss))]
+    if sents and not hits:
+        return ctx.missing("selection_text_not_in_material")
+    if hits and not isinstance(ctx.args.get("selection_segment_id"), int):
+        ctx.args["selection_segment_id"] = hits[0]
+    seg = ctx.args.get("selection_segment_id")
+    _chat(ctx, intent_mode="on_path", selection_segment_id=seg if isinstance(seg, int) else None)
+
+
+_CYCLE_MODES = ("elicit", "diff")
+
+
+def _chat_cycle(ctx: _Ctx) -> None:
+    """discuss.js と同じく議論中の会話に cycle_mode を添えて送る（不正値はそのまま送り 422 を見せる）。"""
+    mode = str(ctx.args.get("cycle_mode") or "").strip()
+    if not mode:
+        return ctx.missing("cycle_mode")
+    _chat(ctx, topic_id=DISCUSSION_TOPIC_ID, intent_mode="discuss", discuss_scope="course_sources",
+          cycle_mode=mode)
+
+
+def _atlas_threads(ctx: _Ctx) -> None:
+    s = ctx.session
+    status, body = ctx.main(params={"course": s.course_id, "topic": s.topic_id, "level": ctx.args.get("level") or 2})
+    if status == 200 and isinstance(body, dict):
+        s.scratch["atlas_threads_present"] = isinstance(body.get("threads"), dict)
+
+
+def _atlas_neighbors(ctx: _Ctx) -> None:
+    if not (ctx.args.get("node_id") or ctx.session.latest("nodes")):
+        _, body = ctx.call("GET", "/api/me/personal-network")
+        for n in _items(body, "nodes"):
+            if isinstance(n, dict):
+                ctx.session.remember("nodes", _first(n, "id", "node_id"))
+    nid = ctx.args.get("node_id") or ctx.session.latest("nodes")
+    if not nid:
+        return ctx.missing("node_id")
+    ctx.main(params={"node_id": nid})
+
+
+def _doc_of(ctx: _Ctx) -> str:
+    s = ctx.session
+    return str(ctx.args.get("document_id") or s.latest("graph_documents") or s.latest("documents") or "")
+
+
+def _doc_view(ctx: _Ctx) -> None:
+    doc = _doc_of(ctx)
+    ctx.main(overrides={"document_id": doc} if doc else None)
+
+
+def _seminar_brief(ctx: _Ctx) -> None:
+    doc = str(ctx.args.get("document_ref") or "") or _doc_of(ctx)
+    ctx.main(overrides={"document_ref": doc} if doc else None)
+
+
+def _deliberation_overview(ctx: _Ctx) -> None:
+    s = ctx.session
+    etype = ctx.args.get("element_type") or "theory_component"
+    eid = ctx.args.get("element_id") or (s.latest("components") if etype == "theory_component" else s.latest("elements"))
+    if not eid:
+        return ctx.missing("element_id")
+    doc = _doc_of(ctx)
+    ctx.main(params={"document_id": doc} if doc else None, overrides={"element_type": etype, "element_id": eid})
+
+
+def _node_chat(ctx: _Ctx) -> None:
+    """admin-graph-review.js の openNodeChat と同じ: W層セッション（theory_component）→ messages。
+
+    screen_context は画面の getScreenContext と同じ形（selection に document_id / node_id / component_id /
+    graph_layer、view に mode / layer）。
+    """
+    s = ctx.session
+    doc = _doc_of(ctx)
+    targets = s.maps.get("node_targets") or {}
+    node_arg = str(ctx.args.get("node_id") or "")
+    comp = str(ctx.args.get("component_id") or "")
+    if comp in targets:  # ノード id が component_id に渡された（画面はノードから実体要素を解決する）
+        node_arg, comp = node_arg or comp, targets[comp]
+    if not comp and node_arg:
+        comp = targets.get(node_arg, node_arg if _UUID_RE.match(node_arg) else "")
+    if not comp and not node_arg:
+        comp = str(s.latest("components") or "")
+        if comp in targets:
+            node_arg, comp = comp, targets[comp]
+    if not comp:
+        # 画面は解決できないノードではリクエストせず事実文を出す
+        return ctx.missing("component_id")
+    key = f"{doc}|{comp}"
+    sid = s.maps.setdefault("node_sessions", {}).get(key)
+    if not sid:
+        status, body = ctx.call("POST", "/api/admin/deliberation/sessions",
+                                json={"scope": "document", "element_type": "theory_component",
+                                      "element_id": comp, "document_id": doc or None, "title": ""})
+        sess = body.get("session") if isinstance(body, dict) else None
+        sid = str(sess.get("id")) if isinstance(sess, dict) and sess.get("id") else ""
+        if not sid:
+            return
+        s.maps["node_sessions"][key] = sid
+    node_id = node_arg or comp
+    screen = graph_screen_context(doc, node_id=node_id, component_id=comp, layer="main")
+    ctx.main(json={"content": str(ctx.args.get("content") or ctx.args.get("message") or ""),
+                   "screen_context": screen}, overrides={"session_id": sid})
+
+
+def _approve_claim(ctx: _Ctx) -> None:
+    cid = ctx.args.get("claim_id") or ctx.session.latest("claims")
+    if not cid:
+        return ctx.missing("claim_id")
+    ctx.main(json={"review_status": str(ctx.args.get("review_status") or "teacher_approved")},
+             overrides={"claim_id": cid})
+
+
+def _graph_open_structure(ctx: _Ctx) -> None:
+    """グラフレビューを開く + 根拠の主張（reference_index.claims の DB 行があるもの）を覚える。"""
+    _graph_open(ctx)
+    body = ctx.session.last_body
+    ref = body.get("reference_index") if isinstance(body, dict) else None
+    if not isinstance(ref, dict) and isinstance(body, dict) and isinstance(body.get("graph"), dict):
+        ref = body["graph"].get("reference_index")
+    claims = ref.get("claims") if isinstance(ref, dict) else None
+    for entry in (claims or {}).values() if isinstance(claims, dict) else []:
+        if isinstance(entry, dict):
+            ctx.session.remember("claims", entry.get("claim_id") or entry.get("parent_claim_id"))
+
+
 _HANDLERS: dict[str, Callable[[_Ctx], None]] = {
     "learning.course.list": _course_list,
     "learning.course.enroll": _course_enroll,
@@ -894,7 +1199,7 @@ _HANDLERS: dict[str, Callable[[_Ctx], None]] = {
     "learning.element.context": _element_context,
     "learning.personal_network.mine": _network,
     "learning.personal_network.journey": _network_node(()),
-    "learning.personal_network.nearby": _network_node(("mode",)),
+    "learning.personal_network.nearby": _network_node(("mode", "center_component_id")),
     "learning.atlas.view": _atlas_view,
     "learning.corpus.domains": _corpus_domains,
     "learning.corpus.documents": _corpus_documents,
@@ -903,7 +1208,7 @@ _HANDLERS: dict[str, Callable[[_Ctx], None]] = {
     "admin.materials.list": _materials_list,
     "admin.materials.get": _materials_get,
     "admin.materials.upload_url": _upload_url,
-    "admin.graph_review.open": _graph_open,
+    "admin.graph_review.open": _graph_open_structure,
     "admin.graph_review.chat": _graph_chat,
     "admin.course_builder.session_create": _cb_session_create,
     "admin.course_builder.chat": _cb_chat,
@@ -920,4 +1225,18 @@ _HANDLERS: dict[str, Callable[[_Ctx], None]] = {
     "admin.copilot.chat": _copilot,
     "admin.help.inspect": _help_inspect("/api/admin/assistant/help/ui-anchor-events"),
     "admin.discuss_opening_review.list": _discuss_review,
+    "learning.component.context": _component_context,
+    "learning.component.context_hop": _component_context_hop,
+    "learning.chunk.claim_refs": _claim_refs,
+    "learning.chat.ask_selection": _chat_ask_selection,
+    "learning.chat.cycle": _chat_cycle,
+    "learning.atlas.threads": _atlas_threads,
+    "learning.atlas.neighbors": _atlas_neighbors,
+    "admin.paper_layer.view": _doc_view,
+    "admin.theory_modules.view": _doc_view,
+    "admin.theory_modules.related": _doc_view,
+    "admin.graph_review.node_chat": _node_chat,
+    "admin.deliberation.overview": _deliberation_overview,
+    "admin.graph_review.approve_claim": _approve_claim,
+    "admin.seminar_brief.view": _seminar_brief,
 }

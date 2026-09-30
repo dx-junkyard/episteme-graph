@@ -17,6 +17,8 @@ e. precondition の連鎖（A・ハーネス）: 同じペルソナの 3 手以�
 f. 固定コースの取り違え（A・ハーネス）: campaign が ``course_id`` を固定しているのに、ペルソナが別のコースを
    受講登録・表示した（runner_note ``pinned_course_mismatch:``）。その週の内容依存の検証は固定したコースを
    見ていない（第 12 周 = IK-0506）。ペルソナ・セッションごとに 1 件。
+g. 構造で答えたか（A・仮説）: 「この式はどこから」「根拠」を含む質問の回答に、同じセッションで見た教材の主張本文・
+   段階の日本語ラベル（``core/element_vocab.py::THEORY_STAGE_LABELS``）・出典番号のどれも無い。断定しない（PE3）。
 
 応答の要約は ``HttpTrace.digest``（runner が応答全体から取る）を優先し、無い古い transcript では
 ``response_excerpt`` から読める範囲で代える（抜粋に出典が入っていなければ a・b は見送る）。
@@ -30,6 +32,7 @@ from uxsim.oracles.findings import FindingFactory, excerpt_json
 from uxsim.runner.digest import (DISTINGUISH_KEYS, chat_record, chat_record_from_excerpt, numeric_keys,
                                  numeric_keys_from_excerpt)
 from uxsim.schema import Finding, HttpTrace, TranscriptStep
+from uxsim.oracles.principle import THEORY_STAGE_LABELS  # 製品の正本（principle.py 経由 — 製品 import は 1 箇所）
 
 CHAT_ACTIONS = ("learning.chat.", "learning.discuss.ask", "learning.corpus.discuss_ask")
 CHAT_PATH_RE = re.compile(r"/chat$")
@@ -55,9 +58,38 @@ HYP_STALE = "追いの質問に直前の回答が逐語で返った"
 HYP_NUMERIC = "学習者向け応答に数値の項目が載っている（UI に出るかは browser runner で確認）"
 
 
+_NUMERIC_ALLOWLIST_LOWER = frozenset(k.lower() for k in NUMERIC_ALLOWLIST)
+
+# レクチャーの audio-status / sequence の既存キー。UI のボタン判定・送りが使う契約で、画面に数値として出ない
+# （IK-0537）。発見にせず run の注記に残す（PE7）
+LECTURE_UI_CONTRACT_PATHS = ("/audio-status", "/sequence")
+LECTURE_UI_CONTRACT_KEYS = frozenset({
+    "duration_ms", "total_duration_ms", "ready_chunks", "ready_slides", "ready_segments", "total_chunks",
+    "total_segments", "total_slides",
+})
+
+
+def _lecture_contract(t: HttpTrace, key: str) -> bool:
+    path = t.path or ""
+    return "/lecture/" in path and path.endswith(LECTURE_UI_CONTRACT_PATHS) and key in LECTURE_UI_CONTRACT_KEYS
+
+
+def ui_contract_notes(steps: Iterable[TranscriptStep]) -> dict:
+    """発見にしなかったレクチャー UI 契約の数値キー（run の注記用）。"""
+    seen: dict[str, set[str]] = {}
+    for step in steps:
+        for t in step.http:
+            if t.status == 200:
+                keys = [k for k in _trace_numeric_keys(t) if _lecture_contract(t, k)]
+                if keys:
+                    seen.setdefault(step.action_id, set()).update(keys)
+    return {a: {"keys": sorted(v), "note": "レクチャーの UI 契約（画面には数値として出ない・IK-0537）"}
+            for a, v in sorted(seen.items())}
+
+
 def _allowed_numeric(key: str) -> bool:
     k = key.lower()
-    return (k in NUMERIC_ALLOWLIST or k == "id" or k.endswith(("_id", "_ids", "_at", "_ts", "timestamp"))
+    return (k in _NUMERIC_ALLOWLIST_LOWER or k == "id" or k.endswith(("_id", "_ids", "_at", "_ts", "timestamp"))
             or k in ("ts", "time", "created", "updated"))
 
 
@@ -213,7 +245,7 @@ def _check_numeric_keys(seq: list[TranscriptStep], factory: FindingFactory) -> l
         for t in step.http:
             if t.status != 200:
                 continue
-            found |= {k for k in _trace_numeric_keys(t) if not _allowed_numeric(k)}
+            found |= {k for k in _trace_numeric_keys(t) if not _allowed_numeric(k) and not _lecture_contract(t, k)}
         if found:
             by_action.setdefault(step.action_id, set()).update(found)
             hit_steps.append(step)
@@ -281,6 +313,67 @@ def _check_pinned_mismatch(seq: list[TranscriptStep], factory: FindingFactory) -
                          steps=sorted({s.seq for s, _ in hits}), layers=["cycle_verification"])]
 
 
+# ----------------------------------------------------------------------------
+# g. 構造で答えたか（非LLM の目印・仮説 — PE3）
+# ----------------------------------------------------------------------------
+STRUCTURE_QUESTION_WORDS = ("この式はどこから", "根拠")
+CLAIM_TEXT_KEYS = ("statement", "text", "full_text")
+CLAIM_SOURCE_ACTIONS = ("learning.element.", "learning.component.", "learning.topic.")
+CLAIM_PROBE_CHARS = 12
+HYP_NO_STRUCTURE = ("仮説: 式の出どころ・根拠を尋ねた質問に、教材の主張・段階・出典番号のどれにも触れずに"
+                    "答えている（構造で答えていない可能性）")
+
+
+def _claim_texts(v, key: str = "") -> Iterable[str]:
+    if isinstance(v, dict):
+        for k, x in v.items():
+            yield from _claim_texts(x, k)
+    elif isinstance(v, list):
+        for x in v:
+            yield from _claim_texts(x, key)
+    elif isinstance(v, str) and key in CLAIM_TEXT_KEYS and len(v.strip()) >= CLAIM_PROBE_CHARS:
+        yield v.strip()
+
+
+def _full_answer(trace: HttpTrace) -> str:
+    body = excerpt_json(trace.response_excerpt)
+    if isinstance(body, dict) and isinstance(body.get("answer"), str):
+        return body["answer"]
+    rec = chat_of(trace) or {}
+    return str(rec.get("answer_head") or "")
+
+
+def _check_structure_answer(seq: list[TranscriptStep], factory: FindingFactory) -> list[Finding]:
+    claims: list[str] = []
+    stages = [v for v in THEORY_STAGE_LABELS.values() if v]
+    for step in seq:
+        if step.action_id.startswith(CLAIM_SOURCE_ACTIONS):
+            for t in step.http:
+                if t.status == 200:
+                    claims += list(_claim_texts(excerpt_json(t.response_excerpt)))
+            continue
+        if not step.action_id.startswith(CHAT_ACTIONS):
+            continue
+        message = str(step.args.get("message") or "")
+        if not any(w in message for w in STRUCTURE_QUESTION_WORDS):
+            continue
+        trace = _chat_trace(step)
+        if trace is None:
+            continue
+        rec = chat_of(trace) or {}
+        if rec.get("degraded"):
+            continue
+        answer = _full_answer(trace)
+        if not answer:
+            continue
+        grounded = (bool(rec.get("answer_markers")) or "[出典" in answer or any(s in answer for s in stages)
+                    or any(c[:CLAIM_PROBE_CHARS] in answer for c in claims))
+        if not grounded:
+            return [factory.make(oracle="A", severity="confused", step=step, quote=answer[:200],
+                                 hypothesis=HYP_NO_STRUCTURE)]
+    return []
+
+
 def check(steps: list[TranscriptStep], factory: FindingFactory) -> list[Finding]:
     out: list[Finding] = []
     flagged_renumber: set[str] = set()
@@ -297,6 +390,7 @@ def check(steps: list[TranscriptStep], factory: FindingFactory) -> list[Finding]
                 out += _check_indistinct(step, factory)
         out += _check_stale(seq, factory)
         out += _check_pinned_mismatch(seq, factory)
+        out += _check_structure_answer(seq, factory)
         if persona not in flagged_numeric:
             found = _check_numeric_keys(seq, factory)
             if found:

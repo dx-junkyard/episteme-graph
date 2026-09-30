@@ -1,0 +1,25 @@
+scenario: s-two-layer-explanation
+domain: astrophysics
+# 第 15 波: 部品とグラフのある論文（7ef9e487）のトピックへ向け直した
+params:
+  goal_text: 同じ要素について、一般的な意味とこの論文での意味の違いを説明できるようになること
+  topic_hint: 二重ネットワークとTOV方程式の課し方（PINN による中性子星状態方程式）
+  topic_hint_terms:
+  - TOV
+  - 二重ネットワーク
+  - PINN
+  seed_questions:
+  - TOV 方程式は一般的には何と何の釣り合いを表す式ですか？
+  - この論文では TOV 方程式をどういう形で推定に組み込んでいるんですか？
+  - 一般的な説明とこの論文の説明で、食い違っているところはありますか？
+per_archetype:
+  adjacent_field:
+    seed_questions:
+    - PINN は、微分方程式の残差を損失に足した回帰のようなものと考えてよいですか？
+    - ネットワークを二つに分けるのは、データ科学でいうどんな設計上の理由に近いですか？
+    - この論文での使い方は、一般的な PINN の使い方とどこが違うんですか？
+  non_native:
+    goal_text: explaining the general meaning and the in-paper meaning of the same element
+    seed_questions:
+    - What does the TOV equation express in general?
+    - How is it built into the inference in this paper?

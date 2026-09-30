@@ -1,0 +1,49 @@
+id: s-return-and-journey
+population: students
+runner:
+- api
+- browser
+session: 2
+preconditions:
+- 前のセッションでこのペルソナが書き置きと持ち越しの問いを残している
+goal: '{{goal_text}} の続きをするために、翌日ログインし、扉と持ち越しを読み、わたしの地図から旅をたどって、その場所の周りを見る'
+params_required:
+- goal_text
+- carryover_answer
+- seed_questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.cycle.return_door
+- do: learning.cycle.todays_words
+- do: learning.discuss.opening
+- do: learning.discuss.ask
+  with:
+    message: '{{carryover_answer}}'
+- do: learning.personal_network.mine
+- do: learning.atlas.neighbors
+  note: いまの地図の霧に名前のある隣の概念が出るかを見る
+- do: learning.personal_network.journey
+- do: learning.personal_network.nearby
+  note: 旅のノードから「この場所の周りを見る」
+- choose:
+  - do: learning.discuss.ask
+    with:
+      message: '{{seed_questions | next}}'
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#return-door
+- manual: student/02-student.md#personal-map
+- manual: student/02-student.md#understanding-cycle
+watch_for:
+- 旅の手がかりが無いとき、カードが消えずに何が足りないかと精密化の出口が事実文で出る
+- 別のコースに同じ場所があるときは、その事実が一文で出る
+- 督促・連続日数・件数の表示がどこにも出ない

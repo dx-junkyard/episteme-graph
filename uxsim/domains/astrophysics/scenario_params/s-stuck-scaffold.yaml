@@ -1,0 +1,29 @@
+scenario: s-stuck-scaffold
+domain: astrophysics
+params:
+  goal_text: µ(a) の章を一通り読むこと
+  topic_hint: 主結果：µ(a)と音速への制約（暗黒エネルギーと修正重力の音速を扱う論文）
+  topic_hint_terms:
+  - 音速
+  - µ(a)
+  - 暗黒エネルギー
+  - 修正重力
+  stuck_messages:
+  - わからない
+  - まだわからない
+  - どこがわからないかもわからない
+  - うーん
+  - わからないです
+per_archetype:
+  night_parttime:
+    stuck_messages:
+    - わからん
+    - まだ
+    - むずい
+    - どこから？
+  non_native:
+    goal_text: reading the µ(a) chapter once
+    stuck_messages:
+    - I don't get it
+    - still lost
+    - I don't know what I don't know

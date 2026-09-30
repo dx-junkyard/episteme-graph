@@ -220,3 +220,15 @@ def test_response_digest_shapes():
     assert chat["sources"][0] == {"index": 1, "position": 1, "chunk_id": "c1", "source_title": "論文A", "meta": "m"}
     assert "score" not in chat["sources"][0]  # 値は残さない
     assert response_digest([{"id": "c1", "title": "t"}]) == {}
+
+
+def test_structure_answer_hypothesis():
+    from uxsim.oracles import dialogue
+    ask = _chat_step(1, {"answer": "それは一般的な話です。", "sources": []}, message="この式はどこから来たの？")
+    found = [f for f in dialogue.check([ask], _factory()) if "構造で答えていない" in f.hypothesis]
+    assert len(found) == 1 and found[0].hypothesis.startswith("仮説")
+    grounded = _chat_step(1, {"answer": "理論の前提 [出典1] から導かれます。", "sources": []},
+                          message="根拠は？")
+    assert not [f for f in dialogue.check([grounded], _factory()) if "構造で答えていない" in f.hypothesis]
+    other = _chat_step(1, {"answer": "こんにちは。", "sources": []}, message="こんにちは")
+    assert not [f for f in dialogue.check([other], _factory()) if "構造で答えていない" in f.hypothesis]

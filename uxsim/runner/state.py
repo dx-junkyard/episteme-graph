@@ -79,7 +79,8 @@ class PersonaSession:
         plural = {"material_id": "materials", "document_id": "documents", "component_id": "components",
                   "task_id": "tasks", "trace_id": "traces", "item_id": "recon_items", "recon_id": "recons",
                   "chunk_id": "chunks", "group_id": "groups", "node_id": "nodes", "element_id": "elements",
-                  "element_type": "element_types"}.get(name)
+                  "element_type": "element_types", "claim_id": "claims",
+                  "document_ref": "documents"}.get(name)
         return self.latest(plural) if plural else ""
 
 
@@ -124,6 +125,10 @@ def _generic(body: Any, depth: int = 0, max_lines: int = 160) -> list[str]:
         lines.append(pad + _str(body)[:1500])
     return lines
 
+
+# admin.js REFERENCE_HEALTH_CHIP_LABELS / admin-graph-review.js MODULE_RELATED_NONE_TEXT の逐語ミラー
+REFERENCE_HEALTH_CHIP_LABELS = {"ok": "参照: 問題なし", "broken": "参照: 切れがあります", "unchecked": "参照: 未確認"}
+MODULE_RELATED_NONE_TEXT = "このモジュールと同じ構造のモジュールを持つ他の論文は、このコーパスの中では見つかっていません。"
 
 _FORMULA_PLACEHOLDER_RE = __import__("re").compile(r"\[\[(FORMULA_\d+)\]\]")
 
@@ -317,6 +322,47 @@ def render_material_text(chunk: Any) -> str:
     return _SENTINEL_RE.sub(expand, out)
 
 
+ANCHOR_KINDS = ("component", "claim", "equation")
+
+
+def material_anchors(body: Any) -> list[dict]:
+    """教材区画に見えている ⚓（evidence_items の component / claim / equation）を画面の出現順に番号付きで返す。
+
+    ペルソナが「どの ⚓ を開くか」を選べるようにするための一覧（第 14 周: 常に最後の要素が開いていた）。
+    番号は 1 始まり・同じ kind:id は 1 度だけ。区画番号 ``segment`` も持つ。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    chunks = body.get("chunks") if isinstance(body, dict) else None
+    for si, ch in enumerate(chunks or []):
+        if not isinstance(ch, dict):
+            continue
+        for ev in ch.get("evidence_items") or []:
+            if not isinstance(ev, dict) or ev.get("kind") not in ANCHOR_KINDS or not ev.get("id"):
+                continue
+            key = f"{ev['kind']}:{ev['id']}"
+            if key in seen:
+                continue
+            seen.add(key)
+            title = str(ev.get("title") or ev.get("label") or ev.get("summary") or "")
+            out.append({"no": len(out) + 1, "kind": ev["kind"], "id": str(ev["id"]),
+                        "title": re.sub(r"\s+", " ", title).strip()[:60], "segment": si})
+    return out
+
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？.!?])\s*")
+
+
+def material_sentences(body: Any) -> list[list[str]]:
+    """教材の区画ごとの文の列（区画番号 = chunks の位置・文番号 = 1 始まり）。選択質問の実在検査に使う。"""
+    out: list[list[str]] = []
+    for ch in (body.get("chunks") if isinstance(body, dict) else None) or []:
+        text = render_material_text(ch) if isinstance(ch, dict) else ""
+        sents = [x.strip() for x in _SENTENCE_SPLIT_RE.split(text) if len(x.strip()) >= 4]
+        out.append(sents)
+    return out
+
+
 def _chat(body: dict) -> list[str]:
     out = ["AI の回答:", str(body.get("answer", ""))]
     stance = body.get("stance") or {}
@@ -335,8 +381,13 @@ def _chat(body: dict) -> list[str]:
         out.append(f"〔鏡〕{body['mirror'].get('text', '')}")
     confirm = body.get("anchor_confirm")
     if isinstance(confirm, dict):
-        opts = " / ".join(str(o.get("label", "")) for o in confirm.get("options") or [] if isinstance(o, dict))
-        out.append(f"確認: {confirm.get('question', '')}（{opts}）")
+        # 画面（app.js renderAnchorConfirmPrompt）は見出し（prompt）とボタンだけを描き、発言全文は再掲しない。
+        # 投影も同じにする（第 15 周: 発言全文 + 6 選択肢の括弧列挙は投影が作っていた）。
+        opts = [str(o.get("label", "")) for o in confirm.get("options") or [] if isinstance(o, dict)]
+        head = confirm.get("prompt") or "この疑問はどれに近いですか？"
+        out.append(f"確認: {head}")
+        for o in opts:
+            out.append(f"  選択肢: {o}")
     for a in body.get("next_actions") or []:
         if isinstance(a, dict):
             out.append(f"ボタン: {a.get('label', '')}")
@@ -346,6 +397,26 @@ def _chat(body: dict) -> list[str]:
     if body.get("degraded"):
         out.append("〔この回答は縮退した固定文です〕")
     return out
+
+
+def _component_context_lines(body: dict) -> list[str]:
+    """部品の文脈（画面の統一パーツカード + 文脈の図）。ラベル・事実文だけを並べ、数値を足さない。"""
+    lines = ["部品の文脈:"]
+    graph = body.get("graph") if isinstance(body.get("graph"), dict) else None
+    rest = {k: v for k, v in body.items() if k != "graph"}
+    lines.extend(_generic(rest, max_lines=80))
+    if graph is None:
+        lines.append("文脈の図: 表示されなかった")
+        return lines
+    focus = graph.get("focus") if isinstance(graph.get("focus"), dict) else {}
+    lines.append(f"文脈の図の中心: {focus.get('label', '')}")
+    for lane, name in (("upper", "上位"), ("lower", "下位")):
+        items = [it for it in graph.get(lane) or [] if isinstance(it, dict)]
+        lines.append(f"{name}:" if items else f"{name}: なし")
+        for it in items:
+            mark = "（移動できる）" if it.get("navigable") and it.get("element_type") == "theory_component" else ""
+            lines.append(f"- {it.get('relation_label', '')} {it.get('label', '')}{mark} id={it.get('id', '')}")
+    return lines
 
 
 def _error(status: int, body: Any) -> str:
@@ -391,6 +462,52 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
                 tag = "（受講可能）" if c.get("is_enrollable") else ""
                 lines.append(f"- {c.get('title', '')}{tag} id={c.get('id', '')}")
         return _clip("\n".join(lines) if len(lines) > 1 else "コースが 1 つも表示されていない。")
+    if action_id == "admin.materials.list" and isinstance(body, list):
+        # 教材管理の行（admin.js renderMaterials）: 題名・状態・開示範囲・参照の健全性チップの文言
+        lines = ["教材一覧:"]
+        for m in body[:20]:
+            if not isinstance(m, dict):
+                continue
+            health = m.get("reference_health") if isinstance(m.get("reference_health"), dict) else None
+            chip = ""
+            if health:
+                chip = "・" + REFERENCE_HEALTH_CHIP_LABELS.get(str(health.get("status") or "unchecked"),
+                                                               REFERENCE_HEALTH_CHIP_LABELS["unchecked"])
+            lines.append(f"- {m.get('title', '')}（{m.get('filename', '')}・{m.get('status', '')}・"
+                         f"{m.get('visibility', '')}{chip}）document_id={m.get('document_id', '')}")
+        return _clip("\n".join(lines) if len(lines) > 1 else "教材が 1 つも表示されていない。")
+    if action_id == "admin.theory_modules.related" and isinstance(body, dict):
+        # 画面（admin-graph-review.js relatedModulesHtml）はモジュールの詳細ペインに題名と事実文だけを出す。
+        # module_key（m2:…）は内部表現なので投影しない（TM12）
+        facts = [str(f) for f in body.get("facts") or [] if str(f or "").strip()]
+        lines = ["同じ構造のモジュールを持つ論文:"]
+        if body.get("available") is False:
+            return _clip("\n".join(lines + facts))
+        for i, mod in enumerate(body.get("modules") or [], 1):
+            if not isinstance(mod, dict):
+                continue
+            titles = [str(d.get("title") or "").strip() for d in mod.get("documents") or [] if isinstance(d, dict)]
+            titles = [t for t in titles if t]
+            lines.append(f"- モジュール{i}: " + ("、".join(titles) if titles else
+                                                   "" if facts else MODULE_RELATED_NONE_TEXT))
+        lines.extend(facts)
+        return _clip("\n".join(lines))
+    if action_id == "learning.reconstruction.next" and isinstance(body, dict):
+        item = body.get("item") if isinstance(body.get("item"), dict) else body
+        space = [o for o in item.get("response_space") or [] if isinstance(o, dict)]
+        if space:
+            # 画面（reconstruction.js）はラジオの label だけを見せる（op_* の id は value 属性で見えない）
+            rest = {k: v for k, v in item.items() if k != "response_space"}
+            lines = ["再構成の問い:"] + _generic(rest, max_lines=40) + ["選択肢（option にラベルか番号を渡す）:"]
+            lines += [f"- {i}. {o.get('label', '')}" for i, o in enumerate(space, 1)]
+            return _clip("\n".join(lines))
+    if action_id == "learning.course.enroll" and isinstance(body, dict):
+        # 画面（app.js enrollCourse）はコースを開き、enrolled が真のときだけ notice を一度出す。
+        # 応答のフラグ（is_template / is_enrollable / visibility）は描かない（§7.3・第 14 周）
+        lines = [f"コース: {body.get('title', '')}"]
+        if body.get("enrolled") and body.get("notice"):
+            lines.append(f"（お知らせ: {body['notice']}）")
+        return _clip("\n".join(lines))
     if action_id == "learning.course.open" and isinstance(body, dict):
         master = body.get("master_course") if isinstance(body.get("master_course"), dict) else body
         topics = [t for t in (master.get("topics") or []) if isinstance(t, dict)]
@@ -438,6 +555,35 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
         rest = {k: v for k, v in body.items() if k not in ("documents", "domains", "unplaced_documents", "facts")}
         lines.extend(_generic(rest, max_lines=30))
         return _clip("\n".join(lines))
+    if action_id in ("learning.component.context", "learning.component.context_hop") and isinstance(body, dict):
+        return _clip("\n".join(_component_context_lines(body)))
+    if action_id == "learning.chunk.claim_refs" and isinstance(body, dict):
+        claims = [c for c in body.get("claims") or [] if isinstance(c, dict)]
+        lines = ["この出典に紐づく主張:"] + [f"- {c.get('label', '')}（{c.get('claim_type', '')}）id={c.get('id', '')}"
+                                             for c in claims]
+        return _clip("\n".join(lines) if claims else "この出典に紐づく主張は表示されなかった。")
+    if action_id == "learning.atlas.threads" and isinstance(body, dict):
+        threads = body.get("threads")
+        if not isinstance(threads, dict):
+            lines = ["推定の糸: この地図には表示されていない（切り替えが出ていない）。"]
+        else:
+            lines = [f"推定の糸（AIによる推定（未確認）・骨格 版{threads.get('skeleton_version', '')}）:"]
+            for it in threads.get("items") or []:
+                if isinstance(it, dict):
+                    lines.append(f"- {it.get('from_label', '')} ⋯ {it.get('to_label', '')}（{it.get('nearness_label', '')}）")
+        rest = {k: v for k, v in body.items() if k != "threads"}
+        lines.extend(_generic(rest, max_lines=60))
+        return _clip("\n".join(lines))
+    if action_id == "learning.atlas.neighbors" and isinstance(body, dict):
+        if not body.get("available"):
+            return _clip(f"近くにある概念は表示されなかった。{body.get('note') or ''}".strip())
+        here = body.get("here") if isinstance(body.get("here"), dict) else {}
+        lines = [f"いまの場所: {here.get('label', '')}（{here.get('region_label', '')}）", "近くにある概念:"]
+        rel = {"edge": "直接つながる", "sibling": "同じ領域"}
+        for n in body.get("neighbors") or []:
+            if isinstance(n, dict):
+                lines.append(f"- {n.get('label', '')}（{n.get('region_label', '')}・{rel.get(n.get('relation'), n.get('relation', ''))}）")
+        return _clip("\n".join(lines))
     if action_id == "learning.topic.open" and isinstance(body, dict):
         lines = ["教材:"]
         # 準備中／未生成の事実文（IK-0375）は画面と同じく本文の上に出す（第 6 周: DTO にはあったが投影が落としていた）
@@ -454,6 +600,12 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
                 # chunk の formulas / figures / evidence_items で解決する。引けない埋め込みは画面と同じ未解決カード
                 # （kind:id を出す）にし、引けないプレースホルダーは残す（製品側の未解決 = IK-0389 を隠さない）。
                 lines.append(render_material_text({**ch, "text": text})[:3000])
+        anchors = material_anchors(body)
+        if anchors:
+            # 画面の ⚓ チップを番号で選べるように列挙する（element_ref に番号か id を渡す）
+            lines.append("見えている ⚓（element_ref に番号を渡すと開ける）:")
+            for a in anchors[:30]:
+                lines.append(f"- ⚓{a['no']} {MATERIAL_KIND_LABELS.get(a['kind'], a['kind'])}: {a['title']}（区画{a['segment']}）")
         return _clip("\n".join(lines))
     lines = _generic(body)
     return _clip("\n".join(lines) if lines else "（画面に何も表示されなかった）")

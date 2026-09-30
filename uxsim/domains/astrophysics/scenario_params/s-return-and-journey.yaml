@@ -1,0 +1,16 @@
+scenario: s-return-and-journey
+domain: astrophysics
+params:
+  goal_text: 昨日考えた µ(a) と音速の論文の続き
+  carryover_answer: 一晩考えて、音速が小さいと µ のずれが大きく見えるのは、準静的近似の範囲の話だと思う。
+  seed_questions:
+  - 昨日の問いの続きとして、安定性の制約はこの結論をどれくらい狭めますか？
+  - わたしの地図の近くにある要素のうち、次に読むべきものはどれだと思いますか？
+per_archetype:
+  voice_first:
+    carryover_answer: えっと、音速が小さいと µ のずれが大きく見える、ってことでいい？
+    seed_questions:
+    - じゃあ安定性の条件って、どこで効くの？
+  non_native:
+    goal_text: continuing yesterday's paper on µ(a) and the sound speed
+    carryover_answer: A small sound speed makes the deviation of µ look larger, within the quasi-static approximation.

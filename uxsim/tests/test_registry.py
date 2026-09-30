@@ -31,6 +31,10 @@ admin.course_builder.chat admin.course_builder.register admin.course.visibility 
 admin.release_review.accept admin.atlas_binding.propose admin.atlas_binding.save admin.lecture_studio.scripts
 admin.users.create_student admin.groups.create admin.groups.add_member admin.copilot.chat admin.help.inspect
 admin.discuss_opening_review.list
+learning.component.context learning.component.context_hop learning.chunk.claim_refs learning.chat.ask_selection
+learning.chat.cycle learning.atlas.threads learning.atlas.neighbors admin.paper_layer.view admin.theory_modules.view
+admin.theory_modules.related admin.graph_review.node_chat admin.deliberation.overview
+admin.graph_review.approve_claim admin.seminar_brief.view
 """.split()
 
 MANUAL_ROOT = REPO_ROOT / "docs" / "manual"
@@ -129,3 +133,15 @@ def test_affordance_and_manual_resolve(action_id):
 def test_known_unsupported_list_is_empty():
     """現時点で全行為が実ルートを持つ（持たない行為を足したらここに列挙する）。"""
     assert sorted(a.id for a in REGISTRY.values() if a.unsupported) == []
+
+
+STRUCTURE_IDS = REQUIRED_IDS[REQUIRED_IDS.index("learning.component.context"):]
+
+
+@pytest.mark.parametrize("action_id", STRUCTURE_IDS)
+def test_structure_actions_have_handlers_and_real_affordance(action_id):
+    """§18.2 の行為は実行関数を持ち、affordance が実在の UI 部品かマニュアル節に解決する。"""
+    from uxsim.runner.actions_exec import _HANDLERS
+
+    assert action_id in _HANDLERS
+    assert not REGISTRY[action_id].unsupported

@@ -59,6 +59,21 @@ def _failed(step: TranscriptStep) -> bool:
     return any(t.status is None or (t.status or 0) >= 400 for t in step.http)
 
 
+TRACE_CHAIN = ("learning.element.context", "learning.component.context")
+
+
+def _trace_break(step: TranscriptStep) -> str:
+    """辿りの連鎖の途切れ方（``404`` / ``missing`` / 空文字 = 途切れていない）。"""
+    for t in step.http:
+        if (t.error or "").startswith("precondition:"):
+            return "missing"
+        if t.status == 404:
+            return "404"
+        if t.status == 200 and '"missing"' in (t.response_excerpt or ""):
+            return "missing"
+    return ""
+
+
 def prefilter(steps: list[TranscriptStep]) -> tuple[list[StepGroup], list[str], list[str]]:
     """候補グループ・unsupported の行為一覧・help no_hit の一覧を返す。"""
     groups: list[StepGroup] = []
@@ -73,6 +88,15 @@ def prefilter(steps: list[TranscriptStep]) -> tuple[list[StepGroup], list[str], 
             unsupported.append(s.action_id.split(":", 1)[1])
         if s.action_id.endswith("help.inspect") and any(t.path.endswith("ui-anchor-events") for t in s.http):
             no_hits.append(str(s.args.get("anchor_id") or ""))
+    for seq in by_persona.values():
+        started = False
+        for s in seq:
+            if not s.action_id.startswith(TRACE_CHAIN):
+                continue
+            how = _trace_break(s)
+            if how and (started or s.action_id.startswith(TRACE_CHAIN[1])):
+                groups.append(StepGroup(reason=f"trace_break:{how}", steps=[s]))
+            started = started or s.action_id.startswith(TRACE_CHAIN[0])
     for seq in by_persona.values():
         run: list[TranscriptStep] = []
         for s in seq:
@@ -91,6 +115,8 @@ def _deterministic_hypothesis(group: StepGroup) -> str:
     s = group.steps[0]
     if group.reason == "consecutive_failures":
         return f"{s.action_id} が続けて失敗し、利用者が先へ進めない"
+    if group.reason.startswith("trace_break:"):
+        return f"要素から部品への辿りが {s.action_id} で途切れた（{group.reason.split(':', 1)[1]}）"
     what = {"friction:blocked": "先へ進めなくなった", "friction:gave_up": "諦めた",
             "friction:confused": "画面の意味が分からなくなった", "friction:misread": "画面を読み違えた"}
     return f"{s.action_id} の後、利用者が{what.get(group.reason, '詰まった')}"
@@ -128,7 +154,8 @@ def check(steps: list[TranscriptStep], factory: FindingFactory, llm: Optional[Pe
     out: list[Finding] = []
     for g in groups:
         s = g.steps[0]
-        severity = "blocked" if g.reason == "consecutive_failures" else FRICTION_SEVERITY[g.reason.split(":", 1)[1]]
+        severity = ("blocked" if g.reason == "consecutive_failures" or g.reason.startswith("trace_break:")
+                    else FRICTION_SEVERITY[g.reason.split(":", 1)[1]])
         hypothesis = _deterministic_hypothesis(g)
         verdict = judge(g, llm) if llm is not None else None
         if verdict is not None:

@@ -35,4 +35,5 @@ notes: |                            # 任意。前提・意図を事実文で
 | `c-astro-quota-edge` | astrophysics | course-astro-v1 | 日次上限に当たったときの見え方 |
 | `c-astro-all-students-smoke` | astrophysics | course-astro-v1 | 学生 10 名全員で受講の入口だけを通す |
 | `c-astro-teachers-review` | astrophysics | corpus-astro-v1 | 行動型の違う教員 4 名で、グラフ確認から公開まで |
+| `c-astro-structure-30` | astrophysics | corpus-astro-v1 | 論理構造の見やすさ・辿れる理解・対話支援の 30 場面（§18。教員は既存教材を読むだけ・学生はコース 1bad7d9f 固定） |
 | `c-regression-all` | （全分野） | 各回帰経路の指定 | `scenarios/regression/` 全件を replay で再演する |

@@ -1,0 +1,26 @@
+scenario: s-lecture-then-trace
+domain: astrophysics
+params:
+  goal_text: 講義の前に中性子星の状態方程式の章を一度通して聴き、分からない式を辿っておくこと
+  topic_hint: 二重ネットワークとTOV方程式の課し方（PINN による中性子星状態方程式）
+  topic_hint_terms:
+  - TOV
+  - 二重ネットワーク
+  - 状態方程式
+  - PINN
+  symbol_hints:
+  - P
+  - \rho
+  - c_s^2
+  - M
+  - R
+  interrupt_questions:
+  - いまのスライドの TOV 方程式というのは、何と何の釣り合いの式ですか？
+  - ネットワークを二つに分けるのは、何を別々に学習させるためですか？
+  - 読み上げとスライドの式が合っていない気がします。いまはどの式の話ですか？
+per_archetype:
+  non_native:
+    goal_text: listening once through the neutron-star EoS chapter
+    interrupt_questions:
+    - What balance does the TOV equation on this slide express?
+    - Why are there two networks?

@@ -1,0 +1,42 @@
+id: s-map-to-sea-to-discuss
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、分野の地図→推定の糸→論文の位置づけ→論文の海→コースの外の論文との議論と進む'
+params_required:
+- goal_text
+- atlas_region_hint
+- corpus_question
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.atlas.view
+  note: '{{atlas_region_hint}} のあたりを探す'
+- do: learning.atlas.threads
+  note: 推定の糸を表示する
+- do: learning.landscape.view
+- do: learning.corpus.domains
+- do: learning.corpus.documents
+- do: learning.corpus.discuss_ask
+  with:
+    message: '{{corpus_question}}'
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#field-atlas
+- manual: student/02-student.md#relation-threads
+- manual: student/02-student.md#paper-placement
+- manual: student/02-student.md#corpus-sea
+- manual: student/02-student.md#corpus-sea-discuss
+watch_for:
+- 推定の糸は点線で「AIによる推定（未確認）」と骨格の版が事実文で添えられる
+- 論文の位置づけに AI の推定と教員確認済みの出所ラベルが付く
+- コースの外の論文との議論で、使えない機能があれば縮退が明示される
+- 地図・海の固定文が読み手の言語で出る

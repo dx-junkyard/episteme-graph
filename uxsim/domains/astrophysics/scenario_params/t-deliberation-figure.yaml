@@ -1,0 +1,8 @@
+scenario: t-deliberation-figure
+domain: astrophysics
+params:
+  goal_text: 図が論文のどの主張を支えているかを確かめること
+  material_hint: Cep B の磁化フィラメントの論文（フィラメントの形状と磁場の形態の図）
+  copilot_questions:
+  - この図を深く検討する画面では、どこから読めばいいですか？
+  - 図の解釈を確定するにはどの操作をすればいいですか？

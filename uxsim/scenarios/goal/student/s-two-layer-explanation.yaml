@@ -1,0 +1,43 @@
+id: s-two-layer-explanation
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、同じ要素の一般的な説明とこの論文での意味を読み比べる'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- seed_questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.component.context
+  note: 要素文脈を開き、一般的な説明とこの論文での意味を探す
+- do: learning.element.context
+  note: 同じ要素の主張・式の側からも読む
+- repeat:
+    until: persona_decides_to_stop or steps > 3
+    max: 3
+    do: learning.chat.ask
+    with:
+      message: '{{seed_questions | next}}'
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#material-element-anchor
+- manual: student/02-student.md#context-tab
+watch_for:
+- 一般的な説明とこの論文での意味が区別されて出る
+- 教員が承認した説明だけが出て、候補が混ざらない
+- 一般的な説明が分野外の読者にも通じる言葉で書かれている

@@ -1,0 +1,53 @@
+id: s-lecture-then-trace
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、{{topic_hint}} のレクチャーを聴き、分からない箇所で止めて記号→⚓→質問と辿る'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- symbol_hints
+- interrupt_questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.lecture.audio_status
+- do: learning.lecture.sequence
+  note: 最初から聴く
+- do: learning.symbol.lookup
+  with:
+    symbol: '{{symbol_hints | next}}'
+  note: 止めて、聞き取れなかった記号の定義を確かめる
+- do: learning.component.context
+  note: いまのスライドの ⚓ を開く
+- repeat:
+    until: persona_decides_to_stop or steps > 3
+    max: 3
+    do: learning.chat.ask
+    with:
+      message: '{{interrupt_questions | next}}'
+- do: learning.lecture.sequence
+  note: 続きから聴く
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#interactive-lecture
+- manual: student/02-student.md#symbol-lookup
+- manual: student/02-student.md#material-element-anchor
+watch_for:
+- スライドの分割で論理の流れ（前提→式→結果）が追える
+- スライドの表示と読み上げが同じ箇所を指している
+- 復元由来の式にはその印が付く
+- 止めて質問した後、どこから再開するのかが分かる

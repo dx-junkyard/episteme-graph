@@ -104,3 +104,129 @@ def test_run_all_writes_findings(tmp_path):
     assert findings[0].evidence.transcript_steps == [1, 2]
     notes = json.loads((tmp_path / "oracle_notes.json").read_text())
     assert "未実施" in notes["observation"]["note"]
+
+
+# --- §18 の拡張 ---------------------------------------------------------------
+
+def _get(seq, action, body, *, path="/api/learning/x", screen="learning", persona="st-1", args=None, status=200):
+    st = _step(seq, action, body=body, path=path, screen=screen, persona=persona, status=status)
+    st.http[0].method = "GET"
+    if args:
+        st.args = args
+    return st
+
+
+def test_principle_internal_id_new_prefixes():
+    for token in ("eq_tex_4", "fig_3", "sec_runin_2", "ev_abc1", "m2|outer"):
+        steps = [_get(1, "learning.element.context", {"facts": [f"関係 {token} を見る"]})]
+        assert any("内部 ID" in f.hypothesis for f in principle.check(steps, _factory())), token
+    ok = [_get(1, "learning.element.context", {"facts": ["式 (12) は z = 0.5 で成り立つ"]})]
+    assert not any("内部 ID" in f.hypothesis for f in principle.check(ok, _factory()))
+
+
+def test_principle_language_mismatch_ja_default():
+    steps = [_get(1, "learning.personal_network.nearby", {"facts": ["This node is derived from the theory basis."]})]
+    assert any("英語" in f.hypothesis for f in principle.check(steps, _factory()))
+    ok = [_get(1, "learning.personal_network.nearby", {"facts": ["式 (12) は理論の基礎から導かれます。"],
+                                                        "label": "ΛCDM"})]
+    assert not any("英語" in f.hypothesis for f in principle.check(ok, _factory()))
+
+
+def test_principle_language_english_persona(monkeypatch):
+    monkeypatch.setattr(principle, "_persona_language", lambda d, p: "en")
+    steps = [_get(1, "learning.atlas.view", {"facts": ["このコーパスの中では検証記録がありません。"]})]
+    assert any("言語不一致" in f.hypothesis for f in principle.check(steps, _factory()))
+
+
+def test_principle_scoring_vocab_read_from_product_guardrails():
+    vocab = principle.scoring_vocab()
+    assert "正答率" in vocab and "不正解" in vocab
+    steps = [_get(1, "learning.reconstruction.submit", {"statements": ["あなたの答えは不正解です"]})]
+    assert any("採点" in f.hypothesis for f in principle.check(steps, _factory()))
+    quoted = [_get(1, "learning.reconstruction.submit", {"quote": "68% CL で正解に近い"})]
+    assert not any("採点" in f.hypothesis for f in principle.check(quoted, _factory()))
+    chat = [_get(1, "learning.chat.ask", {"answer": "1% 精度", "facts": ["一致度は高めです"]},
+                 args={"cycle_mode": "diff"})]
+    assert any("採点" in f.hypothesis for f in principle.check(chat, _factory()))
+
+
+def test_principle_teacher_structure_forbidden_keys():
+    bad = [_get(1, "admin.graph_review.open", {"modules": [{"label": "定義", "member_count": 3,
+                                                             "id": "m2|outer|ops=x"}]},
+                path="/api/admin/documents/d/theory-modules", screen="admin")]
+    found = principle.check(bad, _factory())
+    assert any("教員向け" in f.hypothesis and "member_count" in f.evidence.quote for f in found)
+    ok = [_get(1, "admin.graph_review.open", {"modules": [{"label": "定義"}]},
+               path="/api/admin/documents/d/paper-layer", screen="admin")]
+    assert principle.check(ok, _factory()) == []
+
+
+def test_contract_graph_chat_stance_prefix():
+    bad = [_step(1, "admin.graph_review.chat", screen="admin",
+                 body={"reply": "AIの読み（未確認）：この論文は…", "stance_label": "AIの読み（未確認）"})]
+    ok = [_step(1, "admin.graph_review.chat", screen="admin",
+                body={"reply": "この論文は…", "stance_label": "AIの読み（未確認）"})]
+    assert any("重複" in f.hypothesis for f in contract.check(bad, _factory()))
+    assert contract.check(ok, _factory()) == []
+
+
+def test_contract_hop_degraded_is_fact_not_violation():
+    steps = [_get(1, "learning.component.context_hop", {"instance": {"component": {"label": "x"}}, "graph": None})]
+    found = contract.check(steps, _factory())
+    assert len(found) == 1 and found[0].hypothesis.startswith("縮退の事実") and found[0].severity_label == "confused"
+
+
+def test_contract_symbol_lookup_outside_course():
+    course = _get(1, "learning.course.open", {"course": {"data": {"sources": [{"document_id": "doc-a"}]}}})
+    inside = _get(2, "learning.symbol.lookup", {"definition": {"document_id": "doc-a"}})
+    outside = _get(3, "learning.symbol.lookup", {"definition": {"document_id": "doc-b"}})
+    assert contract.check([course, inside], _factory()) == []
+    assert any("別論文" in f.hypothesis for f in contract.check([course, outside], _factory()))
+    assert contract.check([outside], _factory()) == []  # sources を知らなければ判定しない
+
+
+def test_behavior_trace_break_grouped_by_cause():
+    steps = [_get(1, "learning.element.context", {"x": 1}),
+             _get(2, "learning.component.context_hop", {"detail": "missing"}, status=404),
+             _get(3, "learning.element.context", {"x": 1}, persona="st-2"),
+             _get(4, "learning.component.context_hop", {"detail": "missing"}, status=404, persona="st-2")]
+    found, _ = behavior.check(steps, _factory())
+    breaks = [f for f in found if "辿り" in f.hypothesis]
+    assert len({f.fingerprint for f in breaks}) == 1 and breaks[0].severity_label == "blocked"
+
+
+def test_principle_enumeration_ten_is_not_score():
+    """第 15 周の誤検出: 「次の 3 点」「1点」は列挙。点数は採点の文脈だけで当てる。"""
+    quiet = [_step(i, "learning.chat.ask", body={k: t}) for i, (k, t) in enumerate(
+        [("answer", "要点は次の 3点 です"), ("answer", "1点だけ補足します"), ("facts", ["注意は 1点 あります"])], 1)]
+    assert not any("数値" in f.hypothesis for f in principle.check(quiet, _factory()))
+    for t in ("10点満点で 7点満点", "評価は 7/10 です", "点数は 80"):
+        found = principle.check([_step(1, "learning.chat.ask", body={"answer": t})], _factory())
+        assert any("数値" in f.hypothesis for f in found), t
+
+
+def test_principle_delimited_tex_label_is_not_raw():
+    ok = [_get(1, "learning.chunk.claim_refs",
+               {"label": r"In an equation of this paper, $d$ depends on $\chi_{\mathrm{eff}}$ and $\frac{a}{b}$"}),
+          _get(2, "learning.chunk.claim_refs", {"label": r"cut: $d$ depends on $\chi_{\mathrm{…"})]
+    assert not any("生の TeX" in f.hypothesis for f in principle.check(ok, _factory()))
+    for lab in (r"\frac{a}{b} の比", r"残骸 \( x \) がある"):
+        found = principle.check([_get(1, "learning.chunk.claim_refs", {"label": lab})], _factory())
+        assert any("生の TeX" in f.hypothesis for f in found), lab
+
+
+def test_dialogue_viewbox_and_lecture_contract_not_findings():
+    from uxsim.oracles import dialogue
+    steps = [
+        _get(1, "learning.atlas.open", {"viewBox": 100, "w": 3}),
+        _get(2, "learning.lecture.audio_status", {"ready_chunks": 2, "total_chunks": 3, "total_duration_ms": 9},
+             path="/api/learning/lecture/courses/c/topics/t/audio-status"),
+        _get(3, "learning.lecture.sequence", {"duration_ms": 5, "total_slides": 4},
+             path="/api/learning/lecture/courses/c/topics/t/sequence"),
+    ]
+    assert not any("数値の項目" in f.hypothesis for f in dialogue.check(steps, _factory()))
+    notes = dialogue.ui_contract_notes(steps)
+    assert set(notes) == {"learning.lecture.audio_status", "learning.lecture.sequence"}
+    # 真の検出（confidence）は残る
+    bad = [_get(1, "learning.element.context", {"confidence": 0.8})]
+    assert any("数値の項目" in f.hypothesis for f in dialogue.check(bad, _factory()))

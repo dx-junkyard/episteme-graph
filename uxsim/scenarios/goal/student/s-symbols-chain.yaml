@@ -1,0 +1,49 @@
+id: s-symbols-chain
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、式の多い {{topic_hint}} で記号を順にタップし、定義から前提の説明へ進む'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- symbol_hints
+- seed_questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- repeat:
+    until: persona_decides_to_stop or steps > 4
+    max: 4
+    do: learning.symbol.lookup
+    with:
+      symbol: '{{symbol_hints | next}}'
+- do: learning.element.context
+  note: 記号が出てくる式の文脈を開く
+- repeat:
+    until: persona_decides_to_stop or steps > 3
+    max: 3
+    do: learning.chat.ask
+    with:
+      message: '{{seed_questions | next}}'
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#symbol-lookup
+- manual: student/02-student.md#prerequisite-check
+watch_for:
+- 記号をタップすると、その位置より前の定義が出るか、定義が無いことが事実文で出る
+- 定義を求めて別の論文を黙って探しに行かない
+- 式は印字番号と記号で語られ、復元由来の式にはその印が付く
+- 固定文が読み手の言語で出る

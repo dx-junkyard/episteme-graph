@@ -1,0 +1,42 @@
+id: s-stuck-scaffold
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために {{topic_hint}} を読むが、分からないと短く言い続ける'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- stuck_messages
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- repeat:
+    until: persona_decides_to_stop or friction == gave_up or steps > 5
+    max: 5
+    do: learning.chat.ask
+    with:
+      message: '{{stuck_messages | next}}'
+- choose:
+  - do: learning.descent.ladder
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#ai-chat
+- manual: student/02-student.md#prerequisite-check
+- manual: student/02-student.md#descent-ladder
+watch_for:
+- 足場かけが一度に一点だけ示される
+- 前提の確認が同じ問いを繰り返さない

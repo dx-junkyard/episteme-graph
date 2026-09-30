@@ -71,9 +71,30 @@ watch_for:                        # 審判が見るべきこと（平叙の事�
 | students | `s-quota-edge` | 上限に達するまで質問を続ける |
 | students | `s-free-wander` | 目標だけ与えて自由に歩く |
 | students | `s-voice-casual` | 音声・気軽な調子で話しかける |
+| students | `s-read-backbone` | ⚓ を順に開く → 要素文脈（中心命題での役割）→ 出典（§18 #1・2） |
+| students | `s-discuss-backbone` | 議論の開幕（中心命題・支持構造・確かめていないこと）→ 支持構造の一つを議論（#3） |
+| students | `s-symbols-chain` | 記号を順にタップ → 式の文脈 → 前提の説明（#7・8） |
+| students | `s-lecture-then-trace` | レクチャー → 止めて記号 → ⚓ → 質問 → 続き（#9） |
+| students | `s-two-layer-explanation` | 同じ要素の一般説明とこの論文での意味を読み比べる（#10・11） |
+| students | `s-check-then-reconstruct` | 確認問題 → 自己確認 → 再構成の出題と照合（#12） |
+| students | `s-trace-one-hop` | ⚓ → 要素文脈 → 隣の要素へ 1 hop ずつ → 旅（#13・14） |
+| students | `s-source-roundtrip` | 質問 → 出典チップ → 原文 → 主張の参照 → 教材へ戻る（#15・16） |
+| students | `s-descend-and-nearby` | 降下路 → 楽屋 → いまここの周り（#17・18） |
+| students | `s-map-to-sea-to-discuss` | 分野の地図 → 推定の糸 → 位置づけ → 論文の海 → コース外の論文と議論（#19・20） |
+| students | `s-return-and-journey` | （session 2）扉 → 持ち越し → わたしの地図 → 霧 → 旅 → この場所の周り（#21） |
+| students | `s-ask-where-from` | 式や回答の出所を構造として問い続ける（#22・23） |
+| students | `s-select-and-ask` | 教材の一文を選択して質問 → 帰属カード（#24） |
+| students | `s-misconception-mirror` | 誤解を前提に質問し訂正を受ける（#25） |
+| students | `s-stuck-scaffold` | 「わからない」と短く言い続ける（#26） |
+| students | `s-elicit-diff` | 予想を書く → 出典と並置（#27） |
 | teachers | `t-build-course-from-corpus` | 次にやること → 教材 → コースビルダー → 登録 → リリース前の確認 → 公開 |
 | teachers | `t-review-graph-then-publish` | グラフレビューで承認・却下 → コース登録 → リリース前の確認 → 公開 |
 | teachers | `t-onboard-student-and-share` | 学生アカウント作成 → グループ作成・招待 → 共有 |
+| teachers | `t-structure-layers` | グラフ画面で理論モジュール → 論文の順 → 対話（教材を読むだけ。§18 #4・5） |
+| teachers | `t-paper-order-coverage` | 論文の順で章 → ノード、掛かっていない章を見つける（#6） |
+| teachers | `t-graph-dialogue-to-approve` | グラフ全体対話 → ノード対話 → 根拠 claim の承認（#28） |
+| teachers | `t-deliberation-figure` | 図を深く検討 → 本文での言及 → AI アシスタントに手順を聞く（#29） |
+| teachers | `t-seminar-brief` | ゼミ前ブリーフを読む（#30） |
 
 経路を足すときは分野の語を書かず `params_required` で穴にする（§11.5）。経路を改名・削除しない
 （使わなくなったら `status: retired` を付けて残す — 課題エントリから参照されるため）。

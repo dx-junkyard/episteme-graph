@@ -26,9 +26,11 @@ def run_oracles(run_dir: Path, *, judge_llm: Optional[PersonaLLM] = None, databa
     factory = FindingFactory(meta)
     notes: dict = {}
     found: list[Finding] = []
-    found += contract.check(steps, factory)
+    brain_backed = str(getattr(meta, "persona_llm_provider", "") or get_settings().persona_llm_provider) == "mailbox"
+    found += contract.check(steps, factory, brain_backed=brain_backed)
     found += principle.check(steps, factory)
     found += dialogue.check(steps, factory)
+    notes["dialogue_ui_contract"] = dialogue.ui_contract_notes(steps)
     c, notes["behavior"] = behavior.check(steps, factory, judge_llm)
     found += c
     d, notes["document"] = document.check(steps, factory, judge_llm, out_dir=run_dir)

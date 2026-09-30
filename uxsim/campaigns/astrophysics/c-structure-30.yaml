@@ -1,0 +1,36 @@
+id: c-astro-structure-30
+domain: astrophysics
+snapshot: corpus-astro-v1
+course_id: 1bad7d9f
+personas:
+  teachers: [te-01-rookie-seminar, te-02-veteran-intro, te-03-meticulous-seminar, te-04-copilot-intro, te-05-delegator-lab]
+  students: [st-01-m1-radio, st-02-m2-lensing-theory, st-03-d1-from-particle, st-04-intl-exoplanet, st-05-night-solarwind,
+             st-06-skeptic-bao, st-07-m1-grb-voice, st-08-m1-rprocess-lecture, st-09-d2-from-datasci, st-10-d3-21cm-receiver]
+scenarios:
+  teacher: [t-structure-layers, t-paper-order-coverage, t-graph-dialogue-to-approve, t-deliberation-figure, t-seminar-brief]
+  student: [s-read-backbone, s-discuss-backbone, s-symbols-chain, s-lecture-then-trace, s-two-layer-explanation,
+            s-check-then-reconstruct, s-trace-one-hop, s-source-roundtrip, s-descend-and-nearby, s-map-to-sea-to-discuss,
+            s-return-and-journey, s-ask-where-from, s-select-and-ask, s-misconception-mirror, s-stuck-scaffold, s-elicit-diff]
+runner: api
+flags: {}
+sessions_per_student: 2
+budget: {product_llm_calls: 1500, persona_llm_calls: 2400, wall_clock_minutes: 480}
+notes: |
+  設計書 docs/architecture/persona_enactment_testing_design.md §18（論理構造の見やすさ・辿れる理解・対話支援の 30 場面）。
+  教員場面は教材 7ef9e487 / 7954db7d（グラフ・論文層あり）を既存のまま読むだけで、教材の取り込み・コース登録・公開はしない。
+  学生はコース 1bad7d9f に固定（周の前に reset_learner_state --yes → pin_course --yes）。
+  runner の組合せ規則（uxsim/runner/api.py run_campaign）: 教員は各自 1 セッションで teacher の経路を全部、学生はセッション
+  1〜sessions_per_student ごとに student の経路のうち session が一致するものを全部走らせる（ペルソナ × 経路の全組）。
+  したがって §18.3 の 30 組は全組の部分集合として必ず含まれ、実際の組は教員 5 × 5 経路 = 25、学生 10 × 15 経路（session 1）
+  + 10 × 1 経路（s-return-and-journey, session 2）= 160、合計 185 組になる。30 組だけに絞るときは --persona / --scenario の
+  フィルタで場面ごとに走らせる。§18.3 の 30 組:
+   1 st-01 × s-read-backbone / 2 st-06 × s-read-backbone / 3 st-02 × s-discuss-backbone / 4 te-03 × t-structure-layers /
+   5 te-02 × t-structure-layers / 6 te-01 × t-paper-order-coverage / 7 st-10 × s-symbols-chain / 8 st-04 × s-symbols-chain /
+   9 st-08 × s-lecture-then-trace / 10 st-01 × s-two-layer-explanation / 11 st-09 × s-two-layer-explanation /
+   12 st-06 × s-check-then-reconstruct / 13 st-01 × s-trace-one-hop / 14 st-03 × s-trace-one-hop / 15 st-06 × s-source-roundtrip /
+   16 st-05 × s-source-roundtrip / 17 st-01 × s-descend-and-nearby / 18 st-02 × s-descend-and-nearby /
+   19 st-06 × s-map-to-sea-to-discuss / 20 st-04 × s-map-to-sea-to-discuss / 21 st-07 × s-return-and-journey（session 2）/
+   22 st-01 × s-ask-where-from / 23 st-06 × s-ask-where-from / 24 st-03 × s-select-and-ask / 25 st-06 × s-misconception-mirror /
+   26 st-05 × s-stuck-scaffold / 27 st-02 × s-elicit-diff / 28 te-03 × t-graph-dialogue-to-approve /
+   29 te-04 × t-deliberation-figure / 30 te-05 × t-seminar-brief
+  既存の s-check-and-object・s-discuss-one-paper は本 campaign では新経路に置き換える。
