@@ -22,6 +22,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user
 from services import (
     dismiss_cycle_intention,
@@ -56,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 # main.py で直接 include される学習者向け router（reconstruction.py / discuss_observation.py
 # と同型。admin.router 経由の二段ネストにしない — Tier 3-17c）。
-learning_router = APIRouter(prefix="/api/learning", tags=["Learning"])
+learning_router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 
 class CycleIntentionRequest(BaseModel):

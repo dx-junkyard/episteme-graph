@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 import services
 from core import atlas_correspondence
 from core import atlas_state
@@ -52,7 +53,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/landscape", tags=["Landscape"])
 
 # 学習者向け（main.py がそのまま登録する。フルパスを自前で持つ）
-learning_router = APIRouter(prefix="/api/learning", tags=["Learning"])
+learning_router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 
 # ---------------------------------------------------------------------------

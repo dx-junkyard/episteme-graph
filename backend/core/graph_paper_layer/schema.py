@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from core import display_projection as _dp
 from core.text_hygiene import strip_control_sequences
 
 # ---------------------------------------------------------------------------
@@ -86,22 +87,11 @@ TEXT_SNIPPET_MAX = 200
 #: display_label 用の短い本文上限（PL7 の「番号なし: 本文先頭」）。
 LABEL_SNIPPET_MAX = 40
 
-#: PL4: DTO に載せてはいけないキー（ガードレールが再帰走査する）。
-FORBIDDEN_KEYS: tuple[str, ...] = (
-    "confidence",
-    "weight",
-    "candidate_score",
-    "qualification_reason",
-)
+#: PL4: DTO に載せてはいけないキー（ガードレールが再帰走査する）。正本は display_projection（DP2）。
+FORBIDDEN_KEYS: tuple[str, ...] = _dp.PAPER_LAYER_FORBIDDEN_KEYS
 
 #: PL7: display_label に出してはいけない内部 ID のプレフィックス（テスト用）。
-INTERNAL_ID_PREFIXES: tuple[str, ...] = (
-    "eq_op_",
-    "theory_op_",
-    "eq_",
-    "ev_",
-    "claim_",
-)
+INTERNAL_ID_PREFIXES: tuple[str, ...] = _dp.PAPER_LAYER_INTERNAL_ID_PREFIXES
 
 #: coverage の ``unbound_claims`` に載せる claim の条件（§3.2）。
 UNBOUND_CLAIM_SUPPORT_STATUS = "source_backed"

@@ -29,6 +29,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user, _require_system_admin, _require_teacher
 # オブジェクトスコープ権限（P0）の正本ゲート。`_require_teacher` は「TEACHER 以上」しか
 # 保証しないため、course_id 直指定の経路は編集権限ゲートを必ず通す
@@ -86,7 +87,7 @@ logger = logging.getLogger(__name__)
 # admin.router（prefix=/api/admin）に include される
 admin_router = APIRouter(prefix="/doubt", tags=["Doubt Layer"])
 # main.py で直接 include される学習者向け読み取り専用 router
-learning_router = APIRouter(prefix="/api/learning", tags=["Learning"])
+learning_router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 _LEDGER_TARGET_TYPES = tuple(t.value for t in TargetType)
 _VERIFICATION_STATUSES = tuple(s.value for s in VerificationStatus)

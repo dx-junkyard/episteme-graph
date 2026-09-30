@@ -30,11 +30,12 @@ from core import atlas as atlas_module
 from core import atlas_state
 from core import atlas_placement
 from core.course_data import course_cartridge_id, course_topics
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/atlas", tags=["Atlas"])
+router = APIRouter(prefix="/api/atlas", tags=["Atlas"], route_class=LearnerDisplayRoute)
 
 # フィクスチャと同じ viewBox (§4.1)
 _VIEWBOX = {1: (680, 370), 2: (680, 330), 3: (680, 400)}

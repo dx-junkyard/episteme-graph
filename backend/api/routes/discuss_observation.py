@@ -23,6 +23,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user, _require_system_admin
 from core.discuss import observation
 from core.schema import AUDIT_ENTITY_DISCUSS_OBSERVATION
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 # main.py が `/api/admin` prefix でフラット登録する（Tier 3-17c、reconstruction.py と同型）。
 admin_router = APIRouter(tags=["Discuss Observation"])
 # main.py が prefix なしでそのまま登録する（自身が /api/learning を持つ）。
-learning_router = APIRouter(prefix="/api/learning", tags=["Learning"])
+learning_router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 
 _MAX_METRIC_EVENTS_PER_REQUEST = 20

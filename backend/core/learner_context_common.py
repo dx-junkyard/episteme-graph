@@ -33,6 +33,7 @@ import re
 import uuid
 from typing import Any, Callable
 
+from core import display_projection as _dp
 from core.label_vocab import RECONSTRUCTED_EQUATION_NOTE
 from core.text_excerpt import looks_like_tex_math
 from core.deliberation.schema import (
@@ -90,11 +91,12 @@ def strip_confidence(value: Any) -> Any:
     学習者向け文脈 API 共通のヘルパー。component / claim / equation の各 API が
     同じ規則を使うため、正本はここ1箇所に置く（W8 の実装をコピペしない）。
     """
-    if isinstance(value, dict):
-        return {k: strip_confidence(v) for k, v in value.items() if k != "confidence"}
-    if isinstance(value, list):
-        return [strip_confidence(v) for v in value]
-    return value
+    return _dp.strip_keys(value, _CONFIDENCE_ONLY)
+
+
+#: ``strip_confidence`` が落とすキー（W8。学習者向けルート全体の禁止キーは
+#: ``display_projection.FORBIDDEN_KEYS_LEARNER`` が別途落とす）。
+_CONFIDENCE_ONLY = frozenset({"confidence"})
 
 
 # ---------------------------------------------------------------------------
@@ -136,77 +138,38 @@ def scoped_id_match_sql(
 # W層は変更しない（LE6）ので、学習者向け射影の時点で「裸の内部 ID 形」を検出し
 # 一般ラベルへ置換する。
 
-_UUID_LABEL_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
+# 語彙（正規表現・一般ラベル表）の正本は ``core/display_projection.py``（DP2）。
+# ここでは学習者向け要素文脈の遮断層として使う名前を割り当てるだけで、判定の中身
+# （先頭一致 / 文中埋め込み / 役割文 / agent 側 ID）は従来と同一である。
+_UUID_LABEL_RE = _dp.UUID_FULL_RE
 
-_INTERNAL_ID_LABEL_RES = (
-    re.compile(r"^ev(?:idence)?_[0-9]", re.IGNORECASE),   # evidence_registry: ev_0001
-    re.compile(r"^synth_", re.IGNORECASE),               # 合成 claim: synth_claim_0001
-    re.compile(r"^claim_", re.IGNORECASE),                # claim 生ID: claim_span_001 / claim_0004
-    re.compile(r"^span_[0-9]", re.IGNORECASE),           # rhetorical_role: span_001
-    re.compile(r"^support:"),                             # thesis support node: support:<section>:<idx>
-    re.compile(r"^node_", re.IGNORECASE),                 # graph node id
-)
+_INTERNAL_ID_LABEL_RES = _dp.LEARNER_INTERNAL_ID_LABEL_RES
 
 # ラベル**全体**ではなく「内部 ID を埋め込んだ事実文」も遮る（EC3。
 # equation_context_panel_display_design.md §1.5）。W層 ``_derivation_membership_facts``
 # は「導出「derivation_eq_tex_b16」のステップ「step_001」」のような文をラベルにするため、
-# 先頭一致の ``_INTERNAL_ID_LABEL_RES`` では検出できない。関係の意味（relation_label
-# 「の導出に属する」）は保持したまま、ラベルだけ一般ラベルへ置換する。
-_EMBEDDED_INTERNAL_ID_RE = re.compile(
-    r"derivation_[A-Za-z0-9_]+"
-    r"|system_derivation_[0-9]+"
-    r"|(?:^|[^A-Za-z0-9])sys_[0-9]+_step_[0-9]+"
-    r"|(?:^|[^A-Za-z0-9])step_[0-9]+",
-    re.IGNORECASE,
-)
+# 先頭一致の ``_INTERNAL_ID_LABEL_RES`` では検出できない。
+_EMBEDDED_INTERNAL_ID_RE = _dp.LEARNER_EMBEDDED_INTERNAL_ID_RE
 
 # ``eq_2_7`` 形は論文の式番号由来で学習者にも可読なため v1 では置換しない（設計書 §4 の裁定）。
-_EQUATION_NUMBER_LABEL_RE = re.compile(r"^eq[_\-.]?[0-9]", re.IGNORECASE)
+_EQUATION_NUMBER_LABEL_RE = _dp.LEARNER_EQUATION_NUMBER_LABEL_RE
 
 # element_type 別の一般ラベル（内部 ID を出す代わりの事実文。関係語
 # （``relation_label``）は保持するので「図 / を根拠とする」の形で意味は残る）。
-_GENERIC_ITEM_LABELS = {
-    ELEMENT_THEORY_CLAIM: "関連する主張",
-    ELEMENT_THEORY_COMPONENT: "関連する論理要素",
-    ELEMENT_EQUATION: "関連する数式",
-    "figure": "図",
-    "evidence": "本文の根拠箇所",
-    "section": "掲載セクション",
-    "thesis": "中心命題",
-    "derivation": "導出の流れ",
-    "symbol": "記号",
-    "stage": "理論の段階",
-    "part": "構成部品",
-}
-_GENERIC_ITEM_LABEL_FALLBACK = "関連する要素"
+_GENERIC_ITEM_LABELS = _dp.GENERIC_ITEM_LABELS
+_GENERIC_ITEM_LABEL_FALLBACK = _dp.GENERIC_LABEL_FALLBACK
 
 # ``focus.contextual_role`` は上位項目のラベルから合成される（W層
 # ``_derive_contextual_role``）ため、内部 ID がそのまま役割文に混ざり得る
-# （「synth_claim_0001を定量化する」等）。含まれていたら role をキーごと落とす
-# （candidate / unidentified と同じ「推測で穴埋めしない」縮退）。
-ROLE_INTERNAL_TOKEN_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-    r"|synth_[A-Za-z0-9_]*[0-9]"
-    r"|claim_span_[0-9]"
-    r"|claim_[0-9]{3,}"
-    r"|ev(?:idence)?_[0-9]{3,}"
-    r"|span_[0-9]{3,}"
-    r"|support:",
-    re.IGNORECASE,
-)
+# （「synth_claim_0001を定量化する」等）。含まれていたら role をキーごと落とす。
+ROLE_INTERNAL_TOKEN_RE = _dp.LEARNER_ROLE_INTERNAL_TOKEN_RE
 # 後方互換 alias（共有契約の公開名は ROLE_INTERNAL_TOKEN_RE）。
 _ROLE_INTERNAL_TOKEN_RE = ROLE_INTERNAL_TOKEN_RE
 
 # TheoryOperationGraph のノード ID（``theory_op_0001`` / ``eq_op_0007``）と
 # コンポーネントの agent 側 ID。ITEM v2 の ``sublabel`` / ``intrinsic`` の事実文は
 # ラベルと違い自由文なので、**文中のどこに現れても**遮断する。
-_EXTRA_INTERNAL_TOKEN_RE = re.compile(
-    r"(?:^|[^A-Za-z0-9])(?:theory_op|eq_op)_[0-9]"
-    r"|(?:^|[^A-Za-z0-9])comp_[0-9]",
-    re.IGNORECASE,
-)
+_EXTRA_INTERNAL_TOKEN_RE = _dp.LEARNER_EXTRA_INTERNAL_TOKEN_RE
 
 # W層 ITEM の表示専用 element_type（``deliberation/schema.py`` の解決対象語彙には無い）。
 ITEM_TYPE_SYMBOL = "symbol"

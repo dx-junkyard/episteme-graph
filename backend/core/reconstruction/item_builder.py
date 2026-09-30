@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.element_vocab import claim_type_label
 from core.reconstruction.claim_context import (
     RELATION_WITHHELD_FEW_SYMBOLS,
     RELATION_WITHHELD_NOT_RELATIONAL,
@@ -73,6 +74,8 @@ def visible_claim_fields(claim: dict[str, Any]) -> dict:
     return {
         "concepts": subject_driver_concepts(claim),
         "claim_type": str(claim.get("claim_type") or ""),
+        # 種別は日本語の表示名で渡す（語彙の正本は core/element_vocab。未知は空）。
+        "claim_type_label": claim_type_label(claim.get("claim_type")),
         "source_scope": _public_source_scope(claim.get("source_scope")),
     }
 
@@ -83,7 +86,7 @@ def _public_source_scope(scope: Any) -> dict:
         return {}
     return {
         "level": str(scope.get("level") or ""),
-        "section_id": str(scope.get("section_id") or ""),
+        # section_id は解析層の内部 ID なので学習者に返さない（見出しだけで足りる）。
         "section_title": str(scope.get("section_title") or ""),
         "pages": [p for p in (scope.get("pages") or []) if isinstance(p, int)],
     }

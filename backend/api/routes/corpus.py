@@ -31,6 +31,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user
 from services import (
     list_visible_document_ids,
@@ -43,7 +44,7 @@ from core import corpus_view
 logger = logging.getLogger(__name__)
 
 # main.py が直接登録する（cycle.py / reconstruction.py と同型の学習者向け router）。
-learning_router = APIRouter(prefix="/api/learning", tags=["Learning"])
+learning_router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 _DETAIL_DOMAIN_REQUIRED = "分野を指定してください。"
 _DETAIL_NO_SKELETON = "この分野には凍結済みの骨格がありません。"

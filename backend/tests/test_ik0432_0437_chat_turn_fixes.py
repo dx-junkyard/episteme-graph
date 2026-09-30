@@ -171,6 +171,29 @@ class TestRehydrateHistorySources:
         client = [{"role": "assistant", "content": "回答 A"}]
         assert learning_mod._rehydrate_history_sources(client, stored)[0] == {"role": "assistant", "content": "回答 A"}
 
+    def test_matches_by_id_when_projection_masked_the_answer(self):
+        """表示投影で本文の内部 ID が置き換わっても、id / reply_to_id で出典を戻す（レビュー m5）。"""
+        from core.display_projection import project_for_learner
+
+        raw = "式 eq_tex_b14 が要 [出典1]"
+        masked = project_for_learner({"answer": raw})["answer"]
+        assert masked != raw
+        stored = [
+            {"role": "user", "content": "q", "id": "u1"},
+            {"role": "assistant", "content": raw, "id": "a1", "sources": [{"index": 1, "chunk_id": "c"}]},
+        ]
+        by_id = [{"role": "user", "content": "q", "id": "u1"}, {"role": "assistant", "content": masked, "id": "a1"}]
+        assert learning_mod._rehydrate_history_sources(by_id, stored)[1]["sources"] == [{"index": 1, "chunk_id": "c"}]
+        by_reply = [
+            {"role": "user", "content": "q", "id": "u1"},
+            {"role": "assistant", "content": masked, "reply_to_id": "u1"},
+        ]
+        out = learning_mod._rehydrate_history_sources(by_reply, stored)
+        assert out[1]["sources"] == [{"index": 1, "chunk_id": "c"}]
+        assert out[1]["content"] == masked  # 本文は送り返されたまま
+        unmatched = [{"role": "assistant", "content": masked, "id": "zz"}]
+        assert "sources" not in learning_mod._rehydrate_history_sources(unmatched, stored)[0]
+
 
 class TestStableNumberingAcrossTurns:
     def test_second_turn_reuses_number_and_continues(self, chat_env):

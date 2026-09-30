@@ -17,6 +17,7 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text as sa_text
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user
 from schemas import (
     LectureFigureItem,
@@ -70,7 +71,7 @@ from core import element_explanations
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/learning/lecture", tags=["Lecture"])
+router = APIRouter(prefix="/api/learning/lecture", tags=["Lecture"], route_class=LearnerDisplayRoute)
 
 
 # ---------------------------------------------------------------------------

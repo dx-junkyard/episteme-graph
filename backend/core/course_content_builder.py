@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from core import course_units as course_units_mod
+from core import display_projection as _dp
 from core import label_vocab
 from core import element_explanations as element_explanations_store
 from core.course_data import (
@@ -4215,7 +4216,7 @@ def _resolvable_formula_keys(formulas: list[dict]) -> set[str]:
 
 
 #: 学習者に見せない抽出段の式 ID（``eq_eqcand_inline_blk_…`` / ``eqcand_…`` / ``eq_op_…``）。
-_INTERNAL_EQUATION_ID_RE = re.compile(r"(?:^|[^A-Za-z0-9])(?:eq_)?eqcand_|(?:^|[^A-Za-z0-9])eq_op_\d", re.IGNORECASE)
+_INTERNAL_EQUATION_ID_RE = _dp.COURSE_CONTENT_INTERNAL_EQUATION_ID_RE  # 正本は display_projection（DP2）
 
 
 def is_internal_equation_id(text: object) -> bool:
@@ -5963,12 +5964,7 @@ _LEGACY_EQUATION_REQUIREMENT_RE = re.compile(r"^数式\s+.+\s+の意味または
 
 # 学習者向けの文に出してはならない内部 ID（PL7）。eq_* / comp_* / claim_* /
 # synth_claim_* / ev_* / UUID。論文の印字番号（式 (12)）は対象外。
-_LEARNER_INTERNAL_ID_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?:eq_[A-Za-z0-9_]+|comp_[A-Za-z0-9_]+|claim_[A-Za-z0-9_]+"
-    r"|synth_claim_[0-9]+|ev_[0-9]+"
-    r"|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
-    r"(?![A-Za-z0-9])"
-)
+_LEARNER_INTERNAL_ID_RE = _dp.COURSE_CONTENT_LEARNER_INTERNAL_ID_RE  # 正本は display_projection（DP2）
 _EMBED_SYNTAX_RE = re.compile(r"!?\[\[[^\]]*\]\]")
 
 # 印字番号として読めるラベル（``12`` / ``(12)`` / ``3a`` / ``A.1`` / ``2.7``）。

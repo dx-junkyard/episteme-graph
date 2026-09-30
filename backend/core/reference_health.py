@@ -73,6 +73,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from sqlalchemy import text as sa_text
 
 from core import coverage_facts
+from core import display_projection as _dp
 
 logger = logging.getLogger(__name__)
 
@@ -176,15 +177,9 @@ CHECKED_GRAPH_LAYERS = ("main", "equation_detail")
 _LABEL_SNIPPET_MAX = 80
 
 #: 「裸の内部 ID」を表示ラベルに出さないための判定（UUID / agent 側 ID 形）。
-#: ``core.learner_context_common`` の同種の判定は学習者向け射影の正本だが、本モジュールは
-#: 教員向け運用情報であり依存を増やしたくないため、ここでは最小限の局所判定に留める。
-_UUID_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
-_INTERNAL_ID_RE = re.compile(
-    r"^(?:eq|ev|eq_op|theory_op|comp|span|step|synth_claim|claim|node|blk|sec)[_\-]?\w*\d[\w\-.]*$",
-    re.IGNORECASE,
-)
+#: 語彙は ``core.display_projection`` の系統別定数（教員向け運用情報の局所判定）を参照する。
+_UUID_RE = _dp.UUID_FULL_RE
+_INTERNAL_ID_RE = _dp.REFERENCE_HEALTH_INTERNAL_ID_RE  # 正本は display_projection（DP2）
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core import display_projection as _dp
 from core.doubt.open_assumptions import compile_open_assumptions, target_label
 from core.doubt.schema import LOAD_LEVEL_LABELS
 from core.doubt.support_paths import build_support_context, compute_support_lines_from_context
@@ -51,21 +52,12 @@ _MAX_CLEAR_SKIES = 8
 # SB2 の再帰安全網: 万一投影に混入しても落とす生数値キー
 # （core/discuss/opening.py::_strip_numeric_keys と同型。ホワイトリスト投影が主で、
 #  これは最後の安全網）。
-_FORBIDDEN_NUMERIC_KEYS = frozenset({
-    "dependent_count", "n_items", "load_score", "confidence", "score",
-    "n", "n_users", "count", "weight",
-})
+_FORBIDDEN_NUMERIC_KEYS = _dp.SEMINAR_BRIEF_FORBIDDEN_NUMERIC_KEYS  # 正本は display_projection（DP2）
 
 
 def _strip_numeric_keys(value: Any) -> Any:
     """レスポンスを再帰走査して生数値キーを除去する（SB2 の最後の安全網）。"""
-    if isinstance(value, dict):
-        return {
-            k: _strip_numeric_keys(v) for k, v in value.items() if k not in _FORBIDDEN_NUMERIC_KEYS
-        }
-    if isinstance(value, list):
-        return [_strip_numeric_keys(v) for v in value]
-    return value
+    return _dp.strip_keys(value, _FORBIDDEN_NUMERIC_KEYS)
 
 
 def _resolve_document_id(session, document_ref: str) -> str:

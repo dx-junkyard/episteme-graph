@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text as sa_text
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user, _require_teacher
 from services import _resolve_document, get_accessible_course_data, record_review_event, user_can_view_course
 from core import teacher_triage
@@ -51,7 +52,7 @@ from core.reconstruction.worker import run_item_authoring_for_document
 logger = logging.getLogger(__name__)
 
 # main.py で直接 include される学習者向け router
-learning_router = APIRouter(prefix="/api/learning", tags=["Learning"])
+learning_router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 # admin.router（prefix=/api/admin）に include される教員向け router（prefix なし）
 admin_router = APIRouter(tags=["Reconstruction"])
 

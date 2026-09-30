@@ -29,6 +29,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from core import display_projection as _dp
 from core.element_vocab import (
     chain_type_label,
     claim_tier_label,
@@ -117,49 +118,22 @@ class Label:
 # _EMBEDDED_INTERNAL_ID_RE）と整合させる。あちらは「最後の砦」として維持し、
 # こちらは**生成時点で**候補から外すための判定（EC3′）。
 
-_UUID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-)
+# 語彙の正本は ``core/display_projection.py``（DP2）。判定の中身は従来と同一。
+_UUID_RE = _dp.UUID_ANY_RE
 
 # ラベル先頭が裸の内部 ID である形。
-_INTERNAL_ID_PREFIX_RES = (
-    re.compile(r"^ev(?:idence)?_[0-9]", re.IGNORECASE),       # ev_0001
-    re.compile(r"^synth_", re.IGNORECASE),                     # synth_claim_0001
-    re.compile(r"^claim_", re.IGNORECASE),                     # claim_span_001
-    re.compile(r"^span_[0-9]", re.IGNORECASE),                 # span_001
-    re.compile(r"^support:"),                                  # support:<section>:<idx>
-    re.compile(r"^node_", re.IGNORECASE),                      # graph node id
-    re.compile(r"^comp_", re.IGNORECASE),                      # component id
-    re.compile(r"^theory_op_", re.IGNORECASE),                 # main graph node id
-    re.compile(r"^eq_op_", re.IGNORECASE),                     # equation_detail node id
-    re.compile(r"^step_[0-9]", re.IGNORECASE),                 # step_001
-    re.compile(r"^sys_[0-9]+_step_[0-9]+", re.IGNORECASE),
-    re.compile(r"^(?:system_)?derivation_", re.IGNORECASE),
-)
+_INTERNAL_ID_PREFIX_RES = _dp.DELIBERATION_INTERNAL_ID_PREFIX_RES
 
 # 文中に**埋め込まれた**内部 ID（「導出「derivation_eq_tex_b16」のステップ
 # 「step_001」」のような機械連結文を候補から外す）。
-_EMBEDDED_INTERNAL_ID_RES = (
-    re.compile(r"derivation_[A-Za-z0-9_]+", re.IGNORECASE),
-    re.compile(r"system_derivation_[0-9]+", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])sys_[0-9]+_step_[0-9]+", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])step_[0-9]+", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])theory_op_[0-9]+", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])eq_op_[0-9]+", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])(?:ev|evidence)_[0-9]{3,}", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])synth_[A-Za-z0-9_]*[0-9]", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])span_[0-9]{3,}", re.IGNORECASE),
-)
+_EMBEDDED_INTERNAL_ID_RES = _dp.DELIBERATION_EMBEDDED_INTERNAL_ID_RES
 
 # 論文の式番号の**厳密形**: ``eq_2_7`` / ``eq.3.14`` / ``(3.14)`` / ``2.7``。
 # 合成 ID ``eq_tex_b14`` は「eq の直後が数字でない」ため一致しない（§5.1）。
-_PAPER_EQUATION_NUMBER_RE = re.compile(
-    r"^\(?\s*(?:eq\.?|equation|式)?[\s_\-.]?([0-9]+(?:[._\-][0-9]+)*)\s*\)?$",
-    re.IGNORECASE,
-)
+_PAPER_EQUATION_NUMBER_RE = _dp.PAPER_EQUATION_NUMBER_RE
 
 # 文中の式 ID トークン（``eq_tex_b16`` / ``eq_2_7``）。
-_EQUATION_ID_TOKEN_RE = re.compile(r"(?:^|[^A-Za-z0-9])(eq[_\-.][A-Za-z0-9_.\-]+)", re.IGNORECASE)
+_EQUATION_ID_TOKEN_RE = _dp.DELIBERATION_EQUATION_ID_TOKEN_RE
 
 
 def looks_like_paper_equation_number(value: object) -> bool:

@@ -41,6 +41,7 @@ from core.element_explanations import (
     STATUS_APPROVED,
     list_for_document,
 )
+from core import display_projection as _dp
 from core import element_vocab
 from core.knowledge_objects.references import claim_ref_variants, normalize_claim_ref
 from core.label_vocab import SUPPORT_SECTION_LABELS
@@ -171,7 +172,7 @@ _REVIEW_REASON_FACT_PHRASES = {
 _SYSTEM_UNCONFIRMED_PREFIX = "解析がこの箇所の裏付けをまだ取れていません"
 
 # 数値を一切見せない（W8/DM6）。射影後も念のため再帰的に除去するキー。
-_FORBIDDEN_NUMERIC_KEYS = ("confidence", "load_score", "score")
+_FORBIDDEN_NUMERIC_KEYS = _dp.DISCUSS_OPENING_FORBIDDEN_NUMERIC_KEYS  # 正本は display_projection（DP2）
 
 
 # ---------------------------------------------------------------------------
@@ -781,13 +782,7 @@ def _strip_numeric_keys(value: Any) -> Any:
     （W8/DM6 相当。``core/component_context.py::_strip_confidence`` と同型の安全網。
     射影関数はそもそもホワイトリストで組み立てているため通常は何も落とさない）。
     """
-    if isinstance(value, dict):
-        return {
-            k: _strip_numeric_keys(v) for k, v in value.items() if k not in _FORBIDDEN_NUMERIC_KEYS
-        }
-    if isinstance(value, list):
-        return [_strip_numeric_keys(v) for v in value]
-    return value
+    return _dp.strip_keys(value, _FORBIDDEN_NUMERIC_KEYS)
 
 
 # ---------------------------------------------------------------------------

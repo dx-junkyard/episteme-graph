@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 import services
 from core import atlas
 from core import atlas_correspondence
@@ -54,10 +55,10 @@ admin_atlas_router = APIRouter(prefix="/atlas", tags=["Admin"])
 binding_router = APIRouter(prefix="/courses", tags=["Admin"])
 
 # 学習者向け (main.py がインクルード)
-learning_router = APIRouter(prefix="/api/learning/atlas", tags=["Learning"])
+learning_router = APIRouter(prefix="/api/learning/atlas", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 # 修正報告 (仕様書 §11: POST /api/atlas/report。main.py がインクルード)
-report_router = APIRouter(prefix="/api/atlas", tags=["Atlas"])
+report_router = APIRouter(prefix="/api/atlas", tags=["Atlas"], route_class=LearnerDisplayRoute)
 
 
 # ---------------------------------------------------------------------------

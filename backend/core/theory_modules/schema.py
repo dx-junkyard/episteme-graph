@@ -29,6 +29,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from core import display_projection as _dp
 from core.text_hygiene import strip_control_sequences
 
 # ---------------------------------------------------------------------------
@@ -109,32 +110,13 @@ THEORY_OBJECT_MAX = 120
 #: 理論対象に印字番号を並べるときの上限。
 THEORY_OBJECT_LABELS_MAX = 3
 
-#: TM6: DTO に出してはならないキー（ガードレールが再帰走査する）。
-FORBIDDEN_KEYS: tuple[str, ...] = (
-    "confidence",
-    "weight",
-    "score",
-    "candidate_score",
-    "fingerprint",
-    "structure_fingerprint",
-    "interface_width",
-    "interface_size",
-    "k",
-    "limit",
-    "count",
-    "counts",
-    "module_count",
-    "member_count",
-    "consumer_count",
-    "multiplicity",
-)
+#: TM6: DTO に出してはならないキー（ガードレールが再帰走査する）。正本は display_projection（DP2）。
+FORBIDDEN_KEYS: tuple[str, ...] = _dp.THEORY_MODULE_FORBIDDEN_KEYS
 
 #: TM10: 表示ラベル・本文に出してはならない内部 ID の形（テスト兼用）。
-INTERNAL_ID_RE = re.compile(
-    r"\b(?:eq_op|theory_op|eq|synth_claim|claim_span|claim|ev|comp|derivation|system_derivation)_[0-9A-Za-z_.:\-]*[0-9A-Za-z]",
-)
+INTERNAL_ID_RE = _dp.THEORY_MODULE_INTERNAL_ID_RE
 #: 式 ID の形（本文中の式 ID を印字番号へ置き換えるための抽出）。
-EQUATION_ID_TOKEN_RE = re.compile(r"\beq_[0-9A-Za-z_.\-]*[0-9A-Za-z]")
+EQUATION_ID_TOKEN_RE = _dp.THEORY_MODULE_EQUATION_ID_TOKEN_RE
 
 # ---------------------------------------------------------------------------
 # 事実文（TM8）。語彙表ではなく固定文として個別に置く。
@@ -238,14 +220,12 @@ def has_printed_label(record: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 #: 途中で切れた式 ID（``eq_eqcand_inline_blk_3df32664_``）も末尾の区切りごと拾う。
-_EQUATION_ID_WITH_TAIL_RE = re.compile(r"\beq_(?!op_)[0-9A-Za-z_.\-]*")
+_EQUATION_ID_WITH_TAIL_RE = _dp.THEORY_MODULE_EQUATION_ID_WITH_TAIL_RE
 #: その他の内部 ID（途中切れの末尾区切り込み）。
-_OTHER_INTERNAL_ID_WITH_TAIL_RE = re.compile(
-    r"\b(?:eq_op|theory_op|synth_claim|claim_span|claim|ev|comp|derivation|system_derivation)_[0-9A-Za-z_.:\-]*",
-)
+_OTHER_INTERNAL_ID_WITH_TAIL_RE = _dp.THEORY_MODULE_OTHER_INTERNAL_ID_WITH_TAIL_RE
 #: 式の左辺として添える記号列の上限（長い式は添えない）。
 _LHS_MAX_CHARS = 24
-UNIDENTIFIED_ELEMENT_TEXT = "（本文を特定できない要素）"
+UNIDENTIFIED_ELEMENT_TEXT = _dp.UNIDENTIFIED_ELEMENT_TEXT
 UNNUMBERED_EQUATION_TEXT = "番号なしの式"
 
 

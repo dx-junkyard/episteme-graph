@@ -28,6 +28,7 @@ from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core import display_projection as _dp
 from core.doubt.dependency import DependencyGraph, build_dependency_graph, seed_nodes_for_target
 from core.doubt.observation_targets import observation_claim_targets
 
@@ -195,6 +196,15 @@ def _real_node(node_id: str) -> bool:
     return node_id not in (_SOURCE_NODE, _SINK_NODE)
 
 
+def _readable_member_label(label: Any) -> str:
+    """cut_members の表示ラベル。ラベルが引けない・内部 ID を含むときに生のノード ID へ
+    縮退しない（事実文 ``fact_line`` は学習者にも届く — 表示投影層 DP2）。"""
+    text = str(label or "").strip()
+    if not text or _dp.is_internal_id_token(text):
+        return _dp.UNIDENTIFIED_ELEMENT_TEXT
+    return _dp.mask_internal_ids(text)
+
+
 def _cut_members(
     original_edges: list[tuple[str, str]],
     s_reachable: set[str],
@@ -213,7 +223,7 @@ def _cut_members(
         if u in s_reachable and v not in s_reachable:
             real = u if _real_node(u) else (v if _real_node(v) else None)
             if real is not None:
-                members[real] = node_labels.get(real, real)
+                members[real] = _readable_member_label(node_labels.get(real))
     return [
         {"node_id": nid, "label": members[nid]}
         for nid in sorted(members.keys())
