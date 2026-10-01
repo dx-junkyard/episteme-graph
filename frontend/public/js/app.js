@@ -8624,7 +8624,19 @@
           const data = await res.json();
           if (!data || data.available !== true ||
               !Array.isArray(data.rungs) || !data.rungs.length) {
-            // 梯子が組めない要素では枠ごと静かに消す（エラー文を出さない）。
+            // 第 17 周 D3: 組めなかった理由と次の一手（サーバの事実文）があれば素通しで出す。
+            const facts = (data && Array.isArray(data.facts)) ? data.facts.filter(Boolean) : [];
+            if (facts.length) {
+              facts.forEach((f) => {
+                const line = document.createElement("div");
+                line.className = "descent-unavailable-fact";
+                line.textContent = String(f);
+                rungsBox.appendChild(line);
+              });
+              hintBtn.disabled = true;
+              return;
+            }
+            // 理由も無ければ枠ごと静かに消す（エラー文を出さない）。
             frame.remove();
             return;
           }

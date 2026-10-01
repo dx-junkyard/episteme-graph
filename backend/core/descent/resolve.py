@@ -262,3 +262,84 @@ def resolve_element(
         match_ids=_match_ids_from_scope(db_uuid, scope),
         label=label,
     )
+
+
+# ---------------------------------------------------------------------------
+# 解決できなかった理由（第 17 周 D3: available:false に理由と次の一手を添える）
+# ---------------------------------------------------------------------------
+
+#: コースに解析済みの教材が結びついていない。
+UNRESOLVED_NO_DOCUMENTS = "no_course_documents"
+#: 同じ ID の要素が複数の論文にあり、どの論文の要素か決められない（FD4 の fail-closed）。
+UNRESOLVED_AMBIGUOUS = "ambiguous_across_documents"
+#: いま話している論文（焦点）の解析結果に見つからない。
+UNRESOLVED_NOT_IN_FOCUS = "not_found_in_focus"
+#: コースの教材の解析結果のどこにも見つからない。
+UNRESOLVED_NOT_FOUND = "not_found"
+
+UNRESOLVED_REASONS: tuple[str, ...] = (
+    UNRESOLVED_NO_DOCUMENTS,
+    UNRESOLVED_AMBIGUOUS,
+    UNRESOLVED_NOT_IN_FOCUS,
+    UNRESOLVED_NOT_FOUND,
+)
+
+
+def _documents_with_equation(element_id: str, document_ids: list[str]) -> list[str]:
+    raw_id = str(element_id or "").strip()
+    hits: list[str] = []
+    for document_id in document_ids:
+        try:
+            records = equation_records(document_id, artifacts=document_run_artifacts(document_id))
+        except Exception:  # noqa: BLE001
+            continue
+        if any(
+            isinstance(r, dict) and str(r.get("equation_id") or "") == raw_id for r in records
+        ):
+            hits.append(document_id)
+            if len(hits) > 1:
+                break
+    return hits
+
+
+def _documents_with_row(table: str, element_id: str, document_ids: list[str]) -> list[str]:
+    hits: list[str] = []
+    for document_id in document_ids:
+        try:
+            row = _resolve_row(table, element_id, [document_id])
+        except Exception:  # noqa: BLE001
+            continue
+        if row:
+            hits.append(document_id)
+            if len(hits) > 1:
+                break
+    return hits
+
+
+def explain_unresolved(
+    element_type: str,
+    element_id: str,
+    course_data: dict | None,
+    *,
+    preferred_document_ids: "tuple[str, ...] | list[str]" = (),
+) -> str:
+    """``resolve_element`` が ``None`` を返した理由を1つの enum で返す（読み取り専用）。
+
+    解決規則そのもの（FD4）は変えない。どの段で止まったかを学習者に正直に言うための診断。
+    """
+    document_ids = normalized_document_ids(course_document_ids(course_data))
+    if not document_ids:
+        return UNRESOLVED_NO_DOCUMENTS
+    if element_type == ELEMENT_TYPE_EQUATION:
+        hits = _documents_with_equation(element_id, document_ids)
+    else:
+        table = (
+            VIEW_COMPONENTS_LIVE if element_type == ELEMENT_TYPE_COMPONENT else VIEW_CLAIMS_LIVE
+        )
+        hits = _documents_with_row(table, element_id, document_ids)
+    if len(hits) > 1:
+        return UNRESOLVED_AMBIGUOUS
+    focus = [d for d in (preferred_document_ids or ()) if d in set(document_ids)]
+    if focus and not (set(hits) & set(focus)):
+        return UNRESOLVED_NOT_IN_FOCUS
+    return UNRESOLVED_NOT_FOUND

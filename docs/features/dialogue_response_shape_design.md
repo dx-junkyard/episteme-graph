@@ -125,3 +125,12 @@ system に足す直後（`messages: list[dict] = [` の前）。保存文・痕�
   `index.html` の `?v=` を更新。`css/styles.css` に `.closing-question`。
 - テスト: `backend/tests/test_dialogue_shape_{core,guardrails,route}.py`。既存の鏡・discuss・前提の逆質問・
   ストリーミング・様相のガードレールは不変で通る。
+
+### 8.1 第 17 周の追補（2026-10-01）
+
+- RS3 の問いの検出に「か。」で終わる日本語の問い（`…でしょうか。` / `…ますか。` / `…ですか。` / `…かな。`）を加えた
+  （最終文 80 字以内・`ことか` / `どうか` / `確か` 等の非疑問の語尾は除く = 保守側）。何も落とさないときのバイト一致（RS5）は不変。
+- **詰まりの区画**: `is_stuck_reply`（「わからない」「むずい」「まだわからない」。「はい」等の相づちは含まない）が真で casual /
+  discuss / 楽屋でない往復は `assemble(..., stuck=True)` が本文の最初の段落の足場（3 文まで）だけを残し、問い返しを置かない。
+  前提の逆質問はその往復には添えず次の往復へ回す（提示の記帳 `record_prerequisite_gate_presented` もしない）。tutor
+  プロンプトにルール 6【詰まり】を 1 文。テストは `test_dialogue_shape_stuck.py`。

@@ -146,6 +146,39 @@ FACT_RANGE_SHARPEN = (
     "教材のテキストを選んで質問するか、帰属カードで確定すると、1点に絞り込まれます。"
 )
 
+#: 議論（discuss / ``_discussion``）由来の痕跡の出口案内。discuss には選べる教材テキストが
+#: 無いので、``FACT_RANGE_SHARPEN`` の「テキストを選んで質問する」は実行できない（第 17 周）。
+FACT_DISCUSS_SHARPEN = (
+    "議論の着地画面で帰属カードを確定するか、開幕画面の支持構造から論文の構成をたどると、"
+    "1点に絞り込まれます。"
+)
+
+#: 焦点（この問いへの回答が引用した論文）にグラフが1つも無いとき、コース全体へ黙って
+#: 広げずに止める notice（第 17 周 D2: 無関係な論文が並ぶのを防ぐ。件数なし）。
+NOTICE_CITED_DOCUMENTS_NO_GRAPH = (
+    "この問いで話していた論文は、理論構成のグラフがまだ作られていないため、周りを表示できません。"
+)
+
+#: 議論の疑似トピック（``derive._DISCUSSION_TOPIC_ID`` と同じ値）。
+_DISCUSSION_TOPIC_ID = "_discussion"
+
+
+def is_discussion_node(node: PersonalNode) -> bool:
+    """議論（``_discussion`` 疑似トピック）由来の痕跡か。"""
+    anchor = getattr(node, "anchor", None)
+    return (
+        getattr(anchor, "anchor_type", None) == ANCHOR_TYPE_TOPIC
+        and str(getattr(anchor, "anchor_id", "") or "") == _DISCUSSION_TOPIC_ID
+    )
+
+
+def sharpen_fact_for(node: PersonalNode | None) -> str:
+    """痕跡の出所に応じた「1点に絞り込む」出口案内（実行できる操作だけを案内する）。"""
+    if node is not None and is_discussion_node(node):
+        return FACT_DISCUSS_SHARPEN
+    return FACT_RANGE_SHARPEN
+
+
 #: コース範囲フォールバック（トピック⇄claim の対応が引けないときに、コース sources の
 #: 解析済み論文の理論構成をそのまま範囲として見せる）の事実文。**粗いことを隠さず、
 #: 粗いとラベルして見せる**ための1行（PMN-1 の正直さ。件数・数値は言わない = PMN-4）。
@@ -755,6 +788,7 @@ def build_topic_range(
     fallback_fact: str = "",
     claim_summaries: dict[str, dict] | None = None,
     missing_graph_titles: list[str] | None = None,
+    sharpen_fact: str = FACT_RANGE_SHARPEN,
 ) -> dict:
     """範囲モード（topic アンカーの事実ベース粗表示）の DTO を組み立てる（純関数）。
 
@@ -836,7 +870,7 @@ def build_topic_range(
         facts.append(_FACT_RANGE_NO_GRAPH_TEMPLATE.format(title=title))
     if verification_suppressed:
         facts.append(FACT_NO_VERIFICATION_RECORDS)
-    facts.append(FACT_RANGE_SHARPEN)
+    facts.append(sharpen_fact or FACT_RANGE_SHARPEN)
 
     if atlas_concept_context:
         region_label = str(atlas_concept_context.get("region_label") or "")
@@ -1002,8 +1036,9 @@ def _nearby_for_topic_anchor(
     「偽精度の禁止」は粗い対応を隠すことではなく、粗いとラベルして見せることなので、
     ``touched`` を推測で立てない限りこの表示は事実のままである。
     """
+    sharpen = sharpen_fact_for(start)
     if not start.course_id:
-        return unavailable(mode, facts=[FACT_RANGE_SHARPEN])
+        return unavailable(mode, facts=[sharpen])
 
     if center_component_id:
         for document_id in _documents_for_anchor(
@@ -1104,10 +1139,14 @@ def _nearby_for_topic_anchor(
             previous_cited_document_ids=cited_docs,
         )
         # コース範囲フォールバック: touched は立てず、粗いことを事実文で明示する。
+        # 第 17 周 D2: 焦点（引用した論文）があるときはそこで止める。焦点の論文に
+        # グラフが無くても、コース全体へ黙って広げない（無関係な論文を並べない）。
+        # コース範囲は焦点が1つも無いときだけ。
         tiers = []
         if focus:
             tiers.append((FACT_RANGE_CITED_DOCUMENTS, list(focus.document_ids)))
-        tiers.append((FACT_RANGE_COURSE_FALLBACK, course_candidates))
+        else:
+            tiers.append((FACT_RANGE_COURSE_FALLBACK, course_candidates))
         for tier_fact, tier_documents in tiers:
             fallback_fact = tier_fact
             missing_graph_ids = []
@@ -1128,9 +1167,21 @@ def _nearby_for_topic_anchor(
                 )
             if documents:
                 break
+        if not documents and focus:
+            no_graph_titles = queries.fetch_document_titles(missing_graph_ids)
+            return unavailable(
+                mode,
+                NOTICE_CITED_DOCUMENTS_NO_GRAPH,
+                facts=[
+                    _FACT_RANGE_NO_GRAPH_TEMPLATE.format(title=t)
+                    for t in [no_graph_titles.get(d, "") for d in missing_graph_ids]
+                    if t
+                ][:_MAX_NO_GRAPH_FACTS]
+                + [sharpen],
+            )
 
     if not documents:
-        return unavailable(mode, NOTICE_TOPIC_NO_MAPPING, facts=[FACT_RANGE_SHARPEN])
+        return unavailable(mode, NOTICE_TOPIC_NO_MAPPING, facts=[sharpen])
 
     titles = queries.fetch_document_titles(
         [d["document_id"] for d in documents] + list(missing_graph_ids)
@@ -1155,6 +1206,7 @@ def _nearby_for_topic_anchor(
         fallback_fact=fallback_fact,
         claim_summaries=claim_summaries,
         missing_graph_titles=missing_graph_titles,
+        sharpen_fact=sharpen,
     )
 
 

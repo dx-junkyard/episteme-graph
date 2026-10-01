@@ -33,6 +33,7 @@ __all__ = [
     "SHAPE_DTO_KEYS",
     "GATE_SEPARATOR",
     "assemble",
+    "is_stuck_reply",
     "mirror_core",
     "previous_correction_fact",
     "render_answer_text",
@@ -183,6 +184,17 @@ def mirror_core(mirror: dict | str | None, learner_message: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 _QUESTION_END = ("？", "?")
+#: 「か。」で終わる日本語の問い（「…でしょうか。」「…ますか。」「…ですか。」「…かな。」）。
+#: 疑問符の無い問いも問い返しとして数える（第 17 周: 問い返しと逆質問が 1 往復に 2 つ残った）。
+_KA_QUESTION_END_RE = re.compile(r"(?:か|かな|かね)[。．.]$")
+#: 「か。」で終わっても問いではない語尾（感嘆の「ことか」・名詞の「どうか」・形容動詞の語幹）。
+_KA_NON_QUESTION_ENDINGS: tuple[str, ...] = (
+    "ことか", "ものか", "どうか", "確か", "たしか", "わずか", "僅か", "静か", "しずか",
+    "豊か", "ゆたか", "愚か", "おろか", "厳か", "おごそか", "細か", "にわか", "ほのか",
+    "なだらか", "滑らか", "なめらか", "明らか", "あきらか", "柔らか", "やわらか", "穏やか", "おだやか",
+)
+#: 「か。」の問いとして扱う最終文の長さの上限（長い叙述の文末の「か。」は拾わない = 保守側）。
+_KA_QUESTION_MAX_CHARS = 80
 # 行末のアクション目印（ドリルダウン）。問いの判定から外し、区画の最後に残す。
 _ACTION_LINE_RE = re.compile(
     r"^\s*(?:[-*・]\s*)?\[(?:ACTION_BUTTON:[^\]]*|[^\]]*について詳しく聞く|Ask more about[^\]]*)\]\s*$"
@@ -206,8 +218,13 @@ def _split_action_tail(text: str) -> tuple[str, str]:
 def _pop_trailing_question(text: str) -> tuple[str, str] | None:
     """本文末尾の問いの文を 1 つ取り出す。取り出せなければ None。"""
     t = str(text or "").rstrip()
-    if not t or not t.endswith(_QUESTION_END):
+    if not t:
         return None
+    ka_form = False
+    if not t.endswith(_QUESTION_END):
+        if not _KA_QUESTION_END_RE.search(t):
+            return None
+        ka_form = True
     if t.count("```") % 2 == 1:
         return None
     last_line = t.rsplit("\n", 1)[-1]
@@ -233,7 +250,21 @@ def _pop_trailing_question(text: str) -> tuple[str, str] | None:
     # 開き括弧だけが残る（引用の途中で切れた）文は問いとして扱わない。
     if sentence.count("「") != sentence.count("」") or sentence.count("（") != sentence.count("）"):
         return None
+    if ka_form and not _is_ka_question_sentence(sentence):
+        return None
     return rest, sentence
+
+
+def _is_ka_question_sentence(sentence: str) -> bool:
+    """「か。」で終わる文が問いか（保守側: 短い文・問いでない語尾を除く）。"""
+    s = str(sentence or "").strip()
+    if len(s) > _KA_QUESTION_MAX_CHARS:
+        return False
+    head = re.sub(r"[。．.]$", "", s)
+    for suffix in ("かな", "かね"):
+        if head.endswith(suffix):
+            return True
+    return not head.endswith(_KA_NON_QUESTION_ENDINGS)
 
 
 def split_closing_question(body: str) -> tuple[str, list[str]]:
@@ -257,6 +288,60 @@ def split_closing_question(body: str) -> tuple[str, list[str]]:
     if action_tail:
         body_without = (body_without + "\n\n" + action_tail).strip() if body_without else action_tail
     return body_without, questions
+
+
+# ---------------------------------------------------------------------------
+# 詰まり（短い「わからない」）の区画
+# ---------------------------------------------------------------------------
+
+#: 詰まりの返事（内容語の無い「わからない」「むずい」）。先頭の程度語は許す。
+_STUCK_RE = re.compile(
+    r"^(?:まだ|全然|ぜんぜん|よく|さっぱり|ちょっと|やっぱり|やっぱ|うーん|うーむ|えー)*"
+    r"(?:わから(?:ない|ん|ないです|ないな|ません)|分から(?:ない|ん|ないです|ないな|ません)"
+    r"|わかんない|分かんない|むずい|むずかしい|難しい|ちんぷんかんぷん)(?:です)?$"
+)
+_STUCK_EN = frozenset({"idk", "idontknow", "dontknow", "stillconfused", "imlost", "lost", "confused"})
+_STUCK_STRIP_RE = re.compile(r"[\s。、．，！？!?.,…ー〜~「」『』()（）'’]+")
+#: 詰まりの往復で残す足場の文数の上限。
+STUCK_FOOTHOLD_MAX_SENTENCES = 3
+_HEADING_LINE_RE = re.compile(r"^\s*(?:#{1,6}\s|\*\*[^*]+\*\*\s*[:：]?\s*$)")
+
+
+def is_stuck_reply(message: str | None) -> bool:
+    """学習者の発話が内容の無い詰まり（「わからない」「むずい」「まだわからない」）だけか。
+
+    非LLM・決定論。16 字を超える発話・問いの内容語を含む発話は詰まりとみなさない
+    （「むずい。一言で言うと？」は内容のある問い）。
+    """
+    raw = str(message or "").strip()
+    if not raw or len(raw) > 16:
+        return False
+    normalized = _STUCK_STRIP_RE.sub("", raw.casefold())
+    if not normalized:
+        return False
+    if normalized in _STUCK_EN:
+        return True
+    return bool(_STUCK_RE.match(normalized.replace("ー", "")))
+
+
+def _foothold(prose: str) -> str:
+    """本文の最初の段落（見出しだけの段落は次と合わせる）を 3 文までに切り詰める。"""
+    paragraphs = [p for p in re.split(r"\n\s*\n", str(prose or "").strip()) if p.strip()]
+    if not paragraphs:
+        return ""
+    first = paragraphs[0].strip()
+    if _HEADING_LINE_RE.match(first) and "\n" not in first and len(paragraphs) > 1:
+        first = paragraphs[1].strip()
+    if "```" in first or "$$" in first:
+        return first
+    sentences = [m.group(0) for m in re.finditer(r"[^。！？!?\n]+(?:[。！？!?]+|\n|$)", first)]
+    sentences = [x for x in sentences if x.strip()]
+    if len(sentences) <= STUCK_FOOTHOLD_MAX_SENTENCES:
+        return first
+    cut = "".join(sentences[:STUCK_FOOTHOLD_MAX_SENTENCES]).rstrip()
+    if cut.count("$") % 2 == 1:
+        return first
+    return cut
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +433,7 @@ def assemble(
     gate_text: str | None,
     degraded: bool,
     gate_marker: str = "",
+    stuck: bool = False,
 ) -> ResponseShape:
     """生成した回答本文を区画に分ける（RS1〜RS4）。
 
@@ -358,6 +444,8 @@ def assemble(
     - どちらも無いとき: 末尾に連なる問いは最後の 1 つだけ残す。
     - 本文が問いだけで、落とすと空になるときは落とさない（答えを消さない）。
     - ``degraded``（固定文）は組み替えない。
+    - ``stuck``（学習者が「わからない」とだけ返した往復）: 本文は最初の段落の足場（3 文まで）
+      だけを残し、問い返しは置かない（詰まりの区画。足場は 1 つ・問い返しなし）。
     """
     answer = str(answer or "")
     gate = str(gate_text) if gate_text else None
@@ -388,6 +476,22 @@ def assemble(
         closing = questions[-1]
         dropped = tuple(questions[:-1])
         drop_index = set(range(len(questions) - 1))
+    if stuck and prose.strip():
+        foothold = _foothold(prose)
+        if foothold and (foothold != prose.strip() or questions):
+            # 詰まりの区画: 足場 1 つだけ（問い返しなし）。何も落とさないときは元の本文のまま。
+            spliced = foothold + ("\n\n" + actions_tail if actions_tail else "")
+            return ResponseShape(
+                body=foothold,
+                mirror=mirror,
+                closing_question=None,
+                gate_text=gate,
+                allows_anchor_confirm=gate is None and mirror is None,
+                dropped_questions=tuple(questions),
+                actions_tail=actions_tail,
+                gate_marker=str(gate_marker or ""),
+                spliced_text=spliced,
+            )
     # 保存文は元の本文の位置で切り貼りする（何も落とさなければ元の本文そのもの）。
     spliced = _splice_out_questions(answer, questions, drop_index)
     return ResponseShape(

@@ -131,6 +131,12 @@ v1 の中段は「定義・スコープ・表記ゆれ」で構成する。単�
 ladder DTO に `target_label` を足し、開示段が空のときは `reason`（式リンクなし `REVEAL_REASON_NO_EQUATION_LINK` / 手順なし
 `REVEAL_REASON_NO_STEP`）を返す。フロントは段の注記として描く。
 
+### 7.y 組めなかった理由と次の一手（第 17 周追補・2026-10-01）
+
+要素が解決できず `available:false` のときも、`reason`（`no_course_documents` / `ambiguous_across_documents` /
+`not_found_in_focus` / `not_found`。診断は `resolve.explain_unresolved` — 解決規則 FD4 は不変）と `facts`（理由 1 行 +
+次の一手「式の中の記号をタップ / 要素の文脈（⚓）」）を返す。フロントは事実文があれば枠を残して素通しで描き、無ければ従来どおり枠ごと消す。
+
 ## 8. 非スコープ（v2）
 
 - フェルミの点検口（桁出題・JOLチップ・DIFF→楽屋導線）

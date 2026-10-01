@@ -88,6 +88,14 @@ FACT_TOPIC_RANGE_PREAMBLE_NO_LABEL = (
 #: [1'] 範囲エントリの各行。
 FACT_TOPIC_RANGE_NODE = "論文『{title}』の理論構成『{label}』に触れています。"
 
+#: [1'] の「直前の引用」段（焦点論文 FD1）: トピック⇄claim の対応が引けない痕跡
+#: （議論 ``_discussion`` など）で、この問いへの回答が引用した論文の理論構成を範囲として
+#: たどる（第 17 周 D1）。どこに触れたかは主張しない（論文単位の対応）。
+FACT_CITED_RANGE_PREAMBLE = (
+    "この問いへの回答が引用した論文の理論構成をたどります（論文単位の対応）。"
+)
+FACT_CITED_RANGE_NODE = "論文『{title}』には理論構成『{label}』があります。"
+
 #: タイトルが引けない document のラベル（捏造しない・件数に言及しない）。
 _UNTITLED_DOCUMENT_LABEL = "この教材"
 
@@ -452,12 +460,16 @@ def build_person_journey(
         range_entries = [e for e in (topic_range.get("entries") or []) if isinstance(e, dict)]
         if range_entries:
             topic_label = str(topic_range.get("topic_label") or "")
+            cited_basis = topic_range.get("basis") == "cited"
+            if cited_basis:
+                preamble = FACT_CITED_RANGE_PREAMBLE
+            elif topic_label:
+                preamble = FACT_TOPIC_RANGE_PREAMBLE.format(topic_label=topic_label)
+            else:
+                preamble = FACT_TOPIC_RANGE_PREAMBLE_NO_LABEL
+            node_template = FACT_CITED_RANGE_NODE if cited_basis else FACT_TOPIC_RANGE_NODE
             steps.append({
-                "fact": (
-                    FACT_TOPIC_RANGE_PREAMBLE.format(topic_label=topic_label)
-                    if topic_label
-                    else FACT_TOPIC_RANGE_PREAMBLE_NO_LABEL
-                ),
+                "fact": preamble,
                 "ref": {
                     "kind": "personal_node",
                     "id": start_node.id,
@@ -469,7 +481,7 @@ def build_person_journey(
                 entry_label = str(entry.get("label") or "")
                 entry_title = str(entry.get("document_title") or "") or _UNTITLED_DOCUMENT_LABEL
                 steps.append({
-                    "fact": FACT_TOPIC_RANGE_NODE.format(title=entry_title, label=entry_label),
+                    "fact": node_template.format(title=entry_title, label=entry_label),
                     "ref": {
                         "kind": "graph_node",
                         "id": str(entry.get("component_id") or ""),
@@ -752,7 +764,7 @@ def _cross_course_hint(user_id: str, start_node: PersonalNode) -> dict | None:
     return None
 
 
-def _empty_journey_facts() -> list[str]:
+def _empty_journey_facts(start_node: PersonalNode | None = None) -> list[str]:
     """空の旅に添える出口案内の事実文（文言の正本は ``nearby.FACT_RANGE_SHARPEN``）。
 
     「いまここの周り」の unavailable 分岐と**同じ1行**を使う（同義の別文言を増やさない）。
@@ -760,15 +772,18 @@ def _empty_journey_facts() -> list[str]:
     ``build_journey`` / :func:`build_person_journey` の純粋部を sqlalchemy 無しで
     検証できる本モジュールの規約を守るために遅延 import する。解決できないときは
     行を1つ減らすだけに留める（fail-soft。同じ文字列を複製しない）。
+
+    議論（``_discussion``）由来の痕跡には、discuss で実行できる出口
+    （``nearby.FACT_DISCUSS_SHARPEN``）を案内する（選べる教材テキストが無いため）。
     """
     try:
-        from core.personal_graph.nearby import FACT_RANGE_SHARPEN
+        from core.personal_graph.nearby import sharpen_fact_for
     except Exception:
         return []
-    return [FACT_RANGE_SHARPEN]
+    return [sharpen_fact_for(start_node)]
 
 
-def _with_empty_journey_notice(result: dict) -> dict:
+def _with_empty_journey_notice(result: dict, start_node: PersonalNode | None = None) -> dict:
     """steps が空のときだけ ``notice`` / ``facts`` を足す（非空なら DTO 完全不変）。
 
     欠落を無言の空リストで返さず、事実文（何が記録されていないか）と出口案内を添える。
@@ -778,8 +793,56 @@ def _with_empty_journey_notice(result: dict) -> dict:
     if result.get("steps"):
         return result
     result["notice"] = NOTICE_JOURNEY_EMPTY
-    result["facts"] = _empty_journey_facts()
+    result["facts"] = _empty_journey_facts(start_node)
     return result
+
+
+def _cited_range_for_node(
+    user_id: str,
+    start_node: PersonalNode,
+    can_view_document=None,
+) -> dict | None:
+    """[1'] の「直前の引用」段: この問いへの回答が引用した論文の理論構成（第 17 周 D1）。
+
+    「いまここの周り」の範囲モードと同じ焦点論文の段（``queries.fetch_trace_cited_document_ids``
+    → ``resolve_focus_document``、スコープ = 痕跡のコース sources ∩ 閲覧可能）を使う。
+    どのノードに触れたかは主張せず（touched なし）、論文単位の対応として列挙する。
+    ``can_view_document`` が callable でなければ何も返さない（fail-closed）。
+    """
+    if not callable(can_view_document) or not start_node.course_id:
+        return None
+    try:
+        from core.focus_document import resolve_focus_document
+        from core.personal_graph import nearby, queries
+
+        course_scope = nearby._documents_for_anchor(
+            start_node, can_view_document=can_view_document, user_id=user_id
+        )
+        cited_docs = queries.fetch_trace_cited_document_ids(start_node.id)
+        focus = resolve_focus_document(
+            allowed_document_ids=course_scope,
+            previous_cited_document_ids=cited_docs,
+        )
+        document_ids = [d for d in focus.document_ids if can_view_document(user_id, d)]
+        if not document_ids:
+            return None
+        titles = queries.fetch_document_titles(document_ids)
+        entries: list[dict] = []
+        for document_id in document_ids:
+            graph = queries.fetch_component_graph(document_id)
+            if not graph:
+                continue
+            for node in nearby.main_nodes(graph):
+                entries.append({
+                    "component_id": str(node.get("component_id") or ""),
+                    "label": nearby.node_display_label(node),
+                    "document_title": titles.get(document_id, ""),
+                })
+        if not entries:
+            return None
+        return {"topic_label": "", "entries": entries[:MAX_FANOUT_PER_SEGMENT], "basis": "cited"}
+    except Exception:
+        return None
 
 
 def _topic_range_for_node(
@@ -986,6 +1049,12 @@ def journey_for_person_node(
         topic_range = _topic_range_for_node(
             user_id, start_node, can_view_document=can_view_document,
         )
+        if topic_range is None:
+            # 第 17 周 D1: トピック⇄claim の対応が引けない痕跡（議論など）は、この問いへの
+            # 回答が引用した論文を範囲の入口にする（nearby と同じ焦点論文の段）。
+            topic_range = _cited_range_for_node(
+                user_id, start_node, can_view_document=can_view_document,
+            )
 
     result = build_person_journey(
         start_node,
@@ -998,4 +1067,4 @@ def journey_for_person_node(
         viewable_document_ids,
         topic_range=topic_range,
     )
-    return _with_empty_journey_notice(result)
+    return _with_empty_journey_notice(result, start_node)
