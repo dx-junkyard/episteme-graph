@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+from episteme_graph.agents.generation_language import apply_generation_language
+
 from .schema import ASSEMBLY_HINT_TYPES, ComponentAssemblyLLMInput
 
 _SYSTEM_CONTENT = """\
@@ -191,14 +193,41 @@ _OUTPUT_SCHEMA = {
 }
 
 
+#: 解析 run の生成言語（run options ``language``）で書かせる、生成した文章のフィールド。
+#: 論文の逐語・記号・ID・語彙値は含めない（``generation_language`` の不変条項）。
+GENERATED_PROSE_FIELDS: tuple[str, ...] = (
+    "components[].teaching_takeaway",
+    "components[].dependencies[].reason",
+    "components[].review_notes",
+    "assembly_hints[].reason",
+    "review_notes",
+)
+
+
 class ComponentAssemblyPromptFactory:
-    def build_messages(self, llm_input: ComponentAssemblyLLMInput) -> list[dict]:
+    #: 解析 run の生成言語（``ja`` / ``en``）。``None`` なら prompt は従来と同一。
+    language: str | None = None
+
+    def __init__(self, language: str | None = None) -> None:
+        self.language = language
+
+    def build_messages(self, *args, **kwargs) -> list[dict]:
+        return apply_generation_language(
+            self._base_messages(*args, **kwargs), self.language, GENERATED_PROSE_FIELDS
+        )
+
+    def build_repair_messages(self, *args, **kwargs) -> list[dict]:
+        return apply_generation_language(
+            self._base_repair_messages(*args, **kwargs), self.language, GENERATED_PROSE_FIELDS
+        )
+
+    def _base_messages(self, llm_input: ComponentAssemblyLLMInput) -> list[dict]:
         return [
             {"role": "system", "content": _SYSTEM_CONTENT},
             {"role": "user", "content": self._build_user_content(llm_input)},
         ]
 
-    def build_repair_messages(
+    def _base_repair_messages(
         self,
         llm_input: ComponentAssemblyLLMInput,
         previous_output: dict,

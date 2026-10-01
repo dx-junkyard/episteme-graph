@@ -248,9 +248,28 @@ def _mask_internal_ids(text: str) -> str:
     return mask_internal_ids_readable(text)
 
 
+def _stage_label(node: dict[str, Any]) -> str:
+    """main ノードの英語の stage 名（#308）を日本語の段名にする（IK-0546）。
+
+    grounding に英語の段名を渡すと、日本語の応答に英語の段名がそのまま混ざる。
+    graph_json は非改変（読み時に訳すだけ）。main 以外のラベルはそのまま返す。
+    """
+    label = str(node.get("label") or "").strip()
+    if _node_layer(node) != "main":
+        return label
+    from core.element_vocab import theory_stage_display_label
+
+    return theory_stage_display_label(label)
+
+
 def _node_label(node: dict[str, Any]) -> str:
     for key in ("display_label", "label", "name"):
-        value = _mask_internal_ids(str(node.get(key) or ""))
+        raw = str(node.get(key) or "")
+        if key in ("display_label", "label") and _node_layer(node) == "main":
+            from core.element_vocab import theory_stage_display_label
+
+            raw = theory_stage_display_label(raw)
+        value = _mask_internal_ids(raw)
         if value and value != "（本文を特定できない要素）":
             return value
     return "（本文を特定できない要素）"
@@ -342,7 +361,7 @@ def graph_grounding_to_text(grounding: dict[str, Any]) -> str:
         if description:
             # display_label は「段: 説明の先頭（途中切れ）」の形のことがあり、説明を併記すると
             # 同じ文が二重に並ぶ（第 14 周 mailbox seq89/91）。説明があるときは短い label を使う。
-            short = str(node.get("label") or "").strip()
+            short = _stage_label(node)
             _, _, tail = head.partition(": ")
             if short and tail and description.startswith(tail.rstrip(".…").strip()[:40]):
                 head = short
@@ -359,7 +378,7 @@ def graph_grounding_to_text(grounding: dict[str, Any]) -> str:
         description = _mask_internal_ids(str(node.get("description") or ""))
         if description:
             by_description.setdefault(description, []).append(
-                str(node.get("label") or _node_label(node)).strip()
+                (_stage_label(node) or _node_label(node)).strip()
             )
     for heads in by_description.values():
         unique_heads = list(dict.fromkeys(h for h in heads if h))

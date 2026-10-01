@@ -1,6 +1,8 @@
 """ThesisReconstructionAgent: reconstruct central thesis and support structure."""
 from __future__ import annotations
 
+from episteme_graph.agents.generation_language import normalize_generation_language
+
 import logging
 
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult
@@ -46,7 +48,10 @@ class ThesisReconstructionAgent:
         cartridge_id: str | None = None,
         config: dict | None = None,
         claim_objects=None,
+        language: str | None = None,
     ) -> ThesisReconstructionResult:
+        # 解析 run の生成言語（IK-0571）。未指定なら prompt は従来と同一。
+        self._prompt_factory.language = normalize_generation_language(language)
         cartridge = self._load_cartridge(cartridge_id)
         llm_input = self._input_builder.build(
             skeleton,

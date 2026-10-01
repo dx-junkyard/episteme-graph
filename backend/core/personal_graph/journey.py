@@ -104,6 +104,17 @@ def _sort_key(row: dict) -> tuple:
     return (str(row.get("created_at") or ""), str(row.get("id") or ""))
 
 
+def _main_node_label(node: dict) -> str:
+    """学習者に見せる main ノード名（IK-0546: 英語の stage 名を日本語の段名へ）。
+
+    graph_json の ``label`` は #308 の規律で英語の stage 表示名のまま。訳語の正本は
+    ``core.element_vocab``（純データ）で、stage に引けないラベルはそのまま返す。
+    """
+    from core.element_vocab import theory_stage_display_label
+
+    return theory_stage_display_label(node.get("label"))
+
+
 def _find_main_node(nodes: list[dict], anchor_type: str, anchor_id: str) -> dict | None:
     """anchor（component_id / claim_id）を含む main layer node を探す。
 
@@ -211,14 +222,14 @@ def build_journey(
         main_node = _find_main_node(all_nodes, anchor_type, anchor_id)
         if main_node is not None:
             main_id = str(main_node.get("component_id") or "")
-            main_label = str(main_node.get("label") or main_id)
+            main_label = _main_node_label(main_node) or main_id
             steps.append({
                 "fact": f"この{kind_ja}は理論構成『{main_label}』の一部です",
                 "ref": {"kind": "graph_node", "id": main_id, "label": main_label},
             })
             neighbors = _adjacent_main_nodes(local_graph, main_id, nodes_by_id)
             for neighbor in neighbors[:MAX_FANOUT_PER_SEGMENT]:
-                n_label = str(neighbor.get("label") or neighbor.get("component_id") or "")
+                n_label = _main_node_label(neighbor) or str(neighbor.get("component_id") or "")
                 steps.append({
                     "fact": f"『{main_label}』は『{n_label}』ともつながっています",
                     "ref": {
@@ -476,14 +487,14 @@ def build_person_journey(
         main_node = _find_main_node(all_nodes, anchor_type, anchor_id)
         if main_node is not None:
             main_id = str(main_node.get("component_id") or "")
-            main_label = str(main_node.get("label") or main_id)
+            main_label = _main_node_label(main_node) or main_id
             steps.append({
                 "fact": f"この{kind_ja}は理論構成『{main_label}』の一部です",
                 "ref": {"kind": "graph_node", "id": main_id, "label": main_label},
             })
             neighbors = _adjacent_main_nodes(local_graph, main_id, nodes_by_id)
             for neighbor in neighbors[:MAX_FANOUT_PER_SEGMENT]:
-                n_label = str(neighbor.get("label") or neighbor.get("component_id") or "")
+                n_label = _main_node_label(neighbor) or str(neighbor.get("component_id") or "")
                 steps.append({
                     "fact": f"『{main_label}』は『{n_label}』ともつながっています",
                     "ref": {

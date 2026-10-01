@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+from episteme_graph.agents.generation_language import apply_generation_language
+
 from .schema import (
     MAX_GRAPH_SUMMARY_CHARS,
     MAX_NARRATIVE_ROLE_CHARS,
@@ -56,14 +58,42 @@ _OUTPUT_SCHEMA = {
 }
 
 
+#: 解析 run の生成言語（run options ``language``）で書かせる、生成した文章のフィールド。
+#: 論文の逐語・記号・ID・語彙値は含めない（``generation_language`` の不変条項）。
+GENERATED_PROSE_FIELDS: tuple[str, ...] = (
+    "graph_summary",
+    "node_narratives[].narrative_role",
+    "node_narratives[].reason",
+    "edge_narratives[].transition_text",
+    "edge_narratives[].reason",
+    "review_notes",
+)
+
+
 class NarrativePromptFactory:
-    def build_messages(self, llm_input: NarrativeLLMInput, cartridge=None) -> list[dict]:
+    #: 解析 run の生成言語（``ja`` / ``en``）。``None`` なら prompt は従来と同一。
+    language: str | None = None
+
+    def __init__(self, language: str | None = None) -> None:
+        self.language = language
+
+    def build_messages(self, *args, **kwargs) -> list[dict]:
+        return apply_generation_language(
+            self._base_messages(*args, **kwargs), self.language, GENERATED_PROSE_FIELDS
+        )
+
+    def build_repair_messages(self, *args, **kwargs) -> list[dict]:
+        return apply_generation_language(
+            self._base_repair_messages(*args, **kwargs), self.language, GENERATED_PROSE_FIELDS
+        )
+
+    def _base_messages(self, llm_input: NarrativeLLMInput, cartridge=None) -> list[dict]:
         return [
             {"role": "system", "content": _SYSTEM_CONTENT},
             {"role": "user", "content": self._build_user_content(llm_input)},
         ]
 
-    def build_repair_messages(
+    def _base_repair_messages(
         self,
         llm_input: NarrativeLLMInput,
         previous_output: dict,

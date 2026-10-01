@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+from episteme_graph.agents.generation_language import apply_generation_language
+
 from .schema import GRAPH_RELATIONS, SUPPORT_SECTIONS, SUPPORT_TYPES, CartridgeContext, ThesisLLMInput
 
 _SYSTEM_CONTENT = """\
@@ -57,8 +59,38 @@ _OUTPUT_SCHEMA = {
 }
 
 
+#: 解析 run の生成言語（run options ``language``）で書かせる、生成した文章のフィールド。
+#: 論文の逐語・記号・ID・語彙値は含めない（``generation_language`` の不変条項）。
+GENERATED_PROSE_FIELDS: tuple[str, ...] = (
+    "central_thesis.text",
+    "central_thesis.reason",
+    "alternative_theses[].text",
+    "alternative_theses[].reason",
+    "support_structure.*[].text",
+    "support_structure.*[].reason",
+    "excluded_from_core[].reason",
+    "review_notes",
+)
+
+
 class ThesisReconstructionPromptFactory:
-    def build_messages(
+    #: 解析 run の生成言語（``ja`` / ``en``）。``None`` なら prompt は従来と同一。
+    language: str | None = None
+
+    def __init__(self, language: str | None = None) -> None:
+        self.language = language
+
+    def build_messages(self, *args, **kwargs) -> list[dict]:
+        return apply_generation_language(
+            self._base_messages(*args, **kwargs), self.language, GENERATED_PROSE_FIELDS
+        )
+
+    def build_repair_messages(self, *args, **kwargs) -> list[dict]:
+        return apply_generation_language(
+            self._base_repair_messages(*args, **kwargs), self.language, GENERATED_PROSE_FIELDS
+        )
+
+    def _base_messages(
         self,
         llm_input: ThesisLLMInput,
         cartridge: CartridgeContext | None = None,
@@ -68,7 +100,7 @@ class ThesisReconstructionPromptFactory:
             {"role": "user", "content": self._build_user_content(llm_input, cartridge)},
         ]
 
-    def build_repair_messages(
+    def _base_repair_messages(
         self,
         llm_input: ThesisLLMInput,
         previous_output: dict,

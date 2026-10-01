@@ -365,7 +365,8 @@ class TestGraphNodeResolver:
         ctx = _ctx(selection={"document_id": "doc-1", "node_id": "theory_op_0001"})
         facts = gr.resolve_graph_node(ctx, {"paper_layer": _full_dto()})
         assert facts == [
-            "選択中のノード: 「Equation system」（主グラフ）",
+            # IK-0546: main の英語の stage 名（#308）は日本語の段名で渡す。
+            "選択中のノード: 「式の体系」（主グラフ）",
             ac_schema.FACT_NODE_UNLOCATED,
         ]
 
@@ -437,7 +438,7 @@ class TestGraphNodeResolver:
 class TestDocumentGraphResolver:
     def test_sections_are_listed_in_paper_order_with_node_labels(self):
         facts = gr.resolve_document_graph(_ctx(), {"paper_layer": _full_dto()})
-        assert facts[0] == "章「Introduction」 → ノード: Linearize／Equation system"
+        assert facts[0] == "章「Introduction」 → ノード: Linearize／式の体系"
         assert facts[1] == f"章「Method」 → {ac_schema.FACT_SECTION_UNBOUND}"
 
     def test_coverage_is_listed_as_labels_without_counts(self):
@@ -549,7 +550,7 @@ class TestDocumentGraphNodeLocations:
         ctx = normalize_screen_context({"screen": "graph_review", "selection": {"document_id": "d"}})
         facts = gr.resolve_document_graph(ctx, {"paper_layer": dto})
         joined = "\n".join(facts)
-        assert "ノード「Theory basis」の論文での所在: 章 「2. METHODS」、式 (3)" in joined
+        assert "ノード「理論の土台」の論文での所在: 章 「2. METHODS」、式 (3)" in joined
         assert "「z」" not in joined
         assert "theory_op_" not in joined
         assert gr.FACT_MAIN_NODE_NO_LOCATION in joined

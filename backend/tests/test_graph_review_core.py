@@ -100,7 +100,9 @@ class TestGroundingToText:
         ))
         text = gd.graph_grounding_to_text(grounding)
         assert "[この論文の理論構成]" in text
-        assert "Theory basis" in text and "基礎方程式の前提" in text
+        # IK-0546: main の英語の stage 名は日本語の段名で渡す。
+        assert "理論の土台" in text and "基礎方程式の前提" in text
+        assert "Theory basis" not in text
         assert "部分的な裏付け" in text
         assert "[構成どうしの関係]" in text and "derives" in text
         assert "まだ教員が確認していない構成" in text and "missing_atomic_claim" in text
@@ -143,7 +145,7 @@ class TestGroundingToText:
         nodes += [_node("d%d" % i, graph_layer="equation_detail", label="eq %d" % i)
                   for i in range(28)]
         text = gd.graph_grounding_to_text(gd.build_graph_grounding(_graph(nodes=nodes)))
-        assert "Theory basis" in text
+        assert "理論の土台" in text and "Theory basis" not in text
         assert "eq 0" not in text and "eq 27" not in text
         # 詳細層に未レビューが残っている事実は、件数なしの1行で残す。
         assert "式の詳細層にも、まだ確認していないステップがあります。" in text
@@ -352,5 +354,6 @@ def test_main_node_line_does_not_repeat_truncated_description():
     graph = {"nodes": [{"component_id": "n1", "graph_layer": "main", "label": "Theory basis",
                         "display_label": "Theory basis: " + desc[:60], "description": desc}], "edges": []}
     text = gd.graph_grounding_to_text(gd.build_graph_grounding(graph))
-    assert f"- Theory basis：{desc}" in text
+    assert f"- 理論の土台：{desc}" in text
+    assert "Theory basis" not in text
     assert text.split("[解析")[0].count("The delay-time") == 1

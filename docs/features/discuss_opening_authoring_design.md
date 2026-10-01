@@ -505,3 +505,6 @@ stale を付けない・D層非改変・repair 指示と validator の整合）/
   無いので言語を運べない — 取り込み後に再解析で選ぶ）/ arXivから探す・論文レーダーのモーダルに言語の
   選択を出すこと（API は受けるが UI は未配線）/ 言語の教員ごとの既定値の保存 / 既存の生成物の翻訳。
 - ガードレール: `test_generation_language_option.py`。
+- **追補（2026-10-01）**: 同じ `language` を paper_skeleton / thesis_reconstruction /
+  narrative_annotator / component_assembly の生成文にも運んだ（未指定なら prompt は不変）。
+  対象フィールドと対象外の理由は `generation_language_design.md`。

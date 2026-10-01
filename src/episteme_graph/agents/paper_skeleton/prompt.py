@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 
+from episteme_graph.agents.generation_language import apply_generation_language
+
 from .schema import LOGICAL_BLOCK_TYPES, CartridgeContext, SkeletonLLMInput
 
 _SYSTEM_CONTENT = """\
@@ -92,8 +94,41 @@ _OUTPUT_SCHEMA = {
 }
 
 
+#: 解析 run の生成言語（run options ``language``）で書かせる、生成した文章のフィールド。
+#: 論文の逐語・記号・ID・語彙値は含めない（``generation_language`` の不変条項）。
+GENERATED_PROSE_FIELDS: tuple[str, ...] = (
+    "paper_goal.text",
+    "paper_goal.reason",
+    "central_question.text",
+    "central_question.reason",
+    "headline_claim.reason",
+    "supporting_subclaims[].reason",
+    "logical_blocks[].label",
+    "logical_blocks[].summary",
+    "logical_blocks[].reason",
+    "excluded_regions[].reason",
+    "review_notes",
+)
+
+
 class PaperSkeletonPromptFactory:
-    def build_messages(
+    #: 解析 run の生成言語（``ja`` / ``en``）。``None`` なら prompt は従来と同一。
+    language: str | None = None
+
+    def __init__(self, language: str | None = None) -> None:
+        self.language = language
+
+    def build_messages(self, *args, **kwargs) -> list[dict]:
+        return apply_generation_language(
+            self._base_messages(*args, **kwargs), self.language, GENERATED_PROSE_FIELDS
+        )
+
+    def build_repair_messages(self, *args, **kwargs) -> list[dict]:
+        return apply_generation_language(
+            self._base_repair_messages(*args, **kwargs), self.language, GENERATED_PROSE_FIELDS
+        )
+
+    def _base_messages(
         self,
         llm_input: SkeletonLLMInput,
         cartridge: CartridgeContext | None = None,
@@ -104,7 +139,7 @@ class PaperSkeletonPromptFactory:
             {"role": "user", "content": user_content},
         ]
 
-    def build_repair_messages(
+    def _base_repair_messages(
         self,
         llm_input: SkeletonLLMInput,
         previous_output: dict,

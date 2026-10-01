@@ -411,6 +411,10 @@ class CartridgeContext:
   バイト列を返した URL、応答に `effective_format` / `fell_back`。解析 run の生成言語
   `options.language`（`ja` / `en`、再解析は継承）は discuss_opening・contextual_explanation の
   指示だけを変え LLM 呼び出しを増やさない（`discuss_opening_authoring_design.md` §14）。
+  2026-10-01 に paper_skeleton / thesis_reconstruction / narrative_annotator / component_assembly の
+  生成文にも拡張（正本 `agents/generation_language.py`・orchestrator は `_run_language(ctx)`。未指定なら
+  prompt は 1 バイトも不変。決定論の後段が英語キーワードで読む component の label / summary と
+  equation_semantics は対象外 — `generation_language_design.md`）。
 
 ### 論文ディスカバリー層（arXiv 分野購読, migration 071/072, 2026-08-27）
 

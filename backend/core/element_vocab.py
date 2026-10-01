@@ -45,6 +45,7 @@ __all__ = [
     "link_status_label",
     "operation_label",
     "symbol_scope_label",
+    "theory_stage_display_label",
     "theory_stage_key",
     "theory_stage_label",
 ]
@@ -111,6 +112,27 @@ def theory_stage_key(value: object) -> str:
         return head.replace(" ", "_")
     return ""
 
+
+
+def theory_stage_display_label(label: object) -> str:
+    """main ノードの ``label``（#308 の英語の stage 表示名）を日本語の段名にして返す。
+
+    IK-0546: graph_json の ``label`` は英語の stage 名のまま（#308 の規律・validator は
+    非改変）で、表示する側がここを通して訳す。``"<Stage>: 説明"`` 形（旧 run）は説明を
+    残して見出しだけ訳す。stage に引けない文字列（詳細層のラベル・旧形式）はそのまま
+    返す（情報を落とさない）。
+    """
+    raw = str(label if label is not None else "").strip()
+    if not raw:
+        return ""
+    key = theory_stage_key(raw)
+    stage_ja = theory_stage_label(key) if key else ""
+    if not stage_ja:
+        return raw
+    head, sep, tail = raw.partition(":")
+    if sep and tail.strip() and theory_stage_key(head) == key:
+        return f"{stage_ja}: {tail.strip()}"
+    return stage_ja
 
 # ── 導出・グラフの操作動詞 ────────────────────────────────────────────────────
 # キーは snake_case（derivation_chain/schema.py の OPERATION_ONTOLOGY /

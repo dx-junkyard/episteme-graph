@@ -154,6 +154,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
 - [図解析の反証型反復検証（#499）](features/contextual_figure_analysis_iterative_verification.md)
 - [教員指示付き図再解析](features/guided_figure_reanalysis_design.md)
 - [図⇄概念構造の接続](features/figure_concept_linking_design.md)
+- [生成言語を A層の生成文へ運ぶ（run options `language`・IK-0571）](features/generation_language_design.md)
 
 ### 群2: 学びの対話と講義
 

@@ -1170,7 +1170,10 @@ def _stage_paper_skeleton(ctx: PipelineContext) -> bool:
         ctx.report_start("paper_skeleton", total=1, unit="llm_call")
         try:
             ps_agent = _instantiate(ctx.agent_classes["PaperSkeletonAgent"])
-            ctx.skeleton = ps_agent.run(structure=ctx.structure, cartridge_id=ctx.cartridge_id)
+            ctx.skeleton = ps_agent.run(
+                structure=ctx.structure, cartridge_id=ctx.cartridge_id,
+                **_language_run_kwargs(ps_agent, ctx),
+            )
         except Exception as exc:
             logger.exception("paper_skeleton stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
             raise PipelineStageError("paper_skeleton", str(exc), cause=exc) from exc
@@ -1889,6 +1892,7 @@ def _stage_thesis_reconstruction(ctx: PipelineContext) -> bool:
             ctx.thesis = th_agent.run(
                 skeleton=ctx.skeleton, qualified_claims=ctx.qualified, equations=ctx.equations,
                 cartridge_id=ctx.cartridge_id, claim_objects=ctx.claim_objects,
+                **_language_run_kwargs(th_agent, ctx),
             )
         except Exception as exc:
             logger.exception("thesis_reconstruction stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
@@ -2082,6 +2086,7 @@ def _stage_component_assembly(ctx: PipelineContext) -> bool:
                         "accept apparatus_semantics yet; skipping (document=%s)",
                         ctx.document_id,
                     )
+            ca_kwargs.update(_language_run_kwargs(ca_agent, ctx))
             ctx.component_result = ca_agent.run(**ca_kwargs)
         except Exception as exc:
             logger.exception("component_assembly stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
@@ -2297,11 +2302,13 @@ def _stage_narrative_annotator(ctx: PipelineContext) -> bool:
         try:
             from episteme_graph.agents.narrative_annotator.agent import NarrativeAnnotator
 
-            ctx.narrative = NarrativeAnnotator().run(
+            narrative_agent = NarrativeAnnotator()
+            ctx.narrative = narrative_agent.run(
                 ctx.component_graph_result,
                 thesis=ctx.thesis,
                 derivations=ctx.derivations,
                 cartridge_id=ctx.cartridge_id,
+                **_language_run_kwargs(narrative_agent, ctx),
             )
             ctx.save_artifact("narrative_annotator", ctx.narrative)
         except Exception as exc:
@@ -4632,6 +4639,35 @@ def _run_generation_language(effective_options: dict | None) -> str | None:
     raw = (effective_options or {}).get("language")
     text = str(raw or "").strip().lower()
     return text if text in RUN_GENERATION_LANGUAGES else None
+
+
+def _run_language(ctx: "PipelineContext") -> str | None:
+    """この run の生成言語（``ja`` / ``en`` / ``None``）を読む唯一の入口（IK-0571）。
+
+    run options の ``language`` を語彙で絞った値。discuss_opening / contextual_explanation /
+    paper_skeleton / thesis_reconstruction / component_assembly / narrative_annotator が使う。
+    """
+    return _run_generation_language(getattr(ctx, "effective_options", None))
+
+
+def _language_run_kwargs(agent: Any, ctx: "PipelineContext") -> dict[str, Any]:
+    """agent.run() に渡す ``language`` kwarg（指定があり、run が受け取れるときだけ）。
+
+    **未指定なら空 dict** — 呼び出しは従来と 1 文字も変わらない（A層の既定の挙動を変えない）。
+    差し替えられたテスト用 agent が ``language`` を受けないときも渡さない
+    （apparatus_semantics と同じ防御的な渡し方）。
+    """
+    language = _run_language(ctx)
+    if not language:
+        return {}
+    try:
+        params = inspect.signature(agent.run).parameters
+    except (TypeError, ValueError, AttributeError):
+        return {}
+    accepts = "language" in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    return {"language": language} if accepts else {}
 
 
 def _discuss_opening_language(run_language: str | None = None) -> str:

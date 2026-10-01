@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from core.element_vocab import theory_stage_display_label
 from core.text_excerpt import excerpt as _excerpt
 
 from ..registry import register
@@ -113,8 +114,16 @@ def _join(items: list[str], *, truncated: bool = False) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _node_head_fact(node: Mapping[str, Any]) -> str:
+def _node_display_label(node: Mapping[str, Any]) -> str:
+    """ノードの表示名。main の英語の stage 名（#308）は日本語の段名にする（IK-0546）。"""
     label = _text(node.get("label"), MAX_TEXT_CHARS)
+    if (_text(node.get("graph_layer")) or "main") != "main":
+        return label
+    return theory_stage_display_label(label)
+
+
+def _node_head_fact(node: Mapping[str, Any]) -> str:
+    label = _node_display_label(node)
     layer = GRAPH_LAYER_LABELS.get(_text(node.get("graph_layer")), "")
     if not label:
         return ""
@@ -333,7 +342,7 @@ def resolve_document_graph(ctx: ScreenContext, sources: Mapping[str, Any]) -> li
         return facts
 
     labels = {
-        node_id: _text(_dict(node).get("label"), _MAX_LABEL_CHARS)
+        node_id: _text(_node_display_label(_dict(node)), _MAX_LABEL_CHARS)
         for node_id, node in _dict(dto.get("nodes")).items()
     }
     for section in _list(_dict(dto.get("paper")).get("sections"))[:MAX_SECTION_LINES]:
