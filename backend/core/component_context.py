@@ -155,7 +155,7 @@ def _query_component_row(component_id: str, document_ids: list[str]) -> dict | N
                 f"""
                 SELECT id::text AS id, document_id::text AS document_id, course_id, name,
                        component_type, component_type_text, summary, status, review_status,
-                       source_scope, thesis_context
+                       source_scope, thesis_context, parent_agent_component_id
                 FROM theory_components_live
                 WHERE document_id = ANY(CAST(:doc_ids AS uuid[])) AND ({where_clause})
                 ORDER BY (id::text = :raw_id) DESC
@@ -613,6 +613,154 @@ def _dependency_lane_items(
     return items, all(ref in resolved for ref in refs)
 
 
+#: 分割の親子・依存の逆向きの関係語（W層 ``context_lens.RELATION_LABELS`` の既存語。
+#: 主語は常に focus — 上位の親は「（focus は）親 の構成要素である」、下位の子は
+#: 「子 を構成要素として含む」、上位の利用元は「利用元 に利用される」と読む）。
+_PART_OF_RELATION_LABEL = context_lens_mod.RELATION_LABELS["member_of"]
+_CONTAINS_RELATION_LABEL = context_lens_mod.RELATION_LABELS["contains"]
+_USED_BY_RELATION_LABEL = context_lens_mod.RELATION_LABELS["used_by_component"]
+
+#: 中心命題・支持構造（``element_type="thesis"``）は学習者の文脈 API では開けない。
+#: 次の一歩は discuss の開幕画面なので、そのレーンに1回だけこの事実文を添える（IK-0570）。
+THESIS_EXIT_FACT = "議論の開幕画面で中心命題と支持構造を読めます"
+_ELEMENT_THESIS = "thesis"
+
+
+def _split_parent_label(artifacts: dict, parent_ref: str) -> str:
+    """分割の親（LLM 原案）の表示名（``refinement_report.split_actions.parent_label``）。"""
+    assembly = _json_dict(artifacts.get("component_assembly"))
+    report = _json_dict(assembly.get("refinement_report"))
+    for action in _json_list(report.get("split_actions")):
+        if isinstance(action, dict) and str(action.get("parent_component_id") or "") == parent_ref:
+            return str(action.get("parent_label") or "").strip()
+    return ""
+
+
+def _reverse_dependency_refs(artifacts: dict, agent_ids: set[str]) -> list[str]:
+    """focus を ``dependencies.component_refs`` に挙げる component の agent ID（論文順）。"""
+    refs: list[str] = []
+    assembly = _json_dict(artifacts.get("component_assembly"))
+    for comp in _json_list(assembly.get("components")):
+        if not isinstance(comp, dict):
+            continue
+        comp_id = str(comp.get("component_id") or "").strip()
+        if not comp_id or comp_id in agent_ids or comp_id in refs:
+            continue
+        if set(_dependency_agent_refs(comp)) & agent_ids:
+            refs.append(comp_id)
+    return refs
+
+
+def _resolve_child_components(document_id: str, agent_ids: set[str]) -> list[dict]:
+    """``parent_agent_component_id`` が focus の agent ID である同じ論文の live 子 component。"""
+    if not document_id or not agent_ids:
+        return []
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT id::text AS id, name
+                FROM theory_components_live
+                WHERE document_id = CAST(:document_id AS uuid)
+                  AND parent_agent_component_id = ANY(CAST(:refs AS text[]))
+                ORDER BY name, id
+                """
+            ),
+            {"document_id": document_id, "refs": sorted(agent_ids)},
+        ).mappings().fetchall()
+    finally:
+        session.close()
+    return [dict(r) for r in rows or []]
+
+
+def _component_lane_entry(row_id: str, label: str, relation_label: str) -> dict | None:
+    return _project_context_item(
+        {
+            "element_type": ELEMENT_THEORY_COMPONENT,
+            "element_id": row_id,
+            "label": label,
+            "relation_label": relation_label,
+            "relation_status": _DEPENDENCY_RELATION_STATUS,
+        }
+    )
+
+
+def _hierarchy_lane_items(
+    component_db_id: str,
+    document_id: str,
+    component_row: dict,
+    agent_ids: set[str],
+    artifacts: dict,
+) -> tuple[list[dict], list[dict]]:
+    """分割の親子と依存の逆向きを、同じ論文の live 行へ解決して辿れる項目にする（IK-0588）。
+
+    下へ辿る参照（依存先・子）だけでは、移った先から元へ戻れない。上位には
+    ①分割の親（``parent_agent_component_id`` → 同じ論文の live 行。親が行として残って
+    いない分割では原案の表示名だけを id なしで出す — 捏造しない）②focus に依存する
+    component（「に利用される」）を、下位には③分割の子（「を構成要素として含む」）を足す。
+    どれも fail-soft（解決できなければ足さない）。
+    """
+    upper: list[dict] = []
+    lower: list[dict] = []
+    parent_ref = str(component_row.get("parent_agent_component_id") or "").strip()
+    try:
+        wanted = ([parent_ref] if parent_ref else []) + _reverse_dependency_refs(artifacts, agent_ids)
+        resolved = _resolve_live_components(document_id, wanted) if wanted else {}
+    except Exception:  # noqa: BLE001 - fail-soft
+        logger.warning("component_context: hierarchy resolve failed for %s", document_id, exc_info=True)
+        resolved = {}
+    if parent_ref:
+        row = resolved.get(parent_ref)
+        if row and str(row.get("id")) != component_db_id:
+            entry = _component_lane_entry(str(row["id"]), str(row.get("name") or ""), _PART_OF_RELATION_LABEL)
+        else:
+            parent_label = _split_parent_label(artifacts, parent_ref)
+            entry = (
+                _component_lane_entry("", parent_label, _PART_OF_RELATION_LABEL)
+                if parent_label
+                else None
+            )
+            if entry is not None:
+                entry.pop("id", None)
+        if entry is not None:
+            upper.append(entry)
+    for ref in _reverse_dependency_refs(artifacts, agent_ids):
+        row = resolved.get(ref)
+        if not row or str(row.get("id")) == component_db_id:
+            continue
+        entry = _component_lane_entry(str(row["id"]), str(row.get("name") or ""), _USED_BY_RELATION_LABEL)
+        if entry is not None:
+            upper.append(entry)
+    try:
+        children = _resolve_child_components(document_id, agent_ids)
+    except Exception:  # noqa: BLE001 - fail-soft
+        logger.warning("component_context: child resolve failed for %s", document_id, exc_info=True)
+        children = []
+    for child in children:
+        if str(child.get("id")) == component_db_id:
+            continue
+        entry = _component_lane_entry(str(child["id"]), str(child.get("name") or ""), _CONTAINS_RELATION_LABEL)
+        if entry is not None:
+            lower.append(entry)
+    return upper, lower
+
+
+def _finalize_lane(lane: list[dict]) -> tuple[list[dict], bool]:
+    """中心命題・支持構造の項目から宛先の無い ``id`` を外す（``id=None`` を描かせない）。"""
+    out: list[dict] = []
+    has_thesis = False
+    for entry in lane:
+        if entry.get("element_type") == _ELEMENT_THESIS:
+            has_thesis = True
+            entry = dict(entry)
+            if not entry.get("id"):
+                entry.pop("id", None)
+            entry["navigable"] = False
+        out.append(entry)
+    return out, has_thesis
+
+
 def _merge_lane(
     lane: list[dict], extra: list[dict], *, drop_unresolved_components: bool = False
 ) -> list[dict]:
@@ -653,7 +801,13 @@ def _merge_lane(
 
 
 def _build_graph(
-    component_db_id: str, document_id: str, assembly_record: dict | None = None
+    component_db_id: str,
+    document_id: str,
+    assembly_record: dict | None = None,
+    *,
+    component_row: dict | None = None,
+    agent_ids: set[str] | None = None,
+    artifacts: dict | None = None,
 ) -> dict | None:
     try:
         ref = ElementRef(
@@ -674,13 +828,35 @@ def _build_graph(
     extra, all_resolved = _dependency_lane_items(
         component_db_id, document_id, assembly_record or {}
     )
-    return {
+    upper_extra: list[dict] = []
+    lower_extra: list[dict] = []
+    if component_row is not None:
+        upper_extra, lower_extra = _hierarchy_lane_items(
+            component_db_id, document_id, component_row, set(agent_ids or ()), artifacts or {}
+        )
+    upper, upper_thesis = _finalize_lane(
+        _merge_lane(_visible_lane(result.get("upper")), upper_extra)
+    )
+    lower, lower_thesis = _finalize_lane(
+        _merge_lane(
+            _visible_lane(result.get("lower")),
+            lower_extra + extra,
+            drop_unresolved_components=all_resolved,
+        )
+    )
+    graph = {
         "focus": {"id": component_db_id, "label": str(focus.get("label") or "")},
-        "upper": _merge_lane(_visible_lane(result.get("upper")), []),
-        "lower": _merge_lane(
-            _visible_lane(result.get("lower")), extra, drop_unresolved_components=all_resolved
-        ),
+        "upper": upper,
+        "lower": lower,
     }
+    exits = {
+        lane: THESIS_EXIT_FACT
+        for lane, has_thesis in (("upper", upper_thesis), ("lower", lower_thesis))
+        if has_thesis
+    }
+    if exits:
+        graph["exits"] = exits
+    return graph
 
 
 # ---------------------------------------------------------------------------
@@ -778,6 +954,13 @@ def build_component_context(
         "component_id": component_db_id,
         "instance": instance,
         "shared_part": _build_shared_part(component_db_id, document_id, agent_ids),
-        "graph": _build_graph(component_db_id, document_id, assembly_record),
+        "graph": _build_graph(
+            component_db_id,
+            document_id,
+            assembly_record,
+            component_row=component_row,
+            agent_ids=agent_ids,
+            artifacts=artifacts,
+        ),
     }
     return _strip_confidence(result)

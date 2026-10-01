@@ -6705,6 +6705,8 @@ button.ls-course-evidence-head {
 
 /* Phase 3: 1-hop 近傍グラフ（「グラフで見る」・「旅」） */
 .evidence-chip-context-graph-toggle { margin: 8px 0; }
+/* IK-0570: 中心命題・支持構造への次の一歩（事実文・警告色にしない） */
+.evidence-chip-context-exit { margin: 6px 0; font-size: 12px; color: var(--color-text-secondary, #6e6e73); }
 .evidence-chip-context-graph-btn {
   appearance: none;
   border: 1px solid var(--color-border-secondary, #d2d2d7);

@@ -1129,6 +1129,14 @@ def _collect_structured_content(
                 item = dict(record)
                 item.setdefault("document_id", document_id)
                 item[_SCOPE_DOC_KEY] = document_id
+                # IK-0584: 出典カードの見出しは掲載節の見出し（式と同じ規則で解決できた
+                # ものだけ）。見出しが無ければ見出しを出さず、引用だけを描く。
+                evidence_source = item.get("source") if isinstance(item.get("source"), dict) else {}
+                evidence_section = _section_title(
+                    sections_by_id.get(str(evidence_source.get("section_id") or ""))
+                )
+                if evidence_section and section_title_rejection_reason(evidence_section) is None:
+                    item["section_label"] = evidence_section
                 evidence[str(item["evidence_id"])] = item
                 scoped["evidence"].setdefault((document_id, str(item["evidence_id"])), item)
 
@@ -2802,10 +2810,14 @@ def _topic_evidence_links(
         # \begin{aligned}...\end{aligned} 全体）。summary 経由にすると 220 字で
         # 切り詰められて TeX が壊れるため、全文を latex として渡し UI に数式
         # 描画させる。role が別でも本文が TeX なら同様に扱う。
+        evidence_section = str(record.get("section_label") or "")
         if evidence_role == "equation_quote" or _looks_like_tex_math(evidence_text):
             add("source", evidence_id, "", evidence_role, latex=evidence_text)
         else:
-            add("source", evidence_id, evidence_text, evidence_role)
+            add(
+                "source", evidence_id, evidence_text, evidence_role,
+                extra={"section_label": evidence_section or None},
+            )
 
     def add_figure(figure_ref: dict | None) -> None:
         if not figure_ref:
@@ -3022,6 +3034,23 @@ def source_excerpt_evidence_id(topic: dict) -> str:
     return normalize_evidence_id(str(chunk_ids[0]) if chunk_ids else "excerpt")
 
 
+def _same_display_text(a: str, b: str) -> bool:
+    return " ".join(str(a or "").split()).casefold() == " ".join(str(b or "").split()).casefold()
+
+
+def _source_item_heading(link: dict, summary: str) -> str:
+    """出典（source）カードの見出し（IK-0584）。
+
+    掲載節の見出し（``label`` / ``section_label``）だけを使い、引用本文（summary）を
+    見出しに流用しない。見出しが引用と同じ文になるときも空にする（二重表示の防止）。
+    """
+    for key in ("label", "section_label"):
+        heading = str(link.get(key) or "").strip()
+        if heading and not _same_display_text(heading, summary):
+            return heading
+    return ""
+
+
 def build_topic_evidence_items(topic: dict) -> list[dict]:
     """学習画面向けの読み取り専用 evidence DTO を、トピックに公開済みの参照だけから
     決定論的に組み立てる（admin ``lsTopicEvidenceItems`` と同一規則）。
@@ -3137,6 +3166,11 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
             # component_evidence_redesign.md Phase 1 §4: title に summary を流用
             # しない（同じ文が title/summary に二重表示される症状の解消）。
             title = link.get("label") or (rich_component or {}).get("label") or "論理コンポーネント"
+        elif kind == "source":
+            # IK-0584: 見出しの欄に引用（summary）を流用しない（component と同じ規則）。
+            # 見出しは掲載節の見出しだけ。引用と同じ文になる・見出しが無いときは
+            # title を持たせず、カードは引用だけを描く（freeze 済みの旧教材にも読み時で効く）。
+            title = _source_item_heading(link, summary)
         else:
             title = summary or str(raw_id) or kind
         item = {
@@ -3147,6 +3181,8 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
             "role": link.get("support_role") or "",
             "confidence": link.get("confidence") or "",
         }
+        if kind == "source" and not latex and not title:
+            del item["title"]
         if latex:
             item["latex"] = latex
         if kind == "component":

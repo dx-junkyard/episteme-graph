@@ -5346,7 +5346,10 @@
 
   function materialAnchorTooltipContent(item) {
     if (!item) return null;
-    var label = item.title || item.label || item.caption || item.figure_id || item.id || "";
+    // IK-0584: 見出しの無い出典は内部 id を見出しにせず、引用の短い抜粋を使う。
+    var label = item.title || item.label || item.caption ||
+      (item.kind === "source" ? shortMaterialEvidenceSummary(item.summary) : "") ||
+      item.figure_id || item.id || "";
     var body = equationExplanatoryLines(item, label).join("\n");
     // 文脈パネルを開ける種別（claim / equation）のときだけ導線を添える（fail-closed）。
     var cta = null;
@@ -7904,9 +7907,15 @@
         var cardBody = evidenceItem.latex
           ? '<span class="ls-material-embed-summary ls-material-embed-formula">' + renderMaterialKatex(evidenceItem.latex, true) + '</span>'
           : '<span class="ls-material-embed-summary">' + escHtml(shortMaterialEvidenceSummary(evidenceItem.summary) || "この教材要素に紐づく根拠です。") + '</span>';
+        // IK-0584: 見出し（title）が無い出典は見出しを描かず引用だけを出す（内部 id を
+        // 見出しの代わりにしない）。見出しが引用と同じ文なら二重に描かない（旧データの防衛）。
+        var cardTitle = String(evidenceItem.title || "").trim();
+        if (cardTitle && cardTitle.replace(/\s+/g, " ") === String(evidenceItem.summary || "").trim().replace(/\s+/g, " ")) {
+          cardTitle = "";
+        }
         return '<span class="ls-material-embed ls-material-evidence-card" data-evidence-ref="' + escHtml(embed.kind + ":" + embedId) + '">' +
           '<span class="ls-material-embed-kind">' + escHtml(materialEvidenceKindLabel(evidenceItem.kind)) + '</span>' +
-          '<strong>' + escHtml(evidenceItem.title || evidenceItem.id) + '</strong>' +
+          (cardTitle ? '<strong>' + escHtml(cardTitle) + '</strong>' : '') +
           cardBody +
         '</span>';
       }
@@ -8221,6 +8230,21 @@
       escHtml(summary || "この論文での位置づけはまだ登録されていません。") + '</div>';
   }
 
+  // IK-0570: 中心命題・支持構造はこのポップオーバーからは開けない。サーバが添えた
+  // 次の一歩の事実文（graph.exits、レーンごとに1回）をそのまま描く（文言を焼き込まない）。
+  function componentContextExitsHtml(graph) {
+    var exits = (graph && graph.exits) || {};
+    var seen = {};
+    var html = "";
+    ["upper", "lower"].forEach(function (lane) {
+      var fact = exits[lane];
+      if (!fact || seen[fact]) return;
+      seen[fact] = true;
+      html += '<div class="evidence-chip-context-exit">' + escHtml(fact) + '</div>';
+    });
+    return html;
+  }
+
   function renderComponentContextPanel(pop, body, data, resolver) {
     var instance = (data && data.instance) || {};
     var sharedPart = data && data.shared_part;
@@ -8242,6 +8266,7 @@
     '</div>' +
     '<div class="evidence-chip-context-pane" data-pane="instance">' +
       componentContextCardOrFallbackHtml(cardDto, cardOpts) +
+      componentContextExitsHtml(graph) +
       renderContextInstanceDetails(instance, resolver) +
     '</div>' +
     (sharedPart ? '<div class="evidence-chip-context-pane" data-pane="shared" hidden>' + renderContextSharedPane(sharedPart) + '</div>' : "") +
