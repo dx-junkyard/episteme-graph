@@ -45,10 +45,10 @@ resolution:
     - 3123f2d
     - cb301bb
   verification:
-    methods: [guardrail]
+    methods: [guardrail, reproduction_rerun]
     unverified:
-      - "砂場再演（次の周で確かめる）"
-      - ブラウザでの画面確認
+      - "ブラウザでの画面確認"
+      - "出典の場所が「冒頭」と節名で不揃いな件（IK-0544）は別課題"
 related: [IK-0511, IK-0382, IK-0580]
 view_of: []
 history:
@@ -57,6 +57,11 @@ history:
     from: 'open'
     to: 'resolved'
     reason: '第 18 波で表示中トピックの出典チャンクを [出典N] として採用した（ガードレールで確認・再演は次の周）。（persona_enactment_testing_design.md §18.10）'
+  - date: '2026-10-01'
+    field: resolution.verification.methods
+    from: '[guardrail]'
+    to: '[guardrail, reproduction_rerun]'
+    reason: '第 18 周の再演（st-05 s-source-roundtrip）で、表示中トピックの教材を問う質問に出典チップが付き、出典を開く往復が始まった。（persona_enactment_testing_design.md §18.11）'
 ---
 
 ## 課題

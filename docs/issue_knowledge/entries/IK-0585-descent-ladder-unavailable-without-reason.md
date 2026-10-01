@@ -44,10 +44,10 @@ resolution:
     - docs/features/structure_descent_design.md
     - 7b90670
   verification:
-    methods: [guardrail]
+    methods: [guardrail, reproduction_rerun]
     unverified:
-      - "砂場再演（次の周で確かめる）"
-      - ブラウザでの画面確認
+      - "ブラウザでの画面確認"
+      - "降下路が開けたときの段の中身が対象と噛み合うか（第 18 周 st-01 で噛み合わない段を観察・未起票）"
 related: [IK-0519]
 view_of: []
 history:
@@ -56,6 +56,11 @@ history:
     from: 'open'
     to: 'resolved'
     reason: '第 18 波で降下路の不能理由と次の操作の事実文を返すようにした（ガードレールで確認・再演は次の周）。（persona_enactment_testing_design.md §18.10）'
+  - date: '2026-10-01'
+    field: resolution.verification.methods
+    from: '[guardrail]'
+    to: '[guardrail, reproduction_rerun]'
+    reason: '第 18 周の再演（st-02 s-descend-and-nearby）で、解決できない要素に理由と次の操作の事実文が出た。（persona_enactment_testing_design.md §18.11）'
 ---
 
 ## 課題

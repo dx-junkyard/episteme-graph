@@ -45,10 +45,10 @@ resolution:
     - backend/tests/test_document_refs.py
     - cb301bb
   verification:
-    methods: [guardrail]
+    methods: [guardrail, reproduction_rerun]
     unverified:
-      - "砂場再演（次の周で確かめる）"
-      - ブラウザでの画面確認
+      - "ブラウザでの画面確認"
+      - "URL 取得・ディスカバリー経由で取り込んだ教材の経路"
 related: []
 view_of: []
 history:
@@ -57,6 +57,11 @@ history:
     from: 'open'
     to: 'resolved'
     reason: '第 18 波で document_id の規則を documents.id に一本化し、両形の判別を 2 箇所に限定するガードレールを置いた。（persona_enactment_testing_design.md §18.10）'
+  - date: '2026-10-01'
+    field: resolution.verification.methods
+    from: '[guardrail]'
+    to: '[guardrail, reproduction_rerun]'
+    reason: '第 18 周の再演で、コース画面・議論の開幕・出典の往復が documents.id 一本で通り、source_path 形の値が画面に出なかった。（persona_enactment_testing_design.md §18.11）'
 ---
 
 ## 課題

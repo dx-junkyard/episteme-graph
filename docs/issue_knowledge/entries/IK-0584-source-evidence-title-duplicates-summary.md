@@ -1,9 +1,9 @@
 ---
 id: IK-0584
 title: "教材の出典（source）埋め込みで title に summary（逐語引用）をそのまま入れるため、出典カードに同じ英文が二度並ぶ"
-status: open
+status: resolved
 recorded_at: 2026-10-01
-resolved_at: null
+resolved_at: 2026-10-01
 sources:
   - docs/architecture/persona_enactment_testing_design.md §18.9
 feature_context:
@@ -35,9 +35,17 @@ discovery:
   perspective: [reproduction, trace_walk]
   note: "第 17 周の頭脳メモ（〔出典: X〕X の二重表示）を、ハーネスの投影・製品のカード描画・evidence item の組み立ての順に辿った。"
 resolution:
-  perspective: [pending]
-  note: "未解決。第 17 周の記録（§18.9）で起票した。"
-  landed_in: []
+  perspective: [representation_change, guardrail_fix]
+  note: '出典（source）の埋め込みで title に引用文を入れず、見出しは掲載節の見出しだけにした。見出しが無い・引用と同じ文なら title を持たせず、カードは引用だけを描く（読み時適用・freeze 済みの旧教材にも効く）。'
+  landed_in:
+    - backend/core/course_content_builder.py
+    - frontend/public/js/app.js
+    - backend/tests/test_ik0584_source_evidence_title.py
+    - e27ee17
+  verification:
+    methods: [guardrail, reproduction_rerun]
+    unverified:
+      - "ブラウザでの画面確認（ハーネスの投影は見出しが無いとき id を描くため、再演では見出し欄に ev_ 番号が見えた — ハーネス側の写し漏れ）"
 related: [IK-0464]
 view_of: []
 history:
@@ -46,6 +54,11 @@ history:
     from: 'open'
     to: 'open'
     reason: '2026-10-01 第 18 波で是正中（別担当がコードを是正している）。'
+  - date: '2026-10-01'
+    field: status
+    from: 'open'
+    to: 'resolved'
+    reason: '第 18 波（e27ee17）で是正し、第 18 周の再演（st-01 / st-02 の教材）で出典カードの英文が見出しと本文に二重に出なくなったことを見た。（persona_enactment_testing_design.md §18.11）'
 ---
 
 ## 課題
@@ -58,7 +71,7 @@ history:
 
 ## 解決の観点
 
-未解決。原因は確認済みで、着手点は classification.basis のとおり。
+解決（e27ee17）。見出しは掲載節の見出しだけにし、無ければ title を持たせない読み時の是正にした（freeze 済み教材を作り直さずに効く）。カード側は title が無ければ見出しを描かない（id へフォールバックしない）。
 
 ## 一般化
 

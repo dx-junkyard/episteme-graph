@@ -52,6 +52,11 @@ history:
     from: '[]'
     to: '第 18 波の一部是正'
     reason: '詰まりの区画と学習相談のトピック範囲は入った。残り: 早期 return 経路の骨格は詰まりの区画のみ（先に答える・確認・鏡の区画は未適用）。（persona_enactment_testing_design.md §18.10）'
+  - date: '2026-10-01'
+    field: status
+    from: 'open'
+    to: 'open'
+    reason: '第 18 周の再演（st-05 s-stuck-scaffold）で、詰まりの 1 往復目は足場 1 つ・問い返しなし・前提ゲートなし（GONE）、ゲートは次の往復へ繰り延べられた。残り: ゲート表示中の「むずい」が前提トピックの長い説明になる・「どこから？」が学習相談の固定構成（【歓迎と目標】…）になる、は STILL。（persona_enactment_testing_design.md §18.11）'
 ---
 
 ## 課題

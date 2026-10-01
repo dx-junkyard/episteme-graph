@@ -45,10 +45,10 @@ resolution:
     - docs/features/focus_document_design.md
     - cb301bb
   verification:
-    methods: [guardrail]
+    methods: [guardrail, reproduction_rerun]
     unverified:
-      - "砂場再演（次の周で確かめる）"
-      - ブラウザでの画面確認
+      - "ブラウザでの画面確認"
+      - "ハーネスの行為で主張 ⚓ を開く再演（第 18 周のハーネスは主張 ⚓ を部品文脈の行為に渡せず、砂場 API の GET で同じ要求を再実行した）"
 related: [IK-0516, IK-0553, IK-0580]
 view_of: []
 history:
@@ -57,6 +57,11 @@ history:
     from: 'open'
     to: 'resolved'
     reason: '第 18 波で主張 ⚓ の宛先を論文内で一意にした（ガードレールで確認・再演は次の周）。（persona_enactment_testing_design.md §18.10）'
+  - date: '2026-10-01'
+    field: resolution.verification.methods
+    from: '[guardrail]'
+    to: '[guardrail, reproduction_rerun]'
+    reason: '第 18 周で、表示中トピックの主張 ⚓ の要素文脈を砂場 API の GET で再実行し、焦点論文で解決すること・曖昧な番号では特定の事実文が出ることを見た。（persona_enactment_testing_design.md §18.11）'
 ---
 
 ## 課題
