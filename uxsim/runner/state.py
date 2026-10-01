@@ -335,7 +335,11 @@ def render_material_text(chunk: Any) -> str:
             label = MATERIAL_KIND_LABELS.get(str(item.get("kind")), str(item.get("kind")))
             body = f"$${item['latex']}$$" if item.get("latex") else (
                 _short_summary(item.get("summary")) or "この教材要素に紐づく根拠です。")
-            return f"〔{label}: {item.get('title') or item.get('id')}〕{body}"
+            # app.js（IK-0584）と同じ: 見出しが無い出典は引用文だけを出し、内部 ID を見出しに使わない
+            title = item.get("title")
+            if not title or title == item.get("summary"):
+                return f"〔{label}〕{body}"
+            return f"〔{label}: {title}〕{body}"
         return "" if drop_unresolved else _missing_embed(kind, raw_id)
 
     def expand(m: "re.Match[str]") -> str:
