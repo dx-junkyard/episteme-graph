@@ -2878,7 +2878,8 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   `label_vocab.WM_INTERACTION` 3段・縮退文はサーバ fact `WM_DEGRADED_NOTICE` に一本化）。
 - **Phase 5 ゼミ前ブリーフと鏡面化**（`seminar_brief_mirroring_design.md`）:
   `core/doubt/seminar_brief.py`（4区画 `fragile_assumptions` / `single_support_lines` /
-  `clear_skies` / `learner_handoff`、SL1 閉世界語彙のガードレール対象）+ `routes/seminar_brief.py`
+  `clear_skies` / `learner_handoff`、SL1 閉世界語彙のガードレール対象。2026-10-01: 同文面の項目は式名で区別するか 1 行に畳み・
+  自分の主張を自分の支持線に数えない・`learner_handoff` は k-匿名の素朴な問いの集約（名前とレンジのみ）を出す — IK-0593）+ `routes/seminar_brief.py`
   （GET 1本・権限2段ゲート）+ 教材行 ⋯ メニュー「ゼミ前ブリーフ…」。鏡面化は
   `_get_discuss_system_prompt` の 〔鏡〕 契約 + `core/discuss/mirroring.py::extract_mirror`
   （鏡文中の**すべて**の「」引用が学習者の直前発話の逐語部分文字列であること・最短2文字・

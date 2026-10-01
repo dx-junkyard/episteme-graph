@@ -31,6 +31,7 @@ from sqlalchemy import text as sa_text
 from core import display_projection as _dp
 from core.doubt.dependency import DependencyGraph, build_dependency_graph, seed_nodes_for_target
 from core.doubt.observation_targets import observation_claim_targets
+from core.knowledge_objects.references import normalize_claim_ref
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,33 @@ def _cut_members(
     ][:_MAX_CUT_MEMBERS]
 
 
+def _target_claim_ids(graph: DependencyGraph, target_type: str, target_id: str) -> set[str]:
+    """台帳対象そのものの主張 ID（表記ゆれ込み）。claim なら自身、component なら根拠の主張。"""
+    raw: list[str] = []
+    if target_type == "claim":
+        raw = [target_id]
+    elif target_type == "component":
+        raw = list(graph.node_claim_ids.get(target_id) or [])
+    out: set[str] = set()
+    for value in raw:
+        text = str(value or "").strip()
+        if text:
+            out.add(text)
+            out.add(normalize_claim_ref(text))
+    return out
+
+
+def _shares_target_claim(graph: DependencyGraph, node_id: str, target_claims: set[str]) -> bool:
+    """``node_id`` の根拠の主張が、対象そのものの主張と同じか（自己支持の判定）。"""
+    if not target_claims:
+        return False
+    for value in graph.node_claim_ids.get(node_id) or []:
+        text = str(value or "").strip()
+        if text and (text in target_claims or normalize_claim_ref(text) in target_claims):
+            return True
+    return False
+
+
 @dataclass
 class SupportPathContext:
     """複数対象を評価するときに再利用する、コース/文書スコープの共有文脈（性能改善）。
@@ -297,6 +325,10 @@ def compute_support_lines_from_context(
     graph = ctx.graph
     adjacency = ctx.adjacency
 
+    # 対象そのものの主張（IK-0593）: 同じ主張を根拠にもつ別ノード（式の詳細層の別の手順など）は
+    # 対象の言い直しであって独立の支持ではない — root にも崩れる対象（cut_members）にも数えない。
+    target_claims = _target_claim_ids(graph, target_type, target_id)
+
     roots: set[str] = set()
     contributing_claims: dict[str, dict] = {}
     for item in ctx.obs_targets:
@@ -304,6 +336,7 @@ def compute_support_lines_from_context(
         referencing_nodes = {
             nid for nid in graph.claim_refs.get(claim_id, set())
             if nid in graph.node_ids and nid not in sinks
+            and not _shares_target_claim(graph, nid, target_claims)
         }
         if referencing_nodes:
             roots |= referencing_nodes
@@ -335,7 +368,19 @@ def compute_support_lines_from_context(
         }
 
     if flow == 1:
-        cut_members = _cut_members(original_edges, s_reachable, graph.node_labels)
+        cut_members = [
+            m for m in _cut_members(original_edges, s_reachable, graph.node_labels)
+            if not _shares_target_claim(graph, m["node_id"], target_claims)
+        ]
+        if not cut_members:
+            # 崩れる対象が対象自身の言い直ししか残らない = 観測からの独立した支持線は無い。
+            # 新しい文を作らず、既存の閉世界の事実文（SL1）へ縮退する。
+            return {
+                "level": "none",
+                "fact_line": FACT_LINE_NONE,
+                "cut_members": [],
+                "observation_roots": observation_roots,
+            }
         labels = "、".join(m["label"] for m in cut_members) or "（不明）"
         fact_line = (
             f"この対象は単一の支持線に立っています。"

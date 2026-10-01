@@ -210,7 +210,7 @@ class TestFourSections:
         assert "if (!rowEls || !rowEls.length) return null;" in block
         assert "該当なし" not in seg
 
-    def test_fourth_section_is_always_rendered_with_the_reserved_note(self):
+    def test_fourth_section_is_always_rendered_with_the_note(self):
         seg = _brief_segment()
         block = _fn_block(seg, "function renderSeminarBrief(data) {")
         assert "body.appendChild(handedSection);" in block
@@ -223,10 +223,20 @@ class TestFourSections:
     def test_reserved_note_fallback_mirrors_the_backend_constant(self):
         """フォールバック固定文はサーバ正本（LEARNER_HANDOFF_RESERVED_NOTE）の逐語。"""
         seg = _brief_segment()
-        needle = 'var SEMINAR_BRIEF_RESERVED_NOTE = "' + sb_mod.LEARNER_HANDOFF_RESERVED_NOTE + '";'
+        needle = 'var SEMINAR_BRIEF_HANDOFF_EMPTY_NOTE = "' + sb_mod.LEARNER_HANDOFF_NO_RECORD_NOTE + '";'
         assert needle in seg
         # サーバの note を優先し、無いときだけフォールバックする。
-        assert "handed.note || SEMINAR_BRIEF_RESERVED_NOTE" in seg
+        assert "handed.note || SEMINAR_BRIEF_HANDOFF_EMPTY_NOTE" in seg
+        # 「実装後に使われます」の予約文は消えた（IK-0593 — 仕組みはある。無いのは記録）。
+        assert "実装後に使われます" not in seg
+
+    def test_handoff_items_and_merged_note_are_rendered(self):
+        """IK-0593: 第4区画の事実行と、同じ文面をまとめた事実文を描く（件数は描かない）。"""
+        seg = _brief_segment()
+        block = _fn_block(seg, "function renderSeminarBrief(data) {")
+        assert "(handed.items || []).forEach" in block
+        assert "_sbMergedFacts(item)" in block
+        assert "item.merged_note" in seg
 
     def test_unavailable_shows_only_the_reason_fact(self):
         seg = _brief_segment()

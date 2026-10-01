@@ -89,7 +89,10 @@ class TestGenerationLanguage:
         assert "<option value=\"none\">指定しない</option>" in js
 
     def test_cache_buster_was_bumped(self):
-        assert "/js/admin.js?v=tex-default-language-20261001-1" in _read(ADMIN_HTML)
+        # 後続の変更がさらに上げてよい — この変更より前の値に戻っていないことだけを固定する。
+        html = _read(ADMIN_HTML)
+        assert "/js/admin.js?v=" in html
+        assert "/js/admin.js?v=theory-modules-ui-20260923-1" not in html
 
 
 class TestManualSections:

@@ -8,7 +8,9 @@
   ① 脆い前提       — D層 open-assumptions（``compile_open_assumptions`` の document 絞り込み）
   ② 一点吊りの支持線 — SL層 ``support_paths`` の ``level == "single"`` の事実文
   ③ 晴れ間          — 「このコーパスの中では検証記録が見つかりません。」の閉世界事実文（SL1）
-  ④ 学習者からの問い — v1 は空欄予約（SB3。手渡しチャネル本体は v2 の例外設計書を経る）
+  ④ 学習者からの問い — この論文を教材にするコースの素朴な問いシグナル（D1-5 の k-匿名集約の
+    再利用・名前とレンジだけ）。記録が無ければ「まだありません」の事実文（IK-0593。
+    学習者が意図して手渡すチャネル本体は v2 の例外設計書を経る — SB3）
 
 原則:
   - SB2 数値を見せない — 件数・人数の生値を返さない（レンジ・段階ラベル・事実文のみ）。
@@ -30,6 +32,7 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core import display_projection as _dp
+from core.doubt.naive_signal import aggregate_naive_signals_for_courses
 from core.doubt.open_assumptions import compile_open_assumptions, target_label
 from core.doubt.schema import LOAD_LEVEL_LABELS
 from core.doubt.support_paths import build_support_context, compute_support_lines_from_context
@@ -41,13 +44,29 @@ logger = logging.getLogger(__name__)
 # 台帳はコーパスの射影であって分野の射影ではない。晴れ間は発見の候補地であって発見ではない。
 FACT_LINE_NO_VERIFICATION_RECORD = "このコーパスの中では検証記録が見つかりません。"
 
-# 第4区画（学習者からの問い）の空欄予約文（SB3）。警告色・催促文にしない（空欄は発見の流儀）。
-LEARNER_HANDOFF_RESERVED_NOTE = "（この区画は、学習者からの手渡しの仕組みの実装後に使われます）"
+# 第4区画（学習者からの問い）の事実文（SB3 / IK-0593）。警告色・催促文にしない（空欄は発見の流儀）。
+# 記録が無いとき — 「実装後に使われます」と言わない（集約の仕組みは既にある。無いのは記録）。
+LEARNER_HANDOFF_NO_RECORD_NOTE = "このコースの学習者の詰まりの記録はまだありません。"
+# 記録があるとき、区画の出所を言う一行（件数・閾値の数字は書かない — SB2）。
+LEARNER_HANDOFF_SOURCE_NOTE = (
+    "学習者が自分で確かめた問いのうち、同じ箇所に複数の学習者が集まったものだけを示します"
+    "（少人数の箇所は出しません）。"
+)
+# 1件の事実文（名前は statement 側。人数はレンジだけ — privacy.py の正本）。
+LEARNER_HANDOFF_FACT_TEMPLATE = "複数の学習者が、ここで問いを立てています（{count_range} 人）。"
+
+# 同じ文面の項目を 1 行にまとめたときの事実文（IK-0593。件数は書かない — SB2）。
+MERGED_SAME_TEXT_NOTE = "同じ文面の項目をまとめて表示しています（同じ主張が複数の手順で使われています）。"
+# 対象は別だが、読める手がかり（式の名前）でも見分けられない同じ文面の項目をまとめたとき。
+MERGED_INDISTINCT_NOTE = "見分ける手がかりのない同じ文面の項目をまとめて表示しています。"
 
 # 各区画の上限（順位づけの演出はしない。並び順は投影元の決定論順をそのまま使う）
 _MAX_FRAGILE_ASSUMPTIONS = 8
 _MAX_SINGLE_SUPPORT_LINES = 5
 _MAX_CLEAR_SKIES = 8
+_MAX_LEARNER_HANDOFF = 8
+#: 項目を区別する式の名前の上限（「式 (3)・式 (4)」まで）。
+_MAX_DISTINGUISHING_EQUATIONS = 2
 
 # SB2 の再帰安全網: 万一投影に混入しても落とす生数値キー
 # （core/discuss/opening.py::_strip_numeric_keys と同型。ホワイトリスト投影が主で、
@@ -133,6 +152,10 @@ class _ReadableLabels:
         self.equation_records: dict = {}
         self.node_labels: dict[str, str] = {}
         self.claim_texts: dict[str, str] = {}
+        # 項目の同一性・区別に使う読み時の補助（IK-0593。表示には ID を出さない）
+        self.node_claim_ids: dict[str, list[str]] = {}
+        self.node_operations: dict[str, str] = {}
+        self.node_equation_ids: dict[str, list[str]] = {}
         graph = None
         try:
             from core.document_pipeline.persistence import document_run_artifacts
@@ -161,6 +184,13 @@ class _ReadableLabels:
         except Exception:  # noqa: BLE001
             logger.debug("seminar brief node labels unavailable for %s", document_id, exc_info=True)
         if graph is not None:
+            self.node_claim_ids = {k: list(v or []) for k, v in dict(getattr(graph, "node_claim_ids", {}) or {}).items()}
+            self.node_operations = {k: str(v or "") for k, v in dict(getattr(graph, "node_operations", {}) or {}).items()}
+            for eq_id, nids in dict(getattr(graph, "equation_refs", {}) or {}).items():
+                for nid in nids or ():
+                    eqs = self.node_equation_ids.setdefault(str(nid), [])
+                    if eq_id not in eqs:
+                        eqs.append(str(eq_id))
             for nid, raw in dict(graph.node_labels).items():
                 self.node_labels[nid] = self._readable_node_label(
                     raw,
@@ -209,6 +239,37 @@ class _ReadableLabels:
             return masked_head or op_ja or UNIDENTIFIED_ELEMENT_TEXT
         return masked_head
 
+    def identity(self, item: dict) -> tuple:
+        """項目が指す対象の同一性（IK-0593）。同じ主張を根拠にもつ同じ操作のノードは同じ対象とみなす。"""
+        from core.knowledge_objects.references import normalize_claim_ref
+
+        target_type = str(item.get("target_type") or "")
+        target_id = str(item.get("target_id") or "")
+        if target_type == "claim":
+            return ("claim", normalize_claim_ref(target_id))
+        if target_id in self.node_labels:
+            claims = [normalize_claim_ref(c) for c in self.node_claim_ids.get(target_id) or [] if str(c or "").strip()]
+            if claims:
+                return ("node", claims[0], self.node_operations.get(target_id, ""))
+        return (target_type, target_id)
+
+    def distinguisher(self, item: dict) -> str:
+        """同じ文面の別の対象を見分ける読める手がかり（式の名前。内部 ID・件数は使わない）。"""
+        from core.theory_modules.schema import equation_display_name
+
+        target_id = str(item.get("target_id") or "")
+        names: list[str] = []
+        for eq_id in sorted(self.node_equation_ids.get(target_id) or []):
+            record = self.equation_records.get(eq_id)
+            if not record:
+                continue
+            name = equation_display_name(record)
+            if name and name not in names:
+                names.append(name)
+            if len(names) >= _MAX_DISTINGUISHING_EQUATIONS:
+                break
+        return "・".join(names)
+
     def text(self, value: Any) -> str:
         from core.theory_modules.schema import (
             UNIDENTIFIED_ELEMENT_TEXT,
@@ -240,6 +301,149 @@ def _readable_items(items: list[dict], labels: "_ReadableLabels", keys: tuple[st
         for key in keys:
             if key in item:
                 item[key] = labels.text(item.get(key))
+
+
+def _disambiguate_same_text(items: list[dict], labels: "_ReadableLabels", *, extra_key: str = "") -> list[dict]:
+    """同じ文面の項目を、同じ対象なら 1 行にまとめ、別の対象なら式の名前で見分ける（IK-0593）。
+
+    文面（``statement`` + ``extra_key`` の値）が同じ項目の群ごとに:
+      1. 見分けの手がかり（ノードが使う式の名前）が群の中で違えば、手がかりのある項目の文面に
+         「（式 (3)）」を添える。
+      2. 手がかりでも分けられず残った項目は先頭の 1 件にまとめ ``merged_note`` を添える
+         （同じ対象 = 同じ主張・同じ操作なら MERGED_SAME_TEXT_NOTE、別の対象なら
+         MERGED_INDISTINCT_NOTE — 「同じ主張」と言えないものにそう書かない）。
+    並びは入力の決定論順を保つ。内部 ID・件数は文面に出さない（PL7 / SB2）。
+    """
+    groups: dict[tuple, list[int]] = {}
+    for idx, item in enumerate(items):
+        key = (str(item.get("statement") or ""), str(item.get(extra_key) or "") if extra_key else "")
+        groups.setdefault(key, []).append(idx)
+
+    drop: set[int] = set()
+    for key, indices in groups.items():
+        if len(indices) < 2 or not key[0]:
+            continue
+        dist = {i: labels.distinguisher(items[i]) for i in indices}
+        if len(set(dist.values())) > 1:
+            for i in indices:
+                if dist[i]:
+                    items[i]["statement"] = f"{items[i]['statement']}（{dist[i]}）"
+        buckets: dict[str, list[int]] = {}
+        for i in indices:
+            buckets.setdefault(dist[i] if len(set(dist.values())) > 1 else "", []).append(i)
+        for bucket in buckets.values():
+            if len(bucket) < 2:
+                continue
+            keeper = bucket[0]
+            same_target = len({labels.identity(items[i]) for i in bucket}) == 1
+            items[keeper]["merged_note"] = MERGED_SAME_TEXT_NOTE if same_target else MERGED_INDISTINCT_NOTE
+            drop.update(bucket[1:])
+    return [item for idx, item in enumerate(items) if idx not in drop]
+
+
+def _courses_using_document(session, document_id: str) -> list[str]:
+    """この論文を教材（sources）にもつ学習コースの id（第4区画の集約範囲）。取得失敗は空。"""
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT lc.id::text
+                FROM learning_courses lc
+                JOIN documents d ON d.id = CAST(NULLIF(:doc, '') AS uuid)
+                WHERE lc.data->'sources' @> jsonb_build_array(jsonb_build_object('material_id', d.source_path))
+                   OR lc.data->'sources' @> jsonb_build_array(jsonb_build_object('material_id', d.id::text))
+                   OR lc.data->'sources' @> jsonb_build_array(jsonb_build_object('document_id', d.id::text))
+                ORDER BY lc.id
+            """),
+            {"doc": document_id},
+        ).fetchall()
+    except Exception:
+        logger.debug("seminar brief course lookup failed for %s", document_id, exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+    return [str(r[0]) for r in rows if r and r[0]]
+
+
+def _document_member_ids(session, document_id: str, table: str, ids: list[str]) -> set[str]:
+    """``ids`` のうち、この論文の live 行に実在するもの（第4区画を論文の範囲に絞る）。"""
+    if not ids:
+        return set()
+    if table == "claim":
+        sql = """
+            SELECT id::text FROM theory_claims_live
+            WHERE document_id = CAST(NULLIF(:doc, '') AS uuid)
+              AND id::text = ANY(:ids)
+        """
+    elif table == "component":
+        sql = """
+            SELECT id::text FROM theory_components_live
+            WHERE document_id = CAST(NULLIF(:doc, '') AS uuid)
+              AND id::text = ANY(:ids)
+        """
+    else:
+        return set()
+    try:
+        rows = session.execute(sa_text(sql), {"doc": document_id, "ids": list(ids)}).fetchall()
+    except Exception:
+        logger.debug("seminar brief member lookup failed for %s", document_id, exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return set()
+    return {str(r[0]) for r in rows if r and r[0]}
+
+
+def _learner_handoff(session, document_id: str, labels: "_ReadableLabels") -> dict:
+    """区画④: この論文を教材にするコースの素朴な問いシグナル（D1-5 の k-匿名集約の再利用）。
+
+    学習者個人・学習者別件数の経路はこのモジュールに書かない（SB4）— 集約は
+    ``core/doubt/naive_signal.py``（本人が引き受けた行のみ・ユニーク学習者・n<3 非表示・
+    レンジのみ）の公開関数に任せ、ここでは論文の範囲に絞って名前を読める語にするだけ。
+    """
+    course_ids = _courses_using_document(session, document_id)
+    signals: list[dict] = []
+    if course_ids:
+        try:
+            signals = aggregate_naive_signals_for_courses(session, course_ids)
+        except Exception:  # noqa: BLE001
+            logger.debug("seminar brief naive signals failed for %s", document_id, exc_info=True)
+            signals = []
+
+    by_type: dict[str, list[str]] = {}
+    for sig in signals:
+        by_type.setdefault(str(sig.get("anchor_type") or ""), []).append(str(sig.get("anchor_id") or ""))
+    members = {
+        "claim": _document_member_ids(session, document_id, "claim", by_type.get("claim", [])),
+        "component": _document_member_ids(session, document_id, "component", by_type.get("component", [])),
+        "equation": {eid for eid in by_type.get("equation", []) if eid in labels.equation_records},
+    }
+
+    items: list[dict] = []
+    for sig in signals:
+        anchor_type = str(sig.get("anchor_type") or "")
+        anchor_id = str(sig.get("anchor_id") or "")
+        count_range = str(sig.get("count_range") or "")
+        if not count_range or anchor_id not in members.get(anchor_type, set()):
+            continue
+        if anchor_type in ("claim", "component"):
+            name = labels.text(target_label(session, anchor_type, anchor_id))
+        else:
+            name = labels.text(anchor_id)
+        if not name or name == anchor_id or _dp.UNIDENTIFIED_ELEMENT_TEXT in name:
+            continue  # 名前を読める語にできない箇所は出さない（内部 ID・置換語だけの行を作らない）
+        items.append({
+            "anchor_type": anchor_type,
+            "statement": name,
+            "fact_line": LEARNER_HANDOFF_FACT_TEMPLATE.format(count_range=count_range),
+        })
+        if len(items) >= _MAX_LEARNER_HANDOFF:
+            break
+    if not items:
+        return {"reserved": False, "items": [], "note": LEARNER_HANDOFF_NO_RECORD_NOTE}
+    return {"reserved": False, "items": items, "note": LEARNER_HANDOFF_SOURCE_NOTE}
 
 
 def _project_fragile_item(item: dict) -> dict:
@@ -359,7 +563,7 @@ def _single_support_lines(
     return out
 
 
-def _clear_skies(assumption_items: list[dict]) -> list[dict]:
+def _clear_skies(assumption_items: list[dict], limit: int | None = _MAX_CLEAR_SKIES) -> list[dict]:
     """区画③: open_assumptions 投影のうち untested × スコープ空欄の対象に閉世界固定文を添える。"""
     out: list[dict] = []
     for item in assumption_items:
@@ -373,7 +577,7 @@ def _clear_skies(assumption_items: list[dict]) -> list[dict]:
             "statement": str(item.get("statement") or ""),
             "fact_line": FACT_LINE_NO_VERIFICATION_RECORD,
         })
-        if len(out) >= _MAX_CLEAR_SKIES:
+        if limit is not None and len(out) >= limit:
             break
     return out
 
@@ -435,15 +639,21 @@ def build_seminar_brief(session, document_ref: str) -> dict:
     assumption_items = compile_open_assumptions(
         session, course_id, include_challenger_names=False, document_id=document_id,
     )
-    fragile = [_project_fragile_item(i) for i in assumption_items[:_MAX_FRAGILE_ASSUMPTIONS]]
+    labels = _ReadableLabels(session, document_id, course_id)
+    # 読める文面にしてから同じ文面の項目を畳み・見分け（IK-0593）、そのあとで上限を掛ける
+    # （重複が上限枠を食って別の前提が落ちるのを避ける）。
+    fragile = [_project_fragile_item(i) for i in assumption_items]
+    _readable_items(fragile, labels, ("statement",))
+    fragile = _disambiguate_same_text(fragile, labels)[:_MAX_FRAGILE_ASSUMPTIONS]
     _attach_stumble_axes(document_id, fragile)
 
-    labels = _ReadableLabels(session, document_id, course_id)
     single_lines = _single_support_lines(session, course_id, document_id, labels)
-    skies = _clear_skies(assumption_items)
-    _readable_items(fragile, labels, ("statement",))
+    skies = _clear_skies(assumption_items, limit=None)
     _readable_items(single_lines, labels, ("statement", "fact_line"))
     _readable_items(skies, labels, ("statement",))
+    single_lines = _disambiguate_same_text(single_lines, labels, extra_key="fact_line")
+    skies = _disambiguate_same_text(skies, labels)[:_MAX_CLEAR_SKIES]
+    handoff = _learner_handoff(session, document_id, labels)
 
     brief = {
         "available": True,
@@ -455,7 +665,8 @@ def build_seminar_brief(session, document_ref: str) -> dict:
         "single_support_lines": single_lines,
         # ③ 晴れ間（閉世界の固定事実文）
         "clear_skies": skies,
-        # ④ 学習者からの問い — v1 は空欄で予約（SB3）
-        "learner_handoff": {"reserved": True, "note": LEARNER_HANDOFF_RESERVED_NOTE},
+        # ④ 学習者からの問い — 素朴な問いシグナルの k-匿名集約（名前とレンジのみ）か
+        #    「まだありません」の事実文（SB3 / IK-0593）
+        "learner_handoff": handoff,
     }
     return _strip_numeric_keys(brief)

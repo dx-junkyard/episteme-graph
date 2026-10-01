@@ -375,12 +375,13 @@ class TestBriefComposition:
         brief = _patched_brief(monkeypatch, items=items)
         assert brief["clear_skies"] == []
 
-    def test_fourth_section_is_reserved_with_fixed_note(self, monkeypatch):
-        """SB3: 第4区画は空欄予約（警告色・催促文にしない固定の事実文）。"""
+    def test_fourth_section_without_records_says_so_honestly(self, monkeypatch):
+        """SB3 / IK-0593: 記録が無いときは「まだありません」の事実文（予約文にしない）。"""
         brief = _patched_brief(monkeypatch)
         assert brief["learner_handoff"] == {
-            "reserved": True,
-            "note": "（この区画は、学習者からの手渡しの仕組みの実装後に使われます）",
+            "reserved": False,
+            "items": [],
+            "note": "このコースの学習者の詰まりの記録はまだありません。",
         }
 
     def test_no_raw_numeric_keys_anywhere(self, monkeypatch):
@@ -391,7 +392,7 @@ class TestBriefComposition:
         assert offending == [], f"生数値キーがブリーフに漏洩: {offending}"
 
     def test_fragile_assumptions_capped_at_eight(self, monkeypatch):
-        items = [_assumption_item(target_id=f"t-{i}") for i in range(12)]
+        items = [_assumption_item(target_id=f"t-{i}", statement=f"前提その{i}") for i in range(12)]
         brief = _patched_brief(monkeypatch, items=items)
         assert len(brief["fragile_assumptions"]) == 8
 

@@ -3822,13 +3822,14 @@
   // 正本: docs/features/seminar_brief_mirroring_design.md
   //   SB1 新テーブル・新LLMゼロ（既存投影の読み時合成 — このモーダルは読むだけ。書き込みAPIなし）
   //   SB2 数値を見せない（件数・人数の生値なし。段階ラベル・事実文のみ描画する）
-  //   SB3 第4区画「学習者からの問い」は v1 空欄で予約（空欄は発見の流儀 — 警告色・催促文にしない）
+  //   SB3 第4区画「学習者からの問い」は素朴な問いシグナルの k-匿名集約（名前とレンジのみ）。
+  //       記録が無いときは「まだありません」の事実文（空欄は発見の流儀 — 警告色・催促文にしない）
   //   SB4 学習者個人・学習者別件数への導線を作らない
   // 描画は createElement / textContent 基調（本文変数を innerHTML に渡さない）。
 
   // 第4区画の note がサーバから取れないときの固定文
-  // （正本: core/doubt/seminar_brief.py::LEARNER_HANDOFF_RESERVED_NOTE の逐語）。
-  var SEMINAR_BRIEF_RESERVED_NOTE = "（この区画は、学習者からの手渡しの仕組みの実装後に使われます）";
+  // （正本: core/doubt/seminar_brief.py::LEARNER_HANDOFF_NO_RECORD_NOTE の逐語）。
+  var SEMINAR_BRIEF_HANDOFF_EMPTY_NOTE = "このコースの学習者の詰まりの記録はまだありません。";
   // 支持線の段階ラベル。正本は backend/core/doubt/schema.py::SUPPORT_LEVEL_BADGE_LABELS
   // （test_seminar_brief_ui_static.py が逐語ミラーを固定。SL4: 経路数・カットのサイズは出さない）。
   var SEMINAR_SUPPORT_LEVEL_LABELS = {
@@ -3953,6 +3954,11 @@
     return ["つまづき — " + parts.join(" ・ ")];
   }
 
+  // 同じ文面の項目をサーバがまとめたときの事実文（IK-0593。件数は出さない）。
+  function _sbMergedFacts(item) {
+    return (item && typeof item.merged_note === "string" && item.merged_note) ? [item.merged_note] : [];
+  }
+
   function _sbStatementRow(statement, facts) {
     var row = _sbEl("div", "padding:6px 0;border-bottom:1px solid var(--color-border-tertiary)");
     row.className = "seminar-brief-row";
@@ -3979,7 +3985,7 @@
     var fragileRows = [];
     (data.fragile_assumptions || []).forEach(function (item) {
       if (!item || !item.statement) return;
-      fragileRows.push(_sbStatementRow(item.statement, _sbFragileMeta(item).concat(_sbStumbleFacts(item.stumble))));
+      fragileRows.push(_sbStatementRow(item.statement, _sbFragileMeta(item).concat(_sbStumbleFacts(item.stumble), _sbMergedFacts(item))));
     });
     var fragileSection = _sbSection("脆い前提", fragileRows);
     if (fragileSection) body.appendChild(fragileSection);
@@ -3988,7 +3994,7 @@
     var singleRows = [];
     (data.single_support_lines || []).forEach(function (item) {
       if (!item || !item.statement) return;
-      singleRows.push(_sbStatementRow(item.statement, item.fact_line ? [item.fact_line] : []));
+      singleRows.push(_sbStatementRow(item.statement, (item.fact_line ? [item.fact_line] : []).concat(_sbMergedFacts(item))));
     });
     var singleSection = _sbSection("一点吊りの支持線", singleRows);
     if (singleSection) body.appendChild(singleSection);
@@ -3997,18 +4003,22 @@
     var clearingRows = [];
     (data.clear_skies || []).forEach(function (item) {
       if (!item || !item.statement) return;
-      clearingRows.push(_sbStatementRow(item.statement, item.fact_line ? [item.fact_line] : []));
+      clearingRows.push(_sbStatementRow(item.statement, (item.fact_line ? [item.fact_line] : []).concat(_sbMergedFacts(item))));
     });
     var clearingSection = _sbSection("晴れ間", clearingRows);
     if (clearingSection) body.appendChild(clearingSection);
 
-    // 4. 学習者からの問い — v1 は空欄予約（SB3）。空でもこの区画だけは常に出し、
-    //    淡色の note のみを添える（警告色・催促文にしない）。
+    // 4. 学習者からの問い — 素朴な問いシグナルの k-匿名集約（名前とレンジのみ, SB3/SB4）。
+    //    空でもこの区画だけは常に出し、淡色の note を添える（警告色・催促文にしない）。
     var handed = data.learner_handoff || {};
     var handedSection = _sbEl("div", "margin-bottom:16px");
     handedSection.className = "seminar-brief-section seminar-brief-handed";
     handedSection.appendChild(_sbEl("div", "font-size:13px;font-weight:600;color:var(--color-text-primary);margin-bottom:6px", "学習者からの問い"));
-    handedSection.appendChild(_sbEl("div", "font-size:12px;color:var(--color-text-tertiary)", handed.note || SEMINAR_BRIEF_RESERVED_NOTE));
+    (handed.items || []).forEach(function (item) {
+      if (!item || !item.statement) return;
+      handedSection.appendChild(_sbStatementRow(item.statement, item.fact_line ? [item.fact_line] : []));
+    });
+    handedSection.appendChild(_sbEl("div", "font-size:12px;color:var(--color-text-tertiary)", handed.note || SEMINAR_BRIEF_HANDOFF_EMPTY_NOTE));
     body.appendChild(handedSection);
   }
 
