@@ -112,14 +112,28 @@ def _clip(text: str, n: int = OBSERVATION_CHARS) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
-def _str(v: Any) -> str:
-    return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
-
-
 # 画面（app.js / admin.js）が表示しない「宛先」のキー。id・*_id・*_ids・stable_key などは UI がリンク解決に使う
 # だけで文字として出さない（製品の表示投影 display_projection.ID_KEY_RE と同じ線引き・第 17 周）。
 # ペルソナの観察に載せると「UUID が見える」「id=None」の偽の所見になる。
-_ADDRESS_KEY_RE = __import__("re").compile(r"(?:^|_)(?:id|ids|key|keys)$|^(?:material_id|document_id|stable_key|href|src|run_id)$")
+# *_ref / *_refs / *_uuid（step_refs 等）も製品 ID_KEY_RE と同じく宛先として扱う（第 18 周）。
+_ADDRESS_KEY_RE = __import__("re").compile(
+    r"(?:^|_)(?:id|ids|key|keys|ref|refs|uuid)$|^(?:material_id|document_id|stable_key|href|src|run_id)$")
+
+
+def strip_address_keys(v: Any) -> Any:
+    """入れ子の dict / list から宛先キー（``_ADDRESS_KEY_RE``）を再帰的に落とす。値の文字列は触らない。"""
+    if isinstance(v, dict):
+        return {k: strip_address_keys(x) for k, x in v.items()
+                if not (isinstance(k, str) and _ADDRESS_KEY_RE.search(k))}
+    if isinstance(v, list):
+        return [strip_address_keys(x) for x in v]
+    return v
+
+
+def _str(v: Any) -> str:
+    # 深さの上限を越えた dict / list は JSON で 1 行に印字する。その前に宛先キーを落とす（第 18 周: 教員向け投影の
+    # 入れ子に node_ids・module_key・evidence_claim_ids・section_id が文字として残り、実画面に無い ID が見えていた）
+    return v if isinstance(v, str) else json.dumps(strip_address_keys(v), ensure_ascii=False)
 
 
 def _generic(body: Any, depth: int = 0, max_lines: int = 160) -> list[str]:
@@ -132,6 +146,8 @@ def _generic(body: Any, depth: int = 0, max_lines: int = 160) -> list[str]:
                 break
             if isinstance(k, str) and _ADDRESS_KEY_RE.search(k):
                 continue
+            if isinstance(v, (dict, list)):
+                v = strip_address_keys(v)  # 深さによらず同じ線引き（入れ子の JSON 印字にも宛先キーを残さない）
             if isinstance(v, (dict, list)) and depth < 2 and v:
                 lines.append(f"{pad}{k}:")
                 lines.extend(_generic(v, depth + 1, max_lines - len(lines)))
@@ -139,6 +155,10 @@ def _generic(body: Any, depth: int = 0, max_lines: int = 160) -> list[str]:
                 lines.append(f"{pad}{k}: {_str(v)[:200]}")
     elif isinstance(body, list):
         for i, v in enumerate(body[:8]):
+            if isinstance(v, (dict, list)):
+                v = strip_address_keys(v)
+                if not v:
+                    continue  # 宛先キーだけの項目（{"id": …}）は画面に何も描かれない
             if isinstance(v, (dict, list)) and depth < 2:
                 lines.append(f"{pad}- ({i + 1})")
                 # 1 項目あたりの行数に上限を置き、後ろの項目が空行「- (3)」にならないようにする
@@ -405,8 +425,24 @@ def stance_line_shown(stance: Any, *, discuss: bool = False) -> bool:
             and bool(stance.get("label")))
 
 
+MIRROR_LABEL = "AIによる言い直し"  # app.js renderMirrorBlock の見出しの逐語ミラー
+MIRROR_CHIPS = ("そのとおり", "少し違う")
+
+
+def _mirror_lines(body: dict) -> list[str]:
+    """app.js ``renderMirrorBlock`` と同じ: mirror.text があるときだけ、回答本文の前に見出し付きの枠とチップを描く。
+
+    本文末尾の ``MIRROR_MOVED_NOTE``（「…『AIによる言い直し』の枠に示しています」）はこの枠を指す。投影が枠を描かないと
+    実画面に無い枠を指す文に見える（第 18 周・ハーネス側）。注記文そのものは製品の文言なので落とさない。"""
+    mirror = body.get("mirror")
+    text = str(mirror.get("text") or "").strip() if isinstance(mirror, dict) else ""
+    if not text:
+        return []
+    return [f"〔{MIRROR_LABEL}〕{text}", "  " + " ".join(f"ボタン: {c}" for c in MIRROR_CHIPS)]
+
+
 def _chat(body: dict, *, discuss: bool = False) -> list[str]:
-    out = ["AI の回答:", str(body.get("answer", ""))]
+    out = _mirror_lines(body) + ["AI の回答:", str(body.get("answer", ""))]
     stance = body.get("stance") or {}
     if stance_line_shown(stance, discuss=discuss):
         # 画面は「{label}答えました。」の 1 行（tutor・明示の様相・楽屋・議論では何も出ない — 第 17 周）
@@ -420,8 +456,6 @@ def _chat(body: dict, *, discuss: bool = False) -> list[str]:
             # 番号は DTO の index（セッション内で安定・不連続あり = IK-0432）。位置番号で描くと本文の [出典N] とずれる
             n = s.get("index") or i
             out.append(f"出典{n}: {s.get('source_title') or s.get('title') or ''} {s.get('meta') or ''}".rstrip())
-    if isinstance(body.get("mirror"), dict):
-        out.append(f"〔鏡〕{body['mirror'].get('text', '')}")
     confirm = body.get("anchor_confirm")
     if isinstance(confirm, dict):
         # 画面（app.js renderAnchorConfirmPrompt）は見出し（prompt）とボタンだけを描き、発言全文は再掲しない。
@@ -457,11 +491,21 @@ def _component_context_lines(body: dict) -> list[str]:
         items = [it for it in graph.get(lane) or [] if isinstance(it, dict)]
         lines.append(f"{name}:" if items else f"{name}: なし")
         for it in items:
-            mark = "（移動できる）" if it.get("navigable") and it.get("element_type") == "theory_component" else ""
+            # id を持たない行（中心命題・支持構造など）は移動先にならない。行は描くが手掛かりは付けない
+            mark = ("（移動できる）" if it.get("navigable") and it.get("element_type") == "theory_component"
+                    and str(it.get("id") or "").strip() else "")
             # 移動できる部品だけ手掛かり（id）を添える（旅の hop の引数に使う）。画面は id を見せないが、
             # 動かせる相手を指す手段としてだけ残す。移動できない行には id を出さない（「id=None」の偽所見の防止）
-            handle = f" id={it.get('id', '')}" if mark else ""
+            handle = f" id={it.get('id')}" if mark else ""
             lines.append(f"- {it.get('relation_label', '')} {it.get('label', '')}{mark}{handle}")
+    # app.js componentContextExitsHtml と同じ: 次の一歩の事実文（graph.exits）をレーン順に、同じ文は 1 回だけ描く
+    exits = graph.get("exits") if isinstance(graph.get("exits"), dict) else {}
+    seen: set[str] = set()
+    for lane in ("upper", "lower"):
+        fact = str(exits.get(lane) or "").strip()
+        if fact and fact not in seen:
+            seen.add(fact)
+            lines.append(f"（{fact}）")
     return lines
 
 
@@ -474,6 +518,9 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
     """応答をペルソナが読む画面の文に投影する（最大 ~1500 字）。"""
     if action_id.startswith("unsupported:"):
         return "この操作は画面に見当たらない（実行できなかった）。"
+    if isinstance(body, dict) and body.get("_ui_fact"):
+        # 画面がサーバの応答を事実文に置き換えて出す縮退（例: ノード対話の 404 / 422）
+        return _clip(str(body["_ui_fact"]))
     if status is None and isinstance(body, dict) and body.get("_precondition"):
         return f"この操作に必要なものがまだ画面に無い（{body['_precondition']}）。"
     if status is None:

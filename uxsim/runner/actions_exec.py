@@ -571,8 +571,27 @@ def _symbol_lookup(ctx: _Ctx) -> None:
                      "topic_id": getattr(s, "topic_id", None)})
 
 
+DESCENT_ELEMENT_TYPES = ("equation", "component", "claim")  # 製品 routes/descent.py の SUPPORTED_ELEMENT_TYPES
+
+
 def _descent_ladder(ctx: _Ctx) -> None:
+    """画面は ⚓ をタップした要素の id で降下路を開く。⚓ の番号（「⚓3」/ 3）や element_ref は教材の ⚓ 一覧から
+    要素に引き直す（第 18 周: 番号をそのまま element_id に送り not_found になっていた — ハーネスの写し漏れ）。"""
     s = ctx.session
+    ref = str(ctx.args.get("element_ref") or "").strip()
+    eid_arg = str(ctx.args.get("element_id") or "").strip()
+    if not ref and re.fullmatch(r"(?:⚓\s*)?\d+", eid_arg):
+        ref = eid_arg
+    if ref:
+        m = re.fullmatch(r"(?:⚓\s*)?(\d+)", ref)
+        hit = next((a for a in material_anchors(s.material) if (m and a["no"] == int(m.group(1))) or a["id"] == ref),
+                   None)
+        if hit is None:
+            return ctx.missing("element_ref")  # 一覧に無い番号・id は製品を叩かない
+        etype = {"theory_component": "component", "theory_claim": "claim"}.get(hit["kind"], hit["kind"])
+        if etype not in DESCENT_ELEMENT_TYPES:
+            return ctx.missing("descent_anchor")  # 図・出典の ⚓ には降下路が無い
+        ctx.args["element_type"], ctx.args["element_id"] = etype, hit["id"]
     if not (ctx.args.get("element_id") or s.latest("elements")):
         return ctx.missing("element_id")
     ctx.main(params={"element_type": ctx.args.get("element_type") or s.latest("element_types") or "claim",
@@ -724,13 +743,21 @@ def _graph_open(ctx: _Ctx) -> None:
         ctx.session.remember("graph_documents", doc)
     graph = body.get("graph") if isinstance(body, dict) and isinstance(body.get("graph"), dict) else body
     targets = ctx.session.maps.setdefault("node_targets", {})
-    for n in _items(graph, "nodes"):
-        if isinstance(n, dict):
-            ctx.session.remember("components", _first(n, "db_id", "component_db_id", "component_id", "id"))
-            nid = _first(n, "id", "node_id")
-            tgt = deliberation_target_id(n)
-            if nid:
-                targets[nid] = tgt
+    nodes = [n for n in _items(graph, "nodes") if isinstance(n, dict)]
+    if nodes:
+        # 画面の選択と同じ材料（id / ラベル / 層 / 実体要素）をグラフの並び順で覚える。ノード対話はここから引く
+        ctx.session.scratch["graph_nodes"] = []
+        ctx.session.scratch.pop("graph_selected_node", None)
+    for n in nodes:
+        ctx.session.remember("components", _first(n, "db_id", "component_db_id", "component_id", "id"))
+        nid = _first(n, "id", "node_id")
+        tgt = deliberation_target_id(n)
+        if nid:
+            targets[nid] = tgt
+            ctx.session.scratch["graph_nodes"].append({
+                "id": nid, "target": tgt, "layer": str(n.get("graph_layer") or "main"),
+                "labels": [str(n.get(k) or "").strip() for k in ("label", "visual_label", "title", "name")
+                           if str(n.get(k) or "").strip()]})
 
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
@@ -1156,27 +1183,81 @@ def _deliberation_overview(ctx: _Ctx) -> None:
     ctx.main(params={"document_id": doc} if doc else None, overrides={"element_type": etype, "element_id": eid})
 
 
-def _node_chat(ctx: _Ctx) -> None:
-    """admin-graph-review.js の openNodeChat と同じ: W層セッション（theory_component）→ messages。
+NODE_UNRESOLVABLE_FACT = ("このノードは論理要素として解決できないため、ノード対話は開始できません。"
+                          "グラフ全体との対話をご利用ください。")  # admin-graph-review.js の事実文の逐語ミラー
 
-    screen_context は画面の getScreenContext と同じ形（selection に document_id / node_id / component_id /
-    graph_layer、view に mode / layer）。
+
+_ID_TOKEN_RE = re.compile(r"^[A-Za-z0-9_.:\-]+$")
+
+
+def _label_key(text: Any) -> str:
+    import unicodedata
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(text or ""))).casefold()
+
+
+def _node_by_ref(nodes: list[dict], ref: str) -> Optional[dict]:
+    """ペルソナが渡したノードの指定（id か画面のラベル）をグラフのノードに引く。ラベルは完全一致 → 一意な部分一致。"""
+    ref = str(ref or "").strip()
+    if not ref:
+        return None
+    for n in nodes:
+        if n["id"] == ref:
+            return n
+    key = _label_key(ref)
+    exact = [n for n in nodes if any(_label_key(lb) == key for lb in n.get("labels") or [])]
+    if exact:
+        return exact[0]
+    part = [n for n in nodes if any(key and (key in _label_key(lb) or _label_key(lb) in key)
+                                    for lb in n.get("labels") or [] if _label_key(lb))]
+    return part[0] if len(part) == 1 else None
+
+
+def _node_chat(ctx: _Ctx) -> None:
+    """admin-graph-review.js の openNodeChat と同じ: ノード → 実体要素（deliberationTargetId）→ W層セッション → messages。
+
+    - ノードの指定（node_id / component_id に渡された id かラベル）はグラフのノードに引き、画面と同じ規則
+      （DB UUID → representative_component_id → linked_component_ids の先頭）で実体要素にする。
+    - 指定が無ければ直前に選んだノード、それも無ければ主グラフの先頭で実体要素に解決できるノード（第 18 周:
+      直近に覚えた id（ノードの component_id）をそのまま送り「この要素は見つかりませんでした」で止まった）。
+    - ラベルを名指ししたのに引けないときは、覚えている古い id を送らない。
+    - 解決できないノード、およびセッション作成の 404 / 422 は、画面と同じく事実文に置き換える。
+    screen_context は画面の getScreenContext と同じ形。
     """
     s = ctx.session
     doc = _doc_of(ctx)
     targets = s.maps.get("node_targets") or {}
-    node_arg = str(ctx.args.get("node_id") or "")
-    comp = str(ctx.args.get("component_id") or "")
-    if comp in targets:  # ノード id が component_id に渡された（画面はノードから実体要素を解決する）
-        node_arg, comp = node_arg or comp, targets[comp]
-    if not comp and node_arg:
-        comp = targets.get(node_arg, node_arg if _UUID_RE.match(node_arg) else "")
-    if not comp and not node_arg:
-        comp = str(s.latest("components") or "")
-        if comp in targets:
-            node_arg, comp = comp, targets[comp]
+    nodes: list[dict] = list(s.scratch.get("graph_nodes") or [])
+    node_arg = str(ctx.args.get("node_id") or "").strip()
+    comp = str(ctx.args.get("component_id") or "").strip()
+    layer = "main"
+    picked: Optional[dict] = None
+    named = node_arg or (comp if comp and not _UUID_RE.match(comp) and comp not in set(targets.values()) else "")
+    if named and nodes:
+        picked = _node_by_ref(nodes, named)
+        if picked is None and named not in targets and not _UUID_RE.match(named):
+            if named == comp and _ID_TOKEN_RE.match(comp):
+                named = ""  # 部品の id（comp_* 等）を component_id に直接渡した — そのまま実体要素として開く
+            else:
+                # 名指ししたノード（ラベル）が画面のグラフに無い。覚えている古い id で代用しない
+                return ctx.missing("graph_node")
+    if picked is None and named in targets:
+        picked = next((n for n in nodes if n["id"] == named), {"id": named, "target": targets[named], "layer": "main"})
+    if picked is None and not named and not comp and nodes:
+        sel = s.scratch.get("graph_selected_node")
+        picked = next((n for n in nodes if n["id"] == sel), None) or next(
+            (n for n in nodes if n.get("layer") == "main" and n.get("target")), None)
+    if picked is not None:
+        node_arg, comp, layer = picked["id"], picked.get("target") or "", picked.get("layer") or "main"
+        s.scratch["graph_selected_node"] = picked["id"]
+        if not comp:
+            # 画面は解決できないノードではリクエストせず事実文を出す
+            s.last_status, s.last_body = None, {"_ui_fact": NODE_UNRESOLVABLE_FACT}
+            return
+    elif not comp and node_arg:
+        comp = node_arg if _UUID_RE.match(node_arg) else ""
+    if not comp and not node_arg and not nodes:
+        comp = str(s.latest("components") or "")  # グラフを開いていない（覚えた部品の id で開く）
     if not comp:
-        # 画面は解決できないノードではリクエストせず事実文を出す
         return ctx.missing("component_id")
     key = f"{doc}|{comp}"
     sid = s.maps.setdefault("node_sessions", {}).get(key)
@@ -1184,13 +1265,17 @@ def _node_chat(ctx: _Ctx) -> None:
         status, body = ctx.call("POST", "/api/admin/deliberation/sessions",
                                 json={"scope": "document", "element_type": "theory_component",
                                       "element_id": comp, "document_id": doc or None, "title": ""})
+        if status in (404, 422):
+            # 画面は 404 / 422 を「論理要素として解決できない」縮退として事実文に置き換える（内部文言を素通ししない）
+            s.last_status, s.last_body = None, {"_ui_fact": NODE_UNRESOLVABLE_FACT}
+            return
         sess = body.get("session") if isinstance(body, dict) else None
         sid = str(sess.get("id")) if isinstance(sess, dict) and sess.get("id") else ""
         if not sid:
             return
         s.maps["node_sessions"][key] = sid
     node_id = node_arg or comp
-    screen = graph_screen_context(doc, node_id=node_id, component_id=comp, layer="main")
+    screen = graph_screen_context(doc, node_id=node_id, component_id=comp, layer=layer)
     ctx.main(json={"content": str(ctx.args.get("content") or ctx.args.get("message") or ""),
                    "screen_context": screen}, overrides={"session_id": sid})
 
