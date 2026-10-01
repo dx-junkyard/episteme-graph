@@ -1,9 +1,9 @@
 ---
 id: IK-0590
 title: "前提ゲートの直後に「はい、そうですね」で始めた新しい質問が、ゲートへの返事として扱われて前提トピックの説明が足され、いま開いているトピックの教材を「前提トピックの資料」と呼ぶ"
-status: open
+status: resolved
 recorded_at: 2026-10-01
-resolved_at: null
+resolved_at: 2026-10-01
 sources:
   - docs/architecture/persona_enactment_testing_design.md §18.11
 feature_context:
@@ -39,12 +39,28 @@ discovery:
   perspective: [reproduction, symptom_report]
   note: "第 18 周 st-06（s-misconception-mirror）で、前置き付きの新しい質問への回答が途中から前提トピックの説明に切り替わり、画面の位置関係（表示中のトピックと前提トピック）が逆転した。同じ前置きでも別の往復ではゲート扱いされず、判定が揺れる。"
 resolution:
-  perspective: [pending]
-  note: "未解決。発話の本文が問い（「か。」「？」・依頼）を含むときはゲート返事ではなく新しい質問として先に答え、ゲートは次の往復へ繰り延べる（詰まりの区画と同じ骨格）案が候補。"
-  landed_in: []
+  perspective: [order_and_budget, guardrail_fix]
+  note: '前置き（「はい、…」）を剥がした核心に中身があれば、肯定だけを記帳して中身に通常の RAG で答える（ack_content）。素の「はい」は従来どおり肯定のみ。対比（「はい、でも…」）は肯定に数えない。前提説明の経路の材料の呼び名は通常の回答に混ざらない。'
+  landed_in:
+    - backend/api/routes/learning.py
+    - backend/core/dialogue_shape.py
+    - backend/tests/test_wave18_gate_stuck_advice.py
+    - docs/backend/rag-chat.md
+    - docs/features/dialogue_response_shape_design.md
+    - 97994b9
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "砂場での再演（st-06 s-misconception-mirror・st-02 のテキスト選択の質問）"
+      - "前置きの剥がしが当たらない言い回し"
 related: [IK-0560, IK-0586, IK-0509]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: status
+    from: 'open'
+    to: 'resolved'
+    reason: '第 19 波で、前置き付きの質問は肯定を記帳して中身に答えるようにした（ガードレールで確認・再演は次の周）。（persona_enactment_testing_design.md §18.12）'
 ---
 
 ## 課題
@@ -61,9 +77,9 @@ history: []
 
 ## 解決の観点
 
-未解決。ゲート返事の判定を本文の中身（問い・依頼の有無）で確かめ、問いがあれば先に答えてゲートを次の往復へ送る。前提説明の経路のプロンプト語が
-通常の回答に混ざらないよう、経路ごとの材料の呼び名を分ける。
-原因は仮説で、確かめる点は classification.basis に書いた。
+97994b9。ゲート返事の判定を前置きではなく前置きを剥がした核心で確かめ、中身があれば肯定だけを記帳して中身に答える（`dialogue_shape.strip_preamble` を公開し判定に使う）。
+判定の順序を「返事の経路を先に通す」から「中身の有無を先に見る」へ入れ替えた見立て。
+原因は起票時の仮説のまま（classification.basis）で、是正後の再演で確かめる。
 
 ## 一般化
 

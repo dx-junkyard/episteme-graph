@@ -1,9 +1,9 @@
 ---
 id: IK-0592
 title: "グラフレビューの辺に confidence の生値が戻る（射影の後で応答モデルの既定値 0.5 が入る）・辺の根拠文が英語の定型文で式 ID が残る"
-status: open
+status: resolved
 recorded_at: 2026-10-01
-resolved_at: null
+resolved_at: 2026-10-01
 sources:
   - docs/architecture/persona_enactment_testing_design.md §18.11
 feature_context:
@@ -39,12 +39,26 @@ discovery:
   perspective: [reproduction, trace_walk]
   note: "第 18 周 te-03 の頭脳メモ（辺の confidence: 0.5・英語の reason）を、全辺が同じ 0.5 であることから応答モデルの既定値と見当を付け、route と schemas.py を辿って確かめた。"
 resolution:
-  perspective: [pending]
-  note: "未解決。射影を応答モデルの後（model_dump の後）に置くか、教員向け応答モデルから confidence を外す。辺の根拠文は表示ラベルの訳語表と式番号の置き換えに通す。"
-  landed_in: []
+  perspective: [representation_change, guardrail_fix]
+  note: '`ComponentGraphEdge.confidence` の既定を None にし、None のときは応答からキーごと外す serializer を置いた。射影で落とした値が応答モデルの詰め直しで戻らない。辺の根拠文（英語の定型文・式 ID の残り）はこの是正に含まれない。'
+  landed_in:
+    - backend/api/schemas.py
+    - backend/tests/test_wave18_gate_stuck_advice.py
+    - 97994b9
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "砂場での再演（te-03）"
+      - "辺の根拠文の英語の定型文と式 ID の残り（未着手）"
+      - "既定値を持つ他の教員向け応答モデル"
 related: [IK-0579, IK-0546]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: status
+    from: 'open'
+    to: 'resolved'
+    reason: '第 19 波で、辺の confidence が射影後に既定値で戻らないようにした（ガードレールで確認・再演は次の周）。残り: 辺の根拠文の英語の定型文と式 ID の残りは未着手。（persona_enactment_testing_design.md §18.12）'
 ---
 
 ## 課題
@@ -62,8 +76,8 @@ history: []
 
 ## 解決の観点
 
-未解決。射影を応答の最後に置く（応答モデルの詰め直しの後）か、教員向け応答モデルの数値フィールドを外す。
-根拠文の部分の原因は仮説で、確かめる点は classification.basis に書いた（confidence の部分は確認済み）。
+97994b9。応答モデル側で、値が無いことをキーの不在として表す（既定値で埋めない）見立て。射影の順序は変えていない。
+根拠文の部分は未着手で、原因は仮説のまま（classification.basis）。
 
 ## 一般化
 

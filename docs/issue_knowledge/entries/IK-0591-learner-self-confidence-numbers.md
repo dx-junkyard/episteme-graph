@@ -1,9 +1,9 @@
 ---
 id: IK-0591
 title: "学習者が求めると、回答が自分の説明の確かさを「9割以上」「8割程度」の数で項目ごとに出す"
-status: open
+status: resolved
 recorded_at: 2026-10-01
-resolved_at: null
+resolved_at: 2026-10-01
 sources:
   - docs/architecture/persona_enactment_testing_design.md §18.11
 feature_context:
@@ -37,12 +37,26 @@ discovery:
   perspective: [reproduction, invariant_audit]
   note: "第 17 周（§18.9 で判定保留）と第 18 周 st-06 で同型が再現した。審判 B（学習者に数値が見えている）が拾った。"
 resolution:
-  perspective: [pending]
-  note: "未解決。確かさは段階ラベル（confidence の 2 表・label_vocab）か、根拠の種類（論文の記述を直接確認 / 一般知識の補足 / 推測）の事実で返し、割合・確率の数を出さない規則を足す案。"
-  landed_in: []
+  perspective: [explicit_contract, guardrail_fix]
+  note: 'tutor・casual のテキスト経路のプロンプトに、確からしさを割合・確率の数で示さず根拠の種類で伝える規則を足した。出力側の数の検査は置いていない。'
+  landed_in:
+    - backend/api/routes/learning.py
+    - backend/tests/test_wave18_gate_stuck_advice.py
+    - 97994b9
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "砂場での再演（st-06 s-misconception-mirror）"
+      - "discuss・楽屋のプロンプト"
+      - "回答本文の後処理による数の検査（置いていない）"
 related: [IK-0582]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: status
+    from: 'open'
+    to: 'resolved'
+    reason: '第 19 波で、確からしさを数で示さない規則をプロンプトに足した（ガードレールで確認・再演は次の周）。残り: 出力側の検査は無くプロンプトの文言に任せたまま。（persona_enactment_testing_design.md §18.12）'
 ---
 
 ## 課題
@@ -59,8 +73,8 @@ history: []
 
 ## 解決の観点
 
-未解決。数の種類を列挙で禁じるのではなく、確かさを伝える形式（段階ラベル・根拠の種類）を規則として与える。
-原因は仮説で、確かめる点は classification.basis に書いた。
+97994b9。数の種類を列挙で禁じるのではなく、確からしさを伝える形式（根拠の種類）を規則として与える見立て。プロンプト文言の契約で、出口の検査ではない。
+原因は起票時の仮説のまま（classification.basis）で、是正後の再演で確かめる。
 
 ## 一般化
 

@@ -56,6 +56,11 @@ history:
     from: 'open'
     to: 'open'
     reason: '第 18 周の再演（st-02 discuss・st-01 通常チャット）で、回答が式 (9) などを「AI が文脈から復元した式で、原文の数式とは照合できていません」と述べた（復元式の印は回答に届いた）。スライド位置（SA層 4-c）は未着手のまま。（persona_enactment_testing_design.md §18.11）'
+  - date: '2026-10-01'
+    field: status
+    from: 'open'
+    to: 'open'
+    reason: '第 19 波でも状態は変わらない。復元式の印は配信済み、表示中のスライド位置（SA層 4-c）は未着手のまま open。（persona_enactment_testing_design.md §18.12）'
 ---
 
 ## 課題
