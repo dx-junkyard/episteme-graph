@@ -39,6 +39,7 @@ class PersonaSession:
     maps: dict[str, dict[str, str]] = field(default_factory=dict)  # 例: graph_sessions {document_id: session_id}
     scratch: dict[str, Any] = field(default_factory=dict)  # 直前の提案など、ID 以外の一時データ
     seq_counter: int = 0
+    uses_voice: bool = False  # 音声中心のペルソナ（persona_uses_voice）。チャットは音声ループと同じ形で送る
 
     def history_for(self, topic_id: str) -> list[dict]:
         """トピックごとの会話履歴（UI の state.chatMessages 相当）。"""
@@ -82,6 +83,24 @@ class PersonaSession:
                   "element_type": "element_types", "claim_id": "claims",
                   "document_ref": "documents"}.get(name)
         return self.latest(plural) if plural else ""
+
+
+# 行動型の ``uses_voice``（no / sometimes / mostly）のうち、チャットを音声ループで送るとみなす値。
+# ``sometimes`` は文字の経路のまま（どちらで送ったかを runner が決めると、ペルソナの選択を差し替えることになる）
+VOICE_HABIT_VALUES = ("mostly", "yes", "always", "true")
+
+
+def persona_uses_voice(habits: Any) -> bool:
+    """行動型の癖から、チャットを音声（``intent_mode=casual`` + ``screen_mode=voice``）で送るかを決める。"""
+    raw = habits.get("uses_voice") if isinstance(habits, dict) else None
+    if raw is True:
+        return True
+    return str(raw or "").strip().lower() in VOICE_HABIT_VALUES
+
+
+def is_pseudo_chunk_id(value: Any) -> bool:
+    """トピック教材の区画が持つ擬似 id（製品 learning.py の ``topic:{topic_id}``）か。実在のチャンクではない。"""
+    return str(value or "").startswith("topic:")
 
 
 # ----------------------------------------------------------------------------
@@ -371,11 +390,23 @@ def material_sentences(body: Any) -> list[list[str]]:
     return out
 
 
-def _chat(body: dict) -> list[str]:
+DISCUSS_CHAT_ACTIONS = ("learning.discuss.ask", "learning.corpus.discuss_ask", "learning.chat.cycle")
+
+
+def stance_line_shown(stance: Any, *, discuss: bool = False) -> bool:
+    """app.js ``renderStanceLine`` と同じ条件: 推定（source=inferred）で tutor 以外、かつ議論中でないときだけ出る。"""
+    if discuss or not isinstance(stance, dict):
+        return False
+    return (stance.get("source") == "inferred" and bool(stance.get("stance")) and stance.get("stance") != "tutor"
+            and bool(stance.get("label")))
+
+
+def _chat(body: dict, *, discuss: bool = False) -> list[str]:
     out = ["AI の回答:", str(body.get("answer", ""))]
     stance = body.get("stance") or {}
-    if isinstance(stance, dict) and stance.get("label"):
-        out.append(f"〔回答の調子: {stance.get('label')}〕")
+    if stance_line_shown(stance, discuss=discuss):
+        # 画面は「{label}答えました。」の 1 行（tutor・明示の様相・楽屋・議論では何も出ない — 第 17 周）
+        out.append(f"〔回答の調子: {stance.get('label')}答えました〕")
     grounding = {"course_material": "教材に基づく", "other_material": "別の資料に基づく",
                  "model_generated": "出典を追えない AI の説明"}.get(body.get("content_grounding") or "", "")
     if grounding:
@@ -448,7 +479,7 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
     if isinstance(body, dict) and "answer" in body and action_id.startswith(
             ("learning.chat", "learning.discuss.ask", "learning.corpus.discuss_ask", "admin.course_builder.chat",
              "admin.copilot")):
-        lines = _chat(body)
+        lines = _chat(body, discuss=action_id in DISCUSS_CHAT_ACTIONS)
         if action_id == "admin.course_builder.chat" and isinstance(body.get("course_draft"), dict):
             draft = body["course_draft"]
             # 画面（admin.js）と同じく章の中のトピックも数える。第 5 周で上位の topics だけを見て

@@ -106,3 +106,6 @@ class RunMeta(BaseModel):
     # 空でなければ、その週の内容依存の検証は固定したコースを見ていない
     pinned_course_id: str = ""
     pinned_course_mismatch: list[dict[str, Any]] = Field(default_factory=list)
+    # 経路の前提（scenario.preconditions の check）が満たせず歩かなかった経路の記録（第 17 周）。
+    # 各要素 {persona_id, session, scenario_id, unmet: [{text, check, missing, reason}], seeded: [経路 id]}
+    blocked_precondition: list[dict[str, Any]] = Field(default_factory=list)

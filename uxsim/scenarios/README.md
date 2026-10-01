@@ -15,7 +15,8 @@ population: students              # students | teachers
 runner: [api, browser]            # 走らせてよい runner。api だけの経路もある
 goal: "{{goal_text}} のために …"   # ペルソナ LLM に渡す目標文（穴を含んでよい）
 params_required: [goal_text, ...] # scenario_params が必ず埋める穴の一覧
-preconditions: [...]              # 任意。始める前に成り立っているべき状態（事実文）
+preconditions: [...]              # 任意。始める前に成り立っているべき状態（事実文。下の「前提」）
+seed_scenarios: [...]             # 任意。機械で確かめた前提が欠けていたら、先に歩いて種をまく経路の id
 session: 1                        # 任意。何回目のセッションとして走らせるか（既定 1。2 以上は再ログインで近似 — §7.4）
 steps: [...]                      # 下の記法
 stop_when: [gave_up, budget_exhausted]
@@ -24,6 +25,29 @@ expects:                          # 審判 D（文書）の期待の引き先。
 watch_for:                        # 審判が見るべきこと（平叙の事実文。点数・閾値を書かない）
   - 429 のときに上限に達したことが本人に伝わる文が出る
 ```
+
+## 前提（preconditions / seed_scenarios）
+
+`preconditions` の要素は事実文の文字列か、機械で確かめる dict です。
+
+```yaml
+preconditions:
+  - text: 前のセッションでこのペルソナが書き置きと持ち越しの問いを残している
+    check: return_door                 # 語彙は scenario.py の PRECONDITION_CHECKS
+    requires: [leave_note, carryover]  # return_door の部品（leave_note / carryover / last_tension）。空なら「扉が空でない」
+seed_scenarios: [s-discuss-one-paper]
+```
+
+runner は経路を始める前に `check` 付きの前提を学習者の GET（`return_door` は `GET /cycle/return-door`）で確かめ、
+その GET を `runner_driven:` の transcript 行に残します。満たされていなければ、
+
+1. `seed_scenarios` があればそれを同じペルソナ・同じセッションで先に歩き（最初の行に `seeded_precondition:`）、
+   もう一度確かめる。
+2. 種まき経路が無い、または歩いても足りなければ、経路を**歩かずに飛ばし**、`meta.json` の `blocked_precondition`
+   と notes（`blocked_precondition:`）・runner_note に残す。空のセッションを歩くと「扉・持ち越しが空」を製品の欠陥と
+   読む偽所見になる（第 17 周 st-07）。
+
+文字列だけの前提は機械では確かめません（ペルソナと審判が読む事実文のまま）。
 
 ## steps の記法
 

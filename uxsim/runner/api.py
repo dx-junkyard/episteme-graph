@@ -29,11 +29,11 @@ from uxsim.llm import (CachingPersonaLLM, PersonaLLM, ReplayPersonaLLM, ReplayTh
                        load_cache_jsonl, make_live_llm)
 from uxsim.persona.agent import PersonaAgent, StepDecision
 from uxsim.persona.compose import PersonaSpec, compose_persona, course_brief
-from uxsim.runner.actions_exec import PINNED_MISMATCH_MARK, execute, prefetch_courses
+from uxsim.runner.actions_exec import PINNED_MISMATCH_MARK, execute, prefetch_courses, runner_note
 from uxsim.runner.client import EpistemeClient
 from uxsim.runner.scenario import (SKIP_ACTION_ID, Scenario, ScenarioParams, StepSpec, evaluate_until, load_params,
                                    load_scenario)
-from uxsim.runner.state import PersonaSession, project_observation
+from uxsim.runner.state import PersonaSession, persona_uses_voice, project_observation
 from uxsim.schema import RunMeta, ThinkAloud, TranscriptStep, now_iso
 
 BUDGET_KEYS = ("product_llm_calls", "persona_llm_calls", "wall_clock_minutes")
@@ -316,6 +316,9 @@ class ScenarioRunner:
         if valid and action.llm_cost == "product":
             self.budget.product_calls += 1
         observation = project_observation(action_id, self.session.last_status, self.session.last_body)
+        for note in self.session.scratch.pop("observation_notes", None) or []:
+            # runner が画面の前提として添える事実（例: 音声モードは議論では使えない）。審判・ペルソナが割り引く材料
+            observation += f"\n〔{note}〕"
         if action_id == "learning.topic.open" and self.session.last_status == 200:
             # 画面はトピックの末尾に確認問題を出す。投影に無いと、ペルソナは問題文を見ずに答える（第 8 周）
             topic = self.session.topics.get(self.session.topic_id) or {}
@@ -426,6 +429,53 @@ def record_pinned_mismatch(meta: RunMeta, session: PersonaSession) -> bool:
     return bool(found)
 
 
+BLOCKED_PRECONDITION_MARK = "blocked_precondition"
+SEEDED_PRECONDITION_MARK = "seeded_precondition"
+
+
+def _precondition_course_id(session: PersonaSession) -> str:
+    return str(session.course_id or session.scratch.get("pinned_course_id") or session.scratch.get("default_course_id") or "")
+
+
+def check_preconditions(scenario: Scenario, session: PersonaSession, client: EpistemeClient,
+                        writer: Optional["RunWriter"] = None) -> list[dict[str, Any]]:
+    """経路の機械で確かめられる前提（``check`` を持つ要素）を学習者の GET で確かめ、満たされないものを返す。
+
+    runner の手（ペルソナの判断ではない）なので、確かめた GET は ``runner_driven`` の transcript 行に残す。
+    session の ``last_status`` / ``last_body`` は確かめる前の値に戻す（ペルソナの次の判断・stop 判定を変えない）。
+    """
+    unmet: list[dict[str, Any]] = []
+    saved = (session.last_status, session.last_body, session.last_action)
+    for pre in scenario.precondition_checks:
+        check, requires, text = pre.get("check"), list(pre.get("requires") or []), str(pre.get("text") or "")
+        if check != "return_door":
+            continue
+        cid = _precondition_course_id(session)
+        if not cid:
+            unmet.append({"text": text, "check": check, "missing": requires, "reason": "受講中のコースが無い"})
+            continue
+        http = execute("learning.cycle.return_door", {"course_id": cid}, session, client)
+        status, body = session.last_status, session.last_body
+        if status != 200 or not isinstance(body, dict):
+            missing, reason = requires, f"扉を読めなかった（HTTP {status}）"
+        else:
+            missing = [r for r in requires if not body.get(r)] if requires else (["any"] if body.get("empty") else [])
+            reason = "扉に残っていない" if missing else ""
+        if missing:
+            unmet.append({"text": text, "check": check, "missing": missing, "reason": reason})
+        if writer is not None:
+            action = registry.REGISTRY["learning.cycle.return_door"]
+            verdict = "満たされている" if not missing else f"満たされていない（{reason}: {', '.join(missing)}）"
+            writer.write_step(TranscriptStep(
+                seq=writer.next_seq(), persona_id=session.persona_id, session=session.session_no,
+                scenario_id=scenario.id, action_id="learning.cycle.return_door", screen=action.screen,
+                affordance=action.affordance, http=http,
+                observation=project_observation("learning.cycle.return_door", status, body),
+                runner_notes=[f"runner_driven: 経路 {scenario.id} の前提「{text}」を確かめた — {verdict}"]))
+    session.last_status, session.last_body, session.last_action = saved
+    return unmet
+
+
 def _make_llm(settings: Settings, run_dir: Path, replay_dir: Optional[Path]):
     live: Optional[PersonaLLM] = None
     if settings.persona_llm_provider != "replay":
@@ -527,7 +577,7 @@ def run_campaign(
         client = make_client()
         session = PersonaSession(persona_id=pid, username=persona_username(pid), password=settings.persona_password,
                                  role="TEACHER" if role_key == "teacher" else "STUDENT", session_no=session_no,
-                                 course_id=carried.get(pid, ""))
+                                 course_id=carried.get(pid, ""), uses_voice=persona_uses_voice(spec.habits))
         # campaign の course_id（検証したいコースの固定。第 9 周: 同名コース 2 本のうち再生成していない方を
         # 「受講中の先頭」で拾い、内容依存の是正が確認できなかった）
         if campaign.get("course_id"):
@@ -557,6 +607,46 @@ def run_campaign(
                 if missing:
                     meta.notes.append(f"{scenario.id}（{pid}）は分野パラメータが埋まっていないため未実施: {', '.join(missing)}")
                     continue
+                if scenario.precondition_checks:
+                    unmet = check_preconditions(scenario, session, client, writer)
+                    seeded: list[str] = []
+                    if unmet and scenario.seed_scenarios:
+                        # (a) 種をまく経路があれば先に歩く（同じペルソナ・同じセッション）。歩いた後にもう一度確かめる
+                        for seed_id in scenario.seed_scenarios:
+                            seed = load_scenario(seed_id, data_root)
+                            seed_params = ScenarioParams(load_params(domain, seed.id, pid, data_root, spec.archetype_id),
+                                                         persona=persona_fields(spec, data_root))
+                            seed_missing = seed.missing_params(seed_params.values)
+                            if seed_missing:
+                                meta.notes.append(f"{seed.id}（{pid}・{scenario.id} の種まき）は分野パラメータが埋まっていないため未実施: "
+                                                  f"{', '.join(seed_missing)}")
+                                continue
+                            runner_note(session, f"{SEEDED_PRECONDITION_MARK}: 経路 {scenario.id} の前提"
+                                                 f"（{'; '.join(u['text'] for u in unmet)}）が満たされていないため、"
+                                                 f"先に {seed.id} を歩いて種をまく（runner の手）")
+                            writer.log(f"seed {pid} s{session_no} {seed.id} for {scenario.id}")
+                            seed_outcome = ScenarioRunner(agent, seed, seed_params, session, client, writer, budget,
+                                                          max_steps=max_steps, divergence=divergence).run()
+                            seeded.append(seed.id)
+                            if seed_outcome.stopped.startswith("budget:"):
+                                stop_all = seed_outcome.stopped
+                                break
+                        if stop_all:
+                            meta.notes.append(f"予算（{stop_all.split(':', 1)[1]}）に達したため、ここで campaign を止めました。")
+                            break
+                        unmet = check_preconditions(scenario, session, client, writer)
+                    if unmet:
+                        # (b) 種をまけない（または撒いても足りない）なら経路を歩かない — 空のセッションを歩くと
+                        # 扉・持ち越しが空であることを製品の欠陥と読む偽所見になる（第 17 周 st-07）
+                        detail = "; ".join(f"{u['text']}（{u['reason']}: {', '.join(u['missing'])}）" for u in unmet)
+                        meta.blocked_precondition.append({"persona_id": pid, "session": session_no,
+                                                          "scenario_id": scenario.id, "unmet": unmet, "seeded": seeded})
+                        meta.notes.append(f"{BLOCKED_PRECONDITION_MARK}: {scenario.id}（{pid}・セッション {session_no}）は"
+                                          f"前提が満たされていないため歩いていません: {detail}"
+                                          + (f"（種まき {', '.join(seeded)} の後も不足）" if seeded else ""))
+                        runner_note(session, f"{BLOCKED_PRECONDITION_MARK}: 経路 {scenario.id} を飛ばした — {detail}")
+                        writer.write_meta(meta)
+                        continue
                 writer.log(f"start {pid} s{session_no} {scenario.id}")
                 outcome = ScenarioRunner(agent, scenario, params, session, client, writer, budget,
                                          max_steps=max_steps, divergence=divergence).run()

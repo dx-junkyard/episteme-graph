@@ -54,7 +54,7 @@ def test_claim_refs_uses_known_chunk():
     seen: list[httpx.Request] = []
     client = _client(lambda r: httpx.Response(200, json={"claims": [{"id": "x", "claim_type": "result", "label": "L"}]}), seen)
     s = _session()
-    s.remember("chunks", "ch9")
+    s.remember("source_chunks", "ch9")  # 画面の出典カードのチャンク（claim-refs の宛先は出典だけ — 第 17 周）
     execute("learning.chunk.claim_refs", {}, s, client)
     assert seen[-1].method == "GET" and seen[-1].url.path == "/api/learning/courses/c1/chunks/ch9/claim-refs"
     assert s.latest("elements") == "x"

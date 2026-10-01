@@ -261,6 +261,9 @@ class Scenario:
     expects: list[dict[str, Any]] = field(default_factory=list)
     runner: list[str] = field(default_factory=lambda: ["api"])
     sessions: Optional[list[int]] = None
+    # 始める前に成り立っているべき状態。各要素 {text, check?, requires?}（文字列だけの要素は text のみ = 機械では確かめない）
+    preconditions: list[dict[str, Any]] = field(default_factory=list)
+    seed_scenarios: list[str] = field(default_factory=list)  # 前提が欠けていたら先に歩いて種をまく経路
     status: str = "active"
     path: Optional[Path] = None
     raw: dict[str, Any] = field(default_factory=dict)
@@ -268,6 +271,11 @@ class Scenario:
     @property
     def screen(self) -> str:
         return "admin" if self.population == "teachers" else "learning"
+
+    @property
+    def precondition_checks(self) -> list[dict[str, Any]]:
+        """機械で確かめる前提（``check`` を持つ要素）だけ。"""
+        return [p for p in self.preconditions if p.get("check")]
 
     def all_steps(self):
         for s in self.steps:
@@ -283,6 +291,32 @@ class Scenario:
             for o in s.options:
                 needed |= template_names(o.with_) | template_names(o.note)
         return sorted(n for n in needed if n not in params)
+
+
+# 前提の機械検査の語彙（runner/api.py check_preconditions が実装）。
+#   return_door: 学習者の GET /cycle/return-door が requires の部品（leave_note / carryover / last_tension）を全部持つ
+PRECONDITION_CHECKS = ("return_door",)
+RETURN_DOOR_PARTS = ("leave_note", "carryover", "last_tension")
+
+
+def _parse_preconditions(raw: Any, sid: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in raw or []:
+        if isinstance(item, str):
+            out.append({"text": item})
+            continue
+        if not isinstance(item, dict):
+            raise ScenarioError(f"{sid}: preconditions の要素は文字列か dict で書く: {item!r}")
+        check = str(item.get("check") or "")
+        if check and check not in PRECONDITION_CHECKS:
+            raise ScenarioError(f"{sid}: preconditions の check が語彙にありません: {check}（{PRECONDITION_CHECKS}）")
+        requires = [str(x) for x in item.get("requires") or []]
+        if check == "return_door":
+            bad = [r for r in requires if r not in RETURN_DOOR_PARTS]
+            if bad:
+                raise ScenarioError(f"{sid}: return_door の requires は {RETURN_DOOR_PARTS} から選ぶ: {bad}")
+        out.append({"text": str(item.get("text") or ""), "check": check, "requires": requires})
+    return out
 
 
 def _option(raw: Any, with_: Optional[dict] = None, note: str = "") -> Option:
@@ -345,6 +379,11 @@ def parse_scenario(data: dict[str, Any], path: Optional[Path] = None) -> Scenari
         [int(x) for x in sessions] if isinstance(sessions, list) else None)
     runner = data.get("runner") or ["api"]
     sc.runner = [runner] if isinstance(runner, str) else list(runner)
+    sc.preconditions = _parse_preconditions(data.get("preconditions"), sc.id)
+    seeds = data.get("seed_scenarios") or []
+    sc.seed_scenarios = [str(seeds)] if isinstance(seeds, str) else [str(x) for x in seeds]
+    if sc.id in sc.seed_scenarios:
+        raise ScenarioError(f"{sc.id}: seed_scenarios に自分自身は書けない")
     return sc
 
 

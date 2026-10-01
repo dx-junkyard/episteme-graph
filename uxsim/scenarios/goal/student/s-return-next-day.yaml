@@ -3,7 +3,10 @@ population: students
 runner: [api, browser]
 session: 2
 preconditions:
-  - 前のセッションでこのペルソナが書き置き（leave_note）と持ち越しの問い（carryover_question）を残している
+  - text: 前のセッションでこのペルソナが書き置き（leave_note）と持ち越しの問い（carryover_question）を残している
+    check: return_door
+    requires: [leave_note, carryover]
+seed_scenarios: [s-discuss-one-paper]
 goal: "{{goal_text}} の続きをするために、翌日あらためてログインし、前回どこまで考えたかを思い出して、持ち越した問いに答える"
 params_required: [goal_text, carryover_answer, seed_questions]
 steps:

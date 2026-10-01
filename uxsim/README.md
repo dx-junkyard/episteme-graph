@@ -57,6 +57,20 @@
    backend/.venv/bin/python -m uxsim.sandbox.pin_course --campaign <campaign.yaml> --yes  # 同名の公開コースを private に（製品 API）
    ```
 
+   経路が `check` 付きの `preconditions` を持つ（例: session 2 の `s-return-and-journey`）と、runner は始める前に
+   学習者の GET で確かめ、欠けていれば `seed_scenarios` を先に歩くか、無ければ経路を飛ばして `meta.json` の
+   `blocked_precondition` に残す（形は `scenarios/README.md` の「前提」）。
+
+   runner が画面の振る舞いに合わせて補うこと（第 17 周）:
+   - 行動型の `uses_voice` が `mostly`（音声中心）のペルソナのチャット（`learning.chat.ask` / `casual` / `ask_selection`）は、
+     学習画面の音声ループ（app.js）と同じく `intent_mode="casual"` + `screen_mode="voice"` で送る（runner_note `runner_voice:`）。
+     議論（`learning.discuss.ask` 等）は画面が音声のまま入れないので文字で送り、観察に「音声モードは議論では使えない
+     （設計 §6.4）」を添える — その回答の書き言葉・LaTeX・[出典N] は音声向けでないことの欠陥として数えない。
+   - `learning.chunk.claim_refs` の宛先は、回答の出典か開いた出典本文の実在チャンクだけ（トピック教材の擬似 id
+     `topic:tNN` は使わない）。無ければ HTTP を出さず `precondition:chunk_id`。
+   - 回答の調子の行（〔回答の調子: …答えました〕）は app.js `renderStanceLine` と同じく、推定（inferred）で tutor 以外・
+     議論中でないときだけ投影する。
+
    教員段 → 学生段の順に走り、`sessions_per_student` が 2 以上なら 2 回目は再ログインで「翌日」を近似する（§7.4）。
    終わると決定論の審判（A・B・C の前処理・D の組・E）が自動でかかる。
 

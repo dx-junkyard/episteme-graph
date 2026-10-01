@@ -12,7 +12,7 @@ from typing import Any, Callable, Optional
 
 from uxsim.actions import registry
 from uxsim.runner.client import EpistemeClient
-from uxsim.runner.state import PersonaSession, material_anchors, material_sentences
+from uxsim.runner.state import PersonaSession, is_pseudo_chunk_id, material_anchors, material_sentences
 from uxsim.schema import HttpTrace
 
 DISCUSSION_TOPIC_ID = "_discussion"  # 製品 routes/learning.py の予約疑似トピック
@@ -297,7 +297,10 @@ def _topic_open(ctx: _Ctx) -> None:
         for ch in _items(body, "chunks"):
             if not isinstance(ch, dict):
                 continue
-            s.remember("chunks", ch.get("id"))
+            # トピック教材の区画は擬似 id（製品 learning.py の ``topic:{topic_id}``）を持つ。実在のチャンクでは
+            # ないので覚えない（第 17 周: claim-refs に渡して 404 の偽所見になった）
+            if not is_pseudo_chunk_id(ch.get("id")):
+                s.remember("chunks", ch.get("id"))
             for f in ch.get("formulas") or []:
                 if isinstance(f, dict):
                     s.remember("equations", _first(f, "equation_id", "id"))
@@ -337,8 +340,9 @@ def _chat(ctx: _Ctx, *, topic_id: Optional[str] = None, template: Optional[str] 
         s.last_answer = str(resp.get("answer", ""))
         s.scratch["last_sources"] = {}
         for src in resp.get("sources") or []:
-            if isinstance(src, dict):
+            if isinstance(src, dict) and not is_pseudo_chunk_id(src.get("chunk_id")):
                 s.remember("chunks", src.get("chunk_id"))
+                s.remember("source_chunks", src.get("chunk_id"))  # 画面の出典カード（claim-refs の宛先）
                 if src.get("chunk_id"):
                     s.scratch["last_sources"][str(src.get("index") or len(s.scratch["last_sources"]) + 1)] = str(src["chunk_id"])
         confirm = resp.get("anchor_confirm")
@@ -346,12 +350,40 @@ def _chat(ctx: _Ctx, *, topic_id: Optional[str] = None, template: Optional[str] 
             s.remember("anchor_traces", confirm.get("trace_id"))
 
 
+# 音声中心のペルソナ（行動型の ``uses_voice: mostly`` 等 — state.persona_uses_voice）は、学習画面の
+# ハンズフリー音声ループ（app.js handleVoiceSegment）と同じく ``intent_mode="casual"`` で送り、
+# ``resolveScreenMode()`` と同じく ``screen_mode="voice"`` を添える（第 17 周: 音声のペルソナに文字の
+# on_path を送り、書き言葉の回答を欠陥と数えていた）。
+VOICE_ROUTING_NOTE = "runner_voice: 音声中心のペルソナなので、学習画面の音声ループと同じく intent_mode=casual + screen_mode=voice で送った"
+# 音声のまま議論に入ると app.js は VOICE_DISCUSS_UNAVAILABLE_NOTE を出して音声を止める（音声版 discuss は設計 §6.4 の
+# 非スコープ）。議論の回答は文字で読む書き言葉なので、LaTeX・[出典N] を音声の欠陥として数えない
+VOICE_DISCUSS_NOTE = "音声モードは議論では使えない（設計 §6.4）"
+
+
+def _voice_kwargs(ctx: _Ctx) -> dict[str, Any]:
+    if not ctx.session.uses_voice:
+        return {}
+    runner_note(ctx.session, VOICE_ROUTING_NOTE)
+    return {"intent_mode": "casual", "screen_mode": "voice"}
+
+
+def _mark_voice_discuss(ctx: _Ctx) -> None:
+    """議論系の行為。音声のペルソナでも画面は文字で送る（screen_mode=voice は付かない）ことを観察と記録に残す。"""
+    if not ctx.session.uses_voice:
+        return
+    if str(ctx.args.get("screen_mode") or "") == "voice":
+        ctx.args.pop("screen_mode", None)
+    runner_note(ctx.session, f"runner_voice_discuss: {VOICE_DISCUSS_NOTE}。回答は文字の議論として読む"
+                             "（書き言葉・LaTeX・[出典N] を音声向けでないことの欠陥として数えない）")
+    ctx.session.scratch.setdefault("observation_notes", []).append(VOICE_DISCUSS_NOTE)
+
+
 def _chat_ask(ctx: _Ctx) -> None:
-    _chat(ctx, intent_mode="on_path")
+    _chat(ctx, **{"intent_mode": "on_path", **_voice_kwargs(ctx)})
 
 
 def _chat_casual(ctx: _Ctx) -> None:
-    _chat(ctx, intent_mode="casual")
+    _chat(ctx, **{"intent_mode": "casual", **_voice_kwargs(ctx)})
 
 
 def _chat_backstage(ctx: _Ctx) -> None:
@@ -359,10 +391,13 @@ def _chat_backstage(ctx: _Ctx) -> None:
 
 
 def _chat_usage_help(ctx: _Ctx) -> None:
-    _chat(ctx, support_action="usage_help", ui_anchor=ctx.args.get("ui_anchor"))
+    # 音声ループ中でも使い方の問いは support_action=usage_help のまま（app.js のインスペクト分岐）。画面の様相だけ添える
+    voice = {"screen_mode": "voice"} if ctx.session.uses_voice else {}
+    _chat(ctx, support_action="usage_help", ui_anchor=ctx.args.get("ui_anchor"), **voice)
 
 
 def _discuss_ask(ctx: _Ctx) -> None:
+    _mark_voice_discuss(ctx)
     _chat(ctx, topic_id=DISCUSSION_TOPIC_ID, intent_mode="discuss",
           discuss_scope=ctx.args.get("discuss_scope") or "course_sources")
 
@@ -381,6 +416,7 @@ def _chat_rewrite(ctx: _Ctx) -> None:
 
 def _corpus_discuss(ctx: _Ctx) -> None:
     doc = ctx.args.get("document_id") or ctx.session.latest("corpus_documents") or ctx.session.latest("documents")
+    _mark_voice_discuss(ctx)
     _chat(ctx, topic_id=f"_doc:{doc}", overrides={"document_id": doc}, intent_mode="discuss")
 
 
@@ -435,7 +471,9 @@ def _source_chunk_open(ctx: _Ctx) -> None:
         cid = (s.scratch.get("last_sources") or {}).get(m.group(1), "")
         if not cid:
             return ctx.missing("chunk_id")
-    ctx.main(overrides={"chunk_id": cid} if cid else None)
+    status, _ = ctx.main(overrides={"chunk_id": cid} if cid else None)
+    if status == 200 and cid and not is_pseudo_chunk_id(cid):
+        s.remember("source_chunks", cid)
 
 
 def _discuss_opening(ctx: _Ctx) -> None:
@@ -1021,7 +1059,11 @@ def _component_context_hop(ctx: _Ctx) -> None:
 
 
 def _claim_refs(ctx: _Ctx) -> None:
-    cid = ctx.args.get("chunk_id") or ctx.session.latest("chunks")
+    """画面（app.js の出典カード ``data-lx-ledger-chunk``）は実在の出典チャンクにだけ claim-refs を引く。
+    宛先は回答の出典か開いた出典本文のチャンクだけ（トピック教材の擬似 id ``topic:tNN`` は使わない — 第 17 周）。"""
+    arg = str(ctx.args.get("chunk_id") or "").strip()
+    cid = "" if is_pseudo_chunk_id(arg) else arg
+    cid = cid or ctx.session.latest("source_chunks")
     if not cid:
         return ctx.missing("chunk_id")
     status, body = ctx.main(overrides={"chunk_id": cid})
@@ -1053,7 +1095,8 @@ def _chat_ask_selection(ctx: _Ctx) -> None:
     if hits and not isinstance(ctx.args.get("selection_segment_id"), int):
         ctx.args["selection_segment_id"] = hits[0]
     seg = ctx.args.get("selection_segment_id")
-    _chat(ctx, intent_mode="on_path", selection_segment_id=seg if isinstance(seg, int) else None)
+    _chat(ctx, **{"intent_mode": "on_path", **_voice_kwargs(ctx)},
+          selection_segment_id=seg if isinstance(seg, int) else None)
 
 
 _CYCLE_MODES = ("elicit", "diff")
@@ -1064,6 +1107,7 @@ def _chat_cycle(ctx: _Ctx) -> None:
     mode = str(ctx.args.get("cycle_mode") or "").strip()
     if not mode:
         return ctx.missing("cycle_mode")
+    _mark_voice_discuss(ctx)
     _chat(ctx, topic_id=DISCUSSION_TOPIC_ID, intent_mode="discuss", discuss_scope="course_sources",
           cycle_mode=mode)
 

@@ -5,7 +5,11 @@ runner:
 - browser
 session: 2
 preconditions:
-- 前のセッションでこのペルソナが書き置きと持ち越しの問いを残している
+- text: 前のセッションでこのペルソナが書き置きと持ち越しの問いを残している
+  check: return_door
+  requires: [leave_note, carryover]
+seed_scenarios:
+- s-discuss-one-paper
 goal: '{{goal_text}} の続きをするために、翌日ログインし、扉と持ち越しを読み、わたしの地図から旅をたどって、その場所の周りを見る'
 params_required:
 - goal_text
