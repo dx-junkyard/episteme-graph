@@ -1,9 +1,9 @@
 ---
 id: IK-0589
 title: "教材に見えている主張 ⚓ の要素文脈が、表示中トピックの論文でも「このコースの教材からは特定できませんでした」になる"
-status: open
+status: resolved
 recorded_at: 2026-10-01
-resolved_at: null
+resolved_at: 2026-10-01
 sources:
   - docs/architecture/persona_enactment_testing_design.md §18.9
 feature_context:
@@ -35,12 +35,28 @@ discovery:
   perspective: [reproduction, trace_walk]
   note: "第 17 周の頭脳メモ（前周は開けた主張文脈が開けない）と、要素文脈の解決関数を突き合わせた。"
 resolution:
-  perspective: [pending]
-  note: "未解決。第 17 周の記録（§18.9）で起票した。"
-  landed_in: []
+  perspective: [representation_change, guardrail_fix]
+  note: '主張 ⚓ の宛先を論文内で一意にした。UUID → block 修飾 → 素の番号の順で解決し、表示中トピックの論文でも曖昧なら推測せず事実文にする。'
+  landed_in:
+    - backend/core/element_context.py
+    - backend/core/course_content_builder.py
+    - backend/api/routes/learning.py
+    - backend/tests/test_claim_address_resolution.py
+    - docs/features/focus_document_design.md
+    - cb301bb
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "砂場再演（次の周で確かめる）"
+      - ブラウザでの画面確認
 related: [IK-0516, IK-0553, IK-0580]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: status
+    from: 'open'
+    to: 'resolved'
+    reason: '第 18 波で主張 ⚓ の宛先を論文内で一意にした（ガードレールで確認・再演は次の周）。（persona_enactment_testing_design.md §18.10）'
 ---
 
 ## 課題
@@ -53,7 +69,8 @@ history: []
 
 ## 解決の観点
 
-未解決。原因は仮説で、classification.basis に確かめる点を書いた。
+主張の宛先の表現を論文内で一意な形に変え、解決順を UUID → block 修飾 → 素の番号に固定した（cb301bb）。曖昧な宛先は推測で結ばず事実文に落とす。
+原因は起票時の仮説のまま（classification.basis）で、是正後の再演で確かめる。
 
 ## 一般化
 

@@ -40,7 +40,12 @@ resolution:
   landed_in: []
 related: [IK-0464]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: status
+    from: 'open'
+    to: 'open'
+    reason: '2026-10-01 第 18 波で是正中（別担当がコードを是正している）。'
 ---
 
 ## 課題

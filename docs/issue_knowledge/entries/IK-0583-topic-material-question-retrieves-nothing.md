@@ -1,9 +1,9 @@
 ---
 id: IK-0583
 title: "表示中トピックの教材の内容を問う短い質問で検索がゼロ件になり、回答が「出典を追えない AI の説明」に倒れて出典の往復が始められない"
-status: open
+status: resolved
 recorded_at: 2026-10-01
-resolved_at: null
+resolved_at: 2026-10-01
 sources:
   - docs/architecture/persona_enactment_testing_design.md §18.9
 feature_context:
@@ -35,12 +35,28 @@ discovery:
   perspective: [reproduction, data_inspection]
   note: "第 17 周のペルソナの頭脳メモ（出典チップが出ず往復が始められない）と、製品頭脳の受けた要求（教材コンテキストなし・未踏ガード）を突き合わせた。"
 resolution:
-  perspective: [pending]
-  note: "未解決。第 17 周の記録（§18.9）で起票した。"
-  landed_in: []
+  perspective: [carry_through, guardrail_fix]
+  note: '表示中トピックという対象を検索の外から運び込み、トピックの出典チャンクを問いの文面に依らず [出典N] として採用する。検索がゼロ件でも表示中の教材を根拠に答え、出典チップの往復が立つ。'
+  landed_in:
+    - backend/api/routes/learning.py
+    - backend/core/course_data.py
+    - backend/tests/test_wave17_topic_source_grounding.py
+    - docs/backend/rag-chat.md
+    - 3123f2d
+    - cb301bb
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "砂場再演（次の周で確かめる）"
+      - ブラウザでの画面確認
 related: [IK-0511, IK-0382, IK-0580]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: status
+    from: 'open'
+    to: 'resolved'
+    reason: '第 18 波で表示中トピックの出典チャンクを [出典N] として採用した（ガードレールで確認・再演は次の周）。（persona_enactment_testing_design.md §18.10）'
 ---
 
 ## 課題
@@ -53,7 +69,8 @@ t8 を開いた学習者が教材の内容をそのまま尋ねても、検索�
 
 ## 解決の観点
 
-未解決。原因は仮説で、classification.basis に確かめる点を書いた。
+表示中トピックの出典チャンクを検索結果とは別に [出典N] として採用するようにした（3123f2d・cb301bb の learning.py）。対象（表示中トピック）を検索の母集合の外から運び込む見立て。
+原因は起票時の仮説のまま（classification.basis）で、是正後の再演で確かめる。
 
 ## 一般化
 

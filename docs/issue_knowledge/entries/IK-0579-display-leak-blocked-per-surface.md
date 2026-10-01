@@ -48,6 +48,8 @@ resolution:
     - backend/api/display_route.py
     - backend/tests/test_display_projection_guardrails.py
     - docs/features/display_projection_design.md §6
+    - backend/tests/test_display_projection_teacher.py
+    - 8199668
   principles:
     - principle: route-all-surfaces-through-one-point
       use: extracted
@@ -67,6 +69,11 @@ history:
     to: guardrail のみ（砂場の API 確認あり・再演では未確定）
     reason: >-
       第 17 周の後、学習者向け部品文脈の DTO の表示キーに内部 ID が無いことを砂場の API で確かめた。ペルソナが見た内部 ID はハーネスの投影が宛先キーを出していたため（01513fa で是正）で、再演での確認は次の周。教員向け（project_for_teacher）は未配線のまま。（persona_enactment_testing_design.md §18.9）
+  - date: '2026-10-01'
+    field: resolution.landed_in
+    from: '教員向け未配線'
+    to: '教員向け配線済み'
+    reason: '教員向けの名指しの面に project_for_teacher を配線（8199668）。（persona_enactment_testing_design.md §18.10）'
 ---
 
 ## 課題

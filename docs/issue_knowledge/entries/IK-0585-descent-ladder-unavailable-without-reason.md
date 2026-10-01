@@ -1,9 +1,9 @@
 ---
 id: IK-0585
 title: "降下路（足場ダイヤル）が要素をコース内で解決できないとき {available: false} だけを返し、理由と次の操作の事実文が無い"
-status: open
+status: resolved
 recorded_at: 2026-10-01
-resolved_at: null
+resolved_at: 2026-10-01
 sources:
   - docs/architecture/persona_enactment_testing_design.md §18.9
 feature_context:
@@ -35,12 +35,27 @@ discovery:
   perspective: [reproduction, trace_walk]
   note: "第 17 周 s-descend-and-nearby の頭脳メモ（available: false だけ）をルートとエンジンの分岐で確かめた。"
 resolution:
-  perspective: [pending]
-  note: "未解決。第 17 周の記録（§18.9）で起票した。"
-  landed_in: []
+  perspective: [explicit_contract, guardrail_fix]
+  note: '降下路が要素をコース内で解決できないとき、{available: false} だけで終わらせず、解決できなかった理由と次の操作の事実文を返す。'
+  landed_in:
+    - backend/core/descent/engine.py
+    - backend/core/descent/resolve.py
+    - backend/tests/test_descent_core.py
+    - docs/features/structure_descent_design.md
+    - 7b90670
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "砂場再演（次の周で確かめる）"
+      - ブラウザでの画面確認
 related: [IK-0519]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: status
+    from: 'open'
+    to: 'resolved'
+    reason: '第 18 波で降下路の不能理由と次の操作の事実文を返すようにした（ガードレールで確認・再演は次の周）。（persona_enactment_testing_design.md §18.10）'
 ---
 
 ## 課題
@@ -53,7 +68,7 @@ history: []
 
 ## 解決の観点
 
-未解決。原因は確認済みで、着手点は classification.basis のとおり。
+解決器が不能の理由を区別して返し、降下路はその理由と次の操作の事実文を添える（7b90670）。
 
 ## 一般化
 

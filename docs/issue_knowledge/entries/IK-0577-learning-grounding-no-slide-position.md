@@ -35,12 +35,22 @@ discovery:
   perspective: [reproduction]
   note: "第 15 周の頭脳メモ（STILL / NEW）と審判の所見から。"
 resolution:
-  perspective: [pending]
-  note: "未解決。第 16 波では是正していない。"
-  landed_in: []
+  perspective: [carry_through, pending]
+  note: '一部是正（第 18 波）。復元式の印と式番号の事実を回答の材料（grounding）に渡すようにした。表示中のスライド位置を grounding に載せる SA層 4-c は未着手。'
+  landed_in:
+    - backend/core/formula_facts.py
+    - backend/api/routes/learning.py
+    - backend/tests/test_wave17_topic_source_grounding.py
+    - 3123f2d
+    - cb301bb
 related: []
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.landed_in
+    from: '[]'
+    to: '第 18 波の一部是正'
+    reason: '復元式の印・式番号の事実を grounding に渡した。残り: スライド位置（SA層 4-c）は未着手。（persona_enactment_testing_design.md §18.10）'
 ---
 
 ## 課題
@@ -53,7 +63,7 @@ history: []
 
 ## 解決の観点
 
-未解決。SA層 Phase 4-c（topic / visible）は保留のまま。
+一部是正（3123f2d・cb301bb）。復元式の印・式番号は grounding に載った。スライド位置（SA層 4-c）は未着手。
 
 ## 一般化
 

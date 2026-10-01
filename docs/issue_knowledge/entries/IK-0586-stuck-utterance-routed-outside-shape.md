@@ -35,12 +35,23 @@ discovery:
   perspective: [reproduction, invariant_audit]
   note: "第 17 周の頭脳メモ（短い「わからない」ほど長い回答・テンプレ回答）を、根の統合記録の「早期 return は対象外」と突き合わせた。"
 resolution:
-  perspective: [pending]
-  note: "未解決。第 17 周の記録（§18.9）で起票した。"
-  landed_in: []
+  perspective: [responsibility_move, pending]
+  note: '一部是正（第 18 波）。「か。」で終わる問いの検出と詰まりの区画（足場 1 つ・問い返しなし・前提ゲートは次の往復へ）をサーバが組み立て、学習相談の概念・トピックをトピック範囲に絞った。早期 return 経路で骨格が効くのは詰まりの区画だけで、他の区画（先に答える・確認・鏡）は未適用。'
+  landed_in:
+    - backend/core/dialogue_shape.py
+    - backend/tests/test_dialogue_shape_stuck.py
+    - backend/api/routes/learning.py
+    - docs/features/dialogue_response_shape_design.md
+    - 7b90670
+    - 3123f2d
 related: [IK-0582, IK-0580, IK-0560]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.landed_in
+    from: '[]'
+    to: '第 18 波の一部是正'
+    reason: '詰まりの区画と学習相談のトピック範囲は入った。残り: 早期 return 経路の骨格は詰まりの区画のみ（先に答える・確認・鏡の区画は未適用）。（persona_enactment_testing_design.md §18.10）'
 ---
 
 ## 課題
@@ -53,7 +64,8 @@ history: []
 
 ## 解決の観点
 
-未解決。原因は仮説で、classification.basis に確かめる点を書いた。
+一部是正（7b90670・3123f2d）。詰まりの区画と学習相談のトピック範囲への絞り込みは入った。早期 return 経路の骨格は詰まりの区画のみで、残りは未解決。
+原因は起票時の仮説のまま（classification.basis）で、是正後の再演で確かめる。
 
 ## 一般化
 
