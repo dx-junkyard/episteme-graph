@@ -97,14 +97,22 @@ def _str(v: Any) -> str:
     return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
 
 
+# 画面（app.js / admin.js）が表示しない「宛先」のキー。id・*_id・*_ids・stable_key などは UI がリンク解決に使う
+# だけで文字として出さない（製品の表示投影 display_projection.ID_KEY_RE と同じ線引き・第 17 周）。
+# ペルソナの観察に載せると「UUID が見える」「id=None」の偽の所見になる。
+_ADDRESS_KEY_RE = __import__("re").compile(r"(?:^|_)(?:id|ids|key|keys)$|^(?:material_id|document_id|stable_key|href|src|run_id)$")
+
+
 def _generic(body: Any, depth: int = 0, max_lines: int = 160) -> list[str]:
-    """DTO を「項目: 値」の行に平たく並べる（深さ 2 まで・リストは先頭 8 件）。"""
+    """DTO を「項目: 値」の行に平たく並べる（深さ 2 まで・リストは先頭 8 件）。宛先キー（id 等）は画面と同じく出さない。"""
     lines: list[str] = []
     pad = "  " * depth
     if isinstance(body, dict):
         for k, v in body.items():
             if len(lines) >= max_lines:
                 break
+            if isinstance(k, str) and _ADDRESS_KEY_RE.search(k):
+                continue
             if isinstance(v, (dict, list)) and depth < 2 and v:
                 lines.append(f"{pad}{k}:")
                 lines.extend(_generic(v, depth + 1, max_lines - len(lines)))
@@ -415,7 +423,10 @@ def _component_context_lines(body: dict) -> list[str]:
         lines.append(f"{name}:" if items else f"{name}: なし")
         for it in items:
             mark = "（移動できる）" if it.get("navigable") and it.get("element_type") == "theory_component" else ""
-            lines.append(f"- {it.get('relation_label', '')} {it.get('label', '')}{mark} id={it.get('id', '')}")
+            # 移動できる部品だけ手掛かり（id）を添える（旅の hop の引数に使う）。画面は id を見せないが、
+            # 動かせる相手を指す手段としてだけ残す。移動できない行には id を出さない（「id=None」の偽所見の防止）
+            handle = f" id={it.get('id', '')}" if mark else ""
+            lines.append(f"- {it.get('relation_label', '')} {it.get('label', '')}{mark}{handle}")
     return lines
 
 
