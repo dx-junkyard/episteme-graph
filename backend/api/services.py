@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from sqlalchemy import text as sa_text
 
 from core import candidate_flow
+from core import document_refs as _document_refs
 from core.course_data import (
     course_llm_models,
     course_source_material_ids,
@@ -1034,7 +1035,12 @@ def user_can_access_group(user_id: str, group_id: str | None) -> bool:
 
 
 def _resolve_document(document_ref: str) -> dict | None:
-    """document_ref（documents.id UUID か source_path=material_id）から doc メタを解決する。"""
+    """document_ref（documents.id UUID か source_path=material_id）から doc メタを解決する。
+
+    2つの ID 体系を突き合わせる**単数の正本**（複数は ``core.document_refs.resolve_document_refs``。
+    IK-0550 — ガードレール ``test_document_refs_guardrails.py``）。同じ ref が一方の id と
+    別の行の source_path に当たるときは id 一致を採る。
+    """
     if not document_ref:
         return None
     session = _pg_session()
@@ -1047,6 +1053,7 @@ def _resolve_document(document_ref: str) -> dict | None:
                        group_id::text
                 FROM documents
                 WHERE id::text = :ref OR source_path = :ref
+                ORDER BY (id::text = :ref) DESC
                 LIMIT 1
             """),
             {"ref": document_ref},
@@ -1633,11 +1640,10 @@ def list_course_source_document_ids(course_data: dict | None) -> set[str]:
     try:
         session = _pg_session()
         try:
-            rows = session.execute(
-                sa_text("SELECT id::text FROM documents WHERE source_path = ANY(:mids)"),
-                {"mids": list(material_ids)},
-            ).fetchall()
-            resolved_ids = {str(row[0]) for row in rows if row[0]}
+            # ``sources[].material_id`` に documents.id（UUID）が入っているコースもある
+            # （教材一覧の document_id で選んだ等）。両形を同じ document に着地させる（IK-0550）。
+            resolved = _document_refs.resolve_document_refs(session, material_ids)
+            resolved_ids = {entry["document_id"] for entry in resolved.values() if entry.get("document_id")}
         finally:
             session.close()
     except Exception as exc:
@@ -1670,22 +1676,71 @@ def resolve_course_source_titles(course_data: dict | None) -> dict[str, str]:
     try:
         session = _pg_session()
         try:
+            resolved = _document_refs.resolve_document_refs(session, material_ids)
+            doc_ids = sorted({e["document_id"] for e in resolved.values() if e.get("document_id")})
             rows = session.execute(
-                sa_text(
-                    "SELECT source_path, title FROM documents WHERE source_path = ANY(:mids)"
-                ),
-                {"mids": list(material_ids)},
-            ).fetchall()
+                sa_text("SELECT id::text, title FROM documents WHERE id::text = ANY(:ids)"),
+                {"ids": doc_ids},
+            ).fetchall() if doc_ids else []
         finally:
             session.close()
     except Exception as exc:  # noqa: BLE001 — fail-soft
         logger.warning("resolve_course_source_titles failed: %s", exc)
         return {}
-    return {
-        str(row[0]): str(row[1]).strip()
-        for row in rows
-        if row[0] and str(row[1] or "").strip()
+    title_by_doc = {
+        str(row[0]): str(row[1]).strip() for row in rows if row[0] and str(row[1] or "").strip()
     }
+    # キーは保存された ``material_id`` のまま（source_path でも documents.id でも。IK-0550）。
+    return {
+        ref: title_by_doc[entry["document_id"]]
+        for ref, entry in resolved.items()
+        if entry.get("document_id") in title_by_doc
+    }
+
+
+def course_source_document_id_map(course_data: dict | None) -> dict[str, str]:
+    """コースの ``sources[].material_id`` → ``documents.id``（両形を受ける。fail-soft で空）。"""
+    if not isinstance(course_data, dict):
+        return {}
+    material_ids = course_source_material_ids(course_data)
+    if not material_ids:
+        return {}
+    try:
+        session = _pg_session()
+        try:
+            resolved = _document_refs.resolve_document_refs(session, material_ids)
+        finally:
+            session.close()
+    except Exception as exc:  # noqa: BLE001 — fail-soft
+        logger.warning("course_source_document_id_map failed: %s", exc)
+        return {}
+    return {ref: entry["document_id"] for ref, entry in resolved.items() if entry.get("document_id")}
+
+
+def with_course_source_document_ids(data: dict) -> dict:
+    """``sources[]`` に ``document_id``（documents.id）を足したコピーを返す（IK-0550）。
+
+    クライアントへ document を渡すキーは常に ``document_id``（UUID）。``material_id`` は
+    アップロード時の ID（documents.source_path）としてそのまま残す。既に ``document_id`` を
+    持つ source は触らない。解決できなければ何も足さない（保存データは変えない）。
+    """
+    if not isinstance(data, dict) or not data.get("sources"):
+        return data
+    mapping = course_source_document_id_map(data)
+    if not mapping:
+        return data
+    sources: list = []
+    changed = False
+    for src in data.get("sources") or []:
+        if isinstance(src, dict) and not src.get("document_id"):
+            doc_id = mapping.get(str(src.get("material_id") or "").strip())
+            if doc_id:
+                src = {**src, "document_id": doc_id}
+                changed = True
+        sources.append(src)
+    if not changed:
+        return data
+    return {**data, "sources": sources}
 
 
 _FORMULA_PLACEHOLDER_RE = re.compile(r"\[\[FORMULA_\d+\]\]")
@@ -2047,6 +2102,9 @@ def search_chunks_with_metadata(
                     "section_title": (row[6] if len(row) > 6 else "") or "",
                     # IK-0472: トピックの論文を優先する並べ替えに使う（学習者 DTO には載せない）。
                     "document_id": str(row[8]) if len(row) > 8 and row[8] else "",
+                    # IK-0577: 出典ポップアップが描く式の事実（印字番号・AI復元の印）を
+                    # チャットの文脈にも渡す1行（学習者 DTO には載せない）。
+                    "formula_facts": _formula_fact_line(row[7] if len(row) > 7 else None),
                     # 同じ論文の出典どうしを見分ける箇所の手がかり（IK-0381）。
                     "location_hint": chunk_location_hint(
                         section_title=(row[6] if len(row) > 6 else "") or "",
@@ -2065,6 +2123,16 @@ def search_chunks_with_metadata(
     except Exception as exc:
         logger.warning("System-wide pgvector search failed: %s", exc)
         return []
+
+
+def _formula_fact_line(formulas: object) -> str:
+    """チャンクの式の事実1行（IK-0577。正本は ``core.formula_facts``）。失敗は空。"""
+    try:
+        from core.formula_facts import formula_fact_line
+
+        return formula_fact_line(formulas)
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def get_chunks_for_prompt(
@@ -2125,6 +2193,7 @@ def get_chunks_for_prompt(
                     "material_id": str(row[4]) if row[4] else "",
                     "section_title": row[5] or "",
                     "document_id": str(row[7]) if row[7] else "",
+                    "formula_facts": _formula_fact_line(row[6]),
                     "location_hint": chunk_location_hint(section_title=row[5] or "", text=row[1]),
                 }
             results = [by_id[c] for c in ids if c in by_id]

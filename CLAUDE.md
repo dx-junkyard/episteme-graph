@@ -1841,6 +1841,9 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
 完全に空なら `model_generated`。判定は `search_chunks_with_metadata` が返す
 `material_id` を使うため、この関数のクエリを変更する際は `material_id` の SELECT を
 落とさないこと。
+第 17 周（2026-10-01）: 表示中トピックの出典チャンク（`material_chunk_ids`）も `[出典N]（表示中の教材の出典）` として登録し
+（`_topic_source_rows`・可視性は `get_chunks_for_prompt` で強制・最大3件）、式の印字番号と AI復元の印を文脈に1行で添える
+（`core/formula_facts.py`・IK-0577）。答え方のメタ語（一言・根拠・短く…）は内容語に数えない。
 
 ### component 根拠カードの引用チップ化 + コーススコープ component 文脈API（2026-07-21）
 
@@ -1874,6 +1877,8 @@ role/confidence（`_best_mapping` の照合来歴 `exact_title|title_similarity|
   （IK-0553）。component 文脈の依存先は同一論文の live component に解決して辿れる項目にする（IK-0554）。
   **2026-09-30 以降この優先は焦点論文（下記「焦点論文」節・`core/focus_document.py`）に一本化** — 部品本体の
   解決もコース横断 `LIMIT 1` をやめ、焦点の論文 → スコープ内で一意 → それ以外は未解決（FD4）。
+- **主張の宛先（2026-10-01）**: 新しい freeze は `![[claim:…]]` を論文内で一意な形（DB UUID → `{block_id}:{agent_claim_id}`）で書き
+  （`course_content_builder.assign_claim_addresses`）、`element_context._resolve_claim` は UUID / block 付き / 素の番号の順に狭める。素の番号が論文内で曖昧なら事実文（`ambiguous_claim_number`）。教材の document は常に `document_id`（UUID）で渡し、両形の突き合わせは `_resolve_document` / `core/document_refs.py` だけ（IK-0550）。
 - **ガバナンス**: コース公開（freeze）= ソース文書内 1-hop 近傍の露出承認（設計書 §6）。
 - ガードレール: `test_component_context_{core,api}.py` /
   `test_component_evidence_chips_ui_static.py` / `test_component_evidence_admin_ui_static.py`。
@@ -1999,6 +2004,9 @@ DO1〜DO6: 本文非含有/仮名化/学習者に数値非表示/削除APIなし
   撤回するなら撤回と明示させる（`_anchor_ladder_hint` の直後。casual / elicit では持ち越さない）。
 - **応答の順序・問いの数・鏡の範囲を新しい固定文の継ぎ足しで制御しない — `core/dialogue_shape.py` を通す**。
   プロンプトは区画の中身を埋めるだけ（discuss ルール 2 の核心語の 1 文・ルール 6 の「問いは 1 つ」の 1 文は同じことを言う補助）。
+- **詰まりの区画（第 17 周）**: 「わからない」とだけ返した往復（`is_stuck_reply`・casual / discuss / 楽屋を除く）は
+  `assemble(stuck=True)` が足場 1 つ（3 文まで）・問い返しなしにし、前提の逆質問は次の往復へ回す（提示の記帳もしない）。
+  RS3 の問いの検出は「か。」で終わる日本語の問いも拾う（`test_dialogue_shape_stuck.py`）。
 - ガードレール: `test_dialogue_shape_{core,guardrails,route}.py`。
 
 ### discuss 開幕素材のオーサリング（投影是正 + AI生成 + 教員添削, migration 062, 2026-07-30）
@@ -3021,6 +3029,9 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   `reply_to_id` → 本文の順に突き合わせる。
 - **新しい学習者向けルートは `LearnerDisplayRoute` を持つルーターに置く・遮断語彙（内部 ID の正規表現・
   禁止キー集合）を再定義しない**。対象外は auth / groups / export / indicators / disclosure。
+- **教員向け（DP7, 2026-10-01）: 名指しの面（グラフレビュー・論文の順・理論モジュール・ゼミ前ブリーフ・W層の要素文脈・
+  グラフ全体対話）は `project_for_teacher` を通す** — 専用ルーターは `route_class=TeacherDisplayRoute`、admin ルーターに
+  同居する面はエンドポイントで `project_teacher_dto` / `_teacher_view` を呼ぶ（admin ルーター全体には掛けない）。
 - ガードレール: `test_display_projection_{guardrails,core}.py`（全学習者ルートの route class・
   response_model・語彙・純粋性・委譲の同一性・リーク走査）。
 

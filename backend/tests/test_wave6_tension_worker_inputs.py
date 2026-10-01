@@ -300,7 +300,8 @@ class TestTensionWorkerContext:
     def test_falls_back_to_source_document_parent_components(self, _tension_env):
         script = self._base_script()
         script["FROM chunks"] = [("ch-1", "head")]
-        script["FROM documents WHERE source_path"] = [("doc-1",)]
+        # 教材 ref の両形突き合わせは core.document_refs（id, source_path を返す）が正本（IK-0550）。
+        script["OR source_path = ANY(:refs)"] = [("doc-1", "m1")]
         script["parent_agent_component_id IS NULL"] = [("comp-p", "Parent component")]
         log, agent = _tension_env(script)
         tension_worker.run_tension_mining("u1", "c1", "t1")

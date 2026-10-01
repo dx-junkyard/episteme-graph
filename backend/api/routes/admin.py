@@ -94,6 +94,7 @@ from core import account_lifecycle
 from core import account_status
 from core import auth_events as auth_events_module
 from core import decision_context
+from core import document_refs as _document_refs
 from core.paper_discovery import schema as pd_schema
 from core.config import get_settings
 from core.course_data import (
@@ -2814,6 +2815,30 @@ def _attach_unit_identity_to_draft(course_draft: dict, candidates: list) -> None
     _normalize_topics(course_draft.get("topics"))
 
 
+def _canonical_selected_material_ids(refs: list[str]) -> list[str]:
+    """選択教材の ref（material_id / documents.id の混在可）を material_id の並びへ揃える。
+
+    解決は ``core.document_refs``（両形の突き合わせの正本）に委ねる。解決できない ref は
+    元の値のまま残す（後段の可視性ゲート・存在確認がそのまま効く。DB 不達でも従来どおり）。
+    """
+    try:
+        session = _pg_session()
+        try:
+            resolved = _document_refs.resolve_document_refs(session, refs)
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — fail-soft（従来の値で続ける）
+        logger.warning("course builder: material ref canonicalization failed", exc_info=True)
+        return list(refs)
+    out: list[str] = []
+    for ref in refs:
+        text = str(ref or "").strip()
+        material_id = (resolved.get(text) or {}).get("material_id") or text
+        if material_id and material_id not in out:
+            out.append(material_id)
+    return out
+
+
 @router.post(
     "/course-builder/chat",
     response_model=_CourseBuilderChatResponseOut,
@@ -2846,6 +2871,12 @@ def course_builder_chat(
     messages: list[dict] = [
         {"role": "system", "content": _COURSE_BUILDER_SYSTEM_PROMPT},
     ]
+
+    # 選択教材は material_id（source_path）でも documents.id（教材一覧の document_id）でも
+    # 受ける。以降の経路は source_path を前提に書かれているので、ここで1回だけ揃える
+    # （IK-0550: documents.id で選ぶと教材コンテキストも sources も空になっていた）。
+    if body.selected_material_ids:
+        body.selected_material_ids = _canonical_selected_material_ids(body.selected_material_ids)
 
     # 選択教材のナレッジグラフ・チャンクテキストを含む詳細コンテキストを注入
     unit_candidates_out: list[dict] = []
@@ -2915,7 +2946,7 @@ def course_builder_chat(
                         params[f"mid_{i}"] = mid
                     records = pg_session.execute(
                         sa_text(f"""
-                            SELECT source_path, title, filename
+                            SELECT source_path, title, filename, id::text
                             FROM documents
                             WHERE source_path IN ({placeholders}) AND status = 'completed'
                         """),
@@ -2926,11 +2957,15 @@ def course_builder_chat(
 
                 sources = []
                 for r in records:
-                    sources.append({
+                    source = {
                         "material_id": r[0] or "",
                         "title": r[1] or r[2] or "",
                         "subtitle": "",
-                    })
+                    }
+                    # document は常に document_id（documents.id）で運ぶ（IK-0550）。
+                    if len(r) > 3 and r[3]:
+                        source["document_id"] = str(r[3])
+                    sources.append(source)
                 course_draft["sources"] = sources
             except Exception:
                 logger.warning("Failed to inject material sources into course_draft", exc_info=True)

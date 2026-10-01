@@ -25,6 +25,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text as sa_text
 
+from core.document_refs import resolve_document_refs
+
 from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user, _require_teacher
 from services import _resolve_document, get_accessible_course_data, record_review_event, user_can_view_course
@@ -99,13 +101,12 @@ def _course_scope(session, course_data: dict, topic_id: str | None = None) -> di
     doc_refs: list[str] = []
     if material_ids:
         try:
-            rows = session.execute(
-                sa_text("SELECT id::text FROM documents WHERE source_path = ANY(:mids) OR id::text = ANY(:mids)"),
-                {"mids": material_ids},
-            ).fetchall()
-            for r in rows:
-                if r[0] and r[0] not in doc_refs:
-                    doc_refs.append(r[0])
+            # 両形（source_path / documents.id）の突き合わせは core.document_refs が正本（IK-0550）。
+            resolved = resolve_document_refs(session, material_ids)
+            for ref in material_ids:
+                doc_id = (resolved.get(str(ref)) or {}).get("document_id")
+                if doc_id and doc_id not in doc_refs:
+                    doc_refs.append(doc_id)
         except Exception:
             logger.debug("document resolution failed", exc_info=True)
 

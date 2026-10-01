@@ -33,6 +33,7 @@ from core.llm import generate_text, generate_text_with_structured_output, get_ll
 from core.llm_usage.context import usage_context
 from core.llm_worker.single_shot import structured_call
 from core.postgres import get_session as _pg_session
+from core.schema import CLAIM_ORIGIN_SPAN
 from core.text_excerpt import excerpt, looks_like_tex_math, normalize_source_line_breaks
 from core.text_hygiene import (
     INTERNAL_FORMULA_PLACEHOLDER_TEXT,
@@ -133,7 +134,8 @@ def build_course_content(user_id: str, course_id: str) -> dict:
         # (document_id, equation_id) — agent 側の equation ID は論文間で再利用され
         # 得るため、equation ID 単独では別論文の説明と混線する。
         equation_explanations = _load_approved_equation_explanations(session, document_ids)
-        bundle = _collect_structured_content(artifacts_by_doc, equation_explanations)
+        claim_rows = _load_claim_address_rows(session, document_ids)
+        bundle = _collect_structured_content(artifacts_by_doc, equation_explanations, claim_rows)
         if not bundle["mapping_topics"] and not bundle["components"]:
             _set_content_status(
                 course,
@@ -887,6 +889,16 @@ class _BundleScope:
             )
         ]
 
+    def claim_address(self, document_id: object, claim_id: object) -> str:
+        """教材に書く主張の宛先（``assign_claim_addresses``）。索引に無ければ素の ID。"""
+        claim_id = str(claim_id or "").strip()
+        if not claim_id or self._scoped is None:
+            return claim_id
+        address = (self._scoped.get("claim_addresses") or {}).get(
+            (str(document_id or "").strip(), claim_id)
+        )
+        return str(address or claim_id)
+
     def narrative(self, document_id: object, component_id: object) -> dict | None:
         component_id = str(component_id or "").strip()
         document_id = str(document_id or "").strip()
@@ -945,6 +957,7 @@ def _linked_refs(components: list[dict], field: str, *, include_evidence_refs: b
 def _collect_structured_content(
     artifacts_by_doc: dict[str, dict],
     equation_explanations: dict[tuple[str, str], str] | None = None,
+    claim_rows: list[dict] | None = None,
 ) -> dict:
     """artifact 群から course snapshot の素材を集める。
 
@@ -953,6 +966,9 @@ def _collect_structured_content(
     中だけ**で equation レコードへ添え、見出し生成の材料にする（省略時は従来どおり
     説明なしのラダー）。document ごとのループ内で引くため、別論文の同名 equation ID
     と混線しない。
+
+    ``claim_rows`` は ``_load_claim_address_rows`` が返す live 行で、教材に書く主張の宛先を
+    論文内で一意にする材料（``assign_claim_addresses``）。省略時は live 行なしとして扱う。
     """
     equation_explanations = equation_explanations or {}
     mapping_topics: list[dict] = []
@@ -988,6 +1004,10 @@ def _collect_structured_content(
         "thesis_nodes": {},
     }
     thesis_nodes: dict[str, dict] = {}
+    # (document_id, agent claim_id) -> claim_object_builder の中での出現数。rhetorical_role の
+    # span_id は block ごとに振り直されるため、同じ agent claim_id が1論文の中で2回以上
+    # 現れ得る（教材の ⚓ 宛先を一意にする材料。focus_document_design.md §追補）。
+    claim_id_counts: dict[tuple[str, str], int] = {}
 
     for document_id, artifacts in artifacts_by_doc.items():
         document_id = str(document_id or "").strip()
@@ -1098,6 +1118,8 @@ def _collect_structured_content(
                 item[_SCOPE_DOC_KEY] = document_id
                 claims[str(item["claim_id"])] = item
                 scoped["claims"].setdefault((document_id, str(item["claim_id"])), item)
+                claim_key = (document_id, str(item["claim_id"]))
+                claim_id_counts[claim_key] = claim_id_counts.get(claim_key, 0) + 1
 
         # evidence_registry (EvidenceRegistryBuilder) を取り込み、PDF 原文スパンを
         # kind=source の根拠アイテム化できるようにする。
@@ -1154,6 +1176,8 @@ def _collect_structured_content(
                 figure_claim_links.setdefault(claim_id, []).append(link)
                 scoped["figure_claim_links"].setdefault((document_id, claim_id), []).append(link)
 
+    scoped["claim_addresses"] = assign_claim_addresses(scoped, claim_id_counts, claim_rows)
+
     return {
         "mapping_topics": mapping_topics,
         "components": components,
@@ -1165,6 +1189,134 @@ def _collect_structured_content(
         "thesis_nodes": thesis_nodes,
         "scoped": scoped,
     }
+
+
+# ---------------------------------------------------------------------------
+# 教材の主張の宛先（``![[claim:…]]`` / evidence_links の claim target）
+# ---------------------------------------------------------------------------
+# claim_object_builder の agent claim_id（``claim_span_007``）は span_id 由来で、span_id は
+# block ごとに振り直されるため**1論文の中でも一意でない**（第 17 周: 同じ ``claim_span_007``
+# が論文内の複数の主張に当たり、学習者の ⚓ が「特定できません」になった）。新しい freeze
+# では教材に書く宛先を論文内で一意にする（focus_document_design.md §追補「主張の宛先」）:
+#
+# 1. DB UUID（``theory_claims.id``）— live 行に1対1で着地できるとき。
+# 2. ``{block_id}:{agent_claim_id}`` — UUID に着地できないが、出典 block が分かるとき
+#    （live 行が引けたのに曖昧 / 同じ claim_id が artifact に複数ある）。
+# 3. 素の agent claim_id — それ以外（live 行が読めず artifact の中でも一意 = 従来どおり）。
+#
+# 読み手（``core.element_context._resolve_claim``）は3形すべてを受け、この順に狭める。
+# 旧教材の素の ID は ``legacy_ids`` で従来どおり解決する（推測はしない）。
+
+
+def _load_claim_address_rows(session, document_ids: list[str]) -> list[dict]:
+    """主張の宛先を UUID にするための live 行（読み取り専用・失敗は空 = 従来の宛先）。"""
+    if not document_ids:
+        return []
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id::text AS id, document_id::text AS document_id,
+                       parent_claim_id::text AS parent_claim_id, origin,
+                       source_scope->'legacy_ids' AS legacy_ids,
+                       source_scope->>'block_id' AS block_id
+                FROM theory_claims_live
+                WHERE document_id = ANY(CAST(:doc_ids AS uuid[]))
+            """),
+            {"doc_ids": [str(d) for d in document_ids]},
+        ).mappings().fetchall()
+    except Exception:  # noqa: BLE001
+        logger.warning("course_content: claim address rows read failed", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+    out: list[dict] = []
+    for row in rows or []:
+        try:
+            out.append(dict(row))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _claim_row_legacy_ids(row: dict) -> list[str]:
+    raw = row.get("legacy_ids")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            raw = []
+    return [str(x) for x in raw] if isinstance(raw, list) else []
+
+
+def claim_address_for(
+    claim: dict,
+    document_id: str,
+    claim_id: str,
+    *,
+    block_ids: list[str],
+    rows: list[dict] | None,
+    duplicated: bool,
+) -> str:
+    """1つの主張の教材上の宛先（上の3形のどれか）を決める純関数。
+
+    ``rows`` はその document の live 行（``_load_claim_address_rows``）。``None`` / 空は
+    「live 行を読めなかった」= UUID 化しない。UUID 化は agent claim_id を legacy_ids に持つ
+    主張オブジェクトの行（origin != span）がちょうど1行に絞れるときだけ（出典 block →
+    親子の重複除去の順で狭める。推測で1行を選ばない）。
+    """
+    del claim  # 将来の材料（stable_key 等）のための引数。現状は ID と block だけで決まる。
+    claim_id = str(claim_id or "").strip()
+    if not claim_id:
+        return claim_id
+    if rows:
+        candidates = [
+            r for r in rows
+            if str(r.get("origin") or "") != CLAIM_ORIGIN_SPAN
+            and claim_id in _claim_row_legacy_ids(r)
+        ]
+        if len(candidates) > 1 and block_ids:
+            primary = [r for r in candidates if str(r.get("block_id") or "") == block_ids[0]]
+            if not primary:
+                primary = [r for r in candidates if str(r.get("block_id") or "") in block_ids]
+            if primary:
+                candidates = primary
+        if len(candidates) > 1:
+            parents = {str(r.get("parent_claim_id") or "") for r in candidates}
+            candidates = [r for r in candidates if str(r.get("id") or "") not in parents]
+        if len(candidates) == 1 and str(candidates[0].get("id") or "").strip():
+            return str(candidates[0]["id"]).strip()
+    if (rows or duplicated) and block_ids:
+        return f"{block_ids[0]}:{claim_id}"
+    return claim_id
+
+
+def assign_claim_addresses(
+    scoped: dict,
+    claim_id_counts: dict[tuple[str, str], int] | None,
+    claim_rows: list[dict] | None,
+) -> dict[tuple[str, str], str]:
+    """``(document_id, agent claim_id) -> 教材上の宛先`` の索引（scoped の claims 全件）。"""
+    rows_by_doc: dict[str, list[dict]] = {}
+    for row in claim_rows or []:
+        if isinstance(row, dict):
+            rows_by_doc.setdefault(str(row.get("document_id") or "").strip(), []).append(row)
+    counts = claim_id_counts or {}
+    scope = _BundleScope({"scoped": scoped})
+    addresses: dict[tuple[str, str], str] = {}
+    for (doc, claim_id), claim in (scoped.get("claims") or {}).items():
+        if not isinstance(claim, dict):
+            continue
+        addresses[(doc, claim_id)] = claim_address_for(
+            claim,
+            doc,
+            claim_id,
+            block_ids=_claim_block_ids(claim, doc, scope),
+            rows=rows_by_doc.get(doc),
+            duplicated=counts.get((doc, claim_id), 0) > 1,
+        )
+    return addresses
 
 
 def _load_chunks(session, material_ids: list[str]) -> dict[str, list[dict]]:
@@ -1652,6 +1804,19 @@ def _equation_refs_from_units(unit_rows: list[dict], scope: "_BundleScope") -> l
             (doc, eq_id)
             for eq_id in course_units_mod.unit_equation_agent_ids(row)
             if scope.get("equations", doc, eq_id) is not None
+        )
+    return list(dict.fromkeys(refs))
+
+
+def _claim_refs_from_units(unit_rows: list[dict], scope: "_BundleScope") -> list[tuple[str, str]]:
+    """``_claim_ids_from_units`` の document 付き版（宛先の解決に document が要る）。"""
+    refs: list[tuple[str, str]] = []
+    for row in unit_rows:
+        doc = _unit_document_id(row)
+        refs.extend(
+            (doc, claim_id)
+            for claim_id in course_units_mod.unit_claim_agent_ids(row)
+            if scope.get("claims", doc, claim_id) is not None
         )
     return list(dict.fromkeys(refs))
 
@@ -2315,6 +2480,11 @@ def _enrich_topics(
             and not (section_claim_refs or section_block_refs or equations)
         )
 
+        topic_claim_refs = list(dict.fromkeys(
+            _linked_refs(components, "linked_claim_ids")
+            + (_claim_refs_from_units(unit_rows, scope) if unit_rows else [])
+            + list(section_claim_refs)
+        ))
         topic.update({
             "summary": summary,
             "content": content,
@@ -2330,6 +2500,7 @@ def _enrich_topics(
                 component_label_for=lambda doc, cid: (
                     (scope.get("components", doc, cid) or {}).get("label") or ""
                 ),
+                claim_address_for_ref=scope.claim_address,
             ),
             "learning_objectives": learning_objectives,
             "prerequisite_concepts": prerequisite_concepts,
@@ -2343,10 +2514,9 @@ def _enrich_topics(
                 + [str(c.get("component_id") or "") for c in claim_linked_components if c.get("component_id")]
             )),
             "linked_equation_ids": [str(e.get("equation_id") or e.get("id")) for e in equations if e.get("equation_id") or e.get("id")],
+            # 主張は evidence_links と同じ宛先（論文内で一意な形）で並べる。
             "linked_claim_ids": list(dict.fromkeys(
-                _linked_ids(components, "linked_claim_ids")
-                + (_claim_ids_from_units(unit_rows, scope) if unit_rows else [])
-                + [claim_id for _doc, claim_id in section_claim_refs]
+                scope.claim_address(doc, cid) for doc, cid in topic_claim_refs
             )),
             "source_evidence_ids": evidence_ids,
             "evidence_links": evidence_links,
@@ -2365,6 +2535,9 @@ def _enrich_topics(
                 if unit_rows else mapping_confidence
             ),
         })
+        # 前の生成で保存済みの本文（下書きの保持・生成の縮退時）にある素の主張番号を、
+        # このトピックで一意に対応する宛先へ書き換える（宛先が変わっても ⚓ が外れない）。
+        _rewrite_topic_claim_embeds(topic, _claim_address_map(topic_claim_refs, scope))
         narrative = _topic_narrative(components, narrative_by_component, scope=scope)
         if narrative:
             # 材料が無ければキー自体を足さない（§6.5。空の語りの弧を作らない）。
@@ -2610,7 +2783,9 @@ def _topic_evidence_links(
             continue
         add(
             "claim",
-            claim_id,
+            # 教材の ⚓ の宛先は論文内で一意な形（UUID / block 付き）にする
+            # （focus_document_design.md §追補「主張の宛先」）。
+            scope.claim_address(claim_doc, claim_id),
             claim.get("normalized_text") or claim.get("text") or "",
             str(claim.get("support_status") or "claim"),
         )
@@ -3125,6 +3300,57 @@ def drop_unresolved_evidence_embeds(text: str, evidence_items: list[dict]) -> tu
         out = re.sub(r"[ \t]+\n", "\n", out)
         out = re.sub(r"\n{3,}", "\n\n", out).strip()
     return out, dropped
+
+
+_CLAIM_EMBED_REWRITE_RE = re.compile(r"(!\[\[\s*claim\s*:\s*)([^\]\n]*?)(\s*\]\])", re.IGNORECASE)
+
+
+def _claim_address_map(claim_refs: list[tuple[str, str]], scope: "_BundleScope") -> dict[str, str]:
+    """``素の agent claim_id -> 宛先``（トピックの中でちょうど1つの宛先に対応するものだけ）。
+
+    同じ素の番号がトピックの中で2つの宛先（別論文 / 同じ論文の別 block）に対応するときは
+    書き換えない（推測しない）。宛先が素の番号のままのものも載せない。
+    """
+    seen: dict[str, set[str]] = {}
+    for doc, claim_id in claim_refs or []:
+        claim_id = str(claim_id or "").strip()
+        if not claim_id:
+            continue
+        seen.setdefault(claim_id, set()).add(scope.claim_address(doc, claim_id))
+    return {
+        cid: next(iter(addresses))
+        for cid, addresses in seen.items()
+        if len(addresses) == 1 and next(iter(addresses)) != cid
+    }
+
+
+def rewrite_claim_embeds(text: str, address_map: dict[str, str]) -> str:
+    """``![[claim:素の番号]]`` を ``address_map`` の宛先へ書き換える（他の埋め込みは触らない）。"""
+    if not text or not address_map:
+        return text
+
+    def _sub(match: "re.Match[str]") -> str:
+        raw = match.group(2)
+        address = address_map.get(normalize_evidence_id(raw))
+        return f"{match.group(1)}{address}{match.group(3)}" if address else match.group(0)
+
+    return _CLAIM_EMBED_REWRITE_RE.sub(_sub, text)
+
+
+def _rewrite_topic_claim_embeds(topic: dict, address_map: dict[str, str]) -> None:
+    if not isinstance(topic, dict) or not address_map:
+        return
+    material = topic.get("student_material")
+    if isinstance(material, dict) and material.get("source_text"):
+        topic["student_material"] = {
+            **material,
+            "source_text": rewrite_claim_embeds(str(material.get("source_text") or ""), address_map),
+        }
+    elif isinstance(material, str) and material:
+        topic["student_material"] = rewrite_claim_embeds(material, address_map)
+    spoken = topic.get("spoken_script")
+    if isinstance(spoken, str) and spoken:
+        topic["spoken_script"] = rewrite_claim_embeds(spoken, address_map)
 
 
 def _sanitize_topic_evidence_embeds(topic: dict) -> bool:
@@ -3897,8 +4123,13 @@ def _content_blocks(
     display_labels: dict[str, str] | None = None,
     component_label_for: Any = None,
     projected_components: list[dict] | None = None,
+    claim_address_for_ref: Any = None,
 ) -> list[dict]:
     """トピックの構造化本文ブロック。
+
+    ``claim_address_for_ref`` は ``(document_id, agent claim_id) -> 教材上の宛先``
+    （``_BundleScope.claim_address``）。部品の ``claims`` を evidence_links と同じ宛先で
+    並べる（省略時は素の ID = 従来どおり）。
 
     ``projected_components`` は単位の主張から引いた部品（散文には使わず、部品の
     投影 = ⚓ チップの材料にだけ足す）。
@@ -3944,7 +4175,9 @@ def _content_blocks(
             ),
             "equations": _component_equations_with_roles(c),
             "claims": [
-                str(cid) for cid in _as_list(c.get("linked_claim_ids")) if str(cid).strip()
+                (claim_address_for_ref(c.get("document_id") or _scope_doc(c), cid)
+                 if claim_address_for_ref is not None else str(cid))
+                for cid in _as_list(c.get("linked_claim_ids")) if str(cid).strip()
             ][:12],
         }
         # IK-0443: 部品の前提（"15 seeds aggregated" 等）も授業用ドラフトの材料に運ぶ。
@@ -6024,6 +6257,10 @@ def _equation_printed_label(eq: dict) -> str:
     if not match:
         return ""
     return f"式 ({match.group(1)})"
+
+
+#: 公開名（学習チャットの式の事実行 ``core/formula_facts.py`` が使う。IK-0577）。
+equation_printed_label = _equation_printed_label
 
 
 def _compact_math(text: str) -> str:

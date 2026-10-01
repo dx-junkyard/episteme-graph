@@ -292,11 +292,14 @@ def _course_source_document_ids(session, course_data) -> list[str]:
     ids = [str(s["document_id"]) for s in course_sources(data) if isinstance(s, dict) and s.get("document_id")]
     material_ids = list(course_source_material_ids(data))
     if material_ids:
-        rows = session.execute(
-            sa_text("SELECT id::text FROM documents WHERE source_path = ANY(:mids)"),
-            {"mids": material_ids},
-        ).fetchall()
-        ids.extend(str(r[0]) for r in rows if r and r[0])
+        # material_id が documents.id 形で保存されたコースも同じ document に着地させる（IK-0550）。
+        from core.document_refs import resolve_document_refs
+
+        resolved = resolve_document_refs(session, material_ids)
+        ids.extend(
+            resolved[ref]["document_id"] for ref in material_ids
+            if ref in resolved and resolved[ref].get("document_id")
+        )
     out: list[str] = []
     for doc_id in ids:
         if doc_id not in out:

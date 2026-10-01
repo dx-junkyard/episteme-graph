@@ -303,3 +303,9 @@ backend フルスイート 5,237 pass / 20 skipped(node あり環境では 5,248
   表示中トピックの論文を先に引き、なお複数の論文に当たるときは未解決（`available:false`）にする。記号・要素文脈の要求は `topic_id` を持つ。
 - **依存先を辿れる項目にする**（IK-0554）: component 文脈の依存先は同一論文の live component に解決し（`_dependency_lane_items` /
   `_merge_lane`）、navigable な項目として返す。上位レーン（中心命題・支持構造）の項目が id を持たない件は未解決（IK-0570）。
+
+- **主張の宛先を論文内で一意にする**（2026-10-01）: `![[claim:…]]` の素の agent ID（`claim_span_007`）は span_id が block ごとに
+  振り直されるため論文内でも曖昧だった。新しい freeze は宛先を DB UUID（着地できないときは `{block_id}:{agent_claim_id}`）で書き、
+  学習者の文脈 API は UUID / block 付き / 素の番号の3形を受けてこの順に狭める。素の番号が論文内で曖昧なときは推測せず
+  「同じ番号の主張が論文内に複数あるため特定できません」を返す。既存コースは再生成するまで素の番号のまま（正本は
+  `focus_document_design.md` §追補「主張の宛先」）。

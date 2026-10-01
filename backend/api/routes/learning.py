@@ -58,6 +58,7 @@ from services import (
     get_anchor_digest,
     get_tension_digest,
     resolve_course_source_titles,
+    with_course_source_document_ids,
     course_deletion_notice,
     enroll_user_in_course,
     get_course_chunks_ordered,
@@ -114,7 +115,14 @@ from core.course_data import (
     is_symbol_concept_name,
     iter_all_topics,
     learner_topic_units_projection,
+    topic_key_concepts,
+    topic_material_chunk_ids,
     topic_unit_keys,
+)
+from core.formula_facts import (
+    RECONSTRUCTED_FORMULA_INSTRUCTION,
+    formula_fact_line,
+    has_reconstructed_fact,
 )
 from core.teaching_figures import store as teaching_figures_store
 from core import decision_context
@@ -216,6 +224,7 @@ from core.discuss.opening import document_thesis_fact_lines
 from core.discuss.mirroring import MIRROR_MOVED_NOTE, MIRROR_MOVED_NOTE_EN, extract_mirror
 from core.dialogue_shape import (
     assemble as assemble_response_shape,
+    is_stuck_reply,
     mirror_core,
     previous_correction_fact,
     render_answer_text,
@@ -919,6 +928,7 @@ def _with_resolved_source_titles(data: dict) -> dict:
     """
     if not isinstance(data, dict) or not data.get("sources"):
         return data
+    data = with_course_source_document_ids(data)  # IK-0550: document は常に document_id（UUID）で渡す
     try:
         titles = resolve_course_source_titles(data)
     except Exception:  # noqa: BLE001 — fail-soft
@@ -1518,6 +1528,40 @@ def _classify_intent(
     return "DOMAIN_RAG"
 
 
+def _advice_concepts(topic_info: dict | None, course_data: dict | None) -> list[str]:
+    """学習相談に並べる主要概念（第 17 周 C-seq10）。トピックの key_concepts を優先する。"""
+    concepts = topic_key_concepts(topic_info)
+    if concepts:
+        return concepts
+    out: list[str] = []
+    for c in (course_data or {}).get("concepts", []) or []:
+        name = c.get("name", c) if isinstance(c, dict) else str(c)
+        name = str(name or "").strip()
+        if name and not is_symbol_concept_name(name) and name not in out:
+            out.append(name)
+    return out
+
+
+def _advice_topics(topic_info: dict | None, course_data: dict | None, limit: int = 10) -> list[dict]:
+    """学習相談に並べるトピック（現在の章 → 現在のトピックの前後 → 先頭、最大 ``limit`` 件）。"""
+    topics = course_topics(course_data)
+    if not topics:
+        return []
+    if not isinstance(topic_info, dict):
+        return topics[:limit]
+    chapter = topic_info.get("chapter_index")
+    if chapter is not None:
+        same = [t for t in topics if t.get("chapter_index") == chapter]
+        if same:
+            return same[:limit]
+    current = str(topic_info.get("id") or "")
+    index = next((i for i, t in enumerate(topics) if str(t.get("id") or "") == current), None)
+    if index is None:
+        return topics[:limit]
+    start = max(0, min(index - limit // 2, len(topics) - limit))
+    return topics[start:start + limit]
+
+
 def _generate_learning_advice_response(
     course_title: str,
     topic_title: str,
@@ -1554,21 +1598,20 @@ def _generate_learning_advice_response(
             if name:
                 prerequisites.append(name)
 
-    if course_data:
-        for c in course_data.get("concepts", []):
-            name = c.get("name", c) if isinstance(c, dict) else str(c)
-            if name:
-                concepts.append(name)
+    # 第 17 周（C-seq10）: 主要概念は表示中トピックのもの（コース全体の concepts は複数の論文に
+    # またがるため、トピックの概念が無いときだけ使う）。
+    concepts = _advice_concepts(topic_info, course_data)
 
-    # コース全体のトピック一覧（最大10件）
+    # トピック一覧は現在の章（同じ論文）のトピック（最大10件）。章が分からなければ現在の
+    # トピックの前後。コースの先頭10件にすると現在の論文のトピックが入らないことがある。
     topics_block = ""
     if course_data:
-        topics = course_topics(course_data)
+        topics = _advice_topics(topic_info, course_data)
         if topics:
             topics_list = "\n".join(
-                f"  - {t.get('title', t.get('id', ''))}" for t in topics[:10]
+                f"  - {t.get('title', t.get('id', ''))}" for t in topics
             )
-            topics_block = f"■ コースのトピック一覧:\n{topics_list}\n\n"
+            topics_block = f"■ コースのトピック一覧（現在の章）:\n{topics_list}\n\n"
 
     concepts_block = ""
     if concepts:
@@ -2146,6 +2189,7 @@ def _get_integrated_tutor_system_prompt(domain: str, response_persona: str | Non
 5. 【ドリルダウン】回答の末尾に、関連して深掘りできそうなトピックを `[〇〇について詳しく聞く]` の形式で1〜2つ提示してください。
    ただし、クリック可能なボタンとして提示したい場合は必ず `[ACTION_BUTTON: 〇〇について聞く]` の形式を使ってください。
    英語で回答するときは、この目印を `[Ask more about X]` の形式で書いてください。
+6. 【詰まり】学生が「わからない」「むずかしい」とだけ返したときは、全体を要約し直さず、最初の一歩になる足場を1つだけ（3文以内）示してください。問い返しはしないでください。
 
 **フォーマット要件:**
 - 数式は必ず LaTeX 記法で記述（インラインは $...$、ディスプレイは $$...$$）
@@ -2755,7 +2799,8 @@ def _displayed_sources_for(answer: str, sources: list[dict], content_grounding: 
     course_material / other_material のときは、その出所を決めた出典（origin が出所と同じもの）を
     並べる — 出所の判定（IK-0382）は「文脈に置いて問いに関わった資料」で決まり引用の有無では
     決まらないので、帯だけ「教材に基づく」で出典が空、という食い違いを作らない。
-    トピック教材だけで course_material になった往復は番号付き出典が無いので空のまま（従来どおり）。
+    第 17 周（A1）: 表示中の教材の出典チャンクも番号付き出典として登録されるので、トピック教材で
+    course_material になった往復にも ② の出典が並ぶ（チャンクを持たない旧コースだけ空のまま）。
 
     第 14 周: 並びは番号順（会話内で番号は固定なので、提示順ではなく番号で並べる）。②の
     「本文が引用していない出典」には ``cited: False`` を付け、画面で「本文では引用して
@@ -3861,6 +3906,77 @@ def _generate_graph_element_explanation(
     return LearningChatResponse(answer=answer, course_update=None, degraded=degraded)
 
 
+#: 第 17 周（A1）: 表示中の教材から番号付き出典として登録するチャンクの上限・1件の字数。
+_TOPIC_SOURCE_CHUNK_MAX = 3
+_TOPIC_SOURCE_CHUNK_MAX_CHARS = 1200
+
+
+def _topic_source_rows(
+    topic: dict | None,
+    *,
+    allowed_document_ids,
+    focus=None,
+    exclude_chunk_ids: set | None = None,
+) -> list[dict]:
+    """表示中のトピック教材の出典チャンクを検索結果の形で返す（第 17 周 A1・読み取り専用）。
+
+    入力は ``topic.material_chunk_ids``（→ ``linked_chunk_ids``）。可視性は
+    ``get_chunks_for_prompt`` が ``allowed_document_ids`` を SQL 内で強制する（空集合は
+    SQL 非発行）。焦点の論文を先に並べ（``prefer_focus``・類似度は無いので順序だけ）、
+    ``exclude_chunk_ids`` を落とし、上限 :data:`_TOPIC_SOURCE_CHUNK_MAX` 件。失敗は空。
+    """
+    ids = [c for c in topic_material_chunk_ids(topic) if c not in (exclude_chunk_ids or set())]
+    if not ids:
+        return []
+    try:
+        rows = get_chunks_for_prompt(ids, allowed_document_ids=allowed_document_ids)
+    except Exception:  # noqa: BLE001
+        logger.debug("topic source rows: read failed", exc_info=True)
+        return []
+    rows = [dict(r) for r in rows or [] if isinstance(r, dict)]
+    if focus is not None:
+        rows = prefer_focus(rows, focus, drop_off_focus=False)
+    return rows[:_TOPIC_SOURCE_CHUNK_MAX]
+
+
+def _formula_fact_suffix(row: dict, sink: list[str]) -> str:
+    """出典1件の式の事実行（IK-0577）。あれば改行付きで返し ``sink`` に控える。"""
+    line = str((row or {}).get("formula_facts") or "").strip()
+    if not line:
+        return ""
+    sink.append(line)
+    return "\n" + line
+
+
+def _topic_formula_fact_line(topic: dict | None) -> str:
+    """表示中のトピック教材の式の事実行（IK-0577）。教材本文が参照する式だけ。"""
+    if not isinstance(topic, dict):
+        return ""
+    try:
+        # content_blocks の式（``reconstructed`` は A層の写し — course_content_builder が載せる）。
+        formulas = [
+            item
+            for block in topic.get("content_blocks") or []
+            if isinstance(block, dict) and block.get("type") == "equations"
+            for item in block.get("items") or []
+            if isinstance(item, dict)
+        ]
+        material = _topic_student_material(topic)
+        referenced = {
+            normalize_evidence_id(m.group(1))
+            for m in re.finditer(r"!\[\[equation:([^\]|]+)", material)
+        }
+        if referenced:
+            formulas = [
+                f for f in formulas
+                if normalize_evidence_id(f.get("equation_id") or f.get("id")) in referenced
+            ]
+        return formula_fact_line(formulas)
+    except Exception:  # noqa: BLE001
+        logger.debug("topic formula facts failed", exc_info=True)
+        return ""
+
+
 def _topic_student_material(topic: dict) -> str:
     material = topic.get("student_material")
     if isinstance(material, dict):
@@ -3897,6 +4013,11 @@ _GROUNDING_GENERIC_TERMS = frozenset({
     "意味", "理解", "説明", "質問", "回答", "教材", "論文", "本文", "部分", "場合",
     "具体的", "初歩的", "確認", "問題", "答え", "出典", "箇所", "内容", "トピック",
     "何", "今", "今回", "方法", "理由", "関係", "結果",
+    # 第 17 周: 答え方・問い方を指すメタ語（説明の中身ではない）。これらが内容語に
+    # 数えられると「根拠はどこ？一言で。」のような画面を指す問いが教材と無関係と判定され、
+    # 出所がターンごとに反転していた。
+    "一言", "根拠", "要約", "簡単", "短く", "つまり", "結局", "要点", "ポイント",
+    "全体", "全体像", "どこ", "どれ", "ここ", "それ", "これ", "以上",
 })
 
 
@@ -5806,12 +5927,9 @@ def _learning_chat_core(
             body.history, body.message, advice_answer,
             assistant_meta={"content_grounding": "model_generated"},
         )
-        first_concept = ""
-        for _c in (course_data.get("concepts") or []):
-            _name = _c.get("name", _c) if isinstance(_c, dict) else str(_c)
-            if _name:
-                first_concept = str(_name)
-                break
+        # 第 17 周（C-seq10）: ボタンの行き先は表示中トピックの最初の概念（無ければコース全体）。
+        _advice_concept_list = _advice_concepts(topic_info, course_data)
+        first_concept = _advice_concept_list[0] if _advice_concept_list else ""
         advice_next = support_agent.advice_actions(support_origin, topic_title, first_concept)
         return LearningChatResponse(
             answer=advice_answer,
@@ -5857,6 +5975,13 @@ def _learning_chat_core(
         )
         return LearningChatResponse(answer=_ack_answer, course_update=None, support_mode="normal")
     if _is_backstage or _prereq_followup in ("after_gate", "gated_before") or body.replace_message_id:
+        prerequisite_intervention = None
+    # 応答の骨格（詰まりの区画, 第 17 周）: 「わからない」とだけ返した往復は足場 1 つで答え、
+    # 前提の逆質問はこの往復には添えず次の往復へ回す（提示の記帳もしない = 1 回だけの規則を保つ）。
+    _turn_is_stuck = (
+        is_stuck_reply(body.message) and not (_is_casual or _is_discuss or _is_backstage)
+    )
+    if _turn_is_stuck:
         prerequisite_intervention = None
     # TRIAGE14 (a): 逆質問は 1 コース × 1 トピック × 1 学習者につき一度だけ。提示した事実を
     # learning_states.progress_data に残し、以後は出さない（提示の記録であって能力推定ではない = UC5）。
@@ -5976,13 +6101,20 @@ def _learning_chat_core(
     # IK-0382: 注入したトピック教材を「この回答の根拠」と数えてよいか。注入（プロンプト）は
     # 従来どおりで、出所分類と tier 下限だけがこの判定に従う。
     topic_material_grounds = False
+    #: IK-0577: 文脈に置いた式の事実行（復元式が1つでもあれば system に1文を足す）。
+    _formula_fact_lines: list[str] = []
     if topic_info:
         topic_material = material_text_for_prompt(topic_info, _topic_student_material(topic_info))
         if topic_material:
             has_topic_material = True
             topic_material_grounds = _topic_material_engages_message(body, topic_material, message=_turn_question)
+            # IK-0577: 画面の教材に添えている式の事実（印字番号・AI復元の印）も同じ区画に置く。
+            _topic_formula_facts = _topic_formula_fact_line(topic_info)
+            if _topic_formula_facts:
+                _formula_fact_lines.append(_topic_formula_facts)
             cited_chunks.append(
                 f"[現在表示中の教材]\n{sanitize_source_text_for_prompt(topic_material[:5000])}"
+                + (f"\n{_topic_formula_facts}" if _topic_formula_facts else "")
             )
     for r in chunk_results:
         if r["score"] >= 0.30:
@@ -6000,6 +6132,7 @@ def _learning_chat_core(
             cited_chunks.append(
                 f"[出典{_source['index']}] 『{r['source_title']}』\n"
                 f"{sanitize_source_text_for_prompt(r['text'])}"
+                + _formula_fact_suffix(r, _formula_fact_lines)
             )
     # IK-0475: 直前の回答が本文で引用したチャンクのうち今回の検索に無いものを、元の番号の
     # まま文脈へ戻す（最大3件・1件1200字）。番号の対応は会話の採番器（IK-0432/0444）と一致する
@@ -6014,6 +6147,28 @@ def _learning_chat_core(
             cited_chunks.append(
                 f"[出典{_source['index']}] 『{r['source_title']}』（前の回答で引用した箇所）\n"
                 f"{sanitize_source_text_for_prompt(r['text'])[:_CARRIED_CHUNK_MAX_CHARS]}"
+                + _formula_fact_suffix(r, _formula_fact_lines)
+            )
+    # 第 17 周（A1）: 表示中の教材の出典チャンク（topic.material_chunk_ids）を番号付き出典として
+    # 登録する。教材本文は毎ターン [現在表示中の教材] として文脈に入るのに、引用できる出典としては
+    # 登録されず、検索が何も採用しない往復では出典チップが構造上出なかった（往復を始められない）。
+    # 可視性は get_chunks_for_prompt が allowed_document_ids を SQL 内で強制し、焦点の論文を先に
+    # 並べ（FD3）、検索・持ち越しで既に文脈にあるものは重ねない。上限は
+    # _TOPIC_SOURCE_CHUNK_MAX。予想を引き出す往復（elicit）では教材の出典を手渡さない。
+    # 本文が1つも引用しなければ、出所は後段の TRIAGE14 の規則どおり正直に扱う。
+    if has_topic_material and _cycle_mode != "elicit":
+        for r in _topic_source_rows(
+            topic_info,
+            allowed_document_ids=allowed_document_ids,
+            focus=_focus if _focus_doc_ids else None,
+            exclude_chunk_ids={s["chunk_id"] for s in cited_sources},
+        ):
+            _source = _adopted_source_entry(_citation_numbers, r, course_material_ids)
+            cited_sources.append(_source)
+            cited_chunks.append(
+                f"[出典{_source['index']}] 『{r['source_title']}』（表示中の教材の出典）\n"
+                f"{sanitize_source_text_for_prompt(r['text'])[:_TOPIC_SOURCE_CHUNK_MAX_CHARS]}"
+                + _formula_fact_suffix(r, _formula_fact_lines)
             )
 
     # L1: 回答全体の格を最弱根拠へ安全側集約。採用根拠が無ければ未踏(out_of_source)。
@@ -6134,6 +6289,9 @@ def _learning_chat_core(
     _anchor_ladder_hint = _build_anchor_ladder_hint(body, body.history)
     if _anchor_ladder_hint:
         _system_prompt += "\n\n" + _anchor_ladder_hint
+    # IK-0577: 文脈に AI が復元した式があるときだけ、それを原文の式として断定させない1文を足す。
+    if any(has_reconstructed_fact(line) for line in _formula_fact_lines):
+        _system_prompt += "\n\n" + RECONSTRUCTED_FORMULA_INSTRUCTION
     # IK-0576（応答の骨格 §6）: 前の往復の訂正を持ち越す（casual / elicit では持ち越さない）。
     _correction_block = "" if _is_casual or _cycle_mode == "elicit" else _previous_correction_block(
         # m2: サーバ正本の履歴（書き直しなら切り詰め済みのサーバ履歴）から読む。
@@ -6422,6 +6580,7 @@ def _learning_chat_core(
         gate_text=_prereq_gate_text_for_shape,
         degraded=degraded,
         gate_marker=PREREQUISITE_GATE_ANSWERED_MARKER,
+        stuck=_turn_is_stuck,
     )
     answer = render_answer_text(_response_shape)
 

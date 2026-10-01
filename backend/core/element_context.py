@@ -68,6 +68,8 @@ from sqlalchemy import text as sa_text
 from core.postgres import get_session
 from core import learner_context_common
 from core.focus_document import resolve_in_focus
+from core.knowledge_objects.references import normalize_claim_ref
+from core.schema import CLAIM_ORIGIN_SPAN
 from core.learner_context_common import (  # noqa: F401  (旧名の再エクスポート)
     ITEM_GROUP_FALLBACK,
     ITEM_GROUPS,
@@ -160,35 +162,69 @@ _DEGENERATE_LENS_NOTE = "要素が見つからないか読み取りに失敗し�
 # 曖昧判定に必要なのは「2 行以上あるか」だけなので、候補は少数で足りる
 # （legacy_ids が大量一致するケースで巨大な結果集合を作らない）。
 _CLAIM_CANDIDATE_LIMIT = 3
+#: block で狭めた宛先の候補上限（同じ block の span 行 + 主張オブジェクト + 親子で数行）。
+_CLAIM_BLOCK_CANDIDATE_LIMIT = 8
 
 
-def _resolve_claim(element_id: str, course_document_ids: set[str]) -> tuple[str, str] | None:
-    """claim を ``(db_uuid, document_id)`` に解決する（コース document 集合内に限定）。
+#: 素の agent 側 ID（``claim_span_007``）が焦点の論文の中で複数の主張に当たったときの事実文。
+#: rhetorical_role の ``span_id`` は block ごとに振り直されるため、素の番号は論文の中でも
+#: 一意でない（focus_document_design.md §追補「主張の宛先」）。推測で1つを選ばない。
+NOTE_AMBIGUOUS_CLAIM_NUMBER = "同じ番号の主張が論文内に複数あるため特定できません"
+#: 上記事実文に付ける機械可読の理由（数値は載せない）。
+REASON_AMBIGUOUS_CLAIM_NUMBER = "ambiguous_claim_number"
 
-    ``document_id = ANY(:doc_ids)`` を WHERE 句に直接含めることで（後付けの Python
-    フィルタではなく）、agent 側 ID がコース外文書の同名 claim に誤って一致する余地を
-    断つ。WHERE 断片の組み立ては
-    ``learner_context_common.scoped_id_match_sql``（component 側の
-    ``_resolve_component_row`` と共有する正本）に委ね、本関数は claim 固有の
-    **曖昧一致の扱い**だけを持つ。
+#: 主張の宛先の3形（知識オブジェクト層の内容由来キーではなく、教材本文 ``![[claim:…]]`` に
+#: 書かれる宛先）。解決はこの順に狭める。
+CLAIM_ADDRESS_UUID = "uuid"
+CLAIM_ADDRESS_BLOCK_QUALIFIED = "block_qualified"
+CLAIM_ADDRESS_BARE = "bare"
 
-    **agent 側 ID の曖昧一致は解決しない**（fail-closed）。``claim_span_001`` のような
-    agent 側 ID は span_id が block ごとに振り直されるため文書内でも文書間でも反復し
-    （``claim_object_builder/builder.py::_make_claim_id`` の legacy_ids はカウンタ接尾辞
-    を持たない）、複数文書をソースに持つコースでは**別論文の別 claim** に一致し得る。
-    W層 ``core/deliberation/refs.py::_resolve_by_legacy_id`` が「単一 document 必須」で
-    同じ問題を断っているのと整合させ、本モジュールでは
 
-    - UUID（``theory_claims.id``）完全一致 … 一意なので即決
-    - legacy_ids 一致が **ちょうど1行** … 解決
-    - legacy_ids 一致が複数行（別 document にまたがる / 同一 document 内で複数） … 曖昧
-      なので ``None``（呼び出し側が 404 → フロントは「文脈情報はまだありません。」へ縮退）
+def claim_address_form(element_id: object) -> str:
+    """教材の主張の宛先の形を返す（``uuid`` / ``block_qualified`` / ``bare``）。
 
-    とする。「たまたま最初に返った行」を出典に裏付けられた文脈として見せない。
+    - ``theory_claims.id``（UUID）… 一意。
+    - ``{block_id}:{span_id}``（P0-6 の legacy キー）/ ``{block_id}:{agent_claim_id}`` …
+      block で狭めた宛先（論文内で一意）。thesis 参照の ``claim:`` 接頭辞は剥がしてから見る。
+    - それ以外（``claim_span_007``）… 素の agent 側 ID（論文内でも一意とは限らない）。
+    """
+    text = normalize_claim_ref(element_id)
+    if not text:
+        return CLAIM_ADDRESS_BARE
+    if _is_uuid(text):
+        return CLAIM_ADDRESS_UUID
+    head, sep, rest = text.partition(":")
+    if sep and head.strip() and rest.strip():
+        return CLAIM_ADDRESS_BLOCK_QUALIFIED
+    return CLAIM_ADDRESS_BARE
+
+
+def _narrow_claim_candidates(candidates: list[dict]) -> list[dict]:
+    """同じ主張を指す重複行を外す（推測ではなく、行どうしの構造から決まる絞り込みだけ）。
+
+    親 claim（claim_object）は atomic 子の agent ID も legacy_ids に持つ（TRIAGE14:
+    ``claim_span_001_112_sub02`` が子と親の2行に当たった）。候補のうち別の候補の親である
+    行を外す。
+    """
+    parents = {str(c.get("parent_claim_id") or "") for c in candidates}
+    return [c for c in candidates if str(c.get("id") or "") not in parents]
+
+
+def _resolve_claim_detail(
+    element_id: str, course_document_ids: set[str]
+) -> tuple[tuple[str, str] | None, bool]:
+    """``(解決結果, 同一論文内で曖昧だったか)`` を返す（:func:`_resolve_claim` の本体）。
+
+    第2要素は「素の番号が**同じ論文の中で**複数の主張に当たった」ときだけ True
+    （論文をまたぐ曖昧さ・不在は False）。呼び出し側はこれを事実文
+    :data:`NOTE_AMBIGUOUS_CLAIM_NUMBER` に変える。
     """
     document_ids = _normalized_document_ids(course_document_ids)
     if not document_ids:
-        return None
+        return None, False
+    form = claim_address_form(element_id)
+    if form == CLAIM_ADDRESS_BLOCK_QUALIFIED:
+        return _resolve_block_qualified_claim(normalize_claim_ref(element_id), document_ids), False
 
     where_clause, params = scoped_id_match_sql(element_id, document_ids)
 
@@ -212,24 +248,115 @@ def _resolve_claim(element_id: str, course_document_ids: set[str]) -> tuple[str,
         session.close()
     candidates = [dict(r) for r in (rows or [])]
     if not candidates:
-        return None
+        return None, False
     first = candidates[0]
     if not first.get("id_match") and len(candidates) > 1:
-        # 親 claim（claim_object）は atomic 子の agent ID も legacy_ids に持つ
-        # （TRIAGE14: ``claim_span_001_112_sub02`` が子と親の2行に当たり 404 になった）。
-        # 候補のうち別の候補の親である行を外し、1行に絞れればそれを採る。
-        parents = {str(c.get("parent_claim_id") or "") for c in candidates}
-        narrowed = [c for c in candidates if str(c.get("id") or "") not in parents]
+        narrowed = _narrow_claim_candidates(candidates)
         if len(narrowed) == 1:
-            return str(narrowed[0]["id"]), str(narrowed[0]["document_id"] or "")
+            return (str(narrowed[0]["id"]), str(narrowed[0]["document_id"] or "")), False
         # agent 側 ID が複数行に一致した = どの claim を指すか決められない（fail-closed）。
         logger.info(
             "element_context: ambiguous agent claim id %r matched %d rows in course scope",
             str(element_id),
             len(candidates),
         )
+        documents = {str(c.get("document_id") or "") for c in (narrowed or candidates)}
+        return None, len(documents) == 1
+    return (str(first["id"]), str(first["document_id"] or "")), False
+
+
+def _resolve_block_qualified_claim(address: str, document_ids: list[str]) -> tuple[str, str] | None:
+    """``{block_id}:{span_id}`` / ``{block_id}:{agent_claim_id}`` を1行に解決する。
+
+    1. 宛先そのものが legacy キー（P0-6 の ``{block}:{span}``）の行があればそれだけを見る。
+    2. 無ければ ``source_scope.block_id = block`` かつ（legacy_ids に後半を持つ /
+       ``source_scope.span_id = 後半``）の行。
+    3. 同じ block の span 行（origin='span'）と主張オブジェクトの行が両方当たるときは
+       主張オブジェクトの行を採る（同じ span から出た同じ命題の2表現。別の主張の推測ではない）。
+    4. 親子の重複を外し、ちょうど1行のときだけ返す（それ以外は ``None`` = fail-closed）。
+    """
+    block_id, _sep, local_id = address.partition(":")
+    block_id, local_id = block_id.strip(), local_id.strip()
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                f"""
+                SELECT id::text AS id, document_id::text AS document_id,
+                       parent_claim_id::text AS parent_claim_id, origin,
+                       (source_scope->'legacy_ids' ? :address) AS exact_key
+                FROM theory_claims_live
+                WHERE document_id = ANY(CAST(:doc_ids AS uuid[]))
+                  AND (
+                    source_scope->'legacy_ids' ? :address
+                    OR (
+                      source_scope->>'block_id' = :block_id
+                      AND (
+                        source_scope->'legacy_ids' ? :local_id
+                        OR source_scope->>'span_id' = :local_id
+                      )
+                    )
+                  )
+                ORDER BY document_id ASC, created_at ASC, id::text ASC
+                LIMIT {_CLAIM_BLOCK_CANDIDATE_LIMIT}
+                """
+            ),
+            {
+                "address": address,
+                "block_id": block_id,
+                "local_id": local_id,
+                "doc_ids": document_ids,
+            },
+        ).mappings().fetchall()
+    finally:
+        session.close()
+    candidates = [dict(r) for r in (rows or [])]
+    if not candidates:
         return None
-    return str(first["id"]), str(first["document_id"] or "")
+    exact = [c for c in candidates if c.get("exact_key")]
+    if exact:
+        candidates = exact
+    non_span = [c for c in candidates if str(c.get("origin") or "") != CLAIM_ORIGIN_SPAN]
+    if non_span and len(non_span) < len(candidates):
+        candidates = non_span
+    if len(candidates) > 1:
+        candidates = _narrow_claim_candidates(candidates)
+    if len(candidates) != 1:
+        logger.info(
+            "element_context: block-qualified claim address %r matched %d rows",
+            address,
+            len(candidates),
+        )
+        return None
+    return str(candidates[0]["id"]), str(candidates[0]["document_id"] or "")
+
+
+def _resolve_claim(element_id: str, course_document_ids: set[str]) -> tuple[str, str] | None:
+    """claim を ``(db_uuid, document_id)`` に解決する（コース document 集合内に限定）。
+
+    ``document_id = ANY(:doc_ids)`` を WHERE 句に直接含めることで（後付けの Python
+    フィルタではなく）、agent 側 ID がコース外文書の同名 claim に誤って一致する余地を
+    断つ。WHERE 断片の組み立ては
+    ``learner_context_common.scoped_id_match_sql``（component 側の
+    ``_resolve_component_row`` と共有する正本）に委ね、本関数は claim 固有の
+    **曖昧一致の扱い**だけを持つ。
+
+    宛先は3形を受ける（focus_document_design.md §追補「主張の宛先」。この順に狭める）:
+
+    - UUID（``theory_claims.id``）完全一致 … 一意なので即決
+    - ``{block_id}:{span_id}`` / ``{block_id}:{agent_claim_id}`` … block で狭めて1行に
+      なるときだけ（:func:`_resolve_block_qualified_claim`）
+    - 素の agent 側 ID … legacy_ids 一致が **ちょうど1行**（親子の重複は外す）のときだけ
+
+    **agent 側 ID の曖昧一致は解決しない**（fail-closed）。``claim_span_001`` のような
+    agent 側 ID は span_id が block ごとに振り直されるため文書内でも文書間でも反復し
+    （``claim_object_builder/builder.py::_make_claim_id`` の legacy_ids はカウンタ接尾辞
+    を持たない）、複数文書をソースに持つコースでは**別論文の別 claim** に一致し得る。
+    W層 ``core/deliberation/refs.py::_resolve_by_legacy_id`` が「単一 document 必須」で
+    同じ問題を断っているのと整合させる。「たまたま最初に返った行」を出典に裏付けられた
+    文脈として見せない。
+    """
+    return _resolve_claim_detail(element_id, course_document_ids)[0]
 
 
 def _resolve_equation(
@@ -303,6 +430,10 @@ def _ordered_preferred(preferred_document_ids, all_ids: list[str]) -> list[str]:
     return out
 
 
+#: ``_resolve_element`` が「素の番号が論文内で曖昧」を返すための目印（解決値ではない）。
+_AMBIGUOUS_CLAIM = ("", "")
+
+
 def _resolve_element(
     element_type: str,
     element_id: str,
@@ -313,10 +444,19 @@ def _resolve_element(
         all_ids = _normalized_document_ids(course_document_ids)
 
         def _lookup(doc_ids: list[str]):
-            # ``_resolve_claim`` 自身が集合内の曖昧一致を None にする（集合内で一意か
+            # ``_resolve_claim_detail`` 自身が集合内の曖昧一致を None にする（集合内で一意か
             # UUID 完全一致のときだけ返す）ので、1回の読みがそのまま「一意解」になる。
-            hit = _resolve_claim(element_id, set(doc_ids)) if doc_ids else None
-            return [(hit[1], hit)] if hit else []
+            # 素の番号が**同じ論文の中で**複数に当たったときは、その論文の候補として
+            # 「曖昧」の目印を返す — 焦点の論文で曖昧なのに焦点の外の同番号へ落ちない
+            # （⚓ は焦点の論文のもの。別論文の主張を推測で見せない）。
+            if not doc_ids:
+                return []
+            hit, ambiguous_in_document = _resolve_claim_detail(element_id, set(doc_ids))
+            if hit:
+                return [(hit[1], hit)]
+            if ambiguous_in_document and len(doc_ids) == 1:
+                return [(doc_ids[0], _AMBIGUOUS_CLAIM)]
+            return []
 
         # 焦点の論文で先に解決し、焦点の外ではコース内で一意のときだけ（FD4）。
         return resolve_in_focus(
@@ -718,6 +858,14 @@ def build_element_context(
     resolved = _resolve_element(
         element_type, element_id, course_document_ids, preferred_document_ids
     )
+    if resolved is _AMBIGUOUS_CLAIM:
+        # 素の番号（``claim_span_007``）が論文の中で複数の主張に当たった。推測で選ばず、
+        # 汎用の「特定できません」ではなく理由を事実で返す（200・数値なし）。
+        return {
+            "available": False,
+            "note": NOTE_AMBIGUOUS_CLAIM_NUMBER,
+            "reason": REASON_AMBIGUOUS_CLAIM_NUMBER,
+        }
     if resolved is None:
         return None
     resolved_id, document_id = resolved

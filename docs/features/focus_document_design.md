@@ -107,3 +107,44 @@
   前提の説明に④段（画面の選択）を渡す。回帰テストは `test_focus_document_core.py`
   （`TestFocusGroupAmbiguity` / `TestLearnerFocusPreviousCitationGate`）と
   `test_focus_document_guardrails.py::TestReviewGatesM4`。
+
+## 追補「主張の宛先」（2026-10-01・ID 体系の不一致の是正）
+
+**症状**: 第 17 周、コース 1bad7d9f / トピック t11 の ⚓ `![[claim:claim_span_007]]` の文脈が「このコースの教材からは
+特定できませんでした」になり、`claim_span_003_sub01` は解決した。rhetorical_role の `span_id` は block ごとに振り直され、
+claim_object_builder の agent ID（`claim_{span_id}`）は**1論文の中でも**複数の主張に当たる。教材に書かれた素の番号は
+それ自体が曖昧で、FD4 の fail-closed は正しく推測を拒んでいた（原因は書き手の宛先）。
+
+**規則（書き手）**: 新しい freeze では `course_content_builder` が教材に書く主張の宛先（`evidence_links[].target_id` /
+`topic.linked_claim_ids` / 部品投影の `claims` / 生成本文の `![[claim:…]]`）を論文内で一意な形にする
+（`assign_claim_addresses` / `claim_address_for`。正本は `_BundleScope.claim_address`）。
+
+1. DB UUID（`theory_claims.id`）— live 行（`theory_claims_live`、origin≠span）の legacy_ids に agent ID を持つ行が、
+   出典 block（evidence → `source.block_id`）→ 親子の重複除去 の順でちょうど1行に絞れるとき。
+2. `{block_id}:{agent_claim_id}` — UUID に着地できないが出典 block が分かるとき（live 行が曖昧 / artifact に同じ
+   claim_id が複数ある）。P0-6 の `{block_id}:{span_id}` ではなく agent ID を後半に置くのは、atomic 子
+   （`claim_span_003_sub01`）が親と同じ span を持ち、span キーでは親子を区別できないため。
+3. 素の agent ID — live 行が読めず artifact の中でも一意なとき（従来どおり）。
+
+保存済みの本文（下書きの保持・生成の縮退）にある素の番号は、トピックの中でちょうど1つの宛先に対応するときだけ
+`rewrite_claim_embeds` で書き換える（2つの宛先に対応する番号は書き換えない）。
+
+**規則（読み手）**: `core.element_context._resolve_claim` は3形を受け、UUID → block 付き → 素の番号 の順に狭める
+（`claim_address_form`）。block 付きは「宛先そのものが legacy キーの行」→「同じ block で legacy_ids / span_id が後半に
+一致する行」の順で見て、同じ block の span 行と主張オブジェクト行が両方当たるときは主張オブジェクト行を採る（同じ span の
+2表現で、別の主張の推測ではない）。素の番号が**同じ論文の中で**複数に当たるときは、焦点の外の同番号へ落とさず
+`{"available": false, "note": "同じ番号の主張が論文内に複数あるため特定できません", "reason": "ambiguous_claim_number"}`
+を返す（ルートは `build_element_context` の戻り値をそのまま返す。論文をまたぐ曖昧さ・不在は従来の汎用文）。
+
+**既存の教材**: 凍結済みのコースは素の番号のまま（読み手は従来どおり legacy_ids で解決し、曖昧なら上の事実文）。
+宛先を一意にするにはコース内容の再生成（freeze のやり直し）が要る。component の agent ID（`comp_001`）は
+component_assembly が論文ごとに一意に振り、legacy_ids は agent ID だけなので同じ問題は無い（変更なし）。
+
+**教材の ID 体系（IK-0550）**: document には `documents.id`（UUID・解析成果の正本）と `documents.source_path`
+（= `material_id`・アップロード時の ID。UUID に見えることがある）の2つがある。クライアントへ document を渡すキーは
+常に `document_id`（UUID）で、`material_id` はアップロード時の ID を名指すところにだけ残す（学習者のコース詳細の
+`sources[]` は `document_id` を併記 — `services.with_course_source_document_ids`）。受け付ける側の両形の突き合わせは
+単数なら `services._resolve_document`、複数なら `core.document_refs.resolve_document_refs` だけが行う
+（コース sources の document 解決・題名解決・コースビルダーの選択教材・R層スコープ・tension worker を移行。
+ガードレール `test_document_refs.py::test_both_forms_disambiguation_only_in_known_places` は既存6箇所を凍結した
+allowlist で、新しい突き合わせの直書きを拒む）。テストは `test_claim_address_resolution.py` / `test_document_refs.py`。

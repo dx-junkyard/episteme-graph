@@ -258,7 +258,9 @@ class LearningSource(BaseModel):
     subtitle: str = ""
     license: str = ""
     used_section: str = ""
-    material_id: str = ""  # アップロード教材と紐付ける場合
+    material_id: str = ""  # アップロード教材と紐付ける場合（documents.source_path = アップロード時の ID）
+    # documents.id（UUID）。クライアントへ document を渡すキーは常にこれ（IK-0550）。
+    document_id: str = ""
 
 
 class LearningReferencedSection(BaseModel):
