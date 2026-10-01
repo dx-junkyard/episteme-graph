@@ -39,6 +39,7 @@ __all__ = [
     "render_answer_text",
     "shape_dto",
     "split_closing_question",
+    "strip_preamble",
 ]
 
 #: 保存文で本文と前提の逆質問を区切る区切り（RS5。履歴の判定器と既存テストが依存する）。
@@ -98,6 +99,11 @@ def _strip_preamble(text: str) -> str:
                 changed = True
             break
     return rest.strip()
+
+
+def strip_preamble(text: str) -> str:
+    """先頭の同意・挨拶・前置きを剥がした核心（公開名。境界の規則は ``_strip_preamble`` と同じ）。"""
+    return _strip_preamble(text)
 
 
 def _norm_ws(text: str) -> str:

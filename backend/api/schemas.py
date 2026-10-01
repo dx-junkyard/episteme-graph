@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer
 
 # 画面文脈アダプター（assistant_screen_adapter_design.md §4.2 / §11.2）: 上限の正本は
 # core 側の定数（SA7: 予算はコード定数・env で緩めない）。leaf モジュールを直接 import
@@ -1319,7 +1319,9 @@ class ComponentGraphEdge(BaseModel):
     target_component_id: str
     relation: str = "RELATED_TO"
     edge_type: str = "explicit_connector"
-    confidence: float = 0.5
+    # 第 18 周（G3）: 教員向けの表示投影（DP7）は数値キーを落とす。既定値で 0.5 を埋め戻さない
+    # よう None 既定にし、None のときは応答からキーごと外す（下の serializer）。
+    confidence: float | None = None
     support_status: str = "design_inferred"
     # Same backing vocabulary as nodes (issue #311 criterion 6).
     source_backing_status: str = ""
@@ -1332,6 +1334,13 @@ class ComponentGraphEdge(BaseModel):
     # NarrativeAnnotator の edge_narratives と突合するための辺 ID（論文層が使う。
     # 旧 graph_json では空文字）。
     edge_id: str = ""
+
+    @model_serializer(mode="wrap")
+    def _drop_absent_confidence(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("confidence") is None:
+            data.pop("confidence", None)
+        return data
 
 
 class ComponentGraphResponse(BaseModel):

@@ -134,3 +134,7 @@ system に足す直後（`messages: list[dict] = [` の前）。保存文・痕�
   discuss / 楽屋でない往復は `assemble(..., stuck=True)` が本文の最初の段落の足場（3 文まで）だけを残し、問い返しを置かない。
   前提の逆質問はその往復には添えず次の往復へ回す（提示の記帳 `record_prerequisite_gate_presented` もしない）。tutor
   プロンプトにルール 6【詰まり】を 1 文。テストは `test_dialogue_shape_stuck.py`。
+- **第 18 周（ゲート後の詰まり・早期 return の骨格）**: 逆質問が出ている間の素の詰まり（「むずい」）は `_prerequisite_followup` が
+  「いいえ」と読まず `after_gate` に倒し、通常の RAG + `assemble(stuck=True)` で足場 1 つ。逆質問は詰まりの往復を飛ばして保留
+  （`_previous_turn_was_prerequisite_gate`）。「はい、…」＋中身は `ack_content`（肯定を記帳し中身に RAG で答える）。
+  学習相談・前提説明の早期 return も `_shape_advice_answer` で骨格に通す（学習相談は見出しなし・5 文以内）。テストは `test_wave18_gate_stuck_advice.py`。

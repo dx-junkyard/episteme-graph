@@ -229,6 +229,7 @@ from core.dialogue_shape import (
     previous_correction_fact,
     render_answer_text,
     shape_dto,
+    strip_preamble,
 )
 # コーパス回遊 Phase B（docs/features/corpus_roaming_design.md §5.1）: コース無し論文議論の
 # 会話コンテキスト・センチネル。**"_doc:" の組み立て・判定はこの正本関数以外に書かない**。
@@ -1572,6 +1573,7 @@ def _generate_learning_advice_response(
     on_llm_call: Callable[[], None] | None = None,
     source_context: str | None = None,
     explain_prerequisite: str | None = None,
+    topic_source_context: str | None = None,
 ) -> str:
     """学習相談・メタ質問・学習開始への応答を生成する（ルート②: ナビゲーター）。
 
@@ -1663,6 +1665,7 @@ def _generate_learning_advice_response(
             "1. 【ひとことで】何をする考え方・方法なのかを1〜2文で述べる。\n"
             "2. 【しくみ】考え方の要点を具体的に説明する（必要なら数式を $...$ で示してよい）。\n"
             f"3. 【このトピックとのつながり】「{topic_title}」でこの前提がどう使われるかを1〜2文で述べる。\n\n"
+            f"※注意: 「{topic_title}」は学生がいま開いているトピックです。「次のトピック」と呼ばないこと。\n"
             "※注意: 学生のメッセージに具体的な問いが含まれていれば、それに必ず答えること。\n"
             "※注意: 学生のメッセージが「まだ」「わからない」のような短い返事だけなら、それは前提を"
             "まだ理解していないという返事です。問い返さず、上の構成で前提そのものを最初から説明すること。"
@@ -1681,20 +1684,37 @@ def _generate_learning_advice_response(
             logger.warning("Prerequisite explanation LLM call failed, returning fallback")
             return f"「{explain_target}」の説明を生成できませんでした。"
 
+    # 第 18 周（G2）: 学習相談（「どこから読めばいい？」）は固定構成の見出し（旧【歓迎と目標】
+    # 【構成要素】…）をやめ、表示中のトピック自身の構造（題名・主要概念・章の次のトピック）から
+    # 短い平文（5文以内・見出しなし・数値なし）で答える。表示中の教材の出典の抜粋が渡されたときは
+    # 教材に触れた箇所に [出典N] を添えさせる（出典チップは本文が引用したものだけ = IK-0494）。
+    next_topic = _advice_next_topic(topic_info, course_data)
+    next_block = f"■ 章の次のトピック: {next_topic}\n\n" if next_topic else ""
+    topic_source_block = ""
+    if topic_source_context and _CITATION_MARKER_RE.search(topic_source_context):
+        topic_source_block = (
+            f"{topic_source_context}\n\n"
+            "■ 上の出典の扱い: 表示中の教材に触れたところには、付された番号付き出典マーカー"
+            " `[出典N]` を本文に自然に挿入すること（番号は提示されたものに対応させ、独自の番号は"
+            "使わないこと）。\n\n"
+        )
     prompt = (
-        f"あなたは「{course_title}」の学習をサポートするナビゲーター教授です。\n"
+        f"あなたは「{course_title}」の学習をサポートする教授です。\n"
         f"学生は現在「{topic_title}」のトピックを学習しています。\n\n"
         f"{persona_block}"
         f"{topics_block}"
         f"{concepts_block}"
         f"{prereqs_block}"
+        f"{next_block}"
         f"{source_block}"
+        f"{topic_source_block}"
         f"学生からのメッセージ: {message}\n\n"
-        "コース全体の構造と学生の現在位置を踏まえ、以下の構成で回答してください:\n"
-        "1. 【歓迎と目標】このトピックで学ぶことの全体像と、最終的な学習目標を簡潔に説明する。\n"
-        "2. 【構成要素】習得すべき主要な概念をリストアップする。\n"
-        "3. 【前提知識の確認】このトピックを学ぶために必要な前提知識を提示する。\n"
-        "4. 【次の一歩】最後に、学生がこの後どう進めばよいかを1〜2文で促す。\n\n"
+        "上の材料（現在のトピックの題名・主要概念・章の次のトピック・表示中の教材の出典）だけを使って、"
+        "学生のメッセージに直接答えてください。\n"
+        "  - 5文以内の平易な文章で書くこと。見出し・【】で囲んだ区切り・箇条書き・番号付きリストは使わないこと。\n"
+        "  - 件数・割合・時間などの数値は書かないこと。\n"
+        "  - 歓迎の挨拶や学習目標の前置きは書かず、まず答えから書くこと。\n"
+        "  - 問い返しは書かないこと。\n"
         "※注意: ここでは具体的な解説（数式展開など）はまだ行わないこと。\n"
         "※注意: 選択肢ボタンはシステムが自動付与するので、本文に [ ] 形式のボタン記法は書かないこと。"
     )
@@ -1710,13 +1730,53 @@ def _generate_learning_advice_response(
         )
     except Exception:
         logger.warning("Learning advice response LLM call failed, returning fallback")
-        return (
-            f"「{course_title}」の学習サポートへようこそ！\n\n"
-            f"これから「{topic_title}」の学習を始めます。\n\n"
-            + (f"**習得すべき主要概念:** {', '.join(concepts)}\n\n" if concepts else "")
-            + (f"**必要な前提知識:** {', '.join(prerequisites)}\n\n" if prerequisites else "")
-            + "下の選択肢から、前提知識の確認に進むか、最初の概念の説明に進むかを選んでください。"
-        )
+        # 決定論の短い平文（見出し・数値・挨拶なし）。
+        parts = [f"「{course_title}」の「{topic_title}」は、表示中の教材を最初から読むところから始められます。"]
+        if concepts:
+            parts.append(f"このトピックでは{'、'.join(concepts[:3])}を中心に扱います。")
+        if next_topic:
+            parts.append(f"読み終えたら、章の次のトピック「{next_topic}」へ進めます。")
+        return "".join(parts)
+
+
+def _advice_next_topic(topic_info: dict | None, course_data: dict | None) -> str:
+    """表示中のトピックの章で次に来るトピックの題名（無ければ空文字。決定論）。"""
+    if not isinstance(topic_info, dict):
+        return ""
+    topics = _advice_topics(topic_info, course_data, limit=10**6)
+    current = str(topic_info.get("id") or "")
+    for i, t in enumerate(topics):
+        if str(t.get("id") or "") == current:
+            if i + 1 < len(topics):
+                return str(topics[i + 1].get("title") or "").strip()
+            return ""
+    return ""
+
+
+#: 学習相談の平文に残す文数の上限（第 18 周 G2）。
+_ADVICE_MAX_SENTENCES = 5
+_ADVICE_HEADING_RE = re.compile(r"^\s*(?:#{1,6}\s+|\d+[.)．]\s*)?【[^】\n]{1,20}】\s*|^\s*#{1,6}\s+", re.MULTILINE)
+
+
+def _shape_advice_answer(answer: str, message: str, *, plain: bool) -> str:
+    """学習相談・前提説明の早期 return を応答の骨格に通す（IK-0586 の残り）。
+
+    ``assemble`` で答え先頭・問い返し 1 つまで（stuck は早期 return に来ない）。``plain`` の
+    学習相談は見出し・【】の区切りを外し、5文に切り詰める（数式・コードを含む段落は切らない）。
+    """
+    text = str(answer or "")
+    if plain:
+        text = _ADVICE_HEADING_RE.sub("", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        if "$" not in text and "```" not in text:
+            sentences = [m.group(0) for m in re.finditer(r"[^。！？!?]+(?:[。！？!?]+|$)", text)]
+            sentences = [x for x in sentences if x.strip()]
+            if len(sentences) > _ADVICE_MAX_SENTENCES:
+                text = "".join(sentences[:_ADVICE_MAX_SENTENCES]).strip()
+    shape = assemble_response_shape(
+        answer=text, learner_message=message, is_discuss=False, gate_text=None, degraded=False,
+    )
+    return render_answer_text(shape)
 
 
 # ---------------------------------------------------------------------------
@@ -2107,16 +2167,65 @@ def _previous_turn_was_prerequisite_gate(history: list[dict] | None, topic_title
     """直前の assistant ターンがこのトピックの逆質問なら、その逆質問が挙げた最初の前提名を返す。
 
     該当しなければ None。前提名が読めない逆質問は空文字を返す（「逆質問だった」事実は残す）。
+
+    第 18 周（詰まりの区画）: 逆質問の後に学習者が「むずい」「わからない」とだけ返した往復
+    （足場 1 つの応答）は飛ばして、その前の逆質問をまだ答えを待っている逆質問として読む
+    （詰まりは逆質問への答えではない。逆質問は次の中身のある往復まで保留にする）。
     """
-    for turn in reversed(history or []):
-        if not isinstance(turn, dict) or turn.get("role") != "assistant":
+    turns = [t for t in (history or []) if isinstance(t, dict)]
+    index = len(turns) - 1
+    while index >= 0:
+        turn = turns[index]
+        if turn.get("role") != "assistant":
+            index -= 1
             continue
         content = str(turn.get("content") or "")
         if PREREQUISITE_GATE_MARKER in content and f"「{topic_title}」" in content:
             match = _PREREQUISITE_GATE_FIRST_RE.search(content)
             return match.group(1).strip() if match else ""
+        # 直前の学習者発話が詰まりだけなら、この往復を飛ばして前の assistant ターンを見る。
+        user_index = next(
+            (i for i in range(index - 1, -1, -1) if turns[i].get("role") == "user"), None
+        )
+        if user_index is not None and is_stuck_reply(str(turns[user_index].get("content") or "")):
+            index = user_index - 1
+            continue
         return None
     return None
+
+
+#: G4: 逆質問への肯定の返事として読む先頭の語（services の肯定の返事 + 了解の語）。
+_ACK_CONTENT_LEADS = ("はい", "ええ", "うん", "わかりました", "分かりました", "了解", "yes", "yeah", "yep", "ok", "okay", "sure")
+#: G4: 肯定の後に続いても「前提を説明してほしい」と読む明示の語（「とは」は「ことは」に当たるので含めない）。
+_ACK_CONTENT_EXPLAIN_MARKERS = (
+    "教えて", "説明して", "わからない", "分からない", "わかりません", "分かりません",
+    "知らない", "知りません",
+)
+_ACK_CONTENT_CONTRAST = ("でも", "けど", "だけど", "ただ", "しかし", "but ")
+_ACK_LEAD_SEP = "、,，。.!！ 　…~〜\n\t"
+
+
+def _affirmative_lead_content(message: str) -> str:
+    """肯定の返事で始まり中身が続く発話なら、前置きを剥がした中身を返す（無ければ空文字）。
+
+    決定論・非LLM。前置きの境界は ``core.dialogue_shape.strip_preamble`` の規則（語の後ろに
+    区切りか文末）。中身が逆接（「でも」「けど」…）で始まるときは肯定とみなさず空文字。
+    """
+    raw = str(message or "").strip()
+    lowered = raw.casefold()
+    lead = next(
+        (
+            w for w in _ACK_CONTENT_LEADS
+            if lowered.startswith(w) and (len(raw) == len(w) or raw[len(w)] in _ACK_LEAD_SEP)
+        ),
+        None,
+    )
+    if lead is None:
+        return ""
+    core = strip_preamble(raw)
+    if not core or core.casefold().startswith(_ACK_CONTENT_CONTRAST):
+        return ""
+    return core
 
 
 def _prerequisite_followup(
@@ -2134,6 +2243,8 @@ def _prerequisite_followup(
         ``kind`` は ``"explain"``（前提そのものの説明へ = 3段解決）/ ``"after_gate"``
         （直前が逆質問だった。逆質問を繰り返さない）/ ``"gated_before"``（このトピックの
         逆質問が履歴のもっと前にある。出し直さず、事実文1行を添えて答える = IK-0422）/
+        ``"ack_content"``（直前の逆質問に肯定で答え、中身の問いが続いた。肯定を記帳し、
+        中身に通常の RAG で答える = 第 18 周 G4。``target`` は前置きを剥がした中身）/
         ``None``（従来どおり）。
         ``target`` は説明する前提の名前（``"explain"`` のときだけ）。
     """
@@ -2151,8 +2262,22 @@ def _prerequisite_followup(
     )
     teach = any(m in msg for m in _PREREQ_TEACH_MARKERS) or bool(_PREREQ_TEACH_EN_RE.search(lowered))
     if gate_first is not None:
+        # 第 18 周（詰まりの区画）: 「むずい」「わからない」とだけの返事は逆質問への「いいえ」
+        # ではなく詰まり。前提の説明へ流さず、いまの問いへの足場 1 つで答える（逆質問は保留）。
+        # 「いいえ」「わからないので説明して」のように明示した答えは従来どおり explain。
+        if is_stuck_reply(msg):
+            return "after_gate", None
         if acknowledged or _is_bare_yes(msg):
             return "after_gate", None
+        # 第 18 周（G4）: 「はい、そうですね、分かりました。<中身>」のように肯定の返事で始まり
+        # 中身が続く発話は、逆質問への「はい」＋中身の問い。逆質問の答えとして丸ごと消費せず
+        # （前提の説明へ流さない）、肯定を記帳したうえで中身に通常の RAG で答える。
+        # 「はい、でも説明して」のように前提の説明を明示的に求める中身は従来どおり explain。
+        core = _affirmative_lead_content(msg)
+        if core and not (
+            any(m in core for m in _ACK_CONTENT_EXPLAIN_MARKERS) and (mentioned or overlap)
+        ):
+            return "ack_content", core
         if negative or teach or mentioned or overlap:
             return "explain", mentioned or overlap or gate_first or names[0]
         return "after_gate", None
@@ -2190,6 +2315,7 @@ def _get_integrated_tutor_system_prompt(domain: str, response_persona: str | Non
    ただし、クリック可能なボタンとして提示したい場合は必ず `[ACTION_BUTTON: 〇〇について聞く]` の形式を使ってください。
    英語で回答するときは、この目印を `[Ask more about X]` の形式で書いてください。
 6. 【詰まり】学生が「わからない」「むずかしい」とだけ返したときは、全体を要約し直さず、最初の一歩になる足場を1つだけ（3文以内）示してください。問い返しはしないでください。
+7. 【確からしさ】自分の確からしさを数値・割合・点数で示さない（「論文に明記 / 論文から推定 / 一般知識」の3段の言葉で示す）。
 
 **フォーマット要件:**
 - 数式は必ず LaTeX 記法で記述（インラインは $...$、ディスプレイは $$...$$）
@@ -2233,7 +2359,8 @@ def _get_casual_teacher_system_prompt(
         _format_rule = """5. 【書き方】数式が要るところは LaTeX（インラインは $...$、ディスプレイは $$...$$）で
    そのまま書いてかまいません。教材のコンテキストに番号付き出典（`[出典1]` …）があれば、
    言及したところに自然に添えてください（無い場合は出典マーカーを書かないこと）。
-   `[ACTION_BUTTON: ...]` などのシステム記法は出力しないでください。"""
+   `[ACTION_BUTTON: ...]` などのシステム記法は出力しないでください。
+   自分の確からしさを数値・割合・点数で示さない（「論文に明記 / 論文から推定 / 一般知識」の3段の言葉で示す）。"""
     return f"""あなたは{domain_label}が大好きで、学生と雑談するのが楽しみな「気軽に話せる先生」です。
 研究室の廊下やゼミ後の立ち話のように、教材で扱っている題材について肩の力を抜いて一緒に面白がってください。
 
@@ -3937,6 +4064,39 @@ def _topic_source_rows(
     if focus is not None:
         rows = prefer_focus(rows, focus, drop_off_focus=False)
     return rows[:_TOPIC_SOURCE_CHUNK_MAX]
+
+
+def _advice_topic_source_context(
+    topic_info: dict,
+    course_data: dict,
+    numbers: "_SessionCitationNumbers",
+    *,
+    user_id: str,
+    scope_document_ids,
+) -> tuple[list[dict], str | None]:
+    """学習相談に渡す表示中の教材の出典（第 18 周 G2）。``(出典リスト, 番号付き抜粋)``。
+
+    可視性は ``get_chunks_for_prompt`` が SQL 内で強制する（``_topic_source_rows``）。
+    失敗は ``([], None)``（学習相談そのものは止めない）。
+    """
+    try:
+        allowed = scope_document_ids if scope_document_ids is not None else list_visible_document_ids(user_id)
+        material_ids = set(course_source_material_ids(course_data))
+        sources: list[dict] = []
+        chunks: list[str] = []
+        for r in _topic_source_rows(topic_info, allowed_document_ids=allowed):
+            source = _adopted_source_entry(numbers, r, material_ids)
+            sources.append(source)
+            chunks.append(
+                f"[出典{source['index']}] 『{r['source_title']}』（表示中の教材の出典）\n"
+                f"{sanitize_source_text_for_prompt(r['text'])[:_TOPIC_SOURCE_CHUNK_MAX_CHARS]}"
+            )
+        if not chunks:
+            return [], None
+        return sources, "## 表示中の教材の出典\n" + "\n\n".join(chunks)
+    except Exception:  # noqa: BLE001
+        logger.debug("advice topic sources failed", exc_info=True)
+        return [], None
 
 
 def _formula_fact_suffix(row: dict, sink: list[str]) -> str:
@@ -5746,7 +5906,7 @@ def _learning_chat_core(
         _prereq_followup, _prereq_target = _prerequisite_followup(
             body.message, body.history, topic_info, topic_title, course_data,
         )
-        if _prereq_followup == "explain" and _route_for_typed_action(body.support_action):
+        if _prereq_followup in ("explain", "ack_content") and _route_for_typed_action(body.support_action):
             # 明示の typed action が勝つ（逆質問の繰り返しだけは after_gate として抑える）。
             _prereq_followup, _prereq_target = "after_gate", None
     # IK-0396: 逆質問に「理解している」と答えた往復は、記帳（check_prerequisites 側）のうえで
@@ -5760,9 +5920,12 @@ def _learning_chat_core(
         _is_explicit_prerequisite_acknowledgement(body.message) or _prereq_bare_yes
     ):
         _prereq_resume_question = _question_before_prerequisite_gate(body.history, topic_title)
+    # 第 18 周（G4）: 逆質問への「はい、…」に中身が続いた往復。答えるのは前置きを剥がした中身
+    # （肯定の記帳は下の check_prerequisites に定型の答えを渡して行う = 素の「はい」と同じ）。
+    _prereq_ack_content = _prereq_target if _prereq_followup == "ack_content" else None
     # この往復で答える問い（検索・生成・教材の関わり・痕跡の本文）。保存する学習者発話は
     # body.message のまま（本人が打った文を書き換えない）。
-    _turn_question = _prereq_resume_question or body.message
+    _turn_question = _prereq_resume_question or _prereq_ack_content or body.message
     # IK-0424: 「Yes, I understand. … which part …?」のように、理解の答えに新しい問いを続けた
     # 往復では、元の質問だけに差し替えず新しい問いも併せて答える（新しい問いを落とさない）。
     if _prereq_resume_question and not _prereq_bare_yes and _is_question_shaped(body.message):
@@ -5795,8 +5958,17 @@ def _learning_chat_core(
         )
     if _prereq_followup == "explain":
         _prejudged = "LEARNING_ADVICE"  # IK-0383: 前提そのものの説明（上の判定）
-    if _prereq_resume_question:
-        _prejudged = "DOMAIN_RAG"  # IK-0396: 元の質問に答える（分類の LLM を追加しない）
+    if _prereq_resume_question or _prereq_ack_content:
+        _prejudged = "DOMAIN_RAG"  # IK-0396 / G4: 問いに答える（分類の LLM を追加しない）
+    # 第 18 周（詰まりの区画）: 「むずい」「わからない」とだけの往復は、学習相談・前提の説明へ
+    # 分類させず通常の RAG 回答へ流す（足場 1 つは下流の骨格 assemble(stuck=True) が作る）。
+    # 検索は内容語の無い発話なので直前の問いを借りる（_retrieval_query_for_turn）。
+    if (
+        is_stuck_reply(body.message)
+        and not (_is_casual or _is_discuss or _atlas_ctx or _is_backstage)
+        and _prereq_followup != "explain"
+    ):
+        _prejudged = "DOMAIN_RAG"
     # 明示 casual（音声ループ等が intent_mode="casual" を送った往復）と、CHIT_CHAT 判定から
     # 合流する推定 casual_light を後段で区別するため、再代入より前の値を控える（LC6）。
     _explicit_casual = _is_casual
@@ -5872,6 +6044,17 @@ def _learning_chat_core(
                     ).get("document_id"),
                 ).document_ids,
             )
+        # 第 18 周（G2）: 学習相談の一般アドバイスにも表示中の教材の出典チャンクを番号付きで渡し、
+        # 教材に触れた箇所の出典チップを本文の引用どおりに出す（可視性は get_chunks_for_prompt が
+        # SQL 内で強制。前提の説明は前提の資料を引くので対象外）。
+        _advice_topic_sources, _advice_topic_context = (
+            _advice_topic_source_context(
+                topic_info, course_data, _citation_numbers,
+                user_id=current_user["id"], scope_document_ids=scope_document_ids,
+            )
+            if not is_prereq and topic_info
+            else ([], None)
+        )
         with usage_context("learning:chat", user_id=current_user["id"], course_id=course_id):
             advice_answer = _generate_learning_advice_response(
                 course_title, topic_title, body.message,
@@ -5879,8 +6062,12 @@ def _learning_chat_core(
                 on_llm_call=_consume_quota,
                 source_context=(prereq_context or {}).get("context_block"),
                 explain_prerequisite=_explain_target,
+                topic_source_context=_advice_topic_context,
             )
         advice_answer, inline_actions = extract_inline_actions(advice_answer)
+        # IK-0586 の残り: 早期 return も応答の骨格に通す（答え先頭・問い返し 1 つまで）。
+        # 学習相談は見出しを外した短い平文にする（G2）。
+        advice_answer = _shape_advice_answer(advice_answer, body.message, plain=not is_prereq)
         if is_prereq and prereq_context is not None:
             # IK-0430: 根拠の無い [出典N]（番号付き出典の無い抜粋への捏造）を本文から除く。
             advice_answer = _reconcile_citation_markers(
@@ -5904,6 +6091,10 @@ def _learning_chat_core(
             )
             _prereq_grounding = prereq_context["content_grounding"]
             _prereq_tier = prereq_context["overall_tier"]
+            # 第 18 周（G4・原則8）: 本文が何も引用せず見せる出典も無い説明に「教材に基づく」を
+            # 付けない（出所の帯と出典チップを食い違わせない）。
+            if not _prereq_sources and _prereq_grounding in ("course_material", "other_material"):
+                _prereq_grounding = "model_generated"
             persist_chat_history(
                 current_user["id"], course_id, topic_id,
                 body.history, body.message, result.answer,
@@ -5922,15 +6113,50 @@ def _learning_chat_core(
                 content_grounding=_prereq_grounding,
             )
         # 学習開始・一般アドバイスはパス上（detour ではない）。前進アクションを型付きで提示。
+        # 第 18 周（G2）: 本文が表示中の教材の出典を引用していれば course_material + その出典
+        # チップ、引用していなければ model_generated（出所を空欄にしない = 原則8）。
+        advice_answer = _reconcile_citation_markers(
+            advice_answer, {s["index"] for s in _advice_topic_sources}
+        )
+        _advice_cited = _sources_cited_in_answer(advice_answer, _advice_topic_sources)
+        _advice_grounding = (
+            "course_material"
+            if any(s.get("origin") == "course_material" for s in _advice_cited)
+            else ("other_material" if _advice_cited else "model_generated")
+        )
+        _advice_sources = _displayed_sources_for(advice_answer, _advice_topic_sources, _advice_grounding)
+        _advice_tier = (
+            aggregate_overall_tier([s["tier"] for s in _advice_sources]) if _advice_sources else None
+        )
         persist_chat_history(
             current_user["id"], course_id, topic_id,
             body.history, body.message, advice_answer,
-            assistant_meta={"content_grounding": "model_generated"},
+            assistant_meta=(
+                {
+                    "sources": _history_source_meta(_advice_sources),
+                    "overall_tier": _advice_tier,
+                    "content_grounding": _advice_grounding,
+                    CITATION_MAP_KEY: _citation_numbers.mapping(),
+                }
+                if _advice_sources
+                else {"content_grounding": "model_generated"}
+            ),
         )
         # 第 17 周（C-seq10）: ボタンの行き先は表示中トピックの最初の概念（無ければコース全体）。
         _advice_concept_list = _advice_concepts(topic_info, course_data)
         first_concept = _advice_concept_list[0] if _advice_concept_list else ""
         advice_next = support_agent.advice_actions(support_origin, topic_title, first_concept)
+        if _advice_sources:
+            # 表示中の教材の出典を本文が引用した（第 18 周 G2）。
+            return LearningChatResponse(
+                answer=advice_answer,
+                course_update=None,
+                origin=asdict(support_origin),
+                next_actions=[asdict(a) for a in (advice_next + inline_actions)],
+                sources=_advice_sources,
+                overall_tier=_advice_tier,
+                content_grounding=_advice_grounding,
+            )
         return LearningChatResponse(
             answer=advice_answer,
             course_update=None,
@@ -5947,7 +6173,7 @@ def _learning_chat_core(
         current_user["id"], course_id, course_data, topic_title,
         # IK-0424: 逆質問の直後の素の「はい / yes」は、逆質問への明示的な答えとして記帳させる
         # （check_prerequisites の記帳判定が読む定型の答えに置き換えて渡す。保存する発話は不変）。
-        "はい、理解しています" if _prereq_bare_yes else body.message,
+        "はい、理解しています" if (_prereq_bare_yes or _prereq_ack_content) else body.message,
     )
     # IK-0383: 楽屋は前提ゲートを通さない（楽屋の問いを逆質問に吸い込ませない）。直前が逆質問
     # だった往復でも同じ逆質問を繰り返さない。check_prerequisites は呼んだまま（「理解している」の
@@ -5974,7 +6200,7 @@ def _learning_chat_core(
             body.history, body.message, _ack_answer,
         )
         return LearningChatResponse(answer=_ack_answer, course_update=None, support_mode="normal")
-    if _is_backstage or _prereq_followup in ("after_gate", "gated_before") or body.replace_message_id:
+    if _is_backstage or _prereq_followup in ("after_gate", "gated_before", "ack_content") or body.replace_message_id:
         prerequisite_intervention = None
     # 応答の骨格（詰まりの区画, 第 17 周）: 「わからない」とだけ返した往復は足場 1 つで答え、
     # 前提の逆質問はこの往復には添えず次の往復へ回す（提示の記帳もしない = 1 回だけの規則を保つ）。
