@@ -78,10 +78,11 @@ class TestSingleFilteredSearchFeedsCitedSources:
 
     def test_cited_sources_appended_exactly_once_from_chunk_results_loop(self):
         body = self._learning_chat_body()
-        # cited_sources へ書き込むのは2箇所だけ: ①検索結果のループ ②直前の回答が引用した
-        # チャンクを戻すループ（IK-0475）。②は検索ではなく id 指定の読み出しで、当該往復の
-        # allowed_document_ids をそのまま渡す（範囲を広げない = DM1/DM2）。
-        assert body.count("cited_sources.append(") == 2
+        # cited_sources へ書き込むのは3箇所だけ: ①検索結果のループ ②直前の回答が引用した
+        # チャンクを戻すループ（IK-0475）③表示中の教材の出典チャンク（第 17 周 A1）。
+        # ②③は検索ではなく id 指定の読み出しで、当該往復の allowed_document_ids を
+        # そのまま渡す（範囲を広げない = DM1/DM2）。
+        assert body.count("cited_sources.append(") == 3
         # 1つ目が `for r in chunk_results:` ループの内側にあること。
         loop_start = body.index("for r in chunk_results:")
         append_idx = body.index("cited_sources.append(")
@@ -101,6 +102,13 @@ class TestSingleFilteredSearchFeedsCitedSources:
         loop_idx = body.index("for r in _carried:")
         assert append_idx < loop_idx < second_idx
         assert "_previous_cited_rows" in body[append_idx:loop_idx]
+        # 3つ目は _topic_source_rows（topic.material_chunk_ids の id 指定読み出し）だけを回す。
+        third_idx = body.index("cited_sources.append(", second_idx + 1)
+        topic_idx = body.index("for r in _topic_source_rows(")
+        assert second_idx < topic_idx < third_idx
+        topic_call = body[topic_idx:third_idx]
+        assert "allowed_document_ids=allowed_document_ids" in topic_call
+        assert "list_visible_document_ids" not in topic_call
 
     def test_no_second_search_or_scope_widening_after_initial_call(self):
         """最初の（唯一の）検索呼び出しより後ろに、2回目の検索呼び出しや

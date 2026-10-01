@@ -148,7 +148,9 @@ LLM の追加コールは無い（②相当の検索1回 = 通常の RAG ター�
    分野レベルの不在は言わない）をサーバ側で添える。
 
 `LEARNING_ADVICE` のどの分岐でも `content_grounding` を `None` にしない（原則8）。
-学習相談の一般アドバイスは `model_generated`。教員側には G層ルール
+学習相談の一般アドバイスは `model_generated`。一般アドバイスに並べる主要概念・トピック一覧・
+「〜の説明に進む」ボタンは表示中トピック（`topic.key_concepts`・現在の章）に寄せ、トピックに概念が無いときだけ
+コース全体の `concepts` へ落とす（第 17 周 C-seq10。`_advice_concepts` / `_advice_topics`）。教員側には G層ルール
 `course.prerequisite_uncovered`（recommended・道案内のみ）が対応する。
 
 ### ② ベクトル検索（`services.py::search_chunks_with_metadata`）
@@ -587,6 +589,16 @@ explore）」の 3 軸を 1 つの enum に畳んでいました。入口統合 
 ---
 
 - 引用ゼロ × 表示中教材が問いに無関係なら model_generated（第 14 周の裁定。採用した出典があっても本文が1つも引用しなければ資料に基づく回答とは名乗らない）。
+
+- **表示中の教材の出典も番号付き出典にする**（第 17 周 A1・2026-10-01）: `[現在表示中の教材]` の直後に、そのトピックの
+  `material_chunk_ids`（→ `linked_chunk_ids`、正本 `core.course_data.topic_material_chunk_ids`）を `get_chunks_for_prompt`
+  （`allowed_document_ids` を SQL 内で強制）で最大3件読み、焦点の論文を先に並べ（`prefer_focus`）、検索・持ち越しと重ねずに
+  `_adopted_source_entry` で `[出典N]（表示中の教材の出典）` として登録する（`_topic_source_rows`）。検索が何も採用しない往復でも
+  出典チップが出て往復を始められる。番号は会話の採番器（IK-0432/0444）のまま。elicit では登録しない。本文が引用しなければ上の規則どおり。
+  答え方を指すメタ語（一言・根拠・要約・短く・つまり・どこ 等）は `_GROUNDING_GENERIC_TERMS` に入れ、出所がターンごとに反転しない。
+- **式の事実をチャットにも渡す**（IK-0577・SA層 4-c の一部）: 出典ポップアップが描く印字番号と AI復元の印を、チャンクごと
+  （`formula_facts`・`services` が `core.formula_facts.formula_fact_line` で作る）と表示中の教材（本文が参照する式）に1行で添え、
+  復元式があるときだけ system に `RECONSTRUCTED_FORMULA_INSTRUCTION`（復元式を原文の式として断定しない）を足す。LLM 回数は不変。
 
 ### 4.x 出典の並びと採用の絞り込み（第 15 波 = ペルソナ通し受講 第 14 周 c-astro-structure-30 の是正・2026-09-30。課題ナレッジ IK-0512〜0514）
 

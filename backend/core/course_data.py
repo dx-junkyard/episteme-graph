@@ -367,6 +367,40 @@ def topic_unit_keys(topic: dict | None) -> list[str]:
     return list(dict.fromkeys(str(u["stable_key"]).strip() for u in topic_units(topic)))
 
 
+def topic_material_chunk_ids(topic: dict | None) -> list[str]:
+    """トピック教材の出典チャンク id（``material_chunk_ids`` → ``linked_chunk_ids``）。
+
+    順序保持・重複除去・空と非文字列は落とす。学習チャットが表示中の教材の出典を
+    番号付き出典として登録するときの入力（IK-0577 / 第 17 周）。可視性はここでは
+    判定しない（読み出し側が ``allowed_document_ids`` で強制する）。
+    """
+    if not isinstance(topic, dict):
+        return []
+    out: list[str] = []
+    for key in ("material_chunk_ids", "linked_chunk_ids"):
+        values = topic.get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            cid = str(value or "").strip() if isinstance(value, (str, int)) else ""
+            if cid and cid not in out:
+                out.append(cid)
+    return out
+
+
+def topic_key_concepts(topic: dict | None) -> list[str]:
+    """``topic.key_concepts`` を名前の列で返す（記号様の名前は落とす・順序保持・重複除去）。"""
+    if not isinstance(topic, dict):
+        return []
+    out: list[str] = []
+    for item in topic.get("key_concepts") or []:
+        name = item.get("name") if isinstance(item, dict) else item
+        name = str(name or "").strip()
+        if name and not is_symbol_concept_name(name) and name not in out:
+            out.append(name)
+    return out
+
+
 def learner_topic_units_projection(topic: dict | None) -> list[dict]:
     """学習者向け DTO 用の ``topic.units`` 射影（``kind`` / ``label`` だけ）。
 
