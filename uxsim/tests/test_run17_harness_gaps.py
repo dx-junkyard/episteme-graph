@@ -232,6 +232,9 @@ def _door_handler(state):
             return httpx.Response(200, json={"access_token": "tok", "token_type": "bearer"})
         if path == "/api/learning/courses":
             return httpx.Response(200, json=[{"id": "c1", "title": "受講中", "is_enrollable": False}])
+        if path == "/api/learning/courses/c1":
+            # 種まき経路の前に runner がコースを開く（第 18 周: 種まきにもコースの文脈を用意する）
+            return httpx.Response(200, json={"id": "c1", "title": "受講中", "topics": []})
         if path == "/api/learning/courses/c1/cycle/intention":
             body = json.loads(request.content)
             state[body.get("role")] = {"text": body.get("text")}
@@ -288,4 +291,5 @@ def test_unmet_precondition_with_seed_runs_seed_then_scenario(tmp_path):
     assert any(n.startswith("seeded_precondition:") for s in steps for n in s.runner_notes)
     # 確かめる（不足）→ 種まき → 確かめる（満たす）→ 経路本体の扉
     assert state["door_gets"] == 3
+    assert meta.seeded_precondition and meta.seeded_precondition[0]["satisfied"] is True
     assert [s.scenario_id for s in steps if s.action_id == "learning.cycle.return_door"][-1] == "s-return"

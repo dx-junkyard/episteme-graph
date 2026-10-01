@@ -42,7 +42,13 @@ runner は経路を始める前に `check` 付きの前提を学習者の GET（
 その GET を `runner_driven:` の transcript 行に残します。満たされていなければ、
 
 1. `seed_scenarios` があればそれを同じペルソナ・同じセッションで先に歩き（最初の行に `seeded_precondition:`）、
-   もう一度確かめる。
+   もう一度確かめる。種まきの前に runner は通常の経路と同じコースの文脈を用意する（受講していなければ
+   `learning.course.enroll` → `learning.course.open`。`runner_driven:` の transcript 行・第 18 周 st-07 は
+   これが無く、受講可能なだけのコースを開いて 404 → 以降が `course_id` 無しで空振りした）。種まき中のペルソナの
+   目標には「議論を終える前に（部品）を必ず残してから終える」を足し、ペルソナが途中でやめても（persona_stop /
+   goal_reached / blocked）まだ歩いていない部品を残す手順（`learning.cycle.intention` の role=leave_note /
+   carryover_question、last_tension は `learning.tension.confirm`）へ進める（`seed_landing:`）。記録は
+   `meta.json` の `seeded_precondition`（bootstrap・止まり方・着地した部品・満たされたか）。
 2. 種まき経路が無い、または歩いても足りなければ、経路を**歩かずに飛ばし**、`meta.json` の `blocked_precondition`
    と notes（`blocked_precondition:`）・runner_note に残す。空のセッションを歩くと「扉・持ち越しが空」を製品の欠陥と
    読む偽所見になる（第 17 周 st-07）。

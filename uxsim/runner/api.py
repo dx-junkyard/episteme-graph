@@ -31,8 +31,8 @@ from uxsim.persona.agent import PersonaAgent, StepDecision
 from uxsim.persona.compose import PersonaSpec, compose_persona, course_brief
 from uxsim.runner.actions_exec import PINNED_MISMATCH_MARK, execute, prefetch_courses, runner_note
 from uxsim.runner.client import EpistemeClient
-from uxsim.runner.scenario import (SKIP_ACTION_ID, Scenario, ScenarioParams, StepSpec, evaluate_until, load_params,
-                                   load_scenario)
+from uxsim.runner.scenario import (SKIP_ACTION_ID, Option, Scenario, ScenarioParams, StepSpec, evaluate_until,
+                                   load_params, load_scenario)
 from uxsim.runner.state import PersonaSession, persona_uses_voice, project_observation
 from uxsim.schema import RunMeta, ThinkAloud, TranscriptStep, now_iso
 
@@ -182,14 +182,49 @@ class _UntilMet(Exception):
 
 RUNNER_DRIVEN_ACTIONS = ("auth.login",)  # runner がセッション開始時に行うので経路の中では飛ばす
 
+# 前提の部品（scenario.RETURN_DOOR_PARTS）→ それを残す経路の手順の見分け方（第 18 周）。
+# 種まき経路をペルソナが途中で終えても、部品を残す手順（議論の着地の「書き置き」「持ち越す問い」）には進める
+SEED_PART_ROLES = {"leave_note": "leave_note", "carryover": "carryover_question"}
+SEED_PART_ACTIONS = {"last_tension": "learning.tension.confirm"}
+SEED_PART_LABELS = {"leave_note": "次の自分への書き置き", "carryover": "次に考えたい問い（持ち越す問い）",
+                    "last_tension": "引っかかりの確定"}
+SEED_LANDING_STOPS = ("persona_stop", "goal_reached", "blocked")  # この止まり方なら着地の手順へ進める
+SEED_LANDING_MARK = "seed_landing"
+
+
+def _option_leaves_part(option: Option, part: str) -> bool:
+    role = SEED_PART_ROLES.get(part)
+    if role and option.action == "learning.cycle.intention" and str((option.with_ or {}).get("role") or "") == role:
+        return True
+    return bool(SEED_PART_ACTIONS.get(part) and option.action == SEED_PART_ACTIONS[part])
+
+
+def seed_landing_steps(scenario: Scenario, parts: list[str]) -> list[tuple[str, StepSpec]]:
+    """種まき経路の中で、前提の部品 ``parts`` を残す手順（最上位の do / choose）を経路の順に返す。"""
+    found: list[tuple[str, StepSpec]] = []
+    for spec in scenario.steps:
+        if spec.kind == "repeat":
+            continue
+        for part in parts:
+            if any(_option_leaves_part(o, part) for o in spec.options):
+                found.append((part, spec))
+                break
+    return found
+
 
 class ScenarioRunner:
     """1 ペルソナ × 1 経路を実行する。"""
 
     def __init__(self, agent: PersonaAgent, scenario: Scenario, params: ScenarioParams, session: PersonaSession,
                  client: EpistemeClient, writer: RunWriter, budget: Budget, *, max_steps: int = 0,
-                 divergence: Optional[ReplayThenLivePersonaLLM] = None) -> None:
+                 divergence: Optional[ReplayThenLivePersonaLLM] = None,
+                 seed_requires: Optional[list[str]] = None) -> None:
         self.agent, self.scenario, self.params = agent, scenario, params
+        # 種まきとして歩くときの前提の部品（空なら通常の経路）
+        self.seed_requires = list(seed_requires or [])
+        self._landing = False
+        self._done: set[int] = set()
+        self.landing_parts: list[str] = []
         self.session, self.client, self.writer, self.budget = session, client, writer, budget
         self.max_steps = max_steps
         self.divergence = divergence
@@ -214,7 +249,11 @@ class ScenarioRunner:
         self.pending = None
 
     def _goal(self) -> str:
-        return str(self.params.render(self.scenario.goal))
+        goal = str(self.params.render(self.scenario.goal))
+        if self.seed_requires:
+            parts = "と".join(SEED_PART_LABELS.get(p, p) for p in self.seed_requires)
+            goal += f"。議論を終える前に、{parts}を必ず残してから終える"
+        return goal
 
     # -- 判断 ------------------------------------------------------------------
     def _check_stops(self, d: StepDecision) -> None:
@@ -233,6 +272,8 @@ class ScenarioRunner:
         http_error = (self.session.last_status or 0) >= 400
         if "blocked" in stop_when and (self._blocked_streak >= 2 or (d.prev_friction == "blocked" and http_error)):
             raise _Stop("blocked")
+        if self._landing:
+            return  # 種まきの着地（部品を残す手順）の最中は、やめたい・目標に届いた、では止めない
         if d.goal_reached and "goal_reached" in stop_when:
             raise _Stop("goal_reached")
         if d.stop and self.session.last_status == 429 and "quota_exhausted" in stop_when:
@@ -255,6 +296,7 @@ class ScenarioRunner:
         """do / choose の 1 回。"""
         if self.budget.exhausted():
             raise BudgetExhausted(self.budget.exhausted())
+        self._done.add(id(spec))
         allowed = [a for a in spec.allowed(self.scenario.screen) if a.id not in RUNNER_DRIVEN_ACTIONS]
         if not allowed:
             return
@@ -341,11 +383,34 @@ class ScenarioRunner:
         if self.max_steps and self.outcome.steps >= self.max_steps:
             raise _Stop("max_steps")
 
+    def _land_seed(self) -> None:
+        """種まき経路が途中で止まったとき、まだ歩いていない「部品を残す手順」へ進める（runner の手）。"""
+        pending = [(part, spec) for part, spec in seed_landing_steps(self.scenario, self.seed_requires)
+                   if id(spec) not in self._done]
+        if not pending:
+            return
+        self._landing = True
+        parts = [p for p, _ in pending]
+        self.landing_parts = parts
+        runner_note(self.session, f"{SEED_LANDING_MARK}: 種まきの経路 {self.scenario.id} が"
+                                  f"「{self.outcome.stopped}」で止まったため、前提の部品"
+                                  f"（{', '.join(parts)}）を残す着地の手順へ進めた（runner の手）")
+        try:
+            for _, spec in pending:
+                self._one(spec)
+        except _Stop:
+            pass
+        finally:
+            self._landing = False
+
     def run(self) -> ScenarioOutcome:
         try:
-            self._run_steps(self.scenario.steps)
-        except _Stop as stop:
-            self.outcome.stopped = str(stop)
+            try:
+                self._run_steps(self.scenario.steps)
+            except _Stop as stop:
+                self.outcome.stopped = str(stop)
+            if self.seed_requires and self.outcome.stopped in SEED_LANDING_STOPS:
+                self._land_seed()
         except BudgetExhausted as exc:
             self.outcome.stopped = f"budget:{exc}"
         finally:
@@ -474,6 +539,52 @@ def check_preconditions(scenario: Scenario, session: PersonaSession, client: Epi
                 runner_notes=[f"runner_driven: 経路 {scenario.id} の前提「{text}」を確かめた — {verdict}"]))
     session.last_status, session.last_body, session.last_action = saved
     return unmet
+
+
+def bootstrap_seed_course(seed: Scenario, session: PersonaSession, client: EpistemeClient,
+                          writer: Optional["RunWriter"] = None) -> tuple[bool, list[str]]:
+    """種まき経路を歩く前に、通常の経路と同じコースの文脈（受講 → コースを開く）を用意する（runner の手）。
+
+    通常の経路は ``learning.course.list`` → ``learning.course.enroll`` → ``learning.course.open`` で campaign の
+    固定コースに入るが、種まき経路（例: s-discuss-one-paper）は ``course.open`` から始まる。前のセッションで
+    受講していないペルソナが種をまくと、受講可能なだけのコースを開いて 404 になり、以降の手順が
+    ``course_id`` 無しで空振りした（第 18 周 st-07）。ここで受講と表示を済ませ、種まき経路の ``course.open``
+    が同じコースを開けるようにする。戻り値は (用意できたか, 事実文の列)。
+    """
+    notes: list[str] = []
+    saved = (session.last_status, session.last_body, session.last_action)
+    cid = _precondition_course_id(session)
+    if not cid:
+        return False, ["受講中のコースも受講可能なコースも無い"]
+    plan: list[tuple[str, dict[str, Any]]] = []
+    if not session.course_id:
+        plan.append(("learning.course.enroll", {"course_id": cid}))
+    plan.append(("learning.course.open", {"course_id": cid}))
+    ok = True
+    for action_id, args in plan:
+        http = execute(action_id, args, session, client)
+        status, body = session.last_status, session.last_body
+        good = bool(status) and int(status) < 300
+        enroll = action_id == "learning.course.enroll"
+        fact = (f"{'受講を始めた' if enroll else 'コースを開いた'}（course_id={cid}）" if good else
+                f"{'受講を始められなかった' if enroll else 'コースを開けなかった'}（HTTP {status}・course_id={cid}）")
+        notes.append(fact)
+        if writer is not None:
+            action = registry.REGISTRY[action_id]
+            writer.write_step(TranscriptStep(
+                seq=writer.next_seq(), persona_id=session.persona_id, session=session.session_no,
+                scenario_id=seed.id, action_id=action_id, args=args, screen=action.screen,
+                affordance=action.affordance, http=http, observation=project_observation(action_id, status, body),
+                runner_notes=[f"runner_driven: 種まき経路 {seed.id} の前に、通常の経路と同じくコースの文脈を"
+                              f"用意した — {fact}"] + list(session.scratch.pop("runner_notes", None) or [])))
+        if not good:
+            ok = False
+            break
+    session.last_status, session.last_body, session.last_action = saved
+    if ok and session.course_id != cid:
+        ok = False
+        notes.append(f"コースを開いた後も course_id={cid} が画面の文脈に残っていない")
+    return ok, notes
 
 
 def _make_llm(settings: Settings, run_dir: Path, replay_dir: Optional[Path]):
@@ -621,13 +732,37 @@ def run_campaign(
                                 meta.notes.append(f"{seed.id}（{pid}・{scenario.id} の種まき）は分野パラメータが埋まっていないため未実施: "
                                                   f"{', '.join(seed_missing)}")
                                 continue
+                            parts = sorted({m for u in unmet for m in u.get("missing") or []})
+                            record: dict[str, Any] = {"persona_id": pid, "session": session_no,
+                                                      "scenario_id": scenario.id, "seed_id": seed.id,
+                                                      "unmet_before": parts, "bootstrap": [], "stopped": "",
+                                                      "steps": 0, "landing": [], "satisfied": False}
+                            meta.seeded_precondition.append(record)
+                            lacking = [p for p in parts if p in SEED_PART_ROLES or p in SEED_PART_ACTIONS]
+                            unreachable = [p for p in lacking
+                                           if p not in {q for q, _ in seed_landing_steps(seed, lacking)}]
+                            if unreachable:
+                                meta.notes.append(f"{seed.id}（{pid}・{scenario.id} の種まき）には前提の部品"
+                                                  f"（{', '.join(unreachable)}）を残す手順が無い")
+                            ok_boot, boot_notes = bootstrap_seed_course(seed, session, client, writer)
+                            record["bootstrap"] = boot_notes
+                            if not ok_boot:
+                                record["stopped"] = "bootstrap_failed"
+                                meta.notes.append(f"{seed.id}（{pid}・{scenario.id} の種まき）はコースの文脈を"
+                                                  f"用意できなかったため歩いていません: {'; '.join(boot_notes)}")
+                                continue
                             runner_note(session, f"{SEEDED_PRECONDITION_MARK}: 経路 {scenario.id} の前提"
                                                  f"（{'; '.join(u['text'] for u in unmet)}）が満たされていないため、"
                                                  f"先に {seed.id} を歩いて種をまく（runner の手）")
                             writer.log(f"seed {pid} s{session_no} {seed.id} for {scenario.id}")
-                            seed_outcome = ScenarioRunner(agent, seed, seed_params, session, client, writer, budget,
-                                                          max_steps=max_steps, divergence=divergence).run()
+                            seed_runner = ScenarioRunner(agent, seed, seed_params, session, client, writer, budget,
+                                                         max_steps=max_steps, divergence=divergence,
+                                                         seed_requires=parts)
+                            seed_outcome = seed_runner.run()
+                            record.update(stopped=seed_outcome.stopped, steps=seed_outcome.steps,
+                                          landing=list(seed_runner.landing_parts))
                             seeded.append(seed.id)
+                            writer.write_meta(meta)
                             if seed_outcome.stopped.startswith("budget:"):
                                 stop_all = seed_outcome.stopped
                                 break
@@ -635,6 +770,14 @@ def run_campaign(
                             meta.notes.append(f"予算（{stop_all.split(':', 1)[1]}）に達したため、ここで campaign を止めました。")
                             break
                         unmet = check_preconditions(scenario, session, client, writer)
+                        for rec in meta.seeded_precondition:
+                            if rec["persona_id"] == pid and rec["session"] == session_no and \
+                                    rec["scenario_id"] == scenario.id:
+                                rec["satisfied"] = not unmet
+                        if seeded:
+                            meta.notes.append(f"{SEEDED_PRECONDITION_MARK}: {scenario.id}（{pid}・セッション {session_no}）の"
+                                              f"前提を満たすために {', '.join(seeded)} を先に歩いた — "
+                                              + ("前提は満たされた" if not unmet else "それでも満たされていない"))
                     if unmet:
                         # (b) 種をまけない（または撒いても足りない）なら経路を歩かない — 空のセッションを歩くと
                         # 扉・持ち越しが空であることを製品の欠陥と読む偽所見になる（第 17 周 st-07）

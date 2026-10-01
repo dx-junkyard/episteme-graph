@@ -109,3 +109,7 @@ class RunMeta(BaseModel):
     # 経路の前提（scenario.preconditions の check）が満たせず歩かなかった経路の記録（第 17 周）。
     # 各要素 {persona_id, session, scenario_id, unmet: [{text, check, missing, reason}], seeded: [経路 id]}
     blocked_precondition: list[dict[str, Any]] = Field(default_factory=list)
+    # 前提を満たすために先に歩いた種まき経路の記録（第 18 周）。各要素 {persona_id, session, scenario_id, seed_id,
+    # unmet_before: [部品], bootstrap: [runner の手の事実文], stopped, steps, landing: [経路の終わりに進めた部品],
+    # satisfied: bool（種まきの後にもう一度確かめて前提が満たされたか）}
+    seeded_precondition: list[dict[str, Any]] = Field(default_factory=list)
