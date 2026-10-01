@@ -45,7 +45,13 @@ resolution:
       - "砂場再演（第 16 波の是正後に同じ場面を再運転していない）"
 related: []
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.verification
+    from: guardrail のみ
+    to: guardrail のみ（砂場で残る）
+    reason: >-
+      第 17 周でも t11 / t12 の「この節で使う数式」に本文と無関係な N = 15（乱数シード数）が出た。付録ではなく本文側の記号＝数値の式で、除外の条件に当たらない。（persona_enactment_testing_design.md §18.9）
 ---
 
 ## 課題

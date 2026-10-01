@@ -71,7 +71,13 @@ resolution:
       - PDF しか無い論文の式復元
 related: [IK-0328, IK-0353, IK-0354, IK-0540, IK-0541, IK-0555, IK-0571]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.verification
+    from: guardrail のみ
+    to: guardrail のみ（再取り込み待ち）
+    reason: >-
+      第 17 周は PDF 経路で取り込んだ既存コーパスのまま走らせたため、TeX 既定の効果は確かめられない（IK-0540 / IK-0541 / IK-0547 / IK-0551 は想定どおり STILL）。再取り込み後の周で確かめる。（persona_enactment_testing_design.md §18.9）
 ---
 
 ## 課題

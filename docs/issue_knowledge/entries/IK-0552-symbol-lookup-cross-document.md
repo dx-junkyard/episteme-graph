@@ -42,12 +42,17 @@ resolution:
     - backend/api/routes/learning.py
     - frontend/public/js/app.js
   verification:
-    methods: [guardrail]
-    unverified:
-      - "砂場再演（第 16 波の是正後に同じ場面を再運転していない）"
+    methods: [guardrail, reproduction_rerun]
+    unverified: []
 related: [IK-0518]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.verification
+    from: guardrail のみ
+    to: guardrail + 砂場再演
+    reason: >-
+      第 17 周 s-symbols-chain で、別論文の同記号が名前だけの事実文に留まり定義に混ざらないことを頭脳メモが GONE と記録した。（persona_enactment_testing_design.md §18.9）
 ---
 
 ## 課題

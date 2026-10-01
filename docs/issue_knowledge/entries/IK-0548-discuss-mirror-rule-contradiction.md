@@ -44,13 +44,18 @@ resolution:
     - backend/tests/test_dialogue_shape_core.py
     - backend/tests/test_dialogue_shape_route.py
   verification:
-    methods: [guardrail]
+    methods: [guardrail, reproduction_rerun]
     unverified:
-      - 砂場での再演（ペルソナ通し受講の次の周）
       - 実 LLM 出力での問いの切り分けの取りこぼし（箇条書き末尾の問いなど）
 related: []
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.verification
+    from: guardrail のみ
+    to: guardrail + 砂場再演
+    reason: >-
+      第 17 周の discuss で、末尾に鏡と確認の問いが重なった応答（製品頭脳の出力）を、サーバが鏡 1 つだけにして配信したことを transcript で確かめた。（persona_enactment_testing_design.md §18.9）
 ---
 
 ## 課題

@@ -45,7 +45,13 @@ resolution:
       - "砂場再演（第 16 波の是正後に同じ場面を再運転していない）"
 related: [IK-0526]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.verification
+    from: guardrail のみ
+    to: guardrail のみ（砂場で部分的に残る）
+    reason: >-
+      第 17 周の教員場面で、表の見出し「Estimates (90% CI)」が level 1 の章として残った。判定の当たらない見出しの形がある。（persona_enactment_testing_design.md §18.9）
 ---
 
 ## 課題

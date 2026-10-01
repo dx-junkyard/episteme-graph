@@ -41,12 +41,17 @@ resolution:
     - backend/core/element_context.py
     - backend/api/routes/learning.py
   verification:
-    methods: [guardrail]
-    unverified:
-      - "砂場再演（第 16 波の是正後に同じ場面を再運転していない）"
+    methods: [guardrail, reproduction_rerun]
+    unverified: []
 related: [IK-0550]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.verification
+    from: guardrail のみ
+    to: guardrail + 砂場再演
+    reason: >-
+      第 17 周の再演で、式 ⚓ の要素文脈が表示中トピックの論文の式として開いた。衝突時の fail-closed が主張 ⚓ に及ぶ疑いは IK-0589 に分けた。（persona_enactment_testing_design.md §18.9）
 ---
 
 ## 課題

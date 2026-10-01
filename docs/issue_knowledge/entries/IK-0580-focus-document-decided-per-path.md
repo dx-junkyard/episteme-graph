@@ -55,14 +55,19 @@ resolution:
       use: extracted
       note: "対象の選択の派生形（段順の解決関数 1 つ + 衝突の fail-closed）。コース横断の LIMIT 1 を廃止した。痕跡への焦点の出所の記帳は見送った。"
   verification:
-    methods: [guardrail]
+    methods: [guardrail, reproduction_rerun]
     unverified:
-      - 砂場での再演（ペルソナ通し受講の次の周）
       - ブラウザでの画面確認
       - 痕跡 payload への焦点の出所の記帳（見送り）
 related: [IK-0513, IK-0552, IK-0553, IK-0554, IK-0556, IK-0558]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.verification
+    from: guardrail のみ
+    to: guardrail + 砂場再演
+    reason: >-
+      第 17 周の再演で、別論文の記号が混ざらない（s-symbols-chain）・discuss で議論中の論文が優先される・式 ⚓ が表示中の論文で開くことを確かめた。早期 return 経路の焦点は IK-0586 に分けた。（persona_enactment_testing_design.md §18.9）
 ---
 
 ## 課題

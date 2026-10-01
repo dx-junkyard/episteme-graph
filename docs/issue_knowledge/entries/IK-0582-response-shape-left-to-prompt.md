@@ -54,15 +54,20 @@ resolution:
       use: extracted
       note: "生成物の形の派生形（生成後・保存前の 1 点でサーバが区画を組み立て、保存形は不変）。早期 return の経路は対象外で残した。"
   verification:
-    methods: [guardrail]
+    methods: [guardrail, reproduction_rerun]
     unverified:
-      - 砂場での再演（ペルソナ通し受講の次の周）
       - ブラウザでの画面確認
       - 早期 return の経路（HELP / 学習相談 / 地図 / 要素説明）
       - 実 LLM 出力での問いの切り分けの取りこぼし
 related: [IK-0509, IK-0548, IK-0562, IK-0575, IK-0576]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.verification
+    from: guardrail のみ
+    to: guardrail + 砂場再演
+    reason: >-
+      第 17 周の再演で、前提ゲートでも先に答える・確認の問いは 1 つまで（サーバが 2 つ目を落として配信）・鏡は核心語・直前の訂正を持ち越す、を transcript と頭脳メモで確かめた。早期 return 経路は IK-0586 に分けた。（persona_enactment_testing_design.md §18.9）
 ---
 
 ## 課題

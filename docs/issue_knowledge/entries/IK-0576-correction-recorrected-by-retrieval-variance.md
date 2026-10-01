@@ -44,13 +44,18 @@ resolution:
     - backend/tests/test_dialogue_shape_core.py
     - backend/tests/test_dialogue_shape_route.py
   verification:
-    methods: [guardrail]
+    methods: [guardrail, reproduction_rerun]
     unverified:
-      - 砂場での再演（ペルソナ通し受講の次の周）
       - 実 LLM 出力での問いの切り分けの取りこぼし（箇条書き末尾の問いなど）
 related: [IK-0545]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.verification
+    from: guardrail のみ
+    to: guardrail + 砂場再演
+    reason: >-
+      第 17 周の s-elicit-diff と s-misconception-mirror で、前の往復の訂正が次の往復で覆らなかったことを頭脳メモが GONE と記録した。（persona_enactment_testing_design.md §18.9）
 ---
 
 ## 課題

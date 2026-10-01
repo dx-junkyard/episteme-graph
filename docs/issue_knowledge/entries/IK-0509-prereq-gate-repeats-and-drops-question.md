@@ -55,6 +55,12 @@ history:
     to: guardrail + 砂場再演
     reason: >-
       第 15 周（persona_enactment_testing_design.md §18.7）の再演で症状の消失を頭脳メモが GONE と記録した。
+  - date: '2026-10-01'
+    field: resolution.verification
+    from: guardrail + 砂場再演
+    to: guardrail + 砂場再演（再確認）
+    reason: >-
+      第 17 周でも前提ゲートのターンで元の質問に先に答え、同じトピックで 2 度目は出なかった（頭脳メモ GONE）。（persona_enactment_testing_design.md §18.9）
 ---
 
 ## 課題

@@ -40,12 +40,17 @@ resolution:
   landed_in:
     - backend/core/component_context.py
   verification:
-    methods: [guardrail]
-    unverified:
-      - "砂場再演（第 16 波の是正後に同じ場面を再運転していない）"
+    methods: [guardrail, reproduction_rerun]
+    unverified: []
 related: []
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.verification
+    from: guardrail のみ
+    to: guardrail + 砂場再演
+    reason: >-
+      第 17 周の再演（ハーネスの topic_id 是正後）で、部品の文脈から下位の部品へ 1 hop 移れた。移った先が行き止まりになる件は IK-0588 に分けた。（persona_enactment_testing_design.md §18.9）
 ---
 
 ## 課題

@@ -41,12 +41,17 @@ resolution:
     - backend/api/routes/learning.py
     - backend/api/services.py
   verification:
-    methods: [guardrail]
-    unverified:
-      - "砂場再演（第 16 波の是正後に同じ場面を再運転していない）"
+    methods: [guardrail, reproduction_rerun]
+    unverified: []
 related: []
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.verification
+    from: guardrail のみ
+    to: guardrail + 砂場再演
+    reason: >-
+      第 17 周の discuss で、議論中の論文（2606.00411v1）の出典が優先して引かれたことを transcript と頭脳メモで確かめた。（persona_enactment_testing_design.md §18.9）
 ---
 
 ## 課題

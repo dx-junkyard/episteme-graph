@@ -60,7 +60,13 @@ resolution:
       - 教員向けルート（project_for_teacher は未配線）
 related: [IK-0338, IK-0411, IK-0428, IK-0517, IK-0520, IK-0524, IK-0546, IK-0563, IK-0564, IK-0565, IK-0566, IK-0571, IK-0578]
 view_of: []
-history: []
+history:
+  - date: '2026-10-01'
+    field: resolution.verification
+    from: guardrail のみ
+    to: guardrail のみ（砂場の API 確認あり・再演では未確定）
+    reason: >-
+      第 17 周の後、学習者向け部品文脈の DTO の表示キーに内部 ID が無いことを砂場の API で確かめた。ペルソナが見た内部 ID はハーネスの投影が宛先キーを出していたため（01513fa で是正）で、再演での確認は次の周。教員向け（project_for_teacher）は未配線のまま。（persona_enactment_testing_design.md §18.9）
 ---
 
 ## 課題
