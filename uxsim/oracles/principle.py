@@ -107,7 +107,13 @@ def _numbers(text: str) -> str:
 INTERNAL_ID_PREFIXES = ("fig_", "sec_runin", "module_key", "eq_tex_", f"{MODULE_RULE_VERSION}|")
 
 
+# 埋め込みマーカー ![[kind:id]] / [[FORMULA_N]] は画面がチップ・式に解決する「宛先」で、表示文ではない
+# （製品の表示投影 display_projection.EMBED_MARKER_RE と同じ扱い・第 17 周）。検査前に取り除く。
+_EMBED_MARKER = re.compile(r"!?\[\[\s*(?:[A-Za-z_]+\s*:\s*)?[^\]\n]*\]\]")
+
+
 def _internal_id(text: str) -> str:
+    text = _EMBED_MARKER.sub(" ", text)
     m = _ID_PATTERNS.search(text) or MODULE_INTERNAL_ID_RE.search(text)
     if m:
         return m.group(0)

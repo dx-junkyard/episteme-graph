@@ -568,8 +568,11 @@ def _element_context(ctx: _Ctx) -> None:
     # 第 15 周: theory_claim のまま呼んで 404 になっていた（製品欠陥ではない）
     etype = {"theory_component": "component", "theory_claim": "claim"}.get(etype, etype)
     if etype == "component":
+        # 実フロント（focusQuerySuffix）と同じく表示中トピックを添える（第 17 周: 焦点論文の衝突解決は
+        # topic が無いと fail-closed で 404 になる — 製品欠陥ではなくハーネスの写し漏れ）
         ctx.call("GET", "/api/learning/courses/{course_id}/components/{component_id}/context",
-                 overrides={"component_id": eid})
+                 overrides={"component_id": eid},
+                 params={"topic_id": s.topic_id} if getattr(s, "topic_id", None) else None)
     else:
         # 実フロントは表示中トピックを添える（式 ID の論文またぎの衝突をトピックの論文で解く）
         ctx.main(overrides={"element_type": etype, "element_id": eid},
@@ -984,7 +987,8 @@ def _component_context(ctx: _Ctx) -> None:
     cid = cid or s.latest("components")
     if not cid:
         return ctx.missing("component_id")
-    status, body = ctx.main(overrides={"component_id": cid})
+    status, body = ctx.main(overrides={"component_id": cid},
+                            params={"topic_id": s.topic_id} if getattr(s, "topic_id", None) else None)
     if status == 200:
         s.scratch["component_center"] = str(cid)
         _remember_component_graph(s, body)
@@ -1009,7 +1013,8 @@ def _component_context_hop(ctx: _Ctx) -> None:
     target = _hop_target(graph, str(ctx.args.get("component_id") or ""))
     if not target:
         return ctx.missing("adjacent_component")
-    status, body = ctx.main(overrides={"component_id": target})
+    status, body = ctx.main(overrides={"component_id": target},
+                            params={"topic_id": s.topic_id} if getattr(s, "topic_id", None) else None)
     if status == 200:
         s.scratch["component_center"] = target
         _remember_component_graph(s, body)
