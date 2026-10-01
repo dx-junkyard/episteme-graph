@@ -356,6 +356,25 @@ def _apply_cross_corpus_gate(positioning_payload: dict[str, Any], current_user: 
     lens["hidden_count"] = hidden
 
 
+def _teacher_view(document_id: str | None, payload: dict[str, Any]) -> dict[str, Any]:
+    """教員向けの名指しの面（要素の内訳・文脈・グラフ全体対話）の表示投影（DP7）。
+
+    deliberation ルーター全体には掛けない（要素インベントリの ``counts`` など件数を正当に
+    返す API が同居する）。エンドポイントの戻り値に ``project_for_teacher`` を明示的に通す。
+    """
+    from routes.theory_components import project_teacher_dto
+
+    if not document_id:
+        from core.display_projection import project_for_teacher
+
+        try:
+            return project_for_teacher(payload)
+        except Exception:  # noqa: BLE001 — DP6
+            logger.warning("teacher display projection failed", exc_info=True)
+            return payload
+    return project_teacher_dto(document_id, payload)
+
+
 @router.get("/elements/{element_type}/{element_id}/overview")
 def get_element_overview(
     element_type: str,
@@ -477,13 +496,16 @@ def get_element_overview(
             "note": "説明の取得に失敗しました",
         }
 
-    return {
-        "ref": ref.to_dict(),
-        "decomposition": breakdown,
-        "positioning": positioning_payload,
-        "context": context_payload,
-        "explanations": explanations_payload,
-    }
+    return _teacher_view(
+        ref.document_id,
+        {
+            "ref": ref.to_dict(),
+            "decomposition": breakdown,
+            "positioning": positioning_payload,
+            "context": context_payload,
+            "explanations": explanations_payload,
+        },
+    )
 
 
 @router.get("/elements/{element_type}/{element_id}/context")
@@ -534,7 +556,7 @@ def get_element_context(
 
     if context_result is None:
         return {"available": False, "note": "この要素型にはコンテキスト投影がありません"}
-    return {"available": True, **context_result}
+    return _teacher_view(ref.document_id, {"available": True, **context_result})
 
 
 # ---------------------------------------------------------------------------
@@ -1202,7 +1224,7 @@ def open_graph_dialogue_session(
                 "element_id": doc_id,
             },
         )
-    return {"session": _session_response(session), "created": created}
+    return _teacher_view(doc_id, {"session": _session_response(session), "created": created})
 
 
 @router.post("/documents/{document_id}/graph-sessions/{session_id}/messages")
@@ -1282,12 +1304,15 @@ def post_graph_dialogue_message(
 
     # spoken / stance_label は保存しない（append_messages は reply のみ）。
     # ラベルは対話結果（共通骨格 chat_turn.TurnResult 由来）から素通しする。
-    return {
-        "reply": result.reply,
-        "degraded": result.degraded,
-        "spoken": result.spoken,
-        "stance_label": result.stance_label or AI_READING_LABEL,
-    }
+    return _teacher_view(
+        doc_id,
+        {
+            "reply": result.reply,
+            "degraded": result.degraded,
+            "spoken": result.spoken,
+            "stance_label": result.stance_label or AI_READING_LABEL,
+        },
+    )
 
 
 @router.get("/elements/{element_type}/{element_id}/annotations")

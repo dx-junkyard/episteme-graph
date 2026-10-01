@@ -34,6 +34,7 @@ DTO に漏れていた。遮断は画面ごとに別々の遮断器（`learner_c
 | DP4 | **英語生成文の置換は LABEL_KEYS のみ**。`label` / `sublabel` / `narrative_role` / `operation_line` / `display_label` / `role_label` の英語の生成文（4 語以上かつ解析層の定型の目印を持つもの）だけを一般ラベルへ置き換える。`title` / `text` / `passage` / `quote` / `summary` は論文本文（正当に英語）なので置き換えない。論文タイトルのような人間の英語は定型の目印を持たないので置き換えない。 |
 | DP5 | **教員向けは段階ラベルを残す**。`project_for_teacher` は TM6 ∪ PL4 の数値キーだけを落とし、`*_label` の段階ラベルと件数キー `n` 等は残す。英語生成文の置換もしない。 |
 | DP6 | **fail-soft で応答を止めない**。射影が例外を出したら警告を残して元の値を返す（学習者の操作を止めない）。 |
+| DP7 | **教員向けの名指しの面は `project_for_teacher` を通る**（2026-10-01）。グラフレビュー（component-graph）・論文の順（paper-layer）・理論モジュール（theory-modules / related）・ゼミ前ブリーフ・W層の要素文脈（overview / context）・グラフ全体対話（graph-sessions）。専用ルーター（ゼミ前ブリーフ）は `route_class=TeacherDisplayRoute`、大きな admin ルーターに同居する面はエンドポイント本体で射影の入口（`project_teacher_dto` / `_teacher_view`）を明示的に呼ぶ。admin ルーター全体には掛けない（件数を正当に返す API が同居する）。 |
 
 ## 3. 語彙
 
@@ -63,8 +64,8 @@ DTO に漏れていた。遮断は画面ごとに別々の遮断器（`learner_c
 
 - `auth.py` / `groups.py`（`/api/me/invitations` を含む）/ `export.py` / `indicators.py` /
   `disclosure.py`: 認証・運用・カタログで、それぞれのガードレールがキーを走査している。
-- 管理画面のルート: 教員向けは各層の射影（PL / TM / W層）がそのまま正本。`project_for_teacher`
-  は関数として用意し、ルート全体への適用はしていない（次段の判断）。
+- 管理画面のルート: 名指しの面（DP7）以外は各層の射影（PL / TM / W層）がそのまま正本。
+  admin ルーター全体へは適用しない（要素インベントリの `counts` など、件数を正当に返す API が同居する）。
 - 画像・音声・SSE の途中フレーム（`delta` は衛生済みの本文のみ）。
 
 ## 5. 新しいルートを足すとき
@@ -129,3 +130,46 @@ DTO に漏れていた。遮断は画面ごとに別々の遮断器（`learner_c
 - **履歴の出典メタ**: 応答本文の内部 ID が置き換わると、送り返された本文が保存本文と一致せず
   `_rehydrate_history_sources` が出典メタ（IK-0432 の番号の対応）を戻せなかった。突き合わせを
   assistant `id` → `reply_to_id`（直前の user `id`）→ 本文の順にした。
+
+### 2026-10-01 教員向けの名指しの面（DP7）
+
+第 17 周の教員レーンで、グラフレビュー初期表示・論文の順・理論モジュール・ゼミ前ブリーフに内部 ID が
+残っていた。多くは番地キー（`node_ids` / `section_id` / `module_key` / `target_id` …）の下で画面遷移に
+要る値だったので、まず fixture（実論文 3 本 `backend/tests/fixtures/theory_modules/`）から 3 つの DTO を
+組み、**番地キー以外の表示文**に残る内部 ID を測った。射影前: 論文の順のノード `label`（`Define eq_tex_b78`
+等・式の詳細層で 1 論文 52 件）・主張本文（`Equation (eq_tex_b14) defines …`）・理論モジュールの前提文
+（`… summarized in tex_b92`）。component-graph は既存の読み時ラベル置換で 0 件。射影後: 3 DTO × 3 論文で 0 件。
+
+- `core/display_projection.py`: `mask_internal_ids` / `project` / `project_for_teacher` に任意の
+  `token_replacer`（トークン → 読める語。`None` を返せば既定語）。本モジュールは式の記録を読まない（純関数のまま）。
+- `api/display_route.py::TeacherDisplayRoute`（学習者向けと同じ包み方・Response 素通し・DP6）。ゼミ前ブリーフの
+  `admin_router` が持つ。
+- `routes/theory_components.py::project_teacher_dto`: 式の記録から「式 (N)」/「番号なしの式」へ置き換える
+  replacer を組んで `project_for_teacher` に通し、数字を含まない TeX ラベル由来の式 ID（`eq_delta_b_flamingo`）も
+  記録にあるものに限って表示文から置き換える。component-graph / paper-layer / theory-modules / related の 4 本と、
+  `routes/deliberation.py::_teacher_view` 経由で overview / context / graph-sessions（開始・発話）の 4 本。
+  paper-layer / theory-modules は builder が読んだ artifact を `artifacts_sink` で受け取り二度読まない。
+- 番地キーは残す（`module_key` / `parent_module_key` / `*_module_keys` はグラフレビューの UI がモジュールを引く鍵 —
+  TM10/TM12 の「表示しない」は画面に描かないことで、DTO から消すことではない）。落ちるのは TM6 ∪ PL4 の数値キー
+  （`structure_fingerprint` / `confidence` / `weight` / `score` / `count` …）。`confidence_label` 等の段階ラベルは残す。
+  component-graph の辺の `confidence` は応答モデルの既定値（0.5）に戻るため、原稿スタジオの辺の太さは一様になる（GR3）。
+
+射影では直せない作り込みの漏れ:
+
+- **ゼミ前ブリーフの対象名**: 依存グラフのノード名は A層の `visual_label`（`Infer intermediate claim\nsynth_claim_0013 → clai`
+  — 2 行目は 30 字で切られる）だったため、隠すと「Infer intermediate claim（本文を特定できない要素） → clai」になり、
+  脆い前提 8 件と一点吊りの支持線の崩れる対象がすべて中身ゼロだった。`DependencyGraph` に表示用の
+  `node_claim_ids` / `node_operations` を足し、`_ReadableLabels` が「操作の日本語名（`element_vocab.operation_label`）:
+  根拠の主張本文（`claim_object_builder`・語の途中で切らない）」で組み直す。主張が引けなければ操作の日本語名だけ。
+  支持線の `cut_members` も同じ名前で組む（`ctx.graph.node_labels` を上書き）。`target_label` の丸めは
+  `text_excerpt.excerpt`（語の途中で切らない）。
+- **グラフの `visual_label`**: 2 行目（入力 → 出力）に内部 ID か切れ端が残るなら 2 行目を落として動詞だけにする
+  （式 ID だけなら「式 (2) → 式 (3)」に置き換えて残す）。
+- **主グラフの `display_label` の生 TeX**（「消去: D, M_{\mathrm{PISN}}, N」）: 理論対象に TeX があれば理論モジュールと
+  同じ `plain_math` で読める形へ落とす。`plain_math` はエスケープした波括弧 `\{ \}` と `\_ \%` を畳み、名前の付かない
+  残りのバックスラッシュを出さない（「\Θ^2_GW\」の解消）。
+- 次にやること（G層）の `locate_plan.steps[].anchor_id` は UI の論理アンカー（番地キー `*_id`）なので変えない。
+
+ガードレール: `test_display_projection_guardrails.py`（名指しの 8 エンドポイントが射影の入口を呼ぶ・ゼミ前ブリーフの
+ルーターが `TeacherDisplayRoute`・admin ルーター全体には掛けない・教員 UI が落とすキーを読まない・fixture 3 本の
+DTO の表示文に内部 ID が残らない）+ `test_display_projection_teacher.py`。

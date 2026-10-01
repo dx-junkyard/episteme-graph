@@ -261,14 +261,17 @@ class TestBuildPaperLayerForDocument:
     def test_route_delegates_to_the_shared_builder(self, monkeypatch):
         seen = {}
 
-        def _fake(doc):
+        def _fake(doc, **kwargs):
+            # 表示投影が同じ artifact を使うための受け皿（artifacts_sink）だけを受け取る。
             seen["doc"] = doc
+            seen["kwargs"] = set(kwargs)
             return {"available": True}
 
         monkeypatch.setattr(tc, "_ensure_document_viewable", lambda doc, user: None)
         monkeypatch.setattr(tc, "build_paper_layer_for_document", _fake)
         result = tc.get_document_paper_layer(_DOC, current_user=_TEACHER)
         assert seen["doc"] == _DOC
+        assert seen["kwargs"] <= {"artifacts_sink"}
         assert result == {"available": True}
 
     def test_shared_builder_has_no_permission_gate_of_its_own(self, monkeypatch):

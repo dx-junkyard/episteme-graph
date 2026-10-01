@@ -283,3 +283,202 @@ class TestLeakScan:
         assert [item["id"] for item in projected["items"]] == list(BAD_TOKENS)
         assert projected["items"][0]["node_ids"] == [BAD_TOKENS[0]]
         assert projected["meta"]["chain"] == list(BAD_TOKENS)
+
+
+# ---------------------------------------------------------------------------
+# DP7: 教員向けの名指しの面（グラフレビュー・論文の順・理論モジュール・ゼミ前ブリーフ・
+# W層の要素文脈・グラフ全体対話）は project_for_teacher を通る
+# ---------------------------------------------------------------------------
+
+import ast  # noqa: E402
+import json  # noqa: E402
+
+FIXTURES = BACKEND / "tests" / "fixtures" / "theory_modules"
+
+#: (ルート定義モジュール, エンドポイント関数名)。大きな admin ルーターに同居する面は
+#: エンドポイント本体で射影の入口を明示的に呼ぶ（ルーター全体には掛けない）。
+TEACHER_NAMED_ENDPOINTS = (
+    ("theory_components", "get_component_graph"),
+    ("theory_components", "get_document_paper_layer"),
+    ("theory_components", "get_document_theory_modules"),
+    ("theory_components", "get_document_theory_modules_related"),
+    ("deliberation", "get_element_overview"),
+    ("deliberation", "get_element_context"),
+    ("deliberation", "open_graph_dialogue_session"),
+    ("deliberation", "post_graph_dialogue_message"),
+)
+#: 射影の入口（いずれも最終的に ``project_for_teacher`` を呼ぶ）。
+TEACHER_PROJECTION_ENTRIES = ("project_for_teacher(", "project_teacher_dto(", "_teacher_view(")
+
+
+def _function_source(module: str, name: str) -> str:
+    path = BACKEND / "api" / "routes" / f"{module}.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return ast.get_source_segment(path.read_text(encoding="utf-8"), node) or ""
+    raise AssertionError(f"{module}.{name} が見つかりません")
+
+
+class TestTeacherNamedSurfacesAreProjected:
+    def test_seminar_brief_router_is_a_teacher_display_route(self):
+        from display_route import TeacherDisplayRoute
+        from routes import seminar_brief
+
+        assert seminar_brief.admin_router.route_class is TeacherDisplayRoute
+        assert seminar_brief.admin_router.routes, "ゼミ前ブリーフのルートが登録されていない"
+        for route in seminar_brief.admin_router.routes:
+            assert isinstance(route, TeacherDisplayRoute), route.path
+
+    @pytest.mark.parametrize("module,name", TEACHER_NAMED_ENDPOINTS)
+    def test_named_endpoint_calls_the_teacher_projection(self, module, name):
+        src = _function_source(module, name)
+        assert any(entry in src for entry in TEACHER_PROJECTION_ENTRIES), f"{module}.{name}"
+
+    def test_projection_entries_reach_project_for_teacher(self):
+        assert "project_for_teacher(" in _function_source("theory_components", "project_teacher_dto")
+        view = _function_source("deliberation", "_teacher_view")
+        assert "project_teacher_dto(" in view and "project_for_teacher(" in view
+
+    def test_admin_routers_are_not_wrapped_wholesale(self):
+        # 件数・段階ラベルを正当に返す admin API が同居するため、大きなルーターには掛けない。
+        from display_route import TeacherDisplayRoute
+        from routes import deliberation, theory_components
+
+        assert theory_components.router.route_class is not TeacherDisplayRoute
+        assert deliberation.router.route_class is not TeacherDisplayRoute
+
+    def test_teacher_ui_does_not_read_stripped_keys(self):
+        # 教員の画面が落とすキー（数値・指紋）を読んでいないこと（module_key は番地なので残す）。
+        sources = [
+            ROOT / "frontend" / "public" / "js" / name
+            for name in ("admin-graph-review.js", "deliberation.js")
+        ]
+        stripped = sorted(
+            k for k in dp.FORBIDDEN_KEYS_TEACHER if k not in {"count", "counts", "limit", "k", "confidence"}
+        )
+        for path in sources:
+            text = path.read_text(encoding="utf-8")
+            for key in stripped:
+                assert f".{key}" not in text and f'["{key}"]' not in text, (path.name, key)
+
+
+class _NoRows:
+    def fetchall(self):
+        return []
+
+    def fetchone(self):
+        return None
+
+
+class _FakeSession:
+    def execute(self, *args, **kwargs):
+        return _NoRows()
+
+    def close(self):
+        pass
+
+
+def _fixture_docs():
+    return sorted(FIXTURES.glob("*.json"))
+
+
+def _equation_ids(artifacts: dict) -> set[str]:
+    payload = artifacts.get("equation_semantics") or {}
+    return {
+        str(r.get("equation_id"))
+        for r in (payload.get("records") or payload.get("equations") or [])
+        if isinstance(r, dict) and r.get("equation_id")
+    }
+
+
+def _leaks(value, equation_ids: set[str], key=None, out=None):
+    import re
+
+    out = [] if out is None else out
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _leaks(v, equation_ids, k, out)
+    elif isinstance(value, list):
+        for v in value:
+            _leaks(v, equation_ids, key, out)
+    elif isinstance(value, str) and not dp.is_address_key(key) and not dp.is_address_value(value):
+        if dp.is_internal_id_token(value) and not dp.is_display_key(key):
+            return out  # 1 トークンの番地の列（DP3）
+        for m in dp.INTERNAL_ID_TOKEN_RE.finditer(value):
+            out.append((key, m.group(0)))
+        for eid in equation_ids:
+            if re.search(r"(?<![A-Za-z0-9_])" + re.escape(eid) + r"(?![A-Za-z0-9_])", value):
+                out.append((key, eid))
+    return out
+
+
+@pytest.fixture
+def theory_routes(monkeypatch):
+    import routes.theory_components as tc
+
+    state: dict = {}
+    monkeypatch.setattr(tc, "_ensure_document_viewable", lambda *a: None)
+    monkeypatch.setattr(tc, "_components_for_document", lambda doc: [])
+    monkeypatch.setattr(
+        tc,
+        "_stored_component_graph",
+        lambda doc: dict(json.loads(json.dumps(state["graph"])), edges=[], graph_id="g1", document_id=doc),
+    )
+    monkeypatch.setattr(tc, "_normalize_stored_component_graph", lambda doc, graph, comps: graph)
+    monkeypatch.setattr(tc, "document_run_artifacts", lambda doc, **k: state["artifacts"])
+    monkeypatch.setattr(tc, "_pg_session", lambda: _FakeSession())
+    monkeypatch.setattr(tc, "_paper_layer_figure_rows", lambda doc: [])
+    monkeypatch.setattr(tc, "_paper_layer_explanation_rows", lambda doc: [])
+    return tc, state
+
+
+class TestTeacherFixtureLeakScan:
+    """実論文 3 本の fixture から組んだ教員向け DTO の表示文に内部 ID が残らない。"""
+
+    @pytest.mark.parametrize("fixture", _fixture_docs(), ids=lambda p: p.stem)
+    def test_theory_component_dtos_have_no_internal_ids_in_display_text(self, theory_routes, fixture):
+        tc, state = theory_routes
+        data = json.loads(fixture.read_text(encoding="utf-8"))
+        state["graph"], state["artifacts"] = data["graph_json"], data["artifacts"]
+        doc = data["document_id"]
+        equation_ids = _equation_ids(data["artifacts"])
+        dtos = {
+            "component-graph": tc.get_component_graph(doc, current_user={}).model_dump(),
+            "paper-layer": tc.get_document_paper_layer(doc, current_user={}),
+            "theory-modules": tc.get_document_theory_modules(doc, current_user={}),
+        }
+        for name, dto in dtos.items():
+            assert not _leaks(dto, equation_ids), (name, _leaks(dto, equation_ids)[:5])
+            keys = {k for k, _ in _walk(dto) if k is not None}
+            assert not (keys & (dp.FORBIDDEN_KEYS_TEACHER - {"confidence"})), name
+
+    def test_fixture_population_is_realistic(self, theory_routes):
+        # 射影なしの DTO には実際に内部 ID が表示文に含まれていた（このテストが空振りでない）。
+        tc, state = theory_routes
+        data = json.loads((FIXTURES / "arxiv_2609_15375v1_tex.json").read_text(encoding="utf-8"))
+        state["graph"], state["artifacts"] = data["graph_json"], data["artifacts"]
+        raw = tc.build_paper_layer_for_document(data["document_id"])
+        assert _leaks(raw, set())
+
+    def test_related_dto_is_projected(self, theory_routes, monkeypatch):
+        tc, _state = theory_routes
+        import routes.library as library_routes
+        from core.library import structural_matches
+
+        monkeypatch.setattr(tc, "_resolve_document", lambda ref: {"id": "11111111-1111-1111-1111-111111111111"})
+        monkeypatch.setattr(library_routes, "_document_access_checker", lambda uid: (lambda d: True))
+        monkeypatch.setattr(
+            structural_matches,
+            "build_related_for_document",
+            lambda *a, **k: {
+                "available": True,
+                "facts": ["同じ構造の外枠 theory_op_0003 を持つ論文があります。"],
+                "modules": [{"module_key": "m2:abc", "titles": ["A"], "structure_fingerprint": "fp"}],
+                "hidden": False,
+            },
+        )
+        out = tc.get_document_theory_modules_related("doc", current_user={"id": "u"})
+        assert "theory_op_0003" not in out["facts"][0]
+        assert out["modules"][0]["module_key"] == "m2:abc"  # 番地（UI のキー）は残る
+        assert "structure_fingerprint" not in out["modules"][0]

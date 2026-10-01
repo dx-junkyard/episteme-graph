@@ -45,6 +45,10 @@ class DependencyGraph:
     claim_refs: dict[str, set[str]] = field(default_factory=dict)
     equation_refs: dict[str, set[str]] = field(default_factory=dict)
     document_ids: list[str] = field(default_factory=list)
+    # 表示用の補助（読める名前を組むため。依存計算には使わない — 第 17 周 te-05）:
+    # ノード → 根拠の主張 ID（graph 上の綴りのまま）/ 操作語彙（``infer_intermediate_claim`` 等）。
+    node_claim_ids: dict[str, list[str]] = field(default_factory=dict)
+    node_operations: dict[str, str] = field(default_factory=dict)
 
     def downstream(self, node_id: str) -> set[str]:
         """node_id に依存する下流ノード集合（自身は含まない）。閉路対応。"""
@@ -141,11 +145,15 @@ def build_dependency_graph(session, course_id: str = "", document_id: str = "") 
                 node.get("visual_label") or node.get("display_label") or node.get("label") or nid
             )
             graph.node_layers[nid] = str(node.get("graph_layer") or "main")
+            graph.node_operations[nid] = str(node.get("operation") or "")
             for key in _NODE_CLAIM_KEYS:
                 for cid in _as_list(node.get(key)):
                     claim_id = str(cid or "").strip()
                     if claim_id:
                         graph.claim_refs.setdefault(claim_id, set()).add(nid)
+                        claims = graph.node_claim_ids.setdefault(nid, [])
+                        if claim_id not in claims:
+                            claims.append(claim_id)
             for key in _NODE_EQUATION_KEYS:
                 for eid in _as_list(node.get(key)):
                     eq_id = str(eid or "").strip()

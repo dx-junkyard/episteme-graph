@@ -710,6 +710,10 @@ def plain_math(text: str) -> str:
     out = re.sub(r"\\\\+(?=[A-Za-z])", r"\\", out)
     out = re.sub(r"\\\\+", " ", out)
     out = re.sub(r"\\(?:mid|vert)\b", " | ", out)
+    # エスケープした波括弧・記号（``\{\Theta\}`` / ``\_``）はバックスラッシュごと畳む
+    # （第 17 周: 波括弧だけ消えて「\Θ^2_GW\」が残った）。
+    out = re.sub(r"\\[{}]", "", out)
+    out = re.sub(r"\\([_%&#])", r"\1", out)
     # 記号名の置換は装飾コマンドを剥がす前に行う（剥がした後だと ``\\cdot\\vec{k}`` が
     # ``\\cdotk`` になって名前の境界が消える）。
     out = re.sub(r"\\([A-Za-z]+)", lambda m: _PLAIN_GREEK.get(m.group(1), m.group(0)), out)
@@ -720,6 +724,8 @@ def plain_math(text: str) -> str:
     out = re.sub(r"\\(?:left|right|,|;|!|quad|qquad)", "", out)
     out = re.sub(r"\\([A-Za-z]+)", r"\1", out)
     out = out.replace("{", "").replace("}", "")
+    # 名前の付かない残りのバックスラッシュ（``\ `` 等）は表示に出さない。
+    out = out.replace("\\", "")
     return re.sub(r"\s+", " ", out).strip()
 
 

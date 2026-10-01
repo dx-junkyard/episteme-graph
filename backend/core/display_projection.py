@@ -25,7 +25,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from core.text_excerpt import looks_like_tex_math
 
@@ -144,19 +144,45 @@ def contains_internal_id(value: Any) -> bool:
 EMBED_MARKER_RE = re.compile(r"!?\[\[(?:[^\[\]\n]|\[\[[^\[\]\n]*\]\])*\]\]")
 
 
-def mask_internal_ids(value: Any, replacement: str = UNIDENTIFIED_ELEMENT_TEXT) -> str:
+#: 内部 ID トークン → 読める語。``None`` / 空文字を返せば既定の置き換え語を使う。
+TokenReplacer = Callable[[str], "str | None"]
+
+
+def mask_internal_ids(
+    value: Any,
+    replacement: str = UNIDENTIFIED_ELEMENT_TEXT,
+    *,
+    token_replacer: "TokenReplacer | None" = None,
+) -> str:
     """文字列中の内部 ID トークンを ``replacement`` に置き換える（前後の空白は保つ）。
 
     埋め込み参照（:data:`EMBED_MARKER_RE`）の内側は番地なので置き換えない。
+    ``token_replacer`` を渡すと、トークンごとに読める語（例: 式 ID → 「式 (12)」）を
+    先に引き、引けなかったものだけ ``replacement`` にする（教員向けの面が式の記録を
+    持っているときに使う。本モジュールは記録を読まない）。
     """
     text = str(value if value is not None else "")
+
+    def _sub(chunk: str) -> str:
+        if token_replacer is None:
+            return INTERNAL_ID_TOKEN_RE.sub(replacement, chunk)
+
+        def _one(match: "re.Match[str]") -> str:
+            try:
+                readable = token_replacer(match.group(0))
+            except Exception:  # noqa: BLE001 — 読める語が引けなくても既定語で隠す
+                readable = None
+            return readable or replacement
+
+        return INTERNAL_ID_TOKEN_RE.sub(_one, chunk)
+
     parts: list[str] = []
     cursor = 0
     for marker in EMBED_MARKER_RE.finditer(text):
-        parts.append(INTERNAL_ID_TOKEN_RE.sub(replacement, text[cursor:marker.start()]))
+        parts.append(_sub(text[cursor:marker.start()]))
         parts.append(marker.group(0))
         cursor = marker.end()
-    parts.append(INTERNAL_ID_TOKEN_RE.sub(replacement, text[cursor:]))
+    parts.append(_sub(text[cursor:]))
     return "".join(parts)
 
 
@@ -457,7 +483,13 @@ OPTION_LIST_KEYS: frozenset[str] = frozenset({"response_space", "next_actions", 
 
 
 def _project_string(
-    key: Any, value: str, *, audience: Audience, element_type: Any, in_options: bool = False
+    key: Any,
+    value: str,
+    *,
+    audience: Audience,
+    element_type: Any,
+    in_options: bool = False,
+    token_replacer: "TokenReplacer | None" = None,
 ) -> str:
     if is_address_key(key) or is_address_value(value):
         return value
@@ -470,7 +502,7 @@ def _project_string(
                 return value
             if audience == "learner" and str(key or "") in LABEL_KEYS and element_type:
                 return generic_label(element_type)
-        text = mask_internal_ids(text)
+        text = mask_internal_ids(text, token_replacer=token_replacer)
     # 英語の生成文の置換は、要素の種類（element_type）が分かり、選択肢の列の中でないときだけ
     # （種類が分からない・選択肢のラベルを一般ラベルへ畳むと、別々の項目が同じ語になる）。
     if (
@@ -492,6 +524,7 @@ def _project(
     forbidden: frozenset[str],
     element_type: Any,
     in_options: bool = False,
+    token_replacer: "TokenReplacer | None" = None,
 ) -> Any:
     if hasattr(value, "model_dump") and callable(getattr(value, "model_dump")):
         value = value.model_dump()
@@ -502,7 +535,13 @@ def _project(
             if k in forbidden:
                 continue
             out[k] = _project(
-                v, key=k, audience=audience, forbidden=forbidden, element_type=own_type, in_options=in_options
+                v,
+                key=k,
+                audience=audience,
+                forbidden=forbidden,
+                element_type=own_type,
+                in_options=in_options,
+                token_replacer=token_replacer,
             )
         return out
     if isinstance(value, (list, tuple)):
@@ -515,16 +554,24 @@ def _project(
                 forbidden=forbidden,
                 element_type=element_type,
                 in_options=child_in_options,
+                token_replacer=token_replacer,
             )
             for v in value
         ]
         return items if isinstance(value, list) else tuple(items)
     if isinstance(value, str):
-        return _project_string(key, value, audience=audience, element_type=element_type, in_options=in_options)
+        return _project_string(
+            key,
+            value,
+            audience=audience,
+            element_type=element_type,
+            in_options=in_options,
+            token_replacer=token_replacer,
+        )
     return value
 
 
-def project(payload: Any, *, audience: Audience) -> Any:
+def project(payload: Any, *, audience: Audience, token_replacer: "TokenReplacer | None" = None) -> Any:
     """応答を画面向けに射影する（再帰・入力不変）。
 
     - 禁止キー（:data:`FORBIDDEN_KEYS_LEARNER` / :data:`FORBIDDEN_KEYS_TEACHER`）は値ごと落とす。
@@ -534,19 +581,25 @@ def project(payload: Any, *, audience: Audience) -> Any:
       置き換え、それ以外のキーでは番地の値として残す（``chain`` / ``edges`` 等）。
     - 学習者向けでは :data:`LABEL_KEYS` の英語生成文を一般ラベルへ置き換える。
     - pydantic モデルは ``model_dump()`` で dict にしてから射影する。
+    - ``token_replacer`` は埋め込まれた内部 ID を読める語へ置き換える関数（任意）。
     """
     if audience not in ("learner", "teacher"):
         raise ValueError(f"unknown audience: {audience!r}")
     forbidden = FORBIDDEN_KEYS_LEARNER if audience == "learner" else FORBIDDEN_KEYS_TEACHER
-    return _project(payload, key=None, audience=audience, forbidden=forbidden, element_type=None)
+    return _project(
+        payload, key=None, audience=audience, forbidden=forbidden, element_type=None, token_replacer=token_replacer
+    )
 
 
 def project_for_learner(payload: Any) -> Any:
     return project(payload, audience="learner")
 
 
-def project_for_teacher(payload: Any) -> Any:
-    return project(payload, audience="teacher")
+def project_for_teacher(payload: Any, *, token_replacer: "TokenReplacer | None" = None) -> Any:
+    """教員向けの名指しの面（グラフレビュー・論文の順・理論モジュール・ゼミ前ブリーフ・W層の
+    要素文脈・グラフ全体対話）が通す射影（DP5 / DP7）。段階ラベル ``*_label`` は残し、
+    TM6 ∪ PL4 の数値キーを落とし、表示文に埋め込まれた内部 ID を読める語へ置き換える。"""
+    return project(payload, audience="teacher", token_replacer=token_replacer)
 
 
 __all__ = [
@@ -583,6 +636,7 @@ __all__ = [
     "THEORY_MODULE_FORBIDDEN_KEYS",
     "THEORY_MODULE_INTERNAL_ID_RE",
     "THEORY_MODULE_OTHER_INTERNAL_ID_WITH_TAIL_RE",
+    "TokenReplacer",
     "UNIDENTIFIED_ELEMENT_TEXT",
     "UUID_ANY_RE",
     "UUID_FULL_RE",

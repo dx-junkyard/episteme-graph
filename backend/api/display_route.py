@@ -1,4 +1,4 @@
-"""学習者向けルートの表示投影（``LearnerDisplayRoute``）。
+"""学習者向けルートの表示投影（``LearnerDisplayRoute``）と教員向けの名指しの面（``TeacherDisplayRoute``）。
 
 正本設計書: ``docs/features/display_projection_design.md``（DP1 / DP6）。
 
@@ -25,7 +25,7 @@ from typing import Any, Callable
 from fastapi.routing import APIRoute
 from starlette.responses import Response
 
-from core.display_projection import project_for_learner
+from core.display_projection import project_for_learner, project_for_teacher
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +81,65 @@ class LearnerDisplayRoute(APIRoute):
         super().__init__(path, wrap_learner_endpoint(endpoint), **kwargs)
 
 
+# ---------------------------------------------------------------------------
+# 教員向けの名指しの面（DP7）
+# ---------------------------------------------------------------------------
+
+
+def project_teacher_payload(value: Any) -> Any:
+    """エンドポイントの戻り値を教員向けに射影する（対象外の型は素通し・DP6 で縮退）。"""
+    if value is None or isinstance(value, (Response, str, bytes)):
+        return value
+    if not isinstance(value, (dict, list, tuple)) and not callable(getattr(value, "model_dump", None)):
+        return value
+    try:
+        return project_for_teacher(value)
+    except Exception:  # noqa: BLE001 — DP6: 射影の失敗で応答を止めない
+        logger.warning("teacher display projection failed", exc_info=True)
+        return value
+
+
+def wrap_teacher_endpoint(endpoint: Callable[..., Any]) -> Callable[..., Any]:
+    """エンドポイントを教員向け射影付きの包みにする（同期 / 非同期を保つ）。"""
+    if getattr(endpoint, "__teacher_display_projected__", False):
+        return endpoint
+    if inspect.iscoroutinefunction(endpoint):
+
+        @functools.wraps(endpoint)
+        async def _async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            return project_teacher_payload(await endpoint(*args, **kwargs))
+
+        wrapper: Callable[..., Any] = _async_wrapper
+    else:
+
+        @functools.wraps(endpoint)
+        def _sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            return project_teacher_payload(endpoint(*args, **kwargs))
+
+        wrapper = _sync_wrapper
+    wrapper.__teacher_display_projected__ = True  # type: ignore[attr-defined]
+    return wrapper
+
+
+class TeacherDisplayRoute(APIRoute):
+    """戻り値を ``project_for_teacher`` に通す APIRoute（DP7）。
+
+    管理画面のルーター全体には使わない（件数・段階ラベルを正当に返す admin API がある）。
+    名指しの面だけを持つ専用ルーター（ゼミ前ブリーフ）に ``route_class=`` で付ける。
+    名指しの面が大きな admin ルーターに同居しているときは、エンドポイントの中で
+    ``project_for_teacher(`` を明示的に呼ぶ（ガードレールがどちらかを検査する）。
+    """
+
+    def __init__(self, path: str, endpoint: Callable[..., Any], **kwargs: Any) -> None:
+        super().__init__(path, wrap_teacher_endpoint(endpoint), **kwargs)
+
+
 __all__ = [
     "LearnerDisplayRoute",
+    "TeacherDisplayRoute",
     "project_learner_model",
     "project_learner_payload",
+    "project_teacher_payload",
     "wrap_learner_endpoint",
+    "wrap_teacher_endpoint",
 ]

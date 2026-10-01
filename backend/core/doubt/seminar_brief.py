@@ -112,17 +112,28 @@ def _derive_course_id(session, document_id: str) -> str:
     return ""
 
 
+#: ノードの読める名前に添える根拠の主張本文の上限（語の途中で切らない）。
+_NODE_CLAIM_EXCERPT_MAX = 90
+
+
 class _ReadableLabels:
-    """ブリーフの事実文から内部 ID を外すための読み時辞書（第 15 周 te-05 seq29）。
+    """ブリーフの事実文から内部 ID を外すための読み時辞書（第 15 周 te-05 seq29 / 第 17 周 te-05）。
 
     式 ID は ``equation_semantics`` の記録から「式 (N)」/「番号なしの式（左辺 X）」に、
-    グラフノード ID は依存グラフのノード表示名に、それ以外は「（本文を特定できない要素）」に
-    置き換える。取得失敗は fail-soft（置換語だけで ID は出さない）。
+    グラフノード ID は**読める名前**（操作の日本語名 + 根拠の主張本文）に、それ以外は
+    「（本文を特定できない要素）」に置き換える。取得失敗は fail-soft（置換語だけで ID は出さない）。
+
+    依存グラフのノード名は A層の ``visual_label``（``Infer intermediate claim\nsynth_claim_0013 → clai``
+    — 2 行目は 30 字で切られる）を優先するため、そのまま隠すと「Infer intermediate claim
+    （本文を特定できない要素） → clai」になり中身が読めなかった。ノードの根拠主張
+    （``claim_object_builder`` の本文）と操作の日本語名（``element_vocab.operation_label``）で組み直す。
     """
 
     def __init__(self, session, document_id: str, course_id: str = "") -> None:
         self.equation_records: dict = {}
         self.node_labels: dict[str, str] = {}
+        self.claim_texts: dict[str, str] = {}
+        graph = None
         try:
             from core.document_pipeline.persistence import document_run_artifacts
 
@@ -132,15 +143,71 @@ class _ReadableLabels:
             for record in payload.get("records") or payload.get("equations") or []:
                 if isinstance(record, dict) and record.get("equation_id"):
                     self.equation_records.setdefault(str(record["equation_id"]), record)
+            claims_payload = artifacts.get("claim_object_builder")
+            claims_payload = claims_payload if isinstance(claims_payload, dict) else {}
+            for claim in claims_payload.get("claims") or claims_payload.get("claim_objects") or []:
+                if not isinstance(claim, dict):
+                    continue
+                claim_id = str(claim.get("claim_id") or "").strip()
+                text = str(claim.get("normalized_text") or claim.get("text") or "").strip()
+                if claim_id and text:
+                    self.claim_texts.setdefault(claim_id, text)
         except Exception:  # noqa: BLE001
-            logger.debug("seminar brief equation records unavailable for %s", document_id, exc_info=True)
+            logger.debug("seminar brief artifacts unavailable for %s", document_id, exc_info=True)
         try:
             from core.doubt.dependency import build_dependency_graph
 
             graph = build_dependency_graph(session, course_id=course_id, document_id=document_id)
-            self.node_labels = dict(graph.node_labels)
         except Exception:  # noqa: BLE001
             logger.debug("seminar brief node labels unavailable for %s", document_id, exc_info=True)
+        if graph is not None:
+            for nid, raw in dict(graph.node_labels).items():
+                self.node_labels[nid] = self._readable_node_label(
+                    raw,
+                    operation=str(getattr(graph, "node_operations", {}).get(nid) or ""),
+                    claim_ids=list(getattr(graph, "node_claim_ids", {}).get(nid) or []),
+                )
+
+    def _claim_text(self, claim_id: str) -> str:
+        from core.knowledge_objects.references import normalize_claim_ref
+
+        text = self.claim_texts.get(claim_id)
+        if not text:
+            try:
+                text = self.claim_texts.get(normalize_claim_ref(claim_id))
+            except Exception:  # noqa: BLE001
+                text = None
+        return str(text or "")
+
+    def _readable_node_label(self, raw: Any, *, operation: str, claim_ids: list[str]) -> str:
+        from core.element_vocab import operation_label
+        from core.text_excerpt import excerpt
+        from core.theory_modules.schema import UNIDENTIFIED_ELEMENT_TEXT, mask_internal_ids_readable
+
+        head = str(raw or "").split("\n", 1)[0].strip()
+        op_ja = operation_label(operation)
+        claim = ""
+        for claim_id in claim_ids:
+            text = self._claim_text(claim_id)
+            if text:
+                claim = excerpt(mask_internal_ids_readable(text, self.equation_records), _NODE_CLAIM_EXCERPT_MAX)
+                if claim:
+                    break
+        masked_head = mask_internal_ids_readable(head, self.equation_records)
+        generic_head = (
+            not masked_head
+            or UNIDENTIFIED_ELEMENT_TEXT in masked_head
+            or _dp.contains_internal_id(head)
+            or bool(op_ja and operation and _is_operation_phrase(masked_head, operation))
+        )
+        if claim and generic_head:
+            return f"{op_ja}: {claim}" if op_ja else claim
+        if generic_head:
+            stripped = masked_head.replace(UNIDENTIFIED_ELEMENT_TEXT, "").strip()
+            if op_ja and (not stripped or _is_operation_phrase(stripped, operation)):
+                return op_ja
+            return masked_head or op_ja or UNIDENTIFIED_ELEMENT_TEXT
+        return masked_head
 
     def text(self, value: Any) -> str:
         from core.theory_modules.schema import (
@@ -159,6 +226,13 @@ class _ReadableLabels:
             return mask_internal_ids_readable(raw, self.equation_records)
         masked = mask_internal_ids_readable(raw, self.equation_records)
         return masked or UNIDENTIFIED_ELEMENT_TEXT
+
+
+def _is_operation_phrase(text: str, operation: str) -> bool:
+    """``text`` が操作語彙の英語の言い回しそのもの（``Infer intermediate claim``）か。"""
+    phrase = " ".join(str(operation or "").replace("_", " ").split()).lower()
+    body = " ".join(str(text or "").split()).lower()
+    return bool(phrase) and (body == phrase or body.startswith(phrase + " ") or body.startswith(phrase + "("))
 
 
 def _readable_items(items: list[dict], labels: "_ReadableLabels", keys: tuple[str, ...]) -> None:
@@ -226,7 +300,9 @@ def _attach_stumble_axes(document_id: str, fragile_items: list[dict]) -> None:
             item["stumble"] = stumble
 
 
-def _single_support_lines(session, course_id: str, document_id: str) -> list[dict]:
+def _single_support_lines(
+    session, course_id: str, document_id: str, labels: "_ReadableLabels | None" = None
+) -> list[dict]:
     """区画②: document の台帳対象のうち独立支持経路が1本（level=single）のものの事実文。
 
     共有文脈（``build_support_context``）は**1回だけ**構築し、対象ごとに
@@ -251,6 +327,13 @@ def _single_support_lines(session, course_id: str, document_id: str) -> list[dic
     ctx = build_support_context(session, course_id=course_id, document_id=document_id)
     if ctx is None:
         return []
+    if labels is not None and labels.node_labels:
+        # 崩れる対象（cut_members）の名前も読める名前で組む（事実文に生の英語操作名 +
+        # 「（本文を特定できない要素）」が並ぶのを防ぐ — 第 17 周 te-05）。
+        try:
+            ctx.graph.node_labels.update(labels.node_labels)
+        except Exception:  # noqa: BLE001
+            logger.debug("seminar brief node label override failed", exc_info=True)
 
     out: list[dict] = []
     for target_id, target_type in sorted((str(r[0]), str(r[1])) for r in rows):
@@ -356,7 +439,7 @@ def build_seminar_brief(session, document_ref: str) -> dict:
     _attach_stumble_axes(document_id, fragile)
 
     labels = _ReadableLabels(session, document_id, course_id)
-    single_lines = _single_support_lines(session, course_id, document_id)
+    single_lines = _single_support_lines(session, course_id, document_id, labels)
     skies = _clear_skies(assumption_items)
     _readable_items(fragile, labels, ("statement",))
     _readable_items(single_lines, labels, ("statement", "fact_line"))

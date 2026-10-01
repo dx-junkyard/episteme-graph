@@ -49,6 +49,13 @@ def _challenge_count_label(count: int) -> str:
     return "複数"
 
 
+def _label_excerpt(value: Any, limit: int) -> str:
+    """表示ラベルの丸め。語の途中で切らない（「→ clai」の切れ端を出さない — 第 17 周 te-05）。"""
+    from core.text_excerpt import excerpt
+
+    return excerpt(value, limit) or str(value or "")[:limit]
+
+
 def target_label(session, target_type: str, target_id: str) -> str:
     """台帳対象の表示ラベルを引く（見つからなければ id をそのまま）。"""
     try:
@@ -58,21 +65,21 @@ def target_label(session, target_type: str, target_id: str) -> str:
                 {"tid": target_id},
             ).fetchone()
             if row and row[0]:
-                return str(row[0])[:160]
+                return _label_excerpt(row[0], 160)
         elif target_type == "component":
             row = session.execute(
                 sa_text("SELECT name FROM theory_components_live WHERE id::text = :tid"),
                 {"tid": target_id},
             ).fetchone()
             if row and row[0]:
-                return str(row[0])[:160]
+                return _label_excerpt(row[0], 160)
         elif target_type == "assumption":
             row = session.execute(
                 sa_text("SELECT statement FROM assumption_nodes WHERE id::text = :tid"),
                 {"tid": target_id},
             ).fetchone()
             if row and row[0]:
-                return str(row[0])[:200]
+                return _label_excerpt(row[0], 200)
     except Exception:
         logger.debug("target label lookup failed for %s/%s", target_type, target_id, exc_info=True)
     return target_id

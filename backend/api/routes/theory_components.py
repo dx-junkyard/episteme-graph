@@ -3356,31 +3356,147 @@ def mask_equation_ids_in_label(text: str, equation_records: dict) -> str:
     return mask_internal_ids_readable(text, equation_records)
 
 
-def _mask_node_equation_ids(document_id: str, graph: dict) -> None:
-    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
-    from core.theory_modules.schema import EQUATION_ID_TOKEN_RE
-
-    if not any(
-        isinstance(n, dict) and any(EQUATION_ID_TOKEN_RE.search(str(n.get(k) or "")) for k in _NODE_LABEL_KEYS)
-        for n in nodes
-    ):
-        return
-    try:
-        artifacts = document_run_artifacts(document_id) or {}
-    except Exception:
-        logger.debug("component-graph: artifacts unavailable for label masking", exc_info=True)
-        artifacts = {}
+def _equation_records_for_document(document_id: str, artifacts: dict | None = None) -> dict:
+    """``equation_semantics`` の記録を ``equation_id`` で引く索引（取れなければ空・fail-soft）。"""
+    if artifacts is None:
+        try:
+            artifacts = document_run_artifacts(document_id) or {}
+        except Exception:
+            logger.debug("equation records unavailable for document %s", document_id, exc_info=True)
+            artifacts = {}
     payload = artifacts.get("equation_semantics") if isinstance(artifacts.get("equation_semantics"), dict) else {}
     records: dict = {}
     for record in (payload.get("records") or payload.get("equations") or []):
         if isinstance(record, dict) and record.get("equation_id"):
             records.setdefault(str(record["equation_id"]), record)
+    return records
+
+
+def _teacher_token_replacer(equation_records: dict):
+    """教員向け射影の ``token_replacer``: 式 ID は印字番号「式 (12)」/「番号なしの式」へ、
+    それ以外は ``None``（射影の既定語「（本文を特定できない要素）」）を返す（PL7 / TM10）。"""
+    from core.theory_modules.schema import UNNUMBERED_EQUATION_TEXT, equation_display_name
+
+    records = equation_records or {}
+
+    def _replace(token: str) -> str | None:
+        key = str(token or "").rstrip("_.-")
+        record = records.get(key) or records.get(f"eq_{key}")
+        if record:
+            return equation_display_name(record)
+        if re.match(r"^(?:eq[_\-]|eqcand_|tex_)", key, re.IGNORECASE):
+            return UNNUMBERED_EQUATION_TEXT
+        return None
+
+    return _replace
+
+
+def project_teacher_dto(document_id: str, payload: Any, *, artifacts: dict | None = None) -> Any:
+    """教員向けの名指しの面の DTO を表示投影に通す（DP7）。
+
+    数値キー（TM6 ∪ PL4）を落とし、表示文に埋め込まれた内部 ID を式の印字番号か
+    「（本文を特定できない要素）」へ置き換える。番地キー（``*_id`` / ``*_key`` 等）は
+    画面遷移に要るので残す。射影が失敗しても応答は止めない（DP6）。
+    """
+    from core.display_projection import project_for_teacher
+
+    records: dict = {}
+    try:
+        records = _equation_records_for_document(document_id, artifacts)
+        replacer = _teacher_token_replacer(records)
+    except Exception:
+        logger.debug("teacher projection: equation records unavailable", exc_info=True)
+        replacer = None
+    try:
+        projected = project_for_teacher(payload, token_replacer=replacer)
+    except Exception:  # noqa: BLE001 — DP6
+        logger.warning("teacher display projection failed for document %s", document_id, exc_info=True)
+        return payload
+    try:
+        return _mask_named_equation_ids(projected, records)
+    except Exception:  # noqa: BLE001 — DP6
+        logger.debug("teacher projection: named equation id masking failed", exc_info=True)
+        return projected
+
+
+def _mask_named_equation_ids(payload: Any, records: dict) -> Any:
+    """TeX ラベル由来の式 ID（``eq_delta_b_flamingo`` — 数字を含まないので統合語彙に当たらない）を、
+    その文書の式の記録にある ID に限って表示文から印字番号へ置き換える（番地キーは残す）。"""
+    from core.display_projection import is_address_key, is_address_value
+    from core.theory_modules.schema import equation_display_name
+
+    named = sorted(
+        (eid for eid in (records or {}) if eid and not any(ch.isdigit() for ch in eid)),
+        key=len,
+        reverse=True,
+    )
+    if not named:
+        return payload
+    pattern = re.compile(r"(?<![A-Za-z0-9_])(?:" + "|".join(re.escape(e) for e in named) + r")(?![A-Za-z0-9_])")
+
+    def _walk(value: Any, key: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: _walk(v, k) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_walk(v, key) for v in value]
+        if isinstance(value, str) and not is_address_key(key) and not is_address_value(value):
+            if value in records:
+                # 値全体が式 ID 1 つ（番地の列）のときは表示文のキーでだけ置き換える。
+                from core.display_projection import is_display_key
+
+                return equation_display_name(records[value]) if is_display_key(key) else value
+            return pattern.sub(lambda m: equation_display_name(records.get(m.group(0))), value)
+        return value
+
+    return _walk(payload, None)
+
+
+#: A層の ``visual_label`` 2 行目（``入力 → 出力``）は 30 字で切られており、内部 ID の
+#: 切れ端（``synth_claim_0013 → clai``）が残る。読めない 2 行目は落として動詞だけにする。
+_VISUAL_FLOW_CUT_LENGTH = 30
+
+
+def _readable_visual_label(value: str, equation_records: dict) -> str:
+    from core.display_projection import UNIDENTIFIED_ELEMENT_TEXT, contains_internal_id
+    from core.theory_modules.schema import contains_internal_id as tm_contains_internal_id
+    from core.theory_modules.schema import mask_internal_ids_readable
+
+    lines = str(value or "").split("\n")
+    head = mask_internal_ids_readable(lines[0], equation_records)
+    if len(lines) < 2:
+        return head
+    flow = "\n".join(lines[1:])
+    if not (contains_internal_id(flow) or tm_contains_internal_id(flow)):
+        return f"{head}\n{flow}" if head else flow
+    masked = mask_internal_ids_readable(flow, equation_records)
+    if not masked or UNIDENTIFIED_ELEMENT_TEXT in masked or len(flow) >= _VISUAL_FLOW_CUT_LENGTH:
+        return head
+    return f"{head}\n{masked}" if head else masked
+
+
+def _mask_node_equation_ids(document_id: str, graph: dict) -> None:
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    from core.display_projection import contains_internal_id
+    from core.theory_modules.schema import EQUATION_ID_TOKEN_RE
+    from core.theory_modules.schema import contains_internal_id as tm_contains_internal_id
+
+    def _has_id(value: Any) -> bool:
+        text = str(value or "")
+        return bool(EQUATION_ID_TOKEN_RE.search(text)) or contains_internal_id(text) or tm_contains_internal_id(text)
+
+    if not any(isinstance(n, dict) and any(_has_id(n.get(k)) for k in _NODE_LABEL_KEYS) for n in nodes):
+        return
+    records = _equation_records_for_document(document_id)
     for node in nodes:
         if not isinstance(node, dict):
             continue
         for key in _NODE_LABEL_KEYS:
             value = node.get(key)
-            if isinstance(value, str) and EQUATION_ID_TOKEN_RE.search(value):
+            if not isinstance(value, str) or not _has_id(value):
+                continue
+            if key == "visual_label":
+                node[key] = _readable_visual_label(value, records)
+            else:
                 node[key] = mask_equation_ids_in_label(value, records)
 
 
@@ -3393,6 +3509,7 @@ def _attach_main_stage_display_labels(graph: dict, components: list) -> None:
     第 15 周 product seq146）。graph_json は書き換えない（読み時の射影）。
     """
     from core.element_vocab import THEORY_STAGE_DISPLAY_TO_KEY, THEORY_STAGE_LABELS
+    from core.text_excerpt import looks_like_tex_math
     from core.theory_modules.schema import mask_internal_ids_readable
 
     summary_by_id: dict[str, str] = {}
@@ -3413,6 +3530,12 @@ def _attach_main_stage_display_labels(graph: dict, components: list) -> None:
         stage_ja = THEORY_STAGE_LABELS.get(key or str(node.get("theory_stage") or ""))
         if stage_ja:
             theory_object = mask_internal_ids_readable(node.get("theory_object") or "")
+            if "\\" in theory_object or "$" in theory_object or looks_like_tex_math(theory_object):
+                # 主グラフの表示ラベルはプレーンテキストで描かれる（キャンバス・チップ）。生 TeX
+                # （``M_{\mathrm{PISN}}``）は理論モジュールと同じ規則で読める形へ落とす。
+                from core.theory_modules.builder import plain_math
+
+                theory_object = plain_math(theory_object)
             node["display_label"] = f"{stage_ja}: {theory_object}" if theory_object else stage_ja
         rep = str(node.get("representative_component_id") or "")
         full = summary_by_id.get(rep, "")
@@ -3433,10 +3556,10 @@ def get_component_graph(
         _mask_node_equation_ids(document_id, stored_graph)
         _attach_main_stage_display_labels(stored_graph, components)
         stored_graph["reference_index"] = _build_graph_reference_index(document_id, stored_graph)
-        return ComponentGraphResponse(**stored_graph)
+        return ComponentGraphResponse(**project_teacher_dto(document_id, stored_graph))
     payload = _build_component_graph_payload(document_id, components)
     payload["reference_index"] = _build_graph_reference_index(document_id, payload)
-    return ComponentGraphResponse(**payload)
+    return ComponentGraphResponse(**project_teacher_dto(document_id, payload))
 
 
 # ---------------------------------------------------------------------------
@@ -3558,10 +3681,12 @@ def get_document_paper_layer(
     既存 ``GET .../component-graph`` のレスポンスには一切触れない（別経路・遅延取得）。
     """
     _ensure_document_viewable(document_id, current_user)  # PL6
-    return build_paper_layer_for_document(document_id)
+    sink: dict = {}
+    dto = build_paper_layer_for_document(document_id, artifacts_sink=sink)
+    return project_teacher_dto(document_id, dto, artifacts=sink.get("artifacts") or {})
 
 
-def build_paper_layer_for_document(document_id: str) -> dict:
+def build_paper_layer_for_document(document_id: str, *, artifacts_sink: dict | None = None) -> dict:
     """論文層 DTO を組み立てる（**権限ゲートは呼び出し側の責務**）。
 
     ``GET .../paper-layer`` の本体であり、画面文脈アダプター（``core.assistant_context``）
@@ -3592,6 +3717,9 @@ def build_paper_layer_for_document(document_id: str) -> dict:
     except Exception:
         logger.debug("paper_layer: artifacts unavailable for document %s", document_id, exc_info=True)
         artifacts = {}
+    if artifacts_sink is not None:
+        # 表示投影（式の印字番号への置き換え）が同じ artifact を使う — 二度読まない。
+        artifacts_sink["artifacts"] = artifacts or {}
 
     try:
         figure_rows = _paper_layer_figure_rows(document_id)
@@ -3689,10 +3817,12 @@ def get_document_theory_modules(
     既存 ``GET .../component-graph`` のレスポンスには一切触れない（別経路・遅延取得）。
     """
     _ensure_document_viewable(document_id, current_user)  # TM9
-    return build_theory_modules_for_document(document_id)
+    sink: dict = {}
+    dto = build_theory_modules_for_document(document_id, artifacts_sink=sink)
+    return project_teacher_dto(document_id, dto, artifacts=sink.get("artifacts") or {})
 
 
-def build_theory_modules_for_document(document_id: str) -> dict:
+def build_theory_modules_for_document(document_id: str, *, artifacts_sink: dict | None = None) -> dict:
     """理論モジュール DTO を組み立てる（**権限ゲートは呼び出し側の責務**）。
 
     ``GET .../theory-modules`` の本体。画面文脈アダプター等から使うときも、呼び出す前に
@@ -3725,6 +3855,8 @@ def build_theory_modules_for_document(document_id: str) -> dict:
     except Exception:
         logger.debug("theory_modules: artifacts unavailable for document %s", document_id, exc_info=True)
         artifacts = {}
+    if artifacts_sink is not None:
+        artifacts_sink["artifacts"] = artifacts or {}
     try:
         from core.document_pipeline.persistence import equation_stable_key_map
 
@@ -5217,7 +5349,7 @@ def get_document_theory_modules_related(
     can_view = _document_access_checker(str(current_user.get("id") or ""))
     session = _pg_session()
     try:
-        return structural_matches.build_related_for_document(
+        related = structural_matches.build_related_for_document(
             session,
             canonical_id,
             rule_version=RULE_VERSION,
@@ -5229,3 +5361,4 @@ def get_document_theory_modules_related(
         raise HTTPException(status_code=500, detail="同じ構造の論文を照合できませんでした。")
     finally:
         session.close()
+    return project_teacher_dto(canonical_id, related)
