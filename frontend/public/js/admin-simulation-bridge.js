@@ -764,6 +764,7 @@
         " " + chip(labels.separation, "simulation-chip-label") +
         " " + chip(labels.reference, "simulation-chip-label") +
         (r.created_at ? ' <span class="simulation-muted">' + esc(r.created_at) + "</span>" : "") +
+        sharedChip(r) +
       "</div>" +
       (result.statement ? '<p class="simulation-statement">' + esc(result.statement) + "</p>" : "") +
       factsHtml(facts) +
@@ -784,6 +785,14 @@
     } catch (e) { /* fail-soft */ }
   }
 
+  // v1.1（SB12/SB13）: 学習者が本人の操作で共有した実行だけがここに現れる。
+  // 学習者の識別子は出さない（サーバが shared_by_label を付けたときだけ添える）。
+  function sharedChip(r) {
+    if (!r || r.shared !== true) return "";
+    var label = typeof r.shared_by_label === "string" && r.shared_by_label ? " " + esc(r.shared_by_label) : "";
+    return " " + chip("学習者が共有", "simulation-chip-shared") + label;
+  }
+
   function renderRunHistory() {
     var list = runs();
     if (!list.length) return '<p class="simulation-muted">この教材の実行記録はまだありません。</p>';
@@ -794,7 +803,8 @@
         var active = current && String(current.id) === String(r.id);
         return '<li><button type="button" class="simulation-history-btn' + (active ? " is-active" : "") + '" data-sim-action="select-run" data-run-id="' + esc(r.id) + '">' +
           esc(r.created_at || "") + " " + esc(RUN_STATUS_LABELS[r.status] || r.status || "") +
-          (labels.agreement ? " / " + esc(labels.agreement) : "") + "</button></li>";
+          (labels.agreement ? " / " + esc(labels.agreement) : "") + "</button>" +
+          sharedChip(r) + "</li>";
       }).join("") + "</ul></div>";
   }
 

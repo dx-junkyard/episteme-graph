@@ -12413,3 +12413,88 @@ button.element-card-item:focus-visible .element-card-item-label {
 .simulation-notice { padding: 6px 10px; border-radius: 6px; font-size: 12.5px; margin: 4px 0; border: 1px solid var(--color-border, #e2e8f0); }
 .simulation-notice.is-error { border-color: var(--color-border-danger, #fca5a5); }
 .simulation-notice.is-success { border-color: var(--color-border-success, #86efac); }
+
+/* ── 動かして確かめる（検証シミュレーション v1.1, simulation_bridge_design.md §14.4）──
+   パネルは教材区画（.material-region）の中に開き、開いている間は教材本文の場所を使う
+   （1画面レイアウト: 下段の flex: 0 0 auto 規約に触れず、区画内でだけスクロールする）。
+   予想の列には判定の色を付けない（SB14 / UC2）。 */
+.simulation-lab-btn {
+  border: 1px solid var(--color-border-secondary, #d0d7de);
+  background: var(--color-background-primary, #fff);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.simulation-lab-btn[hidden] { display: none; }
+.simulation-lab-btn[aria-pressed="true"] { background: var(--color-background-secondary, #f3f5f8); }
+.simulation-lab-region {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+}
+.simulation-lab-region[hidden] { display: none; }
+.material-region.simulation-lab-open { max-height: 70%; }
+.material-region.simulation-lab-open .material-body { display: none; }
+.sim-lab-card {
+  border: 1px solid var(--lx-line, #d0d7de);
+  border-radius: 10px;
+  background: var(--color-background-primary, #fff);
+  padding: 10px 12px;
+  font-size: 13px;
+}
+.sim-lab-head { display: flex; align-items: center; justify-content: space-between; }
+.sim-lab-title { font-weight: 600; font-size: 14px; }
+.sim-lab-close { border: none; background: none; font-size: 18px; cursor: pointer; color: var(--color-text-secondary, #57606a); }
+.sim-lab-lead { margin: 4px 0; }
+.sim-lab-muted { color: var(--color-text-secondary, #57606a); font-size: 12px; }
+.sim-lab-fact { margin: 4px 0; color: var(--color-text-secondary, #57606a); }
+.sim-lab-facts { margin: 4px 0 4px 18px; padding: 0; color: var(--color-text-secondary, #57606a); font-size: 12px; }
+.sim-lab-doc { margin: 4px 0; font-size: 12px; }
+.sim-lab-steps { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.sim-lab-step { border-top: 0.5px solid var(--color-border-tertiary, #e5e7eb); padding-top: 8px; }
+.sim-lab-step-head { font-weight: 600; margin-bottom: 4px; }
+.sim-lab-step-no { display: inline-block; min-width: 1.4em; }
+.sim-lab-sub { font-weight: 600; font-size: 12px; margin: 6px 0 2px; }
+.sim-lab-modules, .sim-lab-wirings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.sim-lab-module.is-inner { margin-left: 18px; }
+.sim-lab-module.is-active .sim-lab-module-btn { border-color: var(--color-text-primary, #1f2328); font-weight: 600; }
+.sim-lab-module-btn, .sim-lab-btn {
+  border: 1px solid var(--color-border-secondary, #d0d7de);
+  background: var(--color-background-primary, #fff);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sim-lab-module-btn[disabled], .sim-lab-btn[disabled] { opacity: 0.55; cursor: default; }
+.sim-lab-primary { font-weight: 600; }
+.sim-lab-link { border: none; background: none; padding: 0; color: var(--color-text-link, #0969da); cursor: pointer; font-size: 12px; }
+.sim-lab-io { font-size: 12px; }
+.sim-lab-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.sim-lab-params { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0; }
+.sim-lab-param input { width: 7em; }
+.sim-lab-claims { display: flex; flex-direction: column; gap: 2px; }
+.sim-lab-code {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  min-height: 10em;
+}
+.sim-lab-chip {
+  display: inline-block;
+  border: 1px solid var(--color-border-secondary, #d0d7de);
+  border-radius: 10px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+.sim-lab-wiring.is-candidate { border: 1px dotted var(--color-border-secondary, #d0d7de); border-radius: 6px; padding: 4px 6px; }
+.sim-lab-chip-candidate { border-style: dotted; }
+.sim-lab-table { border-collapse: collapse; font-size: 12px; margin: 6px 0; }
+.sim-lab-table th, .sim-lab-table td { border: 0.5px solid var(--color-border-tertiary, #e5e7eb); padding: 2px 6px; text-align: left; }
+.sim-lab-run, .sim-lab-program, .sim-lab-proposal { margin-top: 6px; }
+.sim-lab-card-head { font-weight: 600; margin-bottom: 4px; }
+.sim-lab-statement { margin: 4px 0; }

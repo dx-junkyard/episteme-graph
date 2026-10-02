@@ -87,6 +87,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # 記号の「直前の定義」（docs/features/concept_registry_design.md §7 / P3-5）:
         # 教材の数式の中の記号をタップしたときに出るポップオーバー。
         "material.symbol-lookup",
+        # 動かして確かめる（docs/features/simulation_bridge_design.md §14.4 / v1.1）:
+        # 教材区画の「🧪 動かして確かめる」ボタンと、開いたパネル（本人の試行のみ）。
+        "material.simulation-lab",
     }
 )
 
@@ -186,6 +189,8 @@ UI_ANCHORS: dict[str, str] = {
     "chat.stance-chip": "student/02-student.md#stance-chip",
     # 数式の中の記号をタップして「直前の定義」を見る（概念レジストリ P3-5）。
     "material.symbol-lookup": "student/02-student.md#symbol-lookup",
+    # 理論モジュールをコードにして予想を書いてから動かす（検証シミュレーション v1.1）。
+    "material.simulation-lab": "student/02-student.md#simulation-lab",
 }
 
 

@@ -1169,6 +1169,8 @@
     var strip = document.getElementById("quick-anchor-strip");
     if (!strip) return;
     strip.hidden = !(state.course && state.currentTopicId);
+    // 動かして確かめる（§14.4）: 同じ「コース・トピック選択時のみ」の規則でボタンを合わせる。
+    if (window.SimulationLab) window.SimulationLab.setContext();
   }
 
   // 理解サイクル Phase 1（精読モード, §4.3/§5.3）: コース単位のクライアント設定。
@@ -3703,6 +3705,8 @@
     if (window.AtlasMinimap) window.AtlasMinimap.refresh();
     // 再構成ループ (R層): トピックの文脈を配線する。自動割り込みはしない（本人が開く）。
     if (window.Reconstruction) window.Reconstruction.setContext(state.courseId || "", topicId || "");
+    // 動かして確かめる（検証シミュレーション v1.1, §14.4）: トピックが変わったら閉じて文脈だけ配線する。
+    if (window.SimulationLab) window.SimulationLab.setContext();
 
     if (state.courseId && topicId) {
       if (topicId === DISCUSS_TOPIC_ID) {
@@ -9587,6 +9591,17 @@
     initMaterialHoverLatch(); // 教材ホバー + ラッチ（学習UI再編 Phase 3）
     initSymbolLookup(); // 記号の「直前の定義」（概念レジストリ P3-5, §7）
     initDiscussUI();
+    // 動かして確かめる（検証シミュレーション v1.1, docs/features/simulation_bridge_design.md §14.4）:
+    // 本人が押したときだけ開く。文脈は DI で読む（document_id はトピック教材の焦点論文）。
+    if (window.SimulationLab && window.SimulationLab.init) {
+      window.SimulationLab.init({
+        apiFetch: apiFetch,
+        getCourseId: function () { return state.courseId || ""; },
+        getTopicId: function () { return state.currentTopicId || ""; },
+        getDocumentId: function () { return state.topicMaterialDocumentId || null; },
+        escHtml: escHtml,
+      });
+    }
     // discuss モード（論文と話す）: discuss.js が現在アプリの表示コースを読める
     // ようにする DI（着地モーダルのコース一致ガードの防御の二重化に使う）。
     if (window.Discuss && window.Discuss.init) {
