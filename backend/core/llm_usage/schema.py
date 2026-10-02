@@ -139,6 +139,9 @@ KNOWN_FEATURES = (
     # アブストラクトの比較分析（1リクエスト = 1コール）。発見層で**テキスト**生成を
     # 使う唯一の地点で、教員の明示ボタンでのみ発火する（PR5）。
     "discovery:compare",
+    # --- 検証シミュレーション層（SB層、正本 docs/features/simulation_bridge_design.md §5.1 / §5.4）---
+    "simulation:codegen",
+    "simulation:revision",
     # --- 埋め込み ---
     "embedding:chunks",
     "embedding:library_search",

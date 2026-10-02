@@ -319,6 +319,16 @@ _ALLOWED_VALUE_SPLITS = {
         "core/reconstruction/diff.py::_CHOICE_MATCH_STATEMENTS",
         "core/reconstruction/diff.py::_CHOICE_SELECTION_TEMPLATES",
     ),
+    # SB層 比較器: 段階キーの短い表示ラベル（label_vocab）と、同じ段階の閉世界の事実文
+    # （simulation_bridge/schema.py）。前者はチップ、後者は文として併記される。役割が違う。
+    (
+        "core/label_vocab.py::SIMULATION_AGREEMENT_LABELS",
+        "core/simulation_bridge/schema.py::AGREEMENT_FACTS",
+    ),
+    (
+        "core/label_vocab.py::SIMULATION_SEPARATION_LABELS",
+        "core/simulation_bridge/schema.py::SEPARATION_FACTS",
+    ),
     # 図タイプの表示名と、その図が埋めるギャップの説明文。
     (
         "core/teaching_figures/schema.py::FIGURE_KIND_GAP_HINTS",

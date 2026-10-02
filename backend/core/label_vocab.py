@@ -87,6 +87,14 @@ __all__ = [
     "RECONSTRUCTED_EQUATION_MARK",
     "REVIEW_PENDING_LABEL",
     "SCRIPT_STATUS_LABELS",
+    "SIMULATION_AGREEMENT_LABELS",
+    "SIMULATION_AGREEMENT_LEVEL_SCALE",
+    "SIMULATION_AGREEMENT_THRESHOLDS",
+    "SIMULATION_SEPARATION_LABELS",
+    "SIMULATION_SEPARATION_LEVEL_SCALE",
+    "SIMULATION_SEPARATION_THRESHOLDS",
+    "simulation_agreement_level",
+    "simulation_separation_level",
     "SUPPORT_SECTION_LABELS",
     "TRACE_STATUS_LABELS",
     "VERIFICATION_STATUS_LABELS_LEDGER",
@@ -361,6 +369,72 @@ WM_INTERACTION_DENSITY = GradedScale(
 WM_INTERACTION_LABELS = MappingProxyType(
     dict(zip(WM_INTERACTION_LEVEL_SCALE.labels, WM_INTERACTION_DENSITY.labels))
 )
+
+
+# ── 検証シミュレーション（SB層 比較器, simulation_bridge_design.md §5.3）────────────
+# 理論の出力と模擬観測の**相対差**（小さいほど良い）と、効果量 / ばらつきの**分離比**
+# （大きいほど良い）を段階化する。閾値は発明値（設計書 §5.3 の宣言。実測での見直し前提）。
+# 本層の数値は教員向け計器（制度指標カタログ ``simulation.agreement``）として metrics に
+# 残すが、段階キーとラベルの正本はここ。**未測定（None）は段階に倒さず ``unmeasured``**
+# にする — 「一致」を測れなかった事実を「乖離」とも「一致」とも見せない（SB1）。
+#: 相対差の境界（昇順: これ以下なら match / rough、超えれば diverge）。
+SIMULATION_AGREEMENT_THRESHOLDS = (0.05, 0.20)
+#: 分離比の境界（降順: これ以上なら clear / border、未満は buried）。
+SIMULATION_SEPARATION_THRESHOLDS = (3.0, 1.0)
+
+#: 相対差は「小さいほど上位」なので、符号を反転した値（``-rel_diff``）を渡す降順スケール。
+#: 末尾（diverge）が最も慎重な段階（一致を言い過ぎない）。直接呼ばず
+#: :func:`simulation_agreement_level` を使う（None → unmeasured の分岐を持つ）。
+SIMULATION_AGREEMENT_LEVEL_SCALE = GradedScale(
+    tuple(-t for t in SIMULATION_AGREEMENT_THRESHOLDS),
+    ("match", "rough", "diverge"),
+)
+#: 分離比の段階キー。末尾（buried）が最も慎重な段階。
+SIMULATION_SEPARATION_LEVEL_SCALE = GradedScale(
+    SIMULATION_SEPARATION_THRESHOLDS,
+    ("clear", "border", "buried"),
+)
+
+SIMULATION_AGREEMENT_LABELS = MappingProxyType({
+    "match": "一致",
+    "rough": "おおむね一致",
+    "diverge": "乖離",
+    "unmeasured": "未測定",
+})
+SIMULATION_SEPARATION_LABELS = MappingProxyType({
+    "clear": "分離できる",
+    "border": "境界",
+    "buried": "埋もれる",
+    "unmeasured": "未測定",
+})
+
+
+def _finite_or_none(value: object) -> float | None:
+    try:
+        if value is None or isinstance(value, bool):
+            return None
+        numeric = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        return None
+    return numeric
+
+
+def simulation_agreement_level(relative_difference: object) -> str:
+    """相対差 → ``match`` / ``rough`` / ``diverge``。測れない値は ``unmeasured``。"""
+    numeric = _finite_or_none(relative_difference)
+    if numeric is None or numeric < 0:
+        return "unmeasured"
+    return SIMULATION_AGREEMENT_LEVEL_SCALE.label_for(-numeric)
+
+
+def simulation_separation_level(ratio: object) -> str:
+    """分離比 → ``clear`` / ``border`` / ``buried``。測れない値は ``unmeasured``。"""
+    numeric = _finite_or_none(ratio)
+    if numeric is None or numeric < 0:
+        return "unmeasured"
+    return SIMULATION_SEPARATION_LEVEL_SCALE.label_for(numeric)
 
 
 # ---------------------------------------------------------------------------

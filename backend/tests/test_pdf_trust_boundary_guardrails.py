@@ -49,6 +49,8 @@ NOTICE_APPLIED_PATHS: list[tuple[Path, str]] = [
     (CORE_DIR / "doubt" / "scope_candidates" / "prompt.py", "build_content"),
     (CORE_DIR / "doubt" / "falsification_conditions" / "prompt.py", "build_content"),
     (CORE_DIR / "deliberation" / "standardization" / "prompt.py", "build_content"),
+    # 検証シミュレーション層（SB層）の理論プログラム生成（式・記号の本文 = 論文由来）。
+    (CORE_DIR / "simulation_bridge" / "codegen.py", "build_codegen_prompt"),
 ]
 
 #: 資料本文（PDF 由来）を運ぶ変数・属性の名前。SQL の f-string に載っていたら違反。

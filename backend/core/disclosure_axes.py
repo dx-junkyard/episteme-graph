@@ -712,6 +712,16 @@ _SPECS: tuple[DisclosureSpec, ...] = (
                 sends="入力した文と、グラフの骨格・未確認の一覧",
                 feature="deliberation:graph_chat",
             ),
+            AiTouchpoint(
+                operation="理論モジュールのシミュレーションコード生成",
+                sends="式の本文・記号の定義・前提の文",
+                feature="simulation:codegen",
+            ),
+            AiTouchpoint(
+                operation="実験機の配線の改訂提案",
+                sends="比較結果の事実文・現在の配線・部品の目録",
+                feature="simulation:revision",
+            ),
         ),
         without_ai=(
             "開示範囲の変更・承認・却下・版の発行は、外部の AI を通りません。",

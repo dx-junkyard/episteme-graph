@@ -506,6 +506,33 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GROBID_URL"),
     )
 
+    # --- 検証シミュレーション層（SB層） ---
+    # sandbox（sim-runner コンテナ）の到達先。空 = 未構成（run は常に失敗事実文・compose が設定する）
+    sim_runner_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("SIM_RUNNER_URL"),
+    )
+    # 1 run の上限秒数
+    simulation_run_timeout_seconds: int = Field(
+        default=20,
+        validation_alias=AliasChoices("SIMULATION_RUN_TIMEOUT_SECONDS"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    simulation_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("SIMULATION_LLM_MODEL"),
+    )
+    # 理論プログラム生成（simulation:codegen）の 1 日あたり LLM コール上限
+    simulation_codegen_max_calls_per_day: int = Field(
+        default=20,
+        validation_alias=AliasChoices("SIMULATION_CODEGEN_MAX_CALLS_PER_DAY"),
+    )
+    # 配線の改訂提案（simulation:revision）の 1 日あたり LLM コール上限
+    simulation_revision_max_calls_per_day: int = Field(
+        default=20,
+        validation_alias=AliasChoices("SIMULATION_REVISION_MAX_CALLS_PER_DAY"),
+    )
+
     # --- ISOM ---
     isom_output_dir: str = "output/incoming"
 
