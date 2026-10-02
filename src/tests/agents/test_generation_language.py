@@ -3,8 +3,9 @@
 不変条項:
 - 未指定なら prompt は従来と 1 バイトも変わらない（system は各 prompt の ``_SYSTEM_CONTENT`` そのもの）。
 - 指定ありなら system の末尾に ``## Output Language`` 節が付き、対象フィールドが列挙される。
-- 決定論の後段が英語のキーワードで読むフィールド（component の label / summary / reason、
-  式の summary / reason 等）は対象にしない。
+- 決定論の後段が英語のキーワードで読むフィールド（component の label / reason、
+  式の summary / reason 等）は対象にしない。component の summary は後段が語彙値を先に
+  読むようにしたので対象（IK-0571 §6、``test_generation_language_structure.py``）。
 """
 from __future__ import annotations
 
@@ -106,9 +107,11 @@ def test_normalize_vocabulary():
 def test_structure_driving_fields_are_excluded():
     """英語のキーワード照合で構造を導く後段が読むフィールドは言語指定の対象外。"""
     ca = set(ca_prompt.GENERATED_PROSE_FIELDS)
-    for field in ("components[].label", "components[].summary", "components[].reason",
+    for field in ("components[].label", "components[].reason",
                   "components[].preconditions[].text", "components[].cautions[].text"):
         assert field not in ca
+    # summary / teaching_takeaway は学習者に見える散文として対象（§6）。
+    assert {"components[].summary", "components[].teaching_takeaway"} <= ca
     # claim / 逐語引用・headline の主張文は論文の言語のまま。
     ps = set(ps_prompt.GENERATED_PROSE_FIELDS)
     assert "headline_claim.text" not in ps and "supporting_subclaims[].text" not in ps

@@ -196,6 +196,10 @@ _OUTPUT_SCHEMA = {
 #: 解析 run の生成言語（run options ``language``）で書かせる、生成した文章のフィールド。
 #: 論文の逐語・記号・ID・語彙値は含めない（``generation_language`` の不変条項）。
 GENERATED_PROSE_FIELDS: tuple[str, ...] = (
+    # IK-0571 §6: summary は後段の構造導出（internal_flow の relation / operation の補完 /
+    # support_role の補完）が語彙値（operation / primary_operation / responsibility_type）を
+    # 先に読むようにしたので対象に加えた。label は同一性キーと名前照合の材料なので対象外。
+    "components[].summary",
     "components[].teaching_takeaway",
     "components[].dependencies[].reason",
     "components[].review_notes",

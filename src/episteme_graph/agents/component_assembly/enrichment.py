@@ -531,7 +531,37 @@ def _fill_internal_flow(component: ComponentRecord) -> None:
     ][:4]
 
 
+#: IK-0571: 宣言された operation（語彙値）→ internal_flow の relation。
+#: operation を宣言した component では summary（生成言語で書かれる散文）を読まない。
+_OPERATION_FLOW_RELATIONS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("eliminat",), "eliminate_parameter"),
+    (("constrain", "consisten", "residual"), "derive_constraint"),
+    (("diagnos", "forecast"), "diagnose_with"),
+    (("correct",), "apply_correction"),
+)
+
+
+def declared_operation_text(component) -> str:
+    """component が宣言した operation 語彙値（operation / primary_operation）。空なら ""。
+
+    IK-0571: 決定論の後段が構造を導くときの第一の入力。語彙値は生成言語の指定で
+    翻訳されないので、ここから導いた結果は言語に依らない。
+    """
+    return " ".join(
+        str(getattr(component, name, "") or "").strip()
+        for name in ("operation", "primary_operation")
+        if str(getattr(component, name, "") or "").strip()
+    ).lower()
+
+
 def _flow_relation(component: ComponentRecord) -> str:
+    declared = declared_operation_text(component)
+    if declared:
+        for needles, relation in _OPERATION_FLOW_RELATIONS:
+            if any(n in declared for n in needles):
+                return relation
+        return "derive_from"
+    # operation を宣言していない component だけ従来の本文照合に落ちる。
     text = " ".join([component.label, component.summary, component.reason]).lower()
     if "eliminat" in text:
         return "eliminate_parameter"

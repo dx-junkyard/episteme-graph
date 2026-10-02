@@ -419,21 +419,6 @@ def _major_io_transform_count(component: ComponentRecord) -> int:
     return max(output_groups, len(relations))
 
 
-def _component_text(component: ComponentRecord) -> str:
-    parts = [
-        component.label,
-        component.summary,
-        component.reason,
-        component.operation,
-        component.primary_operation,
-    ]
-    for collection in (component.inputs, component.outputs, component.preconditions, component.cautions):
-        for item in collection or []:
-            if isinstance(item, dict):
-                parts.extend(str(item.get(k) or "") for k in ("name", "label", "text", "role"))
-    return " ".join(str(v) for v in parts if v).lower()
-
-
 def _ordered_unique(values) -> list:
     result = []
     seen = set()

@@ -1775,6 +1775,7 @@ def _stage_figure_table_semantics(ctx: PipelineContext) -> bool:
                 # (works both freshly-run and resumed: _stage_claim_qualification
                 # restores ctx.qualified from the artifact via from_dict).
                 qualified=ctx.qualified,
+                language=_run_language(ctx),
             )
         except Exception as exc:
             logger.exception(
@@ -3974,6 +3975,7 @@ def _build_figure_table_semantics(
     evidence: Any,
     claim_objects: Any,
     qualified: Any = None,
+    language: str | None = None,
 ):
     from episteme_graph.agents.figure_table_semantics.agent import (
         FigureTableSemanticsAgent,
@@ -4040,6 +4042,8 @@ def _build_figure_table_semantics(
         cartridge_id=cartridge_id,
         evidence_index=evidence_index,
         claim_link_index=claim_link_index,
+        # IK-0571: 図表の teaching_takeaway（決定論のテンプレート文）の言語。未指定なら渡さない。
+        **_language_kwargs_for(agent, language),
     )
 
 
@@ -4645,7 +4649,8 @@ def _run_language(ctx: "PipelineContext") -> str | None:
     """この run の生成言語（``ja`` / ``en`` / ``None``）を読む唯一の入口（IK-0571）。
 
     run options の ``language`` を語彙で絞った値。discuss_opening / contextual_explanation /
-    paper_skeleton / thesis_reconstruction / component_assembly / narrative_annotator が使う。
+    paper_skeleton / thesis_reconstruction / component_assembly / narrative_annotator /
+    figure_table_semantics（決定論テンプレートの言語）が使う。
     """
     return _run_generation_language(getattr(ctx, "effective_options", None))
 
@@ -4657,7 +4662,11 @@ def _language_run_kwargs(agent: Any, ctx: "PipelineContext") -> dict[str, Any]:
     差し替えられたテスト用 agent が ``language`` を受けないときも渡さない
     （apparatus_semantics と同じ防御的な渡し方）。
     """
-    language = _run_language(ctx)
+    return _language_kwargs_for(agent, _run_language(ctx))
+
+
+def _language_kwargs_for(agent: Any, language: str | None) -> dict[str, Any]:
+    """``_language_run_kwargs`` の本体（ctx を持たない builder からも使う）。"""
     if not language:
         return {}
     try:

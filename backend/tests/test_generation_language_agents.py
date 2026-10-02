@@ -121,6 +121,56 @@ class TestStagesPassLanguage:
         assert seen == [language or "<absent>"]
 
 
+@pytest.mark.parametrize("language", ["ja", None])
+def test_figure_table_semantics_passes_language_only_when_set(language):
+    """図表の teaching_takeaway（決定論テンプレート）にも生成言語が届く。未指定なら kwarg なし。"""
+    seen: list = []
+    ctx = _ctx({"language": language} if language else {},
+               {"FigureTableSemanticsAgent": _recording_agent(seen)})
+    with pytest.raises(_Stop):
+        orch._build_figure_table_semantics(
+            agent_classes=ctx.agent_classes, cartridge_id=None, structure=ctx.structure,
+            evidence=None, claim_objects=None, qualified=None, language=orch._run_language(ctx),
+        )
+    assert seen == [language or "<absent>"]
+
+
+def test_figure_table_stage_reads_run_language():
+    from tests.guardrail_helpers import extract_function_source  # noqa: E402
+
+    src = extract_function_source(Path(orch.__file__).read_text(encoding="utf-8"),
+                                  "_stage_figure_table_semantics")
+    assert "language=_run_language(ctx)" in src
+
+
+def test_structure_readers_do_not_scan_summary_when_vocabulary_is_declared():
+    """IK-0571 §6: component の summary を生成言語の対象にした前提のガードレール。
+
+    構造（internal_flow の relation / operation の補完 / support_role の補完）を導く後段は、
+    宣言された語彙値を先に読む。summary を英語キーワードで読むだけの未使用関数は残さない。
+    """
+    from tests.guardrail_helpers import assert_source_forbids, extract_function_source  # noqa: E402
+
+    agents = ROOT / "src" / "episteme_graph" / "agents" / "component_assembly"
+    for name in ("component_refiner.py", "granularity_analyzer.py"):
+        assert_source_forbids(
+            (agents / name).read_text(encoding="utf-8"),
+            ["def _component_text("], context=name,
+        )
+    checks = {
+        "enrichment.py": ("_flow_relation", "declared_operation_text(component)"),
+        "component_refiner.py": ("_infer_operation_from_text", "component.primary_operation"),
+        "claim_centered_planner.py": ("_infer_support_role", "_declared_support_role("),
+    }
+    for name, (fn, declared) in checks.items():
+        body = extract_function_source((agents / name).read_text(encoding="utf-8"), fn)
+        assert declared in body, (name, fn)
+        first_text = min(
+            i for i in (body.find("component.summary"), body.find("_component_text(")) if i >= 0
+        )
+        assert body.find(declared) < first_text, (name, fn)
+
+
 def test_llm_stage_registry_is_unchanged():
     """言語の配線で LLM ステージの集合を変えない（呼び出し回数を増やさない）。"""
     for stage in ("paper_skeleton", "thesis_reconstruction", "component_assembly", "narrative_annotator"):

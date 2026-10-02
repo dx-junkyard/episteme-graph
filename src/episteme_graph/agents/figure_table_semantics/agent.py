@@ -27,6 +27,29 @@ from .schema import (
     ValidationIssue,
 )
 from episteme_graph.agents.figure_modes import infer_mode_from_text
+from episteme_graph.agents.generation_language import normalize_generation_language
+
+#: IK-0571: 生成言語が ``ja`` のときの teaching_takeaway の訳語（決定論のテンプレート）。
+#: 語彙値（figure_type / table_type / comparison_axes）そのものは record に原形のまま残し、
+#: 文の中の呼び名だけを訳す。訳語に無い語彙値は原形で出す（捏造しない）。
+_FIGURE_TYPE_JA = {
+    "probability_distribution": "分布の図",
+    "comparison_plot": "比較の図",
+    "schematic": "模式図",
+    "flow_diagram": "流れの図",
+    "unknown": "図",
+}
+_TABLE_TYPE_JA = {
+    "comparison_table": "比較の表",
+    "uncertainty_table": "不確かさの表",
+    "results_summary": "結果をまとめた表",
+    "unknown": "表",
+}
+_COMPARISON_AXIS_JA = {
+    "pairwise_comparison": "二者の比較",
+    "current_vs_future": "現在と将来の比較",
+    "framework_comparison": "枠組みどうしの比較",
+}
 
 _FIG_LABEL_RE = re.compile(r"^(?:Figure|Fig\.?)\s*([0-9A-Za-z\.]+)\s*[:.\-]?\s*", re.IGNORECASE)
 _TBL_LABEL_RE = re.compile(r"^Table\s*([0-9A-Za-z\.]+)\s*[:.\-]?\s*", re.IGNORECASE)
@@ -41,6 +64,7 @@ class FigureTableSemanticsAgent:
     ) -> None:
         self._figure_enricher = figure_enricher
         self._table_enricher = table_enricher
+        self._language: str | None = None
 
     def run(
         self,
@@ -49,7 +73,11 @@ class FigureTableSemanticsAgent:
         cartridge_id: str | None = None,
         evidence_index: dict[str, list[str]] | None = None,
         claim_link_index: dict[str, list[str]] | None = None,
+        language: str | None = None,
     ) -> FigureTableSemanticsResult:
+        # 解析 run の生成言語（IK-0571）。未指定なら teaching_takeaway は従来の英語テンプレートの
+        # まま（1 文字も変わらない）。LLM は呼ばない（決定論のテンプレートの言語だけが変わる）。
+        self._language = normalize_generation_language(language)
         evidence_index = evidence_index or {}
         claim_link_index = claim_link_index or {}
         figures: list[FigureRecord] = []
@@ -234,7 +262,10 @@ class FigureTableSemanticsAgent:
             linked_claim_ids=list(claim_link_index.get(block.block_id, [])),
             linked_component_candidates=[],
             interpretation="",
-            teaching_takeaway=self._figure_takeaway(figure_type, caption_text, comparison_axes),
+            teaching_takeaway=self._figure_takeaway(
+                figure_type, caption_text, comparison_axes,
+                language=getattr(self, "_language", None),
+            ),
             source_evidence_ids=list(evidence_index.get(block.block_id, [])),
             suggested_mode=suggested_mode,
             mode_reason=mode_reason,
@@ -269,30 +300,43 @@ class FigureTableSemanticsAgent:
             comparison_axes=comparison_axes,
             linked_claim_ids=list(claim_link_index.get(block.block_id, [])),
             interpretation="",
-            teaching_takeaway=self._table_takeaway(table_type, caption_text, comparison_axes),
+            teaching_takeaway=self._table_takeaway(
+                table_type, caption_text, comparison_axes,
+                language=getattr(self, "_language", None),
+            ),
             source_evidence_ids=list(evidence_index.get(block.block_id, [])),
         )
 
     @staticmethod
     def _figure_takeaway(
-        figure_type: str, caption: str, comparison_axes: list[str]
+        figure_type: str, caption: str, comparison_axes: list[str],
+        language: str | None = None,
     ) -> str:
         if not caption:
             return ""
         if figure_type == "unknown" and not comparison_axes:
             return ""
+        if language == "ja":
+            return _ja_takeaway(
+                _FIGURE_TYPE_JA.get(figure_type, figure_type), caption, comparison_axes
+            )
         if comparison_axes:
             return f"Use this {figure_type} to discuss {', '.join(comparison_axes)}."
         return f"Use this {figure_type} to support: {caption[:80]}".rstrip()
 
     @staticmethod
     def _table_takeaway(
-        table_type: str, caption: str, comparison_axes: list[str]
+        table_type: str, caption: str, comparison_axes: list[str],
+        language: str | None = None,
     ) -> str:
         if not caption:
             return ""
         if table_type == "unknown" and not comparison_axes:
             return ""
+        if language == "ja":
+            return _ja_takeaway(
+                _TABLE_TYPE_JA.get(table_type, table_type), caption, comparison_axes
+            )
         if comparison_axes:
             return f"Use this {table_type} to compare {', '.join(comparison_axes)}."
         return f"Use this {table_type} to support: {caption[:80]}".rstrip()
@@ -343,3 +387,11 @@ class FigureTableSemanticsAgent:
         if "framework" in lower or "model" in lower and "comparison" in lower:
             axes.append("framework_comparison")
         return axes
+
+
+def _ja_takeaway(kind_label: str, caption: str, comparison_axes: list[str]) -> str:
+    """teaching_takeaway の日本語テンプレート（IK-0571）。caption の抜粋は論文の言語のまま。"""
+    if comparison_axes:
+        axes = "・".join(_COMPARISON_AXIS_JA.get(a, a) for a in comparison_axes)
+        return f"この{kind_label}は、{axes}を議論するのに使えます。"
+    return f"この{kind_label}は「{caption[:80].strip()}」の裏付けに使えます。"

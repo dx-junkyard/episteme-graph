@@ -1223,20 +1223,6 @@ def _source_backed_status(parent_status: str) -> str:
     return "source_backed"
 
 
-def _component_text(component: ComponentRecord) -> str:
-    parts = [
-        component.label,
-        component.summary,
-        component.reason,
-        component.teaching_takeaway,
-    ]
-    for collection in (component.inputs, component.outputs, component.preconditions, component.cautions):
-        for item in collection or []:
-            if isinstance(item, dict):
-                parts.extend(str(item.get(k) or "") for k in ("name", "label", "text", "role"))
-    return " ".join(parts).lower()
-
-
 def _equation_text(eq_id: str, eq_index: dict[str, dict]) -> str:
     eq = eq_index.get(eq_id) or {}
     fields = [
@@ -1261,6 +1247,11 @@ def _responsibility_named_in_text(label: str, text: str) -> bool:
 
 
 def _infer_operation_from_text(component: ComponentRecord) -> str:
+    # IK-0571: primary_operation（語彙値）を宣言していればそれを読み、summary
+    # （生成言語で書かれる散文）には落ちない。
+    declared = str(component.primary_operation or "").strip()
+    if declared:
+        return _operation_family(declared)
     text = " ".join([
         str(component.label or ""),
         str(component.summary or ""),
