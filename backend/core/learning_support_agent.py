@@ -188,12 +188,35 @@ class LearningSupportAgent:
     def prerequisite_choice_actions(
         self,
         first_prerequisite: str,
+        *,
+        language: str = "ja",
     ) -> list[LearningSupportAction]:
         """前提知識チェックの介入時に提示する「はい/いいえ」選択肢（型付き）。
 
         ``with_learning_actions`` の ``extra_actions`` として渡される前提なので、
-        先頭の「学習パスに戻る」はここには含めない。
+        先頭の「学習パスに戻る」はここには含めない。``language="en"`` は英語で問うた
+        往復（IK-0574）。英語の文言の正本は ``core.label_vocab``。
         """
+        first = (first_prerequisite or "").strip()
+        if language == "en":
+            from core import label_vocab
+
+            actions = [
+                LearningSupportAction(
+                    type="continue_detail",
+                    label=label_vocab.PREREQUISITE_CHOICE_YES_EN,
+                    message=label_vocab.PREREQUISITE_CHOICE_YES_EN,
+                )
+            ]
+            if first:
+                actions.append(
+                    LearningSupportAction(
+                        type="drilldown",
+                        label=label_vocab.PREREQUISITE_CHOICE_NO_LABEL_EN.format(prerequisite=first),
+                        message=label_vocab.PREREQUISITE_CHOICE_NO_MESSAGE_EN.format(prerequisite=first),
+                    )
+                )
+            return actions
         actions = [
             LearningSupportAction(
                 type="continue_detail",
@@ -201,7 +224,6 @@ class LearningSupportAgent:
                 message="はい、理解しています",
             )
         ]
-        first = (first_prerequisite or "").strip()
         if first:
             actions.append(
                 LearningSupportAction(

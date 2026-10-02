@@ -529,6 +529,12 @@ class LearningChatResponse(BaseModel):
     #    "label": "<core/label_vocab.py の LEARNING_STANCE_LABELS>"}
     # confidence・一致度・スコアのような数値キーは絶対に入れない。
     stance: dict | None = None
+    # IK-0545（回答の逐語引用と出典本文の一致検査、core/citation_check.py）: 本文の
+    # 「…」[出典N] の逐語引用を出典 N のチャンク本文と突き合わせた事実。検査した引用が無い
+    # 往復は None。{"checked": ["1", ...], "unmatched": [{"citation": "N", "quotes": [...],
+    # "note": "<事実文>"}]}。番号は本文の [出典N] の N。件数・一致度の数値は入れない。
+    # RAG 応答の最終 return だけが設定する（保存文・履歴メタには焼き込まない）。
+    citation_check: dict | None = None
 
 
 class LearningChatHistoryResponse(BaseModel):

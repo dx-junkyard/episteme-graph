@@ -6322,6 +6322,20 @@ button.ls-course-evidence-head {
   color: var(--color-text-tertiary);
 }
 .stance-fact { color: var(--color-text-tertiary); }
+
+/* ── 逐語引用と出典本文の一致検査（IK-0545, docs/backend/rag-chat.md）──
+   一致を確認できなかった出典に添える事実の 1 行。事実であって警告ではないので、
+   警告色・強調色・バッジは使わない（.stance-line と同じ控えめなトーン）。数値は描かない。 */
+.citation-check-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+.citation-check-fact { color: var(--color-text-tertiary); }
 .stance-correct-btn { font-size: 12px; padding: 3px 10px; }
 
 /* ===== 右パネル再設計（episteme-right-panel-mock 由来。lx- 接頭辞で既存と分離）===== */

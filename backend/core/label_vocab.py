@@ -588,6 +588,30 @@ PREREQUISITE_GATE_EN = (
     'or "No, please explain {prerequisite} first".'
 )
 
+#: 前提確認の逆質問の英語版（IK-0574）。学習者の当該発話が英語（``_is_mostly_latin`` か
+#: ``_is_kana_kanji_free``）の往復では、日本語の逆質問（``services.check_prerequisites`` が正本）
+#: の代わりにこちらを出す。履歴の判定器は下の 2 つの目印と ``"{topic}"`` の引用で
+#: 英語の逆質問を読む（日本語の ``「{topic}」`` / ``PREREQUISITE_GATE_MARKER`` と対）。
+#: 目印の文字列はこの本文の部分文字列でなければならない（test_ik0574_prerequisite_gate_language.py）。
+PREREQUISITE_GATE_MARKER_EN = "you first need the following prerequisites"
+#: 英語の逆質問が「最初に説明する前提」を挙げる言い方（``まず「X」から説明します`` と対）。
+PREREQUISITE_GATE_FIRST_EN = 'I will start by explaining "{first}"'
+PREREQUISITE_GATE_FULL_EN = (
+    'To understand "{topic}", ' + PREREQUISITE_GATE_MARKER_EN + ":\n\n"
+    "**{prerequisites}**\n\n"
+    'Do you already understand these? If you do, we will continue with "{topic}" on that basis. '
+    "If not, " + PREREQUISITE_GATE_FIRST_EN + ".\n\n"
+    + PREREQUISITE_GATE_EN.replace("{prerequisite}", "{first}")
+)
+#: 逆質問を回答の後ろに添えた往復の目印の英語版（``PREREQUISITE_GATE_ANSWERED_MARKER``
+#: 「ご質問には上で答えました。」と対。保存文の形 = 本文 → 区切り → 目印 → 逆質問 は不変）。
+PREREQUISITE_GATE_ANSWERED_MARKER_EN = "I answered your question above. "
+#: 逆質問の選択肢ボタンの英語版（``LearningSupportAgent.prerequisite_choice_actions``）。
+#: ``message`` は英語の確認判定（services の肯定 / route の否定・説明要求）が受理する形。
+PREREQUISITE_CHOICE_YES_EN = "Yes, I understand"
+PREREQUISITE_CHOICE_NO_LABEL_EN = 'No, explain "{prerequisite}" first'
+PREREQUISITE_CHOICE_NO_MESSAGE_EN = "No, please explain {prerequisite} first"
+
 #: 学習者が自分の理解度を点数・割合で求めたときの固定応答（IK-0397。非LLM・
 #: 数値非表示の原則を事実として述べる）。
 UNDERSTANDING_SCORE_REQUEST_REPLY = (

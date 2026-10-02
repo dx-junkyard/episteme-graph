@@ -365,6 +365,11 @@ METRIC_EVENT_VOCAB: frozenset[str] = frozenset(
         # ``retrieved_structure``（検索で当たった箇所の構造）も**この1ビットへ相乗り**する。
         # 画面由来か検索由来かを payload で区別しない（新しい event 語彙も作らない）。
         "structured_grounding_present",
+        # IK-0545（docs/backend/rag-chat.md「回答の逐語引用と出典本文の一致検査」）: 回答本文の
+        # 逐語引用のうち、引用先の出典チャンク本文と一致を確認できないものがあったターンの
+        # **種別だけ**（どの出典か・何件かは入れない = DO1。payload は常に空）。
+        # **記録はサーバ側**（_learning_chat_core）が best-effort で行う。
+        "citation_quote_unmatched",
     }
 )
 

@@ -126,6 +126,7 @@ from core.formula_facts import (
 )
 from core.teaching_figures import store as teaching_figures_store
 from core import decision_context
+from core import document_refs as _document_refs
 from core.course_prerequisites import resolve_prerequisite_topic_ids
 from core.course_units import (
     candidate_keys,
@@ -222,6 +223,7 @@ from core.focus_document import (
 from core.discuss.opening import build_opening as build_discussion_opening
 from core.discuss.opening import document_thesis_fact_lines
 from core.discuss.mirroring import MIRROR_MOVED_NOTE, MIRROR_MOVED_NOTE_EN, extract_mirror
+from core.citation_check import check_citations
 from core.dialogue_shape import (
     assemble as assemble_response_shape,
     is_stuck_reply,
@@ -230,6 +232,7 @@ from core.dialogue_shape import (
     render_answer_text,
     shape_dto,
     strip_preamble,
+    verbatim_shape_dto,
 )
 # コーパス回遊 Phase B（docs/features/corpus_roaming_design.md §5.1）: コース無し論文議論の
 # 会話コンテキスト・センチネル。**"_doc:" の組み立て・判定はこの正本関数以外に書かない**。
@@ -430,20 +433,14 @@ def _ordered_source_document_ids(
     visible = set(list_visible_document_ids(user_id) or [])
     if not visible:
         return []
-    placeholders = ", ".join(f":mid_{i}" for i in range(len(ordered)))
-    rows = session.execute(
-        sa_text(
-            f"SELECT source_path, id::text AS doc_id FROM documents "
-            f"WHERE source_path IN ({placeholders})"
-        ),
-        {f"mid_{i}": mid for i, mid in enumerate(ordered)},
-    ).fetchall()
-    by_material = {
-        str(r[0]): str(r[1])
-        for r in rows
-        if r and r[0] and r[1] and str(r[1]) in visible
+    # どの document 行か（両形: documents.id / source_path）の解決は core.document_refs だけ（IK-0595）。
+    resolved = _document_refs.resolve_document_refs(session, ordered)
+    by_ref = {
+        ref: str(row.get("document_id") or "")
+        for ref, row in resolved.items()
+        if row and row.get("document_id") and str(row.get("document_id")) in visible
     }
-    return list(dict.fromkeys(by_material[m] for m in ordered if m in by_material))
+    return list(dict.fromkeys(by_ref[m] for m in ordered if m in by_ref))
 
 
 def _preserve_topic_units(incoming_topics: list[dict], existing_topics: object) -> list[dict]:
@@ -2002,6 +1999,15 @@ PREREQUISITE_GATE_ANSWERED_MARKER = "ご質問には上で答えました。"
 PREREQUISITE_ACK_ONLY_REPLY = "わかりました。「{prerequisite}」は理解している前提で進めます。続けて質問してください。"
 PREREQUISITE_ACK_ONLY_REPLY_EN = 'Got it. We will go on assuming you understand "{prerequisite}". Feel free to ask your next question.'
 _PREREQUISITE_GATE_FIRST_RE = re.compile(r"まず「(.+?)」から説明します")
+#: 英語の逆質問の「最初に説明する前提」（IK-0574。正本は label_vocab.PREREQUISITE_GATE_FIRST_EN）。
+_PREREQUISITE_GATE_FIRST_EN_RE = re.compile(
+    re.escape(label_vocab.PREREQUISITE_GATE_FIRST_EN).replace(re.escape("{first}"), "(.+?)")
+)
+#: 逆質問を回答の後ろに添えた往復の目印（日本語 / 英語。IK-0574）。
+_PREREQUISITE_GATE_ANSWERED_MARKERS = (
+    PREREQUISITE_GATE_ANSWERED_MARKER,
+    label_vocab.PREREQUISITE_GATE_ANSWERED_MARKER_EN.strip(),
+)
 
 #: 「理解していない・教えてほしい」の答え（逆質問の直後に効く）。
 _PREREQ_NEGATIVE_MARKERS = (
@@ -2114,7 +2120,7 @@ def _prerequisite_gate_asked_in_history(history: list[dict] | None, topic_title:
         if not isinstance(turn, dict) or turn.get("role") != "assistant":
             continue
         content = str(turn.get("content") or "")
-        if PREREQUISITE_GATE_MARKER in content and f"「{topic_title}」" in content:
+        if _is_prerequisite_gate_for_topic(content, topic_title):
             return True
     return False
 
@@ -2137,6 +2143,47 @@ def _is_kana_kanji_free(text: str) -> bool:
     if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", body):
         return False
     return bool(re.search(r"[A-Za-z]", body))
+
+
+def _fixed_text_language(text: str) -> str:
+    """固定文（前提の逆質問・目印・選択肢）を出す言語 ``"ja"`` / ``"en"``（IK-0574）。
+
+    判定器は新設せず、既存の 2 つ（``_is_mostly_latin`` = IK-0424 / ``_is_kana_kanji_free`` =
+    IK-0450）の和で読む（当該発話だけ・数値なし・会話を跨がない）。
+    """
+    return "en" if (_is_mostly_latin(text) or _is_kana_kanji_free(text)) else "ja"
+
+
+def _is_prerequisite_gate_for_topic(content: str, topic_title: str) -> bool:
+    """assistant 本文がこのトピックの前提の逆質問か（日本語 / 英語の両方を読む。IK-0574）。"""
+    text = str(content or "")
+    if PREREQUISITE_GATE_MARKER in text and f"「{topic_title}」" in text:
+        return True
+    return label_vocab.PREREQUISITE_GATE_MARKER_EN in text and f'"{topic_title}"' in text
+
+
+def _prerequisite_gate_first_name(content: str) -> str:
+    """逆質問が挙げた最初の前提名（読めなければ空文字。日本語 / 英語の両方）。"""
+    text = str(content or "")
+    match = _PREREQUISITE_GATE_FIRST_RE.search(text) or _PREREQUISITE_GATE_FIRST_EN_RE.search(text)
+    return match.group(1).strip() if match else ""
+
+
+def _prerequisite_gate_text(intervention: dict, topic_title: str, language: str) -> str:
+    """このターンに添える逆質問の本文（目印は ``assemble`` 側が前置する。IK-0574）。
+
+    日本語は ``services.check_prerequisites`` の本文そのまま。英語は ``label_vocab`` の
+    英語版（同じ前提の並び・同じ最初の前提）を組み立てる（LLM 0 回）。
+    """
+    if language != "en":
+        return intervention["message"]
+    unlearned = [str(x) for x in (intervention.get("unlearned") or []) if str(x).strip()]
+    first = str(intervention.get("first_prerequisite") or (unlearned[0] if unlearned else ""))
+    return label_vocab.PREREQUISITE_GATE_FULL_EN.format(
+        topic=topic_title,
+        prerequisites=", ".join(unlearned[:3]) or first,
+        first=first,
+    )
 
 
 def _history_has_gate_skipped_notice(history: list | None) -> bool:
@@ -2180,9 +2227,8 @@ def _previous_turn_was_prerequisite_gate(history: list[dict] | None, topic_title
             index -= 1
             continue
         content = str(turn.get("content") or "")
-        if PREREQUISITE_GATE_MARKER in content and f"「{topic_title}」" in content:
-            match = _PREREQUISITE_GATE_FIRST_RE.search(content)
-            return match.group(1).strip() if match else ""
+        if _is_prerequisite_gate_for_topic(content, topic_title):
+            return _prerequisite_gate_first_name(content)
         # 直前の学習者発話が詰まりだけなら、この往復を飛ばして前の assistant ターンを見る。
         user_index = next(
             (i for i in range(index - 1, -1, -1) if turns[i].get("role") == "user"), None
@@ -3048,6 +3094,9 @@ def _adopted_source_entry(
         # 数式区間（``$…$``）の途中では切らない（IK-0394。切り詰めは
         # ``core.text_excerpt.excerpt`` の1実装）。
         "quote": excerpt(quote, 80, keep_dollar_math=True),
+        # IK-0545: 文脈に置いたチャンク本文（逐語引用の一致検査の突き合わせ先）。応答 DTO
+        # （SourceTierItem）・履歴メタ（_history_source_meta）には載らない。
+        "passage": sanitize_source_text_for_prompt(result.get("text") or ""),
         "meta": _source_location_meta(result),
         "origin": (
             "course_material" if result.get("material_id") in course_material_ids else "other_material"
@@ -3950,7 +3999,9 @@ def _generate_graph_element_explanation(
             user_id, course_id, topic_id,
             body.history, user_message, approved_answer,
         )
-        return LearningChatResponse(answer=approved_answer, course_update=None)
+        return LearningChatResponse(
+            answer=approved_answer, course_update=None, shape=verbatim_shape_dto(approved_answer),
+        )
 
     degraded = False
     graph_description = (context.get("graph_description") or "").strip()
@@ -4026,11 +4077,21 @@ def _generate_graph_element_explanation(
                 answer = answer.replace(formula_id, f"${target_formula_latex}$")
             if target_formula_latex not in answer:
                 answer = f"対象の数式は次の式です。\n\n$${target_formula_latex}$$\n\n" + answer
+        if not degraded:
+            # 応答の骨格（RS1〜RS3）: 「最後に短い確認文を1つ」の指示を LLM の自制に任せず、
+            # 末尾に連なる問いは最後の 1 つだけ残す（保存文も同じ本文）。
+            answer = render_answer_text(assemble_response_shape(
+                answer=answer, learner_message=user_message, is_discuss=False,
+                gate_text=None, degraded=False,
+            ))
     persist_chat_history(
         user_id, course_id, topic_id,
         body.history, user_message, answer,
     )
-    return LearningChatResponse(answer=answer, course_update=None, degraded=degraded)
+    return LearningChatResponse(
+        answer=answer, course_update=None, degraded=degraded,
+        shape=None if degraded else verbatim_shape_dto(answer),
+    )
 
 
 #: 第 17 周（A1）: 表示中の教材から番号付き出典として登録するチャンクの上限・1件の字数。
@@ -4444,9 +4505,9 @@ def _question_before_prerequisite_gate(history: list | None, topic_title: str) -
         if turn.get("role") != "assistant":
             continue
         content = str(turn.get("content") or "")
-        if PREREQUISITE_GATE_MARKER not in content or f"「{topic_title}」" not in content:
+        if not _is_prerequisite_gate_for_topic(content, topic_title):
             return None
-        if PREREQUISITE_GATE_ANSWERED_MARKER in content:
+        if any(marker in content for marker in _PREREQUISITE_GATE_ANSWERED_MARKERS):
             return None  # TRIAGE14: 元の質問にはその逆質問のターンで答え済み
         for prev in reversed(turns[:index]):
             if prev.get("role") == "user":
@@ -5324,7 +5385,7 @@ def _atlas_action_response(
             body.history, body.message, answer,
             user_message_id=body.message_id or None,
         )
-        return LearningChatResponse(answer=answer, course_update=None)
+        return LearningChatResponse(answer=answer, course_update=None, shape=verbatim_shape_dto(answer))
 
     if action == "learn":
         interest_view = get_interest_traces(user_id, course_id, topic_id)
@@ -5356,7 +5417,9 @@ def _atlas_action_response(
             body.history, body.message, answer,
             user_message_id=body.message_id or None,
         )
-        return LearningChatResponse(answer=answer, course_update=None, atlas_path_card=card)
+        return LearningChatResponse(
+            answer=answer, course_update=None, atlas_path_card=card, shape=verbatim_shape_dto(answer),
+        )
 
     return None
 
@@ -5489,6 +5552,12 @@ def _usage_help_response(
                 ).strip()
                 if not formatted:
                     raise ValueError("empty response")
+                # 応答の骨格（RS3）: 整形した会話調の本文だけを区画に通す（問い返しは 1 つまで）。
+                # マニュアル本文そのもの（下のテキスト経路・整形失敗の素通し）は組み替えない。
+                formatted = render_answer_text(assemble_response_shape(
+                    answer=formatted, learner_message=body.message, is_discuss=False,
+                    gate_text=None, degraded=False,
+                ))
                 answer = f"{formatted}\n\n{_USAGE_HELP_FOOTER}"
             except Exception:
                 logger.warning("usage help casual LLM formatting failed; falling back to raw body", exc_info=True)
@@ -5526,6 +5595,8 @@ def _usage_help_response(
         course_update=None,
         manual_citations=manual_citations,
         degraded=degraded,
+        # 応答の骨格: マニュアル本文・無ヒット固定文は組み替えず区画を読むだけ。
+        shape=verbatim_shape_dto(answer),
     )
 
 
@@ -5738,7 +5809,10 @@ def _learning_chat_core(
             current_user["id"], course_id, topic_id,
             body.history, body.message, result.answer,
         )
-        return LearningChatResponse(**result.model_dump(), course_update=None)
+        # 応答の骨格: 固定文は組み替えず区画を読むだけ（早期 return でも shape を埋める）。
+        return LearningChatResponse(
+            **result.model_dump(), course_update=None, shape=verbatim_shape_dto(result.answer),
+        )
 
     # UIサジェスト由来の明示アクションは自然文の意図分類より優先する。
     if body.action == "EXPLAIN_GRAPH_ELEMENT":
@@ -5782,6 +5856,8 @@ def _learning_chat_core(
             **result.model_dump(),
             course_update=graph_response.course_update,
             structure_anchor=_tap_anchor,
+            # 応答の骨格: 生成本文は _generate_graph_element_explanation が assemble 済み。
+            shape=verbatim_shape_dto(result.answer),
         )
 
     # 学生 HELP ルート（設計 §1-3）: casual バイパス（次の _is_casual 判定）より手前に
@@ -5826,6 +5902,7 @@ def _learning_chat_core(
                 answer=_score_reply,
                 course_update=None,
                 content_grounding="model_generated",
+                shape=verbatim_shape_dto(_score_reply),
             )
 
         # IK-0434: お礼・締めくくりだけの発話は、検索も回答生成もせず固定の1文で応じる
@@ -5856,6 +5933,7 @@ def _learning_chat_core(
                 answer=_closing_reply,
                 course_update=None,
                 content_grounding=None,
+                shape=verbatim_shape_dto(_closing_reply),
             )
 
     # カジュアル対話モード（気軽に話せる先生・ハンズフリー音声会話）:
@@ -6111,6 +6189,7 @@ def _learning_chat_core(
                 sources=_prereq_sources,
                 overall_tier=_prereq_tier,
                 content_grounding=_prereq_grounding,
+                shape=verbatim_shape_dto(result.answer),
             )
         # 学習開始・一般アドバイスはパス上（detour ではない）。前進アクションを型付きで提示。
         # 第 18 周（G2）: 本文が表示中の教材の出典を引用していれば course_material + その出典
@@ -6156,6 +6235,7 @@ def _learning_chat_core(
                 sources=_advice_sources,
                 overall_tier=_advice_tier,
                 content_grounding=_advice_grounding,
+                shape=verbatim_shape_dto(advice_answer),
             )
         return LearningChatResponse(
             answer=advice_answer,
@@ -6165,6 +6245,7 @@ def _learning_chat_core(
             # 学習相談の一般アドバイスは資料に基づかない（コース構造とモデルの知識だけ）。
             # 出所を空欄のままにせず model_generated と正直に言う（是正 F4 / 原則8）。
             content_grounding="model_generated",
+            shape=verbatim_shape_dto(advice_answer),
         )
 
     # 3. Adaptive Routing: 前提知識の自動判定 (ルート③/④の前に実行)
@@ -6199,7 +6280,10 @@ def _learning_chat_core(
             current_user["id"], course_id, topic_id,
             body.history, body.message, _ack_answer,
         )
-        return LearningChatResponse(answer=_ack_answer, course_update=None, support_mode="normal")
+        return LearningChatResponse(
+            answer=_ack_answer, course_update=None, support_mode="normal",
+            shape=verbatim_shape_dto(_ack_answer),
+        )
     if _is_backstage or _prereq_followup in ("after_gate", "gated_before", "ack_content") or body.replace_message_id:
         prerequisite_intervention = None
     # 応答の骨格（詰まりの区画, 第 17 周）: 「わからない」とだけ返した往復は足場 1 つで答え、
@@ -6222,21 +6306,22 @@ def _learning_chat_core(
     # 応答の骨格（core/dialogue_shape.py）へ渡す逆質問の本文（目印は assemble 側で前置する）。
     _prereq_gate_text_for_shape: str | None = None
     _prereq_gate_actions: list = []
+    _prereq_gate_language = "ja"
     if prerequisite_intervention:
         try:
             record_prerequisite_gate_presented(current_user["id"], course_id, topic_id)
         except Exception:
             logger.warning("Failed to record prerequisite gate", exc_info=True)
+        # IK-0574: 英語で問うた受講者には逆質問・目印・選択肢を英語で出す（IK-0424 の
+        # 「日本語の逆質問 + 英語の1文」をやめる）。言語は当該発話だけで決める。
+        _prereq_gate_language = _fixed_text_language(body.message)
         _prereq_gate_actions = list(support_agent.prerequisite_choice_actions(
-            prerequisite_intervention.get("first_prerequisite", "")
+            prerequisite_intervention.get("first_prerequisite", ""),
+            language=_prereq_gate_language,
         ))
-        _gate_text = prerequisite_intervention["message"]
-        if _is_mostly_latin(body.message):
-            # IK-0424: 英語で問うた受講者に日本語だけの逆質問を返さない（英語の1文を添える）。
-            _gate_text = _gate_text + "\n\n" + label_vocab.PREREQUISITE_GATE_EN.format(
-                prerequisite=prerequisite_intervention.get("first_prerequisite", "")
-            )
-        _prereq_gate_text_for_shape = _gate_text
+        _prereq_gate_text_for_shape = _prerequisite_gate_text(
+            prerequisite_intervention, topic_title, _prereq_gate_language
+        )
 
     # 4. RAG: システム全域のチャンクを検索し、コンテキストを構築
     #    search_chunks_with_metadata は各チャンクに tier(L1信頼性) を付与して返す。
@@ -6805,10 +6890,21 @@ def _learning_chat_core(
         is_discuss=_is_discuss,
         gate_text=_prereq_gate_text_for_shape,
         degraded=degraded,
-        gate_marker=PREREQUISITE_GATE_ANSWERED_MARKER,
+        gate_marker=(
+            label_vocab.PREREQUISITE_GATE_ANSWERED_MARKER_EN
+            if _prereq_gate_language == "en"
+            else PREREQUISITE_GATE_ANSWERED_MARKER
+        ),
         stuck=_turn_is_stuck,
     )
     answer = render_answer_text(_response_shape)
+    # IK-0545: 回答本文の逐語引用（「…」[出典N]）が出典 N のチャンク本文に含まれるかを
+    # 決定論で突き合わせる（core/citation_check.py・非LLM）。本文は変えず事実だけを返す（P4）。
+    _citation_check = None if degraded else check_citations(
+        answer, {s["index"]: s.get("passage") for s in cited_sources}
+    )
+    if _citation_check and _citation_check["unmatched"]:
+        _record_document_discuss_event("citation_quote_unmatched", current_user["id"], course_id)
 
     # 誤解検出（マイルドな表現にも対応）。casual では採点・訂正の圧を掛けない。
     # degraded ターンは回答本文が根拠を伴わない固定文のため、本文依存の後処理はスキップする
@@ -7044,6 +7140,7 @@ def _learning_chat_core(
         # RAG 応答（この最終 return）だけが設定し、HELP / 学習相談 / 地図 / 要素説明の
         # 早期 return は None のまま。数値キーは持たない（LC7）。
         stance=build_stance_dto(_stance, _stance_source),
+        citation_check=_citation_check,
         mock=False,
         degraded=degraded,
     )

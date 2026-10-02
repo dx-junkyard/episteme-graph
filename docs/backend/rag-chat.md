@@ -104,7 +104,9 @@
 > `label_vocab.PREREQUISITE_GATE_SKIPPED_NOTICE`（確認はまだ記録していない事実文）を添える
 > （IK-0422）。前提名の内容語（漢字・カタカナの2字以上 / 英字2字以上の語。英字は語境界付き）が
 > 2つ以上重なる問いは前提そのものへの問いとして説明へ流す（IK-0423・`_prerequisite_content_overlap`）。
-> 発話の大半がラテン文字なら逆質問に英語の1文（`PREREQUISITE_GATE_EN`）を添え、事実文も英語にする。
+> 英語の発話（`_is_mostly_latin` か `_is_kana_kanji_free` = `_fixed_text_language`）には逆質問・回答済みの目印・選択肢を
+> 英語で出し（`label_vocab.PREREQUISITE_GATE_FULL_EN` ほか。IK-0574 — 旧 IK-0424 の「日本語の逆質問 + 英語の1文」を置換）、
+> 事実文も英語にする。履歴の判定器は日英両方の逆質問を読む（`_is_prerequisite_gate_for_topic`）。
 > 英語の「I understand / I'm familiar with」等と、逆質問直後の素の「yes / はい」を理解の答えとして
 > 記帳し、英語の否定形（no / I don't / not familiar / please explain）は説明へ流す（IK-0424）。
 > 英語の回答のドリルダウン目印 `[Ask more about X]` / `[Ask about X]` / `[Tell me more about X]` も
@@ -707,3 +709,31 @@ UI 側の扱いは [学習機能](../features/learning.md)・[フロントエン
 - **無内容チャンク 3 種**（IK-0559）: `non_content_chunk_reason` に acknowledgments / title_block / outline。
 - **ゲート後の分岐**（IK-0560）: 「まだ」「わからん」「むずい」等の口語の否定を否定の返事に含め、前提トピックの教材本文を説明の入力に渡す。
   英語話者にも日本語のゲート文が出る件は未解決（IK-0574）。
+
+## 追補（2026-10-02）回答の逐語引用と出典本文の一致検査（IK-0545）
+
+LLM が別のチャンクの文を `[出典N]` に帰属させる誤帰属は、出典チップが付いている限り
+「裏付けがある」ように見えたまま通っていた（第 14 周 seq135）。RAG 応答の後処理で、
+回答本文の**逐語引用**を引用先チャンクの本文と突き合わせ、一致を確認できないものを事実として返す。
+
+- **正本**: `backend/core/citation_check.py::check_citations(answer, passages)`（純関数・非LLM・同期・決定論。
+  FastAPI / sqlalchemy / LLM 非 import）。`passages` は出典番号 → LLM の文脈に置いたチャンク本文
+  （`_adopted_source_entry` の内部キー `passage`。応答 DTO・履歴メタには載らない）。
+- **検査の対象**: 「」『』“” "" で括られた逐語のうち、正規化後 8 字以上のもの（短い引用は用語の強調とみなす）。
+  同じ文の中で引用の**直後**に続く `[出典N]`（連続するマーカーはどれかの本文に含まれれば一致）、無ければ
+  引用の**直前**の `[出典N]` に結び付ける。文の区切り（引用の外の `。．！？!?` 改行）を越えては結び付けない。
+  引用符の無い言い換えは逐語一致の対象にならないので検査しない（一致しないのが正常な文を不一致と言わない）。
+  省略記号（…・...・‥）で区切った断片は順に検査する。
+- **正規化**: SA層 `core/assistant_context/selection.py` と同じ作法（制御シーケンス除去 → 空白除去）に、NFKC・
+  大文字小文字・`$`・引用末尾の句読点の違いを吸収するだけ。比較キーを作るだけで本文・抜粋は書き換えない。
+- **DTO**: `LearningChatResponse.citation_check`（RAG 応答の最終 return のみ。検査した引用が無ければ `None`）—
+  `{"checked": ["1", …], "unmatched": [{"citation": "N", "quotes": ["…"], "note": "引用文は出典本文と一致を確認できていません"}]}`。
+  番号は本文の `[出典N]` の N。件数・一致度・類似度の数値は載せない。degraded ターンは `None`。
+  SSE の `final` も同じ後処理を通るので同じ値が載る。
+- **本文・保存文は不変**（P4 / RS5）。引用を落とさず書き換えず、`citation_map`（IK-0444）・出典番号の意味論も変えない。
+- **画面**: `app.js` の `renderCitationCheckLine` が `unmatched` の出典ごとに `[出典N]`（出典チップ）+ サーバの `note` を
+  1 行添える（`.citation-check-line`・警告色なし・文言はフロントに焼き込まない）。履歴の再読み込み後は出さない（保存しないため）。
+- **観測**: 不一致があった往復だけ `discuss_metric_events` に `citation_quote_unmatched`（payload 空・サーバ側記録）。
+- ガードレール: `test_citation_check_{core,route,ui_static}.py`。
+- 適用範囲: `_learning_chat_core` の RAG 応答（コース経路・document 直付け discuss の両方。同じコアを通る）。
+  前提知識の説明（LEARNING_ADVICE）などの早期 return には未適用。言い換えの意味的一致（LLM・embedding による検査）はしない。

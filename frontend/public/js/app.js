@@ -1466,6 +1466,23 @@
   // 表示ラベルはサーバ（core/label_vocab.py の LEARNING_STANCE_LABELS）が付けた
   // stance.label をそのまま描く — フロントに様相→日本語の表を持たない（ミラー規律）。
   // confidence・一致度などの数値は DTO に無く、ここでも一切描かない（LC7）。
+  // IK-0545: 回答本文の逐語引用が出典本文と一致を確認できなかった出典ごとに 1 行。
+  // 文言はサーバ（core/citation_check.py の CITATION_UNMATCHED_NOTE）が返す note を素通しする
+  // （フロントに文言を焼き込まない）。[出典N] は後段の linkifyCitations で出典チップになる。
+  function renderCitationCheckLine(msg) {
+    var check = msg && msg.citation_check;
+    var items = (check && Array.isArray(check.unmatched)) ? check.unmatched : [];
+    if (!items.length) return "";
+    var html = "";
+    items.forEach(function (item) {
+      if (!item || !item.citation || !item.note) return;
+      html += '<div class="citation-check-line" data-citation-check="' + escHtml(String(item.citation)) + '">' +
+        '[出典' + escHtml(String(item.citation)) + ']<span class="citation-check-fact">' +
+        escHtml(item.note) + '</span></div>';
+    });
+    return html;
+  }
+
   function renderStanceLine(msg) {
     var st = msg && msg.stance;
     if (!st || st.source !== "inferred" || !st.stance || st.stance === "tutor") return "";
@@ -1878,6 +1895,9 @@
     // 入口統合 Phase 1（§6）: 様相チップ（推定で答えたときだけの 1 行 + 訂正）。
     // 出所（tier / grounding）の直後に置く — 根拠の提示は様相にかかわらず同じ。
     html += renderStanceLine(msg);
+
+    // IK-0545: 逐語引用と出典本文の一致検査（サーバの事実文をそのまま描く。警告色にしない）。
+    html += renderCitationCheckLine(msg);
 
     // ヘルプルート（§1-3-6）: マニュアル出典。HELP 応答時のみ非 null。
     // chunk ではないためクリック動作は持たせない（/source-chunk/ には接続しない）。
@@ -4943,6 +4963,9 @@
           // 応答の骨格（RS1〜RS5）: {closing_question, has_gate, mirror_kept}（数値なし）。
           // 末尾の問い返しを独立段落で描くのに使う。
           shape: data.shape || null,
+          // IK-0545: 逐語引用と出典本文の一致検査の事実（{checked, unmatched:[{citation, quotes, note}]}。
+          // 数値なし）。一致を確認できなかった出典にだけ事実文の 1 行を添える。
+          citation_check: data.citation_check || null,
           // 訂正（聞き直し）で「同じ位置から」再処理するための元 user メッセージ id。
           reply_to_id: userMsgId,
           mock: isMock(data),

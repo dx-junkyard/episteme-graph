@@ -138,3 +138,32 @@ system に足す直後（`messages: list[dict] = [` の前）。保存文・痕�
   「いいえ」と読まず `after_gate` に倒し、通常の RAG + `assemble(stuck=True)` で足場 1 つ。逆質問は詰まりの往復を飛ばして保留
   （`_previous_turn_was_prerequisite_gate`）。「はい、…」＋中身は `ack_content`（肯定を記帳し中身に RAG で答える）。
   学習相談・前提説明の早期 return も `_shape_advice_answer` で骨格に通す（学習相談は見出しなし・5 文以内）。テストは `test_wave18_gate_stuck_advice.py`。
+
+### 8.2 早期 return の骨格と逆質問の言語（2026-10-02, IK-0594 / IK-0574）
+
+`_learning_chat_core` と委譲先の早期 return を全件列挙し、区画から外れる経路だけを直した（問い返しの無い経路に問いは足さない）。
+
+| 経路 | 本文 | 外れ方（是正前） | 適用 |
+|---|---|---|---|
+| 学習パスに戻る（`return_to_learning_path`） | 固定文 | shape なし（問い返しなし） | `verbatim_shape_dto` |
+| 要素タップの説明（`EXPLAIN_GRAPH_ELEMENT`・LLM 経路） | 生成 | 「最後に確認文を1つ」を LLM の自制に任せ、問い返しが連なり得る / shape なし | `assemble` + `render_answer_text`（保存文も同じ）+ `verbatim_shape_dto` |
+| 要素タップの説明（承認済み説明・graph_description 由来・degraded） | 固定・承認済み | shape なし | `verbatim_shape_dto`（degraded は None のまま） |
+| HELP（テキスト経路・マニュアル本文素通し） | マニュアル本文 | shape なし | `verbatim_shape_dto` のみ（**本文は切り詰めない・言い換えない**） |
+| HELP（無ヒット固定文） | 固定文 | shape なし | `verbatim_shape_dto` |
+| HELP（音声 / casual の会話調整形） | 生成 | 問い返しが連なり得る / shape なし | 整形本文だけ `assemble`（footer は後ろ）。整形失敗の素通しは組み替えない |
+| 点数・割合の要求 / 締めくくり | 固定文 | shape なし | `verbatim_shape_dto` |
+| 地図 ↗ mind / learn | 固定文 | shape なし | `verbatim_shape_dto` |
+| 学習相談・前提の説明 | 生成 | 第 19 波で `_shape_advice_answer` 済み / shape なし | `verbatim_shape_dto`（最終本文を読むだけ） |
+| 回答済みの逆質問に「理解している」だけ | 固定文 | shape なし | `verbatim_shape_dto` |
+
+- `core/dialogue_shape.py::verbatim_shape_dto(text)`: `assemble` と同じ規則で区画を読むだけで本文は変えない。末尾の問いが
+  1 つだけのときだけ `closing_question` に報告し、連なる問いがあれば None（組み替えていないので問い返しとは言わない）。
+  `has_gate` / `mirror_kept` は常に False（早期経路に逆質問・鏡は無い）。
+- ガードレール: 4 関数（`_learning_chat_core` / `_usage_help_response` / `_atlas_action_response` /
+  `_generate_graph_element_explanation`）の `LearningChatResponse(` 呼び出しすべてに `shape=` があることを AST で固定
+  （`test_early_return_shape.py`）。
+- **逆質問の言語（IK-0574）**: 当該発話の言語（既存の `_is_mostly_latin` / `_is_kana_kanji_free` の和 = `_fixed_text_language`）を
+  逆質問の本文・回答済みの目印・選択肢ボタンまで運ぶ。英語は `label_vocab` の `PREREQUISITE_GATE_FULL_EN` / `_MARKER_EN` /
+  `_FIRST_EN` / `_ANSWERED_MARKER_EN` / `PREREQUISITE_CHOICE_*_EN`。RS5 の形（本文 → `\n\n---\n\n` + 目印 + 逆質問）は不変で、
+  判定器は `_is_prerequisite_gate_for_topic` / `_prerequisite_gate_first_name` 経由で日英両方を読む。日本語の発話の逆質問は
+  バイト一致。テストは `test_ik0574_prerequisite_gate_language.py`。

@@ -40,6 +40,7 @@ __all__ = [
     "shape_dto",
     "split_closing_question",
     "strip_preamble",
+    "verbatim_shape_dto",
 ]
 
 #: 保存文で本文と前提の逆質問を区切る区切り（RS5。履歴の判定器と既存テストが依存する）。
@@ -546,6 +547,27 @@ def shape_dto(shape: ResponseShape, *, mirror: dict | None = None) -> dict | Non
         "closing_question": shape.closing_question,
         "has_gate": bool(shape.gate_text),
         "mirror_kept": mirror is not None,
+    }
+
+
+def verbatim_shape_dto(text: str) -> dict:
+    """本文を組み替えない早期経路（固定文・マニュアル本文の素通し）の応答 DTO。
+
+    ``assemble`` と同じ規則で区画を**読む**だけで、本文は変えない（マニュアル本文を
+    切り詰めない・言い換えない）。末尾の問い返しは、規則どおりに読んで何も落とす必要が
+    無いとき（＝最後の 1 つだけが末尾にある）だけ ``closing_question`` として報告する。
+    落とす必要がある本文（末尾に問いが連なる）は組み替えていないので報告しない（None）。
+    逆質問・鏡は早期経路に無い（``has_gate`` / ``mirror_kept`` は常に False）。
+    """
+    original = str(text or "")
+    shape = assemble(
+        answer=original, learner_message="", is_discuss=False, gate_text=None, degraded=False,
+    )
+    unchanged = render_answer_text(shape) == original
+    return {
+        "closing_question": shape.closing_question if unchanged else None,
+        "has_gate": False,
+        "mirror_kept": False,
     }
 
 

@@ -227,7 +227,9 @@ class TestEnglishRoute:
     def test_english_question_gets_english_gate_sentence(self, chat_env, monkeypatch):
         monkeypatch.setattr(learning_mod, "_classify_intent", lambda *a, **k: "DOMAIN_RAG")
         resp = _chat("What exactly is oscillating in baryon acoustic oscillations?")
-        assert learning_mod.PREREQUISITE_GATE_MARKER in resp.answer
+        # IK-0574: 英語で問うた受講者には逆質問全体を英語で出す（日本語の逆質問は出さない）。
+        assert learning_mod.PREREQUISITE_GATE_MARKER not in resp.answer
+        assert label_vocab.PREREQUISITE_GATE_MARKER_EN in resp.answer
         assert label_vocab.PREREQUISITE_GATE_EN.format(prerequisite=PREREQ) in resp.answer
         # 追記しても逆質問の判定（直前が逆質問か・最初の前提名）は保たれる。
         assert learning_mod._previous_turn_was_prerequisite_gate(

@@ -220,17 +220,18 @@ class TestSourceDocumentVisibilityGate:
     """P2-R5: sources に material_id が書いてあるだけでは読んでよい根拠にならない。"""
 
     def test_invisible_documents_are_dropped(self, monkeypatch):
-        class _Session:
-            def execute(self, *_a, **_k):
-                class _R:
-                    @staticmethod
-                    def fetchall():
-                        return [("m1", "doc-visible"), ("m2", "doc-hidden")]
-                return _R()
-
+        # IK-0595: 両形（documents.id / source_path）の解決は core.document_refs に委ねる。
+        monkeypatch.setattr(
+            learning_routes._document_refs, "resolve_document_refs",
+            lambda _s, refs: {
+                "m1": {"document_id": "doc-visible", "material_id": "m1"},
+                "m2": {"document_id": "doc-hidden", "material_id": "m2"},
+                "doc-visible": {"document_id": "doc-visible", "material_id": "m1"},
+            },
+        )
         monkeypatch.setattr(learning_routes, "list_visible_document_ids", lambda _u: ["doc-visible"])
         out = learning_routes._ordered_source_document_ids(
-            _Session(), ["m1", "m2"], user_id="u1"
+            _FakeSession(), ["m1", "m2", "doc-visible"], user_id="u1"
         )
         assert out == ["doc-visible"]
 
