@@ -38,6 +38,11 @@ DETECTOR_VERSION = "simulation-bridge/v1"
 #: U層 feature キー（``core/llm_usage/schema.py::KNOWN_FEATURES`` に登録する 2 件）。
 FEATURE_CODEGEN = "simulation:codegen"
 FEATURE_REVISION = "simulation:revision"
+#: v1.1（§14.3）: 学習者が起動する生成・改訂提案（U層の帰属を教員の操作と分ける）。
+FEATURE_LEARNER_CODEGEN = "learning:simulation_codegen"
+FEATURE_LEARNER_REVISION = "learning:simulation_revision"
+#: 学習者の試行の痕跡（interest_traces.kind・登録簿 core/trace_registry.py に宣言 = SB15）。
+TRACE_KIND_VERIFICATION_ATTEMPT = "verification_attempt"
 
 #: M層 scene キー（``core/llm_policy.py``。``simulation:*`` はこの scene に束ねる）。
 SCENE_SIMULATION = "simulation"
@@ -80,7 +85,9 @@ PROGRAM_STATUSES: tuple[str, ...] = (
 
 WIRING_ORIGIN_TEACHER = "teacher"
 WIRING_ORIGIN_LLM = "llm_candidate"
-WIRING_ORIGINS: tuple[str, ...] = (WIRING_ORIGIN_TEACHER, WIRING_ORIGIN_LLM)
+#: v1.1（§14・migration 089）: 学習者が自分で組んだ配線（本人の操作で confirmed として作る = SB11）。
+WIRING_ORIGIN_LEARNER = "learner"
+WIRING_ORIGINS: tuple[str, ...] = (WIRING_ORIGIN_TEACHER, WIRING_ORIGIN_LEARNER, WIRING_ORIGIN_LLM)
 
 WIRING_STATUS_CANDIDATE = "candidate"
 WIRING_STATUS_CONFIRMED = "confirmed"
@@ -227,6 +234,14 @@ FACT_NO_PROPOSAL = "目録にある部品の組み替えでは改訂案を作れ
 FACT_NO_PARTS_CATALOG = "凍結された部品がまだありません。ナレッジライブラリに部品を登録して凍結してください。"
 FACT_NO_WIRING = "配線なしで実行したため、模擬観測は理論の出力そのものです。"
 FACT_REFERENCE_MISSING = "論文の記載値は入力されていません。"
+# v1.1（§14）学習者向けの事実文
+FACT_LEARNER_CODE_REJECTED = "このコードには許可されていない操作が含まれているため、採用・実行できません。"
+FACT_LEARNER_CODE_EDITED = "あなたが書き直したコードです。"
+FACT_SHARED = "この実行記録を担当教員と共有しました。"
+FACT_SHARED_LEDGER = "観測系の主張の台帳に、確かめた結果の候補として記帳しました。確定するのは教員です。"
+FACT_SHARED_NO_LEDGER = "観測系の主張が選ばれていないため、台帳の候補には記帳していません。"
+FACT_SHARED_NOT_SUCCEEDED = "比較まで終わっていない実行なので、台帳の候補には記帳していません。"
+FACT_SELECT_DOCUMENT = "動かす論文を選んでください。"
 
 #: 一致の段階ラベル（表示は label_vocab の表が正本。ここは level キーの意味の説明用）。
 AGREEMENT_FACTS: dict[str, str] = {

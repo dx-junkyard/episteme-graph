@@ -112,6 +112,11 @@ def scene_for_feature(feature: str) -> str | None:
         return SCENE_PIPELINE_VISION
     if feature == "pipeline" or feature.startswith("pipeline:"):
         return SCENE_PIPELINE
+    if feature in ("learning:simulation_codegen", "learning:simulation_revision"):
+        # 検証シミュレーション層 v1.1（simulation_bridge_design.md §14.3）。学習者が起動するが、
+        # 実体は教員の生成・改訂提案と同じコード生成なので学習チャットの場面ではなく
+        # ``simulation`` scene に束ねる（下の learning:* 分岐より前に置くこと）。
+        return SCENE_SIMULATION
     if feature in (
         "learning:chat",
         "learning:chat_casual",
@@ -402,6 +407,9 @@ _FEATURE_ENV_SETTINGS: dict[str, tuple[str, str]] = {
     # 検証シミュレーション層（simulation_bridge_design.md §8）: 生成と改訂提案で同一の設定キーを共有する。
     "simulation:codegen": ("simulation_llm_model", "fast"),
     "simulation:revision": ("simulation_llm_model", "fast"),
+    # v1.1（§14.3）: 学習者起動の生成・改訂提案も同じ設定キー（場面は simulation）。
+    "learning:simulation_codegen": ("simulation_llm_model", "fast"),
+    "learning:simulation_revision": ("simulation_llm_model", "fast"),
 }
 
 # 特例: Settings に専用フィールドが無く、呼び出し元が os.getenv で直接読んでいる feature

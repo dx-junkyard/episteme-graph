@@ -986,11 +986,16 @@ SL層 `support_paths` + claim つまづきサマリー（k-匿名集約の再利
 合わせて `sim-runner`（隔離コンテナ）で実行し、決定論の比較器で理論の出力と模擬観測を突き合わせる
 （正本: [features/simulation_bridge_design.md](../features/simulation_bridge_design.md) §6、不変条項 SB1〜SB10）。
 main.py が `prefix="/api/admin"` で直接登録する。全エンドポイント `_require_teacher`、ルーターは
-`route_class=TeacherDisplayRoute`（DP7）。生成コードは api-server で実行しない（SB3: 実行前にサーバ側 AST 検査を毎回やり直す）。
+本層専用の `route_class=SimulationDisplayRoute`（`TeacherDisplayRoute` は記号 `k` 等のキーを落とすため使わない —
+落とすのは `schema.FORBIDDEN_DTO_KEYS` だけ）。生成コードは api-server で実行しない（SB3: 実行前にサーバ側 AST 検査を毎回やり直す）。
 LLM を呼ぶのは generate / propose-revision の 2 本だけ（各 1 コール + 日次 CostGate
 `SIMULATION_CODEGEN_MAX_CALLS_PER_DAY` / `SIMULATION_REVISION_MAX_CALLS_PER_DAY`。超過は 429 事実文）。
 監査は `AUDIT_ENTITY_SIMULATION`（コミット後に記帳）。DELETE ルートは無い（SB7）。差の数値は計器
-`simulation-agreement`（制度指標カタログ・教員向け `per_item_no_person`）として runs の DTO に出る。学習者向け経路は無い。
+`simulation-agreement`（制度指標カタログ・教員向け `per_item_no_person`）として runs の DTO に出る。
+v1.1（§14）以降、一覧に出るのは**教員本人の行 + 所有者の無い v1 の旧行 + 学習者が本人の操作で共有した run**
+（run の DTO に `shared: bool`、他者が共有した run には `shared_by_label` = 表示名。学習者の user id は出さない）。
+学習者の program / wiring / 共有していない run は見えず、id を指定しても 404。手順の正本は
+`core/simulation_bridge/service.py`（学習者向けルーターと共有）。
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
@@ -1013,6 +1018,33 @@ LLM を呼ぶのは generate / propose-revision の 2 本だけ（各 1 コー�
 | POST | `/api/admin/doubt/ledger/{target_type}/{target_id}/simulation-candidates/{candidate_id}/dismiss` | `_require_editable_ledger_target` | 見送り（配列内の status 遷移・削除しない） |
 
 教員向け台帳 GET（`/api/admin/doubt/ledger/{target_type}/{target_id}`）は未処理の `simulation_candidates` も返す。学習者向け台帳 GET には載せない。
+
+### 動かして確かめる — 学習者向け（`routes/simulation_lab.py` learning_router、SB層 v1.1）
+
+学習者が理論モジュールのシミュレーションを**作って試す**経路（正本: [features/simulation_bridge_design.md](../features/simulation_bridge_design.md) §14、
+SB11〜SB15）。`learning_router = APIRouter(prefix="/api/learning", route_class=LearnerDisplayRoute)` を main.py が直接 include する
+（cycle / descent と同型）。全エンドポイント `_get_current_user`（`_require_teacher` を置かない = SB11: 試行に承認ゲートを置かない。
+安全の弁は AST 検査と sim-runner）。受講ゲートは `get_accessible_course_data`、教材はコースの sources
+（`list_course_source_document_ids`）に限り外は 404。`document_id` を省くと焦点論文（`services.learner_focus_document` = FD1）。
+programs / wirings / runs の読み書きは**本人所有の行だけ**（他者の行は存在を明かさず 404 = SB12）。LLM を呼ぶのは generate /
+propose-revision の 2 本（feature `learning:simulation_codegen` / `learning:simulation_revision`・scene `simulation`・本人キーの
+日次 CostGate `SIMULATION_LEARNER_MAX_CALLS_PER_DAY` 既定 20 を 2 本で共有・学習者はモデルを選ばない）。本人の試行は監査記帳しない。
+DTO は射影が記号キーを落とさないよう `[{symbol, value}]` / `[{symbol, mean, std}]` / `[{name, value}]` のリストで返し、
+所有者・作成者の user id・confidence を載せない。成功した run ごとに `interest_traces` kind `verification_attempt` を 1 行
+（payload は run_id / document_id / module_key / agreement_level / separation_level / shared のみ・数値なし = SB15）。DELETE ルートは無い。
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| GET | `/api/learning/courses/{course_id}/simulation/overview?document_id=&topic_id=` | 焦点論文の理論モジュール（`program` = 本人の最新）+ 本人の programs / wirings / runs + 観測系の主張 + 部品目録 + `documents`（コースの論文一覧）。教材が決まらなければ `available:false` + 事実文 |
+| POST | `/api/learning/courses/{course_id}/simulation/programs/generate` | `{module_key, document_id?, topic_id?}` → 本人所有の candidate（LLM 1 コール） |
+| POST | `/api/learning/simulation/programs/{program_id}/edit` | `{source_code}` → 本人の新版（AST 検査・本人の旧版を superseded。不合格も `ast_ok=false` で保存） |
+| POST | `/api/learning/simulation/programs/{program_id}/adopt` | 本人の採用（`confirmed`）。AST 不合格は 422 |
+| GET | `/api/learning/simulation/parts` | 凍結版の部品目録（`params: [{name, default, unit, min, max}]`） |
+| GET / POST | `/api/learning/courses/{course_id}/simulation/wirings` | 本人の配線の一覧 / 本人が組む（`origin='learner'`・`confirmed` で作成・`parts[].params` は `[{name, value}]` か写像） |
+| POST | `/api/learning/courses/{course_id}/simulation/runs` | `{program_id, wiring_id?, prediction?, values, params, instrument_params?, reference?, seed?, observation_claim_ids?, topic_id?}`。本人の採用済みプログラム（と本人の confirmed 配線）だけ。数値以外は 422・`observation_claim_ids` はこの論文の観測系の主張だけ |
+| GET | `/api/learning/courses/{course_id}/simulation/runs` / `/api/learning/simulation/runs/{run_id}` | 本人の run だけ |
+| POST | `/api/learning/simulation/runs/{run_id}/share` | 共有（`shared_at` を刻む・冪等）。初回だけ、成功した run の観測系の主張の台帳に `simulation_candidates` を追記（`created_by` = 学習者・確定は教員 = SB13） |
+| POST | `/api/learning/simulation/runs/{run_id}/propose-revision` | 本人の配線の改訂候補（`origin='llm_candidate'`・本人所有の candidate。学習者向けの確定経路は v1.1 では持たない） |
 
 ### W層 — 要素検討ワークスペース `/api/admin/deliberation`（`routes/deliberation.py`）
 

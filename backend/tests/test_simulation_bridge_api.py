@@ -80,21 +80,22 @@ class _FakeStore:
 
     # programs
     def create_program(self, session, *, document_id, module_key, module_stable_key="", source_code,
-                       io_contract, provenance, created_by, review_status="candidate", record_audit=None):
+                       io_contract, provenance, created_by, review_status="candidate", record_audit=None,
+                       owner_user_id=None, course_id=None, supersede_unowned=False):
         pid = str(uuid.uuid4())
         row = {
             "id": pid, "document_id": document_id, "module_key": module_key,
             "module_stable_key": module_stable_key, "source_code": source_code,
             "io_contract": dict(io_contract or {}), "provenance": dict(provenance or {}),
             "review_status": review_status, "created_by": created_by, "created_at": "t",
-            "decided_at": None, "superseded_at": None,
+            "decided_at": None, "superseded_at": None, "owner_user_id": owner_user_id,
         }
         self.programs[pid] = row
         if record_audit:
             record_audit(entity_id=pid, action="program_generated", new_status=review_status, actor_id=created_by)
         return dict(row)
 
-    def list_programs(self, session, *, document_id, include_superseded=False):
+    def list_programs(self, session, *, document_id, include_superseded=False, **_filters):
         return [dict(p) for p in reversed(list(self.programs.values())) if p["document_id"] == document_id]
 
     def get_program(self, session, program_id):
@@ -113,19 +114,20 @@ class _FakeStore:
 
     # wirings
     def create_wiring(self, session, *, document_id, name, parts, edges, origin, created_by,
-                      parent_wiring_id=None, revision_note="", review_status=None, record_audit=None):
+                      parent_wiring_id=None, revision_note="", review_status=None, record_audit=None,
+                      owner_user_id=None, course_id=None):
         wid = str(uuid.uuid4())
         status = review_status or ("confirmed" if origin == "teacher" else "candidate")
         row = {
             "id": wid, "document_id": document_id, "name": name, "parts": copy.deepcopy(list(parts)),
             "edges": copy.deepcopy(list(edges)), "origin": origin, "review_status": status,
             "parent_wiring_id": parent_wiring_id, "revision_note": revision_note,
-            "created_by": created_by, "created_at": "t",
+            "created_by": created_by, "created_at": "t", "owner_user_id": owner_user_id,
         }
         self.wirings[wid] = row
         return dict(row)
 
-    def list_wirings(self, session, *, document_id, include_generic=True):
+    def list_wirings(self, session, *, document_id, include_generic=True, **_filters):
         return [dict(w) for w in self.wirings.values() if w["document_id"] in (document_id, None, "")]
 
     def get_wiring(self, session, wiring_id):
@@ -139,18 +141,20 @@ class _FakeStore:
 
     # runs
     def record_run(self, session, *, document_id, program_id, wiring_id, observation_claim_ids, inputs,
-                   result, runner, status, created_by, record_audit=None):
+                   result, runner, status, created_by, record_audit=None, owner_user_id=None,
+                   course_id=None, prediction=None):
         rid = str(uuid.uuid4())
         row = {
             "id": rid, "document_id": document_id, "program_id": program_id, "wiring_id": wiring_id,
             "observation_claim_ids": list(observation_claim_ids or []), "inputs": dict(inputs or {}),
             "result": copy.deepcopy(dict(result or {})), "runner": dict(runner or {}), "status": status,
             "ledger_candidate_id": None, "created_by": created_by, "created_at": "t",
+            "owner_user_id": owner_user_id, "shared_at": None,
         }
         self.runs[rid] = row
         return dict(row)
 
-    def list_runs(self, session, *, document_id, limit=50):
+    def list_runs(self, session, *, document_id, limit=50, **_filters):
         return [dict(r) for r in self.runs.values() if r["document_id"] == document_id]
 
     def get_run(self, session, run_id):
@@ -226,6 +230,7 @@ def env(monkeypatch):
     ))
     monkeypatch.setattr(sbr, "record_review_event", lambda *a, **k: audits.append(a))
     monkeypatch.setattr(sbr, "_sandbox_client", lambda: state["sandbox"])
+    monkeypatch.setattr(sbr, "_user_display_names", lambda s, ids: {})
 
     def _quota(gate, **kw):
         gate_calls.append(kw)

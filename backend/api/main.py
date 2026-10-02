@@ -68,6 +68,7 @@ from routes import cartridge_shape as cartridge_shape_routes
 from routes import reference_health as reference_health_routes
 from routes import seminar_brief as seminar_brief_routes
 from routes import simulation_bridge as simulation_bridge_routes
+from routes import simulation_lab as simulation_lab_routes
 from routes import discuss_observation as discuss_observation_routes
 from routes import cycle as cycle_routes
 from routes import descent as descent_routes
@@ -485,6 +486,10 @@ app.include_router(discuss_observation_routes.admin_router, prefix="/api/admin")
 # 生成・配線・sim-runner での実行・比較・台帳候補（/api/admin/simulation/...）。
 # 既存 admin ルーターとパスが衝突しないためフラット登録で足りる（Tier 3-17c と同型）。
 app.include_router(simulation_bridge_routes.admin_router, prefix="/api/admin")
+# 検証シミュレーション層 v1.1「主語は学習者」（simulation_bridge_design.md §14, migration 089）。
+# 学習者が作って試す「動かして確かめる」（/api/learning/...）。ルーター自身が /api/learning
+# プレフィックスを持つ（cycle / descent と同型）。
+app.include_router(simulation_lab_routes.learning_router)
 # コースビルダーの前提知識 半順序チェック（learning_units_design.md §6.4 / P2-4）。
 # 下書きだけを入力に取る読み取り専用 API 1本（POST /api/admin/course-builder/prerequisite-check）。
 # routes/admin.py の /course-builder/* とはパスが衝突しないためフラット登録で足りる。

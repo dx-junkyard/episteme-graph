@@ -1,7 +1,7 @@
 # 検証シミュレーション層（Simulation Bridge, SB層 — 理論⇔シミュレーション⇔実験の翻訳層）
 
-> **状態: 実装済み（v1・2026-10-02 起票・同日実装）**。migration 088。オーナー判断 3 件（§9）は
-> 2026-10-02 の「実装を進めてほしい」で推奨案を採用。実装記録は §12（docker 実機・ブラウザは未確認）。
+> **状態: 実装済み（v1 2026-10-02 / v1.1「学習者が主語」2026-10-03）**。migration 088 / 089。オーナー判断 3 件（§9）は
+> 推奨案を採用。**2026-10-03 のオーナー指摘で主語を学習者に是正**（§14 が v1 の §1〜§7 に優先する）。実装記録は §12。
 
 **正本**: 本ドキュメント。
 **関連**: [理論モジュール層](theory_module_layer_design.md)（TM1〜TM15 — シミュレータの単位になる
@@ -20,7 +20,7 @@
 
 | # | 判断 | 採用 | 根拠 |
 |---|---|---|---|
-| — | この層は開発用の仕組みか製品機能か | **製品機能**（episteme-graph 本体）。教員・研究者が自分の教材（論文）に対して使い、結果は D層の台帳に候補として戻る | オーナー 2026-10-02。uxsim（ペルソナ通し受講テスト）から借りるのは「評価者と是正者を分けて所見を課題として記帳する」運転の型だけ |
+| — | この層は開発用の仕組みか製品機能か | **製品機能**（episteme-graph 本体）。**主語は学習者**（学生が作って試す）。教員は同じ道具を使えるほか、共有物（台帳・部品）へ入る所の弁になる | オーナー 2026-10-02 / **2026-10-03 是正**「学生が作って試すことができなければこの仕組の意味はない」（.personalize P-0016）。uxsim から借りるのは運転の型だけ |
 | O-1 | 生成コードの実行場所 | **別コンテナ `sim-runner`**（ネットワーク無し・読み取り専用・CPU / メモリ / 時間上限）。API サーバのプロセスで `exec` しない | 後戻りしにくい構造。uxsim の砂場と同じく製品プロセスから隔離する |
 | O-2 | 差の数値を出すか（原則 4 改訂） | **教員・研究者向けの計器として制度指標カタログに登録したうえで数値を出す**。学習者には出さない | 計器の定義・用途を公開すれば数値を出してよい（vision §6.1）。学習者向け面は本層に無い |
 | O-3 | 実験機の部品をどこに置くか | **L層 `library_entries` に同居**（`entry_type` を 3 つ足す） | 教員共同財・凍結版・retire・装置候補からの昇格導線をそのまま再利用できる |
@@ -312,9 +312,85 @@ src 2,264 pass（2026-10-02 時点）。docker 実機・ブラウザは未確認
 `sandbox_configured` を確認 ②TeX 経路の教材（2609.15375v1 TeX 取り込み）で理論モジュール 1 つのコード生成 → 配線
 「線形増幅器 + ガウス雑音 + 平均化」→ 実行 → 台帳候補まで通す ③ペルソナ通し受講の教員場面に本画面を 1 場面足す。
 
+## 14. v1.1 — 主語は学習者（2026-10-03 是正）
+
+v1 は教員・研究者を主語にし、LLM 生成コードの実行に「教員が確定」を置いていた。オーナーの指摘
+「学生が作って試すことができなければこの仕組の意味はない」により、**作って試す主体は学習者**とし、
+教員の弁は共有物へ入るときだけに限る。vision 原則 1（確定は本人＝学習者の痕跡 / 教員＝共有物）と
+§9「自分で確かめた痕跡」への直結。安全の弁（AST 検査・隔離実行）と承認の弁（確定）を混同しない。
+
+### 14.1 不変条項の追補（SB11〜SB15）
+
+| # | 条項 | 内容 |
+|---|---|---|
+| SB11 | **試行に承認ゲートを置かない** | 学習者のプログラム生成・編集・配線・実行は本人の操作だけで完結する。AST 検査と sandbox を通れば走る。「確定」は本人の**採用**（この版を使う）であって教員の承認ではない |
+| SB12 | **所有は本人・可視は本人** | programs / wirings / runs は `owner_user_id` の所有物。他者（教員を含む）に見えるのは本人が**明示的に共有**した run だけ（PN-1 / P3 継承）。評価に使わない。教員向け集約は作らない（作るなら k-匿名 + 指標カタログ） |
+| SB13 | **共有は本人の 1 操作・台帳は教員の弁** | 学習者が run に「共有する」を押す → `shared_at` 刻印 + 観測系 claim の台帳に `simulation_candidates` を追記（`created_by` = 学習者）。台帳での確定（`indirectly_supported` 止まり）は教員（SB1 不変） |
+| SB14 | **予想は並置・採点しない** | 実行前に学習者が出力の予想を書ける（ELICIT）。結果は予想と並べて見せるだけで、正誤・一致度ラベルを付けない（UC2）。一致の段階ラベルが付くのは理論出力と模擬観測の間だけ |
+| SB15 | **痕跡は登録簿に宣言** | run は `interest_traces` の kind `verification_attempt`（本人のみ可視・問いの軌跡×・教員集約×・わたしの記録○）として 1 行残す（payload は run_id / document_id / agreement_level の enum のみ・数値なし） |
+
+SB6 の読み替え: 本人には自分の run の数値（相対差・分離比）を見せてよい（原則 4「本人の資源・履歴は本人に」）。
+他者比較・ランキング・推薦には使わない。学習者向け DTO は `LearnerDisplayRoute` を通るので、**記号をキーにした
+写像は `[{symbol, ...}]` のリストで返す**（射影が `k` 等のキーを落とすため。IK-0598 の学習者側）。
+
+### 14.2 データモデル（migration 089・列追加のみ）
+
+| 表 | 追加 |
+|---|---|
+| `simulation_programs` / `instrument_wirings` / `simulation_runs` | `owner_user_id UUID`（users FK なし・NULL = 旧行）/ `course_id TEXT`（学習文脈。任意） |
+| `simulation_runs` | `shared_at TIMESTAMPTZ`（本人の明示共有。NULL = 本人のみ）/ `prediction JSONB`（予想。`[{symbol, value}]`） |
+| `instrument_wirings.origin` CHECK | `learner` を追加（`teacher` / `learner` / `llm_candidate`） |
+
+### 14.3 学習者 API（`routes/simulation_lab.py`・`learning_router`・`LearnerDisplayRoute`・受講ゲート `get_accessible_course_data`）
+
+| メソッド | パス | 内容 |
+|---|---|---|
+| GET | `/api/learning/courses/{cid}/simulation/overview?document_id=` | 焦点論文（指定が無ければ `services.learner_focus_document`）の理論モジュール + 本人の programs / wirings / runs + 部品目録 + 観測系 claim。document はコース sources に限る（`ANY(:doc_ids)`） |
+| POST | `.../simulation/programs/generate` | `{document_id, module_key}` → 本人所有の candidate（feature `learning:simulation_codegen`・日次 CostGate は本人キー） |
+| POST | `/api/learning/simulation/programs/{id}/edit` | `{source_code}` → 本人の新版（AST 検査・旧版 superseded）。**自分で書く**経路 |
+| POST | `/api/learning/simulation/programs/{id}/adopt` | 本人の採用（`confirmed`）。AST 不合格は 422 |
+| GET | `/api/learning/simulation/parts` | 凍結版の部品目録 |
+| POST / GET | `.../simulation/wirings` | 本人の配線（`origin='learner'`・`confirmed` で作成） |
+| POST | `.../simulation/runs` | `{program_id, wiring_id?, prediction?, values, params, instrument_params?, reference?, seed?}` → 実行・比較・痕跡 1 行 |
+| GET | `.../simulation/runs` / `/api/learning/simulation/runs/{id}` | 本人の run のみ |
+| POST | `/api/learning/simulation/runs/{id}/share` | SB13 |
+| POST | `/api/learning/simulation/runs/{id}/propose-revision` | 本人の配線の改訂候補（feature `learning:simulation_revision`） |
+
+教員側 `routes/simulation_bridge.py` は残し、所有者＝教員本人の行 + 学習者が共有した run（`shared: true`）を
+一覧する。教員の生成・配線・実行は本人所有として同じ列に入る。
+
+### 14.4 学習画面
+
+教材区画のツールバーに「🧪 動かして確かめる」（アンカー `material.simulation-lab`）。開くと教材区画の下に
+パネル（`simulation-lab.js`）: ①理論モジュールを選ぶ → ②コードを生成 / 自分で書く → 採用 → ③配線（任意）→
+④出力の予想を書く → 実行 → ⑤予想・理論の出力・模擬観測を並置 + 事実文 + 数値 → ⑥「共有する」。
+自動では開かない・ポーリングしない・督促しない（原則 12）。マニュアルは `docs/manual/student/02-student.md`。
+
+### 12.2 v1.1「主語は学習者」（2026-10-03・Opus 2 体 + 実機）
+
+オーナー指摘（.personalize P-0016）を受け、§14 のとおり主語を学習者に是正した。migration 089。
+
+| 部品 | 実装 |
+|---|---|
+| 学習者 API | `routes/simulation_lab.py`（`learning_router`・`LearnerDisplayRoute`・受講ゲート + コース sources の `ANY(:doc_ids)`・他人の行は 404）。手順の本体は `core/simulation_bridge/service.py`（FastAPI 非 import）に移し、教員ルーターと共有 |
+| 所有と共有 | 3 表に `owner_user_id` / `course_id`、runs に `shared_at` / `prediction`。教員の一覧は本人の行 + 所有者なしの旧行 + 学習者が共有した run（`shared` / `shared_by_label`。学生の id は出さない） |
+| 試行の弁 | 生成 → 自分で編集（`/edit` は本人の新版・AST 検査）→ 採用（`/adopt`）→ 実行。承認ゲートなし（SB11）。予想 `prediction` は並置のみ（SB14） |
+| 痕跡 | `interest_traces` kind `verification_attempt`（`trace_registry` 11 kind 目・問いの軌跡 / 教員集約 / わたしの地図 すべて×・payload は enum と id のみ） |
+| 登録 | `learning:simulation_codegen` / `learning:simulation_revision`（scene `simulation`）・`SIMULATION_LEARNER_MAX_CALLS_PER_DAY`・可視性 6 軸 `learner_traces` に AI 通過点 2 件 + 共有の事実 |
+| 学習画面 | 教材区画「🧪 動かして確かめる」（`material.simulation-lab`）→ 教材区画内のパネル `simulation-lab.js`（5 段）。`docs/manual/student/02-student.md` §19 |
+| 投影 | 学習者 DTO は記号キーの写像をリストで返す。`display_projection.VERBATIM_KEYS = {"source_code"}`（コード中の `step_1` 等を内部 ID と誤認して書き換えないため） |
+
+**実機で見つかった不具合（2026-10-03・ローカル dev スタック）**: ①`knowledge_equations_live` ビューが存在しなかった
+（078 は表だけ・`_live` は claims / components / symbols / modules / units のみ）。読み手が例外を握りつぶして `[]` を返し、
+同じ session の次の SQL が `InFailedSqlTransaction` で落ち、教員 overview が 500。089 でビューを作り、握りつぶす箇所は
+`service.rollback_quietly` を必ず通す。②SYSTEM_ADMIN はコンテンツ系タブを見ないので、実機確認は教員・学生のテスト
+アカウント（`uxsim/sandbox/.env.sbtest`・git 管理外）で行う。オーナーの文書・コースには触れていない（所有者以外の
+共有・公開は API が 404 を返す設計のとおり）。
+
+
 ## 13. 非スコープ（v1）
 
-学習者向け表示 / 自動反復（是正者を人の操作なしに回す）/ 複数配線の自動探索・最適化 /
+（学習者向け表示は v1.1 で実装 — §14）/ 自動反復（是正者を人の操作なしに回す）/ 複数配線の自動探索・最適化 /
 Python 以外の言語 / 外部データ（実測値ファイル）の取り込み / 装置候補（apparatus_semantics）から
 `instrument_model` への自動昇格 / 台帳 `evidence_lines` への記帳 / 理論モジュール以外（単一式・
 component）の単位でのコード生成。

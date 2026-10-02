@@ -193,6 +193,13 @@ ID_KEY_RE = re.compile(
     r"|_(?:id|ids|key|keys|ref|refs|uuid|url|urls|href|src|path)$"
 )
 
+#: 値が「本人が読み書きする原文」であるキー（文字列を書き換えない）。
+#: ``source_code`` は学習者が自分で生成・編集して再送するシミュレーションのコード
+#: （検証シミュレーション層 v1.1 §14）。``step_1`` / ``sym_2`` のような変数名が内部 ID の
+#: 語彙に当たって置き換わると、コードそのものが壊れて実行できなくなる。禁止キーの遮断は
+#: 従来どおり効く（値の書き換えだけを止める）。
+VERBATIM_KEYS: frozenset[str] = frozenset({"source_code"})
+
 #: 値そのものが番地である文字列（API のパス・外部 URL）。キーを問わず遮断しない。
 ADDRESS_VALUE_RE = re.compile(r"^(?:/api/|https?://)", re.IGNORECASE)
 
@@ -491,7 +498,7 @@ def _project_string(
     in_options: bool = False,
     token_replacer: "TokenReplacer | None" = None,
 ) -> str:
-    if is_address_key(key) or is_address_value(value):
+    if is_address_key(key) or is_address_value(value) or str(key or "") in VERBATIM_KEYS:
         return value
     text = value
     if contains_internal_id(text):
@@ -640,6 +647,7 @@ __all__ = [
     "UNIDENTIFIED_ELEMENT_TEXT",
     "UUID_ANY_RE",
     "UUID_FULL_RE",
+    "VERBATIM_KEYS",
     "contains_internal_id",
     "generic_label",
     "is_address_key",

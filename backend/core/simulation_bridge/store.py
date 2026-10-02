@@ -104,36 +104,45 @@ _PROGRAM_COLUMNS = (
     "id", "document_id", "module_stable_key", "module_key", "language", "source_code",
     "io_contract", "provenance", "review_status", "review_note", "decided_by", "decided_at",
     "created_by", "created_at", "updated_at", "superseded_at", "superseded_by_id",
+    "owner_user_id", "course_id",
 )
 _PROGRAM_SELECT = """
     id::text, document_id::text, module_stable_key, module_key, language, source_code,
     io_contract, provenance, review_status, review_note, decided_by, decided_at,
-    created_by, created_at, updated_at, superseded_at, superseded_by_id::text
+    created_by, created_at, updated_at, superseded_at, superseded_by_id::text,
+    owner_user_id::text, course_id
 """
 
 _WIRING_COLUMNS = (
     "id", "document_id", "name", "parts", "edges", "origin", "parent_wiring_id",
     "revision_note", "review_status", "review_note", "decided_by", "decided_at",
-    "created_by", "created_at", "updated_at",
+    "created_by", "created_at", "updated_at", "owner_user_id", "course_id",
 )
 _WIRING_SELECT = """
     id::text, document_id::text, name, parts, edges, origin, parent_wiring_id::text,
     revision_note, review_status, review_note, decided_by, decided_at,
-    created_by, created_at, updated_at
+    created_by, created_at, updated_at, owner_user_id::text, course_id
 """
 
 _RUN_COLUMNS = (
     "id", "document_id", "program_id", "wiring_id", "observation_claim_ids", "inputs",
     "result", "runner", "status", "ledger_candidate_id", "created_by", "created_at",
+    "owner_user_id", "course_id", "shared_at", "prediction",
 )
 _RUN_SELECT = """
     id::text, document_id::text, program_id::text, wiring_id::text, observation_claim_ids,
-    inputs, result, runner, status, ledger_candidate_id, created_by, created_at
+    inputs, result, runner, status, ledger_candidate_id, created_by, created_at,
+    owner_user_id::text, course_id, shared_at, prediction
 """
 
 _JSON_DICT_KEYS = frozenset({"io_contract", "provenance", "inputs", "result", "runner"})
-_JSON_LIST_KEYS = frozenset({"parts", "edges", "observation_claim_ids"})
-_TIME_KEYS = frozenset({"decided_at", "created_at", "updated_at", "superseded_at"})
+_JSON_LIST_KEYS = frozenset({"parts", "edges", "observation_claim_ids", "prediction"})
+_TIME_KEYS = frozenset({"decided_at", "created_at", "updated_at", "superseded_at", "shared_at"})
+#: NULL を ``None`` のまま返す列（空文字に倒さない — 所有者の有無・学習文脈の有無を区別する）。
+_NULLABLE_TEXT_KEYS = frozenset({
+    "id", "document_id", "program_id", "wiring_id", "parent_wiring_id", "superseded_by_id",
+    "decided_by", "owner_user_id", "course_id",
+})
 
 
 def _clean(value: Any) -> str:
@@ -186,9 +195,7 @@ def _row_to_dict(row: Any, columns: Sequence[str]) -> dict:
             out[key] = _loads(value, [])
         elif key in _TIME_KEYS:
             out[key] = _iso(value)
-        elif key in ("id", "document_id", "program_id", "wiring_id", "parent_wiring_id", "superseded_by_id"):
-            out[key] = str(value) if value else None
-        elif key == "decided_by":
+        elif key in _NULLABLE_TEXT_KEYS:
             out[key] = str(value) if value else None
         else:
             out[key] = value if value is not None else ""
@@ -200,6 +207,31 @@ def _require_actor(actor_id: Any) -> str:
     if not actor:
         raise SimulationStateError("操作した人が特定できません（確定は人間の操作のみ）。")
     return actor
+
+
+def is_owner(row: Mapping[str, Any] | None, user_id: Any) -> bool:
+    """``row`` の所有者が ``user_id`` か（SB12。所有者の無い v1 の旧行は誰の所有でもない）。"""
+    if not row:
+        return False
+    owner = _clean(row.get("owner_user_id"))
+    return bool(owner) and owner == _clean(user_id)
+
+
+def _owner_filter_params(owner_user_id: Any, include_unowned: bool) -> dict:
+    owner = _clean(owner_user_id)
+    return {
+        "filter_owner": bool(owner),
+        "owner_user_id": owner or None,
+        "include_unowned": bool(include_unowned),
+    }
+
+
+#: 所有者で絞る WHERE 句（``filter_owner`` が偽なら絞らない = v1 と同じ）。
+_OWNER_CLAUSE = """
+    (NOT :filter_owner
+     OR owner_user_id = CAST(:owner_user_id AS uuid)
+     OR (:include_unowned AND owner_user_id IS NULL))
+"""
 
 
 def _audit(
@@ -259,8 +291,15 @@ def create_program(
     created_by: str,
     review_status: str = schema.PROGRAM_STATUS_CANDIDATE,
     record_audit: RecordAudit | None = None,
+    owner_user_id: str | None = None,
+    course_id: str | None = None,
+    supersede_unowned: bool = False,
 ) -> dict:
-    """理論プログラムの新しい版を挿入し、同じ (document, module) の旧版を superseded にする。
+    """理論プログラムの新しい版を挿入し、同じ (document, module, 所有者) の旧版を superseded にする。
+
+    v1.1（§14・SB12）: 旧版の置き換えは**同じ所有者の行だけ**（学習者 A の編集が B や教員の
+    版を倒さない）。``owner_user_id`` が None のときは所有者の無い行（v1 の旧行）同士。
+    ``supersede_unowned=True`` は教員の再生成が v1 の旧行（所有者なし）も置き換えるための指定。
 
     旧版（``candidate`` / ``confirmed``）は削除せず ``superseded`` + ``superseded_at`` +
     ``superseded_by_id``（新行）で残す（SB7）。新行を先に挿入するのは、``superseded_by_id``
@@ -283,11 +322,11 @@ def create_program(
             f"""
             INSERT INTO simulation_programs
                 (document_id, module_stable_key, module_key, language, source_code,
-                 io_contract, provenance, review_status, created_by)
+                 io_contract, provenance, review_status, created_by, owner_user_id, course_id)
             VALUES
                 (CAST(:document_id AS uuid), :module_stable_key, :module_key, :language,
                  :source_code, CAST(:io_contract AS jsonb), CAST(:provenance AS jsonb),
-                 :review_status, :created_by)
+                 :review_status, :created_by, CAST(:owner_user_id AS uuid), :course_id)
             RETURNING {_PROGRAM_SELECT}
             """
         ),
@@ -301,6 +340,8 @@ def create_program(
             "provenance": _dumps(dict(provenance or {})),
             "review_status": status,
             "created_by": _clean(created_by),
+            "owner_user_id": _clean(owner_user_id) or None,
+            "course_id": _clean(course_id) or None,
         },
     ).fetchone()
     if row is None:
@@ -320,6 +361,8 @@ def create_program(
                AND module_key = :module_key
                AND review_status IN (:candidate, :confirmed)
                AND id <> CAST(:new_id AS uuid)
+               AND (owner_user_id IS NOT DISTINCT FROM CAST(:owner_user_id AS uuid)
+                    OR (:supersede_unowned AND owner_user_id IS NULL))
             RETURNING id::text, review_status
             """
         ),
@@ -330,6 +373,8 @@ def create_program(
             "module_key": key,
             "candidate": schema.PROGRAM_STATUS_CANDIDATE,
             "confirmed": schema.PROGRAM_STATUS_CONFIRMED,
+            "owner_user_id": _clean(owner_user_id) or None,
+            "supersede_unowned": bool(supersede_unowned),
         },
     ).fetchall()
     superseded_ids = [str(r[0]) for r in (superseded_rows or []) if r and r[0]]
@@ -355,8 +400,19 @@ def create_program(
     return program
 
 
-def list_programs(session: Any, *, document_id: str, include_superseded: bool = False) -> list[dict]:
-    """教材の理論プログラム（新しい順）。既定では superseded を除く。"""
+def list_programs(
+    session: Any,
+    *,
+    document_id: str,
+    include_superseded: bool = False,
+    owner_user_id: str | None = None,
+    include_unowned: bool = False,
+) -> list[dict]:
+    """教材の理論プログラム（新しい順）。既定では superseded を除く。
+
+    ``owner_user_id`` を渡すとその所有者の行だけ（SB12）。``include_unowned`` は所有者の
+    無い v1 の旧行も含める（教員の画面）。
+    """
     doc = _clean(document_id)
     if not doc:
         return []
@@ -366,6 +422,7 @@ def list_programs(session: Any, *, document_id: str, include_superseded: bool = 
             SELECT {_PROGRAM_SELECT} FROM simulation_programs
              WHERE document_id = CAST(:document_id AS uuid)
                AND (:include_superseded OR review_status <> :superseded)
+               AND {_OWNER_CLAUSE}
              ORDER BY created_at DESC
             """
         ),
@@ -373,6 +430,7 @@ def list_programs(session: Any, *, document_id: str, include_superseded: bool = 
             "document_id": doc,
             "include_superseded": bool(include_superseded),
             "superseded": schema.PROGRAM_STATUS_SUPERSEDED,
+            **_owner_filter_params(owner_user_id, include_unowned),
         },
     ).fetchall()
     return [_row_to_dict(r, _PROGRAM_COLUMNS) for r in (rows or [])]
@@ -525,10 +583,13 @@ def create_wiring(
     revision_note: str = "",
     review_status: str | None = None,
     record_audit: RecordAudit | None = None,
+    owner_user_id: str | None = None,
+    course_id: str | None = None,
 ) -> dict:
     """配線行を作る。
 
-    ``review_status`` 未指定なら ``origin='teacher'`` → ``confirmed`` /
+    ``review_status`` 未指定なら ``origin='teacher'`` / ``'learner'``（v1.1・本人が組んだ配線 =
+    SB11）→ ``confirmed`` /
     ``origin='llm_candidate'`` → ``candidate``。**LLM の改訂提案を confirmed で作ることは
     できない**（SB5: 教員が確定して初めて run に使える）。``document_id`` が空なら
     論文に紐づかない汎用配線。部品・配線の妥当性検査（``instrument.validate_wiring``）は
@@ -540,7 +601,7 @@ def create_wiring(
     if review_status is None or not _clean(review_status):
         status = (
             schema.WIRING_STATUS_CONFIRMED
-            if org == schema.WIRING_ORIGIN_TEACHER
+            if org in (schema.WIRING_ORIGIN_TEACHER, schema.WIRING_ORIGIN_LEARNER)
             else schema.WIRING_STATUS_CANDIDATE
         )
     else:
@@ -558,14 +619,14 @@ def create_wiring(
             f"""
             INSERT INTO instrument_wirings
                 (document_id, name, parts, edges, origin, parent_wiring_id, revision_note,
-                 review_status, decided_by, decided_at, created_by)
+                 review_status, decided_by, decided_at, created_by, owner_user_id, course_id)
             VALUES
                 (CAST(NULLIF(:document_id, '') AS uuid), :name, CAST(:parts AS jsonb),
                  CAST(:edges AS jsonb), :origin, CAST(NULLIF(:parent_wiring_id, '') AS uuid),
                  :revision_note, :review_status,
                  CASE WHEN :review_status = :confirmed THEN :created_by ELSE NULL END,
                  CASE WHEN :review_status = :confirmed THEN now() ELSE NULL END,
-                 :created_by)
+                 :created_by, CAST(:owner_user_id AS uuid), :course_id)
             RETURNING {_WIRING_SELECT}
             """
         ),
@@ -580,6 +641,8 @@ def create_wiring(
             "review_status": status,
             "confirmed": schema.WIRING_STATUS_CONFIRMED,
             "created_by": creator,
+            "owner_user_id": _clean(owner_user_id) or None,
+            "course_id": _clean(course_id) or None,
         },
     ).fetchone()
     if row is None:
@@ -588,7 +651,7 @@ def create_wiring(
     _audit(
         record_audit,
         entity_id=wiring["id"],
-        action="wiring_created" if org == schema.WIRING_ORIGIN_TEACHER else "wiring_proposed",
+        action="wiring_proposed" if org == schema.WIRING_ORIGIN_LLM else "wiring_created",
         new_status=status,
         actor_id=creator or None,
         metadata={
@@ -600,8 +663,18 @@ def create_wiring(
     return wiring
 
 
-def list_wirings(session: Any, *, document_id: str | None, include_generic: bool = True) -> list[dict]:
-    """教材の配線（+ 既定で汎用配線 = ``document_id IS NULL``）を新しい順に返す。"""
+def list_wirings(
+    session: Any,
+    *,
+    document_id: str | None,
+    include_generic: bool = True,
+    owner_user_id: str | None = None,
+    include_unowned: bool = False,
+) -> list[dict]:
+    """教材の配線（+ 既定で汎用配線 = ``document_id IS NULL``）を新しい順に返す。
+
+    ``owner_user_id`` を渡すとその所有者の行だけ（SB12・``include_unowned`` で v1 の旧行も）。
+    """
     doc = _clean(document_id)
     if not doc and not include_generic:
         return []
@@ -609,12 +682,18 @@ def list_wirings(session: Any, *, document_id: str | None, include_generic: bool
         sa_text(
             f"""
             SELECT {_WIRING_SELECT} FROM instrument_wirings
-             WHERE (:has_document AND document_id = CAST(:document_id AS uuid))
-                OR (:include_generic AND document_id IS NULL)
+             WHERE ((:has_document AND document_id = CAST(:document_id AS uuid))
+                    OR (:include_generic AND document_id IS NULL))
+               AND {_OWNER_CLAUSE}
              ORDER BY created_at DESC
             """
         ),
-        {"document_id": doc or None, "has_document": bool(doc), "include_generic": bool(include_generic)},
+        {
+            "document_id": doc or None,
+            "has_document": bool(doc),
+            "include_generic": bool(include_generic),
+            **_owner_filter_params(owner_user_id, include_unowned),
+        },
     ).fetchall()
     return [_row_to_dict(r, _WIRING_COLUMNS) for r in (rows or [])]
 
@@ -676,8 +755,14 @@ def record_run(
     status: str,
     created_by: str,
     record_audit: RecordAudit | None = None,
+    owner_user_id: str | None = None,
+    course_id: str | None = None,
+    prediction: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict:
-    """実行記録を 1 行追記する（失敗・rejected も残す = SB7）。"""
+    """実行記録を 1 行追記する（失敗・rejected も残す = SB7）。
+
+    ``prediction`` は学習者が実行前に書いた予想 ``[{symbol, value}]``（SB14・採点しない）。
+    """
     st = _clean(status)
     if st not in schema.RUN_STATUSES:
         raise SimulationStateError(f"実行結果の語彙にない値です: {status}")
@@ -690,12 +775,13 @@ def record_run(
             f"""
             INSERT INTO simulation_runs
                 (document_id, program_id, wiring_id, observation_claim_ids, inputs, result,
-                 runner, status, created_by)
+                 runner, status, created_by, owner_user_id, course_id, prediction)
             VALUES
                 (CAST(:document_id AS uuid), CAST(:program_id AS uuid),
                  CAST(NULLIF(:wiring_id, '') AS uuid), CAST(:observation_claim_ids AS jsonb),
                  CAST(:inputs AS jsonb), CAST(:result AS jsonb), CAST(:runner AS jsonb),
-                 :status, :created_by)
+                 :status, :created_by, CAST(:owner_user_id AS uuid), :course_id,
+                 CAST(:prediction AS jsonb))
             RETURNING {_RUN_SELECT}
             """
         ),
@@ -709,6 +795,9 @@ def record_run(
             "runner": _dumps(dict(runner or {})),
             "status": st,
             "created_by": _clean(created_by),
+            "owner_user_id": _clean(owner_user_id) or None,
+            "course_id": _clean(course_id) or None,
+            "prediction": _dumps([dict(p) for p in (prediction or []) if isinstance(p, Mapping)]),
         },
     ).fetchone()
     if row is None:
@@ -725,7 +814,20 @@ def record_run(
     return run
 
 
-def list_runs(session: Any, *, document_id: str, limit: int = 50) -> list[dict]:
+def list_runs(
+    session: Any,
+    *,
+    document_id: str,
+    limit: int = 50,
+    owner_user_id: str | None = None,
+    include_unowned: bool = False,
+    include_shared: bool = False,
+) -> list[dict]:
+    """教材の実行記録（新しい順）。
+
+    ``owner_user_id`` を渡すとその所有者の行だけ。``include_shared`` は他者が本人の操作で
+    共有した run（``shared_at IS NOT NULL``）も含める（教員の画面 = SB13）。
+    """
     doc = _clean(document_id)
     if not doc:
         return []
@@ -738,11 +840,17 @@ def list_runs(session: Any, *, document_id: str, limit: int = 50) -> list[dict]:
             f"""
             SELECT {_RUN_SELECT} FROM simulation_runs
              WHERE document_id = CAST(:document_id AS uuid)
+               AND ({_OWNER_CLAUSE} OR (:include_shared AND shared_at IS NOT NULL))
              ORDER BY created_at DESC
              LIMIT :limit
             """
         ),
-        {"document_id": doc, "limit": lim},
+        {
+            "document_id": doc,
+            "limit": lim,
+            "include_shared": bool(include_shared),
+            **_owner_filter_params(owner_user_id, include_unowned),
+        },
     ).fetchall()
     return [_row_to_dict(r, _RUN_COLUMNS) for r in (rows or [])]
 
@@ -771,6 +879,42 @@ def set_run_ledger_candidate(session: Any, *, run_id: str, candidate_id: str) ->
         {"id": _clean(run_id), "candidate_id": _clean(candidate_id)},
     ).fetchone()
     return _row_to_dict(row, _RUN_COLUMNS) if row else None
+
+
+def set_run_shared(session: Any, *, run_id: str, owner_user_id: str) -> dict:
+    """本人の run を共有する（``shared_at`` の刻印・冪等 = SB13）。
+
+    既に共有済みなら刻印時刻を変えずにそのまま返す。所有者でない・所有者の無い行は
+    :class:`SimulationStateError`（API 層は他者の行の存在を明かさないため 404 に写す）。
+
+    Raises:
+        SimulationNotFoundError: 行が無い。
+        SimulationStateError: 所有者でない。
+    """
+    rid = _clean(run_id)
+    current = get_run(session, rid)
+    if current is None:
+        raise SimulationNotFoundError("実行記録が見つかりません。")
+    if not is_owner(current, owner_user_id):
+        raise SimulationStateError("この実行記録を共有できるのは、実行した本人だけです。")
+    if current.get("shared_at"):
+        return current
+    row = session.execute(
+        sa_text(
+            f"""
+            UPDATE simulation_runs SET shared_at = now()
+             WHERE id = CAST(:id AS uuid)
+               AND owner_user_id = CAST(:owner_user_id AS uuid)
+               AND shared_at IS NULL
+            RETURNING {_RUN_SELECT}
+            """
+        ),
+        {"id": rid, "owner_user_id": _clean(owner_user_id)},
+    ).fetchone()
+    if row is None:
+        # 同時に別の操作が共有した（冪等なので現在の行を返す）。
+        return get_run(session, rid) or current
+    return _row_to_dict(row, _RUN_COLUMNS)
 
 
 # ---------------------------------------------------------------------------
@@ -1057,10 +1201,12 @@ __all__ = [
     "get_program",
     "get_run",
     "get_wiring",
+    "is_owner",
     "list_programs",
     "list_runs",
     "list_wirings",
     "record_run",
     "set_run_ledger_candidate",
+    "set_run_shared",
     "summarize_run_inputs",
 ]

@@ -142,6 +142,9 @@ KNOWN_FEATURES = (
     # --- 検証シミュレーション層（SB層、正本 docs/features/simulation_bridge_design.md §5.1 / §5.4）---
     "simulation:codegen",
     "simulation:revision",
+    # v1.1（§14.3）: 学習者が「動かして確かめる」から起動する生成・改訂提案（教員の操作と帰属を分ける）
+    "learning:simulation_codegen",
+    "learning:simulation_revision",
     # --- 埋め込み ---
     "embedding:chunks",
     "embedding:library_search",

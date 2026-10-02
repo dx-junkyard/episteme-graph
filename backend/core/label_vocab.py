@@ -885,6 +885,8 @@ TRACE_STATUS_LABELS_BY_KIND = MappingProxyType({
     "frontier_interest": MappingProxyType({"open": "関心を記録"}),
     "help_usage": MappingProxyType({"open": "記録済み"}),
     "raw": MappingProxyType({"open": "記録済み"}),
+    # 検証シミュレーション層 v1.1（SB15）: 動かして確かめた試行。「未解決」と読ませない。
+    "verification_attempt": MappingProxyType({"open": "動かして確かめた"}),
 })
 
 #: 学習の意図（``interest_traces.kind='intention'``）の役割ラベル。役割語彙の正本は

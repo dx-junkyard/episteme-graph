@@ -624,6 +624,28 @@ Phase 1 で行になった `knowledge_symbols` / `knowledge_equations` / `knowle
   `student/02-student.md#symbol-lookup`）。ガードレールは
   `backend/tests/test_symbol_lookup_{core,api,ui_static}.py`。
 
+## 3.14 動かして確かめる（検証シミュレーション層 v1.1）
+
+論文の理論モジュール 1 つを、学習者が**自分でシミュレーションに起こして走らせ**、出力の予想と
+理論の出力・模擬観測を並べて見る導線（正本:
+[simulation_bridge_design.md](simulation_bridge_design.md) §14 / SB11〜SB15）。
+
+- **主体は学習者**（SB11）: コードを生成（AI 1 コール）するか自分で書き、**本人が採用**して実行する。
+  教員の承認は要らない。安全の弁は AST 検査と隔離実行（sim-runner）で、実行前に毎回やり直す。
+- **所有・可視は本人**（SB12）: programs / wirings / runs は本人の所有物で、他の学習者にも教員にも
+  見えない。教員に見えるのは本人が「共有する」を押した run だけ（表示名つき）。評価に使わない。
+- **共有は 1 操作**（SB13）: 共有すると、選んだ観測系の主張の台帳に「確かめた結果の候補」が入る。
+  確定するのは教員で、確定しても「間接的な支持」止まり（一致は検証ではない = SB1）。
+- **予想は並置**（SB14）: 実行前に書いた予想は、結果の横にそのまま並べるだけで採点しない。
+  一致の段階ラベルが付くのは理論の出力と模擬観測の間だけ。本人には自分の run の数値（相対差・
+  分離比）も見せる。
+- **痕跡**（SB15）: 成功した run ごとに `interest_traces` の kind `verification_attempt` を 1 行
+  （「わたしの記録」に出る・問いの軌跡 / 教員集約 / わたしの地図には出ない・payload に数値なし）。
+- **API**: `routes/simulation_lab.py`（`/api/learning/courses/{course_id}/simulation/...` と
+  `/api/learning/simulation/...`。一覧は [api.md](../backend/api.md) の「動かして確かめる」節）。
+  教材は焦点論文（`services.learner_focus_document`）が既定で、コースの sources の外は 404。
+- ガードレールは `backend/tests/test_simulation_lab_{api,guardrails}.py`。
+
 ---
 
 ## 4. インタラクティブ・レクチャーモード

@@ -60,8 +60,9 @@ class TraceKindSpec:
     dead: bool = False               # 書き込み経路が現存しない語彙（TR3: 削除せず保持）
 
 
-# 10 kind の宣言（2026-08-15 時点の実態調査の確定値 + 構造の降下路の
-# ``backstage_question`` + コーパス回遊層 Phase D の ``frontier_interest``。
+# 11 kind の宣言（2026-08-15 時点の実態調査の確定値 + 構造の降下路の
+# ``backstage_question`` + コーパス回遊層 Phase D の ``frontier_interest`` +
+# 検証シミュレーション層 v1.1 の ``verification_attempt``。
 # 既存 kind の露出の意味論は変えない）。宣言順は台帳
 # 「わたしの記録」の系統表示順の正本でもある（dict の挿入順）。
 TRACE_KINDS: dict[str, TraceKindSpec] = {
@@ -213,6 +214,24 @@ TRACE_KINDS: dict[str, TraceKindSpec] = {
             "backend/api/services.py::aggregate_frontier_interest"
             "（GET /api/admin/discovery/frontier-interest の k-匿名レンジ集計）",
         ),
+    ),
+    "verification_attempt": TraceKindSpec(
+        kind="verification_attempt",
+        label="自分で確かめた試行",
+        writers=(
+            "backend/api/routes/simulation_lab.py の「動かして確かめる」実行"
+            "（成功した run 1 件につき 1 行・services.record_interest_trace 経由。"
+            "検証シミュレーション層 v1.1 docs/features/simulation_bridge_design.md §14 SB15）",
+        ),
+        statuses=frozenset({"open"}),
+        # SB12 / SB15: 試行は本人のもの。発話ではないので「問いの軌跡」に出さず、教員向けの
+        # 集約にも、わたしの地図の導出にも使わない（台帳「わたしの記録」には出る）。
+        # payload は run_id / document_id / module_key / 段階語（agreement_level 等）と
+        # shared の真偽値だけで数値を持たない。教員に見えるのは本人が「共有する」を押した
+        # run そのものであって、この痕跡ではない。
+        learner_trajectory=False,
+        teacher_dashboard=False,
+        personal_map=False,
     ),
 }
 

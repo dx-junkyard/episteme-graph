@@ -52,6 +52,8 @@ VIEW_LEARNING_UNITS_LIVE = "learning_units_live"
 #: 記号の live ビュー（Phase 3 / migration 082。concept_registry_design.md §4.8）。
 #: 学習者向けの「直前の定義」と同一性候補の導出はこのビューを読む。
 VIEW_SYMBOLS_LIVE = "knowledge_symbols_live"
+#: 式の live ビュー（migration 089。検証シミュレーション層の式の読み手が読む）。
+VIEW_EQUATIONS_LIVE = "knowledge_equations_live"
 #: 理論モジュールの live ビュー（§13.2）。同一性候補（規則 ⑤）と related はこちらを読む。
 VIEW_THEORY_MODULES_LIVE = "knowledge_theory_modules_live"
 

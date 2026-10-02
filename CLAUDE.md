@@ -3532,7 +3532,8 @@ Phase 1（保存・同一性候補）は同日に実装済み。目的は**理�
 ### 検証シミュレーション層（Simulation Bridge, SB層 — 理論⇔シミュレーション⇔実験の翻訳層, migration 088, 2026-10-02）
 
 理論モジュール（式の部分系）を**数値で走らせ、実験機のモデルを通し、論文が言う観測量が見えるか**を
-確かめる製品機能。正本は `docs/features/simulation_bridge_design.md`（SB1〜SB10・§4 データモデル・
+確かめる製品機能。**主語は学習者**（学生が作って試す。試行に承認ゲートを置かず、教員の弁は共有物＝台帳・部品へ
+入るときだけ — 2026-10-03 是正・設計書 §14 SB11〜SB15・migration 089）。正本は `docs/features/simulation_bridge_design.md`（SB1〜SB10・§4 データモデル・
 §5 規則・§6 API・§12 実装記録）。uxsim（開発用のペルソナ通し受講テスト）から借りたのは「実行・審判・
 是正者を分けて所見を記帳する」運転の型だけで、本層は教員・研究者が自分の教材に対して使い、結果は
 D層の台帳へ**候補**として戻る。
@@ -3567,14 +3568,18 @@ D層の台帳へ**候補**として戻る。
   監査 `AUDIT_ENTITY_SIMULATION`。U層 feature `simulation:codegen` / `simulation:revision`、scene
   `simulation`、env `SIM_RUNNER_URL` / `SIMULATION_RUN_TIMEOUT_SECONDS` / `SIMULATION_LLM_MODEL` /
   `SIMULATION_{CODEGEN,REVISION}_MAX_CALLS_PER_DAY`。可視性 6 軸の AI 通過点 2 件を `course_materials` に宣言。
-- **UI**: 教材管理の行 ⋯ メニュー「検証シミュレーション…」→ `admin-simulation-bridge.js`（ES5・
+- **学習者側（v1.1）**: `routes/simulation_lab.py`（`/api/learning/.../simulation/...`・`LearnerDisplayRoute`・本人所有のみ・
+  他人の行は 404）。生成 → 自分で編集 → 採用 → 配線 → 予想（並置のみ・採点しない）→ 実行 → 「共有する」で
+  `shared_at` + 台帳候補。痕跡は kind `verification_attempt`（本人のみ）。学習画面は教材区画「🧪 動かして確かめる」
+  （`simulation-lab.js`・アンカー `material.simulation-lab`）。学習者 DTO は記号キーの写像をリストで返す。
+- **UI（教員側）**: 教材管理の行 ⋯ メニュー「検証シミュレーション…」→ `admin-simulation-bridge.js`（ES5・
   `window.SimulationBridge`・DI 注入）。4 区画（理論モジュール / 配線 / 実行 / 記帳と改訂）。段階ラベルは
   サーバが解決した日本語を素通し（JS に表をミラーしない）。アンカー `materials.row-simulation` +
   `simulation.*`（件数の正本は `test_admin_help_ui_anchors.py`）+ `docs/manual/teacher/27-admin-simulation-bridge.md`。
 - **運用上の前提**: PDF 経路の式は復元由来が多いので **TeX 経路の教材で使う**（再現性レビュー E-1）。
 - **ガードレール**: `test_simulation_bridge_{store,migration,ast_guard,sandbox,codegen,instrument,comparator,
   revision,api,guardrails,ui_static}.py` + `test_simrunner_harness.py`。
-- **非スコープ（v1）**: 学習者向け表示 / 自動反復 / 複数配線の自動探索 / Python 以外 / 実測データの取り込み /
+- **非スコープ（v1.1）**: 自動反復 / 複数配線の自動探索 / Python 以外 / 実測データの取り込み /
   装置候補から `instrument_model` への自動昇格 / `evidence_lines` への記帳。
 
 ### 論文の再現性レビューと是正（migration なし, 2026-09-19）

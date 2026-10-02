@@ -100,6 +100,12 @@ class FakeSession:
             return _Result([_tuple(r, WIRING_COLS) for r in rows])
         if sql.startswith("INSERT INTO simulation_runs"):
             return self._insert_run(params)
+        if sql.startswith("UPDATE simulation_runs SET shared_at"):
+            row = self.runs.get(params["id"])
+            if row is None or row.get("owner_user_id") != params["owner_user_id"] or row.get("shared_at"):
+                return _Result([])
+            row["shared_at"] = "now"
+            return _Result([_tuple(row, RUN_COLS)])
         if sql.startswith("UPDATE simulation_runs"):
             row = self.runs.get(params["id"])
             if row:
@@ -142,6 +148,7 @@ class FakeSession:
             "review_status": p["review_status"], "review_note": "", "decided_by": None,
             "decided_at": None, "created_by": p["created_by"], "created_at": "t", "updated_at": "t",
             "superseded_at": None, "superseded_by_id": None,
+            "owner_user_id": p["owner_user_id"], "course_id": p["course_id"],
         }
         self.programs[rid] = row
         return _Result([_tuple(row, PROGRAM_COLS)])
@@ -154,6 +161,10 @@ class FakeSession:
                 and row["module_key"] == p["module_key"]
                 and row["review_status"] in (p["candidate"], p["confirmed"])
                 and row["id"] != p["new_id"]
+                and (
+                    row.get("owner_user_id") == p["owner_user_id"]
+                    or (p["supersede_unowned"] and not row.get("owner_user_id"))
+                )
             ):
                 row["review_status"] = p["superseded"]
                 row["superseded_at"] = "now"
@@ -196,6 +207,8 @@ class FakeSession:
             "inputs": json.loads(p["inputs"]), "result": json.loads(p["result"]),
             "runner": json.loads(p["runner"]), "status": p["status"], "ledger_candidate_id": "",
             "created_by": p["created_by"], "created_at": "t",
+            "owner_user_id": p["owner_user_id"], "course_id": p["course_id"], "shared_at": None,
+            "prediction": json.loads(p["prediction"]),
         }
         self.runs[rid] = row
         return _Result([_tuple(row, RUN_COLS)])
@@ -414,6 +427,68 @@ class TestRuns:
                 session, document_id=DOC, program_id=prog["id"], wiring_id=None, observation_claim_ids=[],
                 inputs={}, result={}, runner={}, status="ok", created_by="t1",
             )
+
+
+class TestLearnerOwnership:
+    """v1.1（§14・SB12 / SB13 / SB14）: 所有者ごとの置き換え・共有の刻印・予想の保存。"""
+
+    def test_supersede_is_scoped_to_the_owner(self):
+        session = FakeSession()
+        a = _program(session, owner_user_id="u-a")
+        b = _program(session, owner_user_id="u-b")
+        a2 = _program(session, owner_user_id="u-a")
+        assert a2["superseded_ids"] == [a["id"]]
+        assert session.programs[b["id"]]["review_status"] == "candidate"
+
+    def test_teacher_regeneration_can_supersede_unowned_v1_rows(self):
+        session = FakeSession()
+        legacy = _program(session)  # owner なし = v1 の旧行
+        learner = _program(session, owner_user_id="u-a")
+        teacher = _program(session, owner_user_id="t-1", supersede_unowned=True)
+        assert teacher["superseded_ids"] == [legacy["id"]]
+        assert session.programs[learner["id"]]["review_status"] == "candidate"
+
+    def test_learner_wiring_starts_confirmed(self):
+        session = FakeSession()
+        wiring = store.create_wiring(
+            session, document_id=DOC, name="A", parts=[], edges=[], origin="learner", created_by="u-a",
+            owner_user_id="u-a",
+        )
+        assert wiring["review_status"] == "confirmed"
+
+    def test_record_run_keeps_prediction_and_owner(self):
+        session = FakeSession()
+        prog = _program(session, owner_user_id="u-a")
+        run = store.record_run(
+            session, document_id=DOC, program_id=prog["id"], wiring_id=None, observation_claim_ids=[],
+            inputs={}, result={}, runner={}, status="succeeded", created_by="u-a", owner_user_id="u-a",
+            course_id="c1", prediction=[{"symbol": "k", "value": 2.0}],
+        )
+        assert run["prediction"] == [{"symbol": "k", "value": 2.0}]
+        assert run["owner_user_id"] == "u-a"
+        assert run["shared_at"] is None
+
+    def test_set_run_shared_is_owner_only_and_idempotent(self):
+        session = FakeSession()
+        prog = _program(session, owner_user_id="u-a")
+        run = store.record_run(
+            session, document_id=DOC, program_id=prog["id"], wiring_id=None, observation_claim_ids=[],
+            inputs={}, result={}, runner={}, status="succeeded", created_by="u-a", owner_user_id="u-a",
+        )
+        with pytest.raises(store.SimulationStateError):
+            store.set_run_shared(session, run_id=run["id"], owner_user_id="u-b")
+        shared = store.set_run_shared(session, run_id=run["id"], owner_user_id="u-a")
+        assert shared["shared_at"] == "now"
+        again = store.set_run_shared(session, run_id=run["id"], owner_user_id="u-a")
+        assert again["shared_at"] == "now"
+        with pytest.raises(store.SimulationNotFoundError):
+            store.set_run_shared(session, run_id=str(uuid.uuid4()), owner_user_id="u-a")
+
+    def test_is_owner(self):
+        assert store.is_owner({"owner_user_id": "u-a"}, "u-a")
+        assert not store.is_owner({"owner_user_id": "u-a"}, "u-b")
+        assert not store.is_owner({"owner_user_id": None}, "")
+        assert not store.is_owner(None, "u-a")
 
 
 # ===========================================================================

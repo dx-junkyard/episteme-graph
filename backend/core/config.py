@@ -532,6 +532,11 @@ class Settings(BaseSettings):
         default=20,
         validation_alias=AliasChoices("SIMULATION_REVISION_MAX_CALLS_PER_DAY"),
     )
+    # v1.1（§14.3）: 学習者が起動する生成・改訂提案の 1 日あたり LLM コール上限（本人キー・2 本で共有）
+    simulation_learner_max_calls_per_day: int = Field(
+        default=20,
+        validation_alias=AliasChoices("SIMULATION_LEARNER_MAX_CALLS_PER_DAY"),
+    )
 
     # --- ISOM ---
     isom_output_dir: str = "output/incoming"

@@ -14,12 +14,17 @@
   しないので、ここで commit し、監査はコミット後にまとめて記帳する（entity_type は
   ``AUDIT_ENTITY_SIMULATION`` 固定）。
 - LLM を呼ぶのは「コードを生成」と「改訂案を求める」の 2 本だけ（各 1 コール + 日次 CostGate = SB9）。
-- 学習者向けの経路は無い（SB6）。confidence はどの DTO にも載せない。
+- v1.1（§14）: 学習者が作って試す経路は ``routes/simulation_lab.py``（学習者向けルーター）。
+  本ルーターが一覧するのは**教員本人の行 + 所有者の無い v1 の旧行 + 学習者が本人の操作で
+  共有した run**（``shared: true``）だけで、学習者の program / wiring / 共有していない run は
+  見えない（SB12）。共有した学習者は表示名だけで示し、user id は出さない。
+- 手順（式と記号の引き出し・AST 検査 → sim-runner → 比較・台帳候補）は
+  ``core/simulation_bridge/service.py`` が正本で、学習者向けルーターと共有する。
+- confidence はどの DTO にも載せない。
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -43,14 +48,13 @@ from core import llm_policy
 from core.config import get_settings
 from core.document_refs import canonical_document_ids, is_document_uuid
 from core.doubt.observation_targets import observation_claim_targets
-from core.label_vocab import SIMULATION_AGREEMENT_LABELS, SIMULATION_SEPARATION_LABELS
 from core.llm import generate_text, generate_text_with_structured_output
 from core.llm_usage.context import usage_context
 from core.llm_worker.cost_gate import CostGate
 from core.postgres import get_session as _pg_session
 from core.schema import AUDIT_ENTITY_SIMULATION
-from core.simulation_bridge import ast_guard, catalog as parts_catalog, codegen, comparator
-from core.simulation_bridge import instrument, revision, schema, store
+from core.simulation_bridge import catalog as parts_catalog, codegen
+from core.simulation_bridge import instrument, revision, schema, service, store
 from core.simulation_bridge.sandbox import sandbox_client_from_settings
 
 logger = logging.getLogger(__name__)
@@ -111,7 +115,6 @@ _revision_cost_gate = CostGate()
 
 _QUOTA_MESSAGE = "本日の AI 呼び出し回数の上限に達しました。明日以降にもう一度お試しください。"
 _NOT_FOUND = "対象が見つかりません。"
-_SYMBOL_LIMIT = 60
 
 
 # ---------------------------------------------------------------------------
@@ -297,11 +300,18 @@ def _wiring_dto(wiring: dict | None, catalog: dict[str, dict]) -> dict | None:
     })
 
 
-def _run_dto(run: dict | None) -> dict | None:
+def _run_dto(run: dict | None, *, viewer_id: str = "", shared_by: dict[str, str] | None = None) -> dict | None:
     if not run:
         return None
     runner = dict(run.get("runner") or {})
+    owner = str(run.get("owner_user_id") or "")
+    shared = bool(run.get("shared_at"))
+    extra: dict[str, Any] = {"shared": shared}
+    if shared and owner and owner != viewer_id:
+        # 学習者が共有した run（SB13）。表示名だけを出し、user id は出さない。
+        extra["shared_by_label"] = (shared_by or {}).get(owner) or _SHARED_BY_UNKNOWN
     return _strip_forbidden({
+        **extra,
         "id": run.get("id"),
         "document_id": run.get("document_id"),
         "program_id": run.get("program_id"),
@@ -316,150 +326,48 @@ def _run_dto(run: dict | None) -> dict | None:
     })
 
 
-def _str_list(value: Any) -> list[str]:
-    if isinstance(value, (list, tuple)):
-        return [str(v) for v in value if str(v or "").strip()]
-    return []
-
-
-def _module_equation_ids(module: dict, record: dict | None) -> list[str]:
-    ids: list[str] = []
-    for key in ("inputs", "outputs", "foundation"):
-        for item in module.get(key) or []:
-            if isinstance(item, dict) and item.get("equation_id"):
-                ids.append(str(item["equation_id"]))
-    if record:
-        for step in record.get("member_steps") or []:
-            if isinstance(step, dict):
-                ids.extend(_str_list(step.get("input_equation_ids")))
-                ids.extend(_str_list(step.get("output_equation_ids")))
-        for key in ("input_equation_ids", "output_equation_ids", "foundation_equation_ids", "produced_equation_ids"):
-            ids.extend(_str_list(record.get(key)))
-    seen: set[str] = set()
-    return [i for i in ids if not (i in seen or seen.add(i))]
-
-
-def _loads(value: Any, default: Any) -> Any:
-    if value is None:
-        return default
-    if isinstance(value, (dict, list)):
-        return value
-    if isinstance(value, str) and value.strip():
-        try:
-            return json.loads(value)
-        except (TypeError, ValueError):
-            return default
-    return default
-
-
 def _saved_module_records(session: Any, document_id: str) -> dict[str, dict]:
-    try:
-        rows = session.execute(
-            sa_text(
-                """
-                SELECT agent_module_key, stable_key, member_steps, input_equation_ids,
-                       output_equation_ids, foundation_equation_ids, produced_equation_ids
-                  FROM knowledge_theory_modules_live
-                 WHERE document_id = CAST(:d AS uuid)
-                """
-            ),
-            {"d": document_id},
-        ).fetchall()
-    except Exception:  # noqa: BLE001 — 保存行が引けなくても読み時 DTO だけで続ける
-        logger.debug("simulation: saved theory modules unavailable", exc_info=True)
-        return {}
-    out: dict[str, dict] = {}
-    for row in rows or []:
-        values = list(row)
-        if len(values) < 7 or not values[0]:
-            continue
-        out[str(values[0])] = {
-            "stable_key": str(values[1] or ""),
-            "member_steps": _loads(values[2], []),
-            "input_equation_ids": _loads(values[3], []),
-            "output_equation_ids": _loads(values[4], []),
-            "foundation_equation_ids": _loads(values[5], []),
-            "produced_equation_ids": _loads(values[6], []),
-        }
-    return out
-
-
-_EQUATION_COLUMNS = ("agent_equation_id", "label", "latex", "plain_text", "defined_symbols", "used_symbols", "agent_payload")
+    """``service.saved_module_records`` の薄い委譲（テストの差し替え口）。"""
+    return service.saved_module_records(session, document_id)
 
 
 def _equation_rows(session: Any, document_id: str, ids: list[str] | None) -> list[dict]:
-    sql = (
-        "SELECT agent_equation_id, label, latex, plain_text, defined_symbols, used_symbols, agent_payload "
-        "FROM knowledge_equations_live WHERE document_id = CAST(:d AS uuid)"
-    )
-    params: dict[str, Any] = {"d": document_id}
-    if ids is not None:
-        if not ids:
-            return []
-        sql += " AND agent_equation_id = ANY(:ids)"
-        params["ids"] = list(ids)
-    try:
-        rows = session.execute(sa_text(sql), params).fetchall()
-    except Exception:  # noqa: BLE001
-        logger.debug("simulation: equations unavailable", exc_info=True)
-        return []
-    out = []
-    for row in rows or []:
-        values = list(row)
-        if len(values) < len(_EQUATION_COLUMNS):
-            continue
-        item = dict(zip(_EQUATION_COLUMNS, values))
-        item["defined_symbols"] = _loads(item.get("defined_symbols"), [])
-        item["used_symbols"] = _loads(item.get("used_symbols"), [])
-        item["agent_payload"] = _loads(item.get("agent_payload"), {})
-        out.append(item)
-    return out
-
-
-_SYMBOL_COLUMNS = ("id", "agent_symbol_id", "canonical_symbol", "kind", "unit", "scope", "definition_evidence_texts", "agent_payload")
+    return service.equation_rows(session, document_id, ids)
 
 
 def _symbol_rows(session: Any, document_id: str, equations: list[dict]) -> list[dict]:
+    return service.symbol_rows(session, document_id, equations)
+
+
+def _user_display_names(session: Any, user_ids: list[str]) -> dict[str, str]:
+    """共有した人の表示名（user id は DTO に出さない）。引けなければ空。"""
+    ids = sorted({str(u) for u in user_ids if str(u or "").strip()})
+    if not ids:
+        return {}
     try:
         rows = session.execute(
-            sa_text(
-                """
-                SELECT id::text, agent_symbol_id, canonical_symbol, kind, unit, scope,
-                       definition_evidence_texts, agent_payload
-                  FROM knowledge_symbols_live
-                 WHERE document_id = CAST(:d AS uuid)
-                 ORDER BY canonical_symbol
-                """
-            ),
-            {"d": document_id},
+            sa_text("SELECT id::text, display_name FROM users WHERE id::text = ANY(:ids)"),
+            {"ids": ids},
         ).fetchall()
-    except Exception:  # noqa: BLE001
-        logger.debug("simulation: symbols unavailable", exc_info=True)
-        return []
-    symbols = []
-    for row in rows or []:
-        values = list(row)
-        if len(values) < len(_SYMBOL_COLUMNS):
-            continue
-        item = dict(zip(_SYMBOL_COLUMNS, values))
-        item["definition_evidence_texts"] = _loads(item.get("definition_evidence_texts"), [])
-        item["agent_payload"] = _loads(item.get("agent_payload"), {})
-        symbols.append(item)
-    wanted: set[str] = set()
-    for eq in equations:
-        wanted.update(_str_list(eq.get("defined_symbols")))
-        wanted.update(_str_list(eq.get("used_symbols")))
-    matched = [s for s in symbols if str(s.get("canonical_symbol") or "") in wanted]
-    return (matched or symbols)[:_SYMBOL_LIMIT]
+    except Exception:  # noqa: BLE001 — 表示名が引けなくても一覧は返す
+        logger.debug("simulation: user display names unavailable", exc_info=True)
+        service.rollback_quietly(session)
+        return {}
+    return {str(r[0]): str(r[1] or "") for r in rows or [] if r and r[0]}
 
 
-def _has_text(row: dict) -> bool:
-    return bool(str(row.get("latex") or "").strip() or str(row.get("plain_text") or "").strip())
+#: 共有した人の表示名が引けないときのラベル。
+_SHARED_BY_UNKNOWN = "学習者"
 
 
-def _is_reconstructed(row: dict) -> bool:
-    policy = (row.get("agent_payload") or {}).get("confidence_policy") if isinstance(row.get("agent_payload"), dict) else None
-    return bool(isinstance(policy, dict) and policy.get("must_not_treat_as_source_extracted"))
+def _visible_to_teacher(row: dict | None, user_id: str, *, allow_shared: bool = False) -> bool:
+    """教員の画面で扱える行か（本人の行・所有者の無い v1 の旧行・共有された run = SB12 / SB13）。"""
+    if not row:
+        return False
+    owner = str(row.get("owner_user_id") or "")
+    if not owner or owner == user_id:
+        return True
+    return bool(allow_shared and row.get("shared_at"))
 
 
 def _modules_payload(document_id: str) -> tuple[dict, list[dict]]:
@@ -473,7 +381,7 @@ def _modules_payload(document_id: str) -> tuple[dict, list[dict]]:
 
 
 def _find_module(modules: list[dict], module_key: str) -> dict | None:
-    return next((m for m in modules if str(m.get("module_key") or "") == module_key), None)
+    return service.find_module(modules, module_key)
 
 
 def _load_catalog(session: Any) -> tuple[list[dict], dict[str, dict]]:
@@ -485,6 +393,7 @@ def _require_program(session: Any, program_id: str) -> dict:
     try:
         program = store.get_program(session, program_id)
     except Exception:  # noqa: BLE001 — UUID でない id 等は不在と同じ扱い
+        service.rollback_quietly(session)
         program = None
     if not program:
         raise HTTPException(status_code=404, detail="理論プログラムが見つかりません。")
@@ -495,6 +404,7 @@ def _require_wiring(session: Any, wiring_id: str) -> dict:
     try:
         wiring = store.get_wiring(session, wiring_id)
     except Exception:  # noqa: BLE001
+        service.rollback_quietly(session)
         wiring = None
     if not wiring:
         raise HTTPException(status_code=404, detail="配線が見つかりません。")
@@ -505,6 +415,7 @@ def _require_run(session: Any, run_id: str) -> dict:
     try:
         run = store.get_run(session, run_id)
     except Exception:  # noqa: BLE001
+        service.rollback_quietly(session)
         run = None
     if not run:
         raise HTTPException(status_code=404, detail="実行記録が見つかりません。")
@@ -527,47 +438,28 @@ def get_simulation_overview(document_id: str, current_user: dict = Depends(_requ
         facts = [str(f) for f in (dto.get("facts") or []) if str(f or "").strip()]
         records = _saved_module_records(session, doc)
         equations = {str(e.get("agent_equation_id") or ""): e for e in _equation_rows(session, doc, None)}
-        programs = store.list_programs(session, document_id=doc)
-        latest_by_module: dict[str, dict] = {}
-        for program in programs:
-            key = str(program.get("module_key") or "")
-            if key and key not in latest_by_module:
-                latest_by_module[key] = program
-        module_items = []
-        for module in modules:
-            key = str(module.get("module_key") or "")
-            ids = _module_equation_ids(module, records.get(key))
-            rows = [equations[i] for i in ids if i in equations]
-            texted = [r for r in rows if _has_text(r)]
-            module_items.append({
-                "module_key": key,
-                "level": module.get("level"),
-                "label": module.get("label") or "",
-                "visual_label": module.get("visual_label") or "",
-                "theory_object": module.get("theory_object") or "",
-                "inputs": [
-                    {"equation_id": i.get("equation_id"), "display_label": i.get("display_label")}
-                    for i in module.get("inputs") or [] if isinstance(i, dict)
-                ],
-                "outputs": [
-                    {"equation_id": i.get("equation_id"), "display_label": i.get("display_label")}
-                    for i in module.get("outputs") or [] if isinstance(i, dict)
-                ],
-                "assumptions": [
-                    {"text": a.get("text") or "", "origin_label": a.get("origin_label") or ""}
-                    for a in module.get("assumptions") or [] if isinstance(a, dict)
-                ],
-                "has_equation_text": bool(texted),
-                "reconstructed_inputs": any(_is_reconstructed(r) for r in texted),
-                "program": _program_dto(latest_by_module.get(key)),
-            })
+        uid = _user_id(current_user)
+        programs = store.list_programs(session, document_id=doc, owner_user_id=uid, include_unowned=True)
+        module_items = service.module_items(
+            modules,
+            records=records,
+            equations_by_id=equations,
+            latest_program_by_module=service.latest_by_module(programs),
+            program_dto=_program_dto,
+        )
         catalog_rows, catalog = _load_catalog(session)
-        wirings = store.list_wirings(session, document_id=doc)
-        runs = store.list_runs(session, document_id=doc)
+        wirings = store.list_wirings(session, document_id=doc, owner_user_id=uid, include_unowned=True)
+        runs = store.list_runs(
+            session, document_id=doc, owner_user_id=uid, include_unowned=True, include_shared=True
+        )
+        shared_by = _user_display_names(
+            session, [str(r.get("owner_user_id") or "") for r in runs if r.get("shared_at")]
+        )
         try:
             targets = observation_claim_targets(session, document_id=doc)
         except Exception:  # noqa: BLE001
             logger.debug("simulation: observation targets unavailable", exc_info=True)
+            service.rollback_quietly(session)
             targets = []
         if not catalog_rows:
             facts.append(schema.FACT_NO_PARTS_CATALOG)
@@ -581,7 +473,7 @@ def get_simulation_overview(document_id: str, current_user: dict = Depends(_requ
             "modules": module_items,
             "programs": [_program_dto(p) for p in programs],
             "wirings": [_wiring_dto(w, catalog) for w in wirings],
-            "runs": [_run_dto(r) for r in runs],
+            "runs": [_run_dto(r, viewer_id=uid, shared_by=shared_by) for r in runs],
             "observation_targets": [
                 {
                     "claim_id": t.get("claim_id"),
@@ -622,13 +514,16 @@ def generate_simulation_program(
         module = _find_module(modules, module_key)
         if module is None:
             raise HTTPException(status_code=404, detail="この理論モジュールは見つかりません。")
-        records = _saved_module_records(session, doc)
-        record = records.get(module_key)
-        ids = _module_equation_ids(module, record)
-        equations = _equation_rows(session, doc, ids)
-        if not any(_has_text(row) for row in equations):
+        record, equations, symbols = service.fetch_module_inputs(
+            session,
+            doc,
+            module,
+            saved_records=_saved_module_records,
+            equations_fn=_equation_rows,
+            symbols_fn=_symbol_rows,
+        )
+        if not any(service.has_text(row) for row in equations):
             raise HTTPException(status_code=422, detail=schema.FACT_NO_MODULE_EQUATIONS)
-        symbols = _symbol_rows(session, doc, equations)
 
         settings = get_settings()
         consume_daily_quota(
@@ -638,7 +533,7 @@ def generate_simulation_program(
             message=_QUOTA_MESSAGE,
         )
         with usage_context(feature=schema.FEATURE_CODEGEN, user_id=uid or None, document_id=doc):
-            draft = codegen.generate_program(
+            draft, facts, provenance = service.generate_draft(
                 module,
                 equations=equations,
                 symbols=symbols,
@@ -647,16 +542,7 @@ def generate_simulation_program(
                 model=requested_model,
             )
         if not draft.source_code:
-            raise HTTPException(
-                status_code=422,
-                detail=" ".join(codegen.program_facts_for_display(draft)) or codegen.FACT_GENERATION_FAILED,
-            )
-        facts = codegen.program_facts_for_display(draft)
-        provenance = dict(draft.provenance or {})
-        provenance["facts"] = facts
-        provenance["ast_ok"] = bool(draft.accepted)
-        if draft.ast_check is not None and not draft.accepted:
-            provenance["ast_reasons"] = list(draft.ast_check.reasons)
+            raise HTTPException(status_code=422, detail=" ".join(facts) or codegen.FACT_GENERATION_FAILED)
         try:
             program = store.create_program(
                 session,
@@ -669,6 +555,8 @@ def generate_simulation_program(
                 created_by=uid,
                 review_status=schema.PROGRAM_STATUS_CANDIDATE,
                 record_audit=audit,
+                owner_user_id=uid or None,
+                supersede_unowned=True,
             )
         except store.SimulationStateError as exc:
             session.rollback()
@@ -691,6 +579,8 @@ def decide_simulation_program(
     audit = _AuditBuffer()
     try:
         program = _require_program(session, program_id)
+        if not _visible_to_teacher(program, _user_id(current_user)):
+            raise HTTPException(status_code=404, detail="理論プログラムが見つかりません。")
         _ensure_document_editable(str(program.get("document_id") or ""), current_user)
         action = (body.action or "").strip()
         if action not in store.DECIDE_ACTIONS:
@@ -745,7 +635,9 @@ def list_simulation_wirings(document_id: str, current_user: dict = Depends(_requ
     try:
         doc = _canonical_document_id(session, document_id)
         _rows, catalog = _load_catalog(session)
-        wirings = store.list_wirings(session, document_id=doc)
+        wirings = store.list_wirings(
+            session, document_id=doc, owner_user_id=_user_id(current_user), include_unowned=True
+        )
     finally:
         session.close()
     return {"wirings": [_wiring_dto(w, catalog) for w in wirings]}
@@ -782,6 +674,7 @@ def create_simulation_wiring(
                 origin=schema.WIRING_ORIGIN_TEACHER,
                 created_by=_user_id(current_user),
                 record_audit=audit,
+                owner_user_id=_user_id(current_user) or None,
             )
         except store.SimulationStateError as exc:
             session.rollback()
@@ -804,6 +697,8 @@ def decide_simulation_wiring(
     audit = _AuditBuffer()
     try:
         wiring = _require_wiring(session, wiring_id)
+        if not _visible_to_teacher(wiring, _user_id(current_user)):
+            raise HTTPException(status_code=404, detail="配線が見つかりません。")
         document_id = str(wiring.get("document_id") or "")
         if document_id:
             _ensure_document_editable(document_id, current_user)
@@ -863,7 +758,7 @@ def create_simulation_run(
     try:
         doc = _canonical_document_id(session, document_id)
         program = _require_program(session, (body.program_id or "").strip())
-        if str(program.get("document_id") or "") != doc:
+        if str(program.get("document_id") or "") != doc or not _visible_to_teacher(program, uid):
             raise HTTPException(status_code=404, detail="理論プログラムが見つかりません。")
         if program.get("review_status") != schema.PROGRAM_STATUS_CONFIRMED:
             raise HTTPException(status_code=422, detail="確定した理論プログラムだけを実行できます。")
@@ -873,14 +768,11 @@ def create_simulation_run(
         if wiring_id:
             wiring = _require_wiring(session, wiring_id)
             wiring_document = str(wiring.get("document_id") or "")
-            if wiring_document and wiring_document != doc:
+            if (wiring_document and wiring_document != doc) or not _visible_to_teacher(wiring, uid):
                 raise HTTPException(status_code=404, detail="配線が見つかりません。")
             if wiring.get("review_status") != schema.WIRING_STATUS_CONFIRMED:
                 raise HTTPException(status_code=422, detail="確定した配線だけを実行に使えます。")
             _rows, catalog = _load_catalog(session)
-        wiring_name = str((wiring or {}).get("name") or "")
-        provenance = dict(program.get("provenance") or {})
-        reconstructed = bool(provenance.get("reconstructed_inputs"))
         inputs = {
             "values": dict(body.values),
             "params": dict(body.params),
@@ -889,123 +781,40 @@ def create_simulation_run(
             "seed": body.seed,
         }
         claim_ids = [str(c).strip() for c in body.observation_claim_ids if str(c or "").strip()]
-
-        def _record(status: str, result: dict, runner: dict) -> dict:
-            return store.record_run(
-                session,
-                document_id=doc,
-                program_id=str(program.get("id")),
-                wiring_id=wiring_id or None,
-                observation_claim_ids=claim_ids,
-                inputs=inputs,
-                result=result,
-                runner=runner,
-                status=status,
-                created_by=uid,
-                record_audit=audit,
-            )
-
-        source = str(program.get("source_code") or "")
-        check = ast_guard.check_program(source)
-        if not (check.ok and check.entrypoint_found):
-            run = _record(
-                schema.RUN_STATUS_REJECTED,
-                {"facts": [schema.FACT_AST_REJECTED], "reconstructed_inputs": reconstructed},
-                {"status": schema.RUN_STATUS_REJECTED, "ast_check": list(check.reasons), "error": ""},
-            )
-            session.commit()
-        else:
-            instrument_source = ""
-            instrument_param_values: dict[str, Any] = {}
-            if wiring is not None:
-                parts = list(wiring.get("parts") or [])
-                edges = list(wiring.get("edges") or [])
-                try:
-                    instrument_source = instrument.compose_instrument(parts, edges, catalog)
-                except ValueError as exc:
-                    raise HTTPException(status_code=422, detail=str(exc)) from exc
-                merged = instrument.default_params(parts, catalog)
-                for slot, values in (body.instrument_params or {}).items():
-                    merged.setdefault(str(slot), {}).update({str(k): float(v) for k, v in values.items()})
-                instrument_param_values = merged
-
-            client = _sandbox_client()
-            theory = client.run(
-                source,
-                entrypoint=schema.PROGRAM_ENTRYPOINT,
-                inputs=dict(body.values),
-                params=dict(body.params),
+        try:
+            status, result, runner = service.run_pipeline(
+                program=program,
+                wiring=wiring,
+                catalog=catalog,
+                values=body.values,
+                params=body.params,
+                instrument_params=body.instrument_params,
+                reference=body.reference,
                 seed=body.seed,
+                sandbox_client=_sandbox_client(),
+                module_label=_module_label(doc, str(program.get("module_key") or "")),
             )
-            if theory.status != schema.RUN_STATUS_SUCCEEDED:
-                run = _record(
-                    schema.RUN_STATUS_FAILED,
-                    {"facts": list(theory.facts or []), "reconstructed_inputs": reconstructed},
-                    {"status": schema.RUN_STATUS_FAILED, "error": theory.error, "stage": "theory"},
-                )
-            else:
-                theory_outputs = dict(theory.outputs or {})
-                observed: dict | None = None
-                failed = None
-                if wiring is not None:
-                    observed_run = client.run(
-                        instrument_source,
-                        entrypoint=schema.INSTRUMENT_ENTRYPOINT,
-                        inputs=theory_outputs,
-                        params=instrument_param_values,
-                        seed=body.seed,
-                    )
-                    if observed_run.status != schema.RUN_STATUS_SUCCEEDED:
-                        failed = observed_run
-                    else:
-                        raw = observed_run.outputs or {}
-                        observed = raw.get("observed") if isinstance(raw.get("observed"), dict) else {}
-                if failed is not None:
-                    run = _record(
-                        schema.RUN_STATUS_FAILED,
-                        {
-                            "theory_outputs": theory_outputs,
-                            "facts": list(failed.facts or []),
-                            "reconstructed_inputs": reconstructed,
-                        },
-                        {"status": schema.RUN_STATUS_FAILED, "error": failed.error, "stage": "instrument"},
-                    )
-                else:
-                    comparison = comparator.compare(
-                        theory_outputs, observed, reference=body.reference, wiring_name=wiring_name
-                    )
-                    statement = comparator.comparison_statement(
-                        comparison,
-                        module_label=_module_label(doc, str(program.get("module_key") or "")),
-                        wiring_name=wiring_name,
-                    )
-                    facts = list(comparison.facts)
-                    if reconstructed:
-                        facts.append(schema.FACT_RECONSTRUCTED_INPUTS)
-                    result = {
-                        "theory_outputs": theory_outputs,
-                        "observed": observed,
-                        "comparison": comparison.to_dict(),
-                        "labels": {
-                            "agreement": SIMULATION_AGREEMENT_LABELS[comparison.agreement_level],
-                            "separation": SIMULATION_SEPARATION_LABELS[comparison.separation_level],
-                            "reference": SIMULATION_AGREEMENT_LABELS[comparison.reference_level],
-                        },
-                        "statement": statement,
-                        "facts": facts,
-                        "reconstructed_inputs": reconstructed,
-                        "wiring_name": wiring_name,
-                    }
-                    run = _record(
-                        schema.RUN_STATUS_SUCCEEDED,
-                        result,
-                        {"status": schema.RUN_STATUS_SUCCEEDED, "error": ""},
-                    )
-            session.commit()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        run = store.record_run(
+            session,
+            document_id=doc,
+            program_id=str(program.get("id")),
+            wiring_id=wiring_id or None,
+            observation_claim_ids=claim_ids,
+            inputs=inputs,
+            result=result,
+            runner=runner,
+            status=status,
+            created_by=uid,
+            record_audit=audit,
+            owner_user_id=uid or None,
+        )
+        session.commit()
     finally:
         session.close()
     audit.flush()
-    return {"run": _run_dto(run)}
+    return {"run": _run_dto(run, viewer_id=uid)}
 
 
 @admin_router.get("/simulation/documents/{document_id}/runs")
@@ -1015,21 +824,34 @@ def list_simulation_runs(document_id: str, current_user: dict = Depends(_require
     session = _pg_session()
     try:
         doc = _canonical_document_id(session, document_id)
-        runs = store.list_runs(session, document_id=doc)
+        uid = _user_id(current_user)
+        runs = store.list_runs(
+            session, document_id=doc, owner_user_id=uid, include_unowned=True, include_shared=True
+        )
+        shared_by = _user_display_names(
+            session, [str(r.get("owner_user_id") or "") for r in runs if r.get("shared_at")]
+        )
     finally:
         session.close()
-    return {"indicator_id": "simulation-agreement", "runs": [_run_dto(r) for r in runs]}
+    return {
+        "indicator_id": "simulation-agreement",
+        "runs": [_run_dto(r, viewer_id=uid, shared_by=shared_by) for r in runs],
+    }
 
 
 @admin_router.get("/simulation/runs/{run_id}")
 def get_simulation_run(run_id: str, current_user: dict = Depends(_require_teacher)) -> dict:
+    uid = _user_id(current_user)
     session = _pg_session()
     try:
         run = _require_run(session, run_id)
+        if not _visible_to_teacher(run, uid, allow_shared=True):
+            raise HTTPException(status_code=404, detail="実行記録が見つかりません。")
+        shared_by = _user_display_names(session, [str(run.get("owner_user_id") or "")]) if run.get("shared_at") else {}
     finally:
         session.close()
     _ensure_document_viewable(str(run.get("document_id") or ""), current_user)
-    return {"indicator_id": "simulation-agreement", "run": _run_dto(run)}
+    return {"indicator_id": "simulation-agreement", "run": _run_dto(run, viewer_id=uid, shared_by=shared_by)}
 
 
 # ---------------------------------------------------------------------------
@@ -1049,6 +871,8 @@ def add_simulation_ledger_candidate(
     audit = _AuditBuffer()
     try:
         run = _require_run(session, run_id)
+        if not _visible_to_teacher(run, uid, allow_shared=True):
+            raise HTTPException(status_code=404, detail="実行記録が見つかりません。")
         _ensure_document_editable(str(run.get("document_id") or ""), current_user)
         if run.get("status") != schema.RUN_STATUS_SUCCEEDED:
             raise HTTPException(status_code=422, detail="成功した実行だけを台帳の候補にできます。")
@@ -1056,33 +880,15 @@ def add_simulation_ledger_candidate(
         claim_ids = [str(c).strip() for c in (requested if requested is not None else run.get("observation_claim_ids") or []) if str(c or "").strip()]
         if not claim_ids:
             raise HTTPException(status_code=422, detail="台帳に記帳する観測系の主張を選んでください。")
-        result = dict(run.get("result") or {})
-        comparison = dict(result.get("comparison") or {})
-        statement = str(result.get("statement") or "")
-        level = str(comparison.get("agreement_level") or schema.AGREEMENT_LEVEL_UNMEASURED)
-        candidates = []
         try:
-            for claim_id in claim_ids:
-                candidate = store.build_ledger_candidate(
-                    run=run,
-                    statement=statement,
-                    level=level,
-                    facts=list(comparison.get("facts") or []),
-                    reconstructed_inputs=bool(result.get("reconstructed_inputs")),
-                    created_by=uid,
-                    wiring_name=str(result.get("wiring_name") or ""),
-                )
-                candidates.append(
-                    store.append_ledger_candidate(
-                        session,
-                        target_type="claim",
-                        target_id=claim_id,
-                        candidate=candidate,
-                        record_audit=audit,
-                        actor_id=uid,
-                    )
-                )
-            store.set_run_ledger_candidate(session, run_id=run_id, candidate_id=str(candidates[0]["candidate_id"]))
+            candidates = service.ledger_candidates_for_run(
+                session,
+                run=run,
+                claim_ids=claim_ids,
+                created_by=uid,
+                store_module=store,
+                record_audit=audit,
+            )
         except store.SimulationStateError as exc:
             session.rollback()
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1106,6 +912,8 @@ def propose_simulation_revision(
     audit = _AuditBuffer()
     try:
         run = _require_run(session, run_id)
+        if not _visible_to_teacher(run, uid):
+            raise HTTPException(status_code=404, detail="実行記録が見つかりません。")
         _ensure_document_editable(str(run.get("document_id") or ""), current_user)
         wiring_id = str(run.get("wiring_id") or "")
         comparison = dict((run.get("result") or {}).get("comparison") or {})
@@ -1161,6 +969,7 @@ def propose_simulation_revision(
                 parent_wiring_id=wiring_id,
                 revision_note=note,
                 record_audit=audit,
+                owner_user_id=uid or None,
             )
         except store.SimulationStateError as exc:
             session.rollback()

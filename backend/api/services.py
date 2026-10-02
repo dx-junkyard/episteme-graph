@@ -3948,6 +3948,37 @@ def record_cycle_anchor_mark(
     )
 
 
+def mark_verification_attempt_shared(user_id: str, run_id: str) -> bool:
+    """「動かして確かめた」痕跡（kind ``verification_attempt``）の payload に ``shared: true`` を刻む。
+
+    検証シミュレーション層 v1.1（simulation_bridge_design.md §14 SB13 / SB15）。本人が run を
+    共有したことを本人の記録にも残すだけで、行は増やさず消さない（P4）。本人の行だけを対象に
+    する（``user_id`` で絞る）。失敗しても共有そのものは止めない（best-effort・戻り値で通知）。
+    """
+    if not str(user_id or "").strip() or not str(run_id or "").strip():
+        return False
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                   SET payload = jsonb_set(payload, '{shared}', 'true'::jsonb, true)
+                 WHERE user_id = CAST(:uid AS uuid)
+                   AND kind = 'verification_attempt'
+                   AND payload->>'run_id' = :rid
+            """),
+            {"uid": user_id, "rid": run_id},
+        )
+        session.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.warning("mark_verification_attempt_shared failed: %s", exc)
+        return False
+    finally:
+        session.close()
+
+
 def recent_duplicate_ui_anchor_event(
     user_id: str, help_anchor: str, *, window_minutes: int = 30,
 ) -> bool:
@@ -4011,6 +4042,9 @@ def get_interest_traces(user_id: str, course_id: str, topic_id: str | None = Non
                   -- コーパス回遊層（§7）: frontier_interest は「地図の端の先を知りたい」の
                   -- 1タップであって発話ではない。「問いの軌跡」には出さない（台帳には出る）
                   AND kind <> 'frontier_interest'
+                  -- 検証シミュレーション層 v1.1（SB15）: verification_attempt は「動かして確かめた」
+                  -- 試行の記録であって発話ではない。「問いの軌跡」には出さない（台帳には出る）
+                  AND kind <> 'verification_attempt'
                 ORDER BY
                     CASE status WHEN 'revisited' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
                     created_at DESC
@@ -4046,9 +4080,11 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
     # frontier_interest（コーパス回遊層 §7）はコース非依存の1タップで、専用の
     # k-匿名集約（aggregate_frontier_interest）だけが読む — コース単位の本集計には
     # 混ぜない（センチネル course_id のため実際には一致しないが、除外を明示する）。
+    # verification_attempt（検証シミュレーション層 v1.1 SB12/SB15）は本人の試行の記録で、
+    # 教員向け集約を作らない（作るなら k-匿名 + 指標カタログ）。
     _dashboard_excluded_kinds = (
         "('help_usage', 'intention', 'anchor_mark', 'backstage_question', "
-        "'frontier_interest')"
+        "'frontier_interest', 'verification_attempt')"
     )
     session = _pg_session()
     try:
