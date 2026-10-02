@@ -2,7 +2,7 @@
 
 > **状態:** 完了済みのスナップショット（2026-09-30）。4 つの根はそれぞれ設計書（下表）が正本で、本書は
 > 「なぜ面ごとの修正をやめたか」と「どの面の修正がどの構造に置き換わったか」の記録。やることリストとして
-> 読まない（残したものは §6）。課題ナレッジは IK-0579〜IK-0582。
+> 読まない（残したものは §6）。課題ナレッジは IK-0579〜IK-0582（§5a の追補は IK-0595）。
 
 ## 1. 起点
 
@@ -57,21 +57,34 @@
 | 正本 | [応答の骨格](../features/dialogue_response_shape_design.md)（RS1〜RS5） |
 | 横断ガードレール | `backend/tests/test_dialogue_shape_guardrails.py` |
 
+## 5a. 根 5 — 「どの document 行か」の解決が経路ごと（2026-10-02 追補）
+
+| 項目 | 内容 |
+|---|---|
+| 面ごとに塞いでいた場所 | 教材詳細（一覧の document_id で 404）/ 教材状態の投影 / レーダーの seed / 分野コーパス / G層の教材 ref / ゼミ前ブリーフの seed（いずれも両形を独自 SQL で照合）。公開範囲の更新・教材削除・原稿スタジオのパイプライン実行・構造再解析・降下路・分野コーパスの一覧・コース経由の可視性・削除の巻き添えコース（いずれも source_path 形だけで照合） |
+| 何が根だったか | 教材の ID は `documents.id`（UUID）と `source_path`（material_id）の 2 つで、コースの `sources[].material_id` にはどちらの形も入る。IK-0550 で判別を 2 箇所に寄せた後も旧来の 6 ファイルが独自の `id::text = :ref OR source_path = :ref` を持ち（`LIMIT 1` だけで id 優先の規則が無い・教材詳細は逆に source_path を優先）、source_path 形だけの経路は UUID 形の sources を見落としていた |
+| 置き換えた構造 | 解決は `backend/core/document_refs.py` の 1 SQL（`resolve_document_rows` / `resolve_document_row` / `list_documents_for_refs` / `canonical_document_ids`。id 一致を優先・同じ source_path は新しい行・列は許可表のみ）。API 層の単数・権限込みは従来どおり `services._resolve_document` / `services.resolve_document_access`。**権限は解決した documents.id 1 行に対して各経路が掛ける**（解決器は権限を見ない）。コース経由の可視性と削除の巻き添えは両形を当てる |
+| 正本 | `backend/core/document_refs.py`（モジュール docstring）・課題ナレッジ IK-0595 |
+| 横断ガードレール | `backend/tests/test_document_id_resolution_guardrails.py`（両形照合は正本 2 ファイルのみ・source_path 形だけの照合は理由付き allowlist の関数のみ・寄せた経路が document_refs を通る）+ `backend/tests/test_document_refs.py`（legacy allowlist は空） |
+
 ## 6. 残したもの
 
 - **`project_for_teacher` は未配線**。教員向けの管理ルートは各層の射影（PL / TM / W層）が引き続き正本で、
   表示投影層の教員版は関数だけある（表示投影 §4）。
 - **バッチ取り込みキューは生成言語を運べない**。キュー表に options 列が無いため、取り込み後に再解析で選ぶ
   （discuss 開幕素材 §14 の非スコープ）。
-- **早期 return の経路は応答の骨格の対象外**（HELP / 学習相談 / 地図 / 要素説明）。最終 return の RAG 応答だけ
-  （応答の骨格 §7）。
-- **IK-0545（回答の引用と引用先チャンクの一致検査）は未着手**。応答の骨格とは別件。
+- ~~早期 return の経路は応答の骨格の対象外~~ → 2026-10-02 に HELP / 学習相談 / 地図 / 要素説明の全経路へ
+  `verbatim_shape_dto` か `assemble` を通した（IK-0594・応答の骨格 §8.2）。
+- ~~`routes/learning.py::_ordered_source_document_ids` は source_path 形だけで引いたまま~~ → 同日 `core.document_refs.
+  resolve_document_refs` へ寄せ、allowlist の「未是正」行を消した（IK-0595）。
+- ~~IK-0545（回答の引用と引用先チャンクの一致検査）は未着手~~ → 同日 `core/citation_check.py` で非LLM の逐語一致検査を
+  後処理に 1 箇所置き、不一致は事実文 1 行（保存文は不変）。
 - **PDF 経路そのものの式復元の強化は次段**。既定を TeX にしたのは上流の根を避ける手当てで、PDF しか無い
   論文の損失は残る。
 
 ## 7. 次に同型が出たとき
 
 同じマスク・同じ優先条件・同じ固定文を別のルートに書き足そうとしたら、それは面の欠陥ではなく
-本書の 4 つの構造のどれかを迂回している兆候である。書き足す前に、該当する 1 箇所に規則を足し、
+本書の 4 つ（§5a を足して 5 つ）の構造のどれかを迂回している兆候である。書き足す前に、該当する 1 箇所に規則を足し、
 横断ガードレールが新しい面を拾うことを確かめる。解決原理は
 [課題ナレッジの解決原理](../issue_knowledge/principles.md) の `route-all-surfaces-through-one-point`。
