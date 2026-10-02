@@ -333,6 +333,11 @@ _NON_INDICATOR_ROUTES: dict[str, str] = {
     "/api/admin/status/overview": _R_STATE,
     "/api/admin/tasks/{task_id}": _R_STATE,
     "/api/admin/theory-components/{component_id}/explanations": _R_OBJECT,
+    # -- SB層（検証シミュレーション。差の数値は simulation-agreement が計器） ------
+    "/api/admin/simulation/documents/{document_id}/overview": _R_OBJECT,
+    "/api/admin/simulation/documents/{document_id}/wirings": _R_OBJECT,
+    "/api/admin/simulation/parts": _R_OBJECT,
+    "/api/admin/simulation/runs/{run_id}": _R_OBJECT,
     "/api/admin/url-fetch-domains": _R_SETTING,
     # -- AL層（アカウント運用。個票は account-activity が計器） ---------------
     "/api/admin/users": _R_ACCOUNT,

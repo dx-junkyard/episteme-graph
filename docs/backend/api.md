@@ -73,7 +73,7 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
   （/cartridges 配下）/ `atlas_vectors`（/cartridges 配下）/ `atlas_edges`（/cartridges 配下）/
   `doubt.admin_router`（/doubt）/ `admin_assistant.admin_router`（/assistant）/
   `reconstruction.admin_router` / `seminar_brief.admin_router`（/documents 配下）/
-  `discuss_observation.admin_router` / `course_prerequisites`（/course-builder/prerequisite-check）/
+  `discuss_observation.admin_router` / `simulation_bridge.admin_router`（/simulation）/ `course_prerequisites`（/course-builder/prerequisite-check）/
   `cartridge_shape`（/cartridges/{id}/fit。cartridge の形の宣言に対する適合事実の読み取り専用1本）/ `reference_health`（/documents/{id}/reference-health。DB live 行の参照整合の読み取り専用1本）/ `versioning` / `status`
   （/status）/ `notifications`（/notifications）/ `deliberation`（/deliberation）/ `teaching_figures` /
   `landscape.router`（/landscape）/ `admin_assistant.help_kb_router`（/help-kb）
@@ -979,6 +979,40 @@ SL層 `support_paths` + claim つまづきサマリー（k-匿名集約の再利
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
 | GET | `/api/admin/documents/{document_ref}/seminar-brief` | TEACHER + document 閲覧権（`_ensure_document_viewable`・404 fail-closed） | 4区画の合成ビュー: ①脆い前提（未検証×下流影響「高」。`dependent_count` 等の生数値は落とし、load 段階ラベル・challenge_count_label・SL 4キーの段階表示のみ・上位8件）②一点吊りの支持線（`level=single` の事実文・上限5）③晴れ間（「このコーパスの中では検証記録が見つかりません。」の閉世界固定文, SL1・上限8）④学習者からの問い（v1 は空欄予約, SB3）。document / course 対応が解決できないときは `{available: false, reason}` の正直縮退で 200 |
+
+### 検証シミュレーション（`routes/simulation_bridge.py` admin_router）
+
+理論モジュール 1 つを LLM が Python の理論プログラム候補に翻訳し、教員が組んだ実験機の配線（L層の凍結版部品）と
+合わせて `sim-runner`（隔離コンテナ）で実行し、決定論の比較器で理論の出力と模擬観測を突き合わせる
+（正本: [features/simulation_bridge_design.md](../features/simulation_bridge_design.md) §6、不変条項 SB1〜SB10）。
+main.py が `prefix="/api/admin"` で直接登録する。全エンドポイント `_require_teacher`、ルーターは
+`route_class=TeacherDisplayRoute`（DP7）。生成コードは api-server で実行しない（SB3: 実行前にサーバ側 AST 検査を毎回やり直す）。
+LLM を呼ぶのは generate / propose-revision の 2 本だけ（各 1 コール + 日次 CostGate
+`SIMULATION_CODEGEN_MAX_CALLS_PER_DAY` / `SIMULATION_REVISION_MAX_CALLS_PER_DAY`。超過は 429 事実文）。
+監査は `AUDIT_ENTITY_SIMULATION`（コミット後に記帳）。DELETE ルートは無い（SB7）。差の数値は計器
+`simulation-agreement`（制度指標カタログ・教員向け `per_item_no_person`）として runs の DTO に出る。学習者向け経路は無い。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/simulation/documents/{document_id}/overview` | TEACHER + document 閲覧権 | 理論モジュール（`has_equation_text` / `reconstructed_inputs` / 最新の `program`）・programs・wirings・runs・観測系 claim・部品目録・`sandbox_configured` を 1 画面分 |
+| POST | `/api/admin/simulation/documents/{document_id}/programs/generate` | TEACHER + document 編集権 + 日次上限 | body `{module_key, model?}` → LLM 1 コール → `candidate` 行（AST 検査に落ちた下書きも `provenance.ast_ok=false` で候補として残す）。式の本文が無いモジュールは LLM を呼ばず 422 |
+| POST | `/api/admin/simulation/programs/{program_id}/decide` | 編集権（プログラムの document） | `{action: confirm \| dismiss, note?}`。`ast_ok=false` の確定は 422 |
+| GET | `/api/admin/simulation/parts` | TEACHER | 凍結版の部品目録（`instrument_model` / `noise_source` / `signal_processing`・active・最新版） |
+| GET / POST | `/api/admin/simulation/documents/{document_id}/wirings` | 閲覧権 / 編集権 | 一覧（教材の配線 + 汎用配線）/ 教員が組む（`instrument.validate_wiring` 通過時のみ・`confirmed` で作成） |
+| POST | `/api/admin/simulation/wirings/{wiring_id}/decide` | 編集権（汎用配線は SYSTEM_ADMIN か作成者） | 改訂候補の confirm / dismiss |
+| POST | `/api/admin/simulation/documents/{document_id}/runs` | 編集権 | 確定したプログラム（と確定した配線）を sim-runner で同期実行 → 比較 → append-only の 1 行。AST 不通過は `rejected`、実行環境の不達・失敗は `failed`（どちらも 200 で行を返す） |
+| GET | `/api/admin/simulation/documents/{document_id}/runs` / `/api/admin/simulation/runs/{run_id}` | 閲覧権 | 実行記録（`result.comparison.metrics` と段階ラベル・閉世界の事実文） |
+| POST | `/api/admin/simulation/runs/{run_id}/ledger-candidate` | 編集権 | 成功した run を観測系 claim ごとに台帳 `simulation_candidates` へ候補として追記 |
+| POST | `/api/admin/simulation/runs/{run_id}/propose-revision` | 編集権 + 日次上限 | 配線の改訂案（凍結版部品の組み替えのみ・`origin=llm_candidate` の候補配線） |
+
+台帳候補の判断は D層ルーター（`routes/doubt.py`）に置く:
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/admin/doubt/ledger/{target_type}/{target_id}/simulation-candidates/{candidate_id}/confirm` | `_require_editable_ledger_target` | 確定。スコープ 1 件（`system` = 配線名・`condition` = 入力条件）を足し、`untested` / `unknown` のときだけ `indirectly_supported` に上げる（SB1: それ以上は上げない）。処理済みは 422 |
+| POST | `/api/admin/doubt/ledger/{target_type}/{target_id}/simulation-candidates/{candidate_id}/dismiss` | `_require_editable_ledger_target` | 見送り（配列内の status 遷移・削除しない） |
+
+教員向け台帳 GET（`/api/admin/doubt/ledger/{target_type}/{target_id}`）は未処理の `simulation_candidates` も返す。学習者向け台帳 GET には載せない。
 
 ### W層 — 要素検討ワークスペース `/api/admin/deliberation`（`routes/deliberation.py`）
 

@@ -78,8 +78,10 @@ from core.schema import (
     AUDIT_ENTITY_CHALLENGE,
     AUDIT_ENTITY_COUNTERFACTUAL_SESSION,
     AUDIT_ENTITY_LEDGER,
+    AUDIT_ENTITY_SIMULATION,
     AUDIT_ENTITY_VERIFICATION_PROPOSAL,
 )
+from core.simulation_bridge import store as simulation_store
 from services import get_accessible_course_data, record_review_event
 
 logger = logging.getLogger(__name__)
@@ -254,6 +256,46 @@ def _falsification_candidate_out(candidate: dict) -> dict:
         "reason": str(candidate.get("reason") or ""),
         "status": str(candidate.get("status") or "candidate"),
     }
+
+
+def _simulation_candidate_out(candidate: dict) -> dict:
+    """検証シミュレーションの台帳候補（SB層）の API 表現。confidence は持たない（SB6）。"""
+    return {
+        "candidate_id": str(candidate.get("candidate_id") or ""),
+        "run_id": str(candidate.get("run_id") or ""),
+        "program_id": str(candidate.get("program_id") or ""),
+        "wiring_id": str(candidate.get("wiring_id") or ""),
+        "wiring_name": str(candidate.get("wiring_name") or ""),
+        "condition": str(candidate.get("condition") or ""),
+        "statement": str(candidate.get("statement") or ""),
+        "level": str(candidate.get("level") or ""),
+        "facts": [str(f) for f in candidate.get("facts") or [] if str(f or "").strip()],
+        "reconstructed_inputs": bool(candidate.get("reconstructed_inputs")),
+        "status": str(candidate.get("status") or "candidate"),
+        "created_at": str(candidate.get("created_at") or ""),
+    }
+
+
+def _simulation_candidates_for(session, target_type: str, target_id: str) -> list[dict]:
+    """``epistemic_ledger.simulation_candidates`` を列名で引く（未処理の候補のみ・fail-soft）。"""
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT simulation_candidates
+                FROM epistemic_ledger
+                WHERE target_id = :tid AND target_type = :ttype
+            """),
+            {"tid": target_id, "ttype": target_type},
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — 列が無い旧 DB でも台帳の他の情報は返す
+        logger.debug("simulation candidates unavailable", exc_info=True)
+        return []
+    if row is None:
+        return []
+    return [
+        _simulation_candidate_out(c) for c in _jsonb_list(row[0])
+        if isinstance(c, dict) and str(c.get("status") or "candidate") == "candidate"
+    ]
 
 
 def _validate_falsification_condition_fields(
@@ -469,6 +511,8 @@ def get_ledger_entry(
         evidence_lines = [
             _evidence_line_out(line) for line in _jsonb_list(row[15]) if isinstance(line, dict)
         ]
+        # SB層（検証シミュレーション, migration 088）: 台帳候補は列名で引く（位置に頼らない）。
+        simulation_candidates = _simulation_candidates_for(session, target_type, target_id)
         # SL-3: 独立支持経路（数値非公開・導出失敗はキー自体を付けない fail-soft）。
         support_lines = None
         try:
@@ -533,6 +577,7 @@ def get_ledger_entry(
             "evidence_lines": evidence_lines,
             "falsification_conditions": falsification_conditions,
             "falsification_candidates": falsification_candidates,
+            "simulation_candidates": simulation_candidates,
             **({"support_lines": support_lines} if support_lines is not None else {}),
             "updated_at": str(row[12] or ""),
         }
@@ -1228,6 +1273,90 @@ def dismiss_falsification_candidate(
         {"action": "falsification_candidate_dismiss", "candidate_id": candidate_id},
     )
     return {"ok": True, "candidate_id": candidate_id, "status": "dismissed"}
+
+
+class _SimulationAuditAdapter:
+    """SB層 store の ``record_audit(**kw)`` を ``_record_doubt_event`` へ写す（コミット後に記帳）。"""
+
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def __call__(self, **kwargs: Any) -> None:
+        self.events.append(dict(kwargs))
+
+    def flush(self) -> None:
+        for event in self.events:
+            metadata = dict(event.get("metadata") or {})
+            metadata.setdefault("action", event.get("action"))
+            _record_doubt_event(
+                AUDIT_ENTITY_SIMULATION,
+                str(event.get("entity_id") or ""),
+                str(event.get("old_status") or ""),
+                str(event.get("new_status") or ""),
+                event.get("actor_id"),
+                metadata,
+            )
+
+
+def _decide_simulation_candidate(
+    target_type: str, target_id: str, candidate_id: str, action: str, current_user: dict
+) -> dict:
+    _require_ledger_target_type(target_type)
+    _require_editable_ledger_target(target_type, target_id, current_user)
+    audit = _SimulationAuditAdapter()
+    session = _pg_session()
+    try:
+        try:
+            outcome = simulation_store.decide_ledger_candidate(
+                session,
+                target_type=target_type,
+                target_id=target_id,
+                candidate_id=candidate_id,
+                action=action,
+                actor_id=str(current_user.get("id") or ""),
+                record_audit=audit,
+            )
+        except simulation_store.SimulationNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc) or "台帳候補が見つかりません。") from exc
+        except simulation_store.SimulationStateError as exc:
+            session.rollback()
+            raise HTTPException(status_code=422, detail=str(exc) or "この候補は既に処理済みです。") from exc
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to decide simulation candidate for %s/%s", target_type, target_id)
+        raise HTTPException(status_code=500, detail="台帳候補の判断を保存できませんでした。")
+    finally:
+        session.close()
+    audit.flush()
+    return {
+        "candidate": _simulation_candidate_out(outcome.get("candidate") or {}),
+        "verification_status": str(outcome.get("verification_status") or ""),
+    }
+
+
+@admin_router.post("/ledger/{target_type}/{target_id}/simulation-candidates/{candidate_id}/confirm")
+def confirm_simulation_candidate(
+    target_type: str,
+    target_id: str,
+    candidate_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """検証シミュレーションの台帳候補の確定（SB1: indirectly_supported 止まり）。"""
+    return _decide_simulation_candidate(target_type, target_id, candidate_id, "confirm", current_user)
+
+
+@admin_router.post("/ledger/{target_type}/{target_id}/simulation-candidates/{candidate_id}/dismiss")
+def dismiss_simulation_candidate(
+    target_type: str,
+    target_id: str,
+    candidate_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """検証シミュレーションの台帳候補の見送り（配列内の status 遷移・削除しない）。"""
+    return _decide_simulation_candidate(target_type, target_id, candidate_id, "dismiss", current_user)
 
 
 @admin_router.post("/courses/{course_id}/falsification-candidates/refresh")
