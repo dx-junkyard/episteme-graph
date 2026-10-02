@@ -39,6 +39,11 @@ ENTRY_TYPE_OBSERVABLE = "observable"
 ENTRY_TYPE_ASSUMPTION = "assumption"
 ENTRY_TYPE_QUANTITY = "quantity"
 ENTRY_TYPE_PROCESS = "process"
+# 検証シミュレーション層の実験機部品（simulation_bridge_design.md §4.1・migration 088）。
+# body の規約は core/simulation_bridge/schema.py::PART_BODY_KEYS（L層 store は検査しない）。
+ENTRY_TYPE_INSTRUMENT_MODEL = "instrument_model"
+ENTRY_TYPE_NOISE_SOURCE = "noise_source"
+ENTRY_TYPE_SIGNAL_PROCESSING = "signal_processing"
 
 #: entry_type の語彙。正本は ``core/schema.py::LIBRARY_ENTRY_TYPES``（migration 082 の
 #: 語彙表 ``knowledge_entry_types`` が同じ列挙をシードする）。ここは再エクスポートで、
@@ -388,6 +393,9 @@ ENTRY_TYPE_LABELS = {
     "assumption": "前提",
     "quantity": "量",
     "process": "過程",
+    "instrument_model": "装置モデル",
+    "noise_source": "ノイズ源",
+    "signal_processing": "信号処理の工夫",
 }
 
 LABEL_KIND_LABELS = {

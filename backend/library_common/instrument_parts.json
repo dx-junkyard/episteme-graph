@@ -1,0 +1,149 @@
+[
+  {
+    "entry_type": "instrument_model",
+    "name": "線形増幅器",
+    "aliases": ["増幅器", "linear amplifier"],
+    "summary": "入力信号を一定の利得で増幅する理想的な線形増幅器。帯域・飽和は扱わない。",
+    "body": {
+      "transfer": "params[\"gain\"] * x",
+      "params": {
+        "gain": {"default": 10.0, "unit": "", "min": 0.0, "max": 1000000.0}
+      },
+      "inputs": ["x"],
+      "outputs": ["y"]
+    }
+  },
+  {
+    "entry_type": "instrument_model",
+    "name": "低域通過フィルタ（1次, 定常ゲイン）",
+    "aliases": ["ローパスフィルタ", "low-pass filter"],
+    "summary": "1 次の低域通過フィルタを定常状態（信号周波数での振幅応答）として扱う。位相は扱わない。",
+    "body": {
+      "transfer": "x / np.sqrt(1.0 + (params[\"signal_frequency\"] / params[\"cutoff_frequency\"]) ** 2)",
+      "params": {
+        "cutoff_frequency": {"default": 100.0, "unit": "Hz", "min": 0.000001, "max": 1000000000.0},
+        "signal_frequency": {"default": 1.0, "unit": "Hz", "min": 0.0, "max": 1000000000.0}
+      },
+      "inputs": ["x"],
+      "outputs": ["y"]
+    }
+  },
+  {
+    "entry_type": "instrument_model",
+    "name": "検出器（量子効率）",
+    "aliases": ["検出器", "detector"],
+    "summary": "到達した量のうち量子効率の割合だけを検出量として出力する検出器。",
+    "body": {
+      "transfer": "params[\"quantum_efficiency\"] * x",
+      "params": {
+        "quantum_efficiency": {"default": 0.8, "unit": "", "min": 0.0, "max": 1.0}
+      },
+      "inputs": ["x"],
+      "outputs": ["y"]
+    }
+  },
+  {
+    "entry_type": "noise_source",
+    "name": "ガウス雑音",
+    "aliases": ["白色雑音", "熱雑音", "gaussian noise"],
+    "summary": "平均 0・標準偏差 sigma の正規分布に従う加法雑音。",
+    "body": {
+      "noise_kind": "gaussian",
+      "params": {
+        "sigma": {"default": 0.1, "unit": "", "min": 0.0, "max": 1000000.0}
+      },
+      "depends_on": "装置の熱雑音・読み出し雑音など、信号の大きさに依らないばらつき。"
+    }
+  },
+  {
+    "entry_type": "noise_source",
+    "name": "ショット雑音",
+    "aliases": ["ポアソン雑音", "shot noise"],
+    "summary": "信号を計数の期待値とみなしたポアソン分布によるばらつき。信号が大きいほど絶対量は増える。",
+    "body": {
+      "noise_kind": "poisson",
+      "params": {
+        "scale": {"default": 1.0, "unit": "", "min": 0.000001, "max": 1000000.0}
+      },
+      "depends_on": "検出される粒子・光子の数（信号の大きさ）に依存する。"
+    }
+  },
+  {
+    "entry_type": "noise_source",
+    "name": "1/f 雑音",
+    "aliases": ["フリッカー雑音", "flicker noise"],
+    "summary": "低い周波数ほどパワーが大きいゆらぎ。長時間の測定ほど効く。",
+    "body": {
+      "noise_kind": "one_over_f",
+      "params": {
+        "amplitude": {"default": 0.05, "unit": "", "min": 0.0, "max": 1000000.0}
+      },
+      "depends_on": "素子のゆらぎ。測定時間と周波数帯に依存する。"
+    }
+  },
+  {
+    "entry_type": "noise_source",
+    "name": "ドリフト",
+    "aliases": ["ゆっくりした変動", "drift"],
+    "summary": "測定の進行に比例してゆっくり増える系統的なずれ。",
+    "body": {
+      "noise_kind": "drift",
+      "params": {
+        "rate": {"default": 0.01, "unit": "", "min": -1000000.0, "max": 1000000.0}
+      },
+      "depends_on": "温度変化・経年変化など、時間とともに変わる装置の状態。"
+    }
+  },
+  {
+    "entry_type": "noise_source",
+    "name": "オフセット",
+    "aliases": ["零点ずれ", "offset"],
+    "summary": "すべての測定に一定量だけ加わる系統的なずれ。",
+    "body": {
+      "noise_kind": "offset",
+      "params": {
+        "offset": {"default": 0.0, "unit": "", "min": -1000000.0, "max": 1000000.0}
+      },
+      "depends_on": "零点の校正誤差・背景信号。"
+    }
+  },
+  {
+    "entry_type": "signal_processing",
+    "name": "平均化（N 回）",
+    "aliases": ["平均化", "averaging"],
+    "summary": "同じ測定を n 回繰り返して平均する。信号の値は変えず、ランダムな雑音の分散を 1/n にする（分散のスケーリングは配線の合成器が行う）。系統的なずれは減らさない。",
+    "body": {
+      "transfer": "x",
+      "params": {
+        "n": {"default": 10, "unit": "回", "min": 1, "max": 1000000}
+      },
+      "removes": ["gaussian", "poisson"]
+    }
+  },
+  {
+    "entry_type": "signal_processing",
+    "name": "差動測定",
+    "aliases": ["差分測定", "differential measurement"],
+    "summary": "信号のある測定と無い測定の差を取る。両方に共通するずれを打ち消す。",
+    "body": {
+      "transfer": "x - params[\"reference\"]",
+      "params": {
+        "reference": {"default": 0.0, "unit": "", "min": -1000000.0, "max": 1000000.0}
+      },
+      "removes": ["offset", "drift"]
+    }
+  },
+  {
+    "entry_type": "signal_processing",
+    "name": "ロックイン検出",
+    "aliases": ["位相敏感検出", "lock-in detection"],
+    "summary": "信号を既知の周波数で変調し、同じ周波数の成分だけを取り出す。変調周波数から離れた低周波のゆらぎを抑える。",
+    "body": {
+      "transfer": "params[\"demodulation_gain\"] * x",
+      "params": {
+        "demodulation_gain": {"default": 0.5, "unit": "", "min": 0.0, "max": 1.0}
+      },
+      "removes": ["one_over_f", "drift", "offset"]
+    }
+  }
+]

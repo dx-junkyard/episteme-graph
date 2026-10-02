@@ -555,6 +555,12 @@ AUDIT_ENTITY_KNOWLEDGE_OBJECT = "knowledge_object"
 # 監査に載せない。取り込んだ人は束の中には書かず、この行の changed_by だけに残る。
 AUDIT_ENTITY_IMPORT = "import"
 
+# 検証シミュレーション層（simulation_bridge_design.md SB7）: 理論プログラム / 実験機の配線 /
+# run / 台帳候補の遷移を記帳する。entity_id は program_id / wiring_id / run_id / 台帳の
+# target_id。action は core/simulation_bridge/schema.py::AUDIT_ACTIONS。生成コード本文・
+# 数値は監査に載せない。
+AUDIT_ENTITY_SIMULATION = "simulation"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -604,6 +610,7 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_EXPORT,
     AUDIT_ENTITY_KNOWLEDGE_OBJECT,
     AUDIT_ENTITY_IMPORT,
+    AUDIT_ENTITY_SIMULATION,
 )
 
 
@@ -706,6 +713,8 @@ LEARNING_UNIT_KINDS_FOR_COURSE: tuple[str, ...] = (
 LIBRARY_ENTRY_TYPES: tuple[str, ...] = (
     "apparatus", "theory_component", "concept", "theory", "method",
     "observable", "assumption", "quantity", "process",
+    # 検証シミュレーション層の実験機部品（simulation_bridge_design.md §4.1・migration 088）。
+    "instrument_model", "noise_source", "signal_processing",
 )
 
 #: library_entry_labels.kind（SKOS の prefLabel / altLabel / hiddenLabel）。

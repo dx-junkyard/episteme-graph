@@ -22,7 +22,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（2026-09-25 時点で **088 以降**。044〜087 は使用済み — §3 参照。
+  着手時は次の空き番号（2026-10-02 時点で **089 以降**。044〜088 は使用済み — §3 参照。
   採番前に必ず `ls backend/db/` で確認する）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
@@ -66,6 +66,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | **M層** | 場面別 LLM モデル選択（LLM Model Selection） | `docs/features/llm_model_selection_design.md`（M1〜M10） | `backend/core/llm_policy.py` / `llm_policy_store.py` + `routes/llm_models.py` + `admin-llm-models.js` | 061 | 実装済み（Phase 0〜4。ユーザー別保存が正・tier名/金額は UI 非表示） |
 | **R層** | 再構成ループ（Reconstruction Loop） | `docs/features/reconstruction_loop_design.md` | `backend/core/reconstruction/` + `routes/reconstruction.py` + `reconstruction.js` | 036 | 実装済み |
 | **S層**（便宜ラベル） | 分野の地図（Field Atlas） | `field_atlas_overlay_spec.md`（オーバーレイ仕様の正本。原本消失のため **2026-08-14 の再構成版**が現行 — [不具合報告](doc_review_findings_2026-08-13.md) §1-1 は解消済み）+ `field_atlas_*.md`（骨格 / バインディング / 修正報告 / DB管理化 / 詳細パネル / 骨格エディタ）+ `atlas_binding_lifecycle_design.md` + 追補 [ノード版間対応](../features/atlas_node_correspondence_design.md)（NC1〜NC8。凍結時に教員が確定した `id_migrations` で版をまたいだ node_id を読み替える。migration なし） | `backend/core/atlas*.py` + `routes/atlas.py` / `atlas_view.py` + `atlas-*.js` | 023, 024, 026, 027, 028, 046, **057（ドメイン lifecycle）** | 実装済み |
+| **SB層** | 検証シミュレーション層（Simulation Bridge — 理論⇔シミュレーション⇔実験の翻訳層） | `features/simulation_bridge_design.md`（SB1〜SB10） | `backend/core/simulation_bridge/` | 088 | v1 実装済み（2026-10-02・docker 実機未確認） |
 | **SL層** | 賭け金の台帳（Stakes Ledger）＝理解サイクル Phase 3 | `docs/features/stakes_ledger_design.md`（SL1〜SL10・§15 実装記録） | `backend/core/doubt/` 配下の SL 系モジュール + `routes/doubt.py` 拡張（D層の双対拡張・既存意味論は非改変） | 067 | 実装済み（SL-1〜SL-5） |
 | **U層** | LLM トークン使用量推計（Usage Metering） | `docs/features/llm_usage_metering_design.md` | `backend/core/llm_usage/` + `routes/llm_usage.py` | 043, **069（ユーザー別集計軸）** | 実装済み |
 | **（運営基盤）** | アカウントライフサイクル管理（一覧・停止・削除・リセット・最終ログイン・利用実績照会） | `docs/features/account_lifecycle_management_design.md`（AL1〜AL10） | `backend/core/account_status.py` / `auth_events.py` / `account_lifecycle.py` + `routes/admin.py` User Management 節 + `routes/auth.py` | 068, 069 | 実装済み（Phase 0〜3） |
@@ -121,7 +122,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   `backend/tests/test_admin_help_ui_anchors.py`（管理側の網羅・双方向整合は同テストと
   `test_admin_help_inspect_ui_static.py` が構造的に守る）。
 
-## 3. migration 帰属一覧（init〜087、2026-09-25 時点）
+## 3. migration 帰属一覧（init〜088、2026-10-02 時点）
 
 `backend/db/` の実ファイルを正とした全 migration の帰属。
 
@@ -196,8 +197,9 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 085 | `085_paper_discovery_arxiv_metadata_cache` | **論文ディスカバリー層 / 論文レーダー**（arXiv メタデータの外部事実キャッシュ1表。候補・教員の判断は保存しない。正本は `docs/features/paper_radar_design.md` §14） |
 | 086 | `086_theory_modules` | **理論モジュール層 Phase 1**（新表 `knowledge_theory_modules` + `knowledge_theory_modules_live`、`element_identity_links` の instance 型に `theory_module`、`knowledge_mapping_justifications` に `structural_match`。保存行は表示の正本ではない。正本は `docs/features/theory_module_layer_design.md` §13） |
 | 087 | `087_document_figures_superseded` | **L層 図画像レジストリ**（`document_figures.status` の CHECK に `superseded` を追加。最新の抽出で作られなかった前回までの行を消さずに一覧から外す。正本は `docs/features/image_pipeline_knowledge_library_design.md` §18） |
+| 088 | `088_simulation_bridge` | **検証シミュレーション層（SB層）**（新表 `simulation_programs`（LLM 生成の理論シミュレータ候補・再生成は superseded）/ `instrument_wirings`（L層部品の配線・改訂提案は `parent_wiring_id`）/ `simulation_runs`（append-only）、`epistemic_ledger.simulation_candidates` JSONB、語彙表 `knowledge_entry_types` に `instrument_model` / `noise_source` / `signal_processing`。DELETE 文なし・users 参照なし。正本は `docs/features/simulation_bridge_design.md`） |
 
-次の空き番号は **088**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **089**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。
 
@@ -219,6 +221,8 @@ PROV-O の 2 語で宣言する。**コード変更はゼロ**（宣言だけ）
 | `library_entry_versions`（L層の凍結版） | revision | ナレッジライブラリ エントリの凍結版。パイプラインが読むのは凍結版だけ | `image_pipeline_knowledge_library_design.md` §6 |
 | 知識行の `produced_by_run_id` / `superseded_at` / `superseded_by_run_id`（`theory_claims` / `theory_components` / `knowledge_*` / `learning_units`） | revision | 解析 run による改訂。**同一性は `stable_key`、版は run**。live ビューは「現在の版」の射影 | `knowledge_objects_design.md`（KO3） |
 | `knowledge_theory_modules`（`stable_key` / `superseded_at`・`rule_version`） | revision | 理論モジュール（外枠・内側）の解析 run による改訂。同一性は `stable_key`（材料は生む式の stable_key 集合 + 段 + **規則の版**）で、規則の版を上げたときも revision として旧行を残す（確定済み同一性リンクの付け替えはしない前提 — 設計書 §9 O-5）。保存行は同一性リンクの参照先と構造の指紋の照合の索引で、**表示の正本ではない**（表示は読み時導出） | `theory_module_layer_design.md` §13 |
+| `simulation_programs`（`review_status` superseded・`superseded_by_id`） | revision | 再生成は旧行を superseded にして新行 | `simulation_bridge_design.md` §4.2 |
+| `instrument_wirings`（`parent_wiring_id`） | revision | 改訂提案は親を指す新行 | 同 §4.4 |
 | `element_explanations` / `landscape_placements` / `landscape_gap_signals` / `element_annotations` の `superseded` 遷移 | revision | 候補の改訂（再解析で inferred / candidate だけが倒れ、確定は残る） | 各層の設計書（LS3 / OA 系） |
 | `document_analysis_runs`（同一 document の run 列・`documents.active_analysis_run_id`） | revision | 解析そのものの改訂。採用 run が「現在の版」。artifact は 1 run × 1 stage の生成ログ | `knowledge_objects_design.md`（KO6） |
 | `element_id_remap` | revision 間の対応表 | 旧 ID → 新 ID（同一 stable_key の別 run）。「解決済み」フラグではなく事実の記録 | `knowledge_objects_design.md`（KO8） |

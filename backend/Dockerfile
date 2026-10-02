@@ -9,6 +9,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/core/ /app/core/
 COPY backend/db/ /app/db/
 COPY backend/cartridges/ /app/cartridges/
+# 分野に紐づかない共通部品（検証シミュレーション層の実験機部品など）。core/library/seed.py が
+# /app/library_common/*.json を domain_key=unassigned で取り込む。
+COPY backend/library_common/ /app/library_common/
 # 骨格専用バンドルドメイン（分野の地図のシード。knowledge_landscape_design.md §6.1）。
 # core/atlas_store.py::ATLAS_BUNDLED_DOMAINS_DIR が /app/atlas_domains を見るため、
 # ここを COPY しないと宇宙物理の基準地図が本番イメージに入らない。

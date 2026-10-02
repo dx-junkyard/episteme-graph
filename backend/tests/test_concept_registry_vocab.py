@@ -30,7 +30,12 @@ MIGRATION = BACKEND / "db" / "082_concept_registry.sql"
 #: 語彙表のシードを足す後続 migration（082 のシード文は編集しない規律なので、語彙を
 #: 足すときは新しい migration が同じ表へ ``ON CONFLICT DO NOTHING`` で 1 行足す）。
 #: 086 = 理論モジュール層 Phase 1 の ``structural_match``（theory_module_layer_design.md §13.10）。
-SEED_MIGRATIONS = (MIGRATION, BACKEND / "db" / "086_theory_modules.sql")
+#: 088 = 検証シミュレーション層の実験機部品 3 種（simulation_bridge_design.md §4.1）。
+SEED_MIGRATIONS = (
+    MIGRATION,
+    BACKEND / "db" / "086_theory_modules.sql",
+    BACKEND / "db" / "088_simulation_bridge.sql",
+)
 
 _PAIR_RE = re.compile(r"\('([^']+)',\s*'([^']*)'\)")
 
