@@ -60,6 +60,7 @@
     selectedRunId: "",
     proposal: null,
     historyOpen: false,
+    chosenDocumentId: "",
     seq: 0,
   };
 
@@ -100,7 +101,7 @@
     return {
       courseId: str(deps.getCourseId && deps.getCourseId()),
       topicId: str(deps.getTopicId && deps.getTopicId()),
-      documentId: str(deps.getDocumentId && deps.getDocumentId()),
+      documentId: st.chosenDocumentId || str(deps.getDocumentId && deps.getDocumentId()),
     };
   }
   function docId() {
@@ -177,7 +178,7 @@
   }
 
   function resetData() {
-    st.overview = null;
+    st.overview = null; st.chosenDocumentId = "";
     st.loadError = "";
     st.moduleKey = "";
     st.programId = "";
@@ -238,6 +239,12 @@
         "/simulation/overview" + (qs.length ? "?" + qs.join("&") : ""));
       if (seq !== st.seq) return;
       st.overview = data;
+      const docs = arr(obj(data).documents);
+      if (!str(obj(data).document_id) && docs.length === 1 && str(obj(docs[0]).document_id) && !st.chosenDocumentId) {
+        st.chosenDocumentId = str(docs[0].document_id);
+        st.loading = false;
+        return refresh();
+      }
       if (st.moduleKey && !currentModule()) { st.moduleKey = ""; st.programId = ""; }
     } catch (e) {
       if (seq !== st.seq) return;
@@ -298,7 +305,13 @@
       return;
     }
     const o = ov();
-    if (o.document_title) html += '<p class="sim-lab-doc">論文: ' + esc(o.document_title) + "</p>";
+    const docList = arr(o.documents).filter((d) => str(obj(d).document_id));
+    if (docList.length > 1 || (!str(o.document_id) && docList.length)) {
+      html += '<div class="sim-lab-row"><label>動かす論文 <select class="sim-lab-select" data-sl-change="choose-doc">' +
+        (!str(o.document_id) ? '<option value="">選んでください</option>' : '') +
+        docList.map((d) => '<option value="' + esc(d.document_id) + '"' + (str(d.document_id) === str(o.document_id) ? ' selected' : '') + '>' + esc(d.title || d.document_id) + '</option>').join('') +
+        '</select></label></div>';
+    } else if (o.document_title) html += '<p class="sim-lab-doc">論文: ' + esc(o.document_title) + "</p>";
     if (o.sandbox_configured === false) html += '<p class="sim-lab-fact">' + esc(SANDBOX_OFF) + "</p>";
     html += factsHtml(o.facts);
     if (o.available === false || !modules().length) {
@@ -873,6 +886,13 @@
     button = document.getElementById("simulation-lab-btn");
     if (region && !region.dataset.slBound) {
       region.addEventListener("click", onClick);
+      region.addEventListener("change", (e) => {
+        const t = e.target && e.target.closest ? e.target.closest('[data-sl-change="choose-doc"]') : null;
+        if (!t) return;
+        st.chosenDocumentId = str(t.value);
+        st.moduleKey = ""; st.programId = ""; st.wiringId = ""; st.selectedRunId = "";
+        refresh();
+      });
       region.dataset.slBound = "1";
     }
     if (button && !button.dataset.slBound) {
