@@ -15,6 +15,7 @@ import uuid as _uuid
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
+from core import document_refs as _document_refs
 from core.course_data import course_atlas_binding_facts, course_source_material_ids
 from core.lecture import compute_course_audio_readiness, get_course_lecture_language
 
@@ -39,17 +40,27 @@ def _iso(value) -> str:
 # ---------------------------------------------------------------------------
 
 
+_DOCUMENT_STATUS_COLUMNS = ("status", "chunk_count", "updated_at")
+
+
+def _as_projector_row(entry: dict | None) -> dict | None:
+    """``document_refs`` の解決結果を従来の行形（id / source_path / status / ...）に揃える。"""
+    if not entry:
+        return None
+    return {
+        "id": entry["document_id"],
+        "source_path": entry.get("material_id") or None,
+        "status": entry.get("status"),
+        "chunk_count": entry.get("chunk_count"),
+        "updated_at": entry.get("updated_at"),
+    }
+
+
 def _fetch_document(session: Session, document_ref: str) -> dict | None:
-    row = session.execute(
-        sa_text("""
-            SELECT id::text, source_path, status, chunk_count, updated_at
-            FROM documents
-            WHERE id::text = :ref OR source_path = :ref
-            LIMIT 1
-        """),
-        {"ref": document_ref},
-    ).mappings().fetchone()
-    return dict(row) if row else None
+    # 両形（documents.id / source_path）の突き合わせは core/document_refs に委ねる（IK-0550）。
+    return _as_projector_row(
+        _document_refs.resolve_document_row(session, document_ref, columns=_DOCUMENT_STATUS_COLUMNS)
+    )
 
 
 def _fetch_latest_run(session: Session, document_id: str, material_id: str) -> dict | None:
@@ -167,22 +178,8 @@ def _fetch_documents_bulk(session: Session, document_refs: list[str]) -> dict[st
     refs = [r for r in document_refs if r]
     if not refs:
         return {}
-    rows = session.execute(
-        sa_text("""
-            SELECT id::text, source_path, status, chunk_count, updated_at
-            FROM documents
-            WHERE id::text = ANY(:refs) OR source_path = ANY(:refs)
-        """),
-        {"refs": refs},
-    ).mappings().fetchall()
-    by_id: dict[str, dict] = {}
-    by_source: dict[str, dict] = {}
-    for row in rows:
-        d = dict(row)
-        by_id[d["id"]] = d
-        if d["source_path"]:
-            by_source[d["source_path"]] = d
-    return {ref: (by_id.get(ref) or by_source.get(ref)) for ref in refs}
+    resolved = _document_refs.resolve_document_rows(session, refs, columns=_DOCUMENT_STATUS_COLUMNS)
+    return {ref: _as_projector_row(resolved.get(ref)) for ref in refs}
 
 
 def _fetch_latest_runs_bulk(

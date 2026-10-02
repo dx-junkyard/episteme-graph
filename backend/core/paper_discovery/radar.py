@@ -40,6 +40,7 @@ from typing import Any, Optional
 
 from sqlalchemy import text as sa_text
 
+from core import document_refs as _document_refs
 from core.label_vocab import (
     RADAR_DISTANCE_LABEL_FAR,
     RADAR_DISTANCE_LABEL_MID,
@@ -151,30 +152,20 @@ def _document_row(session, document_ref: str) -> Optional[dict[str, str]]:
     ref = _clean(document_ref)
     if not ref:
         return None
-    row = session.execute(
-        sa_text(
-            """
-            SELECT id::text,
-                   COALESCE(source_path, ''),
-                   COALESCE(NULLIF(title, ''), NULLIF(filename, ''), ''),
-                   COALESCE(source_url, ''),
-                   COALESCE(filename, '')
-              FROM documents
-             WHERE id::text = :ref OR source_path = :ref
-             LIMIT 1
-            """
-        ),
-        {"ref": ref},
-    ).fetchone()
-    if not row:
+    # 両形の突き合わせは core/document_refs に委ねる（IK-0550・id 一致を優先する規則も同じ）。
+    entry = _document_refs.resolve_document_row(
+        session, ref, columns=("title", "filename", "source_url"),
+    )
+    if not entry:
         return None
+    title = str(entry.get("title") or "").strip() or str(entry.get("filename") or "").strip()
     return {
-        "document_id": str(row[0] or "").strip(),
-        "source_path": str(row[1] or "").strip(),
-        "title": _clean(row[2]),
-        "source_url": str(row[3] or "").strip(),
+        "document_id": str(entry.get("document_id") or "").strip(),
+        "source_path": str(entry.get("material_id") or "").strip(),
+        "title": _clean(title),
+        "source_url": str(entry.get("source_url") or "").strip(),
         # ファイル名は arXiv 出所の**推定**にだけ使う（``arXiv-2407.01221v2.tar.gz``）。
-        "filename": _clean(row[4]),
+        "filename": _clean(entry.get("filename") or ""),
     }
 
 

@@ -1038,7 +1038,7 @@ def _resolve_document(document_ref: str) -> dict | None:
     """document_ref（documents.id UUID か source_path=material_id）から doc メタを解決する。
 
     2つの ID 体系を突き合わせる**単数の正本**（複数は ``core.document_refs.resolve_document_refs``。
-    IK-0550 — ガードレール ``test_document_refs_guardrails.py``）。同じ ref が一方の id と
+    IK-0550 — ガードレール ``test_document_refs.py``）。同じ ref が一方の id と
     別の行の source_path に当たるときは id 一致を採る。
     """
     if not document_ref:
@@ -1563,6 +1563,9 @@ def list_visible_document_ids(user_id: str) -> set[str]:
                              AND gm3.user_id = CAST(:uid AS uuid)
                        )
                        OR d.source_path IN (SELECT material_id FROM course_material_ids)
+                       -- sources[].material_id に documents.id（UUID）を入れたコースもある
+                       -- （list_course_source_document_ids と同じ両形の意味論・IK-0550）。
+                       OR d.id::text IN (SELECT material_id FROM course_material_ids)
                 """),
                 {"uid": user_id},
             ).fetchall()
@@ -6169,25 +6172,41 @@ def reanalyze_course_structure_background(
     updated_chunks = 0
     errors: list[str] = []
 
+    # sources[].material_id には documents.id（UUID）が入っているコースもある。両形の
+    # 突き合わせは core/document_refs に 1 回で委ねる（IK-0550）。解決に失敗したら
+    # 各教材は「見つからない」として errors に残る（推測で別の教材を引かない）。
+    resolved_docs: dict[str, dict] = {}
+    try:
+        session = _pg_session()
+        try:
+            resolved_docs = _document_refs.resolve_document_refs(session, material_ids)
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001
+        logger.warning("reanalyze_course_structure: document ref resolution failed", exc_info=True)
+
     for material_id in material_ids:
         try:
-            session = _pg_session()
-            try:
-                row = session.execute(
-                    sa_text("""
-                        SELECT d.id, COALESCE(d.title, d.filename, d.source_path, '') AS title,
-                               string_agg(c.text, E'\n\n' ORDER BY c.chunk_index) AS full_text,
-                               COUNT(c.id) AS chunk_count
-                        FROM documents d
-                        LEFT JOIN chunks c ON c.document_id = d.id
-                        WHERE d.source_path = :material_id
-                        GROUP BY d.id, d.title, d.filename, d.source_path
-                        LIMIT 1
-                    """),
-                    {"material_id": material_id},
-                ).fetchone()
-            finally:
-                session.close()
+            resolved_doc = resolved_docs.get(material_id)
+            row = None
+            if resolved_doc:
+                session = _pg_session()
+                try:
+                    row = session.execute(
+                        sa_text("""
+                            SELECT d.id, COALESCE(d.title, d.filename, d.source_path, '') AS title,
+                                   string_agg(c.text, E'\n\n' ORDER BY c.chunk_index) AS full_text,
+                                   COUNT(c.id) AS chunk_count
+                            FROM documents d
+                            LEFT JOIN chunks c ON c.document_id = d.id
+                            WHERE d.id = CAST(:document_id AS uuid)
+                            GROUP BY d.id, d.title, d.filename, d.source_path
+                            LIMIT 1
+                        """),
+                        {"document_id": resolved_doc["document_id"]},
+                    ).fetchone()
+                finally:
+                    session.close()
 
             if not row:
                 raise RuntimeError(f"material not found: {material_id}")

@@ -145,6 +145,22 @@ class FakeSession:
                 doc["source_url"] = p.get("url")
                 changed += 1
             return _Result(rowcount=changed)
+        if "FROM documents" in sql and "ANY(:refs)" in sql:
+            # core.document_refs.resolve_document_rows（両形の突き合わせの正本・IK-0550）
+            refs = set(p.get("refs") or [])
+            return _Result(
+                [
+                    {
+                        "id": d["id"],
+                        "source_path": d.get("source_path") or "",
+                        "title": d.get("title"),
+                        "filename": d.get("filename"),
+                        "source_url": d.get("source_url"),
+                    }
+                    for d in self.documents
+                    if d["id"] in refs or d.get("source_path") in refs
+                ]
+            )
         if "FROM documents" in sql and ":ref" in sql:
             ref = p.get("ref")
             rows = [

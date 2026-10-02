@@ -220,6 +220,23 @@ def auth_headers(teacher_token):
     return {"Authorization": f"Bearer {teacher_token}"}
 
 
+def _wire_document_resolution(mock_pg, rows=(("doc-uuid-1", "mat-001"),)):
+    """delete_material は先に core.document_refs で教材 ref を両形解決する（IK-0550）。
+
+    解決クエリ（``ANY(:refs)``）にだけ ``(id, source_path)`` を返し、他の SQL は
+    従来どおり ``mock_pg.execute.return_value`` を返す。
+    """
+    default = mock_pg.execute.return_value
+    resolve = MagicMock()
+    resolve.fetchall.return_value = list(rows)
+
+    def _execute(stmt, *args, **kwargs):
+        return resolve if "ANY(:refs)" in str(stmt) else default
+
+    mock_pg.execute.side_effect = _execute
+    return mock_pg
+
+
 @_skip_no_fastapi
 class TestDeleteMaterial:
     """DELETE /api/admin/materials/{material_id} エンドポイントのテスト。"""
@@ -237,6 +254,7 @@ class TestDeleteMaterial:
         )
         # fetchall for courses (no linked courses)
         mock_pg.execute.return_value.fetchall.return_value = []
+        _wire_document_resolution(mock_pg)
         mock_session.return_value = mock_pg
 
         resp = client.request(
@@ -262,6 +280,7 @@ class TestDeleteMaterial:
             "test.pdf",
             "mat-001",
         )
+        _wire_document_resolution(mock_pg)
         mock_session.return_value = mock_pg
 
         resp = client.request(
@@ -316,7 +335,10 @@ class TestDeleteMaterial:
             sql = " ".join(str(args[0]).split()) if args else ""
             params = args[1] if len(args) > 1 else (kwargs.get("params") or {})
             result = MagicMock()
-            if "SELECT source_path, uploaded_by::text FROM documents" in sql:
+            if "ANY(:refs)" in sql:
+                # core.document_refs の両形解決（IK-0550）
+                result.fetchall.return_value = [("doc-uuid-1", "mat-001")]
+            elif "SELECT source_path, uploaded_by::text FROM documents" in sql:
                 # _purge_document が読む (source_path, uploaded_by)
                 result.fetchone.return_value = ("mat-001", "test-teacher-id")
             elif "FROM documents" in sql and "SELECT" in sql:
@@ -372,6 +394,7 @@ class TestDeleteMaterial:
             "doc-uuid-1", "テスト教材", "test.pdf", "mat-001",
         )
         mock_pg.execute.return_value.fetchall.return_value = []
+        _wire_document_resolution(mock_pg)
         mock_session.return_value = mock_pg
 
         resp = client.request(
@@ -406,6 +429,7 @@ class TestDeleteMaterial:
         mock_pg.execute.return_value.fetchone.return_value = (
             "doc-uuid-1", "テスト教材", "test.pdf", "mat-001",
         )
+        _wire_document_resolution(mock_pg)
         mock_session.return_value = mock_pg
 
         resp = client.request(

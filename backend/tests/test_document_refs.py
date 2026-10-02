@@ -94,10 +94,47 @@ class TestResolveDocumentRefs:
             _DocumentsFake(), [_DOC_2, "missing", _MAT_1, _DOC_1]
         ) == [_MAT_2, _MAT_1]
 
+    def test_rows_carry_requested_columns_and_reject_unknown(self):
+        fake = _ColumnsFake()
+        out = document_refs.resolve_document_rows(fake, [_MAT_1], columns=("title", "uploaded_by"))
+        assert out[_MAT_1] == {
+            "document_id": _DOC_1, "material_id": _MAT_1, "title": "Paper One", "uploaded_by": "u1",
+        }
+        assert "uploaded_by::text AS uploaded_by" in fake.calls[0]
+        with pytest.raises(ValueError):
+            document_refs.resolve_document_rows(fake, [_MAT_1], columns=("title; DROP TABLE x",))
+
+    def test_single_ref_and_canonical_document_ids(self):
+        assert document_refs.resolve_document_row(_DocumentsFake(), _MAT_2)["document_id"] == _DOC_2
+        assert document_refs.resolve_document_row(_DocumentsFake(), "") is None
+        assert document_refs.canonical_document_ids(
+            _DocumentsFake(), [_MAT_2, _DOC_1, _MAT_1, "missing"]
+        ) == [_DOC_2, _DOC_1]
+
+    def test_list_keeps_every_row_sharing_a_source_path(self):
+        docs = [
+            {"id": _DOC_1, "source_path": "m-x", "title": ""},
+            {"id": _DOC_2, "source_path": "m-x", "title": ""},
+        ]
+        rows = document_refs.list_documents_for_refs(_DocumentsFake(docs), ["m-x", _DOC_1])
+        assert [r["document_id"] for r in rows] == [_DOC_1, _DOC_2]
+        # 1 ref = 1 行の解決は 1 行に畳む。
+        assert set(document_refs.resolve_document_refs(_DocumentsFake(docs), ["m-x"])) == {"m-x"}
+
     def test_uuid_shape_is_not_proof(self):
         assert document_refs.is_document_uuid(_MAT_1) is True  # 形は UUID でも
         out = document_refs.resolve_document_refs(_DocumentsFake(), [_MAT_1])
         assert out[_MAT_1]["document_id"] == _DOC_1  # 着地先は documents.id
+
+
+class _ColumnsFake(_DocumentsFake):
+    def execute(self, stmt, params=None):
+        self.calls.append(str(stmt))
+        refs = set((params or {}).get("refs") or [])
+        return _Result([
+            {"id": d["id"], "source_path": d["source_path"], "title": d["title"], "uploaded_by": "u1"}
+            for d in self.documents if d["id"] in refs or d["source_path"] in refs
+        ])
 
 
 @pytest.fixture
@@ -199,16 +236,11 @@ _BOTH_FORMS_RE = re.compile(
 
 #: 正本（単数 / 複数）。
 _CANONICAL = {"api/services.py", "core/document_refs.py"}
-#: IK-0550 是正（2026-10-01）より前からある既存の突き合わせ。数を増やさない — 新しい経路は
-#: ``core.document_refs.resolve_document_refs`` / ``services._resolve_document`` を使う。
-_LEGACY_ALLOWLIST = {
-    "api/routes/admin.py",            # get_material（一覧の document_id で詳細を開ける・第 15 周）
-    "core/status/projector.py",       # 教材状態の投影（core 内・services を import できない）
-    "core/paper_discovery/radar.py",  # レーダーの seed 解決（core 内）
-    "core/paper_discovery/corpus.py", # 分野コーパスの解決（core 内）
-    "core/admin_assistant/next_steps.py",  # G層の教材 ref 解決（core 内）
-    "core/doubt/seminar_brief.py",    # ゼミ前ブリーフの seed（core 内）
-}
+#: IK-0550 是正（2026-10-01）より前からあった突き合わせ（get_material / projector / radar /
+#: corpus / next_steps / seminar_brief）は IK-0594（2026-10-02）で core.document_refs に寄せ、
+#: 空になった。**ここに足さない** — 新しい経路は ``core.document_refs`` /
+#: ``services._resolve_document`` を使う（``test_document_id_resolution_guardrails.py``）。
+_LEGACY_ALLOWLIST: set[str] = set()
 
 
 def test_both_forms_disambiguation_only_in_known_places():

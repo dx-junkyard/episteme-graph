@@ -25,6 +25,7 @@ from services import (
     reanalyze_course_structure_background,
     update_background_task,
 )
+from core import document_refs as _document_refs
 from core.course_data import course_source_material_ids
 from core.document_pipeline.orchestrator import PIPELINE_STAGES
 from core.postgres import get_session as _pg_session
@@ -187,27 +188,26 @@ def _course_pipeline_documents(course_data: dict) -> list[dict]:
     if not material_ids:
         return []
 
-    params = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
-    placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
     session = _pg_session()
     try:
-        rows = session.execute(
-            sa_text(
-                f"""
-                SELECT id::text, COALESCE(source_path, ''), COALESCE(filename, title, 'document.pdf')
-                FROM documents
-                WHERE source_path IN ({placeholders})
-                ORDER BY created_at ASC
-                """
-            ),
-            params,
-        ).fetchall()
+        # sources[].material_id には documents.id（UUID）が入っているコースもある。
+        # 両形の突き合わせは core/document_refs に委ねる（IK-0550）。
+        entries = _document_refs.list_documents_for_refs(
+            session, material_ids, columns=("filename", "title", "created_at"),
+        )
     finally:
         session.close()
+    # 解析は古い教材から順に（旧 SQL の ORDER BY created_at ASC と同じ）。
+    entries = [e for e in entries if e.get("document_id") and e.get("material_id")]
+    dated = sorted((e for e in entries if e.get("created_at") is not None), key=lambda e: e["created_at"])
+    ordered = dated + [e for e in entries if e.get("created_at") is None]
     return [
-        {"document_id": row[0], "material_id": row[1], "filename": row[2] or "document.pdf"}
-        for row in rows
-        if row[0] and row[1]
+        {
+            "document_id": e["document_id"],
+            "material_id": e["material_id"],
+            "filename": e.get("filename") or e.get("title") or "document.pdf",
+        }
+        for e in ordered
     ]
 
 
@@ -297,28 +297,21 @@ def _set_document_pipeline_status(document_id: str, status: str) -> None:
 def _get_editable_material_document(material_id: str, current_user: dict) -> dict:
     session = _pg_session()
     try:
-        row = session.execute(
-            sa_text(
-                """
-                SELECT id::text, source_path, COALESCE(filename, title, 'document.pdf'), uploaded_by::text
-                FROM documents
-                WHERE source_path = :material_id
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            ),
-            {"material_id": material_id},
-        ).fetchone()
+        # 一覧の document_id（UUID）でも material_id でも同じ教材に着地させる
+        # （両形の突き合わせは core/document_refs・IK-0550）。
+        entry = _document_refs.resolve_document_row(
+            session, material_id, columns=("filename", "title", "uploaded_by"),
+        )
     finally:
         session.close()
-    if not row:
+    if not entry:
         raise HTTPException(status_code=404, detail="Material not found")
-    if current_user.get("role") != ROLE_SYSTEM_ADMIN and str(row[3]) != str(current_user.get("id")):
+    if current_user.get("role") != ROLE_SYSTEM_ADMIN and str(entry.get("uploaded_by")) != str(current_user.get("id")):
         raise HTTPException(status_code=403, detail="Material is not editable")
     return {
-        "document_id": row[0],
-        "material_id": row[1] or material_id,
-        "filename": row[2] or "document.pdf",
+        "document_id": entry["document_id"],
+        "material_id": entry.get("material_id") or material_id,
+        "filename": entry.get("filename") or entry.get("title") or "document.pdf",
     }
 
 

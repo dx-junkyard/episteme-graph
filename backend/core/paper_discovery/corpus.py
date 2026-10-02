@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 from sqlalchemy import text as sa_text
 
+from core import document_refs as _document_refs
 from core.paper_discovery.schema import normalize_arxiv_id
 
 logger = logging.getLogger(__name__)
@@ -83,18 +84,9 @@ def document_domain_keys(session, document_ref: str) -> list[str]:
     if not ref:
         return []
 
-    row = session.execute(
-        sa_text(
-            """
-            SELECT COALESCE(source_path, '')
-              FROM documents
-             WHERE id::text = :ref OR source_path = :ref
-             LIMIT 1
-            """
-        ),
-        {"ref": ref},
-    ).fetchone()
-    source_path = str((row or [""])[0] or "").strip()
+    # 両形の突き合わせは core/document_refs に委ねる（IK-0550）。
+    entry = _document_refs.resolve_document_row(session, ref)
+    source_path = str((entry or {}).get("material_id") or "").strip()
     if not source_path:
         # material_id が無い document はコース sources から辿れない（判定不能を
         # 「分野なし」と偽らず、空を返して呼び出し側の縮退に任せる — PD6）。
@@ -132,20 +124,11 @@ def domain_document_refs(session, domain_key: str) -> list[str]:
     if not material_ids:
         return []
 
-    doc_rows = session.execute(
-        sa_text(
-            """
-            SELECT id::text, COALESCE(source_path, '')
-              FROM documents
-             WHERE source_path = ANY(CAST(:material_ids AS text[]))
-            """
-        ),
-        {"material_ids": material_ids},
-    ).fetchall()
-
+    # sources[].material_id には documents.id（UUID）が入っているコースもある。
+    # 両形の突き合わせは core/document_refs に委ねる（IK-0550）。
     refs: list[str] = []
-    for row in doc_rows:
-        for value in (row[0], row[1]):
+    for entry in _document_refs.list_documents_for_refs(session, material_ids):
+        for value in (entry.get("document_id"), entry.get("material_id")):
             value = str(value or "").strip()
             if value:
                 refs.append(value)
@@ -173,31 +156,18 @@ def domain_document_rows(
     if row_limit == 0:
         return []
 
-    rows = session.execute(
-        sa_text(
-            """
-            SELECT id::text,
-                   COALESCE(title, ''),
-                   COALESCE(source_url, '')
-              FROM documents
-             WHERE source_path = ANY(CAST(:material_ids AS text[]))
-             ORDER BY created_at DESC NULLS LAST, id
-             LIMIT :limit
-            """
-        ),
-        {"material_ids": material_ids, "limit": row_limit},
-    ).fetchall()
-
+    # 両形（documents.id / source_path）の突き合わせは core/document_refs（IK-0550）。
+    # 並び（created_at DESC NULLS LAST, id）は document_refs の SQL と同じ。
+    entries = _document_refs.list_documents_for_refs(
+        session, material_ids, columns=("title", "source_url"),
+    )
     out: list[dict[str, Any]] = []
-    for row in rows:
-        document_id = str(row[0] or "").strip()
-        if not document_id:
-            continue
+    for entry in entries[:row_limit]:
         out.append(
             {
-                "document_id": document_id,
-                "title": str(row[1] or "").strip(),
-                "source_url": str(row[2] or "").strip(),
+                "document_id": str(entry["document_id"]),
+                "title": str(entry.get("title") or "").strip(),
+                "source_url": str(entry.get("source_url") or "").strip(),
             }
         )
     return out

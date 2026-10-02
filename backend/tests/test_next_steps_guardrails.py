@@ -1082,7 +1082,9 @@ class TestDiscussOpeningUnreviewedEvaluator:
         src = extract_function_source(
             _NEXT_STEPS_SRC, "_eval_course_discuss_opening_unreviewed"
         )
-        assert src.count("session.execute(") == 3
+        # document 解決は core/document_refs（1 SQL・IK-0550）に委ねるので本体の execute は2本。
+        assert src.count("session.execute(") == 2
+        assert src.count("_ref_to_document_id(session") == 1
 
 
 # ===========================================================================

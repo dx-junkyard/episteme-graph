@@ -1208,6 +1208,50 @@ def _material_reference_health(stage_outputs: dict | None) -> dict:
     return projected
 
 
+def _material_visibility_clauses(user_groups: list, params: dict) -> tuple[str, str, str]:
+    """教材一覧・詳細（list_materials / get_material）が共有する可視性の 3 条件。
+
+    返すのは ``(group_clause, course_mat_clause, doc_perm_clause)``。グループのプレースホルダ
+    （``:g_{i}``）は ``params`` に足す。コース経由の開示は ``sources[].material_id`` が
+    source_path 形でも documents.id（UUID）形でも同じ教材に効かせる
+    （``services.list_visible_document_ids`` と同じ両形の意味論・IK-0550）。
+    """
+    if not user_groups:
+        return "FALSE", "FALSE", "FALSE"
+    gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
+    for i, gid in enumerate(user_groups):
+        params[f"g_{i}"] = gid
+    group_clause = f"(d.visibility = 'group' AND d.group_id IN ({gph}))"
+    course_source_refs = f"""
+        SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
+        FROM learning_courses lc
+        JOIN object_group_permissions cgp
+            ON cgp.object_type = 'course' AND cgp.object_id = lc.id
+        JOIN group_members gm ON gm.group_id = cgp.group_id
+        WHERE gm.user_id = CAST(:user_id AS uuid)
+          AND cgp.group_id IN ({gph})
+          AND cgp.permission IN ('viewer', 'editor')
+          AND lc.data IS NOT NULL
+          AND jsonb_typeof(lc.data->'sources') = 'array'
+    """
+    course_mat_clause = (
+        f"(d.source_path IN ({course_source_refs}) OR d.id::text IN ({course_source_refs}))"
+    )
+    # migration 044: 解析成果をグループへ直接共有（object_group_permissions object_type='document' 経由）
+    doc_perm_clause = f"""
+        d.id::text IN (
+            SELECT dgp.object_id
+            FROM object_group_permissions dgp
+            JOIN group_members gm ON gm.group_id = dgp.group_id
+            WHERE dgp.object_type = 'document'
+              AND gm.user_id = CAST(:user_id AS uuid)
+              AND dgp.group_id IN ({gph})
+              AND dgp.permission IN ('viewer', 'editor')
+        )
+    """
+    return group_clause, course_mat_clause, doc_perm_clause
+
+
 @router.get("/materials", response_model=list[MaterialOut])
 def list_materials(
     include: str | None = None,
@@ -1229,41 +1273,9 @@ def list_materials(
     user_groups = get_user_group_ids(current_user["id"])
 
     params: dict = {"user_id": current_user["id"]}
-    group_clause = "FALSE"
-    course_mat_clause = "FALSE"
-    doc_perm_clause = "FALSE"
-
-    if user_groups:
-        gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
-        for i, gid in enumerate(user_groups):
-            params[f"g_{i}"] = gid
-        group_clause = f"(d.visibility = 'group' AND d.group_id IN ({gph}))"
-        course_mat_clause = f"""
-            d.source_path IN (
-                SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
-                FROM learning_courses lc
-                JOIN object_group_permissions cgp
-                    ON cgp.object_type = 'course' AND cgp.object_id = lc.id
-                JOIN group_members gm ON gm.group_id = cgp.group_id
-                WHERE gm.user_id = CAST(:user_id AS uuid)
-                  AND cgp.group_id IN ({gph})
-                  AND cgp.permission IN ('viewer', 'editor')
-                  AND lc.data IS NOT NULL
-                  AND jsonb_typeof(lc.data->'sources') = 'array'
-            )
-        """
-        # migration 044: 解析成果をグループへ直接共有（object_group_permissions object_type='document' 経由）
-        doc_perm_clause = f"""
-            d.id::text IN (
-                SELECT dgp.object_id
-                FROM object_group_permissions dgp
-                JOIN group_members gm ON gm.group_id = dgp.group_id
-                WHERE dgp.object_type = 'document'
-                  AND gm.user_id = CAST(:user_id AS uuid)
-                  AND dgp.group_id IN ({gph})
-                  AND dgp.permission IN ('viewer', 'editor')
-            )
-        """
+    group_clause, course_mat_clause, doc_perm_clause = _material_visibility_clauses(
+        user_groups, params
+    )
 
     session = _pg_session()
     try:
@@ -1543,71 +1555,44 @@ def get_material(
     user_groups = get_user_group_ids(current_user["id"])
 
     params: dict = {"user_id": current_user["id"], "material_id": material_id}
-    group_clause = "FALSE"
-    course_mat_clause = "FALSE"
-    doc_perm_clause = "FALSE"
-
-    if user_groups:
-        gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
-        for i, gid in enumerate(user_groups):
-            params[f"g_{i}"] = gid
-        group_clause = f"(d.visibility = 'group' AND d.group_id IN ({gph}))"
-        course_mat_clause = f"""
-            d.source_path IN (
-                SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
-                FROM learning_courses lc
-                JOIN object_group_permissions cgp
-                    ON cgp.object_type = 'course' AND cgp.object_id = lc.id
-                JOIN group_members gm ON gm.group_id = cgp.group_id
-                WHERE gm.user_id = CAST(:user_id AS uuid)
-                  AND cgp.group_id IN ({gph})
-                  AND cgp.permission IN ('viewer', 'editor')
-                  AND lc.data IS NOT NULL
-                  AND jsonb_typeof(lc.data->'sources') = 'array'
-            )
-        """
-        # migration 044: 解析成果のグループ直接共有（object_group_permissions object_type='document' 経由）
-        doc_perm_clause = f"""
-            d.id::text IN (
-                SELECT dgp.object_id
-                FROM object_group_permissions dgp
-                JOIN group_members gm ON gm.group_id = dgp.group_id
-                WHERE dgp.object_type = 'document'
-                  AND gm.user_id = CAST(:user_id AS uuid)
-                  AND dgp.group_id IN ({gph})
-                  AND dgp.permission IN ('viewer', 'editor')
-            )
-        """
+    group_clause, course_mat_clause, doc_perm_clause = _material_visibility_clauses(
+        user_groups, params
+    )
 
     session = _pg_session()
     try:
-        record = session.execute(
-            sa_text(f"""
-                SELECT d.source_path, d.filename, d.title, d.status, d.created_at, d.knowledge_graph,
-                       COALESCE(d.visibility, 'private'), d.group_id,
-                       COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count,
-                       d.id::text AS document_id
-                FROM documents d
-                LEFT JOIN (
-                    SELECT material_id, COUNT(*) AS chunk_count
-                    FROM chunks
-                    GROUP BY material_id
-                ) cs ON cs.material_id = d.source_path
-                WHERE (d.source_path = :material_id OR d.id::text = :material_id)
-                  AND (
-                      d.uploaded_by = CAST(:user_id AS uuid)
-                      OR d.visibility = 'public'
-                      OR {group_clause}
-                      OR {course_mat_clause}
-                      OR {doc_perm_clause}
-                  )
-                ORDER BY (d.source_path = :material_id) DESC
-                LIMIT 1
-            """),
-            params,
-        ).fetchone()
-        # 教材一覧の document_id（UUID）でも開けるよう、以降は material_id（source_path）に揃える
-        # （第 15 周 te-04 seq25: 一覧の ID で詳細が 404 になった）。
+        # 教材一覧の document_id（UUID）でも開けるよう、両形の突き合わせは core/document_refs に
+        # 委ね（IK-0550・第 15 周 te-04 seq25: 一覧の ID で詳細が 404 になった）、可視性の判定は
+        # 解決した documents.id 1 行に対して行う。
+        resolved = _document_refs.resolve_document_row(session, material_id)
+        record = None
+        if resolved:
+            params["document_id"] = resolved["document_id"]
+            record = session.execute(
+                sa_text(f"""
+                    SELECT d.source_path, d.filename, d.title, d.status, d.created_at, d.knowledge_graph,
+                           COALESCE(d.visibility, 'private'), d.group_id,
+                           COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count,
+                           d.id::text AS document_id
+                    FROM documents d
+                    LEFT JOIN (
+                        SELECT material_id, COUNT(*) AS chunk_count
+                        FROM chunks
+                        GROUP BY material_id
+                    ) cs ON cs.material_id = d.source_path
+                    WHERE d.id = CAST(:document_id AS uuid)
+                      AND (
+                          d.uploaded_by = CAST(:user_id AS uuid)
+                          OR d.visibility = 'public'
+                          OR {group_clause}
+                          OR {course_mat_clause}
+                          OR {doc_perm_clause}
+                      )
+                    LIMIT 1
+                """),
+                params,
+            ).fetchone()
+        # 以降は material_id（source_path）に揃える（_material_status のキー・応答の形は不変）。
         if record and record[0]:
             material_id = str(record[0])
         # Tier3-16: list_materials と同じ projector 導出で run を反映する
@@ -1793,16 +1778,23 @@ def update_material_visibility(
 
     session = _pg_session()
     try:
+        # 一覧の document_id（UUID）でも material_id でも同じ教材に着地させる（IK-0550）。
+        # 両形の突き合わせは core/document_refs に委ね、以降は documents.id 1 行で判定する。
+        resolved = _document_refs.resolve_document_row(session, material_id)
+        if not resolved:
+            raise HTTPException(status_code=404, detail="Material not found")
+        if resolved.get("material_id"):
+            material_id = resolved["material_id"]
         # 旧 visibility は監査記帳のために同一トランザクション内で読む
         # （どこから どこへ 開いたかを記録するため。UPDATE の 404 判定は不変）。
         previous = session.execute(
             sa_text("""
                 SELECT COALESCE(visibility, 'private')
                 FROM documents
-                WHERE source_path = :material_id
+                WHERE id = CAST(:document_id AS uuid)
                   AND uploaded_by = CAST(:user_id AS uuid)
             """),
-            {"material_id": material_id, "user_id": current_user["id"]},
+            {"document_id": resolved["document_id"], "user_id": current_user["id"]},
         ).fetchone()
         result = session.execute(
             sa_text("""
@@ -1810,18 +1802,20 @@ def update_material_visibility(
                 SET visibility = :visibility,
                     group_id = CAST(:group_id AS uuid),
                     updated_at = now()
-                WHERE source_path = :material_id
+                WHERE id = CAST(:document_id AS uuid)
                   AND uploaded_by = CAST(:user_id AS uuid)
                 RETURNING id
             """),
             {
                 "visibility": body.visibility,
                 "group_id": body.group_id if body.visibility == "group" else None,
-                "material_id": material_id,
+                "document_id": resolved["document_id"],
                 "user_id": current_user["id"],
             },
         ).fetchone()
         session.commit()
+    except HTTPException:
+        raise
     except Exception:
         session.rollback()
         raise
@@ -2023,17 +2017,23 @@ def delete_material(
     """
     session = _pg_session()
     try:
-        # 1) 教材の存在確認 & タイトル照合
-        doc = session.execute(
-            sa_text("""
-                SELECT id, title, filename, source_path
-                FROM documents
-                WHERE source_path = :material_id
-                  AND uploaded_by = CAST(:user_id AS uuid)
-                LIMIT 1
-            """),
-            {"material_id": material_id, "user_id": current_user["id"]},
-        ).fetchone()
+        # 1) 教材の存在確認 & タイトル照合。一覧の document_id（UUID）でも material_id でも
+        #    同じ教材に着地させる（両形の突き合わせは core/document_refs・IK-0550）。
+        resolved = _document_refs.resolve_document_row(session, material_id)
+        doc = None
+        if resolved:
+            if resolved.get("material_id"):
+                material_id = resolved["material_id"]
+            doc = session.execute(
+                sa_text("""
+                    SELECT id, title, filename, source_path
+                    FROM documents
+                    WHERE id = CAST(:document_id AS uuid)
+                      AND uploaded_by = CAST(:user_id AS uuid)
+                    LIMIT 1
+                """),
+                {"document_id": resolved["document_id"], "user_id": current_user["id"]},
+            ).fetchone()
 
         if not doc:
             raise HTTPException(status_code=404, detail="Material not found")

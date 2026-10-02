@@ -112,5 +112,6 @@ def test_get_material_accepts_document_uuid():
     text = (Path(__file__).resolve().parents[1] / "api/routes/admin.py").read_text(encoding="utf-8")
     start = text.index("def get_material(")
     src = text[start:text.index("\ndef ", start + 10)]
-    assert "d.id::text = :material_id" in src
+    assert "_document_refs.resolve_document_row(session, material_id)" in src
+    assert "OR d.id::text = :material_id" not in src
     assert "Material not found" not in src

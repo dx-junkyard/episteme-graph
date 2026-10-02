@@ -685,6 +685,14 @@ class DiscoveryFake:
             return self._subscriptions(sql, p)
         if "paper_discovery_dismissals" in sql:
             return self._dismissals(sql, p)
+        if "FROM documents" in sql and "ANY(:refs)" in sql:
+            # core.document_refs（両形の突き合わせの正本・IK-0550）。行は mapping で返す。
+            refs = set(p.get("refs") or [])
+            return FakeResult([
+                {**d, "source_path": d.get("source_path") or ""}
+                for d in self.documents
+                if d["id"] in refs or d.get("source_path") in refs
+            ])
         if "FROM documents" in sql and "source_url" in sql:
             return FakeResult([(d.get("source_url"),) for d in self.documents])
         if "FROM documents" in sql:

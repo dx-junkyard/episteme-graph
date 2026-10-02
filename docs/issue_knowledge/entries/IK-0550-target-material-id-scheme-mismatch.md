@@ -49,8 +49,8 @@ resolution:
     unverified:
       - "ブラウザでの画面確認"
       - "URL 取得・ディスカバリー経由で取り込んだ教材の経路"
-related: []
-view_of: []
+related: [IK-0595]
+view_of: [IK-0595]
 history:
   - date: '2026-10-01'
     field: status

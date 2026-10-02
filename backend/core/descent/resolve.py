@@ -25,6 +25,7 @@ from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core import document_refs as _document_refs
 from core.course_data import course_source_material_ids, course_sources
 from core.deliberation.refs import document_run_artifacts, equation_records
 from core.focus_document import resolve_in_focus, unique_row_lookup
@@ -83,10 +84,8 @@ def course_document_ids(course_data: dict | None) -> set[str]:
     try:
         session = _pg_session()
         try:
-            rows = session.execute(
-                sa_text("SELECT id::text FROM documents WHERE source_path = ANY(:mids)"),
-                {"mids": list(material_ids)},
-            ).fetchall()
+            # 両形（documents.id / source_path）の突き合わせは core/document_refs（IK-0550）。
+            resolved = _document_refs.resolve_document_refs(session, list(material_ids))
         finally:
             session.close()
     except Exception:  # noqa: BLE001
@@ -95,7 +94,7 @@ def course_document_ids(course_data: dict | None) -> set[str]:
             exc_info=True,
         )
         return explicit_ids
-    return explicit_ids | {str(r[0]) for r in rows if r[0]}
+    return explicit_ids | {e["document_id"] for e in resolved.values() if e.get("document_id")}
 
 
 def _resolve_equation(

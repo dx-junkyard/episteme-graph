@@ -32,6 +32,7 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core import display_projection as _dp
+from core import document_refs as _document_refs
 from core.doubt.naive_signal import aggregate_naive_signals_for_courses
 from core.doubt.open_assumptions import compile_open_assumptions, target_label
 from core.doubt.schema import LOAD_LEVEL_LABELS
@@ -89,19 +90,12 @@ def _resolve_document_id(session, document_ref: str) -> str:
     if not document_ref:
         return ""
     try:
-        row = session.execute(
-            sa_text("""
-                SELECT id::text
-                FROM documents
-                WHERE id::text = :ref OR source_path = :ref
-                LIMIT 1
-            """),
-            {"ref": document_ref},
-        ).fetchone()
+        # 両形の突き合わせは core/document_refs に委ねる（IK-0550）。
+        entry = _document_refs.resolve_document_row(session, document_ref)
     except Exception:
         logger.warning("seminar brief document resolution failed for %s", document_ref, exc_info=True)
         return ""
-    return str(row[0]) if row else ""
+    return str(entry["document_id"]) if entry else ""
 
 
 def _derive_course_id(session, document_id: str) -> str:

@@ -30,6 +30,7 @@ from sqlalchemy import text as sa_text
 
 from core import atlas_store
 from core import coverage_facts
+from core import document_refs as _document_refs
 from core import element_explanations as element_explanations_store
 from core import privacy
 from core.admin_assistant import capabilities as caps
@@ -931,6 +932,12 @@ def _eval_material_analysis_llm_failed(session, uid: str) -> list[tuple[NextStep
     return out
 
 
+def _ref_to_document_id(session, refs) -> dict[str, str]:
+    """教材 ref（documents.id / source_path）→ documents.id。正本は core/document_refs。"""
+    resolved = _document_refs.resolve_document_refs(session, sorted(refs))
+    return {ref: entry["document_id"] for ref, entry in resolved.items() if entry.get("document_id")}
+
+
 def _eval_course_discuss_opening_unreviewed(session, uid: str) -> list[tuple[NextStep, str]]:
     """discuss_opening_authoring_design.md §6.2: 所有コースのソース論文に、未確認の
     「議論のきっかけ」（``element_type='document'`` / ``role='discussion_seed'`` の
@@ -968,20 +975,8 @@ def _eval_course_discuss_opening_unreviewed(session, uid: str) -> list[tuple[Nex
         return []
 
     # sources[].material_id は documents.id / documents.source_path のどちらでも
-    # 参照されうる（_resolve_document の慣例）ため両方で突合する。
-    doc_rows = session.execute(
-        sa_text(
-            "SELECT id::text AS id, source_path FROM documents "
-            "WHERE id::text = ANY(:refs) OR source_path = ANY(:refs)"
-        ),
-        {"refs": sorted(refs)},
-    ).mappings().fetchall()
-    ref_to_doc: dict[str, str] = {}
-    for row in doc_rows:
-        doc_id = str(row["id"])
-        ref_to_doc[doc_id] = doc_id
-        if row["source_path"]:
-            ref_to_doc[str(row["source_path"])] = doc_id
+    # 参照されうる。両形の突き合わせは core/document_refs に委ねる（IK-0550）。
+    ref_to_doc = _ref_to_document_id(session, refs)
     if not ref_to_doc:
         return []
 
@@ -1125,21 +1120,8 @@ def _eval_course_prerequisite_uncovered(session, uid: str) -> list[tuple[NextSte
     terms = terms[:_PREREQ_MAX_TERMS_PER_EVALUATION]
 
     # sources[].material_id は documents.id / documents.source_path のどちらでも
-    # 参照されうる（_resolve_document の慣例）ため両方で突合する。
-    ref_to_doc: dict[str, str] = {}
-    if refs:
-        doc_rows = session.execute(
-            sa_text(
-                "SELECT id::text AS id, source_path FROM documents "
-                "WHERE id::text = ANY(:refs) OR source_path = ANY(:refs)"
-            ),
-            {"refs": sorted(refs)},
-        ).mappings().fetchall()
-        for row in doc_rows:
-            doc_id = str(row["id"])
-            ref_to_doc[doc_id] = doc_id
-            if row["source_path"]:
-                ref_to_doc[str(row["source_path"])] = doc_id
+    # 参照されうる。両形の突き合わせは core/document_refs に委ねる（IK-0550）。
+    ref_to_doc = _ref_to_document_id(session, refs) if refs else {}
 
     doc_ids = sorted(set(ref_to_doc.values()))[:_PREREQ_MAX_DOCUMENTS_PER_EVALUATION]
 
