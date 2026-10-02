@@ -3798,6 +3798,13 @@ Phase 0〜4 実装後の**再照合**（実論文 12 本の原本 ⇄ 成果）�
 - domain-specific なロジックをagent内にハードコードしない（cartridgeから読む）
 
 ### 8. 課題の記録（課題ナレッジ, `docs/issue_knowledge/`, 2026-09-18）
+- **設計・実装に着手する前に `docs/issue_knowledge/recall.md`（想起シート・機械生成・短い 1 枚）を読む**（2026-10-02）。
+  変更の語から当てる族・繰り返し出ている型の見分け方と確かめ方・解決原理が載っている。新しい `*_design.md`
+  （`docs/features` / `docs/architecture`）には見出しに `pre-mortem` を含む節を置き、当たる型の slug か「該当なし」を
+  書く（無いと `test_issue_knowledge_guardrails.py` が落ちる。レガシーは allowlist・減らす方向のみ）。実装後のエントリは
+  `resolution.principles` を `use: consulted` で残す。予告した型と実際に出た型は索引 §14.5 が突き合わせる。
+  索引・辞書・原理は 2026-10-02 の効果検証で「書かれたが設計前に読まれていない」ことが分かったため、読み込み経路に
+  この 1 枚を置く（正本は `docs/architecture/issue_knowledge_effectiveness_review_2026-10-02.md`）
 - 調査記録・レビュー文書・是正リストに課題を載せたとき／解消したときは、`docs/issue_knowledge/entries/`
   に 1 課題 = 1 エントリで記帳する（正本は `docs/issue_knowledge/README.md`・分類体系は `taxonomy.md`）
 - 分類は **4 軸の座標**（処理 `processing` / 構造 `structure` / 接続 `connection` / 統制 `governance`。各軸 1〜2 値か

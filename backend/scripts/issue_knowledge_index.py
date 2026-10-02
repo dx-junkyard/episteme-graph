@@ -6,7 +6,7 @@
 
 使い方（リポジトリルートから）::
 
-    backend/.venv/bin/python backend/scripts/issue_knowledge_index.py            # index.md を再生成
+    backend/.venv/bin/python backend/scripts/issue_knowledge_index.py            # index.md / recall.md を再生成
     backend/.venv/bin/python backend/scripts/issue_knowledge_index.py --check    # 差分があれば非0
     backend/.venv/bin/python backend/scripts/issue_knowledge_index.py --validate # 検証結果だけ表示
 
@@ -34,6 +34,10 @@ TEMPLATE_DOC = IK_DIR / "TEMPLATE.md"
 DICTIONARY_DOC = IK_DIR / "dictionary.md"
 PRINCIPLES_DOC = IK_DIR / "principles.md"
 INDEX_DOC = IK_DIR / "index.md"
+RECALL_DOC = IK_DIR / "recall.md"
+FEATURES_DIR = ROOT / "docs" / "features"
+# pre-mortem 節を必須にする設計書の置き場所（`*_design.md`）。
+DESIGN_DOC_GLOBS: tuple[tuple[Path, str], ...] = ((FEATURES_DIR, "*_design.md"), (ARCH_DIR, "*_design.md"))
 
 # ---------------------------------------------------------------------------
 # 語彙（正本は taxonomy.md。ここはミラー）
@@ -322,6 +326,214 @@ def dictionary_typical_coordinates(dictionary_text: str) -> dict[str, str]:
         if tm:
             out[m.group(1)] = tm.group(1)
     return out
+
+
+# ---------------------------------------------------------------------------
+# 想起シート（recall.md）と設計書の pre-mortem
+# ---------------------------------------------------------------------------
+
+# 設計時に辞書を当てる引き金（README §3.3b の表の正本。recall.md §1 に機械生成で出る）。
+PREMORTEM_TRIGGERS: tuple[tuple[str, str], ...] = (
+    ("再実行・再解析・再生成・削除・全件再適用", "reexecution-and-deletion"),
+    ("既定値・プリフィル・自動確定・AI の判定", "human-decision-authority"),
+    ("段階間の受け渡し・権限・可視性・オプション", "condition-and-scope-transfer"),
+    ("キャッシュ・投影・音声・索引などの派生物", "derivative-and-wiring"),
+    ("ID・キー・版・名前空間", "identity-representation"),
+    ("語彙表・判定・分割規則の新設", "canonical-source-split"),
+    ("外部 API・LLM 呼び出し", "ordering-and-budget"),
+    ("画面・応答・経路を 1 つ足す（既存の規則を新しい面にも効かせる）", "derivative-and-wiring"),
+)
+
+# 想起シートに載せる型の数の上限（読む量を抑える。読まれなければ無いのと同じ）。
+RECALL_MAX_PATTERNS = 12
+# 想起シートの行数上限（ガードレールが検査する。短さが読み込み経路の条件）。
+RECALL_MAX_LINES = 220
+
+PREMORTEM_HEADING_RE = re.compile(r"(?mi)^(#{2,4})\s+.*pre-mortem.*$")
+PREMORTEM_NONE_TEXT = "該当なし"
+_BACKTICK_SLUG_RE = re.compile(r"`([a-z0-9]+(?:-[a-z0-9]+)*)`")
+
+
+def dictionary_type_rows(dictionary_text: str) -> dict[str, dict[str, str]]:
+    """{型 slug: {"一般形": ..., "見分け方": ..., "確かめ方": ..., "族": 族 slug}}。"""
+    out: dict[str, dict[str, str]] = {}
+    families = dictionary_families(dictionary_text)
+    family_of = {pat: fam for fam, pats in families.items() for pat in pats}
+    for m in re.finditer(r"(?ms)^#### ([a-z0-9-]+)\s*$(.*?)(?=^#### |^### |^## |\Z)", dictionary_text):
+        slug, body = m.group(1), m.group(2)
+        rows: dict[str, str] = {"族": family_of.get(slug, "")}
+        for key in ("一般形", "見分け方", "確かめ方"):
+            rm = re.search(r"\| " + key + r" \| (.+?) \|\s*$", body, re.M)
+            if rm:
+                rows[key] = rm.group(1).strip()
+        out[slug] = rows
+    return out
+
+
+def family_names(dictionary_text: str) -> dict[str, str]:
+    """{族 slug: 族の名}（辞書の族の表「族の名」行）。"""
+    out: dict[str, str] = {}
+    for m in re.finditer(r"(?ms)^### ([a-z0-9-]+)\s*$(.*?)(?=^#### |^### |^## |\Z)", dictionary_text):
+        nm = re.search(r"\| 族の名 \| (.+?) \|\s*$", m.group(2), re.M)
+        if nm:
+            out[m.group(1)] = nm.group(1).strip()
+    return out
+
+
+def recall_patterns(entries: list["Entry"], dictionary_text: str) -> list[str]:
+    """想起シートに載せる型。月をまたいで出た回数 → 件数 → slug の順で上位 RECALL_MAX_PATTERNS 件。"""
+    known = set(dictionary_patterns(dictionary_text))
+    months: dict[str, set[str]] = defaultdict(set)
+    counts: Counter = Counter()
+    for e in entries:
+        pat = str(e.meta.get("pattern"))
+        if pat not in known or e.meta.get("status") == "rejected":
+            continue
+        counts[pat] += 1
+        if e.meta.get("recorded_at"):
+            months[pat].add(str(e.meta.get("recorded_at"))[:7])
+    ranked = sorted(counts, key=lambda p: (-len(months[p]), -counts[p], p))
+    return ranked[:RECALL_MAX_PATTERNS]
+
+
+def design_docs(root: Path = ROOT) -> list[Path]:
+    out: list[Path] = []
+    for base, glob in DESIGN_DOC_GLOBS:
+        d = root / base.relative_to(ROOT) if base.is_absolute() else root / base
+        if d.is_dir():
+            out.extend(sorted(d.glob(glob)))
+    return out
+
+
+def premortem_section(text: str) -> str | None:
+    """設計書の pre-mortem 節の本文（見出しから次の同格以上の見出しまで）。無ければ None。"""
+    m = PREMORTEM_HEADING_RE.search(text)
+    if not m:
+        return None
+    level = len(m.group(1))
+    rest = text[m.end():]
+    nxt = re.search(r"(?m)^#{1,%d}\s+" % level, rest)
+    return rest[: nxt.start()] if nxt else rest
+
+
+def premortem_declaration(text: str, dictionary_text: str) -> dict | None:
+    """{"slugs": [型], "none": bool}。pre-mortem 節が無ければ None。"""
+    sec = premortem_section(text)
+    if sec is None:
+        return None
+    known = set(dictionary_patterns(dictionary_text))
+    families = set(dictionary_families(dictionary_text))
+    slugs = [s for s in _BACKTICK_SLUG_RE.findall(sec) if s in known]
+    fams = [s for s in _BACKTICK_SLUG_RE.findall(sec) if s in families]
+    seen: list[str] = []
+    for s in slugs:
+        if s not in seen:
+            seen.append(s)
+    return {"slugs": seen, "families": sorted(set(fams)), "none": PREMORTEM_NONE_TEXT in sec}
+
+
+def premortem_hits(entries: list["Entry"], dictionary_text: str, root: Path = ROOT) -> list[dict]:
+    """設計書ごとの「予告した型」と「その設計書を出典に持つエントリの型」の突き合わせ。"""
+    out: list[dict] = []
+    for path in design_docs(root):
+        decl = premortem_declaration(path.read_text(encoding="utf-8"), dictionary_text)
+        if decl is None:
+            continue
+        name = path.name
+        actual: dict[str, list[Entry]] = defaultdict(list)
+        for e in entries:
+            if e.meta.get("status") == "rejected":
+                continue
+            if any(name in str(s) for s in _as_list(e.meta.get("sources"))):
+                actual[str(e.meta.get("pattern"))].append(e)
+        predicted = decl["slugs"]
+        out.append({
+            "doc": path.relative_to(root).as_posix(),
+            "predicted": predicted,
+            "none": decl["none"],
+            "hit": [p for p in predicted if p in actual],
+            "missed": {p: actual[p] for p in sorted(actual) if p not in predicted},
+            "actual": actual,
+        })
+    return out
+
+
+def render_recall(entries: list["Entry"], dictionary_text: str, principles_text: str | None = None) -> str:
+    """設計・実装の前に読む 1 枚。索引（長い）の要約ではなく、当てる型と確かめ方だけを置く。"""
+    principles_text = principles_text_or_empty(principles_text)
+    rows = dictionary_type_rows(dictionary_text)
+    fams = family_names(dictionary_text)
+    ptypes = principle_types(principles_text)
+    principle_of: dict[str, list[str]] = defaultdict(list)
+    for slug, pats in ptypes.items():
+        for pat in pats:
+            principle_of[pat].append(slug)
+    by_pattern: dict[str, list[Entry]] = defaultdict(list)
+    for e in entries:
+        by_pattern[str(e.meta.get("pattern"))].append(e)
+
+    lines: list[str] = []
+    lines.append("# 課題ナレッジ — 想起シート（設計・実装の前に読む 1 枚・機械生成）")
+    lines.append("")
+    lines.append("[← 課題ナレッジの入口](README.md) ｜ [辞書](dictionary.md) ｜ [解決原理](principles.md) ｜ [索引](index.md)")
+    lines.append("")
+    lines.append(
+        "> **状態:** 生きたリファレンス（機械生成・2026-10-02 新設）。手で編集しない。"
+        "`backend/.venv/bin/python backend/scripts/issue_knowledge_index.py` が index.md と同時に再生成する。"
+        "索引と辞書は長く、開きに行かないと読まれなかった（効果検証 2026-10-02）。この 1 枚は**読み込み経路に置く**ための要約で、"
+        "設計書の pre-mortem 節に型の slug を写すところまでが使い方。"
+    )
+    lines.append("")
+    lines.append("## 1. 変更に含まれる語 → 先に当てる族")
+    lines.append("")
+    lines.append("| 変更に含まれる語 | 先に当てる族 |")
+    lines.append("|---|---|")
+    for words, fam in PREMORTEM_TRIGGERS:
+        lines.append(f"| {words} | {fams.get(fam, fam)}（`{fam}`） |")
+    lines.append("")
+    lines.append("## 2. 繰り返し出ている型（月をまたいだ回数の多い順）")
+    lines.append("")
+    lines.append(
+        "設計書の pre-mortem 節には、当たる型の slug をバッククォートで書く（当たらなければ「該当なし」）。"
+        "「見分け方」が当たるなら「確かめ方」を検証計画に写す。"
+    )
+    lines.append("")
+    lines.append("| 型 | 族 | 見分け方 | 確かめ方 | 原理 | 直近の事例 |")
+    lines.append("|---|---|---|---|---|---|")
+    for pat in recall_patterns(entries, dictionary_text):
+        r = rows.get(pat, {})
+        recent = sorted(by_pattern[pat], key=lambda e: (str(e.meta.get("recorded_at") or ""), e.id), reverse=True)[:2]
+        prin = ", ".join(f"[`{p}`](principles.md#{p})" for p in principle_of.get(pat, [])) or "—"
+        lines.append(
+            f"| [`{pat}`](dictionary.md#{pat}) | {fams.get(r.get('族', ''), r.get('族', ''))} | "
+            f"{_cell(r.get('見分け方', ''))} | {_cell(r.get('確かめ方', ''))} | {prin} | "
+            f"{', '.join(_link(e) for e in recent)} |"
+        )
+    lines.append("")
+    lines.append("## 3. 解決原理（当たる型があれば、併用する部品・派生形・非適用を principles.md で読む）")
+    lines.append("")
+    sections = principle_sections(principles_text)
+    for slug in principle_slugs(principles_text):
+        pm = re.search(r"\| 原理 \| (.+?) \|\s*$", sections.get(slug, ""), re.M)
+        pats = ", ".join(f"`{p}`" for p in ptypes.get(slug, []))
+        lines.append(f"- [`{slug}`](principles.md#{slug}) — {pm.group(1).strip() if pm else ''}（当たる型: {pats}）")
+    lines.append("")
+    lines.append("## 4. 設計書に書く形")
+    lines.append("")
+    lines.append("見出しに `pre-mortem` を含む節を置き、表の「型」列に slug を書く。後で起票したエントリの `sources` にその設計書を")
+    lines.append("書くと、索引 §14.5 が「予告した型」と「実際に出た型」を突き合わせる。実装後のエントリの `resolution.principles` は")
+    lines.append("`use: consulted`（設計前に読んだ）にする。")
+    lines.append("")
+    lines.append("```markdown")
+    lines.append("## N. 設計時の検査（pre-mortem）")
+    lines.append("")
+    lines.append("| 変更の性質 | 型 | 本書での扱い（採る部品・見送る派生形） |")
+    lines.append("|---|---|---|")
+    lines.append("| 再解析で既存の確定が消えないか | `reexecution-overwrites-human-decision` | … |")
+    lines.append("")
+    lines.append("当たらない族: 該当なし（理由を一行）")
+    lines.append("```")
+    return "\n".join(lines)
 
 
 def principles_text_or_empty(principles_text: str | None = None) -> str:
@@ -1358,6 +1570,33 @@ def render_index(entries: list[Entry], dictionary_text: str, principles_text: st
     )
     lines.append("")
 
+    lines.append("### 14.5 pre-mortem の的中（設計書が予告した型 × その設計書を出典に持つエントリの型）")
+    lines.append("")
+    lines.append(
+        "設計書の pre-mortem 節（[想起シート §4](recall.md)）に書かれた型と、その設計書を `sources` に持つエントリの型を突き合わせる。"
+        "予告が当たらないのは辞書の「見分け方」か引き金の表が弱い印で、予告しなかった型は次の設計で先に当てる候補。目標値にしない。"
+        "検証の仕組みの設計書（ペルソナ通し受講など）は製品側の課題の起票元にもなるため、その行の「予告せずに出た型」は製品の分布を含む。"
+        "各型は代表 2 件まで（残りは件数）。"
+    )
+    lines.append("")
+    hits = premortem_hits(entries, dictionary_text)
+    if hits:
+        lines.append("| 設計書 | 予告した型 | 的中 | 予告せずに出た型 |")
+        lines.append("|---|---|---|---|")
+        for h in hits:
+            predicted = ", ".join(f"`{p}`" for p in h["predicted"]) or ("該当なし" if h["none"] else "—")
+            hit = ", ".join(f"`{p}`" for p in h["hit"]) or "—"
+            def _missed_cell(p: str, es: list[Entry]) -> str:
+                shown = sorted(es, key=lambda e: e.id)[:2]
+                more = f" ほか {len(es) - len(shown)} 件" if len(es) > len(shown) else ""
+                return f"`{p}`（{', '.join(_link(e) for e in shown)}{more}）"
+
+            missed = ", ".join(_missed_cell(p, es) for p, es in h["missed"].items()) or "—"
+            lines.append(f"| `{h['doc']}` | {predicted} | {hit} | {missed} |")
+    else:
+        lines.append("（pre-mortem 節を持つ設計書はまだ無い）")
+    lines.append("")
+
     lines.append("## 15. 解決原理別（principles.md — 型を横断する条件付きの解決知識）")
     lines.append("")
     lines.append(
@@ -1524,16 +1763,21 @@ def main(argv: list[str] | None = None) -> int:
         return _print_stats(entries)
 
     rendered = render_index(entries, dictionary_text) + "\n"
+    recall = render_recall(entries, dictionary_text) + "\n"
     if args.check:
-        current = INDEX_DOC.read_text(encoding="utf-8") if INDEX_DOC.exists() else ""
-        if current != rendered:
-            print("index.md が最新ではない。再生成すること:", file=sys.stderr)
+        stale = [
+            doc for doc, text in ((INDEX_DOC, rendered), (RECALL_DOC, recall))
+            if (doc.read_text(encoding="utf-8") if doc.exists() else "") != text
+        ]
+        if stale:
+            print(f"{', '.join(d.name for d in stale)} が最新ではない。再生成すること:", file=sys.stderr)
             print("  backend/.venv/bin/python backend/scripts/issue_knowledge_index.py", file=sys.stderr)
             return 1
-        print("index.md は最新")
+        print("index.md / recall.md は最新")
         return 0
     INDEX_DOC.write_text(rendered, encoding="utf-8")
-    print(f"wrote {INDEX_DOC.relative_to(ROOT)} ({len(entries)} entries)")
+    RECALL_DOC.write_text(recall, encoding="utf-8")
+    print(f"wrote {INDEX_DOC.relative_to(ROOT)} / {RECALL_DOC.relative_to(ROOT)} ({len(entries)} entries)")
     return _print_validation(entries, dictionary_text)
 
 

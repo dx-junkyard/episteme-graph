@@ -168,10 +168,11 @@ CLAUDE.md 内でアンカー件数の 4 値（228/244/248/255）が併存した�
 [課題ナレッジ](issue_knowledge/README.md) に 1 課題 = 1 エントリで記帳する（正本は起票元の文書の
 まま。エントリは「原因の性質による分類・発見観点・解決観点・型」を引くための索引層）。
 
-- [ ] **設計時（pre-mortem）**: 変更に「再実行・削除・既定値・AI の判定・段階間の受け渡し・
-      派生物・ID や版・語彙表の新設・外部呼び出し」が含まれるなら、
-      [課題ナレッジ README §3.3b](issue_knowledge/README.md) の表で該当する族の型の「見分け方」を
-      先に当て、該当しないなら「該当なし」と PR に書く。当てた型に [解決原理](issue_knowledge/principles.md)
+- [ ] **設計時（pre-mortem）**: 先に [想起シート](issue_knowledge/recall.md)（短い 1 枚）を読み、
+      変更に「再実行・削除・既定値・AI の判定・段階間の受け渡し・派生物・ID や版・語彙表の新設・外部呼び出し・
+      新しい画面や経路」が含まれるなら、該当する族の型の「見分け方」を先に当て、当たる型の slug を設計書の
+      pre-mortem 節に書く。該当しないなら設計書に「該当なし」と書く（新しい `*_design.md` は節が無いと
+      `test_issue_knowledge_guardrails.py` が落ちる）。当てた型に [解決原理](issue_knowledge/principles.md)
       が結びついていれば（索引 §15）、併用する部品・派生形・非適用を読み、採る部品と見送る派生形を設計書に書く
 - [ ] 新しい課題に `docs/issue_knowledge/entries/IK-NNNN-*.md` を作り、4 軸の座標を
       [taxonomy.md §1.2](issue_knowledge/taxonomy.md) の手順（**原因の性質**。無い軸は none、

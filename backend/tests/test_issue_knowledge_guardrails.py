@@ -515,3 +515,176 @@ class TestSolutionPrinciples:
             hits = [ln for ln in live if "選ぶのは人" in ln]
             assert hits == [], f"{name}: 人は選ばない（問題が明らかになったときだけ介入する）: {hits}"
         assert "問題が明らかになったとき" in taxonomy_text
+
+# ---------------------------------------------------------------------------
+# 想起シート（recall.md）と設計書の pre-mortem 節 — 「思い出させる」経路（2026-10-02）
+# ---------------------------------------------------------------------------
+
+# pre-mortem 節を持たないレガシー設計書。新しい `*_design.md` には節を必須とするため、
+# この allowlist は**減らす方向のみ**（新しい設計書をここに足してはならない）。
+_PREMORTEM_LEGACY_ALLOWLIST = frozenset(
+    {
+        "account_lifecycle_management_design.md",
+        "admin_assistant_design.md",
+        "assistant_common_infra_design.md",
+        "assistant_screen_adapter_design.md",
+        "atlas_binding_lifecycle_design.md",
+        "atlas_node_correspondence_design.md",
+        "atlas_relation_edges_design.md",
+        "atlas_vector_anchoring_design.md",
+        "candidate_flow_design.md",
+        "category_gap_candidates_design.md",
+        "claim_concept_grounding_design.md",
+        "concept_registry_design.md",
+        "corpus_complement_design.md",
+        "corpus_roaming_design.md",
+        "decision_context_design.md",
+        "dialogue_response_shape_design.md",
+        "disclosure_axes_design.md",
+        "discuss_dialogue_alignment_design.md",
+        "discuss_observation_design.md",
+        "discuss_opening_authoring_design.md",
+        "discussion_mode_design.md",
+        "display_projection_design.md",
+        "element_context_lens_design.md",
+        "element_deliberation_workspace_design.md",
+        "element_inventory_design.md",
+        "equation_context_panel_display_design.md",
+        "equation_hover_content_design.md",
+        "exposition_layer_design.md",
+        "figure_concept_linking_design.md",
+        "focus_document_design.md",
+        "generation_language_design.md",
+        "graph_dialogue_review_design.md",
+        "graph_paper_layer_design.md",
+        "guidance_layer_design.md",
+        "guided_figure_reanalysis_design.md",
+        "hierarchical_context_explanation_design.md",
+        "image_pipeline_knowledge_library_design.md",
+        "indicator_governance_design.md",
+        "knowledge_landscape_design.md",
+        "knowledge_objects_design.md",
+        "knowledge_transfer_design.md",
+        "label_vocab_design.md",
+        "learner_element_context_design.md",
+        "learning_chat_entry_unification_design.md",
+        "learning_ui_inspect_hover_design.md",
+        "learning_units_design.md",
+        "lecture_slide_sync_design.md",
+        "llm_model_selection_design.md",
+        "llm_response_streaming_design.md",
+        "llm_usage_metering_design.md",
+        "manual_help_kb_design.md",
+        "paper_discovery_design.md",
+        "paper_radar_design.md",
+        "personal_knowledge_network_design.md",
+        "personal_map_curiosity_design.md",
+        "personal_map_nearby_design.md",
+        "reconstruction_loop_design.md",
+        "release_review_flow_design.md",
+        "return_door_design.md",
+        "seminar_brief_mirroring_design.md",
+        "shared_versioning_design.md",
+        "stakes_ledger_design.md",
+        "status_notification_design.md",
+        "structure_descent_design.md",
+        "teacher_triage_instruments_design.md",
+        "teaching_figure_studio_design.md",
+        "trace_registry_sovereignty_ledger_design.md",
+        "understanding_cycle_design.md",
+        "url_material_upload_design.md",
+    }
+)
+
+_RECALL_READERS = (
+    ROOT / "CLAUDE.md",
+    ROOT / "docs" / "development_checklist.md",
+    ROOT / "docs" / "architecture" / "improvement_cycle.md",
+    README_DOC,
+    ROOT / ".claude" / "skills" / "episteme-graph-dev" / "SKILL.md",
+    ROOT / ".claude" / "skills" / "episteme-graph-knowledge" / "SKILL.md",
+)
+
+
+class TestRecallSheet:
+    """辞書・原理は「開きに行かないと読まれない」。短い想起シートを読み込み経路に置き、設計書に型を写させる。"""
+
+    def test_recall_doc_exists_and_matches_generator(self, entries, dictionary_text):
+        assert ik.RECALL_DOC.exists(), "docs/issue_knowledge/recall.md が無い（生成器で作る）"
+        rendered = ik.render_recall(entries, dictionary_text) + "\n"
+        assert ik.RECALL_DOC.read_text(encoding="utf-8") == rendered, (
+            "recall.md が生成器の出力と一致しない。再生成すること: "
+            "backend/.venv/bin/python backend/scripts/issue_knowledge_index.py"
+        )
+
+    def test_recall_doc_is_short(self):
+        n = len(ik.RECALL_DOC.read_text(encoding="utf-8").splitlines())
+        assert n <= ik.RECALL_MAX_LINES, f"recall.md が {n} 行。読み込み経路に置く 1 枚は {ik.RECALL_MAX_LINES} 行以内"
+
+    def test_recall_lists_bounded_patterns_with_detection_and_verification(self, entries, dictionary_text):
+        pats = ik.recall_patterns(entries, dictionary_text)
+        assert 0 < len(pats) <= ik.RECALL_MAX_PATTERNS
+        rows = ik.dictionary_type_rows(dictionary_text)
+        for pat in pats:
+            assert rows[pat].get("見分け方") and rows[pat].get("確かめ方"), f"辞書の型 `{pat}` に見分け方・確かめ方が無い"
+
+    def test_trigger_families_exist_in_dictionary(self, dictionary_text):
+        families = set(ik.dictionary_families(dictionary_text))
+        for _words, fam in ik.PREMORTEM_TRIGGERS:
+            assert fam in families, f"引き金の族 `{fam}` が辞書に無い"
+
+    def test_trigger_table_is_canonical_in_module(self):
+        # README §3.3b は表を持たず recall.md（生成器の PREMORTEM_TRIGGERS）を指す。表を 2 箇所に持たない。
+        readme = README_DOC.read_text(encoding="utf-8")
+        assert "recall.md" in readme
+        assert "| 変更に含まれる語 | 先に当てる族 |" not in readme, "引き金の表は生成器（recall.md）だけが持つ"
+
+    def test_recall_is_in_the_reading_path(self):
+        for path in _RECALL_READERS:
+            assert "recall.md" in path.read_text(encoding="utf-8"), f"{path.relative_to(ROOT)} が recall.md を参照していない"
+
+    def test_new_design_docs_declare_premortem(self, dictionary_text):
+        missing = []
+        for path in ik.design_docs():
+            if path.name in _PREMORTEM_LEGACY_ALLOWLIST:
+                continue
+            decl = ik.premortem_declaration(path.read_text(encoding="utf-8"), dictionary_text)
+            if decl is None or not (decl["slugs"] or decl["none"]):
+                missing.append(path.relative_to(ROOT).as_posix())
+        assert missing == [], (
+            f"pre-mortem 節（見出しに pre-mortem・本文に辞書の型 slug か「{ik.PREMORTEM_NONE_TEXT}」）が無い設計書: {missing}。"
+            "書き方は docs/issue_knowledge/recall.md §4"
+        )
+
+    def test_premortem_legacy_allowlist_has_no_stale_entries(self, dictionary_text):
+        names = {p.name for p in ik.design_docs()}
+        stale = sorted(n for n in _PREMORTEM_LEGACY_ALLOWLIST if n not in names)
+        assert stale == [], f"存在しない設計書が allowlist に残っている: {stale}"
+        graduated = sorted(
+            p.name for p in ik.design_docs()
+            if p.name in _PREMORTEM_LEGACY_ALLOWLIST and ik.premortem_section(p.read_text(encoding="utf-8")) is not None
+        )
+        assert graduated == [], f"pre-mortem 節を得た設計書は allowlist から外す: {graduated}"
+
+    def test_premortem_slugs_in_design_docs_exist(self, dictionary_text):
+        known = set(ik.dictionary_patterns(dictionary_text))
+        for path in ik.design_docs():
+            sec = ik.premortem_section(path.read_text(encoding="utf-8"))
+            if sec is None:
+                continue
+            # 節の中でバッククォートされた slug 形の語のうち、族でも型でもないものは typo の疑い
+            families = set(ik.dictionary_families(dictionary_text))
+            for tok in ik._BACKTICK_SLUG_RE.findall(sec):
+                if "-" in tok and tok not in known and tok not in families:
+                    # 原理 slug・識別子（snake_case は対象外）は許す
+                    assert tok in set(ik.principle_slugs(ik.principles_text_or_empty())), (
+                        f"{path.name} の pre-mortem 節に辞書に無い slug `{tok}`"
+                    )
+
+    def test_index_renders_premortem_hits(self, entries, dictionary_text):
+        text = ik.render_index(entries, dictionary_text)
+        assert "### 14.5 pre-mortem の的中" in text
+        hits = ik.premortem_hits(entries, dictionary_text)
+        assert hits, "pre-mortem 節を持つ設計書が 1 つも無い"
+        for h in hits:
+            assert set(h["hit"]) <= set(h["predicted"])
