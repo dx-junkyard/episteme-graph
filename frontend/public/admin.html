@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Episteme Graph — 管理画面</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <link rel="stylesheet" href="/css/styles.css?v=ik0375-20260927">
+  <link rel="stylesheet" href="/css/styles.css?v=simulation-bridge-20261002-1">
   <script defer src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
@@ -1052,9 +1052,13 @@
   <!-- グラフ対話レビュー（graph_dialogue_review_design.md）。LectureStudio.graphView に
        依存するため admin-lecture-studio.js より後・admin.js より前に読み込む -->
   <script src="/js/admin-graph-review.js?v=theory-modules-teacher-structure-20260930-1"></script>
+  <!-- 検証シミュレーション（simulation_bridge_design.md §7）— 教材行の「⋯」から開く 4 区画の
+       フルモーダル（グラフレビューのモーダル CSS を再利用）。admin-indicators.js と
+       admin-llm-models.js に任意で依存し、admin.js から DI 注入するため admin.js より前。 -->
+  <script src="/js/admin-simulation-bridge.js?v=simulation-bridge-20261002-1"></script>
   <!-- 束の取り込み（knowledge_transfer_design.md §4.3）— 教材行の「⋯」から開く
        dry-run → 確定の 2 段モーダル。admin.js から DI 注入するため admin.js より前。 -->
   <script src="/js/admin-knowledge-import.js?v=knowledge-transfer-20260913-1"></script>
-  <script src="/js/admin.js?v=seminar-brief-dedupe-20261001-1"></script>
+  <script src="/js/admin.js?v=simulation-bridge-20261002-2"></script>
 </body>
 </html>

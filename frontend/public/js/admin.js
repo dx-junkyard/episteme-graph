@@ -468,6 +468,11 @@
       var seminarBriefBtn = m.document_id
         ? '<button class="ls-menu-item admin-seminar-brief-btn" type="button" data-ui-anchor="materials.row-seminar-brief" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="輪講の前に、この論文の脆い前提・一点吊りの支持線・晴れ間を確認します（読み取り専用）">ゼミ前ブリーフ…</button>'
         : "";
+      // 検証シミュレーション（simulation_bridge_design.md §7）: 理論モジュールをコード化し、
+      // 実験機の配線を通した模擬観測と比べる教員向けモーダル（document_id が必要）。
+      var simulationBtn = m.document_id
+        ? '<button class="ls-menu-item admin-simulation-bridge-btn" type="button" data-ui-anchor="materials.row-simulation" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="理論モジュールをコード化し、実験機の配線を通した模擬観測と比べます（一致は検証ではなく候補です）">検証シミュレーション…</button>'
+        : "";
       // 束の取り込み（knowledge_transfer_design.md P4-1 / §4.3）: 別インスタンスで
       // 書き出した束（zip）をこの教材の知識として取り込む。取り込みは編集権限が要る操作で、
       // 実行前に必ず dry-run（確認）を挟む（document_id が必要）。
@@ -520,6 +525,7 @@
             versionBtn +
             landscapeBtn +
             seminarBriefBtn +
+            simulationBtn +
             referenceHealthBtn +
             importBtn +
             estimateBtn +
@@ -612,6 +618,15 @@
     tbody.querySelectorAll(".admin-seminar-brief-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         openSeminarBriefModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+      });
+    });
+
+    // 検証シミュレーション（simulation_bridge_design.md §7）: 4 区画のフルモーダル
+    tbody.querySelectorAll(".admin-simulation-bridge-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (window.SimulationBridge) {
+          window.SimulationBridge.open(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+        }
       });
     });
 
@@ -2771,6 +2786,9 @@
     assumption: "前提",
     quantity: "量",
     process: "過程",
+    instrument_model: "装置モデル",
+    noise_source: "ノイズ源",
+    signal_processing: "信号処理の工夫",
   };
   var _libraryLabelKindLabels = {
     preferred: "主ラベル",
@@ -12777,6 +12795,10 @@
       if (window.GraphReview) {
         window.GraphReview.init({ apiFetch: apiFetch, escHtml: escHtml, getToken: getAuthToken });
       }
+      // 検証シミュレーション（simulation_bridge_design.md §7）— 教材行の ⋯ メニューから開く。
+      if (window.SimulationBridge) {
+        window.SimulationBridge.init({ apiFetch: apiFetch, escHtml: escHtml, getToken: getAuthToken });
+      }
     }
     initStumbles();
     initAtlas();
@@ -12956,6 +12978,10 @@
       // ゼミ前ブリーフ: 教材行の「ゼミ前ブリーフ…」ボタン（⋯メニュー内）。
       seminar_brief_button: function (id) {
         return _matRowActionAnchor(id, ".admin-seminar-brief-btn");
+      },
+      // 検証シミュレーション: 教材行の「検証シミュレーション…」ボタン（⋯メニュー内）。
+      simulation_bridge_button: function (id) {
+        return _matRowActionAnchor(id, ".admin-simulation-bridge-btn");
       },
       // 開幕素材レビュー（discuss の「議論のきっかけ」）: 要素インベントリ内の
       // 「説明レビュー」ボタン。インベントリを開くまでは DOM に存在しないので、

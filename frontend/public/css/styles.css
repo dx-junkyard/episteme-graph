@@ -12317,3 +12317,99 @@ button.element-card-item:focus-visible .element-card-item-label {
   font-size: 11.5px;
   color: var(--color-text-tertiary, #94a3b8);
 }
+
+/* ===========================================================================
+   検証シミュレーション（simulation_bridge_design.md §7）
+   外枠はグラフレビュー（graph-review-modal / -frame / -header）を再利用する。
+   識別子は simulation- プレフィックス。警告色は使わない（事実文は中立色）。
+   =========================================================================== */
+.simulation-frame { overflow: auto; }
+.simulation-lead {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border, #e2e8f0);
+  font-size: 13px;
+}
+.simulation-disclaimer { margin: 0; color: var(--color-text-secondary, #475569); }
+.simulation-sandbox-fact {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 6px;
+  color: var(--color-text-secondary, #475569);
+}
+.simulation-sandbox-fact[hidden] { display: none; }
+.simulation-body { padding: 12px 16px 24px; display: flex; flex-direction: column; gap: 16px; }
+.simulation-section {
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.simulation-section-title { margin: 0 0 8px; font-size: 14px; }
+.simulation-module { padding: 8px 0; border-top: 1px dashed var(--color-border, #e2e8f0); }
+.simulation-module.is-inner { margin-left: 24px; }
+.simulation-module-head { display: flex; gap: 8px; align-items: center; }
+.simulation-module-label { font-weight: 600; }
+.simulation-io, .simulation-chain { margin: 4px 0; font-size: 12.5px; }
+.simulation-arrow { color: var(--color-text-secondary, #64748b); margin: 0 4px; }
+.simulation-assumptions { margin: 2px 0 4px 18px; font-size: 12.5px; }
+.simulation-muted { color: var(--color-text-secondary, #64748b); font-size: 12.5px; }
+.simulation-fact-line { margin: 4px 0; font-size: 12.5px; color: var(--color-text-secondary, #475569); }
+.simulation-facts { margin: 6px 0; padding-left: 18px; font-size: 12.5px; color: var(--color-text-secondary, #475569); }
+.simulation-chip {
+  display: inline-block;
+  border: 1px solid var(--color-border, #cbd5e1);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11.5px;
+}
+.simulation-chip-muted { opacity: 0.75; }
+.simulation-chip-ai { border-style: dashed; }
+.simulation-chip-label { background: var(--color-background-info, #eef2ff); }
+.simulation-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+.simulation-decide { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
+.simulation-disabled-reason { font-size: 12px; color: var(--color-text-secondary, #64748b); }
+.simulation-program-card, .simulation-wiring-card, .simulation-run-card, .simulation-builder, .simulation-proposal {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 8px;
+}
+.simulation-wiring-card.is-ai-proposal, .simulation-proposal { border-style: dashed; }
+.simulation-card-head { font-weight: 600; font-size: 13px; margin: 6px 0 4px; }
+.simulation-source {
+  max-height: 280px;
+  overflow: auto;
+  font-size: 12px;
+  background: var(--color-background-secondary, #f8fafc);
+  padding: 8px;
+  border-radius: 6px;
+}
+.simulation-table { border-collapse: collapse; font-size: 12.5px; margin: 6px 0; }
+.simulation-table th, .simulation-table td {
+  border: 1px solid var(--color-border, #e2e8f0);
+  padding: 3px 8px;
+  text-align: left;
+}
+.simulation-params { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 4px 0; }
+.simulation-param { font-size: 12.5px; display: inline-flex; gap: 4px; align-items: center; }
+.simulation-param input[type="number"] { width: 110px; }
+.simulation-builder-list { padding-left: 20px; }
+.simulation-builder-part { margin: 6px 0; }
+.simulation-claims { display: flex; flex-direction: column; gap: 2px; margin: 4px 0; }
+.simulation-claim { font-size: 12.5px; }
+.simulation-ref-row { font-size: 12.5px; margin: 4px 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.simulation-inst-slot { margin: 4px 0; font-size: 12.5px; }
+.simulation-history ul { list-style: none; padding-left: 0; margin: 4px 0; }
+.simulation-history-btn {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12.5px;
+  padding: 2px 0;
+  text-align: left;
+}
+.simulation-history-btn.is-active { font-weight: 700; }
+.simulation-statement { margin: 4px 0; font-size: 13px; }
+.simulation-notice { padding: 6px 10px; border-radius: 6px; font-size: 12.5px; margin: 4px 0; border: 1px solid var(--color-border, #e2e8f0); }
+.simulation-notice.is-error { border-color: var(--color-border-danger, #fca5a5); }
+.simulation-notice.is-success { border-color: var(--color-border-success, #86efac); }

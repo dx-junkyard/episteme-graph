@@ -233,7 +233,13 @@ class TestAdminUiAnchorsModule:
         # + 2026-10-01: 論文の取り込みモーダルの生成言語の2件 —
         #   materials.arxiv-discovery-language / materials.radar-language（同期の取り込みだけに効く）。
         #   docs/features/paper_radar_design.md §15.9。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 359
+        # + 2026-10-02: 検証シミュレーション層の9件 —
+        #   materials.row-simulation（教材行「⋯」の「検証シミュレーション…」）/
+        #   simulation.modal / simulation.generate / simulation.program-decide /
+        #   simulation.wiring-new / simulation.wiring-decide / simulation.run /
+        #   simulation.ledger-candidate / simulation.propose-revision。
+        #   docs/features/simulation_bridge_design.md §7。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 368
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

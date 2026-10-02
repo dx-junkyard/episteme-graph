@@ -1193,6 +1193,27 @@ _REGISTRY: list[Capability] = [
                   precondition="material_menu_open"),
         ),
     ),
+    # 検証シミュレーション（simulation_bridge_design.md §7）: 道案内のみ。コード生成・改訂案は
+    # LLM コストを伴い、確定は教員の明示ボタンのため Copilot の代行に載せない（SB1 / SB9）。
+    Capability(
+        id="materials.simulation_bridge",
+        screen="materials",
+        title="理論モジュールを検証シミュレーションで走らせる",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#simulation-bridge",
+        description="理論モジュールを AI にコード化させ（候補）、教員が確定したコードを実験機の配線"
+                    "（ナレッジライブラリの部品）に通して模擬観測と比べる。一致は検証ではなく、"
+                    "結果は台帳の候補として記帳するだけで、確定は台帳の画面で行う。",
+        api={"method": "GET", "path": "/api/admin/simulation/documents/{document_id}/overview"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
+                  precondition="material_selected"),
+            _step("materials", "simulation_bridge_button", "「検証シミュレーション…」を押します",
+                  precondition="material_menu_open"),
+        ),
+    ),
     # 制度指標カタログ（indicator_governance_design.md IG1）: 計器の**定義だけ**を全当事者に
     # 開く読み取り専用 API。値は返さないので、この capability も定義の在り処を案内するだけ。
     Capability(

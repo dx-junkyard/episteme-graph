@@ -3529,6 +3529,54 @@ Phase 1（保存・同一性候補）は同日に実装済み。目的は**理�
 - **非スコープ**: 学習者向け表示 / SA層解決器（`view.layer = "module"`）/ 辺の承認 / LLM による命名・境目提案 /
   全論文横断の一枚図（原則 6）/ 直線チェーン（分岐も循環も無い長い連なり）の内側分割。
 
+### 検証シミュレーション層（Simulation Bridge, SB層 — 理論⇔シミュレーション⇔実験の翻訳層, migration 088, 2026-10-02）
+
+理論モジュール（式の部分系）を**数値で走らせ、実験機のモデルを通し、論文が言う観測量が見えるか**を
+確かめる製品機能。正本は `docs/features/simulation_bridge_design.md`（SB1〜SB10・§4 データモデル・
+§5 規則・§6 API・§12 実装記録）。uxsim（開発用のペルソナ通し受講テスト）から借りたのは「実行・審判・
+是正者を分けて所見を記帳する」運転の型だけで、本層は教員・研究者が自分の教材に対して使い、結果は
+D層の台帳へ**候補**として戻る。
+
+- **不変条項の要点**: SB1 **シミュレーションの一致は検証ではない**（vision §2.8 の「分析妥当性」の候補。
+  台帳では `indirectly_supported` 止まり・`directly_verified` にしない・閉世界「このモデルと配線のもとでは」）/
+  SB2 3 部品の独立（理論プログラムは装置を知らず、配線は理論を知らず、比較器だけが両方を読む）/ SB3 コードは
+  候補・実行は隔離（サーバ側 AST 許可リスト `ast_guard` + 別コンテナ `sim-runner`。**api-server プロセス内で
+  `exec` しない**）/ SB4 比較器は決定論 / SB5 是正者は L層**凍結版**の部品の組み替えだけ（目録外は drop）/
+  SB6 数値は教員向け計器として制度指標カタログ `simulation-agreement` に登録して出す・学習者向け経路なし /
+  SB7 runs は append-only・programs / wirings は status 遷移・DELETE なし / SB8 A層非改変 / SB9 LLM は生成と
+  改訂提案だけ・各 1 コール + 日次 CostGate・自動反復なし / SB10 復元式（`must_not_treat_as_source_extracted`）
+  の印を program → run → 台帳候補まで写す。
+- **3 部品**: 理論シミュレータ `simulation_programs`（LLM 候補 → 教員確定。`simulate(inputs, params) -> dict`）/
+  実験機シミュレータ `instrument_wirings`（L層 `library_entries` の新 entry_type 3 種 `instrument_model` /
+  `noise_source` / `signal_processing` を一本の信号経路に配線。`instrument.compose_instrument` が決定論で
+  `simulate_instrument(signal, params, seed)` を合成）/ 比較器 `comparator.compare`（相対差・分離比・論文の
+  記載値との差 → `label_vocab.SIMULATION_AGREEMENT_LABELS` / `SIMULATION_SEPARATION_LABELS` の段階ラベル +
+  事実文 + `metrics`）。
+- **core**（`backend/core/simulation_bridge/`、FastAPI 非 import）: `schema.py`（語彙・契約・事実文の正本）/
+  `ast_guard.py` / `sandbox.py`（`SandboxClient`・transport 注入・未設定 / 不達は事実文の failed）/
+  `codegen.py`（untrusted 区画 + structured_call・同一コール内修復 1 回）/ `instrument.py` / `comparator.py` /
+  `revision.py` / `catalog.py`（凍結版部品の目録）/ `store.py`（`candidate_flow` 経由の遷移・台帳
+  `simulation_candidates` の追記と確定）。sandbox 本体は `simrunner/`（リポジトリ直下・`backend/Dockerfile`
+  は COPY しない・compose `sim-runner` は `internal: true` のネットワークのみ・`SIM_RUNNER_URL`）。
+- **DB（088）**: `simulation_programs` / `instrument_wirings` / `simulation_runs` + `epistemic_ledger.
+  simulation_candidates` + `knowledge_entry_types` 3 件のシード。`created_by` は TEXT（users FK なし）。
+  同梱部品は `backend/library_common/instrument_parts.json`（`domain_key='unassigned'`・`seed.py` が
+  cartridges と併せて走査・初版凍結）。
+- **API**（`routes/simulation_bridge.py`・main.py 直接登録・`/api/admin/simulation/...`・閲覧 = viewable /
+  生成・配線・実行・記帳 = editable）+ `routes/doubt.py` の `simulation-candidates/{cid}/confirm|dismiss`。
+  監査 `AUDIT_ENTITY_SIMULATION`。U層 feature `simulation:codegen` / `simulation:revision`、scene
+  `simulation`、env `SIM_RUNNER_URL` / `SIMULATION_RUN_TIMEOUT_SECONDS` / `SIMULATION_LLM_MODEL` /
+  `SIMULATION_{CODEGEN,REVISION}_MAX_CALLS_PER_DAY`。可視性 6 軸の AI 通過点 2 件を `course_materials` に宣言。
+- **UI**: 教材管理の行 ⋯ メニュー「検証シミュレーション…」→ `admin-simulation-bridge.js`（ES5・
+  `window.SimulationBridge`・DI 注入）。4 区画（理論モジュール / 配線 / 実行 / 記帳と改訂）。段階ラベルは
+  サーバが解決した日本語を素通し（JS に表をミラーしない）。アンカー `materials.row-simulation` +
+  `simulation.*`（件数の正本は `test_admin_help_ui_anchors.py`）+ `docs/manual/teacher/27-admin-simulation-bridge.md`。
+- **運用上の前提**: PDF 経路の式は復元由来が多いので **TeX 経路の教材で使う**（再現性レビュー E-1）。
+- **ガードレール**: `test_simulation_bridge_{store,migration,ast_guard,sandbox,codegen,instrument,comparator,
+  revision,api,guardrails,ui_static}.py` + `test_simrunner_harness.py`。
+- **非スコープ（v1）**: 学習者向け表示 / 自動反復 / 複数配線の自動探索 / Python 以外 / 実測データの取り込み /
+  装置候補から `instrument_model` への自動昇格 / `evidence_lines` への記帳。
+
 ### 論文の再現性レビューと是正（migration なし, 2026-09-19）
 
 Phase 0〜4 実装後の**再照合**（実論文 12 本の原本 ⇄ 成果）。正本は

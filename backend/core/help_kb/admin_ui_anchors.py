@@ -356,6 +356,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-resume-analysis",
         "materials.row-retry-stage",
         "materials.row-seminar-brief",
+        # 検証シミュレーション層（simulation_bridge_design.md §7）: 「⋯」メニューの入口。
+        "materials.row-simulation",
         "materials.row-share",
         "materials.row-version",
         "materials.seminar-brief-modal",
@@ -394,6 +396,15 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "stumbles.course-select",
         "stumbles.refresh-btn",
         "stumbles.table",
+        # 検証シミュレーション層（simulation_bridge_design.md §7）: モーダルの4区画。
+        "simulation.generate",
+        "simulation.ledger-candidate",
+        "simulation.modal",
+        "simulation.program-decide",
+        "simulation.propose-revision",
+        "simulation.run",
+        "simulation.wiring-decide",
+        "simulation.wiring-new",
         "system-stats.generate-audio",
         "system-stats.generate-script",
         "system-stats.refresh",
@@ -679,6 +690,16 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "graph-review.reject": "teacher/26-admin-graph-review.md#node-reject",
     "graph-review.reset-layout": "teacher/26-admin-graph-review.md#reset-layout",
     "graph-review.voice": "teacher/26-admin-graph-review.md#voice-chat",
+
+    # --- simulation.* — 検証シミュレーション（simulation_bridge_design.md §7） ----------
+    "simulation.generate": "teacher/27-admin-simulation-bridge.md#simulation-generate",
+    "simulation.ledger-candidate": "teacher/27-admin-simulation-bridge.md#simulation-ledger-candidate",
+    "simulation.modal": "teacher/27-admin-simulation-bridge.md#simulation-modal",
+    "simulation.program-decide": "teacher/27-admin-simulation-bridge.md#simulation-program-decide",
+    "simulation.propose-revision": "teacher/27-admin-simulation-bridge.md#simulation-propose-revision",
+    "simulation.run": "teacher/27-admin-simulation-bridge.md#simulation-run",
+    "simulation.wiring-decide": "teacher/27-admin-simulation-bridge.md#simulation-wiring-decide",
+    "simulation.wiring-new": "teacher/27-admin-simulation-bridge.md#simulation-wiring-new",
 
     # --- groups.* — グループタブ --------------------------------------------------------
     # グループを作成
@@ -1048,6 +1069,7 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-retry-stage": "teacher/11-admin-materials.md#row-retry-stage",
     # ゼミ前ブリーフ…（seminar_brief_mirroring_design.md §1: 輪講前の read-only 合成ビュー）
     "materials.row-seminar-brief": "teacher/11-admin-materials.md#seminar-brief-open",
+    "materials.row-simulation": "teacher/27-admin-simulation-bridge.md#row-simulation",
     # 共有設定
     "materials.row-share": "teacher/11-admin-materials.md#row-share",
     # 版の管理
