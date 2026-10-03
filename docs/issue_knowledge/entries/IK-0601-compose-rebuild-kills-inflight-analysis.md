@@ -27,7 +27,7 @@ classification:
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    確認: `docker compose -f docker-compose.yml -f docs/architecture/improvement_cycle.md §2.5 up -d --build frontend` は、設定が
+    確認: `docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build frontend` は、設定が
     変わった依存先のコンテナも作り直す。sim-runner のネットワーク・環境変数の追加で api-server の設定が変わって
     いたため api-server も再作成され、走行中の解析 run が equation_semantics の段で止まり、状態は running のまま
     残った。api-server のログに migration の起動表示が出ていたことから再起動に気づいた。接続軸 condition =
