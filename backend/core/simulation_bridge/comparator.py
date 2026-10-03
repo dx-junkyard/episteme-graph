@@ -25,6 +25,8 @@ __all__ = ["EPSILON", "compare", "comparison_statement"]
 
 #: 相対差の分母の下限（理論の出力が 0 のとき）。
 EPSILON = 1e-12
+#: 理論の出力がゼロで相対差が定義できないときの事実文。
+FACT_ZERO_THEORY_OUTPUT = "理論の出力がゼロのため、相対差（一致の度合い）は測れません。"
 
 _REFERENCE_SENTENCES: tuple[tuple[str, str], ...] = (
     (schema.AGREEMENT_LEVEL_MATCH, "論文の記載値と一致しています。"),
@@ -59,8 +61,12 @@ def _scalar(value: Any) -> float | None:
     return None
 
 
-def _rel_diff(value: float, base: float) -> float:
-    return abs(value - base) / max(abs(base), EPSILON)
+def _rel_diff(value: float, base: float) -> float | None:
+    """相対差 |value − base| / |base|。理論の出力がゼロ（EPSILON 未満）のときは測れないので None
+    （実機 2026-10-03: 直交する波数で理論出力が 0 になり、ノイズだけで「乖離」と出た空疎な判定の是正）。"""
+    if abs(base) < EPSILON:
+        return None
+    return abs(value - base) / abs(base)
 
 
 def _observed_stats(entry: Any) -> tuple[float | None, float | None]:
@@ -96,6 +102,7 @@ def compare(
     rel_values: list[float] = []
     sep_values: list[float] = []
     sep_unmeasured = False
+    zero_theory = False
     point_values: dict[str, float] = {}
 
     for symbol in sorted(theory):
@@ -109,13 +116,16 @@ def compare(
             if mean is None:
                 continue
         rel = _rel_diff(mean, base)
+        if rel is None:
+            zero_theory = True
         ratio: float | None = None
         if not no_wiring and std is not None and std > 0:
             ratio = abs(base) / std
             sep_values.append(ratio)
         else:
             sep_unmeasured = True
-        rel_values.append(rel)
+        if rel is not None:
+            rel_values.append(rel)
         point_values[symbol] = mean
         by_symbol[symbol] = {
             schema.METRIC_RELATIVE_DIFFERENCE: rel,
@@ -169,6 +179,8 @@ def compare(
         facts.append(schema.FACT_REFERENCE_MISSING)
     if no_wiring:
         facts.append(schema.FACT_NO_WIRING)
+    if zero_theory:
+        facts.append(FACT_ZERO_THEORY_OUTPUT)
     facts.append(schema.FACT_NOT_VERIFICATION)
 
     metrics: dict[str, Any] = {

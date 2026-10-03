@@ -129,3 +129,11 @@ class TestCompare:
         assert comparator.comparison_statement(None, module_label="M", wiring_name="").endswith(
             schema.AGREEMENT_FACTS["unmeasured"]
         )
+
+
+def test_zero_theory_output_is_unmeasured_not_divergent():
+    c = comparator.compare({"y": 0.0}, {"y": {"mean": 0.01, "std": 0.1}}, wiring_name="W")
+    assert c.agreement_level == "unmeasured"
+    assert c.metrics["relative_difference"] is None
+    assert comparator.FACT_ZERO_THEORY_OUTPUT in c.facts
+
