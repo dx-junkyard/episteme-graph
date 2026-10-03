@@ -239,7 +239,9 @@ class TestAdminUiAnchorsModule:
         #   simulation.wiring-new / simulation.wiring-decide / simulation.run /
         #   simulation.ledger-candidate / simulation.propose-revision。
         #   docs/features/simulation_bridge_design.md §7。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 368
+        # 第 21 波（2026-10-03）: +1 = simulation.ledger-candidate-decide（学習者が共有した実行の
+        #   台帳候補を確定・見送る。simulation_bridge_design.md §12.4）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 369
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

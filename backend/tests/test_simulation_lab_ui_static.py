@@ -26,7 +26,9 @@ STUDENT_MANUAL = ROOT / "docs" / "manual" / "student" / "02-student.md"
 
 ANCHOR_ID = "material.simulation-lab"
 OWN_ONLY = "この記録はあなたにだけ表示されます。成績評価には使用されません。"
-SHARE_CONFIRM = "この実行を教員に共有し、関係する主張の台帳に候補として記帳します。確定は教員が行います。"
+SHARE_CONFIRM = "この実行を教員に共有します。比較が測れている実行なら、関係する主張の台帳に候補として記帳します（確定は教員が行います）。比較が測れていない実行は共有だけで、台帳の候補にはなりません。"
+# 第 21 周 R4: サーバの事実文が無い UI の固定文（語の定義）。マニュアル §19 と逐語で一致させる。
+MODULE_LEGEND = "外枠 = 式のまとまりの外側の単位 / 内側 = その中の小さな手順 / 番号なし = 論文に式番号の無い式"
 
 
 def _read(path: Path) -> str:
@@ -72,7 +74,22 @@ class TestScriptAndEntry:
 
     def test_public_api(self):
         js = _read(LAB_JS)
-        assert "window.SimulationLab = { init, open, close, refresh, setContext };" in js
+        assert "window.SimulationLab = { init, open, close, refresh, setContext, getSelectedRunId };" in js
+
+    def test_app_js_sends_simulation_run_id_reference_only(self):
+        # 第 21 周 R12（SA層 4-e）: 開いている自分の実行の id だけを selection に載せる（画面の文字は送らない）。
+        js = _read(APP_JS)
+        start = js.index("function getScreenContext(payload, latchKind)")
+        block = js[start:js.index("\n  }\n", start)]
+        assert "window.SimulationLab.getSelectedRunId()" in block
+        assert "selection.simulation_run_id = simulationRunId" in block
+        assert "if (simulationRunId)" in block  # 開いていなければキーごと送らない
+
+    def test_selected_run_id_only_when_open(self):
+        js = _read(LAB_JS)
+        start = js.index("function getSelectedRunId()")
+        block = js[start:js.index("\n  }\n", start)]
+        assert "if (!st.open) return \"\";" in block
 
 
 class TestStatements:
@@ -81,6 +98,26 @@ class TestStatements:
         assert FACT_NOT_VERIFICATION in js
         assert OWN_ONLY in js
         assert SHARE_CONFIRM in js
+
+    def test_module_legend_and_member_equations(self):
+        js = _read(LAB_JS)
+        assert MODULE_LEGEND in js
+        assert MODULE_LEGEND in _read(STUDENT_MANUAL)
+        assert "この手順の式" in js
+        assert "→ 論文全体のまとめへ" in js
+        assert "前提をすべて見る" in js
+        assert "選んだまとまり: " in js
+
+    def test_share_note_is_standing_left_of_button(self):
+        js = _read(LAB_JS)
+        note = js.index("sim-lab-share-note")
+        assert note < js.index('data-sl-action="share"', note)
+        assert "window.confirm(SHARE_CONFIRM)" in js
+
+    def test_symbols_rendered_with_katex_but_keys_stay_raw(self):
+        js = _read(LAB_JS)
+        assert "renderToString(text, { throwOnError: false })" in js
+        assert "data-sl-predict=\"' + esc(s) + '\"" in js
 
     def test_three_columns(self):
         js = _read(LAB_JS)
@@ -114,7 +151,7 @@ class TestNoJudgingOrPolling:
 
     def test_does_not_read_dom_text(self):
         js = _read(LAB_JS)
-        for term in ("innerText", "textContent", "getScreenContext"):
+        for term in ("innerText", "textContent"):
             assert term not in js
 
 
@@ -140,6 +177,8 @@ class TestAnchorAndManual:
             "{#simulation-lab-own-records}",
             "{#simulation-lab-share}",
             "{#simulation-lab-unavailable}",
+            "{#simulation-lab-levels}",
+            "{#simulation-lab-modules}",
         ):
             assert anchor in md, anchor
         assert FACT_NOT_VERIFICATION in md

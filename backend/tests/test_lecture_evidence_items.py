@@ -113,7 +113,7 @@ def test_render_material_chunk_removes_missing_cards_in_drop_mode():
 def test_app_js_cache_buster_bumped():
     html = _read(INDEX_HTML)
     # IK-0545 で app.js を更新したため版を上げた（逐語引用の一致検査の 1 行）。
-    assert "/js/app.js?v=ik0545-" in html
+    assert "/js/app.js?v=round21-" in html
 
 
 def test_drop_mode_renders_chips_and_omits_raw_ids(tmp_path):

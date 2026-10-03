@@ -12474,6 +12474,8 @@ button.element-card-item:focus-visible .element-card-item-label {
 .sim-lab-link { border: none; background: none; padding: 0; color: var(--color-text-link, #0969da); cursor: pointer; font-size: 12px; }
 .sim-lab-io { font-size: 12px; }
 .sim-lab-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.sim-lab-share-note { flex: 1 1 240px; margin: 0; }
+.sim-lab-legend { margin: 2px 0 6px; }
 .sim-lab-params { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0; }
 .sim-lab-param input { width: 7em; }
 .sim-lab-claims { display: flex; flex-direction: column; gap: 2px; }

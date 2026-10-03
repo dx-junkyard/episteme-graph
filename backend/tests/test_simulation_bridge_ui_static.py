@@ -40,6 +40,7 @@ SIM_ANCHOR_IDS = (
     "simulation.run",
     "simulation.ledger-candidate",
     "simulation.propose-revision",
+    "simulation.ledger-candidate-decide",
 )
 
 

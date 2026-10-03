@@ -11,7 +11,7 @@
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
   <!-- ?v=: レイアウト（1画面に収める）系の修正は CSS が古いままだと効かないので、
        atlas.css と同じくバージョンクエリでキャッシュを切る。 -->
-  <link rel="stylesheet" href="/css/styles.css?v=simulation-lab-20261003">
+  <link rel="stylesheet" href="/css/styles.css?v=simulation-lab-round21-20261003">
   <link rel="stylesheet" href="/css/atlas.css?v=knowledge-landscape-20260804">
 </head>
 <body>
@@ -239,7 +239,7 @@
        入力欄のそばに1行だけ置く。文言はサーバ（GET /api/disclosure）が正本で、
        取得できないときは何も描かない。app.js が init() で注入するため先に読み込む。 -->
   <script src="/js/disclosure-note.js?v=disclosure-20260910-1"></script>
-  <script src="/js/app.js?v=ik0545-20261003-simulation-lab"></script>
+  <script src="/js/app.js?v=round21-20261003-simulation-run"></script>
   <script src="/js/atlas-fixture.js"></script>
   <script src="/js/atlas-data.js"></script>
   <script src="/js/atlas-overlay.js?v=ik0412-20260928"></script>
@@ -262,7 +262,7 @@
   <script src="/js/discuss.js?v=focusdoc-20260930"></script>
   <!-- 動かして確かめる（検証シミュレーション v1.1, simulation_bridge_design.md §14.4）:
        app.js の initApp（DOMContentLoaded）が SimulationLab.init を呼ぶため、同期読み込みで足りる。 -->
-  <script src="/js/simulation-lab.js?v=simulation-lab-20261003-4"></script>
+  <script src="/js/simulation-lab.js?v=simulation-lab-20261003-round21"></script>
   <!-- コーパス回遊層（docs/features/corpus_roaming_design.md §4.2）:
        コース非依存の「論文の海」（コーパス地図・論文リスト・地図の端・コース無し論文議論）。
        開幕画面は discuss.js を document 文脈で再利用するため、その後に読み込む。 -->

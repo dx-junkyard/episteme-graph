@@ -4499,6 +4499,11 @@
         ? state.discussFocusDocumentId
         : state.topicMaterialDocumentId;
       if (focusDocumentId) selection.document_id = String(focusDocumentId);
+      // 「動かして確かめる」で開いている自分の実行（SA層 4-e）。参照の id だけを渡し、事実文に
+      // するのはサーバ（本人の run 以外は無視される）。開いていなければキーごと送らない。
+      const simulationRunId = (window.SimulationLab && typeof window.SimulationLab.getSelectedRunId === "function")
+        ? String(window.SimulationLab.getSelectedRunId() || "") : "";
+      if (simulationRunId) selection.simulation_run_id = simulationRunId;
       const view = {
         mode: resolveScreenMode(),
         precision_reading: isPrecisionReadingOn(state.courseId),

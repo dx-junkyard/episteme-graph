@@ -1202,9 +1202,10 @@ _REGISTRY: list[Capability] = [
         required_role=ROLE_TEACHER,
         kind=KIND_GUIDANCE_ONLY,
         howto_doc="admin_operations/materials.md#simulation-bridge",
-        description="理論モジュールを AI にコード化させ（候補）、教員が確定したコードを実験機の配線"
-                    "（ナレッジライブラリの部品）に通して模擬観測と比べる。一致は検証ではなく、"
-                    "結果は台帳の候補として記帳するだけで、確定は台帳の画面で行う。",
+        description="理論モジュールを AI にコード化させ（候補）、確定したコードを実験機の配線"
+                    "（ナレッジライブラリの部品）に通して模擬観測と比べる。学習者が共有した実行も"
+                    "ここに並び、その台帳の候補をこの画面で確定・見送る（見送りは理由が必要）。"
+                    "一致は検証ではなく、確定しても「間接的に支持」より上には上がらない。",
         api={"method": "GET", "path": "/api/admin/simulation/documents/{document_id}/overview"},
         locate_steps=(
             _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),

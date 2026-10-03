@@ -7,6 +7,7 @@
  *         ②実験機の配線（ナレッジライブラリの凍結済み部品を並べる。AI の改訂案は点線枠）
  *         ③実行（確定済みのコード・配線・観測系の主張・入力値）→ 比較の段階ラベル + 事実文 + 数値表
  *         ④台帳に候補として記帳 / 配線の改訂案を求める
+ *           + 学習者が共有した実行（v1.1・SB13）の台帳候補を確定する / 見送る（既存 D層 API を呼ぶだけ）
  *
  * - ES5 / IIFE。window.SimulationBridge を公開。admin.js の initApp() から init({...}) で DI。
  * - モーダルの外枠はグラフレビューの CSS（graph-review-modal / -frame / -header）を再利用する。
@@ -24,6 +25,8 @@
   // 画面の冒頭に常に出す固定の事実文（core/simulation_bridge/schema.py::FACT_NOT_VERIFICATION と同文）。
   var FACT_NOT_VERIFICATION = "シミュレーションの一致は検証ではなく、分析の妥当性の候補にとどまります。";
   var SCREEN_CONTEXT_SCREEN = "simulation_bridge";
+  // 確定の応答に事実文が無いときに添える固定文（マニュアル teacher/27 と同じ内容・SB1）。
+  var LEDGER_CONFIRM_FACT = "確定しても「間接的に支持」より上には上がりません。";
   var DEFAULT_INDICATOR_ID = "simulation.agreement";
 
   var PROGRAM_STATUS_LABELS = {
@@ -65,6 +68,8 @@
     selectedRunId: "",
     lastRun: null,
     proposal: null,
+    ledgerCandidates: {}, // run_id -> {loading, error, items:[{claim_id, label, candidate}]}
+    dismissReasons: {}, // candidate_id -> 見送りの理由（入力中の値）
   };
 
   // -------------------------------------------------------------------------
@@ -290,6 +295,8 @@
     state.selectedRunId = "";
     state.lastRun = null;
     state.proposal = null;
+    state.ledgerCandidates = {};
+    state.dismissReasons = {};
     var modal = ensureModal();
     modal.hidden = false;
     document.getElementById("simulation-title-text").textContent = state.title;
@@ -734,18 +741,48 @@
     return '<table class="simulation-table"><thead><tr><th>計器</th><th>記号</th><th>値</th></tr></thead><tbody>' + rows + "</tbody></table>";
   }
 
-  function outputsTable(result) {
+  // 学習者の予想（共有された実行だけ。リスト [{symbol, value}] でも写像でも読む）。判定の語・色は付けない（SB14）。
+  function predictionMap(run) {
+    var out = {};
+    var raw = obj(run).prediction;
+    if (arr(raw).length) {
+      arr(raw).forEach(function (it) {
+        var o = obj(it);
+        var sym = String(o.symbol || o.name || "");
+        if (sym) out[sym] = o.value;
+      });
+    } else {
+      var m = obj(raw);
+      Object.keys(m).forEach(function (k) { out[k] = m[k]; });
+    }
+    return out;
+  }
+
+  function outputsTable(result, run) {
     var theory = obj(result.theory_outputs);
     var observed = obj(result.observed);
+    var prediction = (run && run.shared === true) ? predictionMap(run) : {};
+    var withPrediction = Object.keys(prediction).length > 0;
     var syms = Object.keys(theory);
     Object.keys(observed).forEach(function (s) { if (syms.indexOf(s) < 0) syms.push(s); });
+    Object.keys(prediction).forEach(function (s) { if (syms.indexOf(s) < 0) syms.push(s); });
     if (!syms.length) return "";
-    return '<table class="simulation-table"><thead><tr><th>記号</th><th>理論の出力</th><th>模擬観測の平均</th><th>模擬観測の標準偏差</th></tr></thead><tbody>' +
+    return '<table class="simulation-table"><thead><tr><th>記号</th>' + (withPrediction ? "<th>学習者の予想</th>" : "") +
+      "<th>理論の出力</th><th>模擬観測の平均</th><th>模擬観測の標準偏差</th></tr></thead><tbody>" +
       syms.map(function (s) {
         var o = obj(observed[s]);
-        return "<tr><td><code>" + esc(s) + "</code></td><td>" + esc(fmtValue(theory[s])) + "</td><td>" +
+        return "<tr><td><code>" + esc(s) + "</code></td>" +
+          (withPrediction ? "<td>" + esc(fmtValue(prediction[s])) + "</td>" : "") +
+          "<td>" + esc(fmtValue(theory[s])) + "</td><td>" +
           esc(fmtValue(o.mean)) + "</td><td>" + esc(fmtValue(o.std)) + "</td></tr>";
       }).join("") + "</tbody></table>";
+  }
+
+  function when(value) {
+    var raw = value == null ? "" : String(value);
+    if (!raw) return "";
+    var d = new Date(raw);
+    return isNaN(d.getTime()) ? raw : d.toLocaleString();
   }
 
   function renderSelectedRun() {
@@ -764,12 +801,12 @@
         " " + chip(labels.agreement, "simulation-chip-label") +
         " " + chip(labels.separation, "simulation-chip-label") +
         " " + chip(labels.reference, "simulation-chip-label") +
-        (r.created_at ? ' <span class="simulation-muted">' + esc(r.created_at) + "</span>" : "") +
+        (r.created_at ? ' <span class="simulation-muted">' + esc(when(r.created_at)) + "</span>" : "") +
         sharedChip(r) +
       "</div>" +
       (result.statement ? '<p class="simulation-statement">' + esc(result.statement) + "</p>" : "") +
       factsHtml(facts) +
-      outputsTable(result) +
+      outputsTable(result, r) +
       (metricsTable(comparison.metrics)
         ? '<div class="simulation-metrics"><div class="simulation-indicator-slot"></div>' + metricsTable(comparison.metrics) + "</div>"
         : "") +
@@ -803,7 +840,7 @@
         var labels = obj(obj(r.result).labels);
         var active = current && String(current.id) === String(r.id);
         return '<li><button type="button" class="simulation-history-btn' + (active ? " is-active" : "") + '" data-sim-action="select-run" data-run-id="' + esc(r.id) + '">' +
-          esc(r.created_at || "") + " " + esc(RUN_STATUS_LABELS[r.status] || r.status || "") +
+          esc(when(r.created_at)) + " " + esc(RUN_STATUS_LABELS[r.status] || r.status || "") +
           (labels.agreement ? " / " + esc(labels.agreement) : "") + "</button>" +
           sharedChip(r) + "</li>";
       }).join("") + "</ul></div>";
@@ -818,6 +855,10 @@
       noticeHtml("ledger");
     if (!run || run.status !== "succeeded") {
       html += '<p class="simulation-muted">実行済みの結果を選ぶと、台帳への記帳と改訂案を求める操作ができます。</p>';
+      return html + renderProposal() + "</section>";
+    }
+    if (isLearnerShared(run)) {
+      html += renderSharedLedgerCandidates(run);
       return html + renderProposal() + "</section>";
     }
     var claimIds = arr(run.observation_claim_ids);
@@ -838,8 +879,126 @@
         (revisionReason ? '<span class="simulation-disabled-reason">' + esc(revisionReason) + "</span>" : "") +
       "</span>" +
     "</div>" +
-    '<p class="simulation-muted">台帳での確定は前提の地図タブで行います。確定しても「間接的に支持」より上には上がりません。</p>';
+    '<p class="simulation-muted">記帳した候補の確定・見送りは、前提の地図タブの台帳で行います。' + esc(LEDGER_CONFIRM_FACT) + "</p>";
     return html + renderProposal() + "</section>";
+  }
+
+  // 学習者が本人の操作で共有した実行（教員自身の実行ではない）。
+  function isLearnerShared(run) {
+    return !!run && run.shared === true && typeof run.shared_by_label === "string" && !!run.shared_by_label;
+  }
+
+  function claimLabel(claimId) {
+    var hit = "";
+    arr(ov().observation_targets).forEach(function (t) {
+      if (!hit && t && String(t.claim_id) === String(claimId)) hit = String(t.label || "");
+    });
+    return hit;
+  }
+
+  // 共有された実行の台帳候補（主張ごと）。共有の時点でサーバが候補を記帳している。
+  // 候補は GET /admin/doubt/ledger/claim/{claim_id} の simulation_candidates[] から run_id 一致で引く。
+  function renderSharedLedgerCandidates(run) {
+    var html = '<div class="simulation-ledger-candidates" data-ui-anchor="simulation.ledger-candidate-decide">' +
+      '<div class="simulation-card-head">台帳の候補（学習者が共有した実行）</div>' +
+      '<p class="simulation-muted">' + esc(LEDGER_CONFIRM_FACT) + "</p>";
+    var claimIds = arr(run.observation_claim_ids);
+    if (!claimIds.length) {
+      return html + '<p class="simulation-muted">この実行には関係する主張が選ばれていないため、台帳の候補はありません。</p></div>';
+    }
+    var entry = state.ledgerCandidates[String(run.id)];
+    if (!entry) {
+      loadLedgerCandidates(run);
+      entry = state.ledgerCandidates[String(run.id)];
+    }
+    if (entry.loading) return html + '<p class="simulation-muted">台帳の候補を読み込み中...</p></div>';
+    if (entry.error) html += '<div class="simulation-notice is-error">' + esc(entry.error) + "</div>";
+    var busy = !!state.busy.ledgerDecide;
+    html += '<ul class="simulation-ledger-list">' + arr(entry.items).map(function (it) {
+      var label = it.label || claimLabel(it.claim_id) || "（主張の本文を表示できません）";
+      var c = it.candidate;
+      if (!c) {
+        return "<li><div>" + esc(label) + '</div><div class="simulation-muted">この実行の未処理の候補はありません（確定・見送り済みか、記帳されていません）。</div></li>';
+      }
+      var cid = String(c.candidate_id || "");
+      var reason = state.dismissReasons[cid] || "";
+      var reasonEmpty = !String(reason).trim();
+      return "<li><div>" + esc(label) + "</div>" +
+        (c.statement ? '<p class="simulation-statement">' + esc(c.statement) + "</p>" : "") +
+        factsHtml(c.facts) +
+        '<div class="simulation-actions">' +
+          '<button type="button" class="admin-action-btn" data-sim-action="ledger-confirm" data-claim-id="' + esc(it.claim_id) + '" data-candidate-id="' + esc(cid) + '"' + (busy ? " disabled" : "") + ">確定する</button>" +
+          '<input type="text" class="simulation-dismiss-reason" data-dismiss-reason="' + esc(cid) + '" placeholder="見送る理由（必須）" value="' + esc(reason) + '">' +
+          '<button type="button" class="admin-action-btn" data-sim-action="ledger-dismiss" data-claim-id="' + esc(it.claim_id) + '" data-candidate-id="' + esc(cid) + '"' + (busy || reasonEmpty ? " disabled" : "") + ">見送る</button>" +
+          '<span class="simulation-disabled-reason"' + (reasonEmpty ? "" : " hidden") + ">見送るには理由を書いてください。</span>" +
+        "</div></li>";
+    }).join("") + "</ul>";
+    return html + noticeHtml("ledgerDecide") + "</div>";
+  }
+
+  function loadLedgerCandidates(run) {
+    var runId = String(run.id);
+    var claimIds = arr(run.observation_claim_ids);
+    state.ledgerCandidates[runId] = { loading: true, error: "", items: [] };
+    var failed = false;
+    var jobs = claimIds.map(function (claimId) {
+      return deps.apiFetch("/admin/doubt/ledger/claim/" + encodeURIComponent(claimId))
+        .then(function (res) { return readJson(res, "台帳の候補を読み込めませんでした。"); })
+        .then(function (data) {
+          var hit = null;
+          arr(obj(data).simulation_candidates).forEach(function (c) {
+            if (!hit && c && String(c.run_id) === runId) hit = c;
+          });
+          return { claim_id: claimId, label: claimLabel(claimId), candidate: hit };
+        })
+        .catch(function () {
+          failed = true;
+          return { claim_id: claimId, label: claimLabel(claimId), candidate: null };
+        });
+    });
+    return Promise.all(jobs).then(function (items) {
+      state.ledgerCandidates[runId] = {
+        loading: false,
+        error: failed ? "一部の主張の台帳を読み込めませんでした。" : "",
+        items: items,
+      };
+      renderAll();
+    });
+  }
+
+  function decideLedgerCandidate(claimId, candidateId, action) {
+    var run = selectedRun();
+    if (!run || !claimId || !candidateId) return;
+    var reason = String(state.dismissReasons[candidateId] || "").trim();
+    if (action === "dismiss" && !reason) {
+      setNotice("ledgerDecide", "見送るには理由を書いてください。", "error");
+      renderAll();
+      return;
+    }
+    setNotice("ledgerDecide", "", "");
+    state.busy.ledgerDecide = true;
+    renderAll();
+    var path = "/admin/doubt/ledger/claim/" + encodeURIComponent(claimId) +
+      "/simulation-candidates/" + encodeURIComponent(candidateId) + "/" + action;
+    return post(path, action === "dismiss" ? { reason: reason } : {})
+      .then(function (res) { return readJson(res, "台帳候補の判断を記録できませんでした。"); })
+      .then(function (data) {
+        var facts = arr(obj(data).facts).filter(function (f) { return typeof f === "string" && f; });
+        if (action === "confirm") {
+          setNotice("ledgerDecide", "確定しました。" + (facts.length ? facts.join(" ") : LEDGER_CONFIRM_FACT), "success");
+        } else {
+          setNotice("ledgerDecide", "見送りました。" + facts.join(" "), "success");
+          delete state.dismissReasons[candidateId];
+        }
+      })
+      .catch(function (err) {
+        setNotice("ledgerDecide", (err && err.message) || "台帳候補の判断を記録できませんでした。", "error");
+      })
+      .then(function () {
+        state.busy.ledgerDecide = false;
+        delete state.ledgerCandidates[String(run.id)];
+        renderAll();
+      });
   }
 
   function renderProposal() {
@@ -954,6 +1113,20 @@
       state.builder.name = t.value;
       return;
     }
+    if (t.hasAttribute && t.hasAttribute("data-dismiss-reason")) {
+      var cid = t.getAttribute("data-dismiss-reason");
+      var wasEmpty = !String(state.dismissReasons[cid] || "").trim();
+      state.dismissReasons[cid] = t.value;
+      // 空 ⇄ 非空が変わったときだけ「見送る」の活性を合わせる（入力中のカーソルを失わない）。
+      if (wasEmpty !== !String(t.value).trim()) {
+        var row = t.parentNode;
+        var btn = row && row.querySelector('[data-sim-action="ledger-dismiss"]');
+        if (btn) btn.disabled = !String(t.value).trim() || !!state.busy.ledgerDecide;
+        var why = row && row.querySelector(".simulation-disabled-reason");
+        if (why) why.hidden = !!String(t.value).trim();
+      }
+      return;
+    }
     if (t.hasAttribute && t.hasAttribute("data-builder-param")) {
       var idx = Number(t.getAttribute("data-builder-index"));
       var part = state.builder.parts[idx];
@@ -997,6 +1170,12 @@
         renderAll();
         break;
       case "ledger": recordLedgerCandidate(); break;
+      case "ledger-confirm":
+        decideLedgerCandidate(btn.getAttribute("data-claim-id"), btn.getAttribute("data-candidate-id"), "confirm");
+        break;
+      case "ledger-dismiss":
+        decideLedgerCandidate(btn.getAttribute("data-claim-id"), btn.getAttribute("data-candidate-id"), "dismiss");
+        break;
       case "revision": proposeRevision(); break;
       default: break;
     }

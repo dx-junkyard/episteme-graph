@@ -399,6 +399,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # 検証シミュレーション層（simulation_bridge_design.md §7）: モーダルの4区画。
         "simulation.generate",
         "simulation.ledger-candidate",
+        "simulation.ledger-candidate-decide",
         "simulation.modal",
         "simulation.program-decide",
         "simulation.propose-revision",
@@ -694,6 +695,7 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- simulation.* — 検証シミュレーション（simulation_bridge_design.md §7） ----------
     "simulation.generate": "teacher/27-admin-simulation-bridge.md#simulation-generate",
     "simulation.ledger-candidate": "teacher/27-admin-simulation-bridge.md#simulation-ledger-candidate",
+    "simulation.ledger-candidate-decide": "teacher/27-admin-simulation-bridge.md#simulation-ledger-candidate-decide",
     "simulation.modal": "teacher/27-admin-simulation-bridge.md#simulation-modal",
     "simulation.program-decide": "teacher/27-admin-simulation-bridge.md#simulation-program-decide",
     "simulation.propose-revision": "teacher/27-admin-simulation-bridge.md#simulation-propose-revision",

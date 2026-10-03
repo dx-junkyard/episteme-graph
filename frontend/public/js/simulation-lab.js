@@ -9,16 +9,24 @@
 //   段階ラベルが付くのは理論の出力と模擬観測の間だけで、文言はサーバ（result.labels）が正本。
 // - 自動では開かない・ポーリングしない・督促しない（原則 12）。
 //
-// window.SimulationLab = { init, open, close, refresh, setContext }
+// - 学習チャットへの参照（SA層 4-e）: 開いているときだけ、選んでいる（無ければ最新の）自分の実行の
+//   id を getSelectedRunId() で返す。app.js が screen_context.selection.simulation_run_id に載せる
+//   （画面の文字は送らない = SA1。事実文にするのはサーバ）。
+//
+// window.SimulationLab = { init, open, close, refresh, setContext, getSelectedRunId }
 (function () {
   "use strict";
 
   const NOT_VERIFICATION = "シミュレーションの一致は検証ではなく、分析の妥当性の候補にとどまります。";
   const OWN_ONLY = "この記録はあなたにだけ表示されます。成績評価には使用されません。";
-  const SHARE_CONFIRM = "この実行を教員に共有し、関係する主張の台帳に候補として記帳します。確定は教員が行います。";
+  const SHARE_CONFIRM = "この実行を教員に共有します。比較が測れている実行なら、関係する主張の台帳に候補として記帳します（確定は教員が行います）。比較が測れていない実行は共有だけで、台帳の候補にはなりません。";
   const SANDBOX_OFF = "この環境ではコードを実行する場所が用意されていません。コードの生成と編集はできますが、実行はできません。";
   const GENERIC_ERROR = "処理を完了できませんでした。時間をおいてもう一度試してください。";
   const CANDIDATE_WIRING_NOTE = "この提案は参考表示です";
+  // サーバの事実文が無い UI の固定文（語の定義）。マニュアル §19「まとまりの一覧の読み方」と同じ内容。
+  const MODULE_LEGEND = "外枠 = 式のまとまりの外側の単位 / 内側 = その中の小さな手順 / 番号なし = 論文に式番号の無い式";
+  const PARAM_UNIT_NOTE = "（理論の出力と同じ単位の絶対値）";
+  const MODULE_EQUATIONS_LIMIT = 6;
   const PROGRAM_STATUS_LABELS = {
     candidate: "候補",
     confirmed: "採用済み",
@@ -92,6 +100,39 @@
   function chip(text, cls) {
     if (!text) return "";
     return '<span class="sim-lab-chip' + (cls ? " " + cls : "") + '">' + esc(text) + "</span>";
+  }
+  // 記号は KaTeX で描く（描けなければ <code> のまま）。入力欄の name 属性は記号の文字列のまま。
+  function symHtml(s) {
+    const text = str(s);
+    if (!text) return "";
+    const k = window.katex;
+    if (k && typeof k.renderToString === "function") {
+      try {
+        return '<span class="sim-lab-sym">' + k.renderToString(text, { throwOnError: false }) + "</span>";
+      } catch (_) { /* 下の <code> に縮退 */ }
+    }
+    return "<code>" + esc(text) + "</code>";
+  }
+  // 「$…$」を含む表示ラベル（式の display_label）は、$ の内側だけ KaTeX で描く。
+  function mathText(s) {
+    const text = str(s);
+    const k = window.katex;
+    if (!text || text.indexOf("$") < 0 || !k || typeof k.renderToString !== "function") return esc(text);
+    return text.split(/(\$[^$]+\$)/).map((part) => {
+      if (part.length > 2 && part.charAt(0) === "$" && part.charAt(part.length - 1) === "$") {
+        try { return k.renderToString(part.slice(1, -1), { throwOnError: false }); } catch (_) { return esc(part); }
+      }
+      return esc(part);
+    }).join("");
+  }
+  function when(s) {
+    const raw = str(s);
+    if (!raw) return "";
+    const d = new Date(raw);
+    return isNaN(d.getTime()) ? raw : d.toLocaleString();
+  }
+  function uniq(list) {
+    return arr(list).filter((f, i, all) => f && all.indexOf(f) === i);
   }
   function symOf(item) {
     const o = obj(item);
@@ -334,15 +375,35 @@
   }
   function eqList(list) {
     const labels = arr(list).map((e) => str(obj(e).display_label)).filter(Boolean);
-    return labels.length ? labels.map(esc).join("、") : "—";
+    return labels.length ? labels.map(mathText).join("、") : "—";
   }
-
-  function renderModulesStep() {
-    const list = modules().slice().sort((a, b) => {
+  // 「この手順の式」（成員の式の表示ラベル。上限を超えたら「…」）。
+  function memberEquations(mod) {
+    const labels = arr(obj(mod).equations).map((e) => str(obj(e).display_label)).filter(Boolean);
+    if (!labels.length) return "";
+    const shown = labels.slice(0, MODULE_EQUATIONS_LIMIT).map(mathText).join("、");
+    return shown + (labels.length > MODULE_EQUATIONS_LIMIT ? "、…" : "");
+  }
+  function sortedModules() {
+    return modules().slice().sort((a, b) => {
       const la = str(obj(a).level) === "inner" ? 1 : 0;
       const lb = str(obj(b).level) === "inner" ? 1 : 0;
       return la - lb;
     });
+  }
+  // 一覧の番号（1 始まり）。同じ記号のまとまりが複数あっても番号で区別する。
+  function moduleNumber(key) {
+    const idx = sortedModules().findIndex((m) => str(obj(m).module_key) === key);
+    return idx >= 0 ? idx + 1 : 0;
+  }
+  function moduleTitle(mod) {
+    const m = obj(mod);
+    const n = moduleNumber(str(m.module_key));
+    return (n ? n + ". " : "") + str(m.visual_label || m.label || "理論モジュール");
+  }
+
+  function renderModulesStep() {
+    const list = sortedModules();
     const items = list.map((m) => {
       const mod = obj(m);
       const key = str(mod.module_key);
@@ -351,19 +412,43 @@
       const active = key === st.moduleKey;
       const assumptions = arr(mod.assumptions).map((a) => {
         const ao = obj(a);
+        if (!ao.text) return "";
         return esc(ao.text) + (ao.origin_label ? "（" + esc(ao.origin_label) + "）" : "");
       }).filter(Boolean);
+      // 前提は先頭 1 件だけ見せ、残りは折りたたむ（英語の長い列で一覧が埋まらないように）。
+      let assumptionHtml = "";
+      if (assumptions.length) {
+        assumptionHtml = '<div class="sim-lab-muted">前提: ' + assumptions[0] + "</div>";
+        if (assumptions.length > 1) {
+          assumptionHtml += '<details class="sim-lab-assumptions"><summary>前提をすべて見る</summary><ul class="sim-lab-facts">' +
+            assumptions.slice(1).map((a) => "<li>" + a + "</li>").join("") + "</ul></details>";
+        }
+      }
+      // 入力の式 → 出力の式。どちらも空のまとまり（境界をまたぐ式が無い手順）は「この手順の式」を出す。
+      const hasIo = arr(mod.inputs).length || arr(mod.outputs).length;
+      const members = memberEquations(mod);
+      const toSink = arr(mod.to_sink).length;
+      let ioHtml = "";
+      if (hasIo) {
+        ioHtml = '<div class="sim-lab-io">' + eqList(mod.inputs) + " → " + eqList(mod.outputs) + "</div>";
+        if (members) ioHtml += '<details class="sim-lab-members"><summary>この手順の式</summary><div class="sim-lab-io">' + members + "</div></details>";
+      } else if (members) {
+        ioHtml = '<div class="sim-lab-io">この手順の式: ' + members + "</div>";
+      } else {
+        ioHtml = '<div class="sim-lab-io">' + eqList(mod.inputs) + " → " + eqList(mod.outputs) + "</div>";
+      }
+      if (toSink) ioHtml += '<div class="sim-lab-muted">→ 論文全体のまとめへ</div>';
       return '<li class="sim-lab-module' + (inner ? " is-inner" : "") + (active ? " is-active" : "") + '">' +
         '<button type="button" class="sim-lab-module-btn" data-sl-action="select-module" data-module-key="' + esc(key) + '"' +
-        (can ? "" : " disabled") + ">" + esc(mod.visual_label || mod.label || "理論モジュール") + "</button>" +
+        (can ? "" : " disabled") + ">" + esc(moduleTitle(mod)) + "</button>" +
         (mod.theory_object ? '<div class="sim-lab-muted">対象: ' + esc(mod.theory_object) + "</div>" : "") +
-        '<div class="sim-lab-io">' + eqList(mod.inputs) + " → " + eqList(mod.outputs) + "</div>" +
-        (assumptions.length ? '<div class="sim-lab-muted">前提: ' + assumptions.join(" / ") + "</div>" : "") +
+        ioHtml + assumptionHtml +
         (can ? "" : '<div class="sim-lab-fact">このモジュールには式の本文が引けないため、コードを作れません。</div>') +
         (mod.reconstructed_inputs ? '<div class="sim-lab-muted">入力の式に PDF から復元された式が含まれています。</div>' : "") +
         "</li>";
     }).join("");
     return '<li class="sim-lab-step">' + stepHead("①", "理論モジュールを選ぶ") +
+      '<p class="sim-lab-muted sim-lab-legend">' + esc(MODULE_LEGEND) + "</p>" +
       '<ul class="sim-lab-modules">' + items + "</ul></li>";
   }
 
@@ -375,6 +460,7 @@
     } else {
       const program = currentProgram();
       const generating = !!st.busy.generate;
+      body += '<p class="sim-lab-sub">選んだまとまり: ' + esc(moduleTitle(mod)) + "</p>";
       body += '<div class="sim-lab-row"><button type="button" class="sim-lab-btn" data-sl-action="generate"' +
         (generating ? " disabled" : "") + ">" + (generating ? "生成中…" : (program ? "作り直す" : "生成する")) + "</button>" +
         '<span class="sim-lab-muted">AI がこのモジュールの式からコードの下書きを作ります。自分で書き直せます。</span></div>';
@@ -390,7 +476,7 @@
     const prov = obj(p.provenance);
     const astOk = prov.ast_ok !== false;
     const reasons = arr(prov.ast_reasons).filter(Boolean);
-    const facts = [].concat(arr(prov.facts), arr(p.facts));
+    const facts = uniq([].concat(arr(prov.facts), arr(p.facts)));
     const saving = !!st.busy.edit;
     const adopting = !!st.busy.adopt;
     let html = '<div class="sim-lab-program">' +
@@ -441,6 +527,9 @@
     if (st.builder.length) {
       html += '<ol class="sim-lab-chain">' + st.builder.map((b, idx) => {
         const pt = obj(b.part);
+        // 単位の空いたパラメータ（ガウス雑音の sigma 等）には一度だけ基準を添える（サーバの note を優先）。
+        const unitless = arr(pt.params).some((pr) => !str(obj(pr).unit));
+        const unitNote = str(pt.note) || (unitless ? PARAM_UNIT_NOTE : "");
         const params = arr(pt.params).map((pr) => {
           const po = obj(pr);
           const name = str(po.name);
@@ -450,7 +539,8 @@
         }).join("");
         return '<li><strong>' + esc(pt.name) + "</strong>" + (pt.summary ? ' <span class="sim-lab-muted">' + esc(pt.summary) + "</span>" : "") +
           ' <button type="button" class="sim-lab-link" data-sl-action="remove-part" data-index="' + idx + '">外す</button>' +
-          (params ? '<div class="sim-lab-params">' + params + "</div>" : "") + "</li>";
+          (params ? '<div class="sim-lab-params">' + params + "</div>" +
+            (unitNote ? '<div class="sim-lab-muted">' + esc(unitNote) + "</div>" : "") : "") + "</li>";
       }).join("") + "</ol>";
       html += '<div class="sim-lab-row"><label>配線の名前 <input type="text" id="sim-lab-wiring-name" value="' + esc(st.builderName) + '" placeholder="例: 検出器つき"></label> ' +
         '<button type="button" class="sim-lab-btn" data-sl-action="save-wiring"' + (st.busy.wiring ? " disabled" : "") + ">配線を保存</button></div>";
@@ -473,7 +563,7 @@
       html += '<p class="sim-lab-muted">実行する前に、出力がいくつになると思うかを書けます（任意）。予想は採点されません。</p>' +
         '<div class="sim-lab-params">' + outs.map((o) => {
           const s = symOf(o);
-          return '<label class="sim-lab-param">あなたの予想 <code>' + esc(s) + "</code>" +
+          return '<label class="sim-lab-param">あなたの予想 ' + symHtml(s) +
             (obj(o).unit ? " [" + esc(obj(o).unit) + "]" : "") +
             ' <input type="number" step="any" data-sl-predict="' + esc(s) + '"></label>';
         }).join("") + "</div>";
@@ -487,7 +577,7 @@
       const input = vector
         ? ' <input type="text" inputmode="decimal" placeholder="数値（ベクトルはカンマ区切り）" '
         : ' <input type="number" step="any" ';
-      return '<label class="sim-lab-param"><code>' + esc(s) + "</code>" + (io2.unit ? " [" + esc(io2.unit) + "]" : "") +
+      return '<label class="sim-lab-param">' + symHtml(s) + (io2.unit ? " [" + esc(io2.unit) + "]" : "") +
         input + attr + '="' + esc(s) + '" value="' + esc(io2.default == null ? "" : io2.default) + '"></label>';
     }).join("");
     const ins = numberInputs(io.inputs, "data-sl-value");
@@ -498,7 +588,7 @@
       html += '<details class="sim-lab-ref"><summary>論文の記載値と並べる（任意）</summary><div class="sim-lab-params">' +
         outs.map((o) => {
           const s = symOf(o);
-          return '<div class="sim-lab-ref-row"><code>' + esc(s) + "</code>" +
+          return '<div class="sim-lab-ref-row">' + symHtml(s) +
             ' <label>値 <input type="number" step="any" data-sl-ref="' + esc(s) + '" data-sl-ref-field="value"></label>' +
             ' <label>単位 <input type="text" data-sl-ref="' + esc(s) + '" data-sl-ref-field="unit" value="' + esc(obj(o).unit || "") + '"></label>' +
             ' <label>出典の覚え書き <input type="text" data-sl-ref="' + esc(s) + '" data-sl-ref-field="source_note"></label></div>';
@@ -568,14 +658,14 @@
     let html = '<div class="sim-lab-run">' +
       '<div class="sim-lab-card-head">実行の結果 ' + chip(RUN_STATUS_LABELS[status] || status, "sim-lab-status-" + esc(status)) +
       (r.shared ? " " + chip("共有済み", "sim-lab-chip-shared") : "") +
-      (r.created_at ? ' <span class="sim-lab-muted">' + esc(r.created_at) + "</span>" : "") + "</div>";
+      (r.created_at ? ' <span class="sim-lab-muted">' + esc(when(r.created_at)) + "</span>" : "") + "</div>";
     if (syms.length) {
       // 予想の列には判定の語・色を付けない（SB14 / UC2）。
       html += '<table class="sim-lab-table"><thead><tr><th>記号</th><th>あなたの予想</th><th>理論の出力</th><th>模擬観測（平均 ± ばらつき）</th></tr></thead><tbody>' +
         syms.map((s) => {
           const o = obj(observed[s]);
           const obsText = (o.mean === undefined && o.std === undefined) ? "—" : fmt(o.mean) + " ± " + fmt(o.std);
-          return "<tr><td><code>" + esc(s) + "</code></td><td>" + esc(fmt(prediction[s])) + "</td><td>" +
+          return "<tr><td>" + symHtml(s) + "</td><td>" + esc(fmt(prediction[s])) + "</td><td>" +
             esc(fmt(theory[s])) + "</td><td>" + esc(obsText) + "</td></tr>";
         }).join("") + "</tbody></table>";
     }
@@ -593,12 +683,12 @@
     if (status === "succeeded") {
       const hasWiring = !!r.wiring_id;
       html += '<div class="sim-lab-row">' +
+        (r.shared ? "" : '<p class="sim-lab-muted sim-lab-share-note">' + esc(SHARE_CONFIRM) + "</p>") +
         '<button type="button" class="sim-lab-btn" data-sl-action="share" data-run-id="' + esc(r.id) + '"' +
         (r.shared || st.busy.share ? " disabled" : "") + ">" + (r.shared ? "共有済み" : "共有する") + "</button>" +
         '<button type="button" class="sim-lab-btn" data-sl-action="propose" data-run-id="' + esc(r.id) + '"' +
         (hasWiring && !st.busy.propose ? "" : " disabled") + ">改訂案を求める</button></div>";
       if (!hasWiring) html += '<p class="sim-lab-muted">改訂案は、配線を使った実行にだけ求められます。</p>';
-      if (!r.shared) html += '<p class="sim-lab-muted">共有すると、この実行が教員に見え、関係する主張の台帳に候補として記帳されます。</p>';
     }
     html += notice("share") + notice("propose");
     if (st.proposal && str(st.proposal.runId) === str(r.id)) html += renderProposal(st.proposal);
@@ -617,7 +707,7 @@
       const s = str(o.symbol);
       Object.keys(o).forEach((k) => {
         if (k === "symbol" || o[k] === null || o[k] === undefined) return;
-        rows += "<tr><td>" + esc(METRIC_LABELS[k] || k) + "</td><td><code>" + esc(s) + "</code></td><td>" + esc(fmt(o[k])) + "</td></tr>";
+        rows += "<tr><td>" + esc(METRIC_LABELS[k] || k) + "</td><td>" + symHtml(s) + "</td><td>" + esc(fmt(o[k])) + "</td></tr>";
       });
     });
     if (!rows) return "";
@@ -649,7 +739,7 @@
         const ro = obj(r);
         const lab = obj(obj(ro.result).labels);
         return '<li><button type="button" class="sim-lab-link" data-sl-action="select-run" data-run-id="' + esc(ro.id) + '">' +
-          esc(ro.created_at || "") + " " + esc(RUN_STATUS_LABELS[str(ro.status)] || str(ro.status)) +
+          esc(when(ro.created_at)) + " " + esc(RUN_STATUS_LABELS[str(ro.status)] || str(ro.status)) +
           (lab.agreement ? " / " + esc(lab.agreement) : "") + (ro.shared ? " / 共有済み" : "") + "</button></li>";
       }).join("") + "</ul></details>";
   }
@@ -840,6 +930,9 @@
         o.runs = upsert(o.runs, data.run);
         st.overview = o;
       }
+      // 共有の結果（台帳に記帳した・比べた中身が無いので記帳しなかった等）はサーバの事実文を素通し。
+      const facts = uniq(data.facts);
+      if (facts.length) st.notice.share = facts.join(" ");
     });
   }
 
@@ -895,6 +988,14 @@
     }
   }
 
+  // 学習チャットの画面文脈（SA層 4-e）へ渡す参照: 開いているときだけ、選んでいる実行（無ければ最新の
+  // 自分の実行）の id。開いていない・実行が無いときは "" で、app.js はキーごと送らない。
+  function getSelectedRunId() {
+    if (!st.open) return "";
+    const run = selectedRun() || runs()[0];
+    return run ? str(obj(run).id) : "";
+  }
+
   function init(options) {
     deps = Object.assign({}, deps, options || {});
     region = document.getElementById("simulation-lab-region");
@@ -917,5 +1018,5 @@
     updateButton();
   }
 
-  window.SimulationLab = { init, open, close, refresh, setContext };
+  window.SimulationLab = { init, open, close, refresh, setContext, getSelectedRunId };
 })();
