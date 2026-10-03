@@ -42,8 +42,14 @@ def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
 SAFE = {k: getattr(builtins, k) for k in (
     "abs", "min", "max", "sum", "range", "len", "enumerate", "zip", "map", "filter", "float",
     "int", "bool", "str", "list", "dict", "tuple", "set", "round", "pow", "sorted", "reversed",
-    "isinstance", "complex", "ValueError", "ZeroDivisionError", "Exception", "True", "False", "None")}
+    "isinstance", "complex", "ValueError", "ZeroDivisionError", "Exception", "True", "False", "None",
+    # 2026-10-03 実機: 生成コードが callable() を使って NameError。読み取り専用の組み込みを足す
+    # （ファイル・属性操作・動的実行に触れるものは足さない）。
+    "callable", "any", "all", "divmod", "iter", "next", "frozenset", "slice",
+    "TypeError", "KeyError", "IndexError", "ArithmeticError", "OverflowError", "FloatingPointError",
+    "RuntimeError", "AssertionError", "StopIteration", "NotImplementedError", "AttributeError")}
 SAFE["__import__"] = _guarded_import
+SAFE["print"] = lambda *a, **k: None  # 標準出力は結果の JSON 1 行専用。生成コードの print は捨てる
 LIMIT = 4096
 def conv(v):
     if numpy is not None:

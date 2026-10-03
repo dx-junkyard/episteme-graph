@@ -74,3 +74,17 @@ def test_timeout(server):
 
 def test_missing_source(server):
     assert server.run_source({})["ok"] is False
+
+
+def test_harness_allows_readonly_builtins_and_swallows_print(server):
+    src = (
+        "def simulate(inputs, params):\n"
+        "    f = params.get('f')\n"
+        "    print('noise')\n"
+        "    ok = callable(f) and any([True]) and all([True])\n"
+        "    return {'y': 1.0 if not ok else 2.0}\n"
+    )
+    out = server.run_source({"source": src, "entrypoint": "simulate", "inputs": {}, "params": {}, "seed": 1, "timeout_s": 5})
+    assert out["ok"], out
+    assert out["outputs"] == {"y": 1.0}
+
