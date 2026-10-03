@@ -1016,11 +1016,13 @@ def append_ledger_candidate(
     candidate: Mapping[str, Any],
     record_audit: RecordAudit | None = None,
     actor_id: str | None = None,
+    document_id: str | None = None,
+    course_id: str | None = None,
 ) -> dict:
     """台帳行を（無ければ）作り、``simulation_candidates`` に候補を 1 件追記する。
 
-    台帳行の作成は ``routes/doubt.py::_get_or_create_ledger_row`` と同じ
-    ``INSERT ... ON CONFLICT (target_id, target_type) DO NOTHING``。
+    台帳行の作成は ``core/doubt/ledger_targets.ensure_ledger_row``（``document_id`` NOT NULL を満たす。
+    migration 080 以降 ``(target_id, target_type)`` だけの INSERT は落ちる）。
     """
     tt = _require_target_type(target_type)
     tid = _clean(target_id)
@@ -1031,16 +1033,12 @@ def append_ledger_candidate(
         item.pop(key, None)
     if not _clean(item.get("candidate_id")):
         raise SimulationStateError("台帳候補の ID がありません。")
-    session.execute(
-        sa_text(
-            """
-            INSERT INTO epistemic_ledger (target_id, target_type)
-            VALUES (:tid, :ttype)
-            ON CONFLICT (target_id, target_type) DO NOTHING
-            """
-        ),
-        {"tid": tid, "ttype": tt},
-    )
+    from core.doubt.ledger_targets import ensure_ledger_row
+
+    try:
+        ensure_ledger_row(session, target_type=tt, target_id=tid, document_id=document_id, course_id=course_id)
+    except ValueError as exc:
+        raise SimulationStateError(str(exc)) from exc
     session.execute(
         sa_text(
             """

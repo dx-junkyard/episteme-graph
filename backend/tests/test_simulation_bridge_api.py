@@ -165,7 +165,7 @@ class _FakeStore:
         self.runs[run_id]["ledger_candidate_id"] = candidate_id
         return dict(self.runs[run_id])
 
-    def append_ledger_candidate(self, session, *, target_type, target_id, candidate, record_audit=None, actor_id=None):
+    def append_ledger_candidate(self, session, *, target_type, target_id, candidate, record_audit=None, actor_id=None, document_id=None, course_id=None):
         item = dict(candidate)
         item["target"] = (target_type, target_id)
         self.ledger.append(item)

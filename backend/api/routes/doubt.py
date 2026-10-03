@@ -188,14 +188,14 @@ def _get_or_create_ledger_row(session, target_type: str, target_id: str):
     row = _fetch_ledger_row(session, target_type, target_id)
     if row is not None:
         return row
-    session.execute(
-        sa_text("""
-            INSERT INTO epistemic_ledger (target_id, target_type)
-            VALUES (:tid, :ttype)
-            ON CONFLICT (target_id, target_type) DO NOTHING
-        """),
-        {"tid": target_id, "ttype": target_type},
-    )
+    # migration 080 以降 document_id は UUID NOT NULL（既定なし）。対象から引いて入れる。
+    from core.doubt.ledger_targets import ensure_ledger_row
+
+    try:
+        ensure_ledger_row(session, target_type=target_type, target_id=target_id)
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     session.commit()
     return _fetch_ledger_row(session, target_type, target_id)
 

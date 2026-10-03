@@ -487,6 +487,8 @@ def ledger_candidates_for_run(
                 candidate=candidate,
                 record_audit=record_audit,
                 actor_id=created_by,
+                document_id=str(run.get("document_id") or "") or None,
+                course_id=str(run.get("course_id") or "") or None,
             )
         )
     store_module.set_run_ledger_candidate(

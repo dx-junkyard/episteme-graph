@@ -539,7 +539,7 @@ class TestLedgerCandidate:
     def test_append_strips_forbidden_keys(self):
         session = FakeSession()
         cand = dict(_candidate(), confidence=0.9)
-        stored = store.append_ledger_candidate(session, target_type="claim", target_id="c1", candidate=cand)
+        stored = store.append_ledger_candidate(session, target_type="claim", target_id="c1", candidate=cand, document_id="dddddddd-dddd-dddd-dddd-dddddddddddd")
         assert "confidence" not in stored
         assert "confidence" not in session.ledger[("claim", "c1")]["simulation_candidates"][0]
 
@@ -547,7 +547,7 @@ class TestLedgerCandidate:
     def test_confirm_raises_only_to_indirectly_supported(self, before):
         session = FakeSession()
         cand = _candidate()
-        store.append_ledger_candidate(session, target_type="claim", target_id="c1", candidate=cand)
+        store.append_ledger_candidate(session, target_type="claim", target_id="c1", candidate=cand, document_id="dddddddd-dddd-dddd-dddd-dddddddddddd")
         session.ledger[("claim", "c1")]["verification_status"] = before
         audit = AuditLog()
         out = store.decide_ledger_candidate(
@@ -572,7 +572,7 @@ class TestLedgerCandidate:
     def test_confirm_does_not_touch_other_statuses(self, before):
         session = FakeSession()
         cand = _candidate()
-        store.append_ledger_candidate(session, target_type="claim", target_id="c1", candidate=cand)
+        store.append_ledger_candidate(session, target_type="claim", target_id="c1", candidate=cand, document_id="dddddddd-dddd-dddd-dddd-dddddddddddd")
         session.ledger[("claim", "c1")]["verification_status"] = before
         store.decide_ledger_candidate(
             session, target_type="claim", target_id="c1", candidate_id=cand["candidate_id"],
@@ -599,7 +599,7 @@ class TestLedgerCandidate:
     def test_no_wiring_label(self):
         session = FakeSession()
         cand = _candidate(wiring_name="")
-        store.append_ledger_candidate(session, target_type="claim", target_id="c1", candidate=cand)
+        store.append_ledger_candidate(session, target_type="claim", target_id="c1", candidate=cand, document_id="dddddddd-dddd-dddd-dddd-dddddddddddd")
         store.decide_ledger_candidate(
             session, target_type="claim", target_id="c1", candidate_id=cand["candidate_id"],
             action="confirm", actor_id="t2",
@@ -609,7 +609,7 @@ class TestLedgerCandidate:
     def test_dismiss_keeps_status_and_element(self):
         session = FakeSession()
         cand = _candidate()
-        store.append_ledger_candidate(session, target_type="claim", target_id="c1", candidate=cand)
+        store.append_ledger_candidate(session, target_type="claim", target_id="c1", candidate=cand, document_id="dddddddd-dddd-dddd-dddd-dddddddddddd")
         session.ledger[("claim", "c1")]["verification_status"] = "untested"
         out = store.decide_ledger_candidate(
             session, target_type="claim", target_id="c1", candidate_id=cand["candidate_id"],
@@ -625,7 +625,7 @@ class TestLedgerCandidate:
     def test_already_decided_and_missing(self):
         session = FakeSession()
         cand = _candidate()
-        store.append_ledger_candidate(session, target_type="claim", target_id="c1", candidate=cand)
+        store.append_ledger_candidate(session, target_type="claim", target_id="c1", candidate=cand, document_id="dddddddd-dddd-dddd-dddd-dddddddddddd")
         store.decide_ledger_candidate(
             session, target_type="claim", target_id="c1", candidate_id=cand["candidate_id"],
             action="dismiss", actor_id="t2",
