@@ -53,18 +53,19 @@ def _route_function(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1. 登録 kind は5つ（4-c は保留のまま）
+# 1. 登録 kind は6つ（4-c は保留のまま・4-e simulation を含む）
 # ---------------------------------------------------------------------------
 
 
 class TestRegisteredKinds:
-    def test_exactly_five_kinds_are_registered(self):
+    def test_exactly_six_kinds_are_registered(self):
         assert registered_kinds(SCREEN_LEARNING) == (
             "element",
             "verification",
             "placement",
             "view",
             "retrieved_structure",
+            "simulation",
         )
 
     def test_deferred_resolvers_are_still_absent(self):

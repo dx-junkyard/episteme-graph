@@ -241,8 +241,161 @@ def equation_body(record: Any) -> dict:
     }
 
 
+#: 式の本文スニペット（``member_equations[].latex_snippet``）の上限。表示ラベルより長く取る。
+LATEX_SNIPPET_MAX = 120
+
+#: 定義する記号を表示ラベルに並べる上限。
+LABEL_SYMBOLS_MAX = 3
+
+# 表示用 LaTeX から落とす語（数式環境の枠・番号付けの制御。KaTeX のインラインで描けない／意味を持たない）。
+_LATEX_ENV_RE = re.compile(
+    r"\\(?:begin|end)\{(?:equation|align|eqnarray|gather|multline|split|aligned|gathered|displaymath|math)\*?\}"
+)
+_LATEX_LABEL_RE = re.compile(r"\\(?:label|tag)\*?\{[^{}]*\}")
+_LATEX_NOISE_RE = re.compile(r"\\(?:nonumber|notag)\b")
+_LATEX_OUTER_DELIMS = (("$$", "$$"), ("\\[", "\\]"), ("\\(", "\\)"), ("$", "$"))
+_LATEX_LEFT_RIGHT_RE = re.compile(r"\\(?:left|right)(?![A-Za-z])")
+
+
+def _clean_latex(latex: str) -> str:
+    """表示用に LaTeX を整える（環境の枠・``\\label``・``&``・外側の区切りを落とし空白を畳む）。"""
+    text = strip_control_sequences(str(latex or "")).strip()
+    for opener, closer in _LATEX_OUTER_DELIMS:
+        if len(text) >= len(opener) + len(closer) and text.startswith(opener) and text.endswith(closer):
+            text = text[len(opener):len(text) - len(closer)].strip()
+            break
+    text = re.sub(r"(?<!\\)%[^\n]*", " ", text)  # LaTeX のコメント
+    text = _LATEX_ENV_RE.sub(" ", text)
+    text = _LATEX_LABEL_RE.sub(" ", text)
+    text = _LATEX_NOISE_RE.sub(" ", text)
+    text = text.replace("&", " ").replace("\\\\", " ").replace("$", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+#: 引数（波括弧の群）を取る LaTeX コマンドと、その群の数。切れ目の直前に引数が欠けたまま
+#: 残ると KaTeX が描けないため、そのコマンドごと落とす。
+_LATEX_ARG_COMMANDS: dict[str, int] = {
+    "frac": 2, "dfrac": 2, "tfrac": 2, "binom": 2, "dbinom": 2, "tbinom": 2,
+    "sqrt": 1, "hat": 1, "widehat": 1, "bar": 1, "overline": 1, "underline": 1, "tilde": 1,
+    "widetilde": 1, "vec": 1, "dot": 1, "ddot": 1, "mathrm": 1, "mathbf": 1, "mathit": 1,
+    "mathcal": 1, "mathbb": 1, "mathsf": 1, "mathfrak": 1, "boldsymbol": 1, "bm": 1, "text": 1,
+    "textrm": 1, "textbf": 1, "operatorname": 1, "overbrace": 1, "underbrace": 1,
+}
+
+
+def _group_start(text: str, close_index: int) -> int:
+    """``text[close_index] == "}"`` に対応する ``{`` の位置（見つからなければ -1）。"""
+    depth = 0
+    for index in range(close_index, -1, -1):
+        char = text[index]
+        escaped = index > 0 and text[index - 1] == "\\"
+        if char == "}" and not escaped:
+            depth += 1
+        elif char == "{" and not escaped:
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
+
+
+def _trim_incomplete_tail(text: str) -> str:
+    """末尾に残った「引数の足りないコマンド」「上付き・下付きの記号」を落とす（決定論）。"""
+    while True:
+        text = text.rstrip()
+        if text.endswith(("^", "_", "\\", "{")) and not text.endswith("\\{"):
+            text = text[:-1]
+            continue
+        # 末尾の完結した群を遡り、その手前のコマンドが群を足りなく持つなら群ごと落とす。
+        position = len(text)
+        groups = 0
+        while position > 0 and text[position - 1] == "}":
+            begin = _group_start(text, position - 1)
+            if begin < 0:
+                break
+            position = begin
+            groups += 1
+            while position > 0 and text[position - 1] == " ":
+                position -= 1
+        matched = re.search(r"\\([A-Za-z]+)\*?$", text[:position])
+        if matched and groups < _LATEX_ARG_COMMANDS.get(matched.group(1), 0):
+            text = text[:matched.start()]
+            continue
+        return text
+
+
+def _cut_latex(text: str, limit: int) -> tuple[str, bool]:
+    """``limit`` 字で切る。``\\コマンド`` の途中・開いた波括弧の中・引数の足りないコマンドの
+    後ろでは切らず、``\\left`` / ``\\right`` の片割れを残さない（KaTeX で描ける形に保つ）。"""
+    if len(text) <= limit:
+        return text, False
+    cut = text[:limit]
+    # 末尾が ``\\abc`` の途中（次の字も英字）なら、そのコマンドごと落とす。
+    marker = cut.rfind("\\")
+    if (
+        marker >= 0
+        and re.fullmatch(r"\\[A-Za-z]*", cut[marker:])
+        and (len(cut) - marker == 1 or text[limit].isalpha())
+    ):
+        cut = cut[:marker]
+    cut = _LATEX_LEFT_RIGHT_RE.sub("", cut)
+    # 開いたままの群の中の末尾を整えてから、開いた波括弧を閉じる。閉じた結果、引数の足りない
+    # コマンド（``\\frac{a}`` 等）が残れば、そのコマンドごと落とす。
+    cut = _trim_incomplete_tail(cut)
+    depth = 0
+    for index, char in enumerate(cut):
+        escaped = index > 0 and cut[index - 1] == "\\"
+        if char == "{" and not escaped:
+            depth += 1
+        elif char == "}" and not escaped and depth > 0:
+            depth -= 1
+    return _trim_incomplete_tail(cut + "}" * depth), True
+
+
+def equation_latex_snippet(record: Any, limit: int = LATEX_SNIPPET_MAX) -> str:
+    """式本文（LaTeX）の表示用スニペット ``$…$``（切ったときは後ろに ``…``）。本文が無ければ ""。"""
+    body = equation_body(record)
+    text = _clean_latex(body["latex"])
+    if not text:
+        return ""
+    cut, truncated = _cut_latex(text, limit)
+    if not cut:
+        return ""
+    return f"${cut}$" + ("…" if truncated else "")
+
+
+def equation_defined_symbols(record: Any) -> list[str]:
+    """式が定義する記号名（``semantics.defined_symbols`` → 無ければ式レコード直下の同名キー）。
+
+    dict 形は ``definition_status`` が ``defined`` / ``redefined``（または ``defined_here``）の
+    ものだけを数える（``equation_semantics`` の export と同じ規則）。推測しない。
+    """
+    rec = record if isinstance(record, dict) else {}
+    semantics = rec.get("semantics") if isinstance(rec.get("semantics"), dict) else {}
+    raws: list = []
+    for source in (semantics.get("defined_symbols"), rec.get("defined_symbols")):
+        if isinstance(source, list):
+            raws.extend(source)
+    out: list[str] = []
+    for raw in raws:
+        name = ""
+        if isinstance(raw, str):
+            name = raw.strip()
+        elif isinstance(raw, dict):
+            if raw.get("defined_here") or str(raw.get("definition_status") or "") in ("defined", "redefined"):
+                name = str(raw.get("symbol") or "").strip()
+        name = strip_control_sequences(name).strip().strip("$").strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
 def equation_display_label(record: Any) -> str:
-    """式の表示ラベル（PL7）。印字番号があれば ``式 (12)``、無ければ本文先頭。
+    """式の表示ラベル（PL7）。
+
+    印字番号があれば ``式 (12)``。無ければ ``番号なし: `` に続けて、
+    ①式本文の先頭（``$…$``・``LABEL_SNIPPET_MAX`` 字）②定義する記号の列挙
+    ③どちらも無いときだけ平文（A層の英語要約になりうる）の先頭、の順。
+    第 21 周: TeX 経路の式で ③ が先に出て、一覧が英語の断片で埋まっていた。
 
     ``equation_id`` は**決して**ラベルに使わない。
     """
@@ -250,10 +403,17 @@ def equation_display_label(record: Any) -> str:
     label = str(rec.get("label") or "").strip()
     if label:
         return f"式 ({label})"
-    body = equation_body(rec)
-    snippet = _first_text(body["plain_text"], body["latex"])
+    snippet = equation_latex_snippet(rec, LABEL_SNIPPET_MAX)
     if snippet:
-        return f"番号なし: {snippet[:LABEL_SNIPPET_MAX]}"
+        return f"番号なし: {snippet}"
+    symbols = equation_defined_symbols(rec)
+    if symbols:
+        listed = "、".join(f"${sym}$" for sym in symbols[:LABEL_SYMBOLS_MAX])
+        more = " ほか" if len(symbols) > LABEL_SYMBOLS_MAX else ""
+        return f"番号なし: {listed}{more} を定義する式"
+    plain = _first_text(equation_body(rec)["plain_text"])
+    if plain:
+        return f"番号なし: {plain[:LABEL_SNIPPET_MAX]}"
     return "番号なし"
 
 

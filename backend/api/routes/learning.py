@@ -195,6 +195,14 @@ from core.assistant_context.schema import (
     LEARNING_ELEMENT_TYPES,
     LEARNING_VERIFICATION_OUTPUT_CONSTRAINT,
     MAX_LEARNING_RETRIEVED_CLAIMS_PER_SOURCE,
+    selected_simulation_run_id,
+)
+# 画面文脈 4-e（assistant_screen_adapter_design.md §11.17）: 学習者が開いている自分の
+# 検証シミュレーションの実行記録。読みは store の 1 関数だけ・本人所有の判定も store。
+from core.simulation_bridge import store as simulation_store
+from core.simulation_bridge.schema import (
+    FACT_NOT_VERIFICATION as SIMULATION_FACT_NOT_VERIFICATION,
+    LEARNING_SIMULATION_OUTPUT_CONSTRAINT,
 )
 from core.learning_support_agent import (
     LearningSupportAgent,
@@ -3482,6 +3490,35 @@ def _screen_element_document_id(element: dict, ctx, grounding_document_ids: set[
     return ""
 
 
+def _screen_simulation_run(
+    ctx, *, user_id: str, grounding_document_ids: set[str]
+) -> dict:
+    """``selection.simulation_run_id`` が指す**本人の** run 行（無ければ ``{}``）。
+
+    画面文脈 4-e（§11.17 / simulation_bridge_design.md §14.4）。fail-closed:
+    UUID でない・行が無い・本人の所有でない（所有者の無い v1 の旧行を含む）・run の
+    document が grounding の範囲外 → いずれも黙って空（他人の run の存在を明かさない）。
+    """
+    run_id = selected_simulation_run_id(getattr(ctx, "selection", None))
+    if not run_id or not str(user_id or "").strip() or not grounding_document_ids:
+        return {}
+    session = _pg_session()
+    try:
+        run = simulation_store.get_run(session, run_id)
+    except Exception:  # noqa: BLE001 - 読めないなら載せないだけ（SA2）
+        logger.debug("screen_context: simulation run lookup failed", exc_info=True)
+        return {}
+    finally:
+        session.close()
+    if not run or not simulation_store.is_owner(run, user_id):
+        return {}
+    # 範囲の判定は所属の検査であって論文の優先ではない（焦点論文の規則とは別）。
+    run_document = str(run.get("document_id") or "")
+    if run_document not in grounding_document_ids:
+        return {}
+    return run
+
+
 def _learning_screen_sources(
     ctx,
     *,
@@ -3491,6 +3528,7 @@ def _learning_screen_sources(
     grounding_document_ids: set[str],
     kinds: tuple[str, ...] | None = None,
     preferred_document_ids: "tuple[str, ...]" = (),
+    user_id: str = "",
 ) -> dict:
     """画面文脈の解決に渡す ``sources``（§11.3 の契約）を権限ゲート内で組む。
 
@@ -3502,10 +3540,21 @@ def _learning_screen_sources(
     if not grounding_document_ids:
         return {}
     wanted = None if kinds is None else set(kinds)
-    if wanted is not None and not wanted & {"element", "verification", "placement"}:
+    if wanted is not None and not wanted & {
+        "element", "verification", "placement", "simulation"
+    }:
         return {}
 
     sources: dict = {}
+    if wanted is None or "simulation" in wanted:
+        simulation_run = _screen_simulation_run(
+            ctx, user_id=user_id, grounding_document_ids=grounding_document_ids
+        )
+        if simulation_run:
+            sources["simulation"] = simulation_run
+    if wanted is not None and not wanted & {"element", "verification", "placement"}:
+        return sources
+
     try:
         element = _screen_element_sources(
             ctx,
@@ -3570,6 +3619,7 @@ def _learning_screen_context_block(
     grounding_document_ids: set[str],
     kinds: tuple[str, ...] | None = None,
     preferred_document_ids: "tuple[str, ...]" = (),
+    user_id: str = "",
 ) -> tuple[str, bool]:
     """``(事実文ブロック, 台帳由来の事実を含むか)``。解決できなければ ``("", False)``。
 
@@ -3608,6 +3658,7 @@ def _learning_screen_context_block(
             grounding_document_ids=grounding_document_ids,
             kinds=kinds,
             preferred_document_ids=preferred_document_ids,
+            user_id=user_id,
         )
     except Exception:  # noqa: BLE001
         logger.debug("screen_context: sources assembly failed", exc_info=True)
@@ -6708,6 +6759,7 @@ def _learning_chat_core(
             grounding_document_ids=_screen_grounding_document_ids,
             kinds=("view",) if _cycle_mode == "elicit" else None,
             preferred_document_ids=_focus.document_ids,
+            user_id=str(current_user["id"]),
         )
     # -----------------------------------------------------------------------
     # 知識の転用層 P4-2（knowledge_transfer_design.md §5）— RAG の構造 1 hop
@@ -6745,6 +6797,13 @@ def _learning_chat_core(
         messages[0] = {
             "role": "system",
             "content": messages[0]["content"] + "\n\n" + LEARNING_VERIFICATION_OUTPUT_CONSTRAINT,
+        }
+    if SIMULATION_FACT_NOT_VERIFICATION in _screen_block:
+        # 画面文脈 4-e（§11.17）: 実行記録の事実（SB1「一致は検証ではない」）が実際に
+        # ブロックへ載ったときだけ、出力側にも同じ拘束を掛ける（台帳と同じ2段構え）。
+        messages[0] = {
+            "role": "system",
+            "content": messages[0]["content"] + "\n\n" + LEARNING_SIMULATION_OUTPUT_CONSTRAINT,
         }
     if _screen_block or _retrieved_block:
         # §11.7: 構造 grounding が載ったターンの**種別だけ**を1ビット記録する

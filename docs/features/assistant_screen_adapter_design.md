@@ -2,7 +2,8 @@
 
 > **状態: 実装済み（正本・凍結）**（Phase 1 = グラフレビュー。Phase 2〜3 は §6 予約。
 > **Phase 4 = 学習チャットは §11 で実装済み（2026-09-12・4-a/4-b/4-d。4-c は保留）**。
-> 学習側の5つ目の解決器 `retrieved_structure`（知識の転用層 P4-2）は §11.16）
+> 学習側の5つ目の解決器 `retrieved_structure`（知識の転用層 P4-2）は §11.16、6つ目の
+> `simulation`（検証シミュレーションの実行記録 = 4-e）は §11.17）
 > （2026-09-06 起票・同日実装。migration なし・新テーブルなし・LLM 呼び出し回数不変の
 > 読み時解決。実装記録は §10 = Phase 1 / §11.15 = Phase 4）
 
@@ -602,6 +603,7 @@ Phase 4 の価値（構造 grounding が回答を変えたか）を後から測�
 | **4-b** | 選択チップ1件の解決 | `element` / `view` | + `schema.py`（`"learning"` / 新ヘッダ / 新上限）/ `resolvers/learning.py` / `schemas.py` / `app.js` |
 | **4-c** | 表示中トピックの主張・要素の要約 | `topic` / `visible` | + `build_topic_evidence_items` の再利用 |
 | **4-d** | 検証事実・分野内の位置づけ | `verification` / `placement` | + 台帳・配置の学習者射影の呼び出し |
+| **4-e** | 開いている自分の検証シミュレーションの実行記録（§11.17・2026-10-03 追加） | `simulation` | + `simulation_bridge.store` の本人所有の読み / `simulation-lab.js` / `app.js` |
 
 **後方互換**: `screen_context` を送らないクライアント（および 4-a 適用前に
 `selection_text` を送らないターン）は、`render_block` が `""` を返すため
@@ -902,3 +904,39 @@ main 層のみ・LLM 呼び出し箇所不変・CostGate より後・継ぎ目�
 訳語表の非重複）。既存 `test_assistant_context_learning_{core,guardrails}.py` の
 **「登録 kind は4つ」を5つへ更新**し、`resolve_topic` / `resolve_visible` 不在（4-c 保留）の
 検査は維持した。
+
+### 11.17 simulation（検証シミュレーションの実行記録 = 4-e）— 2026-10-03
+
+**何を**: 学習チャットの6つ目の解決器 `simulation` を登録した（第 21 周 R12: 学習者が「🧪 動かして確かめる」で
+実行した結果をチャットで尋ねても、回答側が実行結果を見ていなかった）。設計の正本は
+[検証シミュレーション層](simulation_bridge_design.md) §14（SB11〜SB15）と §12.4。migration なし・新エンドポイントなし・
+**LLM 呼び出し回数不変**（合流点・CostGate の位置も不変）。
+
+**入口**: `screen_context.selection.simulation_run_id`（UUID 文字列）。フロント（`simulation-lab.js` の
+`getSelectedRunId()`）は**パネルを開いているときだけ**、選んでいる実行（無ければいちばん新しい自分の実行）の id を返し、
+`app.js` の `getScreenContext` が `selection` に additive に載せる。開いていなければキーごと送らない。要素選択と同時に送ってよい。
+画面の文字は送らない（SA1）。`ScreenContextPayload`（`api/schemas.py`）と `normalize_screen_context` が受け、UUID の形でなければ
+`selected_simulation_run_id` が捨てる（キャストエラーを route に持ち込まない）。
+
+**解決**: route（`_screen_simulation_run`）が `simulation_bridge.store.get_run` を引き、**本人所有**（`store.is_owner`）かつ run の
+document が当該ターンの grounding 範囲内のときだけ `sources["simulation"]` に入れる。他人の run・不在・範囲外は黙って空（SA2・
+他人の run の存在を明かさない）。解決器 `resolve_simulation` は画面の id と run の id が一致するときだけ事実文にする。
+
+**事実文**（最大 8 行 = `MAX_LEARNING_SIMULATION_FACTS`）: 見出し（理論モジュール名・配線名か配線なし・比較まで終わっていない
+ときはその事実）/ 入力 / 理論の出力 / 模擬観測（平均 ± ばらつき）/ あなたの予想（「当否は判定していません」と明記して並べるだけ =
+SB14）/ 段階ラベル（DTO の軸名つきの値）/ 成功した run では SB1 の一文（比較の事実より**前**に置く — 予算超過で末尾から落ちても
+この一文が残る並び）/ その他の事実文を連結した 1 行。**数値は載せてよい**（本人の run の値なので本人に見せてよい = SB6 の読み替え・
+§14.1）。記号は内部 ID の語彙（表示投影層と学習者射影の両方）で遮断する。
+
+**出力側の拘束**: SB1 の一文が実際にブロックに載ったときだけ、system 末尾（台帳の `LEARNING_VERIFICATION_OUTPUT_CONSTRAINT` と
+同じ位置）に `simulation_bridge.schema.LEARNING_SIMULATION_OUTPUT_CONSTRAINT`（一致を検証・実証と言い換えない・予想の当否を
+判定しない）を足す。
+
+**モード別**: `casual` では出さない、`cycle_mode="elicit"` では引かない（既存のモード別 kinds 規則 = §11.15.4 に従う）。それ以外は
+あり。観測は既存 `structured_grounding_present`（種別だけ・payload 空）に相乗り。
+
+**ガードレール**: `test_assistant_context_learning_guardrails.py` の「登録 kind の出荷集合」を
+element / verification / placement / view / retrieved_structure / simulation の6つへ更新（`resolve_topic` / `resolve_visible` 不在 =
+4-c 保留の固定は維持）+ `test_assistant_context_learning_simulation.py`（本人所有・範囲・id 不一致・予想の文言・SB1 の行の位置・
+数値の扱い）+ `test_simulation_lab_ui_static.py`（`app.js` が参照の id だけを載せること・開いていないときは送らないこと）。
+

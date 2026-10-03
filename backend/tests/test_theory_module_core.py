@@ -747,6 +747,7 @@ class TestPurityAndDisplay:
             "module_key", "level", "parent_module_key", "label", "visual_label", "process_verbs", "theory_object",
             "stage_keys", "dominant_stage", "source_backing_status", "inputs", "outputs", "foundation",
             "required_claims", "assumption_ids", "assumptions", "subtitle", "members", "components_for_comparison", "isolated_reason",
+            "member_equations", "to_sink",
         }
         for module in result["modules"]:
             assert set(module) == module_keys
@@ -1015,3 +1016,111 @@ class TestPlainMathRemnants:
 
     def test_mid_becomes_bar(self):
         assert builder_mod.plain_math(r"z\mid \Lambda") == "z | Λ"
+
+
+# ---------------------------------------------------------------------------
+# 第 21 周 R1 / R2: 成員の式・sink へ渡す式・番号の無い式のラベル
+# ---------------------------------------------------------------------------
+
+
+def _with_latex(fixture: dict) -> dict:
+    """fixture の式レコードに LaTeX 本文と定義する記号を足した複製（実物の TeX 経路の形）。"""
+    data = copy.deepcopy(fixture)
+    payload = data["artifacts"]["equation_semantics"]
+    records = payload.get("records") or payload.get("equations") or []
+    for index, record in enumerate(records):
+        record.setdefault("source_extraction", {})["latex"] = f"X_{{{index}}} = \\alpha_{{{index}}} + \\beta"
+        record.setdefault("semantics", {})["defined_symbols"] = [
+            {"symbol": f"X_{{{index}}}", "definition_status": "defined"},
+            {"symbol": "\\beta", "definition_status": "used"},
+        ]
+        record.setdefault("semantics", {})["summary"] = "Defines the quantity X used in the paper."
+    return data
+
+
+class TestMemberEquationsAndSink:
+    def test_member_equations_shape_order_and_cap(self, tex_2407):
+        result = _build(tex_2407)
+        assert result["available"] is True
+        for module in result["modules"]:
+            items = module["member_equations"]
+            assert len(items) <= builder_mod.MEMBER_EQUATIONS_MAX
+            ids = [item["equation_id"] for item in items]
+            assert len(ids) == len(set(ids))
+            for item in items:
+                assert set(item) == {"equation_id", "display_label", "latex_snippet", "defined_symbols"}
+                assert isinstance(item["defined_symbols"], list)
+                assert not INTERNAL_ID_RE.search(item["display_label"])
+            for item in module["to_sink"]:
+                assert set(item) == {"equation_id", "display_label"}
+
+    def test_modules_without_interface_still_list_their_equations(self, tex_2407, tex_2609):
+        # 「入力 — → 出力 —」のモジュールでも、成員の式は空にならない（R1 の症状）。
+        found = False
+        for fixture in (tex_2407, tex_2609):
+            for module in _build(fixture)["modules"]:
+                if not module["inputs"] and not module["outputs"]:
+                    found = True
+                    assert module["member_equations"]
+        assert found
+
+    def test_to_sink_matches_the_sink_handoff(self, tex_2407, tex_2609):
+        seen_sink = False
+        for fixture in (tex_2407, tex_2609):
+            for module in _build(fixture)["modules"]:
+                outputs = {item["equation_id"] for item in module["outputs"]}
+                sink_ids = {item["equation_id"] for item in module["to_sink"]}
+                assert not outputs & sink_ids
+                seen_sink = seen_sink or bool(sink_ids)
+        assert seen_sink
+
+    def test_latex_and_symbols_are_carried_when_present(self, tex_2407):
+        result = _build(_with_latex(tex_2407))
+        items = [item for module in result["modules"] for item in module["member_equations"]]
+        assert items
+        for item in items:
+            assert item["latex_snippet"].startswith("$X_{") and "\\alpha" in item["latex_snippet"]
+            assert item["defined_symbols"] and item["defined_symbols"][0].startswith("X_{")
+            assert "\\beta" not in item["defined_symbols"]  # used は定義ではない
+
+    def test_unnumbered_labels_prefer_latex_over_english_summary(self, tex_2407):
+        result = _build(_with_latex(tex_2407))
+        labels = [
+            item["display_label"]
+            for module in result["modules"]
+            for key in ("inputs", "outputs", "foundation", "member_equations", "to_sink")
+            for item in module[key]
+        ]
+        unnumbered = [label for label in labels if label.startswith("番号なし")]
+        assert unnumbered
+        for label in unnumbered:
+            assert "Defines" not in label
+            assert label.startswith("番号なし: $X_{")
+
+    def test_unnumbered_label_falls_back_to_summary_without_latex_or_symbols(self, tex_2407):
+        # 本文も記号も無い式だけ、従来の要約に縮退する（fixture = 間引いた実物）。
+        result = _build(tex_2407)
+        labels = [item["display_label"] for module in result["modules"] for item in module["member_equations"]]
+        assert any(label.startswith("番号なし: ") for label in labels)
+
+    def test_identity_material_is_unchanged_by_display_fields(self, tex_2407):
+        # TM12: 指紋・stable_key・identity_eligible は表示の追加で変わらない。
+        from core.theory_modules import build_theory_module_records
+
+        def _material(fixture):
+            payload = build_theory_module_records(
+                document_id=fixture["document_id"],
+                artifacts=fixture["artifacts"],
+                graph_json=fixture["graph_json"],
+            )
+            return [
+                (
+                    r["module_key"], r["structure_fingerprint"], r["identity_eligible"],
+                    tuple(r["produced_equation_keys"]),
+                )
+                for r in payload["records"]
+            ]
+
+        before = _material(tex_2407)
+        assert before
+        assert before == _material(_with_latex(tex_2407))

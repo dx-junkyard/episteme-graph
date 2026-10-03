@@ -23,7 +23,8 @@ from typing import Any, Callable, Mapping, Sequence
 
 from sqlalchemy import text as sa_text
 
-from core.label_vocab import SIMULATION_AGREEMENT_LABELS, SIMULATION_SEPARATION_LABELS
+from core import display_projection
+from core.label_vocab import SIMULATION_AGREEMENT_LABELS, SIMULATION_AXIS_LABELS, SIMULATION_SEPARATION_LABELS
 from core.simulation_bridge import ast_guard, codegen, comparator, instrument, schema
 
 logger = logging.getLogger(__name__)
@@ -269,6 +270,21 @@ def module_items(
                 {"text": a.get("text") or "", "origin_label": a.get("origin_label") or ""}
                 for a in module.get("assumptions") or [] if isinstance(a, dict)
             ],
+            # 第 21 周 R1: 外枠の境界をまたがないモジュールは inputs / outputs が空になる。成員の式と
+            # 論文全体のまとめ（sink）へ渡す式を additive に出す（theory_modules builder の
+            # member_equations / to_sink。無ければ空 — 表示の正本は builder）。
+            "equations": [
+                {
+                    "display_label": e.get("display_label") or "",
+                    "latex_snippet": e.get("latex_snippet") or "",
+                    "defined_symbols": str_list(e.get("defined_symbols")),
+                }
+                for e in module.get("member_equations") or [] if isinstance(e, dict)
+            ],
+            "to_sink": [
+                {"equation_id": e.get("equation_id"), "display_label": e.get("display_label") or ""}
+                for e in module.get("to_sink") or [] if isinstance(e, dict)
+            ],
             "has_equation_text": bool(texted),
             "reconstructed_inputs": any(is_reconstructed(r) for r in texted),
             "program": program_dto(latest_program_by_module.get(key)),
@@ -460,24 +476,94 @@ def run_pipeline(
         theory_outputs, observed, reference=dict(reference) if reference else None, wiring_name=wiring_name
     )
     statement = comparator.comparison_statement(comparison, module_label=module_label, wiring_name=wiring_name)
-    facts = list(comparison.facts)
+    # 第 21 周 R5: statement は一致の文を含むので、facts 側の同じ一致の文を 1 つに畳む。
+    agreement_fact = schema.closed_world(
+        schema.AGREEMENT_FACTS[comparison.agreement_level], wiring_name=wiring_name
+    )
+    comparison_dict = comparison.to_dict()
+    comparison_dict["facts"] = without_statement_duplicate(comparison_dict["facts"], statement, agreement_fact)
+    facts = list(comparison_dict["facts"])
     if reconstructed:
         facts.append(schema.FACT_RECONSTRUCTED_INPUTS)
     result = {
         "theory_outputs": theory_outputs,
-        "observed": observed,
-        "comparison": comparison.to_dict(),
-        "labels": {
-            "agreement": SIMULATION_AGREEMENT_LABELS[comparison.agreement_level],
-            "separation": SIMULATION_SEPARATION_LABELS[comparison.separation_level],
-            "reference": SIMULATION_AGREEMENT_LABELS[comparison.reference_level],
-        },
+        # 第 21 周 R7: 配線なしは「模擬観測は理論の出力そのもの」（FACT_NO_WIRING）なので、表もそうする。
+        # 比較の意味（一致は未測定）は comparator のまま変えない。
+        "observed": observed if observed is not None else observed_from_theory(theory_outputs),
+        "comparison": comparison_dict,
+        "labels": axis_labels(
+            comparison.agreement_level, comparison.separation_level, comparison.reference_level
+        ),
         "statement": statement,
         "facts": facts,
         "reconstructed_inputs": reconstructed,
         "wiring_name": wiring_name,
     }
     return schema.RUN_STATUS_SUCCEEDED, result, {"status": schema.RUN_STATUS_SUCCEEDED, "error": ""}
+
+
+def axis_labels(agreement_level: str, separation_level: str, reference_level: str) -> dict[str, str]:
+    """``result.labels``（第 21 周 R5: 値は ``"{軸名}: {段階}"`` — 3 つが何の段階か読めるように）。"""
+    return {
+        "agreement": f"{SIMULATION_AXIS_LABELS['agreement']}: {SIMULATION_AGREEMENT_LABELS[agreement_level]}",
+        "separation": f"{SIMULATION_AXIS_LABELS['separation']}: {SIMULATION_SEPARATION_LABELS[separation_level]}",
+        "reference": f"{SIMULATION_AXIS_LABELS['reference']}: {SIMULATION_AGREEMENT_LABELS[reference_level]}",
+    }
+
+
+def without_statement_duplicate(facts: Sequence[str], statement: str, agreement_fact: str) -> list[str]:
+    """statement と同文・statement が既に言っている一致の文を facts から落とす（R5）。"""
+    statement = str(statement or "")
+    out = []
+    for fact in facts or []:
+        text = str(fact)
+        if statement and (text == statement or text == agreement_fact):
+            continue
+        out.append(text)
+    return out
+
+
+def observed_from_theory(theory_outputs: Mapping[str, Any]) -> dict[str, dict]:
+    """配線なしの模擬観測（= 理論の出力そのもの・ばらつきなし）を観測の表の形にする（R7）。"""
+    out: dict[str, dict] = {}
+    for symbol, value in (theory_outputs or {}).items():
+        base = comparator.scalar(value)
+        if base is not None:
+            out[str(symbol)] = {"mean": base, "std": None}
+    return out
+
+
+def is_unmeasured_run(run: Mapping[str, Any]) -> bool:
+    """比較の 3 軸（一致・分離・記載値）がすべて未測定の run か（共有で台帳候補を作らない判定）。"""
+    comparison = dict((run.get("result") or {}).get("comparison") or {})
+    unmeasured = schema.AGREEMENT_LEVEL_UNMEASURED
+    return all(
+        str(comparison.get(key) or unmeasured) == unmeasured
+        for key in ("agreement_level", "separation_level", "reference_level")
+    )
+
+
+def is_readable_target_label(label: Any) -> bool:
+    """観測系の主張の候補として学習者・教員に出してよいラベルか（R16・P-0008）。
+
+    本文が空・``（本文を特定できない要素）``・内部 ID 形（``claim:`` / ``span_`` / ``tex_b`` 等）は出さない。
+    英語の原文は教材の言語なので残す。
+    """
+    text = str(label or "").strip()
+    if not text or text == display_projection.UNIDENTIFIED_ELEMENT_TEXT:
+        return False
+    lowered = text.lower()
+    if lowered.startswith("claim:") or "span_" in lowered or "tex_b" in lowered:
+        return False
+    return not display_projection.contains_internal_id(text)
+
+
+def readable_observation_targets(targets: Sequence[Any]) -> list[dict]:
+    """``observation_claim_targets`` の戻りから、本文の読める候補だけを残す（両 route の唯一の判定）。"""
+    return [
+        dict(t) for t in targets or []
+        if isinstance(t, Mapping) and t.get("claim_id") and is_readable_target_label(t.get("label"))
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +689,12 @@ def metrics_by_symbol_list(mapping: Any) -> list[dict]:
 
 __all__ = [
     "SYMBOL_LIMIT",
+    "axis_labels",
+    "is_readable_target_label",
+    "is_unmeasured_run",
+    "observed_from_theory",
+    "readable_observation_targets",
+    "without_statement_duplicate",
     "check_source",
     "rollback_quietly",
     "equation_rows",

@@ -336,7 +336,8 @@ class TestOverview:
         assert out["sandbox_configured"] is False
         module = out["modules"][0]
         assert set(module) == {"module_key", "level", "label", "visual_label", "theory_object", "inputs",
-                               "outputs", "assumptions", "has_equation_text", "reconstructed_inputs", "program"}
+                               "outputs", "assumptions", "has_equation_text", "reconstructed_inputs", "program",
+                               "equations", "to_sink"}
         assert module["has_equation_text"] is True
         assert module["program"] is None
         assert "structure_fingerprint" not in module
@@ -483,8 +484,10 @@ class TestRuns:
         assert "def simulate_instrument" in payloads[1]["source"]
         comparison = run["result"]["comparison"]
         assert comparison["agreement_level"] == "match"
-        assert run["result"]["labels"]["agreement"] == "一致"
-        assert run["result"]["labels"]["separation"] in ("分離できる", "境界", "埋もれる", "未測定")
+        # 第 21 周 R5: 値は「軸名: 段階」
+        assert run["result"]["labels"]["agreement"] == "一致（理論の出力と模擬観測）: 一致"
+        assert run["result"]["labels"]["separation"].split(": ", 1)[1] in ("分離できる", "境界", "埋もれる", "未測定")
+        assert run["result"]["labels"]["reference"].startswith("記載値との一致: ")
         assert "増幅＋ノイズ" in run["result"]["statement"]
         _assert_no_forbidden_keys(out)
 

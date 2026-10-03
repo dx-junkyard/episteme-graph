@@ -90,6 +90,7 @@ __all__ = [
     "SIMULATION_AGREEMENT_LABELS",
     "SIMULATION_AGREEMENT_LEVEL_SCALE",
     "SIMULATION_AGREEMENT_THRESHOLDS",
+    "SIMULATION_AXIS_LABELS",
     "SIMULATION_SEPARATION_LABELS",
     "SIMULATION_SEPARATION_LEVEL_SCALE",
     "SIMULATION_SEPARATION_THRESHOLDS",
@@ -406,6 +407,13 @@ SIMULATION_SEPARATION_LABELS = MappingProxyType({
     "border": "境界",
     "buried": "埋もれる",
     "unmeasured": "未測定",
+})
+#: 段階ラベル 3 つの軸名（第 21 周 R5: 「未測定 / 未測定 / 未測定」が何の 3 つか読めなかった）。
+#: 表示は ``"{軸名}: {段階}"``（``simulation_bridge.service.run_pipeline`` の ``result.labels``）。
+SIMULATION_AXIS_LABELS = MappingProxyType({
+    "agreement": "一致（理論の出力と模擬観測）",
+    "separation": "分離（効果とばらつき）",
+    "reference": "記載値との一致",
 })
 
 

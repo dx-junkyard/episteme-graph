@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable
 
 from pydantic import BaseModel, Field
@@ -26,7 +27,6 @@ from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE, sanitize_source_text_for_
 
 __all__ = [
     "FACT_GENERATION_FAILED",
-    "FACT_OUTPUTS_NOT_MATCHING",
     "build_codegen_prompt",
     "generate_program",
     "program_facts_for_display",
@@ -34,8 +34,8 @@ __all__ = [
 
 #: LLM の応答が得られなかった・読めなかったとき（数値なしの事実文）。
 FACT_GENERATION_FAILED = "コードを生成できませんでした（AI の応答を読めませんでした）。"
-#: io_contract の出力記号が理論モジュールの出力の式の記号と重ならないとき（警告・候補のまま）。
-FACT_OUTPUTS_NOT_MATCHING = "生成されたコードの出力の記号が、理論モジュールの出力の式の記号と重なっていません。"
+# io_contract の出力記号が理論モジュールの出力の式の記号と重ならないときの事実文は
+# ``schema.outputs_not_matching_fact``（第 21 周 R9: 両方の記号を名指しする・警告で候補のまま）。
 
 _TEXT_LIMIT = 1200
 _DEFINITION_LIMIT = 300
@@ -59,6 +59,7 @@ _INSTRUCTION = """あなたは理論の数式を、検算用の小さな Python 
   `{"symbol": 記号, "kind": 種別, "unit": 単位（不明なら空文字）, "default": 既定値（無ければ空文字）}`。
 - `facts`: どの近似を置いたか・何を省いたかを日本語の短い事実文で列挙してください。
   式の本文が読み取れない・復元された式で不確かな箇所も、ここに事実として書いてください。
+  facts は学習者が読む文です。role= などの内部の語・英語の型名を書かないでください。
 
 # 出力形式
 JSON オブジェクト `{"source_code": "...", "io_contract": {...}, "facts": ["..."]}` だけを返してください。"""
@@ -256,10 +257,28 @@ def _normalize_contract(value: Any) -> dict[str, list[dict]]:
     return {key: _contract_items(raw.get(key)) for key in ("inputs", "outputs", "parameters")}
 
 
+#: 資料の ``role=`` 語彙 → 学習者が読む日本語（第 21 周 R8: LLM の facts がプロンプトの語彙を写す）。
+ROLE_WORDS: dict[str, str] = {
+    "input": "入力の式",
+    "output": "出力の式",
+    "member": "手順の中の式",
+    "foundation": "共有の基礎の式",
+}
+_ROLE_RE = re.compile(r"role\s*=\s*(input|output|member|foundation)\b", re.IGNORECASE)
+
+
+def _humanize_fact(text: str) -> str:
+    """``role=output`` 等を日本語に置換する。置換し切れない ``role=`` が残る文は空にする（落とす）。"""
+    replaced = _ROLE_RE.sub(lambda m: ROLE_WORDS[m.group(1).lower()], text)
+    if re.search(r"role\s*=", replaced, re.IGNORECASE):
+        return ""
+    return replaced
+
+
 def _normalize_facts(value: Any) -> list[str]:
     facts: list[str] = []
     for item in _str_list(value):
-        text = strip_control_sequences(item).strip()[:_FACT_LIMIT]
+        text = _humanize_fact(strip_control_sequences(item).strip())[:_FACT_LIMIT]
         if text and text not in facts:
             facts.append(text)
     return facts[:_MAX_FACTS]
@@ -271,12 +290,38 @@ def _source_of(data: dict) -> str:
 
 
 def _output_symbols(module: dict, equations: list[dict]) -> set[str]:
+    """モジュールの出力の式が定義する記号名（dict 形のレコードは名前だけを取る — 第 21 周の再演で dict の repr が
+    学習者の事実文に出た）。判定は論文層の正本 ``equation_defined_symbols`` に委ねる。"""
+    from core.graph_paper_layer.schema import equation_defined_symbols  # 遅延 import（循環回避）
+
     output_ids = {str(o.get("equation_id")) for o in module.get("outputs") or [] if isinstance(o, dict)}
     symbols: set[str] = set()
     for row in equations:
         if isinstance(row, dict) and _equation_id(row) in output_ids:
-            symbols.update(_str_list(row.get("defined_symbols")))
-    return {s.strip() for s in symbols if s.strip()}
+            names = equation_defined_symbols(row)
+            if not names:
+                names = [x for x in _str_list(row.get("defined_symbols")) if not x.lstrip().startswith("{")]
+            symbols.update(names)
+    return {s.strip() for s in symbols if s.strip() and not s.lstrip().startswith("{")}
+
+
+_SYMBOL_NORM_RE = re.compile(r"\\(?:mathrm|mathcal|mathbf|mathit|rm|text|mathsf|boldsymbol|bm)\s*\{([^{}]*)\}")
+
+
+def normalize_symbol(name: Any) -> str:
+    """記号名の照合用の正規化（TeX の修飾・波括弧・バックスラッシュ・空白・`$` を落として小文字に）。
+    ``C_{\\mathrm{eff}}`` と ``C_eff`` を同じ記号とみなす（第 21 周の再演: ASCII 名と TeX 名の食い違いで誤警告）。"""
+    text = str(name or "").replace("$", "")
+    for _ in range(3):
+        text = _SYMBOL_NORM_RE.sub(r"\1", text)
+    text = re.sub(r"\\[A-Za-z]+", lambda m: m.group(0)[1:], text)
+    return re.sub(r"[{}\\\s]", "", text).lower()
+
+
+def symbols_overlap(declared: set[str], expected: set[str]) -> bool:
+    d = {normalize_symbol(x) for x in declared if str(x).strip()}
+    e = {normalize_symbol(x) for x in expected if str(x).strip()}
+    return bool(d & e)
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -377,8 +422,8 @@ def generate_program(
         system_facts.append(schema.FACT_AST_REJECTED)
     expected = _output_symbols(module, equations)
     declared = {item["symbol"] for item in contract["outputs"]}
-    if expected and declared and not (expected & declared):
-        system_facts.append(FACT_OUTPUTS_NOT_MATCHING)
+    if expected and declared and not symbols_overlap(declared, expected):
+        system_facts.append(schema.outputs_not_matching_fact(declared, expected))
     return schema.ProgramDraft(
         source_code=source,
         io_contract=contract,

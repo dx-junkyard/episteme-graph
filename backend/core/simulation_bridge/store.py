@@ -1070,8 +1070,11 @@ def decide_ledger_candidate(
     action: str,
     actor_id: str,
     record_audit: RecordAudit | None = None,
+    reason: str = "",
 ) -> dict:
     """台帳候補の確定 / 見送り（配列内の status 遷移。行・要素は削除しない）。
+
+    ``reason`` は見送りの理由（RE5 と同じく見送りは理由を残す。確定では使わない）。
 
     確定時は ``verification_scopes`` に ``VerificationScope`` 形のスコープを 1 件追加し
     （``system`` = 配線名 or 「配線なし」・``condition`` = 入力条件・``evidence_ids`` は空）、
@@ -1144,6 +1147,8 @@ def decide_ledger_candidate(
         audit_action = "ledger_candidate_confirmed"
     else:
         target["status"] = schema.LEDGER_CANDIDATE_STATUS_DISMISSED
+        if _clean(reason):
+            target["dismiss_reason"] = _clean(reason)[:400]
         target["dismissed_by"] = actor
         target["dismissed_at"] = now
         session.execute(

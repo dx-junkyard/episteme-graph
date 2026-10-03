@@ -21,12 +21,11 @@ from core import label_vocab
 
 from . import schema
 
-__all__ = ["EPSILON", "compare", "comparison_statement"]
+__all__ = ["EPSILON", "compare", "comparison_statement", "scalar"]
 
 #: 相対差の分母の下限（理論の出力が 0 のとき）。
 EPSILON = 1e-12
-#: 理論の出力がゼロで相対差が定義できないときの事実文。
-FACT_ZERO_THEORY_OUTPUT = "理論の出力がゼロのため、相対差（一致の度合い）は測れません。"
+# 理論の出力がゼロの記号の事実文は ``schema.zero_theory_fact``（第 21 周 R6: 記号を名指しする）。
 
 _REFERENCE_SENTENCES: tuple[tuple[str, str], ...] = (
     (schema.AGREEMENT_LEVEL_MATCH, "論文の記載値と一致しています。"),
@@ -59,6 +58,11 @@ def _scalar(value: Any) -> float | None:
             return None
         return sum(flat) / len(flat)
     return None
+
+
+def scalar(value: Any) -> float | None:
+    """公開名（配線なしの観測を理論値で埋めるときに service が使う）。"""
+    return _scalar(value)
 
 
 def _rel_diff(value: float, base: float) -> float | None:
@@ -102,7 +106,7 @@ def compare(
     rel_values: list[float] = []
     sep_values: list[float] = []
     sep_unmeasured = False
-    zero_theory = False
+    zero_theory: list[str] = []
     point_values: dict[str, float] = {}
 
     for symbol in sorted(theory):
@@ -115,9 +119,10 @@ def compare(
             mean, std = _observed_stats(observed[symbol])
             if mean is None:
                 continue
-        rel = _rel_diff(mean, base)
+        # 配線なしは観測が理論値そのものなので、記号ごとの相対差も測らない（0.0 を「一致」と読ませない — 第 21 周の再演）
+        rel = None if no_wiring else _rel_diff(mean, base)
         if rel is None:
-            zero_theory = True
+            zero_theory.append(symbol)
         ratio: float | None = None
         if not no_wiring and std is not None and std > 0:
             ratio = abs(base) / std
@@ -180,7 +185,7 @@ def compare(
     if no_wiring:
         facts.append(schema.FACT_NO_WIRING)
     if zero_theory:
-        facts.append(FACT_ZERO_THEORY_OUTPUT)
+        facts.append(schema.zero_theory_fact(zero_theory))
     facts.append(schema.FACT_NOT_VERIFICATION)
 
     metrics: dict[str, Any] = {

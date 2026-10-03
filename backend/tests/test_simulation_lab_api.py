@@ -753,3 +753,58 @@ class TestVectorValues:
         with pytest.raises(HTTPException):
             sl._value_pairs([{"symbol": "k1", "value": []}], label="入力の値")
 
+
+
+# ---------------------------------------------------------------------------
+# 第 21 周の是正（R13 採用の意味 / R16 観測系の主張 / 未測定の共有）
+# ---------------------------------------------------------------------------
+
+
+class TestRound21:
+    def test_adopt_says_it_is_not_teacher_approval(self, env):
+        pid = _seed_program(env, status="candidate")
+        out = lab.adopt_simulation_lab_program(pid, current_user=STUDENT)
+        assert out["facts"] == [schema.FACT_ADOPTED]
+        assert schema.FACT_ADOPTED in out["program"]["facts"]
+        assert schema.FACT_ADOPTED in out["program"]["provenance"]["facts"]
+
+    def test_candidate_program_has_no_adopted_fact(self, env):
+        pid = _seed_program(env, status="candidate")
+        overview = lab.get_simulation_lab_overview(COURSE, document_id=DOC, current_user=STUDENT)
+        program = next(p for p in overview["programs"] if p["id"] == pid)
+        assert schema.FACT_ADOPTED not in program["facts"]
+
+    def test_unreadable_targets_are_dropped_and_fact_added(self, env, monkeypatch):
+        rows = [
+            {"claim_id": "c1", "label": "（本文を特定できない要素）"},
+            {"claim_id": "c2", "label": "claim:tex_b19:span_002"},
+        ]
+        for module in (lab, sbr):
+            monkeypatch.setattr(module, "observation_claim_targets", lambda s, **k: list(rows))
+        out = lab.get_simulation_lab_overview(COURSE, document_id=DOC, current_user=STUDENT)
+        assert out["observation_targets"] == []
+        assert schema.FACT_NO_OBSERVATION_TARGETS in out["facts"]
+        teacher = sbr.get_simulation_overview(DOC, current_user=TEACHER)
+        assert teacher["observation_targets"] == []
+        assert schema.FACT_NO_OBSERVATION_TARGETS in teacher["facts"]
+
+    def test_readable_targets_keep_no_fact(self, env):
+        out = lab.get_simulation_lab_overview(COURSE, document_id=DOC, current_user=STUDENT)
+        assert [t["claim_id"] for t in out["observation_targets"]] == ["c1"]
+        assert schema.FACT_NO_OBSERVATION_TARGETS not in out["facts"]
+
+    def test_share_of_unmeasured_run_does_not_write_ledger(self, env):
+        pid = _seed_program(env)
+        rid = lab.create_simulation_lab_run(COURSE, body=_run_body(pid), current_user=STUDENT)["run"]["id"]
+        assert env["store"].runs[rid]["status"] == "succeeded"
+        out = lab.share_simulation_lab_run(rid, body=None, current_user=STUDENT)
+        assert out["run"]["shared"] is True
+        assert env["store"].ledger == []
+        assert schema.FACT_SHARED_UNMEASURED in out["facts"]
+        assert schema.FACT_SHARED_LEDGER not in out["facts"]
+
+    def test_no_wiring_run_shows_observed_as_theory(self, env):
+        pid = _seed_program(env)
+        run = lab.create_simulation_lab_run(COURSE, body=_run_body(pid), current_user=STUDENT)["run"]
+        observed = {o["symbol"]: o for o in run["result"]["observed"]}
+        assert observed["k"] == {"symbol": "k", "mean": 2.0, "std": None}

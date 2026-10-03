@@ -318,6 +318,8 @@ def _run_dto(run: dict | None, *, viewer_id: str = "", shared_by: dict[str, str]
         "wiring_id": run.get("wiring_id"),
         "status": run.get("status"),
         "observation_claim_ids": list(run.get("observation_claim_ids") or []),
+        # 学習者が実行前に書いた予想（SB14: 並べて見せるだけ・当否は付けない。第 21 周 (g) の教員画面の列）
+        "prediction": [dict(x) for x in (run.get("prediction") or []) if isinstance(x, dict)],
         "inputs": dict(run.get("inputs") or {}),
         "result": dict(run.get("result") or {}),
         "runner": {"status": runner.get("status") or run.get("status"), "error": runner.get("error") or ""},
@@ -461,8 +463,12 @@ def get_simulation_overview(document_id: str, current_user: dict = Depends(_requ
             logger.debug("simulation: observation targets unavailable", exc_info=True)
             service.rollback_quietly(session)
             targets = []
+        # 第 21 周 R16: 本文の読めない・内部 ID 形のラベルは候補から外す（学習者側と同じ 1 関数）。
+        targets = service.readable_observation_targets(targets)
         if not catalog_rows:
             facts.append(schema.FACT_NO_PARTS_CATALOG)
+        if not targets:
+            facts.append(schema.FACT_NO_OBSERVATION_TARGETS)
         client = _sandbox_client()
         return {
             "document_id": doc,

@@ -411,9 +411,10 @@ def _targets(session: Any, document_id: str) -> list[dict]:
         logger.debug("simulation lab: observation targets unavailable", exc_info=True)
         service.rollback_quietly(session)
         rows = []
+    # 第 21 周 R16: 本文の読めない・内部 ID 形のラベルは候補から外す（判定は service の 1 関数）。
     return [
         {"claim_id": str(t.get("claim_id") or ""), "label": t.get("label") or ""}
-        for t in rows or [] if isinstance(t, dict) and t.get("claim_id")
+        for t in service.readable_observation_targets(rows or [])
     ]
 
 
@@ -434,6 +435,10 @@ def _program_dto(program: dict | None) -> dict | None:
     if not program:
         return None
     provenance = dict(program.get("provenance") or {})
+    facts = [str(f) for f in provenance.get("facts") or []]
+    # 第 21 周 R13: 採用（confirmed）は本人の選択で教員の承認ではないことを、版の事実文に常に添える。
+    if program.get("review_status") == schema.PROGRAM_STATUS_CONFIRMED and schema.FACT_ADOPTED not in facts:
+        facts.append(schema.FACT_ADOPTED)
     return _strip({
         "id": program.get("id"),
         "module_key": program.get("module_key"),
@@ -442,11 +447,11 @@ def _program_dto(program: dict | None) -> dict | None:
         "io_contract": dict(program.get("io_contract") or {}),
         "provenance": {
             "reconstructed_inputs": bool(provenance.get("reconstructed_inputs")),
-            "facts": list(provenance.get("facts") or []),
+            "facts": list(facts),
             "ast_ok": bool(provenance.get("ast_ok")),
             "ast_reasons": list(provenance.get("ast_reasons") or []),
         },
-        "facts": list(provenance.get("facts") or []),
+        "facts": list(facts),
         "created_at": program.get("created_at"),
     })
 
@@ -628,6 +633,9 @@ def get_simulation_lab_overview(
         runs = store.list_runs(session, document_id=doc, owner_user_id=uid)
         if not catalog_rows:
             facts.append(schema.FACT_NO_PARTS_CATALOG)
+        targets = _targets(session, doc)
+        if not targets:
+            facts.append(schema.FACT_NO_OBSERVATION_TARGETS)
         return {
             **base,
             "available": bool(modules),
@@ -636,7 +644,7 @@ def get_simulation_lab_overview(
             "programs": [_program_dto(p) for p in programs],
             "wirings": [_wiring_dto(w, catalog) for w in wirings],
             "runs": [_run_dto(r) for r in runs],
-            "observation_targets": _targets(session, doc),
+            "observation_targets": targets,
         }
     finally:
         session.close()
@@ -795,7 +803,7 @@ def adopt_simulation_lab_program(program_id: str, current_user: dict = Depends(_
         refreshed = store.get_program(session, str(program.get("id"))) or program
     finally:
         session.close()
-    return {"program": _program_dto(refreshed)}
+    return {"program": _program_dto(refreshed), "facts": [schema.FACT_ADOPTED]}
 
 
 # ---------------------------------------------------------------------------
@@ -1064,6 +1072,9 @@ def share_simulation_lab_run(
         if not already:
             if run.get("status") != schema.RUN_STATUS_SUCCEEDED:
                 facts.append(schema.FACT_SHARED_NOT_SUCCEEDED)
+            elif service.is_unmeasured_run(run):
+                # 比較の 3 軸がすべて未測定なら、台帳に載せる中身が無い（SB13 の読み替え・§14.1）。
+                facts.append(schema.FACT_SHARED_UNMEASURED)
             else:
                 requested = body.claim_ids if body is not None and body.claim_ids is not None else None
                 known = {t["claim_id"] for t in _targets(session, str(run.get("document_id") or ""))}

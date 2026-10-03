@@ -89,7 +89,7 @@ class TestCompare:
         # 理論出力がゼロなら相対差は定義できない（2026-10-03 是正: 以前は EPSILON で割って「一致」/「乖離」を出していた）
         c = comparator.compare({"y": 0.0}, {"y": {"mean": 0.0, "std": 1.0}})
         assert c.agreement_level == "unmeasured"
-        assert comparator.FACT_ZERO_THEORY_OUTPUT in c.facts
+        assert schema.zero_theory_fact(["y"]) in c.facts
 
     def test_list_theory_output(self):
         c = comparator.compare({"y": [1.0, 3.0]}, {"y": {"mean": 2.0, "std": 0.1}})
@@ -137,5 +137,30 @@ def test_zero_theory_output_is_unmeasured_not_divergent():
     c = comparator.compare({"y": 0.0}, {"y": {"mean": 0.01, "std": 0.1}}, wiring_name="W")
     assert c.agreement_level == "unmeasured"
     assert c.metrics["relative_difference"] is None
-    assert comparator.FACT_ZERO_THEORY_OUTPUT in c.facts
+    assert schema.zero_theory_fact(["y"]) in c.facts
 
+
+
+class TestRound21:
+    """第 21 周の是正（R6 記号ごとのゼロ出力・R5 軸名は service 側）。"""
+
+    def test_zero_theory_names_only_the_zero_symbols(self):
+        c = comparator.compare(
+            {"L_5": 0.0, "a": 2.0},
+            {"L_5": {"mean": 0.01, "std": 0.1}, "a": {"mean": 2.0, "std": 0.1}},
+        )
+        fact = schema.zero_theory_fact(["L_5"])
+        assert fact in c.facts
+        # 他の記号の相対差は従来どおり測る
+        assert c.metrics["relative_difference"] == pytest.approx(0.0)
+        assert c.agreement_level == "match"
+        assert c.metrics["by_symbol"]["L_5"]["relative_difference"] is None
+
+    def test_no_zero_theory_fact_when_nonzero(self):
+        c = comparator.compare({"a": 2.0}, {"a": {"mean": 2.0, "std": 0.1}})
+        assert not any("ゼロ" in f for f in c.facts)
+
+    def test_zero_theory_fact_has_no_count(self):
+        fact = schema.zero_theory_fact(["b", "a"])
+        assert fact == "理論の出力がゼロの記号（a、b）については、相対差を測れません。"
+        assert schema.zero_theory_fact([]) == ""

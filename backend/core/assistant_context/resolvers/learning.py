@@ -28,9 +28,12 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from core.display_projection import contains_internal_id as _display_internal_id
 from core.element_vocab import claim_type_label, theory_stage_key, theory_stage_label
-from core.learner_context_common import is_internal_id_label, safe_text
+from core.learner_context_common import contains_internal_id, is_internal_id_label, safe_text
+from core.simulation_bridge.schema import FACT_NOT_VERIFICATION, RUN_STATUS_SUCCEEDED
 from core.text_excerpt import excerpt as _excerpt
+from core.text_hygiene import strip_control_sequences
 
 from ..registry import register
 from ..schema import (
@@ -46,6 +49,11 @@ from ..schema import (
     MAX_LEARNING_RETRIEVED_CLAIM_CHARS,
     MAX_LEARNING_RETRIEVED_CLAIMS_PER_SOURCE,
     MAX_LEARNING_RETRIEVED_FACTS,
+    MAX_LEARNING_SIMULATION_FACT_LINE_CHARS,
+    MAX_LEARNING_SIMULATION_FACTS,
+    MAX_LEARNING_SIMULATION_SYMBOL_CHARS,
+    MAX_LEARNING_SIMULATION_SYMBOLS,
+    MAX_LEARNING_SIMULATION_VECTOR_ITEMS,
     MAX_LEARNING_SUPPORT_ITEMS,
     MAX_LEARNING_VERIFICATION_FACTS,
     MAX_TEXT_CHARS,
@@ -53,6 +61,7 @@ from ..schema import (
     SCREEN_LEARNING,
     ScreenContext,
     infer_selection_kind,
+    selected_simulation_run_id,
 )
 
 # ---------------------------------------------------------------------------
@@ -561,6 +570,170 @@ def resolve_retrieved_structure(
     return facts[:MAX_LEARNING_RETRIEVED_FACTS]
 
 
+# ---------------------------------------------------------------------------
+# kind "simulation" — 学習者が開いている自分の検証シミュレーションの実行記録（4-e）
+#
+# 正本: ``docs/features/simulation_bridge_design.md`` §14（SB11〜SB15）と本層の §11.17。
+# route が**本人所有**かつ grounding の document 範囲内の run だけを
+# ``sources["simulation"]`` に入れる（他人の run・不在は渡さない = 黙って空）。
+# 本人の run なので入力・出力・模擬観測の値は載せてよい（SB6 の読み替え・§14.1）。
+# 予想は並べるだけで当否を書かない（SB14）。``FACT_NOT_VERIFICATION`` は成功した run で
+# 必ず 1 行として載せ、route はそれがブロックに載ったときだけ出力側の拘束を足す。
+# ---------------------------------------------------------------------------
+
+_MODULE_LABEL_PATTERN = "理論モジュール『"
+
+
+def _simulation_module_label(statement: str) -> str:
+    """``statement``（閉世界の 1 文）から理論モジュール名を取り出す（無ければ ``""``）。"""
+    start = statement.find(_MODULE_LABEL_PATTERN)
+    if start < 0:
+        return ""
+    rest = statement[start + len(_MODULE_LABEL_PATTERN):]
+    end = rest.find("』")
+    return _safe(rest[:end], MAX_TEXT_CHARS) if end > 0 else ""
+
+
+def _simulation_number(value: Any) -> str:
+    """数値（とベクトル）を短い表記にする。数値でないものは ``""``（載せない）。"""
+    if isinstance(value, bool) or value is None:
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value:  # NaN
+            return ""
+        return f"{value:.4g}"
+    if isinstance(value, (list, tuple)):
+        items = [_simulation_number(v) for v in value[:MAX_LEARNING_SIMULATION_VECTOR_ITEMS]]
+        items = [item for item in items if item]
+        if not items:
+            return ""
+        more = "、…" if len(value) > MAX_LEARNING_SIMULATION_VECTOR_ITEMS else ""
+        return "(" + "、".join(items) + more + ")"
+    return ""
+
+
+def _simulation_symbol(value: Any) -> str:
+    text = strip_control_sequences(str(value or "")).strip()
+    # 内部 ID の語彙は表示投影層（統合語彙）と学習者射影の両方で見る（再定義しない）。
+    if not text or contains_internal_id(text) or _display_internal_id(text):
+        return ""
+    return text[:MAX_LEARNING_SIMULATION_SYMBOL_CHARS]
+
+
+def _simulation_pairs(mapping: Any) -> list[tuple[str, Any]]:
+    """``{sym: v}`` と ``[{symbol, value}]`` の両形を ``[(sym, v)]``（記号の昇順）にする。"""
+    pairs: list[tuple[str, Any]] = []
+    if isinstance(mapping, Mapping):
+        pairs = [(str(k), mapping[k]) for k in mapping]
+    else:
+        for item in _list(mapping):
+            row = _dict(item)
+            if "symbol" in row:
+                pairs.append((str(row.get("symbol")), row.get("value")))
+    return sorted(pairs, key=lambda kv: kv[0])
+
+
+def _simulation_value_line(title: str, mapping: Any) -> str:
+    items: list[str] = []
+    for symbol, value in _simulation_pairs(mapping):
+        name = _simulation_symbol(symbol)
+        shown = _simulation_number(value)
+        if name and shown:
+            items.append(f"{name} = {shown}")
+    if not items:
+        return ""
+    shown_items, truncated = _capped(items, MAX_LEARNING_SIMULATION_SYMBOLS)
+    return f"{title}: {_join(shown_items, truncated=truncated)}"
+
+
+def _simulation_observed_line(mapping: Any) -> str:
+    items: list[str] = []
+    for symbol, entry in _simulation_pairs(mapping):
+        name = _simulation_symbol(symbol)
+        if not name:
+            continue
+        if isinstance(entry, Mapping):
+            mean = _simulation_number(entry.get("mean"))
+            std = _simulation_number(entry.get("std"))
+        else:
+            mean, std = _simulation_number(entry), ""
+        if not mean:
+            continue
+        items.append(f"{name} = {mean} ± {std}" if std else f"{name} = {mean}")
+    if not items:
+        return ""
+    shown_items, truncated = _capped(items, MAX_LEARNING_SIMULATION_SYMBOLS)
+    return f"模擬観測（実験機のモデルを通した値）: {_join(shown_items, truncated=truncated)}"
+
+
+def resolve_simulation(ctx: ScreenContext, sources: Mapping[str, Any]) -> list[str]:
+    """学習者が開いている自分の実行記録を事実文にする（4-e・最大 8 行）。
+
+    ``sources["simulation"]`` は route が本人所有を確かめた run 行（store の dict）。
+    画面の ``selection.simulation_run_id`` と run の ID が一致しないときは何も出さない。
+    """
+    run_id = selected_simulation_run_id(ctx.selection)
+    run = _dict(sources.get("simulation"))
+    if not run_id or not run or _text(run.get("id")).lower() != run_id:
+        return []
+
+    result = _dict(run.get("result"))
+    inputs = _dict(run.get("inputs"))
+    statement = _text(result.get("statement"))
+    module_label = _simulation_module_label(statement)
+    wiring_name = _safe(result.get("wiring_name"), MAX_TEXT_CHARS)
+    succeeded = _text(run.get("status")) == RUN_STATUS_SUCCEEDED
+
+    head = (
+        f"学習者が開いている検証シミュレーションの実行記録（本人の実行）: "
+        f"理論モジュール『{module_label}』を動かした記録です"
+        if module_label
+        else "学習者が開いている検証シミュレーションの実行記録（本人の実行）です"
+    )
+    head += f"（配線『{wiring_name}』）" if wiring_name else "（配線なし）"
+    if not succeeded:
+        head += "。比較まで終わっていない実行です"
+    facts: list[str] = [head + "。"]
+
+    for line in (
+        _simulation_value_line("入力", inputs.get("values")),
+        _simulation_value_line("理論の出力", result.get("theory_outputs")),
+        _simulation_observed_line(result.get("observed")),
+        _simulation_value_line(
+            "あなたの予想（学習者が実行前に書いた値。当否は判定していません）",
+            run.get("prediction"),
+        ),
+    ):
+        if line:
+            facts.append(line)
+
+    labels = [
+        _safe(value, MAX_TEXT_CHARS)
+        for value in _dict(result.get("labels")).values()
+        if _safe(value, MAX_TEXT_CHARS)
+    ]
+    if labels:
+        facts.append("段階ラベル: " + "／".join(labels))
+
+    # SB1: 成功した run では「一致は検証ではない」を必ず 1 行で渡す。比較の事実より**前**に
+    # 置く（``render_block`` は予算超過で末尾から落とすので、比較の事実だけが残って
+    # この 1 行が落ちる並びにしない）。
+    if succeeded:
+        facts.append(FACT_NOT_VERIFICATION)
+
+    other_facts: list[str] = []
+    for fact in _list(result.get("facts")):
+        text = _safe(fact)
+        if text and text != FACT_NOT_VERIFICATION and text not in other_facts:
+            other_facts.append(text)
+    if other_facts:
+        joined = "".join(f if f.endswith("。") else f + "。" for f in other_facts)
+        facts.append("比較の事実: " + _text(joined, MAX_LEARNING_SIMULATION_FACT_LINE_CHARS))
+    return facts[:MAX_LEARNING_SIMULATION_FACTS]
+
+
 # 登録順がそのまま予算の優先順位（``render_block`` は行境界で末尾から落とす）。
 # 具体的なもの（学習者が明示的に選んだ要素）から順に登録する。
 # ``retrieved_structure`` は**別ブロック**（別ヘッダ・別予算）として描画されるため
@@ -571,3 +744,6 @@ register(SCREEN_LEARNING, "verification", resolve_verification)
 register(SCREEN_LEARNING, "placement", resolve_placement)
 register(SCREEN_LEARNING, "view", resolve_view)
 register(SCREEN_LEARNING, "retrieved_structure", resolve_retrieved_structure)
+# 4-e（検証シミュレーション）は ``selection.simulation_run_id`` があるときだけ事実を出す。
+# 画面文脈ブロックの末尾に載る（学習者が要素も同時に選んでいれば要素の事実が先）。
+register(SCREEN_LEARNING, "simulation", resolve_simulation)

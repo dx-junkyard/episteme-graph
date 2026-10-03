@@ -128,7 +128,9 @@ def test_output_symbol_mismatch_is_a_fact_not_a_rejection():
     llm = FakeLLM(_resp(GOOD_CODE, outputs=("z",)))
     draft = codegen.generate_program(MODULE, equations=EQUATIONS, symbols=SYMBOLS, structured_fn=llm)
     assert draft.accepted
-    assert codegen.FACT_OUTPUTS_NOT_MATCHING in draft.facts
+    fact = schema.outputs_not_matching_fact({"z"}, {"y"})
+    assert fact in draft.facts
+    assert "（z）" in fact and "（y）" in fact
 
 
 def test_llm_failure_degrades_to_fact():
@@ -157,3 +159,41 @@ def test_code_fence_in_source_is_stripped():
     draft = codegen.generate_program(MODULE, equations=EQUATIONS, symbols=SYMBOLS, structured_fn=llm)
     assert draft.accepted
     assert not draft.source_code.startswith("```")
+
+
+# ---------------------------------------------------------------------------
+# 第 21 周（R8 内部語の衛生・R9 名指し）
+# ---------------------------------------------------------------------------
+
+
+def test_output_symbols_matching_has_no_mismatch_fact():
+    llm = FakeLLM(_resp(GOOD_CODE, outputs=("y",)))
+    draft = codegen.generate_program(MODULE, equations=EQUATIONS, symbols=SYMBOLS, structured_fn=llm)
+    assert not any("重なっていません" in f for f in draft.facts)
+
+
+def test_role_words_are_humanized_in_facts():
+    out = codegen._normalize_facts([
+        "y（role=output）は x から計算した。",
+        "role=member の式は省いた。",
+        "role=foundation を定数とした。",
+        "role=input を受ける。",
+    ])
+    assert out == [
+        "y（出力の式）は x から計算した。",
+        "手順の中の式 の式は省いた。",
+        "共有の基礎の式 を定数とした。",
+        "入力の式 を受ける。",
+    ]
+    assert not any("role" in f for f in out)
+
+
+def test_unknown_role_fact_is_dropped():
+    out = codegen._normalize_facts(["role=sink は無視した。", "近似として線形にした。"])
+    assert out == ["近似として線形にした。"]
+
+
+def test_prompt_tells_facts_are_for_learners():
+    prompt = codegen.build_codegen_prompt(MODULE, equations=EQUATIONS, symbols=SYMBOLS)
+    notice_at = prompt.index(UNTRUSTED_SOURCE_NOTICE)
+    assert "role= などの内部の語・英語の型名を書かないでください" in prompt[:notice_at]

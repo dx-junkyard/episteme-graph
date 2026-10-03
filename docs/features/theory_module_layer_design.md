@@ -970,6 +970,21 @@ LLM 0 回・embedding 0 回・A層非改変。
 
 ---
 
+### 12.7 DTO 追補 — `member_equations` / `to_sink`（第 21 周 R1・2026-10-03）
+
+接点（`inputs` / `outputs`）は外枠の境界をまたぐ式だけなので、孤立したモジュール・sink へ渡すだけのモジュールでは両方が空になり、
+検証シミュレーションの一覧で「— → —」として何を受け取り何を出すか読めなかった（ペルソナ通し受講 第 21 周 a/c/f/h）。module dict に
+**表示専用の 2 キー**を additive に足した:
+
+- `member_equations: [{equation_id, display_label, latex_snippet, defined_symbols}]` — 成員 step が使う・生む式を成員の順に重複なしで
+  並べる（上限 `MEMBER_EQUATIONS_MAX = 12`）。表示ラベル・本文の断片・定義する記号は論文層の正本
+  （`graph_paper_layer_design.md` §14）から取り、内部 ID を含むものは空にする（TM10）。
+- `to_sink: [{equation_id, display_label}]` — 論文全体をまとめる手順（sink）へ渡す式（`flow.interface` の to_sink）。
+
+指紋・stable_key・`identity_eligible` の材料は変えない（TM12 — 表示だけ）。番号の無い式のラベルは論文層の規則に委ね、英語要約は
+最後の縮退にした（R2）。検証シミュレーションの学習者 DTO は `equations` / `to_sink` として受ける（`simulation_bridge_design.md` §12.4）。
+テストは `test_theory_module_core.py`（成員の順・重複なし・上限・sink・指紋が変わらないこと）。
+
 ## 13. Phase 1 設計 — 保存（knowledge object 化）と構造の指紋による同一性候補
 
 > **状態: 設計（2026-09-23）**。実装は次の工程。DDL の下書きは `backend/db/086_theory_modules.sql`

@@ -242,6 +242,19 @@ FACT_SHARED_LEDGER = "観測系の主張の台帳に、確かめた結果の候�
 FACT_SHARED_NO_LEDGER = "観測系の主張が選ばれていないため、台帳の候補には記帳していません。"
 FACT_SHARED_NOT_SUCCEEDED = "比較まで終わっていない実行なので、台帳の候補には記帳していません。"
 FACT_SELECT_DOCUMENT = "動かす論文を選んでください。"
+# 第 21 周（2026-10-03）の是正で足した事実文（規則は 1 箇所 = P-0014）
+#: 理論の出力がゼロの記号を名指しする（R6・数は書かない・記号は列挙）。``zero_theory_fact()`` で組み立てる。
+FACT_ZERO_THEORY_SYMBOLS = "理論の出力がゼロの記号（{symbols}）については、相対差を測れません。"
+#: 生成コードの出力記号と理論モジュールの出力の式が定義する記号が重ならない（R9・両方を名指し）。
+FACT_OUTPUTS_NOT_MATCHING_NAMED = (
+    "生成されたコードの出力の記号（{declared}）と、理論モジュールの出力の式が定義する記号（{expected}）が重なっていません。"
+)
+#: 採用は本人の選択で、教員の承認ではない（R13・SB11）。
+FACT_ADOPTED = "採用は、あなたがこの版を使うと決める操作です。教員の承認ではありません。"
+#: 本文の読める観測系の主張が 1 件も無い（R16・P-0008）。
+FACT_NO_OBSERVATION_TARGETS = "この論文には、本文の読める観測系の主張がまだありません。"
+#: 比較の 3 軸がすべて未測定の run を共有したとき（SB13 の読み替え・§14.1）。
+FACT_SHARED_UNMEASURED = "比較が測れていない実行なので、台帳の候補には記帳していません（共有はされています）。"
 
 #: 一致の段階ラベル（表示は label_vocab の表が正本。ここは level キーの意味の説明用）。
 AGREEMENT_FACTS: dict[str, str] = {
@@ -348,6 +361,30 @@ def is_part_type(value: str) -> bool:
     return value in PART_TYPES
 
 
+def _symbol_list(symbols: Any, *, limit: int = 8) -> str:
+    names: list[str] = []
+    for item in symbols or []:
+        text = str(item or "").strip()
+        if text and text not in names:
+            names.append(text)
+    shown = names[:limit]
+    return "、".join(shown) + ("、ほか" if len(names) > limit else "")
+
+
+def zero_theory_fact(symbols: Any) -> str:
+    """理論の出力がゼロの記号を名指しする事実文（R6）。記号が無ければ空文字。"""
+    listed = _symbol_list(sorted(str(s) for s in (symbols or [])))
+    return FACT_ZERO_THEORY_SYMBOLS.format(symbols=listed) if listed else ""
+
+
+def outputs_not_matching_fact(declared: Any, expected: Any) -> str:
+    """生成コードの出力記号とモジュールの出力の式の記号を両方名指しする事実文（R9）。"""
+    return FACT_OUTPUTS_NOT_MATCHING_NAMED.format(
+        declared=_symbol_list(sorted(str(s) for s in (declared or []))) or "なし",
+        expected=_symbol_list(sorted(str(s) for s in (expected or []))) or "なし",
+    )
+
+
 def closed_world(sentence: str, *, wiring_name: str = "") -> str:
     """事実文を閉世界の前置き付きにする（SB1）。配線名があれば名指しする。"""
     text = (sentence or "").strip()
@@ -357,5 +394,7 @@ def closed_world(sentence: str, *, wiring_name: str = "") -> str:
         return f"このモデルと配線『{wiring_name}』のもとでは、{text}"
     return FACT_CLOSED_WORLD_PREFIX + text
 
+
+LEARNING_SIMULATION_OUTPUT_CONSTRAINT = "シミュレーションの実行記録について言えるのは「このモデルと配線のもとでは」どう出たかまでです。理論の出力と模擬観測が一致しても、それを検証・実証・論文の正しさの確認と言い換えないでください（分析の妥当性の候補にとどまります）。学習者の予想が当たったか外れたかを判定しないでください。"
 
 __all__ = [name for name in globals() if not name.startswith("_")]

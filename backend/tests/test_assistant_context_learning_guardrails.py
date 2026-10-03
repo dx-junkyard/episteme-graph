@@ -150,8 +150,9 @@ class TestStagedScope:
         """Phase 4（4-a/4-b/4-d）の4つ + 知識の転用層 P4-2 の ``retrieved_structure``。
 
         P4-2 は**別ブロック**（``BLOCK_HEADER_RETRIEVED`` / 検索由来）として描画される
-        ため末尾に登録する。件数を増やすときは設計書（P4-2 は
-        ``knowledge_transfer_design.md`` §5）に沿って本テストも更新する。
+        ため末尾に登録する。4-e の ``simulation``（学習者が開いている自分の検証
+        シミュレーションの実行記録 = 設計書 §11.17）はその後ろ。件数を増やすときは設計書
+        （P4-2 は ``knowledge_transfer_design.md`` §5）に沿って本テストも更新する。
         """
         assert registered_kinds(SCREEN_LEARNING) == (
             "element",
@@ -159,6 +160,7 @@ class TestStagedScope:
             "placement",
             "view",
             "retrieved_structure",
+            "simulation",
         )
 
     def test_topic_and_visible_resolvers_are_not_registered(self):

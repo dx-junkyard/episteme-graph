@@ -228,6 +228,7 @@ class TestRegistration:
             "placement",
             "view",
             "retrieved_structure",
+            "simulation",
         )
 
     def test_retrieved_structure_stays_out_of_the_screen_context_block(self):

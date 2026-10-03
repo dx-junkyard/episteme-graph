@@ -73,6 +73,14 @@ from core.theory_modules.schema import (
     has_printed_label,
     truncate_snippet,
 )
+from core.graph_paper_layer.schema import (
+    equation_defined_symbols as _paper_equation_defined_symbols,
+    equation_display_label as _paper_equation_display_label,
+    equation_latex_snippet as _paper_equation_latex_snippet,
+)
+
+#: モジュールの ``member_equations`` に並べる式の上限（成員の順・重複なし）。
+MEMBER_EQUATIONS_MAX = 12
 
 # ---------------------------------------------------------------------------
 # A層語彙（関数内 import）
@@ -749,10 +757,35 @@ class _Labels:
         self.components: list[dict] = _dicts(_mapping(artifacts.get("component_assembly")).get("components"))
 
     def equation_label(self, eq_id: str) -> str:
-        return equation_display_label(self.equation_records.get(eq_id))
+        """式の表示ラベル。印字番号は従来どおり、番号の無い式は論文層の正本規則
+        （式本文の先頭 → 定義する記号 → 平文）を使う（第 21 周 R2: 英語要約が先に出ていた）。
+        論文層の規則で何も取れないときだけ従来の要約に縮退する。内部 ID は出さない（TM10）。
+        """
+        record = self.equation_records.get(eq_id)
+        if record is None or has_printed_label(record):
+            return equation_display_label(record)
+        label = _paper_equation_display_label(record)
+        if label == "番号なし" or contains_internal_id(label):
+            return equation_display_label(record)
+        return label
 
     def equation_item(self, eq_id: str) -> dict:
         return {"equation_id": eq_id, "display_label": self.equation_label(eq_id)}
+
+    def equation_detail(self, eq_id: str) -> dict:
+        """``member_equations`` の 1 件（表示ラベル + 式本文の断片 + 定義する記号）。"""
+        record = self.equation_records.get(eq_id)
+        snippet = _paper_equation_latex_snippet(record) if record is not None else ""
+        if contains_internal_id(snippet):
+            snippet = ""
+        symbols = [
+            sym for sym in (_paper_equation_defined_symbols(record) if record is not None else [])
+            if not contains_internal_id(sym)
+        ]
+        item = self.equation_item(eq_id)
+        item["latex_snippet"] = snippet
+        item["defined_symbols"] = symbols
+        return item
 
     def mask_equation_ids(self, text: str, *, printed_only: bool) -> str:
         """本文中の式 ID を印字番号に置き換える。``printed_only`` なら印字番号の無い式で ""。"""
@@ -950,6 +983,17 @@ def _module_dto(
         "inputs": [labels.equation_item(eq) for eq in inputs],
         "outputs": [labels.equation_item(eq) for eq in outputs],
         "foundation": [labels.equation_item(eq) for eq in used_foundation],
+        # 第 21 周 R1: 外枠の境界をまたぐ式（inputs / outputs）が無いモジュールでも、何を受け取り
+        # 何を出すかが読めるように、成員の手順が使う・生む式を成員の順に並べる（表示だけ —
+        # 指紋・stable_key・identity_eligible の材料は変えない = TM12）。
+        "member_equations": [
+            labels.equation_detail(eq)
+            for eq in _dedup(
+                eq for step in ordered for eq in list(step.inputs) + list(step.outputs)
+            )[:MEMBER_EQUATIONS_MAX]
+        ],
+        # 論文全体をまとめる手順（sink）へ渡す式。
+        "to_sink": [labels.equation_item(eq) for eq in to_sink],
         "required_claims": [
             {
                 "claim_id": cid,

@@ -203,6 +203,13 @@ def equation_display_label(record: Any) -> str:
     label = clean_text(rec.get("label")).strip("()").strip()
     if label and not contains_internal_id(label):
         return f"式 ({label})"
+    # 番号なしの式の表示は論文層の正本（LaTeX の先頭 → 定義する記号 → 平文）に委ねる（第 21 周 R2・P-0014:
+    # ここに英語要約を先に取る複製があり、学習者の一覧が「番号なし: Defines the …」で埋まった）。
+    from core.graph_paper_layer.schema import equation_display_label as _paper_label  # 遅延 import（循環回避）
+
+    paper = _paper_label(rec)
+    if paper and paper != "番号なし" and not contains_internal_id(paper):
+        return paper
     summary = equation_summary(rec)
     if summary:
         return f"番号なし: {summary[:LABEL_SNIPPET_MAX]}"

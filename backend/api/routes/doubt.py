@@ -1299,7 +1299,7 @@ class _SimulationAuditAdapter:
 
 
 def _decide_simulation_candidate(
-    target_type: str, target_id: str, candidate_id: str, action: str, current_user: dict
+    target_type: str, target_id: str, candidate_id: str, action: str, current_user: dict, *, reason: str = ""
 ) -> dict:
     _require_ledger_target_type(target_type)
     _require_editable_ledger_target(target_type, target_id, current_user)
@@ -1315,6 +1315,7 @@ def _decide_simulation_candidate(
                 action=action,
                 actor_id=str(current_user.get("id") or ""),
                 record_audit=audit,
+                reason=reason,
             )
         except simulation_store.SimulationNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc) or "台帳候補が見つかりません。") from exc
@@ -1353,10 +1354,15 @@ def dismiss_simulation_candidate(
     target_type: str,
     target_id: str,
     candidate_id: str,
+    body: dict | None = Body(default=None),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """検証シミュレーションの台帳候補の見送り（配列内の status 遷移・削除しない）。"""
-    return _decide_simulation_candidate(target_type, target_id, candidate_id, "dismiss", current_user)
+    """検証シミュレーションの台帳候補の見送り（配列内の status 遷移・削除しない）。
+
+    body の ``reason`` を候補に残す（第 21 周 (g): 見送りの理由の置き場が無かった。空でもよい — 教員側の弁を増やさない）。
+    """
+    reason = str((body or {}).get("reason") or "") if isinstance(body, dict) else ""
+    return _decide_simulation_candidate(target_type, target_id, candidate_id, "dismiss", current_user, reason=reason)
 
 
 @admin_router.post("/courses/{course_id}/falsification-candidates/refresh")

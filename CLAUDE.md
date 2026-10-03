@@ -3092,6 +3092,12 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   観測は `discuss_metric_events` の `structured_grounding_present`（種別だけ・payload 空・
   サーバ側記録）。ガードレールは `test_assistant_context_learning_{core,guardrails,route}.py` +
   `test_learning_screen_context_ui_static.py`。
+- **4-e `simulation`（2026-10-03・第 21 波・migration なし）**: 学習者が「🧪 動かして確かめる」で開いている実行の記録を
+  `screen_context.selection.simulation_run_id` で渡し、`resolvers/learning.py::resolve_simulation` が**本人所有**の run だけ
+  （`simulation_store.get_run` / `is_owner`・grounding の範囲内）を事実 8 行（入力・理論の出力・模擬観測・予想は当否なし・段階ラベル・
+  FACT_NOT_VERIFICATION・比較の事実）にする。SB1 の行が載ったときだけ system 末尾に `LEARNING_SIMULATION_OUTPUT_CONSTRAINT`。
+  casual では出さず elicit では引かない。登録 kind は 6 つ（`resolve_topic` / `resolve_visible` の不在は固定のまま）。
+  学習 route が SB 層から呼んでよいのは `get_run` / `is_owner` だけ（`test_simulation_bridge_guardrails.py`）。
 - **横展開（設計予約、着手時に設計書へ §追加）**: Phase 2 = W層要素モーダル / Phase 3 = Admin
   Copilot（既存 `collectScreenContext()` に `screen` を足して同じ語彙へ）。**新しい画面に AI 対話を
   置くときは、画面テキストを送らず、この規約で参照を渡して解決器を1本足す。**
@@ -3413,8 +3419,8 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - **P4-2 RAG の構造 1 hop**（SA層 kind `retrieved_structure`・`resolvers/learning.py`）: 採用 chunk（score ≥ 0.30・当該ターンの
   `allowed_document_ids` を `ANY(:doc_ids)` で強制）→ `theory_claims_live(chunk_id)` → 理論操作グラフ **main 層**ノードを決定論で解決し、
   画面文脈ブロックの直後に事実文ブロック（`BLOCK_HEADER_RETRIEVED`・出典ごと 2 主張・全体 8 行）を足す。`screen_context` が無くても働く。
-  casual / `cycle_mode=elicit` では出さない。**LLM 呼び出し箇所は増えない**（ガードレールで固定）。登録 kind は 5 つ
-  （element / verification / placement / view / retrieved_structure。`resolve_topic` / `resolve_visible` は引き続き作らない）。
+  casual / `cycle_mode=elicit` では出さない。**LLM 呼び出し箇所は増えない**（ガードレールで固定）。登録 kind は 6 つ
+  （element / verification / placement / view / retrieved_structure / simulation（2026-10-03・第 21 波 4-e）。`resolve_topic` / `resolve_visible` は引き続き作らない）。
   ノード事実文は stage の日本語ラベル（`element_vocab`）+ `display_label` の理論対象で、英語の stage 名（内部表示名）は学習者に出さない。
   観測は既存 `structured_grounding_present` に相乗り。docs は SA層設計書 §11.16 / `rag-chat.md` ④-b' / `learning.md`。
 - **P4-3 参照の健全性**（`core/reference_health.py`・FastAPI 非 import・live ビューのみ）: グラフノード → 主張 / component → 主張・式 /
@@ -3579,6 +3585,16 @@ D層の台帳へ**候補**として戻る。
 - **運用上の前提**: PDF 経路の式は復元由来が多いので **TeX 経路の教材で使う**（再現性レビュー E-1）。
 - **ガードレール**: `test_simulation_bridge_{store,migration,ast_guard,sandbox,codegen,instrument,comparator,
   revision,api,guardrails,ui_static}.py` + `test_simrunner_harness.py`。
+- **第 21 周 = uxsim 8 場面による UX 検証と是正（2026-10-03・migration なし）**: 正本は
+  `persona_enactment_testing_design.md` §19（場面 (a)〜(h)・行為 13・審判 `uxsim/oracles/simulation.py`）と設計書 §12.4。
+  学生 6・教員 2 を砂場（TeX 4 本）に通し、課題 IK-0608〜0628 を起票。是正: 段階ラベルは「軸名: 段階」（軸名の正本
+  `label_vocab.SIMULATION_AXIS_LABELS`）/ ゼロ出力は記号を名指し / 配線なしの `observed` は理論値（std None） / 生成 facts の
+  `role=` は日本語化・残れば落とす / 重なりの事実文は両方の記号を名指し / adopt 応答に `FACT_ADOPTED`（本人の選択・教員の承認ではない）/
+  観測系の主張の候補から本文の無い・内部 ID 形のラベルを外す（`service.is_readable_target_label` の 1 箇所・候補ゼロは
+  `FACT_NO_OBSERVATION_TARGETS`）/ **SB13 の読み替え**: 3 軸とも未測定の run は共有しても台帳の候補を作らない
+  （`FACT_SHARED_UNMEASURED`）/ overview の modules に `equations`（成員の式）と `to_sink` を additive 追加 /
+  式の表示ラベルは論文層の正本（`graph_paper_layer.schema.equation_display_label` = 印字番号 → LaTeX の先頭 → 定義する記号 → 平文。
+  `theory_modules/schema.py` の複製は委譲）/ SA層 4-e `simulation`（上記 SA層の節）。UI・アンカー・マニュアル・Copilot KB は第 2 波。
 - **非スコープ（v1.1）**: 自動反復 / 複数配線の自動探索 / Python 以外 / 実測データの取り込み /
   装置候補から `instrument_model` への自動昇格 / `evidence_lines` への記帳。
 

@@ -406,6 +406,88 @@ NOT NULL（080 以降の潜在不具合・D層の経路も同根）/ 生成コ�
 事実文「理論操作グラフが無いため…」とグラフレビューにグラフが出る不整合（グラフの解決経路の差 — 要調査）/
 TeX 経路でも inline 式候補が `reconstructed` 扱いになり SB10 の印が付く（正直だが過剰）/ 失敗 run の日時表示が ISO 生。
 
+### 12.4 第 21 周 — uxsim 8 場面による UX 検証と是正（2026-10-03）
+
+正本の運転記録は `docs/architecture/persona_enactment_testing_design.md` §19（場面・行為・審判・運転・着手の地図）。
+砂場（TeX 4 本・コース 1bad7d9f）で学生 6（st-01/03/04/06/07/10）・教員 2（te-03/04）を場面 (a)〜(h) に通した。
+LLM 生成は学生 1 人 1 回・改訂案 1 回（`llm_usage_events` で確認）。arXiv は呼んでいない。
+
+**見えたこと（製品側の根）**: まとまりの「入力の式 → 出力の式」が境界をまたぐ式だけで多くが空 / 印字番号の無い式の表示ラベルが
+A層の英語要約の先頭 / 段階ラベル 3 値に軸名が無く statement と同文の fact が重なる / 出力の 1 つがゼロで全体の文が出る /
+配線なしのとき観測の列が空のまま「理論の出力そのもの」の文 / 生成の facts に `role=output` 等の内部語 / 「出力の記号が重なっていません」が
+何と何かを言わない / 採用が本人の選択で教員の承認ではないことが画面に無い / 観測系の主張の候補に本文の無い claim（「（本文を特定できない要素）」・
+`claim:…`）/ 学習チャットに実行結果が渡らない（SA層に simulation の解決器が無い）/ 教員が台帳の候補を確定する UI が無い（API だけ）/
+Copilot の操作 KB が v1 の文（学習者には表示されない）/ 未測定の run が台帳の候補になる。
+
+**是正（第 1 波 = core・第 2 波 = UI・マニュアル・KB）**: 本節の末尾に各波の着地を追記する。**SB13 の読み替え**: 比較が 3 軸とも
+未測定の run は、共有はされるが台帳の候補には記帳しない（`FACT_SHARED_UNMEASURED`）。何も確かめていない候補を教員の台帳に並べない
+ための弁で、確定が教員にあること（SB13 本体）は変えない。
+
+**据え置き**: 前提（assumptions）が英語の長い列 — A層 equation_semantics の生成言語が対象外（表示側では直せない）/ 固定文の i18n（既知の構造課題）/
+部品の雑音の単位・基準（目録の本文の問題。UI に注記だけ）。
+
+**第 1 波の着地（core・2026-10-03）**:
+
+- **§5.3 比較器**: 理論の出力がゼロの記号は記号ごとに持ち、事実文は記号を名指しする（`schema.zero_theory_fact` /
+  `FACT_ZERO_THEORY_SYMBOLS`・数は書かない）。他の記号の相対差は従来どおり測る。配線なしの run は `result.observed` を
+  理論値（`{sym: {mean: 理論値, std: null}}`）で埋め、表と `FACT_NO_WIRING` の文を一致させる（比較の意味 = 未測定は不変）。
+  `result.labels` の値は軸名付き `"{軸名}: {段階}"`（軸名の正本は `label_vocab.SIMULATION_AXIS_LABELS` — 一致（理論の出力と
+  模擬観測）/ 分離（効果とばらつき）/ 記載値との一致。段階の表 `SIMULATION_*_LABELS` は不変）。statement と同文の fact は落とす。
+- **§5.1 生成**: `codegen._normalize_facts` が `role=input|output|member|foundation` を日本語（入力の式 / 出力の式 / 手順の中の式 /
+  共有の基礎の式）に置換し、置換し切れない `role=` を含む文は落とす。プロンプトに「facts は学習者が読む文。role= などの内部の語・
+  英語の型名を書かない」。出力記号の不一致の事実文は両方の記号を名指しする（`schema.outputs_not_matching_fact`）。
+- **§14 採用と候補の絞り**: 採用（confirmed）の版の facts と adopt 応答に `FACT_ADOPTED`（本人の選択で教員の承認ではない = SB11）。
+  観測系の主張の候補から本文の無いもの・「（本文を特定できない要素）」・内部 ID 形のラベルを外す（判定は
+  `service.readable_observation_targets` 1 関数を学習者・教員の両 route が呼ぶ = P-0008）。1 件も残らなければ overview の facts に
+  `FACT_NO_OBSERVATION_TARGETS`。**SB13 の読み替え**（上記）は `service.is_unmeasured_run` が判定し、share 応答に
+  `FACT_SHARED_UNMEASURED`。
+- **§6 DTO**（additive）: `modules[]` に `equations: [{display_label, latex_snippet, defined_symbols}]`（成員の式・上限 12）と
+  `to_sink: [{equation_id, display_label}]`。式の表示ラベルは論文層の正本（`graph_paper_layer_design.md` §14）を通す。
+- **学習チャット（§14.4 の追補）**: チャットは「動かして確かめる」で選んでいる自分の実行の記録を見る（SA層 4-e =
+  `assistant_screen_adapter_design.md` §11.17）。事実文に SB1 の行が載ったときだけ system 末尾に
+  `LEARNING_SIMULATION_OUTPUT_CONSTRAINT`（検証・実証と言い換えない・予想の当否を判定しない）。登録 kind の出荷集合を固定する
+  ガードレール（`test_assistant_context_learning_guardrails.py`）は 6 kind に更新した。
+
+**第 2 波の着地（UI・マニュアル・KB・2026-10-03）**:
+
+- **学習画面**（`simulation-lab.js`）: まとまりの一覧の見出し直下に凡例 1 行（UI の固定文 `MODULE_LEGEND` — 外枠 / 内側 / 番号なし）・
+  一覧に番号（「3. …」）・選んだまとまりを番号つきで「選んだまとまり: …」と表示（同じ記号のまとまりを見分ける）。入出力が空の
+  まとまりは「この手順の式: …」（上限 6・以降「…」）、入出力があるときは折りたたみで同じ列、sink へ渡すまとまりは
+  「→ 論文全体のまとめへ」。前提は先頭 1 件 + 折りたたみ「前提をすべて見る」（`origin_label` を添える）。記号は KaTeX で描き
+  （描けなければ `<code>`）、入力欄の `name` 属性は記号の文字列のまま。式の表示ラベルは `$…$` の内側だけ KaTeX。段階ラベルの
+  チップは DTO の値を素通し（軸名つき）。「共有する」の**左**に常設の事実文（`SHARE_CONFIRM` と同文・confirm は残す）、
+  共有の応答の facts（`FACT_SHARED_UNMEASURED` 等）を素通しで表示。単位の空いた部品パラメータに一度だけ
+  「（理論の出力と同じ単位の絶対値）」（DTO に `note` があれば優先）。日時は `toLocaleString()`。
+  `getSelectedRunId()`（開いているときだけ・選択中か最新の自分の run）を公開し、`app.js` の `getScreenContext` が
+  `selection.simulation_run_id` に載せる（開いていなければキーごと送らない）。
+- **管理画面**（`admin-simulation-bridge.js`）: 学習者が共有した実行（`shared: true` かつ `shared_by_label`）を選ぶと、区画 4 に
+  「台帳の候補（学習者が共有した実行）」— 主張ごとに本文（overview の `observation_targets` から引く）・候補の statement / facts・
+  ［確定する］／［見送る（理由必須）］。候補は `GET /api/admin/doubt/ledger/claim/{claim_id}` の `simulation_candidates[]` から
+  `run_id` 一致で引き（実行を選んだときに主張ごと 1 回・ポーリングなし）、判断は既存
+  `POST .../simulation-candidates/{candidate_id}/confirm|dismiss`。確定後は応答の facts、無ければ固定文
+  「確定しても「間接的に支持」より上には上がりません。」。共有 run の結果の表に「学習者の予想」の列（DTO に `prediction` が
+  あるとき）。アンカー `simulation.ledger-candidate-decide`（`teacher/27#simulation-ledger-candidate-decide`）。
+- **マニュアル・KB**: student/02 §19 に `#simulation-lab-modules`（一覧の読み方）/ `#simulation-lab-levels`（段階の言葉と未測定）を
+  足し、「何ができるか」「共有する」を画面に合わせた。teacher/27 の概要を v1.1 に（「学習者にはこの画面も結果も表示されません」を
+  削除）、`#simulation-shared-runs` と台帳候補の節。`admin_operations/materials.md#simulation-bridge` と capability
+  `materials.simulation_bridge` の説明文を v1.1 に（内部名 doubt-atlas を書かない）。
+- **残した依頼（core）**: ①教員側 `routes/simulation_bridge.py::_run_dto` に `prediction` が無く、「学習者の予想」の列は現状描かれない
+  （列は DTO に来たときだけ出す作り）。②台帳候補の dismiss エンドポイントが body を受けず、UI で必須にした見送りの理由が
+  保存されない（候補の status 遷移だけ）。③部品パラメータの DTO に `note` が無い（UI は固定の注記に縮退）。
+
+**第 1 波の後の追補（Fable・同日）**: 重なりの事実文の記号は論文層の `equation_defined_symbols` で名前だけを取り（dict の repr が学習者に
+出た再演の所見）、照合は `codegen.normalize_symbol`（TeX の修飾・波括弧・`\` を落として小文字）で `C_{\mathrm{eff}}` と `C_eff` を同じ記号と
+みなす / 配線なしの run は記号ごとの相対差も None（0.0 を「一致」と読ませない）/ 教員の run DTO に `prediction`（学習者の予想・並べるだけ）/
+台帳候補の見送り API は body `reason` を候補に残す（`dismiss_reason`・RE5 と同じ「見送りは理由を残す」）/ 共有ボタンの脇の事実文を
+「比較が測れている実行なら候補として記帳・測れていなければ共有だけ」に（押す前と後の文の食い違いの再演所見）。
+
+**再演（同日・(a)(e)(f)(g)）**: GONE = 英語の生成文のラベル / role= の内部語 / 「出力の記号が重なっていません」の無名 / 採用の意味 /
+段階ラベルの軸名 / 配線なしの観測の列 / 一致の文の重複 / 観測系の主張の「本文を特定できない要素」/ 共有の意味の事前表示 / 未測定の run の
+台帳記帳。STILL = (a) の初見の学生は成員の式が並んでも「何を受け取り何を出すか」を読めず諦めた（境界をまたぐ式が無いモジュールの入出力は
+構造上空で、R1 の UI だけでは足りない — 入出力の**記号**（io_contract 相当）を生成前に出す案は次周）/ 前提の英語（A層）/ 同名のモジュール
+（`制約を適用: $m_1$` ×3）/ 英語話者への日本語の固定文と HELP 経路の目次返し（英語の問いに §19 が引けず目次だけ返す = IK-0611 の派生）/
+教員の Copilot は確定の問いに「走らせる場所」の道案内を返す（capability に台帳候補の確定が無い）。
+
 ## 13. 非スコープ（v1）
 
 （学習者向け表示は v1.1 で実装 — §14）/ 自動反復（是正者を人の操作なしに回す）/ 複数配線の自動探索・最適化 /

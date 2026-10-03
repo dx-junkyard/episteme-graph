@@ -18,6 +18,7 @@ import しない）。規律は3つ:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -282,6 +283,54 @@ MAX_LEARNING_RETRIEVED_CLAIMS_PER_SOURCE = 2
 
 #: 検索由来の主張本文の先頭抜粋の上限（§5「120 字」。決定論的な切り出し・要約しない）。
 MAX_LEARNING_RETRIEVED_CLAIM_CHARS = 120
+
+
+# ---------------------------------------------------------------------------
+# 検証シミュレーションの実行記録（Phase 4-e = 設計書 §11.17 / simulation_bridge_design.md §14.4）
+#
+# 学習者が「🧪 動かして確かめる」で開いている**自分の**実行記録を、チャットが見られる
+# ようにする。画面は ``selection.simulation_run_id`` を参照として渡すだけ（SA1）で、
+# route が本人所有（``owner_user_id == user_id``）かつ grounding の document 範囲内の
+# run だけを ``sources["simulation"]`` に入れる。他人の run・不在は黙って空（SA2）。
+#
+# 数値の扱い（SB6 の読み替え・§14.1）: 本人の run の入力・理論の出力・模擬観測は本人に
+# 見せてよい値なので事実文に載せる。予想は並べるだけで当否を書かない（SB14）。
+# ---------------------------------------------------------------------------
+
+#: 画面の ``selection`` で実行記録を指すキー（第 2 波のフロントが送る）。
+SELECTION_SIMULATION_RUN_ID_KEY = "simulation_run_id"
+
+#: 実行記録から出す事実文の上限（行）。
+MAX_LEARNING_SIMULATION_FACTS = 8
+
+#: 1行に並べる記号の上限（超えたら「ほか」）。
+MAX_LEARNING_SIMULATION_SYMBOLS = 6
+
+#: ベクトル値を並べる要素数の上限。
+MAX_LEARNING_SIMULATION_VECTOR_ITEMS = 4
+
+#: 記号名の文字上限（学習者のコードが宣言した記号。長文を持ち回らない）。
+MAX_LEARNING_SIMULATION_SYMBOL_CHARS = 40
+
+#: 比較の事実文を連結した1行の文字上限。
+MAX_LEARNING_SIMULATION_FACT_LINE_CHARS = 360
+
+_UUID_SHAPE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def selected_simulation_run_id(selection: Mapping[str, Any] | None) -> str:
+    """``selection.simulation_run_id`` が UUID の形ならそれを返す（それ以外は ``""``）。
+
+    UUID でない値で DB を引かない（キャストエラーを route に持ち込まない）。純関数・
+    例外を出さない。
+    """
+    mapping = _as_mapping(selection) or {}
+    value = _clip_str(mapping.get(SELECTION_SIMULATION_RUN_ID_KEY), MAX_ID_CHARS)
+    if value and _UUID_SHAPE.match(value):
+        return value.lower()
+    return ""
 
 
 # ---------------------------------------------------------------------------

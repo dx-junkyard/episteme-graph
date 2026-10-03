@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import copy
+import re
 import sys
 from pathlib import Path
 
@@ -777,9 +778,64 @@ class TestDisplayLabels:
     def test_numbered_equation_uses_the_printed_number(self):
         assert pl_schema.equation_display_label(_equation("eq_12", label="12")) == "式 (12)"
 
-    def test_unnumbered_equation_uses_the_body_head(self):
+    def test_unnumbered_equation_uses_the_latex_head(self):
+        # 第 21 周 R2: 印字番号の無い式は式本文（LaTeX）の先頭を $…$ で出す（平文の英語要約より先）。
+        record = _equation("eq_op_0007", label=None, plain_text="Defines the Jeans length as the critical")
+        assert pl_schema.equation_display_label(record) == "番号なし: $x = y$"
+
+    def test_unnumbered_equation_without_latex_lists_defined_symbols(self):
+        record = _equation("eq_op_0007", label=None, plain_text="Defines the Jeans mass")
+        record["source_extraction"]["latex"] = ""
+        record["reconstruction"]["latex"] = ""
+        record["semantics"]["defined_symbols"] = [
+            {"symbol": "M_J", "definition_status": "defined"},
+            {"symbol": "x", "definition_status": "used"},
+        ]
+        label = pl_schema.equation_display_label(record)
+        assert label == "番号なし: $M_J$ を定義する式"
+        assert "Defines" not in label
+
+    def test_unnumbered_equation_falls_back_to_plain_text_only_without_latex_and_symbols(self):
         record = _equation("eq_op_0007", label=None, plain_text="alpha = beta gamma")
+        record["source_extraction"]["latex"] = ""
+        record["reconstruction"]["latex"] = ""
         assert pl_schema.equation_display_label(record) == "番号なし: alpha = beta gamma"
+
+    def test_long_latex_is_cut_without_splitting_a_command_and_closes_math(self):
+        latex = r"\begin{equation}\label{eq:jeans} \lambda_J = \left(\frac{\pi c_s^2}{G\rho_0}\right)^{1/2}\sqrt{\alpha\beta\gamma} \end{equation}"
+        record = _equation("eq_tex_b3", label=None, plain_text="Defines the Jeans length")
+        record["source_extraction"]["latex"] = latex
+        record["reconstruction"]["latex"] = ""
+        label = pl_schema.equation_display_label(record)
+        assert label.startswith("番号なし: $\\lambda_J")
+        assert "\\label" not in label and "begin" not in label and "\\left" not in label
+        body = label[len("番号なし: "):]
+        assert body.count("$") == 2 and body.endswith("$…")
+        inner = body[1:body.rindex("$")]
+        assert inner.count("{") == inner.count("}")
+        assert not inner.endswith("\\")
+        # 切れ目がコマンドの途中に来ない（``\\fra`` のような断片・引数の欠けた ``\\frac`` を残さない）
+        for command in re.findall(r"\\([A-Za-z]+)", inner):
+            assert command in {"lambda", "frac", "pi", "rho", "sqrt", "alpha", "beta", "gamma"}
+        assert not re.search(r"\\frac\{[^{}]*\}$", inner)
+
+    def test_cut_never_leaves_dangling_syntax(self):
+        text = r"\lambda_J = \left(\frac{\pi c_s^{2}}{G\rho_0}\right)^{1/2}\sqrt{\alpha\beta} + \mathrm{d}x"
+        for limit in range(1, len(text) + 2):
+            cut, truncated = pl_schema._cut_latex(text, limit)
+            assert truncated is (limit < len(text))
+            assert cut.count("{") == cut.count("}")
+            assert not cut.endswith(("^", "_", "\\", "{"))
+            assert "\\left" not in cut or not truncated
+            assert not re.search(r"\\(?:fra|frac|sqr|sqrt|mathr|mathrm)$", cut)
+            assert not re.search(r"\\frac\{[^{}]*\}$", cut)
+
+    def test_latex_snippet_and_defined_symbols_helpers(self):
+        record = _equation("eq_tex_b3", label=None)
+        assert pl_schema.equation_latex_snippet(record) == "$x = y$"
+        assert pl_schema.equation_defined_symbols(record) == []
+        assert pl_schema.equation_latex_snippet({}) == ""
+        assert pl_schema.equation_defined_symbols({"defined_symbols": ["$k$", "k", " "]}) == ["k"]
 
     def test_unnumbered_equation_without_body_degrades(self):
         record = {"equation_id": "eq_9", "label": None, "source_extraction": {}, "reconstruction": {}}

@@ -32,6 +32,11 @@ class ScreenContextPayload(BaseModel):
     Phase 1（W層・グラフレビュー）と Phase 4（学習チャット）の**共通の受け口**なので、
     ここ（``api/schemas.py``）に置く。``routes/deliberation.py`` は後方互換のため
     再エクスポートする。
+
+    ``selection`` は自由形の参照の袋で、キーの語彙は core 側が持つ。学習画面の
+    ``selection.simulation_run_id``（4-e・§11.17 — 学習者が開いている自分の検証
+    シミュレーションの実行記録の ID）もここに入る（additive・型の追加なし。UUID の形で
+    なければ core の ``selected_simulation_run_id`` が捨てる）。
     """
 
     model_config = {"extra": "forbid"}
