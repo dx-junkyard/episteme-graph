@@ -1374,3 +1374,8 @@ _HANDLERS: dict[str, Callable[[_Ctx], None]] = {
     "admin.graph_review.approve_claim": _approve_claim,
     "admin.seminar_brief.view": _seminar_brief,
 }
+
+# 検証シミュレーション層（SB層）の行為は別モジュール（契約 = docs/features/simulation_bridge_design.md §14.3）
+from uxsim.runner import simlab_exec as _simlab_exec  # noqa: E402
+
+_HANDLERS.update(_simlab_exec.HANDLERS)

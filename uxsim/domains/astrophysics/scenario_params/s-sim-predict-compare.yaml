@@ -1,0 +1,19 @@
+scenario: s-sim-predict-compare
+domain: astrophysics
+# 場面 (c) st-01（newcomer）。(a) と同じ論文・トピック・まとまりで、予想を書いてから動かす。
+params:
+  goal_text: 磁場の推定に使う量について、自分の予想と理論の出力を並べて自分の理解のずれを見つけること
+  topic_hint: DCF法による磁場強度の推定（Cepheus B の磁場トポロジーと星形成の論文）
+  topic_hint_terms:
+  - DCF法
+  - 磁場強度
+  module_hint: σ_ξ
+  input_hints:
+    delta_theta: 0.2
+    sigma_v: 1.0
+    n: 1000.0
+  prediction_hint:
+    σ_ξ: 0.2
+  questions:
+  - 予想と結果の差は、点数や正解・不正解として扱われるのですか？
+  - 結果に付いている「一致」や「分離」の言葉は、何と何を比べた言葉ですか？

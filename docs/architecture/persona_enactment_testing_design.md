@@ -1497,3 +1497,108 @@ campaign `c-astro-structure-30` は学生段のみ（教員場面は教材 `7ef9
 - **d3ecaef（ハーネス）**: 画面投影の宛先キーを入れ子まで外す、部品文脈の出口と鏡の見出しを描く、ノード対話は実画面と同じ代表部品の解決と
   ラベル指定、降下路は ⚓ 番号を受ける（第 18 周のハーネス所見）。
 - **継続**: IK-0577 は復元式の印が配信済みで、表示中のスライド位置（SA層 4-c）は未着手のまま open。
+
+## 19. 増強: 検証シミュレーション層（SB層・「🧪 動かして確かめる」）の 8 場面（2026-10-03 起草）
+
+SB層 v1.1「主語は学習者」（`docs/features/simulation_bridge_design.md` §14）を出荷した直後の UX 検証。主題は §18 と同じく
+構造の見やすさ・関係を辿る理解・対話支援（P-0013）で、SB 固有の問い — **何が入力で何が出力か読めるか / 自分で直して走らせられるか /
+採点されていないと分かるか / 配線の差が見えるか・AI の提案が参考表示と分かるか / 共有の意味が押す前に分かるか / 失敗から復帰できるか /
+教員側に個人情報が出ず確定の導線が分かるか / 復元式の印と音声中心の学生での縮退が正直か** — を場面 (a)〜(h) に置く。
+LLM 生成は 1 ペルソナ 1 回・改訂案は 1 経路だけ（従量部分の宣言。P-0011 / P-0018）。
+
+### 19.1 行為（PE9 — 画面の部品 + 実ルート）
+
+`uxsim/actions/registry.py` の `_SIMLAB` / `_ADMIN_SIM`（13 本）。学習側は全て `material.simulation-lab` を担体に、マニュアル
+`student/02-student.md#simulation-lab*` の節へ対応づける: `learning.simlab.{open, select_module, generate, edit, adopt, wiring_save,
+predict, run, share, propose_revision}`。教員側は `admin.simulation.{open, review_shared_run, ledger_candidate_confirm}`
+（`materials.row-simulation` / `simulation.run` / `simulation.ledger-candidate`）。`select_module` と `predict` は画面上の選択・入力で
+API は overview の再読（画面を読み直す操作）。`ledger_candidate_confirm` は run の観測系の主張の台帳（D層 GET）から run_id の一致する
+候補を引いて確定する。実装は `uxsim/runner/simlab_exec.py`（行為 + 投影を 1 箇所に。`actions_exec` が末尾で取り込み、
+`state.project_observation` が冒頭で委譲する）。module の指定はラベル・対象の部分一致（TeX とギリシャ文字を `norm_tex` で平らにする）か
+一覧の番号で、内部の `module_key` を台本に書かない。
+
+### 19.2 場面（誰 × 経路 × 見るもの）
+
+| 場面 | 経路 | ペルソナ | 論文 / トピック | 見るもの |
+|---|---|---|---|---|
+| (a) | `s-sim-first-open` | st-01（newcomer） | Cepheus B / DCF 法 | まとまりの一覧から入力→出力・前提が読めるか。生成なし |
+| (b) | `s-sim-edit-adopt-run` | st-03（adjacent_field） | 音速 / Horndeski `L_2` | 生成 → 1 行直す → 採用 → ベクトル入力で実行 |
+| (c) | `s-sim-predict-compare` | st-01 | Cepheus B / `σ_ξ` | 予想を書いて並べる。採点・判定が付かないか |
+| (d) | `s-sim-rewire-revise` | st-06（skeptic） | 音速 / `ξ_±` | 配線 2 種で実行し見比べる。改訂案は参考表示か |
+| (e) | `s-sim-share-meaning` | st-04（non_native） | 遅延時間分布 / `L(D|Λ)` | 共有の意味を聞いてから共有。台帳の候補・確定は教員 |
+| (f) | `s-sim-failure-recovery` | st-10（受信機） | Cepheus B / `M_J` | 入力欠けの失敗 → 事実文 → 揃えて実行 |
+| (g) | `t-sim-review-shared` | te-03 / te-04 | (e) の論文 | 共有 run の表示名以外の個人情報・台帳候補の確定導線 |
+| (h) | `s-sim-reconstructed-voice` | st-07（voice_first・未受講） | PINN / `L_TOV` | 復元式の印が選択時と生成時に出るか・音声で意味を聞く |
+
+campaign: `uxsim/campaigns/astrophysics/c-simulation-lab.yaml`（学生 6）と `c-simulation-lab-teacher.yaml`（教員 2・学生の共有の後）。
+params は `uxsim/domains/astrophysics/scenario_params/{s-sim-*,t-sim-review-shared}.yaml`（ラベルの部分一致・部品名で引き、UUID を書かない）。
+
+### 19.3 審判
+
+`uxsim/oracles/simulation.py`（決定論・LLM 0 回・製品の語彙は `principle.py` 経由で import）。A = DTO の形（記号写像のリスト形・段階の語彙・
+失敗 run の事実文・4xx の detail の空／内部例外文／英語・生成応答の形）。B = SB1 閉世界（「検証された」に FACT_NOT_VERIFICATION が伴うか）・
+SB14（予想の当否キーが無い・labels は 3 キー）・UC2 採点語彙・SB12（教員応答に owner_user_id / email / username が無い）・SB10（復元式の印）・
+SB5（改訂案の部品が目録内）・言語・内部 ID・件数。E = 痕跡 `verification_attempt` の有無と payload（数値なし・語彙内）・LLM 予算の実数・
+run の所有者。層は `findings._LAYER_BY_PREFIX` に `learning.simlab.` / `admin.simulation.` → `simulation_bridge_sb`。
+
+### 19.4 運転
+
+砂場は `-p episteme-uxsim`（frontend 3100 / DB 5433）。sim-runner が砂場にも立ち、学習者 overview の `sandbox_configured` が true であることを先に見る。
+教材は TeX 経路 4 本（snapshot `corpus-astro-tex-v1`・コース `1bad7d9f`）。arXiv は呼ばない（取り込み済みの教材で足りる — P-0007）。
+1 場面 = 1 invocation（`uxsim/runs/run21_lane.sh <campaign> <persona> <mailbox> <scenario…>`）、ペルソナ頭脳はレーンごと 1 体・製品頭脳 1 体
+（proxy の mailbox は既定の `uxsim/runs/mailbox`。前の周の seq 以前には応えない）。教員 campaign は学生の共有の後に走らせる。
+**砂場の api-server 像が v1（教員ルートのみ）だったので、学習者ルートを含む像に差し替えてから始めた**（compose build が registry の
+metadata 取得で止まったため、同じ commit から作った開発スタックの像を retag して `up -d --no-build`）。
+
+### 19.5 第 21 周（2026-10-03・c-simulation-lab / c-simulation-lab-teacher・8 場面 + 共有だけの経路 1）
+
+**走らせ方**: 砂場は TeX 4 本（snapshot `corpus-astro-tex-v1`）・コース `1bad7d9f`。学生 6 レーン（st-01 が (a)(c) の 2 場面・他は 1 場面）を 2 組に分けて並列、
+その後 st-04 の共有だけの経路、最後に教員 2 レーン。ペルソナ頭脳はレーンごと 1 体・製品頭脳 1 体（Opus）。製品 LLM の実数は
+`llm_usage_events`（`learning:simulation_codegen` が学生 1 人 1 回・`learning:simulation_revision` が 1 回）で宣言どおり。従量課金はチャットの RAG 検索の
+embedding だけ（本物の OpenAI）。arXiv は呼んでいない。
+
+**場面ごとの結果**（詳細は `uxsim/runs/BRAIN_NOTES_round21_*.md` と各 run の `findings.jsonl`）:
+- (a) st-01: まとまりを 2 つ選んでも入力・出力が「— → —」で、前提は英語の長い列。**諦めた**。
+- (b) st-03: 生成 → L_3 の符号を 1 行直す → 採用 → 11 個の生 TeX 記号をキーに実行まで通った。採用が本人の選択で教員の承認ではないことは画面に無い。
+  チャットは計量の符号を出典付きで説明したが「実行結果は手元に無い」と断った。
+- (c) st-01: 予想 → 配線なし実行 → 「未測定 / 未測定 / 未測定」の意味を 2 回聞いたが、2 回とも使い方マニュアルの同じ節が返り**諦めた**。予想に判定・点数は付かなかった（OK）。
+- (d) st-06: 配線「雑音だけ」「雑音と平均化」で 2 回実行。出力の桁（1e-10）に対して sigma が絶対値で 8 桁大きく、どちらも「乖離 / 埋もれる」で配線の差が言葉に出ない。
+  改訂案は「AI の提案（未確認）」として桁合わせを提案（OK）。チャットに実行結果が渡っていない。
+- (e) st-04（英語話者）: 共有の意味を英語で聞いたらマニュアルの目次（日本語）が返り、共有せずに終えた。(e') 共有だけの経路で共有 → 台帳の候補 1 件。
+  共有の意味は押した**後**の文でしか読めなかった。
+- (f) st-10: 入力を 1 つ欠いた実行は「入力『…』の値が必要です」の事実文で止まり、聞かずに直せた（OK）。出力の記号の警告の意味が読めない。
+- (g) te-03 / te-04: 共有 run は開けた（表示名だけ・共有されていない run は見えない = OK）。**台帳の候補を確定する導線が画面に無い**。Copilot の操作 KB が v1 の文
+  （「学習者にはこの画面も結果も表示されません」）のまま。未測定の run がそのまま台帳の候補になっていた。どちらも確定しなかった。
+- (h) st-07（音声）: 復元式の印は選択時・生成時の両方に出た（OK）。声の答えは復元式を原文と同じ扱いにしなかった（OK）。まだ動かしていないのに結果を前提にした問い返し。
+
+**ハーネス側で直したこと**: 模擬観測の列を `value` で読んで「—」にしていた（画面は `mean ± std`）／巨大数の書式／改訂案に op・slot を出していた／
+教員側の列名「あなたの予想」／共有ボタンの確認文が API runner では見えない → 投影に添えた／E2（LLM 予算）が並列レーンの時間窓で偽陽性 → run のペルソナの
+user_id に限定／B7 がピリオド無しの英語断片を拾わない → `language_fragment` 規則。**ペルソナが「模擬観測が — なのに…」と言った所見は投影の誤りで、製品の
+欠陥ではない**（配線なしで `observed` が空なのは製品の事実で R7 として別に残す）。
+
+**着手の地図（この波が前提とする利用状況: 学習者が個人で「作って試す」段階。複数学生の共有 run を教員が並べて読む共同利用はまだ無い）**
+
+| 項目（根） | 目的への寄与 | 利用状況での必要性 | 放置時に起きること | 負担 | 前提関係 | まだ分かっていないこと |
+|---|---|---|---|---|---|---|
+| R1 まとまりの入力→出力が空（成員の式を出す） | 「何を入力に何を出すか」を読む入口 | 初見の学生が最初に見る欄。全員が詰まった | 一覧から選べず諦める（(a) の再現） | core 2 箇所 + UI 1 箇所 | R2 と同じ DTO | 成員の式を何本まで見せると読めるか |
+| R2 式の表示ラベルが英語要約 | 一覧の可読性 | 全場面 | 英語の断片で埋まる | 1 関数（教員側の論文層も同時に変わる） | — | latex 断片が長い式でどう見えるか |
+| R5/R6/R7 比較の表示（軸名・ゼロの記号・配線なしの観測） | 結果の読み取り | 実行した全員 | 「未測定が 3 つ」「ゼロなのに…」で混乱 | comparator / service | — | 記載値を入れた場面は未検証 |
+| R8/R9 生成の facts の内部語・重なりの文 | 生成コードの読み取り | 生成した全員 | role=output を学生が読む | codegen 1 箇所 | — | LLM が指示を守る割合（頭脳では守れた） |
+| R12 チャットが実行結果を見ない | 対話支援の根幹 | 結果の意味を聞いた全員 | AI が「結果は手元に無い」と断る・マニュアル節が返る | SA層 解決器 1 本 + UI の文脈送信 + マニュアル 1 節 | SA層 4-c と同じ合流点 | 前提の逆質問との同居 |
+| R13 採用の意味 | SB11 が画面の文で伝わるか | 採用した全員 | 承認と誤読 | 事実文 1 つ | — | — |
+| R16 観測系の主張の候補が読めない | 共有の対象を選ぶ | 共有する学生 | 「本文を特定できない要素」から選ぶ | service 1 関数 | — | 候補ゼロの論文で共有の意味がどう変わるか |
+| R17 教員の確定導線が無い | SB13 の「確定は教員」の実体 | 共有が起きた後 | 教員は API でしか確定できない | UI + マニュアル + アンカー | R16・未測定の共有 | 見送りの理由の置き場 |
+| 未測定の共有を台帳候補にしない | 台帳の雑音 | 配線なしで共有した学生 | 何も確かめていない候補が台帳に並ぶ | share 1 箇所 | SB13 の読み替え（設計書に記録） | 教員が「未測定でも残したい」場合 |
+| R10/R11/R15/R18 UI の読み取り（記号の描画・共有の説明・部品の単位・同名のまとまり） | 操作の迷いを減らす | 全場面 | 生 TeX を打つ・押してから意味を知る | UI | 第 1 波の DTO | — |
+| Copilot KB / マニュアルの v1 文 | 教員の道案内 | 教員 | 画面と逆の説明 | docs 2 箇所 | — | — |
+| R3 前提の英語（A層） | — | 全場面 | 英語の長い列 | 表示側では直せない | generation_language の対象化は別件 | 式語彙の enum 化との順序 |
+
+オーナーに問う 3 種（不変条項の解釈・権利/制度・後戻りしにくい構造）に当たるものは**無い**。「未測定の共有を台帳候補にしない」は SB13 の読み替え
+だが候補の弁（確定は教員）を狭めるだけで、設計書 §14 に記録して進める。
+
+**第 1 波・第 2 波の後の再演（同日・(a) st-01 / (f) st-10 / (e) st-04 / (g) te-03）**: `uxsim/runs/run21r_lane.sh`（`--replay` で前回の run を
+指定。画面が変わった地点で cache miss → live に切り替わり `replay_divergence` が立つ）。(f) は入力欠けの事実文・採用の意味・軸名付きの段階
+ラベル・観測の列が揃い goal_reached。(e) は共有の意味を押す前に読んで共有し、未測定なので台帳の候補にならない事実文を読んだ（チャットの
+英語の問いには目次が返る = STILL）。(a) は STILL（上記）。(g) は 1 回目の再演で台帳候補の区画がハーネスの投影に無く（画面にはある）、
+`admin.simulation.review_shared_run` が主張の台帳も読むように直して 2 回目を走らせた。ハーネス側の修正: 再演で見つけた投影の不足 2 件
+（台帳候補・改訂案の理由だけ）と E2 の教員だけの run での誤判定。

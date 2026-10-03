@@ -1,0 +1,62 @@
+id: s-sim-edit-adopt-run
+population: students
+runner:
+- api
+# 場面 (b)。生成されたコードを 1 行だけ自分で直し、採用して走らせ、結果を読む。
+goal: '{{goal_text}} のために、{{topic_hint}} の理論のまとまりをコードにし、1 行だけ自分で直して採用し、動かして結果を読む'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_hint
+- edit_hint
+- input_hints
+- questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+  note: 式の本文があり、PDF から復元された式を入力に含まないまとまりを優先して選ぶ
+- do: learning.simlab.generate
+  note: コードの下書きを AI に作らせる（この経路で 1 回だけ）
+- do: learning.simlab.edit
+  note: '生成されたコード全文を元に、{{edit_hint}}。直すのは 1 行だけで、残りはそのまま source_code に入れる'
+- do: learning.simlab.adopt
+  note: 採用は自分がこの版を使うと決める操作で、教員の承認ではないことを確かめながら押す
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    wiring: none
+  note: 入力の値は io_contract.inputs の記号に合わせて置き換える。ベクトルの入力はカンマ区切りの数値の列で渡す
+- choose:
+  - do: learning.chat.ask
+    with:
+      message: '{{questions | next}}'
+    note: 実行結果の読み方で分からないところを聞く
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-steps
+- manual: student/02-student.md#simulation-lab-not-verification
+- manual: student/02-student.md#simulation-lab-own-records
+watch_for:
+- 生成されたコードの全文と、入力・出力の記号（io_contract）が読める
+- 書き直したコードに許可されない操作があれば、採用・実行できない理由が事実文で並ぶ
+- 採用が教員の承認ではなく本人の選択だと分かる文が出る
+- 実行結果は記号ごとに理論の出力と模擬観測が並び、段階の言葉と本人の実行の数値が出る
+- ベクトルの入力を渡したときに、失敗するならその理由が次に何をすればよいか分かる文で出る
+- 一致は検証ではないという一文が実行結果の近くでも失われない

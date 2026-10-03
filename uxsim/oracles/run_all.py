@@ -1,6 +1,6 @@
 """審判を全部かける: ``python -m uxsim.oracles.run_all runs/<campaign>/<run_id> [--judge]``。
 
-A・B・E と対話の往復をまたぐ検査（``dialogue``）は決定論（LLM 0 回）。C・D の LLM 審判は ``--judge`` のときだけ（ペルソナと同じ
+A・B・E と対話の往復をまたぐ検査（``dialogue``）・検証シミュレーション層の検査（``simulation``）は決定論（LLM 0 回）。C・D の LLM 審判は ``--judge`` のときだけ（ペルソナと同じ
 プロバイダ・別プロンプト）。出力: ``findings.jsonl`` / ``oracle_notes.json`` / ``document_pairs.jsonl``。
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Optional
 
 from uxsim.config import UXSIM_ROOT, get_settings
 from uxsim.llm import PersonaLLM, make_live_llm
-from uxsim.oracles import behavior, contract, dialogue, document, observation, principle
+from uxsim.oracles import behavior, contract, dialogue, document, observation, principle, simulation
 from uxsim.oracles.findings import FindingFactory, dedupe, load_meta, load_transcript, write_findings
 from uxsim.schema import Finding
 
@@ -30,6 +30,7 @@ def run_oracles(run_dir: Path, *, judge_llm: Optional[PersonaLLM] = None, databa
     found += contract.check(steps, factory, brain_backed=brain_backed)
     found += principle.check(steps, factory)
     found += dialogue.check(steps, factory)
+    found += simulation.check(steps, factory)
     notes["dialogue_ui_contract"] = dialogue.ui_contract_notes(steps)
     c, notes["behavior"] = behavior.check(steps, factory, judge_llm)
     found += c
@@ -38,6 +39,7 @@ def run_oracles(run_dir: Path, *, judge_llm: Optional[PersonaLLM] = None, databa
     url = get_settings().sandbox_database_url if database_url is None else database_url
     e, notes["observation"] = observation.check(meta, factory, url, engine)
     found += e
+    found += simulation.check_observation(meta, factory, url, engine, steps=steps)
     findings = dedupe(found)
     write_findings(run_dir / "findings.jsonl", findings)
     (run_dir / "oracle_notes.json").write_text(json.dumps(notes, ensure_ascii=False, indent=2, default=str),

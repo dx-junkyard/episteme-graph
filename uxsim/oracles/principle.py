@@ -51,6 +51,7 @@ from core.theory_modules.schema import RULE_VERSION as MODULE_RULE_VERSION  # no
 from core.graph_paper_layer.schema import FORBIDDEN_KEYS as PAPER_FORBIDDEN_KEYS  # noqa: E402
 from core.label_vocab import AI_READING_LABEL  # noqa: E402,F401  contract.py が再利用
 from core.element_vocab import THEORY_STAGE_LABELS  # noqa: E402,F401  dialogue.py が再利用
+from core.simulation_bridge import schema as SIMULATION_SCHEMA  # noqa: E402,F401  simulation.py が再利用
 
 DISPLAY_KEYS = frozenset({
     "answer", "label", "title", "text", "fact_line", "facts", "notice", "statement", "statements", "description",

@@ -1,0 +1,51 @@
+id: s-sim-reconstructed-voice
+population: students
+runner:
+- api
+# 場面 (h)。入力の式に PDF から復元された式を含むまとまりで、復元の印が見えるか・音声中心の学生に伝わるかを見る。
+# チャットは learning.chat.casual（runner が音声経路で送る）。
+goal: '{{goal_text}} のために、{{topic_hint}} の理論のまとまりをコードにして、注意書きの意味を声で聞いて確かめる'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_hint
+- questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: まだ受講していないので受講を始める
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+  note: 入力の式に PDF から復元された式を含むまとまりを選ぶ
+- do: learning.simlab.generate
+  note: コードの下書きを AI に作らせる（この経路で 1 回だけ）。出てきた注意書きを読む
+- repeat:
+    until: persona_decides_to_stop or steps > 2
+    max: 2
+    do: learning.chat.casual
+    with:
+      message: '{{questions | next}}'
+    note: 手がふさがっているので、注意書きの意味を声で聞く
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-steps
+- manual: student/02-student.md#simulation-lab-not-verification
+- manual: student/02-student.md#voice-mode
+watch_for:
+- 入力の式に PDF から復元された式が含まれることが、まとまりの選択時と生成したコードの両方で事実文として出る
+- 気軽な調子の答えでも、復元された式が原文から取り出した式ではないことが言葉で説明される
+- 読み上げに式の記号・記法がそのまま混ざらない
+- 答えが復元された式を論文の原文と同じ扱いで語らない

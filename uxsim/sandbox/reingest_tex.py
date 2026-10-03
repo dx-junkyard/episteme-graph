@@ -76,6 +76,7 @@ def main(argv=None) -> int:
     ap.add_argument("--poll", type=int, default=30)
     ap.add_argument("--timeout", type=int, default=7200, help="解析待ち上限（秒・全体）")
     ap.add_argument("--dry-run", action="store_true", help="取り込みも差し替えもせず、何をするかだけ表示")
+    ap.add_argument("--resume", default="", help="取得済みの JSON（[{arxiv_id, material_id, task_id}]）。arXiv を呼ばず完了待ちと差し替えだけ")
     a = ap.parse_args(argv)
 
     env_file = ROOT / a.env
@@ -102,14 +103,30 @@ def main(argv=None) -> int:
     status, body, _ = admin.call("POST", "/api/admin/url-fetch-domains", json={"domain": "arxiv.org"})
     print("allow arxiv.org:", status, str(body)[:120])
 
+    # コースの読み書きは所有者で（学習者 API は所有者 / 受講者以外に 404）。所有者候補 → 管理者の順。
+    course_client = admin
+    owner_label = "admin"
+    for persona in a.owner_persona:
+        c = EpistemeClient(st.base_url)
+        ok, _ = c.login(_persona_username(persona), st.persona_password)
+        if ok:
+            s_, b_, _ = c.call("GET", f"/api/learning/courses/{a.course}") if a.course else (200, {}, 0)
+            if s_ == 200:
+                course_client, owner_label = c, persona
+                break
+    print("course client:", owner_label)
+
     # 旧 material_id（同じ arXiv 番号）をコースの sources から控える
     old_by_arxiv: dict[str, dict] = {}
     course_data = None
     if a.course:
-        status, course_data, _ = admin.call("GET", f"/api/learning/courses/{a.course}")
+        status, course_data, _ = course_client.call("GET", f"/api/learning/courses/{a.course}")
         if status != 200 or not isinstance(course_data, dict):
             print("course GET failed", status, str(course_data)[:200], file=sys.stderr)
             return 1
+        # 学習者 API の詳細は {master_course: {...}, personal_layer: {...}} の入れ子
+        if isinstance(course_data.get("master_course"), dict):
+            course_data = course_data["master_course"]
         for src in course_data.get("sources") or []:
             print("  source:", src.get("material_id"), src.get("document_id"), (src.get("title") or "")[:60])
 
@@ -120,6 +137,9 @@ def main(argv=None) -> int:
         return 0
 
     results: list[dict] = []
+    if a.resume:
+        results = [dict(x, status="queued") for x in json.loads(pathlib.Path(a.resume).read_text())]
+        plan = []
     for i, item in enumerate(plan):
         if i:
             time.sleep(4)  # arXiv の 3 秒規律
@@ -196,21 +216,10 @@ def main(argv=None) -> int:
                             if k in ("title", "subtitle", "license", "used_section", "material_id", "document_id")})
         print("replace sources:", replaced)
         if replaced:
-            owner = None
-            for persona in a.owner_persona:
-                c = EpistemeClient(st.base_url)
-                ok, _ = c.login(_persona_username(persona), st.persona_password)
-                if ok:
-                    s, b, _ = c.call("PUT", f"/api/learning/courses/{a.course}", json={"sources": sources})
-                    print("PUT sources as", persona, s, str(b)[:120])
-                    if s == 200:
-                        owner = persona
-                        break
-            if owner is None:
-                s, b, _ = admin.call("PUT", f"/api/learning/courses/{a.course}", json={"sources": sources})
-                print("PUT sources as admin", s, str(b)[:120])
-                if s != 200:
-                    print("sources の差し替えに失敗。--owner-persona にコース所有者を指定してください。", file=sys.stderr)
+            s, b, _ = course_client.call("PUT", f"/api/learning/courses/{a.course}", json={"sources": sources})
+            print("PUT sources as", owner_label, s, str(b)[:120])
+            if s != 200:
+                print("sources の差し替えに失敗。--owner-persona にコース所有者を指定してください。", file=sys.stderr)
         for x in results:
             old = old_by_arxiv.get(x["arxiv_id"])
             if old:

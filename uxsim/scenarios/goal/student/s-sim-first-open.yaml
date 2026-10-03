@@ -1,0 +1,60 @@
+id: s-sim-first-open
+population: students
+runner:
+- api
+# 場面 (a)。検証シミュレーション層（SB層）の学習画面「🧪 動かして確かめる」を初めて開き、
+# 理論モジュールの入力と出力が読めるかを見る。コードの生成はしない（LLM 生成 0 回）。
+goal: '{{goal_text}} のために、{{topic_hint}} で「動かして確かめる」を初めて開き、理論のまとまりが何を受け取って何を出すのかを読む'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_numbers
+- module_hint
+- questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+  note: 教材の下の「🧪 動かして確かめる」を押してパネルを開く
+- repeat:
+    until: persona_decides_to_stop or steps > 3
+    max: 3
+    do: learning.simlab.select_module
+    with:
+      module_hint: '{{module_numbers | next}}'
+    note: 上から順にいくつかのまとまりを選んで、入力の式・出力の式・前提を読み比べる
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+  note: 読み比べた中から、いちばん入力と出力が読めそうなまとまりを 1 つ選び直す
+- repeat:
+    until: persona_decides_to_stop or steps > 2
+    max: 2
+    do: learning.chat.ask
+    with:
+      message: '{{questions | next}}'
+    note: 選んだまとまりが何を入力に何を出すのかを確かめる
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab
+- manual: student/02-student.md#simulation-lab-steps
+- manual: student/02-student.md#simulation-lab-not-verification
+watch_for:
+- 各まとまりに「入力の式 → 出力の式」と前提が並び、何が入力で何が出力かが読める
+- まとまりの名前・入力・出力に内部の番号や英語の生成ラベルがそのまま出ていない
+- 式の本文が引けないまとまりは選べないことと、その理由が一行で出る
+- パネルの先頭に、シミュレーションの一致は検証ではないという一文がある
+- 入力の式に PDF から復元された式が含まれるまとまりには、その旨が出る
+- パネルは自分で押したときだけ開き、催促や件数の表示が無い

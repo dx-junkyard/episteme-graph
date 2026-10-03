@@ -81,7 +81,9 @@ class PersonaSession:
                   "task_id": "tasks", "trace_id": "traces", "item_id": "recon_items", "recon_id": "recons",
                   "chunk_id": "chunks", "group_id": "groups", "node_id": "nodes", "element_id": "elements",
                   "element_type": "element_types", "claim_id": "claims",
-                  "document_ref": "documents"}.get(name)
+                  "document_ref": "documents",
+                  # 検証シミュレーション（SB層）: 自分のコード / 配線 / 実行
+                  "program_id": "sim_programs", "wiring_id": "sim_wirings", "run_id": "sim_runs"}.get(name)
         return self.latest(plural) if plural else ""
 
 
@@ -518,6 +520,11 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
     """応答をペルソナが読む画面の文に投影する（最大 ~1500 字）。"""
     if action_id.startswith("unsupported:"):
         return "この操作は画面に見当たらない（実行できなかった）。"
+    if action_id.startswith(("learning.simlab.", "admin.simulation.")):
+        # 検証シミュレーション（SB層）の画面は uxsim/runner/simlab_exec.py が投影する（エラーも含めて 1 箇所）
+        from uxsim.runner import simlab_exec  # 遅延 import（循環回避）
+
+        return simlab_exec.project(action_id, status, body)
     if isinstance(body, dict) and body.get("_ui_fact"):
         # 画面がサーバの応答を事実文に置き換えて出す縮退（例: ノード対話の 404 / 422）
         return _clip(str(body["_ui_fact"]))

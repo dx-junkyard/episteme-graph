@@ -340,7 +340,70 @@ _ADMIN: list[Action] = [
        manual=_TE + "11-admin-materials.md#seminar-brief-open"),
 ]
 
-REGISTRY: dict[str, Action] = {a.id: a for a in _LEARNING + _ADMIN}
+# --- 検証シミュレーション層（SB層・学習画面「🧪 動かして確かめる」/ 教員の「検証シミュレーション…」）。
+# 契約の正本は docs/features/simulation_bridge_design.md §14.3（学習者 API）/ §6（教員 API）。
+_SL = "material.simulation-lab"
+_SLM = _ST + "simulation-lab"
+_SIM_OVERVIEW = ("GET", "/api/learning/courses/{course_id}/simulation/overview")
+_SIMLAB: list[Action] = [
+    _a("learning.simlab.open", "動かして確かめるを開く", "learning", _SL, _SIM_OVERVIEW,
+       args={"document_id": "str?", "topic_id": "str?"}, precondition="コースのトピックを開いている", manual=_SLM,
+       note="開いた論文の理論モジュール・自分のコード/配線/実行・部品目録・観測系の主張を覚える"),
+    _a("learning.simlab.select_module", "理論モジュールを選ぶ", "learning", _SL, _SIM_OVERVIEW,
+       args={"module_hint": "str"}, precondition="動かして確かめるを開いている", manual=_SLM + "-steps",
+       note="module_hint はモジュールのラベル・対象の部分一致か一覧の番号（1 始まり）"),
+    _a("learning.simlab.generate", "コードを生成する", "learning", _SL,
+       ("POST", "/api/learning/courses/{course_id}/simulation/programs/generate"),
+       args={"module_hint": "str?"}, precondition="理論モジュールを選んでいる", llm_cost="product", manual=_SLM + "-steps"),
+    _a("learning.simlab.edit", "自分で書き直す", "learning", _SL,
+       ("POST", "/api/learning/simulation/programs/{program_id}/edit"),
+       args={"source_code": "str"}, precondition="コードが表示されている", manual=_SLM + "-steps"),
+    _a("learning.simlab.adopt", "採用する", "learning", _SL,
+       ("POST", "/api/learning/simulation/programs/{program_id}/adopt"),
+       precondition="コードが表示されている", manual=_SLM + "-steps"),
+    _a("learning.simlab.wiring_save", "配線を保存", "learning", _SL,
+       ("POST", "/api/learning/courses/{course_id}/simulation/wirings"),
+       args={"name": "str", "parts": "list[str]", "params": "dict?"}, precondition="部品目録が表示されている",
+       manual=_SLM + "-steps", note="parts は部品名を上流→下流の順（目録の名前の部分一致）。params は {部品名: {名前: 値}}"),
+    _a("learning.simlab.predict", "予想を書く", "learning", _SL, _SIM_OVERVIEW,
+       args={"prediction": "dict"}, precondition="採用したコードがある", manual=_SLM + "-prediction",
+       note="prediction は {記号: 数値}。実行のときに並べて見せる（採点されない）"),
+    _a("learning.simlab.run", "実行して並べて見る", "learning", _SL,
+       ("POST", "/api/learning/courses/{course_id}/simulation/runs"),
+       args={"values": "dict", "params": "dict?", "prediction": "dict?", "claim_hint": "str?", "wiring": "str?",
+             "seed": "int?"},
+       precondition="採用したコードがある", manual=_SLM + "-steps",
+       note="values は {記号: 数値 or 数値の列（カンマ区切り文字列可）}。wiring は配線名の部分一致・\"none\" で配線なし。"
+            "claim_hint は観測系の主張のラベルの部分一致"),
+    _a("learning.simlab.share", "共有する", "learning", _SL,
+       ("POST", "/api/learning/simulation/runs/{run_id}/share"),
+       args={"claim_hint": "str?"}, precondition="実行の記録がある", manual=_SLM + "-share"),
+    _a("learning.simlab.propose_revision", "改訂案を求める", "learning", _SL,
+       ("POST", "/api/learning/simulation/runs/{run_id}/propose-revision"),
+       precondition="配線を使った実行の記録がある", llm_cost="product", manual=_SLM + "-steps"),
+]
+
+_TS = _TE + "27-admin-simulation-bridge.md#"
+_ADMIN_SIM: list[Action] = [
+    _a("admin.simulation.open", "検証シミュレーションを開く", "admin", "materials.row-simulation",
+       ("GET", "/api/admin/simulation/documents/{document_id}/overview"),
+       args={"document_id": "str?", "material_hint": "str?"}, extra_api=(("GET", "/api/admin/materials"),),
+       manual=_TS + "simulation-overview",
+       note="material_hint は教材一覧の題名・ファイル名の部分一致。共有された run（shared: true）の run_id を覚える"),
+    _a("admin.simulation.review_shared_run", "共有された実行を見る", "admin", "simulation.run",
+       ("GET", "/api/admin/simulation/runs/{run_id}"), args={"run_id": "str?"},
+       extra_api=(("GET", "/api/admin/doubt/ledger/{target_type}/{target_id}"),),
+       precondition="共有された実行が一覧にある", manual=_TS + "simulation-run",
+       note="画面は共有 run を選ぶと主張の台帳を読み、台帳の候補（確定 / 見送り）を並べる"),
+    _a("admin.simulation.ledger_candidate_confirm", "台帳の候補を確定する", "admin", "simulation.ledger-candidate",
+       ("POST", "/api/admin/doubt/ledger/{target_type}/{target_id}/simulation-candidates/{candidate_id}/confirm"),
+       args={"run_id": "str?"}, precondition="共有された実行の観測系の主張に候補が記帳されている",
+       manual=_TS + "simulation-ledger-candidate",
+       extra_api=(("GET", "/api/admin/doubt/ledger/{target_type}/{target_id}"),),
+       note="run の観測系の主張（claim）の台帳を読み、run_id の一致する候補を確定する。確定は教員の弁（SB13）"),
+]
+
+REGISTRY: dict[str, Action] = {a.id: a for a in _LEARNING + _ADMIN + _SIMLAB + _ADMIN_SIM}
 
 
 def get(action_id: str) -> Optional[Action]:
