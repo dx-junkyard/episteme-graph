@@ -337,6 +337,37 @@ def check_source(source_code: str) -> tuple[bool, list[str]]:
 # ---------------------------------------------------------------------------
 
 
+#: 実行前検査で入力が足りないときの事実文（学習者が自分で直せるよう名指しする）。
+FACT_MISSING_INPUT = "入力『{name}』の値が必要です。値を入れてから実行してください。"
+#: 実行時エラーの事実文（本人のコードのエラーなので型とメッセージの先頭を見せる。制御文字は除く）。
+FACT_RUNTIME_ERROR = "実行時のエラー: {head}"
+_ERROR_HEAD_CHARS = 200
+
+
+def missing_required_inputs(source: str, *, values: Mapping[str, Any], params: Mapping[str, Any]) -> list[str]:
+    """コードが必ず読むキーのうち、入力にも定数にも無いものを名前順で返す（決定論・非実行）。"""
+    keys = ast_guard.required_keys(source)
+    given = {str(k) for k, v in dict(values or {}).items() if v is not None} | {
+        str(k) for k, v in dict(params or {}).items() if v is not None
+    }
+    missing = [k for k, required in keys["inputs"].items() if required and k not in given]
+    missing += [k for k, required in keys["params"].items() if required and k not in given]
+    return sorted(set(missing))
+
+
+def error_facts(error: str | None) -> list[str]:
+    """sandbox のエラー文字列を 1 行の事実文にする（空なら何も足さない）。"""
+    from core.text_hygiene import strip_control_sequences
+
+    head = strip_control_sequences(str(error or "")).strip().splitlines()
+    if not head or not head[0]:
+        return []
+    text = head[0][:_ERROR_HEAD_CHARS]
+    if text.startswith("not_configured") or text.startswith("missing_inputs"):
+        return []
+    return [FACT_RUNTIME_ERROR.format(head=text)]
+
+
 def run_pipeline(
     *,
     program: Mapping[str, Any],
@@ -378,6 +409,16 @@ def run_pipeline(
             merged.setdefault(str(slot), {}).update({str(k): float(v) for k, v in (slot_values or {}).items()})
         instrument_param_values = merged
 
+    # 実行前の検査: コードが必ず読むキーが入力に無ければ、KeyError を待たずに名指しで返す（学習者が直せる事実文）。
+    missing = missing_required_inputs(source, values=values, params=params)
+    if missing:
+        facts = [FACT_MISSING_INPUT.format(name=name) for name in missing]
+        return (
+            schema.RUN_STATUS_FAILED,
+            {"facts": facts, "reconstructed_inputs": reconstructed},
+            {"status": schema.RUN_STATUS_FAILED, "error": "missing_inputs: " + ", ".join(missing), "stage": "theory"},
+        )
+
     theory = sandbox_client.run(
         source,
         entrypoint=schema.PROGRAM_ENTRYPOINT,
@@ -388,7 +429,7 @@ def run_pipeline(
     if theory.status != schema.RUN_STATUS_SUCCEEDED:
         return (
             schema.RUN_STATUS_FAILED,
-            {"facts": list(theory.facts or []), "reconstructed_inputs": reconstructed},
+            {"facts": list(theory.facts or []) + error_facts(theory.error), "reconstructed_inputs": reconstructed},
             {"status": schema.RUN_STATUS_FAILED, "error": theory.error, "stage": "theory"},
         )
 
@@ -407,7 +448,7 @@ def run_pipeline(
                 schema.RUN_STATUS_FAILED,
                 {
                     "theory_outputs": theory_outputs,
-                    "facts": list(observed_run.facts or []),
+                    "facts": list(observed_run.facts or []) + error_facts(observed_run.error),
                     "reconstructed_inputs": reconstructed,
                 },
                 {"status": schema.RUN_STATUS_FAILED, "error": observed_run.error, "stage": "instrument"},

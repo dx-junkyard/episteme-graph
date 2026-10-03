@@ -162,3 +162,41 @@ def check_expression(expr: str) -> schema.AstCheckResult:
             reasons.append("式で代入・非同期・yield は使えません。")
         reasons.extend(_common_reasons(node))
     return schema.AstCheckResult(ok=not reasons, reasons=_uniq(reasons), entrypoint_found=True)
+
+
+def required_keys(source: str) -> dict[str, dict[str, bool]]:
+    """生成コードが ``inputs`` / ``params`` から読む文字列キーを集める（決定論・実行しない）。
+
+    戻り値は ``{"inputs": {key: required}, "params": {key: required}}``。``x["k"]`` は必須、
+    ``x.get("k", default)`` は任意（``x.get("k")`` だけなら必須扱い）。io_contract が
+    コードと食い違って入力欄に現れないキー（実機 2026-10-03 の ``KeyError: 'b_1'``）を、
+    契約の補完と実行前の検査の両方で使う。構文エラーなら空。
+    """
+    out: dict[str, dict[str, bool]] = {"inputs": {}, "params": {}}
+    try:
+        tree = ast.parse(source or "")
+    except SyntaxError:
+        return out
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) and node.value.id in out:
+            key = node.slice
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                out[node.value.id].setdefault(key.value, True)
+                out[node.value.id][key.value] = True
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in out
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            name = node.args[0].value
+            optional = len(node.args) >= 2 or bool(node.keywords)
+            bucket = out[node.func.value.id]
+            if name not in bucket:
+                bucket[name] = not optional
+    return out
+

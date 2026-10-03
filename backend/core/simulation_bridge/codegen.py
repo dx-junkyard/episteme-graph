@@ -370,6 +370,7 @@ def generate_program(
             check = ast_guard.check_program(source)
 
     contract = _normalize_contract(data.get("io_contract"))
+    contract = complete_contract_from_source(contract, source)
     llm_facts = _normalize_facts(data.get("facts"))
     provenance["facts"] = llm_facts
     if not (check.ok and check.entrypoint_found):
@@ -398,3 +399,25 @@ def program_facts_for_display(draft: schema.ProgramDraft) -> list[str]:
     if provenance.get("reconstructed_inputs"):
         facts.append(schema.FACT_RECONSTRUCTED_INPUTS)
     return _dedupe([strip_control_sequences(str(f)).strip() for f in facts])
+
+
+def complete_contract_from_source(contract: dict[str, list[dict]], source: str) -> dict[str, list[dict]]:
+    """コードが読むキーで io_contract を補完する（決定論・SB3 の AST と同じ走査）。
+
+    LLM が ``params["b_1"]`` を使いながら契約に ``b_1`` を書かないと、入力欄に現れず実行が
+    ``KeyError`` で落ちる（実機 2026-10-03）。契約に無いキーは ``kind`` を inputs=``variable`` /
+    params=``parameter``、``default`` は None（画面では空欄・実行前検査で名指しされる）として足す。
+    既存の項目は変えない。
+    """
+    out = {k: [dict(i) for i in (contract.get(k) or [])] for k in ("inputs", "outputs", "parameters")}
+    keys = ast_guard.required_keys(source)
+    have_inputs = {str(i.get("symbol") or "") for i in out["inputs"]}
+    have_params = {str(i.get("symbol") or "") for i in out["parameters"]}
+    for name in sorted(keys["inputs"]):
+        if name and name not in have_inputs:
+            out["inputs"].append({"symbol": name, "kind": "variable", "unit": "", "default": None})
+    for name in sorted(keys["params"]):
+        if name and name not in have_params and name not in have_inputs:
+            out["parameters"].append({"symbol": name, "kind": "parameter", "unit": "", "default": None})
+    return out
+
