@@ -580,7 +580,8 @@
         chips.map((c) => chip(c, "sim-lab-chip-label")).join(" ") + "</div>";
     }
     if (result.statement) html += '<p class="sim-lab-statement">' + esc(result.statement) + "</p>";
-    const facts = [].concat(arr(comparison.facts), arr(result.facts));
+    let facts = [].concat(arr(comparison.facts), arr(result.facts));
+    facts = facts.filter((f, i) => f && facts.indexOf(f) === i);
     if (!facts.length && status && status !== "succeeded") facts.push("実行は完了しませんでした。");
     html += factsHtml(facts);
     html += metricsTable(comparison.metrics);

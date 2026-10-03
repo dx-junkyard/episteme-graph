@@ -68,7 +68,9 @@ class TestCompare:
 
     def test_no_wiring(self):
         c = comparator.compare({"y": 2.0}, None)
-        assert c.agreement_level == "match"
+        # 配線なしでは模擬観測＝理論出力なので「一致」を出さない（空疎な一致の禁止）
+        assert c.agreement_level == "unmeasured"
+        assert c.metrics["relative_difference"] is None
         assert c.separation_level == "unmeasured"
         assert schema.FACT_NO_WIRING in c.facts
         assert c.facts[-1] == schema.FACT_NOT_VERIFICATION

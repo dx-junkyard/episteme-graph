@@ -757,6 +757,7 @@
     var labels = obj(result.labels);
     var status = String(r.status || "");
     var facts = [].concat(arr(comparison.facts), arr(result.facts));
+    facts = facts.filter(function (f, i) { return f && facts.indexOf(f) === i; });
     if (!facts.length && status !== "succeeded") facts.push("実行は完了しませんでした。");
     return '<div class="simulation-run-card">' +
       '<div class="simulation-card-head">実行結果 ' + chip(RUN_STATUS_LABELS[status] || status, "simulation-status-" + esc(status)) +

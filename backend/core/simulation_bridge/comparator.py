@@ -123,7 +123,9 @@ def compare(
             schema.METRIC_REFERENCE_DIFFERENCE: None,
         }
 
-    relative_difference = max(rel_values) if rel_values else None
+    # 配線なし（観測なし）のときは模擬観測が理論の出力そのものなので、一致は測っていない（空疎な「一致」を
+    # 出さない — 実機 2026-10-03 の是正）。相対差は None にして段階ラベルを未測定に落とす。
+    relative_difference = None if no_wiring else (max(rel_values) if rel_values else None)
     # 1 記号でも分離を測れなければ、分離は測れなかったとする（最悪値を見落とさない）。
     separation_ratio = min(sep_values) if sep_values and not sep_unmeasured else None
 
