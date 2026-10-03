@@ -85,9 +85,11 @@ class TestCompare:
         assert c.agreement_level == "unmeasured"
         assert c.metrics["relative_difference"] is None
 
-    def test_theory_zero_uses_epsilon(self):
+    def test_theory_zero_is_unmeasured(self):
+        # 理論出力がゼロなら相対差は定義できない（2026-10-03 是正: 以前は EPSILON で割って「一致」/「乖離」を出していた）
         c = comparator.compare({"y": 0.0}, {"y": {"mean": 0.0, "std": 1.0}})
-        assert c.agreement_level == "match"
+        assert c.agreement_level == "unmeasured"
+        assert comparator.FACT_ZERO_THEORY_OUTPUT in c.facts
 
     def test_list_theory_output(self):
         c = comparator.compare({"y": [1.0, 3.0]}, {"y": {"mean": 2.0, "std": 0.1}})
