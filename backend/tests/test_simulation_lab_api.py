@@ -736,3 +736,20 @@ class TestLearnerProjection:
         assert {o["symbol"] for o in run["result"]["theory_outputs"]} >= {"k", "count", "n"}
         assert body["parts_catalog"][0]["params"][0]["name"] == "gain"
         assert "owner_user_id" not in response.text
+
+
+class TestVectorValues:
+    def test_value_pairs_accepts_short_numeric_vectors_and_rejects_bad(self):
+        from fastapi import HTTPException
+
+        from routes import simulation_lab as sl
+
+        out = sl._value_pairs([{"symbol": "k1", "value": [0.1, 0.0, 0.0]}, {"symbol": "F3", "value": 0.5}], label="入力の値")
+        assert out == {"k1": [0.1, 0.0, 0.0], "F3": 0.5}
+        import pytest
+
+        with pytest.raises(HTTPException):
+            sl._value_pairs([{"symbol": "k1", "value": ["a", 1]}], label="入力の値")
+        with pytest.raises(HTTPException):
+            sl._value_pairs([{"symbol": "k1", "value": []}], label="入力の値")
+

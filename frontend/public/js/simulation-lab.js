@@ -482,8 +482,13 @@
       const io2 = obj(it);
       const s = symOf(io2);
       if (!s) return "";
+      // 入力（data-sl-value）はベクトルも受ける（カンマ区切り）。パラメータは数値 1 つ。
+      const vector = attr === "data-sl-value";
+      const input = vector
+        ? ' <input type="text" inputmode="decimal" placeholder="数値（ベクトルはカンマ区切り）" '
+        : ' <input type="number" step="any" ';
       return '<label class="sim-lab-param"><code>' + esc(s) + "</code>" + (io2.unit ? " [" + esc(io2.unit) + "]" : "") +
-        ' <input type="number" step="any" ' + attr + '="' + esc(s) + '" value="' + esc(io2.default == null ? "" : io2.default) + '"></label>';
+        input + attr + '="' + esc(s) + '" value="' + esc(io2.default == null ? "" : io2.default) + '"></label>';
     }).join("");
     const ins = numberInputs(io.inputs, "data-sl-value");
     const pars = numberInputs(io.parameters, "data-sl-param-run");
@@ -657,10 +662,19 @@
     const n = Number(raw);
     return isFinite(n) ? n : null;
   }
+  // 入力の値: 「0.1, 0, 0」のようなカンマ区切りはベクトル（数値の配列）として送る。
+  function readValue(el) {
+    if (!el) return null;
+    const raw = str(el.value).trim();
+    if (!raw) return null;
+    if (raw.indexOf(",") < 0) return readNumber(el);
+    const parts = raw.split(",").map((x) => Number(x.trim()));
+    return parts.length && parts.every((n) => isFinite(n)) ? parts : null;
+  }
   function collect(selector, attr) {
     const out = [];
     region.querySelectorAll(selector).forEach((el) => {
-      const v = readNumber(el);
+      const v = attr === "data-sl-value" ? readValue(el) : readNumber(el);
       if (v !== null) out.push({ name: el.getAttribute(attr), value: v });
     });
     return out;

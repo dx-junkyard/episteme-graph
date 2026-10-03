@@ -154,7 +154,7 @@ class RunRequest(BaseModel):
     program_id: str = ""
     wiring_id: str | None = None
     observation_claim_ids: list[str] = Field(default_factory=list)
-    values: dict[str, float] = Field(default_factory=dict)
+    values: dict[str, float | list[float]] = Field(default_factory=dict)  # ベクトル入力可（波数など）
     params: dict[str, float] = Field(default_factory=dict)
     instrument_params: dict[str, dict[str, float]] = Field(default_factory=dict)
     reference: dict[str, dict[str, Any]] | None = None

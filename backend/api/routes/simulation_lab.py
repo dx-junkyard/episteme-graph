@@ -153,6 +153,44 @@ def _numeric_pairs(value: Any, *, key_name: str, label: str) -> dict[str, float]
     return out
 
 
+#: ベクトル入力の上限（波数ベクトル等。長い列は実測データの取り込みであって v1 の対象外）。
+_VECTOR_MAX_LEN = 64
+
+
+def _value_pairs(value: Any, *, label: str) -> dict[str, float | list[float]]:
+    """入力の値: 数値、または数値の列（ベクトル。カンマ区切りの画面入力が ``[..]`` で届く）。
+
+    生成コードは波数ベクトルのような配列入力を期待することがある（実機 2026-10-03:
+    ``TypeError: 'float' object is not iterable``）。スカラーだけに縛らない。
+    """
+    if value is None:
+        return {}
+    items: list[tuple[Any, Any]] = []
+    if isinstance(value, dict):
+        items = list(value.items())
+    elif isinstance(value, list):
+        for entry in value:
+            if not isinstance(entry, dict):
+                raise HTTPException(status_code=422, detail=f"{label}の形が正しくありません。")
+            items.append((entry.get("symbol", entry.get("name")), entry.get("value")))
+    else:
+        raise HTTPException(status_code=422, detail=f"{label}の形が正しくありません。")
+    out: dict[str, float | list[float]] = {}
+    for name, number in items:
+        key = str(name or "").strip()
+        if not key:
+            raise HTTPException(status_code=422, detail=f"{label}に名前の無い値があります。")
+        if isinstance(number, list):
+            if not number or len(number) > _VECTOR_MAX_LEN or not all(_is_number(x) for x in number):
+                raise HTTPException(status_code=422, detail=f"{label}のベクトルは数値だけの短い列にしてください（{key}）。")
+            out[key] = [float(x) for x in number]
+            continue
+        if not _is_number(number):
+            raise HTTPException(status_code=422, detail=f"{label}には数値だけを入れてください（{key}）。")
+        out[key] = float(number)
+    return out
+
+
 def _prediction_list(value: Any) -> list[dict]:
     """予想を ``[{symbol, value}]`` にする（数値だけ。そのまま保存して並置する = SB14）。"""
     pairs = _numeric_pairs(value, key_name="symbol", label="予想")
@@ -869,7 +907,7 @@ def create_simulation_lab_run(
     course_data = _require_course(uid, course_id)
     allowed = _course_document_ids(course_data)
     prediction = _prediction_list(body.prediction)
-    values = _numeric_pairs(body.values, key_name="symbol", label="入力の値")
+    values = _value_pairs(body.values, label="入力の値")
     params = _numeric_pairs(body.params, key_name="name", label="パラメータ")
     instrument_params = _instrument_params(body.instrument_params)
     reference = _reference(body.reference)
