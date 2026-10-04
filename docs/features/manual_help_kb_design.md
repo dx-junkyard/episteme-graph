@@ -334,3 +334,36 @@ capabilities: [materials.upload]  # 任意。registry と相互参照（実在�
 | P4（情報を落とさない） | TODO は除外+To-Do 可視化で保持、dismiss は行削除しない（§6-14） |
 | A層ほか既存レイヤー非改変 | admin_operations 正本のまま・knowledge.py は委譲のみ・読む側として積層 |
 | コスト上限文化 | 新規 env 0（既存 quota 相乗り + `usage_context` U層計測） |
+
+---
+
+## 9. 追補（2026-10-04・第 22 周）: マニュアル検索の語の切り方・目次の除外・開いているパネルの節の優先・英語の問い
+
+uxsim 第 21 周（SB層・`persona_enactment_testing_design.md` §19.5）で「未測定って何」「予想は点数になるか」に同じ手順の節が返り、
+英語の "What happens when I share this run?" に**目次（日本語）**が返った（IK-0611 派生）。trace_walk（`search_manual` を直接呼ぶ・
+LLM 不使用）で根を 4 つに分け、それぞれ 1 箇所で直した（`route-all-surfaces-through-one-point`）。
+
+| 根 | 事実 | 是正（正本の場所） |
+|---|---|---|
+| 1 目次が documented ヒットになる | `#toc` はリンクの並びだけの節だが全見出し語を含むので語の重なりで上位に来る。本文が空でないため `documented=True` となり、ベクトル補助層のフォールバック（not documented のときだけ）も走らない | 本文がリンクの並びだけの節を**構造で判定**して検索の候補から外す（`core/help_kb/index.py::is_navigation_section` + `manual.search_manual`）。索引からは外さない（validator のリンク検証が `#toc` を引く） |
+| 2 日本語の採点が機能語の字に支配される | `WORD_RE` は日本語を 1 字ずつ割るため「と・は・何・で・す・か」を多く含む長い節が核心語「未測定」を持つ短い節より上に来る | マニュアル検索だけ語の切り方を変える: ASCII 語 + 漢字・カタカナ 1 字 + かな漢字の隣接 2 字（ひらがな同士は除く）。ひらがな 1 字は数えず、2 字は重み 2・見出しの重なりは 2 倍（`index.tokenize_cjk_ngrams` / `score_sections(cjk_ngrams=, prefer_anchor=)`）。**Copilot KB（`admin_assistant/knowledge.py`）は `tokenize` を直接使い不変** |
+| 3 英語の問いは日本語の節に語で当たらない | 言語をまたぐ照合は語の検索では原理的にできず、偶然の ASCII（PDF・コードの語）の節に落ちる | かな・漢字を含まない問いでは語の照合を使わず、ベクトル補助層（言語をまたぐ）→ 開いているパネルの節 の順。本文は言い換えず（パラフレーズ禁止 = 意味ドリフトゼロ）、英語の 1 行「The usage guide is written in Japanese…」と英語のフッター・無ヒット文を添える（LLM 0 回のまま） |
+| 4 結果の意味の問いが HELP に行くと実行の事実が届かない | HELP 経路は LLM 0 回・マニュアル素通しなので、SA層 4-e `simulation` の事実文（なぜ未測定か）が届かない | 「🧪 動かして確かめる」のパネルが開いていて（`screen_context.selection.simulation_run_id` = 画面の明示状態）、発話が実行結果の言葉（`label_vocab` の段階ラベル + 記載値・分離・模擬観測・ばらつき / 英語 unmeasured・agreement・separation・reference value。正本 `core/simulation_bridge/schema.py::mentions_simulation_result`）を含むときは、pre-route でも分類の USAGE_HELP でも HELP に回さず DOMAIN_RAG へ（`routes/learning.py::_is_simulation_result_question`）。型付き `usage_help` は従来どおり HELP。「予想」は結果の語に入れない（方針の問いでマニュアルの節が正本）。**「共有」は周の途中で結果の語に加えた**（下記の改訂） |
+
+パネルが開いているときの HELP は `prefer_anchor="simulation-lab"` で節の一族をスコア正の範囲で先頭に寄せ、どれにも当たらなければパネルの節そのものを返す。
+LC1〜LC8 との照合: 変えるのは**様相ではなくルート**（LC1）、入力は当該発話 + 画面の明示状態（LC4）、非LLM で LLM 呼び出しは増えない（LC5）、
+明示が勝つ（LC2）、HELP pre-route は最前段のまま（LC3）、下流の条件式は無改変で `intent` の再代入 1 行（LC8）。実測（実マニュアル）:
+「未測定とは何ですか」→ `#simulation-lab-levels`、「予想は点数になるか」→ `#simulation-lab-prediction`、「共有すると誰に見えますか」→ `#simulation-lab-share`。
+確かめていない範囲: 分類 LLM が同じ発話を USAGE_HELP にするか / ベクトル補助層が英語の問いで `simulation-lab-share` に当たるか（距離の足切り 0.55 を
+言語をまたいで越えるか）— 第 22 周の場面 (j) で見る。**オーナー判断の候補**: 英語で問う学習者に HELP 経路で 1 LLM コールを使って英語で答えるか
+（推奨: 現状維持 = 日本語本文 + 英語の前置き 1 行・LLM 0 回。需要が観測されたら英語版マニュアル `student/en/` を別途用意）。
+ガードレール: `test_help_usage_route.py`（+8）/ `test_help_kb.py`（+12）。
+
+**周の途中の改訂（2026-10-04・第 22 周 (j)(l) の所見）**: 英語の「この実行を共有すると誰に見えるか」は HELP の英語経路で §19 冒頭の
+日本語本文が返り（パネルの節への縮退 = 共有の節ではない）、(l) の「前の実行はいつ・配線・段階は」は分類 USAGE_HELP → 「何ができるか」の節が
+返った。どちらも**開いている自分の実行についての問い**で、マニュアルの一般論ではなく実行の事実で答えるべきもの。そこで結果の語に
+日本語「段階・配線・実行の記録・前の実行・実行結果・理論の出力・共有」、英語 `run / wiring / share / shared / sharing` を足し、SA層 4-e の
+解決器が共有の意味（`schema.FACT_SHARE_MEANING_UNSHARED / _SHARED` — 画面の確認文と同じ内容）と教員の判断の状態（`ledger_decision.fact`）を
+事実文として渡すようにした（`MAX_LEARNING_SIMULATION_FACTS` 8 → 12）。パネルが開いていないときの「共有すると誰に見えますか」は従来どおり
+HELP（`#simulation-lab-share`）。英語 HELP の節選択（意図語 → 節）は作らず、実行についての問いは RAG へ・一般の使い方は日本語本文のまま。
+

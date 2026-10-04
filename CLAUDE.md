@@ -1312,6 +1312,12 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
 
 ### 利用者マニュアル KB（help_kb, migration 058/059, 2026-07-25）
 
+- **マニュアル検索の是正（2026-10-04・第 22 周・正本は設計書 §9）**: 目次節（リンクの並びだけの節 — 構造で判定）は検索の候補から外す
+  （索引からは外さない）/ マニュアル検索だけ語の切り方を漢字・カタカナ 1 字 + かな漢字 2 字 n-gram に（ひらがな 1 字は数えない・Copilot KB
+  の `tokenize` は不変）/ かな・漢字を含まない問いは語の照合を使わずベクトル補助層 → 開いているパネルの節（英語の前置き 1 行・LLM 0 回）/
+  「🧪 動かして確かめる」のパネルが開いていて実行結果の言葉（`simulation_bridge.schema.mentions_simulation_result`）を含む問いは
+  pre-route でも分類の USAGE_HELP でも HELP に回さず DOMAIN_RAG へ（型付き `usage_help` は HELP のまま）。
+
 docs/manual を AI アシスタントの知識源にする非ベクトル KB。正本は
 `docs/features/manual_help_kb_design.md`。ベクトル RAG は建てない（97KB・70節に埋め込み
 基盤は過剰。無ヒット率の計器が要求してから Phase 3 で検討）。**chunks テーブルへの
@@ -3097,7 +3103,7 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   （`simulation_store.get_run` / `is_owner`・grounding の範囲内）を事実 8 行（入力・理論の出力・模擬観測・予想は当否なし・段階ラベル・
   FACT_NOT_VERIFICATION・比較の事実）にする。SB1 の行が載ったときだけ system 末尾に `LEARNING_SIMULATION_OUTPUT_CONSTRAINT`。
   casual では出さず elicit では引かない。登録 kind は 6 つ（`resolve_topic` / `resolve_visible` の不在は固定のまま）。
-  学習 route が SB 層から呼んでよいのは `get_run` / `is_owner` だけ（`test_simulation_bridge_guardrails.py`）。
+  学習 route が SB 層から呼んでよいのは `get_run` / `is_owner` / `ledger_decisions_for_run`（SELECT のみ・第 22 周）だけ（`test_simulation_bridge_guardrails.py`）。
 - **横展開（設計予約、着手時に設計書へ §追加）**: Phase 2 = W層要素モーダル / Phase 3 = Admin
   Copilot（既存 `collectScreenContext()` に `screen` を足して同じ語彙へ）。**新しい画面に AI 対話を
   置くときは、画面テキストを送らず、この規約で参照を渡して解決器を1本足す。**
@@ -3595,6 +3601,24 @@ D層の台帳へ**候補**として戻る。
   （`FACT_SHARED_UNMEASURED`）/ overview の modules に `equations`（成員の式）と `to_sink` を additive 追加 /
   式の表示ラベルは論文層の正本（`graph_paper_layer.schema.equation_display_label` = 印字番号 → LaTeX の先頭 → 定義する記号 → 平文。
   `theory_modules/schema.py` の複製は委譲）/ SA層 4-e `simulation`（上記 SA層の節）。UI・アンカー・マニュアル・Copilot KB は第 2 波。
+- **第 22 周 = 第 21 周の残根と通せなかった経路（2026-10-04・migration なし）**: 正本は `persona_enactment_testing_design.md` §19.6 と
+  設計書 §12.5 / §14.5。砂場の運転は reset（SB層 3 表と台帳候補の要素も対象・`--exclude-persona` で (l) のレーンだけ残す）→ pin →
+  snapshot、教員への editor 共有は所有者の共有 API（`uxsim/sandbox/grant_document_editors.py`）。core: 理論モジュールに
+  `input_symbols` / `output_symbols`（受け取る記号 → 定める記号。`clean_symbol_name` / `symbol_match_key` が正本・`codegen.normalize_symbol`
+  は委譲・指紋不変 = TM12）と `subtitle` / `output_symbols_note`（`FACT_NO_OUTPUT_SYMBOLS`）/ 適性判定 `suitability.assess_module`
+  （損失・目的関数のまとまりは `simulable: false` + `FACT_NOT_SIMULABLE`・判定できなければ None・試行は止めない）/ codegen の資料は
+  記号の名前だけ・英語要約は `summary`・記号表はこの式群の記号だけ・`io_contract.cannot_compute` + `FACT_CANNOT_COMPUTE` /
+  学習者 run DTO に `ledger_decision {status, fact}`（§14.5・教員名と理由は出さない）/ `store.display_metrics`（配線なしの相対差・分離比は
+  None・データ不変）/ 教員の記帳経路にも `is_unmeasured_run` → 422 / 台帳 GET に `simulation_candidates_decided`（`dismiss_reason`）/
+  比較器のゼロの名指しは配線ありのときだけ・記載値の単位と出所を `FACT_REFERENCE_INPUT` と SA層の事実文に / **「平均化（N 回）」を
+  実装**（`instrument._is_averaging_part` = 宣言の形で見分け、上流の段を n 回引き直して平均。分散 1/n・系統ずれ不変）/ 改訂案なしの理由
+  （`FACT_NO_PROPOSAL_NONE` / `_ALL_DROPPED`）/ `separation_ratio` の表示名は「理論の出力と模擬観測のばらつきの比」。学習チャット:
+  開いている実行についての問い（結果の語 + 共有・配線・前の実行 / share・run・wiring）は HELP に回さず RAG へ、解決器が
+  `FACT_SHARE_MEANING_*` と `ledger_decision.fact` を渡す（`manual_help_kb_design.md` §9）。UI（第 2 波）: 「受け取る記号 → 定める記号」・
+  副題・適性の文・`ledger_decision.fact`・判断済みの候補の折りたたみ（見送りの理由・日時）・権限の無い教員はボタン無効 + 理由
+  （teacher overview の `can_decide_ledger`）・アンカー `simulation.ledger-candidate-decided`。ハーネスの投影は UI と同じ欄・同じ形
+  （IK-0634）。課題 IK-0629〜0648。**オーナー判断の候補（推奨どおり実装・§14.5）**: 見送り理由の学習者開示（推奨: 出さない）/
+  「担当教員」= 教材の編集者（推奨: そのまま）/ 英語 HELP に LLM を使うか（推奨: 使わない）。
 - **非スコープ（v1.1）**: 自動反復 / 複数配線の自動探索 / Python 以外 / 実測データの取り込み /
   装置候補から `instrument_model` への自動昇格 / `evidence_lines` への記帳。
 

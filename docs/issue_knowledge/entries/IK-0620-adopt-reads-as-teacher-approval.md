@@ -48,9 +48,15 @@ resolution:
     methods: [guardrail, reproduction_rerun, docker_e2e]
     unverified:
       - "英語話者への固定文（i18n・既知の構造課題）"
-related: [IK-0626]
+      - "採用を押す前の画面には採用の意味の文が無い（IK-0646）"
+related: [IK-0626, IK-0646]
 view_of: []
-history: []
+history:
+  - date: 2026-10-04
+    field: resolution.verification
+    from: 記録時の範囲
+    to: 第 22 周の再演で更新
+    reason: "第 22 周 (b)(c)(i)(k) で採用後の事実文を確認"
 ---
 
 ## 課題
@@ -64,6 +70,8 @@ history: []
 ## 解決の観点
 
 採用の意味を事実文で宣言した。再演で採用後の画面にこの文が出て、承認との誤読は消えた（GONE）。
+
+第 22 周の再演: (b)(c)(i)(k) で採用後の事実文が出ることを確認した（GONE）。押す前の画面に無い点は IK-0646 に分けた。
 
 ## 一般化
 

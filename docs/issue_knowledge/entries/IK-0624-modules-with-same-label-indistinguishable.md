@@ -8,6 +8,8 @@ sources:
   - docs/architecture/persona_enactment_testing_design.md §19
   - docs/features/simulation_bridge_design.md §14
   - docs/features/simulation_bridge_design.md §12.4
+  - "docs/architecture/persona_enactment_testing_design.md §19.6"
+  - "docs/features/simulation_bridge_design.md §12.5"
 feature_context:
   realizing: "学習者と教員が理論モジュールの一覧から目的のモジュールを選ぶ"
   layers: [simulation_bridge_sb, graph_review, frontend_learning_ui, frontend_admin_ui]
@@ -37,20 +39,28 @@ discovery:
   perspective: [reproduction]
   note: "第 21 周のペルソナ通し受講（c-simulation-lab）で、学生と教員の両場面で、同じ文面のモジュールが並び、どれを選べばよいか迷った。"
 resolution:
-  perspective: [representation_change]
-  note: "学習画面の一覧に番号（「3. …」）を付け、選んだまとまりを番号つきで「選んだまとまり: …」と表示して同じ題名のまとまりを見分けられるようにした。"
+  perspective: [representation_change, carry_through]
+  note: "第 21 波の番号に加え、第 22 波で根 2 つを直した: _module_subtitle が番号なしの式の左辺を記録トップレベルの latex からしか取れず全部「番号なしの式」になっていた（式本文は source_extraction.latex）ので論文層の正本ラベルへ倒した / service.module_items が副題を DTO に載せていなかった（available-but-unwired）ので subtitle を運んだ。"
   landed_in:
-    - frontend/public/js/simulation-lab.js
-    - backend/tests/test_simulation_lab_ui_static.py
-    - "docs/features/simulation_bridge_design.md §12.4"
+    - "frontend/public/js/simulation-lab.js"
+    - "backend/core/theory_modules/builder.py"
+    - "backend/core/simulation_bridge/service.py"
+    - "backend/tests/test_simulation_lab_ui_static.py"
+    - "docs/features/simulation_bridge_design.md §12.5"
   verification:
-    methods: [guardrail, docker_e2e]
+    methods: [guardrail, docker_e2e, scratch_db]
     unverified:
       - "教員画面の一覧には番号が無く、教員の再演では同じ文面の 3 つがなお区別できなかった"
-      - "番号を付けても同じ文面の題名そのものは残る"
+      - "同じ不等式が論文の 2 箇所に現れる組は式の材料で区別できず、副題でも同じ文面が残る"
+      - "砂場の再演で GONE を確認していない"
 related: [IK-0608]
 view_of: []
-history: []
+history:
+  - date: 2026-10-04
+    field: resolution.note
+    from: 第 21 波の番号のみ
+    to: 副題の根 2 つを追記
+    reason: "第 22 波で副題の欠落を直した"
 ---
 
 ## 課題
@@ -64,6 +74,8 @@ history: []
 ## 解決の観点
 
 学習画面では番号で見分けられるようにした。教員画面の同じ文面の並びは再演でも残った。
+
+第 22 波で副題の根 2 つ（番号なしの式への潰れ・DTO への未配線）を直した。同じ不等式が 2 箇所に現れる組は式の材料では区別できない。
 
 ## 一般化
 

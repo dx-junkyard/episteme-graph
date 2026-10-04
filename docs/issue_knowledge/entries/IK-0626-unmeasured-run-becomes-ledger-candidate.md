@@ -8,6 +8,8 @@ sources:
   - docs/architecture/persona_enactment_testing_design.md §19
   - docs/features/simulation_bridge_design.md §14
   - docs/features/simulation_bridge_design.md §12.4
+  - "docs/architecture/persona_enactment_testing_design.md §19.6"
+  - "docs/features/simulation_bridge_design.md §12.5"
 feature_context:
   realizing: "学習者の共有した実行を、主張の検証状態の候補として台帳に記帳する"
   layers: [simulation_bridge_sb, doubt_d]
@@ -38,19 +40,32 @@ discovery:
   note: "第 21 周の教員場面（t-sim-review-shared）で、未測定の実行に確定の操作が並び、ペルソナが確定してよいか Copilot に尋ねた。"
 resolution:
   perspective: [fail_closed, explicit_contract]
-  note: "比較が 3 軸とも未測定の run は、共有はされるが台帳の候補には記帳しない（service.is_unmeasured_run が判定し、share 応答に FACT_SHARED_UNMEASURED）。SB13 の読み替えとして設計書 §12.4 に記録した（確定が教員にあることは不変）。"
+  note: "比較が 3 軸とも未測定の run は、共有はされるが台帳の候補には記帳しない（service.is_unmeasured_run が判定し、share 応答に FACT_SHARED_UNMEASURED）。SB13 の読み替えとして設計書 §12.4 に記録した（確定が教員にあることは不変）。第 22 波で教員自身の記帳経路も同じ判定に揃え、未測定なら 422 FACT_UNMEASURED_NOT_LEDGERABLE を返す（面ごとに判定が分かれていた = rule-enforced-per-surface の芽）。"
   landed_in:
-    - backend/core/simulation_bridge/service.py
-    - backend/core/simulation_bridge/schema.py
-    - backend/tests/test_simulation_bridge_service.py
+    - "backend/core/simulation_bridge/service.py"
+    - "backend/core/simulation_bridge/schema.py"
+    - "backend/api/routes/simulation_bridge.py"
+    - "backend/tests/test_simulation_bridge_service.py"
     - "docs/features/simulation_bridge_design.md §12.4"
   verification:
-    methods: [guardrail, reproduction_rerun, docker_e2e]
+    methods: [guardrail, reproduction_rerun, docker_e2e, scratch_db]
     unverified:
+      - "第 21 周 (e') の再演はリセットで前提の実行が消えて不能だった（IK-0648）"
       - "教員が未測定の実行でも候補に残したい場合の扱い"
-related: [IK-0606, IK-0623, IK-0618]
+      - "教員の記帳経路の 422 を砂場の再演で確認していない"
+related: [IK-0606, IK-0623, IK-0618, IK-0648]
 view_of: []
-history: []
+history:
+  - date: 2026-10-04
+    field: resolution.note
+    from: 学習者の共有経路のみ
+    to: 教員の記帳経路を追記
+    reason: "第 22 波で教員経路を同じ判定に揃えた"
+  - date: 2026-10-04
+    field: resolution.verification
+    from: 記録時の範囲
+    to: 第 22 周の再演で更新
+    reason: "第 22 周 (e''-only)(g') で確認"
 ---
 
 ## 課題
@@ -64,6 +79,10 @@ history: []
 ## 解決の観点
 
 未測定の run を候補にしない弁を置き、共有の応答でその事実を返す。再演で未測定の共有が台帳の候補にならず、事実文が出たことを見た（GONE）。
+
+第 22 波で教員自身の記帳経路にも同じ判定を置いた。
+
+第 22 周: (e''-only) で測れた実行の共有から候補が 2 件立ち、(g') で見送りの理由が残ることを砂場 DB の読み取りで確かめた。
 
 ## 一般化
 

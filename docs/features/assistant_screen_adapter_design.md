@@ -935,6 +935,13 @@ SB14）/ 段階ラベル（DTO の軸名つきの値）/ 成功した run では
 **モード別**: `casual` では出さない、`cycle_mode="elicit"` では引かない（既存のモード別 kinds 規則 = §11.15.4 に従う）。それ以外は
 あり。観測は既存 `structured_grounding_present`（種別だけ・payload 空）に相乗り。
 
+**HELP との線引き（2026-10-04・第 22 周）**: パネルが開いていて（`selection.simulation_run_id` あり）発話が実行結果の言葉
+（未測定・一致・分離・記載値…・英語 unmeasured・agreement・separation。正本 `simulation_bridge.schema.mentions_simulation_result`）を
+含むときは、使い方の HELP 経路（LLM 0 回・マニュアル素通し = この解決器の事実文が届かない）に回さず DOMAIN_RAG へ流す
+（`routes/learning.py::_is_simulation_result_question`。pre-route と分類 USAGE_HELP の両方で効く・型付き `usage_help` は HELP のまま）。
+「共有」「予想」は方針の問いなので HELP のまま（マニュアルの節が正本・`prefer_anchor="simulation-lab"` で節の一族を先頭に）。
+正本は `manual_help_kb_design.md` §9。
+
 **ガードレール**: `test_assistant_context_learning_guardrails.py` の「登録 kind の出荷集合」を
 element / verification / placement / view / retrieved_structure / simulation の6つへ更新（`resolve_topic` / `resolve_visible` 不在 =
 4-c 保留の固定は維持）+ `test_assistant_context_learning_simulation.py`（本人所有・範囲・id 不一致・予想の文言・SB1 の行の位置・

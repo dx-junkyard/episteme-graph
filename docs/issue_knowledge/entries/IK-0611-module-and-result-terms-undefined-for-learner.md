@@ -1,9 +1,9 @@
 ---
 id: IK-0611
 title: "理論モジュールと実行結果の画面語（外枠・内側・番号なし・吸い込み口・未測定・一致・分離）の定義が画面にもマニュアルにも無く、使い方の質問にも目次が返る"
-status: open
+status: resolved
 recorded_at: 2026-10-03
-resolved_at: null
+resolved_at: 2026-10-04
 sources:
   - docs/architecture/persona_enactment_testing_design.md §19
   - docs/features/simulation_bridge_design.md §14
@@ -37,15 +37,32 @@ discovery:
   perspective: [reproduction, doc_code_diff]
   note: "第 21 周のペルソナ通し受講（c-simulation-lab）で、全員が外枠・番号なしの意味で迷い、未測定や予想の扱いを尋ねた学生には目次や手順の節が返った。マニュアル §19 の見出しと画面の語を突き合わせ、定義の節が無いと分かった。"
 resolution:
-  perspective: [pending]
-  note: "部分着地（第 21 波・2026-10-03）: 学生マニュアル §19 に #simulation-lab-modules（外枠・内側・番号なし・この手順の式）と #simulation-lab-levels（一致・分離・記載値・未測定）の 2 節を足し、simulation-lab.js の一覧見出し直下に凡例 1 行を置いた。英語の問いに使い方の HELP 経路が目次だけを返す（§19 が引けない）のは再演でも残ったため open のまま。"
+  perspective: [single_point_fix, representation_change]
+  note: "第 21 波で定義の節（#simulation-lab-modules / #simulation-lab-levels）と凡例を足したが、その節が HELP 検索で引けなかった。第 22 周（2026-10-04）の trace_walk で根を 4 つに分けた: ①目次節が documented ヒットになる（構造で判定して候補から外す）②日本語の採点が 1 字切りで機能語に支配される（マニュアル検索だけ 2 字 n-gram・ひらがな 1 字を数えない）③英語の問いは日本語の節に語で当たらない（語の照合をやめベクトル補助層 → 開いているパネルの節・英語の前置き 1 行・LLM 0 回）④結果の意味の問いが HELP に行くと実行の事実文が届かない（パネルが開いていて結果の言葉を含む発話は DOMAIN_RAG へ）。正本は manual_help_kb_design.md §9。"
   landed_in:
     - docs/manual/student/02-student.md
     - frontend/public/js/simulation-lab.js
-    - "docs/features/simulation_bridge_design.md §12.4"
+    - backend/core/help_kb/index.py
+    - backend/core/help_kb/manual.py
+    - backend/api/routes/learning.py
+    - backend/core/simulation_bridge/schema.py
+    - "docs/features/manual_help_kb_design.md §9"
+  verification:
+    methods: [guardrail, reproduction_rerun]
+    unverified:
+      - "ベクトル補助層が英語の問いで simulation-lab-share に当たるか（第 22 周 (j) は実行の事実の経路で答えたため HELP 側は通っていない）"
+  principles:
+    - principle: route-all-surfaces-through-one-point
+      use: consulted
+      note: "採点・目次除外は search_manual 1 箇所、結果語の判定は schema の 1 関数に置き、pre-route と分類の両経路が同じ判定を通る"
 related: [IK-0612, IK-0619]
 view_of: []
-history: []
+history:
+  - date: 2026-10-04
+    field: resolution.verification
+    from: 記録時の範囲
+    to: 第 22 周の再演で更新
+    reason: "第 22 周 (c)(j) の再演で GONE"
 ---
 
 ## 課題
@@ -58,7 +75,11 @@ history: []
 
 ## 解決の観点
 
+第 21 波は定義の節と凡例を足す表現の是正、第 22 周は「節があるのに引けない」検索側の根（目次・採点・言語・経路）を 1 箇所ずつ塞いだ境界の是正。
+
 部分着地（第 21 波）。定義の節 2 つをマニュアル §19 に足し、画面の一覧に凡例 1 行を置いた。英語の問いに対して HELP 経路が目次だけを返し、新しい節が引けない症状は再演でも残った（分割はせずこのエントリで追う）。
+
+第 22 周の再演: (c) で「未測定とは」「点数になるか」に段階の言葉の節が返り、(j) で英語の 2 問が実行の事実で答えられた（GONE）。
 
 ## 一般化
 

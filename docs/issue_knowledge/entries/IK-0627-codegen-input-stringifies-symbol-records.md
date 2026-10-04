@@ -1,13 +1,15 @@
 ---
 id: IK-0627
 title: "コード生成の資料が式の定義記号のレコードを文字列化して渡すため、記号の意味が辞書の表記のまま切れて LLM に届き、記号表の内部 ID も混ざる"
-status: open
+status: resolved
 recorded_at: 2026-10-03
-resolved_at: null
+resolved_at: 2026-10-04
 sources:
   - docs/architecture/persona_enactment_testing_design.md §19
   - docs/features/simulation_bridge_design.md §14
   - docs/features/simulation_bridge_design.md §12.4
+  - "docs/architecture/persona_enactment_testing_design.md §19.6"
+  - "docs/features/simulation_bridge_design.md §12.5"
 feature_context:
   realizing: "理論モジュールの式と記号の意味を資料にして、LLM に理論プログラムを生成させる"
   layers: [simulation_bridge_sb, pipeline_a]
@@ -37,14 +39,30 @@ discovery:
   perspective: [reproduction, data_inspection]
   note: "第 21 周の製品側の頭脳（コード生成の LLM 役）が受け取った資料に、記号の意味が辞書表記で切れて入っていた。資料の組み立てを読んで文字列化を確認した。"
 resolution:
-  perspective: [pending]
-  note: "部分着地（第 21 波の後の追補・2026-10-03）: codegen._output_symbols が論文層の定義記号から名前だけを取るようにし、学習者に出る重なりの事実文から辞書表記を消した。LLM へ渡す資料の側で記号レコードを文字列化して素通しする箇所は直していないため open のまま。"
+  perspective: [explicit_contract, representation_change]
+  note: "第 22 波: codegen._prompt_material で資料を整形した — 記号は名前だけ（dict は symbol キー）・英語要約は別キー summary・記号表はこの式群に現れる記号だけに絞り kind / unit が不明のキーを落とす・出力の式が無いモジュールには output_note・契約に io_contract.cannot_compute を足して計算できない記号を名指しさせる。service.symbol_rows は名前と normalize_symbol で照合し、一致ゼロで教材全体へ落とさない。手続の式（損失など）は suitability.py が判定する。"
   landed_in:
-    - backend/core/simulation_bridge/codegen.py
-    - "docs/features/simulation_bridge_design.md §12.4"
+    - "backend/core/simulation_bridge/codegen.py"
+    - "backend/core/simulation_bridge/service.py"
+    - "backend/core/simulation_bridge/suitability.py"
+    - "docs/features/simulation_bridge_design.md §12.5"
+  verification:
+    methods: [guardrail, scratch_db, reproduction_rerun]
+    unverified:
+      - "LLM が cannot_compute を使うかは第 22 周の製品頭脳でだけ見た"
 related: [IK-0615, IK-0617]
 view_of: []
-history: []
+history:
+  - date: 2026-10-04
+    field: status
+    from: open
+    to: resolved
+    reason: "第 22 波で資料の組み立てを整形した"
+  - date: 2026-10-04
+    field: resolution.verification
+    from: 記録時の範囲
+    to: 第 22 周の再演で更新
+    reason: "第 22 周 (b)(c) の再演で GONE"
 ---
 
 ## 課題
@@ -58,6 +76,10 @@ history: []
 ## 解決の観点
 
 部分着地。事実文側では名前だけを取るようにしたが、プロンプトへ渡す資料の文字列化は残る。
+
+第 22 波で解決。資料の側で記号レコードを名前に落とし、記号表を絞り、計算できない記号を契約で名指しさせた。記号表そのものの kind / unit の欠落（A層）は IK-0637 の範囲。
+
+第 22 周の再演: (b)(c) で role= と辞書の表記が消え、記号を名指しした計算不能の文が出た（GONE）。
 
 ## 一般化
 

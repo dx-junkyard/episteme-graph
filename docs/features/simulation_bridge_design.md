@@ -495,6 +495,98 @@ Copilot の操作 KB が v1 の文（学習者には表示されない）/ 未�
 `制約を適用: $m_1$` ×3 / 共有者の表示名（砂場のアカウントは表示名 = ログイン名で、製品は display_name を引いている）/ 第 1 波より前に
 作られた run の metrics には記号ごとの相対差 0.0 が残る（新しい run は None）。候補が**ある**ときの確定・見送り操作の見え方は未観察。
 
+### 12.5 第 22 周 — 第 21 周で残った根と通せなかった経路（2026-10-04）
+
+正本の運転記録は `persona_enactment_testing_design.md` §19.6。砂場は第 21 周のまま（TeX 4 本・コース 1bad7d9f・api 像は開発像の retag。
+第 22 波の差し替えは `docker cp` + `docker restart api-server`）。周の前に `reset_learner_state --exclude-persona st-06-skeptic-bao --yes`
+（SB層の 3 表と台帳候補の要素も対象に拡張）→ `pin_course --yes` → snapshot `corpus-astro-tex-r22`。砂場の教材は bootstrap 教員の所有で
+te-03 / te-04 に編集権限が無く台帳候補の確定が 404 になるため、所有者の共有 API で editor 共有を張った
+（`uxsim/sandbox/grant_document_editors.py`・DB 直接操作なし）。
+
+**調査で確かめた根（着手前）**:
+- IK-0608 入出力が読めない: `_Flow.interface()` は外枠の境界をまたぐ式だけで決まり孤立モジュールは空。TeX 4 本では `knowledge_equations_live` /
+  equation_semantics artifact の `defined_symbols` / `used_symbols` がほぼ全件埋まっており（例 1771872a: 79/81・76/81）、
+  「受け取る記号（成員の式が使うが成員のどれも定義しない）→ 定める記号（成員の式が定義する。出力の式を先頭に）」を**決定論**で導ける。
+- IK-0624 同名のモジュール: 根は 2 つ。`_module_subtitle` が番号なしの式の左辺を記録トップレベルの `latex` からしか取れず全部「番号なしの式」に
+  なっていた（式本文は `source_extraction.latex`）/ `service.module_items` が副題を DTO に載せていなかった（`available-but-unwired`）。
+  是正後も d82c5f0a の `制約を適用: $m_1$` のうち 2 本は同じ不等式が論文の 2 箇所（b21 / b38）に現れるため式の材料では区別できない。
+- IK-0611 派生（HELP の目次返し）: pre-route は犯人ではなく分類 LLM が USAGE_HELP にしていた。HELP 側の根は 4 つ（目次が documented ヒット /
+  日本語の採点が 1 字切りで機能語に支配 / 英語の問いは日本語の節に語で当たらない / 結果の意味の問いが HELP に行くと実行の事実文が届かない）。
+  正本は `manual_help_kb_design.md` §9。
+- IK-0627 codegen の資料: `defined_symbols` は全件 dict の配列で `_str_list` が repr 化（`sym_` 内部 ID・`'meaning': None` まで LLM へ）。
+  記号表は 428 件全件 kind unknown・unit 空（A層由来）。保存済み理論モジュール 57 本のうち出力の式が空 43 本。
+- 「物理でないモジュール」: PINN の損失（eq:total_loss / tov_residual…）は latex の `\mathcal{L}` では Lagrangian と区別できないが、
+  summary が "training loss" / "neural network" と語る → 方法の語（分野語でない）で決定論に判定できる。
+- Copilot の未回答 2 点: 候補になる条件は `service.is_unmeasured_run` が正本（成功した run で一致・分離・記載値のどれかが測れている）。
+  **教員自身の記帳経路は同じ判定を見ていなかった**（`rule-enforced-per-surface`）。確定が学習者から見えるかは製品として未定義だった。
+- 相対差 0.0 の残骸: 第 1 波以前の run 10 本中 7 本（配線なし）の `by_symbol.*.relative_difference` が 0.0。データは不変・表示側で読み替える。
+
+**第 1 波の着地（core・並列 4 体）**:
+- 理論モジュール（`theory_modules/builder.py` / `schema.py`）: `_module_dto` に additive `input_symbols`（≤ 8）/ `output_symbols`（≤ 4・切ったら末尾 `…`）。
+  記号の雑音（数値・記号でない LaTeX 命令・関係式・内部 ID・dict の文字列化・40 字超）は `clean_symbol_name`、照合キーは `symbol_match_key`
+  （`codegen.normalize_symbol` はこれへ委譲 = 正本 1 つ）。指紋・stable_key・module_key は不変（TM12・テストで固定）。副題は番号なしの式で
+  論文層の正本ラベルへ倒す。`service.module_items` に `input_symbols` / `output_symbols` / `subtitle` / `output_symbols_note`
+  （定める記号が無いときだけ `FACT_NO_OUTPUT_SYMBOLS`）。砂場 57 モジュールで input_symbols 空 0・output_symbols 空 21（制約・関係式 = 何も定義しない）。
+- 適性判定（新規 `simulation_bridge/suitability.py::assess_module`）: 本文のある式の半数以上が手続の印（argmin/argmax 系・summary の
+  loss / objective function / training / neural network / regularization）→ `simulable: False` + `FACT_NOT_SIMULABLE`。全式に既知の型で印ゼロ →
+  True。それ以外 → None と空文字（判定しないことを正直に）。`module_items` が `simulable` / `simulability_note` を載せる。試行は止めない（SB11）。
+  砂場: PINN 3 モジュール = False、1771872a True 23 / None 6。
+- codegen（`_prompt_material`）: 記号は名前だけ（dict は `symbol` キー）・式の label は `equation_display_name`・英語要約は別キー `summary`・記号表は
+  この式群に現れる記号だけ（上限 `SYMBOL_TABLE_LIMIT=40`・kind/unit が unknown/空ならキーを落とす・名前だけの項目は載せない）。出力の式が無い
+  モジュールには `output_note`。契約に `io_contract.cannot_compute: [{symbol, reason}]` を additive に足し、facts に `FACT_CANNOT_COMPUTE`
+  （記号を名指し・数なし）。`service.symbol_rows` は名前 + `normalize_symbol` で照合し、一致ゼロで教材全体へ落とさない。
+  プロンプト長は中央値 約 4,100 字（最大 約 16,500 字・式本文が主）。
+- 台帳と表示（`store.py` / 両 route）: 学習者 run DTO に `ledger_decision {status, fact}`（§14.5）。`store.display_metrics` が配線なしの run の
+  相対差・分離比を None に読み替え（学習者 `by_symbol: []`・教員 `{}`・記載値との差は残す・データ不変）。教員の記帳経路にも
+  `is_unmeasured_run` → 422 `FACT_UNMEASURED_NOT_LEDGERABLE`。台帳 GET に `simulation_candidates_decided[]`（status・`dismiss_reason`・`decided_at`。
+  判断者の user id は出さない — 帰属は監査）。Copilot capability `materials.simulation_bridge` の description と
+  `admin_operations/materials.md#simulation-bridge` に、候補になる条件・確定の帰結・学習者からの見え方・編集権限の要件。
+- HELP 経路（`core/help_kb` / `routes/learning.py`）: `manual_help_kb_design.md` §9 の 4 是正。
+
+**第 1 波の追補（周の途中・学生レーンの所見から）**:
+- §5.3 比較器: 「理論の出力がゼロの記号」の事実文が配線なしの run で全記号に出ていた（`rel is None` を配線なしと区別していなかった —
+  (i) で B_0 = 2.4e-4、(k) で M_J = 1.4e34 に「ゼロ」）。ゼロの名指しは配線ありで |理論| < EPSILON のときだけに。記載値がゼロのときの
+  `None` を max() に混ぜないガード。記載値を入れた run は `FACT_REFERENCE_INPUT`「比べた論文の記載値: B_0（単位 G・出所）」を facts に
+  （値は入力欄に既にあるので書かない = facts に数字を載せないガードレール）。SA層 4-e の解決器にも同じ行（単位が AI の文脈に無く、
+  換算の誤りを疑わせた (i) seq11）。
+- §5.2 実験機: **「平均化（N 回）」が何もしていなかった**（transfer が `x` のままで、目録の summary「分散のスケーリングは合成器が行う」が
+  実装されていなかった。(d') で n=16 を足してもばらつきが縮まず増えた）。`compose_instrument` が宣言の形（恒等 transfer + `n` +
+  `removes` にランダム雑音）で平均化の部品を見分け、上流の段（雑音の引き直しを含む）を n 回やり直した平均に置き換える
+  （分散 1/n・offset / drift は n 回とも同じなので不変。`MAX_AVERAGING = 1000`）。煙テスト: σ=1 の雑音の std 0.68 → n=16 で 0.175。
+- §5.4 改訂提案: 「作れなかった」に理由を添える（`FACT_NO_PROPOSAL_NONE` = AI が変更を挙げなかった / `FACT_NO_PROPOSAL_ALL_DROPPED` =
+  挙げたが目録外・範囲外・規約違反で全て外した）。
+- 表示名: `separation_ratio` の表示名「差と模擬観測のばらつきの比」は中身（|理論の出力| ÷ ばらつき）と不一致だった（(d') seq20）→
+  「理論の出力と模擬観測のばらつきの比」に（学習・教員 UI・ハーネス）。
+- HELP / RAG の線引きの改訂: 開いている実行についての問い（共有・配線・段階・前の実行…）は RAG へ（`manual_help_kb_design.md` §9 の改訂）。
+  `FACT_NO_OUTPUT_SYMBOLS` は「どの記号を求めるかは生成時に決まる」を含む文言に（(i)(a') で関係式のまとまりが「B_0 を受け取り何も定めない」と
+  読まれた — 式は関係で、向きは生成が決める）。
+
+**第 2 波の着地（UI・アンカー・マニュアル・KB・2026-10-04）**: 学習画面 = 「受け取る記号 → 定める記号」（KaTeX・描けなければ `<code>`）・副題・
+`output_symbols_note`・`simulability_note`（警告色にせず選択も止めない）・「— → —」の行を廃止・共有 run に `ledger_decision.fact`・`cannot_compute` の
+「計算していない記号」・段階チップの見出しを外す（軸名はラベル値に含まれる）。教員画面 = 「判断済みの候補」の折りたたみ（状態・日時・見送りの理由）・
+主張はラベルで描く・編集権限の無い教員はボタン無効 + 理由（teacher overview に `can_decide_ledger`）・共有 run の「学習者の予想」列。アンカー
+`simulation.ledger-candidate-decided`（+1）。マニュアル student/02 §19・teacher/27・`admin_operations/materials.md` を画面に合わせた。
+**再演の結果**: `persona_enactment_testing_design.md` §19.6 の表。GONE = 入出力の空欄 / role= / 表と文の食い違い / 軸名なし / 採用の意味 / 確定導線なし /
+Copilot の v1 文 / 目次返し / 英語の問いへの日本語素通し。STILL = 前提の英語（A層）/ 記号の生 TeX / 関係式のまとまりの向き / 同名の不等式モジュール。
+NEW で直したもの = ゼロ判定・記載値の単位・平均化・比のラベル・改訂案の理由。未観察 = 確定の経路（E5）。
+
+
+### 14.5 共有した実行への教員の判断の見え方（第 22 周・2026-10-04）
+
+学習者が共有した run には、その run に付いた台帳候補の判断の**状態だけ**を `ledger_decision {status, fact}` として出す
+（`none` / `candidate` / `confirmed` / `dismissed`。1 run が複数の主張に候補を持つときの集約は confirmed > candidate > dismissed）。
+教員名・見送りの理由・件数は出さず、通知・バッジも作らない（SB12・UC4）。確定の事実文は「間接的に支持」より上がらないことを含む（SB1）。
+教員は台帳 GET の `simulation_candidates_decided` で判断済みの候補と見送りの理由を読める（RE5「見送りは理由を残す」= 残すだけでなく読める）。
+台帳の候補になるのは成功した run のうち比較が 1 軸でも測れたもの（正本 `service.is_unmeasured_run`）で、学習者の共有と教員の記帳の
+両経路が同じ判定を通る。配線なしの run は表示時に相対差・分離比を出さない（正本 `store.display_metrics`・第 21 波以前の 0.0 を含む・データ不変）。
+
+**オーナー判断の候補（推奨付き・裁定まで推奨どおり実装）**:
+1. 見送りの理由を共有した学習者本人に開示するか — 推奨 **v1 は開示しない（状態だけ）**。理由は教員の記述で、開示は記述の宛先を学習者へ
+   広げる（可視性 6 軸の宛先変更）。開示するなら教員が見送り時に「学習者にも伝える」を明示選択する形（既定オフ）。
+2. 台帳候補を判断できる「担当教員」を教材の編集者と見なすか、コース所有者も含めるか — 推奨 **教材の編集者のまま**。権限の無い教員には
+   ボタンを無効にして理由の事実文を添える（第 2 波 UI）。砂場では所有者が editor 共有を張って観察した。
+3. 英語で問う学習者に HELP 経路で 1 LLM コールを使って英語で答えるか — 推奨 **現状維持**（`manual_help_kb_design.md` §9）。
+
 ## 13. 非スコープ（v1）
 
 （学習者向け表示は v1.1 で実装 — §14）/ 自動反復（是正者を人の操作なしに回す）/ 複数配線の自動探索・最適化 /
