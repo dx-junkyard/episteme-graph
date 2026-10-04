@@ -1,0 +1,47 @@
+id: s-sim-stale-runs
+population: students
+runner:
+- api
+preconditions:
+- 第 21 周の自分の実行・配線・採用済みのコードが残っている（この学生だけ reset_learner_state の対象から外す）
+# 第 22 周 (l)。前の周の自分の実行（日時・共有の印・採用済みのコード）を、自分の過去のものとして見分けられるかを見る。生成なし。
+goal: '{{goal_text}} のために、{{topic_hint}} で「動かして確かめる」を開き、前に自分が動かした記録を見分ける'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_hint
+- questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+  note: これまでの実行の一覧（日時・状態・段階・共有済み）と、わたしのコード・わたしの配線を読む
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+  note: 前に使ったまとまりを選び、採用済みのコードが自分の前の版だと分かるかを見る
+- choose:
+  - do: learning.chat.ask
+    with:
+      message: '{{questions | next}}'
+      simulation_run_id: latest
+    note: 一番新しい記録がいつの自分の実行かを確かめる
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-own-records
+- manual: student/02-student.md#simulation-lab-steps
+watch_for:
+- これまでの実行に日時と状態・共有の印が並び、前の周のものと今日のものを見分けられる
+- 共有した実行には、教員の判断（待っている・記録した・記録しなかった）が一行で出る
+- 採用済みのコードがどのまとまりのどの版かが分かる

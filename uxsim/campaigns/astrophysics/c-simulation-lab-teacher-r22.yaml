@@ -1,0 +1,21 @@
+id: c-astro-simulation-lab-teacher-r22
+domain: astrophysics
+snapshot: corpus-astro-tex-v1
+course_id: 1bad7d9f
+personas:
+  teachers: [te-03-meticulous-seminar, te-04-copilot-intro]
+  students: []
+scenarios:
+  teacher: [t-sim-decide-candidates]
+runner: api
+flags: {}
+budget: {product_llm_calls: 10, persona_llm_calls: 80, wall_clock_minutes: 60}
+notes: |
+  第 22 周の教員場面 (g')。学生の (e'') st-04 × s-sim-share-measured で、配線ありの実行が観測系の主張 2 つ付きで共有された後に走らせる。
+  台帳の候補の確定・見送りは**教材単位の編集権限**を要する（doubt.py _require_editable_ledger_target）。砂場の教材 1771872a（Cepheus B）の
+  所有者は uxsim-bootstrap-teacher で、te-03 / te-04 には編集権限が無い（te-04 はコース 1bad7d9f の所有者だが教材の所有者ではない）。
+  権限を付けずに走らせると確定・見送りは 404 になり、それ自体を所見として読む周になる。判断を通す周にするなら、運転側で
+  教材の所有者として教員ペルソナを editor に共有する（製品 API の document 共有。砂場の運転の手 —
+  uxsim/sandbox/grant_document_editors.py --course 1bad7d9f --teacher te-03-meticulous-seminar --teacher te-04-copilot-intro --yes）。
+  te-03 を先に走らせる（1 件確定・1 件見送り）。te-04 はその後に走らせ、判断済みの状態と Copilot の答えを読む。
+  場面の組: (g') te-03-meticulous-seminar × t-sim-decide-candidates / te-04-copilot-intro × t-sim-decide-candidates

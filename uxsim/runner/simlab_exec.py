@@ -27,9 +27,17 @@ PANEL_SANDBOX_MISSING = "この環境ではコードを実行する場所が用�
 PANEL_SHARE_CONFIRM = "この実行を教員に共有します。比較が測れている実行なら、関係する主張の台帳に候補として記帳します（確定は教員が行います）。比較が測れていない実行は共有だけで、台帳の候補にはなりません。"
 PANEL_PROPOSAL_HEAD = "AI の提案（未確認）"
 PANEL_PROPOSAL_NOTE = "この提案は参考表示です"
+# 画面（simulation-lab.js PARAM_UNIT_NOTE）: 単位の空いたパラメータの部品に一度だけ添える（サーバの note が優先）
+# 画面（admin-simulation-bridge.js LEDGER_DECIDE_NO_PERMISSION）— overview.can_decide_ledger が false のときの理由
+PANEL_LEDGER_DECIDE_NO_PERMISSION = ("この教材の編集権限が無いため、確定・見送りはできません。"
+                                     "教材の所有者に、共有で編集者に加えてもらってください。")
+# 画面（simulation-lab.js renderPredictStep）が ④ の欄に並べる観測系の主張のうち、投影に出す先頭の件数
+TARGETS_SHOWN = 12
+PANEL_TARGETS_HEAD = "関係する主張（観測）"
+PANEL_PARAM_UNIT_NOTE = "（理論の出力と同じ単位の絶対値）"
 METRIC_LABELS = {
     "relative_difference": "理論の出力と模擬観測の相対差",
-    "separation_ratio": "差と模擬観測のばらつきの比",
+    "separation_ratio": "理論の出力と模擬観測のばらつきの比",  # simulation-lab.js METRIC_LABELS と同じ（中身は |理論の出力| ÷ ばらつき）
     "reference_relative_difference": "理論の出力と論文の記載値の相対差",
 }
 STATUS_LABELS = {"succeeded": "実行できました", "failed": "実行は完了しませんでした"}
@@ -123,6 +131,27 @@ def _fmt(v: Any) -> str:
     return str(v)
 
 
+def when(raw: Any) -> str:
+    """画面（simulation-lab.js ``when``）と同じく実行の日時を人の読む形に（読めなければそのまま）。"""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    from datetime import datetime  # 遅延 import（軽いが投影の時だけ使う）
+
+    try:
+        d = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if d.tzinfo is not None:
+        d = d.astimezone()
+    return d.strftime("%Y/%m/%d %H:%M")
+
+
+def _symbols(v: Any) -> list[str]:
+    """記号名の列（文字列だけ — dict の repr を作らない・IK-0627）。"""
+    return [x.strip() for x in v if isinstance(x, str) and x.strip()] if isinstance(v, (list, tuple)) else []
+
+
 def _facts(v: Any) -> list[str]:
     return [str(f) for f in (v or []) if str(f or "").strip()] if isinstance(v, list) else []
 
@@ -180,7 +209,8 @@ def norm_tex(text: Any) -> str:
 
 
 def _module_text(m: dict) -> str:
-    return norm_tex(" ".join(str(m.get(k) or "") for k in ("label", "visual_label", "theory_object")))
+    # 第 22 周 (j) st-04 seq7: 副題（「生む式: 式 (eq:dcf)」）で探しても一覧に無いと言われた — 副題も照合する
+    return norm_tex(" ".join(str(m.get(k) or "") for k in ("label", "visual_label", "theory_object", "subtitle")))
 
 
 def find_module(modules: list[dict], hint: Any) -> Optional[dict]:
@@ -257,9 +287,37 @@ def _select_module(ctx) -> None:
         return
     ctx.session.scratch["sim_module_key"] = str(module.get("module_key") or "")
     ctx.session.scratch["sim_module"] = module
+    _annotate_selected(ctx, module)
     ctx.session.last_body = {"_sim_selected": module, "document_title": body.get("document_title", ""),
                              "parts_catalog": body.get("parts_catalog") or [],
                              "observation_targets": body.get("observation_targets") or []}
+
+
+def selected_module_digest(module: dict) -> dict:
+    """選んだまとまりの、審判が読む欄だけ（名前と記号の列・適性。module_key は審判の照合用に残す）。
+
+    overview の応答は 2000 字の抜粋に収まらないことが多いので、選んだ 1 件を trace の digest に写す
+    （審判 B10 は「受け取る記号も定める記号も無いまとまりを選んだ」をここから読む）。
+    """
+    return {
+        "module_key": str(module.get("module_key") or ""),
+        "label": str(module.get("label") or "")[:120],
+        "level": str(module.get("level") or ""),
+        "input_symbols": [str(x) for x in (module.get("input_symbols") or []) if isinstance(x, str)],
+        "output_symbols": [str(x) for x in (module.get("output_symbols") or []) if isinstance(x, str)],
+        "simulable": module.get("simulable") if isinstance(module.get("simulable"), bool) else None,
+        "has_io_keys": "input_symbols" in module or "output_symbols" in module,
+    }
+
+
+def _annotate_selected(ctx, module: dict) -> None:
+    traces = getattr(ctx.client, "traces", None)
+    if not traces:
+        return
+    last = traces[-1]
+    digest = getattr(last, "digest", None)
+    if isinstance(digest, dict):
+        digest["sim_selected_module"] = selected_module_digest(module)
 
 
 def _generate(ctx) -> None:
@@ -318,6 +376,18 @@ def _find_part(parts: list[dict], name: Any) -> Optional[dict]:
 
 
 def _wiring_save(ctx) -> None:
+    if ctx.args.get("reuse_existing") in (True, "true", "True", "yes", 1):
+        # 第 22 周 s-sim-share-measured-only: 前の周で保存した同名の配線があれば保存し直さない（画面の ⑤ で選ぶだけ）
+        name = str(ctx.args.get("name") or "").strip().lower()
+        existing = next((w for w in _dto_list(ctx.session, "sim_wirings_dto")
+                         if name and str(w.get("name") or "").strip().lower() == name
+                         and str(w.get("origin") or "") != "llm_candidate"), None)
+        if existing is not None:
+            _put_front(ctx.session, "sim_wirings_dto", "sim_wirings", existing)
+            ctx.session.scratch.setdefault("runner_notes", []).append(
+                f"runner_reuse_wiring: 保存済みの配線『{existing.get('name')}』を使う（保存し直さない）")
+            ctx.session.last_status, ctx.session.last_body = 200, {"wiring": existing, "_reused": True}
+            return
     parts_catalog = _dto_list(ctx.session, "sim_parts")
     if not parts_catalog:
         ctx.missing("parts_catalog")
@@ -388,13 +458,71 @@ def _pick_wiring(ctx) -> Optional[str]:
     return str(rows[0]["id"]) if rows else None
 
 
-def _claim_ids_for(ctx, hint: Any) -> list[str]:
+def _claim_ids_for(ctx, hint: Any, hints: Any = None) -> list[str]:
+    """観測系の主張のラベルの部分一致 → claim_id。``hints``（列）は 1 語につき最初の 1 件ずつ（重複なし）。
+
+    第 22 周 (e''): 主張を 2 つ選んで共有し、台帳の候補を 2 件立てる（教員が確定と見送りの両方を通すため）。
+    """
     targets = _dto_list(ctx.session, "sim_targets")
-    needle = str(hint or "").strip().lower()
-    if not needle:
-        return []
-    ids = [str(t.get("claim_id")) for t in targets if needle in str(t.get("label") or "").lower()]
-    return ids[:1]
+    words = [hint] + (list(hints) if isinstance(hints, (list, tuple)) else ([hints] if hints else []))
+    ids: list[str] = []
+    for w in words:
+        needle = str(w or "").strip().lower()
+        if not needle:
+            continue
+        hit = next((str(t.get("claim_id")) for t in targets
+                    if needle in str(t.get("label") or "").lower() and str(t.get("claim_id")) not in ids), "")
+        if hit:
+            ids.append(hit)
+        else:
+            # 第 22 周 st-04: 一覧に無い主張文を書いても黙って空になっていた — 落としたことを記録し画面にも 1 行出す
+            note = f"主張『{str(w).strip()}』は観測系の主張の一覧に無い"
+            ctx.session.scratch.setdefault("runner_notes", []).append(f"runner_claim_miss: {note}")
+            ctx.session.scratch.setdefault("sim_claim_misses", []).append(note)
+    return ids
+
+
+def _claim_labels_for(session: PersonaSession, claim_ids: Any) -> list[str]:
+    """run の observation_claim_ids → 観測系の主張のラベル（claim_id は出さない。引けないものは本文なしの文）。"""
+    out: list[str] = []
+    for cid in claim_ids if isinstance(claim_ids, (list, tuple)) else []:
+        if str(cid or "").strip():
+            out.append(_claim_label(session, cid) or "（主張の本文を表示できません）")
+    return out
+
+
+def _annotate_run_body(ctx) -> None:
+    """run / share の応答に、選んだ主張のラベルと、一覧に無かった主張の文を添える（投影用・製品には送らない）。"""
+    misses = list(ctx.session.scratch.pop("sim_claim_misses", None) or [])
+    body = ctx.session.last_body
+    if not isinstance(body, dict):
+        return
+    extra: dict[str, Any] = {}
+    if misses:
+        extra["_claim_misses"] = misses
+    run = body.get("run") if isinstance(body.get("run"), dict) else None
+    if run is not None and run.get("observation_claim_ids"):
+        extra["_claim_labels"] = _claim_labels_for(ctx.session, run.get("observation_claim_ids"))
+    if extra:
+        ctx.session.last_body = {**body, **extra}
+
+
+def _reference_list(v: Any) -> list[dict]:
+    """論文の記載値: {記号: 数値} / {記号: {value, unit, source_note}} / [{symbol, value, …}] → [{symbol, value, unit, source_note}]。"""
+    items: list[tuple[str, Any]] = []
+    if isinstance(v, dict):
+        items = [(str(k), val) for k, val in v.items()]
+    elif isinstance(v, list):
+        items = [(str(e.get("symbol") or ""), e) for e in v if isinstance(e, dict)]
+    out: list[dict] = []
+    for sym, val in items:
+        if not sym.strip():
+            continue
+        entry = val if isinstance(val, dict) else {"value": val}
+        num = _num(entry.get("value"))
+        out.append({"symbol": sym.strip(), "value": num if num is not None else entry.get("value"),
+                    "unit": str(entry.get("unit") or ""), "source_note": str(entry.get("source_note") or "")})
+    return out
 
 
 def _run(ctx) -> None:
@@ -415,9 +543,12 @@ def _run(ctx) -> None:
         payload["params"] = params
     if prediction:
         payload["prediction"] = [{"symbol": k, "value": v} for k, v in prediction.items()]
-    claim_ids = _claim_ids_for(ctx, ctx.args.get("claim_hint"))
+    claim_ids = _claim_ids_for(ctx, ctx.args.get("claim_hint"), ctx.args.get("claim_hints"))
     if claim_ids:
         payload["observation_claim_ids"] = claim_ids
+    reference = _reference_list(ctx.args.get("reference"))
+    if reference:
+        payload["reference"] = reference
     if ctx.session.topic_id:
         payload["topic_id"] = ctx.session.topic_id
     seed = _num(ctx.args.get("seed"))
@@ -426,6 +557,7 @@ def _run(ctx) -> None:
     status, body = ctx.main(json=payload)
     if status == 200 and isinstance(body, dict):
         _put_front(ctx.session, "sim_runs_dto", "sim_runs", body.get("run"))
+    _annotate_run_body(ctx)
 
 
 def _share(ctx) -> None:
@@ -433,11 +565,12 @@ def _share(ctx) -> None:
     if not rows:
         ctx.missing("run_id")
         return
-    claim_ids = _claim_ids_for(ctx, ctx.args.get("claim_hint"))
+    claim_ids = _claim_ids_for(ctx, ctx.args.get("claim_hint"), ctx.args.get("claim_hints"))
     payload = {"claim_ids": claim_ids} if claim_ids else {}
     status, body = ctx.main(json=payload, overrides={"run_id": str(rows[0]["id"])})
     if status == 200 and isinstance(body, dict):
         _put_front(ctx.session, "sim_runs_dto", "sim_runs", body.get("run"))
+    _annotate_run_body(ctx)
 
 
 def _propose_revision(ctx) -> None:
@@ -483,6 +616,17 @@ def _admin_open(ctx) -> None:
         for r in reversed(shared):
             ctx.session.remember("sim_runs", r.get("id"))
         ctx.session.scratch["sim_parts"] = [p for p in (body.get("parts_catalog") or []) if isinstance(p, dict)]
+        # 画面（admin-simulation-bridge.js claimLabel）は台帳の候補の主張を overview の観測系の主張のラベルで描く
+        ctx.session.scratch["sim_targets"] = [t for t in (body.get("observation_targets") or []) if isinstance(t, dict)]
+        # 画面（renderSharedLedgerCandidates）は overview.can_decide_ledger === false のとき確定・見送りを押せなくする
+        ctx.session.scratch["sim_can_decide_ledger"] = body.get("can_decide_ledger") is not False
+
+
+def _claim_label(session: PersonaSession, claim_id: Any) -> str:
+    for t in _dto_list(session, "sim_targets"):
+        if str(t.get("claim_id")) == str(claim_id):
+            return str(t.get("label") or "")
+    return ""
 
 
 def _shared_run(ctx) -> Optional[dict]:
@@ -506,43 +650,83 @@ def _admin_review_shared(ctx) -> None:
         rows = [r for r in _dto_list(ctx.session, "sim_shared_runs_dto") if r.get("id") != body["run"].get("id")]
         ctx.session.scratch["sim_shared_runs_dto"] = [body["run"]] + rows
         # 画面（admin-simulation-bridge.js 区画 4）は共有 run を選ぶと主張の台帳を 1 回読み、候補を並べる
-        candidates = []
+        candidates, decided = [], []
         for cid in [str(c) for c in (body["run"].get("observation_claim_ids") or []) if str(c or "").strip()][:3]:
             st2, ledger = ctx.call("GET", "/api/admin/doubt/ledger/{target_type}/{target_id}",
                                    overrides={"target_type": "claim", "target_id": cid})
             if st2 == 200 and isinstance(ledger, dict):
-                for c in ledger.get("simulation_candidates") or []:
-                    if isinstance(c, dict) and str(c.get("run_id") or "") == str(body["run"].get("id")):
-                        candidates.append({"claim_id": cid, **c})
+                # 画面: overview のラベル → 無ければ台帳の対象ラベル（target_label）
+                label = _claim_label(ctx.session, cid) or str(ledger.get("target_label") or "")
+                for key, sink in (("simulation_candidates", candidates), ("simulation_candidates_decided", decided)):
+                    for c in ledger.get(key) or []:
+                        if isinstance(c, dict) and str(c.get("run_id") or "") == str(body["run"].get("id")):
+                            sink.append({"claim_id": cid, "_claim_label": label, **c})
+        ctx.session.scratch["sim_ledger_candidates"] = candidates
         ctx.session.last_status, ctx.session.last_body = 200, {**body, "_ledger_candidates": candidates,
+                                                                "_ledger_decided": decided,
+                                                                "_can_decide_ledger": ctx.session.scratch.get(
+                                                                    "sim_can_decide_ledger", True) is not False,
                                                                 "_claims_checked": bool(body["run"].get("observation_claim_ids"))}
 
 
-def _admin_ledger_confirm(ctx) -> None:
+def _pick_candidate(ctx, run: dict) -> tuple[str, str, str]:
+    """(claim_id, candidate_id, 前提の欠け) — 台帳を読み、run_id の一致する未処理の候補を 1 つ選ぶ。
+
+    ``claim_hint``（観測系の主張のラベルの部分一致）があればその主張の候補を選ぶ。無ければ観測系の主張の順に
+    最初の未処理の候補（画面で上から押すのと同じ）。
+    """
+    claim_ids = [str(c) for c in (run.get("observation_claim_ids") or []) if str(c or "").strip()]
+    if not claim_ids:
+        return "", "", "observation_claim_id"
+    needle = str(ctx.args.get("claim_hint") or "").strip().lower()
+    if needle:
+        hit = [c for c in claim_ids if needle in _claim_label(ctx.session, c).lower()]
+        if not hit:
+            return "", "", "claim_hint"
+        claim_ids = hit
+    for cid in claim_ids:
+        status, body = ctx.call("GET", "/api/admin/doubt/ledger/{target_type}/{target_id}",
+                                overrides={"target_type": "claim", "target_id": cid})
+        if status != 200 or not isinstance(body, dict):
+            continue
+        for c in body.get("simulation_candidates") or []:
+            if isinstance(c, dict) and str(c.get("run_id") or "") == str(run.get("id")):
+                cand = str(c.get("candidate_id") or c.get("id") or "")
+                if cand:
+                    return cid, cand, ""
+        ctx.session.last_body = {"_sim_no_candidate": True, "ledger": body}
+    return "", "", "candidate_id"
+
+
+def _decide_candidate(ctx, payload: dict) -> None:
     run = _shared_run(ctx)
     if run is None:
         ctx.missing("run_id")
         return
-    claim_ids = [str(c) for c in (run.get("observation_claim_ids") or []) if str(c or "").strip()]
-    if not claim_ids:
-        ctx.missing("observation_claim_id")
+    claim_id, candidate_id, lack = _pick_candidate(ctx, run)
+    if lack:
+        if lack == "candidate_id":
+            if not isinstance(ctx.session.last_body, dict) or not ctx.session.last_body.get("_sim_no_candidate"):
+                ctx.session.last_body = {"_sim_no_candidate": True, "ledger": {}}
+            ctx.client.traces.append(_precondition_trace(ctx, "candidate_id"))
+            ctx.session.last_status = None
+        else:
+            ctx.missing(lack)
         return
-    target_type, target_id = "claim", claim_ids[0]
-    status, body = ctx.call("GET", "/api/admin/doubt/ledger/{target_type}/{target_id}",
-                            overrides={"target_type": target_type, "target_id": target_id})
-    if status != 200 or not isinstance(body, dict):
+    ctx.main(json=payload, overrides={"target_type": "claim", "target_id": claim_id, "candidate_id": candidate_id})
+
+
+def _admin_ledger_confirm(ctx) -> None:
+    _decide_candidate(ctx, {})
+
+
+def _admin_ledger_dismiss(ctx) -> None:
+    """見送る（理由必須）。画面は理由が空のあいだ「見送る」が押せない（admin-simulation-bridge.js）。"""
+    reason = str(ctx.args.get("reason") or "").strip()
+    if not reason:
+        ctx.missing("reason")
         return
-    candidate_id = ""
-    for c in body.get("simulation_candidates") or []:
-        if isinstance(c, dict) and str(c.get("run_id") or "") == str(run.get("id")):
-            candidate_id = str(c.get("candidate_id") or c.get("id") or "")
-            break
-    if not candidate_id:
-        ctx.session.last_body = {"_sim_no_candidate": True, "ledger": body}
-        ctx.client.traces.append(_precondition_trace(ctx, "candidate_id"))
-        ctx.session.last_status = None
-        return
-    ctx.main(json={}, overrides={"target_type": target_type, "target_id": target_id, "candidate_id": candidate_id})
+    _decide_candidate(ctx, {"reason": reason})
 
 
 HANDLERS: dict[str, Callable[[Any], None]] = {
@@ -559,6 +743,7 @@ HANDLERS: dict[str, Callable[[Any], None]] = {
     "admin.simulation.open": _admin_open,
     "admin.simulation.review_shared_run": _admin_review_shared,
     "admin.simulation.ledger_candidate_confirm": _admin_ledger_confirm,
+    "admin.simulation.ledger_candidate_dismiss": _admin_ledger_dismiss,
 }
 
 
@@ -576,17 +761,36 @@ def _module_lines(m: dict, *, detail: bool, index: Optional[int] = None, compact
     head = f"{index}. " if index is not None else ""
     level = LEVEL_LABELS.get(str(m.get("level") or ""), str(m.get("level") or ""))
     lines = [f"{head}[{level}] {m.get('label') or m.get('visual_label') or ''}"]
+    if str(m.get("subtitle") or "").strip():
+        # 第 22 周: 同名のまとまりを区別する副題（生む式の番号・名前）
+        lines.append(f"   {str(m['subtitle']).strip()}")
     if m.get("theory_object") and not compact:
         lines.append(f"   対象: {m['theory_object']}")
-    io_line = f"   {_eq_labels(m.get('inputs'))} → {_eq_labels(m.get('outputs'))}"
-    if m.get("to_sink"):
-        io_line += "（→ 論文全体のまとめへ）"
-    lines.append(io_line)
+    ins, outs = _symbols(m.get("input_symbols")), _symbols(m.get("output_symbols"))
+    if ins or outs:
+        # 第 22 周（IK-0608）: 受け取る記号 → 定める記号。空の側は空のまま（画面と同じ — 「—」を補わない）
+        lines.append(f"   受け取る記号: {'、'.join(ins)} → 定める記号: {'、'.join(outs)}")
+    else:
+        note = next((str(m.get(k)).strip() for k in ("symbols_note", "io_symbols_note") if str(m.get(k) or "").strip()), "")
+        if note:  # 製品の縮退文があれば素通し（無ければ何も補わない）
+            lines.append(f"   {note}")
+    if str(m.get("output_symbols_note") or "").strip():
+        # 画面（renderModulesStep）: 記号行の直後に 1 行（定める記号が空のときの事実文）
+        lines.append(f"   {str(m['output_symbols_note']).strip()}")
+    if m.get("inputs") or m.get("outputs"):
+        # 画面: 入力の式 → 出力の式は、どちらかが非空のときだけ（「— → —」を作らない）
+        lines.append(f"   {_eq_labels(m.get('inputs'))} → {_eq_labels(m.get('outputs'))}")
+    if m.get("simulable") is False:
+        note = str(m.get("simulability_note") or m.get("suitability_note") or "").strip()
+        if note:
+            lines.append(f"   {note}")
     # 第 21 波 R1: 入力→出力が空でも、成員の式（equations）を画面が出す
     eqs = [e for e in (m.get("equations") or []) if isinstance(e, dict)]
     if eqs and (not m.get("inputs") or not m.get("outputs") or detail):
         shown = [str(e.get("display_label") or e.get("latex_snippet") or "") for e in eqs[:6]]
         lines.append("   この手順の式: " + "、".join(x for x in shown if x) + ("、…" if len(eqs) > 6 else ""))
+    if m.get("to_sink"):
+        lines.append("   → 論文全体のまとめへ")  # 画面: 入出力とは別の 1 行
     assumptions = [str(a.get("text") or "") for a in (m.get("assumptions") or []) if isinstance(a, dict)]
     assumptions = [a for a in assumptions if a]
     if compact:
@@ -617,7 +821,10 @@ def _parts_lines(parts: Any) -> list[str]:
             label = str(p.get("entry_type_label") or p.get("entry_type") or "部品")
             params = "、".join(f"{q.get('name')}={_fmt(q.get('default'))}{q.get('unit') or ''}" for q in (p.get("params") or [])
                                if isinstance(q, dict))
-            groups.setdefault(label, []).append(f"{p.get('name') or ''}" + (f"（{params}）" if params else ""))
+            unitless = any(isinstance(q, dict) and not str(q.get("unit") or "") for q in (p.get("params") or []))
+            note = str(p.get("note") or "").strip() or (PANEL_PARAM_UNIT_NOTE if unitless else "")
+            groups.setdefault(label, []).append(f"{p.get('name') or ''}" + (f"（{params}）" if params else "")
+                                                + (note if params and note else ""))
     return [f"部品 — {k}: " + " / ".join(v) for k, v in groups.items()]
 
 
@@ -627,8 +834,11 @@ def _program_lines(program: dict, facts: list[str]) -> list[str]:
     lines = [f"コード（{status}）",
              f"入力: {', '.join(str(x if not isinstance(x, dict) else x.get('symbol') or x.get('name') or '') for x in (io.get('inputs') or [])) or '—'}"
              f" → 出力: {', '.join(str(x if not isinstance(x, dict) else x.get('symbol') or x.get('name') or '') for x in (io.get('outputs') or [])) or '—'}"]
-    if io.get("params"):
-        lines.append("パラメータ: " + ", ".join(str(x if not isinstance(x, dict) else x.get("name") or "") for x in io["params"]))
+    pars = io.get("parameters") if isinstance(io.get("parameters"), list) else []
+    if pars:
+        lines.append("パラメータ: " + ", ".join(str(x if not isinstance(x, dict) else x.get("symbol") or x.get("name") or "")
+                                           for x in pars))
+    lines.extend(_input_fields_lines(io))
     prov = program.get("provenance") if isinstance(program.get("provenance"), dict) else {}
     for f in facts or _facts(program.get("facts")) or _facts(prov.get("facts")):
         lines.append(f)
@@ -637,6 +847,48 @@ def _program_lines(program: dict, facts: list[str]) -> list[str]:
     lines.append("```python")
     lines.append(str(program.get("source_code") or ""))
     lines.append("```")
+    return lines
+
+
+def _io_symbol(x: Any) -> str:
+    return str(x if not isinstance(x, dict) else x.get("symbol") or x.get("name") or "").strip()
+
+
+def _input_fields_lines(io: dict) -> list[str]:
+    """画面（simulation-lab.js renderPredictStep）の ④ の欄の並び: あなたの予想 → 入力 → パラメータ。
+
+    第 22 周: 契約のキーは ``parameters``（旧投影は ``params`` を読んでいて、パラメータ欄が無いと読まれていた）。
+    """
+    def field(x: Any) -> str:
+        sym = _io_symbol(x)
+        if not sym:
+            return ""
+        unit = str(x.get("unit") or "") if isinstance(x, dict) else ""
+        default = x.get("default") if isinstance(x, dict) else None
+        return sym + (f" [{unit}]" if unit else "") + (f"（既定 {_fmt(default)}）" if default is not None else "")
+
+    out: list[str] = []
+    outs = [s for s in (_io_symbol(x) for x in (io.get("outputs") or [])) if s]
+    if outs:
+        out.append("④ あなたの予想の欄（任意・採点されない）: " + "、".join(outs))
+    ins = [f for f in (field(x) for x in (io.get("inputs") or [])) if f]
+    if ins:
+        out.append("④ 入力の欄: " + "、".join(ins))
+    pars = [f for f in (field(x) for x in (io.get("parameters") or [])) if f]
+    if pars:
+        out.append("④ パラメータの欄: " + "、".join(pars))
+    return out
+
+
+def _targets_lines(targets: Any) -> list[str]:
+    """画面（renderPredictStep）の「関係する主張（観測）」のチェック欄。先頭 TARGETS_SHOWN 件を出す。"""
+    rows = [t for t in (targets or []) if isinstance(t, dict) and str(t.get("label") or "").strip()]
+    if not rows:
+        return []
+    lines = [f"{PANEL_TARGETS_HEAD}（④で実行の前に選ぶ）:"]
+    lines.extend(f"  ☐ {str(t.get('label')).strip()}" for t in rows[:TARGETS_SHOWN])
+    if len(rows) > TARGETS_SHOWN:
+        lines.append("  …")
     return lines
 
 
@@ -661,9 +913,17 @@ def _pairs_named(v: Any) -> list[dict]:
     return []
 
 
-def _run_lines(run: dict, facts: list[str]) -> list[str]:
+def _run_lines(run: dict, facts: list[str], *, claim_labels: Any = None, claim_misses: Any = None) -> list[str]:
     status = str(run.get("status") or "")
-    lines = [f"実行の記録: {STATUS_LABELS.get(status, status)}" + ("（共有済み）" if run.get("shared") else "")]
+    stamp = when(run.get("created_at"))
+    lines = [f"実行の記録: {STATUS_LABELS.get(status, status)}" + ("（共有済み）" if run.get("shared") else "")
+             + (f" {stamp}" if stamp else "")]
+    # 第 22 周 (c): 選んだ観測系の主張（画面の ④ で付けたチェック）。ラベルで出す（claim_id は出さない）
+    labels = [str(x) for x in (claim_labels or []) if str(x or "").strip()]
+    if labels:
+        lines.append("選んだ観測系の主張: " + " / ".join(labels))
+    for miss in claim_misses or []:
+        lines.append(f"（{miss}ため、選ばれていません）")
     result = run.get("result") if isinstance(run.get("result"), dict) else {}
     pred = dict(_pairs(run.get("prediction")))
     theory = dict(_pairs(result.get("theory_outputs")))
@@ -685,7 +945,7 @@ def _run_lines(run: dict, facts: list[str]) -> list[str]:
     labels = result.get("labels") if isinstance(result.get("labels"), dict) else {}
     chips = [str(labels.get(k)) for k in ("agreement", "separation", "reference") if labels.get(k)]
     if chips:
-        lines.append("理論の出力と模擬観測: " + " / ".join(chips))
+        lines.append(" / ".join(chips))  # 画面と同じ見出しなし・「 / 」区切り（軸名はラベル値に含まれる — 第 22 周 (i)）
     if result.get("statement"):
         lines.append(str(result["statement"]))
     comparison = result.get("comparison") if isinstance(result.get("comparison"), dict) else {}
@@ -696,6 +956,9 @@ def _run_lines(run: dict, facts: list[str]) -> list[str]:
     for k, label in METRIC_LABELS.items():
         if metrics.get(k) is not None:
             lines.append(f"{label}: {_fmt(metrics[k])}")
+    decision = run.get("ledger_decision") if isinstance(run.get("ledger_decision"), dict) else {}
+    if str(decision.get("fact") or "").strip():
+        lines.append(str(decision["fact"]).strip())  # 第 22 周: 共有した実行への教員の判断（空なら描かない）
     if run.get("shared_by_label"):
         lines.append(f"学習者が共有 {run['shared_by_label']}")
     elif status == "succeeded" and not run.get("shared"):
@@ -704,8 +967,25 @@ def _run_lines(run: dict, facts: list[str]) -> list[str]:
     return lines
 
 
+def _history_lines(rows: list[dict]) -> list[str]:
+    """画面（simulation-lab.js renderHistory）: 各行 = 日時 状態 / 一致の段階 / 共有済み + 教員の判断の事実文 1 行。"""
+    lines = ["これまでの実行（あなたの記録）:"]
+    for r in rows:
+        labels = (r.get("result") or {}).get("labels") if isinstance(r.get("result"), dict) else {}
+        agreement = labels.get("agreement") if isinstance(labels, dict) else ""
+        lines.append("  - " + (when(r.get("created_at")) + " " if r.get("created_at") else "") +
+                     STATUS_LABELS.get(str(r.get("status") or ""), str(r.get("status") or "")) +
+                     (f" / {agreement}" if agreement else "") + (" / 共有済み" if r.get("shared") else ""))
+        d = r.get("ledger_decision") if isinstance(r.get("ledger_decision"), dict) else {}
+        if r.get("shared") and str(d.get("fact") or "").strip() and str(d.get("status") or "") != "none":
+            lines.append(f"    {str(d['fact']).strip()}")
+    return lines
+
+
 def _overview_lines(body: dict) -> list[str]:
-    lines = ["🧪 動かして確かめる" + (f" — {body.get('document_title')}" if body.get("document_title") else "")]
+    # 画面の先頭（renderInto）: 見出し → 検証ではない旨・本人だけの記録 → 論文 → 事実文
+    lines = ["🧪 動かして確かめる" + (f" — {body.get('document_title')}" if body.get("document_title") else ""),
+             PANEL_NOT_VERIFICATION, PANEL_OWN_RECORDS]
     if body.get("sandbox_configured") is False:
         lines.append(PANEL_SANDBOX_MISSING)
     for f in _facts(body.get("facts")):
@@ -713,6 +993,18 @@ def _overview_lines(body: dict) -> list[str]:
     docs = [d for d in (body.get("documents") or []) if isinstance(d, dict)]
     if not body.get("document_id") and docs:
         lines.append("論文: " + " / ".join(str(d.get("title") or d.get("document_id") or "") for d in docs))
+    # 第 22 周 (e) st-04 seq19: 開き直したとき「これまでの実行」は画面の ⑤ の下にあるが、投影は 6000 字で切れて
+    # 一覧の後ろの記録が読めなかった。自分の記録（コード・配線・実行）と関係する主張は一覧の前に置く。
+    programs = [r for r in (body.get("programs") or []) if isinstance(r, dict)]
+    if programs:
+        lines.append("わたしのコード: " + " / ".join(PROGRAM_STATUS_LABELS.get(str(r.get("review_status") or ""), str(r.get("review_status") or "")) for r in programs))
+    wirings = [r for r in (body.get("wirings") or []) if isinstance(r, dict)]
+    if wirings:
+        lines.append("わたしの配線: " + " / ".join(str(r.get("name") or "") for r in wirings))
+    runs = [r for r in (body.get("runs") or []) if isinstance(r, dict)]
+    if runs:
+        lines.extend(_history_lines(runs))
+    lines.extend(_targets_lines(body.get("observation_targets")))
     modules = [m for m in (body.get("modules") or []) if isinstance(m, dict)]
     if modules:
         lines.append("理論モジュールを選ぶ:")
@@ -721,25 +1013,6 @@ def _overview_lines(body: dict) -> list[str]:
     elif body.get("document_id"):
         lines.append("理論モジュールが表示されていない。")
     lines.extend(_parts_lines(body.get("parts_catalog")))
-    targets = [t for t in (body.get("observation_targets") or []) if isinstance(t, dict)]
-    if targets:
-        shown = [str(t.get("label") or "") for t in targets[:8]]
-        lines.append("観測系の主張: " + " / ".join(shown) + (" / …" if len(targets) > 8 else ""))
-    for key, label in (("programs", "わたしのコード"), ("wirings", "わたしの配線"), ("runs", "実行の記録")):
-        rows = [r for r in (body.get(key) or []) if isinstance(r, dict)]
-        if not rows:
-            continue
-        if key == "programs":
-            lines.append(f"{label}: " + " / ".join(PROGRAM_STATUS_LABELS.get(str(r.get("review_status") or ""), str(r.get("review_status") or "")) for r in rows))
-        elif key == "wirings":
-            lines.append(f"{label}: " + " / ".join(str(r.get("name") or "") for r in rows))
-        else:
-            lines.append(f"{label}: " + " / ".join(
-                STATUS_LABELS.get(str(r.get("status") or ""), str(r.get("status") or "")) +
-                (" / " + str((r.get("result") or {}).get("labels", {}).get("agreement")) if isinstance(r.get("result"), dict) and (r.get("result") or {}).get("labels", {}).get("agreement") else "") +
-                (" / 共有済み" if r.get("shared") else "") for r in rows))
-    lines.append(PANEL_NOT_VERIFICATION)
-    lines.append(PANEL_OWN_RECORDS)
     return lines
 
 
@@ -771,6 +1044,7 @@ def project(action_id: str, status: Optional[int], body: Any) -> str:
         else:
             lines.append("コード（生成する・自分で書く・採用する）: まだ無い")
         lines.extend(_parts_lines(body.get("parts_catalog")))
+        lines.extend(_targets_lines(body.get("observation_targets")))  # 第 22 周 (a): ④ のチェック欄
         return _clip("\n".join(lines))
     if isinstance(body.get("_sim_prediction"), dict):
         pred = body["_sim_prediction"]
@@ -781,7 +1055,8 @@ def project(action_id: str, status: Optional[int], body: Any) -> str:
     if "program" in body and isinstance(body.get("program"), dict):
         return _clip("\n".join(_program_lines(body["program"], _facts(body.get("facts")))))
     if "wiring" in body and isinstance(body.get("wiring"), dict) and "proposal" not in body:
-        return _clip("\n".join(_wiring_lines(body["wiring"])))
+        head = ["保存済みの配線を選んだ（保存し直していない）:"] if body.get("_reused") else []
+        return _clip("\n".join(head + _wiring_lines(body["wiring"])))
     if "proposal" in body:
         proposal = body.get("proposal") if isinstance(body.get("proposal"), dict) else {}
         lines = [PANEL_PROPOSAL_HEAD, PANEL_PROPOSAL_NOTE]
@@ -800,7 +1075,8 @@ def project(action_id: str, status: Optional[int], body: Any) -> str:
             lines.append("新しい配線は作られなかった。")
         return _clip("\n".join(lines))
     if "run" in body and isinstance(body.get("run"), dict):
-        return _clip("\n".join(_run_lines(body["run"], _facts(body.get("facts")))))
+        return _clip("\n".join(_run_lines(body["run"], _facts(body.get("facts")), claim_labels=body.get("_claim_labels"),
+                                          claim_misses=body.get("_claim_misses"))))
     if "modules" in body or "documents" in body:
         return _clip("\n".join(_overview_lines(body)))
     return _clip("\n".join(_generic(body)))
@@ -837,9 +1113,35 @@ def _admin_lines(action_id: str, body: dict) -> list[str]:
             if not body.get("_claims_checked"):
                 lines.append("  この実行には観測系の主張が選ばれていないため、台帳の候補はありません。")
             elif not cands:
-                lines.append("  この実行の台帳の候補はありません（比較が測れていない実行は候補になりません）。")
+                lines.append("  この実行の未処理の候補はありません（確定・見送り済みか、記帳されていません）。")  # 画面 renderSharedLedgerCandidates と同文（te-04 の偽所見の是正）
             for c in cands:
-                lines.append(f"  - 主張 {c.get('claim_id')}: {c.get('statement') or ''}（状態: {c.get('status')}）"
-                             f" ［確定する］［見送る（理由必須）］")
+                # 画面（renderSharedLedgerCandidates）は主張を overview のラベルで描く（claim_id は出さない）
+                label = str(c.get("_claim_label") or "") or "（主張の本文を表示できません）"
+                lines.append(f"  - {label}: {c.get('statement') or ''}")
+                lines.extend(f"    {f}" for f in _facts(c.get("facts")))
+                if body.get("_can_decide_ledger") is False:
+                    lines.append(f"    ［確定する］［見送る］（押せない: {PANEL_LEDGER_DECIDE_NO_PERMISSION}）")
+                else:
+                    lines.append("    ［確定する］［見送る理由（必須）を書いてから見送る］")
+            decided = [c for c in (body.get("_ledger_decided") or []) if isinstance(c, dict)]
+            if decided:
+                lines.append("判断済みの候補:")
+            for c in decided:
+                label = str(c.get("_claim_label") or "") or "（主張の本文を表示できません）"
+                state = {"confirmed": "確定済み", "dismissed": "見送り"}.get(str(c.get("status") or ""), str(c.get("status") or ""))
+                reason = str(c.get("dismiss_reason") or "").strip()
+                when = str(c.get("decided_at") or "").strip()[:16].replace("T", " ")  # 画面（admin-simulation-bridge.js）は日時も出す
+                lines.append(f"  - {label}: {state}" + (f" {when}" if when else "") + (f"（見送りの理由: {reason}）" if reason else ""))
         return lines + _generic(body["run"], max_lines=60)
+    if action_id in ("admin.simulation.ledger_candidate_confirm", "admin.simulation.ledger_candidate_dismiss") \
+            and isinstance(body.get("candidate"), dict):
+        c = body["candidate"]
+        state = {"confirmed": "確定しました", "dismissed": "見送りました"}.get(str(c.get("status") or ""), str(c.get("status") or ""))
+        lines = [f"台帳の候補を{state}" if state.endswith("した") else f"台帳の候補: {state}"]
+        if str(c.get("statement") or "").strip():
+            lines.append(str(c["statement"]).strip())
+        if str(c.get("dismiss_reason") or "").strip():
+            lines.append(f"見送りの理由: {str(c['dismiss_reason']).strip()}")
+        lines.extend(_facts(c.get("facts")))
+        return lines + _generic({k: v for k, v in body.items() if k != "candidate"}, max_lines=20)
     return _generic(body, max_lines=80)

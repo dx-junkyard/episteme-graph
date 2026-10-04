@@ -1,0 +1,74 @@
+id: s-sim-share-measured
+population: students
+runner:
+- api
+# 第 22 周 (e'')。比較が測れた実行（配線あり）を、観測系の主張を 2 つ選んで共有し、台帳の候補が 2 件立つかを見る
+# （教員 (g') が確定と見送りの両方を通すため）。共有の前に共有の意味を 1 問だけ聞く（(j) と重ねない）。
+goal: '{{goal_text}} のために、{{topic_hint}} の理論のまとまりを配線に通して動かし、関係する主張を 2 つ選んで担当教員に共有する'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_hint
+- input_hints
+- wiring_name
+- wiring_parts
+- wiring_params
+- claim_hints
+- questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+- do: learning.simlab.generate
+  note: コードの下書きを AI に作らせる（この経路で 1 回だけ）
+- do: learning.simlab.adopt
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    wiring: none
+  note: まず配線なしで動かし、理論の出力の桁を読む。入力の記号は io_contract.inputs に合わせて置き換える
+- do: learning.simlab.wiring_save
+  with:
+    name: '{{wiring_name}}'
+    parts: '{{wiring_parts}}'
+    params: '{{wiring_params}}'
+  note: 雑音と平均化の配線を保存する。sigma は台本の仮の値を、読んだ理論の出力のおよそ 1 割の大きさに置き換える
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    wiring: '{{wiring_name}}'
+    claim_hints: '{{claim_hints}}'
+  note: 関係する観測系の主張を 2 つ選んで、配線ありで動かす
+- do: learning.chat.ask
+  with:
+    message: '{{questions | next}}'
+  note: 共有を押す前に、共有すると何が起きるかを 1 問だけ聞く
+- do: learning.simlab.share
+  with:
+    claim_hints: '{{claim_hints}}'
+  note: 納得できたら最新の実行を共有する（押すと確認の文が出る）。納得できなければ共有せずにやめてよい
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-share
+- manual: student/02-student.md#simulation-lab-levels
+- manual: student/02-student.md#simulation-lab-own-records
+watch_for:
+- 配線ありの実行では一致・分離の段階が測れていて、共有すると選んだ主張ごとに台帳の候補が立つことが事実文で分かる
+- 共有のあと、候補が担当教員の判断を待っていることが実行の記録に一行で出る
+- 共有の意味を英語で聞いたとき、使い方マニュアルの目次ではなく共有の意味の答えが返る
+- 関係する主張の名前に内部の番号や「本文を特定できない要素」のような文字が出ない

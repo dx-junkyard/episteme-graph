@@ -1,0 +1,35 @@
+id: c-astro-simulation-lab-r22
+domain: astrophysics
+snapshot: corpus-astro-tex-v1
+course_id: 1bad7d9f
+personas:
+  teachers: []
+  students: [st-01-m1-radio, st-03-d1-from-particle, st-04-intl-exoplanet, st-06-skeptic-bao, st-07-m1-grb-voice,
+             st-10-d3-21cm-receiver]
+scenarios:
+  student: [s-sim-first-open-io, s-sim-rewire-scaled, s-sim-share-measured, s-sim-reference-value,
+            s-sim-english-meaning, s-sim-voice-result, s-sim-stale-runs, s-sim-share-measured-only]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 40, persona_llm_calls: 400, wall_clock_minutes: 300}
+notes: |
+  第 22 周（SB層「🧪 動かして確かめる」）の新しい場面。正本は docs/architecture/persona_enactment_testing_design.md §19
+  と docs/features/simulation_bridge_design.md（SB1〜SB15）。第 21 周の 8 場面は新 campaign に含めず、
+  c-simulation-lab.yaml を --replay で再演する（uxsim/runs/run22r_lane.sh）。
+  教材は TeX 経路の 4 本（snapshot corpus-astro-tex-v1）・コース 1bad7d9f 固定（周の前に pin_course --yes）。
+  周の前の reset は st-06 だけ残す: reset_learner_state --yes --exclude-persona st-06-skeptic-bao（(l) が前の周の記録を読む）。
+  LLM 生成（learning.simlab.generate）は (d') st-06 / (e'') st-04 / (i) st-10 / (k) st-07 の各 1 回、改訂案は (d') の 1 回だけ。
+  arXiv は呼ばない。runner は「ペルソナ × 経路の全組」を走らせるので、運転は --persona X --scenario Y で 1 場面ずつ。
+  場面の組（誰 × 経路 × 論文）と、レーン内の順:
+   (a')  st-01-m1-radio × s-sim-first-open-io（Cepheus B / DCF 法・σ_ξ・生成なし）
+   (l)   st-06-skeptic-bao × s-sim-stale-runs（音速の論文 / 観測量・ξ_±・生成なし・reset しない）→ 同じレーンで続けて (d')
+   (d')  st-06-skeptic-bao × s-sim-rewire-scaled（音速の論文 / 観測量・ξ_±・sigma を桁合わせ・改訂案 1 回）
+   (e'') st-04-intl-exoplanet × s-sim-share-measured（Cepheus B / DCF 法・σ_ξ・配線あり・主張 2 つで共有）→ 同じレーンで続けて (j)
+   (e''') st-04-intl-exoplanet × s-sim-share-measured-only（(e'') のやり直し。生成・採用なし・前の周の採用済みコードと
+         保存済みの配線『雑音と平均化』で、主張 2 つを選んで実行 → 共有。reset せずに回す）
+   (j)   st-04-intl-exoplanet × s-sim-english-meaning（(e'') の実行を開いたまま英語で聞く・生成なし）
+   (i)   st-10-d3-21cm-receiver × s-sim-reference-value（Cepheus B / DCF 法・内側 eq:mod_dcf・記載値 153 μG）
+         （st-03-d1-from-particle でも走る。params に st-03 の問いもある）
+   (k)   st-07-m1-grb-voice × s-sim-voice-result（Cepheus B / 主結果・M_J・音声経路）
+   (g')  te-03 / te-04 × t-sim-decide-candidates は c-simulation-lab-teacher-r22.yaml（(e'') の共有の後）

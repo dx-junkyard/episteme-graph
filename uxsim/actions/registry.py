@@ -46,7 +46,7 @@ def _a(id: str, label: str, screen: Screen, affordance: str, api, **kw) -> Actio
 
 
 _ST = "student/02-student.md#"
-_CHAT_ARGS = {"message": "str", "selection_text": "str?", "screen_mode": "str?"}
+_CHAT_ARGS = {"message": "str", "selection_text": "str?", "screen_mode": "str?", "simulation_run_id": "str?"}
 
 _LEARNING: list[Action] = [
     _a("auth.login", "ログインする", "learning", _ST + "login", ("POST", "/api/auth/login"),
@@ -363,21 +363,24 @@ _SIMLAB: list[Action] = [
        precondition="コードが表示されている", manual=_SLM + "-steps"),
     _a("learning.simlab.wiring_save", "配線を保存", "learning", _SL,
        ("POST", "/api/learning/courses/{course_id}/simulation/wirings"),
-       args={"name": "str", "parts": "list[str]", "params": "dict?"}, precondition="部品目録が表示されている",
-       manual=_SLM + "-steps", note="parts は部品名を上流→下流の順（目録の名前の部分一致）。params は {部品名: {名前: 値}}"),
+       args={"name": "str", "parts": "list[str]", "params": "dict?", "reuse_existing": "bool?"},
+       precondition="部品目録が表示されている",
+       manual=_SLM + "-steps", note="parts は部品名を上流→下流の順（目録の名前の部分一致）。params は {部品名: {名前: 値}}。"
+            "reuse_existing が真なら、同じ名前の保存済みの配線があれば保存し直さずにそれを使う（画面で既存の配線を選ぶのと同じ）"),
     _a("learning.simlab.predict", "予想を書く", "learning", _SL, _SIM_OVERVIEW,
        args={"prediction": "dict"}, precondition="採用したコードがある", manual=_SLM + "-prediction",
        note="prediction は {記号: 数値}。実行のときに並べて見せる（採点されない）"),
     _a("learning.simlab.run", "実行して並べて見る", "learning", _SL,
        ("POST", "/api/learning/courses/{course_id}/simulation/runs"),
-       args={"values": "dict", "params": "dict?", "prediction": "dict?", "claim_hint": "str?", "wiring": "str?",
-             "seed": "int?"},
+       args={"values": "dict", "params": "dict?", "prediction": "dict?", "claim_hint": "str?", "claim_hints": "list[str]?",
+             "wiring": "str?", "reference": "dict?", "seed": "int?"},
        precondition="採用したコードがある", manual=_SLM + "-steps",
        note="values は {記号: 数値 or 数値の列（カンマ区切り文字列可）}。wiring は配線名の部分一致・\"none\" で配線なし。"
-            "claim_hint は観測系の主張のラベルの部分一致"),
+            "claim_hint / claim_hints は観測系の主張のラベルの部分一致（hints は 1 語につき 1 件）。"
+            "reference は論文の記載値 {記号: 数値 or {value, unit, source_note}}（記号は io_contract.outputs に合わせる）"),
     _a("learning.simlab.share", "共有する", "learning", _SL,
        ("POST", "/api/learning/simulation/runs/{run_id}/share"),
-       args={"claim_hint": "str?"}, precondition="実行の記録がある", manual=_SLM + "-share"),
+       args={"claim_hint": "str?", "claim_hints": "list[str]?"}, precondition="実行の記録がある", manual=_SLM + "-share"),
     _a("learning.simlab.propose_revision", "改訂案を求める", "learning", _SL,
        ("POST", "/api/learning/simulation/runs/{run_id}/propose-revision"),
        precondition="配線を使った実行の記録がある", llm_cost="product", manual=_SLM + "-steps"),
@@ -397,10 +400,18 @@ _ADMIN_SIM: list[Action] = [
        note="画面は共有 run を選ぶと主張の台帳を読み、台帳の候補（確定 / 見送り）を並べる"),
     _a("admin.simulation.ledger_candidate_confirm", "台帳の候補を確定する", "admin", "simulation.ledger-candidate",
        ("POST", "/api/admin/doubt/ledger/{target_type}/{target_id}/simulation-candidates/{candidate_id}/confirm"),
-       args={"run_id": "str?"}, precondition="共有された実行の観測系の主張に候補が記帳されている",
+       args={"run_id": "str?", "claim_hint": "str?"}, precondition="共有された実行の観測系の主張に候補が記帳されている",
        manual=_TS + "simulation-ledger-candidate",
        extra_api=(("GET", "/api/admin/doubt/ledger/{target_type}/{target_id}"),),
-       note="run の観測系の主張（claim）の台帳を読み、run_id の一致する候補を確定する。確定は教員の弁（SB13）"),
+       note="run の観測系の主張（claim）の台帳を読み、run_id の一致する候補を確定する。確定は教員の弁（SB13）。"
+            "claim_hint（主張のラベルの部分一致）でどの主張の候補かを選べる"),
+    _a("admin.simulation.ledger_candidate_dismiss", "台帳の候補を見送る", "admin", "simulation.ledger-candidate-decide",
+       ("POST", "/api/admin/doubt/ledger/{target_type}/{target_id}/simulation-candidates/{candidate_id}/dismiss"),
+       args={"run_id": "str?", "claim_hint": "str?", "reason": "str"},
+       precondition="共有された実行の観測系の主張に候補が記帳されている",
+       manual=_TS + "simulation-ledger-candidate-decide",
+       extra_api=(("GET", "/api/admin/doubt/ledger/{target_type}/{target_id}"),),
+       note="理由は必須（画面は理由が空のあいだ「見送る」が押せない）。見送りは配列内の status 遷移で、候補は消えない"),
 ]
 
 REGISTRY: dict[str, Action] = {a.id: a for a in _LEARNING + _ADMIN + _SIMLAB + _ADMIN_SIM}

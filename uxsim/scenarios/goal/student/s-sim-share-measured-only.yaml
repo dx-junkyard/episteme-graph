@@ -1,0 +1,65 @@
+id: s-sim-share-measured-only
+population: students
+runner:
+- api
+# 第 22 周 (e'') のやり直し用の短い経路（st-04・LLM 生成なし）。s-sim-share-measured から generate / adopt を除き、
+# 前の周で採用済みのコード（最新の採用済み）で配線ありの実行をし、観測系の主張を 2 つ選んで共有する。
+# 配線は保存済みの『雑音と平均化』があればそれを使い、無ければ保存する（reuse_existing）。params は
+# s-sim-share-measured と同じ値（per_archetype.non_native も同じ）。
+goal: '{{goal_text}} のために、{{topic_hint}} の理論のまとまりを、前に採用したコードのまま配線に通して動かし、関係する主張を 2 つ選んで担当教員に共有する'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_hint
+- input_hints
+- wiring_name
+- wiring_parts
+- wiring_params
+- claim_hints
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+  note: これまでの実行・わたしのコード・わたしの配線と、関係する主張（観測）の一覧を読む
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+  note: 前に採用したコードのあるまとまりを選ぶ（コードは作り直さない）
+- do: learning.simlab.wiring_save
+  with:
+    name: '{{wiring_name}}'
+    parts: '{{wiring_parts}}'
+    params: '{{wiring_params}}'
+    reuse_existing: true
+  note: 保存済みの『{{wiring_name}}』があればそれを使い、無ければ保存する
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    wiring: '{{wiring_name}}'
+    claim_hints: '{{claim_hints}}'
+  note: 関係する主張（観測）の一覧から 2 つ選んで、配線ありで動かす。一覧に無い文は選べない
+- do: learning.simlab.share
+  with:
+    claim_hints: '{{claim_hints}}'
+  note: 選んだ主張が実行の記録に出ていることを確かめてから共有する（押すと確認の文が出る）
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-share
+- manual: student/02-student.md#simulation-lab-own-records
+watch_for:
+- 選んだ主張 2 つが実行の記録に出て、共有で候補が 2 件立つ
+- 主張の名前が一覧に無いときは、選ばれていないことが画面に 1 行出る（黙って空にならない）
+- 開き直したときに、これまでの実行と前に採用したコードが読める
+- 関係する主張の名前に内部の番号や「本文を特定できない要素」のような文字が出ない

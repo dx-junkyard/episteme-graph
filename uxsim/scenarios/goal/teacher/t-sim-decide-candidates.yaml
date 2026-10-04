@@ -1,0 +1,66 @@
+id: t-sim-decide-candidates
+population: teachers
+runner:
+- api
+preconditions:
+- 同じ周の学生（st-04 × s-sim-share-measured）が、配線ありの実行を観測系の主張 2 つ付きで共有している。教材の取り込み・コース登録・公開はしない
+- 判断する教員が教材の編集権限を持っている（台帳への記帳は教材単位の編集権限を要する。持っていなければ確定・見送りは 404 になり、それ自体を所見として読む）
+# 第 22 周 (g')。候補のある共有 run を開き、1 件を確定・1 件を理由付きで見送る。Copilot に候補の条件と学習者からの見え方を聞く。
+goal: '{{goal_text}} のために、学生が共有した実行の台帳の候補を読み、1 件を確定し 1 件を理由を書いて見送る'
+params_required:
+- goal_text
+- material_hint
+- confirm_claim_hint
+- dismiss_claim_hint
+- dismiss_reason
+- copilot_questions
+steps:
+- do: auth.login
+- do: admin.materials.list
+- do: admin.simulation.open
+  with:
+    material_hint: '{{material_hint}}'
+  note: '題名に {{material_hint}} を含む教材の行の ⋯ メニューから「検証シミュレーション…」を開く'
+- do: admin.simulation.review_shared_run
+  note: 共有された実行を開き、条件・結果・段階の言葉と、主張ごとの台帳の候補を読む
+- choose:
+  - do: admin.simulation.ledger_candidate_confirm
+    with:
+      claim_hint: '{{confirm_claim_hint}}'
+    note: 実行の条件と結果に納得できる主張の候補を確定する
+  - do: admin.copilot.chat
+    with:
+      message: '{{copilot_questions | next}}'
+    note: 確定する前に、確定すると何が起きるかを聞く
+  optional: true
+- choose:
+  - do: admin.simulation.ledger_candidate_dismiss
+    with:
+      claim_hint: '{{dismiss_claim_hint}}'
+      reason: '{{dismiss_reason}}'
+    note: 実行の条件がこの主張を確かめる形になっていない候補を、理由を書いて見送る
+  optional: true
+- do: admin.simulation.review_shared_run
+  note: もう一度開き、確定・見送りの状態と見送りの理由が残っているかを見る
+- repeat:
+    until: persona_decides_to_stop or steps > 2
+    max: 2
+    do: admin.copilot.chat
+    with:
+      message: '{{copilot_questions | next}}'
+    note: どういう実行なら候補になるか、確定・見送りは学習者から見えるかを聞く
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: teacher/27-admin-simulation-bridge.md#simulation-shared-runs
+- manual: teacher/27-admin-simulation-bridge.md#simulation-ledger-candidate-decide
+- manual: teacher/27-admin-simulation-bridge.md#simulation-ledger-candidate
+watch_for:
+- 候補は主張の名前で並び、内部の番号が出ない
+- 見送りは理由が空のあいだ押せず、見送った候補は理由とともに状態で残る（消えない）
+- 確定しても主張の検証状態は「間接的に支持」より上に上がらない
+- Copilot が「どういう実行なら候補になるか」（比較が測れた実行だけ）と「確定・見送りは学習者に状態の一行として見える」を画面と同じ内容で答える
+- 共有した学生の表示名だけが出て、メールアドレスやユーザー名が出ない

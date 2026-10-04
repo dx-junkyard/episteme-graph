@@ -1,0 +1,14 @@
+# --- snapshot record (appended by snapshot.py) ---
+snapshot_record:
+  name: corpus-astro-tex-r22
+  created_at: 2026-10-04T00:13:39+00:00
+  git_commit: 05b56d8
+  migration_head: '089'
+  note: "第 22 周の前提: 第 1 波差し替え・st-06 以外 reset・te-03/04 に editor 共有"
+# --- snapshot record (appended by snapshot.py) ---
+snapshot_record:
+  name: corpus-astro-tex-r22
+  created_at: 2026-10-04T00:13:56+00:00
+  git_commit: 05b56d8
+  migration_head: '089'
+  note: "第 22 周の前提: 第 1 波差し替え・st-06 以外 reset・pin・te-03/04 に editor 共有"

@@ -28,6 +28,12 @@
   // 確定の応答に事実文が無いときに添える固定文（マニュアル teacher/27 と同じ内容・SB1）。
   var LEDGER_CONFIRM_FACT = "確定しても「間接的に支持」より上には上がりません。";
   var DEFAULT_INDICATOR_ID = "simulation.agreement";
+  // 台帳候補を確定・見送れない理由（overview.can_decide_ledger === false のとき。マニュアル teacher/27
+  // #simulation-ledger-candidate-decide-disabled と同じ内容。強制は台帳 API 側 = 押しても 404 になる）。
+  var LEDGER_DECIDE_NO_PERMISSION = "この教材の編集権限が無いため、確定・見送りはできません。教材の所有者に、共有で編集者に加えてもらってください。";
+  var LEDGER_DECIDED_STATUS_LABELS = { confirmed: "確定済み", dismissed: "見送り" };
+  // 記号の列の末尾の省略の印（core/theory_modules/schema.py::SYMBOL_LIST_TRUNCATED_MARK）。
+  var SYMBOL_TRUNCATED_MARK = "\u2026";
 
   var PROGRAM_STATUS_LABELS = {
     candidate: "候補",
@@ -47,7 +53,7 @@
   };
   var METRIC_LABELS = {
     relative_difference: "理論の出力と模擬観測の相対差",
-    separation_ratio: "差とばらつきの比",
+    separation_ratio: "理論の出力とばらつきの比",
     reference_relative_difference: "論文の記載値との相対差",
   };
 
@@ -410,6 +416,21 @@
     return html + "</section>";
   }
 
+  // 受け取る記号 → 定める記号（第 22 周・IK-0608）。どちらも空なら何も描かない。
+  function symbolNames(list) {
+    return arr(list).map(function (x) { return x == null ? "" : String(x); }).filter(function (x) { return !!x; })
+      .map(function (x) { return x === SYMBOL_TRUNCATED_MARK ? esc(x) : "<code>" + esc(x) + "</code>"; }).join("、");
+  }
+
+  function moduleSymbolsHtml(m) {
+    var ins = symbolNames(m.input_symbols);
+    var outs = symbolNames(m.output_symbols);
+    var html = "";
+    if (ins || outs) html += '<div class="simulation-io simulation-symbols">受け取る記号: ' + ins + ' <span class="simulation-arrow">→</span> 定める記号: ' + outs + "</div>";
+    if (m.output_symbols_note) html += '<div class="simulation-muted">' + esc(m.output_symbols_note) + "</div>";
+    return html;
+  }
+
   function renderModule(module) {
     var m = obj(module);
     var key = String(m.module_key || "");
@@ -429,8 +450,11 @@
         '<span class="simulation-module-label">' + esc(m.visual_label || m.label || "理論モジュール") + "</span>" +
         (inner ? chip("内側", "simulation-chip-muted") : "") +
       "</div>" +
+      (m.subtitle ? '<div class="simulation-muted simulation-module-subtitle">' + esc(m.subtitle) + "</div>" : "") +
       (m.theory_object ? '<div class="simulation-muted">理論対象: ' + esc(m.theory_object) + "</div>" : "") +
+      moduleSymbolsHtml(m) +
       '<div class="simulation-io">受ける式: ' + equationChips(m.inputs) + ' <span class="simulation-arrow">→</span> 返す式: ' + equationChips(m.outputs) + "</div>" +
+      (m.simulable === false && m.simulability_note ? '<p class="simulation-fact-line">' + esc(m.simulability_note) + "</p>" : "") +
       (assumptions ? '<div class="simulation-muted">要求される前提:</div><ul class="simulation-assumptions">' + assumptions + "</ul>" : "") +
       (m.reconstructed_inputs ? '<p class="simulation-fact-line">入力の式に PDF から復元された式が含まれています。</p>' : "") +
       '<div class="simulation-actions">' + genBtn + genReason + "</div>" +
@@ -914,6 +938,8 @@
     if (entry.loading) return html + '<p class="simulation-muted">台帳の候補を読み込み中...</p></div>';
     if (entry.error) html += '<div class="simulation-notice is-error">' + esc(entry.error) + "</div>";
     var busy = !!state.busy.ledgerDecide;
+    var canDecide = ov().can_decide_ledger !== false;
+    if (!canDecide) html += '<p class="simulation-disabled-reason simulation-ledger-no-permission">' + esc(LEDGER_DECIDE_NO_PERMISSION) + "</p>";
     html += '<ul class="simulation-ledger-list">' + arr(entry.items).map(function (it) {
       var label = it.label || claimLabel(it.claim_id) || "（主張の本文を表示できません）";
       var c = it.candidate;
@@ -927,13 +953,34 @@
         (c.statement ? '<p class="simulation-statement">' + esc(c.statement) + "</p>" : "") +
         factsHtml(c.facts) +
         '<div class="simulation-actions">' +
-          '<button type="button" class="admin-action-btn" data-sim-action="ledger-confirm" data-claim-id="' + esc(it.claim_id) + '" data-candidate-id="' + esc(cid) + '"' + (busy ? " disabled" : "") + ">確定する</button>" +
-          '<input type="text" class="simulation-dismiss-reason" data-dismiss-reason="' + esc(cid) + '" placeholder="見送る理由（必須）" value="' + esc(reason) + '">' +
-          '<button type="button" class="admin-action-btn" data-sim-action="ledger-dismiss" data-claim-id="' + esc(it.claim_id) + '" data-candidate-id="' + esc(cid) + '"' + (busy || reasonEmpty ? " disabled" : "") + ">見送る</button>" +
-          '<span class="simulation-disabled-reason"' + (reasonEmpty ? "" : " hidden") + ">見送るには理由を書いてください。</span>" +
+          '<button type="button" class="admin-action-btn" data-sim-action="ledger-confirm" data-claim-id="' + esc(it.claim_id) + '" data-candidate-id="' + esc(cid) + '"' + (busy || !canDecide ? " disabled" : "") + ">確定する</button>" +
+          '<input type="text" class="simulation-dismiss-reason" data-dismiss-reason="' + esc(cid) + '" placeholder="見送る理由（必須）" value="' + esc(reason) + '"' + (canDecide ? "" : " disabled") + ">" +
+          '<button type="button" class="admin-action-btn" data-sim-action="ledger-dismiss" data-claim-id="' + esc(it.claim_id) + '" data-candidate-id="' + esc(cid) + '"' + (busy || reasonEmpty || !canDecide ? " disabled" : "") + ">見送る</button>" +
+          '<span class="simulation-disabled-reason"' + (reasonEmpty && canDecide ? "" : " hidden") + ">見送るには理由を書いてください。</span>" +
         "</div></li>";
     }).join("") + "</ul>";
-    return html + noticeHtml("ledgerDecide") + "</div>";
+    return html + renderDecidedLedgerCandidates(entry) + noticeHtml("ledgerDecide") + "</div>";
+  }
+
+  // 判断済みの候補（この実行の分だけ）。見送りの理由を読めるようにする（RE5）。学習者には状態だけが届く。
+  function renderDecidedLedgerCandidates(entry) {
+    var rows = [];
+    arr(entry && entry.items).forEach(function (it) {
+      arr(it.decided).forEach(function (c) { rows.push({ label: it.label || claimLabel(it.claim_id), c: obj(c) }); });
+    });
+    if (!rows.length) return "";
+    return '<details class="simulation-ledger-decided" data-ui-anchor="simulation.ledger-candidate-decided">' +
+      "<summary>判断済みの候補</summary><ul>" + rows.map(function (row) {
+        var c = row.c;
+        var status = String(c.status || "");
+        var reason = String(c.dismiss_reason || "").trim();
+        return "<li><div>" + esc(row.label || "（主張の本文を表示できません）") + " " +
+          chip(LEDGER_DECIDED_STATUS_LABELS[status] || status, "simulation-chip-muted") +
+          (c.decided_at ? ' <span class="simulation-muted">' + esc(when(c.decided_at)) + "</span>" : "") + "</div>" +
+          (c.statement ? '<p class="simulation-statement">' + esc(c.statement) + "</p>" : "") +
+          (reason ? '<div class="simulation-muted">見送りの理由: ' + esc(reason) + "</div>" : "") +
+        "</li>";
+      }).join("") + "</ul></details>";
   }
 
   function loadLedgerCandidates(run) {
@@ -949,11 +996,16 @@
           arr(obj(data).simulation_candidates).forEach(function (c) {
             if (!hit && c && String(c.run_id) === runId) hit = c;
           });
-          return { claim_id: claimId, label: claimLabel(claimId), candidate: hit };
+          var decided = arr(obj(data).simulation_candidates_decided).filter(function (c) {
+            return c && String(c.run_id) === runId;
+          });
+          // 主張は本文のラベルで描く（claim_id は出さない）。overview に無ければ台帳の対象ラベル。
+          var label = claimLabel(claimId) || String(obj(data).target_label || "");
+          return { claim_id: claimId, label: label, candidate: hit, decided: decided };
         })
         .catch(function () {
           failed = true;
-          return { claim_id: claimId, label: claimLabel(claimId), candidate: null };
+          return { claim_id: claimId, label: claimLabel(claimId), candidate: null, decided: [] };
         });
     });
     return Promise.all(jobs).then(function (items) {

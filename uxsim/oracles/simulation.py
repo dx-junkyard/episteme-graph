@@ -26,11 +26,20 @@ B 原則:
 - B9 数値 — 学習者向けの overview / module の facts に件数（N 件 / N 個 / N 本）。本人の run の metrics は
   SB6 の読み替え（§14.1）で対象外
 
+- B10 IK-0608 — 選んだまとまり（``select_module`` の trace digest ``sim_selected_module``）に受け取る記号も定める
+  記号も 1 つも無い（比率ではなく所見。``simulable: false`` のまとまりと、記号の欄を持たない旧 DTO は対象外）
+- B11 SB1 の表示 — 教員向けの実行記録（admin.simulation.*）で、配線の無い実行の ``result.comparison.metrics.by_symbol``
+  に相対差・分離比が数で載っている（配線なしの模擬観測は理論の出力そのもので、差は意味を持たない）
+
 E 観測（砂場 DB の読みだけ）:
 - E1 ``interest_traces`` kind=verification_attempt — 成功した学習者の run があるのに痕跡が無い / payload に
   数値の欄 / agreement_level が語彙外
 - E2 ``llm_usage_events`` の学習者向け codegen・revision の件数が学生ペルソナ数を超える（数は server_rows だけ）
 - E3 ``simulation_runs`` に owner_user_id が NULL の新規行
+- E4 SB7 — 教員が見送った候補（行為 ``admin.simulation.ledger_candidate_dismiss`` が 200）が
+  ``epistemic_ledger.simulation_candidates[]`` に ``status='dismissed'`` と空でない ``dismiss_reason`` で残っていない
+- E5 SB1 — 教員が確定した候補（``ledger_candidate_confirm`` が 200）の主張の ``verification_status`` が
+  ``directly_verified`` に上がっている（確定しても ``indirectly_supported`` 止まり）
 
 限界: 抜粋が 2000 字で切れた応答（コード全文を含む生成応答など）は JSON として読めず、キーの有無だけを
 正規表現で見る（io_contract の検査は読めたときだけ）。
@@ -407,6 +416,53 @@ def _check_internal_ids(step: TranscriptStep, body: Any, factory: FindingFactory
     return []
 
 
+def _check_selected_module_io(step: TranscriptStep, t: HttpTrace, factory: FindingFactory) -> list[Finding]:
+    """B10: 選んだまとまりに受け取る記号も定める記号も無い（runner が digest に写した選択の 1 件を読む）。"""
+    if step.action_id != LEARNER_PREFIX + "select_module":
+        return []
+    sel = (t.digest or {}).get("sim_selected_module")
+    if not isinstance(sel, dict) or not sel.get("has_io_keys") or sel.get("simulable") is False:
+        return []
+    if sel.get("input_symbols") or sel.get("output_symbols"):
+        return []
+    return [_make(factory, step, oracle="B", severity="confused", key="module_io_empty",
+                  quote=str(sel.get("label") or "")[:120],
+                  server_rows={"module_key": sel.get("module_key"), "level": sel.get("level")},
+                  hypothesis="選んだ理論のまとまりに、受け取る記号も定める記号も 1 つも出ていない（何を入れて何が出るかが読めない）")]
+
+
+def _unwired_numeric_runs(t: HttpTrace, body: Any) -> list[str]:
+    """配線の無い実行で、記号ごとの相対差・分離比が数で載っている run の id（body が読めなければ digest）。"""
+    hits: list[str] = []
+    if body is not None:
+        for d in _walk_dicts(body):
+            if not _is_run(d) or d.get("wiring_id"):
+                continue
+            by_symbol = _get(d, ("result", "comparison", "metrics", "by_symbol"))
+            items = by_symbol.values() if isinstance(by_symbol, dict) else (by_symbol if isinstance(by_symbol, list) else [])
+            if any(isinstance(e, dict) and any(isinstance(e.get(k), (int, float)) and not isinstance(e.get(k), bool)
+                                               for k in (sb.METRIC_RELATIVE_DIFFERENCE, sb.METRIC_SEPARATION_RATIO))
+                   for e in items):
+                hits.append(str(d.get("id") or ""))
+        return hits
+    for r in (t.digest or {}).get("simulation_runs") or []:
+        if isinstance(r, dict) and not r.get("wired") and r.get("by_symbol_numeric"):
+            hits.append(str(r.get("id") or ""))
+    return hits
+
+
+def _check_unwired_metrics(step: TranscriptStep, t: HttpTrace, body: Any, factory: FindingFactory) -> list[Finding]:
+    """B11: 教員向けの実行記録で、配線なしの実行に記号ごとの相対差が数で載っている。"""
+    if not step.action_id.startswith(ADMIN_PREFIX):
+        return []
+    hits = _unwired_numeric_runs(t, body)
+    if not hits:
+        return []
+    return [_make(factory, step, oracle="B", severity="principle", key="unwired_metrics",
+                  server_rows={"run_ids": hits[:10]},
+                  hypothesis="配線なしの実行（模擬観測が理論の出力そのもの）に、記号ごとの相対差・分離比が数で載っている")]
+
+
 def _check_counts(step: TranscriptStep, body: Any, factory: FindingFactory) -> list[Finding]:
     if not step.action_id.startswith(LEARNER_PREFIX) or not isinstance(body, dict):
         return []
@@ -444,6 +500,8 @@ def check(steps: list[TranscriptStep], factory: FindingFactory) -> list[Finding]
             out += _check_detail(step, t, body, factory)
             out += _check_personal_keys(step, t, body, factory)
             out += _check_generate(step, t, body, factory)
+            out += _check_selected_module_io(step, t, factory)
+            out += _check_unwired_metrics(step, t, body, factory)
             if body is None:
                 out += _check_excerpt_contract(step, t, factory)
                 continue
@@ -513,6 +571,72 @@ def collect(database_url: str, meta: RunMeta, engine: Any = None, *,
     return rows
 
 
+_DECIDE_PATH_RE = re.compile(
+    r"/ledger/(?P<ttype>[^/]+)/(?P<tid>[^/]+)/simulation-candidates/(?P<cid>[^/]+)/(?P<action>confirm|dismiss)$")
+DIRECTLY_VERIFIED = "directly_verified"
+
+
+def decided_candidates(steps: Optional[list[TranscriptStep]]) -> list[dict]:
+    """transcript から、教員の確定・見送りが 200 で通った候補（target_type / target_id / candidate_id / action）。"""
+    out: list[dict] = []
+    for s in steps or []:
+        if s.action_id not in (ADMIN_PREFIX + "ledger_candidate_confirm", ADMIN_PREFIX + "ledger_candidate_dismiss"):
+            continue
+        for t in s.http:
+            m = _DECIDE_PATH_RE.search(t.path or "")
+            if m and t.status == 200 and t.method.upper() == "POST":
+                out.append({**m.groupdict(), "seq": s.seq})
+    return out
+
+
+def collect_ledger(database_url: str, decided: list[dict], engine: Any = None) -> list[dict]:
+    """判断した候補の台帳の行（``verification_status`` と該当候補の要素）を読む（SELECT のみ）。"""
+    if not decided:
+        return []
+    from sqlalchemy import create_engine, text  # 遅延 import
+
+    eng = engine or create_engine(database_url)
+    rows: list[dict] = []
+    with eng.connect() as conn:
+        for d in decided:
+            got = conn.execute(text(
+                "SELECT l.verification_status, c AS candidate FROM epistemic_ledger l "
+                "LEFT JOIN LATERAL jsonb_array_elements(COALESCE(l.simulation_candidates, '[]'::jsonb)) AS c "
+                "ON c->>'candidate_id' = :cid WHERE l.target_type = :ttype AND l.target_id = :tid"),
+                {"cid": d["cid"], "ttype": d["ttype"], "tid": d["tid"]}).mappings().all()
+            row = dict(got[0]) if got else {}
+            rows.append({**d, "found": bool(got), "verification_status": row.get("verification_status"),
+                         "candidate": row.get("candidate") if isinstance(row.get("candidate"), dict) else None})
+    return rows
+
+
+def check_ledger_decisions(rows: list[dict], factory: FindingFactory) -> list[Finding]:
+    """E4 / E5（行は ``collect_ledger`` の形）。"""
+    out: list[Finding] = []
+
+    def make(hypothesis: str, server_rows: dict, key: str) -> Finding:
+        return factory.make(oracle="E", severity="inconsistent", screen="admin", affordance="simulation.ledger-candidate-decide",
+                            hypothesis=hypothesis, server_rows=server_rows,
+                            layers=["simulation_bridge_sb", "doubt_d"], fingerprint_key=f"sb:e:{key}")
+
+    for r in rows:
+        where = {"target_type": r.get("ttype"), "target_id": r.get("tid"), "candidate_id": r.get("cid"),
+                 "seq": r.get("seq")}
+        cand = r.get("candidate") or {}
+        if r.get("action") == "dismiss":
+            if not cand:
+                out.append(make("教員が見送った台帳の候補が、台帳の配列に残っていない（見送りは消さずに状態で残す）",
+                                where, "dismissed_missing"))
+            elif cand.get("status") != sb.LEDGER_CANDIDATE_STATUS_DISMISSED or not str(cand.get("dismiss_reason") or "").strip():
+                out.append(make("教員が見送った台帳の候補に、見送りの状態か理由が残っていない",
+                                {**where, "status": cand.get("status"),
+                                 "has_reason": bool(str(cand.get("dismiss_reason") or "").strip())}, "dismissed_reason"))
+        elif r.get("action") == "confirm" and r.get("verification_status") == DIRECTLY_VERIFIED:
+            out.append(make("シミュレーションの候補を確定した主張の検証状態が「直接検証」まで上がっている（一致は検証ではない）",
+                            {**where, "verification_status": r.get("verification_status")}, "confirm_raised"))
+    return out
+
+
 def _numeric_payload_keys(payload: Any) -> list[str]:
     if not isinstance(payload, dict):
         return []
@@ -572,4 +696,11 @@ def check_observation(meta: Optional[RunMeta], factory: FindingFactory, database
     if rows["runs_without_owner"]:
         out.append(make("検証シミュレーションの実行記録に所有者の無い新しい行がある",
                         {"simulation_runs": rows["runs_without_owner"]}, "run_owner"))
+    decided = decided_candidates(steps)
+    if decided:
+        try:
+            ledger_rows = collect_ledger(database_url, decided, engine)
+        except Exception:  # noqa: BLE001 — 読めなければ E4/E5 は未実施
+            ledger_rows = []
+        out += check_ledger_decisions(ledger_rows, factory)
     return out

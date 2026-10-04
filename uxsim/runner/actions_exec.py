@@ -327,6 +327,10 @@ def _chat(ctx: _Ctx, *, topic_id: Optional[str] = None, template: Optional[str] 
         if ctx.args.get(k):
             body[k] = ctx.args[k]
     body.update({k: v for k, v in extra.items() if v not in (None, "")})
+    screen = simulation_screen_context(s, ctx.args.get("simulation_run_id"), tid,
+                                       mode=str(body.get("screen_mode") or "chat"))
+    if screen is not None:
+        body["screen_context"] = screen
     ov = dict(overrides or {})
     ov.setdefault("topic_id", tid)
     if template:
@@ -351,6 +355,34 @@ def _chat(ctx: _Ctx, *, topic_id: Optional[str] = None, template: Optional[str] 
 
 
 # 音声中心のペルソナ（行動型の ``uses_voice: mostly`` 等 — state.persona_uses_voice）は、学習画面の
+LATEST_RUN_WORDS = ("latest", "最新", "いまの実行", "current")
+
+
+def simulation_screen_context(session: Any, run_ref: Any, topic_id: Optional[str], *, mode: str = "chat") -> Optional[dict]:
+    """「🧪 動かして確かめる」で実行を開いたまま送るときの ``screen_context``（app.js ``getScreenContext`` と同じ形）。
+
+    画面は開いている自分の実行の id だけを ``selection.simulation_run_id`` に載せる（SA層 4-e・事実文にするのは
+    サーバ）。台本の ``with: simulation_run_id: latest`` は画面の記録の先頭（最新）の実行を指す。指定が無い・
+    記録が無いときは None（キーごと送らない — 開いていない画面と同じ）。
+    """
+    ref = str(run_ref or "").strip()
+    if not ref:
+        return None
+    if ref.lower() in LATEST_RUN_WORDS:
+        rows = session.scratch.get("sim_runs_dto") if isinstance(session.scratch.get("sim_runs_dto"), list) else []
+        ref = str((rows[0] or {}).get("id") or "") if rows and isinstance(rows[0], dict) else ""
+        if not ref:
+            return None
+    selection: dict[str, Any] = {"course_id": str(session.course_id or ""), "topic_id": str(topic_id or ""),
+                                 "kind": "topic", "simulation_run_id": ref}
+    doc = (session.material or {}).get("document_id") if isinstance(session.material, dict) else None
+    if doc:
+        selection["document_id"] = str(doc)
+    return {"screen": "learning", "selection": selection,
+            "view": {"mode": mode if mode in ("chat", "voice", "lecture") else "chat", "precision_reading": False},
+            "visible_entities": []}
+
+
 # ハンズフリー音声ループ（app.js handleVoiceSegment）と同じく ``intent_mode="casual"`` で送り、
 # ``resolveScreenMode()`` と同じく ``screen_mode="voice"`` を添える（第 17 周: 音声のペルソナに文字の
 # on_path を送り、書き言葉の回答を欠陥と数えていた）。

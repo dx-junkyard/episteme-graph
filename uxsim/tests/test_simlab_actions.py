@@ -74,11 +74,11 @@ def _body(request: httpx.Request) -> dict:
 
 def test_registry_has_all_sb_actions_with_handlers():
     ids = [a for a in REGISTRY if a.startswith(("learning.simlab.", "admin.simulation."))]
-    assert len(ids) == 13
+    assert len(ids) == 14  # 第 22 周: ledger_candidate_dismiss
     for aid in ids:
         assert aid in _HANDLERS, aid
         assert REGISTRY[aid].affordance in ("material.simulation-lab", "materials.row-simulation", "simulation.run",
-                                            "simulation.ledger-candidate")
+                                            "simulation.ledger-candidate", "simulation.ledger-candidate-decide")
     assert REGISTRY["learning.simlab.generate"].llm_cost == "product"
     assert REGISTRY["learning.simlab.propose_revision"].llm_cost == "product"
 
@@ -202,7 +202,7 @@ def test_predict_then_run_sends_prediction_values_claim_and_wiring():
     assert body["prediction"] == [{"symbol": "P_B", "value": 4.0}] and body["observation_claim_ids"] == ["clm-9"]
     assert s.latest("sim_runs") == "r1"
     obs = project_observation("learning.simlab.run", s.last_status, s.last_body)
-    assert "実行できました" in obs and "P_B | 4 | 4 | 4.1 ± 0.2" in obs and "理論の出力と模擬観測: 一致 / はっきり分かれる" in obs
+    assert "実行できました" in obs and "P_B | 4 | 4 | 4.1 ± 0.2" in obs and "\n一致 / はっきり分かれる\n" in obs and "段階:" not in obs  # 画面と同じ見出しなし（軸名はサーバのラベル値に含まれる）
     assert "相対差: 0.025" in obs and "分析の妥当性の候補" in obs
     # wiring="none" なら配線なし
     execute("learning.simlab.run", {"values": {"B": 2}, "wiring": "none"}, s, client)
@@ -264,7 +264,7 @@ def test_teacher_open_review_and_ledger_confirm_flow():
     # 画面は共有 run を選ぶと主張の台帳も読む（区画 4「台帳の候補」）
     assert [r.url.path for r in seen[-2:]] == ["/api/admin/simulation/runs/r1", "/api/admin/doubt/ledger/claim/clm-9"]
     obs = project_observation("admin.simulation.review_shared_run", s.last_status, s.last_body)
-    assert "台帳の候補（学習者が共有した実行）" in obs and "［確定する］［見送る（理由必須）］" in obs
+    assert "台帳の候補（学習者が共有した実行）" in obs and "［確定する］［見送る理由（必須）を書いてから見送る］" in obs
     execute("admin.simulation.ledger_candidate_confirm", {}, s, client)
     assert [r.url.path for r in seen[-2:]] == ["/api/admin/doubt/ledger/claim/clm-9",
                                                "/api/admin/doubt/ledger/claim/clm-9/simulation-candidates/cand-1/confirm"]

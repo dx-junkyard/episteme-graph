@@ -102,8 +102,52 @@ def chat_record_from_excerpt(excerpt: str) -> Optional[dict]:
             "degraded": '"degraded": true' in excerpt, "sources": [], "sources_known": False}
 
 
+_METRIC_DIFF_KEYS = ("relative_difference", "separation_ratio")
+
+
+def _walk(v: Any) -> Iterator[dict]:
+    if isinstance(v, dict):
+        yield v
+        for x in v.values():
+            yield from _walk(x)
+    elif isinstance(v, list):
+        for x in v:
+            yield from _walk(x)
+
+
+def _by_symbol_numeric(by_symbol: Any) -> list[str]:
+    """記号ごとの比較で、相対差・分離比が数で入っている記号の名前（値は残さない — PE7）。"""
+    items = by_symbol.items() if isinstance(by_symbol, dict) else (
+        [(str(e.get("symbol") or ""), e) for e in by_symbol if isinstance(e, dict)] if isinstance(by_symbol, list) else [])
+    out = []
+    for sym, entry in items:
+        if isinstance(entry, dict) and any(isinstance(entry.get(k), (int, float)) and not isinstance(entry.get(k), bool)
+                                           for k in _METRIC_DIFF_KEYS):
+            out.append(str(sym))
+    return out
+
+
+def simulation_runs_record(body: Any) -> list[dict]:
+    """SB層の実行記録（``program_id`` と ``status`` を持つ dict）ごとに、配線の有無と記号ごとの比較の数の有無。
+
+    審判 B11（配線の無い実行に相対差が数で載る）が 2000 字の抜粋の外を読むため。数そのものは残さない。
+    """
+    out: list[dict] = []
+    for d in _walk(body):
+        if "program_id" in d and "status" in d and ("result" in d or "inputs" in d):
+            result = d.get("result") if isinstance(d.get("result"), dict) else {}
+            comparison = result.get("comparison") if isinstance(result.get("comparison"), dict) else {}
+            metrics = comparison.get("metrics") if isinstance(comparison.get("metrics"), dict) else {}
+            out.append({"id": str(d.get("id") or ""), "wired": bool(d.get("wiring_id")),
+                        "by_symbol_numeric": _by_symbol_numeric(metrics.get("by_symbol"))[:MAX_KEYS]})
+    return out[:MAX_SOURCES]
+
+
 def response_digest(body: Any) -> dict:
     out: dict[str, Any] = {}
+    sim_runs = simulation_runs_record(body)
+    if sim_runs:
+        out["simulation_runs"] = sim_runs
     keys = numeric_keys(body)
     if keys:
         out["numeric_keys"] = keys
