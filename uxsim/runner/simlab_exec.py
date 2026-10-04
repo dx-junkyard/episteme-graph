@@ -1143,5 +1143,8 @@ def _admin_lines(action_id: str, body: dict) -> list[str]:
         if str(c.get("dismiss_reason") or "").strip():
             lines.append(f"見送りの理由: {str(c['dismiss_reason']).strip()}")
         lines.extend(_facts(c.get("facts")))
-        return lines + _generic({k: v for k, v in body.items() if k != "candidate"}, max_lines=20)
+        # 画面（admin-simulation-bridge.js）は候補の結果だけを描く。応答の生の値（verification_status 等）を
+        # 投影に流すと「生の値が画面に出る」偽所見になる（第 22 周 te-04）ので、facts 以外は出さない。
+        lines.extend(f for f in _facts(body.get("facts")) if f not in lines)
+        return lines
     return _generic(body, max_lines=80)
