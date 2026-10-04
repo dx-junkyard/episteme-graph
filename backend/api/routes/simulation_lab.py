@@ -489,13 +489,30 @@ def _wiring_dto(wiring: dict | None, catalog: dict[str, dict]) -> dict | None:
     })
 
 
-def _run_dto(run: dict | None) -> dict | None:
+def _ledger_decision_dto(run: dict, decisions: dict[str, str] | None) -> dict:
+    """共有した run への教員の判断（状態と事実文だけ。教員名・理由・件数は出さない）。"""
+    if not run.get("shared_at"):
+        status = schema.LEDGER_DECISION_NONE
+    else:
+        status = (decisions or {}).get(str(run.get("id") or ""), schema.LEDGER_DECISION_NONE)
+    if status not in schema.LEDGER_DECISION_STATUSES:
+        status = schema.LEDGER_DECISION_NONE
+    return {"status": status, "fact": schema.LEDGER_DECISION_FACTS.get(status, "")}
+
+
+def _decisions_for(session: Any, runs: list[dict]) -> dict[str, str]:
+    shared_ids = [str(r.get("id") or "") for r in runs or [] if r and r.get("shared_at")]
+    return store.ledger_decisions_for_runs(session, shared_ids) if shared_ids else {}
+
+
+def _run_dto(run: dict | None, decisions: dict[str, str] | None = None) -> dict | None:
     if not run:
         return None
     inputs = dict(run.get("inputs") or {})
     result = dict(run.get("result") or {})
     comparison = dict(result.get("comparison") or {})
-    metrics = dict(comparison.get("metrics") or {})
+    # 配線なしの run は相対差・分離比を出さない（旧 run の 0.0 を表示で消す・データは不変）。
+    metrics = store.display_metrics(comparison.get("metrics"), wired=bool(run.get("wiring_id")))
     learner_result: dict[str, Any] = {
         "theory_outputs": service.symbol_value_list(result.get("theory_outputs") or {}),
         "observed": service.observed_list(result.get("observed") or {}),
@@ -531,6 +548,7 @@ def _run_dto(run: dict | None) -> dict | None:
         },
         "result": learner_result,
         "shared": bool(run.get("shared_at")),
+        "ledger_decision": _ledger_decision_dto(run, decisions),
         "created_at": run.get("created_at"),
     })
 
@@ -631,6 +649,7 @@ def get_simulation_lab_overview(
         )
         wirings = store.list_wirings(session, document_id=doc, owner_user_id=uid)
         runs = store.list_runs(session, document_id=doc, owner_user_id=uid)
+        decisions = _decisions_for(session, runs)
         if not catalog_rows:
             facts.append(schema.FACT_NO_PARTS_CATALOG)
         targets = _targets(session, doc)
@@ -643,7 +662,7 @@ def get_simulation_lab_overview(
             "modules": module_items,
             "programs": [_program_dto(p) for p in programs],
             "wirings": [_wiring_dto(w, catalog) for w in wirings],
-            "runs": [_run_dto(r) for r in runs],
+            "runs": [_run_dto(r, decisions) for r in runs],
             "observation_targets": targets,
         }
     finally:
@@ -1027,9 +1046,10 @@ def list_simulation_lab_runs(
             document_id=document_id, topic_id=topic_id, allowed=allowed, required=True,
         )
         runs = store.list_runs(session, document_id=doc, owner_user_id=uid)
+        decisions = _decisions_for(session, runs)
     finally:
         session.close()
-    return {"runs": [_run_dto(r) for r in runs]}
+    return {"runs": [_run_dto(r, decisions) for r in runs]}
 
 
 @learning_router.get("/simulation/runs/{run_id}")
@@ -1038,10 +1058,11 @@ def get_simulation_lab_run(run_id: str, current_user: dict = Depends(_get_curren
     session = _pg_session()
     try:
         run = _own_or_404(_get_or_none(store.get_run, session, run_id), uid, _RUN_NOT_FOUND)
+        _require_scope(uid, run, _RUN_NOT_FOUND)
+        decisions = _decisions_for(session, [run])
     finally:
         session.close()
-    _require_scope(uid, run, _RUN_NOT_FOUND)
-    return {"run": _run_dto(run)}
+    return {"run": _run_dto(run, decisions)}
 
 
 @learning_router.post("/simulation/runs/{run_id}/share")
@@ -1098,11 +1119,12 @@ def share_simulation_lab_run(
                     facts.append(schema.FACT_SHARED_NO_LEDGER)
         session.commit()
         refreshed = store.get_run(session, str(run.get("id"))) or shared
+        decisions = _decisions_for(session, [refreshed])
     finally:
         session.close()
     if not already:
         mark_verification_attempt_shared(uid, str(refreshed.get("id") or ""))
-    return {"run": _run_dto(refreshed), "facts": facts}
+    return {"run": _run_dto(refreshed, decisions), "facts": facts}
 
 
 @learning_router.post("/simulation/runs/{run_id}/propose-revision")

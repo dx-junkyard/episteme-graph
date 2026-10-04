@@ -41,6 +41,8 @@ NOISE_PARAM_BY_KIND: dict[str, str] = {
 
 #: 模擬観測のアンサンブル回数（``params["_repeats"]`` で上書き可・上限あり）。
 DEFAULT_REPEATS = 64
+#: 「平均化（N 回）」の n の上限（repeats × n の実行時間を抑える。目録の max 1000000 は宣言上の範囲）。
+MAX_AVERAGING = 1000
 MAX_REPEATS = 4096
 #: 結果に残すサンプル数の上限。
 MAX_SAMPLES = 64
@@ -312,6 +314,17 @@ def _noise_lines(kind: str, indent: str) -> list[str]:
     raise ValueError(f"未知のノイズ種別です: {kind}")
 
 
+def _is_averaging_part(body: dict) -> bool:
+    """部品の宣言から「平均化（N 回）」を見分ける（transfer が恒等で、n を持ち、ランダム雑音を removes に挙げる）。
+    名前や分野語ではなく宣言の形で判定する。"""
+    params = body.get("params") if isinstance(body.get("params"), dict) else {}
+    removes = body.get("removes") if isinstance(body.get("removes"), list) else []
+    transfer = str(body.get("transfer") or "").strip()
+    return "n" in params and transfer in ("x", "") and any(
+        str(r) in (schema.NOISE_KIND_GAUSSIAN, schema.NOISE_KIND_POISSON) for r in removes
+    )
+
+
 def compose_instrument(
     parts: list[dict],
     edges: list[dict],
@@ -343,6 +356,21 @@ def compose_instrument(
         entry = catalog[str(part.get("entry_id"))]
         entry_type = entry.get("entry_type")
         body = entry.get("body") or {}
+        if entry_type != schema.PART_TYPE_NOISE and _is_averaging_part(body):
+            # 「平均化（N 回）」: 同じ測定を n 回繰り返して平均する。上流の段（雑音の引き直しを含む）を
+            # n 回やり直した平均に置き換えるので、ランダムな雑音の分散は 1/n になり、系統的なずれ（offset /
+            # drift）は n 回とも同じなので減らない。第 22 周 (d'): transfer が `x` のままで何もしていなかった
+            # （目録の summary「分散のスケーリングは合成器が行う」が実装されていなかった）是正。
+            upstream = list(stage_lines)
+            stage_lines.append(f"{indent}params = merged[{slot!r}]")
+            stage_lines.append(f"{indent}n_avg = max(1, min(int(round(float(params.get('n', 1)))), {MAX_AVERAGING}))")
+            stage_lines.append(f"{indent}draws = []")
+            stage_lines.append(f"{indent}for _k in range(n_avg):")
+            stage_lines.append(f"{indent}    x = np.array(base, dtype=float)")
+            stage_lines.extend("    " + line for line in upstream)
+            stage_lines.append(f"{indent}    draws.append(np.array(x, dtype=float))")
+            stage_lines.append(f"{indent}x = np.mean(np.asarray(draws, dtype=float), axis=0)")
+            continue
         stage_lines.append(f"{indent}params = merged[{slot!r}]")
         if entry_type == schema.PART_TYPE_NOISE:
             stage_lines.extend(_noise_lines(str(body.get("noise_kind")), indent))

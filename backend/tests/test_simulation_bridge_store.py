@@ -658,3 +658,72 @@ class TestStoreModuleDiscipline:
         assert "fastapi" not in source
         assert "AUDIT_ENTITY_SIMULATION" in source
         assert 'entity_type="simulation"' not in source
+
+
+class TestLedgerDecisionsForRuns:
+    class _Rows:
+        def __init__(self, rows=None, fail=False):
+            self.rows = rows or []
+            self.fail = fail
+            self.rollbacks = 0
+            self.params = None
+            self.sql = ""
+
+        def execute(self, statement, params=None):
+            if self.fail:
+                raise RuntimeError("column missing")
+            self.sql = str(statement)
+            self.params = params
+
+            rows = self.rows
+
+            class _R:
+                def fetchall(self_inner):
+                    return rows
+
+            return _R()
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    def test_groups_by_run_and_aggregates(self):
+        session = self._Rows([("r1", "dismissed"), ("r1", "confirmed"), ("r2", "candidate"), ("r3", "dismissed")])
+        out = store.ledger_decisions_for_runs(session, ["r1", "r2", "r3", "r4"])
+        assert out == {"r1": "confirmed", "r2": "candidate", "r3": "dismissed"}
+        assert session.params == {"run_ids": ["r1", "r2", "r3", "r4"]}
+        assert "SELECT" in session.sql and "UPDATE" not in session.sql and "INSERT" not in session.sql
+
+    def test_single_run_default_none(self):
+        assert store.ledger_decisions_for_run(self._Rows([]), "r9") == schema.LEDGER_DECISION_NONE
+
+    def test_empty_ids_issue_no_sql(self):
+        session = self._Rows(fail=True)
+        assert store.ledger_decisions_for_runs(session, []) == {}
+
+    def test_failure_is_fail_soft_and_rolls_back(self):
+        session = self._Rows(fail=True)
+        assert store.ledger_decisions_for_runs(session, ["r1"]) == {}
+        assert session.rollbacks == 1
+
+
+class TestDisplayMetrics:
+    def test_wired_is_unchanged(self):
+        metrics = {"relative_difference": 0.1, "by_symbol": {"k": {"relative_difference": 0.1}}}
+        assert store.display_metrics(metrics, wired=True) == metrics
+
+    def test_unwired_drops_relative_and_empty_symbols(self):
+        metrics = {
+            "relative_difference": 0.0, "separation_ratio": None,
+            "by_symbol": {
+                "k": {"relative_difference": 0.0, "separation_ratio": None, "reference_relative_difference": None},
+                "n": {"relative_difference": 0.0, "reference_relative_difference": 0.5},
+            },
+        }
+        out = store.display_metrics(metrics, wired=False)
+        assert out["relative_difference"] is None
+        assert out["by_symbol"] == {"n": {"relative_difference": None, "separation_ratio": None,
+                                          "reference_relative_difference": 0.5}}
+        assert metrics["by_symbol"]["k"]["relative_difference"] == 0.0  # 入力は不変
+
+    def test_none_metrics(self):
+        assert store.display_metrics(None, wired=False)["by_symbol"] == {}

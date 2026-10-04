@@ -1186,6 +1186,109 @@ def decide_ledger_candidate(
     }
 
 
+
+# ---------------------------------------------------------------------------
+# 共有した run への教員の判断の読み出し（第 22 周 A4・SELECT のみ）
+# ---------------------------------------------------------------------------
+
+# 1 つの run は観測系の主張ごとに複数の候補を持ちうる。集約の優先順:
+# 1 件でも確定 → confirmed / 未処理が残る → candidate / すべて見送り → dismissed。
+_DECISION_PRECEDENCE = (
+    schema.LEDGER_CANDIDATE_STATUS_CONFIRMED,
+    schema.LEDGER_CANDIDATE_STATUS_CANDIDATE,
+    schema.LEDGER_CANDIDATE_STATUS_DISMISSED,
+)
+
+
+def aggregate_ledger_decision(statuses: Sequence[Any]) -> str:
+    """run に付いた台帳候補の status 列を 1 つの状態に畳む（純関数・決定論）。
+
+    候補が無ければ ``schema.LEDGER_DECISION_NONE``。語彙外の status は無視する。
+    """
+    present = {_clean(s) for s in statuses or []}
+    for status in _DECISION_PRECEDENCE:
+        if status in present:
+            return status
+    return schema.LEDGER_DECISION_NONE
+
+
+def ledger_decisions_for_runs(session: Any, run_ids: Sequence[Any]) -> dict[str, str]:
+    """run ID ごとに、台帳候補の判断状態を返す（``{run_id: status}``・候補の無い run は含めない）。
+
+    ``epistemic_ledger.simulation_candidates`` の要素の ``run_id`` で引く（SELECT のみ）。
+    読めない（旧 DB・列なし）ときは空を返し、セッションを巻き戻して呼び出し側を壊さない（IK-0599）。
+    """
+    ids = sorted({_clean(r) for r in run_ids or [] if _clean(r)})
+    if not ids:
+        return {}
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT c->>'run_id', c->>'status'
+                  FROM epistemic_ledger l,
+                       jsonb_array_elements(COALESCE(l.simulation_candidates, '[]'::jsonb)) AS c
+                 WHERE l.simulation_candidates <> '[]'::jsonb
+                   AND c->>'run_id' = ANY(:run_ids)
+                """
+            ),
+            {"run_ids": ids},
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 判断の表示は付帯情報（fail-soft）
+        logger.debug("ledger decisions unavailable", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return {}
+    grouped: dict[str, list[str]] = {}
+    for row in rows or []:
+        rid, status = _clean(row[0]), _clean(row[1])
+        if rid:
+            grouped.setdefault(rid, []).append(status)
+    out: dict[str, str] = {}
+    for rid, statuses in grouped.items():
+        decided = aggregate_ledger_decision(statuses)
+        if decided != schema.LEDGER_DECISION_NONE:
+            out[rid] = decided
+    return out
+
+
+def ledger_decisions_for_run(session: Any, run_id: Any) -> str:
+    """1 run の判断状態（候補が無ければ ``schema.LEDGER_DECISION_NONE``）。"""
+    rid = _clean(run_id)
+    return ledger_decisions_for_runs(session, [rid]).get(rid, schema.LEDGER_DECISION_NONE)
+
+
+def display_metrics(metrics: Mapping[str, Any] | None, *, wired: bool) -> dict:
+    """比較の数値を表示用に読み替える（データは書き換えない・第 22 周 A4）。
+
+    配線なしの run では模擬観測 = 理論の出力そのものなので、相対差と分離比は意味を持たない。
+    第 21 波より前の run には記号ごとの相対差 0.0 が残っているため、表示の段階で ``None`` にする
+    （0.0 を「一致」と読ませない）。論文の記載値との差は配線に依らないので残す。全指標が ``None`` の
+    記号は一覧から外す（中身の無い項目は出さない = P-0008）。
+    """
+    data = dict(metrics or {})
+    by_symbol_raw = data.get("by_symbol")
+    by_symbol = dict(by_symbol_raw) if isinstance(by_symbol_raw, Mapping) else {}
+    if wired:
+        return {**data, "by_symbol": by_symbol}
+    out = dict(data)
+    out[schema.METRIC_RELATIVE_DIFFERENCE] = None
+    out[schema.METRIC_SEPARATION_RATIO] = None
+    cleaned: dict[str, Any] = {}
+    for symbol, entry in by_symbol.items():
+        if not isinstance(entry, Mapping):
+            continue
+        item = dict(entry)
+        item[schema.METRIC_RELATIVE_DIFFERENCE] = None
+        item[schema.METRIC_SEPARATION_RATIO] = None
+        if item.get(schema.METRIC_REFERENCE_DIFFERENCE) is None:
+            continue
+        cleaned[symbol] = item
+    out["by_symbol"] = cleaned
+    return out
+
 __all__ = [
     "DECIDE_ACTIONS",
     "LEDGER_TARGET_TYPES",
@@ -1194,6 +1297,7 @@ __all__ = [
     "SimulationNotFoundError",
     "SimulationStateError",
     "WIRING_VOCABULARY",
+    "aggregate_ledger_decision",
     "append_ledger_candidate",
     "build_ledger_candidate",
     "create_program",
@@ -1201,10 +1305,13 @@ __all__ = [
     "decide_ledger_candidate",
     "decide_program",
     "decide_wiring",
+    "display_metrics",
     "get_program",
     "get_run",
     "get_wiring",
     "is_owner",
+    "ledger_decisions_for_run",
+    "ledger_decisions_for_runs",
     "list_programs",
     "list_runs",
     "list_wirings",

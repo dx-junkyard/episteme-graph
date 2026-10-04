@@ -197,3 +197,136 @@ def test_prompt_tells_facts_are_for_learners():
     prompt = codegen.build_codegen_prompt(MODULE, equations=EQUATIONS, symbols=SYMBOLS)
     notice_at = prompt.index(UNTRUSTED_SOURCE_NOTICE)
     assert "role= などの内部の語・英語の型名を書かないでください" in prompt[:notice_at]
+
+
+# ---------------------------------------------------------------------------
+# 第 22 周 A3（IK-0627）: 資料の整形・記号表の絞り・計算できないときの形
+# ---------------------------------------------------------------------------
+
+
+def _material(module, equations, symbols):
+    llm = FakeLLM(_resp(GOOD_CODE))
+    codegen.generate_program(module, equations=equations, symbols=symbols, structured_fn=llm)
+    prompt = llm.calls[0]["messages"][0]["content"]
+    json_start = prompt.index("```json") + len("```json")
+    json_end = prompt.index("```", json_start)
+    return prompt, json.loads(prompt[json_start:json_end])
+
+
+DICT_EQUATIONS = [
+    {
+        "agent_equation_id": "eq_1", "label": "", "latex": "S = \\int L \\, dx", "plain_text": "S = \\int L \\, dx",
+        "defined_symbols": [
+            {"symbol": "S", "meaning": "The theory action. It is integrated.", "symbol_id": "sym_abc_S", "definition_status": "defined"},
+            {"symbol": "L", "meaning": None, "symbol_id": "sym_abc_L", "definition_status": "used"},
+        ],
+        "used_symbols": ["x"],
+        "agent_payload": {"semantics": {"equation_type": "definition", "summary": "Defines the full action as the integral of L."}},
+    },
+    {"agent_equation_id": "eq_2", "label": "(2)", "latex": "y = a x", "plain_text": "", "defined_symbols": ["y"],
+     "used_symbols": ["x"], "agent_payload": {}},
+]
+
+
+def test_dict_symbols_become_names_not_repr():
+    prompt, material = _material(MODULE, DICT_EQUATIONS, SYMBOLS)
+    first = material["equations"][0]
+    assert first["defined_symbols"] == ["S"]
+    assert "L" in first["used_symbols"] and "x" in first["used_symbols"]
+    assert "{'symbol'" not in prompt and "sym_abc" not in prompt and "symbol_id" not in prompt
+    assert "definition_status" not in prompt
+
+
+def test_english_summary_is_not_used_as_label():
+    _, material = _material(MODULE, DICT_EQUATIONS, SYMBOLS)
+    first = material["equations"][0]
+    assert "Defines" not in first["label"]
+    assert first["label"].startswith("番号なし")
+    assert first["summary"].startswith("Defines the full action")
+    assert material["equations"][1]["label"] == "式 (2)"
+    # plain_text が latex と同じなら重ねて載せない
+    assert "plain_text" not in first
+
+
+def test_member_prose_labels_are_folded():
+    module = dict(MODULE, members=[{"operation_label": "定義", "input_labels": ["番号なし: Defines the full Horndeski action as the"],
+                                    "output_labels": ["式 (2)"]}])
+    _, material = _material(module, EQUATIONS, SYMBOLS)
+    member = material["module"]["members"][0]
+    assert member["inputs"] == ["番号なし"]
+    assert member["outputs"] == ["式 (2)"]
+
+
+def test_symbol_table_is_limited_to_this_module_and_drops_unknowns():
+    symbols = [
+        {"canonical_symbol": "a", "kind": "unknown", "unit": "", "scope": "document", "definition_evidence_texts": ["a は係数です。続きの文。"], "agent_payload": {}},
+        {"canonical_symbol": "M_PISN", "kind": "unknown", "unit": "", "scope": "document", "definition_evidence_texts": ["遠い記号"], "agent_payload": {}},
+        {"canonical_symbol": "x", "kind": "", "unit": "", "scope": "section", "definition_evidence_texts": [], "agent_payload": {}},
+    ]
+    _, material = _material(MODULE, EQUATIONS, symbols)
+    names = [s["symbol"] for s in material["symbols"]]
+    assert names == ["a"]  # 式に無い M_PISN は落ちる・名前だけの x も載せない
+    item = material["symbols"][0]
+    assert item == {"symbol": "a", "meaning": "a は係数です。続きの文。"} or "kind" not in item
+    assert "unit" not in item and "kind" not in item and "scope" not in item
+
+
+def test_symbol_meaning_falls_back_to_equation_dict_meaning():
+    symbols = [{"canonical_symbol": "S", "kind": "unknown", "unit": "", "definition_evidence_texts": [], "agent_payload": {}}]
+    _, material = _material(MODULE, DICT_EQUATIONS, symbols)
+    assert material["symbols"] == [{"symbol": "S", "meaning": "The theory action."}]
+
+
+def test_symbol_table_upper_bound():
+    many = [{"canonical_symbol": f"s{i}", "unit": "m", "definition_evidence_texts": [], "agent_payload": {}} for i in range(80)]
+    eqs = [dict(EQUATIONS[0], used_symbols=[f"s{i}" for i in range(80)])]
+    _, material = _material(MODULE, eqs, many)
+    assert len(material["symbols"]) == codegen.SYMBOL_TABLE_LIMIT
+
+
+def test_output_note_only_when_module_has_no_output_equation():
+    _, with_output = _material(MODULE, EQUATIONS, SYMBOLS)
+    assert "output_note" not in with_output
+    module = dict(MODULE, outputs=[])
+    _, without = _material(module, EQUATIONS, SYMBOLS)
+    assert without["output_note"] == codegen.MATERIAL_NO_OUTPUT_NOTE
+
+
+def test_instruction_describes_cannot_compute():
+    prompt, _ = _material(MODULE, EQUATIONS, SYMBOLS)
+    head = prompt[: prompt.index(UNTRUSTED_SOURCE_NOTICE)]
+    assert "cannot_compute" in head and "部分実装で埋めない" in head
+
+
+def test_cannot_compute_is_normalized_and_named_in_facts():
+    resp = _resp(GOOD_CODE, outputs=())
+    resp["cannot_compute"] = [
+        {"symbol": "\\xi_\\pm", "reason": "核が外部定義で role=output の値を出せない"},
+        {"symbol": ""},
+        "P_m",
+        {"symbol": "\\xi_\\pm", "reason": "重複"},
+    ]
+    llm = FakeLLM(resp)
+    draft = codegen.generate_program(MODULE, equations=EQUATIONS, symbols=SYMBOLS, structured_fn=llm)
+    blocked = draft.io_contract["cannot_compute"]
+    assert [b["symbol"] for b in blocked] == ["\\xi_\\pm", "P_m"]
+    assert "role=" not in blocked[0]["reason"] and "出力の式" in blocked[0]["reason"]
+    fact = schema.cannot_compute_fact(blocked)
+    assert fact in draft.facts and fact in codegen.program_facts_for_display(draft)
+    assert "\\xi_\\pm" in fact and "P_m" in fact
+    assert not any(ch.isdigit() for ch in schema.FACT_CANNOT_COMPUTE)
+    # 出力が空なら出力記号の食い違い警告は出さない
+    assert not any("出力の式" in f and "記号" in f and "一致" in f for f in draft.facts if f != fact)
+
+
+def test_cannot_compute_inside_contract_is_accepted_and_kept_through_completion():
+    resp = _resp(GOOD_CODE, outputs=())
+    resp["io_contract"]["cannot_compute"] = [{"symbol": "C_l", "reason": "関数形が無い"}]
+    draft = codegen.generate_program(MODULE, equations=EQUATIONS, symbols=SYMBOLS, structured_fn=FakeLLM(resp))
+    assert draft.io_contract["cannot_compute"] == [{"symbol": "C_l", "reason": "関数形が無い"}]
+    assert set(draft.io_contract) == {"inputs", "outputs", "parameters", "cannot_compute"}
+
+
+def test_no_cannot_compute_key_when_nothing_blocked():
+    draft = codegen.generate_program(MODULE, equations=EQUATIONS, symbols=SYMBOLS, structured_fn=FakeLLM(_resp(GOOD_CODE)))
+    assert "cannot_compute" not in draft.io_contract

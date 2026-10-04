@@ -71,6 +71,7 @@ class _FakeStore:
     SimulationNotFoundError = real_store.SimulationNotFoundError
     SimulationStateError = real_store.SimulationStateError
     build_ledger_candidate = staticmethod(real_store.build_ledger_candidate)
+    display_metrics = staticmethod(real_store.display_metrics)
 
     def __init__(self):
         self.programs: dict[str, dict] = {}
@@ -231,6 +232,7 @@ def env(monkeypatch):
     monkeypatch.setattr(sbr, "record_review_event", lambda *a, **k: audits.append(a))
     monkeypatch.setattr(sbr, "_sandbox_client", lambda: state["sandbox"])
     monkeypatch.setattr(sbr, "_user_display_names", lambda s, ids: {})
+    monkeypatch.setattr(sbr, "_can_decide_ledger", lambda d, u: True)
 
     def _quota(gate, **kw):
         gate_calls.append(kw)
@@ -327,7 +329,7 @@ class TestRegistration:
 
 class TestOverview:
     KEYS = {"document_id", "available", "facts", "sandbox_configured", "indicator_id", "modules", "programs",
-            "wirings", "runs", "observation_targets", "parts_catalog"}
+            "wirings", "runs", "observation_targets", "parts_catalog", "can_decide_ledger"}
 
     def test_shape(self, env):
         out = sbr.get_simulation_overview(DOC, current_user=TEACHER)
@@ -337,6 +339,7 @@ class TestOverview:
         module = out["modules"][0]
         assert set(module) == {"module_key", "level", "label", "visual_label", "theory_object", "inputs",
                                "outputs", "assumptions", "has_equation_text", "reconstructed_inputs", "program",
+                               "input_symbols", "output_symbols", "subtitle", "output_symbols_note", "simulable", "simulability_note",
                                "equations", "to_sink"}
         assert module["has_equation_text"] is True
         assert module["program"] is None
@@ -361,6 +364,33 @@ class TestOverview:
         body = response.json()
         assert set(body) == self.KEYS
         assert body["modules"][0]["module_key"] == MODULE["module_key"]
+
+
+class TestCanDecideLedger:
+    """第 22 周: 台帳候補の確定・見送りボタンの活性（台帳 API の権限ゲートと同じ判定・fail-closed）。"""
+
+    def test_system_admin_without_lookup(self, monkeypatch):
+        import services
+
+        monkeypatch.setattr(services, "resolve_document_access", lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
+        assert sbr._can_decide_ledger(DOC, {"id": "u-admin", "role": sbr.ROLE_SYSTEM_ADMIN}) is True
+
+    def test_follows_document_edit_permission(self, monkeypatch):
+        import services
+
+        monkeypatch.setattr(services, "resolve_document_access",
+                            lambda uid, ref: types.SimpleNamespace(found=True, can_edit=uid == "editor"))
+        assert sbr._can_decide_ledger(DOC, {"id": "editor", "role": "TEACHER"}) is True
+        assert sbr._can_decide_ledger(DOC, {"id": "viewer", "role": "TEACHER"}) is False
+
+    def test_lookup_failure_is_false(self, monkeypatch):
+        import services
+
+        def _boom(*a, **k):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(services, "resolve_document_access", _boom)
+        assert sbr._can_decide_ledger(DOC, {"id": "t", "role": "TEACHER"}) is False
 
 
 # ---------------------------------------------------------------------------
@@ -667,3 +697,72 @@ class TestDoubtSimulationCandidates:
 
         src = (BACKEND / "api" / "routes" / "doubt.py").read_text(encoding="utf-8")
         assert "_require_editable_ledger_target(" in extract_function_source(src, "_decide_simulation_candidate")
+
+
+# ---------------------------------------------------------------------------
+# 第 22 周 A4: 未測定の実行は教員側からも台帳候補にしない・配線なしの相対差・判断済み候補の読み出し
+# ---------------------------------------------------------------------------
+
+
+class TestA4LedgerAndMetrics:
+    def test_teacher_cannot_ledger_unmeasured_run(self, env):
+        rid = _succeeded_run(env)
+        env["store"].runs[rid]["result"]["comparison"] = {"agreement_level": "unmeasured", "metrics": {}}
+        with pytest.raises(HTTPException) as exc:
+            sbr.add_simulation_ledger_candidate(rid, body=None, current_user=TEACHER)
+        assert exc.value.status_code == 422
+        assert exc.value.detail == schema.FACT_UNMEASURED_NOT_LEDGERABLE
+        assert env["store"].ledger == []
+
+    def test_reference_only_run_can_be_ledgered(self, env):
+        rid = _succeeded_run(env)
+        env["store"].runs[rid]["result"]["comparison"] = {
+            "agreement_level": "unmeasured", "separation_level": "unmeasured", "reference_level": "match",
+            "metrics": {},
+        }
+        out = sbr.add_simulation_ledger_candidate(rid, body=None, current_user=TEACHER)
+        assert len(out["candidates"]) == 2
+
+    def test_teacher_dto_hides_no_wiring_relative_difference(self):
+        run = {
+            "id": "r", "wiring_id": None, "status": "succeeded",
+            "result": {"comparison": {"agreement_level": "unmeasured", "metrics": {
+                "relative_difference": 0.0,
+                "by_symbol": {"k": {"relative_difference": 0.0, "separation_ratio": None,
+                                    "reference_relative_difference": None}},
+            }}},
+        }
+        out = sbr._run_dto(run)
+        metrics = out["result"]["comparison"]["metrics"]
+        assert metrics["by_symbol"] == {}
+        assert metrics["relative_difference"] is None
+        assert run["result"]["comparison"]["metrics"]["relative_difference"] == 0.0
+
+    def test_decided_candidates_are_readable_with_reason(self):
+        import json
+
+        class _S:
+            def execute(self, statement, params=None):
+                class _R:
+                    def fetchone(self_inner):
+                        return (json.dumps([
+                            {"candidate_id": "a", "run_id": "r1", "status": "candidate"},
+                            {"candidate_id": "b", "run_id": "r1", "status": "dismissed",
+                             "dismiss_reason": "入力が論文と違う", "dismissed_by": "t-uuid",
+                             "dismissed_at": "2026-10-04T00:00:00+00:00"},
+                            {"candidate_id": "c", "run_id": "r2", "status": "confirmed",
+                             "confirmed_by": "t-uuid", "confirmed_at": "2026-10-04T01:00:00+00:00"},
+                        ]),)
+                return _R()
+
+        pending = doubt_routes._simulation_candidates_for(_S(), "claim", "c1")
+        decided = doubt_routes._simulation_candidates_for(_S(), "claim", "c1", decided=True)
+        assert [c["candidate_id"] for c in pending] == ["a"]
+        assert [c["candidate_id"] for c in decided] == ["b", "c"]
+        assert decided[0]["dismiss_reason"] == "入力が論文と違う"
+        assert decided[0]["decided_at"].startswith("2026-10-04")
+        assert "t-uuid" not in repr(decided)
+
+    def test_ledger_get_returns_decided_key(self):
+        src = (BACKEND / "api" / "routes" / "doubt.py").read_text(encoding="utf-8")
+        assert '"simulation_candidates_decided": simulation_candidates_decided' in src

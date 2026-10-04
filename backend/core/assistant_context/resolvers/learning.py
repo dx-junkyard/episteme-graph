@@ -668,6 +668,21 @@ def _simulation_observed_line(mapping: Any) -> str:
     return f"模擬観測（実験機のモデルを通した値）: {_join(shown_items, truncated=truncated)}"
 
 
+def _simulation_reference_line(reference: Any) -> str:
+    """入力した論文の記載値（記号・値・単位・出所）。第 22 周 (i): 単位が AI の文脈に無く、換算の誤りを疑わせた。"""
+    from core.simulation_bridge.schema import reference_input_fact  # 遅延 import（解決器の純粋性検査の経路を変えない）
+
+    mapping = reference
+    if isinstance(reference, list):  # DTO の list 形 [{symbol, value, unit, source_note}] も受ける
+        mapping = {
+            _text(item.get("symbol")): item for item in reference
+            if isinstance(item, dict) and _text(item.get("symbol"))
+        }
+    if not isinstance(mapping, dict) or not mapping:
+        return ""
+    return safe_text(reference_input_fact(mapping))
+
+
 def resolve_simulation(ctx: ScreenContext, sources: Mapping[str, Any]) -> list[str]:
     """学習者が開いている自分の実行記録を事実文にする（4-e・最大 8 行）。
 
@@ -699,6 +714,7 @@ def resolve_simulation(ctx: ScreenContext, sources: Mapping[str, Any]) -> list[s
 
     for line in (
         _simulation_value_line("入力", inputs.get("values")),
+        _simulation_reference_line(inputs.get("reference")),
         _simulation_value_line("理論の出力", result.get("theory_outputs")),
         _simulation_observed_line(result.get("observed")),
         _simulation_value_line(
@@ -722,6 +738,14 @@ def resolve_simulation(ctx: ScreenContext, sources: Mapping[str, Any]) -> list[s
     # この 1 行が落ちる並びにしない）。
     if succeeded:
         facts.append(FACT_NOT_VERIFICATION)
+
+    # 第 22 周 (j): 「この実行を共有すると何が起きるか」を実行の事実として渡す（英語の問いにも実行の事実から答えられる）。
+    from core.simulation_bridge.schema import FACT_SHARE_MEANING_SHARED, FACT_SHARE_MEANING_UNSHARED  # 遅延 import
+
+    facts.append(FACT_SHARE_MEANING_SHARED if run.get("shared_at") else FACT_SHARE_MEANING_UNSHARED)
+    decision = _dict(run.get("ledger_decision"))
+    if _safe(decision.get("fact")):
+        facts.append(_safe(decision.get("fact")))
 
     other_facts: list[str] = []
     for fact in _list(result.get("facts")):

@@ -41,6 +41,7 @@ SIM_ANCHOR_IDS = (
     "simulation.ledger-candidate",
     "simulation.propose-revision",
     "simulation.ledger-candidate-decide",
+    "simulation.ledger-candidate-decided",
 )
 
 
@@ -187,3 +188,42 @@ class TestAnchors:
         raw = _read(MANUAL)
         assert "シミュレーションの一致は検証ではありません" in raw
         assert "学習者" in raw
+
+
+class TestRound22LedgerDecision:
+    """第 22 周: 判断済みの候補の折りたたみ・権限の無い教員のボタン無効化・主張はラベルで描く。"""
+
+    def test_decided_candidates_folding(self):
+        src = _read(SIM_JS)
+        assert "simulation_candidates_decided" in src
+        assert "判断済みの候補" in src
+        assert "dismiss_reason" in src
+        assert 'data-ui-anchor="simulation.ledger-candidate-decided"' in src
+
+    def test_disabled_without_edit_permission(self):
+        src = _read(SIM_JS)
+        assert "ov().can_decide_ledger !== false" in src
+        m = re.search(r'var LEDGER_DECIDE_NO_PERMISSION = "([^"]+)";', src)
+        assert m, "LEDGER_DECIDE_NO_PERMISSION が無い"
+        assert m.group(1).split("、", 1)[0] in _read(MANUAL)
+        assert "!canDecide" in src
+
+    def test_claim_is_drawn_by_label_not_id(self):
+        src = _read(SIM_JS)
+        assert "|| it.claim_id" not in src
+        assert "obj(data).target_label" in src
+
+    def test_module_symbols_line(self):
+        src = _read(SIM_JS)
+        for key in ("m.input_symbols", "m.output_symbols", "m.output_symbols_note", "m.subtitle",
+                    "m.simulable === false", "m.simulability_note"):
+            assert key in src, key
+        assert sb_schema.FACT_NOT_SIMULABLE not in src
+        assert sb_schema.FACT_NO_OUTPUT_SYMBOLS not in src
+
+    def test_manual_round22(self):
+        raw = _read(MANUAL)
+        assert "{#simulation-ledger-candidate-decided}" in raw
+        assert "どういう実行が候補になるか" in raw
+        assert "確定は学習者からどう見えるか" in raw
+        assert "教材の編集権限" in raw

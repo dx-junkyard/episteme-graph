@@ -397,4 +397,155 @@ def closed_world(sentence: str, *, wiring_name: str = "") -> str:
 
 LEARNING_SIMULATION_OUTPUT_CONSTRAINT = "シミュレーションの実行記録について言えるのは「このモデルと配線のもとでは」どう出たかまでです。理論の出力と模擬観測が一致しても、それを検証・実証・論文の正しさの確認と言い換えないでください（分析の妥当性の候補にとどまります）。学習者の予想が当たったか外れたかを判定しないでください。"
 
+# ---------------------------------------------------------------------------
+# 第 22 周 A4: 共有した実行への教員の判断（学習者の run DTO の ``ledger_decision``）
+# 状態だけを事実文で出す。教員名・見送りの理由・件数は学習者に出さない（SB12 / KO10）。
+# ---------------------------------------------------------------------------
+
+LEDGER_DECISION_NONE = "none"
+LEDGER_DECISION_STATUSES = (
+    LEDGER_DECISION_NONE,
+    LEDGER_CANDIDATE_STATUS_CANDIDATE,
+    LEDGER_CANDIDATE_STATUS_CONFIRMED,
+    LEDGER_CANDIDATE_STATUS_DISMISSED,
+)
+FACT_LEDGER_DECISION_CANDIDATE = "共有した実行は、台帳の候補として担当教員の判断を待っています。"
+FACT_LEDGER_DECISION_CONFIRMED = (
+    "担当教員が、この実行の結果を台帳に記録しました。シミュレーションの一致は検証ではないため、"
+    "主張の検証状態は「間接的に支持」より上には上がりません。"
+)
+FACT_LEDGER_DECISION_DISMISSED = "担当教員は、この実行の結果を台帳には記録しないと判断しました。"
+LEDGER_DECISION_FACTS = {
+    LEDGER_DECISION_NONE: "",
+    LEDGER_CANDIDATE_STATUS_CANDIDATE: FACT_LEDGER_DECISION_CANDIDATE,
+    LEDGER_CANDIDATE_STATUS_CONFIRMED: FACT_LEDGER_DECISION_CONFIRMED,
+    LEDGER_CANDIDATE_STATUS_DISMISSED: FACT_LEDGER_DECISION_DISMISSED,
+}
+# 教員自身の実行から記帳しようとして比較が測れていないとき（学習者の共有と同じ判定 = service.is_unmeasured_run）。
+FACT_UNMEASURED_NOT_LEDGERABLE = (
+    "比較が測れていない実行なので、台帳の候補にはできません（配線を通すか、論文の記載値を入力して実行してください）。"
+)
+
+
+# ---------------------------------------------------------------------------
+# 第 22 周 A3（IK-0627 系）: codegen の「計算できない」と理論モジュールの適性
+# ---------------------------------------------------------------------------
+
+#: 生成側が「値を出せない」と申告した出力記号（記号を名指し・数は書かない）。
+FACT_CANNOT_COMPUTE = "資料の式だけでは値を出せない記号があります（{symbols}）。この記号は計算していません。"
+#: 理論モジュールの式が量の関係ではなく学習・最適化の手続（損失・目的関数）を表すとき。
+FACT_NOT_SIMULABLE = (
+    "このまとまりの式は、量の関係ではなく学習・最適化の手続（損失・目的関数）を表しているため、"
+    "数値で動かしても論文の予言の確かめにはなりません。"
+)
+
+
+def cannot_compute_fact(items: Any) -> str:
+    """``cannot_compute`` の項目（``{symbol, reason}``）から事実文を作る。記号が無ければ空文字。"""
+    names: list[str] = []
+    for item in items or []:
+        name = str((item or {}).get("symbol") if isinstance(item, dict) else item or "").strip()
+        if name and name not in names:
+            names.append(name)
+    listed = _symbol_list(names)
+    return FACT_CANNOT_COMPUTE.format(symbols=listed) if listed else ""
+
+
+# ---------------------------------------------------------------------------
+# 学習チャットの経路（第 22 周 A2・IK-0611 派生）
+# ---------------------------------------------------------------------------
+#: 実行結果の段階の言葉を英語で問うときの語（日本語は ``label_vocab`` の段階ラベル・軸名から導く）。
+#: パネルで実行を開いたまま、これらを含む問いは「画面の使い方」ではなく**その実行の結果の意味**を
+#: 問うものとして扱い、使い方マニュアルを返す経路に回さない（SA層 4-e の事実文が載る経路へ）。
+SIMULATION_RESULT_TERMS_EN = (
+    "unmeasured", "not measured", "agreement", "agree", "separation", "separable",
+    "reference value", "discrepancy", "diverge", "divergence", "buried",
+    # 第 22 周 (j): 開いている自分の実行について問う語（share は「この実行を共有すると」の問いを実行の事実で答えるため）
+    "run", "wiring", "share", "shared", "sharing",
+)
+#: 段階ラベル以外に結果を指す日本語（記載値・ばらつき・模擬観測）。
+_SIMULATION_RESULT_EXTRA_TERMS_JA = (
+    "記載値", "分離", "模擬観測", "ばらつき",
+    # 第 22 周 (l)/(j): 自分の実行の記録そのものを問う語（パネルが開いているときだけ効く — 呼び出し側のゲート）
+    "段階", "配線", "実行の記録", "前の実行", "実行結果", "理論の出力", "共有",
+)
+
+
+def simulation_result_terms_ja() -> tuple[str, ...]:
+    """実行結果を指す日本語の語（段階ラベルの正本 ``label_vocab`` から導く・重複なし）。"""
+    from core import label_vocab  # 純データ。循環を避けて関数内で読む
+
+    terms: list[str] = []
+    for value in (
+        *label_vocab.SIMULATION_AGREEMENT_LABELS.values(),
+        *label_vocab.SIMULATION_SEPARATION_LABELS.values(),
+        *_SIMULATION_RESULT_EXTRA_TERMS_JA,
+    ):
+        text = str(value or "").strip()
+        if text and text not in terms:
+            terms.append(text)
+    return tuple(terms)
+
+
+def mentions_simulation_result(text: Any) -> bool:
+    """発話が実行結果の段階の言葉に触れているか（決定論・非LLM・例外を出さない）。
+
+    英語は語境界で照合する（``agree`` が ``disagreement`` の中で当たらないように）。
+    """
+    import re
+
+    body = str(text or "")
+    if not body.strip():
+        return False
+    if any(term in body for term in simulation_result_terms_ja()):
+        return True
+    lowered = body.lower()
+    return any(
+        re.search(r"(?<![a-z])" + re.escape(term) + r"(?![a-z])", lowered)
+        for term in SIMULATION_RESULT_TERMS_EN
+    )
+
+
+#: 第 22 周（IK-0608）: 定める記号が無いまとまり（制約・関係を課す手順）の事実文。受け取る記号だけが並ぶ理由を学習者に示す。
+FACT_NO_OUTPUT_SYMBOLS = "このまとまりの式は記号どうしの関係（制約）で、新しい記号を定めません。どの記号を求めるかはコードの生成時に決まり、生成後の入力・出力に出ます。"
+
+#: 第 22 周 (i): 比べた論文の記載値を、記号・単位・出所で名指しする（値は入力欄に既にある。facts に数字は書かない = SB6 のガードレール）。
+#: 単位が画面にも AI の文脈にも渡らず、換算の誤りを疑わせた所見への是正。
+FACT_REFERENCE_INPUT = "比べた論文の記載値: {items}。"
+_REFERENCE_ITEMS_MAX = 6
+
+
+def reference_input_fact(reference: Any) -> str:
+    """``{symbol: {value, unit?, source_note?}}`` → 「比べた論文の記載値: B_0（単位 G・ACF 解析…）。」。空なら ""。
+    値は書かない（数字を facts に載せない）。単位も出所も無い記号は名前だけ。"""
+    if not isinstance(reference, dict):
+        return ""
+    items: list[str] = []
+    for symbol, entry in reference.items():
+        name = str(symbol or "").strip()
+        if not name:
+            continue
+        unit = str(entry.get("unit") or "").strip() if isinstance(entry, dict) else ""
+        note = str(entry.get("source_note") or "").strip() if isinstance(entry, dict) else ""
+        details = [f"単位 {unit}" if unit else "", note[:80] if note else ""]
+        details = [d for d in details if d]
+        items.append(name + (f"（{'・'.join(details)}）" if details else ""))
+        if len(items) >= _REFERENCE_ITEMS_MAX:
+            break
+    return FACT_REFERENCE_INPUT.format(items="、".join(items)) if items else ""
+
+
+#: 第 22 周 (j): 開いている実行の共有の意味を、実行記録の事実文として AI の文脈に渡す（画面の確認文と同じ内容。英語で問われても
+#: 実行の事実から答えられるように。正本はここ・JS の SHARE_CONFIRM は同じ内容の表示用）。
+FACT_SHARE_MEANING_UNSHARED = (
+    "この実行はまだ共有されていません。共有すると、この実行だけが担当の教員に表示名つきで見えるようになり、"
+    "比較が測れている実行なら関係する主張の台帳に候補として記帳されます（確定は教員が行い、確定しても「間接的に支持」より上には上がりません）。"
+    "比較が測れていない実行は共有だけで、台帳の候補にはなりません。ほかの実行や予想の下書きは共有されません。"
+)
+FACT_SHARE_MEANING_SHARED = "この実行は担当の教員に共有済みです（表示名つきで見えています）。"
+
+#: 第 22 周 (d'): 改訂案が無いときの理由（どちらか 1 つを FACT_NO_PROPOSAL に添える）。
+FACT_NO_PROPOSAL_NONE = "AI は現在の配線で足りると判断し、部品の追加・削除・値の変更を挙げませんでした。"
+FACT_NO_PROPOSAL_ALL_DROPPED = "AI が挙げた変更は、目録に無い部品・範囲外の値・配線の規約に反するものだったため、すべて外しました（外した理由は個別に示しています）。"
+
 __all__ = [name for name in globals() if not name.startswith("_")]

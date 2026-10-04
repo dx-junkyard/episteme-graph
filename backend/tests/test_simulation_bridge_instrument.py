@@ -252,3 +252,52 @@ class TestComposeInstrument:
         assert instrument.default_params([{"slot": "a", "entry_id": "amp", "params": {"gain": 4}}], cat) == {
             "a": {"gain": 4.0}
         }
+
+
+class TestAveragingPart:
+    """第 22 周 (d'): 「平均化（N 回）」は上流の雑音を n 回引き直して平均する（分散 1/n・系統ずれは不変）。"""
+
+    def _avg_n(self):
+        return {
+            "entry_id": "avg_n",
+            "version_no": 1,
+            "entry_type": schema.PART_TYPE_PROCESSING,
+            "name": "平均化（N 回）",
+            "body": {"transfer": "x", "params": {"n": {"default": 10, "min": 1, "max": 1000000, "unit": "回"}},
+                     "removes": ["gaussian", "poisson"]},
+        }
+
+    def _compose(self, n, offset=None):
+        entries = [_noise(default=1.0), self._avg_n()]
+        parts = [
+            {"slot": "noise", "entry_id": "noise_gaussian", "version_no": 1, "params": {}},
+            {"slot": "avg", "entry_id": "avg_n", "version_no": 1, "params": {"n": n}},
+        ]
+        edges = [{"from_slot": "noise", "to_slot": "avg"}]
+        if offset is not None:
+            entries.insert(0, _noise(kind="offset", param="offset", default=offset))
+            entries[0]["entry_id"] = "noise_offset"
+            parts.insert(0, {"slot": "off", "entry_id": "noise_offset", "version_no": 1, "params": {}})
+            edges = [{"from_slot": "off", "to_slot": "noise"}, {"from_slot": "noise", "to_slot": "avg"}]
+        return instrument.compose_instrument(parts, edges, _catalog(*entries))
+
+    def test_is_averaging_part_detected_by_declaration_shape(self):
+        assert instrument._is_averaging_part(self._avg_n()["body"])
+        assert not instrument._is_averaging_part(_avg()["body"])  # n を持たない恒等 transfer は平均化ではない
+        assert not instrument._is_averaging_part(_amp()["body"])
+
+    def test_variance_shrinks_with_n(self):
+        std1 = _run(self._compose(1), {"y": 10.0}, {"_repeats": 400}, seed=1)["observed"]["y"]["std"]
+        std16 = _run(self._compose(16), {"y": 10.0}, {"_repeats": 400}, seed=1)["observed"]["y"]["std"]
+        assert std16 < std1 / 2.5  # 1/sqrt(16) = 1/4 のあたり（統計ゆらぎの余裕を見る）
+
+    def test_systematic_offset_is_not_averaged_away(self):
+        out = _run(self._compose(16, offset=0.5), {"y": 10.0}, {"_repeats": 200}, seed=2)["observed"]["y"]
+        assert out["mean"] == pytest.approx(10.5, abs=0.1)
+
+    def test_source_passes_program_guard(self):
+        from core.simulation_bridge import ast_guard
+
+        result = ast_guard.check_program(self._compose(4), entrypoint=schema.INSTRUMENT_ENTRYPOINT)
+        assert result.ok, result.reasons
+

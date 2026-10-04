@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from core.help_kb.ui_anchors import KNOWN_UI_ANCHOR_IDS, UI_ANCHORS  # noqa: E402
+from core.simulation_bridge import schema as sb_schema  # noqa: E402
 from core.simulation_bridge.schema import FACT_NOT_VERIFICATION  # noqa: E402
 
 JS_DIR = ROOT / "frontend" / "public" / "js"
@@ -123,6 +124,62 @@ class TestStatements:
         js = _read(LAB_JS)
         for col in ("あなたの予想", "理論の出力", "模擬観測"):
             assert col in js
+
+
+class TestRound22ModuleSymbolsAndDecisions:
+    """第 22 周: まとまりの記号・副題・適性 / 共有した実行への教員の判断 / 計算していない記号。
+
+    形は uxsim/runner/simlab_exec.py の投影（_module_lines / _run_lines）と揃える（第 21 周の偽所見の再発防止）。
+    """
+
+    def test_module_symbol_line_shape(self):
+        js = _read(LAB_JS)
+        for key in ("mod.input_symbols", "mod.output_symbols", "mod.output_symbols_note", "mod.subtitle",
+                    "mod.simulable === false", "mod.simulability_note"):
+            assert key in js, key
+        assert "受け取る記号: " in js and " → 定める記号: " in js
+        # 両方空なら何も補わない（「—」で埋めない）。式の入出力の行も式が非空のときだけ。
+        assert "if (insSym || outsSym)" in js
+        assert 'eqList(mod.inputs) + " → " + eqList(mod.outputs)' in js
+        assert js.count('eqList(mod.inputs) + " → " + eqList(mod.outputs)') == 1
+
+    def test_truncation_mark_is_not_a_symbol(self):
+        js = _read(LAB_JS)
+        assert 'const SYMBOL_TRUNCATED_MARK = "…"' in js
+        assert "x === SYMBOL_TRUNCATED_MARK ? esc(x) : symHtml(x)" in js
+
+    def test_server_facts_not_mirrored(self):
+        # 定める記号なし・適性・教員の判断の文はサーバの DTO が正本（JS は素通し）。
+        js = _read(LAB_JS)
+        for text in (sb_schema.FACT_NO_OUTPUT_SYMBOLS, sb_schema.FACT_NOT_SIMULABLE,
+                     sb_schema.FACT_LEDGER_DECISION_CANDIDATE, sb_schema.FACT_LEDGER_DECISION_CONFIRMED,
+                     sb_schema.FACT_LEDGER_DECISION_DISMISSED):
+            assert text not in js
+
+    def test_cannot_compute_fact_is_verbatim_mirror(self):
+        js = _read(LAB_JS)
+        assert 'const FACT_CANNOT_COMPUTE = "' + sb_schema.FACT_CANNOT_COMPUTE + '"' in js
+        assert "計算していない記号" in js
+        assert "obj(p.io_contract).cannot_compute" in js
+
+    def test_ledger_decision_line_only_for_shared_runs(self):
+        js = _read(LAB_JS)
+        start = js.index("function ledgerDecisionHtml(run)")
+        block = js[start:js.index("\n  }\n", start)]
+        assert "r.ledger_decision" in block
+        assert '"none"' in block and "!r.shared" in block
+        # 実行の結果と「これまでの実行」の両方に出す。
+        assert js.count("ledgerDecisionHtml(") >= 3
+        assert "これまでの実行（あなたの記録）" in js
+
+    def test_manual_round22(self):
+        md = _read(STUDENT_MANUAL)
+        assert sb_schema.FACT_NO_OUTPUT_SYMBOLS in md
+        assert sb_schema.FACT_CANNOT_COMPUTE.format(symbols="…") in md
+        assert "受け取る記号: … → 定める記号: …" in md
+        assert "使い方の説明（このマニュアル）は日本語だけ" in md
+        assert "記載値を入れなかったときは「未測定」" in md
+        assert "見送りの理由は表示されず" in md
 
 
 class TestNoJudgingOrPolling:

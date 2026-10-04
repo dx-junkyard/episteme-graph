@@ -203,6 +203,7 @@ from core.simulation_bridge import store as simulation_store
 from core.simulation_bridge.schema import (
     FACT_NOT_VERIFICATION as SIMULATION_FACT_NOT_VERIFICATION,
     LEARNING_SIMULATION_OUTPUT_CONSTRAINT,
+    mentions_simulation_result,
 )
 from core.learning_support_agent import (
     LearningSupportAgent,
@@ -3505,6 +3506,14 @@ def _screen_simulation_run(
     session = _pg_session()
     try:
         run = simulation_store.get_run(session, run_id)
+        # 第 22 周 (j): 共有した run への教員の判断の状態（run DTO と同じ `ledger_decision`）を解決器にも渡す。
+        # 読めなければ無いだけ（事実文が 1 行減るだけで run 自体は落とさない）。
+        if run and run.get("shared_at"):
+            try:
+                run = dict(run)
+                run["ledger_decision"] = simulation_store.ledger_decisions_for_run(session, run_id)
+            except Exception:  # noqa: BLE001
+                logger.debug("screen_context: ledger decision lookup failed", exc_info=True)
     except Exception:  # noqa: BLE001 - 読めないなら載せないだけ（SA2）
         logger.debug("screen_context: simulation run lookup failed", exc_info=True)
         return {}
@@ -5475,8 +5484,42 @@ def _atlas_action_response(
     return None
 
 
+# 第 22 周 A2（IK-0611 派生）: 「🧪 動かして確かめる」パネルの UI 論理アンカー。パネルが開いて
+# いる（画面文脈に ``selection.simulation_run_id`` がある）往復では、使い方の検索をこの節の一族に
+# 寄せる。パネルが開いていることは画面の明示状態で、推定ではない（LC4 の許された入力）。
+_SIMULATION_LAB_UI_ANCHOR = "material.simulation-lab"
+
+
+def _simulation_panel_open(body: LearningChatRequest, *, course_id: str) -> bool:
+    """学習者が検証シミュレーションのパネルで実行を開いているか（画面文脈の参照だけで判定）。"""
+    return bool(
+        selected_simulation_run_id(_screen_selection_for_anchor(body, course_id=course_id))
+    )
+
+
+def _is_simulation_result_question(body: LearningChatRequest, *, course_id: str) -> bool:
+    """開いている実行の**結果の言葉**（未測定・一致・分離・記載値…）を問う発話か。
+
+    これは画面の使い方ではなく、その実行の結果の意味を問うもの。使い方マニュアルの経路
+    （LLM 0 回・本文素通し）では SA層 4-e の実行の事実文が届かないので、HELP に回さず通常の
+    RAG 経路へ流す（非LLM・当該発話 + 画面の明示状態だけ = LC4 / LC5。様相は変えない = LC1）。
+    """
+    return mentions_simulation_result(body.message) and _simulation_panel_open(
+        body, course_id=course_id
+    )
+
+
 _USAGE_HELP_FOOTER = "教材の内容についての質問なら、そのまま送り直してください。"
 _USAGE_HELP_NOT_DOCUMENTED = "その使い方の説明はまだ整備されていません。"
+# 英語の問い（かな・漢字を含まない発話）への固定文。使い方マニュアルは日本語だけなので、
+# 語の照合では節に当たらない（英語の語が日本語の節に偶然重なって目次・無関係な節が返っていた）。
+_USAGE_HELP_JA_ONLY_NOTE_EN = (
+    "The usage guide is written in Japanese. Here is the section that matches what you have open."
+)
+_USAGE_HELP_FOOTER_EN = "If this is a question about the course material, please send it again."
+_USAGE_HELP_NOT_DOCUMENTED_EN = (
+    "I could not find the part of the usage guide (written in Japanese) that answers this."
+)
 
 
 def _usage_help_response(
@@ -5529,11 +5572,41 @@ def _usage_help_response(
                 "documented": True,
             }]
 
-    if not hits and _search_manual is not None:
+    # 第 22 周 A2: 英語の問いは日本語マニュアルに語で当たらない（偶然の重なりで目次・無関係な節が
+    # 返る）ので語の照合を使わず、ベクトル補助層 → 開いているパネルの節の順に当たる。
+    # パネルが開いていれば、その節の一族を検索の先頭に寄せる（画面の明示状態だけを使う）。
+    english_query = _is_kana_kanji_free(body.message)
+    panel_section: dict | None = None
+    if (
+        not ui_anchor_id
+        and _resolve_ui_anchor is not None
+        and _split_manual_ref is not None
+        and _simulation_panel_open(body, course_id=course_id)
+    ):
         try:
-            hits = _search_manual(
-                body.message, audience="student", limit=3, screen=body.screen_mode,
-            ) or []
+            panel_resolved = _resolve_ui_anchor(_SIMULATION_LAB_UI_ANCHOR)
+        except Exception:
+            logger.debug("resolve_ui_anchor failed for simulation panel", exc_info=True)
+            panel_resolved = None
+        if panel_resolved:
+            panel_file, panel_anchor = _split_manual_ref(panel_resolved.get("manual_anchor", ""))
+            if panel_file and panel_anchor:
+                panel_section = {
+                    "file": panel_file,
+                    "anchor": panel_anchor,
+                    "title": panel_resolved.get("title", ""),
+                    "body": panel_resolved.get("body", ""),
+                    "audience": "student",
+                    "citation": f"manual/student/{panel_file}#{panel_anchor}",
+                    "documented": bool(str(panel_resolved.get("body") or "").strip()),
+                }
+
+    if not hits and _search_manual is not None and not english_query:
+        search_kwargs: dict = {"audience": "student", "limit": 3, "screen": body.screen_mode}
+        if panel_section:
+            search_kwargs["prefer_anchor"] = panel_section["anchor"]
+        try:
+            hits = _search_manual(body.message, **search_kwargs) or []
         except Exception:
             logger.warning("search_manual failed for usage help route; falling back to no-hit", exc_info=True)
             hits = []
@@ -5555,9 +5628,24 @@ def _usage_help_response(
             )
             vector_hits = []
         if vector_hits:
+            if panel_section:
+                # 開いているパネルの節の一族に当たったものを先に（並べ替えだけ・足さない）。
+                family = panel_section["anchor"]
+                vector_hits = sorted(
+                    vector_hits,
+                    key=lambda h: 0 if (
+                        str(h.get("anchor") or "") == family
+                        or str(h.get("anchor") or "").startswith(family + "-")
+                    ) else 1,
+                )
             top = vector_hits[0]
             documented = bool(top.get("documented", True))
             used_vector = True
+
+    # 第 22 周 A2: どの検索にも当たらず、パネルが開いているなら、その節を返す（画面の明示状態）。
+    if not documented and panel_section and panel_section.get("documented"):
+        top = panel_section
+        documented = True
 
     is_casual = (body.intent_mode or "").strip() == "casual"
     degraded = False
@@ -5566,8 +5654,12 @@ def _usage_help_response(
     # 未指定時は従来どおり search_manual/vector が見つけた節の citation を使う。
     trace_anchor = f"ui:{ui_anchor_id}" if ui_anchor_id else None
 
+    footer = _USAGE_HELP_FOOTER_EN if english_query else _USAGE_HELP_FOOTER
     if not documented:
-        answer = f"{_USAGE_HELP_NOT_DOCUMENTED}\n\n{_USAGE_HELP_FOOTER}"
+        not_documented = (
+            _USAGE_HELP_NOT_DOCUMENTED_EN if english_query else _USAGE_HELP_NOT_DOCUMENTED
+        )
+        answer = f"{not_documented}\n\n{footer}"
         manual_citations = None
         record_interest_trace(
             user_id, course_id, topic_id,
@@ -5609,14 +5701,17 @@ def _usage_help_response(
                     answer=formatted, learner_message=body.message, is_discuss=False,
                     gate_text=None, degraded=False,
                 ))
-                answer = f"{formatted}\n\n{_USAGE_HELP_FOOTER}"
+                answer = f"{formatted}\n\n{footer}"
             except Exception:
                 logger.warning("usage help casual LLM formatting failed; falling back to raw body", exc_info=True)
-                answer = f"{body_text}\n\n{_USAGE_HELP_FOOTER}"
+                answer = f"{body_text}\n\n{footer}"
                 degraded = True
         else:
             # テキスト経路: 凍結本文を素通し（パラフレーズによる意味ドリフトをゼロにする）。
-            answer = f"{body_text}\n\n[出典1]\n\n{_USAGE_HELP_FOOTER}"
+            answer = f"{body_text}\n\n[出典1]\n\n{footer}"
+            if english_query:
+                # 英語の問いには、本文が日本語であることを先に一行で言う（本文は言い換えない）。
+                answer = f"{_USAGE_HELP_JA_ONLY_NOTE_EN}\n\n{answer}"
         trace_payload = {
             "help_anchor": trace_anchor or (citation or None),
             "documented": True,
@@ -5922,9 +6017,13 @@ def _learning_chat_core(
             _route_for_typed_action(body.support_action) == "USAGE_HELP"
             # 分野語彙（内容質問の誤爆ガード）はコースのカートリッジから読む
             # （分野名をコードに書かない。導出できないコースでは分野非依存語のみ）。
-            or _is_usage_question(
-                body.message,
-                cartridge_id=course_cartridge_id(course_data) or None,
+            or (
+                _is_usage_question(
+                    body.message,
+                    cartridge_id=course_cartridge_id(course_data) or None,
+                )
+                # 第 22 周 A2: 開いている実行の結果の言葉を問うなら使い方ではない（RAG 経路へ）。
+                and not _is_simulation_result_question(body, course_id=course_id)
             )
         )
         if _is_usage_help:
@@ -6133,6 +6232,12 @@ def _learning_chat_core(
     # （テキスト経路は quota 非消費・本文素通し、音声/casual 経路は 1 LLM コール）は
     # Phase 1 と同一で、二重に interest_trace を記録することもない
     # （pre-route はここに到達する前に早期 return しているため一度しか通らない）。
+    # 第 22 周 A2（IK-0611 派生）: 分類が USAGE_HELP でも、開いている実行の結果の言葉（未測定・
+    # 一致・分離・記載値…）を問う発話は使い方マニュアルに回さず、SA層 4-e の実行の事実文が載る
+    # 通常の RAG 経路へ流す（非LLM・画面の明示状態だけで判定・LLM を増やさない）。型付き
+    # アクション usage_help（明示）は上の pre-route で処理済みなので、ここは分類の結果だけ。
+    if intent == "USAGE_HELP" and _is_simulation_result_question(body, course_id=course_id):
+        intent = "DOMAIN_RAG"
     if intent == "USAGE_HELP":
         with usage_context("learning:help_usage", user_id=current_user["id"], course_id=course_id):
             return _usage_help_response(

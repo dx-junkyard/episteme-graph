@@ -273,11 +273,20 @@ def _simulation_candidate_out(candidate: dict) -> dict:
         "reconstructed_inputs": bool(candidate.get("reconstructed_inputs")),
         "status": str(candidate.get("status") or "candidate"),
         "created_at": str(candidate.get("created_at") or ""),
+        # 判断済みの候補の控え（教員向け。判断した人の user id は出さない — 帰属は監査に残る）。
+        "decided_at": str(candidate.get("confirmed_at") or candidate.get("dismissed_at") or ""),
+        "dismiss_reason": str(candidate.get("dismiss_reason") or ""),
     }
 
 
-def _simulation_candidates_for(session, target_type: str, target_id: str) -> list[dict]:
-    """``epistemic_ledger.simulation_candidates`` を列名で引く（未処理の候補のみ・fail-soft）。"""
+def _simulation_candidates_for(
+    session, target_type: str, target_id: str, *, decided: bool = False
+) -> list[dict]:
+    """``epistemic_ledger.simulation_candidates`` を列名で引く（fail-soft）。
+
+    既定は未処理の候補のみ（``simulation_candidates`` キー）。``decided=True`` は確定・見送り済みの
+    候補（``simulation_candidates_decided`` キー。見送りの理由を読めるようにする = RE5）。
+    """
     try:
         row = session.execute(
             sa_text("""
@@ -294,7 +303,7 @@ def _simulation_candidates_for(session, target_type: str, target_id: str) -> lis
         return []
     return [
         _simulation_candidate_out(c) for c in _jsonb_list(row[0])
-        if isinstance(c, dict) and str(c.get("status") or "candidate") == "candidate"
+        if isinstance(c, dict) and (str(c.get("status") or "candidate") == "candidate") != decided
     ]
 
 
@@ -513,6 +522,9 @@ def get_ledger_entry(
         ]
         # SB層（検証シミュレーション, migration 088）: 台帳候補は列名で引く（位置に頼らない）。
         simulation_candidates = _simulation_candidates_for(session, target_type, target_id)
+        simulation_candidates_decided = _simulation_candidates_for(
+            session, target_type, target_id, decided=True
+        )
         # SL-3: 独立支持経路（数値非公開・導出失敗はキー自体を付けない fail-soft）。
         support_lines = None
         try:
@@ -578,6 +590,7 @@ def get_ledger_entry(
             "falsification_conditions": falsification_conditions,
             "falsification_candidates": falsification_candidates,
             "simulation_candidates": simulation_candidates,
+            "simulation_candidates_decided": simulation_candidates_decided,
             **({"support_lines": support_lines} if support_lines is not None else {}),
             "updated_at": str(row[12] or ""),
         }

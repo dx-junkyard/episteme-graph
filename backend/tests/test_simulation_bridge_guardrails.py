@@ -206,13 +206,14 @@ class TestNoLearnerSurface:
         """第 21 周 R12（§14.4）: 学習チャットは選択中の実行の記録を**読むだけ**（画面文脈 4-e）。
 
         学習者の試行の入口は ``routes/simulation_lab.py`` に 1 つ。learning.py から生成・実行・共有・
-        台帳への書き込みを呼ばない（store の読み取り 2 関数だけを許す）。
+        台帳への書き込みを呼ばない（store の読み取り 3 関数だけを許す。第 22 周 (j): 共有した run への
+        教員の判断の状態 ``ledger_decisions_for_run``（SELECT のみ）を解決器に渡すために足した）。
         """
         import re
 
         text = (BACKEND / "api" / "routes" / "learning.py").read_text(encoding="utf-8")
         calls = set(re.findall(r"simulation_store\.([A-Za-z_]+)", text))
-        assert calls <= {"get_run", "is_owner"}, calls
+        assert calls <= {"get_run", "is_owner", "ledger_decisions_for_run"}, calls
         for forbidden in ("run_pipeline", "generate_draft", "simulation_bridge import codegen", "sandbox_client", "append_ledger_candidate",
                           "set_run_shared", "create_run", "create_program"):
             assert forbidden not in text, forbidden

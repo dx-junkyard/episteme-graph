@@ -218,6 +218,25 @@ def _user_id(current_user: dict) -> str:
     return str(current_user.get("id") or "")
 
 
+def _can_decide_ledger(document_id: str, current_user: dict) -> bool:
+    """この教材の台帳候補（共有 run 由来）を確定・見送りできるか（第 22 周・画面のボタン活性用）。
+
+    判定は台帳 API の権限ゲート（``doubt._require_editable_ledger_target`` →
+    ``_require_editable_document_or_404``）と同じ「教材の編集権限 or SYSTEM_ADMIN」。強制は台帳 API
+    側に残り、この値は表示の補助（UI の無効化は補助・強制はサーバ）。判定できなければ False（fail-closed）。
+    """
+    if current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        return True
+    try:
+        from services import resolve_document_access
+
+        access = resolve_document_access(current_user["id"], document_id)
+        return bool(access.found and access.can_edit)
+    except Exception:  # noqa: BLE001
+        logger.debug("simulation: ledger decide permission unavailable", exc_info=True)
+        return False
+
+
 def _canonical_document_id(session: Any, ref: str) -> str:
     text = str(ref or "").strip()
     if is_document_uuid(text):
@@ -300,6 +319,20 @@ def _wiring_dto(wiring: dict | None, catalog: dict[str, dict]) -> dict | None:
     })
 
 
+def _display_result(run: dict) -> dict:
+    """run の result を表示用に写す（配線なしの run は相対差・分離比を出さない。データは不変）。"""
+    result = dict(run.get("result") or {})
+    comparison = result.get("comparison")
+    if isinstance(comparison, dict):
+        comparison = dict(comparison)
+        if "metrics" in comparison:
+            comparison["metrics"] = store.display_metrics(
+                comparison.get("metrics"), wired=bool(run.get("wiring_id"))
+            )
+        result["comparison"] = comparison
+    return result
+
+
 def _run_dto(run: dict | None, *, viewer_id: str = "", shared_by: dict[str, str] | None = None) -> dict | None:
     if not run:
         return None
@@ -321,7 +354,7 @@ def _run_dto(run: dict | None, *, viewer_id: str = "", shared_by: dict[str, str]
         # 学習者が実行前に書いた予想（SB14: 並べて見せるだけ・当否は付けない。第 21 周 (g) の教員画面の列）
         "prediction": [dict(x) for x in (run.get("prediction") or []) if isinstance(x, dict)],
         "inputs": dict(run.get("inputs") or {}),
-        "result": dict(run.get("result") or {}),
+        "result": _display_result(run),
         "runner": {"status": runner.get("status") or run.get("status"), "error": runner.get("error") or ""},
         "ledger_candidate_id": run.get("ledger_candidate_id"),
         "created_at": run.get("created_at"),
@@ -489,6 +522,8 @@ def get_simulation_overview(document_id: str, current_user: dict = Depends(_requ
                 for t in targets if isinstance(t, dict)
             ],
             "parts_catalog": catalog_rows,
+            # 第 22 周: 共有 run の台帳候補を確定・見送りできるか（権限の無い教員にはボタンを無効にして理由を添える）。
+            "can_decide_ledger": _can_decide_ledger(doc, current_user),
         }
     finally:
         session.close()
@@ -882,6 +917,9 @@ def add_simulation_ledger_candidate(
         _ensure_document_editable(str(run.get("document_id") or ""), current_user)
         if run.get("status") != schema.RUN_STATUS_SUCCEEDED:
             raise HTTPException(status_code=422, detail="成功した実行だけを台帳の候補にできます。")
+        if service.is_unmeasured_run(run):
+            # 学習者の共有と同じ判定（正本 service.is_unmeasured_run）。比較が測れていない実行は台帳に載せる中身が無い。
+            raise HTTPException(status_code=422, detail=schema.FACT_UNMEASURED_NOT_LEDGERABLE)
         requested = (body.claim_ids if body is not None and body.claim_ids is not None else None)
         claim_ids = [str(c).strip() for c in (requested if requested is not None else run.get("observation_claim_ids") or []) if str(c or "").strip()]
         if not claim_ids:

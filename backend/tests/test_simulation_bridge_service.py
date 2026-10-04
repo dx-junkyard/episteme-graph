@@ -193,3 +193,53 @@ class TestRound21ModuleItems:
     def test_missing_keys_give_empty_lists(self):
         item = self._items({"module_key": "m1"})
         assert item["equations"] == [] and item["to_sink"] == []
+
+
+class TestRound22ModuleSymbols:
+    """IK-0608 / IK-0624: 受け取る記号 → 定める記号と副題を素通しする（正本は theory_modules builder）。"""
+
+    def _items(self, module):
+        return service.module_items(
+            [module], records={}, equations_by_id={}, latest_program_by_module={}, program_dto=lambda p: None,
+        )[0]
+
+    def test_symbols_and_subtitle_pass_through(self):
+        item = self._items({
+            "module_key": "m1",
+            "input_symbols": ["a", "\\alpha_{\\rm B}", "…"],
+            "output_symbols": ["x"],
+            "subtitle": "生む式: 式 (3)",
+        })
+        assert item["input_symbols"] == ["a", "\\alpha_{\\rm B}", "…"]
+        assert item["output_symbols"] == ["x"]
+        assert item["subtitle"] == "生む式: 式 (3)"
+
+    def test_missing_keys_give_empty_values(self):
+        item = self._items({"module_key": "m1"})
+        assert item["input_symbols"] == [] and item["output_symbols"] == [] and item["subtitle"] == ""
+
+    def test_non_string_symbols_are_dropped_not_stringified(self):
+        item = self._items({"module_key": "m1", "input_symbols": [{"symbol": "z"}, "w", None, " "]})
+        assert item["input_symbols"] == ["w"]
+
+    def test_builder_output_reaches_module_items(self):
+        from core.theory_modules import build_theory_modules
+
+        artifacts = {
+            "derivation_chain": {"chains": [{"derivation_id": "d1", "chain_type": "equation_chain", "steps": [
+                {"step_id": "s1", "operation": "define_x", "input_equation_ids": ["eq_a"],
+                 "output_equation_ids": ["eq_b"], "required_claim_ids": [], "assumption_ids": []},
+            ]}]},
+            "equation_semantics": {"records": [
+                {"equation_id": "eq_a", "semantics": {"defined_symbols": [{"symbol": "a", "definition_status": "defined"}]}},
+                {"equation_id": "eq_b", "semantics": {"defined_symbols": [{"symbol": "x", "definition_status": "defined"}],
+                                                       "used_symbols": ["a", "k"]}},
+            ]},
+            "claim_object_builder": {"claims": []},
+            "component_assembly": {"components": []},
+        }
+        dto = build_theory_modules(document_id="doc-1", artifacts=artifacts, graph_json={"nodes": [], "edges": []})
+        item = self._items(dto["modules"][0])
+        assert item["input_symbols"] == ["a", "k"]
+        assert item["output_symbols"] == ["x"]
+        assert isinstance(item["subtitle"], str)

@@ -121,7 +121,9 @@ def compare(
                 continue
         # 配線なしは観測が理論値そのものなので、記号ごとの相対差も測らない（0.0 を「一致」と読ませない — 第 21 周の再演）
         rel = None if no_wiring else _rel_diff(mean, base)
-        if rel is None:
+        # ゼロの記号を名指しするのは、配線ありで相対差を測ろうとして測れなかったときだけ（配線なしは
+        # そもそも測らないので「ゼロ」ではない — 第 22 周 (i): B_0 = 2.4e-4 に「ゼロの記号」と出た）。
+        if rel is None and not no_wiring and abs(base) < EPSILON:
             zero_theory.append(symbol)
         ratio: float | None = None
         if not no_wiring and std is not None and std > 0:
@@ -158,6 +160,8 @@ def compare(
             if point is None:
                 continue
             diff = _rel_diff(point, ref)
+            if diff is None:  # 記載値がゼロのときは測れない（None を max() に混ぜない）
+                continue
             reference_values.append(diff)
             by_symbol.setdefault(
                 symbol,
@@ -180,6 +184,10 @@ def compare(
     if reference_given:
         sentence = dict(_REFERENCE_SENTENCES)[reference_level]
         facts.append(schema.closed_world("模擬観測は" + sentence, wiring_name=wiring_name))
+        # 何を・どの単位で比べたかを名指しする（第 22 周 (i): 単位が画面にも AI の文脈にも渡らず、換算の誤りを疑わせた）
+        reference_fact = schema.reference_input_fact(reference)
+        if reference_fact:
+            facts.append(reference_fact)
     else:
         facts.append(schema.FACT_REFERENCE_MISSING)
     if no_wiring:

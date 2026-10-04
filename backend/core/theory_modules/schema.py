@@ -272,3 +272,109 @@ def mask_internal_ids_readable(text: Any, equation_records: dict | None = None) 
 
     masked = _EQUATION_ID_WITH_TAIL_RE.sub(_eq, str(text or ""))
     return _OTHER_INTERNAL_ID_WITH_TAIL_RE.sub(UNIDENTIFIED_ELEMENT_TEXT, masked).strip()
+
+
+# ---------------------------------------------------------------------------
+# モジュールの「受け取る記号 → 定める記号」（第 22 周・IK-0608）
+#
+# 外枠の境界をまたぐ式（inputs / outputs）だけでは、孤立したモジュールが何を受け取り何を出す
+# 計算かが読めない。成員の式の ``defined_symbols`` / ``used_symbols``（equation_semantics の記録）
+# から決定論で導く。表示だけ — 指紋・stable_key・identity_eligible・module_key の材料は変えない（TM12）。
+# 記号は「名前だけ」（dict の repr を作らない — IK-0627）。
+# ---------------------------------------------------------------------------
+
+#: 受け取る記号の表示上限。
+MODULE_INPUT_SYMBOLS_MAX = 8
+#: 定める記号の表示上限。
+MODULE_OUTPUT_SYMBOLS_MAX = 4
+#: 上限で切ったことを示す末尾の印（件数は書かない）。
+SYMBOL_LIST_TRUNCATED_MARK = "…"
+#: 1 記号の表示上限（引数並びまで抱えた長い「記号」は一覧に出さない — 式本文は member_equations で読む）。
+SYMBOL_DISPLAY_MAX_CHARS = 40
+
+_SYMBOL_NORM_RE = re.compile(r"\\(?:mathrm|mathcal|mathbf|mathit|rm|text|mathsf|boldsymbol|bm)\s*\{([^{}]*)\}")
+_COMMAND_RE = re.compile(r"\\([A-Za-z]+)")
+_BARE_COMMAND_RE = re.compile(r"\\([A-Za-z]+)\s*(?:_.*)?")
+_PROSE_RE = re.compile(r"[A-Za-z]{2,}\s+[A-Za-z]{2,}")
+#: dict の repr（``{'symbol': 'z'}``）は記号名ではない（IK-0627）。
+_DICT_REPR_RE = re.compile(r"^\{\s*['\"]")
+#: 関係式（``q < q_c`` / ``k \\in \\{…\\}``）は記号ではない。
+_RELATION_RE = re.compile(r"[<>=]|\\(?:in|leq?|geq?|neq|approx|sim|simeq|equiv|propto|ll|gg)(?![A-Za-z])")
+
+
+def symbol_match_key(name: Any) -> str:
+    """記号名の照合キー。``core.simulation_bridge.codegen.normalize_symbol`` と同じ規則
+    （逐語の一致はテストで固定。theory_modules は simulation_bridge を import しない層なので
+    ここに置き、正本を 1 つにするときは codegen 側がこちらへ委譲する）。"""
+    text = str(name or "").replace("$", "")
+    for _ in range(3):
+        text = _SYMBOL_NORM_RE.sub(r"\1", text)
+    text = re.sub(r"\\[A-Za-z]+", lambda m: m.group(0)[1:], text)
+    return re.sub(r"[{}\\\s]", "", text).lower()
+
+
+def _latex_token_sets() -> tuple[frozenset[str], frozenset[str]]:
+    """(記号でない LaTeX 命令名, ギリシャ文字名)。正本は A層 equation_semantics（関数内 import・
+    読めない環境では空集合に縮退 = 除外が弱まるだけで落とさない）。"""
+    try:
+        from episteme_graph.agents.equation_semantics import schema as es_schema
+    except Exception:  # noqa: BLE001
+        return frozenset(), frozenset()
+    return (
+        frozenset(getattr(es_schema, "_LATEX_NON_SYMBOL_TOKENS", ()) or ()),
+        frozenset(getattr(es_schema, "_LATEX_GREEK_NAMES", ()) or ()),
+    )
+
+
+def clean_symbol_name(raw: Any) -> str:
+    """表示してよい記号名（文字列）を返す。表示に向かないものは ""。
+
+    除くもの: 文字列でない値 / 内部 ID を含む（``sym_N`` を含む表示投影の語彙）/ dict の repr / 数字で始まる（``180\\degree/\\pi`` / ``4\\pi``）/
+    関係式（``q < q_c``）/ 数値だけ（``0.75`` / ``-1`` / ``1/3``）/
+    記号でない LaTeX 命令だけ（``\\ln`` / ``\\sum_i`` / ``\\nabla_\\mu``）/ 英単語の並び（散文）/
+    ``SYMBOL_DISPLAY_MAX_CHARS`` を超える長さ。
+    """
+    if not isinstance(raw, str):
+        return ""
+    name = strip_control_sequences(raw).strip().strip("$").strip()
+    if not name or len(name) > SYMBOL_DISPLAY_MAX_CHARS:
+        return ""
+    if contains_internal_id(name) or _dp.contains_internal_id(name) or _DICT_REPR_RE.match(name):
+        return ""
+    if name[0].isdigit() or _RELATION_RE.search(name):
+        return ""
+    non_symbol, greek = _latex_token_sets()
+    bare = _BARE_COMMAND_RE.fullmatch(name)
+    if bare and bare.group(1) in non_symbol:
+        return ""
+    has_greek = any(cmd in greek for cmd in _COMMAND_RE.findall(name))
+    letters = re.sub(r"\\[A-Za-z]+", " ", name)
+    if not has_greek and not re.search(r"[A-Za-z]", letters):
+        return ""
+    if _PROSE_RE.search(re.sub(r"[{}]", " ", letters)):
+        return ""
+    return name
+
+
+def equation_used_symbols(record: Any) -> list[str]:
+    """式が使う記号名（``semantics.used_symbols`` → 無ければ式レコード直下）。名前だけ・重複なし。"""
+    rec = record if isinstance(record, dict) else {}
+    semantics = rec.get("semantics") if isinstance(rec.get("semantics"), dict) else {}
+    raws: list = []
+    for source in (semantics.get("used_symbols"), rec.get("used_symbols")):
+        if isinstance(source, list):
+            raws.extend(source)
+    out: list[str] = []
+    for raw in raws:
+        name = raw.get("symbol") if isinstance(raw, dict) else raw
+        name = clean_symbol_name(name)
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def cap_symbol_list(names: list[str], limit: int) -> list[str]:
+    """上限で切る。切ったときだけ末尾に ``SYMBOL_LIST_TRUNCATED_MARK`` を足す（件数は書かない）。"""
+    if len(names) <= limit:
+        return list(names)
+    return list(names[:limit]) + [SYMBOL_LIST_TRUNCATED_MARK]

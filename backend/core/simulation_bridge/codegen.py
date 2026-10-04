@@ -61,14 +61,22 @@ _INSTRUCTION = """あなたは理論の数式を、検算用の小さな Python 
   式の本文が読み取れない・復元された式で不確かな箇所も、ここに事実として書いてください。
   facts は学習者が読む文です。role= などの内部の語・英語の型名を書かないでください。
 
+# 計算できないとき
+- 出力の式が資料に無い・関数形が定義されていない（外部の表・任意関数に依る）などで値を出せないときは、
+  部分実装で埋めないでください。`io_contract.outputs` を空にし、
+  `cannot_compute`: `[{"symbol": 記号, "reason": 日本語の短い理由}]` を返してください。
+- 資料に「出力の式が割り当てられていない」とある場合は、手順の中の式が定める記号を出力の候補として扱って構いません。
+
 # 出力形式
-JSON オブジェクト `{"source_code": "...", "io_contract": {...}, "facts": ["..."]}` だけを返してください。"""
+JSON オブジェクト `{"source_code": "...", "io_contract": {...}, "facts": ["..."], "cannot_compute": [...]}` だけを返してください
+（`cannot_compute` は計算できない記号が無ければ空の配列）。"""
 
 
 class _ProgramResponse(BaseModel):
     source_code: str = ""
     io_contract: dict = Field(default_factory=dict)
     facts: list[str] = Field(default_factory=list)
+    cannot_compute: list[Any] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +136,105 @@ def _roles(module: dict) -> dict[str, str]:
     return roles
 
 
+#: 記号表の上限（この式群に現れる記号だけに絞った後の上限。第 21 周 seq418: 文書全体の記号で 1 万字に膨らんだ）。
+SYMBOL_TABLE_LIMIT = 40
+#: 式の要約（A層の英語の生成文。LLM 向けの資料にだけ載せ、label には使わない）の上限。
+_SUMMARY_LIMIT = 200
+#: 出力の式が割り当てられていないモジュールで資料に添える 1 行（LLM 向け。学習者には出ない）。
+MATERIAL_NO_OUTPUT_NOTE = (
+    "このまとまりには出力の式が割り当てられていません。手順の中の式が定める記号が出力の候補です。"
+    "それでも値を出せないときは cannot_compute で申告してください。"
+)
+_UNKNOWN_WORDS = frozenset({"", "unknown", "none", "null", "n/a"})
+_PROSE_RE = re.compile(r"[A-Za-z]{2,}(?:\s+[A-Za-z]{2,}){2,}")
+_UNNUMBERED_PREFIX = "番号なし"
+_SENTENCE_END_RE = re.compile(r"(?<=[。．.!?！？])\s")
+
+
+def _symbol_name(raw: Any) -> str:
+    """記号の名前だけ（dict なら ``symbol`` キー。repr を文字列化しない — IK-0627）。"""
+    if isinstance(raw, dict):
+        raw = raw.get("symbol") or raw.get("canonical_symbol") or raw.get("name") or ""
+    if not isinstance(raw, str):
+        return ""
+    name = strip_control_sequences(raw).strip().strip("$").strip()
+    if not name or name.startswith("{"):
+        return ""
+    return name[:60]
+
+
+def _name_list(value: Any) -> list[str]:
+    items = value if isinstance(value, (list, tuple)) else ([value] if isinstance(value, (str, dict)) else [])
+    out: list[str] = []
+    for item in items:
+        name = _symbol_name(item)
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _first_sentence(value: Any, limit: int = _DEFINITION_LIMIT) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    head = _SENTENCE_END_RE.split(text, maxsplit=1)[0]
+    return _text(head, limit)
+
+
+def _semantics(row: dict) -> dict:
+    sem = _payload_dict(row).get("semantics")
+    if not isinstance(sem, dict):
+        sem = row.get("semantics") if isinstance(row.get("semantics"), dict) else {}
+    return sem
+
+
+def _equation_symbols(row: dict) -> tuple[list[str], list[str], dict[str, str]]:
+    """(定める記号, 使う記号, 記号 → 意味)。dict 形の ``definition_status`` が used のものは使う記号に回す。"""
+    from core.graph_paper_layer.schema import equation_defined_symbols  # 遅延 import（循環回避）
+
+    defined = [n for n in (_symbol_name(x) for x in equation_defined_symbols(row)) if n]
+    used = _name_list(row.get("used_symbols"))
+    meanings: dict[str, str] = {}
+    raw_defined = row.get("defined_symbols")
+    for raw in raw_defined if isinstance(raw_defined, list) else []:
+        name = _symbol_name(raw)
+        if not name:
+            continue
+        if isinstance(raw, dict):
+            meaning = _first_sentence(raw.get("meaning") or raw.get("evidence_text"))
+            if meaning and name not in meanings:
+                meanings[name] = meaning
+            if name not in defined and name not in used:
+                used.append(name)
+        elif name not in defined:
+            defined.append(name)
+    return defined, used, meanings
+
+
+def _equation_label(row: dict) -> str:
+    """式の表示ラベル（印字番号 → 左辺の記号 → 「番号なしの式」）。英語要約は label に使わない。"""
+    from core.theory_modules.schema import equation_display_name  # 遅延 import（循環回避）
+
+    return _text(equation_display_name(row), 120)
+
+
+def _member_label(value: Any) -> str:
+    """成員の入出力ラベル。英語の生成文の断片（「番号なし: Defines the …」）は「番号なし」に畳む。"""
+    text = _text(value, 120)
+    body = text.split(":", 1)[1] if text.startswith(_UNNUMBERED_PREFIX) and ":" in text else text
+    if "$" not in body and "\\" not in body and _PROSE_RE.search(body):
+        return _UNNUMBERED_PREFIX
+    return text
+
+
+def _symbol_ids_of(row: dict) -> set[str]:
+    payload = _payload_dict(row)
+    ids: set[str] = set()
+    for key in ("used_in_equation_ids", "defining_equation_ids"):
+        ids.update(_str_list(payload.get(key)))
+    return ids
+
+
 def _prompt_material(module: dict, equations: list[dict], symbols: list[dict]) -> dict:
     roles = _roles(module)
     members = []
@@ -137,45 +244,72 @@ def _prompt_material(module: dict, equations: list[dict], symbols: list[dict]) -
         members.append(
             {
                 "operation": _text(member.get("operation_label"), 120),
-                "inputs": [_text(v, 120) for v in _str_list(member.get("input_labels"))],
-                "outputs": [_text(v, 120) for v in _str_list(member.get("output_labels"))],
+                "inputs": [_member_label(v) for v in _str_list(member.get("input_labels"))],
+                "outputs": [_member_label(v) for v in _str_list(member.get("output_labels"))],
             }
         )
     eq_items = []
+    wanted: set[str] = set()
+    meanings: dict[str, str] = {}
+    eq_ids: set[str] = set()
     for row in equations:
         if not isinstance(row, dict):
             continue
-        eq_items.append(
-            {
-                "label": _text(row.get("label") or row.get("display_label"), 120),
-                "role": roles.get(_equation_id(row), "member"),
-                "latex": _text(row.get("latex")),
-                "plain_text": _text(row.get("plain_text")),
-                "defined_symbols": [_text(v, 60) for v in _str_list(row.get("defined_symbols"))],
-                "used_symbols": [_text(v, 60) for v in _str_list(row.get("used_symbols"))],
-                "reconstructed": _is_reconstructed(row),
-            }
-        )
+        defined, used, eq_meanings = _equation_symbols(row)
+        for name, meaning in eq_meanings.items():
+            meanings.setdefault(normalize_symbol(name), meaning)
+        wanted.update(normalize_symbol(n) for n in (*defined, *used))
+        eq_ids.add(_equation_id(row))
+        item: dict[str, Any] = {
+            "label": _equation_label(row),
+            "role": roles.get(_equation_id(row), "member"),
+            "latex": _text(row.get("latex")),
+            "defined_symbols": defined,
+            "used_symbols": used,
+            "reconstructed": _is_reconstructed(row),
+        }
+        plain = _text(row.get("plain_text"))
+        if plain and plain != item["latex"]:
+            item["plain_text"] = plain
+        summary = _text(_semantics(row).get("summary"), _SUMMARY_LIMIT)
+        if summary:
+            item["summary"] = summary
+        eq_items.append(item)
+    wanted.discard("")
+    eq_ids.discard("")
     sym_items = []
     for row in symbols:
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or len(sym_items) >= SYMBOL_TABLE_LIMIT:
             continue
-        constraints = _payload_dict(row).get("domain_constraints")
-        sym_items.append(
-            {
-                "symbol": _text(row.get("canonical_symbol"), 60),
-                "kind": _text(row.get("kind") or "unknown", 30),
-                "unit": _text(row.get("unit"), 60),
-                "scope": _text(row.get("scope"), 120),
-                "definitions": [_text(v, _DEFINITION_LIMIT) for v in _str_list(row.get("definition_evidence_texts"))[:2]],
-                "domain_constraints": [_text(v, 200) for v in _str_list(constraints)][:5],
-            }
-        )
+        name = _symbol_name(row.get("canonical_symbol"))
+        key = normalize_symbol(name)
+        if not name or not (key in wanted or (_symbol_ids_of(row) & eq_ids)):
+            continue
+        item = {"symbol": name}
+        meaning = ""
+        for text in _str_list(row.get("definition_evidence_texts")):
+            meaning = _first_sentence(text)
+            if meaning:
+                break
+        meaning = meaning or meanings.get(key, "")
+        if meaning:
+            item["meaning"] = meaning
+        unit = _text(row.get("unit"), 60).strip()
+        if unit.lower() not in _UNKNOWN_WORDS:
+            item["unit"] = unit
+        kind = _text(row.get("kind"), 30).strip()
+        if kind.lower() not in _UNKNOWN_WORDS:
+            item["kind"] = kind
+        constraints = [_text(v, 200) for v in _str_list(_payload_dict(row).get("domain_constraints"))][:5]
+        if constraints:
+            item["domain_constraints"] = constraints
+        if len(item) > 1:  # 名前だけの項目は式の defined/used と重複するので載せない（P-0008）
+            sym_items.append(item)
     assumptions = []
     for item in module.get("assumptions") or []:
         if isinstance(item, dict) and str(item.get("text") or "").strip():
             assumptions.append(_text(item.get("text"), 400))
-    return {
+    material: dict[str, Any] = {
         "module": {
             "label": _text(module.get("label"), 200),
             "theory_object": _text(module.get("theory_object"), 200),
@@ -185,6 +319,9 @@ def _prompt_material(module: dict, equations: list[dict], symbols: list[dict]) -
         "equations": eq_items,
         "symbols": sym_items,
     }
+    if eq_items and not any(item["role"] == "output" for item in eq_items):
+        material["output_note"] = MATERIAL_NO_OUTPUT_NOTE
+    return material
 
 
 def build_codegen_prompt(module: dict, *, equations: list[dict], symbols: list[dict]) -> str:
@@ -252,9 +389,32 @@ def _contract_items(value: Any) -> list[dict]:
     return items
 
 
-def _normalize_contract(value: Any) -> dict[str, list[dict]]:
+def _cannot_compute_items(value: Any) -> list[dict]:
+    """``cannot_compute``（``{symbol, reason}`` の列）の正規化。記号の無い項目は落とす。"""
+    items: list[dict] = []
+    if not isinstance(value, list):
+        return items
+    for item in value:
+        if isinstance(item, str):
+            item = {"symbol": item}
+        if not isinstance(item, dict):
+            continue
+        symbol = _symbol_name(item.get("symbol") or item.get("name") or "")
+        if not symbol or any(i["symbol"] == symbol for i in items):
+            continue
+        reason = _humanize_fact(strip_control_sequences(str(item.get("reason") or "")).strip())[:120]
+        items.append({"symbol": symbol, "reason": reason})
+    return items[:_MAX_FACTS]
+
+
+def _normalize_contract(value: Any, cannot_compute: Any = None) -> dict[str, list[dict]]:
+    """io_contract の 3 区分。``cannot_compute`` は応答の top-level でも io_contract の中でも受ける（additive）。"""
     raw = value if isinstance(value, dict) else {}
-    return {key: _contract_items(raw.get(key)) for key in ("inputs", "outputs", "parameters")}
+    contract = {key: _contract_items(raw.get(key)) for key in ("inputs", "outputs", "parameters")}
+    blocked = _cannot_compute_items(cannot_compute if cannot_compute else raw.get("cannot_compute"))
+    if blocked:
+        contract["cannot_compute"] = blocked
+    return contract
 
 
 #: 資料の ``role=`` 語彙 → 学習者が読む日本語（第 21 周 R8: LLM の facts がプロンプトの語彙を写す）。
@@ -309,13 +469,12 @@ _SYMBOL_NORM_RE = re.compile(r"\\(?:mathrm|mathcal|mathbf|mathit|rm|text|mathsf|
 
 
 def normalize_symbol(name: Any) -> str:
-    """記号名の照合用の正規化（TeX の修飾・波括弧・バックスラッシュ・空白・`$` を落として小文字に）。
-    ``C_{\\mathrm{eff}}`` と ``C_eff`` を同じ記号とみなす（第 21 周の再演: ASCII 名と TeX 名の食い違いで誤警告）。"""
-    text = str(name or "").replace("$", "")
-    for _ in range(3):
-        text = _SYMBOL_NORM_RE.sub(r"\1", text)
-    text = re.sub(r"\\[A-Za-z]+", lambda m: m.group(0)[1:], text)
-    return re.sub(r"[{}\\\s]", "", text).lower()
+    """記号名の照合用の正規化。正本は ``core.theory_modules.schema.symbol_match_key``（TeX の修飾・波括弧・
+    バックスラッシュ・空白・`$` を落として小文字に。``C_{\\mathrm{eff}}`` と ``C_eff`` を同じ記号とみなす）。
+    theory_modules は simulation_bridge を import しない層なので、こちらが委譲する（第 22 周 A1 の依頼）。"""
+    from core.theory_modules.schema import symbol_match_key  # 遅延 import（起動順の都合・循環回避）
+
+    return symbol_match_key(name)
 
 
 def symbols_overlap(declared: set[str], expected: set[str]) -> bool:
@@ -414,12 +573,15 @@ def generate_program(
             source = _source_of(data)
             check = ast_guard.check_program(source)
 
-    contract = _normalize_contract(data.get("io_contract"))
+    contract = _normalize_contract(data.get("io_contract"), data.get("cannot_compute"))
     contract = complete_contract_from_source(contract, source)
     llm_facts = _normalize_facts(data.get("facts"))
     provenance["facts"] = llm_facts
     if not (check.ok and check.entrypoint_found):
         system_facts.append(schema.FACT_AST_REJECTED)
+    blocked_fact = schema.cannot_compute_fact(contract.get("cannot_compute"))
+    if blocked_fact:
+        system_facts.append(blocked_fact)
     expected = _output_symbols(module, equations)
     declared = {item["symbol"] for item in contract["outputs"]}
     if expected and declared and not symbols_overlap(declared, expected):
@@ -443,6 +605,9 @@ def program_facts_for_display(draft: schema.ProgramDraft) -> list[str]:
     provenance = getattr(draft, "provenance", None) or {}
     if provenance.get("reconstructed_inputs"):
         facts.append(schema.FACT_RECONSTRUCTED_INPUTS)
+    blocked_fact = schema.cannot_compute_fact((getattr(draft, "io_contract", None) or {}).get("cannot_compute"))
+    if blocked_fact:
+        facts.append(blocked_fact)
     return _dedupe([strip_control_sequences(str(f)).strip() for f in facts])
 
 
@@ -455,6 +620,8 @@ def complete_contract_from_source(contract: dict[str, list[dict]], source: str) 
     既存の項目は変えない。
     """
     out = {k: [dict(i) for i in (contract.get(k) or [])] for k in ("inputs", "outputs", "parameters")}
+    if contract.get("cannot_compute"):
+        out["cannot_compute"] = [dict(i) for i in contract["cannot_compute"]]
     keys = ast_guard.required_keys(source)
     have_inputs = {str(i.get("symbol") or "") for i in out["inputs"]}
     have_params = {str(i.get("symbol") or "") for i in out["parameters"]}

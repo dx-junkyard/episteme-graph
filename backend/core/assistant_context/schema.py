@@ -301,7 +301,7 @@ MAX_LEARNING_RETRIEVED_CLAIM_CHARS = 120
 SELECTION_SIMULATION_RUN_ID_KEY = "simulation_run_id"
 
 #: 実行記録から出す事実文の上限（行）。
-MAX_LEARNING_SIMULATION_FACTS = 8
+MAX_LEARNING_SIMULATION_FACTS = 12  # 第 22 周: 記載値・共有の意味・教員の判断の行を足した
 
 #: 1行に並べる記号の上限（超えたら「ほか」）。
 MAX_LEARNING_SIMULATION_SYMBOLS = 6

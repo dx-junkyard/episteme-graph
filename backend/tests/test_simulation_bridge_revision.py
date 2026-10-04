@@ -144,12 +144,12 @@ def test_change_that_breaks_wiring_is_dropped():
     fake = _Fake({"changes": [{"op": "remove", "slot": "amp", "reason": "外す"}]})
     p = revision.propose_revision(wiring, _comparison(), _catalog(), structured_fn=fake)
     assert p.empty
-    assert p.facts == [schema.FACT_NO_PROPOSAL]
+    assert p.facts == [schema.FACT_NO_PROPOSAL, schema.FACT_NO_PROPOSAL_ALL_DROPPED]
     assert any("規約を満たさなく" in d for d in p.dropped)
 
 
 def test_missing_slot_dropped_and_no_proposal_fact():
     fake = _Fake({"changes": [{"op": "remove", "slot": "ghost"}]})
     p = revision.propose_revision(_wiring(), _comparison(), _catalog(), structured_fn=fake)
-    assert p.empty and p.facts == [schema.FACT_NO_PROPOSAL]
+    assert p.empty and p.facts == [schema.FACT_NO_PROPOSAL, schema.FACT_NO_PROPOSAL_ALL_DROPPED]
     assert any("配線に無い slot" in d for d in p.dropped)

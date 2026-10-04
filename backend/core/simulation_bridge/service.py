@@ -25,7 +25,7 @@ from sqlalchemy import text as sa_text
 
 from core import display_projection
 from core.label_vocab import SIMULATION_AGREEMENT_LABELS, SIMULATION_AXIS_LABELS, SIMULATION_SEPARATION_LABELS
-from core.simulation_bridge import ast_guard, codegen, comparator, instrument, schema
+from core.simulation_bridge import ast_guard, codegen, comparator, instrument, schema, suitability
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,13 @@ def rollback_quietly(session: Any) -> None:
 def str_list(value: Any) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [str(v) for v in value if str(v or "").strip()]
+    return []
+
+
+def symbol_names(value: Any) -> list[str]:
+    """記号名のリスト（文字列だけ。dict の repr を作らない — IK-0627）。"""
+    if isinstance(value, (list, tuple)):
+        return [v.strip() for v in value if isinstance(v, str) and v.strip()]
     return []
 
 
@@ -208,12 +215,22 @@ def symbol_rows(session: Any, document_id: str, equations: list[dict]) -> list[d
         item["definition_evidence_texts"] = loads(item.get("definition_evidence_texts"), [])
         item["agent_payload"] = loads(item.get("agent_payload"), {})
         symbols.append(item)
+    # 第 22 周（IK-0627 の派生）: 式の defined_symbols は dict の配列なので名前だけを取り、照合は
+    # codegen.normalize_symbol（TeX の修飾・波括弧の差を吸収）。一致ゼロでも教材全体へは落とさない
+    # （文書全体の記号を数十個抱えてプロンプトが膨らむ seq418 の根）。
+    from core.graph_paper_layer.schema import equation_defined_symbols  # 遅延 import（循環回避）
+
     wanted: set[str] = set()
     for eq in equations:
-        wanted.update(str_list(eq.get("defined_symbols")))
-        wanted.update(str_list(eq.get("used_symbols")))
-    matched = [s for s in symbols if str(s.get("canonical_symbol") or "") in wanted]
-    return (matched or symbols)[:SYMBOL_LIMIT]
+        names = list(equation_defined_symbols(eq)) + [
+            x for x in str_list(eq.get("used_symbols")) if not x.lstrip().startswith("{")
+        ]
+        wanted.update(codegen.normalize_symbol(n) for n in names if str(n).strip())
+    wanted.discard("")
+    if not wanted:
+        return []
+    matched = [s for s in symbols if codegen.normalize_symbol(s.get("canonical_symbol")) in wanted]
+    return matched[:SYMBOL_LIMIT]
 
 
 def fetch_module_inputs(
@@ -285,11 +302,39 @@ def module_items(
                 {"equation_id": e.get("equation_id"), "display_label": e.get("display_label") or ""}
                 for e in module.get("to_sink") or [] if isinstance(e, dict)
             ],
+            # 第 22 周（IK-0608 / IK-0624）: 受け取る記号 → 定める記号と、同名のモジュールを
+            # 区別する副題（正本は theory_modules builder。無ければ空 — 名前だけの文字列）。
+            "input_symbols": symbol_names(module.get("input_symbols")),
+            "output_symbols": symbol_names(module.get("output_symbols")),
+            "subtitle": str(module.get("subtitle") or ""),
+            # 定める記号が無い（制約・関係式だけの手順）ときだけ事実文（受け取る記号があるのに出力欄が空、と読まれないため）。
+            "output_symbols_note": (
+                schema.FACT_NO_OUTPUT_SYMBOLS
+                if symbol_names(module.get("input_symbols")) and not symbol_names(module.get("output_symbols"))
+                else ""
+            ),
             "has_equation_text": bool(texted),
             "reconstructed_inputs": any(is_reconstructed(r) for r in texted),
             "program": program_dto(latest_program_by_module.get(key)),
+            # 第 22 周（seq419）: 量の関係ではなく学習・最適化の手続（損失・目的関数）を表すまとまりは、
+            # 数値で動かしても論文の予言の確かめにならないことを事実文で示す。判定できなければ None と空文字
+            # （判定しないことを正直に — 試行は止めない）。正本は suitability.assess_module。
+            **_suitability_keys(module, rows),
         })
     return items
+
+
+def _suitability_keys(module: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    try:
+        verdict = suitability.assess_module(module, rows)
+    except Exception:  # noqa: BLE001 — 判定器の失敗で一覧を落とさない
+        logger.debug("simulation: suitability failed", exc_info=True)
+        verdict = {"simulable": None, "note": ""}
+    simulable = verdict.get("simulable")
+    return {
+        "simulable": simulable if isinstance(simulable, bool) else None,
+        "simulability_note": str(verdict.get("note") or "") if simulable is False else "",
+    }
 
 
 def latest_by_module(programs: Sequence[Mapping[str, Any]]) -> dict[str, dict]:

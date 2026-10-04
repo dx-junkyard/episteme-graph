@@ -56,6 +56,12 @@ from core.theory_modules.schema import (
     LEVEL_INNER,
     LEVEL_OUTER,
     MEMBER_CHAIN_TYPES,
+    MODULE_INPUT_SYMBOLS_MAX,
+    MODULE_OUTPUT_SYMBOLS_MAX,
+    cap_symbol_list,
+    clean_symbol_name,
+    equation_used_symbols,
+    symbol_match_key,
     MODULE_IDENTITY_MIN_MEMBERS,
     MODULE_IDENTITY_MIN_PROCESS_KINDS,
     OUTER_INTERFACE_LIMIT,
@@ -67,6 +73,7 @@ from core.theory_modules.schema import (
     THEORY_OBJECT_LABELS_MAX,
     THEORY_OBJECT_MAX,
     UNCLASSIFIED_EDGE_TYPE,
+    UNNUMBERED_EQUATION_TEXT,
     clean_text,
     contains_internal_id,
     equation_display_label,
@@ -994,6 +1001,8 @@ def _module_dto(
         ],
         # 論文全体をまとめる手順（sink）へ渡す式。
         "to_sink": [labels.equation_item(eq) for eq in to_sink],
+        # 第 22 周（IK-0608）: 受け取る記号 → 定める記号（表示だけ・TM12 の材料は変えない）。
+        **_module_symbols(flow, labels, members, outputs or to_sink or representative),
         "required_claims": [
             {
                 "claim_id": cid,
@@ -1036,6 +1045,51 @@ def assumption_origin_label(text: str) -> str:
     return ASSUMPTION_ORIGIN_PAPER_LABEL
 
 
+def _module_symbols(
+    flow: _Flow, labels: "_Labels", members: frozenset[int], primary: list[str]
+) -> dict[str, list[str]]:
+    """モジュールの ``input_symbols`` / ``output_symbols``（決定論・名前だけ）。
+
+    - 定める記号: 成員の step が生む式（共有の基礎を除く）の定義記号。``primary``（外へ出す式 →
+      sink へ渡す式 → 代表の式）の定義記号を先頭に。
+    - 受け取る記号: 生む式が使う記号 + 外から受ける式（共有の基礎を含む）の定義記号のうち、
+      生む式のどれも定義しない記号。共有の基礎が定義する記号は受け取る側に数える。
+    照合は ``symbol_match_key``（``alpha_{\\rm B}`` と ``\\alpha_{\\rm B}`` を同じ記号とみなす）。
+    """
+    produced = [eq for eq in flow.produced(members) if eq not in flow.foundation]
+    produced_set = set(produced)
+    external = [eq for eq in flow.consumed(members) if eq not in produced_set]
+
+    def _defined(eq: str) -> list[str]:
+        record = labels.equation_records.get(eq)
+        if record is None:
+            return []
+        return [n for n in (clean_symbol_name(s) for s in _paper_equation_defined_symbols(record)) if n]
+
+    outputs: list[str] = []
+    seen_out: set[str] = set()
+    for eq in [e for e in primary if e in produced_set] + produced:
+        for name in _defined(eq):
+            key = symbol_match_key(name)
+            if key and key not in seen_out:
+                seen_out.add(key)
+                outputs.append(name)
+
+    inputs: list[str] = []
+    seen_in: set[str] = set(seen_out)
+    candidates = [n for eq in produced for n in equation_used_symbols(labels.equation_records.get(eq))]
+    candidates += [n for eq in external for n in _defined(eq)]
+    for name in candidates:
+        key = symbol_match_key(name)
+        if key and key not in seen_in:
+            seen_in.add(key)
+            inputs.append(name)
+    return {
+        "input_symbols": cap_symbol_list(inputs, MODULE_INPUT_SYMBOLS_MAX),
+        "output_symbols": cap_symbol_list(outputs, MODULE_OUTPUT_SYMBOLS_MAX),
+    }
+
+
 def _module_subtitle(labels: "_Labels", equations: list[str]) -> str:
     printed = _dedup(
         labels.equation_label(eq) for eq in equations
@@ -1047,11 +1101,27 @@ def _module_subtitle(labels: "_Labels", equations: list[str]) -> str:
     from core.theory_modules.schema import equation_display_name
 
     unnumbered = _dedup(
-        equation_display_name(labels.equation_records.get(eq)) for eq in equations
+        _unnumbered_subtitle_name(labels, eq, equation_display_name) for eq in equations
     )
+    unnumbered = [name for name in unnumbered if name]
     if unnumbered:
         return "生む式: " + "、".join(unnumbered[:THEORY_OBJECT_LABELS_MAX])
     return ""
+
+
+def _unnumbered_subtitle_name(labels: "_Labels", eq: str, display_name) -> str:
+    """番号なしの式の副題の名前。左辺の記号が取れればそれ（「番号なしの式（左辺 X）」）、
+    取れなければ論文層の正本ラベル（式本文の先頭 → 定義する記号）。どちらも取れなければ
+    「番号なしの式」（第 22 周 IK-0624: 式本文が ``source_extraction`` にある記録では左辺が
+    取れず、同名のモジュールの副題がすべて「番号なしの式」になっていた）。"""
+    record = labels.equation_records.get(eq)
+    name = display_name(record)
+    if name != UNNUMBERED_EQUATION_TEXT:
+        return name
+    label = labels.equation_label(eq)
+    if label and not contains_internal_id(label):
+        return label
+    return name
 
 
 def _structure_fingerprint(level: str, steps: list[_Step], inputs: list[str], outputs: list[str], premise: bool) -> str:

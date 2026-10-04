@@ -747,7 +747,7 @@ class TestPurityAndDisplay:
             "module_key", "level", "parent_module_key", "label", "visual_label", "process_verbs", "theory_object",
             "stage_keys", "dominant_stage", "source_backing_status", "inputs", "outputs", "foundation",
             "required_claims", "assumption_ids", "assumptions", "subtitle", "members", "components_for_comparison", "isolated_reason",
-            "member_equations", "to_sink",
+            "member_equations", "to_sink", "input_symbols", "output_symbols",
         }
         for module in result["modules"]:
             assert set(module) == module_keys
@@ -1124,3 +1124,136 @@ class TestMemberEquationsAndSink:
         before = _material(tex_2407)
         assert before
         assert before == _material(_with_latex(tex_2407))
+
+
+# ---------------------------------------------------------------------------
+# 第 22 周（IK-0608 / IK-0624）: 受け取る記号 → 定める記号・同名モジュールの副題
+# ---------------------------------------------------------------------------
+
+
+def _sym_record(eq_id, *, defined=(), used=(), latex="", label=None):
+    return {
+        "equation_id": eq_id,
+        "label": label,
+        "semantics": {
+            "summary": "",
+            "defined_symbols": [
+                {"symbol": s, "definition_status": "defined", "symbol_id": f"sym_x_{i}"}
+                for i, s in enumerate(defined)
+            ],
+            "used_symbols": list(used),
+        },
+        "source_extraction": {"latex": latex},
+    }
+
+
+class TestModuleSymbols:
+    def _two_step(self):
+        # eq_a → (定義) → eq_b → (求解) → eq_c。孤立した 1 本の連なり（外枠の境界をまたぐ式は無い）。
+        chains = [_chain("d1", [
+            _step("s1", "define_x", ["eq_a"], ["eq_b"]),
+            _step("s2", "solve_y", ["eq_b"], ["eq_c"]),
+        ])]
+        records = [
+            _sym_record("eq_a", defined=["a"], used=["k"]),
+            _sym_record("eq_b", defined=["x"], used=["a", "\\ln", "0.75", "x"]),
+            _sym_record("eq_c", defined=["y", "z"], used=["x", "alpha_{\\rm B}", "q < q_c"]),
+        ]
+        records[2]["semantics"]["defined_symbols"].append({"symbol": "\\alpha_{\\rm B}", "definition_status": "defined"})
+        return chains, records
+
+    def test_direction_received_then_defined(self):
+        chains, records = self._two_step()
+        result = _run(chains, records=records)
+        module = _outer(result)[0]
+        # 定める記号: 生む式（eq_b, eq_c）の定義記号。外へ出す・代表の式（eq_c）が先頭。
+        assert module["output_symbols"][:3] == ["y", "z", "\\alpha_{\\rm B}"]
+        assert "x" in module["output_symbols"]
+        # 受け取る記号: 外から受ける式 eq_a の定義記号 a。生む式が定義する x / alpha_B は数えない
+        # （alpha_{\rm B} と \alpha_{\rm B} は同じ記号とみなす）。
+        assert module["input_symbols"] == ["a"]
+
+    def test_noise_and_names_only(self):
+        chains, records = self._two_step()
+        module = _outer(_run(chains, records=records))[0]
+        flat = module["input_symbols"] + module["output_symbols"]
+        assert all(isinstance(s, str) for s in flat)
+        assert not any(s.startswith("{") or "'symbol'" in s for s in flat)  # dict の repr を作らない（IK-0627）
+        assert "\\ln" not in flat and "0.75" not in flat and "q < q_c" not in flat
+
+    def test_internal_id_symbols_dropped(self):
+        chains = [_chain("d1", [_step("s1", "define_x", ["eq_a"], ["eq_b"])])]
+        records = [
+            _sym_record("eq_a", defined=["eq_tex_b12"]),
+            _sym_record("eq_b", defined=["sym_9", "x"], used=["eq_op_3", "w"]),
+        ]
+        module = _outer(_run(chains, records=records))[0]
+        flat = module["input_symbols"] + module["output_symbols"]
+        assert not any(INTERNAL_ID_RE.search(s) for s in flat)
+        assert module["output_symbols"] == ["x"] and module["input_symbols"] == ["w"]
+
+    def test_nested_dict_symbol_is_not_stringified(self):
+        chains = [_chain("d1", [_step("s1", "define_x", ["eq_a"], ["eq_b"])])]
+        records = [_sym_record("eq_b", defined=[{"symbol": "z"}, "x"], used=[{"symbol": "w"}, "v"])]
+        module = _outer(_run(chains, records=records))[0]
+        assert module["output_symbols"] == ["x"]
+        assert module["input_symbols"] == ["w", "v"]
+
+    def test_empty_without_semantics(self):
+        chains = [_chain("d1", [_step("s1", "define_x", ["eq_a"], ["eq_b"])])]
+        module = _outer(_run(chains))[0]
+        assert module["input_symbols"] == [] and module["output_symbols"] == []
+
+    def test_truncation_mark_without_count(self):
+        chains = [_chain("d1", [_step("s1", "define_x", ["eq_a"], ["eq_b"])])]
+        records = [_sym_record("eq_b", defined=["x"], used=[f"u_{i}" for i in range(12)])]
+        module = _outer(_run(chains, records=records))[0]
+        assert len(module["input_symbols"]) == 9
+        assert module["input_symbols"][-1] == "…"
+
+    def test_fingerprint_and_keys_unchanged_by_symbols(self):
+        chains, records = self._two_step()
+        bare = [{"equation_id": r["equation_id"], "label": None, "semantics": {"summary": ""}} for r in records]
+        with_sym = builder_mod.build_theory_module_records(
+            document_id="doc-1", artifacts=_artifacts(chains, records=records), graph_json={"nodes": [], "edges": []},
+        )
+        without = builder_mod.build_theory_module_records(
+            document_id="doc-1", artifacts=_artifacts(chains, records=bare), graph_json={"nodes": [], "edges": []},
+        )
+        pick = lambda rs: [(r.get("module_key"), r.get("structure_fingerprint"), r.get("identity_eligible")) for r in (rs.get("records") if isinstance(rs, dict) else rs)]
+        assert pick(with_sym) and all(fp for _k, fp, _e in pick(with_sym))
+        assert pick(with_sym) == pick(without)
+
+    def test_golden_fixtures_still_build(self, tex_2407, tex_2609):
+        assert len(_outer(_build(tex_2407))) == 8
+        assert len(_outer(_build(tex_2609))) == 10
+        for fixture in (tex_2407, tex_2609):
+            for module in _build(fixture)["modules"]:
+                assert isinstance(module["input_symbols"], list)
+                assert isinstance(module["output_symbols"], list)
+
+    def test_symbol_match_key_mirrors_codegen(self):
+        from core.simulation_bridge.codegen import normalize_symbol
+        from core.theory_modules.schema import symbol_match_key
+
+        for name in ["alpha_{\\rm B}", "\\alpha_{\\rm B}", "C_{\\mathrm{eff}}", "C_eff", "$x$", "\\mathcal{L}_2", "P_{\\rm no \\, DE}"]:
+            assert symbol_match_key(name) == normalize_symbol(name)
+
+
+class TestUnnumberedSubtitle:
+    def test_subtitle_uses_equation_text_when_lhs_unavailable(self):
+        # 式本文が source_extraction にある記録（左辺が取れない）でも、同名のモジュールが副題で区別できる。
+        chains = [
+            _chain("d1", [_step("s1", "constrain_x", ["eq_a"], ["eq_b"])]),
+            _chain("d2", [_step("s1", "constrain_x", ["eq_a"], ["eq_c"])]),
+        ]
+        records = [
+            _sym_record("eq_a", defined=["M"], latex="M = 45"),
+            _sym_record("eq_b", used=["m", "M"], latex="m < M"),
+            _sym_record("eq_c", used=["m", "M"], latex="m > M"),
+        ]
+        result = _run(chains, records=records)
+        subtitles = [m["subtitle"] for m in _outer(result)]
+        assert len(subtitles) == 2 and len(set(subtitles)) == 2
+        assert all("番号なしの式" != s.replace("生む式: ", "") for s in subtitles)
+        assert not any(INTERNAL_ID_RE.search(s) for s in subtitles)

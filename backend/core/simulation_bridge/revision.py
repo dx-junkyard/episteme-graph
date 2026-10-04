@@ -318,5 +318,8 @@ def propose_revision(
         parts, edges = new_parts, new_edges
         accepted.append(change)
 
-    facts = [] if accepted else [schema.FACT_NO_PROPOSAL]
+    facts: list[str] = []
+    if not accepted:
+        # 第 22 周 (d'): 「作れなかった」だけでは理由が読めない。AI が変更を挙げなかったのか、挙げたが全て外れたのかを分ける。
+        facts = [schema.FACT_NO_PROPOSAL, schema.FACT_NO_PROPOSAL_ALL_DROPPED if dropped else schema.FACT_NO_PROPOSAL_NONE]
     return schema.RevisionProposal(changes=accepted, dropped=dropped, facts=facts, parts=parts, edges=edges)

@@ -81,6 +81,17 @@ class _OwnerAwareStore:
     SimulationStateError = real_store.SimulationStateError
     build_ledger_candidate = staticmethod(real_store.build_ledger_candidate)
     is_owner = staticmethod(real_store.is_owner)
+    display_metrics = staticmethod(real_store.display_metrics)
+
+    def ledger_decisions_for_runs(self, session, run_ids):
+        wanted = {str(r) for r in run_ids}
+        grouped: dict[str, list[str]] = {}
+        for item in self.ledger:
+            rid = str(item.get("run_id") or "")
+            if rid in wanted:
+                grouped.setdefault(rid, []).append(str(item.get("status") or ""))
+        out = {rid: real_store.aggregate_ledger_decision(st) for rid, st in grouped.items()}
+        return {rid: st for rid, st in out.items() if st != schema.LEDGER_DECISION_NONE}
 
     def __init__(self):
         self.programs: dict[str, dict] = {}
@@ -808,3 +819,109 @@ class TestRound21:
         run = lab.create_simulation_lab_run(COURSE, body=_run_body(pid), current_user=STUDENT)["run"]
         observed = {o["symbol"]: o for o in run["result"]["observed"]}
         assert observed["k"] == {"symbol": "k", "mean": 2.0, "std": None}
+
+
+# ---------------------------------------------------------------------------
+# 第 22 周 A4: 共有した実行への教員の判断（状態だけ）・配線なしの相対差
+# ---------------------------------------------------------------------------
+
+
+_LEGACY_NO_WIRING_METRICS = {
+    "relative_difference": 0.0,
+    "separation_ratio": None,
+    "reference_relative_difference": None,
+    "by_symbol": {
+        "k": {"relative_difference": 0.0, "separation_ratio": None, "reference_relative_difference": None},
+        "n": {"relative_difference": 0.0, "separation_ratio": None, "reference_relative_difference": 0.25},
+    },
+}
+
+
+class TestLedgerDecision:
+    def _shared_run(self, env):
+        pid = _seed_program(env)
+        wid = _seed_wiring(env)
+        rid = lab.create_simulation_lab_run(COURSE, body=_run_body(pid, wid), current_user=STUDENT)["run"]["id"]
+        lab.share_simulation_lab_run(rid, body=None, current_user=STUDENT)
+        return rid
+
+    def test_unshared_run_has_none_and_empty_fact(self, env):
+        pid = _seed_program(env)
+        rid = lab.create_simulation_lab_run(COURSE, body=_run_body(pid), current_user=STUDENT)["run"]["id"]
+        out = lab.get_simulation_lab_run(rid, current_user=STUDENT)
+        assert out["run"]["ledger_decision"] == {"status": "none", "fact": ""}
+
+    def test_shared_run_waits_for_teacher(self, env):
+        rid = self._shared_run(env)
+        out = lab.get_simulation_lab_run(rid, current_user=STUDENT)
+        assert out["run"]["ledger_decision"] == {
+            "status": "candidate", "fact": schema.FACT_LEDGER_DECISION_CANDIDATE,
+        }
+        listed = lab.list_simulation_lab_runs(COURSE, document_id=DOC, topic_id="", current_user=STUDENT)
+        assert listed["runs"][0]["ledger_decision"]["status"] == "candidate"
+
+    def test_confirmed_and_dismissed_show_state_only(self, env):
+        rid = self._shared_run(env)
+        item = env["store"].ledger[0]
+        item.update({"status": "confirmed", "confirmed_by": TEACHER["id"]})
+        out = lab.get_simulation_lab_run(rid, current_user=STUDENT)
+        assert out["run"]["ledger_decision"] == {
+            "status": "confirmed", "fact": schema.FACT_LEDGER_DECISION_CONFIRMED,
+        }
+        item.update({"status": "dismissed", "dismiss_reason": "入力が論文と違う", "dismissed_by": TEACHER["id"]})
+        out = lab.get_simulation_lab_run(rid, current_user=STUDENT)
+        assert out["run"]["ledger_decision"]["status"] == "dismissed"
+        assert out["run"]["ledger_decision"]["fact"] == schema.FACT_LEDGER_DECISION_DISMISSED
+        text = repr(out)
+        assert "入力が論文と違う" not in text
+        assert TEACHER["id"] not in text
+
+    def test_overview_carries_decision_and_survives_projection(self, env):
+        self._shared_run(env)
+        out = lab.get_simulation_lab_overview(COURSE, document_id=DOC, topic_id="", current_user=STUDENT)
+        projected = project_for_learner(out)
+        assert projected["runs"][0]["ledger_decision"]["status"] == "candidate"
+        assert projected["runs"][0]["ledger_decision"]["fact"] == schema.FACT_LEDGER_DECISION_CANDIDATE
+
+    def test_facts_have_no_digits(self):
+        import re
+
+        for status in schema.LEDGER_DECISION_STATUSES:
+            assert not re.search(r"[0-9０-９]", schema.LEDGER_DECISION_FACTS[status])
+
+    def test_aggregate_precedence(self):
+        agg = real_store.aggregate_ledger_decision
+        assert agg([]) == "none"
+        assert agg(["dismissed", "candidate"]) == "candidate"
+        assert agg(["dismissed", "confirmed", "candidate"]) == "confirmed"
+        assert agg(["dismissed", "dismissed"]) == "dismissed"
+        assert agg(["bogus"]) == "none"
+
+
+class TestNoWiringMetrics:
+    def test_legacy_zero_relative_difference_is_hidden(self):
+        run = {
+            "id": "r", "wiring_id": None, "status": "succeeded", "inputs": {},
+            "result": {"comparison": {"agreement_level": "unmeasured", "metrics": copy.deepcopy(_LEGACY_NO_WIRING_METRICS)}},
+        }
+        metrics = lab._run_dto(run)["result"]["comparison"]["metrics"]
+        assert metrics["relative_difference"] is None
+        # 記載値との差だけは残る（配線に依らない）。全指標 None の記号は出さない。
+        assert metrics["by_symbol"] == [{
+            "symbol": "n", "relative_difference": None, "separation_ratio": None,
+            "reference_relative_difference": 0.25,
+        }]
+        assert run["result"]["comparison"]["metrics"] == _LEGACY_NO_WIRING_METRICS  # データは不変
+
+    def test_no_wiring_without_reference_has_empty_by_symbol(self):
+        legacy = copy.deepcopy(_LEGACY_NO_WIRING_METRICS)
+        legacy["by_symbol"]["n"]["reference_relative_difference"] = None
+        run = {"id": "r", "wiring_id": "", "inputs": {}, "result": {"comparison": {"metrics": legacy}}}
+        assert lab._run_dto(run)["result"]["comparison"]["metrics"]["by_symbol"] == []
+
+    def test_wired_run_keeps_relative_difference(self):
+        metrics = {"relative_difference": 0.01, "by_symbol": {"k": {"relative_difference": 0.01}}}
+        run = {"id": "r", "wiring_id": "w", "inputs": {}, "result": {"comparison": {"metrics": metrics}}}
+        out = lab._run_dto(run)["result"]["comparison"]["metrics"]
+        assert out["relative_difference"] == 0.01
+        assert out["by_symbol"][0]["relative_difference"] == 0.01
