@@ -1,0 +1,9 @@
+scenario: s-v5-empty-door
+domain: astrophysics
+params:
+  goal_text: 担当論文の主結果を自分の言葉で言えるようになること
+  seed_questions:
+    - 昨日の続きから始めたいのですが、どこから読めばいいですか？
+per_archetype:
+  night_parttime:
+    goal_text: 仕事のあとの 30 分で、担当論文の主結果をつかむこと

@@ -1,0 +1,21 @@
+id: s-v5-predict-pause
+population: students
+runner: [api, browser]
+session: 1
+goal: '{{goal_text}} のために、夜の 30 分で予想だけ書いて、並べる前に今日はやめる'
+params_required: [goal_text, prediction_text]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.enroll
+    note: 受講中でなければ受講を始める
+  - do: learning.course.open
+  - do: learning.discuss.opening
+  - do: learning.chat.cycle
+    with: {cycle_mode: elicit, message: '{{prediction_text}}'}
+    note: 予想を書いたところで時間切れ。並べるのは明日にする
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#understanding-cycle
+watch_for:
+  - 途中でやめても、やめたことを咎める文・続きを促す督促が出ない

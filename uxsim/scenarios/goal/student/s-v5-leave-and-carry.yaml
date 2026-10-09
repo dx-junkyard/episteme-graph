@@ -1,0 +1,40 @@
+id: s-v5-leave-and-carry
+population: students
+runner: [api, browser]
+session: 1
+goal: '{{goal_text}} のために、論文と議論し、終わるときに次の自分への書き置きと持ち越す問いを自分の言葉で残す'
+params_required: [goal_text, seed_questions, carryover_pick, carryover_question_text, leave_note_text]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.enroll
+    note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+  - do: learning.course.open
+  - do: learning.discuss.opening
+  - repeat:
+      until: "persona_decides_to_stop or steps > 3"
+      max: 3
+      do: learning.discuss.ask
+      with: {message: '{{seed_questions | next}}'}
+  - do: learning.cycle.landing_candidates
+    note: 議論の終わりの「次に持ち越すなら、どの問いにしますか？」を見る
+  - choose:
+      - do: learning.cycle.intention
+        with: {role: carryover_question, pick: '{{carryover_pick}}'}
+        note: 選択肢の中に自分の問いがあればそれを選ぶ
+      - do: learning.cycle.intention
+        with: {role: carryover_question, text: '{{carryover_question_text}}'}
+        note: 選択肢に無ければ「自分の言葉で書く」
+  - do: learning.cycle.todays_words
+    note: 「今日のあなたの言葉」を開き、自分の発話の逐語が並ぶかを見る
+  - do: learning.cycle.intention
+    with: {role: leave_note, text: '{{leave_note_text}}'}
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#discuss-end
+  - manual: student/02-student.md#understanding-cycle
+  - manual: student/02-student.md#return-door-leave-note
+watch_for:
+  - 持ち越しの選択肢が自分が実際に書いた問いの言葉で並び、AI が言い換えた問いにすり替わっていない
+  - 今日のあなたの言葉には自分の発話だけが逐語で並び、AI の応答が混ざらない
+  - 書き置きを残したことが控えめな事実文で返り、件数・達成の演出が出ない

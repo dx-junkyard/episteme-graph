@@ -1,6 +1,6 @@
 """審判を全部かける: ``python -m uxsim.oracles.run_all runs/<campaign>/<run_id> [--judge]``。
 
-A・B・E と対話の往復をまたぐ検査（``dialogue``）・検証シミュレーション層の検査（``simulation``）は決定論（LLM 0 回）。C・D の LLM 審判は ``--judge`` のときだけ（ペルソナと同じ
+A・B・E（E6 確定文脈・E7 差分・E8 撤回の保持を含む）と対話の往復をまたぐ検査（``dialogue``）・検証シミュレーション層の検査（``simulation``）は決定論（LLM 0 回）。C・D の LLM 審判は ``--judge`` のときだけ（ペルソナと同じ
 プロバイダ・別プロンプト）。出力: ``findings.jsonl`` / ``oracle_notes.json`` / ``document_pairs.jsonl``。
 """
 from __future__ import annotations
@@ -13,7 +13,8 @@ from typing import Optional
 
 from uxsim.config import UXSIM_ROOT, get_settings
 from uxsim.llm import PersonaLLM, make_live_llm
-from uxsim.oracles import behavior, contract, dialogue, document, observation, principle, simulation
+from uxsim.oracles import (behavior, contract, decision, dialogue, differential, document, observation, principle,
+                           retraction, simulation)
 from uxsim.oracles.findings import FindingFactory, dedupe, load_meta, load_transcript, write_findings
 from uxsim.schema import Finding
 
@@ -40,6 +41,12 @@ def run_oracles(run_dir: Path, *, judge_llm: Optional[PersonaLLM] = None, databa
     e, notes["observation"] = observation.check(meta, factory, url, engine)
     found += e
     found += simulation.check_observation(meta, factory, url, engine, steps=steps)
+    # 第 23 周: E6 確定文脈 / E7 差分（沈黙適応の仮説）/ E8 撤回の保持
+    e6, notes["decision_context"] = decision.check(steps, meta, factory, url, engine)
+    found += e6
+    found += differential.check(steps, factory)
+    e8, notes["retraction"] = retraction.check(steps, meta, factory, url, engine)
+    found += e8
     findings = dedupe(found)
     write_findings(run_dir / "findings.jsonl", findings)
     (run_dir / "oracle_notes.json").write_text(json.dumps(notes, ensure_ascii=False, indent=2, default=str),

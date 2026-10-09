@@ -24,10 +24,13 @@ def test_topic_by_hint_matches_title_or_chapter():
 def test_course_open_projection_lists_every_topic_with_chapter_and_check_marker():
     body = {"master_course": {"title": "C", "chapters": [{"title": "第1章"}, {"title": "第2章"}],
                               "topics": [{"id": f"t{i}", "title": f"題{i}", "chapter_index": i // 6, "status": "locked",
+                                          "status_label": "まだ順番が来ていません（開けます）",
                                           "check_questions": [{"question": "Q"}] if i == 9 else []} for i in range(12)]}}
     out = project_observation("learning.course.open", 200, body)
     assert "t11 題11" in out and "…ほか" not in out
-    assert "第2章:" in out and "t9 題9 [locked]（確認問題あり）" in out
+    # 第 23 周: 状態は画面と同じくサーバの status_label（raw の locked は出さない）
+    assert "第2章:" in out and "t9 題9（まだ順番が来ていません（開けます））（確認問題あり）" in out
+    assert "locked" not in out
 
 
 def test_optional_material_is_dropped_not_raised():

@@ -73,7 +73,7 @@ class EpistemeClient:
             self.count_429 += 1
         body = _decode(resp)
         self.traces.append(HttpTrace(method=method, path=path, status=resp.status_code, elapsed_ms=elapsed,
-                                     response_excerpt=_excerpt(body), digest=_digest(body)))
+                                     response_excerpt=_excerpt(body), digest=_digest(body, path)))
         return resp.status_code, body, elapsed
 
     def wait_task(self, task_id: str, timeout_s: float = 1800.0, poll_s: float = 10.0,
@@ -108,9 +108,9 @@ def _decode(resp: httpx.Response) -> Any:
     return resp.text
 
 
-def _digest(body: Any) -> dict:
+def _digest(body: Any, path: str = "") -> dict:
     try:
-        return response_digest(body)
+        return response_digest(body, path=path)
     except Exception:  # noqa: BLE001 — 要約の失敗で記録を落とさない
         return {}
 

@@ -1,0 +1,23 @@
+id: s-v5-records-after-retraction
+population: students
+runner: [api, browser]
+session: 1
+preconditions:
+  - このペルソナは同じ周で s-v5-rewrite-delete と s-v5-anchor-dismiss を歩き、書き直し・取り消し・候補の却下をしている
+goal: '{{goal_text}} の前に、書き直し・取り消し・外したものが、わたしの記録でどの状態の名前で読めるかを確かめる'
+params_required: [goal_text]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.open
+  - do: learning.records.mine
+    note: 取り消し・外した記録を探し、状態の名前（取り消し・外した等）が読めるかを見る
+  - do: learning.traces.list
+    note: 問いの軌跡に取り消したものが出ていないかを見る
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#my-records
+  - manual: student/02-student.md#edit-delete-message
+watch_for:
+  - 取り消した・外した記録が消えておらず、状態の名前（日本語）が付いていて、内部の英語の状態名が出ない
+  - 取り消した記録が誰に見えるか（自分だけか）が書かれている

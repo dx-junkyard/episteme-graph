@@ -282,8 +282,89 @@ def check_teacher_structure(steps: list[TranscriptStep], factory: FindingFactory
     return out
 
 
+# ---------------------------------------------------------------------------
+# 間を埋めない（UC4 / RD2 / RD5）— 帰還の扉・今日の言葉・持ち越し・わたしの記録に督促・連続日数・件数（第 23 周）
+# ---------------------------------------------------------------------------
+# 語彙は製品のガードレールテストのモジュール定数をそのまま読む（PE6）
+_NAG_VOCAB_SOURCES = (
+    ("backend/tests/test_learner_streak_guardrails.py", "_FORBIDDEN"),
+    ("backend/tests/test_return_door_ui_static.py", "FORBIDDEN_WORDS"),
+    ("backend/tests/test_return_door_ui_static.py", "ELAPSED_DAYS_WORDS"),
+)
+NAG_SURFACE_ACTIONS = ("learning.cycle.return_door", "learning.cycle.todays_words", "learning.cycle.landing_candidates",
+                       "learning.cycle.intention", "learning.records.mine")
+# 本人の言葉（逐語）が入る欄は対象外（本人が「毎日」と書いても製品の督促ではない）
+_NAG_SKIP_KEYS = frozenset({"text", "label", "quote", "evidence_quote", "paraphrase", "learner_text"})
+_DAY_COUNT = re.compile(r"(?<![\w.])\d+\s*(?:日(?:目|間|連続|ぶり)|件|回)")
+
+
+def _module_constants(path: Path, name: str) -> tuple[str, ...]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return ()
+    for stmt in tree.body:
+        if (isinstance(stmt, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in stmt.targets)
+                and isinstance(stmt.value, ast.Tuple)):
+            return tuple(e.value for e in stmt.value.elts if isinstance(e, ast.Constant) and isinstance(e.value, str))
+    return ()
+
+
+@lru_cache(maxsize=1)
+def nag_vocab() -> tuple[str, ...]:
+    words: list[str] = []
+    for rel, name in _NAG_VOCAB_SOURCES:
+        words += list(_module_constants(REPO_ROOT / rel, name))
+    return tuple(dict.fromkeys(words))
+
+
+def _all_texts(body: Any, excerpt: str) -> Iterator[tuple[str, str]]:
+    if body is None:
+        for m in _KV_RE.finditer(excerpt or ""):
+            yield m.group(1), m.group(2)
+        return
+
+    def walk(v: Any, key: str) -> Iterator[tuple[str, str]]:
+        if isinstance(v, dict):
+            for k, x in v.items():
+                yield from walk(x, str(k))
+        elif isinstance(v, list):
+            for x in v:
+                yield from walk(x, key)
+        elif isinstance(v, str) and v.strip():
+            yield key, v
+
+    yield from walk(body, "")
+
+
+def check_nag(steps: list[TranscriptStep], factory: FindingFactory) -> list[Finding]:
+    """session をまたいで戻ってきた面（扉・今日の言葉・持ち越し・記録）に督促・経過日数・件数の語が無いこと。"""
+    out: list[Finding] = []
+    vocab = nag_vocab()
+    seen: set[str] = set()
+    for step in steps:
+        if step.action_id not in NAG_SURFACE_ACTIONS:
+            continue
+        texts: list[str] = []  # 投影（observation）は本人の言葉を含むので見ない。応答の製品の欄だけ
+        for t in step.http:
+            if t.status == 200 and t.response_excerpt:
+                texts += [x for k, x in _all_texts(excerpt_json(t.response_excerpt), t.response_excerpt)
+                          if k not in _NAG_SKIP_KEYS]
+        for text in texts:
+            hit = next((w for w in vocab if w in text), "")
+            m = _DAY_COUNT.search(_EXCLUDE.sub(" ", text)) if not hit else None
+            hit = hit or (m.group(0) if m else "")
+            if hit and step.action_id not in seen:
+                seen.add(step.action_id)
+                out.append(factory.make(oracle="B", severity="principle", step=step, quote=hit,
+                                        hypothesis=f"戻ってきた面に督促・経過日数・件数の語が出ている（{step.action_id}）",
+                                        layers=["understanding_cycle", "frontend_learning_ui"]))
+                break
+    return out
+
+
 def check(steps: list[TranscriptStep], factory: FindingFactory) -> list[Finding]:
-    out: list[Finding] = check_teacher_structure(steps, factory)
+    out: list[Finding] = check_teacher_structure(steps, factory) + check_nag(steps, factory)
     checks = _checks()
     domain = factory.meta.domain if factory.meta else ""
     for step in steps:

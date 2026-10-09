@@ -36,4 +36,6 @@ notes: |                            # 任意。前提・意図を事実文で
 | `c-astro-all-students-smoke` | astrophysics | course-astro-v1 | 学生 10 名全員で受講の入口だけを通す |
 | `c-astro-teachers-review` | astrophysics | corpus-astro-v1 | 行動型の違う教員 4 名で、グラフ確認から公開まで |
 | `c-astro-structure-30` | astrophysics | corpus-astro-v1 | 論理構造の見やすさ・辿れる理解・対話支援の 30 場面（§18。教員は既存教材を読むだけ・学生はコース 1bad7d9f 固定） |
+| `c-astro-vision5-students` | astrophysics | corpus-astro-tex-v1 | 第 23 周: vision 5 機能（扉・撤回・精読・記録と開示・位置づけ）を学生 3 名で（コース 1bad7d9f 固定） |
+| `c-astro-vision5-teachers` | astrophysics | corpus-astro-tex-v1 | 第 23 周 F5: リリース前の確認と確定文脈を教員 2 名で（自分のコースを種まきで作る） |
 | `c-regression-all` | （全分野） | 各回帰経路の指定 | `scenarios/regression/` 全件を replay で再演する |

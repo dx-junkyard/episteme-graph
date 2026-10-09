@@ -131,8 +131,10 @@ def test_affordance_and_manual_resolve(action_id):
 
 
 def test_known_unsupported_list_is_empty():
-    """現時点で全行為が実ルートを持つ（持たない行為を足したらここに列挙する）。"""
-    assert sorted(a.id for a in REGISTRY.values() if a.unsupported) == []
+    """実ルートを持たない行為（画面だけの切り替え）。足したらここに列挙する。
+
+    精読モードのトグルはブラウザの localStorage だけを変える（第 23 周。API runner は事実文で置き換える）。"""
+    assert sorted(a.id for a in REGISTRY.values() if a.unsupported) == ["learning.cycle.precision_toggle"]
 
 
 STRUCTURE_IDS = REQUIRED_IDS[REQUIRED_IDS.index("learning.component.context"):]

@@ -295,8 +295,10 @@ class Scenario:
 
 # 前提の機械検査の語彙（runner/api.py check_preconditions が実装）。
 #   return_door: 学習者の GET /cycle/return-door が requires の部品（leave_note / carryover / last_tension）を全部持つ
-PRECONDITION_CHECKS = ("return_door",)
+#   owns_course: 教員の GET /api/admin/courses に自分が所有するコースがある（requires: unpublished なら未公開のもの。第 23 周）
+PRECONDITION_CHECKS = ("return_door", "owns_course")
 RETURN_DOOR_PARTS = ("leave_note", "carryover", "last_tension")
+OWNS_COURSE_PARTS = ("unpublished",)
 
 
 def _parse_preconditions(raw: Any, sid: str) -> list[dict[str, Any]]:
@@ -315,6 +317,10 @@ def _parse_preconditions(raw: Any, sid: str) -> list[dict[str, Any]]:
             bad = [r for r in requires if r not in RETURN_DOOR_PARTS]
             if bad:
                 raise ScenarioError(f"{sid}: return_door の requires は {RETURN_DOOR_PARTS} から選ぶ: {bad}")
+        if check == "owns_course":
+            bad = [r for r in requires if r not in OWNS_COURSE_PARTS]
+            if bad:
+                raise ScenarioError(f"{sid}: owns_course の requires は {OWNS_COURSE_PARTS} から選ぶ: {bad}")
         out.append({"text": str(item.get("text") or ""), "check": check, "requires": requires})
     return out
 

@@ -14,6 +14,7 @@ from uxsim.actions import registry
 from uxsim.runner.client import EpistemeClient
 from uxsim.runner.state import PersonaSession, is_pseudo_chunk_id, material_anchors, material_sentences
 from uxsim.schema import HttpTrace
+from uxsim.runner import vision5_exec as _vision5
 
 DISCUSSION_TOPIC_ID = "_discussion"  # 製品 routes/learning.py の予約疑似トピック
 HISTORY_WINDOW = 20
@@ -86,6 +87,10 @@ def execute(action_id: str, args: dict, session: PersonaSession, client: Epistem
     action = registry.get(action_id)
     if action is None or action.unsupported or action.api is None:
         session.last_status, session.last_body = None, None
+        if action is not None:
+            # 画面だけの切り替え（例: 精読モードのトグル）は、画面の事実文と runner_note に置き換える（第 23 周）
+            _vision5.ui_only(action_id, session)
+            session.last_action = action_id
         return [HttpTrace(method="-", path=f"unsupported:{action_id}", error="unsupported")]
     ctx = _Ctx(action, args, session, client)
     handler = _HANDLERS.get(action_id, _default)
@@ -249,7 +254,18 @@ def _course_open(ctx: _Ctx) -> None:
     if not cid:
         ctx.call("GET", "/api/learning/courses/{course_id}")  # precondition を記録させる
         return
-    _load_course(ctx, cid)
+    status, body = _load_course(ctx, cid)
+    if status != 200 or not isinstance(body, dict):
+        return
+    # 第 23 周: 画面（app.js loadAndRenderCourse → loadReturnDoor）はコースを開くたびに帰還の扉を 1 回読み、
+    # 非空ならコースの画面の最上部に出す。投影がコースの目次だけを見せ、扉が無いように読めていた。
+    s = ctx.session
+    st2, door = ctx.call("GET", "/api/learning/courses/{course_id}/cycle/return-door", overrides={"course_id": cid})
+    s.last_status, s.last_body = status, body
+    if st2 == 200 and isinstance(door, dict) and not door.get("empty"):
+        if isinstance(door.get("carryover"), dict):
+            s.remember("carryover_traces", door["carryover"].get("trace_id"))
+        s.last_body = {**body, "_return_door": door}
 
 
 def _next_topic(session: PersonaSession) -> str:
@@ -333,6 +349,7 @@ def _chat(ctx: _Ctx, *, topic_id: Optional[str] = None, template: Optional[str] 
         body["screen_context"] = screen
     ov = dict(overrides or {})
     ov.setdefault("topic_id", tid)
+    s.scratch["last_chat_topic"] = tid  # 書き直し・削除の既定の会話（画面で直前に話していた会話）
     if template:
         status, resp = ctx.call("POST", template, json=body, overrides=ov)
     else:
@@ -435,15 +452,37 @@ def _discuss_ask(ctx: _Ctx) -> None:
 
 
 def _chat_rewrite(ctx: _Ctx) -> None:
+    """app.js の ✏️: その発言以降を捨てて同じ位置から送り直す。議論中の発言は議論の会話のまま送る（第 23 周）。"""
     s = ctx.session
-    history = s.chat_history
-    target = ctx.args.get("replace_message_id") or next(
-        (m.get("id") for m in reversed(history) if m.get("role") == "user" and m.get("id")), "")
-    if target:
-        idx = next((i for i, m in enumerate(history) if m.get("id") == target), None)
-        if idx is not None:
-            del history[idx:]  # UI と同じく当該メッセージ以降を捨てる
-    _chat(ctx, replace_message_id=target or None)
+    tid = _vision5.resolve_chat_topic(s, ctx.args.get("topic"))
+    history = s.history_for(tid)
+    idx, target = _vision5.pick_user_message(history, ctx.args.get("nth_from_last"),
+                                             str(ctx.args.get("replace_message_id") or ""))
+    if target and idx >= 0:
+        del history[idx:]  # UI と同じく当該メッセージ以降を捨てる
+        runner_note(s, f"rewrite_target: {target}")  # 審判 E8 が派生痕跡の supersede を確かめる宛先
+    if tid == DISCUSSION_TOPIC_ID:
+        _mark_voice_discuss(ctx)
+        _chat(ctx, topic_id=tid, replace_message_id=target or None, intent_mode="discuss",
+              discuss_scope=ctx.args.get("discuss_scope") or "course_sources")
+    else:
+        _chat(ctx, topic_id=tid, replace_message_id=target or None)
+
+
+def _chat_history(ctx: _Ctx) -> None:
+    """これまでの会話を読む。画面はトピック（議論）を開くとサーバの履歴を描くので、手元の会話が空なら
+    その履歴を手元に写す（翌日のセッションで書き直し・削除・続きの送信ができるように — 第 23 周）。"""
+    s = ctx.session
+    given = ctx.args.get("topic_id") or ctx.args.get("topic")
+    tid = _vision5.resolve_chat_topic(s, given) if given else s.topic_id
+    status, body = ctx.main(overrides={"topic_id": tid} if tid else None)
+    if status == 200 and isinstance(body, dict):
+        local = s.history_for(tid)
+        if not local:
+            for m in body.get("history") or []:
+                if isinstance(m, dict) and m.get("role") in ("user", "assistant"):
+                    local.append({"role": m["role"], "content": str(m.get("content") or ""),
+                                  **({"id": str(m["id"])} if m.get("id") else {})})
 
 
 def _corpus_discuss(ctx: _Ctx) -> None:
@@ -516,9 +555,32 @@ def _discuss_opening(ctx: _Ctx) -> None:
 
 
 def _cycle_intention(ctx: _Ctx) -> None:
-    status, body = ctx.main(json=ctx.body_args())
+    """discuss.js postCycleIntention。carryover_question の pick は「次に持ち越すなら」の選択肢
+    （saveCycleCarryover は選んだ問いの文と出所を送る）、revisit_answer は扉・開幕で見た持ち越しの問いに答える。"""
+    body = ctx.body_args()
+    s = ctx.session
+    pick = body.pop("pick", None)
+    role = str(body.get("role") or "")
+    own_text = str(body.get("text") or "").strip()
+    if role == "carryover_question" and pick not in (None, ""):
+        if own_text:
+            # 画面は「選択肢を選ぶ」か「自分の言葉で書く」の二択。両方渡されたら本人の言葉を優先する
+            # （第 23 周 st-02: pick を優先して本人の言葉が保存されなかった）
+            runner_note(s, "runner_choice: pick と text の両方が渡されたので「自分の言葉で書く」（text）で送った")
+        else:
+            cand = _vision5._hint_pick(list(s.scratch.get("landing_candidates") or []), pick, ("label",))
+            if cand is None:
+                return ctx.missing("landing_candidate")
+            body["text"], body["source_trace_id"] = str(cand.get("label") or ""), str(cand.get("trace_id") or "")
+    # 候補ゼロでも「自分の言葉で書く」は押せる（第 23 周 st-05）— text があれば候補を前提にしない
+    if role == "revisit_answer" and not body.get("source_trace_id") and s.latest("carryover_traces"):
+        body["source_trace_id"] = s.latest("carryover_traces")
+    body = {k: v for k, v in body.items() if v not in (None, "")}
+    status, body = ctx.main(json=body)
     if isinstance(body, dict):
         ctx.session.remember("intention_traces", _first(body, "trace_id", "id"))
+    if status is not None:
+        ctx.session.last_body = {"_ui_fact": _vision5.intention_view(role, status, body)}
 
 
 _QUICK_LABELS = {"気になる": "curious", "まだ分からない": "not_yet", "あとで戻る": "return_later",
@@ -542,20 +604,41 @@ def _cycle_anchor(ctx: _Ctx) -> None:
     ctx.main(json=body)
 
 
+_DIGEST_PATHS = {"traces": "/api/learning/courses/{course_id}/tension/digest",
+                 "anchor_traces": "/api/learning/courses/{course_id}/anchors/digest"}
+
+
 def _digest(kind: str) -> Callable[[_Ctx], None]:
     def run(ctx: _Ctx) -> None:
         status, body = ctx.main()
-        for it in _items(body, "items", "candidates", "digest"):
-            if isinstance(it, dict):
-                ctx.session.remember(kind, _first(it, "trace_id", "id"))
+        items = [it for it in _items(body, "items", "candidates", "digest") if isinstance(it, dict)]
+        if status == 200:
+            ctx.session.scratch[f"digest_{kind}"] = items  # 画面は先頭から 1 枚ずつ（「あとで」で次へ）
+        for it in items:
+            ctx.session.remember(kind, _first(it, "trace_id", "id"))
     return run
 
 
 def _trace_action(kind: str, json_keys: tuple[str, ...] = ()) -> Callable[[_Ctx], None]:
+    """候補カードの「そう、これ」「違う」。画面は digest の先頭の 1 枚（いま表示されている候補）に押す。
+    pick（候補の番号）を渡すと、前の候補を「あとで」にしてその候補に押す。押した後、画面は digest を読み直す
+    （第 23 周 st-06: 候補の宛先が画面に無く、最後に覚えた id へ送っていた）。"""
     def run(ctx: _Ctx) -> None:
-        tid = ctx.args.get("trace_id") or ctx.session.latest(kind)
+        s = ctx.session
+        tid = ctx.args.get("trace_id") or _vision5.digest_pick(s, f"digest_{kind}", ctx.args.get("pick")) \
+            or s.latest(kind)
         body = {k: ctx.args[k] for k in json_keys if ctx.args.get(k) not in (None, "")}
-        ctx.main(json=body, overrides={"trace_id": tid} if tid else None)
+        status, resp = ctx.main(json=body, overrides={"trace_id": tid} if tid else None)
+        if status == 200 and kind in _DIGEST_PATHS:
+            notice = resp.get("notice") if isinstance(resp, dict) else ""
+            st2, dig = ctx.call("GET", _DIGEST_PATHS[kind])
+            if st2 == 200:
+                items = [it for it in _items(dig, "items") if isinstance(it, dict)]
+                s.scratch[f"digest_{kind}"] = items
+                card = (_vision5.anchor_card if kind == "anchor_traces" else _vision5.tension_card)(dig)
+                s.last_status, s.last_body = 200, {"_ui_fact": (f"{notice}\n" if notice else "") + card}
+            elif notice:
+                s.last_status, s.last_body = 200, {"_ui_fact": str(notice)}
     return run
 
 
@@ -567,7 +650,7 @@ def _recon_next(ctx: _Ctx) -> None:
         ctx.session.scratch["recon_space"] = [o for o in item.get("response_space") or [] if isinstance(o, dict)]
 
 
-def _recon_submit(ctx: _Ctx) -> None:
+def _recon_response(ctx: _Ctx) -> dict:
     resp = ctx.args.get("response")
     if not isinstance(resp, dict):
         resp = {"text": str(resp or "")}
@@ -582,8 +665,24 @@ def _recon_submit(ctx: _Ctx) -> None:
         if hit is None:
             hit = next((o for o in space if str(o.get("label")) and str(o.get("label")) in pick), None)
         resp = {"option_id": str(hit["id"])} if hit else resp
+    return resp
+
+
+def _recon_submit(ctx: _Ctx) -> None:
+    resp = _recon_response(ctx)
     status, body = ctx.main(json={"course_id": ctx.session.course_id, "response": resp,
                                   "revision_of": ctx.args.get("revision_of")})
+    if isinstance(body, dict):
+        ctx.session.remember("recons", _first(body, "recon_id", "reconstruction_id", "id"))
+
+
+def _recon_revise(ctx: _Ctx) -> None:
+    """reconstruction.js の「もう一度挑戦」: 直前の答え（current.reconId）を revision_of に付けて /revise へ。"""
+    prev = ctx.args.get("revision_of") or ctx.session.latest("recons")
+    if not prev:
+        return ctx.missing("revision_of")
+    resp = _recon_response(ctx)
+    status, body = ctx.main(json={"course_id": ctx.session.course_id, "response": resp, "revision_of": prev})
     if isinstance(body, dict):
         ctx.session.remember("recons", _first(body, "recon_id", "reconstruction_id", "id"))
 
@@ -670,6 +769,7 @@ def _element_context(ctx: _Ctx) -> None:
 
 def _network(ctx: _Ctx) -> None:
     status, body = ctx.main()
+    _vision5.remember_network_nodes(ctx.session, body)
     for n in _items(body, "nodes"):
         if isinstance(n, dict):
             ctx.session.remember("nodes", _first(n, "id", "node_id"))
@@ -973,8 +1073,11 @@ def _cb_register(ctx: _Ctx) -> None:
 
 
 def _course_visibility(ctx: _Ctx) -> None:
-    ctx.main(json={"visibility": str(ctx.args.get("visibility") or "public"),
-                   "group_id": ctx.args.get("group_id")})
+    vis = str(ctx.args.get("visibility") or "public")
+    status, _ = ctx.main(json={"visibility": vis, "group_id": ctx.args.get("group_id")})
+    if status == 200 and ctx.action.id == "admin.course.visibility":
+        # 画面の文（リリース前の確認のステップ 3「公開しました。」/ コース管理「更新しました」）
+        ctx.session.last_body = {"_ui_fact": _vision5.course_visibility_view(ctx.session, vis)}
 
 
 def _release_placements(ctx: _Ctx) -> None:
@@ -983,11 +1086,34 @@ def _release_placements(ctx: _Ctx) -> None:
         for p in _items(doc, "placements"):
             if isinstance(p, dict):
                 ctx.session.remember("placements", _first(p, "id", "placement_id"))
+    if status == 200:
+        _vision5.remember_landscape(ctx.session, body)
 
 
 def _release_accept(ctx: _Ctx) -> None:
-    presented = ctx.session.all("placements")
-    ctx.main(json={"presented_placement_ids": presented} if presented else {})
+    """admin-release-review.js acceptPlacements と同じ: 未確認が無ければ記録せずに次へ、あれば画面で未確認として
+    描いていた配置の id と、根拠の折りたたみを開いた行の id を来歴として送る（第 23 周）。"""
+    body = _vision5.accept_body(ctx.session)
+    if body is None:
+        # 画面は未確認が無ければ何も記録せずにステップ 3 を描く（acceptPlacements → advance）
+        ctx.session.last_status, ctx.session.last_body = 200, {
+            "_ui_fact": _vision5.RR_NO_PENDING + "\n" + _vision5.release_step3_text(ctx.session, published=False)}
+        runner_note(ctx.session, "runner_ui_mirror: 未確認の配置が無いので「次へ」は POST しなかった（画面と同じ）")
+        return
+    status, resp = ctx.main(json=body)
+    if status == 200:
+        dc = resp.get("decision_context") if isinstance(resp, dict) else None
+        if isinstance(dc, dict):
+            reported = dc.get("client_reported") if isinstance(dc.get("client_reported"), dict) else {}
+            opened = reported.get("evidence_expanded_placement_ids")
+            ctx.session.scratch["accept_record"] = {
+                "confirmed": int((dc.get("applied") or {}).get("count") or 0),
+                "evidence_opened": len(opened) if isinstance(opened, list) else len(body.get("evidence_expanded_placement_ids") or [])}
+        # 画面は記録の後に配置を取り直してからステップ 3 を描く（fetchLandscape）。投影は「次へ」の応答のまま
+        st2, fresh = ctx.call("GET", "/api/admin/landscape/courses/{course_id}/placements")
+        if st2 == 200:
+            _vision5.remember_landscape(ctx.session, fresh)
+        ctx.session.last_status, ctx.session.last_body = status, resp
 
 
 def _atlas_propose(ctx: _Ctx) -> None:
@@ -1137,21 +1263,33 @@ def _chat_ask_selection(ctx: _Ctx) -> None:
     """画面では教材に実在する文しか選べない。``selection_ref``（「区画番号:文番号」）で投影の文を選ぶか、
     ``selection_text`` が教材本文に含まれることを確かめる（第 14 周: 本文に無い文を選んだことになっていた）。"""
     sents = material_sentences(ctx.session.material)
+    norm = lambda x: re.sub(r"[\s*$]+", "", x)  # 画面で選ぶ文は描画後（強調・数式の区切りは見えない）
+    text = str(ctx.args.get("selection_text") or "").strip()
     ref = str(ctx.args.get("selection_ref") or "").strip()
+    ref_seg: Optional[int] = None
+    ref_text = ""
     if ref:
         m = re.fullmatch(r"(\d+)\s*[:：-]\s*(\d+)", ref)
-        if not m or int(m.group(1)) >= len(sents) or not (1 <= int(m.group(2)) <= len(sents[int(m.group(1))])):
+        if m and int(m.group(1)) < len(sents) and 1 <= int(m.group(2)) <= len(sents[int(m.group(1))]):
+            ref_seg, ref_text = int(m.group(1)), sents[int(m.group(1))][int(m.group(2)) - 1]
+        elif not text:
             return ctx.missing("selection_ref")
-        ctx.args["selection_text"] = sents[int(m.group(1))][int(m.group(2)) - 1]
-        ctx.args["selection_segment_id"] = int(m.group(1))
-    text = str(ctx.args.get("selection_text") or "").strip()
+    # 第 23 周: 画面の「ここについて質問」は選んだ文そのものを送る。頭脳が文（selection_text）を書いたらそれを優先し、
+    # selection_ref は区画の特定にだけ使う（ref の文で text を上書きしていた — st-02 run 27821 seq7）。
+    if not text:
+        text = ref_text
+    elif ref_text and norm(ref_text) != norm(text):
+        runner_note(ctx.session, "runner_choice: selection_text と selection_ref の文が食い違ったので、"
+                                 "選んだ文（selection_text）を送った")
     if not text:
         return ctx.missing("selection_text")
-    norm = lambda x: re.sub(r"[\s*$]+", "", x)  # 画面で選ぶ文は描画後（強調・数式の区切りは見えない）
+    ctx.args["selection_text"] = text
     hits = [i for i, ss in enumerate(sents) if norm(text) in norm("".join(ss))]
     if sents and not hits:
         return ctx.missing("selection_text_not_in_material")
-    if hits and not isinstance(ctx.args.get("selection_segment_id"), int):
+    if ref_seg is not None and (not hits or ref_seg in hits):
+        ctx.args["selection_segment_id"] = ref_seg
+    elif hits and not isinstance(ctx.args.get("selection_segment_id"), int):
         ctx.args["selection_segment_id"] = hits[0]
     seg = ctx.args.get("selection_segment_id")
     _chat(ctx, **{"intent_mode": "on_path", **_voice_kwargs(ctx)},
@@ -1334,6 +1472,19 @@ def _graph_open_structure(ctx: _Ctx) -> None:
 
 
 _HANDLERS: dict[str, Callable[[_Ctx], None]] = {
+    "learning.chat.delete_message": lambda c: _vision5.delete_message(c),
+    "learning.chat.history": _chat_history,
+    "learning.traces.list": lambda c: _vision5.traces_list(c),
+    "learning.traces.map_exclude": lambda c: _vision5.map_exclude(c),
+    "learning.traces.map_restore": lambda c: _vision5.map_restore(c),
+    "learning.records.export": lambda c: _vision5.records_export(c),
+    "learning.disclosure.view": lambda c: _vision5.disclosure_view(c),
+    "learning.cycle.landing_candidates": lambda c: _vision5.landing_candidates(c),
+    "learning.cycle.return_door": lambda c: _vision5.return_door(c),
+    "learning.reconstruction.revise": _recon_revise,
+    "admin.courses.list": lambda c: _vision5.courses_list(c),
+    "admin.release_review.row_status": lambda c: _vision5.row_status(c),
+    "admin.release_review.read_evidence": lambda c: _vision5.read_evidence(c),
     "learning.course.list": _course_list,
     "learning.course.enroll": _course_enroll,
     "learning.course.open": _course_open,

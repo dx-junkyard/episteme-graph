@@ -513,6 +513,11 @@ def check_preconditions(scenario: Scenario, session: PersonaSession, client: Epi
     saved = (session.last_status, session.last_body, session.last_action)
     for pre in scenario.precondition_checks:
         check, requires, text = pre.get("check"), list(pre.get("requires") or []), str(pre.get("text") or "")
+        if check == "owns_course":
+            miss = _check_owns_course(scenario, session, client, writer, requires, text)
+            if miss:
+                unmet.append(miss)
+            continue
         if check != "return_door":
             continue
         cid = _precondition_course_id(session)
@@ -541,6 +546,41 @@ def check_preconditions(scenario: Scenario, session: PersonaSession, client: Epi
     return unmet
 
 
+def _check_owns_course(scenario: Scenario, session: PersonaSession, client: EpistemeClient,
+                       writer: Optional["RunWriter"], requires: list[str], text: str) -> Optional[dict[str, Any]]:
+    """教員が所有するコースがあるかを GET /api/admin/courses で確かめる（第 23 周）。
+
+    満たされていれば ``admin.courses.list`` の手と同じく ``session.course_id`` をそのコースにする
+    （以降の「確認して公開」の対象）。満たされていなければ不足の dict を返す。
+    """
+    args = {"prefer": "unpublished"} if "unpublished" in requires else {}
+    http = execute("admin.courses.list", args, session, client)
+    status, body = session.last_status, session.last_body
+    rows = [c for c in body if isinstance(c, dict)] if isinstance(body, list) else []
+    owned = [c for c in rows if c.get("role") == "owner"]
+    if "unpublished" in requires:
+        owned = [c for c in owned if not c.get("is_published")]
+    if status != 200:
+        miss = {"text": text, "check": "owns_course", "missing": ["owned_course"],
+                "reason": f"コース一覧を読めなかった（HTTP {status}）"}
+    elif not owned:
+        miss = {"text": text, "check": "owns_course", "missing": ["owned_course"],
+                "reason": "自分が所有する" + ("未公開の" if "unpublished" in requires else "") + "コースが無い"}
+    else:
+        miss = None
+    if writer is not None:
+        action = registry.REGISTRY["admin.courses.list"]
+        verdict = "満たされている" if miss is None else f"満たされていない（{miss['reason']}）"
+        writer.write_step(TranscriptStep(
+            seq=writer.next_seq(), persona_id=session.persona_id, session=session.session_no,
+            scenario_id=scenario.id, action_id="admin.courses.list", args=args, screen=action.screen,
+            affordance=action.affordance, http=http,
+            observation=project_observation("admin.courses.list", status, body),
+            runner_notes=[f"runner_driven: 経路 {scenario.id} の前提「{text}」を確かめた — {verdict}"]
+            + list(session.scratch.pop("runner_notes", None) or [])))
+    return miss
+
+
 def bootstrap_seed_course(seed: Scenario, session: PersonaSession, client: EpistemeClient,
                           writer: Optional["RunWriter"] = None) -> tuple[bool, list[str]]:
     """種まき経路を歩く前に、通常の経路と同じコースの文脈（受講 → コースを開く）を用意する（runner の手）。
@@ -552,6 +592,9 @@ def bootstrap_seed_course(seed: Scenario, session: PersonaSession, client: Epist
     が同じコースを開けるようにする。戻り値は (用意できたか, 事実文の列)。
     """
     notes: list[str] = []
+    if session.role == "TEACHER":
+        # 教員の種まき（例: 自分のコースを登録する経路）は受講の文脈を要しない（第 23 周）
+        return True, ["教員の種まきなので受講・コースを開く手順は要らない"]
     saved = (session.last_status, session.last_body, session.last_action)
     cid = _precondition_course_id(session)
     if not cid:

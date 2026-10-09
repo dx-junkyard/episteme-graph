@@ -175,6 +175,18 @@ def _generic(body: Any, depth: int = 0, max_lines: int = 160) -> list[str]:
     return lines
 
 
+# app.js renderCourseSelect の optgroup の見出し（逐語ミラー）
+COURSE_GROUP_MINE = "マイコース"
+COURSE_GROUP_ENROLLABLE = "新しく受講可能なコース"
+# 投影を上限で切るときの明示（画面は切らないので、切ったことを頭脳に隠さない）
+CONTINUES_MARK = "（続きあり）"
+# personal-map-home.js の常設注記と空状態の事実文（逐語ミラー）
+PERSONAL_MAP_PRIVACY_NOTE = "この地図はあなたにだけ表示されます。成績評価には使用されません。"
+PERSONAL_MAP_EMPTY = (
+    ("いまここの周り", "まだ論文の理論構成に結びついた記録がありません。教材のどこについての記録か決めると、ここに現れます。"),
+    ("いまの地図", "まだ痕跡がありません。学習の中で問いを残すと、ここに現れます。"),
+    ("問いからの旅", "まだ問いの記録がありません。学習の中で問いを残すと、ここに現れます。"),
+)
 # admin.js REFERENCE_HEALTH_CHIP_LABELS / admin-graph-review.js MODULE_RELATED_NONE_TEXT の逐語ミラー
 REFERENCE_HEALTH_CHIP_LABELS = {"ok": "参照: 問題なし", "broken": "参照: 切れがあります", "unchecked": "参照: 未確認"}
 MODULE_RELATED_NONE_TEXT = "このモジュールと同じ構造のモジュールを持つ他の論文は、このコーパスの中では見つかっていません。"
@@ -534,6 +546,11 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
         return "画面が応答しなかった（接続できない / 時間切れ）。"
     if status >= 400:
         return _clip(_error(status, body))
+    from uxsim.runner import vision5_exec  # 遅延 import（循環回避）— 第 23 周の画面（扉・記録・リリース前の確認ほか）
+
+    shown = vision5_exec.project(action_id, status, body)
+    if shown:
+        return _clip(shown)
     if isinstance(body, dict) and "answer" in body and action_id.startswith(
             ("learning.chat", "learning.discuss.ask", "learning.corpus.discuss_ask", "admin.course_builder.chat",
              "admin.copilot")):
@@ -556,12 +573,34 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
     if isinstance(body, dict) and body.get("_binary"):
         return f"音声・画像が返ってきた（{body['_binary']}）。"
     if action_id == "learning.course.list" and isinstance(body, list):
-        lines = ["コース一覧:"]
-        for c in body[:20]:
-            if isinstance(c, dict):
-                tag = "（受講可能）" if c.get("is_enrollable") else ""
-                lines.append(f"- {c.get('title', '')}{tag} id={c.get('id', '')}")
-        return _clip("\n".join(lines) if len(lines) > 1 else "コースが 1 つも表示されていない。")
+        # 画面（app.js renderCourseSelect）は受講中・所有を「マイコース」、未受講を「新しく受講可能なコース」の
+        # 見出しで分ける（第 23 周: 見出しを落として受講可能側だけに印があるように見せていた）
+        rows = [c for c in body[:20] if isinstance(c, dict)]
+        own = [c for c in rows if not c.get("is_enrollable")]
+        avail = [c for c in rows if c.get("is_enrollable")]
+        if not rows:
+            return "コースが 1 つも表示されていない。"
+        lines = ["コースの選択:"]
+        if not own:
+            lines.append("（受講するコースを選択...）")
+        for head, group in ((COURSE_GROUP_MINE, own), (COURSE_GROUP_ENROLLABLE, avail)):
+            if group:
+                lines.append(f"{head}:")
+                lines += [f"- {c.get('title', '')} id={c.get('id', '')}" for c in group]
+        return _clip("\n".join(lines))
+    if action_id == "learning.source_chunk.open" and isinstance(body, dict):
+        # 画面（app.js の出典ポップアップ）は節名と本文を切らずに描く（第 23 周: 本文が 200 字で切れていた）
+        lines = [str(body.get("section") or "").strip()]
+        lines.append(render_material_text({"text": body.get("text"), "formulas": body.get("formulas"),
+                                           "figures": body.get("figures")}))
+        text = "\n".join(x for x in lines if x)
+        if len(text) > OBSERVATION_CHARS - len(CONTINUES_MARK):
+            text = text[: OBSERVATION_CHARS - len(CONTINUES_MARK) - 1] + CONTINUES_MARK
+        return text or "（出典の本文は表示されなかった）"
+    if action_id == "learning.personal_network.mine" and isinstance(body, dict) and not body.get("nodes"):
+        # 画面（personal-map-home.js）は空のとき各タブに事実文を描く（第 23 周: 投影が無言だった）
+        return "\n".join(["わたしの地図（タブ: いまここの周り / いまの地図 / 問いからの旅）", PERSONAL_MAP_PRIVACY_NOTE]
+                         + [f"{tab}: {msg}" for tab, msg in PERSONAL_MAP_EMPTY])
     if action_id == "admin.materials.list" and isinstance(body, list):
         # 教材管理の行（admin.js renderMaterials）: 題名・状態・開示範囲・参照の健全性チップの文言
         lines = ["教材一覧:"]

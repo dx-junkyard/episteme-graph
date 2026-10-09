@@ -1,0 +1,45 @@
+id: t-v5-release-meticulous
+population: teachers
+runner: [api, browser]
+preconditions:
+  - text: このペルソナは自分が所有する未公開のコースを持っている
+    check: owns_course
+    requires: [unpublished]
+seed_scenarios: [t-v5-register-own-course]
+goal: "自分のコースの「確認して公開」で、論文の位置づけを根拠まで読み、違うものは却下・再検討にしてから次へ進めて公開する"
+params_required: [reject_hint, reconsider_hint]
+steps:
+  - do: auth.login
+  - do: admin.courses.list
+    with: {prefer: unpublished}
+  - do: admin.release_review.placements
+    note: ステップ 2 の位置づけを全部読む
+  - do: admin.release_review.read_evidence
+    with: {placement_hint: "{{reject_hint}}"}
+    note: 却下を考えている行の「根拠を見る」を開く
+  - do: admin.release_review.row_status
+    with: {status: 却下, placement_hint: "{{reject_hint}}"}
+  - do: admin.release_review.read_evidence
+    with: {placement_hint: "{{reconsider_hint}}"}
+  - do: admin.release_review.row_status
+    with: {status: 再検討, placement_hint: "{{reconsider_hint}}"}
+  - repeat:
+      until: "persona_decides_to_stop or steps > 2"
+      max: 2
+      do: admin.release_review.read_evidence
+      note: ほかに気になる行の根拠も開く（番号か概念の名前で指す）
+  - do: admin.release_review.accept
+    note: 残りの未確認を「この配置で次へ」で確認する
+  - do: admin.course.visibility
+    with: {visibility: public}
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/13-admin-course-management.md#release-review-modal
+  - manual: teacher/13-admin-course-management.md#release-review-evidence
+  - manual: teacher/13-admin-course-management.md#release-review-next
+watch_for:
+  - 各行の根拠（論文からの逐語引用）が 1 操作で開け、引用が無い行は「無い」と事実文で言う
+  - 却下・再検討にした行は「次へ」で確認済みに上書きされない
+  - このペルソナは 4 本の教材の編集権限（editor 共有）を持つので、「次へ」で未確認が確認済みになり、確認できなかった論文の事実文は出ない
+  - 「次へ」のあとに、表示されていた配置と確認した配置が一致したかが事実文で出て、開いた根拠の行が来歴として記録に残る（審判 E6）
+  - 未確認の件数は出てよいが、確からしさの数値（重み・信頼度）は出ない

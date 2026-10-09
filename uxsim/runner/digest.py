@@ -143,8 +143,85 @@ def simulation_runs_record(body: Any) -> list[dict]:
     return out[:MAX_SOURCES]
 
 
-def response_digest(body: Any) -> dict:
+# ---------------------------------------------------------------------------
+# 第 23 周: 非 LLM 応答の構造（審判 E7 の差分）と、わたしの記録の行（審判 E8）
+# ---------------------------------------------------------------------------
+# 学習者の非 LLM の GET のうち、同じコースなら学習者によらず同じであるはずの面（E7 が比べる）。
+# 本人固有の欄（STRUCTURE_PERSONAL_KEYS）を落として比べる。
+STRUCTURE_PATH_RES = (
+    re.compile(r"^/api/learning/courses/[^/]+$"),
+    re.compile(r"^/api/learning/courses/[^/]+/topics/[^/]+/material$"),
+    re.compile(r"^/api/learning/courses/[^/]+/discuss/opening$"),
+    re.compile(r"^/api/learning/courses/[^/]+/topics/[^/]+/reconstruction/next$"),
+    re.compile(r"^/api/learning/courses/[^/]+/landscape$"),
+)
+# 本人の進み具合・本人の言葉・時刻（学習者ごとに違って当然の欄）。宛先（id 類）も比べない
+# status_label は目次の状態の表示語で、本人の会話で学習中に変わる（第 23 周: E7 の誤検出源）
+STRUCTURE_PERSONAL_KEYS = frozenset({
+    "status", "status_label", "progress_pct", "progress", "intention", "enrolled", "notice", "learning_state",
+    "current_topic_id",
+    "personal_graph", "progress_data", "trace_id", "message_id", "revisit", "carryover", "leave_note",
+})
+_STRUCT_ADDRESS_RE = re.compile(r"(?:^|_)(?:id|ids|uuid)$|_at$|^(?:created|updated)$")
+STRUCTURE_MAX_PATHS = 200
+STRUCTURE_MAX_DEPTH = 4
+STRUCTURE_MAX_LIST = 30
+
+
+def _structure_walk(v: Any, path: str, depth: int, out: dict[str, str]) -> None:
+    if len(out) >= STRUCTURE_MAX_PATHS:
+        return
+    if isinstance(v, dict) and depth < STRUCTURE_MAX_DEPTH:
+        for k in sorted(v):
+            if k in STRUCTURE_PERSONAL_KEYS or _STRUCT_ADDRESS_RE.search(str(k)):
+                continue
+            _structure_walk(v[k], f"{path}.{k}" if path else str(k), depth + 1, out)
+    elif isinstance(v, list) and depth < STRUCTURE_MAX_DEPTH:
+        out[f"{path}#len"] = str(len(v))
+        for i, x in enumerate(v[:STRUCTURE_MAX_LIST]):
+            _structure_walk(x, f"{path}[{i}]", depth + 1, out)
+    else:
+        if isinstance(v, (dict, list)):
+            v = _strip_struct(v)
+        out[path or "."] = _sha(json.dumps(v, ensure_ascii=False, sort_keys=True))[:8]
+
+
+def _strip_struct(v: Any) -> Any:
+    if isinstance(v, dict):
+        return {k: _strip_struct(x) for k, x in v.items()
+                if not (k in STRUCTURE_PERSONAL_KEYS or _STRUCT_ADDRESS_RE.search(str(k)))}
+    if isinstance(v, list):
+        return [_strip_struct(x) for x in v]
+    return v
+
+
+def structure_record(body: Any) -> dict[str, str]:
+    """欄の道 → 値の指紋（先頭 8 字）。本人固有の欄・宛先・時刻を落とす。値そのものは残さない（PE7）。"""
+    out: dict[str, str] = {}
+    _structure_walk(body, "", 0, out)
+    return out
+
+
+def records_record(body: Any) -> list[dict]:
+    """わたしの記録（GET /api/me/records）の行: id・種類・状態・地図に出していないか（本文は残さない）。"""
+    out: list[dict] = []
+    for sys_ in (body.get("systems") if isinstance(body, dict) else None) or []:
+        for it in (sys_.get("items") if isinstance(sys_, dict) else None) or []:
+            if isinstance(it, dict) and it.get("id"):
+                flags = it.get("flags") if isinstance(it.get("flags"), dict) else {}
+                out.append({"id": str(it["id"]), "kind": str(it.get("kind") or ""), "status": str(it.get("status") or ""),
+                            "map_excluded": bool(flags.get("map_excluded"))})
+    return out[:500]
+
+
+def response_digest(body: Any, path: str = "") -> dict:
     out: dict[str, Any] = {}
+    if path and isinstance(body, (dict, list)) and any(r.match(path) for r in STRUCTURE_PATH_RES):
+        out["structure"] = structure_record(body)
+    if path == "/api/me/records":
+        rec = records_record(body)
+        if rec:
+            out["records"] = rec
     sim_runs = simulation_runs_record(body)
     if sim_runs:
         out["simulation_runs"] = sim_runs

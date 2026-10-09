@@ -1,0 +1,20 @@
+scenario: t-v5-register-own-course
+domain: astrophysics
+params:
+  course_title: 論文ゼミ（第 23 周）
+  builder_messages:
+    - 章立ては教材の論文 1 本につき 1 章にしてください。
+    - これで登録します。最後に章とトピックの一覧を見せてください。
+per_archetype:
+  veteran_clicks_through:
+    builder_messages:
+      - それでいい。登録するから一覧だけ出して。
+  meticulous_reviewer:
+    builder_messages:
+      - 各トピックがどの学ぶ単位から作られているかを、単位の名前で一覧にしてください。
+      - 論文に書かれていない説明を足している箇所があれば挙げてください。これで登録します。
+personas:
+  te-02-veteran-intro:
+    course_title: 宇宙論入門 補助教材（第 23 周・堀）
+  te-03-meticulous-seminar:
+    course_title: 大規模構造の論文ゼミ（第 23 周・岡村）

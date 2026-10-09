@@ -54,6 +54,11 @@ _LAYER_BY_PREFIX: dict[str, list[str]] = {
     "admin.copilot.": ["admin_copilot"],
     "admin.help.": ["help_kb"],
     "admin.discuss_opening_review.": ["discuss"],
+    "learning.chat.delete_message": ["rag_chat", "trace_registry"],
+    "learning.traces.": ["learner_experience_b", "personal_network"],
+    "learning.traces.map_": ["personal_network", "trace_registry"],
+    "learning.disclosure.": ["disclosure_axes"],
+    "admin.courses.": ["auth_visibility"],
     "learning.simlab.": ["simulation_bridge_sb", "frontend_learning_ui"],
     "admin.simulation.": ["simulation_bridge_sb"],
 }

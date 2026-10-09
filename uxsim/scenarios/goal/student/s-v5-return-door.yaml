@@ -1,0 +1,39 @@
+id: s-v5-return-door
+population: students
+runner: [api, browser]
+session: 2
+preconditions:
+  - text: 前のセッションでこのペルソナが書き置きと持ち越しの問いを残している
+    check: return_door
+    requires: [leave_note, carryover]
+seed_scenarios: [s-v5-leave-and-carry]
+goal: '{{goal_text}} の続きをするために翌日ログインし、扉の自分の言葉から始めて、持ち越した問いに答える'
+params_required: [goal_text, revisit_answer_text, seed_questions]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.open
+  - do: learning.cycle.return_door
+    note: コースを開いた画面の最上部の扉を読む（前の日の自分の書き置きと持ち越しの問い）
+  - do: learning.discuss.opening
+    note: 開幕画面に持ち越しの問いへの再回答の欄が出るかを見る
+  - do: learning.cycle.intention
+    with: {role: revisit_answer, text: '{{revisit_answer_text}}'}
+    note: 持ち越した問いに、一晩たった自分の言葉で答える
+  - choose:
+      - do: learning.discuss.ask
+        with: {message: '{{seed_questions | next}}'}
+    optional: true
+  - do: learning.records.mine
+    note: 書き置き・持ち越し・再回答が、わたしの記録でどう並んでいるかを見る
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#return-door
+  - manual: student/02-student.md#return-door-inlay
+  - manual: student/02-student.md#understanding-cycle
+  - manual: student/02-student.md#my-records
+watch_for:
+  - 扉に書き置きと持ち越しの問いが自分の言葉のまま出て、AI の要約・言い換えが混ざらない
+  - 扉に経過日数（「〜日ぶり」）・件数・連続日数・督促が出ない
+  - 持ち越しの問いに答えると、前の自分の答えとの違いが事実文で返り、正誤・点数にならない
+  - 書き置き・持ち越し・再回答の状態が、わたしの記録で種類と状態の名前付きで読める

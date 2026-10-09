@@ -33,7 +33,7 @@ watch_for:                        # 審判が見るべきこと（平叙の事�
 ```yaml
 preconditions:
   - text: 前のセッションでこのペルソナが書き置きと持ち越しの問いを残している
-    check: return_door                 # 語彙は scenario.py の PRECONDITION_CHECKS
+    check: return_door                 # 語彙は scenario.py の PRECONDITION_CHECKS（return_door / owns_course）
     requires: [leave_note, carryover]  # return_door の部品（leave_note / carryover / last_tension）。空なら「扉が空でない」
 seed_scenarios: [s-discuss-one-paper]
 ```
@@ -52,6 +52,9 @@ runner は経路を始める前に `check` 付きの前提を学習者の GET（
 2. 種まき経路が無い、または歩いても足りなければ、経路を**歩かずに飛ばし**、`meta.json` の `blocked_precondition`
    と notes（`blocked_precondition:`）・runner_note に残す。空のセッションを歩くと「扉・持ち越しが空」を製品の欠陥と
    読む偽所見になる（第 17 周 st-07）。
+
+`check: owns_course`（第 23 周）は教員の `GET /api/admin/courses` に自分の所有するコースがあるか（`requires: [unpublished]`
+なら未公開のもの）を確かめ、あればそのコースを「確認して公開」の対象にする。教員の種まき経路はコースの受講を要しない。
 
 文字列だけの前提は機械では確かめません（ペルソナと審判が読む事実文のまま）。
 
@@ -117,6 +120,23 @@ runner は経路を始める前に `check` 付きの前提を学習者の GET（
 | students | `s-misconception-mirror` | 誤解を前提に質問し訂正を受ける（#25） |
 | students | `s-stuck-scaffold` | 「わからない」と短く言い続ける（#26） |
 | students | `s-elicit-diff` | 予想を書く → 出典と並置（#27） |
+| students | `s-v5-leave-nothing` / `s-v5-empty-door` | 第 23 周 F1: 何も残さずに終える → 翌日、空の扉に何が出るか |
+| students | `s-v5-leave-and-carry` / `s-v5-return-door` | F1: 書き置き・持ち越しを残す → 翌日、扉から持ち越しに答える |
+| students | `s-v5-revisit-rewrite` | F1: 持ち越しに答えてから書き直す → 扉と記録の変化 |
+| students | `s-v5-rewrite-delete` | F2: 書き直し → 🗑 取り消し → 会話・問いの軌跡・わたしの記録 |
+| students | `s-v5-map-exclude-restore` | F2: 「地図には反映しない」→「地図に戻す」→ 地図・旅・近傍・記録 |
+| students | `s-v5-recon-revise` | F2: 再構成 → 判定がおかしい → もう一度挑戦 → 記録 |
+| students | `s-v5-anchor-dismiss` | F2: 帰属・引っかかりの候補を外す → 記録 |
+| students | `s-v5-precision-elicit` | F3: 精読モードの入口 → 予想 → 並置 → 軽い印 → 持ち越しを選ぶ |
+| students | `s-v5-predict-pause` / `s-v5-predict-resume` | F3: 予想だけ書いてやめる → 翌日、続きを辿る |
+| students | `s-v5-predict-no-grading` | F3: 自由記述の予想に正誤・点数が出ない・並置が出典を示す |
+| students | `s-v5-records-export` / `s-v5-records-after-retraction` | F4: わたしの記録と持ち出し・取り消し後の状態ラベル |
+| students | `s-v5-ask-disclosure` | F4: 入力欄の下の開示の一行とチャットの答えの一致 |
+| students | `s-v5-landscape-check` | F5 の学習者側: 位置づけ表示（教員が確認を飛ばして公開した前後で比べる） |
+| teachers | `t-v5-register-own-course` | F5 の種まき: 砂場の教材から自分のコースを登録する（公開しない） |
+| teachers | `t-v5-release-skip-step2` | F5: 「確認して公開」でステップ 2 を「あとで」→ 公開 |
+| teachers | `t-v5-release-click-through` | F5: 読まずに「次へ」→ 公開（編集権限の無い教員） |
+| teachers | `t-v5-release-meticulous` | F5: 根拠を読み、却下・再検討 → 次へ → 公開（editor あり） |
 | teachers | `t-build-course-from-corpus` | 次にやること → 教材 → コースビルダー → 登録 → リリース前の確認 → 公開 |
 | teachers | `t-review-graph-then-publish` | グラフレビューで承認・却下 → コース登録 → リリース前の確認 → 公開 |
 | teachers | `t-onboard-student-and-share` | 学生アカウント作成 → グループ作成・招待 → 共有 |

@@ -289,7 +289,7 @@ def test_unmet_precondition_with_seed_runs_seed_then_scenario(tmp_path):
     scen = [s.scenario_id for s in steps if s.action_id == "learning.cycle.intention"]
     assert scen == ["s-seed", "s-seed"]
     assert any(n.startswith("seeded_precondition:") for s in steps for n in s.runner_notes)
-    # 確かめる（不足）→ 種まき → 確かめる（満たす）→ 経路本体の扉
-    assert state["door_gets"] == 3
+    # 確かめる（不足）→ 種まき（コースを開くと画面と同じく扉を 1 回読む — 第 23 周）→ 確かめる（満たす）→ 経路本体の扉
+    assert state["door_gets"] == 4
     assert meta.seeded_precondition and meta.seeded_precondition[0]["satisfied"] is True
     assert [s.scenario_id for s in steps if s.action_id == "learning.cycle.return_door"][-1] == "s-return"

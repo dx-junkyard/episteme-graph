@@ -1,0 +1,13 @@
+scenario: s-v5-precision-elicit
+domain: astrophysics
+params:
+  goal_text: µ(a) と音速への制約について、答えを見る前に自分の予想を書き、出典と比べること
+  topic_hint_terms: [音速, µ(a), 暗黒エネルギー, 修正重力]
+  prediction_text: 音速が光速より小さいと、µ は 1 より大きい方向にずれて見え、データは µ_0 が 1 より少し大きい値を好むと予想する。
+  quick_label: まだ分からない
+  carryover_pick: "1"
+  carryover_question_text: 予想と出典のずれは、α_K ∝ α_B の仮定のせいか
+per_archetype:
+  confident_theorist:
+    prediction_text: α_K ∝ α_B の仮定の下では c_s^2 が小さいほど µ − 1 が増え、2σ 程度で µ > 1 が好まれると予想する。
+    quick_label: 気になる

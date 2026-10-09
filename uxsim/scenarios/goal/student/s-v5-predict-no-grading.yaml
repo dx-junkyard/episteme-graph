@@ -1,0 +1,35 @@
+id: s-v5-predict-no-grading
+population: students
+runner: [api, browser]
+session: 1
+goal: '{{goal_text}} のために、自由記述で予想を書き、出典と並べたときに正誤で裁かれないか、並置が出典を示すかを確かめる'
+params_required: [goal_text, prediction_text, seed_questions]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.enroll
+    note: 受講中でなければ受講を始める
+  - do: learning.course.open
+  - do: learning.discuss.opening
+  - do: learning.chat.cycle
+    with: {cycle_mode: elicit, message: '{{prediction_text}}'}
+  - do: learning.chat.cycle
+    with: {cycle_mode: diff, message: '{{prediction_text}}'}
+  - choose:
+      - do: learning.source_chunk.open
+        with: {source_no: 1}
+        note: 並置で示された出典の本文を開いて、本当にそう書いてあるかを確かめる
+    optional: true
+  - choose:
+      - do: learning.discuss.ask
+        with: {message: '{{seed_questions | next}}'}
+        note: 並置への疑問を議論で続ける
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#understanding-cycle
+  - manual: student/02-student.md#answer-origin-badge
+watch_for:
+  - 並置に「正解」「不正解」「誤り」「点数」の語が出ない
+  - 並置が出典（どの論文のどこか）を示し、出典を開くと同じことが書いてある
+  - 食い違いは「可能性」として語られ、断定で裁かれない
