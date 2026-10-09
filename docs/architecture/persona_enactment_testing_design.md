@@ -1846,5 +1846,5 @@ skipped の経路は砂場では観察できない（サーバ側は `test_relea
 
 **ハーネス側（第 3 の直し・`harness_fixes.md`）**: `selection_ref` が頭脳の `selection_text` を上書き / 出典本文の observation の切り詰め /
 個人地図の空状態・「マイコース」見出しを投影が落とす / E7 の `STRUCTURE_PERSONAL_KEYS` に `status_label` / precondition 文の識別子 /
-course.open の投影に扉 / 画面文に内部名。選別は `uxsim/runs/round23/round23_report.md`、課題は IK-0649〜0694。
+course.open の投影に扉 / 画面文に内部名 / **未対応**: ハーネスがチャットの `history` を窓（直近 N 往復）で送るため、サーバがクライアントの history で保存履歴を置き換え、st-05 の `_discussion` の session 1 の往復が DB から消えた（「今日のあなたの言葉」が空だった原因。画面は全履歴を送るので製品では起きないが、`persist_chat_history` がクライアントの history を信用する弱さは第 4 波候補）。選別は `uxsim/runs/round23/round23_report.md`、課題は IK-0649〜0694。
 
