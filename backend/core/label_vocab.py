@@ -98,6 +98,10 @@ __all__ = [
     "simulation_separation_level",
     "SUPPORT_SECTION_LABELS",
     "TRACE_STATUS_LABELS",
+    "TRACE_SUPERSEDED_REASON_LABELS",
+    "TRACE_SUPERSEDED_REASONS",
+    "CHAT_TURN_WITHDRAWN_FACT",
+    "LANDSCAPE_STATUS_LABELS",
     "VERIFICATION_STATUS_LABELS_LEDGER",
     "VERIFICATION_STATUS_LABELS_LENS",
     "WEIGHT_LABELS",
@@ -478,8 +482,65 @@ TRACE_STATUS_LABELS = MappingProxyType({
     "articulated": "言葉にした",
     "connected": "つないだ",
     "abstracted": "抽象化",
-    "superseded": "書き直しで差し替え",
+    # 理由（``payload.superseded_reason``）の無い旧行の既定。書き直しと取り消しを
+    # 区別できない行に「書き直し」と断言しない（第 23 波 F2）。
+    "superseded": "書き直しか取り消しで差し替え",
 })
+
+#: 学習チャットの往復を書き直し・取り消ししたとき、そこから作られた痕跡に残す理由語彙
+#: （``interest_traces.payload.superseded_reason``。書き手は
+#: ``api/services.py::truncate_chat_and_supersede``）。``superseded`` という1語に
+#: 書き直しと取り消しの2つの原因を畳まない（第 23 波 F2）。
+TRACE_SUPERSEDED_REASONS = ("rewrite", "delete")
+
+#: 上の理由ごとの「わたしの記録」の状態ラベル（読み手は ``core/trace_ledger.py``）。
+TRACE_SUPERSEDED_REASON_LABELS = MappingProxyType({
+    "rewrite": "書き直しで差し替え",
+    "delete": "取り消し（記録には残しています）",
+})
+
+#: 学習画面のコース目次のトピック状態（``LearningTopic.status``）の表示語（第 23 周）。
+#: ``locked`` は「順番に学ぶ」の推奨順であって禁止ではない（ロック中のトピックも
+#: 開ける — ``_overlay_learner_progress`` の docstring）。「鍵がかかっている」と読ませず
+#: 「開ける」ことを言う。読み手は ``api/routes/learning.py::_project_topics_for_learner``
+#: （``topics[].status_label``）。JS は ``status_label`` を描く（第 2 波）。
+TOPIC_STATUS_LABELS = MappingProxyType({
+    "completed": "確認済み",
+    "in_progress": "学習中",
+    "locked": "まだ順番が来ていません（開けます）",
+})
+
+#: 「問いの軌跡」（``GET /api/learning/courses/{id}/interest-traces`` →
+#: ``core/learning_experience.py::build_traces_view`` の ``kind_label``）で各行に付ける
+#: 種別の表示語。第 23 周（st-06「質問なのに誤答と言われるのは引っかかる」）:
+#: ``misconception`` の行の本文は**学習者の質問そのもの**で、AI の回答に訂正の言い回しが
+#: あったことを示すだけなので、「誤答」という評価語を付けない（vision §3.2 採点しない）。
+#: 事実語「訂正あり」にする。JS 側（app.js ``TRACE_KIND_LABEL``）はサーバの ``kind_label``
+#: を描くよう移す（第 2 波）。
+TRACE_TRAJECTORY_KIND_LABELS = MappingProxyType({
+    "question": "問い",
+    "detour": "寄り道",
+    "misconception": "訂正あり",
+    "raw": "記録",
+    "tension": "違和感",
+    "backstage_question": "楽屋の質問",
+})
+
+#: 「再訪のころ合い」の文中で行を指す語。``misconception`` の行も中身は問いなので
+#: 「問い」と呼ぶ（「前に引っかかった誤答」と言わない — 第 23 周）。
+TRACE_TRAJECTORY_KIND_WORDS = MappingProxyType({
+    "question": "問い",
+    "detour": "寄り道",
+    "misconception": "問い",
+    "backstage_question": "楽屋の質問",
+})
+
+#: 🗑（このメッセージ以降を取り消す）の直後に会話欄へ出す事実文。往復は会話の履歴から
+#: 外れるが、そこから作られた問い・引っかかりの記録は行を消さず状態を変えて残る（P4）。
+CHAT_TURN_WITHDRAWN_FACT = (
+    "この往復を会話から取り消しました。ここから作られた問い・引っかかりの記録は、"
+    "「わたしの記録」に取り消し済みとして残ります。"
+)
 
 #: ``epistemic_ledger.verification_status``（migration 029 の CHECK 語彙）の
 #: **D層 API 向け**文言。SL1 の閉世界語彙に合わせ「記帳がある / ない」を主語にする
@@ -743,6 +804,26 @@ CHECK_SELF_CHECK_DISAGREED_NOTICE_EN = (
 
 
 # ---------------------------------------------------------------------------
+# 知識ランドスケープの配置状態（教員向けの状態名）
+# ---------------------------------------------------------------------------
+#
+# 語彙（enum）の正本は ``core/landscape/schema.py`` の ``STATUSES``、教員向けの状態名の
+# 正本はここ（``landscape/schema.py::STATUS_LABELS`` はこの表の別名）。学習者向けの
+# 出所ラベル（「確認待ち（AI推定）」等）は ``landscape/schema.py::PROVENANCE_LABELS`` で、
+# 宛先が違う別の表。教材管理の位置づけモーダル（``admin.js``）とリリース前の確認
+# （``admin-release-review.js``）の状態名フォールバックはこの表の**逐語ミラー**
+# （``test_landscape_status_vocab_mirror.py``）。行のボタン「再検討」を押した結果は
+# 「再検討中」で、押したボタンと同じ語で読める（第 23 波 F5）。
+LANDSCAPE_STATUS_LABELS = MappingProxyType({
+    "inferred": "AI推定（未確認）",
+    "confirmed": "教員確認済み",
+    "rejected": "却下",
+    "review_required": "再検討中",
+    "superseded": "再解析により置換",
+})
+
+
+# ---------------------------------------------------------------------------
 # リリース前の確認で「確認しなかった教材」がある理由の事実文（IK-0376）
 # ---------------------------------------------------------------------------
 #
@@ -760,6 +841,13 @@ RELEASE_SKIPPED_NOT_EDITABLE_NOTE = (
 RELEASE_SKIPPED_NOT_VISIBLE_NOTE = (
     "閲覧できない教材、または見つからない教材の位置づけは、ここでは確認できません。"
 )
+#: 提示された配置と確認した配置が一致しないときの事実文（第 23 周 F5）。
+#: 「表示されていた N 件のうち M 件を確認した」を数字で言う（RR6 が隠すのは weight /
+#: confidence であって、提示・適用の件数という事実ではない — DC2）。読み手は
+#: ``api/routes/landscape.py::accept_course_landscape_placements`` の ``decision_note``。
+RELEASE_DECISION_PARTIAL_NOTE = "表示された{presented}件のうち確認したのは{applied}件です。"
+#: 上の事実文に、編集権限の無い教材を対象外にした分を添える補足（教材の本数）。
+RELEASE_DECISION_NOT_EDITABLE_SUFFIX = "（編集権限の無い教材{documents}本の位置づけは対象外）"
 
 
 # ---------------------------------------------------------------------------

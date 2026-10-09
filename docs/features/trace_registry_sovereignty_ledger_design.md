@@ -84,8 +84,8 @@ ALL_TRACE_KINDS / TRAJECTORY_EXCLUDED_KINDS / DASHBOARD_EXCLUDED_KINDS / PERSONA
 | detour（dead） | 寄り道 | ✓ | ✓ | — |
 | backstage_question | 楽屋の質問 | ✓ | — | — |
 | help_usage | 使い方の質問 | — | —（※ teacher_aggregations に G層 manual.help_gaps_pending を宣言） | — |
-| intention | 学習の意図 | — | — | — |
-| anchor_mark | 軽量アンカー | — | — | — |
+| intention | 開いた動機・持ち越した問い・書き置き（2026-10-09 まで「学習の意図」— §6） | — | — | — |
+| anchor_mark | 教材に付けた印（2026-10-09 まで「軽量アンカー」— §6） | — | — | — |
 
 あわせて `CONSUMERS`（消費者名 → モジュールパス・方式・対象 kind 集合の宣言表）を登録簿に持ち、
 ガードレールの検査対象を列挙可能にする（ドキュメンテーション兼テスト駆動データ）。
@@ -129,7 +129,8 @@ dismiss したまま保持されている候補・書き直しで superseded に
 「教員向けには3人以上の匿名集計にのみ含まれることがあります」/「AIの候補です。あなたが確定するまで
 あなたの痕跡になりません」）。「持ち出す」で自分の痕跡一式が JSON で手元に落ちる。
 封印ボタンは無い——代わりに正直な事実文「封印の仕組みは、封印したという事実を残したまま内容を
-読めなくする形で設計中です」。
+読めなくする形で設計中です」（2026-10-09 に「この画面でできるのは、一覧を見ることと持ち出すことです。記録の内容を
+読めなくする（封印する）操作はありません。」へ置き換え — 設計メモ調の約束を画面に出さない。§6）。
 
 ### 3.2 core（`backend/core/trace_ledger.py`、FastAPI 非 import）
 
@@ -153,9 +154,11 @@ dismiss したまま保持されている候補・書き直しで superseded に
   スキーマ安定性: `schema_version` を持ち、将来の kind 追加は records に新 kind の行が
   増えるだけで既存キーは変えない。
 - 来歴欄: 系統ごとの露出事実文（登録簿由来・静的）+ 全体注記
-  「集約への包含の来歴は現在記録されていません。どの記録がどの匿名集計に含まれたかは、
-  この画面からは確かめられません」（2026-09-28・IK-0415 で「実装予定」の先取りを撤去 —
-  TR5「先取りの約束を出さない」）。
+  「あなたの記録がどの匿名集計に使われたかは、現在記録されていません。そのため、この画面では
+  確かめられません」（2026-09-28・IK-0415 で「実装予定」の先取りを撤去 —
+  TR5「先取りの約束を出さない」。2026-10-09 第 23 波・第 2 波で意味を変えずに語順を平易化し、
+  見出しは「匿名集計に使われたかどうか（来歴）」）。行ごとの公表文は、系統の見出しの下の文に
+  含まれるときは行に繰り返さない（見出しの下に 1 回だけ）。
 - status の表示（2026-09-28・IK-0415）: `open` を一律「未解決」と読ませない。kind ごとの
   上書き `label_vocab.TRACE_STATUS_LABELS_BY_KIND`（誤解の記録 = 「回答で訂正の指摘あり
   （あなたの確認前）」— 本人確定の誤解メモとは別物で、進捗の誤解の数には入らない = 是正 F5）
@@ -245,3 +248,39 @@ dismiss したまま保持されている候補・書き直しで superseded に
 - 集約への包含来歴の記録基盤（提案1 v2 手渡しチャネルと同時に設計）
 - 公表状態の三段敷居（未寄贈/手渡し済み/引用済み — 手渡しチャネル実装後）
 - 台帳からの直接操作（confirm / dismiss / map-exclude は既存画面のまま）
+
+## 6. 追補（2026-10-09・第 23 周）— 取り消しの理由・空の系統・画面の語
+
+uxsim 第 23 周（[ペルソナ通し受講テスト](../architecture/persona_enactment_testing_design.md) §20）の F2・F4 で、
+「わたしの記録」が書き直しと取り消しを 1 語に畳み、空の系統を見出しごと並べ、内部の語を系統名にしていた
+（IK-0653 / IK-0656）。migration なし・登録簿の kind 追加なし。
+
+- **`superseded_reason`**: 学習チャットの往復を ✏️ 書き直し・🗑 取り消ししたとき、`services.truncate_chat_and_supersede`
+  が派生痕跡を `superseded` にするのに加えて `payload.superseded_reason`（`rewrite` / `delete`。語彙の正本は
+  `core/label_vocab.py::TRACE_SUPERSEDED_REASONS`・未知の値は `rewrite` に倒さず `ValueError`）を残す。
+  `trace_ledger.status_label_for` は理由があれば `TRACE_SUPERSEDED_REASON_LABELS`（「書き直しで差し替え」/
+  「取り消し（記録には残しています）」）を返し、理由の無い旧行は「書き直しか取り消しで差し替え」（`TRACE_STATUS_LABELS`
+  の既定を変えた — 区別できない行に「書き直し」と断言しない）。🗑 の応答には事実文 `fact`
+  （`label_vocab.CHAT_TURN_WITHDRAWN_FACT`）を付け、画面（`app.js` / `corpus-sea.js`）はそれをそのまま会話の末尾に描く。
+  同じ往復から生まれた誤解の候補も同じ理由で `superseded` にする（[個人知識ネットワーク](personal_knowledge_network_design.md) §16 の訂正操作の追補）。
+- **見送った行の目印**: 行 DTO の `flags` に `dismissed` を足し、見送った行も有効な行と見分けられるようにした
+  （書き直し・取り消し・見送りの行は状態チップを付けて淡く描く）。
+- **空の系統の畳み（P-0008）**: 中身のある系統だけを見出しごと出し、行の無い系統は名前を末尾の 1 行
+  「まだ記録の無い種類: …」に畳む（`my-records.js`。登録簿の系統の一覧そのものは変えない）。
+- **行の階層と公表文**: 行は本文 → 日付・コース → 状態チップの 3 段。行の公表文が系統の見出しの下の文に含まれるときは
+  行に繰り返さない（AI の候補のように行ごとに扱いが違う記録だけ行にも出す）。
+- **系統名を画面の語に**: 登録簿の `label` は学習者の系統見出しにそのまま出るので、`intention` を「開いた動機・持ち越した
+  問い・書き置き」、`anchor_mark` を「教材に付けた印」にした（扉・着地画面・教材の印の語と揃える）。kind・露出宣言は不変。
+  `backstage_question` の「楽屋の質問」は降下路の画面の語なので変えていない。
+- **封印の文**: §3.1 のとおり事実文に置き換えた（偽のボタンを置かない方針は不変）。
+- **開示の事実文の再掲**: 先頭（常設の注記の下）に、学習画面の入力欄の上と同じ「入力した文がどこへ送られるか」の
+  事実文を 1 回置く（文言はサーバの正本・`disclosure-note.js` の `mount`・取れなければ何も描かない）。
+- **登録簿の新しい宣言 `margin_marks`**: 欄外の印に本人の言葉として出る kind（`question` / `tension` / `anchor_mark`）。
+  導出 frozenset `MARGIN_MARK_KINDS` と消費者宣言 `cycle_margin_marks`（`core/cycle/derive.py::build_margin_marks`・
+  allowlist）を足した（[帰還の扉](return_door_design.md) §2.3）。問いの軌跡の除外は変えていない。
+- **問いの軌跡の種別名**: 誤解の記録の行（中身は学習者の質問）に付けていた「誤答」をやめ「訂正あり」にした。表示語の正本は
+  `label_vocab.TRACE_TRAJECTORY_KIND_LABELS`（`build_traces_view` が `kind_label` として返し、JS は描くだけ）。
+- テスト: `test_trace_ledger_core.py` / `test_my_records_ui_static.py` / `test_round23_learner_cycle.py::TestWithdrawalIsReported` /
+  `test_round23_server_fixes.py::TestTrajectoryKindLabels`。
+- **未解決（課題として記帳済み）**: 持ち出しファイルの種類・状態が内部名のまま（IK-0683）/ 見送った帰属の候補が記録に
+  状態として現れず、戻す操作も無い（IK-0660）/ ✏️ の後に会話へ一言が無い（IK-0682）。

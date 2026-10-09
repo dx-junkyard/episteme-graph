@@ -3333,13 +3333,15 @@
     daily_call_limit_reached: "本日の配置候補の生成上限に達しました。翌日以降に再度お試しください。",
     llm_call_failed: "配置候補の生成に失敗しました。しばらく待ってから再度お試しください。"
   };
-  // サーバの status_label が取れないときのフォールバック（fail-soft・断定しない語）。
+  // サーバの status_label が取れないときのフォールバック。正本は
+  // backend/core/label_vocab.py::LANDSCAPE_STATUS_LABELS の逐語ミラー
+  // （test_landscape_status_vocab_mirror.py。行のボタン「再検討」の結果は「再検討中」）。
   var LANDSCAPE_STATUS_FALLBACK_LABELS = {
+    inferred: "AI推定（未確認）",
     confirmed: "教員確認済み",
-    inferred: "AIによる推定（未確認）",
-    review_required: "確認待ち（AI推定）",
     rejected: "却下",
-    superseded: "旧候補"
+    review_required: "再検討中",
+    superseded: "再解析により置換"
   };
   var LANDSCAPE_STATUS_ACTIONS = [
     ["confirmed", "確認"],
@@ -8860,6 +8862,12 @@
             setNewDomainStatus("仮予約の保存に失敗しました: " + err.message, true);
           });
       });
+    }
+    // リリース前の確認（第 23 波・第 2 波 F5）: 保存ボタンの行に呼び出し側の副ボタン
+    // （「あとで」）を並べられるよう、描画後に行を渡す。既定（options.onRendered なし）は不変。
+    if (typeof options.onRendered === "function") {
+      var abSaveBtn = bodyEl.querySelector("[data-role='ab-save']");
+      options.onRendered(abSaveBtn);
     }
   }
 

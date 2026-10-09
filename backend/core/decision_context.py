@@ -179,6 +179,9 @@ def build_decision_context(
     reopen_statuses: Iterable[Any] = (),
     evidence_shown: bool | None = None,
     client_reported: Mapping[str, Any] | None = None,
+    skipped_ids: Iterable[Any] | None = None,
+    skipped_document_ids: Iterable[Any] | None = None,
+    skipped_reason: str = "",
 ) -> dict:
     """確定文脈の1ブロックを組み立てる（JSON シリアライズ可能な dict）。
 
@@ -195,6 +198,12 @@ def build_decision_context(
             確認していないものを ``True`` にしない。
         client_reported: クライアントの来歴申告（サーバが検証していない値）。
             未指定・空なら ``None`` のまま載せる（DC4）。
+        skipped_ids: 提示はされていたが**この確定者には適用できなかった**対象の id 列
+            （例: 編集権限の無い教材の配置。第 23 周 F5）。指定したときだけ ``skipped``
+            ブロック（``count`` / ``ids`` / ``truncated`` / ``document_ids`` / ``reason``）
+            を足す（additive。未指定の経路の形は変えない）。
+        skipped_document_ids: ``skipped_ids`` の対象が属する親（document 等）の id 列。
+        skipped_reason: 対象外にした理由の語（例: ``"not_editable"``）。
 
     ``presented_matches_applied`` は**切り詰め前の集合**で比較する（表示上限の副作用で
     一致判定が変わらないようにする）。
@@ -224,7 +233,7 @@ def build_decision_context(
     if client_reported:
         reported = {str(k): v for k, v in dict(client_reported).items()}
 
-    return {
+    out = {
         "basis": basis_norm,
         "presented": _id_block(presented),
         "applied": _id_block(applied),
@@ -242,6 +251,16 @@ def build_decision_context(
         "evidence_shown": evidence_shown,
         "client_reported": reported,
     }
+    if skipped_ids is not None:
+        # 第 23 周 F5: 「見たが確認しなかった」対象を適用集合と別キーで残す
+        # （DC2: 提示と適用の差を後から再構成できるようにする）。
+        skipped_block = _id_block(_normalize_ids(skipped_ids))
+        skipped_block["document_ids"] = sorted(_normalize_ids(skipped_document_ids))[
+            :PRESENTED_IDS_MAX
+        ]
+        skipped_block["reason"] = str(skipped_reason or "").strip()
+        out["skipped"] = skipped_block
+    return out
 
 
 def attach_decision_context(metadata: dict, ctx: dict) -> dict:

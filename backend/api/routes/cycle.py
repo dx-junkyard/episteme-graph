@@ -13,6 +13,8 @@ structure_anchor と同型）。骨格は非LLM・同期（UC8）。intention / 
   structure_anchor 経路A（``attribution_source='learner_selected'``）へ相乗りし、
   ``core.structure_anchor.schema.build_anchor_payload`` を必ず使う。
 - ``GET .../cycle/landing-candidates``: LEAVE の選択リスト（設計書 §5.5）。
+- ``GET .../cycle/margin-marks``: 欄外の印（return_door_design.md §2.3・第 23 波 F1）。
+  母集合は登録簿の ``margin_marks`` 宣言（問いの軌跡の一覧を流用しない）。
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from services import (
 )
 from core.cycle.derive import (
     build_landing_candidates,
+    build_margin_marks,
     build_return_door,
     build_revisit_facts,
     build_todays_words,
@@ -42,11 +45,13 @@ from core.cycle.queries import (
     fetch_active_leave_note,
     fetch_landing_candidates,
     fetch_last_owned_tension,
+    fetch_margin_mark_traces,
     fetch_recent_traces_since,
     fetch_todays_user_words,
 )
 from core.cycle.schema import INTENTION_ROLES, QUICK_LABELS
 from core.personal_graph.derive import derive_personal_network
+from core.trace_registry import MARGIN_MARK_KINDS
 from core.structure_anchor.schema import (
     ATTRIBUTION_LEARNER_SELECTED,
     anchor_type_for_element,
@@ -327,3 +332,27 @@ def get_cycle_landing_candidates_route(
         logger.warning("Failed to build landing candidates", exc_info=True)
         candidates = []
     return {"candidates": candidates}
+
+
+@learning_router.get("/courses/{course_id}/cycle/margin-marks")
+def get_cycle_margin_marks_route(
+    course_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """欄外の印（return_door_design.md §2.3）— 読み取り専用・本人のみ・非LLM。
+
+    第 23 波 F1: 欄外の印は「問いの軌跡」（``GET .../interest-traces``）の一覧を流用して
+    いたため、軌跡から除外される「教材に付けた印」（anchor_mark）が一度も出なかった。
+    母集合は登録簿の ``margin_marks`` 宣言（``MARGIN_MARK_KINDS``）で決め、問いの軌跡の
+    除外は変えない。導出失敗は印なしへ縮退する（fail-open — 印が出ないだけ）。
+    """
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    try:
+        rows = fetch_margin_mark_traces(current_user["id"], course_id, MARGIN_MARK_KINDS)
+        return build_margin_marks(rows)
+    except Exception:
+        logger.warning("Failed to build margin marks", exc_info=True)
+        return {"marks": []}

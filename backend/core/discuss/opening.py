@@ -526,6 +526,30 @@ def project_backbone(
     return projected, truncated
 
 
+def learner_backbone_node(node: dict[str, Any]) -> dict[str, Any]:
+    """``project_backbone`` の1ノード → 学習者向け開幕 DTO のノード（第 23 周）。
+
+    ``project_backbone`` の戻り値は脆い箇所の導出（``_is_fragile_backbone_node`` /
+    ``_backbone_fact_line``）の入力なので内部語を持ったまま残し、学習者へ返す直前に
+    ここで絞る:
+
+    - ``stage`` / ``review_status`` / ``source_backing_status`` / ``review_reasons`` は
+      解析の内部語（``theory_basis`` / ``source_backed`` / ``missing_atomic_claim``）で、
+      学習者の画面に出す語ではない → 落とす。画面が使う区別は ``backed``（根拠が原文で
+      確認されているか）の真偽1つにする。
+    - ``description`` は理論操作グラフの集約ノードの説明（解析の中間文・論文の逐語では
+      なく、生成言語の対象外 = 英語のまま）→ 出さない（論文の内容は thesis / 支持構造 /
+      章の骨格の区画が逐語の出典つきで出す — DM8 の「言語を変換しない」に反しない）。
+    - ``node_id`` は「ここから話す」の構造帰属（経路A）の参照キーとして残す（表示しない）。
+    """
+    return {
+        "node_id": str(node.get("node_id") or ""),
+        "label": str(node.get("label") or ""),
+        "stage_label": str(node.get("stage_label") or ""),
+        "backed": str(node.get("source_backing_status") or "") == "source_backed",
+    }
+
+
 def project_chapter_skeleton(
     skeleton: dict[str, Any] | None,
     structure: dict[str, Any] | None = None,
@@ -1083,6 +1107,14 @@ def build_opening(
 
     assumption_items = _compile_open_assumptions(course_id)
     fragile_points, fragile_truncated = project_fragile_points(assumption_items, backbone_by_document)
+    # 第 23 周（st-02・st-05）: 脆い箇所の導出が済んだら、学習者に返すバックボーンからは
+    # 解析の内部語（stage キー・review_status・source_backing_status・review_reasons）と
+    # 英語の解析中間文（description）を落とす。画面が要るのは表示ラベルと「根拠が
+    # 確認されているか」の真偽だけ（learner_backbone_node）。
+    for document_dto in documents:
+        document_dto["backbone"] = [
+            learner_backbone_node(n) for n in document_dto.get("backbone") or []
+        ]
 
     focus = str(course_focus or "").strip()
     result = {

@@ -53,7 +53,8 @@ MISCONCEPTION_STATUS_CANDIDATE = "candidate"
 MISCONCEPTION_STATUS_CONFIRMED = "confirmed"
 #: 本人が受け入れなかった状態（行は消さない, P4）。
 MISCONCEPTION_STATUS_DISMISSED = "dismissed"
-#: メッセージの書き直し・削除で置き換えられた履歴状態（将来の message_id 連携用）。
+#: メッセージの書き直し・削除で置き換えられた履歴状態（第 23 周: ``message_id`` で
+#: ``services.truncate_chat_and_supersede`` が遷移させる。理由は ``superseded_reason``）。
 MISCONCEPTION_STATUS_SUPERSEDED = "superseded"
 
 #: 候補 → 確定の共通制御フロー（``core.candidate_flow``）へ渡す語彙宣言。
@@ -258,3 +259,50 @@ def set_misconception_status(
         updated.misconceptions_by_topic[topic_id][index] = target
         return updated, old_status
     return None
+
+
+def supersede_misconceptions_for_messages(
+    data: PersonalGraphData,
+    message_ids,
+    *,
+    reason: str,
+    superseded_at: str | None = None,
+) -> tuple[PersonalGraphData, int]:
+    """取り除いたメッセージから生まれた**候補**の誤解メモを ``superseded`` にする。
+
+    第 23 周（st-06 の実測）: 書き直し・取り消しをした往復の誤解候補が「AI が訂正を
+    提案した箇所」として生き残っていた。``message_id`` が ``message_ids`` に含まれる
+    エントリのうち **candidate だけ**を遷移させ、``superseded_reason`` に ``reason``
+    （``rewrite`` / ``delete``）を残す（行は消さない, P4）。本人が 3 択で確定・却下した
+    行（confirmed / dismissed）は人の判断なので動かさない。``message_id`` を持たない
+    旧行は対象にならない（従来どおり）。
+
+    純関数。``(updated, 遷移した件数)`` を返す（0 件なら ``data`` のコピーをそのまま）。
+    """
+    targets = {str(m) for m in (message_ids or []) if str(m or "").strip()}
+    updated = data.model_copy(deep=True)
+    if not targets:
+        return updated, 0
+    when = superseded_at or _now_iso()
+    changed = 0
+    for topic_id, entries in list(updated.misconceptions_by_topic.items()):
+        if not isinstance(entries, list):
+            continue
+        new_entries = []
+        for raw in entries:
+            if (
+                isinstance(raw, dict)
+                and str(raw.get("message_id") or "") in targets
+                and normalize_misconception(raw)["status"] == MISCONCEPTION_STATUS_CANDIDATE
+            ):
+                target = dict(raw)
+                target["id"] = misconception_entry_id(raw)
+                target["status"] = MISCONCEPTION_STATUS_SUPERSEDED
+                target["superseded_reason"] = reason
+                target["reviewed_at"] = when
+                new_entries.append(target)
+                changed += 1
+            else:
+                new_entries.append(raw)
+        updated.misconceptions_by_topic[topic_id] = new_entries
+    return updated, changed

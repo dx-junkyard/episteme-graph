@@ -508,3 +508,16 @@ stale を付けない・D層非改変・repair 指示と validator の整合）/
 - **追補（2026-10-01）**: 同じ `language` を paper_skeleton / thesis_reconstruction /
   narrative_annotator / component_assembly の生成文にも運んだ（未指定なら prompt は不変）。
   対象フィールドと対象外の理由は `generation_language_design.md`。
+
+## 15. 追補 — 学習者 DTO のバックボーンから内部語を落とす（2026-10-09・第 23 周・migration なし）
+
+> **状態: 実装済み**。砂場再演（st-02・st-05）で開幕 DTO に `stage: theory_basis` / `review_status` /
+> `source_backing_status: source_backed` / `review_reasons: missing_atomic_claim` と英語の
+> `description` が出ていた。`project_backbone` の戻り値は脆い箇所の導出の入力なので内部語を持ったまま残し、
+> `build_opening` が脆い箇所を導出した**後**で `learner_backbone_node` により
+> `{node_id, label, stage_label, backed}` に絞る。`description` は理論操作グラフの集約ノードの説明
+> （解析の中間文で論文の逐語ではなく、生成言語の対象外）なので**出さない**。論文の内容は thesis・支持構造・
+> 章の骨格の区画が出す（DM8「言語を変換しない」には反しない — 変換ではなく非表示）。
+> 回帰テストは `backend/tests/test_round23_server_fixes.py::TestLearnerBackbone`。
+> 第 23 周の再演（st-02・st-05・st-06）で、開幕の内部語と JSON の露出が消えたことを確認した（[ペルソナ通し受講テスト](../architecture/persona_enactment_testing_design.md) §20.6）。
+> 中心となる式のチップの生 TeX（IK-0685）と英語の主張文の混在は残っている。

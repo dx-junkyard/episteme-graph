@@ -502,9 +502,15 @@
         { method: "DELETE" }
       );
       if (!res.ok) throw new Error("Delete failed");
+      var deleted = null;
+      try { deleted = await res.json(); } catch (_) { deleted = null; }
       if (idx !== -1) state.chatMessages = state.chatMessages.slice(0, idx);
       renderChat();
       renderRightPanel();
+      // 第 23 波 F2: 取り消した直後に、往復は会話から外れ痕跡は残るという事実文を1行
+      // （文言はサーバ = core/label_vocab.py::CHAT_TURN_WITHDRAWN_FACT。ここに書き写さない）。
+      if (deleted && typeof deleted.fact === "string") appendSystemNote(deleted.fact);
+      refreshMarginMarks();
     } catch (err) {
       alert("メッセージの削除に失敗しました。");
     }
@@ -669,7 +675,10 @@
           ? '<span class="ni-done" title="確認済み">✓</span>'
           : "";
 
-        html += '<div class="' + cls + '" data-topic="' + t.id + '" style="padding-left:36px">';
+        // 第 23 周（第 3 波）: 目次の状態はサーバの status_label（確認済み / 学習中 /
+        // まだ順番が来ていません（開けます））を title に出す（ドットの色だけに頼らない）。
+        const tStatusTitle = t.status_label ? ' title="' + escHtml(t.status_label) + '"' : "";
+        html += '<div class="' + cls + '" data-topic="' + t.id + '"' + tStatusTitle + ' style="padding-left:36px">';
         html += escHtml(t.title) + annotationBadge + supportBadge + doneBadge;
         html += '<span class="dot ' + dotCls + '" style="margin-left:auto"></span></div>';
       });
@@ -1020,7 +1029,9 @@
         method: "POST",
         body: JSON.stringify(payload),
       });
-      return !!(res && res.ok);
+      var ok = !!(res && res.ok);
+      if (ok) refreshMarginMarks();
+      return ok;
     } catch (_) {
       return false;
     }
@@ -1169,6 +1180,8 @@
     var strip = document.getElementById("quick-anchor-strip");
     if (!strip) return;
     strip.hidden = !(state.course && state.currentTopicId);
+    // 精読モードのトグル（第 2 波 V3'）も同じ「コース・トピック選択時のみ」の規則で出す。
+    syncPrecisionToggle();
     // 動かして確かめる（§14.4）: 同じ「コース・トピック選択時のみ」の規則でボタンを合わせる。
     if (window.SimulationLab) window.SimulationLab.setContext();
   }
@@ -1179,6 +1192,12 @@
     return "eg_precision_reading:" + (courseId || state.courseId || "");
   }
 
+  // 第 23 波 F3: 精読トグルを押した直後に出す事実文（状態と、次に何が変わるか）。
+  const PRECISION_FACT_ON =
+    "精読モード: ON。論文と議論の開幕で、予想を書く欄が開いた状態で始まります。";
+  const PRECISION_FACT_OFF =
+    "精読モード: OFF。予想を書く欄は、開幕の「予想してから開く」から開けます。";
+
   function isPrecisionReadingOn(courseId) {
     try {
       return localStorage.getItem(precisionReadingStorageKey(courseId)) === "1";
@@ -1186,6 +1205,24 @@
       return false;
     }
   }
+
+  // 精読トグル（教材区画の見出し行・順番に学ぶ / 議論の両方で同じ 1 つ）の表示と押下状態。
+  // コース切替でも現在コースの保存値を反映し直す（別コースの状態を持ち越して見せない）。
+  function syncPrecisionToggle() {
+    var toggle = document.getElementById("cycle-precision-toggle");
+    if (!toggle) return;
+    toggle.hidden = !(state.course && state.currentTopicId);
+    toggle.setAttribute("aria-pressed", isPrecisionReadingOn() ? "true" : "false");
+    // 押した直後の事実文（入力欄の上の 1 行）は、コースかトピックが変わったら下げる
+    // （別の文脈に前の操作の文を残さない）。
+    var key = (state.courseId || "") + "|" + (state.currentTopicId || "");
+    if (key !== precisionFactContextKey) {
+      precisionFactContextKey = key;
+      var fact = document.getElementById("cycle-precision-fact");
+      if (fact) { fact.hidden = true; fact.textContent = ""; }
+    }
+  }
+  var precisionFactContextKey = "";
 
   function setPrecisionReadingOn(on) {
     try {
@@ -1274,16 +1311,18 @@
   }
 
   // ── 欄外の印（return_door_design.md §2.3）─────────────────────────────
-  // 教材区画の右余白に、本人の確定痕跡（structure_anchor を持つ確定済み問い + 確定
-  // tension）を「段差でつまずく人」の淡いアイコンで縦に並べる（旧: ● の点。何の印か
+  // 教材区画の右余白に、本人の確定痕跡（どこへの問いかを確定した問い・引き受けた
+  // 引っかかり・教材に付けた印）を「段差でつまずく人」の淡いアイコンで縦に並べる（旧: ● の点。何の印か
   // 伝わらないという指摘を受けて図案化した）。新しい順に最大 MARGIN_MARKS_MAX 点・数は
   // 表示しない（RD5）。map_excluded の行は表示しない（既存の訂正操作を尊重）。
   // 素材位置への正確な対応付けは v1 では行わない（縦並び + ツールチップに帰属ラベルで近似）。
   // 表示トグルの状態は localStorage `eg_margin_marks:<courseId>`（精読モードと同型の
   // 許容例外）。既定は表示 ON。
   const MARGIN_MARKS_MAX = 12;
-  // 確定 tension とみなす status（正本: backend/core/tension/schema.py::TENSION_OWNED_STATUSES）
-  const MARGIN_TENSION_STATUSES = ["open", "articulated", "connected", "abstracted"];
+  // 第 23 波 F1: 印の母集合は GET .../cycle/margin-marks（サーバが登録簿の margin_marks
+  // 宣言で決める）。以前は「問いの軌跡」の一覧を流用していたため、教材に付けた印
+  // （気になる・まだ分からない…）が一度も出なかった。確定 tension の status 判定も
+  // サーバ側（core/cycle/derive.py::build_margin_marks が TENSION_OWNED_STATUSES を読む）。
   let marginMarksCache = { courseId: "", marks: null };
 
   function marginMarksStorageKey(courseId) {
@@ -1308,17 +1347,21 @@
   function extractMarginMarks(traces) {
     const marks = [];
     (traces || []).forEach(function (t) {
-      if (!t) return;
-      if (t.map_excluded) return; // 「地図には反映しない」にした行は出さない
-      // structure_anchor は API 側で確定済み（learner_selected/confirmed・active）のみ付く。
-      const isAnchored = !!t.structure_anchor;
-      const isOwnedTension = t.kind === "tension" && MARGIN_TENSION_STATUSES.indexOf(t.status) !== -1;
-      if (!isAnchored && !isOwnedTension) return;
+      if (!t || !t.text) return;
+      // 「地図には反映しない」にした行は出さない（サーバでも落としている二重防御）。
+      if (t.map_excluded) return;
       marks.push(t);
     });
-    // interest-traces の並び（status 優先 + 各群で新しい順）をそのまま使い、上限で切る
-    // （応答に created_at が無いため、厳密な新しい順は v1 では近似に留める）。
+    // サーバの並び（新しい順）をそのまま使い、上限で切る。
     return marks.slice(0, MARGIN_MARKS_MAX);
+  }
+
+  // 印を付けた・引っかかりや問いの帰属を確定した直後に、欄外の印を取り直す
+  // （第 23 波 F1: 以前はコース切替までキャッシュを捨てなかった）。
+  function refreshMarginMarks() {
+    marginMarksCache = { courseId: "", marks: null };
+    if (isMarginMarksOn()) loadMarginMarks();
+    else renderMarginMarks();
   }
 
   // 印の図案（index.html のトグルボタン内 SVG と同じ形）: 段差でつまずく人。
@@ -1388,11 +1431,14 @@
     marks.forEach(function (t) {
       const dot = document.createElement("button");
       dot.type = "button";
-      dot.className = "margin-mark-dot" + (t.kind === "tension" ? " tension" : "");
+      dot.className = "margin-mark-dot" +
+        (t.kind === "tension" ? " tension" : "") + (t.kind === "anchor_mark" ? " mark" : "");
       dot.appendChild(createStumbleIcon(13));
-      // ツールチップは本人の言葉の逐語 + 帰属ラベル（textContent のみ・数値なし）。
-      const anchorLabel = (t.structure_anchor && t.structure_anchor.anchor_label) || "";
-      const tip = (anchorLabel ? "〔" + anchorLabel + "〕 " : "") + (t.text || "");
+      // ツールチップは本人の言葉の逐語 + 印の種類・帰属ラベル（textContent のみ・数値なし）。
+      const anchorLabel = t.anchor_label || "";
+      const markLabel = t.mark_label || "";
+      const tip = (markLabel ? "「" + markLabel + "」 " : "") +
+        (anchorLabel ? "〔" + anchorLabel + "〕 " : "") + (t.text || "");
       dot.addEventListener("mouseenter", function () { showMarginMarkTip(dot, tip); });
       dot.addEventListener("focus", function () { showMarginMarkTip(dot, tip); });
       dot.addEventListener("mouseleave", hideMarginMarkTip);
@@ -1412,17 +1458,17 @@
     }
     let data = null;
     try {
-      const res = await apiFetch("/learning/courses/" + cid + "/interest-traces");
+      const res = await apiFetch("/learning/courses/" + cid + "/cycle/margin-marks");
       if (res.ok) data = await res.json();
     } catch (_) {
       data = null;
     }
     if (state.courseId !== cid) return; // コース切替後の遅延応答を破棄
-    if (!data || !Array.isArray(data.traces)) {
+    if (!data || !Array.isArray(data.marks)) {
       renderMarginMarks(); // fail-closed: 取れなければ何も出さない（キャッシュは残さない）
       return;
     }
-    marginMarksCache = { courseId: cid, marks: extractMarginMarks(data.traces) };
+    marginMarksCache = { courseId: cid, marks: extractMarginMarks(data.marks) };
     renderMarginMarks();
   }
 
@@ -2744,6 +2790,7 @@
     } catch (_) { /* best-effort */ }
     await loadTensionDigest();
     loadInterestTraces();  // 確定した違和感は問いの軌跡に現れる
+    refreshMarginMarks();  // 第 23 波 F1: 欄外の印にもすぐ出す
   }
 
   async function dismissTension(traceId) {
@@ -2815,6 +2862,7 @@
     } catch (_) { /* best-effort */ }
     await loadAnchorDigest();
     loadInterestTraces();  // 確定した帰属は問いの軌跡のチップに現れる
+    refreshMarginMarks();  // 第 23 波 F1: 欄外の印にもすぐ出す
   }
 
   // D層 (D3-6): チャット欄の末尾に静かな注記を 1 行足す（割り込み要素ゼロ）。
@@ -3304,7 +3352,8 @@
 
   // ============ 問いの軌跡（資産化レイヤー）— 進捗タブで使用 ============
   // 表示・「解決済みにする」は interest_traces の実データ（Stage 3）。
-  var TRACE_KIND_LABEL = { question: "問い", detour: "寄り道", misconception: "誤答", raw: "記録", tension: "違和感" };
+  // 第 23 周（第 3 波）: 表示名の正本はサーバの t.kind_label。これは旧サーバ向けの縮退表。
+  var TRACE_KIND_LABEL = { question: "問い", detour: "寄り道", misconception: "訂正あり", raw: "記録", tension: "違和感" };
   var TRACE_KIND_CLS = { question: "q", detour: "detour", misconception: "mis", raw: "q", tension: "q" };
   var STATUS_META = {
     open: { label: "未解決", cls: "open" },
@@ -3415,7 +3464,7 @@
     }
 
     if (traces.length === 0) {
-      html += '<p class="lx-note" style="margin-top:0">まだ記録された問いはありません。学習で生まれた問い・寄り道・誤答がここに溜まります。</p>';
+      html += '<p class="lx-note" style="margin-top:0">まだ記録された問いはありません。学習で生まれた問い・寄り道・訂正のあった回答がここに溜まります。</p>';
       return html;
     }
 
@@ -3430,7 +3479,7 @@
       fbtn("all", "すべて", "") +
       fbtn("question", "問い", "var(--lx-kind-q)") +
       fbtn("detour", "寄り道", "var(--lx-kind-detour)") +
-      fbtn("misconception", "誤答", "var(--lx-kind-mis)") + '</div>';
+      fbtn("misconception", "訂正あり", "var(--lx-kind-mis)") + '</div>';
 
     // トレース群（status を主役に）。「わたしの地図」との相互リンクのためコンテナに id を付与する
     // (Phase P-1: PersonalMap.annotateTrajectoryList / openTrajectory が data-trace-id を参照する)。
@@ -3443,7 +3492,7 @@
       // PersonalMap.annotateTrajectoryList がこの属性を見て「地図に戻す」チップを付ける。
       html += '<div class="lx-trace ' + kc + '" data-trace-id="' + escHtml(t.id || "") +
         '" data-map-excluded="' + (t.map_excluded ? "1" : "0") + '"><div class="lx-rail"></div><div class="lx-trace-body">';
-      html += '<div class="lx-trace-top"><span class="lx-kind-tag">' + escHtml(TRACE_KIND_LABEL[t.kind] || t.kind || "記録") + '</span>';
+      html += '<div class="lx-trace-top"><span class="lx-kind-tag">' + escHtml(t.kind_label || TRACE_KIND_LABEL[t.kind] || "記録") + '</span>';
       html += '<span class="lx-status-tag ' + sm.cls + '">' + escHtml(sm.label) + '</span></div>';
       html += '<div class="lx-trace-text">' + escHtml(t.text || "") + '</div>';
       if (t.context_label) html += '<div class="lx-trace-ctx">' + escHtml(t.context_label) + '</div>';
@@ -3890,12 +3939,6 @@
       bar.querySelectorAll("[data-discuss-scope]").forEach(function (b) {
         b.classList.toggle("active", b.getAttribute("data-discuss-scope") === scope);
       });
-      // 理解サイクル Phase 1（精読モード, §4.3）: コース切替でも現在コースの
-      // 保存値を反映し直す（別コースの状態を持ち越して見せない）。
-      var precisionToggle = document.getElementById("cycle-precision-toggle");
-      if (precisionToggle) {
-        precisionToggle.setAttribute("aria-pressed", isPrecisionReadingOn() ? "true" : "false");
-      }
     }
   }
 
@@ -3931,6 +3974,18 @@
         var next = !isPrecisionReadingOn();
         setPrecisionReadingOn(next);
         this.setAttribute("aria-pressed", next ? "true" : "false");
+        // 第 23 波 F3: 押した直後に状態と次に変わることを1行で返す（画面が何も変わらない
+        // まま ON/OFF の効果が分からない、をなくす）。
+        var fact = document.getElementById("cycle-precision-fact");
+        if (fact) {
+          fact.textContent = next ? PRECISION_FACT_ON : PRECISION_FACT_OFF;
+          fact.hidden = false;
+        }
+        // 開幕を表示中なら、いまの設定で描き直す（ON なら予想の欄が開く）。
+        if (window.Discuss && typeof window.Discuss.renderOpening === "function" && isDiscussMode()) {
+          var mb = document.getElementById("material-body");
+          if (mb) window.Discuss.renderOpening(mb, state.courseId);
+        }
       });
     }
   }

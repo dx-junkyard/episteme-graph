@@ -241,3 +241,35 @@ class TestAnchorsAndWiring:
     def test_script_is_loaded_before_admin_js(self):
         assert "/js/admin-release-review.js" in HTML_SRC
         assert HTML_SRC.index("/js/admin-release-review.js") < HTML_SRC.index("/js/admin.js")
+
+class TestRound23StepThreeReadsFreshPlacements:
+    """第 23 波 F5: 「この配置で次へ」の後、ステップ 3 は確認前の件数で要約しない。"""
+
+    def _accept(self):
+        return SRC[SRC.index("function acceptPlacements") : SRC.index("function renderPublishStep")]
+
+    def test_accept_refetches_placements_before_advancing(self):
+        accept = self._accept()
+        assert "fetchLandscape()" in accept
+        # 取り直し（fetchLandscape）の後に advance する（advance が先だと古い件数で要約する）。
+        assert accept.index("fetchLandscape()") < accept.index("advance();\n          // 提示と確認")
+
+    def test_stale_summary_does_not_claim_a_pending_count(self):
+        publish = SRC[SRC.index("function renderPublishStep") : SRC.index("function publish(btn)")]
+        assert "state.landscapeStale" in publish
+        assert publish.index("state.landscapeStale") < publish.index("pending_count")
+        assert "NOTICE_LANDSCAPE_STALE" in publish
+
+    def test_mismatch_offers_going_back_inside_the_wizard(self):
+        assert "再読み込み" not in _code_only(SRC)
+        publish = SRC[SRC.index("function renderPublishStep") : SRC.index("function publish(btn)")]
+        assert "state.acceptMismatch" in publish
+        assert "BACK_TO_LANDSCAPE_LABEL" in publish
+        assert "state.stepIndex = 1;" in publish
+
+    def test_next_meaning_sits_right_above_the_buttons(self):
+        assert 'id="release-review-next-meaning"' in SRC
+        assert SRC.index('id="release-review-next-meaning"') < SRC.index('id="release-review-facts"')
+        assert "setNextMeaning(NOTICE_NEXT_MEANING);" in SRC
+        # 脚注（facts）には「次へ」の意味を連結しない。
+        assert "var parts = [NOTICE_REOPEN];" in SRC

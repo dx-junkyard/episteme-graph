@@ -352,3 +352,54 @@ def fetch_landing_candidates(user_id: str, course_id: str, since_hours: int = 24
         }
         for r in rows
     ]
+
+
+def fetch_margin_mark_traces(
+    user_id: str, course_id: str, kinds, limit: int = 60
+) -> list[dict]:
+    """「欄外の印」の生データ（第 23 波 F1 / return_door_design.md §2.3）。
+
+    母集合の kind は呼び出し側が ``core.trace_registry.MARGIN_MARK_KINDS``（登録簿の
+    ``margin_marks`` 宣言）を渡す — ここに kind のリテラルを書かない（読み手ごとの
+    母集合を登録簿 1 箇所で決める）。差し替え・取り消し済み（``superseded``）と
+    「地図には反映しない」にした行（``payload.map_excluded``）は SQL で落とす。
+    kind ごとの絞り込み（確定済みの問い・引き受けた引っかかり・取り消していない印）と
+    件数の上限は ``core.cycle.derive.build_margin_marks`` の責務。新しい順。
+    """
+    from sqlalchemy import text as sa_text
+
+    from core.postgres import get_session as _pg_session
+
+    kind_list = sorted(str(k) for k in (kinds or ()))
+    if not kind_list:
+        return []
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id, kind, status, payload, created_at
+                FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  AND kind = ANY(:kinds)
+                  AND status <> 'superseded'
+                  AND COALESCE(payload->>'map_excluded', 'false') NOT IN ('true', '1')
+                ORDER BY created_at DESC
+                LIMIT :lim
+            """),
+            {"uid": user_id, "cid": course_id, "kinds": kind_list, "lim": int(limit)},
+        ).fetchall()
+    except Exception:
+        logger.warning("fetch_margin_mark_traces failed (fail-open to no marks)", exc_info=True)
+        rows = []
+    finally:
+        session.close()
+    return [
+        {
+            "id": str(r[0]),
+            "kind": r[1],
+            "status": r[2],
+            "payload": _payload_dict(r[3]),
+            "created_at": _to_iso(r[4]),
+        }
+        for r in rows
+    ]

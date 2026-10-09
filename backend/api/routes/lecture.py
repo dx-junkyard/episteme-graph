@@ -599,10 +599,14 @@ def lecture_interrupt_chat(
 
     # 誤解検出
     course_update = None
+    # 第 23 周: 誤解候補と永続履歴に同じ user メッセージ id を焼き込む（書き直し・
+    # 取り消しで候補を supersede できるように）。
+    _user_message_id = str(uuid.uuid4())
     if topic_info and any(kw in answer for kw in ["訂正：", "訂正:", "【訂正】"]):
         course_update = detect_and_record_misconception(
             current_user["id"], course_id, course_data, topic_id,
             body.message, answer,
+            message_id=_user_message_id,
         )
 
     # 本文中のドリルダウンマーカーは構造化アクションへ正規化する（フロントは
@@ -613,6 +617,7 @@ def lecture_interrupt_chat(
     persist_chat_history(
         current_user["id"], course_id, topic_id,
         body.history, body.message, clean_answer,
+        user_message_id=_user_message_id,
     )
 
     return LectureInterruptResponse(

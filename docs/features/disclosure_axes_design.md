@@ -87,6 +87,7 @@ AI 通過点（`ai_touchpoints`）は「どの操作で・何が送られるか�
 | 学習チャット・discuss の入力欄（composer 直上） | `index.html` の `data-disclosure-note` | `learning_chat` |
 | ハンズフリー音声パネル | `index.html` の `data-disclosure-note` | `learning_chat` |
 | 予想を書く枠 / 違いの観点（AI に問い・観点を求めるボタンの近傍） | `discuss.js` の `mount()` | `learning_chat` |
+| わたしの記録の先頭（常設の注記の下。2026-10-09 追加 — 入力欄の上と同じ文を 1 操作で確かめられる場所に再掲） | `my-records.js` の `mount()` | `learning_chat` |
 | 操作アシスタント（Copilot）の入力欄 | `admin-assistant.js` の `mount()` | `course_materials` |
 | W層「深く検討」の対話 | `deliberation.js` の担体 + `mount()` | `course_materials` |
 | グラフ対話レビューのチャット | `admin-graph-review.js` の担体 + `mount()` | `course_materials` |
@@ -145,3 +146,20 @@ AI 通過点（`ai_touchpoints`）は「どの操作で・何が送られるか�
 （elicit は構造の事実を受け取らないため、1項目にまとめると宣言が嘘になる）。`basis` に
 `core/assistant_context/resolvers/learning.py` を追加。**軸・`data_kind`・`label` は不変**で、
 学習者マニュアル（student §18）にも同じ事実を1文足した。
+
+**2026-10-09（第 23 周・撤回欄の是正）**: uxsim 第 23 周
+（[ペルソナ通し受講テスト](../architecture/persona_enactment_testing_design.md) §20）の F2 で、第 6 軸 `withdrawal` の
+2 箇所が現物より多くを約束していた（IK-0654）。DA1（現物から確認できることだけ）に従い、現物に合わせて書き直した。
+**軸・`data_kind`・`label` は不変**。
+
+- `learning_chat`: 旧文は「書き直し・削除をすると、そこから後のやりとりは記録から外れます」。現物は、往復が**会話の履歴から**
+  外れ、そこから作られた問い・引っかかりの痕跡は行を消さず「差し替え・取り消し」の状態で残る
+  （`services.truncate_chat_and_supersede`・「わたしの記録」で確かめられる）。履歴をまとめて削除したときは会話の履歴だけが
+  消える。教材から答えられなかった質問の記録（`unanswered_query_logs`）はどちらの削除でも担当教員の一覧から外れない。
+- `learner_traces`: 旧文は「候補は却下できます。…後から戻せます」。現物は、「地図には反映しない」は問いの軌跡の
+  「地図に戻す」で戻せるが、見送った AI の候補を戻す操作（API）は無い。宣言にその事実を書いた。
+- 学習者マニュアル（student §18 `{#disclosure}` と書き直し・削除の節）も同じ事実に揃えた。
+- 第 23 周で出た「入力欄の下の 1 行に、保持・撤回（どこに残るか・いつ消せるか）も足すか」は、1 行を外部の AI に渡る告知に
+  絞る現行の方針（§4「事実文の配置」）を変える判断なので、オーナー判断の候補として推奨付きで裁定待ち（推奨: 足さない。
+  保持・撤回は「わたしの記録」の先頭の事実文と student §18 で 1 操作以内に読める — 上記 §20.9）。
+  取り消した質問を教員の一覧から外すか（IK-0658）・見送った候補を戻す操作を足すか（IK-0660）も同じく裁定待ち。

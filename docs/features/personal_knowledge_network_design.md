@@ -500,6 +500,19 @@ queries.py   → SQL 読みプリミティブ（core.postgres.get_session 直読
 - `GET .../interest-traces` の各項目に `map_excluded: bool` を付与（restore 導線用）。
 - 導出側は `build_network` が `payload.map_excluded` truthy な trace をスキップ
   （コースビュー・個人スコープの両方に自動で効く）。
+- **追補（2026-10-09・第 23 周）— 書き直し・取り消しをした往復の誤解候補**: uxsim 第 23 周
+  （[ペルソナ通し受講テスト](../architecture/persona_enactment_testing_design.md) §20）で、✏️ 書き直し・🗑 取り消しを
+  した往復から生まれた誤解の**候補**が `personal_graph.misconceptions_by_topic` に生き残り、「わたしの記録」の誤解の
+  記録に並んでいた（IK-0687）。原因は、誤解候補に焼き込む `message_id` が `body.message_id` 依存で、無い経路では
+  `None` だったこと（学習チャットの書き直し・削除の機能で「誤解記録は message_id リンクを持たないため個別に
+  supersede しない」と既知の限界にしていたもの）。是正: `_learning_chat_core`（と
+  document 直付け discuss）は user メッセージ id を先に確定させ、誤解候補と永続履歴の両方に同じ値を焼き込む。
+  `services.truncate_chat_and_supersede` は同じトランザクション内で `_supersede_misconceptions_in_session` を呼び、
+  純関数 `personal_graph/graph_data.py::supersede_misconceptions_for_messages` が**候補（candidate）だけ**を
+  `superseded` にして `superseded_reason`（`rewrite` / `delete`）を残す（行は消さない — P4）。本人が 3 択で確定・却下した
+  メモは人の判断なので動かさない。`message_id` を持たない旧行は対象外（従来どおり）。地図の導出は誤解をノードにしない
+  （§2）ので、この是正は地図の形を変えない。テスト: `test_round23_server_fixes.py`（`TestSupersedeMisconceptions` /
+  `TestSupersedeInSession`）。
 
 ### P-3: 最上位「わたしの地図」（frontend）
 

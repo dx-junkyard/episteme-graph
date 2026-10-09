@@ -126,7 +126,8 @@ class TestRowRetentionAndProjection:
         ]
         by_id = {i["id"]: i for i in _all_items(_overview(rows))}
         assert by_id["t-1"]["status_label"] == "未解決"
-        assert by_id["t-2"]["status_label"] == "書き直しで差し替え"
+        # 理由の無い旧行は書き直しと取り消しを区別できない（第 23 波 F2）。
+        assert by_id["t-2"]["status_label"] == "書き直しか取り消しで差し替え"
         assert by_id["t-3"]["status_label"] == "見送り（保持）"
 
     def test_open_is_not_read_as_unresolved_for_misconception_and_intention(self):
@@ -184,6 +185,7 @@ class TestRowRetentionAndProjection:
         by_id = {i["id"]: i for i in _all_items(_overview(rows))}
         assert by_id["t-1"]["flags"] == {
             "map_excluded": False, "superseded": False, "candidate": True,
+            "dismissed": False,
         }
         assert by_id["t-2"]["flags"]["superseded"] is True
         assert by_id["t-3"]["flags"]["map_excluded"] is True
@@ -349,3 +351,43 @@ class TestExport:
         assert "完全な持ち出し" not in EXPORT_NOTE
         assert "上限まで" in EXPORT_NOTE
         assert not any(ch.isdigit() for ch in EXPORT_NOTE)
+
+
+class TestRound23SupersededReason:
+    """第 23 波 F2: 書き直しと取り消しを superseded の1語に畳まない。"""
+
+    def test_reason_specific_labels(self):
+        rows = [
+            _row(id="r-1", status="superseded",
+                 payload={"text": "x", "superseded_reason": "rewrite"}),
+            _row(id="r-2", status="superseded",
+                 payload={"text": "y", "superseded_reason": "delete"}),
+        ]
+        by_id = {i["id"]: i for i in _all_items(_overview(rows))}
+        assert by_id["r-1"]["status_label"] == "書き直しで差し替え"
+        assert by_id["r-2"]["status_label"] == "取り消し（記録には残しています）"
+
+    def test_unknown_reason_falls_back_to_the_undistinguished_label(self):
+        rows = [_row(id="r-3", status="superseded",
+                     payload={"text": "z", "superseded_reason": "other"})]
+        by_id = {i["id"]: i for i in _all_items(_overview(rows))}
+        assert by_id["r-3"]["status_label"] == "書き直しか取り消しで差し替え"
+
+    def test_dismissed_rows_are_flagged(self):
+        rows = [_row(id="d-1", kind="tension", status="dismissed")]
+        by_id = {i["id"]: i for i in _all_items(_overview(rows))}
+        assert by_id["d-1"]["flags"]["dismissed"] is True
+
+    def test_reason_vocab_and_labels_agree(self):
+        from core.label_vocab import TRACE_SUPERSEDED_REASON_LABELS, TRACE_SUPERSEDED_REASONS
+
+        assert set(TRACE_SUPERSEDED_REASON_LABELS) == set(TRACE_SUPERSEDED_REASONS)
+
+    def test_registry_labels_use_screen_words(self):
+        """第 23 波 F4: 系統見出しに内部の語（軽量アンカー・学習の意図）を出さない。"""
+        from core.trace_registry import TRACE_KINDS
+
+        labels = {spec.label for spec in TRACE_KINDS.values()}
+        assert "軽量アンカー" not in labels
+        assert "学習の意図" not in labels
+        assert TRACE_KINDS["anchor_mark"].label == "教材に付けた印"

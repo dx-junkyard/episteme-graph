@@ -69,6 +69,15 @@ migration: **不要**（`interest_traces` の kind 追加なし。`intention` �
 - `map_excluded` の痕跡は表示しない（既存の訂正操作を尊重）。opt-out 可（表示トグル。
   サーバに設定テーブルを作らず localStorage — 精読モードと同型）。
 - 表示上限（新しい順に最大 12 点。間引きは数を見せずに行う）。減衰表示は v2。
+- **母集合は登録簿の `margin_marks` 宣言**（2026-10-09・第 23 波 F1）。読み元は
+  `GET /api/learning/courses/{id}/cycle/margin-marks`（`core/cycle/queries.py::
+  fetch_margin_mark_traces` が `trace_registry.MARGIN_MARK_KINDS` = 問い・引っかかり・
+  教材に付けた印 を受け、`core/cycle/derive.py::build_margin_marks` が kind ごとに本人が
+  引き受けたものだけを通す）。以前は「問いの軌跡」（interest-traces）の一覧を流用しており、
+  軌跡から除外される「教材に付けた印」（anchor_mark）が一度も出なかった。問いの軌跡の
+  除外は変えない。印を付けた・引っかかりや問いの帰属を確定した・🗑 で取り消した直後に
+  取り直す（以前はコース切替までキャッシュを捨てなかった）。差し替え・取り消し済み
+  （`superseded`）は出さない。並びは `created_at` の新しい順（下の①の近似は解消）。
 
 ## 3. 対話から思考を掬う仕事の委譲（明文化）
 
@@ -133,3 +142,27 @@ migration: **不要**（`interest_traces` の kind 追加なし。`intention` �
 - 扉の内側の想起リンク＋二列並置（右列既定畳み）・精読モード限定の1タップ想起ゲート
 - 減衰表示（時間定数の設計込み）
 - leave_note の「わたしの地図」時間層表示
+
+## 7. 追補（2026-10-09・第 23 周）— 持ち越しの逐語と保存の成否
+
+uxsim 第 23 周（[ペルソナ通し受講テスト](../architecture/persona_enactment_testing_design.md) §20）の F1 で見えた
+RD1 の破れと、保存の成否を偽る表示の是正。migration なし・LLM 0 回。欄外の印の読み元の是正は §2.3 に追記した。
+
+- **持ち越しの問いは候補の本文を保存する（RD1・IK-0650）**: 着地の「次に持ち越すなら」の候補
+  （`GET .../cycle/landing-candidates`）は、選択肢に出す**表示専用**の `label`（80 字・印は 60 字で切り、印の種類の接頭辞
+  「気になる: 」等を付けた文）と、元の痕跡の**本文そのもの** `text`（切り詰めず・接頭辞を付けない）の 2 つを持つ
+  （`core/cycle/derive.py::build_landing_candidates`）。以前は `label` を持ち越しの本文として保存しており、扉と開幕に出る
+  「本人の言葉」が切り詰めと接頭辞の付いた表示文になっていた。保存するのは `text` で、本文の無い印だけは `label`
+  （印の種類の語）を使う（`discuss.js`）。是正前に保存された行は書き換えない（P4）ので、その行は扉に表示文のまま出る。
+- **保存の成否を事実文で返す（IK-0651）**: 持ち越し・開いた動機・予想・予想との違いの 4 か所が応答を見ずに
+  「記録しました」「残しました」と出していた。書き置き（`saveLeaveNote`）と同じ作法に揃え、失敗したら書いた文章を消さず、
+  押したボタンを戻し、その場に「保存できませんでした。入力はそのまま残しています。」を 1 行出す（`discuss.js` の
+  `SAVE_FAILED_FACT` / `showSaveFailed`）。成功のときだけ成功の文を出す。
+- **欄外の印**（§2.3 の追記）: 母集合を登録簿の `margin_marks` 宣言で決める `GET .../cycle/margin-marks`（登録簿の消費者
+  宣言 `cycle_margin_marks`）。教材に付けた印が初めて出るようになり、印を付けた・確定した・🗑 で取り消した直後に取り直す。
+- テスト: `backend/tests/test_round23_learner_cycle.py`（`TestCarryoverKeepsTheWholeText` / `TestSavesReportTheirOutcome` /
+  `TestMarginMarks` / `TestMarginMarksRoute`）+ `test_return_door_ui_static.py`。
+- **未解決（課題として記帳済み）**: 持ち越しの問いに答えても扉は答える前と同じ（IK-0668）/ 候補が 1 つも無いときの見出し
+  （IK-0669）/ 議論の AI が「持ち越しの問い、受け取りました」と言う（持ち越しは画面の操作でだけ残る — IK-0670）/
+  切り上げの挨拶や予想が「問い［未解決］」として記録・軌跡に並ぶ（IK-0667）/ 前日に書いた予想に扉・開幕から辿れない
+  （第 23 周の所見。扉の 3 部品に予想を足すかは RD1〜RD3 の範囲の判断として未着手）。

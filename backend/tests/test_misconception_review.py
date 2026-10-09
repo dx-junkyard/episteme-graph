@@ -564,8 +564,11 @@ class TestGuardrails:
         )
 
     def test_detection_passes_message_id_from_the_route(self):
+        # 第 23 周: 誤解候補と永続履歴は同じ id（無ければルートで採番した値）を持つ。
         src = _read(LEARNING_PY)
-        assert "message_id=body.message_id or None," in src
+        assert "_user_message_id = body.message_id or str(uuid.uuid4())" in src
+        assert "message_id=_user_message_id," in src
+        assert "user_message_id=_user_message_id," in src
 
 
 # ---------------------------------------------------------------------------

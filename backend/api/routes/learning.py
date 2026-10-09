@@ -63,6 +63,7 @@ from services import (
     enroll_user_in_course,
     get_course_chunks_ordered,
     get_course_completion,
+    list_learner_touched_topic_ids,
     get_course_data,
     get_course_live_llm_models,
     get_editable_course_data,
@@ -589,8 +590,16 @@ def _project_topics_for_learner(data: dict) -> dict:
         projected["units"] = learner_topic_units_projection(topic)
         return projected
 
+    def _with_status_label(topic):
+        # 第 23 周（st-02・st-06）: locked を説明なしに出さない（推奨順であって禁止では
+        # ない）。表示語の正本は label_vocab.TOPIC_STATUS_LABELS。
+        if not isinstance(topic, dict):
+            return topic
+        status = str(topic.get("status") or "locked")
+        return {**topic, "status_label": label_vocab.TOPIC_STATUS_LABELS.get(status, "")}
+
     if isinstance(out.get("topics"), list):
-        out["topics"] = [_project(t) for t in out["topics"]]
+        out["topics"] = [_with_status_label(_project(t)) for t in out["topics"]]
     # IK-0384: ``course_content_status`` はコース生成の内部記録（件数・document_id・
     # draft_errors・uncovered_sections(_dropped) など）を任意キーで積む free-form dict で、
     # 学習者に出すものではない（KO10 / 数値非表示）。学習画面が読めるのは状態の語だけ
@@ -995,17 +1004,30 @@ def get_course(
     except Exception:
         logger.warning("Failed to read course completion for course view", exc_info=True)
         completed_ids = []
+    # 第 23 周（st-02・st-06）: 読んで質問したトピックが「まだ順番が来ていない」のままに
+    # 見えていた。本人が会話したトピックを「学習中」として重ねる（表示だけ・fail-open）。
+    try:
+        touched_ids = list_learner_touched_topic_ids(current_user["id"], course_id)
+    except Exception:
+        logger.warning("Failed to read touched topics for course view", exc_info=True)
+        touched_ids = []
     return LearningCourseLayeredResponse(
         master_course=LearningCourseDetail(
             **_project_topics_for_learner(
-                _overlay_learner_progress(_with_resolved_source_titles(data), completed_ids)
+                _overlay_learner_progress(
+                    _with_resolved_source_titles(data), completed_ids, touched_ids
+                )
             )
         ),
         personal_layer=PersonalLayer(**personal),
     )
 
 
-def _overlay_learner_progress(data: dict, completed_topic_ids: list[str]) -> dict:
+def _overlay_learner_progress(
+    data: dict,
+    completed_topic_ids: list[str],
+    touched_topic_ids: list[str] | tuple = (),
+) -> dict:
     """本人の完了記録からトピック・章の状態と progress_pct を導出して重ねたコピーを返す（IK-0398）。
 
     規則（決定論・保存データは変更しない）:
@@ -1015,10 +1037,14 @@ def _overlay_learner_progress(data: dict, completed_topic_ids: list[str]) -> dic
         ロック中のトピックも開ける — 学習者を閉め出さない既存挙動は変えない）
       - 章: 全トピック完了 → ``completed`` / どれかが完了か進行中 → ``in_progress``。
         ``progress_pct`` は章内の完了トピックの割合（既存の DTO 項目を実値に揃えるだけ）
-    完了記録が1件も無ければ何も変えない（マスターの値のまま）。
+      - 本人が会話したトピック（``touched_topic_ids``）で完了記録の無いもの → ``locked``
+        なら ``in_progress``（第 23 周: 読んで質問したトピックが「まだ順番が来ていない」の
+        ままに見えていた。接触は理解の根拠にならないので ``completed`` にはしない — F4）
+    完了記録も会話の記録も無ければ何も変えない（マスターの値のまま）。
     """
     completed = {str(t) for t in (completed_topic_ids or []) if t}
-    if not isinstance(data, dict) or not completed:
+    touched = {str(t) for t in (touched_topic_ids or []) if t}
+    if not isinstance(data, dict) or not (completed or touched):
         return data
     out = dict(data)
     flat = [t for t in (data.get("topics") or []) if isinstance(t, dict)]
@@ -1029,7 +1055,7 @@ def _overlay_learner_progress(data: dict, completed_topic_ids: list[str]) -> dic
         status = str(topic.get("status") or "locked")
         if topic_id in completed:
             status = "completed"
-        elif previous_completed and status == "locked":
+        elif (previous_completed or topic_id in touched) and status == "locked":
             status = "in_progress"
         if topic_id:
             status_by_id[topic_id] = status
@@ -5313,7 +5339,7 @@ def delete_chat_message_from(
 
     try:
         result = truncate_chat_and_supersede(
-            current_user["id"], course_id, topic_id, message_id
+            current_user["id"], course_id, topic_id, message_id, reason="delete"
         )
     except Exception:
         logger.exception(
@@ -5325,7 +5351,13 @@ def delete_chat_message_from(
     if result is None:
         raise HTTPException(status_code=404, detail="Message not found")
 
-    return {"status": "deleted", "removed_count": result["removed_count"]}
+    # 第 23 波 F2: 取り消しの直後に、往復は会話から外れたが痕跡は状態を変えて残る事実を返す
+    # （文言の正本は core/label_vocab.py。画面は JS に焼き込まずこの文をそのまま描く）。
+    return {
+        "status": "deleted",
+        "removed_count": result["removed_count"],
+        "fact": label_vocab.CHAT_TURN_WITHDRAWN_FACT,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -7076,21 +7108,25 @@ def _learning_chat_core(
     # 是正 F5: 記録されるのは **candidate**（AI が訂正を提案した箇所）だけで、「誤解」として
     # 確定するのは本人の3択（POST .../misconceptions/{id}/review）に限る。
     course_update = None
+    # 第 23 周（st-06）: user メッセージ id はここで確定させ、誤解候補と永続履歴の両方に
+    # 同じ値を焼き込む（以前は body.message_id が無いと誤解候補だけ None になり、
+    # 書き直し・取り消しで supersede できなかった）。
+    _user_message_id = body.message_id or str(uuid.uuid4())
     if not degraded:
         if not _is_casual and topic_info and any(
             kw in answer for kw in ["訂正", "より正確です", "誤解"]
         ):
             course_update = detect_and_record_misconception(
                 current_user["id"], course_id, course_data, topic_id, body.message, answer,
-                # 機能3（書き直し・削除）で派生痕跡を supersede する将来の連携のため、
-                # 当該ターンの user メッセージ id を候補に持たせる（無い経路では None）。
-                message_id=body.message_id or None,
+                # 機能3（書き直し・削除）で派生した誤解候補を同じ理由で supersede する
+                # ため、当該ターンの user メッセージ id を候補に持たせる。
+                message_id=_user_message_id,
             )
 
     _persisted = persist_chat_history(
         current_user["id"], course_id, topic_id,
         body.history, body.message, answer,
-        user_message_id=body.message_id or None,
+        user_message_id=_user_message_id,
         # 履歴復元後も本文中の [出典N] を出典チップに戻せるようにする（sources を焼き込まないと
         # リロード・トピック切替・discuss モード遷移のあとプレーンテキストに退化する）。
         # 保存するのはチップ描画とポップアップ起動に要る最小フィールドのみ（quote / meta /
@@ -7682,7 +7718,8 @@ def delete_document_discussion_message_from(
     document_id, _source_path, _title = _resolve_discuss_document(current_user["id"], document_ref)
     try:
         result = truncate_chat_and_supersede(
-            current_user["id"], document_context_id(document_id), DISCUSSION_TOPIC_ID, message_id
+            current_user["id"], document_context_id(document_id), DISCUSSION_TOPIC_ID, message_id,
+            reason="delete",
         )
     except Exception:
         logger.exception(
@@ -7694,7 +7731,13 @@ def delete_document_discussion_message_from(
     if result is None:
         raise HTTPException(status_code=404, detail="Message not found")
 
-    return {"status": "deleted", "removed_count": result["removed_count"]}
+    # 第 23 波 F2: 取り消しの直後に、往復は会話から外れたが痕跡は状態を変えて残る事実を返す
+    # （文言の正本は core/label_vocab.py。画面は JS に焼き込まずこの文をそのまま描く）。
+    return {
+        "status": "deleted",
+        "removed_count": result["removed_count"],
+        "fact": label_vocab.CHAT_TURN_WITHDRAWN_FACT,
+    }
 
 
 @router.get("/courses/{course_id}/source-chunk/{chunk_id}")

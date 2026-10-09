@@ -17,6 +17,7 @@ LS5「数値を見せない」: weight / confidence の生値を返す関数は�
 from __future__ import annotations
 
 from core.label_vocab import (
+    LANDSCAPE_STATUS_LABELS as _LANDSCAPE_STATUS_LABELS,
     WEIGHT_LABELS,
     WEIGHT_LEVEL_SCALE,
     WEIGHT_RELATION,
@@ -106,13 +107,9 @@ LEARNER_VISIBLE_STATUSES = (
 #: 再解析で ``superseded`` へ落として良い状態（LS3: 教員の判断は AI が上書きしない）。
 SUPERSEDABLE_STATUSES = (STATUS_INFERRED,)
 
-STATUS_LABELS: dict[str, str] = {
-    STATUS_INFERRED: "AI推定（未確認）",
-    STATUS_CONFIRMED: "教員確認済み",
-    STATUS_REJECTED: "却下",
-    STATUS_REVIEW_REQUIRED: "再検討中",
-    STATUS_SUPERSEDED: "再解析により置換",
-}
+#: 教員向けの状態名。正本は ``core/label_vocab.py::LANDSCAPE_STATUS_LABELS``（第 23 波 F5:
+#: 管理画面 2 か所の JS フォールバックが逐語ミラーする相手を 1 つにする）。
+STATUS_LABELS = _LANDSCAPE_STATUS_LABELS
 
 
 def is_valid_status(value: str) -> bool:

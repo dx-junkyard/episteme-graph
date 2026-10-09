@@ -98,7 +98,13 @@ def build_landing_candidates(rows: list[dict], limit: int = _MAX_LANDING_CANDIDA
 
     並び順: revisit=true の anchor_mark → articulated tension →
     その他 active anchor_mark → confirmed/learner_selected question。
-    各要素は ``{trace_id, kind, label, revisit}`` のみ（数値は含めない。UC9）。
+    各要素は ``{trace_id, kind, label, text, revisit}`` のみ（数値は含めない。UC9）。
+
+    ``label`` は選択肢に出す**表示専用**の文（切り詰め・印の種類の接頭辞付き）、
+    ``text`` は元の痕跡の**本文そのもの**（切り詰めず・接頭辞を付けない）。持ち越しの
+    問いとして保存するのは ``text`` で、扉と開幕に出るのも逐語のまま（RD1。第 23 波 F1:
+    以前は 80 字で切った ``label`` を本文として保存していた）。本文の無い印だけは
+    ``text`` が空で、呼び出し側は ``label``（印の種類の語）を使う。
     """
     revisit_anchors: list[dict] = []
     tensions: list[dict] = []
@@ -125,25 +131,99 @@ def build_landing_candidates(rows: list[dict], limit: int = _MAX_LANDING_CANDIDA
             else:
                 label = label_jp
             revisit = bool(payload.get("revisit"))
-            item = {"trace_id": trace_id, "kind": kind, "label": label, "revisit": revisit}
+            item = {
+                "trace_id": trace_id, "kind": kind, "label": label, "text": text,
+                "revisit": revisit,
+            }
             (revisit_anchors if revisit else other_anchors).append(item)
         elif kind == "tension" and status == "articulated":
-            text = payload.get("learner_text") or payload.get("text") or ""
+            text = (payload.get("learner_text") or payload.get("text") or "").strip()
             label = _excerpt(text, _EXCERPT_LEN)
             if not label:
                 continue
-            tensions.append({"trace_id": trace_id, "kind": kind, "label": label, "revisit": False})
+            tensions.append({
+                "trace_id": trace_id, "kind": kind, "label": label, "text": text,
+                "revisit": False,
+            })
         elif kind == "question":
             anchor = payload.get("structure_anchor") or {}
             if anchor.get("attribution_source") not in ("learner_selected", "confirmed"):
                 continue
-            label = _excerpt(payload.get("text") or "", _EXCERPT_LEN)
+            text = (payload.get("text") or "").strip()
+            label = _excerpt(text, _EXCERPT_LEN)
             if not label:
                 continue
-            questions.append({"trace_id": trace_id, "kind": kind, "label": label, "revisit": False})
+            questions.append({
+                "trace_id": trace_id, "kind": kind, "label": label, "text": text,
+                "revisit": False,
+            })
 
     ordered = revisit_anchors + tensions + other_anchors + questions
     return ordered[:limit]
+
+
+#: 欄外の印の上限（app.js の MARGIN_MARKS_MAX と同じ値。数は画面に出さない — RD5）。
+MAX_MARGIN_MARKS = 12
+_ANCHOR_ACCEPTED_ATTRIBUTIONS = ("learner_selected", "confirmed")
+
+
+def build_margin_marks(rows: list[dict], limit: int = MAX_MARGIN_MARKS) -> dict[str, Any]:
+    """「欄外の印」の DTO（第 23 波 F1 / return_door_design.md §2.3）。
+
+    母集合は登録簿の ``margin_marks`` 宣言（``core.trace_registry.MARGIN_MARK_KINDS``）。
+    ここでは kind ごとに本人が引き受けたものだけを通す:
+
+    - 問い: どこへの問いかを本人が確定したもの（帰属が learner_selected / confirmed で
+      取り下げていない）。
+    - 引っかかり: 本人が引き受けた status（``TENSION_OWNED_STATUSES``）。
+    - 教材に付けた印: 取り下げていない印（「気になる」「まだ分からない」…）。
+
+    各要素は ``{kind, text, anchor_label, mark_label}`` のみ。本人の言葉は逐語のまま
+    （切り詰めない・言い換えない = RD1）で、件数・数値は持たない（RD5）。
+    ``anchor_label`` が本文の先頭と同じ（選択範囲の抜き書き）ときは重ねて出さない。
+    """
+    from core.tension.schema import TENSION_OWNED_STATUSES
+
+    marks: list[dict] = []
+    for row in rows or []:
+        if len(marks) >= limit:
+            break
+        kind = row.get("kind")
+        status = row.get("status")
+        payload = row.get("payload") or {}
+        if payload.get("map_excluded"):
+            continue
+        anchor = payload.get("structure_anchor") or {}
+        mark_label = ""
+        if kind == "question":
+            if anchor.get("attribution_source") not in _ANCHOR_ACCEPTED_ATTRIBUTIONS:
+                continue
+            if anchor.get("status") == "dismissed":
+                continue
+            text = (payload.get("text") or "").strip()
+        elif kind == "tension":
+            if status not in TENSION_OWNED_STATUSES:
+                continue
+            text = (payload.get("learner_text") or payload.get("text") or "").strip()
+        elif kind == "anchor_mark":
+            if anchor.get("status") == "dismissed":
+                continue
+            text = (payload.get("text") or "").strip()
+            mark_label = str(QUICK_LABELS.get(payload.get("quick_label"), {}).get("label", ""))
+        else:
+            continue
+        if not text:
+            continue
+        anchor_label = str(anchor.get("anchor_label") or "").strip()
+        if anchor_label and text.startswith(anchor_label.rstrip("…")):
+            anchor_label = ""
+        marks.append({
+            "kind": kind,
+            "text": text,
+            "anchor_label": anchor_label,
+            "mark_label": mark_label if mark_label != text else "",
+        })
+    return {"marks": marks}
 
 
 _MAX_TODAYS_WORDS = 30

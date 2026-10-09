@@ -38,20 +38,34 @@
     "確認後も、教材管理の「位置づけ（分野マップ）」から個別に再検討・却下へ戻せます。";
   // 記録した結果、提示されていたものと確認したものが一致したかの事実文（数値は出さない）。
   var NOTICE_ACCEPT_MATCHED = "表示されていた配置と確認した配置は一致しています";
+  // 第 23 波 F5: 差があったときの出口は「再読み込み」（ウィザードが消える）ではなく、
+  // ウィザードの中でステップ 2 に戻って最新の配置を取り直す操作にする。
   var NOTICE_ACCEPT_MISMATCH =
-    "表示と確認した配置に差がありました（画面を再読み込みしてください）";
+    "表示と確認した配置に差がありました。下の「ステップ 2 に戻って確かめる」で最新の配置を表示し直せます";
+  var BACK_TO_LANDSCAPE_LABEL = "ステップ 2 に戻って確かめる";
+  // 第 23 波・第 2 波 F5: ステップ 3 の「確認として記録したもの」（件数のみ・RR6）。
+  var RECORDED_HEADING = "ステップ 2 で確認として記録したもの";
+  var RECORDED_CONFIRMED_PREFIX = "確認済みにした配置: ";
+  var RECORDED_EVIDENCE_PREFIX = "根拠を開いて読んだ配置: ";
+  var RECORDED_DECIDED_PREFIX = "却下・再検討にした配置: ";
+  // accept 後に配置を取り直せなかったときの事実文（確認前の件数で要約しない）。
+  var NOTICE_LANDSCAPE_STALE =
+    "確認を記録しました。最新の位置づけを読み込めなかったため、件数の要約は表示していません。";
   var EVIDENCE_SUMMARY = "根拠を見る";
   var EVIDENCE_EMPTY = "この配置には論文からの引用が残っていません。";
   var LANDSCAPE_EMPTY =
     "この論文の分野マップ上の位置づけはまだありません。このまま公開できます。";
   var LANDSCAPE_INTRO =
     "この論文が分野マップ（基準地図）のどこに位置づくかの候補です。1つの論文が複数の領域・複数の観点に置かれることがあります。";
+  // サーバの status_label が取れないときのフォールバック。正本は
+  // backend/core/label_vocab.py::LANDSCAPE_STATUS_LABELS の逐語ミラー
+  // （test_landscape_status_vocab_mirror.py）。行のボタン「再検討」の結果は「再検討中」。
   var STATUS_FALLBACK_LABELS = {
+    inferred: "AI推定（未確認）",
     confirmed: "教員確認済み",
-    inferred: "AIによる推定（未確認）",
-    review_required: "確認待ち（AI推定）",
     rejected: "却下",
-    superseded: "旧候補"
+    review_required: "再検討中",
+    superseded: "再解析により置換"
   };
   // RR4: 一括の「次へ」とは独立に、個別の修正手段を常に出す。
   var ROW_ACTIONS = [
@@ -66,6 +80,10 @@
     autoOpened: false,
     busy: false,
     landscape: null,
+    // accept の後に配置を取り直せなかった（ステップ 3 で確認前の件数を言わない）。
+    landscapeStale: false,
+    // 提示と適用に差があった（ステップ 3 にステップ 2 へ戻る操作を出す）。
+    acceptMismatch: false,
     mapSaved: false,
     published: false,
     // 是正 F7（2026-09-10・六つのレンズ §4 第1波 #5 / 02_teacher.md 提案7）:
@@ -73,7 +91,12 @@
     // だけ集める。開いた/開かなかったの2値のみで、滞在時間・視線などは測らない
     // （原則5: 監視しない）。値は来歴申告としてサーバへ渡し、サーバは検証しない
     // （DC4）。「根拠を描くコードがある」ことを「根拠が出ていた」と申告しない。
-    evidenceExpanded: {}
+    evidenceExpanded: {},
+    // 第 23 波・第 2 波 F5: ステップ 3 の「確認として記録したもの」の材料。
+    // acceptRecord は accept 応答の decision_context から読み時に作る（サーバ変更なし）。
+    // rowDecided はこのウィザードで却下・再検討にした配置の id（件数だけを出す — RR6）。
+    acceptRecord: null,
+    rowDecided: {}
   };
 
   function esc(text) {
@@ -92,9 +115,9 @@
     var node = el("release-review-notice");
     if (!node) return;
     node.textContent = message || "";
-    node.style.color = isError
-      ? "var(--color-text-danger, #e53935)"
-      : "var(--color-text-secondary)";
+    node.className = isError
+      ? "release-review-notice release-review-notice-error"
+      : "release-review-notice";
   }
 
   // IK-0376: 一括確認で対象外になった論文があったときの事実文（サーバの skipped_note を
@@ -134,33 +157,40 @@
     state.autoOpened = !!options.autoOpened;
     state.busy = false;
     state.landscape = null;
+    state.landscapeStale = false;
+    state.acceptMismatch = false;
     state.mapSaved = false;
     state.published = false;
     // 是正 F7: 開き直しは前回の「開いた」を引き継がない（この確定の来歴だけを申告する）。
     state.evidenceExpanded = {};
+    state.acceptRecord = null;
+    state.rowDecided = {};
 
     close();
     var overlay = document.createElement("div");
     overlay.id = "release-review-modal";
     overlay.setAttribute("data-ui-anchor", "release-review.modal");
-    overlay.style.cssText =
-      "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.className = "release-review-overlay";
+    // 第 23 波・第 2 波 F5: 見た目は styles.css の release-review-* クラスが持つ
+    // （inline style をやめ、狭い画面でははみ出さない幅 min(600px, 96vw) にする）。
     overlay.innerHTML =
-      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:600px;max-width:760px;max-height:86vh;display:flex;flex-direction:column">' +
-        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">' +
-          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">リリース前の確認: ' +
+      '<div class="release-review-dialog">' +
+        '<div class="release-review-head">' +
+          '<h3 class="release-review-title">リリース前の確認: ' +
             esc(state.courseTitle) +
           "</h3>" +
-          '<button id="release-review-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+          '<button id="release-review-close" class="release-review-close" type="button" aria-label="閉じる">&times;</button>' +
         "</div>" +
-        '<div id="release-review-steps" style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:6px"></div>' +
-        '<p id="release-review-intro" style="font-size:12px;color:var(--color-text-secondary);margin:0 0 8px"></p>' +
-        '<div id="release-review-notice" style="font-size:12px;color:var(--color-text-secondary);margin:0 0 8px"></div>' +
+        '<ol id="release-review-steps" class="release-review-stepbar"></ol>' +
+        '<p id="release-review-intro" class="release-review-intro"></p>' +
+        '<div id="release-review-notice" class="release-review-notice"></div>' +
         '<div id="release-review-skipped-note" class="release-review-skipped-note" hidden></div>' +
-        '<div id="release-review-body" style="overflow-y:auto;flex:1;min-height:180px"></div>' +
-        '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px;padding-top:10px;border-top:1px solid var(--color-border-tertiary)">' +
-          '<div id="release-review-facts" style="font-size:11px;color:var(--color-text-tertiary)"></div>' +
-          '<div id="release-review-actions" style="display:flex;gap:8px;flex-wrap:wrap"></div>' +
+        '<div id="release-review-body" class="release-review-body"></div>' +
+        // 第 23 波 F5（RR2）: 「次へ」の意味は主ボタンの直上に 1 行で置く（脚注に埋めない）。
+        '<div id="release-review-next-meaning" class="release-review-next-meaning" hidden></div>' +
+        '<div class="release-review-foot">' +
+          '<div id="release-review-facts" class="release-review-facts"></div>' +
+          '<div id="release-review-actions" class="release-review-actions"></div>' +
         "</div>" +
       "</div>";
     document.body.appendChild(overlay);
@@ -177,21 +207,38 @@
     renderStep();
   }
 
+  // 第 23 波・第 2 波 F5: ステップ表示は「済み・現在・未」が見て分かる 3 段の部品
+  // （1 行の文字列連結をやめる）。状態は class と aria-current で持ち、語は付け足さない。
   function renderStepBar() {
     var node = el("release-review-steps");
     if (!node) return;
-    var parts = [];
+    var html = "";
     for (var i = 0; i < STEPS.length; i++) {
-      var marker = i === state.stepIndex ? "▶ " : "";
-      parts.push(marker + "ステップ " + (i + 1) + "/" + STEPS.length + " " + STEPS[i].label);
+      var phase = i < state.stepIndex ? "done" : (i === state.stepIndex ? "current" : "todo");
+      html +=
+        '<li class="release-review-step is-' + phase + '"' +
+        (phase === "current" ? ' aria-current="step"' : "") +
+        '><span class="release-review-step-num">' + (i + 1) + "</span>" +
+        '<span class="release-review-step-label">' +
+        esc("ステップ " + (i + 1) + "/" + STEPS.length + " " + STEPS[i].label) +
+        "</span></li>";
     }
-    node.textContent = parts.join("　／　");
+    node.innerHTML = html;
+  }
+
+  // RR2: 「次へ」= 確認したものとして記録する、をボタンの直上に出す（空なら隠す）。
+  function setNextMeaning(message) {
+    var node = el("release-review-next-meaning");
+    if (!node) return;
+    node.textContent = message || "";
+    node.hidden = !message;
   }
 
   function renderStep() {
     renderStepBar();
     setNotice("");
     setSkippedNote("");
+    setNextMeaning("");
     var body = el("release-review-body");
     var actions = el("release-review-actions");
     var facts = el("release-review-facts");
@@ -218,10 +265,7 @@
     btn.className = "admin-action-btn";
     btn.textContent = label;
     if (anchor) btn.setAttribute("data-ui-anchor", anchor);
-    if (isPrimary) {
-      btn.style.cssText =
-        "background:var(--color-text-info);color:#fff;border-color:var(--color-text-info)";
-    }
+    if (isPrimary) btn.className += " release-review-primary";
     btn.addEventListener("click", handler);
     container.appendChild(btn);
     return btn;
@@ -232,10 +276,14 @@
   // 主ボタンのラベルだけ saveLabel で差し替え、onSaved で次へ進む。
   function renderMapStep(body, actions) {
     body.innerHTML =
-      '<div id="release-review-map-status" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
+      '<div id="release-review-map-status" class="release-review-map-status"></div>' +
       '<div id="release-review-map-body"></div>';
-    var facts = el("release-review-facts");
-    if (facts) facts.textContent = NOTICE_NEXT_MEANING;
+    setNextMeaning(NOTICE_NEXT_MEANING);
+    // 「あとで」は割り当て画面が読めないときの出口でもあるので、まず下の操作欄に置く。
+    // 割り当て画面が描けたら、主ボタン「この対応で次へ」の隣へ移す（主と副を同じ欄に）。
+    var laterBtn = addButton(actions, "あとで", "", function () {
+      advance();
+    });
 
     if (deps.atlasBindingPropose) {
       deps.atlasBindingPropose(
@@ -251,29 +299,29 @@
           courseTitle: state.courseTitle,
           courseDescription: "",
           saveLabel: STEPS[0].next,
-          saveAnchor: "release-review.next"
+          saveAnchor: "release-review.next",
+          onRendered: function (saveBtn) {
+            if (!saveBtn || !saveBtn.parentNode) return;
+            saveBtn.className += " release-review-primary";
+            saveBtn.parentNode.insertBefore(laterBtn, saveBtn.nextSibling);
+          }
         }
       );
     } else {
       // RR7: 割り当て UI が使えなくても確認と公開は続けられる。
       body.innerHTML =
-        '<div style="font-size:13px;color:var(--color-text-tertiary)">学習マップの割り当て画面を読み込めませんでした。「分野の地図」タブから後で割り当てられます。</div>';
+        '<div class="release-review-empty">学習マップの割り当て画面を読み込めませんでした。「分野の地図」タブから後で割り当てられます。</div>';
     }
-
-    addButton(actions, "あとで", "", function () {
-      advance();
-    });
   }
 
   // ── ステップ2: 論文の位置づけ ──────────────────────────────────────────
   function renderLandscapeStep(body, actions) {
     body.innerHTML =
-      '<div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:8px">' +
+      '<div class="release-review-landscape-intro">' +
       esc(LANDSCAPE_INTRO) +
       "</div>" +
-      '<div id="release-review-landscape-body" style="font-size:13px;color:var(--color-text-tertiary)">読み込み中...</div>';
-    var facts = el("release-review-facts");
-    if (facts) facts.textContent = NOTICE_NEXT_MEANING;
+      '<div id="release-review-landscape-body" class="release-review-landscape-body">読み込み中...</div>';
+    setNextMeaning(NOTICE_NEXT_MEANING);
 
     var nextBtn = addButton(
       actions,
@@ -337,14 +385,14 @@
       var quote = (items[i] && items[i].quote) || "";
       if (!quote) continue;
       inner +=
-        '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-top:3px">' +
+        '<div class="release-review-evidence-quote">' +
         "&quot;" +
         esc(quote) +
         "&quot;</div>";
     }
     if (!inner) {
       inner =
-        '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:3px">' +
+        '<div class="release-review-evidence-empty">' +
         esc(EVIDENCE_EMPTY) +
         "</div>";
     }
@@ -352,8 +400,8 @@
       '<details class="release-review-evidence" data-ui-anchor="release-review.evidence"' +
       ' data-placement-id="' +
       esc((placement && placement.id) || "") +
-      '" style="margin-top:3px">' +
-      '<summary style="font-size:11.5px;color:var(--color-text-tertiary);cursor:pointer">' +
+      '">' +
+      "<summary>" +
       esc(EVIDENCE_SUMMARY) +
       "</summary>" +
       inner +
@@ -375,7 +423,7 @@
     return (
       '<span class="release-review-node-status" data-node-status="' +
       esc((placement && placement.node_status) || "") +
-      '" style="font-size:11px;color:var(--color-text-secondary)">' +
+      '">' +
       esc(label) +
       "</span>"
     );
@@ -388,25 +436,29 @@
       (placement && placement.node_label) || (placement && placement.node_id) || "";
     var domain =
       (placement && placement.domain_name) || (placement && placement.domain_key) || "";
+    // 第 23 波・第 2 波 F5: 状態は左罫の色（data-status）と状態チップで区別する。
+    // 語はサーバの status_label（label_vocab.LANDSCAPE_STATUS_LABELS の逐語）のまま。
     var html =
       '<div class="release-review-placement-row" data-placement-id="' +
       esc((placement && placement.id) || "") +
-      '" style="padding:7px 0;border-bottom:1px solid var(--color-border-tertiary)">' +
-      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
-      '<span style="font-size:13px;color:var(--color-text-primary)">' +
+      '" data-status="' +
+      esc((placement && placement.status) || "") +
+      '">' +
+      '<div class="release-review-placement-top">' +
+      '<span class="release-review-placement-label">' +
       esc(label) +
       "</span>" +
-      '<span style="font-size:11px;color:var(--color-text-tertiary)">' +
-      esc(domain + (meta.length ? " ・ " + meta.join(" ・ ") : "")) +
-      "</span>" +
-      '<span style="font-size:11px;color:var(--color-text-secondary)">' +
+      '<span class="release-review-placement-status">' +
       esc(statusLabel(placement)) +
       "</span>" +
       nodeStatusChipHtml(placement) +
+      "</div>" +
+      '<div class="release-review-placement-meta">' +
+      esc(domain + (meta.length ? " ・ " + meta.join(" ・ ") : "")) +
       "</div>";
     if (placement && placement.reason) {
       html +=
-        '<div style="font-size:12px;color:var(--color-text-secondary);margin-top:3px">' +
+        '<div class="release-review-placement-reason">' +
         esc(placement.reason) +
         "</div>";
     }
@@ -416,14 +468,14 @@
     html += evidenceHtml(placement);
     // RR4: 個別の修正手段（却下・再検討）を常に出す。
     if (placement && placement.status !== "rejected") {
-      html += '<div style="margin-top:4px;display:flex;gap:6px">';
+      html += '<div class="release-review-row-actions">';
       for (var i = 0; i < ROW_ACTIONS.length; i++) {
         html +=
           '<button class="admin-action-btn release-review-row-btn" type="button" data-placement-id="' +
           esc(placement.id || "") +
           '" data-status="' +
           esc(ROW_ACTIONS[i][0]) +
-          '" style="font-size:11px;padding:1px 7px">' +
+          '">' +
           esc(ROW_ACTIONS[i][1]) +
           "</button>";
       }
@@ -448,8 +500,8 @@
       html +=
         '<div class="release-review-document" data-document-id="' +
         esc(doc.document_id || "") +
-        '" style="margin-bottom:12px">' +
-        '<div style="font-size:12.5px;font-weight:600;color:var(--color-text-primary)">' +
+        '">' +
+        '<div class="release-review-document-title">' +
         esc(doc.title || doc.document_id || "") +
         "</div>";
       for (var j = 0; j < placements.length; j++) {
@@ -460,7 +512,7 @@
       for (var k = 0; k < unplaced.length; k++) {
         var entry = unplaced[k] || {};
         html +=
-          '<div class="release-review-unplaced" style="font-size:11.5px;color:var(--color-text-tertiary);padding:3px 0">' +
+          '<div class="release-review-unplaced">' +
           esc(
             "この論文は「" +
               (entry.domain_name || entry.domain_key || "") +
@@ -474,7 +526,7 @@
 
     if (!anyPlacement && !html) {
       html =
-        '<div style="font-size:13px;color:var(--color-text-tertiary)">' +
+        '<div class="release-review-empty">' +
         esc(LANDSCAPE_EMPTY) +
         "</div>";
     }
@@ -482,7 +534,8 @@
 
     var facts = el("release-review-facts");
     if (facts) {
-      var parts = [NOTICE_NEXT_MEANING, NOTICE_REOPEN];
+      // 「次へ」の意味はボタン直上（setNextMeaning）に置いたので、脚注は再審経路と件数・骨格版だけ。
+      var parts = [NOTICE_REOPEN];
       var pending = Number((data && data.pending_count) || 0);
       if (pending) parts.push("未確認 " + pending + "件");
       var hidden = Number((data && data.hidden_document_count) || 0);
@@ -545,6 +598,7 @@
       })
       .then(function () {
         state.busy = false;
+        state.rowDecided[placementId] = true;
         // サーバ状態を正本として読み直す（ローカルで書き換えない）。
         reloadLandscape();
       })
@@ -555,17 +609,23 @@
       });
   }
 
-  function reloadLandscape() {
-    api("/admin/landscape/courses/" + encodeURIComponent(state.courseId) + "/placements")
+  // 配置をサーバから取り直す（失敗は null。ローカルで状態を書き換えない）。
+  function fetchLandscape() {
+    return api("/admin/landscape/courses/" + encodeURIComponent(state.courseId) + "/placements")
       .then(function (res) {
         return res.ok ? res.json() : null;
       })
-      .then(function (data) {
-        if (!data) return;
-        state.landscape = data;
-        renderLandscapeBody(data);
-      })
-      .catch(function () {});
+      .catch(function () {
+        return null;
+      });
+  }
+
+  function reloadLandscape() {
+    fetchLandscape().then(function (data) {
+      if (!data) return;
+      state.landscape = data;
+      renderLandscapeBody(data);
+    });
   }
 
   // 是正 F7: この確定までに根拠の折りたたみを開いた行の id（DOM の toggle イベント
@@ -628,24 +688,40 @@
         return res.json();
       })
       .then(function (data) {
-        state.busy = false;
-        // RR7: 記録の結果に関わらず先へ進める。事実文は次ステップの描画
-        // （renderStep が notice を空にする）の後に出す。
-        advance();
-        // 提示と確認の一致を事実文で残す（DC2: 一致を偽らない）。
-        var ctx = data && data.decision_context;
-        if (ctx) {
-          setNotice(
-            ctx.presented_matches_applied
-              ? NOTICE_ACCEPT_MATCHED
-              : NOTICE_ACCEPT_MISMATCH,
-            !ctx.presented_matches_applied
+        // 第 23 波 F5: 書き込んだ後は配置を取り直してからステップ 3 を描く（確認前の
+        // pending_count で「未確認 N件」と要約しない）。取り直せなければ件数を言わない。
+        return fetchLandscape().then(function (fresh) {
+          state.busy = false;
+          if (fresh) {
+            state.landscape = fresh;
+            state.landscapeStale = false;
+          } else {
+            state.landscapeStale = true;
+          }
+          var ctx = data && data.decision_context;
+          state.acceptMismatch = !!(ctx && !ctx.presented_matches_applied);
+          state.acceptRecord = acceptRecordFrom(ctx);
+          // RR7: 記録の結果に関わらず先へ進める。事実文は次ステップの描画
+          // （renderStep が notice を空にする）の後に出す。
+          advance();
+          // 提示と確認の一致を事実文で残す（DC2: 一致を偽らない）。
+          // 第 23 周（第 3 波）: 不一致のときはサーバの decision_note（何件のうち何件・
+          // 対象外の理由）をそのまま描く。無い（旧サーバ）ときだけ固定文に縮退する。
+          if (ctx) {
+            var mismatchNote =
+              data && typeof data.decision_note === "string" && data.decision_note
+                ? data.decision_note
+                : NOTICE_ACCEPT_MISMATCH;
+            setNotice(
+              ctx.presented_matches_applied ? NOTICE_ACCEPT_MATCHED : mismatchNote,
+              !ctx.presented_matches_applied
+            );
+          }
+          // IK-0376: 対象外にした論文があったときだけ、その事実を件数の隣に1行で残す。
+          setSkippedNote(
+            data && typeof data.skipped_note === "string" ? data.skipped_note : ""
           );
-        }
-        // IK-0376: 対象外にした論文があったときだけ、その事実を件数の隣に1行で残す。
-        setSkippedNote(
-          data && typeof data.skipped_note === "string" ? data.skipped_note : ""
-        );
+        });
       })
       .catch(function (err) {
         // RR7: 記録に失敗しても公開は止めない（未確認のまま配信される）。
@@ -659,6 +735,48 @@
       });
   }
 
+  // accept 応答の decision_context から「確認として記録したもの」の件数を作る
+  // （applied = 確認済みにした配置 / client_reported = 根拠を開いた行の申告）。
+  // ctx が無ければ null（件数を推測しない）。
+  function acceptRecordFrom(ctx) {
+    if (!ctx) return null;
+    var applied = Number((ctx.applied && ctx.applied.count) || 0);
+    var reported = ctx.client_reported || {};
+    var opened = reported.evidence_expanded_placement_ids;
+    var openedCount = Object.prototype.toString.call(opened) === "[object Array]"
+      ? opened.length
+      : expandedEvidencePlacementIds().length;
+    return { confirmed: applied, evidenceOpened: openedCount };
+  }
+
+  function rowDecidedCount() {
+    var n = 0;
+    for (var key in state.rowDecided) {
+      if (Object.prototype.hasOwnProperty.call(state.rowDecided, key)) n += 1;
+    }
+    return n;
+  }
+
+  // ステップ 3 の先頭: このウィザードで確認として記録したものの事実文（件数のみ — RR6）。
+  // 記録が何も無ければ区画ごと出さない（P-0008）。
+  function recordedSummaryHtml() {
+    var decided = rowDecidedCount();
+    var rec = state.acceptRecord;
+    if (!rec && !decided) return "";
+    var lines = [];
+    if (rec) {
+      lines.push(RECORDED_CONFIRMED_PREFIX + rec.confirmed + "件");
+      lines.push(RECORDED_EVIDENCE_PREFIX + rec.evidenceOpened + "件");
+    }
+    lines.push(RECORDED_DECIDED_PREFIX + decided + "件");
+    var html = '<div class="release-review-recorded">';
+    html += '<div class="release-review-recorded-hd">' + esc(RECORDED_HEADING) + "</div>";
+    html += '<ul class="release-review-recorded-list">';
+    for (var i = 0; i < lines.length; i++) html += "<li>" + esc(lines[i]) + "</li>";
+    html += "</ul></div>";
+    return html;
+  }
+
   // ── ステップ3: 公開 ───────────────────────────────────────────────────
   function renderPublishStep(body, actions) {
     var lines = [];
@@ -667,7 +785,9 @@
         ? "学習マップの割り当てを保存しました。"
         : "学習マップの割り当ては変更していません。"
     );
-    if (state.landscape) {
+    if (state.landscapeStale) {
+      lines.push(NOTICE_LANDSCAPE_STALE);
+    } else if (state.landscape) {
       var count = Number(state.landscape.placement_count || 0);
       var pending = Number(state.landscape.pending_count || 0);
       if (count) {
@@ -686,17 +806,27 @@
       "公開すると受講者が受講できるようになります。公開後も内容の修正はいつでもできます。"
     );
 
-    var html = '<ul style="margin:0;padding-left:18px;font-size:13px;color:var(--color-text-secondary)">';
+    var html = recordedSummaryHtml();
+    html += '<ul class="release-review-publish-list">';
     for (var i = 0; i < lines.length; i++) {
-      html += "<li style='margin-bottom:4px'>" + esc(lines[i]) + "</li>";
+      html += "<li>" + esc(lines[i]) + "</li>";
     }
     html += "</ul>";
     if (state.published) {
       html +=
-        '<div id="release-review-published" style="margin-top:10px;font-size:13px;color:var(--color-text-success)">公開しました。</div>';
+        '<div id="release-review-published" class="release-review-published">公開しました。</div>';
     }
     body.innerHTML = html;
 
+    // 第 23 波 F5: 提示と確認に差があったときは、ウィザードの中でステップ 2 に戻って
+    // 最新の配置を取り直せる（再読み込みでウィザードを消さない）。
+    if (state.acceptMismatch && !state.published) {
+      addButton(actions, BACK_TO_LANDSCAPE_LABEL, "", function () {
+        state.acceptMismatch = false;
+        state.stepIndex = 1;
+        renderStep();
+      });
+    }
     if (!state.published) {
       var publishBtn = addButton(
         actions,

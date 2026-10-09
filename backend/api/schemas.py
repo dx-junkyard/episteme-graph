@@ -178,6 +178,9 @@ class LearningTopic(BaseModel):
     title: str
     chapter_index: int
     status: str = "locked"  # completed | in_progress | locked
+    # 第 23 周: ``status`` の表示語（正本 ``core/label_vocab.py::TOPIC_STATUS_LABELS``）。
+    # locked は推奨順であって禁止ではないことを言う。学習者向け応答でだけ埋まる。
+    status_label: str = ""
     prerequisites: list[LearningPrerequisite] = Field(default_factory=list)
     misconceptions: list[LearningMisconception] = Field(default_factory=list)
     # learning_units_design.md §6.1 (P2-3): このトピックが束ねた「学ぶ単位」。

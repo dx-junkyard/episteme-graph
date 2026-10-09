@@ -717,11 +717,13 @@ def accept_course_landscape_placements(
     session = _session()
     try:
         # DC2: 「提示されていたもの」はサーバが更新前に取り直す（クライアント申告に
-        # 依存しない）。edit できる document の live な inferred が「次へ」の対象として
-        # 画面に出ていた集合である。
+        # 依存しない）。GET .../placements と同じく**閲覧できる全ソース論文**の live な
+        # inferred が「次へ」の画面に出ていた集合である（第 23 周 F5: 以前は edit できる
+        # document だけで組んでいたため、閲覧のみの教員が 8 件を見て 0 件確認しても
+        # 「一致しています」と記帳されていた）。
         presented_rows = landscape_store.list_for_documents(
             session,
-            sorted(editable_ids),
+            sorted(viewable),
             statuses=[landscape_schema.STATUS_INFERRED],
         )
         updated = landscape_store.accept_inferred_for_documents(
@@ -765,10 +767,24 @@ def accept_course_landscape_placements(
             reported["evidence_shown"] = bool(body.evidence_shown)
         client_reported = reported or None
 
+    # 第 23 周 F5: 提示されたが編集権限が無く対象外だった配置を別キーで残す。
+    # （焦点論文の優先規則ではなく、権限による対象外の切り分け。）
+    skipped_rows = []
+    for row in presented_rows:
+        row_document_id = str(row.get("document_id") or "")
+        if row_document_id in editable_ids:
+            continue
+        skipped_rows.append(row)
+    skipped_document_ids = sorted(
+        {str(r.get("document_id") or "") for r in skipped_rows if r.get("document_id")}
+    )
     ctx = decision_context.build_decision_context(
         basis=decision_context.BASIS_RELEASE_REVIEW_PLACEMENTS,
         presented_ids=[str(r.get("id") or "") for r in presented_rows],
         applied_ids=[str(r.get("id") or "") for r in updated],
+        skipped_ids=[str(r.get("id") or "") for r in skipped_rows],
+        skipped_document_ids=skipped_document_ids,
+        skipped_reason=RELEASE_SKIPPED_REASON_NOT_EDITABLE,
         # RR4: 各行の [却下] [再検討] と、ステップの「あとで」が常に出ている。
         alternatives=(
             decision_context.ALT_REJECT,
@@ -804,6 +820,28 @@ def accept_course_landscape_placements(
             ),
         )
 
+    if not updated:
+        # 第 23 周 F5: 1 件も確認しなかった「次へ」も手続として残す（DC1。以前は
+        # confirmed 1 件ごとのループだけだったため、閲覧のみの教員の「次へ」が監査に
+        # 1 行も残らず、「見たが確認しなかった」ことが再構成できなかった）。
+        # 遷移は無いので old/new は同じ status（遷移なしの事実）+ ``no_transition``。
+        services.record_review_event(
+            AUDIT_ENTITY_LANDSCAPE_PLACEMENT,
+            course_id,
+            landscape_schema.STATUS_INFERRED,
+            landscape_schema.STATUS_INFERRED,
+            current_user.get("id"),
+            decision_context.attach_decision_context(
+                {
+                    "action": RELEASE_ACCEPT_ACTION,
+                    "course_id": course_id,
+                    "scope": "course",
+                    "no_transition": True,
+                },
+                ctx,
+            ),
+        )
+
     result: dict = {
         "course_id": course_id,
         "confirmed": len(updated),
@@ -814,7 +852,36 @@ def accept_course_landscape_placements(
     if skipped_note:
         # 飛ばした教材があるときだけキーを足す（無いときは従来のレスポンスと同じ形）。
         result["skipped_note"] = skipped_note
+    decision_note = _release_decision_note(ctx)
+    if decision_note:
+        # 提示と確認が一致しないときだけ（DC2: 一致を偽らない事実文）。
+        result["decision_note"] = decision_note
     return result
+
+
+#: 第 23 周 F5: 対象外にした理由の語（``decision_context.skipped.reason``）。
+RELEASE_SKIPPED_REASON_NOT_EDITABLE = "not_editable"
+
+
+def _release_decision_note(ctx: Mapping[str, Any]) -> str:
+    """提示と確認が一致しないときの事実文（一致していれば ``""``）。
+
+    件数はサーバ導出の集合（``presented`` / ``applied`` / ``skipped``）から取る。
+    """
+    if ctx.get("presented_matches_applied"):
+        return ""
+    presented = int((ctx.get("presented") or {}).get("count") or 0)
+    applied = int((ctx.get("applied") or {}).get("count") or 0)
+    note = label_vocab.RELEASE_DECISION_PARTIAL_NOTE.format(
+        presented=presented, applied=applied
+    )
+    skipped = ctx.get("skipped") or {}
+    documents = len(skipped.get("document_ids") or [])
+    if int(skipped.get("count") or 0) > 0 and documents > 0:
+        note = note[:-1] + label_vocab.RELEASE_DECISION_NOT_EDITABLE_SUFFIX.format(
+            documents=documents
+        ) + "。"
+    return note
 
 
 def _release_skipped_note(*, not_editable: int, hidden: int) -> str:

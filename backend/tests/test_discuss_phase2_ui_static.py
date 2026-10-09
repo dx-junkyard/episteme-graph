@@ -175,7 +175,9 @@ class TestOpeningScreenSections:
         点線枠などの控えめな差にとどめ、警告色・強調色にしない（設計 §3.3）。"""
         js = _read(DISCUSS_JS)
         block = _extract_function_body(js, "function renderBackboneSection(doc) {")
-        assert "source_backed" in block
+        # 第 23 周: 学習者 DTO は内部語 source_backing_status を落とし ``backed`` の真偽を返す
+        # （JS は ``n.backed`` を読む。移行中は旧キーの比較でも可）。
+        assert "backed" in block
         assert "discuss-backbone-node--review" in block
         css = _read(STYLES_CSS)
         review_rule = css.split(".discuss-backbone-node--review {")[1].split("}")[0]

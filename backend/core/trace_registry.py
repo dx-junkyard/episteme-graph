@@ -33,6 +33,7 @@ __all__ = [
     "ALL_TRACE_KINDS",
     "CONSUMERS",
     "DASHBOARD_EXCLUDED_KINDS",
+    "MARGIN_MARK_KINDS",
     "PERSONAL_MAP_KINDS",
     "TRACE_KINDS",
     "TRAJECTORY_EXCLUDED_KINDS",
@@ -58,6 +59,11 @@ class TraceKindSpec:
     # 偽らない）。
     teacher_aggregations: tuple[str, ...] = ()
     dead: bool = False               # 書き込み経路が現存しない語彙（TR3: 削除せず保持）
+    # 教材区画の右端「欄外の印」（return_door_design.md §2.3）に本人の言葉として出るか。
+    # 読み手は ``core/cycle/derive.py::build_margin_marks``（GET .../cycle/margin-marks）。
+    # 第 23 波 F1: 欄外の印は「問いの軌跡」の一覧を流用していたため、軌跡から除外される
+    # 印（anchor_mark）が一度も出なかった。読み手ごとの母集合をこの宣言で分ける。
+    margin_marks: bool = False
 
 
 # 11 kind の宣言（2026-08-15 時点の実態調査の確定値 + 構造の降下路の
@@ -77,6 +83,7 @@ TRACE_KINDS: dict[str, TraceKindSpec] = {
         learner_trajectory=True,
         teacher_dashboard=True,
         personal_map=True,
+        margin_marks=True,
     ),
     "backstage_question": TraceKindSpec(
         kind="backstage_question",
@@ -126,6 +133,7 @@ TRACE_KINDS: dict[str, TraceKindSpec] = {
         learner_trajectory=True,
         teacher_dashboard=True,
         personal_map=True,
+        margin_marks=True,
     ),
     "raw": TraceKindSpec(
         kind="raw",
@@ -175,7 +183,9 @@ TRACE_KINDS: dict[str, TraceKindSpec] = {
     ),
     "intention": TraceKindSpec(
         kind="intention",
-        label="学習の意図",
+        # 画面の語（帰還の扉・着地画面・マニュアル）に揃える。内部の語「学習の意図」を
+        # 学習者の系統見出しに出さない（第 23 波 F4）。
+        label="開いた動機・持ち越した問い・書き置き",
         writers=("services.record_cycle_intention（leave_note 含む）",),
         statuses=frozenset({"open", "superseded", "dismissed"}),
         learner_trajectory=False,
@@ -184,12 +194,14 @@ TRACE_KINDS: dict[str, TraceKindSpec] = {
     ),
     "anchor_mark": TraceKindSpec(
         kind="anchor_mark",
-        label="軽量アンカー",
+        # 画面の語（教材の「気になる」「まだ分からない」…の印）に揃える（第 23 波 F4）。
+        label="教材に付けた印",
         writers=("services.record_cycle_anchor_mark",),
         statuses=frozenset({"open"}),
         learner_trajectory=False,
         teacher_dashboard=False,
         personal_map=False,
+        margin_marks=True,
     ),
     "frontier_interest": TraceKindSpec(
         kind="frontier_interest",
@@ -246,6 +258,9 @@ DASHBOARD_EXCLUDED_KINDS: frozenset[str] = frozenset(
 )
 PERSONAL_MAP_KINDS: frozenset[str] = frozenset(
     spec.kind for spec in TRACE_KINDS.values() if spec.personal_map
+)
+MARGIN_MARK_KINDS: frozenset[str] = frozenset(
+    spec.kind for spec in TRACE_KINDS.values() if spec.margin_marks
 )
 
 
@@ -354,6 +369,16 @@ CONSUMERS: dict[str, dict] = {
         "function": "aggregate_frontier_interest",
         "mode": "allowlist",
         "kinds": frozenset({"frontier_interest"}),
+    },
+    # 欄外の印（第 23 波 F1）。母集合は登録簿の margin_marks 宣言（導出 frozenset）で、
+    # 読み出し SQL（core/cycle/queries.py::fetch_margin_mark_traces）はこの集合を
+    # パラメタで受ける。kind ごとの絞り込み（確定済みの問い・引き受けた引っかかり・
+    # 取り消していない印）は導出関数の分岐が持つ。
+    "cycle_margin_marks": {
+        "module": "backend/core/cycle/derive.py",
+        "function": "build_margin_marks",
+        "mode": "allowlist",
+        "kinds": MARGIN_MARK_KINDS,
     },
     "cycle_queries": {
         "module": "backend/core/cycle/queries.py",

@@ -594,6 +594,32 @@ def get_course_completion(user_id: str, course_id: str, course_data: dict) -> di
     }
 
 
+def list_learner_touched_topic_ids(user_id: str, course_id: str) -> list[str]:
+    """本人がそのコースで会話した（往復が残っている）トピックの id を返す（第 23 周）。
+
+    コース目次の状態表示（``in_progress`` = 学習中）にだけ使う。接触は理解の根拠に
+    ならないので、完了（``completed``）の判定には使わない（是正 F4 / UC5 — 提示内容は
+    変えず、本人の操作を状態表示に反映するだけ）。``_`` で始まる疑似トピック
+    （``_discussion`` 等）は除く。読み取り専用。
+    """
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT topic_id FROM learning_chat_history
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                  AND jsonb_typeof(history) = 'array'
+                  AND jsonb_array_length(history) > 0
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchall()
+    finally:
+        session.close()
+    return sorted(
+        {str(r[0]) for r in rows if r and r[0] and not str(r[0]).startswith("_")}
+    )
+
+
 def _fetch_course_data_row(course_id: str) -> dict | None:
     """course_id だけから data 本体を取得する内部ヘルパ。"""
     session = _pg_session()
@@ -3395,8 +3421,15 @@ def truncate_chat_and_supersede(
     course_id: str,
     topic_id: str,
     from_message_id: str,
+    *,
+    reason: str = "rewrite",
 ) -> dict | None:
     """機能3: ``from_message_id`` 以降の往復を履歴から取り除き、派生痕跡を supersede する。
+
+    ``reason`` は ``rewrite``（✏️ 書き直し）か ``delete``（🗑 取り消し）。派生痕跡の
+    ``payload.superseded_reason`` に残し、「わたしの記録」が「書き直しで差し替え」と
+    「取り消し」を言い分けられるようにする（第 23 波 F2。語彙の正本は
+    ``core.label_vocab.TRACE_SUPERSEDED_REASONS``。未知の値は ``rewrite`` に倒さず拒否する）。
 
     - ``learning_chat_history.history`` から ``from_message_id`` の位置以降（当該メッセージを
       含む）を切り詰める（空になれば行削除）。
@@ -3407,6 +3440,10 @@ def truncate_chat_and_supersede(
     戻り値 ``{"truncated_history": [...], "removed_ids": [...], "removed_count": n}``。
     ``from_message_id`` が履歴に無ければ ``None``（呼び出し側が 404 等を返す）。
     """
+    from core.label_vocab import TRACE_SUPERSEDED_REASONS
+
+    if reason not in TRACE_SUPERSEDED_REASONS:
+        raise ValueError(f"unknown supersede reason: {reason!r}")
     session = _pg_session()
     try:
         record = session.execute(
@@ -3448,18 +3485,26 @@ def truncate_chat_and_supersede(
         # 派生痕跡を supersede（削除せず保持。P4）。worker/digest は superseded を拾わない。
         if removed_ids:
             ph = ", ".join(f":rid_{i}" for i in range(len(removed_ids)))
-            params = {"uid": user_id, "cid": course_id}
+            params = {"uid": user_id, "cid": course_id, "reason": reason}
             for i, rid in enumerate(removed_ids):
                 params[f"rid_{i}"] = rid
             session.execute(
                 sa_text(f"""
                     UPDATE interest_traces
-                    SET status = 'superseded', last_seen_at = now()
+                    SET status = 'superseded', last_seen_at = now(),
+                        payload = COALESCE(payload, '{{}}'::jsonb)
+                                  || jsonb_build_object('superseded_reason', CAST(:reason AS text))
                     WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
                       AND payload->>'message_id' IN ({ph})
                       AND status <> 'superseded'
                 """),
                 params,
+            )
+            # 第 23 周（st-06）: 取り除いた往復から生まれた誤解の**候補**も同じ理由で
+            # superseded にする（personal_graph の誤解メモは message_id を持つ。行は消さない。
+            # 本人が確定・却下したメモは人の判断なので動かさない）。
+            _supersede_misconceptions_in_session(
+                session, user_id, course_id, removed_ids, reason=reason
             )
         session.commit()
         return {
@@ -3478,6 +3523,46 @@ def truncate_chat_and_supersede(
         raise
     finally:
         session.close()
+
+
+def _supersede_misconceptions_in_session(
+    session, user_id: str, course_id: str, message_ids, *, reason: str
+) -> int:
+    """呼び出し元トランザクション内で、誤解メモの候補を message_id で supersede する。
+
+    ``learning_states`` 行が無い・誤解メモが無いときは何もしない（SQL は SELECT 1 本）。
+    遷移が 0 件なら UPDATE を発行しない。戻り値は遷移した件数。
+    """
+    row = session.execute(
+        sa_text("""
+            SELECT personal_graph FROM learning_states
+            WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+            LIMIT 1
+            FOR UPDATE
+        """),
+        {"uid": user_id, "cid": course_id},
+    ).fetchone()
+    if not row or row[0] is None:
+        return 0
+    raw = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    data = personal_graph_data.parse_personal_graph(raw)
+    updated, changed = personal_graph_data.supersede_misconceptions_for_messages(
+        data, message_ids, reason=reason
+    )
+    if changed:
+        session.execute(
+            sa_text("""
+                UPDATE learning_states
+                SET personal_graph = CAST(:personal AS jsonb), updated_at = now()
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+            """),
+            {
+                "uid": user_id,
+                "cid": course_id,
+                "personal": json.dumps(personal_graph_data.to_jsonb(updated), ensure_ascii=False),
+            },
+        )
+    return changed
 
 
 # ---------------------------------------------------------------------------

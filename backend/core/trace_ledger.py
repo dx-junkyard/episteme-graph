@@ -33,6 +33,7 @@ from core.label_vocab import (
     INTENTION_ROLE_LABELS,
     TRACE_STATUS_LABELS,
     TRACE_STATUS_LABELS_BY_KIND,
+    TRACE_SUPERSEDED_REASON_LABELS,
 )
 from core.postgres import get_session as _pg_session
 from core.privacy import K_ANONYMITY
@@ -57,9 +58,11 @@ PUBLICITY_PRIVATE = "あなた以外には表示されません。"
 
 #: 全体注記（TR5）。包含来歴の記録基盤は提案1 v2（手渡しチャネル）の専用設計書で
 #: 確定する — ここで先取りしない。
+#: 第 23 波・第 2 波 V4': 意味は変えず、学習者が読める語順に直した（「集約への包含の来歴」
+#: という硬い名詞句をやめる）。
 PROVENANCE_NOTE = (
-    "集約への包含の来歴は現在記録されていません。"
-    "どの記録がどの匿名集計に含まれたかは、この画面からは確かめられません。"
+    "あなたの記録がどの匿名集計に使われたかは、現在記録されていません。"
+    "そのため、この画面では確かめられません。"
 )
 
 #: 書き込み経路が現存しない系統（登録簿の ``dead``）に既存の行があるときの事実文。
@@ -218,6 +221,11 @@ def status_label_for(kind: str, status: str, payload: dict | None = None) -> str
         role = str((payload or {}).get("role") or "")
         if role in INTENTION_ROLE_LABELS:
             return INTENTION_ROLE_LABELS[role]
+    if status == "superseded":
+        # 第 23 波 F2: 書き直しと取り消しを1語に畳まない（理由は payload に残っている）。
+        reason = str((payload or {}).get("superseded_reason") or "")
+        if reason in TRACE_SUPERSEDED_REASON_LABELS:
+            return TRACE_SUPERSEDED_REASON_LABELS[reason]
     by_kind = TRACE_STATUS_LABELS_BY_KIND.get(kind) or {}
     if status in by_kind:
         return by_kind[status]
@@ -252,6 +260,8 @@ def _project_item(row: dict, spec, course_labels: dict) -> dict:
             "map_excluded": bool(payload.get("map_excluded")),
             "superseded": status == "superseded",
             "candidate": status == "candidate",
+            # 第 23 波 F4: 見送った（dismissed）行も有効な行と見分けられるように。
+            "dismissed": status == "dismissed",
         },
         "publicity": _row_publicity(status, spec),
     }

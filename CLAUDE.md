@@ -2347,8 +2347,10 @@ UC9 数値を見せない / UC10 既存層は非改変。
 - **派生痕跡の後始末（P4 情報を落とさない）**: 取り除いたメッセージ id を `payload.message_id` に
   持つ `interest_traces` は **削除せず** `status='superseded'` にする。以降 tension/anchor の
   worker（`_fetch_pending_*`）と各 digest・問いの軌跡ビューは `status <> 'superseded'` で除外する。
-  ※ 誤解記録（`personal_layer.misconceptions_by_topic`）は message_id リンクを持たないため、
-  現状は個別 supersede しない（既知の限界。将来 message_id 紐づけを付けてから対応）。
+  誤解記録（`personal_layer.misconceptions_by_topic`）も同じトランザクションで `candidate` の行だけ
+  `superseded` + `superseded_reason` に遷移する（2026-10-09 第 23 波。`graph_data.supersede_misconceptions_for_messages`。
+  本人が確定・却下した行と message_id の無い旧行は動かさない）。取り消しの理由は `payload.superseded_reason`
+  （`rewrite` / `delete`・正本 `label_vocab.TRACE_SUPERSEDED_REASONS`）で、わたしの記録が言い分ける。
 - **フロント（app.js）**: user バブルに ✏️/🗑。書き直しは本文を入力欄へ戻し `editingMessageId` を
   立て、送信で `_replace_message_id`（内部）→ クライアント履歴も同位置で truncate。削除は確認の上
   DELETE API を呼び、成功時にクライアント履歴を truncate。トピック切替で編集状態は解除する。

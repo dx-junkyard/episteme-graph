@@ -29,6 +29,7 @@ for _p in (str(BACKEND), str(BACKEND / "api")):
 
 import routes.learning as learning_mod  # noqa: E402
 import core.llm_policy as llm_policy_mod  # noqa: E402
+from core import label_vocab as label_vocab_mod  # noqa: E402
 from core.discuss import context as discuss_context  # noqa: E402
 from core.llm_worker.cost_gate import CostGate  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
@@ -440,7 +441,9 @@ class TestDocumentHistoryAndDelete:
         assert trunc.call_args.args[:4] == (
             USER["id"], f"_doc:{DOC_ID}", learning_mod.DISCUSSION_TOPIC_ID, "msg-7",
         )
-        assert out == {"status": "deleted", "removed_count": 3}
+        assert trunc.call_args.kwargs == {"reason": "delete"}
+        assert out["status"] == "deleted" and out["removed_count"] == 3
+        assert out["fact"] == label_vocab_mod.CHAT_TURN_WITHDRAWN_FACT
 
     def test_delete_unknown_message_is_404(self, viewable, monkeypatch):
         monkeypatch.setattr(

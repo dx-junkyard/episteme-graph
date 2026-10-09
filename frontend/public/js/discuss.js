@@ -59,6 +59,8 @@
   }
 
   var openingCache = { courseId: "", data: null };
+  // 精読モードで予想の欄を自動で開いた文脈（第 23 波 F3。描き直しのたびに開き直さない）。
+  var predictAutoOpenedFor = "";
   var openingReqSeq = 0;
 
   function token() {
@@ -188,6 +190,24 @@
     }
   }
 
+  // 第 23 波 F1: 保存の成否で事実文を変える共通の作法（書き置き saveLeaveNote と同じ）。
+  // 失敗したら書いた文章を消さず、押したボタンを戻し、その場に事実文を1行出す。
+  // 以前は持ち越し・開いた動機・予想・予想との違いの4か所が応答を見ずに
+  // 「記録しました」「残しました」と出していた（失敗でも成功と表示）。
+  var SAVE_FAILED_FACT = "保存できませんでした。入力はそのまま残しています。";
+
+  function showSaveFailed(host, btn) {
+    if (btn) btn.disabled = false;
+    if (!host) return;
+    var err = host.querySelector(".discuss-landing-reflect-error");
+    if (!err) {
+      err = document.createElement("div");
+      err.className = "discuss-landing-reflect-error";
+      host.appendChild(err);
+    }
+    err.textContent = SAVE_FAILED_FACT;
+  }
+
   // 保存が成功したら開幕データのキャッシュを捨てる。次回の開幕取得で最新の
   // intention 状態（動機記録済み・持ち越し更新後）から組み立て直させるため
   // （古い DTO を再描画しない）。
@@ -212,7 +232,9 @@
       html += '<div class="cycle-diff-body">' + esc(predictionText || "") + '</div>';
       html += '</div>';
       html += '<div class="cycle-diff-col">';
-      html += '<div class="cycle-diff-hd">論文の骨格</div>';
+      // 第 23 波 F3（出所の正直さ）: 右列は論文の原文ではなく解析で再構成した文。
+      // 文言は開幕の論文カード（core/discuss/opening.py の「解析で再構成した文」）と揃える。
+      html += '<div class="cycle-diff-hd">論文の骨格（解析で再構成した文）</div>';
       html += '<div class="cycle-diff-body">' +
         (right ? esc(right) : 'まだ整理されていません') + '</div>';
       html += '</div>';
@@ -257,6 +279,7 @@
     html += '<div class="discuss-section-sub">予想と何が違いましたか？（任意）</div>';
     html += '<textarea class="cycle-textarea" id="cycle-diff-reflect-input" rows="2" ' +
       'placeholder="予想と何が違いましたか？（任意）"></textarea>';
+    html += '<div class="cycle-disclosure-slot" id="cycle-diff-disclosure"></div>';
     html += '<div class="discuss-landing-card-actions">';
     html += '<button type="button" class="discuss-landing-card-btn" id="cycle-diff-reflect-save">残す</button>';
     html += '<button type="button" class="discuss-landing-card-btn secondary" ' +
@@ -265,7 +288,15 @@
     diffArea.innerHTML = html;
     diffArea.hidden = false;
     // 外部 AI 転送の常設事実文（DA2）: 「AIに違いの観点を出してもらう」の近傍に1行。
-    if (window.DisclosureNote) window.DisclosureNote.mount(diffArea, "learning_chat");
+    // 第 2 波 V3': 入力欄の直下の担体に入れる（区画の先頭に割り込ませない）。
+    // 予想の欄（外側）に同じ事実文が既に出ていれば重ねて出さない（1 回だけ）。
+    var diffNoteSlot = document.getElementById("cycle-diff-disclosure");
+    var predictNoteSlotForDiff = document.getElementById("cycle-predict-disclosure");
+    var predictHasNote = !!(predictNoteSlotForDiff && diffArea.parentNode &&
+      predictNoteSlotForDiff.parentNode === diffArea.parentNode);
+    if (window.DisclosureNote && diffNoteSlot && !predictHasNote) {
+      window.DisclosureNote.mount(diffNoteSlot, "learning_chat");
+    }
     sendDiscussMetric("cycle_diff_viewed", {});
     var saveBtn = document.getElementById("cycle-diff-reflect-save");
     if (saveBtn) {
@@ -275,12 +306,18 @@
         if (!text) return;
         saveBtn.disabled = true;
         // UPDATE: 既存の discuss reflection API をそのまま使う（新 API を作らない）。
+        var saved = false;
         try {
-          await apiFetch(
+          var res = await apiFetch(
             "/learning/courses/" + encodeURIComponent(ctx.courseId) + "/discuss/reflection",
             { method: "POST", body: JSON.stringify({ text: text }) }
           );
-        } catch (e) { /* best-effort */ }
+          saved = !!(res && res.ok);
+        } catch (e) { saved = false; }
+        if (!saved) {
+          showSaveFailed(diffArea, saveBtn);
+          return;
+        }
         diffArea.innerHTML = '<div class="discuss-landing-card-done">残しました。</div>';
       });
     }
@@ -311,8 +348,10 @@
     // 構造の降下路（SD6 宣言された留保, structure_descent_design.md §3）: 出し惜しみが
     // 働く opt-in 枠には宣言一行を常設する（静的文字列のみ。既存の文言・プロンプト・
     // ボタンは非改変）。
+    // 第 23 波・第 2 波 V3': 枠の宣言 → 問い（見出し）→ 対象の論文（補足）→ 入力 → 送り先の
+    // 事実文（入力欄の直下に 1 回）→ 操作、の順に階層を付ける。
     var html = '<div class="elicit-declaration">いまは答えを配らない対話です</div>';
-    html += '<div class="discuss-section-sub">この論文は何を示すと思いますか？</div>';
+    html += '<div class="discuss-section-hd cycle-predict-question">この論文は何を示すと思いますか？</div>';
     if (docs.length) {
       html += '<ul class="cycle-predict-doc-list">';
       docs.forEach(function (doc) { html += '<li>' + esc(doc.title || "") + '</li>'; });
@@ -320,6 +359,7 @@
     }
     html += '<textarea class="cycle-textarea" id="cycle-predict-input" rows="2" ' +
       'placeholder="この論文は何を示すと思いますか？"></textarea>';
+    html += '<div class="cycle-disclosure-slot" id="cycle-predict-disclosure"></div>';
     html += '<div class="discuss-landing-card-actions">';
     html += '<button type="button" class="discuss-landing-card-btn" id="cycle-predict-save">予想を記録して開く</button>';
     html += '<button type="button" class="discuss-landing-card-btn secondary" id="cycle-predict-skip">そのまま開く</button>';
@@ -332,7 +372,9 @@
     // 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2）: この枠には
     // AI に問い・観点を求めるボタンがあるので、入力欄のそばに1行置く（文言はサーバが
     // 正本・取得できなければ何も描かない fail-soft）。同意ボタンは作らない（DA5）。
-    if (window.DisclosureNote) window.DisclosureNote.mount(area, "learning_chat");
+    // 第 2 波 V3': 枠の先頭ではなく入力欄の直下の担体に入れる（問いの前に割り込ませない）。
+    var predictNoteSlot = document.getElementById("cycle-predict-disclosure");
+    if (window.DisclosureNote && predictNoteSlot) window.DisclosureNote.mount(predictNoteSlot, "learning_chat");
     // 理解サイクル Phase 2（AI Elicit モード, 設計書 §8）: 答えを提示せず、予測を立てる
     // ための問いを一つだけもらう。既存 learning_chat の1コール地点に
     // cycle_mode="elicit" を添えて相乗りする（新エンドポイントを作らない）。
@@ -362,12 +404,20 @@
         var predictionText = predictInput ? (predictInput.value || "").trim() : "";
         var motiveInput = document.getElementById("cycle-motive-input");
         var motiveText = motiveInput ? (motiveInput.value || "").trim() : "";
+        if (!predictionText && !motiveText) {
+          if (predictInput) predictInput.focus();
+          return;
+        }
         saveBtn.disabled = true;
         // 動機（空可・そのままの値。予想のみのときの穴埋め文言は作らない）+ 予想を
         // 同じ intention 行に同居させる（行を増やさない, §5.3）。
-        await postCycleIntention({
+        var saved = await postCycleIntention({
           role: "opening_motive", text: motiveText, prediction: { text: predictionText },
         });
+        if (!saved) {
+          showSaveFailed(area, saveBtn);
+          return;
+        }
         sendDiscussMetric("cycle_prediction_saved", {});
         invalidateOpeningCache();
         renderCycleDiff(docs, predictionText);
@@ -377,7 +427,8 @@
 
   function renderCycleMotiveBlock() {
     var precisionOn = isPrecisionReadingOn();
-    var html = '<div class="cycle-opening-block" id="cycle-motive-block">';
+    var html = '<div class="cycle-opening-block" id="cycle-motive-block"' +
+      (precisionOn ? ' data-cycle-predict-autoopen="1"' : '') + '>';
     html += '<div class="discuss-section-hd">この論文を、なぜ今開きましたか？</div>';
     html += '<textarea class="cycle-textarea" id="cycle-motive-input" rows="2" ' +
       'placeholder="任意・書かなくても進めます"></textarea>';
@@ -407,6 +458,23 @@
     html += '<button type="button" class="discuss-landing-card-btn" data-cycle-revisit-save="' + tid + '">書いて進む</button>';
     html += '<button type="button" class="discuss-landing-card-btn secondary" data-cycle-revisit-skip>そのまま進む</button>';
     html += '</div>';
+    // 第 23 波 F3: 精読モード ON のときは、持ち越しの問いがある開幕でも予想の導線を出す
+    // （問いを二つ重ねないよう、ここでは自動で開かずボタンだけ置く — §5.1/§5.2）。
+    if (isPrecisionReadingOn()) {
+      html += '<button type="button" class="discuss-landing-card-btn secondary" data-cycle-predict-open>予想してから開く</button>';
+      html += '<div class="cycle-predict-area" id="cycle-predict-area" hidden></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // 第 23 波 F3: 精読モード ON で、動機を記録済み・持ち越しの問いも無い開幕（2回目以降）
+  // に出す予想の区画。以前はこの組み合わせで何も描かず、ON が初回にしか効かなかった。
+  // 動機の入力は初回だけなので、ここには置かない。
+  function renderCyclePredictOnlyBlock() {
+    var html = '<div class="cycle-opening-block" id="cycle-predict-block" data-cycle-predict-autoopen="1">';
+    html += '<button type="button" class="cycle-predict-link" data-cycle-predict-open>予想してから開く</button>';
+    html += '<div class="cycle-predict-area" id="cycle-predict-area" hidden></div>';
     html += '</div>';
     return html;
   }
@@ -419,6 +487,8 @@
     if (!intention) return "";
     if (intention.carryover) return renderCycleCarryoverBlock(intention.carryover);
     if (intention.has_motive === false) return renderCycleMotiveBlock();
+    // UC1: 精読モードは opt-in。OFF なら従来どおり何も描かない（既定の読書体験を変えない）。
+    if (isPrecisionReadingOn()) return renderCyclePredictOnlyBlock();
     return "";
   }
 
@@ -758,7 +828,8 @@
       // そのものなので、両方描くと同じ文字が二重に出る。
       html += '<div class="discuss-backbone-list discuss-backbone-flow">';
       nodes.forEach(function (n, i) {
-        var backed = n && n.source_backing_status === "source_backed";
+        // 第 23 周（第 3 波）: 学習者 DTO は内部語を落とし ``backed`` の真偽だけを返す。
+        var backed = !!(n && n.backed === true);
         if (!backed) hasReview = true;
         var cls = "discuss-backbone-node" + (backed ? "" : " discuss-backbone-node--review");
         var label = (n && n.stage_label) || (n && n.label) || "";
@@ -766,8 +837,7 @@
         // 構造帰属（経路A）: main 層のバックボーンノードは theory_component なので
         // node_id をそのままアンカー id にする（anchor_type は concept）。
         html += '<button type="button" class="' + cls + '" data-discuss-ask="' + esc(askText(label)) + '"' +
-          anchorAttrs(n && n.node_id ? { id: n.node_id, kind: "concept", label: label } : null) +
-          (n && n.description ? ' title="' + esc(n.description) + '"' : '') + '>';
+          anchorAttrs(n && n.node_id ? { id: n.node_id, kind: "concept", label: label } : null) + '>';
         html += '<span class="discuss-backbone-num">' + (i + 1) + '</span>';
         html += '<span class="discuss-backbone-label">' + esc(label) + '</span>';
         html += '</button>';
@@ -945,8 +1015,17 @@
       cycleMotiveSaveBtn.addEventListener("click", async function () {
         var input = document.getElementById("cycle-motive-input");
         var text = input ? (input.value || "").trim() : "";
+        var motiveBlock = document.getElementById("cycle-motive-block");
+        if (!text) {
+          if (input) input.focus();
+          return;
+        }
         cycleMotiveSaveBtn.disabled = true;
-        await postCycleIntention({ role: "opening_motive", text: text });
+        var motiveSaved = await postCycleIntention({ role: "opening_motive", text: text });
+        if (!motiveSaved) {
+          showSaveFailed(motiveBlock, cycleMotiveSaveBtn);
+          return;
+        }
         sendDiscussMetric("cycle_motive_saved", {});
         invalidateOpeningCache();
         var block = document.getElementById("cycle-motive-block");
@@ -956,6 +1035,15 @@
     containerEl.querySelectorAll("[data-cycle-predict-open]").forEach(function (btn) {
       btn.addEventListener("click", function () { openCyclePredictArea(); });
     });
+    // 第 23 波 F3: 精読モード ON の開幕では予想の欄を開いた状態で出す（マニュアルの
+    // 「既定で表示されます」と一致させる。押さないと開かない状態にしない）。
+    // 同じ開幕の描き直し（送信のたびの再描画）で、閉じた欄を何度も開き直さないよう、
+    // 自動で開くのは文脈ごとに一度だけ（以降は「予想してから開く」で開ける）。
+    if (containerEl.querySelector("[data-cycle-predict-autoopen]") &&
+        predictAutoOpenedFor !== openingCache.courseId) {
+      predictAutoOpenedFor = openingCache.courseId;
+      openCyclePredictArea();
+    }
     var cycleRevisitSkipBtn = containerEl.querySelector("[data-cycle-revisit-skip]");
     if (cycleRevisitSkipBtn) {
       cycleRevisitSkipBtn.addEventListener("click", function () {
@@ -1161,8 +1249,11 @@
     (candidates || []).forEach(function (c) {
       var tid = esc(c.trace_id);
       var label = esc(c.label || "");
+      // 第 23 波 F1（RD1 逐語）: 表示は切り詰めた label、保存するのは本文そのもの（text）。
+      // 本文の無い印だけは label（印の種類の語）を保存する。
+      var fullText = esc(c.text || c.label || "");
       html += '<button type="button" class="cycle-leave-option" data-cycle-leave-pick="' + tid +
-        '" data-cycle-leave-label="' + label + '">' + label;
+        '" data-cycle-leave-text="' + fullText + '" title="' + fullText + '">' + label;
       if (c.revisit) html += '<span class="cycle-leave-chip">あとで戻る</span>';
       html += '</button>';
     });
@@ -1192,20 +1283,26 @@
       saveBtn.addEventListener("click", function () {
         var text = ta ? (ta.value || "").trim() : "";
         if (!text) return;
-        saveCycleCarryover(text, "");
+        saveCycleCarryover(text, "", saveBtn);
       });
     }
   }
 
   // 選択 or 自由入力の確定。旧 carryover は role='carryover_question' の新規記録で
   // サーバ側が superseded に遷移させる（UC6・行削除しない）。
-  async function saveCycleCarryover(text, sourceTraceId) {
+  async function saveCycleCarryover(text, sourceTraceId, btn) {
+    if (!text) return;
     var body = { role: "carryover_question", text: text };
     if (sourceTraceId) body.source_trace_id = sourceTraceId;
-    await postCycleIntention(body);
+    var section = document.getElementById("cycle-leave-section");
+    if (btn) btn.disabled = true;
+    var saved = await postCycleIntention(body);
+    if (!saved) {
+      showSaveFailed(section, btn);
+      return;
+    }
     sendDiscussMetric("cycle_carryover_saved", {});
     invalidateOpeningCache();
-    var section = document.getElementById("cycle-leave-section");
     if (section) {
       section.innerHTML =
         '<div class="discuss-landing-section-hd">次に持ち越すなら、どの問いにしますか？</div>' +
@@ -1392,14 +1489,7 @@
     if (btn) btn.disabled = true;
     var data = await postCycleIntention({ role: "leave_note", text: text });
     if (!data) {
-      if (btn) btn.disabled = false;
-      var err = box.querySelector(".discuss-landing-reflect-error");
-      if (!err) {
-        err = document.createElement("div");
-        err.className = "discuss-landing-reflect-error";
-        box.appendChild(err);
-      }
-      err.textContent = "保存できませんでした。入力はそのまま残しています。";
+      showSaveFailed(box, btn);
       return;
     }
     invalidateOpeningCache();
@@ -1470,8 +1560,9 @@
     root.querySelectorAll("[data-cycle-leave-pick]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         saveCycleCarryover(
-          this.getAttribute("data-cycle-leave-label") || "",
-          this.getAttribute("data-cycle-leave-pick") || ""
+          this.getAttribute("data-cycle-leave-text") || "",
+          this.getAttribute("data-cycle-leave-pick") || "",
+          this
         );
       });
     });

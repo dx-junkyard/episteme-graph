@@ -944,10 +944,21 @@
         method: "DELETE",
       });
       if (!res.ok) return;
+      let deleted = null;
+      try { deleted = await res.json(); } catch (_) { deleted = null; }
       const idx = findMessageIndex(msgId);
       if (idx !== -1) state.discuss.messages = state.discuss.messages.slice(0, idx);
       if (state.discuss.editingMessageId === msgId) state.discuss.editingMessageId = "";
       renderChat();
+      // 第 23 波 F2: 取り消しの事実文（文言はサーバ）を会話の末尾に1行添える。
+      const area = el("corpus-sea-chat");
+      if (area && deleted && typeof deleted.fact === "string") {
+        const note = document.createElement("div");
+        note.className = "corpus-sea-withdrawn-fact";
+        note.style.cssText = "font-size:12px;color:var(--color-text-tertiary,#94a3b8);margin:6px 12px";
+        note.textContent = deleted.fact;
+        area.appendChild(note);
+      }
     } catch (e) {
       /* 失敗時は表示を変えない */
     }
