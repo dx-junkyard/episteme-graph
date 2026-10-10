@@ -984,7 +984,7 @@
   }
 
   function paperFactLine(text) {
-    return '<div class="graph-review-paper-fact">' + esc(text) + "</div>";
+    return '<div class="graph-review-paper-fact">' + richText(text) + "</div>";
   }
 
   function paperFactLines(facts, fallback) {
@@ -1075,7 +1075,7 @@
     return '<div class="graph-review-paper-chips">' + ids.map(function (nodeId) {
       var selected = nodeId === state.selectedNodeId ? " is-selected" : "";
       return '<button type="button" class="graph-review-paper-chip' + selected +
-        '" data-graph-review-node-id="' + esc(nodeId) + '">' + esc(paperNodeLabel(nodeId)) + "</button>";
+        '" data-graph-review-node-id="' + esc(nodeId) + '">' + richText(paperNodeLabel(nodeId)) + "</button>";
     }).join("") + "</div>";
   }
 
@@ -1085,7 +1085,7 @@
     });
     if (!list.length) return "";
     return '<div class="graph-review-paper-chips">' + list.map(function (item) {
-      return '<span class="graph-review-paper-chip is-static">' + esc(String(item.display_label)) + "</span>";
+      return '<span class="graph-review-paper-chip is-static">' + richText(String(item.display_label)) + "</span>";
     }).join("") + "</div>";
   }
 
@@ -1419,7 +1419,7 @@
         var body = latex ? richText("$" + latex + "$") : esc(String(equation.plain_text || ""));
         return '<div class="graph-review-paper-item">' +
           '<div class="graph-review-paper-item-head">' +
-            '<span class="graph-review-paper-chip is-static">' + esc(String(equation.display_label || "")) + "</span>" +
+            '<span class="graph-review-paper-chip is-static">' + richText(String(equation.display_label || "")) + "</span>" +
             chips.map(function (chip) {
               return '<span class="graph-review-chip">' + esc(chip) + "</span>";
             }).join("") +
@@ -1449,8 +1449,8 @@
       block("図・表", "<ul>" + media.map(function (item) {
         var label = String(item.display_label || "").trim();
         var caption = String(item.caption || "").trim();
-        return "<li>" + (label ? '<span class="graph-review-paper-strong">' + esc(label) + "</span>" : "") +
-          (caption ? " " + esc(caption) : "") + "</li>";
+        return "<li>" + (label ? '<span class="graph-review-paper-strong">' + richText(label) + "</span>" : "") +
+          (caption ? " " + richText(caption) : "") + "</li>";
       }).join("") + "</ul>");
     }
 
@@ -1474,7 +1474,7 @@
         var steps = (derivation.steps || []).map(function (step) {
           var inputs = (step.input_labels || []).join(" , ");
           var outputs = (step.output_labels || []).join(" , ");
-          var flow = inputs || outputs ? esc(inputs) + " → " + esc(outputs) : "";
+          var flow = inputs || outputs ? richText(inputs) + " → " + richText(outputs) : "";
           var reason = String(step.reason || "").trim();
           return "<li>" + esc(String(step.operation || "")) +
             (flow ? '<div class="graph-review-paper-flow">' + flow + "</div>" : "") +
@@ -1676,7 +1676,8 @@
       component_id: MODULE_SINK_PREFIX + index,
       component_type: "TheoryModuleSink",
       label: "",
-      display_label: sinkDisplayLabel(sink),
+      // キャンバスはプレーンテキスト。サーバが $…$ を落とした visual_label を先に使う。
+      display_label: String((sink && sink.visual_label) || "").trim() || sinkDisplayLabel(sink),
       source_backing_status: "",
       graph_layer: "main",
       display_order: order,
@@ -1713,7 +1714,7 @@
       var stageLabel = stageLabelJa(module.dominant_stage);
       var backingLabel = g.sourceBackingLabel(module.source_backing_status);
       titles[node.component_id] = [MODULE_LAYER_LABEL, stageLabel, backingLabel,
-        String(module.subtitle || "").trim()]
+        String(module.visual_subtitle || module.subtitle || "").trim()]
         .filter(Boolean).join("\n");
     });
     sinks.forEach(function (sink, index) {
@@ -1924,11 +1925,11 @@
       var text = flow ? op + "： " + flow : op;
       var nodeIds = (member.node_ids || []).filter(function (id) { return String(id || "").trim(); });
       if (!nodeIds.length) {
-        return '<li><span class="graph-review-paper-chip is-static">' + esc(text) + "</span></li>";
+        return '<li><span class="graph-review-paper-chip is-static">' + richText(text) + "</span></li>";
       }
       return '<li><button type="button" class="graph-review-paper-chip graph-review-module-member" ' +
         'data-graph-review-module-member="' + esc(String(nodeIds[0])) + '" ' +
-        'data-ui-anchor="graph-review.module-member">' + esc(text) + "</button></li>";
+        'data-ui-anchor="graph-review.module-member">' + richText(text) + "</button></li>";
     }).join("");
     return rows ? '<ul class="graph-review-module-members">' + rows + "</ul>" : "";
   }
@@ -1942,7 +1943,7 @@
         '<div class="graph-review-paper-item-head"><span class="graph-review-paper-strong">' +
           richText(moduleDisplayLabel(module)) + "</span>" +
           (String(module.subtitle || "").trim()
-            ? ' <span class="graph-review-chip">' + esc(String(module.subtitle)) + "</span>" : "") +
+            ? ' <span class="graph-review-chip">' + richText(String(module.subtitle)) + "</span>" : "") +
           "</div>" +
         (verbs ? '<div class="graph-review-paper-note">' + esc(verbs) + "</div>" : "") +
         moduleBlock("外から受ける式", moduleEquationChips(module.inputs)) +
@@ -2041,7 +2042,7 @@
     var html = '<div class="graph-review-detail-head">' +
       '<div class="graph-review-detail-title">' + richText(moduleDisplayLabel(module)) + "</div>" +
       (String(module.subtitle || "").trim()
-        ? '<div class="graph-review-paper-note">' + esc(String(module.subtitle)) + "</div>" : "") +
+        ? '<div class="graph-review-paper-note">' + richText(String(module.subtitle)) + "</div>" : "") +
       '<div class="graph-review-detail-chips">' +
         '<span class="graph-review-chip">' + esc(level) + "</span>" +
         (backing ? '<span class="graph-review-chip">裏付け: ' + esc(g.sourceBackingLabel(backing)) + "</span>" : "") +
@@ -2098,7 +2099,7 @@
 
   function sinkDetailHtml(sink) {
     var html = '<div class="graph-review-detail-head">' +
-      '<div class="graph-review-detail-title">' + esc(sinkDisplayLabel(sink)) + "</div>" +
+      '<div class="graph-review-detail-title">' + richText(sinkDisplayLabel(sink)) + "</div>" +
       '<div class="graph-review-detail-chips"><span class="graph-review-chip">結果の吸い込み口</span></div>' +
       "</div>";
     html += paperFactLine("論文全体の結果をまとめる手順です。まとまりの境目を広げないよう、モジュールの中には入れていません。");
@@ -2316,7 +2317,7 @@
 
     var html = "" +
       '<div class="graph-review-detail-head">' +
-        '<div class="graph-review-detail-title">' + esc(g.detailHeading(node, nodeId)) + "</div>" +
+        '<div class="graph-review-detail-title">' + richText(g.detailHeading(node, nodeId)) + "</div>" +
         '<div class="graph-review-detail-chips">' +
           '<span class="graph-review-chip">' + esc(g.roleLabel(node)) + "</span>" +
           (backing ? '<span class="graph-review-chip">裏付け: ' + esc(g.sourceBackingLabel(backing)) + "</span>" : "") +

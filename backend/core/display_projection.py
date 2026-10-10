@@ -27,6 +27,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Literal
 
+from core.latex_display import PROSE_MATH_KEYS, delimit_bare_tex
 from core.text_excerpt import looks_like_tex_math
 
 Audience = Literal["learner", "teacher"]
@@ -520,6 +521,11 @@ def _project_string(
         and looks_like_generated_english_label(text)
     ):
         text = generic_label(element_type)
+    # 教員向けの地の文に裸で混ざった TeX（``m_{\\Lambda_b}``）を ``$…$`` で囲む。画面の描画器は
+    # ``$…$`` だけを数式として描くため、囲まないと生の TeX が出る（2026-10-10・正本は
+    # ``core.latex_display``）。``latex`` / ``symbol`` 系のキーは画面側が包むので対象外。
+    if audience == "teacher" and str(key or "") in PROSE_MATH_KEYS:
+        text = delimit_bare_tex(text)
     return text
 
 

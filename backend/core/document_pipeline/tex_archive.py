@@ -48,7 +48,9 @@ _BLOCK_ENV_RE = re.compile(
     r"\\end\{(?P=env)\}",
     re.DOTALL,
 )
-_DISPLAY_MATH_RE = re.compile(r"(?P<display_math>\$\$.*?\$\$|\\\[.*?\\\])", re.DOTALL)
+# ``$$`` は直前が空白・行頭・句読点のときだけ表示数式の開始とみなす（``$h$$\\ldef$$H_0$`` の
+# ように隣接するインライン数式の継ぎ目を表示数式と読み違えると、段落が数式の途中で割れる）。
+_DISPLAY_MATH_RE = re.compile(r"(?P<display_math>(?<![^\s:.,;(])\$\$.*?\$\$|\\\[.*?\\\])", re.DOTALL)
 _CAPTION_RE = re.compile(r"\\caption(?:\[[^\]]*\])?\{([^{}]+)\}", re.DOTALL)
 _LABEL_RE = re.compile(r"\\label\s*\{([^{}]+)\}")
 _REF_RE = re.compile(r"\\(?:ref|eqref|autoref|cref|Cref)\s*\{([^{}]+)\}")
@@ -371,7 +373,7 @@ def _tex_to_blocks_and_sections(
 
     for segment in _segment_tex(body):
         if segment[0] == "section":
-            level, title = segment[1], _clean_text(segment[2])
+            level, title = segment[1], _clean_prose(segment[2], macros=macros)
             if not title:
                 continue
             section_id = f"sec_{len(sections) + 1}"
@@ -401,14 +403,14 @@ def _tex_to_blocks_and_sections(
                 equation_label=label,
             )
         elif segment[0] in {"figure", "table"}:
-            caption = _clean_text(_first_match(_CAPTION_RE, segment[1]))
+            caption = _clean_prose(_caption_text(segment[1]), macros=macros)
             block_type = "figure_caption" if segment[0] == "figure" else "table_caption"
             if caption:
                 add_block(caption, block_type, section_id=current_section_id)
         else:
             for paragraph in _paragraphs(segment[1]):
                 add_block(
-                    _clean_text(paragraph),
+                    _clean_prose(paragraph, macros=macros),
                     "body_paragraph",
                     section_id=current_section_id,
                     raw=_tex_reference_metadata(paragraph, bibliography),
@@ -747,6 +749,114 @@ def _clean_bib_value(value: str) -> str:
         value = value[1:-1]
     value = re.sub(r"\s+", " ", value)
     return value.strip()
+
+
+#: 本文中のインライン数式（``$…$`` / ``$$…$$`` / ``\\(…\\)``）。``\\$`` は区切りに数えない。
+_INLINE_MATH_SEGMENT_RE = re.compile(
+    # 単一の ``$`` を先に試す（``$h$$\\ldef$$H_0$`` のような隣接するインライン数式を
+    # ``$$…$$`` と読み違えない。中身の無い ``$$`` は単一側で一致せず ``$$…$$`` に落ちる）。
+    r"(?<!\\)\$(?P<d>[^$]+?)(?<!\\)\$|(?<!\\)\$\$(?P<dd>.+?)(?<!\\)\$\$|\\\((?P<p>.+?)\\\)",
+    re.DOTALL,
+)
+
+
+def _caption_text(segment: str) -> str:
+    """``\\caption[短い]{本文}`` の本文（波括弧の入れ子を許す — 数式入りの caption を落とさない）。"""
+    match = re.search(r"\\caption\*?\s*", segment or "")
+    if not match:
+        return ""
+    pos = _skip_ws(segment, match.end())
+    if pos < len(segment) and segment[pos] == "[":
+        _short, pos = _read_bracket_arg(segment, pos)
+        pos = _skip_ws(segment, pos)
+    body, _end = _read_balanced_braced(segment, pos)
+    return body or ""
+
+
+def _clean_inline_math(latex: str, macros: dict[str, TexMacro] | None) -> str:
+    cleaned = _LABEL_RE.sub("", latex or "")
+    cleaned = _expand_simple_macros(cleaned, macros or {})
+    cleaned = _replace_math_refs(cleaned)
+    cleaned = _MATH_LAYOUT_COMMAND_RE.sub("", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _clean_prose(text: str | None, *, macros: dict[str, TexMacro] | None = None) -> str:
+    """本文・caption・節見出しの整形。**インライン数式は ``$…$`` のまま残す**。
+
+    2026-10-10: 旧実装は本文も ``_clean_text`` に通しており、``$`` を外したうえで
+    ``\\Lambda`` 等のコマンドと波括弧をすべて消していた（``$R_{\\Lambda_c}$`` →
+    ``R__c``、``$\\bar B\\to D^{(*)}\\tau\\bar\\nu$`` → ``B D^(*)``）。その本文を読む後段
+    （主張・根拠の引用・前提・要約）は崩れた記法を受け取り、LLM が記法を作り直していた。
+    数式の外側だけを従来どおり平文化し、数式は論文の簡単なマクロを展開した LaTeX で残す。
+    """
+    if not text:
+        return ""
+    parts: list[str] = []
+    pos = 0
+    for match in _INLINE_MATH_SEGMENT_RE.finditer(text):
+        parts.append(_clean_text_fragment(text[pos:match.start()], macros))
+        latex = _clean_inline_math(match.group("dd") or match.group("d") or match.group("p") or "", macros)
+        if latex:
+            # 隣接する数式は空白で離す（``$a$$b$`` は描画側で ``$$…$$`` と読まれる）。
+            if "".join(parts).endswith("$"):
+                parts.append(" ")
+            parts.append(f"${latex}$")
+        pos = match.end()
+    parts.append(_clean_text_fragment(text[pos:], macros))
+    return re.sub(r"\s+", " ", "".join(parts)).strip()
+
+
+_ENSUREMATH_RE = re.compile(r"\\ensuremath\s*(?=\{)")
+_MATH_MARKER_RE = re.compile(r"[_^]|\\[A-Za-z]+")
+
+
+def _text_mode_macro_math(text: str, macros: dict[str, TexMacro] | None) -> tuple[str, list[str]]:
+    """地の文で使われた論文のマクロ（``\\RD`` → ``\\ensuremath{R_D}``）を展開し、数式に
+    なるものは退避して占位子に置く（平文化で波括弧・コマンドが消されないように）。"""
+    stash: list[str] = []
+    if not macros:
+        return text, stash
+
+    def replace(match: re.Match[str]) -> str:
+        macro = macros.get(match.group(0))
+        if macro is None or macro.arg_count != 0:
+            return match.group(0)
+        expanded = _expand_simple_macros(macro.replacement, macros).strip()
+        inner = expanded
+        ensure = _ENSUREMATH_RE.match(expanded)
+        if ensure:
+            body, _end = _read_balanced_braced(expanded, ensure.end())
+            inner = body if body is not None else expanded
+        elif not _MATH_MARKER_RE.search(expanded):
+            return expanded
+        latex = _clean_inline_math(inner, macros)
+        if not latex:
+            return ""
+        stash.append(f"${latex}$")
+        return f"\x00{len(stash) - 1}\x00"
+
+    return _CONTROL_SEQUENCE_RE.sub(replace, text), stash
+
+
+def _clean_text_fragment(text: str, macros: dict[str, TexMacro] | None = None) -> str:
+    """数式を含まない地の文の平文化（前後の空白は残す — 数式との継ぎ目を保つ）。"""
+    if not text:
+        return ""
+    text, stash = _text_mode_macro_math(text, macros)
+    if stash:
+        cleaned = _clean_text_fragment(text)
+        return re.sub(r"\x00(\d+)\x00", lambda m: stash[int(m.group(1))], cleaned)
+    text = re.sub(r"\\(?:label|ref|eqref|cite|citep|citet|url|href)\*?(?:\[[^\]]*\])?\{[^{}]*\}", "", text)
+    text = re.sub(r"\\(?:vspace|vskip|hspace|setcounter|renewcommand|newcommand)\b(?:\[[^\]]*\])?(?:\{[^{}]*\})*", " ", text)
+    previous = None
+    while previous != text:
+        previous = text
+        text = _COMMAND_WITH_ARG_RE.sub(r"\1", text)
+    text = _COMMAND_RE.sub("", text)
+    text = text.replace("\\&", "&").replace("~", " ")
+    text = re.sub(r"[{}]", "", text)
+    return re.sub(r"\s+", " ", text)
 
 
 def _clean_text(text: str | None) -> str:

@@ -826,7 +826,8 @@ class TestDisplayLabels:
             assert truncated is (limit < len(text))
             assert cut.count("{") == cut.count("}")
             assert not cut.endswith(("^", "_", "\\", "{"))
-            assert "\\left" not in cut or not truncated
+            # ``\\left`` と ``\\right`` は対で残すか、対ごと落とす（片割れは KaTeX で描けない）。
+            assert cut.count("\\left") == cut.count("\\right")
             assert not re.search(r"\\(?:fra|frac|sqr|sqrt|mathr|mathrm)$", cut)
             assert not re.search(r"\\frac\{[^{}]*\}$", cut)
 

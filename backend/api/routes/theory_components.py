@@ -2517,13 +2517,13 @@ def _split_on_symbol(segment: str, name: str, token_only: bool) -> list[tuple[st
 
 
 def _truncate_reference_text(text: str, limit: int = _REFERENCE_TEXT_SNIPPET_MAX) -> str:
-    """スニペット丸め。``$...$`` の途中で切らない（閉じない ``$`` を残さない）。"""
-    if len(text) <= limit:
-        return text
-    cut = text[:limit]
-    if cut.count("$") % 2 == 1:
-        cut = cut[:cut.rfind("$")]
-    return cut
+    """スニペット丸め。``$...$`` の途中で切らない（閉じない ``$`` を残さない）。
+
+    規則の正本は論文層の ``truncate_snippet``（裸の TeX を ``$…$`` で囲んでから切る）。
+    """
+    from core.graph_paper_layer.schema import truncate_snippet
+
+    return truncate_snippet(text, limit)
 
 
 def _artifact_claim_concept_names(record: dict) -> list[str]:

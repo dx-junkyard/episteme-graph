@@ -17,6 +17,8 @@ import re
 from typing import Any
 
 from core import display_projection as _dp
+from core.latex_display import delimit_bare_tex, looks_like_bare_tex, truncate_latex
+from core.text_excerpt import excerpt
 from core.text_hygiene import strip_control_sequences
 
 # ---------------------------------------------------------------------------
@@ -200,7 +202,9 @@ def truncate_snippet(text: Any, limit: int = TEXT_SNIPPET_MAX) -> str:
     （``[0m`` 等）が混ざることがあるため、丸める前に除去する
     （2026-09-10・graph_dialogue_review_design.md §15）。
     """
-    value = strip_control_sequences(str(text or ""))
+    # 裸の TeX（``\\overset{…}{…}`` が ``$`` の外にある引用）は先に ``$…$`` で囲む。囲まずに
+    # 切ると、波括弧の途中で切れた生の TeX が残る（2026-10-10・正本は core.latex_display）。
+    value = delimit_bare_tex(strip_control_sequences(str(text or "")))
     if len(value) <= limit:
         return value
     cut = value[:limit]
@@ -254,7 +258,6 @@ _LATEX_ENV_RE = re.compile(
 _LATEX_LABEL_RE = re.compile(r"\\(?:label|tag)\*?\{[^{}]*\}")
 _LATEX_NOISE_RE = re.compile(r"\\(?:nonumber|notag)\b")
 _LATEX_OUTER_DELIMS = (("$$", "$$"), ("\\[", "\\]"), ("\\(", "\\)"), ("$", "$"))
-_LATEX_LEFT_RIGHT_RE = re.compile(r"\\(?:left|right)(?![A-Za-z])")
 
 
 def _clean_latex(latex: str) -> str:
@@ -272,83 +275,14 @@ def _clean_latex(latex: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-#: 引数（波括弧の群）を取る LaTeX コマンドと、その群の数。切れ目の直前に引数が欠けたまま
-#: 残ると KaTeX が描けないため、そのコマンドごと落とす。
-_LATEX_ARG_COMMANDS: dict[str, int] = {
-    "frac": 2, "dfrac": 2, "tfrac": 2, "binom": 2, "dbinom": 2, "tbinom": 2,
-    "sqrt": 1, "hat": 1, "widehat": 1, "bar": 1, "overline": 1, "underline": 1, "tilde": 1,
-    "widetilde": 1, "vec": 1, "dot": 1, "ddot": 1, "mathrm": 1, "mathbf": 1, "mathit": 1,
-    "mathcal": 1, "mathbb": 1, "mathsf": 1, "mathfrak": 1, "boldsymbol": 1, "bm": 1, "text": 1,
-    "textrm": 1, "textbf": 1, "operatorname": 1, "overbrace": 1, "underbrace": 1,
-}
-
-
-def _group_start(text: str, close_index: int) -> int:
-    """``text[close_index] == "}"`` に対応する ``{`` の位置（見つからなければ -1）。"""
-    depth = 0
-    for index in range(close_index, -1, -1):
-        char = text[index]
-        escaped = index > 0 and text[index - 1] == "\\"
-        if char == "}" and not escaped:
-            depth += 1
-        elif char == "{" and not escaped:
-            depth -= 1
-            if depth == 0:
-                return index
-    return -1
-
-
-def _trim_incomplete_tail(text: str) -> str:
-    """末尾に残った「引数の足りないコマンド」「上付き・下付きの記号」を落とす（決定論）。"""
-    while True:
-        text = text.rstrip()
-        if text.endswith(("^", "_", "\\", "{")) and not text.endswith("\\{"):
-            text = text[:-1]
-            continue
-        # 末尾の完結した群を遡り、その手前のコマンドが群を足りなく持つなら群ごと落とす。
-        position = len(text)
-        groups = 0
-        while position > 0 and text[position - 1] == "}":
-            begin = _group_start(text, position - 1)
-            if begin < 0:
-                break
-            position = begin
-            groups += 1
-            while position > 0 and text[position - 1] == " ":
-                position -= 1
-        matched = re.search(r"\\([A-Za-z]+)\*?$", text[:position])
-        if matched and groups < _LATEX_ARG_COMMANDS.get(matched.group(1), 0):
-            text = text[:matched.start()]
-            continue
-        return text
-
-
 def _cut_latex(text: str, limit: int) -> tuple[str, bool]:
-    """``limit`` 字で切る。``\\コマンド`` の途中・開いた波括弧の中・引数の足りないコマンドの
-    後ろでは切らず、``\\left`` / ``\\right`` の片割れを残さない（KaTeX で描ける形に保つ）。"""
-    if len(text) <= limit:
-        return text, False
-    cut = text[:limit]
-    # 末尾が ``\\abc`` の途中（次の字も英字）なら、そのコマンドごと落とす。
-    marker = cut.rfind("\\")
-    if (
-        marker >= 0
-        and re.fullmatch(r"\\[A-Za-z]*", cut[marker:])
-        and (len(cut) - marker == 1 or text[limit].isalpha())
-    ):
-        cut = cut[:marker]
-    cut = _LATEX_LEFT_RIGHT_RE.sub("", cut)
-    # 開いたままの群の中の末尾を整えてから、開いた波括弧を閉じる。閉じた結果、引数の足りない
-    # コマンド（``\\frac{a}`` 等）が残れば、そのコマンドごと落とす。
-    cut = _trim_incomplete_tail(cut)
-    depth = 0
-    for index, char in enumerate(cut):
-        escaped = index > 0 and cut[index - 1] == "\\"
-        if char == "{" and not escaped:
-            depth += 1
-        elif char == "}" and not escaped and depth > 0:
-            depth -= 1
-    return _trim_incomplete_tail(cut + "}" * depth), True
+    """``limit`` 字前後で、式の**原子の境目で**切る（正本は ``core.latex_display.truncate_latex``）。
+
+    文字数で切ってから壊れた末尾を削る旧方式は、``\\begin{cases}`` の ``\\end`` 欠け・
+    ``\\bigg[`` の区切り欠け・``\\frac1`` / ``\\overset`` の引数欠けを取りこぼしていた
+    （2026-10-10）。原子（コマンド + 引数・群・環境・``\\left…\\right``）の境目でしか切らない。
+    """
+    return truncate_latex(text, limit)
 
 
 def equation_latex_snippet(record: Any, limit: int = LATEX_SNIPPET_MAX) -> str:
@@ -412,8 +346,11 @@ def equation_display_label(record: Any) -> str:
         more = " ほか" if len(symbols) > LABEL_SYMBOLS_MAX else ""
         return f"番号なし: {listed}{more} を定義する式"
     plain = _first_text(equation_body(rec)["plain_text"])
-    if plain:
-        return f"番号なし: {plain[:LABEL_SNIPPET_MAX]}"
+    # 平文が実は LaTeX のとき（PDF 経路の記録で多い）は、文字数で切った生の TeX を出さない。
+    if plain and not looks_like_bare_tex(plain):
+        cut = excerpt(plain, LABEL_SNIPPET_MAX)
+        if cut:
+            return f"番号なし: {cut}"
     return "番号なし"
 
 
@@ -445,7 +382,7 @@ def figure_display_label(
         return f"{prefix} {number}"
     caption_text = str(caption or "").strip()
     if caption_text:
-        return caption_text[:LABEL_SNIPPET_MAX]
+        return excerpt(caption_text, LABEL_SNIPPET_MAX, keep_dollar_math=True) or caption_text[:LABEL_SNIPPET_MAX]
     return "表" if kind == "table" else "図"
 
 

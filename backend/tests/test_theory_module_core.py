@@ -746,7 +746,7 @@ class TestPurityAndDisplay:
         module_keys = {
             "module_key", "level", "parent_module_key", "label", "visual_label", "process_verbs", "theory_object",
             "stage_keys", "dominant_stage", "source_backing_status", "inputs", "outputs", "foundation",
-            "required_claims", "assumption_ids", "assumptions", "subtitle", "members", "components_for_comparison", "isolated_reason",
+            "required_claims", "assumption_ids", "assumptions", "subtitle", "visual_subtitle", "members", "components_for_comparison", "isolated_reason",
             "member_equations", "to_sink", "input_symbols", "output_symbols",
         }
         for module in result["modules"]:

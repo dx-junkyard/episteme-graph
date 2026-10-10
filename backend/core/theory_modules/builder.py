@@ -976,6 +976,7 @@ def _module_dto(
             "output_labels": [labels.equation_label(eq) for eq in step.outputs],
         })
 
+    subtitle = _module_subtitle(labels, outputs or representative)
     return {
         "module_key": key,
         "level": level,
@@ -1018,7 +1019,9 @@ def _module_dto(
             {"text": text, "origin_label": assumption_origin_label(text)} for text in assumptions
         ],
         # 同名のモジュールが並んでも区別できる副題（生む式の印字番号・内部 ID なし）。
-        "subtitle": _module_subtitle(labels, outputs or representative),
+        "subtitle": subtitle,
+        # ノードのツールチップ（プレーンテキスト）用。$…$ を visual_label と同じ規則で落とす。
+        "visual_subtitle": plain_math(subtitle),
         "members": member_rows,
         "components_for_comparison": labels.components_for(representative),
         "isolated_reason": isolated_reason,
@@ -1506,10 +1509,17 @@ def _build(
             key for members, key in outer_keys
             if set(flow.produced(members)) & set(sink.inputs)
         )
+        output_labels = [labels.equation_label(eq) for eq in sink.outputs]
+        operation_label = _operation_label(sink.operation)
         sink_rows.append({
-            "operation_label": _operation_label(sink.operation),
+            "operation_label": operation_label,
             "input_labels": [labels.equation_label(eq) for eq in sink.inputs],
-            "output_labels": [labels.equation_label(eq) for eq in sink.outputs],
+            "output_labels": output_labels,
+            # ノード（プレーンテキスト）用。$…$ をモジュールの visual_label と同じ規則で落とす。
+            "visual_label": plain_math(
+                f"{operation_label} → {', '.join(output_labels)}" if operation_label and output_labels
+                else operation_label or ", ".join(output_labels)
+            ),
             "source_module_keys": from_keys,
         })
     if sink_rows:

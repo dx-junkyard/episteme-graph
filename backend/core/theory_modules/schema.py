@@ -211,8 +211,14 @@ def equation_display_label(record: Any) -> str:
     if paper and paper != "番号なし" and not contains_internal_id(paper):
         return paper
     summary = equation_summary(rec)
-    if summary:
-        return f"番号なし: {summary[:LABEL_SNIPPET_MAX]}"
+    # 要約の候補は式本文（LaTeX）に落ちうる。文字数で切った生の TeX は描けないので出さない。
+    from core.latex_display import looks_like_bare_tex
+    from core.text_excerpt import excerpt
+
+    if summary and not looks_like_bare_tex(summary):
+        cut = excerpt(summary, LABEL_SNIPPET_MAX)
+        if cut:
+            return f"番号なし: {cut}"
     return "番号なし"
 
 
