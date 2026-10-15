@@ -13,7 +13,7 @@
 - ``generate_embeddings(texts)``     — テキスト埋め込み
 
 内部では ``core.config.Settings`` からモデル名を取得し、
-Reasoning モデル（o1, o3-mini, gpt-5.x 等）向けの自動変換を行う:
+Reasoning モデル（o1, o3-mini, gpt-5 以降の世代 等）向けの自動変換を行う:
 
 - ``system`` ロール → ``developer`` ロールへの変換
 - ``temperature`` / ``max_tokens`` の自動除去
@@ -158,8 +158,11 @@ def max_tokens_for_model(model: str | None) -> int:
 # Reasoning モデル判定
 # ---------------------------------------------------------------------------
 
+# o 系（o1 / o3 / o4 …）と gpt-5 以降の世代（gpt-5.x / gpt-6-luna / gpt-6.1-sol …）。
+# 世代を列挙すると新世代で max_tokens を送って 400 になる（2026-10-13 gpt-6 系で発生）ため、
+# 「gpt-<5 以上の整数>」で判定する。
 _REASONING_MODEL_PATTERNS = re.compile(
-    r"^(o1|o3|o4|gpt-5)"
+    r"^(o\d|gpt-([5-9]|[1-9]\d+)(?!\d))"
 )
 
 
