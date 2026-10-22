@@ -48,6 +48,66 @@ VALID_EDGE_TYPES = [
     "eliminates_bias",
 ]
 
+# 辺推論で LLM が選ぶ関係語彙（プロンプトの Edge inference rules と 1 対 1）。
+# VALID_EDGE_TYPES の小文字語は normalizer が operation から決定論で付ける edge_type で、
+# LLM には渡さない（IK-0791: 定義の無い語を推測で選ばせない）。validator は両方を受理する。
+LLM_RELATION_EDGE_TYPES = [
+    "REQUIRES",
+    "PRODUCES_FOR",
+    "TRANSFORMS",
+    "DERIVES_FROM",
+    "QUALIFIES",
+    "ENABLES",
+    "INHIBITS",
+    "CHECKED_BY",
+    "DEFINES",
+    "CONFLICTS_WITH",
+    "RELATED_TO",
+]
+
+GENERIC_RELATION_EDGE_TYPE = "RELATED_TO"
+
+# DSL の core_predicate（dsl_linking.schema.CORE_PREDICATES = backend CorePredicate の 10 語）
+# → component 辺の edge_type の写像の正本（IK-0791・X1 seq 3289）。
+# reverse=True は向きを入れ替える（DSL「診断 MEASURES 観測量」→ 部品「観測量 CHECKED_BY 診断」）。
+# INHIBITS（DSL = 抑える・補正する）は component 辺の INHIBITS（矛盾・妥当性の否定）と意味が
+# 違うので QUALIFIES に写す（「Jeffreys 事前分布が Laplace 項を否定」と読ませない）。
+# 対応する関係の無い述語（CONTAINS / CORRELATES / CAUSES / EQUIVALENT）は generic の
+# RELATED_TO に写し、mapping_note で「固有の対応なし」と残す（落とさない）。
+CORE_PREDICATE_TO_EDGE_TYPE: dict[str, dict] = {
+    "REQUIRES": {"edge_type": "REQUIRES", "reverse": False},
+    "PRODUCES": {"edge_type": "PRODUCES_FOR", "reverse": False},
+    "TRANSFORMS": {"edge_type": "TRANSFORMS", "reverse": False},
+    "DEFINES": {"edge_type": "DEFINES", "reverse": False},
+    "MEASURES": {"edge_type": "CHECKED_BY", "reverse": True},
+    "INHIBITS": {"edge_type": "QUALIFIES", "reverse": False},
+}
+CORE_PREDICATE_NO_SPECIFIC_EDGE_TYPE = "no_specific_edge_type"
+
+
+def edge_type_for_core_predicate(core_predicate: str | None) -> dict:
+    """DSL の core_predicate を component 辺の edge_type に写す（決定論・落とさない）。
+
+    戻り値は ``{"edge_type", "reverse", "generic", "mapping_note"}``。写像表に無い述語
+    （未知語を含む）は ``RELATED_TO`` + ``generic=True`` + ``mapping_note`` で返す。
+    """
+    key = str(core_predicate or "").strip().upper()
+    hit = CORE_PREDICATE_TO_EDGE_TYPE.get(key)
+    if hit:
+        return {
+            "edge_type": hit["edge_type"],
+            "reverse": bool(hit["reverse"]),
+            "generic": False,
+            "mapping_note": "",
+        }
+    return {
+        "edge_type": GENERIC_RELATION_EDGE_TYPE,
+        "reverse": False,
+        "generic": True,
+        "mapping_note": CORE_PREDICATE_NO_SPECIFIC_EDGE_TYPE,
+    }
+
+
 # Source-backing classification for theory-operation nodes (issue #302).
 SOURCE_BACKING_STATUSES = [
     "source_backed",
@@ -77,7 +137,22 @@ REVIEW_REASONS = [
     # the AI rather than extracted from the paper, so the structure is kept but
     # never confirmed (a human decides). See RECONSTRUCTION_BACKED_STEP_REASON.
     "reconstructed_equation_backing",
+    # The derivation step declared an elimination but named no eliminated symbol,
+    # so it is kept as a generic step (never an ``eliminates`` edge) instead of
+    # tripping the elimination_missing_eliminated_symbols hard error.
+    "elimination_target_unresolved",
+    # The node failed a node-scoped hard validation rule after generation; the
+    # orchestrator moved it to the debug layer (review_required) so the rest of
+    # the graph can still be persisted instead of discarding the whole graph.
+    "validation_demoted",
 ]
+
+VALIDATION_DEMOTED_REASON = "validation_demoted"
+
+ELIMINATION_TARGET_UNRESOLVED_REASON = "elimination_target_unresolved"
+# Operation substituted for an elimination step with no eliminated symbol. Must be
+# a GENERIC_OPERATIONS member and must not contain "eliminat".
+UNRESOLVED_ELIMINATION_OPERATION = "transform"
 
 #: Marker a derivation step carries in ``review_reason`` when the equations it uses
 #: were reconstructed from context instead of extracted from the paper. The value is

@@ -85,6 +85,10 @@ class ComponentAssemblyAgent:
             derivations=derivations,
         )
         diagnostics: dict = {}
+        if llm_input.input_coverage:
+            # Input budget (MAX_INPUT_CHARS): which available_claims were not
+            # rendered into the prompt — reported, not dropped silently.
+            diagnostics["component_assembly_input_coverage"] = dict(llm_input.input_coverage)
         # Defensively strip dangling equation references (#368 follow-up): a
         # claim / thesis / DSL ref to an equation absent from the final set must
         # not collapse the whole assembly into a deterministic fallback.

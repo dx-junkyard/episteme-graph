@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core.doubt.scope_candidates.schema import ScopeTargetContext, SourceBlock
+from core.schema import CLAIM_ORIGIN_EQUATION_SYNTHESIS
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +53,11 @@ def build_target_context(session, target_type: str, target_id: str) -> ScopeTarg
             rows = session.execute(
                 sa_text("""
                     SELECT text, normalized_text, evidence_text
-                    FROM theory_claims_live WHERE id::text = :tid
+                    FROM theory_claims_live
+                    WHERE id::text = :tid
+                      AND origin IS DISTINCT FROM :synth
                 """),
-                {"tid": target_id},
+                {"tid": target_id, "synth": CLAIM_ORIGIN_EQUATION_SYNTHESIS},
             ).fetchall()
             for row in rows:
                 context.target_label = _clip(str(row[1] or row[0] or ""))[:120]
@@ -69,9 +72,10 @@ def build_target_context(session, target_type: str, target_id: str) -> ScopeTarg
                     SELECT text, evidence_text, equation
                     FROM theory_claims_live
                     WHERE (equation->>'equation_id') = :tid
+                      AND origin IS DISTINCT FROM :synth
                     ORDER BY created_at ASC
                 """),
-                {"tid": target_id},
+                {"tid": target_id, "synth": CLAIM_ORIGIN_EQUATION_SYNTHESIS},
             ).fetchall()
             for idx, row in enumerate(rows[:_MAX_BLOCKS // 2]):
                 equation = _equation_dict(row[2])

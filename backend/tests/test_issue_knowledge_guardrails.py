@@ -575,8 +575,6 @@ _PREMORTEM_LEGACY_ALLOWLIST = frozenset(
         "llm_response_streaming_design.md",
         "llm_usage_metering_design.md",
         "manual_help_kb_design.md",
-        "paper_discovery_design.md",
-        "paper_radar_design.md",
         "personal_knowledge_network_design.md",
         "personal_map_curiosity_design.md",
         "personal_map_nearby_design.md",

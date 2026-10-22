@@ -1,0 +1,21 @@
+# 開発スタックの api-server の LLM 呼び出しを Claude Code の頭脳（uxsim/sandbox/claude_proxy.py）へ回す overlay。
+# 使い方（リポジトリルートで）:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml -f uxsim/sandbox/docker-compose.bridge.yml up -d --no-deps api-server
+# 外すときは同じ 3 ファイルから本ファイルを抜いて up -d --no-deps api-server。
+# chat.completions は mailbox 経由で頭脳が応え、/v1/embeddings は proxy が本物の OpenAI へ素通しする（P-0011）。
+services:
+  api-server:
+    environment:
+      # 周回中は分野を入口で選ぶ規律（F9）に合わせ env 既定を空にする（開発機の .env は particle_physics）。
+      EPISTEME_DEFAULT_CARTRIDGE_ID: ${RADAR_LOOP_DEFAULT_CARTRIDGE_ID:-}
+      # 頭脳（人手相当の LLM）は 1 応答に数分かかるので、A層 agent の 300s/330s の打ち切りを周回中だけ延ばす
+      # （既定のままだと thesis / dsl / component_assembly が決定論フォールバックに落ちる — 2026-10-16 実測 128 件）。
+      AGENT_LLM_TIMEOUT_SECONDS: ${RADAR_LOOP_AGENT_LLM_TIMEOUT_SECONDS:-}
+      AGENT_LLM_WALL_TIMEOUT_SECONDS: ${RADAR_LOOP_AGENT_LLM_WALL_TIMEOUT_SECONDS:-}
+      OPENAI_BASE_URL: ${BRIDGE_OPENAI_BASE_URL:-http://host.docker.internal:8090/v1}
+      # 自律周回（radar_loop）用の段階上限。空なら製品既定（上限なし・J-3）。頭脳が 1 ブロック 1 コールを
+      # 肩代わりすると 1 本に 10 時間超かかるため、周回中だけ節単位の層化サンプリングで母集合を絞る
+      # （coverage は stage_outputs に正直に残る）。本番の値は変えない。
+      RHETORICAL_ROLE_MAX_BLOCKS: ${RADAR_LOOP_RHETORICAL_ROLE_MAX_BLOCKS:-}
+      CLAIM_QUALIFICATION_MAX_SPANS: ${RADAR_LOOP_CLAIM_QUALIFICATION_MAX_SPANS:-}
+      EQUATION_SEMANTICS_MAX_EQUATIONS: ${RADAR_LOOP_EQUATION_SEMANTICS_MAX_EQUATIONS:-}

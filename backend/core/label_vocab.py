@@ -54,6 +54,7 @@ __all__ = [
     "CHALLENGE_MODE_LABELS",
     "CITATION_INTENT_LABELS",
     "COMPLEMENT_SKY_THRESHOLD",
+    "KEYPHRASE_SOURCE_LABELS",
     "AUDIO_STATUS_LABELS",
     "CONFIDENCE_LABELS_LOW_MED_HIGH",
     "CONFIDENCE_LABEL_HIGH",
@@ -326,6 +327,24 @@ EDGE_KIND_LABELS = MappingProxyType(
     }
 )
 
+
+# ── キーフレーズの供給元（論文ディスカバリー / 論文レーダー, PD3）─────────────────
+#
+# 語彙の正本は core/paper_discovery/schema.py::KEYPHRASE_SOURCES。表示語彙はここが
+# 唯一の定義で、admin-paper-discovery.js / admin-paper-radar.js の SOURCE_LABELS は
+# 逐語ミラー（test_paper_radar_ui_static.py が一致を固定）。チップの title 属性に出る。
+KEYPHRASE_SOURCE_LABELS = MappingProxyType(
+    {
+        "skeleton": "分野の地図の概念から",
+        "cartridge": "カートリッジ語彙から",
+        "component": "承認済み理論部品から",
+        "alias": "教員が確定した別名から",
+        "concept": "主張の概念から",
+        "title": "題名から",
+        "thesis": "論文の中心命題・要旨から",
+        "manual": "手動",
+    }
+)
 
 # ── 関連の強さ（知識ランドスケープの weight, LS5）──────────────────────────────
 WEIGHT_THRESHOLD_STRONG = 0.7

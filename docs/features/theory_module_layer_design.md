@@ -286,7 +286,7 @@ fixture にし、外枠 8 を再現することを受け入れ条件にする（
 | 工程の型 | 成員 step の edge_type（`classify_operation`）の多重集合。**UI には出現順に重複を除いた動詞の列だけ**を出す（多重度は内部指紋 = TM6） | `component_graph/schema.py` |
 | stage の色 | 成員の stage（`stage_for_edge_type`）。モジュールの色は最多の stage（同数は `THEORY_STAGES` の順で早い方）。詳細ペインには含まれる stage を全部並べる | 同上 |
 | 理論対象 | 外へ出す式に結び付く atomic claim の本文。本文由来の主張を先に使い、式から機械合成した主張（`equation_claim_synthesis` の定型文「… defines $S$.」「…, $T$ depends on …」）は本文を並べず**対象の記号 $S$ / $T$ だけを取り出して列挙**する（実測: 本文由来の主張は `equation_ids` を持たないため、実際には合成主張の記号が理論対象になる）。どちらも無ければ式の印字番号。主張の `equation_ids` がモジュールの扱う式の範囲をはみ出すもの（系レベルの主張）は使わない | `equation_claim_synthesis` の定型文 |
-| ラベル | 「工程の型 + 理論対象」。工程の型は動詞の訳（`element_vocab.OPERATION_LABELS`）、stage 名は `element_vocab.THEORY_STAGE_LABELS`。分野語はコードに無く、論文の主張本文からだけ入る（TM5）。`label` は `$…$` を含み詳細ペインで数式として描く。ノードのラベルは `visual_label`（`$…$` をプレーンテキストに落としたもの。ギリシャ文字・装飾コマンドの最小変換のみ） | 5.6 |
+| ラベル | 「工程の型 + 理論対象」。工程の型は動詞の訳（`element_vocab.OPERATION_LABELS`）、stage 名は `element_vocab.THEORY_STAGE_LABELS`。分野語はコードに無く、論文の主張本文からだけ入る（TM5）。`label` は `$…$` を含み詳細ペインで数式として描く。ノードのラベルは `visual_label`（`$…$` をプレーンテキストに落としたもの。ギリシャ文字・装飾コマンドの最小変換のみ）。プレーン化の正本は `core/theory_modules/schema.py::plain_math`（2026-10-16 にビルダーから移設。`related` の事実文はこれで**読み時に**作り直し、保存行の旧規則の値を使わない — `paper_radar_design.md` §22.4 / IK-0786） | 5.6 |
 | 裏付け | 成員の `source_backing_status` の最も弱いもの。復元由来の式（`must_not_treat_as_source_extracted`）しか裏付けの無い成員を含むなら `partially_source_backed` 止まり（再現性レビュー R-1 と同じ規則） | 既存 |
 | 部品との照合 | 外へ出す式を `output_equation_ids` に持つ component_assembly の部品名。「照合用（AI の原案）」と明示して並べるだけで、一致度は出さない（TM4 / TM6） | component_assembly artifact |
 
@@ -1384,3 +1384,16 @@ _stage_theory_modules, progress_unit="builder")`・`llm_kind` なし・`model_po
 - **番号なしの式の副題**（IK-0564）: 印字番号の無い式は「番号なしの式（左辺 X）」、内側モジュールにも subtitle を付ける。左辺が同じ内側
   モジュールが並んで見える件は未解決（IK-0551）。
 - **related の契約**（IK-0568）: 相手のいる外枠だけを返し、確認済みの外枠は `checked_module_keys`（内部キー・表示しない）で別に返す。
+
+## 追補（2026-10-16・論文レーダー第 5 波 — related の対象外と近い構造）
+
+正本は `paper_radar_design.md` §22。本書に関わる規律だけを記す。
+
+- **照合の対象外を分ける**（IK-0778）: `related` の `checked_module_keys` は**照合した外枠だけ**（`identity_eligible`）に縮め、対象外の
+  外枠は `ineligible_module_keys`（内部キー・表示しない）で別に返す。照合の対象が 1 つも無い論文では `FACT_RELATED_NO_ELIGIBLE` を
+  返し、閉世界の `FACT_RELATED_NONE` を言わない。対象と対象外が混ざるときは対象外をラベルで名指しする（件数なし）。
+- **`near_structure` は related の表示専用**（IK-0779）: 指紋が完全一致しない外枠どうしで、汎用でない工程の型を 2 種以上共有する対を
+  ラベルの列挙だけで返す（最大 5 対・数値なし = TM6・指紋なし = TM12）。**同一性には使わない** — 候補キーの計算も
+  `library_entries` / `element_identity_links` への書き込みもせず、規則 ⑤（`identity_candidates.run_structural_module_rule`）は
+  指紋の完全一致のままにする（TM13・O-6 従属）。近さを候補化の根拠にするなら、O-6 の裁定後に本書へ節を足してから。
+- 相手の閲覧可否は route の `can_view`（fail-closed）を使い、閲覧できない相手は近い構造に出さない（`hidden` も立てない）。

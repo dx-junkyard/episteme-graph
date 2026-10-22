@@ -15,7 +15,10 @@ Rules (general scholarly notation only — no field-specific vocabulary):
 * a period after a common abbreviation is not a boundary
   (:data:`NON_TERMINAL_ABBREVIATIONS`: ``et al.``, ``Fig.``, ``Eq.``, ``e.g.``, ...);
 * a period after a bare number inside a still-open parenthesis is not a
-  boundary (``(Davis 1951. ...`` / ``(see ref. 12. ...``).
+  boundary (``(Davis 1951. ...`` / ``(see ref. 12. ...``);
+* a terminator inside inline / display math (``$…$`` / ``$$…$$`` / ``\\(…\\)`` /
+  ``\\[…\\]``) is not a boundary — a math segment is one token
+  (2026-10-16, S2 seq 2750: ``$\\hat{N}_{ijk...} = …$`` was cut at ``ijk.``).
 
 Pure functions, stdlib only (importable from ``backend`` and ``src`` alike).
 """
@@ -26,6 +29,8 @@ import re
 
 __all__ = [
     "NON_TERMINAL_ABBREVIATIONS",
+    "math_regions",
+    "position_in_math",
     "split_sentence_spans",
     "split_sentences",
 ]
@@ -46,6 +51,55 @@ DEFAULT_TERMINATORS = ".!?。！？"
 
 _LEADING_PUNCT = "([{\"'“‘«"
 _NUMBER_TOKEN_RE = re.compile(r"^[-+]?\d+(?:[.,]\d+)*[a-z]?$")
+
+
+_MATH_OPEN_CLOSE = (("$$", "$$"), ("\\[", "\\]"), ("\\(", "\\)"), ("$", "$"))
+
+
+def math_regions(text: str) -> list[tuple[int, int]]:
+    """``(start, end)`` of math segments in ``text`` (delimiters included).
+
+    Recognizes ``$$…$$``, ``\\[…\\]``, ``\\(…\\)`` and ``$…$``; an escaped
+    ``\\$`` is not a delimiter. An unclosed opener is ignored (no region), so a
+    stray ``$`` never swallows the rest of the text.
+    """
+    text = str(text or "")
+    regions: list[tuple[int, int]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        matched = False
+        for opener, closer in _MATH_OPEN_CLOSE:
+            if not text.startswith(opener, i):
+                continue
+            if opener.startswith("$") and i > 0 and text[i - 1] == "\\":
+                break
+            j = i + len(opener)
+            while True:
+                k = text.find(closer, j)
+                if k < 0:
+                    break
+                if closer.startswith("$") and text[k - 1] == "\\":
+                    j = k + 1
+                    continue
+                break
+            if k < 0:
+                break
+            regions.append((i, k + len(closer)))
+            i = k + len(closer)
+            matched = True
+            break
+        if not matched:
+            i += 1
+    return regions
+
+
+def position_in_math(regions: list[tuple[int, int]], pos: int) -> tuple[int, int] | None:
+    """The math region strictly containing ``pos`` (``start < pos < end``), or None."""
+    for start, end in regions:
+        if start < pos < end:
+            return start, end
+    return None
 
 
 def _last_token(prefix: str) -> str:
@@ -69,10 +123,13 @@ def split_sentence_spans(
     """
     text = str(text or "")
     boundary = re.compile("[" + re.escape(terminators) + "]")
+    regions = math_regions(text)
     spans: list[tuple[int, int]] = []
     start = 0
     for match in boundary.finditer(text):
         end = match.end()
+        if position_in_math(regions, match.start()) is not None:
+            continue  # a terminator inside $…$ / \\(…\\) / \\[…\\] is not a boundary
         if end < len(text) and not text[end].isspace():
             continue  # mid-token period like "3.14" or "v2.0"
         if match.group() == ".":

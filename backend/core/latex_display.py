@@ -229,8 +229,23 @@ _TRAILING_PUNCT = ".,;:"
 _URLISH_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 
 
+def _is_cjk(char: str) -> bool:
+    """和文の文字・和文の約物（``、`` ``：`` を含む）か。数式の語はこれをまたがない。"""
+    code = ord(char)
+    return (
+        0x3000 <= code <= 0x30FF      # 和文の約物・かな
+        or 0x3400 <= code <= 0x9FFF   # 漢字
+        or 0xF900 <= code <= 0xFAFF
+        or 0xFF00 <= code <= 0xFFEF   # 全角の英数・約物
+    )
+
+
 def _words(text: str) -> list[tuple[int, int]]:
-    """波括弧の外の空白で区切った語の区間（``{\\cal {H}}`` を割らない）。"""
+    """波括弧の外の空白・和文の文字で区切った語の区間（``{\\cal {H}}`` を割らない）。
+
+    和文は語の区切りとして扱う（``R_δ(λ)、定義:`` を 1 語にして ``$R_δ(λ)、定義$:`` と
+    和文ごと囲んでいた — judge-deep-07 ②）。波括弧の中の和文（``\\text{…}``）は割らない。
+    """
     spans: list[tuple[int, int]] = []
     depth = 0
     start: int | None = None
@@ -246,7 +261,7 @@ def _words(text: str) -> list[tuple[int, int]]:
             depth += 1
         elif char == "}":
             depth = max(0, depth - 1)
-        if char.isspace() and depth == 0:
+        if (char.isspace() or _is_cjk(char)) and depth == 0:
             if start is not None:
                 spans.append((start, index))
                 start = None

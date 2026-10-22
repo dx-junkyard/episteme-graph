@@ -196,6 +196,26 @@ E-2 / J-3。上限を敷く運用は env `RHETORICAL_ROLE_MAX_BLOCKS` / `CLAIM_Q
 `summary_stats.llm_calls`（run ごとの差分）に残し、orchestrator が stage payload の `llm_calls` に写す
 （実測の正本は U層 `llm_usage_events` — こちらは agent 側の自己申告）。
 
+### 理論操作グラフの縮退はノード単位（2026-10-16・IK-0727）
+
+export_validation が component_graph に hard error を出したとき、従来はグラフ全体を保存しなかった
+（`skip_graph_persist`）。1 ノードの欠陥で全ノード・全辺が教材から消えるのを避けるため、次の 2 段にした。
+
+- **生成側（normalizer）**: `eliminate` を宣言しながら `eliminated_symbols` が空の derivation step は、記号を推測で
+  補わず generic（`transform`）として扱う。宣言された操作は `review_reason` に、理由コード
+  `elimination_target_unresolved` を `review_reasons` に残す。式 backing（入力・出力の両方）があれば式の詳細層に
+  `partially_source_backed`、無ければ debug 層（#361 と同じ規則）。main 層の elimination stage は作らない（#308）。
+- **保存側（orchestrator）**: component_graph の error が**すべて**ノード単位で降格により解消できる規則
+  （`core/document_pipeline/graph_demotion.py::DEMOTABLE_RULE_IDS` — main 層でだけ error になる規則と、降格時に
+  中和できる規則）なら、該当ノードを `graph_layer="debug"` / `source_backing_status="review_required"` /
+  `review_reasons += ["validation_demoted"]` に降格し、触れる辺も debug 層に移して ComponentGraphValidator で
+  **再検証**する。error がゼロのときだけ降格版を保存し、降格したノード ID を
+  `stage_outputs.persist_claims_components_graph.graph_demoted_node_ids` に残す。列挙外の error（依存の循環・gate 自身の
+  参照検査など）が 1 件でもあれば従来どおりグラフを保存しない。
+- **P4 と #306 / #308 の両立**: ノードも辺も 1 つも削らない（P4）。降格したノードは debug 層・review_required で
+  確定扱いせず、main 層にも置かない（#306 / #308）。validator の hard error の規則は変えない。component_graph の
+  artifact は書き換えず（KO6）、降格は persist の時点で毎回決定論的に再計算する。
+
 ### artifact の run 選択（2026-09-12 P0-8）
 
 成果物は `document_analysis_artifacts`（1 run × 1 stage = 1 行・migration 079。旧 `stage_outputs._artifacts` blob は 079 が1回だけ移送）に保存され、読む側は `persistence.document_run_artifacts(document_id, *,

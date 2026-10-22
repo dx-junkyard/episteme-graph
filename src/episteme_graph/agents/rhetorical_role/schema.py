@@ -66,6 +66,23 @@ EXCLUSION_ROLES = {
     "background_general",
 }
 
+PRIOR_WORK_NOT_REJECT_NOTE = (
+    "prior_work is context, not a reject candidate (IK-0803)"
+)
+
+
+def normalize_reject_flag(role_labels, is_reject_candidate: bool) -> tuple[bool, bool]:
+    """先行研究の言及を reject 候補にしない（IK-0803・#317 の情報を落とさない）。
+
+    LLM は prior_work の span に ``is_reject_candidate=True`` を付けることがある
+    （seq 3028: ``["prior_work", "citation_context"]``）。先行研究の主張は claim 候補から
+    外すが reject ではなく文脈として後段の採否判定に残すので、reject 印を外す。
+    戻り値は ``(is_reject_candidate, changed)``。
+    """
+    if is_reject_candidate and "prior_work" in (role_labels or []):
+        return False, True
+    return bool(is_reject_candidate), False
+
 
 @dataclass
 class RoleLLMInput:
@@ -80,6 +97,13 @@ class RoleLLMInput:
     prev_text: str | None
     next_text: str | None
     normalized_terms: list[dict] | None = None
+    # 2026-10-16（S1 seq 2722 ほか）: 直前 2 ブロック以内（同じ節）に式ブロックがあるときだけ
+    # その式 ``{block_id, label, latex}``（TeX 由来のみ本文・PDF 由来は None）。
+    # ブロック先頭の where / which / i.e. が指す式を材料に入れる。
+    preceding_equation: dict | None = None
+    # 2026-10-17（X1 seq 3376）: 前後の文脈ブロックが別の節のものか。プロンプトの見出しで明示する。
+    prev_text_other_section: bool = False
+    next_text_other_section: bool = False
 
 
 @dataclass

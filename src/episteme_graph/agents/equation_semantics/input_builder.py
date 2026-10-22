@@ -34,6 +34,7 @@ import re
 from episteme_graph.agents.document_structure.schema import DocumentStructureResult, TypedBlock
 from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
 from episteme_graph.agents.rhetorical_role.schema import RhetoricalRoleResult
+from episteme_graph.agents.text_truncation import truncate_text
 from episteme_graph.agents.stratified_sampling import (
     NO_SECTION_KEY,
     order_blocks,
@@ -59,6 +60,23 @@ _DEFAULT_MAX_INLINE_EQUATIONS = 32
 _MAX_INLINE_EQUATIONS_ENV = "EQUATION_SEMANTICS_MAX_INLINE_EQUATIONS"
 _MAX_CONTEXT_BLOCKS = 6
 _MAX_CONTEXT_CHARS = 1200
+#: 近傍の式一覧（``neighbor_equations``）の上限・節外を拾う窓・LaTeX の先頭の長さ。
+_MAX_NEIGHBOR_EQUATIONS = 12
+_NEIGHBOR_EQUATION_WINDOW = 24
+_NEIGHBOR_LATEX_HEAD_CHARS = 80
+_ELLIPSIS = "…"
+#: 文脈ブロックを上限で切って渡した理由（coverage ``details.truncated_blocks`` — IK-0808）。
+TRUNCATED_CONTEXT_REASON = "context_block_over_char_limit"
+
+
+def context_excerpt(text: str, limit: int, *, keep_end: bool = False) -> str:
+    """文脈の抜粋を ``limit`` 字以内で、文・語の境界と数式（``$…$``）の外で切って返す（J0 / IK-0808）。
+
+    前文脈（``keep_end=True``）は式に近い末尾側を残す。切ったときは ``…`` を付ける。
+    規則の正本は ``episteme_graph.agents.text_truncation.truncate_text``。
+    """
+    return truncate_text(text, limit, keep_end=keep_end)[0]
+
 
 _COVERAGE_UNIT = "equation_candidates"
 _TRUNCATION_REASON = "max_equations"
@@ -66,16 +84,141 @@ _INLINE_TRUNCATION_REASON = "max_inline_equations"
 
 # extraction_status のうち再構成が必要なもの
 _NEEDS_RECONSTRUCTION_STATUSES = {"partial", "fragment_only", "label_only", "missing", "unparsed"}
+# PDF 経路（テキスト層）の inline 候補。右辺は小数点・べき（``0.1`` / ``10^12``）の途中で
+# 切らない（旧版は ``.`` と ``^`` を含めず ``0.1`` を ``= 0`` と切っていた — IK 起票中）。
+# 左端は語・添字・TeX コマンドの途中から始めない（``\mathrm{halo}} = K`` のような切り出し防止）。
 _INLINE_MATH_RE = re.compile(
-    r"(?<![A-Za-z])"
+    r"(?<![A-Za-z0-9_^{}\\])"
     r"(?P<expr>"
     r"(?:[A-Za-zα-ωΑ-Ω][A-Za-z0-9_{}()α-ωΑ-Ω]{0,16})"
     r"\s*"
     r"(?:=|≠|≈|≤|≥|<|>|\\neq|\\approx)"
     r"\s*"
-    r"(?:[A-Za-z0-9_{}()α-ωΑ-Ω+\-*/π]{1,24})"
+    r"(?:[A-Za-z0-9_{}()α-ωΑ-Ω+\-*/π^]{1,24}(?:\.[0-9][A-Za-z0-9_{}()α-ωΑ-Ω+\-*/π^]{0,16})?)"
     r")"
 )
+
+# TeX 経路の inline 数式。``$…$`` / ``\(…\)`` の**原文境界**で切り出す（正規表現で関係式を
+# 推測しない）。``tex_archive._clean_prose`` が本文の inline 数式を ``$…$`` のまま残す。
+_TEX_INLINE_MATH_RE = re.compile(
+    r"(?<![\\$])\$(?P<d>(?:\\\$|[^$])+?)(?<!\\)\$(?!\$)"
+    r"|\\\((?P<p>.+?)\\\)",
+    re.S,
+)
+
+# 関係演算子（波括弧の深さ 0 でのみ分割する）。
+_RELATION_TOKEN_RE = re.compile(
+    r"\\(?:leq|le|geq|ge|neq|ne|approx|simeq|sim|equiv|propto|lesssim|gtrsim|ll|gg"
+    r"|coloneqq|doteq|leqslant|geqslant)(?![A-Za-z])"
+    r"|:=|<=|>=|!=|[=<>≤≥≠≈∼≃≡∝]"
+)
+# 数値リテラル（符号・小数・``\times 10^{n}``・べき）。
+_NUMBER_HEAD_RE = re.compile(
+    r"[+\-−]?\s*(?:\d+(?:\.\d*)?|\.\d+)"
+    r"(?:\s*\^\s*(?:\{\s*[+\-−]?\s*\d+(?:\.\d+)?\s*\}|[+\-−]?\d))?"
+    r"(?:\s*(?:\\times|\\cdot|×|x)\s*10\s*\^\s*(?:\{\s*[+\-−]?\s*\d+(?:\.\d+)?\s*\}|[+\-−]?\d))?"
+)
+# 数値の後ろに続いてよい単位・空白の字句（これだけで尽きれば「単位付き数値」）。
+_UNIT_TOKEN_RE = re.compile(
+    r"\s+|\\[,;:! ]|~|/|\\%|%|[()]"
+    r"|\^\s*(?:\{\s*[+\-−]?\s*\d+(?:\.\d+)?\s*\}|[+\-−]?\d)"
+    r"|M_\{?\s*\\(?:odot|sun)\s*\}?|\\(?:odot|msun|Msun|degree|circ|AA)(?![A-Za-z])"
+    r"|\\(?:mathrm|rm|text|textrm|mbox|unit|mathit)\s*\{[A-Za-z\s.]*\}"
+    r"|\{\s*\\rm\s+[A-Za-z\s.]*\}"
+    r"|(?:h|Mpc|kpc|pc|Gpc|km|s|Gyr|Myr|yr|K|eV|keV|MeV|GeV|TeV|cm|mm|nm|m|g|kg|Hz|kHz|MHz|GHz"
+    r"|deg|arcmin|arcsec|sr|Jy|erg|W|J|dex)(?![A-Za-z])"
+)
+# 候補から除いた inline 数式を coverage の details に挙げる上限（件数ではなく列挙の上限）。
+_MAX_EXCLUDED_INLINE_LISTED = 40
+INLINE_EXCLUSION_VALUE_SPECIFICATION = "value_specification"
+
+
+def _split_relation_sides(expr: str) -> list[str]:
+    """波括弧の深さ 0 にある関係演算子で式を分割する（関係演算子が無ければ 1 要素）。"""
+    sides: list[str] = []
+    depth = 0
+    last = 0
+    i = 0
+    n = len(expr)
+    while i < n:
+        ch = expr[i]
+        if ch == "\\" and i + 1 < n and expr[i + 1] in "{}":
+            i += 2
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(depth - 1, 0)
+        elif depth == 0:
+            m = _RELATION_TOKEN_RE.match(expr, i)
+            if m:
+                sides.append(expr[last:i])
+                last = m.end()
+                i = m.end()
+                continue
+        i += 1
+    sides.append(expr[last:])
+    return sides
+
+
+def _strip_outer_braces(text: str) -> str:
+    text = text.strip()
+    while text.startswith("{") and text.endswith("}"):
+        inner = text[1:-1]
+        depth = 0
+        balanced = True
+        for ch in inner:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth < 0:
+                    balanced = False
+                    break
+        if not balanced or depth != 0:
+            break
+        text = inner.strip()
+    return text
+
+
+def is_numeric_value_side(side: str) -> bool:
+    """辺が数値リテラル（単位付きを含む）だけで尽きるか。``3R_{\\rm vir}`` は数値ではない。"""
+    text = _strip_outer_braces(side)
+    if not text:
+        return False
+    m = _NUMBER_HEAD_RE.match(text)
+    if not m or m.end() == 0:
+        return False
+    rest = text[m.end():]
+    while rest:
+        u = _UNIT_TOKEN_RE.match(rest)
+        if not u or u.end() == 0:
+            return False
+        rest = rest[u.end():]
+    return True
+
+
+def classify_inline_relation(expr: str) -> str | None:
+    """inline 数式を式候補にしてよいかを決める。
+
+    戻り値 ``None`` = 候補（記号どうしの等式・関係式）、``"no_relation"`` = 関係式でない、
+    ``"value_specification"`` = 値の代入・パラメータ指定・閾値（``z=0`` / ``a=5`` /
+    ``M>10^{12}M_\\odot`` / ``0<z<1``）。値の言及を式にすると後段（DSL・部品グラフ・
+    二層説明）に偽の依存ができ、LLM 呼び出しも増える。
+    """
+    sides = [s for s in _split_relation_sides(expr or "")]
+    if len(sides) < 2:
+        return "no_relation"
+    non_empty = [s for s in sides if s.strip()]
+    if len(non_empty) < 2:
+        # ``\\sim 10^{12}`` / ``>5`` のような片側だけの比較は値の言及。
+        return INLINE_EXCLUSION_VALUE_SPECIFICATION if non_empty and all(
+            is_numeric_value_side(s) for s in non_empty
+        ) else "no_relation"
+    numeric = sum(1 for s in non_empty if is_numeric_value_side(s))
+    if numeric >= len(non_empty) - 1:
+        return INLINE_EXCLUSION_VALUE_SPECIFICATION
+    return None
 
 
 class EquationSemanticsInputBuilder:
@@ -137,13 +280,14 @@ class EquationSemanticsInputBuilder:
         )
 
         inline_all: list[EquationCandidate] = []
+        inline_excluded: list[dict] = []
         if include_inline:
             for block in ordered_blocks:
                 if block.block_type != "body_paragraph":
                     continue
-                inline_all.extend(
-                    self._inline_candidates_for_block(block, structure.document_id)
-                )
+                found, excluded = self._scan_inline_block(block, structure.document_id)
+                inline_all.extend(found)
+                inline_excluded.extend(excluded)
 
         # inline は「文書順に上限まで」。display の層化とは独立の弁で、
         # display の式ブロックはこの上限では減らない。
@@ -169,6 +313,7 @@ class EquationSemanticsInputBuilder:
             "inline_cut_by_total_limit": inline_cut_by_total_limit,
             "display_cut_by_total_limit": display_cut_by_total_limit,
             "include_inline": include_inline,
+            "inline_excluded": inline_excluded,
         }
 
     def compute_candidate_coverage(
@@ -203,6 +348,18 @@ class EquationSemanticsInputBuilder:
         )
         if unprocessed:
             details["unprocessed_sections"] = unprocessed
+        truncated_blocks = self._truncated_context_blocks(plan)
+        if truncated_blocks:
+            # 文脈の本文を上限で切って渡したブロック（IK-0808。切った側に「…」が付く）。
+            details["truncated_blocks"] = truncated_blocks
+        # 値の代入・パラメータ指定として式候補から除いた inline 数式（P4: 落とした事実を残す）。
+        # 母集合には入れない（式ではないので「取りこぼし」ではない）が、理由付きで列挙する。
+        excluded = plan["inline_excluded"]
+        if excluded:
+            details["excluded_inline"] = excluded[:_MAX_EXCLUDED_INLINE_LISTED]
+            details["excluded_inline_listing_truncated"] = (
+                len(excluded) > _MAX_EXCLUDED_INLINE_LISTED
+            )
         # 理由コードは**実際に効いた弁だけ**を書く（``build_coverage_report`` は
         # truncated==0 のとき理由を落とすが、inline 上限だけが効いたときに
         # ``max_equations`` を並べると「全体上限で切った」と読めてしまう）。
@@ -218,6 +375,53 @@ class EquationSemanticsInputBuilder:
             "unit": _COVERAGE_UNIT,
             "details": details,
         }
+
+    @classmethod
+    def _truncated_context_blocks(cls, plan: dict) -> list[dict]:
+        """文脈として上限で切って渡すブロックを ``[{block_id, reason}]`` で（IK-0808・決定論）。
+
+        ``_neighbor_texts`` と同じ歩き方（同じ節・前後 ``_MAX_CONTEXT_BLOCKS``）で、本文が
+        ``_MAX_CONTEXT_CHARS`` を超える文脈ブロックを列挙する。件数は書かない。
+        """
+        ordered_blocks = plan["ordered_blocks"]
+        index_by_id = {b.block_id: i for i, b in enumerate(ordered_blocks)}
+        targets = list(plan["selected_display_indices"])
+        for candidate in plan["inline_candidates"]:
+            idx = index_by_id.get(str(candidate.source_location.get("block_id") or ""))
+            if idx is not None:
+                targets.append(idx)
+                if len(ordered_blocks[idx].text or "") > _MAX_CONTEXT_CHARS:
+                    targets.append(-1 - idx)  # 対象の段落そのものも抜粋される
+        seen: set[str] = set()
+        result: list[dict] = []
+
+        def _add(block) -> None:
+            if block.block_id in seen:
+                return
+            seen.add(block.block_id)
+            result.append({"block_id": block.block_id, "reason": TRUNCATED_CONTEXT_REASON})
+
+        for target in sorted(set(targets), key=lambda v: v if v >= 0 else -1 - v):
+            if target < 0:
+                _add(ordered_blocks[-1 - target])
+                continue
+            own_section = getattr(ordered_blocks[target], "section_id", None)
+            for direction in (-1, 1):
+                i = target + direction
+                taken = 0
+                while 0 <= i < len(ordered_blocks) and taken < _MAX_CONTEXT_BLOCKS:
+                    block = ordered_blocks[i]
+                    if getattr(block, "section_id", None) != own_section:
+                        break
+                    if block.block_type in _CONTEXT_BLOCK_TYPES:
+                        taken += 1
+                        trusted_or_prose = (
+                            block.block_type != "equation_block" or cls._is_trusted_tex_block(block)
+                        )
+                        if trusted_or_prose and len(block.text or "") > _MAX_CONTEXT_CHARS:
+                            _add(block)
+                    i += direction
+        return result
 
     def build_llm_inputs(
         self,
@@ -246,6 +450,8 @@ class EquationSemanticsInputBuilder:
         block_by_id = {b.block_id: b for b in ordered_blocks}
         index_by_block_id = {b.block_id: i for i, b in enumerate(ordered_blocks)}
 
+        equation_entries = self._equation_block_entries(ordered_blocks)
+
         inputs: list[EquationLLMInput] = []
         for candidate in _accepted:
             block_id = str(candidate.source_location.get("block_id") or "")
@@ -265,9 +471,15 @@ class EquationSemanticsInputBuilder:
                 label = candidate.matched_label
                 equation_id = candidate.accepted_equation_id or f"eq_{candidate.candidate_id}"
                 equation_text = candidate.raw_text
-                latex = None
-                plain_text = candidate.raw_text
-                extraction_source = "inline_pdf_text_layer"
+                if candidate.source_location.get("extraction_source") == "tex_source":
+                    # TeX 原文の ``$…$`` 境界で切り出した式。復元しない（reconstruction=none）。
+                    latex = candidate.raw_text
+                    plain_text = None
+                    extraction_source = "tex_source"
+                else:
+                    latex = None
+                    plain_text = candidate.raw_text
+                    extraction_source = "inline_pdf_text_layer"
             source_is_trusted = extraction_source == "tex_source"
             section = sections_by_id.get(block.section_id or "")
             needs_reconstruction = (
@@ -279,12 +491,17 @@ class EquationSemanticsInputBuilder:
             if block.block_type != "equation_block":
                 start = int(candidate.source_location.get("span_start") or 0)
                 end = int(candidate.source_location.get("span_end") or start)
-                current = (
-                    block.text[:start]
-                    + "[INLINE_MATH_TARGET_OMITTED_AS_UNTRUSTED]"
-                    + block.text[end:]
-                )
-                prev_texts.append(f"[{block.block_id}] {current[:_MAX_CONTEXT_CHARS]}")
+                if source_is_trusted:
+                    # TeX 原文は伏せない。対象の位置を印で示す（同じ段落に複数の式があっても曖昧にしない）。
+                    target = (
+                        "[INLINE_MATH_TARGET]" + block.text[start:end] + "[/INLINE_MATH_TARGET]"
+                    )
+                else:
+                    target = "[INLINE_MATH_TARGET_OMITTED_AS_UNTRUSTED]"
+                # 対象が抜粋の外に出ないよう、対象の前後をそれぞれ抜粋して挟む。
+                before = context_excerpt(block.text[:start], _MAX_CONTEXT_CHARS * 2 // 3, keep_end=True)
+                after = context_excerpt(block.text[end:], _MAX_CONTEXT_CHARS // 3)
+                prev_texts.append(f"[{block.block_id}] {before}{target}{after}")
 
             inputs.append(EquationLLMInput(
                 document_id=structure.document_id,
@@ -308,8 +525,106 @@ class EquationSemanticsInputBuilder:
                 needs_reconstruction=needs_reconstruction,
                 extraction_source=extraction_source,
                 source_is_trusted=source_is_trusted,
+                neighbor_equations=self._neighbor_equations(
+                    equation_entries, idx, block.section_id, equation_id
+                ),
+                candidate_text_spans=(
+                    self._candidate_text_spans(ordered_blocks, idx, spans_by_block)
+                    if roles is not None
+                    else None
+                ),
             ))
         return inputs
+
+    @staticmethod
+    def _candidate_text_spans(
+        ordered_blocks: list[TypedBlock],
+        index: int,
+        spans_by_block: dict[str, list[dict]],
+    ) -> list[dict]:
+        """linked_text_spans の候補（IK-0809）。
+
+        式のブロック自身（inline 候補なら本文の段落）と、同じ節の直前・直後の本文ブロック
+        （式ブロックは飛ばす）の役割付き span を文書順に並べる。display 式でも
+        「この式を導入・説明する本文」の span_id を指せるようにする。
+        """
+        own_section = getattr(ordered_blocks[index], "section_id", None)
+        block_ids: list[str] = []
+        for direction in (-1, 1):
+            i = index + direction
+            while 0 <= i < len(ordered_blocks):
+                neighbor = ordered_blocks[i]
+                if getattr(neighbor, "section_id", None) != own_section:
+                    break
+                if neighbor.block_type != "equation_block" and neighbor.block_type in _CONTEXT_BLOCK_TYPES:
+                    block_ids.append(neighbor.block_id)
+                    break
+                i += direction
+        ordered_ids = [
+            b.block_id
+            for b in ordered_blocks
+            if b.block_id in set(block_ids) | {ordered_blocks[index].block_id}
+        ]
+        result: list[dict] = []
+        for block_id in ordered_ids:
+            for span in spans_by_block.get(block_id, []):
+                result.append({
+                    "span_id": span.get("span_id"),
+                    "block_id": block_id,
+                    "text": span.get("text"),
+                    "role_labels": list(span.get("role_labels") or []),
+                })
+        return result
+
+    def _equation_block_entries(self, ordered_blocks: list[TypedBlock]) -> list[tuple[int, str | None, dict]]:
+        """文書順の式ブロックを ``(index, section_id, {equation_id, label, latex_head})`` に。
+
+        ID は ``build_llm_inputs`` が display 式に付けるのと同じ正規化
+        （``EquationNormalizer.normalize``）で決める。PDF 由来の式の文字列は信用しない
+        ので ``latex_head`` は None（ID とラベルだけを渡す）。
+        """
+        entries: list[tuple[int, str | None, dict]] = []
+        for i, block in enumerate(ordered_blocks):
+            if block.block_type != "equation_block":
+                continue
+            equation = self._normalizer.normalize(block)
+            latex_head = None
+            if self._is_trusted_tex_block(block):
+                head = " ".join((equation.latex or block.text or "").split())
+                latex_head = head[:_NEIGHBOR_LATEX_HEAD_CHARS] or None
+            entries.append((i, block.section_id, {
+                "equation_id": equation.equation_id,
+                "label": equation.label,
+                "latex_head": latex_head,
+            }))
+        return entries
+
+    @staticmethod
+    def _neighbor_equations(
+        entries: list[tuple[int, str | None, dict]],
+        index: int,
+        section_id: str | None,
+        own_equation_id: str,
+    ) -> list[dict]:
+        """対象の近傍の式（同一節優先 → 距離 → 文書順で上限まで選び、文書順で返す）。"""
+        picked: list[tuple[int, int, int, dict]] = []
+        for i, sec, entry in entries:
+            if entry["equation_id"] == own_equation_id or i == index:
+                continue
+            same = sec == section_id
+            if not same and abs(i - index) > _NEIGHBOR_EQUATION_WINDOW:
+                continue
+            picked.append((0 if same else 1, abs(i - index), i, entry))
+        picked.sort(key=lambda t: (t[0], t[1], t[2]))
+        chosen = sorted(picked[:_MAX_NEIGHBOR_EQUATIONS], key=lambda t: t[2])
+        seen: set[str] = set()
+        result: list[dict] = []
+        for _, _, _, entry in chosen:
+            if entry["equation_id"] in seen:
+                continue
+            seen.add(entry["equation_id"])
+            result.append(dict(entry))
+        return result
 
     # ------------------------------------------------------------------
     # Legacy build() — backward compat: runs candidates + accepted filter internally
@@ -418,10 +733,74 @@ class EquationSemanticsInputBuilder:
         return provenance or None
 
     def _inline_candidates_for_block(self, block: TypedBlock, document_id: str) -> list[EquationCandidate]:
+        return self._scan_inline_block(block, document_id)[0]
+
+    def _scan_inline_block(
+        self, block: TypedBlock, document_id: str
+    ) -> tuple[list[EquationCandidate], list[dict]]:
+        """本文ブロックの inline 式候補と、値の指定として除いたものを返す。
+
+        TeX 経路（``tex_source``）は ``$…$`` / ``\\(…\\)`` の原文境界で切り出し、PDF 経路は
+        テキスト層を正規表現で拾う。どちらも値の代入・パラメータ指定は候補にしない。
+        """
+        if self._is_trusted_tex_block(block):
+            return self._tex_inline_candidates(block, document_id)
+        return self._pdf_inline_candidates(block, document_id)
+
+    def _tex_inline_candidates(
+        self, block: TypedBlock, document_id: str
+    ) -> tuple[list[EquationCandidate], list[dict]]:
         candidates: list[EquationCandidate] = []
+        excluded: list[dict] = []
+        for match in _TEX_INLINE_MATH_RE.finditer(block.text):
+            latex = " ".join((match.group("d") or match.group("p") or "").split())
+            if len(latex) < 3 or len(latex) > 300:
+                continue
+            verdict = classify_inline_relation(latex)
+            if verdict == "no_relation":
+                continue
+            if verdict:
+                excluded.append({"block_id": block.block_id, "text": latex, "reason": verdict})
+                continue
+            candidates.append(EquationCandidate(
+                candidate_id=f"eqcand_inline_{block.block_id}_{match.start()}_{uuid.uuid4().hex[:8]}",
+                document_id=document_id,
+                source_location={
+                    "page": block.page,
+                    "section_id": block.section_id,
+                    "block_id": block.block_id,
+                    "span_start": match.start(),
+                    "span_end": match.end(),
+                    "bbox": list(block.bbox) if block.bbox else [],
+                    "extraction_source": "tex_source",
+                },
+                raw_text=latex,
+                matched_label=None,
+                detection_method=["inline_equation_heuristic", "tex_source"],
+                candidate_score=min(block.confidence, 0.55),
+                extraction_status="unparsed",   # gate が上書きする
+                acceptance_status="provisional",
+                accepted_equation_id=None,
+                merge_target_hint=None,
+                needs_math_review=False,
+                review_reason=[],
+            ))
+        return candidates, excluded
+
+    def _pdf_inline_candidates(
+        self, block: TypedBlock, document_id: str
+    ) -> tuple[list[EquationCandidate], list[dict]]:
+        candidates: list[EquationCandidate] = []
+        excluded: list[dict] = []
         for match in _INLINE_MATH_RE.finditer(block.text):
-            expr = " ".join(match.group("expr").split())
+            expr = " ".join(match.group("expr").split()).rstrip(".,;:")
             if len(expr) < 3 or len(expr) > 80:
+                continue
+            verdict = classify_inline_relation(expr)
+            if verdict == "no_relation":
+                continue
+            if verdict:
+                excluded.append({"block_id": block.block_id, "text": expr, "reason": verdict})
                 continue
             candidates.append(EquationCandidate(
                 candidate_id=f"eqcand_inline_{block.block_id}_{match.start()}_{uuid.uuid4().hex[:8]}",
@@ -445,7 +824,7 @@ class EquationSemanticsInputBuilder:
                 needs_math_review=True,
                 review_reason=["inline_pdf_math_untrusted"],
             ))
-        return candidates
+        return candidates, excluded
 
     @staticmethod
     def _map_backbone_by_section(
@@ -485,21 +864,31 @@ class EquationSemanticsInputBuilder:
         limit: int,
     ) -> list[str]:
         texts: list[str] = []
+        # 文脈は同じ節の中に限る（付録の式の前に結論の段落を入れない — J1 seq 1858）。
+        own_section = getattr(blocks[index], "section_id", None) if 0 <= index < len(blocks) else None
         i = index + direction
         while 0 <= i < len(blocks) and len(texts) < limit:
             block = blocks[i]
+            if getattr(block, "section_id", None) != own_section:
+                break
             if block.block_type in _CONTEXT_BLOCK_TYPES:
                 if block.block_type == "equation_block":
                     label = EquationNormalizer.extract_label(block.text) or getattr(block, "equation_label", None) or ""
                     label_part = f" label={label}" if label else ""
                     if EquationSemanticsInputBuilder._is_trusted_tex_block(block):
-                        texts.append(f"[{block.block_id}]{label_part} {block.text[:_MAX_CONTEXT_CHARS]}")
+                        texts.append(
+                            f"[{block.block_id}]{label_part} "
+                            f"{context_excerpt(block.text, _MAX_CONTEXT_CHARS, keep_end=direction < 0)}"
+                        )
                     else:
                         texts.append(
                             f"[{block.block_id}]{label_part} [EQUATION_TEXT_FROM_PDF_OMITTED_AS_UNTRUSTED]"
                         )
                 else:
-                    texts.append(f"[{block.block_id}] {block.text[:_MAX_CONTEXT_CHARS]}")
+                    texts.append(
+                        f"[{block.block_id}] "
+                        f"{context_excerpt(block.text, _MAX_CONTEXT_CHARS, keep_end=direction < 0)}"
+                    )
             i += direction
         if direction < 0:
             texts.reverse()
@@ -518,7 +907,8 @@ class EquationSemanticsInputBuilder:
 
     @staticmethod
     def _extraction_source(block: TypedBlock) -> str:
-        raw = block.raw if isinstance(block.raw, dict) else {}
+        raw = getattr(block, "raw", None)
+        raw = raw if isinstance(raw, dict) else {}
         source = str(raw.get("extraction_source") or "")
         if source:
             return source

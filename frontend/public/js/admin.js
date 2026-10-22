@@ -346,10 +346,38 @@
     return stages.concat(group.stages);
   }, []);
 
+  // 教材一覧（最後に描いたもの）から material_id で1行を引く（論文レーダーの導線用）。
+  function findMaterialInList(materialId) {
+    var list = state.materialsList || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && String(list[i].material_id) === String(materialId)) return list[i];
+    }
+    return null;
+  }
+
+  // 教材一覧の行へスクロールして一時的に強調する（論文レーダーの「この教材の行へ」）。
+  // 行がまだ一覧に無い（再読込前）ときは一覧を読み直してから探す。
+  function focusMaterialRow(materialId) {
+    if (!materialId) return;
+    var row = document.querySelector('#materials-tbody tr[data-material-id="' + CSS.escape(String(materialId)) + '"]');
+    if (!row) {
+      loadMaterials();
+      return;
+    }
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    row.classList.add("material-row-focus");
+    setTimeout(function () { row.classList.remove("material-row-focus"); }, 2500);
+  }
+
   function renderMaterials(materials) {
     var tbody = document.getElementById("materials-tbody");
     // 解析再開モーダルが直近の analysis_options を復元できるよう、一覧取得のたびにキャッシュする。
     state.materialsList = materials || [];
+    // 論文レーダーの取り込み済み候補は、この一覧の解析状態で導線を出し分ける（§19 C）。
+    // 再読込のたびに知らせるだけで、レーダー側からはポーリングしない（PR5）。
+    if (window.PaperRadar && window.PaperRadar.onMaterialsUpdated) {
+      setTimeout(function () { window.PaperRadar.onMaterialsUpdated(); }, 0);
+    }
     if (!materials || materials.length === 0) {
       tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--color-text-tertiary)">教材がまだアップロードされていません</td></tr>';
       return;
@@ -460,7 +488,7 @@
       // ⋯ メニューではなく行のアイコンボタン（📡）として「パイプラインを実行 ▼」の隣に出す。
       var radarTitle = "近い論文を探す — この論文を起点に、距離（近い/中間/同じ分野の別テーマ）を選んで arXiv から候補を探します";
       var radarBtn = m.document_id
-        ? '<button class="admin-action-btn material-row-icon-btn admin-radar-doc-btn" type="button" data-ui-anchor="materials.row-radar" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="' + escHtml(radarTitle) + '" aria-label="近い論文を探す"><span class="material-row-icon material-row-icon-emoji" aria-hidden="true">📡</span></button>'
+        ? '<button class="admin-action-btn material-row-icon-btn admin-radar-doc-btn" type="button" data-ui-anchor="materials.row-radar" data-document-id="' + escHtml(m.document_id) + '" data-analysis-cartridge-id="' + escHtml(m.analysis_cartridge_id || "") + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="' + escHtml(radarTitle) + '" aria-label="近い論文を探す"><span class="material-row-icon material-row-icon-emoji" aria-hidden="true">📡</span></button>'
         : "";
       // ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1）: 輪講の前にこの論文の
       // 「賭け金」（脆い前提・一点吊りの支持線・晴れ間）を10分で把握する read-only
@@ -608,7 +636,9 @@
         if (window.PaperRadar) {
           window.PaperRadar.openModal(
             this.getAttribute("data-document-id"),
-            this.getAttribute("data-title")
+            this.getAttribute("data-title"),
+            // 取り込みの「解析の分野」の既定 = seed 教材の採用 run の分野（無ければ「指定しない」）。
+            { cartridgeId: this.getAttribute("data-analysis-cartridge-id") || "" }
           );
         }
       });
@@ -1406,6 +1436,14 @@
       body: JSON.stringify(body),
     })
       .then(function (res) {
+        // 409 = この教材の解析が実行中（重ねて起動しない。IK-0702）。サーバの事実文を出す。
+        if (res.status === 409) {
+          return res.json().catch(function () { return {}; }).then(function (d) {
+            var err = new Error("status 409");
+            err.detail = (d && typeof d.detail === "string") ? d.detail : "";
+            throw err;
+          });
+        }
         if (!res.ok) throw new Error("status " + res.status);
         return res.json();
       })
@@ -1414,9 +1452,9 @@
         if (data.task_id) startTaskPolling(data.task_id, filename);
         loadMaterials();
       })
-      .catch(function () {
+      .catch(function (err) {
         if (btn) { btn.disabled = false; btn.textContent = "解析再開"; }
-        showUploadStatus("解析の再開に失敗しました。", "error");
+        showUploadStatus((err && err.detail) || "解析の再開に失敗しました。", "error");
       });
   }
 
@@ -12758,6 +12796,8 @@
           apiFetch: apiFetch,
           escHtml: escHtml,
           onUploadAccepted: handleUploadAccepted,
+          // 取り込みの「解析の分野」の選択肢は教材アップロードと同じ合成の1本を共有する。
+          loadDomainOptions: loadDomainOptions,
         });
         var discoveryLink = document.getElementById("paper-discovery-link");
         if (discoveryLink) {
@@ -12774,6 +12814,14 @@
           apiFetch: apiFetch,
           escHtml: escHtml,
           onUploadAccepted: handleUploadAccepted,
+          loadDomainOptions: loadDomainOptions,
+          // 取り込み済み・受理直後の候補から先へ進む導線（paper_radar_design.md §19 C）。
+          getMaterial: findMaterialInList,
+          focusMaterialRow: focusMaterialRow,
+          openGraphReview: function (documentId, title) {
+            if (window.GraphReview) window.GraphReview.open(documentId, title);
+          },
+          openLandscape: openLandscapeModal,
         });
       }
       // 束の取り込み（knowledge_transfer_design.md P4-1 / §4.3）— 教材行の

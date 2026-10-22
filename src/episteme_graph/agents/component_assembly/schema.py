@@ -331,6 +331,13 @@ class ComponentAssemblyLLMInput:
     claim_centered_plan: dict = field(default_factory=dict)
     # Claims dropped by the shared input limit (issue #356).
     excluded_from_pipeline_input: list[dict] = field(default_factory=list)
+    # available_claims rows actually rendered into the prompt when the input
+    # exceeds the character budget (None = render ``available_claims`` as is).
+    # ``available_claims`` stays the full ID whitelist for validation.
+    prompt_available_claims: list[dict] | None = None
+    # Coverage report (coverage_report.build_coverage_report) of the prompt
+    # budget: what was not rendered and why. Empty when nothing was cut.
+    input_coverage: dict = field(default_factory=dict)
 
 
 @dataclass

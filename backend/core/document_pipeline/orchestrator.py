@@ -503,6 +503,8 @@ class PipelineContext:
     skip_graph_persist: bool = False
     skip_component_persist: bool = False
     degraded_stages: list = field(default_factory=list)
+    # ノード単位の降格で保存できたときの降格ノード ID（graph_demotion.py）。
+    graph_demoted_node_ids: list = field(default_factory=list)
 
 
 @dataclass
@@ -2557,7 +2559,10 @@ def _stage_export_validation(ctx: PipelineContext) -> bool:
 # ユーザーを完全に詰まらせてはならない。
 #
 # エラーの種類に応じて persist をスキップし、completed（機能縮退）で完了する:
-#   component_graph エラー   → graph のみスキップ、claims + components は保存
+#   component_graph エラー   → ノード単位で解消できる error だけなら、該当ノードを
+#                              debug / review_required に降格して再検証し、error が
+#                              ゼロならグラフを保存する（graph_demotion.py・P4）。
+#                              それ以外は graph のみスキップ、claims + components は保存
 #   no_components /
 #   deterministic_fallback   → components + graph スキップ、claims は保存
 #   その他の品質エラー       → すべて保存（review_required フラグのみ）
@@ -2586,6 +2591,7 @@ def _compute_persist_degradation_flags(ctx: PipelineContext) -> None:
     ctx.skip_graph_persist = False
     ctx.skip_component_persist = False
     ctx.degraded_stages = []
+    ctx.graph_demoted_node_ids = []
     if ctx.validation_result_dict.get("status") == "failed_validation":
         all_val_errors = ctx.validation_result_dict.get("errors") or []
         component_skip_errors = [e for e in all_val_errors if e.get("code") in _COMPONENT_SKIP_CODES]
@@ -2600,6 +2606,14 @@ def _compute_persist_degradation_flags(ctx: PipelineContext) -> None:
                 "ExportValidationGate: コンポーネント生成不可 (%d error(s)) — "
                 "claims のみ保存して completed に移行: document=%s material=%s",
                 len(all_val_errors), ctx.document_id, ctx.material_id,
+            )
+        elif graph_errors and _try_node_demotion(ctx, graph_errors):
+            # ノード単位の降格で再検証を通った: グラフを保存する（降格ノードは debug 層）。
+            logger.warning(
+                "ExportValidationGate: component_graph エラー (%d) — %d ノードを debug に"
+                "降格して graph を保存: document=%s material=%s",
+                len(graph_errors), len(ctx.graph_demoted_node_ids),
+                ctx.document_id, ctx.material_id,
             )
         elif graph_errors:
             # graph のみスキップ、claims + components は保存
@@ -2618,6 +2632,26 @@ def _compute_persist_degradation_flags(ctx: PipelineContext) -> None:
                 "全アーティファクトを保存して completed に移行: document=%s material=%s",
                 len(all_val_errors), ctx.document_id, ctx.material_id,
             )
+
+
+def _try_node_demotion(ctx: PipelineContext, graph_errors: list) -> bool:
+    """component_graph の hard error をノード単位の降格で解消できれば True。
+
+    降格版は ``ctx.component_graph_result`` に差し替える（component_graph の artifact は
+    書き換えない = KO6。降格は persist の時点で毎回決定論的に再計算される）。
+    """
+    from .graph_demotion import try_demote_graph
+
+    try:
+        demoted, node_ids = try_demote_graph(ctx.component_graph_result, graph_errors)
+    except Exception:  # noqa: BLE001 - 降格に失敗したら従来どおりスキップ
+        logger.exception("component_graph node demotion failed: document=%s", ctx.document_id)
+        return False
+    if demoted is None:
+        return False
+    ctx.component_graph_result = demoted
+    ctx.graph_demoted_node_ids = list(node_ids)
+    return True
 
 
 def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
@@ -2752,6 +2786,8 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                 "graph_skipped": ctx.skip_graph_persist or ctx.skip_component_persist,
                 "components_skipped": ctx.skip_component_persist,
                 "degraded_stages": ctx.degraded_stages,
+                # ノード単位で debug に降格して保存したノード（空なら降格なし）。
+                "graph_demoted_node_ids": list(ctx.graph_demoted_node_ids),
                 # 知識オブジェクト（式・根拠・導出・記号）の保存件数（KO4）。
                 "knowledge_objects": knowledge_stats,
             })

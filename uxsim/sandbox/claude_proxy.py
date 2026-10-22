@@ -57,6 +57,39 @@ def _schema_note(response_format) -> str:
     return ""
 
 
+async def _ask_async(request: Request, kind: str, payload: dict):
+    """Mailbox.ask の非同期版（スレッド不使用）。切断を検知したら res に error を置き None を返す。"""
+    import asyncio
+    import os
+    from datetime import datetime, timezone
+
+    seq = BOX._next_seq()
+    req = BOX.root / f"req-{seq:05d}.json"
+    res = BOX.root / f"res-{seq:05d}.json"
+    body = {"seq": seq, "kind": kind, "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **payload}
+    tmp = req.with_suffix(".tmp")
+    tmp.write_text(json.dumps(body, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, req)
+    deadline = time.time() + BOX.timeout_s
+    while time.time() < deadline:
+        if res.is_file():
+            try:
+                data = json.loads(res.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                await asyncio.sleep(0.5)
+                continue
+            if isinstance(data, dict) and data.get("error"):
+                raise MailboxError(str(data["error"]))
+            return data if isinstance(data, dict) else {}
+        if await request.is_disconnected():
+            abandoned = res.with_suffix(".tmp")
+            abandoned.write_text(json.dumps({"error": "client_disconnected", "abandoned_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}), encoding="utf-8")
+            os.replace(abandoned, res)
+            return None
+        await asyncio.sleep(1.0)
+    raise MailboxTimeout(f"mailbox 応答待ちが {BOX.timeout_s:.0f} 秒を超えた: {req.name}")
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     body = await request.json()
@@ -69,13 +102,15 @@ async def chat_completions(request: Request):
     STATS["chat"] += 1
     note = _schema_note(body.get("response_format"))
     try:
-        # mailbox の待ちはブロッキングなのでスレッドへ逃がす（第 5 周: 直列化されて学生 4 名の要求が
-        # 1 本ずつしか流れず、2 体目の頭脳が遊んだ）。
-        import asyncio
-
-        data = await asyncio.to_thread(
-            BOX.ask, "product", {"model": body.get("model"), "messages": messages,
-                                 "response_format": body.get("response_format"), "note": note})
+        # 第 24 周（2026-10-16）: スレッドに逃がすと既定の executor（十数本）が、応答の来ない要求
+        # （再作成された api-server の置き土産）に 45 分ずつ塞がれ、新しい要求が proxy の中で十数分待たされた
+        # （製品側の打ち切りは延ばしてもフォールバックに落ちた根）。mailbox の待ちを非同期のポーリングにして
+        # スレッドを使わず、呼び出し元が切断したら res に error を置いて頭脳の無駄を止める。
+        data = await _ask_async(request, "product", {"model": body.get("model"), "messages": messages,
+                                                      "response_format": body.get("response_format"), "note": note})
+        if data is None:
+            STATS["client_disconnected"] = STATS.get("client_disconnected", 0) + 1
+            return JSONResponse(status_code=499, content={"error": {"message": "client disconnected", "type": "server_error"}})
     except (MailboxTimeout, MailboxError) as exc:
         STATS["errors"] += 1
         return JSONResponse(status_code=502, content={"error": {"message": f"uxsim brain: {exc}", "type": "server_error"}})

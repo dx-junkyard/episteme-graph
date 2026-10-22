@@ -539,7 +539,9 @@ class TestRelatedPayload:
             {"module_key": "k1", "documents": [{"title": "Paper B"}]},
         ]
         # 相手のないモジュールは行にしない（第 15 周 te-02 seq17）。照合した key は別キーで残す。
-        assert body["checked_module_keys"] == ["k1", "k2"]
+        # 照合の対象外（identity_eligible でない）は照合した集合に入れない（§22 A）。
+        assert body["checked_module_keys"] == ["k1"]
+        assert body["ineligible_module_keys"] == ["k2"]
         assert body["hidden"] is True
         assert body["facts"] == [tm_related.FACT_RELATED_HIDDEN]
 
@@ -822,3 +824,378 @@ class TestRelatedNoneFact:
     def test_no_none_fact_when_partner_listed(self):
         body = _payload([_own("m1")], [_match("x1", OTHER_DOC)])
         assert tm_related.FACT_RELATED_NONE not in body["facts"]
+
+
+class TestRelatedPeerUnsaved:
+    """§21 C（論文レーダー第 4 波）: 照合できなかった側を「見つかっていません」の前に名指しする。"""
+
+    def test_peer_fact_precedes_none(self):
+        body = tm_related.build_related_payload(
+            DOC,
+            own_rows=[_own("m1", key="k1")],
+            matches=[],
+            decisions={},
+            rule_version=RULE,
+            can_view=lambda d: True,
+            titles={},
+            candidate_key_for=library_schema.build_structural_candidate_key,
+            unsaved_peer_titles=("Kurtosis consistency relation",),
+        )
+        assert body["facts"] == [
+            tm_related.FACT_RELATED_PEER_UNSAVED.format(title="Kurtosis consistency relation"),
+            tm_related.FACT_RELATED_NONE,
+        ]
+
+    def test_without_peer_is_unchanged(self):
+        body = _payload([_own("m1", key="k1")], [])
+        assert body["facts"] == [tm_related.FACT_RELATED_NONE]
+
+    def test_build_related_names_an_unsaved_viewable_peer(self, monkeypatch):
+        from core.library import structural_matches as sm
+
+        monkeypatch.setattr(sm, "load_live_modules", lambda session, d: [_own("m1", key="k1")])
+        monkeypatch.setattr(sm, "load_matching_modules", lambda *a, **k: [])
+        monkeypatch.setattr(sm, "documents_with_saved_modules", lambda session, ids: set())
+        monkeypatch.setattr(sm, "load_document_titles", lambda session, ids: {OTHER_DOC: "Seed paper"})
+        body = sm.build_related_for_document(
+            object(), DOC, rule_version=RULE, can_view=lambda d: True, peer_document_id=OTHER_DOC,
+        )
+        assert body["facts"][0] == tm_related.FACT_RELATED_PEER_UNSAVED.format(title="Seed paper")
+        # 閲覧できない相手は名指ししない（題名を漏らさない）。
+        body = sm.build_related_for_document(
+            object(), DOC, rule_version=RULE, can_view=lambda d: False, peer_document_id=OTHER_DOC,
+        )
+        assert body["facts"] == [tm_related.FACT_RELATED_NONE]
+
+    def test_saved_set_issues_no_sql_for_empty_input(self):
+        from core.library import structural_matches as sm
+
+        class _Boom:
+            def execute(self, *a, **k):
+                raise AssertionError("SQL must not be issued")
+
+        assert sm.documents_with_saved_modules(_Boom(), []) == set()
+
+
+# ---------------------------------------------------------------------------
+# §22（論文レーダー第 5 波）— 照合の対象外の分離（A）と近い構造（B）
+# ---------------------------------------------------------------------------
+
+
+def _steps(*pairs):
+    """``(operation, edge_type, generic)`` の列 → member_steps。"""
+    return [{"operation": op, "edge_type": et, "generic": generic} for op, et, generic in pairs]
+
+
+_STEPS_A = _steps(("derive_result", "derives", False), ("define", "defines", False),
+                  ("normalize", "normalizes", False))
+_STEPS_B = _steps(("normalize", "normalizes", False), ("define", "defines", False),
+                  ("approximate", "approximates", False), ("derive_result", "derives", False),
+                  ("derive_result", "derives", False))
+_STEPS_GENERIC = _steps(("relate", "relates", True), ("transform", "transforms", True),
+                        ("define", "defines", False))
+
+
+def _own_full(mid, *, steps, label, fingerprint=FP, eligible=True, key=None):
+    row = _own(mid, fingerprint=fingerprint, eligible=eligible, key=key)
+    row.update({"label": label, "visual_label": label, "member_steps": steps})
+    return row
+
+
+def _peer(document_id, *, steps, label, fingerprint="m2|outer|ops=other|in=1|out=1|premise=0"):
+    return {"document_id": document_id, "level": "outer", "rule_version": RULE, "label": label,
+            "visual_label": label, "member_steps": steps, "structure_fingerprint": fingerprint}
+
+
+class TestWave5IneligibleSplit:
+    def test_all_ineligible_says_no_eligible_not_none(self):
+        body = _payload([_own_full("m1", steps=_STEPS_A, label="定義", eligible=False, key="k1")], [])
+        assert body["checked_module_keys"] == []
+        assert body["ineligible_module_keys"] == ["k1"]
+        assert body["facts"] == [tm_related.FACT_RELATED_NO_ELIGIBLE]
+        assert tm_related.FACT_RELATED_NONE not in body["facts"]
+
+    def test_mixed_names_ineligible_by_label_without_counts(self):
+        body = _payload(
+            [_own_full("m1", steps=_STEPS_A, label="正規化の工程", key="k1"),
+             _own_full("m2", steps=_STEPS_A, label="確率的項の定義", eligible=False, key="k2")],
+            [],
+        )
+        assert body["checked_module_keys"] == ["k1"]
+        assert body["ineligible_module_keys"] == ["k2"]
+        assert body["facts"][0] == tm_related.FACT_RELATED_NONE
+        assert body["facts"][1] == tm_related.FACT_RELATED_INELIGIBLE_LISTED.format(labels="確率的項の定義")
+
+    def test_ineligible_labels_are_capped_with_hoka(self):
+        own = [_own_full("m0", steps=_STEPS_A, label="対象", key="k0")] + [
+            _own_full(f"i{n}", steps=_STEPS_A, label=f"定義{chr(0x30A2 + n)}", eligible=False, key=f"ki{n}")
+            for n in range(tm_related.INELIGIBLE_LABELS_MAX + 2)
+        ]
+        body = _payload(own, [])
+        assert body["facts"][-1].endswith("ほか")
+
+    def test_internal_id_labels_are_not_named(self):
+        body = _payload(
+            [_own_full("m1", steps=_STEPS_A, label="対象", key="k1"),
+             _own_full("m2", steps=_STEPS_A, label="eq_op_12 の定義", eligible=False, key="k2")],
+            [],
+        )
+        assert body["facts"] == [tm_related.FACT_RELATED_NONE]
+
+
+class TestWave5NearStructure:
+    def _body(self, peers, *, can_view=lambda d: True, own=None):
+        return tm_related.build_related_payload(
+            DOC,
+            own_rows=own or [_own_full("m1", steps=_STEPS_A, label="推定量の正規化", key="k1")],
+            matches=[],
+            decisions={},
+            rule_version=RULE,
+            can_view=can_view,
+            titles={OTHER_DOC: "Kinetic Theory", THIRD_DOC: "Paper C"},
+            candidate_key_for=library_schema.build_structural_candidate_key,
+            peer_outer_rows=peers,
+        )
+
+    def test_shape_and_shared_operation_labels(self):
+        body = self._body([_peer(OTHER_DOC, steps=_STEPS_B, label="流入テンソルの規格化")])
+        assert body["near_structure"] == [{
+            "seed_module_key": "k1",
+            "seed_module_label": "推定量の正規化",
+            "peer_module_label": "流入テンソルの規格化",
+            "peer_document_title": "Kinetic Theory",
+            "shared_operation_labels": ["結果を導出", "定義", "正規化"],
+        }]
+        assert body["near_structure_note"] == tm_related.FACT_NEAR_STRUCTURE_NOTE
+        # 近い構造は「同じ構造」の列挙（modules）に混ぜない。
+        assert body["modules"] == []
+
+    def test_generic_only_overlap_is_not_near(self):
+        body = self._body([_peer(OTHER_DOC, steps=_STEPS_GENERIC, label="関係づけ")])
+        assert body["near_structure"] == []
+        assert body["near_structure_note"] == ""
+
+    def test_exact_fingerprint_match_is_left_to_modules(self):
+        body = self._body([_peer(OTHER_DOC, steps=_STEPS_B, label="同型", fingerprint=FP)])
+        assert body["near_structure"] == []
+
+    def test_invisible_peer_is_dropped_silently(self):
+        body = self._body([_peer(THIRD_DOC, steps=_STEPS_B, label="見えない")],
+                          can_view=lambda d: d != THIRD_DOC)
+        assert body["near_structure"] == []
+        assert "Paper C" not in str(body) and "見えない" not in str(body)
+
+    def test_capped_and_numberless(self):
+        peers = [_peer(OTHER_DOC, steps=_STEPS_B, label=f"相手{chr(0x30A2 + n)}")
+                 for n in range(tm_related.NEAR_STRUCTURE_MAX_PAIRS + 3)]
+        body = self._body(peers)
+        assert len(body["near_structure"]) == tm_related.NEAR_STRUCTURE_MAX_PAIRS
+        for key, value in _walk(body["near_structure"]):
+            assert key not in tm_schema.FORBIDDEN_KEYS, key
+            assert not (isinstance(value, (int, float)) and not isinstance(value, bool)), key
+            if isinstance(value, str):
+                assert "ops=" not in value and FP not in value
+
+    def test_near_structure_creates_no_identity_candidate(self):
+        """TM13: 近い構造は表示専用。候補キーの計算も書き込みもしない。"""
+        calls = []
+
+        def _key(fp):
+            calls.append(fp)
+            return library_schema.build_structural_candidate_key(fp)
+
+        tm_related.build_related_payload(
+            DOC,
+            own_rows=[_own_full("m1", steps=_STEPS_A, label="推定量の正規化", key="k1",
+                                eligible=False)],
+            matches=[], decisions={}, rule_version=RULE, can_view=lambda d: True,
+            titles={OTHER_DOC: "Kinetic Theory"}, candidate_key_for=_key,
+            peer_outer_rows=[_peer(OTHER_DOC, steps=_STEPS_B, label="流入テンソルの規格化")],
+        )
+        assert calls == []
+        src = (BACKEND / "core" / "theory_modules" / "related.py").read_text(encoding="utf-8")
+        near_src = src[src.index("def _near_pairs"):src.index("def _unavailable")]
+        for term in ("candidate_key", "identity", "INSERT", "library_entries"):
+            assert term not in near_src.replace("同一性", ""), term
+        rule = (BACKEND / "core" / "library" / "identity_candidates.py").read_text(encoding="utf-8")
+        assert "near_structure" not in rule
+
+    def test_structural_matches_loads_peers_fail_soft(self, monkeypatch):
+        from core.library import structural_matches as sm
+
+        monkeypatch.setattr(sm, "load_live_modules", lambda session, d: [
+            _own_full("m1", steps=_STEPS_A, label="推定量の正規化", key="k1")])
+        monkeypatch.setattr(sm, "load_matching_modules", lambda *a, **k: [])
+        monkeypatch.setattr(sm, "load_peer_outer_modules", lambda *a, **k: [
+            _peer(OTHER_DOC, steps=_STEPS_B, label="流入テンソルの規格化")])
+        monkeypatch.setattr(sm, "load_document_titles", lambda session, ids: {OTHER_DOC: "Kinetic Theory"})
+        body = sm.build_related_for_document(object(), DOC, rule_version=RULE, can_view=lambda d: True)
+        assert body["near_structure"][0]["peer_document_title"] == "Kinetic Theory"
+
+        def _boom(*a, **k):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(sm, "load_peer_outer_modules", _boom)
+        body = sm.build_related_for_document(object(), DOC, rule_version=RULE, can_view=lambda d: True)
+        assert body["near_structure"] == [] and body["available"] is True
+
+    def test_module_match_states_sql_reads_live_view_and_skips_empty(self):
+        from core.library import structural_matches as sm
+
+        class _Boom:
+            def execute(self, *a, **k):
+                raise AssertionError("SQL must not be issued")
+
+        assert sm.module_match_states(_Boom(), [], rule_version=RULE) == {}
+
+
+# ---------------------------------------------------------------------------
+# 第 6 波（judge-deep-07 ②④・§22.4）: ラベルのプレーン化の正本・近い構造の並び・相手の題名
+# ---------------------------------------------------------------------------
+
+
+class TestWave6LabelPlainCanon:
+    def test_ineligible_labels_go_through_plain_math_and_keep_dollar_pairs(self):
+        from core.display_projection import project_for_teacher
+
+        body = _payload(
+            [_own_full("m1", steps=_STEPS_A, label="正規化の工程", key="k1"),
+             _own_full("m2", steps=_STEPS_A, label=r"定義: $R_\delta(\lambda)$", eligible=False, key="k2"),
+             _own_full("m3", steps=_STEPS_A, label=r"定義: $\eta$", eligible=False, key="k3"),
+             _own_full("m4", steps=_STEPS_A, label=r"定義を適用: $O_{L,\parallel}(\textbf{x})$",
+                       eligible=False, key="k4")],
+            [],
+        )
+        # 保存行の visual_label が旧規則の残骸（textbfx）でも、読み時に正本で作り直す。
+        body_stale = _payload(
+            [_own_full("m1", steps=_STEPS_A, label="正規化の工程", key="k1"),
+             {**_own_full("m4", steps=_STEPS_A, label=r"定義を適用: $O_{L,\parallel}(\textbf{x})$",
+                          eligible=False, key="k4"),
+              "visual_label": "定義を適用: O_L,parallel(textbfx)"}],
+            [],
+        )
+        for payload in (body, body_stale):
+            listed = [f for f in payload["facts"] if f.startswith("次のモジュールは")]
+            assert listed, payload["facts"]
+            assert "textbf" not in listed[0] and "parallel" not in listed[0]
+        listed = next(f for f in body["facts"] if f.startswith("次のモジュールは"))
+        assert "R_δ(λ)" in listed and "O_L,∥(x)" in listed
+        # 教員向け投影（裸の TeX の区切り付け）を通しても、$ が和文の項目境界をまたがない。
+        projected = project_for_teacher({"facts": [listed]})["facts"][0]
+        for chunk in projected.split("、"):
+            assert chunk.count("$") % 2 == 0, projected
+        assert "$R_δ(λ)、" not in projected
+
+    def test_related_uses_the_schema_plain_math(self):
+        src = (BACKEND / "core" / "theory_modules" / "related.py").read_text(encoding="utf-8")
+        assert "plain_math(" in src
+        builder_src = (BACKEND / "core" / "theory_modules" / "builder.py").read_text(encoding="utf-8")
+        # 正本は schema.py の 1 つだけ（builder は import して使う）。
+        assert "def plain_math(" not in builder_src
+        assert tm_schema.plain_math(r"$\langle \cdots \rangle_{\rm FoG}$") == "⟨ ⋯ ⟩_FoG"
+        assert tm_schema.plain_math(r"$\textbf{u}^{\rm FoG}$") == "u^FoG"
+
+
+_STEPS_RARE = _steps(("solve_for", "solves", False), ("eliminate", "eliminates", False),
+                     ("define", "defines", False))
+_STEPS_COMMON_PEER = _steps(("define", "defines", False), ("derive_result", "derives", False),
+                            ("normalize", "normalizes", False))
+
+
+class TestWave6NearStructureOrder:
+    def test_rare_kinds_outrank_common_kinds_at_equal_shared_count(self):
+        own = [_own_full("m1", steps=_steps(("define", "defines", False), ("derive_result", "derives", False),
+                                             ("solve_for", "solves", False), ("eliminate", "eliminates", False)),
+                         label="起点のまとまり", key="k1")]
+        fourth = "44444444-4444-4444-4444-444444444444"
+        fifth = "55555555-5555-5555-5555-555555555555"
+        peers = [
+            # 共有 2 種（定義・結果を導出）— どの論文にもある型。題名順では先頭（"A …"）。
+            _peer(OTHER_DOC, steps=_STEPS_COMMON_PEER, label="ありふれた工程"),
+            # 共有 2 種（求解・消去）— この相手にしか無い型。
+            _peer(THIRD_DOC, steps=_STEPS_RARE, label="珍しい工程"),
+            _peer(fourth, steps=_STEPS_COMMON_PEER, label="ありふれた工程 2"),
+            _peer(fifth, steps=_STEPS_COMMON_PEER, label="ありふれた工程 3"),
+        ]
+        near = tm_related.build_near_structure(
+            own, peers, document_id=DOC, rule_version=RULE, can_view=lambda d: True,
+            titles={OTHER_DOC: "A common paper", THIRD_DOC: "Z rare paper",
+                    fourth: "B common", fifth: "C common"},
+        )
+        assert near[0]["peer_module_label"] == "珍しい工程"
+        # 珍しさが同じなら題名順（決定論）。
+        assert [p["peer_document_title"] for p in near[1:]] == ["A common paper", "B common", "C common"]
+        for pair in near:
+            assert not any(isinstance(v, (int, float)) and not isinstance(v, bool) for v in pair.values())
+
+    def test_more_shared_kinds_still_come_first(self):
+        own = [_own_full("m1", steps=_STEPS_B, label="起点", key="k1")]
+        peers = [
+            _peer(OTHER_DOC, steps=_steps(("define", "defines", False), ("normalize", "normalizes", False)),
+                  label="二種"),
+            _peer(THIRD_DOC, steps=_STEPS_B[:3] + [_STEPS_B[3]], label="四種",
+                  fingerprint="m2|outer|ops=x|in=2|out=1|premise=0"),
+        ]
+        near = tm_related.build_near_structure(
+            own, peers, document_id=DOC, rule_version=RULE, can_view=lambda d: True,
+            titles={OTHER_DOC: "A", THIRD_DOC: "Z"},
+        )
+        assert near[0]["peer_module_label"] == "四種"
+
+
+class TestWave6PeerDisplayTitle:
+    def test_title_note_is_attached_to_the_pair(self):
+        own = [_own_full("m1", steps=_STEPS_A, label="起点", key="k1")]
+        peers = [_peer(OTHER_DOC, steps=_STEPS_B, label="相手")]
+        near = tm_related.build_near_structure(
+            own, peers, document_id=DOC, rule_version=RULE, can_view=lambda d: True,
+            titles={OTHER_DOC: "Post-Newtonian theory"},
+            title_notes={OTHER_DOC: "教材名はファイル名のままです。"},
+        )
+        assert near[0]["peer_document_title"] == "Post-Newtonian theory"
+        assert near[0]["peer_document_title_note"] == "教材名はファイル名のままです。"
+
+    def test_filename_title_uses_cached_arxiv_title_or_says_unresolved(self, monkeypatch):
+        from core.library import structural_matches as sm
+        from core.paper_discovery import metadata_cache, radar
+        from core.paper_discovery.schema import ArxivEntry
+
+        monkeypatch.setattr(sm, "load_document_titles", lambda session, ids: {
+            OTHER_DOC: "arXiv-2610.20589v1", THIRD_DOC: "arXiv-2508.06322v2", DOC: "Kinetic Theory"})
+        monkeypatch.setattr(sm, "_cached_arxiv_titles", lambda session, ids, raw: {
+            OTHER_DOC: "Post-Newtonian theory in de Sitter spacetimes"})
+        titles, notes = sm.load_display_titles(object(), [OTHER_DOC, THIRD_DOC, DOC])
+        assert titles[OTHER_DOC] == "Post-Newtonian theory in de Sitter spacetimes"
+        assert notes[OTHER_DOC] == radar.NOTE_SEED_TITLE_IS_FILENAME
+        assert titles[THIRD_DOC] == "arXiv-2508.06322v2"
+        assert notes[THIRD_DOC] == radar.NOTE_TITLE_UNRESOLVED
+        assert titles[DOC] == "Kinetic Theory" and DOC not in notes
+
+        # 写しの読み出しは arXiv API を呼ばない（read_fresh = DB の写しだけ）。
+        calls = []
+
+        class _S:
+            def execute(self, *a, **k):
+                class _R:
+                    def fetchall(self_inner):
+                        return [(OTHER_DOC, "https://arxiv.org/src/2610.20589")]
+                return _R()
+
+        monkeypatch.undo()  # 実物の _cached_arxiv_titles を通す
+        monkeypatch.setattr(metadata_cache, "read_fresh",
+                            lambda session, ids: calls.append(list(ids)) or {
+                                "2610.20589": ArxivEntry(arxiv_id="2610.20589", title="PN theory")})
+        out = sm._cached_arxiv_titles(_S(), [OTHER_DOC], {OTHER_DOC: "arXiv-2610.20589v1"})
+        assert out == {OTHER_DOC: "PN theory"} and calls == [["2610.20589"]]
+        src = (BACKEND / "core" / "library" / "structural_matches.py").read_text(encoding="utf-8")
+        assert "arxiv_client" not in src
+
+    def test_display_title_for_is_the_shared_canon(self):
+        from core.paper_discovery import radar
+
+        assert radar.display_title_for("Real title") == ("Real title", "")
+        assert radar.display_title_for("arXiv-2508.06322v2", "T") == ("T", radar.NOTE_SEED_TITLE_IS_FILENAME)
+        assert radar.display_title_for("arXiv-2508.06322v2", "") == (
+            "arXiv-2508.06322v2", radar.NOTE_TITLE_UNRESOLVED)
+        src = (BACKEND / "core" / "library" / "structural_matches.py").read_text(encoding="utf-8")
+        assert "display_title_for(" in src

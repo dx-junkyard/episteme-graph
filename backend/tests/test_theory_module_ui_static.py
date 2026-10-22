@@ -452,3 +452,22 @@ class TestPhase1CacheBusting:
             match = re.search(r'/js/' + re.escape(path) + r'\?v=([^"]+)"', HTML_SRC)
             assert match, path
             assert match.group(1) != old, path
+
+
+class TestRelatedWave5:
+    """§22 A / B（論文レーダー第 5 波）: 照合の対象外を別の文で言い、近い構造をラベルで列挙する。"""
+
+    def test_ineligible_module_gets_its_own_sentence(self):
+        html = _function_block("relatedModulesHtml")
+        assert "data.ineligible_module_keys" in html
+        assert "MODULE_RELATED_INELIGIBLE_TEXT" in html
+        assert "MODULE_RELATED_INELIGIBLE_TEXT = " in JS_SRC
+
+    def test_near_structure_is_matched_by_module_key_and_numberless(self):
+        block = _function_block("nearStructureHtml")
+        assert "data.near_structure" in block
+        assert "pair.seed_module_key" in block and "module.module_key" in block
+        assert "data.near_structure_note" in block
+        for word in (".length +", "toFixed", "fingerprint", "count"):
+            assert word not in block
+        assert "nearStructureHtml(module, data)" in _function_block("relatedModulesHtml")

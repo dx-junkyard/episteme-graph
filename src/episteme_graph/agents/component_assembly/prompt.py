@@ -280,13 +280,24 @@ class ComponentAssemblyPromptFactory:
             "claim_centered_plan": llm_input.claim_centered_plan,
         }
         available = {
-            "available_claims": llm_input.available_claims,
+            "available_claims": (
+                llm_input.prompt_available_claims
+                if llm_input.prompt_available_claims is not None
+                else llm_input.available_claims
+            ),
             "available_evidence": llm_input.available_evidence,
             "available_equations": llm_input.available_equations,
             "available_dsl_nodes": llm_input.available_dsl_nodes,
             "available_dsl_edges": llm_input.available_dsl_edges,
             "available_derivation_ids": llm_input.available_derivation_ids,
         }
+        if llm_input.prompt_available_claims is not None:
+            # Input budget (component_assembly input_builder): the claim list
+            # below is a subset. accepted_claims IDs are always valid too.
+            available["available_claims_note"] = (
+                "available_claims lists a subset of the paper's claims to fit the "
+                "input size; every claim_id in accepted_claims is also available."
+            )
         parts = [
             "## Task",
             "Assemble reusable knowledge components. Return ONLY JSON.",

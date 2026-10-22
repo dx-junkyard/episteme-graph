@@ -73,7 +73,10 @@ class TestPaperLayerHeadings:
 class TestRelatedOneLinePerOuter:
     def test_no_partners_means_single_fact_and_no_rows(self):
         own = [
-            {"id": f"m{i}", "agent_module_key": "", "rule_version": "m2", "level": "outer",
+            # 照合の対象（agent_module_key あり・identity_eligible）だが相手ゼロ。
+            # 第 5 波（§22 A）以降、対象の外枠が 1 つも無いときは FACT_RELATED_NO_ELIGIBLE に
+            # 分かれるので、ここは「対象はあるが見つかっていない」側を固定する。
+            {"id": f"m{i}", "agent_module_key": f"m2:k{i}", "rule_version": "m2", "level": "outer",
              "structure_fingerprint": "fp", "identity_eligible": True}
             for i in range(17)
         ]
@@ -83,6 +86,19 @@ class TestRelatedOneLinePerOuter:
         )
         assert body["modules"] == []
         assert body["facts"] == [tm_related.FACT_RELATED_NONE]
+
+    def test_no_eligible_outer_says_so_instead_of_not_found(self):
+        own = [
+            {"id": "m0", "agent_module_key": "", "rule_version": "m2", "level": "outer",
+             "structure_fingerprint": "fp", "identity_eligible": False}
+        ]
+        body = tm_related.build_related_payload(
+            "doc", own_rows=own, matches=[], decisions={}, rule_version="m2",
+            can_view=lambda d: True, titles={}, candidate_key_for=lambda fp: fp,
+        )
+        assert body["modules"] == []
+        assert tm_related.FACT_RELATED_NO_ELIGIBLE in body["facts"]
+        assert tm_related.FACT_RELATED_NONE not in body["facts"]
 
 
 class TestSeminarBriefReadable:

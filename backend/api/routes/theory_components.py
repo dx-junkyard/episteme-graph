@@ -10,7 +10,7 @@ import re
 import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -5313,9 +5313,21 @@ def create_candidates_from_query(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_peer_document_id(ref: Optional[str]) -> str:
+    """照合の相手の参照（UUID / material_id）→ documents.id。解決できなければ空。"""
+    if not str(ref or "").strip():
+        return ""
+    try:
+        resolved = _resolve_document(str(ref).strip())
+    except Exception:  # noqa: BLE001 — 相手が引けなくても照合は成立させる
+        return ""
+    return str((resolved or {}).get("id") or "")
+
+
 @router.get("/documents/{document_id}/theory-modules/related", response_model=None)
 def get_document_theory_modules_related(
     document_id: str,
+    peer_document_id: Optional[str] = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """保存済みの外枠モジュールごとに、構造の指紋が完全一致する他の論文のタイトルを列挙する。
@@ -5344,6 +5356,10 @@ def get_document_theory_modules_related(
             "available": False,
             "facts": [tm_related.FACT_RELATED_NOT_SAVED],
             "modules": [],
+            "checked_module_keys": [],
+            "ineligible_module_keys": [],
+            "near_structure": [],
+            "near_structure_note": "",
             "hidden": False,
         }
     can_view = _document_access_checker(str(current_user.get("id") or ""))
@@ -5355,6 +5371,8 @@ def get_document_theory_modules_related(
             rule_version=RULE_VERSION,
             can_view=can_view,
             candidate_key_for=library_schema.build_structural_candidate_key,
+            # 照合の相手（レーダーの起点など）。閲覧できないものは無視する（§21 C）。
+            peer_document_id=_resolve_peer_document_id(peer_document_id),
         )
     except Exception:
         logger.debug("theory_modules related: lookup failed for document %s", document_id, exc_info=True)

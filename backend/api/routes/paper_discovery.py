@@ -69,6 +69,7 @@ import logging
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import services
@@ -102,6 +103,7 @@ from core.schema import AUDIT_ENTITY_PAPER_DISCOVERY
 from routes.admin import (
     _URL_FETCH_ERROR_STATUS,
     _accept_material_source,
+    _validate_cartridge_option,
     _validate_models_option,
 )
 
@@ -145,6 +147,10 @@ _DETAIL_INGEST_TOO_MANY = (
     "件数を減らして実行してください。"
 )
 _DETAIL_INVALID_ARXIV_ID = "arXiv ID として解釈できませんでした。"
+#: 既に取り込み済み（投入者に見える教材の ``source_url`` と同じ arXiv ID）— IK-0796。
+#: 重複取り込みは解析パイプラインを丸ごと二重に走らせるだけで資産にならない。
+#: 解析をやり直したいときは既存教材の再解析を使う（``force`` は作らない）。
+_DETAIL_ALREADY_INGESTED = pd_queue.SKIP_ALREADY_INGESTED + "（解析結果は既存の教材から開けます）"
 #: 配信形式（TeX / PDF）の指定が語彙外だった（語彙の正本は
 #: ``core.paper_discovery.schema.SOURCE_FORMATS``）。入口で fail-closed に弾く —
 #: 語彙外を黙って既定へ落とすと、教員が選んだつもりの形式と実際に取りに行く形式が
@@ -291,6 +297,12 @@ class IngestRequest(BaseModel):
     #: 生成物の言語（``ja`` / ``en``。``None`` = 指定なし）。意味は
     #: ``POST /api/admin/materials/upload`` の ``language`` と同一（run options に入る）。
     language: Optional[Literal["ja", "en"]] = None
+    #: 解析の分野（2026-10-16・migration 090 と同じ是正）。意味と検証は
+    #: ``POST /api/admin/materials/upload`` の ``cartridge_id`` と同一
+    #: （``routes.admin._validate_cartridge_option``）: ``None`` = 未指定（env 既定）/
+    #: ``""`` = 「指定しない」の明示 / それ以外 = 選択肢に実在する分野キー（語彙外は 422）。
+    #: ``domain_key`` は監査の帰属（購読の名前空間）で、解析の分野には使わない。
+    cartridge_id: Optional[str] = None
 
 
 class IngestBatchItem(BaseModel):
@@ -309,6 +321,9 @@ class IngestBatchRequest(BaseModel):
     models: Optional[dict] = None
     #: ``IngestRequest.source_format`` と同じ意味（同期・バッチで語彙を分けない）。
     source_format: str = ""
+    #: ``IngestRequest.cartridge_id`` と同じ意味。キュー行（migration 090）に保存し、
+    #: worker が受理時に ``_accept_material_source(cartridge_id=)`` へ渡す。
+    cartridge_id: Optional[str] = None
 
 
 class CitationSearchRequest(BaseModel):
@@ -656,6 +671,37 @@ def citation_search_candidates(
 # ---------------------------------------------------------------------------
 
 
+def _visible_ingested_documents(user_id: str) -> dict[str, dict]:
+    """投入者に**見える**教材のうち、URL 経由で取り込まれたものの arXiv ID 対応。
+
+    候補一覧の「取り込み済み」判定（``search.visible_ingested_documents``）と同じ正本を
+    取り込みの弁でも使う（IK-0796 — 一覧は判定していたのに弁に同じ判定が無く、既存論文が
+    二重に解析された）。可視集合の取得に失敗したときは空集合（判定なし）に縮退する。
+    """
+    session = None
+    try:
+        session = _pg_session()
+        return pd_search.visible_ingested_documents(
+            session,
+            visible_document_ids=services.list_visible_document_ids(str(user_id or "")),
+        )
+    except Exception:  # noqa: BLE001 — 判定不能で取り込み全体を止めない（従来挙動へ縮退）
+        logger.warning("failed to resolve already-ingested documents", exc_info=True)
+        return {}
+    finally:
+        if session is not None:
+            session.close()
+
+
+def _already_ingested_entry(arxiv_id: str, existing: dict) -> dict:
+    return {
+        "arxiv_id": arxiv_id,
+        "detail": _DETAIL_ALREADY_INGESTED,
+        "reason": pd_queue.REASON_ALREADY_INGESTED,
+        "existing": pd_queue.existing_document_ref(existing),
+    }
+
+
 @router.post("/ingest", status_code=202)
 def ingest_candidates(
     body: IngestRequest,
@@ -678,6 +724,12 @@ def ingest_candidates(
 
     アイテム間の 3 秒間隔（worker の ``INTER_ITEM_SLEEP_SECONDS``）は同期経路では
     置かない（上限5件・教員が待つ同期リクエストのため。設計書 §15.9 の非スコープ）。
+
+    **既に取り込み済みの論文は取得しない**（IK-0796）。投入者に見える教材の
+    ``source_url`` に同じ arXiv ID（version 抜き）があれば、arXiv を呼ぶ前に止める。
+    有効な item が全部取り込み済みなら **409**（``detail`` は事実文・``existing[]`` に
+    既存教材の document_id / material_id / title）。一部だけなら該当 item を
+    ``failed`` に ``reason: "already_ingested"`` + ``existing`` で積み、残りは取り込む。
     """
     items = list(body.items or [])
     if not items:
@@ -685,12 +737,40 @@ def ingest_candidates(
     if len(items) > MAX_INGEST_PER_REQUEST:
         raise HTTPException(status_code=422, detail=_DETAIL_INGEST_TOO_MANY)
 
+    requested_ids = [
+        pd_schema.normalize_arxiv_id(str(getattr(item, "arxiv_id", "") or "")) for item in items
+    ]
+    valid_ids = [arxiv_id for arxiv_id in requested_ids if arxiv_id]
+    ingested_map = _visible_ingested_documents(current_user["id"]) if valid_ids else {}
+    if valid_ids and all(arxiv_id in ingested_map for arxiv_id in valid_ids):
+        # どの item も取得しない（arXiv も LLM も呼ばない）。検証より先に返すのは、
+        # 409 の対象が「やることが無い」事実だから（語彙外の指定より優先して伝える）。
+        existing = []
+        for arxiv_id in dict.fromkeys(valid_ids):
+            entry = pd_queue.existing_document_ref(ingested_map[arxiv_id])
+            entry["arxiv_id"] = arxiv_id
+            existing.append(entry)
+        logger.info(
+            "arXiv ingest rejected as already ingested for user=%s ids=%s",
+            current_user["id"], list(dict.fromkeys(valid_ids)),
+        )
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": _DETAIL_ALREADY_INGESTED,
+                "reason": pd_queue.REASON_ALREADY_INGESTED,
+                "existing": existing,
+            },
+        )
+
     source_format = _resolved_source_format(body.source_format)
 
     models_option: dict | None = None
     if body.models:
         models_option = _validate_models_option(body.models)
     language_option = body.language
+    # 分野は取得の前に検証する（語彙外で arXiv を叩かない）。検証の正本は upload と同一。
+    cartridge_option = _validate_cartridge_option(body.cartridge_id)
 
     session = _pg_session()
     try:
@@ -709,6 +789,10 @@ def ingest_candidates(
         arxiv_id = pd_schema.normalize_arxiv_id(raw_id)
         if not arxiv_id:
             failed.append({"arxiv_id": raw_id, "detail": _DETAIL_INVALID_ARXIV_ID})
+            continue
+        if arxiv_id in ingested_map:
+            # 取り込み済みは取得しない（IK-0796）。一部だけのときは 1 件分の失敗に閉じる。
+            failed.append(_already_ingested_entry(arxiv_id, ingested_map[arxiv_id]))
             continue
         if rate_limited:
             # 取得していない事実を、429 を受けた item と同じ事実文で残す。
@@ -761,6 +845,7 @@ def ingest_candidates(
                 # 実際にバイト列を返した URL を出所として記帳する（フォールバック時は /pdf/）。
                 source_url=resolved.source_url,
                 language=language_option,
+                cartridge_id=cartridge_option,
             )
         except HTTPException as exc:
             # 保存・受理の失敗も1件分に閉じる（残りの取り込みを巻き添えにしない）。
@@ -786,6 +871,7 @@ def ingest_candidates(
         {
             "action": "ingest",
             "source_format": source_format,
+            "cartridge_id": cartridge_option,
             "arxiv_ids": [entry.get("arxiv_id", "") for entry in accepted],
             "effective_formats": {
                 entry.get("arxiv_id", ""): entry.get("effective_format", "")
@@ -849,6 +935,8 @@ def ingest_batch(
     models_option: dict | None = None
     if body.models:
         models_option = _validate_models_option(body.models)
+    # 分野は投入時に検証する（worker は再検証しない — models と同じ方針）。
+    cartridge_option = _validate_cartridge_option(body.cartridge_id)
 
     session = _pg_session()
     try:
@@ -861,6 +949,10 @@ def ingest_batch(
                 analyze_images=body.analyze_images,
                 models=models_option,
                 source_format=source_format,
+                cartridge_id=cartridge_option,
+                # 取り込み済みの判定は投入者に見える教材で行い、既存教材を事実として
+                # skipped に添える（IK-0796・IK-0701 と同じ可視集合）。
+                ingested_documents=_visible_ingested_documents(current_user["id"]),
             )
         except ValueError as exc:
             session.rollback()
@@ -908,6 +1000,7 @@ def ingest_batch(
             {
                 "action": "ingest_batch",
                 "source_format": source_format,
+                "cartridge_id": cartridge_option,
                 "arxiv_ids": [entry["arxiv_id"] for entry in result["queued"]],
                 "skipped_arxiv_ids": [entry["arxiv_id"] for entry in result["skipped"]],
                 "queued": len(result["queued"]),
@@ -1161,6 +1254,14 @@ def _merge_fetched_metadata(seed: dict, fetched: dict) -> dict:
     if fetched.get("categories"):
         payload["categories"] = list(fetched["categories"])
         payload["categories_source"] = pd_radar.CATEGORIES_SOURCE_ARXIV
+        # 主カテゴリだけ既定で有効・副カテゴリは打ち消し表示（§19 B）も1回目から移す。
+        for key in ("category_candidates", "primary_category"):
+            if fetched.get(key):
+                payload[key] = fetched[key]
+    # 起点の見出し（教材名がファイル名のときの arXiv 題名 — §19 E）も移す。
+    for key in ("arxiv_title", "display_title", "title_note"):
+        if fetched.get(key) and not payload.get(key):
+            payload[key] = fetched[key]
     if fetched.get("metadata_source"):
         payload["metadata_source"] = fetched["metadata_source"]
     return payload
@@ -1282,6 +1383,11 @@ def radar_search(
                 anchor_context_resolver=lambda domain_key: _anchor_context(
                     session, domain_key
                 ),
+                # 「取り込み済み」は閲覧者に見える教材だけで判定する（§19 C・IK-0701。
+                # core はユーザーを知らないので可視集合を注入する — 例外時は空集合 = fail-closed）。
+                visible_document_ids=services.list_visible_document_ids(
+                    str(current_user.get("id") or "")
+                ),
             )
         except LookupError as exc:
             raise HTTPException(
@@ -1360,6 +1466,11 @@ def radar_compare(
                 str(access.document_id or ""),
                 arxiv_ids,
                 user_id=current_user["id"],
+                # 取り込み済み候補の解析結果を材料に足すための可視集合（IK-0818。
+                # core はユーザーを知らないので注入する — 空なら要旨だけの比較 = fail-closed）。
+                visible_document_ids=services.list_visible_document_ids(
+                    str(current_user.get("id") or "")
+                ),
             )
             _persist_arxiv_metadata_cache(session)
             if isinstance(result, dict):

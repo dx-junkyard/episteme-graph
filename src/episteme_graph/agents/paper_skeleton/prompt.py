@@ -187,9 +187,16 @@ class PaperSkeletonPromptFactory:
 
         if llm_input.section_headers:
             parts.append("\n## Section Structure")
+            def _header_line(s: dict) -> str:
+                indent = "  " * (max(int(s.get("level") or 1), 1) - 1)
+                number = f"{s['section_number']} " if s.get("section_number") else ""
+                page = f" (page {s['page_start']})" if s.get("page_start") else ""
+                return f"{indent}- [{s['section_id']}] {number}{s['title']}{page}"
+
             for s in llm_input.section_headers:
-                indent = "  " * (s["level"] - 1)
-                parts.append(f"{indent}- [{s['section_id']}] {s['title']} (page {s['page_start']})")
+                parts.append(_header_line(s))
+                for sub in s.get("subsections") or []:
+                    parts.append(_header_line(sub))
 
         if llm_input.representative_blocks:
             parts.append("\n## Representative Blocks per Section")

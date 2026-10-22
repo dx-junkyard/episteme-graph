@@ -28,16 +28,19 @@ from __future__ import annotations
 import logging
 
 from episteme_graph.agents.llm_step import MAX_REPAIR_ATTEMPTS, run_repair_loop
+from episteme_graph.agents.sentence_split import math_regions, position_in_math
 
 from .llm_client import RhetoricalRoleLLMClient
 from .prompt import RhetoricalRolePromptFactory
 from .schema import (
+    PRIOR_WORK_NOT_REJECT_NOTE,
     BlockRoleAnnotation,
     CartridgeContext,
     RoleLLMInput,
     RhetoricalRoleResult,
     SpanAnnotation,
     ValidationIssue,
+    normalize_reject_flag,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +55,49 @@ REPAIR_FAILED_REASON = "Repair failed after max attempts"
 OFFSET_CORRECTION_EXACT = "exact_match"
 OFFSET_CORRECTION_WHITESPACE = "whitespace_normalized"
 OFFSET_CORRECTION_ANCHOR = "head_tail_anchor"
+#: span の境界が数式（``$…$`` / ``\\(…\\)`` / ``\\[…\\]``）の内側に落ちていたので、
+#: 数式の外へ出した（2026-10-16, S2 seq 2750: ``$\\hat{N}_{ijk.`` で span が途切れた）。
+OFFSET_CORRECTION_MATH_BOUNDARY = "math_boundary"
+_MATH_TRAILING_PUNCT = ".,;:!?"
+
+
+def snap_span_out_of_math(
+    block_text: str,
+    char_start: int,
+    char_end: int,
+    regions: list[tuple[int, int]],
+    *,
+    covered_until: int = 0,
+) -> tuple[int, int, bool]:
+    """span の境界を数式の外へ出す（数式は 1 トークン — 内側では切らない）。
+
+    * 終わりが数式の内側 → 数式の終わりまで延ばし、直後の句読点 1 字も含める。
+    * 始まりが数式の内側 → 直前の span がその数式を覆っていれば（``covered_until`` が
+      数式の終わり以降）数式と句読点・空白の後ろへ進め、覆っていなければ数式の始まりへ戻す。
+    戻り値の 3 つ目は動かしたかどうか。
+    """
+    moved = False
+    if not (0 <= char_start < char_end <= len(block_text)):
+        return char_start, char_end, False
+    region = position_in_math(regions, char_end)
+    if region is not None:
+        char_end = region[1]
+        if char_end < len(block_text) and block_text[char_end] in _MATH_TRAILING_PUNCT:
+            char_end += 1
+        moved = True
+    region = position_in_math(regions, char_start)
+    if region is not None:
+        if covered_until >= region[1]:
+            new_start = region[1]
+            while new_start < len(block_text) and (
+                block_text[new_start] in _MATH_TRAILING_PUNCT or block_text[new_start].isspace()
+            ):
+                new_start += 1
+            char_start = min(new_start, char_end)
+        else:
+            char_start = region[0]
+        moved = True
+    return char_start, char_end, moved
 
 #: Head / tail length used by the anchor fallback.
 ANCHOR_LENGTH = 40
@@ -207,6 +253,8 @@ def _parse_block_annotation(raw: dict, llm_input: RoleLLMInput) -> BlockRoleAnno
     raw_spans = raw.get("span_annotations", [])
     block_text = llm_input.block_text or ""
     spans: list[SpanAnnotation] = []
+    regions = math_regions(block_text)
+    covered_until = 0
     for i, span in enumerate(raw_spans if isinstance(raw_spans, list) else []):
         if not isinstance(span, dict):
             continue
@@ -230,16 +278,35 @@ def _parse_block_annotation(raw: dict, llm_input: RoleLLMInput) -> BlockRoleAnno
             # 位置を当てても修復失敗に数えられていた（2026-09-19 レビュー R-2）。
             # 検証基準は不変で、LLM の写しの方を本文に揃える（本文が正本）。
             text = block_text[char_start:char_end]
+        if regions and block_text[char_start:char_end] == text:
+            char_start, char_end, moved = snap_span_out_of_math(
+                block_text, char_start, char_end, regions, covered_until=covered_until
+            )
+            if moved:
+                text = block_text[char_start:char_end]
+                correction = OFFSET_CORRECTION_MATH_BOUNDARY
+        if block_text[char_start:char_end] == text:
+            covered_until = max(covered_until, char_end)
+        role_labels = list(span.get("role_labels", ["unknown"]))
+        is_reject, reject_changed = normalize_reject_flag(
+            role_labels, bool(span.get("is_reject_candidate", False))
+        )
+        span_reason = str(span.get("reason", ""))
+        if reject_changed:
+            span_reason = (
+                f"{span_reason}; {PRIOR_WORK_NOT_REJECT_NOTE}"
+                if span_reason else PRIOR_WORK_NOT_REJECT_NOTE
+            )
         spans.append(SpanAnnotation(
             span_id=span.get("span_id", f"span_{i+1:03d}"),
             text=text,
             char_start=char_start,
             char_end=char_end,
-            role_labels=list(span.get("role_labels", ["unknown"])),
+            role_labels=role_labels,
             is_claim_candidate=bool(span.get("is_claim_candidate", False)),
-            is_reject_candidate=bool(span.get("is_reject_candidate", False)),
+            is_reject_candidate=is_reject,
             confidence=max(0.0, min(1.0, confidence)),
-            reason=str(span.get("reason", "")),
+            reason=span_reason,
             offset_correction=correction,
         ))
 

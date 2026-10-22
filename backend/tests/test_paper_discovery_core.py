@@ -1134,6 +1134,23 @@ class TestAliasSupplier:
             {"text": "form factor", "source": "component"},
         ]
 
+    def test_radar_seed_sources_are_in_the_vocabulary(self):
+        """論文レーダーの seed 供給（§16）の 2 語彙。分野供給（_SUPPLIERS）には入れない。"""
+        assert "concept" in schema.KEYPHRASE_SOURCES
+        assert "title" in schema.KEYPHRASE_SOURCES
+        assert "thesis" in schema.KEYPHRASE_SOURCES
+        order = [name for name, _fn in vocab._SUPPLIERS]
+        assert not {"concept", "title", "thesis"} & set(order)
+        # 不明な供給元は manual に落ちるが、新語彙は保持される（出所を消さない — PD3）。
+        assert schema.normalize_keyphrase({"text": "kurtosis", "source": "concept"})["source"] == "concept"
+        assert schema.normalize_keyphrase({"text": "gravity theories", "source": "title"})["source"] == "title"
+        assert schema.normalize_keyphrase({"text": "modified gravity", "source": "thesis"})["source"] == "thesis"
+
+    def test_source_labels_cover_the_vocabulary(self):
+        from core.label_vocab import KEYPHRASE_SOURCE_LABELS
+
+        assert tuple(KEYPHRASE_SOURCE_LABELS) == schema.KEYPHRASE_SOURCES
+
     def test_supplier_is_registered_between_cartridge_and_component(self):
         order = [name for name, _fn in vocab._SUPPLIERS]
         assert order == ["skeleton", "cartridge", "alias", "component"]
@@ -1141,3 +1158,55 @@ class TestAliasSupplier:
         # "manual"（教員が自分で足したもの）は供給元ではなく、語彙の末尾に残る。
         assert schema.KEYPHRASE_SOURCES[-1] == "manual"
         assert "manual" not in order
+
+
+class TestVisibleIngestedDocuments:
+    """「取り込み済み」を閲覧者に見える教材だけで判定する（paper_radar §19 C・IK-0701）。"""
+
+    class _Session:
+        def __init__(self, rows):
+            self.rows = rows
+            self.calls: list[tuple[str, dict]] = []
+
+        def execute(self, stmt, params=None):
+            sql = " ".join(str(stmt).split())
+            self.calls.append((sql, dict(params or {})))
+            visible = set((params or {}).get("visible_ids") or [])
+            return FakeResult([r for r in self.rows if r[0] in visible])
+
+    _ROWS = [
+        ("doc-a", "mat-a", "A", "completed", "https://arxiv.org/abs/2608.00002v2"),
+        ("doc-b", "mat-b", "A (copy)", "processing", "https://arxiv.org/pdf/2608.00002"),
+        ("doc-c", "mat-c", "C", "processing", "https://example.org/x.pdf"),
+    ]
+
+    def test_empty_visibility_issues_no_sql(self):
+        session = self._Session(self._ROWS)
+        assert search_mod.visible_ingested_documents(session, visible_document_ids=set()) == {}
+        assert search_mod.visible_ingested_documents(session, visible_document_ids=None) == {}
+        assert session.calls == []
+
+    def test_visibility_is_enforced_inside_the_query(self):
+        session = self._Session(self._ROWS)
+        out = search_mod.visible_ingested_documents(
+            session, visible_document_ids={"doc-a", "doc-c"}
+        )
+        assert "ANY(:visible_ids)" in session.calls[0][0]
+        assert out == {
+            "2608.00002": {
+                "document_id": "doc-a", "material_id": "mat-a",
+                "title": "A", "analysis_status": "completed",
+            }
+        }
+
+    def test_first_row_wins_for_the_same_paper(self):
+        session = self._Session(self._ROWS)
+        out = search_mod.visible_ingested_documents(
+            session, visible_document_ids={"doc-a", "doc-b"}
+        )
+        assert out["2608.00002"]["document_id"] == "doc-a"
+        assert "ORDER BY (status = 'completed') DESC" in session.calls[0][0]
+
+    def test_visibility_is_a_required_keyword(self):
+        with pytest.raises(TypeError):
+            search_mod.visible_ingested_documents(self._Session(self._ROWS))  # type: ignore[call-arg]

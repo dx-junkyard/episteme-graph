@@ -400,3 +400,19 @@ class TestAuditCatalog:
         assert len(core_schema.AUDIT_ENTITY_TYPES) == len(
             set(core_schema.AUDIT_ENTITY_TYPES)
         )
+
+
+class TestPerspectiveLabelCanonReused:
+    """§22 C（論文レーダー第 5 波）: 配置の対比の観点ラベルは landscape の正本から引く。"""
+
+    def test_radar_contrast_uses_landscape_perspective_label(self):
+        src = (BACKEND / "core" / "paper_discovery" / "radar.py").read_text(encoding="utf-8")
+        assert "from core.landscape.schema import PERSPECTIVES, perspective_label" in src
+        for label in schema.PERSPECTIVE_LABELS.values():
+            assert label not in src, label
+
+    def test_radar_js_has_no_perspective_table(self):
+        js = (ROOT / "frontend" / "public" / "js" / "admin-paper-radar.js").read_text(encoding="utf-8")
+        for label in schema.PERSPECTIVE_LABELS.values():
+            assert label not in js, label
+        assert "item.perspective_label" in js

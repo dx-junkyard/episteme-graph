@@ -63,7 +63,9 @@
 `document_structure/agent.py`。PDF（または TEI-XML）から **ブロック・セクション・メタデータ**を復元。パーサ/レイアウト優先で意味解釈はしない。
 - 入力: PDF bytes / TEI-XML（`source_kind="tex_archive"` の教材は agent を通さず
   `backend/core/document_pipeline/tex_archive.py::build_structure_from_tex_archive` が同じ
-  `DocumentStructureResult` を組み立てる）
+  `DocumentStructureResult` を組み立てる）。TeX 経路の数式では `\ensuremath{X}` を `X` に外す（入れ子も・
+  `tex_archive._unwrap_ensuremath`）。引用の目印の直後に空白なしで次の文が続く原文（`\cite{…}.In`）は
+  空白 1 字だけ補う（語は足さない。式の後ろの句点が原文に無い場合は補わない）（2026-10-16）
 - 出力: `DocumentStructureResult`（blocks, sections, metadata）
 - 設計上は「曖昧なブロックのみ LLM 補助」だが**その補助は未実装**で、実態は完全に決定論的
   （`_PIPELINE_STEPS` の宣言も `llm_kind="none"`。orchestrator の当該行のコメントが正）。
@@ -83,25 +85,55 @@
 `rhetorical_role/agent.py`。chunk/span の論理役割（assumption / derivation / result など）をブロック単位で判定。
 - 入力: DocumentStructure + PaperSkeleton
 - 出力: `RhetoricalRoleResult`
+- 直前の文脈ブロックが同じ小節の式ブロックで、かつ本文が続き語（小文字始まり・where / which / i.e. / This is because / In the second line …、
+  `input_builder.starts_as_continuation`）で始まるときだけ、その式を `preceding_equation`
+  （block_id / label / TeX 由来のみ本文）として材料に足す（話題の変わった段落には渡さない — IK-0714 精密化, 2026-10-17）。
+  前後の文脈ブロックが別の節のものなら見出しを「(from the previous/next section, not part of this section)」にする（`prev_text_other_section` / `next_text_other_section`）。
+  span の境界は数式（`$…$` / `\(…\)` / `\[…\]`）の内側に置かない — 内側に落ちた境界は
+  `repair.snap_span_out_of_math` が数式の外へ出し `offset_correction="math_boundary"` を記録する。
+  共有の文分割器 `agents/sentence_split.py` も数式の内側の句点では切らない（2026-10-16）
+- 対象ブロック（1,800 字）・前後の文脈（280 字）は `agents/text_truncation.py::truncate_text`（文境界 → 語境界・`$…$` の外・切った側に「…」）で切り、対象を切ったブロックは coverage `details.truncated_blocks`（`reason=block_text_over_char_limit`）に残す（IK-0808, 2026-10-17）
 
 ### ClaimQualificationAgent（#219, #317）— LLM-first
 `claim_qualification/agent.py`。役割付き span の **採否・区分（paper_core/supporting/background）・粒度**を判定し、**atomic rewrite**（1 claim = 1 最小命題への再構成）を実施。
 - 出力: `ClaimQualificationResult`。`QualifiedSpanRecord.atomic_claims`（text / normalized_text / claim_type_candidate / atomicity / status / source_span_id / evidence_quote / qualification_reason / confidence）。
 - atomic 化できない箇所は `atomicity="non_atomic"` / `status="review_required"` で保持。
+- 役割判定が reject 候補にし、役割が主張になり得ない語彙（`schema.NON_CLAIMABLE_ROLE_LABELS` = section_meta / meta_discourse / citation_context）だけの span は LLM を呼ばず `status="rejected"` / `qualification_reason="reject_candidate_from_rhetorical_role"`（confidence は役割判定の値）で記録し、`summary_stats.skipped_reject_candidates` と coverage `details.skipped_reject_candidates` に残す。先行研究（`prior_work`）は reject 候補にしない — rhetorical_role が reject 印を外し、採否判定の母集合に残す（IK-0803, 2026-10-17）。役割判定で reject=True だった span が採否判定の入力で False になるのは prior_work を含む span だけで、印は artifact を経て保たれる（`background_general` を含む reject 候補は主張を含み得るので LLM に回る。回帰 `test_reject_flag_flow_x1.py`）。
+- 先頭の接続詞の禁止語彙は `schema.ATOMIC_CLAIM_LEADING_CONNECTOR_WORDS` が唯一の正本で、prompt と違反メッセージ（修復要求）はこれを全列挙する（部分列挙を書かない）。
+- 因果の span「Because X, Y」は接続詞を剥がして X を `qualification_reason` に移さない（主張の内容を落とす）。主語から始まる 1 関係主張（「Y because X」）に言い直し（X 単独の主張を足してよい）、言い直せなければ `non_atomic` / `review_required` で保持する（2026-10-16）。
+- 原文ブロック（`source_block_text`・1,800 字）は先頭で語の途中に切らず、対象 span を切らずに含む窓を `text_truncation.excerpt_around` で作って両端に「…」を付け、coverage `details.truncated_blocks`（`reason=source_block_over_char_limit`）に残す（IK-0808, 2026-10-17）。
+- 式の導入文・続き文には隣接式 `adjacent_equations`（同じ小節の直前・直後の式ブロック 1 つずつ・ラベルと印字番号付き・式本文は TeX 由来のみで PDF 由来は印だけ）を添える。前はブロック先頭の span で本文が続き語か直前の式の名指し（「The last factor」）で始まるとき（判定の正本は rhetorical_role `refers_to_preceding_equation`）、後はブロック末尾の span で本文が文末記号で閉じていないとき（`ends_as_equation_intro`）だけ。prompt は「隣接式を参照先として採否を判断・式そのものは主張にしない」。LLM 呼び出し数は不変（IK-0714, 2026-10-17）。
 
 ### EquationSemanticsAgent（#220）— LLM-first
 `equation_semantics/agent.py`。数式ブロックの意味役割（equation_type、定義/使用シンボル、仮定、入出力式）を復元。`to_equations_export()` で `equations.json` 化。受理判定は `EquationAcceptanceGate`。
 - 出力: `EquationSemanticsResult`（EquationRecord のリスト）
+- LLM 入力に近傍の式の一覧 `neighbor_equations: [{equation_id, label, latex_head}]`（同一節優先・上限 12・
+  文書順。PDF 由来の式は `latex_head=None`）を渡し、`input/output_equation_ids` はこの一覧の ID に限る。
+  一覧外の ID は validator `restrict_io_links_to_neighbors` が外し、warning と review flag
+  `io_id_not_in_neighbor_equations` に残す。ラベルの無い式は `label: `（空）で渡す（2026-10-16）
+- display / inline の両経路で、式のブロックと同じ節の直前・直後の本文ブロックの役割付き span を `candidate_text_spans: [{span_id, block_id, text, role_labels}]` として渡し、`linked_text_spans` は（block_id, span_id）がこの一覧にあるものに限る。一覧外は validator `restrict_linked_spans_to_candidates` が外し warning と review flag `linked_span_not_in_candidates` に残す。TeX 式の指示は出力欄の無い「式テキストにそのまま使え」をやめ「原文の TeX として読む」に改めた。文脈ブロックの切り詰めは coverage `details.truncated_blocks`（`reason=context_block_over_char_limit`）（IK-0809 / IK-0808, 2026-10-17）
+- 生成要約（`semantics.summary`）に内部 ID（`tex_b80` 等）を書かない指示を prompt に 1 文。validator `scrub_internal_ids_from_summary` が残った ID を外し warning と review flag `internal_id_in_summary` に残す（A層の正本 `agents/internal_id_text.py`。contextual_explanation の input_builder も散文の材料から同じ関数で外す。表示側 `display_projection.INTERNAL_ID_TOKEN_RE` が A層の語彙を覆うことはガードレールで固定）（IK-0819, 2026-10-17）
 - `EquationRecord` は「PDF 原文由来（`source_extraction`）」と「文脈補完で復元した部分
   （`reconstruction`）」を分離して保持する（混同禁止）
+- `reconstruction.status` の語彙の正本は `schema.RECONSTRUCTION_STATUSES`（`none` /
+  `inferred_from_context` / `reconstructed_from_neighbors` / `manually_supplied`）。`none` は
+  正式な値で validator も受ける。経路で変わるのは選ぶ値だけ — TeX 原文がある式
+  （`source_is_trusted`）は復元しないので `none`、PDF 由来の式は復元必須なので `none` を選ばない
+  （validator `missing_mandatory_reconstruction`）。プロンプトの許容値の行と出力スキーマの例も
+  この語彙に揃える（2026-10-16 まで経路を問わず「exclude 'none'」と書き、TeX 方針と矛盾していた）
 - **条件付き vision**: PDF の数式テキスト層は inline / display を問わず信用しないため、
   `source_is_trusted` でない候補だけ `image_extractor.py` が該当領域を切り出して画像を添付し、
   「画像を LaTeX 復元の一次ソースとせよ」と指示する。画像が取れなければ捏造せず
   `needs_reconstruction` のまま理由付きで残す。M層のモデル選択上は **text ステージ**扱い
   （`_PIPELINE_STEPS` の `vision_optional=True`。`VISION_STAGE_NAMES` には入らない）
+- **inline 式候補**（`input_builder._scan_inline_block`）: TeX 経路の本文は `$…$` / `\(…\)` の原文境界で切り出し `tex_source`（再構成なし・文脈は伏せず `[INLINE_MATH_TARGET]` で位置を示す）、PDF 経路だけが正規表現で拾い `inline_pdf_text_layer`（小数点・べきの途中で切らない）。2026-10-16 まで TeX 本文も PDF 向け正規表現で切り直し、添字・小数の途中で切れた断片を再構成に回していた
+- 値の代入・パラメータ指定・閾値（`z=0` / `a=5` / `M>10^{12}M_\odot` / `0<z<1`、`classify_inline_relation`）は式候補にせず、coverage の `details.excluded_inline`（`reason=value_specification`）に残す。母集合には数えない（値の言及は後段の DSL・部品グラフ・二層説明に偽の依存を作り、LLM 呼び出しも増やす）
 
 ### ClaimObjectBuilder（#237, #317）— 決定論
 `claim_object_builder/builder.py`。ClaimQualification の atomic 候補 + EvidenceRegistry から **最終 claims.json** を組立。atomic rewrite はせず、変換・リンク・検証に責務を限定。`source_evidence_ids` を付与し atomicity を検証。**最終 claim_id の真実の源**（ID 正規化の基準）。
+claim 種別の語彙 `schema.CLAIM_TYPE_ONTOLOGY` は、claim_qualification のプロンプトが許す
+`CORE_CLAIM_TYPE_FALLBACKS` を全て受ける（`relation` / `correction` / `uncertainty` / `diagnostic_claim` は
+2026-10-17 に追加。いずれも正本 `backend/core/schema.py::CLAIM_TYPES` に在り、語彙外は `unknown` に丸まる）。
 
 同ディレクトリの `equation_claim_synthesis.py`（決定論・非 LLM）は、**散文としては書かれていないが
 数式構造が語っている主張**を atomic claim に起こす。orchestrator の
@@ -116,6 +148,13 @@ claim を作る。
   `concepts` 側は素の記号のまま＝区切りを付けるのは散文だけ）。
 - **これらの合成 claim は `theory_claims` に永続化されない**（artifact のみ。→
   [パイプライン概要 §3](overview.md#3-データの依存関係抜粋)）。
+- system-level の合成 claim が記号（消去 + 保持）を `MAX_SYMBOLS_PER_ATOMIC_SYSTEM_CLAIM`（6）より多く、
+  または本文が 300 字より長く束ねるときは `split_required` / `is_atomic=False` / `review_required` +
+  `review_reasons=["non_atomic_system_claim"]` に落とす（根拠件数では判定しない — IK-0798）。
+
+決定論分割（LLM の atomic 候補が無いときの review suggestion）は、助動詞の直後（`can therefore`）・
+節頭以外の接続副詞・述語の出ていない関係節の内側（`where A and B are …`）では切らず、動詞の無い断片は
+接続語ごと戻して連結する。2 つに割れなければ子主張を作らない（IK-0797）。
 
 ### SymbolRegistryBuilder（#355）— 決定論
 `symbol_registry/builder.py`。数式記号の定義・表記ゆれ・スコープを一元管理。LaTeX 正規化（`\mathrm` 除去、`\beta`→`β`、数式の大文字小文字は保持）+ カートリッジ aliases で重複排除、再定義検出。
@@ -188,20 +227,49 @@ claim を作る。
 `thesis_reconstruction/agent.py`。中心命題（headline thesis）と支持構造（supporting claims）を再構成。
 - 入力: PaperSkeleton + ClaimQualification + EquationSemantics（+ claim objects）
 - 出力: `ThesisReconstructionResult`
+- 入力の式（`major_equations`・上限 16）は先頭切り捨てではなく `agents/equation_selection.py` の正本規則で選ぶ（主張が参照する式 → 結果系の節・結果の式 → 残りを節単位の層化。coverage に選び方と取りこぼした節。2026-10-16・IK-0722）。
+- プロンプトの Output Schema は support_structure の各要素の形（`SupportEntry` の 6 項目）を全節に示す（`test_prompt_contract.py` が validator と突き合わせる。2026-10-16・IK-0725）。
 
 ### DSLLinkingAgent（#222）— LLM-first
 `dsl_linking/agent.py`。Claim/Equation/Thesis を **DSL グラフ**（predicate 付きノード・エッジ）に接続。`DSLGraphCleanup` で整形。
 - 出力: `DSLLinkingResult`（nodes, edges with predicate, source_ids）
+- 入力の式（上限 24）も `equation_selection.py` で選ぶ（thesis・主張が参照する式を優先。2026-10-16・IK-0722）。
+- `accepted_claims` は claim object を母集合に組み、ID を claim object の `claim_id` 一系統に揃える。原子化された親（atomic な子を持つ親）は子に置き換え、親は子が無いときだけ渡す。全行に `atomicity` / `is_atomic` を明示し、thesis_nodes の `claim_ids` も同じ名前空間に揃えて親を子へ展開する（IK-0807, 2026-10-17。dsl_linking 側のみ — IK-0719 の他段は未是正）。
 
 ### ComponentAssemblyAgent（#223）— LLM-first + cartridge-aware
 `component_assembly/agent.py`。claims/equations/thesis/DSL から **再利用可能コンポーネント**を生成（粒度のリファイン、決定論的フォールバックあり）。
 - 出力: `ComponentAssemblyResult`
+- 入力の採択主張（`accepted_claims`、上限 48）は節ごとに層化して選ぶ（`claim_selection.select_claim_rows(...,
+  section_key_of=)` → `stratified_sampling.select_indices`。各節に最低 1 枠・残りは節の大きさに比例・節内は重要度順）。
+  結果の節の paper_core 主張が枠を埋めて定式化・モデルの節が 0 件になる偏りの是正（2026-10-17・頭脳 W1 seq 3283）。
+- 入力の文字数上限はコード定数 `input_builder.MAX_INPUT_CHARS`（200,000 字・indent=2 の JSON）。超えたときは
+  プロンプトに出す `available_claims` だけを間引き（accepted_claims と重複する行 → 非 atomic 行 → 節で層化した
+  部分集合の順）、`available_claims` 本体は ID の許可リストとして全件のまま。間引いた事実は
+  `llm_input.input_coverage`（coverage_report 形式）→ `diagnostics.component_assembly_input_coverage` に残す。
+- **ComponentRefiner の分割規約（IK-0728 / IK-0755 / IK-0792, 2026-10-17）**:
+  - 同じ (operation, 入力式集合, 出力式集合) の導出 step は 1 つの親の子にしかならない。持ち主は
+    `_assign_step_owners`（導出チェーンの直結 → 共有する式の数 → 組立順）で決め、式を共有するだけの他の親には
+    複製しない。
+  - `unknown_specific_operation`（演算の型を特定できなかった step）は `transform` 等と同じ汎用扱いで、自分の子を
+    作らず近い子の internal_flow に畳む（「Unknown specific operation: …」を name に出さない）。
+  - 子の `summary` / `teaching_takeaway` は親（LLM が生成言語で書いた文）をそのまま保つ。分割の由来の機械文
+    （「… isolated as a reusable … (#324)」「covers N equation step(s)」）は `reason` にだけ残す。
+  - 振り分けの再判定理由は「low-confidence …」の定型文ではなく、実際に落ちた判定（`review flags: missing_label` /
+    `review_status is teacher_review_required` / `confidence below 0.8` 等）を列挙する（`_rejudge_reason`）。
+  - 式を持たない結果・診断・限界の部品（ClaimBundle / Diagnostic / Uncertainty）は分割の対象外で、そのまま残る。
+    ComponentGraph の入力上限（`max_components` 32）は元の親ごとに round-robin で選び
+    （`component_graph.input_builder.select_components_within_limit`）、後半の親が子の列に押し出されて辺候補から
+    消える（IK-0765）ことを防ぐ。入り切らなかった部品は `last_component_coverage` に残る。
 
 ### ComponentGraphAgent（#266, #302）— 決定論 + LLM エッジ
 `component_graph/agent.py` + `normalizer.py`。DerivationChain から **理論操作グラフ（TheoryOperationGraph）** を構築。ノード生成は決定論的、エッジ推論に LLM。詳細は [DSL と理論操作グラフ](theory-graph.md)。
 - 入力: `components` / `dsl` / `derivations` / `claims`（`orchestrator._component_graph_claims` が
   EvidenceRegistry から `evidence_text` を解決して enrich 済み）/ `evidence_snippets`
 - 出力: `ComponentGraphResult`（2 層 + debug 層: main / equation_detail / debug、ソースバッキング状態つき）
+- 辺の修復（repair）は辺の出力で直せる検証種別（`repair.EDGE_REPAIRABLE_RULE_IDS` = 端点不在・自己ループ・
+  辺型語彙外・重複・依存の循環 等）だけで回し、ノード側の誤りは normalizer / 降格に任せて修復コールを出さない（IK-0729）。
+  修復要求に引く前回出力は文字数で切らず、辺の配列を先頭から間引いて JSON のまま渡し範囲を注記する（IK-0763）
+- 辺推論で LLM に渡す語彙はプロンプトが定義する関係 11 語（`schema.LLM_RELATION_EDGE_TYPES`）だけ。小文字の operation 由来語は normalizer 専用で validator だけが受理する。DSL の core_predicate → edge_type の写像の正本は `schema.CORE_PREDICATE_TO_EDGE_TYPE`（MEASURES → CHECKED_BY は向きを反転・INHIBITS は補正なので QUALIFIES）で、Material 2 の各辺に `suggested_edge_type` と向きを載せる。対応の無い CONTAINS / CORRELATES / CAUSES / EQUIVALENT は `RELATED_TO` + `mapping_note="no_specific_edge_type"` + warning（落とさない。IK-0791, 2026-10-17）
 - **M層のステージ別モデル選択の対象外**（`_PIPELINE_STEPS` で `llm_kind="text"` かつ
   `model_policy=False`）。LLM は呼ぶが `GET /api/admin/llm-models/pipeline-stages` には現れず、
   `stage_outputs._stage_models` にも記録されない。集合に足すと API 応答とラベル表が変わるため、
@@ -298,6 +366,7 @@ equation）に **2 層の説明**を生成する（正本:
 | `id_canonicalization.py` | 横断参照を canonical claim_id に揃える。`canonical_claim_id_for_span()` / `canonicalize_claim_refs()`。解決不能な参照は drop + warning |
 | `ref_resolution.py` | 参照文字列の正規化・解決の正本（#443）。`normalize_ref()` は先頭 1 つの `scope:` 接頭辞のみ吸収（区切りが 2 つ以上ある構造的 id は温存）、`RefResolver.is_dangling` は**純粋な集合所属判定**で「legacy っぽい見た目」で分岐しない。`CANONICAL_FIELD_MAP` / `detect_field_alias_conflicts()` が同一概念の別名フィールド衝突を検出。`export_validation_gate.py` と export API が利用 |
 | `cartridge_loader.py` / `cartridge_context.py` | `CartridgeLoader` / `CartridgeContext` の**正本**（2026-07 整理で 12 コピーを統合）。各 agent の `cartridge_loader.py` はここからの薄い再エクスポートで、必須フィールドが増える `component_assembly` / `component_graph` だけが固有の `CartridgeContext` を維持する → [カートリッジシステム](cartridges.md) |
+| `text_truncation.py` | LLM 入力に載せる本文の切り詰めの正本（IK-0808）。`truncate_text(text, limit, keep_end=)`（文境界 → 語境界・`$…$` の外・切った側に「…」・空白は正規化しない）/ `excerpt_around()`（対象を切らずに前後を切る）。学習者向けの `backend/core/text_excerpt.excerpt` と同じ流儀（A層は backend を import しない） |
 | `cartridge_paths.py` | カートリッジのパス解決（`EPISTEME_CARTRIDGES_DIR` → 自動探索） |
 | `llm_json_client.py` | プロバイダ対応の JSON LLM クライアント（`core.llm.generate_text` をラップ、タイムアウト/構造化出力/raw 追跡） |
 

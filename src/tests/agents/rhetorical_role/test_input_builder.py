@@ -274,3 +274,62 @@ def test_no_table_bodies_means_no_exclusion_detail():
     para = _typed("b1", "We assume the noise is stationary.", "body_paragraph", 0)
     _, coverage = BUILDER.build_with_coverage(_structure([para]), _skeleton())
     assert "excluded_table_block_ids" not in (coverage.get("details") or {})
+
+
+def test_long_block_text_is_cut_at_a_sentence_boundary_and_recorded():
+    """O0 seq 2220: 1,800 字の上限で語の途中（「in th」）で切らない。切った事実は coverage に残す。"""
+    sentence = "The kinetic description reproduces the fluid limit at large scales. "
+    text = sentence * 40 + "Finally we discuss the behaviour in the strongly coupled regime"
+    structure = _structure([_typed("b1", text, "body_paragraph", order=1)])
+    inputs, coverage = BUILDER.build_with_coverage(structure, _skeleton())
+    block_text = inputs[0].block_text
+    assert len(block_text) <= 1800
+    assert block_text.endswith("scales.…")
+    assert text.startswith(block_text[:-1])  # 元の本文の先頭と同じ（span オフセットは不変）
+    assert coverage["details"]["truncated_text_block_ids"] == ["b1"]
+    assert coverage["processed"] == coverage["population"]
+
+
+def test_long_block_without_sentence_end_is_cut_at_a_word_boundary():
+    text = "word " * 600
+    structure = _structure([_typed("b1", text, "body_paragraph", order=1)])
+    block_text = BUILDER.build(structure, _skeleton())[0].block_text
+    assert len(block_text) <= 1800
+    assert block_text.endswith("word…")
+
+
+def test_short_block_text_is_not_marked_truncated():
+    structure = _structure([_typed("b1", "We assume a narrow-width limit.", "body_paragraph", order=1)])
+    inputs, coverage = BUILDER.build_with_coverage(structure, _skeleton())
+    assert inputs[0].block_text == "We assume a narrow-width limit."
+    assert "truncated_text_block_ids" not in coverage.get("details", {})
+
+
+def test_truncated_blocks_carry_a_reason_and_neighbor_context_is_marked():
+    """IK-0808: 切ったブロックは理由付き、近傍の文脈も語境界で切って「…」を付ける。"""
+    long_prev = "alpha beta gamma " * 40 + "the subject sentence ends here."
+    text = "The kinetic description reproduces the fluid limit at large scales. " * 40
+    structure = _structure([
+        _typed("b0", long_prev, "body_paragraph", order=0),
+        _typed("b1", text, "body_paragraph", order=1),
+    ])
+    inputs, coverage = BUILDER.build_with_coverage(structure, _skeleton())
+    assert {"block_id": "b1", "reason": "block_text_over_char_limit"} in coverage["details"]["truncated_blocks"]
+    prev = inputs[1].prev_text
+    assert prev.startswith("…") and long_prev.endswith(prev[1:])
+
+
+def test_neighbor_context_skips_table_body_blocks():
+    """IK-0806: 表本体（raw.in_table）は Previous/Next Context に載せない。"""
+    table = _typed("t1", "Quantity | Notation | Factor", "body_paragraph", order=2)
+    table.raw = {"in_table": True}
+    structure = _structure([
+        _typed("b0", "Previous paragraph.", "body_paragraph", order=0),
+        _typed("b1", "Current paragraph.", "body_paragraph", order=1),
+        table,
+        _typed("b3", "Next paragraph.", "body_paragraph", order=3),
+    ])
+    inputs = {i.block_id: i for i in BUILDER.build(structure, _skeleton())}
+    assert inputs["b1"].next_text == "Next paragraph."
+    assert inputs["b3"].prev_text == "Current paragraph."
+    assert "t1" not in inputs

@@ -243,7 +243,9 @@ class TestAdminUiAnchorsModule:
         #   台帳候補を確定・見送る。simulation_bridge_design.md §12.4）。
         # 第 22 周（2026-10-04）: +1 = simulation.ledger-candidate-decided（共有された実行の判断済みの
         #   候補と見送りの理由を読む折りたたみ）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 370
+        # 2026-10-16: +2 = materials.arxiv-discovery-ingest-domain / materials.radar-ingest-domain
+        #   （取り込みの「解析の分野」。paper_discovery_design.md §12 / paper_radar_design.md §16）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 376
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

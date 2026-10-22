@@ -268,7 +268,7 @@ def test_equation_semantics_reports_the_inline_cap(monkeypatch):
     captured: dict[str, dict] = {}
     blocks = [_Block("e1", 1, 0, "a = 1 (1)", block_type="equation_block", section_id="s1")]
     blocks += [
-        _Block(f"p{i}", 1, i + 1, f"Here N_{i} = {i} holds for the sample.", section_id="s1")
+        _Block(f"p{i}", 1, i + 1, f"Here N_{i} = k_{i} holds for the sample.", section_id="s1")
         for i in range(50)
     ]
     orchestrator._stage_equation_semantics(_equation_ctx(captured, blocks))
@@ -288,7 +288,7 @@ def test_equation_semantics_population_counts_inline_candidates(monkeypatch):
     structure = _Structure(
         blocks=[
             _Block("e1", 1, 0, "a = 1 (1)", block_type="equation_block", section_id="s1"),
-            _Block("b1", 1, 1, "Here N = 5 holds for the sample.", section_id="s1"),
+            _Block("b1", 1, 1, "Here N = k T holds for the sample.", section_id="s1"),
         ],
         sections=[_Section("s1", "Formulation")],
     )

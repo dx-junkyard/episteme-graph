@@ -29,7 +29,7 @@ from .llm_client import ComponentGraphLLMClient
 from .merger import ComponentGraphMerger
 from .normalizer import ComponentGraphNormalizer
 from .prompt import ComponentGraphPromptFactory
-from .repair import ComponentGraphRepairer, _parse_raw
+from .repair import ComponentGraphRepairer, _parse_raw, needs_edge_repair
 from .schema import CartridgeContext, ComponentGraphResult
 from .validator import ComponentGraphValidator
 
@@ -148,7 +148,10 @@ class ComponentGraphAgent:
         result = _parse_raw(raw_output, components.document_id, llm_input.cartridge_id, nodes)
         issues = self._validator.validate(result, cartridge, llm_input=llm_input)
 
-        if [i for i in issues if i.severity == "error"]:
+        # IK-0729: repair only when an error is fixable by the edge output.
+        # Node-side errors are left to the normalizer / graph demotion and
+        # re-validated below — no LLM call is spent on them.
+        if needs_edge_repair(issues):
             result = self._repairer.repair(
                 llm_input=llm_input,
                 raw_output=raw_output,

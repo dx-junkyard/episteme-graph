@@ -207,7 +207,7 @@ class TestEnqueueItems:
         result = q.enqueue_items(FakeSession(), [{"arxiv_id": "not-an-id"}])
         assert result["queued"] == []
         assert result["skipped"] == [
-            {"arxiv_id": "not-an-id", "detail": q.SKIP_INVALID_ID}
+            {"arxiv_id": "not-an-id", "detail": q.SKIP_INVALID_ID, "reason": q.REASON_INVALID_ID}
         ]
 
     def test_skip_already_ingested(self):
@@ -216,7 +216,7 @@ class TestEnqueueItems:
         result = q.enqueue_items(session, [{"arxiv_id": "2608.20293"}])
         assert result["queued"] == []
         assert result["skipped"] == [
-            {"arxiv_id": "2608.20293", "detail": q.SKIP_ALREADY_INGESTED}
+            {"arxiv_id": "2608.20293", "detail": q.SKIP_ALREADY_INGESTED, "reason": q.REASON_ALREADY_INGESTED}
         ]
         assert not [s for s in session.sqls() if "INSERT INTO" in s]
 
@@ -225,7 +225,33 @@ class TestEnqueueItems:
         session = FakeSession(active_ids=["2608.20293"])
         result = q.enqueue_items(session, [{"arxiv_id": "2608.20293"}])
         assert result["skipped"] == [
-            {"arxiv_id": "2608.20293", "detail": q.SKIP_ALREADY_QUEUED}
+            {"arxiv_id": "2608.20293", "detail": q.SKIP_ALREADY_QUEUED, "reason": q.REASON_ALREADY_QUEUED}
+        ]
+
+    def test_visible_ingested_documents_decide_and_carry_the_existing_document(self):
+        # IK-0796: API 層が投入者の可視集合から作った対応を渡すと、それで判定し、
+        # 既存教材（解析結果への導線）を skip 行に事実として添える。
+        q = self._queue()
+        # 全 documents には他人の非公開取り込み（2608.00009）があるが、投入者には見えない。
+        session = FakeSession(source_urls=["https://arxiv.org/src/2608.00009"])
+        result = q.enqueue_items(
+            session,
+            [{"arxiv_id": "2608.20293v2"}, {"arxiv_id": "2608.00009"}],
+            ingested_documents={
+                "2608.20293": {
+                    "document_id": "doc-1", "material_id": "mat-1",
+                    "title": "Dark energy", "analysis_status": "completed",
+                }
+            },
+        )
+        assert [entry["arxiv_id"] for entry in result["queued"]] == ["2608.00009"]
+        assert result["skipped"] == [
+            {
+                "arxiv_id": "2608.20293",
+                "detail": q.SKIP_ALREADY_INGESTED,
+                "reason": q.REASON_ALREADY_INGESTED,
+                "existing": {"document_id": "doc-1", "material_id": "mat-1", "title": "Dark energy"},
+            }
         ]
 
     def test_duplicate_within_the_same_request_is_skipped_once(self):
@@ -569,6 +595,9 @@ def worker_env(monkeypatch):
         state["finished"].append((item_id, accepted, detail))
 
     monkeypatch.setattr(ingest_worker, "_finish", _finish)
+    # 取得直前の「取り込み済み」判定（IK-0796）。既定は該当なし。
+    state["existing"] = None
+    monkeypatch.setattr(ingest_worker, "_already_ingested", lambda item: state["existing"])
 
     def _fetch(url, allowed):
         state["fetches"].append((url, list(allowed)))
@@ -608,6 +637,17 @@ def _item(**overrides):
 
 
 class TestProcessItem:
+    def test_already_ingested_item_is_not_fetched(self, worker_env):
+        # IK-0796: キューに積まれた後に同じ論文が入っていたら、arXiv も受理も呼ばない。
+        worker_env["existing"] = {"document_id": "doc-1", "material_id": "mat-1", "title": "Dark energy"}
+        assert worker_env["module"].process_item(_item()) is False
+        assert worker_env["fetches"] == []
+        assert worker_env["accepted"] == []
+        item_id, accepted, detail = worker_env["finished"][0]
+        assert item_id == "i-1" and accepted is None
+        assert detail.startswith(worker_env["module"].ingest_queue.SKIP_ALREADY_INGESTED)
+        assert "Dark energy" in detail
+
     def test_success_marks_accepted_with_ids(self, worker_env):
         assert worker_env["module"].process_item(_item()) is True
         item_id, accepted, detail = worker_env["finished"][0]
@@ -679,6 +719,39 @@ class TestProcessItem:
         )
         mod.process_item(_item())
         assert worker_env["accepted"][0]["filename"] == "2608.20293.pdf"
+
+
+class TestAlreadyIngestedCheck:
+    """取得直前の判定は投入者の可視集合で行う（IK-0796・IK-0701）。"""
+
+    def test_uses_the_requesters_visible_documents(self, monkeypatch):
+        import ingest_worker
+
+        seen: dict = {}
+        monkeypatch.setattr(ingest_worker, "get_session", lambda: FakeSession())
+        monkeypatch.setattr(
+            ingest_worker.services, "list_visible_document_ids",
+            lambda user_id: seen.setdefault("user", user_id) and {"doc-1"},
+        )
+
+        def _visible(session, *, visible_document_ids):
+            seen["visible"] = set(visible_document_ids)
+            return {"2608.20293": {"document_id": "doc-1", "material_id": "mat-1", "title": "T"}}
+
+        monkeypatch.setattr(ingest_worker.ingest_queue, "visible_ingested_documents", _visible)
+        found = ingest_worker._already_ingested(_item(arxiv_id="2608.20293v3"))
+        assert found["document_id"] == "doc-1"
+        assert seen["user"] == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        assert seen["visible"] == {"doc-1"}
+
+    def test_check_failure_falls_back_to_fetching(self, monkeypatch):
+        import ingest_worker
+
+        def _boom():
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(ingest_worker, "get_session", _boom)
+        assert ingest_worker._already_ingested(_item()) is None
 
 
 class TestDrainLoop:
@@ -845,3 +918,71 @@ class TestStartupWiring:
         block = src.split("start_background_worker()", 1)[1][:400]
         assert "except Exception" in block
         assert "logger.warning" in block
+
+
+# ===========================================================================
+# 解析の分野（cartridge_id）— migration 090・2026-10-16
+# （condition-not-propagated の是正: キュー行が分野を運び、worker が受理へ渡す）
+# ===========================================================================
+
+
+class TestCartridgeIdThroughTheQueue:
+    def test_migration_090_adds_the_column(self):
+        sql = _SQL_LINE_COMMENT_RE.sub("", read_migration_sql(BACKEND, 90))
+        assert "ALTER TABLE paper_discovery_ingest_items" in sql
+        assert "ADD COLUMN IF NOT EXISTS cartridge_id TEXT" in sql
+        assert "DELETE" not in sql.upper()
+
+    def test_enqueue_stores_the_domain(self):
+        from core.paper_discovery import ingest_queue
+
+        session = FakeSession()
+        ingest_queue.enqueue_items(
+            session, [{"arxiv_id": "2608.20293"}], cartridge_id="astrophysics"
+        )
+        insert = next(params for sql, params in session.calls if "INSERT INTO" in sql)
+        assert insert["cartridge_id"] == "astrophysics"
+        sql = next(sql for sql, _p in session.calls if "INSERT INTO" in sql)
+        assert "cartridge_id" in sql
+
+    def test_enqueue_keeps_null_and_empty_distinct(self):
+        from core.paper_discovery import ingest_queue
+
+        session = FakeSession()
+        ingest_queue.enqueue_items(session, [{"arxiv_id": "2608.20293"}])
+        ingest_queue.enqueue_items(session, [{"arxiv_id": "2608.20294"}], cartridge_id="")
+        inserts = [params for sql, params in session.calls if "INSERT INTO" in sql]
+        assert inserts[0]["cartridge_id"] is None
+        assert inserts[1]["cartridge_id"] == ""
+
+    def test_claimed_row_carries_the_domain(self):
+        from core.paper_discovery import ingest_queue
+
+        session = FakeSession(
+            rows_by_fragment={
+                "UPDATE paper_discovery_ingest_items": [ITEM_ROW + ("astrophysics",)]
+            }
+        )
+        item = ingest_queue.claim_next(session)
+        assert item["cartridge_id"] == "astrophysics"
+        assert "cartridge_id" in extract_function_source(_QUEUE_SRC, "_row_to_item")
+
+    def test_legacy_row_without_the_column_is_none(self):
+        from core.paper_discovery import ingest_queue
+
+        session = FakeSession(
+            rows_by_fragment={"UPDATE paper_discovery_ingest_items": [ITEM_ROW + (None,)]}
+        )
+        assert ingest_queue.claim_next(session)["cartridge_id"] is None
+
+    def test_worker_passes_the_domain_to_acceptance(self, worker_env):
+        worker_env["module"].process_item(_item(cartridge_id="astrophysics"))
+        assert worker_env["accepted"][0]["cartridge_id"] == "astrophysics"
+
+    def test_worker_passes_none_when_unspecified(self, worker_env):
+        worker_env["module"].process_item(_item())
+        assert worker_env["accepted"][0]["cartridge_id"] is None
+
+    def test_worker_passes_explicit_none_choice(self, worker_env):
+        worker_env["module"].process_item(_item(cartridge_id=""))
+        assert worker_env["accepted"][0]["cartridge_id"] == ""

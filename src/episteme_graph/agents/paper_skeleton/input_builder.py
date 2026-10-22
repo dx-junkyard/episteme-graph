@@ -64,8 +64,11 @@ class SkeletonInputBuilder:
 
         selected = self._select_sections(sections, max_sections)
         abstract_blocks = self._extract_abstract(blocks, sections)
-        section_headers = self._section_headers(selected)
-        representative_blocks = self._extract_representative_blocks(blocks, selected)
+        # 頁を持たない経路（TeX 取り込みは ``metadata.pages == 0`` で全節 page_start=1）では
+        # 頁を出さない — 既定値が実在の頁に見える（IK-0799）。
+        has_pages = bool(getattr(structure.metadata, "pages", 0) or 0)
+        section_headers = self._section_headers(selected, sections, has_pages=has_pages)
+        representative_blocks = self._extract_representative_blocks(blocks, selected, sections)
         conclusion_blocks = self._extract_conclusion_blocks(blocks, sections)
         normalized_terms = self._build_normalized_terms(cartridge) if cartridge else None
 
@@ -237,29 +240,71 @@ class SkeletonInputBuilder:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _section_headers(selected_sections: list) -> list[dict]:
-        return [
-            {
+    def _descendant_ids(section_id: str, sections: list) -> list[str]:
+        """``section_id`` の下位節 ID（文書順・孫以下を含む）。"""
+        children: dict[str, list[str]] = {}
+        for s in sections:
+            if s.parent_section_id:
+                children.setdefault(s.parent_section_id, []).append(s.section_id)
+        out: list[str] = []
+        stack = list(reversed(children.get(section_id, [])))
+        while stack:
+            sid = stack.pop()
+            out.append(sid)
+            stack.extend(reversed(children.get(sid, [])))
+        return out
+
+    @classmethod
+    def _section_headers(
+        cls, selected_sections: list, all_sections: list | None = None, *, has_pages: bool = True
+    ) -> list[dict]:
+        """骨格判断の対象節（level-1）。下位節は ``subsections`` に入れ子で添える（IK-0799 —
+        本文の「Sec. 2.1」と ``sec_N`` を対応させる材料。節の母集合・件数は level-1 のまま）。"""
+        by_id = {s.section_id: s for s in (all_sections or [])}
+
+        def header(s) -> dict:
+            item = {
                 "section_id": s.section_id,
                 "title": s.title,
                 "level": s.level,
-                "page_start": s.page_start,
+                "page_start": s.page_start if has_pages else None,
                 "parent_section_id": s.parent_section_id,
             }
-            for s in selected_sections
-        ]
+            number = getattr(s, "section_number", None)
+            if number:
+                item["section_number"] = number
+            return item
+
+        result: list[dict] = []
+        for s in selected_sections:
+            item = header(s)
+            subs = [header(by_id[sid]) for sid in cls._descendant_ids(s.section_id, all_sections or [])
+                    if sid in by_id]
+            if subs:
+                item["subsections"] = subs
+            result.append(item)
+        return result
+
+    @staticmethod
+    def _is_prose_block(b: TypedBlock) -> bool:
+        """本文の段落か（表本体 ``raw.in_table`` は代表・結論ブロックに使わない — R-4）。"""
+        if b.block_type != "body_paragraph":
+            return False
+        raw = b.raw or {}
+        return not (raw.get("in_table") or raw.get("from_table"))
 
     def _extract_representative_blocks(
-        self, blocks: list[TypedBlock], selected_sections: list
+        self, blocks: list[TypedBlock], selected_sections: list, all_sections: list | None = None
     ) -> list[dict]:
-        """各 major section の先頭・末尾 body_paragraph を収集する。"""
+        """各 major section（下位節を含む）の先頭・末尾 body_paragraph を収集する。"""
         top_sections = selected_sections
 
         result: list[dict] = []
         for section in top_sections:
+            scope = {section.section_id, *self._descendant_ids(section.section_id, all_sections or [])}
             sec_blocks = [
                 b for b in blocks
-                if b.section_id == section.section_id and b.block_type == "body_paragraph"
+                if b.section_id in scope and self._is_prose_block(b)
             ]
             if not sec_blocks:
                 continue
@@ -285,7 +330,7 @@ class SkeletonInputBuilder:
         result = [
             self._block_to_dict(b)
             for b in blocks
-            if b.section_id in conclusion_section_ids and b.block_type == "body_paragraph"
+            if b.section_id in conclusion_section_ids and self._is_prose_block(b)
         ]
         return result[:_MAX_CONCLUSION_BLOCKS]
 

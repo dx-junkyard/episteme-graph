@@ -25,6 +25,19 @@ from episteme_graph.agents.component_assembly.schema import is_symbol_like_conce
 from .schema import ClaimConcept, ClaimObjectRecord
 
 
+# A synthesised system-level claim is "one minimal proposition" only while it
+# names a handful of symbols. Beyond this it summarises a multi-step system
+# (IK-0798: one claim eliminating 4 and retaining 4 symbols, backed by ~150
+# evidence ids, was marked atomic and used as strong graph backing). The count is
+# of the proposition's arguments (eliminated + retained symbols), never of the
+# evidence ids — evidence volume says nothing about how many propositions the
+# text makes.
+MAX_SYMBOLS_PER_ATOMIC_SYSTEM_CLAIM = 6
+# Same idea for the rendered text: an atomic claim is a short sentence. Longer
+# synthesised prose means many symbols were enumerated.
+MAX_ATOMIC_SYNTH_TEXT_CHARS = 300
+NON_ATOMIC_SYSTEM_CLAIM_REASON = "non_atomic_system_claim"
+
 # General, domain-neutral claim types (issue #388).
 DEFINITION_CLAIM = "definition_claim"
 DEPENDENCY_CLAIM = "dependency_claim"
@@ -281,10 +294,28 @@ def synthesize_equation_claims(
             derivation_ids=[getattr(chain, "derivation_id", "")],
             synthesis_method="system_derivation",
         )
+        n_symbols = len({str(x) for x in retained + eliminated if x})
+        if (
+            n_symbols > MAX_SYMBOLS_PER_ATOMIC_SYSTEM_CLAIM
+            or len(text) > MAX_ATOMIC_SYNTH_TEXT_CHARS
+        ):
+            _mark_non_atomic(claim)
         out.append(claim)
         index += 1
 
     return out
+
+
+def _mark_non_atomic(claim: ClaimObjectRecord) -> None:
+    """Keep the claim but stop it from acting as strong backing (IK-0798, #317)."""
+    claim.atomicity = "split_required"
+    claim.is_atomic = False
+    claim.support_status = "review_required"
+    claim.qualification_reason = (
+        "system-level claim bundles many symbols; not a single minimal proposition"
+    )
+    if NON_ATOMIC_SYSTEM_CLAIM_REASON not in claim.review_reasons:
+        claim.review_reasons.append(NON_ATOMIC_SYSTEM_CLAIM_REASON)
 
 
 def _make_claim(

@@ -51,6 +51,9 @@ import source_resolution
 # PD2: 受理は既存アップロード経路をそのまま呼ぶ（専用の教材種別を作らない）。
 from routes.admin import _accept_material_source
 
+# 可視集合の正本（取り込み済み判定を投入者に見える教材で行う — IK-0796・IK-0701）。
+import services
+
 logger = logging.getLogger(__name__)
 
 #: worker の有効化（既定 on）。V層スイーパの ``VERSION_SWEEPER_ENABLED`` と同じ流儀。
@@ -155,6 +158,35 @@ def _allowed_domains() -> list[str]:
         session.close()
 
 
+def _already_ingested(item: dict) -> dict | None:
+    """取得の直前に、投入者に見える教材へ同じ arXiv 論文が既にあるかを確かめる。
+
+    投入時（``/ingest-batch``）にも判定しているが、キューに積まれてから取得されるまでの
+    間に同期の ``/ingest`` やアップロードで同じ論文が入ることがある。取得してから
+    気づくと解析パイプラインが丸ごと二重に走る（IK-0796）。判定できないときは None
+    （従来どおり取得する）。
+    """
+    arxiv_id = str(item.get("arxiv_id") or "")
+    requested_by = str(item.get("requested_by") or "")
+    if not arxiv_id or not requested_by:
+        return None
+    session = None
+    try:
+        session = get_session()
+        ingested = ingest_queue.visible_ingested_documents(
+            session,
+            visible_document_ids=services.list_visible_document_ids(requested_by),
+        )
+        found = ingested.get(ingest_queue.normalize_arxiv_id(arxiv_id))
+        return dict(found) if isinstance(found, dict) else None
+    except Exception:  # noqa: BLE001 — 判定不能で取り込みを止めない
+        logger.warning("ingest worker: failed to check already-ingested documents", exc_info=True)
+        return None
+    finally:
+        if session is not None:
+            session.close()
+
+
 def _finish(item_id: str, *, accepted: dict | None = None, detail: str = "") -> None:
     session = get_session()
     try:
@@ -212,6 +244,18 @@ def process_item(item: dict, *, clock=time.monotonic) -> bool:
     source_url = str(item.get("source_url") or "")
     requested_by = str(item.get("requested_by") or "")
 
+    existing = _already_ingested(item)
+    if existing is not None:
+        # arXiv も LLM も呼ばない。既存教材は事実文で残す（行は failed — 再試行で同じ判定）。
+        title = str(existing.get("title") or "").strip()
+        detail = ingest_queue.SKIP_ALREADY_INGESTED + (f"（既存の教材: {title}）" if title else "")
+        logger.info(
+            "ingest worker: item %s skipped as already ingested (document=%s)",
+            item_id, existing.get("document_id"),
+        )
+        _finish(item_id, detail=detail)
+        return False
+
     try:
         allowed = _allowed_domains()
     except Exception:
@@ -256,6 +300,10 @@ def process_item(item: dict, *, clock=time.monotonic) -> bool:
             current_user={"id": requested_by},
             # 実際にバイト列を返した URL を出所として記帳する（フォールバック時は /pdf/）。
             source_url=resolved.source_url,
+            # migration 090: 投入時に教員が選んだ分野（API 層で検証済み・再検証しない）。
+            # None = 未指定（env 既定）/ "" = 「指定しない」の明示。キュー行が運ばないと
+            # 非同期の受理で分野が落ちる（condition-not-propagated）。
+            cartridge_id=item.get("cartridge_id"),
         )
     except HTTPException as exc:
         logger.warning("ingest worker: acceptance failed for item %s: %s", item_id, exc.detail)

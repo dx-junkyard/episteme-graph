@@ -482,3 +482,31 @@ class TestTeacherFixtureLeakScan:
         assert "theory_op_0003" not in out["facts"][0]
         assert out["modules"][0]["module_key"] == "m2:abc"  # 番地（UI のキー）は残る
         assert "structure_fingerprint" not in out["modules"][0]
+
+
+def test_agent_side_internal_id_vocabulary_is_covered_by_display_projection():
+    """IK-0819: A層が生成文から外す内部 ID は、表示側の統合語彙にも必ず当たる（A ⊆ 表示）。
+
+    A層 ``episteme_graph/agents/internal_id_text.py`` は backend を import できず、backend は
+    SA層の推移的純粋性のため A層を module level で import できない。語彙の食い違いを見本で固定する。
+    """
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _src = str(_Path(__file__).resolve().parents[2] / "src")
+    if _src not in _sys.path:
+        _sys.path.insert(0, _src)
+    from core import display_projection as _dp
+    from episteme_graph.agents import internal_id_text as _a
+
+    samples = [
+        "tex_b80", "(tex_b80)", "eq_tex_b78", "eq_blk_3df32664", "eq_op_12", "eq_eqcand_inline_blk_3",
+        "claim_span_3", "synth_claim_0001", "span_1", "ev_12", "theory_op_4", "comp_009", "node_3",
+        "step_001", "blk_12", "sym_4", "evidence_7", "derivation_eq_tex_b16",
+        "k1:0123456789abcdef", "123e4567-e89b-12d3-a456-426614174000",
+    ]
+    for text in samples:
+        for token in _a.find_internal_ids(text):
+            assert _dp.contains_internal_id(token), token
+    for text in ["eq_12", "eq_2_7", "(3.14)", "span_id", "claim_type", "latex_b1"]:
+        assert not _a.contains_internal_id(text), text

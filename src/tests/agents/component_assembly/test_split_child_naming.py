@@ -154,8 +154,11 @@ def test_split_children_carry_the_parent_label():
     ]
     for child in result.components:
         assert child.label.lower() not in _BARE_RESPONSIBILITY_LABELS
-        # 親の label は summary にも残る（どの理論対象の一部かが読める）。
-        assert "Kernel normalization constraint" in child.summary
+        # IK-0755: summary は親の（LLM が生成言語で書いた）summary をそのまま保つ。
+        # 分割の機械文（#324・件数）は reason にだけ残り、表示用の欄に出ない。
+        assert child.summary == parent.summary
+        assert "(#324)" not in child.summary
+        assert "Kernel normalization constraint" in child.reason
 
 
 def test_children_of_different_parents_do_not_share_a_label():

@@ -30,6 +30,7 @@ from core.element_vocab import THEORY_STAGE_LABELS as _ELEMENT_STAGE_LABELS
 from core.element_vocab import operation_label as _vocab_operation_label
 
 from core.theory_modules.schema import (
+    plain_math,
     BACKING_INFERRED,
     BACKING_ORDER,
     CLAIM_CHAIN_TYPES,
@@ -688,20 +689,6 @@ def _is_synthesized_claim(claim: dict) -> bool:
 
 _SYNTH_DEFINES_RE = re.compile(r"defines\s+(\$[^$]+\$)")
 _SYNTH_DEPENDS_RE = re.compile(r",\s*(\$[^$]+\$)\s+depends on")
-_PLAIN_WRAPPER_COMMANDS = (
-    "mathrm|rm|bm|mathbf|boldsymbol|text|textrm|mathcal|mathbb|mathfrak|mathit|operatorname|"
-    "tilde|hat|bar|vec|dot|ddot|overline|underline|widetilde|widehat"
-)
-_PLAIN_WRAPPERS_RE = re.compile(r"\\(?:" + _PLAIN_WRAPPER_COMMANDS + r")\s*\{([^{}]*)\}")
-_PLAIN_WRAPPERS_BARE_RE = re.compile(r"\\(?:" + _PLAIN_WRAPPER_COMMANDS + r")\s+([A-Za-z0-9])")
-_PLAIN_GREEK = {
-    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε", "varepsilon": "ε", "zeta": "ζ",
-    "eta": "η", "theta": "θ", "iota": "ι", "kappa": "κ", "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ",
-    "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ", "upsilon": "υ", "phi": "φ", "varphi": "φ", "chi": "χ",
-    "psi": "ψ", "omega": "ω", "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π",
-    "Sigma": "Σ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω", "odot": "⊙", "infty": "∞", "partial": "∂",
-    "nabla": "∇", "times": "×", "cdot": "·", "pm": "±", "ell": "ℓ", "hbar": "ℏ",
-}
 
 
 def _symbol_of_synthesized(text: str) -> str:
@@ -713,35 +700,8 @@ def _symbol_of_synthesized(text: str) -> str:
     return ""
 
 
-def plain_math(text: str) -> str:
-    """``$…$`` の LaTeX を、ノードのラベル（プレーンテキスト）用に読める形へ落とす。
-
-    数式描画の代替ではなく、``\\Delta\\Sigma(R)`` を「ΔΣ(R)」程度に整えるだけ。詳細ペインは
-    ``theory_object`` の ``$…$`` を数式として描く。
-    """
-    out = str(text or "").replace("$", "")
-    # 二重化した区切り（JSON 由来の ``\\Theta`` / TeX の改行 ``\\``）を先に畳む
-    # （第 14 周: 「\Θ^2_GW\」の残骸）。関係記号は読める記号へ（``z\mid Λ`` →「z | Λ」）。
-    out = re.sub(r"\\\\+(?=[A-Za-z])", r"\\", out)
-    out = re.sub(r"\\\\+", " ", out)
-    out = re.sub(r"\\(?:mid|vert)\b", " | ", out)
-    # エスケープした波括弧・記号（``\{\Theta\}`` / ``\_``）はバックスラッシュごと畳む
-    # （第 17 周: 波括弧だけ消えて「\Θ^2_GW\」が残った）。
-    out = re.sub(r"\\[{}]", "", out)
-    out = re.sub(r"\\([_%&#])", r"\1", out)
-    # 記号名の置換は装飾コマンドを剥がす前に行う（剥がした後だと ``\\cdot\\vec{k}`` が
-    # ``\\cdotk`` になって名前の境界が消える）。
-    out = re.sub(r"\\([A-Za-z]+)", lambda m: _PLAIN_GREEK.get(m.group(1), m.group(0)), out)
-    for _ in range(3):
-        out = _PLAIN_WRAPPERS_RE.sub(r"\1", out)
-        out = _PLAIN_WRAPPERS_BARE_RE.sub(r"\1", out)
-    out = re.sub(r"\\(?:rm|bf|it|bm|displaystyle)\b\s*", "", out)
-    out = re.sub(r"\\(?:left|right|,|;|!|quad|qquad)", "", out)
-    out = re.sub(r"\\([A-Za-z]+)", r"\1", out)
-    out = out.replace("{", "").replace("}", "")
-    # 名前の付かない残りのバックスラッシュ（``\ `` 等）は表示に出さない。
-    out = out.replace("\\", "")
-    return re.sub(r"\s+", " ", out).strip()
+# ``$…$`` → 表示用プレーンテキストの正本は ``core.theory_modules.schema.plain_math``
+# （事実文・保存行・グラフレビューの DTO が同じ関数を通る — TM10）。
 
 
 class _Labels:

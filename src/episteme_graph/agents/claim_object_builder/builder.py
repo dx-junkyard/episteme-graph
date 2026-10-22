@@ -688,6 +688,10 @@ class ClaimObjectBuilder:
         """
         parent_id = self._dedup_id(base_claim_id, counter, seen)
         parts = self._split_into_atomic(ctx.text)
+        if len([p for p in parts if (p or "").strip()]) < 2:
+            # No confident split point (IK-0797): a single "child" would just
+            # repeat the parent, so the parent alone carries the review reason.
+            parts = []
         subclaim_ids: list[str] = []
         split_suggestions: list[dict] = []
         for idx, part in enumerate(parts, start=1):
@@ -1060,7 +1064,10 @@ class ClaimObjectBuilder:
         if len(semi_clauses) >= 2:
             return "non_atomic", "contains multiple propositions; split required"
         # 3. Coordinated finite clauses (e.g. "X derives Y and shows Z").
-        parts = cls._CLAUSE_CONNECTORS.split(t)
+        # Same split points as ``_split_into_atomic`` (IK-0797): a connector after
+        # an auxiliary ("can therefore become") or inside an unfinished relative
+        # clause ("where A and B are ...") does not separate propositions.
+        parts = [part for _conn, part in cls._connector_parts(t)]
         if len(parts) >= 2:
             clauses_with_verb = sum(1 for p in parts if cls._clause_has_verb(p))
             if clauses_with_verb >= 2:
@@ -1109,19 +1116,31 @@ class ClaimObjectBuilder:
                     segments.append(semi)
 
         # 2. Split each segment on coordinating connectors into finite clauses.
+        # Only at legitimate split points (``_connector_parts``); a verb-less
+        # fragment is merged back WITH its connector so no word is dropped
+        # (IK-0797: "... field the long-wavelength ..." lost its "and").
         clauses: list[str] = []
         for seg in segments:
-            parts = [p.strip() for p in cls._CLAUSE_CONNECTORS.split(seg) if p.strip()]
-            if len(parts) <= 1:
+            conn_parts = [(c, p.strip()) for c, p in cls._connector_parts(seg) if p.strip()]
+            if len(conn_parts) <= 1:
                 clauses.append(seg)
                 continue
             buffer = ""
-            for p in parts:
+            for conn, p in conn_parts:
                 if cls._clause_has_verb(p):
-                    clauses.append(f"{buffer} {p}".strip() if buffer else p)
+                    if buffer:
+                        clauses.append(f"{buffer} {conn} {p}".strip() if conn else f"{buffer} {p}")
+                    else:
+                        clauses.append(p)
                     buffer = ""
                 else:
-                    buffer = f"{buffer} {p}".strip() if buffer else p
+                    joined = f"{conn} {p}".strip() if conn else p
+                    if buffer:
+                        buffer = f"{buffer} {joined}"
+                    elif clauses:
+                        clauses[-1] = f"{clauses[-1].rstrip('.')} {joined}".strip()
+                    else:
+                        buffer = joined
             if buffer:
                 if clauses:
                     clauses[-1] = f"{clauses[-1].rstrip('.')} {buffer}".strip()
@@ -1140,6 +1159,67 @@ class ClaimObjectBuilder:
                 c = c + "."
             result.append(c[0].upper() + c[1:] if c else c)
         return result
+
+    # Words after which a connector cannot start a new proposition: the verb
+    # phrase is still open ("can therefore become", "is thus given", "to then").
+    _AUXILIARIES = frozenset({
+        "is", "are", "was", "were", "be", "been", "being", "am",
+        "has", "have", "had", "do", "does", "did",
+        "can", "cannot", "could", "may", "might", "must", "will", "would",
+        "should", "shall", "to", "not",
+    })
+    # Sentence adverbs: a proposition boundary only when clause-initial
+    # (segment start or after , ; :), never mid-clause ("can therefore become").
+    _DISCOURSE_ADVERBS = frozenset({
+        "then", "therefore", "moreover", "furthermore", "however", "thus", "hence",
+    })
+    # A connector inside a relative / complement clause whose own predicate has
+    # not appeared yet coordinates noun phrases, not propositions
+    # ("scales where the density field and the velocity field are ...").
+    _SUBORDINATORS = frozenset({
+        "where", "which", "that", "who", "whom", "whose", "when", "whereby",
+        "if", "because", "since", "although", "though", "whether",
+    })
+
+    @classmethod
+    def _connector_parts(cls, segment: str) -> list[tuple[str, str]]:
+        """Split ``segment`` at legitimate connector split points (IK-0797).
+
+        Returns ``[(connector_before_part, part), ...]``; the first part has an
+        empty connector. Connectors that are not split points stay inside the
+        part, so joining ``connector + part`` reproduces the segment.
+        """
+        out: list[tuple[str, str]] = []
+        cut = 0
+        prev_conn = ""
+        for m in cls._CLAUSE_CONNECTORS.finditer(segment):
+            left = segment[cut:m.start()]
+            if not cls._is_connector_split_point(left, m.group(0)):
+                continue
+            out.append((prev_conn, left))
+            prev_conn = m.group(0)
+            cut = m.end()
+        out.append((prev_conn, segment[cut:]))
+        return out
+
+    @classmethod
+    def _is_connector_split_point(cls, left: str, connector: str) -> bool:
+        stripped = left.rstrip()
+        words = re.findall(r"[A-Za-z]+", stripped.lower())
+        if not words:
+            return False
+        if words[-1] in cls._AUXILIARIES:
+            return False
+        if connector.lower() in cls._DISCOURSE_ADVERBS and not stripped.endswith((",", ";", ":")):
+            return False
+        # Unfinished relative / complement clause on the left.
+        for i in range(len(words) - 1, -1, -1):
+            if words[i] in cls._SUBORDINATORS:
+                tail = " ".join(words[i + 1:])
+                if not cls._clause_has_verb(tail):
+                    return False
+                break
+        return True
 
     @classmethod
     def _clause_has_verb(cls, clause: str) -> bool:

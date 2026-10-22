@@ -12869,3 +12869,9 @@ button.element-card-item:focus-visible .element-card-item-label {
 .sim-lab-run, .sim-lab-program, .sim-lab-proposal { margin-top: 6px; }
 .sim-lab-card-head { font-weight: 600; margin-bottom: 4px; }
 .sim-lab-statement { margin: 4px 0; }
+
+/* 論文レーダー「この教材の行へ」で行を一時的に強調する（paper_radar_design.md §19 C） */
+#materials-tbody tr.material-row-focus > td {
+  background: rgba(37, 99, 235, 0.12);
+  transition: background 0.4s ease;
+}

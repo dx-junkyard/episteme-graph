@@ -33,6 +33,68 @@ from core import display_projection as _dp
 from core.text_hygiene import strip_control_sequences
 
 # ---------------------------------------------------------------------------
+# ``$…$`` → 表示用プレーンテキスト（正本・TM10）
+#
+# 事実文に載せるモジュールのラベル（related の対象外の名指し・近い構造の対）、保存行の
+# ``visual_label``、グラフレビューのノード名がこの 1 つの関数を通る（judge-deep-07 ②:
+# 保存時の旧規則で落とした ``textbfx`` が事実文にそのまま出ていた）。
+# ---------------------------------------------------------------------------
+
+_PLAIN_WRAPPER_COMMANDS = (
+    "mathrm|rm|bm|mathbf|boldsymbol|text|textrm|textbf|textit|textsf|texttt|textnormal|emph|mathsf|mathtt|"
+    "mathcal|mathbb|mathfrak|mathit|mathscr|operatorname|"
+    "tilde|hat|bar|vec|dot|ddot|overline|underline|widetilde|widehat"
+)
+_PLAIN_WRAPPERS_RE = re.compile(r"\\(?:" + _PLAIN_WRAPPER_COMMANDS + r")\s*\{([^{}]*)\}")
+_PLAIN_WRAPPERS_BARE_RE = re.compile(r"\\(?:" + _PLAIN_WRAPPER_COMMANDS + r")\s+([A-Za-z0-9])")
+_PLAIN_GREEK = {
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε", "varepsilon": "ε", "zeta": "ζ",
+    "eta": "η", "theta": "θ", "iota": "ι", "kappa": "κ", "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ",
+    "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ", "upsilon": "υ", "phi": "φ", "varphi": "φ", "chi": "χ",
+    "psi": "ψ", "omega": "ω", "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π",
+    "Sigma": "Σ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω", "odot": "⊙", "infty": "∞", "partial": "∂",
+    "nabla": "∇", "times": "×", "cdot": "·", "pm": "±", "ell": "ℓ", "hbar": "ℏ",
+    # 区切り・省略・関係の記号（``\\langle \\cdots \\rangle`` が「langle cdots rangle」に
+    # なっていた — judge-deep-07 ②）。
+    "langle": "⟨", "rangle": "⟩", "cdots": "⋯", "ldots": "…", "dots": "…", "parallel": "∥",
+    "perp": "⊥", "prime": "′", "to": "→", "leq": "≤", "geq": "≥", "le": "≤", "ge": "≥",
+    "sim": "∼", "approx": "≈", "propto": "∝", "neq": "≠",
+}
+
+
+def plain_math(text: str) -> str:
+    """``$…$`` の LaTeX を、ノードのラベル（プレーンテキスト）用に読める形へ落とす。
+
+    数式描画の代替ではなく、``\\Delta\\Sigma(R)`` を「ΔΣ(R)」程度に整えるだけ。詳細ペインは
+    ``theory_object`` の ``$…$`` を数式として描く。
+    """
+    out = str(text or "").replace("$", "")
+    # 二重化した区切り（JSON 由来の ``\\Theta`` / TeX の改行 ``\\``）を先に畳む
+    # （第 14 周: 「\Θ^2_GW\」の残骸）。関係記号は読める記号へ（``z\mid Λ`` →「z | Λ」）。
+    out = re.sub(r"\\\\+(?=[A-Za-z])", r"\\", out)
+    out = re.sub(r"\\\\+", " ", out)
+    out = re.sub(r"\\(?:mid|vert)\b", " | ", out)
+    # エスケープした波括弧・記号（``\{\Theta\}`` / ``\_``）はバックスラッシュごと畳む
+    # （第 17 周: 波括弧だけ消えて「\Θ^2_GW\」が残った）。
+    out = re.sub(r"\\[{}]", "", out)
+    out = re.sub(r"\\([_%&#])", r"\1", out)
+    # 記号名の置換は装飾コマンドを剥がす前に行う（剥がした後だと ``\\cdot\\vec{k}`` が
+    # ``\\cdotk`` になって名前の境界が消える）。
+    out = re.sub(r"\\([A-Za-z]+)", lambda m: _PLAIN_GREEK.get(m.group(1), m.group(0)), out)
+    for _ in range(3):
+        out = _PLAIN_WRAPPERS_RE.sub(r"\1", out)
+        out = _PLAIN_WRAPPERS_BARE_RE.sub(r"\1", out)
+    out = re.sub(r"\\(?:rm|bf|it|bm|displaystyle)\b\s*", "", out)
+    out = re.sub(r"\\(?:left|right|,|;|!|quad|qquad)", "", out)
+    out = re.sub(r"\\([A-Za-z]+)", r"\1", out)
+    out = out.replace("{", "").replace("}", "")
+    # 名前の付かない残りのバックスラッシュ（``\ `` 等）は表示に出さない。
+    out = out.replace("\\", "")
+    return re.sub(r"\s+", " ", out).strip()
+
+
+
+# ---------------------------------------------------------------------------
 # 規則の版と閾値（env から読まない）
 # ---------------------------------------------------------------------------
 

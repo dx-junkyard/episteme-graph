@@ -264,6 +264,8 @@
   var MODULE_RELATED_HEADING = "同じ構造のモジュールを持つ論文";
   var MODULE_RELATED_NOTE = "工程の型と、受け渡す式の形が同じモジュールを持つ論文です（閲覧できる論文だけを示します）。";
   var MODULE_RELATED_NONE_TEXT = "このモジュールと同じ構造のモジュールを持つ他の論文は、このコーパスの中では見つかっていません。";
+  // 照合の対象外（§22 A）。成員が少ないか、単一の工程の型だけのモジュールは照合しない。
+  var MODULE_RELATED_INELIGIBLE_TEXT = "このモジュールは工程が少ないか単一の工程の型だけでできているため、構造の照合の対象にしていません。";
   var MODULE_RELATED_UNMATCHED_TEXT = "このモジュールは保存済みのモジュールと対応が取れないため、同じ構造の論文を示していません。";
   var MODULE_SINK_PREFIX = "sink:"; // 合成ノードの vis id（表示しない）
   var MODULE_CANVAS_LABEL_MAX_CHARS = 48;
@@ -1990,6 +1992,28 @@
     return null;
   }
 
+  // 近い構造（§22 B）。表示専用・同一性の候補ではない。このモジュールのラベルに一致する対だけを
+  // ラベルの列挙で描く（数・指紋は描かない）。
+  function nearStructureHtml(module, data) {
+    var pairs = Array.isArray(data.near_structure) ? data.near_structure : [];
+    if (!pairs.length) return "";
+    var wanted = String(module.module_key || "");
+    var lines = [];
+    pairs.forEach(function (pair) {
+      if (!pair) return;
+      if (!wanted || String(pair.seed_module_key || "") !== wanted) return;
+      var ops = (pair.shared_operation_labels || []).filter(function (op) { return String(op || "").trim(); });
+      // 題名がファイル名のまま・arXiv の題名を表示している / 未取得の事実（§22.4・サーバの文面）。
+      var titleNote = pair.peer_document_title_note ? "（" + esc(String(pair.peer_document_title_note)) + "）" : "";
+      lines.push("<li>" + esc(String(pair.peer_document_title || "")) + titleNote + " — " +
+        richText(String(pair.peer_module_label || "")) +
+        (ops.length ? "（共通する工程: " + esc(ops.join("・")) + "）" : "") + "</li>");
+    });
+    if (!lines.length) return "";
+    return '<div class="graph-review-paper-note">' + esc(String(data.near_structure_note || "")) + "</div>" +
+      "<ul>" + lines.join("") + "</ul>";
+  }
+
   // タイトルの列挙とサーバの事実文だけを描く（数・指紋・status・module_key は描かない）。
   // 取得前・失敗時・内側のまとまりでは何も描かない。列挙も事実文も無ければ区画を出さない
   // （閉世界の言明を足さない）。
@@ -2008,8 +2032,11 @@
       // 照合の対象に入っていない（保存行と対応が取れない）ときだけ対応不能の文を出す。
       var checked = Array.isArray(data.checked_module_keys) ? data.checked_module_keys : null;
       var wanted = String((module && module.module_key) || "");
+      var ineligible = Array.isArray(data.ineligible_module_keys) ? data.ineligible_module_keys : [];
       if (checked && checked.indexOf(wanted) >= 0) {
         body = facts.length ? "" : paperFactLine(MODULE_RELATED_NONE_TEXT);
+      } else if (ineligible.indexOf(wanted) >= 0) {
+        body = paperFactLine(MODULE_RELATED_INELIGIBLE_TEXT);
       } else {
         body = paperFactLine(MODULE_RELATED_UNMATCHED_TEXT);
       }
@@ -2027,6 +2054,7 @@
       }
     }
     body += paperFactLines(facts, "");
+    body += nearStructureHtml(module, data);
     return moduleBlock(MODULE_RELATED_HEADING, body);
   }
 

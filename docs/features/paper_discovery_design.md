@@ -62,7 +62,7 @@ confirmed リンクと骨格が育っている — 事前構築の実体は自�
 |---|---|---|
 | **PD1** | **発見は自動、取り込みは教員の明示承認のみ** | 候補のリストアップまでが機械の仕事。解析パイプラインに入るのは教員が選択・確認した論文だけ。全自動クロール取り込みの経路を作らない（LLM コストの弁であると同時に、レビューされない inferred 成果物の無限堆積を防ぐ。candidate-only 原則の取り込み版）。 |
 | **PD2** | **取得・解析は既存経路へ完全合流** | 承認された論文の取得は `core/url_fetch.py`（UF1〜UF6）を呼ぶだけ。許可ドメイン照合・SSRF ガード・形式判定・`_accept_material_source` への合流をそのまま継承し、ディスカバリー専用の取得経路・専用の教材種別を作らない。A層は非改変。 |
-| **PD3** | **検索語彙は分野語彙から供給し、出所を明示する** | キーフレーズ候補は骨格概念・カートリッジ ontology（aliases 含む）・教員が確定した骨格ノードの別名（`alias`。[VA層設計書](atlas_vector_anchoring_design.md) §7 の還流2）・confirmed 理論部品から自動供給し、各フレーズに供給元を表示する（出所5語彙 `skeleton|cartridge|component|alias|manual`）。教員は自由に外せる・足せる。**AI・サーバが購読条件を教員の操作なしに書き換えることはない**（購読は教員の意思の正本）。 |
+| **PD3** | **検索語彙は分野語彙から供給し、出所を明示する** | キーフレーズ候補は骨格概念・カートリッジ ontology（aliases 含む）・教員が確定した骨格ノードの別名（`alias`。[VA層設計書](atlas_vector_anchoring_design.md) §7 の還流2）・confirmed 理論部品から自動供給し、各フレーズに供給元を表示する（出所8語彙 `skeleton|cartridge|component|alias|concept|title|thesis|manual`。`concept` = 論文レーダーの起点教材の live 主張の概念名（記号・文のような名前を除く）/ `title` = 起点教材の題名の名詞句 / `thesis` = 起点教材の中心命題（`thesis_reconstruction`）の名詞句 — いずれもレーダーの seed 供給専用で分野購読の供給には使わない。[paper_radar_design.md](paper_radar_design.md) §17）。教員は自由に外せる・足せる。**AI・サーバが購読条件を教員の操作なしに書き換えることはない**（購読は教員の意思の正本）。 |
 | **PD4** | **数値スコアを見せない（教員含む）** | 類似度・一致度の生数値は UI・API レスポンスに出さない。提示は並び順と段階ラベルまで（LS/W8 と同じ規律）。 |
 | **PD5** | **候補は保存せず読み時導出** | サーバに保存するのは購読条件・見送り記録・取り込み対応（出所 URL）だけ。候補一覧は毎回 arXiv API から導出し、「取り込み済み」「見送り済み」の判定も既存行との突合で導出する（G1 と同じ思想 — 完了フラグ・候補スナップショットのテーブルを持たない）。見送りは行削除せず状態遷移で保持し、復帰できる（P4）。 |
 | **PD6** | **閉世界の正直さ** | 候補一覧は「この購読条件で arXiv を検索した結果」であって分野の全体ではない。UI は検索条件を常に併記し、「この分野の論文は他にない」と読める表示をしない（SL1 の同族）。API 失敗時は事実文で degrade し、空一覧を「該当なし」と偽らない。 |
@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS paper_discovery_subscriptions (
     arxiv_categories  TEXT[] NOT NULL DEFAULT '{}',
     keyphrases        JSONB  NOT NULL DEFAULT '[]',
     -- keyphrases 要素: {"text": "...",
-    --                   "source": "skeleton"|"cartridge"|"component"|"alias"|"manual",
+    --                   "source": "skeleton"|"cartridge"|"component"|"alias"|"concept"|"title"|"thesis"|"manual",
     --                   "enabled": true}  — 供給元の明示（PD3）。外した状態も保持する（P4）
     followed_authors  JSONB  NOT NULL DEFAULT '[]',
     updated_by        UUID,
@@ -146,7 +146,7 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_url TEXT;
 
 | ファイル | 責務 |
 |---|---|
-| `schema.py` | dataclass / 語彙の正本。`normalize_arxiv_id()`（URL・version 吸収）、キーフレーズ供給元語彙（`skeleton` / `cartridge` / `component` / `alias` / `manual`。`alias` = 教員が確定した骨格ノードの別名 — [VA層設計書](atlas_vector_anchoring_design.md) §7 の還流2） |
+| `schema.py` | dataclass / 語彙の正本。`normalize_arxiv_id()`（URL・version 吸収）、キーフレーズ供給元語彙（`skeleton` / `cartridge` / `component` / `alias` / `concept` / `title` / `thesis` / `manual`。`concept` / `title` / `thesis` は論文レーダーの seed 供給専用（radar 設計書 §17）。`alias` = 教員が確定した骨格ノードの別名 — [VA層設計書](atlas_vector_anchoring_design.md) §7 の還流2） |
 | `arxiv_client.py` | arXiv API 呼び出しの唯一の入口。`export.arxiv.org` への HTTPS 固定・**モジュールレベルの 3 秒スロットル**（前回呼び出し時刻を保持し不足分 sleep）・タイムアウト・`xml.etree` による Atom パース。返すのは正規化済み `ArxivEntry`（id / title / authors / summary / categories / published / updated / pdf_url） |
 | `vocab.py` | キーフレーズ候補の供給。①`atlas_store.load_learner_skeleton()` の概念ラベル ②カートリッジ `ontology.json` の aliases / notation_patterns ③当該分野の document 群から confirmed / teacher_approved な `theory_components` のラベル。各候補に `source` を付けて返す（PD3） |
 | `search.py` | 購読条件 → `search_query` 文字列の組み立て（カテゴリ OR 結合 + フレーズ AND/OR）、結果への注釈付け（取り込み済み / 見送り済みの読み時導出）、新着判定（`last_checked_at` 比較） |
@@ -548,3 +548,54 @@ backend フルスイート 11,188 pass。
   マニュアル節 [取得する形式](../manual/teacher/11-admin-materials.md#arxiv-discovery-format)）。
   既定・事実文はレーダー側と**逐語一致**で、`test_paper_discovery_ui_static.py::
   TestSourceFormatSwitch` が固定する。
+
+## 12. 追補 — 取り込みに「解析の分野」を通す（2026-10-16・migration 090）
+
+**状態**: 実装済み（2026-10-16）。
+
+### 12.1 何が起きていたか
+
+教材アップロードと再解析は optional `cartridge_id`（2026-09-10 是正 F9 =「分野は入口で教員が
+選ぶ」）を `_accept_material_source(cartridge_id=)` へ通すが、本層の取り込み経路
+（`POST /ingest` / `POST /ingest-batch` + キュー + worker）は分野を受けず、受理に渡して
+いなかった。そのため `run_document_pipeline` が env 既定（開発機では `particle_physics`）を
+黙って適用し、宇宙物理の論文（arXiv 2610.20589）を論文レーダーから取り込んだ解析に素粒子物理の
+正規化語彙（HQET / SM）が提示された（uxsim 頭脳メモ `uxsim/runs/radar_loop/BRAIN_NOTES_A.md`
+seq 562）。`domain_key` は購読の名前空間 = **監査の帰属**で、解析の分野ではない
+（ドライバ `uxsim/sandbox/radar_loop.py` も `--cartridge-id` を `domain_key` に入れていた）。
+
+### 12.2 pre-mortem
+
+| 型 | 当たるか | 対策 |
+|---|---|---|
+| `condition-not-propagated` | 当たる（本件そのもの。入口 → 同期受理 / 入口 → キュー行 → worker → 受理 の 2 経路で条件が境界を越えない） | 検証は upload と**同じ関数**（`routes.admin._validate_cartridge_option` を import・コピペしない）。キュー行に列を持たせて非同期境界を越えて運び、worker は再検証せず渡す。テストは境界をまたぐ形（API → `_accept_material_source` の kwargs / enqueue の kwargs / claim した行 → worker の kwargs）で固定 |
+| `scope-widened-silently` | 当たらない（未指定 None の意味は従来どおり env 既定 → 分野中立。暗黙に広げる経路を増やさない） | — |
+
+### 12.3 仕様
+
+- `IngestRequest` / `IngestBatchRequest` に `cartridge_id: Optional[str] = None`。意味は upload と同一:
+  `None` = 未指定（env 既定 → 分野中立）/ `""` = 「指定しない」の明示 / それ以外 = 選択肢に実在する
+  分野キー（語彙外は 422・detail は upload と同文）。検証は**取得・投入の前**（語彙外で arXiv を叩かない）。
+- `/ingest` は `_accept_material_source(cartridge_id=)` へ渡し、監査 metadata に `cartridge_id` を残す。
+- `/ingest-batch` は migration 090 の `paper_discovery_ingest_items.cartridge_id TEXT NULL` に保存
+  （NULL と `""` を区別したまま）。`ingest_queue` の DTO に `cartridge_id`、worker が受理へそのまま渡す。
+- UI（`admin-paper-discovery.js` / `admin-paper-radar.js`）: 取り込み区画の「生成する言語」の下に
+  「解析の分野」select（アンカー `materials.arxiv-discovery-ingest-domain` /
+  `materials.radar-ingest-domain`）。選択肢は `admin.js loadDomainOptions()` を DI で受け取り
+  （教材アップロードの「分野」と同じ合成の 1 本）、retired を除外・先頭は「指定しない」。
+  送信は同期・キューの両方で常に `cartridge_id`（「指定しない」は `""`）。
+- **既定値の決め方**: 分野購読モーダルは**選んでいる購読の `domain_key` が選択肢に実在すれば**それ、
+  無ければ「指定しない」（購読は分野単位の教員共同財で、分野マップ / カートリッジのキーと名前空間を
+  共有するため。`arxiv` 等の名前空間だけのキーは選択肢に無いので「指定しない」に落ちる）。
+  レーダーは §16（`paper_radar_design.md`）。どちらも推定で分野を作らない。
+
+### 12.4 ガードレール
+
+`test_paper_discovery_api.py::TestIngestCartridgeId` / `test_paper_discovery_worker.py::
+TestCartridgeIdThroughTheQueue` / `test_paper_discovery_ui_static.py::TestIngestDomainSelect` /
+`test_admin_help_ui_anchors.py`（件数 372）。
+
+### 12.5 追補 — 取り込み済みの論文は弁で止める（2026-10-16・migration なし・IK-0796）
+
+候補一覧と同じ判定（投入者に**見える**教材の `source_url` の正規化 arXiv ID・正本は `ingest_queue.visible_ingested_documents`、`search` は再エクスポート）を弁にも置く。同期 `/ingest` は arXiv を呼ぶ前に判定し、全件取り込み済みなら **409**（`detail` 事実文・`reason: "already_ingested"`・`existing[]` = document_id / material_id / title / arxiv_id）、一部なら該当 item を `failed` に同じ形で積む。`/ingest-batch` は `skipped[]` に `reason` + `existing`、worker は取得直前に再判定して `failed` に残す。`force` は作らない（重複は資産にならない・やり直しは再解析）。
+汎用「URLから取得」には付けない: UF5（取得後は既存アップロードと同一経路・URL のための分岐を足さない）に従い、ファイル選択のアップロードにも重複判定が無い以上 URL 経路だけ止める理由が無く、受理後の `notice` では費用（解析）が先に出て警告の意味を成さないため。事前確認を付けるなら upload と URL の両方に同じ判定を置く別件として扱う。

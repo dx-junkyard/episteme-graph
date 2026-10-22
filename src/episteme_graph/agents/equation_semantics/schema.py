@@ -193,6 +193,15 @@ REVIEW_FLAGS = [
     # Issue #368: an I/O derivation link referenced an id that is not a member
     # of the document's final equation set (block id / candidate id / dangling).
     "nonequation_id_in_links",
+    # 2026-10-16: an I/O derivation link named an equation that was not in the
+    # neighbor_equations list given to the LLM (it was dropped, not trusted).
+    "io_id_not_in_neighbor_equations",
+    # IK-0809: a linked_text_spans entry named a span that was not in the
+    # candidate_text_spans list given to the LLM (it was dropped, not trusted).
+    "linked_span_not_in_candidates",
+    # IK-0819: the generated summary contained internal identifiers (block ids such
+    # as tex_b80); they were stripped from the summary and the fact is kept here.
+    "internal_id_in_summary",
 ]
 
 CANDIDATE_REVIEW_REASONS = [
@@ -331,6 +340,15 @@ class EquationLLMInput:
     needs_reconstruction: bool = False
     extraction_source: str = "pdf_text_layer"
     source_is_trusted: bool = False
+    # 2026-10-16（S1 seq 2839/2845/2848）: 近傍の式ブロックの一覧
+    # ``[{equation_id, label, latex_head}]``（同一節優先・上限 12・文書順）。
+    # input/output_equation_ids の材料。None = 一覧を組まなかった旧経路（制限しない）。
+    neighbor_equations: list[dict] | None = None
+    # IK-0809（2026-10-17）: linked_text_spans の材料。式のブロック（inline）と、式の直前・
+    # 直後の本文ブロックの役割付き span ``[{span_id, block_id, text, role_labels}]``。
+    # span_id はブロックごとに振り直されるので block_id と組で引く。None = 役割判定の
+    # 結果を渡さなかった経路（制限しない）。
+    candidate_text_spans: list[dict] | None = None
 
 
 # ---------------------------------------------------------------------------

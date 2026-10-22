@@ -467,3 +467,18 @@ class TestNoNulBytesInFrontendJs:
             path.name for path in sorted(_JS_DIR.glob("*.js")) if b"\x00" in path.read_bytes()
         ]
         assert offenders == [], "リテラル NUL バイトを含む JS: " + str(offenders)
+
+
+# ---------------------------------------------------------------------------
+# 8. キーフレーズの出所ラベル — 中心命題の段は要旨も材料にする（paper_radar §20 C）
+# ---------------------------------------------------------------------------
+
+
+class TestKeyphraseSourceLabelThesis:
+    def test_thesis_label_names_the_abstract_too(self):
+        """段④の ``thesis`` は中心命題に加えて arXiv 要旨（写し）も材料にする。
+
+        ラベルが「中心命題から」のままだと、要旨由来の固有名（DHOST 等）の出所を偽る。
+        JS 2 本の逐語ミラーは ``test_paper_radar_ui_static.py::TestKeyphraseSupply`` が固定する。
+        """
+        assert label_vocab.KEYPHRASE_SOURCE_LABELS["thesis"] == "論文の中心命題・要旨から"

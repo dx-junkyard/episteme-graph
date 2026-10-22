@@ -3457,10 +3457,18 @@ def upsert_analysis_run(
     ``None`` のときは既存値を保持する（呼び出し側が毎回 options を意識せず
     呼べるようにするため）。
 
+    ``cartridge_id`` は**この run の実効の分野**で、新規作成・更新の両方で必ず書く
+    （``None`` / ``""`` は NULL = 分野中立）。「前回 run の分野を引き継ぐ」解決は
+    呼び出し側（route の ``_previous_run_cartridge_id`` / orchestrator の env 解決）が
+    済ませてから渡す — persistence で ``None`` を「変更なし」と読むと、resume 経路で
+    「指定しない」への解除が表現できない（IK-0702。options と違い、ここに保持の分岐を
+    置かない）。
+
     ``stage_outputs`` の ``_artifacts`` は **stage_outputs に書かず**、生成ログ表
     ``document_analysis_artifacts`` へ stage ごと upsert する（§6 / KO6）。読み手の
     契約（``document_run_artifacts()``）は getter 側の hydrate で不変に保つ。
     """
+    cartridge_id = (cartridge_id or "").strip() or None
     payload = dict(stage_outputs or {})
     artifacts = payload.pop(ARTIFACTS_KEY, None)
     stage_outputs = payload
@@ -3505,6 +3513,7 @@ def upsert_analysis_run(
                     """
                     UPDATE document_analysis_runs SET
                         status = :status,
+                        cartridge_id = :cartridge_id,
                         current_stage = :current_stage,
                         error_message = :error_message,
                         stage_outputs = stage_outputs || CAST(:stage_outputs AS jsonb),
@@ -3518,6 +3527,7 @@ def upsert_analysis_run(
                 {
                     "id": run_id,
                     "status": status,
+                    "cartridge_id": cartridge_id,
                     "current_stage": current_stage,
                     "error_message": error_message or "",
                     "stage_outputs": _json_dumps(stage_outputs or {}),

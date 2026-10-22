@@ -13,7 +13,7 @@
  *   PD8 押し付けない（自動表示・ポーリングをしない。開いたときだけ fetch する）
  *
  * ES5 で書く（開発ルール5。admin.js / admin-release-review.js と同じ流儀）。
- * DI は init(deps)。
+ * DI は init(deps)。deps = { apiFetch, escHtml, onUploadAccepted, loadDomainOptions }。
  */
 (function () {
   "use strict";
@@ -21,10 +21,15 @@
   var deps = null;
 
   // PD3: 供給元の日本語ラベル（チップの title 属性に出す）。
+  // 正本は core/label_vocab.py の KEYPHRASE_SOURCE_LABELS（逐語ミラー）。
   var SOURCE_LABELS = {
     skeleton: "分野の地図の概念から",
     cartridge: "カートリッジ語彙から",
     component: "承認済み理論部品から",
+    alias: "教員が確定した別名から",
+    concept: "主張の概念から",
+    title: "題名から",
+    thesis: "論文の中心命題・要旨から",
     manual: "手動"
   };
 
@@ -293,6 +298,71 @@
   }
 
   // 既存アップロード欄と同じ入力から解析オプションを引き継ぐ（第2の設定 UI を作らない）。
+  // ── 解析の分野（cartridge_id）────────────────────────────────────────
+  // 取り込んだ論文の解析に使う分野。意味は教材アップロードの「分野」行と同一
+  // （「指定しない」= 分野固有の語彙・検証を注入しない分野中立の解析）。
+  // 選択肢は admin.js の loadDomainOptions()（教材アップロードと同じ合成の1本）を
+  // DI で受け取り、廃止済み（retired）の分野は出さない。値はそのまま送り、語彙外は
+  // サーバが 422 で拒否する（フロントの絞り込みを信頼しない）。
+  // 既定は選んでいる購読の分野（domain_key が選択肢に実在するときだけ）。
+  var INGEST_DOMAIN_NOTICE =
+    "「指定しない」は、分野固有の語彙・検証を使わずに解析します。";
+
+  function ingestDomainRowHtml() {
+    return (
+      '<div id="pd-ingest-domain-row" data-ui-anchor="materials.arxiv-discovery-ingest-domain" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">' +
+        '<label for="pd-ingest-domain-select" style="font-size:12px;color:var(--color-text-secondary)">解析の分野</label>' +
+        '<select id="pd-ingest-domain-select" style="font-size:12px">' +
+          '<option value="" selected>指定しない</option>' +
+        "</select>" +
+        '<span style="font-size:11.5px;color:var(--color-text-tertiary)">' +
+          esc(INGEST_DOMAIN_NOTICE) +
+        "</span>" +
+      "</div>"
+    );
+  }
+
+  // 選択肢を読み込み、preferredKey が選択肢に実在すればそれを既定にする
+  // （無ければ「指定しない」のまま）。取得失敗時は「指定しない」だけを残す。
+  function loadIngestDomainOptions(preferredKey) {
+    state.ingestDomainKeys = {};
+    state.ingestDomainPreferred = preferredKey || "";
+    if (!deps || !deps.loadDomainOptions) return;
+    deps.loadDomainOptions()
+      .then(function (opts) {
+        var node = el("pd-ingest-domain-select");
+        if (!node || !state.open) return;
+        var keys = (opts && opts.keys) || [];
+        var names = (opts && opts.names) || {};
+        var lifecycles = (opts && opts.lifecycles) || {};
+        for (var i = 0; i < keys.length; i++) {
+          var key = keys[i];
+          if (!key || lifecycles[key] === "retired") continue;
+          var option = document.createElement("option");
+          option.value = key;
+          option.textContent = names[key] ? names[key] + " (" + key + ")" : key;
+          node.appendChild(option);
+          state.ingestDomainKeys[key] = true;
+        }
+        applyIngestDomainDefault(state.ingestDomainPreferred);
+      })
+      .catch(function () { /* 選択肢が読めなければ「指定しない」のまま */ });
+  }
+
+  function applyIngestDomainDefault(preferredKey) {
+    state.ingestDomainPreferred = preferredKey || "";
+    var node = el("pd-ingest-domain-select");
+    if (!node) return;
+    var keys = state.ingestDomainKeys || {};
+    node.value = preferredKey && keys[preferredKey] ? preferredKey : "";
+  }
+
+  // 送る値（「指定しない」は ""）。
+  function selectedIngestDomain() {
+    var node = el("pd-ingest-domain-select");
+    return node ? String(node.value || "") : "";
+  }
+
   function uploadOptions() {
     var checkbox = el("upload-analyze-images");
     var analyzeImages = !!(checkbox && checkbox.checked);
@@ -460,6 +530,8 @@
               esc(LANGUAGE_NOTICE) +
             "</span>" +
           "</div>" +
+          // 解析の分野（cartridge_id）。同期・キュー登録の両方に効く（キュー行が運ぶ — migration 090）。
+          ingestDomainRowHtml() +
           '<div id="pd-ingest-summary" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
           '<div id="pd-ingest-estimate" style="font-size:11.5px;color:var(--color-text-tertiary);margin-bottom:6px"></div>' +
           '<div id="pd-ingest-result" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
@@ -521,6 +593,7 @@
       "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
     overlay.innerHTML = modalHtml();
     document.body.appendChild(overlay);
+    loadIngestDomainOptions(state.domainKey);
 
     overlay.addEventListener("click", function (event) {
       if (event.target === overlay) close();
@@ -682,6 +755,9 @@
     state.citationNote = "";
     state.citationSeeds = [];
     setNotice("");
+
+    // 取り込みの「解析の分野」の既定は選んだ購読の分野（選択肢に無ければ「指定しない」）。
+    applyIngestDomainDefault(state.domainKey);
 
     var subscription = findSubscription(state.domainKey);
     state.categories = subscription ? (subscription.arxiv_categories || []).slice(0) : [];
@@ -2024,6 +2100,8 @@
     // 生成する言語: 選んだときだけ送る（同期の /ingest のみ。キューは言語を持たない）。
     var ingestLanguage = selectedLanguage();
     if (!batch && ingestLanguage) payload.language = ingestLanguage;
+    // 解析の分野: 常に送る（「指定しない」は ""）。domain_key は監査の帰属で、解析には効かない。
+    payload.cartridge_id = selectedIngestDomain();
     if (batch && state.domainKey) payload.domain_key = state.domainKey;
 
     state.ingesting = true;

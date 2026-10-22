@@ -22,7 +22,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（2026-10-03 時点で **090 以降**。044〜089 は使用済み — §3 参照。
+  着手時は次の空き番号（2026-10-16 時点で **091 以降**。044〜090 は使用済み — §3 参照。
   採番前に必ず `ls backend/db/` で確認する）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
@@ -84,7 +84,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | カテゴリギャップ候補 | 分野マップを論文から育てる層 | `docs/features/category_gap_candidates_design.md`（§10 実装記録） | `backend/core/atlas_gaps/` + `routes/atlas_gaps.py` | 066 | 実装済み（v1-a〜v1-d） |
 | VA層 | ベクトル係留（アンカー埋め込み・別名レジストリ・配置プレフィルタ・着地予測） | `docs/features/atlas_vector_anchoring_design.md`（VA1〜VA9・§12 実装記録） | `backend/core/atlas_vectors/` + `routes/atlas_vectors.py` | 074 | 実装済み（v1） |
 | RE追補 | 分野マップの関係表示（辺候補レビュー + 学習者向け「推定の糸」） | `docs/features/atlas_relation_edges_design.md`（RE1〜RE8・§11 実装記録）・親: [表示原則の討議記録](field_map_display_principles_2026-08-29.md) | `backend/core/atlas_edges/` + `routes/atlas_edges.py` + `atlas-threads-layer.js` | 076 | 実装済み（v1） |
-| 論文ディスカバリー層 | arXiv 分野購読による論文発見と、教員の明示承認による取り込み（+ バッチ取り込みキュー・関連度ランキング・引用グラフ拡張口） | `docs/features/paper_discovery_design.md`（PD1〜PD8・§10 実装記録） | `backend/core/paper_discovery/` + `routes/paper_discovery.py` + `backend/api/ingest_worker.py` + `admin-paper-discovery.js` | 071, 072 | 実装済み（Phase 1〜3） |
+| 論文ディスカバリー層 | arXiv 分野購読による論文発見と、教員の明示承認による取り込み（+ バッチ取り込みキュー・関連度ランキング・引用グラフ拡張口） | `docs/features/paper_discovery_design.md`（PD1〜PD8・§10 実装記録） | `backend/core/paper_discovery/` + `routes/paper_discovery.py` + `backend/api/ingest_worker.py` + `admin-paper-discovery.js` | 071, 072, 090 | 実装済み（Phase 1〜3） |
 | 論文レーダー | 教材（seed）起点の類似論文探索・距離3択・AI 比較分析・arXiv 出所の後付け登録 | `docs/features/paper_radar_design.md`（PR1〜PR8・§10〜§12 実装記録。PD1〜PD8 を全継承） | `backend/core/paper_discovery/`（radar.py / compare.py ほか）+ `routes/paper_discovery.py` + `admin-paper-radar.js` | 不要（既存表の読み + `documents.source_url` の記帳のみ） | 実装済み（v1 + 重なり・差分提示） |
 | コーパス回遊層 | 論文の海（コーパス地図）・コース無しの論文議論・地図の端・関心信号 | `docs/features/corpus_roaming_design.md`（CR1〜CR10・§12 実装記録） | `backend/core/corpus_view.py` + `core/discuss/context.py` + `routes/corpus.py` + `corpus-sea.js` | 073 | 実装済み（Phase A〜D） |
 | コーパスを補う論文 | 「近さ」ではなく「コーパスに何が足されるか」で候補を選ぶ第3の探し方（レンズA 地図の薄い領域 / レンズB 検証記録の無い前提 / レンズC 基盤論文）。3レンズとも決定論・LLM 0回で、embedding は既存の関連度バッチに相乗りする | `docs/features/corpus_complement_design.md`（CC1〜CC8・§11 実装記録。PD1〜PD8 を全継承） | `backend/core/paper_discovery/`（complement.py / foundation.py / reference_cache.py）+ `routes/paper_discovery.py`（complement/*）+ `admin-paper-discovery.js` | 077 | 実装済み（v1） |
@@ -122,7 +122,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   `backend/tests/test_admin_help_ui_anchors.py`（管理側の網羅・双方向整合は同テストと
   `test_admin_help_inspect_ui_static.py` が構造的に守る）。
 
-## 3. migration 帰属一覧（init〜089、2026-10-03 時点）
+## 3. migration 帰属一覧（init〜090、2026-10-16 時点）
 
 `backend/db/` の実ファイルを正とした全 migration の帰属。
 
@@ -199,8 +199,9 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 087 | `087_document_figures_superseded` | **L層 図画像レジストリ**（`document_figures.status` の CHECK に `superseded` を追加。最新の抽出で作られなかった前回までの行を消さずに一覧から外す。正本は `docs/features/image_pipeline_knowledge_library_design.md` §18） |
 | 088 | `088_simulation_bridge` | **検証シミュレーション層（SB層）**（新表 `simulation_programs`（LLM 生成の理論シミュレータ候補・再生成は superseded）/ `instrument_wirings`（L層部品の配線・改訂提案は `parent_wiring_id`）/ `simulation_runs`（append-only）、`epistemic_ledger.simulation_candidates` JSONB、語彙表 `knowledge_entry_types` に `instrument_model` / `noise_source` / `signal_processing`。DELETE 文なし・users 参照なし。正本は `docs/features/simulation_bridge_design.md`） |
 | 089 | `089_simulation_learner` | **検証シミュレーション層 v1.1「主語は学習者」**（`simulation_programs` / `instrument_wirings` / `simulation_runs` に `owner_user_id UUID`（users FK なし）・`course_id TEXT`、`simulation_runs` に `shared_at`（本人の明示共有）・`prediction JSONB`（予想）、`instrument_wirings.origin` の CHECK に `learner`、`knowledge_equations_live` ビュー（078 で欠けていた KO5 の live ビュー）。列追加のみ・DELETE 文なし。正本は `docs/features/simulation_bridge_design.md` §14） |
+| 090 | `090_paper_discovery_ingest_cartridge` | 論文ディスカバリー層 — 取り込みキュー `paper_discovery_ingest_items` に `cartridge_id TEXT NULL`（解析の分野。NULL = 未指定・`''` = 「指定しない」の明示。列追加のみ。正本は `docs/features/paper_discovery_design.md` §12） |
 
-次の空き番号は **090**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **091**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。
 

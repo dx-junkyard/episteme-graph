@@ -104,8 +104,8 @@ def test_inline_candidates_are_counted_in_the_population():
     """
     blocks = [
         _typed("e1", "a = 1 (1)", "equation_block", 0),
-        _typed("b1", "Here N = 5 holds for the sample.", "body_paragraph", 1),
-        _typed("b2", "We also take M = 7 in this case.", "body_paragraph", 2),
+        _typed("b1", "Here N = k T holds for the sample.", "body_paragraph", 1),
+        _typed("b2", "We also take M = r s in this case.", "body_paragraph", 2),
     ]
     structure = _structure(blocks)
     full = BUILDER.compute_candidate_coverage(structure)
@@ -122,7 +122,7 @@ def test_inline_candidates_are_counted_in_the_population():
 def test_include_inline_false_is_recorded_in_details():
     blocks = [
         _typed("e1", "a = 1 (1)", "equation_block", 0),
-        _typed("b1", "Here N = 5 holds.", "body_paragraph", 1),
+        _typed("b1", "Here N = k T holds.", "body_paragraph", 1),
     ]
     facts = BUILDER.compute_candidate_coverage(_structure(blocks), {"include_inline": False})
     assert facts["details"]["includes_inline_candidates"] is False
@@ -142,7 +142,7 @@ def _inline_heavy(n_inline: int, n_display: int = 3):
         order += 1
     for i in range(n_inline):
         blocks.append(
-            _typed(f"p{i}", f"Here N_{i} = {i} holds for the sample.",
+            _typed(f"p{i}", f"Here N_{i} = k_{i} holds for the sample.",
                    "body_paragraph", order)
         )
         order += 1

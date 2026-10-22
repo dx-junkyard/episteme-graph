@@ -1043,6 +1043,17 @@ def reanalyze_document(
             detail="Document has no material_id; cannot fetch PDF for reanalysis",
         )
 
+    # 同じ教材の解析がこのプロセスで走っている間は重ねて起動しない（IK-0702）。
+    # resume は走行中の run を同じ run id で拾うため、重ねると旧スレッド（前回の分野・
+    # オプション）が並走し続け、run 行と LLM 呼び出しに前回の分野が残る。
+    with _material_lock:
+        _running = (_material_status.get(material_id) or {}).get("status") == "processing"
+    if _running:
+        raise HTTPException(
+            status_code=409,
+            detail="この教材の解析が実行中です。完了してから再解析してください。",
+        )
+
     filename_kind = _uploaded_source_kind(filename)
     object_candidates = []
     if filename_kind:

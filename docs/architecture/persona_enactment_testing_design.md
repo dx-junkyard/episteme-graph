@@ -1848,3 +1848,18 @@ skipped の経路は砂場では観察できない（サーバ側は `test_relea
 個人地図の空状態・「マイコース」見出しを投影が落とす / E7 の `STRUCTURE_PERSONAL_KEYS` に `status_label` / precondition 文の識別子 /
 course.open の投影に扉 / 画面文に内部名 / **未対応**: ハーネスがチャットの `history` を窓（直近 N 往復）で送るため、サーバがクライアントの history で保存履歴を置き換え、st-05 の `_discussion` の session 1 の往復が DB から消えた（「今日のあなたの言葉」が空だった原因。画面は全履歴を送るので製品では起きないが、`persist_chat_history` がクライアントの history を信用する弱さは第 4 波候補）。選別は `uxsim/runs/round23/round23_report.md`、課題は IK-0649〜0694。
 
+
+## 21. 論文レーダー自律周回（第 24 周相当・2026-10-16）
+
+画面を通しで受講する周ではなく、**処理済みの教材を起点にレーダーで探し → 分野のペルソナ（審判）が関心を判定し → 関心の持てる
+候補だけを取り込み → 解析後の構造で近さを確かめ → 次の起点へ連鎖する**を止めるまで回す周。ハーネスは製品の HTTP API だけを叩き
+（PE2）、取り込みの弁は審判の decision ファイル（教員の明示操作の代行）に置いて製品に自動取り込みを足さない（PD1）。製品の LLM は
+bridge（`uxsim/sandbox/claude_proxy.py` → mailbox → Opus の頭脳）で肩代わりし、embedding は本物、arXiv は 1 周 ≤ 2 回。
+
+- driver: `uxsim/sandbox/radar_loop.py`（v2 = 浅い段 scan / 深い段 deep・decision の handshake・STOP・attach）、overlay:
+  `uxsim/sandbox/docker-compose.bridge.yml`（開発スタックの api-server だけに重ねる）、記録: `uxsim/runs/radar_loop/`（git 管理外。
+  規律は BRAIN_INSTRUCTIONS / JUDGE_INSTRUCTIONS、現状の棚卸しは UX_BASELINE）。
+- 方式・運転手順・実測（scan-01 の縮退 → 手入力の参照 → 是正直後の失敗 → 是正後の初の取り込み判定）・見つかった根と是正・
+  残課題の正本は [論文レーダーの自律周回](../features/paper_radar_autonomous_loop_design.md)。課題は IK-0695〜IK-0710。
+- 本章の他の周との違い: 審判は E1〜E8 ではなく分野のペルソナによる関心判定（数値を材料にしない）で、審判の判定を**取り込みの前**に
+  挟む（1 本の解析に 10 時間を超えるため — 同設計書 §3）。深い段の審判は本書の時点で未実施。

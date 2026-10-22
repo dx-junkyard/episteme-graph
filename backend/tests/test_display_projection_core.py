@@ -217,3 +217,17 @@ class TestExtraVocabulary:
     @pytest.mark.parametrize("text", ["Figure 3", "Section 3", "latex_b14", "eq_2_7", "eq_12", "figure", "sections"])
     def test_legitimate_display_text_is_not_caught(self, text):
         assert not dp.contains_internal_id(text)
+
+
+class TestBlockIdInGeneratedSummary:
+    """IK-0819: 生成要約に書き写された TeX 経路のブロック ID を表示で遮断する。"""
+
+    def test_parenthesized_block_id_is_detected_and_masked(self):
+        text = "Defines the scale factor (tex_b80)."
+        assert dp.contains_internal_id(text)
+        assert "tex_b80" not in dp.mask_internal_ids(text)
+
+    def test_paper_equation_numbers_and_placeholder_stay(self):
+        assert not dp.contains_internal_id("eq_12")
+        assert not dp.contains_internal_id("eq_2_7")
+        assert not dp.contains_internal_id("tex_bN")

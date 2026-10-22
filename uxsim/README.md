@@ -16,6 +16,7 @@
 | `llm.py` | ペルソナ・審判側 LLM（OpenAI / Anthropic / replay。製品の `core/llm.py` は import しない） |
 | `oracles/` | （第 23 周）`decision.py` = E6 一括確定の確定文脈 / `differential.py` = E7 非 LLM 応答の学習者間差分（沈黙適応の仮説・複数 run は `python -m uxsim.oracles.differential <run...>`）/ `retraction.py` = E8 撤回・訂正の保持。行為の実行と投影は `runner/vision5_exec.py`。審判 A 契約 / B 原則 / C 行動（原因 = 行為 × 詰まり方で束ねる）/ D 文書 / E 観測差分 / `simulation.py`（SB層の A・B・E — 設計書 §19.3）/ `dialogue.py`（往復をまたぐ A・B: 出典番号の振り直し・区別できない出典・古い回答の再送・学習者向け応答の数の欄・precondition の連鎖 =「ハーネス:」）+ `findings.py` + `run_all.py` |
 | `report/` | `campaign_report.py` / `issue_knowledge_bridge.py`（課題ナレッジ候補）/ `map_draft.py`（着手の地図の下書き） |
+| `sandbox/` | 砂場の運転補助（overlay・snapshot・リセット等）。`claude_proxy.py` = OpenAI 互換 proxy（製品の chat.completions を mailbox 経由で頭脳へ回し、embeddings は本物へ素通し）/ `brain.py` = 頭脳の mailbox CLI / `radar_loop.py` = 論文レーダーの自律周回 driver v2（浅い段 scan → 審判 → 深い段 deep の handshake・STOP・attach。正本 `docs/features/paper_radar_autonomous_loop_design.md`）+ `docker-compose.bridge.yml`（開発スタックの api-server に proxy を重ねる overlay） |
 | `runs/` | run の生ログ（git 管理外）: `<campaign_id>/<run_id>/{meta.json, transcript.jsonl, cache/, logs/, findings.jsonl, report.md}` |
 
 ## 走らせ方

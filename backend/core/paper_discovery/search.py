@@ -24,11 +24,14 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 from sqlalchemy import text as sa_text
 
 from core.paper_discovery import arxiv_client, metadata_cache, store
+from core.paper_discovery import ingest_queue as _ingest_queue
+from episteme_graph.agents.alias_matching import text_mentions_alias
 from core.paper_discovery.schema import (
     normalize_arxiv_id,
     normalize_authors,
@@ -123,18 +126,32 @@ def ingested_arxiv_ids(session) -> set[str]:
     return out
 
 
+# 「取り込み済み」判定の正本は ingest_queue に置く（取り込みの弁 = API と worker も同じ判定を
+# 使う — IK-0796。worker は arxiv_client を import するこのモジュールを読めない（PD1））。
+# 候補一覧・レーダーは従来どおり ``search.visible_ingested_documents`` で呼べる（再エクスポート）。
+visible_ingested_documents = _ingest_queue.visible_ingested_documents
+
+
 def matched_keyphrases(entry_payload: dict, keyphrases: list[dict]) -> list[str]:
     """候補のタイトル + 要旨に現れた（enabled な）キーフレーズを返す。
 
     「なぜ候補か」を1行で示すための材料（ブラックボックスのおすすめにしない）。
-    大文字小文字を無視した部分一致で、**一致度の数値は返さない**（PD4）。
+    **一致度の数値は返さない**（PD4）。照合は語境界付きの正本
+    ``episteme_graph.agents.alias_matching.text_mentions_alias`` に寄せる（radar 設計書
+    §21 A'・``rule-enforced-per-surface`` の是正）: 3 文字以下の語は大小区別の単語完全
+    一致（``P`` / ``B`` が ``Power`` や ``bias`` の中に当たらない）、それより長い語は
+    大小無視の語境界付き一致。ハイフンと空白の連なりは同じ区切りとみなす
+    （``large-scale structure`` は ``Large Scale Structure`` にも当たる — arXiv の
+    ``all:`` の照合と画面のチップを食い違わせない。§20 A）。
     """
-    haystack = " ".join(
-        [
-            str(entry_payload.get("title") or ""),
-            str(entry_payload.get("summary") or ""),
-        ]
-    ).casefold()
+    haystack = _match_form(
+        " ".join(
+            [
+                str(entry_payload.get("title") or ""),
+                str(entry_payload.get("summary") or ""),
+            ]
+        )
+    )
     if not haystack.strip():
         return []
     hits: list[str] = []
@@ -142,9 +159,15 @@ def matched_keyphrases(entry_payload: dict, keyphrases: list[dict]) -> list[str]
         if not phrase.get("enabled", True):
             continue
         text = str(phrase.get("text") or "").strip()
-        if text and text.casefold() in haystack:
+        if text and text_mentions_alias(haystack, _match_form(text)):
             hits.append(text)
     return hits
+
+
+def _match_form(text: str) -> str:
+    """一致チップの照合形（ハイフンと空白の連なりを 1 つの空白に。大小は保つ —
+    短い語の大小区別は ``alias_matching`` の規約）。"""
+    return re.sub(r"[\s\-]+", " ", str(text or "")).strip()
 
 
 # ---------------------------------------------------------------------------

@@ -50,6 +50,8 @@ from .schema import (
     ComponentGraphEdge,
     ComponentGraphNode,
     ComponentGraphResult,
+    ELIMINATION_TARGET_UNRESOLVED_REASON,
+    UNRESOLVED_ELIMINATION_OPERATION,
     classify_operation,
     derivation_step_ref,
     review_status_for_backing,
@@ -164,6 +166,17 @@ class ComponentGraphNormalizer:
                 counter += 1
                 operation = str(getattr(step, "operation", "") or "")
                 verb, edge_type, is_generic = classify_operation(operation)
+                # 消去の操作を宣言しているのに消去対象の記号が材料に無い step は、
+                # 消去として確定できない（validator の hard error
+                # elimination_missing_eliminated_symbols に当たり、グラフ全体が
+                # 保存されなくなる）。記号を推測で補わず、宣言された操作は
+                # declared_operation に残したまま generic 扱い（式 backing があれば
+                # equation_detail に partially_source_backed、無ければ debug）に落とす。
+                declared_operation = ""
+                if _is_unresolved_elimination(operation, step):
+                    declared_operation = operation
+                    operation = UNRESOLVED_ELIMINATION_OPERATION
+                    _, edge_type, is_generic = classify_operation(operation)
                 step_id = str(getattr(step, "step_id", "") or f"step_{counter}")
                 records.append({
                     "detail_id": f"eq_op_{counter:04d}",
@@ -183,6 +196,7 @@ class ComponentGraphNormalizer:
                     ),
                     "component_records": component_records,
                     "operation": operation,
+                    "declared_operation": declared_operation,
                     "verb": verb,
                     "edge_type": edge_type,
                     "is_generic": is_generic,
@@ -729,6 +743,9 @@ def _detail_node_from_record(
     if generic_kept:
         status = "partially_source_backed"
         reasons = _ordered_unique(list(reasons) + ["generic_operation"])
+    declared_operation = str(rec.get("declared_operation") or "")
+    if declared_operation:
+        reasons = _ordered_unique(list(reasons) + [ELIMINATION_TARGET_UNRESOLVED_REASON])
 
     definitions = outputs if edge_type == "defines" else []
     constraints = outputs if edge_type in ("constrains", "derives", "diagnoses") else []
@@ -741,6 +758,11 @@ def _detail_node_from_record(
 
     detail_label = _build_detail_label(rec["verb"], step, inputs, outputs)
     step_reason = str(getattr(step, "reason", "") or "").strip()
+    if declared_operation:
+        step_reason = (
+            f"declared operation {declared_operation!r} names no eliminated symbol; "
+            f"kept as a generic step. {step_reason}"
+        ).strip()
     step_input_claims = _ordered_unique(getattr(step, "input_claim_ids", []) or [])
     step_required_claims = _ordered_unique(getattr(step, "required_claim_ids", []) or [])
     step_output_claims = _ordered_unique(getattr(step, "output_claim_ids", []) or [])
@@ -791,6 +813,17 @@ def _detail_node_from_record(
         **_support_metadata_for_components(list(rec.get("linked_component_ids", [])), [rec]),
         **_concepts_for_components(list(rec.get("linked_component_ids", [])), [rec]),
     )
+
+
+def _is_unresolved_elimination(operation: str, step) -> bool:
+    """True when a step declares an elimination but names no eliminated symbol.
+
+    Mirrors the validator's rule (``"eliminat"`` in the operation) so that every
+    node the validator would reject is downgraded here instead.
+    """
+    if "eliminat" not in str(operation or "").lower():
+        return False
+    return not _ordered_unique(getattr(step, "eliminated_symbols", []) or [])
 
 
 def _detail_edges_from_records(

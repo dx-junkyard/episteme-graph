@@ -33,8 +33,16 @@ from typing import Any, Optional
 #: ``skeleton`` = atlas 骨格の概念ラベル / ``cartridge`` = カートリッジ ontology /
 #: ``alias`` = 教員が確定した骨格ノードの別名
 #: （``docs/features/atlas_vector_anchoring_design.md`` §7 の還流2）/
-#: ``component`` = 承認済み理論部品のラベル / ``manual`` = 教員が自分で足したもの。
-KEYPHRASE_SOURCES = ("skeleton", "cartridge", "component", "alias", "manual")
+#: ``component`` = 承認済み理論部品のラベル /
+#: ``concept`` = 論文レーダーの起点教材の live 主張（``theory_claims_live.concepts``）の
+#: 概念名（記号・文のような名前は除く）/ ``title`` = 起点教材の題名の名詞句 /
+#: ``thesis`` = 起点教材の中心命題（``thesis_reconstruction``）の名詞句
+#: （``docs/features/paper_radar_design.md`` §17）/ ``manual`` = 教員が自分で足したもの。
+#: ``manual`` は末尾に置く（供給元ではなく落とし所）。表示ラベルの正本は
+#: ``core.label_vocab.KEYPHRASE_SOURCE_LABELS``。
+KEYPHRASE_SOURCES = (
+    "skeleton", "cartridge", "component", "alias", "concept", "title", "thesis", "manual",
+)
 
 #: 供給元が不明・不正だったキーフレーズの落とし所（教員が足したものと同じ扱い）。
 DEFAULT_KEYPHRASE_SOURCE = "manual"

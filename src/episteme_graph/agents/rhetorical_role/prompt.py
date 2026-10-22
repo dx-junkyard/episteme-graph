@@ -108,13 +108,32 @@ class RhetoricalRolePromptFactory:
         if llm_input.headline_claim:
             parts.append(f"headline_claim: {llm_input.headline_claim}")
 
-        if llm_input.prev_text:
-            parts.append("\n## Previous Context")
+        # 直前の文脈ブロックが Preceding Equation の式そのもの（TeX 由来で本文が載る）なら
+        # Previous Context に同じ式を二重に載せない（IK-0794 / seq 2983）。
+        eq_shown = bool(
+            llm_input.preceding_equation and llm_input.preceding_equation.get("latex")
+        )
+        if llm_input.prev_text and not eq_shown:
+            parts.append(
+                "\n## Previous Context (from the previous section, not part of this section)"
+                if llm_input.prev_text_other_section else "\n## Previous Context"
+            )
             parts.append(llm_input.prev_text)
+        if llm_input.preceding_equation:
+            eq = llm_input.preceding_equation
+            parts.append("\n## Preceding Equation (the block right before this one; the current block starts as its continuation)")
+            parts.append(f"block_id: {eq.get('block_id')}")
+            parts.append(f"label: {eq.get('label') or ''}")
+            parts.append(
+                eq.get("latex") or "[EQUATION_TEXT_FROM_PDF_OMITTED_AS_UNTRUSTED]"
+            )
         parts.append("\n## Current Block Text")
         parts.append(llm_input.block_text)
         if llm_input.next_text:
-            parts.append("\n## Next Context")
+            parts.append(
+                "\n## Next Context (from the next section, not part of this section)"
+                if llm_input.next_text_other_section else "\n## Next Context"
+            )
             parts.append(llm_input.next_text)
 
         if llm_input.normalized_terms:
@@ -141,6 +160,7 @@ class RhetoricalRolePromptFactory:
         parts.append("\n## Constraints")
         parts.append(
             "- span text must be an exact substring of Current Block Text\n"
+            "- never start or end a span inside inline math ($…$, \\(…\\), \\[…\\]); treat each math segment as one token\n"
             "- char_start and char_end are zero-based offsets into Current Block Text\n"
             "- figure/table/prior-work/meta spans should usually be reject candidates\n"
             "- content-bearing definition/relation/assumption/derivation/correction/"

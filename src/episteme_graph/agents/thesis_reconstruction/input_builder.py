@@ -6,6 +6,10 @@
 **どれだけ渡さなかったかは報告する** — :meth:`compute_input_coverage` が母集合・
 処理数・理由コードを返し、orchestrator が stage payload の ``coverage`` に載せる
 （P0-10）。
+
+式（``major_equations``）は先頭切り捨てをやめ、``equation_selection`` の正本規則
+（主張が参照する式 → 結果系の節・結果の式 → 残りを節単位の層化サンプリング）で選ぶ
+（再現性レビュー J-3。先頭 16 式で頭打ちになり主結果の式が材料に入らなかった）。
 """
 from __future__ import annotations
 
@@ -15,6 +19,12 @@ from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
 from episteme_graph.agents.claim_selection import (
     headline_text_for_selection,
     select_claim_rows,
+)
+from episteme_graph.agents.equation_selection import (
+    SELECTION_RULE,
+    linked_equation_ids_from_claims,
+    priority_section_ids_from_skeleton,
+    select_equation_indices,
 )
 from episteme_graph.agents.id_canonicalization import (
     canonical_claim_id_for_span,
@@ -47,7 +57,11 @@ class ThesisReconstructionInputBuilder:
         )
         accepted_claims = claim_selection.selected
         major_equations = self._major_equations(
-            equations, int(cfg.get("max_equations", _MAX_EQUATIONS))
+            equations,
+            int(cfg.get("max_equations", _MAX_EQUATIONS)),
+            claim_rows=accepted_claims,
+            claim_objects=claim_objects,
+            skeleton=skeleton,
         )
         logical_blocks = self._logical_blocks(
             skeleton, int(cfg.get("max_logical_blocks", _MAX_LOGICAL_BLOCKS))
@@ -90,16 +104,22 @@ class ThesisReconstructionInputBuilder:
         max_logical_blocks = int(cfg.get("max_logical_blocks", _MAX_LOGICAL_BLOCKS))
 
         available_claims = len(getattr(qualified_claims, "qualified_spans", []) or [])
-        selected_claims = len(
-            self._accepted_claims(
-                qualified_claims,
-                max_claims,
-                claim_objects=claim_objects,
-                skeleton=skeleton,
-            ).selected
+        selected_claim_rows = self._accepted_claims(
+            qualified_claims,
+            max_claims,
+            claim_objects=claim_objects,
+            skeleton=skeleton,
+        ).selected
+        selected_claims = len(selected_claim_rows)
+        equation_selection = self._equation_selection(
+            equations,
+            max_equations,
+            claim_rows=selected_claim_rows,
+            claim_objects=claim_objects,
+            skeleton=skeleton,
         )
-        available_equations = len(getattr(equations, "equations", []) or []) if equations else 0
-        selected_equations = min(available_equations, max(max_equations, 0))
+        available_equations = equation_selection.population
+        selected_equations = len(equation_selection.indices)
         available_blocks = len(getattr(skeleton, "logical_blocks", []) or [])
         selected_blocks = min(available_blocks, max(max_logical_blocks, 0))
 
@@ -116,7 +136,11 @@ class ThesisReconstructionInputBuilder:
             "processed": selected_claims + selected_equations + selected_blocks,
             "reasons": reasons,
             "unit": "context_items",
-            "details": {"scope": "claims_equations_logical_blocks"},
+            "details": {
+                "scope": "claims_equations_logical_blocks",
+                "equation_selection": SELECTION_RULE,
+                "unprocessed_equation_sections": equation_selection.unprocessed_sections,
+            },
         }
 
     @staticmethod
@@ -180,14 +204,43 @@ class ThesisReconstructionInputBuilder:
         )
 
     @staticmethod
-    def _major_equations(
+    def _equation_selection(
         equations: EquationSemanticsResult | None,
         limit: int,
+        *,
+        claim_rows: list[dict] | None = None,
+        claim_objects=None,
+        skeleton=None,
+    ):
+        records = list(getattr(equations, "equations", None) or []) if equations else []
+        return select_equation_indices(
+            records,
+            limit,
+            linked_equation_ids=linked_equation_ids_from_claims(
+                (row.get("claim_id") for row in claim_rows or []), claim_objects
+            ),
+            priority_section_ids=priority_section_ids_from_skeleton(skeleton),
+        )
+
+    @classmethod
+    def _major_equations(
+        cls,
+        equations: EquationSemanticsResult | None,
+        limit: int,
+        *,
+        claim_rows: list[dict] | None = None,
+        claim_objects=None,
+        skeleton=None,
     ) -> list[dict]:
         if not equations:
             return []
+        records = list(equations.equations)
+        selection = cls._equation_selection(
+            equations, limit,
+            claim_rows=claim_rows, claim_objects=claim_objects, skeleton=skeleton,
+        )
         result = []
-        for record in equations.equations[:limit]:
+        for record in (records[i] for i in selection.indices):
             src = record.source_extraction
             sem = record.semantics
             loc = src.source_location if src.source_location else {}

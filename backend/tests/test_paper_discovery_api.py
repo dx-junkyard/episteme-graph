@@ -297,6 +297,16 @@ def env(monkeypatch):
 
     monkeypatch.setattr(routes, "_accept_material_source", _accept)
 
+    # ── 取り込み済み判定（IK-0796・投入者の可視集合）。既定は該当なし ──────
+    state["ingested"] = {}
+    state["ingested_calls"] = []
+
+    def _visible_ingested(user_id):
+        state["ingested_calls"].append(user_id)
+        return dict(state["ingested"])
+
+    monkeypatch.setattr(routes, "_visible_ingested_documents", _visible_ingested)
+
     state["client"] = TestClient(app)
     state["routes"] = routes
     state["tokens"] = {
@@ -1563,3 +1573,228 @@ class TestIngestStopsAtRateLimit:
         assert len(env["fetches"]) == 1
         assert failed[1].get("rate_limited") is None
         assert failed[1]["arxiv_id"] == "not-an-id"
+
+
+# ---------------------------------------------------------------------------
+# 解析の分野（cartridge_id）の受け渡し — 2026-10-16・migration 090
+# （condition-not-propagated の是正。paper_discovery_design.md §12）
+# ---------------------------------------------------------------------------
+class TestIngestCartridgeId:
+    """取り込み経路が upload と同じ検証で分野を受け、受理・キュー行へ運ぶ。"""
+
+    @pytest.fixture(autouse=True)
+    def _known_keys(self, monkeypatch):
+        import routes.admin as admin_routes
+
+        monkeypatch.setattr(
+            admin_routes, "_known_domain_keys", lambda: {"astrophysics", "particle_physics"}
+        )
+
+    def _ingest(self, env, extra):
+        env["session"].domains = ["arxiv.org"]
+        body = {"items": _items("2608.20293")}
+        body.update(extra)
+        return env["client"].post(
+            "/api/admin/discovery/ingest", json=body, headers=_auth(env, "teacher")
+        )
+
+    def _batch(self, env, extra):
+        env["session"].domains = ["arxiv.org"]
+        body = {"items": _items("2608.20293")}
+        body.update(extra)
+        return env["client"].post(
+            "/api/admin/discovery/ingest-batch", json=body, headers=_auth(env, "teacher")
+        )
+
+    def test_uses_the_same_validator_as_upload(self):
+        import routes.admin as admin_routes
+        import routes.paper_discovery as routes
+
+        assert routes._validate_cartridge_option is admin_routes._validate_cartridge_option
+
+    def test_known_key_is_passed_to_acceptance(self, env):
+        res = self._ingest(env, {"cartridge_id": "astrophysics"})
+        assert res.status_code == 202
+        assert env["accepted"][0]["cartridge_id"] == "astrophysics"
+
+    def test_empty_string_means_explicit_none(self, env):
+        res = self._ingest(env, {"cartridge_id": ""})
+        assert res.status_code == 202
+        assert env["accepted"][0]["cartridge_id"] == ""
+
+    def test_omitted_stays_none(self, env):
+        res = self._ingest(env, {})
+        assert res.status_code == 202
+        assert env["accepted"][0]["cartridge_id"] is None
+
+    def test_unknown_key_is_422_before_fetch(self, env):
+        res = self._ingest(env, {"cartridge_id": "no_such_domain"})
+        assert res.status_code == 422
+        assert "選択肢にありません" in res.json()["detail"]
+        assert env["fetches"] == []
+        assert env["accepted"] == []
+
+    def test_domain_key_is_not_used_as_the_analysis_domain(self, env):
+        res = self._ingest(env, {"domain_key": "astrophysics"})
+        assert res.status_code == 202
+        assert env["accepted"][0]["cartridge_id"] is None
+
+    def test_ingest_audit_records_the_domain(self, env):
+        self._ingest(env, {"cartridge_id": "astrophysics"})
+        assert env["audits"][-1][5]["cartridge_id"] == "astrophysics"
+
+    def test_batch_passes_the_domain_to_the_queue(self, env):
+        res = self._batch(env, {"cartridge_id": "astrophysics"})
+        assert res.status_code == 202
+        assert env["enqueue_calls"][0][1]["cartridge_id"] == "astrophysics"
+
+    def test_batch_empty_string_and_omitted(self, env):
+        assert self._batch(env, {"cartridge_id": ""}).status_code == 202
+        assert env["enqueue_calls"][-1][1]["cartridge_id"] == ""
+        env["enqueue_calls"].clear()
+        assert self._batch(env, {}).status_code == 202
+        assert env["enqueue_calls"][-1][1]["cartridge_id"] is None
+
+    def test_batch_unknown_key_is_422_before_enqueue(self, env):
+        res = self._batch(env, {"cartridge_id": "no_such_domain"})
+        assert res.status_code == 422
+        assert env["enqueue_calls"] == []
+        assert env["audits"] == []
+
+
+# ---------------------------------------------------------------------------
+# 既に取り込み済みの論文は取り込みの弁で止める（IK-0796, 2026-10-16）
+# ---------------------------------------------------------------------------
+
+
+_EXISTING = {
+    "document_id": "2a24b9e4-0000-0000-0000-000000000000",
+    "material_id": "mat-existing",
+    "title": "Existing paper",
+    "analysis_status": "completed",
+}
+
+
+class TestIngestAlreadyIngested:
+    """候補一覧と同じ判定（可視教材の ``source_url``）を取り込みの弁でも使う。"""
+
+    PATH = "/api/admin/discovery/ingest"
+
+    def test_single_already_ingested_is_409_without_fetching(self, env):
+        env["session"].domains = ["arxiv.org"]
+        env["ingested"] = {"2609.35757": dict(_EXISTING)}
+        res = env["client"].post(
+            self.PATH, json={"items": _items("2609.35757v1")}, headers=_auth(env, "teacher")
+        )
+        assert res.status_code == 409
+        body = res.json()
+        assert isinstance(body["detail"], str) and "取り込み済み" in body["detail"]
+        assert body["reason"] == "already_ingested"
+        assert body["existing"] == [
+            {
+                "document_id": _EXISTING["document_id"],
+                "material_id": "mat-existing",
+                "title": "Existing paper",
+                "arxiv_id": "2609.35757",
+            }
+        ]
+        # arXiv も受理（= 解析パイプライン）も呼ばない。
+        assert env["fetches"] == []
+        assert env["accepted"] == []
+        assert env["ingested_calls"] == [_TEACHER]
+
+    def test_mixed_request_ingests_the_rest_and_reports_the_duplicate(self, env):
+        env["session"].domains = ["arxiv.org"]
+        env["ingested"] = {"2609.35757": dict(_EXISTING)}
+        res = env["client"].post(
+            self.PATH,
+            json={"items": _items("2609.35757", "2608.20293")},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 202
+        body = res.json()
+        assert [entry["arxiv_id"] for entry in body["accepted"]] == ["2608.20293"]
+        assert len(body["failed"]) == 1
+        failure = body["failed"][0]
+        assert failure["arxiv_id"] == "2609.35757"
+        assert failure["reason"] == "already_ingested"
+        assert failure["existing"]["document_id"] == _EXISTING["document_id"]
+        assert len(env["accepted"]) == 1
+        assert all("2609.35757" not in url for url, _ in env["fetches"])
+
+    def test_not_ingested_is_unchanged(self, env):
+        env["session"].domains = ["arxiv.org"]
+        res = env["client"].post(
+            self.PATH, json={"items": _items("2608.20293")}, headers=_auth(env, "teacher")
+        )
+        assert res.status_code == 202
+        assert len(res.json()["accepted"]) == 1
+
+    def test_batch_passes_the_visible_ingested_documents(self, env):
+        env["ingested"] = {"2609.35757": dict(_EXISTING)}
+        env["enqueue_result"] = {
+            "queued": [],
+            "skipped": [
+                {
+                    "arxiv_id": "2609.35757",
+                    "detail": env["routes"].pd_queue.SKIP_ALREADY_INGESTED,
+                    "reason": "already_ingested",
+                    "existing": {
+                        "document_id": _EXISTING["document_id"],
+                        "material_id": "mat-existing",
+                        "title": "Existing paper",
+                    },
+                }
+            ],
+        }
+        res = env["client"].post(
+            "/api/admin/discovery/ingest-batch",
+            json={"items": _items("2609.35757")},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 202
+        _entries, kwargs = env["enqueue_calls"][0]
+        assert kwargs["ingested_documents"] == {"2609.35757": _EXISTING}
+        skipped = res.json()["skipped"]
+        assert skipped[0]["reason"] == "already_ingested"
+        assert skipped[0]["existing"]["document_id"] == _EXISTING["document_id"]
+
+
+class TestVisibleIngestedHelper:
+    """``_visible_ingested_documents`` は投入者の可視集合を候補一覧と同じ正本へ渡す。"""
+
+    def test_uses_the_users_visible_documents(self, monkeypatch):
+        import routes.paper_discovery as routes
+
+        class _S:
+            def close(self):
+                pass
+
+        seen: dict = {}
+        monkeypatch.setattr(routes, "_pg_session", lambda: _S())
+        monkeypatch.setattr(
+            routes.services, "list_visible_document_ids", lambda user_id: {"doc-1"}
+        )
+
+        def _visible(session, *, visible_document_ids):
+            seen["visible"] = set(visible_document_ids)
+            return {"2609.35757": dict(_EXISTING)}
+
+        monkeypatch.setattr(routes.pd_search, "visible_ingested_documents", _visible)
+        assert routes._visible_ingested_documents("u-1") == {"2609.35757": _EXISTING}
+        assert seen["visible"] == {"doc-1"}
+
+    def test_failure_degrades_to_no_judgement(self, monkeypatch):
+        import routes.paper_discovery as routes
+
+        class _S:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(routes, "_pg_session", lambda: _S())
+
+        def _fail(user_id):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(routes.services, "list_visible_document_ids", _fail)
+        assert routes._visible_ingested_documents("u-1") == {}

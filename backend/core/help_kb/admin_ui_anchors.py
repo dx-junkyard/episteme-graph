@@ -299,6 +299,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.arxiv-discovery-format",
         # 生成する言語（同期の取り込みだけに効く）— レーダー側の materials.radar-language と同型。
         "materials.arxiv-discovery-language",
+        # 解析の分野（cartridge_id。同期・キューの両方に効く — 2026-10-16・migration 090）。
+        "materials.arxiv-discovery-ingest-domain",
         "materials.arxiv-discovery-queue",
         "materials.arxiv-discovery-queue-refresh",
         "materials.arxiv-discovery-search",
@@ -320,10 +322,17 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # 取得する形式（TeX ソース / PDF）— arXiv の「Access Paper」の選択肢に対応。
         "materials.radar-format",
         "materials.radar-language",
+        # 解析の分野（cartridge_id。既定は seed 教材の採用 run の分野 — 2026-10-16）。
+        "materials.radar-ingest-domain",
         "materials.radar-ingest",
         "materials.radar-modal",
         "materials.radar-provenance",
         "materials.radar-search",
+        # 取り込み済み候補の導線と連鎖（paper_radar_design.md §19 C — 2026-10-16）。
+        "materials.radar-ingested-open-material",
+        "materials.radar-ingested-graph-review",
+        "materials.radar-ingested-landscape",
+        "materials.radar-chain-seed",
         "materials.library-entry-merge-target",
         "materials.library-entry-modal",
         "materials.llm-model-change",
@@ -964,6 +973,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # 論文では arXiv が返した PDF をそのまま取り込む（形式の判定はサーバ側）
     "materials.arxiv-discovery-format": "teacher/11-admin-materials.md#arxiv-discovery-format",
     "materials.arxiv-discovery-language": "teacher/11-admin-materials.md#arxiv-discovery-language",
+    # 解析の分野（「指定しない」= 分野固有の語彙・検証を使わない）
+    "materials.arxiv-discovery-ingest-domain": "teacher/11-admin-materials.md#arxiv-discovery-ingest-domain",
     # 選択した論文を取り込む（許可ドメイン未設定・未選択のときは無効）
     "materials.arxiv-discovery-ingest": "teacher/11-admin-materials.md#arxiv-discovery-ingest",
     # 学習者の関心（コーパス回遊 Phase D。k-匿名レンジの事実行だけ・行が無ければ区画ごと非表示）
@@ -1008,6 +1019,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # 論文では arXiv が返した PDF をそのまま取り込む（形式の判定はサーバ側）
     "materials.radar-format": "teacher/11-admin-materials.md#radar-format",
     "materials.radar-language": "teacher/11-admin-materials.md#radar-language",
+    # 解析の分野（レーダー。既定は起点教材の解析分野）
+    "materials.radar-ingest-domain": "teacher/11-admin-materials.md#radar-ingest-domain",
     # 選択した論文を取り込む（レーダー）— 取り込みの弁は既存 ingest と同一
     "materials.radar-ingest": "teacher/11-admin-materials.md#radar-ingest",
     # 論文レーダーモーダル（起点の教材 / 距離と検索条件 / 候補一覧 / 取り込み）
@@ -1017,6 +1030,12 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.radar-provenance": "teacher/11-admin-materials.md#radar-provenance",
     # この条件で検索（レーダー）— arXiv のメタデータのみ・テキスト LLM 不使用
     "materials.radar-search": "teacher/11-admin-materials.md#radar-search",
+    # 取り込み済み・受理直後の候補の導線（§19 C）— 教材の行へ / グラフレビュー /
+    # 位置づけ / この論文を起点に探す（解析完了までは理由付きで無効）
+    "materials.radar-ingested-open-material": "teacher/11-admin-materials.md#radar-ingested-open-material",
+    "materials.radar-ingested-graph-review": "teacher/11-admin-materials.md#radar-ingested-graph-review",
+    "materials.radar-ingested-landscape": "teacher/11-admin-materials.md#radar-ingested-landscape",
+    "materials.radar-chain-seed": "teacher/11-admin-materials.md#radar-chain-seed",
     # 統合先ラジオ（新規作成 / 既存エントリへ統合）+ 例示画像を含めるチェックボックス
     "materials.library-entry-merge-target": "teacher/11-admin-materials.md#library-entry-merge-target",
     # ライブラリへ昇格モーダル

@@ -26,6 +26,7 @@ from core.doubt.scope_candidates.system import SYSTEM
 from core.llm_usage.context import bind_usage_context
 from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session
+from core.schema import CLAIM_ORIGIN_EQUATION_SYNTHESIS
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,24 @@ _daily_call_counts: dict[str, int] = _cost_gate.daily_counts
 
 _today_key = today_str
 
+#: 対象から外す理由（IK-0790）。式から決定論で合成した定型主張
+#: （``theory_claims.origin='equation_synthesis'``・「An equation of this paper defines X.」型）は
+#: 論文の文を持たず、検証条件を抽出する材料が原理的に無い。LLM に渡すと候補は必ず空で、
+#: 日次上限だけを消費する。台帳行には触らない（scope_candidates は空のまま・P4）。
+SKIP_REASON_SYNTHESIZED_CLAIMS = "skipped_synthesized_claims"
+
+#: 対象選択で除外する主張の origin。
+_EXCLUDED_CLAIM_ORIGINS: tuple[str, ...] = (CLAIM_ORIGIN_EQUATION_SYNTHESIS,)
+
+#: 台帳行のうち「式由来の合成主張を指す claim 行」を表す述語（epistemic_ledger を外側に置く）。
+_SYNTHESIZED_CLAIM_PREDICATE = """
+    target_type = 'claim' AND EXISTS (
+        SELECT 1 FROM theory_claims_live c
+        WHERE c.id::text = epistemic_ledger.target_id
+          AND c.origin = ANY(:excluded_origins)
+    )
+"""
+
 
 def _check_and_count_llm_call() -> bool:
     """日次上限内なら加算して True。上限超過なら False。
@@ -52,8 +71,11 @@ def _check_and_count_llm_call() -> bool:
 
 def _claim_pending_targets(session, document_id: str, course_id: str) -> list[tuple[str, str]]:
     """未解析の台帳行を claim し（analyzed_at を先に打つ）、対象リストを返す。"""
-    filters = ["scope_candidates_analyzed_at IS NULL"]
-    params: dict = {"limit": _BATCH_LIMIT}
+    filters = [
+        "scope_candidates_analyzed_at IS NULL",
+        f"NOT ({_SYNTHESIZED_CLAIM_PREDICATE})",
+    ]
+    params: dict = {"limit": _BATCH_LIMIT, "excluded_origins": list(_EXCLUDED_CLAIM_ORIGINS)}
     if document_id:
         filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
         params["doc"] = document_id
@@ -77,6 +99,27 @@ def _claim_pending_targets(session, document_id: str, course_id: str) -> list[tu
     ).fetchall()
     session.commit()
     return [(str(r[0]), str(r[1])) for r in rows]
+
+
+def _has_skipped_synthesized_targets(session, document_id: str, course_id: str) -> bool:
+    """未解析のまま対象選択から外れた合成主張の台帳行があるか（件数は返さない）。"""
+    filters = ["scope_candidates_analyzed_at IS NULL", _SYNTHESIZED_CLAIM_PREDICATE]
+    params: dict = {"excluded_origins": list(_EXCLUDED_CLAIM_ORIGINS)}
+    if document_id:
+        filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
+        params["doc"] = document_id
+    if course_id:
+        filters.append("course_id = :course")
+        params["course"] = course_id
+    row = session.execute(
+        sa_text(f"""
+            SELECT EXISTS (
+                SELECT 1 FROM epistemic_ledger WHERE {' AND '.join(filters)}
+            )
+        """),
+        params,
+    ).fetchone()
+    return bool(row and row[0])
 
 
 def _append_candidates(session, target_type: str, target_id: str, candidates: list[dict]) -> None:
@@ -113,6 +156,18 @@ def run_scope_candidate_mining(document_id: str = "", course_id: str = "") -> di
         logger.warning("scope candidate claim failed", exc_info=True)
         session.close()
         return {"processed": 0}
+
+    skipped_reasons: list[str] = []
+    try:
+        if _has_skipped_synthesized_targets(session, document_id, course_id):
+            skipped_reasons.append(SKIP_REASON_SYNTHESIZED_CLAIMS)
+            logger.info(
+                "scope candidate targets excluded: reason=%s (document=%s)",
+                SKIP_REASON_SYNTHESIZED_CLAIMS, document_id or "-",
+            )
+    except Exception:
+        session.rollback()
+        logger.debug("scope candidate skip probe failed", exc_info=True)
 
     agent = ScopeCandidateAgent()
     processed = 0
@@ -156,7 +211,11 @@ def run_scope_candidate_mining(document_id: str = "", course_id: str = "") -> di
         "scope candidate mining done: processed=%d candidates=%d (document=%s)",
         processed, generated, document_id or "-",
     )
-    return {"processed": processed, "candidates": generated}
+    return {
+        "processed": processed,
+        "candidates": generated,
+        "skipped_reasons": skipped_reasons,
+    }
 
 
 def maybe_schedule_scope_candidates(document_id: str = "", course_id: str = "") -> bool:

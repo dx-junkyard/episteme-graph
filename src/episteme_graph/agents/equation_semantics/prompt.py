@@ -30,7 +30,9 @@ Focus on:
 3. Which local assumptions or limits the equation depends on
 4. Whether the equation is derived from or leads to nearby equations
 5. The semantic status: source_backed (good extraction), context_inferred, reconstruction_based
-6. Producing a short reusable semantic summary
+6. Producing a short reusable semantic summary. Write it in plain prose: never put
+   block_id / span_id / equation_id or any other internal identifier (e.g. tex_b80,
+   blk_12, eq_tex_b78) in the summary; refer to equations by their printed number or content.
 7. Always provide a reconstruction block. Treat all PDF-extracted math text,
    including inline math, as untrusted/corrupted unless a trusted non-PDF
    LaTeX source is explicitly supplied.
@@ -81,15 +83,18 @@ _OUTPUT_SCHEMA = {
     "input_equation_ids": ["eq_id of equations this derives from"],
     "output_equation_ids": ["eq_id of equations derived from this"],
     "linked_text_spans": [
-        {"span_id": "span id", "relation": "introduced_by | explained_by | derived_from_text | qualified_by | normalized_by_text"}
+        {"span_id": "span_id from candidate_text_spans", "block_id": "block_id of that span", "relation": "introduced_by | explained_by | derived_from_text | qualified_by | normalized_by_text"}
     ],
     "summary": "short semantic summary",
     "review_flags": ["optional allowed review flags"],
     "reconstruction": {
-        "__note__": "Required for every PDF-derived equation candidate",
+        "__note__": (
+            "Required for every PDF-derived equation candidate. "
+            "For a trusted TeX source equation use status='none' (no reconstruction)."
+        ),
         "latex": "string or null",
         "plain_text": "string or null",
-        "status": "inferred_from_context | reconstructed_from_neighbors | manually_supplied",
+        "status": "none | inferred_from_context | reconstructed_from_neighbors | manually_supplied",
         "method": ["nearby_text", "section_heading", "claim_reference", "etc"],
         "supporting_refs": ["block_id or section_id used as evidence"],
         "confidence": 0.0,
@@ -97,6 +102,26 @@ _OUTPUT_SCHEMA = {
         "review_reason": ["reason strings"],
     },
 }
+
+
+def _reconstruction_statuses_line(source_is_trusted: bool) -> str:
+    """``reconstruction.status`` の許容値の 1 行（語彙の正本は ``schema.RECONSTRUCTION_STATUSES``）。
+
+    ``'none'`` は正式な値で、validator も受ける。経路で使い分けるのは**どの値を選ぶか**だけ:
+    TeX 原文がある式は復元しないので ``'none'``、PDF 由来の式は復元必須なので ``'none'`` を
+    選ばない。以前は経路を問わず「(exclude 'none')」と書き、同じプロンプトの TeX 方針
+    （``reconstruction.status='none'`` を使え）と矛盾していた。
+    """
+    allowed = ", ".join(RECONSTRUCTION_STATUSES)
+    if source_is_trusted:
+        return (
+            f"reconstruction statuses: {allowed} "
+            "(this equation comes from trusted TeX source: use 'none')"
+        )
+    return (
+        f"reconstruction statuses: {allowed} "
+        "(this equation is PDF-derived: do not use 'none'; a reconstruction is mandatory)"
+    )
 
 
 class EquationSemanticsPromptFactory:
@@ -142,7 +167,7 @@ class EquationSemanticsPromptFactory:
         parts.append("## Task")
         if llm_input.source_is_trusted:
             parts.append(
-                "Use the source-backed TeX equation exactly as the equation text, then infer its local semantic role and dependencies.\n"
+                "The equation text below is source-backed TeX: read it as given and infer its local semantic role and dependencies.\n"
                 "Do not reconstruct or rewrite the equation unless you are only providing a plain-text paraphrase.\n"
                 "Return ONLY JSON matching the output schema."
             )
@@ -163,7 +188,8 @@ class EquationSemanticsPromptFactory:
             parts.append(f"section_title: {llm_input.section_title}")
         if llm_input.backbone_block_type:
             parts.append(f"backbone_block_type: {llm_input.backbone_block_type}")
-        parts.append(f"label: {llm_input.label}")
+        # ラベルの無い式で文字列 "None" を渡さない（2026-10-16, radar_loop S0 seq 2847）。
+        parts.append(f"label: {llm_input.label or ''}")
         parts.append(f"extraction_source: {llm_input.extraction_source}")
         parts.append(f"extraction_status: {llm_input.extraction_status}")
         if llm_input.source_is_trusted:
@@ -214,7 +240,13 @@ class EquationSemanticsPromptFactory:
         if llm_input.next_texts:
             parts.append("\n## Next Text Blocks")
             parts.extend(llm_input.next_texts)
-        if llm_input.nearby_span_annotations:
+        if llm_input.neighbor_equations is not None:
+            parts.append("\n## Neighbor Equations")
+            parts.append(json.dumps(llm_input.neighbor_equations, ensure_ascii=False, indent=2))
+        if llm_input.candidate_text_spans is not None:
+            parts.append("\n## Candidate Text Spans (candidate_text_spans)")
+            parts.append(json.dumps(llm_input.candidate_text_spans, ensure_ascii=False, indent=2))
+        elif llm_input.nearby_span_annotations:
             parts.append("\n## Nearby Role-Labeled Spans")
             parts.append(json.dumps(llm_input.nearby_span_annotations, ensure_ascii=False, indent=2))
 
@@ -240,11 +272,12 @@ class EquationSemanticsPromptFactory:
         parts.append(f"definition_statuses: {', '.join(DEFINITION_STATUSES)}")
         parts.append(f"linked text relations: {', '.join(LINKED_TEXT_RELATIONS)}")
         parts.append(f"review flags: {', '.join(REVIEW_FLAGS)}")
-        parts.append(f"reconstruction statuses: {', '.join(RECONSTRUCTION_STATUSES)} (exclude 'none')")
+        parts.append(_reconstruction_statuses_line(llm_input.source_is_trusted))
         parts.append("\n## Constraints")
         parts.append(
             "- Use local context; do not infer a role from corrupted equation text alone\n"
             "- equation_type=transformation → include input_equation_ids when context supports it\n"
+            "- input_equation_ids / output_equation_ids may only contain equation_id values listed in neighbor_equations; if none fits, leave them empty\n"            "- linked_text_spans may only contain span_id (with its block_id) listed in candidate_text_spans; if none fits, leave it empty\n"
             "- equation_type=definition → include defined_symbols when context supports it\n"
             "- If context is missing, add broken_context or ambiguous_role review flag\n"
             "- confidence must be between 0.0 and 1.0\n"
