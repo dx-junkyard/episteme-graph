@@ -1,10 +1,11 @@
 ---
 id: IK-0761
 title: "論文レーダーで取り込んだ論文を次の起点にする連鎖の系譜（元の起点 → トライスペクトル → FoG …）が画面に出ず、第 4 波の「前の起点」1 行も保存されず 1 段だけ"
-status: open
+status: resolved
 recorded_at: 2026-10-16
-resolved_at: null
+resolved_at: 2026-10-22
 sources:
+  - "docs/features/paper_radar_design.md §24"
   - "docs/features/paper_radar_design.md §21"
   - "docs/features/paper_radar_autonomous_loop_design.md"
 feature_context:
@@ -40,10 +41,27 @@ discovery:
   perspective: [data_inspection]
   note: "浅い段の審判が scan-07 の seed ヘッダと取り込み済みカードを読み、元の起点（尖度の整合関係）から来たこと・前段で取り込んだ運動論の論文がこの起点から取り込まれたことが読めないと記録した（scan-06 仮説 4 の継続。出所: uxsim/runs/radar_loop/judge-scan-07.md §④-5 / judge-deep-06.md）。"
 resolution:
-  perspective: [pending]
-  note: "未解決。候補: 新しい保存を作らず、documents.source_url（取り込みの出所）と取り込みの監査（AUDIT_ENTITY_PAPER_DISCOVERY）から「この論文はどの起点のレーダーから取り込まれたか」を読み時導出し、seed ヘッダに系譜を数段出す（PR1 の非保存・PR4 と両立の可能性）。監査に起点が無ければ記帳を足すかの判断が先。"
+  perspective: [carry_through, required_argument]
+  note: "取り込みの監査（AUDIT_ENTITY_PAPER_DISCOVERY の ingest / ingest_batch）には起点が記録されていなかったので、レーダーの取り込みが seed_document_id を送り、サーバが view を確かめて documents.id に正規化したときだけ監査 metadata に残すようにした（閲覧できない値は記録しない・取り込みは止めない）。GET /radar/seed は radar.seed_lineage で source_url の arXiv ID → それを取り込んだ監査 → 起点 → … を遡り、seed.lineage（古い → 新しい）/ lineage_line / lineage_note を返す。段数の上限・循環の停止・閲覧できない論文は題名も id も出さずに止める・失敗は fail-soft。可視集合は route からの必須の注入で、空なら SQL を発行しない。新テーブル・保存なし。画面は seed ヘッダに 1 行で、JS 内の「前の起点」行に優先する。"
   landed_in:
-    - "docs/features/paper_radar_design.md §21"
+    - "backend/core/paper_discovery/radar.py"
+    - "backend/api/routes/paper_discovery.py"
+    - "frontend/public/js/admin-paper-radar.js"
+    - "backend/tests/test_paper_radar_core.py"
+    - "backend/tests/test_paper_radar_api.py"
+    - "backend/tests/test_paper_radar_ui_static.py"
+    - "docs/features/paper_radar_design.md §24"
+  principles:
+    - principle: enforce-condition-in-query-with-required-argument
+      use: consulted
+      note: >-
+        採った部品は可視集合の必須キーワード引数と、空集合での SQL 非発行。固有の差分: 閲覧できない論文は名前を伏せた語に置き換え、そこで遡るのを止める（存在は 1 語で残し、先の系譜は辿らない）。取り込み時の起点の記録もクライアントの申告を信用せず view で確かめてから正規化する。
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "実 DB の theory_review_events に対する JSONB 包含（metadata->'arxiv_ids' @> ...）の問い合わせ（フェイクセッションで検証・実 DB は触っていない）"
+      - "この変更より前の取り込みには起点の記録が無いので系譜に出ない"
+      - "取り込み → 次の起点で開き直す → 閉じて教材行から開き直す操作列での画面の確認（ブラウザは開いていない）"
 related: [IK-0700]
 view_of: []
 history: []

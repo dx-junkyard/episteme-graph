@@ -1,9 +1,9 @@
 ---
 id: IK-0754
 title: "component_assembly のプロンプトに、component_graph の validator が main graph で hard error にする汎用 operation（limit / parameterize / verify / couple / qualify / classify 等）の語彙表が無く、LLM が選んだ語が後段で error になる"
-status: open
+status: resolved
 recorded_at: 2026-10-16
-resolved_at: null
+resolved_at: 2026-10-22
 sources:
   - "docs/pipeline/agents.md"
   - "docs/pipeline/theory-graph.md"
@@ -22,11 +22,12 @@ classification:
     connection: medium
     governance: low
   proposals: []
-  cause_status: hypothesis
+  cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
+    確認済み: prompt.py の operation の記述は開いた例示だけで、classify_operation の表を渡していなかった。以下は起票時の見立て:
     仮説: 後段の component_graph は schema.classify_operation の prefix 語彙（define / linearize / solve / eliminate /
     derive / constrain / diagnose / compare …）で edge_type を決め、それ以外の汎用 operation を main graph で hard error
     にする。前段の component_assembly のプロンプトは『define/linearize/…/diagnose/forecast/compare/...』と開いた例示
@@ -42,10 +43,23 @@ discovery:
   perspective: [data_inspection]
   note: "論文レーダー自律周回で頭脳 M1 が component_graph の修復要求（seq 2092 = AdS/dS 連星 PN 論文・2089 の再提出）を読み、main graph の汎用 operation として limit / parameterize / verify / couple / qualify / classify が error になっていること、それが同じ頭脳が component_assembly（seq 2077）で選んだ語だったことに気付いた（出所: uxsim/runs/radar_loop/BRAIN_NOTES_M1.md）。"
 resolution:
-  perspective: [pending]
-  note: "未解決。classify_operation の語彙を正本にして component_assembly のプロンプトへ閉じた表として渡し（言い換えない）、語彙外は generic として扱う旨を明示する案。一致は逐語ミラーの検査で固定する。"
+  perspective: [canonical_source, guardrail_fix]
+  note: "component_graph/schema.py の operation 語彙表（_OPERATION_PREFIX_MAP / _OPERATION_FULL_MAP）を同一オブジェクトのまま公開名 OPERATION_PREFIX_FAMILIES / OPERATION_FULL_NAMES で出し、component_assembly のプロンプトが operation_vocabulary_text() でそれを閉じた表（prefix → グラフ関係・完全名 → グラフ関係・汎用語）として渡す（写しを作らない・遅延 import で循環を避ける）。開いた例示『define/linearize/…/forecast/compare/...』は撤去し、limit / parameterize / verify / couple / qualify / classify / forecast が汎用扱いになることを明示した。validator は operation / primary_operation が classify_operation で汎用と判定されたら warning operation_outside_graph_vocabulary を出す（error にしない・語は残す = 情報を落とさない）。"
   landed_in:
-    - "docs/pipeline/agents.md"
+    - "src/episteme_graph/agents/component_graph/schema.py"
+    - "src/episteme_graph/agents/component_assembly/prompt.py"
+    - "src/episteme_graph/agents/component_assembly/validator.py"
+    - "src/tests/agents/component_assembly/test_operation_vocabulary_ik0754.py"
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "live LLM run not performed（実 LLM が閉じた表に従って語を選ぶかの実測）"
+      - "component_graph の修復要求で main_graph_generic_operation が消えることの再解析での確認"
+  principles:
+    - principle: route-all-surfaces-through-one-point
+      use: consulted
+      note: >-
+        採った部品は「規則を 1 箇所に置き、他は参照する」。固有の差分: 正本（classify_operation の表）は既に 1 つで、前段のプロンプトが別の開いた列挙を持っていたため、写しを作らず同一オブジェクトを公開名で参照させた。下流での読み替え（修復段で語を直す）ではなく上流の入力を変えた。
 related: [IK-0729, IK-0727]
 view_of: []
 history: []
@@ -66,7 +80,7 @@ classify が hard error になる。これらは component_assembly で LLM が�
 
 ## 解決の観点
 
-未解決。
+正本（classify_operation の語彙表）を前段のプロンプトへ同一オブジェクトのまま閉じた表として渡し（canonical_source）、語彙外を warning で報告する検査と、プロンプトに全 prefix・完全名が載ることのテストを置いた（guardrail_fix）。
 
 ## 一般化
 

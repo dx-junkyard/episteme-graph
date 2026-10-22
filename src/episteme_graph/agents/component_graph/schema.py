@@ -411,6 +411,15 @@ _OPERATION_PREFIX_MAP = {
 }
 
 
+#: Public, read-only names for the operation vocabulary above (IK-0754). Upstream
+#: generators (component_assembly's prompt / validator) present this exact table
+#: to the LLM so the words they choose are the ones ``classify_operation`` accepts.
+#: These are the same objects, not copies — the tables above stay the single
+#: canonical source.
+OPERATION_FULL_NAMES = _OPERATION_FULL_MAP
+OPERATION_PREFIX_FAMILIES = _OPERATION_PREFIX_MAP
+
+
 def classify_operation(operation: str) -> tuple[str, str, bool]:
     """Map a derivation operation to a (verb, edge_type, is_generic) triple.
 

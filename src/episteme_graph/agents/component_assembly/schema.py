@@ -443,6 +443,12 @@ class ComponentRecord:
     publish_ready: bool = False
     fallback_reason: str = ""
     original_failure_codes: list[str] = field(default_factory=list)
+    # IK-0755: provenance of a ComponentRefiner split, kept as structured data so
+    # human-facing text fields (summary / teaching_takeaway / reason) never carry
+    # issue numbers, internal operation names or step counts. Keys:
+    # {split_from, split_rule, operation_family, derivation_step_ids,
+    #  equation_ids}. Empty for components that were not produced by a split.
+    derivation_refs: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -567,6 +573,7 @@ class ComponentAssemblyResult:
                 publish_ready=bool(c.get("publish_ready", False)),
                 fallback_reason=c.get("fallback_reason", ""),
                 original_failure_codes=list(c.get("original_failure_codes") or []),
+                derivation_refs=dict(c.get("derivation_refs") or {}),
             ))
         issues = [ValidationIssue(**i) for i in d.get("validation_issues", [])]
         return cls(

@@ -1,9 +1,9 @@
 ---
 id: IK-0755
 title: "ComponentRefiner の子部品の local_text が「… within … (#324)」「covers 5 equation step(s)」のような内部の課題番号・操作名・件数の機械文で、依存先の表示名にも混ざり、学習者・教員向け表示に出るおそれ"
-status: open
+status: resolved
 recorded_at: 2026-10-16
-resolved_at: null
+resolved_at: 2026-10-22
 sources:
   - "docs/pipeline/agents.md"
   - "docs/features/graph_paper_layer_design.md"
@@ -23,11 +23,12 @@ classification:
     connection: medium
     governance: medium
   proposals: []
-  cause_status: hypothesis
+  cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
+    確認済み: refiner の _theory_unit_summary / _suggested_summary 等が機械文を組み、子の summary / reason に入れていた（local_text は backend が label: summary で組む）。以下は起票時の見立て:
     仮説: refiner は子部品の local_text を決定論の定型文（『… isolated as a reusable equation_system component within …
     (#324)』『Reusable theory unit (derive_consequence) within …; covers 5 equation step(s).』）で埋めており、コード上の
     課題番号・内部の操作名・件数がそのまま表示用の欄に入る。構造軸 representation = 子部品の由来（分割規則・成員数）を
@@ -43,10 +44,25 @@ discovery:
   perspective: [data_inspection]
   note: "論文レーダー自律周回で頭脳 M1 が contextual_explanation の材料（seq 2116・2119・2122）を読み、分割後の子部品（comp_002__r1 / __r2 ほか）の local_text と依存先の表示名に『(#324)』『covers 5 / 7 equation step(s)』『derive_consequence』の機械文が入っていることに気付いた（出所: uxsim/runs/radar_loop/BRAIN_NOTES_M1.md）。"
 resolution:
-  perspective: [pending]
-  note: "未解決。分割の由来（規則・成員数）は local_text ではなく別の欄（agent_payload 等）に記録し、local_text は空か人向けの文にする。表示投影の遮断語彙に文中の課題番号・件数の機械文を足すかは、上流で入れない是正を先にしてから判断する（上流の損失を下流で読み替えない）。"
+  perspective: [representation_change, guardrail_fix]
+  note: "分割の由来を文の欄から外し、ComponentRecord の新しい構造化欄 derivation_refs（split_from / split_rule / operation_family / derivation_step_ids / equation_ids）に移した。子の summary / teaching_takeaway は親（LLM が生成言語で書いた）の値をそのまま保ち、reason も『Split from a broader component by …』の短い文だけにして課題番号・操作名・件数を入れない。機械文を組み立てていた _theory_unit_summary / _responsibility_summary / _suggested_summary / _suggested_takeaway / _responsibility_takeaway と依存・報告の reason の『(#324)』『(issue #308/#319)』を撤去。local_text の消費者は backend/core/document_pipeline/contextual_explanation_inputs.py（label: summary を組む・依存先の lower context も label: summary）と contextual_explanation agent で、どれも機械文に依存していない。derivation_refs は persistence の agent_payload に自動で入る。"
   landed_in:
-    - "docs/pipeline/agents.md"
+    - "src/episteme_graph/agents/component_assembly/component_refiner.py"
+    - "src/episteme_graph/agents/component_assembly/schema.py"
+    - "src/tests/agents/component_assembly/test_refiner_no_machine_text_ik0755.py"
+    - "src/tests/agents/component_assembly/test_refiner_radar_w1_regressions.py"
+    - "src/tests/agents/component_assembly/test_split_child_naming.py"
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "live LLM run not performed（実論文の再解析で子部品の local_text と依存先の表示名に機械文が残らないことの実測）"
+      - "保存済みの artifact・theory_components に残る旧機械文（再解析まで残る）"
+      - "子部品 label の『Verb: 記号列』形（生 TeX・同名の重複）は本件の範囲外"
+  principles:
+    - principle: route-all-surfaces-through-one-point
+      use: consulted
+      note: >-
+        採った部品は「上流の損失なら下流の読み替えではなく上流の入力を変える」。固有の差分: 表示投影の遮断語彙に文中の課題番号・件数を足すのではなく、refiner が機械文を作らないようにし、由来は構造化欄に移して情報を落とさない。
 related: [IK-0728, IK-0571]
 view_of: []
 history:
@@ -87,7 +103,7 @@ history:
 
 ## 解決の観点
 
-未解決。
+由来の記録と人向けの文の欄を分ける表現の変更（representation_change）。refiner の文字列リテラルに課題番号・件数の機械文が無いことを AST で固定した（guardrail_fix）。
 
 ## 一般化
 

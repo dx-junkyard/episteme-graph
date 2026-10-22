@@ -21,6 +21,10 @@ import re
 
 _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 
+# IK-0753: 以下のプレフィックス表と組み立ては ``backend/core/display_projection.py`` の
+# ``INTERNAL_ID_TOKEN_RE`` の**逐語の写し**（A層は backend を import できない）。両者の
+# パターン文字列が一致することを ``backend/tests/test_display_projection_guardrails.py`` が
+# 固定する — どちらかを変えたら両方を変える。
 #: 直後が数字であることを要求するプレフィックス（``span_1`` は当て、語彙語 ``span_id`` は当てない）。
 _IMMEDIATE = (
     r"theory_op_",
@@ -29,30 +33,38 @@ _IMMEDIATE = (
     r"comp_",
     r"node_",
     r"span_",
+    r"sys_[0-9]+_step_",
     r"step_",
     r"blk_",
+    r"section_",
+    r"sec_",
+    r"figure_",
+    r"fig_",
     r"sym_",
-    r"tex_b",
 )
-#: 本体のどこかに数字があればよいもの（``eq_tex_b78`` / ``claim_span_3`` / ``synth_claim_0001``）。
+#: 本体のどこかに数字があればよいもの（``derivation_eq_tex_b16`` / ``synth_claim_0001`` /
+#: ``tex_b14``）。論文の式番号（eq_12 / eq_2_7）は汎用 ``eq_`` から除外する。
 _ANYWHERE = (
-    r"eq_tex_",
-    r"eq_blk_",
-    r"eq_op_",
-    r"eq_eqcand_",
-    r"eqcand_",
+    r"system_derivation_",
+    r"derivation_",
+    r"synth_",
     r"claim_span_",
-    r"synth_claim_",
-    r"derivation_eq_",
+    r"claim_",
+    r"eqcand_",
+    r"tex_",
+    r"eq[_\-](?![0-9]+(?:[._\-][0-9]+)*(?![A-Za-z0-9_]))",
 )
+
+_TAIL = r"[A-Za-z0-9_\-]*(?:\.[A-Za-z0-9_\-]+)*"
 
 INTERNAL_ID_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:"
-    r"(?:" + "|".join(_IMMEDIATE) + r")[0-9][A-Za-z0-9_\-]*"
-    r"|(?:" + "|".join(_ANYWHERE) + r")(?=[A-Za-z0-9_\-]*[0-9])[A-Za-z0-9_\-]+"
-    r"|k1:[0-9a-f]{8,}(?:#[0-9]+)?"
-    r"|" + _UUID
-    + r")(?![A-Za-z0-9_])",
+    r"(?:" + "|".join(_IMMEDIATE) + r")[0-9]" + _TAIL
+    + r"|(?:" + "|".join(_ANYWHERE) + r")(?=[A-Za-z0-9_.\-]*[0-9])" + _TAIL
+    + r"|k1:[0-9a-f]{8,}(?:#[0-9]+)?"
+    + r"|support:[A-Za-z0-9_\-]+(?::[A-Za-z0-9_\-]+)*"
+    + r"|" + _UUID
+    + r")",
     re.IGNORECASE,
 )
 

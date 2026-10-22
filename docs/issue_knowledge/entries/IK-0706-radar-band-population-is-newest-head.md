@@ -1,10 +1,11 @@
 ---
 id: IK-0706
 title: "論文レーダーの帯分けの母集団が「網の中で取得した新着の先頭」だけで、帯ラベル「近い」がその中での相対的な近さしか意味しない"
-status: open
+status: resolved
 recorded_at: 2026-10-16
-resolved_at: null
+resolved_at: 2026-10-22
 sources:
+  - "docs/features/paper_radar_design.md §24"
   - "docs/features/paper_radar_design.md §19.2"
 feature_context:
   realizing: "近い論文の候補を近さの段階（近い・中間・遠い）に分けて示す"
@@ -39,10 +40,19 @@ discovery:
   perspective: [data_inspection]
   note: "手でキーフレーズを足して網を狭めた検索でも、起点の核心に当たる論文を拾う保証が無く、ある起点ではむしろ「中間」の帯の方が近かったことを検索記録で読んだ（出所: uxsim/runs/radar_loop/judge-scan-01.md §4 仮説 2・judge-scan-02.md §4 の 4・scan-01b-manual-keyphrases.json）。"
 resolution:
-  perspective: [pending]
-  note: "未解決。網（キーフレーズ）で狭めるのが先で、これは供給の段の是正（IK-0703）で一部進んだ。取得件数を増やすと arXiv 呼び出しの予算に触れる。帯ラベルに母集団の性質（取得した範囲の中での比較であること）を事実文で添える案は 2026-10-16 の第 3 波（§20 D）で部分対応（帯と関係ラベルが同時に出るときの 1 行）。母集団の問題は残る。"
+  perspective: [explicit_contract]
+  note: "母集団の取り方（新着の先頭・取得件数）は予算に触れるので変えず、帯ラベルが出るときは関係ラベルの有無に関わらず常に母集団の事実文（radar.NOTE_BAND_POPULATION「帯は arXiv から取得した新着の候補の中での比較です。取得していない論文はこの帯に入りません。」）を band_population_note として返し、凡例の直後に 1 回だけ描く。帯分けできなかったときは出さない。数値は出さない（PR2 / PD4）。対照検索（contrast-2026-10-22-kurtosis.json）で帯付き候補とともに返ることを確かめた。§20 D の reading_note は関係ラベルと同時に出るときの読み方として残す。"
   landed_in:
-    - "docs/features/paper_radar_design.md §19.2"
+    - "backend/core/paper_discovery/radar.py"
+    - "frontend/public/js/admin-paper-radar.js"
+    - "backend/tests/test_paper_radar_core.py"
+    - "backend/tests/test_paper_radar_ui_static.py"
+    - "docs/features/paper_radar_design.md §24"
+  verification:
+    methods: [guardrail, reproduction_rerun]
+    unverified:
+      - "再演は 2026-10-22 のオーケストレータの対照検索（uxsim/runs/radar_loop/contrast-2026-10-22-kurtosis.json・尖度の起点・作業ツリーを反映）で band_population_note が返ることを見たもの。画面で帯と凡例の近くに 1 行で読めること（ブラウザは開いていない）"
+      - "母集団そのもの（新着の先頭に限られること）は変えていない。ラベルを読む人がこの文で相対比較と読むかは未確認"
 related: [IK-0703]
 view_of: []
 history: []

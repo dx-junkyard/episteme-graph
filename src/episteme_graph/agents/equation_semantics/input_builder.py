@@ -451,6 +451,10 @@ class EquationSemanticsInputBuilder:
         index_by_block_id = {b.block_id: i for i, b in enumerate(ordered_blocks)}
 
         equation_entries = self._equation_block_entries(ordered_blocks)
+        # 文脈の式ブロックに添える ID（Neighbor Equations と同じ正規化 — IK-0766）。
+        equation_ids_by_block = {
+            ordered_blocks[i].block_id: entry["equation_id"] for i, _sec, entry in equation_entries
+        }
 
         inputs: list[EquationLLMInput] = []
         for candidate in _accepted:
@@ -486,8 +490,12 @@ class EquationSemanticsInputBuilder:
                 not source_is_trusted
                 and (force_reconstruction or candidate.extraction_status in _NEEDS_RECONSTRUCTION_STATUSES)
             )
-            prev_texts = self._neighbor_texts(ordered_blocks, idx, -1, _MAX_CONTEXT_BLOCKS)
-            next_texts = self._neighbor_texts(ordered_blocks, idx, 1, _MAX_CONTEXT_BLOCKS)
+            prev_texts = self._neighbor_texts(
+                ordered_blocks, idx, -1, _MAX_CONTEXT_BLOCKS, equation_ids=equation_ids_by_block
+            )
+            next_texts = self._neighbor_texts(
+                ordered_blocks, idx, 1, _MAX_CONTEXT_BLOCKS, equation_ids=equation_ids_by_block
+            )
             if block.block_type != "equation_block":
                 start = int(candidate.source_location.get("span_start") or 0)
                 end = int(candidate.source_location.get("span_end") or start)
@@ -862,7 +870,16 @@ class EquationSemanticsInputBuilder:
         index: int,
         direction: int,
         limit: int,
+        *,
+        equation_ids: dict[str, str] | None = None,
     ) -> list[str]:
+        """同じ節の前後の文脈ブロック。
+
+        式ブロックの見出しは ``[block_id | equation_id: …]``（IK-0766）。旧実装は TeX の ``\\label``
+        のキーを `` label=eqn:halopressure`` と本文の頭に地続きで書いており、読み手（LLM・頭脳）は
+        取り込みの残骸として式の一部に読み、キーから ``eq_eqn_*`` を推測していた。添えるのは
+        Neighbor Equations と同じ解決可能な ID だけで、TeX のキーは本文側に出さない。
+        """
         texts: list[str] = []
         # 文脈は同じ節の中に限る（付録の式の前に結論の段落を入れない — J1 seq 1858）。
         own_section = getattr(blocks[index], "section_id", None) if 0 <= index < len(blocks) else None
@@ -873,17 +890,17 @@ class EquationSemanticsInputBuilder:
                 break
             if block.block_type in _CONTEXT_BLOCK_TYPES:
                 if block.block_type == "equation_block":
-                    label = EquationNormalizer.extract_label(block.text) or getattr(block, "equation_label", None) or ""
-                    label_part = f" label={label}" if label else ""
+                    equation_id = (equation_ids or {}).get(block.block_id) or ""
+                    head = (
+                        f"[{block.block_id} | equation_id: {equation_id}]" if equation_id else f"[{block.block_id}]"
+                    )
                     if EquationSemanticsInputBuilder._is_trusted_tex_block(block):
                         texts.append(
-                            f"[{block.block_id}]{label_part} "
+                            f"{head} "
                             f"{context_excerpt(block.text, _MAX_CONTEXT_CHARS, keep_end=direction < 0)}"
                         )
                     else:
-                        texts.append(
-                            f"[{block.block_id}]{label_part} [EQUATION_TEXT_FROM_PDF_OMITTED_AS_UNTRUSTED]"
-                        )
+                        texts.append(f"{head} [EQUATION_TEXT_FROM_PDF_OMITTED_AS_UNTRUSTED]")
                 else:
                     texts.append(
                         f"[{block.block_id}] "

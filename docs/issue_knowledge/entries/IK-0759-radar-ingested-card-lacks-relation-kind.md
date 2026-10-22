@@ -1,10 +1,11 @@
 ---
 id: IK-0759
 title: "論文レーダーの取り込み済み候補のカードが、取り込み前の AI 比較で読めていた関係の種類（同じ対象を扱う等）を言わず、取り込むと「何の関係か」の言葉が画面から消える"
-status: open
+status: resolved
 recorded_at: 2026-10-16
-resolved_at: null
+resolved_at: 2026-10-22
 sources:
+  - "docs/features/paper_radar_design.md §24"
   - "docs/features/paper_radar_design.md §21"
   - "docs/features/paper_radar_design.md §19"
   - "docs/features/paper_radar_autonomous_loop_design.md"
@@ -42,10 +43,19 @@ discovery:
   perspective: [data_inspection]
   note: "浅い段の審判が scan-06・deep-06 の比較（2 回とも shared_subject）と scan-07 の取り込み済みカード（skip: ingested・関係の種類なし）を並べ、取り込みの前後で関係の言葉が消えることを記録した（出所: uxsim/runs/radar_loop/judge-scan-07.md §④-3 / judge-deep-06.md）。"
 resolution:
-  perspective: [pending]
-  note: "未解決。比較を保存するのは PR4 に触れるため採らない。候補: ①取り込み済み候補も「比較する」の対象に選べるようにする（既存の 1 コール・日次上限に相乗り）②配置の対比の近くに「関係の種類は比較で確かめられます」の導線 1 行を添える。"
+  perspective: [carry_through]
+  note: "取り込み済み候補のカードにも比較用のチェックボックス（pr-select-compare-only）を出し、「違いを分析」の対象に選べるようにした。取り込みの対象には入らない（selectedIngestIds が status new だけに絞る）。比較は既存の 1 コール・日次上限・非保存（PR4）のままで、要旨は run_compare の写しの read-through を通るので検索で取得した候補なら arXiv の追加呼び出しはゼロ（テストで固定）。比較結果がまだ無い取り込み済みカードには配置の対比の直後に導線 1 行を添えた（候補②）。サーバ側の比較には取り込み済みを除外する条件は元々無く、外れていたのは画面の選択肢だけだった。"
   landed_in:
-    - "docs/features/paper_radar_design.md §21"
+    - "frontend/public/js/admin-paper-radar.js"
+    - "frontend/public/admin.html"
+    - "backend/tests/test_paper_radar_core.py"
+    - "backend/tests/test_paper_radar_ui_static.py"
+    - "docs/features/paper_radar_design.md §24"
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "画面で取り込み済み候補を選んで比較し、関係の種類がカードに出ること（ブラウザは開いていない・LLM は呼んでいない）"
+      - "写しが期限切れの取り込み済み候補では arXiv を呼ぶ（既存の read-through の仕様どおり・画面での確認はしていない）"
 related: [IK-0750]
 view_of: []
 history: []

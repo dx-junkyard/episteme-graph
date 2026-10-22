@@ -136,6 +136,10 @@ class MaterialOut(BaseModel):
     # （切れている参照の列挙は詳細 API 側。行に件数バッジを作らない = T-3）。
     # run が無い / 検査の事実が無い教材は ``{"status": "unchecked"}``。
     reference_health: dict | None = None
+    # 解析の縮退（IK-0715）。A層 agent が AI の応答を得られず決定論の代替・空の成果に
+    # 落ちたステージの事実を ``core/analysis_degradation.py`` の 1 投影から
+    # ``{status, facts}`` **だけ**で返す（facts は数字なし。details は行に出さない）。
+    analysis_degradation: dict | None = None
     # --- メタデータ（教材選択UIの情報提示用。documents 列から常時付与）---
     authors: list[str] = Field(default_factory=list)
     year: int | None = None
@@ -1382,6 +1386,10 @@ class ComponentGraphResponse(BaseModel):
     # パイプライン修正は再解析まで既存グラフに反映されない — その古さを教員が
     # 判断できるようにする事実（表示・注意文は UI 側）。
     graph_updated_at: str = ""
+    # 解析の縮退（IK-0715）。採用 run で AI の応答が得られず決定論の代替・空の成果に
+    # 落ちた段の事実 ``{status, facts}``（``core/analysis_degradation.py`` が正本・数字なし）。
+    # UI は ``status == "degraded"`` のときだけバナー 1 行を出す。
+    analysis_degradation: dict = Field(default_factory=dict)
 
 
 class LectureStudioSettings(BaseModel):

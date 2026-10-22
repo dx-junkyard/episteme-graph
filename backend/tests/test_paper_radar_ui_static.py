@@ -735,10 +735,12 @@ class TestCandidateStates:
     def setup_method(self):
         self.src = _read(RADAR_JS)
 
-    def test_ingested_is_labelled_and_not_selectable(self):
+    def test_ingested_is_labelled_and_selectable_only_for_compare(self):
+        """取り込み済みは取り込みの対象にしない。比較の対象にだけ選べる（§24 C・IK-0759）。"""
         body = _extract_function(self.src, "candidateCardHtml")
         assert "INGESTED_BADGE_LABEL" in body
         assert 'status === "new"' in body
+        assert "pr-select-compare-only" in body
 
     def test_ingested_badge_sits_on_the_title_row(self):
         """取り込み済みは一覧を流し読みしても分かる位置（タイトル行）に出す。
@@ -905,7 +907,7 @@ class TestArxivProvenanceRegistration:
 class TestCacheBuster:
     def test_admin_html_bumps_the_radar_cache_buster(self):
         src = _read(ADMIN_HTML)
-        assert "js/admin-paper-radar.js?v=paper-radar-20261017-ik0818" in src
+        assert "js/admin-paper-radar.js?v=paper-radar-20261022-wave24" in src
 
 
 # ---------------------------------------------------------------------------
@@ -1402,3 +1404,81 @@ class TestCompareCandidateAnalysisSource:
         src = _read(RADAR_JS)
         helper = _extract_function(src, "compareSourceNoteHtml")
         assert "data-ui-anchor" not in helper
+
+
+class TestRadarWave24:
+    """§24 — 網の偏り（A）・帯の母集団（B）・取り込み済みの比較（C）・起点の系譜（D）。"""
+
+    def setup_method(self):
+        self.src = _read(RADAR_JS)
+
+    def test_dominant_note_is_a_server_pass_through(self):
+        assert "keyphrase_dominant_note" in _extract_function(self.src, "runSearch")
+        assert "state.keyphraseDominantNote" in _extract_function(self.src, "renderKeyphraseHitsNote")
+        assert 'state.keyphraseDominantNote = ""' in _extract_function(self.src, "openModal")
+        # 文言はサーバ（radar.NOTE_KEYPHRASE_DOMINANT_TEMPLATE）が持つ。
+        assert "一般語に寄って" not in self.src
+
+    def test_band_population_note_is_drawn_once_near_the_legend(self):
+        assert "band_population_note" in _extract_function(self.src, "runSearch")
+        body = _extract_function(self.src, "renderCandidates")
+        legend = body.index("relationLegendHtml()")
+        assert body.index("bandPopulationNoteHtml()") > legend
+        assert body.count("bandPopulationNoteHtml()") == 1
+        note = _extract_function(self.src, "bandPopulationNoteHtml")
+        assert "state.bandPopulationNote" in note
+        assert "available === false" in note
+        assert 'id="pr-band-population-note"' in note
+        assert "data-ui-anchor" not in note, "事実の段落はアンカーにしない"
+        assert "取得していない論文" not in self.src, "文言はサーバの素通し"
+
+    def test_ingested_candidates_are_selectable_for_compare_only(self):
+        body = _extract_function(self.src, "candidateCardHtml")
+        assert 'status === "ingested"' in body
+        assert "pr-select-compare-only" in body
+        assert "INGESTED_COMPARE_HINT" in body
+        ingest_ids = _extract_function(self.src, "selectedIngestIds")
+        assert 'candidate.status !== "new"' in ingest_ids
+        assert "selectedIngestIds()" in _extract_function(self.src, "runIngest")
+        assert "selectedIngestIds()" in _extract_function(self.src, "renderIngestSummary")
+        # 比較は従来どおり選択した全件（取り込み済みを含む）。
+        assert "selectedIds()" in _extract_function(self.src, "runCompare")
+
+    def test_ingest_sends_the_seed_document(self):
+        body = _extract_function(self.src, "runIngest")
+        assert "payload.seed_document_id" in body
+        for line in self.src.splitlines():
+            if "seed_document_id" in line:
+                assert "localStorage" not in line
+
+    def test_lineage_is_drawn_from_the_server_line(self):
+        assert "seed.lineage_line" in _extract_function(self.src, "applySeed")
+        body = _extract_function(self.src, "renderSeed")
+        assert 'id="pr-seed-lineage"' in body
+        assert "state.lineageLine" in body and "state.lineageNote" in body
+        # 系譜があるときは JS 内の 1 段だけの「前の起点」行に優先する。
+        assert body.index("state.lineageLine") < body.index("state.previousSeedTitle")
+        assert "この起点の系譜" not in self.src, "見出しの文言もサーバの素通し"
+        open_body = _extract_function(self.src, "openModal")
+        assert 'state.lineageLine = ""' in open_body and 'state.lineageNote = ""' in open_body
+
+
+class TestRadarWave24WideningChip:
+    """§24 A — 網を広げる語（dominant を含む）のチップに印と「外して探し直す」の案内。"""
+
+    def setup_method(self):
+        self.src = _read(RADAR_JS)
+
+    def test_dominant_words_get_the_widening_mark_and_action_title(self):
+        body = _extract_function(self.src, "renderKeyphraseChips")
+        assert "hitInfo.dominant === true" in body
+        assert "KEYPHRASE_WIDENS_ACTION_TITLE" in body
+        assert "dominant_note" in _extract_function(self.src, "runSearch")
+
+    def test_removal_stays_the_teachers_click(self):
+        """外すのはチップのクリック（enabled の反転）だけで、自動で外さない・自動で検索しない。"""
+        body = _extract_function(self.src, "renderKeyphraseChips")
+        assert "runSearch" not in body
+        assert ".enabled = !state.keyphrases[index].enabled" in body
+        run = _extract_function(self.src, "runSearch")
+        assert "enabled = false" not in run

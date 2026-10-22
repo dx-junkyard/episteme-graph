@@ -46,7 +46,16 @@ _PLAIN_WRAPPER_COMMANDS = (
     "tilde|hat|bar|vec|dot|ddot|overline|underline|widetilde|widehat"
 )
 _PLAIN_WRAPPERS_RE = re.compile(r"\\(?:" + _PLAIN_WRAPPER_COMMANDS + r")\s*\{([^{}]*)\}")
-_PLAIN_WRAPPERS_BARE_RE = re.compile(r"\\(?:" + _PLAIN_WRAPPER_COMMANDS + r")\s+([A-Za-z0-9])")
+_PLAIN_WRAPPERS_BARE_RE = re.compile(
+    r"\\(?:" + _PLAIN_WRAPPER_COMMANDS + r")(?:\s+([A-Za-z0-9])|(?![A-Za-z])\s*([^\sA-Za-z0-9{}\\_^$]))"
+)
+#: 書体の切り替え命令（引数を取らず以降の字の書体を変える — ``{\\cal L}`` / ``\\bf x``）。
+#: 命令名を字として残さない（IK-0835: ``\\cal L_\\star`` が「cal L_star」になった）。
+#: 書体は記号の同一性に関わらない（``\\mathcal{L}`` も「L」— 囲む形の書体命令と同じ扱い）。
+FONT_SWITCH_RE = re.compile(
+    r"\\(?:rm|bf|it|bm|cal|sf|tt|sl|sc|mit|boldmath|displaystyle|textstyle|scriptstyle|scriptscriptstyle)"
+    r"(?![A-Za-z])\s*"
+)
 _PLAIN_GREEK = {
     "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε", "varepsilon": "ε", "zeta": "ζ",
     "eta": "η", "theta": "θ", "iota": "ι", "kappa": "κ", "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ",
@@ -59,6 +68,8 @@ _PLAIN_GREEK = {
     "langle": "⟨", "rangle": "⟩", "cdots": "⋯", "ldots": "…", "dots": "…", "parallel": "∥",
     "perp": "⊥", "prime": "′", "to": "→", "leq": "≤", "geq": "≥", "le": "≤", "ge": "≥",
     "sim": "∼", "approx": "≈", "propto": "∝", "neq": "≠",
+    # 添字の印（``\\mathcal{L}_\\star`` → 「L_⋆」 — 印は落とさず字にする。IK-0835）。
+    "star": "⋆", "ast": "∗",
 }
 
 
@@ -83,8 +94,8 @@ def plain_math(text: str) -> str:
     out = re.sub(r"\\([A-Za-z]+)", lambda m: _PLAIN_GREEK.get(m.group(1), m.group(0)), out)
     for _ in range(3):
         out = _PLAIN_WRAPPERS_RE.sub(r"\1", out)
-        out = _PLAIN_WRAPPERS_BARE_RE.sub(r"\1", out)
-    out = re.sub(r"\\(?:rm|bf|it|bm|displaystyle)\b\s*", "", out)
+        out = _PLAIN_WRAPPERS_BARE_RE.sub(lambda m: m.group(1) or m.group(2) or "", out)
+    out = FONT_SWITCH_RE.sub("", out)
     out = re.sub(r"\\(?:left|right|,|;|!|quad|qquad)", "", out)
     out = re.sub(r"\\([A-Za-z]+)", r"\1", out)
     out = out.replace("{", "").replace("}", "")
@@ -360,7 +371,15 @@ SYMBOL_LIST_TRUNCATED_MARK = "…"
 #: 1 記号の表示上限（引数並びまで抱えた長い「記号」は一覧に出さない — 式本文は member_equations で読む）。
 SYMBOL_DISPLAY_MAX_CHARS = 40
 
-_SYMBOL_NORM_RE = re.compile(r"\\(?:mathrm|mathcal|mathbf|mathit|rm|text|mathsf|boldsymbol|bm)\s*\{([^{}]*)\}")
+#: 照合キーで外す書体の命令（囲む形）。アクセント（``\\hat`` 等）は記号の区別に関わるので外さない。
+_SYMBOL_NORM_RE = re.compile(
+    r"\\(?:mathrm|mathcal|mathbf|mathit|rm|text|textrm|textbf|textit|textsf|texttt|textnormal|mathsf|mathtt|"
+    r"mathbb|mathfrak|mathscr|boldsymbol|bm|pmb|operatorname)\s*\{([^{}]*)\}"
+)
+_SYMBOL_NORM_BARE_RE = re.compile(
+    r"\\(?:mathrm|mathcal|mathbf|mathit|textrm|textbf|textit|mathsf|mathtt|mathbb|mathfrak|mathscr|"
+    r"boldsymbol|bm|pmb)(?![A-Za-z])\s*(?=[A-Za-z0-9\\])"
+)
 _COMMAND_RE = re.compile(r"\\([A-Za-z]+)")
 _BARE_COMMAND_RE = re.compile(r"\\([A-Za-z]+)\s*(?:_.*)?")
 _PROSE_RE = re.compile(r"[A-Za-z]{2,}\s+[A-Za-z]{2,}")
@@ -377,6 +396,12 @@ def symbol_match_key(name: Any) -> str:
     text = str(name or "").replace("$", "")
     for _ in range(3):
         text = _SYMBOL_NORM_RE.sub(r"\1", text)
+    # 書体の切り替え（``{\\cal L}``）は命令名ごと外す（「call」にしない — IK-0835）。
+    text = FONT_SWITCH_RE.sub("", text)
+    # 引数を波括弧で囲まない書体の命令（``\\mathcal L`` / ``\\boldsymbol\\theta``）は命令だけ外す。
+    text = _SYMBOL_NORM_BARE_RE.sub("", text)
+    # 添字の印は書き方によらず同じ記号（``L_\\star`` と ``L_*``）。
+    text = re.sub(r"\\(?:star|ast)(?![A-Za-z])", "*", text)
     text = re.sub(r"\\[A-Za-z]+", lambda m: m.group(0)[1:], text)
     return re.sub(r"[{}\\\s]", "", text).lower()
 

@@ -110,3 +110,36 @@ def test_unlabeled_equation_label_is_not_rendered_as_none():
     content = EquationSemanticsPromptFactory().build_messages(llm_input, None)[-1]["content"]
     assert "label: None" not in content
     assert "\nlabel: \n" in content
+
+
+def test_context_equation_blocks_carry_resolvable_id_not_tex_label_key():
+    """IK-0766（2026-10-22・radar_loop Q1 seq 2488 / S0〜S2）: 文脈の式ブロックの頭に TeX の ``\\label`` の
+    キーが `` label=eqn:halopressure`` と地続きで書かれ、取り込みの残骸として式の一部に読まれた。
+
+    TeX 取り込みは ``\\label`` を本文から外し ``equation_label`` に分けて持つ。文脈の見出しには
+    Neighbor Equations と同じ解決可能な ``equation_id`` だけを括弧の内側に添える。
+    """
+    halo = TypedBlock(
+        "tex_b17", 1, 1, r"P_h(k) = b_1 P_{\rm lin}(k) + P_{\rm stoch}", "equation_block",
+        equation_label="eqn:halopressure",
+        raw={"parser_source": "tex_archive", "extraction_source": "tex_source"},
+    )
+    halo.section_id = "sec_1"
+    blocks = [
+        _typed("tex_b16", "The halo power spectrum is modelled as", "body_paragraph", 0),
+        halo,
+        _typed("tex_b18", "where the stochastic term is a constant, and the average pressure is", "body_paragraph", 2),
+        _typed("tex_b19", r"\bar P = \int P_h(k) \, d\ln k", "equation_block", 3),
+    ]
+    structure = _structure(blocks)
+    inputs = _llm_inputs(structure)
+    target = next(i for i in inputs if i.block_id == "tex_b19")
+    neighbor_ids = {n["equation_id"] for n in target.neighbor_equations}
+    halo_line = next(t for t in target.prev_texts if t.startswith("[tex_b17"))
+    assert "label=" not in halo_line
+    assert "eqn:halopressure" not in halo_line.split("]", 1)[1]
+    head_id = halo_line.split("equation_id: ", 1)[1].split("]", 1)[0]
+    assert head_id in neighbor_ids
+    assert halo_line.split("] ", 1)[1].startswith(r"P_h(k) = b_1")
+    content = EquationSemanticsPromptFactory().build_messages(target, None)[-1]["content"]
+    assert "label=eqn:" not in content

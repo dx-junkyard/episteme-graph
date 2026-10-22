@@ -85,6 +85,11 @@ ARTIFACTS_KEY = "_artifacts"
 
 STAGE_MODELS_KEY = "_stage_models"
 
+# IK-0710: ステージ内チェックポイントの置き場（``{stage: agent が決めた形の状態}``）。
+# 進捗の ``stage_outputs[stage]`` には載せない（タスクのポーリング応答に展開されるため）。
+# ``_`` 始まりなので coverage の欠落走査の対象外。ステージ完了時に当該ステージ分を外す。
+STAGE_CHECKPOINTS_KEY = "_stage_checkpoints"
+
 # ---------------------------------------------------------------------------
 # ステージ属性の語彙（`PipelineStageDef` の宣言フィールド）。
 #
@@ -474,6 +479,9 @@ class PipelineContext:
     should_use_artifact: Callable | None = None
     finish_target_stage: Callable | None = None
     all_artifacts: Callable | None = None
+    # IK-0710: 中断した run のステージ内チェックポイント（``stage_outputs["_stage_checkpoints"]``）。
+    # resume（start_stage なし）のときだけ前回 run から引き継ぎ、restart・新規 run では空。
+    resume_stage_checkpoints: dict = field(default_factory=dict)
 
     # ステージ間で受け渡される可変状態
     pdf_path: str | None = None
@@ -833,6 +841,8 @@ def run_document_pipeline(
         if target_stage != stage:
             return False
         result.final_stage = stage
+        # IK-0362: 単一ステージ実行でも、この run の提供元障害の事実を残す。
+        target_llm_failures = _completion_llm_failures_outputs(run_id)
         upsert_analysis_run(
             run_id=run_id,
             document_id=document_id,
@@ -841,8 +851,9 @@ def run_document_pipeline(
             status="completed",
             current_stage=stage,
             stage_outputs={
-                # IK-0362: 単一ステージ実行でも、この run の提供元障害の事実を残す。
-                **_completion_llm_failures_outputs(run_id),
+                **target_llm_failures,
+                # IK-0715: 縮退の事実も完了経路と同じ投影で残す。
+                **_completion_degradation_outputs(previous_artifacts, target_llm_failures),
                 stage: payload or {"status": "completed", "progress": 100},
             },
         )
@@ -891,6 +902,8 @@ def run_document_pipeline(
     ctx.should_use_artifact = should_use_artifact
     ctx.finish_target_stage = finish_target_stage
     ctx.all_artifacts = all_artifacts
+    if start_index is None:
+        ctx.resume_stage_checkpoints = dict(previous_outputs.get(STAGE_CHECKPOINTS_KEY) or {})
 
     def _record_stage_model_if_used(stage_name: str, had_artifact_before: bool) -> None:
         # M7: 実際に実行した（artifact 再利用ではない）LLM ステージのみ、使用モデルを
@@ -1205,6 +1218,34 @@ def _stage_paper_skeleton(ctx: PipelineContext) -> bool:
     return ctx.finish_target_stage("paper_skeleton", skeleton_done_payload)
 
 
+def _write_stage_checkpoint(ctx: PipelineContext, stage: str, state: dict | None) -> None:
+    """ステージ内チェックポイントを run に書く（``state=None`` で当該ステージ分を外す）。
+
+    artifact（1 run × 1 stage の生成ログ = KO6）とは別物で、中断した run を resume した
+    ときに完了済みの LLM 呼び出しをやり直さないための作業状態（IK-0710）。書き込み失敗は
+    ステージを止めない（チェックポイントが無いだけで、resume は最初からやり直す）。
+    """
+    checkpoints = dict(ctx.resume_stage_checkpoints or {})
+    if state is None:
+        # 引き継がなかった（restart の）run 行にも前回の状態が残り得るので、手元に無くても書く。
+        checkpoints.pop(stage, None)
+    else:
+        checkpoints[stage] = state
+    ctx.resume_stage_checkpoints = checkpoints
+    try:
+        upsert_analysis_run(
+            run_id=ctx.run_id,
+            document_id=ctx.document_id,
+            material_id=ctx.material_id,
+            cartridge_id=ctx.cartridge_id,
+            status="running",
+            current_stage=stage,
+            stage_outputs={STAGE_CHECKPOINTS_KEY: checkpoints},
+        )
+    except Exception:  # noqa: BLE001 — チェックポイントはステージを止めない
+        logger.warning("failed to write stage checkpoint for %s (non-fatal)", stage, exc_info=True)
+
+
 def _stage_rhetorical_role(ctx: PipelineContext) -> bool:
     # ── Stage 6: rhetorical_role ───────────────────────────────────────
     roles_artifact = ctx.artifact("rhetorical_role")
@@ -1216,16 +1257,32 @@ def _stage_rhetorical_role(ctx: PipelineContext) -> bool:
         ctx.report_start("rhetorical_role", total=_agent_input_count("rhetorical_role", ctx.agent_classes, ctx.structure, ctx.skeleton, ctx.cartridge_id), unit="blocks")
         try:
             rr_agent = _instantiate(ctx.agent_classes["RhetoricalRoleAgent"])
+            run_kwargs: dict[str, Any] = {}
+            # IK-0710: ブロック（窓）ごとの結果をチェックポイントに残し、resume では
+            # 未処理のブロックだけを LLM に渡す。注入された agent が受けないなら渡さない。
+            try:
+                run_params = inspect.signature(rr_agent.run).parameters
+            except (TypeError, ValueError):
+                run_params = {}
+            if "checkpoint" in run_params and "checkpoint_callback" in run_params:
+                run_kwargs["checkpoint"] = (ctx.resume_stage_checkpoints or {}).get("rhetorical_role")
+                if run_kwargs["checkpoint"] is None:
+                    # restart で引き継がない run 行に残った古い状態を、最初の窓より前に外す。
+                    _write_stage_checkpoint(ctx, "rhetorical_role", None)
+                run_kwargs["checkpoint_callback"] = lambda state: _write_stage_checkpoint(ctx, "rhetorical_role", state)
             ctx.roles = rr_agent.run(
                 structure=ctx.structure,
                 skeleton=ctx.skeleton,
                 cartridge_id=ctx.cartridge_id,
                 progress_callback=lambda processed, total: ctx.report_item("rhetorical_role", processed, total, "blocks"),
+                **run_kwargs,
             )
         except Exception as exc:
             logger.exception("rhetorical_role stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
             raise PipelineStageError("rhetorical_role", str(exc), cause=exc) from exc
         ctx.save_artifact("rhetorical_role", ctx.roles)
+        # 成果は artifact になった。作業状態のチェックポイントは外す（IK-0710）。
+        _write_stage_checkpoint(ctx, "rhetorical_role", None)
     role_done_payload: dict[str, Any] = dict(getattr(ctx.roles, "summary_stats", {}) or {})
     # coverage は agent（input_builder）が summary_stats に載せて来る。resume では
     # それが前回 run の記録であることを印で明示する。
@@ -2999,10 +3056,36 @@ def _completion_llm_failures_outputs(run_id: str | None) -> dict:
     return {LLM_FAILURES_KEY: block}
 
 
+def _completion_degradation_outputs(artifacts: Any, llm_failures_outputs: dict) -> dict:
+    """完了記録の ``stage_outputs`` に足す縮退のスナップショット（IK-0715）。
+
+    A層 agent が打ち切り・提供元障害で決定論の代替／空の成果に落ちた事実を、in-memory の
+    artifact から ``core.analysis_degradation`` の 1 投影で導いて残す（教材一覧が大きな
+    artifact を読み直さずに済むように）。新しいステージにはしない best-effort の後処理で、
+    失敗しても何も書かない（読み手は「未確認」として扱う）。
+    """
+    try:
+        from core.analysis_degradation import DEGRADATION_KEY, summarize_run_degradation
+
+        summary = summarize_run_degradation(
+            dict(llm_failures_outputs or {}),
+            artifacts=artifacts if isinstance(artifacts, dict) else {},
+        )
+        return {DEGRADATION_KEY: summary}
+    except Exception:  # noqa: BLE001 — 投影は pipeline を止めない
+        logger.warning("analysis degradation snapshot skipped", exc_info=True)
+        return {}
+
+
 def _stage_completed(ctx: PipelineContext) -> None:
     # ── Stage 14: completed ────────────────────────────────────────────
     # IK-0362: AI 提供元の障害で欠けた呼び出しの事実（失敗が無ければ空 dict = 何も書かない）。
     llm_failures_outputs = _completion_llm_failures_outputs(ctx.run_id)
+    # IK-0715: 決定論の代替・空の成果に落ちたステージの事実（llm_failures も同じ投影に入る）。
+    degradation_outputs = _completion_degradation_outputs(
+        ctx.all_artifacts() if callable(getattr(ctx, "all_artifacts", None)) else {},
+        llm_failures_outputs,
+    )
     upsert_analysis_run(
         run_id=ctx.run_id,
         document_id=ctx.document_id,
@@ -3012,6 +3095,7 @@ def _stage_completed(ctx: PipelineContext) -> None:
         current_stage="completed",
         stage_outputs={
             **llm_failures_outputs,
+            **degradation_outputs,
             "completed": {
                 "chunks": ctx.result.chunk_count,
                 "claims": ctx.result.claim_count,

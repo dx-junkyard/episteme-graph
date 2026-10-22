@@ -1,9 +1,9 @@
 ---
 id: IK-0766
 title: "TeX 取り込みで式ブロックの頭に `label=eqn:halopressure` がそのまま残り、equation_semantics の近傍ブロック本文に式の一部として混入する"
-status: open
+status: resolved
 recorded_at: 2026-10-16
-resolved_at: null
+resolved_at: 2026-10-22
 sources:
   - "docs/pipeline/overview.md"
   - "docs/pipeline/agents.md"
@@ -22,28 +22,43 @@ classification:
     connection: medium
     governance: medium
   proposals: []
-  cause_status: hypothesis
+  cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    仮説: tex_archive.py のラベル剥がしが `\label{eqn:…}` の形だけを想定し、`label=eqn:…`（オプション引数や
+    確定（2026-10-22・コードを読んだ）: 起票時の仮説（tex_archive のラベル剥がし漏れ）は外れ。TeX 取り込みは \\label{…} を式の本文から外して
+    equation_label に分けて持っており、式ブロックの本文に label= は無い。残骸に見えたのは equation_semantics の入力 builder
+    （_neighbor_texts）が文脈の式ブロックの頭に TeX のキーを「 label=eqn:halopressure」と本文と地続きに書き足した見出しで、読み手は
+    取り込みの残骸・式の一部と読み、キーから eq_eqn_* を推測した。処理軸 input_handling は「後段への入力の組み立て」として据え置く。
+    以下は起票時の仮説: tex_archive.py のラベル剥がしが `\label{eqn:…}` の形だけを想定し、`label=eqn:…`（オプション引数や
     マクロ展開後の形）を取りこぼして式ブロックの頭に残している。処理軸 input_handling = 取り込みの正規化漏れ。
     後段は残骸を式の本文として読み、LLM は材料に ID が無いためラベルから eq_eqn_* を推定する（IK-0757 の 2 形式混在に
     つながる）。構造・接続・統制の軸は該当なし。確定には tex_archive.py のラベル除去の正規表現と、該当論文の式環境の
     原文の書き方を確認する。
 generalization:
   level: general
-  general_form: "取り込みで剥がすべき組版指示を、想定した 1 つの書き方でしか剥がさないため、別の書き方の指示が本文に残って後段で内容として読まれる"
+  general_form: "後段への入力を組み立てるときに、識別のためのメタデータ（元形式のキー）を本文と地続きに書き添えるため、読み手がそれを本文の残骸・内容として読み、キーから識別子を推測する"
 pattern: unit-of-work-undefined
 discovery:
   perspective: [data_inspection]
   note: "論文レーダー自律周回で頭脳 Q1 が 2610.19001（TeX 経路）の equation_semantics 要求（seq 2488・P^l 線形回帰モデル）を読み、近傍ブロック本文の式の頭に 'label=eqn:halopressure' が混入していることに気付いた。出所: uxsim/runs/radar_loop/BRAIN_NOTES_Q1.md。"
 resolution:
-  perspective: [pending]
-  note: "未解決。ラベルの除去を `\\label{…}` 以外の書き方（オプション引数・key=value 形）にも広げ、除去したラベルは式の ID の材料として別に保持する（情報は落とさない）。"
+  perspective: [single_point_fix, guardrail_fix]
+  note: "文脈の式ブロックの見出しを「[block_id | equation_id: …]」にし、TeX のキーを本文側に出さない。添える ID は Neighbor Equations と同じ正規化（_equation_block_entries）の解決可能な ID だけ（ラベルは equation_label と neighbor_equations[].label に残る — 情報は落とさない）。TeX 取り込みが \\label を本文から外していることも回帰テストで固定した。"
   landed_in:
-    - "docs/pipeline/overview.md"
+    - "src/episteme_graph/agents/equation_semantics/input_builder.py"
+    - "src/tests/agents/equation_semantics/test_neighbor_equations.py"
+    - "backend/tests/test_latex_display.py"
+  principles:
+    - principle: route-all-surfaces-through-one-point
+      use: consulted
+      note: "文脈の式の ID は Neighbor Equations と同じ 1 つの写像から引き、見出しで別のキー（TeX のラベル）を名乗らせない。"
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "live re-ingest not run（2610.19001 / 2609.35757 の再取り込み・再解析で、実 LLM が文脈の式に eq_eqn_* を推測しなくなるかは見ていない）"
+      - "節題の生 TeX（$P_{\\rm stoch}$ 等 — 追加の出所に記した隣接の観察）は本件の範囲外"
 related: [IK-0696, IK-0697, IK-0757]
 view_of: []
 history: []
@@ -81,7 +96,7 @@ LLM に渡った近傍ブロック本文と TeX の式環境を突き合わせ�
 
 ## 解決の観点
 
-未解決。
+2026-10-22: 取り込みの出力（式ブロックの本文）に label= が無いことを確かめ、残骸の出所を equation_semantics の文脈の見出しと特定した。見出しを解決可能な ID の括弧書きに替えた。
 
 ## 一般化
 

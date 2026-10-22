@@ -510,3 +510,22 @@ def test_agent_side_internal_id_vocabulary_is_covered_by_display_projection():
             assert _dp.contains_internal_id(token), token
     for text in ["eq_12", "eq_2_7", "(3.14)", "span_id", "claim_type", "latex_b1"]:
         assert not _a.contains_internal_id(text), text
+
+
+def test_agent_side_internal_id_regex_is_identical_to_display_projection():
+    """IK-0753: A層の内部 ID 正規表現は表示側 ``INTERNAL_ID_TOKEN_RE`` の逐語の写し。
+
+    A層（narrative_annotator の材料・equation_semantics・contextual_explanation）が外す ID と
+    表示側が遮断する ID を同じにする。どちらかを変えたらもう片方も同じに変える。
+    """
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _src = str(_Path(__file__).resolve().parents[2] / "src")
+    if _src not in _sys.path:
+        _sys.path.insert(0, _src)
+    from core import display_projection as _dp
+    from episteme_graph.agents import internal_id_text as _a
+
+    assert _a.INTERNAL_ID_RE.pattern == _dp.INTERNAL_ID_TOKEN_RE.pattern
+    assert _a.INTERNAL_ID_RE.flags == _dp.INTERNAL_ID_TOKEN_RE.flags

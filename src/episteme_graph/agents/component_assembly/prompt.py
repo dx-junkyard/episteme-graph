@@ -27,7 +27,11 @@ define, parameterize, linearize, solve, substitute, eliminate, derive, compare,
 diagnose, forecast, limit. Do NOT keep a parameter-solving step, a residual /
 final-constraint relation, an application / forecast, and a validity caveat
 inside one component.
-Each component should set "operation" to its single main operation.
+Each component should set "operation" to its single main operation, written as
+one of the closed forms in the "Allowed Operations" section (a listed full name,
+or <prefix>_<object> with a listed prefix). Words outside that list (for example
+limit, parameterize, verify, couple, qualify, classify, forecast) are treated as
+generic by the theory graph and cannot appear in its main graph.
 Each component should set "responsibility_type" to one of:
 definition, model, observation_model, observable_basis, equation_system,
 derivation, constraint, application, limitation.
@@ -122,7 +126,7 @@ _OUTPUT_SCHEMA = {
             "component_id": "comp_001",
             "component_type": "allowed component type",
             "responsibility_type": "definition | model | observation_model | observable_basis | equation_system | derivation | constraint | application | limitation",
-            "operation": "single main theoretical operation (define/linearize/eliminate/substitute/solve/derive/constrain/diagnose/forecast/compare/...)",
+            "operation": "single main theoretical operation from the Allowed Operations list (full name, or <prefix>_<object> with a listed prefix)",
             "primary_operation": "string",
             "secondary_operations": [],
             "support_role": "theory_base | observable_bridge | derivation_core | result | application | limitation",
@@ -314,6 +318,8 @@ class ComponentAssemblyPromptFactory:
             ", ".join(llm_input.allowed_component_types),
             "\n## Allowed Dependency Types",
             ", ".join(llm_input.allowed_dependency_types),
+            "\n## Allowed Operations (closed list for operation / primary_operation)",
+            operation_vocabulary_text(),
             "\n## Output Schema",
             json.dumps(_OUTPUT_SCHEMA, ensure_ascii=False, indent=2),
             "\n## Assembly Hint Types",
@@ -340,6 +346,38 @@ class ComponentAssemblyPromptFactory:
             "- Return ONLY valid JSON, no markdown fences",
         ]
         return "\n".join(parts)
+
+
+def operation_vocabulary_text() -> str:
+    """The operation vocabulary the theory graph accepts, as a closed list (IK-0754).
+
+    The table is read from ``component_graph.schema`` (``OPERATION_FULL_NAMES`` /
+    ``OPERATION_PREFIX_FAMILIES`` / ``GENERIC_OPERATIONS``) — the same objects
+    ``classify_operation`` uses — so the prompt cannot drift from the validator.
+    Imported lazily: ``component_graph`` imports ``component_assembly.schema``.
+    """
+    from episteme_graph.agents.component_graph.schema import (
+        GENERIC_OPERATIONS,
+        OPERATION_FULL_NAMES,
+        OPERATION_PREFIX_FAMILIES,
+    )
+
+    lines = [
+        "Choose operation (and primary_operation) ONLY from these forms. The arrow",
+        "shows the theory-graph relation the word becomes.",
+        "Prefix families (write <prefix> or <prefix>_<object>, e.g. solve_linear_system):",
+    ]
+    for prefix, (_verb, edge_type) in OPERATION_PREFIX_FAMILIES.items():
+        lines.append(f"- {prefix} -> {edge_type}")
+    lines.append("Full names (use exactly as written):")
+    for name, (_verb, edge_type) in OPERATION_FULL_NAMES.items():
+        lines.append(f"- {name} -> {edge_type}")
+    generic = sorted(op for op in GENERIC_OPERATIONS if op)
+    lines.append(
+        "Generic (do not use as a main operation): " + ", ".join(generic)
+        + ". Any word not listed above is also treated as generic."
+    )
+    return "\n".join(lines)
 
 
 def _issue_payload(issue, llm_input: ComponentAssemblyLLMInput) -> dict:

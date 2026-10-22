@@ -32,6 +32,7 @@ from episteme_graph.agents.sentence_split import math_regions, position_in_math
 
 from .llm_client import RhetoricalRoleLLMClient
 from .prompt import RhetoricalRolePromptFactory
+from .window import OUTCOME_REPAIRED, WINDOW_REPAIR_ATTEMPTS
 from .schema import (
     PRIOR_WORK_NOT_REJECT_NOTE,
     BlockRoleAnnotation,
@@ -137,6 +138,111 @@ class RhetoricalRoleRepairer:
             validation_issues=validation_issues,
             log_label="Rhetorical role",
         )
+
+
+    def repair_window(
+        self,
+        unresolved: list[RoleLLMInput],
+        raw_output: dict,
+        validation_issues: list[ValidationIssue],
+        cartridge: CartridgeContext | None,
+        llm_client: RhetoricalRoleLLMClient,
+        prompt_factory: RhetoricalRolePromptFactory,
+        validate_block,
+    ) -> dict[str, tuple[BlockRoleAnnotation, str]]:
+        """Re-ask a window for its still-unresolved blocks (IK-0699).
+
+        Each repair asks only the blocks that are still missing or invalid, and
+        accumulates the blocks it answers validly. Returns those accepted blocks;
+        whatever stays unresolved after :data:`WINDOW_REPAIR_ATTEMPTS` (or after
+        an LLM exception) is absent, and the agent re-asks it through the
+        single-block path — a window never drops a block.
+        """
+        state: dict = {"unresolved": list(unresolved), "accepted": {}, "issues": []}
+
+        def _parse(raw: dict) -> dict:
+            accepted, still, issues = parse_window_answer(
+                raw, state["unresolved"], validate_block, outcome=OUTCOME_REPAIRED
+            )
+            state["accepted"].update(accepted)
+            state["unresolved"] = still
+            state["issues"] = issues
+            return state
+
+        return run_repair_loop(
+            build_messages=lambda raw, issues: prompt_factory.build_window_repair_messages(
+                state["unresolved"], raw if isinstance(raw, dict) else {}, issues, cartridge
+            ),
+            generate=lambda messages: llm_client.generate(messages),
+            parse=_parse,
+            validate=lambda st: st["issues"],
+            on_success=lambda st, _remaining: st["accepted"],
+            on_exhausted=lambda _issues: state["accepted"],
+            raw_output=raw_output,
+            validation_issues=validation_issues,
+            log_label="Rhetorical role window",
+            max_attempts=WINDOW_REPAIR_ATTEMPTS,
+        )
+
+
+def window_entries(raw_output) -> dict[str, dict]:
+    """``{block_id: entry}`` from a window answer (first entry wins on duplicates)."""
+    if isinstance(raw_output, dict):
+        items = raw_output.get("block_annotations")
+    elif isinstance(raw_output, list):
+        items = raw_output
+    else:
+        items = None
+    out: dict[str, dict] = {}
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        block_id = item.get("block_id")
+        if block_id is None:
+            continue
+        out.setdefault(str(block_id), item)
+    return out
+
+
+def parse_window_answer(
+    raw_output,
+    window: list[RoleLLMInput],
+    validate_block,
+    *,
+    outcome: str,
+) -> tuple[dict[str, tuple[BlockRoleAnnotation, str]], list[RoleLLMInput], list[ValidationIssue]]:
+    """Split a window answer into accepted blocks, unresolved blocks and their errors.
+
+    Every entry is parsed with **its own** ``RoleLLMInput`` so that the span
+    offsets are resolved server-side against that block's text only (IK-0331).
+    A block with no entry or with a validation error stays unresolved.
+    """
+    entries_by_id = window_entries(raw_output)
+    accepted: dict[str, tuple[BlockRoleAnnotation, str]] = {}
+    unresolved: list[RoleLLMInput] = []
+    issues: list[ValidationIssue] = []
+    for llm_input in window:
+        entry = entries_by_id.get(str(llm_input.block_id))
+        if entry is None:
+            unresolved.append(llm_input)
+            issues.append(ValidationIssue(
+                rule_id="window_block_missing",
+                severity="error",
+                message=f"block {llm_input.block_id} has no entry in block_annotations",
+                field=f"block_annotations[{llm_input.block_id}]",
+            ))
+            continue
+        annotation = _parse_block_annotation(entry, llm_input)
+        annotation.block_id = llm_input.block_id
+        block_errors = [
+            i for i in validate_block(llm_input, annotation) if i.severity == "error"
+        ]
+        if block_errors:
+            unresolved.append(llm_input)
+            issues.extend(block_errors)
+            continue
+        accepted[str(llm_input.block_id)] = (annotation, outcome)
+    return accepted, unresolved, issues
 
 
 def _normalized_with_index(text: str) -> tuple[str, list[int]]:

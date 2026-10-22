@@ -1844,6 +1844,7 @@ def _clean_text_fragment(
     text = _tex_accents(text)
     text = _replace_text_refs(text, labels, english=english)
     text = _tex_quotes(text)
+    text = _tex_dashes(text)
     text = _COLOR_ARG_RE.sub("", text)
     text = re.sub(r"\\(?:label|url)\*?(?:\[[^\]]*\])?\{[^{}]*\}", "", text)
     text = re.sub(r"\\href\s*\{[^{}]*\}", "", text)
@@ -1871,6 +1872,7 @@ def _clean_text(text: str | None, labels: dict[str, "TexLabelTarget"] | None = N
     text = _mark_footnotes(text)
     text = _replace_text_refs(text, labels)
     text = _tex_quotes(text)
+    text = _tex_dashes(text)
     text = _COLOR_ARG_RE.sub("", text)
     text = re.sub(r"\\(?:label|url)\*?(?:\[[^\]]*\])?\{[^{}]*\}", "", text)
     text = re.sub(r"\\href\s*\{[^{}]*\}", "", text)
@@ -2178,6 +2180,37 @@ def _strip_ref_chain(preceding: str) -> str:
     return current
 
 
+#: 参照の直前の語を読むときに見る長さ（段落の頭から毎回読み直さない）。
+_REF_CONTEXT_TAIL_CHARS = 400
+_REF_PLACEHOLDER_RE = re.compile("\x02(\\d+)\x02")
+
+
+def _ref_context(preceding: str) -> str:
+    """参照の直前の文字列を、組版の命令を外した読みで返す（IK-0723 の再発）。
+
+    直前の語の判定（「Sect.」なら番号だけ）は TeX の原文の字面を見ていたので、語と参照の間に
+    組版の印が挟まると「Sect.」を種類の語と読めず「Sect. Sec. 2」になった — ``Sect.\\@~`` /
+    ``Sect.{}~`` / ``{Sect.}~`` / ``\\textit{Sect.}~`` / ``Sect.~\\hyperref[…]{\\ref*{…}}``。
+    ここで書体・リンクの命令と波括弧を外し（中身は残す）、印字されるとおりの語に戻してから
+    判定する。先に並んだ参照（範囲・列挙の判定に使う）は字面のまま残す。``\\S`` は「§」。
+    """
+    tail = (preceding or "")[-_REF_CONTEXT_TAIL_CHARS:]
+    if "\\" not in tail and "{" not in tail and "}" not in tail:
+        return tail
+    kept: list[str] = []
+
+    def keep(match: re.Match[str]) -> str:
+        kept.append(match.group(0))
+        return f"\x02{len(kept) - 1}\x02"
+
+    tail = _TEXT_REF_RE.sub(keep, tail)
+    tail = re.sub(r"\\S(?![A-Za-z@])", "§", tail)
+    tail = re.sub(r"\\[@/]", "", tail)
+    tail = _COMMAND_RE.sub("", tail)
+    tail = tail.replace("{", "").replace("}", "")
+    return _REF_PLACEHOLDER_RE.sub(lambda m: kept[int(m.group(1))], tail)
+
+
 def _render_one_ref(
     cmd: str,
     key: str,
@@ -2213,16 +2246,39 @@ def _render_one_ref(
     # 重ねて印字するが、それは原文の重複であって読み手に渡す情報ではない（IK-0723:
     # 「Sect.~\cref{sec:x}」→「Sect. Sec. 3」）。\cref 系は名前の語だけで判断する（並びの継ぎ目
     # 「) and」は名前ではない）。連なりの先頭の語（「Sects.~\cref{a} and \cref{b}」）も見る。
+    # 語と番号の間に著者が括弧を書いた形（「Sect.~(\\ref{…})」）も、語の後の括弧として読む
+    # （「Sect. (Sec. 2)」にしない — IK-0723）。
+    named_pre = re.sub(r"\(\s*$", "", preceding or "")
+    named_lead = re.sub(r"\(\s*$", "", lead or "")
     if cmd in {"cref", "Cref", "autoref"}:
         name_re = _REF_KIND_NAME_ONLY_RE[kind]
-        named = bool(name_re.search(preceding or "") or name_re.search(lead))
+        named = bool(name_re.search(named_pre) or name_re.search(named_lead))
     else:
         named = bool(
-            _REF_PRECEDING_NAME_RE[kind].search(preceding or "") or _REF_PRECEDING_NAME_RE[kind].search(lead)
+            _REF_PRECEDING_NAME_RE[kind].search(named_pre) or _REF_PRECEDING_NAME_RE[kind].search(named_lead)
         )
     if named:
         return body
     return f"{(_REF_PREFIX_EN if english else _REF_PREFIX)[kind]}{body}"
+
+
+#: TeX の合字の記法（``---`` = em ダッシュ・``--`` = en ダッシュ）と、同じ字を出す命令（IK-0827）。
+_TEX_DASH_COMMAND_RE = re.compile(r"\\(?P<dash>textemdash|textendash)(?![A-Za-z@])\s*(?:\{\})?")
+
+
+def _tex_dashes(text: str) -> str:
+    """TeX の合字の記法を字にする（地の文の断片のみ・数式は通らない — IK-0827）。
+
+    ``central--satellite`` は「central–satellite」、``pairs---we`` は「pairs—we」。記法のまま
+    本文に残すと表示に出て、役割判定（LLM）が ``---`` を文の区切りと読んで span を割る
+    （次の span が「---we will omit …」で始まった）。``\\textemdash`` / ``\\textendash`` は
+    後段の命令の除去で字ごと消えるので、ここで字に置く（情報を落とさない）。参照の範囲
+    （``\\ref{a}--\\ref{b}``）は参照の置換の後に通るので、範囲の判定には影響しない。
+    """
+    if "-" not in text and "\\text" not in text:
+        return text
+    text = _TEX_DASH_COMMAND_RE.sub(lambda m: "\u2014" if m.group("dash") == "textemdash" else "\u2013", text)
+    return text.replace("---", "\u2014").replace("--", "\u2013")
 
 
 def _tex_quotes(text: str) -> str:
@@ -2301,7 +2357,9 @@ def _replace_text_refs(
             return ""
         if not keys:
             return ""
-        preceding = text[: match.start()]
+        raw_preceding = text[: match.start()]
+        # 直前の語は印字される読みで判定する（組版の印で「Sect.」を見落とさない — IK-0723）。
+        preceding = _ref_context(raw_preceding)
         rendered = [_render_one_ref(cmd, keys[0], preceding, labels, english=english)]
         rendered.extend(
             _render_one_ref(cmd, key, "式" if cmd == "eqref" else preceding, labels, english=english)
@@ -2309,7 +2367,7 @@ def _replace_text_refs(
         )
         joined = ", ".join(rendered)
         # 「Eq.\\eqref{…}」「Sec.\\ref{…}」のように語と参照が密着していれば空白を 1 つ挟む。
-        if joined and preceding and re.search(r"[A-Za-z0-9.,;:]$", preceding):
+        if joined and raw_preceding and re.search(r"[A-Za-z0-9.,;:]$", raw_preceding):
             return " " + joined
         return joined
 

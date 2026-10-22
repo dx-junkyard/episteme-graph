@@ -1764,3 +1764,42 @@ paper_goal）/ `TestSeedKeyphraseSupply::test_title_keyphrases_rules`（題名�
 （`all:"..."` の句検索になる点で略語単独より絞れる見込み）。本文の「フル表記 (略語)」は最初に見つかったものだけを採る。
 ガードレール: `test_paper_radar_core.py::TestShortAbbreviationFullForm` / `TestSoleWidening`、
 `test_paper_radar_ui_static.py::TestSoleWideningChipMark`。
+
+## 24. 追補 — 第 7 波: 網の偏りの事実文・帯の母集団・取り込み済み候補の比較・起点の系譜（2026-10-22・migration / env / アンカー / LLM コール / arXiv 呼び出し / 新テーブルなし）
+
+**状態**: 実装済み（2026-10-22）。自律周回の未解決 4 件（IK-0760 / IK-0706 / IK-0759 / IK-0761）を、PR1〜PR8 / PD1〜PD8 の範囲内で解く。
+
+| 項目 | 何を変えたか | 正本 |
+|---|---|---|
+| A 網の偏り（IK-0760） | `keyphrase_hits` に 3 つ目の印を足す。既存の下限（候補 3 件以上・有効な語 2 語以上）のもとで、「すべてに当たった」でも「この語だけに一致が過半」でもないが、取得した候補の **2/3 以上**に当たる語の項目に `dominant: true` と `dominant_note`（`NOTE_KEYPHRASE_DOMINANT_TEMPLATE`「「X」が取得した候補の多くに当たっています。網が一般語に寄っている可能性があります。」）を付け、検索結果に `keyphrase_dominant_note` を足す。閾値はコード定数 `DOMINANT_HIT_SHARE_NUMERATOR` / `DENOMINATOR`（env にしない）。**語の一般性を判定する表は持たない**（分野語を書かない）— 言うのは網の上の事実だけで、外すのは教員（PD3）。件数・割合は書かない（PD4）。arXiv の呼び出しは増やさない（網の取り方 = 案②は §14 の予算に触れるので採らない） | `radar.keyphrase_hits` / `keyphrase_hit_notes` |
+| B 帯の母集団（IK-0706） | 帯ラベルの付いた候補があるときは**常に** `band_population_note`（`NOTE_BAND_POPULATION`「帯は arXiv から取得した新着の候補の中での比較です。取得していない論文はこの帯に入りません。」）を返す。§20 D の `reading_note`（関係ラベルと同時に出るときだけ）とは別の 1 行で、凡例の直後に 1 回だけ描く（帯分けできなかったときは出さない）。数値（取得件数・閾値）は出さない（PR2 / PD4） | `radar.band_population_note`、`admin-paper-radar.js::bandPopulationNoteHtml` |
+| C 取り込み済み候補の比較（IK-0759） | 取り込み済みの候補カードにも比較用のチェックボックス（`pr-select-compare-only`）を出し、「違いを分析」の対象に選べるようにする。取り込みの対象には入らない（`selectedIngestIds` が status `new` だけに絞る — 取り込み済みを再取得しない IK-0796 と二重に守る）。比較は既存の 1 コール・日次上限・非保存（PR4）のまま。要旨は `run_compare` の写しの read-through（`metadata_cache.read_fresh` → 足りない分だけ arXiv）を通るので、検索で取得した候補なら追加の arXiv 呼び出しはゼロ。比較結果がまだ無い取り込み済みカードには導線 1 行（`INGESTED_COMPARE_HINT`）を配置の対比の直後に添える | `admin-paper-radar.js::candidateCardHtml` / `selectedIngestIds` |
+| D 起点の系譜（IK-0761） | 取り込みの監査（`AUDIT_ENTITY_PAPER_DISCOVERY` の `ingest` / `ingest_batch`）の metadata に `seed_document_id` を足す（レーダーの取り込みが `seed_document_id` を送り、サーバが view を確かめて `documents.id` に正規化したときだけ記録 — 申告を信用しない・閲覧できない値は記録しない・取り込みは止めない）。`GET /radar/seed` は `radar.seed_lineage` で「この document の `source_url` の arXiv ID を取り込んだ監査 → その起点 → …」を遡り、`seed.lineage`（`[{document_id, title}]`・古い → 新しい・最後が起点）/ `lineage_line` / `lineage_note` を返す。段数の上限は `LINEAGE_MAX_DEPTH`（コード定数）、循環は止める、閲覧できない論文は `LINEAGE_HIDDEN_TITLE` にして題名も id も出さずそこで止める（可視集合は route からの**必須の注入** — 空なら SQL を発行しない）。失敗は fail-soft（キーを付けない）。新テーブル・保存なし（PR1）。画面は seed ヘッダに 1 行（`#pr-seed-lineage`）+ 事実文で描き、系譜があるときは §21 D の JS 内の「前の起点」行に優先する | `radar.seed_lineage`、`routes/paper_discovery.py::_audit_seed_document_id` / `get_radar_seed` |
+
+- A の画面: `dominant` の語のチップにも §23.5 の印「網を広げる」を付け、title に事実文と操作の案内「クリックで外せます（外したあと「検索」で探し直します）」を添える。外すのは既存のチップのクリック（`enabled` の反転）で、自動では外さず、教員が「検索」を押すまで arXiv を呼ばない（PD3・§14）。新しい操作要素は足していない。
+- 対照検索（2026-10-22・オーケストレータが作業ツリーを反映して arXiv を 1 回・`uxsim/runs/radar_loop/contrast-2026-10-22-kurtosis.json`）: 尖度の起点で `band_population_note` が帯付き候補とともに返り、`large-scale structure` には既存の単独一致の印と事実文が立って `dominant` は重ならなかった。他の教員が取り込んだ候補は `status: new` のまま（閲覧者に見えない取り込みを「取り込み済み」と言わない fail-closed で正しい）。
+- 事実文はすべてサーバ（`radar.py`）の定数で、JS は素通しする（ガードレール）。比較用チェックボックスの title と導線 1 行は操作要素の装飾・案内として JS に持つ。事実表示・既存のチェックボックスと同じ操作なので新アンカーは足さない。`admin.html` の `?v=` を `paper-radar-20261022-wave24` に上げた。
+- 系譜は**この変更以降の取り込みからしか辿れない**（それ以前の監査には起点が無い）。そのため `lineage_note` は「系譜は、論文レーダーから取り込んだときに記録した起点だけからたどっています。」を常に添える。
+
+### 24.1 pre-mortem
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 網の範囲を新着順の先頭で決め、一般語の偏りが下流（帯・比較）でしか現れない | `upstream-loss-masked-downstream` | 当たる（A の主型）。網の取り方は変えず（予算）、偏りを網の上の事実として言う |
+| 段階ラベルの母集団を新着順の先頭で決め、全体の位置のように読まれる | `extent-decided-by-proxy-signal` | 当たる（B）。母集団の性質を帯が出るたびに 1 行で言う。取得件数は増やさない |
+| 比較の判定は取り込み済みにも呼べるのに、画面の選択肢が新着だけだった | `available-but-unwired` | 当たる（C）。選択肢を広げ、取り込みの選択とは分けた |
+| 起点の文脈が JS の一時状態にしかなく、連鎖の系譜が 1 段で途切れる | `condition-not-propagated` | 当たる（D の主型）。取り込みの監査に起点を載せ、読み時に遡る |
+| 系譜の読み出しが閲覧できない論文の題名を出す | `condition-not-propagated` | 当たる。可視集合を必須引数で受け、空なら SQL を発行しない（原理 `enforce-condition-in-query-with-required-argument`） |
+
+### 24.2 限界・非スコープ
+
+- 網そのもの（新着順の先頭 N 件）は変えていない。主題語の論文・古い関連論文が網の外に落ちる現象は残り、事実文で「偏っている可能性」を言うだけ（取得の仕方を変えるのは arXiv の予算 §14 の判断と一緒に）。
+- 系譜は取り込みの監査に起点を記録した取り込みからだけ辿れる。手動アップロード・分野購読モーダルからの取り込み・この変更以前の取り込みは系譜に出ない。同じ arXiv ID を複数の起点から取り込んだ記録があれば、閲覧できる起点のうち最新の記録を採る。
+- 比較結果は従来どおり保存しない（取り込み済みカードの関係の種類は、比較を押したその画面の間だけ読める）。
+- ブラウザでの目視・実 arXiv での再演はしていない。
+
+### 24.3 ガードレール
+
+`test_paper_radar_core.py::TestDominantKeyphrase` / `TestBandPopulationNote` / `TestCompareIngestedUsesCache` / `TestSeedLineage`、
+`test_paper_radar_api.py::TestWave24SearchNotesPassThrough` / `TestSeedLineageRoute` / `TestIngestRecordsTheSeed`、
+`test_paper_radar_ui_static.py::TestRadarWave24`。

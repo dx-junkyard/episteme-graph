@@ -196,11 +196,11 @@ class TestTexIngestKeepsReferencesAndFootnotes:
         "source, expected",
         [
             # O0（2610.19001）: 範囲・列挙の 2 つ目以降に接頭辞を付けない（「B--Sec. F」にしない）。
-            (r"see Appendices~\ref{app:B}--\ref{app:F}.", "see Appendices B--F."),
-            (r"Eqs.~(\ref{eq:a})--(\ref{eq:b})", "Eqs. (1)--(2)"),
+            (r"see Appendices~\ref{app:B}--\ref{app:F}.", "see Appendices B\u2013F."),
+            (r"Eqs.~(\ref{eq:a})--(\ref{eq:b})", "Eqs. (1)\u2013(2)"),
             (r"Figs.~\ref{fig:p}, \ref{fig:q} and \ref{fig:r} show", "Figs. 1, 2 and 3 show"),
             (r"Secs.~\ref{sec:res} and \ref{app:B}", "Secs. 3 and B"),
-            (r"Eqs.~\eqref{eq:a}--\eqref{eq:b}", "Eqs. (1)--(2)"),
+            (r"Eqs.~\eqref{eq:a}--\eqref{eq:b}", "Eqs. (1)\u2013(2)"),
             # 先頭の語が無い並びは従来どおり各参照に前置きを付ける。
             (r"in \ref{sec:res} and \ref{app:B}", "in Sec. 3 and Sec. B"),
         ],
@@ -754,3 +754,84 @@ class TestTexReferenceDoublePrefixAndFootnotePlacement:
         )
         table = [b for b in structure.blocks if b.raw.get("in_table")]
         assert table and all(b.block_type == "body_paragraph" for b in table)
+
+
+class TestTexReferenceContextReadsPrintedWords:
+    """IK-0723 の再発（2026-10-22）: 語と参照の間の組版の印で「Sect.」を見落とし「Sect. Sec. 2」になった。
+
+    直前の語の判定は印字される読み（``_ref_context``）で行う — 取り込みの 1 箇所（``_replace_text_refs``）。
+    """
+
+    LABELS = {
+        "sec:model": ta.TexLabelTarget("section", "2"),
+        "sec:fit": ta.TexLabelTarget("section", "4.1"),
+        "fig:pk": ta.TexLabelTarget("figure", "3"),
+    }
+
+    @pytest.mark.parametrize(
+        "source, expected",
+        [
+            (r"we follow Sect.\@~\cref{sec:model}.", "we follow Sect. 2."),
+            (r"we follow Sect.{}~\cref{sec:model}.", "we follow Sect. 2."),
+            (r"we follow {Sect.}~\cref{sec:model}.", "we follow Sect. 2."),
+            (r"we follow \textit{Sect.}~\cref{sec:model}.", "we follow Sect. 2."),
+            (r"see Sect.~\hyperref[sec:fit]{\ref*{sec:fit}}", "see Sect. 4.1"),
+            (r"(see Sect.~(\ref{sec:fit}))", "(see Sect. (4.1))"),
+            (r"shown in Fig.\@~\ref{fig:pk}", "shown in Fig. 3"),
+            # 語の無い参照は従来どおり種類名を付ける（判定を緩めすぎない）。
+            (r"as in \textit{our} \cref{sec:model}", "as in our Sec. 2"),
+        ],
+    )
+    def test_kind_word_hidden_behind_typesetting_marks_is_still_read(self, source, expected):
+        assert ta._clean_prose(source, labels=self.LABELS) == expected
+
+    def test_footnote_reference_after_marked_kind_word_has_single_prefix(self):
+        structure = _u1_structure(
+            "\\section{Model}\\label{sec:model}\nText.\n\n"
+            "\\section{Fit}\\label{sec:fit}\n"
+            "We fit the data.\\footnote{The priors follow Sect.\\@~\\cref{sec:model}.} Then it ends.\n"
+        )
+        body = [b.text for b in structure.blocks if b.block_type == "body_paragraph"]
+        joined = " ".join(body)
+        assert "Sect. Sec." not in joined
+        assert "Sect. 1" in joined
+
+    def test_paragraph_heading_is_not_fused_to_the_previous_paragraph(self):
+        structure = _u1_structure(
+            "\\section{Waveform}\n"
+            "The flux is computed order by order.\n"
+            "\\paragraph{-1PN Expression:} The leading term reads.\n"
+            "\\paragraph{0PN Expressions:}\nThe next term reads.\n"
+        )
+        texts = [(b.block_type, b.text) for b in structure.blocks]
+        assert ("body_paragraph", "The flux is computed order by order.") in texts
+        assert ("subsection_heading", "-1PN Expression") in texts
+        assert ("subsection_heading", "0PN Expressions") in texts
+
+
+class TestTexDashLigatures:
+    """IK-0827（2026-10-22）: ``--`` / ``---`` を字にする（地の文のみ・数式は不変）。"""
+
+    def test_dashes_become_characters_in_prose(self):
+        out = ta._clean_prose(
+            r"the central--satellite pairs---we will omit the $1-h$ term---and the "
+            r"redshifts 0.2--0.6 \textemdash{} see pp.~3\textendash 5."
+        )
+        assert "--" not in out
+        assert "central\u2013satellite pairs\u2014we will omit" in out
+        assert "$1-h$" in out  # 数式の中の減算は触らない
+        assert "0.2\u20130.6" in out
+        assert "\u2014 see pp. 3\u20135." in out
+
+    def test_dashes_in_block_text_and_section_titles(self):
+        structure = _u1_structure(
+            "\\section{Halo--galaxy connection}\n"
+            "Pairs---we will omit the one-halo term---are counted.\n"
+            "\\begin{equation} a = b - -c \\label{eq:x}\\end{equation}\n"
+        )
+        heading = next(b for b in structure.blocks if b.block_type == "section_heading")
+        body = next(b for b in structure.blocks if b.block_type == "body_paragraph")
+        equation = next(b for b in structure.blocks if b.block_type == "equation_block")
+        assert heading.text == "Halo\u2013galaxy connection"
+        assert body.text == "Pairs\u2014we will omit the one-halo term\u2014are counted."
+        assert equation.text == "a = b - -c"

@@ -1,9 +1,9 @@
 ---
 id: IK-0723
 title: "TeX 取り込みで参照が「Fig 図 1」と二重接頭辞になり、段落末尾に次節の見出し（\\paragraph の「-1PN Expression:」等）が融合する"
-status: open
+status: resolved
 recorded_at: 2026-10-16
-resolved_at: null
+resolved_at: 2026-10-22
 sources:
   - "docs/features/url_material_upload_design.md"
   - "docs/pipeline/overview.md"
@@ -43,11 +43,21 @@ discovery:
   perspective: [data_inspection]
   note: "論文レーダー自律周回で頭脳 L0 が equation_semantics（seq 1884・1908・2001）の文脈窓を読み、見出しの融合と「Fig 図 1」に気付いた（出所: uxsim/runs/radar_loop/BRAIN_NOTES_L0.md）。"
 resolution:
-  perspective: [single_point_fix, pending]
-  note: "直前語の判定を Sect./Sects./ピリオドなしの Sec・Fig・Tab・Eq に広げ、\\cref / \\Cref / \\autoref も直前（と並びの先頭）の語が同じ種類を言っていれば番号だけを置く（番号の正本は従来どおり label の印字番号）。原本 4 本で二重接頭辞 33 → 0（2610.08751 = 31・2610.08908 = 2）、他の参照の出力は不変。"
+  perspective: [single_point_fix, guardrail_fix]
+  note: "2026-10-22（再発の是正）: 直前の語の判定が TeX の原文の字面を見ていたため、語と参照の間に組版の印が挟まると「Sect.」を種類の語と読めなかった（Sect.\\@~ / Sect.{}~ / {Sect.}~ / \\textit{Sect.}~ / Sect.~\\hyperref[…]{\\ref*{…}} / Sect.~(\\ref{…})）。取り込みの参照置換の 1 箇所（_replace_text_refs）で、直前の文字列を印字される読み（tex_archive._ref_context — 書体・リンクの命令と波括弧を外し中身を残す、\\S は §、先に並んだ参照は字面のまま）にしてから判定し、語の直後の括弧も語の後として読む。脚注の中の参照も同じ経路を通る。\\paragraph の融合（起票時の②）は _segment_tex の段落見出しの切り出しで既に起きず、回帰テストで固定した。以下は 2026-10-17 の是正: 直前語の判定を Sect./Sects./ピリオドなしの Sec・Fig・Tab・Eq に広げ、\\cref / \\Cref / \\autoref も直前（と並びの先頭）の語が同じ種類を言っていれば番号だけを置く（番号の正本は従来どおり label の印字番号）。原本 4 本で二重接頭辞 33 → 0（2610.08751 = 31・2610.08908 = 2）、他の参照の出力は不変。"
   landed_in:
     - "backend/core/document_pipeline/tex_archive.py"
     - "backend/tests/test_latex_display.py"
+  principles:
+    - principle: route-all-surfaces-through-one-point
+      use: consulted
+      note: "面（本文・脚注・節題・caption・表）ごとに直さず、全経路が通る参照置換の 1 箇所で直前の語の読みを作る。字面の判定を足していく形（直前語の正規表現を広げる）はやめた。"
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "live re-ingest not run（2610.08751 等の実 TeX の再取り込み・再解析で「Sect. Sec. N」が消えたことは見ていない。原本はローカルに無く外部 API も呼んでいない — 脚注の実際の書き方が今回の 6 形のどれかであることは未確認）"
+      - "\\nameref（節題を印字する参照）は扱っていない（キーが残る）"
+      - "\\paragraph 以外の走り込み見出し（\\textbf{…:} を段落頭に置く形）の融合"
 related: [IK-0697, IK-0696]
 view_of: []
 history:
@@ -88,6 +98,8 @@ history:
 ## 解決の観点
 
 2026-10-17: 直前語の判定を表記ゆれ（Sect. / ピリオドなし）に広げ、\cref 系にも同じ規則を効かせた（tex_archive._render_one_ref）。原本 4 本（1471ff7f / c795b2cf / a8d731be / 842bd9cb）の取り込みを読み直し、「Sect. Sec. N」「Fig Fig. N」が消えたこと・他の参照の出力が変わらないことを見た。\paragraph の融合は扱っていない。
+
+2026-10-22: 再発の型を手元で再現した（Sect.\@~\cref・{Sect.}~・\textit{Sect.}~・\hyperref・Sect.~(\ref) で「Sect. Sec. 2」「Sect. (Sec. 2)」）。直前語の判定を字面ではなく印字される読みで行うようにし、上の形と脚注の中の参照・\paragraph の見出しを回帰テスト（test_latex_display.py::TestTexReferenceContextReadsPrintedWords）で固定した。
 
 ## 一般化
 

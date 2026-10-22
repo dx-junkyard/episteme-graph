@@ -303,6 +303,10 @@ class IngestRequest(BaseModel):
     #: ``""`` = 「指定しない」の明示 / それ以外 = 選択肢に実在する分野キー（語彙外は 422）。
     #: ``domain_key`` は監査の帰属（購読の名前空間）で、解析の分野には使わない。
     cartridge_id: Optional[str] = None
+    #: 論文レーダーから取り込むときの起点（seed）の document（§24 D・IK-0761）。
+    #: 監査の metadata に ``seed_document_id`` として残し、次の起点の系譜を読み時導出する
+    #: （新しい保存を作らない）。閲覧できない・解決できない値は記録しない（取り込みは止めない）。
+    seed_document_id: str = ""
 
 
 class IngestBatchItem(BaseModel):
@@ -324,6 +328,10 @@ class IngestBatchRequest(BaseModel):
     #: ``IngestRequest.cartridge_id`` と同じ意味。キュー行（migration 090）に保存し、
     #: worker が受理時に ``_accept_material_source(cartridge_id=)`` へ渡す。
     cartridge_id: Optional[str] = None
+    #: 論文レーダーから取り込むときの起点（seed）の document（§24 D・IK-0761）。
+    #: 監査の metadata に ``seed_document_id`` として残し、次の起点の系譜を読み時導出する
+    #: （新しい保存を作らない）。閲覧できない・解決できない値は記録しない（取り込みは止めない）。
+    seed_document_id: str = ""
 
 
 class CitationSearchRequest(BaseModel):
@@ -702,6 +710,27 @@ def _already_ingested_entry(arxiv_id: str, existing: dict) -> dict:
     }
 
 
+def _audit_seed_document_id(seed_ref: str, current_user: dict) -> str:
+    """取り込みの監査に残す起点 document（§24 D）。閲覧できるときだけ正規の id を返す。
+
+    クライアントの申告は信用せず、view を確かめてから ``documents.id`` に正規化する。
+    解決できない・閲覧できない値は記録しない（空 — 取り込みそのものは止めない）。
+    """
+    ref = str(seed_ref or "").strip()
+    if not ref:
+        return ""
+    try:
+        access = services.resolve_document_access(current_user.get("id"), ref)
+    except Exception:  # noqa: BLE001 — 系譜は補助情報。取り込みを止めない
+        logger.info("ingest seed document could not be resolved", exc_info=True)
+        return ""
+    if not access.found or not access.document_id:
+        return ""
+    if not access.can_view and str(current_user.get("role") or "") != ROLE_SYSTEM_ADMIN:
+        return ""
+    return str(access.document_id)
+
+
 @router.post("/ingest", status_code=202)
 def ingest_candidates(
     body: IngestRequest,
@@ -862,28 +891,33 @@ def ingest_candidates(
         payload["fell_back"] = bool(resolved.fell_back)
         accepted.append(payload)
 
+    audit_metadata = {
+        "action": "ingest",
+        "source_format": source_format,
+        "cartridge_id": cartridge_option,
+        "arxiv_ids": [entry.get("arxiv_id", "") for entry in accepted],
+        "effective_formats": {
+            entry.get("arxiv_id", ""): entry.get("effective_format", "")
+            for entry in accepted
+        },
+        "fell_back_arxiv_ids": [
+            entry.get("arxiv_id", "") for entry in accepted if entry.get("fell_back")
+        ],
+        "failed_arxiv_ids": [entry.get("arxiv_id", "") for entry in failed],
+        "accepted": len(accepted),
+        "failed": len(failed),
+    }
+    seed_document_id = _audit_seed_document_id(body.seed_document_id, current_user)
+    if seed_document_id:
+        # 起点の系譜を読み時導出するための記録（§24 D・IK-0761）。
+        audit_metadata["seed_document_id"] = seed_document_id
     record_review_event(
         AUDIT_ENTITY_PAPER_DISCOVERY,
         str(body.domain_key or "").strip() or _ENTITY_ID_FALLBACK,
         _STATUS_CANDIDATE,
         _STATUS_INGEST_REQUESTED,
         current_user["id"],
-        {
-            "action": "ingest",
-            "source_format": source_format,
-            "cartridge_id": cartridge_option,
-            "arxiv_ids": [entry.get("arxiv_id", "") for entry in accepted],
-            "effective_formats": {
-                entry.get("arxiv_id", ""): entry.get("effective_format", "")
-                for entry in accepted
-            },
-            "fell_back_arxiv_ids": [
-                entry.get("arxiv_id", "") for entry in accepted if entry.get("fell_back")
-            ],
-            "failed_arxiv_ids": [entry.get("arxiv_id", "") for entry in failed],
-            "accepted": len(accepted),
-            "failed": len(failed),
-        },
+        audit_metadata,
     )
     logger.info(
         "arXiv ingest requested by user=%s accepted=%s failed=%s",
@@ -990,25 +1024,27 @@ def ingest_batch(
         reopen_path=_INGEST_REOPEN_PATH,
         evidence_shown=None,
     )
+    batch_metadata = {
+        "action": "ingest_batch",
+        "source_format": source_format,
+        "cartridge_id": cartridge_option,
+        "arxiv_ids": [entry["arxiv_id"] for entry in result["queued"]],
+        "skipped_arxiv_ids": [entry["arxiv_id"] for entry in result["skipped"]],
+        "queued": len(result["queued"]),
+        "skipped": len(result["skipped"]),
+        "bulk": True,
+    }
+    seed_document_id = _audit_seed_document_id(body.seed_document_id, current_user)
+    if seed_document_id:
+        # 起点の系譜を読み時導出するための記録（§24 D・IK-0761）。
+        batch_metadata["seed_document_id"] = seed_document_id
     record_review_event(
         AUDIT_ENTITY_PAPER_DISCOVERY,
         str(body.domain_key or "").strip() or _ENTITY_ID_FALLBACK,
         _STATUS_CANDIDATE,
         _STATUS_QUEUED,
         current_user["id"],
-        decision_context.attach_decision_context(
-            {
-                "action": "ingest_batch",
-                "source_format": source_format,
-                "cartridge_id": cartridge_option,
-                "arxiv_ids": [entry["arxiv_id"] for entry in result["queued"]],
-                "skipped_arxiv_ids": [entry["arxiv_id"] for entry in result["skipped"]],
-                "queued": len(result["queued"]),
-                "skipped": len(result["skipped"]),
-                "bulk": True,
-            },
-            ctx,
-        ),
+        decision_context.attach_decision_context(batch_metadata, ctx),
     )
     logger.info(
         "arXiv ingest batch queued by user=%s queued=%s skipped=%s",
@@ -1322,9 +1358,28 @@ def get_radar_seed(
             ) from exc
         # arXiv から引けた分の写しを残す（次に開いたときは呼ばない — 設計書 §14）。
         _persist_arxiv_metadata_cache(session)
+        # 起点の系譜（§24 D・IK-0761）。取り込みの監査から読み時導出（保存しない）。
+        # 可視集合は必須の注入（空なら core は SQL を発行しない = fail-closed）。
+        # 写しの commit の後に読む（系譜の SQL が失敗しても写しの記帳を巻き込まない）。
+        seed.update(
+            pd_radar.seed_lineage(
+                session,
+                str(seed.get("document_id") or access.document_id or ""),
+                visible_document_ids=_visible_document_ids_for_lineage(current_user),
+            )
+        )
     finally:
         session.close()
     return {"seed": _with_can_register(seed, access, current_user)}
+
+
+def _visible_document_ids_for_lineage(current_user: dict) -> set[str]:
+    """系譜に名前を出してよい document の集合（失敗は空 = 系譜を出さない）。"""
+    try:
+        return services.list_visible_document_ids(str(current_user.get("id") or ""))
+    except Exception:  # noqa: BLE001 — 系譜は補助情報。起点の解決を止めない
+        logger.info("visible documents for lineage unavailable", exc_info=True)
+        return set()
 
 
 @router.post("/radar/search")

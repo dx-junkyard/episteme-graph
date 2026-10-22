@@ -138,6 +138,7 @@ from core.meta_analyzer import (
     reject_proposal,
 )
 from core.postgres import get_session as _pg_session
+from core import analysis_degradation as analysis_degradation_core
 from core import reference_health as reference_health_core
 from core.reextractor import enqueue_reextraction, get_jobs as get_reextraction_jobs
 from core.schema import (
@@ -1219,6 +1220,18 @@ def _material_reference_health(stage_outputs: dict | None) -> dict:
     return projected
 
 
+def _material_analysis_degradation(stage_outputs: dict | None) -> dict:
+    """run の ``stage_outputs`` から教材行用の縮退の投影 ``{status, facts}`` を作る（IK-0715）。
+
+    完了時に orchestrator が書いた ``stage_outputs.analysis_degradation`` を優先し、
+    それが無い旧 run でも ``llm_failures`` / ``component_assembly`` の完了ペイロードから
+    縮退が見つかれば ``degraded``。何も確かめられなければ ``unchecked``（行には出さない）。
+    判定は ``core.analysis_degradation`` の 1 関数だけが持つ（面ごとに判定を書かない）。
+    """
+    summary = analysis_degradation_core.summarize_run_degradation(stage_outputs or {})
+    return analysis_degradation_core.public_view(summary)
+
+
 def _material_visibility_clauses(user_groups: list, params: dict) -> tuple[str, str, str]:
     """教材一覧・詳細（list_materials / get_material）が共有する可視性の 3 条件。
 
@@ -1442,6 +1455,8 @@ def list_materials(
         # 最新 run に残った**検査時点の事実**から状態と時刻だけを投影する（facts /
         # details は行に出さない = T-3）。run が無い / 事実が無い教材は「未確認」。
         reference_health = _material_reference_health(stage_outputs)
+        # 解析の縮退（IK-0715）: AI の応答が得られず決定論の代替で作られた段の事実。
+        analysis_degradation = _material_analysis_degradation(stage_outputs)
 
         # Tier3-16: run の有無・状態からの status 合成は projector に一本化する
         # （get_material と同一ロジック。一覧と詳細の status を一致させる）。
@@ -1523,6 +1538,7 @@ def list_materials(
                 str(run_data.get("cartridge_id") or "") if run else None
             ),
             reference_health=reference_health,
+            analysis_degradation=analysis_degradation,
             authors=authors,
             year=year,
             doc_type=doc_type,

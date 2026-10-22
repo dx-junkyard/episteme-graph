@@ -465,6 +465,8 @@
       // 件数バッジ・比率は作らない。「切れがあります」も運用上の事実であって失敗ではない
       // ので警告色にしない（未確認は薄色で「まだ確認されていない」ことだけを言う）。
       html += materialReferenceHealthChipHtml(m);
+      // 解析の縮退（IK-0715）: AI の応答が得られず決定論の代替で作られた段があるときだけ 1 行。
+      html += materialAnalysisDegradationChipHtml(m);
       html += "</td>";
       html += "<td>" + escHtml(uploadedAt) + "</td>";
       var resumeBtn = canResume
@@ -3770,6 +3772,20 @@
       : "var(--color-text-secondary)";
     return '<div class="admin-reference-health-chip" style="font-size:11px;color:' + color +
       ';margin-top:2px;">' + escHtml(label) + "</div>";
+  }
+
+  // ── 解析の縮退（IK-0715）────────────────────────────────────────────────
+  // 判定はサーバ（core/analysis_degradation.py）の 1 投影だけが持つ。行に出すのは
+  // status === "degraded" のときの事実文 1 行（詳細の事実文は title のツールチップ）だけで、
+  // 件数・段の数は出さない。ok / unchecked のときは何も描かない（操作要素ではない事実の表示）。
+  function materialAnalysisDegradationChipHtml(m) {
+    var deg = m && m.analysis_degradation;
+    if (!deg || deg.status !== "degraded") return "";
+    var facts = Array.isArray(deg.facts) ? deg.facts : [];
+    var tip = facts.join("\n");
+    return '<div class="admin-analysis-degradation-chip" style="font-size:11px;color:var(--color-text-secondary);margin-top:2px;"' +
+      (tip ? ' title="' + escHtml(tip) + '"' : "") + ">" +
+      escHtml("解析: 一部は AI の応答なしの代替") + "</div>";
   }
 
   function openReferenceHealthModal(documentId, title) {

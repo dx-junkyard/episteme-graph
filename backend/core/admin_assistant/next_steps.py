@@ -28,6 +28,7 @@ from typing import Any, Optional
 
 from sqlalchemy import text as sa_text
 
+from core import analysis_degradation
 from core import atlas_store
 from core import coverage_facts
 from core import document_refs as _document_refs
@@ -886,11 +887,14 @@ def _eval_material_ingest_incomplete(session, uid: str) -> list[tuple[NextStep, 
 
 
 def _eval_material_analysis_llm_failed(session, uid: str) -> list[tuple[NextStep, str]]:
-    """解析中に AI 提供元の呼び出しが失敗した記録が残る教材（IK-0362）。
+    """解析中に AI の応答が得られなかった記録が残る教材（IK-0362 / IK-0715）。
 
     - 点灯: 採用 run の ``stage_outputs.llm_failures`` が存在する（orchestrator が完了時に
-      U層 ``llm_usage_events`` の失敗行から書く。失敗が無い run にはキー自体が無い）。
-    - 消滅: 再実行して失敗の無い run が採用されれば導出されなくなる（G1）。
+      U層 ``llm_usage_events`` の失敗行から書く）、または ``core.analysis_degradation`` の
+      投影が ``degraded``（agent が打ち切り・提供元障害で決定論の代替／空の成果に落ちた。
+      打ち切りは U層に失敗行を残さないので ``llm_failures`` だけでは点かなかった — IK-0715）。
+      判定は投影の 1 関数が持ち、教材行のチップ・グラフレビューのバナーと同じ根拠で点く。
+    - 消滅: 再実行して縮退の無い run が採用されれば導出されなくなる（G1）。
     - 事実文に件数・提供元の生メッセージ・URL を書かない（G6 / 原則4）。利用上限・残高の
       制限による失敗は ``rate_limited`` を見て言い分ける。
     """
@@ -898,33 +902,56 @@ def _eval_material_analysis_llm_failed(session, uid: str) -> list[tuple[NextStep
         sa_text(f"""
             WITH adopted AS ({_ADOPTED_RUN_SQL})
             SELECT a.document_id::text AS id, a.source_path, a.title, a.created_at,
-                   r.stage_outputs -> 'llm_failures' AS llm_failures
+                   r.stage_outputs -> 'llm_failures' AS llm_failures,
+                   r.stage_outputs -> 'analysis_degradation' AS analysis_degradation,
+                   r.stage_outputs -> 'component_assembly' AS component_assembly
             FROM adopted a
             JOIN document_analysis_runs r ON r.id = a.run_id
             WHERE jsonb_typeof(r.stage_outputs -> 'llm_failures') = 'object'
+               OR (r.stage_outputs -> 'analysis_degradation' ->> 'status') = 'degraded'
+               OR (r.stage_outputs -> 'component_assembly' ->> 'fallback') = 'true'
             ORDER BY a.created_at ASC
         """),
         {"uid": uid},
     ).mappings().fetchall()
     out: list[tuple[NextStep, str]] = []
     for row in rows:
-        block = row["llm_failures"] if isinstance(row["llm_failures"], dict) else {}
-        rate_limited = block.get("rate_limited") is True
+        llm_failures = row.get("llm_failures")
         doc_id = row["id"]
         title = row["title"] or doc_id
         material_row_id = row["source_path"] or doc_id
-        if rate_limited:
-            cause = "AI 提供元の利用上限または残高の制限により呼び出しが受け付けられず"
+        if llm_failures is not None:
+            block = llm_failures if isinstance(llm_failures, dict) else {}
+            rate_limited = block.get("rate_limited") is True
+            if rate_limited:
+                cause = "AI 提供元の利用上限または残高の制限により呼び出しが受け付けられず"
+            else:
+                cause = "AI 提供元の呼び出しが失敗し"
+            reason = (
+                f"教材『{title}』の解析中に{cause}、成果の一部が欠けている可能性があります。"
+                "再実行で補えます。"
+            )
         else:
-            cause = "AI 提供元の呼び出しが失敗し"
+            stage_outputs: dict = {}
+            for key in ("analysis_degradation", "component_assembly"):
+                value = row.get(key)
+                if isinstance(value, dict):
+                    stage_outputs[key] = value
+            view = analysis_degradation.public_view(
+                analysis_degradation.summarize_run_degradation(stage_outputs)
+            )
+            if view["status"] != analysis_degradation.STATUS_DEGRADED:
+                continue
+            reason = (
+                f"教材『{title}』の解析は完了していますが、一部は AI の応答が得られず"
+                f"決定論の代替で作られています。{view['facts'][0] if view['facts'] else ''}"
+                "再実行で補えます。"
+            )
         step = _make_step(
             rule_id=RULE_MATERIAL_ANALYSIS_LLM_FAILED,
             target_id=doc_id,
             title=f"教材『{title}』の解析をやり直す",
-            reason=(
-                f"教材『{title}』の解析中に{cause}、成果の一部が欠けている可能性があります。"
-                "再実行で補えます。"
-            ),
+            reason=reason,
             target={"material_id": doc_id},
             ctx={"material_id": material_row_id},
         )

@@ -467,10 +467,7 @@ class ComponentRefiner:
                 candidate=candidate,
                 eq_index=eq_index,
                 dependencies=[],
-                reason=(
-                    f"Isolated single theoretical operation '{candidate.operation}' "
-                    f"from parent component {component.component_id}."
-                ),
+                reason="Isolated a single theoretical operation from a broader component.",
             )
             children.append(child)
 
@@ -489,8 +486,7 @@ class ComponentRefiner:
             operations=[c.operation for c in children],
             reason=(
                 f"Component bundled {len(family_steps)} distinct reusable theory "
-                "units; split into one component per theory-operation family "
-                "(issue #308/#319)."
+                "units; split into one component per theory-operation family."
             ),
         ))
         return children
@@ -585,7 +581,7 @@ class ComponentRefiner:
             nxt.dependencies.append({
                 "dependency_type": "depends_on",
                 "component_refs": [prev.component_id],
-                "reason": "Sequential responsibility dependency from ComponentRefiner (#324).",
+                "reason": "Sequential responsibility dependency from ComponentRefiner.",
             })
 
         review_reasons: list[str] = []
@@ -617,7 +613,7 @@ class ComponentRefiner:
             reason=(
                 "Consumed Step 1 suggested_split plan; reassigned links and "
                 "recomputed concepts into one single-responsibility component "
-                "per suggested child (#324)."
+                "per suggested child."
             ),
         ))
         return children
@@ -757,11 +753,17 @@ class ComponentRefiner:
         # name like "Transform" / "Relate" (issue #308).
         label = _theory_unit_label(raw_operation, parent, eliminated or retained)
         # IK-0755: the parent's (LLM-written, run-language) summary is kept as the
-        # human-facing text. The deterministic unit description (operation family,
-        # step count) is provenance and goes to ``reason`` only.
+        # human-facing text. The split provenance (operation family, steps,
+        # equations) is structured data in ``derivation_refs`` — never a sentence
+        # with issue numbers or step counts in a text field.
         summary = _child_summary(parent)
-        reason = _join_reason(
-            reason, _theory_unit_summary(label, broad_family, parent, len(steps))
+        derivation_refs = _derivation_refs(
+            parent,
+            component_id=component_id,
+            split_rule="theory_operation",
+            operation_family=broad_family,
+            derivation_step_ids=_step_ids(steps),
+            equation_ids=all_eqs,
         )
 
         internal_flow = _build_internal_flow(steps, family)
@@ -826,6 +828,7 @@ class ComponentRefiner:
             split_recommendation=_no_split_recommendation(),
             **_child_support_fields(parent, _responsibility_for_operation(raw_operation)),
             operation=broad_family,
+            derivation_refs=derivation_refs,
         )
 
     def _responsibility_children(
@@ -1050,9 +1053,13 @@ def _build_responsibility_component(
         cautions=list(parent.cautions),
         dependencies=[],
         evidence_refs=evidence_refs,
-        reason=_join_reason(
-            f"Split from oversized component {parent.component_id} by responsibility.",
-            _responsibility_summary(spec, parent),
+        reason="Split from a broader component by responsibility.",
+        derivation_refs=_derivation_refs(
+            parent,
+            component_id=component_id,
+            split_rule="responsibility",
+            operation_family=operation,
+            equation_ids=eq_ids,
         ),
         confidence=parent.confidence,
         review_notes=list(parent.review_notes),
@@ -1077,7 +1084,8 @@ def _build_responsibility_component(
         equation_confidence_summary=dict(parent.equation_confidence_summary or {}),
         confidence_gate=_confidence_gate(_blocked_equation_ids(eq_ids, eq_index)),
         review_status=review_status,
-        teaching_takeaway=_responsibility_takeaway(spec),
+        # IK-0755: keep the parent's (LLM-written) takeaway, not a machine sentence.
+        teaching_takeaway=str(parent.teaching_takeaway or ""),
         source_scope=copy.deepcopy(parent.source_scope or {}),
         assumptions=list(parent.assumptions),
         approximations=list(parent.approximations),
@@ -1132,13 +1140,41 @@ def _child_summary(parent: ComponentRecord) -> str:
     return str(parent.summary or "")
 
 
-def _join_reason(*parts: str) -> str:
-    return " ".join(str(p).strip() for p in parts if str(p or "").strip())
+def _step_ids(steps) -> list[str]:
+    ids: list[str] = []
+    for step in steps or []:
+        sid = step.get("step_id") if isinstance(step, dict) else getattr(step, "step_id", "")
+        if sid and str(sid) not in ids:
+            ids.append(str(sid))
+    return ids
 
 
-def _responsibility_summary(spec: dict, parent: ComponentRecord) -> str:
-    label = str(spec.get("label") or parent.label)
-    return f"{label} isolated as a reusable {spec.get('responsibility_type')} component."
+def _derivation_refs(
+    parent: ComponentRecord,
+    *,
+    component_id: str,
+    split_rule: str,
+    operation_family: str = "",
+    derivation_step_ids: list[str] | None = None,
+    equation_ids: list[str] | None = None,
+) -> dict:
+    """Structured split provenance for a refined child (IK-0755).
+
+    What used to be written into text fields as "… (#324)" / "covers N equation
+    step(s)" is kept here as data, so nothing is lost and the human-facing
+    fields stay prose (or empty).
+    """
+    refs = {
+        "split_from": parent.component_id,
+        "split_rule": split_rule if component_id != parent.component_id else f"{split_rule}_rebuild",
+        "derivation_step_ids": list(derivation_step_ids or []),
+        "equation_ids": list(equation_ids or []),
+    }
+    if operation_family:
+        refs["operation_family"] = operation_family
+    return refs
+
+
 
 
 def _child_support_fields(parent: ComponentRecord, responsibility_type: str) -> dict:
@@ -1192,9 +1228,6 @@ def _secondary_operations(steps: list, primary: str) -> list[str]:
     )
 
 
-def _responsibility_takeaway(spec: dict) -> str:
-    label = str(spec.get("label") or "component")
-    return f"{label} has one clear input/output responsibility."
 
 
 def _responsibility_io(direction: str, spec: dict, parent: ComponentRecord) -> list[dict]:
@@ -1344,12 +1377,6 @@ def _explicit_theory_unit_label(operation: str) -> str:
     return ""
 
 
-def _theory_unit_summary(label: str, family: str, parent: ComponentRecord, step_count: int) -> str:
-    subject = str(parent.label or "").strip() or "the parent theory unit"
-    return (
-        f"Reusable theory unit ({family}) within {subject}; "
-        f"covers {step_count} equation step(s)."
-    )
 
 
 def _build_internal_flow(steps: list, family: str) -> list[dict]:
@@ -2509,20 +2536,8 @@ def _is_bare_responsibility_name(name: str) -> bool:
     }
 
 
-def _suggested_summary(spec: dict, parent: ComponentRecord) -> str:
-    return (
-        f"{_suggested_child_label(spec, parent)} isolated as a reusable "
-        f"{spec.get('responsibility_type')} component within "
-        f"{str(parent.label or '').strip() or 'the parent theory unit'} (#324)."
-    )
 
 
-def _suggested_takeaway(spec: dict, equation_count: int) -> str:
-    name = spec.get("name") or "Component"
-    return (
-        f"{name}: a single {spec.get('responsibility_type')} responsibility "
-        f"covering {equation_count} equation(s)."
-    )
 
 
 def _add_note(notes: list[str], note: str) -> None:
@@ -2596,11 +2611,13 @@ def _build_suggested_component(
         cautions=list(parent.cautions),
         dependencies=[],
         evidence_refs=evidence_refs,
-        reason=_join_reason(
-            f"Split from oversized component {parent.component_id} via Step 1 "
-            "suggested_split (#324).",
-            _suggested_summary(spec, parent),
-            _suggested_takeaway(spec, len(eq_ids)),
+        reason="Split from a broader component by the suggested split plan.",
+        derivation_refs=_derivation_refs(
+            parent,
+            component_id=component_id,
+            split_rule="suggested_split",
+            operation_family=operation,
+            equation_ids=eq_ids,
         ),
         confidence=parent.confidence,
         review_notes=review_notes,

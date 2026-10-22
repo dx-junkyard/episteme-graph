@@ -216,6 +216,25 @@ export_validation が component_graph に hard error を出したとき、従来
   確定扱いせず、main 層にも置かない（#306 / #308）。validator の hard error の規則は変えない。component_graph の
   artifact は書き換えず（KO6）、降格は persist の時点で毎回決定論的に再計算する。
 
+### 解析の縮退の可視化（2026-10-22・IK-0715）
+
+A層 agent の LLM 呼び出しが打ち切り（`AGENT_LLM_WALL_TIMEOUT_SECONDS`）や提供元障害で失敗すると、ステージは
+決定論の代替（`*_deterministic_fallback`）か空の成果（`*_failed`）に落ちて**成功として**終わり、run は
+`completed` になる。完了判定は変えず、縮退の事実を 1 つの投影 `backend/core/analysis_degradation.py::
+summarize_run_degradation(stage_outputs, *, artifacts=None) -> {status: ok|degraded|unchecked, facts, stages, details}`
+にまとめ、教材行のチップ（`MaterialOut.analysis_degradation`）・グラフレビューのバナー
+（`ComponentGraphResponse.analysis_degradation`）・G層 `material.analysis_llm_failed` がすべてこれを通す。
+読む信号は agent が書くものだけ — artifact の `validation_issues[].rule_id`（表 `FALLBACK_RULE_KINDS`）/
+`paper_skeleton.review_notes` の `Skeleton generation failed:` / `component_assembly` の `diagnostics.fallback_reason`
+と `components[].maturity_source="deterministic_fallback"`（完了ペイロード `fallback: true` も）/
+`skipped_reason ∈ {llm_call_failed, repair_failed}`（項目単位は一部欠落）/ `stage_outputs.llm_failures`。
+打ち切りは U層に失敗行を残さない（壁時計の打ち切りは呼び出し側で投げる）ため、`llm_failures` だけでは
+点かなかったのが IK-0715 の穴だった。上限・素材なしの `skipped_*` は参照の健全性（`core/coverage_facts.py`）が
+報告するので含めない。完了時に orchestrator が in-memory の artifact から `stage_outputs.analysis_degradation`
+を書き（新しいステージにはしない）、教材一覧はそのスナップショットを読む（無い旧 run は軽い信号だけで判定し、
+見つからなければ `unchecked` = 行には出さない）。グラフレビューは採用 run の artifact から読み時に導く。
+事実文に数字・例外文を書かず、件数は `details` にだけ置く。
+
 ### artifact の run 選択（2026-09-12 P0-8）
 
 成果物は `document_analysis_artifacts`（1 run × 1 stage = 1 行・migration 079。旧 `stage_outputs._artifacts` blob は 079 が1回だけ移送）に保存され、読む側は `persistence.document_run_artifacts(document_id, *,
@@ -247,6 +266,20 @@ resume 判定・前回 run の options 継承（orchestrator / `routes/admin.py`
 - **使用モデルの記録（M7）** — 実際に実行した LLM ステージ（`LLM_STAGE_NAMES`）だけ、解決済みモデル名を
   `stage_outputs._stage_models` に記録する。artifact を再利用したステージは前回の記録がそのまま残り、
   skip されたステージは記録しない。
+- **役割判定の窓判定とステージ内チェックポイント（2026-10-22・IK-0699 / IK-0710）** — rhetorical_role は同じ節の
+  連続する本文ブロックを窓（既定 6 ブロック・本文 6000 字まで。`config["blocks_per_call"]` /
+  `config["window_max_chars"]` > env `RHETORICAL_ROLE_BLOCKS_PER_CALL` / `RHETORICAL_ROLE_WINDOW_MAX_CHARS` >
+  既定、`blocks_per_call` が 1 以下なら従来どおり 1 ブロック = 1 コール）にまとめて 1 コールで判定し、ブロック ID
+  ごとの答えをブロックごとの `BlockRoleAnnotation`（出力の形は従来と同じ）に戻す。span のオフセットはブロックごとに
+  サーバ側で解決する（IK-0331）。窓の答えに欠けた・検証に落ちたブロックは窓の修復 1 回の後に 1 ブロックの経路
+  （従来の修復ループと全体 `unknown` の代替つき）で問い直し、ブロックを落とさない。回数は
+  `summary_stats.llm_calls` / `windows` / `window_fallback_windows` / `window_fallback_blocks` に残る。
+  窓を 1 つ終えるごとに agent の作業状態を `stage_outputs._stage_checkpoints.rhetorical_role` に書き
+  （進捗の `stage_outputs.rhetorical_role` には載せない — タスクのポーリング応答に展開されるため）、**resume
+  （`start_stage` なし）**では前回 run のその状態を agent に渡して、ブロックの指紋（ID + 本文 + 形式の版）と分野が
+  一致する判定済みブロックを問い直さない（`summary_stats.resumed_blocks`。提供元障害で `unknown` になったブロックは
+  引き継がず問い直す）。artifact は従来どおり完了時に 1 回だけ書き（KO6）、チェックポイントは完了時と、引き継がない
+  run（restart・新規）の最初に外す。
 
 ---
 

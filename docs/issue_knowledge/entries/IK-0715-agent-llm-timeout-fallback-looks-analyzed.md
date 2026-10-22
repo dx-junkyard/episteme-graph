@@ -1,9 +1,9 @@
 ---
 id: IK-0715
 title: "A層 agent の LLM 呼び出しが打ち切りで決定論フォールバックに落ちても run は completed のままで、教材が「解析済み」に見え、フォールバックで出来た部品・グラフであることが画面に出ない"
-status: open
+status: resolved
 recorded_at: 2026-10-16
-resolved_at: null
+resolved_at: 2026-10-22
 sources:
   - "docs/features/paper_radar_autonomous_loop_design.md"
   - "docs/pipeline/overview.md"
@@ -41,10 +41,42 @@ discovery:
   perspective: [data_inspection, symptom_report]
   note: "論文レーダーの自律周回で LLM を頭脳（Opus）が肩代わりし 1 応答に数分かかった結果、多数の呼び出しが打ち切られた。頭脳の所見と docker logs・stage_outputs を読み、フォールバック部品が並ぶ教材が解析済みとして見えることに気付いた（出所: uxsim/runs/radar_loop/BRAIN_NOTES_L2.md）。"
 resolution:
-  perspective: [pending, order_and_budget]
-  note: "部分解決。運転側は周回用 overlay uxsim/sandbox/docker-compose.bridge.yml に RADAR_LOOP_AGENT_LLM_TIMEOUT_SECONDS / RADAR_LOOP_AGENT_LLM_WALL_TIMEOUT_SECONDS を足し、1500 / 1800 秒で再実行した（本番の既定は不変）。ただし打ち切りの延長だけでは直らず、延ばしてもフォールバックに落ち続けた真因は周回用 proxy 側の滞留（去った呼び出し元の待機がスレッドプールを埋めて新しい要求が proxy の中で待たされた — IK-0726 で是正）だった。製品側の「フォールバックで出来た部品・グラフを教材行とグラフレビューに事実として示す（run の完了とは別に縮退を表示する）」は依然 open（未着手）。"
+  perspective: [carry_through, canonical_source]
+  note: >-
+    運転側は周回用 overlay で打ち切りを延ばした（uxsim/sandbox/docker-compose.bridge.yml・真因の proxy 滞留は IK-0726）。
+    製品側は、agent が縮退時に既に書いている信号（validation_issues の *_failed / *_deterministic_fallback・
+    paper_skeleton の review_notes・component_assembly の diagnostics.fallback_reason と maturity_source・
+    skipped_reason の llm_call_failed / repair_failed・stage_outputs.llm_failures）を 1 つの読み時投影
+    core/analysis_degradation.py::summarize_run_degradation に集め、教材行のチップ（MaterialOut.analysis_degradation）・
+    グラフレビューのバナー（ComponentGraphResponse.analysis_degradation）・G層 material.analysis_llm_failed の点灯が
+    すべてこの 1 関数を通るようにした。打ち切りは U層に失敗行を残さないため、従来の llm_failures だけでは点かなかった。
+    完了時（単一ステージ実行の完了も）に orchestrator が in-memory の artifact からスナップショット stage_outputs.analysis_degradation を書き
+    （新しいステージにはしない）、教材一覧はそれを読む。run の completed 判定は変えない。事実文に数字・例外文を書かない。
   landed_in:
     - "uxsim/sandbox/docker-compose.bridge.yml"
+    - "backend/core/analysis_degradation.py"
+    - "backend/core/document_pipeline/orchestrator.py"
+    - "backend/api/routes/admin.py"
+    - "backend/api/routes/theory_components.py"
+    - "backend/api/schemas.py"
+    - "backend/core/admin_assistant/next_steps.py"
+    - "frontend/public/js/admin.js"
+    - "frontend/public/js/admin-graph-review.js"
+    - "backend/tests/test_analysis_degradation_guardrails.py"
+    - "docs/pipeline/overview.md"
+  principles:
+    - principle: route-all-surfaces-through-one-point
+      use: consulted
+      note: >-
+        採った部品は判定の 1 関数化と、面（教材行・グラフレビュー・G層・完了時フック）がその関数を呼ぶことを固定する
+        ガードレール（縮退の rule_id を面のソースに書かせない）。固有の差分: 上流（agent の打ち切り・フォールバック）は
+        意図どおりなので変えず、下流の表示に事実を運ぶだけにした（上流の損失ではなく伝達の欠落）。
+  verification:
+    methods: [guardrail]
+    unverified:
+      - "docker の実機で打ち切りを起こした run を完了させ、教材行のチップ・グラフレビューのバナー・次にやることが出ること"
+      - "完了時スナップショットを持たない既存 run の教材行（軽い信号だけで判定し、thesis・dsl の縮退は unchecked として出ない）"
+      - "admin.js / admin-graph-review.js の構文を node で通していない（静的検査のみ）"
 related: [IK-0699, IK-0710, IK-0726]
 view_of: []
 history: []
@@ -69,8 +101,9 @@ component_assembly の決定論フォールバック（フォールバック部�
 
 ## 解決の観点
 
-運転側は打ち切りを周回用 overlay で延ばして再実行した（order_and_budget）。ただし延長だけでは直らなかった。延ばしても heavy ステージがフォールバックに落ち続けた真因は、周回用 proxy が去った呼び出し元の待機でスレッドプールを塞ぎ、新しい要求が proxy の中で十数分待たされていたことで、IK-0726 で proxy 側を是正した。製品側は未解決で、run の完了状態とは別に
-「フォールバックで出来た成果」を教材行・グラフレビューの事実文として出す必要がある（既にある受け皿 fallback_reason を表示まで運ぶ）。
+運転側は打ち切りを周回用 overlay で延ばして再実行した。延ばしても heavy ステージがフォールバックに落ち続けた真因は周回用 proxy の滞留で、IK-0726 で是正した。
+製品側は、縮退の受け皿（fallback_reason・rule_id）が既にあり伝達だけが欠けていたので、表示まで運んだ（carry_through）。判定は 1 つの投影に
+置き、教材行・グラフレビュー・G層がそれを通す（canonical_source）。run の completed 判定は変えず、成果の縮退を別の事実として示す。
 
 ## 一般化
 

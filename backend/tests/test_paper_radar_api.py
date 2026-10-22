@@ -1137,3 +1137,126 @@ class TestRadarIngestCarriesDomain:
         assert routes.IngestRequest(items=[], cartridge_id="").cartridge_id == ""
         assert routes.IngestRequest(items=[]).cartridge_id is None
         assert routes.IngestBatchRequest(items=[], cartridge_id="astrophysics").cartridge_id == "astrophysics"
+
+
+# ---------------------------------------------------------------------------
+# §24（IK-0706 / IK-0760 / IK-0761）
+# ---------------------------------------------------------------------------
+
+
+class TestWave24SearchNotesPassThrough:
+    def test_band_population_and_dominant_notes_pass_through(self, env):
+        radar = env["routes"].pd_radar
+        env["search_result"] = {
+            "seed": dict(_SEED),
+            "candidates": [{"arxiv_id": "2608.00002", "status": "new", "distance_label": "近い"}],
+            "banding": {"available": True},
+            "band_population_note": radar.NOTE_BAND_POPULATION,
+            "keyphrase_dominant_note": radar.NOTE_KEYPHRASE_DOMINANT_TEMPLATE.format(text="Full-Shape"),
+        }
+        body = env["client"].post(
+            _SEARCH_PATH, json={"document_ref": "doc-1", "distance": "near"},
+            headers=_auth(env, "teacher"),
+        ).json()
+        assert body["band_population_note"] == radar.NOTE_BAND_POPULATION
+        assert body["keyphrase_dominant_note"].startswith("「Full-Shape」")
+
+
+class TestSeedLineageRoute:
+    def test_seed_route_injects_the_viewer_visibility(self, env, monkeypatch):
+        calls: list = []
+
+        def _lineage(session, document_id, *, visible_document_ids):
+            calls.append((document_id, set(visible_document_ids)))
+            return {
+                "lineage": [{"document_id": "doc-0", "title": "元の起点"},
+                            {"document_id": "doc-1", "title": "起点論文"}],
+                "lineage_line": "この起点の系譜: 元の起点 → 起点論文",
+                "lineage_note": env["routes"].pd_radar.NOTE_LINEAGE_SCOPE,
+            }
+
+        monkeypatch.setattr(env["routes"].pd_radar, "seed_lineage", _lineage)
+        body = env["client"].get(_SEED_PATH, headers=_auth(env, "teacher")).json()
+        assert calls == [("doc-1", {"doc-1", "doc-visible"})]
+        assert body["seed"]["lineage_line"].endswith("元の起点 → 起点論文")
+        # 監査の記帳をしない（読み取り専用 — PR5）。
+        assert env["audits"] == []
+
+    def test_seed_route_without_records_has_no_lineage_key(self, env):
+        body = env["client"].get(_SEED_PATH, headers=_auth(env, "teacher")).json()
+        assert "lineage" not in body["seed"]
+
+
+class TestIngestRecordsTheSeed:
+    """§24 D: 取り込みの監査に起点 document を残す（閲覧できる値だけ・正規化して）。"""
+
+    def _stub_batch(self, env, monkeypatch):
+        routes = env["routes"]
+        monkeypatch.setattr(routes, "_visible_ingested_documents", lambda user_id: {})
+        monkeypatch.setattr(routes, "_arxiv_fetch_allowed", lambda session: True)
+        monkeypatch.setattr(
+            routes.pd_queue, "enqueue_items",
+            lambda session, items, **kw: {
+                "queued": [{"item_id": "i-0", "arxiv_id": "2608.00002", "title": ""}],
+                "skipped": [],
+            },
+        )
+
+    def test_batch_audit_carries_the_canonical_seed(self, env, monkeypatch):
+        self._stub_batch(env, monkeypatch)
+        res = env["client"].post(
+            "/api/admin/discovery/ingest-batch",
+            json={"items": [{"arxiv_id": "2608.00002"}], "seed_document_id": "mat-1"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 202
+        metadata = env["audits"][-1][5]
+        assert metadata["action"] == "ingest_batch"
+        assert metadata["seed_document_id"] == "doc-1", "material_id を document.id に正規化する"
+
+    def test_unviewable_seed_is_not_recorded(self, env, monkeypatch):
+        self._stub_batch(env, monkeypatch)
+        env["access"] = env["services"].DocumentAccess(
+            document_id="doc-x", source_path="mat-x", uploaded_by=_ADMIN,
+            is_owner=False, can_view=False, can_edit=False,
+        )
+        env["client"].post(
+            "/api/admin/discovery/ingest-batch",
+            json={"items": [{"arxiv_id": "2608.00002"}], "seed_document_id": "doc-x"},
+            headers=_auth(env, "teacher"),
+        )
+        assert "seed_document_id" not in env["audits"][-1][5]
+
+    def test_sync_ingest_audit_carries_the_seed(self, env, monkeypatch):
+        routes = env["routes"]
+        monkeypatch.setattr(routes, "_visible_ingested_documents", lambda user_id: {})
+        monkeypatch.setattr(routes.url_fetch, "list_url_fetch_domains", lambda session: [{"domain": "arxiv.org"}])
+        fetched = routes.url_fetch.FetchedSource(
+            content=b"%PDF-1.4", source_kind="pdf", filename="2608.00002.pdf",
+        )
+        monkeypatch.setattr(
+            routes.source_resolution, "fetch_arxiv_source",
+            lambda arxiv_id, **kw: routes.source_resolution.ResolvedSource(
+                fetched=fetched, source_url="https://arxiv.org/pdf/2608.00002",
+                effective_format="pdf", fell_back=False,
+            ),
+        )
+        monkeypatch.setattr(routes, "_accept_material_source", lambda **kw: {"material_id": "mat-new"})
+        res = env["client"].post(
+            "/api/admin/discovery/ingest",
+            json={"items": [{"arxiv_id": "2608.00002"}], "seed_document_id": "doc-1"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 202, res.text
+        metadata = env["audits"][-1][5]
+        assert metadata["action"] == "ingest"
+        assert metadata["seed_document_id"] == "doc-1"
+
+    def test_missing_seed_keeps_the_old_metadata_shape(self, env, monkeypatch):
+        self._stub_batch(env, monkeypatch)
+        env["client"].post(
+            "/api/admin/discovery/ingest-batch",
+            json={"items": [{"arxiv_id": "2608.00002"}]},
+            headers=_auth(env, "teacher"),
+        )
+        assert "seed_document_id" not in env["audits"][-1][5]

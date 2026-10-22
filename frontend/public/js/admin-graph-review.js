@@ -409,6 +409,10 @@
             '<button type="button" id="graph-review-close" class="admin-action-btn">閉じる</button>' +
           '</div>' +
         '</div>' +
+        // 解析の縮退の事実（IK-0715）。操作要素ではない事実の 1 行なのでアンカーは付けない。
+        '<div id="graph-review-degradation" class="graph-review-degradation" hidden ' +
+          'style="font-size:12px;color:var(--color-text-secondary);padding:4px 12px;' +
+          'border-bottom:1px solid var(--color-border-tertiary)"></div>' +
         '<div class="graph-review-body">' +
           '<div class="graph-review-graph-pane">' +
             '<div id="graph-review-network-wrap" class="graph-review-network-wrap">' +
@@ -537,6 +541,7 @@
     stopVoice(); // 前回の音声セッションを持ち越さない
     document.getElementById("graph-review-title-text").textContent = state.title;
     document.getElementById("graph-review-graph-updated").textContent = "";
+    renderDegradationBanner(null);
     document.getElementById("graph-review-unreviewed-toggle").checked = false;
     renderResetLayoutButton();
     setStatus("graph-review-graph-status", "グラフを読み込み中...", "info");
@@ -689,6 +694,7 @@
 
   function render() {
     renderGraphUpdatedAt();
+    renderDegradationBanner(state.graph);
     renderViewToggle();
     renderLayerToolbar();
     renderUnreviewedCount();
@@ -736,6 +742,26 @@
     if (!el) return;
     var updatedAt = String((state.graph && state.graph.graph_updated_at) || "");
     el.textContent = updatedAt ? "（" + updatedAt.slice(0, 10) + " の解析結果を表示しています）" : "";
+  }
+
+  // 解析の縮退（IK-0715）。採用 run で AI の応答が得られず決定論の代替・空の成果に
+  // 落ちた段があるときだけ 1 行出す。判定と事実文はサーバ（core/analysis_degradation.py）の
+  // 1 投影が持ち、ここは status を見て文をそのまま並べるだけ（件数は出さない）。
+  // 前置き文の正本は analysis_degradation.BANNER_PREFIX（逐語ミラー）。
+  var DEGRADATION_BANNER_PREFIX = "この解析の一部は AI の応答が得られず決定論の代替で作られています：";
+
+  function renderDegradationBanner(graph) {
+    var el = document.getElementById("graph-review-degradation");
+    if (!el) return;
+    var deg = graph && graph.analysis_degradation;
+    var facts = deg && deg.status === "degraded" && Array.isArray(deg.facts) ? deg.facts : [];
+    if (!facts.length) {
+      el.textContent = "";
+      el.hidden = true;
+      return;
+    }
+    el.textContent = DEGRADATION_BANNER_PREFIX + facts.join("");
+    el.hidden = false;
   }
 
   function renderLayerToolbar() {

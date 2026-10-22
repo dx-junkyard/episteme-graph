@@ -150,7 +150,7 @@ def test_unknown_operation_never_names_a_child():
 # --------------------------------------------------------------------- IK-0755
 
 
-def test_split_children_keep_the_llm_summary_and_put_machine_text_in_reason():
+def test_split_children_keep_the_llm_summary_and_put_provenance_in_derivation_refs():
     components, derivations = _shared_step_fixture()
     parents = {c.component_id: c.summary for c in components}
     result = ComponentRefiner().refine(_result(components), derivations=derivations)
@@ -159,10 +159,23 @@ def test_split_children_keep_the_llm_summary_and_put_machine_text_in_reason():
     for child in children:
         parent_id = child.component_id.split("__", 1)[0]
         assert child.summary == parents[parent_id]
-        for machine in ("(#324)", "equation step(s)", "Reusable theory unit"):
-            assert machine not in child.summary
-            assert machine not in child.teaching_takeaway
-        assert "Reusable theory unit" in child.reason
+        # IK-0755: no machine text in any text field (summary / takeaway / reason).
+        for text in (child.summary, child.teaching_takeaway, child.reason):
+            for machine in ("(#", "step(s)", "equation(s)", "Reusable theory unit"):
+                assert machine not in text
+        # ... the split facts survive as structured data instead.
+        refs = child.derivation_refs
+        assert refs["split_from"] == parent_id
+        assert refs["split_rule"] == "theory_operation"
+        assert refs["operation_family"] == child.operation
+        assert refs["equation_ids"]
+        assert refs["derivation_step_ids"]
+    # The refs round-trip through the artifact dict.
+    from episteme_graph.agents.component_assembly.schema import ComponentAssemblyResult
+    again = ComponentAssemblyResult.from_dict(result.to_dict())
+    assert {c.component_id: c.derivation_refs for c in again.components} == {
+        c.component_id: c.derivation_refs for c in result.components
+    }
 
 
 # --------------------------------------------------------------------- IK-0792

@@ -3544,6 +3544,34 @@ def _attach_main_stage_display_labels(graph: dict, components: list) -> None:
             node["description"] = full
 
 
+def _graph_analysis_degradation(document_id: str) -> dict:
+    """採用 run の縮退の事実 ``{status, facts}``（IK-0715・グラフレビューのバナー用）。
+
+    判定は ``core.analysis_degradation`` の 1 関数だけが持つ（教材行のチップ・G層と同じ）。
+    採用 run の artifact まで読むので、完了時スナップショットの無い旧 run でも導ける。
+    読めなければ ``unchecked``（バナーは出ない・グラフ表示は止めない）。
+    """
+    from core import analysis_degradation as degradation_core
+    from core.document_pipeline.persistence import resolve_artifact_runs
+
+    session = None
+    try:
+        session = _pg_session()
+        doc_id = str(document_id or "").strip()
+        entry = resolve_artifact_runs(session, [doc_id]).get(doc_id) or {}
+        summary = degradation_core.summarize_run_degradation(entry.get("stage_outputs") or {})
+    except Exception:  # noqa: BLE001 — 事実が引けなくてもグラフは出す
+        logger.debug("component-graph: degradation unavailable for %s", document_id, exc_info=True)
+        summary = {}
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                pass
+    return degradation_core.public_view(summary)
+
+
 @router.get("/documents/{document_id}/component-graph", response_model=ComponentGraphResponse)
 def get_component_graph(
     document_id: str,
@@ -3556,10 +3584,14 @@ def get_component_graph(
         _mask_node_equation_ids(document_id, stored_graph)
         _attach_main_stage_display_labels(stored_graph, components)
         stored_graph["reference_index"] = _build_graph_reference_index(document_id, stored_graph)
-        return ComponentGraphResponse(**project_teacher_dto(document_id, stored_graph))
-    payload = _build_component_graph_payload(document_id, components)
-    payload["reference_index"] = _build_graph_reference_index(document_id, payload)
-    return ComponentGraphResponse(**project_teacher_dto(document_id, payload))
+        response = ComponentGraphResponse(**project_teacher_dto(document_id, stored_graph))
+    else:
+        payload = _build_component_graph_payload(document_id, components)
+        payload["reference_index"] = _build_graph_reference_index(document_id, payload)
+        response = ComponentGraphResponse(**project_teacher_dto(document_id, payload))
+    # IK-0715: 表示投影の外で付ける（事実文は投影の置き換え対象ではない）。
+    response.analysis_degradation = _graph_analysis_degradation(document_id)
+    return response
 
 
 # ---------------------------------------------------------------------------

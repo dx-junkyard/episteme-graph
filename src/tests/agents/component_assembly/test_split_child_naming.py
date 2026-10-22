@@ -155,10 +155,12 @@ def test_split_children_carry_the_parent_label():
     for child in result.components:
         assert child.label.lower() not in _BARE_RESPONSIBILITY_LABELS
         # IK-0755: summary は親の（LLM が生成言語で書いた）summary をそのまま保つ。
-        # 分割の機械文（#324・件数）は reason にだけ残り、表示用の欄に出ない。
+        # 分割の由来は derivation_refs（構造化）に残り、文の欄には出ない。
         assert child.summary == parent.summary
         assert "(#324)" not in child.summary
-        assert "Kernel normalization constraint" in child.reason
+        assert "(#" not in child.reason
+        assert child.derivation_refs["split_from"] == "cx"
+        assert child.derivation_refs["split_rule"] == "suggested_split"
 
 
 def test_children_of_different_parents_do_not_share_a_label():

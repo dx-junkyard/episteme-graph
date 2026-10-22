@@ -213,6 +213,9 @@
   // サーバの widens_note（無ければ widening の既定文）を素通しする。
   var KEYPHRASE_WIDENS_MARK = "網を広げる";
   var KEYPHRASE_WIDENS_TITLE = "直前の検索で、取得した候補のすべてに当たった語です。";
+  // 網を広げる語のチップの操作の案内（§24 A）。チップのクリックで外し、探し直すのは
+  // 教員が「検索」を押したとき（自動では外さない・押すまで arXiv を呼ばない — PD3）。
+  var KEYPHRASE_WIDENS_ACTION_TITLE = "クリックで外せます（外したあと「検索」で探し直します）";
   var RELATION_CHIP_STYLE =
     "color:var(--color-text-secondary);background:var(--color-bg-tertiary);border:1px solid var(--color-border)";
 
@@ -243,6 +246,11 @@
   // 連鎖（§21 D）。前の起点は JS 内の呼び出し履歴だけで描く（保存しない）。
   var PREVIOUS_SEED_HEAD = "前の起点: ";
   var PREVIOUS_SEED_TAIL = "（この論文はその『近い論文』として取り込まれました）";
+  // 取り込み済み候補も「違いを分析」の対象に選べる（§24 C・IK-0759）。取り込みの対象には
+  // ならない（selectedIngestIds が status "new" だけに絞る）。結果は保存しない（PR4）。
+  var INGESTED_COMPARE_HINT =
+    "起点との関係の種類は、この候補を選んで「違いを分析」で確かめられます（結果は保存されません）。";
+  var INGESTED_COMPARE_ONLY_TITLE = "比較の対象として選びます（取り込み済みのため取り込みの対象にはなりません）";
 
   var state = {
     open: false,
@@ -278,6 +286,14 @@
     keyphraseHits: {},
     keyphraseHitsNote: "",
     keyphraseWideningNote: "",
+    // 1 つの語が取得した候補の多くに当たっている事実文（サーバ文言の素通し — §24 A）。
+    keyphraseDominantNote: "",
+    // 帯の母集団の事実文（サーバの band_population_note。帯が出るときは常に — §24 B）。
+    bandPopulationNote: "",
+    // 起点の系譜（サーバの seed.lineage_line / lineage_note の素通し — §24 D）。seed の
+    // 差し替え（検索・出所登録）で消えないよう seed とは別に持つ。
+    lineageLine: "",
+    lineageNote: "",
     // 帯と関係の種類の読み方（サーバの reading_note）。比較結果（関係の種類）が描かれた
     // ときだけ #pr-facts に出す（帯と関係ラベルが同時に出るときだけ — §20 D）。
     readingNote: "",
@@ -661,6 +677,10 @@
     state.keyphraseHits = {};
     state.keyphraseHitsNote = "";
     state.keyphraseWideningNote = "";
+    state.keyphraseDominantNote = "";
+    state.bandPopulationNote = "";
+    state.lineageLine = "";
+    state.lineageNote = "";
     state.readingNote = "";
     state.acceptedById = {};
     state.searched = false;
@@ -843,6 +863,8 @@
   function applySeed(seed) {
     state.seed = seed;
     state.seedError = "";
+    state.lineageLine = (seed && seed.lineage_line) || "";
+    state.lineageNote = (seed && seed.lineage_note) || "";
     state.provenance = (seed && seed.provenance) || null;
     state.categories = categoryChipsFromSeed(seed);
     state.categoriesSource = (seed && seed.categories_source) || "";
@@ -882,7 +904,19 @@
       '<div style="font-size:13px;color:var(--color-text-primary)">起点の論文: ' +
       esc(title) +
       "</div>";
-    if (state.previousSeedTitle) {
+    if (state.lineageLine) {
+      // 起点の系譜（サーバが取り込みの監査から導出した 1 行の素通し — §24 D）。
+      html +=
+        '<div id="pr-seed-lineage" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' +
+        esc(state.lineageLine) +
+        "</div>";
+      if (state.lineageNote) {
+        html +=
+          '<div id="pr-seed-lineage-note" style="font-size:11px;color:var(--color-text-tertiary);margin-top:1px">' +
+          esc(state.lineageNote) +
+          "</div>";
+      }
+    } else if (state.previousSeedTitle) {
       html +=
         '<div id="pr-seed-previous" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' +
         esc(PREVIOUS_SEED_HEAD + state.previousSeedTitle + PREVIOUS_SEED_TAIL) +
@@ -1191,6 +1225,7 @@
     var lines = [];
     if (state.keyphraseHitsNote) lines.push(state.keyphraseHitsNote);
     if (state.keyphraseWideningNote) lines.push(state.keyphraseWideningNote);
+    if (state.keyphraseDominantNote) lines.push(state.keyphraseDominantNote);
     var html = "";
     for (var i = 0; i < lines.length; i++) {
       html += '<div class="pr-keyphrase-hit-fact">' + esc(String(lines[i])) + "</div>";
@@ -1215,10 +1250,14 @@
       var sourceLabel = SOURCE_LABELS[entry.source] || SOURCE_LABELS.manual;
       var hitInfo = state.keyphraseHits[String(entry.text || "").toLowerCase()];
       var missed = !!(entry.enabled && hitInfo && hitInfo.hit === false);
-      var widens = !!(entry.enabled && hitInfo && hitInfo.widens === true);
+      var widens = !!(entry.enabled && hitInfo && (hitInfo.widens === true || hitInfo.dominant === true));
       var chipTitle = sourceLabel;
       if (missed) chipTitle = sourceLabel + " ／ " + KEYPHRASE_MISS_TITLE;
-      else if (widens) chipTitle = sourceLabel + " ／ " + (hitInfo.widensNote || KEYPHRASE_WIDENS_TITLE);
+      else if (widens) {
+        chipTitle = sourceLabel + " ／ " +
+          (hitInfo.widensNote || hitInfo.dominantNote || KEYPHRASE_WIDENS_TITLE) +
+          " ／ " + KEYPHRASE_WIDENS_ACTION_TITLE;
+      }
       var markText = missed ? KEYPHRASE_MISS_MARK : widens ? KEYPHRASE_WIDENS_MARK : "";
       var markClass = missed ? "pr-keyphrase-miss" : "pr-keyphrase-widens";
       html +=
@@ -1360,12 +1399,17 @@
               hit: hit.hit === true,
               widens: hit.widens === true,
               // この語だけに一致した候補が多い語の事実文（サーバ文言の素通し・§23.5）。
-              widensNote: hit.widens === true && hit.widens_note ? String(hit.widens_note) : ""
+              widensNote: hit.widens === true && hit.widens_note ? String(hit.widens_note) : "",
+              // 取得した候補の多くに当たる語（サーバ文言の素通し・§24 A）。
+              dominant: hit.dominant === true,
+              dominantNote: hit.dominant === true && hit.dominant_note ? String(hit.dominant_note) : ""
             };
           }
         }
         state.keyphraseHitsNote = (data && data.keyphrase_hits_note) || "";
         state.keyphraseWideningNote = (data && data.keyphrase_widening_note) || "";
+        state.keyphraseDominantNote = (data && data.keyphrase_dominant_note) || "";
+        state.bandPopulationNote = (data && data.band_population_note) || "";
         state.readingNote = (data && data.reading_note) || "";
         state.searched = true;
         // 制限中の 200 応答（候補ゼロ + arxiv_blocked）は「近い論文が無い」ではない。
@@ -1569,6 +1613,18 @@
       if (candidate.new_facets && candidate.new_facets.length) return true;
     }
     return false;
+  }
+
+  // 帯の母集団の事実文（§24 B・IK-0706）。帯が出るときに凡例の近くへ1回だけ。
+  // 文言はサーバ（radar.NOTE_BAND_POPULATION）の素通し。帯分けできなかったときは出さない。
+  function bandPopulationNoteHtml() {
+    if (!state.bandPopulationNote) return "";
+    if (state.banding && state.banding.available === false) return "";
+    return (
+      '<div id="pr-band-population-note" style="font-size:11.5px;color:var(--color-text-tertiary);padding-bottom:6px">' +
+      esc(state.bandPopulationNote) +
+      "</div>"
+    );
   }
 
   function relationLegendHtml() {
@@ -1806,6 +1862,16 @@
         '"' +
         (state.selected[arxivId] ? " checked" : "") +
         ' style="margin-top:3px">';
+    } else if (status === "ingested") {
+      // 取り込み済みは比較の対象にだけ選べる（§24 C・IK-0759）。
+      html +=
+        '<input type="checkbox" class="pr-select pr-select-compare-only" data-compare-only="1" data-arxiv-id="' +
+        esc(arxivId) +
+        '" title="' +
+        esc(INGESTED_COMPARE_ONLY_TITLE) +
+        '"' +
+        (state.selected[arxivId] ? " checked" : "") +
+        ' style="margin-top:3px">';
     } else {
       html += '<span style="width:13px"></span>';
     }
@@ -1860,6 +1926,12 @@
         esc(INGESTED_STATUS_LINE) +
         "</div>";
       html += placementContrastHtml(candidate);
+      if (!state.compareById[arxivId]) {
+        html +=
+          '<div class="pr-ingested-compare-hint" style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px">' +
+          esc(INGESTED_COMPARE_HINT) +
+          "</div>";
+      }
       html += ingestedActionsHtml(candidate);
     }
     if (candidate && candidate.abs_url) {
@@ -2122,6 +2194,7 @@
 
     // 凡例は帯見出しより前に1回だけ（記号の意味を先に置く）。
     var html = relationLegendHtml();
+    html += bandPopulationNoteHtml();
     if (state.banding && state.banding.available === false) {
       // 帯分けができなかったときは帯を作らず、新着順のまま一覧にする（PR2）。
       for (var i = 0; i < state.candidates.length; i++) {
@@ -2192,6 +2265,18 @@
       if (Object.prototype.hasOwnProperty.call(state.selected, key) && state.selected[key]) {
         out.push(key);
       }
+    }
+    return out;
+  }
+
+  // 取り込みの対象は新着の候補だけ（取り込み済みは比較のためだけに選べる — §24 C）。
+  function selectedIngestIds() {
+    var ids = selectedIds();
+    var out = [];
+    for (var i = 0; i < ids.length; i++) {
+      var candidate = findCandidate(ids[i]);
+      if (candidate && candidate.status && candidate.status !== "new") continue;
+      out.push(ids[i]);
     }
     return out;
   }
@@ -2288,7 +2373,7 @@
     var summary = el("pr-ingest-summary");
     var button = el("pr-ingest-btn");
     if (!summary || !button) return;
-    var ids = selectedIds();
+    var ids = selectedIngestIds();
     var overLimit = ids.length > BATCH_INGEST_MAX;
     var lines = [];
     if (overLimit) {
@@ -2320,7 +2405,7 @@
     if (state.ingesting) return;
     var button = el("pr-ingest-btn");
     if (button && button.disabled) return;
-    var ids = selectedIds();
+    var ids = selectedIngestIds();
     if (!ids.length) return;
     if (ids.length > BATCH_INGEST_MAX) {
       // サーバも 422 で拒否する。ここでは先回りして事実文を出すだけ。
@@ -2351,6 +2436,9 @@
     payload.cartridge_id = selectedIngestDomain();
     // 監査の帰属は seed の分野（引けなければサーバ側の既定に落ちる）。
     if (seedDomainKey()) payload.domain_key = seedDomainKey();
+    // 起点の系譜（§24 D）: どの起点のレーダーから取り込んだかを監査に残す。サーバが
+    // 閲覧権限を確かめてから記録する（申告をそのまま信用しない）。
+    payload.seed_document_id = (state.seed && state.seed.document_id) || state.documentId;
 
     state.ingesting = true;
     if (button) button.disabled = true;

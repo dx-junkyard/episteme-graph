@@ -342,6 +342,29 @@ NOTE_KEYPHRASES_SOLE_WIDENING_HEAD = (
     NOTE_KEYPHRASE_SOLE_WIDENING + "（外すかどうかは教員が選びます）: "
 )
 WIDENING_MIN_ENABLED_KEYPHRASES = 2
+#: 1 つの語が取得した候補の多くに当たっている事実文（``hit["dominant_note"]`` /
+#: ``result["keyphrase_dominant_note"]``・設計書 §24 A・IK-0760）。judge-scan-07 で
+#: ``Full-Shape`` が網の大半に当たり、起点固有の主題語の論文が網から消えたのに、
+#: 「すべてに当たった」「この語だけに一致」のどちらの条件にも掛からず画面は黙っていた。
+#: 件数・割合は書かない（PD4 / PR2）。**語の一般性を判定する表は持たない**（分野語を
+#: 書かない）— 言うのは「多くに当たっている」という網の上の事実だけ。外すかどうかは教員。
+NOTE_KEYPHRASE_DOMINANT_TEMPLATE = (
+    "「{text}」が取得した候補の多くに当たっています。"
+    "網が一般語に寄っている可能性があります。"
+)
+#: 「多く」の下限（候補のうち この割合以上に当たった語）。分子 / 分母の整数で持つ
+#: （env にしない・値を変えるときは設計書 §24 に実測を足す）。
+DOMINANT_HIT_SHARE_NUMERATOR = 2
+DOMINANT_HIT_SHARE_DENOMINATOR = 3
+
+#: 帯の母集団の事実文（``result["band_population_note"]``・設計書 §24 B・IK-0706）。
+#: 帯は取得した候補の中での相対比較で、取得は arXiv の新着の先頭に限られる。§20 D の
+#: ``reading_note`` は関係ラベルと同時に出るときだけだったので、帯が出るときは常にこの
+#: 1 行を凡例の近くに出す。数値（取得件数・閾値）は書かない（PR2 / PD4）。
+NOTE_BAND_POPULATION = (
+    "帯は arXiv から取得した新着の候補の中での比較です。"
+    "取得していない論文はこの帯に入りません。"
+)
 
 #: 帯と関係の種類の読み方の事実文（``result["reading_note"]``・設計書 §20 D）。
 #: 帯（要旨の埋め込みの相対比較）・一致チップ（語の一致）・関係の種類（AI の読み）の
@@ -2292,6 +2315,9 @@ def run_radar_search(
     note = reading_note(result["candidates"], distance)
     if note:
         result["reading_note"] = note
+    population = band_population_note(result["candidates"])
+    if population:
+        result["band_population_note"] = population
     return result
 
 
@@ -2337,6 +2363,18 @@ def keyphrase_hits(candidates: Any, keyphrases: Any) -> list[dict]:
         entry: dict = {"text": text, "hit": hit, "widens": widens_all or widens_sole}
         if widens_sole:
             entry["widens_note"] = NOTE_KEYPHRASE_SOLE_WIDENING
+        # §24 A（IK-0760）: すべてでも単独一致でもないが、取得した候補の多くに当たる語。
+        # 既存の 2 つの印と重ねない（同じ語に 2 つの文を付けない）。
+        hit_count = sum(1 for hs in hit_sets if key in hs)
+        if (
+            can_widen
+            and not widens_all
+            and not widens_sole
+            and hit_count * DOMINANT_HIT_SHARE_DENOMINATOR
+            >= len(hit_sets) * DOMINANT_HIT_SHARE_NUMERATOR
+        ):
+            entry["dominant"] = True
+            entry["dominant_note"] = NOTE_KEYPHRASE_DOMINANT_TEMPLATE.format(text=text)
         out.append(entry)
     return out
 
@@ -2357,7 +2395,13 @@ def keyphrase_hit_notes(hits: Any) -> dict:
         h["text"] for h in hits or ()
         if isinstance(h, dict) and h.get("widens") and h.get("widens_note")
     ]
+    dominant = [
+        str(h["dominant_note"]) for h in hits or ()
+        if isinstance(h, dict) and h.get("dominant") and h.get("dominant_note")
+    ]
     out: dict[str, str] = {}
+    if dominant:
+        out["keyphrase_dominant_note"] = " ".join(dominant)
     if missed:
         out["keyphrase_hits_note"] = NOTE_KEYPHRASES_NOT_HIT_HEAD + ", ".join(missed)
     parts: list[str] = []
@@ -2381,6 +2425,16 @@ def reading_note(candidates: Any, distance: str) -> str:
         return ""
     order = READING_NOTE_NEAR_ORDER if distance == "near" else READING_NOTE_NEWEST_ORDER
     return READING_NOTE_BANDS_AND_RELATIONS + order
+
+
+def band_population_note(candidates: Any) -> str:
+    """帯の母集団の事実文（§24 B・IK-0706）。帯ラベルの付いた候補が無ければ空。
+
+    ``reading_note`` と違い、関係の種類（比較結果）の有無に関わらず帯が出るときは常に返す。
+    """
+    if not any(isinstance(c, dict) and c.get("distance_label") for c in candidates or ()):
+        return ""
+    return NOTE_BAND_POPULATION
 
 
 def relation_facts(seed: dict, anchor_context: Optional[dict], resolver: Any) -> list[str]:
@@ -2532,7 +2586,161 @@ def register_arxiv_provenance(session, document_id: str, arxiv_id: str) -> str:
     return url
 
 
+# ---------------------------------------------------------------------------
+# 起点の系譜（§24 D・IK-0761）— 取り込みの監査から読み時導出する（保存しない）
+# ---------------------------------------------------------------------------
+
+#: 系譜を辿る段数の上限（起点を含めず遡る数）。コード定数（env にしない）。
+LINEAGE_MAX_DEPTH = 6
+#: 系譜を辿る監査の action（同期 ``/ingest`` とキュー ``/ingest-batch``）。
+LINEAGE_INGEST_ACTIONS = ("ingest", "ingest_batch")
+#: 同じ arXiv ID の取り込み記録を何件まで見るか（閲覧できる起点を探す範囲）。
+LINEAGE_EVENTS_PER_STEP = 5
+LINEAGE_HEAD = "この起点の系譜: "
+LINEAGE_SEPARATOR = " → "
+#: 閲覧できない論文の代わりに出す語（題名も document_id も出さない — fail-closed）。
+LINEAGE_HIDDEN_TITLE = "（閲覧できない論文）"
+NOTE_LINEAGE_HIDDEN = "閲覧できない論文より前の系譜はたどっていません。"
+NOTE_LINEAGE_TRUNCATED = "これより前の起点はたどっていません。"
+NOTE_LINEAGE_SCOPE = (
+    "系譜は、論文レーダーから取り込んだときに記録した起点だけからたどっています。"
+)
+
+
+def _lineage_parent_ids(session, arxiv_id: str) -> list[str]:
+    """``arxiv_id`` を取り込んだ監査のうち、起点が記録されているものの起点（新しい順）。"""
+    import json
+
+    from core.schema import AUDIT_ENTITY_PAPER_DISCOVERY
+
+    rows = session.execute(
+        sa_text(
+            """
+            SELECT metadata->>'seed_document_id' AS seed_document_id
+              FROM theory_review_events
+             WHERE entity_type = :entity_type
+               AND metadata->>'action' = ANY(:actions)
+               AND metadata->'arxiv_ids' @> CAST(:arxiv_json AS jsonb)
+               AND COALESCE(metadata->>'seed_document_id', '') <> ''
+             ORDER BY created_at DESC
+             LIMIT :limit
+            """
+        ),
+        {
+            "entity_type": AUDIT_ENTITY_PAPER_DISCOVERY,
+            "actions": list(LINEAGE_INGEST_ACTIONS),
+            "arxiv_json": json.dumps([arxiv_id]),
+            "limit": LINEAGE_EVENTS_PER_STEP,
+        },
+    ).fetchall()
+    out: list[str] = []
+    for row in rows:
+        value = row[0] if not isinstance(row, Mapping) else row.get("seed_document_id")
+        value = _clean(value)
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def _lineage_title(session, row: dict[str, str]) -> str:
+    """系譜に出す題名。教材名がファイル名なら arXiv の題名の写しを読む（arXiv は呼ばない）。"""
+    title = row.get("title") or ""
+    if title_looks_like_filename(title):
+        arxiv_id = normalize_arxiv_id(row.get("source_url"))
+        if arxiv_id:
+            try:
+                entry = metadata_cache.read_fresh(session, [arxiv_id]).get(arxiv_id)
+            except Exception:  # noqa: BLE001 — 写しが読めなければ教材名のまま
+                entry = None
+            if entry is not None and _clean(entry.title):
+                return _clean(entry.title)
+    return title
+
+
+def seed_lineage(
+    session, document_id: str, *, visible_document_ids: Any
+) -> dict:
+    """起点の系譜（どの起点のレーダーから取り込まれたか）を遡る（§24 D・読み時導出）。
+
+    取り込みの監査（``AUDIT_ENTITY_PAPER_DISCOVERY`` の ``ingest`` / ``ingest_batch``）の
+    ``metadata.seed_document_id`` と ``documents.source_url`` の arXiv ID を突き合わせて
+    遡る。新しいテーブルも保存も持たない（PR1）。
+
+    Args:
+        visible_document_ids: 閲覧者に見える document.id の集合（**必須**・route が注入）。
+            空なら SQL を発行せず空を返す（fail-closed）。見えない論文は題名も id も出さず
+            :data:`LINEAGE_HIDDEN_TITLE` にし、そこで遡るのを止める。
+
+    Returns:
+        系譜が 2 段以上あるときだけ ``{"lineage": [{document_id, title}]（古い → 新しい・
+        最後が起点）, "lineage_line": str, "lineage_note": str}``。無ければ ``{}``。
+        件数は返さない。失敗は fail-soft（``{}``）。
+    """
+    visible = {str(v) for v in (visible_document_ids or ()) if v}
+    start = _clean(document_id)
+    if not visible or not start:
+        return {}
+    try:
+        start_row = _document_row(session, start)
+        if start_row is None:
+            return {}
+        chain: list[dict[str, str]] = [
+            {"document_id": start_row["document_id"], "title": _lineage_title(session, start_row)}
+        ]
+        seen = {start_row["document_id"]}
+        row = start_row
+        stop_note = ""
+        for depth in range(LINEAGE_MAX_DEPTH + 1):
+            arxiv_id = normalize_arxiv_id(row.get("source_url"))
+            if not arxiv_id:
+                break
+            parents = [p for p in _lineage_parent_ids(session, arxiv_id) if p not in seen]
+            if not parents:
+                break
+            if depth >= LINEAGE_MAX_DEPTH:
+                stop_note = NOTE_LINEAGE_TRUNCATED
+                break
+            visible_parents = [p for p in parents if p in visible]
+            if not visible_parents:
+                chain.append({"document_id": "", "title": LINEAGE_HIDDEN_TITLE})
+                stop_note = NOTE_LINEAGE_HIDDEN
+                break
+            parent_row = _document_row(session, visible_parents[0])
+            if parent_row is None or parent_row["document_id"] not in visible:
+                chain.append({"document_id": "", "title": LINEAGE_HIDDEN_TITLE})
+                stop_note = NOTE_LINEAGE_HIDDEN
+                break
+            seen.add(parent_row["document_id"])
+            chain.append(
+                {
+                    "document_id": parent_row["document_id"],
+                    "title": _lineage_title(session, parent_row),
+                }
+            )
+            row = parent_row
+    except Exception:  # noqa: BLE001 — 系譜は補助情報。起点の解決を止めない
+        logger.info("radar seed lineage unavailable for %s", start, exc_info=True)
+        return {}
+    if len(chain) < 2:
+        return {}
+    lineage = list(reversed(chain))
+    line = LINEAGE_HEAD + LINEAGE_SEPARATOR.join(item["title"] or LINEAGE_HIDDEN_TITLE for item in lineage)
+    note = NOTE_LINEAGE_SCOPE + (stop_note if stop_note else "")
+    return {"lineage": lineage, "lineage_line": line, "lineage_note": note}
+
+
 __all__ = [
+    "DOMINANT_HIT_SHARE_DENOMINATOR",
+    "DOMINANT_HIT_SHARE_NUMERATOR",
+    "LINEAGE_HIDDEN_TITLE",
+    "LINEAGE_MAX_DEPTH",
+    "NOTE_BAND_POPULATION",
+    "NOTE_KEYPHRASE_DOMINANT_TEMPLATE",
+    "NOTE_LINEAGE_HIDDEN",
+    "NOTE_LINEAGE_SCOPE",
+    "NOTE_LINEAGE_TRUNCATED",
+    "band_population_note",
+    "seed_lineage",
     "BODY_ABBREVIATION_MAX_CHUNKS",
     "NOTE_KEYPHRASE_SOLE_WIDENING",
     "NOTE_KEYPHRASES_SOLE_WIDENING_HEAD",

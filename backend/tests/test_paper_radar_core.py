@@ -3922,3 +3922,259 @@ class TestSoleWidening:
         assert radar.keyphrase_hit_notes(hits)["keyphrase_widening_note"].startswith(
             radar.NOTE_KEYPHRASES_WIDENING_HEAD
         )
+
+
+# ---------------------------------------------------------------------------
+# §24 A（IK-0760）— 1 つの語が取得した候補の多くに当たる
+# ---------------------------------------------------------------------------
+
+
+class TestDominantKeyphrase:
+    def _phrases(self, *texts):
+        return [{"text": t, "source": "thesis", "enabled": True} for t in texts]
+
+    def _scan07_like(self):
+        # 9 件中 6 件に Full-Shape（主題語 Galaxy Trispectrum と併記の論文もある = 単独一致ではない）。
+        cands = [
+            {"title": f"DESI Full-Shape analysis {i}", "summary": "EFTofLSS full-shape fits"}
+            for i in range(4)
+        ]
+        cands += [
+            {"title": "Full-Shape and Galaxy Trispectrum", "summary": "EFTofLSS"},
+            {"title": "Full-Shape bispectrum", "summary": "FoG"},
+        ]
+        cands += [
+            {"title": f"Galaxy Trispectrum paper {i}", "summary": "FoG and EFTofLSS"} for i in range(3)
+        ]
+        return cands
+
+    def test_majority_hit_word_gets_a_count_free_fact(self):
+        hits = radar.keyphrase_hits(
+            self._scan07_like(), self._phrases("Full-Shape", "Galaxy Trispectrum", "EFTofLSS", "FoG"),
+        )
+        by = {h["text"]: h for h in hits}
+        assert by["Full-Shape"]["dominant"] is True
+        assert by["Full-Shape"]["dominant_note"] == radar.NOTE_KEYPHRASE_DOMINANT_TEMPLATE.format(
+            text="Full-Shape"
+        )
+        # 既存の印とは重ねない（すべてに当たらず・単独一致の過半でもない）。
+        assert by["Full-Shape"]["widens"] is False
+        assert "dominant" not in by["Galaxy Trispectrum"]
+        notes = radar.keyphrase_hit_notes(hits)
+        assert notes["keyphrase_dominant_note"].startswith("「Full-Shape」")
+        assert "網が一般語に寄っている可能性があります" in notes["keyphrase_dominant_note"]
+        # 件数・割合を書かない（PD4）。
+        assert not any(ch.isdigit() for ch in notes["keyphrase_dominant_note"])
+
+    def test_all_hit_and_sole_words_are_not_doubled(self):
+        three = [{"title": f"dark energy {i}", "summary": ""} for i in range(3)]
+        hits = radar.keyphrase_hits(three, self._phrases("dark energy", "kurtosis"))
+        assert "dominant" not in hits[0] and hits[0]["widens"] is True
+        assert "keyphrase_dominant_note" not in radar.keyphrase_hit_notes(hits)
+
+    def test_below_the_share_is_silent(self):
+        cands = [
+            {"title": "a", "summary": "FoG"},
+            {"title": "b", "summary": "FoG EFT"},
+            {"title": "c", "summary": "EFT SPCF"},
+            {"title": "d", "summary": "SPCF"},
+        ]
+        hits = radar.keyphrase_hits(cands, self._phrases("FoG", "EFT", "SPCF"))
+        assert not any(h.get("dominant") for h in hits)
+
+    def test_needs_enough_candidates_and_phrases(self):
+        two = [{"title": "x", "summary": "Full-Shape FoG"}, {"title": "y", "summary": "Full-Shape"}]
+        assert not any(h.get("dominant") for h in radar.keyphrase_hits(two, self._phrases("Full-Shape", "FoG")))
+
+    def test_threshold_is_a_code_constant_not_env(self):
+        src = (BACKEND / "core" / "paper_discovery" / "radar.py").read_text(encoding="utf-8")
+        assert "DOMINANT_HIT_SHARE_NUMERATOR = 2" in src
+        assert "DOMINANT_HIT_SHARE_DENOMINATOR = 3" in src
+        assert "DOMINANT" not in (BACKEND / "core" / "config.py").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# §24 B（IK-0706）— 帯の母集団の事実文
+# ---------------------------------------------------------------------------
+
+
+class TestBandPopulationNote:
+    def test_present_whenever_bands_are_shown(self):
+        assert radar.band_population_note([{"distance_label": "x"}]) == radar.NOTE_BAND_POPULATION
+        assert radar.band_population_note([{"arxiv_id": "a"}]) == ""
+        assert radar.band_population_note([]) == ""
+
+    def test_note_has_no_numbers(self):
+        assert not any(ch.isdigit() for ch in radar.NOTE_BAND_POPULATION)
+        assert "取得していない論文" in radar.NOTE_BAND_POPULATION
+
+    def test_run_radar_search_attaches_it_without_relation_labels(self, no_arxiv, monkeypatch):
+        """§20 D の reading_note と違い、関係の種類が無くても帯が出れば付く。"""
+        src = (BACKEND / "core" / "paper_discovery" / "radar.py").read_text(encoding="utf-8")
+        body = src[src.index("def run_radar_search"):src.index("def keyphrase_hits")]
+        assert 'result["band_population_note"] = population' in body
+        assert "band_population_note(result[\"candidates\"])" in body
+
+
+# ---------------------------------------------------------------------------
+# §24 C（IK-0759）— 取り込み済み候補の比較は写しを読む（arXiv を増やさない）
+# ---------------------------------------------------------------------------
+
+
+class TestCompareIngestedUsesCache:
+    def test_cached_ingested_candidate_needs_no_arxiv_call(self, no_arxiv, monkeypatch):
+        fetch_calls: list = []
+        monkeypatch.setattr(
+            compare_mod.arxiv_client, "fetch_by_ids",
+            lambda ids, **kw: fetch_calls.append(list(ids)) or [],
+        )
+        monkeypatch.setattr("core.deliberation.refs.document_run_artifacts", lambda document_id: {})
+        monkeypatch.setattr(
+            compare_mod, "load_candidate_analyses", lambda *a, **k: {}
+        )
+        llm_calls: list = []
+        monkeypatch.setattr(
+            compare_mod, "_call_llm",
+            lambda content, model: llm_calls.append(content) or _parsed([]),
+        )
+        session = _seed_session(
+            documents=[
+                {"id": "doc-1", "source_path": "mat-1", "title": "起点論文",
+                 "source_url": "https://arxiv.org/pdf/2608.20293v2"},
+                # 取り込み済みの候補（教材として在る）。
+                {"id": "doc-cand", "source_path": "mat-cand", "title": "A candidate",
+                 "source_url": "https://arxiv.org/src/2608.00002"},
+            ],
+            arxiv_metadata=[
+                schema.ArxivEntry(arxiv_id="2608.20293", summary="seed abstract"),
+                _candidate_entry(),
+            ],
+        )
+        compare_mod.run_compare(session, "doc-1", ["2608.00002"], visible_document_ids={"doc-cand"})
+        assert fetch_calls == [], "写しに在れば取り込み済み候補でも arXiv を呼ばない（§14）"
+        assert len(llm_calls) == 1, "LLM は 1 回のまま"
+
+
+# ---------------------------------------------------------------------------
+# §24 D（IK-0761）— 起点の系譜（取り込みの監査から読み時導出）
+# ---------------------------------------------------------------------------
+
+
+class _LineageSession(FakeSession):
+    """取り込みの監査（theory_review_events）を持つフェイク。"""
+
+    def __init__(self, *, events=(), **kwargs):
+        super().__init__(**kwargs)
+        # {"action", "arxiv_ids", "seed_document_id"}（新しい順に並べておく）
+        self.events = list(events)
+
+    def execute(self, stmt, params=None):
+        sql = " ".join(str(stmt).split())
+        if "FROM theory_review_events" in sql:
+            import json as _json
+
+            p = dict(params or {})
+            self.calls.append((sql, p))
+            wanted = _json.loads(p["arxiv_json"])[0]
+            rows = [
+                (e["seed_document_id"],)
+                for e in self.events
+                if e["action"] in p["actions"]
+                and wanted in e["arxiv_ids"]
+                and e.get("seed_document_id")
+            ]
+            return _Result(rows[: int(p["limit"])])
+        return super().execute(stmt, params)
+
+
+def _lineage_docs():
+    return [
+        {"id": "doc-a", "source_path": "mat-a", "title": "元の起点", "source_url": "https://arxiv.org/abs/2407.01221"},
+        {"id": "doc-b", "source_path": "mat-b", "title": "トライスペクトル", "source_url": "https://arxiv.org/src/2610.08908"},
+        {"id": "doc-c", "source_path": "mat-c", "title": "FoG の再和", "source_url": "https://arxiv.org/src/2609.35757"},
+    ]
+
+
+def _lineage_events():
+    return [
+        {"action": "ingest", "arxiv_ids": ["2609.35757"], "seed_document_id": "doc-b"},
+        {"action": "ingest_batch", "arxiv_ids": ["2610.08908", "2610.00001"], "seed_document_id": "doc-a"},
+    ]
+
+
+class TestSeedLineage:
+    def test_walks_back_oldest_to_newest(self):
+        session = _LineageSession(documents=_lineage_docs(), events=_lineage_events())
+        out = radar.seed_lineage(session, "doc-c", visible_document_ids={"doc-a", "doc-b", "doc-c"})
+        assert [x["document_id"] for x in out["lineage"]] == ["doc-a", "doc-b", "doc-c"]
+        assert out["lineage_line"] == radar.LINEAGE_HEAD + "元の起点 → トライスペクトル → FoG の再和"
+        assert out["lineage_note"] == radar.NOTE_LINEAGE_SCOPE
+        assert not any(ch.isdigit() for ch in out["lineage_line"] + out["lineage_note"])
+
+    def test_material_id_ref_is_resolved(self):
+        session = _LineageSession(documents=_lineage_docs(), events=_lineage_events())
+        out = radar.seed_lineage(session, "mat-c", visible_document_ids={"doc-a", "doc-b", "doc-c"})
+        assert out["lineage"][-1]["document_id"] == "doc-c"
+
+    def test_no_record_means_no_lineage(self):
+        session = _LineageSession(documents=_lineage_docs(), events=[])
+        assert radar.seed_lineage(session, "doc-c", visible_document_ids={"doc-c"}) == {}
+
+    def test_empty_visibility_issues_no_sql(self):
+        session = _LineageSession(documents=_lineage_docs(), events=_lineage_events())
+        assert radar.seed_lineage(session, "doc-c", visible_document_ids=set()) == {}
+        assert session.calls == []
+
+    def test_visibility_is_a_required_keyword(self):
+        session = _LineageSession(documents=_lineage_docs(), events=_lineage_events())
+        with pytest.raises(TypeError):
+            radar.seed_lineage(session, "doc-c")  # type: ignore[call-arg]
+
+    def test_hidden_document_is_not_named_and_stops_the_walk(self):
+        session = _LineageSession(documents=_lineage_docs(), events=_lineage_events())
+        out = radar.seed_lineage(session, "doc-c", visible_document_ids={"doc-a", "doc-c"})
+        assert out["lineage"][0] == {"document_id": "", "title": radar.LINEAGE_HIDDEN_TITLE}
+        assert "トライスペクトル" not in out["lineage_line"]
+        assert "元の起点" not in out["lineage_line"], "見えない論文より前は辿らない"
+        assert out["lineage_note"].endswith(radar.NOTE_LINEAGE_HIDDEN)
+
+    def test_depth_is_capped_with_a_fact(self):
+        n = radar.LINEAGE_MAX_DEPTH + 3
+        docs = [
+            {"id": f"d{i}", "source_path": f"m{i}", "title": f"論文{chr(0x3042 + i)}",
+             "source_url": f"https://arxiv.org/abs/2601.{i:05d}"}
+            for i in range(n)
+        ]
+        events = [
+            {"action": "ingest", "arxiv_ids": [f"2601.{i:05d}"], "seed_document_id": f"d{i - 1}"}
+            for i in range(1, n)
+        ]
+        session = _LineageSession(documents=docs, events=events)
+        out = radar.seed_lineage(session, f"d{n - 1}", visible_document_ids={d["id"] for d in docs})
+        assert len(out["lineage"]) == radar.LINEAGE_MAX_DEPTH + 1
+        assert out["lineage_note"].endswith(radar.NOTE_LINEAGE_TRUNCATED)
+
+    def test_cycle_does_not_loop(self):
+        docs = _lineage_docs()
+        events = _lineage_events() + [
+            {"action": "ingest", "arxiv_ids": ["2407.01221"], "seed_document_id": "doc-c"},
+        ]
+        session = _LineageSession(documents=docs, events=events)
+        out = radar.seed_lineage(session, "doc-c", visible_document_ids={"doc-a", "doc-b", "doc-c"})
+        assert [x["document_id"] for x in out["lineage"]] == ["doc-a", "doc-b", "doc-c"]
+
+    def test_failure_is_fail_soft(self):
+        class _Broken(_LineageSession):
+            def execute(self, stmt, params=None):
+                if "theory_review_events" in str(stmt):
+                    raise RuntimeError("db down")
+                return super().execute(stmt, params)
+
+        session = _Broken(documents=_lineage_docs(), events=_lineage_events())
+        assert radar.seed_lineage(session, "doc-c", visible_document_ids={"doc-c"}) == {}
+
+    def test_lineage_reads_only_audit_and_does_not_write(self):
+        src = (BACKEND / "core" / "paper_discovery" / "radar.py").read_text(encoding="utf-8")
+        body = src[src.index("def _lineage_parent_ids"):src.index("__all__ = [")]
+        for word in ("INSERT", "UPDATE", "DELETE", "commit("):
+            assert word not in body

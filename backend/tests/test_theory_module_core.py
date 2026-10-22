@@ -787,6 +787,29 @@ class TestSynthesizedClaimLabels:
         assert plain_math("$M_{200\\mathrm{m}}$") == "M_200m"
         assert plain_math("") == ""
 
+    def test_font_switch_and_star_subscript_leave_no_command_names(self):
+        """IK-0835: ``\\cal L_\\star`` が「cal L_star」と命令名を字に残した（judge-deep-09）。
+
+        書体は記号の同一性に関わらないので外す（``\\mathcal{L}`` も「L」）。添字の印 ``\\star`` は
+        落とさず「⋆」にする。照合キーでは ``\\star`` と ``*`` を同じ記号として読む。
+        """
+        from core.theory_modules.schema import plain_math, symbol_match_key
+
+        for source in ("$\\mathcal{L}_\\star$", "$\\cal L_\\star$", "${\\cal L}_\\star$"):
+            assert plain_math(source) == "L_⋆"
+        assert plain_math("$\\boldsymbol\\theta$") == "θ"
+        assert plain_math("$O_{L,\\parallel}(\\textbf{x})$") == "O_L,∥(x)"
+        keys = {symbol_match_key(n) for n in (
+            "\\mathcal{L}_\\star", "\\cal L_\\star", "{\\cal L}_*", "\\mathcal L_*", "L_*",
+        )}
+        assert keys == {"l_*"}
+        assert symbol_match_key("\\textbf{x}") == symbol_match_key("\\mathbf{x}") == "x"
+        assert symbol_match_key("\\boldsymbol\\theta") == symbol_match_key("\\theta")
+        # アクセントは記号の区別に関わるので照合キーでは残す（推定量 x̂ と x を同一視しない）。
+        assert symbol_match_key("\\hat{x}") != symbol_match_key("x")
+        for key in keys | {symbol_match_key("\\cal L")}:
+            assert "cal" not in key and "star" not in key
+
     def test_visual_label_has_no_dollar_and_module_label_prefers_symbols(self):
         fixture = _load("arxiv_2609_15375v1_tex.json")
         result = build_theory_modules(
