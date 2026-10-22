@@ -1803,3 +1803,24 @@ paper_goal）/ `TestSeedKeyphraseSupply::test_title_keyphrases_rules`（題名�
 `test_paper_radar_core.py::TestDominantKeyphrase` / `TestBandPopulationNote` / `TestCompareIngestedUsesCache` / `TestSeedLineage`、
 `test_paper_radar_api.py::TestWave24SearchNotesPassThrough` / `TestSeedLineageRoute` / `TestIngestRecordsTheSeed`、
 `test_paper_radar_ui_static.py::TestRadarWave24`。
+
+## 25. 追補 — 供給語の材料の正規化（TeX の断片・スラッシュ・動詞の頭）（2026-10-22・migration / env / アンカー / LLM / arXiv 呼び出しなし）
+
+**きっかけ**: オーナーがブラウザで 2610.08751（事前体積効果・Mpc 単位）を起点に開いた画面で、キーフレーズに `rm Mpc` / `CDM` /
+`adopting Mpc` / `h units` が並び、`CDM` だけに当たる候補が網を占めていた（IK-0845）。中心命題は日本語の文に `${\rm Mpc}/h$`
+`$\Lambda$CDM` の TeX 数式区画を含み、題名は `by adopting Mpc over Mpc/h units`。
+
+**是正**（すべて `core/paper_discovery/radar.py` の供給の入口 `title_thesis_keyphrases`）:
+
+- `strip_tex_for_phrases`: `$…$` の数式区画と、それに**くっついた**英字の断片（`$\Lambda$CDM` の `CDM`・`${\rm Mpc}` の `rm`）、
+  制御綴り、波括弧を句の材料から外す。記号は句ではなく、くっついた断片は語の半分。落とすのは検索語の材料だけで、表示・保存の本文は変えない。
+- 語の正規表現で `/` を語の内側に認め、区切り文字から `/` を外す（`Mpc/h units` は 1 句。`h units` にならない）。
+- 連なりの頭の一般動詞の動名詞（`_GENERIC_GERUNDS`。`adopting` / `mitigating` / `probing` / `revisiting` / `exploring` /
+  `investigating` / `quantifying` / `characterizing` / `assessing` / `evaluating` / `examining` を追加）は句に含めず、連なりを次の語から
+  始める。分野の名詞の -ing（`clustering` / `lensing`）は表に入れない。
+
+**実物での結果**: 題名 + 中心命題から `prior-volume effects` / `galaxy clustering` / `Mpc/h units` / `PVE` だけが残る。
+
+**ガードレール**: `test_paper_radar_core.py::TestKeyphraseSupplyTexAndVerbs`。
+
+**未確認**: 是正後の供給で検索し直した網（arXiv 呼び出しの予算で止めた）。

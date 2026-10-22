@@ -4178,3 +4178,46 @@ class TestSeedLineage:
         body = src[src.index("def _lineage_parent_ids"):src.index("__all__ = [")]
         for word in ("INSERT", "UPDATE", "DELETE", "commit("):
             assert word not in body
+
+
+class TestKeyphraseSupplyTexAndVerbs:
+    """§25（2026-10-22・実測 2610.08751）: 題名・中心命題の TeX 残骸と動詞の断片を供給に出さない。"""
+
+    _TITLE = "Mitigating prior-volume effects in galaxy clustering by adopting Mpc over Mpc/h units"
+    _THESIS = (
+        "フルシェイプ銀河クラスタリング解析の事前体積効果（PVE）は、迷惑パラメータの事前分布を "
+        "${\\rm Mpc}/h$ 単位で課すことで $h$ との見かけの相関が持ち込まれることが主な原因であり、"
+        "事前分布を ${\\rm Mpc}$ 単位で課すだけで $\\Lambda$CDM の事後分布のずれを取り除ける。"
+    )
+
+    def test_strip_tex_drops_math_and_glued_fragments(self):
+        out = radar.strip_tex_for_phrases("priors in ${\\rm Mpc}/h$ units shift $\\Lambda$CDM posteriors")
+        assert "rm" not in out.split()
+        assert "CDM" not in out
+        assert "Mpc" not in out  # 数式の中身は記号であって句ではない
+        assert "priors in units shift posteriors" == out
+
+    def test_tex_math_fragments_do_not_become_keyphrases(self):
+        phrases = [p for p, _ in radar.title_thesis_keyphrases(self._TITLE, self._THESIS)]
+        assert "rm Mpc" not in phrases
+        assert "CDM" not in phrases
+
+    def test_slash_token_is_one_word(self):
+        runs = radar._phrase_runs("adopting Mpc over Mpc/h units")
+        assert ["Mpc/h", "units"] in runs
+        assert ["h", "units"] not in runs
+        phrases = [p for p, _ in radar.title_thesis_keyphrases(self._TITLE, self._THESIS)]
+        assert "Mpc/h units" in phrases
+        assert "h units" not in phrases
+
+    def test_leading_generic_gerund_is_not_part_of_the_phrase(self):
+        runs = radar._phrase_runs("by adopting Mpc over Mpc/h units")
+        assert ["adopting", "Mpc"] not in runs
+        phrases = [p for p, _ in radar.title_thesis_keyphrases(self._TITLE, self._THESIS)]
+        assert "adopting Mpc" not in phrases
+        # 分野の名詞の -ing（clustering）は落とさない
+        assert "galaxy clustering" in phrases
+
+    def test_display_text_is_not_changed_by_phrase_stripping(self):
+        # 落とすのは検索語の材料だけ — 表示の本文は呼び出し側が持つ
+        assert radar.strip_tex_for_phrases("plain title") == "plain title"

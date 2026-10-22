@@ -228,8 +228,23 @@ _TITLE_STOPWORDS = frozenset(
     """.split()
 )
 
-_PHRASE_SEGMENT_SPLIT_RE = re.compile(r"[^A-Za-z0-9\-\s]+")
-_TITLE_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-]*[A-Za-z0-9]|[A-Za-z0-9]")
+#: 語の連なりの区切り（句読点など）。``/`` は区切らない — ``Mpc/h`` は 1 語（§25）。
+_PHRASE_SEGMENT_SPLIT_RE = re.compile(r"[^A-Za-z0-9\-/\s]+")
+_TITLE_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-/]*[A-Za-z0-9]|[A-Za-z0-9]")
+
+#: TeX の数式区画（``$…$``）と、それに**くっついた**英字（``$\\Lambda$CDM`` の ``CDM``・
+#: ``${\\rm Mpc}/h`` の ``rm``）。記号は句ではなく、くっついた断片は語の半分なので、
+#: 句の材料から丸ごと外す（§25・実測 2610.08751: ``rm Mpc`` / ``CDM`` が供給に出た）。
+_TEX_FRAGMENT_RE = re.compile(r"[A-Za-z]*\$[^$]*\$[A-Za-z]*|\\[A-Za-z]+|[{}]")
+
+
+def strip_tex_for_phrases(text: Any) -> str:
+    """題名・中心命題・要旨から TeX の数式区画・制御綴り・波括弧を落とす（純関数・§25）。
+
+    数式の中身とそれに隣接する英字の断片は句の材料にしない（落とすのは検索語の材料だけで、
+    表示や保存の本文は変えない）。
+    """
+    return re.sub(r"\s+", " ", _TEX_FRAGMENT_RE.sub(" ", str(text or ""))).strip()
 
 #: 主張の概念（段③）の検索語としての上限。文のような「概念」（実測 2407.01221:
 #: 「Conditional joint forecast: approximately 0.62 ≤ λ ≤ 1.41」）を arXiv の
@@ -265,6 +280,8 @@ _GENERIC_GERUNDS = frozenset(
     interpolating computing estimating testing training processing matching ordering
     counting combining comparing measuring analyzing analysing using applying
     including improving extending constraining forecasting simulating
+    adopting mitigating probing revisiting exploring investigating quantifying
+    characterizing characterising assessing evaluating examining
     """.split()
 )
 #: 1 語のキーフレーズの最短の字数（``P`` / ``B`` を落とす・§21 A）。
@@ -699,6 +716,10 @@ def _phrase_runs(text: Any) -> list[list[str]]:
                     runs.append(current)
                 current = []
                 continue
+            if not current and token.casefold() in _GENERIC_GERUNDS:
+                # 連なりの頭の一般動詞の動名詞（``adopting Mpc`` の ``adopting``）は
+                # 句の一部ではなく動詞なので、連なりを次の語から始める（§25）。
+                continue
             current.append(token)
         if current:
             runs.append(current)
@@ -904,9 +925,9 @@ def title_thesis_keyphrases(
     if cap == 0:
         return []
 
-    title_text = str(title or "")
-    thesis = str(thesis_text or "")
-    summary_text = str(summary or "")
+    title_text = strip_tex_for_phrases(title)
+    thesis = strip_tex_for_phrases(thesis_text)
+    summary_text = strip_tex_for_phrases(summary)
     title_norm = " ".join(_norm_phrase(" ".join(r)) for r in [_TITLE_WORD_RE.findall(title_text)])
     thesis_norm = " ".join(_norm_phrase(" ".join(r)) for r in [_TITLE_WORD_RE.findall(thesis)])
     summary_norm = " ".join(
