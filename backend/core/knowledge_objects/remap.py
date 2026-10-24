@@ -249,8 +249,8 @@ def _reanchor_one(
             skipped["element_identity_links"] = conflicts
 
     if target_type:
-        # epistemic_ledger: UNIQUE(target_id, target_type) に当たる行は書き換えない
-        # （教員の記帳を別の台帳行に合流させない）。
+        # epistemic_ledger: 行キー (document_id, target_type, target_id)（migration 092・IK-0899）に
+        # 当たる行は書き換えない（教員の記帳を別の台帳行に合流させない）。
         conflicts = _scalar(
             session.execute(
                 sa_text(
@@ -263,6 +263,7 @@ def _reanchor_one(
                       AND EXISTS (
                           SELECT 1 FROM epistemic_ledger e2
                           WHERE e2.target_id = :new_id AND e2.target_type = :target_type
+                            AND e2.document_id::text = :document_id
                       )
                     """
                 ),
@@ -285,6 +286,7 @@ def _reanchor_one(
                   AND NOT EXISTS (
                       SELECT 1 FROM epistemic_ledger e2
                       WHERE e2.target_id = :new_id AND e2.target_type = :target_type
+                        AND e2.document_id::text = :document_id
                   )
                 """
             ),

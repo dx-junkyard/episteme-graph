@@ -406,7 +406,7 @@ def _consume_quota(user_id: str) -> None:
 
 def _targets(session: Any, document_id: str) -> list[dict]:
     try:
-        rows = observation_claim_targets(session, document_id=document_id)
+        rows = observation_claim_targets(session, document_ids=[document_id])
     except Exception:  # noqa: BLE001
         logger.debug("simulation lab: observation targets unavailable", exc_info=True)
         service.rollback_quietly(session)

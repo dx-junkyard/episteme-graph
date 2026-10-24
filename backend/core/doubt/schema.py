@@ -525,3 +525,53 @@ class EvidenceLine(BaseModel):
     def has_support(self) -> bool:
         """根拠 ID が 1 つ以上あるか（3 系統のいずれか）。"""
         return bool(self.evidence_ids or self.claim_ids or self.equation_ids)
+
+
+# ---------------------------------------------------------------------------
+# IK-0932（第 25 周 第 3 波・2026-10-23）: 学習者の地図の札に添える「記帳された条件」の 1 行。
+#
+# 検証は単一ブールにしない（D層の構想の心臓部）。教員がスコープ付きで直接検証を記帳しても、
+# 学習者の地図が状態だけを出すと「無条件に確かめられた」と読める。札の状態が
+# 直接検証・間接的な支持・反証のときだけ、記帳された成立条件と領域を 1 行で添える。
+# 根拠の逐語・記帳者（地位勾配 §8-3）・精度・系・数値は出さない（P7 / SL4）。
+# ---------------------------------------------------------------------------
+
+#: 条件の 1 行を添える検証状態（記帳の中身が「どこで確かめたか」を主張する状態だけ）。
+LEARNER_SCOPE_LINE_STATUSES = ("directly_verified", "indirectly_supported", "refuted")
+
+#: 学習者向けの 1 行の頭（数値なし。閉世界: 記帳の事実であって分野の事実ではない）。
+LEARNER_SCOPE_LINE_PREFIX = "記帳された条件: "
+
+#: 1 行に並べる条件の上限（それ以上は「ほかにも条件の記帳があります」— 件数は言わない）。
+_LEARNER_SCOPE_LINE_MAX = 2
+LEARNER_SCOPE_LINE_MORE = "（ほかにも条件の記帳があります）"
+
+
+def learner_scope_line(status: str, scopes: list) -> str:
+    """学習者の地図の札に添える条件の 1 行（該当しなければ空文字）。純関数。"""
+    if str(status or "") not in LEARNER_SCOPE_LINE_STATUSES:
+        return ""
+    from core.text_excerpt import excerpt
+    from core.text_hygiene import strip_control_sequences
+
+    parts: list[str] = []
+    usable = 0
+    for scope in scopes or []:
+        if not isinstance(scope, dict):
+            continue
+        axes: list[str] = []
+        for key, name in (("condition", "成立条件"), ("domain", "領域")):
+            value = strip_control_sequences(str(scope.get(key) or "")).strip()
+            if value:
+                axes.append(f"{name}「{excerpt(value, 60) or value[:60]}」")
+        if not axes:
+            continue
+        usable += 1
+        if len(parts) < _LEARNER_SCOPE_LINE_MAX:
+            parts.append("・".join(axes))
+    if not parts:
+        return ""
+    line = LEARNER_SCOPE_LINE_PREFIX + "／".join(parts)
+    if usable > len(parts):
+        line += LEARNER_SCOPE_LINE_MORE
+    return line

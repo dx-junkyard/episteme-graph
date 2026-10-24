@@ -214,7 +214,7 @@ class TestLearnerHandoff:
             return self._signals()
 
         monkeypatch.setattr(sb, "aggregate_naive_signals_for_courses", fake_agg)
-        monkeypatch.setattr(sb, "target_label", lambda session, t, i: "検出器の応答は線形である")
+        monkeypatch.setattr(sb, "target_label", lambda session, t, i, **_kw: "検出器の応答は線形である")
         labels = _labels(equation_records={"eq_7": {"equation_id": "eq_7", "label": "(7)"}})
         out = sb._learner_handoff(_HandoffSession(), "doc-1", labels)
         assert seen["course_ids"] == ["course-a"]
@@ -232,7 +232,7 @@ class TestLearnerHandoff:
 
     def test_unreadable_names_are_dropped(self, monkeypatch):
         monkeypatch.setattr(sb, "aggregate_naive_signals_for_courses", lambda s, c: self._signals()[:1])
-        monkeypatch.setattr(sb, "target_label", lambda session, t, i: i)  # 名前が引けず id が返る
+        monkeypatch.setattr(sb, "target_label", lambda session, t, i, **_kw: i)  # 名前が引けず id が返る
         out = sb._learner_handoff(_HandoffSession(), "doc-1", _labels())
         assert out["items"] == []
         assert out["note"] == sb.LEARNER_HANDOFF_NO_RECORD_NOTE

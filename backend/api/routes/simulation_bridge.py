@@ -491,7 +491,7 @@ def get_simulation_overview(document_id: str, current_user: dict = Depends(_requ
             session, [str(r.get("owner_user_id") or "") for r in runs if r.get("shared_at")]
         )
         try:
-            targets = observation_claim_targets(session, document_id=doc)
+            targets = observation_claim_targets(session, document_ids=[doc])
         except Exception:  # noqa: BLE001
             logger.debug("simulation: observation targets unavailable", exc_info=True)
             service.rollback_quietly(session)

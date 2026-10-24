@@ -986,17 +986,31 @@ def _require_target_type(target_type: str) -> str:
     return tt
 
 
-def _fetch_ledger(session: Any, target_type: str, target_id: str, *, for_update: bool = False) -> dict | None:
+def _ledger_where(target_type: str, target_id: str, document_id: str | None) -> tuple[str, dict]:
+    """台帳行の WHERE 句（正本は ``core.doubt.ledger_targets.ledger_row_filter`` — IK-0899）。"""
+    from core.doubt.ledger_targets import LedgerDocumentRequired, ledger_row_filter
+
+    try:
+        return ledger_row_filter(target_type=target_type, target_id=target_id, document_id=document_id)
+    except LedgerDocumentRequired as exc:
+        raise SimulationStateError(str(exc)) from exc
+
+
+def _fetch_ledger(
+    session: Any, target_type: str, target_id: str, *, for_update: bool = False,
+    document_id: str | None = None,
+) -> dict | None:
+    _where, _params = _ledger_where(target_type, target_id, document_id)
     row = session.execute(
         sa_text(
-            """
+            f"""
             SELECT verification_status, verification_scopes, simulation_candidates
               FROM epistemic_ledger
-             WHERE target_id = :tid AND target_type = :ttype
+             WHERE {_where}
             """
             + (" FOR UPDATE" if for_update else "")
         ),
-        {"tid": target_id, "ttype": target_type},
+        _params,
     ).fetchone()
     if row is None:
         return None
@@ -1036,19 +1050,22 @@ def append_ledger_candidate(
     from core.doubt.ledger_targets import ensure_ledger_row
 
     try:
-        ensure_ledger_row(session, target_type=tt, target_id=tid, document_id=document_id, course_id=course_id)
+        used_doc = ensure_ledger_row(
+            session, target_type=tt, target_id=tid, document_id=document_id, course_id=course_id
+        )
     except ValueError as exc:
         raise SimulationStateError(str(exc)) from exc
+    _where, _params = _ledger_where(tt, tid, used_doc)
     session.execute(
         sa_text(
-            """
+            f"""
             UPDATE epistemic_ledger
                SET simulation_candidates = simulation_candidates || CAST(:new AS jsonb),
                    updated_at = now()
-             WHERE target_id = :tid AND target_type = :ttype
+             WHERE {_where}
             """
         ),
-        {"new": _dumps([item]), "tid": tid, "ttype": tt},
+        {"new": _dumps([item]), **_params},
     )
     _audit(
         record_audit,
@@ -1071,6 +1088,7 @@ def decide_ledger_candidate(
     actor_id: str,
     record_audit: RecordAudit | None = None,
     reason: str = "",
+    document_id: str | None = None,
 ) -> dict:
     """台帳候補の確定 / 見送り（配列内の status 遷移。行・要素は削除しない）。
 
@@ -1097,7 +1115,8 @@ def decide_ledger_candidate(
         raise SimulationStateError(f"判断の操作は confirm か dismiss です（受け取った値: {action}）。")
     actor = _require_actor(actor_id)
 
-    ledger = _fetch_ledger(session, tt, tid, for_update=True)
+    _where, _params = _ledger_where(tt, tid, document_id)
+    ledger = _fetch_ledger(session, tt, tid, for_update=True, document_id=document_id)
     if ledger is None:
         raise SimulationNotFoundError("この対象の台帳がありません。")
     candidates = ledger["simulation_candidates"]
@@ -1127,21 +1146,20 @@ def decide_ledger_candidate(
             new_status = schema.LEDGER_MAX_STATUS
         session.execute(
             sa_text(
-                """
+                f"""
                 UPDATE epistemic_ledger
                    SET simulation_candidates = CAST(:candidates AS jsonb),
                        verification_scopes = verification_scopes || CAST(:scope AS jsonb),
                        verification_status = :verification_status,
                        updated_at = now()
-                 WHERE target_id = :tid AND target_type = :ttype
+                 WHERE {_where}
                 """
             ),
             {
                 "candidates": _dumps(candidates),
                 "scope": _dumps([scope]),
                 "verification_status": new_status,
-                "tid": tid,
-                "ttype": tt,
+                **_params,
             },
         )
         audit_action = "ledger_candidate_confirmed"
@@ -1153,14 +1171,14 @@ def decide_ledger_candidate(
         target["dismissed_at"] = now
         session.execute(
             sa_text(
-                """
+                f"""
                 UPDATE epistemic_ledger
                    SET simulation_candidates = CAST(:candidates AS jsonb),
                        updated_at = now()
-                 WHERE target_id = :tid AND target_type = :ttype
+                 WHERE {_where}
                 """
             ),
-            {"candidates": _dumps(candidates), "tid": tid, "ttype": tt},
+            {"candidates": _dumps(candidates), **_params},
         )
         audit_action = "ledger_candidate_dismissed"
 

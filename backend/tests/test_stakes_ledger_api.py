@@ -79,6 +79,23 @@ class _FakeSession:
         self.closed = True
 
 
+@pytest.fixture(autouse=True)
+def _open_ledger_gates(request, monkeypatch):
+    """IK-0899 / IK-0900 の対象単位ゲートを開ける（このファイルは分岐ロジックの単体）。
+
+    ゲートそのものは ``test_doubt_ledger_gates_round25.py`` と、このファイルの
+    ``TestEvidenceLineRequiresDocumentEdit``（``real_ledger_gates = True``）が検査する。
+    """
+    if getattr(request.cls, "real_ledger_gates", False):
+        return
+    monkeypatch.setattr(doubt, "_require_editable_ledger_target", lambda *a, **k: "doc-1")
+    monkeypatch.setattr(
+        doubt, "_ledger_target_access", lambda *a, **k: {"document_id": "doc-1", "can_edit": True}
+    )
+    monkeypatch.setattr(doubt, "_require_viewable_challenge_target", lambda *a, **k: None)
+    monkeypatch.setattr(doubt, "_require_editable_assumption", lambda *a, **k: None)
+
+
 def _no_session():
     raise AssertionError("this test expects validation to fail before a DB session opens")
 
@@ -355,9 +372,25 @@ class TestRefreshFalsificationCandidates:
             doubt, "maybe_schedule_falsification_candidates",
             lambda **kw: calls.append(kw) or True,
         )
+        # IK-0852: 範囲はコースの教材から求めた document 集合（ゲートを通した後）。
+        monkeypatch.setattr(doubt, "_course_scope_document_ids", lambda _cid, _user: ["doc-1"])
         result = doubt.refresh_falsification_candidates("course-1", current_user={"id": "u1"})
-        assert result == {"ok": True, "scheduled": True}
-        assert calls == [{"course_id": "course-1"}]
+        assert result == {"ok": True, "scheduled": True, "note": doubt.BATCH_SCHEDULED_NOTE}
+        assert calls == [{"course_id": "course-1", "document_ids": ["doc-1"]}]
+
+    def test_empty_scope_does_not_schedule_and_says_why(self, monkeypatch):
+        """IK-0853: 教材に解析済みの論文が無いなら起動せず、理由を返す（黙って受け付けない）。"""
+        calls = []
+        monkeypatch.setattr(
+            doubt, "maybe_schedule_falsification_candidates",
+            lambda **kw: calls.append(kw) or True,
+        )
+        monkeypatch.setattr(doubt, "_course_scope_document_ids", lambda _cid, _user: [])
+        result = doubt.refresh_falsification_candidates("course-1", current_user={"id": "u1"})
+        assert result["scheduled"] is False
+        assert result["reason"] == "no_documents"
+        assert result["note"] == doubt.SCOPE_NO_DOCUMENTS_NOTE
+        assert calls == []
 
 
 # ===========================================================================
@@ -376,13 +409,16 @@ class TestObservationTargetsEndpoint:
         )
         captured = {}
 
-        def _fake_targets(_session, *, course_id="", document_id=""):
-            captured["course_id"] = course_id
+        monkeypatch.setattr(doubt, "list_course_source_document_ids", lambda _course: {"doc-1"})
+
+        def _fake_targets(_session, *, document_ids):
+            captured["document_ids"] = document_ids
             return [{"claim_id": "c1", "label": "L", "identified_via": "dsl_measures"}]
 
         monkeypatch.setattr(doubt, "observation_claim_targets", _fake_targets)
         result = doubt.get_observation_targets("course-1", current_user={"id": "u1"})
-        assert captured["course_id"] == "course-1"
+        # IK-0852: course_id 列ではなくコースの教材の document 集合で絞る。
+        assert captured["document_ids"] == ["doc-1"]
         assert result == {"targets": [{"claim_id": "c1", "label": "L", "identified_via": "dsl_measures"}]}
         assert session.closed is True
 
@@ -425,8 +461,9 @@ class TestComputeCounterfactualRoute:
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
         captured = {}
 
-        def _fake_compute(_session, *, toggled_assumption_ids, course_id="", document_id=""):
+        def _fake_compute(_session, *, toggled_assumption_ids, document_ids):
             captured["ids"] = list(toggled_assumption_ids)
+            captured["document_ids"] = list(document_ids)
             return {"toggled_assumption_ids": toggled_assumption_ids}
 
         monkeypatch.setattr(doubt, "compute_counterfactual", _fake_compute)
@@ -434,8 +471,76 @@ class TestComputeCounterfactualRoute:
             toggled_assumption_ids=["a1"],
             toggled_observations=[doubt.ToggledObservation(claim_id="c1", aspect="value")],
         )
-        doubt.compute_counterfactual_route(body, current_user={"id": "u1"})
+        out = doubt.compute_counterfactual_route(body, current_user={"id": "u1"})
+        # IK-0903: 範囲（開いているグラフの論文）の観測でなければ伝播に渡さず、事実文で残す。
+        assert captured["ids"] == ["a1"]
+        assert any(w.startswith(doubt.OBSERVATION_OUTSIDE_SCOPE_WARNING_PREFIX) for w in out["warnings"])
+        # 範囲の指定が無ければ空（全コーパスへ黙って広げない — IK-0852 / fail-closed）
+        assert captured["document_ids"] == []
+
+    def test_observation_in_the_open_graph_is_toggled(self, monkeypatch):
+        """IK-0903: 開いている論文の観測系主張なら、前提と結合して伝播に渡す。"""
+        session = _FakeSession([])
+        monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        monkeypatch.setattr(doubt, "_counterfactual_scope_document_ids", lambda body, user: ["doc-1"])
+        monkeypatch.setattr(
+            doubt, "observation_claim_targets",
+            lambda _s, *, document_ids: [{"claim_id": "c1", "label": "観測", "identified_via": "claim_type"}],
+        )
+        captured = {}
+
+        def _fake_compute(_session, *, toggled_assumption_ids, document_ids):
+            captured["ids"] = list(toggled_assumption_ids)
+            return {"toggled_assumption_ids": toggled_assumption_ids, "warnings": []}
+
+        monkeypatch.setattr(doubt, "compute_counterfactual", _fake_compute)
+        body = doubt.CounterfactualComputeRequest(
+            toggled_assumption_ids=["a1"],
+            toggled_observations=[doubt.ToggledObservation(claim_id="c1", aspect="value")],
+            document_id="doc-1",
+        )
+        out = doubt.compute_counterfactual_route(body, current_user={"id": "u1"})
         assert captured["ids"] == ["a1", "c1"]
+        assert out["warnings"] == []
+
+    def test_document_id_scope_does_not_use_course_id(self, monkeypatch):
+        """IK-0852: document_id があればその 1 件（閲覧権限付き）。course_id では絞らない。"""
+        session = _FakeSession([])
+        monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        captured = {}
+        monkeypatch.setattr(
+            doubt, "compute_counterfactual",
+            lambda _s, *, toggled_assumption_ids, document_ids: captured.update(docs=list(document_ids)) or {},
+        )
+
+        class _Access:
+            found = True
+            can_view = True
+            document_id = "doc-uuid"
+
+        monkeypatch.setattr(doubt, "resolve_document_access", lambda _uid, _ref: _Access())
+        monkeypatch.setattr(
+            doubt, "_course_scope_document_ids",
+            lambda *_a: (_ for _ in ()).throw(AssertionError("course scope must not be used")),
+        )
+        body = doubt.CounterfactualComputeRequest(
+            toggled_assumption_ids=["a1"], course_id="course-1", document_id="material-x",
+        )
+        doubt.compute_counterfactual_route(body, current_user={"id": "u1", "role": "TEACHER"})
+        assert captured["docs"] == ["doc-uuid"]
+
+    def test_document_without_view_permission_is_404(self, monkeypatch):
+        class _Access:
+            found = True
+            can_view = False
+            document_id = "doc-uuid"
+
+        monkeypatch.setattr(doubt, "resolve_document_access", lambda _uid, _ref: _Access())
+        monkeypatch.setattr(doubt, "_pg_session", lambda: _FakeSession([]))
+        body = doubt.CounterfactualComputeRequest(toggled_assumption_ids=["a1"], document_id="d")
+        with pytest.raises(HTTPException) as exc:
+            doubt.compute_counterfactual_route(body, current_user={"id": "u1", "role": "TEACHER"})
+        assert exc.value.status_code == 404
 
     def test_both_empty_is_422_before_compute_call(self, monkeypatch):
         called = []
@@ -720,6 +825,7 @@ class TestLearnerLedgerProjection:
         session = _FakeSession([(_is_ledger_select, [row])])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
         monkeypatch.setattr(doubt, "get_accessible_course_data", lambda uid, cid: {"id": cid})
+        monkeypatch.setattr(doubt, "list_course_source_document_ids", lambda _course: {"doc-1"})
         monkeypatch.setattr(doubt, "compute_support_lines", lambda *a, **kw: None)
 
         result = doubt.get_learner_ledger_line(
@@ -739,6 +845,7 @@ class TestLearnerLedgerProjection:
         session = _FakeSession([(_is_ledger_select, [row])])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
         monkeypatch.setattr(doubt, "get_accessible_course_data", lambda uid, cid: {"id": cid})
+        monkeypatch.setattr(doubt, "list_course_source_document_ids", lambda _course: {"doc-1"})
         monkeypatch.setattr(
             doubt, "compute_support_lines",
             lambda *a, **kw: {"level": "several", "fact_line": "複数の支持線", "cut_members": [], "observation_roots": []},
@@ -747,6 +854,20 @@ class TestLearnerLedgerProjection:
             "course-1", "claim", "target-1", current_user={"id": "student-1"},
         )
         assert result["support_fact_line"] == "複数の支持線"
+
+    def test_target_outside_course_materials_is_404(self, monkeypatch):
+        """IK-0857: 受講中のコースでも、対象の document がコースの教材に無ければ読ませない。"""
+        row = _ledger_row(document_id="doc-other")
+        session = _FakeSession([(_is_ledger_select, [row])])
+        monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        monkeypatch.setattr(doubt, "get_accessible_course_data", lambda uid, cid: {"id": cid})
+        monkeypatch.setattr(doubt, "list_course_source_document_ids", lambda _course: {"doc-1"})
+        monkeypatch.setattr(doubt, "compute_support_lines", lambda *a, **kw: None)
+        with pytest.raises(HTTPException) as exc:
+            doubt.get_learner_ledger_line(
+                "course-1", "claim", "target-1", current_user={"id": "student-1"},
+            )
+        assert exc.value.status_code == 404
 
     def test_course_not_accessible_is_404(self, monkeypatch):
         monkeypatch.setattr(doubt, "get_accessible_course_data", lambda uid, cid: None)
@@ -793,7 +914,7 @@ class TestCompileOpenAssumptionsFalsificationKeys:
         self._patch_common(monkeypatch)
         conditions = [{"kind": "observation_value", "reachability": "reachable"}]
         session = self._session(self._rows(conditions))
-        items = open_assumptions.compile_open_assumptions(session, "course-1")
+        items = open_assumptions.compile_open_assumptions(session, "course-1", document_ids=["doc-1"])
         assert len(items) == 1
         assert items[0]["has_falsification_condition"] is True
         assert items[0]["falsification_not_formulable"] is False
@@ -804,7 +925,7 @@ class TestCompileOpenAssumptionsFalsificationKeys:
         self._patch_common(monkeypatch)
         conditions = [{"kind": "not_formulable", "reachability": "unassessed"}]
         session = self._session(self._rows(conditions))
-        items = open_assumptions.compile_open_assumptions(session, "course-1")
+        items = open_assumptions.compile_open_assumptions(session, "course-1", document_ids=["doc-1"])
         assert items[0]["has_falsification_condition"] is False
         assert items[0]["falsification_not_formulable"] is True
         assert items[0]["reachability_summary"] == ""
@@ -812,7 +933,7 @@ class TestCompileOpenAssumptionsFalsificationKeys:
     def test_no_conditions_at_all(self, monkeypatch):
         self._patch_common(monkeypatch)
         session = self._session(self._rows([]))
-        items = open_assumptions.compile_open_assumptions(session, "course-1")
+        items = open_assumptions.compile_open_assumptions(session, "course-1", document_ids=["doc-1"])
         assert items[0]["has_falsification_condition"] is False
         assert items[0]["falsification_not_formulable"] is False
         assert items[0]["reachability_summary"] == ""
@@ -825,8 +946,24 @@ class TestCompileOpenAssumptionsFalsificationKeys:
             lambda ctx, ttype, tid: {"level": "single", "fact_line": "f", "cut_members": [], "observation_roots": []},
         )
         session = self._session(self._rows([]))
-        items = open_assumptions.compile_open_assumptions(session, "course-1")
+        items = open_assumptions.compile_open_assumptions(session, "course-1", document_ids=["doc-1"])
         assert items[0]["support_line_level"] == "single"
+
+    def test_empty_scope_issues_no_sql(self, monkeypatch):
+        """IK-0852: 範囲（コースの教材）が空なら台帳を読まずに空（fail-closed）。"""
+        self._patch_common(monkeypatch)
+        session = self._session(self._rows([]))
+        assert open_assumptions.compile_open_assumptions(session, "course-1", document_ids=[]) == []
+        assert not any("FROM epistemic_ledger" in str(c[0]) for c in getattr(session, "calls", []))
+
+    def test_scope_is_document_ids_not_course_column(self, monkeypatch):
+        """IK-0852: 台帳は document 集合で絞り、行の course_id 列では絞らない。"""
+        self._patch_common(monkeypatch)
+        session = self._session(self._rows([]))
+        open_assumptions.compile_open_assumptions(session, "course-1", document_ids=["doc-1"])
+        sqls = [str(c[0]) for c in getattr(session, "calls", []) if "FROM epistemic_ledger" in str(c[0])]
+        assert sqls and all("course_id = :course" not in q for q in sqls)
+        assert any("document_id::text = ANY(:doc_ids)" in q for q in sqls)
 
     def test_reachability_summary_picks_best_value(self):
         conditions = [
@@ -913,6 +1050,8 @@ def _evidence_line_body():
 
 
 class TestEvidenceLineRequiresDocumentEdit:
+    real_ledger_gates = True
+
     def test_add_is_404_when_the_target_has_no_document(self, monkeypatch):
         """対象 → document が解決できない = 権限を確かめられない → 書かない。"""
         session = _FakeSession()

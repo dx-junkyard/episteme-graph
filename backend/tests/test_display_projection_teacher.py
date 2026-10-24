@@ -180,6 +180,6 @@ class TestTargetLabelExcerpt:
             def execute(self, *a, **k):
                 return _Row()
 
-        out = target_label(_Session(), "claim", "x")
+        out = target_label(_Session(), "claim", "x", document_id=None)
         assert len(out) <= 161
         assert out.endswith("…") and not out.rstrip("…").endswith("wor")

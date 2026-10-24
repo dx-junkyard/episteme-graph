@@ -127,10 +127,10 @@ def _patched_brief(monkeypatch, *, session=None, items=None) -> dict:
 
     seen: dict = {}
 
-    def fake_compile(sess, course_id, include_challenger_names=False, document_id=""):
+    def fake_compile(sess, course_id, *, document_ids, include_challenger_names=False, **_kw):
         seen["course_id"] = course_id
         seen["include_challenger_names"] = include_challenger_names
-        seen["document_id"] = document_id
+        seen["document_ids"] = list(document_ids)
         return list(items)
 
     monkeypatch.setattr(sb, "compile_open_assumptions", fake_compile)
@@ -156,7 +156,7 @@ def _patched_brief(monkeypatch, *, session=None, items=None) -> dict:
     )
     monkeypatch.setattr(
         sb, "build_support_context",
-        lambda sess, *, course_id="", document_id="": object(),
+        lambda sess, *, document_ids: object(),
     )
     monkeypatch.setattr(
         sb, "compute_support_lines_from_context",
@@ -275,14 +275,15 @@ class TestAvailabilityDegrade:
 
         def _compile(_s, course_id, **kw):
             seen["course"] = course_id
-            seen["doc"] = kw.get("document_id")
+            seen["doc"] = kw.get("document_ids")
             return []
 
         monkeypatch.setattr(sb, "compile_open_assumptions", _compile)
         monkeypatch.setattr(sb, "_single_support_lines", lambda *a, **k: [])
         brief = sb.build_seminar_brief(session, "doc-1")
         assert brief["available"] is True
-        assert seen == {"course": "", "doc": "doc-1"}
+        # IK-0852: 範囲は「この論文」1 件（course_id は出所として返すだけ）
+        assert seen == {"course": "", "doc": ["doc-1"]}
 
     def test_empty_ref_degrades_honestly(self):
         brief = sb.build_seminar_brief(_FakeSession(), "")
@@ -334,7 +335,7 @@ class TestBriefComposition:
         seen = brief["_seen"]
         assert seen["course_id"] == "course-1"
         assert seen["include_challenger_names"] is False  # ブリーフに疑義者名を載せない
-        assert seen["document_id"] == "doc-1"
+        assert seen["document_ids"] == ["doc-1"]
 
     def test_fragile_assumptions_carry_graded_labels_and_sl_keys(self, monkeypatch):
         brief = _patched_brief(monkeypatch)
@@ -428,16 +429,12 @@ class TestStructuralGuardrails:
             context="core/doubt/seminar_brief.py",
         )
 
-    def test_open_assumptions_gained_optional_document_scope(self):
-        """§3 精査④: optional document_id（既定 ""・percentile は course 全体のまま）。"""
-        assert 'document_id: str = ""' in _OPEN_ASSUMPTIONS_SRC
-        # migration 080 で document_id が uuid になったのでバインドを明示キャストする
-        # （空文字は NULLIF で NULL へ倒す）。
-        assert "AND document_id = CAST(NULLIF(:doc, '') AS uuid)" in _OPEN_ASSUMPTIONS_SRC
-        # 支持線の共有文脈にも document_id を透過する
-        assert (
-            "build_support_context(session, course_id=course_id, document_id=document_id)"
-            in _OPEN_ASSUMPTIONS_SRC
-        )
-        # percentile は course 全体（document で絞らない — 「高」の意味を保つ）
-        assert "load_percentiles(session, course_id)" in _OPEN_ASSUMPTIONS_SRC
+    def test_open_assumptions_is_scoped_by_required_document_ids(self):
+        """IK-0852（2026-10-23）: 範囲は必須の document_ids。台帳行の course_id 列で絞らない。"""
+        assert "document_ids,\n" in _OPEN_ASSUMPTIONS_SRC or "*,\n    document_ids," in _OPEN_ASSUMPTIONS_SRC
+        assert "WHERE course_id = :course" not in _OPEN_ASSUMPTIONS_SRC
+        assert "document_scope_clause(scope_ids)" in _OPEN_ASSUMPTIONS_SRC
+        # 支持線の共有文脈にも同じ範囲を渡す
+        assert "build_support_context(session, document_ids=scope_ids)" in _OPEN_ASSUMPTIONS_SRC
+        # percentile の基準は範囲（既定）か呼び出し側が渡す範囲（「高」の意味を呼び出し側が保つ）
+        assert "load_percentiles(session, document_ids=basis_ids)" in _OPEN_ASSUMPTIONS_SRC

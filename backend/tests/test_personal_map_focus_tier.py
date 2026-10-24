@@ -31,7 +31,7 @@ def _patch(monkeypatch, *, cited, graphs):
     monkeypatch.setattr(queries, "fetch_trace_cited_document_ids", lambda tid: list(cited))
     monkeypatch.setattr(queries, "fetch_component_graph", lambda d: _graph(d) if d in graphs else {})
     monkeypatch.setattr(queries, "fetch_document_titles", lambda ids: {d: f"論文{d}" for d in ids})
-    monkeypatch.setattr(queries, "fetch_component_ledger_statuses", lambda ids: {})
+    monkeypatch.setattr(queries, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
     monkeypatch.setattr(nearby, "_resolve_range_atlas_context", lambda cid, tid: None)
     monkeypatch.setattr(nearby, "_claim_summaries_for_graphs", lambda entries: {})
 

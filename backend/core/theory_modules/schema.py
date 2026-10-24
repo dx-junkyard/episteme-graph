@@ -298,7 +298,8 @@ def equation_display_label(record: Any) -> str:
 def has_printed_label(record: Any) -> bool:
     rec = record if isinstance(record, dict) else {}
     label = clean_text(rec.get("label")).strip("()").strip()
-    return bool(label) and not contains_internal_id(label)
+    # TeX の \label キー（eq:mod_dcf）は印字番号ではない（IK-0858 —「式 (eq:mod_dcf)」としない）。
+    return bool(label) and not contains_internal_id(label) and not _dp.is_tex_label_key(label)
 
 
 # ---------------------------------------------------------------------------

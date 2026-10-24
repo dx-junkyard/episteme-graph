@@ -30,6 +30,7 @@ from sqlalchemy import text as sa_text
 
 from core import display_projection as _dp
 from core.doubt.dependency import DependencyGraph, build_dependency_graph, seed_nodes_for_target
+from core.doubt.scope import document_scope_clause, normalize_document_ids
 from core.doubt.observation_targets import observation_claim_targets
 from core.knowledge_objects.references import normalize_claim_ref
 
@@ -71,27 +72,23 @@ def _graph_payload(raw: Any) -> dict:
 
 
 def _qualified_adjacency(
-    session, course_id: str, document_id: str, node_ids: set[str],
+    session, document_ids, node_ids: set[str],
 ) -> dict[str, set[str]]:
     """資格付きエッジ（source_backing_status が source_backed /
     partially_source_backed）の隣接リストを graph_json から直接読む。
+
+    範囲は document 集合（``core/doubt/scope.py`` — 空なら SQL を出さない。IK-0852）。
     """
-    filters = []
-    params: dict[str, Any] = {}
-    if course_id:
-        filters.append("course_id = :course")
-        params["course"] = course_id
-    if document_id:
-        filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
-        params["doc"] = document_id
-    if not filters:
-        filters.append("TRUE")
+    clause = document_scope_clause(document_ids)
+    if clause is None:
+        return {}
+    where, params = clause
     try:
         rows = session.execute(
             sa_text(f"""
                 SELECT graph_json
                 FROM theory_component_graphs
-                WHERE {' AND '.join(filters)}
+                WHERE {where}
             """),
             params,
         ).fetchall()
@@ -258,6 +255,24 @@ def _shares_target_claim(graph: DependencyGraph, node_id: str, target_claims: se
     return False
 
 
+def _nodes_reaching(adjacency: dict[str, set[str]], sinks) -> set[str]:
+    """``sinks`` へ（有向辺を順向きに）辿り着けるノードの集合（sinks を除く・IK-0902）。"""
+    reverse: dict[str, set[str]] = {}
+    for u, targets in adjacency.items():
+        for v in targets:
+            reverse.setdefault(v, set()).add(u)
+    sink_set = set(sinks)
+    seen: set[str] = set()
+    stack = list(sink_set)
+    while stack:
+        node = stack.pop()
+        for prev in reverse.get(node, ()):
+            if prev not in seen and prev not in sink_set:
+                seen.add(prev)
+                stack.append(prev)
+    return seen
+
+
 @dataclass
 class SupportPathContext:
     """複数対象を評価するときに再利用する、コース/文書スコープの共有文脈（性能改善）。
@@ -278,26 +293,27 @@ class SupportPathContext:
 def build_support_context(
     session,
     *,
-    course_id: str = "",
-    document_id: str = "",
+    document_ids,
 ) -> SupportPathContext | None:
-    """コース/文書スコープの共有文脈を1回だけ構築する（fail-soft: 失敗時は None）。"""
-    course_id = str(course_id or "").strip()
-    document_id = str(document_id or "").strip()
+    """document 集合の範囲の共有文脈を1回だけ構築する（fail-soft: 失敗時は None）。
+
+    範囲は ``document_ids``（必須・IK-0852）。空集合はグラフが空になり、対象は解決されない。
+    """
+    document_ids = normalize_document_ids(document_ids)
 
     try:
-        graph = build_dependency_graph(session, course_id=course_id, document_id=document_id)
+        graph = build_dependency_graph(session, document_ids=document_ids)
     except Exception:
         logger.warning("support path dependency graph build failed", exc_info=True)
         return None
 
     try:
-        obs_targets = observation_claim_targets(session, course_id=course_id, document_id=document_id)
+        obs_targets = observation_claim_targets(session, document_ids=document_ids)
     except Exception:
         logger.warning("support path observation target lookup failed", exc_info=True)
         obs_targets = []
 
-    adjacency = _qualified_adjacency(session, course_id, document_id, graph.node_ids)
+    adjacency = _qualified_adjacency(session, document_ids, graph.node_ids)
     return SupportPathContext(graph=graph, obs_targets=obs_targets, adjacency=adjacency)
 
 
@@ -350,6 +366,9 @@ def compute_support_lines_from_context(
 
     flow, _capacity, s_reachable = _max_flow_edge_disjoint_paths(adjacency, roots, sinks)
 
+    # IK-0902: 支持の根は「この対象へ届いた経路の根」だけ（グラフ全体の観測候補を並べない）。
+    # 届いた根 = 根ノードから対象（sink）へ辿れる観測系主張。支持線ゼロ（none）では出さない。
+    reaching = _nodes_reaching(adjacency, sinks)
     observation_roots = [
         {
             "claim_id": claim_id,
@@ -357,6 +376,7 @@ def compute_support_lines_from_context(
             "identified_via": item.get("identified_via", ""),
         }
         for claim_id, item in sorted(contributing_claims.items())
+        if graph.claim_refs.get(claim_id, set()) & reaching
     ][:_MAX_OBSERVATION_ROOTS]
 
     if flow <= 0:
@@ -364,7 +384,7 @@ def compute_support_lines_from_context(
             "level": "none",
             "fact_line": FACT_LINE_NONE,
             "cut_members": [],
-            "observation_roots": observation_roots,
+            "observation_roots": [],
         }
 
     if flow == 1:
@@ -379,7 +399,7 @@ def compute_support_lines_from_context(
                 "level": "none",
                 "fact_line": FACT_LINE_NONE,
                 "cut_members": [],
-                "observation_roots": observation_roots,
+                "observation_roots": [],
             }
         labels = "、".join(m["label"] for m in cut_members) or "（不明）"
         fact_line = (
@@ -406,10 +426,9 @@ def compute_support_lines(
     target_type: str,
     target_id: str,
     *,
-    course_id: str = "",
-    document_id: str = "",
+    document_ids,
 ) -> dict | None:
-    """対象の独立支持経路を計算する（数値非公開・SL4）。
+    """対象の独立支持経路を計算する（数値非公開・SL4。範囲は document 集合 — IK-0852）。
 
     単発呼び出し用の薄いラッパ: :func:`build_support_context` で文脈を1回作り、
     :func:`compute_support_lines_from_context` に渡すだけ。複数対象をまとめて評価する
@@ -421,5 +440,5 @@ def compute_support_lines(
         対象ノードがグラフ上に解決できない、またはグラフ自体が存在しない場合は
         ``None``（呼び出し側は台帳本体を壊さずキーを省略すること）。
     """
-    ctx = build_support_context(session, course_id=course_id, document_id=document_id)
+    ctx = build_support_context(session, document_ids=document_ids)
     return compute_support_lines_from_context(ctx, target_type, target_id)

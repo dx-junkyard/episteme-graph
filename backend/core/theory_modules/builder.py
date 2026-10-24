@@ -1234,6 +1234,19 @@ def _claim_sequence_node_ids(graph_json: dict, chains: list[dict]) -> list[str]:
     return out
 
 
+def claim_sequence_node_ids(*, graph_json: Any, artifacts: Any) -> list[str]:
+    """claim チェーン由来の詳細ノード（公開・IK-0933）。
+
+    グラフレビューのキャンバスから外す判定（(b-読)）と D層の台帳対象の母集合
+    （``core/doubt/population.py``）が同じ判定を使う（正本はここ 1 つ）。失敗は空。
+    """
+    try:
+        chains = _dicts(_mapping(_mapping(artifacts).get("derivation_chain")).get("chains"))
+        return _claim_sequence_node_ids(_mapping(graph_json), chains)
+    except Exception:  # noqa: BLE001
+        return []
+
+
 # ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------

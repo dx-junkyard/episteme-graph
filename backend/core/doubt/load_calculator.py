@@ -23,6 +23,7 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core.doubt.dependency import DependencyGraph, build_dependency_graph, seed_nodes_for_target
+from core.doubt.scope import document_scope_clause, normalize_document_ids
 from core.postgres import get_session
 
 logger = logging.getLogger(__name__)
@@ -66,29 +67,26 @@ def _assumption_seed_nodes(graph: DependencyGraph, created_from: Any) -> set[str
     return seeds
 
 
-def recompute_load_scores(course_id: str = "", document_id: str = "") -> dict:
-    """指定範囲の台帳行の load_score を再計算する（冪等）。"""
+def recompute_load_scores(*, document_ids) -> dict:
+    """指定範囲（document 集合, IK-0852）の台帳行の load_score を再計算する（冪等）。
+
+    範囲が空なら DB に触れずに ``{"updated": 0, "documents": 0}`` を返す（fail-closed）。
+    """
+    document_ids = normalize_document_ids(document_ids)
+    if not document_ids:
+        return {"updated": 0, "documents": 0}
     session = get_session()
     updated = 0
     try:
-        graph = build_dependency_graph(session, course_id=course_id, document_id=document_id)
+        graph = build_dependency_graph(session, document_ids=document_ids)
 
-        filters = []
-        params: dict[str, Any] = {}
-        if course_id:
-            filters.append("course_id = :course")
-            params["course"] = course_id
-        if document_id:
-            filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
-            params["doc"] = document_id
-        if not filters:
-            filters.append("TRUE")
+        where, params = document_scope_clause(document_ids)
 
         rows = session.execute(
             sa_text(f"""
                 SELECT id::text, target_id, target_type
                 FROM epistemic_ledger
-                WHERE {' AND '.join(filters)}
+                WHERE {where}
             """),
             params,
         ).fetchall()
@@ -128,32 +126,37 @@ def recompute_load_scores(course_id: str = "", document_id: str = "") -> dict:
     except Exception:
         session.rollback()
         logger.warning(
-            "load score recompute failed (course=%s document=%s)",
-            course_id or "-", document_id or "-", exc_info=True,
+            "load score recompute failed (documents=%d)", len(document_ids), exc_info=True,
         )
-        return {"updated": 0, "failed": True}
+        return {"updated": 0, "failed": True, "documents": len(document_ids)}
     finally:
         session.close()
 
     logger.info(
-        "load score recompute done: updated=%d (course=%s document=%s)",
-        updated, course_id or "-", document_id or "-",
+        "load score recompute done: updated=%d (documents=%d)", updated, len(document_ids),
     )
-    return {"updated": updated}
+    return {"updated": updated, "documents": len(document_ids)}
 
 
-def load_percentiles(session, course_id: str) -> tuple[float, float, float]:
-    """course 内 load_score の p50 / p90 / p99（段階ラベル変換の閾値）。"""
+def load_percentiles(session, *, document_ids) -> tuple[float, float, float]:
+    """範囲（document 集合, IK-0852）内 load_score の p50 / p90 / p99（段階ラベル変換の閾値）。
+
+    範囲が空なら SQL を出さずに (0, 0, 0)（呼び出し側の段階は最も慎重な側へ倒れる）。
+    """
+    clause = document_scope_clause(document_ids)
+    if clause is None:
+        return 0.0, 0.0, 0.0
+    where, params = clause
     row = session.execute(
-        sa_text("""
+        sa_text(f"""
             SELECT
                 COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY load_score), 0),
                 COALESCE(percentile_cont(0.9) WITHIN GROUP (ORDER BY load_score), 0),
                 COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY load_score), 0)
             FROM epistemic_ledger
-            WHERE course_id = :course AND load_score IS NOT NULL
+            WHERE {where} AND load_score IS NOT NULL
         """),
-        {"course": course_id},
+        params,
     ).fetchone()
     if not row:
         return 0.0, 0.0, 0.0

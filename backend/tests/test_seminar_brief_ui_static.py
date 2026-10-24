@@ -203,12 +203,17 @@ class TestFourSections:
             assert "data." + key in seg, key
             assert '"' + key + '"' in backend_src, key + " がバックエンド投影から消えた"
 
-    def test_empty_sections_are_silently_omitted(self):
-        """空の区画は「（該当なし）」ではなく区画ごと省略する（空欄は発見の流儀）。"""
+    def test_empty_sections_keep_heading_with_server_closed_world_note(self):
+        """IK-0853: 空の区画は見出しを残し、サーバの閉世界の一文（empty_notes）を淡色で添える。
+        サーバが一文を返さない区画は省略する（JS に固定文を持たない・「（該当なし）」と書かない）。"""
         seg = _brief_segment()
-        block = _fn_block(seg, "function _sbSection(heading, rowEls) {")
-        assert "if (!rowEls || !rowEls.length) return null;" in block
+        block = _fn_block(seg, "function _sbSection(heading, rowEls, emptyNote) {")
+        assert "return null;" in block
+        assert "--color-text-tertiary" in block
+        assert "data.empty_notes" in seg
         assert "該当なし" not in seg
+        backend_src = (BACKEND / "core" / "doubt" / "seminar_brief.py").read_text(encoding="utf-8")
+        assert '"empty_notes"' in backend_src
 
     def test_fourth_section_is_always_rendered_with_the_note(self):
         seg = _brief_segment()
@@ -298,7 +303,7 @@ class TestTextContentRendering:
         seg = _brief_segment()
         for signature in (
             "function renderSeminarBrief(data) {",
-            "function _sbSection(heading, rowEls) {",
+            "function _sbSection(heading, rowEls, emptyNote) {",
             "function _sbStatementRow(statement, facts) {",
             "function _sbFragileMeta(item) {",
             "function _sbStumbleFacts(stumble) {",

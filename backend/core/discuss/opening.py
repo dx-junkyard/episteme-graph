@@ -720,7 +720,8 @@ def project_fragile_points(
                 "subject": FRAGILE_SUBJECT_PAPER,
                 "label": label,
                 "fact_line": _assumption_fact_line(item),
-                "document_id": None,
+                # IK-0935: 台帳行の論文（各論文の区画へ振り分ける材料）。無ければ None（コース全体）。
+                "document_id": (str(item.get("document_id") or "").strip() or None),
             }
         )
 
@@ -988,11 +989,13 @@ def _load_approved_discussion_seeds(document_id: str) -> list[dict[str, Any]]:
             session.close()
 
 
-def _compile_open_assumptions(course_id: str) -> list[dict[str, Any]]:
+def _compile_open_assumptions(course_id: str, *, document_ids) -> list[dict[str, Any]]:
     """D層台帳の未検証合意リスト（``core.doubt.open_assumptions.compile_open_assumptions``）
     を学習者向け設定（``include_challenger_names=False``。既存の学習者向け
     ``GET /api/learning/courses/{course_id}/open-assumptions`` と同じ呼び出し方）で読む。
-    台帳未記帳コースでは空リスト（fail-closed。エラーにしない）。
+
+    範囲は ``document_ids``（必須・IK-0852。呼び出し側がコースの教材から求めた集合）。
+    台帳の course_id 列では絞らない。範囲が空・台帳未記帳では空リスト（fail-closed）。
     """
     from core.postgres import get_session
 
@@ -1000,7 +1003,9 @@ def _compile_open_assumptions(course_id: str) -> list[dict[str, Any]]:
 
     session = get_session()
     try:
-        return compile_open_assumptions(session, course_id, include_challenger_names=False)
+        return compile_open_assumptions(
+            session, course_id, document_ids=document_ids, include_challenger_names=False,
+        )
     except Exception:  # noqa: BLE001
         logger.warning("discuss opening: open assumptions read failed for course %s", course_id, exc_info=True)
         return []
@@ -1105,7 +1110,7 @@ def build_opening(
 
         documents.append(document_dto)
 
-    assumption_items = _compile_open_assumptions(course_id)
+    assumption_items = _compile_open_assumptions(course_id, document_ids=ids)
     fragile_points, fragile_truncated = project_fragile_points(assumption_items, backbone_by_document)
     # 第 23 周（st-02・st-05）: 脆い箇所の導出が済んだら、学習者に返すバックボーンからは
     # 解析の内部語（stage キー・review_status・source_backing_status・review_reasons）と
@@ -1126,6 +1131,14 @@ def build_opening(
         "fragile_points": fragile_points,
         "truncated": fragile_truncated,
     }
+    # IK-0853: 「この論文が確かめていないこと」に載る前提が無いとき、区画を消さず閉世界の
+    # 一文を添える（無いのか・出していないのかを区別させる）。文言は core/doubt/scope.py。
+    if ids and not any(
+        isinstance(f, dict) and f.get("kind") == "assumption" for f in fragile_points
+    ):
+        from core.doubt.scope import SECTION_EMPTY_NOTE
+
+        result["paper_unverified_empty_note"] = SECTION_EMPTY_NOTE
     return _strip_numeric_keys(result)
 
 

@@ -84,14 +84,17 @@ def _mark_created_from(session, assumption_id: str, patch: dict) -> None:
     )
 
 
-def run_assumption_mining(course_id: str = "") -> dict:
-    """検出 + 登録 + 正規化を 1 バッチ実行する（同期実行本体）。"""
+def run_assumption_mining(*, document_ids, course_id: str = "") -> dict:
+    """検出 + 登録 + 正規化を 1 バッチ実行する（同期実行本体）。
+
+    範囲は ``document_ids``（必須・IK-0852）。``course_id`` は前提候補の出所と U層の帰属にだけ使う。
+    """
     bind_usage_context("doubt:assumption_normalize", course_id=course_id or None)
     session = get_session()
     registered = 0
     normalized = 0
     try:
-        clusters = detect_gap_clusters(session, course_id=course_id)
+        clusters = detect_gap_clusters(session, document_ids=document_ids)
         registered = register_candidates(session, clusters, course_id=course_id)
 
         # 検出時のクラスタテキストを cluster_key で引けるようにしておく
@@ -164,11 +167,12 @@ def run_assumption_mining(course_id: str = "") -> dict:
     return {"registered": registered, "normalized": normalized}
 
 
-def maybe_schedule_assumption_mining(course_id: str = "") -> bool:
-    """非同期バッチをデーモンスレッドで起動する（P6）。"""
+def maybe_schedule_assumption_mining(*, document_ids, course_id: str = "") -> bool:
+    """非同期バッチをデーモンスレッドで起動する（P6）。範囲は document 集合（IK-0852）。"""
     return SYSTEM.spawn(
         run_assumption_mining,
         thread_factory=threading.Thread,
         thread_name="doubt-assumption-mining",
+        document_ids=list(document_ids or []),
         course_id=course_id,
     )

@@ -51,7 +51,7 @@ class _FakeSession:
 
 def test_claim_sql_excludes_equation_synthesis_claims():
     session = _FakeSession()
-    worker._claim_pending_targets(session, "doc-1", "")
+    worker._claim_pending_targets(session, "doc-1")
     sql, params = session.calls[0]
     assert "theory_claims_live" in sql
     assert "NOT (" in sql

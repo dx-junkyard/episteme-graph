@@ -577,10 +577,27 @@
     });
 
     const h = NB.pad * 2 + 24 + rows.length * NB.rowH - 30;
+    const shown = [];
+    rows.forEach((row) => { (row.nodes || []).forEach((n) => shown.push(n)); });
     return (
       '<div class="pm-home-nb-graph"><svg viewBox="0 0 ' + NB.w + " " + h +
-      '" role="img" aria-label="いまここの前後の関係">' + lanes + links + chips + "</svg></div>"
+      '" role="img" aria-label="いまここの前後の関係">' + lanes + links + chips + "</svg></div>" +
+      nearbyScopeLinesHtml(shown)
     );
+  }
+
+  // IK-0932: 札（直接検証・間接的な支持・反証）の下に、記帳された条件の 1 行を出す。
+  // 文言はサーバの verification.scope_line をそのまま描く（JS に文言を持たない・数値なし）。
+  function nearbyScopeLinesHtml(nodes) {
+    let html = "";
+    (nodes || []).forEach((n) => {
+      const line = n && n.verification && n.verification.scope_line;
+      if (!line) return;
+      html +=
+        '<li class="pm-home-nb-scope-line" data-pm-home-scope-line="' + esc(n.component_id) + '">' +
+        "<b>" + esc(n.label) + "</b>（" + esc(n.verification.label) + "）— " + esc(line) + "</li>";
+    });
+    return html ? '<ul class="pm-home-nb-scope-lines">' + html + "</ul>" : "";
   }
 
   // 記号は atlas.css の .personal-map-dot-* と同じ形・色を共有する（コースビューと統一）。
@@ -742,7 +759,8 @@
     const h = top - NBR.gap + NBR.pad;
     return (
       '<div class="pm-home-nb-graph pm-home-nb-range-graph"><svg viewBox="0 0 ' + NBR.w + " " + h +
-      '" role="img" aria-label="この話題が触れている理論構成">' + links + chips + "</svg></div>"
+      '" role="img" aria-label="この話題が触れている理論構成">' + links + chips + "</svg></div>" +
+      nearbyScopeLinesHtml(nodes)
     );
   }
 

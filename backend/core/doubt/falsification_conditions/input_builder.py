@@ -54,14 +54,14 @@ def _equation_dict(raw: Any) -> dict:
 def _downstream_labels_for_target(session, target_type: str, target_id: str) -> list[str]:
     """この対象に依存する下流ノードのラベル要約（非LLM・決定論）。
 
-    epistemic_ledger から document_id / course_id を引いてグラフ範囲を絞る。
-    どちらも空（未バックフィル）のときは無闇に全文書横断グラフを組まない
-    （fail-soft: 空リストを返す）。
+    epistemic_ledger から document_id を引いてグラフ範囲を絞る（IK-0852: 行の course_id 列は
+    範囲に使わない）。document_id が空（未バックフィル）のときは無闇に全文書横断グラフを
+    組まない（fail-soft: 空リストを返す）。
     """
     try:
         row = session.execute(
             sa_text("""
-                SELECT document_id::text AS document_id, course_id
+                SELECT document_id::text AS document_id
                 FROM epistemic_ledger
                 WHERE target_id = :tid AND target_type = :ttype
             """),
@@ -76,11 +76,10 @@ def _downstream_labels_for_target(session, target_type: str, target_id: str) -> 
     if not row:
         return []
     document_id = str(row[0] or "")
-    course_id = str(row[1] or "")
-    if not document_id and not course_id:
+    if not document_id:
         return []
     try:
-        graph = build_dependency_graph(session, course_id=course_id, document_id=document_id)
+        graph = build_dependency_graph(session, document_ids=[document_id])
         seeds = seed_nodes_for_target(graph, target_type, target_id)
         if not seeds:
             return []

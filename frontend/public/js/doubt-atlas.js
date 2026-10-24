@@ -39,6 +39,15 @@
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  // IK-0899: 台帳の行キーは (document_id, target_type, target_id)（migration 092）。グラフの
+  // ノード id・式の agent ID は論文の中でしか一意でないので、開いている論文を必ず添える。
+  // 論文は台帳区画の container の data-doubt-document に持つ（ここ以外でパスを組まない）。
+  function ledgerPath(container, targetType, targetId, suffix) {
+    var doc = (container && container.getAttribute && container.getAttribute("data-doubt-document")) || "";
+    return "/admin/doubt/ledger/" + encodeURIComponent(targetType) + "/" + encodeURIComponent(targetId) +
+      (suffix || "") + (doc ? "?document_id=" + encodeURIComponent(doc) : "");
+  }
+
   // ── 語彙ラベル（事実記述のみ。評価語を使わない）─────────────────────
   //    正本はサーバ（core/doubt/schema.py の各 *_LABELS / STATUS_LABELS は
   //    core/label_vocab.py::VERIFICATION_STATUS_LABELS_LEDGER）。この表は
@@ -157,15 +166,16 @@
      D1-4 / D1-5 / D3-1: ノード詳細ペインの「認識的地位」セクション
      ================================================================= */
 
-  function renderNodeLedgerSection(detailEl, targetType, targetId) {
+  function renderNodeLedgerSection(detailEl, targetType, targetId, documentId) {
     if (!detailEl || !targetId) return;
     injectStyles();
     var container = document.createElement("div");
     container.className = "doubt-section";
     container.setAttribute("data-doubt-target", targetType + ":" + targetId);
+    if (documentId) container.setAttribute("data-doubt-document", documentId);
     detailEl.appendChild(container);
 
-    apiFetch("/admin/doubt/ledger/" + encodeURIComponent(targetType) + "/" + encodeURIComponent(targetId))
+    apiFetch(ledgerPath(container, targetType, targetId))
       .then(function (res) {
         if (res.status === 404) return null;
         if (!res.ok) throw new Error("ledger fetch failed");
@@ -245,11 +255,75 @@
     return html;
   }
 
-  function renderLedgerInto(container, targetType, targetId, entry) {
+  // IK-0900: 記帳できない教員には記帳ボタンを無効にする（理由の事実文はサーバの can_edit_note）。
+  function disableLedgerWrites(container) {
+    var sel = "[data-doubt-scope-form],[data-doubt-vstatus-form],[data-doubt-candidate-confirm]," +
+      "[data-doubt-candidate-dismiss],[data-doubt-falsification-form],[data-doubt-falsification-confirm]," +
+      "[data-doubt-falsification-dismiss],[data-doubt-evidence-line-form]";
+    Array.prototype.forEach.call(container.querySelectorAll(sel), function (btn) { btn.disabled = true; });
+  }
+
+  // IK-0904: 式・部品の台帳では疑義を残せないので、支える主張を並べて主張の台帳へ辿らせる。
+  function bindSupportingClaims(container) {
+    Array.prototype.forEach.call(
+      container.querySelectorAll("[data-doubt-open-claim-ledger]"),
+      function (btn) {
+        btn.addEventListener("click", function () {
+          var claimId = btn.getAttribute("data-doubt-open-claim-ledger");
+          var slot = container.querySelector('[data-doubt-claim-ledger-slot="' + claimId + '"]');
+          if (!slot) return;
+          if (slot.firstChild) { slot.innerHTML = ""; return; }
+          renderNodeLedgerSection(slot, "claim", claimId,
+            container.getAttribute("data-doubt-document") || "");
+        });
+      }
+    );
+  }
+
+  // IK-0931: 行の無い台帳（exists:false）に出す疑義の入口（行のある台帳の「疑義」区画と同じ規則）。
+  function challengeEntryHtml(entry, targetType) {
+    var html = '<div class="doubt-section"><b>疑義</b>';
+    if (targetType === "assumption" || targetType === "claim") {
+      html += '<p class="doubt-muted">疑義はありません。</p>';
+      html += '<button type="button" class="doubt-chip-btn" data-doubt-challenge-form="1" data-ui-anchor="doubt-atlas.record-challenge">疑義を残す</button>';
+      html += '<div data-doubt-challenge-slot="1"></div>';
+    } else if (entry.challenge_note) {
+      html += '<p class="doubt-muted" data-doubt-challenge-note="1">' + escHtml(entry.challenge_note) + '</p>';
+      (entry.supporting_claims || []).forEach(function (c) {
+        html += '<div class="doubt-scope">' + escHtml(c.label || "") +
+          '<div><button type="button" class="doubt-chip-btn" data-doubt-open-claim-ledger="' + escHtml(c.claim_id) +
+          '" data-ui-anchor="doubt-atlas.record-challenge">この主張の台帳を開く</button></div>' +
+          '<div data-doubt-claim-ledger-slot="' + escHtml(c.claim_id) + '"></div></div>';
+      });
+    }
+    return html + '</div>';
+  }
+
+  function renderLedgerInto(container, targetType, targetId, entry, note) {
     var html = "<b>認識的地位</b>";
-    if (!entry) {
-      // 台帳行なし = 記帳がまだ無いという事実（エラーではない）
-      html += '<p class="doubt-muted">検証スコープの記帳なし</p>';
+    // IK-0901: 対象の名前（式の印字番号・段の日本語名。読めなければ「名前を引けない対象」）。
+    if (entry && entry.target_label) {
+      // IK-0934: 見出しは「論文の題名 › 対象の名前」（同じ番号の対象を論文で見分ける）。
+      var heading = entry.document_title
+        ? escHtml(entry.document_title) + ' › ' + escHtml(entry.target_label)
+        : escHtml(entry.target_label);
+      html += '<p class="doubt-fact" data-doubt-target-heading="1">対象: ' + heading + '</p>';
+    }
+    // IK-0905: 直前の記帳の結果（記帳しました / すでにこの状態です / 重複）。
+    if (note) html += '<p class="doubt-fact" data-doubt-last-note="1">' + escHtml(note) + '</p>';
+    // IK-0899: 論文ごとに分かれる前の共有キーで残った記帳（どの論文のものか確かめさせる）。
+    if (entry && entry.attribution_note) {
+      html += '<p class="doubt-fact" data-doubt-attribution-note="1">' + escHtml(entry.attribution_note) + '</p>';
+    }
+    // IK-0900: 記帳できない教員への事実文（ボタンは下で無効にする）。
+    if (entry && entry.can_edit === false && entry.can_edit_note) {
+      html += '<p class="doubt-muted" data-doubt-read-only-note="1">' + escHtml(entry.can_edit_note) + '</p>';
+    }
+    if (!entry || entry.exists === false) {
+      // 台帳行なし = 記帳がまだ無いという事実（エラーではない）。IK-0931: サーバは行が無くても
+      // 200（exists:false）で名前・疑義の入口・can_edit を返す（文言はサーバの not_recorded_note）。
+      html += '<p class="doubt-muted" data-doubt-not-recorded="1">' +
+        escHtml((entry && entry.not_recorded_note) || "検証スコープの記帳なし") + '</p>';
       html += '<button type="button" class="doubt-chip-btn" data-doubt-scope-form="1" data-ui-anchor="doubt-atlas.record-scope">スコープを記帳</button>';
       html += '<div data-doubt-form-slot="1"></div>';
       // T1(G2-D): 検証状態の記帳導線（台帳行が無くても記帳操作自体は可能）
@@ -259,11 +333,18 @@
       html += falsificationSectionHtml(null);
       // P4-5: 根拠の線も台帳行の有無に関わらず記帳できる（サーバが行を用意する）。
       html += evidenceLinesSectionHtml(null);
+      // IK-0931: 行が無くても疑義の入口（前提・主張は疑義を残す / 式・部品は支える主張へ）を出す。
+      if (entry) html += challengeEntryHtml(entry, targetType);
       container.innerHTML = html;
       bindScopeForm(container, targetType, targetId);
       bindVerificationStatusForm(container, targetType, targetId, 0);
       bindFalsificationSection(container, targetType, targetId);
       bindEvidenceLineForm(container, targetType, targetId);
+      if (entry) {
+        bindChallengeForm(container, targetType, targetId);
+        bindSupportingClaims(container);
+        if (entry.can_edit === false) disableLedgerWrites(container);
+      }
       return;
     }
 
@@ -282,7 +363,8 @@
         if ((s.evidence_ids || []).length) {
           html += '<div class="doubt-scope-meta">evidence: ' + escHtml(s.evidence_ids.join(", ")) + '</div>';
         }
-        html += '<div class="doubt-scope-meta">記帳者: ' + escHtml(s.recorded_by || "-") +
+        // IK-0905: 記帳者は名前で（サーバの recorded_by_label。UUID を出さない）。
+        html += '<div class="doubt-scope-meta">記帳者: ' + escHtml(s.recorded_by_label || "-") +
           (s.reason ? ' — ' + escHtml(s.reason) : '') + '</div></div>';
       });
     } else {
@@ -362,6 +444,15 @@
     if (targetType === "assumption" || targetType === "claim") {
       html += '<button type="button" class="doubt-chip-btn" data-doubt-challenge-form="1" data-ui-anchor="doubt-atlas.record-challenge">疑義を残す</button>';
       html += '<div data-doubt-challenge-slot="1"></div>';
+    } else if (entry.challenge_note) {
+      // IK-0904: 疑義の入口が無い理由と、支える主張の台帳へ辿る道（文言はサーバ）。
+      html += '<p class="doubt-muted" data-doubt-challenge-note="1">' + escHtml(entry.challenge_note) + '</p>';
+      (entry.supporting_claims || []).forEach(function (c) {
+        html += '<div class="doubt-scope">' + escHtml(c.label || "") +
+          '<div><button type="button" class="doubt-chip-btn" data-doubt-open-claim-ledger="' + escHtml(c.claim_id) +
+          '" data-ui-anchor="doubt-atlas.record-challenge">この主張の台帳を開く</button></div>' +
+          '<div data-doubt-claim-ledger-slot="' + escHtml(c.claim_id) + '"></div></div>';
+      });
     }
     html += '</div>';
 
@@ -379,6 +470,8 @@
     bindChallengeActions(container, targetType, targetId);
     bindFalsificationSection(container, targetType, targetId);
     bindEvidenceLineForm(container, targetType, targetId);
+    bindSupportingClaims(container);
+    if (entry.can_edit === false) disableLedgerWrites(container);
   }
 
   // ── P4-5: 根拠の線（knowledge_transfer_design.md §8 / X-5）─────────────────
@@ -457,8 +550,7 @@
           claim_ids: splitIdList(slot.querySelector('[data-f="claim_ids"]').value),
           equation_ids: splitIdList(slot.querySelector('[data-f="equation_ids"]').value),
         };
-        apiFetch("/admin/doubt/ledger/" + encodeURIComponent(targetType) + "/" +
-          encodeURIComponent(targetId) + "/evidence-lines",
+        apiFetch(ledgerPath(container, targetType, targetId, "/evidence-lines"),
           { method: "POST", body: JSON.stringify(body) })
           .then(function (res) {
             if (res.status === 422) {
@@ -476,10 +568,11 @@
     });
   }
 
-  function refreshLedgerSection(container, targetType, targetId) {
-    apiFetch("/admin/doubt/ledger/" + encodeURIComponent(targetType) + "/" + encodeURIComponent(targetId))
+  // note: 直前の記帳の結果の事実文（サーバの note — 記帳しました / すでにこの状態です / 重複）。
+  function refreshLedgerSection(container, targetType, targetId, note) {
+    apiFetch(ledgerPath(container, targetType, targetId))
       .then(function (res) { return res.status === 404 ? null : res.json(); })
-      .then(function (entry) { renderLedgerInto(container, targetType, targetId, entry); })
+      .then(function (entry) { renderLedgerInto(container, targetType, targetId, entry, note); })
       .catch(function () { /* keep current view */ });
   }
 
@@ -492,10 +585,10 @@
       // 軽量フォーム: 必須は「1 軸 + 根拠 + 理由」だけ（記帳 1 件 30 秒以内の導線）
       slot.innerHTML =
         '<div class="doubt-form">' +
-        '<label>成立条件（condition）</label><input data-f="condition" placeholder="例: 低エネルギー極限で">' +
-        '<label>領域（domain）</label><input data-f="domain" placeholder="例: 電磁相互作用で">' +
-        '<label>精度（precision）</label><input data-f="precision" placeholder="例: 一次摂動の精度で">' +
-        '<label>系（system）</label><input data-f="system" placeholder="例: 水素原子で">' +
+        '<label>成立条件</label><input data-f="condition" placeholder="例: 低エネルギー極限で">' +
+        '<label>領域</label><input data-f="domain" placeholder="例: 電磁相互作用で">' +
+        '<label>精度</label><input data-f="precision" placeholder="例: 一次摂動の精度で">' +
+        '<label>系</label><input data-f="system" placeholder="例: 水素原子で">' +
         '<label>根拠（原文の引用など）</label><textarea data-f="evidence_quote" rows="2"></textarea>' +
         '<label>理由</label><input data-f="reason" placeholder="なぜこのスコープと言えるか">' +
         '<button type="button" class="doubt-chip-btn" data-doubt-scope-submit="1" data-ui-anchor="doubt-atlas.record-scope">記帳する</button>' +
@@ -508,8 +601,7 @@
           body[f] = (slot.querySelector('[data-f="' + f + '"]').value || "").trim();
         });
         body.evidence_ids = [];
-        apiFetch("/admin/doubt/ledger/" + encodeURIComponent(targetType) + "/" +
-          encodeURIComponent(targetId) + "/scopes", { method: "POST", body: JSON.stringify(body) })
+        apiFetch(ledgerPath(container, targetType, targetId, "/scopes"), { method: "POST", body: JSON.stringify(body) })
           .then(function (res) {
             if (res.status === 422) {
               return res.json().then(function (data) {
@@ -521,7 +613,7 @@
             if (!res.ok) throw new Error("failed");
             return res.json();
           })
-          .then(function () { refreshLedgerSection(container, targetType, targetId); })
+          .then(function (data) { refreshLedgerSection(container, targetType, targetId, data && data.note); })
           .catch(function () { /* message already shown */ });
       });
     });
@@ -568,8 +660,7 @@
           msg.textContent = "直接検証の記帳には検証スコープの記帳が1件以上必要です。";
           return;
         }
-        apiFetch("/admin/doubt/ledger/" + encodeURIComponent(targetType) + "/" +
-          encodeURIComponent(targetId) + "/verification-status",
+        apiFetch(ledgerPath(container, targetType, targetId, "/verification-status"),
           { method: "PUT", body: JSON.stringify({ verification_status: status, reason: reason }) })
           .then(function (res) {
             if (res.status === 422) {
@@ -581,27 +672,29 @@
             if (!res.ok) throw new Error("failed");
             return res.json();
           })
-          .then(function () { refreshLedgerSection(container, targetType, targetId); })
+          .then(function (data) { refreshLedgerSection(container, targetType, targetId, data && data.note); })
           .catch(function () { /* message already shown */ });
       });
     });
   }
 
   function bindCandidateButtons(container, targetType, targetId) {
-    var base = "/admin/doubt/ledger/" + encodeURIComponent(targetType) + "/" +
-      encodeURIComponent(targetId) + "/scope-candidates/";
+    function candidatePath(candidateId, action) {
+      return ledgerPath(container, targetType, targetId,
+        "/scope-candidates/" + encodeURIComponent(candidateId) + action);
+    }
     var confirms = container.querySelectorAll("[data-doubt-candidate-confirm]");
     var dismisses = container.querySelectorAll("[data-doubt-candidate-dismiss]");
     Array.prototype.forEach.call(confirms, function (btn) {
       btn.addEventListener("click", function () {
-        apiFetch(base + encodeURIComponent(btn.getAttribute("data-doubt-candidate-confirm")) + "/confirm",
+        apiFetch(candidatePath(btn.getAttribute("data-doubt-candidate-confirm"), "/confirm"),
           { method: "POST", body: JSON.stringify({}) })
           .then(function () { refreshLedgerSection(container, targetType, targetId); });
       });
     });
     Array.prototype.forEach.call(dismisses, function (btn) {
       btn.addEventListener("click", function () {
-        apiFetch(base + encodeURIComponent(btn.getAttribute("data-doubt-candidate-dismiss")) + "/dismiss",
+        apiFetch(candidatePath(btn.getAttribute("data-doubt-candidate-dismiss"), "/dismiss"),
           { method: "POST", body: JSON.stringify({}) })
           .then(function () { refreshLedgerSection(container, targetType, targetId); });
       });
@@ -626,8 +719,8 @@
       }).join("");
       slot.innerHTML =
         '<div class="doubt-form">' +
-        '<label>何が起これば覆るか（statement）</label><textarea data-f="statement" rows="2" placeholder="観測・測定の言明として書く"></textarea>' +
-        '<label>区分（kind）</label><select data-f="kind">' + kindOptions + '</select>' +
+        '<label>何が起これば覆るか</label><textarea data-f="statement" rows="2" placeholder="観測・測定の言明として書く"></textarea>' +
+        '<label>区分</label><select data-f="kind">' + kindOptions + '</select>' +
         '<p class="doubt-muted" data-doubt-falsification-kind-note style="display:none">' +
         'この区分は反証条件を定式化できないという記帳です。根拠の引用は必須ではありません。</p>' +
         '<label>根拠（原文の引用）</label><textarea data-f="evidence_quote" rows="2"></textarea>' +
@@ -653,8 +746,7 @@
           reachability: slot.querySelector('[data-f="reachability"]').value,
           evidence_quote: evidenceQuote,
         };
-        apiFetch("/admin/doubt/ledger/" + encodeURIComponent(targetType) + "/" +
-          encodeURIComponent(targetId) + "/falsification-conditions",
+        apiFetch(ledgerPath(container, targetType, targetId, "/falsification-conditions"),
           { method: "POST", body: JSON.stringify(body) })
           .then(function (res) {
             if (res.status === 422) {
@@ -674,8 +766,10 @@
 
   // ボタン連打防止: 送信直後に disabled = true にする（confirm/dismiss の二重送信を防ぐ）。
   function bindFalsificationCandidateButtons(container, targetType, targetId) {
-    var base = "/admin/doubt/ledger/" + encodeURIComponent(targetType) + "/" +
-      encodeURIComponent(targetId) + "/falsification-candidates/";
+    function falsificationCandidatePath(candidateId, action) {
+      return ledgerPath(container, targetType, targetId,
+        "/falsification-candidates/" + encodeURIComponent(candidateId) + action);
+    }
     Array.prototype.forEach.call(
       container.querySelectorAll("[data-doubt-falsification-confirm]"),
       function (btn) {
@@ -685,7 +779,7 @@
           var cid = btn.getAttribute("data-doubt-falsification-confirm");
           var reachSel = container.querySelector('[data-doubt-falsification-reachability="' + cid + '"]');
           var body = { reachability: reachSel ? reachSel.value : "unassessed" };
-          apiFetch(base + encodeURIComponent(cid) + "/confirm", { method: "POST", body: JSON.stringify(body) })
+          apiFetch(falsificationCandidatePath(cid, "/confirm"), { method: "POST", body: JSON.stringify(body) })
             .then(function () { refreshLedgerSection(container, targetType, targetId); })
             .catch(function () { btn.disabled = false; });
         });
@@ -698,7 +792,7 @@
           if (btn.disabled) return;
           btn.disabled = true;
           var cid = btn.getAttribute("data-doubt-falsification-dismiss");
-          apiFetch(base + encodeURIComponent(cid) + "/dismiss", { method: "POST", body: JSON.stringify({}) })
+          apiFetch(falsificationCandidatePath(cid, "/dismiss"), { method: "POST", body: JSON.stringify({}) })
             .then(function () { refreshLedgerSection(container, targetType, targetId); })
             .catch(function () { btn.disabled = false; });
         });
@@ -724,9 +818,10 @@
         .then(function (res) { return res.json ? res.json().catch(function () { return {}; }) : {}; })
         .then(function (data) {
           if (msg) {
-            msg.textContent = (data && data.scheduled)
+            // IK-0853: 理由（範囲が空など）はサーバの事実文をそのまま出す
+            msg.textContent = (data && data.note) ? data.note : ((data && data.scheduled)
               ? "候補生成を予約しました（しばらくしてから再読込してください）。"
-              : "実行しました。";
+              : "実行しました。");
           }
         })
         .catch(function () { if (msg) msg.textContent = "実行に失敗しました。"; })
@@ -972,7 +1067,9 @@
   // ノードとして選べるとは限らないため、専用の一覧から選ぶ）。
   function renderObservationToggleForm(slot, container) {
     slot.innerHTML = '<p class="doubt-muted">読み込み中...</p>';
-    apiFetch("/admin/doubt/courses/" + encodeURIComponent(cfState.courseId) + "/observation-targets")
+    // IK-0903: 開いているグラフの論文の観測だけを選択肢にする（コース全体から取らない）。
+    apiFetch("/admin/doubt/courses/" + encodeURIComponent(cfState.courseId) + "/observation-targets" +
+      (cfState.documentId ? "?document_id=" + encodeURIComponent(cfState.documentId) : ""))
       .then(function (res) { return res.json(); })
       .then(function (data) {
         var targets = (data && data.targets) || [];
@@ -1040,7 +1137,10 @@
       status.textContent = "（トグル中の前提・観測はありません）";
       actions.innerHTML = "";
     } else {
-      status.textContent = "仮に偽（前提）: " + cfState.toggledIds.length + " 件";
+      // IK-0854: 件数ではなく名前で列挙する（ノードの表示名 → 試算結果の名前）
+      status.textContent = cfToggledNames().length
+        ? "仮に偽にしている前提: " + cfToggledNames().join("、")
+        : "";
       actions.innerHTML =
         '<button type="button" class="doubt-cf-btn" id="doubt-cf-clear">すべて解除</button>' +
         '<button type="button" class="doubt-cf-btn" id="doubt-cf-save">セッションを保存</button>';
@@ -1065,7 +1165,12 @@
             shared_scope: "private",
           }),
         }).then(function (res) {
-          status.textContent = res.ok ? "保存しました（共有範囲: private）" : "保存に失敗しました";
+          if (!res.ok) { status.textContent = "保存に失敗しました"; return; }
+          return res.json().catch(function () { return {}; }).then(function (data) {
+            // IK-0854: 共有範囲は内部値ではなくサーバの日本語（Visibility 語彙）
+            var scope = (data && data.shared_scope_label) || "";
+            status.textContent = scope ? "保存しました（共有範囲: " + scope + "）" : "保存しました";
+          });
         });
       });
     }
@@ -1088,6 +1193,38 @@
         });
       }
     }
+  }
+
+  // IK-0854: トグル中の前提の名前（グラフのノード表示名 → 直近の試算結果の名前の順）。
+  function cfToggledNames() {
+    var names = [];
+    var fromResult = (cfState.lastResult && cfState.lastResult.toggled_labels) || [];
+    cfState.toggledIds.forEach(function (id, i) {
+      var label = "";
+      var node = cfState.visNodes && cfState.visNodes.get ? cfState.visNodes.get(id) : null;
+      if (node && node.label) label = String(node.label).split("\n")[0];
+      if (!label && fromResult[i]) label = fromResult[i];
+      if (label && names.indexOf(label) < 0) names.push(label);
+    });
+    return names;
+  }
+
+  // IK-0854: 試算できなかった対象（warnings）を状態行の下に事実文で出す。
+  // 「依存する範囲が無い」と「試算できなかった」を同じ見た目にしない。
+  function renderCfWarnings(result) {
+    var bar = document.getElementById("doubt-cf-bar");
+    if (!bar) return;
+    var box = document.getElementById("doubt-cf-warnings");
+    if (!box) {
+      box = document.createElement("div");
+      box.id = "doubt-cf-warnings";
+      box.className = "doubt-cf-note";
+      bar.appendChild(box);
+    }
+    var warnings = (result && result.warnings) || [];
+    box.innerHTML = warnings.map(function (w) {
+      return '<p class="doubt-fact">' + escHtml(w) + '</p>';
+    }).join("");
   }
 
   function toggleCounterfactualNode(nodeId, visNodes) {
@@ -1129,8 +1266,13 @@
 
   function applyCounterfactualStyles(result) {
     var visNodes = cfState.visNodes;
+    if (result) {
+      cfState.lastResult = result;
+      renderCfWarnings(result);
+      var bar = document.getElementById("doubt-cf-bar");
+      if (bar) updateCfStatus(bar.parentNode || document);
+    }
     if (!visNodes || !result) return;
-    cfState.lastResult = result;
     restoreStyles();
     var updates = [];
     function dim(ids, opacity, dashed) {
@@ -1178,6 +1320,8 @@
     cfState.toggledIds = [];
     cfState.toggledObservations = [];
     cfState.lastResult = null;
+    var warnBox = document.getElementById("doubt-cf-warnings");
+    if (warnBox) warnBox.innerHTML = "";
   }
 
   /* =================================================================
@@ -1202,6 +1346,8 @@
         '<button type="button" class="doubt-cf-btn" id="doubt-audit-btn" data-ui-anchor="doubt-atlas.audit-run">コーパス監査実行</button>' +
         '<button type="button" class="doubt-cf-btn" id="doubt-load-btn" data-ui-anchor="doubt-atlas.load-recompute">負荷再計算</button>' +
         '</div>' +
+        // IK-0853: バッチの結果・実行しなかった理由をサーバの事実文で出す行（件数は出さない）
+        '<p class="doubt-muted" id="doubt-batch-status" role="status"></p>' +
         '<div class="doubt-atlas-wrap">' +
         '<div class="doubt-atlas-plot"><div id="doubt-atlas-svg"></div></div>' +
         '<div class="doubt-atlas-detail" id="doubt-atlas-detail">' +
@@ -1235,20 +1381,33 @@
       reloadAll();
     });
     document.getElementById("doubt-refresh-btn").addEventListener("click", reloadAll);
-    document.getElementById("doubt-mining-btn").addEventListener("click", function () {
+    // IK-0853: バッチの応答（実行しなかった理由・受付・結果）を読んで状態行に事実文で出す。
+    // 文言はサーバの note（core/doubt/scope.py）をそのまま描く — JS に日本語表を持たない。
+    function runBatch(path) {
       if (!tabState.courseId) return;
-      apiFetch("/admin/doubt/courses/" + encodeURIComponent(tabState.courseId) + "/assumption-mining/run",
-        { method: "POST", body: JSON.stringify({}) }).then(reloadAll);
+      var statusEl = document.getElementById("doubt-batch-status");
+      if (statusEl) statusEl.textContent = "";
+      apiFetch("/admin/doubt/courses/" + encodeURIComponent(tabState.courseId) + path,
+        { method: "POST", body: JSON.stringify({}) })
+        .then(function (res) {
+          return res.json().catch(function () { return {}; }).then(function (data) {
+            if (statusEl) {
+              statusEl.textContent = (data && data.note) ? data.note
+                : (res.ok ? "" : "実行できませんでした。");
+            }
+          });
+        })
+        .catch(function () { if (statusEl) statusEl.textContent = "実行できませんでした。"; })
+        .then(reloadAll);
+    }
+    document.getElementById("doubt-mining-btn").addEventListener("click", function () {
+      runBatch("/assumption-mining/run");
     });
     document.getElementById("doubt-audit-btn").addEventListener("click", function () {
-      if (!tabState.courseId) return;
-      apiFetch("/admin/doubt/courses/" + encodeURIComponent(tabState.courseId) + "/corpus-audit/run",
-        { method: "POST", body: JSON.stringify({}) }).then(reloadAll);
+      runBatch("/corpus-audit/run");
     });
     document.getElementById("doubt-load-btn").addEventListener("click", function () {
-      if (!tabState.courseId) return;
-      apiFetch("/admin/doubt/courses/" + encodeURIComponent(tabState.courseId) + "/load/recompute",
-        { method: "POST", body: JSON.stringify({}) }).then(reloadAll);
+      runBatch("/load/recompute");
     });
     document.getElementById("doubt-assumption-filter").addEventListener("change", loadAssumptions);
     // 到達可能フィルタは教員の明示操作（既定 off）。再取得はせず、直近取得済みの一覧を
@@ -1338,6 +1497,15 @@
       }
     });
     svg += '</svg>';
+    // IK-0853: 点が無いときは理由（範囲が空 / 載る対象が無い）と別の入口をサーバの事実文で添える
+    if (!points.length && data && data.empty_note) {
+      svg += '<p class="doubt-muted" data-doubt-atlas-empty>' + escHtml(data.empty_note) + '</p>';
+      if (data.empty_hint) svg += '<p class="doubt-muted">' + escHtml(data.empty_hint) + '</p>';
+    }
+    // IK-0933: 導出の手順を母集合から外したことの事実文（サーバの population_note をそのまま）。
+    if (data && data.population_note) {
+      svg += '<p class="doubt-muted" data-doubt-population-note="1">' + escHtml(data.population_note) + '</p>';
+    }
     host.innerHTML = svg;
     Array.prototype.forEach.call(host.querySelectorAll("[data-doubt-point]"), function (el) {
       el.addEventListener("click", function () {
@@ -1346,7 +1514,7 @@
         var detail = document.getElementById("doubt-atlas-detail");
         detail.innerHTML = '<h5 style="font-size:13px;margin:0 0 6px">' + escHtml(p.label || p.target_id) + '</h5>';
         // 地図専用の別詳細は作らない — 既存の台帳セクション描画を再利用
-        renderNodeLedgerSection(detail, p.target_type, p.target_id);
+        renderNodeLedgerSection(detail, p.target_type, p.target_id, p.document_id || "");
       });
     });
   }
@@ -1439,12 +1607,16 @@
   // 取得結果はキャッシュし、到達可能フィルタの切替は再取得せずクライアント側で絞り込む
   // （教員の明示操作のみで結果が動く。ポーリング・自動再取得はしない）。
   var lastOpenAssumptionItems = [];
+  var lastOpenAssumptionEmptyNote = "";
+  var lastOpenAssumptionPopulationNote = "";
 
   function loadOpenAssumptions() {
     apiFetch("/admin/doubt/courses/" + encodeURIComponent(tabState.courseId) + "/open-assumptions")
       .then(function (res) { return res.json(); })
       .then(function (data) {
         lastOpenAssumptionItems = (data && data.items) || [];
+        lastOpenAssumptionEmptyNote = (data && data.empty_note) || "";
+        lastOpenAssumptionPopulationNote = (data && data.population_note) || "";
         renderOpenAssumptionsList();
       })
       .catch(function () { /* keep */ });
@@ -1460,10 +1632,18 @@
       items = items.filter(function (it) { return it.reachability_summary === "reachable"; });
     }
     if (!items.length) {
-      host.innerHTML = '<p class="doubt-muted">高負荷 × 低検証の対象は現在ありません。</p>';
+      // IK-0853: 範囲が空か・該当なしかはサーバの事実文で言い分ける（フィルタ中は従来の文）
+      var emptyText = (!onlyReachable && lastOpenAssumptionEmptyNote)
+        ? lastOpenAssumptionEmptyNote : "高負荷 × 低検証の対象は現在ありません。";
+      host.innerHTML = '<p class="doubt-muted">' + escHtml(emptyText) + '</p>' +
+        (lastOpenAssumptionPopulationNote
+          ? '<p class="doubt-muted" data-doubt-population-note="1">' + escHtml(lastOpenAssumptionPopulationNote) + '</p>'
+          : '');
       return;
     }
-    var html = "";
+    var html = lastOpenAssumptionPopulationNote
+      ? '<p class="doubt-muted" data-doubt-population-note="1">' + escHtml(lastOpenAssumptionPopulationNote) + '</p>'
+      : "";
     items.forEach(function (item, idx) {
       html += '<div class="doubt-list-row" data-doubt-open="' + idx + '" data-ui-anchor="doubt-atlas.open-assumptions-row">' +
         '<div>' + escHtml(item.statement) + '</div>' +
@@ -1493,7 +1673,7 @@
         if (!item) return;
         var detail = document.getElementById("doubt-atlas-detail");
         detail.innerHTML = '<h5 style="font-size:13px;margin:0 0 6px">' + escHtml(item.statement) + '</h5>';
-        renderNodeLedgerSection(detail, item.target_type, item.target_id);
+        renderNodeLedgerSection(detail, item.target_type, item.target_id, item.document_id || "");
       });
     });
   }
@@ -1515,7 +1695,7 @@
           var collapsed = (s.collapsed_subgraph && s.collapsed_subgraph.node_ids) || [];
           var indeterminate = (s.indeterminate_subgraph && s.indeterminate_subgraph.node_ids) || [];
           html += '<div class="doubt-card">' +
-            '<div><span class="doubt-badge">' + escHtml(s.shared_scope) + '</span>' +
+            '<div><span class="doubt-badge">' + escHtml(s.shared_scope_label || s.shared_scope) + '</span>' +
             '<span class="doubt-badge">作成: ' + escHtml(s.owner_name || "") + '</span></div>' +
             (s.notes ? '<p class="doubt-fact">' + escHtml(s.notes) + '</p>' : '') +
             '<p class="doubt-muted">この前提に依存する範囲: ' + collapsed.length + ' ノード / 両者に依存（判定不能）: ' +

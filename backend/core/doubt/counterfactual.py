@@ -38,6 +38,36 @@ from core.doubt.schema import CounterfactualResult
 
 logger = logging.getLogger(__name__)
 
+#: 試算できなかった対象の事実文の頭（IK-0854。画面はこの文をそのまま描く）。
+UNRESOLVED_WARNING_PREFIX = "グラフ上で見つからなかったため、依存する範囲を試算できなかった対象: "
+
+#: 倒した観測が開いているグラフの論文の観測ではないとき（IK-0903。伝播には渡さない）。
+OBSERVATION_OUTSIDE_SCOPE_WARNING_PREFIX = (
+    "この観測はこのグラフの主張から参照されていないため、依存範囲は変わりません: "
+)
+
+#: 名前を引けない対象の置き換え語（内部 ID を画面に出さない — PL7）。正本は target_labels（IK-0901）。
+from core.doubt.target_labels import UNNAMED_TARGET_LABEL  # noqa: E402
+
+
+def _toggle_label(session, graph: DependencyGraph, target_id: str) -> str:
+    """トグル対象の表示名（前提の文面 → 主張・部品の本文 → グラフのノード名）。"""
+    tid = str(target_id or "").strip()
+    if not tid:
+        return UNNAMED_TARGET_LABEL
+    if tid in graph.node_labels and graph.node_labels[tid] != tid:
+        return graph.node_labels[tid]
+    from core.doubt.open_assumptions import target_label
+
+    for target_type in ("assumption", "claim", "component"):
+        try:
+            label = target_label(session, target_type, tid, document_id=None)
+        except Exception:  # noqa: BLE001
+            label = tid
+        if label and label != tid:
+            return label
+    return UNNAMED_TARGET_LABEL
+
 
 def _seeds_for_assumptions(
     session, graph: DependencyGraph, assumption_ids: list[str]
@@ -109,25 +139,31 @@ def compute_propagation(graph: DependencyGraph, seeds: set[str]) -> Counterfactu
 def compute_counterfactual(
     session,
     toggled_assumption_ids: list[str],
-    course_id: str = "",
-    document_id: str = "",
+    *,
+    document_ids,
 ) -> dict:
     """反実仮想の試算（保存なし）。
+
+    範囲は ``document_ids``（必須・IK-0852）。route が document_id 指定ならその 1 件、
+    コース指定ならコースの教材から求めた集合を渡す（course_id 列では絞らない）。
 
     Returns:
         {"toggled_assumption_ids", "collapsed_node_ids", "surviving_node_ids",
          "indeterminate_node_ids", "node_labels", "warnings"}
     """
-    graph = build_dependency_graph(session, course_id=course_id, document_id=document_id)
+    graph = build_dependency_graph(session, document_ids=document_ids)
     seeds, unresolved = _seeds_for_assumptions(session, graph, toggled_assumption_ids)
     result = compute_propagation(graph, seeds)
     result.toggled_assumption_ids = [str(a) for a in toggled_assumption_ids]
 
+    # IK-0854: トグルした対象は内部 ID ではなく名前で返す（画面が件数でなく名前を列挙する）。
+    toggled_labels = [
+        _toggle_label(session, graph, str(a)) for a in toggled_assumption_ids if str(a or "").strip()
+    ]
+    unresolved_labels = [_toggle_label(session, graph, aid) for aid in unresolved]
     warnings = []
     if unresolved:
-        warnings.append(
-            "グラフ上に対応するノードが見つからなかった前提: " + ", ".join(unresolved)
-        )
+        warnings.append(UNRESOLVED_WARNING_PREFIX + "、".join(unresolved_labels))
 
     payload = result.model_dump()
     payload["node_labels"] = {
@@ -135,6 +171,10 @@ def compute_counterfactual(
         for nid in (result.collapsed_node_ids + result.indeterminate_node_ids)
     }
     payload["warnings"] = warnings
+    payload["toggled_labels"] = toggled_labels
+    payload["unresolved_labels"] = unresolved_labels
+    # 範囲に解析済みのグラフが無い（コースの教材が未解析・範囲が空）ことを試算失敗と区別する。
+    payload["graph_available"] = bool(graph.node_ids)
     return payload
 
 

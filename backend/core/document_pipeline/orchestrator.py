@@ -3139,7 +3139,7 @@ def _stage_completed(ctx: PipelineContext) -> None:
     try:
         from core.doubt.load_calculator import recompute_load_scores
 
-        recompute_load_scores(document_id=ctx.document_id)
+        recompute_load_scores(document_ids=[ctx.document_id])
     except Exception:
         logger.warning(
             "load score recompute skipped for document=%s", ctx.document_id, exc_info=True

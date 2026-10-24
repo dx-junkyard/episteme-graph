@@ -35,6 +35,7 @@ from core import display_projection as _dp
 from core import document_refs as _document_refs
 from core.doubt.naive_signal import aggregate_naive_signals_for_courses
 from core.doubt.open_assumptions import compile_open_assumptions, target_label
+from core.doubt.scope import SECTION_EMPTY_NOTE
 from core.doubt.schema import LOAD_LEVEL_LABELS
 from core.doubt.support_paths import build_support_context, compute_support_lines_from_context
 from core.reconstruction.stumble import get_stumble_summary
@@ -174,7 +175,7 @@ class _ReadableLabels:
         try:
             from core.doubt.dependency import build_dependency_graph
 
-            graph = build_dependency_graph(session, course_id=course_id, document_id=document_id)
+            graph = build_dependency_graph(session, document_ids=[document_id])
         except Exception:  # noqa: BLE001
             logger.debug("seminar brief node labels unavailable for %s", document_id, exc_info=True)
         if graph is not None:
@@ -218,6 +219,15 @@ class _ReadableLabels:
                 if claim:
                     break
         masked_head = mask_internal_ids_readable(head, self.equation_records)
+        # IK-0901 / IK-0934: 主グラフのノードの label は段の英語名（#308 の規約 —
+        # 「Theory basis」）。画面には段の日本語名（element_vocab の正本）+ 根拠の主張で出す。
+        from core.element_vocab import theory_stage_key, theory_stage_label
+
+        stage_ja = theory_stage_label(theory_stage_key(head)) if head else ""
+        if stage_ja:
+            rest = masked_head.split(":", 1)[1].strip() if ":" in masked_head else ""
+            detail = claim or rest
+            return f"{stage_ja}: {detail}" if detail else stage_ja
         generic_head = (
             not masked_head
             or UNIDENTIFIED_ELEMENT_TEXT in masked_head
@@ -423,7 +433,7 @@ def _learner_handoff(session, document_id: str, labels: "_ReadableLabels") -> di
         if not count_range or anchor_id not in members.get(anchor_type, set()):
             continue
         if anchor_type in ("claim", "component"):
-            name = labels.text(target_label(session, anchor_type, anchor_id))
+            name = labels.text(target_label(session, anchor_type, anchor_id, document_id=document_id))
         else:
             name = labels.text(anchor_id)
         if not name or name == anchor_id or _dp.UNIDENTIFIED_ELEMENT_TEXT in name:
@@ -499,13 +509,15 @@ def _attach_stumble_axes(document_id: str, fragile_items: list[dict]) -> None:
 
 
 def _single_support_lines(
-    session, course_id: str, document_id: str, labels: "_ReadableLabels | None" = None
+    session, document_id: str, labels: "_ReadableLabels | None" = None, *, exclusion=None,
 ) -> list[dict]:
-    """区画②: document の台帳対象のうち独立支持経路が1本（level=single）のものの事実文。
+    """区画②: document の台帳対象のうち独立支持経路が1本（level=single）のものの事実文（対象単位）。
 
     共有文脈（``build_support_context``）は**1回だけ**構築し、対象ごとに
     ``compute_support_lines_from_context`` を回す（``compute_support_lines`` を
     対象数分呼んでグラフを N 回再構築する既知のアンチパターンを避ける）。
+    返り値は対象単位で、切断点（``cut_key``）で束ねるのは :func:`_group_single_support_by_cut`
+    （IK-0858。束ねる前に読める名前へ直すため 2 段に分ける）。
     """
     try:
         rows = session.execute(
@@ -522,7 +534,7 @@ def _single_support_lines(
     if not rows:
         return []
 
-    ctx = build_support_context(session, course_id=course_id, document_id=document_id)
+    ctx = build_support_context(session, document_ids=[document_id])
     if ctx is None:
         return []
     if labels is not None and labels.node_labels:
@@ -535,6 +547,8 @@ def _single_support_lines(
 
     out: list[dict] = []
     for target_id, target_type in sorted((str(r[0]), str(r[1])) for r in rows):
+        if exclusion is not None and exclusion.excludes(target_type, target_id, document_id):
+            continue
         try:
             lines = compute_support_lines_from_context(ctx, target_type, target_id)
         except Exception:  # noqa: BLE001
@@ -545,15 +559,62 @@ def _single_support_lines(
             continue
         if not lines or str(lines.get("level") or "") != "single":
             continue
+        cut_members = [m for m in (lines.get("cut_members") or []) if isinstance(m, dict)]
         out.append({
             "target_id": target_id,
             "target_type": target_type,
-            "statement": target_label(session, target_type, target_id),
+            "statement": target_label(session, target_type, target_id, document_id=document_id),
             # level=single の事実文をそのまま使う（数値は元から含まれない, SL4）
             "fact_line": str(lines.get("fact_line") or ""),
+            # 束ねるための読み時の補助（表示しない・返す前に外す）
+            "cut_key": tuple(sorted(str(m.get("node_id") or "") for m in cut_members)),
+            "cut_labels": "、".join(str(m.get("label") or "") for m in cut_members if m.get("label")),
         })
-        if len(out) >= _MAX_SINGLE_SUPPORT_LINES:
-            break
+    return out
+
+
+#: 一点吊りを切断点で束ねた行の事実文（IK-0858。件数は書かない）。
+SINGLE_SUPPORT_GROUP_FACT = "『{cut}』が同時に崩れると、次の対象への観測からの支持が途切れます。"
+#: 束ねた行で名前を挙げる対象の上限（超えた分は「ほか」とだけ書く — 件数を出さない）。
+_SINGLE_SUPPORT_GROUP_NAMES = 3
+
+
+def _group_single_support_by_cut(items: list[dict]) -> list[dict]:
+    """同じ切断点の対象を 1 行に束ねる（IK-0858。行の単位を「対象」から「一点」に変える）。
+
+    切断点が 1 対象にしか無い行は従来の文面のまま。2 対象以上なら、事実文は切断点を主語に
+    1 回だけ言い、対象は名前の列挙（最大 :data:`_SINGLE_SUPPORT_GROUP_NAMES`・超過は「ほか」）
+    にする。並びは最初に現れた順（入力の決定論順）。読み時の補助キーはここで外す。
+    """
+    groups: dict[tuple, list[dict]] = {}
+    order: list[tuple] = []
+    for item in items:
+        key = tuple(item.get("cut_key") or ()) or ("__self__", item.get("target_id"))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(item)
+
+    out: list[dict] = []
+    for key in order:
+        members = groups[key]
+        head = dict(members[0])
+        cut_labels = str(head.pop("cut_labels", "") or "")
+        head.pop("cut_key", None)
+        if len(members) >= 2 and cut_labels:
+            names: list[str] = []
+            for member in members:
+                name = str(member.get("statement") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+            shown = names[:_SINGLE_SUPPORT_GROUP_NAMES]
+            statement = "、".join(f"「{n}」" for n in shown)
+            if len(names) > len(shown):
+                statement += " ほか"
+            head["statement"] = statement
+            head["fact_line"] = SINGLE_SUPPORT_GROUP_FACT.format(cut=cut_labels)
+            head["grouped"] = True
+        out.append(head)
     return out
 
 
@@ -615,23 +676,25 @@ def build_seminar_brief(session, document_ref: str) -> dict:
             "available": False,
             "reason": "指定された文献が見つかりませんでした。",
         }
-    course_id = _derive_course_id(session, document_id)
-    if not course_id:
-        # パイプライン由来の解析グラフはコースに依らない（course_id が空）。台帳もその
-        # document の行を course_id='' で持つので、コース対応が無いことを「解析未完了」と
-        # 言わず、台帳の有無で判定する（第 14 周 brain-te03 / te-05 seq20 の食い違い）。
-        has_ledger, ledger_course = _ledger_course_for_document(session, document_id)
-        if not has_ledger:
-            return {
-                "available": False,
-                "document_id": document_id,
-                "reason": REASON_NO_LEDGER,
-            }
-        course_id = ledger_course
+    # 範囲は「この論文」1 件（IK-0852: 成果の行の course_id 列で範囲を決めない）。可否は台帳の
+    # 行の有無で判定し、course_id は出所として返すだけ（解析グラフ → 台帳の順に引く）。
+    has_ledger, ledger_course = _ledger_course_for_document(session, document_id)
+    if not has_ledger:
+        return {
+            "available": False,
+            "document_id": document_id,
+            "reason": REASON_NO_LEDGER,
+        }
+    course_id = _derive_course_id(session, document_id) or ledger_course
 
     # 区画①の投影元（教員向けブリーフだが疑義者名は載せない — include_challenger_names=False 固定）
+    # IK-0933: claim チェーンの導出ステップ（前提ではない）は区画①③の母集合から外す。
+    from core.doubt.population import CLAIM_CHAIN_EXCLUDED_NOTE, ClaimChainExclusion
+
+    exclusion = ClaimChainExclusion(session)
     assumption_items = compile_open_assumptions(
-        session, course_id, include_challenger_names=False, document_id=document_id,
+        session, course_id, document_ids=[document_id], include_challenger_names=False,
+        exclusion=exclusion,
     )
     labels = _ReadableLabels(session, document_id, course_id)
     # 読める文面にしてから同じ文面の項目を畳み・見分け（IK-0593）、そのあとで上限を掛ける
@@ -641,11 +704,14 @@ def build_seminar_brief(session, document_ref: str) -> dict:
     fragile = _disambiguate_same_text(fragile, labels)[:_MAX_FRAGILE_ASSUMPTIONS]
     _attach_stumble_axes(document_id, fragile)
 
-    single_lines = _single_support_lines(session, course_id, document_id, labels)
+    single_lines = _single_support_lines(session, document_id, labels, exclusion=exclusion)
     skies = _clear_skies(assumption_items, limit=None)
-    _readable_items(single_lines, labels, ("statement", "fact_line"))
+    _readable_items(single_lines, labels, ("statement", "fact_line", "cut_labels"))
     _readable_items(skies, labels, ("statement",))
+    # 同じ切断点の対象を 1 行に束ね（IK-0858）、そのあと同じ文面を畳む（IK-0593）。
+    single_lines = _group_single_support_by_cut(single_lines)
     single_lines = _disambiguate_same_text(single_lines, labels, extra_key="fact_line")
+    single_lines = single_lines[:_MAX_SINGLE_SUPPORT_LINES]
     skies = _disambiguate_same_text(skies, labels)[:_MAX_CLEAR_SKIES]
     handoff = _learner_handoff(session, document_id, labels)
 
@@ -663,4 +729,15 @@ def build_seminar_brief(session, document_ref: str) -> dict:
         #    「まだありません」の事実文（SB3 / IK-0593）
         "learner_handoff": handoff,
     }
+    # IK-0853: 空の区画は見出しを残し、閉世界の一文を添える（区画ごと消えると「無い」と
+    # 「出していない」が区別できない）。文言はサーバ正本（core/doubt/scope.py）。
+    empty_notes = {
+        key: SECTION_EMPTY_NOTE
+        for key in ("fragile_assumptions", "single_support_lines", "clear_skies")
+        if not brief[key]
+    }
+    if empty_notes:
+        brief["empty_notes"] = empty_notes
+    if exclusion.excluded:
+        brief["population_note"] = CLAIM_CHAIN_EXCLUDED_NOTE
     return _strip_numeric_keys(brief)

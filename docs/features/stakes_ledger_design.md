@@ -1,7 +1,7 @@
 # 賭け金の台帳（Stakes Ledger, SL層）設計書 — 理解サイクル Phase 3
 
 **作成日:** 2026-08-13
-**状態:** 設計書 + **SL-1〜SL-5 実装済み（2026-08-13, §15 実装記録参照）**。本書が SL層の**正本**。
+**状態:** 設計書 + **SL-1〜SL-5 実装済み（2026-08-13, §15 実装記録参照）**。2026-10-23 追補 §16（台帳の行キーに論文を含める・IK-0899）実装済み。本書が SL層の**正本**。
 **位置づけ:** `understanding_cycle_design.md` §7 が要求する Phase 3 の専用設計書。
 D層（`doubt_layer_issues.md`）の上に積む第4の拡張であり、**D層の既存5テーブル・既存公理の
 意味論は変えない**。出典は `vision_expansion_proposals_2026-08.md` 提案3（哲学者の反証条件
@@ -506,6 +506,106 @@ migration **067** 適用（設計 §3.1 のまま）。
      reachability 後付けで運用可能）。
 - **残作業**: docker 実機 E2E（反証条件の記帳→伝播→支持線の実データ確認）。
   §13 非スコープ・§14 未決事項は不変。
+
+## §16 追補（2026-10-23）: 台帳の行キーに論文を含める（IK-0899）
+
+**状態:** 実装済み（第 25 周 面 B 第 2 周の是正波・migration **092**）。判断は審判の推奨どおり
+（`uxsim/runs/round25/judge_doubt_r2.md` §5 — 3 種のうち「後戻りしにくい構造」）。
+
+### 16.1 何が起きていたか
+
+migration 029 以来、`epistemic_ledger` の行キーは `UNIQUE(target_id, target_type)` で、対象の ID が
+全体で一意である前提に立っていた。理論操作グラフのノード ID（`theory_op_0001` …）と式の agent ID
+（TeX ラベル由来）は**論文の中でしか一意でない**ため、論文をまたいで 1 行を共有し、ある論文で記帳した
+スコープ・検証状態が別の論文の同じ番号のノードにも出ていた（学生の地図の札・支持線・依存の件数も同じ行）。
+
+### 16.2 決めたこと
+
+1. **行キーは `(document_id, target_type, target_id)`**（`UNIQUE NULLS NOT DISTINCT`。前提の行は複数の論文に
+   またがるため document が NULL のことがある）。claim / assumption と UUID 形の id は全体で一意なので、
+   document_id は権限ゲートと出所にだけ使い、行の突き合わせは従来どおり対象の id だけ（意味は不変）。
+2. **既存の衝突行は自動で振り分けない**。記帳時にどの論文を開いていたかは行にも監査にも残っていない。
+   migration 092 は旧キーが残っている DB で 1 回だけ、論文の中でしか一意でない id の行のうち人の記帳
+   （スコープ・覆る条件・根拠の線・人間専用の検証状態）が入ったものに `attribution_check_needed = TRUE` を
+   立て、台帳 GET が `attribution_note`（`ledger_targets.LEDGER_ATTRIBUTION_CHECK_NOTE`）で教員に
+   「どの論文の記帳か確かめてください」と事実で示す。記帳の入っていない衝突行は再解析の ledger_builder が
+   新キーで論文ごとに作り直す。行は消さない・複製しない。
+3. **行キーの正本は `core/doubt/ledger_targets.ledger_row_filter`**（ここ以外で WHERE 句を組まない）。読み手は
+   `document_id` を**必須のキーワード引数**で受け（`_fetch_ledger_row` / `learner_ledger_line` /
+   `resolve_component_ledger_target` / `open_assumptions.target_label` / `personal_graph.queries.
+   fetch_component_ledger_statuses`）、論文の中でしか一意でない対象で document が分からなければ閉じる
+   （API は 422 の事実文、学習者の一行は出さない）。worker（スコープ候補・覆る条件候補）は claim した行の
+   document を `LedgerTargetRef.document_id` で運ぶ。
+4. **監査の metadata に `document_id`** を残す（対象単位の書き込みの全経路）。今後の振り分けの手掛かり。
+5. 代案（target_id に論文の名前空間を前置）は、既存の参照（反実仮想のトグル・ID の再係留表・疑義の対象）の
+   書き換えが要り、付け忘れが再発の入口になるので採らなかった。
+
+### 16.3 同じ波で入れたこと（document を必須にしたので乗った是正）
+
+- **IK-0900**: 対象単位の書き込みルートはすべて `_require_editable_ledger_target`（対象の教材の編集権限。
+  ノード・式は指定の論文にその対象が実在することも確かめる）。前提の確定・却下は `_require_editable_assumption`、
+  疑義と検証提案は**閲覧できる教員なら**残せる（帰属必須の公開の学術行為）。台帳 GET は閲覧ゲート + `can_edit`
+  （偽なら `can_edit_note` を出し、画面は記帳ボタンを無効にする）。AST ガードレールで固定。
+- **IK-0901**: 台帳対象の表示名の正本は `core/doubt/target_labels.py`（`LedgerTargetLabels` / `ledger_target_label`。
+  式は印字番号、ノードはゼミ前ブリーフと同じ段の日本語名 + 根拠の主張、読めなければ「名前を引けない対象」）。
+  学習者の未検証の前提一覧は同じ文面を畳み、名前を引けない行を後ろへ。
+- **IK-0902**: 支持の根は対象へ届いた経路の根だけ。支持線ゼロ（none）では出さない。
+- **IK-0903**: 観測の選択肢は `observation-targets?document_id=` で開いているグラフの論文に絞る。範囲外の観測は
+  伝播に渡さず warnings（`counterfactual.OBSERVATION_OUTSIDE_SCOPE_WARNING_PREFIX`）。
+- **IK-0904**: 式・部品の台帳は `challenge_allowed: false` + `challenge_note` + `supporting_claims`（ノードの主張参照の
+  うち live の主張）を返し、画面はそこから主張の台帳を開ける。前提の一覧は `mining_note` で前提マイニングの
+  候補が範囲にあるかを毎回事実で添える。
+- **IK-0905**: 入力検査の事実文は画面の語（`label_vocab.LEDGER_SCOPE_AXIS_LABELS`）、記帳者は `recorded_by_label`、
+  同じ内容のスコープは受けたうえで `duplicate` + `note`、検証状態の PUT は `changed` + `note`。
+- **IK-0907**: 学習画面の画面文脈 `view.personal_map_seen`（この学習で「わたしの地図」を開いたか）を受けて、
+  SA層 `view` の解決器が「地図は状態の札だけ・条件は出典タブの一行」の事実を渡す。
+
+### 16.4 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 論文の中でしか一意でない ID を全体キーにしていた | `id-unique-only-within-inner-scope` | 行キーに親（論文）を含める。読み手は document を必須の引数で受け、無ければ閉じる |
+| 権限・範囲の条件を経路ごとに書いていた | `condition-not-propagated` | `enforce-condition-in-query-with-required-argument` を採る（document_id 必須・`ledger_row_filter` の 1 箇所） |
+| 表示名の解決が 2 つに分かれていた | `duplicate-canonical-sources` | `target_labels.py` に寄せ、旧 `target_label` は委譲（戻り値の契約は不変） |
+| 既存の記帳が誰のものか分からない | `reexecution-overwrites-human-decision` | 自動で振り分けず印を立てて人に確かめさせる（行は消さない） |
+
+### 16.5 残した課題
+
+- 衝突行の印は「確かめてください」までで、教員が別の論文へ付け替える操作（移動 API）は無い（v1）。
+- スコープ候補・覆る条件候補の文脈組み立て（`input_builder.build_target_context`）は式の id を論文で絞らずに
+  主張を引く（候補の材料に別の論文の主張が混ざりうる）。行の更新は論文ごとになった。
+- 前提の地図に主張の点を出す層の選択（IK-0904 の第 2 案）は入れていない（式・部品の台帳から主張へ辿る道で代える）。
+- 地図の札から台帳の一行を直接開く操作（IK-0907 の第 3 案）は入れていない（往復の材料に画面の事実を渡す方で代える）。
+
+### 16.6 第 3 波の追補（2026-10-23）: 主張参照の解決・行の無い台帳・母集合・学生に見せる条件
+
+第 3 周（uxsim c-r25-doubt-r3）で、疑義の通しが 3 周続けて成立しない根と、学生に条件が届かない根が分かった（IK-0930〜0936）。
+
+- **主張参照の解決の正本（IK-0930）**: 理論操作グラフ・DSL の主張参照は生成時の局所 ID（`synth_claim_*` / `claim_span_*`）か UUID。
+  `backend/core/knowledge_objects/claim_refs.py`（`ClaimRefResolver`）が UUID はそのまま・局所 ID は `theory_claims_live` の
+  (document_id, agent_claim_id) と `source_scope.legacy_ids` で UUID へ・どちらにも無ければ `claim_object_builder` の本文で名前だけを返す
+  （綴りの正規化は `references.py` の正本）。支える主張・観測の選択肢（A/B 段と C 段を UUID に揃えて重ねる）・支持線の根の名前・
+  表示名・依存グラフの種（`claim_refs` に別名を足す）がこれを通る。**D層の読み手で主張参照を UUID 形だけで篩わない。**
+- **行の無い台帳（IK-0931）**: 台帳 GET は行が無くても、閲覧ゲートと対象の実在の確認を通れば 200 の `exists: false`
+  （名前・論文の題名・疑義の入口・`can_edit`）。404 は実在しない・閲覧できないときだけ。
+- **母集合（IK-0933）**: 前提の地図・未検証合意リスト（教員・学習者）・ゼミ前ブリーフ・discuss 開幕の前提の母集合から、
+  claim チェーンの導出ステップ（理論モジュール層の `claim_sequence_node_ids` と同じ判定 — `core/doubt/population.py`）を外し、
+  外したときは `population_note` の事実文を添える。依存の伝播は全ノードのまま。
+- **見出し（IK-0934 / IK-0901）**: 台帳の見出しは「論文の題名 › 対象の名前」。主グラフのノードの名前は段の日本語名 + 根拠の主張。
+- **学生に見せる条件の範囲（IK-0932・オーナー判断の候補 → 推奨どおり実装）**: 学習者の地図の札は、状態が直接検証・間接的な支持・
+  反証のときだけ「記帳された条件: 成立条件「…」・領域「…」」の 1 行を添える（`core/doubt/schema.py::learner_scope_line`）。
+  **根拠の逐語・記帳者（地位勾配 §8-3）・精度・系・数値は出さない**（P7 / SL4）。条件が 3 つ以上なら件数を言わずに「ほかにも条件の
+  記帳があります」。未検証・検証情報なしの札には何も添えない（空欄は発見）。AI に渡す画面の事実文
+  （`LEARNING_PERSONAL_MAP_SCREEN_FACT`）は地図に合わせて「札の下に条件が 1 行で出る」と言う。D3-6（読み取り専用・一行の事実の併記）
+  の範囲内の拡張として扱い、「検証を単一ブールにしない」を学習者側にも効かせる判断。代案（札から学習者向け台帳 GET を開く展開）は
+  入れていない。
+- 開幕の「確かめていないこと」は前提の document_id で各論文の区画へ（IK-0935）。英語の問いが分類で使い方に回り該当節が無いときは
+  RAG へ戻す（IK-0936・学習チャット側）。
+
+pre-mortem: `id-namespace-conflated`（主張参照の 2 つの ID 空間 → 解決器 1 つ）/ `permission-and-affordance-asymmetric`（行の有無と
+権限の事実を切り離す）/ `extent-decided-by-proxy-signal`（母集合を理論モジュール層の判定に寄せる）/
+`information-dropped-as-unrepresentable`（条件を札まで運ぶ）。残した課題: 地図に主張の点を足す層・札から台帳を開く展開・
+`_compute_with_observation_scope` に局所 ID の旧クライアントが観測を渡したときの範囲判定（選択肢は UUID に揃えたので画面からは来ない）。
 
 ---
 

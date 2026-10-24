@@ -741,3 +741,55 @@ class TestEnglishUsageQuestion:
         resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
         assert learning_mod._USAGE_HELP_NOT_DOCUMENTED_EN in resp.answer
         assert "目次" not in resp.answer
+
+
+# ===========================================================================
+# IK-0936（第 25 周 第 3 波）: 英語の問いが分類で USAGE_HELP に回り、日本語マニュアルに該当節が
+# 無いとき、固定文で終えず通常の RAG 経路へ戻す（型付き usage_help の明示は従来どおり固定文）。
+# ===========================================================================
+
+
+class TestEnglishClassifierUsageHelpFallsBackToRag:
+    def _rag_env(self, monkeypatch):
+        settings = _fake_settings()
+        monkeypatch.setattr(learning_mod, "get_settings", lambda: settings)
+        monkeypatch.setattr(llm_policy_mod, "get_settings", lambda: settings)
+        monkeypatch.setattr(learning_mod, "_learning_chat_cost_gate", CostGate())
+        monkeypatch.setattr(learning_mod, "get_course_data", lambda user_id, course_id: _course_data())
+        monkeypatch.setattr(learning_mod, "_is_usage_question", lambda message, **kwargs: False)
+        monkeypatch.setattr(learning_mod, "search_chunks_with_metadata", lambda *a, **k: [])
+        monkeypatch.setattr(learning_mod, "log_unanswered_query", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "check_prerequisites", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "_atlas_topic_attribution", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "check_and_count_confirm_prompt", lambda *a, **k: False)
+        monkeypatch.setattr(learning_mod, "maybe_schedule_tension_mining", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "maybe_schedule_anchor_mining", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "persist_chat_history", MagicMock(return_value={"user_message_id": "msg-1"}))
+        trace = MagicMock(return_value="trace-1")
+        monkeypatch.setattr(learning_mod, "record_interest_trace", trace)
+        monkeypatch.setattr(learning_mod, "detect_and_record_misconception", MagicMock(return_value=None))
+        monkeypatch.setattr(learning_mod, "generate_text", lambda **kwargs: "The paper places this result in the observation model.")
+        monkeypatch.setattr(learning_mod, "_classify_intent", lambda *a, **k: "USAGE_HELP")
+        monkeypatch.setattr(learning_mod, "_search_manual", lambda *a, **k: [])
+        monkeypatch.setattr(learning_mod, "_vector_search_manual", lambda *a, **k: [])
+        return trace
+
+    def test_english_map_question_with_no_manual_hit_goes_to_rag(self, monkeypatch):
+        trace = self._rag_env(monkeypatch)
+        body = _make_body(message=(
+            "Where is the Cepheus B paper on the field map? Every region looks empty to me. "
+            "What do the tags on the map mean?"
+        ))
+        resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+        assert learning_mod._USAGE_HELP_NOT_DOCUMENTED_EN not in resp.answer
+        assert "observation model" in resp.answer
+        assert not resp.manual_citations
+        # 使い方の無ヒットとしては記録しない（内容の問いとして答えた — G層の需要信号を汚さない）。
+        kinds = [c.kwargs.get("kind") for c in trace.call_args_list]
+        assert "help_usage" not in kinds
+
+    def test_japanese_classifier_no_hit_keeps_fixed_text(self, monkeypatch):
+        self._rag_env(monkeypatch)
+        body = _make_body(message="これはどこで確認すればいいですか")
+        resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+        assert learning_mod._USAGE_HELP_NOT_DOCUMENTED in resp.answer

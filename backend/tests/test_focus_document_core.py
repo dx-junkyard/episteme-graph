@@ -290,7 +290,7 @@ class TestNearbyDiscussRange:
 
         monkeypatch.setattr(queries, "fetch_component_graph", graph)
         monkeypatch.setattr(queries, "fetch_document_titles", lambda ids: {d: d for d in ids})
-        monkeypatch.setattr(queries, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
         monkeypatch.setattr(nearby, "_resolve_range_atlas_context", lambda cid, tid: None)
         monkeypatch.setattr(nearby, "_claim_summaries_for_graphs", lambda entries: {})
 

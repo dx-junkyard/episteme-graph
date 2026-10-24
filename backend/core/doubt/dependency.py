@@ -19,6 +19,8 @@ from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core.doubt.scope import document_scope_clause
+
 logger = logging.getLogger(__name__)
 
 _EXCLUDED_LAYERS = ("debug",)
@@ -105,33 +107,33 @@ def _node_included(node: dict) -> bool:
     return True
 
 
-def build_dependency_graph(session, course_id: str = "", document_id: str = "") -> DependencyGraph:
-    """theory_component_graphs から依存グラフを構築する（course / document 範囲）。"""
+def build_dependency_graph(session, *, document_ids) -> DependencyGraph:
+    """theory_component_graphs から依存グラフを構築する（document 集合の範囲, IK-0852）。
+
+    ``document_ids`` は必須（範囲の正本は ``core/doubt/scope.py``）。空集合なら SQL を
+    出さずに空のグラフを返す（fail-closed）。成果の行の course_id 列では絞らない。
+    """
     graph = DependencyGraph()
-    filters = []
-    params: dict[str, Any] = {}
-    if course_id:
-        filters.append("course_id = :course")
-        params["course"] = course_id
-    if document_id:
-        filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
-        params["doc"] = document_id
-    if not filters:
-        filters.append("TRUE")
+    clause = document_scope_clause(document_ids)
+    if clause is None:
+        return graph
+    where, params = clause
 
     rows = session.execute(
         sa_text(f"""
             SELECT document_id::text AS document_id, graph_json
             FROM theory_component_graphs
-            WHERE {' AND '.join(filters)}
+            WHERE {where}
         """),
         params,
     ).fetchall()
 
+    claim_refs_by_document: dict[str, set[str]] = {}
     for row in rows:
         doc_id = str(row[0] or "")
         if doc_id and doc_id not in graph.document_ids:
             graph.document_ids.append(doc_id)
+        doc_claim_refs = claim_refs_by_document.setdefault(doc_id, set())
         payload = _graph_payload(row[1])
         nodes = [n for n in _as_list(payload.get("nodes")) if isinstance(n, dict)]
         edges = [e for e in _as_list(payload.get("edges")) if isinstance(e, dict)]
@@ -151,6 +153,7 @@ def build_dependency_graph(session, course_id: str = "", document_id: str = "") 
                     claim_id = str(cid or "").strip()
                     if claim_id:
                         graph.claim_refs.setdefault(claim_id, set()).add(nid)
+                        doc_claim_refs.add(claim_id)
                         claims = graph.node_claim_ids.setdefault(nid, [])
                         if claim_id not in claims:
                             claims.append(claim_id)
@@ -176,12 +179,42 @@ def build_dependency_graph(session, course_id: str = "", document_id: str = "") 
                 if claim_id:
                     # claim が偽なら辺の target 以降が崩れる
                     graph.claim_refs.setdefault(claim_id, set()).add(target)
+                    doc_claim_refs.add(claim_id)
             for eid in _as_list(evidence.get("evidence_equation_ids")):
                 eq_id = str(eid or "").strip()
                 if eq_id:
                     graph.equation_refs.setdefault(eq_id, set()).add(target)
 
+    _alias_claim_refs(session, graph, claim_refs_by_document)
     return graph
+
+
+def _alias_claim_refs(session, graph: DependencyGraph, refs_by_document: dict[str, set[str]]) -> None:
+    """主張参照の別名（局所 ID ⇄ UUID）を ``claim_refs`` に足す（IK-0930）。
+
+    グラフの主張参照は生成時の局所 ID（``synth_claim_*`` / ``claim_span_*``）か UUID。
+    観測の選択肢（主張の型で拾った UUID）や台帳の主張 UUID で種を引けるよう、解決の正本
+    （``core/knowledge_objects/claim_refs.py``）で同じ主張の別の綴りを同じノード集合に向ける。
+    既存のキーは書き換えない（別名を足すだけ）。失敗は fail-soft（別名なし = 従来どおり）。
+    """
+    try:
+        from core.knowledge_objects.claim_refs import ClaimRefResolver
+    except Exception:  # noqa: BLE001
+        return
+    for doc_id, refs in refs_by_document.items():
+        if not doc_id or not refs:
+            continue
+        try:
+            resolver = ClaimRefResolver(session, doc_id)
+            for ref in sorted(refs):
+                nodes = graph.claim_refs.get(ref)
+                if not nodes:
+                    continue
+                for alias in resolver.aliases(ref):
+                    if alias != ref:
+                        graph.claim_refs.setdefault(alias, set()).update(nodes)
+        except Exception:  # noqa: BLE001
+            logger.debug("claim ref aliasing failed for %s", doc_id, exc_info=True)
 
 
 def seed_nodes_for_target(graph: DependencyGraph, target_type: str, target_id: str) -> set[str]:

@@ -976,7 +976,7 @@ class TestNearbyForPersonNodeTopicAnchor:
         monkeypatch.setattr(queries_mod, "fetch_claim_document_id", lambda cid: "docA")
         monkeypatch.setattr(queries_mod, "fetch_component_graph", lambda doc_id: sample_graph())
         monkeypatch.setattr(queries_mod, "fetch_document_titles", lambda ids: {"docA": "論文A"})
-        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
 
         dto = N.nearby_for_person_node("user1", "tnode")
         assert dto["available"] is True
@@ -1002,7 +1002,7 @@ class TestNearbyForPersonNodeTopicAnchor:
         monkeypatch.setattr(queries_mod, "fetch_course_document_ids", lambda cid: {"docA"})
         monkeypatch.setattr(queries_mod, "fetch_component_graph", lambda doc_id: sample_graph())
         monkeypatch.setattr(queries_mod, "fetch_document_titles", lambda ids: {"docA": "論文A"})
-        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
         monkeypatch.setattr(queries_mod, "fetch_topic_atlas_binding", lambda cid: {})
 
         dto = N.nearby_for_person_node("user1", "tnode")
@@ -1032,7 +1032,7 @@ class TestNearbyForPersonNodeTopicAnchor:
         monkeypatch.setattr(queries_mod, "fetch_course_document_ids", lambda cid: {"docA"})
         monkeypatch.setattr(queries_mod, "fetch_component_graph", lambda doc_id: sample_graph())
         monkeypatch.setattr(queries_mod, "fetch_document_titles", lambda ids: {"docA": "論文A"})
-        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
         monkeypatch.setattr(queries_mod, "fetch_topic_atlas_binding", lambda cid: {})
 
         dto = N.nearby_for_person_node("user1", "tnode")
@@ -1060,7 +1060,7 @@ class TestNearbyForPersonNodeTopicAnchor:
             },
         )
         monkeypatch.setattr(queries_mod, "fetch_document_titles", lambda ids: {"docA": "論文A"})
-        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
         monkeypatch.setattr(queries_mod, "fetch_topic_atlas_binding", lambda cid: {})
 
         def _must_not_be_called(cid):
@@ -1135,7 +1135,7 @@ class TestNearbyForPersonNodeTopicAnchor:
         monkeypatch.setattr(
             queries_mod, "fetch_document_titles", lambda ids: {d: d.upper() for d in ids}
         )
-        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
         monkeypatch.setattr(queries_mod, "fetch_topic_atlas_binding", lambda cid: {})
 
         dto = N.nearby_for_person_node("user1", "tnode")
@@ -1169,7 +1169,7 @@ class TestNearbyForPersonNodeTopicAnchor:
             "fetch_document_titles",
             lambda ids: {"docA": "論文A", "docB": "論文B"},
         )
-        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
 
         dto = N.nearby_for_person_node("user1", "tnode")
         assert [d["title"] for d in dto["range_documents"]] == ["論文A", "論文B"]
@@ -1190,7 +1190,7 @@ class TestNearbyForPersonNodeTopicAnchor:
         monkeypatch.setattr(N, "derive_person_network", lambda user_id: network)
         monkeypatch.setattr(queries_mod, "fetch_course_document_ids", lambda cid: {"docA"})
         monkeypatch.setattr(queries_mod, "fetch_component_graph", lambda doc_id: sample_graph())
-        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
         monkeypatch.setattr(queries_mod, "fetch_center_support_fact_line", lambda *a, **k: "")
 
         dto = N.nearby_for_person_node("user1", "tnode", center_component_id="n_obs")
@@ -1203,7 +1203,7 @@ class TestNearbyForPersonNodeTopicAnchor:
         monkeypatch.setattr(N, "derive_person_network", lambda user_id: network)
         monkeypatch.setattr(queries_mod, "fetch_course_document_ids", lambda cid: {"docA"})
         monkeypatch.setattr(queries_mod, "fetch_component_graph", lambda doc_id: sample_graph())
-        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
         monkeypatch.setattr(queries_mod, "fetch_center_support_fact_line", lambda *a, **k: "")
 
         dto = N.nearby_for_person_node(
@@ -1242,7 +1242,7 @@ class TestNearbyForPersonNodeRangeModeAtlasConnection:
         monkeypatch.setattr(queries_mod, "fetch_claim_document_id", lambda cid: "docA")
         monkeypatch.setattr(queries_mod, "fetch_component_graph", lambda doc_id: sample_graph())
         monkeypatch.setattr(queries_mod, "fetch_document_titles", lambda ids: {"docA": "論文A"})
-        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
 
     def test_binding_and_cartridge_present_appends_the_fact(self, monkeypatch):
         _, network = self._network()
@@ -1323,7 +1323,7 @@ class TestNearbyForPersonNodeRangeModeAtlasConnection:
         monkeypatch.setattr(N, "derive_person_network", lambda user_id: network)
         monkeypatch.setattr(queries_mod, "fetch_course_document_ids", lambda cid: {"docA"})
         monkeypatch.setattr(queries_mod, "fetch_component_graph", lambda doc_id: sample_graph())
-        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
         monkeypatch.setattr(queries_mod, "fetch_center_support_fact_line", lambda *a, **k: "")
 
         def _must_not_be_called(*a, **k):
@@ -1513,7 +1513,7 @@ class TestClaimSummariesDbPath:
         monkeypatch.setattr(queries_mod, "fetch_claim_document_id", lambda cid: "docA")
         monkeypatch.setattr(queries_mod, "fetch_component_graph", lambda doc_id: sample_graph())
         monkeypatch.setattr(queries_mod, "fetch_document_titles", lambda ids: {"docA": "論文A"})
-        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
         monkeypatch.setattr(queries_mod, "fetch_topic_atlas_binding", lambda cid: {})
         monkeypatch.setattr(
             queries_mod,
@@ -1532,7 +1532,7 @@ class TestClaimSummariesDbPath:
         )
         monkeypatch.setattr(queries_mod, "fetch_claim_document_id", lambda cid: "docA")
         monkeypatch.setattr(queries_mod, "fetch_component_graph", lambda doc_id: sample_graph())
-        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids, **_kw: {})
         monkeypatch.setattr(queries_mod, "fetch_center_support_fact_line", lambda *a, **k: "")
         monkeypatch.setattr(
             queries_mod,

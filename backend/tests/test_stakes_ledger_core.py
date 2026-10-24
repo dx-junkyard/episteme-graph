@@ -127,9 +127,9 @@ class TestObservationClaimTargets:
             graph_rows=[("doc-1", graph_json)],
             label_rows=[("claim-a", "観測量Xの定義")],
         )
-        result = observation_targets.observation_claim_targets(session, document_id="doc-1")
+        result = observation_targets.observation_claim_targets(session, document_ids=["doc-1"])
         assert result == [
-            {"claim_id": "claim-a", "label": "観測量Xの定義", "identified_via": "dsl_measures"}
+            {"claim_id": "claim-a", "label": "観測量Xの定義", "identified_via": "dsl_measures", "document_id": "doc-1"}
         ]
 
     def test_theory_stage_identified_when_dsl_empty(self):
@@ -148,9 +148,9 @@ class TestObservationClaimTargets:
             graph_rows=[("doc-1", graph_json)],
             label_rows=[("claim-b", "診断的主張")],
         )
-        result = observation_targets.observation_claim_targets(session, document_id="doc-1")
+        result = observation_targets.observation_claim_targets(session, document_ids=["doc-1"])
         assert result == [
-            {"claim_id": "claim-b", "label": "診断的主張", "identified_via": "theory_stage"}
+            {"claim_id": "claim-b", "label": "診断的主張", "identified_via": "theory_stage", "document_id": "doc-1"}
         ]
 
     def test_non_observation_stage_is_ignored(self):
@@ -164,7 +164,7 @@ class TestObservationClaimTargets:
             "edges": [],
         }
         session = self._session(graph_rows=[("doc-1", graph_json)])
-        result = observation_targets.observation_claim_targets(session, document_id="doc-1")
+        result = observation_targets.observation_claim_targets(session, document_ids=["doc-1"])
         assert result == []
 
     def test_claim_type_fallback_when_no_graph_signal(self):
@@ -174,9 +174,9 @@ class TestObservationClaimTargets:
             claim_type_rows=[("claim-c",)],
             label_rows=[("claim-c", "観測量の定義文")],
         )
-        result = observation_targets.observation_claim_targets(session, document_id="doc-1")
+        result = observation_targets.observation_claim_targets(session, document_ids=["doc-1"])
         assert result == [
-            {"claim_id": "claim-c", "label": "観測量の定義文", "identified_via": "claim_type"}
+            {"claim_id": "claim-c", "label": "観測量の定義文", "identified_via": "claim_type", "document_id": ""}
         ]
 
     def test_priority_dsl_over_claim_type_for_same_claim(self):
@@ -193,8 +193,8 @@ class TestObservationClaimTargets:
             claim_type_rows=[("claim-x",)],
             label_rows=[("claim-x", "X")],
         )
-        result = observation_targets.observation_claim_targets(session, document_id="doc-1")
-        assert result == [{"claim_id": "claim-x", "label": "X", "identified_via": "dsl_measures"}]
+        result = observation_targets.observation_claim_targets(session, document_ids=["doc-1"])
+        assert result == [{"claim_id": "claim-x", "label": "X", "identified_via": "dsl_measures", "document_id": "doc-1"}]
 
     def test_results_are_sorted_and_deduplicated(self):
         graph_json = {
@@ -208,7 +208,7 @@ class TestObservationClaimTargets:
             graph_rows=[("doc-1", graph_json)],
             label_rows=[("claim-1", "A"), ("claim-2", "B")],
         )
-        result = observation_targets.observation_claim_targets(session, document_id="doc-1")
+        result = observation_targets.observation_claim_targets(session, document_ids=["doc-1"])
         assert [item["claim_id"] for item in result] == ["claim-1", "claim-2"]
 
     def test_predicate_matching_is_case_insensitive_and_edge_type_fallback(self):
@@ -223,12 +223,12 @@ class TestObservationClaimTargets:
             graph_rows=[("doc-1", graph_json)],
             label_rows=[("claim-y", "Y")],
         )
-        result = observation_targets.observation_claim_targets(session, document_id="doc-1")
-        assert result == [{"claim_id": "claim-y", "label": "Y", "identified_via": "dsl_measures"}]
+        result = observation_targets.observation_claim_targets(session, document_ids=["doc-1"])
+        assert result == [{"claim_id": "claim-y", "label": "Y", "identified_via": "dsl_measures", "document_id": "doc-1"}]
 
     def test_empty_everything_returns_empty_list(self):
         session = self._session()
-        result = observation_targets.observation_claim_targets(session, document_id="doc-1")
+        result = observation_targets.observation_claim_targets(session, document_ids=["doc-1"])
         assert result == []
 
 
@@ -352,7 +352,7 @@ class TestQualifiedAdjacency:
         }
         session = self._session_with_graph(graph_json)
         node_ids = {"a", "b", "c", "d", "e", "f"}
-        adjacency = support_paths._qualified_adjacency(session, "", "", node_ids)
+        adjacency = support_paths._qualified_adjacency(session, ["doc-1"], node_ids)
         assert adjacency == {"a": {"b"}, "b": {"c"}}
 
     def test_edges_outside_node_id_scope_are_excluded(self):
@@ -363,7 +363,7 @@ class TestQualifiedAdjacency:
             ]
         }
         session = self._session_with_graph(graph_json)
-        adjacency = support_paths._qualified_adjacency(session, "", "", {"a"})
+        adjacency = support_paths._qualified_adjacency(session, ["doc-1"], {"a"})
         assert adjacency == {}
 
 
@@ -382,7 +382,7 @@ class TestComputeSupportLinesIntegration:
 
     def test_target_not_in_graph_returns_none(self):
         session = self._session(graph_rows=[])
-        result = support_paths.compute_support_lines(session, "component", "missing-node")
+        result = support_paths.compute_support_lines(session, "component", "missing-node", document_ids=["doc-1"])
         assert result is None
 
     def test_no_observation_claims_gives_none_level(self):
@@ -394,7 +394,7 @@ class TestComputeSupportLinesIntegration:
         }
         session = self._session(graph_rows=[("doc-1", graph_json)])
         result = support_paths.compute_support_lines(
-            session, "component", "target-node", document_id="doc-1",
+            session, "component", "target-node", document_ids=["doc-1"],
         )
         assert result == {
             "level": "none",
@@ -433,7 +433,7 @@ class TestComputeSupportLinesIntegration:
             label_rows=[("claim-1", "診断的主張の一例")],
         )
         result = support_paths.compute_support_lines(
-            session, "component", "target-node", document_id="doc-1",
+            session, "component", "target-node", document_ids=["doc-1"],
         )
         assert result["level"] == "single"
         assert result["cut_members"] == [
@@ -481,7 +481,7 @@ class TestComputeSupportLinesIntegration:
             label_rows=[("claim-1", "A"), ("claim-2", "B")],
         )
         result = support_paths.compute_support_lines(
-            session, "component", "target-node", document_id="doc-1",
+            session, "component", "target-node", document_ids=["doc-1"],
         )
         assert result["level"] == "several"
         assert result["fact_line"] == support_paths.FACT_LINE_SEVERAL
@@ -514,7 +514,7 @@ class TestComputeSupportLinesIntegration:
             label_rows=[("claim-1", "A")],
         )
         result = support_paths.compute_support_lines(
-            session, "component", "target-node", document_id="doc-1",
+            session, "component", "target-node", document_ids=["doc-1"],
         )
         assert result["level"] == "none"
 
@@ -707,7 +707,7 @@ class TestFalsificationWorker:
         session = _DispatchSession([
             (_is_claim_query, [("claim", "c1"), ("equation", "e1")]),
         ])
-        rows = fc_worker._claim_pending_targets(session, "doc-1", "")
+        rows = fc_worker._claim_pending_targets(session, "doc-1")
         assert rows == [("claim", "c1"), ("equation", "e1")]
         assert session.committed >= 1
         sql, params = session.calls[-1]
@@ -818,7 +818,7 @@ class TestFalsificationWorker:
         assert started["started"] is True
         assert started["daemon"] is True
         assert started["name"] == "doubt-falsification-conditions"
-        assert started["kwargs"] == {"document_id": "doc-1", "course_id": ""}
+        assert started["kwargs"] == {"document_id": "doc-1", "course_id": "", "document_ids": None}
 
 
 if __name__ == "__main__":

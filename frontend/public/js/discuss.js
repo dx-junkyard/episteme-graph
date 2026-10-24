@@ -788,12 +788,27 @@
   // D層台帳由来（コース全体の未検証前提）。document_id を持たないため、以前は
   // renderThesisSection の document_id 一致フィルタで画面に一度も出ていなかった。
   // 開幕画面から到達できる場所を必ず持たせる（OA7）。
-  function renderPaperUnverifiedSection(fragilePoints) {
-    var points = (fragilePoints || []).filter(function (f) { return f && f.kind === "assumption"; });
-    if (!points.length) return "";
+  // IK-0935: 前提は document_id で各論文の区画へ振り分ける。documentId を渡すとその論文の前提だけ、
+  // restDocIds（文字列の配列）を渡すとどの論文の区画にも入らなかった前提だけを、heading の見出しで描く。
+  function renderPaperUnverifiedSection(fragilePoints, emptyNote, documentId, restDocIds, heading) {
+    var points = (fragilePoints || []).filter(function (f) {
+      if (!f || f.kind !== "assumption") return false;
+      var doc = String(f.document_id || "").toLowerCase();
+      if (documentId) return doc === String(documentId).toLowerCase();
+      if (restDocIds) return !doc || restDocIds.indexOf(doc) < 0;
+      return true;
+    });
+    // IK-0853: 載る前提が無いときは、サーバの閉世界の一文があれば区画を残して添える
+    // （無いのか・出していないのかを区別させる）。一文が無ければ従来どおり出さない。
+    if (!points.length && !emptyNote) return "";
     var html = '<details class="discuss-section discuss-section-unverified">';
-    html += '<summary class="discuss-section-hd">この論文が確かめていないこと</summary>';
+    html += '<summary class="discuss-section-hd">' + esc(heading || "この論文が確かめていないこと") + '</summary>';
     html += '<div class="discuss-section-sub">前提として置かれていて、検証の記録がない箇所です。</div>';
+    if (!points.length) {
+      html += '<div class="discuss-muted">' + esc(emptyNote) + '</div>';
+      html += '</details>';
+      return html;
+    }
     html += fragileItemsHtml(points);
     html += '</details>';
     return html;
@@ -925,6 +940,8 @@
       html += renderThesisSection(doc);
       // 承認済みの「議論のきっかけ」は一等地（折りたたみの外）に置く。無ければ何も出ない。
       html += renderDiscussionSeedsSection(doc);
+      // IK-0935: この論文の前提（台帳行の document_id で振り分け）をこの論文の範囲に置く。
+      if (doc.document_id) html += renderPaperUnverifiedSection(fragile, "", doc.document_id);
       html += '<details class="discuss-more">';
       html += '<summary>この論文の組み立てをくわしく見る</summary>';
       html += renderBackboneSection(doc);
@@ -934,8 +951,13 @@
       html += '</details>';
       html += '</div>';
     });
-    // D層台帳由来（コース全体の前提）は document に紐づかないので docs ループの外に出す。
-    html += renderPaperUnverifiedSection(fragile);
+    // IK-0935: どの論文の区画にも入らなかった前提（document の無いもの）だけを末尾に、
+    // 複数論文なら「このコースの教材全体で確かめていないこと」の見出しで出す。前提が 1 つも無い
+    // ときの閉世界の一文（paper_unverified_empty_note）もここに 1 回だけ出す。
+    var docIds = docs.map(function (d) { return String(d.document_id || "").toLowerCase(); })
+      .filter(function (d) { return !!d; });
+    html += renderPaperUnverifiedSection(fragile, data.paper_unverified_empty_note, "", docIds,
+      multi ? "このコースの教材全体で確かめていないこと" : "この論文が確かめていないこと");
     // トップレベルの truncated は fragile_points（確かめていないこと／確認できていない
     // ところ）の切り詰めを意味する（core/discuss/opening.py の fragile_truncated）。
     // 論文・資料の一覧の話にすり替えない。

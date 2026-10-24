@@ -96,6 +96,34 @@ class TestClosedWorldVocabulary:
         assert_paths_forbid(self._assets(), self.BANNED)
         assert_module_tree_forbids(_FALSIFICATION_DIR, self.BANNED)
 
+    #: IK-0856: 定型句の完全一致だけでは助詞・語順の言い換え（「この分野の未検証の前提」）を
+    #: 拾えない。**同じ文**に「この分野」と検証の不在を言う語が並ぶことを禁じる近接検査。
+    _ABSENCE_WORDS = re.compile(r"未検証|検証されていない|検証記録|検証の記録")
+    _PROXIMITY_ASSETS = (
+        _REPO / "frontend" / "public" / "js" / "app.js",
+        _REPO / "frontend" / "public" / "js" / "discuss.js",
+        _REPO / "frontend" / "public" / "js" / "admin.js",
+        _DOUBT_ATLAS_JS,
+        _ROUTES_DOUBT,
+        _OPENING_MODULE,
+    )
+
+    def test_this_field_never_shares_a_sentence_with_absence_words(self):
+        """SL1: 台帳はコーパスの射影であって分野の射影ではない（IK-0856 の近接検査）。"""
+        paths = list(self._PROXIMITY_ASSETS) + sorted(_DOUBT_DIR.rglob("*.py"))
+        offenders = []
+        for path in paths:
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                for sentence in re.split(r"[。\n]", line):
+                    if "この分野" in sentence and self._ABSENCE_WORDS.search(sentence):
+                        offenders.append(f"{path.name}:{lineno}: {sentence.strip()[:80]}")
+        assert not offenders, "「この分野」と検証の不在が同じ文に並んでいる:\n" + "\n".join(offenders)
+
+    def test_learner_open_assumptions_entry_is_course_scoped(self):
+        """IK-0856: 学習者の入口は「このコースの教材」を主語にする（分野を主語にしない）。"""
+        app_src = (_REPO / "frontend" / "public" / "js" / "app.js").read_text(encoding="utf-8")
+        assert "このコースの教材で、検証の記録がない前提を見る" in app_src
+
     def test_fixed_closed_world_phrase_present_in_support_paths(self):
         """「このコーパスの中では」の原文存在（肯定形の固定文言）。"""
         assert "このコーパスの中では" in _SUPPORT_PATHS_SRC

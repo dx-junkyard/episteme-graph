@@ -61,14 +61,35 @@ def test_ensure_ledger_row_inserts_document_id():
     insert = [q for q in s.sql if "INSERT INTO epistemic_ledger" in q[0]]
     assert len(insert) == 1
     assert "document_id" in insert[0][0] and insert[0][1]["doc"] == doc
-    assert "ON CONFLICT (target_id, target_type) DO NOTHING" in insert[0][0]
+    # IK-0899（migration 092）: 行キーは (document_id, target_type, target_id)。
+    assert "ON CONFLICT ON CONSTRAINT epistemic_ledger_document_target_key DO NOTHING" in insert[0][0]
 
 
 def test_ensure_ledger_row_resolves_when_missing_and_raises_when_unknown():
     s = FakeSession(rows={"theory_components_live": ("33333333-3333-3333-3333-333333333333",)})
-    assert lt.ensure_ledger_row(s, target_type="component", target_id="k1").startswith("3333")
+    # 部品の UUID は全体で一意なので、部品から論文を引いてよい。
+    assert lt.ensure_ledger_row(
+        s, target_type="component", target_id="44444444-4444-4444-4444-444444444444"
+    ).startswith("3333")
     with pytest.raises(ValueError):
         lt.ensure_ledger_row(FakeSession(), target_type="claim", target_id="nope")
+
+
+def test_scoped_target_without_document_is_refused():
+    """IK-0899: グラフのノード id・式の agent ID は論文の中でしか一意でない — 推測で論文を埋めない。"""
+    for target_type, target_id in (("component", "theory_op_0001"), ("equation", "eq_dcf")):
+        with pytest.raises(lt.LedgerDocumentRequired):
+            lt.ensure_ledger_row(FakeSession(), target_type=target_type, target_id=target_id)
+        with pytest.raises(lt.LedgerDocumentRequired):
+            lt.ledger_row_filter(target_type=target_type, target_id=target_id, document_id=None)
+
+
+def test_row_filter_includes_document_only_for_scoped_targets():
+    doc = "55555555-5555-5555-5555-555555555555"
+    where, params = lt.ledger_row_filter(target_type="component", target_id="theory_op_0001", document_id=doc)
+    assert "document_id = CAST(:doc AS uuid)" in where and params["doc"] == doc
+    where, params = lt.ledger_row_filter(target_type="claim", target_id="c1", document_id=doc)
+    assert "document_id" not in where and "doc" not in params
 
 
 def test_every_ledger_target_type_has_a_lookup():

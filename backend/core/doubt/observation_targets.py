@@ -29,6 +29,7 @@ from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core.doubt.scope import document_scope_clause, normalize_document_ids
 from core.element_vocab import theory_stage_key
 
 logger = logging.getLogger(__name__)
@@ -68,29 +69,23 @@ def _graph_payload(raw: Any) -> dict:
     return {}
 
 
-def _fetch_graph_rows(session, course_id: str, document_id: str) -> list[tuple[str, dict]]:
-    """theory_component_graphs から (document_id, graph_json) を course/document 範囲で読む。
+def _fetch_graph_rows(session, document_ids) -> list[tuple[str, dict]]:
+    """theory_component_graphs から (document_id, graph_json) を document 集合の範囲で読む。
 
-    dependency.build_dependency_graph と同じフィルタ規約（filters が空なら TRUE）。
-    このモジュールは dsl ブロック・stage 判定に生の nodes/edges が必要なため、
-    DependencyGraph（除外済み・加工済み）を経由せず独自に読む。
+    dependency.build_dependency_graph と同じ範囲の規約（``core/doubt/scope.py`` —
+    空集合は SQL を出さずに空。IK-0852）。このモジュールは dsl ブロック・stage 判定に
+    生の nodes/edges が必要なため、DependencyGraph（除外済み・加工済み）を経由せず独自に読む。
     """
-    filters = []
-    params: dict[str, Any] = {}
-    if course_id:
-        filters.append("course_id = :course")
-        params["course"] = course_id
-    if document_id:
-        filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
-        params["doc"] = document_id
-    if not filters:
-        filters.append("TRUE")
+    clause = document_scope_clause(document_ids)
+    if clause is None:
+        return []
+    where, params = clause
     try:
         rows = session.execute(
             sa_text(f"""
                 SELECT document_id::text AS document_id, graph_json
                 FROM theory_component_graphs
-                WHERE {' AND '.join(filters)}
+                WHERE {where}
             """),
             params,
         ).fetchall()
@@ -135,17 +130,13 @@ def _claim_ids_from_stage(payload: dict) -> list[str]:
     return claim_ids
 
 
-def _resolve_document_ids(document_id: str, graph_rows: list[tuple[str, dict]]) -> list[str]:
+def _resolve_document_ids(document_ids, graph_rows: list[tuple[str, dict]]) -> list[str]:
     """C段の theory_claims 検索範囲（document_id の集合）を決める。
 
-    明示 document_id は常に含める（グラフが無い document でも C段は生きる,
-    fail-soft）。course_id のみのときは、その course の theory_component_graphs
-    行から観測された document_id を使う（既知の限界: グラフを一件も持たない
-    course では C段の対象文書を特定できない）。
+    範囲（``document_ids``）は常に含める（グラフが無い document でも C段は生きる,
+    fail-soft）。グラフ行の document は範囲の内側にしか無いので和集合は範囲そのもの。
     """
-    doc_ids: list[str] = []
-    if document_id:
-        doc_ids.append(document_id)
+    doc_ids: list[str] = list(normalize_document_ids(document_ids))
     for doc_id, _payload in graph_rows:
         if doc_id and doc_id not in doc_ids:
             doc_ids.append(doc_id)
@@ -173,43 +164,48 @@ def _claim_labels(session, claim_ids: set[str]) -> dict[str, str]:
 def observation_claim_targets(
     session,
     *,
-    course_id: str = "",
-    document_id: str = "",
+    document_ids,
 ) -> list[dict]:
     """観測系 claim の一覧を3段の縮退で同定する（非LLM・読み時・決定論的）。
+
+    範囲は ``document_ids``（必須・IK-0852）。空集合なら SQL を出さずに空を返す。
 
     Returns:
         ``[{"claim_id", "label", "identified_via"}]``。claim_id 昇順・重複なし。
         identified_via の優先順位は dsl_measures > theory_stage > claim_type
         （同一 claim が複数経路で見つかったら最初の経路を保持する）。
     """
-    course_id = str(course_id or "").strip()
-    document_id = str(document_id or "").strip()
+    document_ids = normalize_document_ids(document_ids)
+    if not document_ids:
+        return []
 
-    graph_rows = _fetch_graph_rows(session, course_id, document_id)
+    graph_rows = _fetch_graph_rows(session, document_ids)
 
     identified_via: dict[str, str] = {}
+    # IK-0903: どの論文の観測か（選択肢に論文を添え、開いているグラフの外の観測を見分ける）。
+    claim_documents: dict[str, str] = {}
 
     # --- A: DSL 述語 MEASURES（第一） -------------------------------------
-    for _doc_id, payload in graph_rows:
+    for doc_id, payload in graph_rows:
         for cid in _claim_ids_from_dsl(payload):
             identified_via.setdefault(cid, _IDENTIFIED_VIA_DSL)
+            claim_documents.setdefault(cid, doc_id)
 
     # --- B: theory stage（第二） -------------------------------------------
-    for _doc_id, payload in graph_rows:
+    for doc_id, payload in graph_rows:
         for cid in _claim_ids_from_stage(payload):
             identified_via.setdefault(cid, _IDENTIFIED_VIA_STAGE)
+            claim_documents.setdefault(cid, doc_id)
 
     # --- C: claim 型（第三の縮退） -------------------------------------------
-    doc_ids = _resolve_document_ids(document_id, graph_rows)
+    doc_ids = _resolve_document_ids(document_ids, graph_rows)
     if doc_ids:
         try:
             rows = session.execute(
                 sa_text("""
-                    SELECT id::text
+                    SELECT id::text, document_id::text
                     FROM theory_claims_live
-                    -- docs は明示 document_id（material_id 形もあり得る）と
-                    -- グラフ由来 ID の混在なので text 比較で突き合わせる（080）。
+                    -- docs は範囲の document id（text 表現）。text 比較で突き合わせる（080）。
                     WHERE document_id::text = ANY(CAST(:docs AS text[]))
                       AND claim_type = ANY(:ctypes)
                 """),
@@ -218,13 +214,37 @@ def observation_claim_targets(
             for row in rows:
                 cid = str(row[0])
                 identified_via.setdefault(cid, _IDENTIFIED_VIA_CLAIM_TYPE)
+                if len(row) > 1 and row[1]:
+                    claim_documents.setdefault(cid, str(row[1]))
         except Exception:
             logger.warning("observation target claim_type lookup failed", exc_info=True)
 
     labels = _claim_labels(session, set(identified_via.keys()))
-    items = [
-        {"claim_id": cid, "label": labels.get(cid, cid), "identified_via": via}
-        for cid, via in identified_via.items()
-    ]
+    from core.doubt.target_labels import UNNAMED_TARGET_LABEL
+    from core.knowledge_objects.claim_refs import ClaimRefResolvers
+
+    # IK-0930: A/B 段はグラフの主張参照（生成時の局所 ID のことがある）、C 段は DB の UUID。
+    # 解決の正本で同じ主張を UUID に揃えて重ねる（先に見つかった経路を保持）。名前は本文
+    # （DB → artifact）。UUID に届かない参照は元の綴りのまま残す（伝播はグラフの綴りで引ける）。
+    resolvers = ClaimRefResolvers(session)
+    merged: dict[str, dict] = {}
+    for cid, via in identified_via.items():
+        doc = claim_documents.get(cid, "")
+        resolver = resolvers.for_document(doc)
+        try:
+            canonical = resolver.uuid_for(cid) or cid
+            label = labels.get(cid) or resolver.label_for(cid)
+        except Exception:  # noqa: BLE001
+            canonical, label = cid, labels.get(cid) or ""
+        if canonical in merged:
+            continue
+        # 本文の引けない主張（agent 側の id のまま）は id を名前に使わない（IK-0902 / PL7）。
+        merged[canonical] = {
+            "claim_id": canonical,
+            "label": label or UNNAMED_TARGET_LABEL,
+            "identified_via": via,
+            "document_id": doc,
+        }
+    items = list(merged.values())
     items.sort(key=lambda item: item["claim_id"])
     return items
