@@ -100,10 +100,13 @@ class TestPreparationNotice:
         assert [c.id for c in resp.chunks] == ["chunk-0"]
         assert resp.chunks[0].text == _RAW_HEADER_CHUNK["text"]
 
-    def test_no_notice_when_no_chunks_are_returned(self):
+    def test_empty_material_states_empty(self):
+        """IK-0947（第 25 周 第 3 波）: 区画が無いときも空白にせず、空・準備中の事実文を返す。"""
         resp = _call(_course({"status": "processing"}), [])
         assert resp.chunks == []
-        assert resp.preparation_notice is None
+        assert resp.preparation_notice == label_vocab.TOPIC_MATERIAL_EMPTY_PREPARING_NOTICE
+        resp = _call(_course({"status": "completed"}), [])
+        assert resp.preparation_notice == label_vocab.TOPIC_MATERIAL_EMPTY_NOTICE
 
     def test_no_notice_when_the_explanation_exists(self):
         resp = _call(_course({"status": "processing"}, with_material=True), [_RAW_HEADER_CHUNK])

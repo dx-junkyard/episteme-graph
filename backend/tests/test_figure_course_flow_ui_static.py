@@ -142,12 +142,14 @@ class TestAdminLectureStudioFigureEvidenceItem:
             assert field in block, f"確定契約のフィールド {field} が evidence item に無い"
 
     def test_evidence_title_is_a_short_label_not_full_caption(self):
-        """要求仕様: 「図: <caption先頭>」程度のラベル。"""
+        """要求仕様: caption 先頭の短いラベル。種類の印「図:」は描く側が 1 箇所で付ける
+        （第 25 周 第 3 波・IK-0949 — 見出しに重ねると「図: 図: …」になる）。"""
         src = _read(ADMIN_LS_JS)
         start = src.index('if (kind === "figure") {')
         end = src.index("return;", start)
         block = src[start:end]
-        assert '"図: "' in block
+        assert "lsShortSummary(link.caption" in block
+        assert '"図: "' not in block
 
 
 class TestAdminLectureStudioFigureEmbedResolution:

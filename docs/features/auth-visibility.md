@@ -95,6 +95,19 @@ JWT 認証、RBAC（ロールベースアクセス制御）、グループ、Vis
 - `visibility='public'` のコースは `is_template=true` かつ `is_published=true`。
 - 更新はオーナーまたは `object_group_permissions.editor`、削除はオーナーのみ。
 
+**学習者のコース入場判定は 1 関数（2026-10-23・第 25 周 面 D 第 3 周・IK-0945）**: 学習者の読み取りルートの入場は
+`services.resolve_course_entry(user_id, course_id, *, check_open=False) -> CourseEntry` の 1 箇所で決め、
+`get_course_data` / `get_accessible_course_data` はどちらもこれに委譲する（ルートごとに「受講の行がある」と
+「いま公開されている」の別々の条件式を書かない — 同じコースで画面ごとに入れる / 入れないが食い違っていた）。
+方針（指揮者の判断・推奨どおり）: **所有者・受講の行がある利用者は、コースが非公開・開示範囲の変更後も読み続けられる**
+（教材・講義・チャット・記号の吹き出し・⚓・帰還の扉）。止まるのは新規の受講開始だけで、受講開始は 403
+`label_vocab.COURSE_ENROLLMENT_CLOSED_NOTICE`、マイコースの行には `LearningCourseOut.enrollment_notice`
+（`COURSE_ENROLLED_BUT_CLOSED_NOTICE`）。受講の行も所有もない利用者には常に受付状態
+（`course_open_for_enrollment` = public+published+template / 所属グループ / object_group_permissions）を見る。
+入れないときの 404 detail は日本語の事実文 `COURSE_NOT_AVAILABLE_NOTICE`（英語の「Course not found」を画面に出さない）。
+受講者の継続アクセスは人の権利に関わるため、方針を変えるならオーナー判断として本節を書き換える。
+ガードレール: `backend/tests/test_course_entry_gate.py`。
+
 ---
 
 ## 4. グループ

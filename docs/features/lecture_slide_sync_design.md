@@ -438,3 +438,106 @@ Phase 1+2 だけで「進行の一致」は解消する（既存原稿はマー�
   書いていない既知の未実装。スライド同期で必要性が下がるため見送り）。
 - ja / en 以外の言語。
 - カジュアル音声会話（`/voice/speak`）の言語切替 — 別機構のため対象外。
+
+## 2026-10-23 追補（第 25 周 面 D 第 1 周の是正）
+
+- **区切りが自動分割を止めた事実（IK-0878）**: `POST /api/admin/lecture-studio/preview-split` は
+  `auto_paginate_suppressed`（`===` が 1 つでもあり自動ページ分割をしなかった）と `notes`（理由と揃え方の事実文。
+  正本は `core/lecture.py::slide_split_notes`・JS にミラーしない）を返す。統合で配信される状態のまま保存するときは
+  同じ内容につき 1 回だけ確認する（`admin-lecture-studio.js::lsSaveCourseTopicDraft`）。
+- **保存の副作用（IK-0877）**: トピック保存は DELETE の rowcount を `audio_invalidated` で返し、消したときだけ
+  `notice`（`core/lecture_studio_state.TOPIC_AUDIO_INVALIDATED_NOTICE`）を添える。音声のあるトピックでは保存の
+  近くに `TOPIC_AUDIO_SAVE_NOTICE` を常に出す。コースの状態はトピック教材の経路ではトピック単位
+  （course-structure の `topic_audio_status`）で言い、チャンクの数を出さない。監査の
+  `topic_audio_cache_invalidated` は実際に消したときだけ True。
+- **学生の講義の入口（IK-0879）**: `audio-status` に `lecture_note`（`core/lecture.py::lecture_availability_note`）。
+  音声ゼロでもスライドがあれば講義に入れ、全スライドをタイマー送りにする（入口と再生の条件を揃えた。学習者経路から
+  音声を作らない規律は不変）。マニュアル `student/02-student.md#interactive-lecture` を実装に合わせた。
+- **チャンク経路の読み上げ（IK-0881）**: `persistence._spoken_text_from_formulas` は `[[id]]` と裸の `id`（語境界）を
+  同じキーで置換し、読み上げ文の無い式は講義の言語の語（ja「数式」/「式 (N)」・en「the equation」/「equation (N)」）。
+- ガードレール: `test_lecture_studio_round25.py`。
+
+## 2026-10-23 追補（第 25 周 面 D 第 2 周の是正）
+
+- **保存の可否と届き方を 1 つの値で（IK-0908 / IK-0915）**: course-structure は `can_save`（保存 API と同じ所有者 /
+  SYSTEM_ADMIN の判定）・`save_notice`（editor 共有のとき、所有者へ依頼する事実文）・`delivery`
+  （`{status: immediate|release, message}`。版が無ければ「すぐ受講者に届きます」、版があれば「版 N を見ています。
+  届けるには新しい版を発行」。受講者のいない非公開コースではキーなし）を返す。正本は
+  `core/lecture_studio_state.py::topic_save_facts`（条件は V層の版解決 `services._apply_course_version_view` と同じ）。
+  保存の 403 は `TOPIC_SAVE_FORBIDDEN_DETAIL`（日本語）で、画面は detail を描く。保存の応答にも `delivery`。
+  editor では保存ボタンを無効にして理由を出し、書き換えの応答に `save_notice` を添える（書き換えは editor に許したまま）。
+- **保存・採用の後にサーバの派生を取り直す（IK-0910）**: `lsRefreshTopicServerFacts(topic, {keepDraft})` が
+  course-structure から当該トピックの `evidence_items` / `evidence_state` / `appendix_state` 等だけを写す
+  （採用直後は編集中の本文に触れない）。
+- **区切りの事実文（IK-0914）**: `slide_split_notes(..., display_text=, spoken_text=)` は欄の先頭・末尾・連続の区切りが
+  スライドにならず枚数に数えないことを `SLIDE_MARKER_IGNORED_NOTE` で言う（`has_ignored_slide_markers`。分割の挙動は不変）。
+- **分割インジケータの係留（IK-0913）**: `#ls-course-slides-indicator` に `data-ui-anchor="lecture-studio.slides-indicator"`、
+  マニュアル `teacher/14-admin-lecture-studio.md#slides-indicator`、`ADMIN_UI_ANCHORS` の 3 点。負荷ラベルの節の見出しから
+  内部の呼び名を外した。
+- **付録の付け直しは明示の操作だけ（IK-0872 / IK-0880 の残り・オーナー判断の推奨どおり）**: 保存済みの付録は読み時に
+  付け直さない（配信済みのスライド境界と音声キャッシュの番号を黙って動かさない）。
+  `course_content_builder.reattach_generated_appendix` / `topic_appendix_is_stale`（生成時と同じ `_ensure_required_*`）で、
+  course-structure のトピックに `appendix_state`（違うときだけ）、`POST .../course-topics/{topic_id}/appendix/reattach`
+  （DB 非変更・LLM なし・付け直した本文を返すだけ。確定は既存の保存）、[付録を付け直す]（`lecture-studio.reattach-appendix`・
+  押す前に `appendix_reattach_confirm` で音声とスライドの区切りが動くことを言う）。G層 `course.topic_appendix_stale`
+  （optional・道案内のみ・既存 capability `lecture_studio.generate_audio` の最初の段＝コース選択だけを使う
+  `_make_step(locate_steps_limit=1)`）。教員が付録を消したトピックは対象外。
+- **書き換えの根拠の予算（IK-0909）**: `compact_rewrite_evidence` が直列化の前にキーごとに予算を配り（学ぶ単位を先頭に必ず
+  残す・リストは項目単位・JSON を壊さない）、`is_uninformative_equation_summary` に当たる状態の文を材料から外す。省いた
+  材料は応答の `grounding_trimmed` / `grounding_notice`。
+- ガードレール: `test_lecture_studio_round25_r2.py`。
+
+### pre-mortem（第 2 周の是正）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 保存済みの付録を作り直す | `stale-derivative-served` | 読み時に付け直さず、教員の明示操作 + G層の道案内（境界・音声が黙って動かない） |
+| 採用・保存の後の根拠一覧 | `stale-derivative-served` | 成功の直後に course-structure を取り直す（入口 2 つ） |
+| 書き換えの根拠を切る | `information-dropped-as-unrepresentable` | 直列化の前にキーごとの予算・切ったことを記録 |
+| 保存の権限と画面 | `condition-not-propagated` | 保存 API と同じ判定を course-structure で返し、画面はその値だけを見る |
+
+## 2026-10-23 追補（第 25 周 面 D 第 3 周の是正）
+
+- **読む表示と講義は `build_topic_slides` の戻り値を同じ契約で受け取る（IK-0944 / IK-0946）**: 受講画面の教材区画
+  （`topic_material_delivery_segments`）は 1 枚にしか割れないときもスライドの本文（区切り `===` を剥がした
+  display_text）を配り、全文（区切りが残る）へ落ちるのはスライドが作れないとき（教材なし・例外）だけ。式の解決表は
+  **id の鍵（`[[FORMULA_n]]`・正規化形）を優先**し、並び順の鍵（`FORMULA_i`）は id の鍵がまだ空いているときの
+  救済だけ（`app.js renderMaterialChunk`・原稿スタジオの 3 箇所のプレビューが同じ規則）。スライドに付く式は
+  そのスライドが引く式だけの部分集合なので、並び順の鍵が上書きすると 2 枚目以降の式が 1 つずつずれていた。
+  ハーネスの写し（`uxsim` の resolve_formula_placeholders）は投影同期係が同じ規則に揃える。
+- **空のトピックは空だと言う（IK-0947）**: 教材が空なら `preparation_notice` に `label_vocab.TOPIC_MATERIAL_EMPTY_NOTICE`
+  （生成中なら `TOPIC_MATERIAL_EMPTY_PREPARING_NOTICE`）。講義ボタンの事実文 `lecture_availability_note(...,
+  has_reading_material=)` は読む表示に本文があるときだけ「📖 読む で読めます」を言う。開示範囲の変更・クイック公開・
+  リリース前の確認の公開の応答に、本文の無いトピックが残るなら `COURSE_PUBLISHED_WITH_EMPTY_TOPICS_NOTICE`（件数なし・
+  公開は止めない = RR7）。
+- **下書きの欄の規則表は 1 つ（IK-0948）**: `course_content_builder.TOPIC_DRAFT_FIELD_RULES`（注意点 = 学習者がつまずく点・
+  適用条件・前提。番地・内部 ID・作業メモを書かない）をコース内容生成と AI 書き換えの両方の生成指示が読み、
+  `TOPIC_DRAFT_HANDOFF_RULE` で教員への申し送りを `handoff_notes` に分ける。モデルが注意点に混ぜた作業メモは
+  `split_cautions_and_handoff` が決定論で申し送りへ移す。画面は申し送りを書き換えの知らせ「申し送り:」に出し欄に入れない。
+- **自作の説明図は根拠に数えない（IK-0949）**: `extra.teaching` の図は `topic_evidence_state` の判定から外し、根拠の項目に
+  `teaching: true` / `origin_label = TEACHING_FIGURE_ORIGIN_LABEL`（「教員が作った説明図」）。題名の「図:」の前置をやめ、
+  種類の印は `lsEvidenceItemKindText` の 1 箇所で付ける。
+- **保存できない教員（IK-0950）**: 書き換えの知らせは `can_save=false` のとき `REWRITE_PROPOSAL_UNSAVABLE_NOTICE` に**置き換え**
+  （「保存すると確定」に権限の文を継ぎ足さない）。course-structure に `share_mark`（`COURSE_ROLE_LABELS["editor"]`）、
+  モーダルに［案をコピー］（`lecture-studio.rewrite-copy`・クリップボードのみ・DB 非変更）。
+- **題名の TeX（IK-0951）**: 題名に数式の記法を書かない約束を生成指示（コースビルダー）に入れ、`course_data.title_has_raw_tex` /
+  `course_titles_with_raw_tex` で検出してコース登録の応答と course-structure に `title_notice`（`COURSE_TITLE_RAW_TEX_NOTICE`）+
+  `raw_tex_titles`。表示側でのインライン描画はしない（題名の使い道が多い）。
+- **見出しの内部語と章番号（IK-0952）**: 旧い状態語の「チャンクなし」を見出しに出さず、`no_topics` でもサーバの事実文を出す。
+  章題が「第N章」で始まるなら前置しない（`lsChapterHeading`）。
+- **残り（IK-0909 / IK-0914）**: 書き換えの根拠の予算はリスト・ブロックを丸ごと落とさず項目単位で公平に配る。区切りの
+  事実文は読み上げ欄が空の分岐でも出す。
+- ガードレール: `test_lecture_studio_round25_r3.py` / `test_lecture_reading_lecture_contract.py` / `test_course_entry_gate.py`。
+
+### pre-mortem（第 3 周の是正）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 部分集合の式の解決表 | `id-namespace-conflated` | id の鍵を優先し並び順は救済だけ（3 箇所の写しを同時に） |
+| 1 枚の分岐で区切りを剥がす | `rule-enforced-per-surface` | 割った後の本文を 1 枚でも配る（掃除を分割の分岐に閉じない） |
+| 入場判定を 1 つに | `rule-enforced-per-surface` | `resolve_course_entry` に委譲・方針は auth-visibility.md §3 |
+| 自由記述の欄を AI に埋めさせる | `duplicate-canonical-sources` | 欄の宛先を規則表で両方の生成指示に渡し、申し送りは別キー |
+| 空のトピックを配る | `disclosure-not-declared` | 空・準備中・公開時の準備状態を事実文で運ぶ |
+| 自作図を根拠の置き場に入れる | `projection-mistaken-for-source` | 出所の印を判定と一覧で区別 |
+| editor の書き換え | `permission-and-affordance-asymmetric` | 既定文を置き換え・見出しの印・持ち出しはコピーだけ |
+

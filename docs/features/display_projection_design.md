@@ -173,3 +173,13 @@ DTO に漏れていた。遮断は画面ごとに別々の遮断器（`learner_c
 ガードレール: `test_display_projection_guardrails.py`（名指しの 8 エンドポイントが射影の入口を呼ぶ・ゼミ前ブリーフの
 ルーターが `TeacherDisplayRoute`・admin ルーター全体には掛けない・教員 UI が落とすキーを読まない・fixture 3 本の
 DTO の表示文に内部 ID が残らない）+ `test_display_projection_teacher.py`。
+
+### 2026-10-23 原稿スタジオの読み取り専用区画（DP7 の範囲の読み替え・第 25 周 面 D）
+
+- 原稿スタジオ（`GET .../lecture-studio/course-structure`）は**編集欄の本文には射影を掛けない**（教員が
+  `![[kind:id]]` の埋め込み記法を編集するため）。読み取り専用の区画 — 根拠リンクの一覧（`evidence_items`）と
+  注意点のプレビュー（新キー `cautions_display`）— だけを `project_for_teacher` に通し、式の内部 ID は付録と同じ
+  名前の段（印字番号 → 人が付けた名前 → 「この節の式」。`course_content_builder._appendix_equation_label`）へ
+  写す（`routes/lecture_studio/topics.py::_topic_studio_view`）。編集欄の `cautions` はそのまま返す。
+- 指揮者の判断（オーナー判断の推奨どおり）。分野の地図タブ（IK-0850）も同じ方式で揃える。課題 IK-0873。
+- ガードレール: `test_lecture_studio_round25.py::TestStudioTeacherView`。

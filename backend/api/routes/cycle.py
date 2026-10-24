@@ -24,6 +24,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from core import label_vocab
 from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user
 from services import (
@@ -258,7 +259,7 @@ def get_cycle_return_door_route(
     """
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if not course_data:
-        raise HTTPException(status_code=404, detail="Course not found")
+        raise HTTPException(status_code=404, detail=label_vocab.COURSE_NOT_AVAILABLE_NOTICE)
 
     try:
         leave_note_row = fetch_active_leave_note(current_user["id"], course_id)

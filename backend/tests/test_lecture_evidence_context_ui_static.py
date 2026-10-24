@@ -549,7 +549,11 @@ class TestServerEvidenceItemsArePreferred:
         DTO と同一の純関数）。"""
         src = TOPICS_PY.read_text(encoding="utf-8")
         assert "build_topic_evidence_items" in src
-        assert '"evidence_items": build_topic_evidence_items(t)' in src
+        # 第 25 周 面 D（IK-0873）: 同じ純関数の結果を、読み取り専用の区画として教員向け
+        # 投影（project_for_teacher）に通してから同梱する。
+        assert "evidence_items = build_topic_evidence_items(topic)" in src
+        assert '"evidence_items": projected_items' in src
+        assert "**_topic_studio_view(t, studio_facts)" in src
 
     def test_client_prefers_server_items_and_local_synthesis_is_fallback(self):
         block = self._items_block()

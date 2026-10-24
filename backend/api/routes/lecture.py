@@ -48,6 +48,7 @@ from core.lecture import (
     build_topic_slides,
     compute_material_audio_readiness,
     compute_topic_audio_readiness,
+    lecture_availability_note,
     generate_spoken_text_and_formulas,
     get_course_lecture_language,
     get_user_mastered_concepts,
@@ -454,6 +455,10 @@ def _topic_audio_status_payload(
         "total_slides": 0,
         "language": lecture_language,
         "stale_language": False,
+        # IK-0947: この分岐（トピック教材も論文の資料も無い）では読む教材も無い。
+        "lecture_note": lecture_availability_note(
+            has_audio=False, total_slides=0, has_reading_material=False,
+        ),
     }
 
     # トピック教材ベースのレクチャー（表示＝非レクチャー教材表示と一致）は、
@@ -480,6 +485,10 @@ def _topic_audio_status_payload(
             "total_slides": readiness["total_slides"],
             "language": lecture_language,
             "stale_language": readiness["stale_language"],
+            # IK-0879: 音声ゼロでもスライドがあれば講義に入れる（タイマー送り）。その事実文。
+            "lecture_note": lecture_availability_note(
+                has_audio=ready_slides > 0, total_slides=readiness["total_slides"],
+            ),
         }
 
     material_ids = course_source_material_ids(course_data)
@@ -504,6 +513,11 @@ def _topic_audio_status_payload(
         "total_slides": readiness["total_slides"],
         "language": lecture_language,
         "stale_language": readiness["stale_language"],
+        "lecture_note": lecture_availability_note(
+            has_audio=readiness["ready_slides"] > 0, total_slides=readiness["total_slides"],
+            # IK-0947: 論文の区画も無ければ読む教材も無い（空の「読む」へ誘導しない）。
+            has_reading_material=readiness["total_chunks"] > 0,
+        ),
     }
 
 

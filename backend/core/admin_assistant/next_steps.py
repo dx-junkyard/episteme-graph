@@ -104,6 +104,12 @@ RULE_COURSE_PREREQUISITE_UNCOVERED = "course.prerequisite_uncovered"
 # **配信は止めず**（LU8 / RR7）、事実だけを教員に見せる（学習者へは何も変えない）。
 RULE_COURSE_DELIVERED_UNREVIEWED = "course.delivered_unreviewed"
 
+# 第 25 周 面 D 第 2 周（IK-0872 / IK-0880 の残り）: 所有コースのトピックに、保存済みの
+# 決定論付録（「この節で使う数式」「この節で参照する図」）がいまの根拠から作る形と違うものが
+# ある。保存済みの付録は読み時に付け直さない（スライド境界・音声の番号が黙って動くため）ので、
+# 教員に事実を見せて原稿スタジオの [付録を付け直す] へ道案内だけする（代行しない）。
+RULE_COURSE_TOPIC_APPENDIX_STALE = "course.topic_appendix_stale"
+
 # 利用者マニュアル KB（help_kb, manual_help_kb_design.md §4-1）: 需要側 + 供給側の
 # 両面計器。改善ループを閉じるための3ルール（2026-07-25 追加）。
 RULE_MANUAL_HELP_GAPS_PENDING = "manual.help_gaps_pending"     # 需要側: help_usage 無ヒット/未整備の k-匿名集計
@@ -197,6 +203,12 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "severity": SEVERITY_RECOMMENDED,
         "capability_id": "materials.graph_review",  # 道案内のみ
     },
+    # 道案内は原稿スタジオのコース選択まで（以降の手順は理由の文が言う）。既存の
+    # guidance_only capability を再利用し、新規登録しない（G3）。
+    RULE_COURSE_TOPIC_APPENDIX_STALE: {
+        "severity": SEVERITY_OPTIONAL,
+        "capability_id": "lecture_studio.generate_audio",  # 道案内のみ（最初の 1 段だけ使う）
+    },
     # manual_help_kb_design.md §4-1: 需要側 + 供給側の両面計器。
     RULE_MANUAL_HELP_GAPS_PENDING: {
         "severity": SEVERITY_RECOMMENDED,
@@ -266,12 +278,21 @@ def _iso(value: Any) -> str:
     return str(value or "")
 
 
-def _locate_plan_for(capability_id: str, ctx: Optional[dict] = None) -> dict:
-    """capability の locate_steps を ctx（{course_id: ...} 等）で具体化した dict。"""
+def _locate_plan_for(
+    capability_id: str, ctx: Optional[dict] = None, *, steps_limit: Optional[int] = None
+) -> dict:
+    """capability の locate_steps を ctx（{course_id: ...} 等）で具体化した dict。
+
+    ``steps_limit`` は、既存 capability を再利用するルールが先頭の段（画面・コースの選択）
+    だけを使うときの切り詰め（G3: 道案内の粒度のために capability を増やさない）。
+    """
     cap = caps.get_capability(capability_id)
     if cap is None:
         return {"capability_id": capability_id, "steps": []}
-    return {"capability_id": capability_id, "steps": cap.locate_steps_as_dicts(ctx or {})}
+    steps = cap.locate_steps_as_dicts(ctx or {})
+    if steps_limit is not None:
+        steps = steps[: max(0, int(steps_limit))]
+    return {"capability_id": capability_id, "steps": steps}
 
 
 def _make_step(
@@ -283,6 +304,7 @@ def _make_step(
     target: dict,
     ctx: Optional[dict] = None,
     dismissible: bool = True,
+    locate_steps_limit: Optional[int] = None,
 ) -> NextStep:
     rule = RULE_CATALOG[rule_id]
     capability_id = rule["capability_id"]
@@ -293,7 +315,7 @@ def _make_step(
         title=title,
         reason=reason,
         capability_id=capability_id,
-        locate_plan=_locate_plan_for(capability_id, ctx),
+        locate_plan=_locate_plan_for(capability_id, ctx, steps_limit=locate_steps_limit),
         target=target,
         dismissible=dismissible,
     )
@@ -1471,6 +1493,59 @@ def _eval_manual_todo_unresolved(session, uid: str) -> list[tuple[NextStep, str]
     return [(step, "")]
 
 
+#: 付録の付け直しの道案内で名前を挙げるトピックの上限（件数は書かない — G6）。
+_APPENDIX_STALE_MAX_NAMES = 3
+
+
+def _eval_course_topic_appendix_stale(session, uid: str) -> list[tuple[NextStep, str]]:
+    """所有コースに、保存済みの付録がいまの根拠から作る形と違うトピックがある。
+
+    判定は決定論・非LLM（G2）。生成時と同じ付録の組み立て（``core.lecture_studio_state``
+    経由の純関数）を保存済みの本文に当て、違うトピックだけを数える。教員が付録を消した
+    トピックは対象にしない。付け直して保存すれば項目は自動で消える（G1）。
+    """
+    from core.lecture_studio_state import topic_appendix_state
+
+    rows = session.execute(
+        sa_text(
+            "SELECT id, title, data, created_at FROM learning_courses "
+            "WHERE user_id = CAST(:uid AS uuid) ORDER BY created_at ASC"
+        ),
+        {"uid": uid},
+    ).mappings().fetchall()
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        data = row["data"] if isinstance(row["data"], dict) else {}
+        stale_titles: list[str] = []
+        for topic in iter_all_topics(data):
+            if not isinstance(topic, dict):
+                continue
+            if topic_appendix_state(topic):
+                stale_titles.append(str(topic.get("title") or "").strip() or "無題のトピック")
+        if not stale_titles:
+            continue
+        cid = row["id"]
+        title = row["title"] or cid
+        names = "・".join(f"『{t}』" for t in stale_titles[:_APPENDIX_STALE_MAX_NAMES])
+        if len(stale_titles) > _APPENDIX_STALE_MAX_NAMES:
+            names += " など"
+        step = _make_step(
+            rule_id=RULE_COURSE_TOPIC_APPENDIX_STALE,
+            target_id=str(cid),
+            title=f"コース『{title}』のトピックの付録を付け直す",
+            reason=(
+                f"コース『{title}』のトピック {names} の末尾の付録は、いまの根拠から作る形と違います。"
+                "原稿スタジオでトピックを開き [付録を付け直す] で作り直してから保存できます"
+                "（保存すると、そのトピックの生成済み音声は作り直しになります）。"
+            ),
+            target={"course_id": str(cid)},
+            ctx={"course_id": str(cid)},
+            locate_steps_limit=1,
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
 _RULE_EVALUATORS = {
     RULE_MATERIALS_NONE: _eval_materials_none,
     RULE_MATERIALS_SHARED_AVAILABLE: _eval_materials_shared_available,
@@ -1488,6 +1563,7 @@ _RULE_EVALUATORS = {
     RULE_COURSE_DISCUSS_OPENING_UNREVIEWED: _eval_course_discuss_opening_unreviewed,
     RULE_COURSE_PREREQUISITE_UNCOVERED: _eval_course_prerequisite_uncovered,
     RULE_COURSE_DELIVERED_UNREVIEWED: _eval_course_delivered_unreviewed,
+    RULE_COURSE_TOPIC_APPENDIX_STALE: _eval_course_topic_appendix_stale,
     RULE_MANUAL_HELP_GAPS_PENDING: _eval_manual_help_gaps_pending,
     RULE_ASSISTANT_KB_UNDOCUMENTED: _eval_assistant_kb_undocumented,
     RULE_MANUAL_TODO_UNRESOLVED: _eval_manual_todo_unresolved,

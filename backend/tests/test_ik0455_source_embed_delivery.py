@@ -156,17 +156,22 @@ class TestDeliverySegmentsShareFormulas:
         assert "ev_9999" not in joined and "eqcand" not in joined
         assert "z < 2" in joined
 
-    def test_short_material_keeps_whole_text_and_formulas(self):
+    def test_short_material_uses_slide_text_and_topic_formulas(self):
+        """1 区画でもスライドの本文（割った後）とトピック全体の式を配る（IK-0946 で契約変更）。"""
         topic = _topic()
-        whole = [{"id": "eq_6", "latex": "x"}]
+        text = "短い ![[source:ev_9999]] ![[equation:eq_6]]\n\n==="
+        topic["student_material"] = {"source_text": text}
         segments, formulas = lecture.topic_material_delivery_segments(
-            topic, {}, "短い ![[source:ev_9999]] ![[equation:eq_6]]", whole,
+            topic, {}, text, [{"id": "eq_6", "latex": "x"}],
             ccb.build_topic_evidence_items(topic),
         )
         assert len(segments) == 1 and segments[0].startswith("短い")
-        assert "![[equation:eq_6]]" in segments[0]
+        assert "===" not in segments[0]
         assert "ev_9999" not in segments[0]
-        assert formulas == whole
+        ids = re.findall(r"\[\[FORMULA_\d+\]\]", segments[0])
+        latex = {f["id"]: f["latex"] for f in formulas}
+        assert ids and all(i in latex for i in ids)
+        assert any(v.startswith("c_s^2") for v in latex.values())
 
     def test_get_topic_material_delegates(self):
         src = (BACKEND / "api/routes/learning.py").read_text(encoding="utf-8")

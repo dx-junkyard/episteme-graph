@@ -353,3 +353,18 @@ LLM 呼び出し回数は不変**。
 section_block 単位のトピックは component を直接持たないため ⚓ が出なかった。`course_content_builder._components_linked_to_claims`
 がトピックの主張に結ぶ同一論文の live component を上限 4 まで束ねる（決定論・順序は主張順）。A層が comp_fallback しか出さない教材
 （IK-0540）はこの経路でも部品が出ない。
+
+### 12.4 2026-10-23 — 原稿スタジオの書き換えと根拠の状態（第 25 周 面 D 第 1 周・IK-0874 / IK-0875 / IK-0883）
+
+- **書き換えの根拠に学ぶ単位**: `rewrite_lecture_studio_course_topic` の根拠に `units`（`topic.units` をコースの論文の
+  live 行で解決した種別・名前・要約。番地は載せない — `core/lecture_studio_state.unit_grounding_for_prompt`）を足した。
+  コース内容生成の前でも教員が選んだ単位が根拠になる。根拠が全部空で下書きも見出しだけなら LLM を呼ばず、日次上限も
+  消費せず `skipped` + 事実文を返す。応答が下書きを変えなかったら `changed: false` で「反映しました」と言わない。
+- **根拠の状態は 1 つの値**: course-structure の各トピックに `evidence_state`（`sufficient` / `weak` / `missing` / `none`・
+  日本語の短いラベル・事実文・missing で候補が並ぶときの見出し）。正本は `core/lecture_studio_state.topic_evidence_state`、
+  中央・右ペインがこれを読み、何も無いときの既定は `none`（「ある」と言わない）。
+- **コースビルダーの教材コンテキスト**: 部品の属性は本文だけを「・」で並べ、式は印字番号と短い原文で添える
+  （`routes/admin.py::_material_field_text` / `_material_equation_names`）。プロンプトに「回答本文では handle を書かず
+  単位の名前で言う」を足し、残った handle はサーバがこのターンの候補表の名前へ置き換える
+  （`_replace_unit_handles_in_answer`）。
+- ガードレール: `backend/tests/test_lecture_studio_round25.py`。

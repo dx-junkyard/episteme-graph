@@ -263,4 +263,10 @@ class TestCourseVisibilityIsAudited:
         out = admin_module.update_course_visibility(
             COURSE_ID, body=_Body("public"), current_user=_user(),
         )
-        assert set(out) == {"course_id", "visibility", "group_id"}
+        # IK-0947（第 25 周 第 3 波）: 本文の無いトピックが残るときだけ readiness_note が足る
+        # （確定文脈ではない事実文）。確定文脈はレスポンスに載せない。
+        assert {"course_id", "visibility", "group_id"} <= set(out)
+        assert set(out) - {"course_id", "visibility", "group_id"} <= {"readiness_note"}
+        from core import decision_context as dc
+
+        assert dc.DECISION_CONTEXT_KEY not in out

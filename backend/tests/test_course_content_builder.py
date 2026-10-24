@@ -67,7 +67,9 @@ def test_ensure_required_equations_adds_missing_embeds():
     # 未解決の数式 fix: 本体の無い裸ID（linked_equation_ids だけ）には埋め込みを出さない
     # （出すと必ず「未解決の数式」になるため）。説明バレットは残す。
     assert "![[equation:eq_link_only]]" not in source_text
-    assert "eq_link_only" in source_text
+    # IK-0872: 名前（印字番号・人が付けた名前）も本体も無い式は付録に行を作らない
+    # （式 ID を名前にしない・「この節の式」だけの行を並べない）。
+    assert "eq_link_only" not in source_text
 
 
 def test_equation_has_renderable_body():

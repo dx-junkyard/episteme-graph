@@ -77,7 +77,7 @@ class TestGetCourseElementContextGating:
         with pytest.raises(HTTPException) as exc:
             get_course_element_context("c1", "claim", "claim-1", {"id": "u1"})
         assert exc.value.status_code == 404
-        assert exc.value.detail == "Course not found"
+        assert exc.value.detail == "このコースは見つからないか、閲覧できません。"
 
     @patch("api.routes.learning.build_element_context", return_value=None)
     @patch("api.routes.learning._course_document_ids", return_value=["doc-1"])

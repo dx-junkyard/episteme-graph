@@ -31,6 +31,7 @@ sources[].document_id も同様に書き手が見当たらない読み取り専�
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -469,6 +470,27 @@ def course_cartridge_id(data: dict | None) -> str:
     if not isinstance(data, dict):
         return ""
     return str(data.get("cartridge_id") or "").strip()
+
+
+# 第 25 周 第 3 波（IK-0951）: 表示名（コース・章・トピックの題名）に生の TeX 記法が残っているか。
+# 題名は学生の一覧・各所の見出しで素の文字列として描かれる（数式として描かれない）ので、
+# 生成指示で書かせず、保存・表示の時に検出して教員に知らせる。
+_RAW_TEX_IN_TITLE_RE = re.compile(r"\\[A-Za-z]+|\$|\^|_\{|(?<![A-Za-z0-9])[A-Za-z]_[A-Za-z0-9]")
+
+
+def title_has_raw_tex(title: object) -> bool:
+    return bool(_RAW_TEX_IN_TITLE_RE.search(str(title or "")))
+
+
+def course_titles_with_raw_tex(data: dict | None) -> list[str]:
+    """コース・章・トピックの題名のうち生の TeX 記法を含むもの（出現順・重複なし）。"""
+    data = data or {}
+    titles: list[str] = [str(data.get("title") or "")]
+    for chapter in course_chapters(data):
+        if isinstance(chapter, dict):
+            titles.append(str(chapter.get("title") or ""))
+    titles.extend(str(t.get("title") or "") for t in iter_all_topics(data) if isinstance(t, dict))
+    return list(dict.fromkeys(t for t in titles if t and title_has_raw_tex(t)))
 
 
 def course_title(data: dict | None, default: str = "") -> str:

@@ -23,6 +23,20 @@ def _session_with(record):
     return session
 
 
+import pytest  # noqa: E402
+
+from services import CourseEntry  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _open_entry(monkeypatch):
+    """入場判定（IK-0945 の正本 resolve_course_entry）は受付中として固定する。"""
+    monkeypatch.setattr(
+        learning_routes, "resolve_course_entry",
+        lambda u, c, **kw: CourseEntry(exists=True, data={}, open_for_enrollment=True),
+    )
+
+
 def test_enroll_response_reflects_the_public_course_row(monkeypatch):
     monkeypatch.setattr(
         learning_routes, "_pg_session",
@@ -91,3 +105,39 @@ def test_enroll_already_enrolled_notice(monkeypatch):
     assert out.enrolled is True
     assert out.notice == label_vocab.COURSE_ALREADY_ENROLLED_NOTICE
     assert out.notice != label_vocab.COURSE_ENROLLED_NOTICE
+
+
+def test_enroll_closed_course_states_fact(monkeypatch):
+    """IK-0945: 受講の行が無く受付も止まったコースは 403 の事実文（受講者は読み続けられる）。"""
+    from fastapi import HTTPException
+
+    from core import label_vocab
+
+    monkeypatch.setattr(
+        learning_routes, "_pg_session",
+        lambda: _session_with(("非公開ゼミ", "private", None, False, False, "")),
+    )
+    monkeypatch.setattr(
+        learning_routes, "resolve_course_entry",
+        lambda u, c, **kw: CourseEntry(exists=True, data={}),
+    )
+    with pytest.raises(HTTPException) as exc:
+        learning_routes.enroll_course("c-9", current_user={"id": "u-1"})
+    assert exc.value.status_code == 403
+    assert exc.value.detail == label_vocab.COURSE_ENROLLMENT_CLOSED_NOTICE
+
+
+def test_enroll_enrolled_on_closed_course_is_already_enrolled(monkeypatch):
+    from core import label_vocab
+
+    monkeypatch.setattr(
+        learning_routes, "_pg_session",
+        lambda: _session_with(("非公開ゼミ", "private", None, False, False, "")),
+    )
+    monkeypatch.setattr(
+        learning_routes, "resolve_course_entry",
+        lambda u, c, **kw: CourseEntry(exists=True, data={}, is_enrolled=True),
+    )
+    monkeypatch.setattr(learning_routes, "enroll_user_in_course", lambda u, c: False)
+    out = learning_routes.enroll_course("c-9", current_user={"id": "u-1"})
+    assert out.notice == label_vocab.COURSE_ALREADY_ENROLLED_NOTICE

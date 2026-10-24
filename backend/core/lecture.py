@@ -846,6 +846,93 @@ def auto_paginate_slides(
     return split_slides(display_marked, spoken_marked, formulas, figures)
 
 
+#: 区切り（===）が自動ページ分割を止めていることの事実文（IK-0878。正本はここ・JS にミラーしない）。
+SLIDE_MARKER_SUPPRESSES_AUTOPAGINATION_NOTE = (
+    "区切り（===）があるため、自動ページ分割は止まっています（教員の区切りが優先されます）。"
+)
+#: 教材欄と読み上げ欄の区切りの数が合わず 1 枚に統合されるとき。
+SLIDE_MARKER_MISMATCH_NOTE = (
+    "教材欄は{display}枚・読み上げ欄は{spoken}枚に区切られています。"
+    "読み上げ欄にも同じ数の区切り（===）を入れると{display}枚に分かれます。"
+    "いまのまま保存すると 1 枚に統合して配信されます。"
+)
+
+
+#: 学習者の講義ボタンの事実文（IK-0879。学習者経路から音声は作らない — 文はその事実だけを言う）。
+LECTURE_NO_AUDIO_NOTE = (
+    "このトピックの音声はまだ用意されていません（担当の先生が準備します）。"
+    "講義では文字のスライドを時間で送ります。"
+)
+LECTURE_NO_SLIDES_NOTE = "このトピックには講義のスライドがありません。📖 読む で教材を読めます。"
+
+
+def lecture_availability_note(
+    *, has_audio: bool, total_slides: int, has_reading_material: bool = True,
+) -> str:
+    """講義ボタンの近くに出す事実文（音声があれば空）。
+
+    IK-0947: スライドも読む教材も無いときは空の「読む」へ誘導せず、教材が無い事実だけを言う
+    （文の正本は ``label_vocab.TOPIC_MATERIAL_EMPTY_NOTICE`` — 教材の応答と同じ文）。
+    """
+    if has_audio:
+        return ""
+    if total_slides > 0:
+        return LECTURE_NO_AUDIO_NOTE
+    if not has_reading_material:
+        from core import label_vocab as _label_vocab
+
+        return _label_vocab.TOPIC_MATERIAL_EMPTY_NOTICE
+    return LECTURE_NO_SLIDES_NOTE
+
+
+def auto_paginate_suppressed(display_text: str | None, spoken_text: str | None) -> bool:
+    """``auto_paginate_slides`` が教員の区切りを優先して自動ページ分割をしないか（IK-0878）。"""
+    return bool(_SLIDE_MARKER_RE.search(display_text or "") or _SLIDE_MARKER_RE.search(spoken_text or ""))
+
+
+#: 欄の先頭・末尾・連続した区切りは空のスライドにならず、枚数に数えないこと（IK-0914）。
+#: ``{fields}`` は「教材欄」「読み上げ欄」「教材欄と読み上げ欄」。
+SLIDE_MARKER_IGNORED_NOTE = (
+    "{fields}の先頭・末尾にある区切り（===）や、続けて並んだ区切りはスライドにならず、"
+    "枚数に数えていません。"
+)
+
+
+def has_ignored_slide_markers(text: str | None) -> bool:
+    """区切りのうち、空の区画しか作らないもの（先頭・末尾・連続）があるか（IK-0914）。
+
+    ``_split_marker_segments`` は空の区画を捨てる（空のスライドを作らない — 挙動は妥当）。
+    ここはその「捨てた」事実を言うためだけの読み取り専用の判定。
+    """
+    if not text or not _SLIDE_MARKER_RE.search(text):
+        return False
+    return any(not seg.strip() for seg in _SLIDE_MARKER_RE.split(text))
+
+
+def slide_split_notes(
+    *,
+    suppressed: bool,
+    mismatch: bool,
+    display_count: int,
+    spoken_count: int,
+    display_text: str | None = None,
+    spoken_text: str | None = None,
+) -> list[str]:
+    """プレビューの分割結果に添える事実文（理由と揃え方。IK-0878 / IK-0914）。"""
+    notes: list[str] = []
+    if suppressed:
+        notes.append(SLIDE_MARKER_SUPPRESSES_AUTOPAGINATION_NOTE)
+    if mismatch:
+        notes.append(SLIDE_MARKER_MISMATCH_NOTE.format(display=display_count, spoken=spoken_count))
+    ignored = [
+        name for name, text in (("教材欄", display_text), ("読み上げ欄", spoken_text))
+        if has_ignored_slide_markers(text)
+    ]
+    if ignored:
+        notes.append(SLIDE_MARKER_IGNORED_NOTE.format(fields="と".join(ignored)))
+    return notes
+
+
 def count_slide_marker_segments(
     display_text: str | None,
     spoken_text: str | None,
@@ -1238,13 +1325,13 @@ def topic_material_delivery_segments(
 ) -> tuple[list[str], list[dict]]:
     """受講画面の教材区画（本文と、その本文が引く formulas）を返す（IK-0455）。
 
-    区画の粒度の正本は :func:`build_topic_slides`（P2-R3）。2区画以上に割れるときの本文は
-    ``build_topic_slides`` が式を ``[[FORMULA_N]]`` に置き換えた display_text なので、
+    区画の粒度の正本は :func:`build_topic_slides`（P2-R3）。区画の本文は（1 区画でも）
+    ``build_topic_slides`` が式を ``[[FORMULA_N]]`` に置き換え区切り ``===`` を剥がした display_text なので、
     **同じ関数が返した formulas** を一緒に渡す（従来は content_blocks の式を渡しており、
     ``$w$`` から振られた ``[[FORMULA_0]]`` が content_blocks の0番目の式＝別の式に
     引かれたり、「この数式は教材に載せられていません」に置き換わったりしていた）。
-    割れないときは ``whole_text`` / ``whole_formulas``（呼び出し側が図を解決した全文と
-    content_blocks の式）をそのまま使う。
+    スライドが作れなかったとき（教材なし・例外）だけ ``whole_text`` / ``whole_formulas``
+    （呼び出し側が図を解決した全文と content_blocks の式）を使う（IK-0946）。
 
     どちらの場合も、引けない ``[[FORMULA_N]]`` は事実の文へ、引けない
     ``![[component|claim|source:id]]`` は外す（学習者に生の埋め込み記法・内部 ID を
@@ -1262,7 +1349,10 @@ def topic_material_delivery_segments(
     except Exception:  # noqa: BLE001 - 区画が決まらないだけ（配信は止めない）
         logger.warning("topic material segmentation failed", exc_info=True)
         slides, slide_formulas = [], []
-    if len(slides) >= 2:
+    if slides:
+        # 第 25 周 第 3 波（IK-0946 / IK-0944）: 読む表示と講義は同じ契約で受け取る —
+        # 本文は**割った後**（区切り ``===`` を剥がしたスライドの本文）、式はトピック全体。
+        # 1 枚にしか割れないときも全文（区切りが残る）ではなくスライドの本文を使う。
         texts = [str((slide or {}).get("display_text") or "") for slide in slides]
         formulas = list(slide_formulas or [])
     else:

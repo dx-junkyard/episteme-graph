@@ -296,9 +296,11 @@ class TestAppendixNeverShowsInternalEquationIds:
         return result["student_material"]["source_text"]
 
     def test_inline_candidate_is_labelled_by_its_text(self):
-        text = self._material([{"equation_id": "eq_eqcand_inline_blk_9_3_ff", "raw_text": "w0"}])
+        # IK-0872: 付録の対象はトピックに結ばれた式か本文が触れる式だけ。
+        text = self._material([{"equation_id": "eq_eqcand_inline_blk_9_3_ff", "raw_text": "w0"}],
+                              linked=["eq_eqcand_inline_blk_9_3_ff"])
         lines = [line for line in text.splitlines() if line.startswith("- ")]
-        assert lines and lines[0].startswith("- w0:")
+        assert lines and lines[0] == "- w0"  # 根拠のある説明が無い式は説明の行を作らない（IK-0872）
         assert "eqcand" not in "\n".join(lines)
 
     def test_internal_id_without_body_is_dropped(self):
@@ -306,5 +308,6 @@ class TestAppendixNeverShowsInternalEquationIds:
         assert "eqcand" not in text
 
     def test_printed_equation_ids_are_still_shown(self):
-        text = self._material([{"equation_id": "eq_3_14", "latex": "a=b"}])
-        assert "- eq_3_14:" in text and "![[equation:eq_3_14]]" in text
+        text = self._material([{"equation_id": "eq_3_14", "latex": "a=b"}], linked=["eq_3_14"])
+        # 論文の式番号として読める ID は印字番号で呼ぶ（IK-0872）。
+        assert "- 式 (3.14)" in text and "![[equation:eq_3_14]]" in text

@@ -47,6 +47,8 @@ from core.course_data import (
 )
 from core.lecture import (
     auto_paginate_slides,
+    auto_paginate_suppressed,
+    slide_split_notes,
     build_topic_slides,
     count_slide_marker_segments,
     generate_spoken_text_and_formulas,
@@ -590,6 +592,9 @@ class LecturePreviewSplitResponseWithPagination(LecturePreviewSplitResponse):
 
     auto_paginated: bool = False
     spoken_degraded: bool = False
+    # IK-0878: 区切り（===）が自動ページ分割を止めた事実と、理由・揃え方の事実文。
+    auto_paginate_suppressed: bool = False
+    notes: list[str] = []
 
 
 @router.post("/lecture-studio/preview-split")
@@ -619,6 +624,7 @@ def preview_split_slides(
     display_count, spoken_count = count_slide_marker_segments(body.display_text, body.spoken_text)
     auto_paginated = False
     spoken_degraded = False
+    suppressed = bool(body.auto_paginate) and auto_paginate_suppressed(body.display_text, body.spoken_text)
 
     if body.auto_paginate:
         slides, mismatch = auto_paginate_slides(body.display_text, body.spoken_text, body.formulas)
@@ -651,6 +657,15 @@ def preview_split_slides(
         spoken_segment_count=spoken_count,
         auto_paginated=auto_paginated,
         spoken_degraded=spoken_degraded,
+        auto_paginate_suppressed=suppressed,
+        notes=slide_split_notes(
+            suppressed=suppressed,
+            mismatch=mismatch,
+            display_count=display_count,
+            spoken_count=spoken_count,
+            display_text=body.display_text,
+            spoken_text=body.spoken_text,
+        ),
     )
     payload = response.model_dump()
     try:
