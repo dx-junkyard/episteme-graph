@@ -4,7 +4,7 @@
 
 対象は当該 document の **親 component**（``theory_components_live`` のうち
 ``parent_agent_component_id IS NULL``。子の機械名は対象外 — K-8）。3 つの導出を順に
-かけ、先に当たった経路で確定する（同じ component に 2 種類の候補を作らない）:
+かけ（① → ② → ②b → ③）、先に当たった経路で確定する（同じ component に 2 種類の候補を作らない）:
 
 1. **既存 entry への語彙一致** — ``normalize_label(component.name)`` が確定済み
    エントリのラベル（``name`` / ``alternate`` / ``hidden``）と一致 → 同一性リンク候補
@@ -12,11 +12,20 @@
 2. **他 document の component との語彙一致** — 他 document の live 親 component と
    正規化名が一致し、**どちらも entry に結ばれていない** → candidate entry 1 行 +
    同一性リンク候補 2 本（``lexical_match``）。
-3. **chunk-proxy ベクトル近傍** — 親 component の ``primary_chunk_id`` の
+2b. **同じ論文の別の版の部品との材料の一致**（IK-0919）— 先に文書単位で「同じ論文の
+   別の版」（``documents`` の arXiv ID（``source_url`` → ``filename`` → ``source_path``）の
+   一致、または題名の正規化一致。正規化は ``core/paper_discovery/schema.py`` の正本）を
+   解き、その版の live 親 component のうち、根拠の式（``knowledge_equations_live`` の
+   正規化 LaTeX）か根拠の主張（``theory_claims_live`` の正規化本文）を共有するもの →
+   candidate entry + 同一性リンク候補 2 本（``lexical_match``）。**名前を使わない**
+   （TeX 版と PDF 版で LLM が別の名前を付けても当たる）。
+3. **chunk-proxy ベクトル近傍** — 親 component の代表チャンク（``primary_chunk_id`` →
+   ``source_chunks`` → 根拠の主張の ``chunk_id`` の順・上限
+   :data:`IDENTITY_CHUNK_PROXY_MAX_ORIGINS`。IK-0919 で主張経由を追加）の
    ``chunks.embedding`` を代表ベクトルとし、``chunks`` の pgvector 近傍（他 document・
    上位 :data:`core.library.schema.IDENTITY_CHUNK_TOPK`）で
    :data:`core.library.schema.IDENTITY_CHUNK_PROXY_THRESHOLD` 以上のチャンクを
-   ``primary_chunk_id`` / ``source_chunks`` に持つ他 document の live 親 component →
+   同じ 3 経路のどれかに持つ他 document の live 親 component →
    candidate entry + 同一性リンク候補 2 本（``vector_similarity``）。
 
 規則 ④（主張の概念接地・``claim_concept_grounding_design.md`` §7）: 当該 document の
@@ -130,8 +139,17 @@ def _element_ref(component_id: str, document_id: str) -> ElementRef:
 
 _PARENT_COMPONENT_COLUMNS = """
     id::text, document_id::text, name, component_type,
-    primary_chunk_id::text, source_chunks
+    primary_chunk_id::text, source_chunks,
+    evidence_claims, linked_claim_ids, inputs, outputs, linked_equation_ids
 """
+
+
+def _row_at(row: Any, index: int) -> Any:
+    """行の ``index`` 番目（短い行 = 列を足す前の形の行は ``None``）。"""
+    try:
+        return row[index] if len(row) > index else None
+    except TypeError:
+        return None
 
 
 def _row_to_component(row: Any) -> dict:
@@ -142,6 +160,12 @@ def _row_to_component(row: Any) -> dict:
         "component_type": str(row[3] or ""),
         "primary_chunk_id": str(row[4] or ""),
         "source_chunks": schema.as_list(row[5]),
+        # IK-0919: 部品の根拠の主張・式（名前によらない照合の材料）。
+        "evidence_claims": schema.as_list(_row_at(row, 6)),
+        "linked_claim_ids": schema.as_list(_row_at(row, 7)),
+        "inputs": schema.as_list(_row_at(row, 8)),
+        "outputs": schema.as_list(_row_at(row, 9)),
+        "linked_equation_ids": schema.as_list(_row_at(row, 10)),
     }
 
 
@@ -331,6 +355,319 @@ def _chunk_neighbors(
             continue
         out.append((str(row[0]), similarity))
     return out
+
+
+# ---------------------------------------------------------------------------
+# IK-0919: 名前によらない材料（根拠の主張・式・同じ論文の別の版）
+# ---------------------------------------------------------------------------
+
+#: 規則 ③ の起点にする代表チャンクの上限（1 部品あたり。pgvector 近傍の往復を抑える
+#: コード定数 — env では緩めない）。代表 → 出典 → 根拠の主張のチャンクの順に採る。
+IDENTITY_CHUNK_PROXY_MAX_ORIGINS = 4
+#: 規則 ②b で「式が一致した」と数える正規化 LaTeX の最短長（``r`` / ``P`` のような
+#: 記号 1 つの一致を材料にしない）。
+SAME_PAPER_MIN_EQUATION_CHARS = 8
+#: 規則 ②b で「主張の本文が一致した」と数える正規化本文の最短長。
+SAME_PAPER_MIN_CLAIM_CHARS = 24
+
+#: 規則 ②b の事実文（数値なし・**相手の名前を含めない** = KR10。材料だけを言う）。
+SAME_PAPER_REASON_EQUATION = (
+    "同じ論文の別の版（題名または arXiv ID が一致）の部品と、根拠の式が一致しました。"
+)
+SAME_PAPER_REASON_CLAIM = (
+    "同じ論文の別の版（題名または arXiv ID が一致）の部品と、根拠の主張の本文が一致しました。"
+)
+SAME_PAPER_REASON_BOTH = (
+    "同じ論文の別の版（題名または arXiv ID が一致）の部品と、根拠の式と主張の本文が一致しました。"
+)
+#: 候補が空のときに添える事実文（route 層の facts が使う。文言の正本はここ）。
+SAME_PAPER_VERSIONS_NOTE = (
+    "同じ論文の別の版（TeX と PDF など）の部品は、名前が違っても、根拠の式や主張の本文が"
+    "同じなら候補になります。"
+)
+
+_CLAIM_REF_KEYS = ("claim_ids", "evidence_claims", "linked_claim_ids")
+_CLAIM_REF_SCALAR_KEYS = ("claim_id",)
+_EQUATION_REF_KEYS = ("equation_ids", "linked_equation_ids")
+_EQUATION_REF_SCALAR_KEYS = ("equation_id",)
+
+
+def _nested_refs(value: Any, list_keys: tuple[str, ...], scalar_keys: tuple[str, ...]) -> list[str]:
+    """``inputs`` / ``outputs`` の入れ子から参照 ID を集める（順序保持）。"""
+    out: list[str] = []
+    if isinstance(value, list):
+        for item in value:
+            out.extend(_nested_refs(item, list_keys, scalar_keys))
+        return out
+    if not isinstance(value, dict):
+        return out
+    for key in list_keys:
+        for ref in schema.as_list(value.get(key)):
+            if isinstance(ref, str) and _clean(ref):
+                out.append(_clean(ref))
+    for key in scalar_keys:
+        ref = value.get(key)
+        if isinstance(ref, str) and _clean(ref):
+            out.append(_clean(ref))
+    for key, item in value.items():
+        if key in list_keys or key in scalar_keys:
+            continue
+        if isinstance(item, (list, dict)):
+            out.extend(_nested_refs(item, list_keys, scalar_keys))
+    return out
+
+
+def component_claim_refs(component: dict) -> list[str]:
+    """部品の根拠の主張への参照（DB UUID / agent ID のどちらも。重複除去・順序保持）。
+
+    持ち方は ``evidence_claims``（DB UUID に写像済み）・``linked_claim_ids``（agent ID）・
+    ``inputs`` / ``outputs`` の入れ子の ``claim_ids``（写像済み）。
+    """
+    refs: list[str] = []
+    for key in ("evidence_claims", "linked_claim_ids"):
+        for ref in component.get(key) or ():
+            if isinstance(ref, str) and _clean(ref):
+                refs.append(_clean(ref))
+    for key in ("inputs", "outputs"):
+        refs.extend(_nested_refs(component.get(key) or [], _CLAIM_REF_KEYS, _CLAIM_REF_SCALAR_KEYS))
+    return list(dict.fromkeys(refs))
+
+
+def component_equation_refs(component: dict) -> list[str]:
+    """部品の根拠の式への参照（agent equation ID。重複除去・順序保持）。"""
+    refs: list[str] = []
+    for ref in component.get("linked_equation_ids") or ():
+        if isinstance(ref, str) and _clean(ref):
+            refs.append(_clean(ref))
+    for key in ("inputs", "outputs"):
+        refs.extend(
+            _nested_refs(component.get(key) or [], _EQUATION_REF_KEYS, _EQUATION_REF_SCALAR_KEYS)
+        )
+    return list(dict.fromkeys(refs))
+
+
+_CLAIM_MATERIAL_SQL = """
+    SELECT id::text, document_id::text, agent_claim_id, chunk_id::text,
+           normalized_text, text
+      FROM theory_claims_live
+     WHERE document_id = ANY(CAST(:document_ids AS uuid[]))
+       AND (id::text = ANY(:refs) OR agent_claim_id = ANY(:refs))
+"""
+
+
+def load_claim_materials(
+    session: Any, *, document_ids: list[str], refs: list[str]
+) -> dict[tuple[str, str], dict]:
+    """部品が参照する主張の材料 ``{(document_id, ref): claim}``（live ビューのみ = KO5）。
+
+    ``ref`` は DB UUID と agent ID の両方で引けるように 2 つのキーで索く。
+    """
+    doc_ids = sorted({d for d in document_ids if d})
+    ref_list = sorted({r for r in refs if r})
+    if not doc_ids or not ref_list:
+        return {}
+    try:
+        rows = session.execute(
+            sa_text(_CLAIM_MATERIAL_SQL), {"document_ids": doc_ids, "refs": ref_list}
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 材料が引けなくても名前の規則の候補は残す
+        logger.warning("claim material lookup failed (non-fatal)", exc_info=True)
+        return {}
+    index: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        if len(row) < 6:
+            continue
+        claim = {
+            "id": str(row[0] or ""),
+            "document_id": str(row[1] or ""),
+            "agent_claim_id": str(row[2] or ""),
+            "chunk_id": str(row[3] or ""),
+            "normalized_text": str(row[4] or ""),
+            "text": str(row[5] or ""),
+        }
+        for key in (claim["id"], claim["agent_claim_id"]):
+            if key:
+                index.setdefault((claim["document_id"], key), claim)
+    return index
+
+
+def _claims_of(component: dict, claim_index: dict[tuple[str, str], dict]) -> list[dict]:
+    out: list[dict] = []
+    seen: set[str] = set()
+    for ref in component_claim_refs(component):
+        claim = claim_index.get((component["document_id"], ref))
+        if claim is None or claim["id"] in seen:
+            continue
+        seen.add(claim["id"])
+        out.append(claim)
+    return out
+
+
+def component_origin_chunk_ids(
+    component: dict, claim_index: dict[tuple[str, str], dict]
+) -> list[str]:
+    """規則 ③ の起点・照合先のチャンク（代表 → 出典 → 根拠の主張のチャンク。重複除去）。"""
+    ids = _component_chunk_ids(component)
+    for claim in _claims_of(component, claim_index):
+        if claim["chunk_id"]:
+            ids.append(claim["chunk_id"])
+    return [i for i in dict.fromkeys(ids) if i]
+
+
+_DOCUMENT_IDENTITY_SQL = """
+    SELECT id::text, title, filename, source_url, source_path
+      FROM documents
+     WHERE id = ANY(CAST(:document_ids AS uuid[]))
+"""
+
+
+def paper_identity(row: dict) -> tuple[str, str]:
+    """``(arXiv ID, 題名)``（純関数。正規化は paper_discovery の正本）。
+
+    arXiv ID は ``source_url`` → ``filename`` → ``source_path`` の順に、最初に取れたもの。
+    """
+    from core.paper_discovery import schema as pd_schema
+
+    arxiv_id = pd_schema.normalize_arxiv_id(_clean(row.get("source_url"))) or ""
+    if not arxiv_id:
+        for key in ("filename", "source_path"):
+            arxiv_id = pd_schema.arxiv_id_from_filename(_clean(row.get(key)))
+            if arxiv_id:
+                break
+    return arxiv_id, _clean(row.get("title"))
+
+
+def same_paper(a: dict, b: dict) -> bool:
+    """2 つの document が「同じ論文の別の版」か（決定論・非LLM。曖昧なら偽）。
+
+    arXiv ID が両方取れて一致する、または題名が :func:`titles_match`（正規化の完全一致・
+    最短長あり）で一致する。arXiv ID が両方取れて**違う**ときは題名が同じでも偽
+    （同名の別論文を結ばない）。
+    """
+    from core.paper_discovery import schema as pd_schema
+
+    a_id, a_title = paper_identity(a)
+    b_id, b_title = paper_identity(b)
+    if a_id and b_id:
+        return a_id == b_id
+    return bool(pd_schema.titles_match(a_title, b_title))
+
+
+def resolve_same_paper_documents(
+    session: Any, *, document_id: str, candidate_document_ids: list[str]
+) -> set[str]:
+    """``document_id`` と同じ論文の別の版にあたる document の id 集合（自分は含めない）。"""
+    others = sorted({d for d in candidate_document_ids if d and d != document_id})
+    if not document_id or not others:
+        return set()
+    try:
+        rows = session.execute(
+            sa_text(_DOCUMENT_IDENTITY_SQL), {"document_ids": [document_id, *others]}
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        logger.warning("document identity lookup failed (non-fatal)", exc_info=True)
+        return set()
+    by_id: dict[str, dict] = {}
+    for row in rows:
+        if len(row) < 5:
+            continue
+        by_id[str(row[0])] = {
+            "title": row[1], "filename": row[2], "source_url": row[3], "source_path": row[4],
+        }
+    me = by_id.get(document_id)
+    if me is None:
+        return set()
+    return {doc for doc in others if doc in by_id and same_paper(me, by_id[doc])}
+
+
+_EQUATION_MATERIAL_SQL = """
+    SELECT document_id::text, agent_equation_id, latex, plain_text
+      FROM knowledge_equations_live
+     WHERE document_id = ANY(CAST(:document_ids AS uuid[]))
+       AND agent_equation_id = ANY(:refs)
+"""
+
+
+def load_equation_keys(
+    session: Any, *, document_ids: list[str], refs: list[str]
+) -> dict[tuple[str, str], str]:
+    """``{(document_id, agent_equation_id): 正規化 LaTeX}``（live ビューのみ）。"""
+    doc_ids = sorted({d for d in document_ids if d})
+    ref_list = sorted({r for r in refs if r})
+    if not doc_ids or not ref_list:
+        return {}
+    try:
+        rows = session.execute(
+            sa_text(_EQUATION_MATERIAL_SQL), {"document_ids": doc_ids, "refs": ref_list}
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        logger.warning("equation material lookup failed (non-fatal)", exc_info=True)
+        return {}
+    from episteme_graph.agents.content_normalization import normalize_equation_for_hash
+
+    out: dict[tuple[str, str], str] = {}
+    for row in rows:
+        if len(row) < 4:
+            continue
+        key = normalize_equation_for_hash(row[2], row[3])
+        if len(key) >= SAME_PAPER_MIN_EQUATION_CHARS:
+            out[(str(row[0] or ""), str(row[1] or ""))] = key
+    return out
+
+
+def component_material_keys(
+    component: dict,
+    *,
+    claim_index: dict[tuple[str, str], dict],
+    equation_keys: dict[tuple[str, str], str],
+) -> set[tuple[str, str]]:
+    """部品の名前によらない材料 ``{("equation"|"claim", 正規化文字列)}``（純関数）。"""
+    from episteme_graph.agents.content_normalization import normalize_text_for_hash
+
+    keys: set[tuple[str, str]] = set()
+    for ref in component_equation_refs(component):
+        key = equation_keys.get((component["document_id"], ref))
+        if key:
+            keys.add(("equation", key))
+    for claim in _claims_of(component, claim_index):
+        text = normalize_text_for_hash(claim["normalized_text"] or claim["text"])
+        if len(text) >= SAME_PAPER_MIN_CLAIM_CHARS:
+            keys.add(("claim", text))
+    return keys
+
+
+def same_paper_twin(
+    component: dict,
+    *,
+    candidates: list[dict],
+    materials: dict[str, set[tuple[str, str]]],
+    linked: set[str],
+) -> tuple[Optional[dict], set[str]]:
+    """規則 ②b: 同じ論文の別の版の部品のうち、材料を最も多く共有する未リンクの 1 件。
+
+    同点は ``candidates`` の並び（``document_id, created_at, id``）で先勝ち。共有の多さは
+    選ぶためだけに使い、どこにも書かない（KR6）。戻り値の 2 つ目は一致した材料の種類。
+    """
+    mine = materials.get(component["id"]) or set()
+    if not mine:
+        return None, set()
+    best: Optional[dict] = None
+    best_shared: set[tuple[str, str]] = set()
+    for other in candidates:
+        if other["id"] in linked or other["id"] == component["id"]:
+            continue
+        shared = mine & (materials.get(other["id"]) or set())
+        if len(shared) > len(best_shared):
+            best, best_shared = other, shared
+    return best, {kind for kind, _ in best_shared}
+
+
+def _same_paper_reason(kinds: set[str]) -> str:
+    if {"equation", "claim"} <= kinds:
+        return SAME_PAPER_REASON_BOTH
+    if "equation" in kinds:
+        return SAME_PAPER_REASON_EQUATION
+    return SAME_PAPER_REASON_CLAIM
 
 
 # ---------------------------------------------------------------------------
@@ -640,14 +977,52 @@ def _run_component_and_claim_rules(
     entries_by_id, entry_index = _load_confirmed_entry_keys(sess)
     # 規則 ④ は component が 1 つも無い document でも成立する（主張は別に在る）。
     others = load_other_parent_components(sess, doc_id) if parents else []
+    # IK-0919: 根拠の主張（chunk_id・本文）を名前によらない材料として引く（1 クエリ）。
+    claim_index = (
+        load_claim_materials(
+            sess,
+            document_ids=[doc_id] + [o["document_id"] for o in others],
+            refs=[ref for c in [*parents, *others] for ref in component_claim_refs(c)],
+        )
+        if parents
+        else {}
+    )
     others_by_normalized: dict[str, list[dict]] = {}
     others_by_chunk: dict[str, list[dict]] = {}
     for other in others:
         others_by_normalized.setdefault(
             schema.normalize_label(other["name"]), []
         ).append(other)
-        for chunk_id in _component_chunk_ids(other):
+        for chunk_id in component_origin_chunk_ids(other, claim_index):
             others_by_chunk.setdefault(chunk_id, []).append(other)
+
+    # IK-0919 規則 ②b: 先に文書単位で「同じ論文の別の版」を解き、その版の部品とだけ
+    # 式・主張の本文の一致で対にする（名前を使わない）。
+    same_paper_docs = (
+        resolve_same_paper_documents(
+            sess,
+            document_id=doc_id,
+            candidate_document_ids=[o["document_id"] for o in others],
+        )
+        if parents
+        else set()
+    )
+    same_paper_others = [o for o in others if o["document_id"] in same_paper_docs]
+    materials: dict[str, set[tuple[str, str]]] = {}
+    if same_paper_others:
+        equation_keys = load_equation_keys(
+            sess,
+            document_ids=[doc_id, *sorted(same_paper_docs)],
+            refs=[
+                ref
+                for c in [*parents, *same_paper_others]
+                for ref in component_equation_refs(c)
+            ],
+        )
+        for target in [*parents, *same_paper_others]:
+            materials[target["id"]] = component_material_keys(
+                target, claim_index=claim_index, equation_keys=equation_keys
+            )
 
     linked = (
         _linked_component_ids(
@@ -705,6 +1080,17 @@ def _run_component_and_claim_rules(
         twin = _first_unlinked(others_by_normalized.get(normalized), linked)
         justification = schema.JUSTIFICATION_LEXICAL
         similarity: Optional[float] = None
+        reason: Optional[str] = None
+        if twin is None and same_paper_others:
+            # -- 2b. 同じ論文の別の版の部品と、式・主張の本文が一致（IK-0919）--
+            twin, kinds = same_paper_twin(
+                component,
+                candidates=same_paper_others,
+                materials=materials,
+                linked=linked,
+            )
+            if twin is not None:
+                reason = _same_paper_reason(kinds)
         if twin is None:
             # -- 3. chunk-proxy ベクトル近傍 ----------------------------
             twin, similarity = _chunk_proxy_twin(
@@ -712,6 +1098,7 @@ def _run_component_and_claim_rules(
                 component=component,
                 others_by_chunk=others_by_chunk,
                 linked=linked,
+                claim_index=claim_index,
             )
             justification = schema.JUSTIFICATION_VECTOR
         if twin is None:
@@ -733,7 +1120,7 @@ def _run_component_and_claim_rules(
                 target,
                 entry["id"],
                 justification=justification,
-                reason=_twin_reason(justification, component, twin),
+                reason=reason or _twin_reason(justification, component, twin),
                 confidence=target_similarity,
             )
             if link is None:
@@ -802,23 +1189,28 @@ def _chunk_proxy_twin(
     component: dict,
     others_by_chunk: dict[str, list[dict]],
     linked: set[str],
+    claim_index: Optional[dict[tuple[str, str], dict]] = None,
 ) -> tuple[Optional[dict], Optional[float]]:
-    """chunk-proxy 近傍から、まだ entry に結ばれていない他 document の component を 1 件。"""
-    chunk_id = _clean(component.get("primary_chunk_id"))
-    if not chunk_id:
-        return None, None
-    neighbours = _chunk_neighbors(
-        session,
-        chunk_id=chunk_id,
-        document_id=component["document_id"],
-        top_k=schema.IDENTITY_CHUNK_TOPK,
-    )
-    for neighbour_id, similarity in neighbours:
-        if similarity < schema.IDENTITY_CHUNK_PROXY_THRESHOLD:
-            continue
-        twin = _first_unlinked(others_by_chunk.get(neighbour_id), linked)
-        if twin is not None:
-            return twin, similarity
+    """chunk-proxy 近傍から、まだ entry に結ばれていない他 document の component を 1 件。
+
+    起点は代表チャンクだけでなく、出典チャンク・根拠の主張のチャンクも順に使う
+    （IK-0919: 代表チャンクが空の部品でも規則が走る）。上限は
+    :data:`IDENTITY_CHUNK_PROXY_MAX_ORIGINS`。
+    """
+    origins = component_origin_chunk_ids(component, claim_index or {})
+    for chunk_id in origins[:IDENTITY_CHUNK_PROXY_MAX_ORIGINS]:
+        neighbours = _chunk_neighbors(
+            session,
+            chunk_id=chunk_id,
+            document_id=component["document_id"],
+            top_k=schema.IDENTITY_CHUNK_TOPK,
+        )
+        for neighbour_id, similarity in neighbours:
+            if similarity < schema.IDENTITY_CHUNK_PROXY_THRESHOLD:
+                continue
+            twin = _first_unlinked(others_by_chunk.get(neighbour_id), linked)
+            if twin is not None:
+                return twin, similarity
     return None, None
 
 

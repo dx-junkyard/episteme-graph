@@ -238,6 +238,13 @@ def list_labels(
     return [_label_row_to_dict(row) for row in rows]
 
 
+#: 追加系の操作の結果（IK-0897）。``created`` = 新しく記録した / ``existing`` = 既にあった
+#: （変更なし・表示テキストだけ更新しうる）/ ``dismissed`` = 見送り済みの行があり復帰させなかった。
+OUTCOME_CREATED = "created"
+OUTCOME_EXISTING = "existing"
+OUTCOME_DISMISSED = "dismissed"
+
+
 def add_label(
     entry_id: str,
     *,
@@ -279,6 +286,25 @@ def add_label(
 
     with _session_scope(session) as sess:
         _require_not_retired(sess, key)
+        # IK-0897: どの分岐を通ったか（新規 / 既存 / 見送り済み）を呼び出し側へ返す。
+        prior = sess.execute(
+            sa_text(
+                """
+                SELECT status FROM library_entry_labels
+                 WHERE entry_id = CAST(:entry_id AS uuid)
+                   AND kind = :kind AND normalized_label = :normalized_label
+                 LIMIT 1
+                """
+            ),
+            {"entry_id": key, "kind": kind, "normalized_label": normalized},
+        ).fetchone()
+        prior_status = str(prior[0] or "") if prior else ""
+        if not prior_status:
+            outcome = OUTCOME_CREATED
+        elif prior_status == schema.LABEL_STATUS_CONFIRMED:
+            outcome = OUTCOME_EXISTING
+        else:
+            outcome = OUTCOME_DISMISSED
         row = sess.execute(
             sa_text(
                 f"""
@@ -336,8 +362,10 @@ def add_label(
             new_status=result["status"],
             actor_id=actor,
             reason="",
-            metadata={"label_id": result["id"], "kind": kind},
+            metadata={"label_id": result["id"], "kind": kind, "outcome": outcome},
         )
+    # IK-0897: 結果の種類（created / existing / dismissed）を添える（route が取り出す）。
+    result["outcome"] = outcome
     return result
 
 
@@ -535,6 +563,9 @@ def create_relation(
 ) -> dict:
     """概念どうしの関係を1件作る（既定は ``candidate``。KR2）。
 
+    戻り値の ``outcome`` は結果の種類（IK-0897）: 新しく記録した ``created`` / 既に候補・確定
+    として在った ``existing`` / 見送り済みの行があった ``dismissed``。
+
     **リンクであってマージではない**（KR3）— 2行は並存したままで、``name`` も
     ``aliases`` も書き換えない。対称な kind（``related`` / ``exact_match`` /
     ``close_match``）は ``relation_key`` で A—B と B—A を同じ行に畳む。既存行があれば
@@ -607,6 +638,12 @@ def create_relation(
         if row is None:
             raise RegistryError("failed to record the relation")
         result = _relation_row_to_dict(row)
+        if created:
+            outcome = OUTCOME_CREATED
+        elif result.get("status") == schema.CANDIDATE_STATUS_DISMISSED:
+            outcome = OUTCOME_DISMISSED
+        else:
+            outcome = OUTCOME_EXISTING
 
     if created and record_audit is not None:
         record_audit(
@@ -625,6 +662,7 @@ def create_relation(
                 "mapping_justification": result["mapping_justification"],
             },
         )
+    result["outcome"] = outcome
     return result
 
 

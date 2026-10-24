@@ -300,6 +300,7 @@ _NON_INDICATOR_ROUTES: dict[str, str] = {
     "/api/admin/library/entries/{entry_id}/labels": _R_OBJECT,
     "/api/admin/library/relations": _R_OBJECT,
     "/api/admin/library/atlas-links": _R_OBJECT,
+    "/api/admin/library/atlas-links/nodes": _R_OBJECT,  # 地図の概念の名前検索（IK-0927・集約なし）
     # 教員が確定するための同一性候補（candidate entry + 同一性リンク）そのものの提示。
     # 返す数値は「閲覧できない論文を何本隠したか」（hidden_count）だけで、これは
     # 集約値ではなく**隠し方の事実**（W-β と同じ扱い）。
@@ -362,6 +363,9 @@ _TRIAGED_AS_INDICATORS = (
 #: 本人だけが自分の記録を読む経路は `_get_current_user` で足りるため、ここに宣言する。
 _NON_ROLE_GATED_INDICATOR_ROUTES = {
     "/api/me/records": "本人のみが自分の記録を読む（ロールゲートではなく本人ゲート）",
+    "/api/learning/courses/{course_id}/components/{component_id}/explanations": (
+        "受講者が受講しているコースに届いた説明の段階の言葉を読む（受講ゲート。IK-0926）"
+    ),
 }
 
 

@@ -148,6 +148,9 @@ KNOWN_FEATURES = (
     # --- 埋め込み ---
     "embedding:chunks",
     "embedding:library_search",
+    # W層「共通部品と結びつける」の検索（IK-0928。core/library/search.py の
+    # FEATURE_SHARED_PART_SEARCH。embedding: プレフィックスで scene 対象外 = M5）。
+    "embedding:shared_part_search",
     # help_kb ベクトル補助層（Phase 3 ①、正本 docs/features/manual_help_kb_design.md
     # §5）。core/help_kb/vector.py::sync_manual_vectors が凍結節を埋め込む際に使う。
     "admin:help_kb_embed",

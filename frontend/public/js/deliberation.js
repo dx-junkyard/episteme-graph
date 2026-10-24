@@ -1796,8 +1796,8 @@
   }
 
   // ── N2: 手動リンク作成（共通部品の候補検索 → candidate 作成）────────────────
-  // 検索は GET .../shared-part-candidates（domain はサーバ側で document → cartridge_id
-  // から決定論的に解決。フロントは domain を知らない）。作成は既存の
+  // 検索は GET .../shared-part-candidates（domain はサーバ側で run → コース → 配置の段順に
+  // 解決。決められないときだけ選択肢を返し、教員の選択を domain_key で送る — IK-0890）。作成は既存の
   // POST /identity-links（常に candidate・確定は既存 UI）。数値は表示しない（W8）。
   function _bindIdentityLinkSearch(ref) {
     var openBtn = document.getElementById("deliberation-identity-link-open-search");
@@ -1841,6 +1841,9 @@
       params.push("document_id=" + encodeURIComponent(ref.documentId));
     }
     if (q) params.push("q=" + encodeURIComponent(q));
+    // IK-0890: 教員が選んだ分野はサーバの推定より優先する。
+    var selectedDomain = results.getAttribute("data-selected-domain") || "";
+    if (selectedDomain) params.push("domain_key=" + encodeURIComponent(selectedDomain));
     if (params.length) path += "?" + params.join("&");
     apiFetch(path)
       .then(_parseJsonResponse)
@@ -1868,17 +1871,45 @@
     '</div>';
   }
 
+  // IK-0890: 分野の選択欄。サーバが分野を 1 つに決められない（複数・未定）とき、
+  // または教員が選び直したいときに出す。表示名はサーバが返す domain_label のみ。
+  function _sharedPartDomainSelectHtml(data) {
+    var domains = data.domains || [];
+    if (!domains.length) return "";
+    var current = data.domain_key || "";
+    var options = (current ? "" : '<option value="">分野を選んでください</option>') +
+      domains.map(function (d) {
+        var key = d.domain_key || "";
+        return '<option value="' + escHtml(key) + '"' + (key === current ? " selected" : "") + '>' +
+          escHtml(d.domain_label || "名前の登録が無い分野") + '</option>';
+      }).join("");
+    return '<label class="deliberation-identity-domain">探す分野: ' +
+      '<select data-identity-domain-select="1">' + options + '</select></label>';
+  }
+
+  function _bindSharedPartDomainSelect(ref, results) {
+    var sel = results.querySelector("[data-identity-domain-select]");
+    if (!sel) return;
+    sel.addEventListener("change", function () {
+      results.setAttribute("data-selected-domain", sel.value || "");
+      if (sel.value) _searchSharedPartCandidates(ref);
+    });
+  }
+
   function _renderSharedPartCandidates(ref, data) {
     var results = document.getElementById("deliberation-identity-search-results");
     if (!results) return;
     var entries = data.entries || [];
+    var domainHtml = _sharedPartDomainSelectHtml(data);
     if (!entries.length) {
       // 事実文のみ（0件は正常状態。煽らない・数値を出さない）。
-      results.innerHTML = '<p class="deliberation-identity-empty">' +
+      results.innerHTML = domainHtml + '<p class="deliberation-identity-empty">' +
         escHtml(data.note || "同分野の共通部品が見つかりません。") + '</p>';
+      _bindSharedPartDomainSelect(ref, results);
       return;
     }
-    results.innerHTML = entries.map(_sharedPartCandidateRowHtml).join("");
+    results.innerHTML = domainHtml + entries.map(_sharedPartCandidateRowHtml).join("");
+    _bindSharedPartDomainSelect(ref, results);
     Array.prototype.forEach.call(results.querySelectorAll("[data-identity-create]"), function (btn) {
       btn.addEventListener("click", function () {
         var row = btn.closest(".deliberation-identity-link-row");
@@ -1905,9 +1936,11 @@
       body: JSON.stringify(body)
     })
       .then(_parseJsonResponse)
-      .then(function () {
+      .then(function (result) {
         var note = document.getElementById("deliberation-identity-search-note");
-        if (note) note.textContent = "候補を作成しました。上の一覧から確定・却下できます。";
+        // IK-0918: 新規・既存（候補 / 確定済み / 却下済み）の事実文はサーバが返す（素通し）。
+        var facts = (result && result.facts) || [];
+        if (note) note.textContent = facts.filter(function (f) { return !!f; }).join(" ");
         // 作成済み（または既存）の候補を一覧に反映する。
         _loadIdentityLinks(ref);
         Array.prototype.forEach.call(buttons, function (b) { b.disabled = false; });
@@ -1942,12 +1975,26 @@
             (link.shared_part_summary ? '｜' + escHtml(link.shared_part_summary) : '') +
           '</div>'
         : '') +
+      // IK-0916 / IK-0917: 結んだ相手（部品側）は名前・要約・入出力・論文の題名で描く。
+      // 内部の要素型名・UUID は本文に出さず title 属性にだけ残す。
       (link.instance_element_type
-        ? '<div class="deliberation-annotation-reason">インスタンス: ' + escHtml(link.instance_element_type) +
-          (link.instance_document_id ? ' / ' + escHtml(link.instance_document_id) : '') + '</div>'
+        ? '<div class="deliberation-annotation-reason deliberation-identity-instance" title="' +
+            escHtml((link.instance_element_type || "") + " " + (link.instance_element_id || "")) + '">' +
+            escHtml(link.instance_type_label || "要素") + ': ' +
+            escHtml(link.instance_label || "（名前を読めませんでした）") +
+            (link.instance_summary ? '｜' + escHtml(link.instance_summary) : '') +
+            (link.instance_document_title ? '（論文『' + escHtml(link.instance_document_title) + '』）' : '') +
+            ((link.instance_inputs && link.instance_inputs.length)
+              ? '<div class="deliberation-identity-io">入力: ' + escHtml(link.instance_inputs.join(" ／ ")) + '</div>' : '') +
+            ((link.instance_outputs && link.instance_outputs.length)
+              ? '<div class="deliberation-identity-io">出力: ' + escHtml(link.instance_outputs.join(" ／ ")) + '</div>' : '') +
+          '</div>'
         : '') +
       (link.reason ? '<div class="deliberation-annotation-reason">' + escHtml(link.reason) + '</div>' : '') +
+      (link.provenance_label ? '<span class="deliberation-identity-provenance">' + escHtml(link.provenance_label) + '</span>' : '') +
       (link.confidence_label ? '<span class="deliberation-annotation-confidence">' + escHtml(link.confidence_label) + '</span>' : '') +
+      (pending && link.confirm_note
+        ? '<p class="deliberation-identity-confirm-note">' + escHtml(link.confirm_note) + '</p>' : '') +
       (pending
         ? '<div class="deliberation-annotation-actions" data-ui-anchor="deliberation.identity-link-decide">' +
             '<button type="button" class="deliberation-annotation-btn commit" data-identity-action="confirm" data-ui-anchor="deliberation.identity-link-decide">確定</button>' +

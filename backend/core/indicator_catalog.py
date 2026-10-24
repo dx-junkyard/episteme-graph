@@ -774,6 +774,34 @@ _SPECS: tuple[IndicatorSpec, ...] = (
         consumer="api/routes/theory_components.py::sharing_dashboard",
         design_doc="docs/features/admin.md",
     ),
+    IndicatorSpec(
+        id="explanation-support-label",
+        label="説明への教員の支持（段階ラベル）",
+        definition=(
+            "部品の説明に添える「2名の教員が支持」のような段階の言葉です。"
+            "数えるのは、その説明を支持した教員のうち**説明を書いた本人を除き**、"
+            "**支持を取り消した人を除いた**人数です（書いた本人の支持も記録には残りますが、"
+            "人数には数えません）。暫定の支持だけなら「暫定的に」、強い支持があれば"
+            "「強い支持」、専門タグが2分野以上なら分野の広がりを添えます。"
+            "学習者が受講しているコースに届いた説明について、その学習者が読みます。"
+            "点数・順位は返しません。"
+        ),
+        purpose=(
+            "学習者が、説明がほかの教員にどれだけ支持されているかを知るため。"
+            "説明の正しさの判定や、教員・学習者の評価には使いません。"
+        ),
+        values_audience=AUDIENCE_LEARNER_SELF,
+        granularity=GRANULARITY_PER_ITEM_ATTRIBUTED,
+        source="component_endorsements（著者・取り消しを除く）/ component_explanations（migration 021）",
+        retention=(
+            "支持の取り消しは行削除ではなく取り消し状態への遷移で残ります。"
+            "段階の言葉は保存せず、読むたびに導出します。"
+        ),
+        k_anonymity=False,
+        route="/api/learning/courses/{course_id}/components/{component_id}/explanations",
+        consumer="core/explanation_governance.py::COUNTED_ENDORSEMENT_SUMMARY_SQL",
+        design_doc="docs/features/indicator_governance_design.md",
+    ),
     # -- 配置層（知識ランドスケープ） --------------------------------------
     IndicatorSpec(
         id="landscape-overview",

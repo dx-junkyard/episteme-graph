@@ -81,7 +81,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
@@ -112,6 +112,7 @@ from core.deliberation.schema import (
     ELEMENT_SHARED_PART,
     DIALOGUE_SESSION_ELEMENT_TYPES,
     IDENTITY_LINKABLE_ELEMENT_TYPES,
+    IDENTITY_LINK_STATUS_CANDIDATE,
     IDENTITY_LINK_STATUS_CONFIRMED,
     IDENTITY_LINK_STATUS_REJECTED,
     SCOPE_DOCUMENT,
@@ -193,7 +194,22 @@ def _identity_link_response(link: dict[str, Any]) -> dict[str, Any]:
     """
     response = dict(link)
     raw_confidence = response.pop("confidence", None)
-    response["confidence_label"] = identity_links.confidence_label(raw_confidence)
+    response.pop("outcome", None)  # 作成の結果は create のレスポンス本体で別に返す（IK-0918）
+    # IK-0916: 確信度の段階は AI・照合由来の未確定の行だけ。手で作った行・人が判断した
+    # 行には段階を付けず、出所（教員が作成 / 教員が確定）を別の語で返す。
+    response["confidence_label"] = (
+        identity_links.confidence_label(raw_confidence)
+        if identity_links.shows_confidence(link)
+        else None
+    )
+    response["provenance_label"] = identity_links.provenance_label(link)
+    # IK-0916 / IK-0917: 結んだ相手（部品側）を名前・要約・入出力・論文の題名で読めるようにする。
+    try:
+        response.update(identity_links.describe_instance(link))
+    except Exception:  # noqa: BLE001 — 表示の補助（fail-soft）
+        logger.warning("deliberation: instance describe failed", exc_info=True)
+    if str(link.get("status") or "") == IDENTITY_LINK_STATUS_CANDIDATE:
+        response["confirm_note"] = identity_links.CONFIRM_NOTE
     shared_part_id = str(link.get("shared_part_id") or "").strip()
     if shared_part_id:
         try:
@@ -585,6 +601,7 @@ class IdentityLinkCreateRequest(BaseModel):
 @router.post("/identity-links")
 def create_identity_link(
     body: IdentityLinkCreateRequest,
+    response: Response,
     current_user: dict = Depends(_require_teacher),
 ) -> dict[str, Any]:
     """インスタンス要素 ↔ 共通部品（shared_part）の同一性リンク候補を1件作成する。
@@ -621,21 +638,30 @@ def create_identity_link(
         # KR4（概念レジストリ §4.6）: W層 UI からの手動作成は教員の判断そのもの。
         mapping_justification=MAPPING_JUSTIFICATION_MANUAL,
     )
-    record_review_event(
-        AUDIT_ENTITY_DELIBERATION,
-        link["id"],
-        "",
-        link["status"],
-        current_user.get("id"),
-        {
-            "action": "identity_link.create",
-            "instance_element_type": instance_ref.element_type,
-            "instance_element_id": instance_ref.element_id,
-            "instance_document_id": instance_ref.document_id,
-            "shared_part_id": shared_part_ref.element_id,
-        },
-    )
-    return _identity_link_response(link)
+    outcome = str(link.get("outcome") or identity_links.LINK_OUTCOME_CREATED)
+    if outcome == identity_links.LINK_OUTCOME_CREATED:
+        # 監査は状態が変わったときだけ（既存行を返しただけなら記帳しない）。
+        record_review_event(
+            AUDIT_ENTITY_DELIBERATION,
+            link["id"],
+            "",
+            link["status"],
+            current_user.get("id"),
+            {
+                "action": "identity_link.create",
+                "instance_element_type": instance_ref.element_type,
+                "instance_element_id": instance_ref.element_id,
+                "instance_document_id": instance_ref.document_id,
+                "shared_part_id": shared_part_ref.element_id,
+            },
+        )
+        response.status_code = 201
+    # IK-0918: 新規・既存（候補のまま / 確定済み / 却下済み）を事実文で言い分ける。
+    # 既存のキー集合は保ったまま outcome / facts を足す（追加のみ）。
+    payload = _identity_link_response(link)
+    payload["outcome"] = outcome
+    payload["facts"] = [identity_links.LINK_OUTCOME_FACTS.get(outcome, "")]
+    return payload
 
 
 def _decide_identity_link(link_id: str, status: str, current_user: dict) -> dict[str, Any]:
@@ -723,6 +749,10 @@ def list_shared_part_candidates_for_element(
         default="",
         description="検索テキスト。空なら対象要素の内訳（label・text 等）から自動で組み立てる。",
     ),
+    domain_key: str = Query(
+        default="",
+        description="教員が選んだ分野（IK-0890）。指定があればサーバの推定より優先する。",
+    ),
     current_user: dict = Depends(_require_teacher),
 ) -> dict[str, Any]:
     """手動の同一性リンク作成用: 同分野の類似 library_entries 候補を返す（N2）。
@@ -750,13 +780,38 @@ def list_shared_part_candidates_for_element(
     _require_identity_linkable(ref.element_type)
     _ensure_document_viewable(ref.document_id or "", current_user)
 
-    domain_key = dialogue.document_domain_key(ref.document_id or "")
-    if not domain_key:
+    # IK-0890: 分野は「教員の選択 > 解析 run > コース > 配置」の段順で決める。
+    # 複数・ゼロのときはサーバが黙って決めず、分野の選択肢（表示名付き）を返す。
+    resolved_keys, domain_source = dialogue.resolve_document_domains(ref.document_id or "")
+    selected = str(domain_key or "").strip()
+    domain_choices = _shared_part_domain_choices(resolved_keys)
+    if selected:
+        if selected not in {c["domain_key"] for c in domain_choices}:
+            raise HTTPException(status_code=422, detail="選んだ分野が見つかりません。")
+        domain_key = selected
+        domain_source = SHARED_PART_DOMAIN_SOURCE_SELECTED
+    elif len(resolved_keys) == 1:
+        domain_key = resolved_keys[0]
+    else:
         return {
             "domain_key": "",
+            "domain_label": "",
+            "domain_source": domain_source,
+            "domains": domain_choices,
             "entries": [],
-            "note": "この教材の分野（カートリッジ）が特定できないため、共通部品を検索できません。",
+            "note": (
+                SHARED_PART_DOMAIN_NOTE_MULTIPLE if resolved_keys else SHARED_PART_DOMAIN_NOTE_UNDECIDED
+            ),
         }
+    domain_label = next(
+        (c["domain_label"] for c in domain_choices if c["domain_key"] == domain_key), ""
+    )
+    base: dict[str, Any] = {
+        "domain_key": domain_key,
+        "domain_label": domain_label,
+        "domain_source": domain_source,
+        "domains": domain_choices,
+    }
 
     query_text = (q or "").strip()
     if not query_text:
@@ -765,11 +820,7 @@ def list_shared_part_candidates_for_element(
         except ElementResolutionError as exc:
             raise _http_from_resolution_error(exc) from exc
     if not query_text:
-        return {
-            "domain_key": domain_key,
-            "entries": [],
-            "note": "検索テキストを入力してください。",
-        }
+        return {**base, "entries": [], "note": "検索テキストを入力してください。"}
 
     settings = get_settings()
     top_k = int(getattr(settings, "deliberation_identity_candidates_top_k", 5))
@@ -778,6 +829,9 @@ def list_shared_part_candidates_for_element(
         text=query_text,
         entry_type=dialogue.identity_entry_type_for_element(ref.element_type),
         top_k=top_k,
+        # IK-0928: 教員の検索の埋め込みを U層の機能に帰属させる。
+        feature=library_search.FEATURE_SHARED_PART_SEARCH,
+        user_id=current_user.get("id"),
     )
     entries = [
         {
@@ -789,10 +843,54 @@ def list_shared_part_candidates_for_element(
         for hit in hits
         if hit.get("entry_id")
     ]
-    response: dict[str, Any] = {"domain_key": domain_key, "entries": entries}
+    response: dict[str, Any] = {**base, "entries": entries}
     if not entries:
         response["note"] = "同分野の共通部品が見つかりません。"
     return response
+
+
+#: 分野の出所: 教員が選んだ（IK-0890。``dialogue.DOMAIN_SOURCE_*`` と並ぶ）。
+SHARED_PART_DOMAIN_SOURCE_SELECTED = "selected"
+#: 分野が決まっていない教材（解析・コース・配置のどれにも分野が無い）の事実文。
+SHARED_PART_DOMAIN_NOTE_UNDECIDED = "この教材は分野が決まっていません。分野を選ぶと共通部品を探せます。"
+#: 複数の分野に関わる教材の事実文。
+SHARED_PART_DOMAIN_NOTE_MULTIPLE = "この教材は複数の分野に関わっています。分野を選ぶと共通部品を探せます。"
+
+
+def _shared_part_domain_choices(resolved_keys: list[str]) -> list[dict[str, str]]:
+    """共通部品を探せる分野の選択肢（表示名付き・ライブラリの分野一覧と同じ表示名）。
+
+    並びは「この教材に当たった分野 → ライブラリにエントリがある分野」。fail-soft。
+    """
+    keys: list[str] = [k for k in resolved_keys if k]
+    try:
+        for d in library_store.domain_summary():
+            key = str(d.get("domain_key") or "").strip()
+            if key and key not in keys:
+                keys.append(key)
+    except Exception:  # noqa: BLE001 — 一覧が引けなくても当たった分野は出す
+        logger.debug("library domain summary unavailable", exc_info=True)
+    choices: list[dict[str, str]] = []
+    try:
+        from core.atlas_state import domain_display_name
+        from core.library import schema as _lib_schema
+        from core.postgres import get_session as _get_session
+
+        session = _get_session()
+        try:
+            for key in keys:
+                label = (
+                    _lib_schema.DOMAIN_UNASSIGNED_LABEL
+                    if key == _lib_schema.DOMAIN_KEY_UNASSIGNED
+                    else domain_display_name(session, key)
+                )
+                choices.append({"domain_key": key, "domain_label": label})
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001
+        logger.debug("domain labels unavailable", exc_info=True)
+        choices = [{"domain_key": k, "domain_label": ""} for k in keys]
+    return choices
 
 
 @router.get("/shared-parts/{shared_part_id}/identity-links")

@@ -94,6 +94,33 @@ def _row_to_dict(row: Any) -> dict:
     }
 
 
+#: 候補作成の結果の種類（IK-0918。IK-0897 のラベル追加と同じ作法）。新しく作った
+#: ``created`` / 既にあった（候補のまま・確定済み・却下済み）を言い分ける。
+LINK_OUTCOME_CREATED = "created"
+LINK_OUTCOME_EXISTING_CANDIDATE = "existing_candidate"
+LINK_OUTCOME_EXISTING_CONFIRMED = "existing_confirmed"
+LINK_OUTCOME_EXISTING_REJECTED = "existing_rejected"
+LINK_OUTCOMES = (
+    LINK_OUTCOME_CREATED,
+    LINK_OUTCOME_EXISTING_CANDIDATE,
+    LINK_OUTCOME_EXISTING_CONFIRMED,
+    LINK_OUTCOME_EXISTING_REJECTED,
+)
+_EXISTING_OUTCOME_BY_STATUS = {
+    "candidate": LINK_OUTCOME_EXISTING_CANDIDATE,
+    "confirmed": LINK_OUTCOME_EXISTING_CONFIRMED,
+    "rejected": LINK_OUTCOME_EXISTING_REJECTED,
+}
+
+#: 結果の事実文（正本はサーバ。JS は素通しで描く）。
+LINK_OUTCOME_FACTS = {
+    LINK_OUTCOME_CREATED: "結び付きの候補を作成しました。上の一覧で両側の意味を見比べて確定・却下できます。",
+    LINK_OUTCOME_EXISTING_CANDIDATE: "この部品と共通部品の結び付きは既に候補としてあります。新しくは作っていません。",
+    LINK_OUTCOME_EXISTING_CONFIRMED: "この部品と共通部品の結び付きは既に確定済みです。新しくは作っていません。",
+    LINK_OUTCOME_EXISTING_REJECTED: "この部品と共通部品の結び付きは以前に却下されています。新しくは作っていません（却下は取り消していません）。",
+}
+
+
 def create_candidate(
     instance_ref: ElementRef,
     shared_part_id: str,
@@ -187,7 +214,9 @@ def create_candidate(
                 "mapping_justification": justification,
             },
         ).fetchone()
+        outcome = LINK_OUTCOME_CREATED
         if row is None:
+            outcome = LINK_OUTCOME_EXISTING_CANDIDATE  # 状態は読み直した行で確定する
             # 衝突 → 既存行を読み直す（上書きしない・P4）。instance_document_id も
             # 一致条件に含める（別論文の同一 element_id を誤って返さないため）。
             row = session.execute(
@@ -213,7 +242,12 @@ def create_candidate(
         raise
     finally:
         session.close()
-    return _row_to_dict(row)
+    result = _row_to_dict(row)
+    if outcome != LINK_OUTCOME_CREATED:
+        # IK-0918: 既存行を返すときは、その行の状態で結果の種類を言い分ける。
+        outcome = _EXISTING_OUTCOME_BY_STATUS.get(result.get("status") or "", LINK_OUTCOME_EXISTING_CANDIDATE)
+    result["outcome"] = outcome
+    return result
 
 
 def get_by_id(link_id: str) -> dict | None:
@@ -371,3 +405,170 @@ def confirmed_links_for_document(document_id: str) -> list[dict]:
     finally:
         session.close()
     return [_row_to_dict(r) for r in rows]
+
+
+# ── 結んだ相手（インスタンス側）の読める表示（IK-0916 / IK-0917）─────────────────
+#: インスタンス側の要素型 → 教員向けの呼び名。内部の型名（``theory_component`` 等）を
+#: 画面に出さないための写像（同一性リンクの行専用。学習者向けの呼び名とは用途が違う）。
+INSTANCE_TYPE_DISPLAY: dict[str, str] = {
+    "theory_component": "部品",
+    "theory_claim": "主張",
+    "equation": "式",
+    "figure": "図",
+    "symbol": "記号",
+    "theory_module": "理論モジュール",
+}
+
+#: AI・決定論の照合が作った行（確信度の段階に意味がある行）。手で作った行・人が判断した
+#: 行には確信度の段階を付けない（IK-0916: 「暫定」と「確定」が並んで矛盾して読める）。
+MACHINE_JUSTIFICATIONS = frozenset(
+    {"llm_candidate", "vector_similarity", "lexical_match", "structural_match", "corpus_cooccurrence"}
+)
+
+#: 行の出所（人の判断の状態）の事実語。確信度の段階とは別の位置に描く。
+PROVENANCE_CONFIRMED = "教員が確定"
+PROVENANCE_REJECTED = "教員が却下"
+PROVENANCE_TEACHER_CREATED = "教員が作成（未確定）"
+PROVENANCE_MACHINE_CANDIDATE = "照合による候補（未確定）"
+
+#: 確定の直前に添える事実文（IK-0917: 判断材料を弁の位置に置く）。
+CONFIRM_NOTE = (
+    "確定すると、この 2 つを同じものとして扱います。学生の画面では、この部品の文脈の"
+    "「共通部品」に左の共通部品が出ます。部品が共通部品を使う・満たすだけの関係なら、"
+    "同じものではないので確定しないでください。"
+)
+
+_SUMMARY_LIMIT = 160
+_IO_LIMIT = 3
+
+
+def shows_confidence(link: dict) -> bool:
+    """確信度の段階を描いてよい行か（AI・照合由来の未確定の行だけ）。"""
+    return (
+        str(link.get("status") or "") == IDENTITY_LINK_STATUS_CANDIDATE
+        and str(link.get("mapping_justification") or "") in MACHINE_JUSTIFICATIONS
+    )
+
+
+def provenance_label(link: dict) -> str:
+    status = str(link.get("status") or "")
+    if status == "confirmed":
+        return PROVENANCE_CONFIRMED
+    if status == "rejected":
+        return PROVENANCE_REJECTED
+    if str(link.get("mapping_justification") or "") in MACHINE_JUSTIFICATIONS:
+        return PROVENANCE_MACHINE_CANDIDATE
+    return PROVENANCE_TEACHER_CREATED
+
+
+def _io_texts(value: Any) -> list[str]:
+    items = value if isinstance(value, list) else []
+    texts: list[str] = []
+    for item in items:
+        text = ""
+        if isinstance(item, dict):
+            text = str(item.get("text") or item.get("name") or item.get("label") or "").strip()
+        elif isinstance(item, str):
+            text = item.strip()
+        if text:
+            texts.append(text[:60])
+        if len(texts) >= _IO_LIMIT:
+            break
+    return texts
+
+
+def describe_instance(link: dict) -> dict[str, Any]:
+    """リンクのインスタンス側を読める形で返す（fail-soft・取れないキーは空文字）。
+
+    戻り値: ``instance_type_label`` / ``instance_label`` / ``instance_summary`` /
+    ``instance_inputs`` / ``instance_outputs`` / ``instance_document_title``。
+    内部 ID・UUID は返さない（UI は title 属性に生 ID を残すだけ）。
+    """
+    element_type = str(link.get("instance_element_type") or "")
+    element_id = str(link.get("instance_element_id") or "")
+    document_id = str(link.get("instance_document_id") or "")
+    out: dict[str, Any] = {
+        "instance_type_label": INSTANCE_TYPE_DISPLAY.get(element_type, "要素"),
+        "instance_label": "",
+        "instance_summary": "",
+        "instance_inputs": [],
+        "instance_outputs": [],
+        "instance_document_title": "",
+    }
+    session = None
+    try:
+        session = get_session()
+        if document_id:
+            row = session.execute(
+                sa_text("SELECT title FROM documents WHERE id = CAST(:id AS uuid)"),
+                {"id": document_id},
+            ).fetchone()
+            if row and row[0]:
+                out["instance_document_title"] = str(row[0])
+        if element_type == "theory_component":
+            row = session.execute(
+                sa_text(
+                    "SELECT name, summary, inputs, outputs FROM theory_components_live "
+                    "WHERE id = CAST(:id AS uuid) LIMIT 1"
+                ),
+                {"id": element_id},
+            ).fetchone()
+            if row:
+                out["instance_label"] = str(row[0] or "")
+                out["instance_summary"] = str(row[1] or "")[:_SUMMARY_LIMIT]
+                out["instance_inputs"] = _io_texts(row[2])
+                out["instance_outputs"] = _io_texts(row[3])
+        elif element_type == "theory_claim":
+            row = session.execute(
+                sa_text("SELECT text FROM theory_claims_live WHERE id = CAST(:id AS uuid) LIMIT 1"),
+                {"id": element_id},
+            ).fetchone()
+            if row:
+                out["instance_label"] = str(row[0] or "")[:_SUMMARY_LIMIT]
+        elif element_type == "figure":
+            row = session.execute(
+                sa_text(
+                    "SELECT figure_label, caption_text FROM document_figures "
+                    "WHERE id = CAST(:id AS uuid) LIMIT 1"
+                ),
+                {"id": element_id},
+            ).fetchone()
+            if row:
+                out["instance_label"] = str(row[0] or "")
+                out["instance_summary"] = str(row[1] or "")[:_SUMMARY_LIMIT]
+        elif element_type == "theory_module":
+            row = session.execute(
+                sa_text(
+                    "SELECT label FROM knowledge_theory_modules_live "
+                    "WHERE id = CAST(:id AS uuid) LIMIT 1"
+                ),
+                {"id": element_id},
+            ).fetchone()
+            if row:
+                out["instance_label"] = str(row[0] or "")
+    except Exception:  # noqa: BLE001 — 表示の補助。取れなければ空のまま（fail-soft）
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+    finally:
+        if session is not None:
+            session.close()
+    if not out["instance_label"] and element_type == "equation" and document_id:
+        try:
+            from core.deliberation import labels as _labels
+            from core.deliberation.refs import equation_records
+
+            for record in equation_records(document_id):
+                if str(record.get("equation_id") or "") == element_id:
+                    out["instance_label"] = _labels.equation_label(record).text
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+    if not out["instance_label"] and element_type == "symbol":
+        canonical = ""
+        local = link.get("local_expression") if isinstance(link.get("local_expression"), dict) else {}
+        canonical = str(local.get("notation") or local.get("label") or "")
+        out["instance_label"] = canonical
+    return out

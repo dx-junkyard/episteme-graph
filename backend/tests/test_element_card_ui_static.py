@@ -482,7 +482,8 @@ class TestMathGateIsInternal:
         block = src[start : src.index("\n  }", start)]
         assert "ELEMENT_TYPE_SYMBOL" in block
         assert "renderMathGated(ctx, label, false, true)" in block
-        assert "if (!labelHtml) labelHtml = ctx.esc(label);" in block
+        # IK-0898: 素のテキスト表示は $…$ の区間だけ数式にする共通関数を通る（区間が無ければ esc と同じ）。
+        assert "if (!labelHtml) labelHtml = textWithDelimitedMathHtml(ctx, label);" in block
 
 
 class TestIntrinsicBlock:
@@ -743,8 +744,8 @@ class TestFigureContextReadability:
         assert 'if (fullText === label) fullText = "";' in block
         assert "element-card-item-fulltext" in block
         # 全文があれば全文、無ければ従来どおりラベル（記号はゲート経由）。
-        assert "labelHtml = ctx.esc(fullText);" in block
-        assert "if (!labelHtml) labelHtml = ctx.esc(label);" in block
+        assert "labelHtml = textWithDelimitedMathHtml(ctx, fullText);" in block
+        assert "if (!labelHtml) labelHtml = textWithDelimitedMathHtml(ctx, label);" in block
         # 主文は element-card-item-label クラスを保つ（ナビゲーションの下線が効く）。
         assert 'var labelCls = "element-card-item-label";' in block
         # label 自体は書き換えない（他の消費者と共有の見出し）。

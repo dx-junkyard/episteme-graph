@@ -504,6 +504,8 @@ IDENTITY_CHUNK_TOPK = 8
 #: いう事実**をこのキーで持つ。候補導出（``atlas_links`` / ``identity_candidates``）は
 #: この値を実在する分野名として扱わない。
 DOMAIN_KEY_UNASSIGNED = "unassigned"
+#: 「分野を限らない」共通の部品（``domain_key='unassigned'``）の表示語（正本。routes/library・W層が使う）。
+DOMAIN_UNASSIGNED_LABEL = "分野を限らない（共通）"
 
 
 # ---------------------------------------------------------------------------

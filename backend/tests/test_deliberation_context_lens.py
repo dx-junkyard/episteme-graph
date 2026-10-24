@@ -553,7 +553,10 @@ class TestThesisContextUpperItems:
     def test_missing_thesis_artifact_degrades_to_headline_default(self):
         thesis_context = {"supports_thesis_node_ids": ["central_thesis", "support:direct_supports:1"]}
         items = context_lens._thesis_context_upper_items(None, thesis_context, "doc-1")
-        assert [i["label"] for i in items] == ["中心命題", "支持構造「直接支持」"]
+        # IK-0871: 本文の無い中心命題は種類名だけの項目にしない。
+        assert [i["label"] for i in items] == [
+            context_lens.CENTRAL_THESIS_WITHOUT_TEXT_LABEL, "支持構造「直接支持」"
+        ]
 
     def test_unknown_node_id_form_is_kept_not_guessed(self):
         thesis_context = {"supports_thesis_node_ids": ["weird_ref_x"]}

@@ -37,12 +37,14 @@ equation に裏付けられ、共通部品（L層）や周辺構造（W層 conte
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
 from core import learner_context_common
+from core.display_projection import contains_pipeline_policy_token
 from core.focus_document import resolve_in_focus, unique_row_lookup
 from core.learner_context_common import (  # noqa: F401  (旧名の再エクスポート)
     PROVENANCE_COURSE_FREEZE,
@@ -144,6 +146,54 @@ def _resolve_component_row(
     )
 
 
+def resolve_course_component_id(
+    component_id: str,
+    course_document_ids: set[str],
+    preferred_document_ids: "tuple[str, ...] | list[str] | set[str] | None" = None,
+) -> str | None:
+    """component_id（DB UUID / agent ID）をコースの document 集合内で DB UUID に解決する。
+
+    C層の学生向け説明一覧（IK-0861）が、agent ID を UUID に CAST せずに
+    使えるようにする公開入口。解決規則は ``_resolve_component_row`` と同一。
+    """
+    row = _resolve_component_row(component_id, course_document_ids, preferred_document_ids)
+    if not row or not row.get("id"):
+        return None
+    return str(row.get("id"))
+
+
+def component_matches_multiple_documents(
+    component_id: str, course_document_ids: set[str]
+) -> bool:
+    """component_id がコースの document 集合のうち 2 論文以上に当たるか（IK-0892）。
+
+    解決できなかった理由を「不在」と「どの論文か特定できない」に分けるための読み取り。
+    SQL の WHERE 断片は解決と同じ ``scoped_id_match_sql``。fail-soft（例外は False）。
+    """
+    document_ids = _normalized_document_ids(course_document_ids)
+    if not document_ids or not str(component_id or "").strip():
+        return False
+    where_clause, params = scoped_id_match_sql(component_id, document_ids)
+    try:
+        session = get_session()
+        try:
+            row = session.execute(
+                sa_text(
+                    f"""
+                    SELECT COUNT(DISTINCT document_id) FROM theory_components_live
+                    WHERE document_id = ANY(CAST(:doc_ids AS uuid[])) AND ({where_clause})
+                    """
+                ),
+                params,
+            ).fetchone()
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — 理由の書き分けだけ。解決そのものは止めない
+        logger.debug("component ambiguity check failed for %s", component_id, exc_info=True)
+        return False
+    return bool(row) and int(row[0] or 0) >= 2
+
+
 def _query_component_row(component_id: str, document_ids: list[str]) -> dict | None:
     """``document_ids`` の中で component を1行引く（UUID 完全一致を優先・読み取り専用）。"""
     where_clause, params = scoped_id_match_sql(component_id, document_ids)
@@ -221,16 +271,17 @@ def _equations_index(document_id: str) -> dict[str, dict]:
 
 
 def _equation_label(record: dict | None) -> str:
+    """式の表示名 — 正本 ``graph_paper_layer.schema.equation_display_label`` に委ねる。
+
+    以前は平文・LaTeX を 80 字で素朴に切っており、学習者に切れた生 TeX と TeX 経路の
+    式 ID が出ていた（IK-0862）。印字番号があれば「式 (12)」、無ければ ``$…$`` の
+    先頭か定義する記号。equation_id はラベルに使わない。
+    """
     if not record:
         return ""
-    src = _json_dict(record.get("source_extraction"))
-    rec = _json_dict(record.get("reconstruction"))
-    text = (
-        rec.get("plain_text") or rec.get("latex")
-        or src.get("plain_text") or src.get("latex")
-        or record.get("label") or record.get("equation_id") or ""
-    )
-    return str(text)[:80]
+    from core.graph_paper_layer.schema import equation_display_label  # 遅延 import（推移的純粋性の保護）
+
+    return equation_display_label(record)
 
 
 def _load_graph_narrative(document_id: str) -> dict:
@@ -250,6 +301,68 @@ def _load_graph_narrative(document_id: str) -> dict:
         session.close()
     graph = row[0] if row and isinstance(row[0], dict) else {}
     return _json_dict(graph.get("narrative")) if isinstance(graph, dict) else {}
+
+
+#: 要約の表示上限（IK-0860: 投影の後・語境界で切る）。
+_GRAPH_SUMMARY_MAX_CHARS = 200
+
+
+def _load_graph_node_labels(document_id: str) -> dict[str, str]:
+    """当該 document の最新グラフのノード id → 表示名（main 層は日本語の段名）。"""
+    from core.element_vocab import theory_stage_display_label
+
+    session = get_session()
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                SELECT graph_json FROM theory_component_graphs
+                WHERE document_id = CAST(NULLIF(:doc, '') AS uuid) ORDER BY updated_at DESC LIMIT 1
+                """
+            ),
+            {"doc": document_id},
+        ).fetchone()
+    finally:
+        session.close()
+    graph = row[0] if row and isinstance(row[0], dict) else {}
+    labels: dict[str, str] = {}
+    for node in (graph.get("nodes") or []) if isinstance(graph, dict) else []:
+        if not isinstance(node, dict):
+            continue
+        nid = str(node.get("component_id") or node.get("id") or "").strip()
+        if not nid:
+            continue
+        raw = str(node.get("display_label") or node.get("label") or "").strip()
+        if str(node.get("graph_layer") or "main") == "main":
+            raw = theory_stage_display_label(node.get("label") or raw) or raw
+        label = raw.split("\n", 1)[0].strip()
+        if label and label != nid:
+            labels[nid] = label
+    return labels
+
+
+def readable_graph_summary(summary: object, node_labels: dict[str, str]) -> str:
+    """グラフ要約のノード id を表示名に写し、語境界で切る（IK-0860・純関数）。
+
+    要約は「まず theory_op_0001 が…」とノード id で文を組む。表示投影は後段で id を
+    置き換え語にするだけなので、先に**同じグラフの表示名**へ写す（置き換え語で文を埋めない）。
+    切り詰めは写した後に ``text_excerpt.excerpt`` で行い、id の途中で切れた断片
+    （``theory_op``）を作らない。写せない id は残す（後段の投影が遮断する）。
+    """
+    from core.text_excerpt import excerpt
+
+    text = str(summary or "").strip()
+    if not text:
+        return ""
+    for nid in sorted(node_labels, key=len, reverse=True):
+        label = node_labels[nid]
+        if nid and label:
+            text = re.sub(
+                r"(?<![A-Za-z0-9_])" + re.escape(nid) + r"(?![A-Za-z0-9_])",
+                lambda _m, _label=label: f"「{_label}」",
+                text,
+            )
+    return excerpt(text, _GRAPH_SUMMARY_MAX_CHARS) or ""
 
 
 def _document_title(document_id: str) -> str:
@@ -316,7 +429,7 @@ def _build_field_refs(record: dict, key: str) -> list[dict]:
         if not isinstance(ref, dict):
             continue
         text = str(ref.get("text") or "").strip()
-        if not text:
+        if not text or contains_pipeline_policy_token(text):
             continue
         claim_ids = [str(c) for c in _json_list(ref.get("claim_ids")) if str(c or "").strip()]
         equation_ids = [str(e) for e in _json_list(ref.get("equation_ids")) if str(e or "").strip()]
@@ -334,7 +447,8 @@ def _build_cautions(record: dict) -> list[dict]:
             text = str(ref.get("text") or "").strip()
         elif isinstance(ref, str):
             text = ref.strip()
-        if not text:
+        if not text or contains_pipeline_policy_token(text):
+            # 解析層の方針語（semantic_hint_only 等）を含む注意は学習者に意味をなさない（IK-0862）。
             continue
         items.append({"text": text})
         if len(items) >= _MAX_FIELD_REF_ITEMS:
@@ -360,8 +474,16 @@ def _build_equations(record: dict, equations_by_id: dict[str, dict]) -> list[dic
     items: list[dict] = []
     for eq_id, role in _equation_role_map(record).items():
         eq_record = equations_by_id.get(eq_id)
-        label = _equation_label(eq_record) if eq_record else eq_id
+        # 記録が引けない式は内部 ID を出さず一般ラベルにする（IK-0862）。
+        label = _equation_label(eq_record) if eq_record else learner_context_common.generic_item_label("equation")
         item = {"id": eq_id, "label": label, "role": role}
+        # IK-0894: 教材の式に解決できない式も数式として描けるよう、式本文を同梱する。
+        if eq_record:
+            from core.graph_paper_layer.schema import equation_display_latex  # 遅延 import
+
+            latex = equation_display_latex(eq_record)
+            if latex:
+                item["latex"] = latex
         # 復元由来の式には事実文を1行添える（`_equation_label` は reconstruction を
         # 優先して本文にするため、ここを黙って抽出結果と同じ顔で出さない）。
         note = _reconstructed_equation_note(eq_record) if eq_record else None
@@ -443,7 +565,83 @@ def _confirmed_identity_link(component_db_id: str, document_id: str, agent_ids: 
     return None
 
 
-def _build_shared_part(component_db_id: str, document_id: str, agent_ids: set[str]) -> dict | None:
+#: 「共通部品として」が出ないときの事実文（IK-0863。固定文の正本 — JS にミラーしない）。
+SHARED_PART_ABSENT_NOTE = (
+    "この部品は、ほかの論文の部品と同じものとして教員が確かめた記録が、このコーパスの中にはまだありません。"
+)
+
+
+#: 「共通部品として」面の見出し（IK-0917。同一性リンクの意味 = 教員が「同じもの」として
+#: 確かめた、を学生に言う。固定文の正本 — JS にミラーしない）。
+SHARED_PART_HEADING = "教員がこの部品と同じものとして確かめた共通部品"
+
+#: 他の論文の題名の列挙の前置き（IK-0920。件数ではなく題名で言う — 数値非表示）。
+SHARED_PART_OTHER_DOCUMENTS_LEAD = "あなたが読めるほかの論文で、教員がこの共通部品と同じものとして確かめた部品があるもの:"
+
+#: 読める他の論文に確定リンクが無いときの事実文（IK-0920。閉世界・読めない論文の有無は言わない）。
+SHARED_PART_NO_OTHER_DOCUMENTS_NOTE = (
+    "あなたが読めるほかの論文には、この共通部品と同じものとして教員が確かめた部品の記録がまだありません。"
+)
+
+#: 題名を列挙する上限（それ以上は「ほか」）。
+SHARED_PART_OTHER_DOCUMENTS_MAX = 6
+
+
+def _document_titles(document_ids: list[str]) -> dict[str, str]:
+    """``{document_id: 題名}``（1 クエリ。引けない id はキーを持たない）。"""
+    keys = [str(d) for d in document_ids if str(d or "").strip()]
+    if not keys:
+        return {}
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                "SELECT id::text, title, source_path FROM documents "
+                "WHERE id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"ids": keys},
+        ).fetchall()
+    finally:
+        session.close()
+    return {str(r[0]): str(r[1] or r[2] or "") for r in rows if str(r[1] or r[2] or "").strip()}
+
+
+def _other_confirmed_documents(
+    shared_part_id: str, document_id: str, readable_document_ids: set[str] | None
+) -> tuple[list[dict], bool]:
+    """確定リンク（``shared_part_id`` 一致・confirmed）から、読める他の論文の題名を導く（IK-0920）。
+
+    ``readable_document_ids`` は呼び出し側が渡す学生の読める論文の集合（コースの sources ∪
+    本人の可視集合）。``None`` / 空は fail-closed で何も列挙しない（DB も引かない）。
+    件数・読めない論文の有無は返さない（数値非表示・存在を明かさない）。
+    """
+    readable = {str(d) for d in (readable_document_ids or set()) if str(d or "").strip()}
+    readable.discard(str(document_id))
+    if not readable:
+        return [], False
+    links = identity_links_mod.list_for_shared_part(shared_part_id)
+    ordered: list[str] = []
+    for link in links:
+        if str(link.get("status") or "") != IDENTITY_LINK_STATUS_CONFIRMED:
+            continue
+        doc = str(link.get("instance_document_id") or "")
+        if doc and doc in readable and doc not in ordered:
+            ordered.append(doc)
+    if not ordered:
+        return [], False
+    titles = _document_titles(ordered)
+    items = [{"title": titles[d]} for d in ordered if titles.get(d)]
+    truncated = len(items) > SHARED_PART_OTHER_DOCUMENTS_MAX
+    return items[:SHARED_PART_OTHER_DOCUMENTS_MAX], truncated
+
+
+def _build_shared_part(
+    component_db_id: str,
+    document_id: str,
+    agent_ids: set[str],
+    *,
+    readable_document_ids: set[str] | None = None,
+) -> dict | None:
     try:
         link = _confirmed_identity_link(component_db_id, document_id, agent_ids)
         if not link:
@@ -454,21 +652,34 @@ def _build_shared_part(component_db_id: str, document_id: str, agent_ids: set[st
         entry = library_store_mod.get_entry(shared_part_id)
         if not entry or str(entry.get("status") or "") != library_schema.STATUS_ACTIVE:
             return None
-        source_document_ids = {
-            str(d) for d in _json_list(entry.get("source_document_ids")) if str(d or "").strip()
-        }
-        other_documents_count = len(source_document_ids - {str(document_id)})
+        try:
+            other_documents, other_truncated = _other_confirmed_documents(
+                shared_part_id, document_id, readable_document_ids
+            )
+        except Exception:  # noqa: BLE001 - 列挙できないだけ（共通部品の面は出す）
+            logger.warning(
+                "component_context: other documents for shared part %s failed", shared_part_id, exc_info=True
+            )
+            other_documents, other_truncated = [], False
         decided_by = str(link.get("decided_by") or "").strip()
+        entry_dto: dict = {
+            "name": str(entry.get("name") or ""),
+            "aliases": list(entry.get("aliases") or []),
+            "summary": str(entry.get("summary") or ""),
+            "standardization_status": str(
+                entry.get("standardization_status") or library_schema.STANDARDIZATION_STATUS_UNKNOWN
+            ),
+            # IK-0920: 他の論文は確定リンクから導いた**題名**で言う（件数をやめる）。
+            "other_documents": other_documents,
+            "other_documents_truncated": other_truncated,
+        }
+        if other_documents:
+            entry_dto["other_documents_lead"] = SHARED_PART_OTHER_DOCUMENTS_LEAD
+        else:
+            entry_dto["other_documents_note"] = SHARED_PART_NO_OTHER_DOCUMENTS_NOTE
         return {
-            "entry": {
-                "name": str(entry.get("name") or ""),
-                "aliases": list(entry.get("aliases") or []),
-                "summary": str(entry.get("summary") or ""),
-                "standardization_status": str(
-                    entry.get("standardization_status") or library_schema.STANDARDIZATION_STATUS_UNKNOWN
-                ),
-                "other_documents_count": other_documents_count,
-            },
+            "heading": SHARED_PART_HEADING,
+            "entry": entry_dto,
             "link": {
                 "confirmed_by": _user_display_name(decided_by),
                 "evidence": link.get("evidence") or [],
@@ -870,8 +1081,13 @@ def build_component_context(
     course_document_ids: set[str],
     *,
     preferred_document_ids: "tuple[str, ...] | list[str] | set[str] | None" = None,
+    readable_document_ids: "set[str] | None" = None,
 ) -> dict | None:
     """コーススコープ component 文脈 DTO を組み立てる。
+
+    ``readable_document_ids`` は学生が読める論文の集合（コースの sources ∪ 本人の可視集合。
+    呼び出し側が組む）。「共通部品として」の他の論文の題名はこの集合の中からだけ列挙する
+    （IK-0920。``None`` は ``course_document_ids`` に縮退 = fail-closed）。
 
     ``course_id`` は現状 DB クエリには使わない（コースの受講ゲート自体は
     呼び出し側 ``routes/learning.py`` が ``get_accessible_course_data`` で
@@ -914,7 +1130,13 @@ def build_component_context(
         logger.warning("component_context: narrative load failed for document %s", document_id, exc_info=True)
         narrative = {}
     narrative_role = _narrative_role(component_db_id, component_row, narrative, assembly_record)
-    graph_summary_excerpt = str(narrative.get("graph_summary") or "").strip()[:200]
+    # IK-0860: 切り詰めは投影（id → 表示名）の後・語境界で（id の途中で切らない）。
+    try:
+        node_labels = _load_graph_node_labels(document_id) if narrative.get("graph_summary") else {}
+    except Exception:  # noqa: BLE001
+        logger.debug("component_context: node labels unavailable for %s", document_id, exc_info=True)
+        node_labels = {}
+    graph_summary_excerpt = readable_graph_summary(narrative.get("graph_summary"), node_labels)
 
     try:
         doc_title = _document_title(document_id)
@@ -950,10 +1172,18 @@ def build_component_context(
         "provenance": PROVENANCE_COURSE_FREEZE,
     }
 
+    shared_part = _build_shared_part(
+        component_db_id,
+        document_id,
+        agent_ids,
+        readable_document_ids=(
+            set(readable_document_ids) if readable_document_ids is not None else set(course_document_ids)
+        ),
+    )
     result = {
         "component_id": component_db_id,
         "instance": instance,
-        "shared_part": _build_shared_part(component_db_id, document_id, agent_ids),
+        "shared_part": shared_part,
         "graph": _build_graph(
             component_db_id,
             document_id,
@@ -963,4 +1193,8 @@ def build_component_context(
             artifacts=artifacts,
         ),
     }
+    if shared_part is None:
+        # 「共通部品として」が出ない理由を閉世界の一文で（IK-0863）。候補の有無・却下の
+        # 区別は学生に出さない（候補は教員の判断前なので）。
+        result["shared_part_note"] = SHARED_PART_ABSENT_NOTE
     return _strip_confidence(result)

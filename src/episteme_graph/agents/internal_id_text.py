@@ -61,6 +61,8 @@ INTERNAL_ID_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:"
     r"(?:" + "|".join(_IMMEDIATE) + r")[0-9]" + _TAIL
     + r"|(?:" + "|".join(_ANYWHERE) + r")(?=[A-Za-z0-9_.\-]*[0-9])" + _TAIL
+    # TeX 経路の \label 由来の式 ID（数字なし・eq_eosnet）。表示側と同じ（IK-0862）。
+    + r"|eq_[A-Za-z][A-Za-z0-9_]*"
     + r"|k1:[0-9a-f]{8,}(?:#[0-9]+)?"
     + r"|support:[A-Za-z0-9_\-]+(?::[A-Za-z0-9_\-]+)*"
     + r"|" + _UUID

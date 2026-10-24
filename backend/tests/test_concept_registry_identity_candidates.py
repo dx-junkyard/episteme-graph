@@ -45,6 +45,7 @@ class FakeSession:
     def __init__(
         self, *, parents=(), others=(), entries=(), linked=(), neighbours=(),
         cartridge="", claims=(), linked_claims=(),
+        documents=(), material_claims=(), equations=(),
     ):
         self.parents = list(parents)
         self.others = list(others)
@@ -54,12 +55,25 @@ class FakeSession:
         self.cartridge = cartridge
         self.claims = list(claims)
         self.linked_claims = list(linked_claims)
+        # IK-0919: 文書の素性・根拠の主張・式（名前によらない材料）。
+        self.documents = list(documents)
+        self.material_claims = list(material_claims)
+        self.equations = list(equations)
         self.statements: list[str] = []
+        self.params: list = []
 
     def execute(self, statement, params=None):
         sql = str(statement)
         self.statements.append(sql)
-        if "theory_components_live" in sql and "document_id <> " in sql:
+        self.params.append(params)
+        if "theory_claims_live" in sql and "agent_claim_id = ANY" in sql:
+            refs = set((params or {}).get("refs") or [])
+            rows = [r for r in self.material_claims if r[0] in refs or r[2] in refs]
+        elif "FROM documents" in sql:
+            rows = self.documents
+        elif "knowledge_equations_live" in sql:
+            rows = self.equations
+        elif "theory_components_live" in sql and "document_id <> " in sql:
             rows = self.others
         elif "theory_components_live" in sql:
             rows = self.parents
@@ -591,3 +605,217 @@ class TestGroundedClaimLinks:
         for sql in session.statements:
             assert "FROM theory_claims\n" not in sql
             assert "JOIN theory_claims " not in sql
+
+
+# ---------------------------------------------------------------------------
+# 7. IK-0919: 名前によらない材料（同じ論文の別の版・根拠の主張のチャンク）
+# ---------------------------------------------------------------------------
+
+PDF_DOC = "44444444-4444-4444-4444-444444444444"
+TITLE = "Physics-informed neural networks for neutron star structure"
+
+
+def _rich_component(
+    cid: str, name: str, document_id: str, *, evidence_claims=(), linked_claims=(),
+    inputs=(), equations=(), chunk: str = "",
+) -> tuple:
+    return (
+        cid, document_id, name, "concept", chunk, [],
+        list(evidence_claims), list(linked_claims), list(inputs), [], list(equations),
+    )
+
+
+def _doc(did: str, title: str, *, filename="", url="", path="") -> tuple:
+    return (did, title, filename, url, path)
+
+
+def _mclaim(cid: str, doc: str, agent: str, *, chunk: str = "", text: str = "") -> tuple:
+    return (cid, doc, agent, chunk, text, text)
+
+
+LONG_CLAIM = "The network maps the equation of state to the stellar structure"
+LONG_EQ = r"\frac{dP}{dr} = -\frac{G m \rho}{r^2}"
+
+
+class TestSamePaperVersions:
+    def _base(self, *, docs, eq_pdf=LONG_EQ, claim_pdf=LONG_CLAIM):
+        return FakeSession(
+            parents=[
+                _rich_component(
+                    "tex1", "TOV network map", DOC,
+                    evidence_claims=["claim-tex"], equations=["eq_tex_3"],
+                )
+            ],
+            others=[
+                _rich_component(
+                    "pdf1", "Structure network map", PDF_DOC,
+                    linked_claims=["c_12"], equations=["eq_blk_7"],
+                )
+            ],
+            documents=docs,
+            material_claims=[
+                _mclaim("claim-tex", DOC, "c_1", text=LONG_CLAIM),
+                _mclaim("claim-pdf", PDF_DOC, "c_12", text=claim_pdf),
+            ],
+            equations=[
+                (DOC, "eq_tex_3", "$" + LONG_EQ + "$", ""),
+                (PDF_DOC, "eq_blk_7", eq_pdf.replace(" ", "  "), ""),
+            ],
+        )
+
+    def test_title_match_pairs_components_with_different_names(self, env):
+        session = self._base(docs=[_doc(DOC, TITLE), _doc(PDF_DOC, TITLE.upper() + ".")])
+        env["domain_keys"] = ["astrophysics"]
+        result = ic.run_identity_candidates(document_id=DOC, session=session)
+        assert result["entries_created"] == 1
+        assert result["links_created"] == 2
+        assert {link["ref"].element_id for link in env["created_links"]} == {"tex1", "pdf1"}
+        for link in env["created_links"]:
+            assert link["mapping_justification"] == library_schema.JUSTIFICATION_LEXICAL
+            assert link["reason"] == ic.SAME_PAPER_REASON_BOTH
+            # 相手の名前・数値を事実文に焼き込まない（KR6 / KR10）
+            assert "Structure" not in link["reason"] and "TOV" not in link["reason"]
+            assert not any(ch.isdigit() for ch in link["reason"])
+        assert env["created_entries"][0]["mapping_justification"] == (
+            library_schema.JUSTIFICATION_LEXICAL
+        )
+
+    def test_arxiv_id_match_pairs_components(self, env):
+        session = self._base(
+            docs=[
+                _doc(DOC, "TeX upload", url="https://arxiv.org/src/2407.01221v2"),
+                _doc(PDF_DOC, "Some PDF", filename="2407.01221v1.pdf"),
+            ]
+        )
+        result = ic.run_identity_candidates(document_id=DOC, session=session)
+        assert result["links_created"] == 2
+
+    def test_equation_alone_is_enough(self, env):
+        session = self._base(
+            docs=[_doc(DOC, TITLE), _doc(PDF_DOC, TITLE)], claim_pdf="unrelated short"
+        )
+        ic.run_identity_candidates(document_id=DOC, session=session)
+        assert env["created_links"]
+        assert env["created_links"][0]["reason"] == ic.SAME_PAPER_REASON_EQUATION
+
+    def test_different_papers_are_not_paired(self, env):
+        session = self._base(
+            docs=[
+                _doc(DOC, TITLE, url="https://arxiv.org/abs/2407.01221"),
+                _doc(PDF_DOC, TITLE, url="https://arxiv.org/abs/2501.00001"),
+            ]
+        )
+        result = ic.run_identity_candidates(document_id=DOC, session=session)
+        assert result["links_created"] == 0
+
+    def test_unrelated_titles_are_not_paired(self, env):
+        session = self._base(docs=[_doc(DOC, TITLE), _doc(PDF_DOC, "A different paper title")])
+        result = ic.run_identity_candidates(document_id=DOC, session=session)
+        assert result["links_created"] == 0
+
+    def test_no_shared_material_is_not_paired(self, env):
+        session = self._base(
+            docs=[_doc(DOC, TITLE), _doc(PDF_DOC, TITLE)],
+            eq_pdf=r"E = m c^2 + \\Lambda",
+            claim_pdf="A completely different statement about something else",
+        )
+        result = ic.run_identity_candidates(document_id=DOC, session=session)
+        assert result["links_created"] == 0
+
+    def test_already_linked_twin_is_skipped(self, env):
+        session = self._base(docs=[_doc(DOC, TITLE), _doc(PDF_DOC, TITLE)])
+        session.linked = ["pdf1"]
+        result = ic.run_identity_candidates(document_id=DOC, session=session)
+        assert result["links_created"] == 0
+
+    def test_no_embedding_or_llm_is_called(self, env, monkeypatch):
+        import core.llm as llm
+
+        def _boom(*_a, **_k):
+            raise AssertionError("LLM / embedding must not be called")
+
+        for name in ("generate_embeddings", "generate_text", "generate_text_with_structured_output"):
+            if hasattr(llm, name):
+                monkeypatch.setattr(llm, name, _boom)
+        session = self._base(docs=[_doc(DOC, TITLE), _doc(PDF_DOC, TITLE)])
+        result = ic.run_identity_candidates(document_id=DOC, session=session)
+        assert result["links_created"] == 2
+        # 保存済みベクトルの近傍も引かない（規則 ②b で決まった）
+        assert not any("FROM chunks c" in sql for sql in session.statements)
+
+    def test_reads_live_views_only(self, env):
+        session = self._base(docs=[_doc(DOC, TITLE), _doc(PDF_DOC, TITLE)])
+        ic.run_identity_candidates(document_id=DOC, session=session)
+        joined = "\n".join(session.statements)
+        assert "knowledge_equations_live" in joined
+        assert "FROM theory_claims\n" not in joined
+        assert "FROM knowledge_equations\n" not in joined
+
+
+class TestClaimChunkOrigins:
+    def test_claim_chunk_starts_the_chunk_proxy_rule(self, env):
+        session = FakeSession(
+            parents=[
+                _rich_component("c1", "Slope parameter", DOC, evidence_claims=["cl-a"])
+            ],
+            others=[
+                _rich_component("c2", "Curvature", OTHER_DOC, linked_claims=["c_9"])
+            ],
+            material_claims=[
+                _mclaim("cl-a", DOC, "c_1", chunk="chunk-a"),
+                _mclaim("cl-b", OTHER_DOC, "c_9", chunk="chunk-b"),
+            ],
+            neighbours=[("chunk-b", 0.9)],
+        )
+        result = ic.run_identity_candidates(document_id=DOC, session=session)
+        assert result["links_created"] == 2
+        assert env["created_links"][0]["mapping_justification"] == (
+            library_schema.JUSTIFICATION_VECTOR
+        )
+        neighbour_params = [
+            p for sql, p in zip(session.statements, session.params) if "FROM chunks c" in sql
+        ]
+        assert neighbour_params[0]["chunk_id"] == "chunk-a"
+
+    def test_claim_in_another_document_is_not_borrowed(self, env):
+        # 参照 ID が同じでも、他 document の主張のチャンクを自分の起点にしない。
+        session = FakeSession(
+            parents=[_rich_component("c1", "Slope", DOC, linked_claims=["c_9"])],
+            others=[_rich_component("c2", "Curvature", OTHER_DOC, linked_claims=["c_9"])],
+            material_claims=[_mclaim("cl-b", OTHER_DOC, "c_9", chunk="chunk-b")],
+            neighbours=[("chunk-b", 0.99)],
+        )
+        result = ic.run_identity_candidates(document_id=DOC, session=session)
+        assert result["links_created"] == 0
+
+    def test_nested_input_claim_ids_are_followed(self):
+        component = {
+            "id": "c", "document_id": DOC, "evidence_claims": [], "linked_claim_ids": [],
+            "inputs": [{"name": "x", "claim_ids": ["u1"]}],
+            "outputs": [{"name": "y", "evidence": {"claim_id": "u2"}}],
+        }
+        assert ic.component_claim_refs(component) == ["u1", "u2"]
+
+
+class TestSamePaperPureFunctions:
+    def test_same_paper_by_title(self):
+        assert ic.same_paper({"title": TITLE}, {"title": " " + TITLE.lower() + "\n"})
+
+    def test_short_titles_do_not_match(self):
+        assert not ic.same_paper({"title": "Intro"}, {"title": "intro"})
+
+    def test_conflicting_arxiv_ids_win_over_title(self):
+        assert not ic.same_paper(
+            {"title": TITLE, "source_url": "https://arxiv.org/abs/2407.01221"},
+            {"title": TITLE, "filename": "2501.00001v1.pdf"},
+        )
+
+    def test_note_mentions_versions_without_numbers(self):
+        assert "同じ論文の別の版" in ic.SAME_PAPER_VERSIONS_NOTE
+        assert not any(ch.isdigit() for ch in ic.SAME_PAPER_VERSIONS_NOTE)
+
+    def test_empty_queue_facts_carry_the_versions_note(self):
+        source = (BACKEND / "api" / "routes" / "library.py").read_text(encoding="utf-8")
+        seg = source[source.index("def list_identity_candidates"):]
+        seg = seg[: seg.index("return {\"candidates\"")]
+        assert "SAME_PAPER_VERSIONS_NOTE" in seg

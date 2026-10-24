@@ -241,7 +241,25 @@ class TestBuildEquations:
         assert by_id["eq_1"]["role"] == "input"
         assert by_id["eq_2"]["role"] == "output"
         assert by_id["eq_3"]["role"] == "linked"
-        assert by_id["eq_3"]["label"] == "eq_3"  # 索引に無い equation は id をラベルへフォールバック
+        # 索引に無い equation は内部 ID を出さず一般ラベルにする（IK-0862）。
+        assert by_id["eq_3"]["label"] == "関連する数式"
+
+    def test_label_uses_equation_display_label_not_raw_tex_or_id(self):
+        """IK-0862: 式の表示名は正本 equation_display_label（印字番号 / $…$）で、
+        TeX 経路の式 ID（eq_eosnet）や 80 字で切った生 TeX を出さない。"""
+        long_tex = r"\frac{dP}{dr} = -\frac{G m \rho}{r^2}" + r" + \alpha" * 40
+        record = {"linked_equation_ids": ["eq_eosnet", "eq_tov"]}
+        equations_by_id = {
+            "eq_eosnet": {"equation_id": "eq_eosnet", "source_extraction": {"latex": long_tex}},
+            "eq_tov": {"equation_id": "eq_tov", "label": "3", "source_extraction": {"latex": long_tex}},
+        }
+        items = component_context._build_equations(record, equations_by_id)
+        by_id = {i["id"]: i for i in items}
+        assert by_id["eq_tov"]["label"] == "式 (3)"
+        unnumbered = by_id["eq_eosnet"]["label"]
+        assert unnumbered.startswith("番号なし: $")
+        assert unnumbered.count("$") % 2 == 0
+        assert "eq_eosnet" not in unnumbered
 
 
 class TestBuildClaims:
@@ -340,7 +358,7 @@ class TestBuildSharedPart:
         result = component_context._build_shared_part(_COMP_UUID, _DOC_A, {_COMP_UUID})
         assert result is None
 
-    def test_confirmed_and_active_returns_entry_with_other_documents_count(self, monkeypatch):
+    def test_confirmed_and_active_returns_entry_without_count(self, monkeypatch):
         monkeypatch.setattr(
             component_context.identity_links_mod,
             "list_for_instance",
@@ -363,7 +381,11 @@ class TestBuildSharedPart:
 
         assert result is not None
         assert result["entry"]["name"] == "共通部品X"
-        assert result["entry"]["other_documents_count"] == 2  # _DOC_A 自身を除く
+        # IK-0920: 件数ではなく確定リンクから導いた題名で言う。読める集合を渡さなければ列挙しない（fail-closed）。
+        assert "other_documents_count" not in result["entry"]
+        assert result["entry"]["other_documents"] == []
+        assert result["entry"]["other_documents_note"] == component_context.SHARED_PART_NO_OTHER_DOCUMENTS_NOTE
+        assert result["heading"] == component_context.SHARED_PART_HEADING
         assert result["link"]["confirmed_by"] == "山田先生"
         assert result["provenance"] == "identity_link_confirmed + library_entry"
 
@@ -578,7 +600,7 @@ class TestBuildComponentContextEndToEnd:
         )
         monkeypatch.setattr(
             component_context, "equation_records",
-            lambda _doc: [{"equation_id": "eq_1", "reconstruction": {"plain_text": "E=mc^2"}}],
+            lambda _doc: [{"equation_id": "eq_1", "label": "1", "reconstruction": {"plain_text": "E=mc^2"}}],
         )
         monkeypatch.setattr(component_context.identity_links_mod, "list_for_instance", lambda *a, **k: [])
         monkeypatch.setattr(
@@ -607,7 +629,7 @@ class TestBuildComponentContextEndToEnd:
         assert instance["in_paper"]["document"] == {"id": _DOC_A, "title": "論文タイトル", "section": ""}
         assert instance["in_paper"]["narrative_role"] == "中心命題を支持する"
         assert instance["supports"]["claims"] == [{"id": "claim_1", "excerpt": "主張テキスト"}]
-        assert instance["supports"]["equations"] == [{"id": "eq_1", "label": "E=mc^2", "role": "linked"}]
+        assert instance["supports"]["equations"] == [{"id": "eq_1", "label": "式 (1)", "role": "linked"}]
         assert instance["supports"]["dependencies"] == [
             {"type": "requires", "target_label": "依存先コンポーネント", "reason": "理由"}
         ]

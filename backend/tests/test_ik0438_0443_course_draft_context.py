@@ -43,7 +43,8 @@ def _artifacts_with_component_details() -> dict:
         "summary": "Maps density to pressure.",
     })
     eq = doc_b["equation_semantics"]["equations"][0]
-    eq["reconstruction"] = {"status": "reconstructed", "latex": scope_fixtures.LATEX_B}
+    # IK-0895: 原文の LaTeX と一致する復元は印を付けない — 復元本文は原文と違う式にする。
+    eq["reconstruction"] = {"status": "reconstructed", "latex": scope_fixtures.LATEX_B + r" + \delta"}
     doc_b["document_structure"]["sections"].append({"section_id": "sec_2", "title": "B-field strength (mG)"})
     doc_b["equation_semantics"]["equations"].append({
         "equation_id": "eq_axis",

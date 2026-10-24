@@ -115,11 +115,18 @@ _ANYWHERE_DIGIT_PREFIXES = (
 
 _TAIL = r"[A-Za-z0-9_\-]*(?:\.[A-Za-z0-9_\-]+)*"
 
+#: TeX 経路の式 ID は ``\label{…}`` 由来で数字を含まない（``eq_eosnet`` / ``eq_total_loss``）。
+#: 数字を要求する上の規則では捕まらず学習者に出ていた（IK-0862・2026-10-23）。``eq_`` の直後が
+#: 英字で始まる識別子（英字・数字・``_``）を式 ID とみなす。論文の式番号（``eq_12`` / ``eq_2_7``）は
+#: 直後が数字なので当たらない。
+_TEX_LABEL_EQUATION_ID = r"eq_[A-Za-z][A-Za-z0-9_]*"
+
 #: 内部 ID トークン（語境界付き）。本層の統合語彙。
 INTERNAL_ID_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_])(?:"
     r"(?:" + "|".join(_IMMEDIATE_DIGIT_PREFIXES) + r")[0-9]" + _TAIL
     + r"|(?:" + "|".join(_ANYWHERE_DIGIT_PREFIXES) + r")(?=[A-Za-z0-9_.\-]*[0-9])" + _TAIL
+    + r"|" + _TEX_LABEL_EQUATION_ID
     + r"|k1:[0-9a-f]{8,}(?:#[0-9]+)?"
     + r"|support:[A-Za-z0-9_\-]+(?::[A-Za-z0-9_\-]+)*"
     + r"|" + _UUID_BODY
@@ -137,6 +144,31 @@ def is_internal_id_token(value: Any) -> bool:
 def contains_internal_id(value: Any) -> bool:
     """文字列のどこかに内部 ID トークンが含まれるか（論文の式番号は含まない）。"""
     return bool(INTERNAL_ID_TOKEN_RE.search(str(value if value is not None else "")))
+
+
+#: TeX の ``\label`` キー（``eq:modified_dcf`` / ``sec:intro:a``）。印字番号ではなく人が読む名前でも
+#: ない（IK-0872 / IK-0858）。式の表示名で「式 (eq:mod_dcf)」としない判定の正本。
+TEX_LABEL_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]*:[A-Za-z0-9_.:\-]+$")
+
+
+def is_tex_label_key(value: Any) -> bool:
+    """文字列が TeX の label キー（``eq:acf``）か。"""
+    return bool(TEX_LABEL_KEY_RE.match(str(value if value is not None else "").strip()))
+
+
+#: 解析層の方針語（式の扱い方の内部語彙）。生成文に写ると学習者には意味をなさないので、
+#: これを含む学習者向けの文は出さない（IK-0862）。``blocked`` は英語の通常語なので、方針語の
+#: 鍵名と並んだときだけ当てる。
+PIPELINE_POLICY_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:semantic_hint_only|allowed_downstream_use|downstream_allowed_use"
+    r"|must_not_treat_as_source_extracted|can_support_claim)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+
+def contains_pipeline_policy_token(value: Any) -> bool:
+    """文字列に解析層の方針語が含まれるか。"""
+    return bool(PIPELINE_POLICY_TOKEN_RE.search(str(value if value is not None else "")))
 
 
 #: 本文に埋め込まれた解決可能な参照（番地）: ``![[component:comp_001]]`` /

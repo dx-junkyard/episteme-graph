@@ -79,6 +79,35 @@ def _clean(value: Any) -> str:
     return str(value or "").strip()
 
 
+#: 導出の条件と、候補が出ないときの入口の事実文（IK-0927。数値を書かない = KR6）。
+FACT_UNFROZEN_ENTRIES_LEXICAL_ONLY = (
+    "まだ凍結していないエントリは、名前・別名の一致だけで照合しました"
+    "（意味の近さの照合は、エントリを凍結した版で行います）。"
+)
+FACT_MANUAL_LINK_ENTRY = (
+    "対応が分かっているときは、エントリの詳細の「分野の地図との対応」区画から、"
+    "地図の概念を名前で探して手で対応を付けられます。"
+)
+
+
+def search_concept_nodes(skeleton: Any, query: str, *, limit: int = 20) -> list[dict]:
+    """現行凍結骨格の概念を名前（ラベル・領域名）で探す（手動の対応付け用・IK-0927）。
+
+    照合は ``normalize_label`` の部分一致（教員が名前の一部で探すため）。node_id は
+    応答に載せるが表示には使わない（PL7）。空の問い合わせは先頭から返す。
+    """
+    q = schema.normalize_label(query or "")
+    out: list[dict] = []
+    for node_id, node in sorted(concept_index(skeleton).items(), key=lambda kv: (kv[1]["region_label"], kv[1]["label"])):
+        hay = schema.normalize_label(node["label"] + " " + node["region_label"])
+        if q and q not in hay:
+            continue
+        out.append({"node_id": node_id, "label": node["label"], "region_label": node["region_label"]})
+        if len(out) >= max(1, limit):
+            break
+    return out
+
+
 def concept_index(skeleton: Any) -> dict[str, dict]:
     """骨格の concept を ``node_id -> {label, region_id, region_label}`` に投影する。
 
@@ -374,11 +403,17 @@ def derive_node_link_candidates(session: Any, *, domain_key: str) -> dict:
             "この地図のベクトル索引がまだ作られていないため、意味の近さでは照合していません。"
         )
         reasons.append("no_anchor_vectors")
+    if anchor_vectors and any(entry["id"] not in entry_vectors for entry in entries):
+        # IK-0927: 凍結版の無いエントリはベクトルの照合から外れる（凍結版の embedding しか
+        # 読まない）。黙って外さず、照合の条件を事実で言う。
+        facts.append(FACT_UNFROZEN_ENTRIES_LEXICAL_ONLY)
+        reasons.append("unfrozen_entries_lexical_only")
     if matched_node_labels:
         names = "、".join(dict.fromkeys(matched_node_labels))
         facts.append(f"対応の候補が見つかった地図の概念: {names}")
     if not candidates:
         facts.append("新しい対応の候補はありませんでした。")
+        facts.append(FACT_MANUAL_LINK_ENTRY)
 
     return {
         "candidates": candidates,

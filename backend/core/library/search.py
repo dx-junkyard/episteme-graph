@@ -24,10 +24,34 @@ from . import schema
 logger = logging.getLogger(__name__)
 
 
-def _embed_query(query_text: str, embed_fn: Any = None) -> list[float] | None:
+#: 検索の埋め込みの既定の帰属（U層。IK-0928）。呼び出し側が文脈に合わせて上書きする。
+FEATURE_LIBRARY_SEARCH = "embedding:library_search"
+#: W層「共通部品と結びつける」の検索（IK-0928）。
+FEATURE_SHARED_PART_SEARCH = "embedding:shared_part_search"
+
+
+def _embed_query(
+    query_text: str,
+    embed_fn: Any = None,
+    *,
+    feature: str | None = None,
+    user_id: str | None = None,
+) -> list[float] | None:
+    """問い合わせ文を1本埋め込む。
+
+    ``feature`` を渡すと ``llm_worker.embedding.embed_with_context`` で U層の帰属を張る
+    （IK-0928: 教員の検索の埋め込みが ``unattributed`` で記録されていた）。``None`` は
+    外側の ``usage_context``（パイプライン・worker が張る）をそのまま引き継ぐ。
+    """
     try:
         if embed_fn is not None:
             vector = embed_fn(query_text)
+        elif feature:
+            from core.llm_worker.embedding import embed_with_context
+
+            attrs = {"user_id": user_id} if user_id else {}
+            vectors = embed_with_context([query_text], feature=feature, **attrs)
+            vector = vectors[0] if vectors else None
         else:
             from core.llm import generate_embeddings
 
@@ -46,6 +70,8 @@ def _embedding_search(
     entry_type: str | None,
     top_k: int,
     embed_fn: Any = None,
+    feature: str | None = None,
+    user_id: str | None = None,
 ) -> list[dict]:
     """各 active エントリの「embedding を持つ最新凍結版」を対象にした pgvector cosine 類似検索。
 
@@ -58,7 +84,7 @@ def _embedding_search(
     """
     if not domain_key or not query_text:
         return []
-    vector = _embed_query(query_text, embed_fn)
+    vector = _embed_query(query_text, embed_fn, feature=feature, user_id=user_id)
     if not vector:
         return []
 
@@ -211,8 +237,12 @@ def find_similar_entries(
     text: str,
     entry_type: str | None = None,
     top_k: int = 5,
+    feature: str = FEATURE_LIBRARY_SEARCH,
+    user_id: str | None = None,
 ) -> list[dict]:
     """昇格モーダルの類似既存エントリ提示（embedding 検索 + ILIKE 検索のマージ）。
+
+    教員の操作から呼ばれる検索なので、埋め込みは必ず ``feature`` に帰属させる（IK-0928）。
 
     entry_id で重複排除し、embedding ヒットを優先する。凍結版が無い active エントリ
     （embedding 検索に出てこない）も ILIKE 側で拾える。
@@ -221,7 +251,8 @@ def find_similar_entries(
         return []
 
     embedding_hits = _embedding_search(
-        domain_key=domain_key, query_text=text, entry_type=entry_type, top_k=top_k
+        domain_key=domain_key, query_text=text, entry_type=entry_type, top_k=top_k,
+        feature=feature or FEATURE_LIBRARY_SEARCH, user_id=user_id,
     )
     ilike_hits = _ilike_search(domain_key=domain_key, text=text, entry_type=entry_type, top_k=top_k)
 

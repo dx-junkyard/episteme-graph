@@ -42,11 +42,19 @@ from core.element_vocab import (
     theory_stage_key,
     theory_stage_label,
 )
-from core.text_excerpt import excerpt, first_sentence, looks_like_tex_math, normalize_whitespace
+from core.text_excerpt import (
+    excerpt,
+    first_sentence,
+    is_prose_with_delimited_math,
+    looks_like_tex_math,
+    normalize_inline_math_delimiters,
+    normalize_whitespace,
+)
 
 # 記号の表記ゆれ照合キー（A層 normalize_symbol）は core/symbol_notation.py の
 # seam 経由で読む（core/deliberation は A層 direct import 禁止 — W1 ガードレール。
 # element_vocab 経由の間接依存と同じ公認パターン）。表示用変種の同一性判定に使う。
+from core.latex_display import delimit_bare_tex
 from core.symbol_notation import normalize_symbol
 
 __all__ = [
@@ -804,10 +812,55 @@ _CLAIM_QUOTE_LIMIT = 70
 _GENERIC_CLAIM_LABEL = "主張"
 
 
+# ── 式から合成した主張の見出し（IK-0898）──────────────────────────────────────
+# A層の ``equation_claim_synthesis`` は英語の定型文に ``$…$`` の記号を埋めて主張を作る
+# （A層は非改変）。数式区間ごと捨てると見出しが種類名「主張」だけになり、学習者には
+# 記号の抜けた切れ端が残っていた。定型を読み時に和文へ置き換え、数式区間は保つ。
+_SYNTH_DEFINES_RE = re.compile(
+    r"^(?:Equation \((?P<label>[^()]{1,12})\)|An equation of this paper) defines (?P<target>\$[^$]+\$)\.?$"
+)
+_SYNTH_DEPENDS_RE = re.compile(
+    r"^In (?:equation \((?P<label>[^()]{1,12})\)|an equation of this paper), "
+    r"(?P<target>\$[^$]+\$) depends on (?P<inputs>(?:\$[^$]+\$)(?:, \$[^$]+\$)*)\.?$"
+)
+
+
+def synthesized_claim_japanese(text: Any) -> str:
+    """式から合成した英語の定型主張を、数式区間を保った和文にする（該当しなければ ""）。"""
+    raw = normalize_whitespace(normalize_inline_math_delimiters(_text(text)))
+    if not raw:
+        return ""
+    match = _SYNTH_DEFINES_RE.match(raw)
+    if match:
+        where = f"式 ({match.group('label')})" if match.group("label") else "この論文の式"
+        return f"{where}が {match.group('target')} を定めます"
+    match = _SYNTH_DEPENDS_RE.match(raw)
+    if match:
+        where = f"式 ({match.group('label')})では" if match.group("label") else "この論文の式では"
+        inputs = "、".join(part.strip() for part in match.group("inputs").split(", "))
+        return f"{where} {match.group('target')} が {inputs} に依存します"
+    return ""
+
+
+def _first_usable_with_math(candidates: list[Any], limit: int) -> str:
+    """数式区間（``$…$``）を含む散文を、区間を割らずに切った見出しにする（IK-0898）。"""
+    for candidate in candidates:
+        raw = normalize_inline_math_delimiters(_text(candidate))
+        if not raw or is_internal_id_like(raw) or not is_prose_with_delimited_math(raw):
+            continue
+        cut = excerpt(raw, limit, keep_dollar_math=True)
+        if cut and is_prose_with_delimited_math(cut):
+            return cut
+    return ""
+
+
 def _claim_full_text(data: dict[str, Any]) -> str:
     """ラベルの元になった主張の全文（``text`` → ``normalized_text`` の最初の可用文）。"""
     for candidate in (data.get("text"), data.get("normalized_text")):
         raw = _text(candidate)
+        delimited = delimit_bare_tex(raw)
+        if delimited != raw and is_prose_with_delimited_math(normalize_inline_math_delimiters(delimited)):
+            return normalize_whitespace(delimited)  # IK-0898: 区切った全文（数式区間を保つ）
         if _usable(raw):
             return normalize_whitespace(raw)
     return ""
@@ -834,7 +887,25 @@ def claim_label(row_or_record: dict[str, Any] | None) -> Label:
     載せる（カードは全文を主文に描く）。
     """
     data = _dict(row_or_record)
-    text = _first_usable([data.get("text"), data.get("normalized_text")], _CLAIM_TEXT_LIMIT)
+    synthesized = synthesized_claim_japanese(data.get("text"))
+    if synthesized:
+        text = excerpt(synthesized, _CLAIM_TEXT_LIMIT, keep_dollar_math=True)
+    else:
+        # IK-0898（第 3 周）: 区切りの無い TeX（``P(\\rho)`` / ``\\mathcal{N}_\\mathrm{TOV}``）は
+        # 切り詰めの**前に** ``$…$`` で区切る（上流で 1 箇所 — 学習者・教員どちらの見出しも
+        # 同じ値になる）。区切った文は数式区間を割らない切り詰めで見出しにする。
+        raw_candidates = [_text(data.get("text")), _text(data.get("normalized_text"))]
+        delimited = [delimit_bare_tex(c) for c in raw_candidates]
+        text = ""
+        if delimited != raw_candidates:
+            text = _first_usable_with_math(delimited, _CLAIM_TEXT_LIMIT)
+        if not text:
+            text = _first_usable([data.get("text"), data.get("normalized_text")], _CLAIM_TEXT_LIMIT)
+        if not text:
+            # IK-0898: TeX を含む文を捨てず、数式区間を保って見出しにする。
+            text = _first_usable_with_math(
+                [data.get("text"), data.get("normalized_text")], _CLAIM_TEXT_LIMIT
+            )
     unresolved = False
     source = LABEL_SOURCE_TEXT
     full_text = ""

@@ -35,7 +35,7 @@ from typing import Any, Callable
 
 from core import display_projection as _dp
 from core.label_vocab import RECONSTRUCTED_EQUATION_NOTE
-from core.text_excerpt import looks_like_tex_math
+from core.text_excerpt import is_prose_with_delimited_math, looks_like_tex_math
 from core.deliberation.schema import (
     CONTEXT_STATUS_CANDIDATE,
     ELEMENT_DERIVATION,
@@ -395,24 +395,65 @@ def equation_focus_label(label: str, element_id: str) -> str:
     return ""
 
 
+_LATEX_COMPARE_NOISE_RE = re.compile(
+    r"\\(?:left|right|nonumber|notag|displaystyle|,|;|!|:|quad|qquad)(?![A-Za-z])|\\label\{[^{}]*\}"
+)
+
+
+def normalize_latex_for_comparison(latex: Any) -> str:
+    """原文の LaTeX と復元した LaTeX を突き合わせるための正規化（決定論）。
+
+    空白・間隔命令（``\\,`` ``\\quad`` 等）・``\\left`` / ``\\right``・``\\label{…}``・
+    末尾の句読点を落とす。意味の比較ではなく「同じ文字列を書いているか」の比較。
+    """
+    text = str(latex or "")
+    if not text.strip():
+        return ""
+    text = _LATEX_COMPARE_NOISE_RE.sub("", text)
+    text = re.sub(r"\s+", "", text)
+    return text.rstrip(".,;")
+
+
+def reconstruction_matches_source(reconstructed_latex: Any, source_latex: Any) -> bool:
+    """復元した LaTeX が原文の LaTeX と（正規化後に）一致するか（IK-0895）。
+
+    TeX 経路では原文に LaTeX があるので、``equation_semantics`` が reconstruction を
+    付けても本文が原文そのものなら「AI が文脈から復元した式」ではない。
+    """
+    rec = normalize_latex_for_comparison(reconstructed_latex)
+    src = normalize_latex_for_comparison(source_latex)
+    return bool(rec) and rec == src
+
+
 def equation_latex_is_reconstructed(record: Any) -> bool:
     """この式の LaTeX が「AI が文脈から復元したもの」か（決定論・非LLM）。
 
-    ``record`` は equations.json の export 形・``equation_semantics`` artifact の
-    レコード形のどちらでもよい（どちらも ``reconstruction.status`` を持つ）。
-    ``status`` が ``none`` 以外で、復元本文（latex / plain_text）が実在するときだけ
-    True。復元が空（= 復元できなかった）なら False で、事実文も付かない
-    （「復元した式」と言えるものが無いため）。
+    **復元の印の判定の正本**（IK-0895。教材の式一覧・部品の文脈・要素文脈・
+    ``course_content_builder`` が通る）。``record`` は equations.json の export 形・
+    ``equation_semantics`` artifact のレコード形・``chunks.formulas`` の平坦形の
+    いずれでもよい。
+
+    - ``reconstruction.status`` が ``none`` 以外で、復元本文（latex / plain_text）が
+      実在するときだけ True。復元が空なら False（事実文も付かない）。
+    - 復元本文が原文の LaTeX（``source_extraction.latex``）と正規化後に一致するなら
+      False（TeX 経路で原文どおりの式に印を付けない）。
+    - 平坦形（``reconstructed`` 真偽値のみ）はその値を尊重する。
     """
     data = json_dict(record)
     reconstruction = json_dict(data.get("reconstruction"))
+    if not reconstruction:
+        return data.get("reconstructed") is True
     status = str(reconstruction.get("status") or "none").strip()
     if not status or status == "none":
         return False
-    return bool(
-        str(reconstruction.get("latex") or "").strip()
-        or str(reconstruction.get("plain_text") or "").strip()
-    )
+    rec_latex = str(reconstruction.get("latex") or "").strip()
+    if not (rec_latex or str(reconstruction.get("plain_text") or "").strip()):
+        return False
+    source = json_dict(data.get("source_extraction"))
+    source_latex = source.get("latex") if source else data.get("source_latex")
+    if rec_latex and reconstruction_matches_source(rec_latex, source_latex):
+        return False
+    return True
 
 
 def reconstructed_equation_note(record: Any) -> str | None:
@@ -490,7 +531,9 @@ def project_item(
     # EC1/EC2: レーンの相手ラベルにも生 TeX が混ざり得る（equation は式番号があれば
     # それを、無ければ一般ラベルへ）。記号だけは TeX でも遮断しない（§5.4）。
     is_symbol = element_type == ITEM_TYPE_SYMBOL
-    if not is_symbol and looks_like_tex_math(label):
+    # IK-0898: 地の文に $…$ の数式区間を含む見出し（式から合成した主張の和文など）は
+    # 生 TeX ではない — 画面が数式区間を数式で描く。一般ラベルへ落とさない。
+    if not is_symbol and looks_like_tex_math(label) and not is_prose_with_delimited_math(label):
         replacement = (
             equation_focus_label("", str(element_id or ""))
             if element_type == ELEMENT_EQUATION

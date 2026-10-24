@@ -23,10 +23,12 @@ from core.config import get_settings
 from core.doubt.scope_candidates.agent import ScopeCandidateAgent
 from core.doubt.scope_candidates.input_builder import build_target_context
 from core.doubt.scope_candidates.system import SYSTEM
+from core.doubt.ledger_targets import ledger_row_filter_or_none, ledger_target_refs
+from core.doubt.scope import document_scope_clause
 from core.llm_usage.context import bind_usage_context
 from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session
-from core.schema import CLAIM_ORIGIN_EQUATION_SYNTHESIS
+from core.schema import CLAIM_ORIGIN_EQUATION_SYNTHESIS, NON_SOURCE_TEXT_CLAIM_ORIGINS  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,7 @@ _today_key = today_str
 SKIP_REASON_SYNTHESIZED_CLAIMS = "skipped_synthesized_claims"
 
 #: 対象選択で除外する主張の origin。
-_EXCLUDED_CLAIM_ORIGINS: tuple[str, ...] = (CLAIM_ORIGIN_EQUATION_SYNTHESIS,)
+_EXCLUDED_CLAIM_ORIGINS: tuple[str, ...] = NON_SOURCE_TEXT_CLAIM_ORIGINS
 
 #: 台帳行のうち「式由来の合成主張を指す claim 行」を表す述語（epistemic_ledger を外側に置く）。
 _SYNTHESIZED_CLAIM_PREDICATE = """
@@ -69,7 +71,9 @@ def _check_and_count_llm_call() -> bool:
     return SYSTEM.check_and_count(gate=_cost_gate, settings=get_settings())
 
 
-def _claim_pending_targets(session, document_id: str, course_id: str) -> list[tuple[str, str]]:
+def _claim_pending_targets(
+    session, document_id: str, document_ids: list[str] | None = None,
+) -> list[tuple[str, str]]:
     """未解析の台帳行を claim し（analyzed_at を先に打つ）、対象リストを返す。"""
     filters = [
         "scope_candidates_analyzed_at IS NULL",
@@ -79,9 +83,14 @@ def _claim_pending_targets(session, document_id: str, course_id: str) -> list[tu
     if document_id:
         filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
         params["doc"] = document_id
-    if course_id:
-        filters.append("course_id = :course")
-        params["course"] = course_id
+    if document_ids is not None:
+        # コース単位の起動（IK-0852）: 範囲はコースの教材から求めた document 集合。
+        # 行の course_id 列では絞らない（空集合は SQL を出さない — 呼び出し側で閉じる）。
+        scope = document_scope_clause(document_ids)
+        if scope is None:
+            return []
+        filters.append(scope[0])
+        params.update(scope[1])
     rows = session.execute(
         sa_text(f"""
             UPDATE epistemic_ledger
@@ -93,24 +102,32 @@ def _claim_pending_targets(session, document_id: str, course_id: str) -> list[tu
                 LIMIT :limit
                 FOR UPDATE SKIP LOCKED
             )
-            RETURNING target_type, target_id
+            RETURNING target_type, target_id, document_id::text
         """),
         params,
     ).fetchall()
     session.commit()
-    return [(str(r[0]), str(r[1])) for r in rows]
+    # IK-0899: 行キーの論文を対象に添えて運ぶ（2 要素の tuple のまま）。
+    return ledger_target_refs(rows)
 
 
-def _has_skipped_synthesized_targets(session, document_id: str, course_id: str) -> bool:
+def _has_skipped_synthesized_targets(
+    session, document_id: str, document_ids: list[str] | None = None,
+) -> bool:
     """未解析のまま対象選択から外れた合成主張の台帳行があるか（件数は返さない）。"""
     filters = ["scope_candidates_analyzed_at IS NULL", _SYNTHESIZED_CLAIM_PREDICATE]
     params: dict = {"excluded_origins": list(_EXCLUDED_CLAIM_ORIGINS)}
     if document_id:
         filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
         params["doc"] = document_id
-    if course_id:
-        filters.append("course_id = :course")
-        params["course"] = course_id
+    if document_ids is not None:
+        # コース単位の起動（IK-0852）: 範囲はコースの教材から求めた document 集合。
+        # 行の course_id 列では絞らない（空集合は SQL を出さない — 呼び出し側で閉じる）。
+        scope = document_scope_clause(document_ids)
+        if scope is None:
+            return False
+        filters.append(scope[0])
+        params.update(scope[1])
     row = session.execute(
         sa_text(f"""
             SELECT EXISTS (
@@ -122,27 +139,36 @@ def _has_skipped_synthesized_targets(session, document_id: str, course_id: str) 
     return bool(row and row[0])
 
 
-def _append_candidates(session, target_type: str, target_id: str, candidates: list[dict]) -> None:
+def _append_candidates(
+    session, target_type: str, target_id: str, candidates: list[dict], *, document_id: str | None = None,
+) -> None:
     if not candidates:
         return
+    key = ledger_row_filter_or_none(target_type=target_type, target_id=target_id, document_id=document_id)
+    if key is None:
+        logger.warning("ledger row needs document_id; candidates not appended for %s/%s", target_type, target_id)
+        return
+    where, key_params = key
     session.execute(
-        sa_text("""
+        sa_text(f"""
             UPDATE epistemic_ledger
             SET scope_candidates = scope_candidates || CAST(:new AS jsonb),
                 updated_at = now()
-            WHERE target_id = :tid AND target_type = :ttype
+            WHERE {where}
         """),
-        {
-            "new": json.dumps(candidates, ensure_ascii=False),
-            "tid": target_id,
-            "ttype": target_type,
-        },
+        {"new": json.dumps(candidates, ensure_ascii=False), **key_params},
     )
     session.commit()
 
 
-def run_scope_candidate_mining(document_id: str = "", course_id: str = "") -> dict:
-    """未解析の台帳行に対してスコープ候補を抽出する（同期実行本体）。"""
+def run_scope_candidate_mining(
+    document_id: str = "", course_id: str = "", document_ids: list[str] | None = None,
+) -> dict:
+    """未解析の台帳行に対してスコープ候補を抽出する（同期実行本体）。
+
+    ``document_ids``（コース単位の起動, IK-0852）はコースの教材から求めた範囲。
+    ``course_id`` は U層の帰属にだけ使い、台帳行の絞り込みには使わない。
+    """
     bind_usage_context(
         "doubt:scope_candidates",
         document_id=document_id or None,
@@ -150,7 +176,7 @@ def run_scope_candidate_mining(document_id: str = "", course_id: str = "") -> di
     )
     session = get_session()
     try:
-        targets = _claim_pending_targets(session, document_id, course_id)
+        targets = _claim_pending_targets(session, document_id, document_ids)
     except Exception:
         session.rollback()
         logger.warning("scope candidate claim failed", exc_info=True)
@@ -159,7 +185,7 @@ def run_scope_candidate_mining(document_id: str = "", course_id: str = "") -> di
 
     skipped_reasons: list[str] = []
     try:
-        if _has_skipped_synthesized_targets(session, document_id, course_id):
+        if _has_skipped_synthesized_targets(session, document_id, document_ids):
             skipped_reasons.append(SKIP_REASON_SYNTHESIZED_CLAIMS)
             logger.info(
                 "scope candidate targets excluded: reason=%s (document=%s)",
@@ -173,7 +199,8 @@ def run_scope_candidate_mining(document_id: str = "", course_id: str = "") -> di
     processed = 0
     generated = 0
     try:
-        for target_type, target_id in targets:
+        for target in targets:
+            target_type, target_id = target
             context = build_target_context(session, target_type, target_id)
             if not context.has_sources():
                 processed += 1
@@ -181,13 +208,17 @@ def run_scope_candidate_mining(document_id: str = "", course_id: str = "") -> di
             if not _check_and_count_llm_call():
                 logger.info("scope candidate daily cap reached; remaining targets deferred")
                 # 上限超過分は未解析に戻す（翌日以降のバッチで処理）
+                _reset_key = ledger_row_filter_or_none(
+                    target_type=target_type, target_id=target_id,
+                    document_id=getattr(target, "document_id", None),
+                ) or ("target_id = :tid AND target_type = :ttype", {"tid": target_id, "ttype": target_type})
                 session.execute(
-                    sa_text("""
+                    sa_text(f"""
                         UPDATE epistemic_ledger
                         SET scope_candidates_analyzed_at = NULL
-                        WHERE target_id = :tid AND target_type = :ttype
+                        WHERE {_reset_key[0]}
                     """),
-                    {"tid": target_id, "ttype": target_type},
+                    _reset_key[1],
                 )
                 session.commit()
                 break
@@ -198,7 +229,10 @@ def run_scope_candidate_mining(document_id: str = "", course_id: str = "") -> di
                 data = candidate.model_dump()
                 data["created_at"] = stamp
                 payloads.append(data)
-            _append_candidates(session, target_type, target_id, payloads)
+            _append_candidates(
+                session, target_type, target_id, payloads,
+                document_id=getattr(target, "document_id", None),
+            )
             processed += 1
             generated += len(payloads)
     except Exception:
@@ -218,7 +252,9 @@ def run_scope_candidate_mining(document_id: str = "", course_id: str = "") -> di
     }
 
 
-def maybe_schedule_scope_candidates(document_id: str = "", course_id: str = "") -> bool:
+def maybe_schedule_scope_candidates(
+    document_id: str = "", course_id: str = "", document_ids: list[str] | None = None,
+) -> bool:
     """非同期バッチをデーモンスレッドで起動する（P6: 同期パスに LLM を入れない）。"""
     return SYSTEM.spawn(
         run_scope_candidate_mining,
@@ -226,4 +262,5 @@ def maybe_schedule_scope_candidates(document_id: str = "", course_id: str = "") 
         thread_name="doubt-scope-candidates",
         document_id=document_id,
         course_id=course_id,
+        document_ids=document_ids,
     )

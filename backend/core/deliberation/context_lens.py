@@ -146,7 +146,8 @@ RELATION_LABELS: dict[str, str] = {
     # 設計書に例示された初期語彙。
     "provides_evidence_for": "に証拠を与える",
     "quantifies": "を定量化する",
-    "supports_thesis": "（中心命題）を支持する",
+    # 相手の種類名を関係語に埋め込まない（項目名「中心命題「…」」と並ぶと同語反復になる・IK-0871）。
+    "supports_thesis": "を支持する",
     "supports_component": "の根拠となる",
     "appears_in_section": "に掲載されている",
     "belongs_to_derivation": "の導出に属する",
@@ -723,6 +724,32 @@ def _claim_in_ids(raw_ids: Any, claim_lookup: dict[str, str], element_id: str) -
     return any(claim_lookup.get(str(rid)) == element_id for rid in (raw_ids or []))
 
 
+#: 中心命題の本文も論文の問いも記録されていないときの項目名（IK-0871）。
+CENTRAL_THESIS_WITHOUT_TEXT_LABEL = "この論文の中心命題（本文の記録なし）"
+
+
+def _central_thesis_label(thesis: dict[str, Any] | None) -> str:
+    """中心命題の項目名（IK-0871）。見出し → 中心命題の本文の要約 → 種類名の順。
+
+    本文が引けるときは「中心命題「…」」と中身を名指し、種類名だけの項目を作らない。
+    """
+    thesis = thesis if isinstance(thesis, dict) else {}
+    headline = str(thesis.get("headline_claim") or "").strip()
+    if headline:
+        return headline
+    central = thesis.get("central_thesis") if isinstance(thesis.get("central_thesis"), dict) else {}
+    snippet = excerpt(central.get("text"), _LABEL_LIMIT)
+    if snippet:
+        return f"中心命題「{snippet}」"
+    # 第 2 周（IK-0871 の残り）: 中心命題の本文が記録されていないときは、論文の問いで
+    # 名指す。それも無ければ「この論文の中心命題（本文の記録なし）」と事実で言い、
+    # 種類名だけの項目（「を支持する 中心命題」）にしない。
+    question = excerpt(thesis.get("central_question"), _LABEL_LIMIT)
+    if question:
+        return f"問い「{question}」に答える中心命題"
+    return CENTRAL_THESIS_WITHOUT_TEXT_LABEL
+
+
 def _thesis_upper_items_for_claim(
     thesis: dict[str, Any], claim_lookup: dict[str, str], element_id: str, document_id: str | None
 ) -> list[dict[str, Any]]:
@@ -730,7 +757,7 @@ def _thesis_upper_items_for_claim(
     if not isinstance(thesis, dict):
         return items
     central = thesis.get("central_thesis") if isinstance(thesis.get("central_thesis"), dict) else {}
-    headline = str(thesis.get("headline_claim") or "").strip() or "中心命題"
+    headline = _central_thesis_label(thesis)
     if _claim_in_ids(central.get("claim_ids"), claim_lookup, element_id):
         items.append(
             _item(
@@ -768,7 +795,7 @@ def _thesis_upper_items_for_equation(
     if not isinstance(thesis, dict):
         return items
     central = thesis.get("central_thesis") if isinstance(thesis.get("central_thesis"), dict) else {}
-    headline = str(thesis.get("headline_claim") or "").strip() or "中心命題"
+    headline = _central_thesis_label(thesis)
     if element_id in [str(x) for x in (central.get("equation_ids") or [])]:
         items.append(_item("thesis", None, document_id, headline, "supports_thesis", _status_for_link("explicit")))
     support = thesis.get("support_structure") if isinstance(thesis.get("support_structure"), dict) else {}
@@ -809,7 +836,7 @@ def _thesis_context_upper_items(
     if not isinstance(node_ids, list) or not node_ids:
         return []
     thesis = thesis if isinstance(thesis, dict) else {}
-    headline = str(thesis.get("headline_claim") or "").strip() or "中心命題"
+    headline = _central_thesis_label(thesis)
     support = thesis.get("support_structure") if isinstance(thesis.get("support_structure"), dict) else {}
     status = _status_for_link("explicit")
     items: list[dict[str, Any]] = []
@@ -2658,7 +2685,7 @@ def _build_figure(ref: ElementRef) -> dict[str, Any] | None:
 
     thesis = artifacts.get("thesis_reconstruction")
     if isinstance(thesis, dict) and linked_claim_db_ids:
-        headline = str(thesis.get("headline_claim") or "").strip() or "中心命題"
+        headline = _central_thesis_label(thesis)
         for claim_db in linked_claim_db_ids:
             if _thesis_upper_items_for_claim(thesis, claim_lookup, claim_db, document_id):
                 upper.append(

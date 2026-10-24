@@ -21,7 +21,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
@@ -45,6 +45,15 @@ from core.postgres import get_session
 from core.status import cross_layer_notify
 
 logger = logging.getLogger(__name__)
+
+#: 同一性の候補の空の状態（IK-0864。正本はサーバ — admin.js はこの facts を描くだけ）。
+IDENTITY_CANDIDATES_EMPTY = "確認をお待ちしている同一性の候補はありません。"
+IDENTITY_CANDIDATES_EMPTY_WITH_DISMISSED = "見送り済みを含めても、同一性の候補はありません。"
+IDENTITY_CANDIDATES_ORIGIN_FACT = (
+    "候補は、教材の解析の最後の段（共通する概念の候補づくり）で、ほかの論文の部品や登録済みのエントリと"
+    "名前・構造が一致したときに作られます。教材を追加したあとは、教材管理の行の"
+    "「パイプラインを実行 ▼」から「共通する概念の候補づくり」を実行し直すと、改めて探します。"
+)
 
 router = APIRouter(prefix="/api/admin/library", tags=["Library"])
 
@@ -260,6 +269,100 @@ def _get_entry_or_404(entry_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 表示語（IK-0866・2026-10-23）— 一覧・詳細に UUID・取込経路のトークン・分野の英字キー・
+# 楽観ロックの revision を見せないため、route 層で表示語を足す（値は残す — 画面は表示語を使う）。
+# 帰属の表示名の解決は分野の地図タブ（IK-0850）と同じ ``core.atlas_review_display`` を共有する。
+# ---------------------------------------------------------------------------
+
+#: 同梱シード由来の行の帰属の表示語（``created_by='bundled_import'``）。
+LIBRARY_ACTOR_BUNDLED = "同梱の初期データ"
+#: 「分野を限らない」共通の部品（``domain_key='unassigned'``）の表示語。
+LIBRARY_DOMAIN_UNASSIGNED_LABEL = library_schema.DOMAIN_UNASSIGNED_LABEL
+#: 名前で探して当たるエントリが無いときの事実文（IK-0868）。
+LIBRARY_SEARCH_NOT_FOUND = (
+    "「{query}」に当たるエントリはまだありません。右上の「新規エントリ作成」から作れます。"
+)
+#: 凍結版の有無の事実文。
+LIBRARY_VERSION_NONE = "まだ凍結していません"
+#: 「いまの扱い」が確定のときの補足（確定と凍結は別の操作）。
+LIBRARY_REVIEW_CONFIRMED_NOTE = (
+    "概念として確定しています。確定は凍結とは別の操作で、解析が参照するのは凍結した版だけです。"
+)
+
+
+def _library_version_line(entry: dict) -> str:
+    try:
+        version_no = int(entry.get("latest_version_no") or 0)
+    except (TypeError, ValueError):
+        version_no = 0
+    return f"凍結版 {version_no}" if version_no > 0 else LIBRARY_VERSION_NONE
+
+
+def _library_actor_label(actor: Any, labels: dict[str, str]) -> str:
+    from core.atlas_review_display import DECISION_ACTOR_UNKNOWN
+
+    text = str(actor or "").strip()
+    if not text:
+        return ""
+    if text == "bundled_import":
+        return LIBRARY_ACTOR_BUNDLED
+    return labels.get(text) or DECISION_ACTOR_UNKNOWN
+
+
+def _library_domain_label(session: Any, domain_key: Any, cache: dict[str, str]) -> str:
+    key = str(domain_key or "").strip()
+    if not key:
+        return ""
+    if key in cache:
+        return cache[key]
+    if key == library_schema.DOMAIN_KEY_UNASSIGNED:
+        label = LIBRARY_DOMAIN_UNASSIGNED_LABEL
+    else:
+        from core.atlas_state import domain_display_name
+
+        label = domain_display_name(session, key)
+    cache[key] = label
+    return label
+
+
+def _display_entries(entries: list[dict]) -> list[dict]:
+    """エントリ（dict）の写しに表示語を足す（入力不変・fail-soft）。"""
+    items = [dict(e) for e in entries or () if isinstance(e, dict)]
+    if not items:
+        return items
+    try:
+        from core.atlas_review_display import fetch_actor_labels
+
+        session = get_session()
+    except Exception:  # noqa: BLE001 — 表示語が引けなくても一覧は返す
+        logger.debug("library display labels: session unavailable", exc_info=True)
+        return items
+    try:
+        labels = fetch_actor_labels(
+            session,
+            [e.get("updated_by") for e in items] + [e.get("created_by") for e in items],
+        )
+        domain_cache: dict[str, str] = {}
+        for item in items:
+            item["updated_by_label"] = _library_actor_label(item.get("updated_by"), labels)
+            item["created_by_label"] = _library_actor_label(item.get("created_by"), labels)
+            item["domain_label"] = _library_domain_label(session, item.get("domain_key"), domain_cache)
+            item["version_line"] = _library_version_line(item)
+            if str(item.get("review_status") or "confirmed") == library_schema.REVIEW_STATUS_CONFIRMED:
+                item["review_status_note"] = LIBRARY_REVIEW_CONFIRMED_NOTE
+    except Exception:  # noqa: BLE001
+        logger.warning("library display labels failed (non-fatal)", exc_info=True)
+    finally:
+        session.close()
+    return items
+
+
+def _display_entry(entry: dict) -> dict:
+    out = _display_entries([entry])
+    return out[0] if out else entry
+
+
+# ---------------------------------------------------------------------------
 # エントリ一覧・作成・取得・版履歴
 # ---------------------------------------------------------------------------
 
@@ -293,7 +396,12 @@ def list_entries(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     entries, hidden_count = _apply_candidate_visibility(entries, str(_uid(current_user) or ""))
-    return {"entries": entries, "hidden_count": hidden_count}
+    result: dict[str, Any] = {"entries": _display_entries(entries), "hidden_count": hidden_count}
+    query = (q or "").strip()
+    if query and not entries:
+        # IK-0868: 関係の相手を名前で探して見つからないときの事実文（正本はサーバ）。
+        result["facts"] = [LIBRARY_SEARCH_NOT_FOUND.format(query=query)]
+    return result
 
 
 @router.post("/entries", status_code=201)
@@ -340,12 +448,12 @@ def create_entry(payload: LibraryEntryCreateRequest, current_user: dict = Depend
             uid,
             {"domain_key": entry["domain_key"], "figure_ids": [img["figure_id"] for img in authorized_images]},
         )
-    return entry
+    return _display_entry(entry)
 
 
 @router.get("/entries/{entry_id}")
 def get_entry(entry_id: str, current_user: dict = Depends(_require_teacher)):
-    return _get_entry_or_404(entry_id)
+    return _display_entry(_get_entry_or_404(entry_id))
 
 
 @router.get("/entries/{entry_id}/versions")
@@ -419,7 +527,7 @@ def update_entry(entry_id: str, payload: LibraryEntryUpdateRequest, current_user
             uid,
             {"domain_key": entry["domain_key"], "figure_ids": newly_added_figure_ids},
         )
-    return entry
+    return _display_entry(entry)
 
 
 @router.post("/entries/{entry_id}/freeze")
@@ -543,7 +651,19 @@ def restore_entry(entry_id: str, current_user: dict = Depends(_require_teacher))
 
 @router.get("/domains")
 def domain_summary(current_user: dict = Depends(_require_teacher)):
-    return {"domains": library_store.domain_summary()}
+    domains = [dict(d) for d in library_store.domain_summary()]
+    # IK-0866: 分野の英字キーの代わりに分野名を添える（キーは選択の値として残す）。
+    try:
+        session = get_session()
+        try:
+            cache: dict[str, str] = {}
+            for d in domains:
+                d["domain_label"] = _library_domain_label(session, d.get("domain_key"), cache)
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — 名前が引けなくても一覧は返す
+        logger.debug("library domain labels unavailable", exc_info=True)
+    return {"domains": domains}
 
 
 @router.post("/entries/similar")
@@ -553,6 +673,8 @@ def find_similar_entries(payload: SimilarEntriesRequest, current_user: dict = De
         text=payload.text,
         entry_type=payload.entry_type,
         top_k=payload.top_k,
+        feature=library_search.FEATURE_LIBRARY_SEARCH,
+        user_id=current_user.get("id"),
     )
     return {"entries": entries}
 
@@ -633,10 +755,32 @@ def list_entry_labels(
     }
 
 
+#: ラベル追加の結果の事実文（IK-0897。JS にミラーしない）。
+LABEL_OUTCOME_FACTS = {
+    ("alternate", "created"): "別名を追加しました。",
+    ("hidden", "created"): "隠しラベルを追加しました。",
+    ("alternate", "existing"): "この別名は既に登録されています。変更はありません。",
+    ("hidden", "existing"): "この隠しラベルは既に登録されています。変更はありません。",
+    ("alternate", "dismissed"): "この別名は見送り済みです。追加し直しても見送りは取り消しません。",
+    ("hidden", "dismissed"): "この隠しラベルは見送り済みです。追加し直しても見送りは取り消しません。",
+}
+#: 関係の記録の結果の事実文（IK-0897）。
+RELATION_OUTCOME_FACTS = {
+    "created": "関係を候補として記録しました。確定は一覧から行います。",
+    "existing": "この関係は既に記録されています。変更はありません。",
+    "dismissed": "この関係は見送り済みです。戻すときは見送り済みの一覧から差し戻します。",
+}
+
+
+def _label_outcome_fact(kind: str, outcome: str) -> str:
+    return LABEL_OUTCOME_FACTS.get((str(kind or ""), str(outcome or "")), "")
+
+
 @router.post("/entries/{entry_id}/labels", status_code=201)
 def add_entry_label(
     entry_id: str,
     payload: LabelCreateRequest,
+    response: Response,
     current_user: dict = Depends(_require_teacher),
 ):
     """別名・隠しラベルを1件足す。
@@ -661,7 +805,12 @@ def add_entry_label(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"label": label}
+    # IK-0897: 結果（新規 / 既存 / 見送り済み）を事実文で返す。新規だけ 201。
+    label = dict(label)
+    outcome = str(label.pop("outcome", "") or library_registry.OUTCOME_CREATED)
+    if outcome != library_registry.OUTCOME_CREATED:
+        response.status_code = 200
+    return {"label": label, "outcome": outcome, "facts": [_label_outcome_fact(payload.kind, outcome)]}
 
 
 @router.post("/entries/{entry_id}/labels/{label_id}/dismiss")
@@ -724,6 +873,7 @@ def list_relations(
 @router.post("/relations", status_code=201)
 def create_relation(
     payload: RelationCreateRequest,
+    response: Response,
     current_user: dict = Depends(_require_teacher),
 ):
     """関係を手動で1件作る（``manual_curation`` の候補として立つ）。
@@ -749,7 +899,16 @@ def create_relation(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"relation": relation}
+    # IK-0897: 結果（新規 / 既存 / 見送り済み）を事実文で返す。新規だけ 201。
+    relation = dict(relation)
+    outcome = str(relation.pop("outcome", "") or library_registry.OUTCOME_CREATED)
+    if outcome != library_registry.OUTCOME_CREATED:
+        response.status_code = 200
+    return {
+        "relation": relation,
+        "outcome": outcome,
+        "facts": [RELATION_OUTCOME_FACTS.get(outcome, "")],
+    }
 
 
 @router.post("/relations/{relation_id}/decide")
@@ -844,6 +1003,95 @@ def decide_atlas_link(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if link is None:
         raise HTTPException(status_code=404, detail="atlas link not found")
+    return {"link": link}
+
+
+@router.get("/atlas-links/nodes")
+def search_atlas_link_nodes(
+    domain_key: str,
+    q: str = "",
+    current_user: dict = Depends(_require_teacher),
+):
+    """手動の対応付け用: 現行凍結骨格の概念を名前で探す（IK-0927・読み取りのみ）。
+
+    骨格は読むだけで書き換えない（KR2 / VA9）。凍結版が無ければ空の一覧と事実文。
+    """
+    domain = (domain_key or "").strip()
+    if not domain:
+        raise HTTPException(status_code=422, detail="分野を指定してください。")
+    session = get_session()
+    try:
+        skeleton = atlas_store.load_frozen_skeleton(session, domain)
+    except Exception:  # noqa: BLE001 — 読めなければ空（fail-soft）
+        logger.debug("frozen skeleton lookup failed for %s", domain, exc_info=True)
+        skeleton = None
+    finally:
+        session.close()
+    if skeleton is None:
+        return {
+            "nodes": [],
+            "skeleton_version": "",
+            "facts": ["この分野には、凍結された地図がまだありません。"],
+        }
+    nodes = library_atlas_links.search_concept_nodes(skeleton, q)
+    facts = [] if nodes else ["この名前の概念は、現行の地図にありません。"]
+    return {
+        "nodes": nodes,
+        "skeleton_version": str(getattr(skeleton, "version", "") or ""),
+        "facts": facts,
+    }
+
+
+class AtlasLinkManualRequest(BaseModel):
+    """教員が手で付ける地図との対応（IK-0927）。"""
+
+    domain_key: str
+    node_id: str
+    kind: str = library_schema.RELATION_KIND_EXACT_MATCH
+    reason: str = ""
+
+
+@router.post("/entries/{entry_id}/atlas-links", status_code=201)
+def create_manual_atlas_link(
+    entry_id: str,
+    payload: AtlasLinkManualRequest,
+    current_user: dict = Depends(_require_teacher),
+):
+    """エントリと分野の地図の概念の対応を、教員が手で付ける（IK-0927）。
+
+    候補が出ないときの入口。作る行は ``mapping_justification='manual_curation'`` の
+    候補で、既存の確定・見送りの操作で確定する（KR2: 確定は人の操作）。node は現行凍結版に
+    実在するものだけ受ける（422）。骨格（``atlas_skeletons``）には書かない。
+    """
+    domain = (payload.domain_key or "").strip()
+    node_id = (payload.node_id or "").strip()
+    if not domain or not node_id:
+        raise HTTPException(status_code=422, detail="分野と地図の概念を選んでください。")
+    session = get_session()
+    try:
+        skeleton = atlas_store.load_frozen_skeleton(session, domain)
+    except Exception:  # noqa: BLE001
+        skeleton = None
+    finally:
+        session.close()
+    if skeleton is None or node_id not in library_atlas_links.concept_index(skeleton):
+        raise HTTPException(status_code=422, detail="選んだ概念は、現行の地図にありません。")
+    uid = _uid(current_user)
+    try:
+        link = library_registry.create_node_link(
+            entry_id=entry_id,
+            domain_key=domain,
+            node_id=node_id,
+            kind=payload.kind,
+            mapping_justification=library_schema.JUSTIFICATION_MANUAL,
+            reason=(payload.reason or "").strip() or "教員が地図の概念を選んで対応を付けました。",
+            actor_id=str(uid or ""),
+            record_audit=_registry_audit,
+        )
+    except LibraryRetiredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"link": link}
 
 
@@ -1050,13 +1298,13 @@ def list_identity_candidates(
     if include_dismissed:
         statuses.append(library_schema.REVIEW_STATUS_DISMISSED)
 
-    entries = [
+    entries = _display_entries([
         entry
         for entry in library_store.list_entries(
             domain_key=domain_key, include_retired=True, include_candidates=True
         )
         if entry.get("review_status") in statuses
-    ]
+    ])
 
     _can_view = _document_access_checker(uid)
 
@@ -1119,6 +1367,7 @@ def list_identity_candidates(
                     "entry_type": entry["entry_type"],
                     "review_status": entry["review_status"],
                     "domain_key": entry["domain_key"],
+                    "domain_label": entry.get("domain_label") or "",
                     "mapping_justification": entry.get("mapping_justification"),
                 },
                 "links": items,
@@ -1130,7 +1379,19 @@ def list_identity_candidates(
 
     facts: list[str] = []
     if not candidates:
-        facts.append("確認をお待ちしている同一性の候補はありません。")
+        # IK-0864: 見送り済みを含めたかどうかで文を分け、候補の出所と作り直す道を添える
+        # （文言の正本はこの facts 1 つ — 画面は自前の固定文を並べない）。
+        facts.append(
+            IDENTITY_CANDIDATES_EMPTY_WITH_DISMISSED
+            if include_dismissed
+            else IDENTITY_CANDIDATES_EMPTY
+        )
+        facts.append(IDENTITY_CANDIDATES_ORIGIN_FACT)
+        # IK-0919: 名前の違う同じ論文の別の版（TeX / PDF）も候補になる経路があることを言う
+        # （文言の正本は core/library/identity_candidates.py）。
+        from core.library.identity_candidates import SAME_PAPER_VERSIONS_NOTE
+
+        facts.append(SAME_PAPER_VERSIONS_NOTE)
     if hidden_unresolved_any:
         # P3-R9: 件数は出さない（KR6）。「何が起きたか」だけを事実文で書く。
         facts.append(

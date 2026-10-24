@@ -131,7 +131,8 @@ def test_component_equation_item_without_reconstruction_has_no_note():
 
 def test_component_equation_item_for_unknown_id_has_no_note():
     items = component_context._build_equations({"linked_equation_ids": ["eq_9"]}, {})
-    assert items[0]["label"] == "eq_9"
+    # IK-0862: 記録の無い式は内部 ID ではなく一般ラベル。
+    assert items[0]["label"] == "関連する数式"
     assert "label_note" not in items[0]
 
 

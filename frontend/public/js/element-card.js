@@ -271,6 +271,28 @@
     return rendered || "";
   }
 
+  // 地の文の $…$ / \(…\) 区間だけを renderMathGated で描き、残りは esc する。
+  // 区間が無い文は ctx.esc と同じ結果（既存の表示を変えない）。
+  function textWithDelimitedMathHtml(ctx, text) {
+    var src = textOf(text).replace(/\\\(([\s\S]+?)\\\)/g, function (_m, expr) {
+      return "$" + expr + "$";
+    });
+    if (src.indexOf("$") < 0) return ctx.esc(src);
+    var out = "";
+    var re = /\$([^$]+)\$/g;
+    var last = 0;
+    var m;
+    while ((m = re.exec(src)) !== null) {
+      out += ctx.esc(src.slice(last, m.index));
+      var inner = m[1];
+      var rendered = renderMathGated(ctx, inner, false, inner.length <= SYMBOL_TEX_MAX_LENGTH);
+      out += rendered || ctx.esc(inner);
+      last = re.lastIndex;
+    }
+    out += ctx.esc(src.slice(last));
+    return out;
+  }
+
   function isPlainObject(value) {
     return !!value && typeof value === "object" && !(value instanceof Array);
   }
@@ -630,12 +652,14 @@
     var labelHtml = "";
     var labelCls = "element-card-item-label";
     if (fullText) {
-      labelHtml = ctx.esc(fullText);
+      labelHtml = textWithDelimitedMathHtml(ctx, fullText);
       labelCls += " element-card-item-fulltext";
     } else if (textOf(item.element_type) === ELEMENT_TYPE_SYMBOL) {
       labelHtml = renderMathGated(ctx, label, false, true);
     }
-    if (!labelHtml) labelHtml = ctx.esc(label);
+    // IK-0898: 地の文に $…$ の数式区間を含む見出し（式から合成した主張の和文など）は
+    // 区間だけを数式で描く（ゲート不通過の区間は $ を外した素の文字）。
+    if (!labelHtml) labelHtml = textWithDelimitedMathHtml(ctx, label);
     var qualifier = vocabQualifierLabel(item.element_type, item.qualifier);
     // ラベルと同じ文字列の qualifier はチップにしない（stage は label が段階訳語、
     // qualifier が段階キーなので訳すと一致する）。

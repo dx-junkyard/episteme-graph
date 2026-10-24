@@ -297,6 +297,19 @@ def equation_latex_snippet(record: Any, limit: int = LATEX_SNIPPET_MAX) -> str:
     return f"${cut}$" + ("…" if truncated else "")
 
 
+def equation_display_latex(record: Any, limit: int = 400) -> str:
+    """式本文（LaTeX・区切りなし）を表示用に整えて返す（原子の境目で切る）。本文が無ければ ""。
+
+    部品の文脈の式が教材の式に解決できないとき、画面が式本文を数式として描くための値
+    （IK-0894）。切ったときは末尾に ``…`` を付けない（数式として描くため）。
+    """
+    text = _clean_latex(equation_body(record)["latex"])
+    if not text:
+        return ""
+    cut, _truncated = _cut_latex(text, limit)
+    return cut or ""
+
+
 def equation_defined_symbols(record: Any) -> list[str]:
     """式が定義する記号名（``semantics.defined_symbols`` → 無ければ式レコード直下の同名キー）。
 
@@ -335,7 +348,8 @@ def equation_display_label(record: Any) -> str:
     """
     rec = record if isinstance(record, dict) else {}
     label = str(rec.get("label") or "").strip()
-    if label:
+    # TeX の \label キー（eq:mod_dcf）は印字番号ではないので番号として出さない（IK-0858）。
+    if label and not _dp.is_tex_label_key(label.strip("()").strip()):
         return f"式 ({label})"
     snippet = equation_latex_snippet(rec, LABEL_SNIPPET_MAX)
     if snippet:

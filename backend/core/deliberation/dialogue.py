@@ -282,6 +282,76 @@ def document_domain_key(document_id: str) -> str:
         return ""
 
 
+# 分野の出所（IK-0890）。教員の選択 > 解析 run > コース > 配置 の段順。
+DOMAIN_SOURCE_RUN = "analysis_run"
+DOMAIN_SOURCE_COURSE = "course"
+DOMAIN_SOURCE_PLACEMENT = "placement"
+
+
+def resolve_document_domains(document_id: str) -> tuple[list[str], str]:
+    """document の分野（library domain_key と同一名前空間）を段順で解決する（IK-0890）。
+
+    段順: ①採用解析 run の ``cartridge_id`` → ②この教材を sources に含むコースの
+    ``cartridge_id``（``paper_discovery.corpus.document_domain_keys``）→ ③live な
+    ``landscape_placements`` の ``domain_key``。最初に値が出た段の分野を返す（複数あり得る。
+    複数のときは呼び出し側が教員に選ばせる — サーバが黙って 1 つに決めない）。
+
+    Returns:
+        ``(domain_keys, source)``。どの段にも無ければ ``([], "")``。fail-soft（例外は握る）。
+    """
+    doc_id = str(document_id or "").strip()
+    if not doc_id:
+        return [], ""
+    run_key = document_domain_key(doc_id)
+    if run_key:
+        return [run_key], DOMAIN_SOURCE_RUN
+    try:
+        session = get_session()
+    except Exception:  # noqa: BLE001
+        logger.warning("deliberation dialogue: domain resolution session failed", exc_info=True)
+        return [], ""
+    try:
+        try:
+            from core.paper_discovery import corpus as _corpus  # 遅延 import
+
+            course_keys = [k for k in _corpus.document_domain_keys(session, doc_id) if k]
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "deliberation dialogue: course domain resolution failed for %s", doc_id, exc_info=True,
+            )
+            session.rollback()
+            course_keys = []
+        if course_keys:
+            return course_keys, DOMAIN_SOURCE_COURSE
+        try:
+            rows = session.execute(
+                sa_text(
+                    """
+                    SELECT domain_key, MIN(created_at) AS first_at
+                      FROM landscape_placements
+                     WHERE document_id::text = :doc
+                       AND status NOT IN ('superseded', 'rejected')
+                       AND COALESCE(domain_key, '') <> ''
+                     GROUP BY domain_key
+                     ORDER BY first_at, domain_key
+                    """
+                ),
+                {"doc": doc_id},
+            ).fetchall()
+            placement_keys = [str(r[0]).strip() for r in rows if str(r[0] or "").strip()]
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "deliberation dialogue: placement domain resolution failed for %s", doc_id, exc_info=True,
+            )
+            session.rollback()
+            placement_keys = []
+        if placement_keys:
+            return placement_keys, DOMAIN_SOURCE_PLACEMENT
+        return [], ""
+    finally:
+        session.close()
+
+
 def identity_query_text(breakdown: dict[str, Any]) -> str:
     """内訳から同一性候補検索用のクエリテキストを組み立てる（非LLM・決定論的）。"""
     parts: list[str] = [str(breakdown.get("label") or "")]
@@ -317,8 +387,9 @@ def collect_identity_candidates(ref: ElementRef, breakdown: dict[str, Any]) -> l
         # 設計書 §16: evidence / derivation は共通部品化の対象外なので、同一性候補の
         # 材料自体を供給しない（LLM に「共通部品と同じもの」提案の余地を与えない）。
         return []
-    domain_key = document_domain_key(ref.document_id or "")
-    if not domain_key:
+    # IK-0890: 分野は段順の 1 関数で解決（run → コース → 配置）。複数のときは各分野を引く。
+    domain_keys, _source = resolve_document_domains(ref.document_id or "")
+    if not domain_keys:
         return []
     query_text = identity_query_text(breakdown)
     if not query_text:
@@ -328,12 +399,17 @@ def collect_identity_candidates(ref: ElementRef, breakdown: dict[str, Any]) -> l
     if top_k <= 0:
         return []
     try:
-        hits = search_frozen_entries(
-            domain_key=domain_key,
-            query_text=query_text,
-            entry_type=identity_entry_type_for_element(ref.element_type),
-            top_k=top_k,
-        )
+        hits = []
+        for domain_key in domain_keys:
+            hits.extend(
+                search_frozen_entries(
+                    domain_key=domain_key,
+                    query_text=query_text,
+                    entry_type=identity_entry_type_for_element(ref.element_type),
+                    top_k=top_k,
+                )
+            )
+        hits = hits[:top_k] if len(domain_keys) == 1 else hits[: top_k * len(domain_keys)]
     except Exception:  # noqa: BLE001 — search は例外を投げない契約だが防御的に（非致命）
         logger.warning(
             "deliberation dialogue: identity candidate retrieval failed for %s:%s",

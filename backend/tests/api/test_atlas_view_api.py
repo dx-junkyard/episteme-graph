@@ -560,7 +560,7 @@ class TestGetAtlasNode:
         assert "原文3本に裏付け" in data["verify_line"]
         assert "式(12)" in data["evidence_refs"]
         # C層原則1: 学習者も叩けるルートなので承認は段階ラベルのみ（生数値は出さない）。
-        assert data["endorsements"][0] == {"label": "強い支持: 3名の教員が承認(専門2分野)"}
+        assert data["endorsements"][0] == {"label": "強い支持: 3名の教員が支持(専門2分野)"}
         assert data["skeleton_version"] == "2026.1"
 
     def test_detail_panel_never_leaks_raw_endorsement_counts(self, client, warm_cache):

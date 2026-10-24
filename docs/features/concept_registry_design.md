@@ -491,3 +491,82 @@ Phase 3 の敵対的レビューで挙がった P3-R1〜R14 のうち、本層�
 - **P3-5 記号 lookup は「この論文」に限る**（IK-0552）: 探索範囲は chunk の document、無ければ表示中トピックの論文（`topic_id` を受ける）。
   コースの別論文の定義は持ってこない。別論文に同じ記号があるときは `FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS`、この論文に無いときは
   `FACT_SYMBOL_NOT_IN_THIS_DOCUMENT` の事実文を返す。式本文は返さない（位置の事実文まで・IK-0578 で未決）。
+
+## 追補（2026-10-23・第 25 周 面 A 第 1 周の是正）
+
+- 同一性の候補の空の状態の文言はサーバの `facts` が正本（見送り済みを含めたかで文を分け、候補の出所と
+  作り直す道を添える）。地図との対応の導出結果の `facts` は画面がボタンの下に描く（IK-0864）。
+- 一覧・詳細の表示語は route 層で足す: `updated_by_label`（シードは「同梱の初期データ」・帰属の解決は
+  `core.atlas_review_display.fetch_actor_labels` を共有）/ `domain_label` / `version_line`（「凍結版 N」
+  「まだ凍結していません」・revision は出さない）/ `review_status_note`（確定と凍結は別）（IK-0866）。
+- 別名の正本はラベル区画。詳細の編集面から別名の欄を外し、保存は aliases を送らない（IK-0867）。
+- 関係の相手は名前・別名で検索して選ぶ（`GET /entries?q=` の結果が空なら `facts` で事実文）（IK-0868）。
+- 記号の照会: 式だけで定義された記号は「式 (3)で定義されています。」+ 定義式の本文 / 登録の行に定義が無くても
+  配信済みの式から探す / 但し書きは取り込み形式で分ける / 別の論文の同じ字形は意味の注記つき / 画面が上付きを
+  添字に結合して送った記号は、完全一致の後に `symbol_key_fallbacks` で 1 段ずつ照合し直す（IK-0869 / IK-0870）。
+- Copilot の capability に概念レジストリの 4 項目（案内専用）を足した（IK-0865）。
+
+## 追補（2026-10-23・第 25 周 面 A 第 2 周の是正）
+
+- **共通部品の検索の分野**（IK-0890）: 分野は `core/deliberation/dialogue.py::resolve_document_domains` の 1 関数が
+  段順（採用解析 run の `cartridge_id` → 教材を sources に含むコースの `cartridge_id`（`corpus.document_domain_keys`）→
+  live な `landscape_placements.domain_key`）で決める。深く検討の検索 route（`GET /api/admin/deliberation/elements/
+  {type}/{id}/shared-part-candidates`）と W層の対話の同一性候補の両方がここを通る。route は教員の選択（クエリ
+  `domain_key`）を最優先し、1 つに決まらない（複数・どこにも無い）ときは**サーバが黙って選ばず**、表示名付きの
+  `domains`（`{domain_key, domain_label}`。当たった分野 → ライブラリにエントリがある分野）と事実文を返す
+  （「カートリッジ」の語は出さない）。応答に `domain_label` / `domain_source`（`analysis_run` / `course` /
+  `placement` / `selected`）を添える。表示名の正本は `atlas_state.domain_display_name`、共通の分野は
+  `core/library/schema.DOMAIN_UNASSIGNED_LABEL`。
+- **ラベル・関係の追加の結果**（IK-0897）: `registry.add_label` / `create_relation` は戻り値に `outcome`
+  （`created` / `existing` / `dismissed`）を添える。route は新規だけ 201・それ以外は 200 で、固定文の `facts`
+  （`LABEL_OUTCOME_FACTS` / `RELATION_OUTCOME_FACTS`）を返し、画面は区画の一覧の直前に描く。見送り済みの行は
+  追加し直しても復帰させない（KR7 は不変）。
+- **記号の照会の第 3 の供給源**（IK-0893）: 登録簿に定義の文が無いときだけ、同じ論文の主張本文での使われ方
+  （`mentions`・最大 2 件・数式区間を割らない）を固定文 `FACT_CLAIM_MENTIONS`（「定義の文ではありません」）付きで
+  添える。式の左辺による定義の推定は `P = …` / `P(ε) = …` に限る（`P(R_*) = 0` の値の代入を定義に数えない）。
+- 導出の確認ダイアログの分野名は分野一覧の `domain_label`（IK-0866 の残り）。
+
+### pre-mortem（第 2 周の是正の設計時の検査）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 入口で任意になった分野を後段が唯一の材料として要求 | `available-but-unwired` | 同じ値を持つ別の正本へ段順で後退し、最後は教員に選ばせる |
+| 同じ問い（記号の意味）に画面ごとに別の材料で答える | `duplicate-canonical-sources` | 部品の文脈と同じ主張本文を第 3 の供給源にし、定義と断定しない |
+| 3 つの結果を 1 つの成功で表す | 該当なし（表現の欠落。`outcome` の一級化で解消） | — |
+
+## 追補（2026-10-23・第 25 周 面 A 第 3 周の是正）
+
+- **同一性リンクの行**（IK-0916 / IK-0917）: `_identity_link_response` が部品側を `identity_links.describe_instance`
+  （名前・要約・入出力・論文の題名。live ビューのみ・fail-soft）で同梱し、内部の要素型名・UUID は画面の本文に出さない。
+  確信度の段階（`confidence_label`）は AI・照合由来（`MACHINE_JUSTIFICATIONS`）の未確定の行だけに付け、それ以外は
+  `None`。人の判断の状態は別キー `provenance_label`（教員が作成 / 教員が確定 / 教員が却下 / 照合による候補）。
+  未確定の行には確定の直前に読む `confirm_note`（同じものとして扱う・学生の画面に何が出る・使う関係なら確定しない）。
+  **リンクの種類は足さない**（指揮者の判断・KN-2 の「同じもの」を保つ。使う・満たす関係は v1 で記録しない）。
+- **作成の結果**（IK-0918）: `create_candidate` が `outcome`（`created` / `existing_candidate` /
+  `existing_confirmed` / `existing_rejected`）を返し、route は新規だけ 201 + 監査、既存は 200 + `facts`
+  （`LINK_OUTCOME_FACTS`）。IK-0897 と同じ作法。
+- **同じ論文の別の版**（IK-0919）: `identity_candidates` に規則②b。arXiv ID（`source_url` → `filename` →
+  `source_path`）か題名の正規化完全一致で別の版の組を先に解き、その中で根拠の式の正規化 LaTeX・主張の正規化本文の
+  一致から部品の対を選ぶ（名前を使わない・`lexical_match`・`SAME_PAPER_REASON_*`）。規則③の起点は代表チャンク →
+  出典チャンク → 根拠の主張の `chunk_id`（最大 4）。LLM 0 回・embedding 0 回（KR5 不変）。
+- **確定リンクの読み手**（IK-0920）: ライブラリのエントリ詳細「結びついた教材の部品」・学生の部品の文脈（他の論文は
+  確定リンク ∩ 読める論文の**題名**の列挙。件数キー `other_documents_count` は廃止）・学習チャットの element 解決器の
+  事実 1 行・旅（区画に一意の部品が埋め込まれているときだけ [2] へ）。
+- **地図との対応**（IK-0927）: 導出の事実文に「凍結していないエントリは名前・別名の一致だけで照合」と手動の入口。
+  `GET /api/admin/library/atlas-links/nodes`（現行凍結骨格の概念を名前で検索）+
+  `POST /api/admin/library/entries/{id}/atlas-links`（`manual_curation` の候補・現行版に無い node は 422・骨格に
+  書かない = KR2）。教員の手動作成を即確定にするかは決めていない（候補で入り、既存の確定で確定する）。
+- **検索の帰属**（IK-0928）: `library.search` は `feature` を受けると `embed_with_context` で帰属を張る
+  （`embedding:library_search` / `embedding:shared_part_search`）。
+- **記号の使用例**（IK-0922 / IK-0898）: 論文の文を持たない主張の出所の述語の正本 `core.schema.NON_SOURCE_TEXT_CLAIM_ORIGINS`
+  で合成主張を除き、区切りの無い TeX は切り詰めの前に `delimit_bare_tex` で区切る。
+
+### pre-mortem（第 3 周の是正の設計時の検査）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 確定リンクを作る側だけがあり読む側が無い | `available-but-unwired` | 読み手 4 面を既存 API・既存の解決器・既存の旅の hop に配線（新しい kind・新しい API を作らない） |
+| 意図の語表が登録簿と別にある | `duplicate-canonical-sources` | 語を `Capability.keywords` に移し intent は読むだけ |
+| 合成主張を論文の文として扱う消費者が増える | `rule-enforced-per-surface` | 述語を `core/schema.py` に 1 つ置き 2 消費者が共有 |
+| 作り直しで既存行を返して「作成しました」 | `failure-reported-as-success` | `outcome` の一級化 |
+| 他の論文の題名を学生に出す | `condition-not-propagated` | 読める論文の集合を呼び出し側が組んで渡し、その積だけを列挙（未指定はコースの sources = fail-closed） |

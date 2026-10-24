@@ -896,7 +896,9 @@ class TestSharedPartCandidates:
         assert response.status_code == 200
         body = response.json()
         assert body["entries"] == []
-        assert "検索できません" in body["note"]
+        # IK-0890: 内部語「カートリッジ」を出さず、分野を選ぶ出口を言う。
+        assert "分野を選ぶ" in body["note"]
+        assert "カートリッジ" not in body["note"]
         assert called["search"] is False
 
     def test_hits_are_returned_without_numeric_distance(self, client_and_tokens, monkeypatch):

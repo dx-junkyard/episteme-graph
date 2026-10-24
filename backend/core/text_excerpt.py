@@ -305,3 +305,31 @@ def looks_like_tex_math(text: str) -> bool:
         return False
     covered = sum(len(cmd) + 1 for cmd in commands)
     return covered >= max(10, int(len(t) * 0.2))
+
+
+_PAREN_INLINE_MATH_RE = re.compile(r"\\\((.+?)\\\)", re.DOTALL)
+_DOLLAR_INLINE_MATH_RE = re.compile(r"\$([^$]+)\$")
+_PROSE_WORD_RE = re.compile(r"[A-Za-z]{2,}|[぀-ヿ㐀-鿿]")
+
+
+def normalize_inline_math_delimiters(text: object) -> str:
+    """``\\(…\\)`` のインライン数式を ``$…$`` に正規化する（IK-0898・決定論）。"""
+    return _PAREN_INLINE_MATH_RE.sub(lambda m: "$" + m.group(1) + "$", str(text or ""))
+
+
+def is_prose_with_delimited_math(text: object) -> bool:
+    """地の文に ``$…$``（または ``\\(…\\)``）で区切られた数式を含む文か（IK-0898）。
+
+    TeX 命令がすべて数式区間の内側にあり、区間の外に散文（英語 2 字以上の語か和文）が
+    残るときだけ True。生の TeX 数式（:func:`looks_like_tex_math` が真の本文）と違い、
+    数式区間を数式として描けば読める文なので、見出しから捨てない・剥がさない。
+    """
+    body = normalize_inline_math_delimiters(text).strip()
+    if "$" not in body or body.count("$") % 2:
+        return False
+    if not _DOLLAR_INLINE_MATH_RE.search(body):
+        return False
+    outside = _DOLLAR_INLINE_MATH_RE.sub(" ", body)
+    if _TEX_MATH_ENV_RE.search(outside) or _TEX_COMMAND_RE.search(outside) or "$" in outside:
+        return False
+    return bool(_PROSE_WORD_RE.search(outside))
