@@ -89,7 +89,7 @@ history: []
 - 画面では未確認。学生ペルソナは「全領域が霧のまま・円は小」と書いたが（run 20261022T220616Z-78776 seq 9）、ハーネスの
   論文の海の投影（`uxsim/runner/atlas_exec.py::sea_map_lines`）が霧を骨格の `r.kind == "fog"` で決めており、この是正
   （配置から霧を決める `corpus-sea.js densityIndex`）を写していない。審判 B13 の検出も同じ投影を読んでいる。
-  偽所見として `uxsim/runs/round25/harness_fixes_atlas.md`（第 2 周 H12）に書いた。
+  偽所見として 「uxsim/runs/round25/harness_fixes_atlas.md」（第 2 周 H12）に書いた。
 - 応答からの読み替え: /api/learning/corpus/landscape の placements は各行に region_id（stars / high_energy / cosmology /
   ism_star_formation / observation_methods 等）を持ち、/api/atlas の L1 の region id と一致する。是正後の `densityIndex` は
   これで領域ごとの論文の集合を作るので、配置のある領域は霧にならず段階の塗りになる（製品は是正済み・投影の遅れ）。

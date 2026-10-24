@@ -93,7 +93,7 @@ history: []
   （「AIによる推定 → 〇〇が …」）が載っている（run 20261022T220051Z-74929 seq 4〜7 の応答）。
 - 画面では未確認: ハーネスの投影（`atlas_exec.gap_card_lines` / `edge_card_lines`）がこの 2 行を描かず、採用済みの
   [採用]を押せない状態も写していないため、ペルソナは「誰が採用したか出ない」と書き、審判 B12 が同じ投影を製品の課題として
-  拾った（偽所見 — `harness_fixes_atlas.md` 第 2 周 H11）。
+  拾った（偽所見 — 「harness_fixes_atlas.md」 第 2 周 H11）。
 - 是正者向けの差分（小）: 帰属の表示名が利用者名のまま助詞に続く（「uxsim_te_02_veteran_introが」）。表示名に姓名が無い
   アカウントでは読みにくいので、区切り（「〇〇 が」か「〇〇（教員）が」）を `atlas_review_display.decision_line` で入れる。
 

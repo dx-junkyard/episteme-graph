@@ -64,7 +64,7 @@ component_assembly が決定論フォールバックに落ち続けた。製品�
 抱えたまま残り、プールが埋まって新しい要求は proxy の中で十数分待たされた。呼び出し元の切断・proxy の再起動という
 条件は、スレッドの向こうの待機に伝わらなかった。
 
-出所: 頭脳 M1/M2 の所見（`uxsim/runs/radar_loop/BRAIN_NOTES_M1.md` / `BRAIN_NOTES_M2.md`）と
+出所: 頭脳 M1/M2 の所見（「uxsim/runs/radar_loop/BRAIN_NOTES_M1.md」 / 「BRAIN_NOTES_M2.md」）と
 `docs/features/paper_radar_autonomous_loop_design.md`（AL4: LLM は proxy → mailbox → 頭脳で肩代わり）。
 
 ## 発見の観点
