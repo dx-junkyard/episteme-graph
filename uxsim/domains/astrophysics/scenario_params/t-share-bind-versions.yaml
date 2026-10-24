@@ -1,0 +1,42 @@
+scenario: t-share-bind-versions
+domain: astrophysics
+params:
+  goal_text: 同じ論文の TeX 版と PDF 版で出てくる同じ部品を共通部品として結び、学生が「共通部品として」で読めるようにすること
+  material_hint: Neutron Star Equation of State via Physics Informed Neural Network
+  # 主グラフは段の集約（理論の土台・整合関係）で部品名が出ない。部品は教材の ⚓・原稿スタジオ・［検出要素］で
+  # 選べる名前で指す（第 25 周 H4: 「Equation system」はこの論文の主グラフに無かった）
+  component_hints: [TOV network map, TOV network map]
+  part_name: TOV 方程式（静水圧平衡）
+  part_aliases: [TOV equation, Tolman–Oppenheimer–Volkoff]
+  part_summary: 一般相対論での球対称な星の静水圧平衡。状態方程式を与えると質量と半径の関係が決まる。
+  search_text: TOV 方程式
+  # 第 25 周 第 2 波（IK-0890）: 「探す分野:」の選択欄が出たときに選ぶ分野（表示名の一部）
+  domain_hint: 宇宙物理
+  link_reason: 同じ論文の TeX 版と PDF 版で、同じ式の組を扱う部品のため
+  second_decision: confirm
+  copilot_questions:
+    - 共通部品への結び付きを確定すると、学生の画面では何が見えるようになりますか？
+personas:
+  te-03-meticulous-seminar:
+    second_decision: reject
+    link_reason: TeX 版と同じ式番号の組を扱っていることを両方の内訳で確かめた
+  te-04-copilot-intro:
+    # 第 2 周（judge_share_r1 §6）: TeX 版・PDF 版とも確定する。第 1 周の「TOV 方程式（静水圧平衡）」が残っていれば
+    # 作らずにそれを開く（runner は同名のエントリが一覧にあれば新規作成しない）。この確定が st-06 / st-09 の (d)(e) の材料
+    second_decision: confirm
+    link_reason: TeX 版と PDF 版の両方で、同じ TOV の残差を課す網の部品であることを内訳で確かめた
+  te-02-veteran-intro:
+    # 第 3 周（judge_share_r2 §5 の te-04 × (a') は第 2 周と同じ組なので、行動型の違う te-02 に替えた）。
+    # TeX 版・PDF 版とも確定し、Copilot の 1 手（必須）で「確定すると学生に何が見えるか」を問う。
+    # 第 1・2 周の「TOV 方程式（静水圧平衡）」が残っていれば作らずにそれを開く
+    second_decision: confirm
+    link_reason: TeX 版と PDF 版で同じ部品
+    copilot_questions:
+      - これを確定したら、学生の画面には何が出るようになる？
+  te-05-delegator-lab:
+    # 第 4 周（judge_share_r3 §6）: 委任型が同一性の候補に TeX ⇄ PDF の対が出るかを先に見て、候補から確定する。
+    # 確定の直前に両側の意味が並ぶか（IK-0917）・行が名前で読めるか（IK-0916）。最後に Copilot の 1 手（ライブラリのタブ）
+    second_decision: confirm
+    link_reason: TeX 版と PDF 版で同じ TOV の部品。細部の確認は院生に任せる
+    copilot_questions:
+      - この結び付けを確定したら、学生の画面では何が変わりますか？取り消すときはどこからですか？

@@ -1,0 +1,42 @@
+scenario: s-db-ledger-lines
+domain: astrophysics
+# 第 25 周・面 B (e)。コース 1bad7d9f の Cepheus B 論文の DCF 法のトピック（教員の (b) と同じ論文）。
+params:
+  goal_text: 教材の主張がどこまで確かめられているのかを、出典と台帳の一行で確かめること
+  topic_hint: DCF法による磁場強度の推定（Cepheus B の磁場トポロジーと星形成の論文）
+  topic_hint_terms: [DCF法, 磁場強度]
+  seed_questions:
+    - この磁場強度の推定は、どの条件のもとで確かめられているのですか？
+    - この推定が成り立たなくなるのは、どんな観測が出たときですか？
+  map_question: 分野の地図のこの項目に「記帳」と書いてあるのは、何を確かめた記録のことですか？どこで詳しく見られますか？
+per_archetype:
+  skeptic:
+    seed_questions:
+      - DCF 法の等分配の仮定は、この論文の中で検証されていますか？
+      - 検証されていないなら、それはどこにそう書いてありますか？
+  confident_theorist:
+    seed_questions:
+      - 等分配の仮定が崩れたとき、推定はどちらに偏りますか？
+      - その偏りを確かめた記録はありますか？
+  non_native:
+    goal_text: checking how far the claims in the material have been verified
+    seed_questions:
+      - Under what conditions has this magnetic field estimate been verified?
+      - What observation would make this estimate fail?
+    map_question: On the field map, what does the note on this item mean, and where can I see the details?
+# 第 25 周 第 4 周（doubt H20）: (e) のトピックは教材に ⚓ の部品チップがあるものにする（Cepheus の t0〜t4 には
+# ⚓ が無く、部品の説明ポップアップの一行 IK-0906 が 2 周続けて不達だった）。過去の run で ⚓ を確認したのは
+# PINN の「二重ネットワークとTOV方程式の課し方」（t11・comp_001 / comp_003）と「主結果：R1.4と音速の軟化」（t13・comp_011）
+personas:
+  st-07-m1-grb-voice:
+    topic_hint: 二重ネットワークとTOV方程式の課し方（PINN による中性子星の状態方程式の論文）
+    topic_hint_terms: [二重ネットワーク, TOV方程式]
+    seed_questions:
+      - TOV 方程式をネットワークに課すやり方は、どの条件のもとで確かめられているのですか？
+      - この課し方が成り立たなくなるのは、どんな観測が出たときですか？
+  st-10-d3-21cm-receiver:
+    topic_hint: 主結果：R1.4と音速の軟化（PINN による中性子星の状態方程式の論文）
+    topic_hint_terms: [R1.4, 音速の軟化]
+    seed_questions:
+      - この半径の推定は、どの観測との比較で確かめられているのですか？
+      - 音速の軟化が見えなくなるのは、どんな観測が出たときですか？

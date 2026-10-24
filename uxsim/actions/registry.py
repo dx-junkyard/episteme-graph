@@ -391,7 +391,7 @@ _ADMIN: list[Action] = [
        precondition="グラフレビューでノードの根拠を見ている", manual=_TE + "26-admin-graph-review.md#claim-approve",
        note="review_status は teacher_approved（既定）| rejected | needs_revision | teacher_review_required"),
     _a("admin.seminar_brief.view", "ゼミ前ブリーフを開く", "admin", "materials.row-seminar-brief",
-       ("GET", "/api/admin/documents/{document_ref}/seminar-brief"), args={"document_ref": "str?"},
+       ("GET", "/api/admin/documents/{document_ref}/seminar-brief"), args={"document_ref": "str?", "material_hint": "str?"},
        manual=_TE + "11-admin-materials.md#seminar-brief-open"),
 ]
 
@@ -480,3 +480,21 @@ def get(action_id: str) -> Optional[Action]:
 def actions_for(screen: Screen) -> list[Action]:
     """画面ごとの行為（``auth.login`` は runner 専用なので除く）。"""
     return [a for a in REGISTRY.values() if a.screen == screen and a.id != "auth.login"]
+
+
+try:  # r25:atlas
+    from uxsim.actions.atlas_actions import ACTIONS as _ATLAS_ACTIONS; REGISTRY.update({a.id: a for a in _ATLAS_ACTIONS})  # noqa: E702,E501  r25:atlas
+except ImportError:  # r25:atlas — atlas_actions が先に読まれた循環（atlas_actions 側の末尾で合流する）
+    pass
+try:  # r25:share
+    from uxsim.actions.share_actions import ACTIONS as _SHARE_ACTIONS; REGISTRY.update({a.id: a for a in _SHARE_ACTIONS})  # noqa: E702,E501  r25:share
+except ImportError:  # r25:share — share_actions が先に読まれた循環（share_actions 側の末尾で合流する）
+    pass
+try:  # r25:doubt
+    from uxsim.actions.doubt_actions import ACTIONS as _DOUBT_ACTIONS; REGISTRY.update({a.id: a for a in _DOUBT_ACTIONS})  # noqa: E702,E501  r25:doubt
+except ImportError:  # r25:doubt — doubt_actions が先に読まれた循環（doubt_actions 側の末尾で合流する）
+    pass
+try:  # r25:studio
+    from uxsim.actions.studio_actions import ACTIONS as _STUDIO_ACTIONS; REGISTRY.update({a.id: a for a in _STUDIO_ACTIONS})  # noqa: E702,E501  r25:studio
+except ImportError:  # r25:studio — studio_actions が先に読まれた循環（studio_actions 側の末尾で合流する）
+    pass

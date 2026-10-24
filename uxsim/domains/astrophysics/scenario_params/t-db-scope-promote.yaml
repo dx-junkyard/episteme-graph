@@ -1,0 +1,26 @@
+scenario: t-db-scope-promote
+domain: astrophysics
+# 第 25 周・面 B (b)。教材は TeX 経路の Cepheus B 論文（document 1771872a…・DCF 法）。ノードは主グラフの先頭。
+# スコープの軸と根拠の引用は論文の範囲で書く（材料は論文の本文の言い回しに寄せる。原文の逐語でなくてもよい）。
+params:
+  goal_text: 前提が「どの条件で」確かめられているかを記帳し、検証状態を誇張せずに付けること
+  course_hint: ""
+  material_hint: Cepheus
+  node_hint: "1"
+  scope_condition: 磁場の乱れが小さく、DCF 法の等分配の仮定が成り立つ範囲で
+  scope_domain: 分子雲の偏光観測で
+  scope_quote: 偏光角の分散から磁場強度を見積もる（DCF 法）
+  scope_reason: 論文の方法の節で、この条件のもとでの推定として述べられているため
+  status_reason: スコープの範囲でのみ確かめられたと記帳する
+  # 第 3 周（IK-0899 の確認）: 主グラフの先頭ノードが同じ ID になる別の論文。指揮者は周の前に両論文の主グラフの先頭ノードの
+  # node_id が一致することを graph_json で確かめ、違えば一致する論文に差し替える
+  second_material_hint: Neutron Star Equation of State via Physics Informed Neural Network
+per_archetype:
+  veteran_clicks_through:
+    scope_reason: 方法の節にある
+    status_reason: 確認済み
+personas:
+  te-04-copilot-intro:
+    course_hint: 1bad7d9f
+  te-02-veteran-intro:
+    status_reason: スコープ内で確認

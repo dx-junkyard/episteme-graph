@@ -1,0 +1,78 @@
+id: t-share-labels-atlas
+population: teachers
+runner: [api]
+# 第 25 周 share (c)。概念の別名・隠しラベルを登録し、地図との対応を導出して判断し、関係を 1 本記録する。
+goal: '{{goal_text}} のために、ナレッジライブラリの概念に別名と隠しラベルを足し、分野の地図との対応と概念どうしの関係を判断する'
+params_required: [goal_text, domain_key, entry_hint, alias_label, hidden_label, relation_kind, relation_object_hint, relation_object_summary, dismiss_reason]
+steps:
+  - do: auth.login
+  - do: admin.library.entries
+    note: 「すべての分野」のままエントリ一覧を読む
+  - do: admin.library.entry_open
+    with: {entry_hint: '{{entry_hint}}'}
+    note: エントリを開き、別名・関係・地図との対応・扱いの 4 区画を読む
+  - do: admin.library.label_add
+    with: {label: '{{alias_label}}', kind: alternate}
+    note: 論文での呼び方を別名として足す
+  - do: admin.library.label_add
+    with: {label: '{{hidden_label}}', kind: hidden}
+    note: 表記ゆれを隠しラベルとして足す
+  - do: admin.library.label_add
+    with: {label: '{{alias_label}}', kind: alternate}
+    note: 同じ別名をもう一度足してしまう（既にあるラベルを足し直したとき、何が起きたか — 追加・既存・見送り済みの戻し — が
+      画面で言い分けられるかを読む。第 25 周 第 3 周・IK-0897）
+  # 第 25 周 第 4 周の前: IK-0897 の第 3 の言い分け（見送り済みのラベルを足し直したときの戻し）を見るための手。
+  # 隠しラベルを見送ってから、同じ文字列をもう一度足す
+  - choose:
+      - do: admin.library.label_dismiss
+        with: {label: '{{hidden_label}}', review_note: '{{dismiss_reason}}'}
+        note: 隠しラベルを見送る（理由を書く。行が消えずに「見送り」で残るかを読む）
+    optional: true
+  - choose:
+      - do: admin.library.label_add
+        with: {label: '{{hidden_label}}', kind: hidden}
+        note: 見送った隠しラベルをもう一度足す（見送り済みの戻しが、追加・既存と言い分けられるか）
+    optional: true
+  - do: admin.library.atlas_links_derive
+    with: {domain_key: '{{domain_key}}'}
+    note: 「地図との対応を導出」を押し、確認ダイアログの文を読んで導出する
+  - do: admin.library.entry_open
+    with: {entry_hint: '{{entry_hint}}'}
+    note: 開き直して、地図との対応に何が並んだかを見る
+  - choose:
+      - do: admin.library.atlas_link_decide
+        with: {status: confirmed}
+        note: 骨格のノードとの対応が正しいなら確定する
+      - do: admin.library.atlas_link_decide
+        with: {status: dismissed, review_note: '{{dismiss_reason}}'}
+        note: 違う対応を理由を書いて見送る
+    optional: true
+  - do: admin.library.entry_create
+    with: {name: '{{relation_object_hint}}', summary: '{{relation_object_summary}}', entry_type: concept}
+    note: 関係の相手（{{relation_object_hint}}）が一覧に無ければ、先に「新規エントリ作成」で相手の概念を登録する（第 25 周 第 2 周）
+  - do: admin.library.entries
+    note: 一覧を読み直し、相手の概念が並んだかを見る
+  - do: admin.library.entry_open
+    with: {entry_hint: '{{entry_hint}}'}
+    note: 関係を記録する側のエントリを開き直す
+  - do: admin.library.relation_add
+    with: {kind: '{{relation_kind}}', object_hint: '{{relation_object_hint}}'}
+    note: 別の概念との関係を記録する（相手の指定の仕方を見る）
+  - choose:
+      - do: admin.library.relation_decide
+        with: {status: confirmed}
+      - do: admin.library.relation_decide
+        with: {status: dismissed, review_note: '{{dismiss_reason}}'}
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: teacher/19-admin-knowledge-library.md#labels
+  - manual: teacher/19-admin-knowledge-library.md#identity-derive
+  - manual: teacher/19-admin-knowledge-library.md#atlas-links
+  - manual: teacher/19-admin-knowledge-library.md#relations
+watch_for:
+  - 別名と隠しラベルの違い（検索だけに使う）が画面で読める
+  - 導出の前に「候補だけで骨格は書き換わらない」が出て、導出の後に何が増えたかが分かる（候補ゼロなら無いことが分かる）
+  - 地図との対応に骨格の版が添えられ、近さは段階の言葉で、数値が出ない
+  - 関係の相手を名前で選べる（ID を手で入れさせられるなら、それが見える）
+  - 見送りは理由が要り、見送ったものは消えずに残る

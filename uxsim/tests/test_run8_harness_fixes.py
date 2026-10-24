@@ -27,9 +27,11 @@ def test_course_open_projection_lists_every_topic_with_chapter_and_check_marker(
                                           "status_label": "まだ順番が来ていません（開けます）",
                                           "check_questions": [{"question": "Q"}] if i == 9 else []} for i in range(12)]}}
     out = project_observation("learning.course.open", 200, body)
-    assert "t11 題11" in out and "…ほか" not in out
+    assert "- 題11" in out and "…ほか" not in out
+    # 第 25 周 H9: id は画面の行に出さず、末尾の「操作に使う番号」欄に分ける
+    assert "- t11" not in out and "（操作に使う番号 — 画面には出ない。topic_id に渡す）" in out and "題11=t11" in out
     # 第 23 周: 状態は画面と同じくサーバの status_label（raw の locked は出さない）
-    assert "第2章:" in out and "t9 題9（まだ順番が来ていません（開けます））（確認問題あり）" in out
+    assert "第2章:" in out and "- 題9（まだ順番が来ていません（開けます））（確認問題あり）" in out
     assert "locked" not in out
 
 

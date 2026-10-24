@@ -1,0 +1,17 @@
+scenario: s-studio-lecture-pages
+domain: astrophysics
+params:
+  goal_text: 講義の前に、このコースの最初のトピックを講義として聴いておき、教材の図も確かめておく
+per_archetype:
+  lecture_listener:
+    goal_text: 通学中に聴けるように、最初のトピックを講義モードで聴けるかを確かめ、スライドと教材の流れが同じかを見る
+  voice_first:
+    goal_text: 画面はあまり見ずに音声で聴きたいので、最初のトピックの講義が音声で始められるかを確かめる
+  non_native:
+    goal_text: before the seminar, listen to the first topic as a lecture and check that the figures in the material are shown
+  newcomer:
+    goal_text: 研究室に入ったばかりなので、最初のトピックを講義でざっと聴いて、図で全体像をつかむ
+personas:
+  st-10-d3-21cm-receiver:
+    # 第 4 周（judge_studio_r3 §5）: 固定コース 6be229e1 を受講して S1〜S3・X1〜X4 を初めて評価する。講義を最後まで送る
+    goal_text: 研究室のゼミの前に、このコースの最初のトピックを講義で最後まで聴き、スライドと教材の流れが同じかを確かめる

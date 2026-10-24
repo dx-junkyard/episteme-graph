@@ -24,3 +24,11 @@ per_archetype:
     interrupt_questions:
     - What balance does the TOV equation on this slide express?
     - Why are there two networks?
+personas:
+  st-06-skeptic-bao:
+    # 第 4 周（judge_studio_r3 §5）: 数式の多いトピックで、講義のスライドの式が読む表示と一致するか（IK-0944 の是正後）、
+    # 記号 → ⚓ → 質問（受講ゲートの統一 IK-0945 の後）
+    interrupt_questions:
+      - スライドの式と教材の式で、記号や添字が違って見えます。どちらが論文の式ですか？
+      - この式の残差をネットワークに課すと、何が保証されて何は保証されないのですか？
+      - いまの説明の根拠は、論文のどの節に書いてありますか？

@@ -1,0 +1,22 @@
+scenario: t-atlas-edge-review
+domain: astrophysics
+params:
+  domain_hint: astrophysics
+  accept_hint: "1"
+  accept_kind: 関連
+  dismiss_hint: "2"
+  dismiss_reason: 両方に配置がある論文はあるが、この 2 項目を直接結ぶ説明は論文の中に無いため
+personas:
+  te-02-veteran-intro:
+    accept_kind: 依存
+    dismiss_reason: 講義では別々に扱うので、地図で結ばない
+  te-05-delegator-lab:
+    # 第 3 周（judge_atlas_r2 §5 の te-03 × edge は第 1 周と同じ組なので te-05 に替えた。几帳面な読みは te-03 の
+    # draft-freeze の関係の一覧で見る）。見送りは学生の糸（RE8 / 審判 B5）の材料
+    accept_kind: 関連
+    dismiss_reason: 結ぶ根拠が画面から読めない
+  te-01-rookie-seminar:
+    # 第 4 周（judge_atlas_r3 §5）: 判断済みの帯（IK-0938）と根拠の一文で、新任が採否を決められるか。［すべて表示］の後は
+    # 番号が表示順に振り直される（H19）
+    accept_kind: 関連
+    dismiss_reason: 両方の項目に置かれた論文はあるが、結ぶ説明が論文の中に見当たらないため、いまは結ばない

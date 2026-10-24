@@ -1,0 +1,21 @@
+scenario: t-share-explain-write
+domain: astrophysics
+params:
+  goal_text: 学生がつまずきやすい部品に、自分の言葉の説明を添えて学生に見せられるようにすること
+  component_hint: TOV
+  explanation_title: 私ならこう説明する — TOV 方程式
+  explanation_body: 星の内側の圧力の勾配が重力と釣り合う条件を、一般相対論で書いた式です。状態方程式（圧力と密度の関係）を 1 つ決めると、中心の密度ごとに星の質量と半径が 1 組決まります。
+  material_hint: Neutron Star Equation of State via Physics Informed Neural Network
+personas:
+  te-05-delegator-lab:
+    explanation_title: 院生向けメモ — TOV 方程式
+    explanation_body: 圧力勾配と重力の釣り合い。状態方程式を入れると質量–半径関係が出る。詳細は論文の第 2 節。
+  te-02-veteran-intro:
+    explanation_title: 講義メモ — TOV 方程式
+    explanation_body: 一般相対論版の静水圧平衡。状態方程式を 1 つ決めると、中心密度ごとに質量と半径が 1 組決まる。
+  te-01-rookie-seminar:
+    # 第 4 周（judge_share_r3 §6）: 新人が独自解釈の追加 → 共有 → 査読を歩く。2 軸の語（共有と査読承認 — IK-0924）を読み分けられるか。
+    # H29 の是正で部分一致が複数なら開かずに止まるので、部品名は完全一致で指す（指揮者が te-01 の原稿スタジオの部品一覧で確かめる）
+    component_hint: TOV network map
+    explanation_title: ゼミ用の説明 — TOV 方程式
+    explanation_body: 星の中の圧力が外向きに押す力と、重力が内向きに引く力が釣り合う条件を、一般相対論で書いた式です。圧力と密度の関係（状態方程式）を 1 つ決めると、星の質量と半径の組が決まります。

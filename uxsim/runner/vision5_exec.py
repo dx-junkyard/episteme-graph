@@ -425,11 +425,24 @@ def release_step3_text(session: PersonaSession, *, published: bool) -> str:
     return "\n".join(lines)
 
 
-def course_visibility_view(session: PersonaSession, visibility: str) -> str:
-    """公開の結果の画面。リリース前の確認の中ならステップ 3、そうでなければコース管理の「更新しました」。"""
+def title_notice_line(body: Any, *, prefix: str = "") -> str:
+    """題名に数式の記法が残る事実文（第 3 波・IK-0951）: ``title_notice`` +「（題名 / 題名）」（``raw_tex_titles``）。
+    admin.js（コースビルダーの登録ボタンの下 ``.cb-title-notice``）と admin-lecture-studio.js（見出しの
+    ``[data-title-notice]``）が同じ形で描く。無ければ空文字（改行も付けない）。"""
+    if not isinstance(body, dict) or not body.get("title_notice"):
+        return ""
+    titles = [str(x) for x in body.get("raw_tex_titles") or [] if x]
+    return f"{prefix}{body['title_notice']}" + (f"（{' / '.join(titles)}）" if titles else "") + "\n"
+
+
+def course_visibility_view(session: PersonaSession, visibility: str, *, readiness_note: str = "") -> str:
+    """公開の結果の画面。リリース前の確認の中ならステップ 3（admin-release-review.js: renderStep の後に
+    ``setNotice(readiness_note)``）、そうでなければコース管理の「更新しました」+ 空白 + ``readiness_note``
+    （admin.js setCmVisibilityStatus。第 3 波・IK-0947 — 本文の無いトピックが残るときだけ）。"""
     if isinstance(session.scratch.get("release_landscape"), dict) and visibility == "public":
-        return release_step3_text(session, published=True)
-    return f"（コース管理の開示範囲）{CM_VISIBILITY_DONE}"
+        text = release_step3_text(session, published=True)
+        return text + (f"\n{readiness_note}" if readiness_note else "")
+    return f"（コース管理の開示範囲）{CM_VISIBILITY_DONE}" + (f" {readiness_note}" if readiness_note else "")
 
 
 def accept_body(session: PersonaSession) -> Optional[dict]:
@@ -594,10 +607,11 @@ def project_release_step2(body: dict) -> str:
     hidden = int(body.get("hidden_document_count") or 0) if str(body.get("hidden_document_count") or "0").isdigit() else 0
     if hidden:
         parts.append(f"権限のない論文 {hidden}件は対象外")
-    versions = [f"{d.get('domain_name') or d.get('domain_key')} 骨格版 {d.get('frozen_version')}"
+    # admin-release-review.js（第 3 波・IK-0942）: 「使用した地図: {分野} 地図 版 X」
+    versions = [f"{d.get('domain_name') or d.get('domain_key')} 地図 版 {d.get('frozen_version')}"
                 for d in body.get("domains") or [] if isinstance(d, dict) and d.get("frozen_version")]
     if versions:
-        parts.append("使用した骨格: " + " ・ ".join(versions))
+        parts.append("使用した地図: " + " ・ ".join(versions))
     lines.append(RR_NEXT_MEANING)  # admin-release-review.js setNextMeaning: 主ボタンの直上に 1 行
     lines.append("ボタン: この配置で次へ / あとで")
     lines.append("脚注: " + " ・ ".join(parts))
@@ -619,16 +633,49 @@ def _project_accept(body: dict) -> str:
     return "\n".join(lines)
 
 
+def course_visibility_label(v: Any) -> str:
+    """admin.js ``courseVisibilityLabel`` の写し（未設定・未知は「非公開」）。"""
+    return {"public": "公開中", "group": "グループ限定"}.get(str(v or "private"), "非公開")
+
+
+COURSE_ATLAS_DOMAIN_FALLBACK = "分野名を読めませんでした"  # admin.js courseAtlasBindingText
+
+
+def course_atlas_binding_text(c: dict) -> str:
+    """admin.js ``courseAtlasBindingText``（第 3 波・IK-0929）: 「地図: {atlas_domain_label}（{atlas_binding_coverage_label}）」。
+    内部キー（cartridge_id）と比（N/M トピック）は出さない。表示名が無い（旧サーバ）ときは JS と同じ
+    「分野名を読めませんでした」、段階の語が無ければ括弧ごと省く。"""
+    if not c.get("atlas_cartridge_id"):
+        return "地図: 未設定"
+    text = "地図: " + str(c.get("atlas_domain_label") or COURSE_ATLAS_DOMAIN_FALLBACK)
+    if c.get("atlas_binding_coverage_label"):
+        text += f"（{c['atlas_binding_coverage_label']}）"
+    return text
+
+
+#: discuss.js buildOpeningHtml（第 3 波・IK-0935）: 複数論文のときの末尾の区画の見出し
+OPENING_REST_HEADING_MULTI = "このコースの教材全体で確かめていないこと"
+
+
 def _project_admin_courses(body: list) -> str:
-    role_badge = {"owner": "所有", "editor": "editor", "viewer": "viewer"}
+    """admin.js renderCourseManagementTable（第 25 周 第 2 波 IK-0911）: 役割の印はサーバの日本語の事実（role_label・
+    旧サーバは 所有 / 共有）。英語の owner / editor / viewer は出さない。course_id は画面に出ないので末尾の
+    「操作に使う番号」欄に分ける（studio H17）。"""
     lines = ["コース管理:"]
     for c in body[:20]:
         if not isinstance(c, dict):
             continue
-        lines.append(f"- {c.get('title', '')} 〔{role_badge.get(str(c.get('role') or ''), 'editor')}〕 開示範囲: "
-                     f"{c.get('visibility', '')}")
+        role = str(c.get("role_label") or ("所有" if c.get("role") == "owner" else "共有"))
+        atlas = course_atlas_binding_text(c)
+        # 開示範囲は画面（admin.js courseVisibilityLabel）と同じ日本語のバッジ（第 25 周 H7: 生値 public を出していた）
+        lines.append(f"- {c.get('title', '')} 〔{role}〕 開示範囲: {course_visibility_label(c.get('visibility'))}・{atlas}")
         if c.get("role") == "owner":
-            lines.append("  ボタン: 確認して公開 / 共有設定 / 議論テーマ / AIモデル / 共有ダッシュボード")
+            lines.append("  ボタン: 確認して公開 / 共有設定 / 版の管理 / 共有ダッシュボード / AIモデル / 議論テーマ")
+        else:
+            lines.append("  所有者のみ変更可  ボタン: 版の管理 / 共有ダッシュボード")
+    ids = [f"{c.get('title', '')}={c.get('id')}" for c in body[:20] if isinstance(c, dict) and c.get("id")]
+    if ids:
+        lines.append("（操作に使う番号 — 画面には出ない。course_id に渡す）: " + " / ".join(ids))
     return "\n".join(lines) if len(lines) > 1 else "コースが 1 つも表示されていない。"
 
 
@@ -739,6 +786,9 @@ def course_tree(body: Any) -> str:
         shown = _project_return_door(door)
         if shown != RETURN_DOOR_HIDDEN:
             lines.append(shown)
+    if body.get("_enrollment_notice"):
+        # app.js showCourseEnrollmentNotice（第 3 波・IK-0945）: コース選択の近くの事実文
+        lines.append(str(body["_enrollment_notice"]))
     lines.append(f"コース: {master.get('title', '')}")
     current = None
     for t in topics:
@@ -749,11 +799,15 @@ def course_tree(body: Any) -> str:
                 lines.append(f"{chapters[ci]}:")
         label = f"（{t['status_label']}）" if t.get("status_label") else ""
         mark = "（確認問題あり）" if t.get("check_questions") else ""
-        lines.append(f"- {t.get('id', '')} {t.get('title', '')}{label}{mark}")
+        lines.append(f"- {t.get('title', '')}{label}{mark}")
     concepts = [c.get("name") if isinstance(c, dict) else str(c) for c in master.get("concepts") or []]
     concepts = [c for c in concepts if c]
     if concepts:
         lines.append("概念マップ: " + "、".join(concepts[:20]) + ("、…" if len(concepts) > 20 else ""))
+    # 第 25 周 H9: サイドバーはトピックの id を出さない。行為の引数に使う番地は末尾の欄に分ける
+    ids = [f"{t.get('title', '')}={t.get('id', '')}" for t in topics if t.get("id")]
+    if ids:
+        lines.append("（操作に使う番号 — 画面には出ない。topic_id に渡す）: " + " / ".join(ids))
     return "\n".join(lines)
 
 
@@ -801,7 +855,11 @@ def discuss_opening_view(body: Any) -> str:
     lines.append("トピック順に縛られず、論文全体について話せます。回答の根拠（教材由来か、AIの一般知識か）は各回答に表示されます。"
                  "まず互いの読みを突き合わせてから、論文の主張を一緒に検討します。")
     lines.append("最初の一手: ボタン なぜこの設計? / 前提は何? / 他と矛盾しない?（自由に入力してもかまいません）")
+    head_lines = lines
+    per_doc: list[list[str]] = []
     for doc in docs:
+        lines = []  # この論文の区画（後で観察の予算に合わせて畳む — 第 25 周 doubt H23）
+        per_doc.append(lines)
         if len(docs) > 1:
             lines.append(f"■ {doc.get('title', '')}")
         thesis = doc.get("thesis") if isinstance(doc.get("thesis"), dict) else {}
@@ -837,6 +895,13 @@ def discuss_opening_view(body: Any) -> str:
             sign = next((x.get("authored_by_label") for x in seeds if x.get("authored_by_label")), "")
             if sign:
                 lines.append(f"  {sign}")
+        # discuss.js buildOpeningHtml（第 3 波・IK-0935）: この論文の前提（台帳行の document_id で振り分け）を
+        # この論文の区画に置く（議論のきっかけの後・組み立ての前）
+        mine = [f for f in fragile if f.get("kind") == "assumption" and doc.get("document_id")
+                and str(f.get("document_id") or "").lower() == str(doc["document_id"]).lower()]
+        if mine:
+            lines.append("▶ この論文が確かめていないこと（畳まれている・開くと）:")
+            lines += _fragile_lines(mine)
         lines.append("▶ この論文の組み立てをくわしく見る（畳まれている・開くと）:")
         nodes = [n for n in doc.get("backbone") or [] if isinstance(n, dict)]
         if nodes:
@@ -857,13 +922,48 @@ def discuss_opening_view(body: Any) -> str:
         if unconfirmed:
             lines.append("  まだ確認できていないところ（論文の弱点ではありません。この教材を解析したときに、裏付けを取れなかった箇所です。）")
             lines += _fragile_lines(unconfirmed)
-    paper = [f for f in fragile if f.get("kind") == "assumption"]
+    lines = head_lines
+    tail: list[str] = []
+    # 第 3 波（IK-0935）: どの論文の区画にも入らなかった前提（document_id が無い・一覧に無い）だけを末尾に。
+    # 複数論文なら見出し「このコースの教材全体で確かめていないこと」
+    doc_ids = {str(d.get("document_id") or "").lower() for d in docs if d.get("document_id")}
+    paper = [f for f in fragile if f.get("kind") == "assumption"
+             and (not f.get("document_id") or str(f.get("document_id")).lower() not in doc_ids)]
+    rest_heading = OPENING_REST_HEADING_MULTI if len(docs) > 1 else "この論文が確かめていないこと"
     if paper:
-        lines.append("▶ この論文が確かめていないこと（畳まれている・開くと）:")
-        lines += _fragile_lines(paper)
+        tail.append(f"▶ {rest_heading}（畳まれている・開くと）:")
+        tail += _fragile_lines(paper)
+    elif body.get("paper_unverified_empty_note"):
+        # discuss.js renderPaperUnverifiedSection（IK-0853）: 載る前提が無くてもサーバの閉世界の一文があれば区画を残す
+        tail.append(f"▶ {rest_heading}（畳まれている・開くと）:")
+        tail.append(f"  {body['paper_unverified_empty_note']}")
     if body.get("truncated"):
-        lines.append("確かめていないこと・確認できていないところは、主要なものに絞って表示しています。")
-    return "\n".join(lines)
+        tail.append("確かめていないこと・確認できていないところは、主要なものに絞って表示しています。")
+    # 第 25 周 doubt H23: 区画「この論文が確かめていないこと」は全論文の後ろに 1 か所（IK-0935）。論文が 4 本あると
+    # 観察の上限（6000 字）で区画まで届かなかった — 論文ごとの区画を予算で畳み、末尾の区画を必ず観察に入れる
+    from uxsim.runner.state import OBSERVATION_CHARS  # 観察の上限の正本
+
+    def _size(xs: list[str]) -> int:
+        return sum(len(x) + 1 for x in xs)
+
+    room = OBSERVATION_CHARS - 300 - _size(lines) - _size(tail)
+    each = max(room // max(len(per_doc), 1), 300)
+    for part in per_doc:
+        if _size(part) <= each:
+            lines += part
+            continue
+        kept: list[str] = []
+        for x in part:
+            if _size(kept) + len(x) + 1 > each - len(OPENING_DOC_CLIPPED) - 1:
+                break
+            kept.append(x)
+        lines += kept + [OPENING_DOC_CLIPPED]
+    return "\n".join(lines + tail)
+
+
+#: 開幕の論文ごとの区画を観察の予算で切ったときの印（画面の文ではない）
+OPENING_DOC_CLIPPED = ("（ハーネス: 観察の上限でこの論文の残りの区画を省略した — 画面には続きがある。"
+                       "これは画面の文ではない）")
 
 
 PROJECTORS.update({
@@ -877,6 +977,7 @@ PROJECTORS.update({
         f"コースビルダー: 新しいセッション「{b.get('title') or b.get('display_name') or ''}」を作った（セッションの一覧で選ばれている）"
         if isinstance(b, dict) else ""),
     "admin.course_builder.register": lambda b: (
-        f"ボタン表示: {CB_REGISTERED}\nリリース前の確認が開いた: {RR_AUTO_OPENED}\n"
+        f"ボタン表示: {CB_REGISTERED}\n" + title_notice_line(b, prefix="登録ボタンの下: ")
+        + f"リリース前の確認が開いた: {RR_AUTO_OPENED}\n"
         "（ステップ 1: 学習マップの割り当て → 2: 論文の位置づけ → 3: 公開）" if isinstance(b, dict) else ""),
 })

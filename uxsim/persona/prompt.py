@@ -32,7 +32,9 @@ _RULES_JA = """# 演じ方の規律
 - 諦める条件に当たったら friction_prev を gave_up にし、gave_up_reason に理由を書く。
 - 行為は「このステップで取れる行為」の id からだけ選ぶ。無い操作は選べない。
 - think-aloud（reaction_prev / intent / expectation）は {lang} で書く。
-- 数値の点数・評価を自分でつけない。"""
+- 数値の点数・評価を自分でつけない。
+- 「（操作に使う番号 — 画面には出ない…）」で始まる行は、行為の引数に渡すための番号で、画面には表示されていない。
+  画面の内容として反応しない（内部の番号が見える、とは受け取らない）。"""
 
 
 def _lang(spec: PersonaSpec) -> str:
@@ -79,6 +81,12 @@ def describe_action(action: Action, note: str = "") -> str:
     return f"- {action.id} — {action.label}（{args}）{pre}{hint}"
 
 
+# 第 25 周 H7: 停止条件に当たりうる操作の直後は、反応だけを先に聞く（次の行為は止まらなかったときに別に聞く）
+REACTION_ONLY_SECTION = ("# 反応だけ\n直前の画面への反応だけを返し、action_id は \"none\" にする。"
+                         "ここで行き詰まった（blocked）・諦めた（gave_up）と答えたら、この場面はここで終わる。"
+                         "そうでなければ、次の行為はこの後で別に聞く。")
+
+
 def build_step_message(
     *,
     goal: str,
@@ -91,8 +99,13 @@ def build_step_message(
     notes: Optional[dict[str, str]] = None,
     optional: bool = False,
     exhausted: Optional[list[str]] = None,
+    reaction_only: bool = False,
 ) -> str:
-    """1 ステップ分の user メッセージ。"""
+    """1 ステップ分の user メッセージ。
+
+    ``reaction_only``（第 25 周 H7）: 直前の操作で場面が停止条件に当たりうるとき、反応だけを先に聞く。
+    行き詰まった・諦めたと答えれば場面はここで終わり、頭脳に次の行為を選ばせない。
+    """
     parts = [f"# 目標\n{goal}"]
     if instruction:
         parts.append(f"# このステップ\n{instruction}")
@@ -101,6 +114,8 @@ def build_step_message(
     parts.append("# 直前に見た画面\n" + (observation or "（まだ何も見ていない）"))
     if finishing:
         parts.append("# 終了\nこの経路はここで終わる。直前の画面への反応だけを返し、action_id は \"none\" にする。")
+    elif reaction_only:
+        parts.append(REACTION_ONLY_SECTION)
     else:
         lines = [describe_action(a, (notes or {}).get(a.id, "")) for a in allowed]
         if optional:

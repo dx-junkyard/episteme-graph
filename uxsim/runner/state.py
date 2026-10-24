@@ -109,9 +109,20 @@ def is_pseudo_chunk_id(value: Any) -> bool:
 # 画面の投影
 # ----------------------------------------------------------------------------
 
+HARNESS_CLIPPED_MARK = "（ハーネス: 観察の上限でここから先を省略した — 画面にはこの続きがある。製品の表示が切れたのではない）"
+HARNESS_PRECONDITION_TEXT = ("（ハーネス: この操作の対象がまだ画面に無いので、行為は行われていない。"
+                             "これは画面の文ではない）")
+
+
 def _clip(text: str, n: int = OBSERVATION_CHARS) -> str:
+    """観察の上限で切る。観察全体の長さ（n が大きい）で切るときは、切ったことをハーネスの文で言う（第 25 周 H10:
+    頭脳が「途中で切れている」を製品の所見と混同しない）。短い抜粋（n が小さい）は従来どおり「…」。"""
     text = (text or "").strip()
-    return text if len(text) <= n else text[: n - 1] + "…"
+    if len(text) <= n:
+        return text
+    if n >= 1000:
+        return text[: n - len(HARNESS_CLIPPED_MARK) - 1] + "…" + HARNESS_CLIPPED_MARK
+    return text[: n - 1] + "…"
 
 
 # 画面（app.js / admin.js）が表示しない「宛先」のキー。id・*_id・*_ids・stable_key などは UI がリンク解決に使う
@@ -195,22 +206,25 @@ _FORMULA_PLACEHOLDER_RE = __import__("re").compile(r"\[\[(FORMULA_\d+)\]\]")
 
 
 def resolve_formula_placeholders(text: str, formulas: Any) -> str:
-    """``[[FORMULA_N]]`` を ``chunk.formulas`` の latex で置き換える（画面の renderMaterialChunk と同じ規則:
-    ``formula.id`` か位置 ``FORMULA_<idx>`` で引く）。引けないものは**そのまま残す**。"""
+    """``[[FORMULA_N]]`` を ``chunk.formulas`` の latex で置き換える（app.js ``renderMaterialChunk`` と同じ規則・
+    第 3 波 IK-0944）: **id の鍵（``formula.id`` とその正規化形）を先に全部入れ、並び順の鍵 ``FORMULA_<idx>`` は
+    その鍵がまだ空いているときだけ**。スライドの formulas はそのスライドが引く式の部分集合なので、並び順の鍵が
+    別の式の id を上書きしない。引けないもの（latex が空を含む）は**そのまま残す**。"""
     if not text or not isinstance(formulas, list) or not formulas:
         return text
     by_id: dict[str, str] = {}
+    for f in formulas:
+        if not isinstance(f, dict) or not str(f.get("id") or "").strip():
+            continue
+        latex = str(f.get("latex") or f.get("tex") or "").strip()
+        fid = str(f.get("id")).strip()
+        norm = _norm_evidence_id(fid)
+        for key in (fid, norm, fid.replace("[[", "").replace("]]", "")):
+            by_id[key] = latex
     for idx, f in enumerate(formulas):
         if not isinstance(f, dict):
             continue
-        latex = str(f.get("latex") or f.get("tex") or "").strip()
-        if not latex:
-            continue
-        by_id[f"FORMULA_{idx}"] = latex
-        fid = str(f.get("id") or "").strip()
-        if fid:
-            by_id[fid] = latex
-            by_id[fid.replace("[[", "").replace("]]", "")] = latex
+        by_id.setdefault(f"FORMULA_{idx}", str(f.get("latex") or f.get("tex") or "").strip())
 
     def _sub(m: "re.Match[str]") -> str:  # noqa: F821
         latex = by_id.get(m.group(1))
@@ -290,14 +304,21 @@ def render_material_text(chunk: Any) -> str:
         return ""
     text = str(chunk.get("text") or chunk.get("content") or "")
     drop_unresolved = bool(chunk.get("drop_unresolved_embeds"))
+    # 第 3 波（IK-0944）: id の鍵を先に全部入れ、並び順の鍵（FORMULA_i）は空いているときだけ（app.js renderMaterialChunk）
     formula_by_id: dict[str, dict] = {}
-    for idx, f in enumerate(chunk.get("formulas") or []):
+    formula_list = [f for f in chunk.get("formulas") or []]
+    for f in formula_list:
+        if not isinstance(f, dict) or not f.get("id"):
+            continue
+        fid = str(f["id"])
+        norm = _norm_evidence_id(fid)
+        for key in (fid, norm, f"[[{norm}]]"):
+            formula_by_id[key] = f
+    for idx, f in enumerate(formula_list):
         if not isinstance(f, dict):
             continue
-        fid = str(f.get("id") or f"FORMULA_{idx}")
-        norm = _norm_evidence_id(fid)
-        for key in (fid, norm, f"[[{norm}]]", f"FORMULA_{idx}", f"[[FORMULA_{idx}]]"):
-            formula_by_id[key] = f
+        for key in (f"FORMULA_{idx}", f"[[FORMULA_{idx}]]"):
+            formula_by_id.setdefault(key, f)
     figure_by_id: dict[str, dict] = {}
     for idx, fig in enumerate(chunk.get("figures") or []):
         if not isinstance(fig, dict):
@@ -390,11 +411,15 @@ def render_material_text(chunk: Any) -> str:
 ANCHOR_KINDS = ("component", "claim", "equation")
 
 
-def material_anchors(body: Any) -> list[dict]:
-    """教材区画に見えている ⚓（evidence_items の component / claim / equation）を画面の出現順に番号付きで返す。
+_ANCHOR_EMBED_RE = re.compile(r"!?\[\[(component|claim|equation):([^\]]+)\]\]")
 
-    ペルソナが「どの ⚓ を開くか」を選べるようにするための一覧（第 14 周: 常に最後の要素が開いていた）。
-    番号は 1 始まり・同じ kind:id は 1 度だけ。区画番号 ``segment`` も持つ。
+
+def material_anchors(body: Any) -> list[dict]:
+    """教材区画に**本文の埋め込みとして見えている** ⚓（component / claim のチップ・数式カード）を出現順に番号付きで返す。
+
+    画面（app.js ``renderMaterialChunk``）がチップ・数式カードとして描くのは、本文に ``![[kind:id]]`` で埋め込まれ、
+    evidence_items（数式は formulas でもよい）で引けるものだけ。埋め込まれていない evidence_items は画面に出ない
+    （第 25 周 H1: 全件を 30 個まで列挙していた）。番号は 1 始まり・同じ kind:id は 1 度だけ。区画番号 ``segment`` も持つ。
     """
     out: list[dict] = []
     seen: set[str] = set()
@@ -402,16 +427,61 @@ def material_anchors(body: Any) -> list[dict]:
     for si, ch in enumerate(chunks or []):
         if not isinstance(ch, dict):
             continue
-        for ev in ch.get("evidence_items") or []:
-            if not isinstance(ev, dict) or ev.get("kind") not in ANCHOR_KINDS or not ev.get("id"):
-                continue
-            key = f"{ev['kind']}:{ev['id']}"
+        items = [ev for ev in ch.get("evidence_items") or [] if isinstance(ev, dict) and ev.get("kind")]
+        by_ref = {f"{ev['kind']}:{_norm_evidence_id(ev.get('id'))}": ev for ev in items}
+        by_id: dict[str, dict] = {}
+        for ev in items:
+            by_id.setdefault(_norm_evidence_id(ev.get("id")), ev)
+        formulas: dict[str, dict] = {}
+        for idx, f in enumerate(ch.get("formulas") or []):
+            if isinstance(f, dict):
+                formulas[_norm_evidence_id(f.get("id") or f"FORMULA_{idx}")] = f
+        text = str(ch.get("text") or ch.get("content") or "")
+        text = re.sub(r"!\[\[equation:\s*\[\[([^\]]+)\]\]\s*\]\]", r"![[equation:\1]]", text)
+        for m in _ANCHOR_EMBED_RE.finditer(text):
+            kind, norm = m.group(1), _norm_evidence_id(m.group(2))
+            item = by_ref.get(f"{kind}:{norm}") or by_id.get(norm)
+            formula = formulas.get(norm) if kind == "equation" else None
+            if item is None and formula is None:
+                continue  # 引けない埋め込みは画面では未解決カード（⚓ ではない）
+            key = f"{kind}:{norm}"
             if key in seen:
                 continue
             seen.add(key)
-            title = str(ev.get("title") or ev.get("label") or ev.get("summary") or "")
-            out.append({"no": len(out) + 1, "kind": ev["kind"], "id": str(ev["id"]),
-                        "title": re.sub(r"\s+", " ", title).strip()[:60], "segment": si})
+            src = item or formula or {}
+            # 題名は画面のチップ（renderMaterialEvidenceChip: title || label || id）と同じ文字列で切らない。
+            # 数式は画面がチップではなく式として描くので、描かれる式（LaTeX）を題名にする（第 25 周 面 D H6）
+            latex = str((formula or {}).get("latex") or (item or {}).get("latex") or "") if kind == "equation" else ""
+            title = f"${latex}$" if latex else str(src.get("title") or src.get("label") or src.get("summary") or "")
+            out.append({"no": len(out) + 1, "kind": kind, "id": str((item or {}).get("id") or norm),
+                        "title": re.sub(r"\s+", " ", title).strip(), "segment": si})
+    return out
+
+
+TOPIC_COMPONENT_LIMIT = 12  # app.js _TOPIC_COMPONENT_LIMIT
+
+
+def topic_component_evidence(body: Any) -> list[dict]:
+    """app.js ``collectTopicComponentEvidence`` の写し（出典タブ「このトピックの論理要素」— 部品だけ・最大 12）。"""
+    chunks = [ch for ch in (body.get("chunks") if isinstance(body, dict) else None) or [] if isinstance(ch, dict)]
+    embedded = {_norm_evidence_id(m.group(1)) for ch in chunks
+                for m in re.finditer(r"!\[\[component:([^\]]+)\]\]", str(ch.get("text") or ""))}
+    seen: set[str] = set()
+    out: list[dict] = []
+    for ch in chunks:
+        for item in ch.get("evidence_items") or []:
+            if not isinstance(item, dict) or item.get("kind") != "component":
+                continue
+            norm = _norm_evidence_id(item.get("id"))
+            title = str(item.get("title") or item.get("label") or "")
+            if not norm or norm in seen or not title:
+                continue
+            seen.add(norm)
+            if len(out) >= TOPIC_COMPONENT_LIMIT:
+                continue
+            summary = str(item.get("summary") or "")
+            out.append({"title": title, "summary": summary if summary != title else "",
+                        "has_anchor": norm in embedded})
     return out
 
 
@@ -481,7 +551,11 @@ def _chat(body: dict, *, discuss: bool = False) -> list[str]:
             out.append(f"  選択肢: {o}")
     for a in body.get("next_actions") or []:
         if isinstance(a, dict):
-            out.append(f"ボタン: {a.get('label', '')}")
+            # 第 25 周 share H27: Copilot の navigate（label なし）は admin-assistant.js が［そのタブを開く］を描く。
+            # label の無い行為を空の「ボタン:」で描かない
+            label = str(a.get("label") or "").strip() or ("そのタブを開く" if a.get("type") == "navigate" else "")
+            if label:
+                out.append(f"ボタン: {label}")
     for c in body.get("manual_citations") or []:
         if isinstance(c, dict):
             out.append(f"マニュアル: {c.get('title', '')}")
@@ -490,28 +564,45 @@ def _chat(body: dict, *, discuss: bool = False) -> list[str]:
     return out
 
 
+def component_hop_targets(graph: Any) -> list[str]:
+    """文脈図で移動できる隣の部品の id（画面の「旅」と同じく navigable な theory_component・上位 → 下位の順・重複なし・
+    中心を除く）。投影の「番号 N」と hop の引数の引き直しが同じ並びを使う。"""
+    if not isinstance(graph, dict):
+        return []
+    focus = str((graph.get("focus") or {}).get("id") or "") if isinstance(graph.get("focus"), dict) else ""
+    out: list[str] = []
+    for lane in ("upper", "lower"):
+        for it in graph.get(lane) or []:
+            if not (isinstance(it, dict) and it.get("element_type") == "theory_component" and it.get("navigable")):
+                continue
+            hid = str(it.get("id") or "").strip()
+            if hid and hid != focus and hid not in out:
+                out.append(hid)
+    return out
+
+
 def _component_context_lines(body: dict) -> list[str]:
     """部品の文脈（画面の統一パーツカード + 文脈の図）。ラベル・事実文だけを並べ、数値を足さない。"""
-    lines = ["部品の文脈:"]
+    head, details, shared = _component_instance_lines(body)
+    lines = ["部品の文脈:"] + head
     graph = body.get("graph") if isinstance(body.get("graph"), dict) else None
-    rest = {k: v for k, v in body.items() if k != "graph"}
-    lines.extend(_generic(rest, max_lines=80))
     if graph is None:
-        lines.append("文脈の図: 表示されなかった")
-        return lines
+        # 画面は graph が無ければ「グラフで見る」を出さない（カード・内訳・共通部品のタブは出す）
+        return lines + details + shared
     focus = graph.get("focus") if isinstance(graph.get("focus"), dict) else {}
     lines.append(f"文脈の図の中心: {focus.get('label', '')}")
+    hop_ids = component_hop_targets(graph)
     for lane, name in (("upper", "上位"), ("lower", "下位")):
         items = [it for it in graph.get(lane) or [] if isinstance(it, dict)]
         lines.append(f"{name}:" if items else f"{name}: なし")
         for it in items:
-            # id を持たない行（中心命題・支持構造など）は移動先にならない。行は描くが手掛かりは付けない
-            mark = ("（移動できる）" if it.get("navigable") and it.get("element_type") == "theory_component"
-                    and str(it.get("id") or "").strip() else "")
-            # 移動できる部品だけ手掛かり（id）を添える（旅の hop の引数に使う）。画面は id を見せないが、
-            # 動かせる相手を指す手段としてだけ残す。移動できない行には id を出さない（「id=None」の偽所見の防止）
-            handle = f" id={it.get('id')}" if mark else ""
-            lines.append(f"- {it.get('relation_label', '')} {it.get('label', '')}{mark}{handle}")
+            # 移動できる部品（navigable な theory_component で id あり）にだけ番号を添える。画面は id を見せないので
+            # 観察にも id を出さない（第 25 周 share H2: 上位・下位の UUID が漏れと読まれた）。番号は
+            # ``component_hop_targets`` の並び（hop の component_id に番号を渡すと引き直す）。
+            hid = str(it.get("id") or "").strip()
+            mark = (f"（移動できる・番号 {hop_ids.index(hid) + 1}）" if hid in hop_ids
+                    and it.get("element_type") == "theory_component" and it.get("navigable") else "")
+            lines.append(f"- {it.get('relation_label', '')} {it.get('label', '')}{mark}")
     # app.js componentContextExitsHtml と同じ: 次の一歩の事実文（graph.exits）をレーン順に、同じ文は 1 回だけ描く
     exits = graph.get("exits") if isinstance(graph.get("exits"), dict) else {}
     seen: set[str] = set()
@@ -520,12 +611,152 @@ def _component_context_lines(body: dict) -> list[str]:
         if fact and fact not in seen:
             seen.add(fact)
             lines.append(f"（{fact}）")
-    return lines
+    return lines + details + shared + ["［グラフで見る］"]
+
+
+# app.js の逐語ミラー（MATERIAL_EVIDENCE_EQUATION_ROLE_LABELS / MATERIAL_LIBRARY_STATUS_LABELS / element-vocab の種別名）
+COMPONENT_KIND_LABEL = "論理要素"
+EQUATION_ROLE_LABELS = {"input": "入力", "intermediate": "中間", "output": "出力", "constraint": "制約",
+                        "definition": "定義", "linked": "関連"}
+LIBRARY_STATUS_LABELS = {"standard": "標準", "field_standard": "分野標準", "emerging_common": "共通化しつつある",
+                         "novel": "新規", "unknown": "未評価"}
+COMPONENT_POSITION_EMPTY = "この論文での位置づけはまだ登録されていません。"
+SHARED_PART_EMPTY = "共通部品としての情報はまだ登録されていません。"
+
+
+def shared_pane_lines(shared_part: dict) -> list[str]:
+    """app.js ``renderContextSharedPane``（第 3 波・IK-0917 / IK-0920）: 見出し ``heading`` → 名前 → 別名 → 要約 →
+    標準化状況 → 他の論文の題名の列挙（``other_documents_lead`` の下に ``other_documents[].title``・
+    ``other_documents_truncated`` なら「ほか」）／無ければ ``other_documents_note``。件数（旧 ``other_documents_count``）は
+    描かない。何も無ければ固定文。"""
+    entry = shared_part.get("entry") if isinstance(shared_part.get("entry"), dict) else {}
+    part: list[str] = []
+    if shared_part.get("heading"):
+        part.append(str(shared_part["heading"]))
+    if entry.get("name"):
+        part.append(str(entry["name"]))
+    if entry.get("aliases"):
+        part.append("別名: " + " ・ ".join(str(a) for a in entry["aliases"]))
+    if entry.get("summary"):
+        part.append(str(entry["summary"]))
+    if entry.get("standardization_status"):
+        st = str(entry["standardization_status"])
+        part.append(f"標準化状況: {LIBRARY_STATUS_LABELS.get(st, st)}")
+    docs = [str(d.get("title")) for d in entry.get("other_documents") or [] if isinstance(d, dict) and d.get("title")]
+    if docs:
+        if entry.get("other_documents_lead"):
+            part.append(str(entry["other_documents_lead"]))
+        part += [f"- {t}" for t in docs] + (["- ほか"] if entry.get("other_documents_truncated") else [])
+    elif entry.get("other_documents_note"):
+        part.append(str(entry["other_documents_note"]))
+    return part or [SHARED_PART_EMPTY]
+
+
+def _component_instance_lines(body: dict) -> tuple[list[str], list[str], list[str]]:
+    """app.js ``renderComponentContextPanel`` が描く欄だけ（第 25 周 H4: DTO をキー名ごとダンプしていた —
+    component_type・provenance・英語のキー名は画面に出ない）。
+
+    戻り値は（カードの見出しと位置づけ / 内訳 ``renderContextInstanceDetails`` / 「共通部品として」タブ）。
+    """
+    instance = body.get("instance") if isinstance(body.get("instance"), dict) else {}
+    component = instance.get("component") if isinstance(instance.get("component"), dict) else {}
+    in_paper = instance.get("in_paper") if isinstance(instance.get("in_paper"), dict) else {}
+    graph = body.get("graph") if isinstance(body.get("graph"), dict) else {}
+    focus = graph.get("focus") if isinstance(graph.get("focus"), dict) else {}
+    label = str(component.get("label") or focus.get("label") or "")
+    summary = str(in_paper.get("narrative_role") or component.get("teaching_takeaway") or component.get("summary") or "")
+    shared_part = body.get("shared_part") if isinstance(body.get("shared_part"), dict) else None
+    head = [f"見出し: {COMPONENT_KIND_LABEL} ・ {label}" if label else f"見出し: {COMPONENT_KIND_LABEL}",
+            "タブ: ［この論文では］" + ("［共通部品として］" if shared_part else ""),
+            f"この論文での位置づけ: {summary or COMPONENT_POSITION_EMPTY}"]
+    details: list[str] = []
+    if in_paper.get("graph_summary_excerpt"):
+        details.append(str(in_paper["graph_summary_excerpt"]))
+    supports = instance.get("supports") if isinstance(instance.get("supports"), dict) else {}
+    counts = [f"{name} {len(supports.get(key) or [])}件" for name, key in
+              (("前提", "preconditions"), ("入力", "inputs"), ("出力", "outputs"), ("注意", "cautions"),
+               ("数式", "equations"), ("主張", "claims")) if supports.get(key)]
+    if counts:
+        details.append(" · ".join(counts))  # 画面の摘要行（学習内容の構成数 — 評価の数値ではない）
+    for name, key in (("前提", "preconditions"), ("入力", "inputs"), ("出力", "outputs"), ("注意", "cautions")):
+        texts = [str(it.get("text")) for it in supports.get(key) or [] if isinstance(it, dict) and it.get("text")]
+        if texts:
+            details.append(f"{name}:")
+            details += [f"- {t}" for t in texts]
+    eqs = []
+    for eq in supports.get("equations") or []:
+        if not isinstance(eq, dict):
+            continue
+        role = EQUATION_ROLE_LABELS.get(str(eq.get("role") or ""), "")
+        # 画面は resolver で latex が引ければ式を描き、引けなければサーバ同梱の式本文（eq.latex — IK-0894・第 2 波）、
+        # それも無ければ表示名（$…$ は数式区間）。旧サーバは label（無ければ id）
+        text = f"${eq['latex']}$" if eq.get("latex") else str(eq.get("label") or eq.get("id") or "")
+        eqs.append(f"- {role + ' ' if role else ''}{text}" + (f"（{eq['label_note']}）" if eq.get("label_note") else ""))
+    if eqs:
+        details += ["数式:"] + eqs
+    deps = []
+    for d in supports.get("dependencies") or []:
+        if isinstance(d, dict):
+            t = str(d.get("reason") or "")
+            if d.get("target_label"):
+                t = f"{d['target_label']} — {t}" if t else str(d["target_label"])
+            if t:
+                deps.append(f"- {t}")
+    if deps:
+        details += ["関連:"] + deps
+    claims = [f"- {c['excerpt']}" for c in supports.get("claims") or [] if isinstance(c, dict) and c.get("excerpt")]
+    if claims:
+        details += ["主張:"] + claims
+    doc = in_paper.get("document") if isinstance(in_paper.get("document"), dict) else {}
+    if doc.get("title"):
+        details.append(f"出典論文: {doc['title']}")
+    expl = instance.get("explanation") if isinstance(instance.get("explanation"), dict) else {}
+    if expl.get("body") or expl.get("title"):
+        details.append("教員の説明:")
+        details += [str(expl[k]) for k in ("title", "body", "endorsement_label") if expl.get(k)]
+    shared: list[str] = []
+    if shared_part is not None:
+        shared.append("「共通部品として」タブ:")
+        shared += shared_pane_lines(shared_part)
+    elif body.get("shared_part_note"):
+        # IK-0863: 「共通部品として」が無いときはサーバの事実文がパネルの末尾に出る（app.js renderComponentContextPanel）
+        shared.append(str(body["shared_part_note"]))
+    return head, details, shared
 
 
 def _error(status: int, body: Any) -> str:
     detail = body.get("detail") if isinstance(body, dict) else body
     return f"エラーが表示された（HTTP {status}）: {_str(detail)[:600] if detail not in (None, '') else '（詳細なし）'}"
+
+
+#: personal-map-home.js REF_KIND_LABEL の逐語ミラー（旅の各歩の種別チップ）
+JOURNEY_REF_KIND_LABEL = {"graph_node": "理論構成", "shared_part": "共通部品（専門家確認済み）", "document": "教材",
+                          "atlas_node": "地図", "personal_node": "あなたの痕跡"}
+
+
+def journey_lines(body: dict) -> list[str]:
+    """personal-map-home.js renderJourneyArea の写し（第 25 周 share H25: 応答のキーを素で並べ「truncated: false」が
+    出た）。steps が空なら notice と facts（「この記録について」）、notice も無ければ何も出さない。truncated が真の
+    ときだけ「（途中まで）」。"""
+    steps = [x for x in body.get("steps") or [] if isinstance(x, dict)]
+    if not steps:
+        if not body.get("notice"):
+            return ["（旅の経路は表示されなかった）"]
+        lines = ["旅の経路", str(body["notice"])]
+        facts = [str(f) for f in body.get("facts") or [] if f]
+        if facts:
+            lines += ["この記録について:"] + facts
+        return lines
+    lines = ["旅の経路"]
+    for st in steps:
+        ref = st.get("ref") if isinstance(st.get("ref"), dict) else {}
+        kind = JOURNEY_REF_KIND_LABEL.get(str(ref.get("kind") or ""), "")
+        lines.append(f"- {st.get('fact') or ''}" + (f"［{kind}］" if kind else ""))
+    if body.get("frontier_note"):
+        lines += [str(body["frontier_note"]), "[別の問いから旅に出る]"]
+    if body.get("truncated"):
+        lines.append("（途中まで）")
+    return lines
 
 
 def project_observation(action_id: str, status: Optional[int], body: Any) -> str:
@@ -537,11 +768,19 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
         from uxsim.runner import simlab_exec  # 遅延 import（循環回避）
 
         return simlab_exec.project(action_id, status, body)
+    if action_id.startswith(("admin.lecture_studio.", "admin.figure_studio.", "learning.lecture.")):  # r25:studio
+        from uxsim.runner import studio_exec  # 遅延 import（循環回避）
+
+        shown = studio_exec.project(action_id, status, body)
+        if shown is not None:
+            return shown
     if isinstance(body, dict) and body.get("_ui_fact"):
         # 画面がサーバの応答を事実文に置き換えて出す縮退（例: ノード対話の 404 / 422）
         return _clip(str(body["_ui_fact"]))
     if status is None and isinstance(body, dict) and body.get("_precondition"):
-        return f"この操作に必要なものがまだ画面に無い（{body['_precondition']}）。"
+        # 第 25 周 H1: runner の状態名（ledger_target 等）を頭脳へ渡さない — 製品の画面文と読まれて内部語の所見になった。
+        # 状態名は HttpTrace.error（``precondition:<name>``）として transcript に残る
+        return HARNESS_PRECONDITION_TEXT
     if status is None:
         return "画面が応答しなかった（接続できない / 時間切れ）。"
     if status >= 400:
@@ -583,10 +822,15 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
         lines = ["コースの選択:"]
         if not own:
             lines.append("（受講するコースを選択...）")
+        # 第 25 周 H23（atlas）: 「id=1bad7d9f」は投影の印で、学生が「題名の後ろの英数字は何か」と読んだ。
+        # 画面は題名だけを描く。行為の指し先は表示順の番号か題名（actions_exec.resolve_course_hint）で引く
+        n = 0
         for head, group in ((COURSE_GROUP_MINE, own), (COURSE_GROUP_ENROLLABLE, avail)):
             if group:
                 lines.append(f"{head}:")
-                lines += [f"- {c.get('title', '')} id={c.get('id', '')}" for c in group]
+                for c in group:
+                    n += 1
+                    lines.append(f"{n}. {c.get('title', '')}")
         return _clip("\n".join(lines))
     if action_id == "learning.source_chunk.open" and isinstance(body, dict):
         # 画面（app.js の出典ポップアップ）は節名と本文を切らずに描く（第 23 周: 本文が 200 字で切れていた）
@@ -601,6 +845,8 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
         # 画面（personal-map-home.js）は空のとき各タブに事実文を描く（第 23 周: 投影が無言だった）
         return "\n".join(["わたしの地図（タブ: いまここの周り / いまの地図 / 問いからの旅）", PERSONAL_MAP_PRIVACY_NOTE]
                          + [f"{tab}: {msg}" for tab, msg in PERSONAL_MAP_EMPTY])
+    if action_id == "learning.personal_network.journey" and isinstance(body, dict):
+        return _clip("\n".join(journey_lines(body)))
     if action_id == "admin.materials.list" and isinstance(body, list):
         # 教材管理の行（admin.js renderMaterials）: 題名・状態・開示範囲・参照の健全性チップの文言
         lines = ["教材一覧:"]
@@ -613,7 +859,12 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
                 chip = "・" + REFERENCE_HEALTH_CHIP_LABELS.get(str(health.get("status") or "unchecked"),
                                                                REFERENCE_HEALTH_CHIP_LABELS["unchecked"])
             lines.append(f"- {m.get('title', '')}（{m.get('filename', '')}・{m.get('status', '')}・"
-                         f"{m.get('visibility', '')}{chip}）document_id={m.get('document_id', '')}")
+                         f"{m.get('visibility', '')}{chip}）")
+        # 第 25 周 H9: 画面は document_id を出さない。行為の引数に使う番地は末尾の欄に分ける
+        ids = [f"{m.get('title', '')}={m.get('document_id')}" for m in body[:20]
+               if isinstance(m, dict) and m.get("document_id")]
+        if ids:
+            lines.append("（操作に使う番号 — 画面には出ない。document_id に渡す）: " + " / ".join(ids))
         return _clip("\n".join(lines) if len(lines) > 1 else "教材が 1 つも表示されていない。")
     if action_id == "admin.theory_modules.related" and isinstance(body, dict):
         # 画面（admin-graph-review.js relatedModulesHtml）はモジュールの詳細ペインに題名と事実文だけを出す。
@@ -668,32 +919,13 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
             lines.extend(_generic(rest, max_lines=60))
             return _clip("\n".join(lines))
     if action_id == "learning.landscape.view" and isinstance(body, dict) and isinstance(body.get("documents"), list):
-        # 画面の「分野の中の位置づけ」と同じ粒度: 論文ごとに（分野 / 概念 / 観点 / 関連の強さ / 出所ラベル / 理由）。
-        # _generic の 1 項目 14 行の上限で placements が途中で切れ、出所ラベル（AI推定 / 教員確認）が読めなかった（第 10 周）
-        lines = ["分野の中の位置づけ:"]
-        for d in body.get("domains") or []:
-            if isinstance(d, dict):
-                lines.append(f"- 分野: {d.get('domain_name', '')}（骨格 版 {d.get('frozen_version', '')}）"
-                             + ("（このコースの地図）" if d.get("is_course_map") else ""))
-                for f in d.get("facts") or []:
-                    lines.append(f"  {f}")
-        for doc in body["documents"]:
-            if not isinstance(doc, dict):
-                continue
-            lines.append(f"論文: {doc.get('title', '')}")
-            pls = [p for p in (doc.get("placements") or []) if isinstance(p, dict)]
-            if not pls:
-                lines.append("  （配置なし）")
-            for p in pls:
-                lines.append(f"  - {p.get('node_label', '')}（{p.get('perspective_label', '')}・{p.get('weight_label', '')}・"
-                             f"{p.get('provenance_label', '')}）: {str(p.get('reason', ''))[:160]}")
-        for key in ("unplaced_documents", "facts"):
-            for x in body.get(key) or []:
-                lines.append(f"{'配置されていない論文' if key == 'unplaced_documents' else '注記'}: "
-                             f"{x.get('title', '') if isinstance(x, dict) else x}")
-        rest = {k: v for k, v in body.items() if k not in ("documents", "domains", "unplaced_documents", "facts")}
-        lines.extend(_generic(rest, max_lines=30))
-        return _clip("\n".join(lines))
+        # 出典タブ「分野の中の位置づけ」（app.js buildPaperPlacementHtml）と同じ欄・同じ形（第 25 周 H15: 分野の行・
+        # placed_document_count など画面に出ないキーをダンプしていた）。正本は atlas_exec.paper_placement_section_lines
+        from uxsim.runner import atlas_exec  # 遅延 import（循環回避）
+
+        lines = atlas_exec.paper_placement_section_lines(body)
+        return _clip("\n".join(lines) if lines else
+                     "（出典タブに「分野の中の位置づけ」の節は出ていない — 配置のある論文が無い）")
     if action_id in ("learning.component.context", "learning.component.context_hop") and isinstance(body, dict):
         return _clip("\n".join(_component_context_lines(body)))
     if action_id == "learning.chunk.claim_refs" and isinstance(body, dict):
@@ -706,12 +938,13 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
         if not isinstance(threads, dict):
             lines = ["推定の糸: この地図には表示されていない（切り替えが出ていない）。"]
         else:
-            lines = [f"推定の糸（AIによる推定（未確認）・骨格 版{threads.get('skeleton_version', '')}）:"]
+            # 版の呼び名は IK-0942 の「地図 版 X」（atlas-threads-layer.js factText の写し）
+            lines = [f"推定の糸（AIによる推定（未確認）・地図 版 {threads.get('skeleton_version', '')}）:"]
             for it in threads.get("items") or []:
                 if isinstance(it, dict):
                     lines.append(f"- {it.get('from_label', '')} ⋯ {it.get('to_label', '')}（{it.get('nearness_label', '')}）")
-        rest = {k: v for k, v in body.items() if k != "threads"}
-        lines.extend(_generic(rest, max_lines=60))
+        # 第 25 周 H22（atlas）: 応答の残り（skeleton_version / cartridge / nodes …）を _generic でダンプしない。
+        # 製品の atlas-threads-layer.js は糸の点線と事実文（「AIによる推定（未確認）・地図 版X」）だけを描く
         return _clip("\n".join(lines))
     if action_id == "learning.atlas.neighbors" and isinstance(body, dict):
         if not body.get("available"):
@@ -728,7 +961,11 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
         # 準備中／未生成の事実文（IK-0375）は画面と同じく本文の上に出す（第 6 周: DTO にはあったが投影が落としていた）
         notice = body.get("preparation_notice")
         if isinstance(notice, str) and notice.strip():
-            lines.append(f"（お知らせ: {notice.strip()}）")
+            # app.js renderMaterial（第 3 波・IK-0947）: 区画ゼロなら「読み込み中」と言わずこの文だけを教材区画に
+            # （.material-notice の段落 — 区画があるときも本文の上に同じ段落）
+            lines.append(notice.strip())
+        elif not [ch for ch in body.get("chunks") or [] if isinstance(ch, dict)]:
+            lines.append("教材を読み込み中…")
         for ch in body.get("chunks") or []:
             if isinstance(ch, dict):
                 # 画面は本文を切り詰めない。投影で切ると「途中で切れている」という偽の friction が出る（第 7 周）
@@ -741,10 +978,36 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
                 lines.append(render_material_text({**ch, "text": text})[:3000])
         anchors = material_anchors(body)
         if anchors:
-            # 画面の ⚓ チップを番号で選べるように列挙する（element_ref に番号か id を渡す）
-            lines.append("見えている ⚓（element_ref に番号を渡すと開ける）:")
-            for a in anchors[:30]:
+            # 本文に埋め込まれて画面に出る ⚓ チップ・数式カードだけを出現順に（element_ref に番号か id を渡す）。
+            # 埋め込まれていない根拠は画面に出ないので列挙しない（第 25 周 H1）
+            lines.append("本文の ⚓（element_ref に番号を渡すと開ける）:")
+            for a in anchors:
                 lines.append(f"- ⚓{a['no']} {MATERIAL_KIND_LABELS.get(a['kind'], a['kind'])}: {a['title']}（区画{a['segment']}）")
+        comps = topic_component_evidence(body)
+        if comps:
+            # 出典タブ「このトピックの論理要素」（app.js collectTopicComponentEvidence）— 部品だけ
+            lines.append("出典タブ「このトピックの論理要素」:")
+            for c in comps:
+                lines.append(f"- {c['title']}" + (f" — {c['summary']}" if c["summary"] else "")
+                             + (" ［教材の該当箇所へ］" if c["has_anchor"] else ""))
         return _clip("\n".join(lines))
     lines = _generic(body)
     return _clip("\n".join(lines) if lines else "（画面に何も表示されなかった）")
+
+
+DISCUSS_TOPIC_ID = "_discussion"
+
+
+def learner_focus_params(session: "PersonaSession") -> dict:
+    """app.js focusQuerySuffix（第 25 周 第 2 波）: 学習者の部品の説明・台帳の一行・部品の文脈に付く
+    ``topic_id`` と焦点論文の ``document_id``（議論中は discuss の起点の論文、ほかは表示中のトピックの教材）。"""
+    out: dict = {}
+    if session.topic_id:
+        out["topic_id"] = session.topic_id
+    if session.topic_id == DISCUSS_TOPIC_ID:
+        doc = session.scratch.get("discuss_focus_document_id") or ""
+    else:
+        doc = (session.material or {}).get("document_id") if isinstance(session.material, dict) else ""
+    if doc:
+        out["document_id"] = str(doc)
+    return out

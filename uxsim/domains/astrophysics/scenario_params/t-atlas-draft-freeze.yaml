@@ -1,0 +1,21 @@
+scenario: t-atlas-draft-freeze
+domain: astrophysics
+params:
+  domain_hint: astrophysics
+  accept_hint: "1"
+  edge_accept_hint: "1"
+  edge_kind: 関連
+  freeze_version: "2026.2"
+  freeze_note: 論文の解析から見つかった項目と関係を 1 つずつ追加（第 25 周）
+  correspondence: none
+personas:
+  te-03-meticulous-seminar:
+    # 第 3 周（judge_atlas_r2 §5）: 几帳面な教員が公開前チェックの言い方を確かめてから凍結する。砂場を reset して骨格が
+    # 2026.1 に戻っている前提で 2026.2。reset しないなら第 2 周の 2026.2 が残るので指揮者が 2026.3 に差し替える
+    freeze_note: 論文の解析から見つかった項目 1 件と、近さと配置を確かめた関係 1 件を追加（第 25 周 第 3 周）
+  te-04-copilot-intro:
+    # 第 4 周（judge_atlas_r3 §5）: Copilot 依存型が止め理由（根拠と帰属 — IK-0937・0939）を読み、外れた判断を取り込む／戻すを
+    # 選んで凍結を成立させる（版を上げる役）。現行の凍結版が 2026.1 のままなら 2026.2（指揮者が周の前に確かめ、2026.2 が
+    # 既にあれば 2026.3 に差し替える）
+    freeze_version: "2026.2"
+    freeze_note: 論文の解析から見つかった項目と、根拠を読んだ関係を反映（第 25 周 第 4 周）

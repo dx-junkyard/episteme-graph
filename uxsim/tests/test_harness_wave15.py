@@ -4,9 +4,9 @@ from uxsim.runner.state import PersonaSession, material_anchors, project_observa
 from uxsim.schema import HttpTrace
 
 MATERIAL = {"chunks": [
-    {"text": "音速は小さい。 ![[claim:c1]] 次の文です。", "evidence_items": [
+    {"text": "音速は小さい。 ![[claim:c1]] 次の文です。 ![[component:k2]]", "evidence_items": [
         {"kind": "claim", "id": "c1", "title": "主張いち"}, {"kind": "component", "id": "k2", "title": "部品に"}]},
-    {"text": "現象論的なパラメータ化どうしは互いに整合し、値は1.1です。", "evidence_items": [
+    {"text": "現象論的なパラメータ化どうしは互いに整合し、値は1.1です。\n\n![[equation:eq_3]]", "evidence_items": [
         {"kind": "equation", "id": "eq_3", "title": "式さん"}]},
 ]}
 

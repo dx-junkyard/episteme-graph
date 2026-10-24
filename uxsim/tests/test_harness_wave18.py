@@ -85,7 +85,7 @@ def test_component_context_renders_exits_once_and_hides_idless_handles():
     text = "\n".join(_component_context_lines(body))
     assert text.count(exit_fact) == 1
     assert "中心命題" in text and "id=None" not in text
-    assert "親部品（移動できる） id=k2" in text
+    assert "親部品（移動できる・番号 1）" in text and "k2" not in text  # 第 25 周 share H2: id は観察に出さない
     assert "支持構造（移動できる）" not in text  # id の無い行は移動先にしない
 
 
@@ -205,7 +205,7 @@ def test_descent_ladder_rejects_unknown_or_unsupported_anchor():
     s, c = _session(), FakeClient()
     actions_exec.execute("learning.descent.ladder", {"element_ref": "9"}, s, c)
     assert c.calls == [] and s.last_body == {"_precondition": "element_ref"}
-    s.material = {"chunks": [{"text": "x", "evidence_items": [{"kind": "component", "id": "k1", "title": "部品"}]}]}
+    s.material = {"chunks": [{"text": "x ![[component:k1]]", "evidence_items": [{"kind": "component", "id": "k1", "title": "部品"}]}]}
     actions_exec.execute("learning.descent.ladder", {"element_ref": "1"}, s, c)
     assert c.calls[-1][3] == {"element_type": "component", "element_id": "k1"}
 

@@ -384,7 +384,10 @@ def check(steps: list[TranscriptStep], factory: FindingFactory) -> list[Finding]
                                                 quote=f"{key}: {hit}",
                                                 hypothesis=f"{hypothesis}（{step.action_id}）"))
                 lang = _persona_language(domain, step.persona_id)
-                hit = _language_hit(lang, key, text)
+                # 第 25 周 H16: 分野の地図の骨格の label（領域・概念の名前）は教員が作った内容であって UI の固定文では
+                # ない。内容の言語は言語一致の対象にしない（固定文として当たるのは facts / notice 等）
+                hit = "" if (key == "label" and str(t.path or "").startswith("/api/atlas")) \
+                    else _language_hit(lang, key, text)
                 if hit and "language" not in seen:
                     seen.add("language")
                     what = ("日本語話者の学習者向け事実文に英語の生成文が混じっている" if lang != "en"

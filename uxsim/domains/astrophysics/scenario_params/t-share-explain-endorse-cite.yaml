@@ -1,0 +1,20 @@
+scenario: t-share-explain-endorse-cite
+domain: astrophysics
+params:
+  goal_text: 他の先生の良い説明を、出所を残したまま自分のコースでも使えるようにすること
+  component_hint: TOV
+  expertise_tag: 高密度天体物理
+  citation_intent: uses_as_evidence
+  course_hint: "1"
+personas:
+  te-04-copilot-intro:
+    expertise_tag: 宇宙論
+  te-05-delegator-lab:
+    # 第 3 周: te-02 が書いて共有した説明を承認・引用する（IK-0891 の是正後）。引用先は te-05 自身のコース（一覧の先頭）
+    expertise_tag: 計算天体物理
+  te-03-meticulous-seminar:
+    # 第 4 周（judge_share_r3 §6）: te-01 が書いて共有した説明を几帳面に読み、支持・引用し、支持した教員の一覧を開く
+    # （admin.explanations.endorsers）。引用先は te-03 自身のコース（教員の /api/admin/courses の先頭）
+    component_hint: TOV network map
+    expertise_tag: 高密度天体物理
+    citation_intent: uses_as_evidence

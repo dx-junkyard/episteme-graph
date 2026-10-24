@@ -79,13 +79,18 @@ class PersonaAgent:
         notes: Optional[dict[str, str]] = None,
         optional: bool = False,
         exhausted: Optional[list[str]] = None,
+        reaction_only: bool = False,
     ) -> StepDecision:
-        """次の行為を選ぶ。許されない行為を選んだら 1 回だけ言い直させ、それでも駄目なら記録する。"""
+        """次の行為を選ぶ。許されない行為を選んだら 1 回だけ言い直させ、それでも駄目なら記録する。
+
+        ``reaction_only`` は直前の画面への反応だけを聞く（行為を選ばせない・第 25 周 H7）。
+        """
+        finishing_like = finishing or reaction_only
         if _is_scripted(self.llm):
             first = allowed[0].id if allowed else NO_ACTION
             return StepDecision(
-                action_id=NO_ACTION if finishing else first,
-                args={} if finishing else dict(suggested_args or {}),
+                action_id=NO_ACTION if finishing_like else first,
+                args={} if finishing_like else dict(suggested_args or {}),
                 intent="台本どおりに進む（scripted）",
                 expectation="",
                 prev_reaction="（scripted: 反応は記録しない）",
@@ -93,12 +98,13 @@ class PersonaAgent:
             )
         message = build_step_message(goal=goal, instruction=instruction, allowed=allowed, observation=observation,
                                      history=history, suggested_args=suggested_args, finishing=finishing,
-                                     notes=notes, optional=optional, exhausted=exhausted)
+                                     notes=notes, optional=optional, exhausted=exhausted,
+                                     reaction_only=reaction_only and not finishing)
         out = self._ask(message)
         allowed_ids = {a.id for a in allowed} | ({SKIP_ACTION_ID} if optional else set())
         chosen = str(out.get("action_id") or "").strip()
         invalid = ""
-        if not finishing and chosen not in allowed_ids:
+        if not finishing_like and chosen not in allowed_ids:
             invalid = chosen
             retry = message + ("\n\n# 訂正\n"
                                f"\"{chosen}\" はこのステップで取れない。許された id から 1 つ選び直す。")
@@ -113,8 +119,8 @@ class PersonaAgent:
         args = out.get("args") if isinstance(out.get("args"), dict) else {}
         merged_args = {**(suggested_args or {}), **{k: v for k, v in args.items() if v not in (None, "")}}
         return StepDecision(
-            action_id=NO_ACTION if finishing else chosen,
-            args={} if finishing else merged_args,
+            action_id=NO_ACTION if finishing_like else chosen,
+            args={} if finishing_like else merged_args,
             intent=str(out.get("intent") or ""),
             expectation=str(out.get("expectation") or ""),
             prev_reaction=str(out.get("reaction_prev") or ""),

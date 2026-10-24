@@ -1,0 +1,14 @@
+scenario: s-atlas-sea-map
+domain: astrophysics
+params:
+  goal_text: 分野のどこに論文が厚く、どこがまだ薄いかをつかむこと
+personas:
+  st-01-m1-radio:
+    goal_text: 電波観測に近い領域に論文がどれくらい集まっているか（厚いか薄いか）をつかむこと
+  st-07-m1-grb-voice:
+    goal_text: 自分の興味（突発天体）に近い領域が地図の端にあるかどうかを確かめること
+  st-09-d2-from-datasci:
+    goal_text: データ解析の手法を使う論文が、分野のどの領域に厚く集まり、どこが薄いかを地図の濃淡から読むこと
+  st-10-d3-21cm-receiver:
+    # 第 4 周（judge_atlas_r3 §5）: 円の名前（IK-0941）と、海と L1 の霧の一致
+    goal_text: 21cm 線の観測に近い領域に論文が厚いか薄いかを、論文の海と分野の地図の両方で読み比べること

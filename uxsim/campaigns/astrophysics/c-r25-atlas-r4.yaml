@@ -1,0 +1,49 @@
+id: c-astro-r25-atlas-r4
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 1bad7d9f
+personas:
+  teachers: [te-02-veteran-intro, te-01-rookie-seminar, te-04-copilot-intro]
+  students: [st-06-skeptic-bao, st-10-d3-21cm-receiver]
+scenarios:
+  teacher: [t-atlas-gap-review, t-atlas-edge-review, t-atlas-draft-freeze]
+  student: [s-atlas-threads-and-placement, s-atlas-sea-map]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 4, persona_llm_calls: 300, wall_clock_minutes: 240}
+notes: |
+  第 25 周 面 C「分野の地図の運用」第 4 周（judge_atlas_r3.md §5 の組）。組はすべて第 1〜3 周と別（P-0025）: te-02 × 候補 /
+  te-01 × 辺 / te-04 × 凍結 / st-06 × 糸と配置 / st-10 × 海。教員 3 × 学生 2・5 場面（候補・辺・凍結の 3 つの判断を別の行動型で
+  見る。凍結の場面は他の 2 人の判断を受けて版を上げる役）。
+
+  ── 周の前に指揮者が用意するもの（この順）──
+   1. 是正の前提: 第 3 波の是正（IK-0937〜0943 のうち判断不要分）と H18〜H24 の同期。t-atlas-gap-review は IK-0937、
+      t-atlas-edge-review は IK-0938、s-atlas-sea-map は IK-0941 の是正後。s-atlas-threads-and-placement は IK-0940（霧の意味）の
+      オーナー判断の後（判断の前に回すなら L1 の霧と配置の食い違いは既知の残存として記録する）。製品の第 3 波が閉じたら
+      projection_sync をもう一度回す（特に学習者の地図オーバーレイの見出し「骨格 版」— atlas-overlay.js）。
+   2. 砂場: share と同じ snapshot（取り直した場合は差し替え）。第 3 周は凍結が成立せず、現行の凍結版は 2026.1 のはず。周の前に
+      現行版を確かめ、2026.2 が既にあれば t-atlas-draft-freeze の te-04 節の freeze_version を 2026.3 に差し替える。
+   3. **他のレーンの採用済み・未反映の扱い（H24）: 「反映まで行う」に決める**。前の周から残る採用済み・未反映（惑星形成 — 星形成
+      等）と、この周の te-02 / te-01 が採用したものは、te-04 の t-atlas-draft-freeze が下書きへ反映してから凍結する（止め理由の
+      ［止めている候補を見る］→ 取り込む／戻すの手は場面にある）。te-04 が戻す・見送ると判断したものはそのまま判断として残す
+      （場面の後に指揮者が戻さない）。snapshot を取り直して前の周の判断が消えていれば、この周の 2 人の判断だけが対象になる。
+   4. 教員確認済みの配置が 1 件以上あること（第 3 周の Cepheus B のダストの配置。無ければ te-02 として教材管理の［位置づけ（分野
+      マップ）…］で 1 件 confirmed にする）。st-06 の「確認済みと推定の読み分け」の材料。
+   5. コース 1bad7d9f が公開のままであること（share の用意 3）。
+
+  ── 場面の組とレーンの順（--persona X --scenario Y で 1 場面ずつ・この順で）──
+   1. te-02-veteran-intro × t-atlas-gap-review（外れた判断の別枠を根拠付きで読み、戻す・取り込むを決める。候補があれば 1 採用・1 見送り）
+   2. te-01-rookie-seminar × t-atlas-edge-review（判断済みの帯と根拠の一文で採否を決める。採用 1（関連）・理由付きの見送り 1 —
+      見送りは学生の糸に出ないことの材料 = RE8 / 審判 B5）
+   3. te-04-copilot-intro × t-atlas-draft-freeze（⇢ 1・2。索引の再構築 → 候補と関係の反映 → 関係の一覧を読み直す → 止め理由の根拠と
+      帰属を読む → 取り込む／戻す → 凍結。**この周で 1 名・1 回だけ**。凍結は取り消せない。周の後は snapshot から戻す）
+   4. st-06-skeptic-bao × s-atlas-threads-and-placement（⇢ 3。版が上がった地図・採用した関係の糸・見送った関係が糸に出ないこと・
+      L1 の霧と配置・配置の根拠の逐語（IK-0677））
+   5. st-10-d3-21cm-receiver × s-atlas-sea-map（⇢ 3。円の名前（IK-0941）と、海と L1 の霧の一致）
+  順序は教員の判断 → 凍結 → 学生の地図（審判 B5 の前提）。st-06 / st-10 は studio の学生レーンにも出るので、studio の学生レーンは
+  この面の学生レーンの後に回す（同じ学生の run を同時に走らせない）。
+
+  LLM 予算の見積り: 製品のチャット LLM は呼ばない（候補の導出・取り込み・凍結の影響は決定論）。product_llm_calls は embedding の
+  従量の上限で、索引の再構築 1 回 + 凍結の後に製品が裏で始める新しい版の索引 1 回 = 2 回の見込み（余裕を見て 4）。
+  ペルソナ頭脳は 5 場面 × 50〜60 手 ≒ 250〜300（上限 300）。arXiv は呼ばない。

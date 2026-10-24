@@ -89,7 +89,10 @@ def execute(action_id: str, args: dict, session: PersonaSession, client: Epistem
         session.last_status, session.last_body = None, None
         if action is not None:
             # 画面だけの切り替え（例: 精読モードのトグル）は、画面の事実文と runner_note に置き換える（第 23 周）
-            _vision5.ui_only(action_id, session)
+            if not _vision5.ui_only(action_id, session):  # r25: 面ごとの画面だけの切り替え
+                for _m in (_atlas_exec, _doubt_exec, _studio_exec):
+                    if _m.ui_only(action_id, session):
+                        break
             session.last_action = action_id
         return [HttpTrace(method="-", path=f"unsupported:{action_id}", error="unsupported")]
     ctx = _Ctx(action, args, session, client)
@@ -136,15 +139,67 @@ def _first(d: dict, *keys: str) -> str:
 # 学習側
 # ----------------------------------------------------------------------------
 
+def remember_course_rows(session: PersonaSession, body: Any) -> None:
+    """コース一覧の表示順（マイコース → 受講可能・各 20 件まで = state.py の投影と同じ）を覚える（第 25 周 H23）。"""
+    rows = [c for c in _items(body, "courses")[:20] if isinstance(c, dict) and c.get("id")]
+    ordered = [c for c in rows if not c.get("is_enrollable")] + [c for c in rows if c.get("is_enrollable")]
+    session.scratch["course_list_rows"] = [{"id": str(c["id"]), "title": str(c.get("title") or ""),
+                                            # 第 3 波（IK-0945）: 受付が止まったマイコースの事実文（コースを開いたとき出す）
+                                            "enrollment_notice": str(c.get("enrollment_notice") or "")}
+                                           for c in ordered]
+
+
+def resolve_course_hint(session: PersonaSession, hint: Any) -> Any:
+    """``course_id`` の引数を一覧の表示から引く（第 25 周 H23）。投影はコースの id を出さないので、頭脳は
+    表示順の番号（「2」「2.」）か題名で指す。既知の id・8 文字以上の id の頭はそのまま／一覧の id に引き直す。
+    引けなければ渡された値のまま（製品は 404 を返す — それは観測）。"""
+    h = str(hint or "").strip()
+    rows = session.scratch.get("course_list_rows") or []
+    if not h or not rows:
+        return hint
+    if any(r["id"] == h for r in rows):
+        return h
+    m = re.fullmatch(r"(?:No\.?\s*|#)?(\d{1,3})\.?", h)
+    if m:
+        i = int(m.group(1))
+        return rows[i - 1]["id"] if 1 <= i <= len(rows) else hint
+    if len(h) >= 8:
+        hit = [r for r in rows if r["id"].startswith(h)]
+        if len(hit) == 1:
+            return hit[0]["id"]
+    key = h.casefold()
+    exact = [r for r in rows if r["title"].strip().casefold() == key]
+    part = exact or [r for r in rows if key in r["title"].casefold()]
+    return part[0]["id"] if part else hint
+
+
 def _course_list(ctx: _Ctx) -> None:
     status, body = ctx.main()
+    remember_course_rows(ctx.session, body)
     for c in _items(body, "courses"):
         if isinstance(c, dict) and c.get("id"):
             ctx.session.remember("enrollable" if c.get("is_enrollable") else "courses", c["id"])
 
 
+PIN_STRICT_NOTE = ("runner_fixed: 経路が pin_course を宣言しているので、campaign が固定した course_id={pinned} で入った"
+                   "（ペルソナの選んだ {chosen} は使わない）。一覧に同名のコースが並んでいても、検証したいのは固定したコース"
+                   "（同名コースの判別不能そのものは IK-0407。砂場準備: uxsim/sandbox/pin_course.py）")
+
+
+def pinned_course_override(session: PersonaSession, cid: Any) -> Any:
+    """経路が ``pin_course: true``（runner/api.py が ``scratch["pin_course_strict"]`` に立てる）なら campaign の
+    course_id に差し替え、差し替えたことを runner_note に残す（第 25 周 H6: 同名の別コースを受講して進んだ）。"""
+    pinned = str(session.scratch.get("pinned_course_id") or "")
+    if not session.scratch.get("pin_course_strict") or not pinned or str(cid or "") == pinned:
+        return cid
+    runner_note(session, PIN_STRICT_NOTE.format(pinned=pinned, chosen=cid or "（指定なし）"))
+    return pinned
+
+
 def _course_enroll(ctx: _Ctx) -> None:
-    cid = ctx.args.get("course_id") or ctx.session.latest("enrollable") or ctx.session.latest("courses")
+    cid = (resolve_course_hint(ctx.session, ctx.args.get("course_id")) or ctx.session.latest("enrollable")
+           or ctx.session.latest("courses"))
+    cid = pinned_course_override(ctx.session, cid)
     status, _ = ctx.main(overrides={"course_id": cid})
     if status and status < 300 and cid:
         ctx.session.course_id = cid
@@ -247,12 +302,41 @@ def prefetch_courses(session: PersonaSession, client: EpistemeClient) -> tuple[l
     return traces, notes
 
 
+ENROLL_BEFORE_OPEN_NOTE = ("runner: 選んだコースはコース一覧の「新しく受講可能なコース」側にあった — 製品の画面と"
+                           "同じく受講の確認で[受講する]を押してから開いた（app.js openEnrollConfirm → enrollCourse）")
+
+
+def _enroll_before_open(ctx: _Ctx, cid: str) -> bool:
+    """未受講のコースを開くとき、製品と同じく受講登録してから開く（H6・第 25 周）。
+
+    app.js はコース選択で「新しく受講可能なコース」側を選ぶと、受講の確認（[受講する]）→
+    ``POST /learning/courses/{id}/enroll`` → 一覧の読み直し → 切り替え、の順に進む。runner が GET だけを出すと
+    未受講のコースは 404 になり、場面が 1 操作も進まずに終わった。受講に失敗したら開かない（False）。
+    """
+    s = ctx.session
+    if cid not in s.all("enrollable") or cid in s.all("courses") or cid == s.course_id:
+        return True
+    status, body = ctx.call("POST", "/api/learning/courses/{course_id}/enroll", overrides={"course_id": cid})
+    if not status or status >= 300:
+        return False
+    s.remember("courses", cid)
+    runner_note(s, ENROLL_BEFORE_OPEN_NOTE)
+    if isinstance(body, dict) and body.get("enrolled") and body.get("notice"):
+        # 画面は切り替えの後に受講が成立した事実文（サーバ正本）を一度だけ出す（IK-0405）
+        s.scratch.setdefault("observation_notes", []).append(str(body["notice"]))
+    note_pinned_course_mismatch(s, cid, "learning.course.enroll")
+    return True
+
+
 def _course_open(ctx: _Ctx) -> None:
     s = ctx.session
-    cid = (ctx.args.get("course_id") or s.course_id or s.latest("courses") or s.scratch.get("default_course_id")
-           or s.latest("enrollable"))
+    cid = (resolve_course_hint(s, ctx.args.get("course_id")) or s.course_id or s.latest("courses")
+           or s.scratch.get("default_course_id") or s.latest("enrollable"))
+    cid = pinned_course_override(s, cid)
     if not cid:
         ctx.call("GET", "/api/learning/courses/{course_id}")  # precondition を記録させる
+        return
+    if not _enroll_before_open(ctx, str(cid)):
         return
     status, body = _load_course(ctx, cid)
     if status != 200 or not isinstance(body, dict):
@@ -266,6 +350,11 @@ def _course_open(ctx: _Ctx) -> None:
         if isinstance(door.get("carryover"), dict):
             s.remember("carryover_traces", door["carryover"].get("trace_id"))
         s.last_body = {**body, "_return_door": door}
+    # app.js loadAndRenderCourse → showCourseEnrollmentNotice（第 3 波・IK-0945）: 一覧の行の enrollment_notice を
+    # コース選択の近く（#course-enroll-notice）に出す。一覧を読んでいなければ何も出さない（画面も一覧の行から引く）
+    row = next((r for r in s.scratch.get("course_list_rows") or [] if r.get("id") == str(cid)), None)
+    if row and row.get("enrollment_notice"):
+        s.last_body = {**s.last_body, "_enrollment_notice": row["enrollment_notice"]}
 
 
 def _next_topic(session: PersonaSession) -> str:
@@ -310,6 +399,7 @@ def _topic_open(ctx: _Ctx) -> None:
         s.topic_id = tid
         s.remember("opened_topics", tid)
         s.material = body if isinstance(body, dict) else {}
+        s.scratch.pop("personal_map_seen", None)  # app.js: トピックを読み込むと state.personalMapSeen = false
         for ch in _items(body, "chunks"):
             if not isinstance(ch, dict):
                 continue
@@ -345,6 +435,8 @@ def _chat(ctx: _Ctx, *, topic_id: Optional[str] = None, template: Optional[str] 
     body.update({k: v for k, v in extra.items() if v not in (None, "")})
     screen = simulation_screen_context(s, ctx.args.get("simulation_run_id"), tid,
                                        mode=str(body.get("screen_mode") or "chat"))
+    if screen is None and s.scratch.get("personal_map_seen"):
+        screen = learning_screen_context(s, tid, mode=str(body.get("screen_mode") or "chat"))
     if screen is not None:
         body["screen_context"] = screen
     ov = dict(overrides or {})
@@ -395,9 +487,23 @@ def simulation_screen_context(session: Any, run_ref: Any, topic_id: Optional[str
     doc = (session.material or {}).get("document_id") if isinstance(session.material, dict) else None
     if doc:
         selection["document_id"] = str(doc)
-    return {"screen": "learning", "selection": selection,
-            "view": {"mode": mode if mode in ("chat", "voice", "lecture") else "chat", "precision_reading": False},
-            "visible_entities": []}
+    view: dict[str, Any] = {"mode": mode if mode in ("chat", "voice", "lecture") else "chat", "precision_reading": False}
+    if session.scratch.get("personal_map_seen"):
+        view["personal_map_seen"] = True  # IK-0907: 真偽値のみ
+    return {"screen": "learning", "selection": selection, "view": view, "visible_entities": []}
+
+
+def learning_screen_context(session: Any, topic_id: Optional[str], *, mode: str = "chat") -> dict:
+    """app.js getScreenContext の topic 選択の形（第 25 周 第 2 波）。runner は既定ではチャットに画面文脈を
+    送らない（近似）が、わたしの地図を開いた後だけは ``view.personal_map_seen`` を送るためにこの形を送る。"""
+    selection: dict[str, Any] = {"course_id": str(session.course_id or ""), "topic_id": str(topic_id or ""),
+                                 "kind": "topic"}
+    doc = (session.material or {}).get("document_id") if isinstance(session.material, dict) else None
+    if doc:
+        selection["document_id"] = str(doc)
+    view: dict[str, Any] = {"mode": mode if mode in ("chat", "voice", "lecture") else "chat", "precision_reading": False,
+                            "personal_map_seen": True}
+    return {"screen": "learning", "selection": selection, "view": view, "visible_entities": []}
 
 
 # ハンズフリー音声ループ（app.js handleVoiceSegment）と同じく ``intent_mode="casual"`` で送り、
@@ -692,14 +798,11 @@ def _recon_self_check(ctx: _Ctx) -> None:
 
 
 def _symbol_lookup(ctx: _Ctx) -> None:
-    s = ctx.session
-    if not (ctx.args.get("symbol") or s.latest("symbols_seen")):
-        return ctx.missing("symbol")
-    ctx.main(params={"symbol": ctx.args.get("symbol") or s.latest("symbols_seen"),
-                     "equation_id": ctx.args.get("equation_id") or s.latest("equations"),
-                     "chunk_id": ctx.args.get("chunk_id") or s.latest("chunks"),
-                     # 実フロント（openSymbolLookup）と同じく表示中トピックを添える（第 15 周: 別論文の定義を返す取り違えの是正が効く条件）
-                     "topic_id": getattr(s, "topic_id", None)})
+    # 第 25 周 share H3: 画面（app.js openSymbolLookup）と同じ形で送り（記号は symbolTextFromToken の形・式の id は
+    # タップした数式カードの data-equation-id・表示中トピック）、吹き出しの写しを投影する。正本は share_exec
+    from uxsim.runner import share_exec  # 遅延 import（循環回避）
+
+    share_exec.symbol_lookup(ctx)
 
 
 DESCENT_ELEMENT_TYPES = ("equation", "component", "claim")  # 製品 routes/descent.py の SUPPORTED_ELEMENT_TYPES
@@ -769,6 +872,8 @@ def _element_context(ctx: _Ctx) -> None:
 
 def _network(ctx: _Ctx) -> None:
     status, body = ctx.main()
+    # app.js（IK-0907・第 2 波）: わたしの地図を開いたら state.personalMapSeen = true（トピックを開き直すと戻る）
+    ctx.session.scratch["personal_map_seen"] = True
     _vision5.remember_network_nodes(ctx.session, body)
     for n in _items(body, "nodes"):
         if isinstance(n, dict):
@@ -825,7 +930,40 @@ def _help_inspect(event_path: str) -> Callable[[_Ctx], None]:
             ctx.session.remember("help_no_hit", anchor)
             ctx.session.last_status, ctx.session.last_body = 200, {"help": "この部品の説明は見つからなかった",
                                                                    "anchor_id": anchor}
+            return
+        if status == 200 and isinstance(anchors, dict):
+            # 第 25 周 H5: 全アンカーをダンプして各 body を切り詰めていた。画面はホバーした部品 1 つの
+            # ツールチップ（📖 使い方・見出し・本文の全文）だけを出す（app.js showInspectTooltip）
+            ctx.session.last_status, ctx.session.last_body = 200, {"_ui_fact": help_inspect_view(anchors, anchor)}
     return run
+
+
+INSPECT_BANNER = "使い方を確認中 — 知りたい部分にカーソルを合わせてください（Esc で終了）"
+
+
+def _plain_manual_text(text: Any) -> str:
+    """app.js ``_plainManualText``: 強調記号だけを落とす（語は変えない・要約しない）。"""
+    t = str(text or "")
+    t = re.sub(r"\*\*([\s\S]+?)\*\*", r"\1", t)
+    t = re.sub(r"__([\s\S]+?)__", r"\1", t)
+    t = re.sub(r"`([^`]+)`", r"\1", t)
+    return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+
+def help_inspect_view(anchors: dict, anchor: str) -> str:
+    """インスペクト・モードの画面: バナー + ホバーした部品 1 つのツールチップ（anchor が無ければバナーと
+    カーソルを合わせられる部品の名前だけ）。番地（anchor_id）は末尾の「操作に使う番号」欄に分ける（H9）。"""
+    lines = [INSPECT_BANNER]
+    entry = anchors.get(anchor) if anchor else None
+    if isinstance(entry, dict):
+        lines += ["ツールチップ:", "📖 使い方", _plain_manual_text(entry.get("title")), _plain_manual_text(entry.get("body"))]
+        return "\n".join(x for x in lines if x)
+    names = [(k, _plain_manual_text(v.get("title"))) for k, v in anchors.items() if isinstance(v, dict)]
+    if names:
+        lines.append("カーソルを合わせると説明が出る部品（見出し）: " + " / ".join(dict.fromkeys(t for _, t in names if t)))
+        lines.append("（操作に使う番号 — 画面には出ない。anchor_id に渡すとその部品のツールチップを見る）: "
+                     + ", ".join(k for k, _ in names))
+    return "\n".join(lines)
 
 
 def _voice_speak(ctx: _Ctx) -> None:
@@ -1074,10 +1212,12 @@ def _cb_register(ctx: _Ctx) -> None:
 
 def _course_visibility(ctx: _Ctx) -> None:
     vis = str(ctx.args.get("visibility") or "public")
-    status, _ = ctx.main(json={"visibility": vis, "group_id": ctx.args.get("group_id")})
+    status, resp = ctx.main(json={"visibility": vis, "group_id": ctx.args.get("group_id")})
     if status == 200 and ctx.action.id == "admin.course.visibility":
-        # 画面の文（リリース前の確認のステップ 3「公開しました。」/ コース管理「更新しました」）
-        ctx.session.last_body = {"_ui_fact": _vision5.course_visibility_view(ctx.session, vis)}
+        # 画面の文（リリース前の確認のステップ 3「公開しました。」/ コース管理「更新しました」）+ 第 3 波（IK-0947）の
+        # readiness_note（本文の無いトピックが残るときだけ）
+        note = str(resp.get("readiness_note") or "") if isinstance(resp, dict) else ""
+        ctx.session.last_body = {"_ui_fact": _vision5.course_visibility_view(ctx.session, vis, readiness_note=note)}
 
 
 def _release_placements(ctx: _Ctx) -> None:
@@ -1219,13 +1359,14 @@ def _component_context(ctx: _Ctx) -> None:
 
 def _hop_target(graph: Any, wanted: str = "") -> str:
     """直前の文脈図で移動できる隣の部品（画面の「旅」と同じく navigable な theory_component だけ）。"""
-    if not isinstance(graph, dict):
-        return ""
-    focus = str((graph.get("focus") or {}).get("id") or "") if isinstance(graph.get("focus"), dict) else ""
-    cands = [str(it["id"]) for lane in ("upper", "lower") for it in graph.get(lane) or []
-             if isinstance(it, dict) and it.get("element_type") == "theory_component" and it.get("navigable")
-             and it.get("id") and str(it["id"]) != focus]
+    from uxsim.runner.state import component_hop_targets  # 投影の「番号 N」と同じ並び（第 25 周 share H2）
+
+    cands = component_hop_targets(graph)
     if wanted:
+        m = re.fullmatch(r"(?:番号\s*)?(\d+)", wanted.strip())
+        if m:
+            i = int(m.group(1))
+            return cands[i - 1] if 1 <= i <= len(cands) else ""
         return wanted if wanted in cands else ""
     return cands[0] if cands else ""
 
@@ -1562,3 +1703,14 @@ _HANDLERS: dict[str, Callable[[_Ctx], None]] = {
 from uxsim.runner import simlab_exec as _simlab_exec  # noqa: E402
 
 _HANDLERS.update(_simlab_exec.HANDLERS)
+
+# 第 25 周（空白の 4 面）: 面ごとの実行・投影モジュール（契約 = persona_enactment_testing_design.md §22）
+from uxsim.runner import atlas_exec as _atlas_exec  # noqa: E402  r25:atlas
+from uxsim.runner import share_exec as _share_exec  # noqa: E402  r25:share
+from uxsim.runner import doubt_exec as _doubt_exec  # noqa: E402  r25:doubt
+from uxsim.runner import studio_exec as _studio_exec  # noqa: E402  r25:studio
+
+_HANDLERS.update(_atlas_exec.HANDLERS)  # r25:atlas
+_HANDLERS.update(_share_exec.HANDLERS)  # r25:share
+_HANDLERS.update(_doubt_exec.HANDLERS)  # r25:doubt
+_HANDLERS.update(_studio_exec.HANDLERS)  # r25:studio（既存の learning.lecture.audio_status / sequence も差し替える）

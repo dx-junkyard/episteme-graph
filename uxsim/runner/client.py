@@ -24,6 +24,7 @@ class EpistemeClient:
         self.base_url = base_url.rstrip("/")
         self.token: str = ""
         self.count_429 = 0
+        self.last_headers: dict = {}  # 直前の応答のヘッダ（投影が X-Explanation-Fact 等を読む・第 25 周 第 2 波）
         self.traces: list[HttpTrace] = []
         self._http = httpx.Client(base_url=self.base_url, timeout=timeout_s, transport=transport)
 
@@ -64,6 +65,7 @@ class EpistemeClient:
             resp = self._http.request(method, path, json=json, params=clean_params, files=files, data=data,
                                       headers=headers)
         except httpx.HTTPError as exc:
+            self.last_headers = {}
             elapsed = int((time.monotonic() - started) * 1000)
             self.traces.append(HttpTrace(method=method, path=path, status=None, elapsed_ms=elapsed,
                                          error=f"{type(exc).__name__}: {exc}"))
@@ -71,6 +73,10 @@ class EpistemeClient:
         elapsed = int((time.monotonic() - started) * 1000)
         if resp.status_code == 429:
             self.count_429 += 1
+        try:
+            self.last_headers = {k.lower(): v for k, v in resp.headers.items()}
+        except Exception:  # noqa: BLE001
+            self.last_headers = {}
         body = _decode(resp)
         self.traces.append(HttpTrace(method=method, path=path, status=resp.status_code, elapsed_ms=elapsed,
                                      response_excerpt=_excerpt(body), digest=_digest(body, path)))

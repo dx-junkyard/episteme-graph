@@ -1,0 +1,50 @@
+id: c-r25-doubt-r3
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 1bad7d9f
+personas:
+  teachers: [te-05-delegator-lab, te-02-veteran-intro]
+  students: [st-01-m1-radio, st-04-intl-exoplanet]
+scenarios:
+  teacher: [t-db-challenge-propose, t-db-counterfactual-brief, t-db-scope-promote]
+  student: [s-db-ledger-lines]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 24, persona_llm_calls: 320, wall_clock_minutes: 200}
+notes: |
+  第 25 周・面 B の第 3 周（judge_doubt_r2.md §4 の組）。te-05（委任型・面 B は初めて）が疑義の入口と反実仮想を、te-02 が
+  衝突の解消の確認を歩き、st-01（電波・M1）と st-04（留学生）が教員の記帳の後に (e) を読む。te-02 × t-db-counterfactual-brief は
+  第 1 周と同じ組なので、反実仮想の観測の選択肢（IK-0903）は te-05 の t-db-counterfactual-brief で見る（P-0025）。
+
+  ── 周の前に指揮者が用意するもの（この順）──
+   1. 是正の前提: **(c3) は IK-0904（疑義の入口が標準の経路から届かない）の是正後にだけ回す**（是正前は第 1・2 周と同じく
+      疑義を残せない）。IK-0900（台帳の書き込みが教材の編集権限を見ない）・IK-0903（観測の選択肢がコース全体）・IK-0906・
+      IK-0907 の是正の有無を run の記録に残す。
+   2. オーナー判断の待ち: **(b3) の衝突の確認は IK-0899（台帳の行キーに論文を含めるか）の判断と是正の後で意味を持つ**。
+      判断の前に回すなら、それは「記帳が別の論文に見える」現状の確認で、是正の確認ではないと記録に書く。
+   3. editor 共有: te-05 に Cepheus B の論文（TeX 版）の editor 共有を与え、PINN には与えない（grant_document_editors.py）。
+      (c3) の末尾の 1 手が PINN の台帳で書き込みが閉じること（IK-0900）を 1 回だけ確かめる。te-02 の (b3) も Cepheus と PINN の
+      台帳を開くので、te-02 に Cepheus の editor 共有を与える（PINN は閲覧で足りる — 開いて空を読むだけ）。
+   4. (b3) の材料の確かめ: Cepheus と PINN の主グラフの先頭ノードの node_id が一致することを graph_json で確かめる。違えば
+      t-db-scope-promote の params の second_material_hint を一致する論文に差し替える。
+   5. コースの前提: 両教員とも前提の地図タブにコースが要る（owns_course）。種まき済みのコースが残っていなければ
+      t-v5-register-own-course（コースビルダー 2〜3 回の LLM）を先に歩く。教員の記帳はそのコースで行うので、前提（assumption）の
+      台帳は学生のコース 1bad7d9f の未検証合意リストには出ない。部品・式・主張の台帳は対象単位なので学生の画面に出うる。
+   6. 投影の同期（H11〜H16）を終え、審判に H17 の規則を足しておく。
+
+  ── 場面の組とレーンの順（--persona X --scenario Y で 1 場面ずつ・この順で）──
+   (c3) te-05-delegator-lab × t-db-challenge-propose（式・部品の台帳から支える主張へ移って疑義 → 検証提案 → 取り下げ。最後に
+        編集権限の無い PINN の台帳で 1 回だけ書き込みを試す）
+   (d3) te-05-delegator-lab × t-db-counterfactual-brief（観測を倒す手を第 3 周から必須に。選択肢が開いた論文の観測だけか）
+   (b3) te-02-veteran-intro × t-db-scope-promote（Cepheus のノードに記帳 → PINN の同じ番号のノードの台帳が空か）
+   (e3) st-01-m1-radio × s-db-ledger-lines → st-04-intl-exoplanet × s-db-ledger-lines（教員レーンの後。出典タブ → 部品の説明
+        ポップアップ（承認済み説明の無い部品）→ 未検証の前提一覧（名前が読めるか）→ 地図の札（開いている論文の行か）の順に
+        読み、地図の札について AI に尋ねる（IK-0907））
+  
+  LLM 予算の見積り: 種まき（教員 1 人 2〜3 回 × 最大 2 人 = 0〜6）+ 学生の質問（1 人 2〜3 回 × 2 人 = 4〜6）+ 前提マイニング
+  （任意・非同期 0〜4）= 最大 16 回（余裕を見て 24）。前提の地図・反実仮想・台帳は LLM を呼ばない。ペルソナ頭脳は 5 場面 × 55〜65 手。
+
+  ── 投影の同期（第 2 波・projection_sync_wave2.md）──
+  台帳の GET・記帳は開いた論文の ?document_id= を付ける。疑義を残せない対象の台帳からは admin.doubt.supporting_claim_ledger
+  （［この主張の台帳を開く］）で支える主張の台帳へ移れる（t-db-challenge-propose に任意の 1 手として入れた）。

@@ -1,0 +1,38 @@
+id: t-share-explain-write
+population: teachers
+runner: [api]
+# 第 25 周 share (b) の書き手。原稿スタジオで部品の説明を書き、共有を ON にして査読承認する。
+goal: '{{goal_text}} のために、原稿スタジオで部品「{{component_hint}}」の独自解釈を書き、共有して査読承認する'
+params_required: [goal_text, component_hint, explanation_title, explanation_body, material_hint]
+steps:
+  - do: auth.login
+  - do: admin.explanations.open
+    with: {component_hint: '{{component_hint}}'}
+    note: 原稿スタジオの理論コンポーネントのカードから「説明・承認の共有」を開く
+  - do: admin.explanations.add
+    with: {title: '{{explanation_title}}', body: '{{explanation_body}}'}
+    note: 独自解釈を追加する
+  - do: admin.explanations.update
+    with: {what: share_on, explanation_hint: '{{explanation_title}}'}
+    note: 他の教員が引用できるよう共有を ON にする
+  - do: admin.explanations.update
+    with: {what: approve, explanation_hint: '{{explanation_title}}'}
+    note: 学生に見せてよい説明として査読承認する
+  - choose:
+      - do: admin.document_share.open
+        with: {material_hint: '{{material_hint}}', format_hint: tex}
+        note: この部品の論文の教材の行で「共有」を開き、解析成果を誰と共有しているかを読む
+      - do: admin.explanations.endorse
+        with: {explanation_hint: '{{explanation_title}}', level: provisional}
+        note: 自分の説明に暫定の承認を付けられるかを試す
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: teacher/14-admin-lecture-studio.md#component-endorse
+  - manual: teacher/14-admin-lecture-studio.md#endorsement-add-explanation
+  - manual: teacher/14-admin-lecture-studio.md#endorsement-card
+watch_for:
+  - 部品の一覧から説明バージョンの一覧まで 1 操作で届く（届かないなら、届かない理由が画面で分かる）
+  - 共有 ON と査読承認が別の操作で、それぞれの状態がカードに出る
+  - 承認の厚みは段階ラベル（「未承認」「N名の教員が承認」）で、点数が出ない
+  - 学生にどの説明が見えるか（査読承認したものだけ）が画面かマニュアルから読める

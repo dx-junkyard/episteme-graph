@@ -1,0 +1,32 @@
+id: t-atlas-alias-from-gap
+population: teachers
+runner: [api, browser]
+goal: "候補のうち既存の項目の別の表記と注記されたものを、[別名として登録]で既存項目の別名にし、登録済みの別名の区画に現れることと、候補が理由付きで却下されたことを確かめる"
+params_required: [domain_hint, alias_hint]
+steps:
+  - do: auth.login
+  - do: admin.atlas.open
+    with: {domain_hint: "{{domain_hint}}"}
+  - do: admin.atlas.gaps.list
+    note: 「既存の『…』の別表記の可能性があります」という注記と、その近さの言葉・骨格の版を読む
+  - do: admin.atlas.gaps.alias_register
+    with: {gap_hint: "{{alias_hint}}"}
+    note: 注記の付いた候補を既存項目の別名として登録する（登録が通ると候補は理由付きで却下される）
+  - do: admin.atlas.aliases.list
+    note: 登録した表記が、地図の項目ごとの別名の一覧に出ているかを見る
+  - do: admin.atlas.vectors.status
+    note: 別名の登録で索引の状態がどう言われるかを読む（再構築はしない）
+  - choose:
+      - {do: admin.atlas.gaps.dismissed_filter, with: {show: true}}
+      - {do: admin.atlas.aliases.list, with: {include_dismissed: true}}
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/17-admin-atlas.md#gap-alias-register
+  - manual: teacher/17-admin-atlas.md#aliases
+  - manual: teacher/17-admin-atlas.md#vector-index
+watch_for:
+  - 近い既存項目の注記には、近さの段階の言葉と骨格の版が付き、生の類似度が出ない
+  - 注記の無い候補には[別名として登録]が出ない（索引が無い分野では注記自体が出ない）
+  - 登録が通ったときだけ候補が却下され、却下の理由に既存概念の名前が残る（2 段）
+  - 登録した別名は地図の骨格を変えない（凍結版の中身・次版の下書きが変わらない — 審判 B6）

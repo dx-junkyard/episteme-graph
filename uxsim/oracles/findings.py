@@ -15,6 +15,9 @@ from uxsim.schema import Evidence, Finding, RunMeta, TranscriptStep
 
 # 行為 id の接頭辞 → docs/issue_knowledge/layers.md の語彙（最長一致）
 _LAYER_BY_PREFIX: dict[str, list[str]] = {
+    "admin.figure_studio.": ["teaching_figures"],  # r25:studio
+    "admin.atlas.": ["field_atlas_s"],  # r25:atlas
+    "learning.atlas.sea_map": ["corpus_roaming"],  # r25:atlas
     "auth.": ["auth_visibility"],
     "learning.course.": ["auth_visibility"],
     "learning.topic.": ["learner_experience_b"],

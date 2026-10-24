@@ -1,0 +1,16 @@
+scenario: t-db-challenge-from-node
+domain: astrophysics
+# 第 25 周 第 4 周（te-03）。Cepheus B の論文（te-03 に editor 共有があること — 周の前に確かめる）
+params:
+  goal_text: 原稿スタジオのノードから、支える主張の弱いところを型で指摘し、確かめる手立てを検証の提案にすること
+  course_hint: ""
+  material_hint: Cepheus
+  node_hint: "1"
+  challenge_reason: 等分配の仮定が成り立つ範囲より外の領域にまで、この推定を当てはめているように読める。
+  second_reason: 「乱流」の定義が節によって揺れていて、根拠からこの主張が出てくるつながりが読み取れない。
+  proposal_text: 乱れの大きい領域を分けて偏光角の分散を取り直し、等分配の仮定が崩れる範囲で推定がどう変わるかを比べる。
+  external_check: コーパス外で DCF 法の適用範囲を論じたレビュー論文を確認し、乱れの大きい領域での補正の議論があることを確かめた。
+per_archetype:
+  veteran_clicks_through:
+    challenge_reason: 適用範囲の外挿。
+    second_reason: 定義が曖昧。

@@ -1,0 +1,13 @@
+scenario: t-share-identity-queue
+domain: astrophysics
+params:
+  goal_text: 別々の論文に出てくる同じ部品を、学生に共通部品として見せてよいかを判断すること
+  dismiss_reason: 支持する論文の表記だけでは同じ部品と言える根拠が読めないため
+  copilot_questions:
+    - 同一性の候補を確認・見送りすると、学生の画面では何が変わりますか？
+    - リンクの見送りと概念の見送りは何が違いますか？
+personas:
+  te-01-rookie-seminar:
+    dismiss_reason: 同じものかどうか自分では判断できないため、いったん見送ります
+  te-05-delegator-lab:
+    dismiss_reason: 確認する時間が取れないため見送り。必要なら院生に再確認させる

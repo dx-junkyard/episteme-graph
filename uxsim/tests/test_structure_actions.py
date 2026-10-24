@@ -42,7 +42,7 @@ def test_component_context_then_hop_recenters_on_adjacent_component():
     execute("learning.component.context", {}, s, client)
     assert seen[-1].url.path == "/api/learning/courses/c1/components/comp-a/context"
     obs = project_observation("learning.component.context", s.last_status, s.last_body)
-    assert "隣の部品（移動できる）" in obs and "文脈の図の中心: 中心" in obs
+    assert "隣の部品（移動できる・番号 1）" in obs and "文脈の図の中心: 中心" in obs
     execute("learning.component.context_hop", {}, s, client)
     assert seen[-1].url.path == "/api/learning/courses/c1/components/comp-b/context"  # claim ではなく部品へ
     # 次の hop は隣接が無い → HTTP を出さず precondition

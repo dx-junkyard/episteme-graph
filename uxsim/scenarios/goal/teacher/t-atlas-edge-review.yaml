@@ -1,0 +1,39 @@
+id: t-atlas-edge-review
+population: teachers
+runner: [api, browser]
+goal: "「関係（辺）の候補」を読み、1 件を関係の種類を選んで採用し、1 件を理由を書いて見送り、採用した関係を次版の下書きへ反映する前の確認を読む（反映はしない）"
+params_required: [domain_hint, accept_hint, accept_kind, dismiss_hint, dismiss_reason]
+steps:
+  - do: auth.login
+  - do: admin.atlas.open
+    with: {domain_hint: "{{domain_hint}}"}
+  - do: admin.atlas.edges.list
+    note: つなぐ 2 項目・出所（プロトタイプ近傍 / 共起）・何が近いかの一文・両方に配置がある論文の題名を読む
+  # 第 25 周 第 2 波（IK-0887）: 近さだけの候補は上限で畳まれ、事実文と［すべて表示］が出る
+  - choose:
+      - {do: admin.atlas.edges.show_all}
+      - {do: admin.atlas.edges.list}
+    optional: true
+  - do: admin.atlas.edges.accept
+    with: {edge_hint: "{{accept_hint}}", kind: "{{accept_kind}}"}
+    note: 妥当と判断した関係を、関係の種類を選んで採用する
+  - do: admin.atlas.edges.dismiss
+    with: {edge_hint: "{{dismiss_hint}}", reason: "{{dismiss_reason}}"}
+    note: 地図に足さない関係を、理由を書いて見送る（学生の推定の糸からも消えるはず）
+  - do: admin.atlas.edges.incorporate_preview
+    note: 採用した関係を次版の下書きへ反映するときの確認を読む。下書きが無ければ画面が何と言うかを読む
+  - do: admin.atlas.edges.dismissed_filter
+    with: {show: true}
+    note: 見送った関係が理由付きで残っているかを見る
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/17-admin-atlas.md#edge-candidates
+  - manual: teacher/17-admin-atlas.md#edge-incorporate
+  - manual: teacher/17-admin-atlas.md#edge-dismissed-filter
+watch_for:
+  - 出所チップに近さの段階の言葉は出ず、何が近いかの一文（basis_line）が出て、共起は論文の題名の列挙で示され、件数・類似度が出ない
+  - 近さだけの候補は畳まれ、畳んだことを事実文で言い、［すべて表示］で全部出せる（件数は出さない — IK-0887）
+  - 採用には関係の種類が要り、未選択では送られない（「採用するには関係の種類を選んでください」）
+  - 見送りには理由が要り、見送った関係は既定の一覧から消え、見送り済みの表示で理由付きで残る
+  - 下書きが無いとき、反映の確認は出ずに「次版の下書きがありません…」の事実文になる
+  - 見送った関係は、この後の学生の地図の推定の糸に出ない（審判 B5 — 学生レーンを後に回す）

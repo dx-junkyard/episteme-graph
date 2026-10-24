@@ -13,8 +13,8 @@ from typing import Optional
 
 from uxsim.config import UXSIM_ROOT, get_settings
 from uxsim.llm import PersonaLLM, make_live_llm
-from uxsim.oracles import (behavior, contract, decision, dialogue, differential, document, observation, principle,
-                           retraction, simulation)
+from uxsim.oracles import (atlas, behavior, contract, decision, dialogue, differential, document, doubt, observation,
+                           principle, retraction, share, simulation, studio)
 from uxsim.oracles.findings import FindingFactory, dedupe, load_meta, load_transcript, write_findings
 from uxsim.schema import Finding
 
@@ -32,15 +32,23 @@ def run_oracles(run_dir: Path, *, judge_llm: Optional[PersonaLLM] = None, databa
     found += principle.check(steps, factory)
     found += dialogue.check(steps, factory)
     found += simulation.check(steps, factory)
+    # 第 25 周（空白の 4 面）: 面ごとの決定論の審判
+    found += atlas.check(steps, factory)  # r25:atlas
+    found += share.check(steps, factory)  # r25:share
+    found += doubt.check(steps, factory)  # r25:doubt
+    found += studio.check(steps, factory)  # r25:studio
+    notes["studio"] = studio.summarize(steps)  # r25:studio
     notes["dialogue_ui_contract"] = dialogue.ui_contract_notes(steps)
     c, notes["behavior"] = behavior.check(steps, factory, judge_llm)
     found += c
     d, notes["document"] = document.check(steps, factory, judge_llm, out_dir=run_dir)
     found += d
     url = get_settings().sandbox_database_url if database_url is None else database_url
-    e, notes["observation"] = observation.check(meta, factory, url, engine)
+    e, notes["observation"] = observation.check(meta, factory, url, engine, steps=steps)
     found += e
     found += simulation.check_observation(meta, factory, url, engine, steps=steps)
+    found += share.check_observation(meta, factory, url, engine, steps=steps)  # r25:share
+    found += doubt.check_observation(meta, factory, url, engine, steps=steps)  # r25:doubt
     # 第 23 周: E6 確定文脈 / E7 差分（沈黙適応の仮説）/ E8 撤回の保持
     e6, notes["decision_context"] = decision.check(steps, meta, factory, url, engine)
     found += e6

@@ -1,0 +1,21 @@
+scenario: s-share-symbol-concept
+domain: astrophysics
+params:
+  goal_text: 式の記号がどの概念に当たるかを押さえること
+  topic_hint: 二重ネットワークとTOV方程式の課し方（PINN による中性子星状態方程式）
+  topic_hint_terms: [TOV, 二重ネットワーク, 中性子星, 状態方程式]
+  # 記号は教材の式に実在するものから選ぶ（第 25 周 H8: ρ・M は本文に無かった。runner は教材の式に無い記号をタップしない）
+  symbol_hints: [P, r, '\mathbf{F}_{\!\mathrm{EOS}}', m(r)]
+personas:
+  st-06-skeptic-bao:
+    # 第 2 周（judge_share_r1 §6）: 本文に定義の文がある記号（r・P）/ 定義式だけの記号（F_EOS）/ 登録の無い記号を 1 つずつ。
+    # 登録の無い記号は指揮者が knowledge_symbols_live と教材の式で確かめて差し替える（既定は L_BC — 部品名に出る記号）
+    symbol_hints: [r, P, '\mathbf{F}_{\!\mathrm{EOS}}', '\mathcal{L}_{\mathrm{BC}}']
+  st-09-d2-from-datasci:
+    # 第 3 周（judge_share_r2 §5 の st-06 × (e) は第 2 周と同じ組なので st-09 に替えた）。4 記号を全部タップする
+    # （本文に定義の文 r・P / 定義式だけ F_EOS / 登録なし L_BC）。L_BC が教材の式に無ければ指揮者が差し替える
+    symbol_hints: [r, P, '\mathbf{F}_{\!\mathrm{EOS}}', '\mathcal{L}_{\mathrm{BC}}']
+  st-08-m1-rprocess-lecture:
+    # 第 4 周（judge_share_r3 §6）: 物理の M1 が r・P・F_EOS・L_BC の 4 記号を全部タップする（H26 の是正で L_BC も索引に載る）。
+    # 使用例に式から合成した主張が出ないか（IK-0922）
+    symbol_hints: [r, P, '\mathbf{F}_{\!\mathrm{EOS}}', '\mathcal{L}_{\mathrm{BC}}']

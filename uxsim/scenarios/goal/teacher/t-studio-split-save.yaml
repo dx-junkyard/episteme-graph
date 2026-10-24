@@ -1,0 +1,60 @@
+id: t-studio-split-save
+population: teachers
+runner: [api]
+preconditions:
+  - text: このペルソナは自分が所有するコースを持っている（原稿スタジオでの保存は所有者だけができる）
+    check: owns_course
+seed_scenarios: [t-v5-register-own-course]
+goal: "{{goal_text}}"
+params_required: [goal_text, marker_paragraph, spoken_append]
+steps:
+  - do: auth.login
+  - do: admin.courses.list
+    note: 自分のコースを確かめる
+  - do: admin.lecture_studio.open_course
+    note: 原稿スタジオでそのコースを選ぶ
+  - do: admin.lecture_studio.audio_readiness
+    note: 音声生成のボタンが押せるか、押せないなら理由と次の操作を読む（音声は生成しない）
+  - do: admin.lecture_studio.select_topic
+    with: {prefer: long}
+    note: 教材本文がいちばん長いトピックを開き、スライド枚数のインジケータ（受講画面と同じ自動ページ分割）を読む
+  - choose:
+      - do: admin.lecture_studio.chunk_slides
+        note: 文書構造の原稿で「スライド」タブを開き、分割・音声の有無・負荷ラベルを読む
+      - do: admin.help.inspect
+        with: {anchor_id: lecture-studio.slide-wm-label}
+        note: 負荷ラベルが何を言っているのかを「❓ 使い方」で確かめる
+    optional: true
+  - do: admin.lecture_studio.insert_slide_marker
+    with: {field: material, after_paragraph: "{{marker_paragraph}}"}
+    note: 教材欄の段落の境目にスライド区切りを 1 つ入れ、インジケータの変化を読む
+  - choose:
+      - do: admin.lecture_studio.insert_slide_marker
+        with: {field: spoken}
+        note: 本文説明にも対応する区切りを入れる（もう一方には自動で入らない）
+      - do: admin.lecture_studio.edit_draft
+        with: {field: spoken, append: "{{spoken_append}}"}
+        note: 区切りは教材だけにして、本文説明を書き足す
+    optional: true
+  # 第 25 周 第 2 波（IK-0872 / IK-0880）: 付録がいまの根拠と違うと事実文と［付録を付け直す］が出る（編集欄に入るだけ）
+  - choose:
+      - do: admin.lecture_studio.reattach_appendix
+        note: 付録を付け直して編集欄に入れ、保存で確定するかを決める
+    optional: true
+  - do: admin.lecture_studio.save_topic
+    note: 保存する。保存で何が起きるか（音声・受講者への届き方）が画面で分かるかを気にする
+  - do: admin.lecture_studio.audio_readiness
+    note: 保存の後に、音声生成のボタンの状態と理由をもう一度読む
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/14-admin-lecture-studio.md#course-draft
+  - manual: teacher/14-admin-lecture-studio.md#insert-slide-marker-btn
+  - manual: teacher/14-admin-lecture-studio.md#display-tabs
+  - manual: teacher/14-admin-lecture-studio.md#slide-wm-label
+  - manual: teacher/14-admin-lecture-studio.md#save-btn
+  - manual: teacher/14-admin-lecture-studio.md#audio-all-btn
+watch_for:
+  - スライド枚数のインジケータは受講画面と同じ分割で数え、区切りの数が表示と読み上げで揃わないときはそう言う
+  - 負荷ラベルは段階ラベルと事実文だけで、生の数を出さない
+  - 保存で当該トピックの生成済み音声が作り直しになることが、保存の前か後に画面で分かる
+  - 音声生成のボタンが押せないときは、理由と次の操作が近くに出る

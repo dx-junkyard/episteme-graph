@@ -1,0 +1,33 @@
+id: t-db-ledger-readonly-probe
+population: teachers
+runner: [api]
+# 第 25 周 第 4 周の前（doubt H22）: 第 3 周は「編集権限の無い教材の台帳で 1 回だけ書き込む」手が t-db-challenge-propose の
+# blocked の後ろにあって一度も実行されなかった。権限の確認を疑義の通しから分けた短い場面にする（IK-0900 / IK-0931 の確認）
+preconditions:
+  - text: このペルソナは自分のコースを持っている（前提の地図タブのコース選択に並ぶもの）
+    check: owns_course
+  - このペルソナは foreign_material_hint の教材を閲覧できるが、編集権限は持たない（指揮者が周の前に共有の有無を確かめる）
+goal: "{{goal_text}} のために、閲覧だけできる論文の台帳を開き、書き込めるか・書けないならその理由が画面で分かるかを確かめる"
+params_required: [goal_text, course_hint, foreign_material_hint, node_hint_with_row, node_hint_without_row,
+                  foreign_scope_condition, scope_reason]
+steps:
+  - do: auth.login
+  - do: admin.doubt.tab_open
+    with: {course_hint: "{{course_hint}}"}
+  - do: admin.materials.list
+  - do: admin.doubt.studio_node_ledger
+    with: {material_hint: "{{foreign_material_hint}}", node_hint: "{{node_hint_with_row}}"}
+    note: 閲覧だけできる論文のグラフで、台帳の記帳があるノードを開く。記帳のボタンが押せるか・押せないなら理由が出るかを読む
+  - do: admin.doubt.studio_node_ledger
+    with: {material_hint: "{{foreign_material_hint}}", node_hint: "{{node_hint_without_row}}"}
+    note: 記帳の無いノードも開く（記帳の無い台帳で、書けない理由が同じように出るか）
+  - do: admin.doubt.scope_record
+    with: {condition: "{{foreign_scope_condition}}", reason: "{{scope_reason}}"}
+    note: 1 回だけスコープを書こうとする（書けないならその理由と、誰に頼めばよいかが事実文で出るかを読む）
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: teacher/18-admin-doubt-atlas.md#record-scope
+watch_for:
+  - 編集権限の無い論文の台帳では記帳のボタンが無効で、理由が事実文で出る（IK-0900 / IK-0931 の是正後）
+  - それでも送った書き込みはサーバが拒否し、拒否の文が日本語の事実文（数字・内部 ID なし）
+  - 記帳の無いノードと記帳のあるノードで、書けない理由の文が食い違わない

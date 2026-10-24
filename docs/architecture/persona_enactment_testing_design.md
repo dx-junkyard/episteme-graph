@@ -1863,3 +1863,577 @@ bridge（`uxsim/sandbox/claude_proxy.py` → mailbox → Opus の頭脳）で肩
   残課題の正本は [論文レーダーの自律周回](../features/paper_radar_autonomous_loop_design.md)。課題は IK-0695〜IK-0710。
 - 本章の他の周との違い: 審判は E1〜E8 ではなく分野のペルソナによる関心判定（数値を材料にしない）で、審判の判定を**取り込みの前**に
   挟む（1 本の解析に 10 時間を超えるため — 同設計書 §3）。深い段の審判は本書の時点で未実施。
+
+## 22. 増強: 棚卸しで見えた空白の 4 面（共有・転用 / D層の教員側 / 分野の地図の運用 / 原稿スタジオ→受講）の周（2026-10-22 起草）
+
+第 24 周（レーダー自律周回）の後、場面・行為の棚卸し（§18〜§21 の 70 本超は学生のチャット・議論・SB層・vision 5 機能と
+教員のグラフレビュー・公開に厚く偏る）で「場面ゼロ・行為ほぼゼロ」と分かった 4 面を、**面ごとに 1 回ずつ**「ペルソナ × 場面」の
+組を変えて何周も回す（.personalize P-0024 / P-0025）。対象はこの環境の Claude が自力で操作できる経路（API 経由の砂場・bridge・
+テスト）に限り、組み込みブラウザ（localhost 不可）・arXiv live・目視は使わない。製品の LLM は全部 bridge（`claude_proxy` →
+`uxsim/runs/mailbox` → Opus の製品頭脳 2 体・seq % 2）、ペルソナ LLM はレーン固有の mailbox（uxsim/runs/round25/mailbox_<lane>（git 管理外）・
+Opus のペルソナ頭脳 1 レーン 1 体）。規律は uxsim/runs/round25/BRAIN_INSTRUCTIONS.md（git 管理外）、レーン起動は uxsim/runs/round25/lane.sh（git 管理外）。
+
+### 22.1 砂場の準備（2026-10-22・指揮者）
+
+- 像: 開発像（10-13）を `episteme-uxsim-*:latest` に retag → `up -d --no-build` → snapshot `corpus-astro-tex-r23` を復元 →
+  作業ツリー（backend / src / frontend/public / docs/manual / docs/admin_operations）を docker cp → restart（migration 090 まで適用）。
+  Docker Hub に到達できず `build` は使えない（§21 と同じ）。
+- 面 A の材料: `identity_candidates` ステージを TeX 4 本で再実行 → **同一性候補は真の 0 件**（coverage 全件処理・links 0・entries 0）。
+  `library_entries` 14 件は全部装置・計測系（SB層の同梱部品）で概念系の entry は無い。砂場の 8 教材は同じ 4 論文の TeX 版と PDF 版の対。
+  → 教員が自分で entry を作って結ぶ経路を主経路にし、「候補ゼロの事実文」も場面に含める。
+- 面 C の材料: ギャップ候補 0 件（信号は TeX 2 本に 1 件ずつ・別ラベル）→ 位置づけの再提案（`POST .../placements/propose`・bridge 1 コール/教材）
+  を 8 教材で実行し、TeX / PDF の対が同じ「星間磁場」を出して**候補 1 件（concept）**が立った。辺候補は snapshot 時点から存在。
+  `theory_modules` ステージも TeX 4 本で再実行（外枠 3 / 9 / 16 / 19）。
+- 面 B / 面 D の材料: 台帳行・暗黙前提候補・コース（te-01 の 6be229e1 private / te-04 の 1bad7d9f public）は snapshot のまま。
+
+（§22.2〜22.5 は各面の担当（Opus）が書いた設計メモ uxsim/runs/round25/design_<face>.md（git 管理外） の合流。行為・経路・審判の正本はコード、数字は起草時点のもの。）
+
+### 22.2 面 A: 共有・転用の通し（教員の確定 → 学生の見え方）
+
+> 第 25 周「空白の 4 面」の 1 面。指揮者が `docs/architecture/persona_enactment_testing_design.md` §22 に合流させる下書き。
+> 製品コードは変えていない。行為・経路・審判・運転だけ。
+
+対象の層（CLAUDE.md の正本）: 概念レジストリ層（ナレッジライブラリタブの同一性の候補・別名・関係・地図との対応）/
+W層の同一性リンク（深く検討「共通部品と結びつける」）/ 承認・共有レイヤー（C層・原稿スタジオ「説明・承認の共有」）/
+パイプライン成果のグループ共有（教材の行「共有」）/ component 根拠カード（学生の「共通部品として」タブ・説明バージョン）/
+個人知識ネットワーク（旅の [2][3] 共通部品 hop）/ P3-5 記号 → 概念。
+
+#### 主題と見るもの
+
+教員が確定したものだけが学生に届き、確定前の候補・判断の記録・内部の宛先・数は学生に出ないか。
+教員側では、確定・見送り・引用の操作が 1 つずつの判断として画面に読めるか（理由の扱い・版・出所・件数を出さない規律）。
+
+**砂場の事実（指揮者の実測 2026-10-22）**: 同一性候補は TeX 4 本で再実行して**真の 0 件**、library_entries は 14 件すべて装置系
+（confirmed）で概念系 0・候補 0。8 教材は同じ 4 論文の TeX / PDF の対。よって (a) は「候補ゼロの事実文」を読む場面で始まり、
+**確定のある経路は (a') で教員が自分で作る**（白紙の共通部品 → TeX 版の部品と PDF 版の同じ部品を W層で結び付ける）。
+
+#### 行為（PE9 — `uxsim/actions/share_actions.py`、実行と投影は `uxsim/runner/share_exec.py`）
+
+| 行為 | 画面の部品（affordance） | 製品ルート |
+|---|---|---|
+| `admin.library.identity_candidates` | `knowledge-library.identity-candidates` | GET `/api/admin/library/identity-candidates` |
+| `admin.library.identity_link_decide`（confirm / reject） | 同上 | POST `/api/admin/deliberation/identity-links/{id}/confirm\|reject` |
+| `admin.library.entries` / `entry_open` | `knowledge-library.entries-list` | GET entries（include_candidates）/ entry + labels + relations + atlas-links |
+| `admin.library.entry_create` | `knowledge-library.new-entry-btn` | POST `/api/admin/library/entries` |
+| `admin.library.entry_review` | `knowledge-library.entry-review` | POST `/entries/{id}/review` |
+| `admin.library.label_add` | `knowledge-library.labels` | POST `/entries/{id}/labels` |
+| `admin.library.relation_add` / `relation_decide` | `knowledge-library.relations` | POST `/relations` / `/relations/{id}/decide` |
+| `admin.library.atlas_links_derive` | `knowledge-library.identity-derive` | POST `/atlas-links/derive` |
+| `admin.library.atlas_link_decide` | `knowledge-library.atlas-links` | POST `/atlas-links/{id}/decide` |
+| `admin.deliberation.identity_open` | `deliberation.identity-link-create` | materials → component-graph → overview → GET identity-links |
+| `admin.deliberation.shared_part_search` | 同上 | GET `/elements/{t}/{id}/shared-part-candidates` |
+| `admin.deliberation.identity_link_create` | 同上 | POST `/api/admin/deliberation/identity-links` |
+| `admin.deliberation.identity_link_decide` | `deliberation.identity-link-decide` | POST `.../identity-links/{id}/confirm\|reject` |
+| `admin.explanations.open` | `lecture-studio.component-endorse` | GET `/courses/{cid}/theory-components` → GET `/theory-components/{id}/explanations` |
+| `admin.explanations.add` / `update`（share_on・share_off・approve）/ `endorse` | 同上 | POST explanations / PATCH `/explanations/{id}` / POST endorse |
+| `admin.explanations.cite` | `lecture-studio.cite-intent` | GET `/api/admin/courses` → POST `/explanations/{id}/cite` |
+| `admin.document_share.open` / `add` | `materials.row-share` | GET `/documents/{id}/groups` + `/api/groups` / POST groups |
+| `learning.component.shared_part` | `student/02-student.md#material-element-anchor` | GET `/components/{id}/context`（「共通部品として」タブの投影） |
+| `learning.component.explanations` | 同上 | GET `/components/{id}/explanations` |
+
+学生側の既存の行為を再利用: `learning.component.context` / `context_hop` / `learning.symbol.lookup` / `learning.personal_network.journey` /
+`learning.chat.ask_selection`。
+
+**写し方の決め事**（投影は画面と同じ欄を同じ形で — IK-0634）:
+- 理由が空の［見送り］は画面（`_libraryPromptDismissReason`）が alert で止めて送らない → HTTP を出さず `precondition:dismiss_reason` + 画面の文。
+  分野未選択の「地図との対応を導出」、本文が空の説明の追加、引用先の無い引用、グループ未選択の共有の追加も同じ。
+- **リンクの［見送り］／［却下］の画面には理由の欄が無い**（`_libraryDecideIdentityLink` / `_decideIdentityLink`）。経路の `reason` は送らず runner_note に残す。
+- 関係の相手の欄は「相手のエントリ ID」の手入力だけ。`object_hint`（名前）を渡したら runner が ID を引き、その事実を runner_note に残す。
+- 画面が出している数・内部 ID は投影でも出す（題名が空のリンクの document_id・W層リンク行の英語の要素型と UUID・「他 N 論文でも使用」）。
+- エントリの凍結（版発行）は埋め込みの計算を伴い取り消せないので行為にしない。結び付けに凍結は要らない（共通部品の検索は draft の
+  active エントリも ILIKE で拾い、学生の shared_part は active なエントリで出る）。
+- 共通部品の検索は製品が検索文の埋め込みを 1 回計算する（チャット検索と同じ経路）ので `llm_cost="product"`。
+
+#### 経路（`uxsim/scenarios/goal/{teacher,student}/*-share-*.yaml`・穴は `domains/astrophysics/scenario_params/`）
+
+| 場面 | 経路 | 見るもの |
+|---|---|---|
+| (a) | `t-share-identity-queue` | 候補ゼロの事実文（二重に出ないか）/ 支持論文の題名列挙・数値なし / リンクと概念の見送りで理由の扱いが揃うか / 見送りが状態で残るか |
+| (a') | `t-share-bind-versions` | 白紙の共通部品 → TeX 版の部品 → 検索 → 候補 → 確定 → PDF 版で同じ（確定か却下）。検索で見つかるか（分野が特定できない縮退）/ 却下が残るか |
+| (b1) | `t-share-explain-write` | 部品の一覧から説明・承認の共有まで届くか / 共有 ON と査読承認が別の操作か / 段階ラベル |
+| (b2) | `t-share-explain-endorse-cite` | 共有された説明だけが引用できるか / 引用先は編集できる別のコースだけ・無ければ事実文 / 作者でない編集の拒否が日本語か |
+| (c) | `t-share-labels-atlas` | 別名と隠しラベルの違い / 導出前後の事実文 / 骨格の版・段階の近さ / 関係の相手を名前で選べるか / 見送りの理由 |
+| (d) | `s-share-part-chip` | 「共通部品として」は確定した結び付きの部品にだけ / 枠に件数・内部 ID・数値が出ないか / 説明は査読承認のものだけ / 旅の道が無いときの事実文 |
+| (e) | `s-share-symbol-concept` | 記号の概念は確定した結び付きのときだけ名前と種別で / 無いときは無いことが分かる |
+
+#### 組（面の複雑さ: 高 → 教員 2 × 学生 2）
+
+- **第 1 周 `c-r25-share-r1`**: te-03（精読・editor あり）×(a')(b1) / te-01（新人・editor なし）×(a)(b2)(a 再)(c) /
+  st-02（理論）×(d 前)(d 後)(e) / st-03（隣接分野から）×(d)(e)。te-03 は PINN の PDF 側を**却下**する。
+- **第 2 周 `c-r25-share-r2`**: te-04（Copilot 依存・コース所有・editor あり）×(a')(b2) / te-05（委任・editor なし）×(a)(c)(b1) /
+  st-06（懐疑）×(e)(d) / st-09（データサイエンスから）×(d)。te-04 は音速の論文の TeX ⇄ PDF を**両方確定**、(b2) は引用先の無い事実文を読む。
+- レーンの順と依存は各 campaign の notes が正本（(d) の前後比較は st-02 だけ・(b2) は (b1) の共有 ON の後）。
+
+#### 審判（`uxsim/oracles/share.py`・決定論・製品非 import）
+
+- **A1** 拒否応答（409・422）の detail が空・英語・内部例外文
+- **A2** 同一性の候補の形（`hidden_count` が整数・`hidden_unresolved` が真偽 / 候補ゼロなのに事実文が無い / 参照できない要素を落としたのに事実文が無い）
+- **A3** 地図との対応の導出の応答に `coverage`（件数報告）
+- **A4** 共有を開けた教材へのグループ共有の追加が 404（所有者だけが変えられる理由が画面に出ない疑い）
+- **A5** 部品の一覧は開けたのに説明バージョンが 404（説明・承認の共有に届かない）
+- **A6** 見送り（dismissed）の応答に理由が残っていない
+- **B1** 学生の部品・記号・旅の応答に内部の宛先キー（entry_id / stable_key / produced_by_run_id / superseded_at / candidate_key /
+  shared_part_id / mapping_justification / decided_by）
+- **B2** 学生の応答に数（other_documents_count・承認の内訳 endorser_count 等・hidden_count・citation_count）
+- **B3** 学生の concept_ref に name / entry_type_label 以外の欄
+- **B4** 教員の同一性の候補で論文の題名が空のリンク（画面は document_id を出す）
+- **B5** 教員の W層の同一性リンクの行に論文の UUID（画面は `instance_document_id` と英語の要素型をそのまま出す）
+- **E1** 学生に共通部品・概念として見えた名前に、confirmed かつ active のエントリが無い（候補・見送りの概念が届いた疑い — KR2）
+- **E2** 教員が却下した同一性リンクが `element_identity_links` に `rejected` で残っていない（P4）
+- **E3** 教員が見送った概念が `library_entries` に見送りの状態と理由で残っていない（KR7）
+
+承認の段階ラベル（`_endorsement_label`）は「N名の教員が承認」と人数を含む — CLAUDE.md C層の設計原則 1 の例（「専門家3名が承認」）に
+沿う設計なので審判にしていない（数値の**欄**だけを B2 で見る）。改訂原則 4 との関係は周の後に判断する。
+
+#### 運転
+
+- snapshot `corpus-astro-tex-r23`（コース 1bad7d9f 固定・周の前に `pin_course --yes`）。runner は api。外部 API は呼ばない。
+- 1 場面ずつ `--persona X --scenario Y`。第 2 周で第 1 周の結び付きを消したいときの reset は、`library_entries`（te-03 / te-04 が作った
+  draft）・`element_identity_links`・`component_explanations` / `component_endorsements` / `component_citations` も対象にする必要がある
+  （現行の reset スクリプトの対象かは未確認 — 運転前に確かめる）。消さずに第 1 周の状態の上で第 2 周を読むのが既定。
+- 指揮者が足す行（逐語）は最終報告にある。
+
+#### pre-mortem（課題ナレッジ想起シートの族当て）
+
+- `condition-not-propagated` — 共通部品の検索が document → run の `cartridge_id` で分野を決める。砂場の TeX 教材が分野未指定で解析されて
+  いれば、教員が分野を選んで作った共通部品が検索に出ない（(a') の検索結果と事実文で見る）。
+- `available-but-unwired` / `last-mile-missing` — C層の説明はコース単位（`component.course_id`）で、パイプラインの部品は course_id を持たない。
+  説明・承認の共有に届かないか（A5）、届いても学生の説明一覧（`e.course_id = :course_id`）に出ないか（(d) で見る）。
+- `guardrail-does-not-cover-new-path` — 学生の shared_part は entry の `status='active'` だけを見て `review_status` を見ない
+  （記号の concept_ref は `review_status='confirmed'` を見る）。候補の概念が学生に届く経路（E1）。
+- `id-namespace-conflated` — 学生の説明一覧は `component_id` を UUID に CAST する。チップの id が agent 側 ID なら 5xx（A 契約の既存 5xx 検査）。
+- `information-dropped-as-unrepresentable` — リンクの却下に理由の欄が無く、却下の理由が残らない（経路の reason が送られない runner_note）。
+- `doc-drifts-from-code` — 学生マニュアルに「共通部品として」タブと説明バージョンの節が無い（affordance を `material-element-anchor` に寄せた）。
+
+### 22.3 面 B: D層の教員側 ⇄ 学生の検証状態
+
+> 第 25 周「空白の 4 面」の面 B。製品コードは変えていない（欠陥は周を回してから是正する）。外部 API・TTS を呼ぶ行為は無い。
+> 製品の正本: `backend/api/routes/doubt.py` / `routes/seminar_brief.py`、画面: `frontend/public/js/doubt-atlas.js`
+> （前提の地図タブ・原稿スタジオのグラフに差し込まれる台帳の区画と反実仮想モード）/ `app.js`（D3-6 の一行）、
+> マニュアル: `teacher/18-admin-doubt-atlas.md` / `teacher/14-admin-lecture-studio.md#counterfactual-mode` / `student/02-student.md`。
+
+#### 行為（`uxsim/actions/doubt_actions.py`・27 件）
+
+教員（`admin.doubt.*`・affordance はすべて `doubt-atlas.*` の data-ui-anchor かマニュアル節）:
+
+| 行為 | 画面（JS の関数） | 呼ぶ API |
+|---|---|---|
+| `tab_open` / `refresh` | `initTab` → `loadCourses` → `reloadAll` | `/api/admin/courses` → assumption-atlas・assumptions?status・open-assumptions・counterfactual/sessions |
+| `audit_run` / `mining_run`（LLM・非同期）/ `load_recompute` | `bindTabControls` | コース単位の POST → `reloadAll` |
+| `assumption_filter` / `assumption_confirm` / `assumption_dismiss` | `loadAssumptions` / `bindAssumptionButtons` | 確定は理由が空なら送らない（F7: プリフィルなし） |
+| `ledger_open` | 散布図の点・未検証合意リストの行 → `renderNodeLedgerSection` | `GET /ledger/{t}/{id}`（404 = 未記帳の区画） |
+| `open_reachable_filter` | `renderOpenAssumptionsList`（再取得なし） | HTTP なし |
+| `studio_node_ledger` | 原稿スタジオ `lsRenderGraphNodeDetail`（`component_id \|\| id`） | component-graph → ledger |
+| `scope_record` / `scope_candidate_decide` | `bindScopeForm` / `bindCandidateButtons` | 422 は detail をフォームの下に |
+| `verification_status` | `bindVerificationStatusForm` | スコープ 0 件の直接検証・理由が空は画面が止める（HTTP なし） |
+| `challenge_record` / `challenge_withdraw` / `challenge_propose` / `proposal_status` | `bindChallengeForm` / `bindChallengeActions` / `renderProposalStatusCard` | 疑義の 422 は固定文・取り下げの 403 は固定文・提案は文とコーパス外の確認が空なら送らない |
+| `falsification_record` / `falsification_candidate_decide` / `falsification_refresh`（LLM・非同期） | `falsificationSectionHtml` ほか | — |
+| `counterfactual_toggle` / `counterfactual_observation` / `counterfactual_save` | `toggleCounterfactualNode` / `renderObservationToggleForm` / `updateCfStatus` | compute は vis のノード id を `toggled_assumption_ids` に送る |
+
+学生（`learning.ledger.*`）: `sources_tab`（`annotateOneSourceCardLedger` — source-chunk の式 → claim-refs の主張の順に最大 3 行）/
+`component_line`（`appendLearnerLedgerLine`）/ `open_assumptions`（`loadLearnerOpenAssumptions`）。既存の `learning.discuss.opening`・
+`learning.personal_network.nearby`・`admin.seminar_brief.view` を経路に組み込む。
+
+投影（`uxsim/runner/doubt_exec.py`）は画面の欄を同じ形で文にし、`session.last_body = {"_ui_fact": …}` に置く。画面が出して
+いるもの（記帳者の欄の値・出典ドキュメントの id・origin / status の生の語・「N 箇所が依存」）は隠さず、画面が出していないもの
+（散布図の点の target_id・compute の `surviving_node_ids` と `warnings`）は出さない。画面のクライアント側の止め方は HTTP を
+出さずに文言だけ返し、`ui_guard:` の runner_note に残す。
+
+#### 経路（ペルソナ × 場面）
+
+| 場面 | 経路 | 見るもの |
+|---|---|---|
+| (a) | `t-db-assumption-review` | コーパス監査 → 候補の確定（理由は本人の言葉）・却下 → 却下済みの表示 → 負荷再計算 → 確定した前提の台帳（未検証・スコープ空が「発見」として読めるか） |
+| (b) | `t-db-scope-promote` | スコープ 0 件で直接検証を選ぼうとする → 軸の無いスコープ（422）→ スコープ記帳 → 直接検証 → 原稿スタジオのグラフのノードの台帳 |
+| (c) | `t-db-challenge-propose` | 理由なしの疑義 → 型で疑義 → コーパス外の確認なしの提案 → 提案 → 着手 → 二つ目の疑義（つながりへ）を取り下げ → 未検証合意リスト |
+| (d) | `t-db-counterfactual-brief` | 原稿スタジオで前提のノードを仮に偽 → 観測を仮に倒す（補助仮説）→ 保存 → セッション一覧 → ゼミ前ブリーフ |
+| (e) | `s-db-ledger-lines` | コース 1bad7d9f の DCF 法のトピックで質問 → 出典タブの一行 → 「この分野の未検証の前提を見る」→ 部品の一行 → 議論の開幕 → いまここの周り |
+
+教員の経路はすべて前提 `owns_course`（前提の地図タブのコース選択は所有・共有のコースだけ）+ 種まき `t-v5-register-own-course`。
+
+| 周 | campaign | 教員 | 学生 | 組み合わせの意図 |
+|---|---|---|---|---|
+| 第 1 周 | `c-r25-doubt-r1` | te-03（精読・editor あり）× te-02（クリックスルー・閲覧のみ） | st-06（懐疑）× st-02（理論） | 教員は種まきで自分のコースを作るので、前提の台帳は学生のコースに届かない（届かないことを事実として見る） |
+| 第 2 周 | `c-r25-doubt-r2` | te-04（AI 頼み・学生のコースの所有者）× te-01（新人・閲覧のみ） | st-03（隣接・素粒子）× st-09（隣接・データ） | te-04 が学生のコースで記帳するので、前提の台帳が学生の未検証合意リスト・開幕に届きうる。第 1 周との差が「記帳したコース」の効き目 |
+
+ペルソナ案からの変更: 第 2 周の te-05（委任型）を te-04 に替えた。面 B の学生側に届く記帳を作れるのは学生のコースの所有者
+te-04 だけで、te-05 だと (e) の前段が第 1 周と同じ「別コースの記帳」になる。
+
+#### 審判（`uxsim/oracles/doubt.py`・決定論）
+
+語彙は製品のガードレールテストから ast で読む（PE6）: SL1 の BANNED（`test_stakes_ledger_guardrails.py::TestClosedWorldVocabulary`）・
+煽り語（`test_doubt_guardrails.py::TestNoHypeLanguage`）・学習者の数値キー（`TestLearnerOpenAssumptionsHideRawNumbers._FORBIDDEN`）・
+学習者の帰属キー（`TestFalsificationProjectionsDropNumericAndAttribution` の `assert "…" not in` の左辺）・教員の数値キー
+（`TestNoRawNumbersExposed`）。
+
+- A: DA1 4xx の detail（空・内部例外・日本語でない）/ DA2 学習者の台帳・未検証合意リストに帰属・数値のキー / DA3 教員の doubt 応答に
+  confidence・load_score / DA4 投稿者名の無い疑義 / DA5 取り下げた疑義が同じステップの読み直しで消える・取り下げ済みにならない、
+  却下した前提が「却下済み（保持）」「すべて」に無い / DA6 スコープ 0 件の directly_verified / DA7 コーパス外の確認が空の提案の 2xx
+- B: DB1 禁止語（応答の表示欄と画面の投影）/ DB2 同じ文に「この分野」と「未検証」系 / DB3 「記帳者」に UUID / DB4 同じ教員が
+  コース単位の編集権限ゲートで 404 になった（または一覧で viewer の）コースに、コース単位の doubt の書き込みが 2xx
+- E: DE1 教員が記帳した台帳行の `course_id` が空（前提の地図・未検証合意リストに載らない）
+
+`run_all.py` への登録は指揮者が足す（`found += doubt.check(steps, factory)` / `found += doubt.check_observation(meta, factory, url, engine, steps=steps)`）。
+
+#### 運転
+
+- 順序: 教員 → 学生（plan の順）。第 1 周の後に第 2 周を同じ snapshot から始めるか、続けて走らせるかは指揮者が決める（続けると
+  第 1 周の前提・疑義が残る。台帳は対象単位なので、部品のスコープは第 2 周の学生にも見える）。
+- LLM: 種まき（te-02 / te-03 で 2〜3 回ずつ）・前提マイニング（任意・非同期）・覆る条件の候補（経路には入れていない）・学生の質問 1〜2 回。
+- 砂場で確かめていないこと: 既存の台帳行の `course_id`・`load_score` の有無（散布図・未検証合意リストが空なら `ledger_open` は確定した
+  前提に縮退し `runner_choice:` を残す）、コーパス監査が候補を出すか（出なければ (a) の確定は precondition で止まる — 前提マイニングを
+  選んでも結果は非同期）。
+- `actions_exec.py` の dispatch: `_HANDLERS.update(_doubt_exec.HANDLERS)`（`from uxsim.runner import doubt_exec as _doubt_exec`）。
+
+#### 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 投影が画面と違う形になる | `duplicate-canonical-sources` | 文言は doubt-atlas.js / app.js の逐語ミラー（定数名に JS の関数名を書いた）。変えたら JS を読んで写し直す |
+| 権限の条件がコース直指定の経路で揃っていない | `condition-not-propagated` | 審判 DB4 が transcript だけで拾う（製品の疑いとして記帳候補） |
+| 教員の記帳した行がコースの一覧に届かない | `available-but-unwired` | 審判 DE1（DB 読み）|
+| 画面が止める入力をハーネスが API で通してしまう | `guardrail-does-not-cover-new-path` | 画面と同じくクライアント側で止め、HTTP を出さない |
+
+当たらない族: 再実行と削除（行為に再解析・削除が無い）。
+
+### 22.4 面 C: 分野の地図の運用（教員のギャップ・辺・別名・凍結 → 学生の地図）
+
+> **状態:** 第 25 周の増強（2026-10-22）。行為・経路・審判は実装済み・未運転。指揮者が設計書
+> `docs/architecture/persona_enactment_testing_design.md` に合流させる。製品コードは変えていない。
+
+#### pre-mortem
+
+当たる型: `available-but-unwired`（行為を足しても `actions_exec` の dispatch と `run_all` の登録が無ければ
+`_default` が走り、投影が既定の JSON 整形に落ちる — 指揮者の 3 行が前提）/ `duplicate-canonical-sources`
+（画面の文言を投影へ写すので JS と食い違うと偽所見になる — `test_round25_atlas_harness.py` が JS の原文に
+逐語で現れることを固定）/ `condition-not-propagated`（見送った関係を学生の糸から外す条件が、教員の判断 →
+読み時導出 → `(domain, version)` のキャッシュ → 学生の `/api/atlas` と境界を 3 つまたぐ — 審判 B5 で境界を
+歩いて確かめる）。
+
+#### 行為（`uxsim/actions/atlas_actions.py`・24 件）
+
+教員（`admin`・affordance は `atlas.*` の data-ui-anchor・manual は `teacher/17-admin-atlas.md`）:
+
+| id | 画面の操作 | 主な API |
+|---|---|---|
+| `admin.atlas.open` | 分野を選ぶ（`loadState` と同じく 6 本を読み直す） | `GET /api/admin/atlas/domains` → skeleton / reports / gap-candidates / edge-candidates / vectors/status / aliases |
+| `admin.atlas.gaps.list` / `.dismissed_filter` | 論文の解析から見つかった候補 / 見送り済みも表示 | `GET .../gap-candidates[?include_dismissed=true]` |
+| `admin.atlas.gaps.accept` / `.dismiss` / `.restore` | 採用 / 却下…（理由必須・空は送らない）/ 見送りから戻す | `POST .../gap-candidates/decide` → 一覧の読み直し |
+| `admin.atlas.gaps.alias_register` | 別名として登録（2 段: 登録が通ったときだけ理由を自動で書いて却下） | `POST .../aliases` → `POST .../decide` |
+| `admin.atlas.gaps.draft_from_frozen` | 現在の版から次版の下書きを作る | `POST .../skeleton/draft/from-frozen` |
+| `admin.atlas.gaps.incorporate_preview` / `.incorporate_apply` | 取り込む…（確認まで）/ [下書きに追加する]（`saveDraft` の revision 付き PUT → mark-incorporated） | `POST .../incorporate-preview` / `PUT .../skeleton/draft` |
+| `admin.atlas.edges.list` / `.dismissed_filter` / `.accept`（kind 必須）/ `.dismiss`（理由必須）/ `.restore` | 関係（辺）の候補 | `GET/POST .../edge-candidates[/decide]` |
+| `admin.atlas.edges.incorporate_preview` / `.incorporate_apply` | 次版の下書きへ反映… | `POST .../edge-candidates/incorporate-preview` / `PUT .../skeleton/draft` |
+| `admin.atlas.aliases.list` | 登録済みの別名 | `GET .../aliases` |
+| `admin.atlas.vectors.status` / `.refresh` | ベクトル索引 / [索引を再構築] | `GET .../vectors/status` / `POST .../vectors/refresh` |
+| `admin.atlas.freeze_impact` | [公開（凍結）] → 凍結の影響を読んでキャンセル | `GET .../freeze-impact` |
+| `admin.atlas.freeze` | 対応を確かめて凍結（`correspondence` = none / all / 旧ノード名の一部） | `GET .../freeze-impact` → `POST .../skeleton/freeze` |
+
+学生（`learning`）: `learning.atlas.layers`（地図のコースレベルで「推定の糸」「論文の位置」を重ねる =
+`GET /api/atlas` + `GET /api/learning/courses/{id}/landscape`・affordance `atlas.relation-threads`）/
+`learning.atlas.sea_map`（論文の海の地図 = corpus/landscape + `/api/atlas?cartridge=` + corpus/documents・
+affordance `sidebar.corpus-sea`）。既存の `learning.atlas.view` / `.threads` / `learning.landscape.view` /
+`learning.corpus.*` は再利用する。
+
+**従量（`llm_cost="product"`）**: 製品のチャット LLM を呼ぶ行為は無い。embedding を本物の OpenAI へ素通しする
+3 つだけを product にする — 索引の再構築・別名の登録（製品が 1 項目の索引を裏で作り直す）・凍結（新しい版の
+索引を裏で作る）。retire / restore / 下書きの破棄 / generate（LLM）/ 修正報告の処理は行為にしない。
+
+**投影**（`uxsim/runner/atlas_exec.py`）: 画面と同じ欄を同じ形で（docstring に JS の関数名）。
+`session.last_body = {"_ui_fact": 文}` に置くので `state.project_observation` への分岐の追加は要らない。
+画面が描く件数（公開前チェックの検証エラー件数・「索引済み: N/M ノード」・landscape-layer の「登録済み論文 N 件」）は
+画面どおりに出す。審判用の要約は各 trace の `digest["atlas"]`（ID・版・指紋・状態の語彙だけ。数値の値は持たない）。
+
+#### 経路（ペルソナ × 場面）
+
+| 場面 | 経路 | 第 1 周（`c-r25-atlas-r1`） | 第 2 周（`c-r25-atlas-r2`） |
+|---|---|---|---|
+| (a) ギャップ候補を題名で判断・採用 1・理由付き却下 1・戻す | `t-atlas-gap-review` | te-03（精読） | te-01（新人） |
+| (b) 近傍注記から別名を登録 → 登録済みの別名 | `t-atlas-alias-from-gap` | te-04（Copilot 依存） | te-01 |
+| (c) 辺候補の採用（kind）・見送り・反映の確認 | `t-atlas-edge-review` | te-03 | te-02（ベテラン） |
+| (d1) 下書きを作り、取り込みの確認と凍結の影響を読むまで | `t-atlas-freeze-impact-read` | te-04 | — |
+| (d2) 索引の再構築 → 下書きへ反映 → 凍結の影響 → 凍結 2026.2 | `t-atlas-draft-freeze` | — | te-02（1 回だけ） |
+| (e) 推定の糸と論文の位置を重ねて読み分ける | `s-atlas-threads-and-placement` | st-05（夜間・太陽風） | st-04（留学生・系外惑星）/ st-07（音声中心 — 地図は文字） |
+| (f) 論文の海の厚み・縁・外 | `s-atlas-sea-map` | st-01（電波） | st-07 |
+
+運転は `--persona X --scenario Y` で 1 場面ずつ、教員レーン → 学生レーンの順（審判 B5・B6 が前後を比べる）。
+第 2 周の (d2) は砂場の骨格の版を上げる（取り消せない）ので周の後に snapshot `corpus-astro-tex-r23` から戻す。
+第 1 周の (d1) が作った下書きが残れば (d2) の from-frozen は 409 の事実文になり、残った下書きに反映して凍結する。
+
+#### 審判（`uxsim/oracles/atlas.py`・決定論・DB を読まない）
+
+- **A1** 見送りの判断に理由が残っていない（理由必須の弁）/ **A2** 採用した関係に種類が無い / **A3** 4xx の detail が日本語の事実文でない
+- **B1** 学生の地図・教員の候補一覧に確からしさの生の値の欄（cosine / similarity / score / weight / confidence）
+- **B2** 件数の欄（`count` / `*_count`。`source_document_count` は LS8 の例外）
+- **B3** 糸の端点に領域・項目ごと / 全体の上限超え（RE7）/ **B4** 糸に骨格の版が無い・地図の版と食い違う（RE2・VA8）
+- **B5** 教員が見送った関係が、その後の学生の糸に出る（RE8。戻した関係は除く）
+- **B6** 凍結の操作が無いのに凍結版の中身・学生の地図の版が変わる / 判断だけの区間で次版の下書きが変わる（KN-3・AB4・RE3）
+- **B7** 近傍注記に骨格の版が無い / 支持論文が題名なし（VA8・LS5）
+- **B8** 学生の位置づけに出所ラベルが無い / 現行版に対応の無い位置づけに版の事実文が無い（NC6）
+- **B9** 出所の固定文「AIによる推定（未確認）」と「・骨格 版」が画面の原文（`atlas-threads-layer.js` / `admin.js`）から消えた
+
+却下の理由が空のときの 422 は、画面が送らない（`handleGapAction` / `handleEdgeAction`）ので runner も送らない。
+審判は「送られて通った」痕跡（A1）で見る。
+
+#### 指揮者が足す行（逐語）
+
+- `uxsim/runner/actions_exec.py` の末尾（simlab の取り込みの後）:
+  `from uxsim.runner import atlas_exec as _atlas_exec  # noqa: E402  r25:atlas` と
+  `_HANDLERS.update(_atlas_exec.HANDLERS)  # r25:atlas`
+- `uxsim/oracles/run_all.py`: import に `atlas` を足し、`found += simulation.check(steps, factory)` の次に
+  `found += atlas.check(steps, factory)  # r25:atlas`
+- `uxsim/oracles/findings.py::_LAYER_BY_PREFIX`（任意・審判は自分で層を渡すので無くても動く）:
+  `"admin.atlas.": ["field_atlas_s"],` / `"learning.atlas.sea_map": ["corpus_roaming"],`
+- `uxsim/actions/registry.py` の末尾の合流（`# r25:atlas` の try/except）は追加済み。`state.py` は変えていない。
+
+#### 運転で見えそうな疑い（コードを読んで分かった範囲・仮説）
+
+1. 関係の候補の [採用] [見送り…] [見送りから戻す] には data-ui-anchor が無い（ギャップ側は `atlas.gap-accept` 等が
+   ある）。「？使い方」で個々のボタンを調べられない非対称（管理 UI の 3 点セット）。
+2. 教員の確認の画面に内部 ID が出る: ギャップの取り込みの確認「追加する項目のid: …」「親領域: r_…」（ラベルではなく
+   id）、別名の手動登録は「地図の項目のid」を手で打たせる（PL7 に相当する規律が教員画面に無い）。
+3. 学生の「論文の位置」の事実行「登録済み論文 N 件の解析から生成」は件数を出す（LS8 の設計どおりだが CR3 の
+   数値非表示と並べると説明が要る）。
+4. 推定の糸のペアは `(domain, version)` の in-process キャッシュ。見送りはキャッシュの後で除くので RE8 は保たれる
+   見込みだが、同じ版のまま索引を再構築してもキャッシュが残り、古いアンカーからの糸が出続ける可能性（第 2 周の
+   (d2) の前後で st-04 の糸を比べれば見える）。
+5. 追加だけの次版（from-frozen → 1 項目・1 辺）では削除が無いので「前の版のノードとの対応」の区画が出ない。
+   (d2) の「対応を確かめて凍結」は事実上チェックの無い凍結になる — 対応の画面を通すには既存項目の改名が要る。
+6. 既存のハーネス投影（`state.py` の `learning.atlas.threads`）は `threads = {available: false, note}` のとき
+   「推定の糸（AIによる推定（未確認）・骨格 版）:」と糸があるように見せる（ハーネスの偽所見の型 IK-0634）。
+   新しい `learning.atlas.layers` は「切り替えが出ていない」に直したが、既存行為の投影は指揮者の判断に残す。
+7. 別名の登録と凍結は embedding を裏で呼ぶが、画面は従量をどこにも言わない（教員に金額を出さない M8 とは別に、
+   操作が外部へ何を送るかの開示 — 可視性 6 軸 DA の対象になるかは未確認）。
+
+### 22.5 面 D: 原稿スタジオ → 学生の受講
+
+第 25 周「空白の 4 面」のうち、原稿スタジオ（授業用ドラフトの編集・スライド分割・AI 書き換え・右ペイン・
+音声の準備状態・教材図スタジオ）から学生のレクチャー・教材までを 1 本の面として通す。製品の正本は CLAUDE.md の
+「レクチャーの表示ソースと音声」「レクチャースライド同期 + 音声言語切替」「音声生成の準備確認フロー（#491）」
+「教材図スタジオ」。製品コードはこの作業では変えていない（下の §22.4.6 は周を回してから確かめる疑い）。
+
+#### 行為（`uxsim/actions/studio_actions.py`・17 件）
+
+| id | 画面の部品（anchor / 節） | API | LLM |
+|---|---|---|---|
+| `admin.lecture_studio.open_course` | `lecture-studio.course-select` | GET course-structure + lecture-scripts + settings | – |
+| `admin.lecture_studio.select_topic` | `lecture-studio.course-draft` | POST preview-split（auto_paginate・formulas 空・文書 ID なし = 画面のインジケータと同じ） | – |
+| `admin.lecture_studio.insert_slide_marker` | `lecture-studio.insert-slide-marker-btn` | POST preview-split | – |
+| `admin.lecture_studio.edit_draft` | `lecture-studio.course-draft` | POST preview-split | – |
+| `admin.lecture_studio.save_topic` | `lecture-studio.save-btn` | PUT course-topics/{topic_id} | – |
+| `admin.lecture_studio.rewrite_topic` | `lecture-studio.assistant-modal` | POST course-topics/{topic_id}/draft/rewrite（+ preview-split） | product |
+| `admin.lecture_studio.chunk_slides` | `lecture-studio.display-tab-slides` | POST preview-split（文書 ID 付き = WM レンズ） | – |
+| `admin.lecture_studio.right_pane_evidence` | `lecture-studio.stumble-tab-evidence` | （読み込み済みを描く・HTTP なし） | – |
+| `admin.lecture_studio.right_pane_stumble` | `lecture-studio.stumble-tab-stumble` | GET documents/{id}/claims/stumble-summary | – |
+| `admin.lecture_studio.audio_readiness` | `lecture-studio.audio-all-btn` | （未読み込みのときだけ）GET lecture-scripts + course-structure | – |
+| `admin.figure_studio.suggestions` | `lecture-studio.stumble-tab-figures` | GET topics/{topic_id}/figure-suggestions | – |
+| `admin.figure_studio.suggestions_generate` | `lecture-studio.figure-suggestions-generate` | POST …/figure-suggestions/generate | product |
+| `admin.figure_studio.build_from_suggestion` | `lecture-studio.figure-suggestions` | POST figure-studio/turn（方針入りの初回）+ POST …/accept | product |
+| `admin.figure_studio.turn` | `lecture-studio.figure-studio-send` | POST figure-studio/turn | product |
+| `admin.figure_studio.adopt` | `lecture-studio.figure-studio-adopt` | POST teaching-figures（adopt=true）+ preview-split | – |
+| `admin.figure_studio.existing` | `lecture-studio.figure-studio-modal` | GET teaching-figures | – |
+| `learning.lecture.figure_view` | `student/02-student.md#material-element-anchor` | GET courses/{id}/figures/{figure_id}/image | – |
+
+既存の `learning.lecture.audio_status` / `learning.lecture.sequence` は id をそのまま使い、実行と投影だけを
+`studio_exec` に差し替える（下の「指揮者が足す行」）。`admin.lecture_studio.scripts`（既存）は残す。
+
+**行為にしないもの**: 音声生成（`lecture-audio/generate` — TTS は bridge で肩代わりできない）/ 読み上げ言語の切り替え
+（画面では音声生成モーダルの中にしかなく、原稿の再生成 → 音声生成のチェーンを起こす。設定モーダルは言語を保持する
+だけ。第 2 周も行為にせず、audio-status の `stale_language` の読みで見る）/ 原稿の一括生成・コース内容生成・
+パイプラインの再実行（LLM を大量に呼ぶ）/ スライドの試聴（音声が無いので 404 になるだけ — 画面の「音声未生成」
+バッジで足りる）/ 図の回収・採用に戻す・キャプション修正（この周の場面に入れない — 次の周の候補）。
+
+#### 実行と投影（`uxsim/runner/studio_exec.py`）
+
+- 画面の状態は `scratch` の `studio_*` と `figure_studio`（モーダル 1 つ分・会話は保存しない）に持つ。コースを
+  切り替えると前のコースの選択・下書き・スタジオを捨てる（`lsSelectCourse` と同じ）。
+- 投影は画面と同じ欄を同じ形で: コースツリー（`lsRenderCourseStructure`）・授業用ドラフトの編集欄と
+  インジケータの文（`lsRenderSlideIndicatorEl`）・スライドカード（`lsRenderSlidesPanel` / `lsSlideAudioBadgeHtml`）・
+  音声生成ボタンの理由（`lsAudioReadinessGuidance`）・つまづき（`lsRenderStumbleSummary`）・図の提案
+  （`lsFigureSuggestionsHtml`）・教材図スタジオ（`_sendTurn` / `_saveFigure`）・学生の講義ボタン
+  （`updateLectureToggleAvailability`）・講義の再生画面（`buildLectureDeck`）。文言は JS の逐語ミラー。
+- **画面が描かない欄は投影にも出さない**: AI 書き換えの `figures_restored`、audio-status の `note`、保存の失敗理由
+  （画面は「保存に失敗しました」だけ）、図の提案の取得失敗（画面は「まだありません」と描く）。審判が読む事実は
+  `HttpTrace.digest` の `studio_split` / `studio_saved` / `studio_rewrite` / `studio_adopt` / `studio_suggestions` /
+  `studio_stumble` / `studio_readiness` / `studio_turn` / `studio_student` / `studio_figure_view` に置く。
+- 近似（`runner_note` に残す）: 教材欄のカーソル位置の代わりに、区切りは段落の境目、図は提案の引用箇所の前（無ければ
+  末尾）に入れる。図の提案の作り直しの確認は続行したものとする。音声の無いトピックで講義を始めようとしたときは
+  sequence を読まずに「押せない」画面を出す（`unsupported_ui_state:`）。
+- 学生の `learning.lecture.sequence` は画面と同じく先に audio-status を読み直す（`refreshTopicAudioStatus`）。
+
+#### 審判（`uxsim/oracles/studio.py`・決定論・DB を読まない）
+
+教員側 T1〜T6（負荷ラベルの生の数 / つまづきの生の数 / 提案の取得失敗を「まだありません」と出す / 書き換えで戻した
+図を言わない / 採用した図がトピックの登録に無い / 保存で音声が消えることを言わない）、学生側 S1〜S3（教材の区画数と
+音声の準備状態のスライド数 / 講義のスライド数と教材の区画数 / 音声が無いのに事実文が無い）、面をまたぐ X1〜X4（スタジオの
+プレビュー枚数と保存後の学生の区画数 / 保存後も音声を用意済みと数える / 採用・保存した図が学生の教材で解決されない /
+学生の図の画像が配信されない — 採用した図なら blocked）。仮説に数を書かない（数は `server_rows` だけ）。
+
+#### 経路と穴
+
+| 経路 | 見るもの |
+|---|---|
+| `t-studio-split-save` | (a) 長いトピックの自動ページ分割 → `===` を 1 つ → 保存 → 音声の準備状態の理由 |
+| `t-studio-rewrite-panes` | (b) 根拠リンク・つまづき → AI 書き換え（保存しない提案）→ 保存するか |
+| `t-studio-figure-adopt` | (c) 図の提案 → 1〜2 ターン → 採用（登録・挿入）→ 保存 → 公開 |
+| `s-studio-lecture-pages` | (d) 教材の図 → 講義ボタン（音声が無ければ押せない）→ 次のトピック |
+
+教員 3 経路は前提 `owns_course` + 種まき `t-v5-register-own-course`（保存・採用はコースの所有者だけ）。穴は
+`domains/astrophysics/scenario_params/` の同名ファイル（分野の語は書かない — トピックは番号・`prefer` で選ぶ）。
+
+#### 運転（面の複雑さ: 中 → 教員 2 × 学生 2・場面 4）
+
+- 第 1 周 `c-r25-studio-r1.yaml`（コース 6be229e1 固定）: te-01 (a)(c) → st-08 (d) / st-07 `s-lecture-then-trace`、
+  te-05 (b)（種まきで自分のコース）。6be229e1 は (c) の最後の公開まで private なので**学生レーンは te-01 の (c) の後**。
+  審判 X1〜X4 は同じ run の te-01 の保存・採用と学生の読みを突き合わせる（学生が te-01 の保存したトピックを開いたときだけ）。
+- 第 2 周 `c-r25-studio-r2.yaml`（コース 1bad7d9f 固定）: te-03 (a)(c)・te-02 (b)（両者とも種まきで自分のコース・
+  コース内容生成なし = 教材本文の無い下書き）× st-01 (d)・st-04 `s-lecture`。教員と学生は交わらない。
+- LLM: 第 1 周 図 1〜3 回 + 書き換え 1 回 + 種まき 2〜3 回、学生のチャット最大 3 回。外部 API は呼ばない。
+- 砂場の前提: TTS が無いので音声の用意されたトピックは無いはず（あれば講義の再生画面が出る）。教員の (a)(c) は
+  6be229e1 の `data` を書き換える（周の後に snapshot から戻す）。
+
+#### 製品側で既に見えている疑い（コードを読んで分かった範囲・仮説）
+
+1. 音声の準備状態（`core/lecture.py::compute_topic_audio_readiness`）と音声生成（`lecture_studio/scripts.py` の
+   `build_topic_slides(topic)`）は図の解決（`figures_by_id`）を渡さずに分割するが、教材表示とレクチャーは図 1 個を
+   200 字換算で分割する。`===` の無いトピックに図を採用すると、音声のスライド番号と表示のスライドがずれ得る（S1）。
+2. 原稿スタジオのトピックのインジケータは本文の生テキスト（`![[equation:…]]` / `![[figure:…]]` 未解決・formulas 空）で
+   問い合わせるので、受講画面の分割（式・図を解決してから数える）と枚数が食い違い得る（X1）。
+3. 学生画面はトピックに音声が 1 枚も無いと「🎙 講義」自体を押せない（`app.js startLecture`）が、マニュアル
+   `student/02-student.md#interactive-lecture` は「音声未生成のスライドは一定時間で次へ進む（読むことはできる）」と書く。
+   音声の無い環境では講義モードに入れない（審判 D の材料）。audio-status の `note` は画面に出ない。
+4. 授業用ドラフトの保存は生成済み音声を消し、監査には「教員には保存前に告知される」と書くが、画面の告知は図の採用の
+   直後だけ（`ADOPT_NOTICE`）。普通の編集 → 保存では何も言わない（T6）。
+5. トピックの AI 書き換えは保存せず欄に反映するだけ（「保存すると確定します」）だが、マニュアル `#assistant-modal` は
+   「その場で保存されます」と書く。`figures_restored` は応答にあるが画面が使わない（T4）。
+6. 書き換え（`_course_data_for_studio_editable`）は共有の editor でも通るが、保存・図の保存・採用は所有者だけ
+   （`course_data_for_owner`）。editor は提案は作れても保存で「保存に失敗しました」（理由なし）になる。
+7. つまづきペインの文書は「選択中のチャンク → 原稿一覧の先頭のチャンク」の文書で、course-structure の応答に `sources`
+   が無いので `lsCoursePrimaryDocumentId` / `lsCourseDocumentIds` は空になる。複数論文のコースで 2 本目以降の論文の
+   トピックを開くと、記録があっても「このトピックの claim には、まだ再構成の記録がありません」になり得る。
+8. 負荷ラベルの語彙: マニュアル `#slide-wm-label` は「低・中・高・最高位」「要素の相互作用: 高」と書くが、製品の
+   段階ラベルは `label_vocab.WM_INTERACTION_DENSITY`（非常に多い / 多い / 少ない）。
+9. 図の提案の取得に失敗しても画面は「このトピックの図の提案はまだありません」と出す（`res.ok ? res.json() : null`）（T3）。
+10. 学生の `GET …/lecture/…/sequence` はチャンク経路で `spoken_text` の無いチャンクに LLM 生成（`generate_spoken_text_and_formulas`）
+    を走らせる（学習者起点の LLM。行為の `llm_cost` は none のまま — トピック教材のあるトピックでは起きない）。
+
+### 22.6 第 1 周の結果（2026-10-22 21:34〜22:01・全 19 レーン完走）と是正の波（10-23）
+
+- 運転: 4 面を並列・面ごとに依存順で直列（§22.1 の型）。製品頭脳 2 体・ペルソナ頭脳は面ごとに 1 体（share は 60 件で 2 体目）。
+  10-22 22:1x に Opus の利用上限で頭脳・審判・是正者 9 体が一斉停止 → 10-23 朝に審判は最初から・是正者は diff の続きから起こし直し。
+- 審判の報告: uxsim/runs/round25/judge_<face>_r1.md（git 管理外）、偽所見: 同じ場所の harness_fixes_<face>.md（git 管理外）。課題は面ごとに IK で起票（番号は
+  並行起票のため面ごとに連番ではない）。
+  - 面 C（atlas）: IK-0846〜0851。根 = 「論文の数」を `documents.id` で数える（TeX/PDF の対が 2 本になり、ギャップ・辺・海の全候補が
+    同じ論文の対の共起で立っていた）/ 海の霧が厚みを上書き / 判断の帰属が出ない / 辺候補に根拠なし / 内部 ID / 「該当なし」と「未調査」が同じ見た目。
+  - 面 B（doubt）: IK-0852〜0860。根 = D層のコース範囲を成果行の `course_id` 列で決めている（コースを作らずに解析した教材では前提の地図・
+    未検証合意・観測系・監査・反実仮想・開幕の「確かめていないこと」が全部空）/ 空の理由を画面が捨てる / 反実仮想の warnings 非表示 /
+    台帳対象の id が画面ごとに違う / 「この分野の未検証の前提」（SL1 違反）/ コース単位ルートの権限ゲート / ブリーフの一点吊りの重複 /
+    コースビルダー 2 往復目以降に構成案が渡らない / 要約の切り詰めが投影の前。
+- ハーネスの共通の直し（面 C の H7）: 直前の操作が HTTP エラーか blocked のときは頭脳に反応だけを先に聞き、行き詰まりなら行為を選ばせずに
+  場面を終える（`scene_stopped:`）。頭脳ノートの seq は transcript の seq。
+- **オーナー判断の候補（推奨どおり進めた・後から覆せる）**: D層の「コース範囲」の正本を `course_id` 列から「コースの教材から求めた
+  document 集合」へ切り替える（IK-0852・推奨 = 切り替え。`course_id` 列は記帳の出所の意味に退く。コースごとに別の台帳が要るなら別の層を設計する）。
+
+- **オーナー判断の候補（追加・いずれも推奨どおり進めた）**:
+  - 面 A（IK-0861）: C層の説明の権限単位を部品の `course_id` から document 単位に揃える。学生へは「承認済みかつ共有 ON」の説明だけを
+    コース横断で出し、共有 OFF は書いたコースの学生だけ。ある教員の独自解釈が同じ論文を使う別コースの学生に届きうる（人の権利・後戻り
+    しにくい構造）。推奨 = 揃える・`course_id` は出所として残す。
+  - 面 D / 面 C（IK-0873 / IK-0850）: 教員向け表示投影（DP7）の範囲を編集画面まで広げるか。推奨 = 編集可能な本文には掛けず、
+    原稿スタジオ・分野の地図タブの読み取り専用の区画（根拠・注記・確認文・来歴）だけを `project_for_teacher` に通す。
+  - 面 C（IK-0846）: 同じ arXiv 論文の重複取り込みをアップロード時に拒否するか。推奨 = v1 では拒否せず「論文の数」の数え方だけを直す
+    （PDF / TeX の対を並べて比べる用途が uxsim にある）。
+
+### 22.7 第 2 周の準備と運転（2026-10-23 06:5x〜）
+
+- 是正後の作業ツリー（第 1 周の IK-0846〜0883 の是正・ハーネスの偽所見 H1〜H10 × 4 面）を全件テスト緑（backend / src / uxsim）で
+  砂場へ docker cp → 学生の痕跡 reset → ベクトル索引を 1 回構築（embedding 1 バッチ・59 ノード）→ te-05 に 1bad7d9f の、
+  te-02 に 6be229e1 の editor 共有（所有者がグループを作り招待コードで参加 → コース共有 API。すべて製品の API）→ snapshot
+  `corpus-astro-tex-r25a`。
+- 是正の効果の実測（周の前）: ギャップ候補は 1 → **0**（IK-0846 の是正で TeX/PDF の対が 1 本に数えられ「2 本以上」を満たさなくなった。
+  第 2 周の (a') は空の表示を読む場面になる）。辺候補は 18 → **123**（索引ができたのでアンカー近傍由来の候補が立った。多すぎる
+  候補一覧をどう読ませるかは第 2 周の所見で見る）。
+- レーン: 面 A / B / C を並列（学生の固定コース 1bad7d9f は public のまま）。面 D は `pin_course --yes` で 1bad7d9f を private に
+  するため、**3 面の後に**回す（campaign の順: te-01 (a)(c) → st-08 (d) → te-02 (b)(b') → st-07 は IK-0879 是正済みなので回す）。
+- 製品頭脳は Q0 / Q1（前周の残骸 = created_at が周の前の未応答には応えない）。ペルソナ頭脳は面ごとに 1 体（BRAIN_NOTES_<face>_r2.md・git 管理外）。
+
+### 22.8 第 2 周の結果（2026-10-23 06:57〜・面 A / B / C は 07:21 までに完走・面 D は 07:21〜）
+
+- **GONE（第 1 周の是正が効いたもの・頭脳と審判の実測）**: 面 B = コースを作らずに解析した教材から組んだコースでも前提の地図・
+  未検証合意・学生の一行が空にならない（IK-0852 の根の是正）/ ブリーフの内部キーと重複が消えた。面 A = 教材の ⚓ が 30 個 → 3 個・
+  記号 F_EOS の定義が出る・同じ字形の断り・部品の文脈の内部 ID と方針語が消えた・候補ゼロの事実文と出口・ライブラリの更新者 / 版の
+  表示語・関係を名前で記録・原稿スタジオの説明一覧の 404 が事実文に。面 C = 候補・一覧・学生の位置から重複論文が消えた・未受講コースの
+  404 が受講の事実文に・区画の空状態文・番号の固定・影響ゼロの一文。
+- **偽所見の型（新）= 投影の遅れ**: 製品の是正波で API の新キー / JS の表示が変わっても、ハーネスの投影が旧キーを読み続け、頭脳が
+  STILL と誤判定する（面 C の霧・判断の帰属・出所トークン = H10〜H12、面 A の一覧の更新者 / 版）。**是正波の後・周の前に「投影の同期」
+  を 1 工程として置く**（第 2 周の途中から `sync-projections` 係が 4 面を順に写している。記録 = uxsim/runs/round25/projection_sync_r2.md）。
+- **NEW（第 2 周で初めて見えた根）**: 面 C = 採用済みの判断行が読み時導出の候補から外れても凍結ゲートに残り、画面のどこにも出ない
+  （IK-0884。IK-0846 の是正の副作用）/ 凍結の可否を freeze と freeze-impact が別々に判定（IK-0885）/ 索引後にアンカー近傍の辺候補が
+  大量に同じ段階で立つ（IK-0887）。面 A = 共通部品の検索が run の cartridge_id だけで分野を決め、分野を指定せずに解析した教材では
+  後退も出口も無い / 独自解釈の追加が理由なく失敗。面 B = 台帳の target_id がグラフノード id で document をまたいで衝突する疑い
+  （別の論文を指定しても別の論文の台帳・反実仮想が別の論文の観測文を引く）/ 閲覧のみの教員が他人の教材の台帳に書ける / 内部 ID を
+  遮断した後の表示名が無く「（本文を特定できない要素）」が並ぶ。
+- 面 C の第 2 周の課題 = IK-0884〜0889（是正中）。面 A / B / D の第 2 周の審判は進行中。
+- 面 A の第 2 周の課題 = IK-0890〜0898（是正中）。面 B の第 2 周の課題 = IK-0899〜0907（是正中）。
+- **オーナー判断の候補（追加・推奨どおり進めた）**: 面 B（IK-0899）= `epistemic_ledger` の行キーを (document_id, target_type, target_id)
+  に切り替える（グラフノード id・式 id が論文をまたいで 1 行に衝突し、教員の記帳が別の論文に出る・学生の地図の札も衝突行を読む）。
+  推奨 = 切り替え。人の記帳が入った既存の衝突行は自動で振り分けず現在の論文に残し、教員に確認を促す事実文。代案（target_id に論文の
+  名前空間を前置）は付け忘れが再発の入口になるので採らない。
+- 面 D の第 2 周の課題 = IK-0908〜0915（是正中）。面 D の頭脳の STILL 4 件（根拠の状態・分割の notes・音声ゼロの講義・ヘッダの
+  チャンク数）は投影の遅れ（H11）で、生応答と製品コードでは GONE。
+- **オーナー判断の候補（追加・推奨どおり進めた）**: 面 D（IK-0872 / 0880）= 保存済みの決定論付録を読み時に付け直すか。推奨 =
+  付け直さない（配信済みのスライド境界と音声キャッシュの番号が動くため）。代わりに原稿スタジオに「付録を付け直す」明示の操作
+  （音声の作り直しを事前に言う）と G層の道案内を置く。
+
+### 22.9 第 3 周の準備（2026-10-23 11:5x〜）
+
+- 第 2 波（第 2 周の是正・IK-0884〜0915）を全件テスト緑（backend / src / uxsim）で砂場へ。順は **snapshot r25a を復元 → docker cp →
+  restart（migration 091 = 説明の course_id を NULL 許容 / 092 = 台帳の行キーに document_id）**。092 は旧キーの衝突行に印を立てるが、
+  r25a には人の記帳が入った衝突行が無く 0 件。
+- 投影の同期（第 2 波分）を周の前の工程として置いた（`uxsim/runs/round25/sync_keys_wave2.md` → `projection_sync_wave2.md`・git 管理外）。
+- 前提（campaign の notes どおり・すべて製品の API）: te-02 に PINN の TeX / PDF の editor、te-05 と te-02 に Cepheus の editor、
+  te-04 に 6be229e1 の editor、te-04 が Cepheus の配置を 1 件確認（`PATCH /api/admin/landscape/placements/{id}`）→ snapshot `corpus-astro-tex-r25b`。
+- レーン: 面 A / B / C を並列 → 面 D は後（pin_course が 1bad7d9f を private にし、te-04 の書き換えが 1bad7d9f の教材に触れ得るため）。
+  第 3 周の組は campaign `c-r25-<face>-r3.yaml`（第 1・2 周と別のペルソナ × 場面）。
+
+### 22.10 第 3 周の結果（2026-10-23 12:27〜16:2x・3 回目の利用上限で面 B / C の後半を 16:02 から再演）
+
+- 面 A: 第 1・2 周で止まっていた経路が初めて通った（分野選択 → 共通部品の検索 → TeX 側の同一性リンク作成・確定 → 学生の
+  「共通部品として」に到達、独自解釈の追加・共有 ON・承認・引用も到達）。GONE = IK-0890〜0894 / 0896 / 0897 / 0864 / 0866。
+  新規 IK-0916〜0929（PDF 版と TeX 版の部品の組が名前で結べない・同一性リンクの行に型名と UUID・粒度の違う組を確定できる・確定リンクの
+  読み手が未配線・Copilot の誤ルーティング・著者の自己承認が別コースの学生に届く・標準説明が更新されない 等）。
+- 面 B: st-04 の英語の問いが HELP に誤ルーティングされなくなった（GONE）。地図の札 → AI → 地図の循環案内、前提一覧が導出 step を
+  並べる、英語回答への日本語の段名の混入。審判は進行中。
+- 面 C: GONE = 凍結の影響が止めている 2 件を名指し・[公開できません] 押せない・候補の側に「条件から外れた採用済みの判断」区画・
+  判断の帰属・海の濃淡・縁の重複・索引の結果 1 文。STILL = 辺候補と糸が「かなり近い」一色・採用済みの関係が畳みに埋もれる。
+  NEW = L1 の霧と海の濃淡と L2 の食い違い・反映直後に何を反映したか分からない・日本語文が逐語引用。精読の te-03 は原文で確かめ
+  られない 2 件を取り込まず凍結を保留（妥当な判断）。審判は進行中。
+- **オーナー判断の候補（追加・推奨どおり進めた）**: 面 A（IK-0926）= 支持の数から著者本人を除き、コースをまたいで学生に届けるには
+  著者以外の教員の査読承認を要件にし、学生向けの段階ラベルの定義を制度指標カタログに宣言する（改訂原則 4 / 1）。
+  面 A（IK-0917）= 同一性リンクに「使う・課す」の種類は足さず、確定画面で両側の意味を照合させる。
+- 面 B の第 3 周の課題 = IK-0930〜0936（主張参照の ID 取り違えで支える主張が常に空 / 行の無い対象の台帳 GET が 404 / D層の一覧が
+  導出 step で埋まる / 学生の地図にスコープが出ない / 台帳の見出しに論文名なし / 複数論文の開幕の前提の振り分け / 英語の地図の問いが
+  HELP の固定文で終わる）。GONE = IK-0899 / 0903 / 0905 / 0853 / 0854。疑義 → 提案 → 取り下げは 3 周とも未成立（根 = IK-0930）。
+- **オーナー判断の候補（追加・推奨どおり進めた）**: 面 B（IK-0932）= 学生にスコープ（検証の条件）をどこまで見せるか。推奨 = 状態が
+  直接検証・間接的な支持・反証のときだけ成立条件と領域を 1 行添える（根拠の逐語・記帳者・数値は出さない）。
+- 面 C の第 3 周の課題 = IK-0937〜0943（外れた採用済み候補に根拠が出ない / 採用済み・反映済みの関係が近さ順に埋もれる / 確認と
+  凍結の影響に帰属と根拠が写らない / コースの地図 L1 が配置があっても全領域「霧」（IK-0847 は海の側だけ直していた）/ 海の円が
+  「霧の領域」を名乗る / 版の呼び名の不揃い / 候補ゼロでも見出しが断言）。GONE = IK-0884 / 0885 / 0886 / 0888 / 0889 / 0850 / 0851 / 0846 / 0847。
+- **オーナー判断の候補（追加・推奨どおり進めた）**: 面 C（IK-0940）= 霧の被覆に生きている配置（確認済み・推定）を足し海と同じ判定に。
+  面 C（IK-0848 残り）= 人に見せる名前とログイン名はアカウント層で別に持つまで現状維持。面 C（IK-0939）= 他の教員の採用を凍結する
+  教員が戻せるままにし、他人の採用を戻すときは理由を必須にして監査に残す。面 C（IK-0937 v2）= 外れた判断の根拠の写しを判断行に持つのは
+  実例が出てから。
+- 面 D の第 3 周の課題 = IK-0944〜0952（講義の 2 枚目以降で式が 1 つずつ入れ替わる（重）/ 非公開になった受講中コースの入場判定が
+  画面ごとに食い違う / 1 枚の読む表示に `===` が生で出る / 空のトピックに事実文がない / 書き換えの注意点に教員宛てメモと内部 ID /
+  自作の図が根拠候補に並ぶ / 共有教員への知らせの矛盾 / 題名の生 TeX / 内部語と章番号の二重）。GONE = IK-0908 / 0910 / 0911 / 0879 /
+  0875 / 0876。学生 2 本は固定コースを見ていない（te-03 の公開と pin_course の非公開化 — H21）ので S1〜S3 / X1〜X4 は今周も評価外。
+- **オーナー判断の候補（追加・推奨どおり進めた）**: 面 D（IK-0945）= 受講中のコースが非公開になっても既存の受講者は読み続けられる。
+  新規の受講開始だけ止め、一覧に事実文を出す。
+
+### 22.11 第 4 周の準備（2026-10-23 21:1x〜）
+
+- 第 3 波（IK-0916〜0952）を全件テスト緑（backend 20,048 / src 2,420・変更 JS 13 本は esprima で parse）で砂場へ。順は snapshot r25b 復元 →
+  docker cp → restart。投影の同期（第 3 波分）は面 A〜C 済み・面 D を同期中。
+- 前提（製品の API）: te-05 に PINN TeX / PDF の editor、te-03 に Cepheus の editor と 1bad7d9f の editor、te-05 に 6be229e1 の editor、
+  te-02 が Cepheus の主グラフ先頭ノードにスコープ 1 件（閲覧だけの教員の「行のある対象」を確かめる前提）→ snapshot `corpus-astro-tex-r25c`。
+- 第 4 周の組は `c-r25-<face>-r4.yaml`（第 1〜3 周と別・学生の講義は `pin_course: true` で runner が固定し `pin_course.py` を使わない）。
+  面 D の学生レーンは面 C の凍結（`LANE_DONE_R4`）を待つ。

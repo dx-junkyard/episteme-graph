@@ -157,6 +157,20 @@ def check(steps: list[TranscriptStep], factory: FindingFactory, llm: Optional[Pe
         severity = ("blocked" if g.reason == "consecutive_failures" or g.reason.startswith("trace_break:")
                     else FRICTION_SEVERITY[g.reason.split(":", 1)[1]])
         hypothesis = _deterministic_hypothesis(g)
+        if g.reason.startswith("friction:") and all(_precondition_only(x) for x in g.steps):
+            # 第 25 周 H1: HTTP を出さず precondition で終わった手への詰まりは runner の状態の穴。画面の文として
+            # 読まれた「内部語」を製品の欠陥に数えない（LLM 審判にもかけない）
+            names = sorted({(t.error or "").split(":", 1)[1] for x in g.steps for t in x.http
+                            if (t.error or "").startswith("precondition:")})
+            hypothesis = (f"ハーネス: {s.action_id} は runner が対象（{', '.join(names)}）を画面の状態から解決できず、"
+                          "行為が行われなかった。この詰まりは製品の画面への反応ではない")
+            out.append(factory.make(oracle="C", severity=severity, step=s, hypothesis=hypothesis,
+                                    quote=s.think.gave_up_reason or s.think.reaction,
+                                    steps=[x.seq for x in g.steps], fingerprint_key=f"harness|{cause_key(g)}",
+                                    server_rows={"occurrences": [{"persona_id": s.persona_id, "session": s.session,
+                                                                  "steps": [x.seq for x in g.steps]}],
+                                                 "hypotheses": [hypothesis]}))
+            continue
         verdict = judge(g, llm) if llm is not None else None
         if verdict is not None:
             if verdict["verdict"] == "principled_refusal":

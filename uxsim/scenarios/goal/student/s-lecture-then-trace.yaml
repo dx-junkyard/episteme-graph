@@ -3,6 +3,8 @@ population: students
 runner:
 - api
 - browser
+# 第 25 周 第 4 周（studio H21）: 同名の別コースではなく campaign の固定コースで歩く
+pin_course: true
 goal: '{{goal_text}} のために、{{topic_hint}} のレクチャーを聴き、分からない箇所で止めて記号→⚓→質問と辿る'
 params_required:
 - goal_text
@@ -23,6 +25,13 @@ steps:
 - do: learning.lecture.audio_status
 - do: learning.lecture.sequence
   note: 最初から聴く
+# 第 25 周 第 4 周（studio H16 の残り）: 講義はスライドを 1 枚ずつ出す。分からない式に当たるまで ▶ で送る
+- repeat:
+    until: persona_decides_to_stop or steps > 4
+    max: 4
+    steps:
+    - do: learning.lecture.next
+      note: ▶ で次のスライドへ送る（スライドの式が教材の式と同じ表示か）
 - do: learning.symbol.lookup
   with:
     symbol: '{{symbol_hints | next}}'
@@ -37,6 +46,12 @@ steps:
       message: '{{interrupt_questions | next}}'
 - do: learning.lecture.sequence
   note: 続きから聴く
+- repeat:
+    until: persona_decides_to_stop or steps > 8
+    max: 8
+    steps:
+    - do: learning.lecture.next
+      note: 最後まで ▶ で送る（音声の無いスライドのタイマー送りの終端・止めた位置から再開できたか）
 stop_when:
 - gave_up
 - blocked

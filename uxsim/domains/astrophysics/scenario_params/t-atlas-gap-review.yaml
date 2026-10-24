@@ -1,0 +1,18 @@
+scenario: t-atlas-gap-review
+domain: astrophysics
+params:
+  domain_hint: astrophysics
+  accept_hint: "1"
+  dismiss_hint: "2"
+  dismiss_reason: 既存の領域の言い換えで、地図に新しい項目として立てるほどの主題ではないため
+personas:
+  te-03-meticulous-seminar:
+    dismiss_reason: 触れている論文の逐語を読むと、既存の概念の一部を言い換えたもので、独立した項目にはならないため
+  te-01-rookie-seminar:
+    dismiss_reason: 地図の他の項目と重なって見えるため、いまは立てない
+  te-05-delegator-lab:
+    # 第 3 周: 候補ゼロの理由の一文（IK-0851）と、導出から外れた採用判断の別枠（IK-0884）を読む
+    dismiss_reason: 今は立てない
+  te-02-veteran-intro:
+    # 第 4 周（judge_atlas_r3 §5）: 外れた判断の別枠を根拠付きで読み（IK-0937 の是正後）、ベテランが戻す・取り込むを決める
+    dismiss_reason: 既存の項目の言い換え。立てない

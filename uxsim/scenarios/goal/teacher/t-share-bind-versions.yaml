@@ -1,0 +1,67 @@
+id: t-share-bind-versions
+population: teachers
+runner: [api]
+preconditions:
+  - このペルソナは対象の教材の編集権限（editor 共有）を持つ（同一性リンクの作成・確定は教材単位の編集権限を要する。無ければ作成は 404 になり、それ自体を所見として読む）
+# 第 25 周 share (a') — 確定のある経路を教員が自分で作る主経路。同じ論文の TeX 版と PDF 版の同じ部品を、
+# 白紙から作ったライブラリの共通部品に結び付け、1 本を確定し 1 本を確定するか却下する。
+goal: '{{goal_text}} のために、同じ論文の TeX 版と PDF 版に出てくる同じ部品を、ナレッジライブラリの共通部品として結び付ける'
+params_required: [goal_text, material_hint, component_hints, part_name, part_aliases, part_summary, search_text, link_reason, second_decision, copilot_questions]
+steps:
+  - do: auth.login
+  - do: admin.library.entries
+    note: ナレッジライブラリタブで、同じ部品がすでに登録されていないかを先に見る
+  - do: admin.library.entry_create
+    with: {name: '{{part_name}}', aliases: '{{part_aliases}}', summary: '{{part_summary}}', entry_type: theory_component}
+    note: 無ければ「新規エントリ作成」で共通部品を白紙から登録する（draft のまま）
+  - do: admin.deliberation.identity_open
+    with: {material_hint: '{{material_hint}}', format_hint: tex, component_hint: '{{component_hints | next}}'}
+    note: TeX 版の教材のグラフレビュー（主グラフに無ければ教材行の［検出要素］）から部品を選んで「深く検討」を開き、同一性リンクの区画を読む
+  - do: admin.deliberation.shared_part_search
+    with: {q: '{{search_text}}'}
+    note: 「共通部品と結びつける」で、いま作った共通部品を探す
+  # 第 25 周 第 2 波（IK-0890）: 分野を 1 つに決められない教材では「探す分野:」の選択欄が出る。選ぶと domain_key 付きで探し直す
+  - choose:
+      - {do: admin.deliberation.shared_part_domain, with: {domain_hint: '{{domain_hint}}'}}
+      - {do: admin.deliberation.shared_part_search, with: {q: '{{search_text}}'}}
+    optional: true
+  - do: admin.deliberation.identity_link_create
+    with: {reason: '{{link_reason}}'}
+    note: 見つかれば「この部品と結びつける（候補を作成）」
+  - do: admin.deliberation.identity_link_decide
+    with: {decision: confirm}
+    note: 自分で作った候補を確定する
+  - do: admin.deliberation.identity_open
+    with: {material_hint: '{{material_hint}}', format_hint: pdf, component_hint: '{{component_hints | next}}'}
+    note: PDF 版の教材で同じ部品を開く
+  - do: admin.deliberation.shared_part_search
+    with: {q: '{{search_text}}'}
+  - choose:
+      - {do: admin.deliberation.shared_part_domain, with: {domain_hint: '{{domain_hint}}'}}
+      - {do: admin.deliberation.shared_part_search, with: {q: '{{search_text}}'}}
+    optional: true
+  - do: admin.deliberation.identity_link_create
+    with: {reason: '{{link_reason}}'}
+  - do: admin.deliberation.identity_link_decide
+    with: {decision: '{{second_decision}}'}
+    note: PDF 版の部品の表記を読み、同じと言えるなら確定・言えないなら却下する
+  - do: admin.library.identity_candidates
+    note: ナレッジライブラリに戻り、同一性の候補に何が並ぶかを見る
+  - do: admin.library.entry_open
+    with: {entry_hint: '{{part_name}}'}
+    note: 共通部品を開き、扱い（確定か候補か）と 4 区画を読む
+  - do: admin.copilot.chat
+    with: {message: '{{copilot_questions | next}}', tab: knowledge-library}
+    note: 確定すると学生の画面で何が見えるようになるかを Copilot に聞く（答えの出所と画面の区画が合っているかを見る）。
+      第 25 周 第 3 周から必須の 1 手（judge_share_r2 §5 = H21。任意の 1 手だと頭脳が飛ばし、IK-0865 の確認が成立しなかった）
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: teacher/19-admin-knowledge-library.md#new-entry-btn
+  - manual: teacher/24-admin-deliberation.md#identity-link-create
+  - manual: teacher/24-admin-deliberation.md#identity-link-decide
+watch_for:
+  - 共通部品の検索で、いま作った部品が見つかる（見つからないなら、見つからない理由が事実文で分かる — 分野が特定できない等）
+  - 作られるのは候補だけで、確定は別の 1 操作
+  - リンクの行に論文の内部 ID・英語の要素型が出ない（出るならそれが見える）
+  - 却下したリンクは消えずに「却下」として残る
+  - 共通部品のエントリが「候補」のままでも学生に届かないことが画面から読める

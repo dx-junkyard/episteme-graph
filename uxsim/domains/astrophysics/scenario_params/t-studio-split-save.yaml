@@ -1,0 +1,15 @@
+scenario: t-studio-split-save
+domain: astrophysics
+params:
+  goal_text: 来週の講義の前に、長いトピックの授業用ドラフトを受講画面で見やすい枚数に区切り、保存して音声の準備状態を確かめる
+  marker_paragraph: 2
+  spoken_append: ここで一度区切ります。次のスライドでは、いまの式から何が言えるかを見ます。
+per_archetype:
+  rookie_follows_todo:
+    goal_text: 「次にやること」に出ていた原稿の準備として、長いトピックを区切って保存し、音声を作れる状態かを確かめる
+  delegator:
+    goal_text: 細かい作業は任せたいが、受講者に届く前に長いトピックだけは区切って保存し、音声の準備がどうなっているかだけ把握しておく
+  meticulous_reviewer:
+    goal_text: 区切りを入れたときに表示と読み上げの枚数がずれないか、保存で何が起きるかを一つずつ確かめながら長いトピックを整える
+  veteran_clicks_through:
+    goal_text: 長いトピックに区切りを一つ入れてさっさと保存する。音声のことは後で考える

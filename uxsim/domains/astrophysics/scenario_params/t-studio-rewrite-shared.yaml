@@ -1,0 +1,14 @@
+scenario: t-studio-rewrite-shared
+domain: astrophysics
+params:
+  goal_text: 同僚から共有されたゼミのコースで、先頭のトピックの授業用ドラフトを AI に分かりやすく書き換えてもらい、残せるかを確かめる
+  shared_course_id: 6be229e1
+  rewrite_prompt: 修士1年が初めて読む前提で、式の意味を一言ずつ添えて、段落を短くしてください。式と図の埋め込みは消さないでください。
+per_archetype:
+  veteran_clicks_through:
+    rewrite_prompt: 段落を短くして読みやすくしてください。
+personas:
+  te-05-delegator-lab:
+    # 第 4 周（judge_studio_r3 §5）: editor の書き換えの知らせと案の持ち出し（IK-0950 の是正後）・書き換えの注意点（IK-0948）・
+    # 根拠の配分（IK-0909 の残り）
+    rewrite_prompt: 院生向けに段落を短くし、式ごとに何を決める式かを一言添えてください。式と図の埋め込みは消さないでください。

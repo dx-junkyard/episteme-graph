@@ -61,8 +61,10 @@ def test_personal_map_empty_state_and_course_list_headings():
                {"id": "c2", "title": "まだのコース", "is_enrollable": True}]
     obs = project_observation("learning.course.list", 200, courses)
     lines = obs.splitlines()
-    assert lines.index(f"{COURSE_GROUP_MINE}:") < lines.index("- 受講中のコース id=c1")
-    assert lines.index(f"{COURSE_GROUP_ENROLLABLE}:") < lines.index("- まだのコース id=c2")
+    # 第 25 周 H23（atlas）: id= は投影の印なので出さない（表示順の番号と題名だけ）
+    assert lines.index(f"{COURSE_GROUP_MINE}:") < lines.index("1. 受講中のコース")
+    assert lines.index(f"{COURSE_GROUP_ENROLLABLE}:") < lines.index("2. まだのコース")
+    assert "id=" not in obs
     assert "（受講可能）" not in obs
 
 

@@ -1,0 +1,48 @@
+id: t-share-identity-queue
+population: teachers
+runner: [api]
+preconditions:
+  - 砂場（corpus-astro-tex-r23）は解析パイプラインの同一性の候補づくりを 4 本の TeX 教材で通した状態で、候補は 0 件（指揮者の実測 2026-10-22）。候補が立つのは同じ周の t-share-bind-versions 以降
+# 第 25 周 share (a)。同一性の候補を読み、根拠が分かるものだけ確認し、分からないものは理由を書いて見送る。
+# 候補ゼロなら、ゼロであることの事実文を読む場面になる（それ自体が見るもの）。
+goal: '{{goal_text}} のために、ナレッジライブラリの「同一性の候補」を読み、根拠が分かる結び付きだけ確認し、分からない候補は理由を書いて見送る'
+params_required: [goal_text, dismiss_reason, copilot_questions]
+steps:
+  - do: auth.login
+  - do: admin.library.identity_candidates
+    note: ナレッジライブラリタブを開き、上部の「同一性の候補」を読む（候補が無ければ無いことの文を読む）
+  - choose:
+      - do: admin.library.identity_link_decide
+        with: {decision: confirm}
+        note: 支持する論文の題名と表記から同じ部品だと分かる結び付きを［確認］する
+      - do: admin.library.identity_link_decide
+        with: {decision: reject, reason: '{{dismiss_reason}}'}
+        note: 根拠が読めない結び付きを［見送り］にする（理由の欄があるかを見る）
+    optional: true
+  - choose:
+      - do: admin.library.entry_review
+        with: {status: confirmed}
+        note: 結び付きを読んだうえで概念そのものを［確定］する
+      - do: admin.library.entry_review
+        with: {status: dismissed, review_note: '{{dismiss_reason}}'}
+        note: 同じものと言えない概念を理由を書いて［見送り］にする
+    optional: true
+  - do: admin.library.identity_candidates
+    with: {include_dismissed: true}
+    note: 見送りにしたものも含めて読み直し、判断が状態で残っているかを見る
+  - choose:
+      - do: admin.document_share.open
+        note: この候補の元になった論文の教材の行で「共有」を開き、誰と解析成果を共有しているかを読む
+      - do: admin.copilot.chat
+        with: {message: '{{copilot_questions | next}}'}
+        note: 候補の確定・見送りが学生から何として見えるかを聞く
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: teacher/19-admin-knowledge-library.md#identity-candidates
+  - manual: teacher/19-admin-knowledge-library.md#entry-review
+watch_for:
+  - 候補が無いとき、無いことが 1 つの事実文で出る（同じ意味の文が二重に並ばない）
+  - 候補には支持する論文の題名が並び、件数や一致度の数値・論文の内部 ID が出ない
+  - リンクの［見送り］と概念の［見送り］で理由の扱いが揃っている（片方だけ理由の欄が無いなら、それが見える）
+  - 見送ったものは消えずに「見送り」の状態で残り、読み直すと理由が見える

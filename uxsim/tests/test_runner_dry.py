@@ -150,13 +150,21 @@ def test_prefetch_falls_back_to_first_enrollable():
             return httpx.Response(200, json=[{"id": "c7", "is_enrollable": True}, {"id": "c8", "is_enrollable": True}])
         if request.url.path == "/api/learning/courses/c7":
             return httpx.Response(200, json={"master_course": {"id": "c7", "topics": [{"id": "a"}]}})
+        if request.method == "POST" and request.url.path == "/api/learning/courses/c7/enroll":
+            enrolled.append("c7")
+            return httpx.Response(200, json={"id": "c7", "enrolled": True, "notice": "受講を始めました。"})
         return httpx.Response(404, json={})
 
+    enrolled: list[str] = []
     client = EpistemeClient("http://sandbox.test", transport=httpx.MockTransport(handler))
     s = PersonaSession(persona_id="st-1")
     _, notes = prefetch_courses(s, client)
     assert s.course_id == "" and s.scratch["default_course_id"] == "c7"
     assert any("受講登録はしていない" in n for n in notes)
-    execute("learning.course.open", {}, s, client)
+    traces = execute("learning.course.open", {}, s, client)
+    # 第 25 周 H6: 製品と同じく、受講可能なコースは受講登録してから開く
+    assert enrolled == ["c7"] and [t.method for t in traces][:2] == ["POST", "GET"]
     assert s.course_id == "c7" and s.topic_id == "a"  # in_progress が無ければ先頭
+    assert any("[受講する]を押してから開いた" in n for n in s.scratch["runner_notes"])
+    assert s.scratch["observation_notes"] == ["受講を始めました。"]
     assert any("topic_id=a" in n for n in s.scratch["runner_notes"])

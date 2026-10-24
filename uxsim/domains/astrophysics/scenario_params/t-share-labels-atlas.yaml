@@ -1,0 +1,18 @@
+scenario: t-share-labels-atlas
+domain: astrophysics
+params:
+  goal_text: 論文ごとの呼び方の違いを概念の別名として残し、分野の地図のどこに当たるかを記録すること
+  domain_key: astrophysics
+  entry_hint: TOV
+  alias_label: Tolman–Oppenheimer–Volkoff 方程式
+  hidden_label: TOV eq.
+  relation_kind: related
+  relation_object_hint: 状態方程式
+  relation_object_summary: 圧力とエネルギー密度の関係。TOV 方程式に与えると質量と半径の関係が決まる。
+  dismiss_reason: 骨格のこのノードは観測の手法の領域で、この部品の理論の内容とは対応しないため
+personas:
+  te-05-delegator-lab:
+    dismiss_reason: 対応の根拠が画面から読めないため保留として見送る
+  te-02-veteran-intro:
+    # 第 3 周: 第 2 周に te-05 が足した別名が残った砂場で、同じ別名を足し直す（IK-0897 の outcome の書き分け）
+    dismiss_reason: 領域が違う

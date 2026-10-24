@@ -1,0 +1,21 @@
+scenario: t-db-assumption-review
+domain: astrophysics
+# 第 25 周・面 B (a)。コースは前提の地図タブのコース選択（GET /api/admin/courses = 自分が所有・共有されたもの）から選ぶ。
+# te-02 / te-03 は砂場でコースを所有しないので、経路の前提 owns_course の種まき t-v5-register-own-course で作る。
+# 候補の番号は前提候補の一覧（作成順）の番号。候補の文面は監査の結果次第なので番号で指す（ペルソナが読んで選び直してよい）。
+params:
+  goal_text: ゼミで扱う論文が暗黙に置いている前提を、根拠を読んで引き受けるかどうか決めること
+  course_hint: ""
+  confirm_pick: "1"
+  confirm_reason: 出所の逐語を読み、この導出が明示せずに依存している前提だと判断した。
+  dismiss_pick: "2"
+per_archetype:
+  veteran_clicks_through:
+    confirm_reason: 妥当。
+personas:
+  te-04-copilot-intro:
+    course_hint: 1bad7d9f
+  te-05-delegator-lab:
+    # 第 25 周 第 4 周（judge_doubt_r3 §4）: 前提の地図・合意リストの母集合が前提・主張で埋まるか（IK-0933）、確定した前提の
+    # 台帳の見出しに論文の題名と段の日本語名が出るか（IK-0934・IK-0901 残り）。コースは te-05 自身のコース（一覧の先頭）
+    confirm_reason: 出所の逐語どおり、この導出が書かずに使っている前提。院生にも確認させる。

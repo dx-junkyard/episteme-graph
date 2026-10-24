@@ -1,0 +1,83 @@
+id: t-atlas-draft-freeze
+population: teachers
+runner: [api, browser]
+goal: "索引を作り直してから、採用済みの候補と関係を次版の下書きに反映し、凍結の影響と前の版のノードとの対応を確かめて凍結する（学習者の地図の版が上がる）"
+params_required: [domain_hint, accept_hint, edge_accept_hint, edge_kind, freeze_version, freeze_note, correspondence]
+steps:
+  - do: auth.login
+  - do: admin.atlas.open
+    with: {domain_hint: "{{domain_hint}}"}
+  - do: admin.atlas.vectors.status
+  - do: admin.atlas.vectors.refresh
+    note: 索引を作り直す（embedding を呼ぶ。この周で 1 回だけ）。結果の事実文を読む
+  - do: admin.atlas.gaps.list
+    note: 索引を作り直したあとの近い既存項目の注記を読む
+  - choose:
+      - {do: admin.atlas.gaps.accept, with: {gap_hint: "{{accept_hint}}"}}
+      - {do: admin.atlas.gaps.list}
+    optional: true
+  - do: admin.atlas.gaps.draft_from_frozen
+    note: 次版の下書きを作る（既にあればそれを使う）
+  - do: admin.atlas.gaps.incorporate_preview
+  - do: admin.atlas.gaps.incorporate_apply
+    note: 確認の内容で下書きに追加する（骨格を書くのはこの保存だけ）
+  - do: admin.atlas.edges.list
+  - choose:
+      - {do: admin.atlas.edges.accept, with: {edge_hint: "{{edge_accept_hint}}", kind: "{{edge_kind}}"}}
+      - {do: admin.atlas.edges.list}
+    optional: true
+  - do: admin.atlas.edges.incorporate_preview
+  - do: admin.atlas.edges.incorporate_apply
+  # 第 25 周 第 3 周（judge_atlas_r2 §5 = IK-0886 / IK-0887 の確認）: 反映した関係の札が「下書きに入っています」と読めるか、
+  # 近さ順・上限・「ほかにもあります」の畳み・根拠の有無で残りの候補を読み分けられるかを、凍結の前にもう一度一覧で見る
+  - do: admin.atlas.edges.list
+    note: 反映した関係が下書きに入ったと読めるか・残りの候補が近さ順に並び、全件が出ないときはそう言われるかを読む
+  - do: admin.atlas.freeze_impact
+    with: {version: "{{freeze_version}}"}
+    note: 凍結の影響と前の版のノードとの対応の候補を読む。止める条件（採用済みで未反映の候補・関係）と関係の増減を、
+      押す前に言うかを確かめる（IK-0885）
+  # 第 25 周 第 2 波: 止める条件があれば「公開できません」と［止めている候補を見る］が出る。候補の区画で外れた判断を取り込む
+  - choose:
+      - {do: admin.atlas.freeze_blocked_goto}
+      - {do: admin.atlas.gaps.orphaned_incorporate}
+      - {do: admin.atlas.edges.orphaned_incorporate}
+      - {do: admin.atlas.freeze_impact, with: {version: "{{freeze_version}}"}}
+    optional: true
+  # 第 25 周 H21（第 4 周の前）: ［止めている候補を見る］で候補の区画へ移った後に、取り込む・戻すの手を残す
+  # （1 回目の choose を goto に使うと、すぐ凍結の手番になって判断の手が無かった）
+  - choose:
+      - {do: admin.atlas.gaps.orphaned_incorporate}
+      - {do: admin.atlas.gaps.orphaned_restore}
+      - {do: admin.atlas.edges.orphaned_incorporate}
+      - {do: admin.atlas.edges.orphaned_dismiss}
+      - {do: admin.atlas.freeze_impact, with: {version: "{{freeze_version}}"}}
+    optional: true
+  - choose:
+      - {do: admin.atlas.gaps.incorporate_apply}
+      - {do: admin.atlas.edges.incorporate_apply}
+      - {do: admin.atlas.freeze_impact, with: {version: "{{freeze_version}}"}}
+    optional: true
+  - do: admin.atlas.freeze
+    with: {version: "{{freeze_version}}", note: "{{freeze_note}}", correspondence: "{{correspondence}}"}
+    note: 対応を確かめて凍結する。取り消せないことを読んでから押す
+  - do: admin.atlas.open
+    with: {domain_hint: "{{domain_hint}}"}
+    note: 公開中の版が上がり、反映した候補が一覧から消えているかを見る
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/17-admin-atlas.md#vector-refresh
+  - manual: teacher/17-admin-atlas.md#gap-incorporate
+  - manual: teacher/17-admin-atlas.md#edge-incorporate
+  - manual: teacher/17-admin-atlas.md#freeze
+  - manual: teacher/17-admin-atlas.md#freeze-correspondence
+watch_for:
+  - 索引の再構築の結果は事実文（作り直した / 変更はありませんでした・骨格の版）で出て、件数・類似度が出ない（IK-0889）
+  - 下書きのプレビューに関係（辺）の一覧が文で出て、公開版に無い関係に「次版で加わる関係」と添えられる（IK-0886）
+  - 下書きへの保存は revision 付きで、他の教員の保存が先行していれば 409 の事実文と読み直しになる
+  - 採用済みでまだ下書きに反映していない候補・関係が残っていれば凍結は止まり、残りを名前で列挙する（件数は出さない）
+  - 凍結の後、前の版のノードとの対応はチェックした分だけ記録され、既定ではチェックされていない
+  - 凍結でコースの地図の割り当てが外れる場合は、凍結の前の影響の文で外れるコースの名前が出る（コースの割り当ては
+    次にやることの「割り当てが古い」に出る）
+  - 凍結の後、学生の地図の骨格の版が上がり、推定の糸にも新しい版が付く（学生レーンを後に回す）
+  - 公開前チェックは関係の増減と止める条件を先に言い、止まるなら[公開する]は押せない（IK-0885 の是正後）
+  - 候補一覧から外れた採用判断が別枠で読め、凍結を止めているものが画面にある（IK-0884 の是正後）

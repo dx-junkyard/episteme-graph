@@ -1,0 +1,43 @@
+id: t-db-challenge-from-node
+population: teachers
+runner: [api]
+# 第 25 周 第 4 周の前（doubt 第 4 周の組）: t-db-challenge-propose は教員 5 人すべてが歩いた。地図の点からの入口を使わず、
+# 原稿スタジオのノード台帳 → 支える主張の台帳 → 疑義 → 検証提案 → 取り下げ を 1 本で通す経路に分ける（IK-0930 / IK-0904）
+preconditions:
+  - text: このペルソナは自分のコースを持っている（前提の地図タブのコース選択に並ぶもの）
+    check: owns_course
+  - material_hint の教材の編集権限を持つ（疑義・提案の書き込みが通る）
+goal: "{{goal_text}} のために、原稿スタジオで選んだノードから支える主張の台帳へ移り、疑義を型で残して検証提案にし、別の疑義は取り下げる"
+params_required: [goal_text, course_hint, material_hint, node_hint, challenge_reason, second_reason, proposal_text,
+                  external_check]
+steps:
+  - do: auth.login
+  - do: admin.doubt.tab_open
+    with: {course_hint: "{{course_hint}}"}
+  - do: admin.materials.list
+  - do: admin.doubt.studio_node_ledger
+    with: {material_hint: "{{material_hint}}", node_hint: "{{node_hint}}"}
+    note: 原稿スタジオのグラフでノードを選び、台帳の区画を読む（部品・式の台帳には疑義の入口が無い理由が出るか）
+  - do: admin.doubt.supporting_claim_ledger
+    note: ［この主張の台帳を開く］で、同じ論文の支える主張の台帳へ移る
+  - do: admin.doubt.challenge_record
+    with: {challenge_type: 外挿, reason: "{{challenge_reason}}"}
+  - do: admin.doubt.challenge_propose
+    with: {proposal: "{{proposal_text}}", external_check: "{{external_check}}", reachability: 次世代の装置・観測なら可能}
+  - do: admin.doubt.proposal_status
+    with: {status: 検証に着手}
+  - do: admin.doubt.challenge_record
+    with: {challenge_type: 定義, challenge_mode: 主張と根拠のつながりへ, reason: "{{second_reason}}"}
+  - do: admin.doubt.challenge_withdraw
+    note: 二つ目の疑義を取り下げる（行が消えずに状態として残るかを見る）
+  - do: admin.doubt.refresh
+    note: 未検証合意リストに、検証提案の有無が段階で出るか
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: teacher/18-admin-doubt-atlas.md#record-challenge
+  - manual: teacher/18-admin-doubt-atlas.md#manage-challenge
+watch_for:
+  - 部品・式の台帳から支える主張の台帳へ 1 操作で移れ、移った先の見出しに論文の題名と段の日本語名が出る（IK-0904 / IK-0934）
+  - 疑義の主語は型で、投稿者の名前が添えられる（匿名の疑義が無い）
+  - 提案にした疑義は「検証提案へ昇格済み」になり、取り下げた疑義は台帳から消えずに状態として残る
+  - 地図の点を経由しなくても、ノード起点の疑義が未検証合意リストに反映される（IK-0930 の是正後）

@@ -172,6 +172,22 @@ class _Stop(Exception):
     """経路の stop_when に当たった。"""
 
 
+STOP_NOTE_MARK = "scene_stopped"
+
+
+def stop_note(reason: str, chosen: str = "") -> str:
+    """場面が止まったことを transcript に残す runner の注記（第 25 周 H7）。
+
+    頭脳ノートが、実行されなかった行為の画面について所見を書いていた（te-04 / st-05）。止まった理由と、
+    頭脳が選んだが実行していない行為を事実として残す。
+    """
+    if chosen and chosen not in ("none", SKIP_ACTION_ID):
+        tail = f"頭脳が選んだ次の行為 {chosen} は実行していない（この後の画面は存在しない）"
+    else:
+        tail = "頭脳には次の行為を選ばせていない"
+    return f"runner: {STOP_NOTE_MARK}: 場面はこの操作で終わった（停止条件: {reason}）— {tail}"
+
+
 class _UntilMet(Exception):
     """repeat の until が成り立った（判断を次の step へ持ち越す）。"""
 
@@ -283,13 +299,46 @@ class ScenarioRunner:
         if d.stop and self._until is None and "persona_stop" in stop_when:
             raise _Stop("persona_stop")
 
+    def _stop_may_follow(self) -> bool:
+        """直前の操作への反応しだいで場面が止まりうるか（第 25 周 H7）。
+
+        blocked の停止は「HTTP エラーを伴う blocked」か「2 回続いた blocked」で成立する。どちらかが成り立ちうる
+        ときは、頭脳に次の行為を選ばせる前に反応だけを聞く（止まるなら行為を選ばせない）。
+        """
+        if self.pending is None or "blocked" not in self.scenario.stop_when:
+            return False
+        http_error = (self.session.last_status or 0) >= 400
+        return http_error or getattr(self, "_blocked_streak", 0) >= 1
+
+    def _stop_or_finalize(self, d: StepDecision, chosen: str = "") -> None:
+        """停止条件を見てから直前のステップを記録する。止まるときは transcript に止まった理由を残す（H7）。"""
+        try:
+            self._check_stops(d)
+        except _Stop as stop:
+            if self.pending is not None:
+                self.pending.runner_notes.append(stop_note(str(stop), chosen))
+            self._finalize(d)
+            raise
+        self._finalize(d)
+
     def _decide(self, spec: StepSpec, allowed, suggested, exhausted) -> StepDecision:
         notes = {o.action: str(self.params.render(o.note)) for o in spec.options if o.note}
-        decision = self.agent.step(goal=self._goal(), instruction=str(self.params.render(spec.note)),
+        instruction = str(self.params.render(spec.note))
+        probe: Optional[StepDecision] = None
+        if self._stop_may_follow():
+            # 反応だけを先に聞く。止まるならここで _Stop が上がり、頭脳は次の行為を選ばない
+            probe = self.agent.step(goal=self._goal(), instruction=instruction, allowed=allowed,
+                                    observation=self.observation, history=self.history, reaction_only=True)
+            self._stop_or_finalize(probe)
+        decision = self.agent.step(goal=self._goal(), instruction=instruction,
                                    allowed=allowed, observation=self.observation, history=self.history,
                                    suggested_args=suggested, notes=notes, optional=spec.optional,
                                    exhausted=exhausted)
-        self._finalize(decision)
+        if probe is not None:
+            # 同じ画面への反応は先に聞いたものが正本（二重に数えない）
+            decision.prev_reaction, decision.prev_friction = probe.prev_reaction, probe.prev_friction
+            decision.gave_up_reason = ""
+        self._stop_or_finalize(decision, chosen=decision.action_id)
         return decision
 
     def _one(self, spec: StepSpec) -> None:
@@ -307,7 +356,6 @@ class ScenarioRunner:
             decision = carry
         else:
             decision = self._decide(spec, allowed, suggested, exhausted)
-            self._check_stops(decision)
             if self._until is not None:
                 expr, iterations = self._until
                 self._until = None
@@ -404,6 +452,9 @@ class ScenarioRunner:
             self._landing = False
 
     def run(self) -> ScenarioOutcome:
+        # 第 25 周 H6: 経路が ``pin_course: true`` を宣言したら、学生のコースの選択を campaign の course_id に固定する
+        # （actions_exec ``pinned_course_override``）。経路ごとに立て直す（種まきの経路に持ち越さない）
+        self.session.scratch["pin_course_strict"] = bool(self.scenario.raw.get("pin_course"))
         try:
             try:
                 self._run_steps(self.scenario.steps)

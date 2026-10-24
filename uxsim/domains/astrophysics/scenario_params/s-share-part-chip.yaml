@@ -1,0 +1,26 @@
+scenario: s-share-part-chip
+domain: astrophysics
+params:
+  goal_text: 教材の部品が、ほかの論文でも同じ部品として使われているかを知ること
+  topic_hint: 二重ネットワークとTOV方程式の課し方（PINN による中性子星状態方程式）
+  topic_hint_terms: [TOV, 二重ネットワーク, 中性子星, 状態方程式]
+  seed_questions:
+    - この部品は、ほかの論文でも同じ形で出てきますか？
+    - 先生の説明と論文の書き方で、違うところはありますか？
+per_archetype:
+  non_native:
+    goal_text: finding out whether a component in the material is shared with other papers
+    seed_questions:
+      - Does this component appear in other papers in the same form?
+personas:
+  st-03-d1-from-particle:
+    seed_questions:
+      - 素粒子の状態方程式の扱いと比べて、この部品の前提は何が違いますか？
+  st-09-d2-from-datasci:
+    seed_questions:
+      - このネットワークの部品は、ほかの論文のどの手法と同じものとして扱われていますか？
+  st-01-m1-radio:
+    # 第 4 周（judge_share_r3 §6）: 「共通部品として」の他の論文の題名（IK-0920）・見出しの意味（IK-0917）・選択質問が共通部品を知っているか
+    seed_questions:
+      - この「共通部品として」というのは、どの論文と同じ部品だという意味ですか？
+      - この部品について、先生が書いた説明と論文の書き方はどこが違いますか？

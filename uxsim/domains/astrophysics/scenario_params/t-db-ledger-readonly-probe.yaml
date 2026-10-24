@@ -1,0 +1,14 @@
+scenario: t-db-ledger-readonly-probe
+domain: astrophysics
+# 第 25 周 第 4 周（te-01）。te-01 は PINN の教材を閲覧だけできる状態で歩く（指揮者が周の前に共有を確かめる）
+params:
+  goal_text: 編集権限の無い論文の台帳に、書けるかどうかと書けない理由を確かめること
+  course_hint: ""
+  foreign_material_hint: Neutron Star Equation of State via Physics Informed Neural Network
+  node_hint_with_row: "1"
+  node_hint_without_row: "2"
+  foreign_scope_condition: 状態方程式が単調に増える範囲で
+  scope_reason: この範囲では学習した状態方程式が観測と矛盾しないと読める。
+per_archetype:
+  veteran_clicks_through:
+    scope_reason: 単調な範囲。

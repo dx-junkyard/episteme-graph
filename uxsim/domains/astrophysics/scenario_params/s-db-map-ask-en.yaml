@@ -1,0 +1,8 @@
+scenario: s-db-map-ask-en
+domain: astrophysics
+# 第 25 周 第 4 周（st-04・英語）。中断 run（20261023T034010Z-73962）と同じ地図の問いを 2 回
+params:
+  goal_text: checking what the verification note on the field map means, and whether the answer stays the same when asked twice
+  topic_hint_terms: [DCF法, 磁場強度]
+  map_question: On the field map, what does the note on this item mean, and where can I see the details?
+  map_question_again: On the field map, what does the note on this item mean, and where can I see the details?

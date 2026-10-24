@@ -1,0 +1,14 @@
+# --- snapshot record (appended by snapshot.py) ---
+snapshot_record:
+  name: corpus-astro-tex-r25b
+  created_at: 2026-10-23T02:59:47+00:00
+  git_commit: 3e7049b
+  migration_head: '092'
+  note: "第 25 周 第 3 周の前: r25a + 第 2 波の是正（migration 091/092）+ te-02/te-05 の教材 editor 共有 + te-04 の 6be229e1 editor + 確認済み配置 1 件"
+# --- snapshot record (appended by snapshot.py) ---
+snapshot_record:
+  name: corpus-astro-tex-r25b
+  created_at: 2026-10-23T03:00:19+00:00
+  git_commit: 3e7049b
+  migration_head: '092'
+  note: "第 25 周 第 3 周の前: r25a + 第 2 波の是正（migration 091/092）+ te-02/te-05 の教材 editor 共有 + te-04 の 6be229e1 editor + 確認済み配置 1 件"

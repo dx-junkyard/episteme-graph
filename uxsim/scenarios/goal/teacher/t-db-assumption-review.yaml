@@ -1,0 +1,51 @@
+id: t-db-assumption-review
+population: teachers
+runner: [api]
+preconditions:
+  - text: このペルソナは自分のコース（前提の地図タブのコース選択に並ぶもの）を持っている
+    check: owns_course
+  - 砂場のコースの教材は TeX 経路の解析済みの 4 本（snapshot corpus-astro-tex-r23）。前提候補はコーパス監査（非LLM）で出し、足りなければ前提マイニング（非同期 LLM）を押す
+seed_scenarios: [t-v5-register-own-course]
+goal: "{{goal_text}} のために、前提の地図で暗黙の前提の候補を読み、根拠のあるものは確定し、根拠の弱いものは却下する"
+params_required: [goal_text, course_hint, confirm_pick, confirm_reason, dismiss_pick]
+steps:
+  - do: auth.login
+  - do: admin.doubt.tab_open
+    with: {course_hint: "{{course_hint}}"}
+    note: 前提の地図タブを開き、自分のコースを選ぶ
+  - do: admin.doubt.audit_run
+    note: コーパス監査を実行して、依存されているのに主張も引用も無いノードを前提候補にする
+  - choose:
+      - do: admin.doubt.mining_run
+        note: 候補が無い・少ないときは前提マイニングも押す（非同期 — 押した直後は変わらないことがある）
+    optional: true
+  - do: admin.doubt.refresh
+  - do: admin.doubt.assumption_confirm
+    with: {pick: "{{confirm_pick}}", reason: "{{confirm_reason}}"}
+    note: 出所の逐語が付いている候補を読んで、暗黙の前提として引き受けられるものを確定する
+  - choose:
+      - do: admin.doubt.assumption_dismiss
+        with: {pick: "{{dismiss_pick}}"}
+        note: 根拠の弱い候補を却下する
+    optional: true
+  - do: admin.doubt.assumption_filter
+    with: {status: 却下済み}
+    note: 却下した候補が消えずに残っているかを見る
+  - do: admin.doubt.load_recompute
+    note: 確定した前提が散布図に点として載るよう、依存の広がりを計算し直す
+  - do: admin.doubt.ledger_open
+    note: 確定した前提の台帳を開く（散布図の点か、未検証合意リストの行から）
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: teacher/18-admin-doubt-atlas.md#audit-run
+  - manual: teacher/18-admin-doubt-atlas.md#assumption-confirm
+  - manual: teacher/18-admin-doubt-atlas.md#assumption-dismiss
+  - manual: teacher/18-admin-doubt-atlas.md#plot-detail
+watch_for:
+  - 確定した前提の台帳は「未検証」で検証スコープが空のまま生まれ、空欄は警告色ではなく「検証スコープの記帳なし」という事実として読める
+  - 確定の理由は本人の言葉で書くまで送れない（既定文のプリフィルが無い）
+  - 却下した候補は「却下済み（保持）」に残り、行として消えない
+  - 散布図に評価語・推奨マーク・生の数値が描かれない（軸の名前と段階だけ）
+  - コースを作らずに解析した教材から組んだコースでも、コーパス監査が教材を読み（教材が 0 件扱いにならない）、
+    前提候補が出る（IK-0852 の是正後）。監査・マイニングを押した結果（実行した／受け付けた／材料が無い／該当なし）が
+    事実文で読める（IK-0853 の是正後）

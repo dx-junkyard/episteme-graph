@@ -27,4 +27,7 @@ def test_landscape_projection_shows_provenance_per_placement():
                                                           "reason": "r"}]}],
             "unplaced_documents": [{"title": "Q"}]}
     out = project_observation("learning.landscape.view", 200, body)
-    assert "中性子星（観測から・強い関連・AIによる推定（未確認））" in out and "配置されていない論文: Q" in out
+    # 出典タブの形（app.js buildPaperPlacementHtml — 第 25 周 H15）。分野の行は画面に出ない
+    assert "中性子星（観測から・強い関連） 〔AIによる推定（未確認）〕" in out
+    assert "この論文は、現在の分野の地図（版 1）のどの領域にも配置されていません。" in out
+    assert "登録済み論文 0 件の解析から生成（地図 版 1・AI推定を含む）" in out and "分野: 宇宙物理" not in out

@@ -205,7 +205,7 @@ def test_release_step2_projection_mirrors_screen():
     assert "2. 修正重力（宇宙物理）［AI推定（未確認）］" in obs  # 無ければ label_vocab のミラー
     assert "▶ 根拠を見る（折りたたみ・閉じている）" in obs and "原文の一節" not in obs  # 既定は閉じている
     assert obs.count("[却下] / [再検討]") == 2  # 却下済みの行にはボタンが無い
-    assert "未確認 2件" in obs and "使用した骨格: 宇宙物理 骨格版 2026.1" in obs
+    assert "未確認 2件" in obs and "使用した地図: 宇宙物理 地図 版 2026.1" in obs
 
 
 def test_release_accept_mirrors_screen_body_and_skips_when_nothing_pending():

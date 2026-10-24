@@ -1,0 +1,18 @@
+scenario: s-atlas-threads-and-placement
+domain: astrophysics
+params:
+  goal_text: コースの論文と概念が分野全体の中でどうつながっているかをつかむこと
+personas:
+  st-05-night-solarwind:
+    goal_text: 太陽風の研究がこの分野の地図のどこに置かれ、何とつながっていそうかを夜のうちに確かめること
+  st-01-m1-radio:
+    goal_text: 電波観測の論文が分野のどの領域に置かれているかを確かめること
+  st-04-intl-exoplanet:
+    goal_text: 系外惑星の研究とこの分野の地図の関係を、AI の推定と確かめられたものに分けてつかむこと
+  st-07-m1-grb-voice:
+    goal_text: ガンマ線バーストの研究がこの地図のどこに近いかを、文字で読んで確かめること
+  st-02-m2-lensing-theory:
+    goal_text: 重力レンズの理論がこの地図のどこに置かれ、先生が確かめた位置と AI の推定の位置を読み分けること
+  st-06-skeptic-bao:
+    # 第 4 周（凍結の後）: 版が上がった地図・採用した関係の糸・見送った関係が糸に出ないこと（審判 B5・RE8）・L1 の霧と配置の一致
+    goal_text: BAO の測定がこの地図のどこに置かれているかを、根拠の逐語まで読んで、AI の推定をうのみにせずに確かめること
