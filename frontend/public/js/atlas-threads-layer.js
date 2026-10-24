@@ -42,6 +42,8 @@
   const NODE_GAP = 3;
   // 出所ラベルの固定文（RE2。サーバの段階ラベルは v1 では描かない = RE4）
   const PROVENANCE_TEXT = "AIによる推定（未確認）";
+  // 分野の地図の版の呼び名（IK-0942。正本 core/label_vocab.py::ATLAS_VERSION_PREFIX の逐語ミラー）
+  const ATLAS_VERSION_PREFIX = "地図 版 ";
 
   const state = {
     enabled: false,
@@ -74,7 +76,7 @@
   function factText(threads) {
     const version = (threads && threads.skeleton_version) ? String(threads.skeleton_version) : "";
     // RE2: 出所と骨格版を必ず併記する。件数・近さの数値は出さない（RE4）
-    return version ? PROVENANCE_TEXT + "・骨格 版" + version : PROVENANCE_TEXT;
+    return version ? PROVENANCE_TEXT + "・" + ATLAS_VERSION_PREFIX + version : PROVENANCE_TEXT;
   }
 
   // -------------------------------------------------------------------

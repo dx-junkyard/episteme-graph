@@ -40,6 +40,7 @@ from sqlalchemy import text as sa_text
 from core import atlas_correspondence
 from core import atlas_state
 from core import atlas_store
+from core import document_refs
 from core.atlas_gaps import schema as gap_schema
 from core.landscape import schema as landscape_schema
 
@@ -282,6 +283,80 @@ def _visible_placements(session: Any, domain_key: str, doc_ids: Sequence[str]) -
     ).fetchall()
 
 
+def _domain_paper_representatives(
+    session: Any, domain_key: str, doc_ids: Sequence[str]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """この分野に関係づけられた可視論文の「論文の代表 document_id」と題名（IK-0846）。
+
+    同じ論文の重複取り込み（PDF 版と TeX 版など）は 1 本の論文として数え、読める題名を
+    持つ取り込みを代表にする（判定の正本は ``core.document_refs``）。母集合は論文リスト
+    （:func:`list_corpus_documents`）と同じ「配置あり ∪ 置けなかった信号あり」で、地図の
+    厚みと論文リストが同じ代表を指す（アンカーの絞り込みが一覧の行と一致する）。
+
+    Returns:
+        ``(document_id -> 代表 document_id, document_id -> 題名)``。取れなければ空（呼び出し側は
+        document_id をそのまま使う — fail-soft）。
+    """
+    if not doc_ids:
+        return {}, {}
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT d.id::text,
+                       COALESCE(NULLIF(d.title, ''), NULLIF(d.filename, ''), '') AS title,
+                       COALESCE(d.source_url, '') AS source_url,
+                       COALESCE(d.filename, '') AS filename
+                  FROM documents d
+                 WHERE d.id::text = ANY(:doc_ids)
+                   AND (
+                       EXISTS (
+                           SELECT 1 FROM landscape_placements p
+                            WHERE p.document_id = d.id
+                              AND p.domain_key = :domain_key
+                              AND p.status = ANY(:statuses)
+                       )
+                       OR EXISTS (
+                           SELECT 1 FROM landscape_gap_signals s
+                            WHERE s.document_id = d.id
+                              AND s.domain_key = :domain_key
+                              AND s.status = :active
+                       )
+                   )
+                """
+            ),
+            {
+                "domain_key": domain_key,
+                "doc_ids": list(doc_ids),
+                "statuses": list(landscape_schema.LEARNER_VISIBLE_STATUSES),
+                "active": gap_schema.SIGNAL_STATUS_ACTIVE,
+            },
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 畳めなくても地図と一覧は返す
+        logger.warning("corpus view: paper identities unavailable (non-fatal)", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            logger.debug("corpus view: rollback failed (non-fatal)", exc_info=True)
+        return {}, {}
+    entries = []
+    titles: dict[str, str] = {}
+    for row in rows or ():
+        doc_id = _clean(row[0])
+        if not doc_id:
+            continue
+        titles[doc_id] = _title(row[1])
+        entries.append(
+            {
+                "document_id": doc_id,
+                "title": _clean(row[1]),
+                "source_url": row[2] if len(row) > 2 else "",
+                "filename": row[3] if len(row) > 3 else "",
+            }
+        )
+    return document_refs.representative_document_ids(entries), titles
+
+
 def _visible_gap_signals(session: Any, domain_key: str, doc_ids: Sequence[str]) -> list:
     """縁の材料（§6.1）。
 
@@ -296,7 +371,8 @@ def _visible_gap_signals(session: Any, domain_key: str, doc_ids: Sequence[str]) 
         sa_text(
             """
             SELECT s.parent_region_id,
-                   COALESCE(NULLIF(d.title, ''), NULLIF(d.filename, ''), '') AS title
+                   COALESCE(NULLIF(d.title, ''), NULLIF(d.filename, ''), '') AS title,
+                   s.document_id::text
               FROM landscape_gap_signals s
               JOIN documents d ON d.id = s.document_id
              WHERE s.domain_key = :domain_key
@@ -313,18 +389,39 @@ def _visible_gap_signals(session: Any, domain_key: str, doc_ids: Sequence[str]) 
     ).fetchall()
 
 
-def _build_fringe(rows: Iterable[Any], regions: dict[str, str]) -> list[dict]:
+def _build_fringe(
+    rows: Iterable[Any],
+    regions: dict[str, str],
+    *,
+    representatives: dict[str, str] | None = None,
+    rep_titles: dict[str, str] | None = None,
+) -> list[dict]:
     """信号行 → 領域単位の縁（``[{region_id, region_label, fact_line, paper_titles}]``）。
 
     現行の凍結骨格に無い ``parent_region_id`` の信号は落とす（地図に描けないため。
     行そのものは DB に残り、教員のレビュー候補には出続ける — P4）。
+
+    同じ論文の重複取り込み（PDF 版と TeX 版など）は論文の同一性キーで 1 本に畳み、
+    代表の取り込み（読める題名を持つもの）の題名で列挙する（IK-0846 第 2 周の残存。
+    地図の配置・論文リストと同じ ``_domain_paper_representatives`` の代表を使う）。
+    行の 3 列目（``document_id``）が無い旧形の行は題名の文字列で畳む（従来どおり）。
     """
+    reps = representatives or {}
+    titles_of = rep_titles or {}
     grouped: dict[str, list[str]] = {}
+    seen_papers: dict[str, set[str]] = {}
     for row in rows or ():
         region_id = _clean(row[0])
         if region_id not in regions:
             continue
-        title = _title(row[1])
+        raw_doc_id = _clean(row[2]) if len(row) > 2 else ""
+        paper_id = reps.get(raw_doc_id, raw_doc_id) if raw_doc_id else ""
+        title = _title(titles_of.get(paper_id) or row[1]) if paper_id else _title(row[1])
+        papers = seen_papers.setdefault(region_id, set())
+        if paper_id:
+            if paper_id in papers:
+                continue
+            papers.add(paper_id)
         titles = grouped.setdefault(region_id, [])
         if title and title not in titles:
             titles.append(title)
@@ -400,7 +497,9 @@ def build_corpus_landscape(
     resolve = _node_resolve(session, key)
 
     doc_ids = _visible_ids(visible_doc_ids)
+    representatives, rep_titles = _domain_paper_representatives(session, key, doc_ids)
     placements: list[dict] = []
+    seen_placements: set[tuple[str, str, str]] = set()
     unmapped_versions: set[str] = set()
     for row in _visible_placements(session, key, doc_ids):
         node_id = _clean(row[2])
@@ -413,10 +512,17 @@ def build_corpus_landscape(
             continue
         status = _clean(row[4])
         perspective = _clean(row[3])
+        # 同じ論文の重複取り込みは代表の 1 本に畳む（IK-0846。厚みは論文の数で決まる）。
+        raw_doc_id = _clean(row[0])
+        paper_id = representatives.get(raw_doc_id, raw_doc_id)
+        dedupe = (paper_id, node_id, perspective)
+        if dedupe in seen_placements:
+            continue
+        seen_placements.add(dedupe)
         placements.append(
             {
-                "document_id": _clean(row[0]),
-                "document_title": _title(row[1]),
+                "document_id": paper_id,
+                "document_title": rep_titles.get(paper_id) or _title(row[1]),
                 "anchor_node_id": node_id,
                 "node_label": info["label"],
                 "region_id": info["region_id"],
@@ -432,7 +538,12 @@ def build_corpus_landscape(
         "domain_key": key,
         "skeleton_version": skeleton_version,
         "placements": placements,
-        "fringe": _build_fringe(_visible_gap_signals(session, key, doc_ids), regions),
+        "fringe": _build_fringe(
+            _visible_gap_signals(session, key, doc_ids),
+            regions,
+            representatives=representatives,
+            rep_titles=rep_titles,
+        ),
         "outer": _build_outer(session, key),
         # 読み替えできなかった配置の事実文（縁の事実文と同じ作法で1行ずつ・件数なし）。
         "facts": [
@@ -511,17 +622,33 @@ def list_corpus_documents(
             "active": gap_schema.SIGNAL_STATUS_ACTIVE,
         },
     ).fetchall()
-    return [
-        {
-            "document_id": _clean(row[0]),
-            "title": _title(row[1]),
-            "authors": _authors(row[2]),
-            "year": int(row[3]) if row[3] is not None else None,
-            "placed": bool(row[4]),
-            "can_discuss": True,
-        }
-        for row in rows
-    ]
+    # 同じ論文の重複取り込み（PDF 版と TeX 版など）は 1 行に畳む（IK-0846）。行は代表
+    # （読める題名を持つ取り込み）の値で、``placed`` はどれかの取り込みが置かれていれば真。
+    # 並びは同じ論文の取り込みのうち最も新しいものの位置。
+    representatives, _ = _domain_paper_representatives(session, key, doc_ids)
+    by_id = {_clean(row[0]): row for row in rows}
+    out: list[dict] = []
+    index_of: dict[str, int] = {}
+    for row in rows:
+        doc_id = _clean(row[0])
+        paper_id = representatives.get(doc_id, doc_id)
+        source = by_id.get(paper_id, row)
+        if paper_id in index_of:
+            if bool(row[4]):
+                out[index_of[paper_id]]["placed"] = True
+            continue
+        index_of[paper_id] = len(out)
+        out.append(
+            {
+                "document_id": paper_id if paper_id in by_id else doc_id,
+                "title": _title(source[1]),
+                "authors": _authors(source[2]),
+                "year": int(source[3]) if source[3] is not None else None,
+                "placed": bool(row[4]) or bool(source[4]),
+                "can_discuss": True,
+            }
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -1010,7 +1010,12 @@ class TestFreezeWiringStatic:
     def test_freeze_raises_409_with_pending_edges(self):
         source = self._freeze_source()
         assert "pending_edges" in source
-        assert "_pending_edge_candidates" in source
+        # 凍結の可否は freeze-impact と同じ 1 関数を読む（IK-0885）。
+        assert "_freeze_readiness(" in source
+        helper = extract_function_source(_ATLAS_SRC, "_freeze_readiness")
+        assert "_pending_edge_candidates(" in helper
+        impact = extract_function_source(_ATLAS_SRC, "get_atlas_freeze_impact")
+        assert "_freeze_readiness(" in impact
 
     def test_stamping_happens_inside_the_freeze_transaction(self):
         source = self._freeze_source()

@@ -107,7 +107,11 @@ class TestSectionContract:
     def test_heading_and_intro_literals(self):
         seg = _gap_segment()
         assert 'var GAP_GROUP_TITLE = "論文の解析から見つかった候補";' in seg
-        assert 'var GAP_GROUP_INTRO = "複数の論文が、この地図にまだ無い項目に触れています。";' in seg
+        # IK-0943: 区画の定義の文（候補ゼロでも矛盾しない — 断言しない）。
+        assert (
+            'var GAP_GROUP_INTRO = "2 本以上の論文が、この地図にまだ無い同じ項目に触れたとき、'
+            'ここに候補として出ます。";'
+        ) in seg
 
     def test_group_carries_the_section_anchor(self):
         seg = _gap_segment()
@@ -226,7 +230,8 @@ class TestDecisionButtons:
     def test_dismiss_requires_a_reason_before_sending(self):
         seg = _gap_segment()
         block = _fn_block(seg, "function handleGapAction(clusterKey, action, card) {")
-        assert 'var note = prompt("却下の理由（必須）") || "";' in block
+        # 却下の説明は理由を尋ねる場で出す（IK-0848）。
+        assert 'var note = prompt("却下の理由（必須）\\n" + GAP_DISMISS_NOTE) || "";' in block
         assert "if (!note.trim()) { setGapsStatus(GAP_DISMISS_REASON_REQUIRED, true); return; }" in block
         # 空理由のまま decide を呼ばない（gapDecide は理由チェックの後ろだけ）
         idx_guard = block.index("if (!note.trim())")
@@ -278,12 +283,14 @@ class TestIncorporationThreeSteps:
         assert 'gapsPath() + "/incorporate-preview"' in block
         assert 'method: "POST"' in block
 
-    def test_step2_confirm_shows_node_id_label_and_validation(self):
+    def test_step2_confirm_shows_label_parent_name_and_validation(self):
+        """確認は名前と親領域の名前で言い、内部の id を行にしない（IK-0850）。"""
         seg = _gap_segment()
         block = _fn_block(seg, "function openGapIncorporateConfirm(clusterKey, preview) {")
-        assert "preview.node_id" in block
+        assert "lines.push(\"追加する項目のid" not in block
         assert "preview.proposed_label" in block
-        assert "preview.parent_region_id" in block
+        assert "preview.parent_region_label" in block
+        assert 'lines.push("親領域: " + preview.parent_region_id)' not in block
         assert "validation.errors" in block
         assert "validation.warnings" in block
         assert "openDangerConfirmModal(" in block

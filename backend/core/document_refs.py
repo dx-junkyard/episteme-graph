@@ -217,3 +217,100 @@ def canonical_material_ids(session: Any, refs: Iterable[Any] | None) -> list[str
             seen.add(material_id)
             out.append(material_id)
     return out
+
+
+# ---------------------------------------------------------------------------
+# 論文の同一性キー（IK-0846）
+#
+# ``documents.id`` は「取り込みの行」の ID であって「論文」の ID ではない。同じ arXiv 論文を
+# PDF と TeX で二度取り込むと行は 2 本になるが、論文は 1 本である。「N 本以上の論文で反復
+# したら候補にする」規則（カテゴリギャップ・関係の共起）と、学習者に見せる論文の一覧・厚みは、
+# 行ではなく論文を数える。その「論文」の判定はここだけが行う（数える側に判定を書き写さない）。
+#
+# 優先順: ``source_url`` の arXiv ID（arxiv.org の URL のときだけ）→ ファイル名の arXiv ID →
+# 題名の arXiv ID（PDF 取り込みで題名が番号のままの教材）→ 無ければ ``documents.id``。
+# arXiv ID は version 抜き（v1 と v2 は同じ論文）。曖昧（相異なる ID が 2 つ以上）なら
+# 推定しない（``arxiv_id_from_filename`` の規則）。純関数で DB を引かない — 材料の列
+# （source_url / filename / title）は数える側が自分の SELECT で一緒に引く。
+# ---------------------------------------------------------------------------
+
+#: キーの接頭辞（内部値。表示に使わない）。
+PAPER_KEY_ARXIV_PREFIX = "arxiv:"
+PAPER_KEY_DOCUMENT_PREFIX = "document:"
+
+#: 題名が arXiv 番号そのもの（``2605.26810v1`` / ``2605.26810v1.pdf``）かの判定。
+_ARXIV_ONLY_TITLE_RE = re.compile(
+    r"^\s*(?:arxiv[:\-_ ]?)?\d{4}\.\d{4,5}(?:v\d+)?(?:\.(?:pdf|tar\.gz|gz|tex))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _arxiv_id_from_source_url(source_url: Any) -> str:
+    text = str(source_url or "").strip()
+    if not text or "arxiv.org" not in text.lower():
+        return ""
+    from core.paper_discovery.schema import normalize_arxiv_id  # 遅延 import（純関数のみ）
+
+    return normalize_arxiv_id(text) or ""
+
+
+def paper_identity_key(
+    document_id: Any,
+    *,
+    source_url: Any = None,
+    filename: Any = None,
+    title: Any = None,
+) -> str:
+    """1 本の取り込み（document 行）が指す「論文」のキーを返す（純関数）。
+
+    ``"arxiv:2605.26810"``（version 抜き）か ``"document:{documents.id}"``。キーは数える・
+    畳むための内部値で、DTO・画面に出さない。
+    """
+    from core.paper_discovery.schema import arxiv_id_from_filename  # 遅延 import（純関数のみ）
+
+    arxiv_id = (
+        _arxiv_id_from_source_url(source_url)
+        or arxiv_id_from_filename(str(filename or ""))
+        or arxiv_id_from_filename(str(title or ""))
+    )
+    if arxiv_id:
+        return PAPER_KEY_ARXIV_PREFIX + arxiv_id
+    return PAPER_KEY_DOCUMENT_PREFIX + str(document_id or "").strip()
+
+
+def title_is_arxiv_number(title: Any) -> bool:
+    """題名が arXiv 番号そのもの（読める題名が採れていない取り込み）か。"""
+    return bool(_ARXIV_ONLY_TITLE_RE.match(str(title or "")))
+
+
+def representative_document_ids(entries: Iterable[Mapping[str, Any]]) -> dict[str, str]:
+    """``document_id -> 同じ論文の代表 document_id`` を返す（純関数・決定論）。
+
+    ``entries`` の各要素は ``document_id`` と、任意で ``source_url`` / ``filename`` /
+    ``title`` を持つ mapping。同じ論文（:func:`paper_identity_key` が一致）の取り込みが
+    複数あれば、**読める題名を持つ方**（題名が空でも arXiv 番号そのものでもない）を代表に
+    する。どちらも読める／読めないときは ``document_id`` の昇順の先頭（入力順に依らない —
+    一覧と地図が別々の SQL から同じ代表を選ぶため）。
+    """
+    groups: dict[str, list[tuple[bool, str]]] = {}
+    for entry in entries or ():
+        doc_id = str(entry.get("document_id") or "").strip()
+        if not doc_id:
+            continue
+        key = paper_identity_key(
+            doc_id,
+            source_url=entry.get("source_url"),
+            filename=entry.get("filename"),
+            title=entry.get("title"),
+        )
+        title = str(entry.get("title") or "").strip()
+        unreadable = (not title) or title_is_arxiv_number(title)
+        members = groups.setdefault(key, [])
+        if all(m[1] != doc_id for m in members):
+            members.append((unreadable, doc_id))
+    out: dict[str, str] = {}
+    for members in groups.values():
+        representative = min(members)[1]
+        for _, doc_id in members:
+            out[doc_id] = representative
+    return out

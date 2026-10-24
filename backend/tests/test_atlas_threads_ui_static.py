@@ -79,7 +79,7 @@ class TestLearnerHelpAnchor:
         assert "推定の糸" in md
         # RE2: 出所（AI推定・未確認）と骨格版・実線との区別・既定オフを説明する
         assert PROVENANCE_TEXT in md
-        assert "骨格 版" in md
+        assert "地図 版" in md  # 版の呼び名の正本 = label_vocab.ATLAS_VERSION_PREFIX（IK-0942）
         assert "実線" in md
 
     def test_frontend_carrier_exists(self):
@@ -115,7 +115,7 @@ class TestProvenanceAndDashes:
     def test_fact_line_includes_skeleton_version(self):
         js = _strip_js_comments(_read(THREADS_JS))
         assert "skeleton_version" in js
-        assert "骨格 版" in js
+        assert 'const ATLAS_VERSION_PREFIX = "地図 版 ";' in js  # IK-0942
 
     def test_thread_stroke_is_not_the_solid_edge_color(self):
         """実線の骨格辺（atlas-overlay.js C.edge = #B4B2A9）と同色で描かない。"""

@@ -427,7 +427,7 @@ class TestCorpusHonesty:
         js = _read(APP_JS)
         block = _extract_function_body(js, "function paperPlacementCorpusFact(data) {")
         assert "source_document_count" in block
-        assert "骨格版 " in block
+        assert '"地図 版 "' in block  # IK-0942
         assert "AI推定を含む" in block
 
 

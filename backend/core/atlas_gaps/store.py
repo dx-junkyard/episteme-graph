@@ -41,6 +41,7 @@ from typing import Any, Iterable, Mapping
 from sqlalchemy import text as sa_text
 
 from core import atlas as atlas_module
+from core import document_refs
 from core.atlas_gaps import schema
 from core.schema import AUDIT_ENTITY_CATEGORY_GAP, MAPPING_JUSTIFICATIONS
 
@@ -396,7 +397,8 @@ def _fetch_active_signals(
 
     if with_titles:
         sql = f"""
-            SELECT {_SIGNAL_COLUMNS_SQL}, COALESCE(d.title, '')
+            SELECT {_SIGNAL_COLUMNS_SQL}, COALESCE(d.title, ''),
+                   COALESCE(d.source_url, ''), COALESCE(d.filename, '')
               FROM landscape_gap_signals s
               LEFT JOIN documents d ON d.id = s.document_id
              WHERE {" AND ".join(clauses)}
@@ -413,7 +415,14 @@ def _fetch_active_signals(
         """
     rows = session.execute(sa_text(sql), params).fetchall()
     if with_titles:
-        return [_signal_row_to_dict(r, title=(r[15] or "")) for r in rows]
+        out = []
+        for r in rows:
+            entry = _signal_row_to_dict(r, title=(r[15] or ""))
+            # 論文の同一性の材料（IK-0846）。DTO には載せない（数える・畳むための内部値）。
+            entry["_source_url"] = (r[16] if len(r) > 16 else "") or ""
+            entry["_filename"] = (r[17] if len(r) > 17 else "") or ""
+            out.append(entry)
+        return out
     return [_signal_row_to_dict(r) for r in rows]
 
 
@@ -519,6 +528,76 @@ def _fetch_decisions(session: Any, cluster_keys: Iterable[str]) -> dict[str, dic
     return out
 
 
+def _fold_by_paper(members: list[dict]) -> dict[str, dict]:
+    """cluster の信号を「論文」単位に畳む（IK-0846。重複取り込みは 1 本・読める題名を代表に）。
+
+    同一 document から複数の信号が同じ cluster に入ることは通常無いが
+    （record_signals が畳む）、あっても新しい方（``created_at DESC`` の先頭）を代表にする。
+    """
+    representatives = document_refs.representative_document_ids(
+        {
+            "document_id": signal["document_id"],
+            "title": signal.get("document_title") or "",
+            "source_url": signal.get("_source_url") or "",
+            "filename": signal.get("_filename") or "",
+        }
+        for signal in members
+    )
+    by_document: dict[str, dict] = {}
+    for signal in members:
+        document_id = signal["document_id"]
+        paper = representatives.get(document_id, document_id)
+        current = by_document.get(paper)
+        if current is None or (document_id == paper and current["document_id"] != paper):
+            by_document[paper] = signal
+    return by_document
+
+
+def _paper_documents(by_document: Mapping[str, dict], version: str) -> list[dict]:
+    """畳んだ信号 → 候補 DTO の ``documents``（題名・理由・逐語。生 confidence なし = LS5）。
+
+    通常の候補（:func:`derive_candidates`）と導出から外れた判断（:func:`list_orphaned_decisions`
+    — IK-0937）が**同じ形**で根拠を運ぶための 1 箇所。
+    """
+    documents = []
+    for signal in sorted(
+        by_document.values(),
+        key=lambda s: (s["created_at"], s["id"]),
+        reverse=True,
+    ):
+        documents.append(
+            {
+                "document_id": signal["document_id"],
+                "title": signal.get("document_title") or "",
+                "reason": signal["reason"],
+                "evidence_quote": signal["evidence_quote"],
+                "skeleton_version": signal["skeleton_version"],
+                "version_mismatch": bool(version and signal["skeleton_version"] != version),
+                # LS5: 生値ではなく段階ラベル
+                "confidence_label": schema.confidence_label(signal["confidence"]),
+                "created_at": signal["created_at"],
+            }
+        )
+    return documents
+
+
+def gate_documents(
+    documents: Iterable[Mapping[str, Any]], visible_document_ids: Iterable[str] | None
+) -> tuple[list[dict], bool]:
+    """閲覧できない論文を根拠の列挙から外す（IK-0937・fail-closed）。
+
+    ``visible_document_ids`` が ``None`` のときは絞らない（呼び出し側が可視性を
+    判定しない経路 = テスト・内部用）。戻り値は ``(残した論文, 外した論文があったか)`` —
+    件数ではなく真偽だけを返す（LS5）。
+    """
+    docs = [dict(d) for d in documents or ()]
+    if visible_document_ids is None:
+        return docs, False
+    visible = {_clean(v) for v in visible_document_ids if _clean(v)}
+    kept = [d for d in docs if _clean(d.get("document_id")) in visible]
+    return kept, len(kept) < len(docs)
+
+
 def derive_candidates(
     session: Any,
     *,
@@ -526,8 +605,20 @@ def derive_candidates(
     frozen_skeleton: Any = None,
     current_version: str = "",
     include_dismissed: bool = False,
+    report: dict | None = None,
 ) -> list[dict]:
     """レビューキュー（cluster 単位の候補）を**毎回導出**する（§4.3 / §5.2）。
+
+    ``report`` を渡すと、候補にならなかった理由の**真偽**（件数ではない）を書き込む
+    （IK-0851 第 2 周: 候補ゼロの理由を言い分ける / IK-0884: 導出から外れた判断行の
+    理由を言う）::
+
+        {"signals_present": bool,        # active な信号があったか
+         "below_threshold": bool,        # 反復の条件に届かない cluster があったか
+         "folded_duplicates": bool,      # 重複取り込みを 1 本に畳んだことで届かなかったか
+         "resolved_present": bool,       # 現行版に同名の項目があって外したか
+         "suppressed_present": bool,     # 見送り済み・統合済みで外したか
+         "cluster_states": {cluster_key: "below_threshold" | "resolved"}}
 
     手順:
 
@@ -557,6 +648,17 @@ def derive_candidates(
         return []
 
     signals = _fetch_active_signals(session, domain_key=domain, with_titles=True)
+    if report is not None:
+        report.update(
+            {
+                "signals_present": bool(signals),
+                "below_threshold": False,
+                "folded_duplicates": False,
+                "resolved_present": False,
+                "suppressed_present": False,
+                "cluster_states": {},
+            }
+        )
     if not signals:
         return []
 
@@ -577,19 +679,28 @@ def derive_candidates(
     version = _clean(current_version)
     out: list[dict] = []
     for cluster_key, members in grouped.items():
+        # 反復の閾値は「論文」の数で数える（IK-0846）。同じ論文の PDF 版と TeX 版の
+        # ような重複取り込みは 1 本に畳み、読める題名を持つ取り込みを代表にする。
         # 同一 document から複数の信号が同じ cluster に入ることは通常無いが
         # （record_signals が畳む）、あっても新しい方を代表にする。
-        by_document: dict[str, dict] = {}
-        for signal in members:
-            document_id = signal["document_id"]
-            if document_id not in by_document:
-                by_document[document_id] = signal
+        by_document = _fold_by_paper(members)
         if len(by_document) < schema.MIN_DOCUMENTS_FOR_CANDIDATE:
+            if report is not None:
+                report["below_threshold"] = True
+                report["cluster_states"][cluster_key] = "below_threshold"
+                if (
+                    len({s["document_id"] for s in members})
+                    >= schema.MIN_DOCUMENTS_FOR_CANDIDATE
+                ):
+                    report["folded_duplicates"] = True
             continue
 
         representative = members[0]  # created_at DESC 順（最新の表記を代表にする）
         if representative["normalized_label"] in resolved:
             # 現行凍結版に同名のノードがある = 解消済み（自然消滅）
+            if report is not None:
+                report["resolved_present"] = True
+                report["cluster_states"][cluster_key] = "resolved"
             continue
 
         decision = decisions.get(cluster_key)
@@ -598,6 +709,8 @@ def derive_candidates(
             and decision["status"] in schema.SUPPRESSED_DECISION_STATUSES
             and not include_dismissed
         ):
+            if report is not None:
+                report["suppressed_present"] = True
             continue
 
         layer = representative["layer"]
@@ -610,27 +723,7 @@ def derive_candidates(
             >= atlas_module.MAX_CONCEPTS_PER_REGION
         )
 
-        documents = []
-        for signal in sorted(
-            by_document.values(),
-            key=lambda s: (s["created_at"], s["id"]),
-            reverse=True,
-        ):
-            documents.append(
-                {
-                    "document_id": signal["document_id"],
-                    "title": signal.get("document_title") or "",
-                    "reason": signal["reason"],
-                    "evidence_quote": signal["evidence_quote"],
-                    "skeleton_version": signal["skeleton_version"],
-                    "version_mismatch": bool(
-                        version and signal["skeleton_version"] != version
-                    ),
-                    # LS5: 生値ではなく段階ラベル
-                    "confidence_label": schema.confidence_label(signal["confidence"]),
-                    "created_at": signal["created_at"],
-                }
-            )
+        documents = _paper_documents(by_document, version)
 
         out.append(
             {
@@ -874,24 +967,8 @@ def stamp_applied_versions(
     return [str(r[0] or "") for r in rows]
 
 
-def list_pending_for_freeze(
-    session: Any, *, domain_key: str, draft_node_ids: Iterable[str]
-) -> list[dict]:
-    """公開前チェック用「採用済みでまだ次版に反映されていない候補」（§5.4）。
-
-    対象は当該ドメインの ``status='accepted'`` かつ ``applied_version=''`` のうち、
-    ``draft_node_id`` が空（まだ下書きに取り込んでいない）か、現在の下書きの node 集合
-    に無い（取り込みが失われた）もの。``draft_node_ids`` が空なら「下書きに何も入って
-    いない」ので該当する採用済み候補はすべて未反映として返す。
-
-    各要素は ``{cluster_key, proposed_label, layer, parent_region_id, draft_node_id,
-    review_note}``。**件数ではなくラベルの列挙**で提示するための形（LS5）。
-    ``proposed_label`` は生きている信号の最新表記、信号が無ければ cluster_key から
-    復元した正規化ラベルへ縮退する。
-    """
-    domain = _clean(domain_key)
-    if not domain:
-        return []
+def _fetch_unapplied_accepted(session: Any, domain: str) -> list[dict]:
+    """当該ドメインの ``accepted`` かつ ``applied_version=''`` の判断行（凍結のゲートの母集合）。"""
     rows = session.execute(
         sa_text(
             f"""
@@ -907,14 +984,148 @@ def list_pending_for_freeze(
             "accepted": schema.DECISION_STATUS_ACCEPTED,
         },
     ).fetchall()
-    if not rows:
+    return [_decision_row_to_dict(r) for r in rows or ()]
+
+
+#: 導出から外れた判断行の理由（``orphaned_decisions[].reason``）。文言は
+#: ``core/atlas_review_display.ORPHANED_REASON_FACTS`` が正本（ここは語彙だけ）。
+ORPHAN_REASON_BELOW_THRESHOLD = "below_threshold"
+ORPHAN_REASON_RESOLVED = "resolved"
+ORPHAN_REASON_NO_SIGNALS = "no_signals"
+
+
+def list_orphaned_decisions(
+    session: Any,
+    *,
+    domain_key: str,
+    derived_cluster_keys: Iterable[str],
+    cluster_states: Mapping[str, str] | None = None,
+    draft_node_ids: Iterable[str] | None = None,
+    current_version: str = "",
+    visible_document_ids: Iterable[str] | None = None,
+) -> list[dict]:
+    """導出の条件から外れたのに凍結のゲートが読む「採用済み・未反映」の判断行（IK-0884）。
+
+    凍結のゲート（:func:`list_pending_for_freeze`）は判断行だけを読み、候補一覧
+    （:func:`derive_candidates`）は導出された候補に判断を重ねる。導出の規則・材料が
+    変わって cluster が候補の条件を外れると、判断行はゲートに残るのに一覧から消える。
+    ここではその行を**別枠で**返し、画面に「戻す・取り込む」の入口を置けるようにする
+    （ゲートは緩めない — 教員の採用を黙って捨てない）。
+
+    各要素は ``{cluster_key, proposed_label, layer, layer_label, parent_region_id,
+    reason, in_draft, documents, decision}``（+ 閲覧できない論文を外したときだけ
+    ``documents_hidden: True``）。``documents`` は通常の候補と同じ形の根拠（題名・理由・
+    逐語 — IK-0937）で、``visible_document_ids`` を渡すと閲覧できない論文を外す
+    （fail-closed。件数ではなく真偽だけを返す）。``reason`` は :data:`ORPHAN_REASON_BELOW_THRESHOLD` /
+    :data:`ORPHAN_REASON_RESOLVED` / :data:`ORPHAN_REASON_NO_SIGNALS`。``in_draft`` は
+    取り込んだ node が現在の下書きにある（＝凍結のゲートでは止まらない）こと。
+    件数フィールドは作らない（LS5）。
+    """
+    domain = _clean(domain_key)
+    if not domain:
+        return []
+    derived = {_clean(k) for k in (derived_cluster_keys or ()) if _clean(k)}
+    decisions = [
+        d for d in _fetch_unapplied_accepted(session, domain) if d["cluster_key"] not in derived
+    ]
+    if not decisions:
+        return []
+    states = dict(cluster_states or {})
+    node_set = {_clean(n) for n in (draft_node_ids or ()) if _clean(n)}
+    latest: dict[str, dict] = {}
+    members_by_key: dict[str, list[dict]] = {}
+    for signal in _fetch_active_signals(session, domain_key=domain, with_titles=True):
+        key = schema.build_cluster_key(
+            signal["domain_key"], signal["parent_region_id"], signal["proposed_label"]
+        )
+        latest.setdefault(key, signal)
+        members_by_key.setdefault(key, []).append(signal)
+    out: list[dict] = []
+    for decision in decisions:
+        key = decision["cluster_key"]
+        signal = latest.get(key)
+        _, parent_region_id, normalized_label = schema.parse_cluster_key(key)
+        layer = (signal or {}).get("layer") or (
+            schema.GAP_LAYER_CONCEPT if parent_region_id else schema.GAP_LAYER_REGION
+        )
+        state = states.get(key)
+        if state == "resolved":
+            reason = ORPHAN_REASON_RESOLVED
+        elif signal is None:
+            reason = ORPHAN_REASON_NO_SIGNALS
+        else:
+            reason = ORPHAN_REASON_BELOW_THRESHOLD
+        # 根拠の論文と逐語（IK-0937）。信号が残っている判断は、通常の候補と同じ形で
+        # 運ぶ（外れた判断を原文に照らして判断し直せるように）。信号が消えた判断
+        # （no_signals）は運ぶ材料が無い — 理由の事実文がそれを言う。
+        documents, hidden = gate_documents(
+            _paper_documents(_fold_by_paper(members_by_key.get(key, [])), _clean(current_version)),
+            visible_document_ids,
+        )
+        item = {
+            "cluster_key": key,
+            "proposed_label": (signal or {}).get("proposed_label") or normalized_label,
+            "layer": layer,
+            "layer_label": schema.layer_label(layer),
+            "parent_region_id": (signal or {}).get("parent_region_id") or parent_region_id,
+            "reason": reason,
+            "in_draft": bool(
+                decision["draft_node_id"] and decision["draft_node_id"] in node_set
+            ),
+            "documents": documents,
+            "decision": decision,
+        }
+        if hidden:
+            item["documents_hidden"] = True
+        out.append(item)
+    return out
+
+
+def cluster_documents(session: Any, *, domain_key: str, cluster_key: str) -> list[dict]:
+    """1 cluster の生きている信号から、候補と同じ形の根拠の論文を返す（IK-0937 / IK-0939）。
+
+    候補の条件を外れた（導出に無い）判断でも、信号が残っていれば根拠を引ける。
+    可視性ゲートは呼び出し側（:func:`gate_documents`）。
+    """
+    domain = _clean(domain_key)
+    key = _clean(cluster_key)
+    if not domain or not key:
+        return []
+    members = [
+        signal
+        for signal in _fetch_active_signals(session, domain_key=domain, with_titles=True)
+        if schema.build_cluster_key(
+            signal["domain_key"], signal["parent_region_id"], signal["proposed_label"]
+        )
+        == key
+    ]
+    return _paper_documents(_fold_by_paper(members), "")
+
+
+def list_pending_for_freeze(
+    session: Any, *, domain_key: str, draft_node_ids: Iterable[str]
+) -> list[dict]:
+    """公開前チェック用「採用済みでまだ次版に反映されていない候補」（§5.4）。
+
+    対象は当該ドメインの ``status='accepted'`` かつ ``applied_version=''`` のうち、
+    ``draft_node_id`` が空（まだ下書きに取り込んでいない）か、現在の下書きの node 集合
+    に無い（取り込みが失われた）もの。``draft_node_ids`` が空なら「下書きに何も入って
+    いない」ので該当する採用済み候補はすべて未反映として返す。
+
+    各要素は ``{cluster_key, proposed_label, layer, parent_region_id, draft_node_id,
+    review_note, decision, documents}``（``decision`` は帰属の材料・``documents`` は根拠の
+    論文 — IK-0939。どちらも表示用の写しは route が作る）。**件数ではなくラベルの列挙**で提示するための形（LS5）。
+    ``proposed_label`` は生きている信号の最新表記、信号が無ければ cluster_key から
+    復元した正規化ラベルへ縮退する。
+    """
+    domain = _clean(domain_key)
+    if not domain:
+        return []
+    pending = _fetch_unapplied_accepted(session, domain)
+    if not pending:
         return []
 
     node_set = {_clean(n) for n in (draft_node_ids or []) if _clean(n)}
-    pending = [
-        _decision_row_to_dict(r)
-        for r in rows
-    ]
     pending = [
         d
         for d in pending
@@ -924,11 +1135,13 @@ def list_pending_for_freeze(
         return []
 
     labels: dict[str, dict] = {}
-    for signal in _fetch_active_signals(session, domain_key=domain):
+    members_by_key: dict[str, list[dict]] = {}
+    for signal in _fetch_active_signals(session, domain_key=domain, with_titles=True):
         key = schema.build_cluster_key(
             signal["domain_key"], signal["parent_region_id"], signal["proposed_label"]
         )
         labels.setdefault(key, signal)
+        members_by_key.setdefault(key, []).append(signal)
 
     out: list[dict] = []
     for decision in pending:
@@ -947,15 +1160,24 @@ def list_pending_for_freeze(
                 ),
                 "draft_node_id": decision["draft_node_id"],
                 "review_note": decision["review_note"],
+                # 帰属（IK-0939）。表示名への写しは route が行う（UUID を応答に出さない）。
+                "decision": decision,
+                # 根拠の論文（IK-0939。可視性ゲートは route が gate_documents で掛ける）。
+                "documents": _paper_documents(
+                    _fold_by_paper(members_by_key.get(key, [])), ""
+                ),
             }
         )
     return out
 
 
 __all__ = [
+    "cluster_documents",
     "derive_candidates",
+    "gate_documents",
     "get_decision",
     "list_active_signals",
+    "list_orphaned_decisions",
     "list_pending_for_freeze",
     "mark_incorporated",
     "record_detect_audit",

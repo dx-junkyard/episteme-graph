@@ -430,7 +430,8 @@ def get_atlas(
             nodes.setdefault(
                 region.id,
                 {
-                    "label": f"{region.label}（霧の領域）",
+                    # 名前は名前だけ（IK-0941）。霧の状態は pill（状態語）が言う。
+                    "label": region.label,
                     "pill": atlas_state.PILL_LABELS[atlas_state.STATUS_FOG],
                     "pill_note": atlas_state.pill_note_for(
                         atlas_state.STATUS_FOG, atlas_state.STATUS_FOG

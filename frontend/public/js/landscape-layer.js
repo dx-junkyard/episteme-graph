@@ -28,6 +28,8 @@
   "use strict";
 
   const SVG_NS = "http://www.w3.org/2000/svg";
+  // 分野の地図の版の呼び名（IK-0942。正本 core/label_vocab.py::ATLAS_VERSION_PREFIX の逐語ミラー）
+  const ATLAS_VERSION_PREFIX = "地図 版 ";
   const API_BASE = "/api";
 
   // 同一ノードに載る論文が多いときの見せ方（§10.1）。4件までは横に並べ、
@@ -143,7 +145,7 @@
     const n = typeof corpus.source_document_count === "number" ? corpus.source_document_count : 0;
     const version = skeletonVersionText(data);
     const notes = [];
-    if (version) notes.push("骨格版 " + version);
+    if (version) notes.push(ATLAS_VERSION_PREFIX + version);
     if (includesInferred(data)) notes.push("AI推定を含む");
     let text = "登録済み論文 " + n + " 件の解析から生成";
     if (notes.length) text += "（" + notes.join("・") + "）";

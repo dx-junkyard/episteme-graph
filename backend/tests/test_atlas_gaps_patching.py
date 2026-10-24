@@ -313,7 +313,11 @@ class TestPatchAppliesToTheSkeleton:
             proposed_label="Cosmic Web",
         )
         summary = result["summary"]
-        assert "Cosmic Web" in summary and result["node_id"] in summary
+        assert "Cosmic Web" in summary
+        # 確認文に内部の id を埋め込まない（IK-0850）。親領域は名前で言う。
+        assert result["node_id"] not in summary
+        assert "id:" not in summary
+        assert result["parent_region_label"] and result["parent_region_label"] in summary
         for forbidden in ("穴", "不足", "未整備", "埋めましょう", "べきです"):
             assert forbidden not in summary
 
@@ -326,6 +330,7 @@ class TestPatchAppliesToTheSkeleton:
             "node_id",
             "layer",
             "parent_region_id",
+            "parent_region_label",
             "node",
             "summary",
         }

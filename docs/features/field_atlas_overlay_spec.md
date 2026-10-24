@@ -653,3 +653,29 @@ index.html を **200 で**返し、フロントの `res.ok` 判定をすり抜�
 - パンくずは分野の表示名（`atlas_domain_meta.name` → 同梱 `domain.json`）。無ければ
   「名前が登録されていない分野」。トップレベルに `domain_name` を追加（`cartridge` は取得キー
   として互換のまま）。
+
+## 15. 追補（2026-10-23 第 25 周 第 3 波・IK-0940 / IK-0941 / IK-0942・migration なし）
+
+- **霧の定義の是正（IK-0940）**: L1 の霧（`kind="fog"`）は「論文の配置も解析成果もない領域」。
+  `atlas_state.load_corpus_snapshot` が `landscape_placements` の生きている配置（`status ∈
+  landscape_schema.LEARNER_VISIBLE_STATUSES` = confirmed / inferred / review_required。旧版の node_id は
+  `atlas_correspondence.build_node_resolver` で現行版へ読み替え）を `CorpusSnapshot.placed_node_ids` に読み、
+  `compute_overlay_rows` が領域そのもの・その概念のどれかに配置があれば灯す。論文の海（`corpus_view` /
+  `corpus-sea.js` の `densityIndex` — IK-0847）と同じ状態集合で、霧の判定の正本はこの 1 箇所。
+  - 配置は**真偽だけ**を使い、記帳の件数（`evidence.coverage`）には足さない（CR3）。配置だけで灯った領域の
+    検証行は `atlas_state.REGION_PLACED_ONLY_VERIFY_LINE`「この領域には論文が置かれています（論文の位置）。
+    検証の記録（台帳）はまだありません。」。
+  - キャッシュの陳腐化検知（`_SIGNATURE_SQL`）に `landscape_placements.updated_at` の最大値を足した。
+  - CR2（コース学習の非改変）は霧の**定義の是正**であって学習経路の変更ではない、として抵触しないと判断した
+    （指揮者の判断・推奨どおり）。霧の固定文 `FOG_VERIFY_LINE` / ピル注記は意味どおりになった。
+  - 残課題: L1 のキャッシュはドメイン単位のため、配置の有無は**全利用者の配置**で決まる（海は本人が閲覧できる
+    論文だけで決める）。L1 が言うのは「灯り／霧」の真偽だけで題名・件数は出さないので開示の差は小さいが、
+    閲覧できない論文だけが置かれた領域では L1 が灯り、海は霧になりうる。利用者別の判定にするかは実例を待つ。
+- **状態を名前に焼かない（IK-0941）**: 霧の領域を詳細パネル用の `nodes[region_id]` に載せるときの `label` は
+  領域名のまま（旧「〇〇（霧の領域）」）。霧であることは `pill`（「論文未投入」）が言う。論文の海の
+  `anchorLabel` は領域アンカーなら `regionById` の名前を最初に引く。
+- **版の呼び名（IK-0942）**: 教員・学習者とも「地図 版 X」の 1 形式。正本 `label_vocab.ATLAS_VERSION_PREFIX` /
+  `atlas_version_label()`、JS は逐語ミラー（admin.js `atlasVersionText` / landscape-layer.js /
+  atlas-threads-layer.js / app.js / admin-release-review.js。一致は `test_atlas_review_round25_r3.py`）。
+  分野の地図タブの状態行から「学習者に公開中: 版 X」を外した（要約カードが言う）。論文ディスカバリー・
+  レーダーの「骨格 版」は面 C の外として残した（残課題）。

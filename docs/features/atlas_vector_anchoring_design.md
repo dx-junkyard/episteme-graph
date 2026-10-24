@@ -395,3 +395,26 @@ Fable 5 指揮 + Opus 5 サブエージェント4体（core / API / 統合 / フ
   ③CostGate は in-memory・プロセスローカル（既存層と同じ許容）。
 - **Docker E2E（実 DB での migration 074 適用・freeze フック実走・実 embedding）は
   未実施** — docker 環境復帰後の確認事項。
+
+## 13. 第 25 周の追補（2026-10-23・migration なし・IK-0889 / IK-0887）
+
+- 「ベクトル索引」区画は保存値（件数・ISO 時刻）をそのまま描かない。`GET .../vectors/status` が
+  `facts`（用途の一文 → 最新 / 一部欠け / 未構築 / 版ずれの要否の一文。正本 `core/atlas_review_display.py`
+  の `VECTOR_INDEX_*`）と `built_at_label`（「YYYY-MM-DD HH:MM（UTC）」）を返し、refresh は `fact`
+  （全件再利用なら「変更はありませんでした」）を返す。`embedded_nodes` / `total_nodes` は運用状態の事実として
+  API に残す（VA2 の例外は不変）が画面には出さない。
+- §9 の `ANCHOR_NEARNESS_THRESHOLD_NEAR`（0.55）はラベル×ラベルで校正した値で、関係（辺）の候補が使う
+  プロトタイプ×プロトタイプの分布では未確認（IK-0887 の仮説）。分位を読む read-only スクリプト
+  `backend/scripts/atlas_anchor_pair_distribution.py` を置いた。値を変えるときはその出力をこの節に実測として
+  記録してから変える（2026-10-23 時点で未実測・値は不変）。
+
+
+### 13.1 第 3 波の追補（2026-10-23・IK-0887 残り / IK-0942）
+
+- **閾値の校正は未実施のまま**（事実として記録する）: `ANCHOR_NEARNESS_THRESHOLD_NEAR`（0.55）を
+  プロトタイプ×プロトタイプの分布で校正する作業は、分位スクリプト
+  `backend/scripts/atlas_anchor_pair_distribution.py` を**実 DB（砂場を含む）で走らせない規律**のため、
+  この周でも行っていない。コードの既定値は変えない。値を変えるときは、オーナーまたは運転者が対象 DB で
+  スクリプトを 1 回走らせ、その分位（数値は教員・学習者の画面に出さない設計書の記録として）をこの節に
+  書いてから変える。学習者の糸の一色問題（IK-0887 残り）は校正と根拠の一文の配線が揃うまで残課題。
+- 索引の区画の版の言い方は「現在の公開版（地図 版 X）」（`VECTOR_INDEX_*`・IK-0942）。

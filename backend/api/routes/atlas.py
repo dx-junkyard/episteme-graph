@@ -26,6 +26,7 @@ from core import atlas_correspondence
 from core import atlas_lifecycle
 from core import decision_context
 from core import atlas_reports
+from core import atlas_review_display
 from core import atlas_store
 from core import cartridges as cartridges_module
 from core import llm_policy
@@ -303,6 +304,56 @@ def _edge_pair_label(
     return f"{labels.get(left, left)} — {labels.get(right, right)}"
 
 
+def _freeze_readiness(
+    session,
+    cartridge_id: str,
+    draft: atlas.AtlasSkeleton,
+    frozen: atlas.AtlasSkeleton | None,
+    current_user: dict | None = None,
+) -> dict:
+    """凍結の可否（IK-0885）。**freeze と freeze-impact が同じこの関数を呼ぶ**。
+
+    ``current_user`` を渡すと、止めている採用ごとの帰属と根拠の写し（``pending_items``
+    — IK-0939）を足す。根拠の論文は本人が閲覧できるものだけを題名で列挙する。
+
+    材料は採用済み未反映のカテゴリギャップ候補（:func:`_pending_gap_candidates`）と
+    関係（辺）の候補（:func:`_pending_edge_candidates`）で、いずれも fail-open
+    （照会失敗で凍結という主要操作を止めない）。可否と事実文の決定は
+    ``atlas_lifecycle.freeze_readiness``。件数ではなくラベルの列挙で示す（LS5 / RE4）。
+    """
+    pending_gaps = _pending_gap_candidates(session, cartridge_id, draft)
+    pending_edges = _pending_edge_candidates(session, cartridge_id, draft)
+    pending_items: list[dict] = []
+    if pending_gaps or pending_edges:
+        # 止めている採用の帰属と根拠（IK-0939）。写しが作れなくても判定は変えない（fail-soft）。
+        try:
+            pending_items = atlas_review_display.pending_freeze_items(
+                session,
+                gap_items=pending_gaps,
+                edge_items=pending_edges,
+                edge_label=lambda item: _edge_pair_label(item, draft, frozen),
+                edge_origins=edge_store.origins_for_decisions(
+                    session, [item.get("edge_key") for item in pending_edges]
+                ),
+                visible_document_ids=(
+                    services.list_visible_document_ids(str(current_user.get("id") or ""))
+                    if current_user
+                    else None
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "atlas freeze: pending item context skipped for %s", cartridge_id, exc_info=True
+            )
+            _rollback_quietly(session)
+            pending_items = []
+    return atlas_lifecycle.freeze_readiness(
+        [str(item.get("proposed_label") or "") for item in pending_gaps],
+        [_edge_pair_label(item, draft, frozen) for item in pending_edges],
+        pending_items,
+    )
+
+
 def _skeleton_payload(skeleton: atlas.AtlasSkeleton | None) -> dict[str, Any] | None:
     if skeleton is None:
         return None
@@ -419,18 +470,29 @@ def get_atlas_skeleton_state(
 ) -> dict:
     """骨格のレビュー状態 (draft / 凍結済み) を返す (migration 027: DB が正本)。"""
     session = _skeleton_session()
+    provenance = None
     try:
         draft_row = atlas_store.load_draft(session, cartridge_id)
         frozen = atlas_store.load_learner_skeleton(cartridge_id, session)
+        # 版の出所は表示語に写して添える（IK-0850。取込経路のトークン・確認者の UUID を
+        # 画面に出さない。骨格 dict 自体は編集の材料なので触らない）。
+        try:
+            provenance = atlas_review_display.skeleton_provenance(session, frozen)
+        except Exception:  # noqa: BLE001 — 出所の表示語が作れなくても状態は返す
+            logger.warning("atlas skeleton state: provenance unavailable", exc_info=True)
+            provenance = None
     finally:
         session.close()
     draft_payload = _skeleton_payload(draft_row["skeleton"]) if draft_row else None
     if draft_payload is not None:
         draft_payload["revision"] = draft_row["revision"]
+    frozen_payload = _skeleton_payload(frozen)
+    if frozen_payload is not None and provenance is not None:
+        frozen_payload["provenance"] = provenance
     return {
         "cartridge_id": cartridge_id,
         "draft": draft_payload,
-        "frozen": _skeleton_payload(frozen),
+        "frozen": frozen_payload,
     }
 
 
@@ -817,36 +879,45 @@ def freeze_atlas_skeleton(
         correspondence = _correspondence_preview(
             session, cartridge_id, draft_row["skeleton"], current_frozen_for_impact
         )
-        pending_gaps = _pending_gap_candidates(session, cartridge_id, draft_row["skeleton"])
-        pending_edges = _pending_edge_candidates(
-            session, cartridge_id, draft_row["skeleton"]
+        # 凍結の可否は freeze-impact と同じ判定を読む (IK-0885)。
+        readiness = _freeze_readiness(
+            session,
+            cartridge_id,
+            draft_row["skeleton"],
+            current_frozen_for_impact,
+            current_user,
         )
     finally:
         session.close()
-    if pending_gaps:
+    if readiness["pending_labels"]:
         raise HTTPException(
             status_code=409,
             detail={
                 "message": "採用済みでまだ次版に反映されていない候補が残っています",
                 # 件数ではなくラベルの列挙で示す (LS5: 数値を見せない)。
-                "pending_labels": [
-                    str(item.get("proposed_label") or "") for item in pending_gaps
-                ],
+                "pending_labels": readiness["pending_labels"],
+                "facts": readiness["facts"],
+                **(
+                    {"pending_items": readiness["pending_items"]}
+                    if readiness.get("pending_items")
+                    else {}
+                ),
             },
         )
-    if pending_edges:
+    if readiness["pending_edges"]:
         # 関係（辺）の候補も gap と同列の弁を通す (atlas_relation_edges_design.md §5)。
         raise HTTPException(
             status_code=409,
             detail={
                 "message": "採用済みでまだ次版に反映されていない辺の候補が残っています",
                 # 件数ではなく「ラベルA — ラベルB」の列挙で示す (RE4: 数値を見せない)。
-                "pending_edges": [
-                    _edge_pair_label(
-                        item, draft_row["skeleton"], current_frozen_for_impact
-                    )
-                    for item in pending_edges
-                ],
+                "pending_edges": readiness["pending_edges"],
+                "facts": readiness["facts"],
+                **(
+                    {"pending_items": readiness["pending_items"]}
+                    if readiness.get("pending_items")
+                    else {}
+                ),
             },
         )
     draft = draft_row["skeleton"]
@@ -1180,6 +1251,10 @@ def get_atlas_freeze_impact(
         )
         impact["correspondence"] = _correspondence_preview(
             session, cartridge_id, draft_row["skeleton"], frozen
+        )
+        # 凍結の可否（IK-0885）。freeze が止める条件を、押す前の確認画面で先に言う。
+        impact["readiness"] = _freeze_readiness(
+            session, cartridge_id, draft_row["skeleton"], frozen, current_user
         )
     finally:
         session.close()

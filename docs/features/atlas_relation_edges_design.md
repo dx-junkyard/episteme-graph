@@ -251,3 +251,46 @@ Fable 5 指揮 + Opus 5 サブエージェント4体（core / 管理UI / 学習�
 索引が未構築 / 示せる組なし）で、数値を含まない（RE4）。`threads_for_domain` の戻り値契約
 （`{"available": False}` のみ）は不変で、理由文は route 層で合流する。フロントの
 `threads.available !== true` によるレイヤー非表示（RE2）も不変。
+
+### 11.y 第 25 周の是正（2026-10-23 追補・migration なし・IK-0846 / 0848 / 0849 / 0851）
+
+共起候補の `MIN_DOCUMENTS_FOR_EDGE` は論文の数で数える（同じ論文の重複取り込みは
+`core/document_refs.py` の同一性キーで 1 本に畳み、`documents` も 1 行）。`documents[]` の各行は両端の配置の
+理由と先頭の逐語引用を optional `endpoints[{node_id, node_label, reason, evidence_quote}]` で運ぶ
+（`weight` / `confidence` は SELECT もしない = RE4）。判断の帰属は gap と同じ `core/atlas_review_display.py` の
+投影（`provenance_line` は「AIによる推定 → …」）。採用済みの辺は[採用]と種類の選択を押せなくした（種類を
+変える操作は未提供）。見送り済みの表示で該当ゼロなら `dismissed_note`。学習者の「推定の糸」は不変。
+
+### 11.z 第 25 周 第 2 周の是正（2026-10-23 追補・migration なし・IK-0886 / 0887 / 0884 の辺版）
+
+- **並びと畳み（IK-0887）**: `derive_edge_candidates` の最終整列は「共起を持つ組 → 近さの順位
+  （`derive_vector_pairs` の順。値は持ち出さない）→ (from, to)」。教員の一覧は
+  `derive.cap_for_review`（近さだけの組は 1 ノード `REVIEW_MAX_PER_NODE`=2・全体 `REVIEW_MAX_TOTAL`=30。
+  共起と判断済みは畳まない）で絞り、畳んだら `folded_note`（件数なし）。`?show_all=true` で全部。
+  近さの段階ラベルは最上位帯しか通らず全件同じになるため**教員カードでは描かず**、`basis_line`
+  （何が近いと言っているか・論文の根拠の有無）を出す（DTO の `nearness_label` キーは互換のため残す）。
+  閾値は未校正のまま（仮説）。校正は `backend/scripts/atlas_anchor_pair_distribution.py`（保存済みベクトルを
+  読むだけ）の分位を VA 設計書 §9 に記録してから行う。
+- **下書きの状態（IK-0886）**: 一覧は下書きの edges を重ね、同じ無向ペアがあれば `in_draft: true` +
+  `in_draft_note`（[次版の下書きへ反映…] は押せない）。採用済みで種類があれば `direction_line`
+  （「A が B に依存する関係として記載されます」— 依存の向きは記載順 from → to）。preview にも `direction_line`。
+  下書きプレビュー（地図プレビュー）の下に「関係（辺）」の節を足した（アンカー `atlas.draft-relations`）。
+- **導出から外れた採用（IK-0884 の辺版）**: `store.list_unapplied_accepted` から今回の導出に無い行を
+  `orphaned_decisions` + `orphaned_note` で返す。辺の restore は見送りからしか戻せないので、画面の出口は
+  [見送り…]（理由必須）と [次版の下書きへ反映…]。
+
+
+### 11.z2 第 25 周 第 3 周の是正（2026-10-23 追補・第 3 波・migration なし・IK-0938 / 0939 / 0937 の辺版 / 0943）
+
+- **並び（IK-0938）**: route が `cap_for_review` の**前に** `atlas_review_display.order_decided_first` で
+  「採用済み・未反映（`pending_note`）→ 下書きに入っている → 未判断（共起 → 近さの順のまま）」に並べ直す
+  （畳みは入力の順を保つので帯は崩れない）。mark-incorporated に `result_line`（「『A — B』を次版の下書きに
+  追加しました。」）。
+- **帰属と根拠（IK-0939 / IK-0937 の辺版）**: 採用の根拠は採用時に記録した `mapping_justification`
+  （`vector_similarity` / `corpus_cooccurrence`）から `store.origins_for_decisions` で引き、`edge_basis_line` の
+  文にする（記録が無ければ `PENDING_EDGE_BASIS_NONE`。推測で埋めない = KR4）。導出から外れた判断・
+  freeze-impact の `pending_items`・incorporate-preview（`decision_line` / `basis_line` / `note_line` /
+  `timing_line`）に載せる。採用に任意のメモ。他の教員の採用を見送るとき（元から理由必須）は監査 metadata に
+  `overrides_other_teacher` と理由を残す。
+- **区画の説明（IK-0943）**: `EDGE_GROUP_INTRO` を定義の文に（出所チップの語「プロトタイプ近傍」「共起」の
+  意味を括弧で言う）。

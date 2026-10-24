@@ -268,12 +268,21 @@ class TestDensityIsGradedNotNumeric:
         for cls in (".corpus-sea-region.d1", ".corpus-sea-region.d2", ".corpus-sea-region.d3"):
             assert cls in css, f"密度クラス {cls} の定義が無い"
 
-    def test_fog_regions_keep_their_own_expression(self):
-        """霧の領域は骨格側の表現。密度クラスを重ねない（分岐で切り分ける）。"""
+    def test_fog_regions_come_from_the_sea_placements(self):
+        """霧は海自身の配置から決める（IK-0847）。骨格側の被覆（r.kind）で厚みを上書きしない。"""
         js = _read(CORPUS_JS)
         block = _extract_function_body(js, "function renderMap() {")
-        assert 'const fog = r.kind === "fog";' in block
+        assert "const fog = level === 0;" in block
         assert '? "corpus-sea-region fog"' in block
+        assert 'r.kind === "fog"' not in block
+
+    def test_concepts_hidden_by_skeleton_fog_still_get_a_circle(self):
+        """L1 に概念ノードが無い配置は、配置の region_id の箱に円を置く（IK-0847）。"""
+        js = _read(CORPUS_JS)
+        index = _extract_function_body(js, "function densityIndex(posById, regionById) {")
+        assert "p.region_id" in index
+        point = _extract_function_body(js, "function anchorPoint(nodeId, posById, regionById, density) {")
+        assert "anchorRegion" in point
 
     def test_anchor_radius_comes_from_fixed_bins(self):
         js = _read(CORPUS_JS)

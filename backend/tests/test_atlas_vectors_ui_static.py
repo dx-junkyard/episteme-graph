@@ -112,12 +112,14 @@ class TestVectorIndexPanel:
         assert 'var VECTOR_NO_SKELETON_TEXT = "凍結済みの骨格がありません";' in seg
 
     def test_coverage_fact_line_names_the_skeleton_version(self):
-        """索引済みの件数は運用状態の事実（VA2 の例外）。版を必ず添える（VA8）。"""
+        """IK-0889: 区画はサーバの facts（用途 → 要否。版を含む = VA8）を素通しし、
+        件数と ISO 時刻を描かない。facts が無い旧応答では版だけを添える。"""
         seg = _vector_segment()
         block = _fn_block(seg, "function renderVectorStatus(data) {")
-        assert "data.embedded_nodes" in block
-        assert "data.total_nodes" in block
-        assert '"索引済み: " + embedded + "/" + total + " ノード（骨格 版"' in block
+        assert "data.facts" in block
+        assert "data.built_at_label" in block
+        assert "data.embedded_nodes" not in block
+        assert "atlasVersionText(data.skeleton_version)" in block  # IK-0942
 
     def test_stale_fact_line(self):
         seg = _vector_segment()
@@ -252,7 +254,7 @@ class TestGapNearAnchorFlow:
         seg = self._gap_segment()
         block = _fn_block(seg, "function _gapNearAnchorHtml(candidate) {")
         assert '"既存の『" + near.node_label + "』の別表記の可能性があります"' in block
-        assert 'parts.push("骨格 版" + near.skeleton_version)' in block
+        assert "parts.push(atlasVersionText(near.skeleton_version))" in block  # IK-0942
         assert "near.nearness_label" in block
 
     def test_button_is_gated_on_the_annotation(self):

@@ -411,3 +411,55 @@ decided_by UUID / decided_at / created_at / updated_at
 - backend **8,708 passed / 25 skipped**・src **1,803 passed**（2026-08-11、backend/.venv ローカル実行）。
 - ガードレール `test_atlas_gaps_guardrails.py`（12 クラス）が §5.7 の①〜⑩を網羅（⑤ soft collector の構造検査は `src/tests/agents/landscape_placement/test_category_gaps.py` 側にも保持）。
 - 未実施: docker 実機 E2E（066 の実 DB 適用・実 LLM での gap 申告品質）・コミット分割。
+
+### 10-5. 第 25 周の是正（2026-10-23 追補・migration なし・IK-0846 / 0848 / 0850 / 0851）
+
+反復の閾値（`MIN_DOCUMENTS_FOR_CANDIDATE`）は documents の行ではなく**論文**で数える — 同じ arXiv 論文の PDF 版と
+TeX 版の取り込みは `core/document_refs.py::paper_identity_key`（source_url の arXiv ID → ファイル名 → 題名の
+arXiv 番号 → documents.id）で 1 本に畳み、支持論文の列挙は読める題名を持つ取り込みの 1 行にする。判断の帰属は
+route 層で `core/atlas_review_display.py` が表示名に写し（`decided_by` の UUID は返さない）、`decision_line` /
+`provenance_line`（「AIによる検出 → 〇〇が 日付 に採用しました」）を返す。取り込みの確認は内部 id を行にせず
+親領域を名前で言い（preview に `parent_region_label`）、版の出所は `frozen.provenance` の表示語を描く。
+近い既存項目との照合は `near_anchor_check {state, note}`（照合した / 索引が無いので照合していない /
+照合できなかった）で言い分け、見送り済みの表示で該当ゼロなら `dismissed_note`。文言はすべてサーバ側の定数。
+
+### 10-6. 第 25 周 第 2 周の是正（2026-10-23 追補・migration なし・IK-0884 / 0885 / 0851 残り）
+
+- **導出から外れた判断（IK-0884）**: 判断行（ゲートが読む）と読み時導出の候補（一覧が読む）が別のため、
+  IK-0846 で導出側だけが変わると「採用済み・未反映」の行が一覧から消え、凍結だけを止めていた。
+  `store.list_orphaned_decisions` が `accepted` ∧ `applied_version=''` で今回の導出に cluster が無い行を
+  返し、gap-candidates は `orphaned_decisions[{cluster_key, proposed_label, layer_label, reason, reason_fact,
+  in_draft, in_draft_note?, decision}]` + `orphaned_note` を別枠で返す（理由 3 語彙 = 反復に届かない / 現行版で
+  解消 / 信号なし。文言は `atlas_review_display.ORPHANED_REASON_FACTS`）。画面は区画末尾に
+  [候補へ戻す]（restore = 状態遷移・行は消さない）と [次版の下書きに取り込む…] を出す。**ゲートは緩めない**。
+- **凍結の可否を 1 つに（IK-0885）**: `routes/atlas.py::_freeze_readiness` を freeze と freeze-impact が呼び、
+  可否と事実文は `atlas_lifecycle.freeze_readiness`。freeze-impact は `readiness{ready, pending_labels,
+  pending_edges, facts}` と、関係の増減 `added_edges` / `removed_edges`（「A — B（依存）」のラベル列挙）を返す。
+  `FACT_SAME_NODE_SET` は領域・概念・関係のすべてが同じときだけ。画面は `ready:false` なら確認の段階で
+  [公開できません]（押せない）+ [止めている候補を見る] を出し、押してから 409 で止めない。
+- **候補ゼロの理由（IK-0851 残り）**: `derive_candidates(report=)` が真偽（信号あり / 反復に届かない /
+  重複を畳んで届かない / 現行版で解消 / 判断済みで外した）を書き、候補ゼロなら `empty_notes` を返す。
+- 判断の 1 行の主語は表示名を鉤括弧で区切る（「「〇〇」が 日付 に採用しました」— IK-0848 残り）。
+
+
+### 10-7. 第 25 周 第 3 周の是正（2026-10-23 追補・第 3 波・migration なし・IK-0937 / 0938 / 0939 / 0943）
+
+- **外れた判断に根拠を運ぶ（IK-0937）**: `store.list_orphaned_decisions` は同じ cluster の active 信号を
+  `_fold_by_paper` → `_paper_documents`（通常の候補と同じ 1 箇所）で畳み、`documents`（題名・理由・逐語・段階ラベル。
+  生 confidence なし）を返す。route は `services.list_visible_document_ids` を `visible_document_ids` に渡し、
+  `store.gate_documents` が閲覧できない論文を外して `documents_hidden: true`（真偽だけ）を付ける（fail-closed）。
+  信号が消えた判断（no_signals）は運ぶ材料が無い — 理由の事実文がそれを言う。
+  **v2 見送り**: 採用の時点の根拠の写しを判断行に持つ案は、信号が消えて根拠を失う実例が出るまで保留（後戻り
+  しにくい構造のため。オーナー判断 4 の推奨どおり）。`store.cluster_documents` は取り込みの確認でも同じ根拠を引く。
+- **判断済みを先頭の帯に（IK-0938）**: 一覧は `atlas_review_display.order_decided_first` で
+  「採用済み・未反映（`pending_note` 付き）→ 下書きに入っている → それ以外」に安定ソート（帯の中は導出の順）。
+  mark-incorporated の応答に `result_line`（「『X』を次版の下書きに追加しました。」）。
+- **確定の手前に帰属と根拠（IK-0939）**: freeze-impact / freeze 409 の `readiness.pending_items[{kind, label,
+  decision_line, basis_line, note_line}]`（`atlas_review_display.pending_freeze_items`。判断者は表示名・根拠の論文は
+  閲覧できるものの題名だけ）。incorporate-preview に `decision_line` / `basis_line` / `note_line` / `timing_line`
+  （「下書きの間は学習者に表示されません。公開（凍結）すると…項目として出ます。」）。採用に任意のメモ欄
+  （既存 `review_note`。見送りの理由必須は不変）。**他の教員の採用を候補へ戻すときは理由必須**（route
+  `_overrides_other_teacher` → 422・監査 metadata に `overrides_other_teacher` / `review_note`）。凍結を止める
+  規則（採用済み・未反映は止める）は緩めていない。
+- **区画の説明（IK-0943）**: `GAP_GROUP_INTRO` は定義の文「2 本以上の論文が、この地図にまだ無い同じ項目に
+  触れたとき、ここに候補として出ます。」（候補ゼロでも矛盾しない）。

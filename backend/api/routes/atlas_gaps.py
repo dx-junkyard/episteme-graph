@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 
 import services
 from core import atlas
+from core import atlas_review_display
 from core import atlas_store
 from core.atlas_gaps import patching as gap_patching
 from core.atlas_gaps import schema as gap_schema
@@ -60,6 +61,9 @@ _DETAIL_NO_DRAFT = (
 )
 _DETAIL_NODE_NOT_IN_DRAFT = (
     "この項目は次版の下書きにありません。下書きを保存してから記録してください。"
+)
+_DETAIL_OVERRIDE_REASON_REQUIRED = (
+    "ほかの教員が採用した候補を戻すときは、理由を書いてください（記録に残ります）。"
 )
 _DETAIL_LABEL_UNRESOLVED = "取り込む項目の名前が決まりません。名前を指定してください。"
 
@@ -135,6 +139,18 @@ def _record_gap_event(
         )
     except Exception:  # noqa: BLE001
         logger.warning("category gap review event skipped", exc_info=True)
+
+
+def _overrides_other_teacher(existing: dict | None, actor_id: str) -> bool:
+    """既存の判断が別の教員の採用か（IK-0939）。判断者の記録が無い採用も「別の人」と扱う。"""
+    if not existing or str(existing.get("status") or "") != gap_schema.DECISION_STATUS_ACCEPTED:
+        return False
+    return str(existing.get("decided_by") or "").strip() != str(actor_id or "").strip()
+
+
+def _visible_document_ids(current_user: dict) -> set[str]:
+    """本人が閲覧できる document の集合（失敗は空集合 = fail-closed。services 側が保証）。"""
+    return services.list_visible_document_ids(str(current_user.get("id") or ""))
 
 
 def _candidate_for_cluster(
@@ -215,37 +231,113 @@ def list_atlas_gap_candidates(
     try:
         frozen = _frozen_or_404(session, cartridge_id)
         version = str(getattr(frozen, "version", "") or "")
+        derive_report: dict = {}
         candidates = gap_store.derive_candidates(
             session,
             domain_key=cartridge_id,
             frozen_skeleton=frozen,
             current_version=version,
             include_dismissed=include_dismissed,
+            report=derive_report,
         )
         # 近傍注記（VA層 §7。読み時導出・保存しない）。ベクトル層が使えなければ
         # ``near_anchor`` キーが付かないだけで、候補一覧は従来と完全に同じ形で返る。
+        # 照合の状態（IK-0851: 「照合して該当なし」と「索引が無いので照合していない」を
+        # 同じ空にしない）は annotate が ``report`` に書く。書かれなければキーを付けない。
+        anchor_report: dict = {}
         try:
             from core.atlas_vectors.annotate import annotate_gap_clusters
 
             candidates = annotate_gap_clusters(
-                session, cartridge_id, version, candidates
+                session, cartridge_id, version, candidates, report=anchor_report
             )
         except Exception:  # noqa: BLE001 — 注記の失敗でレビューキューを壊さない
             logger.warning(
                 "atlas gap candidates: anchor annotation unavailable for %s (non-fatal)",
                 cartridge_id, exc_info=True,
             )
+            anchor_report = {"state": atlas_review_display.NEAR_ANCHOR_UNAVAILABLE}
+        # 判断の帰属は表示名に写し、判断者の UUID は返さない（IK-0848）。
+        candidates = atlas_review_display.project_decisions(
+            session, candidates, origin_prefix=atlas_review_display.ORIGIN_PREFIX_GAP
+        )
         draft_row = atlas_store.load_draft(session, cartridge_id)
+        # 導出から外れた「採用済み・未反映」の判断行（IK-0884。凍結のゲートが読む行を
+        # 一覧にも出す — ゲートは緩めない）。失敗しても一覧は返す（fail-soft）。
+        orphaned: list[dict] = []
+        try:
+            orphaned = atlas_review_display.project_orphaned_decisions(
+                session,
+                gap_store.list_orphaned_decisions(
+                    session,
+                    domain_key=cartridge_id,
+                    derived_cluster_keys=[
+                        c.get("cluster_key") for c in candidates
+                    ],
+                    cluster_states=derive_report.get("cluster_states"),
+                    draft_node_ids=(
+                        _draft_node_ids(draft_row["skeleton"]) if draft_row else ()
+                    ),
+                    current_version=version,
+                    # 根拠の論文は閲覧できるものだけ（IK-0937・fail-closed）。
+                    visible_document_ids=_visible_document_ids(current_user),
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "atlas gap candidates: orphaned decisions unavailable for %s",
+                cartridge_id, exc_info=True,
+            )
+            orphaned = []
     finally:
         session.close()
 
-    return {
+    # 判断済みを先頭の帯に（IK-0938）: 採用済み・未反映 → 下書きに入っている → それ以外。
+    draft_nodes = _draft_node_ids(draft_row["skeleton"]) if draft_row else set()
+    candidates = atlas_review_display.order_decided_first(
+        candidates,
+        lambda c: bool(
+            (c.get("decision") or {}).get("draft_node_id")
+            and (c.get("decision") or {}).get("draft_node_id") in draft_nodes
+        ),
+    )
+    payload = {
         "cartridge_id": cartridge_id,
         "candidates": candidates,
         "skeleton_version": version,
         "draft_exists": draft_row is not None,
         "draft_revision": draft_row["revision"] if draft_row else None,
     }
+    check = atlas_review_display.near_anchor_check(anchor_report.get("state") or "")
+    if check is not None and candidates:
+        payload["near_anchor_check"] = check
+    dismissed_note = atlas_review_display.dismissed_none_note(
+        candidates,
+        include_dismissed=include_dismissed,
+        suppressed=gap_schema.SUPPRESSED_DECISION_STATUSES,
+    )
+    if dismissed_note:
+        payload["dismissed_note"] = dismissed_note
+    # 候補ゼロの理由（IK-0851 第 2 周。信号なし / 反復に届かない / 重複を畳んだ /
+    # 現行版で解消 / すべて判断済み を言い分ける。件数は出さない）。
+    if not candidates:
+        empty_notes = atlas_review_display.empty_reason_notes(derive_report)
+        if empty_notes:
+            payload["empty_notes"] = empty_notes
+    if orphaned:
+        payload["orphaned_decisions"] = orphaned
+        payload["orphaned_note"] = atlas_review_display.ORPHANED_NOTE
+    return payload
+
+
+def _project_own_decision(decision: dict | None, current_user: dict) -> dict | None:
+    """判断の応答を表示用に写す（判断者の UUID を出さない — IK-0848）。"""
+    return atlas_review_display.project_decision_for_response(
+        decision,
+        current_user,
+        session_factory=_session,
+        origin_prefix=atlas_review_display.ORIGIN_PREFIX_GAP,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +368,12 @@ def decide_atlas_gap_candidate(
     try:
         existing = gap_store.get_decision(session, cluster_key)
         old_status = str((existing or {}).get("status") or "")
+        overrides_other = _overrides_other_teacher(existing, decided_by)
+        restore_note = str(body.review_note or "").strip()
+        if action == ACTION_RESTORE and overrides_other and not restore_note:
+            # 他の教員の採用を候補へ戻すときは理由を必須にする（IK-0939。凍結の
+            # 規則は緩めない — 戻す判断を誰が何の理由でしたかを監査に残す）。
+            raise HTTPException(status_code=422, detail=_DETAIL_OVERRIDE_REASON_REQUIRED)
         if action == ACTION_RESTORE:
             decision = gap_store.restore_decision(
                 session, cluster_key=cluster_key, decided_by=decided_by
@@ -306,14 +404,19 @@ def decide_atlas_gap_candidate(
     finally:
         session.close()
 
+    audit_metadata: dict[str, Any] = {"action": audit_action, "cartridge_id": cartridge_id}
+    if overrides_other:
+        audit_metadata["overrides_other_teacher"] = True
+        if restore_note and action == ACTION_RESTORE:
+            audit_metadata["review_note"] = restore_note
     _record_gap_event(
         cluster_key,
         old_status,
         decision["status"],
         current_user.get("id"),
-        {"action": audit_action, "cartridge_id": cartridge_id},
+        audit_metadata,
     )
-    return {"cartridge_id": cartridge_id, "decision": decision}
+    return {"cartridge_id": cartridge_id, "decision": _project_own_decision(decision, current_user)}
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +460,27 @@ def preview_atlas_gap_incorporation(
             cluster_key=cluster_key,
             frozen=atlas_store.load_learner_skeleton(cartridge_id, session),
         )
+        # 確認画面に写す帰属と根拠（IK-0939）。写しが作れなくても確認は出す（fail-soft）。
+        context: dict = {}
+        try:
+            items = atlas_review_display.pending_freeze_items(
+                session,
+                gap_items=[
+                    {
+                        "proposed_label": "—",
+                        "decision": decision,
+                        "review_note": decision.get("review_note") or "",
+                        "documents": (candidate or {}).get("documents")
+                        or gap_store.cluster_documents(
+                            session, domain_key=cartridge_id, cluster_key=cluster_key
+                        ),
+                    }
+                ],
+                visible_document_ids=_visible_document_ids(current_user),
+            )
+            context = items[0] if items else {}
+        except Exception:  # noqa: BLE001
+            logger.warning("atlas gap preview: decision context skipped", exc_info=True)
     finally:
         session.close()
 
@@ -386,8 +510,15 @@ def preview_atlas_gap_incorporation(
         "node_id": built["node_id"],
         "layer": built["layer"],
         "parent_region_id": built["parent_region_id"],
+        # 確認画面は親領域を名前で言う（IK-0850。英字キーは保存の内部値）。
+        "parent_region_label": built.get("parent_region_label", ""),
         "proposed_label": label,
         "summary": built["summary"],
+        # 帰属・根拠・採用のメモ・公開の時点（IK-0939）。
+        "decision_line": context.get("decision_line", ""),
+        "basis_line": context.get("basis_line", ""),
+        "note_line": context.get("note_line", ""),
+        "timing_line": atlas_review_display.INCORPORATE_TIMING_GAP,
         "patched_draft": patched,
         "validation": validation,
         "revision": draft_row["revision"],
@@ -507,4 +638,20 @@ def mark_atlas_gap_incorporated(
             "draft_node_id": draft_node_id,
         },
     )
-    return {"cartridge_id": cartridge_id, "decision": updated}
+    node_label = ""
+    for region in getattr(draft_row["skeleton"], "regions", ()) or ():
+        if region.id == draft_node_id:
+            node_label = region.label or ""
+        for concept in getattr(region, "concepts", ()) or ():
+            if concept.id == draft_node_id:
+                node_label = concept.label or ""
+    payload = {
+        "cartridge_id": cartridge_id,
+        "decision": _project_own_decision(updated, current_user),
+    }
+    if node_label:
+        # 何を足したかを名指す結果文（IK-0938）。
+        payload["result_line"] = atlas_review_display.INCORPORATED_GAP_RESULT.format(
+            label=node_label
+        )
+    return payload

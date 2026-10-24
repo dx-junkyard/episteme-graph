@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 
 import services
 from core import atlas
+from core import atlas_review_display
 from core import atlas_store
 from core.atlas_edges import derive as edge_derive
 from core.atlas_edges import patching as edge_patching
@@ -205,9 +206,22 @@ def list_atlas_edge_candidates(
     include_dismissed: bool = Query(
         False, description="true で見送り済みも含める（復帰導線用）"
     ),
+    show_all: bool = Query(
+        False,
+        description="true で、説明文どうしの近さだけの候補も畳まずに全部返す（IK-0887）",
+    ),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """関係（辺）の候補一覧（毎回導出。行として蓄積しない = RE6）。
+
+    第 25 周の追補（IK-0884 / IK-0886 / IK-0887）:
+
+    - 並びは共起（論文の根拠）→ 説明文どうしの近さの順。近さだけの候補は
+      ``show_all`` が無ければ上限で畳み ``folded_note``（件数なし）を返す。
+    - 各候補に ``basis_line``（何が近いと言っているかの一文）。採用済みで種別があれば
+      ``direction_line``（「A が B に依存する関係」— 向きは記載順）。
+    - 下書きに同じ関係が既にある候補は ``in_draft: true`` + ``in_draft_note``。
+    - 採用済み・未反映なのに導出から外れた判断は ``orphaned_decisions`` の別枠。
 
     返す形: ``{cartridge_id, candidates, skeleton_version, draft_exists, draft_revision}``。
     ``candidates`` の各要素は ``core/atlas_edges/derive.py`` の DTO（生 cosine なし・
@@ -235,17 +249,148 @@ def list_atlas_edge_candidates(
         candidates = edge_store.merge_decisions_into(
             candidates, decisions, include_dismissed=include_dismissed
         )
+        # 判断の帰属は表示名に写し、判断者の UUID は返さない（IK-0848）。
+        candidates = atlas_review_display.project_decisions(
+            session, candidates, origin_prefix=atlas_review_display.ORIGIN_PREFIX_EDGE
+        )
         draft_row = atlas_store.load_draft(session, cartridge_id)
+        orphaned: list[dict] = []
+        try:
+            derived_keys = {str(c.get("edge_key") or "") for c in candidates}
+            orphan_rows = []
+            for decision in edge_store.list_unapplied_accepted(
+                session, domain_key=cartridge_id
+            ):
+                if decision["edge_key"] in derived_keys:
+                    continue
+                _d, left, right = edge_schema.parse_edge_key(decision["edge_key"])
+                orphan_rows.append(
+                    {
+                        "edge_key": decision["edge_key"],
+                        "from_id": left,
+                        "to_id": right,
+                        "decision": decision,
+                    }
+                )
+            # 採用の根拠（IK-0937 の辺版）: 導出から外れた判断は候補の origins を持たない
+            # ので、採用の時点に記録した mapping_justification から根拠の一文を引く。
+            orphan_origins = edge_store.origins_for_decisions(
+                session, [row["edge_key"] for row in orphan_rows]
+            )
+            for row in orphan_rows:
+                row["origins"] = orphan_origins.get(row["edge_key"], [])
+            orphaned = atlas_review_display.project_decisions(
+                session, orphan_rows, origin_prefix=atlas_review_display.ORIGIN_PREFIX_EDGE
+            )
+        except Exception:  # noqa: BLE001 — 別枠が作れなくても一覧は返す
+            logger.warning(
+                "atlas edge candidates: orphaned decisions unavailable for %s",
+                cartridge_id, exc_info=True,
+            )
+            orphaned = []
     finally:
         session.close()
 
-    return {
+    labels = _concept_labels(frozen, draft_row["skeleton"] if draft_row else None)
+    draft_pairs = _draft_pair_set(draft_row["skeleton"]) if draft_row else set()
+    # 判断済みを先頭の帯に（IK-0938）: 採用済み・未反映 → 下書きに入っている → 未判断。
+    # 帯の中は導出の順（共起 → 近さ）のまま。畳み（cap_for_review）は入力の順を保つ。
+    candidates = atlas_review_display.order_decided_first(
+        candidates,
+        lambda c: edge_schema.undirected_pair(c.get("from_id"), c.get("to_id")) in draft_pairs,
+    )
+    keep = [
+        str(c.get("edge_key") or "")
+        for c in candidates
+        if isinstance(c.get("decision"), dict)
+    ]
+    folded = False
+    if not show_all:
+        candidates, folded = edge_derive.cap_for_review(candidates, keep_keys=keep)
+    candidates = [_annotate_candidate(c, labels, draft_pairs) for c in candidates]
+    for item in orphaned:
+        _annotate_candidate(item, labels, draft_pairs)
+        if not item.get("basis_line"):
+            item["basis_line"] = atlas_review_display.PENDING_EDGE_BASIS_NONE
+        item.pop("origins", None)
+        item["from_label"] = labels.get(item["from_id"], item["from_id"])
+        item["to_label"] = labels.get(item["to_id"], item["to_id"])
+
+    payload = {
         "cartridge_id": cartridge_id,
         "candidates": candidates,
         "skeleton_version": version,
         "draft_exists": draft_row is not None,
         "draft_revision": draft_row["revision"] if draft_row else None,
     }
+    # 見送り済みの表示で見送り済みがゼロのときの事実文（IK-0851）。
+    dismissed_note = atlas_review_display.dismissed_none_note(
+        candidates,
+        include_dismissed=include_dismissed,
+        suppressed=edge_schema.SUPPRESSED_DECISION_STATUSES,
+    )
+    if dismissed_note:
+        payload["dismissed_note"] = dismissed_note
+    if folded:
+        payload["folded_note"] = atlas_review_display.EDGE_FOLDED_NOTE
+    if orphaned:
+        payload["orphaned_decisions"] = orphaned
+        payload["orphaned_note"] = atlas_review_display.EDGE_ORPHANED_NOTE
+    return payload
+
+
+def _concept_labels(*skeletons) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for skeleton in skeletons:
+        for region in getattr(skeleton, "regions", ()) or ():
+            for concept in getattr(region, "concepts", ()) or ():
+                labels.setdefault(concept.id, concept.label or concept.id)
+            labels.setdefault(region.id, region.label or region.id)
+    return labels
+
+
+def _draft_pair_set(skeleton) -> set[tuple[str, str]]:
+    """下書きの辺の無向ペア集合。"""
+    out: set[tuple[str, str]] = set()
+    for edge in getattr(skeleton, "edges", ()) or ():
+        out.add(edge_schema.undirected_pair(edge.from_id, edge.to_id))
+    return out
+
+
+def _annotate_candidate(
+    candidate: dict, labels: dict[str, str], draft_pairs: set[tuple[str, str]]
+) -> dict:
+    """候補 1 件に表示の文（根拠・向き・下書きの状態）を足す（IK-0886 / IK-0887）。"""
+    basis = atlas_review_display.edge_basis_line(candidate.get("origins") or ())
+    if basis:
+        candidate["basis_line"] = basis
+    decision = candidate.get("decision") if isinstance(candidate.get("decision"), dict) else None
+    kind = str((decision or {}).get("edge_kind") or "")
+    if decision and decision.get("status") == edge_schema.DECISION_STATUS_ACCEPTED and kind:
+        left = str(candidate.get("from_id") or "")
+        right = str(candidate.get("to_id") or "")
+        direction = atlas_review_display.edge_direction_line(
+            kind,
+            candidate.get("from_label") or labels.get(left, left),
+            candidate.get("to_label") or labels.get(right, right),
+        )
+        if direction:
+            candidate["direction_line"] = direction
+    pair = edge_schema.undirected_pair(candidate.get("from_id"), candidate.get("to_id"))
+    if pair in draft_pairs:
+        candidate["in_draft"] = True
+        candidate["in_draft_note"] = atlas_review_display.EDGE_IN_DRAFT
+    return candidate
+
+
+def _project_own_decision(decision: dict | None, current_user: dict) -> dict | None:
+    """判断の応答を表示用に写す（判断者の UUID を出さない — IK-0848）。"""
+    return atlas_review_display.project_decision_for_response(
+        decision,
+        current_user,
+        session_factory=_session,
+        origin_prefix=atlas_review_display.ORIGIN_PREFIX_EDGE,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +427,14 @@ def decide_atlas_edge_candidate(
     pending_audits: list[dict] = []
     session = _session()
     try:
+        # 他の教員の採用を見送りへ動かすか（IK-0939）。見送りは元から理由必須なので、
+        # ここでは監査に「他の教員の採用を動かした」事実と理由を残すだけ。
+        existing = edge_store.get_decision(session, edge_key)
+        overrides_other = bool(
+            existing
+            and existing.get("status") == edge_schema.DECISION_STATUS_ACCEPTED
+            and str(existing.get("decided_by") or "").strip() != decided_by
+        )
         result = edge_store.decide(
             session,
             edge_key=edge_key,
@@ -320,9 +473,20 @@ def decide_atlas_edge_candidate(
             {
                 "action": str(audit.get("action") or action),
                 "cartridge_id": cartridge_id,
+                **(
+                    {
+                        "overrides_other_teacher": True,
+                        "review_note": str(body.review_note or "").strip(),
+                    }
+                    if overrides_other
+                    else {}
+                ),
             },
         )
-    return {"cartridge_id": cartridge_id, "decision": result.get("decision")}
+    return {
+        "cartridge_id": cartridge_id,
+        "decision": _project_own_decision(result.get("decision"), current_user),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +522,24 @@ def preview_atlas_edge_incorporation(
         if decision is None or decision["status"] != edge_schema.DECISION_STATUS_ACCEPTED:
             raise HTTPException(status_code=409, detail=_DETAIL_NOT_ACCEPTED)
         draft_row = _draft_or_409(session, cartridge_id)
+        # 確認画面に写す帰属と根拠（IK-0939）。写しが作れなくても確認は出す（fail-soft）。
+        context: dict = {}
+        try:
+            items = atlas_review_display.pending_freeze_items(
+                session,
+                edge_items=[
+                    {
+                        "edge_key": edge_key,
+                        "decision": decision,
+                        "review_note": decision.get("review_note") or "",
+                    }
+                ],
+                edge_label=lambda _item: "—",
+                edge_origins=edge_store.origins_for_decisions(session, [edge_key]),
+            )
+            context = items[0] if items else {}
+        except Exception:  # noqa: BLE001
+            logger.warning("atlas edge preview: decision context skipped", exc_info=True)
     finally:
         session.close()
 
@@ -383,9 +565,20 @@ def preview_atlas_edge_incorporation(
         "to_id": built["to_id"],
         "kind": built["kind"],
         "summary": built["summary"],
+        # 向きの一文（IK-0886。「依存」は向きを持つ — 記載順 from → to を文で言う）。
+        "direction_line": atlas_review_display.edge_direction_line(
+            built["kind"],
+            _concept_labels(draft_row["skeleton"]).get(built["from_id"], built["from_id"]),
+            _concept_labels(draft_row["skeleton"]).get(built["to_id"], built["to_id"]),
+        ),
         "patched_draft": patched,
         "validation": validation,
         "revision": draft_row["revision"],
+        # 帰属・根拠・採用のメモ・公開の時点（IK-0939）。
+        "decision_line": context.get("decision_line", ""),
+        "basis_line": context.get("basis_line", ""),
+        "note_line": context.get("note_line", ""),
+        "timing_line": atlas_review_display.INCORPORATE_TIMING_EDGE,
     }
 
 
@@ -466,4 +659,12 @@ def mark_atlas_edge_incorporated(
             "cartridge_id": cartridge_id,
         },
     )
-    return {"cartridge_id": cartridge_id, "decision": decision}
+    labels = _concept_labels(draft_row["skeleton"])
+    return {
+        "cartridge_id": cartridge_id,
+        "decision": _project_own_decision(decision, current_user),
+        # 何を足したかを名指す結果文（IK-0938）。
+        "result_line": atlas_review_display.INCORPORATED_EDGE_RESULT.format(
+            label=f"{labels.get(from_id, from_id)} — {labels.get(to_id, to_id)}"
+        ),
+    }

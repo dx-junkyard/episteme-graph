@@ -406,7 +406,8 @@ class TestDeriveEdgeCandidates:
             "skeleton_version",
         }
 
-    def test_sorted_by_node_ids(self):
+    def test_sorted_by_nearness_then_node_ids(self):
+        """IK-0887: 近さだけの組は近い順（値は出さない）。a—d は完全一致で a—c より近い。"""
         sk = skeleton(regions=[("r1", ["a"]), ("r2", ["c", "d"])])
         out = derive.derive_edge_candidates(
             placement_session([]),
@@ -418,7 +419,7 @@ class TestDeriveEdgeCandidates:
                 FakeAnchor("d", [1.0, 0.0]),
             ],
         )
-        assert [(i["from_id"], i["to_id"]) for i in out] == [("a", "c"), ("a", "d")]
+        assert [(i["from_id"], i["to_id"]) for i in out] == [("a", "d"), ("a", "c")]
 
     def test_empty_skeleton_is_fail_closed(self):
         session = placement_session([("d1", "Alpha", "a")])
@@ -665,7 +666,9 @@ class TestFreezeIntegration:
             session, domain_key=DOMAIN, draft_edge_pairs=[("c", "a")]
         )
         assert [p["edge_key"] for p in pending] == [other]
-        assert pending[0] == {
+        # 帰属の材料（IK-0939）は ``decision`` として足される（表示用の写しは route）。
+        assert pending[0]["decision"]["status"] == "accepted"
+        assert {k: v for k, v in pending[0].items() if k != "decision"} == {
             "edge_key": other,
             "from_id": "b",
             "to_id": "d",

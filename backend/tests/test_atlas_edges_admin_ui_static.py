@@ -169,8 +169,11 @@ class TestCandidateCard:
         block = _fn_block(seg, "function _edgeOriginChipsHtml(candidate) {")
         assert 'origin === "vector"' in block
         assert 'origin === "co_occurrence"' in block
-        # 近さの言葉はサーバの nearness_label をそのまま描く（RE4）
-        assert "candidate.nearness_label" in block
+        # IK-0887: 近さの段階ラベルは全件同じ（最上位帯しか通らない）ので描かず、
+        # 何が近いと言っているかはサーバの basis_line をカードに出す（RE4）。
+        assert "candidate.nearness_label" not in block
+        card = _fn_block(seg, "function _edgeCandidateCardHtml(candidate, draftExists, retired) {")
+        assert "candidate.basis_line" in card
 
     def test_origin_label_marks_the_candidate_as_unconfirmed(self):
         seg = _edge_segment()
@@ -202,7 +205,9 @@ class TestCandidateCard:
         assert 'id="atlas-edges-show-dismissed"' in seg
         assert "見送り済みも表示" in seg
         load = _fn_block(seg, "function loadEdgeCandidates() {")
-        assert 'edgeIncludeDismissed ? "?include_dismissed=true" : ""' in load
+        assert 'if (edgeIncludeDismissed) edgeQuery.push("include_dismissed=true");' in load
+        # IK-0887: 畳んだ近さだけの候補を全部出す指定も同じ問い合わせに載せる。
+        assert 'if (edgeShowAll) edgeQuery.push("show_all=true");' in load
 
     def test_kind_selection_survives_the_requeue_after_a_decision(self):
         """判断のたびにキューを読み直すため、選択途中の種類を持ち越す。"""
@@ -273,7 +278,7 @@ class TestDecisionButtons:
         assert "var kind = _edgeKindFromCard(card);" in block
         assert "if (!kind) { setEdgesStatus(EDGE_KIND_REQUIRED, true); return; }" in block
         idx_guard = block.index("if (!kind)")
-        idx_call = block.index('edgeDecide(edgeKey, "accept", "", kind);')
+        idx_call = block.index('edgeDecide(edgeKey, "accept", memo, kind);')
         assert idx_guard < idx_call
 
     def test_accept_note_states_that_the_draft_is_unchanged(self):
@@ -288,7 +293,8 @@ class TestDecisionButtons:
         seg = _edge_segment()
         assert 'var EDGE_DISMISS_REASON_REQUIRED = "見送りには理由が必要です";' in seg
         block = _fn_block(seg, "function handleEdgeAction(edgeKey, action, card) {")
-        assert 'var note = prompt("見送りの理由（必須）") || "";' in block
+        # 見送りの説明は理由を尋ねる場で出す（IK-0848）。
+        assert 'var note = prompt("見送りの理由（必須）\\n" + EDGE_DISMISS_NOTE) || "";' in block
         assert (
             "if (!note.trim()) { setEdgesStatus(EDGE_DISMISS_REASON_REQUIRED, true); return; }"
             in block
@@ -307,7 +313,8 @@ class TestDecisionButtons:
     def test_incorporate_is_gated_on_accepted_and_draft(self):
         seg = _edge_segment()
         card = _fn_block(seg, "function _edgeCandidateCardHtml(candidate, draftExists, retired) {")
-        assert '(!accepted || !draftExists || retired ? " disabled" : "")' in card
+        # IK-0886: 下書きに既にある関係はもう一度反映させない。
+        assert '(!accepted || !draftExists || retired || (candidate && candidate.in_draft) ? " disabled" : "")' in card
 
     def test_blocked_reasons_are_fact_sentences(self):
         seg = _edge_segment()

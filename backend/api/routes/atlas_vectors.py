@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 import services
+from core import atlas_review_display
 from core import atlas_store
 from core.atlas_vectors import builder as vector_builder
 from core.atlas_vectors import schema as vector_schema
@@ -225,13 +226,23 @@ def get_atlas_vector_status(
         session.close()
 
     built_at = coverage.get("built_at")
+    built_iso = built_at.isoformat() if hasattr(built_at, "isoformat") else None
+    embedded_nodes = int(coverage.get("embedded_rows") or 0)
     return {
         "available": True,
         "domain_key": cartridge_id,
         "skeleton_version": version,
         "total_nodes": len(labels),
-        "embedded_nodes": int(coverage.get("embedded_rows") or 0),
-        "built_at": built_at.isoformat() if hasattr(built_at, "isoformat") else None,
+        "embedded_nodes": embedded_nodes,
+        "built_at": built_iso,
+        # 表示用（IK-0889）: 日時は「YYYY-MM-DD HH:MM（UTC）」、区画の一文は用途 → 要否。
+        "built_at_label": atlas_review_display.display_datetime(built_iso),
+        "facts": atlas_review_display.vector_status_facts(
+            version=version,
+            total_nodes=len(labels),
+            embedded_nodes=embedded_nodes,
+            stale=bool(stale),
+        ),
         "stale": bool(stale),
     }
 
@@ -279,6 +290,10 @@ def refresh_atlas_vectors(
             "result": summary,
         },
     )
+    # 作り直しの結果の一文（IK-0889。全件再利用なら「変更はありませんでした」）。
+    fact = atlas_review_display.vector_refresh_fact(summary or {})
+    if fact:
+        summary = dict(summary, fact=fact)
     return summary
 
 

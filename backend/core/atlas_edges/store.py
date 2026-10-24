@@ -132,6 +132,50 @@ def _fetch_decisions(session: Any, edge_keys: Iterable[str]) -> dict[str, dict]:
     return out
 
 
+#: 判断の ``mapping_justification`` → 候補の出所（``origins`` の語彙）。採用の時点で
+#: route が候補の origin から変換して記録したものを逆に引く（IK-0939: 導出から外れた・
+#: 凍結を止めている判断にも「何を根拠にした採用か」を言うため。推測で埋めない）。
+_ORIGIN_BY_JUSTIFICATION = {
+    "vector_similarity": schema.ORIGIN_VECTOR,
+    "corpus_cooccurrence": schema.ORIGIN_CO_OCCURRENCE,
+}
+
+
+def origins_for_decisions(session: Any, edge_keys: Iterable[str]) -> dict[str, list[str]]:
+    """``edge_key -> [origin]``（判断行の ``mapping_justification`` から。記録なしはキーなし）。
+
+    空入力では SQL を発行しない。列が無い古い DB・照会失敗は空 dict（fail-soft —
+    根拠の一文が出ないだけで、判断も凍結のゲートも変わらない）。
+    """
+    keys = sorted({_clean(k) for k in (edge_keys or []) if _clean(k)})
+    if not keys:
+        return {}
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT edge_key, COALESCE(mapping_justification, '')
+                  FROM atlas_edge_decisions
+                 WHERE edge_key = ANY(:keys)
+                """
+            ),
+            {"keys": keys},
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas edges: justification lookup failed (non-fatal)", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return {}
+    out: dict[str, list[str]] = {}
+    for row in rows or ():
+        origin = _ORIGIN_BY_JUSTIFICATION.get(_clean(row[1]))
+        if origin:
+            out[_clean(row[0])] = [origin]
+    return out
+
+
 def get_decision(session: Any, edge_key: str) -> dict | None:
     """1件の判断（無ければ ``None``）。"""
     key = _clean(edge_key)
@@ -435,17 +479,11 @@ def stamp_applied_versions(
     return [_clean(r[0]) for r in (rows or [])]
 
 
-def list_pending_for_freeze(
-    session: Any, *, domain_key: str, draft_edge_pairs: Iterable[Any]
-) -> list[dict]:
-    """公開前チェック用「採用済みでまだ次版の下書きに入っていない辺」（§5）。
+def list_unapplied_accepted(session: Any, *, domain_key: str) -> list[dict]:
+    """当該ドメインの ``accepted`` かつ ``applied_version=''`` の判断行（凍結のゲートの母集合）。
 
-    対象は当該ドメインの ``status='accepted'`` かつ ``applied_version=''`` のうち、
-    無向ペアが現在の下書きの edges に**無い**もの。``draft_edge_pairs`` が空なら
-    「下書きに辺が1本も無い」ので該当する採用済み候補はすべて未反映として返す。
-
-    各要素は ``{edge_key, from_id, to_id, edge_kind, review_note}``。**件数ではなく
-    ラベルの列挙**で提示するための形（RE4。ラベルの解決は骨格を持つ route 側）。
+    IK-0884 と同じ構造: 候補一覧は読み時導出に判断を重ねるので、導出から外れた採用は
+    一覧から消えるのにゲートには残る。一覧の別枠はこの行から作る。
     """
     domain = _clean(domain_key)
     if not domain:
@@ -465,13 +503,31 @@ def list_pending_for_freeze(
             "accepted": schema.DECISION_STATUS_ACCEPTED,
         },
     ).fetchall()
-    if not rows:
+    return [_decision_row_to_dict(row) for row in rows or ()]
+
+
+def list_pending_for_freeze(
+    session: Any, *, domain_key: str, draft_edge_pairs: Iterable[Any]
+) -> list[dict]:
+    """公開前チェック用「採用済みでまだ次版の下書きに入っていない辺」（§5）。
+
+    対象は当該ドメインの ``status='accepted'`` かつ ``applied_version=''`` のうち、
+    無向ペアが現在の下書きの edges に**無い**もの。``draft_edge_pairs`` が空なら
+    「下書きに辺が1本も無い」ので該当する採用済み候補はすべて未反映として返す。
+
+    各要素は ``{edge_key, from_id, to_id, edge_kind, review_note, decision}``。**件数ではなく
+    ラベルの列挙**で提示するための形（RE4。ラベルの解決は骨格を持つ route 側）。
+    """
+    domain = _clean(domain_key)
+    if not domain:
+        return []
+    decisions = list_unapplied_accepted(session, domain_key=domain)
+    if not decisions:
         return []
 
     draft_keys = _pair_keys(domain, draft_edge_pairs)
     out: list[dict] = []
-    for row in rows:
-        decision = _decision_row_to_dict(row)
+    for decision in decisions:
         key = decision["edge_key"]
         if key in draft_keys:
             continue
@@ -483,6 +539,8 @@ def list_pending_for_freeze(
                 "to_id": to_id,
                 "edge_kind": decision["edge_kind"],
                 "review_note": decision["review_note"],
+                # 帰属（IK-0939）。表示名への写しは route が行う（UUID を応答に出さない）。
+                "decision": decision,
             }
         )
     return out
@@ -494,6 +552,8 @@ __all__ = [
     "dismissed_edge_keys",
     "get_decision",
     "list_pending_for_freeze",
+    "list_unapplied_accepted",
     "merge_decisions_into",
+    "origins_for_decisions",
     "stamp_applied_versions",
 ]
