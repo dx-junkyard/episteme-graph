@@ -101,3 +101,9 @@ A層由来の英語の生成文（⚓ 本文・summary・teaching_takeaway・図
 
 原因は仮説（未確定）。
 生成物の言語を表示先の言語と照合する段が無い。
+
+## 第 3 周の再演（第 25 周・面 A 第 3 周、2026-10-23）
+
+残存。学生の部品の文脈の「この論文での位置づけ」が英語の定型文（「Connects theory quantities to the observables the thesis uses.」）、
+主張の excerpt が英語、記号 F_EOS の定義が英語の切れ端（「the EOS feature vector ... to stellar profiles」）。
+run: uxsim/runs/c-astro-r25-share-r3/20261023T033153Z-19784 seq9・seq11。

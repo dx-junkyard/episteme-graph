@@ -525,7 +525,6 @@ class TestSolutionPrinciples:
 _PREMORTEM_LEGACY_ALLOWLIST = frozenset(
     {
         "account_lifecycle_management_design.md",
-        "admin_assistant_design.md",
         "assistant_common_infra_design.md",
         "assistant_screen_adapter_design.md",
         "atlas_binding_lifecycle_design.md",
@@ -535,7 +534,6 @@ _PREMORTEM_LEGACY_ALLOWLIST = frozenset(
         "candidate_flow_design.md",
         "category_gap_candidates_design.md",
         "claim_concept_grounding_design.md",
-        "concept_registry_design.md",
         "corpus_complement_design.md",
         "corpus_roaming_design.md",
         "decision_context_design.md",
@@ -570,7 +568,6 @@ _PREMORTEM_LEGACY_ALLOWLIST = frozenset(
         "learning_chat_entry_unification_design.md",
         "learning_ui_inspect_hover_design.md",
         "learning_units_design.md",
-        "lecture_slide_sync_design.md",
         "llm_model_selection_design.md",
         "llm_response_streaming_design.md",
         "llm_usage_metering_design.md",
@@ -583,7 +580,6 @@ _PREMORTEM_LEGACY_ALLOWLIST = frozenset(
         "return_door_design.md",
         "seminar_brief_mirroring_design.md",
         "shared_versioning_design.md",
-        "stakes_ledger_design.md",
         "status_notification_design.md",
         "structure_descent_design.md",
         "teacher_triage_instruments_design.md",

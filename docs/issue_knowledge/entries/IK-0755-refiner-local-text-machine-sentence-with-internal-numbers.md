@@ -110,3 +110,10 @@ history:
 由来の記録を表示用の欄に入れると、内部番号・件数の機械文が人向けに出る。辞書の型
 information-dropped-as-unrepresentable の近傍（表示の欄に由来しか表せない）。PL7 系の遮断が文中の番号を拾わないなら
 guardrail-does-not-cover-new-path も疑う。
+
+## 第 3 周の再演（第 25 周・面 A 第 3 周、2026-10-23）
+
+残存（保存データ）。砂場の部品の要約に「Reusable theory unit (define_relation) within TOV residual loss; covers 2 equation step(s).」が
+残り、学生の出典タブ「このトピックの論理要素」と、原稿スタジオの標準の説明に出た。是正前の解析の保存データで、再解析で直る
+（unverified の範囲どおり）。ただし標準の説明は初回表示時の要約の写しで再解析後も更新されないため、別に IK-0923 に起票した。
+run: uxsim/runs/c-astro-r25-share-r3/20261023T033153Z-19784 seq6、uxsim/runs/c-astro-r25-share-r3/20261023T033629Z-52380 seq2。
