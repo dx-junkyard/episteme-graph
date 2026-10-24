@@ -54,8 +54,12 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "atlas.domain-retire",
         "atlas.edge-candidates",
         "atlas.edge-dismissed-filter",
+        "atlas.draft-relations",
         "atlas.edge-incorporate",
+        "atlas.edge-orphaned",
+        "atlas.edge-show-all",
         "atlas.freeze",
+        "atlas.freeze-blocked-goto",
         "atlas.freeze-correspondence",
         "atlas.freeze-correspondence-manual",
         "atlas.gap-accept",
@@ -65,6 +69,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "atlas.gap-dismissed-filter",
         "atlas.gap-draft-from-frozen",
         "atlas.gap-incorporate",
+        "atlas.gap-orphaned",
         "atlas.gap-restore",
         "atlas.generate",
         "atlas.overview-action",
@@ -192,7 +197,9 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "interest-dashboard.course-select",
         "interest-dashboard.dashboard-body",
         "interest-dashboard.refresh-btn",
+        "knowledge-library.atlas-link-manual",
         "knowledge-library.atlas-links",
+        "knowledge-library.bound-parts",
         "knowledge-library.detail-deliberate",
         "knowledge-library.detail-freeze",
         "knowledge-library.detail-restore",
@@ -219,6 +226,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.component-insert",
         "lecture-studio.component-open",
         "lecture-studio.component-reject",
+        # 第 25 周 第 3 波（IK-0950）: 共有コースで試した書き換えの案を写す。
+        "lecture-studio.rewrite-copy",
         # 知識の転用層 P4-5（knowledge_transfer_design.md §8）: 別コースで引用するときの
         # 「引用の意図」（任意・未選択は記録なし）。
         "lecture-studio.cite-intent",
@@ -254,11 +263,13 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.recon-item-restore",
         "lecture-studio.recon-review-btn",
         "lecture-studio.recon-review-sort",
+        "lecture-studio.reattach-appendix",
         "lecture-studio.refresh-graph-btn",
         "lecture-studio.right-pane-toggle",
         "lecture-studio.save-btn",
         "lecture-studio.settings-btn",
         "lecture-studio.slide-wm-label",
+        "lecture-studio.slides-indicator",
         "lecture-studio.stumble-tab-evidence",
         "lecture-studio.stumble-tab-figures",
         "lecture-studio.stumble-tab-stumble",
@@ -475,10 +486,18 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "atlas.edge-candidates": "teacher/17-admin-atlas.md#edge-candidates",
     # 見送り済みも表示（辺候補）
     "atlas.edge-dismissed-filter": "teacher/17-admin-atlas.md#edge-dismissed-filter",
+    # 下書きプレビューの「関係（辺）」の節（IK-0886）
+    "atlas.draft-relations": "teacher/17-admin-atlas.md#draft-relations",
     # 次版の下書きへ反映…（採用済みの辺候補にだけ押せる）
     "atlas.edge-incorporate": "teacher/17-admin-atlas.md#edge-incorporate",
+    # 候補の条件から外れた採用済みの関係（IK-0884 と同じ構造）
+    "atlas.edge-orphaned": "teacher/17-admin-atlas.md#edge-orphaned",
+    # すべて表示（畳んだ近さだけの辺候補 — IK-0887）
+    "atlas.edge-show-all": "teacher/17-admin-atlas.md#edge-show-all",
     # 公開前チェック
     "atlas.freeze": "teacher/17-admin-atlas.md#freeze",
+    # 止めている候補を見る（凍結を止める条件があるときの確認 — IK-0885）
+    "atlas.freeze-blocked-goto": "teacher/17-admin-atlas.md#freeze-blocked-goto",
     # 前の版のノードとの対応（凍結の影響モーダル内の区画。チェックは既定オフ）
     "atlas.freeze-correspondence": "teacher/17-admin-atlas.md#freeze-correspondence",
     # 対応先（候補が見つからなかった項目に手で対応づける select）
@@ -497,6 +516,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "atlas.gap-draft-from-frozen": "teacher/17-admin-atlas.md#gap-draft-from-frozen",
     # 次版の下書きに取り込む…
     "atlas.gap-incorporate": "teacher/17-admin-atlas.md#gap-incorporate",
+    # 候補の条件から外れた採用済みの判断（IK-0884）
+    "atlas.gap-orphaned": "teacher/17-admin-atlas.md#gap-orphaned",
     # 見送りから戻す
     "atlas.gap-restore": "teacher/17-admin-atlas.md#gap-restore",
     # 次版の編集を始める
@@ -767,6 +788,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- knowledge-library.* — 分野別ナレッジライブラリタブ（L層 + 概念レジストリ） -----------------
     # 分野の地図との対応（概念レジストリ, migration 082）
     "knowledge-library.atlas-links": "teacher/19-admin-knowledge-library.md#atlas-links",
+    # 地図の概念を名前で探して手で対応を付ける（IK-0927）
+    "knowledge-library.atlas-link-manual": "teacher/19-admin-knowledge-library.md#atlas-link-manual",
     # 深く検討
     "knowledge-library.detail-deliberate": "teacher/19-admin-knowledge-library.md#detail-deliberate",
     # 凍結（版発行）
@@ -781,6 +804,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "knowledge-library.domains-list": "teacher/19-admin-knowledge-library.md#domains-list",
     # エントリ一覧
     "knowledge-library.entries-list": "teacher/19-admin-knowledge-library.md#entries-list",
+    # 結びついた教材の部品（確定した同一性リンクの読み手。IK-0920）
+    "knowledge-library.bound-parts": "teacher/19-admin-knowledge-library.md#bound-parts",
     # この概念の扱い（候補 / 確定 / 見送り）
     "knowledge-library.entry-review": "teacher/19-admin-knowledge-library.md#entry-review",
     # 種別で絞り込む
@@ -805,6 +830,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.ai-assistant-btn": "teacher/14-admin-lecture-studio.md#ai-assistant-btn",
     # AI アシスタント（書き換え）モーダル
     "lecture-studio.assistant-modal": "teacher/14-admin-lecture-studio.md#assistant-modal",
+    # 案をコピー（共有コースで書き換えを試したとき — IK-0950）
+    "lecture-studio.rewrite-copy": "teacher/14-admin-lecture-studio.md#rewrite-copy",
     # 音声生成
     "lecture-studio.audio-all-btn": "teacher/14-admin-lecture-studio.md#audio-all-btn",
     # 音声を生成します（言語選択モーダル）
@@ -897,6 +924,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.settings-btn": "teacher/14-admin-lecture-studio.md#settings-btn",
     # スライドの負荷ラベル（WMレンズ）
     "lecture-studio.slide-wm-label": "teacher/14-admin-lecture-studio.md#slide-wm-label",
+    "lecture-studio.slides-indicator": "teacher/14-admin-lecture-studio.md#slides-indicator",
+    "lecture-studio.reattach-appendix": "teacher/14-admin-lecture-studio.md#reattach-appendix",
     # 根拠リンク
     "lecture-studio.stumble-tab-evidence": "teacher/14-admin-lecture-studio.md#stumble-tabs",
     # 図の提案（右ペイン第3トグル）

@@ -245,7 +245,14 @@ class TestAdminUiAnchorsModule:
         #   候補と見送りの理由を読む折りたたみ）。
         # 2026-10-16: +2 = materials.arxiv-discovery-ingest-domain / materials.radar-ingest-domain
         #   （取り込みの「解析の分野」。paper_discovery_design.md §12 / paper_radar_design.md §16）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 376
+        # 第 25 周 面 C 第 2 波（2026-10-23）: +5 = atlas.gap-orphaned / atlas.edge-orphaned
+        #   （導出から外れた採用済みの判断 — IK-0884）/ atlas.edge-show-all（畳んだ辺候補 — IK-0887）/
+        #   atlas.freeze-blocked-goto（凍結を止める条件 — IK-0885）/ atlas.draft-relations（IK-0886）。
+        # 第 25 周 面 D 第 2 波（2026-10-23）: +2 = lecture-studio.slides-indicator（分割インジケータ —
+        #   IK-0913）/ lecture-studio.reattach-appendix（付録を付け直す — IK-0872 / IK-0880）。
+        # 第 25 周 面 A 第 3 周（2026-10-23）: +1 = knowledge-library.bound-parts（結びついた教材の部品 — IK-0920）。
+        # 同上: +1 = knowledge-library.atlas-link-manual（地図の概念を選んで手で対応を付ける — IK-0927）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 386
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

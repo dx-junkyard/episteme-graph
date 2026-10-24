@@ -546,10 +546,11 @@
         for (var d = 0; d < domains.length; d++) {
           var dom = domains[d] || {};
           if (dom.frozen_version) {
-            versions.push((dom.domain_name || dom.domain_key) + " 骨格版 " + dom.frozen_version);
+            // 版の呼び名は core/label_vocab.py::ATLAS_VERSION_PREFIX の逐語ミラー（IK-0942）
+            versions.push((dom.domain_name || dom.domain_key) + " 地図 版 " + dom.frozen_version);
           }
         }
-        if (versions.length) parts.push("使用した骨格: " + versions.join(" ・ "));
+        if (versions.length) parts.push("使用した地図: " + versions.join(" ・ "));
       }
       facts.textContent = parts.join(" ・ ");
     }
@@ -858,12 +859,14 @@
         }
         return res.json();
       })
-      .then(function () {
+      .then(function (data) {
         state.busy = false;
         state.published = true;
         if (deps.refreshNextSteps) deps.refreshNextSteps();
         if (deps.onPublished) deps.onPublished(state.courseId);
         renderStep();
+        // IK-0947: 本文の無いトピックが残るまま公開したならサーバの事実文を出す。
+        if (data && data.readiness_note) setNotice(data.readiness_note);
       })
       .catch(function (err) {
         state.busy = false;

@@ -443,9 +443,22 @@ def _explanatory_text(value) -> str:
     （``_spoken_plain_text`` と同じ方針。表示用の latex / raw_text は温存する）。
     """
     text = str(value or "").strip()
-    if not text or _looks_like_tex_math(text):
+    if not text or _looks_like_tex_math(text) or is_uninformative_equation_summary(text):
         return ""
     return text
+
+
+#: 解析段が「推定できなかった」ときに書く要約（A層 ``equation_semantics/repair.py`` の
+#: 修復失敗の出力）。状態を言う文であって式の意味ではないので、名前・説明の材料にしない
+#: （IK-0873）。一致は ``test_lecture_studio_round25.py`` が A層のソースと突き合わせて固定する。
+UNINFORMATIVE_EQUATION_SUMMARIES: frozenset[str] = frozenset({
+    "equation semantics could not be inferred.",
+})
+
+
+def is_uninformative_equation_summary(text: object) -> bool:
+    """式の要約が「推定できなかった」という状態の文か（IK-0873）。"""
+    return str(text or "").strip().casefold() in UNINFORMATIVE_EQUATION_SUMMARIES
 
 
 def _equation_link_status(eq: dict) -> str:
@@ -3102,7 +3115,7 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
             # 落とし、ホバーの「意味の要約」行に生 TeX を出さない（EH1/EH2 —
             # 再 freeze なしで既存スナップショットに効かせる防衛）。
             summary = link.get("summary") or ""
-            if _looks_like_tex_math(summary):
+            if _looks_like_tex_math(summary) or is_uninformative_equation_summary(summary):
                 summary = ""
             title_record = _equation_title_record(link, formula, norm)
             items.append({
@@ -3139,17 +3152,25 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
         if kind == "figure":
             fig_id = str(link.get("figure_id") or raw_id or "")
             caption = link.get("caption") or ""
-            items.append({
+            extra = link.get("extra") if isinstance(link.get("extra"), dict) else {}
+            teaching = bool(extra.get("teaching") or link.get("teaching"))
+            item = {
                 "kind": "figure",
                 "id": normalize_evidence_id(fig_id),
                 "figure_id": fig_id,
                 "figure_key": link.get("figure_key") or "",
                 "caption": caption,
-                "title": "図: " + _short_excerpt(caption or fig_id or "図", limit=40),
+                # IK-0949: 種類の印（「図:」）は描く側が 1 箇所で付ける。見出しに重ねない。
+                "title": _short_excerpt(caption or fig_id or "図", limit=40),
                 "summary": caption,
-                "role": link.get("support_role") or "figure",
+                "role": "teaching_figure" if teaching else (link.get("support_role") or "figure"),
                 "confidence": link.get("confidence") or "",
-            })
+            }
+            if teaching:
+                # IK-0949: 教員が教材図スタジオで作った図は論文の根拠と区別する（根拠の状態に数えない）。
+                item["teaching"] = True
+                item["origin_label"] = label_vocab.TEACHING_FIGURE_ORIGIN_LABEL
+            items.append(item)
             continue
         # source / claim / component。equation_quote など生 TeX を summary に持つ source は
         # latex に移して数式描画させる（admin と同じ切り詰め回避ガード）。
@@ -4108,10 +4129,14 @@ def _equation_is_reconstructed(eq: dict) -> bool:
     """
     if not isinstance(eq, dict):
         return False
-    if eq.get("reconstructed") is True:
-        return True
     rec = eq.get("reconstruction")
-    return isinstance(rec, dict) and str(rec.get("status") or "none") != "none"
+    if isinstance(rec, dict):
+        # IK-0895: 判定の正本は learner_context_common（原文の LaTeX と一致する復元は
+        # 印を付けない）。平坦化済みの項目（``reconstructed``）だけが残る場合は尊重する。
+        from core.learner_context_common import equation_latex_is_reconstructed
+
+        return equation_latex_is_reconstructed(eq)
+    return eq.get("reconstructed") is True
 
 
 # ComponentRecord の役割別 equation id フィールド → role 語彙（順序が dedupe の優先順位）。
@@ -4283,6 +4308,54 @@ def _content_blocks(
     return blocks
 
 
+# ---------------------------------------------------------------------------
+# トピック下書きの欄の規則表（第 25 周 第 3 波・IK-0948）
+# ---------------------------------------------------------------------------
+#
+# 同じ成果物（トピックの授業用下書き）を作る 2 つの生成指示 — コース内容生成
+# （本モジュール ``_COURSE_CONTENT_DRAFT_PROMPT``）と原稿スタジオの AI 書き換え
+# （``api/routes/lecture_studio/topics.py::_COURSE_TOPIC_DRAFT_PROMPT``）— が**この 1 つの表**を
+# 読む。片方だけが欄の用途と禁止事項を持つと、もう片方の経路で注意点に AI の作業メモ・
+# 内部 ID が入る。教員宛ての申し送りは書き換えの経路だけが別キー ``handoff_notes`` で返す。
+
+TOPIC_DRAFT_FIELD_RULES = (
+    "- `cautions`（注意点）は**学生に見せる欄**。誤解しやすい点・式や主張の適用条件・前提だけを書く\n"
+    "- 注意点・本文説明・本文の地の文で式や部品に触れるときは、`available_references` の id"
+    "（`eq_…` / `comp_…` / `claim_…` のような内部の番地）を書かず、式は印字番号（「式 (12)」）か"
+    "式の短い原文、部品・主張はその名前で書く（id は埋め込み記法 `![[kind:id]]` の中にだけ書く）\n"
+    "- 作業の記録（何を外した・何が材料に無かった・教員に確認してほしいこと）や、材料の欄の名前"
+    "（`evidence_links` / `content_blocks` / `available_references` など）は、注意点にも教材欄にも書かない\n"
+)
+
+TOPIC_DRAFT_HANDOFF_RULE = (
+    "- 教員に伝えたいこと（材料に無かったもの・書き換えで外したもの・確認してほしいこと）は"
+    " `handoff_notes` に日本語で書く（学生には見せない。注意点に入れない）\n"
+)
+
+#: 注意点に紛れた作業メモを見分ける材料の欄名（プロンプトの JSON キー）。
+_DRAFT_WORK_NOTE_KEYS = (
+    "evidence_links", "available_references", "content_blocks", "grounding_facts",
+    "linked_component_ids", "linked_equation_ids", "source_evidence_ids", "source_excerpt",
+    "component_cautions", "figures_note", "units",
+)
+_DRAFT_WORK_NOTE_KEY_RE = re.compile(r"\b(?:" + "|".join(_DRAFT_WORK_NOTE_KEYS) + r")\b")
+
+
+def split_cautions_and_handoff(cautions: object) -> tuple[list[str], list[str]]:
+    """注意点のうち学生に見せられない行（内部 ID・材料の欄名を含む作業メモ）を申し送りへ移す。
+
+    決定論の後始末（IK-0948）。行は落とさず ``handoff_notes`` へ移す（原則3）。
+    """
+    keep: list[str] = []
+    handoff: list[str] = []
+    for item in _clean_str_list(cautions):
+        if contains_learner_internal_id(item) or _DRAFT_WORK_NOTE_KEY_RE.search(item):
+            handoff.append(item)
+        else:
+            keep.append(item)
+    return keep, handoff
+
+
 _COURSE_CONTENT_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフト作成を支援するアシスタントです。
 
 目的:
@@ -4312,7 +4385,7 @@ _COURSE_CONTENT_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフ�
 - `available_references` の各項目の `text` はその根拠の中身の抜粋（主張の本文・図のキャプション・原文の冒頭・式の本体）。埋め込む前に、説明したい内容と合っているかを `text` で確かめる
 - `figures_note` がある場合、原文抜粋に出てくる図は供給されていない。その図を埋め込まず、必要なら言葉で説明する
 - `component_cautions` は論文の部品に付いた注意書き・前提。授業に関わるものは注意点（cautions）に日本語で書く。`reconstructed_equation` が付いたものは、その式が AI の復元した式であることを必ず注意点に書く
-- 「現在の下書き」は前回の生成時点の根拠に基づく。注意点・注記のうち、いまの根拠候補と食い違うもの（「図・式・主張が紐づいていない」「根拠に無い」など）は引き継がない
+""" + TOPIC_DRAFT_FIELD_RULES + """- 「現在の下書き」は前回の生成時点の根拠に基づく。注意点・注記のうち、いまの根拠候補と食い違うもの（「図・式・主張が紐づいていない」「根拠に無い」など）は引き継がない
 - 現在のセクションに `summary_shared_with` がある場合、その要約はコース内の別のトピックと同じ文になっている。要約を繰り返さず、トピックの題名に沿って何が違うかを書き分ける
 - `grounding_facts` はいまの根拠候補に何が供給されているかの事実。根拠の有無について注記・注意点を書くときは `grounding_facts` と食い違うことを書かない
 - `reconstructed_equation_ids` にある式（`available_references` で `reconstructed` が付いた式）は AI が文脈から復元した式（原文の数式とは未照合）。これらの式を使うときは、そのことを注意点に書く。`reconstruction_note` が付いた式は原文（`raw_text`）が短く、LaTeX の多くが復元なので、LaTeX を原文の数式として断定しない
@@ -5828,10 +5901,18 @@ def _ensure_required_equations_in_material(result: dict, topic: dict) -> None:
     # 付録はいまのトピックから付け直す（数式 → 図の順に呼ばれるので、ここで両方外す）。
     source_text = strip_generated_reference_appendix(str(material.get("source_text") or "")).strip()
     required = _required_equation_items(topic)
+    # IK-0872: 付録は「本文で使う式」の一覧。トピックに明示的に結ばれた式
+    # （linked_equation_ids）か本文が言及する式だけを足し、content_blocks に同じ節の式として
+    # 載っているだけの式は足さない。生成した注意点が触れた式（「式ではない」「使わない」と
+    # 判断して埋め込まなかった式）も足さない — 本文側の判断を後付けで覆さない。
+    linked_ids = {str(eq_id) for eq_id in topic.get("linked_equation_ids") or [] if str(eq_id)}
+    caution_text = "\n".join(_clean_str_list(result.get("cautions")))
     missing = [
         item for item in required
         if item.get("equation_id") and f"![[equation:{item['equation_id']}]]" not in source_text
         and not _is_unmentioned_parameter_value(item, source_text)
+        and (str(item["equation_id"]) in linked_ids or _text_mentions_equation(source_text, item))
+        and not _text_mentions_equation(caution_text, item)
     ]
     if not missing:
         material["source_text"] = source_text
@@ -5850,8 +5931,12 @@ def _ensure_required_equations_in_material(result: dict, topic: dict) -> None:
         )
         inline = "" if has_latex else inline_formula_text(item)
         label = _appendix_equation_label(item, eq_id, inline)
+        if label == APPENDIX_GENERIC_EQUATION_NAME and not renderable:
+            # 名前も本体も無い式の行（「- この節の式」だけ）は読み手に何も渡さない。
+            continue
         description = _equation_material_description(item)
-        lines.append(f"- {label}: {description}")
+        # IK-0872: 根拠のある説明が無い式には説明の行を作らない（固定文で埋めない）。
+        lines.append(f"- {label}: {description}" if description else f"- {label}")
         # 未解決の数式 fix: 描画できる本体（LaTeX / reading / 原文）を持つ式だけ
         # `![[equation:id]]` を埋め込む。本体の無い式（linked_equation_ids だけの
         # 裸ID 等）に埋め込みを出すと、必ず「未解決の数式」になるため埋め込まない。
@@ -5879,20 +5964,68 @@ def _is_unmentioned_parameter_value(item: dict, source_text: str) -> bool:
     return not re.search(r"(?<![A-Za-z\\])" + re.escape(symbol) + r"(?![A-Za-z])", body)
 
 
+#: 付録の式の名前の最後の段（IK-0872）。
+APPENDIX_GENERIC_EQUATION_NAME = "この節の式"
+
+#: TeX の ``\\label`` キー（``eq:modified_dcf`` / ``sec:intro:a``）。人が読む名前ではない（IK-0872）。
+_TEX_LABEL_KEY_RE = _dp.TEX_LABEL_KEY_RE  # 正本は display_projection（IK-0858 で移設）
+
+
+def is_tex_label_key(text: object) -> bool:
+    """文字列が TeX の ``\\label`` キー（``eq:acf``）か（IK-0872）。"""
+    return bool(_TEX_LABEL_KEY_RE.match(str(text or "").strip()))
+
+
 def _appendix_equation_label(item: dict, eq_id: str, inline: str = "") -> str:
     """付録の1行目に出す式の名前（抽出段の内部 ID は出さない — IK-0454）。
 
-    順に ``label`` → 印字番号（「式 (12)」）→ 短い原文 → ID（内部 ID でなければ）→
-    固定文「この節の式」。
+    順に 印字番号（「式 (12)」。label が数字だけのときもここで「式 (N)」になる）→
+    人が付けた ``label``（TeX のラベルキー・内部 ID・数字だけは除く）→ 短い原文 →
+    ID（内部 ID・TeX キーでなければ）→ 固定文「この節の式」（IK-0872）。
     """
-    for candidate in (str(item.get("label") or "").strip(), _equation_printed_label(item)):
-        if candidate and not is_internal_equation_id(candidate):
-            return candidate
+    printed = _equation_printed_label(item)
+    if printed:
+        return printed
+    label = str(item.get("label") or "").strip()
+    if (
+        label and label != eq_id and not is_internal_equation_id(label) and not is_tex_label_key(label)
+        and not labels_mod.is_internal_id_like(label)
+    ):
+        return label
+    if eq_id and labels_mod.looks_like_paper_equation_number(eq_id):
+        return labels_mod.format_equation_number(eq_id)
     if inline:
         return inline
-    if eq_id and not is_internal_equation_id(eq_id):
-        return eq_id
-    return "この節の式"
+    # 式 ID（``eq_dcf`` のような TeX ラベル由来の名前を含む）は人が読む名前ではない。
+    return APPENDIX_GENERIC_EQUATION_NAME
+
+
+def _text_mentions_equation(text: str, item: dict) -> bool:
+    """文がこの式に触れているか（印字番号・人が付けた名前・式の本体・ID のいずれか）。
+
+    付録の対象の判定（IK-0872）に使う。埋め込み記法の中は数えない。
+    """
+    body = re.sub(r"!\[\[[^\]]*\]\]", " ", str(text or ""))
+    if not body.strip():
+        return False
+    printed = _equation_printed_label(item)
+    if printed:
+        number = re.escape(printed[len("式 ("):-1])
+        if re.search(rf"(?:式|Eq\.?|eq\.?|equation)\s*[（(]?\s*{number}\s*[)）]?(?![0-9.])", body):
+            return True
+    label = str(item.get("label") or "").strip()
+    if (
+        len(label) >= 2 and not printed and not is_internal_equation_id(label)
+        and not is_tex_label_key(label) and label in body
+    ):
+        return True
+    compact_body = _compact_math(body)
+    for key in ("latex", "plain_text", "raw_text"):
+        formula = _compact_math(item.get(key) or "")
+        if len(formula) >= 6 and formula in compact_body:
+            return True
+    eq_id = str(item.get("equation_id") or "").strip()
+    return bool(eq_id) and re.search(r"(?<![A-Za-z0-9_])" + re.escape(eq_id) + r"(?![A-Za-z0-9_])", body) is not None
 
 
 def _equation_has_renderable_body(item: dict) -> bool:
@@ -5907,11 +6040,20 @@ def _equation_has_renderable_body(item: dict) -> bool:
 
 
 def _equation_material_description(item: dict) -> str:
-    for key in ("summary", "description", "semantic_summary", "role", "meaning", "plain_text", "reading"):
+    """付録の式に添える説明。根拠のある説明（要約・意味）が無ければ空（IK-0872）。
+
+    読み下し（``plain_text`` / ``reading``）は日本語の文のときだけ使う（英語の読み下し
+    「S equals the spacetime integral …」は式の言い換えで、説明の行に並べない）。根拠の無い
+    固定文（「中心的な関係式です」）は書かない。
+    """
+    for key in ("summary", "description", "semantic_summary", "semantic_kind", "meaning", "plain_text", "reading"):
         text = str(item.get(key) or "").strip()
-        if text and not _looks_like_tex_source(text):
-            return _short_excerpt(text, limit=120)
-    return "この節の説明で参照する中心的な関係式です。"
+        if not text or _looks_like_tex_source(text) or not _explanatory_text(text):
+            continue
+        if key in ("plain_text", "reading") and not _CJK_RE.search(text):
+            continue
+        return _short_excerpt(text, limit=120)
+    return ""
 
 
 def _looks_like_tex_source(text: str) -> bool:
@@ -6043,6 +6185,50 @@ def _ensure_required_figures_in_material(result: dict, topic: dict) -> None:
             lines.append(f"- {_short_excerpt(caption, limit=120)}")
         lines.append(f"![[figure:{figure_id}]]")
     material["source_text"] = "\n".join(line for line in lines if line is not None).strip()
+
+
+def reattach_generated_appendix(
+    topic: dict,
+    source_text: str | None = None,
+    cautions: object = None,
+) -> dict:
+    """末尾の決定論付録を、いまのトピックの根拠から付け直した本文を返す（純関数・LLM なし）。
+
+    第 25 周 面 D 第 2 周（IK-0872 / IK-0880 の残り）: 保存済みの付録は読み時に付け直さない
+    （スライド境界・音声キャッシュの番号が黙って動くため）。教員の明示操作「付録を付け直す」と
+    G層の道案内だけがこの関数を呼ぶ。生成時と同じ ``_ensure_required_*_in_material`` を通すので
+    付録の規則は 1 箇所（名前の段・対象・図の段落化）のまま。
+
+    戻り値 ``{source_text, changed, had_appendix}``。入力を mutate しない。
+    """
+    topic = topic or {}
+    material = topic.get("student_material") if isinstance(topic.get("student_material"), dict) else {}
+    text = str(source_text if source_text is not None else (material.get("source_text") or ""))
+    had_appendix = strip_generated_reference_appendix(text).rstrip() != text.rstrip()
+    result = {
+        "student_material": {
+            "source_format": material.get("source_format") or "eg-markdown-v1",
+            "source_text": text,
+        },
+        "cautions": cautions if cautions is not None else (topic.get("cautions") or []),
+    }
+    _ensure_required_equations_in_material(result, topic)
+    _ensure_required_figures_in_material(result, topic)
+    new_text = str(result["student_material"].get("source_text") or "")
+    return {
+        "source_text": new_text,
+        "changed": new_text.strip() != text.strip(),
+        "had_appendix": had_appendix,
+    }
+
+
+def topic_appendix_is_stale(topic: dict | None) -> bool:
+    """保存済みの付録が、いまの根拠から作る形と違うか（付録の無いトピックは False）。
+
+    教員が付録を消したトピック（付録の見出しが無い）は対象にしない — 消した判断を覆さない。
+    """
+    outcome = reattach_generated_appendix(topic or {})
+    return bool(outcome["had_appendix"] and outcome["changed"])
 
 
 def _ensure_check_question_details(result: dict, topic: dict) -> None:
@@ -6222,8 +6408,9 @@ def _fill_check_question_detail(item: dict, topic: dict) -> None:
 GENERATED_EQUATIONS_HEADING = "### この節で使う数式"
 GENERATED_FIGURES_HEADING = "### この節で参照する図"
 _GENERATED_APPENDIX_LINE_RE = re.compile(
-    r"^(?:-\s.*|!\[\[\s*(?:equation|figure):[^\]]+\]\])$"
+    r"^(?:-\s.*|(?:!\[\[\s*(?:equation|figure):[^\]]+\]\]\s*)+)$"
 )
+_APPENDIX_FIGURE_EMBED_RE = re.compile(r"!\[\[\s*figure:[^\]]+\]\]")
 
 #: 問いが式を参照しているが印字番号が無いときの要件（内部 ID を出さない）。
 QUESTION_EQUATION_REQUIREMENT = "問いにある数式の意味または役割に触れる"
@@ -6263,7 +6450,19 @@ def strip_generated_reference_appendix(
             or _GENERATED_APPENDIX_LINE_RE.match(row.strip())
             for row in tail
         ):
-            return "\n".join(lines[:index]).rstrip()
+            body = "\n".join(lines[:index]).rstrip()
+            # IK-0880: 教員が付録の行に続けて差し込んだ図（1 行に埋め込みが 2 つ以上ある行の
+            # 図）は付録と一緒に消さず、本文の段落として残す（付け直しで重ならないよう本文側へ）。
+            kept = [
+                embed
+                for row in tail
+                if len(re.findall(r"!\[\[[^\]]+\]\]", row)) >= 2
+                for embed in _APPENDIX_FIGURE_EMBED_RE.findall(row)
+                if embed not in body
+            ]
+            if kept:
+                body = (body + "\n\n" if body else "") + "\n\n".join(dict.fromkeys(kept))
+            return body
     return text
 
 

@@ -691,6 +691,7 @@
                 <span id="ls-rewrite-model-chip"></span>
               </div>
               <button id="ls-rewrite-btn" class="admin-action-btn" disabled>AIで提案</button>
+              <button id="ls-rewrite-copy-btn" class="admin-action-btn" type="button" hidden data-ui-anchor="lecture-studio.rewrite-copy">案をコピー</button>
             </div>
           </div>
         </div>
@@ -780,6 +781,8 @@
           <div id="library-domains-panel" style="min-width:180px;max-width:220px;flex:0 0 200px">
             <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">分野</div>
             <button type="button" id="library-atlas-derive-btn" data-ui-anchor="knowledge-library.identity-derive" class="admin-action-btn" style="width:100%;margin-bottom:6px;font-size:11.5px;padding:3px 8px">地図との対応を導出</button>
+            <!-- IK-0864: 導出の結果の事実文（サーバの facts をそのまま描く・事実の段落なので data-ui-anchor なし） -->
+            <div id="library-atlas-derive-facts" style="font-size:11px;color:var(--color-text-secondary);margin-bottom:6px" hidden></div>
             <div id="library-domains-list" data-ui-anchor="knowledge-library.domains-list" style="display:flex;flex-direction:column;gap:4px">
               <div style="padding:8px;color:var(--color-text-tertiary);font-size:12.5px">読み込み中...</div>
             </div>
@@ -995,9 +998,9 @@
   <!-- 統一パーツカード（admin_ux_issues_2026-08-01.md §3.2 / Phase 1）。element-vocab.js
        へ委譲するので後、これを使う全スクリプト（deliberation.js / admin-lecture-studio.js /
        admin.js）より前。カード自身は fetch も data-ui-anchor 直書きもしない。 -->
-  <script src="/js/element-card.js?v=figure-context-20260925-2"></script>
+  <script src="/js/element-card.js?v=share-r2-20261023-1"></script>
   <!-- D層（Doubt Layer）管理 UI — 「分野の地図」(atlas-*) とは別機能 -->
-  <script src="/js/doubt-atlas.js?v=gap-fixes-20260716-1"></script>
+  <script src="/js/doubt-atlas.js?v=round25-doubt-20261023-3"></script>
   <!-- Field Atlas 骨格エディタ改善: ビジュアルプレビュー + AIアシスト編集 -->
   <script src="/js/atlas-draft-preview.js?v=atlas-editor-20260707-1"></script>
   <script src="/js/atlas-assist-panel.js?v=atlas-editor-20260707-1"></script>
@@ -1019,9 +1022,9 @@
        それらより前に読み込む。 -->
   <script src="/js/disclosure-note.js?v=disclosure-20260910-1"></script>
   <!-- 原稿スタジオ（Lecture Script Studio, Issue #70）— admin.js から分離（Tier 3-17b） -->
-  <script src="/js/admin-lecture-studio.js?v=reproduction-wave2-20260919-1"></script>
+  <script src="/js/admin-lecture-studio.js?v=round25-share-r3-20261023-1-studio3"></script>
   <!-- W層（要素検討ワークスペース, Phase 0）— 「深く検討」統合パネル -->
-  <script src="/js/deliberation.js?v=gap-fixes-20260716-1"></script>
+  <script src="/js/deliberation.js?v=share-r3-20261023-1"></script>
   <!-- 制度指標カタログ（indicator_governance_design.md, IG1）— 計器の定義の1行表示。
        計器パネル（admin-llm-usage / admin-discuss-observation / admin.js の関心集約）が
        window.AdminIndicators.mount() を呼ぶため、それらより前に読み込む。 -->
@@ -1039,7 +1042,7 @@
   <script src="/js/admin-cartridge-fit.js?v=cartridge-fit-20260913-1"></script>
   <!-- リリース前の確認（release_review_flow_design.md）— AI が作った地図を提示し
        「次へ」で承認、そのまま公開まで進めるウィザード。admin.js から init/open される。 -->
-  <script src="/js/admin-release-review.js?v=round23-polish-20261009"></script>
+  <script src="/js/admin-release-review.js?v=ik0942-atlas-r3-20261023-studio3"></script>
   <!-- 論文ディスカバリー層（paper_discovery_design.md PD1〜PD8）— arXiv 分野購読と
        候補一覧。取り込みは教員の明示承認のみで、受理後は既存アップロード経路へ合流する。 -->
   <script src="/js/admin-paper-discovery.js?v=paper-discovery-20261016-4"></script>
@@ -1059,6 +1062,6 @@
   <!-- 束の取り込み（knowledge_transfer_design.md §4.3）— 教材行の「⋯」から開く
        dry-run → 確定の 2 段モーダル。admin.js から DI 注入するため admin.js より前。 -->
   <script src="/js/admin-knowledge-import.js?v=knowledge-transfer-20260913-1"></script>
-  <script src="/js/admin.js?v=analysis-degradation-20261022"></script>
+  <script src="/js/admin.js?v=round25-share-r3-20261023-2-db3-atlas3-studio3"></script>
 </body>
 </html>

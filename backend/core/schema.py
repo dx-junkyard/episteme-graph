@@ -668,6 +668,11 @@ CLAIM_ORIGINS: tuple[str, ...] = (
     CLAIM_ORIGIN_EQUATION_SYNTHESIS,
 )
 
+#: 論文の文を持たない主張の出所（式から決定論で合成した定型文）。論文の文として引用・
+#: 抽出の材料にしてはいけない消費者（D層のスコープ候補 IK-0790・記号の使用例 IK-0922）が
+#: 共有する述語の正本。
+NON_SOURCE_TEXT_CLAIM_ORIGINS: tuple[str, ...] = (CLAIM_ORIGIN_EQUATION_SYNTHESIS,)
+
 #: element_id_remap.object_kind / stable_key の種別接頭辞。
 KNOWLEDGE_OBJECT_KINDS: tuple[str, ...] = (
     "claim", "component", "equation", "evidence", "derivation_step", "symbol",

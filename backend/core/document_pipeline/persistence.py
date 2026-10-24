@@ -1009,6 +1009,13 @@ def _equation_previews(equations: Any) -> list[dict]:
         source_location = dict(getattr(src, "source_location", {}) or {})
         source_image = getattr(src, "source_image", None)
         reconstructed = bool(rec and getattr(rec, "status", "none") != "none")
+        if reconstructed:
+            # IK-0895: 復元本文が原文の LaTeX と一致するなら復元の印を付けない
+            # （判定の正本は core.learner_context_common）。
+            from core.learner_context_common import reconstruction_matches_source
+
+            if reconstruction_matches_source(getattr(rec, "latex", None), getattr(src, "latex", None)):
+                reconstructed = False
         latex = getattr(rec, "latex", None) if reconstructed else getattr(src, "latex", None)
         plain_text = getattr(rec, "plain_text", None) if reconstructed else getattr(src, "plain_text", None)
         previews.append({
@@ -1167,17 +1174,42 @@ def _equation_text_variants(raw_text: str) -> list[str]:
     })
 
 
-def _spoken_text_from_formulas(text: str, formulas: list[dict]) -> str:
+#: 読み上げに書く式の印字番号（``12`` / ``(3a)`` / ``A.1``）。TeX のラベルキーは番号ではない。
+_SPOKEN_PRINTED_NUMBER_RE = re.compile(r"^\(?\s*([A-Z]?\d+[a-z]?(?:[.\-]\d+[a-z]?)*)\s*\)?$")
+
+
+def _spoken_equation_fallback(formula: dict, language: str) -> str:
+    """読み上げ文が無い式の代わりの語（IK-0881）。講義の言語に合わせ、印字番号があれば添える。"""
+    match = _SPOKEN_PRINTED_NUMBER_RE.match(str(formula.get("label") or "").strip())
+    if str(language or "ja").lower().startswith("en"):
+        return f"equation ({match.group(1)})" if match else "the equation"
+    return f"式 ({match.group(1)})" if match else "数式"
+
+
+def _spoken_text_from_formulas(text: str, formulas: list[dict], language: str = "ja") -> str:
+    """表示文の式の置き換え（``[[eq_x]]`` / ``eq_x`` / ``[[FORMULA_N]]``）を読み上げの語へ。
+
+    IK-0881: 表示文は ``[[eq_x]]`` の両括弧形でも裸の ID でも式を指すので、両方を同じキーで
+    置き換える（括弧形を先に — 裸の形だけ置き換えると ``[[式 (5)]]`` のように括弧が残る）。
+    読み上げ文の無い式は講義の言語の語（「数式」/「式 (N)」）にし、固定の英語を読ませない。
+    ``chunks.spoken_language`` が NULL のときは ja とみなす規約に合わせ、既定は ja。
+    """
     spoken = text or ""
     for idx, formula in enumerate(formulas or []):
         if not isinstance(formula, dict):
             continue
-        placeholder = str(formula.get("id") or f"[[FORMULA_{idx}]]")
-        replacement = str(formula.get("spoken") or "")
-        if not replacement:
-            label = str(formula.get("label") or "").strip()
-            replacement = f"equation {label}" if label else f"equation {idx + 1}"
-        spoken = spoken.replace(placeholder, replacement)
+        key = str(formula.get("id") or f"[[FORMULA_{idx}]]").strip()
+        replacement = str(formula.get("spoken") or "").strip() or _spoken_equation_fallback(formula, language)
+        bare = key[2:-2] if key.startswith("[[") and key.endswith("]]") else key
+        if not bare:
+            continue
+        spoken = spoken.replace(f"[[{bare}]]", replacement)
+        # 裸の ID は語の境目でだけ置き換える（``eq_1`` が ``eq_10`` の頭に当たらないように）。
+        spoken = re.sub(
+            r"(?<![A-Za-z0-9_])" + re.escape(bare) + r"(?![A-Za-z0-9_])",
+            lambda _m: replacement,
+            spoken,
+        )
     return spoken
 
 

@@ -8391,6 +8391,9 @@ body.admin-inspect-mode textarea:disabled {
   padding: 4px;
 }
 .pm-home-nb-graph svg { display: block; width: 100%; height: auto; }
+/* IK-0932: 札の下の「記帳された条件」の 1 行（事実文 — 警告色にしない） */
+.pm-home-nb-scope-lines { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary, #555); }
+.pm-home-nb-scope-line { margin: 2px 0; }
 .pm-home-nb-lane-line { stroke: #f0f0f3; stroke-width: 1; }
 .pm-home-nb-lane-label { font-size: 9.5px; fill: #a1a1a6; }
 .pm-home-nb-link { fill: none; stroke: #cfcfd6; stroke-width: 1.3; }

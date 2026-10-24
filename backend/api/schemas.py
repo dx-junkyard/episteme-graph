@@ -327,6 +327,16 @@ class LearningCourseOut(BaseModel):
     visibility: str = "private"
     group_id: str | None = None
     description: str = ""
+    # IK-0945: 受講中のコースが新規の受講を受け付けなくなったときの事実文
+    # （正本 core/label_vocab.py::COURSE_ENROLLED_BUT_CLOSED_NOTICE）。それ以外は空。
+    enrollment_notice: str = ""
+
+
+class LearningCourseCreateOut(LearningCourseOut):
+    """コース作成（``POST /courses``）の応答。題名に生の TeX 記法が残るときの知らせ（IK-0951）。"""
+
+    title_notice: str = ""
+    raw_tex_titles: list[str] = []
 
 
 class LearningEnrollOut(LearningCourseOut):
@@ -1484,8 +1494,20 @@ class CourseGroupPermissionOut(BaseModel):
     group_id: str
     group_name: str = ""
     permission: str = "viewer"  # viewer | editor
+    # 権限の表示語（IK-0911。正本は label_vocab.COURSE_SHARE_PERMISSION_LABELS）。
+    permission_label: str = Field(default="", validate_default=True)
     created_at: str = ""
     updated_at: str = ""
+
+    @field_validator("permission_label", mode="before")
+    @classmethod
+    def _default_permission_label(cls, value, info):  # noqa: ANN001
+        if value:
+            return value
+        from core.label_vocab import COURSE_SHARE_PERMISSION_LABELS
+
+        permission = str((info.data or {}).get("permission") or "")
+        return COURSE_SHARE_PERMISSION_LABELS.get(permission, permission)
 
 
 class CourseGroupPermissionUpsertRequest(BaseModel):
@@ -1500,8 +1522,20 @@ class DocumentGroupPermissionOut(BaseModel):
     group_id: str
     group_name: str = ""
     permission: str = "viewer"  # viewer | editor
+    # 権限の表示語（IK-0866。正本は label_vocab.DOCUMENT_SHARE_PERMISSION_LABELS）。
+    permission_label: str = Field(default="", validate_default=True)
     created_at: str = ""
     updated_at: str = ""
+
+    @field_validator("permission_label", mode="before")
+    @classmethod
+    def _default_permission_label(cls, value, info):  # noqa: ANN001
+        if value:
+            return value
+        from core.label_vocab import DOCUMENT_SHARE_PERMISSION_LABELS
+
+        permission = str((info.data or {}).get("permission") or "")
+        return DOCUMENT_SHARE_PERMISSION_LABELS.get(permission, permission)
 
 
 class DocumentGroupPermissionUpsertRequest(BaseModel):

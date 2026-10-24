@@ -42,6 +42,7 @@ from ..schema import (
     LEARNING_DISCUSS_SCOPE_LABELS,
     LEARNING_ELEMENT_TYPE_LABELS,
     LEARNING_ELEMENT_TYPES,
+    LEARNING_PERSONAL_MAP_SCREEN_FACT,
     LEARNING_VIEW_MODE_LABELS,
     MAX_LEARNING_CLAIM_EXCERPT_CHARS,
     MAX_LEARNING_ELEMENT_FACTS,
@@ -145,6 +146,34 @@ def _selected_element(ctx: ScreenContext, sources: Mapping[str, Any]) -> tuple[s
     return element_type, payload
 
 
+#: 確定した同一性リンクの事実文（IK-0920。新しい kind を足さず element 解決器が添える）。
+SHARED_PART_CONFIRMED_FACT = "教員がこの部品を共通部品「{name}」と同じものとして確かめています"
+#: 同じ共通部品と確かめられた部品を持つ、学生が読めるほかの論文（題名の列挙・件数なし）。
+SHARED_PART_OTHER_DOCUMENTS_FACT = "共通部品「{name}」と同じものとして教員が確かめた部品は、{titles}にもあります"
+
+
+def _shared_part_facts(context: Mapping[str, Any]) -> list[str]:
+    """``shared_part``（確定した同一性リンク → active な共通部品）を事実 1〜2 行にする。"""
+    shared = _dict(_dict(context).get("shared_part"))
+    entry = _dict(shared.get("entry"))
+    name = _safe(entry.get("name"), MAX_TEXT_CHARS)
+    if not name:
+        return []
+    facts = [SHARED_PART_CONFIRMED_FACT.format(name=name)]
+    titles = [
+        _safe(_dict(doc).get("title"), MAX_TEXT_CHARS)
+        for doc in _list(entry.get("other_documents"))
+    ]
+    titles = [title for title in titles if title]
+    if titles:
+        shown, truncated = _capped(titles, MAX_LEARNING_SUPPORT_ITEMS)
+        quoted = "・".join(f"論文『{t}』" for t in shown)
+        if truncated or entry.get("other_documents_truncated") is True:
+            quoted = f"{quoted}・{MORE_ITEMS_MARK}"
+        facts.append(SHARED_PART_OTHER_DOCUMENTS_FACT.format(name=name, titles=quoted))
+    return facts
+
+
 def _component_facts(context: Mapping[str, Any]) -> list[str]:
     instance = _dict(_dict(context).get("instance"))
     component = _dict(instance.get("component"))
@@ -168,6 +197,9 @@ def _component_facts(context: Mapping[str, Any]) -> list[str]:
         summary = _safe(component.get("summary"), MAX_TEXT_CHARS)
         if summary:
             facts.append(f"「{label}」の要約: {summary}")
+
+    # IK-0920: 教員が確定した共通部品（上限で切られないよう要約の直後に置く）。
+    facts.extend(_shared_part_facts(context))
 
     supports = _dict(instance.get("supports"))
 
@@ -433,7 +465,12 @@ def resolve_view(ctx: ScreenContext, sources: Mapping[str, Any]) -> list[str]:
     if scope_label:
         parts.append(f"検索範囲: {scope_label}")
 
-    return ["。".join(parts) + "。"] if parts else []
+    facts = ["。".join(parts) + "。"] if parts else []
+    # IK-0907: 地図を開いたことがあるとき、地図に何が出て何が出ないかの事実を添える
+    # （AI が地図に無い「記帳の条件」へ案内しない — 画面の案内は画面の事実に従わせる）。
+    if ctx.view.get("personal_map_seen") is True:
+        facts.append(LEARNING_PERSONAL_MAP_SCREEN_FACT + "。")
+    return facts
 
 
 # ---------------------------------------------------------------------------

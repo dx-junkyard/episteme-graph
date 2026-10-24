@@ -304,8 +304,23 @@ class TestNoLiteralRedefinition:
 # 日本語を含む**表（= 表示ラベル表）。訳語表以外（SQL 断片・英語語彙）は拾わない。
 
 _ALLOWED_VALUE_SPLITS = {
+    # 共有の権限語: コース（受講・閲覧 / 編集。トピックの保存は所有者）と教材の解析成果
+    # （閲覧・引用 / 編集・再解析）で、できることが違う（IK-0911）。同じ画面には併記されない。
+    (
+        "core/label_vocab.py::COURSE_SHARE_PERMISSION_LABELS",
+        "core/label_vocab.py::DOCUMENT_SHARE_PERMISSION_LABELS",
+    ),
+    # 判断の状態ラベル（チップ）と、判断の 1 行の動詞（「〇〇が 日付 に採用しました」）。
+    # 用途が違い同じカードに併記される（IK-0848）。
+    ("core/atlas_gaps/schema.py::DECISION_STATUS_LABELS", "core/atlas_review_display.py::_DECISION_VERBS"),
     # 状態ラベルと、その状態に添える台帳注記。用途が違う（同じ画面に併記される）。
     ("core/atlas_path.py::LEDGER_NOTES", "core/atlas_path.py::STATUS_LABELS"),
+    # 原稿スタジオの根拠の状態: 見出しの短いラベルと、区画の事実文。用途が違い同じ区画に
+    # 併記される（IK-0875）。
+    (
+        "core/lecture_studio_state.py::EVIDENCE_STATE_LABELS",
+        "core/lecture_studio_state.py::EVIDENCE_STATE_MESSAGES",
+    ),
     # 宛先別の文言差を**並べて可視化**している正本の2表（統合すると出力が変わる）。
     (
         "core/label_vocab.py::VERIFICATION_STATUS_LABELS_LEDGER",

@@ -561,6 +561,15 @@ CHAT_TURN_WITHDRAWN_FACT = (
     "「わたしの記録」に取り消し済みとして残ります。"
 )
 
+#: 反実仮想セッションの共有範囲（``counterfactual_sessions.shared_scope`` = 既存の
+#: Visibility 語彙 private / group / public）の日本語。IK-0854: 画面に内部値 ``private`` を
+#: 出さない。文言はコース管理の公開範囲の選択肢（``admin.js``）と同じ語を使う。
+SHARED_SCOPE_LABELS = MappingProxyType({
+    "private": "非公開（自分のみ）",
+    "group": "グループ限定",
+    "public": "公開（全体）",
+})
+
 #: ``epistemic_ledger.verification_status``（migration 029 の CHECK 語彙）の
 #: **D層 API 向け**文言。SL1 の閉世界語彙に合わせ「記帳がある / ない」を主語にする
 #: （``api/routes/doubt.py``）。
@@ -678,6 +687,18 @@ MATERIAL_NOT_GENERATED_NOTICE = (
     "解説は生成されていません。論文の本文をそのまま表示しています。"
 )
 
+# 第 25 周 第 3 波（IK-0947）: トピックに本文も論文の区画も無く、教材が空のとき。空白のまま
+# 配らず空だと言う。講義の案内（core/lecture.py::lecture_availability_note）も同じ文を使い、
+# 空の「読む」へ誘導しない。生成中なら準備中の文。
+TOPIC_MATERIAL_EMPTY_NOTICE = "このトピックの教材はまだ用意されていません（担当の先生が準備します）。"
+TOPIC_MATERIAL_EMPTY_PREPARING_NOTICE = "このトピックの教材は準備中です。"
+# 教員がコースを公開（public / group）したとき、本文の無いトピックが残っていれば応答に添える
+# 事実文（IK-0947。件数は書かない）。
+COURSE_PUBLISHED_WITH_EMPTY_TOPICS_NOTICE = (
+    "本文がまだ無いトピックがあります。学生がそのトピックを開くと、"
+    "教材はまだ用意されていないと表示されます。"
+)
+
 #: 教材本文の数式プレースホルダー（``[[FORMULA_N]]``）が、そのトピックに結びついた式の
 #: どれにも引けなかったときに置き換える文（IK-0389。学習者に生のプレースホルダーを
 #: 見せない）。数値・内部 ID は入れない。
@@ -718,6 +739,25 @@ UNITS_WITHOUT_KNOWLEDGE_NOTE = (
 COURSE_ENROLLED_NOTICE = "受講を開始しました。コースの最初のトピックから読めます。"
 # 既に受講中のコースに再度登録したとき（新しい受講記録は作られていない）。
 COURSE_ALREADY_ENROLLED_NOTICE = "このコースはすでに受講中です。これまでの学習の続きから読めます。"
+# 第 25 周 第 3 波（IK-0945）: 受講中のコースが非公開になったとき。受講者はこれまでどおり読める
+# （新規の受講開始だけが止まる）。コース一覧の受講中の行と受講開始の 403 で同じ文を使う。
+COURSE_ENROLLMENT_CLOSED_NOTICE = "このコースは新規の受講を受け付けていません。"
+
+# 第 25 周 第 3 波（IK-0949）: 教員が教材図スタジオで作り採用した説明図の印（論文由来の根拠と
+# 同じ「根拠候補」に並べない。根拠の状態にも数えない）。
+TEACHING_FIGURE_ORIGIN_LABEL = "教員が作った説明図"
+
+# 第 25 周 第 3 波（IK-0951）: コース・章・トピックの題名に生の TeX 記法が残っているとき、教員に
+# 知らせる事実文（題名は学生の画面で素の文字列として出る）。該当の題名は別に列挙する。
+COURSE_TITLE_RAW_TEX_NOTICE = (
+    "題名に数式の記法が残っています。学生の画面では記号のまま表示されるので、"
+    "言葉で言い換えてください。"
+)
+COURSE_ENROLLED_BUT_CLOSED_NOTICE = (
+    "このコースは新規の受講を受け付けていません。受講中のあなたはこれまでどおり読めます。"
+)
+# 入場できないコース（存在しない・閲覧できない）を学習画面で言うとき（英語の 404 を出さない）。
+COURSE_NOT_AVAILABLE_NOTICE = "このコースは見つからないか、閲覧できません。"
 
 
 # ---------------------------------------------------------------------------
@@ -970,13 +1010,30 @@ ATLAS_PILL_NOTES = MappingProxyType({
     ),
     "gap": "原文に対応する記述が無く、導出をつなぐために AI が補った箇所です。",
     "contested": "この概念について、帰属つきの解釈が複数並んでいます。",
-    "unrecorded": "この場所について、コーパスの論文からの記帳はまだありません。",
+    # IK-0888: 層を名乗る（検証の台帳の話であって、論文の配置の有無ではない）。
+    # 論文が置かれている場所でも、この文が「論文が無い」と読めないようにする。
+    "unrecorded": (
+        "この場所について、検証の記録（台帳）はまだありません。"
+        "論文がこの場所に置かれているかどうかは「論文の位置」で示します。"
+    ),
     "fog": "この領域には、まだコーパスの論文が関係づけられていません。",
 })
 
 #: 分野（atlas ドメイン）の表示名が登録されていないときの学習者向けの呼び名。
 #: domain_key（内部キー）を表示名の代わりに出さない。
 ATLAS_DOMAIN_UNNAMED_LABEL = "名前が登録されていない分野"
+
+#: 分野の地図の版の呼び名（IK-0942 — 「公開版（版 X）」「骨格 版X」「骨格版 X」「版 X」と
+#: 画面ごとに違っていた）。教員・学習者とも「地図 版 X」の 1 形式。JS は逐語ミラー
+#: （admin.js / landscape-layer.js / atlas-threads-layer.js / app.js の ``ATLAS_VERSION_PREFIX``。
+#: 一致は ``test_atlas_review_round25_r3.py`` が固定）。
+ATLAS_VERSION_PREFIX = "地図 版 "
+
+
+def atlas_version_label(version: object) -> str:
+    """版の表示語（「地図 版 2026.1」）。版が空なら空文字（版を捏造しない）。"""
+    text = str(version or "").strip()
+    return f"{ATLAS_VERSION_PREFIX}{text}" if text else ""
 
 
 # ---------------------------------------------------------------------------
@@ -1061,3 +1118,111 @@ RECONSTRUCTED_BEYOND_RAW_NOTE = (
 #: 根拠候補の種類ごとの有無（IK-0461。件数は書かない。``{kind}`` は「主張」「図」等）。
 GROUNDING_KIND_SUPPLIED_FACT = "このトピックには{kind}が根拠候補として供給されています。"
 GROUNDING_KIND_NOT_SUPPLIED_FACT = "このトピックには{kind}が根拠候補として供給されていません。"
+
+#: 教材の解析成果のグループ共有の権限語（IK-0866。画面に viewer / editor を出さない）。
+DOCUMENT_SHARE_PERMISSION_LABELS = {
+    "viewer": "閲覧・引用できる",
+    "editor": "編集・再解析できる",
+}
+
+#: コース管理の役割の印（IK-0911。画面に owner / editor / viewer を出さない。editor 共有でも
+#: 原稿スタジオのトピック保存は所有者だけ — IK-0908 — なので印がそれを言う）。
+COURSE_ROLE_LABELS = MappingProxyType({
+    "owner": "所有",
+    "editor": "共有（編集可・トピックの保存は所有者）",
+    "viewer": "共有（閲覧のみ）",
+})
+
+#: コースのグループ共有の権限語（IK-0911。共有モーダルの選択肢と現在の設定の表で同じ語）。
+COURSE_SHARE_PERMISSION_LABELS = MappingProxyType({
+    "viewer": "受講・閲覧できる",
+    "editor": "編集できる（トピックの保存は所有者）",
+})
+
+#: 検証スコープの 4 軸の画面の語（IK-0905。台帳の記帳フォームの欄見出しと同じ語。
+#: 入力検査の事実文に API の欄名 condition / domain / precision / system を出さない）。
+LEDGER_SCOPE_AXIS_LABELS = MappingProxyType({
+    "condition": "成立条件",
+    "domain": "領域",
+    "precision": "精度",
+    "system": "系",
+})
+
+#: C層の説明カードの 2 軸を別の語で言う（IK-0924）。``component_explanations.review_status``
+#: （migration 021 の CHECK 語彙）は「学生への公開」の軸、支持（endorsement）の厚みは
+#: 「教員の支持」の軸。JS（``admin-lecture-studio.js``）は逐語ミラー
+#: （``test_share_round25_explanations.py`` が一致を固定）。
+EXPLANATION_AXIS_LABELS = MappingProxyType({
+    "review": "学生への公開",
+    "support": "教員の支持",
+    "citation": "引用",
+})
+
+EXPLANATION_REVIEW_STATUS_LABELS = MappingProxyType({
+    "teacher_approved": "公開可（査読済み）",
+    "teacher_review_required": "査読待ち",
+    "needs_revision": "要修正（公開しない）",
+    "rejected": "却下（公開しない）",
+})
+
+#: 説明カードのボタンの語（IK-0924。査読と支持を同じ「承認」の語で並べない）。
+EXPLANATION_ACTION_LABELS = MappingProxyType({
+    "approve": "学生に公開してよいと査読する",
+    "endorse": "支持する",
+    "revoke": "支持を取り消す",
+})
+
+#: 支持の段階（``component_endorsements.level`` の CHECK 語彙）の語（IK-0924）。
+EXPLANATION_SUPPORT_LEVEL_LABELS = MappingProxyType({
+    "provisional": "暫定の支持",
+    "endorsed": "支持",
+    "strong": "強い支持",
+})
+
+#: 教員の支持の段階ラベル（IK-0924 / IK-0926）。人数は**著者を除き・取り消しを除いた**
+#: 支持の数（``core/explanation_governance.COUNTED_ENDORSEMENT_SUMMARY_SQL``）。
+#: 定義は制度指標カタログ ``explanation-support-label`` に宣言する（改訂原則 4）。
+EXPLANATION_SUPPORT_LABEL_NONE = "まだ教員の支持はありません"
+EXPLANATION_SUPPORT_LABEL_PROVISIONAL = "暫定的に{count}名の教員が支持"
+EXPLANATION_SUPPORT_LABEL_COUNT = "{count}名の教員が支持"
+EXPLANATION_SUPPORT_LABEL_STRONG = "強い支持: {label}"
+EXPLANATION_SUPPORT_LABEL_BREADTH = "{label}(専門{breadth}分野)"
+
+
+def explanation_support_label(summary: Mapping[str, object]) -> str:
+    """支持の厚みを段階ラベルにする（数値スコアは出さない。人数の数え方は上の注記）。"""
+    def _int(key: str) -> int:
+        try:
+            return int(summary.get(key) or 0)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 0
+
+    count = _int("endorser_count")
+    if count <= 0:
+        return EXPLANATION_SUPPORT_LABEL_NONE
+    if count == _int("provisional_count"):
+        return EXPLANATION_SUPPORT_LABEL_PROVISIONAL.format(count=count)
+    label = EXPLANATION_SUPPORT_LABEL_COUNT.format(count=count)
+    if _int("strong_count") > 0:
+        label = EXPLANATION_SUPPORT_LABEL_STRONG.format(label=label)
+    breadth = _int("expertise_breadth")
+    if breadth >= 2:
+        label = EXPLANATION_SUPPORT_LABEL_BREADTH.format(label=label, breadth=breadth)
+    return label
+
+
+# ── コース管理の一覧: 地図のトピック対応の段階（IK-0929・比を出さない）─────────────
+ATLAS_BINDING_COVERAGE_LABELS: dict[str, str] = {
+    "all": "すべてのトピックに対応あり",
+    "some": "一部のトピックに対応あり",
+    "none": "トピックの対応なし",
+}
+
+
+def atlas_binding_coverage_label(bound: int, total: int) -> str:
+    """トピックの地図対応を段階の語にする（件数・比は返さない）。"""
+    if total <= 0 or bound <= 0:
+        return ATLAS_BINDING_COVERAGE_LABELS["none"]
+    if bound >= total:
+        return ATLAS_BINDING_COVERAGE_LABELS["all"]
+    return ATLAS_BINDING_COVERAGE_LABELS["some"]

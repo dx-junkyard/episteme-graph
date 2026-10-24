@@ -41,6 +41,8 @@
     // 確認問題モーダルを開き直したとき・トピックを移ったときに false へ戻す。
     checkScaffoldActive: false,
     topicHasAudio: false, // 現トピックに再生可能なキャッシュ済み音声があるか
+    topicHasSlides: false, // 現トピックに講義のスライドがあるか（音声なしでもタイマー送りで入れる）
+    topicLectureNote: "", // 講義ボタンの事実文（サーバの lecture_note）
     topicStaleLanguage: false, // audio-status.stale_language（表示のみ・判定には使わない）
     // ── 学習者体験レイヤー(B層) Stage M ──
     lastSources: [],        // L1: 直近回答の根拠 tier 一覧 [{source_title, tier}]（類似度の生値は受け取らない）
@@ -1643,6 +1645,14 @@
       updateNextTopicBtn();
       return;
     }
+    // IK-0947: 教材が空と分かった（読み込み済みで区画ゼロ）ときは、読み込み中と言わず
+    // サーバの事実文（preparation_notice）をそのまま出す。
+    if (state.topicMaterial && state.topicMaterial.length === 0 && state.topicMaterialNotice) {
+      body.innerHTML = '<div class="material-block-header">教材</div>' +
+        '<div class="material-notice material-notice--empty" role="note">' + escHtml(state.topicMaterialNotice) + '</div>';
+      updateNextTopicBtn();
+      return;
+    }
     if (!state.topicMaterial || state.topicMaterial.length === 0) {
       body.innerHTML = '<div style="color:var(--color-text-tertiary);font-size:13px">教材を読み込み中…</div>';
       updateNextTopicBtn();
@@ -2079,13 +2089,33 @@
     document.addEventListener("keydown", _srcEscClose, true);
     try {
       const res = await apiFetch("/learning/courses/" + state.courseId +
-        "/components/" + encodeURIComponent(componentId) + "/explanations");
+        "/components/" + encodeURIComponent(componentId) + "/explanations" +
+        // IK-0892: 部品の文脈と同じ焦点論文を添える（comp_001 は論文をまたいで衝突する）。
+        focusQuerySuffix("?"));
       const body = pop.querySelector(".src-popup-body");
       if (!body) return;
-      if (!res.ok) { body.textContent = "説明を取得できませんでした。"; return; }
+      if (!res.ok) {
+        // IK-0861: 404（このコースの教材に無い部品）は取得失敗と分け、サーバの事実文を描く。
+        var failText = "説明を取得できませんでした。";
+        if (res.status === 404) {
+          try {
+            const err = await res.json();
+            if (err && typeof err.detail === "string" && err.detail && err.detail !== "Course not found") {
+              failText = err.detail;
+            }
+          } catch (_) { /* 既定の文 */ }
+        }
+        body.textContent = failText;
+        return;
+      }
       const data = await res.json();
       const items = (data && data.explanations) || [];
-      if (!items.length) { body.textContent = "承認済みの説明はまだありません。"; return; }
+      if (!items.length) {
+        body.textContent = (data && data.note) || "承認済みの説明はまだありません。";
+        // IK-0906: 説明が無くても検証状態の一行は出す（別の軸の情報を同じ空で消さない）。
+        appendLearnerLedgerLine(body, "component", componentId);
+        return;
+      }
       body.innerHTML = items.map(function (e) {
         const who = e.kind === "standard" ? "標準の説明" : ("教員: " + (e.author_name || "不明"));
         return '<div class="material-chunk" style="margin-bottom:10px">' +
@@ -2107,24 +2137,37 @@
   // 同一 (targetType, targetId) はセッション内でキャッシュする（再描画のたびに
   // 再取得しない。null＝未記帳もキャッシュして 404 の連打を避ける）。
   var _ledgerFactLineCache = {};
+  // IK-0901: 台帳の対象の表示名（サーバの target_label。fetchLearnerLedgerFactLine と同じキー）。
+  var _ledgerTargetLabelCache = {};
+  function learnerLedgerTargetLabel(targetType, targetId) {
+    var key = state.courseId + "|" + targetType + "|" + targetId + "|" + focusQuerySuffix("?");
+    return _ledgerTargetLabelCache[key] || "";
+  }
   async function fetchLearnerLedgerFactLine(targetType, targetId) {
     if (!targetId || !state.courseId) return null;
-    var cacheKey = state.courseId + "|" + targetType + "|" + targetId;
+    // IK-0899: 台帳の行キーは論文を含む（式の番号は論文の中でしか一意でない）。開いている
+    // 論文（焦点論文）を添え、キャッシュも論文ごとに分ける。
+    var focusSuffix = focusQuerySuffix("?");
+    var cacheKey = state.courseId + "|" + targetType + "|" + targetId + "|" + focusSuffix;
     if (Object.prototype.hasOwnProperty.call(_ledgerFactLineCache, cacheKey)) {
       return _ledgerFactLineCache[cacheKey];
     }
     var text = null;
     try {
       const res = await apiFetch("/learning/courses/" + state.courseId +
-        "/ledger/" + encodeURIComponent(targetType) + "/" + encodeURIComponent(targetId));
+        "/ledger/" + encodeURIComponent(targetType) + "/" + encodeURIComponent(targetId) + focusSuffix);
       if (res.ok) {
         const data = await res.json();
         if (data && data.fact_line) {
           text = data.fact_line;
+          // IK-0901: 行の主語はサーバの表示名（式は印字番号。TeX のラベル・空を主語にしない）。
+          if (data.target_label) _ledgerTargetLabelCache[cacheKey] = String(data.target_label);
           var axes = (data.scopes || []).map(function (s) {
             return [s.condition, s.domain, s.precision, s.system].filter(Boolean).join(" / ");
           }).filter(Boolean);
           if (axes.length > 1) text += "（記帳スコープ: " + axes.join("；") + "）";
+          // IK-0855: 部品を理論操作グラフの段へ写して引いた記録なら、どの段の記録かを添える
+          if (data.target_note) text += " " + data.target_note;
         }
       }
     } catch (_) { /* fail-closed */ }
@@ -3087,7 +3130,7 @@
 
     // D層 (D3-6): 未検証合意リストの閲覧（プル型・読み取り専用。開いた人だけが見る）
     html += '<details class="ps" id="lx-open-assumptions"><summary style="cursor:pointer;font-size:12.5px;' +
-      'color:var(--color-text-secondary)">この分野の未検証の前提を見る</summary>' +
+      'color:var(--color-text-secondary)">このコースの教材で、検証の記録がない前提を見る</summary>' +
       '<div id="lx-open-assumptions-body" style="font-size:12px;margin-top:6px">' +
       '<span style="color:var(--color-text-tertiary)">開くと読み込みます…</span></div></details>';
 
@@ -3226,7 +3269,8 @@
       return ((d && d.placements) || []).some(function (p) { return p && p.status !== "confirmed"; });
     });
     var notes = [];
-    if (version) notes.push("骨格版 " + version);
+    // 版の呼び名は core/label_vocab.py::ATLAS_VERSION_PREFIX「地図 版 」の逐語ミラー（IK-0942）
+    if (version) notes.push("地図 版 " + version);
     if (inferred) notes.push("AI推定を含む");
     var text = "登録済み論文 " + n + " 件の解析から生成";
     if (notes.length) text += "（" + notes.join("・") + "）";
@@ -3307,7 +3351,9 @@
       for (var i = 0; i < combined.length && count < 3; i++) {
         var text = await fetchLearnerLedgerFactLine(combined[i].kind, combined[i].id);
         if (!text) continue;
-        var line = combined[i].label ? (combined[i].prefix + combined[i].label + " — " + text) : text;
+        // IK-0901: 主語はサーバの表示名を優先（式の TeX ラベル・空の主語で行を出さない）。
+        var subject = learnerLedgerTargetLabel(combined[i].kind, combined[i].id) || combined[i].label;
+        var line = subject ? (combined[i].prefix + subject + " — " + text) : text;
         if (shown[line]) continue; // 同一文言の重複行は出さない
         shown[line] = true;
         count++;
@@ -3323,10 +3369,14 @@
     if (!body || !state.courseId) return;
     try {
       const res = await apiFetch("/learning/courses/" + state.courseId + "/open-assumptions");
-      if (!res.ok) { body.textContent = "現在、表示できる項目はありません。"; return; }
+      // IK-0853: 取得失敗と空を同じ文にしない（空の理由はサーバの事実文 empty_note）。
+      if (!res.ok) { body.textContent = "一覧を取得できませんでした。"; return; }
       const data = await res.json();
       const items = (data && data.items) || [];
-      if (!items.length) { body.textContent = "現在、表示できる項目はありません。"; return; }
+      if (!items.length) {
+        body.textContent = (data && data.empty_note) || "現在、表示できる項目はありません。";
+        return;
+      }
       body.innerHTML = items.map(function (item) {
         var line = escHtml(item.statement || item.target_id);
         var meta = [];
@@ -3336,9 +3386,14 @@
         return '<div style="padding:6px 0;border-bottom:1px dashed var(--color-border,#eee)">' + line +
           '<div style="color:var(--color-text-tertiary);font-size:11px;margin-top:2px">' +
           escHtml(meta.join(" ・ ")) + '</div></div>';
-      }).join("");
+      }).join("") +
+        // IK-0933: 導出の手順（前提ではない）を外したことの事実文（サーバの population_note）。
+        ((data && data.population_note)
+          ? '<div style="color:var(--color-text-tertiary);font-size:11px;margin-top:4px" data-lx-population-note="1">' +
+            escHtml(data.population_note) + '</div>'
+          : "");
     } catch (_) {
-      body.textContent = "現在、表示できる項目はありません。";
+      body.textContent = "一覧を取得できませんでした。";
     }
   }
 
@@ -4439,7 +4494,7 @@
     if (mapBtn) {
       mapBtn.addEventListener("click", function () {
         overlay.remove();
-        if (window.PersonalMapHome) window.PersonalMapHome.open();
+        if (window.PersonalMapHome) { state.personalMapSeen = true; window.PersonalMapHome.open(); }
       });
     }
   }
@@ -4566,6 +4621,9 @@
       // discuss のときだけスコープを申告する（画面文脈が範囲を広げてはならない = DM1。
       // 実際の範囲決定はサーバの明示状態が正で、これは表示の事実にすぎない）。
       if (p.discuss_scope) view.discuss_scope = String(p.discuss_scope);
+      // IK-0907: この学習の中で「わたしの地図」を開いたか（真偽値のみ）。サーバは地図に何が出て
+      // 何が出ないかの事実を添え、AI が地図に無い情報へ案内しないようにする。
+      if (state.personalMapSeen) view.personal_map_seen = true;
       return {
         screen: SCREEN_CONTEXT_SCREEN,
         selection: selection,
@@ -5613,7 +5671,21 @@
     if (!parent || !parent.classList || !parent.classList.contains("mord")) return base;
     const supsub = parent.getElementsByClassName("msupsub")[0];
     if (!supsub) return base;
-    const sub = String(supsub.textContent || "").replace(/[\s​‌﻿]/g, "");
+    // IK-0869: msupsub の textContent は上付き（べき）と下付きを連結する（r^2 → "r_2"・
+    // c_s^2 → "c_s2" と別の記号名を送っていた）。KaTeX は下付きを上付きより低い位置
+    // （style.top が浅い負値）に置くので、上付きの段を落として下付きだけを添字にする。
+    // 判別できない形はサーバが完全一致の後にべきを落として照合し直す（symbol_key_fallbacks）。
+    const vlist = supsub.querySelector(".vlist");
+    let sub = "";
+    if (vlist && vlist.children && vlist.children.length) {
+      Array.prototype.forEach.call(vlist.children, function (item) {
+        const top = parseFloat((item.style && item.style.top) || "");
+        if (!isNaN(top) && top > -2.8) sub += String(item.textContent || "");
+      });
+    } else {
+      sub = String(supsub.textContent || "");
+    }
+    sub = sub.replace(/[\s​‌﻿]/g, "");
     return (base && sub) ? (base + "_" + sub) : base;
   }
 
@@ -5641,12 +5713,27 @@
     html += '</div>';
     if (definition && definition.text) {
       html += '<div class="symbol-lookup-definition">' + escHtml(definition.text) + '</div>';
+      // IK-0869: 式だけで定義された記号は、定義式の本文を数式として添える。
+      if (definition.latex) {
+        html += '<div class="symbol-lookup-definition">' + renderMaterialKatex(definition.latex, true) + '</div>';
+      }
       if (definition.equation_label) {
         html += '<div class="symbol-lookup-fact">' + escHtml(definition.equation_label) + '</div>';
       }
     }
     facts.forEach(function (fact) {
       html += '<div class="symbol-lookup-fact">' + escHtml(fact) + '</div>';
+    });
+    // IK-0893: 定義の文が無いとき、この論文の主張での使われ方（出所付き・定義ではない）。
+    ((data && data.mentions) || []).forEach(function (mention) {
+      if (!mention || !mention.text) return;
+      html += '<div class="symbol-lookup-definition">「' + renderTextWithInlineMath(mention.text) + '」</div>';
+    });
+    // IK-0870: 事実文が名指す式（番号の無い式も）を、呼び名と式本文で並べる。
+    ((data && data.equations) || []).forEach(function (eq) {
+      if (!eq || !eq.latex) return;
+      html += '<div class="symbol-lookup-fact">' + escHtml(eq.name || "") + '</div>' +
+        '<div class="symbol-lookup-definition">' + renderMaterialKatex(eq.latex, true) + '</div>';
     });
     if (data && data.concept_ref && data.concept_ref.name) {
       html += '<div class="symbol-lookup-concept">概念: ' + escHtml(data.concept_ref.name) + '（登録済み）</div>';
@@ -6439,6 +6526,7 @@
     // Phase P-3: 最上位「わたしの地図」も同様にキャッシュを破棄する（本人スコープの
     // コース横断ネットワークだが、コース切替のたびに古い表示を残さないよう揃える）。
     if (window.PersonalMapHome) window.PersonalMapHome.invalidate();
+    state.personalMapSeen = false;
     // 知識ランドスケープ: コース切替で「論文の位置」のキャッシュ・トグル状態を破棄する
     // （前コースの配置を別コースの地図・出典タブに持ち越さない）。
     if (window.LandscapeLayer) window.LandscapeLayer.invalidate();
@@ -6498,6 +6586,12 @@
   // 受講登録が成立した事実文（IK-0405）。本文はサーバ正本（label_vocab.COURSE_ENROLLED_NOTICE）を
   // textContent で素通しし、フロントに文言を焼き込まない。空なら何も出さない（fail-soft）。
   // 自動では消さない（タイマーを使わない）— 次のコース切替で消える。
+  function showCourseEnrollmentNotice(courseId) {
+    const row = (_allCourses || []).find(function (c) { return c && c.id === courseId; });
+    const text = row && typeof row.enrollment_notice === "string" ? row.enrollment_notice : "";
+    if (text) showEnrollNotice(text);
+  }
+
   function showEnrollNotice(text) {
     const el = document.getElementById("course-enroll-notice");
     if (!el) return;
@@ -6603,6 +6697,9 @@
     state.personalLayer = courseData.personal;
     loadLearningSupportContext();
     showVersionNoticeBanner(state.courseId);
+    // IK-0945: 受講中のコースが新規の受講を受け付けなくなったときの事実文（サーバの
+    // enrollment_notice をそのまま出す。受講者はこれまでどおり読める）。
+    showCourseEnrollmentNotice(state.courseId);
     if (progress) state.course.progress = progress;
 
     const course = state.course;
@@ -7059,6 +7156,8 @@
   async function refreshLectureAvailability() {
     state.topicHasAudio = false;
     state.topicStaleLanguage = false;
+    state.topicHasSlides = false;
+    state.topicLectureNote = "";
     updateLectureToggleAvailability();
     // discuss モード（論文と話す）は予約疑似トピックのためレクチャー音声の対象外。
     if (!state.courseId || !state.currentTopicId || isDiscussMode()) return;
@@ -7073,6 +7172,10 @@
         if (state.currentTopicId === requestedTopicId) {
           state.topicHasAudio = !!data.has_audio;
           state.topicStaleLanguage = !!data.stale_language;
+          // IK-0879: 音声ゼロでもスライドがあれば講義に入れる（全スライドをタイマー送り）。
+          // 学習者経路から音声は作らない — 事実文はサーバの lecture_note をそのまま出す。
+          state.topicHasSlides = (data.total_slides || 0) > 0;
+          state.topicLectureNote = data.lecture_note || "";
         }
       }
     } catch (e) {
@@ -7087,19 +7190,28 @@
     // G4-L: 無効理由はツールチップだけでなく、ボタン近傍のインライン表示でも分かるようにする。
     var hint = document.getElementById("lecture-toggle-hint");
     // レクチャー再生中はトグル（テキストへ戻る）を常に許可する。
-    var enabled = lectureState.active || state.topicHasAudio;
+    // IK-0879: 入口の条件を再生側（音声の無いスライドはタイマー送り）と揃える。
+    // 音声が 1 枚も無くても、スライドがあれば講義に入れる。
+    var enabled = lectureState.active || state.topicHasAudio || state.topicHasSlides;
     btn.disabled = !enabled;
+    // 学生に取れない操作（管理画面）を指示しない。文はサーバの lecture_note（事実文）。
+    var note = state.topicLectureNote || "";
     if (enabled) {
       btn.classList.remove("disabled");
-      // stale_language は表示のみ（トグルの有効/無効判定は従来どおり has_audio）。
+      // stale_language は表示のみ。
       btn.title = state.topicStaleLanguage
         ? "音声の言語が更新待ちです"
-        : "レクチャーモード切替";
-      if (hint) { hint.hidden = true; hint.textContent = ""; }
+        : (state.topicHasAudio || lectureState.active ? "レクチャーモード切替" : (note || "レクチャーモード切替"));
+      if (hint) {
+        var showNote = !state.topicHasAudio && !lectureState.active && !!note;
+        hint.hidden = !showNote;
+        hint.textContent = showNote ? "🔇 音声未生成" : "";
+        if (showNote) hint.title = note;
+      }
     } else {
       btn.classList.add("disabled");
-      btn.title = "このトピックの音声はまだ生成されていません（管理画面で音声を生成してください）";
-      if (hint) { hint.hidden = false; hint.textContent = "音声未生成"; }
+      btn.title = note || "";
+      if (hint) { hint.hidden = !note; hint.textContent = note ? "講義なし" : ""; hint.title = note; }
     }
   }
 
@@ -7249,8 +7361,9 @@
     // ハンズフリー音声会話とマイク/音声再生を奪い合うため、レクチャー開始時は止める。
     if (voiceState.active) stopVoiceMode();
 
-    // 音声未生成のトピックではレクチャーを開始しない（音声生成は管理画面のみ）。
-    if (!state.topicHasAudio) {
+    // スライドの無いトピックではレクチャーを開始しない。音声が無いだけなら開始し、
+    // 全スライドをタイマー送りにする（IK-0879。音声生成は管理画面のみ — ここでは作らない）。
+    if (!state.topicHasAudio && !state.topicHasSlides) {
       updateLectureToggleAvailability();
       return;
     }
@@ -7808,14 +7921,21 @@
     var dropUnresolvedEmbeds = !!chunk.drop_unresolved_embeds;
     var formulas = chunk.formulas || [];
     var formulaById = {};
-    formulas.forEach(function (formula, idx) {
-      var id = formula.id || ("FORMULA_" + idx);
-      var normalizedId = normalizeMaterialEvidenceId(id);
-      formulaById[String(id)] = formula;
+    // IK-0944: 鍵は id を優先する。並び順の鍵（FORMULA_i）は id の鍵が無いときの救済だけ。
+    // 講義のスライドの formulas はそのスライドが引く式の部分集合なので、並び順の鍵が
+    // 後から id の鍵を上書きすると 2 枚目以降で別の式が差し込まれる。
+    formulas.forEach(function (formula) {
+      if (!formula || !formula.id) return;
+      var normalizedId = normalizeMaterialEvidenceId(formula.id);
+      formulaById[String(formula.id)] = formula;
       formulaById[normalizedId] = formula;
       formulaById["[[" + normalizedId + "]]"] = formula;
-      formulaById["FORMULA_" + idx] = formula;
-      formulaById["[[" + "FORMULA_" + idx + "]]"] = formula;
+    });
+    formulas.forEach(function (formula, idx) {
+      if (!formula) return;
+      var posKey = "FORMULA_" + idx;
+      if (!Object.prototype.hasOwnProperty.call(formulaById, posKey)) formulaById[posKey] = formula;
+      if (!Object.prototype.hasOwnProperty.call(formulaById, "[[" + posKey + "]]")) formulaById["[[" + posKey + "]]"] = formula;
     });
 
     // [[FIGURE_N]] プレースホルダ（セグメント内 1 始まり、chunk.figures 由来。
@@ -8355,6 +8475,10 @@
       componentContextCardOrFallbackHtml(cardDto, cardOpts) +
       componentContextExitsHtml(graph) +
       renderContextInstanceDetails(instance, resolver) +
+      // IK-0863: 「共通部品として」が無いときはサーバの事実文を末尾に描く（理由を黙らない）。
+      (!sharedPart && data && data.shared_part_note
+        ? '<div class="evidence-chip-context-exit" data-shared-part-note>' + escHtml(data.shared_part_note) + '</div>'
+        : "") +
     '</div>' +
     (sharedPart ? '<div class="evidence-chip-context-pane" data-pane="shared" hidden>' + renderContextSharedPane(sharedPart) + '</div>' : "") +
     (graph ? '<div class="evidence-chip-context-graph-toggle">' +
@@ -8451,7 +8575,11 @@
       return '<div class="evidence-chip-popover-equation-item">' +
         (roleLabel ? '<span class="evidence-chip-popover-equation-role">' + escHtml(roleLabel) + '</span>' : "") +
         '<span class="evidence-chip-popover-equation-body">' +
-        (latex ? renderMaterialKatex(latex, true) : escHtml(eq.label || eq.id || "")) +
+        // IK-0894: 教材の式に解決できない式は、サーバが同梱した式本文（latex）を数式で描く。
+        // 無ければ表示名を描く（表示名の $…$ は数式区間 — equation_display_label の契約）。
+        (latex ? renderMaterialKatex(latex, true)
+          : (eq.latex ? renderMaterialKatex(eq.latex, true)
+            : renderTextWithInlineMath(eq.label || ""))) +
         '</span>' +
         // 復元由来の式の事実文（サーバの label_note を素通し。JS に文言を持たない）。
         (eq.label_note ? '<span class="evidence-chip-popover-equation-note">' + escHtml(eq.label_note) + '</span>' : "") +
@@ -8490,6 +8618,8 @@
   function renderContextSharedPane(sharedPart) {
     var entry = sharedPart.entry || {};
     var html = "";
+    // IK-0917: 見出しはサーバの固定文（同一性リンクの意味 = 教員が同じものとして確かめた）を素通し。
+    if (sharedPart.heading) html += '<div class="evidence-chip-popover-section-title" data-shared-part-heading>' + escHtml(sharedPart.heading) + '</div>';
     if (entry.name) html += '<div class="evidence-chip-context-shared-name">' + escHtml(entry.name) + '</div>';
     if (entry.aliases && entry.aliases.length) {
       html += '<div class="evidence-chip-context-shared-aliases">別名: ' + escHtml(entry.aliases.join(" ・ ")) + '</div>';
@@ -8499,8 +8629,17 @@
       var statusLabel = MATERIAL_LIBRARY_STATUS_LABELS[entry.standardization_status] || entry.standardization_status;
       html += '<div class="evidence-chip-context-shared-status">標準化状況: ' + escHtml(statusLabel) + '</div>';
     }
-    if (entry.other_documents_count) {
-      html += '<div class="evidence-chip-context-shared-count">他 ' + escHtml(String(entry.other_documents_count)) + ' 論文でも使用</div>';
+    // IK-0920: 他の論文は確定リンクから導いた題名で列挙する（件数は出さない）。前置き・空の事実文はサーバ固定文。
+    var otherDocs = (entry.other_documents || []).map(function (d) { return d && d.title; }).filter(Boolean);
+    if (otherDocs.length) {
+      html += '<div class="evidence-chip-context-shared-documents" data-shared-part-documents>' +
+        (entry.other_documents_lead ? '<div class="evidence-chip-popover-position">' + escHtml(entry.other_documents_lead) + '</div>' : "") +
+        '<ul class="evidence-chip-popover-list">' +
+        otherDocs.map(function (t) { return '<li>' + escHtml(t) + '</li>'; }).join("") +
+        (entry.other_documents_truncated ? '<li>ほか</li>' : "") +
+        '</ul></div>';
+    } else if (entry.other_documents_note) {
+      html += '<div class="evidence-chip-context-exit" data-shared-part-documents-note>' + escHtml(entry.other_documents_note) + '</div>';
     }
     return html || '<div class="evidence-chip-popover-position">共通部品としての情報はまだ登録されていません。</div>';
   }
@@ -9190,6 +9329,27 @@
     return '<span class="' + cls + '"><code>' + escHtml(formula) + '</code></span>';
   }
 
+  // 地の文に $…$ / \(…\) の数式区間を含む短い文を、文は escHtml・数式は KaTeX で描く
+  // （IK-0893 / IK-0894 / IK-0898。サーバは数式区間を割らずに切り詰めて渡す —
+  // text_excerpt.excerpt(keep_dollar_math=True)）。数式区間の無い文は escHtml と同じ。
+  function renderTextWithInlineMath(text) {
+    var src = String(text || "").replace(/\\\(([\s\S]+?)\\\)/g, function (_m, expr) {
+      return "$" + expr + "$";
+    });
+    var out = "";
+    var re = /\$([^$]+)\$/g;
+    var last = 0;
+    var m;
+    while ((m = re.exec(src)) !== null) {
+      out += escHtml(src.slice(last, m.index));
+      var rendered = renderMaterialKatex(m[1], false);
+      out += rendered || escHtml(m[0]);
+      last = re.lastIndex;
+    }
+    out += escHtml(src.slice(last));
+    return out;
+  }
+
   // 教材埋め込み ![[kind:id]] の id 正規化。管理画面 lsNormalizeEvidenceId
   // （admin-lecture-studio.js）と backend normalize_evidence_id
   // （core/course_content_builder.py）と**同一仕様**にする（両画面で同じ ID が同じ
@@ -9711,7 +9871,7 @@
     var myMapBtn = document.getElementById("my-map-btn");
     if (myMapBtn) {
       myMapBtn.addEventListener("click", function () {
-        if (window.PersonalMapHome) window.PersonalMapHome.open();
+        if (window.PersonalMapHome) { state.personalMapSeen = true; window.PersonalMapHome.open(); }
       });
     }
     // コーパス回遊層（corpus_roaming_design.md §4.2）: 「論文の海」オーバーレイ。

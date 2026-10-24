@@ -114,7 +114,10 @@ def test_app_js_cache_buster_bumped():
     html = _read(INDEX_HTML)
     # IK-0545 で app.js を更新したため版を上げた（逐語引用の一致検査の 1 行）。
     # 第 23 波（2026-10-09）で app.js を再度更新したため round23 に上げた。
-    assert "/js/app.js?v=round23-" in html
+    # 第 25 周（2026-10-23）で app.js を再度更新したため、round23 以降の版を受ける。
+    import re as _re
+
+    assert _re.search(r"/js/app\.js\?v=round2[3-9]-", html)
 
 
 def test_drop_mode_renders_chips_and_omits_raw_ids(tmp_path):

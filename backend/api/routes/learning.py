@@ -36,6 +36,7 @@ from schemas import (
     LearningCheckSelfCheckResponse,
     LearningCourseDetail,
     LearningCourseLayeredResponse,
+    LearningCourseCreateOut,
     LearningCourseOut,
     LearningEnrollOut,
     LearningProgress,
@@ -65,6 +66,8 @@ from services import (
     get_course_completion,
     list_learner_touched_topic_ids,
     get_course_data,
+    course_open_for_enrollment,
+    resolve_course_entry,
     get_course_live_llm_models,
     get_editable_course_data,
     get_viewable_course_data,
@@ -111,6 +114,7 @@ from core.course_data import (
     course_llm_models,
     course_source_material_ids,
     course_title as _course_title,
+    course_titles_with_raw_tex,
     course_topics,
     find_course_topic,
     is_symbol_concept_name,
@@ -146,6 +150,7 @@ from core.lecture import (
 )
 from core import check_review
 from core import element_explanations
+from core import explanation_governance as _explanation_governance
 from core import llm_policy
 from core import label_vocab
 from core.llm import (
@@ -213,7 +218,11 @@ from core.learning_support_agent import (
 )
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
-from core.component_context import build_component_context
+from core.component_context import (
+    build_component_context,
+    component_matches_multiple_documents,
+    resolve_course_component_id,
+)
 # 知識の転用層 P4-2: 理論操作グラフの読み出しは W層の既存関数を再利用する
 # （main 層ノードの review_status 合成も含め、二重実装しない）。
 from core.deliberation.graph_dialogue import load_latest_graph
@@ -671,11 +680,11 @@ def _split_symbol_concepts(concepts: list) -> tuple[list, list[str]]:
     return kept, excluded
 
 
-@router.post("/courses", response_model=LearningCourseOut, status_code=201)
+@router.post("/courses", response_model=LearningCourseCreateOut, status_code=201)
 def create_course(
     body: CourseCreateRequest,
     current_user: dict = Depends(_get_current_user),
-) -> LearningCourseOut:
+) -> LearningCourseCreateOut:
     """新しいコースを作成する。
 
     学ぶ単位の一級化 Phase 2: ①前提を同コース topic の ID 参照に（`resolve_prerequisite_topic_ids`、
@@ -748,13 +757,17 @@ def create_course(
     ).start()
 
     logger.info("Created course '%s' (id=%s) for user=%s", body.title, course_id, current_user["id"])
-    return LearningCourseOut(
+    # IK-0951: 題名に生の TeX 記法が残るなら保存時に知らせる（保存は止めない）。
+    raw_tex_titles = course_titles_with_raw_tex(data)
+    return LearningCourseCreateOut(
         id=course_id,
         title=body.title,
         is_template=body.is_template,
         visibility=body.visibility,
         group_id=body.group_id if body.visibility == "group" else None,
         description=body.description,
+        title_notice=label_vocab.COURSE_TITLE_RAW_TEX_NOTICE if raw_tex_titles else "",
+        raw_tex_titles=raw_tex_titles,
     )
 
 
@@ -880,7 +893,21 @@ def list_courses(
         )
         for r in own_records
     ]
-    # 受講中のマスターコースも「マイコース」として並べる（is_enrollable=False）
+    # 受講中のマスターコースも「マイコース」として並べる（is_enrollable=False）。
+    # IK-0945: 受付が止まった（非公開化された）受講中のコースには事実文を添える
+    # （受講者は読み続けられる。判定は入場判定の正本 course_open_for_enrollment）。
+    def _enrolled_notice(r) -> str:
+        try:
+            open_ = course_open_for_enrollment(
+                current_user["id"], str(r[0]),
+                visibility=r[4], group_id=r[5],
+                is_published=bool(r[3]), is_template=bool(r[2]),
+            )
+        except Exception:  # noqa: BLE001 — 事実文が付かないだけ（一覧は止めない）
+            logger.warning("enrollment openness check failed for %s", r[0], exc_info=True)
+            return ""
+        return "" if open_ else label_vocab.COURSE_ENROLLED_BUT_CLOSED_NOTICE
+
     courses.extend(
         LearningCourseOut(
             id=r[0],
@@ -891,6 +918,7 @@ def list_courses(
             visibility=r[4] or "private",
             group_id=str(r[5]) if r[5] else None,
             description=r[6] or "",
+            enrollment_notice=_enrolled_notice(r),
         )
         for r in enrolled_records
     )
@@ -1275,23 +1303,15 @@ def enroll_course(
         session.close()
 
     if not record:
-        raise HTTPException(status_code=404, detail="Course not found")
+        raise HTTPException(status_code=404, detail=label_vocab.COURSE_NOT_AVAILABLE_NOTICE)
 
     title, visibility, group_id, is_published, is_template = tuple(record)[:5]
     description = tuple(record)[5] if len(tuple(record)) > 5 else ""
-    enrollable = False
-    if visibility == "public" and is_published and is_template:
-        enrollable = True
-    elif visibility == "group" and group_id and user_can_access_group(
-        current_user["id"], str(group_id)
-    ):
-        enrollable = True
-    elif user_can_view_course(current_user["id"], course_id):
-        # object_group_permissions（object_type='course'）経由で viewer/editor 権限を持つ場合
-        enrollable = True
-
-    if not enrollable:
-        raise HTTPException(status_code=403, detail="このコースを受講する権限がありません")
+    # IK-0945: 入場判定の正本（services.resolve_course_entry）を読む。受講中なら（非公開化の
+    # 後でも）「すでに受講中」で返し、受講の行が無く受付も止まっていれば 403 の事実文。
+    entry = resolve_course_entry(current_user["id"], course_id)
+    if not (entry.is_owner or entry.is_enrolled or entry.open_for_enrollment):
+        raise HTTPException(status_code=403, detail=label_vocab.COURSE_ENROLLMENT_CLOSED_NOTICE)
 
     newly_enrolled = enroll_user_in_course(current_user["id"], course_id) is not False
 
@@ -3440,6 +3460,7 @@ def _screen_element_sources(
     topic_info: dict | None,
     grounding_document_ids: set[str],
     preferred_document_ids: "tuple[str, ...]" = (),
+    user_id: str = "",
 ) -> dict:
     """kind ``element`` の sources（選択チップ1件の射影 + evidence item）。
 
@@ -3458,10 +3479,12 @@ def _screen_element_sources(
             _component_context_with_explanation(
                 element_id, course_id, set(grounding_document_ids),
                 preferred_document_ids=preferred,
+                user_id=user_id,
             )
             if preferred
             else _component_context_with_explanation(
-                element_id, course_id, set(grounding_document_ids)
+                element_id, course_id, set(grounding_document_ids),
+                user_id=user_id,
             )
         )
     elif element_type in CONTEXT_ELEMENT_TYPES:  # claim / equation
@@ -3597,6 +3620,7 @@ def _learning_screen_sources(
             topic_info=topic_info,
             grounding_document_ids=grounding_document_ids,
             preferred_document_ids=preferred_document_ids,
+            user_id=user_id,
         )
     except Exception:  # noqa: BLE001
         logger.debug("screen_context: element projection failed", exc_info=True)
@@ -3620,7 +3644,11 @@ def _learning_screen_sources(
         if target_id and _is_db_uuid(target_id):
             session = _pg_session()
             try:
-                line = learner_ledger_line(session, ledger_target, target_id)
+                # IK-0899: 台帳の行キーは論文を含む（要素の論文で引く）。
+                line = learner_ledger_line(
+                    session, ledger_target, target_id,
+                    document_id=_screen_element_document_id(element, ctx, grounding_document_ids) or None,
+                )
                 if line:
                     sources["ledger"] = line
             except Exception:  # noqa: BLE001
@@ -4325,7 +4353,22 @@ _GROUNDING_GENERIC_TERMS = frozenset({
     # 出所がターンごとに反転していた。
     "一言", "根拠", "要約", "簡単", "短く", "つまり", "結局", "要点", "ポイント",
     "全体", "全体像", "どこ", "どれ", "ここ", "それ", "これ", "以上",
+    # 第 25 周 面 D 第 2 周（IK-0912）: 問いの枠の語（どの媒体で・どう言い直すか）。
+    # 「教材の L TOV の式、言葉で言うとどういう意味？」の「言葉」が内容語に数えられ、
+    # 教材を読んで答えたのに出所が「出典を追えない AI の説明」になっていた。
+    "言葉", "講義", "数式", "言い方", "言い換え", "読み方", "日本語",
 })
+
+#: 教材側の照合用に TeX の制御語・括弧・添字記号を外す（IK-0912。``\mathcal{L}_{\rm TOV}``
+#: を「L TOV」として問いの語と照合できるように。プロンプトの本文は変えない）。
+_GROUNDING_TEX_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
+_GROUNDING_TEX_PUNCT_RE = re.compile(r"[{}_^$\\]")
+
+
+def _grounding_haystack(topic_material: str) -> str:
+    text = topic_material or ""
+    plain = _GROUNDING_TEX_PUNCT_RE.sub(" ", _GROUNDING_TEX_COMMAND_RE.sub(" ", text))
+    return (text + "\n" + plain).casefold()
 
 
 def _grounding_content_terms(message: str) -> list[str]:
@@ -4366,7 +4409,7 @@ def _topic_material_engages_message(
     terms = _grounding_content_terms(body.message if message is None else message)
     if not terms:
         return True
-    haystack = topic_material.casefold()
+    haystack = _grounding_haystack(topic_material)
     hits = sum(1 for t in terms if t.casefold() in haystack)
     return hits * 2 > len(terms)
 
@@ -4780,10 +4823,14 @@ def get_topic_material(
     # （何も言わずに論文の表紙が出ると、学習者はコースが壊れていると読む）。
     # 本文を返さないとき（chunks 空）は「そのまま表示しています」が偽になるので付けない。
     # 表示するチャンクの選び方はここでは変えない。
+    # IK-0947: 返す本文が無いときも空だと言う（空白のまま配らない）。
     return TopicMaterialResponse(
         topic_id=topic_id,
         chunks=chunks,
-        preparation_notice=_topic_material_fallback_notice(course_data) if chunks else None,
+        preparation_notice=(
+            _topic_material_fallback_notice(course_data) if chunks
+            else _topic_material_empty_notice(course_data)
+        ),
     )
 
 
@@ -4798,6 +4845,13 @@ def _topic_single_document_id(topic: dict | None) -> str | None:
     except Exception:  # noqa: BLE001 — 補助
         return None
     return next(iter(ids)) if len(ids) == 1 else None
+
+
+def _topic_material_empty_notice(course_data: dict) -> str:
+    """トピックの教材が空のときの事実文（IK-0947。生成中なら準備中）。"""
+    if course_content_is_preparing(course_data):
+        return label_vocab.TOPIC_MATERIAL_EMPTY_PREPARING_NOTICE
+    return label_vocab.TOPIC_MATERIAL_EMPTY_NOTICE
 
 
 def _topic_material_fallback_notice(course_data: dict) -> str:
@@ -5561,8 +5615,12 @@ def _usage_help_response(
     body: LearningChatRequest,
     *,
     on_llm_call: Callable[[], None] | None = None,
-) -> LearningChatResponse:
+    return_none_if_undocumented: bool = False,
+) -> LearningChatResponse | None:
     """学生 HELP ルートのハンドラ（設計 §1-3、ui_anchor 優先は §5.2/§9-1）。
+
+    ``return_none_if_undocumented``（IK-0936）: 該当節が無いとき固定文を返さず、痕跡も履歴も
+    残さずに ``None`` を返す（呼び出し側が通常の RAG 経路へ戻す）。分類経由の英語の問いだけが使う。
 
     docs/manual/student/ の凍結索引を検索し、テキスト経路は本文素通し（パラフレーズ
     禁止・quota 非消費）、音声・casual 経路は 1 LLM コールで会話調へ整形する
@@ -5687,6 +5745,8 @@ def _usage_help_response(
     trace_anchor = f"ui:{ui_anchor_id}" if ui_anchor_id else None
 
     footer = _USAGE_HELP_FOOTER_EN if english_query else _USAGE_HELP_FOOTER
+    if not documented and return_none_if_undocumented:
+        return None
     if not documented:
         not_documented = (
             _USAGE_HELP_NOT_DOCUMENTED_EN if english_query else _USAGE_HELP_NOT_DOCUMENTED
@@ -6270,12 +6330,22 @@ def _learning_chat_core(
     # アクション usage_help（明示）は上の pre-route で処理済みなので、ここは分類の結果だけ。
     if intent == "USAGE_HELP" and _is_simulation_result_question(body, course_id=course_id):
         intent = "DOMAIN_RAG"
+    # IK-0936（第 25 周 第 3 波）: 分類（推定）で使い方に回った**英語の**問いに日本語マニュアルの
+    # 該当節が無いときは、固定文で終えず通常の RAG 経路へ戻す（内容と画面の両方を含む問いの
+    # 分類の取り違えの戻り道。LLM 呼び出しは増やさない — 分類は済み・回答は 1 コールのまま）。
+    # 日本語の無ヒットは従来どおり固定文（使い方の需要信号を G層へ残す）。型付きの usage_help
+    # （明示）は上の pre-route で処理済みでここには来ない。
     if intent == "USAGE_HELP":
+        _help_fallback_to_rag = _is_kana_kanji_free(body.message)
         with usage_context("learning:help_usage", user_id=current_user["id"], course_id=course_id):
-            return _usage_help_response(
+            _help_response = _usage_help_response(
                 current_user["id"], course_id, topic_id, body,
                 on_llm_call=_consume_quota,
+                return_none_if_undocumented=_help_fallback_to_rag,
             )
+        if _help_response is not None:
+            return _help_response
+        intent = "DOMAIN_RAG"
 
     # ルート②: 学習相談・メタ質問 → RAGをスキップし、コース情報をベースにアドバイス
     if intent == "LEARNING_ADVICE":
@@ -7860,7 +7930,7 @@ def get_symbol_lookup_route(
 
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if course_data is None:
-        raise HTTPException(status_code=404, detail="Course not found")
+        raise HTTPException(status_code=404, detail=label_vocab.COURSE_NOT_AVAILABLE_NOTICE)
 
     allowed_document_ids = list_course_source_document_ids(course_data)
     # 定義は「この論文」から引く（別の論文の同名記号を持ってこない）。焦点論文の段は
@@ -8560,21 +8630,64 @@ def connect_tension_route(
     return _learner_tension_decision_dto(result)
 
 
+#: 学生向け説明一覧の事実文（IK-0861。固定文の正本はサーバ — JS にミラーしない）。
+COMPONENT_EXPLANATIONS_EMPTY_NOTE = "この部品には、承認済みの説明がまだありません。"
+COMPONENT_EXPLANATIONS_NOT_IN_COURSE = "この部品は、このコースの教材の中では見つかりませんでした。"
+#: 部品の ID がコースの複数の論文に当たり、どの論文の部品か決められないとき（IK-0892）。
+COMPONENT_EXPLANATIONS_AMBIGUOUS = (
+    "どの論文の部品か特定できませんでした。表示中のトピックの教材から開き直すと説明を出せます。"
+)
+
+#: 学生へ届く説明の条件（IK-0861 + IK-0926・オーナー判断の推奨どおり）。承認済みに限り、
+#: 標準の説明（document 単位）はコースをまたいで届き、教員の説明は書いたコース（出所
+#: ``course_id``）の学生に届く。共有 ON の説明がほかのコースの学生に届くのは、著者以外の
+#: 査読承認を受けたときだけ（e.shared = TRUE かつ最新の査読承認の記帳者が著者でない）。
+#: 正本は ``core.explanation_governance.LEARNER_EXPLANATION_SCOPE_SQL``。
+_LEARNER_EXPLANATION_SCOPE_SQL = _explanation_governance.LEARNER_EXPLANATION_SCOPE_SQL
+
+
 @router.get("/courses/{course_id}/components/{component_id}/explanations")
 def get_component_explanations_for_learner(
     course_id: str,
     component_id: str,
     current_user: dict = Depends(_get_current_user),
+    topic_id: str | None = None,
+    document_id: str | None = None,
 ) -> dict:
     """学習者向け: 1つの理論・概念の説明バージョン(標準/各教員の説明)を返す(C層 Phase 2)。
 
     承認済み(teacher_approved)の説明のみを返す。標準説明は kind='standard'。
     承認の厚みは段階ラベルで示し、数値スコアは学習者に提示しない(点数化を避ける)。
+
+    ゲートは受講（``get_accessible_course_data``）で、部品はコースの教材の document に
+    限って解決する（agent ID も UUID に解決してから引く — CAST しない）。範囲は
+    ``_LEARNER_EXPLANATION_SCOPE_SQL``（IK-0861。2026-10-23 に部品の course_id 一致から
+    切り替えた）。
     """
     from routes.theory_components import _endorsement_label  # 遅延 import(循環回避)
 
-    if not get_viewable_course_data(current_user["id"], course_id):
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
+    course_document_ids = set(_course_document_ids(course_data))
+    # IK-0892: 部品の文脈と同じ焦点論文（FD1/FD4）で解決する。「どの論文か」の条件式は
+    # ここに書かず、焦点の解決（learner_focus_document）と resolve_in_focus に委ねる。
+    focus = (
+        _learner_focus(
+            current_user, course_data, course_id, topic_id,
+            explicit_document_id=str(document_id or "").strip() or None,
+            allowed_document_ids=course_document_ids,
+        )
+        if str(topic_id or "").strip() or str(document_id or "").strip()
+        else FocusDocument()
+    )
+    component_db_id = resolve_course_component_id(
+        component_id, course_document_ids, preferred_document_ids=focus.document_ids,
+    )
+    if not component_db_id:
+        if component_matches_multiple_documents(component_id, course_document_ids):
+            raise HTTPException(status_code=404, detail=COMPONENT_EXPLANATIONS_AMBIGUOUS)
+        raise HTTPException(status_code=404, detail=COMPONENT_EXPLANATIONS_NOT_IN_COURSE)
     session = _pg_session()
     try:
         rows = session.execute(
@@ -8584,13 +8697,12 @@ def get_component_explanations_for_learner(
                        COALESCE(s.provisional_count, 0), COALESCE(s.expertise_breadth, 0)
                 FROM component_explanations e
                 LEFT JOIN users u ON u.id = e.author_id
-                LEFT JOIN component_explanation_endorsement_summary s ON s.explanation_id = e.id
+                LEFT JOIN """ + _explanation_governance.COUNTED_ENDORSEMENT_SUMMARY_SQL + """ s ON s.explanation_id = e.id
                 WHERE e.component_id = CAST(:cid AS uuid)
-                  AND e.course_id = :course_id
-                  AND e.review_status = 'teacher_approved'
+            """ + _LEARNER_EXPLANATION_SCOPE_SQL + """
                 ORDER BY (e.kind = 'standard') DESC, COALESCE(s.endorser_count, 0) DESC, e.created_at ASC
             """),
-            {"cid": component_id, "course_id": course_id},
+            {"cid": component_db_id, "course_id": course_id},
         ).fetchall()
     finally:
         session.close()
@@ -8610,15 +8722,22 @@ def get_component_explanations_for_learner(
             "body": str(r[4] or ""),
             "endorsement_label": _endorsement_label(summary),
         })
-    return {"component_id": component_id, "explanations": explanations}
+    result = {
+        "component_id": component_db_id,
+        "explanations": explanations,
+        "indicator_id": "explanation-support-label",
+    }
+    if not explanations:
+        result["note"] = COMPONENT_EXPLANATIONS_EMPTY_NOTE
+    return result
 
 
 def _first_approved_component_explanation(component_id: str, course_id: str) -> dict | None:
     """承認済み(teacher_approved)の component_explanations を1件返す(C層)。
 
-    ``get_component_explanations_for_learner`` と同じ承認条件・course スコープ・
-    並び順（標準優先 → 承認厚み → 作成順）で、先頭1件のみを
-    ``get_course_component_context`` の ``instance.explanation`` に充填する。
+    ``get_component_explanations_for_learner`` と同じ承認条件・範囲
+    （``_LEARNER_EXPLANATION_SCOPE_SQL``）・並び順（標準優先 → 承認厚み → 作成順）で、
+    先頭1件のみを ``get_course_component_context`` の ``instance.explanation`` に充填する。
     """
     from routes.theory_components import _endorsement_label  # 遅延 import(循環回避)
 
@@ -8631,10 +8750,9 @@ def _first_approved_component_explanation(component_id: str, course_id: str) -> 
                        COALESCE(s.provisional_count, 0), COALESCE(s.expertise_breadth, 0)
                 FROM component_explanations e
                 LEFT JOIN users u ON u.id = e.author_id
-                LEFT JOIN component_explanation_endorsement_summary s ON s.explanation_id = e.id
+                LEFT JOIN """ + _explanation_governance.COUNTED_ENDORSEMENT_SUMMARY_SQL + """ s ON s.explanation_id = e.id
                 WHERE e.component_id = CAST(:cid AS uuid)
-                  AND e.course_id = :course_id
-                  AND e.review_status = 'teacher_approved'
+            """ + _LEARNER_EXPLANATION_SCOPE_SQL + """
                 ORDER BY (e.kind = 'standard') DESC, COALESCE(s.endorser_count, 0) DESC, e.created_at ASC
                 LIMIT 1
             """),
@@ -8665,21 +8783,36 @@ def _component_context_with_explanation(
     course_document_ids: set[str],
     *,
     preferred_document_ids: "tuple[str, ...]" = (),
+    user_id: str = "",
 ) -> dict | None:
     """コーススコープの component 文脈 DTO（C層の承認済み説明を充填済み）。解決不能なら ``None``。
+
+    ``user_id`` があれば「共通部品として」の他の論文を、コースの sources ∪ 本人の可視集合
+    （``list_visible_document_ids``）の中からだけ題名で列挙する（IK-0920）。無ければ
+    コースの sources だけ（fail-closed）。
 
     ``get_course_component_context``（エンドポイント）と、画面文脈アダプター Phase 4
     （``assistant_screen_adapter_design.md`` §11.3 kind ``element``）の共通正本。
     document スコープの強制は ``core.component_context`` の SQL 内
     （``ANY(:doc_ids)``）が持つ — ここで再実装しない。
     """
+    readable_document_ids = set(course_document_ids)
+    if str(user_id or "").strip():
+        try:
+            readable_document_ids |= {str(d) for d in (list_visible_document_ids(user_id) or [])}
+        except Exception:  # noqa: BLE001 - 読めなければコースの sources だけ（fail-closed）
+            logger.debug("component context: visible documents unavailable", exc_info=True)
     context = (
         build_component_context(
             component_id, course_id, course_document_ids,
             preferred_document_ids=preferred_document_ids,
+            readable_document_ids=readable_document_ids,
         )
         if preferred_document_ids
-        else build_component_context(component_id, course_id, course_document_ids)
+        else build_component_context(
+            component_id, course_id, course_document_ids,
+            readable_document_ids=readable_document_ids,
+        )
     )
     if context is None:
         return None
@@ -8713,7 +8846,7 @@ def get_course_component_context(
     """
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if not course_data:
-        raise HTTPException(status_code=404, detail="Course not found")
+        raise HTTPException(status_code=404, detail=label_vocab.COURSE_NOT_AVAILABLE_NOTICE)
 
     course_document_ids = set(_course_document_ids(course_data))
     # 焦点論文（FD1/FD4）: agent 側 ID（``comp_001``）は論文をまたいで衝突するので、
@@ -8732,10 +8865,12 @@ def get_course_component_context(
         _component_context_with_explanation(
             component_id, course_id, course_document_ids,
             preferred_document_ids=focus.document_ids,
+            user_id=current_user["id"],
         )
         if focus.document_ids
         else _component_context_with_explanation(
-            component_id, course_id, course_document_ids
+            component_id, course_id, course_document_ids,
+            user_id=current_user["id"],
         )
     )
     if context is None:
@@ -8779,7 +8914,7 @@ def get_course_element_context(
 
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if not course_data:
-        raise HTTPException(status_code=404, detail="Course not found")
+        raise HTTPException(status_code=404, detail=label_vocab.COURSE_NOT_AVAILABLE_NOTICE)
 
     course_document_ids = set(_course_document_ids(course_data))
     # ⚓ が属する論文で先に解決する（式 ID の論文間衝突）。焦点論文の段は 明示 →

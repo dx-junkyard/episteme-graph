@@ -22,7 +22,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（2026-10-16 時点で **091 以降**。044〜090 は使用済み — §3 参照。
+  着手時は次の空き番号（2026-10-23 時点で **093 以降**。044〜092 は使用済み — §3 参照。
   採番前に必ず `ls backend/db/` で確認する）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
@@ -200,8 +200,10 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 088 | `088_simulation_bridge` | **検証シミュレーション層（SB層）**（新表 `simulation_programs`（LLM 生成の理論シミュレータ候補・再生成は superseded）/ `instrument_wirings`（L層部品の配線・改訂提案は `parent_wiring_id`）/ `simulation_runs`（append-only）、`epistemic_ledger.simulation_candidates` JSONB、語彙表 `knowledge_entry_types` に `instrument_model` / `noise_source` / `signal_processing`。DELETE 文なし・users 参照なし。正本は `docs/features/simulation_bridge_design.md`） |
 | 089 | `089_simulation_learner` | **検証シミュレーション層 v1.1「主語は学習者」**（`simulation_programs` / `instrument_wirings` / `simulation_runs` に `owner_user_id UUID`（users FK なし）・`course_id TEXT`、`simulation_runs` に `shared_at`（本人の明示共有）・`prediction JSONB`（予想）、`instrument_wirings.origin` の CHECK に `learner`、`knowledge_equations_live` ビュー（078 で欠けていた KO5 の live ビュー）。列追加のみ・DELETE 文なし。正本は `docs/features/simulation_bridge_design.md` §14） |
 | 090 | `090_paper_discovery_ingest_cartridge` | 論文ディスカバリー層 — 取り込みキュー `paper_discovery_ingest_items` に `cartridge_id TEXT NULL`（解析の分野。NULL = 未指定・`''` = 「指定しない」の明示。列追加のみ。正本は `docs/features/paper_discovery_design.md` §12） |
+| 091 | `091_component_explanations_course_optional` | 承認・共有レイヤー(C層) — `component_explanations.course_id` の NOT NULL を外し、FK を `ON DELETE SET NULL` に張り替える（course_id は範囲ではなく出所。IK-0891。正本は `docs/features/component_evidence_redesign.md` 2026-10-23 追補） |
+| 092 | `092_epistemic_ledger_document_key` | D層 — 台帳の行キーに論文を含める（`(document_id, target_type, target_id)`・旧キーで人の記帳が入った衝突行には `attribution_check_needed` の印。IK-0899。正本は `docs/features/stakes_ledger_design.md` §16） |
 
-次の空き番号は **091**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **093**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。
 

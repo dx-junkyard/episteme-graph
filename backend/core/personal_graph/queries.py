@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import re
 from uuid import UUID
 
 from sqlalchemy import text as sa_text
@@ -842,7 +843,9 @@ def fetch_confirmed_links_for_shared_part(shared_part_id: str) -> list[dict]:
 LEARNER_EXCLUDED_IDENTITY_ELEMENT_TYPE = "theory_module"
 
 
-def fetch_component_ledger_statuses(component_ids: list[str]) -> dict[str, str]:
+def fetch_component_ledger_statuses(
+    component_ids: list[str], *, document_id: str | None
+) -> dict[str, str]:
     """``epistemic_ledger`` の検証状態を ``component_id -> verification_status`` で返す。
 
     近傍関係ビュー（``nearby.py``、設計書
@@ -851,12 +854,17 @@ def fetch_component_ledger_statuses(component_ids: list[str]) -> dict[str, str]:
     ``core/doubt/ledger_builder.py`` が TheoryOperationGraph の main 層ノードについて
     作る行と同一（同じキーを別解釈しない）。
 
+    IK-0899（migration 092）: 行キーは (document_id, target_type, target_id)。グラフのノード id は
+    論文の中でしか一意でないので ``document_id``（そのグラフの論文）を必須にする。無ければ
+    何も引かない（別の論文の同じ番号のノードの札を出さない — fail-closed）。
+
     **``load_score`` は読まない**（PMN-4: 数値を返さない）。台帳行が無い component は
     キーごと欠落させる（呼び出し側が ``verification: null`` に倒す）。行が無い・
     テーブルが無い等は空 dict へ倒す（PN-7 fail-closed）。
     """
     ids = [str(c) for c in component_ids if c]
-    if not ids:
+    doc = str(document_id or "").strip()
+    if not ids or not doc:
         return {}
     session = _pg_session()
     try:
@@ -864,17 +872,50 @@ def fetch_component_ledger_statuses(component_ids: list[str]) -> dict[str, str]:
         try:
             rows = session.execute(
                 sa_text(f"""
-                    SELECT target_id, verification_status
+                    SELECT target_id, verification_status, verification_scopes
                     FROM epistemic_ledger
                     WHERE target_type = 'component' AND target_id IN ({placeholders})
+                      AND document_id = CAST(:doc AS uuid)
                 """),
-                {f"cid_{i}": cid for i, cid in enumerate(ids)},
+                {**{f"cid_{i}": cid for i, cid in enumerate(ids)}, "doc": doc},
             ).fetchall()
         except Exception:
             return {}
     finally:
         session.close()
-    return {str(r[0]): str(r[1] or "") for r in rows if r and r[0]}
+    out = ComponentLedgerStatuses({str(r[0]): str(r[1] or "") for r in rows if r and r[0]})
+    # IK-0932: 札に添える「記帳された条件」の 1 行（直接検証・間接的な支持・反証のときだけ）。
+    # 状態の dict の形は変えず、条件の 1 行は別の属性で運ぶ（既存の読み手を壊さない）。
+    try:
+        from core.doubt.schema import learner_scope_line
+
+        for r in rows:
+            if not r or not r[0] or len(r) < 3:
+                continue
+            scopes = r[2]
+            if isinstance(scopes, str):
+                try:
+                    scopes = json.loads(scopes)
+                except Exception:  # noqa: BLE001
+                    scopes = []
+            line = learner_scope_line(str(r[1] or ""), scopes if isinstance(scopes, list) else [])
+            if line:
+                out.scope_lines[str(r[0])] = line
+    except Exception:  # noqa: BLE001 — 条件の 1 行が組めなくても札の状態は出す
+        pass
+    return out
+
+
+class ComponentLedgerStatuses(dict):
+    """``component_id -> verification_status`` の dict（既存の形）+ 札の条件の 1 行（IK-0932）。
+
+    ``scope_lines``: ``component_id -> 「記帳された条件: …」``（状態が直接検証・間接的な支持・
+    反証で、成立条件か領域の記帳があるものだけ）。根拠の逐語・記帳者・数値は含めない。
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.scope_lines: dict[str, str] = {}
 
 
 def fetch_center_support_fact_line(
@@ -900,9 +941,10 @@ def fetch_center_support_fact_line(
     session = _pg_session()
     try:
         try:
-            ctx = build_support_context(
-                session, course_id=str(course_id or ""), document_id=str(document_id or "")
-            )
+            # 範囲は中心ノードの document（IK-0852: course_id 列では絞らない）。document が
+            # 引けなければ範囲は空 = 事実文なし（fail-closed）。
+            doc = str(document_id or "").strip()
+            ctx = build_support_context(session, document_ids=[doc] if doc else [])
             result = compute_support_lines_from_context(ctx, "component", str(component_id))
         except Exception:
             return ""
@@ -1040,3 +1082,89 @@ def fetch_atlas_concept_context(cartridge_id: str, atlas_node_id: str) -> dict |
         "sibling_concepts": sibling_concepts,
         "edge_neighbors": edge_neighbors,
     }
+
+
+# ---------------------------------------------------------------------------
+# 区画（segment）に帰属した問いの旅（IK-0920 ④）。区画の本文に埋め込まれた部品
+# （``![[component:…]]``）が**一意**のときだけ、その部品を [2] の同一性リンク hop の
+# 起点にする（決定論・推測しない。一意でなければ従来どおり）。
+# ---------------------------------------------------------------------------
+
+_COMPONENT_EMBED_RE = re.compile(r"!\[\[\s*component\s*:\s*([^\]\n]*?)\s*\]\]", re.IGNORECASE)
+
+
+def segment_component_refs(topic: dict | None, segment_index: int) -> list[str]:
+    """トピック教材の区画 ``segment_index`` に埋め込まれた部品の参照（重複除去・出現順）。
+
+    区画の粒度の正本は ``core.lecture.build_topic_slides``（配信・痕跡帰属と同じ）。
+    材料が無い・番号が範囲外なら空リスト。DB は引かない（純計算）。
+    """
+    if not isinstance(topic, dict) or segment_index < 0:
+        return []
+    try:
+        from core.lecture import build_topic_slides
+        slides, _display, _spoken, _formulas = build_topic_slides(topic)
+    except Exception:
+        return []
+    if segment_index >= len(slides):
+        return []
+    text = str((slides[segment_index] or {}).get("display_text") or "")
+    refs: list[str] = []
+    for match in _COMPONENT_EMBED_RE.finditer(text):
+        ref = match.group(1).strip()
+        if ref and ref not in refs:
+            refs.append(ref)
+    return refs
+
+
+def fetch_topic(course_id: str, topic_id: str) -> dict | None:
+    """コースの1トピックの dict（無ければ None）。"""
+    if not str(course_id or "").strip() or not str(topic_id or "").strip():
+        return None
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT data FROM learning_courses WHERE id = :course_id"),
+            {"course_id": course_id},
+        ).fetchone()
+    except Exception:
+        return None
+    finally:
+        session.close()
+    if not row:
+        return None
+    for topic in iter_all_topics(_payload_dict(row[0])):
+        if str(topic.get("id") or "") == str(topic_id):
+            return topic
+    return None
+
+
+def resolve_course_component(component_ref: str, course_document_ids: set[str]) -> str | None:
+    """部品の参照（DB UUID / agent ID）をコースの論文の範囲で DB UUID に解決する。
+
+    正本は ``core.component_context.resolve_course_component_id``（論文をまたいで
+    曖昧なら解決しない = FD4）。解決できなければ None（fail-closed）。
+    """
+    if not component_ref or not course_document_ids:
+        return None
+    try:
+        from core.component_context import resolve_course_component_id
+        return resolve_course_component_id(component_ref, set(course_document_ids))
+    except Exception:
+        return None
+
+
+def fetch_component_name(component_id: str) -> str:
+    """theory_components_live.name（無ければ ""）。"""
+    session = _pg_session()
+    try:
+        try:
+            row = session.execute(
+                sa_text("SELECT name FROM theory_components_live WHERE id = CAST(:id AS uuid)"),
+                {"id": component_id},
+            ).fetchone()
+        except Exception:
+            return ""
+    finally:
+        session.close()
+    return str(row[0] or "") if row else ""

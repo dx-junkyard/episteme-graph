@@ -172,10 +172,30 @@ def is_discussion_node(node: PersonalNode) -> bool:
     )
 
 
+#: 教材のテキストを選んで質問した痕跡（帰属が区画・チャンク）の出口案内（IK-0896）。
+#: 選択質問は済んでいるので、残る操作（帰属カードで主張・式を選んで確定）だけを言う。
+FACT_SELECTED_SHARPEN = (
+    "この記録は教材の選んだ箇所に帰属しています。帰属カードで主張や式を選んで確定すると、"
+    "1点に絞り込まれ、道がたどれます。"
+)
+
+#: 帰属がテキスト選択の区画・チャンク（主張・式に降りていない）であるアンカー種別。
+_SELECTED_TEXT_ANCHOR_TYPES = frozenset({"segment", "chunk"})
+
+
 def sharpen_fact_for(node: PersonalNode | None) -> str:
-    """痕跡の出所に応じた「1点に絞り込む」出口案内（実行できる操作だけを案内する）。"""
+    """痕跡の出所（帰属の種類）に応じた「1点に絞り込む」出口案内（実行できる操作だけ）。
+
+    - 議論の疑似トピック由来 → 着地画面の帰属カード / 開幕画面の支持構造
+    - 教材のテキスト選択に帰属済み（segment / chunk）→ 帰属カードでの確定だけ（IK-0896:
+      済んだ操作 = 「テキストを選んで質問」を勧めない）
+    - それ以外（トピック縮退など）→ テキスト選択か帰属カード
+    """
     if node is not None and is_discussion_node(node):
         return FACT_DISCUSS_SHARPEN
+    anchor = getattr(node, "anchor", None) if node is not None else None
+    if str(getattr(anchor, "anchor_type", "") or "") in _SELECTED_TEXT_ANCHOR_TYPES:
+        return FACT_SELECTED_SHARPEN
     return FACT_RANGE_SHARPEN
 
 
@@ -407,7 +427,13 @@ def _verification(component_id: str, ledger: dict[str, str]) -> dict | None:
     label = VERIFICATION_STATUS_LABELS_LEDGER.get(status, "")
     if not label:
         return None
-    return {"status": status, "label": label}
+    out = {"status": status, "label": label}
+    # IK-0932: 直接検証・間接的な支持・反証の札には、記帳された条件（成立条件・領域）の 1 行を
+    # 添える（``queries.ComponentLedgerStatuses.scope_lines``。根拠の逐語・記帳者・数値なし）。
+    scope_line = str((getattr(ledger, "scope_lines", None) or {}).get(component_id) or "").strip()
+    if scope_line:
+        out["scope_line"] = scope_line
+    return out
 
 
 def _claim_excerpt(node: dict, claim_summaries: dict[str, dict] | None) -> str | None:
@@ -827,10 +853,12 @@ def build_topic_range(
         graph = doc.get("graph") or {}
         touched_claim_ids = doc.get("touched_claim_ids") or set()
         nodes_out: list[dict] = []
+        # IK-0899: 論文ごとの台帳があればそれを当てる（無ければ従来の共通の dict）。
+        doc_ledger = doc.get("ledger") if isinstance(doc.get("ledger"), dict) else ledger
         for node in main_nodes(graph):
             dto = _node_dto(
                 node,
-                ledger=ledger,
+                ledger=doc_ledger,
                 personal_nodes=personal_nodes,
                 is_center=False,
                 claim_summaries=claim_summaries,
@@ -1059,7 +1087,7 @@ def _nearby_for_topic_anchor(
                 continue
             mains = main_nodes(graph)
             ledger = queries.fetch_component_ledger_statuses(
-                [str(n.get("component_id") or "") for n in mains]
+                [str(n.get("component_id") or "") for n in mains], document_id=document_id
             )
             support_fact_line = queries.fetch_center_support_fact_line(
                 center_component_id,
@@ -1190,7 +1218,15 @@ def _nearby_for_topic_anchor(
         doc["title"] = titles.get(doc["document_id"], "")
     missing_graph_titles = [titles.get(d, "") for d in missing_graph_ids]
 
-    ledger = queries.fetch_component_ledger_statuses(all_main_ids)
+    # IK-0899: 台帳は論文ごと（ノード id は論文の中でしか一意でない）。論文ごとに引き、
+    # 範囲の各論文のノードにはその論文の行だけを当てる（``doc["ledger"]``）。
+    ledger: dict[str, str] = {}
+    for doc in documents:
+        doc["ledger"] = queries.fetch_component_ledger_statuses(
+            [str(n.get("component_id") or "") for n in main_nodes(doc["graph"])],
+            document_id=doc["document_id"],
+        )
+        ledger.update({f'{doc["document_id"]}:{k}': v for k, v in doc["ledger"].items()})
     atlas_concept_context = _resolve_range_atlas_context(
         str(start.course_id or ""), str(start.anchor.anchor_id or "")
     )
@@ -1273,7 +1309,7 @@ def nearby_for_person_node(
 
         mains = main_nodes(graph)
         ledger = queries.fetch_component_ledger_statuses(
-            [str(n.get("component_id") or "") for n in mains]
+            [str(n.get("component_id") or "") for n in mains], document_id=document_id
         )
         support_fact_line = queries.fetch_center_support_fact_line(
             str(center_node.get("component_id") or ""),

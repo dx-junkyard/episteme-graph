@@ -252,6 +252,102 @@ def get_active_task_for_course(course_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class CourseEntry:
+    """学習者のコースへの入場判定（第 25 周 第 3 波・IK-0945）。
+
+    「どのコースに入れるか」の条件式の**唯一の正本**。``get_course_data`` /
+    ``get_accessible_course_data`` / 受講開始（``enroll_course``）/ コース一覧の事実文は
+    すべてこの判定を読み、経路ごとに入場の規則を書かない。
+
+    - ``is_owner``: 所有者。
+    - ``is_enrolled``: 受講の行（``learning_states``）がある。**受講中のコースが後から
+      非公開になっても、受講者は読み続けられる**（オーナー判断の推奨どおり。学習者の記録と
+      途中の学習を所有者の操作で黙って切らない）。
+    - ``open_for_enrollment``: いま新規の受講を受け付けている（公開テンプレート / 所属
+      グループへの共有 / object_group_permissions の viewer・editor）。非公開化で止まるのは
+      ここだけ（＝新規の受講開始）。
+    """
+
+    exists: bool
+    data: dict | None
+    is_owner: bool = False
+    is_enrolled: bool = False
+    open_for_enrollment: bool = False
+
+    @property
+    def readable(self) -> bool:
+        return self.exists and (self.is_owner or self.is_enrolled or self.open_for_enrollment)
+
+
+def course_open_for_enrollment(
+    user_id: str,
+    course_id: str,
+    *,
+    visibility: str | None,
+    group_id: object | None,
+    is_published: bool,
+    is_template: bool,
+) -> bool:
+    """コースがいまこの利用者の新規の受講を受け付けているか（入場判定の正本の一部）。"""
+    if (visibility or "private") == "public" and is_published and is_template:
+        return True
+    if visibility == "group" and group_id and user_can_access_group(user_id, str(group_id)):
+        return True
+    return user_can_view_course(user_id, course_id)
+
+
+def resolve_course_entry(user_id: str, course_id: str, *, check_open: bool = False) -> CourseEntry:
+    """学習者の入場判定を 1 回で解決する（IK-0945）。
+
+    ``check_open=False`` のときは所有者・受講者について受付状態を調べない（チャット等の
+    毎メッセージの経路で余計な問い合わせをしない）。受講の行も所有もない利用者については
+    常に受付状態を調べる（それが入場の唯一の根拠になるため）。
+    """
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT data, user_id, COALESCE(visibility, 'private'),
+                       group_id, COALESCE(is_published, false), COALESCE(is_template, false)
+                FROM learning_courses
+                WHERE id = :course_id
+                LIMIT 1
+            """),
+            {"course_id": course_id},
+        ).fetchone()
+        if not record or not record[0]:
+            return CourseEntry(exists=False, data=None)
+        data_raw, owner_id, visibility, group_id, is_published, is_template = tuple(record)[:6]
+        data = data_raw if isinstance(data_raw, dict) else json.loads(data_raw)
+        is_owner = str(owner_id) == str(user_id)
+        is_enrolled = False
+        if not is_owner:
+            state_row = session.execute(
+                sa_text("""
+                    SELECT 1 FROM learning_states
+                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                    LIMIT 1
+                """),
+                {"user_id": user_id, "course_id": course_id},
+            ).fetchone()
+            is_enrolled = bool(state_row)
+    finally:
+        session.close()
+
+    open_ = False
+    if check_open or not (is_owner or is_enrolled):
+        open_ = course_open_for_enrollment(
+            user_id, course_id,
+            visibility=visibility, group_id=group_id,
+            is_published=bool(is_published), is_template=bool(is_template),
+        )
+    return CourseEntry(
+        exists=True, data=data, is_owner=is_owner, is_enrolled=is_enrolled,
+        open_for_enrollment=open_,
+    )
+
+
 def get_course_data(user_id: str, course_id: str) -> dict | None:
     """LearningCourse のマスターデータを返す（オーナー or 受講者）。
 
@@ -259,45 +355,24 @@ def get_course_data(user_id: str, course_id: str) -> dict | None:
     アクセスし、一般学生と同じ学習体験を得る。
     - オーナーが learning_states を持っていない場合は自動作成する。
     - マスターデータのみを返す（個人レイヤーは get_personal_layer() で別途取得）。
+
+    入場判定は :func:`resolve_course_entry`（IK-0945 の正本）。この経路は受講の行を要する
+    （受講を開始していない公開コースはここでは開けない — 受講開始は enroll の経路）。
+    受講中のコースは非公開になった後も読める。
     """
-    session = _pg_session()
-    try:
-        record = session.execute(
-            sa_text("""
-                SELECT data, user_id FROM learning_courses
-                WHERE id = :course_id
-                LIMIT 1
-            """),
-            {"course_id": course_id},
-        ).fetchone()
-        if not record or not record[0]:
-            return None
-
-        data = record[0] if isinstance(record[0], dict) else json.loads(record[0])
-        owner_id = record[1]
-
-        if str(owner_id) == str(user_id):
-            # Issue #145: オーナーも learning_states を保持する（自動作成）
-            enroll_user_in_course(user_id, course_id)
-            return data  # 所有者は HEAD（working copy）
-
-        # 受講者チェック
-        state_row = session.execute(
-            sa_text("""
-                SELECT 1 FROM learning_states
-                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
-                LIMIT 1
-            """),
-            {"user_id": user_id, "course_id": course_id},
-        ).fetchone()
-        if not state_row:
-            return None
-    finally:
-        session.close()
+    entry = resolve_course_entry(user_id, course_id)
+    if not entry.exists:
+        return None
+    if entry.is_owner:
+        # Issue #145: オーナーも learning_states を保持する（自動作成）
+        enroll_user_in_course(user_id, course_id)
+        return entry.data  # 所有者は HEAD（working copy）
+    if not entry.is_enrolled:
+        return None
 
     # V層（migration 037）: 受講学習者（非所有者）の主経路も発行版に追従させる。
     # editor は HEAD、純 viewer・学習者は有効な版のスナップショット（未発行なら live）。
-    return _apply_course_version_view(course_id, user_id, data)
+    return _apply_course_version_view(course_id, user_id, entry.data)
 
 
 def get_course_live_llm_models(course_id: str) -> dict:
@@ -690,51 +765,20 @@ def _apply_course_version_view(course_id: str, viewer_id: str, live_data: dict |
 
 
 def get_accessible_course_data(user_id: str, course_id: str) -> dict | None:
-    """visibility を考慮して、アクセス可能な LearningCourse データを返す。
+    """アクセス可能な LearningCourse データを返す（入場判定の正本は :func:`resolve_course_entry`）。
 
-    - オーナー本人: 常に可
-    - visibility='public' かつ is_published かつ is_template: 可
-    - visibility='group' かつ自分がそのグループのメンバー: 可
+    - オーナー本人: 常に可（HEAD）
+    - 受講の行がある学習者: 可（**非公開化の後も読み続けられる** — IK-0945）
+    - いま受講を受け付けている（公開テンプレート / 所属グループ / object_group_permissions）: 可
     """
-    session = _pg_session()
-    try:
-        record = session.execute(
-            sa_text("""
-                SELECT data, user_id, COALESCE(visibility, 'private'),
-                       group_id, COALESCE(is_published, false), COALESCE(is_template, false)
-                FROM learning_courses
-                WHERE id = :course_id
-                LIMIT 1
-            """),
-            {"course_id": course_id},
-        ).fetchone()
-        if not record or not record[0]:
-            return None
-
-        data_raw, owner_id, visibility, group_id, is_published, is_template = record
-        data = data_raw if isinstance(data_raw, dict) else json.loads(data_raw)
-
-        # オーナーは HEAD（working copy）。非オーナーの受講者・共有先は発行版に追従する。
-        # editor（グループ）は _apply_course_version_view 内で HEAD 扱いとなる
-        # （get_viewable_course_data と同じ owner/editor→HEAD 判定に揃える）。
-        if str(owner_id) == str(user_id):
-            return data
-        if visibility == "public" and is_published and is_template:
-            return _apply_course_version_view(course_id, user_id, data)
-        if visibility == "group" and group_id:
-            row = session.execute(
-                sa_text("""
-                    SELECT 1 FROM group_members
-                    WHERE group_id = :gid AND user_id = CAST(:uid AS uuid)
-                    LIMIT 1
-                """),
-                {"gid": group_id, "uid": user_id},
-            ).fetchone()
-            if row:
-                return _apply_course_version_view(course_id, user_id, data)
+    entry = resolve_course_entry(user_id, course_id)
+    if not entry.readable:
         return None
-    finally:
-        session.close()
+    # オーナーは HEAD（working copy）。非オーナーの受講者・共有先は発行版に追従する。
+    # editor（グループ）は _apply_course_version_view 内で HEAD 扱いとなる。
+    if entry.is_owner:
+        return entry.data
+    return _apply_course_version_view(course_id, user_id, entry.data)
 
 
 def course_deletion_notice(course_id: str) -> dict | None:

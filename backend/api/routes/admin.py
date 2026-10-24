@@ -97,6 +97,7 @@ from core import decision_context
 from core import document_refs as _document_refs
 from core.paper_discovery import schema as pd_schema
 from core.config import get_settings
+from core.label_vocab import COURSE_ROLE_LABELS, atlas_binding_coverage_label
 from core.course_data import (
     course_cartridge_id,
     course_chapters,
@@ -1920,7 +1921,7 @@ def update_course_visibility(
                     is_template = CASE WHEN :visibility = 'public' THEN true ELSE is_template END,
                     updated_at = now()
                 WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
-                RETURNING id
+                RETURNING id, data
             """),
             {
                 "visibility": body.visibility,
@@ -1987,7 +1988,28 @@ def update_course_visibility(
         "course_id": course_id,
         "visibility": body.visibility,
         "group_id": body.group_id if body.visibility == "group" else None,
+        # IK-0947: 学習者へ開いた（public / group）のに本文の無いトピックが残るなら、その事実文。
+        "readiness_note": (
+            _course_empty_topics_note(result[1] if len(tuple(result)) > 1 else None)
+            if body.visibility in ("public", "group") else ""
+        ),
     }
+
+
+def _course_empty_topics_note(data_raw) -> str:
+    """コースに本文の無いトピックがあれば公開時の事実文を返す（IK-0947・件数なし）。"""
+    from core.course_data import iter_all_topics
+    from core.label_vocab import COURSE_PUBLISHED_WITH_EMPTY_TOPICS_NOTICE
+    from core.lecture import topic_student_material
+
+    try:
+        data = data_raw if isinstance(data_raw, dict) else json.loads(data_raw or "{}")
+        for topic in iter_all_topics(data):
+            if not str(topic_student_material(topic) or "").strip():
+                return COURSE_PUBLISHED_WITH_EMPTY_TOPICS_NOTICE
+    except Exception:  # noqa: BLE001 — 事実文が付かないだけ（公開は止めない）
+        logger.warning("empty-topic check failed on publish", exc_info=True)
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -2228,6 +2250,9 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
   - 1つのトピックには 1〜3 個の handle を選ぶ。適切な候補が無ければ空配列 [] にする
   - 同じ handle を複数のトピックに置いてよい（同じ単位を別の角度から扱う場合）
   - 候補区画そのものが無い場合は units を空配列 [] にする
+  - handle は JSON の units にだけ書く。回答本文（区切り文字より前の文章）では handle（U1 等）を書かず、単位の名前で言う
+- 回答本文で式に触れるときは、教材コンテキストに添えた印字番号（「式 (12)」）か式の短い原文で言う。Component ID・Claim ID などの番地は回答本文に書かない
+- コースタイトル・章タイトル・トピック名には数式の記法（`\\alpha` のようなバックスラッシュの命令、`c_s^2` のような添字・べき、`$…$`）を書かない。題名は学生の画面で素の文字列として表示されるので、記号は言葉で言う（例: 「有効音速の2乗」「μ が 1 を超える領域」）
 - domain フィールドは教材の分野情報（コンポーネントや旧ナレッジグラフの「**分野:**」）から引き継ぐこと
   - 教材の分野情報がなければ、コースの内容を踏まえて適切な専門分野名を設定する
 - sources フィールドは常に空配列 [] のままにすること（教材はシステムが自動的に設定する）"""
@@ -2354,6 +2379,87 @@ def _component_dependency_lines(
             line += f"  Reason: {reason}"
         lines.append(line)
     return lines
+
+
+_UNIT_HANDLE_IN_TEXT_RE = re.compile(r"(?<![A-Za-z0-9_])U(\d+)(?![A-Za-z0-9_])")
+
+
+def _replace_unit_handles_in_answer(answer: str, candidates: list | None) -> str:
+    """回答本文の handle（``U141``）を候補表の名前「…」へ置き換える（IK-0883）。
+
+    候補表に無い ``U\\d+`` は触らない（単位以外の語かもしれない）。JSON（区切り文字以降）は
+    ``_extract_course_draft_from_answer`` が既に外した後の本文だけに掛ける。
+    """
+    if not answer or not candidates:
+        return answer
+    names: dict[str, str] = {}
+    for candidate in candidates:
+        handle = str(getattr(candidate, "handle", "") or "").strip().upper()
+        label = str(getattr(candidate, "label", "") or "").strip()
+        if handle and label:
+            names[handle] = label
+
+    def _sub(match: "re.Match[str]") -> str:
+        label = names.get(f"U{match.group(1)}")
+        return f"「{label}」" if label else match.group(0)
+
+    return _UNIT_HANDLE_IN_TEXT_RE.sub(_sub, answer)
+
+
+#: 教材コンテキストの式の短い原文の上限（IK-0883）。
+_MATERIAL_EQUATION_SNIPPET_MAX = 60
+
+
+def _material_equation_names(analysis_run: dict | None) -> dict[str, str]:
+    """``equation_id`` → 「式 (12)」/「式 (12) `a=b`」/ 短い原文（教材コンテキスト用・IK-0883）。
+
+    印字番号も短い原文も無い式は載せない（内部 ID を名前に使わない）。取れなければ空（fail-soft）。
+    """
+    from core.course_content_builder import _equation_printed_label, is_tex_label_key
+
+    try:
+        stage_outputs = (analysis_run or {}).get("stage_outputs") or {}
+        payload = (stage_outputs.get("_artifacts") or {}).get("equation_semantics") or {}
+        records = payload.get("records") or payload.get("equations") or []
+    except Exception:  # noqa: BLE001
+        return {}
+    names: dict[str, str] = {}
+    for record in records if isinstance(records, list) else []:
+        if not isinstance(record, dict) or not record.get("equation_id"):
+            continue
+        printed = _equation_printed_label(record)
+        body = ""
+        for key in ("latex", "latex_canonical", "raw_text", "text"):
+            value = " ".join(str(record.get(key) or "").split())
+            if value and len(value) <= _MATERIAL_EQUATION_SNIPPET_MAX and not is_tex_label_key(value):
+                body = value
+                break
+        if printed and body:
+            names[str(record["equation_id"])] = f"{printed} `{body}`"
+        elif printed or body:
+            names[str(record["equation_id"])] = printed or f"`{body}`"
+    return names
+
+
+def _material_field_text(values: list, equation_names: dict[str, str]) -> str:
+    """部品の属性（ComponentFieldRef の列）を本文だけの文に（IK-0883）。"""
+    parts: list[str] = []
+    for value in values or []:
+        if isinstance(value, dict):
+            text = str(value.get("text") or value.get("label") or value.get("name") or "").strip()
+            eq_names = [
+                equation_names[str(eq_id)]
+                for eq_id in (value.get("equation_ids") or [])
+                if str(eq_id) in equation_names
+            ]
+            if eq_names:
+                joined = "、".join(dict.fromkeys(eq_names))
+                text = f"{text}（{joined}）" if text else joined
+        else:
+            text = str(value or "").strip()
+        if text:
+            parts.append(text)
+    return "・".join(parts)
 
 
 def _build_material_context(
@@ -2562,6 +2668,7 @@ def _build_material_context(
             )
 
         # ---- 主入力: 理論コンポーネント ----
+        doc_equation_names = _material_equation_names(analysis_run)
         if doc_components:
             sections.append("#### 理論コンポーネント")
             for comp in doc_components[:_MAX_COMPONENTS_PER_MATERIAL]:
@@ -2582,14 +2689,17 @@ def _build_material_context(
                     lines.append(f"  Type: {ctype}")
                 if summary:
                     lines.append(f"  Summary: {summary}")
-                if inputs:
-                    lines.append(f"  Inputs: {', '.join(str(x) for x in inputs[:5])}")
-                if outputs:
-                    lines.append(f"  Outputs: {', '.join(str(x) for x in outputs[:5])}")
-                if preconditions:
-                    lines.append(f"  Preconditions: {', '.join(str(x) for x in preconditions[:5])}")
-                if cautions:
-                    lines.append(f"  Cautions: {', '.join(str(x) for x in cautions[:3])}")
+                # IK-0883: 属性は本文（text）だけを「・」で並べ、式は印字番号と短い原文で
+                # 添える（Python の辞書表記・claim_ids / equation_ids の内部 ID を材料にしない）。
+                for field_label, values, limit in (
+                    ("Inputs", inputs, 5),
+                    ("Outputs", outputs, 5),
+                    ("Preconditions", preconditions, 5),
+                    ("Cautions", cautions, 3),
+                ):
+                    field_text = _material_field_text(values[:limit], doc_equation_names)
+                    if field_text:
+                        lines.append(f"  {field_label}: {field_text}")
                 if review:
                     lines.append(f"  Review: {review}")
                 if maturity:
@@ -2954,6 +3064,9 @@ def course_builder_chat(
         answer = _course_builder_degraded_message(exc)
     else:
         answer, course_draft = _extract_course_draft_from_answer(raw_answer)
+        # IK-0883（置換の後ろ盾）: プロンプトで禁じても回答本文に handle（U141）が残ったら、
+        # このターンの候補表の名前へ置き換える（handle は教員に意味を持たない番地）。
+        answer = _replace_unit_handles_in_answer(answer, unit_candidate_objects)
 
         # IK-0371: 草案の handle をこのターンの候補表の参照キーに結び付けて運ぶ。
         if course_draft is not None:
@@ -3314,6 +3427,7 @@ def list_teacher_courses(
         session.close()
 
     result = []
+    _domain_label_cache: dict[str, str] = {}
     for r in records:
         data = r[7] if len(r) > 7 and isinstance(r[7], dict) else {}
         topics = [t for t in course_topics(data) if isinstance(t, dict)]
@@ -3326,12 +3440,17 @@ def list_teacher_courses(
             "created_at": r[4].isoformat() if r[4] else "",
             "updated_at": r[5].isoformat() if r[5] else "",
             "role": r[6],  # "owner" | "editor" | "viewer"
+            # IK-0911: 役割の表示語（正本は label_vocab.COURSE_ROLE_LABELS。画面に英語を出さない）。
+            "role_label": COURSE_ROLE_LABELS.get(str(r[6] or ""), ""),
             # Atlas operations dashboard projection.  These additive fields do
             # not expose course content; they only let the UI identify courses
             # whose map placement needs attention.
             "atlas_cartridge_id": course_cartridge_id(data),
             "atlas_topic_count": bound_topics,
             "topic_count": len(topics),
+            # IK-0929: 画面は内部キーと比ではなく、分野の表示名と段階の語で描く。
+            "atlas_domain_label": _course_atlas_domain_label(course_cartridge_id(data), _domain_label_cache),
+            "atlas_binding_coverage_label": atlas_binding_coverage_label(bound_topics, len(topics)),
             # G1-1/G5-2: 公開状態・開示範囲を管理画面のコース管理テーブルで確認できるようにする。
             "visibility": (r[8] if len(r) > 8 else None) or "private",
             "group_id": str(r[9]) if len(r) > 9 and r[9] else None,
@@ -5229,3 +5348,25 @@ def get_anchor_insights(
 # api/main.py から `app.include_router(<router>, prefix="/api/admin")` で
 # 直接マウントするフラット構造に統一した（URL・認可・レスポンスは不変）。
 # ---------------------------------------------------------------------------
+
+
+def _course_atlas_domain_label(cartridge_id: str, cache: dict) -> str:
+    """コース管理の一覧の分野の表示名（IK-0929。atlas_state.domain_display_name が正本・fail-soft）。"""
+    key = str(cartridge_id or "").strip()
+    if not key:
+        return ""
+    if key in cache:
+        return cache[key]
+    label = ""
+    try:
+        from core.atlas_state import domain_display_name
+
+        session = _pg_session()
+        try:
+            label = domain_display_name(session, key)
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — 表示語が引けなくても一覧は返す
+        logger.debug("course atlas domain label unavailable for %s", key, exc_info=True)
+    cache[key] = label
+    return label
