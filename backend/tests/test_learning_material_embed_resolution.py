@@ -248,7 +248,14 @@ process.stdout.write(JSON.stringify({
             ],
         }
 
-        backend_keys = {f"{it['kind']}:{it['id']}" for it in build_topic_evidence_items(topic)}
+        # 解決キーは id と別名（``alt_ids``）の両方。第 25 周 第 6 波（IK-1034）でトピック概要は
+        # 項目 1 つ + ``alt_ids: ["summary"]`` になった（一覧に 2 回並べない）が、
+        # ``![[source:summary]]`` で引けることは変わらない。
+        backend_keys = {
+            f"{it['kind']}:{ref}"
+            for it in build_topic_evidence_items(topic)
+            for ref in [it["id"], *(it.get("alt_ids") or [])]
+        }
 
         topic_file = tmp_path / "topic.json"
         topic_file.write_text(json.dumps(topic), encoding="utf-8")
