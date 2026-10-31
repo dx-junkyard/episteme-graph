@@ -1327,7 +1327,7 @@ TestUploadFromUrlArxivRewriting` / `test_tex_default_language_ui_static.py` / �
 
 ### 18.1 背景
 
-uxsim の論文レーダー周回（`uxsim/runs/radar_loop/judge-scan-01.md` §4 仮説 5・`judge-scan-02.md` §4 の 5）で、
+uxsim の論文レーダー周回（「uxsim/runs/radar_loop/judge-scan-01.md」 §4 仮説 5・「judge-scan-02.md」 §4 の 5）で、
 起点と主題が無関係な候補（B 中間子崩壊・ホログラフィー等）でも `common_ground` が「理論と観測を結ぶ」
 「関係式を導く」のような一般論で毎回埋まり、`overlaps` は全件空だった。ペルソナは「論文に書かれていない近さを
 書いているように見える」と読んだ。原因は §12.4 の structured output が共通点 1 文を事実上必須とし、
@@ -1389,8 +1389,8 @@ uxsim の論文レーダー周回（`uxsim/runs/radar_loop/judge-scan-01.md` §4
 
 ## 19. 追補 — 第 2 波: 縮退の事実文・カテゴリの既定・取り込み後の導線（2026-10-16・migration / env / LLM コールなし）
 
-**状態**: 実装済み（2026-10-16）。課題 IK-0700 / IK-0701 と審判 `uxsim/runs/radar_loop/judge-scan-01.md` §4・
-`judge-scan-02.md` §4 の仮説を、PR1〜PR8 / PD1〜PD8 の範囲内（新テーブル・新 LLM コール・arXiv 追加呼び出しなし）で
+**状態**: 実装済み（2026-10-16）。課題 IK-0700 / IK-0701 と審判 「uxsim/runs/radar_loop/judge-scan-01.md」 §4・
+「judge-scan-02.md」 §4 の仮説を、PR1〜PR8 / PD1〜PD8 の範囲内（新テーブル・新 LLM コール・arXiv 追加呼び出しなし）で
 解く。
 
 | 項目 | 何を変えたか | 正本 |
@@ -1440,7 +1440,7 @@ uxsim の論文レーダー周回（`uxsim/runs/radar_loop/judge-scan-01.md` §4
 
 ## 20. 追補 — 第 3 波: 当たらなかった語・網を広げる語・要旨からの供給・帯と関係の読み方（2026-10-16・migration / env / アンカー / LLM コール / arXiv 呼び出しなし）
 
-**状態**: 実装済み（2026-10-16）。審判 `uxsim/runs/radar_loop/judge-scan-05.md` §5 の仮説 1〜5（記録 `scan-05.json`）を、
+**状態**: 実装済み（2026-10-16）。審判 「uxsim/runs/radar_loop/judge-scan-05.md」 §5 の仮説 1〜5（記録 `scan-05.json`）を、
 PR1〜PR8 / PD1〜PD8 の範囲内（新テーブル・新 LLM コール・arXiv 追加呼び出しなし）で解く。
 
 | 項目 | 何を変えたか | 正本 |
@@ -1486,7 +1486,7 @@ PR1〜PR8 / PD1〜PD8 の範囲内（新テーブル・新 LLM コール・arXiv
 
 ## 21. 追補 — 第 4 波: 供給の品質・照合の語境界・取り込み済み候補の配置の対比・構造照合の成立条件・連鎖の表示（2026-10-16・migration / env / アンカー / LLM コール / arXiv 呼び出しなし）
 
-**状態**: 実装済み（2026-10-16）。審判 `uxsim/runs/radar_loop/judge-deep-05.md` §③④ と `judge-scan-06.md` §④（記録
+**状態**: 実装済み（2026-10-16）。審判 「uxsim/runs/radar_loop/judge-deep-05.md」 §③④ と 「judge-scan-06.md」 §④（記録
 `scan-06.json` = 2610.08908 を起点にした連鎖）を、PR1〜PR8 / PD1〜PD8 の範囲内で解く。
 
 | 項目 | 何を変えたか | 正本 |
@@ -1530,7 +1530,7 @@ PR1〜PR8 / PD1〜PD8 の範囲内（新テーブル・新 LLM コール・arXiv
 
 ## 22. 追補 — 第 5 波: 照合の対象外を言う・近い構造の事実文・対比に観点と粒度（2026-10-16・migration / env / アンカー / LLM コール / arXiv 呼び出し / 新テーブルなし）
 
-**状態**: 実装済み（2026-10-16）。審判 `uxsim/runs/radar_loop/judge-deep-06.md` §①-b・§③・§④ の仮説 1 / 2 / 4（記録 `deep-06.json`
+**状態**: 実装済み（2026-10-16）。審判 「uxsim/runs/radar_loop/judge-deep-06.md」 §①-b・§③・§④ の仮説 1 / 2 / 4（記録 `deep-06.json`
 = 起点 2610.08908 / 取り込み 2610.19001、両側に理論モジュールの保存行あり）を、PR1〜PR8 / PD1〜PD8 と理論モジュール層の
 TM6 / TM12 / TM13 / TM15 の範囲内で解く。仮説 3（記号・概念の水準の接点）は概念レジストリ（O-6 従属）の課題、仮説 5 は論文層の既知の限界（PL8）として扱わない。
 
@@ -1571,7 +1571,7 @@ TM6 / TM12 / TM13 / TM15 の範囲内で解く。仮説 3（記号・概念の�
 
 ### 22.4 追補 — 第 6 波: ラベルのプレーン化の正本・近い構造の並びと題名・観点ごとの有無（2026-10-16・migration / env / アンカー / LLM / arXiv 呼び出しなし）
 
-**状態**: 実装済み（2026-10-16）。審判 `uxsim/runs/radar_loop/judge-deep-07.md` §③・§④ の仮説 1〜3（記録 `deep-07.json` = 起点 2610.08908 /
+**状態**: 実装済み（2026-10-16）。審判 「uxsim/runs/radar_loop/judge-deep-07.md」 §③・§④ の仮説 1〜3（記録 `deep-07.json` = 起点 2610.08908 /
 取り込み 2609.35757）。
 
 | 項目 | 何を変えたか | 正本 |
@@ -1606,7 +1606,7 @@ TM6 / TM12 / TM13 / TM15 の範囲内で解く。仮説 3（記号・概念の�
 
 ### 22.5 追補 — AI 比較に取り込み済み候補の解析結果を足す（IK-0818）（2026-10-17・migration / env / アンカー / LLM コール / arXiv 呼び出しなし）
 
-**状態**: 実装済み（2026-10-17・実 LLM での再演は未実施）。審判 `uxsim/runs/radar_loop/judge-deep-09.md` ④ の仮説 1（記録 `deep-09.json` =
+**状態**: 実装済み（2026-10-17・実 LLM での再演は未実施）。審判 「uxsim/runs/radar_loop/judge-deep-09.md」 ④ の仮説 1（記録 `deep-09.json` =
 起点 FoG 再和論文 / 取り込み済み候補 2610.08751）。比較が要旨 2 本だけを材料にし、候補の本文の主張・中心命題にある接点（VDG∞ の
 減衰関数 = FoG の模型）を `overlaps` に出せず `shared_subject` 止まりだった。
 
@@ -1715,7 +1715,7 @@ paper_goal）/ `TestSeedKeyphraseSupply::test_title_keyphrases_rules`（題名�
 
 ### 23.5 追補 — 短い略語はフル表記の句に置き換える・「この語だけに一致した候補が多い」語を言う（2026-10-16・migration / env / アンカー / LLM / embedding / arXiv 呼び出しなし）
 
-**状態**: 実装済み（2026-10-16）。審判 `uxsim/runs/radar_loop/judge-scan-09.md` §5 の仮説 1・2（記録 `scan-09.json`）。
+**状態**: 実装済み（2026-10-16）。審判 「uxsim/runs/radar_loop/judge-scan-09.md」 §5 の仮説 1・2（記録 `scan-09.json`）。
 
 - **起きていたこと**: §23 の是正後、起点 c795b2cf（2609.35757）の供給語は
   `Fingers of God / single-particle characteristic function / FoG / SPCF / EFT`。未取り込み候補 7 件がすべて `EFT` だけで

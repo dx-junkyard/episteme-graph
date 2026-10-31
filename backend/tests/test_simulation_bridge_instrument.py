@@ -47,6 +47,9 @@ def _catalog(*entries):
 
 
 def _run(source, signal, params=None, seed=0):
+    # 合成コードは `import numpy as np` を含む。numpy は本番では隔離 sandbox（simrunner）
+    # 側の依存で、API の requirements には入れない（test_simrunner_harness.py と同じ扱い）。
+    pytest.importorskip("numpy")
     namespace: dict = {}
     exec(compile(source, "<instrument>", "exec"), namespace)  # テスト内でのみ実行（本番は sandbox）
     return namespace[schema.INSTRUMENT_ENTRYPOINT](signal, params or {}, seed)

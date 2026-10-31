@@ -560,7 +560,7 @@ backend フルスイート 11,188 pass。
 （`POST /ingest` / `POST /ingest-batch` + キュー + worker）は分野を受けず、受理に渡して
 いなかった。そのため `run_document_pipeline` が env 既定（開発機では `particle_physics`）を
 黙って適用し、宇宙物理の論文（arXiv 2610.20589）を論文レーダーから取り込んだ解析に素粒子物理の
-正規化語彙（HQET / SM）が提示された（uxsim 頭脳メモ `uxsim/runs/radar_loop/BRAIN_NOTES_A.md`
+正規化語彙（HQET / SM）が提示された（uxsim 頭脳メモ 「uxsim/runs/radar_loop/BRAIN_NOTES_A.md」
 seq 562）。`domain_key` は購読の名前空間 = **監査の帰属**で、解析の分野ではない
 （ドライバ `uxsim/sandbox/radar_loop.py` も `--cartridge-id` を `domain_key` に入れていた）。
 

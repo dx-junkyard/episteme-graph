@@ -90,7 +90,7 @@ history: []
 
 - 画面では未確認。ペルソナは「作成方法: reference_map:… ／ 確認者: faculty:reference_import」を読んだが、これはハーネスの
   投影（`atlas_exec.overview_lines`）が `frozen.generated_by` / `reviewed_by` の生値を描いているためで、製品の admin.js は
-  `frozen.provenance` の表示語を描く（偽所見 — `harness_fixes_atlas.md` 第 2 周 H10）。transcript の応答の抜粋は
+  `frozen.provenance` の表示語を描く（偽所見 — 「harness_fixes_atlas.md」 第 2 周 H10）。transcript の応答の抜粋は
   上限で切れて frozen 部分まで届かず直接は見えないが、同じ是正の束（atlas_review_display）の `decision_line` /
   `provenance_line` と凍結の影響ゼロの一文は同じ API から返っており、`routes/atlas.py` は frozen に provenance を足す。取り込みの確認（patching の summary）は
   ギャップ候補が無く操作されなかったので未観測。

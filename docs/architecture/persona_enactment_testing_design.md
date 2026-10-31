@@ -1692,7 +1692,7 @@ browser runner は未使用（API runner のみ）。
 合格基準は 3 つ: ①原則違反が無い（審判 A〜E）②**その画面で利用者が確認したいことが 1 操作以内で確認できる**
 （各経路の `watch_for`。机上レビューの判定語は「確認できる / 遠い / 出ない」）③見た目（階層・空状態・重なり・
 内部語・数）。③は API runner では読めないので、指揮者が内蔵ブラウザで砂場（幅 1280）を見た所見を視覚ベースラインとして
-別に持つ（`uxsim/runs/round23/visual_baseline.md`）。周の前に UI を読む机上レビュー（`uxsim/runs/round23/desk_review.md`。
+別に持つ（「uxsim/runs/round23/visual_baseline.md」）。周の前に UI を読む机上レビュー（「uxsim/runs/round23/desk_review.md」。
 コード・ブラウザは触らず `file:line` を根拠に）を置いた。
 
 ### 20.2 行為（PE9）
@@ -1752,7 +1752,7 @@ session 2 は同じ起動の中での再ログイン（「翌日」の近似。�
 
 ### 20.6 第 23 周の結果（2026-10-09〜10）
 
-詳細は `uxsim/runs/round23/BRAIN_NOTES_round23*_*.md`・`product_findings_live.md`・各 run の `findings.jsonl`。
+詳細は `uxsim/runs/round23/BRAIN_NOTES_round23*_*.md`・「product_findings_live.md」・各 run の `findings.jsonl`。
 課題は IK-0649〜IK-0689 に記帳した。表の GONE / STILL / NEW は再演（第 1〜3 波の反映後）で見えたもの。
 
 | 機能 | ペルソナ × 経路 | 到達 | GONE（是正後に消えた） | STILL / NEW |
@@ -1778,7 +1778,7 @@ session 2 は同じ起動の中での再ログイン（「翌日」の近似。�
 提示集合がその場で判断した行を含まない（IK-0679）こととも重なる。E8 は取り消しのある run（rewrite-delete・anchor-dismiss・
 revisit-rewrite）で発火しなかった。B の督促語彙は扉・今日の言葉・持ち越し・記録の面で発火しなかった（B で出たのは開幕の生 TeX・英語の生成文と、elicit の応答の制御文字 — 後者は製品頭脳のエスケープ事故で製品の欠陥に数えない）。
 
-### 20.7 ハーネス側の偽所見と直し（`uxsim/runs/round23/harness_fixes.md`）
+### 20.7 ハーネス側の偽所見と直し（「uxsim/runs/round23/harness_fixes.md」）
 
 1. `learning.cycle.intention`: 頭脳が候補の `pick` と本文の `text` を両方渡したとき runner が `pick` を優先し、本人の言葉が
    保存されなかった（st-02 の「扉に印の文」の一部はこれ）。画面は「候補を選ぶ」か「自分で書く」かの二択なので、`text` が
@@ -1844,9 +1844,9 @@ skipped の経路は砂場では観察できない（サーバ側は `test_relea
 
 **従量**: 製品 LLM は頭脳の肩代わり（初回・再演とも）。本物の従量は embedding だけ（proxy 経由。api-server 再起動ごとの help_kb 再同期を含む）。arXiv 0 回。
 
-**ハーネス側（第 3 の直し・`harness_fixes.md`）**: `selection_ref` が頭脳の `selection_text` を上書き / 出典本文の observation の切り詰め /
+**ハーネス側（第 3 の直し・「harness_fixes.md」）**: `selection_ref` が頭脳の `selection_text` を上書き / 出典本文の observation の切り詰め /
 個人地図の空状態・「マイコース」見出しを投影が落とす / E7 の `STRUCTURE_PERSONAL_KEYS` に `status_label` / precondition 文の識別子 /
-course.open の投影に扉 / 画面文に内部名 / **未対応**: ハーネスがチャットの `history` を窓（直近 N 往復）で送るため、サーバがクライアントの history で保存履歴を置き換え、st-05 の `_discussion` の session 1 の往復が DB から消えた（「今日のあなたの言葉」が空だった原因。画面は全履歴を送るので製品では起きないが、`persist_chat_history` がクライアントの history を信用する弱さは第 4 波候補）。選別は `uxsim/runs/round23/round23_report.md`、課題は IK-0649〜0694。
+course.open の投影に扉 / 画面文に内部名 / **未対応**: ハーネスがチャットの `history` を窓（直近 N 往復）で送るため、サーバがクライアントの history で保存履歴を置き換え、st-05 の `_discussion` の session 1 の往復が DB から消えた（「今日のあなたの言葉」が空だった原因。画面は全履歴を送るので製品では起きないが、`persist_chat_history` がクライアントの history を信用する弱さは第 4 波候補）。選別は 「uxsim/runs/round23/round23_report.md」、課題は IK-0649〜0694。
 
 
 ## 21. 論文レーダー自律周回（第 24 周相当・2026-10-16）
@@ -2389,7 +2389,7 @@ affordance `sidebar.corpus-sea`）。既存の `learning.atlas.view` / `.threads
 - 第 2 波（第 2 周の是正・IK-0884〜0915）を全件テスト緑（backend / src / uxsim）で砂場へ。順は **snapshot r25a を復元 → docker cp →
   restart（migration 091 = 説明の course_id を NULL 許容 / 092 = 台帳の行キーに document_id）**。092 は旧キーの衝突行に印を立てるが、
   r25a には人の記帳が入った衝突行が無く 0 件。
-- 投影の同期（第 2 波分）を周の前の工程として置いた（`uxsim/runs/round25/sync_keys_wave2.md` → `projection_sync_wave2.md`・git 管理外）。
+- 投影の同期（第 2 波分）を周の前の工程として置いた（「uxsim/runs/round25/sync_keys_wave2.md」 → 「projection_sync_wave2.md」・git 管理外）。
 - 前提（campaign の notes どおり・すべて製品の API）: te-02 に PINN の TeX / PDF の editor、te-05 と te-02 に Cepheus の editor、
   te-04 に 6be229e1 の editor、te-04 が Cepheus の配置を 1 件確認（`PATCH /api/admin/landscape/placements/{id}`）→ snapshot `corpus-astro-tex-r25b`。
 - レーン: 面 A / B / C を並列 → 面 D は後（pin_course が 1bad7d9f を private にし、te-04 の書き換えが 1bad7d9f の教材に触れ得るため）。

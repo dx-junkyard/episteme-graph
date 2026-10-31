@@ -87,7 +87,7 @@ DTO と描画を走査し、UUID・シード名・英字キー・revision が表
 ## 第 2 周の再演（第 25 周・面 A 第 2 周、2026-10-23）
 
 残存（一部）。ライブラリの一覧・詳細の生応答には `domain_label`（宇宙物理）・`version_line`・`updated_by_label` が載り、画面の
-描画（`admin.js` renderLibraryDetail）も表示名を使う — 詳細の「astrophysics」はハーネスの投影の遅れ（`harness_fixes_share.md`）。
+描画（`admin.js` renderLibraryDetail）も表示名を使う — 詳細の「astrophysics」はハーネスの投影の遅れ（「harness_fixes_share.md」）。
 残っているのは「地図との対応を導出」の確認ダイアログで、`admin.js` deriveLibraryAtlasLinks が `_libraryTabState.selectedDomain`
 （分野の英字キー）をそのまま「分野「astrophysics」の…」に埋め込んでいる。分野の選択肢の表示名（ライブラリの分野一覧の
 `domain_label`）を引いて文に使う。
