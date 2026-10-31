@@ -89,3 +89,11 @@ run: uxsim/runs/c-astro-r25-share-r3/20261023T033153Z-19784 seq8・seq11、uxsim
 `$…$` に区切る（上流の 1 箇所 = `core/deliberation/labels.py::claim_label` と `_claim_full_text`。学習者・教員とも
 同じ見出しになる）。記号の吹き出しの使用例（`core/symbol_lookup.py::_claim_mentions`）も切り詰めの前に区切る。
 テスト: `backend/tests/test_share_round25_r3_fixes.py::TestClaimLabelDelimitsBareTex`。実画面のレーンでの見え方は未確認。
+
+## 第 4 周の再演（第 25 周・面 A 第 4 周、2026-10-25）
+
+第 4 周の再演: 残存（学生のレーンの見出し「The structure network _TOV maps…」「_BC imposes…」「$R_$」、主張の一覧「BC imposes the boundary condition…」、記号 P の使用例「fix P() to 3.06」。`claim_label` は生の TeX を受ければ `$…$` で区切ることを作業ツリーで確かめた（`\mathcal{N}_\mathrm{TOV}` → `$\mathcal{N}_\mathrm{TOV}$`）。同じ文で単位の `$MeV/fm^3$` は残り記号だけ抜けているので、保存された主張の本文が取り込みの時点で記号を失っている可能性が高い（砂場は TeX 取り込みの是正 6c7f187 の前の snapshot `corpus-astro-tex-r23` のまま — campaign の前提 2 が満たされていない）。記号 L_BC の吹き出しに使用例が出ないのも同じ根（本文に記号が残っていない）。確かめるには取り直した snapshot で同じ部品の文脈を開く。run: uxsim/runs/c-astro-r25-share-r4/20261024T233359Z-43631 seq7・10、uxsim/runs/c-astro-r25-share-r4/20261024T233212Z-21482 seq8・10）
+
+## 第 5 周の再演（第 25 周・面 A 第 5 周、2026-10-27）
+
+第 5 周の再演: 残存（保存データ）。下位レーンの「The structure network _TOV maps…」と、同じ画面の「主張」区画の「The structure network TOV maps … {P(k)}_{k=…}」（atomic rewrite 側）が食い違う — 前者は記号を失った span の本文、後者は書き直された子の本文。記号 P の使用例「fix P() to 3.06」・「BC imposes…」も同じ。第 4 周の「$R_$」は「$P(R_*)=0$」と出た（境界条件の式は保存データでも残っていた）。根は取り込み（IK-0665）で、snapshot は再解析されていない（H38）。run: uxsim/runs/c-astro-r25-share-r5/20261027T071307Z-52079 seq8・11、uxsim/runs/c-astro-r25-share-r5/20261027T071522Z-64789 seq7

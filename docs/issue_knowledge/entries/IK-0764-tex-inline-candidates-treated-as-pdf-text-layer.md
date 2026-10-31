@@ -94,3 +94,7 @@ TeX 経路の原文と、equation_semantics に渡った inline 候補の raw_te
 
 上流（TeX 取り込み）は区切りを保持していたのに、下流の候補抽出がそれを使わず PDF 前提の推測で切り出していた。辞書の型 available-but-unwired（起票時の contract-changed-one-side から訂正・history に記録）。
 IK-0762（値指定が式として母集合に入る）と同じ inline 候補の入口の問題で、本件は切り出しと出所の扱い。
+
+## 第 11 周（第 25 周・面 D 第 11 周、2026-10-31・judge_studio_r11）
+
+**STILL（再解析待ちの記録）**。コース 1bad7d9f の t2 の本文「論文では $Q = 0.5$」に〔AI復元〕の印（doubt 面 st-08）。Cep B の TeX 版 document 1771872a の記録 `eq_eqcand_inline_tex_b103_6_97f45e83` は `source_extraction.extraction_source = inline_pdf_text_layer`・`raw_text = "Q=0"`・`reconstruction.status = reconstructed_from_neighbors`（小数点で切れて復元）で、作った run は 2026-10-02（この課題の是正 10-16 の前）。印は記録どおりで、再解析（所有者の操作）まで変わらない。run: uxsim/runs/c-r25-doubt-r11/20261031T102036Z-2368 seq6。

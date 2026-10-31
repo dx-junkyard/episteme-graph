@@ -9,6 +9,7 @@ sources:
   - "docs/features/category_gap_candidates_design.md"
   - "docs/features/atlas_relation_edges_design.md"
   - "docs/features/decision_context_design.md"
+  - "docs/features/account_lifecycle_management_design.md §16"
 feature_context:
   realizing: "教員が分野の地図の候補を採用・見送りし、その判断を後から別の教員が読んで再構成できるようにする"
   layers: [category_gaps, relation_edges_re, frontend_admin_ui]
@@ -54,13 +55,17 @@ resolution:
     - "backend/api/routes/atlas_edges.py"
     - "frontend/public/js/admin.js"
     - "backend/tests/test_atlas_review_round25.py"
+    - "backend/core/account_display.py"
+    - "backend/db/094_users_profile_name.sql"
+    - "backend/tests/test_account_display_guardrails.py"
   principles:
     - principle: route-all-surfaces-through-one-point
       use: consulted
-      note: "gap と辺の 2 つのカードに帰属の写しを書き分けず、route 層の 1 つの投影を通す。"
+      note: "gap と辺の 2 つのカードに帰属の写しを書き分けず、route 層の 1 つの投影を通す。第 5 波では名前の読みも core/account_display.py 1 箇所に寄せた（面を跨ぐ）。"
   verification:
     methods: [guardrail]
     unverified:
+      - "第 5 波の profile_name 化はブラウザ・砂場での再演が未実施（既存アカウントは名前の登録が無いので「名前を登録していない利用者」と出る）"
       - "採用済みの辺の種類を変える操作は作っていない（必要なら別の操作として足す）"
       - "ブラウザでの表示は未確認"
 related: [IK-0660]
@@ -115,3 +120,25 @@ history: []
   から受け取るだけなので、アカウント層が表示名を別に持てば変えずに済む。
 - 第 3 波で、帰属の一行は凍結の止め理由（`readiness.pending_items[].decision_line`）と反映の確認
   （incorporate-preview の `decision_line`）にも運ばれるようになった（IK-0939）。判断者の UUID は出さない。
+
+第 4 周の再演（2026-10-25・campaign c-astro-r25-atlas-r4）: 残存（名前）。帰属は一覧・反映の確認・凍結の影響のすべてに出るが、名前がログイン ID の形（uxsim_te_0N_…）。display_name がログイン名を兼ねる構造の事情で、オーナー判断待ちのまま。run: uxsim/runs/c-astro-r25-atlas-r4/20261024T233234Z-25818 seq 2 / 10 / 13。
+
+第 5 周の再演（2026-10-27・campaign c-astro-r25-atlas-r5）: STILL（名前）。帰属は外れた採用・反映の確認・凍結後の確認者に出るが、名前はログイン ID の形（uxsim_te_03_meticulous_seminar / uxsim_te_05_delegator_lab）のまま。表示名の層はオーナー判断待ち。run: uxsim/runs/c-astro-r25-atlas-r5/20261027T070623Z-23509 seq 2 / 7 / 10 / 15。
+
+## 第 5 波の是正（2026-10-27・面を跨ぐ「表示名」— IK-1007 と同時）
+
+- 残っていた「名前がログイン ID の形」を是正した。オーナー判断（推奨どおり）: ログイン ID は見せない。
+  migration 094 の `users.profile_name`（本人が登録する、人に見せる名前）を足し、`atlas_review_display.fetch_actor_labels`
+  は `core/account_display.py` の `display_label` を通して `profile_name` だけを読む。登録が無ければ
+  「名前を登録していない利用者」（鉤括弧で区切らない固定の主語）で、ログイン ID へフォールバックしない。
+  `project_decision_for_response` はトークンの利用者名（ログイン ID）を表示に使う分岐を外し、常に `users` から引く。
+- 分野の地図の面は表示名を `fetch_actor_labels` から受け取るだけなので、面の側の描画は変えていない（第 3 波の見立てどおり）。
+
+
+## 第 6 周の再演（第 25 周・面 C 第 6 周、2026-10-27・campaign c-astro-r25-atlas-r6）
+
+GONE（第 6 周の観察）。帰属は「江口 大地」「堀 正和」「水野 早紀」と人の名前で出た（判断のカード・反映の確認・凍結の影響・確認者）。砂場で名前を登録したうえでの観察で、未登録の利用者の表示は第 6 周では見ていない。run: uxsim/runs/c-astro-r25-atlas-r6/20261027T122507Z-5200 seq 4 / 6、uxsim/runs/c-astro-r25-atlas-r6/20261027T122716Z-6544 seq 13 / 19。
+
+## 第 7 周の再演（第 25 周・面 C 第 7 周、2026-10-28・campaign c-astro-r25-atlas-r7）
+
+GONE（観察）。帰属は「堀 正和」（採用・見送り）・「江口 大地」（見送り）・確認者「西川 智也」で、ログイン ID は出ない。run: uxsim/runs/c-astro-r25-atlas-r7/20261027T171656Z-52459 seq 4 / 7、uxsim/runs/c-astro-r25-atlas-r7/20261027T171933Z-54352 seq 12。

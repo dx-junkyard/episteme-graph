@@ -58,3 +58,12 @@ history: []
 ## 一般化
 
 上流の正規化で失われた記号は下流のどこでも復元できない。確かめ方は、インライン数式を含む TeX を取り込み、主張・チャンク・出典の引用のすべてに記号が残ることを見ること。
+
+## 第 5 周の再演（第 25 周・面 A 第 5 周、2026-10-27）
+
+第 5 周の再演: 残存（保存データ）。PINN の TeX 版の主張・出典に「_TOV」「P()」「_BC」。6c7f187 は「既存の TeX 取り込み教材は再解析で直る」で、第 5 周の snapshot（corpus-astro-tex-r25d）は取り直しだけで再解析していない（H38）。L_BC の吹き出しに使用例が出ないのも記号が本文に残っていないため。run: uxsim/runs/c-astro-r25-share-r5/20261027T071307Z-52079 seq8・10、uxsim/runs/c-astro-r25-share-r5/20261027T070623Z-23499 seq2
+製品頭脳 A・B のプロンプト（uxsim/runs/mailbox/req-04055.json・req-04056.json）の出典の抜粋でも「via _EOS」「K_0=23020 MeV」（230±20 の ± が消えて数値が読めない）「fixing P()=3.06」「_join 75 MeV/fm^3」— 記号だけでなく数値の不確かさの記法も落ちている。
+
+## 第 6 周の再演（第 25 周・面 A 第 6 周、2026-10-27）
+
+第 6 周の再演: 観測範囲で GONE（PINN の TeX 版を第 5 波のコードで再解析した snapshot r25e）。教材本文の $\mathcal{N}_{\mathrm{TOV}}$・$\mathbf{F}_{\!\mathrm{EOS}}$、記号 P の使用例（a neural network representing $P(\varepsilon)$）、L_BC の使用例（$P(R_\star)=0$）とも記号が欠けずに出た。第 5 周の「_TOV maps」「P()」「fix P() to 3.06」は見えない。凍結済みコースの保存文（IK-0755 の面）は別。run: uxsim/runs/c-astro-r25-share-r6/20261027T122930Z-7994 seq6、uxsim/runs/c-astro-r25-share-r6/20261027T123326Z-10141 seq8・10

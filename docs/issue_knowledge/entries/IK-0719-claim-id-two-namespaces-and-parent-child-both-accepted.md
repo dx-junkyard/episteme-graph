@@ -45,7 +45,7 @@ resolution:
   note: "未解決。後段に渡す主張の母集合を 1 つの名前空間に揃え、原子化された親は子に置き換える（または親子関係を明示して片方だけを採択扱いにする）。"
   landed_in:
     - "docs/pipeline/agents.md"
-related: [IK-0724]
+related: [IK-0724, IK-0733]
 view_of: []
 history: []
 ---
@@ -71,6 +71,8 @@ history: []
 追加の出所（頭脳 Z2）: uxsim/runs/radar_loop/BRAIN_NOTES_Z2.md（seq 3674 — 同じ主張が landscape では claim_span_002_sub01、thesis（seq 3608）では claim:tex_b23:span_002 と段ごとに別の ID 体系）。
 
 同根の観察（頭脳 AA2）: uxsim/runs/radar_loop/BRAIN_NOTES_AA2.md（seq 3842 — candidate_text_spans の span_id がブロックをまたいで重複。ID の名前空間がブロック内に閉じている件は IK-0724）。
+
+追加の出所（第 25 周 第 6 周の前・PINN TeX 再解析 ce667c63・製品頭脳 A / B）: uxsim/runs/round25/BRAIN_NOTES_product_B_r6pre.md（4225 — claim_centered_plan と thesis_nodes の claim ID は claim:tex_b10:span_001 形、available_claims は claim_span_001_sub01 形で、headline_claim_ids が available に無く突き合わせが空になる。available_derivation_ids の step_001 が derivation 名で修飾されず重複。4233 — 主張 8 件すべて upper_context が空で、同根の疑い）、BRAIN_NOTES_product_A_r6pre.md（4224 — thesis の claim_ids に旧形 claim:tex_b18:span_002 が混在）。IK-0733（refiner の headline 主張 ID）と同じ二系統。
 
 ## 発見の観点
 

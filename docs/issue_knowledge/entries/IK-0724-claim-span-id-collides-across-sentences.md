@@ -46,7 +46,7 @@ resolution:
   note: "未解決。採番の材料に block_id など文書内で一意な外側の文脈を足すか、内容由来の stable_key と同じ作法で一意化し、重複を検出したら後段に渡す前に止める。"
   landed_in:
     - "docs/pipeline/agents.md"
-related: [IK-0719]
+related: [IK-0719, IK-1013]
 view_of: []
 history: []
 ---
@@ -70,6 +70,8 @@ history: []
 追加の出所（2610.08751・頭脳 Z2）: uxsim/runs/radar_loop/BRAIN_NOTES_Z2.md（seq 3608 — claim_span_003_65 が tex_b110:span_003（KCDM で 1〜2σ）と tex_b111:span_003（Mpc/h の強い制約は人工的）の 2 主張に重複。legacy_claim_id は別）。
 
 同根の観察（頭脳 AA2・2609.35757 の再解析 run 54e85a2a）: uxsim/runs/radar_loop/BRAIN_NOTES_AA2.md（seq 3842 ほか equation_semantics の全件 — candidate_text_spans の span_id がブロックをまたいで重複（span_001 が tex_b3 と tex_b5 の両方）。span_id がブロック内でしか一意でない仕様のため、(block_id, span_id) の組で引かない下流は誤リンクする。主張 ID の衝突と同じ根）。
+
+追加の出所（第 25 周 第 6 周の前・PINN TeX 再解析 ce667c63・製品頭脳 B）: uxsim/runs/round25/BRAIN_NOTES_product_B_r6pre.md（4211・4213 — equation_semantics の candidate_text_spans で span_001/002/003 が tex_b23 と tex_b25 に重複。4223 — 4213 で eq_total_loss に応えたのに thesis_reconstruction の major_equations では「could not be inferred」confidence 0.0 のまま。linked_text_spans に span_001 が 2 ブロック分あり、span_id だけで照合する validator に弾かれた疑い）。(block_id, span_id) の組で引かない照合が、取り違えだけでなく正しい応答の破棄も起こしうる（失敗文の下流汚染は IK-1013）。
 
 ## 発見の観点
 

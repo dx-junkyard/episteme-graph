@@ -102,3 +102,26 @@ run: uxsim/runs/c-r25-doubt-r3/20261023T033238Z-24957（seq8〜10）/ uxsim/runs
 uxsim/runs/c-r25-doubt-r3/20261023T070217Z-13811（seq8）。論文名が見出しに無い件は IK-0934、主張の名前（agent ID）は IK-0930。
 
 第 3 波で是正（2026-10-23）: ①主グラフのノードの名前は段の日本語名（element_vocab の正本 — 「理論の土台」）+ 根拠の主張にした（seminar_brief._ReadableLabels._readable_node_label。台帳詳細・ブリーフ・反実仮想の状態行が通る）。②学習者の台帳 GET（learner_ledger_line）に表示名の正本 target_label を足し、app.js の出典タブの行の主語はそれを優先する（式は印字番号。TeX のラベル・空の主語で行を出さない）。論文名の見出しは IK-0934、主張の名前は IK-0930 で是正。実画面は未確認（第 4 周 te-05 / st-07）。
+
+第 4 周の再演: 残存（2026-10-25・一部）。台帳の見出しは「論文 › 対象」になった（IK-0934 は GONE）。残るのは、主グラフのノードの対象名が「段の日本語名: 式から合成した英語の主張（生の TeX）」
+（「理論の土台: An equation of this paper defines $\mathcal{L}$.」）で、原稿スタジオのノード名は段の英語名（Theory basis / Consistency relation）のまま、支える主張の一覧に
+同じ文面が 2 行並んで見分けられない（「defines $M$」）こと。支える主張には単位を記号として扱った合成文（「$K_0$ depends on MeV」— IK-0637 と同型）も出る。
+run: uxsim/runs/c-r25-doubt-r4/20261024T232812Z-98847（seq5・6）/ uxsim/runs/c-r25-doubt-r4/20261024T233017Z-7034（seq5・6）。
+
+第 4 波の判定（2026-10-25）: 「台帳の詳細: Theory basis」の英語見出しはハーネスの投影（ノードの生ラベル）で、原稿スタジオの実画面は lsGraphStageLabelJa → element-vocab の正本で「理論の土台」と出す（投影の偽所見 — sync_keys_wave4.md 面 B に記した）。残るのは、対象名・支える主張が式から合成した英語の主張と生の TeX（IK-0571 と同根）で、同じ文面の主張が 2 行並ぶこと・単位を記号に扱う合成文（IK-0637 と同型）。いずれも A層の合成文の側の課題で、この波では直していない。
+
+第 5 周の再演: 残存（学習者の面・2026-10-27）。学生の未検証の前提一覧と開幕の「この論文が確かめていないこと」の項目が「番号なし: $\frac{1}{2} \ddot{\mathrm{I}} = 2$…」のような途中で切れた式の頭で、論文名も言葉の説明も無く、同趣旨の式の頭が重複する（$\mathrm{B}_0$ / ${B_0}$）。教員の前提の地図も、PDF 版の論文を含むコースは全点「番号なし:」で始まる（TeX 版の式は「式 (6)」と印字番号で読める）。対象・支える主張の英語の生成文（「An equation of this paper defines $M$.」）と同文の 2 行（区別不能）も te-02 / te-04 / te-03 で残る。run: uxsim/runs/c-r25-doubt-r5/20261027T071839Z-88666（seq11・14）/ uxsim/runs/c-r25-doubt-r5/20261027T070623Z-23504（seq3〜5）/ uxsim/runs/c-r25-doubt-r5/20261027T070946Z-33422（seq2・5）。
+
+第 6 周の再演: 残存（2026-10-27）。教員: 台帳の対象・支える主張が英語の生成文（「An equation of this paper defines $c_s^2$.」）、同文 2 行、支持線の文に英語の段の名前「Diagnostic / application」、前提の地図の点が「番号なし: $…$」（PDF 版を含むコース）。学生: 未検証の前提一覧と開幕が英語の序論の文・文字化け「�� ≈ 0.75」・文献キー「andre2010archetypal」（並びの入れ替わりは IK-1030）。run: uxsim/runs/c-r25-doubt-r6/20261027T122225Z-3508（seq3・5）/ uxsim/runs/c-r25-doubt-r6/20261027T122508Z-5219（seq5）/ uxsim/runs/c-r25-doubt-r6/20261027T123134Z-9179（seq11）。
+
+第 7 周の再演: STILL（2026-10-28）。台帳の対象名・支える主張・合意リストが英語の生成文（An equation of this paper defines $c_s^2$. 等）で、同じ文面が支える主張に 2 行並ぶ。散布図は「（ほか、同じ文面の点: 点6・点8・点12）」と畳むが、未検証合意リストは同じ文面を名前の区別なく並べる（畳み方が 2 つの一覧で違う）。支持線の文「『Diagnostic / application』が同時に崩れると…」の段階名が英語の内部名のまま。学生の教材の「この節で使う数式」は TeX ラベル（eq:dcf・eq:modified_dcf）と同じ定型文、「（本文を特定できない要素）」。run: uxsim/runs/c-r25-doubt-r7/20261027T171356Z-51086（seq3・5・6）/ uxsim/runs/c-r25-doubt-r7/20261027T171640Z-52350（seq3・13）/ uxsim/runs/c-r25-doubt-r7/20261027T173022Z-59619（seq6）。
+
+第 8 周の再演: STILL（2026-10-28）。前提の地図・合意リスト・ノード台帳・出典タブ・開幕・わたしの地図で英語の定型生成文（An equation of this paper defines …）・同文の行（点1 ほか同じ文面の点 4 つ・支える主張 2 行）・段階名「Diagnostic / application」・式の断片（番号なし: …）・文の途中切れ（(Fig. / 3b ) is reproduced…）。教材一覧と章見出しで PDF 版の題名が arXiv 番号のまま。run: uxsim/runs/c-r25-doubt-r8/20261027T223243Z-92707（seq3・5）/ 20261027T223539Z-94356（seq5）/ 20261027T223914Z-96688（seq3）/ 20261027T224211Z-98239（seq9・11・15・16）。
+
+第 9 周（2026-10-31）: 支持線の切れ目の段名は日本語（『診断・応用』— 第 8 波）で GONE。散布図・合意リスト・支える主張の英語の生成文（「An equation of this paper defines $M$.」が同文 2 行・式の断片）は STILL。run: uxsim/runs/c-r25-doubt-r9/20261031T012052Z-34781（seq5）/ 20261031T003210Z-30688（seq3）。
+
+第 10 周（2026-10-31・judge_doubt_r10）: STILL（同じコース・同じ行）。合意リストの 8・9 行目が同文「An equation of this paper defines $M$.」、原稿スタジオのノード台帳の支える主張にも同文 2 行（区別の手がかりなし）。run: uxsim/runs/c-r25-doubt-r10/20261031T052922Z-65583（seq3）/ uxsim/runs/c-r25-doubt-r10/20261031T053250Z-67645（seq5）。
+
+## 第 11 周の再演（第 25 周・面 B 第 11 周、2026-10-31・judge_doubt_r11 — 固定コース 1bad7d9f・3 周連続の同じ対象）
+
+STILL（3 周同じ）。ノード「理論の土台」の台帳の支える主張に「An equation of this paper defines $M$.」が 2 行同文で並び、合意リスト 8・9 行目も同文。散布図の点・リストの行は英語の生成文のまま。run: 99946 seq5 / 98534 seq3。

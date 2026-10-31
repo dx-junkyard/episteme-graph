@@ -117,3 +117,40 @@ guardrail-does-not-cover-new-path も疑う。
 残り、学生の出典タブ「このトピックの論理要素」と、原稿スタジオの標準の説明に出た。是正前の解析の保存データで、再解析で直る
 （unverified の範囲どおり）。ただし標準の説明は初回表示時の要約の写しで再解析後も更新されないため、別に IK-0923 に起票した。
 run: uxsim/runs/c-astro-r25-share-r3/20261023T033153Z-19784 seq6、uxsim/runs/c-astro-r25-share-r3/20261023T033629Z-52380 seq2。
+
+## 第 4 周の再演（第 25 周・面 A 第 4 周、2026-10-25）
+
+第 4 周の再演: 残存（保存データ。出典タブ「このトピックの論理要素」に「Reusable theory unit (evaluate_condition) within Total objective; covers 2 equation step(s).」と見出し「Evaluate condition: K_0, N_c, \mathcal{L}_\mathrm{BC}」。snapshot が是正前のまま。run: uxsim/runs/c-astro-r25-share-r4/20261024T233212Z-21482 seq6・uxsim/runs/c-astro-r25-share-r4/20261024T233359Z-43631 seq6）
+
+## 第 5 周の再演（第 25 周・面 A 第 5 周、2026-10-27）
+
+第 5 周の再演: 残存（出典タブ「Evaluate condition: K_0, N_c, \mathcal{L}_\mathrm{BC} — Reusable theory unit (evaluate_condition) within Total objective; covers 2 equation step(s).」）。snapshot は corpus-astro-tex-r25d に取り直したが、教材の再解析をしていない（manifest に再解析の記録が無い）ので保存データのまま — 是正の効き目は未評価（harness_fixes_share.md H38）。run: uxsim/runs/c-astro-r25-share-r5/20261027T071307Z-52079 seq6
+
+## 第 6 周の再演（第 25 周・面 A 第 6 周、2026-10-27）
+
+第 6 周の再演: STILL（保存データ）。コース 1bad7d9f は再解析より前に凍結されたので、出典タブ「このトピックの論理要素」に「Evaluate condition: K_0, N_c, \mathcal{L}_\mathrm{BC} — Reusable theory unit (evaluate_condition) within Total objective; covers 2 equation step(s).」が生 TeX のまま残る。是正の効き目はコースの再凍結（または読み時の置き換え）でしか確かめられない。run: uxsim/runs/c-astro-r25-share-r6/20261027T122930Z-7994 seq6
+
+## 第 7 周の再演（第 25 周・面 A 第 7 周、2026-10-28）
+
+第 7 周の再演: STILL（保存データ・旧い凍結）。出典タブ「Reusable theory unit (evaluate_condition) within Total objective; covers 2 equation step(s).」（uxsim/runs/c-astro-r25-share-r7/20261027T171757Z-53326 seq6）。
+
+第 9 周（2026-10-31・面 B から見えたもの）: 固定コース 1bad7d9f の t11 の出典タブ「このトピックの論理要素」に「Evaluate condition: K_0, N_c, \mathcal{L}_\mathrm{BC} — Reusable theory unit (evaluate_condition) within Total objective; covers 2 equation step(s).」が学生に出る。是正前に凍結したコースの写しに残る旧い機械文（再凍結はしていない）。扱いは面 studio / share の審判に委ねる。run: uxsim/runs/c-r25-doubt-r9/20261031T015310Z-38509（seq6）。
+
+第 10 周（2026-10-31・judge_doubt_r10・面 B の観察）: STILL（同じコース・同じトピック）。st-05 の t11 の出典タブ「このトピックの論理要素」に「Evaluate condition: K_0, N_c, \mathcal{L}_\mathrm{BC} — Reusable theory unit (evaluate_condition) within Total objective; covers 2 equation step(s).」。run: uxsim/runs/c-r25-doubt-r10/20261031T053655Z-69809（seq6）。
+
+## 第 10 周の再演（第 25 周・面 A 第 10 周、2026-10-31・judge_share_r10）
+
+STILL（旧い凍結の保存データ）。固定コース 1bad7d9f の t11 の出典タブ「このトピックの論理要素」に「Evaluate condition: K_0, N_c, \mathcal{L}_\mathrm{BC} — Reusable theory unit (evaluate_condition) within Total objective; covers 2 equation step(s).」と「Define: Total objective — … covers 1 equation step(s).」。英語話者の st-04 は「machine notes」と読んだ。run: uxsim/runs/c-astro-r25-share-r10/20261031T053407Z-68377（seq6）・uxsim/runs/c-astro-r25-share-r10/20261031T054227Z-72202（seq6）。
+
+第 10 周（2026-10-31・製品頭脳 B 4315）: STILL（保存データ）。学習チャットの画面文脈でも部品の役割・前提が英語の生成文のまま渡った。
+第 10 波で AI 側だけ是正: 解決器 `_component_facts` が英語の文（役割・要約・前提）に「この文は論文の解析が英語で生成したもの…日本語で言い換えて」を
+添える（文は書き換えない）。出典タブの表示（保存データ）は未是正。
+
+
+## 第 11 周の再演（第 25 周・面 B 第 11 周、2026-10-31・judge_doubt_r11 — 固定コース 1bad7d9f・3 周連続の同じ対象）
+
+第 11 周（judge_doubt_r11）: STILL。st-05 の t1 の出典タブ「このトピックの論理要素」に「熱的超臨界判定 — application — 熱的超臨界判定 — application isolated as a reusable application component within 熱的超臨界判定 (#324).」。run: 1116 seq6。
+
+## 第 11 周の再演（第 25 周・面 A 第 11 周、2026-10-31・judge_share_r11）
+
+STILL（面 A・保存データ）。t11「Evaluate condition: … Reusable theory unit (evaluate_condition) within Total objective; covers 2 equation step(s).」・t1「熱的超臨界判定 — application — … application isolated as a reusable application component within 熱的超臨界判定 (#324).」（uxsim/runs/c-astro-r25-share-r11/20261031T101956Z-2094 seq6・uxsim/runs/c-astro-r25-share-r11/20261031T102623Z-4737 seq6）。

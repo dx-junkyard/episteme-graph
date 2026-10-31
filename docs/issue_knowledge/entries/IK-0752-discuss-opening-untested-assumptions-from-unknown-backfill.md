@@ -47,7 +47,7 @@ resolution:
   note: "未解決。未検証前提の母集合を、人が確定した assumption / 前提の claim_type に限り、unknown バックフィルの主張は「検証記録なし」として別扱いにする案（コーパスを補う論文のレンズ B と同じ規律）。"
   landed_in:
     - "docs/features/discuss_opening_authoring_design.md"
-related: [IK-0731]
+related: [IK-0731, IK-0665, IK-1013]
 view_of: []
 history: []
 ---
@@ -65,6 +65,8 @@ history: []
 追加の出所（2610.08751・頭脳 X1・是正前の run（seq 3289〜3310・2026-10-17 03:00〜03:11））: uxsim/runs/radar_loop/BRAIN_NOTES_X1.md（seq 3301 — untested_assumptions 8 件中 4 件が序論の一般論（「BAO から宇宙論パラメータを推定できる」「EFT・VDG は理論枠組み」）で、論文が確かめていない前提ではなく分野の背景。著者の手が式操作だけの件は IK-0817）。
 
 追加の出所（2610.08751・頭脳 Z2）: uxsim/runs/radar_loop/BRAIN_NOTES_Z2.md（seq 3671 — untested_assumptions に式由来の合成主張「In an equation of this paper, $\Pi(n)$ depends on …」2 件、先行研究の説明（Jeffreys priors define invariant measures…）、途中で切れた脚注「（脚注: In the correct expression…」が入る）。
+
+追加の出所（第 25 周 第 6 周の前・PINN TeX 再解析 ce667c63・製品頭脳 A）: uxsim/runs/round25/BRAIN_NOTES_product_A_r6pre.md（4236 — untested_assumptions に背景の一般文「The true nature of matter…」と TeX 残骸「M_max &= 2.062\, &&^… alignat」「P()」（\varepsilon が消えた記号欠落 — IK-0665 の取り込み時のマクロ削除と同根の疑い）が入る。central_question は unknown、paper_goal は「本文が入力に無いため未確認」— paper_skeleton が題名だけで走った波及。author_choices の reason に失敗文 — IK-1013）。
 
 ## 発見の観点
 

@@ -46,6 +46,7 @@ resolution:
     - "backend/api/routes/theory_components.py"
     - "frontend/public/js/admin-lecture-studio.js"
     - "backend/tests/test_share_round25_explanations.py"
+    - "backend/tests/test_share_round25_r4_fixes.py"
   verification:
     methods: [guardrail]
     unverified:
@@ -70,3 +71,15 @@ history: []
 ## 一般化
 
 権限と見え方の非対称の型。確かめ方は、著者・他の教員・管理者の 3 人で同じカードを開き、押せる操作だけが見えることを画面で見ること。
+
+## 第 4 周の再演（第 25 周・面 A 第 4 周、2026-10-25）
+
+第 4 周の再演: 一部残存（他人の説明で公開・共有の操作は消え、edit_note「この説明の公開・共有の設定は著者だけが変えられます。」が出た。［支持を取り消す］は支持していない教員にも常に描かれる — admin-lecture-studio.js:7423。run: uxsim/runs/c-astro-r25-share-r4/20261024T233620Z-65949 seq3）
+
+## 第 4 波の是正（第 25 周・面 A、2026-10-25）
+
+［支持を取り消す］は本人の有効な支持があるときだけ出す。説明一覧の応答に my_support（component_endorsements の本人・未取り消しの行の有無）を足し、カードは exp.my_support のときだけボタンを描く。
+
+## 第 5 周の再演（第 25 周・面 A 第 5 周、2026-10-27）
+
+第 5 周の再演: 消滅（［支持を取り消す］は本人が支持した後にだけ出た。公開・共有の操作は著者のカードにだけ出た）。残る対応ずれ（査読済みに査読ボタン・共有の知らせの方向）は IK-0985、標準の説明の査読者が居ないことは IK-0984。run: uxsim/runs/c-astro-r25-share-r5/20261027T070623Z-23499 seq2〜6

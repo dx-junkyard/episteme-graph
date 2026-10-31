@@ -52,6 +52,7 @@ resolution:
     - "frontend/public/js/app.js"
     - "backend/tests/test_share_round25_identity_links.py"
     - "backend/tests/test_share_round25_identity_consumers.py"
+    - "backend/tests/test_share_round25_r4_fixes.py"
   verification:
     methods: [guardrail]
     unverified:
@@ -77,3 +78,23 @@ history: []
 ## 一般化
 
 照合の材料が弁の位置に無い型。確かめ方は、粒度の違う対（部品 ⇄ それが使う方程式）を確定しようとしたとき、確定の直前に両側の意味が並び、学生側の見出しが「同じものとして確かめた」と言うことを画面で見ること。
+
+## 第 4 周の再演（第 25 周・面 A 第 4 周、2026-10-25）
+
+第 4 周の再演: 残存（是正の部分は効いた — 確定の直前に両側の名前・要約・入出力と CONFIRM_NOTE が並んだ。それでも委任型の te-05 は「同じ論文の TOV の話なので同じでいいだろう」と注意文を流し読みして作成直後に確定し、学生 st-08・st-01 が「ネットワークそのものが TOV 方程式と同じと言われると混乱する」と記した。照合の材料を並べるだけでは止まらず、確定を戻す経路も無い — IK-0953 として起票。run: uxsim/runs/c-astro-r25-share-r4/20261024T232812Z-98848 seq6-7・uxsim/runs/c-astro-r25-share-r4/20261024T233212Z-21482 seq11・uxsim/runs/c-astro-r25-share-r4/20261024T233359Z-43631 seq7）
+
+## 第 4 波の是正（第 25 周・面 A、2026-10-25）
+
+確定の直前に両側を名指しして「同じものですか（一方が他方を使う・満たすだけではありませんか）」と問う 1 文（identity_links.confirm_question → 応答 confirm_question）と、部品の種別（component_type を entry_type に写したもの）と共通部品の種別が違うときの一段強い確認の事実文（granularity_note）を足した。deliberation.js は種別が違う対の［確定］で、問いと種別の違いを並べた window.confirm をもう一度出す。誤って確定した組は IK-0953 の［確定を取り消す］で戻せる。
+
+## 第 5 周の再演（第 25 周・面 A 第 5 周、2026-10-27）
+
+第 5 周の再演: 残存（エントリ単位）。行動型の te-02 はリンクの弁（問い・種別の文）を通らない［確定にする］（エントリの確定）で、名前の違う対 Boundary constraints ⇄ Softening interpretation を確認ダイアログ無しに確定した。リンクの確定は runner がリンクを引けず未実行（H35）なので、リンクの弁そのものは未評価。エントリの確定とリンクの確定の分離は IK-0982、候補の組の質は IK-0980。run: uxsim/runs/c-astro-r25-share-r5/20261027T071135Z-43804 seq4・5
+
+## 第 5 波の是正（第 25 周・面 A、2026-10-27）
+
+エントリ単位の確認を足した。概念（エントリ）の［確定］の前に「確定するのは概念を置くことだけで、論文の部品との結び付き（各行）は確定されません」と問い（routes/library.py ENTRY_CONFIRM_QUESTION・一覧は confirm_question・詳細は review_confirm_question）、確定後に事実文（ENTRY_CONFIRMED_FACT）。ライブラリの一覧と詳細のリンクの［確認］も、深く検討と同じ confirm_question / granularity_note の確認を通る（admin.js _libraryConfirmIdentityLinkDialog）。エントリの確定とリンクの判断の分離そのものは IK-0982。landed_in: backend/api/routes/library.py・frontend/public/js/admin.js・backend/tests/test_share_round25_r5_fixes.py。
+
+## 第 6 周の再演（第 25 周・面 A 第 6 周、2026-10-27）
+
+第 6 周の再演: GONE（リンクの弁）。一覧の［確認］の前に「（一方が他方を使う・満たすだけではありませんか）。 — 同じものとして確定しますか」が出た。ただし問いの両端が同じ名前（部品「TOV residual loss at collocation points」と共通部品「TOV residual loss at collocation points」）で、対の相手（PDF 版の TOV residual constraint）が問いに出ず弁が働かない → IK-1026。run: uxsim/runs/c-astro-r25-share-r6/20261027T122225Z-3503 seq3
