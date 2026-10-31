@@ -19,6 +19,10 @@ f. 固定コースの取り違え（A・ハーネス）: campaign が ``course_i
    見ていない（第 12 周 = IK-0506）。ペルソナ・セッションごとに 1 件。
 g. 構造で答えたか（A・仮説）: 「この式はどこから」「根拠」を含む質問の回答に、同じセッションで見た教材の主張本文・
    段階の日本語ラベル（``core/element_vocab.py::THEORY_STAGE_LABELS``）・出典番号のどれも無い。断定しない（PE3）。
+h. 本文の出典番号の取りこぼし（A・仮説・第 25 周 第 9 波 IK-1078）: 回答本文の ``[出典N]`` が ``sources[].index`` に
+   無い。製品はマーカー単位で否定を判定する（直後に助詞が続き、その後ろ・次のマーカーの手前までに否定の語があるときだけ
+   引用と数えない）ので、その形のマーカーは見ない（偽所見を作らない）。文末の帰属（「…と書かれています [出典9]」）は
+   sources に載るのが正。本文が抜粋で切れている・出典が読めない応答は見ない。セッションごとに 1 件。
 
 応答の要約は ``HttpTrace.digest``（runner が応答全体から取る）を優先し、無い古い transcript では
 ``response_excerpt`` から読める範囲で代える（抜粋に出典が入っていなければ a・b は見送る）。
@@ -374,6 +378,56 @@ def _check_structure_answer(seq: list[TranscriptStep], factory: FindingFactory) 
     return []
 
 
+HYP_DROPPED_MARKER = "回答本文が [出典N] で根拠を示しているのに、その番号が出典の一覧に無い（本文の帰属が出典の一覧から落ちた）"
+_MARKER_TAIL_RE = re.compile(r"\[出典(\d+)\]")
+NEGATED_MARKER_PARTICLES = ("について", "は", "も", "が", "を", "is", "was", "are", "were")
+NEGATION_WORDS = ("ない", "ません", "無い", "なし", "ず", "not", "no ", "never")
+
+
+def negated_marker(tail: str) -> bool:
+    """製品のマーカー単位の否定判定の写し（第 9 波・IK-1078）: マーカー直後（空白を除く）が助詞で始まり、次のマーカーの
+    手前までに否定の語がある。"""
+    t = tail.lstrip()
+    if not t.startswith(NEGATED_MARKER_PARTICLES):
+        return False
+    return any(w in t for w in NEGATION_WORDS)
+
+
+def dropped_markers(answer: str, indices: set[int]) -> list[int]:
+    """本文の ``[出典N]`` のうち、出典の一覧に無く、否定の形でもない番号（第 9 波 h）。"""
+    hits = list(_MARKER_TAIL_RE.finditer(answer or ""))
+    out: list[int] = []
+    for i, m in enumerate(hits):
+        n = int(m.group(1))
+        end = hits[i + 1].start() if i + 1 < len(hits) else len(answer)
+        if n not in indices and not negated_marker(answer[m.end():end]) and n not in out:
+            out.append(n)
+    return out
+
+
+def _check_dropped_markers(seq: list[TranscriptStep], factory: FindingFactory) -> list[Finding]:
+    for step in seq:
+        if not step.action_id.startswith(CHAT_ACTIONS):
+            continue
+        trace = _chat_trace(step)
+        if trace is None:
+            continue
+        body = excerpt_json(trace.response_excerpt)
+        if not (isinstance(body, dict) and isinstance(body.get("answer"), str)):
+            continue  # 本文が抜粋で切れている — 見ない
+        rec = chat_of(trace) or {}
+        if rec.get("degraded") or not rec.get("sources_known"):
+            continue
+        indices = {int(s.get("index") or 0) for s in body.get("sources") or [] if isinstance(s, dict)
+                   and str(s.get("index") or "").isdigit()}
+        missing = dropped_markers(body["answer"], indices)
+        if missing:
+            return [factory.make(oracle="A", severity="confused", step=step, quote=body["answer"][:200],
+                                 hypothesis=HYP_DROPPED_MARKER,
+                                 server_rows={"missing_markers": missing, "source_indices": sorted(indices)})]
+    return []
+
+
 def check(steps: list[TranscriptStep], factory: FindingFactory) -> list[Finding]:
     out: list[Finding] = []
     flagged_renumber: set[str] = set()
@@ -391,6 +445,7 @@ def check(steps: list[TranscriptStep], factory: FindingFactory) -> list[Finding]
         out += _check_stale(seq, factory)
         out += _check_pinned_mismatch(seq, factory)
         out += _check_structure_answer(seq, factory)
+        out += _check_dropped_markers(seq, factory)
         if persona not in flagged_numeric:
             found = _check_numeric_keys(seq, factory)
             if found:

@@ -4,6 +4,10 @@ params:
   goal_text: 来週の講義の前に、長いトピックの授業用ドラフトを受講画面で見やすい枚数に区切り、保存して音声の準備状態を確かめる
   marker_paragraph: 2
   spoken_append: ここで一度区切ります。次のスライドでは、いまの式から何が言えるかを見ます。
+  # 第 25 周 第 5 周: 区切るトピックの題名の一部（空 = 教材本文がいちばん長いトピック）
+  split_topic_hint: ""
+  # 第 25 周第 5 周 studio H30: X1 の材料に足す区切りの無いトピック（自動ページ分割の経路・t17）
+  x1_topic_hint: GRとMGでの観測量への影響
 per_archetype:
   rookie_follows_todo:
     goal_text: 「次にやること」に出ていた原稿の準備として、長いトピックを区切って保存し、音声を作れる状態かを確かめる
@@ -13,3 +17,19 @@ per_archetype:
     goal_text: 区切りを入れたときに表示と読み上げの枚数がずれないか、保存で何が起きるかを一つずつ確かめながら長いトピックを整える
   veteran_clicks_through:
     goal_text: 長いトピックに区切りを一つ入れてさっさと保存する。音声のことは後で考える
+personas:
+  te-01-rookie-seminar:
+    # 第 6 周（judge_studio_r5 §5）: t16 の区切りを外した状態（studio_t16_no_split）から始め、教材欄と本文説明欄の両方に区切りを
+    # 入れて揃える（insert_slide_marker を material → spoken の順に）→ 保存 → 最後に区切りの無い t17（x1_topic_hint）を保存
+    # （X1 の材料 H30）。音声のあるトピックかは周の前に audio-status で確かめる（campaign notes）
+    # 第 5 周（judge_studio_r4 §5）: 固定コース 6be229e1 の所有者として t16 に区切りを入れて保存し、同じ周の学生レーン
+    # （st-09 の lecture-pages・st-02 の lecture-then-trace）が同じトピックを開く。周またぎの X1 の材料
+    # 第 10 周: t17（t16 は版 5 に区切りあり）。第 11 周（judge_studio_r10 §7 ④・第 10 波）: t17 は版 7 に区切りがある —
+    # X1 は版 7 にも HEAD にも区切りの無い t18 で（周の前に r11_prereqs の studio_release_copy_no_split で確かめる）
+    split_topic_hint: 主結果：CMB・BAO・SN・宇宙シアによる制約
+    # 第 7 周（judge_studio_r6 §7・指揮者の判断）: 所有権を移さず、唯一の所有者 te-01 が「6be229e1 に共有版を発行した状態」
+    # （studio_course_release）で t16 を両欄に区切って保存 → t17 を区切らずに保存。版ありの経路（保存は HEAD に入り、学生は
+    # ピン留めした版を読む — IK-0915 の版あり）。発行の前後の学生の枚数は周の後の run_all --student-api で比べる（campaign notes）
+    # 第 8 周（judge_studio_r7 §7・IK-1053 の是正後）: 版ありのまま、学生レーンを発行の前に走らせる（face スクリプトの RELEASE2_GO_R8）。
+    # 保存の画面に「未発行の変更がある」事実と［版の管理］への入口が出るか。［付録をまとめて付け直す］
+    # （admin.lecture_studio.reattach_appendix_all）は行為にあるが場面の steps に無い（campaign notes「場面に足りない手」）

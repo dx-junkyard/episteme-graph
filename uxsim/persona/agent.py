@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from uxsim.actions.registry import Action
-from uxsim.llm import PersonaLLM
+from uxsim.llm import TRANSCRIPT_SEQ, PersonaLLM
 from uxsim.persona.compose import PersonaSpec
 from uxsim.persona.prompt import OUTPUT_SCHEMA_HINT, build_step_message, build_system_prompt
 from uxsim.schema import ThinkAloud
@@ -63,8 +63,12 @@ class PersonaAgent:
         self.llm = llm
         self.system = build_system_prompt(spec)
 
-    def _ask(self, message: str) -> dict:
-        return self.llm.complete_json(self.system, [{"role": "user", "content": message}], OUTPUT_SCHEMA_HINT)
+    def _ask(self, message: str, screen_seq: Optional[int] = None) -> dict:
+        token = TRANSCRIPT_SEQ.set(screen_seq)
+        try:
+            return self.llm.complete_json(self.system, [{"role": "user", "content": message}], OUTPUT_SCHEMA_HINT)
+        finally:
+            TRANSCRIPT_SEQ.reset(token)
 
     def step(
         self,
@@ -80,10 +84,12 @@ class PersonaAgent:
         optional: bool = False,
         exhausted: Optional[list[str]] = None,
         reaction_only: bool = False,
+        screen_seq: Optional[int] = None,
     ) -> StepDecision:
         """次の行為を選ぶ。許されない行為を選んだら 1 回だけ言い直させ、それでも駄目なら記録する。
 
         ``reaction_only`` は直前の画面への反応だけを聞く（行為を選ばせない・第 25 周 H7）。
+        ``screen_seq`` は「直前に見た画面」の transcript の seq（mailbox の要求ファイルに写す・第 6 周 atlas H39）。
         """
         finishing_like = finishing or reaction_only
         if _is_scripted(self.llm):
@@ -100,7 +106,7 @@ class PersonaAgent:
                                      history=history, suggested_args=suggested_args, finishing=finishing,
                                      notes=notes, optional=optional, exhausted=exhausted,
                                      reaction_only=reaction_only and not finishing)
-        out = self._ask(message)
+        out = self._ask(message, screen_seq)
         allowed_ids = {a.id for a in allowed} | ({SKIP_ACTION_ID} if optional else set())
         chosen = str(out.get("action_id") or "").strip()
         invalid = ""
@@ -108,7 +114,7 @@ class PersonaAgent:
             invalid = chosen
             retry = message + ("\n\n# 訂正\n"
                                f"\"{chosen}\" はこのステップで取れない。許された id から 1 つ選び直す。")
-            out2 = self._ask(retry)
+            out2 = self._ask(retry, screen_seq)
             chosen2 = str(out2.get("action_id") or "").strip()
             if chosen2 in allowed_ids:
                 # 反応は最初の答えを残す（同じ画面への反応なので）

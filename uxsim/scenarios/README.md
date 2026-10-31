@@ -70,9 +70,14 @@ runner は経路を始める前に `check` 付きの前提を学習者の GET（
 | `- choose: [ {do: …}, {do: …} ]` | 並べた候補からペルソナ LLM が 1 つ選ぶ（行動型の癖に従う）。選ばない理由も think-aloud に残す |
 | `- choose: [ … ]` + `  optional: true` | 何も選ばずに先へ進んでもよい |
 
+`choose`（候補が 2 つ以上の `do` / `repeat` を含む）の候補は、画面の状態で対象の無い行為を runner が外す（面の
+`unavailable(action_id, session)`。例: 候補 0 件の［採用］、確認の画面が開いていない［下書きに追加する］）。外したことは
+「（ハーネス: 画面に対象の無い行為を選択肢から外した — …）」の runner_note に残る。全部外れたらその手は飛ばす（第 25 周 H26）。
+
 `until` の条件文で使ってよい語: `friction in [confused, misread, blocked, gave_up]`（ペルソナの think-aloud の friction）/
 `response is 429`（製品が上限を返した）/ `steps > N` / `goal_reached`（ペルソナが目標達成と判断した）/
-`persona_decides_to_stop`。
+`persona_decides_to_stop` / 状態の旗 `freeze_ready`（runner が画面の状態から立てる — 分野の地図で、次版の下書きがあり
+採用済み・未反映の候補・関係が無い。状態の旗は繰り返しの各回の頭でも見て、立っていれば頭脳に問わずに抜ける。第 25 周 H25）。
 
 ### 穴（placeholder）
 

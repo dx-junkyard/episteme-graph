@@ -41,7 +41,7 @@ def test_atlas_h18_decided_cards_are_not_folded():
     out = ax.fold_cards(cards, frozenset(), 300, "関係の候補", keep=keep)
     text = "\n".join(out)
     assert "4. c4" in text  # 判断済みは予算を越えても全文
-    assert "5. c5" not in text and "（以下の関係の候補は画面の下に続く" in text  # 未判断は題名の列挙に畳む
+    assert "5. c5" not in text and ax.FOLD_HEAD.format(what="関係の候補") in text  # 未判断は題名の列挙に畳む
 
 
 def test_atlas_h18_decided_card_predicate():

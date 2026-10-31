@@ -24,12 +24,30 @@ steps:
     note: AI に書き換えを頼み、埋め込み（部品・式・図）が残っているかと、本文が根拠に沿っているかを読む
   - do: admin.lecture_studio.save_topic
     note: 共有された側として保存を試み、保存できるか・できないならその理由が画面で分かるかを読む
+  - do: admin.lecture_studio.rewrite_copy
+    note: 保存できないなら、試した案を所有者に渡すために［案をコピー］で写す（第 3 波・IK-0950）
+  # 第 25 周 第 8 周 studio H39: 共有された側の音声の出口（IK-1071 — 押せない理由と「所有者に依頼する」）を読む
+  - do: admin.lecture_studio.audio_readiness
+    note: 音声生成のボタンが押せるか。押せないなら理由と次の操作（所有者に依頼する・誰に何を渡すか）が画面で揃うかを読む
+  # 第 25 周 第 8 波（IK-1071）: 押せない「→ 所有者に依頼する」は［依頼の文をコピー］に置き換わった
+  - choose:
+      - do: admin.lecture_studio.audio_request_copy
+        note: 理由の横の［依頼の文をコピー］で、所有者に渡す文（コース・お願い・言語・音声の状態・音声の無いトピック）を写し、宛先の名前が揃うかを読む
+    optional: true
 stop_when: [gave_up, blocked, budget_exhausted]
 expects:
   - manual: teacher/14-admin-lecture-studio.md#assistant-modal
   - manual: teacher/14-admin-lecture-studio.md#course-draft
+  - manual: teacher/14-admin-lecture-studio.md#rewrite-copy
   - manual: teacher/14-admin-lecture-studio.md#save-btn
+  - manual: teacher/14-admin-lecture-studio.md#audio-all-btn
+  - manual: teacher/14-admin-lecture-studio.md#audio-request-copy
 watch_for:
   - 書き換えは提案として欄に入り、保存するまで受講者に届かないことが分かる
   - 書き換えの本文が、このトピックの根拠（論理要素・主張・数式）から外れたことを足していない
   - 共有された教員が保存できないなら、保存の前か後に理由が画面で分かる（「保存に失敗しました」だけで終わらない）
+  - 音声を作れない共有教員には、理由（所有者名入り）と［依頼の文をコピー］の出口が出て、写した文の見出しと宛先の名前が揃う（IK-1071）
+  # 第 9 波（sync_keys_wave9 面 D・IK-1081）
+  - 古い生成規則の作業メモが残るトピックは、コースの見出しの一覧とトピックの事実文で分かり、書き換えの案に作業メモが持ち込まれない
+  # 第 10 波（sync_keys_wave10 面 D・IK-1081 の残り）
+  - 作業メモの一覧が「本文の「注」の段落に残る」と「注意点だけに残る」の 2 つに分かれ、注意点の「埋め込んでいません」が本文と食い違うトピックには事実文が出る

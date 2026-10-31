@@ -11,3 +11,8 @@ per_archetype:
     figure_refine: それでいいです。
   meticulous_reviewer:
     figure_instruction: 本文に出てくる量だけを使って、どの量がどの量を決めるかを矢印で示す概念関係図にしてください。本文に無い関係は描かないでください。
+personas:
+  te-01-rookie-seminar:
+    # 第 5 周: 区切りと同じトピック t16 に図を採用して保存する（学生の X3・X4 と採用の知らせ IK-0979 の材料）
+    figure_topic_hint: kineticityからのbraiding導出
+    figure_instruction: このトピックの主な量（音速・kineticity・braiding）がどれを決めるかを、矢印でつないだ概念関係図にしてください。ラベルは日本語で。

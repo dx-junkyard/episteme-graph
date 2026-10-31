@@ -20,7 +20,7 @@ from typing import Any, Iterator, Optional
 MARKER_RE = re.compile(r"\[出典\s*(\d+)\]")
 # 出典チップを互いに区別できる欄（題以外）。どれかが出典ごとに違えば「区別できる」
 DISTINGUISH_KEYS = ("meta", "section", "section_title", "section_id", "used_section", "page", "page_start",
-                    "page_end", "pages", "chapter_title")
+                    "page_end", "pages", "chapter_title", "version_note")
 MAX_KEYS = 80
 MAX_SOURCES = 24
 HEAD_CHARS = 160

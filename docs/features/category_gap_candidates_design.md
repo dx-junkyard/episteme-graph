@@ -463,3 +463,20 @@ route 層で `core/atlas_review_display.py` が表示名に写し（`decided_by`
   規則（採用済み・未反映は止める）は緩めていない。
 - **区画の説明（IK-0943）**: `GAP_GROUP_INTRO` は定義の文「2 本以上の論文が、この地図にまだ無い同じ項目に
   触れたとき、ここに候補として出ます。」（候補ゼロでも矛盾しない）。
+
+### 10-8. 第 25 周 第 4 周の是正（2026-10-25 追補・第 4 波・migration なし・IK-0966）
+
+- 外れた採用済みの判断の区画の冒頭は定義の文（`ORPHANED_NOTE`）にし、凍結を止める一文（`ORPHANED_BLOCKS_FREEZE`）は下書きに
+  入っていない行があるときだけ `atlas_review_display.orphaned_note` が足す（全行取り込み済みでも「公開できません」と言い続けない）。
+
+### 10-9. 第 25 周 第 5 周の是正（2026-10-27 追補・第 5 波・migration なし・IK-0991 / 0992 / 0995 / 0942 残り）
+
+- **IK-0991**: from-frozen は前の版の `generated_by` を写さず `revision_of:{前の版}`（`atlas_review_display.revision_generated_by`）を
+  記す。表示は「前の版（地図 版 X）からの改訂（候補・関係の取り込みと教員の編集）」。
+- **IK-0992**: 下書きが無いとき、分野の地図タブに「公開中の版（地図 版 X）の項目と関係を見る（読み取り専用）」の折りたたみ
+  （`admin.js renderPublishedView`・既存の `AtlasDraftPreview` と関係の節を再利用・アンカー `atlas.published-contents`）。
+- **IK-0995**: 候補ゼロの理由 `EMPTY_BELOW_THRESHOLD` に記録の所在（教材管理の［位置づけ（分野マップ）…］）を足し、
+  位置づけモーダルの「配置できなかった分野」の行に `gap_topics`（記録した主題の名前・件数なし）を出す（§4.1 の裁定どおり
+  1 論文の画面に地図を直すボタンは置かない）。
+- **IK-0942 残り**: 凍結の確認の見出しを「地図 版 X を公開する前の確認」に。
+- pre-mortem は `field_atlas_overlay_spec.md` §17.1。

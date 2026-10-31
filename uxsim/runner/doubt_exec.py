@@ -8,7 +8,7 @@
   ``evidenceLinesSectionHtml`` / ``renderProposalStatusCard`` / ``updateCfStatus``）、学習側は ``app.js``
   （``fetchLearnerLedgerFactLine`` / ``annotateOneSourceCardLedger`` / ``appendLearnerLedgerLine`` /
   ``loadLearnerOpenAssumptions``）。**画面が出しているものは隠さない**（記帳者の欄の値・出典ドキュメントの id・
-  origin / status の生の語彙 — 隠すと審判から欠陥が見えなくなる）。画面が出していないもの（散布図の点の
+  前提の出所・段階の札 — 第 6 波からはサーバの ``origin_label`` / ``status_label``。隠すと審判から欠陥が見えなくなる）。画面が出していないもの（散布図の点の
   target_id・負荷の生値）は出さない。
 - 画面がクライアント側で止める入力（確定の理由が空・理由が空の検証状態・スコープ 0 件の直接検証・
   提案の文やコーパス外の確認が空）は HTTP を出さずに画面の文言を返し、runner_note に残す（画面と同じ止め方）。
@@ -17,7 +17,7 @@
 - 画面が覚えるもの（``PersonaSession.scratch``）: ``doubt_courses`` / ``doubt_course_id`` / ``doubt_atlas`` /
   ``doubt_assumptions`` / ``doubt_assumption_filter`` / ``doubt_open`` / ``doubt_open_reachable`` /
   ``doubt_cf_sessions`` / ``doubt_target``（開いている台帳の対象）/ ``doubt_ledger``（その台帳。未記帳は None）/
-  ``doubt_proposal``（登録直後の検証提案）/ ``doubt_graph``（原稿スタジオのグラフ）/ ``doubt_cf``（反実仮想の状態）/
+  ``doubt_graph``（原稿スタジオのグラフ）/ ``doubt_cf``（反実仮想の状態）/
   ``doubt_obs_targets``（観測系の主張）。
 - このモジュールは ``actions_exec`` を import しない（``actions_exec`` が ``HANDLERS`` を取り込む）。
 """
@@ -27,7 +27,7 @@ import re
 import unicodedata
 from typing import Any, Callable, Optional
 
-from uxsim.runner.state import PersonaSession, _clip
+from uxsim.runner.state import NUM_HINT_RE, PersonaSession, _clip, num_hint_index
 
 ADMIN_PREFIX = "admin.doubt."
 LEARNER_PREFIX = "learning.ledger."
@@ -61,6 +61,9 @@ PROPOSAL_STATUS_LABELS = {"proposed": "検証に着手可能", "in_progress": "�
 ASSUMPTION_FILTERS = {"候補": "candidate", "確定済み": "confirmed", "却下済み": "dismissed", "却下済み（保持）": "dismissed",
                       "すべて": "all", "candidate": "candidate", "confirmed": "confirmed", "dismissed": "dismissed",
                       "all": "all"}
+
+#: doubt-atlas.js の select の選択肢（表示順・逐語）
+ASSUMPTION_FILTER_OPTIONS = ("候補", "確定済み", "却下済み（保持）", "すべて")
 
 TAB_HEAD = "前提の地図 ※「分野の地図」とは別機能です（負荷度×検証度の事実の投影）"
 COURSE_SELECT_EMPTY = "コースを選択..."
@@ -103,11 +106,20 @@ CF_SAVED = "保存しました（共有範囲: private）"
 CF_SAVE_FAIL = "保存に失敗しました"
 # app.js（学習画面の D3-6）
 LEARNER_OPEN_SUMMARY = "このコースの教材で、検証の記録がない前提を見る"
+#: app.js 出典タブの前提一覧（第 8 波・IK-1059 — 学習者の語。「台帳」「記帳」を出さない）
+LEARNER_NO_SCOPE = "検証の記録なし"  # 第 10 波: 見出し「検証の記録がない前提」と同じ語（app.js）
+LEARNER_HAS_SCOPE = "記録された条件あり"  # 第 10 波（app.js）
 LEARNER_OPEN_FAIL = "一覧を取得できませんでした。"
 LEARNER_OPEN_EMPTY = "現在、表示できる項目はありません。"
-LEARNER_NO_LINE = "（この根拠カードには検証状態の一行が添えられていない — 画面は台帳の記帳が無い対象には何も出さない）"
+#: 第 25 周第 5 周 H38: 第 4 波以降、記帳の無い対象にも一行が出る（exists:false の fact_line）。カードが無言なのは
+#: 一行を引く対象が無いか、出典の論文がコースの教材の外で本文・台帳の GET が 404 になるとき。2 つを言い分ける
+LEARNER_NO_LINE = "（この根拠カードには検証状態の一行が添えられていない — 一行を引ける式・主張がこのカードに無い）"
+LEARNER_NO_LINE_OUTSIDE = ("（この根拠カードには検証状態の一行が添えられていない — 出典の論文がこのコースの教材の外で、"
+                           "台帳の一行が引けない）")
 
-_NUM_HINT_RE = re.compile(r"^\s*[#＃]?\s*(\d+)\s*$")
+# 第 25 周 第 6 周 H39: 「疑義2」「提案1」を番号と読めず、提案化・取り下げが送られなかった（share H35 と同型）。
+# 正本は state.NUM_HINT_RE（面ごとに複製しない）
+_NUM_HINT_RE = NUM_HINT_RE
 
 
 def _runner_note(session: PersonaSession, note: str) -> None:
@@ -121,6 +133,7 @@ MISSING_WHAT = {
     "ledger_target": "台帳を開ける点・行（散布図の点・未検証合意リストの行・確定した前提）が画面に無い",
     "supporting_claim": "［この主張の台帳を開く］が出ている支える主張が台帳に無い",
     "assumption_candidate": "指した前提候補のカードが画面に無い",
+    "assumption_ledger": "［台帳を開く］が出ている前提のカードが画面に無い（確定済みで論文に結ばれた前提だけに出る）",
     "scope_candidate": "指したスコープの候補が台帳に無い",
     "verification_status": "選んだ検証状態が記帳フォームの選択肢に無い",
     "open_challenge": "取り下げ・提案にできる疑義が台帳に無い",
@@ -158,9 +171,8 @@ def hint_pick(items: list[dict], hint: Any, fields: tuple[str, ...]) -> Optional
     raw = str(hint if hint is not None else "").strip()
     if not raw:
         return items[0]
-    m = _NUM_HINT_RE.match(raw)
-    if m:
-        n = int(m.group(1))
+    n = num_hint_index(raw)
+    if n is not None:
         return items[n - 1] if 1 <= n <= len(items) else None
     k = _key(raw)
     exact = [i for i in items if any(_key(i.get(f)) == k for f in fields)]
@@ -214,6 +226,7 @@ def atlas_lines(data: Any, budget: Optional[int] = None) -> list[str]:
     lines = [f"散布図（横軸: {AXIS_X}［{' / '.join(COVERAGE_LABELS.values())}］・"
              f"縦軸: {AXIS_Y}［{' / '.join(LOAD_LABELS.values())}］）:"]
     population = str(data.get("population_note") or "") if isinstance(data, dict) else ""
+    unplotted = unplotted_lines(data)
     if not points:
         lines.append("（点は描かれていない）")
         # renderAtlasSvg（IK-0853）: 点が無いときは理由と別の入口をサーバの事実文で添える（旧サーバは無い）
@@ -221,6 +234,7 @@ def atlas_lines(data: Any, budget: Optional[int] = None) -> list[str]:
             lines.append(str(data["empty_note"]))
             if data.get("empty_hint"):
                 lines.append(str(data["empty_hint"]))
+        lines += unplotted  # 第 8 波（IK-1058）: 散布図の下・population_note の前
         if population:
             lines.append(population)  # 第 3 波（IK-0933）: data-doubt-population-note
         return lines
@@ -253,10 +267,26 @@ def atlas_lines(data: Any, budget: Optional[int] = None) -> list[str]:
             break
         lines.append(row)
         used += len(row) + 1
+    lines += unplotted
     if population:
         # renderAtlasSvg（第 3 波・IK-0933）: 導出の手順を母集合から外した事実文を散布図の下に 1 行（予算で切らない）
         lines.append(population)
     return lines
+
+
+def unplotted_lines(data: Any) -> list[str]:
+    """renderAtlasSvg（第 8 波・IK-1058）: 依存の広がりを計算できない前提（点にしない）— 見出し ``unplotted_heading`` と
+    前提ごとのボタン（``data-doubt-unplotted-point``・押すと台帳）。番号は指し示し用（画面に番号は無い）。キーが無ければ出さない。"""
+    rows = [p for p in (data.get("unplotted_points") or [] if isinstance(data, dict) else []) if isinstance(p, dict)]
+    if not rows:
+        return []
+    out = [str(data.get("unplotted_heading") or "")] if data.get("unplotted_heading") else []
+    for i, p in enumerate(rows, 1):
+        out.append(f"- 前提{i}: ［{p.get('label') or ''}］（押すと台帳）")
+        # 第 9 波（IK-1074）: ボタンの下の区別の 1 行（被覆・論文・記帳の日時。``data-doubt-unplotted-detail``）。
+        if p.get("detail_line"):
+            out.append(f"  {p.get('detail_line')}")
+    return out
 
 
 #: 散布図の点を観察の予算で切ったときの印（画面の文ではない）
@@ -267,7 +297,12 @@ ATLAS_POINTS_CLIPPED = ("（ハーネス: 観察の上限で散布図の残り�
 def assumption_lines(data: Any, status_filter: str) -> list[str]:
     """``loadAssumptions``: カード（前提文・origin と status のバッジ・出所の逐語・出典ドキュメント・ボタン）。"""
     label = {v: k for k, v in ASSUMPTION_FILTERS.items() if not k.isascii() and k != "却下済み"}.get(status_filter, status_filter)
-    lines = [f"前提候補のレビュー（表示: {label}）:"]
+    # 第 25 周 第 6 周 H42: 表示の select（doubt-atlas.js doubt-assumption-filter）の選択肢ごと写す。現在値だけでは
+    # 頭脳が切り替えの手が無いと読んだ
+    lines = [f"前提候補のレビュー（表示: {label} ［{' / '.join(ASSUMPTION_FILTER_OPTIONS)}］）:"]
+    # 第 4 波（IK-0853）: 前提マイニングの事実（サーバの mining_note・5 語）を一覧の頭に 1 行（空の文の上にも）
+    if isinstance(data, dict) and data.get("mining_note"):
+        lines.append(str(data["mining_note"]))
     items = [a for a in ((data or {}).get("items") or [])] if isinstance(data, dict) else []
     if not items:
         lines.append(ASSUMPTIONS_EMPTY)
@@ -275,7 +310,9 @@ def assumption_lines(data: Any, status_filter: str) -> list[str]:
     for i, a in enumerate(items, 1):
         if not isinstance(a, dict):
             continue
-        badges = [str(a.get("origin") or ""), str(a.get("status") or "")]
+        # 第 6 波（IK-1028）: 札はサーバが解決した画面の語（origin_label / status_label）を素通し。生の内部語
+        # （manual / confirmed）は画面に出ないので写さない。語が無ければ札ごと出さない（doubt-atlas.js と同じ）
+        badges = [str(a.get("origin_label") or ""), str(a.get("status_label") or "")]
         if a.get("has_naive_signal"):
             badges.append("複数の学習者がここで問いを立てています")
         lines.append(f"{i}. {a.get('statement') or ''}［{' / '.join(b for b in badges if b)}］")
@@ -284,13 +321,27 @@ def assumption_lines(data: Any, status_filter: str) -> list[str]:
         cf = a.get("created_from") if isinstance(a.get("created_from"), dict) else {}
         if cf.get("document_ids"):
             lines.append(f"   出典ドキュメント: {', '.join(str(x) for x in cf['document_ids'])}")
+        # 第 6 波（IK-1028）: 確定済みの前提は［台帳を開く］（ledger_document_id があるとき）か事実文 ledger_note
+        if a.get("ledger_document_id"):
+            lines.append("   ［台帳を開く］")
+            # 第 7 波（IK-1028 の残り）: 結ばれた論文の題名の 1 行（data-doubt-assumption-ledger-doc-line・範囲外の論文ならキーなし）
+            if a.get("ledger_document_line"):
+                lines.append(f"   {a['ledger_document_line']}")
+        elif a.get("ledger_note"):
+            lines.append(f"   {a['ledger_note']}")
         if a.get("status") == "candidate":
             lines.append("   ［確定］［文面を訂正して確定］［却下］")
     return lines
 
 
+#: 未検証合意リストを観察の予算で間引いたときの印（画面の文ではない・第 9 波・doubt H53）
+OPEN_ROWS_CLIPPED = ("（ハーネス: 観察の上限で未検証合意リストの途中の行を省略した — 画面のリストにはまだ行がある。"
+                     "依存の広がりを計算できない前提の行（事実文の付いた行）は番号のまま下に写す。これは画面の文ではない）")
+
+
 def open_lines(items: list[dict], *, only_reachable: bool, empty_note: str = "",
-               population_note: str = "") -> list[str]:
+               population_note: str = "", field_source: Optional[dict] = None,
+               budget: Optional[int] = None) -> list[str]:
     """``renderOpenAssumptionsList``: 行と段階のバッジ（数値は出さない）。空のときはフィルタ中でなければ
     サーバの ``empty_note``（範囲が空か・該当なしか — IK-0853）、無ければ従来の文。
 
@@ -307,23 +358,93 @@ def open_lines(items: list[dict], *, only_reachable: bool, empty_note: str = "",
         return lines
     if population_note:
         lines.append(population_note)
+    fs = field_source if isinstance(field_source, dict) else {}
+    # 第 5 波（IK-1002）: 「検証」と「支持」は別の記録 — 事実文はリストの頭（population_note の下）、欄名はサーバ
+    if fs.get("field_sources_note"):
+        lines.append(str(fs["field_sources_note"]))
+    # 第 10 波（IK-1120）: 支持線を読む範囲の事実文（data-doubt-support-scope-note・field_sources_note の下）
+    if fs.get("support_scope_note"):
+        lines.append(str(fs["support_scope_note"]))
+    head_len = len(lines)
+    pinned: dict[int, str] = {}  # 第 9 波（H53）: load_note の行（予算の外で必ず写す）
     for i, it in enumerate(rows, 1):
-        badges = [f"依存の広がり: {LOAD_LABELS.get(str(it.get('load_level')), str(it.get('load_level') or ''))}",
-                  "検証: " + STATUS_LABELS.get(str(it.get("verification_status")), str(it.get("verification_status") or ""))
+        # 第 8 波（IK-1058）: 依存の広がりを計算できない前提は段のバッジではなくサーバの事実文（load_note）
+        badges = [str(it["load_note"]) if it.get("load_note") else f"{field_label(fs, 'load', '依存の広がり')}: "
+                  f"{LOAD_LABELS.get(str(it.get('load_level')), str(it.get('load_level') or ''))}",
+                  f"{field_label(fs, 'verification', '検証')}: " + STATUS_LABELS.get(str(it.get("verification_status")), str(it.get("verification_status") or ""))
                   + ("（スコープの記帳なし）" if it.get("scope_count_is_zero") else "")]
         if it.get("challenge_count_label"):
             badges.append(f"疑義: {it['challenge_count_label']}")
         if it.get("has_verification_proposal"):
-            badges.append("検証提案あり")
+            # 第 10 波（IK-1121）: 提案の進み具合の語はサーバの verification_proposal_label
+            badges.append(str(it.get("verification_proposal_label") or "検証提案あり"))
         if it.get("has_naive_signal"):
             badges.append("学習者の問いあり")
         badges.append("覆る条件: あり" if it.get("has_falsification_condition") else "覆る条件: なし")
         rs = it.get("reachability_summary")
-        badges.append(f"到達可能性: {REACHABILITY_LABELS.get(str(rs), str(rs))}" if rs else "到達可能性: 記録なし")
+        # 第 10 波（IK-1120）: この欄は覆る条件の到達可能性（台帳の検証提案の到達可能性とは別の量・欄名はサーバ）
+        fr = field_label(fs, "falsification_reachability", "覆る条件の到達可能性")
+        badges.append(f"{fr}: {REACHABILITY_LABELS.get(str(rs), str(rs))}" if rs else f"{fr}: 記録なし")
         sl = it.get("support_line_level")
-        badges.append(f"支持: {SUPPORT_LEVEL_BADGE_LABELS.get(str(sl), str(sl))}" if sl else "支持: 未算出")
-        lines.append(f"{i}. {it.get('statement') or ''}［{' / '.join(badges)}］")
-    return lines
+        sl_label = field_label(fs, "support_line", "支持")
+        badges.append(f"{sl_label}: {SUPPORT_LEVEL_BADGE_LABELS.get(str(sl), str(sl))}" if sl else f"{sl_label}: 未算出")
+        row = f"{i}. {it.get('statement') or ''}［{' / '.join(badges)}］"
+        lines.append(row)
+        if it.get("load_note"):
+            pinned[len(lines) - 1] = row
+    if budget is None or sum(len(x) + 1 for x in lines) <= budget:
+        return lines
+    # 第 9 波（doubt H53）: 予算を越えるときは先頭から行を写し、load_note の行は予算の外で末尾に必ず写す
+    # （手の前提は並びの末尾に載る — 観察の上限で構造的に見えなくなっていた）
+    reserve = sum(len(r) + 1 for r in pinned.values()) + len(OPEN_ROWS_CLIPPED) + 1
+    out = lines[:head_len]
+    used = sum(len(x) + 1 for x in out)
+    stop = len(lines)
+    for idx in range(head_len, len(lines)):
+        if idx in pinned:  # 予算に既に数えてある（reserve）— 位置のまま写す
+            out.append(lines[idx])
+            reserve -= len(lines[idx]) + 1
+            used += len(lines[idx]) + 1
+            continue
+        if used + len(lines[idx]) + 1 + reserve > budget:
+            stop = idx
+            break
+        out.append(lines[idx])
+        used += len(lines[idx]) + 1
+    if stop == len(lines):
+        return lines
+    out.append(OPEN_ROWS_CLIPPED)
+    out += [row for idx, row in sorted(pinned.items()) if idx > stop]
+    return out
+
+
+#: 第 25 周 第 10 波（doubt H59）: 観察全体の上限（6000 字）が、末尾に写した手の前提の行を属性の途中で切った。上の区画を
+#: 先に畳み、この行は属性ごと上限の外側（末尾）に写す
+OPEN_PINNED_TAIL_NOTE = ("（ハーネス: 観察の上限で上の区画を途中で畳んだ。未検証合意リストのうち依存の広がりを計算できない前提の行"
+                         "（事実文の付いた行）は属性ごと番号のまま下に写す。これは画面の文ではない）")
+
+
+def pinned_open_rows(items: list[dict], *, only_reachable: bool = False,
+                     field_source: Optional[dict] = None) -> list[str]:
+    """未検証合意リストのうち load_note の付いた行（番号・属性ごと）。``open_lines`` と同じ文字で返す。純関数。"""
+    notes = [str(it["load_note"]) for it in items if isinstance(it, dict) and it.get("load_note")]
+    if not notes:
+        return []
+    full = open_lines(items, only_reachable=only_reachable, field_source=field_source)
+    return [line for line in full if re.match(r"^\d+\. ", line) and any(n in line for n in notes)]
+
+
+def fit_with_pinned_tail(text: str, tail_rows: list[str], limit: int) -> str:
+    """``text`` が ``limit`` を越えるとき、上を畳んで ``tail_rows`` を属性ごと末尾に写す（H59）。収まるならそのまま。純関数。"""
+    if len(text) <= limit or not tail_rows:
+        return text
+    tail_all = "\n".join([OPEN_PINNED_TAIL_NOTE] + tail_rows)
+    room = max(limit - len(tail_all) - 1, 1000)
+    head = _clip(text, room)
+    rows = [r for r in tail_rows if r not in head]
+    if not rows:
+        return head
+    return head + "\n" + "\n".join([OPEN_PINNED_TAIL_NOTE] + rows)
 
 
 def cf_session_lines(data: Any) -> list[str]:
@@ -345,14 +466,20 @@ def cf_session_lines(data: Any) -> list[str]:
     return lines
 
 
+def course_option_text(c: dict) -> str:
+    """doubt-atlas.js loadCourses の選択肢の文（第 5 波・IK-1000）:「{題名}（{role_label}）」。role_label が無ければ題名だけ。"""
+    title = str(c.get("title") or c.get("id") or "")
+    return f"{title}（{c['role_label']}）" if c.get("role_label") else title
+
+
 def tab_view(session: PersonaSession) -> str:
     sc = session.scratch
     courses = sc.get("doubt_courses") or []
     cid = sc.get("doubt_course_id") or ""
     chosen = next((c for c in courses if str(c.get("id")) == cid), None)
     lines = [TAB_HEAD]
-    opts = " / ".join(str(c.get("title") or c.get("id") or "") for c in courses) or "（選べるコースが無い）"
-    lines.append(f"コース: {chosen.get('title') if chosen else COURSE_SELECT_EMPTY}（選択肢: {opts}）"
+    opts = " / ".join(course_option_text(c) for c in courses) or "（選べるコースが無い）"
+    lines.append(f"コース: {course_option_text(chosen) if chosen else COURSE_SELECT_EMPTY}（選択肢: {opts}）"
                  "［再読込］［前提マイニング実行］［コーパス監査実行］［負荷再計算］")
     if not cid:
         return "\n".join(lines)
@@ -362,19 +489,38 @@ def tab_view(session: PersonaSession) -> str:
 
     rest = [f"詳細: {DETAIL_PLACEHOLDER}"]
     rest += assumption_lines(sc.get("doubt_assumptions"), str(sc.get("doubt_assumption_filter") or "candidate"))
+    cf_lines = cf_session_lines(sc.get("doubt_cf_sessions"))
+    # 第 9 波（doubt H53）: 未検証合意リストにも予算を渡す（散布図の最小 400 字を残す）。load_note の行は予算の外で末尾に写る
+    open_budget = OBSERVATION_CHARS - 200 - 400 - sum(len(x) + 1 for x in lines + rest + cf_lines)
     rest += open_lines(list(sc.get("doubt_open") or []), only_reachable=bool(sc.get("doubt_open_reachable")),
                        empty_note=str(sc.get("doubt_open_empty_note") or ""),
-                       population_note=str(sc.get("doubt_open_population_note") or ""))
-    rest += cf_session_lines(sc.get("doubt_cf_sessions"))
+                       population_note=str(sc.get("doubt_open_population_note") or ""),
+                       field_source=sc.get("doubt_open_field_source"), budget=max(open_budget, 600))
+    rest += cf_lines
     budget = OBSERVATION_CHARS - 200 - sum(len(x) + 1 for x in lines + rest)
     lines += atlas_lines(sc.get("doubt_atlas"), budget=max(budget, 400))
-    return "\n".join(lines + rest)
+    # 第 10 波（doubt H59）: 下限（散布図 400 字・リスト 600 字）で全体が上限を越えても、手の前提の行は属性ごと末尾に残す
+    pinned = pinned_open_rows(list(sc.get("doubt_open") or []), only_reachable=bool(sc.get("doubt_open_reachable")),
+                              field_source=sc.get("doubt_open_field_source"))
+    return fit_with_pinned_tail("\n".join(lines + rest), pinned, OBSERVATION_CHARS - 200)
 
 
 # ---------------------------------------------------------------------------
 # 台帳の詳細の投影（renderLedgerInto）
 # ---------------------------------------------------------------------------
-def falsification_lines(entry: Optional[dict]) -> list[str]:
+#: doubt-atlas.js ``disableLedgerWrites`` が無効にする要素（逐語ミラー・第 25 周 H29）。閲覧だけの台帳（can_edit:false）で
+#: 投影が「（押せない）」を付けるボタンはこの一覧と対応させる（スコープ・検証状態のフォーム / スコープの候補の確定・却下 /
+#: 覆る条件のフォーム・候補の確認・見送り・AI 候補 / 根拠の線のフォーム / 検証提案の状態）
+READ_ONLY_DISABLED_SELECTORS = (
+    "[data-doubt-scope-form]", "[data-doubt-vstatus-form]", "[data-doubt-candidate-confirm]",
+    "[data-doubt-candidate-dismiss]", "[data-doubt-falsification-form]", "[data-doubt-falsification-confirm]",
+    "[data-doubt-falsification-dismiss]", "[data-doubt-evidence-line-form]",
+    "[data-doubt-falsification-refresh]", "[data-doubt-proposal-status]")
+
+
+def falsification_lines(entry: Optional[dict], off: str = "", refresh_note: str = "") -> list[str]:
+    """覆る条件の区画。``off`` は閲覧だけの台帳の「（押せない）」（doubt-atlas.js ``disableLedgerWrites`` — H29）。
+    第 4 波（IK-0969）: ［AIに候補を出してもらう］の下に ``falsification_refresh_note``（操作の範囲 = コースの教材全体）。"""
     conds = (entry or {}).get("falsification_conditions") or []
     cands = (entry or {}).get("falsification_candidates") or []
     lines = ["覆る条件:"]
@@ -396,9 +542,39 @@ def falsification_lines(entry: Optional[dict]) -> list[str]:
             lines.append(f"  「{c['evidence_quote']}」")
         if c.get("reason"):
             lines.append(f"  {c['reason']}")
-        lines.append("  到達可能性（確認時に選択）［確認して記帳］［見送る］")
-    lines.append("［覆る条件を記帳する］［AIに候補を出してもらう］")
+        lines.append(f"  到達可能性（確認時に選択）［確認して記帳］［見送る］{off}")
+    lines.append(f"［覆る条件を記帳する］［AIに候補を出してもらう］{off}")
+    note = refresh_note or str((entry or {}).get("falsification_refresh_note") or "")
+    if note:
+        lines.append(note)
     return lines
+
+
+#: 第 10 波（IK-1121）: 着手済みのカードの完了の根拠の欄（doubt-atlas.js の label の文）
+PROPOSAL_NOTE_FIELD = "確かめたこと（任意・完了を記録するときに残ります）の欄"
+
+
+def proposal_card_lines(proposals: Any, off: Optional[str] = "") -> list[str]:
+    """doubt-atlas.js ``proposalCardsHtml``（第 4 波・IK-0968）: 台帳 GET の ``challenges[].proposals`` を疑義の下に常設。
+    「検証提案: {status_label}」→ 提案 / コーパス外の確認 / 検証提案の到達可能性（``reachability_label``）/ 提案者 →
+    完了の 3 行（第 10 波・IK-1121: ``status_line`` / ``completion_note_line`` / ``status_note``）→ 状態のボタン
+    （proposed = ［検証に着手］［取り下げ］/ in_progress = 確かめたこと（任意）の欄 +［完了を記録］［取り下げ］）。"""
+    out: list[str] = []
+    for i, p in enumerate([p for p in proposals or [] if isinstance(p, dict) and p.get("id")], 1):
+        st = str(p.get("status") or "proposed")
+        out.append(f"  - 検証提案{i}: {p.get('status_label') or PROPOSAL_STATUS_LABELS.get(st, st)}")
+        for head, key in (("提案", "proposal"), ("コーパス外の確認", "external_check"),
+                          ("検証提案の到達可能性", "reachability_label"), ("提案者", "proposer_name")):
+            if p.get(key):
+                out.append(f"    {head}: {p[key]}")
+        for key in ("status_line", "completion_note_line", "status_note"):
+            if p.get(key):
+                out.append(f"    {p[key]}")
+        buttons = {"proposed": "［検証に着手］［取り下げ］",
+                   "in_progress": f"{PROPOSAL_NOTE_FIELD} ［完了を記録］［取り下げ］"}.get(st, "")
+        if buttons and off is not None:  # off=None = 取り下げ済みの疑義の下（読み取りのみ・IK-0998）
+            out.append(f"    {buttons}{off}")
+    return out
 
 
 def support_lines(entry: Optional[dict]) -> list[str]:
@@ -415,7 +591,7 @@ def support_lines(entry: Optional[dict]) -> list[str]:
     return lines
 
 
-def evidence_line_lines(entry: Optional[dict]) -> list[str]:
+def evidence_line_lines(entry: Optional[dict], off: str = "") -> list[str]:
     lines = ["根拠の線:"]
     rows = [r for r in ((entry or {}).get("evidence_lines") or []) if isinstance(r, dict)]
     if not rows:
@@ -428,7 +604,7 @@ def evidence_line_lines(entry: Optional[dict]) -> list[str]:
         if ids:
             lines.append(f"  {' / '.join(ids)}")
         lines.append("  出所: 教員の記帳")
-    lines.append("［根拠の線を追加］")
+    lines.append(f"［根拠の線を追加］{off}")
     return lines
 
 
@@ -439,11 +615,55 @@ def challenge_entry_lines(target: dict, entry: dict) -> list[str]:
     if target.get("target_type") in ("assumption", "claim"):
         lines += [NO_CHALLENGE, "［疑義を残す］"]
     elif entry.get("challenge_note"):
-        lines.append(str(entry["challenge_note"]))
-        for c in entry.get("supporting_claims") or []:
-            if isinstance(c, dict) and c.get("claim_id"):
-                lines.append(f"- {c.get('label') or ''} ［この主張の台帳を開く］")
+        lines += supporting_claims_lines(entry)
     return lines
+
+
+def supporting_claims_lines(entry: dict) -> list[str]:
+    """doubt-atlas.js ``supportingClaimsHtml``（第 5 波・IK-1003）: ``challenge_note`` → ``supporting_challenge_note`` →
+    支える主張の行（主張の文 + サーバの段階語 ``challenge_state_label`` のバッジ +［この主張の台帳を開く］）。"""
+    lines = [str(entry["challenge_note"])]
+    if entry.get("supporting_challenge_note"):
+        lines.append(str(entry["supporting_challenge_note"]))
+    for c in entry.get("supporting_claims") or []:
+        if isinstance(c, dict) and c.get("claim_id"):
+            badge = f" 〔{c['challenge_state_label']}〕" if c.get("challenge_state_label") else ""
+            lines.append(f"- {c.get('label') or ''}{badge} ［この主張の台帳を開く］")
+    return lines
+
+
+#: 疑義区画の末尾の折りたたみの見出し（サーバの ``withdrawn_challenges_heading`` が無いときの JS の既定）
+WITHDRAWN_HEADING_FALLBACK = "取り下げ済みの疑義"
+
+
+def withdrawn_challenge_lines(entry: dict, opened: bool = False) -> list[str]:
+    """doubt-atlas.js ``withdrawnChallengesHtml``（第 5 波・IK-0998）: ``challenges[]`` のうち withdrawn を
+    疑義区画の末尾の <details>（既定で閉じる・アンカー doubt-atlas.withdrawn-challenges）に、型・向き・投稿者 — 理由・
+    状態・提案カード（読み取りのみ）の順。ボタンなし・件数なし。取り下げ済みが無ければ区画ごと出ない。"""
+    rows = [c for c in entry.get("challenges") or [] if isinstance(c, dict) and c.get("status") == "withdrawn"]
+    if not rows:
+        return []
+    heading = str(entry.get("withdrawn_challenges_heading") or WITHDRAWN_HEADING_FALLBACK)
+    if not opened:
+        return [f"▸ {heading}（折りたたみ・閉じている）"]
+    lines = [f"▾ {heading}:"]
+    for c in rows:
+        mode = c.get("challenge_mode_label") or CHALLENGE_MODE_LABELS.get(str(c.get("challenge_mode")), CHALLENGE_MODE_LABELS["direct"])
+        lines.append(f"- {CHALLENGE_TYPE_LABELS.get(str(c.get('challenge_type')), str(c.get('challenge_type') or ''))}"
+                     f"（向き: {mode}）{c.get('challenger_name') or ''}" + (f" — {c['reason']}" if c.get("reason") else ""))
+        state = c.get("status_label") or CHALLENGE_STATUS_LABELS.get(str(c.get("status")), str(c.get("status") or ""))
+        lines.append(f"  状態: {state}")
+        if c.get("record_line"):
+            lines.append(f"  {c['record_line']}")  # 第 8 波（IK-1060）: 記帳・取り下げの人と日時（サーバの文）
+        # proposalCardsHtml(c.proposals, true): 読み取りのみ（状態のボタンを描かない）
+        lines += proposal_card_lines(c.get("proposals"), off=None)
+    return lines
+
+
+def field_label(source: Any, key: str, fallback: str) -> str:
+    """doubt-atlas.js ``fieldLabel``（第 5 波・IK-1002）: 欄名はサーバの ``field_labels``、無ければ従来の語。"""
+    labels = source.get("field_labels") if isinstance(source, dict) and isinstance(source.get("field_labels"), dict) else {}
+    return str(labels.get(key) or fallback)
 
 
 def ledger_heading(entry: dict) -> str:
@@ -454,7 +674,18 @@ def ledger_heading(entry: dict) -> str:
     return f"対象: {entry['target_label']}"
 
 
-def ledger_view(target: dict, entry: Optional[dict], note: str = "") -> str:
+#: 第 25 周 第 10 波（doubt H61）: 運転の前提スクリプト（r*_prereqs.py の ledger_reason / assumption_reason）が教員の資格で書いた
+#: 理由の文。頭脳がその文を記帳者本人の言葉と読まないよう、観察で「前提の材料」と注記する（照合表は r5_prereqs の文の形）
+PREREQ_REASON_RE = re.compile(r"^\s*(?:（前提の材料[^）]*）|第\s*\d+\s*周の前提)")
+PREREQ_REASON_NOTE = ("  （ハーネス: この理由の文は運転の前提スクリプトが記帳者の資格で書いた行（前提の材料）で、記帳者本人の言葉ではない。"
+                      "これは画面の文ではない）")
+
+
+def is_prereq_reason(text: Any) -> bool:
+    return bool(PREREQ_REASON_RE.match(str(text or "")))
+
+
+def ledger_view(target: dict, entry: Optional[dict], note: str = "", *, withdrawn_open: bool = False) -> str:
     title = str(target.get("label") or target.get("target_id") or "")
     lines = [f"台帳の詳細: {title}", "認識的地位"]
     # doubt-atlas.js renderLedgerInto（第 2 波 + 第 3 波）: 対象の見出し → 直前の記帳の結果 → 帰属の注記 → 記帳できない理由
@@ -472,12 +703,20 @@ def ledger_view(target: dict, entry: Optional[dict], note: str = "") -> str:
         # 台帳行なし（第 3 波・IK-0931: サーバは 200 + exists:false で名前・疑義の入口・can_edit を返す。
         # 旧サーバの 404 は entry=None）。文言はサーバの not_recorded_note、無ければ従来の文
         lines += [str((entry or {}).get("not_recorded_note") or NO_SCOPE), f"［スコープを記帳］［検証状態を記帳する］{off}"]
-        lines += falsification_lines(None)
-        lines += evidence_line_lines(None)
+        lines += falsification_lines(None, off, str((entry or {}).get("falsification_refresh_note") or ""))
+        lines += evidence_line_lines(None, off)
         if entry:
             lines += challenge_entry_lines(target, entry)
         return "\n".join(lines)
-    lines.append("検証状態: " + STATUS_LABELS.get(str(entry.get("verification_status")), str(entry.get("verification_status") or "")))
+    # 第 5 波（IK-1002）: 欄の出所の違いを 1 行（field_sources_note）→ 欄名はサーバの field_labels。
+    # 状態が unknown でスコープだけあるときは verification_status_note を「検証情報なし」の代わりに出す
+    if entry.get("field_sources_note"):
+        lines.append(str(entry["field_sources_note"]))
+    vlabel = field_label(entry, "verification", "検証状態")
+    if entry.get("verification_status_note"):
+        lines.append(f"{vlabel}: {entry['verification_status_note']}")
+    else:
+        lines.append(f"{vlabel}: " + STATUS_LABELS.get(str(entry.get("verification_status")), str(entry.get("verification_status") or "")))
     scopes = [s for s in entry.get("verification_scopes") or [] if isinstance(s, dict)]
     if scopes:
         for s in scopes:
@@ -489,12 +728,18 @@ def ledger_view(target: dict, entry: Optional[dict], note: str = "") -> str:
                 lines.append(f"  evidence: {', '.join(str(x) for x in s['evidence_ids'])}")
             # IK-0905: 記帳者は名前（recorded_by_label）。UUID を出さない
             lines.append(f"  記帳者: {s.get('recorded_by_label') or '-'}" + (f" — {s['reason']}" if s.get("reason") else ""))
+            if is_prereq_reason(s.get("reason")):
+                lines.append(PREREQ_REASON_NOTE)
     else:
         lines.append(NO_SCOPE)
     lines.append(f"明示的合意: {entry['consensus_explicit_label']}" if entry.get("consensus_explicit_label") else NO_CONSENSUS)
-    lines.append(f"行動上の合意: {entry.get('consensus_behavioral_dependents') or 0} 箇所が依存")
+    lines.append(f"{field_label(entry, 'behavioral', '行動上の合意')}: "
+                 f"{entry.get('consensus_behavioral_dependents') or 0} 箇所が依存")
     if entry.get("load_level"):
-        lines.append(f"依存の広がり（段階）: {LOAD_LABELS.get(str(entry['load_level']), str(entry['load_level']))}")
+        lines.append(f"{field_label(entry, 'load', '依存の広がり（段階）')}: "
+                     f"{LOAD_LABELS.get(str(entry['load_level']), str(entry['load_level']))}")
+    elif entry.get("load_note"):
+        lines.append(str(entry["load_note"]))  # 第 8 波（IK-1058）: 手で記帳した前提（計算できない事実文）
     if isinstance(entry.get("naive_signal"), dict) and entry["naive_signal"].get("present"):
         lines.append(NAIVE_SIGNAL)
     for i, c in enumerate([c for c in entry.get("scope_candidates") or [] if isinstance(c, dict)], 1):
@@ -512,21 +757,22 @@ def ledger_view(target: dict, entry: Optional[dict], note: str = "") -> str:
             mode = c.get("challenge_mode_label") or CHALLENGE_MODE_LABELS.get(str(c.get("challenge_mode")), CHALLENGE_MODE_LABELS["direct"])
             lines.append(f"- 疑義{i}: {CHALLENGE_TYPE_LABELS.get(str(c.get('challenge_type')), str(c.get('challenge_type') or ''))}"
                          f"（向き: {mode}）{c.get('challenger_name') or ''}" + (f" — {c['reason']}" if c.get("reason") else ""))
-            lines.append(f"  状態: {CHALLENGE_STATUS_LABELS.get(str(c.get('status')), str(c.get('status') or ''))}"
-                         + ("［取り下げ］［検証提案にする］" if c.get("status") in ("open", "answered") else ""))
+            # 第 4 波（IK-0968）: 状態の語はサーバの status_label（無ければ語表）・提案のカードを疑義の下に常設
+            state = c.get("status_label") or CHALLENGE_STATUS_LABELS.get(str(c.get("status")), str(c.get("status") or ""))
+            lines.append(f"  状態: {state}" + ("［取り下げ］［検証提案にする］" if c.get("status") in ("open", "answered") else ""))
+            lines += proposal_card_lines(c.get("proposals"), off)
     else:
         lines.append(NO_CHALLENGE)
     if target.get("target_type") in ("assumption", "claim"):
         lines.append("［疑義を残す］")
     elif entry.get("challenge_note"):
-        # IK-0904: 疑義の入口が無い理由と、支える主張の台帳へ辿る道（文言はサーバ）
-        lines.append(str(entry["challenge_note"]))
-        for c in entry.get("supporting_claims") or []:
-            if isinstance(c, dict) and c.get("claim_id"):
-                lines.append(f"- {c.get('label') or ''} ［この主張の台帳を開く］")
-    lines += falsification_lines(entry)
+        # IK-0904: 疑義の入口が無い理由と、支える主張の台帳へ辿る道（文言はサーバ）。IK-1003: 主張の印・集約の 1 行
+        lines += supporting_claims_lines(entry)
+    # 第 5 波（IK-0998）: 取り下げ済みの疑義（読み取りのみ・畳む・消さない）
+    lines += withdrawn_challenge_lines(entry, withdrawn_open)
+    lines += falsification_lines(entry, off)
     lines += support_lines(entry)
-    lines += evidence_line_lines(entry)
+    lines += evidence_line_lines(entry, off)
     return "\n".join(lines)
 
 
@@ -558,6 +804,11 @@ def _reload_all(ctx) -> None:
     sc["doubt_open_empty_note"] = str((opened or {}).get("empty_note") or "") if isinstance(opened, dict) else ""
     sc["doubt_open_population_note"] = (str((opened or {}).get("population_note") or "")
                                         if isinstance(opened, dict) else "")
+    # 第 5 波（IK-1002）: field_labels / field_sources_note（台帳と同じ）
+    # 第 10 波（IK-1120）: + support_scope_note（支持線を読む範囲の事実文）
+    sc["doubt_open_field_source"] = ({k: opened.get(k) for k in ("field_labels", "field_sources_note", "support_scope_note")
+                                      if opened.get(k)}
+                                     if isinstance(opened, dict) else {})
     _, cfs = ctx.call("GET", DOUBT + "/counterfactual/sessions", params={"course_id": cid})
     sc["doubt_cf_sessions"] = cfs if isinstance(cfs, dict) else {}
 
@@ -578,13 +829,17 @@ def tab_open(ctx) -> None:
     status, body = ctx.call("GET", "/api/admin/courses")
     courses = [c for c in (body if isinstance(body, list) else []) if isinstance(c, dict) and (c.get("id") or c.get("course_id"))]
     courses = [{"id": str(c.get("id") or c.get("course_id")), "title": str(c.get("title") or c.get("id") or ""),
-                "role": str(c.get("role") or "")} for c in courses]
+                "role": str(c.get("role") or ""), "role_label": str(c.get("role_label") or "")} for c in courses]
     s.scratch["doubt_courses"] = courses
     hint = ctx.args.get("course_hint")
-    chosen = hint_pick(courses, hint, ("title", "id")) if courses else None
-    if hint and chosen is None:
-        _runner_note(s, f"runner_choice: course_hint={hint} に合うコースが一覧に無いので先頭を選んだ")
-        chosen = courses[0] if courses else None
+    chosen = hint_pick(courses, hint, ("title", "id")) if (courses and hint) else None
+    if chosen is None:
+        # doubt-atlas.js loadCourses（第 5 波・IK-1000）: 既定は role == "owner" の先頭、無ければ一覧の先頭
+        default = next((c for c in courses if c.get("role") == "owner"), courses[0] if courses else None)
+        if hint:
+            _runner_note(s, f"runner_choice: course_hint={hint} に合うコースが一覧に無いので画面の既定"
+                            f"（{'本人所有の先頭' if default and default.get('role') == 'owner' else '一覧の先頭'}）を選んだ")
+        chosen = default
     s.scratch["doubt_course_id"] = chosen["id"] if chosen else ""
     for k in ("doubt_atlas", "doubt_assumptions", "doubt_open", "doubt_cf_sessions", "doubt_target", "doubt_ledger"):
         s.scratch.pop(k, None)
@@ -696,10 +951,19 @@ def assumption_dismiss(ctx) -> None:
 def _targets_from(ctx, source: str) -> list[dict]:
     sc = ctx.session.scratch
     if source == "atlas":
-        pts = (sc.get("doubt_atlas") or {}).get("points") or [] if isinstance(sc.get("doubt_atlas"), dict) else []
+        atlas = sc.get("doubt_atlas") if isinstance(sc.get("doubt_atlas"), dict) else {}
+        # 第 8 波（IK-1058）: 散布図の下の「依存の広がりを計算できない前提」のボタンも台帳を開く（点の後ろに並べる）
+        pts = list(atlas.get("points") or []) + list(atlas.get("unplotted_points") or [])
         return [{"target_type": p.get("target_type"), "target_id": p.get("target_id"), "label": p.get("label") or p.get("target_id"),
                  "document_id": str(p.get("document_id") or "")}  # 第 2 波: points[].document_id（開く論文）
                 for p in pts if isinstance(p, dict) and p.get("target_id")]
+    if source == "unplotted":
+        # 第 9 波（doubt H52）: 散布図の下の「依存の広がりを計算できない前提」の区画だけ（番号は区画の中で数える =
+        # unplotted_lines の「前提N」）
+        atlas = sc.get("doubt_atlas") if isinstance(sc.get("doubt_atlas"), dict) else {}
+        return [{"target_type": p.get("target_type"), "target_id": p.get("target_id"), "label": p.get("label") or p.get("target_id"),
+                 "document_id": str(p.get("document_id") or "")}
+                for p in atlas.get("unplotted_points") or [] if isinstance(p, dict) and p.get("target_id")]
     if source == "open":
         rows = list(sc.get("doubt_open") or [])
         if sc.get("doubt_open_reachable"):
@@ -710,18 +974,60 @@ def _targets_from(ctx, source: str) -> list[dict]:
     if source == "assumptions":
         # 確定した前提は散布図に点として載る（負荷が計算されていれば）。散布図に無いときの近道ではなく、
         # 同じ前提を確定直後に開く（画面では確定後に散布図・未検証合意リストを読み直す）
-        return list(sc.get("doubt_confirmed_assumptions") or [])
+        rows = list(sc.get("doubt_confirmed_assumptions") or [])
+        # 第 25 周 第 7 周 H44: この run で確定したものだけでなく、表示中の前提候補の一覧（確定済みに切り替えたもの）で
+        # ［台帳を開く］が出ている確定済みの前提（ledger_document_id あり）も対象にする
+        seen = {str(r.get("target_id") or "") for r in rows if isinstance(r, dict)}
+        for a in _assumption_items(ctx):
+            if a.get("status") == "confirmed" and a.get("ledger_document_id") and str(a.get("id") or "") not in seen:
+                rows.append({"target_type": "assumption", "target_id": str(a.get("id")),
+                             "label": str(a.get("statement") or ""), "document_id": str(a.get("ledger_document_id") or "")})
+        return rows
     return []
+
+
+#: 第 25 周 第 7 周 H44（頭脳の運転の観察）: 台帳を開く行為の from に画面の言い方が来る。空か未知なら全源を順に試す
+LEDGER_FROM_WORDS = {"計算できない前提": "unplotted", "依存の広がりを計算できない": "unplotted",  # 第 9 波（H52）
+                     "散布図": "atlas", "点": "atlas", "未検証合意リスト": "open", "合意リスト": "open",
+                     "確定した前提": "assumptions", "確定済みの前提": "assumptions", "前提": "assumptions",
+                     "前提候補": "assumptions"}
+
+
+def ledger_from_source(raw: Any) -> str:
+    src = str(raw or "").strip()
+    if src in ("atlas", "open", "assumptions", "unplotted"):
+        return src
+    for word, key in sorted(LEDGER_FROM_WORDS.items(), key=lambda kv: -len(kv[0])):
+        if word in src:
+            return key
+    return ""
+
+
+#: 「計算できない前提」区画の番号の指し方（unplotted_lines の「前提N」）
+UNPLOTTED_HINT_RE = re.compile(r"^\s*前提\s*(\d+)\s*$")
+
+
+def ledger_sources(raw_from: Any, target_hint: Any) -> tuple[list[str], Any]:
+    """台帳を開く対象の源の順と、源の中で使う hint（第 9 波・doubt H52）。
+
+    hint「前提N」は散布図の下の「依存の広がりを計算できない前提」区画の N 番目（区画の中で数える — 散布図の点の
+    番号「点N」とは別）。from が「確定した前提」でも、まずこの区画を見る（第 9 周は assumptions 源だけを見て空振りし、
+    atlas 源なら点 1 を指していた）。"""
+    src = ledger_from_source(raw_from)
+    m = UNPLOTTED_HINT_RE.match(unicodedata.normalize("NFKC", str(target_hint or "")))
+    if m:
+        # 「前提N」の番号は区画の中でだけ数える（他の源の番号に読み替えない — 別の対象を開かない）
+        return ["unplotted"], m.group(1)
+    return ([src] if src else ["atlas", "open", "assumptions"]), target_hint
 
 
 def ledger_open(ctx) -> None:
     if not _need_course(ctx):
         return
-    src = str(ctx.args.get("from") or "").strip()
-    sources = [src] if src in ("atlas", "open", "assumptions") else ["atlas", "open", "assumptions"]
+    sources, hint = ledger_sources(ctx.args.get("from"), ctx.args.get("target_hint"))
     picked, used = None, ""
     for name in sources:
-        picked = hint_pick(_targets_from(ctx, name), ctx.args.get("target_hint"), ("label", "target_id"))
+        picked = hint_pick(_targets_from(ctx, name), hint, ("label", "target_id"))
         if picked:
             used = name
             break
@@ -731,6 +1037,33 @@ def ledger_open(ctx) -> None:
         _runner_note(ctx.session, "runner_choice: 散布図・未検証合意リストに対象が無いので、確定した前提の台帳を開いた"
                                   "（画面では散布図の点として現れてから開く）")
     _open_ledger(ctx, dict(picked))
+
+
+def unplotted_open(ctx) -> None:
+    """doubt-atlas.js ``[data-doubt-unplotted-point]``（第 8 波・IK-1058 / 第 9 波・doubt H52）: 散布図の下の「依存の広がりを
+    計算できない前提」区画のボタン → 右の詳細に台帳。pick は区画の中の番号（「前提N」の N）か前提文の一部。"""
+    if not _need_course(ctx):
+        return
+    raw = str(ctx.args.get("pick") or "")
+    m = UNPLOTTED_HINT_RE.match(unicodedata.normalize("NFKC", raw))
+    picked = hint_pick(_targets_from(ctx, "unplotted"), m.group(1) if m else raw, ("label", "target_id"))
+    if not picked:
+        return _missing(ctx, "unplotted_point")
+    _open_ledger(ctx, dict(picked))
+
+
+def assumption_open_ledger(ctx) -> None:
+    """doubt-atlas.js ``[data-doubt-assumption-ledger]``（第 6 波・IK-1028）: 前提候補のレビューのカードの［台帳を開く］。
+    右の詳細に前提の台帳（``?document_id={ledger_document_id}``）を開く（散布図の点と同じ台帳の区画）。"""
+    if not _need_course(ctx):
+        return
+    items = [a for a in _assumption_items(ctx) if isinstance(a, dict) and a.get("ledger_document_id")]
+    picked = hint_pick(items, ctx.args.get("pick"), ("statement",))
+    if not picked:
+        return _missing(ctx, "assumption_ledger")
+    _open_ledger(ctx, {"target_type": "assumption", "target_id": str(picked.get("id")),
+                       "label": str(picked.get("statement") or ""),
+                       "document_id": str(picked.get("ledger_document_id") or "")})
 
 
 def _ledger_doc_params(target: dict) -> Optional[dict]:
@@ -752,7 +1085,7 @@ def _mark_ledger_digest(ctx, target: dict, entry: Any) -> None:
 def _open_ledger(ctx, target: dict) -> None:
     s = ctx.session
     s.scratch["doubt_target"] = target
-    s.scratch.pop("doubt_proposal", None)
+    s.scratch["doubt_withdrawn_open"] = False  # 台帳を開き直すと折りたたみは閉じた状態から
     status, entry = ctx.call("GET", DOUBT + "/ledger/{target_type}/{target_id}", params=_ledger_doc_params(target),
                              overrides={"target_type": str(target["target_type"]), "target_id": str(target["target_id"])})
     _mark_ledger_digest(ctx, target, entry)
@@ -782,7 +1115,9 @@ def _refresh_ledger(ctx, head: str = "", note: str = "") -> None:
         ctx.session.scratch["doubt_ledger"] = None
     elif _status_ok(status) and isinstance(entry, dict):
         ctx.session.scratch["doubt_ledger"] = entry
-    _show(ctx, (head + "\n" if head else "") + ledger_view(target, ctx.session.scratch.get("doubt_ledger"), note=note))
+    _show(ctx, (head + "\n" if head else "") + ledger_view(
+        target, ctx.session.scratch.get("doubt_ledger"), note=note,
+        withdrawn_open=bool(ctx.session.scratch.get("doubt_withdrawn_open"))))
 
 
 def _need_target(ctx) -> Optional[dict]:
@@ -818,8 +1153,48 @@ def _ledger_post(ctx, method: str, suffix: str, body: dict, fallback: str, *, ov
     return status, resp
 
 
+#: 第 25 周 第 8 周 doubt H50 / H51: 根拠・理由の欄に入れた文が場面の材料（運転が用意した固定文）なら、その目印。
+#: 材料の文は「（場面の材料・第 N 周）」で始め、送ったときは観察に「この欄は場面の材料」を 1 行添える。添えないと、頭脳は
+#: 「」で写った材料を論文の引用と読み（H50）、周ごとに同じ文が重なるのを製品の重複と読む（H51）
+SCENARIO_MATERIAL_MARK = "（場面の材料"
+SCENARIO_MATERIAL_NOTE = ("ハーネス: {fields}の文は場面の材料（運転が用意した固定文）で、論文の逐語でも"
+                          "このペルソナが書いた言葉でもない。同じ文が前の周の記帳と並ぶのは材料の重なり。これは画面の文ではない")
+_MATERIAL_FIELD_WORDS = {"evidence_quote": "根拠", "reason": "理由", "condition": "条件"}
+#: 第 25 周 第 10 波（doubt H60）: 材料の文から周番号の頭書きを外した（周ごとに理由が変わり、疑義の重複の告知 — 同じ型・同じ
+#: 理由の完全一致 — に構造的に当たらなかった）。目印は文の中ではなく、場面の材料（scenario_params の値）との一致で観察に注記する。
+#: ScenarioRunner.run が ``session.scratch["scenario_material_texts"]`` に材料の文の集合を置く
+SCENARIO_MATERIAL_TEXTS_KEY = "scenario_material_texts"
+
+
+def scenario_material_texts(values: Any) -> list[str]:
+    """場面の材料の値のうち、記帳の欄に入り得る文（5 字以上の文字列・リストの中の文字列も）。純関数。"""
+    out: list[str] = []
+    for v in (values or {}).values() if isinstance(values, dict) else []:
+        for x in (v if isinstance(v, list) else [v]):
+            if isinstance(x, str) and len(x.strip()) >= 5 and x.strip() not in out:
+                out.append(x.strip())
+    return out
+
+
+def _is_material(session, value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if SCENARIO_MATERIAL_MARK in text:
+        return True
+    return text in (session.scratch.get(SCENARIO_MATERIAL_TEXTS_KEY) or [])
+
+
+def note_scenario_material(session, body: dict) -> None:
+    fields = [w for k, w in _MATERIAL_FIELD_WORDS.items() if _is_material(session, body.get(k))]
+    if fields:
+        session.scratch.setdefault("observation_notes", []).append(
+            SCENARIO_MATERIAL_NOTE.format(fields="・".join(f"「{f}」の欄" for f in fields)))
+
+
 def scope_record(ctx) -> None:
     body = {f: str(ctx.args.get(f) or "").strip() for f in ("condition", "domain", "precision", "system", "evidence_quote", "reason")}
+    note_scenario_material(ctx.session, body)
     body["evidence_ids"] = []
     status, _ = _ledger_post(ctx, "POST", "/scopes", body, SCOPE_422_FALLBACK)
     if _status_ok(status):
@@ -870,6 +1245,19 @@ def verification_status(ctx) -> None:
         ctx.session.scratch.setdefault("doubt_written", []).append({**t, "what": "verification_status", "status": key})
 
 
+REASON_FROM_OPEN = ("open_challenge", "既存の疑義")
+REASON_COPIED_NOTE = ("ハーネス: この疑義の型と理由は、台帳に既にある未取り下げの疑義の写し（場面の材料 — 同じ型・同じ理由の疑義を"
+                      "記帳したときの知らせを確かめる手）で、このペルソナが書いた言葉ではない。これは画面の文ではない")
+REASON_COPY_NONE_NOTE = ("ハーネス: 写す元の未取り下げの疑義（理由のあるもの）が台帳に無かったので、材料の理由のまま送った。"
+                         "これは画面の文ではない")
+
+
+def copy_source_challenge(open_rows: list[dict], ctype: str) -> Optional[dict]:
+    """写す元の疑義: 同じ型で理由のある最初の未取り下げの疑義、無ければ理由のある最初の疑義（H60）。純関数。"""
+    rows = [c for c in open_rows if isinstance(c, dict) and str(c.get("reason") or "").strip()]
+    return next((c for c in rows if c.get("challenge_type") == ctype), None) or (rows[0] if rows else None)
+
+
 def challenge_record(ctx) -> None:
     t = _need_target(ctx)
     if not t:
@@ -886,6 +1274,17 @@ def challenge_record(ctx) -> None:
     ctype = ctype or "scope_extrapolation"
     mode = _word(ctx.args.get("challenge_mode"), CHALLENGE_MODE_LABELS, {"つながり": "undercut", "根拠": "undercut"}) or "direct"
     body = {"challenge_type": ctype, "challenge_mode": mode, "reason": str(ctx.args.get("reason") or "").strip()}
+    if str(ctx.args.get("reason_from") or "").strip() in REASON_FROM_OPEN:
+        # 第 10 波（doubt H60）: 既存の未取り下げの疑義の型と理由をそのまま写す（疑義の重複の告知を確かめる場面の手）
+        src = copy_source_challenge(open_challenges(ctx.session.scratch.get("doubt_ledger")), ctype)
+        if src is not None:
+            body["challenge_type"] = str(src.get("challenge_type") or ctype)
+            body["reason"] = str(src.get("reason") or "").strip()
+            ctx.session.scratch.setdefault("observation_notes", []).append(REASON_COPIED_NOTE)
+        else:
+            ctx.session.scratch.setdefault("observation_notes", []).append(REASON_COPY_NONE_NOTE)
+    else:
+        note_scenario_material(ctx.session, body)
     status, resp = ctx.call("POST", DOUBT + "/targets/{target_type}/{target_id}/challenges", json=body,
                             overrides={"target_type": str(t["target_type"]), "target_id": str(t["target_id"])})
     if status == 422:
@@ -893,34 +1292,70 @@ def challenge_record(ctx) -> None:
         return _show(ctx, ledger_view(t, ctx.session.scratch.get("doubt_ledger")) + f"\n（フォームの下に表示: {CHALLENGE_422}）")
     if _status_ok(status) and isinstance(resp, dict):
         ctx.session.remember("doubt_challenges", resp.get("challenge_id"))
-        _refresh_ledger(ctx)
+        # 第 9 波（IK 疑義の重複の告知）: 画面は台帳を描き直し、応答の duplicate_note を取り下げの知らせと同じ位置に添える
+        # （refreshLedgerSection(…, data.duplicate_note || "")）。記帳は止めない
+        _refresh_ledger(ctx, note=str(resp.get("duplicate_note") or ""))
+
+
+def _pick_challenge(ctx, target: dict, button: str) -> Optional[dict]:
+    """疑義の番号・理由・型で 1 件（第 25 周 H28・第 4 周）。
+
+    番号は画面（投影の「疑義N」）と同じ一覧 = 取り下げ済み以外の疑義で引く（旧実装は状態が open / answered の疑義だけの
+    一覧で引き、昇格済みの疑義 1 があると「疑義 2」が範囲外になって止まった）。選んだ疑義が［取り下げ］［検証提案にする］の
+    出ない状態なら、送らずに画面の事実で止める。当たらなければ None（precondition を残す）。"""
+    entry = ctx.session.scratch.get("doubt_ledger")
+    shown = open_challenges(entry)
+    picked = hint_pick(shown, ctx.args.get("pick"), ("reason", "challenge_type"))
+    if not picked:
+        _missing(ctx, "open_challenge")
+        return None
+    if picked.get("status") not in ("open", "answered"):
+        n = shown.index(picked) + 1
+        state = CHALLENGE_STATUS_LABELS.get(str(picked.get("status")), str(picked.get("status") or ""))
+        _ui_stop(ctx, ledger_view(target, entry) + f"\n（疑義{n} は状態が「{state}」で、［{button}］のボタンが出ていない）",
+                 f"challenge: 疑義{n} は {picked.get('status')} なので［{button}］が無い")
+        return None
+    return picked
 
 
 def challenge_withdraw(ctx) -> None:
     t = _need_target(ctx)
     if not t:
         return
-    picked = hint_pick([c for c in open_challenges(ctx.session.scratch.get("doubt_ledger"))
-                        if c.get("status") in ("open", "answered")], ctx.args.get("pick"), ("reason", "challenge_type"))
+    picked = _pick_challenge(ctx, t, "取り下げ")
     if not picked:
-        return _missing(ctx, "open_challenge")
-    status, _ = ctx.call("POST", DOUBT + "/challenges/{challenge_id}/withdraw", json={},
-                         overrides={"challenge_id": str(picked.get("id"))})
+        return
+    status, resp = ctx.call("POST", DOUBT + "/challenges/{challenge_id}/withdraw", json={},
+                            overrides={"challenge_id": str(picked.get("id"))})
     if status == 403:
         return _show(ctx, ledger_view(t, ctx.session.scratch.get("doubt_ledger")) + f"\n（疑義の下に表示: {WITHDRAW_403}）")
     if _status_ok(status):
         ctx.session.scratch.setdefault("doubt_withdrawn", []).append(str(picked.get("id")))
-        _refresh_ledger(ctx)
+        # 第 5 波: 画面は台帳を読み直し、応答の note を台帳の頭（data-doubt-last-note）に出す
+        _refresh_ledger(ctx, note=str(resp.get("note") or "") if isinstance(resp, dict) else "")
+
+
+def withdrawn_challenges_open(ctx) -> None:
+    """疑義区画の末尾の「取り下げ済みの疑義（読み取りのみ）」の折りたたみを開く（第 5 波・IK-0998）。
+    開く操作そのものは画面の中だけだが、投影は最新の台帳（GET）を読み直してから開いた形で描く。"""
+    t = _need_target(ctx)
+    if not t:
+        return
+    entry = ctx.session.scratch.get("doubt_ledger")
+    if not isinstance(entry, dict) or not withdrawn_challenge_lines(entry):
+        return _ui_stop(ctx, ledger_view(t, entry) + "\n（「取り下げ済みの疑義」の折りたたみはこの台帳に無い — 取り下げた疑義が無い）",
+                        "withdrawn_challenges: 取り下げ済みの疑義が無いので折りたたみが出ていない")
+    ctx.session.scratch["doubt_withdrawn_open"] = True
+    _refresh_ledger(ctx)
 
 
 def challenge_propose(ctx) -> None:
     t = _need_target(ctx)
     if not t:
         return
-    picked = hint_pick([c for c in open_challenges(ctx.session.scratch.get("doubt_ledger"))
-                        if c.get("status") in ("open", "answered")], ctx.args.get("pick"), ("reason", "challenge_type"))
+    picked = _pick_challenge(ctx, t, "検証提案にする")
     if not picked:
-        return _missing(ctx, "open_challenge")
+        return
     base = ledger_view(t, ctx.session.scratch.get("doubt_ledger"))
     proposal = str(ctx.args.get("proposal") or "").strip()
     external = str(ctx.args.get("external_check") or "").strip()
@@ -938,42 +1373,124 @@ def challenge_propose(ctx) -> None:
     if status == 422:
         return _show(ctx, f"{base}\n{form}\n（フォームの下に表示: {_detail(resp) or PROPOSAL_422_FALLBACK}）")
     if _status_ok(status) and isinstance(resp, dict) and resp.get("proposal_id"):
-        ctx.session.scratch["doubt_proposal"] = {"id": str(resp["proposal_id"]), "status": "proposed"}
         ctx.session.remember("doubt_proposals", resp["proposal_id"])
-        # 画面は台帳を読み直さず（proposal_id を保つため）、その疑義のボタンを無効にしてカードを差し込む
-        _show(ctx, base + "\n" + proposal_card("proposed") + "\n（この疑義の［取り下げ］［検証提案にする］は押せなくなった）")
+        # 第 4 波（IK-0968）: 画面は昇格の後に台帳を読み直し、提案は challenges[].proposals のカードとして疑義の下に出る
+        _refresh_ledger(ctx)
 
 
-def proposal_card(status: str) -> str:
-    """``renderProposalStatusCard``。"""
-    line = f"検証提案（コーパス外の確認あり）: {PROPOSAL_STATUS_LABELS.get(status, status)}"
-    buttons = []
-    if status == "proposed":
-        buttons.append("［検証に着手］")
-    if status == "in_progress":
-        buttons.append("［完了を記録］")
-    if status in ("proposed", "in_progress"):
-        buttons.append("［取り下げ］")
-    return line + ("".join(buttons) if buttons else "")
+def ledger_proposals(entry: Optional[dict]) -> list[dict]:
+    """台帳 GET の疑義の下の検証提案（表示順 = 取り下げていない疑義の順 → 疑義ごとの提案の順。第 4 波・IK-0968）。"""
+    out: list[dict] = []
+    for c in open_challenges(entry):
+        out += [p for p in c.get("proposals") or [] if isinstance(p, dict) and p.get("id")]
+    return out
 
 
 def proposal_status(ctx) -> None:
-    prop = ctx.session.scratch.get("doubt_proposal")
-    if not prop:
-        return _missing(ctx, "proposal_card")
+    """doubt-atlas.js ``bindProposalStatusButtons``（第 4 波・IK-0968）: 台帳の疑義の下の提案カードのボタン →
+    ``PATCH /proposals/{id}`` → 台帳を読み直す。失敗はカードに「更新に失敗しました。」。``pick`` は提案の番号か文の一部。
+    閲覧だけの台帳（can_edit:false）ではボタンが無効（IK-0969）。"""
+    t = _need_target(ctx)
+    if not t:
+        return
+    entry = ctx.session.scratch.get("doubt_ledger")
     want = _word(ctx.args.get("status"), {"in_progress": "検証に着手", "completed": "完了を記録", "withdrawn": "取り下げ"},
                  {"着手": "in_progress", "完了": "completed", "取り下げ": "withdrawn"})
-    allowed = {"proposed": ("in_progress", "withdrawn"), "in_progress": ("completed", "withdrawn")}.get(prop["status"], ())
+    props = [p for p in ledger_proposals(entry) if p.get("status") in ("proposed", "in_progress")]
+    if not props:
+        return _missing(ctx, "proposal_card")
+    prop = hint_pick(props, ctx.args.get("pick"), ("proposal", "external_check")) if ctx.args.get("pick") else None
+    if prop is None:
+        allowed_for = {"in_progress": ("proposed",), "completed": ("in_progress",), "withdrawn": ("proposed", "in_progress")}
+        prop = next((p for p in props if p.get("status") in allowed_for.get(want or "", ())), props[0])
+    if isinstance(entry, dict) and entry.get("can_edit") is False:
+        return _ui_stop(ctx, ledger_view(t, entry) + "\n（検証提案のボタンは押せない）",
+                        "proposal_status: can_edit=false なので画面のボタンは無効")
+    cur = str(prop.get("status") or "")
+    allowed = {"proposed": ("in_progress", "withdrawn"), "in_progress": ("completed", "withdrawn")}.get(cur, ())
     if want not in allowed:
-        return _ui_stop(ctx, proposal_card(prop["status"]) + "\n（そのボタンはこのカードに無い）",
-                        f"proposal_status: {want or ctx.args.get('status')} のボタンは状態 {prop['status']} のカードに無い")
-    status, _ = ctx.call("PATCH", DOUBT + "/proposals/{proposal_id}", json={"status": want},
-                         overrides={"proposal_id": prop["id"]})
+        return _ui_stop(ctx, ledger_view(t, entry) + "\n（そのボタンはこの提案のカードに無い）",
+                        f"proposal_status: {want or ctx.args.get('status')} のボタンは状態 {cur} のカードに無い")
+    patch: dict[str, Any] = {"status": want}
+    note = str(ctx.args.get("completion_note") or "").strip()
+    if want == "completed" and note:
+        # 第 10 波（IK-1121）: 着手済みのカードの「確かめたこと（任意）」の欄。空なら送らない（JS と同じ）
+        patch["completion_note"] = note
+    status, _ = ctx.call("PATCH", DOUBT + "/proposals/{proposal_id}", json=patch,
+                         overrides={"proposal_id": str(prop["id"])})
     if _status_ok(status):
-        prop["status"] = want
-        _show(ctx, proposal_card(want))
+        _refresh_ledger(ctx)
     else:
-        _show(ctx, proposal_card(prop["status"]) + f"\n（カードに表示: {PROPOSAL_STATUS_FAIL}）")
+        _show(ctx, ledger_view(t, entry) + f"\n（提案のカードに表示: {PROPOSAL_STATUS_FAIL}）")
+
+
+#: 画面を経ない確認の印（第 25 周 H30）。画面はボタンを無効にして要求を送らないので、サーバ側の拒否
+#: （IK-0900）はこの 1 手でしか確かめられない。頭脳と審判がこの観察を画面の操作と取り違えないよう先頭に置く
+RAW_PROBE_HEAD = ("（ハーネス: 画面を経ない確認 — 画面のボタンは押さず、記帳の要求を 1 回だけ直接送った。空の欄（軸・根拠・理由）は"
+                  "ハーネスが既定値で埋めた有効な body — 入力の不足では止まらない。これは画面の文ではない）")
+#: 第 25 周 第 7 周 H43: 根拠を空にした不完全な body を明示で送ったときの観察の頭
+RAW_PROBE_INCOMPLETE_HEAD = ("（ハーネス: 画面を経ない確認 — 根拠（原文の引用）を空にしたままの不完全な body を 1 回だけ直接送った。"
+                             "権限の拒否（403 / 404）と入力の不足（422）のどちらが先に返るかを見る。これは画面の文ではない）")
+
+
+#: 第 25 周第 5 周 H34: 画面を経ない確認の既定の body。軸・根拠・理由を揃えた**有効な入力**にして、入力の検査（422）
+#: ではなく権限の弁（閲覧のみ・不在は 404）そのものを当てる。頭脳が値を渡せばそれを優先する。
+RAW_PROBE_SCOPE_DEFAULTS = {
+    "condition": "ハーネスの確認: 閲覧だけの教員が記帳を試みる",
+    "domain": "", "precision": "", "system": "",
+    "evidence_quote": "ハーネスの確認（画面を経ない要求）",
+    "reason": "ハーネス: 権限の弁の確認（第 6 周の再プローブ）",
+}
+
+
+def raw_probe_scope_body(args: dict) -> dict:
+    """``scope_record_raw`` の body（H34）。空の欄は既定値で埋め、軸・根拠・理由が必ず揃う。"""
+    body = {f: str((args or {}).get(f) or "").strip() for f in RAW_PROBE_SCOPE_DEFAULTS}
+    if not any(body[a] for a in ("condition", "domain", "precision", "system")):
+        body["condition"] = RAW_PROBE_SCOPE_DEFAULTS["condition"]
+    for f in ("evidence_quote", "reason"):
+        body[f] = body[f] or RAW_PROBE_SCOPE_DEFAULTS[f]
+    body["evidence_ids"] = []
+    return body
+
+
+def raw_probe_incomplete_body(args: dict) -> dict:
+    """``scope_record_raw_incomplete`` の body（H43）: 軸と理由は渡す（無ければ既定値）が、根拠（evidence_quote）は空のまま。"""
+    body = raw_probe_scope_body(args)
+    body["evidence_quote"] = ""
+    return body
+
+
+def scope_record_raw_incomplete(ctx) -> None:
+    """第 25 周 第 7 周 H43: 根拠を空にした不完全な body を画面を経ずに 1 回送る（権限 → 入力の順 IK-0999 を当てる）。"""
+    _scope_record_raw(ctx, raw_probe_incomplete_body(ctx.args), RAW_PROBE_INCOMPLETE_HEAD)
+
+
+def scope_record_raw(ctx) -> None:
+    _scope_record_raw(ctx, raw_probe_scope_body(ctx.args), RAW_PROBE_HEAD)
+
+
+def _scope_record_raw(ctx, body: dict, head: str) -> None:
+    """閲覧だけの台帳で、スコープの記帳の要求を画面のガードを経ずに 1 回送り、サーバの応答（403 / 404 の detail）を見る。
+
+    第 25 周 H30（第 4 周）: runner の ui_guard（can_edit=false でボタン無効）が要求を送らずに止めるので、IK-0900 の
+    サーバ側は 4 周続けて run で確かめられなかった。権限の確認の場面だけが使う明示の行為。"""
+    t = _need_target(ctx)
+    if not t:
+        return
+    # 台帳 GET と同じ ?document_id=（開いた論文。無ければ行の document_id）を付ける
+    doc = str(t.get("document_id") or ctx.args.get("document_id")
+              or (ctx.session.scratch.get("doubt_ledger") or {}).get("document_id") or "")
+    status, resp = ctx.call("POST", DOUBT + "/ledger/{target_type}/{target_id}/scopes", json=body,
+                            params={"document_id": doc} if doc else None,
+                            overrides={"target_type": str(t["target_type"]), "target_id": str(t["target_id"])})
+    if status is None:
+        return
+    detail = _detail(resp) or "（detail なし）"
+    _show(ctx, f"{head}\nサーバの応答: HTTP {status} — {detail}")
+    if _status_ok(status):
+        _runner_note(ctx.session, "raw_probe: 閲覧だけのはずの台帳にサーバが記帳を受け付けた（スコープが 1 件増えた可能性）")
+        ctx.session.scratch.setdefault("doubt_written", []).append({**t, "what": "scope_raw"})
 
 
 def falsification_record(ctx) -> None:
@@ -1009,6 +1526,11 @@ def falsification_candidate_decide(ctx) -> None:
 def falsification_refresh(ctx) -> None:
     t = ctx.session.scratch.get("doubt_target") or {}
     base = ledger_view(t, ctx.session.scratch.get("doubt_ledger")) if t else ""
+    entry = ctx.session.scratch.get("doubt_ledger")
+    if t and isinstance(entry, dict) and entry.get("can_edit") is False:
+        # doubt-atlas.js disableLedgerWrites（IK-0969 の是正後）: 閲覧だけの台帳では［AIに候補を出してもらう］も無効
+        return _ui_stop(ctx, base + "\n（［AIに候補を出してもらう］は押せない）",
+                        "falsification_refresh: can_edit=false なので画面のボタンは無効")
     if not _course(ctx):
         return _ui_stop(ctx, (base + "\n" if base else "") + f"（ボタンの横に表示: {FALSIFICATION_REFRESH_NO_COURSE}）",
                         "falsification_refresh: 前提の地図タブでコースを選んでいない")
@@ -1062,8 +1584,16 @@ def _load_graph(ctx) -> Optional[dict]:
         if not isinstance(n, dict):
             continue
         nid = str(n.get("component_id") or n.get("id") or n.get("node_id") or "")  # lsGraphNodeId
-        label = next((str(n.get(k)).strip() for k in ("label", "visual_label", "title", "name") if str(n.get(k) or "").strip()), nid)
-        nodes.append({"id": nid, "vis_id": str(n.get("id") or nid), "label": label, "layer": str(n.get("graph_layer") or "main")})
+        raw = next((str(n.get(k)).strip() for k in ("label", "visual_label", "title", "name") if str(n.get(k) or "").strip()), nid)
+        # 第 4 波（sync_keys_wave4 面 B）: 画面のノード名・台帳の見出しは lsGraphSemanticLabel（段名は日本語
+        # 「理論の土台」）。生の label（「Theory basis」）を見出しにすると英語見出しの偽所見になった（第 4 周 te-01 seq5）。
+        # 生の label は node_hint の照合にだけ残す
+        from uxsim.runner.share_exec import graph_node_label  # 遅延 import（画面のノード名の写しの正本）
+        label = graph_node_label(n) or raw
+        if label == "（無題）":
+            label = raw
+        nodes.append({"id": nid, "vis_id": str(n.get("id") or nid), "label": label, "raw_label": raw,
+                      "layer": str(n.get("graph_layer") or "main")})
     # 画面は既定で主グラフの層を描く
     nodes.sort(key=lambda n: 0 if n["layer"] == "main" else 1)
     g = {"document_id": doc, "nodes": nodes}
@@ -1080,12 +1610,30 @@ def studio_node_ledger(ctx) -> None:
     g = _load_graph(ctx)
     if not g:
         return
-    node = hint_pick(g["nodes"], ctx.args.get("node_hint"), ("label", "id"))
+    node = hint_pick(g["nodes"], ctx.args.get("node_hint"), ("label", "raw_label", "id"))
     if not node:
         return _missing(ctx, "graph_node")
     # lsRenderGraphNodeDetail → renderNodeLedgerSection(detail, "component", nodeId)
     _open_ledger(ctx, {"target_type": "component", "target_id": node["id"], "label": node["label"], "from": "studio",
                        "document_id": str(g.get("document_id") or "")})  # lsGraphActiveDocumentId()
+    check_expected_row(ctx, node)
+
+
+def check_expected_row(ctx, node: dict) -> None:
+    """``expect_row``（場面の前提「行のある対象」）を開いた台帳で確かめる（第 25 周 H31・第 4 周）。
+
+    第 4 周は周の前の行の用意が別の論文のノードに置かれ、「行のある対象」の観察が成立しないまま進んだ。台帳が
+    exists:false なら、経路は止めずに runner_note と ``inrun_unmet``（→ meta の blocked_precondition）に残す。"""
+    want = str(ctx.args.get("expect_row") or "").strip().lower()
+    if want not in ("true", "1", "yes", "はい"):
+        return
+    entry = ctx.session.scratch.get("doubt_ledger")
+    if isinstance(entry, dict) and entry.get("exists") is not False and ctx.session.last_status == 200:
+        return
+    text = f"台帳の記帳があるノード（{node.get('label') or node.get('id') or ''}）"
+    reason = "開いた台帳に行が無い（exists:false）— 周の前の行の用意がこの論文のこのノードに置かれていない"
+    ctx.session.scratch.setdefault("inrun_unmet", []).append({"text": text, "reason": reason, "check": "ledger_row"})
+    _runner_note(ctx.session, f"blocked_precondition: {text} — {reason}")
 
 
 def supporting_claim_ledger(ctx) -> None:
@@ -1168,7 +1716,7 @@ def counterfactual_toggle(ctx) -> None:
     g = _load_graph(ctx)
     if not g:
         return
-    node = hint_pick(g["nodes"], ctx.args.get("node_hint"), ("label", "id"))
+    node = hint_pick(g["nodes"], ctx.args.get("node_hint"), ("label", "raw_label", "id"))
     if not node:
         return _missing(ctx, "graph_node")
     cf = _cf(ctx)
@@ -1232,9 +1780,14 @@ def open_reachable_filter(ctx) -> None:
     flag = not (on is False or str(on).strip().lower() in ("false", "0", "off", "いいえ"))
     ctx.session.scratch["doubt_open_reachable"] = flag
     ctx.session.last_status = 200
+    from uxsim.runner.state import OBSERVATION_CHARS  # 観察の上限の正本
+
     _show(ctx, "\n".join(open_lines(list(ctx.session.scratch.get("doubt_open") or []), only_reachable=flag,
                                     empty_note=str(ctx.session.scratch.get("doubt_open_empty_note") or ""),
-                                    population_note=str(ctx.session.scratch.get("doubt_open_population_note") or ""))))
+                                    population_note=str(ctx.session.scratch.get("doubt_open_population_note") or ""),
+                                    # 第 10 波: 絞り込みでも欄名・事実文は同じ（doubt-atlas.js lastOpenAssumptionFieldSource）
+                                    field_source=ctx.session.scratch.get("doubt_open_field_source"),
+                                    budget=OBSERVATION_CHARS - 200)))
     _runner_note(ctx.session, "ui_only: 到達可能フィルタは読み込み済みの一覧をその場で絞る（HTTP なし）")
 
 
@@ -1261,7 +1814,7 @@ def _learner_line(ctx, target_type: str, target_id: str) -> Optional[str]:
                 for sc in data.get("scopes") or [] if isinstance(sc, dict)]
         axes = [a for a in axes if a]
         if len(axes) > 1:
-            text += "（記帳スコープ: " + "；".join(axes) + "）"
+            text += "（記録された検証スコープ: " + "；".join(axes) + "）"  # 第 8 波（IK-1059）
         if data.get("target_note"):
             # IK-0855: 部品を理論操作グラフの段へ写して引いた記録なら、どの段の記録かを添える
             text += " " + str(data["target_note"])
@@ -1298,6 +1851,7 @@ def sources_tab(ctx) -> None:
         seen_chunks.add(chunk)
         combined: list[tuple[str, str, str, str]] = []  # (kind, id, prefix, label)
         st, data = ctx.call("GET", "/api/learning/courses/{course_id}/source-chunk/{chunk_id}", overrides={"chunk_id": chunk})
+        outside = st == 404  # 本文の GET が 404 = 出典がこのコースの教材の外（H38）
         ids: set[str] = set()
         for f in (data or {}).get("formulas") or [] if _status_ok(st) and isinstance(data, dict) else []:
             fid = str((f or {}).get("id") or "") if isinstance(f, dict) else ""
@@ -1309,20 +1863,27 @@ def sources_tab(ctx) -> None:
         for c in (cdata or {}).get("claims") or [] if _status_ok(st2) and isinstance(cdata, dict) else []:
             if isinstance(c, dict) and c.get("id"):
                 combined.append(("claim", str(c["id"]), "主張 ", str(c.get("label") or "")))
-        shown: list[str] = []
+        # 第 4 波（IK-0971）: 同じ事実文は出典ごとに 1 行へ畳み、主語を「・」で並べる（app.js annotateOneSourceCardLedger）。
+        # 1 カード最大 3 行は畳んだ後の行数。行の無い対象も 200（exists:false）の fact_line で 1 行になる
+        groups: list[dict] = []
         for kind, tid, prefix, label in combined:
-            if len(shown) >= 3:
-                break
             text = _learner_line(ctx, kind, tid)
             if not text:
                 continue
             # 第 3 波（IK-0901）: 主語はサーバの target_label を優先（式の TeX ラベル・空の主語で行を出さない）
             subject = learner_ledger_target_label(s, kind, tid) or label
-            line = f"{prefix}{subject} — {text}" if subject else text
-            if line not in shown:
-                shown.append(line)
+            group = next((g for g in groups if g["text"] == text), None)
+            if group is None:
+                if len(groups) >= 3:
+                    continue
+                group = {"text": text, "subjects": []}
+                groups.append(group)
+            named = f"{prefix}{subject}" if subject else ""
+            if named and named not in group["subjects"]:
+                group["subjects"].append(named)
+        shown = [("・".join(g["subjects"]) + " — " + g["text"]) if g["subjects"] else g["text"] for g in groups]
         out.append(f"- 出典{no} のカード:")
-        out += [f"  {ln}" for ln in shown] if shown else [f"  {LEARNER_NO_LINE}"]
+        out += [f"  {ln}" for ln in shown] if shown else [f"  {LEARNER_NO_LINE_OUTSIDE if outside else LEARNER_NO_LINE}"]
     s.scratch["ledger_lines_shown"] = out[1:]
     _show(ctx, "\n".join(out))
 
@@ -1354,6 +1915,40 @@ def _center_component(session: PersonaSession) -> str:
     return str(focus.get("id") or session.scratch.get("component_center") or "")
 
 
+def _center_component_label(session: PersonaSession, cid: str) -> str:
+    """直前に開いた部品の文脈の中心の名前（第 6 周 H40 — ポップアップの見出しに部品名を出す）。"""
+    graph = session.scratch.get("last_component_graph")
+    focus = graph.get("focus") if isinstance(graph, dict) and isinstance(graph.get("focus"), dict) else {}
+    if focus and str(focus.get("id") or "") == str(cid) and focus.get("label"):
+        return str(focus["label"])
+    if str(session.scratch.get("component_center") or "") == str(cid):
+        return str(session.scratch.get("component_center_label") or "")
+    return ""
+
+
+def _material_component_anchors(session: PersonaSession) -> list[dict]:
+    """教材の ⚓ の部品チップ（題名つき）。"""
+    from uxsim.runner.state import material_anchors
+
+    return [{"id": str(a["id"]), "label": str(a.get("title") or a.get("label") or a["id"])}
+            for a in material_anchors(session.material) if a.get("kind") in ("component", "theory_component") and a.get("id")]
+
+
+def component_line_target(session: PersonaSession, hint: Any) -> tuple[str, str]:
+    """説明のポップアップを開く部品（第 25 周 第 7 周 H46）: hint があれば「◯◯の説明」ボタン → ⚓ の部品チップ → 直前の文脈の
+    中心の名前、の順に hint で引く。hint が当たらないときだけ直前の中心へ倒す（返り値の id が空なら呼び出し側が中心を使う）。
+    hint が無ければ従来どおり「◯◯の説明」ボタンの先頭。"""
+    mentions = _material_component_mentions(session)
+    text = str(hint or "").strip()
+    if not text:
+        return (mentions[0]["id"], mentions[0]["label"]) if mentions else ("", "")
+    for pool in (mentions, _material_component_anchors(session)):
+        picked = hint_pick(pool, text, ("label", "id")) if pool else None
+        if picked:
+            return picked["id"], picked["label"]
+    return "", ""
+
+
 def component_line(ctx) -> None:
     """``showComponentExplanations``: 教材の「◯◯の説明」ボタン（理論コンポーネント）で開く説明バージョンの
     ポップアップ。検証状態の一行は説明の下に添えられる（第 25 周 第 2 波: 承認済みの説明がゼロでも空の文の下に
@@ -1365,18 +1960,21 @@ def component_line(ctx) -> None:
     s = ctx.session
     cid = str(ctx.args.get("component_id") or "").strip()
     label = ""
-    mentions = _material_component_mentions(s)
-    if not cid and mentions:
-        picked = hint_pick(mentions, ctx.args.get("component_hint"), ("label", "id")) or mentions[0]
-        cid, label = picked["id"], picked["label"]
+    if not cid:
+        cid, label = component_line_target(s, ctx.args.get("component_hint"))
     if not cid:
         cid = _center_component(s)
         if cid:
-            _runner_note(s, "runner_choice: 教材に「◯◯の説明」ボタン（理論コンポーネント）が無いので、"
-                            "直前に開いた部品の文脈の中心の部品で説明のポップアップを開いた")
+            label = _center_component_label(s, cid)
+            _runner_note(s, ("runner_choice: 教材の「◯◯の説明」ボタン・⚓ の部品チップに「"
+                             f"{ctx.args.get('component_hint')}」に合うものが無いので、" if ctx.args.get("component_hint")
+                             else "runner_choice: 教材に「◯◯の説明」ボタン（理論コンポーネント）が無いので、")
+                         + "直前に開いた部品の文脈の中心の部品で説明のポップアップを開いた")
     if not cid:
         return _missing(ctx, "component_id")
     head = f"「{label}の説明」のポップアップ（説明バージョン）:" if label else "部品の説明のポップアップ（説明バージョン）:"
+    # 第 25 周 第 6 周 H40: どの部品のポップアップかを観察の頭に 1 行（app.js の見出し src-popup-title = 部品名と逐語で揃える）
+    head = (f"（部品: {label}）\n" if label else "（見出し: 説明バージョン）\n") + head
     from uxsim.runner.state import learner_focus_params
 
     status, data = ctx.call("GET", "/api/learning/courses/{course_id}/components/{component_id}/explanations",
@@ -1389,6 +1987,12 @@ def component_line(ctx) -> None:
         fail = detail if (status == 404 and isinstance(detail, str) and detail and detail != "Course not found") \
             else EXPLANATIONS_FAIL
         return _show(ctx, f"{head}\n{fail}")
+    if isinstance(data, dict) and data.get("available") is False:
+        # 第 7 波（IK-1021 doubt 側）: 後継が決まらない凍結の ⚓ は 200 + available:false。見出しは凍結時の部品名、
+        # 本文は frozen_label_line（無ければ note）だけ（別の部品の検証状態の一行は添えない — app.js showComponentExplanations）
+        fl = str(data.get("frozen_label") or "")
+        top = f"（部品: {fl}）\n" if fl else "（見出し: 説明バージョン）\n"
+        return _show(ctx, f"{top}{data.get('frozen_label_line') or data.get('note') or EXPLANATIONS_FAIL}")
     items = [e for e in (data or {}).get("explanations") or [] if isinstance(e, dict)] if isinstance(data, dict) else []
     if not items:
         empty = str(data.get("note") or "") if isinstance(data, dict) else ""
@@ -1422,9 +2026,10 @@ def learner_open_assumptions(ctx) -> None:
         return _show(ctx, f"{head}\n{data.get('empty_note') or LEARNER_OPEN_EMPTY}")
     lines = [head]
     for it in items:
-        meta = [NO_SCOPE if it.get("scope_count_is_zero") else "検証: 記帳あり"]
+        meta = [LEARNER_NO_SCOPE if it.get("scope_count_is_zero") else LEARNER_HAS_SCOPE]  # 第 8 波（IK-1059）: 学習者の語
         if it.get("has_verification_proposal"):
-            meta.append("検証提案あり")
+            # 第 10 波（IK-1121）: 提案の進み具合の語はサーバの verification_proposal_label（無ければ旧語）
+            meta.append(str(it.get("verification_proposal_label") or "検証提案あり"))
         lines.append(f"- {it.get('statement') or it.get('target_id') or ''}（{' ・ '.join(meta)}）")
     if data.get("population_note"):
         # app.js（第 3 波・IK-0933）: 行の後に data-lx-population-note の 1 行（空のときは出さない）
@@ -1537,7 +2142,7 @@ NEARBY_AXIS_NOTE = {"near": "上から下へ、前提 → いまここ → そ�
                     "root": "上から下へ、土台から順に前提が積み上がって「いまここ」に至ります。",
                     "range": "上から下へ、土台から順に前提が積み上がっています。"}
 NEARBY_EMPTY_NOTICE = "この記録は、まだ論文の理論構成に結びついていません。"
-NEARBY_LEGEND_LEDGER = ("凡例: 枠線の実線 = 検証の記帳がある / 点線 = このコーパスの中では検証記録がない")
+NEARBY_LEGEND_LEDGER = ("凡例: 枠線の実線 = 検証の記録がある / 点線 = このコーパスの中では検証記録がない")  # 第 8 波（IK-1059）
 NEARBY_LEGEND_RANGE = "凡例: 濃い = この話題が触れている場所 / 薄い = この論文のその他の理論構成"
 NEARBY_LEGEND_KINDS = "凡例: 問い / 引っかかり / 再構成"
 NEARBY_FAIL = "いまは表示できません。"
@@ -1548,7 +2153,7 @@ def _nearby_chip(n: dict, *, excerpt: bool) -> str:
     if excerpt and n.get("claim_excerpt"):
         parts.append(f"「{n['claim_excerpt']}」")
     ver = n.get("verification") if isinstance(n.get("verification"), dict) else None
-    parts.append(f"［{ver.get('label')}］" if ver and ver.get("label") else "（枠線: 台帳の記帳なし）")
+    parts.append(f"［{ver.get('label')}］" if ver and ver.get("label") else "（枠線: 検証の記録なし）")  # 第 9 波（IK-1059）: 学習者の語
     if n.get("touched") is False:
         parts.append("（薄い）")
     if n.get("mine"):
@@ -1639,6 +2244,11 @@ def nearby(ctx) -> None:
         if ctx.args.get(k):
             params[k] = ctx.args[k]
     status, dto = ctx.main(params=params)
+    if _status_ok(status):
+        # 第 10 波（IK-1113）: 見ている場所の参照を控える（開いている間の往復の selection.personal_map_node_id）
+        from uxsim.runner.actions_exec import remember_personal_map_view
+
+        remember_personal_map_view(s, params["node_id"], params.get("center_component_id"))
     if status == 404:
         return _show(ctx, "わたしの地図 — いまここの周り:\n" + NEARBY_EMPTY_NOTICE)
     if not _status_ok(status):
@@ -1655,15 +2265,20 @@ HANDLERS: dict[str, Callable[[Any], None]] = {
     "admin.doubt.assumption_filter": assumption_filter,
     "admin.doubt.assumption_confirm": assumption_confirm,
     "admin.doubt.assumption_dismiss": assumption_dismiss,
+    "admin.doubt.assumption_open_ledger": assumption_open_ledger,  # 第 6 波（IK-1028）
     "admin.doubt.ledger_open": ledger_open,
+    "admin.doubt.unplotted_open": unplotted_open,  # 第 9 波（doubt H52）
     "admin.doubt.open_reachable_filter": open_reachable_filter,
     "admin.doubt.studio_node_ledger": studio_node_ledger,
     "admin.doubt.supporting_claim_ledger": supporting_claim_ledger,  # 第 2 波（IK-0904）
     "admin.doubt.scope_record": scope_record,
+    "admin.doubt.scope_record_raw": scope_record_raw,  # 第 25 周 H30（画面を経ない確認）
+    "admin.doubt.scope_record_raw_incomplete": scope_record_raw_incomplete,  # 第 25 周 第 7 周 H43
     "admin.doubt.scope_candidate_decide": scope_candidate_decide,
     "admin.doubt.verification_status": verification_status,
     "admin.doubt.challenge_record": challenge_record,
     "admin.doubt.challenge_withdraw": challenge_withdraw,
+    "admin.doubt.withdrawn_challenges_open": withdrawn_challenges_open,  # 第 5 波（IK-0998）
     "admin.doubt.challenge_propose": challenge_propose,
     "admin.doubt.proposal_status": proposal_status,
     "admin.doubt.falsification_record": falsification_record,

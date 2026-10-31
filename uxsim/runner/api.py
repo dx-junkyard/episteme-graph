@@ -29,10 +29,12 @@ from uxsim.llm import (CachingPersonaLLM, PersonaLLM, ReplayPersonaLLM, ReplayTh
                        load_cache_jsonl, make_live_llm)
 from uxsim.persona.agent import PersonaAgent, StepDecision
 from uxsim.persona.compose import PersonaSpec, compose_persona, course_brief
-from uxsim.runner.actions_exec import PINNED_MISMATCH_MARK, execute, prefetch_courses, runner_note
+from uxsim.runner.studio_exec import lecture_paused_note
+from uxsim.runner.actions_exec import (PINNED_MISMATCH_MARK, execute, prefetch_courses, runner_note,
+                                      unavailable_reason)
 from uxsim.runner.client import EpistemeClient
 from uxsim.runner.scenario import (SKIP_ACTION_ID, Option, Scenario, ScenarioParams, StepSpec, evaluate_until,
-                                   load_params, load_scenario)
+                                   load_params, load_scenario, state_flags_in)
 from uxsim.runner.state import PersonaSession, persona_uses_voice, project_observation
 from uxsim.schema import RunMeta, ThinkAloud, TranscriptStep, now_iso
 
@@ -228,6 +230,26 @@ def seed_landing_steps(scenario: Scenario, parts: list[str]) -> list[tuple[str, 
     return found
 
 
+#: 第 25 周 第 8 周 share H50: 音声のペルソナでも、場面の材料 ``voice: false`` があればこの経路のチャットは文字で送る
+#: （casual + screen_mode=voice では構造の手がかり・画面文脈が渡らない規則なので、テキストの前提の観察ができない）。
+#: 経路の間だけ差し替え、終われば戻す
+VOICE_OFF_VALUES = frozenset({"false", "no", "off", "text", "0"})
+VOICE_OFF_NOTE = ("runner_fixed: 場面の材料 voice: false — 音声中心のペルソナだが、この経路のチャットは文字で送る"
+                  "（intent_mode=casual / screen_mode=voice を付けない）")
+
+
+def apply_scenario_voice(session: PersonaSession, params: ScenarioParams) -> Optional[bool]:
+    """``voice: false`` の材料があれば ``session.uses_voice`` を False にし、元の値を返す（変えなければ None）。"""
+    raw = params.values.get("voice") if isinstance(params.values, dict) else None
+    if raw is None or not session.uses_voice:
+        return None
+    if raw is False or str(raw).strip().lower() in VOICE_OFF_VALUES:
+        session.uses_voice = False
+        runner_note(session, VOICE_OFF_NOTE)
+        return True
+    return None
+
+
 class ScenarioRunner:
     """1 ペルソナ × 1 経路を実行する。"""
 
@@ -321,6 +343,13 @@ class ScenarioRunner:
             raise
         self._finalize(d)
 
+    def _screen_seq(self) -> Optional[int]:
+        """「直前に見た画面」が transcript のどの seq の結果か（第 6 周 atlas H39 — 頭脳が自分で数えない）。"""
+        if self.pending is not None:
+            return int(self.pending.seq)
+        last = int(getattr(self.writer, "seq", 0) or 0)
+        return last or None
+
     def _decide(self, spec: StepSpec, allowed, suggested, exhausted) -> StepDecision:
         notes = {o.action: str(self.params.render(o.note)) for o in spec.options if o.note}
         instruction = str(self.params.render(spec.note))
@@ -328,12 +357,13 @@ class ScenarioRunner:
         if self._stop_may_follow():
             # 反応だけを先に聞く。止まるならここで _Stop が上がり、頭脳は次の行為を選ばない
             probe = self.agent.step(goal=self._goal(), instruction=instruction, allowed=allowed,
-                                    observation=self.observation, history=self.history, reaction_only=True)
+                                    observation=self.observation, history=self.history, reaction_only=True,
+                                    screen_seq=self._screen_seq())
             self._stop_or_finalize(probe)
         decision = self.agent.step(goal=self._goal(), instruction=instruction,
                                    allowed=allowed, observation=self.observation, history=self.history,
                                    suggested_args=suggested, notes=notes, optional=spec.optional,
-                                   exhausted=exhausted)
+                                   exhausted=exhausted, screen_seq=self._screen_seq())
         if probe is not None:
             # 同じ画面への反応は先に聞いたものが正本（二重に数えない）
             decision.prev_reaction, decision.prev_friction = probe.prev_reaction, probe.prev_friction
@@ -347,6 +377,26 @@ class ScenarioRunner:
             raise BudgetExhausted(self.budget.exhausted())
         self._done.add(id(spec))
         allowed = [a for a in spec.allowed(self.scenario.screen) if a.id not in RUNNER_DRIVEN_ACTIONS]
+        if spec.kind == "choose" or len(spec.options) > 1:
+            # 第 25 周 H26（第 4 周）: 画面の状態で対象の無い行為（候補 0 件の［採用］等）を選択肢から外す。
+            # 不実行の注記で済ませると、頭脳は「押したのに何も起きない」と読んで諦めた。外したことは runner_note に残す
+            kept, dropped = [], []
+            for a in allowed:
+                reason = unavailable_reason(a.id, self.session)
+                (dropped if reason else kept).append((a, reason))
+            if dropped:
+                runner_note(self.session, "（ハーネス: 画面に対象の無い行為を選択肢から外した — "
+                            + "／".join(f"{a.id}: {r}" for a, r in dropped) + "。これは画面の文ではない）")
+            allowed = [a for a, _ in kept]
+        elif len(allowed) == 1:
+            # 第 25 周 第 6 周 atlas H38: 場面の固定手（do）も同じ除外を通す。下書きが既にあり候補も 0 件の状態で
+            # ［次版の下書きを作る］→ 取り込み → 反映の固定手が HTTP を出さずに終わり、審判 A が blocked に数えた。
+            # 画面に対象が無ければ頭脳に問わず手を消費しないで飛ばし、その事実をハーネスの印で残す
+            reason = unavailable_reason(allowed[0].id, self.session)
+            if reason:
+                runner_note(self.session, f"（ハーネス: 画面に対象が無いので飛ばした — {allowed[0].id}: {reason}。"
+                                          "これは画面の文ではない）")
+                return
         if not allowed:
             return
         single = spec.kind != "choose" and len(spec.options) == 1 and spec.options[0].action != "*"
@@ -359,7 +409,7 @@ class ScenarioRunner:
             if self._until is not None:
                 expr, iterations = self._until
                 self._until = None
-                if evaluate_until(expr, {"friction": decision.prev_friction, "steps": iterations,
+                if evaluate_until(expr, {**self._state_flags(), "friction": decision.prev_friction, "steps": iterations,
                                          "status": self.session.last_status, "goal_reached": decision.goal_reached,
                                          "persona_decides_to_stop": decision.stop}):
                     raise _UntilMet(decision)
@@ -381,9 +431,17 @@ class ScenarioRunner:
             else:
                 self._one(spec)
 
+    def _state_flags(self) -> dict[str, bool]:
+        """runner が画面の状態から立てた旗（``scenario.STATE_FLAGS``・第 25 周 H25）。"""
+        return {k: bool(v) for k, v in (self.session.scratch.get("until_flags") or {}).items()}
+
     def _repeat(self, spec: StepSpec) -> None:
         iterations = 0
+        flags_in_until = state_flags_in(spec.until)
         while iterations < spec.max:
+            if flags_in_until and evaluate_until(" or ".join(flags_in_until), self._state_flags()):
+                # 状態の旗が立った（例: 採用済み・未反映が無くなった）— 頭脳に次の手を問わずに繰り返しを抜ける
+                break
             self._until = (spec.until, iterations) if iterations > 0 else None
             try:
                 if spec.children:
@@ -406,6 +464,9 @@ class ScenarioRunner:
         if valid and action.llm_cost == "product":
             self.budget.product_calls += 1
         observation = project_observation(action_id, self.session.last_status, self.session.last_body)
+        paused = lecture_paused_note(action_id, self.session)  # 第 25 周 第 6 周 studio H33
+        if paused:
+            observation += "\n" + paused
         for note in self.session.scratch.pop("observation_notes", None) or []:
             # runner が画面の前提として添える事実（例: 音声モードは議論では使えない）。審判・ペルソナが割り引く材料
             observation += f"\n〔{note}〕"
@@ -455,6 +516,11 @@ class ScenarioRunner:
         # 第 25 周 H6: 経路が ``pin_course: true`` を宣言したら、学生のコースの選択を campaign の course_id に固定する
         # （actions_exec ``pinned_course_override``）。経路ごとに立て直す（種まきの経路に持ち越さない）
         self.session.scratch["pin_course_strict"] = bool(self.scenario.raw.get("pin_course"))
+        # 第 25 周 第 10 波（doubt H60）: 場面の材料の文（記帳の欄に入ったときに観察で「場面の材料」と注記する照合表）
+        from uxsim.runner.doubt_exec import SCENARIO_MATERIAL_TEXTS_KEY, scenario_material_texts
+
+        self.session.scratch[SCENARIO_MATERIAL_TEXTS_KEY] = scenario_material_texts(self.params.values)
+        voice_saved = apply_scenario_voice(self.session, self.params)
         try:
             try:
                 self._run_steps(self.scenario.steps)
@@ -468,7 +534,8 @@ class ScenarioRunner:
             if self.pending is not None:
                 try:
                     final = self.agent.step(goal=self._goal(), instruction="", allowed=[],
-                                            observation=self.observation, history=self.history, finishing=True)
+                                            observation=self.observation, history=self.history, finishing=True,
+                                            screen_seq=self._screen_seq())
                     self._finalize(final)
                     if final.prev_friction == "gave_up" or final.gave_up_reason:
                         self.outcome.gave_up = True
@@ -477,6 +544,8 @@ class ScenarioRunner:
                     self.writer.log(f"最後の反応を取得できませんでした: {exc}")
                     self.writer.write_step(self.pending)
                     self.pending = None
+            if voice_saved is not None:
+                self.session.uses_voice = voice_saved
         return self.outcome
 
 
@@ -547,6 +616,20 @@ def record_pinned_mismatch(meta: RunMeta, session: PersonaSession) -> bool:
 
 BLOCKED_PRECONDITION_MARK = "blocked_precondition"
 SEEDED_PRECONDITION_MARK = "seeded_precondition"
+
+
+def record_inrun_unmet(meta: RunMeta, session: PersonaSession) -> bool:
+    """経路の途中で runner が確かめた場面の前提の不足（``session.scratch["inrun_unmet"]``・第 25 周 doubt H31）を
+    meta に ``blocked_precondition`` として移す。経路は歩いているので、その前提に依る観察だけを成立していないと読む。"""
+    found = list(session.scratch.pop("inrun_unmet", None) or [])
+    for u in found:
+        meta.blocked_precondition.append({"persona_id": session.persona_id, "session": session.session_no,
+                                          "scenario_id": u.get("scenario_id", ""), "unmet": [u], "seeded": [],
+                                          "in_run": True})
+        meta.notes.append(f"{BLOCKED_PRECONDITION_MARK}: {session.persona_id}（セッション {session.session_no}）の"
+                          f"経路の途中で前提が満たされていなかった: {u.get('text', '')}（{u.get('reason', '')}）。"
+                          "この前提に依る観察は成立していないものとして読む")
+    return bool(found)
 
 
 def _precondition_course_id(session: PersonaSession) -> str:
@@ -787,6 +870,10 @@ def run_campaign(
         # 「受講中の先頭」で拾い、内容依存の是正が確認できなかった）
         if campaign.get("course_id"):
             session.scratch["pinned_course_id"] = str(campaign["course_id"])
+        # 第 25 周 第 9 波（studio H40）: 発行の直前に学生の読みを run の中に残す手（studio_exec.prepublish_student_reads）が
+        # 書き先と学生の資格を引けるように（画面の状態ではない — 観察には出さない）
+        session.scratch["run_dir"] = str(run_dir)
+        session.scratch["campaign_students"] = [str(x) for x in personas.get("students") or []]
         ok, trace = client.login(session.username, session.password)
         writer.write_step(TranscriptStep(
             seq=writer.next_seq(), persona_id=pid, session=session_no, action_id="auth.login",
@@ -896,7 +983,7 @@ def run_campaign(
                     break
         finally:
             carried[pid] = session.course_id
-            if record_pinned_mismatch(meta, session):
+            if record_pinned_mismatch(meta, session) | record_inrun_unmet(meta, session):
                 writer.write_meta(meta)  # 途中で止まった run でも meta に残す（第 12 周の meta は finished_at が空だった）
             meta.spent["http_429"] = meta.spent.get("http_429", 0) + client.count_429
             client.close()
@@ -920,6 +1007,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     run_dir = run_campaign(resolve_campaign_path(args.campaign), replay_of=args.replay,
                            persona_filter=args.persona, scenario_filter=args.scenario, max_steps=args.max_steps)
     print(f"run: {run_dir}")
+    # 第 25 周 第 10 波（share H65）: 到達点（状態を変える手が成功した事実）を run に残す。lane.sh の LANE_DEPS が読む
+    from uxsim.runner.outcome import write_outcome
+
+    try:
+        write_outcome(run_dir)
+    except Exception as exc:  # noqa: BLE001 — 到達点の記録が書けなくても run は残す（依存の判定は「記録なし」で止まる）
+        print(f"到達点の記録を書けませんでした: {exc}")
     if not args.no_oracles:
         from uxsim.oracles.run_all import run_oracles
 

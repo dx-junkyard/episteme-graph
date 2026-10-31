@@ -26,12 +26,45 @@ steps:
     with: {proposal: "{{proposal_text}}", external_check: "{{external_check}}", reachability: 次世代の装置・観測なら可能}
   - do: admin.doubt.proposal_status
     with: {status: 検証に着手}
+  # 第 25 周 第 9 波（doubt H54）: 着手した提案の［完了を記録］（9 周未到達 — 場面の手に無かった）。pick を省くと着手中の提案を指す
+  - choose:
+      - do: admin.doubt.proposal_status
+        with: {status: 完了を記録}
+        note: 着手した検証提案が済んだ（または済んだと記録してよい）なら［完了を記録］を押し、カードと合意リストの行の変わり方を読む
+    optional: true
   - do: admin.doubt.challenge_record
     with: {challenge_type: 定義, challenge_mode: 主張と根拠のつながりへ, reason: "{{second_reason}}"}
   - do: admin.doubt.challenge_withdraw
     note: 二つ目の疑義を取り下げる（行が消えずに状態として残るかを見る）
+  # 第 25 周 第 7 周 H44: 取り下げ済みの折りたたみ（第 5 波で runner にある）を開く手。中身（型・向き・理由・取り下げた人）を読む
+  - choose:
+      - do: admin.doubt.withdrawn_challenges_open
+        note: 疑義の区画の末尾「取り下げ済みの疑義（読み取りのみ）」を開き、取り下げた疑義の中身を読む
+    optional: true
+  # 第 25 周 第 10 波（doubt H60）: 疑義の重複の告知（同じ型・同じ理由の未取り下げの疑義があるときの知らせ）を確かめる手。
+  # 材料の理由に周番号を入れていたため、知らせの条件（理由の完全一致）に構造的に当たらなかった。runner は台帳の既存の疑義の
+  # 型と理由をそのまま写して送り、観察に「場面の材料の写し」と注記する。記帳するかはペルソナの判断（記帳は消えずに残る）
+  - choose:
+      - do: admin.doubt.challenge_record
+        with: {challenge_type: 外挿, reason_from: open_challenge}
+        note: 既にある疑義と同じ型・同じ理由の疑義をもう一度残そうとしたとき、画面が何と言うかを読む（知らせが出るか・記帳は止まるか）
+    optional: true
   - do: admin.doubt.refresh
     note: 未検証合意リストに、検証提案の有無が段階で出るか
+  # 第 25 周 第 5 周（judge_doubt_r4 §4・IK-0968）: 台帳を開き直して、作った検証提案と取り下げた疑義が後から読めるか
+  - choose:
+      - do: admin.doubt.studio_node_ledger
+        with: {material_hint: "{{material_hint}}", node_hint: "{{node_hint}}"}
+        note: 同じノードの台帳を開き直す
+    optional: true
+  - choose:
+      - do: admin.doubt.supporting_claim_ledger
+        note: 支える主張の台帳へもう一度移り、さっき作った検証提案と取り下げた疑義が読めるかを見る
+    optional: true
+  - choose:
+      - do: admin.doubt.withdrawn_challenges_open
+        note: 開き直した台帳でも「取り下げ済みの疑義」を開いて中身を読む
+    optional: true
 stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
 expects:
   - manual: teacher/18-admin-doubt-atlas.md#record-challenge

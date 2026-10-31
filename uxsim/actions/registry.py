@@ -259,6 +259,12 @@ _LEARNING: list[Action] = [
     _a("learning.atlas.neighbors", "わたしの地図で近くにある概念（霧）を見る", "learning", "topbar.my-map",
        ("GET", "/api/me/personal-network/atlas-neighbors"), args={"node_id": "str?"},
        precondition="わたしの地図にノードがある", manual=_ST + "personal-map"),
+    # 第 25 周 第 5 波（IK-0848 / IK-1007）: 共有先・判断の記録に出る名前を本人が登録する
+    _a("learning.profile.name", "上部の「👤 名前」で共有先に出る名前を見る・登録する", "learning", "topbar.profile-name",
+       ("PATCH", "/api/me/profile"), args={"profile_name": "str?"}, extra_api=(("GET", "/api/me/profile"),),
+       manual=_ST + "profile-name",
+       note="profile_name を省くと読むだけ（いま共有先に出る名前と説明）。空文字で登録を消す。200 字まで。"
+            "ログインに使うユーザー名は変わらず、ほかの利用者には見せない"),
 ]
 
 _TE = "teacher/"
@@ -393,6 +399,11 @@ _ADMIN: list[Action] = [
     _a("admin.seminar_brief.view", "ゼミ前ブリーフを開く", "admin", "materials.row-seminar-brief",
        ("GET", "/api/admin/documents/{document_ref}/seminar-brief"), args={"document_ref": "str?", "material_hint": "str?"},
        manual=_TE + "11-admin-materials.md#seminar-brief-open"),
+    _a("admin.profile.name", "ヘッダーの「👤 名前」で共有先・判断の記録に出る名前を見る・登録する", "admin",
+       "header.profile-name", ("PATCH", "/api/me/profile"), args={"profile_name": "str?"},
+       extra_api=(("GET", "/api/me/profile"),), manual=_TE + "10-admin-common.md#profile-name",
+       note="第 25 周 第 5 波（IK-0848 / IK-1007）。profile_name を省くと読むだけ。空文字で登録を消す。200 字まで。"
+            "帰属・所有者・査読者・記帳者の名前はこの登録から出る（未登録は「名前の登録がありません」）"),
 ]
 
 # --- 検証シミュレーション層（SB層・学習画面「🧪 動かして確かめる」/ 教員の「検証シミュレーション…」）。

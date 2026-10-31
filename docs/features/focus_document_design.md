@@ -148,3 +148,92 @@ component_assembly が論文ごとに一意に振り、legacy_ids は agent ID �
 （コース sources の document 解決・題名解決・コースビルダーの選択教材・R層スコープ・tension worker を移行。
 ガードレール `test_document_refs.py::test_both_forms_disambiguation_only_in_known_places` は既存6箇所を凍結した
 allowlist で、新しい突き合わせの直書きを拒む）。テストは `test_claim_address_resolution.py` / `test_document_refs.py`。
+
+## 追補（2026-10-27・第 25 周 第 5 波）焦点と同じ論文の別の版・構成の段落
+
+- **別の版**（IK-0996）: 検索結果の後処理（`services._collapse_search_paper_versions` → `core/source_versions`）が
+  同じ論文の別の版の同じ箇所を 1 行に畳むとき、**焦点の論文の版を先に残す**（`search_chunks_with_metadata(...,
+  prefer_document_ids=_focus.document_ids)`）。焦点の版を落として別の版を残すと、FD3 の除外で焦点の外として落ち、
+  出所分類が「別の資料」に変わるため。焦点が無いときは AI が復元した式の少ない版（TeX）を残す。FD1〜FD5 は非改変。
+- **構成の段落**（IK-0987）: 焦点の外の論文の「This paper is organized as follows」の段落が FD3 の相対比較を通って
+  いた件は、FD3 の閾値を変えず、検索の非本文判定（`non_content_chunk_reason` の `outline`）で採用から外す
+  （TeX の参照が落ちた番号の無い「Sec.」も節参照に数える）。焦点の内外を問わず、構成の段落は問いの材料にならない。
+
+pre-mortem: `scope-widened-silently`（相対比較が汎用段落を通す）— 規則ではなく候補の母集合で止める。
+`condition-not-propagated`（焦点が版の選択に伝わらない）— `prefer_document_ids` で渡す。
+
+## 追補（2026-10-27・第 25 周 第 6 波）焦点を同じ論文の別の版まで広げる・出典番号の版
+
+- **焦点の版**（IK-1035 / IK-0987 STILL）: 焦点の論文が PDF 版の document のとき、同じ論文の TeX 版のチャンクは
+  焦点の外に数えられていた（第 5 波の畳み込みは同じ箇所だけを畳み、別の箇所の TeX 版の行は残る）。焦点内に採用の
+  下限を満たす行が PDF 版に無いと FD3 は何も除外せず、無関係な論文の行が通った。`resolve_focus_document(` の直後に
+  `core/focus_document.with_paper_versions(_focus, services.paper_version_siblings(...))` で焦点に別の版を足す。
+  版の判定は IK-0919 の `same_paper` の 1 つ、版は**スコープ（`allowed_document_ids`）との積だけ**（FD2）、段（`source`）は
+  変えない。`resolve_focus_document(` を呼ぶのは 1 回のまま（FD1 のガードレール）。前提の説明の検索（`prefer_document_ids`）
+  も同じ関数を通る。スコープが `None` / 空なら版を足さない（fail-closed）。
+- **出典番号の版**（IK-1037）: 版を畳むとき、会話で既に出典番号を持つチャンク（`_SessionCitationNumbers.mapping()`）を最優先で
+  残す（`collapse_paper_versions(prefer_chunk_ids=)`）。焦点の版の優先（第 5 波）より前に置く — 前の往復で引用した版を
+  選び直すと別のチャンクとして新しい番号が振られ、前の回答の [出典5] が今回 [出典12] になるため。
+
+### 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 焦点を広げるとスコープを広げないか | `scope-widened-silently` | 版はスコープとの積だけ。スコープの外の版は足さない |
+| 写しの 1 つで対象を表していないか | `same-name-different-referents` | 焦点を論文の版の集合にする（判定は `same_paper` の正本） |
+| 代表の選び直しで番号が変わらないか | `id-not-stable-across-versions` | 番号を持つチャンクを代表に残す |
+| 版の判定を別の面で再実装しないか | `duplicate-canonical-sources` | `same_paper` を呼ぶだけ。新しい同一視の規則を作らない |
+
+当たらない族: 確定の担当（AI の判定で確定するものは無い）。
+
+## 追補（2026-10-31・第 25 周 第 9 波）地図の場所に置かれた論文を焦点に加える（FD-note 3）
+
+- **症状**（製品頭脳 B 4293）: 分野の地図で「暗黒エネルギー」を開いて尋ねても、焦点はトピックの論文（Cep B）だけで、
+  FD3 がトピックの論文より類似度の低い地図の論文の行を落とした。地図の場所の参照（`view.atlas_node_id`）は画面文脈の
+  事実文（SA層）にしか効いていなかった。
+- **FD-note 3 地図の場所の論文は加えるだけ。** chat core は `resolve_focus_document(` の直後に
+  `core/focus_document.with_screen_place_documents(_focus, 置かれた論文, allowed_document_ids=...)` を通す。置かれた論文は
+  `learner_landscape_for_documents`（学習者向け位置づけ射影）で、コースの論文 ∩ スコープの中だけ（FD2）。段（`source`）と
+  既存の焦点の論文は変えず、後ろに足す（焦点が無ければ④段 = 画面で選んだ論文）。discuss では足さない。
+- **トピックの段を外さない理由**: `view.atlas_node_id` は app.js の「最後に開いた場所」で、地図を閉じた後も残る
+  （`state.atlasLastNode`）。これでトピックの段を外すと、地図を一度開いた後のトピックの問いすべてで焦点が崩れる。
+  加えるだけなら、トピックの問いでは地図の論文の行が FD3 を通るだけ（並べ替えは焦点の内外だけを見る）。
+- 同じ理由で、前提の逆質問（A3）のゲートは `view.atlas_node_id` では飛ばさない — 地図の問いでゲートを出さない規律は
+  明示の ↗（`atlas_context`）の経路のまま。
+
+### 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 焦点を足すとスコープを広げないか | `scope-widened-silently` | 置かれた論文はコースの論文 ∩ `allowed_document_ids` だけ。スコープが空なら足さない |
+| 持続する画面状態を「いま」の明示と読まないか | `condition-not-propagated` | 最後に開いた場所は「加える」にだけ使い、段の勝ち負け・前提ゲートは変えない |
+| 「どの論文か」の条件式を他所に書かないか | `duplicate-canonical-sources` | 合成は `core/focus_document.py` の 1 関数。`resolve_focus_document(` は chat core で 1 回のまま |
+
+当たらない族: 確定の担当（確定する操作は無い）。
+
+## 追補（2026-10-31・第 25 周 第 10 波）今の往復で選んだ地図の場所は明示の焦点（FD-note 4）
+
+- **症状**（製品頭脳 A 4307 / B 4312・前周 4293）: FD-note 3 は置かれた論文を焦点の**後ろに加える**だけで、トピックの論文
+  （Cep B）は焦点に残った。FD3 の並べ替え・除外は焦点の内外しか見ないので、場所を開いて尋ねても Cep B の行が先に並び、
+  検索の構造 1 hop（`retrieved_structure`）にも Cep B の主張・段階が載った。表示中の教材の出典（`_topic_source_rows`）も
+  Cep B を番号付き出典として足していた。
+- **FD-note 4 今の往復で選んだ地図の場所は明示の段。** 画面は分野の地図で場所を選んだ直後の 1 往復（地図はモーダルなので
+  閉じてから尋ねる）と地図を開いている間だけ `selection.atlas_node_id` を載せ、その往復を送ったら落とす（トピックを移っても
+  落とす。最後に開いた場所は `view.atlas_node_id` に残る）。chat core は `selection.atlas_node_id` があるときだけ
+  `with_screen_place_documents(..., selected_now=True)` を呼び、置かれた論文（スコープ内）だけを `source="explicit"` の焦点にする
+  （トピックの段は外す）。置かれた論文がスコープに無ければ従来の焦点のまま（材料の無い焦点を作らない）。同じ往復では
+  表示中の教材の出典チャンクを番号付き出典に足さない（教材本文の注入は従来どおり）。`view` だけの往復は FD-note 3 のまま。
+- 前提の逆質問のゲートは変えない（`atlas_context` の経路のまま）。`resolve_focus_document(` は chat core で 1 回のまま。
+- 意図分類の手がかり（`_intent_screen_hint`）も同じ区別で、地図の場所の 1 行は `selection` にあるときを先に、`view` だけなら
+  要素・選んだ一節・わたしの地図の後に回す（製品頭脳 B 4308）。
+
+### 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 持続する画面状態を「いま」の明示と読まないか | `condition-not-propagated` | 明示は `selection`（送ったら落とす）だけ。`view` は FD-note 3 の「加える」にだけ使う |
+| 焦点を替えるとスコープを広げないか | `scope-widened-silently` | 置かれた論文はコースの論文 ∩ `allowed_document_ids`。無ければ焦点を替えない |
+| 「どの論文か」の条件式を他所に書かないか | `duplicate-canonical-sources` | 段の入れ替えは `core/focus_document.with_screen_place_documents` の 1 関数 |
+| 画面の申告が送信のたびに残り続けないか | `stale-derivative-served` | app.js は `getScreenContext` で 1 回使ったら落とす・トピック移動で落とす |
+
+当たらない族: 確定の担当（確定する操作は無い）。

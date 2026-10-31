@@ -360,3 +360,8 @@ ALTER TABLE atlas_domain_meta ADD COLUMN IF NOT EXISTS retire_note TEXT NOT NULL
   `test_atlas_binding_pending.py` / `test_atlas_freeze_impact.py` ほか。
 - 本書の対象外（後続の別層）: カテゴリギャップ候補（migration 066）・
   ベクトル係留（074）・辺候補（076）は、それぞれの設計書が正本。
+
+### 11.x 第 25 周 第 4 波の追補（2026-10-25・IK-0963）
+
+- 凍結の影響（`compute_freeze_impact`）に `added_nodes`（「名前（親領域）」/「名前（領域）」・骨格の順）を足し、facts に
+  「次版で加わる項目: …」を関係の列挙と同じ並びで出す（件数なし・初回凍結は全項目になるので出さない）。

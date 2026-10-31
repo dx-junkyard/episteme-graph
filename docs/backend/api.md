@@ -369,6 +369,20 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 > `test_trace_registry_guardrails.py` で固定。TR4）。封印は v2 の専用設計書を経る。
 > `{user_id}` パスパラメータは作らない — 対象は常に認証ユーザー本人。
 
+### 人に見せる名前（`routes/my_profile.py`、本人のみ・migration 094）
+
+`users.display_name` はログインの照合列を兼ねる（`routes/auth.py`）ので、帰属・所有者名・査読者名の
+表示には使わない。人に見せる名前は本人が登録する `users.profile_name` だけで、読みの正本は
+`core/account_display.py`（`display_label` — 空なら `None`、ログイン ID へフォールバックしない）。
+正本は `docs/features/account_lifecycle_management_design.md` 2026-10-27 第 5 波の追補（IK-0848 / IK-1007）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/me/profile` | 本人のみ | `{profile_name, label, note, message}`。未登録なら `profile_name` は空・`label` は「名前の登録がありません」 |
+| PATCH | `/api/me/profile` | 本人のみ | body `{profile_name}`（制御文字除去・空白を畳む・200 字超は 422・空文字で消す）。監査 `AUDIT_ENTITY_USER_ACCOUNT`（名前の本文は載せず登録の有無だけ） |
+
+> `{user_id}` パスパラメータは作らない。ログイン ID・パスワード・トークン世代には触れない。
+
 ### 構造の降下路（`routes/descent.py`、読み取り専用）
 
 足場ダイヤル・楽屋の降下エンジン（`docs/features/structure_descent_design.md`。実体は

@@ -5,7 +5,9 @@ params:
   material_hint: Neutron Star Equation of State via Physics Informed Neural Network
   # 主グラフは段の集約（理論の土台・整合関係）で部品名が出ない。部品は教材の ⚓・原稿スタジオ・［検出要素］で
   # 選べる名前で指す（第 25 周 H4: 「Equation system」はこの論文の主グラフに無かった）
-  component_hints: [TOV network map, TOV network map]
+  # 第 6 周の前（2026-10-27）: TeX 版の再解析で部品名が変わった（旧「TOV network map」は両版とも live に無い）。
+  # 1 本目 = TeX 版の実在名、2 本目 = PDF 版の TOV 残差の部品の実在名（PDF 版に TeX 版と同名の部品は無い）
+  component_hints: [TOV residual loss at collocation points, TOV residual constraint]
   part_name: TOV 方程式（静水圧平衡）
   part_aliases: [TOV equation, Tolman–Oppenheimer–Volkoff]
   part_summary: 一般相対論での球対称な星の静水圧平衡。状態方程式を与えると質量と半径の関係が決まる。

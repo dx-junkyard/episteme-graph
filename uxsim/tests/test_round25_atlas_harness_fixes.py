@@ -24,7 +24,7 @@ def test_h1_edges_fold_into_titles_within_budget_and_repeat_explanations_once():
     lines = ax.edges_lines(s, budget=budget)
     text = "\n".join(lines)
     assert ax._size(lines) <= budget + 400 < ax._size(full)
-    assert "（以下の関係の候補は画面の下に続く: " in text  # 切ったことを投影の側で言う（件数は書かない）
+    assert ax.FOLD_HEAD.format(what="関係の候補") in text  # 切ったことを投影の側で言う（件数は書かない）
     assert ax.SAME_EXPLAIN_NOTE.strip() in text
     assert text.count(ax.EDGE_ACCEPT_NOTE) == 1
 

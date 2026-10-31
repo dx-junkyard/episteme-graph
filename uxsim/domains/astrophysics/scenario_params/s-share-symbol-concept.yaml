@@ -19,3 +19,20 @@ personas:
     # 第 4 周（judge_share_r3 §6）: 物理の M1 が r・P・F_EOS・L_BC の 4 記号を全部タップする（H26 の是正で L_BC も索引に載る）。
     # 使用例に式から合成した主張が出ないか（IK-0922）
     symbol_hints: [r, P, '\mathbf{F}_{\!\mathrm{EOS}}', '\mathcal{L}_{\mathrm{BC}}']
+  st-10-d3-21cm-receiver:
+    # 第 5 周（judge_share_r4 §6）: 観測装置の D3 が 4 記号を全部タップ。共通部品の版（IK-0954 の判断後）・「標準化状況」の扱い（IK-0959）
+    symbol_hints: [r, P, '\mathbf{F}_{\!\mathrm{EOS}}', '\mathcal{L}_{\mathrm{BC}}']
+  st-01-m1-radio:
+    # 第 6 周（judge_share_r5 §6 の st-09 × (e) は第 3 周と同じ組なので、(e) 未担当の st-01 に替えた）。IK-0983（記号を概念に
+    # 結ぶ入口）の是正の後に、4 記号を全部タップして記号の概念が出るか（5 周とも構造的に未達）
+    symbol_hints: [r, P, '\mathbf{F}_{\!\mathrm{EOS}}', '\mathcal{L}_{\mathrm{BC}}']
+  st-04-intl-exoplanet:
+    # 第 7 周（judge_share_r6 §6 の st-07 × (e) は、st-07 が doubt の地図の問いと studio の (d') も担うため — 同じ学生を 3 面に
+    # 出さない — (e) 未担当の st-04 に替えた。テキストで歩く）。前提② share_symbol_link_frozen（記号リンクを 1 本確定 → 凍結し直し）の
+    # 後に、4 記号を全部タップして記号の概念名が出るか（IK-0983 の学生側の初評価）・F_EOS の使用例（IK-1022）
+    goal_text: finding out which concept each symbol in the equations stands for
+    # 第 8 周（judge_share_r7 §6・(e) 再）: TeX 版の L_TOV の記号リンクを教員が確定・凍結した後に、L_TOV の概念名が出るか
+    # （IK-0983 の学生側の初評価）。PDF 版 F_EOS の誤確定は理由付きで取り消し済み（share_symbol_misconfirm_revoked）。第 7 周の run で
+    # 教材の式に実在した L_TOV を 3 つ目に入れる（L_BC は外した）。言語は英語のまま
+    # 第 10 波（judge_share_r10 H62）: 第 10 周の狙い IK-0681（N_TOV の式の名前）の記号が材料に無かった。5 つ目に N_TOV を足す
+    symbol_hints: [r, P, '\mathcal{L}_{\mathrm{TOV}}', '\mathbf{F}_{\!\mathrm{EOS}}', '\mathcal{N}_{\mathrm{TOV}}']

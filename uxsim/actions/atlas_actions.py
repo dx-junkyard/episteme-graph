@@ -61,6 +61,12 @@ ACTIONS: list[Action] = [
        ("POST", _CART + "/skeleton/draft/from-frozen"), extra_api=(_SKELETON, _GAPS, _EDGES),
        precondition="採用済みの候補があり、次版の下書きが無い", manual=_TA + "gap-draft-from-frozen",
        note="現行の凍結版を複製するだけ（LLM なし）。下書きは学習者に表示されない。下書きが既にあれば 409 の事実文"),
+    _a("admin.atlas.edges.draft_from_frozen", "関係（辺）の区画の先頭の[現在の版から次版の下書きを作る]", "admin",
+       "atlas.edge-draft-from-frozen", ("POST", _CART + "/skeleton/draft/from-frozen"), extra_api=(_SKELETON, _GAPS, _EDGES),
+       precondition="関係（辺）の候補の区画が出ていて、次版の下書きが無い（廃止済みの分野では押せない）",
+       manual=_TA + "edge-draft-from-frozen",
+       note="第 7 波（IK-1044）: 論文由来の候補が 0 件でも出る。現行の凍結版を複製するだけ（LLM なし）。結果の文は関係の区画の"
+            "状態行。下書きは学習者に表示されない"),
     _a("admin.atlas.gaps.incorporate_preview", "候補を[次版の下書きに取り込む…]（確認まで）", "admin",
        "atlas.gap-incorporate", ("POST", _CART + "/gap-candidates/incorporate-preview"),
        args={"gap_hint": "str?", "label": "str?"}, precondition="採用済みの候補があり、次版の下書きがある",
@@ -107,7 +113,7 @@ ACTIONS: list[Action] = [
        ("GET", _CART + "/freeze-impact"), args={"version": "str"}, extra_api=(_SKELETON, ("GET", _CART + "/reports")),
        precondition="次版の下書きがある", manual=_TA + "freeze",
        note="version は版数（例 2026.2）— 画面は版数が空だと影響を読む前に止まる。[公開（凍結）]を押して出る"
-            "影響の確認（削除される項目・外れるコース・事実文・前の版のノードとの対応）か、影響が無ければ公開前チェック"
+            "影響の確認（削除される項目・外れるコース・事実文・前の版のノードとの対応）か、影響が無ければ「地図 版 X を公開する前の確認」"
             "まで。キャンセルして凍結しない"),
     _a("admin.atlas.freeze", "対応を確かめて凍結する（学習者向けに公開する）", "admin", "atlas.freeze-correspondence",
        ("POST", _CART + "/skeleton/freeze"), args={"version": "str", "note": "str?", "correspondence": "str?"},
@@ -138,6 +144,20 @@ ACTIONS: list[Action] = [
     _a("admin.atlas.freeze_blocked_goto", "凍結の影響で[止めている候補を見る]を押す", "admin", "atlas.freeze-blocked-goto",
        _GAPS, extra_api=(_EDGES,), precondition="凍結の影響に「公開できません」が出ている（readiness.ready が偽）",
        manual=_TA + "freeze-blocked-goto", note="モーダルを閉じて候補の区画（候補 → 関係の候補）へ移る"),
+    # --- 第 25 周 第 5 波（IK-0992）--------------------------------------------------------------
+    _a("admin.atlas.published_view", "「公開中の版の項目と関係を見る（読み取り専用）」を開く", "admin",
+       "atlas.published-contents", _SKELETON, precondition="分野を選んでいて、公開中の版がある",
+       manual=_TA + "published-contents",
+       note="公開中の版があれば出る折りたたみ（既定で閉じている。第 6 波から下書きがある間も出て、見出しは"
+            "「公開中の版（地図 版 X）を見る（読み取り専用 — 下で編集している次版の下書きとは別です）」）。"
+            "公開中の版の領域・概念と「関係（辺）」の節を読む"
+            "（次版で加わる印は付かない・関係が無ければ「この版には関係（辺）がありません。」）"),
+    _a("admin.material.landscape_view", "教材の行［⋯］→［位置づけ（分野マップ）…］を開いて読む", "admin",
+       "materials.row-landscape", ("GET", "/api/admin/landscape/documents/{ref}/placements"),
+       args={"material_hint": "str?", "format_hint": "str?", "document_id": "str?"},
+       extra_api=(("GET", "/api/admin/materials"),), manual="teacher/11-admin-materials.md#landscape-open",
+       note="読むだけ（確認・却下・再提案はしない）。ドメイン別の配置・状態・理由と、配置できなかった分野の行"
+            "（置けなかった主題の名前と「分野の地図への候補として記録されています」）を見る。候補ゼロの理由の文が案内する到達口"),
     # --- 学生 --------------------------------------------------------------------------------
     _a("learning.atlas.select_node", "分野の地図で領域・概念を選んで右のパネル（状態・検証の行・承認の行）を読む",
        "learning", "topbar.atlas", ("GET", "/api/atlas"), args={"node_hint": "str?", "level": "int?"},

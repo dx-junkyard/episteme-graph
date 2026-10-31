@@ -33,8 +33,28 @@ ACTIONS: list[Action] = [
        args={"decision": "str", "candidate_hint": "str?", "link_hint": "str?", "reason": "str?"},
        precondition="同一性の候補が表示されている", manual=_KL + "identity-candidates",
        note="decision は confirm（確認）| reject（見送り）。candidate_hint は概念の名前の部分一致か番号、"
-            "link_hint は論文の題名の部分一致か番号（1 始まり）。リンクの見送りの画面には理由の欄が無い — "
-            "reason を書いても送られない（runner_note に残す）"),
+            "link_hint は論文の題名の部分一致か番号（1 始まり）。第 7 波（IK-1050）: ［見送り］は理由の入力ダイアログ"
+            "（必須・記録に残る）— reason に書く。空なら画面は送らない"),
+    _a("admin.library.identity_link_revoke", "エントリの「結びついた教材の部品」の確定の行で［確定を取り消す］を押す",
+       "admin", "deliberation.identity-link-revoke",
+       ("POST", "/api/admin/deliberation/identity-links/{link_id}/revoke"),
+       args={"reason": "str", "entry_hint": "str?", "candidate_hint": "str?", "link_hint": "str?",
+             "revoke_target_hint": "str?", "revoke_protect_entry_ids": "str?"},
+       extra_api=(("GET", "/api/admin/deliberation/shared-parts/{entry_id}/identity-links"),),
+       precondition="エントリの詳細を開いている（または同一性の候補が表示されている）", manual=_KL + "bound-parts",
+       note="第 4 波（IK-0953）: 確定した結び付きだけに出る。理由は必須（空なら画面が止める）。取り消しても行は残り、"
+            "学生の「共通部品として」から消える。entry_hint / candidate_hint でエントリ、link_hint で部品名か論文の題名か番号"),
+    _a("admin.library.identity_link_restore", "見送り・取り消し済みの結び付きの行で［候補に戻す］を押す（理由を書く）",
+       "admin", "deliberation.identity-link-restore",
+       ("POST", "/api/admin/deliberation/identity-links/{link_id}/restore"),
+       args={"reason": "str", "section": "str?", "candidate_hint": "str?", "entry_hint": "str?", "link_hint": "str?"},
+       extra_api=(("GET", "/api/admin/library/identity-candidates"),
+                  ("GET", "/api/admin/deliberation/shared-parts/{entry_id}/identity-links")),
+       precondition="同一性の候補かエントリの詳細に、見送り・取り消し済みの結び付きがある",
+       manual=_DL + "identity-link-restore",
+       note="第 8 波（IK-1062）: 見送り（rejected）・確定の取り消し（revoked）の行にだけ出る。理由は必須（空なら画面が止める）。"
+            "section は candidates（既定・ライブラリ上部の同一性の候補）| parts | symbols（エントリ詳細の結び付きの区画）。"
+            "前の判断の記録は残り、行に「候補に戻した」の記録と理由が付く"),
     _a("admin.library.entries", "ナレッジライブラリのエントリ一覧を見る", "admin", "knowledge-library.entries-list",
        ("GET", _LIB + "/entries"), args={"domain_key": "str?", "q": "str?", "entry_type": "str?"},
        manual=_KL + "entries-list", note="画面は候補（include_candidates=true）も一覧に出し、行のチップで区別する"),
@@ -54,7 +74,36 @@ ACTIONS: list[Action] = [
        ("POST", _LIB + "/entries/{entry_id}/review"),
        args={"status": "str", "review_note": "str?", "entry_hint": "str?", "candidate_hint": "str?"},
        precondition="同一性の候補かエントリの詳細が表示されている", manual=_KL + "entry-review",
-       note="status は confirmed（確定）| dismissed（見送り・理由必須。画面は理由が空なら送らない）"),
+       note="status は confirmed（確定）| dismissed（見送り・理由必須。画面は理由が空なら送らない）| candidate（詳細で"
+            "見送り済みを［候補に戻す］）。candidate_hint は同一性の候補のカード、entry_hint は詳細。［確定］は確認の"
+            "ダイアログ（確定するのは概念を置くことだけで、結び付きは行ごとに別に確かめる）— cancel: true で［キャンセル］。"
+            "確定済みの概念には操作が出ない"),
+    _a("admin.library.bound_link_decide", "エントリ詳細の「結びついた教材の部品」/「結びついた記号」の候補の行を [確認] / [見送り] する",
+       "admin", "knowledge-library.bound-part-decide",
+       ("POST", "/api/admin/deliberation/identity-links/{link_id}/confirm"),
+       args={"decision": "str", "section": "str?", "link_hint": "str?", "entry_hint": "str?", "cancel": "bool?",
+             "reason": "str?"},
+       extra_api=(("POST", "/api/admin/deliberation/identity-links/{link_id}/reject"),
+                  ("GET", "/api/admin/deliberation/shared-parts/{entry_id}/identity-links")),
+       precondition="エントリの詳細を開いていて、候補の結び付きの行がある", manual=_KL + "bound-part-decide",
+       note="第 5 波: 候補の行だけに出る。section は parts（既定・教材の部品）| symbols（結びついた記号）。"
+            "link_hint は部品名・記号の表記か論文の題名か番号。［確認］は確認のダイアログ（問い・種別の文・"
+            "「同じものとして確定しますか。」）— cancel: true で［キャンセル］。第 7 波（IK-1050）: ［見送り］は理由必須"
+            "（reason。空なら画面は送らない）"),
+    _a("admin.library.symbol_derive", "エントリ詳細の［記号の候補を探す］を押す", "admin", "knowledge-library.symbol-derive",
+       ("POST", _LIB + "/entries/{entry_id}/symbol-candidates/derive"), args={"entry_hint": "str?"},
+       extra_api=(("GET", "/api/admin/deliberation/shared-parts/{entry_id}/identity-links"),),
+       precondition="確定済みのエントリの詳細を開いている", manual=_KL + "symbol-derive",
+       note="第 5 波（IK-0983）: 閲覧できる教材の記号の定義の文に、この概念の名前・別名が語として現れる記号を候補にする"
+            "（LLM なし）。結果の文は「結びついた記号」の直前。候補・見送り済み・公開停止のエントリでは押せない"),
+    _a("admin.library.entry_freeze", "エントリ詳細の［凍結（版発行）］を押す（changelog メモ・確認のダイアログ）", "admin",
+       "knowledge-library.detail-freeze", ("POST", _LIB + "/entries/{entry_id}/freeze"),
+       args={"entry_hint": "str?", "note": "str?", "cancel": "bool?"},
+       extra_api=(("GET", _LIB + "/entries/{entry_id}"),),
+       precondition="確定済みのエントリの詳細を開いている", manual=_KL + "detail-freeze",
+       note="第 9 波（share H54）: 凍結版はパイプラインの解析と学生の見え方に使われ、取り消せない（修正は次版）。"
+            "note は changelog メモ（任意）。cancel: true で確認のダイアログを［キャンセル］。未確定・見送りの概念はサーバが"
+            "事実文で止める（409）。凍結の後の索引づくりで埋め込みの計算が 1 回走る"),
     _a("admin.library.label_add", "別名・隠しラベルを追加する", "admin", "knowledge-library.labels",
        ("POST", _LIB + "/entries/{entry_id}/labels"), args={"label": "str", "kind": "str?", "entry_hint": "str?"},
        precondition="エントリの詳細を開いている", manual=_KL + "labels",
@@ -65,17 +114,36 @@ ACTIONS: list[Action] = [
        precondition="エントリの詳細の「別名・隠しラベル」に見送っていないラベルがある", manual=_KL + "labels",
        note="第 25 周 第 4 周の前（IK-0897 の第 3 の言い分けを見るため）: label は見送るラベルの文字列（部分一致か番号）。"
             "画面は理由の入力ダイアログで空のまま OK すると送らない。行は消えず「見送り」の状態で残る"),
+    _a("admin.library.labels_dismissed_open", "「別名・隠しラベル」の折りたたみ「見送り済みのラベル」を開く", "admin",
+       "knowledge-library.labels-dismissed", ("GET", _LIB + "/entries/{entry_id}/labels"), args={"entry_hint": "str?"},
+       precondition="エントリの詳細の「別名・隠しラベル」に見送ったラベルがある", manual=_KL + "labels-dismissed",
+       note="第 6 波（IK-1024）: 見送った行は消えず、理由・見送った人・日付（decision_line）と［見送りを取り消す］が並ぶ"),
+    _a("admin.library.label_restore", "見送り済みのラベルの［見送りを取り消す］を押す（理由を書く）", "admin",
+       "knowledge-library.label-restore", ("POST", _LIB + "/entries/{entry_id}/labels/{label_id}/restore"),
+       args={"label": "str", "review_note": "str?", "entry_hint": "str?"},
+       precondition="エントリの詳細の「見送り済みのラベル」に行がある", manual=_KL + "label-restore",
+       note="第 6 波（IK-1024）: label は取り消すラベルの文字列（部分一致か番号）。理由が空なら画面は送らない。"
+            "取り消した理由も記録に残る（公開停止のエントリでは 409）"),
     _a("admin.library.relation_add", "関係（上位・関連・同じ・近い）を追加する", "admin", "knowledge-library.relations",
        ("POST", _LIB + "/relations"),
        args={"kind": "str", "object_entry_id": "str?", "object_hint": "str?", "reason": "str?", "entry_hint": "str?"},
        precondition="エントリの詳細を開いている", manual=_KL + "relations",
-       note="kind は broader | related | exact_match | close_match。画面の相手の欄は「相手のエントリ ID」の"
-            "手入力だけ — object_hint（名前）を渡すと runner が一覧から ID を引き、その事実を runner_note に残す"),
+       note="kind は broader | related | exact_match | close_match。object_hint（名前）で相手を検索して選ぶ。"
+            "第 8 波（IK-1063）: 理由の欄（任意）がある — reason に書けば送られる"),
     _a("admin.library.relation_decide", "関係の候補を [確定] / [見送り] にする", "admin", "knowledge-library.relations",
        ("POST", _LIB + "/relations/{relation_id}/decide"),
-       args={"status": "str", "review_note": "str?", "relation_hint": "str?"},
+       args={"status": "str", "review_note": "str?", "relation_hint": "str?", "cancel": "bool?"},
        precondition="エントリの詳細に関係が表示されている", manual=_KL + "relations",
-       note="status は confirmed | dismissed（見送りは理由必須）"),
+       note="status は confirmed | dismissed（見送りは理由必須）。第 8 波（IK-1063）: ［確定］も任意の理由の入力ダイアログ"
+            "（review_note。cancel: true で確定しない）。body に開いているエントリ（viewer_entry_id）が載り、"
+            "判断の 1 行が一覧の直前に出る"),
+    _a("admin.library.relation_decision_reason", "確定した関係に「確定の理由を書き足す」", "admin",
+       "knowledge-library.relation-decision-reason", ("PATCH", _LIB + "/relations/{relation_id}/decision-reason"),
+       args={"reason": "str", "relation_hint": "str?", "cancel": "bool?"},
+       precondition="エントリの詳細の関係の一覧に［確定の理由を書き足す］が出ている（理由の無い確定を、確定した本人が見ているとき）",
+       manual=_KL + "relation-decision-reason",
+       note="第 25 周 第 10 波: 押すと「確定の理由を書いてください（必須）」の入力ダイアログ（先頭にサーバの "
+            "decision_reason_add_note）。空は送らない。書いた理由は書き換えられず、行は消えない"),
     _a("admin.library.atlas_links_derive", "「地図との対応を導出」を押す", "admin", "knowledge-library.identity-derive",
        ("POST", _LIB + "/atlas-links/derive"), args={"domain_key": "str?"}, manual=_KL + "identity-derive",
        note="画面は分野を選んでいないと「先に左の一覧から分野を選んでください」で止まり、押すと確認ダイアログが出る"),
@@ -127,10 +195,22 @@ ACTIONS: list[Action] = [
     _a("admin.deliberation.identity_link_decide", "同一性リンクを [確定] / [却下] する", "admin",
        "deliberation.identity-link-decide",
        ("POST", "/api/admin/deliberation/identity-links/{link_id}/confirm"),
-       extra_api=(("POST", "/api/admin/deliberation/identity-links/{link_id}/reject"),),
-       args={"decision": "str", "link_hint": "str?"}, precondition="同一性リンクの候補が表示されている",
-       manual=_DL + "identity-link-decide", note="decision は confirm | reject。却下に理由の欄は無い"),
+       extra_api=(("POST", "/api/admin/deliberation/identity-links/{link_id}/reject"),
+                  ("POST", "/api/admin/deliberation/identity-links/{link_id}/revoke")),
+       args={"decision": "str", "link_hint": "str?", "reason": "str?", "cancel": "bool?"},
+       precondition="同一性リンクの候補が表示されている",
+       manual=_DL + "identity-link-decide",
+       note="decision は confirm | reject | revoke（reject・revoke とも reason 必須 — 第 7 波 IK-1050 で見送りにも理由の"
+            "入力ダイアログが付いた。空なら画面は送らない）。"
+            "種別が違う対の［確定］は確認ダイアログが出る（cancel: true でキャンセル）"),
     # --- 原稿スタジオ「説明・承認の共有」（C層）---
+    _a("admin.deliberation.identity_link_restore", "同一性リンクの見送り・取り消し済みの行で［候補に戻す］を押す（理由を書く）",
+       "admin", "deliberation.identity-link-restore",
+       ("POST", "/api/admin/deliberation/identity-links/{link_id}/restore"),
+       args={"reason": "str", "link_hint": "str?"},
+       precondition="深く検討の同一性リンク区画に見送り・取り消し済みの行がある",
+       manual=_DL + "identity-link-restore",
+       note="第 8 波（IK-1062）: 理由は必須（空なら画面が止める）。前の判断の記録は残る"),
     _a("admin.explanations.open", "原稿スタジオで部品の「説明・承認の共有」を開く", "admin",
        "lecture-studio.component-endorse",
        ("GET", "/api/admin/theory-components/{component_id}/explanations"),
@@ -142,12 +222,15 @@ ACTIONS: list[Action] = [
        ("POST", "/api/admin/theory-components/{component_id}/explanations"),
        args={"body": "str", "title": "str?"}, precondition="説明・承認の共有を開いている",
        manual=_LS + "endorsement-add-explanation", note="画面は共有 OFF で追加する（共有は別のボタン）"),
-    _a("admin.explanations.update", "説明カードの「共有ON/OFF」「学生に公開してよいと査読する」を押す", "admin",
+    _a("admin.explanations.update", "説明カードの「共有ON/OFF」「学生に公開してよいと査読する」「もう一人の査読者として査読する」を押す", "admin",
        "lecture-studio.component-endorse", ("PATCH", "/api/admin/explanations/{explanation_id}"),
        args={"what": "str", "explanation_hint": "str?"}, precondition="説明バージョンのカードが表示されている",
        manual=_LS + "endorsement-card",
-       note="what は share_on | share_off | approve（学生に公開してよいと査読する）。explanation_hint は題名・作者の部分一致"
-            "か番号。第 3 波（IK-0925）: 2 つのボタンは説明の著者（と管理者）のカードにだけ出る — 出ていないカードでは押せない"),
+       note="what は share_on | share_off | approve（学生に公開してよいと査読する）| second_review（もう一人の査読者として"
+            "査読する）。explanation_hint は題名・作者の部分一致か番号。第 5 波: 査読のボタンは査読できるカード（著者・管理者、"
+            "標準の説明はその論文を編集できる教員も）にだけ出る。査読済みには［学生に公開してよいと査読する］が出ず、"
+            "［もう一人の査読者として査読する］はもう一人の査読を待つ標準の説明だけ。標準の説明には［共有ON/OFF］が出ない。"
+            "知らせはサーバの文（何が変わり、どこへ届くか）"),
     _a("admin.explanations.endorse", "説明カードの「支持する」を押す", "admin", "lecture-studio.component-endorse",
        ("POST", "/api/admin/explanations/{explanation_id}/endorse"),
        args={"level": "str?", "expertise_tag": "str?", "explanation_hint": "str?"},
@@ -165,10 +248,17 @@ ACTIONS: list[Action] = [
             "数は出さない"),
     _a("admin.explanations.cite", "説明カードの「別コースで引用」で引用する", "admin", "lecture-studio.cite-intent",
        ("POST", "/api/admin/explanations/{explanation_id}/cite"),
-       args={"course_hint": "str?", "citation_intent": "str?", "explanation_hint": "str?"},
+       args={"course_hint": "str?", "cite_course_id": "str?", "citation_intent": "str?", "explanation_hint": "str?"},
        extra_api=(("GET", "/api/admin/courses"),), precondition="説明バージョンのカードが表示されている",
        manual=_LS + "endorsement-cite",
        note="画面は管理コース一覧のうち owner / editor の別コースだけを引用先に出す。citation_intent は任意（空 = 記録しない）"),
+    _a("admin.explanations.stranded_open", "説明一覧の［再解析前の説明を開く（読み取り専用）］を押す", "admin",
+       "lecture-studio.explanation-stranded-open",
+       ("GET", "/api/admin/theory-components/{component_id}/stranded-explanations"),
+       precondition="説明・承認の共有を開いていて、事実文に「再解析前の部品に付いたままの説明」がある",
+       manual=_LS + "explanation-stranded-open",
+       note="第 7 波（IK-1012 の残り）: 再解析前の部品に付いたままの説明を読み取り専用で並べる（作成者・日付の"
+            "origin_line と書き直しの案内 rewrite_note。編集・査読の操作は出ない）"),
     # --- 教材管理の行「共有」---
     _a("admin.document_share.open", "教材の行の「共有」を開く", "admin", "materials.row-share",
        ("GET", "/api/admin/documents/{document_id}/groups"), args={"material_hint": "str?", "format_hint": "str?", "document_id": "str?"},

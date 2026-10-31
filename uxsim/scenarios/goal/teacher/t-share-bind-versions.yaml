@@ -43,8 +43,14 @@ steps:
   - do: admin.deliberation.identity_link_create
     with: {reason: '{{link_reason}}'}
   - do: admin.deliberation.identity_link_decide
+    # 第 7 波（IK-1050）: 見送り（却下）は理由必須 — reject のときはペルソナが reason を書く（空なら画面は送らない）
     with: {decision: '{{second_decision}}'}
-    note: PDF 版の部品の表記を読み、同じと言えるなら確定・言えないなら却下する
+    note: PDF 版の部品の表記を読み、同じと言えるなら確定・言えないなら理由を書いて却下する
+  # 第 25 周 第 8 波（IK-1062）: 却下・取り消しを判断し直すときは［候補に戻す］（理由必須 — ペルソナが reason を書く）
+  - choose:
+      - do: admin.deliberation.identity_link_restore
+        note: 却下（見送り）した行を判断し直すなら、理由を書いて［候補に戻す］→ 戻した記録（誰が・いつ・前の判断・理由）が行に出るかを読む
+    optional: true
   - do: admin.library.identity_candidates
     note: ナレッジライブラリに戻り、同一性の候補に何が並ぶかを見る
   - do: admin.library.entry_open
@@ -59,6 +65,7 @@ expects:
   - manual: teacher/19-admin-knowledge-library.md#new-entry-btn
   - manual: teacher/24-admin-deliberation.md#identity-link-create
   - manual: teacher/24-admin-deliberation.md#identity-link-decide
+  - manual: teacher/24-admin-deliberation.md#identity-link-restore
 watch_for:
   - 共通部品の検索で、いま作った部品が見つかる（見つからないなら、見つからない理由が事実文で分かる — 分野が特定できない等）
   - 作られるのは候補だけで、確定は別の 1 操作

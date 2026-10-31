@@ -1,0 +1,28 @@
+id: c-r25-doubt-r9
+domain: astrophysics
+snapshot: corpus-astro-tex-r25h
+course_id: 1bad7d9f
+personas:
+  teachers: [te-02-veteran-intro, te-03-meticulous-seminar]
+  students: [st-05-night-solarwind, st-08-m1-rprocess-lecture]
+scenarios:
+  teacher: [t-db-assumption-review, t-db-challenge-from-node]
+  student: [s-db-ledger-lines, s-db-map-ask-en]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 10, persona_llm_calls: 260, wall_clock_minutes: 240}
+notes: |
+  第 25 周・面 B の第 9 周（judge_doubt_r8.md §4・r9_prereqs.md・harness_fixes_r8_summary.md の H48〜H51）。第 8 波の是正後（IK-1057 部分・1058・1059・1060・0901）。
+  教員 2 × 学生 2・4 場面:
+  te-02 × t-db-assumption-review（手の前提（Cepheus TeX に結んだもの・manual_assumption --assumption-on-cepheus）→ 台帳 → スコープ記帳 → 前提の地図の
+  `unplotted_points` と合意リストの `load_note`（IK-1058 の読み時の段）— 8 周未達の最後の区間）/ te-03 × t-db-challenge-from-node（第 7・8 周に記帳した疑義が
+  ある主張から入り、取り下げ済みの折りたたみに記帳 / 取り下げの名前と日時（IK-1060）・提案の［完了を記録］— 8 周未到達）/ st-05 × s-db-ledger-lines
+  （**固定 topic t11**・⚓ がある — H48。PINN の ⚓ は開かない側なので「置き換わりました」/ 後継（IK-1051）の見え方と、⚓ の部品の記帳ありの一行）/
+  st-08 × s-db-map-ask-en（**テキスト**・地図の場所を開いたまま尋ねて AI の材料とパネルの語が揃うか（IK-1059）・「台帳」が届かないか（atlas の IK-1018 の経路））。
+  te-01 × probe は IK-0999 GONE のため外した（閲覧もできない教員は砂場で作れない）。
+  **固定コースは 1bad7d9f** — 第 8 周の 6be229e1（PDF 版）から替える。理由は share と同じ（⚓ の読み違い・TeX 版に前提がある）。前周との比較はコースが
+  替わった事実を審判に明記する（H49 — 同じコース・トピックでの比較は第 10 周以降）。
+  組の例外（P-0025）: te-02・te-03・st-05 は第 8 周と同じ組（是正の前後比較・審判の指定）。st-08 × map-ask は新しい組。学生の面: st-05 は doubt だけ・
+  st-08 は doubt と studio（2 面）。
+  一括の確かめと用意: `backend/.venv/bin/python uxsim/runs/round25/r9_prereqs.py --dry-run --ik1057-json <読み取りの JSON> --assumption-on-cepheus`。

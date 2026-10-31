@@ -1,0 +1,26 @@
+id: c-astro-r25-atlas-r9
+domain: astrophysics
+snapshot: corpus-astro-tex-r25h
+course_id: 1bad7d9f
+personas:
+  teachers: [te-04-copilot-intro, te-03-meticulous-seminar]
+  students: [st-03-d1-from-particle, st-01-m1-radio]
+scenarios:
+  teacher: [t-atlas-edge-review, t-atlas-draft-freeze]
+  student: [s-atlas-threads-and-placement]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 4, persona_llm_calls: 260, wall_clock_minutes: 240}
+notes: |
+  第 25 周・面 C の第 9 周（judge_atlas_r8.md §6・r9_prereqs.md・harness_fixes_r8_summary.md の H45〜H47）。第 8 波の是正後（IK-1045・1055・1056・1046 残り・軽 3 件）。
+  周の前の実測（r9_prereqs）: atlas_frozen_and_pending = 現行の凍結版 2026.5（第 8 周 te-01）・下書きなし・採用済み未反映なし。atlas_freeze_version: te-03（と te-01）の freeze_version が 2026.6。**指揮者は API で下書きを作らない**（作ったら run の記録に書く）。
+  教員 2 × 学生 2・4 レーン（依存の順）:
+  te-04 × t-atlas-edge-review（下書きなしのまま **有向の「依存」で採用 1** → 関係の区画の［現在の版から次版の下書きを作る］（場面に
+  `edges.draft_from_frozen` が入った — H45）→ 反映の確認（向きの一文 IK-1047）→ 反映）/ te-03 × t-atlas-draft-freeze（te-01 以外で凍結 2026.6）/
+  st-03 × s-atlas-threads-and-placement（足跡あり・1bad7d9f = トピック対応 8 のコース。確定済みの関係 5 本（2026.2〜2026.6）が実線か「描いていない
+  確定済みの関係」の事実文に名前で出るか — IK-1045）/ st-01 × s-atlas-threads-and-placement（足跡なし・同コース。括弧が「いま学んでいる場所」から
+  始まらないこと（IK-1055）・状態の違う概念 2 つで承認の行が同じ文か（IK-1056））。
+  対照の 6be229e1（binding なし）は campaign の course_id が 1 つなので今周は組まない。st-08 × sea は外した（版表示は閉じた）。
+  組の例外（P-0025）: te-04 × edge-review・st-03・st-01 は第 8 周と同じ組（是正の前後比較・審判の指定）。te-03 × freeze は新しい組。
+  学生の面: st-03 は atlas だけ・st-01 は atlas と studio（2 面）— studio の場面を atlas の後に（足跡なしの条件を壊さない）。

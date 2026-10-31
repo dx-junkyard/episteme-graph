@@ -12,7 +12,7 @@
 - 教員向けの数値キー ``test_doubt_guardrails.py::TestNoRawNumbersExposed`` の ``assert '"<key>"' not in …`` の左辺
 
 A 契約:
-- DA1 doubt の 4xx（401/403/404/429 を除く）の ``detail`` が空・内部例外文・日本語を含まない
+- DA1 doubt の 4xx（401/403/404/429 を除く。第 6 波から台帳の書き込みの 403/404 は検査する）の ``detail`` が空・内部例外文・日本語を含まない
 - DA2 学習者向けの台帳・未検証合意リストの応答に、帰属・数値のキー（上の 2 表）がある
 - DA3 教員向けの doubt の応答に、数値のキー（confidence / load_score）がある
 - DA4 疑義に投稿者の名前が無い（匿名に見える疑義）
@@ -196,7 +196,9 @@ def _check_detail(step: TranscriptStep, t: HttpTrace, body: Any, factory: Findin
     path = t.path or ""
     if not (path.startswith("/api/admin/doubt/") or _LEARNER_LEDGER_PATH.match(path)):
         return []
-    if not (400 <= (t.status or 0) < 500) or t.status in (401, 403, 404, 429):
+    if not (400 <= (t.status or 0) < 500) or t.status in (401, 429):
+        return []
+    if t.status in (403, 404) and not _is_ledger_write(t):
         return []
     detail = body.get("detail") if isinstance(body, dict) else None
     where = {"status": t.status, "where": f"{t.method} {t.path}"}
@@ -215,6 +217,13 @@ def _check_detail(step: TranscriptStep, t: HttpTrace, body: Any, factory: Findin
                       hypothesis=f"台帳・疑義の拒否応答の detail が日本語の事実文になっていない（{step.action_id}）",
                       server_rows=where)]
     return []
+
+
+def _is_ledger_write(t: HttpTrace) -> bool:
+    """第 6 波（IK-1027）: 台帳の書き込み（``/api/admin/doubt/ledger/…`` への GET 以外）の 403 / 404 は日本語の事実文
+    （403 = 台帳 GET の ``can_edit_note`` と同じ文・404 =「この台帳の対象は見つからないか、記帳できません。」）。
+    英語の「Ledger target not found」は廃止されたので、403 / 404 もこの経路だけ detail を検査する。"""
+    return (t.method or "").upper() != "GET" and (t.path or "").startswith("/api/admin/doubt/ledger/")
 
 
 def _keys(body: Any) -> set[str]:

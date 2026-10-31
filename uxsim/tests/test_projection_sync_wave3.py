@@ -64,7 +64,8 @@ def test_js_mirrors_exist_in_admin_js():
     admin = (_JS / "admin.js").read_text(encoding="utf-8")
     for text in (ax.GAP_DOCUMENTS_HIDDEN_TEXT, ax.GAP_ACCEPT_MEMO_PROMPT.replace("\n", "\\n"),
                  ax.GAP_RESTORE_REASON_PROMPT.replace("\n", "\\n"), ax.EDGE_ACCEPT_MEMO_PROMPT.replace("\n", "\\n"),
-                 "判断のメモ: ", '"採用: " + preview.decision_line', "marked.result_line", "readiness.pending_items",
+                 # 第 8 波（sync_keys_wave8 面 C）: 見送った判断は「見送りの理由」、それ以外は「判断のメモ」
+                 '(decision.status === "dismissed" ? "見送りの理由" : "判断のメモ") + \': \'', '"採用: " + preview.decision_line', "marked.result_line", "readiness.pending_items",
                  '"・" + parts.join(" ／ ")'):
         assert text in admin, text
     panel = (_JS / "atlas-panel.js").read_text(encoding="utf-8")
@@ -230,3 +231,105 @@ def test_sea_anchor_label_prefers_region():
     skeleton = {"nodes": {"r1": {"label": "宇宙背景放射（霧の領域）"}}}
     assert ax._sea_anchor_label("r1", {}, regions, skeleton) == "宇宙背景放射"
     assert ax._sea_anchor_label("c1", {"c1": {"label": "温度揺らぎ"}}, regions, skeleton) == "温度揺らぎ"
+
+
+# ---------------------------------------------------------------------------
+# 面 D（studio）— 書き換えの知らせ・［案をコピー］・根拠の種類の印・区切りの事実文・受講開始の失敗・式の解決表
+# ---------------------------------------------------------------------------
+def test_studio_js_mirrors_exist():
+    from uxsim.runner import state as st
+    from uxsim.runner import studio_exec as sx
+
+    studio = (_JS / "admin-lecture-studio.js").read_text(encoding="utf-8")
+    for text in (sx.COPY_DONE_TEMPLATE, sx.COPY_EMPTY, '"申し送り: " + handoff.join(" / ")',
+                 'data.can_save === false ? "" : data.save_notice', "copyBtn.hidden = lsCourseCanSave()",
+                 "(item && item.origin_label) || lsEvidenceKindLabel(item && item.kind)"):
+        assert text in studio, text
+    html = (REPO_ROOT / "frontend" / "public" / "admin.html").read_text(encoding="utf-8")
+    assert f">{sx.COPY_BUTTON}</button>" in html and 'data-ui-anchor="lecture-studio.rewrite-copy"' in html
+    app = (_JS / "app.js").read_text(encoding="utf-8")
+    assert st.ENROLL_FAIL_PREFIX in app
+
+
+def test_rewrite_status_line_handoff_and_can_save():
+    from uxsim.runner import studio_exec as sx
+
+    owner = sx.rewrite_status_line({"notice": "", "save_notice": "保存すると確定", "grounding_notice": "根拠を省いた",
+                                    "handoff_notes": ["式 (3) の記号を確認", ""]})
+    assert owner == f"{sx.REWRITE_OK} 根拠を省いた 保存すると確定 申し送り: 式 (3) の記号を確認"
+    shared = sx.rewrite_status_line({"notice": "案を編集欄に入れました。…［案をコピー］で写して、所有者に渡せます。",
+                                     "save_notice": "保存できません", "can_save": False, "handoff_notes": ["a", "b"]})
+    assert "保存できません" not in shared and shared.endswith("申し送り: a / b")
+    # 旧サーバ（can_save / handoff_notes なし）は従来どおり save_notice を足す
+    assert sx.rewrite_status_line({"save_notice": "X"}) == f"{sx.REWRITE_OK} X"
+
+
+def test_rewrite_copy_action_only_when_unsaveable():
+    import copy as _copy
+
+    from uxsim.runner import studio_exec as sx
+    from uxsim.tests.test_r25_studio import STRUCTURE
+    from uxsim.tests.test_r25_studio_harness_fixes import _teacher as _studio_teacher
+
+    assert REGISTRY["admin.lecture_studio.rewrite_copy"].affordance == "lecture-studio.rewrite-copy"
+    st = _copy.deepcopy(STRUCTURE)
+    st.update({"can_save": False, "save_notice": "このコースではトピックを保存できません。"})
+    s, client, seen = _studio_teacher(structure=st)
+    sx.execute("admin.lecture_studio.select_topic", _Ctx(REGISTRY["admin.lecture_studio.select_topic"], {}, s, client))
+    n = len(seen)
+    text = project_observation("admin.lecture_studio.select_topic", s.last_status, s.last_body)
+    assert f"［{sx.COPY_BUTTON}］" in text
+    s.scratch["studio_draft"]["material"] = "教材の案"
+    s.scratch["studio_draft"]["spoken"] = ""
+    sx.execute("admin.lecture_studio.rewrite_copy", _Ctx(REGISTRY["admin.lecture_studio.rewrite_copy"], {}, s, client))
+    assert len(seen) == n  # HTTP なし
+    assert s.scratch["studio_clipboard"].startswith("【教材欄】\n教材の案")
+    assert sx.COPY_DONE_TEMPLATE.replace("{sections}", "教材欄") in project_observation(
+        "admin.lecture_studio.rewrite_copy", s.last_status, s.last_body)
+    # 保存できるコースではボタンが出ない
+    s2, client2, _ = _studio_teacher()
+    sx.execute("admin.lecture_studio.select_topic", _Ctx(REGISTRY["admin.lecture_studio.select_topic"], {}, s2, client2))
+    sx.execute("admin.lecture_studio.rewrite_copy", _Ctx(REGISTRY["admin.lecture_studio.rewrite_copy"], {}, s2, client2))
+    assert "studio_clipboard" not in s2.scratch
+
+
+def test_evidence_kind_text_prefers_origin_label():
+    from uxsim.runner import studio_exec as sx
+
+    teaching = {"kind": "figure", "title": "円偏光の模式", "teaching": True, "origin_label": "教員が作った説明図"}
+    assert sx.evidence_kind_text(teaching) == "教員が作った説明図"
+    assert sx.evidence_kind_text({"kind": "figure"}) == "図"
+    lines = sx._evidence_lines({"evidence_items": [teaching]})
+    assert lines[1].startswith("- 教員が作った説明図: 円偏光の模式") and "図: 図" not in lines[1]
+
+
+def test_indicator_notes_in_empty_spoken_and_ok_branches():
+    from uxsim.runner import studio_exec as sx
+
+    notes = ["教材欄の先頭・末尾にある区切り（===）…"]
+    assert sx.indicator_text({"display_count": 2, "spoken_count": 0, "notes": notes}) == \
+        f"表示 2 枚 / 読み上げ未入力 — {notes[0]}"
+    assert sx.indicator_text({"display_count": 2, "spoken_count": 2, "notes": notes}).endswith(f"✓ — {notes[0]}")
+    assert sx.indicator_text({"display_count": 1, "spoken_count": 0}) == "表示 1 枚 / 読み上げ未入力"
+
+
+def test_enroll_failure_shows_confirm_modal_error():
+    from uxsim.runner import state as st
+
+    text = project_observation("learning.course.enroll", 403,
+                               {"detail": "このコースは新規の受講を受け付けていません。"})
+    assert f"{st.ENROLL_FAIL_PREFIX}（このコースは新規の受講を受け付けていません。）" in text
+    assert "HTTP 403" not in text
+    assert "（HTTP 404）" in project_observation("learning.course.enroll", 404, {})
+
+
+def test_formula_placeholders_id_key_wins_over_position():
+    from uxsim.runner.state import render_material_text, resolve_formula_placeholders
+
+    # 2 枚目のスライド: formulas はこのスライドが引く式の部分集合（並び順 0 の式の id は FORMULA_3）
+    formulas = [{"id": "FORMULA_3", "latex": "E=mc^2"}, {"id": "FORMULA_0", "latex": "a+b"}]
+    assert resolve_formula_placeholders("[[FORMULA_0]] と [[FORMULA_3]]", formulas) == "$a+b$ と $E=mc^2$"
+    # id の鍵が空いているときだけ並び順の鍵で引く
+    assert resolve_formula_placeholders("[[FORMULA_1]]", [{"id": "x", "latex": "p"}, {"id": "y", "latex": "q"}]) == "$q$"
+    shown = render_material_text({"text": "[[FORMULA_0]]", "formulas": formulas})
+    assert "a+b" in shown and "E=mc^2" not in shown

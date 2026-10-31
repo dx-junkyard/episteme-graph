@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -112,6 +113,22 @@ def is_pseudo_chunk_id(value: Any) -> bool:
 HARNESS_CLIPPED_MARK = "（ハーネス: 観察の上限でここから先を省略した — 画面にはこの続きがある。製品の表示が切れたのではない）"
 HARNESS_PRECONDITION_TEXT = ("（ハーネス: この操作の対象がまだ画面に無いので、行為は行われていない。"
                              "これは画面の文ではない）")
+
+
+# 第 25 周 第 6 周（doubt H39 / share H35 の統合）: 頭脳が番号で選ぶときの hint の正本。投影が番号の前に付ける通し名
+# （「リンク1」「⚓2」「疑義2」「提案1」「前提3」「主張4」「点1」「カード1」「候補1」「番号 3」「#3」「No.3」）と後ろの助数詞
+# （「本目」「件目」「番目」）を許す。面ごとに番号の正規表現を複製しない（share_exec / doubt_exec はここを引く）。
+NUM_HINT_RE = re.compile(
+    r"^\s*(?:#|＃|No\.?\s*|リンク|番号|⚓|候補|カード|疑義|検証提案|提案|前提|主張|点)?\s*(\d+)\s*(?:本目|件目|番目|つ目)?\s*$")
+
+
+def num_hint_index(hint: Any) -> Optional[int]:
+    """hint が番号の指定なら 1 始まりの番号、そうでなければ None（全角数字は NFKC で読む）。"""
+    text = unicodedata.normalize("NFKC", str(hint if hint is not None else "")).strip()
+    if not text:
+        return None
+    m = NUM_HINT_RE.match(text)
+    return int(m.group(1)) if m else None
 
 
 def _clip(text: str, n: int = OBSERVATION_CHARS) -> str:
@@ -263,25 +280,50 @@ def _short_summary(text: Any) -> str:
     return t[:260].strip() + "..." if len(t) > 260 else t
 
 
+def reconstructed_mark_text(item: Any) -> str:
+    """app.js ``renderMaterialEquationBody`` の復元の印の文字版（第 25 周第 5 周 H37）。
+
+    画面は印を式と別の ``span`` で描き、事実文 ``reconstructed_note`` は外側の ``title`` と印の ``aria-label``
+    （ホバーでしか読めない）に持たせる。投影は式の直後に印を連結して注記を落としていた。ここでは
+    「〔AI復元（ホバーで: …）〕」の形で、区切りと注記（ホバーでしか読めないことも含めて）を写す。"""
+    if not isinstance(item, dict) or not item.get("reconstructed"):
+        return ""
+    mark = str(item.get("reconstructed_mark") or "").strip()
+    note = str(item.get("reconstructed_note") or "").strip()
+    if not mark and not note:
+        return ""
+    hover = f"（ホバーで: {note}）" if note else ""
+    return f" 〔{mark}{hover}〕"
+
+
 def _equation_body(formula: Optional[dict]) -> str:
     """画面の renderMaterialEquationBody の文字版（LaTeX → plain_text → raw_text）。"""
     if not isinstance(formula, dict):
         return ""
+    if formula.get("latex_withheld"):
+        # 第 5 波（IK-1008）: 壊れた復元は式を描かず、印と事実文だけ（事実文は画面に見えている — ホバーではない）
+        mark = str(formula.get("reconstructed_mark") or "").strip()
+        note = str(formula.get("reconstructed_note") or "").strip()
+        return " ".join(v for v in (f"〔{mark}〕" if mark else "", note) if v)
     latex = str(formula.get("latex") or formula.get("summary") or "")
     if latex:
-        mark = str(formula.get("reconstructed_mark") or "") if formula.get("reconstructed") else ""
-        return f"$${latex}$$" + (f"{mark}" if mark else "")
+        return f"$${latex}$$" + reconstructed_mark_text(formula)
     for key in ("plain_text", "raw_text"):
         if formula.get(key):
             return str(formula[key])
     return ""
 
 
+FIGURE_CARD_IMAGE_HEAD = "〔図（画像あり）〕"
+
+
 def _figure_card(figure: dict) -> str:
     """画面の renderMaterialFigureCard の文字版。"""
     caption = str(figure.get("caption") or "")
     explanation = str(figure.get("explanation") or "")
-    head = "〔図〕" if figure.get("image_url") else "〔図: この図の画像を取得できませんでした。〕"
+    # 第 25 周 第 10 波（studio H45）: 画像があるときは「画像 + 説明」が描かれていることを頭で言う（「〔図〕」だけだと頭脳が
+    # 説明文の札と読み「図の絵が出ていない」と書いた）
+    head = FIGURE_CARD_IMAGE_HEAD if figure.get("image_url") else "〔図: この図の画像を取得できませんでした。〕"
     return head + (f" {caption}" if caption else "") + (f"（{explanation}）" if explanation else "")
 
 
@@ -351,7 +393,15 @@ def render_material_text(chunk: Any) -> str:
         raw, pid = m.group(0), m.group(1)
         formula = formula_by_id.get(raw) or formula_by_id.get(pid) or formula_by_id.get(_norm_evidence_id(pid))
         if formula is not None:
-            maths.append(str(formula.get("latex") or formula.get("summary") or pid))
+            if formula.get("latex_withheld") and formula.get("reconstructed"):
+                # 第 5 波（IK-1008）: 本文の [[FORMULA_N]] でも壊れた復元は式を描かず印と事実文だけ（app.js MATERIAL_MATH）
+                maths.append("\x01" + _equation_body(formula))
+                return f"\x00MATH_{len(maths) - 1}\x00"
+            latex = str(formula.get("latex") or formula.get("summary") or pid)
+            # 第 4 波（IK-0977）: 復元の記録がある式は、本文中の [[FORMULA_N]] でも式カードと同じ印
+            # （app.js の MATERIAL_MATH 展開 → renderMaterialEquationBody）
+            mark = reconstructed_mark_text(formula) if formula.get("latex") else ""
+            maths.append(f"{latex}$" + mark if mark else f"{latex}$")
             return f"\x00MATH_{len(maths) - 1}\x00"
         figure = figure_by_id.get(raw) or figure_by_id.get(pid)
         if figure is not None:
@@ -384,7 +434,10 @@ def render_material_text(chunk: Any) -> str:
             return "" if drop_unresolved else _missing_embed(kind, raw_id)
         if kind in ("component", "claim"):
             if item:
-                return f"〔⚓ {item.get('title') or item.get('label') or item.get('id') or norm}〕"
+                # 第 7 波（IK-0571 の面 D 側）: チップは display_label を優先し、原文の言語のままなら
+                # サーバの印（title_original_mark「（原文）」）をそのまま添える（翻訳しない・固定文を補完しない）
+                name = item.get('display_label') or item.get('title') or item.get('label') or item.get('id') or norm
+                return f"〔⚓ {name}{item.get('title_original_mark') or ''}〕"
             return "" if drop_unresolved else _missing_embed(kind, raw_id)
         if item:
             label = MATERIAL_KIND_LABELS.get(str(item.get("kind")), str(item.get("kind")))
@@ -402,7 +455,7 @@ def render_material_text(chunk: Any) -> str:
         if kind == "EMBED":
             return render_embed(*embeds[idx])
         if kind == "MATH":
-            return f"${maths[idx]}$"
+            return maths[idx][1:] if maths[idx].startswith("\x01") else f"${maths[idx]}"
         return _figure_card(figs[idx])
 
     return _SENTINEL_RE.sub(expand, out)
@@ -452,9 +505,13 @@ def material_anchors(body: Any) -> list[dict]:
             # 題名は画面のチップ（renderMaterialEvidenceChip: title || label || id）と同じ文字列で切らない。
             # 数式は画面がチップではなく式として描くので、描かれる式（LaTeX）を題名にする（第 25 周 面 D H6）
             latex = str((formula or {}).get("latex") or (item or {}).get("latex") or "") if kind == "equation" else ""
-            title = f"${latex}$" if latex else str(src.get("title") or src.get("label") or src.get("summary") or "")
+            # 第 7 波（IK-0571）: ⚓ の名前は display_label 優先 + 原文の印（app.js renderMaterialEvidenceChip）
+            title = f"${latex}$" if latex else (
+                str(src.get("display_label") or src.get("title") or src.get("label") or src.get("summary") or "")
+                + str(src.get("title_original_mark") or ""))
             out.append({"no": len(out) + 1, "kind": kind, "id": str((item or {}).get("id") or norm),
-                        "title": re.sub(r"\s+", " ", title).strip(), "segment": si})
+                        "title": re.sub(r"\s+", " ", title).strip(), "segment": si,
+                        "display_label": str((item or {}).get("display_label") or "").strip()})
     return out
 
 
@@ -540,6 +597,9 @@ def _chat(body: dict, *, discuss: bool = False) -> list[str]:
             # 番号は DTO の index（セッション内で安定・不連続あり = IK-0432）。位置番号で描くと本文の [出典N] とずれる
             n = s.get("index") or i
             out.append(f"出典{n}: {s.get('source_title') or s.get('title') or ''} {s.get('meta') or ''}".rstrip())
+            # 第 25 周 第 5 波（IK-1006）: 同じ論文の別の版を 1 件に畳んだ出典は、カードの .lx-src-meta に 1 行
+            if str(s.get("version_note") or "").strip():
+                out.append(f"  {str(s.get('version_note')).strip()}")
     confirm = body.get("anchor_confirm")
     if isinstance(confirm, dict):
         # 画面（app.js renderAnchorConfirmPrompt）は見出し（prompt）とボタンだけを描き、発言全文は再掲しない。
@@ -583,6 +643,15 @@ def component_hop_targets(graph: Any) -> list[str]:
 
 def _component_context_lines(body: dict) -> list[str]:
     """部品の文脈（画面の統一パーツカード + 文脈の図）。ラベル・事実文だけを並べ、数値を足さない。"""
+    if body.get("available") is False:
+        # 第 6 波（IK-1021）: 凍結時の部品が置き換わり後継が決まらないとき、画面はサーバの事実文だけを描く
+        # （app.js renderComponentContextPanel の data-component-superseded）。第 7 波: 見出しは凍結時の部品名
+        # （frozen_label）、本文は frozen_label_line（無ければ note）
+        lines = ["部品の文脈:"]
+        if body.get("frozen_label"):
+            lines.append(f"見出し: {COMPONENT_KIND_LABEL} ・ {body['frozen_label']}")
+        lines.append(str(body.get("frozen_label_line") or body.get("note") or "詳細情報を取得できませんでした。"))
+        return lines
     head, details, shared = _component_instance_lines(body)
     lines = ["部品の文脈:"] + head
     graph = body.get("graph") if isinstance(body.get("graph"), dict) else None
@@ -624,9 +693,13 @@ COMPONENT_POSITION_EMPTY = "この論文での位置づけはまだ登録され�
 SHARED_PART_EMPTY = "共通部品としての情報はまだ登録されていません。"
 
 
+#: admin-assistant.js renderMarkdown（第 4 波・IK-0958）の節内リンクの置き換え
+COPILOT_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
+
+
 def shared_pane_lines(shared_part: dict) -> list[str]:
     """app.js ``renderContextSharedPane``（第 3 波・IK-0917 / IK-0920）: 見出し ``heading`` → 名前 → 別名 → 要約 →
-    標準化状況 → 他の論文の題名の列挙（``other_documents_lead`` の下に ``other_documents[].title``・
+    標準化の一文（``standardization_note``・第 4 波）→ 他の論文の題名の列挙（``other_documents_lead`` の下に ``other_documents[].title``・
     ``other_documents_truncated`` なら「ほか」）／無ければ ``other_documents_note``。件数（旧 ``other_documents_count``）は
     描かない。何も無ければ固定文。"""
     entry = shared_part.get("entry") if isinstance(shared_part.get("entry"), dict) else {}
@@ -639,9 +712,10 @@ def shared_pane_lines(shared_part: dict) -> list[str]:
         part.append("別名: " + " ・ ".join(str(a) for a in entry["aliases"]))
     if entry.get("summary"):
         part.append(str(entry["summary"]))
-    if entry.get("standardization_status"):
-        st = str(entry["standardization_status"])
-        part.append(f"標準化状況: {LIBRARY_STATUS_LABELS.get(st, st)}")
+    # 第 4 波（IK-0959）: 標準化の評価は教員が確定したときだけサーバの 1 文 ``standardization_note``
+    # （旧 ``standardization_status`` の enum を語表で引く描き方は廃止 — 未評価はキーなし）
+    if entry.get("standardization_note"):
+        part.append(str(entry["standardization_note"]))
     docs = [str(d.get("title")) for d in entry.get("other_documents") or [] if isinstance(d, dict) and d.get("title")]
     if docs:
         if entry.get("other_documents_lead"):
@@ -664,22 +738,35 @@ def _component_instance_lines(body: dict) -> tuple[list[str], list[str], list[st
     graph = body.get("graph") if isinstance(body.get("graph"), dict) else {}
     focus = graph.get("focus") if isinstance(graph.get("focus"), dict) else {}
     label = str(component.get("label") or focus.get("label") or "")
+    if component.get("label"):
+        label += str(component.get("label_original_mark") or "")  # 第 7 波（IK-0571）: 原文の印の素通し
+    display_label = str(body.get("_chip_display_label") or "").strip()
     summary = str(in_paper.get("narrative_role") or component.get("teaching_takeaway") or component.get("summary") or "")
+    if in_paper.get("narrative_role"):
+        summary += str(in_paper.get("narrative_role_original_mark") or "")
     shared_part = body.get("shared_part") if isinstance(body.get("shared_part"), dict) else None
-    head = [f"見出し: {COMPONENT_KIND_LABEL} ・ {label}" if label else f"見出し: {COMPONENT_KIND_LABEL}",
-            "タブ: ［この論文では］" + ("［共通部品として］" if shared_part else ""),
-            f"この論文での位置づけ: {summary or COMPONENT_POSITION_EMPTY}"]
+    # 第 7 波（IK-0571）: ⚓ から開いたときは ⚓ の表示名（display_label）が見出しに残り、英語の内部名で上書きしない
+    shown = display_label or label
+    head = [f"見出し: {COMPONENT_KIND_LABEL} ・ {shown}" if shown else f"見出し: {COMPONENT_KIND_LABEL}",
+            "タブ: ［この論文では］" + ("［共通部品として］" if shared_part else "")]
+    if body.get("version_note"):
+        # 第 6 波（IK-1021）: 置き換わった部品を新しい部品へつないだ事実（「この論文では」の先頭・カードの前）
+        head.append(str(body["version_note"]))
+    head.append(f"この論文での位置づけ: {summary or COMPONENT_POSITION_EMPTY}")
     details: list[str] = []
     if in_paper.get("graph_summary_excerpt"):
         details.append(str(in_paper["graph_summary_excerpt"]))
     supports = instance.get("supports") if isinstance(instance.get("supports"), dict) else {}
-    counts = [f"{name} {len(supports.get(key) or [])}件" for name, key in
-              (("前提", "preconditions"), ("入力", "inputs"), ("出力", "outputs"), ("注意", "cautions"),
-               ("数式", "equations"), ("主張", "claims")) if supports.get(key)]
-    if counts:
-        details.append(" · ".join(counts))  # 画面の摘要行（学習内容の構成数 — 評価の数値ではない）
+    # 第 10 波（studio）: app.js renderSupportsSummaryLine は件数を出さない（区画の名前だけ「前提 · 注意 · 数式 · 主張」）
+    present = [name for name, key in
+               (("前提", "preconditions"), ("入力", "inputs"), ("出力", "outputs"), ("注意", "cautions"),
+                ("数式", "equations"), ("主張", "claims")) if supports.get(key)]
+    if present:
+        details.append(" · ".join(present))  # 画面の摘要行
     for name, key in (("前提", "preconditions"), ("入力", "inputs"), ("出力", "outputs"), ("注意", "cautions")):
-        texts = [str(it.get("text")) for it in supports.get(key) or [] if isinstance(it, dict) and it.get("text")]
+        # 第 8 波（IK-0571 の区画そろえ）: 原文の言語のままの項目の末尾にサーバの印（original_mark「（原文）」）
+        texts = [str(it.get("text")) + str(it.get("original_mark") or "") for it in supports.get(key) or []
+                 if isinstance(it, dict) and it.get("text")]
         if texts:
             details.append(f"{name}:")
             details += [f"- {t}" for t in texts]
@@ -701,10 +788,11 @@ def _component_instance_lines(body: dict) -> tuple[list[str], list[str], list[st
             if d.get("target_label"):
                 t = f"{d['target_label']} — {t}" if t else str(d["target_label"])
             if t:
-                deps.append(f"- {t}")
+                deps.append(f"- {t}{d.get('original_mark') or ''}")  # 第 8 波（IK-0571）: 原文の印の素通し
     if deps:
         details += ["関連:"] + deps
-    claims = [f"- {c['excerpt']}" for c in supports.get("claims") or [] if isinstance(c, dict) and c.get("excerpt")]
+    claims = [f"- {c['excerpt']}{c.get('original_mark') or ''}" for c in supports.get("claims") or []
+              if isinstance(c, dict) and c.get("excerpt")]
     if claims:
         details += ["主張:"] + claims
     doc = in_paper.get("document") if isinstance(in_paper.get("document"), dict) else {}
@@ -727,6 +815,22 @@ def _component_instance_lines(body: dict) -> tuple[list[str], list[str], list[st
 def _error(status: int, body: Any) -> str:
     detail = body.get("detail") if isinstance(body, dict) else body
     return f"エラーが表示された（HTTP {status}）: {_str(detail)[:600] if detail not in (None, '') else '（詳細なし）'}"
+
+
+#: app.js openEnrollConfirm の showError の前置き（逐語ミラー）
+ENROLL_FAIL_PREFIX = "受講登録に失敗しました。もう一度お試しください。"
+
+
+def enroll_error_text(status: int, body: Any) -> str:
+    """受講開始の失敗（app.js ``enrollCourse`` → ``openEnrollConfirm`` の ``showError``・第 3 波 IK-0945）。
+
+    確認のモーダル（このコースを受講しますか？）は閉じず、「受講登録に失敗しました。もう一度お試しください。（detail）」を
+    出す。detail はサーバの事実文（403「このコースは新規の受講を受け付けていません。」/ 404「このコースは見つからないか、
+    閲覧できません。」）。detail が無い応答は ``HTTP {status}``（画面の ``new Error(detail || "HTTP " + status)``）。"""
+    detail = body.get("detail") if isinstance(body, dict) else None
+    msg = detail if isinstance(detail, str) and detail else (_str(detail) if detail else f"HTTP {status}")
+    return ("受講の確認（このコースを受講しますか？）の中にエラーが表示された: "
+            f"{ENROLL_FAIL_PREFIX}（{msg}）\nボタン: キャンセル / 受講する")
 
 
 #: personal-map-home.js REF_KIND_LABEL の逐語ミラー（旅の各歩の種別チップ）
@@ -783,6 +887,8 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
         return HARNESS_PRECONDITION_TEXT
     if status is None:
         return "画面が応答しなかった（接続できない / 時間切れ）。"
+    if status >= 400 and action_id == "learning.course.enroll":
+        return _clip(enroll_error_text(status, body))
     if status >= 400:
         return _clip(_error(status, body))
     from uxsim.runner import vision5_exec  # 遅延 import（循環回避）— 第 23 周の画面（扉・記録・リリース前の確認ほか）
@@ -793,6 +899,9 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
     if isinstance(body, dict) and "answer" in body and action_id.startswith(
             ("learning.chat", "learning.discuss.ask", "learning.corpus.discuss_ask", "admin.course_builder.chat",
              "admin.copilot")):
+        if action_id.startswith("admin.copilot") and isinstance(body.get("answer"), str):
+            # 第 4 波（IK-0958）: admin-assistant.js renderMarkdown は節内リンク「[見出し](#anchor)」を「見出し」に描く
+            body = dict(body, answer=COPILOT_LINK_RE.sub(r"「\1」", body["answer"]))
         lines = _chat(body, discuss=action_id in DISCUSS_CHAT_ACTIONS)
         if action_id == "admin.course_builder.chat" and isinstance(body.get("course_draft"), dict):
             draft = body["course_draft"]
@@ -858,8 +967,12 @@ def project_observation(action_id: str, status: Optional[int], body: Any) -> str
             if health:
                 chip = "・" + REFERENCE_HEALTH_CHIP_LABELS.get(str(health.get("status") or "unchecked"),
                                                                REFERENCE_HEALTH_CHIP_LABELS["unchecked"])
+            # 第 4 波（IK-0974）: 開示範囲のバッジの横に自分の役割（role_label）、viewer の行だけ下に edit_request_note
+            role = f"・{m['role_label']}" if m.get("role_label") else ""
             lines.append(f"- {m.get('title', '')}（{m.get('filename', '')}・{m.get('status', '')}・"
-                         f"{m.get('visibility', '')}{chip}）")
+                         f"{m.get('visibility', '')}{role}{chip}）")
+            if m.get("edit_request_note"):
+                lines.append(f"  {m['edit_request_note']}")
         # 第 25 周 H9: 画面は document_id を出さない。行為の引数に使う番地は末尾の欄に分ける
         ids = [f"{m.get('title', '')}={m.get('document_id')}" for m in body[:20]
                if isinstance(m, dict) and m.get("document_id")]

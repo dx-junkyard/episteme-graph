@@ -175,7 +175,7 @@ def test_equation_embed_uses_formulas_or_pending():
 
 def test_figure_placeholder_and_unserved_figure_embed():
     figs = [{"id": "[[FIGURE_1]]", "figure_id": "f1", "caption": "図1 偏光", "image_url": "/api/x"}]
-    assert render_material_text(_chunk("[[FIGURE_1]]", figures=figs)) == "〔図〕 図1 偏光"
+    assert render_material_text(_chunk("[[FIGURE_1]]", figures=figs)) == "〔図（画像あり）〕 図1 偏光"  # 第 25 周 第 10 波（studio H45）
     nofig = [{"figure_id": "f2", "caption": "c"}]
     assert "画像を取得できませんでした" in render_material_text(_chunk("[[FIGURE_1]]", figures=nofig))
     ev = [{"kind": "figure", "id": "f9", "caption": "未配信の図"}]

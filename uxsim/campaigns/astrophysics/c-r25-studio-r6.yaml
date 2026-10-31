@@ -1,0 +1,64 @@
+id: c-astro-r25-studio-r6
+domain: astrophysics
+snapshot: corpus-astro-tex-r25e
+course_id: 6be229e1
+personas:
+  teachers: [te-01-rookie-seminar, te-04-copilot-intro]
+  students: [st-03-d1-from-particle, st-05-night-solarwind]
+scenarios:
+  teacher: [t-studio-split-save, t-studio-rewrite-shared]
+  student: [s-studio-lecture-pages, s-lecture-then-trace]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 8, persona_llm_calls: 220, wall_clock_minutes: 240}
+notes: |
+  第 25 周 面 D（原稿スタジオ → 学生の受講）の第 6 周（judge_studio_r5.md §5 と r6_prereqs.md の面 studio）。教員 2 × 学生 2・4 場面:
+  te-01 × (a) split-save（区切りを教材欄と本文説明欄の両方に揃える・最後に区切りの無い t17 の保存 = X1 の材料 H30）/
+  te-04 × (b') rewrite-shared（共有教員として 6be229e1 へ）/ st-03 × (d) lecture-pages（t0 を最後まで）/
+  st-05 × (d') lecture-then-trace（部品チップのある t11 で 5 か所の印）。面 D は X1（保存の直後のプレビューの枚数 = 学生の枚数）が
+  第 5 周に成立したので、場面を 4 つに絞る。
+  組の例外（P-0025）: te-01 × (a) は第 1・2・5 周と同じ組。6be229e1 の所有者は砂場で te-01 だけで保存は所有者しかできない（第 5 周の
+  例外を継続）。今回は区切りを外した t16 から始めて両欄に揃える手順と、区切りの無い t17 の保存（自動ページ分割の経路）を見るので
+  第 5 周（片欄の区切り・統合 1 枚）と観察が重ならない。figure-adopt は第 1・2・5 周に te-01 が歩いたので回さない。
+  学生の差し替え: 審判の「st-05 または st-08」は st-05 にした（st-08 は share と atlas に出る）。
+  学生の見るトピックは t0 / t11 で、te-01 の保存した t16 / t17 ではない。X1 の t16 / t17 は周またぎの審判（run_all --campaign）が
+  プレビューの配信の枚数（delivered_count・H27）と学生の API の枚数を直接突き合わせる。
+
+  一括の確かめと用意: `backend/.venv/bin/python uxsim/runs/round25/r6_prereqs.py --dry-run`（= r5_prereqs.py --round 6。役の既定
+  ROUND_DEFAULTS[6] はこの campaign の組と一致）→ 書き込みは `--allow-reanalyze`（LLM）/ `--allow-confirmed-assumption` /
+  `--allow-topic-write` を指揮者が明示したときだけ。identity_rerun の記録の鍵はこの campaign の snapshot 名（r25e）。
+
+  ── 周の前に指揮者が用意するもの（この順）──
+   1. 砂場（共通 1）: share と同じ corpus-astro-tex-r25e。名前の登録（共通 3）— ［案をコピー］の宛先の名前（IK-1007）がログイン ID でないこと。
+   2. **t16 の区切りを外した状態から始める**（studio_t16_no_split・H30）: snapshot の取り直しで戻すか、`--allow-topic-write` で所有者として
+      区切りを外して保存（保存は音声キャッシュを消す — その場合は t16 の音声が無い状態で始まったと run の記録に書く）。
+   3. 音声のあるトピック（審判の「音声のあるトピック」）: te-01 の split-save は保存で当該トピックの音声が作り直しになることの告知を見る。
+      周の前に GET /api/learning/courses/6be229e1/topics/t16/audio-status で t16 に音声があるか確かめ、無ければ run の記録に
+      「音声の無いトピックで保存した」と書く（TTS は bridge で肩代わりできず、ハーネスは音声を作らない）。
+   4. 公開とコース一覧（studio_visibility）: 6be229e1・1bad7d9f 公開／0d70b5d0・74ca9b48 非公開。te-01 の /api/admin/courses の先頭が
+      6be229e1・t16 の題名に「kineticityからのbraiding導出」が含まれる（te01_course_head）。この周の場面に公開の手は無い — 公開を
+      伴う操作をするなら学生レーンの後。
+   5. editor 共有（(b') の前）: te-04 に 6be229e1 の editor（studio_course_editor・グループ経由）。
+   6. 是正と投影の同期（共通 2）: 審判の配信の枚数の比較（H27）・根拠チップの全件（H28）・⚓ の条件付き（H29）。IK-1008 / 1009（復元の印）・
+      IK-1010 / 1011（人の加えたものと機械のもの・申し送りの根拠）・IK-1007（名前）の是正。学生の固定コースは pin_course（runner）。
+
+  ── レーンの順（face_studio_r6.sh。--persona X --scenario Y で 1 場面ずつ・この順で）──
+   1. te-01-rookie-seminar × t-studio-split-save（6be229e1 の t16 に教材欄 → 本文説明欄の順で区切りを入れて揃える → 保存 → 音声の
+      準備の文 → t17 を区切りを入れずに保存）
+   2. te-04-copilot-intro × t-studio-rewrite-shared（6be229e1 の先頭のトピックで書き換え → ［案をコピー］の中身と宛先の名前 →
+      保存の事前表示。保存は通らないので 6be229e1 は変わらない）
+   3. st-03-d1-from-particle × s-studio-lecture-pages（⇢ 1 と atlas の mailbox_atlas/LANE_DONE_R6。t0 を講義で最後まで — 境目 IK-0976・
+      付録の矛盾 IK-0872 ①）
+   4. st-05-night-solarwind × s-lecture-then-trace（⇢ 1 と doubt の mailbox_doubt/ST05_DONE_R6。t11 で式 → 記号 → ⚓ → チャット。
+      復元の印が本文・講義・付録・吹き出し・チャットの 5 か所で揃うか（latex_withheld 込み）IK-1008 / 1009）
+   5. 周の後に `python -m uxsim.oracles.run_all uxsim/runs/c-astro-r25-studio-r6 --campaign`（te-01 の保存の配信の枚数と学生の枚数）。
+
+  場面に足りない手（ハーネスへの申し送り・この campaign では足していない）:
+   - 音声生成を実際に押す手が行為に無い（studio_actions.py の「行為にしないもの」— TTS は bridge で肩代わりできない）。審判の
+     「共有教員が音声生成を押す（非対称の確認・3 周未確認）」は t-studio-rewrite-shared では当たらない。rewrite-shared には
+     audio_readiness（ボタンの状態と理由を読む）の手も無い。
+   - s-studio-lecture-pages の 2 つ目以降のトピックは「次のトピック」しか開けず、t0 の後に t11 を指せない（t11 は st-05 が見る）。
+
+  LLM 予算の見積り: 書き換え 1 + 学生のチャット 最大 3 = 最大 4 回（余裕を見て 8）。図スタジオ・TTS は呼ばない。種まき 0
+  （te-01・te-04 とも既存のコース）。ペルソナ頭脳は 4 場面 × 45〜55 手 ≒ 180〜220（上限 220）。外部 API は呼ばない。

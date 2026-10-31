@@ -1,21 +1,46 @@
 scenario: t-atlas-draft-freeze
 domain: astrophysics
+# 第 25 周 第 10 波（atlas H51）: freeze_note（凍結のメモ = 公開版に残る教員の文）に周番号を入れない。運転の文脈はコメントに置く
 params:
   domain_hint: astrophysics
   accept_hint: "1"
   edge_accept_hint: "1"
   edge_kind: 関連
   freeze_version: "2026.2"
-  freeze_note: 論文の解析から見つかった項目と関係を 1 つずつ追加（第 25 周）
+  freeze_note: 論文の解析から見つかった項目と関係を 1 つずつ追加
   correspondence: none
 personas:
   te-03-meticulous-seminar:
     # 第 3 周（judge_atlas_r2 §5）: 几帳面な教員が公開前チェックの言い方を確かめてから凍結する。砂場を reset して骨格が
     # 2026.1 に戻っている前提で 2026.2。reset しないなら第 2 周の 2026.2 が残るので指揮者が 2026.3 に差し替える
-    freeze_note: 論文の解析から見つかった項目 1 件と、近さと配置を確かめた関係 1 件を追加（第 25 周 第 3 周）
+    # 第 9 周（judge_atlas_r8 §6）: 現行の凍結版は 2026.5（第 8 周 te-01）。te-04 が同じ周に画面で作った下書き（反映済み）を
+    # 凍結の影響で確かめて 2026.6。下書きが無ければ場面の固定手（関係の区画のボタン）で作る — 指揮者は API で作らない
+    freeze_version: "2026.6"
+    freeze_note: 同じ周に採用・反映された有向の関係を確かめ、関係だけの版上げとして凍結
   te-04-copilot-intro:
     # 第 4 周（judge_atlas_r3 §5）: Copilot 依存型が止め理由（根拠と帰属 — IK-0937・0939）を読み、外れた判断を取り込む／戻すを
     # 選んで凍結を成立させる（版を上げる役）。現行の凍結版が 2026.1 のままなら 2026.2（指揮者が周の前に確かめ、2026.2 が
     # 既にあれば 2026.3 に差し替える）
     freeze_version: "2026.2"
-    freeze_note: 論文の解析から見つかった項目と、根拠を読んだ関係を反映（第 25 周 第 4 周）
+    freeze_note: 論文の解析から見つかった項目と、根拠を読んだ関係を反映
+  te-05-delegator-lab:
+    # 第 5 周（judge_atlas_r4 §6）: 教員レーンの先頭で、残存する他人の採用（campaign notes に名前で列挙）を根拠の一文（IK-0962）を
+    # 読んで反映するか戻すかを決め、凍結を成立させる。現行の凍結版が 2026.1 なら 2026.2（2026.2 があれば指揮者が 2026.3 に差し替える）
+    # 第 7 周（judge_atlas_r6 §6）: 現行の凍結版は 2026.3（第 6 周 te-01）。項目が加わる版上げとして 2026.4
+    # （周の前に r5_prereqs.py --round 7 の atlas_freeze_version で確かめる）
+    freeze_version: "2026.4"
+    freeze_note: 論文の解析から見つかった項目を取り込み、項目が加わる版上げとして凍結
+  te-01-rookie-seminar:
+    # 第 6 周（judge_atlas_r5 §8）: 現行の凍結版は 2026.2（第 5 周 te-05 が凍結）で下書きは無い。次版サイクルの起点
+    # （［次版の下書きを作る］→ 前の周から残る te-04 の採用「ブラックホール — 超大質量ブラックホール」をメモで読んで反映 →
+    # 凍結の影響 → 凍結）なので 2026.3。周の前に r5_prereqs.py --round 6 の atlas_freeze_version で確かめる
+    # 第 8 周（judge_atlas_r7 §6・r8_prereqs 共通 3）: 現行の凍結版は 2026.4（第 7 周 te-05）で下書きは無い（atlas_no_draft）。
+    # 場面の固定手［次版の下書きを作る］で画面から下書きを作り（IK-1044 の入口の確かめ）、te-04 が同じ周に採用した関係を反映して
+    # 2026.5（関係だけの版上げの 2 回目）。周の前に r8_prereqs の atlas_freeze_version で確かめる
+    # 第 10 周（judge_atlas_r9 §6）: 現行の凍結版は 2026.6（第 9 周 te-03）・下書きなし。同じ周に te-02 / te-05 が有向の「依存」を
+    # 採用 → 画面のボタンで下書き → 反映した後、凍結の影響に向きの一文が出るかを読んで 2026.7（周の前に r10_prereqs の
+    # atlas_freeze_version で確かめる）
+    # 第 11 周（judge_atlas_r10 §6・第 10 波）: 現行の凍結版は 2026.7（第 10 周 te-01）・下書きなし。同じ周の edge-review の後に
+    # 2026.8（周の前に r11_prereqs の atlas_freeze_version で確かめる）。freeze_note は周番号を入れない（H51 — 周番号はこのコメントに）
+    freeze_version: "2026.8"
+    freeze_note: 同じ周に採用された関係を反映し、関係だけの版上げとして凍結

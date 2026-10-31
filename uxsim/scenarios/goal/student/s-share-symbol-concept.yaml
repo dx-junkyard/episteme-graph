@@ -1,5 +1,8 @@
 id: s-share-symbol-concept
 population: students
+# 第 25 周 第 7 周 atlas H43: 是正の確かめが固定コース（campaign の course_id）に依存する場面は最初の open を固定する。
+# 同題名のコースを人がどう見分けるか（IK-0407）を観察したい場面とは分ける（その場面には pin_course を付けない）
+pin_course: true
 runner: [api, browser]
 # 第 25 周 share (e)。記号の意味を引き、概念の参照が確定した結び付きのときだけ出ることを見る。
 goal: '{{goal_text}} のために、{{topic_hint}} の式の記号を順にタップし、その記号がどの概念に当たるかが分かるかを確かめる'
@@ -27,6 +30,13 @@ steps:
   - do: learning.symbol.lookup
     with: {symbol: '{{symbol_hints | next}}'}
     note: 4 つ目の記号（登録の無い記号なら、無いことがどう言われるかを読む）
+  # 第 25 周 第 10 波（judge_share_r10 H62）: 材料に 5 つ目の記号があれば（st-04 の N_TOV — 式の中に現れる経路・IK-0681）
+  # タップする。材料が尽きていれば飛ばしてよい
+  - choose:
+      - do: learning.symbol.lookup
+        with: {symbol: '{{symbol_hints | next}}'}
+        note: 5 つ目の記号（式の中に現れる記号なら、どの式の記号として言われるかを読む）
+    optional: true
   - choose:
       - do: learning.component.context
         note: 記号が出てくる部品の ⚓ を開く

@@ -1,0 +1,63 @@
+id: c-astro-r25-studio-r5
+domain: astrophysics
+snapshot: corpus-astro-tex-r25d
+course_id: 6be229e1
+personas:
+  teachers: [te-01-rookie-seminar, te-03-meticulous-seminar]
+  students: [st-09-d2-from-datasci, st-02-m2-lensing-theory]
+scenarios:
+  teacher: [t-studio-split-save, t-studio-figure-adopt, t-studio-rewrite-shared]
+  student: [s-studio-lecture-pages, s-lecture-then-trace]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 12, persona_llm_calls: 260, wall_clock_minutes: 260}
+notes: |
+  第 25 周 面 D（原稿スタジオ → 学生の受講）の第 5 周（judge_studio_r4.md §5・§7 と r5_prereqs.md の面 studio）。狙いは、
+  **固定コース 6be229e1 の所有者として保存する教員と、同じコース・同じトピックを見る学生の組**で、保存の後の学生の画面
+  （X1〜X3）を周またぎの審判（run_all --campaign）で初めて閉じること。教員 2 × 学生 2・5 場面:
+  te-01 × (a) split-save → (c) figure-adopt（6be229e1 の所有者・トピック t16）/ te-03 × (b') rewrite-shared /
+  st-09 × (d) lecture-pages（t16）/ st-02 × (d') lecture-then-trace（t16）。
+  組の例外（P-0025）: te-01 × (a)(c) は第 1・2 周と同じ組。6be229e1 の所有者は砂場で te-01 だけで、原稿スタジオの保存・図の
+  採用は所有者しかできない。審判の提案（6be229e1 の複製を te-04 の所有にする）は course_id が変わって学生の固定コースと
+  ずれ、所有の移管は他の面の前提（te-01 が 6be229e1 を所有）を動かすので採らない。第 1・2 周の te-01 は、t16 が前の周の
+  編集の残りから始まり（H12）学生が別のトピック・別のコースを見ていて X1 が評価外だったので、今回の観察（同じトピックの
+  保存 → 学生の枚数・図・式の印）は重ならない。te-03 × (b') と学生 2 人の組は新しい。
+
+  ── 周の前に指揮者が用意するもの（この順）──
+   1. 砂場（共通 1・H12）: share と同じ取り直した snapshot に差し替える。6be229e1 のトピック t0 / t16 が第 1 周以前の状態に
+      戻っていることを確かめる（取り直しで戻らなければ戻す）。
+   2. 公開とコース一覧（H26）: 6be229e1 が公開中であること（IK-0915「公開中の保存の届き方」の前提）。第 4 周に te-02 が公開した
+      0d70b5d0、te-03 の 74ca9b48 は非公開に戻す。前の周に pin_course で非公開にした 1bad7d9f が公開に戻っているか確かめる
+      （他の 3 面の固定コース）。te-01 の figure-adopt の最後の公開の手は 6be229e1（公開済みなら何も変わらない）にしか
+      効かず学生の一覧に新しいコースを足さないが、6be229e1 が非公開だった場合はここで公開になる — 学生レーンはこの後に走る。
+      te-03 の (b') は保存も公開もしない。この周に学生レーンより前に公開されるコースは無い。
+   3. te-01 の /api/admin/courses の先頭（原稿スタジオで開くコース）が 6be229e1 であること。t16 の題名に
+      「kineticityからのbraiding導出」が含まれること（split_topic_hint / figure_topic_hint / 学生の topic_hint_terms。
+      違えば 4 つの params を実在の題名の一部に差し替える）。
+   4. editor 共有（(b') の前）: te-01 として 6be229e1 を te-03 の入ったグループへ editor で共有する（第 3・4 周と同じ手順:
+      グループ作成 → 招待コードで参加 → POST /api/admin/courses/6be229e1/groups {permission: editor}）。
+   5. 是正と投影の同期（共通 2）: IK-0975（プレビューと配信の入力）・IK-0976（読みの単位）・IK-0977（復元の印）・IK-0978
+      （［案をコピー］— 作業ツリーの投影は同期済み）・IK-0979（採用の知らせ）。IK-0978 の後半（所有者の名前の表示）は
+      オーナー判断（judge_studio_r4 §6-1）の後。学生の固定コースは pin_course（runner）で、pin_course.py は走らせない。
+      観察には「一覧の『新しく受講可能なコース』の N.『題名』の行」が出る（H23）。
+
+  ── レーンの順（face_studio_r5.sh。--persona X --scenario Y で 1 場面ずつ・この順で）──
+   1. te-01-rookie-seminar × t-studio-split-save → t-studio-figure-adopt（6be229e1 の t16 に区切りを入れて保存 → 同じトピックに
+      図を採用して保存 → 公開の手。プレビューの枚数（IK-0975）・採用の知らせ（IK-0979）・保存の届き方（IK-0915））
+   2. te-03-meticulous-seminar × t-studio-rewrite-shared（用意 4 の後。6be229e1 で書き換え → ［案をコピー］の中身と宛先
+      （IK-0978）・保存の事前表示・共有教員の音声生成の押下（非対称の確認）。保存は通らないので 6be229e1 は変わらない）
+   3. st-09-d2-from-datasci × s-studio-lecture-pages（⇢ 1 と atlas の LANE_DONE_R5。t16 を講義で最後まで — 見出しの泣き別れ
+      IK-0976・付録の矛盾 IK-0872・te-01 の保存の後の枚数と図）
+   4. st-02-m2-lensing-theory × s-lecture-then-trace（⇢ 1 と atlas の LANE_DONE_R5。t16 で式 → 記号 → ⚓（主張の ⚓ を要素の文脈で
+      開ける H25）→ チャット。復元の印が 5 か所で一致するか IK-0977）
+   5. 周の後に `python -m uxsim.oracles.run_all uxsim/runs/c-astro-r25-studio-r5 --campaign` → campaign_studio_cross.jsonl
+      （H24。te-01 の保存と学生 2 人の枚数を周をまたいで突き合わせる）。
+
+  LLM 予算の見積り: 図スタジオ 1〜3（+ 図の提案 0〜1）+ 書き換え 1 + 学生のチャット 最大 3 + 種まき 0（te-01・te-03 とも
+  既存のコース）= 最大 8 回（余裕を見て 12）。TTS は呼ばない。ペルソナ頭脳は 5 場面（教員 3・学生 2）× 45〜55 手 ≒
+  220〜250（上限 260）。外部 API は呼ばない。
+
+   前提の実測（2026-10-27）: 6be229e1 公開・1bad7d9f 公開・0d70b5d0 / 74ca9b48 非公開・te-01 の一覧先頭は 6be229e1・te-03 に editor（グループ経由）。
+   t0 には図の埋め込み、t16 にはスライドの区切りが前の周から残っている。**指揮者の判断: r25c を基点に残したまま周を回す**
+   （r25a に戻すと他 3 面の前提が消える。X1 の判定は「保存した直後の枚数 = 学生の枚数」で、前の周の区切りの有無に依らない）。

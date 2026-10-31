@@ -1,0 +1,66 @@
+id: c-astro-r25-studio-r7
+domain: astrophysics
+snapshot: corpus-astro-tex-r25f
+course_id: 6be229e1
+personas:
+  teachers: [te-01-rookie-seminar, te-05-delegator-lab]
+  students: [st-07-m1-grb-voice, st-01-m1-radio]
+scenarios:
+  teacher: [t-studio-split-save, t-studio-rewrite-shared]
+  student: [s-lecture-then-trace, s-studio-lecture-pages]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 8, persona_llm_calls: 220, wall_clock_minutes: 240}
+notes: |
+  第 25 周 面 D（原稿スタジオ → 学生の受講）の第 7 周（judge_studio_r6.md §7 と r7_prereqs.md の面 studio・共通 1〜6）。全組が既出なので
+  前提状態を変える。教員 2 × 学生 2・4 場面:
+  te-01 × (a) t-studio-split-save（**6be229e1 に共有版を発行した状態**で t16 を両欄に区切って保存 → t17 を区切らずに保存。保存は HEAD に入り、
+  学生はピン留めした版を読む — IK-0915 の版ありの経路・6 周未確認）/ te-05 × (b') t-studio-rewrite-shared（editor として根拠のある先頭の
+  トピック t0 で書き換え — IK-1010 の sufficient 形・IK-1034）/ st-07 × (d') s-lecture-then-trace（t11 で講義中の質問の後に「▶ 再開」H33・
+  5 か所の印 IK-0895）/ st-01 × (d) s-studio-lecture-pages（t0 → t1 の境目 IK-0976 の残りの 2 形）。
+  指揮者の判断（審判の te-02 × (a) を変えた）: 所有権を移さず、唯一の所有者 te-01 が版ありの 6be229e1 で保存する。保存は所有者だけで、
+  te-02 に移すにはアカウントの移管（SYSTEM_ADMIN・重い）が要るため。
+  組の例外（P-0025）: te-01 × (a) は第 1・2・5・6 周と同じ組（6be229e1 の所有者は te-01 だけ）、te-05 × (b') は第 4 周と同じ組、st-07 × (d') は
+  第 1・2 周と同じ組、st-01 × (d) は第 3 周と同じ組。どれも前提状態（版あり・根拠のあるトピック・講義の一時停止と再開の行為・是正後の
+  境目）が違うので観察が重ならない。st-07 は doubt の s-db-map-ask-en にも出る（2 面。3 面に出る学生はいない — share の (e) を st-04 に
+  替えたのはこのため）。st-01 は studio だけ。
+
+  一括の確かめと用意: `backend/.venv/bin/python uxsim/runs/round25/r7_prereqs.py --dry-run`（= r5_prereqs.py --round 7。役の既定
+  ROUND_DEFAULTS[7] = studio_editor te-05 はこの campaign の組と一致）。
+
+  ── 周の前に指揮者が用意するもの（この順。r7_prereqs の項目名）──
+   1. 製品の第 6 波（IK-0895・IK-1032 / 1034 / 1010 の残り）と H31〜H33 のハーネス是正 → 投影の同期 → この前提 → 周（共通 1）。snapshot は
+      corpus-astro-tex-r25f。名前の登録 persona_profile_names（共通 2）—［案をコピー］の宛先の名前がログイン ID でないこと。
+   2. studio_t16_no_split: t16 の区切りを外した状態から始める（do は --allow-topic-write のときだけ。保存は音声キャッシュを消す — その場合は
+      run の記録に書く）。周の前に t16 の audio-status を読み、音声の有無を run の記録に書く。
+   3. studio_visibility: 6be229e1・1bad7d9f 公開／0d70b5d0・74ca9b48 非公開。te01_course_head: te-01 の /api/admin/courses の先頭が 6be229e1・
+      t16 の題名に「kineticityからのbraiding導出」。
+   4. studio_course_editor（te-05）: te-05 に 6be229e1 の editor。
+   5. studio_course_release（所有者 te-01）: 6be229e1 に共有版を発行（V層 POST /api/admin/shared/course/{id}/releases）。**2〜4 の後に**発行する
+      （発行した版が「t16 の区切りなし」の状態をピン留めする）。学生レーンはこの版を読む。
+   6. 学生の固定コースは pin_course（runner）。st-07・st-01 が 6be229e1 を受講していなければ場面の enroll が受講を始める。
+
+  ── レーンの順（face_studio_r7.sh。--persona X --scenario Y で 1 場面ずつ・この順で）──
+   1. te-01-rookie-seminar × t-studio-split-save（版ありの 6be229e1 で t16 を両欄に区切って保存 → 音声の準備の文 → t17 を区切らずに保存）
+   2. 周またぎの審判を 1 回（発行の前 = 学生はピン留めの版・所有者は HEAD）: run_all --campaign --student-api（保存したトピックごとに
+      学生の講義 API の total_slides を直接引く・読み取りだけ）。版ありなので保存の直後の枚数と学生の枚数が食い違うのが規則どおりの姿
+      （食い違いの有無と、所有者・学生に「発行するまで届かない」が言われたかを見る）
+   3. te-05-delegator-lab × t-studio-rewrite-shared（6be229e1 の先頭のトピック t0 で書き換え →［案をコピー］の中身と宛先 → 保存の事前表示）
+   4. st-01-m1-radio × s-studio-lecture-pages（t0 を最後まで → 次のトピック t1）
+   5. st-07-m1-grb-voice × s-lecture-then-trace（⇢ doubt の mailbox_doubt/ST07_DONE_R7。t11 で式 → 記号 → ⚓ → 講義中のチャット →「▶ 再開」）
+   6. ⇢ mailbox_studio/RELEASE2_DONE_R7（2 の後に mailbox_studio/SPLIT_DONE_R7 が出る。学生レーン 4・5 が終わってから、指揮者が te-01 として
+      6be229e1 の新しい版を発行した）か RELEASE2_SKIP_R7（発行しない）→ 周またぎの
+      審判をもう一度（発行の後 = 学生の枚数が保存の直後の枚数に揃うか — X1 の版ありの経路）
+  最後に mailbox_studio/LANE_DONE_R7。
+
+  場面に足りない手（ハーネスへの申し送り・この campaign では足していない）:
+   - 音声生成を押す行為（admin.lecture_studio.audio_generate・第 6 周に足した）は t-studio-rewrite-shared の steps に無い（t-studio-split-save にも
+     無い — audio_readiness だけ）。審判の「te-05 × (b') で音声生成を実際に押す（判断 2 の材料）」はこの campaign では行われない。
+   - t-studio-split-save に版の発行の手が無い（発行の前後の比較は指揮者の手と周またぎの審判で代える）。
+   - s-studio-lecture-pages は 2 つ目以降のトピックを「次のトピック」でしか開けないので、st-01 は t0 → t1 → t2 までで t11 に届かない
+     （t11 の境目は st-07 の (d') の講義で見る）。
+
+  LLM 予算の見積り: 書き換え 1 + 学生のチャット 最大 3（st-07）+ st-01 0 = 最大 4 回（余裕を見て 8）。音声生成・図スタジオ・TTS は呼ばない
+  （音声生成の手が場面に無い）。種まき 0（te-01・te-05 とも既存のコース）。版の発行は LLM を使わない。ペルソナ頭脳は 4 場面 × 45〜55 手
+  ≒ 180〜220（上限 220）。外部 API は呼ばない。

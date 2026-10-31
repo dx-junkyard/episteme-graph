@@ -1,0 +1,57 @@
+id: c-astro-r25-atlas-r5
+domain: astrophysics
+snapshot: corpus-astro-tex-r25d
+course_id: 1bad7d9f
+personas:
+  teachers: [te-05-delegator-lab, te-04-copilot-intro]
+  students: [st-09-d2-from-datasci, st-02-m2-lensing-theory]
+scenarios:
+  teacher: [t-atlas-draft-freeze, t-atlas-edge-review, t-atlas-gap-review]
+  student: [s-atlas-threads-and-placement, s-atlas-sea-map]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 4, persona_llm_calls: 300, wall_clock_minutes: 240}
+notes: |
+  第 25 周 面 C「分野の地図の運用」第 5 周（judge_atlas_r4.md §6 の組。r5_prereqs.md の面 atlas と共通 1〜4）。教員 2 × 学生 2・
+  5 場面: te-05 × 凍結（教員レーンの先頭）/ te-04 × 辺 → 候補 / 凍結の後に st-09 × 糸と配置・st-02 × 海。
+  組の差し替え（P-0025）: 審判の提案の te-03 × t-atlas-edge-review は第 1 周、te-01 × t-atlas-gap-review は第 2 周と同じ組
+  （審判の「te-03 は第 1・3 周は draft-freeze」は誤り — 第 1 周の te-03 は gap と edge を歩いた）。辺・候補のどちらも未担当の
+  教員は te-04 だけなので、2 場面とも te-04 に渡した（te-04 は第 1 周に別名と凍結の影響、第 4 周に凍結を歩いた）。
+  審判が te-03 に求めた「第 1 周に自分が採用した関係（ブラックホール — 重力波）の行方」は、te-05 の凍結でその関係を
+  反映するか戻すかを決める場面で読む。
+
+  ── 周の前に指揮者が用意するもの（この順）──
+   1. 砂場（共通 1）: share と同じ取り直した snapshot に差し替える。取り直しで前の周の判断（atlas_gap_decisions /
+      atlas_edge_decisions・下書き）が消えたかを確かめ、run の記録に残す。
+   2. 是正の前提: H25〜H27 の同期と IK-0962（止め理由の根拠の一文）・IK-0963（加わる項目）の是正、projection_sync（共通 2）。
+   3. **残存する採用済み・未反映の判断**（H25・頭脳に渡す）: 第 4 周の終了時点で次の 1 件が残っている —
+      関係「ブラックホール — 重力波」（第 1 周に te-03 が採用・4 周とも未反映）。第 4 周に te-04 が下書きに反映した
+      「惑星形成 — 星形成」は下書きに入ったまま凍結されていない。周の前に通常の関係の候補一覧の先頭帯と下書きを確かめ、
+      ここに無いものが残っていれば名前でこの節に足す。採用済み・未反映が 5 件以上なら場面の前に指揮者が整理する
+      （場面の反映の繰り返しの上限は 4）。te-05 が戻す・見送ると判断したものはそのまま判断として残す。
+   4. 現行の凍結版を確かめる（第 1〜4 周は凍結が成立せず 2026.1 のはず）。2026.2 が既にあれば t-atlas-draft-freeze の te-05 節の
+      freeze_version を 2026.3 に差し替える。凍結は取り消せない — この周で 1 名・1 回だけ。
+   5. 候補（t-atlas-gap-review）: この砂場の 4 論文では 2 本以上の反復が立たず、ギャップ候補は 0 件の見込み。runner は
+      候補 0 件のとき［採用］［却下］を選択肢から外す（H26）— 場面の主眼は空の説明と外れた枠を新しい目で読めるかになる。
+   6. 教員確認済みの配置が 1 件以上あること（第 3 周の Cepheus B のダストの配置。無ければ指揮者が教材管理の［位置づけ（分野
+      マップ）…］で 1 件 confirmed にする）。st-09 の確認済みと推定の読み分けの材料。コース 1bad7d9f が公開のままであること。
+   7. te-04 の t-atlas-edge-review で採用した関係は次版の下書きに入らず、第 6 周の凍結の残存になる（周の後に名前を記録する）。
+
+  ── レーンの順（face_atlas_r5.sh。--persona X --scenario Y で 1 場面ずつ・この順で）──
+   1. te-05-delegator-lab × t-atlas-draft-freeze（索引の再構築 → 用意 3 の残存を根拠の一文で読んで反映 / 戻す → 確認 → 下書きに
+      追加を freeze_ready まで最大 4 回 → 凍結の影響 → 凍結 2026.2）
+   2. te-04-copilot-intro × t-atlas-edge-review（凍結の後の判断済みの帯と根拠の一文で、採用 1（関連）・理由付きの見送り 1 —
+      見送りは学生の糸に出ないことの材料 = RE8 / 審判 B5）
+   3. te-04-copilot-intro × t-atlas-gap-review（候補ゼロの理由と外れた枠）
+   4. st-09-d2-from-datasci × s-atlas-threads-and-placement（⇢ 1・2。版が上がった地図・反映した関係の糸・見送った関係が糸に
+      出ないこと・未訪問の札 IK-0964）
+   5. st-02-m2-lensing-theory × s-atlas-sea-map（⇢ 1。版が上がった地図の海と L1 の霧の一致・円の名前）
+  最後に mailbox_atlas/LANE_DONE_R5 を出す（studio の学生レーン st-09 / st-02 がこれを待つ — 同じ学生の run を同時に走らせない）。
+
+  LLM 予算の見積り: 製品のチャット LLM は呼ばない（候補の導出・取り込み・凍結の影響は決定論）。product_llm_calls は embedding の
+  従量の上限で、索引の再構築 1 回 + 凍結の後に製品が裏で始める新しい版の索引 1 回 = 2 回の見込み（余裕を見て 4）。
+  ペルソナ頭脳は 5 場面 × 50〜60 手 ≒ 250〜300（上限 300）。arXiv は呼ばない。
+
+   前提の実測（2026-10-27）: 現行凍結版 2026.1・下書きあり。採用済み・未反映 = 関係「ブラックホール — 重力波」（下書きに未反映）／
+   項目「星間磁場」（下書きに未反映）の 2 件。教員確認済みの配置 1 件（Cepheus B → ダスト）。ギャップ候補は未確認（周で読む）。

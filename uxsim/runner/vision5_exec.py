@@ -591,7 +591,11 @@ def project_release_step2(body: dict) -> str:
             chip = f" 〔{RR_NODE_STATUS[p['node_status']]}〕" if p.get("node_status") in RR_NODE_STATUS else ""
             lines.append(f"  {n}. {p.get('node_label') or ''}（{meta}）［{_rr_status_label(p)}］{chip}")
             if p.get("reason"):
-                lines.append(f"     {str(p['reason'])[:200]}")
+                # 第 4 波（IK-0967）: 〔AIの要約〕+ 理由 → reason_note（admin-release-review.js）
+                label = f"〔{p['reason_label']}〕" if p.get("reason_label") else ""
+                lines.append(f"     {label}{str(p['reason'])[:200]}")
+                if p.get("reason_note"):
+                    lines.append(f"     {p['reason_note']}")
             lines.append(f"     ▶ {RR_EVIDENCE_SUMMARY}（折りたたみ・閉じている）")
             if p.get("status") != "rejected":
                 lines.append("     ボタン: " + " / ".join(f"[{lb}]" for _, lb in RR_ROW_ACTIONS))
@@ -867,8 +871,13 @@ def discuss_opening_view(body: Any) -> str:
             lines.append("この論文が答えようとした問い")
             if thesis.get("central_question"):
                 lines += [f"  {thesis['central_question']}", "  ボタン: この問いから聞く"]
+            elif thesis.get("central_question_note"):
+                lines.append(f"  {thesis['central_question_note']}")  # 第 7 波（IK-1013）: 問いだけ空
             if thesis.get("paper_goal"):
                 lines.append(f"  この論文が目指したこと: {thesis['paper_goal']}")
+        elif thesis.get("central_question_note"):
+            # 第 7 波（IK-1013 の学習者側）: 解析の代替語だけなら区画を出さず、サーバの事実文 1 行（data-discuss-question-note）
+            lines.append(str(thesis["central_question_note"]))
         chapters = [b for b in doc.get("chapter_skeleton") or [] if isinstance(b, dict)
                     and (str(b.get("label") or "").strip() or str(b.get("summary") or "").strip())]
         if chapters:
@@ -952,6 +961,9 @@ def discuss_opening_view(body: Any) -> str:
         if _size(part) <= each:
             lines += part
             continue
+        # 第 25 周 doubt H33（第 4 周）: 「この論文が確かめていないこと」は区画の後半にあり、畳むと省略側に落ちた。
+        # 畳むときはこの区画を論文の見出しの直後に写してから、残り（骨格・主張…）を予算で切る
+        part = opening_unverified_first(part)
         kept: list[str] = []
         for x in part:
             if _size(kept) + len(x) + 1 > each - len(OPENING_DOC_CLIPPED) - 1:
@@ -959,6 +971,22 @@ def discuss_opening_view(body: Any) -> str:
             kept.append(x)
         lines += kept + [OPENING_DOC_CLIPPED]
     return "\n".join(lines + tail)
+
+
+#: 畳むときに写した区画の印（画面の並びではない）
+OPENING_UNVERIFIED_COPIED = "（ハーネス: 観察の上限で畳むので、この区画を先に写した — 画面では議論のきっかけの後にある）"
+
+
+def opening_unverified_first(part: list[str]) -> list[str]:
+    """論文の区画から「▶ この論文が確かめていないこと」の塊（次の「▶ 」まで）を見出しの直後へ写す（H33）。"""
+    start = next((i for i, x in enumerate(part) if x.startswith("▶ この論文が確かめていないこと")), None)
+    if start is None:
+        return part
+    end = next((i for i in range(start + 1, len(part)) if part[i].startswith("▶ ")), len(part))
+    block = part[start:end]
+    head = part[:1] if part and part[0].startswith("■ ") else []
+    rest = part[len(head):start] + part[end:]
+    return head + [OPENING_UNVERIFIED_COPIED] + block + rest
 
 
 #: 開幕の論文ごとの区画を観察の予算で切ったときの印（画面の文ではない）

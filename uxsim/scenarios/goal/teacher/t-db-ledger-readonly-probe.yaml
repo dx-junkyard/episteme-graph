@@ -7,6 +7,9 @@ preconditions:
   - text: このペルソナは自分のコースを持っている（前提の地図タブのコース選択に並ぶもの）
     check: owns_course
   - このペルソナは foreign_material_hint の教材を閲覧できるが、編集権限は持たない（指揮者が周の前に共有の有無を確かめる）
+  # 第 25 周 H31（第 4 周）: 第 4 周は行の用意が別の論文に置かれた。runner が開いた台帳で確かめ、無ければ blocked_precondition に記す
+  - foreign_material_hint の論文の node_hint_with_row のノードの台帳に行がある（指揮者が周の前に記帳者 te-02 で用意する。
+    runner は expect_row で確かめる）
 goal: "{{goal_text}} のために、閲覧だけできる論文の台帳を開き、書き込めるか・書けないならその理由が画面で分かるかを確かめる"
 params_required: [goal_text, course_hint, foreign_material_hint, node_hint_with_row, node_hint_without_row,
                   foreign_scope_condition, scope_reason]
@@ -16,7 +19,7 @@ steps:
     with: {course_hint: "{{course_hint}}"}
   - do: admin.materials.list
   - do: admin.doubt.studio_node_ledger
-    with: {material_hint: "{{foreign_material_hint}}", node_hint: "{{node_hint_with_row}}"}
+    with: {material_hint: "{{foreign_material_hint}}", node_hint: "{{node_hint_with_row}}", expect_row: "true"}
     note: 閲覧だけできる論文のグラフで、台帳の記帳があるノードを開く。記帳のボタンが押せるか・押せないなら理由が出るかを読む
   - do: admin.doubt.studio_node_ledger
     with: {material_hint: "{{foreign_material_hint}}", node_hint: "{{node_hint_without_row}}"}
@@ -24,6 +27,15 @@ steps:
   - do: admin.doubt.scope_record
     with: {condition: "{{foreign_scope_condition}}", reason: "{{scope_reason}}"}
     note: 1 回だけスコープを書こうとする（書けないならその理由と、誰に頼めばよいかが事実文で出るかを読む）
+  # 第 25 周 H30（第 4 周）: 画面はボタンを無効にして送らないので、サーバ側の拒否（IK-0900）は画面を経ない 1 手で確かめる
+  - do: admin.doubt.scope_record_raw
+    with: {condition: "{{foreign_scope_condition}}", reason: "{{scope_reason}}"}
+    note: （ハーネスの確認）画面を経ずに記帳の要求を 1 回だけ送り、サーバが拒否するか・拒否の文が日本語の事実文かを読む
+  # 第 25 周 第 7 周 H43: scope_record_raw は根拠・理由を既定値で埋めた有効な body。権限 → 入力の順（IK-0999）は根拠を空にした
+  # 不完全な body を明示で送って当てる
+  - do: admin.doubt.scope_record_raw_incomplete
+    with: {condition: "{{foreign_scope_condition}}", reason: "{{scope_reason}}"}
+    note: （ハーネスの確認）根拠を空にした不完全な記帳の要求を 1 回だけ送り、権限の拒否と入力の不足のどちらが先に返るかを読む
 stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
 expects:
   - manual: teacher/18-admin-doubt-atlas.md#record-scope

@@ -35,7 +35,7 @@ B 原則:
 - B13 論文の海で、配置があるのに地図の全領域が霧で描かれ、厚みが読めない（IK-0847）
 - B14 凍結の影響（freeze-impact）が止める条件を言わなかった（readiness が ready / 無い）のに、続く凍結が
   採用済み未反映の候補で 409 になった — 押してから止まる（IK-0885。凍結の可否の判定が 2 つある）
-- B15 候補の一覧（ギャップ・関係）が空なのに、候補ゼロの理由（empty_notes）も導出から外れた判断の別枠も無い（IK-0851）
+- B15 候補の一覧（ギャップ・関係）が空なのに、候補ゼロの理由（empty_notes・索引の構築中の index_note）も導出から外れた判断の別枠も無い（IK-0851）
 - B16 凍結を止めた採用済みの候補（409 の pending_labels / pending_edges）が、直前に読んだ候補の一覧にも
   「候補の条件から外れた採用済みの判断」の別枠にも見えない — 止めている候補を画面で探せない（IK-0884）
 
@@ -419,7 +419,9 @@ def _check_freeze_readiness(steps: list[TranscriptStep], factory: FindingFactory
                 labels = {str(c.get("label") or "") for c in dg.get("candidates") or []}
                 labels |= {str(x) for x in dg.get("orphaned_labels") or []}
                 visible[kind] = {x for x in labels if x}
-                if not dg.get("candidates") and not dg.get("empty_notes") and not dg.get("orphaned_labels") \
+                # 第 6 周 H37: 索引の構築中の index_note（「…関係の候補はまだ出していません」）も空の理由の文として数える
+                if not dg.get("candidates") and not dg.get("empty_notes") and not dg.get("index_note") \
+                        and not dg.get("orphaned_labels") \
                         and 200 <= (t.status or 0) < 300:
                     out.append(_make(factory, step, t, oracle="B", severity="confused", key=f"empty_without_reason:{kind}",
                                      hypothesis="候補の一覧が空なのに、候補が無い理由の事実文も、候補の条件から外れた判断の"

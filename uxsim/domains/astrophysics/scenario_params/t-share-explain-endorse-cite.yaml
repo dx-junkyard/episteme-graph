@@ -6,15 +6,60 @@ params:
   expertise_tag: 高密度天体物理
   citation_intent: uses_as_evidence
   course_hint: "1"
+  # 第 25 周 第 7 周 H43: 引用先コースの id の頭（空なら course_hint の題名・番号で引く）
+  cite_course_id: ""
+  # 第 25 周第 5 周 H36: 説明を開くコースは題名ではなく id で固定する（同題名の 2 コース・IK-0407）。所有者 te-04 のゼミ = TeX 版
+  studio_course_id: 1bad7d9f
+  # 第 25 周 第 10 波: 自分の説明を書く → 共有 ON → 引用の材料（既定は空 = その手は材料なし。書くならペルソナが自分の言葉で）
+  own_explanation_title: ""
+  own_explanation_body: ""
+  cite_explanation_hint: ""
 personas:
   te-04-copilot-intro:
     expertise_tag: 宇宙論
+    # 第 7 周（judge_share_r6 §6・(b2) は 5 教員とも既出 → 前提状態を変える）: te-04 は説明の著者。前提③ pinn_editor（te-02 に
+    # PINN 2 版の editor）と IK-1023 の是正の後、te-02 が 2 人目の査読者として te-04 の説明「AI と下書きした説明 — TOV の残差損失」を
+    # 査読した状態で、著者として説明カードの査読の印・支持者の一覧・共有の知らせ（IK-0985 の残り）を読み、te-01 のコース 6be229e1
+    # （te-04 は第 6 周の studio_course_editor で editor）へ引用する。6be229e1 の学生に届くかを見る学生の手はこの campaign に無い
+    component_hint: TOV residual loss at collocation points
+    # 引用先の選び方は題名の部分一致だけ（runner の pick）。6be229e1 と 1bad7d9f は同題名（IK-0407）だが、引用先の選択肢は引用元の
+    # 1bad7d9f を除くので、te-04 が編集できる残りのうちこの題名に当たるのは 6be229e1（te-04 に 6be229e1 の editor が残っているかを周の前に確かめる）
+    course_hint: 宇宙物理 論文紹介ゼミ
+    # 第 25 周 第 7 周 H43: 引用先は題名では選べない（同題名 2 つ）。id の頭で引く
+    cite_course_id: 6be229e1
+    citation_intent: uses_as_evidence
   te-05-delegator-lab:
     # 第 3 周: te-02 が書いて共有した説明を承認・引用する（IK-0891 の是正後）。引用先は te-05 自身のコース（一覧の先頭）
     expertise_tag: 計算天体物理
   te-03-meticulous-seminar:
     # 第 4 周（judge_share_r3 §6）: te-01 が書いて共有した説明を几帳面に読み、支持・引用し、支持した教員の一覧を開く
     # （admin.explanations.endorsers）。引用先は te-03 自身のコース（教員の /api/admin/courses の先頭）
-    component_hint: TOV network map
+    component_hint: TOV residual loss at collocation points
     expertise_tag: 高密度天体物理
+    citation_intent: uses_as_evidence
+  te-02-veteran-intro:
+    # 第 8 周（judge_share_r7 §6・(b2)）: 2 人目の査読者として査読し、引用先は 6be229e1（id で引く — H43）
+    cite_course_id: 0d70b5d0  # 第 10 周: 自分の説明を共有 ON にして、PINN TeX 版を含む自分の別コースへ引用（IK-1061・H56）
+    # 第 10 波（judge_share_r10 §6）: 自分の説明を書く → 共有 ON → その説明を引用する材料（te-02 の講義の言葉で）。
+    # 引用する説明は題名で指す（cite_explanation_hint）。書くか・共有するかはペルソナの判断（前提スクリプトは書かない）
+    own_explanation_title: 講義メモ — コロケーション点での TOV 残差
+    own_explanation_body: ネットワークが出した状態方程式を TOV 方程式に入れたとき、コロケーション点ごとに方程式がどれだけ満たされていないかを二乗して足したものです。これを小さくすることで、星の質量と半径の関係が一般相対論の静水圧平衡と矛盾しないように学習させます。
+    cite_explanation_hint: 講義メモ — コロケーション点での TOV 残差
+    # 第 5 周（judge_share_r4 §6）: te-04 が書いて共有した説明を支持・引用し、支持した教員の一覧を開く。自己承認（IK-0926）と
+    # 引用の列挙（IK-0924）の材料。説明を開く入口はコース 1bad7d9f（指揮者が周の前に te-02 へコースの共有を与える）、
+    # 引用先は te-02 自身のコース（/api/admin/courses の先頭）
+    component_hint: TOV residual loss at collocation points
+    expertise_tag: 天体物理の入門講義
+    citation_intent: uses_as_evidence
+  te-01-rookie-seminar:
+    # 第 6 周（judge_share_r5 §6）: 第 1 周の te-01 は説明の画面が「読み込みに失敗しました」で止まり、支持・引用に届かなかった
+    # （(b2) は 5 教員とも経路に載せ済みで、未到達の te-01 に回す）。説明を開くコースは所有者 te-04 のゼミ（TeX 版の PINN・
+    # studio_course_id = 1bad7d9f・te-01 に editor 共有 = b2_course_editor）。te-04 が書いて共有した説明（第 5 周の説明は再解析で旧部品と
+    # ともに live から外れたため、第 6 周の前に TeX 版の「TOV residual loss at collocation points」へ書き直した —
+    # r6_prereqs.md「再解析の実測」）を支持・引用し、支持した教員の一覧を開く。他コースへの広がり（著者以外の査読 = 2 人目の査読 IK-0984）と引用の列挙（IK-0924）の材料。
+    # 引用先は te-01 自身のコース 6be229e1（/api/admin/courses の先頭）
+    # 第 6 周 H40: 専門タグは専門分野の語の欄。ペルソナの立場の説明（「初めてゼミを担当する立場」）を既定値で渡していた
+    # （頭脳の選択ではなくこの材料が出所）。te-01 の背景（分光サーベイによる観測的宇宙論）から分野の語を渡す
+    component_hint: TOV residual loss at collocation points
+    expertise_tag: 観測的宇宙論
     citation_intent: uses_as_evidence

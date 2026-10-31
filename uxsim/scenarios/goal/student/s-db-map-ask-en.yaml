@@ -8,6 +8,7 @@ preconditions:
   - 教員レーンが分野の地図の台帳に記帳した後の周（地図の札に検証の記録の文が出る）
 goal: "{{goal_text}}"
 params_required: [goal_text, topic_hint_terms, map_question, map_question_again]
+# map_node_hint は任意材料（無ければ node_hint を渡さず先頭の領域を選ぶ）
 steps:
   - do: auth.login
   - do: learning.course.list
@@ -18,9 +19,14 @@ steps:
     with: {topic_hint_terms: "{{topic_hint_terms}}"}
   - do: learning.atlas.view
     note: 分野の地図を開き、項目の札（検証の記録の文）を読む
+  # 第 25 周第 5 周 H36: 地図を見るだけでは札の名前が画面文脈に載らない（app.js も runner も atlas_last_node を
+  # 控えない）。札の付いた概念を選んでから尋ねる（IK-0907 の第 4 波が AI に届くかを当てる）
+  - do: learning.atlas.select_node
+    with: {node_hint: "{{map_node_hint}}"}
+    note: 札（検証の記録の文）の付いた概念を選び、右のパネルを読む — 問いはその後に送る
   - do: learning.chat.ask
     with: {message: "{{map_question}}"}
-    note: 地図の札について英語で尋ねる（使い方の固定文で終わるか、内容の回答になるか）
+    note: 地図の札について、場面の材料（map_question）の言語のまま尋ねる（使い方の固定文で終わるか、内容の回答になるか）
   - do: learning.chat.ask
     with: {message: "{{map_question_again}}"}
     note: 同じ問いをもう一度送る（1 回目と同じ行き先か）

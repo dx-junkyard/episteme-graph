@@ -1,0 +1,21 @@
+# --- snapshot record (appended by snapshot.py) ---
+snapshot_record:
+  name: corpus-astro-tex-r25e
+  created_at: 2026-10-27T12:11:39+00:00
+  git_commit: b7bbb628
+  migration_head: '094'
+  note: ""
+# --- snapshot record (appended by snapshot.py) ---
+snapshot_record:
+  name: corpus-astro-tex-r25e
+  created_at: 2026-10-27T12:12:26+00:00
+  git_commit: b7bbb628
+  migration_head: '094'
+  note: "PINN TeX ce667c63 を第 5 波のコードで再解析（2026-10-27 20:3x〜21:11・製品頭脳 A/B・174 要求）→ identity_candidates を TeX/PDF で再実行（同一論文 2 版は本文一致のみ = IK-0980）"
+# --- snapshot record (appended by snapshot.py) ---
+snapshot_record:
+  name: corpus-astro-tex-r25e
+  created_at: 2026-10-27T12:20:58+00:00
+  git_commit: b7bbb628
+  migration_head: '094'
+  note: "PINN TeX ce667c63 を第 5 波のコードで再解析（2026-10-27・製品頭脳 A/B・174 要求・放棄 2）→ identity 再実行（2 版間は本文一致のみ）→ te-04 の独自解釈を新部品「TOV residual loss at collocation points」に作り直し（共有・自己査読・自己支持）"

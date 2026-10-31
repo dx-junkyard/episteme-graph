@@ -24,9 +24,11 @@ ATLAS = {"course_id": "c1", "axes": {}, "points": [
     {"target_id": "a1", "target_type": "assumption", "label": "等分配が成り立つ", "verification_status": "untested",
      "scope_coverage": "none", "unscoped": True, "load_level": "high", "consensus_label": "", "has_naive_signal": False}]}
 ASSUMPTIONS = {"course_id": "c1", "status": "candidate", "items": [
-    {"id": "a1", "statement": "等分配が成り立つ", "origin": "corpus_audit", "status": "candidate", "created_from": {},
+    {"id": "a1", "statement": "等分配が成り立つ", "origin": "corpus_audit", "status": "candidate",
+     "origin_label": "コーパス監査", "status_label": "候補（未確定）", "created_from": {},
      "evidence_quote": "", "has_naive_signal": False},
-    {"id": "a2", "statement": "乱流は等方的", "origin": "corpus_audit", "status": "candidate", "created_from": {}}]}
+    {"id": "a2", "statement": "乱流は等方的", "origin": "corpus_audit", "status": "candidate",
+     "origin_label": "コーパス監査", "status_label": "候補（未確定）", "created_from": {}}]}
 OPEN = {"course_id": "c1", "items": []}
 LEDGER = {"target_id": "a1", "target_type": "assumption", "target_label": "等分配が成り立つ", "verification_status": "untested",
           "verification_scopes": [], "scope_candidates": [], "consensus_explicit_label": "", "consensus_behavioral_dependents": 0,
@@ -108,7 +110,9 @@ def test_tab_open_selects_course_and_projects_four_sections():
     obs = _obs(s)
     assert doubt_exec.TAB_HEAD in obs and "コース: 宇宙論ゼミ" in obs
     assert "点1: 等分配が成り立つ" in obs and "塗りなし・点線の輪郭" in obs
-    assert "1. 等分配が成り立つ［corpus_audit / candidate］" in obs  # 画面は origin / status を生の語で出す
+    # 第 6 波（IK-1028）: 札はサーバの origin_label / status_label（生の corpus_audit / candidate は描かない）
+    assert "1. 等分配が成り立つ［コーパス監査 / 候補（未確定）］" in obs
+    assert "corpus_audit" not in obs
     assert doubt_exec.OPEN_EMPTY in obs and doubt_exec.CF_SESSIONS_EMPTY in obs
 
 
@@ -160,19 +164,31 @@ def test_challenge_422_fixed_text_withdraw_403_and_withdrawn_hidden():
 def test_proposal_requires_external_check_on_screen_then_card():
     seen: list[httpx.Request] = []
     s = _session()
-    client = _client(_admin_handler({("POST", "/api/admin/doubt/challenges/ch1/proposals"):
-                                     {"ok": True, "proposal_id": "pp1", "challenge_status": "led_to_verification"}}), seen)
+    over = {("POST", "/api/admin/doubt/challenges/ch1/proposals"):
+            {"ok": True, "proposal_id": "pp1", "challenge_status": "led_to_verification"}}
+    client = _client(_admin_handler(over), seen)
     _run("admin.doubt.tab_open", {}, s, client)
     _run("admin.doubt.ledger_open", {}, s, client)
     n = len(seen)
     _run("admin.doubt.challenge_propose", {"proposal": "取り直す"}, s, client)
     assert len(seen) == n and doubt_exec.PROPOSAL_EXTERNAL_EMPTY in _obs(s)
+    # 第 4 波（IK-0968）: 昇格の後は台帳を読み直し、提案は challenges[].proposals のカードとして疑義の下に出る
+    over[("GET", "/api/admin/doubt/ledger/assumption/a1")] = dict(LEDGER, challenges=[dict(
+        LEDGER["challenges"][0], status="led_to_verification", status_label="検証提案へ昇格",
+        proposals=[{"id": "pp1", "proposal": "取り直す", "external_check": "レビューを読んだ", "reachability": "unassessed",
+                    "reachability_label": "未評価", "status": "proposed", "status_label": "検証に着手可能",
+                    "proposer_name": "岡村"}])])
     _run("admin.doubt.challenge_propose", {"proposal": "取り直す", "external_check": "レビューを読んだ"}, s, client)
-    assert "検証提案（コーパス外の確認あり）: 検証に着手可能［検証に着手］［取り下げ］" in _obs(s)
+    assert seen[-1].method == "GET" and seen[-1].url.path.endswith("/ledger/assumption/a1")
+    obs = _obs(s)
+    assert "状態: 検証提案へ昇格" in obs and "検証提案1: 検証に着手可能" in obs and "提案者: 岡村" in obs
+    assert "到達可能性: 未評価" in obs and "［検証に着手］［取り下げ］" in obs
     _run("admin.doubt.proposal_status", {"status": "完了を記録"}, s, client)
-    assert "そのボタンはこのカードに無い" in _obs(s)
+    assert "そのボタンはこの提案のカードに無い" in _obs(s)
     _run("admin.doubt.proposal_status", {"status": "検証に着手"}, s, client)
-    assert seen[-1].method == "PATCH" and json.loads(seen[-1].content) == {"status": "in_progress"}
+    # PATCH の後に台帳を読み直す（bindProposalStatusButtons → refreshLedgerSection）
+    assert seen[-2].method == "PATCH" and seen[-2].url.path.endswith("/proposals/pp1")
+    assert json.loads(seen[-2].content) == {"status": "in_progress"} and seen[-1].method == "GET"
 
 
 def test_studio_node_ledger_404_projects_empty_section_and_counterfactual():
@@ -218,7 +234,7 @@ def test_learner_sources_tab_and_open_assumptions():
     assert "主張 磁場は 30 µG — この内容の検証スコープはまだ記帳されていません。" in _obs(s)
     assert not any(r.url.path.endswith("FORMULA_1]]") for r in seen)
     _run("learning.ledger.open_assumptions", {}, s, client)
-    assert doubt_exec.LEARNER_OPEN_SUMMARY in _obs(s) and "等分配（検証スコープの記帳なし）" in _obs(s)
+    assert doubt_exec.LEARNER_OPEN_SUMMARY in _obs(s) and "等分配（検証の記録なし）" in _obs(s)  # 第 8 波（IK-1059）→ 第 10 波: 見出しと同じ語
 
 
 # ---------------------------------------------------------------------------

@@ -20,9 +20,13 @@ steps:
         note: 候補が無い・少ないときは前提マイニングも押す（非同期 — 押した直後は変わらないことがある）
     optional: true
   - do: admin.doubt.refresh
-  - do: admin.doubt.assumption_confirm
-    with: {pick: "{{confirm_pick}}", reason: "{{confirm_reason}}"}
-    note: 出所の逐語が付いている候補を読んで、暗黙の前提として引き受けられるものを確定する
+  # 第 25 周 第 5 周: 候補が 0 件でも止めない。手動で足した前提（POST /api/admin/doubt/assumptions）は候補を経ずに
+  # 確定で生まれる（本人が書いた前提は本人の確定 — P1）ので、候補が無ければ確定の手を飛ばし、確定済みの前提の台帳へ進む
+  - choose:
+      - do: admin.doubt.assumption_confirm
+        with: {pick: "{{confirm_pick}}", reason: "{{confirm_reason}}"}
+        note: 出所の逐語が付いている候補を読んで、暗黙の前提として引き受けられるものを確定する（候補が無ければ飛ばす）
+    optional: true
   - choose:
       - do: admin.doubt.assumption_dismiss
         with: {pick: "{{dismiss_pick}}"}
@@ -33,8 +37,28 @@ steps:
     note: 却下した候補が消えずに残っているかを見る
   - do: admin.doubt.load_recompute
     note: 確定した前提が散布図に点として載るよう、依存の広がりを計算し直す
-  - do: admin.doubt.ledger_open
-    note: 確定した前提の台帳を開く（散布図の点か、未検証合意リストの行から）
+  # 第 25 周 第 7 周 H44: 確定済みの前提のカードの［台帳を開く］（第 6 波で runner にある）を場面に入れる。散布図・合意リストに
+  # 点が無くても、カードから前提の台帳へ移れる（前提 → 台帳 → スコープは 7 周未到達だった）
+  # 第 25 周 第 9 波（doubt H52）: 散布図の下の「依存の広がりを計算できない前提」区画のボタンを先頭に（第 9 周は台帳を開く行為が
+  # この区画の行を開けず、前提 → 台帳 → スコープが 9 周目も未到達だった）
+  - choose:
+      - do: admin.doubt.unplotted_open
+        note: 散布図の下の「依存の広がりを計算できない前提」で、確定した前提のボタンを押して台帳を開く（区画の中の番号か前提文で選ぶ）
+      - do: admin.doubt.assumption_open_ledger
+        note: 前提候補の一覧（確定済み）のカードで［台帳を開く］を押し、前提の台帳を開く
+      - do: admin.doubt.ledger_open
+        note: 散布図の点か未検証合意リストの行から、確定した前提の台帳を開く
+  # 第 25 周 第 5 周（judge_doubt_r4 §4・r5_prereqs H32）: 確定した前提の台帳にスコープを記帳するまでを 1 場面で通す
+  # （前提の確定 → スコープの記帳が 4 周続けて未到達だった。scope-promote を別に回さずに済ませる）
+  - choose:
+      - do: admin.doubt.scope_record
+        with: {condition: "{{premise_scope_condition}}", evidence_quote: "{{premise_scope_quote}}", reason: "{{premise_scope_reason}}"}
+        note: 確定した前提の台帳に、どの条件で確かめられているかのスコープを記帳する（地図・合意リストにどう載るかを後で読む）
+    optional: true
+  - choose:
+      - do: admin.doubt.refresh
+        note: 記帳の後、前提の地図と未検証合意リストにこの前提がどう載るかを読み直す（IK-0970）
+    optional: true
 stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
 expects:
   - manual: teacher/18-admin-doubt-atlas.md#audit-run

@@ -56,28 +56,56 @@ ACTIONS: list[Action] = [
        ("POST", _DOUBT + "/assumptions/{assumption_id}/dismiss"), args={"pick": "str?"}, extra_api=_RELOAD,
        precondition="前提候補の一覧に候補がある", manual=_TD + "assumption-dismiss",
        note="却下は削除ではなく状態の遷移（表示を「却下済み（保持）」にすると見える）"),
+    _a("admin.doubt.assumption_open_ledger", "確定済みの前提のカードで［台帳を開く］を押す", "admin",
+       "doubt-atlas.assumption-open-ledger", _LEDGER, args={"pick": "str?"},
+       precondition="前提候補のレビューに［台帳を開く］の出ている確定済みの前提がある（表示を確定済み / すべてに切り替える）",
+       manual=_TD + "assumption-open-ledger",
+       note="pick はカードの番号（1 始まり）か前提文の一部。右の詳細に前提の台帳が開き、記帳フォームがそのまま使える。"
+            "論文に結ばれていない前提にはボタンが無く、代わりに事実文が 1 行出る"),
     _a("admin.doubt.ledger_open", "散布図の点・未検証合意リストの行を開いて台帳の詳細を読む", "admin", "doubt-atlas.plot-detail",
        _LEDGER, args={"target_hint": "str?", "from": "str?"}, precondition="前提の地図タブでコースを選んでいる",
        manual=_TD + "plot-detail",
        note="target_hint は点・行の番号（1 始まり）かラベルの一部。from は atlas（散布図）| open（未検証合意リスト）|"
-            " assumptions（前提候補の一覧の確定済みの前提）。省くと散布図 → 未検証合意リスト → 確定済みの前提の順に探す"),
+            " assumptions（前提候補の一覧の確定済みの前提）| unplotted（散布図の下の「依存の広がりを計算できない前提」）。"
+            "省くと散布図 → 未検証合意リスト → 確定済みの前提の順に探す。target_hint「前提N」は計算できない前提の区画の N 番目"
+            "（第 9 波・H52）"),
+    _a("admin.doubt.unplotted_open", "散布図の下の「依存の広がりを計算できない前提」のボタンを押して台帳を開く", "admin",
+       "doubt-atlas.plot-detail", _LEDGER, args={"pick": "str?"}, precondition="前提の地図に「依存の広がりを計算できない前提」の区画がある",
+       manual=_TD + "plot-detail",
+       note="第 9 波（doubt H52）: pick は区画の中の番号（観察の「前提N」の N — 散布図の点の番号とは別）か前提文の一部。"
+            "右の詳細に前提の台帳が開き、記帳フォームがそのまま使える"),
     _a("admin.doubt.open_reachable_filter", "未検証合意リストを「到達可能な反証条件がある項目だけ」に絞る", "admin",
        "doubt-atlas.open-assumptions-reachable-filter", _OPEN, args={"on": "bool?"},
        precondition="未検証合意リストを読んでいる", manual=_TD + "open-assumptions-reachable-filter",
        note="再取得はしない（読み込み済みの一覧をその場で絞るだけ。HTTP なし）"),
     # --- 原稿スタジオのグラフ（ノード詳細の台帳区画・反実仮想モード）---
     _a("admin.doubt.studio_node_ledger", "原稿スタジオのグラフでノードを選び、台帳の区画を読む", "admin", _TL + "counterfactual-mode",
-       _LEDGER, args={"document_id": "str?", "material_hint": "str?", "node_hint": "str?"},
+       _LEDGER, args={"document_id": "str?", "material_hint": "str?", "node_hint": "str?", "expect_row": "str?"},
        extra_api=(_GRAPH, ("GET", "/api/admin/materials")),
        precondition="原稿スタジオで教材のグラフを開いている", manual=_TD + "ledger-detail",
        note="material_hint は教材の題名・ファイル名の部分一致。node_hint はノードのラベルの一部か番号（1 始まり・主グラフが先）。"
-            "画面はノードの component_id（無ければノード id）で台帳を引く"),
+            "画面はノードの component_id（無ければノード id）で台帳を引く。expect_row=true は場面の前提「このノードの台帳に"
+            "行がある」を runner が確かめる印（無ければ blocked_precondition に記す・第 25 周 H31）"),
     # --- 台帳の詳細（renderLedgerInto）---
     _a("admin.doubt.scope_record", "「スコープを記帳」する", "admin", "doubt-atlas.record-scope",
        ("POST", _DOUBT + "/ledger/{target_type}/{target_id}/scopes"),
        args={"condition": "str?", "domain": "str?", "precision": "str?", "system": "str?", "evidence_quote": "str?",
              "reason": "str?"}, extra_api=(_LEDGER,), precondition="台帳の詳細を開いている", manual=_TD + "record-scope",
        note="成立条件・領域・精度・系のどれか 1 つ以上 + 根拠（原文の引用）+ 理由。空欄は画面ではなくサーバが 422 で止める"),
+    _a("admin.doubt.scope_record_raw", "閲覧だけの台帳で、スコープの記帳の要求を画面を経ずに 1 回送ってサーバの応答を見る",
+       "admin", _TD + "record-scope", ("POST", _DOUBT + "/ledger/{target_type}/{target_id}/scopes"),
+       args={"condition": "str?", "reason": "str?"}, extra_api=(_LEDGER,), precondition="台帳の詳細を開いている",
+       manual=_TD + "record-scope",
+       note="第 25 周 H30: 画面の操作ではない（ハーネスの確認）。画面は閲覧だけの台帳で記帳のボタンを無効にして送らない — "
+            "サーバ側の拒否（403 / 404 と detail）を確かめるための 1 手。権限の確認の場面だけが使う"),
+    _a("admin.doubt.scope_record_raw_incomplete",
+       "閲覧だけの台帳で、根拠（原文の引用）を空にしたスコープの記帳の要求を画面を経ずに 1 回送ってサーバの応答を見る",
+       "admin", _TD + "record-scope", ("POST", _DOUBT + "/ledger/{target_type}/{target_id}/scopes"),
+       args={"condition": "str?", "reason": "str?"}, extra_api=(_LEDGER,), precondition="台帳の詳細を開いている",
+       manual=_TD + "record-scope",
+       note="第 25 周 第 7 周 H43: 画面の操作ではない（ハーネスの確認）。scope_record_raw は根拠・理由を既定値で埋めた有効な body を"
+            "送るので、権限 → 入力の順（IK-0999）は当たらない。こちらは根拠（evidence_quote）を空のまま送り、入力の不足より権限が"
+            "先に効くか（403 / 404）・入力の不足が先か（422）を見る"),
     _a("admin.doubt.scope_candidate_decide", "AI のスコープ候補を確定・却下する", "admin", "doubt-atlas.record-scope",
        ("POST", _DOUBT + "/ledger/{target_type}/{target_id}/scope-candidates/{candidate_id}/confirm"),
        args={"decision": "str", "pick": "str?"}, extra_api=(
@@ -105,6 +133,11 @@ ACTIONS: list[Action] = [
        ("POST", _DOUBT + "/challenges/{challenge_id}/withdraw"), args={"pick": "str?"}, extra_api=(_LEDGER,),
        precondition="台帳の詳細に未対応の疑義がある", manual=_TD + "manage-challenge",
        note="pick は疑義の番号（1 始まり）か理由の一部。取り下げは投稿した本人だけ"),
+    _a("admin.doubt.withdrawn_challenges_open", "疑義の区画の末尾「取り下げ済みの疑義（読み取りのみ）」を開く", "admin",
+       "doubt-atlas.withdrawn-challenges", _LEDGER, precondition="台帳の詳細に「取り下げ済みの疑義」の折りたたみが出ている",
+       manual=_TD + "withdrawn-challenges",
+       note="既定で閉じている折りたたみ。取り下げた疑義を型・向き・投稿者 — 理由・状態・検証提案のカードの順に読む"
+            "（読み取りのみ・ボタンなし・件数なし）。疑義の番号（疑義N）は未対応の一覧だけで数え、ここは含まない"),
     _a("admin.doubt.challenge_propose", "疑義を「検証提案にする」", "admin", "doubt-atlas.manage-challenge",
        ("POST", _DOUBT + "/challenges/{challenge_id}/proposals"),
        args={"pick": "str?", "proposal": "str?", "external_check": "str?", "reachability": "str?"},
@@ -112,9 +145,13 @@ ACTIONS: list[Action] = [
        note="external_check（コーパス外の確認）は必須で、空なら画面が止める。reachability は 現在の観測で検証可能 |"
             " 次世代の装置・観測なら可能 | 現状では困難 | 未評価"),
     _a("admin.doubt.proposal_status", "検証提案の進み具合を記帳する（着手・完了・取り下げ）", "admin",
-       "doubt-atlas.manage-challenge", ("PATCH", _DOUBT + "/proposals/{proposal_id}"), args={"status": "str"},
-       precondition="検証提案を登録した直後の画面にいる", manual=_TD + "manage-challenge",
-       note="status は 検証に着手 | 完了を記録 | 取り下げ。画面は提案を登録した直後にだけ操作を出す"),
+       "doubt-atlas.manage-challenge", ("PATCH", _DOUBT + "/proposals/{proposal_id}"),
+       args={"status": "str", "pick": "str?", "completion_note": "str?"}, extra_api=(_LEDGER,),
+       precondition="台帳の詳細の疑義の下に検証提案のカードがある", manual=_TD + "manage-challenge",
+       note="status は 検証に着手 | 完了を記録 | 取り下げ。第 4 波（IK-0968）: 提案は台帳の疑義の下に常設され、"
+            "開き直しても操作できる。pick は提案の番号か文の一部（無ければ status を押せる最初の提案）。"
+            "第 10 波（IK-1121）: completion_note は着手済みのカードの「確かめたこと（任意）」の欄（完了を記録するときだけ"
+            "送る・空なら「確かめたことの記帳なし」と残る）"),
     _a("admin.doubt.falsification_record", "「覆る条件を記帳する」", "admin", "doubt-atlas.falsification-record",
        ("POST", _DOUBT + "/ledger/{target_type}/{target_id}/falsification-conditions"),
        args={"statement": "str?", "kind": "str?", "evidence_quote": "str?", "reason": "str?", "reachability": "str?"},

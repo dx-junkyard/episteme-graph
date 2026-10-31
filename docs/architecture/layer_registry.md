@@ -22,7 +22,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（2026-10-23 時点で **093 以降**。044〜092 は使用済み — §3 参照。
+  着手時は次の空き番号（2026-10-31 時点で **098 以降**。044〜097 は使用済み — §3 参照。
   採番前に必ず `ls backend/db/` で確認する）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
@@ -202,8 +202,12 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 090 | `090_paper_discovery_ingest_cartridge` | 論文ディスカバリー層 — 取り込みキュー `paper_discovery_ingest_items` に `cartridge_id TEXT NULL`（解析の分野。NULL = 未指定・`''` = 「指定しない」の明示。列追加のみ。正本は `docs/features/paper_discovery_design.md` §12） |
 | 091 | `091_component_explanations_course_optional` | 承認・共有レイヤー(C層) — `component_explanations.course_id` の NOT NULL を外し、FK を `ON DELETE SET NULL` に張り替える（course_id は範囲ではなく出所。IK-0891。正本は `docs/features/component_evidence_redesign.md` 2026-10-23 追補） |
 | 092 | `092_epistemic_ledger_document_key` | D層 — 台帳の行キーに論文を含める（`(document_id, target_type, target_id)`・旧キーで人の記帳が入った衝突行には `attribution_check_needed` の印。IK-0899。正本は `docs/features/stakes_ledger_design.md` §16） |
+| 093 | `093_identity_link_revoke` | W層・概念レジストリ — 同一性リンクの確定を取り消す遷移 `confirmed → revoked`（理由必須・取り消した人と日時の列・確定者は残す。IK-0953。正本は `docs/features/concept_registry_design.md` 第 4 波の追補） |
+| 094 | `094_users_profile_name` | アカウントライフサイクル — `users.profile_name`（人に見せる名前。ログイン ID の開示をやめる。IK-0848 / IK-1007。正本は `docs/features/account_lifecycle_management_design.md` 2026-10-27 第 5 波の追補） |
+| 095 | `095_verification_proposal_completion` | D層 / SL層 — `verification_proposals.completed_by` / `completed_at` / `completion_note`（検証提案の完了の帰属・日時・根拠。既存の完了行は監査から 1 回だけ埋める。完了しても検証状態は変えない。IK-1121・第 25 周 第 10 波。正本は `docs/features/stakes_ledger_design.md`） |
+| 097 | `097_verification_proposal_reachability_by_document` | D層 / SL層 — `verification_proposals.reachability` の CHECK に `by_document`（本文・文献の読み直しで確かめられる）を足す（067 の自動名の CHECK を名前付きに置き換え・既存行は不変。語彙の正本は `core/doubt/schema.py::REACHABILITY_LEVELS`。IK-1148・第 25 周 第 11 波。正本は `docs/features/stakes_ledger_design.md`） |
 
-次の空き番号は **093**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **098**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。
 

@@ -60,6 +60,7 @@ class _Ctx:
             self.client.traces.append(HttpTrace(method=method, path=template, status=None,
                                                 error=f"precondition:{miss.name}"))
             self.session.last_status, self.session.last_body = None, {"_precondition": miss.name}
+            note_not_sent(self.session, method, template, miss.name)
             return None, None
         status, body, _ = self.client.call(method, path, json=json, params=params)
         self.session.last_status, self.session.last_body = status, body
@@ -74,11 +75,38 @@ class _Ctx:
         method, template = self.action.api  # type: ignore[misc]
         self.client.traces.append(HttpTrace(method=method, path=template, status=None, error=f"precondition:{name}"))
         self.session.last_status, self.session.last_body = None, {"_precondition": name}
+        note_not_sent(self.session, method, template, name)
 
     def body_args(self) -> dict:
         """path の穴に使った引数を除いた残り（既定の JSON / query）。"""
         holes = set(path_holes(self.action.api[1])) if self.action.api else set()
         return {k: v for k, v in self.args.items() if k not in holes}
+
+
+#: 第 25 周 第 8 周 atlas H46: runner が前提（下書きなし・対象なし）で送らなかった手は、HTTP 行が path の雛形
+#: （``{cartridge_id}`` 等）のまま status なしで残る。審判が「製品が 404 を返した」と読み違えないよう、送らなかったことと
+#: 理由を runner_notes に 1 行で残す（HTTP 行自体は審判の precondition 判定が使うので消さない）
+NOT_SENT_NOTE = ("（ハーネス: 送らなかった — {method} {path}（前提「{name}」が画面に無い）。この手の HTTP 行は雛形の path の"
+                 "ままで status が無く、製品は応答していない。これは画面の文ではない）")
+
+
+def note_not_sent(session: PersonaSession, method: str, template: str, name: str) -> None:
+    session.scratch.setdefault("runner_notes", []).append(
+        NOT_SENT_NOTE.format(method=method, path=template, name=name))
+
+
+def unavailable_reason(action_id: str, session: PersonaSession) -> Optional[str]:
+    """画面の状態で、この行為の対象が画面に無いなら理由（無ければ None）。第 25 周 H26（第 4 周）。
+
+    面ごとの ``unavailable(action_id, session)`` に委ねる（定義していない面は常に None = 外さない）。
+    画面の状態をまだ読んでいない（一覧を開いていない）ときは外さない — 外すのは「画面に無いと分かっている」ときだけ。
+    """
+    for m in (_atlas_exec, _share_exec, _doubt_exec, _studio_exec, _vision5):
+        fn = getattr(m, "unavailable", None)
+        reason = fn(action_id, session) if fn is not None else None
+        if reason:
+            return str(reason)
+    return None
 
 
 def execute(action_id: str, args: dict, session: PersonaSession, client: EpistemeClient) -> list[HttpTrace]:
@@ -97,6 +125,9 @@ def execute(action_id: str, args: dict, session: PersonaSession, client: Epistem
         return [HttpTrace(method="-", path=f"unsupported:{action_id}", error="unsupported")]
     ctx = _Ctx(action, args, session, client)
     handler = _HANDLERS.get(action_id, _default)
+    if action_id not in OPEN_CONTEXT_KEEPERS and not action_id.startswith("learning.chat."):
+        # 画面では別の操作のクリック（mousedown）が部品の文脈のポップオーバーを閉じる（_srcOutsideClose）
+        session.scratch.pop("open_context_element", None)
     try:
         handler(ctx)
     finally:
@@ -145,7 +176,8 @@ def remember_course_rows(session: PersonaSession, body: Any) -> None:
     ordered = [c for c in rows if not c.get("is_enrollable")] + [c for c in rows if c.get("is_enrollable")]
     session.scratch["course_list_rows"] = [{"id": str(c["id"]), "title": str(c.get("title") or ""),
                                             # 第 3 波（IK-0945）: 受付が止まったマイコースの事実文（コースを開いたとき出す）
-                                            "enrollment_notice": str(c.get("enrollment_notice") or "")}
+                                            "enrollment_notice": str(c.get("enrollment_notice") or ""),
+                                            "enrollable": bool(c.get("is_enrollable"))}
                                            for c in ordered]
 
 
@@ -193,7 +225,24 @@ def pinned_course_override(session: PersonaSession, cid: Any) -> Any:
     if not session.scratch.get("pin_course_strict") or not pinned or str(cid or "") == pinned:
         return cid
     runner_note(session, PIN_STRICT_NOTE.format(pinned=pinned, chosen=cid or "（指定なし）"))
+    # 第 25 周 studio H23（第 4 周）: 差し替えを頭脳の観察にも出す（runner_note は頭脳に見えない）。出さないと、頭脳は
+    # 自分の選んだ行（例: マイコースの同名コース）の知らせとして「受講を開始しました」を読んだ
+    session.scratch.setdefault("observation_notes", []).append(pinned_swap_observation(session, pinned))
     return pinned
+
+
+def pinned_swap_observation(session: PersonaSession, pinned: str) -> str:
+    """固定コースへ差し替えたことを、一覧のどの行かで言う（id は出さない）。"""
+    from uxsim.runner.state import COURSE_GROUP_ENROLLABLE, COURSE_GROUP_MINE
+
+    rows = session.scratch.get("course_list_rows") or []
+    hit = next(((i, r) for i, r in enumerate(rows, 1) if r.get("id") == pinned), None)
+    if hit is None:
+        return "ハーネス: 選んだコースではなく、この場面で固定したコースへ入った（一覧の行は特定できない）。これは画面の文ではない"
+    i, r = hit
+    group = COURSE_GROUP_ENROLLABLE if r.get("enrollable") else COURSE_GROUP_MINE
+    return (f"ハーネス: 選んだコースではなく、この場面で固定したコースへ入った — 一覧の「{group}」の {i}. "
+            f"「{r.get('title') or ''}」の行。以降の画面はこのコース。これは画面の文ではない")
 
 
 def _course_enroll(ctx: _Ctx) -> None:
@@ -393,13 +442,20 @@ def _topic_open(ctx: _Ctx) -> None:
     s = ctx.session
     if s.course_id and not s.topic_ids:
         _load_course(ctx, s.course_id, default_topic=False)  # このあと開くトピックが決まるので既定は置かない
-    tid = ctx.args.get("topic_id") or _topic_by_hint(s, ctx.args.get("topic_hint_terms")) or _next_topic(s)
+    tid_arg = str(ctx.args.get("topic_id") or "").strip()
+    if tid_arg and s.topic_ids and tid_arg not in s.topic_ids:
+        # 第 25 周 第 10 波（share H60）: 場面の既定の topic_id（t1）がこのコースに無いときは送らず、題名の語で選び直す
+        runner_note(s, f"runner_default: 材料の topic_id={tid_arg} はこのコースのトピックに無い — 題名の語で選び直した")
+        tid_arg = ""
+    tid = tid_arg or _topic_by_hint(s, ctx.args.get("topic_hint_terms")) or _next_topic(s)
     status, body = ctx.main(overrides={"topic_id": tid} if tid else None)
     if status == 200 and tid:
         s.topic_id = tid
         s.remember("opened_topics", tid)
         s.material = body if isinstance(body, dict) else {}
         s.scratch.pop("personal_map_seen", None)  # app.js: トピックを読み込むと state.personalMapSeen = false
+        s.scratch.pop("atlas_node_fresh", None)  # 第 10 波（FD-note 4）: トピックを移ったら地図の「今の選択」を落とす
+        s.scratch.pop("personal_map_view", None)  # 第 10 波（IK-1113）: トピックを開くのはわたしの地図を閉じた後
         for ch in _items(body, "chunks"):
             if not isinstance(ch, dict):
                 continue
@@ -435,8 +491,16 @@ def _chat(ctx: _Ctx, *, topic_id: Optional[str] = None, template: Optional[str] 
     body.update({k: v for k, v in extra.items() if v not in (None, "")})
     screen = simulation_screen_context(s, ctx.args.get("simulation_run_id"), tid,
                                        mode=str(body.get("screen_mode") or "chat"))
-    if screen is None and s.scratch.get("personal_map_seen"):
+    opened = open_context_selection(s, tid, voice=str(body.get("screen_mode") or "") == "voice")
+    if screen is None and (opened or s.scratch.get("personal_map_seen") or s.scratch.get("atlas_last_node")
+                           or s.scratch.get("personal_map_view")):
         screen = learning_screen_context(s, tid, mode=str(body.get("screen_mode") or "chat"))
+    if screen is not None and opened:
+        screen["selection"].update(opened)
+    if screen is not None:
+        screen["selection"].update(screen_selection_refs(s))
+    else:
+        s.scratch.pop("atlas_node_fresh", None)  # 送った往復で落とす（app.js は getScreenContext の中で落とす）
     if screen is not None:
         body["screen_context"] = screen
     ov = dict(overrides or {})
@@ -490,19 +554,124 @@ def simulation_screen_context(session: Any, run_ref: Any, topic_id: Optional[str
     view: dict[str, Any] = {"mode": mode if mode in ("chat", "voice", "lecture") else "chat", "precision_reading": False}
     if session.scratch.get("personal_map_seen"):
         view["personal_map_seen"] = True  # IK-0907: 真偽値のみ
+    view.update(atlas_last_node_view(session))
     return {"screen": "learning", "selection": selection, "view": view, "visible_entities": []}
+
+
+# 第 25 周 第 5 波（IK-0986）: app.js getScreenContext は明示の要素が無い送信でも、いま開いて表示中の部品の文脈
+# （state.openContextElement）を ``selection.element_type/element_id`` に申告する。ポップオーバーは外側の mousedown で
+# 閉じる。第 25 周 第 7 周 share H46（指揮者の判断）: 文字の送信でも、ポップオーバーを開いたまま尋ねた 1 往復は申告する
+# （開いた部品について問う場面の材料）。送った後は控えを捨てるので 2 往復目には載らない。音声ループは開いたまま続く。
+OPEN_CONTEXT_KEEPERS = frozenset({"learning.component.context", "learning.component.context_hop"})
+
+
+def opened_component_label(body: Any) -> str:
+    """部品の文脈の応答から、app.js が控える部品の名前（``instance.component.label || frozen_label``）。
+    送るときに 40 字で切る（``open_context_selection``）。"""
+    if not isinstance(body, dict):
+        return ""
+    inst = body.get("instance") if isinstance(body.get("instance"), dict) else {}
+    comp = inst.get("component") if isinstance(inst.get("component"), dict) else {}
+    return str(comp.get("label") or body.get("frozen_label") or "")
+
+
+def remember_open_context(session: Any, component_id: str, label: str = "") -> None:
+    """部品の文脈を開いた（200）ときに、画面と同じく開いている部品の参照（と見出しの名前）だけを控える。"""
+    session.scratch["open_context_element"] = {"element_type": "component", "element_id": str(component_id),
+                                               "topic_id": str(getattr(session, "topic_id", "") or ""),
+                                               "element_label": str(label or "")}
+
+
+TEXT_OPEN_CONTEXT_NOTE = ("runner_screen: ⚓ の部品の文脈を開いたまま文字で尋ねた — 画面と同じく、開いている部品を"
+                          "screen_context.selection（kind=element・element_type・element_id・element_label）で申告した")
+
+
+def open_context_selection(session: Any, topic_id: Optional[str], *, voice: bool) -> dict:
+    """開いている部品の文脈を ``selection`` に足す分（無ければ空）。文字の送信ではポップオーバーが閉じるので控えを捨てる。"""
+    opened = session.scratch.get("open_context_element")
+    if not isinstance(opened, dict) or not opened.get("element_id"):
+        return {}
+    if str(opened.get("topic_id") or "") != str(topic_id or ""):
+        if not voice:
+            session.scratch.pop("open_context_element", None)
+        return {}
+    out = {"kind": "element", "element_id": str(opened["element_id"]), "element_type": str(opened["element_type"])}
+    if opened.get("element_label"):
+        out["element_label"] = str(opened["element_label"])[:40]
+    if not voice:
+        # 第 25 周 第 7 周 share H46: 文字の送信でも、送る瞬間にポップオーバーが表示中なら選択を申告する（getScreenContext は
+        # 送信の前に組まれる）。送った後は入力欄の操作でポップオーバーが閉じるので控えを捨てる（次の送信には載らない）
+        session.scratch.pop("open_context_element", None)
+        runner_note(session, TEXT_OPEN_CONTEXT_NOTE)
+    return out
+
+
+def atlas_last_node_view(session: Any) -> dict:
+    """app.js getScreenContext（第 4 波・IK-0907）: 分野の地図で最後に開いた場所の名前（40 字）と状態の enum だけ。
+    ``learning.atlas.select_node`` が ``atlas:nodeselect`` と同じく ``atlas.nodes[node_id]`` から控える。"""
+    node = session.scratch.get("atlas_last_node") if isinstance(session.scratch.get("atlas_last_node"), dict) else None
+    if not node or not node.get("label"):
+        return {}
+    out = {"atlas_node_label": str(node["label"])[:40]}
+    if node.get("node_id"):
+        # 第 6 波（IK-1031・sync_keys_wave6.md 面 B）: 場所の id（app.js と同じく 160 字で切る）。サーバはこれで詳細パネルの
+        # 検証・承認の行と、この場所に置かれたコースの論文の事実文を足す（無いと名前と札の 2 行だけ）
+        out["atlas_node_id"] = str(node["node_id"])[:160]
+    if node.get("status"):
+        out["atlas_node_status"] = str(node["status"])
+    if node.get("ledger_status"):
+        out["atlas_node_ledger_status"] = str(node["ledger_status"])
+    return out
+
+
+PERSONAL_MAP_VIEW_NOTE = ("runner_screen: わたしの地図の「いまここの周り」を開いたまま尋ねた — 画面と同じく、見ている場所の参照"
+                          "（selection.personal_map_node_id・点ビューなら personal_map_center_component_id）を申告した")
+ATLAS_NODE_FRESH_NOTE = ("runner_screen: 分野の地図で場所を選んだ直後の 1 往復 — 画面と同じく、選んだ場所を "
+                         "selection.atlas_node_id で申告した（次の往復からは view の「最後に開いた場所」だけ）")
+
+
+def remember_personal_map_view(session: Any, node_id: Any, center_component_id: Any = None) -> None:
+    """わたしの地図の「いまここの周り」を開いた（nearby 200）ときの中心（personal-map-home.js ``state.nearbyCenterNodeId`` /
+    ``nearbyCenterComponentId``）。パネルを開いている間は次の往復でも載る（閉じる手 = トピックを開く・別のタブ・地図を開く）。"""
+    if not node_id:
+        return
+    view = {"personal_map_node_id": str(node_id)[:160]}
+    if center_component_id:
+        view["personal_map_center_component_id"] = str(center_component_id)[:160]
+    session.scratch["personal_map_view"] = view
+
+
+def screen_selection_refs(session: Any) -> dict:
+    """第 25 周 第 10 波: app.js ``getScreenContext`` の selection に足す参照（表示しない id だけ）。
+
+    - IK-1113: わたしの地図の「いまここの周り」を開いている間 → ``personal_map_node_id``（+ ``personal_map_center_component_id``）
+    - FD-note 4: 分野の地図で場所を選んだ直後の 1 往復 → ``atlas_node_id``（送ったら落とす。``view.atlas_node_*`` は残る）
+    """
+    out: dict[str, Any] = {}
+    pm = session.scratch.get("personal_map_view")
+    if isinstance(pm, dict) and pm.get("personal_map_node_id"):
+        out.update(pm)
+        runner_note(session, PERSONAL_MAP_VIEW_NOTE)
+    node = session.scratch.get("atlas_last_node") if isinstance(session.scratch.get("atlas_last_node"), dict) else None
+    if session.scratch.pop("atlas_node_fresh", None) and node and node.get("node_id"):
+        out["atlas_node_id"] = str(node["node_id"])[:160]
+        runner_note(session, ATLAS_NODE_FRESH_NOTE)
+    return out
 
 
 def learning_screen_context(session: Any, topic_id: Optional[str], *, mode: str = "chat") -> dict:
     """app.js getScreenContext の topic 選択の形（第 25 周 第 2 波）。runner は既定ではチャットに画面文脈を
-    送らない（近似）が、わたしの地図を開いた後だけは ``view.personal_map_seen`` を送るためにこの形を送る。"""
+    送らない（近似）が、わたしの地図を開いた後（``view.personal_map_seen``）と分野の地図で場所を選んだ後
+    （第 4 波・``view.atlas_node_*``）だけはこの形を送る。"""
     selection: dict[str, Any] = {"course_id": str(session.course_id or ""), "topic_id": str(topic_id or ""),
                                  "kind": "topic"}
     doc = (session.material or {}).get("document_id") if isinstance(session.material, dict) else None
     if doc:
         selection["document_id"] = str(doc)
-    view: dict[str, Any] = {"mode": mode if mode in ("chat", "voice", "lecture") else "chat", "precision_reading": False,
-                            "personal_map_seen": True}
+    view: dict[str, Any] = {"mode": mode if mode in ("chat", "voice", "lecture") else "chat", "precision_reading": False}
+    if session.scratch.get("personal_map_seen"):
+        view["personal_map_seen"] = True
+    view.update(atlas_last_node_view(session))
     return {"screen": "learning", "selection": selection, "view": view, "visible_entities": []}
 
 
@@ -874,6 +1043,7 @@ def _network(ctx: _Ctx) -> None:
     status, body = ctx.main()
     # app.js（IK-0907・第 2 波）: わたしの地図を開いたら state.personalMapSeen = true（トピックを開き直すと戻る）
     ctx.session.scratch["personal_map_seen"] = True
+    ctx.session.scratch.pop("personal_map_view", None)  # 第 10 波: 「いまの地図」タブ（いまここの周り以外）
     _vision5.remember_network_nodes(ctx.session, body)
     for n in _items(body, "nodes"):
         if isinstance(n, dict):
@@ -894,7 +1064,12 @@ def _network_node(extra: tuple[str, ...]) -> Callable[[_Ctx], None]:
         for k in extra:
             if ctx.args.get(k):
                 params[k] = ctx.args[k]
-        ctx.main(params=params)
+        status, _ = ctx.main(params=params)
+        if "center_component_id" in extra:  # nearby（いまここの周り）
+            if status == 200:
+                remember_personal_map_view(ctx.session, params["node_id"], params.get("center_component_id"))
+        else:  # journey（問いからの旅）= 別のタブ
+            ctx.session.scratch.pop("personal_map_view", None)
     return run
 
 
@@ -1332,6 +1507,7 @@ def _remember_component_graph(s: PersonaSession, body: Any) -> None:
 def _component_context(ctx: _Ctx) -> None:
     s = ctx.session
     cid = str(ctx.args.get("component_id") or "").strip()
+    chip_label = ""  # ⚓ の表示名（display_label）— 第 7 波（IK-0571）: 文脈パネルが見出しを英語の内部名で上書きしない
     # 第 15 周: ペルソナは ⚓ の番号（"1" / "⚓1"）や element_ref で部品を指すことがある。
     # 番号・一覧の id を教材の ⚓ 一覧から部品 id に引き直す（画面のチップと同じ対象）。製品を素の番号で叩かない。
     ref = cid or str(ctx.args.get("element_ref") or "").strip()
@@ -1341,20 +1517,71 @@ def _component_context(ctx: _Ctx) -> None:
         hit = next((a for a in material_anchors(s.material) if (m and a["no"] == int(m.group(1))) or a["id"] == ref), None)
         if hit is not None:
             if hit.get("kind") not in ("component", "theory_component"):
-                return ctx.missing("component_anchor")  # 主張・式の ⚓ は部品の文脈では開けない
+                # 第 25 周 studio H25（第 4 周）: 画面では主張・式の ⚓ は要素の文脈で開く。部品の文脈の行為で指されても
+                # 行わずに止めると、頭脳は「⚓ が開けない」と製品の欠陥として記した — 画面と同じ要素の文脈へ回す
+                return _anchor_as_element(ctx, hit)
             cid = hit["id"]
+            chip_label = str(hit.get("display_label") or "")
         elif m:
             return ctx.missing("component_anchor")  # 一覧に無い番号
         elif not anchors and not s.latest("components"):
+            note_no_component_anchor(s)
             return ctx.missing("component_id")
     cid = cid or s.latest("components")
     if not cid:
+        note_no_component_anchor(s)
         return ctx.missing("component_id")
     status, body = ctx.main(overrides={"component_id": cid},
                             params={"topic_id": s.topic_id} if getattr(s, "topic_id", None) else None)
+    if status == 200 and chip_label and isinstance(body, dict) and body.get("available") is not False:
+        body["_chip_display_label"] = chip_label  # 投影だけが読む（画面の data-display-label と同じ役）
     if status == 200:
         s.scratch["component_center"] = str(cid)
+        # 第 25 周 第 6 周 doubt H40: 説明のポップアップの見出し（app.js は部品名）に使う名前を控える
+        s.scratch["component_center_label"] = opened_component_label(body)
         _remember_component_graph(s, body)
+        remember_open_context(s, str(cid), s.scratch["component_center_label"])
+
+
+#: 第 25 周 第 8 周 doubt H48: ⚓（部品）を開く手で、開いているトピックの教材に部品の ⚓ が 1 つも無かった。経路は止めずに
+#: ``inrun_unmet``（→ meta の ``blocked_precondition``）と runner_note に残す。残さないと「⚓ が画面に無い」が製品所見に読まれ、
+#: 前提の不成立（⚓ の無いトピックを開いた）が meta から辿れない
+NO_COMPONENT_ANCHOR_TEXT = "開いているトピックの教材に ⚓（部品）がある"
+
+
+def note_no_component_anchor(session: PersonaSession) -> None:
+    anchors = [a for a in material_anchors(session.material) if a.get("kind") in ("component", "theory_component")]
+    if anchors:
+        return
+    tid = str(getattr(session, "topic_id", "") or "")
+    reason = f"トピック {tid or '（未選択）'} の教材に ⚓（部品）が 0 個 — ⚓ のあるトピックを場面の材料（topic_id）で指す"
+    found = session.scratch.setdefault("inrun_unmet", [])
+    if not any(x.get("check") == "component_anchor" and x.get("reason") == reason for x in found):
+        found.append({"text": NO_COMPONENT_ANCHOR_TEXT, "reason": reason, "check": "component_anchor"})
+        runner_note(session, f"（ハーネス: 場面の前提「{NO_COMPONENT_ANCHOR_TEXT}」が成り立っていない — {reason}。"
+                             "これは画面の文ではない）")
+
+
+ANCHOR_AS_ELEMENT_NOTE = ("（ハーネス: ⚓{no} は{kind}の ⚓ — 画面ではこの ⚓ は要素の文脈で開くので、部品の文脈ではなく"
+                          "要素の文脈として開いた。これは画面の文ではない）")
+_ANCHOR_KIND_WORDS = {"claim": "主張", "theory_claim": "主張", "equation": "式", "figure": "図", "source": "出典"}
+
+
+def _anchor_as_element(ctx: _Ctx, hit: dict) -> None:
+    """主張・式の ⚓ を要素の文脈（``learning.element.context`` と同じ GET）で開き、観察に回したことを添える。"""
+    from uxsim.runner.state import project_observation  # 遅延 import（循環回避）
+
+    s = ctx.session
+    etype = {"theory_component": "component", "theory_claim": "claim"}.get(str(hit.get("kind")), str(hit.get("kind")))
+    status, body = ctx.call("GET", "/api/learning/courses/{course_id}/elements/{element_type}/{element_id}/context",
+                            overrides={"element_type": etype, "element_id": str(hit.get("id") or "")},
+                            params={"topic_id": s.topic_id} if getattr(s, "topic_id", None) else None)
+    if status is None:
+        return
+    note = ANCHOR_AS_ELEMENT_NOTE.format(no=hit.get("no", ""), kind=_ANCHOR_KIND_WORDS.get(str(hit.get("kind")), "要素"))
+    runner_note(s, f"runner_choice: ⚓{hit.get('no', '')}（{hit.get('kind')}）は要素の文脈で開いた")
+    s.last_status, s.last_body = status, {"_ui_fact": note + "\n" + project_observation("learning.element.context",
+                                                                                         status, body)}
 
 
 def _hop_target(graph: Any, wanted: str = "") -> str:
@@ -1382,6 +1609,11 @@ def _component_context_hop(ctx: _Ctx) -> None:
     if status == 200:
         s.scratch["component_center"] = target
         _remember_component_graph(s, body)
+        # 第 25 周 第 8 周 share H51: 移った先の部品の名前も控える（app.js は文脈パネルを開くたびに
+        # ``instance.component.label || frozen_label`` を ``state.openContextElement.element_label`` に控える — IK-1064）
+        label = opened_component_label(body)
+        s.scratch["component_center_label"] = label
+        remember_open_context(s, target, label)
 
 
 def _claim_refs(ctx: _Ctx) -> None:
@@ -1612,7 +1844,36 @@ def _graph_open_structure(ctx: _Ctx) -> None:
             ctx.session.remember("claims", entry.get("claim_id") or entry.get("parent_claim_id"))
 
 
+def _profile_name(ctx: _Ctx) -> None:
+    """両画面の「👤 名前」（第 25 周 第 5 波・IK-0848 / IK-1007）: GET /api/me/profile で読み、``profile_name`` が
+    渡されたときだけ PATCH する。画面の文はサーバの ``label`` / ``note`` / ``message`` をそのまま描く。"""
+    st, body = ctx.call("GET", "/api/me/profile")
+    current = body if isinstance(body, dict) else {}
+    lines = ["👤 名前"]
+    if st is None or st >= 400:
+        lines.append(f"（名前を読み込めませんでした: HTTP {st}）")
+    else:
+        lines.append(f"共有先に出る名前: {current.get('label') or ''}")
+        if current.get("note"):
+            lines.append(str(current["note"]))
+    if "profile_name" not in ctx.args or ctx.args.get("profile_name") is None:
+        ctx.session.last_status, ctx.session.last_body = st, {"_ui_fact": "\n".join(lines)}
+        return
+    want = str(ctx.args.get("profile_name") or "")
+    st2, body2 = ctx.main(json={"profile_name": want})
+    if st2 is not None and st2 < 400 and isinstance(body2, dict):
+        lines.append(f"（名前の欄に「{want}」と書いて［保存］）" if want else "（名前の欄を空にして［保存］）")
+        lines.append(str(body2.get("message") or ""))
+        lines.append(f"共有先に出る名前: {body2.get('label') or ''}")
+    else:
+        detail = body2.get("detail") if isinstance(body2, dict) else ""
+        lines.append(f"（保存できませんでした: {detail or f'HTTP {st2}'}）")
+    ctx.session.last_status, ctx.session.last_body = st2, {"_ui_fact": "\n".join(x for x in lines if x)}
+
+
 _HANDLERS: dict[str, Callable[[_Ctx], None]] = {
+    "learning.profile.name": _profile_name,  # 第 25 周 第 5 波（IK-0848 / IK-1007）
+    "admin.profile.name": _profile_name,
     "learning.chat.delete_message": lambda c: _vision5.delete_message(c),
     "learning.chat.history": _chat_history,
     "learning.traces.list": lambda c: _vision5.traces_list(c),

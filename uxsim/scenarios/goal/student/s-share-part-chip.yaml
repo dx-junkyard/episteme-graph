@@ -1,5 +1,8 @@
 id: s-share-part-chip
 population: students
+# 第 25 周 第 7 周 atlas H43: 是正の確かめが固定コース（campaign の course_id）に依存する場面は最初の open を固定する。
+# 同題名のコースを人がどう見分けるか（IK-0407）を観察したい場面とは分ける（その場面には pin_course を付けない）
+pin_course: true
 runner: [api, browser]
 preconditions:
   - 同じ周の教員（t-share-bind-versions / t-share-explain-write）が、部品を共通部品に結び付けて確定し、部品の説明を査読承認した後に走らせる（その前に一度走らせて前後を比べてもよい）
@@ -12,8 +15,9 @@ steps:
   - do: learning.course.enroll
     note: 受講中でなければ受講を始める
   - do: learning.course.open
+  # 第 25 周 第 9 波（share H55）: ⚓ が開くトピックを材料 topic_id で固定できる（空なら topic_hint_terms で選ぶ — 従来どおり）
   - do: learning.topic.open
-    with: {topic_hint_terms: '{{topic_hint_terms}}'}
+    with: {topic_id: '{{topic_id}}', topic_hint_terms: '{{topic_hint_terms}}'}
     note: '{{topic_hint}} に合うトピックを開く'
   - do: learning.component.context
     note: 気になる部品の ⚓ を開く
@@ -28,6 +32,24 @@ steps:
         with: {message: '{{seed_questions | next}}'}
         note: 部品の書かれた箇所を選んで質問する（わたしの地図に場所の付いた記録を残す）
     optional: true
+  # 第 25 周 H33（第 4 周）: わたしの地図は本人が確定した痕跡からの導出で「置く」操作は無い（PN-2）。旅の入口に
+  # 立つには、区画を選んで質問し、その問いの帰属（どこに引っかかったか）を確かめておく
+  - do: learning.chat.ask_selection
+    with: {message: '{{seed_questions | next}}'}
+    note: 部品の書かれた区画を選んで質問する（わたしの地図に場所の付いた記録の素を残す）
+  - do: learning.anchors.digest
+    note: 問いの帰属の候補（どこに引っかかったか）を見る
+  - choose:
+      - do: learning.anchors.confirm
+        note: 帰属が合っていれば確定する（わたしの地図に載る）
+      - do: learning.anchors.dismiss
+        note: 合っていなければ外す
+    optional: true
+  # 第 9 波（share H55）: 選択質問の 3 つ目の枠（第 9 周は枠が 2 つで、材料の 3 問目 — IK-1064「この部品の説明は誰が書いたか」 — が
+  # 送られなかった）。材料が尽きていればペルソナが同じ調子で作る
+  - do: learning.chat.ask_selection
+    with: {message: '{{seed_questions | next}}'}
+    note: 部品を開いたまま、もう 1 つ尋ねる（説明の書き手・ほかの論文での扱いなど、まだ聞いていないこと）
   - do: learning.personal_network.journey
     note: わたしの地図の「問いからの旅」で、この部品から別の論文へたどれる道があるかを見る
 stop_when: [gave_up, blocked, budget_exhausted, persona_stop]

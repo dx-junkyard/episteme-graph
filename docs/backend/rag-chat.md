@@ -737,3 +737,86 @@ LLM が別のチャンクの文を `[出典N]` に帰属させる誤帰属は、
 - ガードレール: `test_citation_check_{core,route,ui_static}.py`。
 - 適用範囲: `_learning_chat_core` の RAG 応答（コース経路・document 直付け discuss の両方。同じコアを通る）。
   前提知識の説明（LEARNING_ADVICE）などの早期 return には未適用。言い換えの意味的一致（LLM・embedding による検査）はしない。
+
+## 追補（2026-10-27・第 25 周 第 5 波）面を跨ぐ学習チャット / RAG の是正
+
+第 25 周の 4 面（共有・疑義・分野の地図・原稿スタジオ）の審判と製品頭脳の所見で、どの面からでも同じ学習チャットの
+組み立てに戻る 5 件を根で束ねた（新しい固定文の継ぎ足しで LLM を制御しない・LLM 回数不変・保存文の形不変 = RS5）。
+
+- **出典の目印の除去は 1 箇所**（IK-1006）: 正本は `core/text_hygiene.remove_citation_markers`（`CITATION_MARKER_RE` も
+  ここへ移した）。根拠の無い番号を空文字にするだけだと、目印を名詞として使った文（「前の回答の「[出典3]」は」）が
+  「前の回答の「」は」と欠ける。目印だけを囲んだ引用符・名詞の位置（直前が「の」・文頭・読点、直後が助詞）は句
+  （応答本文 = 「確認できない出典」、前の往復の持ち越し = 「前の回答で挙げた出典」／直前が「の」なら「出典」）に置き換え、
+  付記の位置は前後の空白ごと取り除く（括弧だけが残る「（）」も残さない）。`_reconcile_citation_markers` と
+  `_correction_source_text`（`previous_correction_fact` の入力）が同じ関数を通る。
+- **同じ論文の別の版を畳む**（IK-0996 + IK-0846 の RAG 面）: `search_chunks_with_metadata` の後処理で
+  `core/source_versions.collapse_paper_versions` を通す。同じ論文かは IK-0919 の正本 `identity_candidates.same_paper`
+  （arXiv ID / 題名の正規化完全一致）、同じ箇所かは式のプレースホルダを除いた本文の一致で決める。残す版は
+  ①焦点の論文（`prefer_document_ids` = `_focus.document_ids`）→ ②AI が復元した式の少ない版 → ③TeX の取り込み →
+  ④検索の順位。残した行は群の最高の類似度を引き継ぎ、`version_note`（事実文・数値なし）を `sources[]`
+  （`SourceTierItem.version_note`）と履歴メタに載せる。出典カードは `.lx-src-meta` に 1 行で描く。
+- **論文の構成の段落を採用しない**（IK-0987）: `non_content_chunk_reason` の `outline` を `_is_paper_outline_paragraph` に。
+  TeX の `\ref` が解決されず番号の落ちた節参照（「in Sec. .」）も節参照に数え、構成の文から後ろが段落の過半ならそれだけで
+  outline。長い導入に構成の 1 文が付いた区画は落とさない。焦点の優先規則（FD3）の閾値は変えていない。
+- **式の事実は式単位**（IK-0997 / IK-1009）: `core/formula_facts.formula_fact_line` は番号の無い復元式を式本文の先頭
+  （`$…$`・論文層の `equation_latex_snippet`）か定める記号で 1 つずつ名指し、印の判定は
+  `equation_latex_is_reconstructed`（TeX 原文と一致すれば印なし）だけを使う。復元式と印の無い式が同じ箇所にあれば
+  「印の無い式は原文の数式です」を添える。印の説明（［AI復元］= …）は行ごとに繰り返さず
+  `RECONSTRUCTED_FORMULA_INSTRUCTION` に 1 回だけ置く。
+- **音声（casual）でも選んでいる要素は渡す**（IK-0986・仮説の是正）: 画面文脈は casual のとき `kinds=("element",)` で
+  選択中の要素だけを解決する（表示モード・台帳・位置づけ・実行記録は引かない）。学習画面の承認済みの説明は事実文で
+  「学習者の画面に出ているこの要素の「教員の説明」（承認済み）」と区画名で指す。フロントは開いている部品の文脈を
+  `state.openContextElement` に控え、ラッチの無い送信（音声ループ）でも表示中なら `selection.element_*` として申告する。
+  保存 message・痕跡は不変（SA6）。
+
+### 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 目印の除去が文の要素を壊す | `information-dropped-as-unrepresentable` | 空にせず句へ置き換える（除去の正本 1 つ） |
+| 版を別物として数える | `same-name-different-referents` | 同一視は IK-0919 の正本を使い、新しい規則を作らない |
+| 印を式ではなく抜粋に付ける | `extent-decided-by-proxy-signal` | 判定は `equation_latex_is_reconstructed` の 1 つ、名指しは式単位 |
+| 見えている材料が音声の往復に渡らない | `available-but-unwired` | casual でも element だけ解決し、フロントは開いている部品を申告 |
+| 新しい判定を面ごとに足す | `duplicate-canonical-sources` | 目印の正規表現を `text_hygiene` に移し、learning.py は別名だけ持つ |
+
+検証: `backend/tests/test_round25_wave5_chat_rag.py` + `test_assistant_context_learning_route.py`（casual の行列）+
+`test_wave17_topic_source_grounding.py`（式の事実）。確かめていない範囲: 砂場での再演（docker を使わない波）、
+`get_chunks_for_prompt`（表示中の教材の出典・持ち越し）と検索結果の間の版の重複、音声で部品を開いたままの実機の往復。
+
+## 追補（2026-10-27・第 25 周 第 6 波）面を跨ぐ学習チャット / RAG の是正（2 回目）
+
+第 6 周の再演と製品頭脳の所見で残った 9 件のうち 6 件を根で束ねた（LLM 回数不変・保存文の形不変 = RS5・`assemble` は不変）。
+
+- **焦点を同じ論文の別の版まで広げる**（IK-1035 / IK-0987 STILL）: `focus_document.with_paper_versions` +
+  `services.paper_version_siblings`（`same_paper` の正本・スコープとの積だけ）。正本の説明は
+  `docs/features/focus_document_design.md` の第 6 波追補。
+- **出典番号を版の選び直しで変えない**（IK-1037）: `search_chunks_with_metadata(..., prefer_chunk_ids=)` に会話の
+  採番器の対応表（`_SessionCitationNumbers.mapping()`）を渡し、`collapse_paper_versions` は番号を持つチャンクを最優先で残す。
+- **式の印を同じ論文の原文で照合する**（IK-1040 / IK-1009 の残り）: `services.paper_original_formula_latex` がスコープ内の
+  同じ論文の別の版のチャンクから印の付かない式の LaTeX を集め、`formula_fact_line(confirmed_latex=)` が一致する復元式の
+  印を外す（一致の判定は `reconstruction_matches_source` の 1 つ）。出典の抜粋（`confirm_formula_facts_across_versions`）と
+  表示中の教材（`_topic_formula_fact_line(..., allowed_document_ids=)`）の両方が通る。照合の材料に使う行の式の記録
+  `_formulas` は返す前に外す（DTO・プロンプトに載せない）。照合できなければ印は従来どおり。
+- **文中の埋め込みを外して文を欠かさない**（IK-1036）: `material_text_for_prompt` は行の途中の
+  `![[claim|component|source:…]]` を参照先の本文の引用（「…」・120 字）にする。引けない・内部 ID 形なら種別の語。
+  行単独のブロック埋め込みは従来どおり外す。
+- **構造ブロックに英語の文を添えない**（IK-1039）: `_retrieved_node_fact` は理論対象が日本語を含まず英単語が並ぶ文なら
+  括弧ごと添えない（短い対象名と数式は残す）。
+- **意図分類に画面の文脈を 1 行**（IK-1043）: `_intent_screen_hint` が地図で開いた場所の名前 → 選んだ要素の名前を
+  40 字で「画面の文脈: …」として分類のプロンプトに添える（本文・選択テキストは渡さない = SA1）。
+
+記帳のみ: IK-1038（前提名の結果の値 — 教材の内容の値で数値非表示の対象外・rejected）、IK-1041（構造ブロックに同一性リンクが
+渡らない — 解決器の種類を足す設計が要る）、IK-1042（帰属の候補の重複・式由来の合成主張の不正な依存 — A層の合成規則と併せて扱う）。
+
+### 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 焦点を広げてスコープを広げないか | `scope-widened-silently` | 版はスコープとの積だけ。`None` / 空のスコープは足さない |
+| 写しごとの材料で判定が割れる | `id-not-stable-across-versions` | 同じ論文の原文の式で照合する。番号は番号を持つチャンクを代表に |
+| 印の判定を新設しない | `duplicate-canonical-sources` | `reconstruction_matches_source` と `same_paper` を呼ぶだけ |
+| 参照記法の除去で文が欠ける | `information-dropped-as-unrepresentable` | 行の途中だけ本文の引用、行単独は外す |
+| 前段に文脈を渡さない | `available-but-unwired` | 分類に名前の 1 行だけ（本文は渡さない） |
+
+検証: `backend/tests/test_round25_wave6_chat_rag.py`。確かめていない範囲: 砂場での再演（docker を使わない波）、焦点の
+document が PDF 版であることの実データ、照合の SQL の応答時間。

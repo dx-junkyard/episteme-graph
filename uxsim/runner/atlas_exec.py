@@ -74,8 +74,20 @@ EDGE_KIND_REQUIRED = "採用するには関係の種類を選んでください"
 EDGE_DISMISS_REASON_REQUIRED = "見送りには理由が必要です"
 EDGE_ACCEPT_NOTE = "[採用] は「この関係は妥当」という判断だけを記録します。次版の下書きはこの操作では変わりません。"
 EDGE_DISMISS_NOTE = "見送った関係は既定の一覧に出なくなります。「見送り済みも表示」から戻せます。"
-EDGE_NO_DRAFT_TEXT = "次版の下書きがまだありません。「現在の版から次版の下書きを作る」を実行すると反映できます。"
+EDGE_NO_DRAFT_TEXT = "次版の下書きがまだありません。この区画の先頭の［現在の版から次版の下書きを作る］を押すと反映できます。"  # admin.js（IK-1044・第 7 波）
+# admin.js _edgeDraftCreateHtml（IK-1044・第 7 波）: 関係の区画の先頭と「採用済み・未反映」の区画の先頭の下書きの入口
+EDGE_DRAFT_CREATE_NOTE = ("編集中の次版の下書きはありません。採用した関係を地図に加えるには、先に公開中の版を複製して次版の"
+                          "下書きを作ります（AI は使いません）。")
+EDGE_DRAFT_CREATE_RETIRED_NOTE = "この分野は廃止済みのため、次版の下書きは作れません。「復帰する」で戻すと作れます。"
+EDGE_DRAFT_CREATE_BUTTON = "現在の版から次版の下書きを作る"
 EDGE_NOT_ACCEPTED_TEXT = "[採用] を押すと、次版の下書きへ反映できます。"
+# 第 8 波（IK-1044 残り・sync_keys_wave8 面 C）: 下書きが無いときの未採用の関係カードの案内（admin.js EDGE_NOT_ACCEPTED_NO_DRAFT_TEXT）
+EDGE_NOT_ACCEPTED_NO_DRAFT_TEXT = "[採用] を押し、この区画の先頭の［現在の版から次版の下書きを作る］で下書きを作ると反映できます。"
+
+
+def decision_note_head(decision: dict) -> str:
+    """admin.js（第 8 波）: 見送った判断のメモの見出しは「見送りの理由」、採用・候補は「判断のメモ」（4 箇所共通）。"""
+    return "見送りの理由" if str((decision or {}).get("status") or "") == "dismissed" else "判断のメモ"
 EDGE_EMPTY_TEXT = "いまレビューする関係の候補はありません。"
 EDGE_DOCUMENTS_HEAD = "両方の項目に配置がある論文"
 EDGE_FREEZE_PENDING_TEXT = "採用済みでまだ次版に反映されていない関係（辺）の候補が残っています"
@@ -88,6 +100,7 @@ VECTOR_DONE_TEXT = "索引を作り直しました"
 # admin.js _appendDraftRelationsSection（IK-0886・第 2 波）
 DRAFT_RELATIONS_TITLE = "関係（辺）"
 DRAFT_RELATIONS_EMPTY = "この下書きには関係（辺）がありません。"
+PUBLISHED_RELATIONS_EMPTY = "この版には関係（辺）がありません。"  # 第 5 波（IK-0992）
 DRAFT_RELATION_NEW = "— 次版で加わる関係"
 # admin.js openFreezeImpactModal(blocked=true)（IK-0885・第 2 波）
 FREEZE_BLOCKED_GOTO = "止めている候補を見る"
@@ -248,6 +261,36 @@ def renumber_cards(session: PersonaSession, kind: str, rows: list[dict], key_fie
         str(r.get(key_field) or "") for r in rows}}
 
 
+# 第 25 周 H27（第 4 周）: カードの番号は投影の印。区画の頭で 1 回だけそう言う（製品のカードに番号は無い）
+CARD_NUMBER_NOTE = ("（ハーネスの番号: カード先頭の「N.」はハーネスが振った印で、画面のカードに番号は無い。"
+                    "いまの表示の順に振り直している — 指すときはこの番号か名前で）")
+
+
+def display_numbers(session: PersonaSession, kind: str, rows: list[dict], key_field: str) -> dict[str, int]:
+    """候補カードの番号を、いまの表示の順に振り直す（第 25 周 H27・第 4 周）。
+
+    H2 の「最初に見た順に固定」は、採用で帯が入れ替わる・見送りで畳みから繰り上がると「2 → 1 → 3」「… 32・33 …」
+    のように表示の並びと番号が食い違い、頭脳が製品の並びの欠陥として記した。表示のたびに表示順で振り、hint の
+    解決は同じ表（キー → 番号）で行う — 頭脳が最後に見た番号がそのまま指す先になる。前の表示の番号は
+    ``atlas_{kind}_numbers_previous`` に残し、変わったカードだけ「（前の表示の番号 N）」を併記する。
+    """
+    old: dict[str, int] = dict(session.scratch.get(f"atlas_{kind}_numbers") or {})
+    table: dict[str, int] = {}
+    for r in rows:
+        k = str(r.get(key_field) or "")
+        if k and k not in table:
+            table[k] = len(table) + 1
+    session.scratch[f"atlas_{kind}_numbers"] = table
+    session.scratch[f"atlas_{kind}_numbers_previous"] = {k: old.get(k) for k in table}
+    return table
+
+
+def previous_number_note(session: PersonaSession, kind: str, key: str, now: int) -> str:
+    """前の表示と番号が変わったカードの見出しに添える文（前の表示に無ければ空）。"""
+    old = (session.scratch.get(f"atlas_{kind}_numbers_previous") or {}).get(key)
+    return f"（前の表示の番号 {old}）" if old and old != now else ""
+
+
 def _hint_pick(rows: list[dict], hint: Any, label_keys: tuple[str, ...],
                numbers: Optional[dict[str, int]] = None, key_field: str = "") -> Optional[dict]:
     """カードの番号か、ラベルの一部で 1 行を選ぶ。
@@ -324,6 +367,44 @@ def _document_refs(c: dict) -> dict:
             "document_ids": [str(d.get("document_id") or d.get("id") or "") for d in docs]}
 
 
+def _status_of(c: Any) -> str:
+    return str(((c or {}).get("decision") or {}).get("status") or "candidate") if isinstance(c, dict) else ""
+
+
+def unreflected(c: Any) -> bool:
+    """採用済みで、まだ次版の下書きに入っていない（凍結を止める）候補・関係・外れた判断。"""
+    return (isinstance(c, dict) and _status_of(c) == "accepted" and not c.get("in_draft")
+            and not ((c.get("decision") or {}).get("applied_version")))
+
+
+def pending_unreflected(session: PersonaSession, kind: str, *, where: str = "all") -> list[dict]:
+    """``kind`` = gap / edge の採用済み・未反映。``where`` = candidates / orphaned / all（第 25 周 H25）。"""
+    data = session.scratch.get("atlas_gaps" if kind == "gap" else "atlas_edges")
+    if not isinstance(data, dict):
+        return []
+    rows: list = []
+    if where in ("candidates", "all"):
+        rows += list(data.get("candidates") or [])
+    if where in ("orphaned", "all"):
+        rows += list(data.get("orphaned_decisions") or [])
+    return [r for r in rows if unreflected(r)]
+
+
+def refresh_freeze_ready(session: PersonaSession) -> None:
+    """状態の旗 ``freeze_ready``（scenario.STATE_FLAGS・第 25 周 H25）を候補の一覧から立て直す。
+
+    下書きがあり、候補・関係の両方の一覧を読んでいて、どちらにも採用済み・未反映が無ければ真。凍結の影響を
+    読んだときはサーバの readiness が勝つ（``_freeze_impact``）。一覧を読んでいなければ旗に触れない。
+    """
+    gaps, edges = session.scratch.get("atlas_gaps"), session.scratch.get("atlas_edges")
+    flags = session.scratch.setdefault("until_flags", {})
+    if not (isinstance(gaps, dict) or isinstance(edges, dict)):
+        return
+    draft = any(isinstance(d, dict) and d.get("draft_exists") for d in (gaps, edges))
+    flags["freeze_ready"] = bool(draft and not pending_unreflected(session, "gap")
+                                 and not pending_unreflected(session, "edge"))
+
+
 def _load_skeleton(ctx) -> tuple[Optional[int], Any]:
     status, body = _call(ctx, "GET", _CART + "/skeleton")
     if status == 200 and isinstance(body, dict):
@@ -374,6 +455,7 @@ def _load_gaps(ctx) -> tuple[Optional[int], Any]:
         _annotate(ctx, _gap_digest(body))
     elif status == 404:
         s.scratch["atlas_gaps"] = None  # 骨格が無い分野はグループごと非表示（fail-closed）
+    refresh_freeze_ready(s)
     return status, body
 
 
@@ -395,6 +477,8 @@ def _edge_digest(body: Any) -> dict:
             "in_draft": bool(c.get("in_draft")),
         } for c in cands],
         "empty_notes": bool((body or {}).get("empty_notes")) if isinstance(body, dict) else False,
+        # 第 6 周 H37: 索引の構築中に候補を出していない理由の文（一覧の上の index_note）も空の理由として数える（審判 B15）
+        "index_note": bool((body or {}).get("index_note")) if isinstance(body, dict) else False,
         "folded": bool((body or {}).get("folded_note")) if isinstance(body, dict) else False,
         "orphaned_labels": [_edge_pair_label(i) for i in ((body or {}).get("orphaned_decisions") or [])
                             if isinstance(i, dict)] if isinstance(body, dict) else [],
@@ -415,6 +499,7 @@ def _load_edges(ctx) -> tuple[Optional[int], Any]:
         _annotate(ctx, _edge_digest(body))
     elif status == 404:
         s.scratch["atlas_edges"] = None
+    refresh_freeze_ready(s)
     return status, body
 
 
@@ -482,6 +567,13 @@ def overview_lines(session: PersonaSession) -> list[str]:
                 lines.append(f"- {atlas_version_text(e.get('version'))} — {e.get('note') or ''}{credit}")
     else:
         lines.append(NO_FROZEN_TEXT)
+    if frozen:
+        # 第 5 波（IK-0992）: #atlas-published-view（atlas.published-contents）の折りたたみ。既定で閉じている。
+        # 第 6 波（IK-0992 の残り）: 下書きがある間も出る（見出しが「…下で編集している次版の下書きとは別です」）。
+        # admin.atlas.published_view で開くと同じプレビュー部品（読み取り専用）で版を描く
+        lines += published_view_lines(frozen, bool(session.scratch.get("atlas_published_open")),
+                                      with_draft=bool(draft),
+                                      version=(state.get("frozen") or {}).get("version"))
     if draft:
         lines.append("次版の下書き（プレビュー）:")
         for r in (draft.get("skeleton") or {}).get("regions") or []:
@@ -497,18 +589,52 @@ def overview_lines(session: PersonaSession) -> list[str]:
     return lines
 
 
-def draft_relations_lines(skeleton: Any, frozen: Any) -> list[str]:
+# admin.js ATLAS_PUBLISHED_VIEW_WITH_DRAFT_TEXT（第 6 波・IK-0992 の残り）
+PUBLISHED_VIEW_WITH_DRAFT_TEXT = "公開中の版（{version}）を見る（読み取り専用 — 下で編集している次版の下書きとは別です）"
+
+
+def published_view_summary(version: Any, *, with_draft: bool = False) -> str:
+    """admin.js renderPublishedView の summary（IK-0992）。下書きがあるときは別の見出し（第 6 波）。"""
+    v = atlas_version_text(version)
+    if with_draft:
+        return PUBLISHED_VIEW_WITH_DRAFT_TEXT.replace("{version}", v or "地図")
+    return "公開中の版" + (f"（{v}）" if v else "") + "の項目と関係を見る（読み取り専用）"
+
+
+def published_view_lines(frozen: Any, opened: bool, *, with_draft: bool = False,
+                         version: Any = None) -> list[str]:
+    """``#atlas-published-view``（公開中の版があるとき出る折りたたみ）。閉じていれば summary の 1 行だけ。
+    開いていれば領域・概念（AtlasDraftPreview）+「関係（辺）」の節（opts.published = 次版で加わる印なし・
+    空なら「この版には関係（辺）がありません。」）。版は data.frozen.version → skeleton.version の順（admin.js と同じ）。"""
+    if not isinstance(frozen, dict):
+        return []
+    summary = published_view_summary(version or frozen.get("version"), with_draft=with_draft)
+    if not opened:
+        return [f"▸ {summary}（折りたたみ・閉じている）"]
+    lines = [f"▾ {summary}:"]
+    for r in frozen.get("regions") or []:
+        if isinstance(r, dict):
+            concepts = "、".join(str((c or {}).get("label") or (c or {}).get("id") or "")
+                                for c in (r.get("concepts") or []) if isinstance(c, dict))
+            lines.append(f"- {r.get('label') or r.get('id') or ''}: {concepts or '（概念なし）'}")
+    lines += draft_relations_lines(frozen, None, published=True)
+    return lines
+
+
+def draft_relations_lines(skeleton: Any, frozen: Any, *, published: bool = False) -> list[str]:
     """admin.js _appendDraftRelationsSection（IK-0886）: 下書きの関係を両端の名前・種類・向きの文で並べ、
     現在の公開版に無い（種類が違う）関係に「— 次版で加わる関係」を添える。件数は出さない。"""
     if not isinstance(skeleton, dict):
         return []
     labels: dict[str, str] = {}
+    concept_ids: set[str] = set()
     for r in skeleton.get("regions") or []:
         if isinstance(r, dict) and r.get("id"):
             labels[str(r["id"])] = str(r.get("label") or r["id"])
             for c in r.get("concepts") or []:
                 if isinstance(c, dict) and c.get("id"):
                     labels[str(c["id"])] = str(c.get("label") or c["id"])
+                    concept_ids.add(str(c["id"]))
 
     def pair(e: dict) -> str:
         a, b = str(e.get("from") or ""), str(e.get("to") or "")
@@ -519,7 +645,10 @@ def draft_relations_lines(skeleton: Any, frozen: Any) -> list[str]:
     edges = [e for e in (skeleton.get("edges") or []) if isinstance(e, dict)]
     lines = [f"{DRAFT_RELATIONS_TITLE}:"]
     if not edges:
-        lines.append(DRAFT_RELATIONS_EMPTY)
+        lines.append(PUBLISHED_RELATIONS_EMPTY if published else DRAFT_RELATIONS_EMPTY)
+    note = relations_mix_note(edges, concept_ids)
+    if note:
+        lines.append(note)
     for e in edges:
         a = labels.get(str(e.get("from") or ""), str(e.get("from") or ""))
         b = labels.get(str(e.get("to") or ""), str(e.get("to") or ""))
@@ -532,9 +661,30 @@ def draft_relations_lines(skeleton: Any, frozen: Any) -> list[str]:
     return lines
 
 
+#: 第 25 周 第 8 周 atlas H47: 製品の関係の一覧は領域どうし・概念どうしを小見出し無しで 1 列に並べ、概念どうしの関係は
+#: 末尾に来る。頭脳が先頭の領域どうしの行で読みやめ「概念どうしの関係が落ちた」と疑った（偽所見）。投影は全行を写したまま、
+#: 両方が混ざるときだけハーネスの注記を 1 行添える（画面の文ではない・件数は言わない）
+RELATIONS_MIX_NOTE = ("（ハーネス: この一覧は領域どうしの関係と概念どうしの関係を同じ列に並べている — 概念どうしの関係は"
+                      "一覧の後ろの方にある。画面の全行を写しているので、欠けを疑う前に末尾まで読む。これは画面の文ではない）")
+
+
+def relations_mix_note(edges: list, concept_ids: set) -> str:
+    """関係の一覧に領域どうしと概念どうし（端点が概念）の両方があれば注記（純関数）。"""
+    def has_concept(e: dict) -> bool:
+        return str(e.get("from") or "") in concept_ids or str(e.get("to") or "") in concept_ids
+    rows = [e for e in edges if isinstance(e, dict)]
+    with_c = [has_concept(e) for e in rows]
+    return RELATIONS_MIX_NOTE if any(with_c) and not all(with_c) else ""
+
+
 GAP_EXPLAIN_LINES = frozenset({GAP_ACCEPT_NOTE, GAP_AT_CAPACITY_TEXT, GAP_NOT_ACCEPTED_TEXT, GAP_NO_DRAFT_TEXT})
-EDGE_EXPLAIN_LINES = frozenset({EDGE_ACCEPT_NOTE, EDGE_NOT_ACCEPTED_TEXT, EDGE_NO_DRAFT_TEXT})
-SAME_EXPLAIN_NOTE = "  （説明は 1 枚目と同じ）"
+EDGE_EXPLAIN_LINES = frozenset({EDGE_ACCEPT_NOTE, EDGE_NOT_ACCEPTED_TEXT, EDGE_NOT_ACCEPTED_NO_DRAFT_TEXT,
+                                EDGE_NO_DRAFT_TEXT})
+# 第 25 周 H27（第 4 周）: 投影の畳み（製品はカードごとに同じ文を繰り返す）には「ハーネス」の印を付ける
+SAME_EXPLAIN_NOTE = "  （ハーネス: 投影の省略 — 説明は上の同じ状態のカードと同じ）"
+# 第 25 周 H28（第 4 周）: 観察の文字数上限で畳んだ行の印。頭脳が製品の表示件数の規則の変化として読まないよう、
+# 表示の都合で畳んだこと・画面には全カードがあることを先に言う
+FOLD_HEAD = "（ハーネス: 表示の都合で畳んだ — 画面には全カードがある。以下の{what}は画面の下に続く: "
 # 観察の上限（state.OBSERVATION_CHARS）から、区画をつなぐ空行・runner の注記の分を引いた投影の予算（H1）
 OBSERVATION_MARGIN = 300
 
@@ -551,8 +701,10 @@ def fold_cards(cards: list[tuple[str, list[str]]], explain: frozenset, budget: O
                what: str, keep: Optional[list[bool]] = None) -> list[str]:
     """候補カードを並べる（H1・第 25 周）。
 
-    - 2 枚目以降のカードの説明文（採用・見送りの注記と押せない理由）が 1 枚目と同じなら
-      「（説明は 1 枚目と同じ）」の 1 行に畳む（製品はカードごとに同じ文を繰り返す — 読む中身は同じ）。
+    - カードの説明文（採用・見送りの注記と押せない理由）が、上で全文を出した同じ状態のカードの説明と同じなら
+      「（説明は上の同じ状態のカードと同じ）」の 1 行に畳む（製品はカードごとに同じ文を繰り返す — 読む中身は同じ）。
+      第 9 波（atlas H49）: 基準は「1 枚目」ではなく、説明の組ごとに最初の 1 枚（1 枚目が採用済みになって説明が
+      変わると、旧来は以降の全カードで同じ 2 行を繰り返した）。
     - ``budget``（字数）を越えるカードは、題名だけを「（以下の{what}は画面の下に続く: …）」に列挙して畳む。
       件数は書かない。無言で切らず、切ったことを投影の側で事実として言う（観察の上限で末尾が消え、
       後ろの区画が一度も頭脳に届かなかった）。
@@ -560,21 +712,22 @@ def fold_cards(cards: list[tuple[str, list[str]]], explain: frozenset, budget: O
       cap_for_review が判断済みを畳まないのと同じ規律 — 畳むと［採用］の帰属と反映済みの印が頭脳に届かない）。
     """
     out: list[str] = []
-    first_explain: Optional[list[str]] = None
+    shown_explains: set[tuple[str, ...]] = set()
     rest: list[str] = []
     for i, (title, lines) in enumerate(cards):
         kept = bool(keep[i]) if keep is not None and i < len(keep) else False
-        explain_lines = [x for x in lines if x.strip() in explain]
-        if first_explain is None:
-            first_explain = explain_lines
-        elif explain_lines and explain_lines == first_explain:
+        explain_lines = tuple(x for x in lines if x.strip() in explain)
+        folded = bool(explain_lines) and explain_lines in shown_explains
+        if folded:
             lines = [x for x in lines if x.strip() not in explain] + [SAME_EXPLAIN_NOTE]
         if not kept and budget is not None and out and (rest or _size(out) + _size(lines) > budget):
             rest.append(title)
             continue
         out += lines
+        if explain_lines and not folded:
+            shown_explains.add(explain_lines)  # 全文を出したカードの説明だけを基準にする
     if rest:
-        head = f"（以下の{what}は画面の下に続く: "
+        head = FOLD_HEAD.format(what=what)
         room = (budget - _size(out) - len(head) - 4) if budget is not None else 0
         shown: list[str] = []
         for t in rest:
@@ -650,7 +803,7 @@ def gap_card_lines(c: dict, idx: int, draft_exists: bool, label_edit: str = "") 
         parts = [p for p in (near.get("nearness_label"), atlas_version_text(near.get("skeleton_version"))) if p]
         lines.append(f"  既存の『{near['node_label']}』の別表記の可能性があります" + (f"（{'・'.join(parts)}）" if parts else ""))
     if decision.get("review_note"):
-        lines.append(f"  判断のメモ: {decision['review_note']}")
+        lines.append(f"  {decision_note_head(decision)}: {decision['review_note']}")
     if suppressed:
         lines.append("  ボタン: [見送りから戻す]")
     else:
@@ -703,18 +856,23 @@ def gaps_lines(session: PersonaSession, budget: Optional[int] = None) -> list[st
     filt = "オン" if session.scratch.get("atlas_gap_include_dismissed") else "オフ"
     lines = [f"{GAP_GROUP_TITLE}（見送り済みも表示: {filt}）", GAP_GROUP_INTRO] + review_list_notes(data)
     cands = [c for c in (data.get("candidates") or []) if isinstance(c, dict)]
+    orphan_items = [i for i in (data.get("orphaned_decisions") or []) if isinstance(i, dict)]
+    numbers = display_numbers(session, "gap", cands + orphan_items, "cluster_key")
+    if cands or orphan_items:
+        lines.append(CARD_NUMBER_NOTE)
     orphaned = gap_orphaned_lines(session, data)
     if not cands:
         # admin.js _reviewEmptyHtml: 従来の一文 + 候補ゼロの理由（empty_notes・IK-0851 第 2 周）
         return lines + [GAP_EMPTY_TEXT] + review_empty_notes(data) + orphaned
     edits = session.scratch.get("atlas_gap_label_edits") or {}
-    numbers = card_numbers(session, "gap", cands, "cluster_key")
     cards = []
     for c in cands:
         key = str(c.get("cluster_key") or "")
         label = edits.get(key, "") or str(c.get("proposed_label") or "")
-        cards.append((label, gap_card_lines(c, numbers.get(key, 0), bool(data.get("draft_exists")),
-                                            edits.get(key, ""))))
+        card = gap_card_lines(c, numbers.get(key, 0), bool(data.get("draft_exists")), edits.get(key, ""))
+        if card:
+            card[0] += previous_number_note(session, "gap", key, numbers.get(key, 0))
+        cards.append((label, card))
     rest = None if budget is None else budget - _size(lines) - _size(orphaned)
     return lines + fold_cards(cards, GAP_EXPLAIN_LINES, rest, "論文の解析から見つかった候補",
                               keep=[decided_card(c) for c in cands]) + orphaned
@@ -760,7 +918,7 @@ def gap_orphaned_lines(session: PersonaSession, data: Any) -> list[str]:
         if item.get("documents_hidden"):
             lines.append(f"  {GAP_DOCUMENTS_HIDDEN_TEXT}")
         if decision.get("review_note"):
-            lines.append(f"  判断のメモ: {decision['review_note']}")
+            lines.append(f"  {decision_note_head(decision)}: {decision['review_note']}")
         if item.get("in_draft_note"):
             lines.append(f"  {item['in_draft_note']}")
         buttons = ["[候補へ戻す]"]
@@ -813,22 +971,40 @@ def edge_card_lines(c: dict, idx: int, draft_exists: bool) -> list[str]:
                 if e.get("evidence_quote"):
                     lines.append(f"        「{e['evidence_quote']}」")
     if decision.get("review_note"):
-        lines.append(f"  判断のメモ: {decision['review_note']}")
+        lines.append(f"  {decision_note_head(decision)}: {decision['review_note']}")
     if suppressed:
         lines.append("  ボタン: [見送りから戻す]")
     else:
         kind = EDGE_KIND_LABELS.get(str(decision.get("edge_kind") or ""), "関係の種類を選ぶ")
         off = not accepted or not draft_exists or in_draft
+        # 第 10 波（H54）: 下書きに入った採用（dismiss_locked）は［見送り…］を描かず、ボタンの下に dismiss_locked_note
+        dismiss = "" if c.get("dismiss_locked") else "[見送り…] "
         # admin.js: 採用済みの辺は[採用]と種類の選択を押せなくする（IK-0848）
         lines.append(f"  関係の種類: {kind}（隣接 / 依存 / 関連）{'（選べない）' if accepted else ''}"
-                     f"  ボタン: [採用]{'（押せない）' if accepted else ''} [見送り…] "
+                     f"  ボタン: [採用]{'（押せない）' if accepted else ''} {dismiss}"
                      f"[次版の下書きへ反映…]{'（押せない）' if off else ''}")
+        if c.get("dismiss_locked_note"):
+            lines.append(f"  {c['dismiss_locked_note']}")
         lines.append(f"  {EDGE_ACCEPT_NOTE}")
-        blocked = ("" if in_draft else EDGE_NOT_ACCEPTED_TEXT if not accepted
+        blocked = ("" if in_draft
+                   else (EDGE_NOT_ACCEPTED_TEXT if draft_exists else EDGE_NOT_ACCEPTED_NO_DRAFT_TEXT) if not accepted
                    else EDGE_NO_DRAFT_TEXT if not draft_exists else "")
         if blocked:
             lines.append(f"  {blocked}")
     return lines
+
+
+#: 第 10 波（H54）: dismiss_locked のカードに［見送り…］が無いことのハーネスの注記（画面の文ではない）
+EDGE_DISMISS_LOCKED_HARNESS = "（このカードには［見送り…］が出ていない — 次版の下書きに入った採用は見送れない。カードの事実文を読む）"
+
+
+def edge_draft_create_lines(data: Any, retired: bool = False) -> list[str]:
+    """admin.js ``_edgeDraftCreateHtml``（IK-1044・第 7 波）: 下書きが無いときだけ事実文 1 行 +［現在の版から次版の
+    下書きを作る］（廃止済みの分野はボタン無効 + 理由の文）。下書きがあれば何も出さない。"""
+    if not isinstance(data, dict) or data.get("draft_exists"):
+        return []
+    note = EDGE_DRAFT_CREATE_RETIRED_NOTE if retired else EDGE_DRAFT_CREATE_NOTE
+    return [f"{note} [{EDGE_DRAFT_CREATE_BUTTON}]" + ("（押せない）" if retired else "")]
 
 
 def edges_lines(session: PersonaSession, budget: Optional[int] = None) -> list[str]:
@@ -837,25 +1013,34 @@ def edges_lines(session: PersonaSession, budget: Optional[int] = None) -> list[s
     if not isinstance(data, dict):
         return []
     filt = "オン" if session.scratch.get("atlas_edge_include_dismissed") else "オフ"
-    lines = [f"{EDGE_GROUP_TITLE}（見送り済みも表示: {filt}）", EDGE_GROUP_INTRO] + review_list_notes(data)
+    lines = [f"{EDGE_GROUP_TITLE}（見送り済みも表示: {filt}）", EDGE_GROUP_INTRO] + review_list_notes(data) \
+        + edge_draft_create_lines(data, bool(session.scratch.get("atlas_domain_retired")))
+    # 第 5 波（IK-0993）: 保存済みアンカーが無いときの index_note は一覧の上（候補ゼロのときも同じ位置）
+    if data.get("index_note"):
+        lines.append(str(data["index_note"]))
+    # 第 5 波（IK-0994）: 判断の結果文 result_line は区画の状態行に出したまま一覧を読み直す
+    if session.scratch.get("atlas_edge_result_line"):
+        lines.append(str(session.scratch.pop("atlas_edge_result_line")))
     cands = [c for c in (data.get("candidates") or []) if isinstance(c, dict)]
+    orphan_items = [i for i in (data.get("orphaned_decisions") or []) if isinstance(i, dict)]
+    shown_all_now = bool(session.scratch.pop("atlas_edge_renumber_pending", False))
+    had_numbers = bool(session.scratch.get("atlas_edge_numbers"))
+    numbers = display_numbers(session, "edge", cands + orphan_items, "edge_key")
+    if cands or orphan_items:
+        lines.append(CARD_NUMBER_NOTE)
     orphaned = edge_orphaned_lines(session, data)
     if not cands:
         return lines + [EDGE_EMPTY_TEXT] + review_empty_notes(data) + orphaned
-    if session.scratch.pop("atlas_edge_renumber_pending", False):
-        renumber_cards(session, "edge", cands + [i for i in (data.get("orphaned_decisions") or [])
-                                                 if isinstance(i, dict)], "edge_key")
-    numbers = card_numbers(session, "edge", cands, "edge_key")
     previous = session.scratch.get("atlas_edge_numbers_previous") or {}
     cards = []
     for c in cands:
         key = str(c.get("edge_key") or "")
         card = edge_card_lines(c, numbers.get(key, 0), bool(data.get("draft_exists")))
-        old = previous.get(key)
-        if old and old != numbers.get(key) and card:
-            card[0] = card[0] + f"（前の表示の番号 {old}）"
-        elif key in previous and old is None and card:
-            card[0] = card[0] + "（［すべて表示］で新しく出た候補）"
+        if card:
+            note = previous_number_note(session, "edge", key, numbers.get(key, 0))
+            if not note and shown_all_now and had_numbers and previous.get(key) is None:
+                note = "（［すべて表示］で新しく出た候補）"
+            card[0] += note
         cards.append((_edge_pair_label(c), card))
     # admin.js renderEdgeCandidates（IK-0887）: 近さだけの候補を畳んだ事実文 + [すべて表示]
     folded = [f"{data['folded_note']} [{EDGE_SHOW_ALL_BUTTON}]"] if data.get("folded_note") else []
@@ -876,6 +1061,8 @@ def edge_orphaned_lines(session: PersonaSession, data: Any) -> list[str]:
     lines = [EDGE_ORPHANED_TITLE]
     if data.get("orphaned_note"):
         lines.append(str(data["orphaned_note"]))
+    # 第 7 波（IK-1044）: 「採用済み・未反映」の区画にも、反映の前提となる下書きの入口
+    lines += edge_draft_create_lines(data, bool(session.scratch.get("atlas_domain_retired")))
     for item in items:
         decision = item.get("decision") if isinstance(item.get("decision"), dict) else {}
         lines.append(f"{numbers.get(str(item.get('edge_key') or ''), 0)}. {_edge_pair_label(item)}")
@@ -886,12 +1073,13 @@ def edge_orphaned_lines(session: PersonaSession, data: Any) -> list[str]:
         if item.get("basis_line"):
             lines.append(f"  {item['basis_line']}")
         if decision.get("review_note"):
-            lines.append(f"  判断のメモ: {decision['review_note']}")
-        for key in ("direction_line", "in_draft_note"):
+            lines.append(f"  {decision_note_head(decision)}: {decision['review_note']}")
+        for key in ("direction_line", "in_draft_note", "dismiss_locked_note"):  # 第 10 波（H54）: 見送れない理由
             if item.get(key):
                 lines.append(f"  {item[key]}")
         off = not draft_exists or bool(item.get("in_draft"))
-        lines.append(f"  ボタン: [見送り…] [次版の下書きへ反映…]{'（押せない）' if off else ''}")
+        dismiss = "" if item.get("dismiss_locked") else "[見送り…] "
+        lines.append(f"  ボタン: {dismiss}[次版の下書きへ反映…]{'（押せない）' if off else ''}")
     return lines
 
 
@@ -911,7 +1099,8 @@ def vector_lines(session: PersonaSession) -> list[str]:
     else:
         if data.get("skeleton_version"):
             lines.append(atlas_version_text(data["skeleton_version"]))
-        if data.get("stale"):
+        # 第 5 波（IK-0993・H33）: 凍結が裏で索引を作っている最中（building）は再構築を促す文を出さない
+        if data.get("stale") and not data.get("building"):
             lines.append(VECTOR_STALE_TEXT)
     if data.get("built_at_label"):
         lines.append(f"最後に作成: {data['built_at_label']}")
@@ -991,11 +1180,169 @@ def _open(ctx) -> None:
         return _fact(ctx, f"「{hint}」に合う分野が選択肢に無い。選択肢: {names or '（なし）'}", 200)
     if s.scratch.get("atlas_domain") != str(picked.get("domain_key") or ""):
         s.scratch["atlas_edge_show_all"] = False  # admin.js select.change: edgeShowAll = false
+        s.scratch["atlas_published_open"] = False  # 分野を切り替えると折りたたみは閉じた状態から
     s.scratch["atlas_domain"] = str(picked.get("domain_key") or "")
     s.scratch["atlas_domain_name"] = str(picked.get("domain_name") or picked.get("domain_key") or "")
+    s.scratch["atlas_domain_retired"] = str(picked.get("lifecycle") or "active") == "retired"  # domainLifecycles
     _load_state(ctx)
     # 製品の縦の並び: マップの区画（概要 → ベクトル索引 → 登録済みの別名）→ 修正報告の区画（ギャップ候補 → 関係の候補）
-    _tab_fact(ctx, overview_lines, vector_lines, aliases_lines, gaps_lines, edges_lines, status=200)
+    _tab_fact(ctx, overview_lines, vector_lines, aliases_lines, reports_lines, gaps_lines, edges_lines, status=200)
+
+
+REPORT_STATUS_LABELS = {"pending": "レビュー待ち", "accepted": "採用済み", "declined": "見送り", "merged": "重複統合"}
+#: 報告者の名前が無いときの JS の既定（ACCOUNT_NAME_UNREGISTERED_ACTOR・第 5 波 IK-0848 / IK-1007）
+REPORTER_UNREGISTERED = "名前を登録していない利用者"
+
+
+def reports_lines(session: PersonaSession) -> list[str]:
+    """admin.js renderReports（既定の絞り込み = レビュー待ち）。第 5 波（IK-0848 / IK-1007）: 報告者は
+    ``reporter_label``（本人が登録した名前・未登録は「名前を登録していない利用者」）。ハーネスで名前を作らない。"""
+    data = session.scratch.get("atlas_reports")
+    if not isinstance(data, dict):
+        return []
+    status_filter = str(session.scratch.get("atlas_report_filter") or "pending")
+    rows = [r for r in data.get("reports") or [] if isinstance(r, dict) and (not status_filter or r.get("status") == status_filter)]
+    lines = [f"修正報告（表示: {REPORT_STATUS_LABELS.get(status_filter, status_filter or 'すべて')}）:"]
+    if not rows:
+        return lines + ["該当する報告はありません。"]
+    for r in rows:
+        target = f"ノード {r['node_id']}" if r.get("node_id") else f"領域 {r.get('region_id') or ''}"
+        if r.get("node_label"):
+            target += f"（{r['node_label']}）"
+        label = REPORT_STATUS_LABELS.get(str(r.get("status")), str(r.get("status") or ""))
+        if r.get("status") == "accepted":
+            label = ("公開版に反映済み" if r.get("applied_version") else "次版で対応済み" if r.get("incorporated_at")
+                     else "採用・次版で対応待ち")
+        head = f"- {target} レベル{r.get('level') or ''} 骨格 {r.get('skeleton_version') or ''}"
+        if r.get("version_mismatch"):
+            head += f" 〔旧版（現行 {data.get('current_version') or '—'}）〕"
+        head += f" ［{label}］"
+        if (r.get("open_count_for_target") or 0) > 1:
+            head += f" 同一対象の未クローズ報告: {r['open_count_for_target']}件"
+        lines.append(head)
+        lines.append(f"  {r.get('report_text') or ''}")
+        created = str(r.get("created_at") or "")[:16].replace("T", " ")
+        lines.append(f"  報告者: {r.get('reporter_label') or r.get('reporter_name') or REPORTER_UNREGISTERED} ／ {created}")
+        for key, lead in (("resolution_note", "処理メモ: "), ("incorporation_note", "次版での対応: ")):
+            if r.get(key):
+                lines.append(f"  {lead}{r[key]}")
+        if r.get("status") == "pending":
+            lines.append("  ［採用（次版へ）］［見送り（理由つき）］［重複統合］")
+    return lines
+
+
+def _published_view(ctx) -> None:
+    """``#atlas-published-view`` の summary を開く（第 5 波・IK-0992）。下書きがあるときは出ない。"""
+    if not _need_domain(ctx):
+        return
+    s = ctx.session
+    _load_skeleton(ctx)
+    state = s.scratch.get("atlas_state") or {}
+    frozen = (state.get("frozen") or {}).get("skeleton") if isinstance(state.get("frozen"), dict) else None
+    if not frozen:
+        return _fact(ctx, harness_note("（公開中の版の折りたたみは表示されていない — この分野には公開中の版が無い）"), 200)
+    # 第 6 波: 下書きがある間も出る（見出しが変わるだけ）
+    s.scratch["atlas_published_open"] = True
+    _fact(ctx, "\n".join(published_view_lines(frozen, True, with_draft=isinstance(state.get("draft"), dict),
+                                               version=(state.get("frozen") or {}).get("version"))), 200)
+
+
+# 教材管理の行［⋯］→［位置づけ（分野マップ）…］（admin.js renderLandscapePlacements・第 5 波 IK-0995 で到達口として案内される）
+LANDSCAPE_EMPTY_NOTICE = "配置候補はまだありません。[AIで再提案] で生成できます。"
+LANDSCAPE_CORPUS_NOTICE = ("この一覧は解析パイプラインが生成した配置候補（AI推定）と、教員の確認結果です。"
+                           "確認していない候補も学習者には「AIによる推定（未確認）」として表示され、却下すると表示されなくなります。")
+LANDSCAPE_GAP_SIGNAL_NOTICE = "この分野の地図への候補として記録されています（分野の地図タブで確認できます）"
+LANDSCAPE_STATUS_FALLBACK = {"inferred": "AI推定（未確認）", "confirmed": "教員確認済み", "rejected": "却下",
+                             "review_required": "再検討中", "superseded": "再解析により置換"}
+LANDSCAPE_NODE_STATUS_LABELS = {"migrated": "前の版から対応づけ", "unmapped": "現行版に対応する場所なし"}
+LANDSCAPE_STATUS_ACTIONS = (("confirmed", "確認"), ("rejected", "却下"), ("review_required", "再検討"))
+
+
+def landscape_modal_lines(data: Any) -> list[str]:
+    """admin.js renderLandscapePlacements の写し（ドメイン別グループ → 行 → 置けなかった分野 → フッター）。
+    原文の引用は既定で閉じた折りたたみ。置けなかった分野の行は ``gap_topics``（第 5 波・IK-0995）を名前で添える。"""
+    data = data if isinstance(data, dict) else {}
+    placements = [p for p in data.get("placements") or [] if isinstance(p, dict)]
+    unplaced = [u for u in data.get("unplaced_domains") or [] if isinstance(u, dict)]
+    lines: list[str] = []
+    if not placements and not unplaced:
+        lines.append(LANDSCAPE_EMPTY_NOTICE)
+    groups: dict[str, dict] = {}
+    for p in placements:
+        key = str(p.get("domain_key") or "")
+        g = groups.setdefault(key, {"domain_key": key, "domain_name": p.get("domain_name") or key, "rows": []})
+        g["rows"].append(p)
+
+    def frozen_version(g: dict) -> str:
+        for d in data.get("domains") or []:
+            if isinstance(d, dict) and d.get("domain_key") == g["domain_key"]:
+                return str(d.get("frozen_version") or d.get("skeleton_version") or "")
+        for r in g["rows"]:
+            if r.get("skeleton_version"):
+                return str(r["skeleton_version"])
+        return ""
+
+    versions = []
+    for g in groups.values():
+        ver = frozen_version(g)
+        lines.append(f"{g['domain_name']}" + (f"（{atlas_version_text(ver)}）" if ver else ""))
+        if ver:
+            versions.append(f"{g['domain_name']} {atlas_version_text(ver)}")
+        for p in g["rows"]:
+            meta = " ・ ".join(str(x) for x in (p.get("perspective_label"), p.get("weight_label")) if x)
+            status = str(p.get("status") or "")
+            chip = str(p.get("status_label") or LANDSCAPE_STATUS_FALLBACK.get(status) or status or "不明")
+            node_chip = LANDSCAPE_NODE_STATUS_LABELS.get(str(p.get("node_status") or ""))
+            lines.append(f"- {p.get('node_label') or p.get('node_id') or ''}" + (f"（{meta}）" if meta else "")
+                         + f"［{chip}］" + (f"〔{node_chip}〕" if node_chip else ""))
+            if p.get("reason"):
+                lines.append("  " + (f"〔{p['reason_label']}〕" if p.get("reason_label") else "") + str(p["reason"]))
+                if p.get("reason_note"):
+                    lines.append(f"  {p['reason_note']}")
+            quotes = [e for e in p.get("evidence") or [] if isinstance(e, dict) and e.get("quote")]
+            lines.append("  ▸ 原文の引用を見る（折りたたみ・閉じている）" if quotes else "  原文の引用はありません")
+            if p.get("review_note"):
+                lines.append(f"  メモ: {p['review_note']}")
+            lines.append("  " + " ".join(f"[{lb}]" + ("（押せない — いまの状態）" if st == status else "")
+                                         for st, lb in LANDSCAPE_STATUS_ACTIONS))
+    if unplaced:
+        lines.append("配置できなかった分野")
+        for u in unplaced:
+            lines.append(f"- この論文は「{u.get('domain_name') or u.get('domain_key') or ''}」の地図に配置できませんでした: "
+                         f"{u.get('reason') or ''}")
+            if u.get("gap_signals_recorded"):
+                topics = [str(t) for t in u.get("gap_topics") or [] if t]
+                lines.append("  " + (f"置けなかった主題: {'、'.join(topics)}。" if topics else "") + LANDSCAPE_GAP_SIGNAL_NOTICE)
+    lines.append(LANDSCAPE_CORPUS_NOTICE)
+    facts = []
+    if data.get("last_run_at") or data.get("generated_at"):
+        facts.append(f"最終生成: {data.get('last_run_at') or data.get('generated_at')}")
+    if versions:
+        facts.append("使用した地図: " + " ・ ".join(versions))
+    if facts:
+        lines.append(" ・ ".join(facts))
+    return lines
+
+
+def _landscape_view(ctx) -> None:
+    """教材管理の行［⋯］→［位置づけ（分野マップ）…］のモーダルを読む（読むだけ。確認・却下・再提案はしない）。"""
+    from uxsim.runner.share_exec import pick_material  # 循環を避ける（share_exec は atlas_exec を import しない）
+    doc = str(ctx.args.get("document_id") or "").strip()
+    title = ""
+    if not doc:
+        st, body = _call(ctx, "GET", "/api/admin/materials")
+        rows = [m for m in body or [] if isinstance(m, dict)] if st == 200 and isinstance(body, list) else []
+        mat = pick_material(rows, ctx.args.get("material_hint"), ctx.args.get("format_hint"))
+        if mat is None or not mat.get("document_id"):
+            names = "、".join(str(m.get("title") or m.get("filename") or "") for m in rows[:12])
+            return _fact(ctx, f"「{ctx.args.get('material_hint') or ''}」に合う教材の行が無い。教材: {names or '（なし）'}", st)
+        doc = str(mat["document_id"])
+        title = str(mat.get("title") or mat.get("filename") or "")
+    status, body = ctx.main(overrides={"ref": doc, "document_id": doc})
+    if status != 200 or not isinstance(body, dict):
+        return _fact(ctx, f"位置づけ（分野マップ）を読み込めませんでした: {_detail(body) or f'HTTP {status}'}", status)
+    head = [f"位置づけ（分野マップ）— {title}" if title else "位置づけ（分野マップ）"]
+    _fact(ctx, "\n".join(head + landscape_modal_lines(body) + ["[AIで再提案] [閉じる]"]), status)
 
 
 def _gaps_list(ctx) -> None:
@@ -1027,6 +1374,8 @@ def _pick_gap(ctx, *, want: Optional[tuple[str, ...]] = None) -> Optional[dict]:
     hint = ctx.args.get("gap_hint")
     if want and not str(hint or "").strip():
         cands_w = [c for c in cands if str((c.get("decision") or {}).get("status") or "candidate") in want]
+        if want == ("accepted",):  # 取り込みは、まだ下書きに入っていない採用を先に（H25）
+            cands_w = [c for c in cands_w if unreflected(c)] or cands_w
         return cands_w[0] if cands_w else None
     numbers = card_numbers(ctx.session, "gap", cands, "cluster_key")
     return _hint_pick(cands, hint, ("proposed_label", "normalized_label", "parent_region_label"),
@@ -1135,7 +1484,7 @@ def _draft_from_frozen(ctx) -> None:
     # 第 25 周 H13: 製品のボタンは「採用済みのギャップ候補 ∧ 下書きなし」のときだけカードに出る（admin.js
     # renderGapCard の ``accepted && !draftExists``）。出ていないボタンの行為は行わない（HTTP を出さない）
     # 第 2 波: 候補の条件から外れた採用済みの判断（orphaned_decisions）のカードにも同じボタンが出る
-    shown = not bool(gaps.get("draft_exists")) and (any(
+    shown = not bool(gaps.get("draft_exists")) and not draft_known(s) and (any(
         isinstance(c, dict) and (c.get("decision") or {}).get("status") == "accepted"
         for c in gaps.get("candidates") or []) or bool(gaps.get("orphaned_decisions")))
     if not shown:
@@ -1149,6 +1498,32 @@ def _draft_from_frozen(ctx) -> None:
     _load_gaps(ctx)
     _load_edges(ctx)
     _tab_fact(ctx, overview_lines, gaps_lines, edges_lines, head=[confirm, "次版の下書きを作りました"], status=status)
+
+
+def _edge_draft_from_frozen(ctx) -> None:
+    """関係の区画の［現在の版から次版の下書きを作る］（IK-1044・第 7 波）。admin.js は gapCreateDraftFromFrozen を
+    setEdgesStatus で呼ぶ — 確認の文 → POST → 結果文は関係の区画の状態行（「次版の下書きを作りました」/
+    「下書きを作れませんでした: {detail}」）→ loadState。"""
+    if not _need_domain(ctx):
+        return
+    s = ctx.session
+    edges = s.scratch.get("atlas_edges") if isinstance(s.scratch.get("atlas_edges"), dict) else {}
+    if edges.get("draft_exists") or draft_known(s):
+        return ctx.missing("edge_draft_from_frozen_button")
+    if s.scratch.get("atlas_domain_retired"):
+        ctx.missing("edge_draft_from_frozen_disabled")
+        return _tab_fact(ctx, edges_lines, head=[f"（［{EDGE_DRAFT_CREATE_BUTTON}］は押せない: {EDGE_DRAFT_CREATE_RETIRED_NOTE}）"])
+    version = str(edges.get("skeleton_version") or (s.scratch.get("atlas_gaps") or {}).get("skeleton_version") or "")
+    confirm = f"（確認）現行版 {version} を複製して下書きを作ります。下書きは学習者には表示されません → OK"
+    status, body = ctx.main(overrides={"cartridge_id": _domain(ctx)})
+    if status is None or status >= 400:
+        s.scratch["atlas_edge_result_line"] = f"下書きを作れませんでした: {_detail(body) or f'HTTP {status}'}"
+        return _tab_fact(ctx, edges_lines, head=[confirm], status=status)
+    s.scratch["atlas_edge_result_line"] = "次版の下書きを作りました"
+    _load_skeleton(ctx)
+    _load_gaps(ctx)
+    _load_edges(ctx)
+    _tab_fact(ctx, overview_lines, gaps_lines, edges_lines, head=[confirm], status=status)
 
 
 def _issue_text(issue: Any) -> str:
@@ -1310,6 +1685,10 @@ def _pick_edge(ctx, *, want: Optional[tuple[str, ...]] = None) -> Optional[dict]
     hint = ctx.args.get("edge_hint")
     if want and not str(hint or "").strip():
         cw = [c for c in cands if str((c.get("decision") or {}).get("status") or "candidate") in want]
+        if want == ("accepted",):  # 反映は、まだ下書きに入っていない採用を先に（H25）
+            cw = [c for c in cw if unreflected(c)] or cw
+        if want == ("candidate", "accepted"):  # 第 10 波（H54）: 見送りの手の候補から dismiss_locked のカードを外す
+            cw = [c for c in cw if not c.get("dismiss_locked")]
         return cw[0] if cw else None
     numbers = card_numbers(ctx.session, "edge", cands, "edge_key")
     h = re.sub(r"\s*[—–]\s*|\s+-\s+", "—", str(hint or "").strip()).casefold()
@@ -1335,6 +1714,10 @@ def _decide_edge(action: str, want: tuple[str, ...]) -> Callable[[Any], None]:
         if action != "restore" and status_now == "dismissed":
             ctx.missing("edge_not_dismissed")
             return _tab_fact(ctx, edges_lines, head=[harness_note("（見送り済みの関係には[見送りから戻す]しか出ていない）")])
+        if action == "dismiss" and picked.get("dismiss_locked"):
+            # 第 10 波（H54）: 下書きに入った採用のカードには［見送り…］が出ない（画面の文は dismiss_locked_note）
+            ctx.missing("edge_dismiss_locked")
+            return _tab_fact(ctx, edges_lines, head=[harness_note(EDGE_DISMISS_LOCKED_HARNESS)])
         payload = {"edge_key": str(picked.get("edge_key") or ""), "action": action, "review_note": ""}
         edge_head: list[str] = []
         if action == "accept":
@@ -1345,6 +1728,12 @@ def _decide_edge(action: str, want: tuple[str, ...]) -> Callable[[Any], None]:
                 ctx.missing("kind")
                 return _tab_fact(ctx, edges_lines, head=[EDGE_KIND_REQUIRED])
             payload["kind"] = kind
+            # admin.js edgeDecide（第 4 波・IK-0962）: 採用のときは候補カードの origins から出所を送る（共起を優先）
+            origins = [str(o) for o in picked.get("origins") or []]
+            if "co_occurrence" in origins:
+                payload["origin"] = "co_occurrence"
+            elif "vector" in origins:
+                payload["origin"] = "vector"
             # admin.js handleEdgeAction（第 3 波・IK-0939）: 種類の後に prompt「採用のメモ（任意）…」→ review_note
             memo = str(ctx.args.get("memo") or "").strip()
             payload["review_note"] = memo
@@ -1358,6 +1747,8 @@ def _decide_edge(action: str, want: tuple[str, ...]) -> Callable[[Any], None]:
             payload["review_note"] = note
         status, body = _call(ctx, "POST", _CART + "/edge-candidates/decide", json=payload)
         if status is not None and status < 400:
+            if isinstance(body, dict) and body.get("result_line"):
+                ctx.session.scratch["atlas_edge_result_line"] = str(body["result_line"])
             _load_edges(ctx)
             return _tab_fact(ctx, edges_lines, head=edge_head or None, status=status)
         _tab_fact(ctx, edges_lines, head=edge_head + [f"処理に失敗しました: {_detail(body) or f'HTTP {status}'}"],
@@ -1405,6 +1796,10 @@ def _edge_preview_fact(ctx, key: str, picked: Optional[dict], status: Optional[i
     lines = [f"つなぐ項目: {pair}"]
     if preview.get("kind"):
         lines.append(f"関係の種類: {EDGE_KIND_LABELS.get(str(preview['kind']), preview['kind'])}")
+    # 第 7 波（IK-1047）: 依存の向き（preview.direction_line・無ければ候補の direction_line）を種類の直後に
+    direction = preview.get("direction_line") or (picked or {}).get("direction_line")
+    if direction:
+        lines.append(str(direction))
     lines += [f"検証: {_issue_text(w)}" for w in validation.get("warnings") or [] if _issue_text(w)]
     errors = [_issue_text(e) for e in validation.get("errors") or [] if _issue_text(e)]
     if errors or not preview.get("patched_draft"):
@@ -1441,6 +1836,8 @@ def vector_refresh_fact(summary: dict) -> str:
     """admin.js vectorRefreshFactText。"""
     if summary.get("status") == "skipped":
         reason = summary.get("skipped_reason")
+        if summary.get("fact"):  # 第 5 波（IK-0993）: 構築中のスキップ等、サーバの事実文があればそれ
+            return str(summary["fact"])
         if reason == "daily_call_limit_reached":
             return VECTOR_LIMIT_TEXT
         if reason == "no_frozen_skeleton":
@@ -1603,6 +2000,13 @@ def _freeze_gates(ctx, version: str) -> Optional[tuple[dict, list[dict]]]:
     return draft, reports
 
 
+def freeze_check_title(version: Any) -> str:
+    """凍結の確認モーダルの見出し（admin.js openFreezeChecklist・IK-0942 残り・第 5 波）。
+    旧「分野の地図骨格を公開前チェック」。"""
+    v = atlas_version_text(version)
+    return (v + " を公開する前の確認") if v else "を公開する前の確認"
+
+
 def _freeze_impact(ctx) -> None:
     """[公開（凍結）] → 影響のモーダル（影響があるとき）か公開前チェック（無いとき）を読んで[キャンセル]する。
 
@@ -1628,13 +2032,16 @@ def _freeze_impact(ctx) -> None:
                         "ready": None if readiness is None else readiness.get("ready") is not False})
     cancel = "（この操作ではキャンセルして凍結しない）"
     s.scratch["atlas_freeze_blocked"] = freeze_blocked(impact)
+    s.scratch["atlas_freeze_blocker"] = first_freeze_blocker(impact)
+    if isinstance(impact.get("readiness"), dict):
+        s.scratch.setdefault("until_flags", {})["freeze_ready"] = not freeze_blocked(impact)
     if freeze_blocked(impact):
         return _fact(ctx, "\n".join(freeze_blocked_lines(impact)), status)
     if _impact_modal_shown(impact):
         lines = ["凍結の影響"] + impact_lines(s, impact) + ["凍結しますか？", "[キャンセル] [続ける]" + cancel]
     else:
         # 影響の取得に失敗したときも、製品は公開前チェックへ進む（プレビューが無くても凍結は止めない）
-        lines = ["分野の地図骨格を公開前チェック"] + freeze_check_lines(version, draft, reports, impact) \
+        lines = [freeze_check_title(version)] + freeze_check_lines(version, draft, reports, impact) \
             + ["[キャンセル] [公開する]" + cancel]
     _fact(ctx, "\n".join(lines), status)
 
@@ -1679,6 +2086,7 @@ def _freeze(ctx) -> None:
     if freeze_blocked(impact):
         # admin.js（IK-0885）: 止める条件があれば[公開する]へ進ませない（押してから 409 で止めない）
         s.scratch["atlas_freeze_blocked"] = True
+        s.scratch["atlas_freeze_blocker"] = first_freeze_blocker(impact)
         ctx.missing("freeze_ready")
         return _fact(ctx, "\n".join(freeze_blocked_lines(impact)), st_i)
     id_migrations = _pick_id_migrations(impact, ctx.args.get("correspondence"))
@@ -1690,7 +2098,7 @@ def _freeze(ctx) -> None:
     head = (["凍結の影響（確認）:"] + impact_lines(s, impact)) if _impact_modal_shown(impact) else []
     if id_migrations:
         head.append("チェックした対応: " + "、".join(f"{m['from']} → {m['to']}" for m in id_migrations))
-    head += ["分野の地図骨格を公開前チェック:"] + check + ["[公開する]"]
+    head += [freeze_check_title(version) + ":"] + check + ["[公開する]"]
     if status is None or status >= 400:
         detail = body.get("detail") if isinstance(body, dict) else None
         if isinstance(detail, dict) and detail.get("pending_labels"):
@@ -1703,9 +2111,11 @@ def _freeze(ctx) -> None:
     _annotate(ctx, {"kind": "freeze", "version": version, "id_migrations": len(id_migrations)})
     _runner_note(s, "runner: 凍結の後、製品はベクトル索引の構築を裏で始める（embedding の従量・best-effort）")
     _load_state(ctx)
-    lines = head + [f"{atlas_version_text(version)} を学習者向けに公開しました。{GAP_FREEZE_REANALYSIS_TEXT}", ""] \
-        + overview_lines(s)
-    _fact(ctx, "\n".join(lines), status)
+    # 第 25 周第 5 周 H33: 凍結の後、画面（loadState）は索引・候補・関係の候補も読み直して描く。admin.atlas.open と
+    # 同じ区画の並びで投影する（凍結直後の「索引は前の版のまま」・関係の候補の空がペルソナに見えなかった）
+    _tab_fact(ctx, overview_lines, vector_lines, aliases_lines, gaps_lines, edges_lines,
+              head=head + [f"{atlas_version_text(version)} を学習者向けに公開しました。{GAP_FREEZE_REANALYSIS_TEXT}"],
+              status=status)
 
 
 def _freeze_blocked_goto(ctx) -> None:
@@ -1718,8 +2128,38 @@ def _freeze_blocked_goto(ctx) -> None:
     s.scratch["atlas_freeze_blocked"] = False
     _load_gaps(ctx)
     _load_edges(ctx)
-    _tab_fact(ctx, gaps_lines, edges_lines, head=[f"（[{FREEZE_BLOCKED_GOTO}] — 凍結の影響を閉じて候補の区画へ移った）"],
-              status=200)
+    head = freeze_blocker_goto_line(s, s.scratch.pop("atlas_freeze_blocker", None))
+    _tab_fact(ctx, gaps_lines, edges_lines, head=[head], status=200)
+
+
+def first_freeze_blocker(impact: dict) -> Optional[dict]:
+    """admin.js scrollToFreezeBlocker: readiness.pending_items のうち ``target_key`` を持つ先頭（第 6 波・IK-1019）。
+    target_key は内部の番地なので画面には写さない（カードの照合にだけ使う）。"""
+    readiness = impact.get("readiness") if isinstance(impact.get("readiness"), dict) else {}
+    for item in readiness.get("pending_items") or []:
+        if isinstance(item, dict) and item.get("target_key"):
+            return {"kind": str(item.get("kind") or ""), "label": str(item.get("label") or ""),
+                    "target_key": str(item["target_key"])}
+    return None
+
+
+def freeze_blocker_goto_line(session: PersonaSession, blocker: Optional[dict]) -> str:
+    """［止めている候補を見る］の行き先（admin.js scrollToFreezeBlocker）: 先頭の止めている候補のカード
+    （``data-edge-key`` / ``data-cluster-key`` が target_key と一致）→ そのグループ → 区画の先頭。"""
+    lead = f"（[{FREEZE_BLOCKED_GOTO}] — 凍結の影響を閉じて"
+    if not blocker:
+        return lead + "候補の区画へ移った）"
+    is_edge = blocker.get("kind") == "edge"
+    kind = "edge" if is_edge else "gap"
+    key_field = "edge_key" if is_edge else "cluster_key"
+    group = EDGE_GROUP_TITLE if is_edge else GAP_GROUP_TITLE
+    rows = (_list_rows(session, kind) or []) + (_list_rows(session, kind, "orphaned_decisions") or [])
+    card = any(str(r.get(key_field) or "") == blocker.get("target_key") for r in rows)
+    if card:
+        return lead + f"「{group}」の「{blocker.get('label') or ''}」のカードへ移った（カードの枠をしばらく強調））"
+    if _list_rows(session, kind) is not None:
+        return lead + f"「{group}」のグループへ移った）"
+    return lead + "候補の区画へ移った）"
 
 
 def _edges_show_all(ctx) -> None:
@@ -1750,6 +2190,35 @@ def _pick_orphan(ctx, kind: str) -> Optional[dict]:
     return _hint_pick(items, hint, labels, numbers, key_field)
 
 
+def _route_to_normal(ctx, kind: str) -> bool:
+    """外れた枠の［取り込む／反映…］を選んだが、指した判断が外れた枠に無いとき、通常の候補一覧の
+    採用済み・未反映へ回す（第 25 周 H25 — H20 の逆向き）。
+
+    凍結を止めている採用が、いまも導出されて通常の一覧の先頭帯にあるとき（製品はそこに［次版の下書きへ反映…］を
+    出し、凍結の影響もその区画を名指す）、頭脳が「外れた枠」の手を選んでも同じ採用を指せるようにする。
+    hint がその候補の番号・名前ならそれを、空か外れた枠向けの番号なら最初の採用済み・未反映を選ぶ。回したことは
+    runner_note に残す。回す先が無ければ偽（従来どおり「指した判断が無い」）。
+    """
+    s = ctx.session
+    pending = pending_unreflected(s, kind, where="candidates")
+    if not pending:
+        return False
+    key_field, hint_key = ("cluster_key", "gap_hint") if kind == "gap" else ("edge_key", "edge_hint")
+    numbers = s.scratch.get(f"atlas_{kind}_numbers") or {}
+    hint = str(ctx.args.get(hint_key) or "").strip()
+    labels = ("proposed_label",) if kind == "gap" else ("from_label", "to_label")
+    hit = _hint_pick(pending, hint, labels, numbers, key_field) if hint else None
+    target = hit or pending[0]
+    ctx.args[hint_key] = str(numbers.get(str(target.get(key_field) or ""), "")) or (
+        str(target.get("proposed_label") or "") if kind == "gap" else _edge_pair_label(target))
+    title = GAP_GROUP_TITLE if kind == "gap" else EDGE_GROUP_TITLE
+    name = str(target.get("proposed_label") or "") if kind == "gap" else _edge_pair_label(target)
+    button = "［次版の下書きに取り込む…］" if kind == "gap" else "［次版の下書きへ反映…］"
+    _runner_note(s, harness_note(f"「{name}」は外れた枠ではなく「{title}」の一覧に採用済み・未反映として出ている。"
+                                 f"その一覧の{button}として実行した"))
+    return True
+
+
 def _gap_orphan_restore(ctx) -> None:
     """admin.js _gapOrphanedHtml [候補へ戻す] → gapDecide(restore)（判断を未判断へ・行は消さない）。"""
     if not _need_domain(ctx):
@@ -1772,6 +2241,8 @@ def _gap_orphan_incorporate(ctx) -> None:
     s = ctx.session
     item = _pick_orphan(ctx, "gap")
     data = s.scratch.get("atlas_gaps") or {}
+    if item is None and _route_to_normal(ctx, "gap"):
+        return _gap_incorporate_preview(ctx)
     if item is None:
         ctx.missing("gap_orphaned")
         return _tab_fact(ctx, gaps_lines, head=[harness_note(f"（「{GAP_ORPHANED_TITLE}」に指した判断が無い）")])
@@ -1792,6 +2263,9 @@ def _edge_orphan_dismiss(ctx) -> None:
     if item is None:
         ctx.missing("edge_orphaned")
         return _tab_fact(ctx, edges_lines, head=[harness_note(f"（「{EDGE_ORPHANED_TITLE}」に指した関係が無い）")])
+    if item.get("dismiss_locked"):
+        ctx.missing("edge_dismiss_locked")  # 第 10 波（H54）
+        return _tab_fact(ctx, edges_lines, head=[harness_note(EDGE_DISMISS_LOCKED_HARNESS)])
     note = str(ctx.args.get("reason") or "")
     if not note.strip():
         ctx.missing("reason")
@@ -1800,6 +2274,8 @@ def _edge_orphan_dismiss(ctx) -> None:
     status, body = _call(ctx, "POST", _CART + "/edge-candidates/decide",
                          json={"edge_key": str(item.get("edge_key") or ""), "action": "dismiss", "review_note": note})
     if status is not None and status < 400:
+        if isinstance(body, dict) and body.get("result_line"):
+            ctx.session.scratch["atlas_edge_result_line"] = str(body["result_line"])
         _load_edges(ctx)
         return _tab_fact(ctx, edges_lines, status=status)
     _tab_fact(ctx, edges_lines, head=[f"処理に失敗しました: {_detail(body) or f'HTTP {status}'}"], status=status)
@@ -1813,6 +2289,8 @@ def _edge_orphan_incorporate(ctx) -> None:
     s = ctx.session
     item = _pick_orphan(ctx, "edge")
     data = s.scratch.get("atlas_edges") or {}
+    if item is None and _route_to_normal(ctx, "edge"):
+        return _edge_incorporate_preview(ctx)
     if item is None:
         ctx.missing("edge_orphaned")
         return _tab_fact(ctx, edges_lines, head=[harness_note(f"（「{EDGE_ORPHANED_TITLE}」に指した関係が無い）")])
@@ -1827,8 +2305,11 @@ def _edge_orphan_incorporate(ctx) -> None:
 # ---------------------------------------------------------------------------
 # 学生
 # ---------------------------------------------------------------------------
-def threads_lines(atlas: dict) -> list[str]:
-    """atlas-threads-layer.js threadsData / factText（available !== true ならトグルごと出さない）。"""
+def threads_lines(atlas: dict, drawn: Optional[set] = None, names: Optional[dict] = None) -> list[str]:
+    """atlas-threads-layer.js threadsData / factText（available !== true ならトグルごと出さない）。
+
+    第 25 周第 5 周 H32: ``drawn``（``levels["2"].nodes`` の id）を渡すと、両端が描かれる糸だけを点線として並べ、端が
+    描かれない糸はサーバの ``threads.undrawn_note``（無ければ ``L2_UNDRAWN_NOTE``）の下に分ける。"""
     threads = atlas.get("threads") if isinstance(atlas.get("threads"), dict) else None
     if not threads or threads.get("available") is not True or not threads.get("items"):
         lines = ["推定の糸: （切り替えが出ていない）"]
@@ -1839,11 +2320,41 @@ def threads_lines(atlas: dict) -> list[str]:
     version = str(threads.get("skeleton_version") or "")
     fact = THREADS_PROVENANCE_TEXT + (f"・{atlas_version_text(version)}" if version else "")
     lines = [f"[☐ 推定の糸] をオンにした: 点線の糸（{fact}）"]
+    hidden = []
     for it in threads.get("items") or []:
         if isinstance(it, dict):
             near = f"（{it['nearness_label']}）" if it.get("nearness_label") else ""
-            lines.append(f"- {it.get('from_label') or ''} ⋯ {it.get('to_label') or ''}{near}")
+            row = f"- {it.get('from_label') or ''} ⋯ {it.get('to_label') or ''}{near}"
+            if drawn is not None and not (str(it.get("from") or "") in drawn and str(it.get("to") or "") in drawn):
+                hidden.append(row)
+                continue
+            lines.append(row)
+    if drawn is not None and len(lines) == 1:
+        lines.append("（両端が描かれている糸は無い — 画面に点線は出ない）")
+    if hidden:
+        # 画面は糸の事実行の下に .threads-undrawn（サーバの undrawn_note）。無ければハーネスの印
+        lines.append(str(threads.get("undrawn_note") or L2_UNDRAWN_NOTE))
+        lines += hidden
+    elif drawn is not None and threads.get("undrawn_note"):
+        lines.append(str(threads["undrawn_note"]))
+    # 第 4 波（IK-0887）: 事実行の下に「糸ごとの根拠」の折りたたみ（items[].basis_line の素通し・atlas-threads-layer.js）
+    bases = [str(it["basis_line"]) for it in threads.get("items") or [] if isinstance(it, dict) and it.get("basis_line")]
+    if bases:
+        lines.append("▸ 糸ごとの根拠（折りたたみ — 開いた中身）:")
+        lines += [f"  {b}" for b in bases]
     return lines
+
+
+def placement_reason_lines(p: dict, indent: str = "") -> list[str]:
+    """第 4 波（IK-0967）: 配置の理由は「〔AIの要約〕理由」（``reason_label``）、その下に ``reason_note``（理由の固有の語が
+    引用に無いときだけ）。app.js / landscape-layer.js / admin.js / admin-release-review.js が同じ順で描く。"""
+    if not p.get("reason"):
+        return []
+    label = f"〔{p['reason_label']}〕" if p.get("reason_label") else ""
+    out = [f"{indent}{label}{p['reason']}"]
+    if p.get("reason_note"):
+        out.append(f"{indent}{p['reason_note']}")
+    return out
 
 
 def placement_layer_lines(landscape: Any) -> list[str]:
@@ -1877,11 +2388,12 @@ def placement_layer_lines(landscape: Any) -> list[str]:
                 bits = "・".join(x for x in (p.get("perspective_label"), p.get("weight_label")) if x)
                 prov = f"〔{p['provenance_label']}〕" if p.get("provenance_label") else ""
                 lines.append(f"    {title}（{bits}）{prov}")
-                if p.get("reason"):
-                    lines.append(f"      {p['reason']}")
+                lines += placement_reason_lines(p, "      ")
                 for ev in p.get("evidence") or []:
                     if isinstance(ev, dict) and ev.get("quote"):
                         lines.append(f"      「{ev['quote']}」")
+                        if ev.get("source_label"):  # 第 4 波（IK-0677）: 引用の出所の印
+                            lines.append(f"      {ev['source_label']}")
     seen: list[str] = []
     for dom in landscape.get("domains") or []:
         for f in (dom or {}).get("facts") or [] if isinstance(dom, dict) else []:
@@ -1941,12 +2453,14 @@ def paper_placement_section_lines(data: Any) -> list[str]:
             chip = str(p.get("node_label") or p.get("node_id") or "") + (f"（{bits}）" if bits else "")
             prov = f" 〔{p['provenance_label']}〕" if p.get("provenance_label") else ""
             lines.append(f"  - {chip}{prov}")
-            quotes = [ev["quote"] for ev in p.get("evidence") or [] if isinstance(ev, dict) and ev.get("quote")]
-            if p.get("reason") or quotes:
+            evs = [ev for ev in p.get("evidence") or [] if isinstance(ev, dict) and ev.get("quote")]
+            if p.get("reason") or evs:
                 lines.append("    ［根拠を見る］を開いた:")
-                if p.get("reason"):
-                    lines.append(f"      {p['reason']}")
-                lines += [f"      「{q}」" for q in quotes]
+                lines += placement_reason_lines(p, "      ")
+                for ev in evs:
+                    lines.append(f"      「{ev['quote']}」")
+                    if ev.get("source_label"):  # 第 4 波（IK-0677）: 引用の出所の印
+                        lines.append(f"      {ev['source_label']}")
     version = _paper_placement_version(data)
     if version:
         for doc in data.get("unplaced_documents") or []:
@@ -1963,8 +2477,68 @@ def paper_placement_section_lines(data: Any) -> list[str]:
 
 
 OVERLAY_LEGEND = ("原文に裏付け", "解釈が分かれる", "暗黙の前提・行間（AIが補完）", "論文未投入の地形")
+
 OVERLAY_L1_REGIONS = 12  # atlas-overlay.js LIMITS.l1Regions
 OVERLAY_L1_CONCEPTS = 6  # atlas-overlay.js LIMITS.l1ConceptsPerRegion
+
+#: 端点が L2 に描かれない糸の印（ハーネスの注記 — サーバの undrawn_note が無いときだけ使う）
+L2_UNDRAWN_NOTE = "（ハーネス: 以下の糸は端が L2 に描かれていないので画面に線が無い。これは画面の文ではない）"
+
+
+def l2_drawn(atlas: Any) -> tuple[list[dict], set[str], dict[str, str]]:
+    """L2 で描かれる概念・その id の集合・id → 名前（第 25 周第 5 周 H32）。
+
+    面 C の是正（IK-0989）で L2 の代表選出はサーバ（``routes/atlas_view.py::select_l2_concept_ids``）へ移り、
+    ``levels["2"].nodes`` / ``edges`` が描く範囲そのもの。投影は製品の描画上限（JS の LIMITS）をミラーせず DTO をそのまま読む。"""
+    levels = atlas.get("levels") if isinstance(atlas, dict) and isinstance(atlas.get("levels"), dict) else {}
+    l2 = levels.get("2") if isinstance(levels.get("2"), dict) else {}
+    info = atlas.get("nodes") if isinstance(atlas, dict) and isinstance(atlas.get("nodes"), dict) else {}
+    nodes = [n for n in l2.get("nodes") or [] if isinstance(n, dict)]
+    ids = {str(n.get("id") or "") for n in nodes if n.get("id")}
+    names: dict[str, str] = {}
+    for n in l2.get("nodes") or []:
+        if isinstance(n, dict) and n.get("id"):
+            nid = str(n["id"])
+            meta = info.get(nid) if isinstance(info.get(nid), dict) else {}
+            names[nid] = str(n.get("label") or meta.get("label") or nid)
+    for nid, meta in info.items():
+        if isinstance(meta, dict) and meta.get("label"):
+            names.setdefault(str(nid), str(meta["label"]))
+    return nodes, ids, names
+
+
+def l2_lines(atlas: Any) -> list[str]:
+    """L2（コースレベル）の描画の文字版: 描かれる概念・実線の関係（両端が描かれる ``levels["2"].edges``）・
+    サーバの ``omitted_note``（画面の層の事実文・IK-0989）。"""
+    nodes, ids, names = l2_drawn(atlas)
+    levels = atlas.get("levels") if isinstance(atlas, dict) and isinstance(atlas.get("levels"), dict) else {}
+    l2 = levels.get("2") if isinstance(levels.get("2"), dict) else {}
+    lines = []
+    labels = [names.get(str(n.get("id") or ""), "") for n in nodes]
+    if labels:
+        lines.append("地図の概念（描かれている）: " + "、".join(x for x in labels if x))
+    # 第 9 波（sync_keys_wave9 面 C・IK-1072）: directed_edges に含まれる組だけ矢じり（向き「A → B（依存）」）
+    directed = {(str(d[0]), str(d[1])) for d in l2.get("directed_edges") or []
+                if isinstance(d, (list, tuple)) and len(d) >= 2}
+    edges = []
+    for e in l2.get("edges") or []:
+        if isinstance(e, (list, tuple)) and len(e) >= 2 and str(e[0]) in ids and str(e[1]) in ids:
+            a, b = names.get(str(e[0]), str(e[0])), names.get(str(e[1]), str(e[1]))
+            edges.append(f"関係（実線）: {a} → {b}（依存）" if (str(e[0]), str(e[1])) in directed
+                         else f"関係（実線）: {a} — {b}")
+    lines += edges or ["関係（実線）: （描かれている概念どうしの関係の線は無い）"]
+    note = level_note_text(l2)
+    if note:
+        lines.append(note)
+    return lines
+
+
+def level_note_text(level_data: Any) -> str:
+    """atlas-overlay.js ``#atlas-level-note``（第 9 波・IK-1072 / IK-1073）: ``now_note → omitted_note → relations_note``
+    を空白で結んだ 1 行（文はサーバ）。無ければ空。"""
+    if not isinstance(level_data, dict):
+        return ""
+    return " ".join(str(level_data[k]) for k in ("now_note", "omitted_note", "relations_note") if level_data.get(k))
 
 
 def overlay_l1_lines(atlas: Any) -> list[str]:
@@ -1978,7 +2552,7 @@ def overlay_l1_lines(atlas: Any) -> list[str]:
         return ["（分野の地図が開かなかった）"]
     info = atlas.get("nodes") if isinstance(atlas.get("nodes"), dict) else {}
     l1 = ((atlas.get("levels") or {}).get("1") or {}) if isinstance(atlas.get("levels"), dict) else {}
-    head = "・".join(str(x) for x in (atlas.get("domain_name"), f"骨格 版 {atlas['skeleton_version']}"
+    head = "・".join(str(x) for x in (atlas.get("domain_name"), f"{ATLAS_VERSION_PREFIX}{atlas['skeleton_version']}"
                                        if atlas.get("skeleton_version") else "", atlas.get("provenance")) if x)
     lines = [f"分野の地図（{head}）" if head else "分野の地図", "凡例: " + " / ".join(OVERLAY_LEGEND)]
     if l1.get("svgDesc"):
@@ -2013,6 +2587,10 @@ def overlay_l1_lines(atlas: Any) -> list[str]:
     if notes:
         lines.append("（概念を選ぶと右のパネルに出る説明）")
         lines += [f"  {pill}: {note}" for pill, note in notes.items()]
+    # 第 9 波（sync_keys_wave9 面 C・IK-1073）: L1 の事実文の行（いまここの不在 now_note など）
+    note = level_note_text(l1)
+    if note:
+        lines.append(note)
     return lines
 
 
@@ -2028,7 +2606,7 @@ def _atlas_view(ctx) -> None:
     _fact(ctx, "\n".join(overlay_l1_lines(atlas)), status)
 
 
-PANEL_VERIFY_FALLBACK = "台帳の記帳情報がありません。"  # atlas-panel.js renderPanel
+PANEL_VERIFY_FALLBACK = "検証の記録がありません。"  # atlas-panel.js renderPanel
 PANEL_ACTIONS = (("learn", "ここから学ぶ ↗", False), ("evid", "根拠を見る ↗", False),
                  ("mind", "気になる ↗", True), ("report", "修正を報告", True))  # atlas-panel.js ACTIONS
 
@@ -2079,6 +2657,12 @@ def panel_lines(atlas: dict, node_id: str) -> list[str]:
         lines.append(str(meta["pill_note"]))
     lines.append(str(meta.get("verify") or PANEL_VERIFY_FALLBACK))
     lines.append(str(meta.get("endorse") or "—"))
+    if meta.get("relations"):
+        # 第 9 波（sync_keys_wave9 面 C）: 確定済みの関係（atlas-panel.js p.atlas-panel-relations・承認の行の下）
+        lines.append(str(meta["relations"]))
+    if meta.get("papers"):
+        # 第 10 波（sync_keys_wave10 面 C）: ここに置かれたこのコースの論文（atlas-panel.js p.atlas-panel-papers・関係の行の下）
+        lines.append(str(meta["papers"]))
     buttons = [f"[{label}]" for key, label, always in PANEL_ACTIONS if always or meta.get(key)]
     lines.append("ボタン: " + " ".join(buttons))
     return lines
@@ -2099,7 +2683,21 @@ def _atlas_select(ctx) -> None:
         ctx.missing("atlas_node")
         return _fact(ctx, "\n".join(overlay_l1_lines(atlas) + [harness_note("（指した名前の領域・概念が地図に無い）")]),
                      status)
-    _fact(ctx, "\n".join(overlay_l1_lines(atlas) + ["", "右のパネル:"] + panel_lines(atlas, nid)), status)
+    # 第 4 波（IK-0907）: app.js の "atlas:nodeselect" の受け手は AtlasOverlay.data.nodes[node_id] の名前と状態を
+    # 控え、次のチャットの screen_context.view に載せる（領域など nodes に無い id は控えない）
+    nodes = atlas.get("nodes") if isinstance(atlas.get("nodes"), dict) else {}
+    info = nodes.get(nid) if isinstance(nodes.get(nid), dict) else None
+    if info and info.get("label"):
+        ctx.session.scratch["atlas_last_node"] = {"label": str(info["label"]), "status": str(info.get("status") or ""),
+                                                  "ledger_status": str(info.get("ledger_status") or ""),
+                                                  # 第 6 波（IK-1031）: app.js は detail.node_id も控えて view.atlas_node_id で送る
+                                                  "node_id": str(nid)}
+        # 第 10 波（FD-note 4）: 選んだ直後の 1 往復だけ selection.atlas_node_id（app.js state.atlasNodeFreshForTurn）
+        ctx.session.scratch["atlas_node_fresh"] = True
+    ctx.session.scratch.pop("personal_map_view", None)  # 分野の地図（モーダル）を開くのはわたしの地図を閉じた後
+    # 第 9 波（atlas H48）: L2 で選んだときは L2 のキャンバスのまま右のパネルが開く（製品の atlas-overlay.js）— L1 に戻さない
+    canvas = l2_map_lines(atlas) if _select_level(ctx.args.get("level")) == 2 else overlay_l1_lines(atlas)
+    _fact(ctx, "\n".join(canvas + ["", "右のパネル:"] + panel_lines(atlas, nid)), status)
 
 
 def _atlas_digest(atlas: dict) -> dict:
@@ -2136,6 +2734,30 @@ def _landscape_digest(landscape: dict) -> dict:
     }
 
 
+def l2_map_lines(atlas: dict) -> list[str]:
+    """L2 のキャンバスの文字版（見出し・パンくず・描かれる概念と実線・推定の糸）。``learning.atlas.layers`` と
+    ``learning.atlas.select_node``（level 2 — 第 9 波・atlas H48）が共有する。"""
+    # 第 4 波（IK-0942）: オーバーレイのフッターは「地図 版 X / provenance」（旧「骨格 X」）
+    lines = [f"分野の地図（{atlas.get('domain_name') or ''}・{ATLAS_VERSION_PREFIX}{atlas.get('skeleton_version') or ''}・"
+             f"{atlas.get('provenance') or ''}）"]
+    crumbs = (atlas.get("crumbs") or {}).get("2") if isinstance(atlas.get("crumbs"), dict) else ""
+    if crumbs:
+        lines.append(str(crumbs))
+    # 第 25 周第 5 周 H32: 製品の描く範囲（levels["2"] の nodes / edges・omitted_note・threads.undrawn_note）に揃える
+    _nodes, drawn, names = l2_drawn(atlas)
+    lines += l2_lines(atlas)
+    lines.append("")
+    lines += threads_lines(atlas, drawn=drawn, names=names)
+    return lines
+
+
+def _select_level(raw: Any) -> int:
+    try:
+        return 2 if int(str(raw or 1).strip()) == 2 else 1
+    except ValueError:
+        return 2 if "2" in str(raw) or "L2" in str(raw).upper() else 1
+
+
 def _atlas_layers(ctx) -> None:
     s = ctx.session
     if not s.course_id:
@@ -2146,17 +2768,7 @@ def _atlas_layers(ctx) -> None:
     if status != 200 or not isinstance(atlas, dict):
         return _fact(ctx, "（分野の地図が開かなかった）", status)
     _annotate(ctx, _atlas_digest(atlas))
-    lines = [f"分野の地図（{atlas.get('domain_name') or ''}・骨格 版 {atlas.get('skeleton_version') or ''}・"
-             f"{atlas.get('provenance') or ''}）"]
-    crumbs = (atlas.get("crumbs") or {}).get("2") if isinstance(atlas.get("crumbs"), dict) else ""
-    if crumbs:
-        lines.append(str(crumbs))
-    l2 = ((atlas.get("levels") or {}).get("2") or {}) if isinstance(atlas.get("levels"), dict) else {}
-    names = [str(n.get("label") or "") for n in l2.get("nodes") or [] if isinstance(n, dict) and n.get("label")]
-    if names:
-        lines.append("地図の概念: " + "、".join(names[:40]))
-    lines.append("")
-    lines += threads_lines(atlas)
+    lines = l2_map_lines(atlas)
     st2, land = ctx.call("GET", "/api/learning/courses/{course_id}/landscape")
     lines.append("")
     if st2 == 200 and isinstance(land, dict):
@@ -2262,17 +2874,36 @@ def sea_map_lines(landscape: Any, skeleton: Any, documents: Any) -> list[str]:
     anchors, by_region, home = sea_density(placements, nodes, regions)
     if regions:
         lines.append(f"地図（凡例: {DENSITY_LEGEND_TITLE} — {' / '.join(DENSITY_LEGEND_LABELS)}）:")
-        for rid, r in regions.items():
-            level = _density_level(len(by_region.get(rid, ())))
-            lines.append(f"- {r.get('label') or rid}: {'霧' if level == 0 else DENSITY_LEGEND_LABELS[level]}")
+        # 第 25 周 H29（第 4 周）: 製品（corpus-sea.js anchorPoint）は概念の円を L1 のノード位置＝領域の箱の中に
+        # 描くので、どの円がどの領域かは位置で読める。投影も円を領域ごとに入れ子で列挙する（平らに並べると
+        # 「どの円がどの領域の中か読めない」という投影由来の所見になった）
+        circles: dict[str, list[str]] = {}
+        outside: list[str] = []
         for aid, docs in anchors.items():
             if aid not in nodes and aid not in regions and aid not in home:
                 continue  # anchorPoint が null — 画面は円を描かない
             label = _sea_anchor_label(aid, nodes, regions, skeleton)
-            where = ""
-            if aid in home:
-                where = f"・領域「{regions[home[aid]].get('label') or home[aid]}」の箱の中"
-            lines.append(f"  ○ {label}（円の大きさ: {_anchor_size(len(docs))}{where}）")
+            size = _anchor_size(len(docs))
+            if aid in regions:
+                circles.setdefault(aid, []).append(f"  ○ {label}（円の大きさ: {size}・領域そのもの）")
+            elif aid in home:
+                circles.setdefault(home[aid], []).append(
+                    f"  ○ {label}（円の大きさ: {size}・領域「{regions[home[aid]].get('label') or home[aid]}」の箱の中）")
+            else:
+                rid = str((nodes.get(aid) or {}).get("region") or "")
+                line = f"  ○ {label}（円の大きさ: {size}）"
+                (circles.setdefault(rid, []) if rid in regions else outside).append(line)
+        for rid, r in regions.items():
+            level = _density_level(len(by_region.get(rid, ())))
+            lines.append(f"- {r.get('label') or rid}: {'霧' if level == 0 else DENSITY_LEGEND_LABELS[level]}")
+            lines += circles.get(rid, [])
+        if outside:
+            lines.append("- （どの領域の箱にも入っていない円）")
+            lines += outside
+        # 第 7 波（IK-0942 の残り）: 凡例の直下に地図の版（サーバの skeleton_version_label の素通し・空なら出さない）
+        vlabel = landscape.get("skeleton_version_label") if isinstance(landscape, dict) else None
+        if isinstance(vlabel, str) and vlabel:
+            lines.append(vlabel)
     else:
         lines.append("（地図は描かれていない）")
     if isinstance(landscape, dict):
@@ -2420,6 +3051,7 @@ HANDLERS: dict[str, Callable[[Any], None]] = {
     "admin.atlas.gaps.restore": _decide_gap("restore", ("dismissed", "merged")),
     "admin.atlas.gaps.alias_register": _gap_alias_register,
     "admin.atlas.gaps.draft_from_frozen": _draft_from_frozen,
+    "admin.atlas.edges.draft_from_frozen": _edge_draft_from_frozen,  # 第 7 波（IK-1044）
     "admin.atlas.gaps.incorporate_preview": _gap_incorporate_preview,
     "admin.atlas.gaps.incorporate_apply": _incorporate_apply("gap"),
     "admin.atlas.edges.list": _edges_list,
@@ -2434,6 +3066,8 @@ HANDLERS: dict[str, Callable[[Any], None]] = {
     "admin.atlas.vectors.refresh": _vectors_refresh,
     "admin.atlas.freeze_impact": _freeze_impact,
     "admin.atlas.freeze": _freeze,
+    "admin.atlas.published_view": _published_view,  # 第 25 周 第 5 波（IK-0992）
+    "admin.material.landscape_view": _landscape_view,  # 第 25 周 第 5 波（IK-0995 の到達口）
     "admin.atlas.freeze_blocked_goto": _freeze_blocked_goto,  # 第 25 周 第 2 波（IK-0885）
     "admin.atlas.edges.show_all": _edges_show_all,  # IK-0887
     "admin.atlas.gaps.orphaned_restore": _gap_orphan_restore,  # IK-0884
@@ -2448,6 +3082,83 @@ HANDLERS: dict[str, Callable[[Any], None]] = {
     "learning.corpus.documents": _corpus_documents,
 }
 ACTION_IDS = frozenset(HANDLERS)
+
+
+def _list_rows(session: PersonaSession, kind: str, field: str = "candidates") -> Optional[list[dict]]:
+    """読んだ一覧の行（一覧をまだ読んでいなければ None — 画面の状態が分からないので外さない）。"""
+    data = session.scratch.get("atlas_gaps" if kind == "gap" else "atlas_edges")
+    if not isinstance(data, dict):
+        return None
+    return [r for r in data.get(field) or [] if isinstance(r, dict)]
+
+
+def draft_known(session: PersonaSession) -> bool:
+    """読んだ一覧（候補・関係の候補）か骨格の状態（loadState）のどれかが「下書きあり」と言うか。"""
+    for key in ("atlas_gaps", "atlas_edges"):
+        d = session.scratch.get(key)
+        if isinstance(d, dict) and d.get("draft_exists"):
+            return True
+    state = session.scratch.get("atlas_state")
+    return isinstance(state, dict) and isinstance(state.get("draft"), dict)
+
+
+def unavailable(action_id: str, session: PersonaSession) -> Optional[str]:
+    """画面に対象の無い行為（第 25 周 H26・第 4 周）。``actions_exec.unavailable_reason`` が選択肢から外す。
+
+    製品の画面にそのボタンが出ていないと**読んだ一覧から分かる**ときだけ理由を返す（一覧をまだ読んでいなければ
+    None）。理由は runner_note に入る短い事実（画面の文ではない）。
+    """
+    s = session
+    kind = "gap" if ".gaps." in action_id else "edge" if ".edges." in action_id else ""
+    if not kind and action_id != "admin.atlas.freeze_blocked_goto":
+        return None
+    if action_id == "admin.atlas.freeze_blocked_goto":
+        return None if s.scratch.get("atlas_freeze_blocked") else "凍結の影響に［止めている候補を見る］が出ていない"
+    if action_id.endswith(".draft_from_frozen") and draft_known(s):
+        # 第 25 周第 5 周 H34（H26 の取りこぼし）: 下書きが既にあれば［現在の版から次版の下書きを作る］は画面に出ない。
+        # 候補・関係の一覧・骨格の状態のどれか 1 つでも下書きありと言えば外す（gap の一覧を読む前でも）
+        return "次版の下書きが既にある（［現在の版から次版の下書きを作る］は出ていない）"
+    cands = _list_rows(s, kind)
+    if cands is None:
+        return None
+    orphans = _list_rows(s, kind, "orphaned_decisions") or []
+    data = s.scratch.get("atlas_gaps" if kind == "gap" else "atlas_edges") or {}
+    statuses = [_status_of(c) for c in cands]
+    what = "候補" if kind == "gap" else "関係の候補"
+    leaf = action_id.rsplit(".", 1)[-1]
+    if leaf == "accept" and "candidate" not in statuses:
+        return f"［採用］を押せる{what}が一覧に無い"
+    if leaf == "dismiss" and not any(x in ("candidate", "accepted") for x in statuses):
+        return f"［却下／見送り］を押せる{what}が一覧に無い"
+    if leaf == "restore" and not any(x in ("dismissed", "merged") for x in statuses):
+        return f"［見送りから戻す］が出ている{what}が一覧に無い"
+    if leaf in ("incorporate_preview", "orphaned_incorporate"):
+        if not data.get("draft_exists"):
+            return "次版の下書きが無い（取り込み・反映のボタンは押せない）"
+        if not pending_unreflected(s, kind):
+            return f"採用済みでまだ下書きに入っていない{what}が無い"
+    if leaf in ("orphaned_restore", "orphaned_dismiss") and not orphans:
+        return "候補の条件から外れた採用済みの判断の枠が出ていない"
+    if leaf == "incorporate_apply":
+        pending = s.scratch.get("atlas_pending_incorporation") or {}
+        if pending.get("kind") != kind:
+            return "取り込み・反映の確認の画面が開いていない"
+    if leaf == "draft_from_frozen" and kind == "edge":
+        # 第 7 波（IK-1044）: 関係の区画の先頭のボタンは下書きが無ければ候補 0 件でも出る（廃止済みは無効）
+        if data.get("draft_exists"):
+            return "［現在の版から次版の下書きを作る］が出ていない"
+        if s.scratch.get("atlas_domain_retired"):
+            return "廃止済みの分野では［現在の版から次版の下書きを作る］は押せない"
+    elif leaf == "draft_from_frozen" and (data.get("draft_exists") or not (
+            any(x == "accepted" for x in statuses) or orphans)):
+        return "［現在の版から次版の下書きを作る］が出ていない"
+    if leaf == "show_all" and not data.get("folded_note"):
+        return "［すべて表示］が出ていない"
+    if leaf == "alias_register" and not any(
+            (c.get("near_anchor") or {}).get("node_id") and _status_of(c) not in ("dismissed", "merged")
+            for c in cands):
+        return "［別名として登録］が出ている候補が無い"
+    return None
 
 
 def execute(action_id: str, ctx) -> bool:

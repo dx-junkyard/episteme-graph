@@ -11,15 +11,18 @@ steps:
   - do: learning.course.enroll
     note: 受講中でなければ受講を始める
   - do: learning.course.open
+  # 第 25 周 第 5 周（judge_studio_r4 §5）: 教員が保存したトピックを学生が開けるよう、材料 topic_hint_terms で開く
+  # トピックを指せるようにした（既定は空 = 従来どおり最初のトピック）
   - do: learning.topic.open
-    note: 最初のトピックの教材を読む（図・式の印も見る）
+    with: {topic_hint_terms: "{{topic_hint_terms}}"}
+    note: 最初のトピック（材料で指定があればそのトピック）の教材を読む（図・式の印も見る）
   - do: learning.lecture.audio_status
     note: 「🎙 講義」が押せるかを確かめる
   - do: learning.lecture.sequence
     note: 講義を始めてみる（押せなければ、なぜ押せないかを読む）
   # 第 25 周 studio H16: 講義はスライドを 1 枚ずつ出す。▶ で最後まで辿れるか（音声の無いスライドはタイマー送り）
   - repeat:
-      until: "persona_decides_to_stop or steps > 8"
+      until: "persona_decides_to_stop or steps > 8 or lecture_at_end"
       max: 8
       steps:
         - do: learning.lecture.next
@@ -32,13 +35,21 @@ steps:
         note: 講義のボタンについて「？」で調べる
     optional: true
   - repeat:
-      until: "persona_decides_to_stop or steps > 4"
+      until: "persona_decides_to_stop or steps > 12"
       max: 2
       steps:
         - do: learning.topic.open
           note: 次のトピックを開く
         - do: learning.lecture.sequence
           note: このトピックでも講義を始めてみる
+        # 第 25 周 第 8 周 studio H38: 次のトピックでも ▶ で送れるようにする（第 8 周は t1 の 2・3 枚目が見えなかった）。
+        # 最後の枚でもう一度 ▶ を押すと lecture_at_end が立ち、送りの繰り返しだけを抜ける（sequence が旗を戻す）
+        - repeat:
+            until: "persona_decides_to_stop or lecture_at_end"
+            max: 4
+            steps:
+              - do: learning.lecture.next
+                note: ▶ で次のスライドへ送る（このトピックの 2 枚目以降が教材の区画と同じ並びか）
 stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
 expects:
   - manual: student/02-student.md#interactive-lecture
@@ -48,3 +59,5 @@ watch_for:
   - 音声がまだ無いときは、講義が使えない理由が事実として出る（マニュアルの「音声未生成のスライドは自動で進む」と食い違わない）
   - 教員が採用した図は教材とスライドに図として出て、画像が読み込める
   - 復元由来の式にはその印が付く
+  # 第 9 波（sync_keys_wave9 面 D・IK-1081）: 作業メモ（「注:」「※」で始まり根拠候補・内部 ID を含む段落）は受講者の本文から外れる
+  - 教材の区画にも講義のスライドにも作業メモの段落（「根拠候補」「（claim）」などを含む注）が出ず、地の文は残る（講義の枚数・最後の枚の中身は前の周から変わり得る — 比較は同じ周の教材の区画と）

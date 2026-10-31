@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import re
@@ -14,6 +15,10 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Protocol, runtime_checkable
 
 from uxsim.schema import now_iso
+
+# 第 25 周 第 6 周 atlas H39: 頭脳ノートの seq が transcript と 1 ずれた（頭脳が自分で数えた）。runner は「直前に見た画面」が
+# transcript のどの seq の結果かをここに置き、mailbox の要求ファイルに写す（messages には入れない — replay の cache key を変えない）。
+TRANSCRIPT_SEQ: "contextvars.ContextVar[Optional[int]]" = contextvars.ContextVar("uxsim_transcript_seq", default=None)
 
 
 class ReplayMiss(KeyError):
@@ -249,7 +254,11 @@ class MailboxPersonaLLM:
 
     def complete_json(self, system: str, messages: list[dict], schema_hint: str) -> dict:
         self.calls += 1
-        data = self.box.ask("persona", {"system": system, "messages": messages, "schema_hint": schema_hint})
+        payload: dict[str, Any] = {"system": system, "messages": messages, "schema_hint": schema_hint}
+        seq = TRANSCRIPT_SEQ.get()
+        if seq is not None:
+            payload["transcript_seq"] = int(seq)
+        data = self.box.ask("persona", payload)
         out = data.get("output")
         if isinstance(out, str):
             out = parse_json_object(out)

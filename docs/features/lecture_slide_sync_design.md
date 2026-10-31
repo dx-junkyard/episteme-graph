@@ -541,3 +541,223 @@ Phase 1+2 だけで「進行の一致」は解消する（既存原稿はマー�
 | 自作図を根拠の置き場に入れる | `projection-mistaken-for-source` | 出所の印を判定と一覧で区別 |
 | editor の書き換え | `permission-and-affordance-asymmetric` | 既定文を置き換え・見出しの印・持ち出しはコピーだけ |
 
+
+## 2026-10-25 追補（第 25 周 面 D 第 4 周の是正 = 第 4 波）
+
+正本: `uxsim/runs/round25/judge_studio_r4.md` §3（IK-0975〜0979）。§6 のオーナー判断候補 1（共有教員に所有者の名前を見せる）は
+推奨どおり「見せる（教員間だけ・学生の DTO には出さない）」で実装した。
+
+- **スライドの境目を決める入口は 1 つ（IK-0975）**: 分割にかける前の入力（`$…$` → `[[FORMULA_N]]`・`![[equation:…]]` /
+  `![[figure:…]]` の解決）を `core/lecture.py::prepare_topic_slide_input` に切り出し、`build_topic_slides` と原稿スタジオの
+  `POST /api/admin/lecture-studio/preview-split`（`auto_paginate=true`）の両方がこれを通る。プレビューは optional
+  `course_id` / `topic_id`（/ `chapter_index` / `topic_index`）で保存済みトピックの文脈（evidence_links / content_blocks）を借り、
+  編集欄の未保存の本文を student_material / spoken_script に重ねた疑似トピックを作る（`_preview_topic_context`。閲覧できない・
+  見つからないときは黙って文脈なし = 応答の形は変えない）。生の本文を `auto_paginate_slides` に直接渡す経路は無くなった。
+- **読みの単位で詰める（IK-0976）**: `_group_units_by_size` は段落ではなく `_reading_blocks`（見出しだけの段落は次と・式だけの
+  段落は直前と結ぶ）を単位に貪欲に詰め、結んだ単位が目安の 2 倍を超えるときだけ単位の中を段落で切る。境目は段落の境界のまま
+  なので、表示と読み上げの同じ index 境界の対応は崩れない。境目が動いたトピックの既存音声は、保存・再生成で作り直す既存の規則
+  （IK-0877）に乗る（構造の判断ではない — judge §6）。
+- **復元の印は式の写しへ運ぶ（IK-0977 / IK-0895 / IK-0872 ②）**: 判定の正本は `learner_context_common.
+  equation_latex_is_reconstructed`（平坦形も原文の LaTeX・原文と一致すれば印なし）。写しの照合は `reconstructed_latex_keys` /
+  `latex_copy_is_reconstructed`（正規化後の完全一致だけ）。`prepare_topic_slide_input` が本文に書き写された式に印を引き直し
+  （`_mark_reconstructed_formula_copies`）、`annotate_reconstructed_formulas` も正本を通す。講義の DTO（`LectureFormulaItem`）が
+  印を落としていたのを直し（`reconstructed` / `reconstructed_mark` / `reconstructed_note` / `latex_withheld`）、`app.js` は
+  `[[FORMULA_N]]` の写しでも式カードと同じ描き方で印を出す。根拠の式（`build_topic_evidence_items`）・記号の吹き出し
+  （`symbol_lookup` — 式一覧と、原文の LaTeX の無い定義式）・教材図スタジオの資料（grounding の行と
+  `RECONSTRUCTED_EQUATION_CONSTRAINT`）も同じ印を持つ。付録の付け直しは英語の要約を説明に採らず、本文が触れていない
+  復元式を足さない。
+- **持ち出しは「何を・誰に」を言う（IK-0978）**: course-structure の保存不可の教員向けに `owner_display_name` / `owner_notice`
+  （`COURSE_OWNER_NOTICE`）/ `proposal_copy_notice`（`PROPOSAL_COPY_NOTICE` の `{sections}` を画面が埋める）。［案をコピー］は
+  教材欄・読み上げ原稿・注意点・確認問題・申し送り（書き換えの応答の `handoff_notes` を画面の状態に保持）を写す。
+  `disclosure_axes`（course_materials の name_disclosure）に 1 行足した。
+- **図の採用の知らせ（IK-0979）**: 固定文 `ADOPT_NOTICE` をやめ、course-structure の `figure_adopt_notice_parts`
+  （`lead` / `audio` / `delivery` — delivery は保存の届き方と同じ文、届く経路の無いコースは `TOPIC_DELIVERY_NONE_NOTICE`）と
+  トピックの `has_topic_audio` から図スタジオが組む。
+- **束ねなかったもの**: 保存済みの旧い付録が学生に届く（IK-0872 ①）は「読み時に付け直さない」判断のまま・区切りを 1 つ入れると
+  3 枚 → 1 枚（IK-0878）は区切りの挿入の UI の問題で境目の入口とは別の根。
+- ガードレール: `test_lecture_studio_round25_r4.py`。
+
+### pre-mortem（第 4 周の是正）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| プレビューと配信の入力 | `rule-enforced-per-surface` | 正規化を 1 関数に切り出し、両経路がそれを通る |
+| 長さの目安で区切る | `extent-decided-by-proxy-signal` | 読みの単位を先に結び、境目は段落境界のまま |
+| 印を写しへ運ぶ | `condition-not-propagated` | 判定は 1 関数・写しは完全一致で引き直す・DTO が落とさない |
+| 持ち出しの中身と宛先 | `last-mile-missing` | 区画名と所有者の表示名（教員間だけ）をサーバの文で |
+| 固定の採用の知らせ | `wording-mismatch` | 保存側と同じ値・同じ文の部品から組む |
+
+## 2026-10-27 追補（第 25 周 面 D 第 5 周の是正 = 第 5 波）
+
+正本: `uxsim/runs/round25/judge_studio_r5.md` §3（IK-1008 / 1010 / 1011）と §1 の残り（IK-0895 STILL・
+IK-0872 ②・IK-0878 の構造）。IK-1007（表示名）と IK-1009（チャットの式の事実行）は別枠の是正。
+
+- **印と表示の可否は式の単位で 1 関数から（IK-0895 / IK-1008）**: `learner_context_common.
+  equation_display_fields(record, *, latex=None, reconstructed=None)` が（`reconstructed` /
+  `reconstructed_mark` / `reconstructed_note`、壊れた復元なら `latex: ""` + `latex_withheld: True`）の組を返す。
+  壊れ方の判定 `is_broken_reconstructed_latex` も同モジュールへ移し（`core.lecture` は再エクスポート）、
+  箇条書きの点（U+2022 — 結果の値の列挙が式の候補に入った形）を壊れ方に加えた。`annotate_reconstructed_formulas`
+  （講義・読む表示・チャットの formulas）・記号の吹き出し（`symbol_lookup._reconstructed_mark_fields` — 式一覧と
+  定義式。伏せた式も一覧から落とさず事実文だけ残す）・根拠の式（`_evidence_reconstructed_fields`）がこれを通る。
+  `![[equation:id]]` の埋め込みと `[[FORMULA_N]]` の解決は、写しの LaTeX の一致ではなく**同じ id の記録**
+  （根拠リンク ∪ content_blocks）のどれかが復元なら復元とする（`lecture._equation_unit_reconstructed`）—
+  描く LaTeX が根拠リンク側で content_blocks の記録と文字が違っても印が落ちない（作用の式 S の食い違いの根）。
+  `app.js` は `latex_withheld` の式を KaTeX で描かず、印と事実文だけを出す（`renderMaterialEquationBody` の先頭）。
+- **人が加えたものと機械が拾ったものを区画で分ける（IK-1010）**: `topic_evidence_state` は教員が加えた資料
+  （`role == "teaching_figure"` / `teaching`）があれば `teacher_added_heading`（「教員が加えた資料（教材欄に
+  埋め込んだ順）」）を返す。根拠の状態（`status`）の判定は変えない。原稿スタジオは中央のチップと右ペインの
+  一覧の両方で、教員の資料を先頭の区画に教材欄の `![[figure:id]]` の位置順で並べ、`unmapped_heading` は
+  解析の候補の区画にだけ掛ける（`lsSplitTeacherAddedEvidence`）。
+- **申し送りの根拠は教員の画面で読める材料だけ（IK-1011）**: 書き換えの規則 `TOPIC_DRAFT_HANDOFF_RULE` に
+  「外す・取り下げる根拠は現在の下書きか根拠候補の見出し・要約・式からの逐語の引用で添え、論理ブロックの要約など
+  画面に出ない材料は挙げない」を足し、応答は `lecture_studio_state.qualify_handoff_basis` が決定論で検査する
+  （照合先は `teacher_visible_texts` = 前の版の下書き・題名・概要・`build_topic_evidence_items` の見出し・要約・
+  式・図題）。照合できない引用・引用の無い取り下げは項目を落とさず末尾に `HANDOFF_UNVERIFIED_BASIS_NOTE`。
+- **付録の名前と本文との整合（IK-0872 ②）**: 名前の段に「定める記号」（`${記号}$ を定める式`。左辺が短く演算・
+  積分・和・分数を含まないときだけ記号とみなす — `_equation_defined_symbol`）を足し、どの段でも名前が付かない式
+  （旧「この節の式」）は付録に足さない。本文が同じ文の中で扱わない語（追わ / 扱わ / 立ち入ら / 触れない / 省略 /
+  割愛）と共にその式の印字番号・記号・添字の族（`\mathcal{L}_i` は `\mathcal{L}_4` の族）に触れていれば足さず
+  （`_text_declines_equation`）、本文に既に埋め込んだ式と同じ記号を定める式（同じ式が 2 つの id で供給された断片）
+  も足さない。生成時と［付録を付け直す］が同じ関数を通る。
+- **区切りを両方の欄へ（IK-0878 の構造）**: 分割の規約（教員の区切りが優先・数が合わなければ 1 枚）は不変。
+  原稿スタジオに［+ 両方の欄に区切りを挿入］（教材欄のカーソル位置 + 読み上げ欄を揃える）と、統合の告知が出ている
+  ときだけ出る［読み上げ欄の区切りを教材欄に揃える］を足した（`lsAlignSpokenSlideMarkers` — 読み上げ欄の区切りを
+  外し、教材欄の内側の区切りの相対位置に近い段落の境目（足りなければ文の境目）へ入れ直す。教材欄は変えない。
+  入れきれなければ事実文で知らせる）。アンカー `lecture-studio.insert-slide-marker-both` /
+  `lecture-studio.align-slide-markers`。
+- **束ねなかったもの**: 保存済みの旧い付録（IK-0872 ①）は「読み時に付け直さない」判断のまま。平坦形の
+  chunks.formulas に原文の LaTeX が無い式の判定そのもの（再解析で揃う）は変えていない — 本波は「同じ式の記録の
+  どれかが復元なら写しも復元」を式の id で揃えた。
+- ガードレール: `test_lecture_studio_round25_r5.py`。
+
+### pre-mortem（第 5 周の是正）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 印だけ借りて伏せる規則を借りない | `rule-enforced-per-surface` | 印と可否の組を 1 関数（`equation_display_fields`）にし、吹き出し・講義・根拠の式・写しが通る |
+| 同じ式の記録が 2 つで印が食い違う | `duplicate-canonical-sources` | 埋め込みは式の id の全記録で判定（写しの文字一致に頼らない） |
+| 人の項目に機械の見出しが掛かる | `wording-mismatch` | 見出しを出所ごとの区画に分ける（判定は不変） |
+| AI が人の記述を外す根拠を画面外に置く | `ai-decides-instead-of-human` | 引用の照合を決定論で行い、照合できない項目に事実文（項目は落とさない） |
+| 名前の無い付録・本文と食い違う付録 | `fallback-fabricates-missing-link` | 名前は記号から・名前が付かない式と本文が扱わない式は足さない |
+| 区切りの片側だけ入る | `wording-mismatch` | 規約は不変・両欄へ入れる手段と揃える導線を足す |
+
+## 2026-10-27 追補（第 25 周 面 D 第 6 周の是正 = 第 6 波）
+
+正本: `uxsim/runs/round25/judge_studio_r6.md` §2・§3・§6（IK-0895 STILL / IK-1032〜1034 / IK-0976・IK-1010 の残り）。
+オーナー判断の候補 2 件は推奨どおりに実装した（下の「オーナー判断」）。
+
+- **印は生きた式の記録から読み時に引く（IK-0895）**: 根は「凍結した写し（content_blocks の式・根拠リンク・講義の
+  式）に復元の状態が無い」こと（第 5 波の「同じ id の記録のどれかが復元なら」は、どの記録にも状態が無いので効かなかった
+  — 固定コースの講義の式 253 件で復元 0 件）。`learner_context_common.EquationReconstructionIndex` が document ごとの
+  生きた記録（採用 run の `equation_semantics` artifact の式 ∪ `chunks.formulas`）の判定（印の正本
+  `equation_latex_is_reconstructed`）を、式の id → 印字番号 → 正規化した LaTeX の鍵で引ける形にする（同じ鍵の記録は
+  OR・論文が分からず答えが割れる鍵は使わない）。DB から集めるのは `core/equation_reconstruction.py`
+  （`resolve_artifact_runs` = adopted ポリシ・120 秒キャッシュ・失敗は空の索引で写し自身の判定に戻る）。
+  判定の入口は 1 関数 `equation_is_reconstructed(record, *, index, document_id)`（索引で引ければその答え、引けなければ
+  記録自身の判定）で、`equation_display_fields` / `reconstructed_equation_note` / `annotate_reconstructed_formulas` /
+  `formula_fact_line` がこれを通る。5 か所の配線: 本文・付録（`get_topic_material`）と講義（`get_lecture_sequence`）は
+  `services.overlay_topic_equation_reconstruction` がトピックの写しに状態（`reconstructed` + `reconstruction_checked`）を
+  載せた複製を読み、チャットは表示中の教材（`_topic_formula_fact_line`）と出典のチャンク（`services._formula_fact_line`）、
+  部品の文脈は `component_context._build_equations` が索引を受け取る。`reconstruction_checked` の付いた写しは決まった
+  答えとして扱い、写しの LaTeX と原文の照合で引き直さない（画面には出さない内部の印）。新しい freeze は
+  `_frozen_reconstruction_state` で写しに状態を書き（記録が状態を持つときだけ）、`chunks.formulas` 由来の補充枠の
+  `reconstructed` も運ぶ。`must_not_treat_as_source_extracted` は印の判定に単独では使わない（PDF 由来の一律の前提でも
+  立つため印を付け過ぎる — 第 2 波の正本のまま）。保存データは書き換えない。
+- **付け直しの結果を言い分ける（IK-1032）**: `reattach_generated_appendix` が `outcome`（`replaced` / `removed` /
+  `added` / `unchanged`）を返し、知らせは `lecture_studio_state.appendix_reattach_notice` の 1 箇所で分岐ごとに
+  （取り除いたときは「いまの根拠からは付録に載せる式・図が無いため、付録を外しました。保存すると確定します。」）。
+- **トピック概要は 1 項目（IK-1034）**: `build_topic_evidence_items` は `source:topic_summary` 1 項目に `alt_ids:
+  ["summary"]` を持たせ、別名は解決の索引だけにする（`_evidence_item_keys`・app.js `lookupEvidenceItem`・原稿スタジオ
+  `lsEvidenceItemByRef` が `alt_ids` でも引く）。
+- **記号の定義の文に添える式（IK-1033）**: `symbol_lookup.equation_defines_symbol` — 記号（引数 `(r)` を外した本体・
+  `\frac{dm}{dr}` の `d` は外して見る）が最初の `=` より前（左辺）に無い式は、定義の文に添えない（文は残す・式の名前も
+  外す）。文も無い式は候補にしない。`=` の無い式は判定しない。
+- **読みの単位を 2 つ足す（IK-0976 の残り）**: `_reading_blocks` は、見出しの直後の導入 1 文（1 文・160 字以内の散文）と
+  `：` で終わる導入の段落を、その次の本体（箇条書き・表・本文 — 次の見出しは除く）と結び、式だけの段落の直後の解説 1 文を
+  式と結ぶ。結んだ単位が目安の 2 倍を超えれば従来どおり段落で切る。境目は段落の境界のまま（表示・音声・readiness の一致は不変）。
+- **解析の候補の区画の見出し（IK-1010 の残り）**: `topic_evidence_state` は教員が加えた資料があり、`unmapped_heading` が
+  出ない（根拠の状態が missing 以外の）とき `analysis_heading`「論文の解析から拾った根拠（式・主張・原文抜粋・概要）」を返し、
+  中央のチップと右ペインは解析の区画（`data-evidence-section="analysis"`）にそれを掛ける。根拠の状態の判定は不変。
+- **オーナー判断 1（保存済みの教材は書き直さない）**: 付録・注意点・凍結した写しを是正のたびにシステムが書き直すことはしない
+  （IK-0895 の写しも読み時に引くだけ）。所有者への道案内は原稿スタジオ側に留め、新しい G層 To-Do は作らない（既存の
+  `course.topic_appendix_stale` はそのまま）。コース見出しに事実文 `APPENDIX_STALE_COURSE_NOTICE` + 該当トピックの題名 +
+  ［付録をまとめて付け直す］（`POST /api/admin/courses/{id}/lecture-studio/appendix/reattach-all`・所有者 / SYSTEM_ADMIN だけ・
+  提示した一覧 ∩ いま付録が古いトピックだけを付け直して保存・付け直したトピックの音声キャッシュを消す・監査
+  `AUDIT_ENTITY_COURSE_TOPIC` / `action=topic_appendix_reattached_all` に `decision_context`（basis
+  `lecture_studio.appendix_reattach_all`・提示 / 適用 / 対象外 = `not_stale_or_unchanged`）。押す前に音声・区切りが動くことを
+  `APPENDIX_REATTACH_ALL_CONFIRM` で確かめる。editor にはボタンを無効にして `APPENDIX_REATTACH_ALL_OWNER_ONLY_NOTICE`。
+  アンカー `lecture-studio.reattach-appendix-all`。
+- **オーナー判断 2（音声生成は所有者だけ）**: `POST /api/admin/courses/{id}/lecture-audio/generate` はトピックの保存と同じ
+  `ensure_course_owner` を通し、editor には 403 + `TOPIC_AUDIO_GENERATE_FORBIDDEN_DETAIL`。`topic_save_facts` が editor に
+  `audio_generate_notice` を返し、原稿スタジオの音声準備の状態に `owner_only`（理由はサーバの文・次の操作「所有者に依頼する」）。
+  学習者経路からの音声生成禁止は不変。
+- ガードレール: `test_lecture_studio_round25_r6.py`。キャッシュの版 `admin-lecture-studio.js?v=…-studio6` / `app.js?v=…-studio6`。
+
+### pre-mortem（第 6 周の是正）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 凍結した写しの印が生きた記録と食い違う | `duplicate-canonical-sources` | 判定の正本は生きた記録の 1 関数（`equation_is_reconstructed`）。写しは決まった答え（`reconstruction_checked`）だけを持つ |
+| 印の規則を面ごとに足す | `rule-enforced-per-surface` | 5 か所が同じ索引・同じ関数を通ることをテストで固定（route の配線もソースで検査） |
+| 再解析の採用で古い答えが残る | `stale-derivative-served` | 索引は 120 秒のキャッシュだけで保存しない（写しは書き換えない）。読み時に引き直す |
+| 一覧と解決の索引の混同 | `duplicate-canonical-sources` | 別名は `alt_ids`（解決の索引）・一覧は 1 項目 |
+| 結果の分岐を知らせが受け取らない | `wording-mismatch` | 分岐の語を応答に持たせ、文はサーバの 1 箇所 |
+| 文と例を別の候補から選ぶ | `fallback-fabricates-missing-link` | 左辺に記号が無い式は添えない（推測で結ばない） |
+| 長さの代理で読みの組を割る | `extent-decided-by-proxy-signal` | 導入と本体・式と解説を先に結ぶ（2 倍を超えたら従来どおり段落で） |
+| システムが人の保存物を書き直す | `ai-decides-instead-of-human` | 書き直さない。所有者の明示操作（一括確定・`decision_context`）だけ |
+| editor の権限の非対称 | `condition-not-propagated` | 音声生成もサーバで所有者判定（UI の無効化は補助） |
+
+## 2026-10-28 追補（第 25 周 面 D 第 7 周の是正 = 第 7 波）
+
+正本: `uxsim/runs/round25/judge_studio_r7.md` §3・§5・§6（IK-1053 / IK-1054 NEW・IK-0976 の残り・IK-0571 の面 D 側）。
+オーナー判断の候補 1 件（版ありのコースの発行の手続）は推奨どおりに実装した（下の「オーナー判断」）。
+
+- **未発行の変更の事実と版の管理への入口（IK-1053）**: 根は「届く条件（版）は運んだが、届けるための手続（発行）への
+  道と、その手続が済んでいるかを保存の画面へ運んでいない」こと（last-mile-missing）。`_topic_save_facts_for` が
+  受講者の見ている版（`active_release_id`）の写しと、いまの working copy（`releases.build_course_snapshot` — V層の
+  写しと同じ形 `{title, description, data}`）を `lecture_studio_state.course_has_unpublished_changes` で比べる
+  （中身の比較・時刻の比較はしない・どちらかが読めなければ None = 何も言わない）。`topic_save_facts(...,
+  unpublished_changes=)` は版ありのとき delivery に `unpublished_changes` と事実文 `unpublished_changes_note`
+  （`TOPIC_UNPUBLISHED_CHANGES_NOTES` — 「版 N の発行の後に保存した変更があります。受講者はまだ版 N を見ています。」/
+  「いまの内容は版 N と同じです（未発行の変更はありません）。」）を載せ、所有者にだけ `versions_entry`
+  （札「版の管理を開く」）を添える（course-structure のトップレベルにも同じ 2 キー）。原稿スタジオは届き方の文の下に
+  事実文と［版の管理を開く］（`lecture-studio.open-versions`）を描き、押すと V層の `Versioning.openModal("course", …)`
+  を開く（`openModal` に任意の 4 引数目 `options.onClose` を足した — 閉じたら course-structure を取り直して事実文を
+  更新する。モーダルの発行の判断・操作は不変）。保存の結果の知らせにも未発行の変更の文が続く。
+- **付録が古いトピックは一覧で（IK-1054）**: 知らせ `APPENDIX_STALE_COURSE_NOTICE` は「付録が古いトピックがあります
+  （下の一覧）。…」で始め、題名は文の括弧に連結しない。原稿スタジオは折りたたみ（`<details>`・見出しはサーバの
+  `appendix_stale_list_summary`・アンカー `lecture-studio.appendix-stale-list`）に 1 行 1 題名、左のトピック一覧と同じ
+  「章.トピック」の番号で並べ、各項目は左の一覧の該当トピックを開く（同じ選択の経路を通す）。
+- **2 文の導入・解説と箇条書きの直後の解説（IK-0976 の残り）**: `_is_single_sentence_unit`（1 文・160 字）を
+  `_is_short_lead_unit`（`_LEAD_IN_MAX_SENTENCES = 2`・`_LEAD_IN_MAX_CHARS = 240`）に置き換え、見出しの直後の導入と
+  式の直後の解説を 2 文まで本体と結ぶ。箇条書き（先頭行が `- ` / `* ` / `1. `）の直後の短い解説（2 文まで）は
+  箇条書きと結ぶ。結んだ単位が目安の 2 倍を超えれば従来どおり段落で切る。境目は段落の境界のまま（表示・音声・
+  readiness の 3 者は同じ関数を通るので一致は保たれ、保存済みの音声は保存・再生成まで旧い境目）。
+- **⚓・吹き出しの原文の印（IK-0571 の面 D 側）**: 翻訳はしない（LLM 0 回）。判定は `text_excerpt.is_untranslated_text`
+  （数式区間を除いた本文に和文の文字が無く英字の語がある）、印の正本は `label_vocab.ORIGINAL_TEXT_MARK`「（原文）」。
+  ①根拠の項目（`build_topic_evidence_items`）は component / claim の表示する名前（`display_label` 優先 — 第 5 波の
+  親 unit の日本語の見出し）が原文のままなら `title_original_mark`。⚓ のチップと見出しは `display_label` を優先し、
+  文脈パネルは部品名（英語の内部名）で見出しを上書きしない。②部品の文脈は、位置づけ（`_narrative_role`）の優先順を
+  保ったまま日本語の候補があれば先に使い、それでも原文なら `narrative_role_original_mark`、部品名には
+  `label_original_mark`、主張には `original_mark`。③記号の吹き出しの使われ方の例文（`mentions[]`）にも
+  `original_mark`。JS は印をサーバの値のまま描く（日本語をミラーしない）。
+- **オーナー判断（版ありのコースの発行）**: 発行は所有者の明示操作のまま（V層の確定仕様）。保存の画面に置くのは
+  未発行の変更の事実と［版の管理］への入口だけで、自動発行・督促・G層 To-Do（`course.unpublished_changes`）は
+  作らない（To-Do は恒常点灯になりうるので運用の実測の後に判断）。
+- ガードレール: `test_lecture_studio_round25_r7.py`。アンカー +2（件数の正本は `test_admin_help_ui_anchors.py`）。
+  キャッシュの版 `admin-lecture-studio.js?v=…-studio7` / `versioning.js?v=…-studio7` / `app.js?v=…-studio7`。
+
+### pre-mortem（第 7 周の是正）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 「別の画面で発行してください」と言うが道と未完了の状態が無い | `last-mile-missing` | 入口（版の管理）と未発行の事実を保存の画面に置く。発行の操作は V層のモーダルのまま |
+| 未発行の判定を時刻で代用する | `completion-defined-by-proxy` | 時刻ではなく版の写しと HEAD の中身を比べる。読めなければ言わない |
+| 自動発行・督促で人の判断を置き換える | `ai-decides-instead-of-human` | しない（オーナー判断）。事実と入口だけ |
+| 対象の集合を挿入句に連結する | `wording-mismatch` | 項目として並べ、各項目から開ける |
+| 長さの代理で読みの組を割る（閾値が 1 文） | `extent-decided-by-proxy-signal` | 2 文まで・箇条書きの直後も結ぶ。2 倍超は従来どおり段落で |
+| 表示・音声・readiness の分割の食い違い | `duplicate-canonical-sources` | 規則は `_reading_blocks` の 1 箇所のまま（3 者が同じ関数） |
+| 原文の言語のまま出る文を黙って出す | `information-dropped-as-unrepresentable` | 落とさず・訳さず、原文の印を付ける。日本語の既存候補を先に選ぶ |
+| 印の文言を面ごとに持つ | `duplicate-canonical-sources` | 文言は `label_vocab.ORIGINAL_TEXT_MARK`、判定は `is_untranslated_text` の 1 箇所。JS は素通し |
+
+当たらない族: 再実行と削除（保存済みデータを書き換えない — 読み時の判定と事実文だけ）。

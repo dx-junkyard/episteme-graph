@@ -420,3 +420,9 @@ L1 骨格（`nodes[].region`）から**クライアント側で決定論導出**
 - コースの地図 L1 の霧も生きている配置を数えるようになり、海と同じ状態集合（`LEARNER_VISIBLE_STATUSES`）で
   決まる（正本 `atlas_state` — `field_atlas_overlay_spec.md` §15）。海は本人が閲覧できる論文だけ、L1 は
   ドメイン単位という差は残る。
+
+### 14.3 第 5 周の是正（2026-10-27 追補・第 5 波・IK-0990）
+
+- 縁（`_build_fringe`）は信号の `normalized_label` が現行凍結版で解消済み（`atlas_gaps.store.resolved_label_set` = 教員側の
+  候補キューと同じ判定）なら出さない。教員の判断（decisions）は読まない（§6.1 不変）。信号の行は残る（P4）。
+- pre-mortem は `field_atlas_overlay_spec.md` §17.1。

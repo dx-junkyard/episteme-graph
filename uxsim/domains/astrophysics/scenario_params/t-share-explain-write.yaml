@@ -16,6 +16,12 @@ personas:
   te-01-rookie-seminar:
     # 第 4 周（judge_share_r3 §6）: 新人が独自解釈の追加 → 共有 → 査読を歩く。2 軸の語（共有と査読承認 — IK-0924）を読み分けられるか。
     # H29 の是正で部分一致が複数なら開かずに止まるので、部品名は完全一致で指す（指揮者が te-01 の原稿スタジオの部品一覧で確かめる）
-    component_hint: TOV network map
+    component_hint: TOV residual loss at collocation points
     explanation_title: ゼミ用の説明 — TOV 方程式
     explanation_body: 星の中の圧力が外向きに押す力と、重力が内向きに引く力が釣り合う条件を、一般相対論で書いた式です。圧力と密度の関係（状態方程式）を 1 つ決めると、星の質量と半径の組が決まります。
+  te-04-copilot-intro:
+    # 第 5 周（judge_share_r4 §6）: te-04 が所有するコース 1bad7d9f（TeX 版の部品）で独自解釈 → 共有 ON → 査読。続けて te-02 が
+    # (b2) で支持・引用する。部品名は TeX 版の［検出要素］の実在名（指揮者が周の前に te-04 の原稿スタジオで完全一致を確かめる）
+    component_hint: TOV residual loss at collocation points
+    explanation_title: AI と下書きした説明 — TOV 方程式
+    explanation_body: 星の中では、圧力が外へ押す力と重力が内へ引く力が釣り合っています。この釣り合いを一般相対論で書いたのが TOV 方程式です。圧力と密度の関係（状態方程式）を 1 つ選ぶと、中心の密度ごとに星の質量と半径が 1 組決まります。

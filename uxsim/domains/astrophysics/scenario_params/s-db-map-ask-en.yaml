@@ -6,3 +6,28 @@ params:
   topic_hint_terms: [DCF法, 磁場強度]
   map_question: On the field map, what does the note on this item mean, and where can I see the details?
   map_question_again: On the field map, what does the note on this item mean, and where can I see the details?
+  # 第 25 周第 5 周 H36: 地図の問いの前に選ぶ、札（検証の記録の文）の付いた概念の名前
+  map_node_hint: 暗黒エネルギー
+personas:
+  st-05-night-solarwind:
+    # 第 5 周（judge_doubt_r4 §4）: 英語以外の学生が同じ地図の問いを日本語で 2 回。AI が札の文を知っているか（IK-0907 の残り）、
+    # 行き先が揺れないか（IK-0936）。場面 id の -en は英語の第 4 周の名残で、手順は言語に依らない
+    goal_text: 分野の地図の項目に付いている検証の記録の文が何を意味するかを確かめ、同じことを 2 回聞いて答えが変わらないかを見ること
+    map_question: 分野の地図のこの項目に付いている検証の記録の文は、何を確かめた記録のことですか？詳しくはどこで見られますか？
+    map_question_again: 分野の地図のこの項目に付いている検証の記録の文は、何を確かめた記録のことですか？詳しくはどこで見られますか？
+  st-06-skeptic-bao:
+    # 第 6 周（judge_doubt_r5 §4）: 日本語で、ノードを選んでから（select_node・map_node_hint）同じ地図の問いを 2 回。札の名前が
+    # AI に届くか（IK-0907 の第 4 波）・行き先が揺れないか（IK-1005 の是正後に送り直しの出口）
+    goal_text: 分野の地図の項目に付いている検証の記録の文が何を意味するかを確かめ、同じことを 2 回聞いて答えが変わらないかを見ること
+    map_question: 分野の地図のこの項目に付いている検証の記録の文は、何を確かめた記録のことですか？詳しくはどこで見られますか？
+    map_question_again: 分野の地図のこの項目に付いている検証の記録の文は、何を確かめた記録のことですか？詳しくはどこで見られますか？
+  st-07-m1-grb-voice:
+    # 第 7 周（judge_doubt_r6 §4）: 論文の配置があるノード「中性子星」を選んでから（select_node）同じ地図の問いを日本語で 2 回。
+    # runner は地図で選んだ場所の id も screen_context.view.atlas_node_id で送る（IK-1031 — サーバが検証・承認の行と置かれた論文の
+    # 事実文を足す）。「どこで見られるか」に［根拠を見る］の論文名で答えるか
+    goal_text: 分野の地図の項目に付いている検証の記録の文が何を意味するかを確かめ、同じことを 2 回聞いて答えが変わらないかを見ること
+    map_question: 分野の地図のこの項目に付いている検証の記録の文は、何を確かめた記録のことですか？詳しくはどこで見られますか？
+    map_question_again: 分野の地図のこの項目に付いている検証の記録の文は、何を確かめた記録のことですか？詳しくはどこで見られますか？
+    map_node_hint: 中性子星
+    # 第 8 周（judge_doubt_r7 §4・IK-1049 の是正後）: 音声のまま（casual の往復）同じノード「中性子星」を選んでから同じ問いを 2 回。
+    # 地図で選んだ場所の事実が音声の往復にも届くか。同じ周の share の (d) を先に歩く（face スクリプトの ST07_DONE_R8）

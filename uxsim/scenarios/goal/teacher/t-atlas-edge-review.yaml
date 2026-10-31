@@ -1,7 +1,7 @@
 id: t-atlas-edge-review
 population: teachers
 runner: [api, browser]
-goal: "「関係（辺）の候補」を読み、1 件を関係の種類を選んで採用し、1 件を理由を書いて見送り、採用した関係を次版の下書きへ反映する前の確認を読む（反映はしない）"
+goal: "「関係（辺）の候補」を読み、1 件を関係の種類を選んで採用し、1 件を理由を書いて見送り、次版の下書きが無ければ関係の区画のボタンで作り、採用した関係を次版の下書きへ反映する前の確認を読む（反映するかはペルソナが決める）"
 params_required: [domain_hint, accept_hint, accept_kind, dismiss_hint, dismiss_reason]
 steps:
   - do: auth.login
@@ -20,8 +20,17 @@ steps:
   - do: admin.atlas.edges.dismiss
     with: {edge_hint: "{{dismiss_hint}}", reason: "{{dismiss_reason}}"}
     note: 地図に足さない関係を、理由を書いて見送る（学生の推定の糸からも消えるはず）
+  # 第 25 周 第 8 周 H45: 関係の区画の先頭の［現在の版から次版の下書きを作る］（IK-1044 の是正）を場面の手に入れる。
+  # 下書きが既にある・廃止済みの分野では画面にボタンが無いので、runner がこの固定手を飛ばす（unavailable）
+  - do: admin.atlas.edges.draft_from_frozen
+    note: 次版の下書きが無ければ、関係の区画の先頭のボタンで画面から作る（AI は使わない・学習者には見えない）
   - do: admin.atlas.edges.incorporate_preview
     note: 採用した関係を次版の下書きへ反映するときの確認を読む。下書きが無ければ画面が何と言うかを読む
+  - choose:
+      - {do: admin.atlas.edges.incorporate_apply}
+      - {do: admin.atlas.edges.list}
+    optional: true
+    note: 確認の内容でよければ下書きに追加する（凍結はこの場面ではしない）。迷えば一覧に戻る
   - do: admin.atlas.edges.dismissed_filter
     with: {show: true}
     note: 見送った関係が理由付きで残っているかを見る
@@ -29,11 +38,18 @@ stop_when: [gave_up, blocked, budget_exhausted]
 expects:
   - manual: teacher/17-admin-atlas.md#edge-candidates
   - manual: teacher/17-admin-atlas.md#edge-incorporate
+  - manual: teacher/17-admin-atlas.md#edge-draft-from-frozen
   - manual: teacher/17-admin-atlas.md#edge-dismissed-filter
 watch_for:
   - 出所チップに近さの段階の言葉は出ず、何が近いかの一文（basis_line）が出て、共起は論文の題名の列挙で示され、件数・類似度が出ない
   - 近さだけの候補は畳まれ、畳んだことを事実文で言い、［すべて表示］で全部出せる（件数は出さない — IK-0887）
   - 採用には関係の種類が要り、未選択では送られない（「採用するには関係の種類を選んでください」）
   - 見送りには理由が要り、見送った関係は既定の一覧から消え、見送り済みの表示で理由付きで残る
-  - 下書きが無いとき、反映の確認は出ずに「次版の下書きがありません…」の事実文になる
+  - 下書きが無いとき、反映の確認は出ずに「次版の下書きがありません…」の事実文になり、関係の区画の先頭に［現在の版から次版の下書きを作る］が出る（IK-1044）
+  - 有向の「依存」で採用した関係は、反映の確認で向き（「…が…に依存する」）の文になる（IK-1047）
   - 見送った関係は、この後の学生の地図の推定の糸に出ない（審判 B5 — 学生レーンを後に回す）
+  # 第 9 波（sync_keys_wave9 面 C）
+  - 次版の下書きに反映した後の関係カードの向きの文は「…次版の下書きに記載されています。」（反映前・反映の確認は「…記載されます。」のまま）で、時制が状態と合っている
+  # 第 10 波（sync_keys_wave10 面 C・H54 / IK-1118）
+  - 次版の下書きに入った採用のカードには［見送り…］が出ず、見送れない理由の事実文が出る（押せない手を押した形にならない）
+  - 採用・反映の知らせは依存の向きの句（「「A」が「B」に依存する関係…」）で、凍結を止めている採用の一覧も同じ句で書かれる

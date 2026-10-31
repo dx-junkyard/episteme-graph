@@ -16,8 +16,13 @@ steps:
       - {do: admin.atlas.gaps.accept, with: {gap_hint: "{{accept_hint}}"}}
       - {do: admin.atlas.gaps.list}
     optional: true
+  # 第 25 周 第 8 周 H45: 下書きを作る固定手は関係の区画のボタン（IK-1044 の是正 — 候補 0 件でも出る）を先に持つ。
+  # 論文由来の候補のカードのボタン（gaps.draft_from_frozen）は採用済みの候補があるときだけ画面に出るので、その条件を
+  # 満たさなければ runner が飛ばす。下書きが既にあればどちらも飛ぶ（既にある下書きを使う）
+  - do: admin.atlas.edges.draft_from_frozen
+    note: 次版の下書きが無ければ、関係の区画の先頭の［現在の版から次版の下書きを作る］で画面から作る（既にあればそれを使う）
   - do: admin.atlas.gaps.draft_from_frozen
-    note: 次版の下書きを作る（既にあればそれを使う）
+    note: （採用済みの論文由来の候補があり、まだ下書きが無いときだけ）候補のカードのボタンで下書きを作る
   - do: admin.atlas.gaps.incorporate_preview
   - do: admin.atlas.gaps.incorporate_apply
     note: 確認の内容で下書きに追加する（骨格を書くのはこの保存だけ）
@@ -37,26 +42,39 @@ steps:
     note: 凍結の影響と前の版のノードとの対応の候補を読む。止める条件（採用済みで未反映の候補・関係）と関係の増減を、
       押す前に言うかを確かめる（IK-0885）
   # 第 25 周 第 2 波: 止める条件があれば「公開できません」と［止めている候補を見る］が出る。候補の区画で外れた判断を取り込む
+  # 第 25 周 H25（第 4 周）: 凍結を止める採用は、いまも導出されていれば外れた枠ではなく通常の一覧の先頭帯に出る
+  # （［次版の下書きへ反映…］）。通常の一覧の反映も選べるようにする
   - choose:
       - {do: admin.atlas.freeze_blocked_goto}
+      - {do: admin.atlas.gaps.incorporate_preview}
+      - {do: admin.atlas.edges.incorporate_preview}
       - {do: admin.atlas.gaps.orphaned_incorporate}
       - {do: admin.atlas.edges.orphaned_incorporate}
       - {do: admin.atlas.freeze_impact, with: {version: "{{freeze_version}}"}}
     optional: true
-  # 第 25 周 H21（第 4 周の前）: ［止めている候補を見る］で候補の区画へ移った後に、取り込む・戻すの手を残す
-  # （1 回目の choose を goto に使うと、すぐ凍結の手番になって判断の手が無かった）
-  - choose:
-      - {do: admin.atlas.gaps.orphaned_incorporate}
-      - {do: admin.atlas.gaps.orphaned_restore}
-      - {do: admin.atlas.edges.orphaned_incorporate}
-      - {do: admin.atlas.edges.orphaned_dismiss}
-      - {do: admin.atlas.freeze_impact, with: {version: "{{freeze_version}}"}}
-    optional: true
-  - choose:
-      - {do: admin.atlas.gaps.incorporate_apply}
-      - {do: admin.atlas.edges.incorporate_apply}
-      - {do: admin.atlas.freeze_impact, with: {version: "{{freeze_version}}"}}
-    optional: true
+  # 第 25 周 H21 / H25: ［止めている候補を見る］で候補の区画へ移った後、採用済み・未反映が無くなる（freeze_ready）まで
+  # 「確認を開く → 下書きに追加」を繰り返せる（採用済み・未反映が 2 件以上あると、固定回数では凍結に届かなかった）
+  - repeat:
+      until: freeze_ready or persona_decides_to_stop
+      max: 4
+      steps:
+        - choose:
+            - {do: admin.atlas.gaps.incorporate_preview}
+            - {do: admin.atlas.edges.incorporate_preview}
+            - {do: admin.atlas.gaps.orphaned_incorporate}
+            - {do: admin.atlas.gaps.orphaned_restore}
+            - {do: admin.atlas.edges.orphaned_incorporate}
+            - {do: admin.atlas.edges.orphaned_dismiss}
+            - {do: admin.atlas.freeze_impact, with: {version: "{{freeze_version}}"}}
+          optional: true
+        - choose:
+            - {do: admin.atlas.gaps.incorporate_apply}
+            - {do: admin.atlas.edges.incorporate_apply}
+            - {do: admin.atlas.freeze_impact, with: {version: "{{freeze_version}}"}}
+          optional: true
+  - do: admin.atlas.freeze_impact
+    with: {version: "{{freeze_version}}"}
+    note: 反映の後にもう一度、凍結を止める条件が残っていないかを読む
   - do: admin.atlas.freeze
     with: {version: "{{freeze_version}}", note: "{{freeze_note}}", correspondence: "{{correspondence}}"}
     note: 対応を確かめて凍結する。取り消せないことを読んでから押す
@@ -68,6 +86,7 @@ expects:
   - manual: teacher/17-admin-atlas.md#vector-refresh
   - manual: teacher/17-admin-atlas.md#gap-incorporate
   - manual: teacher/17-admin-atlas.md#edge-incorporate
+  - manual: teacher/17-admin-atlas.md#edge-draft-from-frozen
   - manual: teacher/17-admin-atlas.md#freeze
   - manual: teacher/17-admin-atlas.md#freeze-correspondence
 watch_for:

@@ -33,6 +33,36 @@ steps:
         with: {label: '{{hidden_label}}', kind: hidden}
         note: 見送った隠しラベルをもう一度足す（見送り済みの戻しが、追加・既存と言い分けられるか）
     optional: true
+  # 第 25 周 第 8 周 share H52（第 7 周から持ち越し）: 記号の候補を探す → 結びついた記号の候補を確かめる、を場面の手に入れる
+  # （第 7・8 周は前提スクリプト・指揮者が代行し、自動の確定 → 取り消しが運転の符号を画面に残した — H49）。
+  # 確定済みでないエントリでは［記号の候補を探す］が押せない（その事実を読む）
+  - choose:
+      - do: admin.library.symbol_derive
+        with: {entry_hint: '{{entry_hint}}'}
+        note: ［記号の候補を探す］を押し、「結びついた記号」の直前の結果の文を読む
+    optional: true
+  # 第 25 周 第 9 波（share H54）: 記号のリンクが全部取り消し済み（既存の行があるので［記号の候補を探す］は新しい候補を作らない）とき、
+  # 取り消した記号の行で理由を書いて［候補に戻す］→ 戻した同じ行を［確認］/［見送り］→ エントリを凍結、を場面の手で通す
+  # （前提スクリプトでは戻さない — H49）
+  - choose:
+      - do: admin.library.identity_link_restore
+        with: {section: symbols, entry_hint: '{{entry_hint}}', reason: '{{symbol_restore_reason}}'}
+        note: 「結びついた記号」の取り消し済みの行で、判断し直す理由を書いて［候補に戻す］（理由が空なら画面は送らない）
+    optional: true
+  - choose:
+      - do: admin.library.bound_link_decide
+        with: {section: symbols, decision: confirm}
+        note: 記号の定義の文を読んで、この概念と同じものと言える記号だけを［確認］する（違えば次の手で見送る）
+      - do: admin.library.bound_link_decide
+        with: {section: symbols, decision: reject, reason: '{{symbol_reject_reason}}'}
+        note: 概念と違う記号を理由を書いて［見送り］する
+    optional: true
+  # 第 9 波（share H54）: 記号を確かめた後のエントリの凍結（学生の記号の吹き出しの概念名 — (e) — が届くのは凍結版）
+  - choose:
+      - do: admin.library.entry_freeze
+        with: {entry_hint: '{{entry_hint}}', note: '{{freeze_note}}'}
+        note: 確定済みのエントリで［凍結（版発行）］を押す（取り消せない旨の確認を読んでから。凍結しない判断なら飛ばす）
+    optional: true
   - do: admin.library.atlas_links_derive
     with: {domain_key: '{{domain_key}}'}
     note: 「地図との対応を導出」を押し、確認ダイアログの文を読んで導出する
@@ -46,6 +76,19 @@ steps:
       - do: admin.library.atlas_link_decide
         with: {status: dismissed, review_note: '{{dismiss_reason}}'}
         note: 違う対応を理由を書いて見送る
+    optional: true
+  # 第 25 周 第 8 周 share H52: 導出で対応が出ないとき、地図の概念を名前で探して手で対応を付ける（候補として作られ、確定は［確定］）
+  - choose:
+      - do: admin.library.atlas_link_manual
+        with: {q: '{{atlas_manual_query}}', entry_hint: '{{entry_hint}}'}
+        note: 地図の概念を名前で探し、合うものがあれば手で対応を付ける（作られるのは候補）
+    optional: true
+  # 第 25 周 第 10 波（share H63）: 検索だけで止まり［対応を付ける］まで進まなかった（材料に node_hint が無い）。検索の結果から
+  # 選んだ概念（名前か番号）で［対応を付ける］を押す手を分けて置く（作られるのは manual_curation の候補・確定は別の判断）
+  - choose:
+      - do: admin.library.atlas_link_manual
+        with: {q: '{{atlas_manual_query}}', entry_hint: '{{entry_hint}}', node_hint: '{{atlas_manual_node_hint}}'}
+        note: 検索の結果に合う概念があれば、その概念（名前か番号）を選んで［対応を付ける］を押す（合わなければ飛ばす）
     optional: true
   - do: admin.library.entry_create
     with: {name: '{{relation_object_hint}}', summary: '{{relation_object_summary}}', entry_type: concept}

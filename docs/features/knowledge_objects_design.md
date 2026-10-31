@@ -538,3 +538,65 @@ claim 本文保護 2 本・第2段突合 1 本・V-1 / V-3 / V-2 の回帰 3 本
 **回帰**: `test_knowledge_objects_persist.py::test_same_equation_id_in_two_blocks_does_not_collide` ほか 5 件
 （是正前のコードで全件落ちることを確認済み）。DELETE は増えず、既存文書の stable_key も変わらない
 （agent ID が一意な文書では従来と同じキーになる）。
+
+### 12.5 2026-10-27 第 6 波 — 版をまたぐ同一性（第 25 周 面 A・IK-1012 / IK-1020 / IK-1021・migration なし）
+
+再解析で LLM が部品名を言い換えると、component の stable_key（label を材料に含む）が一致せず、旧行は superseded・
+新行は別 UUID で INSERT される（KO3 どおり）。KO8 の再係留は **agent ID を持つ参照**だけを書き換える設計で、
+**部品の UUID を持つ人の記録**（C層 `component_explanations` とそれに吊られた支持・引用、`element_identity_links`
+の部品側、台帳 `epistemic_ledger` の component 行、W層の注釈・対話）と、**凍結したコースの ⚓**（agent ID
+`comp_003` — run ごとの連番で、再解析後は別の部品を指す）が置き去りになるか別物を指した。
+
+**オーナー判断（推奨どおり）**: 付け替えるのは、旧部品と新部品が**出典の重なり**（`evidence_claims` /
+`source_chunks` から引いた block_id の集合）で **1 対 1 に決まるときだけ**。決まらなければ旧行に残し（消さない）、
+画面で「この記録は再解析前の部品に付いています」と言う。名前を保護列にして supersede しない案は、直したい誤った
+名前まで固定するので採らない。凍結したコースの ⚓ は**新しい凍結から** DB UUID でも部品を指し、旧い凍結は読み時に
+記録を辿る。
+
+| 対象 | 是正 |
+|---|---|
+| `core/knowledge_objects/sync.py` | `SyncResult.superseded_ids` / `inserted_ids` を additive に返す |
+| `core/knowledge_objects/remap.py` | `match_superseded_components`（純関数: **相互に唯一の最良**で、Jaccard ≥ 0.5 か両側とも重なりの相手が唯一のときだけ結ぶ・同点は結ばない）/ `component_source_blocks`（基表 — KO5 の走査対象外の KO ディレクトリ）/ `reanchor_superseded_components`（決まった組を `element_id_remap` に `reanchored.remap_kind = "superseded_component"` で記録し、上記の人の記録を同じトランザクションで付け替える。一意制約に当たる行 — 標準の説明が新部品に既にある・同じ共有部品へのリンク・台帳の行キー — は動かさず `skipped` に残す）/ `successor_component_id`（記録を辿って live の後継へ・途切れれば `None`）/ `superseded_component_by_agent_id`（旧い凍結の ⚓ を**凍結時の部品名**で引く）/ `stranded_component_explanations`（後継の決まらない説明の列挙）。事実文の正本 `STRANDED_RECORD_NOTE` / `REMAPPED_COMPONENT_NOTE` / `SUPERSEDED_COMPONENT_LEARNER_NOTE` |
+| `core/document_pipeline/persistence.py` | `persist_components` が `_apply_remaps` の後に `_reanchor_superseded_components`（savepoint の内側・失敗は記録を旧行に残して同期は続ける）を呼び、要約を監査の `remap.superseded_component` に残す |
+| `core/frozen_component_refs.py`（新設） | `load_component_uuid_index` / `stamp_component_db_ids`（凍結時に `content_blocks` の部品の行と部品の `evidence_links` へ `db_id` を足す — 本文の `![[component:…]]`・`component_id` は不変）/ `frozen_component_ref` / `resolve_frozen_component` |
+| 学習者 API | `GET …/components/{id}/context` と `…/explanations` が凍結の記録から解決: `live` = その UUID / `remapped` = 後継 + `version_note` / `superseded` = `{"available": false, "note": …}`（説明は 404 + 同じ文）。凍結の手がかりが無いときは従来どおり |
+| 教員 API | 説明一覧は `X-Explanation-Fact` に「この論文には、再解析前の部品に付いたままの説明があります（…）」。同一性リンクの部品側が live に無い行は `instance_stranded_note` |
+
+#### pre-mortem（第 6 波の設計時の検査）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 再解析で人の記録を新しい行へ運ぶ | `reexecution-overwrites-human-decision` | 運ぶのは出典の重なりで 1 対 1 に決まる組だけ。決まらなければ旧行に残し、事実文で言う（消さない・推測で結ばない） |
+| 版をまたいで同じ対象を指す受け皿が内容キーにしか無い | `id-not-stable-across-versions` | 凍結は UUID を持ち、読み時は `element_id_remap` の記録だけを辿る（agent ID を跨 run の鍵に使わない） |
+| 同じ agent ID が run ごとに別の部品を指す | `id-namespace-conflated` | 旧い凍結は凍結時の部品名と一致する行だけを採る。複数の論文に当たれば解決しない |
+| 付け替えの失敗が同期を落とす | `failure-reported-as-success` | savepoint で隔離し、監査の要約に `failed` を残す（同期は成功として続けるが、付け替えなかった事実は残る） |
+
+原理 `sync-by-stable-key-and-protect-human-decisions` を読んだ（consulted）。併用する部品は「参照を結び直す」で、
+派生形「内容キーが一致しない場合の第 2 段突合」（P1-R3 の `fallback_match_column`）を出典の重なりへ広げた。
+非適用: 名前を保護列にする派生形（誤った名前を固定する）。
+
+### 12.6 2026-10-28 第 7 波 — 旧い凍結の ⚓ を読み時に後継へ（第 25 周 面 A・IK-1051 / IK-1012・migration なし）
+
+第 6 波の後、再解析より前に凍結したコース（`db_id` を持たない・`element_id_remap` に `superseded_component` の記録も
+無い — 再解析が第 6 波より前）は、⚓ が 1 つも開けなくなった（誤った部品を開かない是正は正しいが、袋小路が残った）。
+
+**オーナー判断（推奨どおり）**: 凍結した本文は変えない。⚓ の参照だけを、出典の重なりで 1 対 1 に決まるときに限り後継へ
+つなぐ — 再解析時の付け替えと**同じ規則**（`match_superseded_components`）を**読み時**に当てる。決まらなければ学生には
+事実文、所有者には凍結し直しの案内（G層 To-Do は作らない・自動で凍結し直さない）。0 件は「見つからない」と言う。
+
+| 対象 | 是正 |
+|---|---|
+| `core/knowledge_objects/remap.py` | `read_time_superseded_successor(session, component_id) -> (UUID | None, "matched" | "not_found" | "ambiguous")`: 旧の側 = 同じ論文で同じ run（`superseded_by_run_id`）に置き換わった部品の全部、新の側 = その run が新しく入れた部品（`produced_by_run_id` が同じで置き換わりの時刻帯に作られた行 — 内容を更新しただけの既存行は含めない）。**書き込みはしない**。対象の旧部品の出典が新の側のどれとも重ならなければ `not_found`、重なるが 1 対 1 に決まらなければ `ambiguous`。新事実文 `SUPERSEDED_COMPONENT_NOT_FOUND_LEARNER_NOTE`。取り残された説明の読み取り専用の材料 `stranded_component_explanation_records`（UUID を返さない）と案内の文 `STRANDED_*` |
+| `core/frozen_component_refs.py` | `resolve_frozen_component` は記録が無い superseded のとき `read_time_superseded_successor` を試し、決まれば `{"status": "remapped", "read_time": True}`、決まらなければ `{"status": "superseded", "reason": …}`。所有者への案内 `stale_frozen_component_labels`（学生と同じ解決で superseded の ⚓ の凍結時の部品名）/ `frozen_anchor_stale_notice`（名前の列挙・件数なし） |
+| 学習者 API | `superseded` の応答の `note` と `frozen_label_line` は `reason` で言い分ける（`label_vocab.frozen_component_superseded_line(label, reason)`）。`remapped` は第 6 波と同じ `version_note` |
+| 原稿スタジオ | `GET …/lecture-studio/course-structure` に `frozen_anchor_notice` / `frozen_anchor_stale_labels`（あるときだけ）。説明一覧に［再解析前の説明を開く（読み取り専用）］→ `GET /api/admin/theory-components/{id}/stranded-explanations` |
+
+#### pre-mortem（第 7 波の設計時の検査）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 旧い参照が一斉に解決不能になり、利用者には袋小路・所有者には沈黙 | `id-not-stable-across-versions` | 読み時に同じ規則でつなぎ、つながらない理由を 2 つに言い分け、所有者に凍結し直しを案内 |
+| 読み時の導出が書き込みになる | `stale-derivative-served` | 読み時の付け替えは記帳しない（毎回導出）。凍結し直せば `db_id` の直接の参照になる |
+| 内容を更新しただけの行を後継の候補に混ぜる | `same-name-different-referents` | 新の側は置き換わりと同じ時刻帯に作られた行に限る |
+
+原理 `sync-by-stable-key-and-protect-human-decisions` を読んだ（consulted）。

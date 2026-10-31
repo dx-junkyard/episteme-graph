@@ -1,0 +1,7 @@
+scenario: t-studio-reattach-all
+domain: astrophysics
+# 第 25 周 第 9 周（judge_studio_r8 §7）: 所有者 te-01 が 6be229e1 の付録をまとめて付け直す。押した後に周またぎの審判が
+# 学生 API で t0 の J=3・t1 の座標目盛り・t11 の英語の項目名が消えるかを引く（版ありなら発行の前後で）
+params:
+  goal_text: 付録が古いトピックをまとめて付け直し、受講者にいつ・何が届くのかを確かめること
+  studio_course_id: 6be229e1

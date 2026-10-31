@@ -1,0 +1,70 @@
+id: c-astro-r25-studio-r8
+domain: astrophysics
+snapshot: corpus-astro-tex-r25g
+course_id: 6be229e1
+personas:
+  teachers: [te-01-rookie-seminar, te-05-delegator-lab]
+  students: [st-01-m1-radio, st-08-m1-rprocess-lecture]
+scenarios:
+  teacher: [t-studio-split-save, t-studio-rewrite-shared]
+  student: [s-studio-lecture-pages, s-lecture-then-trace]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 8, persona_llm_calls: 220, wall_clock_minutes: 260}
+notes: |
+  第 25 周 面 D（原稿スタジオ → 学生の受講）の第 8 周（judge_studio_r7.md §7・r8_prereqs.md の面 studio と共通 1〜5・harness_fixes_r7_summary.md の
+  H34 / H35）。前提状態を変える周の 2 回目。教員 2 × 学生 2・4 場面:
+  te-01 × (a) t-studio-split-save（版ありの 6be229e1・**学生レーンを発行の前に**走らせ、発行の前後で学生の枚数を比べる。保存の画面に未発行の
+  変更の事実と［版の管理］への入口が出るか = IK-1053 の是正後）/ te-05 × (b') t-studio-rewrite-shared（editor として t0 を書き換え・音声の依頼の
+  出口「所有者に依頼する」の宛先と中身）/ st-01 × (d) s-studio-lecture-pages（t0 → t1 の境目 = IK-0976 の見直し後。t11 は届かない）/
+  st-08 × (d') s-lecture-then-trace（t11 の境目・復元の印と（原文）の印の 5 か所・講義中の質問の後の「▶ 再開」）。
+  所有者の［付録をまとめて付け直す］を押す場面（判断 1 の操作の初観察）は場面に無い（下の「場面に足りない手」）。
+  組の差し替え: 指揮者の組の st-07 × (d') は、st-07 が share の (d) と doubt の地図の問い（音声）にも出るので（3 面）、地図の海だけの st-08 に替えた。
+  組の例外（P-0025）: te-01 × (a) は第 1・2・5〜7 周と同じ組（6be229e1 の所有者は te-01 だけ。今回は学生レーンを発行の前に置き、IK-1053 の是正後）。
+  te-05 × (b') は第 4・7 周と同じ組（今回は音声の依頼の出口）。st-01 × (d) は第 3・7 周と同じ組（IK-0976 の見直し後の前後比較）。
+  st-08 × (d') は新しい組（第 1・2 周の st-08 は (d) の講義のページ。(d') は初めて）。
+  学生の面: st-01 は studio と atlas の足跡なし（2 面）・st-08 は studio と atlas の海（2 面）。atlas の場面を先に歩く（足跡なしの条件を壊さないため
+  ST01_DONE_R8 / 同じ学生を同時に走らせないため ST08_DONE_R8 を待つ）。
+  share の campaign も固定コースを 6be229e1 にした（1bad7d9f の ⚓ が 0 個 — r8_prereqs.md「周の前の実測」）ので、share・doubt の学生（st-07・st-04・
+  st-10・st-05）も同じ 6be229e1 を読む。版 2 の発行（レーン 7）がそれらの学生の読みと重なると前後が混ざるので、指揮者は share の LANE_DONE_R8 と
+  doubt の ST05_DONE_R8 / ST07_DONE_R8 も確かめてから発行する（face スクリプトは share・doubt の学生の後に RELEASE2_GO_R8 を出す）。
+
+  一括の確かめと用意: `backend/.venv/bin/python uxsim/runs/round25/r8_prereqs.py --dry-run`（= r5_prereqs.py --round 8。studio_editor te-05 はこの
+  campaign の組と一致）。
+
+  ── 周の前に指揮者が用意するもの（この順。r8_prereqs の項目名）──
+   1. 製品の第 7 波（IK-0976 の見直し・IK-1053 / 1054 の是正）と H34 / H35 → 投影の同期 → この前提 → 周（共通 1）。snapshot は corpus-astro-tex-r25g。
+      persona_profile_names（共通 2）。
+   2. studio_t16_no_split / studio_visibility / te01_course_head（第 7 周と同じ項目）。t16 の区切りを外す do は `--allow-topic-write` のときだけ
+      （保存は音声キャッシュを消す — その場合は run の記録に書く）。
+   3. studio_course_editor（te-05 に 6be229e1 の editor）。share の te-02 にも 6be229e1 の editor が要る（c-astro-r25-share-r8 の用意 6）。
+   4. studio_course_release（版 1 あり）。学生レーンは版 1 を読む。版 2 の発行は周の中の指揮者の手（下のレーン 7）。
+   5. 学生の固定コースは pin_course（runner）。st-01・st-08 が 6be229e1 を受講していなければ場面の enroll が受講を始める。
+
+  ── レーンの順（face_studio_r8.sh。--persona X --scenario Y で 1 場面ずつ・この順で）──
+   1. te-01-rookie-seminar × t-studio-split-save（版ありで t16 を両欄に区切って保存 → 未発行の事実と［版の管理］→ t17 を区切らずに保存）
+      → mailbox_studio/SPLIT_DONE_R8
+   2. te-05-delegator-lab × t-studio-rewrite-shared（t0 の書き換え →［案をコピー］の宛先 → 保存の事前表示・音声の依頼の出口）
+   3. ⇢ mailbox_atlas/ST01_DONE_R8 ⇢ st-01-m1-radio × s-studio-lecture-pages（t0 → t1）
+   4. ⇢ mailbox_atlas/ST08_DONE_R8 ⇢ st-08-m1-rprocess-lecture × s-lecture-then-trace（t11）
+   5. ⇢ mailbox_share/LANE_DONE_R8 と mailbox_doubt/LANE_DONE_R8（同じ 6be229e1 を読む他の面の学生が版 1 のうちに読み終える）
+   6. 周またぎの審判（発行の前）: `run_all <run_dir> --campaign --student-api --phase before`（学生は campaign の personas.students[0] = st-01 が既定）
+      → mailbox_studio/RELEASE2_GO_R8（学生レーンの後 — H34 の印の向き）
+   7. ⇢ 指揮者が te-01 として 6be229e1 の版 2 を発行し mailbox_studio/RELEASE2_DONE_R8（発行しない判断なら RELEASE2_SKIP_R8）
+   8. 周またぎの審判（発行の後）: `--phase after`（学生の枚数が保存の直後の枚数に揃うか — X1 の版ありの経路）
+  最後に mailbox_studio/LANE_DONE_R8。
+
+  場面に足りない手（ハーネスへの申し送り・この campaign では足していない）:
+   - 所有者の［付録をまとめて付け直す］（admin.lecture_studio.reattach_appendix_all・第 6 波に行為はある）が t-studio-split-save の steps に無い
+     （steps はトピック単位の［付録を付け直す］だけ）。審判の「te-01 が押した後に学生 API で t0 の J=3・t1 の座標目盛り・t11 の英語の読み下しが
+     消えるか・版ありで発行の前後に学生の付録が変わるか」は観察できない。指揮者が代わりに押すかは判断（押すなら発行の前の審判の後・版 2 の発行の
+     前に te-01 として 1 回押し、mailbox_studio/REATTACH_ALL_R8 を出して run の記録に書く — ペルソナの観察ではない）。
+   - IK-1053 の［版の管理］を開く手が場面に無い（保存の告知の文と入口の有無を digest で読むまで）。版の発行も場面の外（レーン 7）。
+   - t-studio-rewrite-shared に音声の依頼（「所有者に依頼する」）を押す手が無い（行為 audio_generate の理由の文までは audio_readiness で読めない —
+     場面に audio_readiness も無い）。
+   - s-studio-lecture-pages は 2 つ目以降のトピックを「次のトピック」でしか開けないので、st-01 は t0 → t1 → t2 までで t11 に届かない（t11 は st-08）。
+
+  LLM 予算の見積り: 書き換え 1 + st-08 の講義中のチャット 最大 3 + st-01 0 = 最大 4 回
+  （余裕を見て 8）。音声生成・図スタジオ・TTS は呼ばない。版の発行・周またぎの審判（--student-api は読み取り）は LLM を使わない。ペルソナ頭脳は
+  4 場面 × 45〜55 手 ≒ 180〜220（上限 220）。外部 API は呼ばない。

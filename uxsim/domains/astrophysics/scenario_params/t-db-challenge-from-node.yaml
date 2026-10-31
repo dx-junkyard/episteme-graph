@@ -1,3 +1,6 @@
+# 第 25 周 第 8 周 doubt H50 / H51: 根拠・理由の固定文は場面の材料。runner が送るときに観察へ「この欄は場面の材料」を添える
+# （doubt_exec.note_scenario_material）。第 10 波（H60）: 文の頭の「（場面の材料・第 N 周）」は外した（周ごとに理由が変わり、
+# 疑義の重複の告知 — 同じ型・同じ理由の完全一致 — に当たらなかった）。目印は材料の値との一致で観察に付く
 scenario: t-db-challenge-from-node
 domain: astrophysics
 # 第 25 周 第 4 周（te-03）。Cepheus B の論文（te-03 に editor 共有があること — 周の前に確かめる）
@@ -14,3 +17,26 @@ per_archetype:
   veteran_clicks_through:
     challenge_reason: 適用範囲の外挿。
     second_reason: 定義が曖昧。
+personas:
+  te-04-copilot-intro:
+    # 第 5 周（judge_doubt_r4 §4）: 取り下げまで通し、台帳を開き直して作った検証提案が読めるか（IK-0968 の是正後）。
+    # Cepheus B の論文（TeX 版）の editor 共有が te-04 にあることを周の前に確かめる
+    challenge_reason: 等分配の仮定が成り立つ範囲より外の領域にまで、この推定を当てはめているように読めます。
+  te-01-rookie-seminar:
+    # 第 6 周（judge_doubt_r5 §4）: 取り下げ → 台帳を開き直して取り下げ済みの疑義が読めるか（IK-0998 の是正後・折りたたみ）、
+    # 支える主張の印（IK-1003）。Cepheus B の論文（TeX 版）の editor 共有が te-01 にあること（cepheus_editor）
+    challenge_reason: 等分配の仮定が成り立つ範囲より外の領域にまで、この推定を当てはめているように読めます（自信はありません）。
+    second_reason: 「乱流」という言葉の意味が節ごとに少し違って見え、根拠からこの主張へのつながりが自分には読み取れません。
+  te-03-meticulous-seminar:
+    # 第 7 周（judge_doubt_r6 §4）: H39（「疑義2」「提案1」を番号として読む）の是正の後に、自分の未対応の疑義を提案化 → もう 1 件を
+    # 取り下げ → 取り下げ直後の note と折りたたみの中身を開いて読む（IK-0998 の残り・6 周未到達）。Cepheus B の論文（TeX 版）の
+    # editor が te-03 にあること（第 4 周に与えたもの — cepheus_editor は te-02 を見るので、te-03 は --cepheus-teacher で別に確かめる）
+    challenge_reason: 等分配の仮定が成り立つ範囲より外の領域にまで、この推定を当てはめているように読めます。どの節でその範囲を確かめたかが本文に見当たりません。
+    second_reason: 「乱流」の定義が第 2 節と第 4 節で異なって読め、根拠からこの主張が出てくるつながりが確かめられません。
+    # 第 8 周（judge_doubt_r7 §4・H44 の是正後）: 第 7 周に取り下げた疑義 2 がある主張から入り、取り下げ済みの折りたたみ
+    # （withdrawn_challenges_open）の中身（型・向き・理由・取り下げた人）を読む。提案の［完了を記録］は場面の steps に無い
+    # （proposal_status は「検証に着手」だけ — campaign notes「場面に足りない手」）
+    # 第 10 周（judge_doubt_r9 §4・H54）: 提案の［完了を記録］を場面に入れた（任意の手）。前提の地図のコースを 1bad7d9f に固定し、
+    # 合意リストの Cepheus の行に「検証提案あり」が出るかまで読む（周の前に r10_prereqs の doubt_te03_course_hint で、
+    # te-03 の前提の地図の選択肢に 1bad7d9f が並ぶかを確かめる）
+    course_hint: 1bad7d9f

@@ -121,7 +121,8 @@ def test_relation_add_by_name_records_runner_note():
         return httpx.Response(200, json={"labels": [], "relations": [], "links": []})
 
     s, _, _ = _run("admin.library.relation_add", {"kind": "related", "object_hint": "状態方程式"}, h, session=s)
-    assert bodies == [{"subject_entry_id": "e1", "object_entry_id": "e2", "kind": "related"}]
+    # 第 8 波（IK-1063）: 画面は理由の欄（任意）の値を送る（空なら空文字）
+    assert bodies == [{"subject_entry_id": "e1", "object_entry_id": "e2", "kind": "related", "reason": ""}]
     assert "相手の選択: 状態方程式" in str(s.last_body)
 
 

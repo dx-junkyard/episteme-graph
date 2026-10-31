@@ -27,7 +27,7 @@ steps:
   note: 最初から聴く
 # 第 25 周 第 4 周（studio H16 の残り）: 講義はスライドを 1 枚ずつ出す。分からない式に当たるまで ▶ で送る
 - repeat:
-    until: persona_decides_to_stop or steps > 4
+    until: persona_decides_to_stop or steps > 4 or lecture_at_end
     max: 4
     steps:
     - do: learning.lecture.next
@@ -36,18 +36,27 @@ steps:
   with:
     symbol: '{{symbol_hints | next}}'
   note: 止めて、聞き取れなかった記号の定義を確かめる
-- do: learning.component.context
-  note: いまのスライドの ⚓ を開く
+# 第 25 周第 5 周 studio H29: ⚓ は「チップがあれば」の条件付き。部品・主張のチップが 1 つも無いトピック（t16 など）では
+# 式 → 記号 → ⚓ が成り立たないので、無ければ飛ばしてチャットへ進む（行為が行われなかったことを辿りの途切れに数えない）。
+# 既定のトピック（t11 = 二重ネットワークとTOV方程式）にはチップがある
+- choose:
+  - do: learning.component.context
+    note: いまのスライドに ⚓（部品・主張のチップ）があれば開く
+  optional: true
 - repeat:
     until: persona_decides_to_stop or steps > 3
     max: 3
     do: learning.chat.ask
     with:
       message: '{{interrupt_questions | next}}'
-- do: learning.lecture.sequence
-  note: 続きから聴く
+# 第 25 周 第 6 周 studio H33: 講義中に質問を送ると講義は一時停止し、モードバーに「▶ 再開」が出る。続きから聴く手を置く
+- choose:
+  - do: learning.lecture.resume
+    note: モードバーの「▶ 再開」で、止めたスライドから続きを聴く
+  - do: learning.lecture.sequence
+    note: 🎙 講義をもう一度押して最初から聴く
 - repeat:
-    until: persona_decides_to_stop or steps > 8
+    until: persona_decides_to_stop or steps > 8 or lecture_at_end
     max: 8
     steps:
     - do: learning.lecture.next

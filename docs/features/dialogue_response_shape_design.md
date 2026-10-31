@@ -167,3 +167,15 @@ system に足す直後（`messages: list[dict] = [` の前）。保存文・痕�
   `_FIRST_EN` / `_ANSWERED_MARKER_EN` / `PREREQUISITE_CHOICE_*_EN`。RS5 の形（本文 → `\n\n---\n\n` + 目印 + 逆質問）は不変で、
   判定器は `_is_prerequisite_gate_for_topic` / `_prerequisite_gate_first_name` 経由で日英両方を読む。日本語の発話の逆質問は
   バイト一致。テストは `test_ik0574_prerequisite_gate_language.py`。
+
+### 8.3 訂正の持ち越しと出典の目印（2026-10-27・第 25 周 第 5 波, IK-1006）
+
+`_correction_source_text` は出典の目印を空文字で剥がしていたため、前の回答が目印を名詞として使っていると
+（「前の回答の「[出典3]」は」）持ち越しの訂正文が「前の回答の「」は」と欠けた。剥がしは
+`core/text_hygiene.remove_citation_markers` に一本化し、名詞の位置の目印は「前の回答で挙げた出典」（直前が「の」なら
+「出典」）に置き換える。応答本文の `_reconcile_citation_markers` も同じ関数で、根拠の無い番号を「確認できない出典」に
+置き換える（保存文の形 = RS5 は不変。区画の組み立て `assemble` は非改変）。
+
+pre-mortem: `information-dropped-as-unrepresentable`（除去が文の要素を壊す）— 付記と名詞の位置を区別する。
+`duplicate-canonical-sources` — 目印の正規表現は `text_hygiene.CITATION_MARKER_RE` を正本にし、
+`routes/learning.py::_CITATION_MARKER_RE` は別名。

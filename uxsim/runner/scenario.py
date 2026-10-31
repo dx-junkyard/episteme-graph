@@ -19,6 +19,7 @@ steps の要素:
 until の式（``or`` / ``and`` でつなぐ。and が先に結合）:
 ``friction in [a, b]`` / ``friction == a`` / ``steps > N``（>= < <= == != も可）/ ``status >= 400`` /
 ``response is 429`` / ``goal_reached`` / ``persona_decides_to_stop`` / ``gave_up`` / ``blocked`` / ``budget_exhausted``
+/ 状態の旗 ``freeze_ready``（``STATE_FLAGS`` — runner が画面の状態から立てる。繰り返しの各回の頭でも見る）
 """
 from __future__ import annotations
 
@@ -33,7 +34,13 @@ from uxsim.actions import registry
 from uxsim.config import UXSIM_ROOT
 
 _TEMPLATE_RE = re.compile(r"\{\{\s*([A-Za-z_][\w.]*)\s*(?:\|\s*(\w+)\s*)?\}\}")
-_FLAGS = ("gave_up", "blocked", "budget_exhausted", "goal_reached", "persona_decides_to_stop")
+# 状態の旗（第 25 周 H25・第 4 周）: runner が画面の状態から立てる旗（``session.scratch["until_flags"]``）。
+#   freeze_ready: 分野の地図で、次版の下書きがあり、採用済みでまだ下書きに入っていない候補・関係が無い
+#   （凍結を止める「採用済み・未反映」が残っていない）。反映の繰り返しの終わりに使う
+#   lecture_at_end: 講義の最後の枚で ▶ をもう一度押した（画面は先へ進まない）。頭脳が stop を立てなくても送りの繰り返しを
+#   抜けて次の手へ進む（第 25 周 第 7 周 — 頭脳の運転の観察）
+STATE_FLAGS = ("freeze_ready", "lecture_at_end")
+_FLAGS = ("gave_up", "blocked", "budget_exhausted", "goal_reached", "persona_decides_to_stop") + STATE_FLAGS
 _CLAUSE_RE = re.compile(
     r"^\s*(?:friction\s+in\s+\[(?P<set>[^\]]*)\]"
     r"|response\s+is\s+(?P<resp>\d{3})"
@@ -93,6 +100,11 @@ def evaluate_until(expr: str, ctx: dict[str, Any]) -> bool:
     if not expr or not str(expr).strip():
         return False
     return any(all(_eval_clause(c, ctx) for c in part) for part in _split(expr))
+
+
+def state_flags_in(expr: str) -> list[str]:
+    """until 式に現れる状態の旗（``STATE_FLAGS``）。"""
+    return [c.strip() for part in _split(expr) for c in part if c.strip() in STATE_FLAGS]
 
 
 def validate_until(expr: str) -> None:

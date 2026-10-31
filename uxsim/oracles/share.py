@@ -24,6 +24,11 @@ A 契約:
   retired・draft・ロールの英字）がそのまま出ている（IK-0865 — 第 25 周 第 2 周の提案）
 - A12 同一性リンクの作成（POST /api/admin/deliberation/identity-links・2xx）の応答の ``id`` が、同じ run の前の作成と同じなのに、
   観察が「作成しました」と言っている（既存のリンクを返しただけなのに新しく作ったように読める — IK-0918・第 25 周 第 3 周）
+- A13 同一性リンクの行が ``decidable: false``（判断の対象でない — 第 9 波・IK-1076）なのに、理由の事実文
+  ``undecidable_note`` が無い / 判断の問い（``confirm_question`` / ``confirm_note`` / ``granularity_note``）を持っている
+  （判断できる行はキーを足さない契約なので、``decidable`` が無い行は見ない — 偽所見を作らない）
+- A14 説明の一覧で ``can_cite: false``（引用できない — 第 9 波・IK-1077）なのに ``cite_note`` が無い
+  （画面はボタンを出さず理由も出さない）。A1 は ``/cite`` の 403 の ``detail`` も見る（日本語の事実文の契約）
 - A11 ナレッジライブラリのタブから聞いた Copilot の回答の出所（citations の先頭）が、この画面（ライブラリ）の
   手順でも節でもない（IK-0865 — 案内役が隣の古い項目で答えた）
 
@@ -33,13 +38,16 @@ B 原則:
 - B2 学生の応答に数（共通部品の ``other_documents_count``・教員の支持の内訳 ``endorser_count`` 等・``hidden_count``）
 - B3 学生の ``concept_ref`` に名前と種別のラベル以外の欄
 - B4 教員の同一性の候補で論文の題名が空のリンク（画面は題名の代わりに論文の内部 ID を出す）
+- B6 学生の記号の照会・部品の文脈の表示語（``facts`` / ``name`` / ``label`` / 見出し）に TeX の label キー（``eq:…``）
+  が出ている（第 9 波・IK-0681 — 是正後は「番号の無い式」・一般ラベルに数える）
 - B5 教員の深く検討の同一性リンクの行に表示語（``instance_type_label`` と名前か題名）が無く、画面が論文の内部 ID を出す
   （第 3 波の是正後は表示語で描くので、旧サーバの形の行だけを拾う）
 
 E 観測（砂場 DB の SELECT だけ・engine か URL があるときだけ）:
 - E1 学生に「共通部品として」「概念」が見えた名前のエントリが、確定（confirmed）・公開（active）の行として無い
   （候補・見送りの概念が学生に届いた疑い — KR2）
-- E2 教員が［見送り］／［却下］した同一性リンク（200）が ``element_identity_links`` に ``rejected`` で残っていない（P4）
+- E2 教員が［見送り］／［却下］した同一性リンク（200）が ``element_identity_links`` に ``rejected`` で残っていない（P4。
+  第 8 波: 後で［候補に戻す］・［確定を取り消す］を押したリンクは、その最後の判断だけを見る）
 - E3 教員が［見送り］にした概念（200）が ``library_entries`` に見送りの状態と理由で残っていない（KR7）
 """
 from __future__ import annotations
@@ -65,7 +73,9 @@ CONCEPT_REF_ALLOWED = frozenset({"name", "entry_type_label"})
 INTERNAL_ERROR_WORDS = ("Traceback", "KeyError", "NoneType", "TypeError", "AttributeError", "Exception")
 _JAPANESE = re.compile(r"[぀-ヿ一-鿿]")
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
-_LINK_DECIDE_RE = re.compile(r"/identity-links/(?P<id>[^/]+)/(?P<decision>confirm|reject)$")
+# 第 8 波（IK-1062）: restore（候補に戻す）・revoke（確定の取り消し）も読み、同じリンクの最後の判断だけを E2 に渡す
+# （見送り → 候補に戻した行は DB で candidate になるのが正しい — 偽所見を作らない）
+_LINK_DECIDE_RE = re.compile(r"/identity-links/(?P<id>[^/]+)/(?P<decision>confirm|reject|restore|revoke)$")
 _ENTRY_REVIEW_RE = re.compile(r"/library/entries/(?P<id>[^/]+)/review$")
 
 LAYERS = {
@@ -122,7 +132,9 @@ def _make(factory: FindingFactory, step: TranscriptStep, *, oracle: str, severit
 # A 契約
 # ---------------------------------------------------------------------------
 def _check_detail(step: TranscriptStep, t: HttpTrace, body: Any, factory: FindingFactory) -> list[Finding]:
-    if t.status not in (409, 422):
+    # 第 9 波（IK-1077）: 引用の 403 の detail も日本語の事実文（「この説明は共有されていないため…」）
+    cite_403 = t.status == 403 and (t.path or "").endswith("/cite")
+    if t.status not in (409, 422) and not cite_403:
         return []
     detail = body.get("detail") if isinstance(body, dict) else None
     where = f"{t.method} {t.path}"
@@ -163,6 +175,61 @@ def _check_identity_shape(step: TranscriptStep, t: HttpTrace, body: Any, factory
     if any(c.get("hidden_unresolved") is True for c in cands) and len(facts) == 0:
         out.append(_make(factory, step, oracle="A", severity="confused", key="identity_unresolved_no_fact",
                          hypothesis="参照できない要素への候補を落としたのに、落としたことを言う事実文が無い"))
+    return out
+
+
+TEX_LABEL_KEY_RE = re.compile(r"(?<![A-Za-z0-9_])eq:[A-Za-z0-9_]")
+TEX_LABEL_DISPLAY_KEYS = ("facts", "name", "label", "title", "heading", "fact_line")
+
+
+def _check_learner_tex_label(step: TranscriptStep, t: HttpTrace, body: Any, factory: FindingFactory) -> list[Finding]:
+    """B6（第 9 波・IK-0681）。表示語の欄だけを見る（番地キー・本文は見ない — 偽所見を作らない）。"""
+    if body is None or step.action_id not in ("learning.symbol.lookup", "learning.component.context",
+                                              "learning.component.context_hop"):
+        return []
+    hits: list[str] = []
+    for d in _walk(body):
+        for k in TEX_LABEL_DISPLAY_KEYS:
+            v = d.get(k)
+            vals = v if isinstance(v, list) else [v]
+            hits += [str(x) for x in vals if isinstance(x, str) and TEX_LABEL_KEY_RE.search(x)]
+    if not hits:
+        return []
+    return [_make(factory, step, oracle="B", severity="principle", key="learner_tex_label", quote=hits[0][:200],
+                  hypothesis="学生の記号の吹き出し・部品の文脈の表示語に、TeX の式の label キー（eq:…）がそのまま出ている")]
+
+
+UNDECIDABLE_QUESTION_KEYS = ("confirm_question", "confirm_note", "granularity_note")
+
+
+def _check_decidable_shape(step: TranscriptStep, t: HttpTrace, body: Any, factory: FindingFactory) -> list[Finding]:
+    """A13 / A14（第 9 波・IK-1076 / IK-1077）。切れた応答（body が読めない）は見ない。"""
+    if t.status != 200 or body is None or t.method.upper() != "GET":
+        return []
+    path = t.path or ""
+    out: list[Finding] = []
+    if path.endswith(("/identity-links", "/identity-candidates")):
+        rows = [d for d in _walk(body) if d.get("decidable") is False]
+        no_note = [d for d in rows if not str(d.get("undecidable_note") or "").strip()]
+        asks = [d for d in rows if any(d.get(k) for k in UNDECIDABLE_QUESTION_KEYS)]
+        if no_note:
+            out.append(_make(factory, step, oracle="A", severity="confused", key="undecidable_no_note",
+                             hypothesis="判断の対象でない同一性リンクの行に、判断できない理由の事実文が無い"
+                                        "（画面はボタンを出さず、理由も出さない）",
+                             server_rows={"where": f"{t.method} {path}"}))
+        if asks:
+            out.append(_make(factory, step, oracle="A", severity="inconsistent", key="undecidable_asks",
+                             hypothesis="判断の対象でない同一性リンクの行が、確定の問いや確認の文を持っている",
+                             server_rows={"where": f"{t.method} {path}",
+                                          "keys": sorted({k for d in asks for k in UNDECIDABLE_QUESTION_KEYS if d.get(k)})}))
+    if path.endswith("/explanations"):
+        exps = body if isinstance(body, list) else (body.get("explanations") if isinstance(body, dict) else None)
+        bad = [e for e in exps or [] if isinstance(e, dict) and e.get("can_cite") is False
+               and not str(e.get("cite_note") or "").strip()]
+        if bad:
+            out.append(_make(factory, step, oracle="A", severity="confused", key="cite_no_note",
+                             hypothesis="引用できない説明に、引用できない理由の事実文が無い（［別コースで引用］が黙って消える）",
+                             server_rows={"where": f"{t.method} {path}"}))
     return out
 
 
@@ -429,8 +496,10 @@ def check(steps: list[TranscriptStep], factory: FindingFactory) -> list[Finding]
                 out += _check_derive(step, t, body, factory)
                 out += _check_dismiss_kept(step, t, body, factory)
                 out += _check_teacher_ids(step, t, body, factory)
+                out += _check_decidable_shape(step, t, body, factory)
             elif t.status == 200:
                 out += _check_learner_keys(step, t, body, factory)
+                out += _check_learner_tex_label(step, t, body, factory)
     return out
 
 
@@ -474,6 +543,8 @@ def teacher_decisions(steps: list[TranscriptStep]) -> dict[str, list[dict]]:
             entry = body.get("entry") if isinstance(body, dict) else None
             if m and isinstance(entry, dict) and entry.get("review_status") == "dismissed":
                 entries.append({"id": m.group("id"), "seq": s.seq})
+    last = {l["id"]: i for i, l in enumerate(links)}
+    links = [l for i, l in enumerate(links) if last[l["id"]] == i and l["decision"] in ("confirm", "reject")]
     return {"links": links, "entries": entries}
 
 

@@ -10,9 +10,39 @@ params:
   relation_object_hint: 状態方程式
   relation_object_summary: 圧力とエネルギー密度の関係。TOV 方程式に与えると質量と半径の関係が決まる。
   dismiss_reason: 骨格のこのノードは観測の手法の領域で、この部品の理論の内容とは対応しないため
+  # 第 25 周 第 8 周 share H52: 記号の見送り・地図の手付けの材料（人の言葉で — 運転の符号を入れない = H49）
+  symbol_reject_reason: 記号の定義の文が指しているのはこの概念とは別の量で、同じものとは言えないため
+  atlas_manual_query: 中性子星
+  # 第 25 周 第 9 波（share H54）: 取り消し済みの記号の行を判断し直す理由・凍結のメモ（人の言葉で — 運転の符号を入れない = H49）
+  symbol_restore_reason: 取り消した記号の定義の文をもう一度読み、この概念と同じ量かを判断し直したいため
+  freeze_note: 記号の結び付きを確かめたので、学生の記号の吹き出しに届く版にする
+  # 第 10 波（H63）: 検索の結果から選ぶ地図の概念（空 = 検索だけ）
+  atlas_manual_node_hint: ""
 personas:
   te-05-delegator-lab:
     dismiss_reason: 対応の根拠が画面から読めないため保留として見送る
   te-02-veteran-intro:
     # 第 3 周: 第 2 周に te-05 が足した別名が残った砂場で、同じ別名を足し直す（IK-0897 の outcome の書き分け）
+    # 第 7 周（judge_share_r6 §6）: 前提①②（対のエントリの確定・凍結と、記号リンク 1 本の確定 → 凍結し直し）の後の確定済み・
+    # 凍結版のあるエントリで、見送り済みのラベルの読み直し（IK-1024 の是正後）・地図との対応の導出の結果。記号の候補を探す手
+    # （admin.library.symbol_derive）と地図の対応を手で付ける手（admin.library.atlas_link_manual）は行為にあるが場面の steps に無い
+    # （campaign notes の「場面に足りない手」）
     dismiss_reason: 領域が違う
+  te-04-copilot-intro:
+    # 第 6 周（judge_share_r5 §6・第 5 周から回した組）: 見送り済みラベルの足し直し（IK-0897）と地図との対応の手動の入口（IK-0927）
+    dismiss_reason: AI に尋ねても対応の根拠が論文の文から示されなかったため、いまは結ばない
+  te-03-meticulous-seminar:
+    # 第 8 周（judge_share_r7 §6・H44 の是正後）: TeX 版の記号候補（L_TOV / N_TOV / F_EOS）が残った状態で（記号の候補を探す手・確定の手は
+    # 場面の steps に無い — この run の後に指揮者が te-03 として候補を読んで確定 → 凍結を判断する。campaign notes）、
+    # 確定済み・凍結版のあるエントリの記号の結び・見送り済みのラベル・地図との対応の導出を几帳面に読む。地図の対応を手で付ける手
+    # （admin.library.atlas_link_manual）も場面に無い
+    dismiss_reason: 骨格のこのノードは観測の手法の領域で、TOV 方程式の理論の内容とは対応しないため結ばない
+    # 第 10 周（judge_share_r9 §6・H54）: 記号のリンク 5 本は全部取り消し済み。場面の手で［候補に戻す］→ 同じ行を確かめて［確認］/［見送り］
+    # → エントリの凍結（凍結するかはペルソナの判断）。st-04 の (e) はこの後に同じ 1bad7d9f の t11 で記号の概念名を読む
+    symbol_restore_reason: 取り消した記号の定義の文を読み直し、TOV 方程式の量と同じものかを判断し直したいため
+    # 第 10 波（judge_share_r10 H59）: 「TOV」は 2 つのエントリ（67727cb0「TOV residual loss at collocation points」/
+    # f55ad8ca「TOV 方程式（静水圧平衡）」）に当たり、第 10 周は記号の付かない後者が開いた。取り消し済みの記号 5 本が付く
+    # 67727cb0 を id の頭で指す（share_exec._resolve_entry は 8 桁以上の 16 進の hint を id の前方一致で引く）
+    entry_hint: 67727cb0
+    # 第 10 波（H63）: 地図の概念を名前で探した後、選んだ概念に［対応を付ける］まで進める材料（作られるのは候補・確定は別の手）
+    atlas_manual_node_hint: 中性子星

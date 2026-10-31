@@ -418,3 +418,18 @@ Fable 5 指揮 + Opus 5 サブエージェント4体（core / API / 統合 / フ
   スクリプトを 1 回走らせ、その分位（数値は教員・学習者の画面に出さない設計書の記録として）をこの節に
   書いてから変える。学習者の糸の一色問題（IK-0887 残り）は校正と根拠の一文の配線が揃うまで残課題。
 - 索引の区画の版の言い方は「現在の公開版（地図 版 X）」（`VECTOR_INDEX_*`・IK-0942）。
+
+### 13.2 第 4 波の追補（2026-10-25・IK-0965）
+
+- 「作り直しが要るか」の判定を 1 つにした: `builder._attach_source_hashes` を再構築と索引の状態（`material_changed_node_ids`・
+  **embedding を呼ばない**）が共有する。状態は行の本数だけでなく材料（別名・確認済み配置の引用）の指紋を比べ、変わった項目があれば
+  「作り直す必要はありません」と言わず項目名を列挙する。再構築の応答に `embedded_node_ids`、結果文は新しく索引した項目を名前で言う（件数なし）。
+
+### 13.3 第 5 波の追補（2026-10-27・IK-0993）
+
+- 凍結が裏で始める索引の構築の途中を、`core/atlas_vectors/builder.py` の構築中の印（`mark_build_started` /
+  `mark_build_finished` / `build_in_progress`。プロセス内・DB に書かない・thread の finally で必ず外す）で表す。
+  `vectors/status` は `building` と事実文 `VECTOR_INDEX_BUILDING`（手作業を促さない）を返し、構築中の
+  `vectors/refresh` は二重に embedding を走らせず `{status: skipped, skipped_reason: building_in_progress, fact}` を返す。
+  凍結の応答の形は変えない（VA4）。複数プロセスでは他プロセスの構築は見えず、従来の文に縮退する（誤って「作っています」と言わない）。
+- pre-mortem は `field_atlas_overlay_spec.md` §17.1。

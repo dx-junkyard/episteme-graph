@@ -294,3 +294,44 @@ Fable 5 指揮 + Opus 5 サブエージェント4体（core / 管理UI / 学習�
   `overrides_other_teacher` と理由を残す。
 - **区画の説明（IK-0943）**: `EDGE_GROUP_INTRO` を定義の文に（出所チップの語「プロトタイプ近傍」「共起」の
   意味を括弧で言う）。
+
+### 11.z3 第 25 周 第 4 周の是正（2026-10-25 追補・第 4 波・migration なし・IK-0962 / 0966 の辺版 / 0887 残り）
+
+- **IK-0962**: 管理画面の採用操作が候補の `origins` から `origin` を送る（論文の共起を優先）。記録の無い過去の採用は、反映の確認と
+  凍結の止め理由で `derive.derived_origins_for_keys`（いま導出される組だけ・保存済みアンカーの読みのみ = RE6）から
+  「採用の時点の根拠は記録されていません。いまの導出では: …」と**時点を明示して**添える。導出されない組は「記録はありません」のまま（推測で埋めない）。
+- **IK-0966**: 外れた辺の判断の区画の冒頭は定義の文（`EDGE_ORPHANED_NOTE`）で、凍結を止める一文は下書きに入っていない関係があるときだけ
+  （`atlas_review_display.orphaned_note(..., edge=True)`）。
+- **IK-0887 残り**: 学習者の糸に `basis_line`（組の名前で根拠を言う一文・数値なし。正本 `threads.THREAD_BASIS_TEMPLATE`）。
+  `_ITEM_KEYS` は 6 キーに（RE4 は不変 — 文であって数値ではない）。画面は「糸ごとの根拠」の折りたたみ。閾値の校正と一色は残課題。
+
+### 11.z4 第 25 周 第 5 周の是正（2026-10-27 追補・第 5 波・migration なし・IK-0993 / 0994 / 0989 の糸）
+
+- **IK-0994**: `POST .../edge-candidates/decide` の応答に `result_line`（組の名前の結果文・正本
+  `atlas_review_display.edge_decide_result_line` = 採用 / 見送り / 戻す）。画面は結果文を出したまま一覧を読み直す
+  （`loadEdgeCandidates(keepStatus)`）。名前が引けなければキーごと付けない（fail-soft）。
+- **IK-0993**: 保存済みアンカーが無いとき一覧に `index_note`（凍結の直後の構築中 `EDGE_INDEX_BUILDING_NOTE` /
+  索引なし `EDGE_INDEX_MISSING_NOTE`）。RE6 は不変（embedding を呼ばない — 状態を言うだけ）。
+- **IK-0989（糸）**: 学習者の L2 に描かれない端点の糸があることを `threads.undrawn_note` で言う（`field_atlas_overlay_spec.md` §17）。
+- pre-mortem は `field_atlas_overlay_spec.md` §17.1。
+
+### 11.z5 第 25 周 第 7 周の是正（2026-10-28 追補・第 7 波・migration なし・IK-1044 / IK-1047 / IK-1046）
+
+- **IK-1044 次版の下書きを作る入口を関係の区画にも**: 第 7 周まで［現在の版から次版の下書きを作る］は論文由来の候補（採用済み）の
+  カードにしか無く、候補 0 件の分野では関係を採用しても画面から下書きを作れなかった（関係カードの文は画面に無いボタンを指していた）。
+  `admin.js::_edgeDraftCreateHtml` が関係（辺）の候補区画の先頭と「候補の条件から外れた採用済みの関係」の区画に、下書きが無いときだけ
+  事実文 + ボタン（アンカー `atlas.edge-draft-from-frozen`・廃止済みは押せない理由の一文）を出す。動作は既存の
+  `gapCreateDraftFromFrozen(setStatusFn)`（`POST .../atlas/skeleton/draft/from-frozen` を呼ぶだけ・既にあれば 409 の事実文を結果欄へ）。
+  **新しい書き込み経路は作らない**（VA9 / RE3 / AB4 不変 — 骨格を書くのは教員の明示操作の既存経路だけ）。関係カードの案内
+  `EDGE_NO_DRAFT_TEXT` は「この区画の先頭の［現在の版から次版の下書きを作る］を押すと反映できます」と画面にある導線を指す。
+  マニュアル `teacher/17-admin-atlas.md#edge-draft-from-frozen`。
+- **IK-1047 反映の確認に向きの一文**: `openEdgeIncorporateConfirm` が種類の直後に `preview.direction_line`（無ければ候補の
+  `direction_line`）を並べる（サーバは既に返していた）。
+- **IK-1046 配置の理由の注記の略称**: `core/landscape/schema.acronym_expanded_in` — 頭字語（英字 2〜6・大文字 2 以上）が引用の
+  連続する語（ハイフンも語の区切り・機能語 of/the/and 等は読み飛ばし可）の頭文字の連なりと大小無視で一致すれば「引用に現れた」と
+  数え、`reason_beyond_quote_note` の注記から外す（A層の `reason_scope` と validator の warning は変えない — 表示の段で絞る）。
+- ガードレール: `backend/tests/test_atlas_review_round25_r7.py`。
+
+pre-mortem: 入口が下位部品のカードの責務になっていた（`last-mile-missing`）→ 分野単位の操作の入口を区画に置き、動作は既存関数を共有
+（二重実装しない）。確認画面がサーバの応答キーを読まない（`available-but-unwired`）→ 応答キーを読む 1 行。表記一致だけの照合
+（`substring-match-false-positive`）→ 決定論の頭字語照合を表示の段に足し、照合の正本（A層）は変えない。当たらない族: 再実行と削除・順序と予算。

@@ -9,6 +9,19 @@ per_archetype:
     rewrite_prompt: 段落を短くして読みやすくしてください。
 personas:
   te-05-delegator-lab:
+    # 第 7 周（judge_studio_r6 §7）: 6be229e1 の editor（studio_course_editor = te-05）として、根拠のある先頭のトピック t0 で書き換え →
+    # IK-1010 の sufficient 形・IK-1034。音声生成を押す行為（admin.lecture_studio.audio_generate）は行為にあるが、この場面の steps に
+    # 無い（campaign notes の「場面に足りない手」）
     # 第 4 周（judge_studio_r3 §5）: editor の書き換えの知らせと案の持ち出し（IK-0950 の是正後）・書き換えの注意点（IK-0948）・
     # 根拠の配分（IK-0909 の残り）
     rewrite_prompt: 院生向けに段落を短くし、式ごとに何を決める式かを一言添えてください。式と図の埋め込みは消さないでください。
+    # 第 8 周（judge_studio_r7 §7）: 共有教員の音声の依頼の出口（「所有者に依頼する」— 宛先と中身）。書き換えの後の［案をコピー］の
+    # 宛先までは場面にあるが、音声の依頼を押す手は steps に無い（campaign notes「場面に足りない手」）
+  te-03-meticulous-seminar:
+    # 第 5 周（judge_studio_r4 §5）: 共有教員として書き換え → ［案をコピー］の中身と宛先（IK-0978 の是正後）・保存の事前表示
+    rewrite_prompt: 本文に出てくる量だけを使い、式ごとに何を決める式かを一言添えて段落を短くしてください。本文に無い関係は足さず、式と図の埋め込みは消さないでください。
+  te-04-copilot-intro:
+    # 第 6 周（judge_studio_r5 §5）: 第 3 周の te-04 は (b)(b') を自分の担当コースで歩いた。今回は共有教員として 6be229e1 へ
+    # （studio_course_editor）。［案をコピー］の宛先の名前（表示名の是正 IK-1007 の後）・申し送りの根拠（IK-1011）。
+    # 音声生成を実際に押す手は行為に無い（campaign notes の「場面に足りない手」）
+    rewrite_prompt: 修士1年が初めて読む前提で段落を短くし、式ごとに何を決める式かを一言添えてください。式と図の埋め込みは消さないでください。

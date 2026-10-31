@@ -6,7 +6,7 @@ preconditions:
 # 第 25 周 share (a)。同一性の候補を読み、根拠が分かるものだけ確認し、分からないものは理由を書いて見送る。
 # 候補ゼロなら、ゼロであることの事実文を読む場面になる（それ自体が見るもの）。
 goal: '{{goal_text}} のために、ナレッジライブラリの「同一性の候補」を読み、根拠が分かる結び付きだけ確認し、分からない候補は理由を書いて見送る'
-params_required: [goal_text, dismiss_reason, copilot_questions]
+params_required: [goal_text, dismiss_reason, revoke_reason, copilot_questions]
 steps:
   - do: auth.login
   - do: admin.library.identity_candidates
@@ -18,6 +18,39 @@ steps:
       - do: admin.library.identity_link_decide
         with: {decision: reject, reason: '{{dismiss_reason}}'}
         note: 根拠が読めない結び付きを［見送り］にする（理由の欄があるかを見る）
+    optional: true
+  # 第 6 周 H39: 画面の順は「確認 → 詳細を開く → 取り消す」。［確定を取り消す］は詳細の確定の行にしか無いので、
+  # 詳細を開く手を代替（choose）に並べない — 開く手は必須の段にし、取り消しと別のリンクの見送りはその後の段に出す。
+  - do: admin.library.entry_open
+    note: 概念のエントリを開き、「結びついた教材の部品」で誰がいつ確定したかを読む
+  - choose:
+      - do: admin.library.identity_link_revoke
+        # 第 25 周 第 7 周 H45: 取り消しの対象は revoke_target_hint で指す。無ければ前提で用意したエントリ（凍結済みの対）の
+        # 確定リンクは取り消さない（revoke_protect_entry_ids）
+        with: {reason: '{{revoke_reason}}', revoke_target_hint: '{{revoke_target_hint}}',
+               revoke_protect_entry_ids: '{{revoke_protect_entry_ids}}'}
+        note: 確定済みの結び付きが同じものと言えないと分かったら、理由を書いて［確定を取り消す］（第 4 波・IK-0953。確定の行にだけ出る）
+    optional: true
+  # 第 25 周 第 8 波（IK-1062）: 否定の判断（見送り・取り消し）は理由を書いて［候補に戻す］で判断し直せる（前の判断の記録は残る）
+  - choose:
+      - do: admin.library.identity_link_restore
+        with: {section: parts}
+        note: 取り消した・見送った結び付きを判断し直すなら、ペルソナが理由（reason）を書いて［候補に戻す］（空なら画面は送らない）
+    optional: true
+  # 第 25 周 第 9 波（share H53）: IK-1062 の確かめ方「取り消し → 戻す → 確定」を場面の形で通す。戻した結び付き（runner が控える）を
+  # 読み直したうえで［確認］か理由付きの［見送り］にする — 確定してよいかはペルソナの判断（同じ論文の 2 版の組なら見送ってよい）
+  - choose:
+      - do: admin.library.bound_link_decide
+        with: {section: parts, decision: confirm}
+        note: 候補に戻した同じ結び付きを、詳細の逐語を読み直したうえで［確認］する（問いのダイアログの文を読む）
+      - do: admin.library.bound_link_decide
+        with: {section: parts, decision: reject, reason: '{{dismiss_reason}}'}
+        note: 戻した結び付きを読み直しても同じ部品と言えないなら、理由を書いて［見送り］にする
+    optional: true
+  - choose:
+      - do: admin.library.identity_link_decide
+        with: {decision: reject, reason: '{{dismiss_reason}}'}
+        note: 詳細で読んだうえで、根拠が読めない別の結び付きを理由を書いて［見送り］にする
     optional: true
   - choose:
       - do: admin.library.entry_review
@@ -46,3 +79,5 @@ watch_for:
   - 候補には支持する論文の題名が並び、件数や一致度の数値・論文の内部 ID が出ない
   - リンクの［見送り］と概念の［見送り］で理由の扱いが揃っている（片方だけ理由の欄が無いなら、それが見える）
   - 見送ったものは消えずに「見送り」の状態で残り、読み直すと理由が見える
+  # 第 10 波（sync_keys_wave10 面 A・IK-1123 / IK-1062）
+  - 詳細の見送りの行に〔見送り〕の札と「見送り: 名前・日付」が二重の印にならずに並び、候補に戻した行には前の判断の記録（誰・いつ・理由）が残る

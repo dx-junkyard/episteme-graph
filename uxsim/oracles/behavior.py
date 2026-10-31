@@ -66,7 +66,9 @@ def _trace_break(step: TranscriptStep) -> str:
     """辿りの連鎖の途切れ方（``404`` / ``missing`` / 空文字 = 途切れていない）。"""
     for t in step.http:
         if (t.error or "").startswith("precondition:"):
-            return "missing"
+            # 第 25 周 studio H25（第 4 周）: 行為が行われなかった（ハーネスの前提不足）。製品の辿りの途切れではない —
+            # ハーネスの注記（dialogue.check の precondition 連鎖）だけに残す
+            continue
         if t.status == 404:
             return "404"
         if t.status == 200 and '"missing"' in (t.response_excerpt or ""):

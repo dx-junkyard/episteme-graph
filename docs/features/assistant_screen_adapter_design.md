@@ -747,7 +747,7 @@ body.message（発話）
 |---|---|---|---|
 | 通常（tutor / on_path / explore） | ○ | ○ | `kinds=None`（全解決器） |
 | `discuss`（`_doc:` 直付けを含む） | ○ | ○ | 同上。スコープは `scope_document_ids` のまま |
-| `casual` | ✗ | ○ | `_is_casual` のとき `_learning_screen_context_block` を**呼ばない** |
+| `casual` | 選んでいる要素だけ（2026-10-27 改訂） | ○ | `kinds=("element",)` — 表示モード・台帳・位置づけ・実行記録は引かない（§11.18） |
 | `cycle_mode="elicit"` | 表示モードの1行だけ | ○ | `kinds=("view",)` — `_learning_screen_sources` も**DB を1本も引かない** |
 | `cycle_mode="diff"` / `backstage` / `check_scaffold` | ○ | ○ | `kinds=None` |
 
@@ -947,3 +947,122 @@ element / verification / placement / view / retrieved_structure / simulation の
 4-c 保留の固定は維持）+ `test_assistant_context_learning_simulation.py`（本人所有・範囲・id 不一致・予想の文言・SB1 の行の位置・
 数値の扱い）+ `test_simulation_lab_ui_static.py`（`app.js` が参照の id だけを載せること・開いていないときは送らないこと）。
 
+
+### 11.18 casual（音声）でも選んでいる要素を渡す — 2026-10-27（第 25 周 第 5 波, IK-0986）
+
+音声（casual）の学生が部品の文脈で読んだ「教員の説明」について「先生の説明と論文の違い」を尋ねると、回答は教員の説明に
+触れず AI 自身の前の回答を「先生の説明」と取り違えた。casual は画面文脈を一切渡していなかったため、学生に見えている
+説明が材料に無かった（`available-but-unwired`）。
+
+- **サーバ**: casual のとき `kinds=("element",)` で選択中の要素だけを解決する（LLM 回数不変・射影は element の 1 本だけ・
+  保存 message と痕跡は不変 = SA6）。§11.5 の「短い会話調と衝突する」理由は表示モード・台帳・位置づけ・実行記録の
+  事実列挙に対するもので、学生が開いている要素はそれ自体が話題なので渡す。
+- **事実文**: 承認済みの説明は「学習者の画面に出ているこの要素の「教員の説明」（承認済み）: …」— 学習画面の区画名
+  （`schema.LEARNER_EXPLANATION_SECTION_LABEL`）で指す。新しい指示文は足さない。
+- **フロント**: `app.js` が部品の文脈を開いたとき `state.openContextElement` に参照（種別・ID・ポップオーバー）を控え、
+  ラッチの無い送信（音声ループ）でもポップオーバーが表示中なら `selection.element_*` として申告する（閉じていれば送らない）。
+- テスト: `test_assistant_context_learning_route.py::TestModeMatrix`（casual は element だけ・台帳と位置づけを引かない・
+  要素が無ければブロックなし）/ `test_assistant_context_learning_core.py`（説明の事実文）。
+- 確かめていない範囲: 実画面で部品を開いたまま音声で尋ねる往復（砂場の再演）。
+
+pre-mortem: `available-but-unwired` — 解決器はあり、casual で配線していなかった。`condition-not-propagated` — 開いている
+部品がラッチ以外の送信に伝わらなかった。
+
+### 11.19 構造ブロックの英語の文・意図分類への画面の名前 — 2026-10-27（第 25 周 第 6 波・面を跨ぐ chat）
+
+- **retrieved_structure の括弧**（IK-1039）: `_retrieved_node_fact` は main ノードの `display_label` の理論対象が日本語を含まず
+  英単語が並ぶ文（解析層の生成した説明）なら括弧ごと添えない。上限で切った英語の途中切り（「…as a conti」）を学習者向けの
+  事実文に入れない（IK-0571 と同じ根）。短い対象名と数式（`$`）は残す。
+- **意図分類**（IK-1043）: 4 ルートの意図分類（`_classify_intent`）は発話しか受けていなかった。`_intent_screen_hint` が
+  `screen_context`（別コースを指すものは無視）の `view.atlas_node_label` → `selection.element_label` の順に名前を 40 字で取り、
+  「画面の文脈: …」の 1 行だけを分類のプロンプトに添える。本文・選択テキストは渡さない（SA1）。解決器の中身（地図の場所の
+  台帳の事実）を増やすのは §11.15 の view 解決器の担当で、ここでは触らない。
+- 未着手（IK-1041）: 構造ブロックに確定済みの同一性リンク（ほかの論文の同じ部品）を渡すには解決器の種類を 1 つ足す設計が要る。
+
+pre-mortem: `rule-enforced-per-surface` — 英語の生成文の遮断は面ごとに出ている。ここは resolver の 1 箇所で止め、射影の
+目印（定型）に頼らない。`available-but-unwired` — 画面の参照は回答には渡っていて分類には渡っていなかった。
+
+### 11.20 casual（音声）でも地図で選んだ場所を渡す — 2026-10-28（第 25 周 第 7 波, IK-1049）
+
+音声（casual）の学生が分野の地図で開いた場所について 2 回尋ね、2 回とも「開いている項目が見えない」と返った。§11.18 で
+casual に渡すのを選択中の要素（kind `element`）だけにしたため、地図の場所（`view` 解決器の担当 — §11.15 / IK-1031）が
+casual では落ちていた（`rule-enforced-per-surface`）。
+
+- **オーナー判断（2026-10-28・推奨どおり）**: §11.5 の「casual は画面文脈なし・選択あり」の「選択」は要素に限らず利用者の
+  明示の選択全般と読む。LC4（当該発話 + 画面の明示状態）の範囲内で、推定は増やさない・LLM 回数は不変・範囲は広げない（DM1）。
+- **サーバ**: casual（elicit を除く）は `kinds=("element",)` のまま `selected_atlas_node=True` を渡し、`_learning_screen_sources`
+  が `include_atlas_node=True` で地図の場所の材料（§11.15 と同じ `_screen_atlas_node_sources`・権限ゲート内）を引く。事実文は
+  新しい公開関数 `resolvers/learning.py::resolve_selected_atlas_node`（`view` 解決器と同じ `_atlas_node_facts` — 名前・札の文・
+  詳細パネルの検証と承認の行・置かれた論文の題名（最大 3・出所ラベル付き））。**kind としては登録しない**（登録 kind 集合は不変・
+  表示モードの事実「…を見ています」・検索範囲・わたしの地図の事実は casual では渡さない）。台帳・位置づけの射影は引かない。
+- フロントは変更なし（`app.js` は既に全送信経路で `view.atlas_node_*` を申告している）。
+- テスト: `test_assistant_context_learning_route.py::TestModeMatrix::test_casual_gets_the_atlas_node_the_learner_selected` /
+  `test_doubt_round25_wave7.py::TestIk1049SelectedAtlasNode`。
+- 確かめていない範囲: 実画面で地図の場所を開いたまま音声で尋ねる往復（砂場の再演）・音声で読み上げる回答の長さ（材料は最大 5 行）。
+
+pre-mortem: `rule-enforced-per-surface` — 画面文脈の絞りをモードごとに掛けたため、音声の利用者だけ選択が届かなかった。
+「同じ選択を読む他のモード」（tutor / discuss / diff / 楽屋 = 全部、elicit = 表示モードだけ、casual = 選択だけ）を列挙して
+範囲を決めた。`scope-widened-silently` — 論文はコースの範囲からだけ（§11.15 と同じ）。
+
+### 11.21 学習者向けの AI 材料の経路一覧 — 参照の解決と学習者の語は 1 点を通る — 2026-10-31（第 25 周 第 9 波, IK-1075 / IK-1059）
+
+第 7〜9 周で同じ型（`rule-enforced-per-surface`）が 3 周続いた: 規則（凍結の ⚓ の後継解決 IK-1021 / IK-1051・学習者の語の表
+IK-1018）を**画面の出口**に掛け、同じ参照・同じ元の文を AI の材料の経路が素のまま運んでいた（IK-1075 = パネルは「後継が決まって
+いません」なのに画面文脈は agent ID のまま別の live 部品へ解決して検証スコープまで渡す / IK-1059 = 札の説明「…記録は台帳に
+ありません」が AI へ渡り英語回答で「the ledger」と訳される）。経路を一度だけ列挙し、各経路がどの正本を通るかを固定する。
+
+| AI への経路（kind / 材料） | 材料を組む関数 | 通る正本 |
+|---|---|---|
+| `element`（部品） | `routes/learning.py::_screen_element_sources` | **`resolve_learner_component_context`**（凍結の ⚓ → `_resolve_frozen_component_ref` → 後継なしは `_superseded_component_payload`・後継ありは付け替え・それ以外は焦点論文）→ `_component_context_with_explanation` → `build_component_context`。部品の文脈 API（`get_course_component_context`）も同じ点を通る |
+| `element`（主張・式） | 同上 | `build_element_context`（焦点論文 FD4） |
+| `element`（図） | 同上 | トピックに公開済みの evidence item のみ |
+| `verification` | `_learning_screen_sources` → `learner_ledger_line` | 学習者向け台帳の投影（`learner_atlas_wording` 済み）。後継なしの部品は対象 ID を持たないので台帳を引かない |
+| `placement` | `learner_landscape_for_documents` | 学習者向け landscape 射影 |
+| 地図の場所（`view` / casual の選択） | `_screen_atlas_node_sources`（検証・承認の行）+ 解決器 `_atlas_node_facts`（札の説明） | 両方とも `label_vocab.learner_atlas_wording`（パネル `routes/atlas_view.py` と同じ表） |
+| わたしの地図を開いている事実 | `LEARNING_PERSONAL_MAP_SCREEN_FACT`（固定文） | 学習者の語で書く（「記録された条件」） |
+| `retrieved_structure` / `simulation` | §11.16 / §11.17 | 各節の射影 |
+
+- **解決器（`resolve_element`）**: 部品の文脈が `available: False`（後継が決まらない ⚓）なら、凍結時の名前と `frozen_label_line`
+  （パネルと同じ事実文）の 2 行だけを渡す。題名だけの縮退（evidence item）にも落とさない — 別の部品の役割・式・検証は材料に無い。
+- **わたしの地図**（AI ではなく画面だが同じ表）: `personal_graph/nearby.py::_verification` の札（`VERIFICATION_STATUS_LABELS_LEDGER`）と
+  条件の 1 行（`core/doubt/schema.LEARNER_SCOPE_LINE_PREFIX` =「記録された条件: 」）を学習者の語で返す。教員の台帳画面の語は変えない（宛先差）。
+- ガードレール: `test_assistant_context_learning_guardrails.py::TestLearnerAiMaterialPaths`（部品の文脈を組んでよい関数は解決点と下請けだけ —
+  AST で呼び出し元を列挙 / 解決点が後継解決を呼ぶ / 地図の材料が語の表を通る / `LEARNING_*` 固定文に「台帳」「記帳」が無い）+
+  `test_doubt_round25_wave9.py`。**学習者に AI の材料を渡す経路を足すときは、この表に 1 行足し、参照の解決と語の表のどちらを通るかを書く。**
+- 確かめていない範囲: 後継の決まる ⚓（付け替え）の画面文脈を実画面で尋ねる往復（砂場の再演）・英語の回答の語（材料からは「台帳」が消えた）。
+
+pre-mortem: `rule-enforced-per-surface` — 原理 `route-all-surfaces-through-one-point` を読んで、規則を経路ごとではなく参照を解く 1 点に置き、
+迂回を AST の呼び出し元検査で塞いだ（固有の差分: 地図の語は元の文が状態キャッシュの共有行なので、置換は読み時の出口 2 か所 + 固定文で、
+1 点にはならない — 表 `ATLAS_LEARNER_WORDING` の 1 つに寄せることで代える）。`contract-changed-one-side` — 解決点の戻り値の形
+（`available: False`）を解決器が読むことをテストで固定。
+
+### 11.22 わたしの地図で見ている場所・選択箇所の式・記録の問いの拘束 — 2026-10-31（第 25 周 第 10 波, IK-1113 ほか）
+
+- **わたしの地図の参照（IK-1113）**: 画面は `selection.personal_map_node_id`（本人の痕跡ノード）と任意の
+  `selection.personal_map_center_component_id`（点ビューの中心）だけを載せる（`personal-map-home.js` の
+  `window.PersonalMapHome.getScreenContext()` が「いまここの周り」タブを開いている間だけ返し、`app.js` が `selection` に合流させる・
+  語は `schema.LEARNING_PERSONAL_MAP_SELECTION_KEYS`）。route の `_screen_personal_map_sources` が画面と同じ近傍関係ビューの正本
+  `core.personal_graph.nearby.nearby_for_person_node`（本人の個人ネットワークに無いノードは None・閲覧できない論文は
+  `user_can_view_document` で外れる）で引き、解決器 `_personal_map_node_facts` が範囲ビュー（中心なし → 範囲の論文と理論構成・
+  触れた部分の印・検証の札と記録された条件）か点ビュー（中心と前後 1 階層）の事実文にする。**kind は登録しない**（地図の場所と同じく
+  `view` の解決器と casual の `resolve_selected_atlas_node` の末尾に足す。登録 kind の集合と 4-c の不在は不変）。主グラフの集約ノード
+  （`theory_op_*`）は近傍関係ビューの DTO のラベルで名指すので、部品の文脈の解決点（`resolve_learner_component_context`）は通らない
+  （画面に出ている事実と同じ材料を渡す = §11.21 の表の「わたしの地図」行が AI 側にも効く）。予算は `MAX_PERSONAL_MAP_*`。
+- **選択箇所の式（製品頭脳 A 4313）**: `selection.py::selection_formula_lines` が表示中の教材の式の記録（`content_blocks` の式・印は
+  生きた式の記録で付け直したもの）から、左辺の記号が選択テキストに現れる式（英数字キーで照合・2 文字以上・最大 3 件・1 行 200 字）を
+  選び、`render_selection_block` が逐語の後に「選択箇所に出てくる式（教材の式の記録）」として添える。逐語の 600 字上限は不変。
+- **記録の有無を問う発話（製品頭脳 A 4302）**: `_asks_about_verification_record`（検証・確かめられ・記録は/が・verified 等）に当たる
+  往復では、台帳の事実がブロックに載らなくても `LEARNING_VERIFICATION_OUTPUT_CONSTRAINT` を system に足す（§11.13-2 の 2 段構えの
+  出力側だけを先に掛ける — 開発者指示の「教材に無ければ一般知識で補う」と引っ張り合う往復の拘束）。
+- **解析の英語の生成文（製品頭脳 B 4315・IK-0755 の AI 側）**: 部品の役割・要約・前提が英語の文なら、事実文に「この文は論文の解析が
+  英語で生成したものです…日本語で言い換えて」を添える（文は書き換えない）。
+- **構造帰属の候補に地図の場所の型が無い（製品頭脳 A 4304 / B 4309・面 B IK-1122 との境界）**: `structure_anchor` の anchor_type に
+  `atlas_node` は足さない（v1）。地図の場所は論文の構造ではなく分野の座標で、帰属の語彙（claim / equation / … / segment）の縮退の
+  鎖に入らない。地図の場所だけを指す問いは、帰属の候補が無い事実として扱い（`unattributed` / 区画への縮退をしない — 区画の既定値を
+  帰属に使わないのは面 B の IK-1122 の是正）、痕跡の payload には地図の場所を焼かない（FD5 と同じ — 記録してよいのは種別だけ）。
+  型を足すなら、骨格の版を跨ぐ node_id の読み替え（K-6 の `NodeResolver`）と、教員向け集約（anchor-insights）の行の定義を同時に
+  決める必要がある — 次の設計で扱う。
+
+pre-mortem: `available-but-unwired` — 近傍関係ビューの正本は画面用に既にあり、新しい射影を作らずに呼ぶだけにした。`condition-not-propagated`
+— 本人ゲート・閲覧可否ゲートは正本の中で掛かる（呼び出し側で再判定しない）。`duplicate-canonical-sources` — 検証の札・条件の語は
+近傍関係ビューの DTO（`learner_atlas_wording` 済み）をそのまま使い、解決器で語の表を持たない。

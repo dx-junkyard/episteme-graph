@@ -40,7 +40,7 @@ def test_fold_cards_never_lists_empty_titles():
     """H14: 字数が尽きても畳んだ候補の題名を最低 1 件は出す。"""
     cards = [("A" * 10, ["x" * 50]), ("長い題名の候補", ["y" * 50])]
     out = ax.fold_cards(cards, frozenset(), 40, "関係の候補")
-    assert out[-1].startswith("（以下の関係の候補は画面の下に続く: 長い題名の候補")
+    assert out[-1].startswith(ax.FOLD_HEAD.format(what="関係の候補") + "長い題名の候補")
     assert ": 、" not in out[-1] and ": …" not in out[-1]
 
 
@@ -55,7 +55,7 @@ def test_learner_atlas_view_is_overlay_l1_not_dump():
                                           {"id": "r2", "label": "重力波", "kind": "fog"}],
                               "nodes": [{"id": "c1", "label": "降着", "region": "r1", "x": 1, "y": 2}]}}}
     lines = "\n".join(ax.overlay_l1_lines(atlas))
-    assert "分野の地図（宇宙物理・骨格 版 2026.1・AI生成・教員レビュー済）" in lines
+    assert "分野の地図（宇宙物理・地図 版 2026.1・AI生成・教員レビュー済）" in lines
     assert "- 降着円盤:" in lines and "○ 降着（未記帳）" in lines
     assert "- 重力波（霧のハッチ — 論文未投入の地形）" in lines
     assert "未記帳: この場所について…" in lines and "skeleton_version" not in lines and "x:" not in lines

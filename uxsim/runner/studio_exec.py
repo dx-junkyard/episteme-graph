@@ -67,6 +67,13 @@ REWRITE_NO_PROMPT = "指示を入力してください"
 # admin-lecture-studio.js（第 25 周 第 2 波）
 REATTACH_FAIL = "付録を付け直せませんでした"
 REATTACH_BUTTON = "付録を付け直す"
+# admin-lecture-studio.js lsCopyRewriteProposal（IK-0950・第 3 波）の逐語ミラー
+COPY_BUTTON = "案をコピー"
+# IK-0978（第 4 波）: 知らせは写した区画の名前（「・」区切り）と渡す相手。文の正本はサーバの course-structure
+# ``proposal_copy_notice``（{sections} を含む）、無ければこの既定
+COPY_DONE_TEMPLATE = "{sections}をクリップボードに写しました。所有者に渡してください。"
+COPY_DONE = COPY_DONE_TEMPLATE  # 旧名（区画名を埋める前の形）
+COPY_EMPTY = "写す案がありません"
 SPLIT_MISMATCH_CONFIRM = "このまま保存すると 1 枚に統合して配信されます。"
 # lsRenderSlidesPanel / lsSlideAudioBadgeHtml
 SLIDE_LONG_WARN = "⚠ 受講画面で縮小表示されます。=== で分割を検討してください"
@@ -106,7 +113,9 @@ FIGURE_KIND_LABELS = {"concept_map": "概念関係図", "process_flow": "プロ�
                       "comparison": "対比図", "timeline": "時系列図", "coordinate": "座標・幾何図",
                       "data_plot_schematic": "模式グラフ", "other": "その他"}
 TEACHING_STATUS_LABELS = {"draft": "下書き", "adopted": "採用済み", "retired": "回収済み"}
-ADOPT_NOTICE = "保存するとこのトピックの生成済み音声は作り直しになります。トピックを保存するまで学習者には表示されません。"
+# 第 4 波（IK-0979）: 採用の知らせの固定文は廃止。course-structure の ``figure_adopt_notice_parts``（lead / audio / delivery）
+# から組む（admin-figure-studio.js ``_adoptNotice``）。旧サーバ（部品なし）は空 — 画面も何も出さない
+ADOPT_NOTICE_LEGACY = "保存するとこのトピックの生成済み音声は作り直しになります。トピックを保存するまで学習者には表示されません。"
 SNAPSHOT_FAILED_NOTICE = "保存されました（配信用の画像の更新に失敗したため、再保存をおすすめします）。"
 STUDIO_EMPTY_PREVIEW = "まだ図はありません。右の欄に「どんな図がほしいか」を書いて送ると、ここにプレビューが出ます。"
 STUDIO_NO_CHANGE = "この応答では図は変わっていません。"
@@ -341,17 +350,36 @@ def _pick_topic(session: PersonaSession, hint: Any, prefer: str) -> Optional[dic
 def _draft_split_payload(session: PersonaSession) -> dict:
     d = session.scratch.get("studio_draft") or {}
     # updateCourseSlideIndicator: 受講側と同じ自動ページ分割で数える（formulas は空・文書 ID は渡さない）
-    return {"display_text": d.get("material") or "", "spoken_text": d.get("spoken") or None, "formulas": [],
-            "auto_paginate": True}
+    payload: dict[str, Any] = {"display_text": d.get("material") or "", "spoken_text": d.get("spoken") or None,
+                               "formulas": [], "auto_paginate": True}
+    # 第 4 波（IK-0975）: コーストピックは番地（course_id / topic_id / chapter_index / topic_index）を送り、サーバが配信と
+    # 同じ入力の正規化（$…$ → [[FORMULA_N]]・式と図の埋め込みの解決）を通してから分割する（lsFetchSplitSlides の topicContext）
+    course_id = str(session.scratch.get("studio_course_id") or "")
+    sel = session.scratch.get("studio_topic") or {}
+    if course_id:
+        payload["course_id"] = course_id
+        tid = str((sel.get("topic") or {}).get("id") or "") if isinstance(sel.get("topic"), dict) else ""
+        if tid:
+            payload["topic_id"] = tid
+        for key in ("chapter_index", "topic_index"):
+            if sel.get(key) is not None:
+                payload[key] = sel[key]
+    return payload
 
 
 def _split_summary(status: Optional[int], body: Any) -> dict:
     """lsFetchSplitSlides の正規化（失敗は 1 枚へ縮退 + error）。"""
     if status != 200 or not isinstance(body, dict):
-        return {"error": True, "display_count": 1, "spoken_count": 0, "mismatch": False, "slides": []}
+        return {"error": True, "display_count": 1, "delivered_count": 1, "spoken_count": 0, "mismatch": False,
+                "slides": []}
     slides = [sd for sd in body.get("slides") or [] if isinstance(sd, dict)]
-    return {"error": False, "display_count": int(body.get("display_segment_count") or 0),
-            "spoken_count": int(body.get("spoken_segment_count") or 0), "mismatch": bool(body.get("mismatch")),
+    display = int(body.get("display_segment_count") or 0)
+    mismatch = bool(body.get("mismatch"))
+    # 第 25 周第 5 周 H27: 配信の枚数 = 応答の slides の数（教材欄と読み上げ欄の区切りが合わないときは 1 枚に統合して
+    # 配信される — display_segment_count は統合前の教材欄の枚数）。slides の無い旧応答は 1 if mismatch else display
+    delivered = len(slides) if "slides" in body else (1 if mismatch else display)
+    return {"error": False, "display_count": display, "delivered_count": delivered,
+            "spoken_count": int(body.get("spoken_segment_count") or 0), "mismatch": mismatch,
             "auto_paginated": bool(body.get("auto_paginated")), "spoken_degraded": bool(body.get("spoken_degraded")),
             "auto_paginate_suppressed": bool(body.get("auto_paginate_suppressed")),
             "notes": [str(n) for n in body.get("notes") or [] if n] if isinstance(body.get("notes"), list) else [],
@@ -370,9 +398,11 @@ def indicator_text(split: dict) -> str:
         return (f"⚠ 表示 {d} 枚に対し読み上げが分割できないため、このトピックの読み上げはタイマー送りになります"
                 "（=== で明示分割すると解消できます）")
     if sp == 0:
-        return f"表示 {d} 枚 / 読み上げ未入力"
+        # IK-0914（第 3 波）: 読み上げ欄が空の分岐でも区切りの事実文（notes）を描く
+        return f"表示 {d} 枚 / 読み上げ未入力" + (" — " + " ".join(notes) if notes else "")
+    # 第 3 波: notes は自動ページ分割の抑止に限らず、あれば描く（lsRenderSlideIndicatorEl の最後の分岐）
     return (f"表示 {d} 枚" + ("（自動ページ分割）" if split.get("auto_paginated") else "") + f" / 読み上げ {sp} 区切り ✓"
-            + (" — " + " ".join(notes) if split.get("auto_paginate_suppressed") and notes else ""))
+            + (" — " + " ".join(notes) if notes else ""))
 
 
 def _wm_digest(slides: list[dict]) -> list[dict]:
@@ -396,8 +426,14 @@ def _preview_topic(ctx) -> dict:
     split = _split_summary(status, body)
     d = s.scratch.get("studio_draft") or {}
     topic = (s.scratch.get("studio_topic") or {}).get("topic") or {}
+    text_sha = _sha(d.get("material") or "", d.get("spoken") or "")
+    stored = draft_from_topic(topic) if topic else {}
     summary = {"scope": "topic", "course_id": s.scratch.get("studio_course_id") or "", "topic_id": topic.get("id") or "",
-               "text_sha": _sha(d.get("material") or "", d.get("spoken") or ""),
+               "text_sha": text_sha,
+               # 第 25 周 第 6 周 H31: 保存済みの本文（開いた時点の course-structure の本文）のプレビューか。保存できない教員の
+               # 書き換えの案のプレビューは周またぎの X1 の比べる相手にしない（check_campaign は draft_only で残す）
+               "matches_stored": bool(stored) and text_sha == _sha(stored.get("material") or "", stored.get("spoken") or ""),
+               "can_save": can_save(s.scratch.get("studio_structure") or {}),
                "status": status, **{k: v for k, v in split.items() if k != "slides"},
                "indicator": indicator_text(split), "wm": _wm_digest(split.get("slides") or []),
                "has_marker_material": bool(_MARKER_RE.search(d.get("material") or "")),
@@ -422,6 +458,10 @@ def _topic_view(session: PersonaSession, **extra: Any) -> dict:
     extra.setdefault("save_block_notice", str(structure.get("save_notice") or ""))
     delivery = structure.get("delivery") if isinstance(structure.get("delivery"), dict) else {}
     extra.setdefault("delivery_message", str(delivery.get("message") or ""))
+    # 第 7 波（IK-1053）: 未発行の変更の事実文と、所有者だけの［版の管理を開く］（lsTopicDeliveryInnerHtml）
+    extra.setdefault("unpublished_changes_note", str(delivery.get("unpublished_changes_note") or ""))
+    entry = delivery.get("versions_entry") if isinstance(delivery.get("versions_entry"), dict) else None
+    extra.setdefault("versions_entry_label", str((entry or {}).get("label") or VERSIONS_ENTRY_LABEL) if entry else "")
     return {"kind": "topic", "topic": sel.get("topic") or {}, "chapter_title": sel.get("chapter_title", ""),
             "draft": session.scratch.get("studio_draft") or {}, "split": session.scratch.get("studio_last_split") or {},
             "view": session.scratch.get("studio_draft_view") or "edit", **extra}
@@ -476,7 +516,18 @@ def coverage_digest(topic: dict) -> dict:
             # 第 25 周 studio H22: 学ぶ単位だけのとき（コース内容生成の前）の専用の文 — 一覧が空なのはその文どおり
             "center_units_only": str(state.get("message") or "").startswith(EVIDENCE_UNITS_ONLY_HEAD),
             "right_pane_has_items": bool(items),
-            "right_pane_kinds": sorted({str(e.get("kind")) for e in items if e.get("kind")})}
+            "right_pane_kinds": sorted({str(e.get("kind")) for e in items if e.get("kind")}),
+            # 第 25 周 第 7 周 studio H35: 区画ごとの件数（教員の資料 / 対応付けられていない候補 / 解析の根拠）。審判だけが読む
+            "right_pane_sections": evidence_sections(topic, items)}
+
+
+def evidence_sections(topic: dict, items: list) -> dict:
+    """右ペインの根拠リンクの区画ごとの件数（lsCourseEvidenceHtml と同じ分け方）。missing で unmapped_heading があれば
+    解析の候補は全部「対応付けられていない候補」の区画。"""
+    teacher, machine = split_teacher_added(topic, [e for e in items if isinstance(e, dict)])
+    st = evidence_state(topic) or {}
+    unmapped = len(machine) if st.get("unmapped_heading") else 0
+    return {"teacher": len(teacher), "unmapped": unmapped, "analysis": len(machine) - unmapped}
 
 
 def topic_grounding_empty(topic: dict) -> bool:
@@ -593,6 +644,107 @@ def _insert_slide_marker(ctx) -> None:
     _ui(s, _topic_view(s, notice=notice))
 
 
+# 第 5 波（IK-0878）: admin-lecture-studio.js の 2 つのボタンと、揃えきれないときの知らせ（action status・error）
+INSERT_BOTH_BUTTON = "+ 両方の欄に区切りを挿入"
+ALIGN_MARKERS_BUTTON = "読み上げ欄の区切りを教材欄に揃える"
+ALIGN_SHORT_NOTICE = ("読み上げ欄に区切りを入れられる段落の境目が足りないため、一部の区切りを入れられませんでした。"
+                      "読み上げ欄に段落を分けてから、もう一度揃えてください。")
+
+
+def slide_marker_offsets(text: str) -> tuple[list[int], int]:
+    """lsSlideMarkerOffsets: 単独行の ``===`` の位置（区切りを除いた本文での文字位置）と、区切りを除いた本文の長さ。"""
+    offsets, plain = [], 0
+    for line in str(text or "").split("\n"):
+        if line.strip() == "===":
+            offsets.append(plain)
+            continue
+        plain += len(line) + 1
+    return offsets, max(plain - 1, 0)
+
+
+def align_spoken_markers(display: str, spoken: str) -> tuple[str, int, int]:
+    """lsAlignSpokenSlideMarkers の写し: 読み上げ欄の区切りを外し、教材欄の内側の区切りと同じ数を、教材欄での相対位置に
+    近い段落の境目（足りなければ文の境目も）へ入れ直す。返り値 (本文, 入れたい数, 入れた数)。"""
+    offsets, length = slide_marker_offsets(display)
+    interior = [o for o in offsets if 0 < o < length]
+    plain = "\n".join(l for l in str(spoken or "").split("\n") if l.strip() != "===")
+    plain = re.sub(r"\n{3,}", "\n\n", plain)
+    wanted = len(interior)
+    if not wanted or not plain.strip():
+        return plain, wanted, 0
+    cands = []
+    for m in re.finditer(r"\n\s*\n", plain):
+        at = m.end()
+        if 0 < at < len(plain) and plain[at:].strip():
+            cands.append(at)
+    if len(cands) < wanted:
+        for m in re.finditer(r"[。．！？]\s*", plain):
+            end = m.end()
+            if 0 < end < len(plain) and plain[end:].strip() and end not in cands:
+                cands.append(end)
+        cands.sort()
+    chosen, last = [], -1
+    for off in interior:
+        target = (off / max(length, 1)) * len(plain)
+        best = -1
+        for c in cands:
+            if c <= last:
+                continue
+            if best < 0 or abs(c - target) < abs(best - target):
+                best = c
+        if best >= 0:
+            chosen.append(best)
+            last = best
+    out = plain
+    for pos in reversed(chosen):
+        out = out[:pos].rstrip() + "\n===\n" + out[pos:].lstrip()
+    return out, wanted, len(chosen)
+
+
+def _apply_aligned_spoken(ctx, notice: str) -> None:
+    s = ctx.session
+    draft = s.scratch["studio_draft"]
+    text, wanted, placed = align_spoken_markers(draft.get("material") or "", draft.get("spoken") or "")
+    draft["spoken"] = text
+    s.scratch["studio_draft_view"] = "edit"
+    _preview_topic(ctx)
+    if placed < wanted:
+        notice += f"\n（画面の状態行・エラー: {ALIGN_SHORT_NOTICE}）"
+    _ui(s, _topic_view(s, notice=notice))
+
+
+def _insert_slide_marker_both(ctx) -> None:
+    """［+ 両方の欄に区切りを挿入］: 教材欄のカーソル位置（runner は段落の境目）に区切りを入れ、読み上げ欄は区切りを外して
+    教材欄の区切りと同じ数を段落の境目へ入れ直す（lsAlignSpokenSlideMarkers）。"""
+    if not _need_draft(ctx):
+        return
+    s = ctx.session
+    raw = ctx.args.get("after_paragraph")
+    try:
+        after = int(raw) if raw not in (None, "") else None
+    except (TypeError, ValueError):
+        after = None
+    draft = s.scratch["studio_draft"]
+    draft["material"], k, how = insert_marker(draft.get("material") or "", after,
+                                              target_ratio=_marker_ratio(draft.get("spoken") or ""))
+    if how != "paragraph" or after is None:
+        _runner_note(s, f"runner_default: 教材欄の区切りはカーソル位置の代わりに{'段落 ' + str(k) + ' の後' if how == 'paragraph' else ('文の境目' if how == 'sentence' else '末尾')}に入れた")
+    _apply_aligned_spoken(ctx, f"（［{INSERT_BOTH_BUTTON}］を押した — 教材欄に区切りを入れ、読み上げ欄の区切りを入れ直した。"
+                               "位置は保存の前に確かめる）")
+
+
+def _align_slide_markers(ctx) -> None:
+    """［読み上げ欄の区切りを教材欄に揃える］— インジケータが「1 枚に統合して配信されます」のときだけ出る。"""
+    if not _need_draft(ctx):
+        return
+    s = ctx.session
+    last = s.scratch.get("studio_last_split") or {}
+    if not last.get("mismatch") or last.get("error"):
+        return _ui(s, _topic_view(s, notice=f"（［{ALIGN_MARKERS_BUTTON}］は出ていない — 区切りの数が合っていて"
+                                               "統合されないときは表示されない）"))
+    _apply_aligned_spoken(ctx, f"（［{ALIGN_MARKERS_BUTTON}］を押した）")
+
+
 def _edit_draft(ctx) -> None:
     if not _need_draft(ctx):
         return
@@ -698,7 +850,8 @@ def _save_topic(ctx) -> None:
                 f for f in saved_digest.get("figure_embeds") or [] if f not in in_evidence)
     if status == 200:
         delivery = body.get("delivery") if isinstance(body, dict) and isinstance(body.get("delivery"), dict) else {}
-        line = SAVE_OK + (f"。{notice}" if notice else "") + (f" {delivery['message']}" if delivery.get("message") else "")
+        line = SAVE_OK + (f"。{notice}" if notice else "") + (f" {delivery['message']}" if delivery.get("message") else "") \
+            + (f" {delivery['unpublished_changes_note']}" if delivery.get("unpublished_changes_note") else "")  # 第 7 波（IK-1053）
     else:
         # 第 2 波: 失敗はサーバの detail（lsApiDetailText）、無ければ「保存に失敗しました」
         line = _api_detail_text(body) or SAVE_FAIL
@@ -718,7 +871,8 @@ def _api_detail_text(body: Any) -> str:
 
 
 TOPIC_SERVER_KEYS = ("evidence_items", "evidence_state", "cautions_display", "document_ids", "has_topic_audio",
-                     "uses_topic_material", "evidence_links", "linked_figure_ids", "appendix_state", "coverage")
+                     "uses_topic_material", "evidence_links", "linked_figure_ids", "appendix_state", "coverage",
+                     "work_note_state")  # 第 9 波（IK-1081）: LS_TOPIC_SERVER_KEYS と同じ
 
 
 def _refresh_topic_server_facts(ctx, topic: dict) -> bool:
@@ -738,11 +892,15 @@ def _refresh_topic_server_facts(ctx, topic: dict) -> bool:
     for key in TOPIC_SERVER_KEYS:
         if key in fresh:
             topic[key] = fresh[key]
-        elif key == "appendix_state":
+        elif key in ("appendix_state", "work_note_state"):
             topic[key] = None
     structure = s.scratch.get("studio_structure")
     if isinstance(structure, dict):
-        for key in ("can_save", "save_notice", "share_mark", "delivery", "figures_index"):  # IK-0950
+        # IK-0950 + 第 4 波（IK-0978 / IK-0979）: 所有者の表示名・案を渡す知らせ・採用の知らせの部品も新しい応答に揃える
+        for key in ("can_save", "save_notice", "share_mark", "owner_notice", "owner_display_name",
+                    "proposal_copy_notice", "figure_adopt_notice_parts", "delivery", "figures_index",
+                    "unpublished_changes_note", "versions_entry",  # 第 7 波（IK-1053）
+                    "audio_generate_notice", "audio_request"):  # 第 9 波: lsRefreshTopicServerFacts と同じキー集合
             if key in data:
                 structure[key] = data[key]
             else:
@@ -800,9 +958,121 @@ def _rewrite_topic(ctx) -> None:
                                  "cautions": _lines(body.get("cautions")),
                                  "check_questions": [q for q in body.get("check_questions") or [] if isinstance(q, dict)]}
     _preview_topic(ctx)
-    # 第 2 波（IK-0909 / IK-0908）: 根拠を省いた事実（grounding_notice）・保存されないこと（save_notice）を添える
-    extra = " ".join(str(body[k]) for k in ("grounding_notice", "save_notice") if body.get(k))
-    _ui(s, _topic_view(s, status_line=str(body.get("notice") or REWRITE_OK) + (f" {extra}" if extra else "")))
+    s.scratch["studio_rewrite_tried"] = True
+    # lsState.rewriteHandoff（IK-0978）: 申し送りは書き換えたトピックに限って［案をコピー］の区画に入る
+    s.scratch["studio_rewrite_handoff"] = {"topic_id": str(topic_id_of(s)),
+                                           "notes": [str(t) for t in body.get("handoff_notes") or [] if t]}
+    _ui(s, _topic_view(s, status_line=rewrite_status_line(body)))
+
+
+def topic_id_of(s: PersonaSession) -> str:
+    return str(((s.scratch.get("studio_topic") or {}).get("topic") or {}).get("id") or "")
+
+
+def rewrite_status_line(body: dict) -> str:
+    """lsRewriteCourseTopicDraft の知らせ（第 3 波）: ``notice``（無ければ「提案を反映しました。保存すると確定します。」）
+    + 根拠を省いた事実（``grounding_notice``・IK-0909）+ 保存されないこと（``save_notice``。ただし ``can_save`` が偽の
+    ときはサーバが notice 自体を置き換えるので継ぎ足さない — IK-0950）+「申し送り: a / b」（``handoff_notes``・
+    IK-0948。注意点の欄には入れない）。旧サーバ（handoff_notes / can_save なし）は従来どおり save_notice を足す。"""
+    handoff = [str(t) for t in body.get("handoff_notes") or [] if t]
+    parts = [body.get("grounding_notice"), "" if body.get("can_save") is False else body.get("save_notice")]
+    if handoff:
+        parts.append("申し送り: " + " / ".join(handoff))
+    extra = " ".join(str(t) for t in parts if t)
+    return str(body.get("notice") or REWRITE_OK) + (f" {extra}" if extra else "")
+
+
+def _copy_proposal(ctx) -> None:
+    """``#ls-rewrite-copy-btn``［案をコピー］（IK-0950・第 3 波）: 保存できない閲覧者（editor 共有）にだけ出る。
+    編集欄の中身（教材欄・読み上げ原稿・注意点）をクリップボードへ写すだけ（HTTP なし・DB 非変更）。
+    admin-lecture-studio.js ``lsCopyRewriteProposal`` / ``lsUpdateAssistantContext``（``copyBtn.hidden = lsCourseCanSave()``）。"""
+    if not _need_draft(ctx):
+        return
+    s = ctx.session
+    structure = s.scratch.get("studio_structure") or {}
+    if can_save(structure):
+        ctx.missing("rewrite_copy_button")
+        _ui(s, _topic_view(s, status_line=f"（［{COPY_BUTTON}］は出ていない — このコースはトピックを保存できる）"), status=None)
+        return
+    d = s.scratch.get("studio_draft") or {}
+    parts: list[str] = []
+    names: list[str] = []
+
+    def add(name: str, body: str) -> None:
+        if body:
+            parts.append(f"【{name}】\n{body}")
+            names.append(name)
+    questions = []
+    for i, q in enumerate([q for q in d.get("check_questions") or [] if isinstance(q, dict)], 1):
+        if q.get("question"):
+            questions.append(f"{i}. {q['question']}" + (f"\n   答えの要点: {q['model_answer']}" if q.get("model_answer") else ""))
+    handoff = s.scratch.get("studio_rewrite_handoff") or {}
+    add("教材欄", str(d.get("material") or ""))
+    add("読み上げ原稿", str(d.get("spoken") or ""))
+    add("注意点", "\n".join(str(c) for c in d.get("cautions") or [] if c))
+    add("確認問題", "\n".join(questions))
+    add("申し送り", "\n".join(handoff.get("notes") or []) if handoff.get("topic_id") == topic_id_of(s) else "")
+    text = "\n\n".join(parts)
+    if not text:
+        _ui(s, _topic_view(s, status_line=COPY_EMPTY))
+        return
+    s.scratch["studio_clipboard"] = text
+    _runner_note(s, "runner_ui_only: ［案をコピー］はクリップボードへ写すだけ（HTTP は出していない）")
+    template = str(structure.get("proposal_copy_notice") or COPY_DONE_TEMPLATE)
+    _ui(s, _topic_view(s, status_line=template.replace("{sections}", "・".join(names))))
+
+
+def audio_request_text(structure: dict, language: str) -> str:
+    """admin-lecture-studio.js ``lsCopyAudioRequest``（第 8 波・IK-1071）と同じ組み立て: 【コース】【お願い】【読み上げの言語】
+    【音声の状態】【音声の無いトピック】（見出しはサーバの ``audio_request.section_labels``・空の区画は出さない）。"""
+    cs = structure or {}
+    req = cs.get("audio_request") if isinstance(cs.get("audio_request"), dict) else {}
+    labels = req.get("section_labels") if isinstance(req.get("section_labels"), dict) else {}
+    lang_labels = req.get("language_labels") if isinstance(req.get("language_labels"), dict) else {}
+    missing = []
+    for ch in cs.get("chapters") or []:
+        for t in (ch or {}).get("topics") or [] if isinstance(ch, dict) else []:
+            if isinstance(t, dict) and t.get("uses_topic_material") is not False and not t.get("has_topic_audio") \
+                    and t.get("title"):
+                missing.append(f"- {t['title']}")
+    ta = cs.get("topic_audio_status") if isinstance(cs.get("topic_audio_status"), dict) else {}
+    parts = []
+    for key, body in (("course", str(cs.get("title") or "")), ("request", str(req.get("request_line") or "")),
+                      ("language", str(lang_labels.get(language) or language)),
+                      ("audio_state", str(ta.get("message") or "")), ("topics", "\n".join(missing))):
+        if body:
+            parts.append(f"【{labels.get(key) or key}】\n{body}")
+    return "\n\n".join(parts)
+
+
+def _copy_audio_request(ctx) -> None:
+    """コース設定メニューの音声生成の案内の［依頼の文をコピー］（第 8 波・IK-1071・``lecture-studio.audio-request-copy``）。
+
+    保存できない閲覧者（editor 共有）で ``audio_request`` があるときだけ出る。所有者に頼む文をクリップボードへ写し、
+    ``copy_notice``（宛先の名前入り）を action status に出す。通知は送らない・DB 非変更（HTTP は出さない）。"""
+    s = ctx.session
+    cid = _studio_course_id(ctx)
+    if not cid:
+        return ctx.missing("course_id")
+    if not s.scratch.get("studio_loaded") or s.scratch.get("studio_course_id") != cid:
+        _load_course(ctx, cid)
+    structure = s.scratch.get("studio_structure") or {}
+    state = audio_readiness_state(s)
+    language = str((s.scratch.get("studio_settings") or {}).get("lecture_language") or "ja")
+    req = structure.get("audio_request") if isinstance(structure.get("audio_request"), dict) else None
+    if state != "owner_only" or not req:
+        ctx.missing("audio_request_copy_button")
+        _ui(s, {"kind": "readiness", "state": state, "structure": structure, "language": language,
+                "status_line": "（［依頼の文をコピー］は出ていない — 音声生成が所有者だけのコースで、依頼の部品があるときだけ出る）"},
+            status=None)
+        return
+    text = audio_request_text(structure, language)
+    s.scratch["studio_clipboard"] = text
+    _runner_note(s, "runner_ui_only: ［依頼の文をコピー］はクリップボードへ写すだけ（HTTP も通知も出していない）")
+    heads = [ln for ln in text.split("\n") if ln.startswith("【")]
+    status_line = str(req.get("copy_notice") or "") + (f"（写した文の見出し: {' '.join(heads)}）" if heads else "")
+    _ui(s, {"kind": "readiness", "state": state, "structure": structure, "language": language,
+            "status_line": status_line})
 
 
 def _reattach_appendix(ctx) -> None:
@@ -835,6 +1105,10 @@ def _reattach_appendix(ctx) -> None:
     if status != 200 or not isinstance(body, dict):
         _ui(s, _topic_view(s, status_line=f"{head} {_api_detail_text(body) or REATTACH_FAIL}".strip()), status=status)
         return
+    # 第 6 波（IK-1032）: outcome（replaced / removed / added / unchanged）と分岐ごとの notice を素通し
+    _digest(ctx, "studio_reattach_appendix", {"topic_id": str(topic.get("id") or ""),
+                                              "outcome": str(body.get("outcome") or ""),
+                                              "changed": bool(body.get("changed"))})
     material = body.get("student_material") if isinstance(body.get("student_material"), dict) else {}
     if body.get("changed") and material:
         topic["student_material"] = material
@@ -843,6 +1117,58 @@ def _reattach_appendix(ctx) -> None:
         s.scratch["studio_draft"] = d
         _preview_topic(ctx)
     _ui(s, _topic_view(s, status_line=f"{head} {body.get('notice') or ''}".strip()), status=status)
+
+
+def _reattach_all_appendices(ctx) -> None:
+    """``#ls-course-reattach-all-btn``（第 6 波・オーナー判断 1 / IK-0872 ①）: 確認（appendix_reattach_all_confirm）→
+    ``POST …/lecture-studio/appendix/reattach-all {topic_ids: 提示したトピック}`` → 知らせ（notice + audio_notice +
+    delivery.message）→ course-structure を読み直す。editor はボタンが押せない（appendix_reattach_all_notice）。
+    押した後に学生の画面で付録が変わったかは学生 API で別に確かめる（H32）。"""
+    s = ctx.session
+    cid = _studio_course_id(ctx)
+    if not cid:
+        return ctx.missing("course_id")
+    if not s.scratch.get("studio_loaded") or s.scratch.get("studio_course_id") != cid:
+        _load_course(ctx, cid)
+    structure = s.scratch.get("studio_structure") or {}
+    view = {"kind": "course", "structure": structure, "settings": s.scratch.get("studio_settings"),
+            "readiness": audio_readiness_state(s)}
+    topics = [t for t in structure.get("appendix_stale_topics") or [] if isinstance(t, dict) and t.get("id")]
+    if not (topics and structure.get("appendix_stale_course_notice")):
+        ctx.missing("reattach_all_button")
+        _ui(s, {**view, "status_line": f"（［{REATTACH_ALL_BUTTON}］は出ていない — 付録が古いトピックが無い）"}, status=None)
+        return
+    if structure.get("appendix_reattach_all_notice"):
+        ctx.missing("reattach_all_disabled")
+        _ui(s, {**view, "status_line": f"（［{REATTACH_ALL_BUTTON}］は押せない: "
+                                       f"{structure['appendix_reattach_all_notice']}）"}, status=None)
+        return
+    confirm = str(structure.get("appendix_reattach_all_confirm") or "")
+    status, body = ctx.call("POST", "/api/admin/courses/{course_id}/lecture-studio/appendix/reattach-all",
+                            json={"topic_ids": [str(t["id"]) for t in topics]}, overrides={"course_id": cid})
+    head = f"（確認: {confirm} → OK）" if confirm else ""
+    if status is None or not (200 <= status < 300) or not isinstance(body, dict):
+        line = _api_detail_text(body) or REATTACH_FAIL
+    else:
+        parts = [str(body.get("notice") or "")]
+        if body.get("audio_notice"):
+            parts.append(str(body["audio_notice"]))
+        delivery = body.get("delivery") if isinstance(body.get("delivery"), dict) else {}
+        if delivery.get("message"):
+            parts.append(str(delivery["message"]))
+        # 第 9 波（IK-1079）: 未発行の変更の事実もトピックの区画と同じサーバの文で添える
+        if delivery.get("unpublished_changes_note"):
+            parts.append(str(delivery["unpublished_changes_note"]))
+        line = " ".join(p for p in parts if p)
+        # 第 10 波（studio H43）: 応答の outcomes の topic_id も残す（発行の直前の学生の読みの起点）
+        outcome_tids = [str(o.get("topic_id")) for o in body.get("outcomes") or []
+                        if isinstance(o, dict) and o.get("topic_id")]
+        _digest(ctx, "studio_reattach_all", {"course_id": cid, "applied_topic_ids": list(body.get("applied_topic_ids") or []),
+                                             "outcome_topic_ids": outcome_tids, "changed": bool(body.get("changed"))})
+        _load_course(ctx, cid)
+        structure = s.scratch.get("studio_structure") or {}
+        view = {**view, "structure": structure, "readiness": audio_readiness_state(s)}
+    _ui(s, {**view, "status_line": f"{head} {line}".strip()}, status=status)
 
 
 def _chunk_doc(chunk: dict) -> str:
@@ -1038,6 +1364,9 @@ def audio_readiness_state(session: PersonaSession) -> str:
     if not session.scratch.get("studio_loaded"):
         return "loading"
     structure = session.scratch.get("studio_structure") or {}
+    # 第 6 波（オーナー判断 2）: 音声生成はトピックの保存と同じく所有者だけ（lsAudioReadinessState の owner_only）
+    if not can_save(structure):
+        return "owner_only"
     content = structure.get("course_content_status") if isinstance(structure, dict) else None
     chunks = [c for c in session.scratch.get("studio_scripts") or [] if isinstance(c, dict)]
     if not (isinstance(content, dict) and content.get("status") == "completed") or not chunks:
@@ -1059,6 +1388,71 @@ def _audio_readiness(ctx) -> None:
     _digest(ctx, "studio_readiness", {"course_id": cid, "state": state})
     _ui(s, {"kind": "readiness", "state": state, "structure": s.scratch.get("studio_structure") or {},
             "language": str((s.scratch.get("studio_settings") or {}).get("lecture_language") or "ja")})
+
+
+#: admin-lecture-studio.js lsBatchAudio / _lsPollAudioTask の文（逐語）
+AUDIO_GEN_START_FAIL = "音声生成を開始できませんでした"
+AUDIO_GEN_FAIL_PREFIX = "音声生成に失敗しました: "
+AUDIO_GEN_POLL_LIMIT = 10  # 3 秒おきに読む回数の上限（ハーネスの都合・画面は終わるまで読む）
+
+
+def _audio_generate(ctx) -> None:
+    """コース設定メニューの「音声生成を実行する」→ 言語モーダルの［開始］を実際に押す（第 25 周 第 6 周 studio・第 7 周の前提）。
+
+    画面が押せない状態（lsCanGenerateAudio が偽）なら押さず、メニューの理由を読む（HTTP を出さない）。言語は現在のコース設定と
+    同じものを送る（言語の切り替え = 原稿再生成のチェーン = 製品 LLM を起こさない）。砂場で TTS が作れないときは、サーバが返す
+    422 / 403 / 404 の理由か、タスクの失敗の文をそのまま読む。"""
+    s = ctx.session
+    cid = _studio_course_id(ctx)
+    if not cid:
+        return ctx.missing("course_id")
+    if not s.scratch.get("studio_loaded") or s.scratch.get("studio_course_id") != cid:
+        _load_course(ctx, cid)
+    state = audio_readiness_state(s)
+    language = str((s.scratch.get("studio_settings") or {}).get("lecture_language") or "ja")
+    view = {"kind": "readiness", "state": state, "structure": s.scratch.get("studio_structure") or {},
+            "language": language}
+    if state != "ready":
+        _digest(ctx, "studio_audio_generate", {"course_id": cid, "pressed": False, "state": state})
+        ctx.missing("audio_generate_disabled")
+        _ui(s, {**view, "status_line": "（「音声生成を実行する」は押せない — メニューの理由のとおり）"}, status=None)
+        return
+    status, body = ctx.call("POST", "/api/admin/courses/{course_id}/lecture-audio/generate",
+                            json={"language": language}, overrides={"course_id": cid})
+    if status is None or not (200 <= status < 300) or not isinstance(body, dict):
+        detail = body.get("detail") if isinstance(body, dict) else None
+        msg = detail if isinstance(detail, str) and detail.strip() else AUDIO_GEN_START_FAIL
+        _digest(ctx, "studio_audio_generate", {"course_id": cid, "pressed": True, "status": status})
+        _ui(s, {**view, "status_line": AUDIO_GEN_FAIL_PREFIX + msg}, status=status)
+        return
+    total = body.get("total_chunks") or 0
+    task_id = str(body.get("task_id") or "")
+    line = f"音声生成中... (0 / {total})"
+    task_status = "pending"
+    import time as _time
+    for _ in range(AUDIO_GEN_POLL_LIMIT if task_id else 0):
+        _time.sleep(3)
+        t_status, task = ctx.call("GET", "/api/admin/tasks/{task_id}", overrides={"task_id": task_id})
+        if t_status != 200 or not isinstance(task, dict):
+            continue
+        rd = task.get("result_data") or {}
+        gen, skip, err = rd.get("generated") or 0, rd.get("skipped") or 0, rd.get("errors") or 0
+        task_status = str(task.get("status") or "")
+        if task_status == "completed":
+            line = (f"音声生成完了: {gen}件生成 / {skip}件スキップ" + (f" / {err}件エラー" if err else "")
+                    + f" (全{total}件)")
+            break
+        if task_status == "failed":
+            line = AUDIO_GEN_FAIL_PREFIX + str(task.get("error_message") or "不明なエラー")
+            break
+        line = ("原稿再生成中... " if rd.get("phase") == "script" else "音声生成中... ") \
+            + f"({gen + skip + err} / {total} — {rd.get('progress') or 0}%)"
+    else:
+        if task_id:
+            line += "（ハーネス: 読む回数の上限で進捗の確認をやめた — 画面は終わるまで読み続ける。これは画面の文ではない）"
+    _digest(ctx, "studio_audio_generate", {"course_id": cid, "pressed": True, "status": status,
+                                           "task_status": task_status})
+    _ui(s, {**view, "status_line": line}, status=status)
 
 
 # ---------------------------------------------------------------------------
@@ -1286,6 +1680,20 @@ def _turn(ctx) -> None:
     _ui(s, {"kind": "figure_studio", "studio": studio})
 
 
+def adopt_notice(session: PersonaSession) -> str:
+    """admin-figure-studio.js ``_adoptNotice``（第 4 波・IK-0979）: lead +（トピックに音声があるときだけ）audio + delivery。
+    部品は原稿スタジオの course-structure ``figure_adopt_notice_parts``、音声の有無は選んでいるトピックの ``has_topic_audio``。"""
+    structure = session.scratch.get("studio_structure") or {}
+    parts = structure.get("figure_adopt_notice_parts") if isinstance(structure.get("figure_adopt_notice_parts"), dict) else {}
+    topic = (session.scratch.get("studio_topic") or {}).get("topic") or {}
+    lines = [str(parts["lead"])] if parts.get("lead") else []
+    if topic.get("has_topic_audio") and parts.get("audio"):
+        lines.append(str(parts["audio"]))
+    if parts.get("delivery"):
+        lines.append(str(parts["delivery"]))
+    return " ".join(lines)
+
+
 def _adopt(ctx) -> None:
     """_saveFigure(true) → onInsert（lsApplyFigureInsert）→ updateCourseSlideIndicator。"""
     if not _need_draft(ctx):
@@ -1308,7 +1716,7 @@ def _adopt(ctx) -> None:
         return
     fid = str(data.get("figure_id") or "")
     studio["adopted_figure_id"] = fid
-    studio["status_line"] = ADOPT_NOTICE + (" " + SNAPSHOT_FAILED_NOTICE if data.get("image_snapshot_failed") else "")
+    studio["status_line"] = adopt_notice(s) + (" " + SNAPSHOT_FAILED_NOTICE if data.get("image_snapshot_failed") else "")
     _digest(ctx, "studio_adopt", {"course_id": s.scratch.get("studio_course_id") or "", "topic_id": studio.get("topic_id"),
                                   "figure_id": fid,
                                   "linked": fid in [str(x) for x in data.get("linked_figure_ids") or []],
@@ -1342,7 +1750,10 @@ def _adopt(ctx) -> None:
         topic = (s.scratch.get("studio_topic") or {}).get("topic") or {}
         if isinstance(data.get("evidence_link"), dict):
             topic["evidence_links"] = list(topic.get("evidence_links") or []) + [data["evidence_link"]]
-        s.scratch.setdefault("studio_audio_notice", {})[str(studio.get("topic_id"))] = True
+        # 第 4 波（IK-0979）: 「音声は作り直し」の文は、トピックに音声があって audio の部品が知らせに入ったときだけ出る
+        parts = (s.scratch.get("studio_structure") or {}).get("figure_adopt_notice_parts") or {}
+        if isinstance(parts, dict) and parts.get("audio") and str(parts["audio"]) in str(studio.get("status_line") or ""):
+            s.scratch.setdefault("studio_audio_notice", {})[str(studio.get("topic_id"))] = True
         s.remember("adopted_figures", fid)
         _runner_note(s, "runner_default: 図の埋め込みはカーソル位置の代わりに" + where + "に入れた"
                         + ("" if heading is not None else "（after_heading に見出しを渡すとその直後に入れる）"))
@@ -1450,6 +1861,10 @@ def _lecture_sequence(ctx) -> None:
                 s.remember("lecture_figures", str(f["figure_id"]))
     s.scratch["lecture_deck"] = slides
     s.scratch["lecture_pos"] = 0
+    s.scratch.setdefault("until_flags", {})["lecture_at_end"] = False
+    # 第 25 周 第 6 周 H33: 再生を始めたトピック（講義が動いている範囲）と一時停止の状態（startLecture は解除する）
+    s.scratch["lecture_topic"] = s.topic_id
+    s.scratch["lecture_paused"] = False
     s.scratch["lecture_stale"] = bool(audio.get("stale_language"))
     # 第 25 周 studio H16: 画面はスライドを 1 枚ずつ出す（全スライドを 1 回の観察で並べない）。送りは learning.lecture.next
     _ui(s, {"kind": "lecture_deck", "slides": slides, "pos": 0, "stale": s.scratch["lecture_stale"]})
@@ -1463,6 +1878,10 @@ def _lecture_next(ctx) -> None:
         return ctx.missing("lecture_deck")
     to = str(ctx.args.get("to") or "next").strip().lower()
     pos = int(s.scratch.get("lecture_pos") or 0)
+    flags = s.scratch.setdefault("until_flags", {})
+    # 第 25 周 第 7 周（頭脳の運転の観察）: 最後の枚でもう一度 ▶ を押したら（画面は進まない）、stop を待たずに繰り返しを抜ける旗
+    flags["lecture_at_end"] = (to not in ("prev", "back", "◀", "前", "last", "end", "最後")
+                               and pos >= len(slides) - 1)
     if to in ("prev", "back", "◀", "前"):
         pos = max(pos - 1, 0)
     elif to in ("last", "end", "最後"):
@@ -1470,12 +1889,64 @@ def _lecture_next(ctx) -> None:
     else:
         pos = min(pos + 1, len(slides) - 1)
     s.scratch["lecture_pos"] = pos
+    s.scratch["lecture_paused"] = False  # ▶ で送ると再生が続く（一時停止の表示は消える）
     seen = s.scratch.setdefault("lecture_seen", [])
     if pos not in seen:
         seen.append(pos)
     _digest(ctx, "studio_lecture_progress", {"course_id": s.course_id, "topic_id": s.topic_id,
                                              "reached_last": pos == len(slides) - 1})
     _ui(s, {"kind": "lecture_deck", "slides": slides, "pos": pos, "stale": bool(s.scratch.get("lecture_stale"))})
+
+
+#: 第 25 周 第 6 周 H33: app.js の sendMessage（全送信経路の合流点）は講義の再生中に送ると pauseLectureForQuestion で
+#: 一時停止し、モードバーに「🎙 講義を一時停止中 ▶ 再開」を出して位置を保つ。送信の行為の集合
+LECTURE_PAUSING_ACTIONS = frozenset({
+    "learning.chat.ask", "learning.chat.rewrite", "learning.chat.backstage", "learning.chat.usage_help",
+    "learning.chat.casual", "learning.chat.ask_selection", "learning.chat.cycle", "learning.discuss.ask",
+})
+LECTURE_PAUSED_BAR = "🎙 講義を一時停止中 ［▶ 再開］"
+#: 一時停止中でないのに再開を押そうとしたとき（画面にボタンが無い）
+LECTURE_NOT_PAUSED = "（ハーネス: モードバーに「▶ 再開」が出ていない — 講義は一時停止していない。これは画面の文ではない）"
+
+
+def _lecture_active(session: PersonaSession) -> bool:
+    deck = session.scratch.get("lecture_deck")
+    return isinstance(deck, list) and bool(deck) and session.scratch.get("lecture_topic") == session.topic_id
+
+
+def lecture_paused_note(action_id: str, session: PersonaSession) -> Optional[str]:
+    """講義中の送信で一時停止に入り、一時停止中は観察の末尾にモードバーの行を写す（第 25 周 第 6 周 H33）。
+
+    頭脳は再開の手も一時停止の表示も無いので ``learning.lecture.sequence``（1 枚目から）を選び、「続きから聴けない」と
+    記した。位置はハーネスの注記（モードバーにスライドの番号は出ない）。講義の行為の観察には付けない。"""
+    if not _lecture_active(session):
+        return None
+    if action_id in LECTURE_PAUSING_ACTIONS:
+        session.scratch["lecture_paused"] = True
+    if not session.scratch.get("lecture_paused") or action_id.startswith("learning.lecture."):
+        return None
+    deck = session.scratch.get("lecture_deck") or []
+    pos = int(session.scratch.get("lecture_pos") or 0)
+    return (f"モードバー: {LECTURE_PAUSED_BAR}（ハーネス: 止めた位置はスライド {pos + 1} / {len(deck)}。"
+            "再開するとこの位置から続く — 番号は画面に出ない）")
+
+
+def _lecture_resume(ctx) -> None:
+    """モードバーの「▶ 再開」（app.js resumeLecture）: 一時停止を解き、止めた位置のスライドから再生を続ける。HTTP は出さない。"""
+    s = ctx.session
+    if not _lecture_active(s):
+        return ctx.missing("lecture_deck")
+    if not s.scratch.get("lecture_paused"):
+        ctx.missing("lecture_paused")
+        s.last_body = {"_precondition": "lecture_paused", "_ui_fact": LECTURE_NOT_PAUSED}
+        return
+    s.scratch["lecture_paused"] = False
+    slides = s.scratch.get("lecture_deck") or []
+    pos = int(s.scratch.get("lecture_pos") or 0)
+    _digest(ctx, "studio_lecture_progress", {"course_id": s.course_id, "topic_id": s.topic_id,
+                                             "reached_last": pos == len(slides) - 1, "resumed": True})
+    _ui(s, {"kind": "lecture_deck", "slides": slides, "pos": pos, "stale": bool(s.scratch.get("lecture_stale")),
+            "resumed": True})
 
 
 def lecture_deck(seq: dict) -> list[dict]:
@@ -1539,10 +2010,237 @@ def _figure_view(ctx) -> None:
             "binary": body.get("_binary") if isinstance(body, dict) else None}, status=200)
 
 
+# ---------------------------------------------------------------------------
+# 第 7 波（IK-1053）: 届き方の文の下の［版の管理を開く］→ V層の版の管理モーダル（versioning.js openModal）
+# ---------------------------------------------------------------------------
+VG_TITLE = "共有バージョン管理"
+#: 第 10 波（IK-1127）: versioning.js ``_introText("course")`` は空（宛先ごとの届き方はサーバの ``audience_note``）。
+#: 旧文「発行した版だけが共有先に見え、共有先は同意するまで自分の版に留まります。」は描かない
+VG_INTRO_COURSE = ""
+VG_NO_RELEASES = "まだ発行された版はありません。"
+VG_PUBLISH = "共有版として発行"
+VG_PUBLISH_FAIL = "発行に失敗しました"
+VG_OWNER_ONLY = "所有者のみ操作できます"
+
+
+def _vg_date(iso: Any) -> str:
+    """versioning.js fmtDate（Y/M/D HH:MM）。ISO として読めなければそのまま。"""
+    from datetime import datetime
+
+    raw = str(iso or "")
+    if not raw:
+        return ""
+    try:
+        d = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    return f"{d.year}/{d.month}/{d.day} {d.hour:02d}:{d.minute:02d}"
+
+
+def versions_modal_lines(title: str, state: dict, releases: list, status_line: str = "") -> list[str]:
+    """versioning.js ``_renderModal``（コース）の写し: 見出し → 説明 → 現在の最新版 → 宛先ごとの届き方 → 受講者の版 →
+    未発行の変更 → 変わったトピック → 発行 → 版の履歴。"""
+    state = state if isinstance(state, dict) else {}
+    lines = [f"{VG_TITLE}（モーダル）", f"コース「{title}」の共有版を管理します。{VG_INTRO_COURSE}"]
+    latest = state.get("latest_version_no") or 0
+    lines.append(f"現在の最新版: {('v' + str(latest)) if latest else '未発行'}")
+    owner = state.get("is_owner") is True
+    # 第 10 波（IK-1127）: 宛先ごとの届き方（全員・data-vg-audience-note）と受講者の見ている版（所有者・data-vg-learner-version）
+    if state.get("audience_note"):
+        lines.append(str(state["audience_note"]))
+    if owner and state.get("learner_version_note"):
+        lines.append(str(state["learner_version_note"]))
+    # 第 9 波（IK-1079）: 所有者にだけ、いまの内容が受講者の版と同じか（data-vg-unpublished-changes）。比べられなければキーなし
+    if owner and state.get("unpublished_changes_note"):
+        lines.append(str(state["unpublished_changes_note"]))
+    # 第 10 波: 発行の後に変わったトピックの題名（data-vg-changed-topics の <details>・件数なし）
+    titles = [str(t) for t in state.get("changed_topic_titles") or [] if str(t or "").strip()]
+    if owner and titles:
+        lines.append(f"▸ {state.get('changed_topics_label') or ''}（折りたたみ）")
+        lines += [f"  - {t}" for t in titles]
+    if state.get("lifecycle") != "pending_deletion":
+        if state.get("can_publish") is True:
+            lines.append(f"この版のメモ（任意）の欄 ［{VG_PUBLISH}］")
+        else:
+            lines.append(f"［{VG_PUBLISH}］（押せない） {VG_OWNER_ONLY}")
+    lines.append("版の履歴")
+    rows = [r for r in releases or [] if isinstance(r, dict)]
+    if not rows:
+        lines.append(VG_NO_RELEASES)
+    for r in rows:
+        mark = " 〔現行〕" if state.get("active_release_id") and r.get("id") == state.get("active_release_id") else ""
+        lines.append(f"- v{r.get('version_no') or ''}{mark} {_vg_date(r.get('created_at'))}"
+                     + (f" — {r['note']}" if r.get("note") else ""))
+    if status_line:
+        lines.append(status_line)
+    return lines
+
+
+def _load_versions(ctx, cid: str) -> tuple[dict, list]:
+    base = "/api/admin/shared/{object_type}/{object_id}"
+    ov = {"object_type": "course", "object_id": cid}
+    _st, state = ctx.call("GET", base + "/version-state", overrides=ov)
+    _st2, releases = ctx.call("GET", base + "/releases", overrides=ov)
+    return (state if isinstance(state, dict) else {}), (releases if isinstance(releases, list) else [])
+
+
+def _versions_entry_blocked(ctx) -> bool:
+    s = ctx.session
+    structure = s.scratch.get("studio_structure") or {}
+    delivery = structure.get("delivery") if isinstance(structure.get("delivery"), dict) else {}
+    if not can_save(structure) or not delivery.get("message") or not isinstance(delivery.get("versions_entry"), dict):
+        ctx.missing("open_versions_button")
+        why = ("届き方の文の下に［版の管理を開く］は出ていない（所有者で、版が発行されているコースだけに出る）")
+        _ui(s, _topic_view(s, status_line=f"（{why}）") if s.scratch.get("studio_topic")
+            else {"kind": "course", "structure": structure, "settings": s.scratch.get("studio_settings"),
+                  "readiness": audio_readiness_state(s), "status_line": why}, status=None)
+        return True
+    return False
+
+
+def _open_versions(ctx) -> None:
+    """［版の管理を開く］（data-ls-open-versions）→ version-state + releases を読みモーダルを描く。"""
+    s = ctx.session
+    cid = _studio_course_id(ctx)
+    if not cid:
+        return ctx.missing("course_id")
+    if _versions_entry_blocked(ctx):
+        return
+    state, releases = _load_versions(ctx, cid)
+    s.scratch["studio_versions_open"] = cid
+    title = str((s.scratch.get("studio_structure") or {}).get("title") or "")
+    _ui(s, {"kind": "versions", "lines": versions_modal_lines(title, state, releases)}, status=200)
+
+
+#: 発行の直前に学生の読みを書く run の中のファイル（campaign の ``campaign_studio_cross.before.jsonl`` と同じ行の形）
+PREPUBLISH_FILE = "campaign_studio_cross.before.jsonl"
+
+
+def _utc_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def prepublish_student_reads(ctx, course_id: str, *, client_factory: Optional[Callable[[], Any]] = None,
+                             now: Optional[str] = None) -> list[dict]:
+    """第 25 周 第 9 波（studio H40）: ［共有版として発行］の直前に、この run で保存したトピックごとの学生の講義 API の
+    ``total_slides`` を学生の資格で読み（GET だけ・1 トピック 1 回）、run の中の ``campaign_studio_cross.before.jsonl`` に
+    ``oracles.studio.check_campaign_saves`` と同じ行の形で書く（``phase: before_publish``）。
+
+    発行が場面の中に入り「保存の後・発行の前」に face スクリプトが学生 API を引く場所が無くなった（第 9 周の発行前の cross が
+    0 組）ための手。画面の操作ではないので観察には出さず runner_notes に 1 行。学生・run の書き先が引けなければ何もしない。"""
+    import json
+    from pathlib import Path
+
+    from uxsim.oracles.findings import load_transcript
+    from uxsim.oracles.studio import check_campaign_reattach, check_campaign_saves
+    from uxsim.runner.actions_exec import runner_note
+
+    s = ctx.session
+    run_dir = str(s.scratch.get("run_dir") or "")
+    students = [str(x) for x in s.scratch.get("campaign_students") or [] if str(x)]
+    if not run_dir or not students:
+        runner_note(s, "prepublish_reads: 学生の読みを残さなかった（campaign の学生か run の書き先が無い）")
+        return []
+    rd = Path(run_dir)
+    steps = load_transcript(rd) if (rd / "transcript.jsonl").is_file() else []
+    if client_factory is None:
+        from uxsim.config import get_settings
+        from uxsim.runner.client import EpistemeClient
+
+        settings = get_settings()
+
+        def client_factory():  # noqa: E306 — 既定の資格（全ペルソナ共通のパスワード）
+            return EpistemeClient(settings.base_url)
+
+    from uxsim.runner.api import persona_username
+
+    client = client_factory()
+    ok = bool(client.login(persona_username(students[0]), s.password)[0])
+
+    def fetch(cid: str, tid: str):
+        if not ok:
+            return None
+        st, body, _ = client.call("GET", f"/api/learning/lecture/courses/{cid}/topics/{tid}/sequence")
+        total = body.get("total_slides") if st == 200 and isinstance(body, dict) else None
+        return total if isinstance(total, int) and not isinstance(total, bool) else None
+
+    read_at = now or _utc_now()  # 第 10 波（studio H44）: 発行の直前に読んだ時刻（審判が「発行の直前」を確かめる材料）
+    saved = [r for r in check_campaign_saves({rd.name: steps}, fetch) if r.get("course_id") == course_id]
+    # 第 10 波（studio H43）: ［付録をまとめて付け直す］で保存したトピックも起点に（save_topic の手と重ならない分だけ）
+    reattached = [r for r in check_campaign_reattach({rd.name: steps}, fetch,
+                                                     exclude={(r["course_id"], r["topic_id"]) for r in saved})
+                  if r.get("course_id") == course_id]
+    rows = [dict(r, phase="before_publish", student=students[0], read_at=read_at) for r in saved + reattached]
+    try:
+        client.close()
+    except Exception:  # noqa: BLE001
+        pass
+    with (rd / PREPUBLISH_FILE).open("a", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    runner_note(s, f"prepublish_reads: 発行の直前に学生（{students[0]}）の講義 API を {len(rows)} トピック読んだ"
+                   f"（GET だけ・{PREPUBLISH_FILE} — 画面の操作ではない）")
+    return rows
+
+
+def _publish_release(ctx) -> None:
+    """版の管理モーダルの［共有版として発行］→ POST releases {note} → 「vN を発行しました（M名に通知）」→ モーダルを
+    閉じる → 原稿スタジオが course-structure を取り直す（options.onClose → lsRefreshTopicServerFacts）。"""
+    s = ctx.session
+    cid = _studio_course_id(ctx)
+    if not cid or s.scratch.get("studio_versions_open") != cid:
+        return ctx.missing("versions_modal")
+    title = str((s.scratch.get("studio_structure") or {}).get("title") or "")
+    state, releases = _load_versions(ctx, cid)
+    if state.get("can_publish") is not True or state.get("lifecycle") == "pending_deletion":
+        ctx.missing("publish_disabled")
+        _ui(s, {"kind": "versions", "lines": versions_modal_lines(title, state, releases)}, status=None)
+        return
+    try:
+        # 第 9 波（studio H40）: 保存の後・発行の前の学生の読み（読み取りだけ）。第 10 波（H44）: 読んだ時刻を渡す
+        prepublish_student_reads(ctx, cid, now=_utc_now())
+    except Exception as exc:  # noqa: BLE001 — 読めなくても発行の手は止めない
+        from uxsim.runner.actions_exec import runner_note
+
+        runner_note(s, f"prepublish_reads: 学生の読みを残せなかった（{type(exc).__name__}）")
+    status, body = ctx.call("POST", "/api/admin/shared/{object_type}/{object_id}/releases",
+                            json={"note": str(ctx.args.get("note") or "")},
+                            overrides={"object_type": "course", "object_id": cid})
+    if status is not None and 200 <= status < 300 and isinstance(body, dict):
+        line = f"v{body.get('version_no') or ''} を発行しました（{body.get('notified') or 0}名に通知）"
+        state, releases = _load_versions(ctx, cid)
+        modal = versions_modal_lines(title, state, releases, line)
+        s.scratch.pop("studio_versions_open", None)
+        topic = (s.scratch.get("studio_topic") or {}).get("topic")
+        if isinstance(topic, dict):
+            _refresh_topic_server_facts(ctx, topic)
+            view = _topic_view(s)
+            lines = modal + ["（モーダルを閉じた — 原稿スタジオが届き方の事実を取り直した）"] + _draft_lines(view)
+        else:
+            # 第 9 波（IK-1079）: トピック未選択で閉じたら、原稿スタジオはコース構造を取り直す（見出しの未発行の文が変わる）
+            st3, fresh = ctx.call("GET", "/api/admin/courses/{course_id}/lecture-studio/course-structure",
+                                  overrides={"course_id": cid})
+            if st3 == 200 and isinstance(fresh, dict):
+                s.scratch["studio_structure"] = fresh
+                lines = modal + ["（モーダルを閉じた — 原稿スタジオがコース構造を取り直した）"] \
+                    + _course_lines(fresh, s.scratch.get("studio_settings"))
+            else:
+                lines = modal + ["（モーダルを閉じた）"]
+        _ui(s, {"kind": "versions", "lines": lines}, status=status)
+    else:
+        detail = body.get("detail") if isinstance(body, dict) else None
+        _ui(s, {"kind": "versions", "lines": versions_modal_lines(
+            title, state, releases, detail if isinstance(detail, str) and detail else VG_PUBLISH_FAIL)}, status=status)
+
+
 HANDLERS: dict[str, Callable[[Any], None]] = {
     "admin.lecture_studio.open_course": _open_course,
     "admin.lecture_studio.select_topic": _select_topic,
     "admin.lecture_studio.insert_slide_marker": _insert_slide_marker,
+    "admin.lecture_studio.insert_slide_marker_both": _insert_slide_marker_both,  # 第 5 波（IK-0878）
+    "admin.lecture_studio.align_slide_markers": _align_slide_markers,  # 第 5 波（IK-0878）
     "admin.lecture_studio.edit_draft": _edit_draft,
     "admin.lecture_studio.save_topic": _save_topic,
     "admin.lecture_studio.rewrite_topic": _rewrite_topic,
@@ -1550,18 +2248,25 @@ HANDLERS: dict[str, Callable[[Any], None]] = {
     "admin.lecture_studio.right_pane_evidence": _evidence_pane,
     "admin.lecture_studio.right_pane_stumble": _stumble_pane,
     "admin.lecture_studio.audio_readiness": _audio_readiness,
+    "admin.lecture_studio.audio_generate": _audio_generate,  # 第 25 周 第 6 周（第 7 周の前提）
     "admin.figure_studio.suggestions": _suggestions,
     "admin.figure_studio.suggestions_generate": _suggestions_generate,
     "admin.figure_studio.build_from_suggestion": _build_from_suggestion,
     "admin.figure_studio.turn": _turn,
     "admin.figure_studio.adopt": _adopt,
     "admin.figure_studio.existing": _existing,
-    "admin.lecture_studio.reattach_appendix": _reattach_appendix,  # 第 2 波（IK-0872 / IK-0880）
+    "admin.lecture_studio.reattach_appendix": _reattach_appendix,
+    "admin.lecture_studio.reattach_appendix_all": _reattach_all_appendices,  # 第 6 波（オーナー判断 1）  # 第 2 波（IK-0872 / IK-0880）
+    "admin.lecture_studio.rewrite_copy": _copy_proposal,  # 第 3 波（IK-0950）
+    "admin.lecture_studio.audio_request_copy": _copy_audio_request,  # 第 8 波（IK-1071）
+    "admin.lecture_studio.open_versions": _open_versions,  # 第 7 波（IK-1053）
+    "admin.lecture_studio.publish_release": _publish_release,  # 第 7 波（IK-1053）
     "learning.lecture.figure_view": _figure_view,
     # 既存の行為 id（画面どおりの投影・審判の要約に差し替える）
     "learning.lecture.audio_status": _lecture_audio_status,
     "learning.lecture.sequence": _lecture_sequence,
     "learning.lecture.next": _lecture_next,  # 第 25 周 studio H16
+    "learning.lecture.resume": _lecture_resume,  # 第 25 周 第 6 周 H33
 }
 
 
@@ -1618,10 +2323,20 @@ def _course_lines(structure: dict, settings: Any) -> list[str]:
     lines = [f"原稿スタジオ — コース: {s.get('title') or 'コース'}（{meta}）"]
     # lsRenderCourseTree（第 3 波）: 題名の下に共有の印（IK-0950・editor のときだけ）、状態の後に題名の数式の事実文（IK-0951）
     if s.get("share_mark"):
-        lines.append(str(s["share_mark"]))
+        # 第 4 波（IK-0978）: 共有の印の隣に所有者（owner_notice「このコースの所有者: {名前}」）
+        lines.append(str(s["share_mark"]) + (f" {s['owner_notice']}" if s.get("owner_notice") else ""))
+    # 第 9 波（IK-1079）: 所有者（保存できる）で発行の後に保存した変更があるときだけ、見出しに事実文と［版の管理を開く］
+    # （data-course-unpublished-changes="1" — lsUnpublishedChangesHtml(delivery, true)）。状態の後・題名の数式の前
+    lines += course_unpublished_lines(s)
     if s.get("title_notice"):
         titles = [str(x) for x in s.get("raw_tex_titles") or [] if x]
         lines.append(str(s["title_notice"]) + (f"（{' / '.join(titles)}）" if titles else ""))
+    lines += appendix_stale_lines(s)
+    # 第 9 波（IK-1081）: 作業メモの名残が残るトピックの事実文と題名の一覧（data-work-note-course-notice="1"・アンカーなし）
+    lines += work_note_course_lines(s)
+    # 第 7 波（IK-1051）: 後継の決まらない部品を指す ⚓ があるときだけ事実文 1 行（data-frozen-anchor-notice）
+    if s.get("frozen_anchor_notice"):
+        lines.append(str(s["frozen_anchor_notice"]))
     lang = str((settings or {}).get("lecture_language") or "ja") if isinstance(settings, dict) else "ja"
     lines.append(f"読み上げ言語: {LANG_LABELS.get(lang, lang)}")
     chapters = [c for c in s.get("chapters") or [] if isinstance(c, dict)]
@@ -1639,10 +2354,107 @@ def _course_lines(structure: dict, settings: Any) -> list[str]:
     return lines
 
 
-def _readiness_lines(state: str) -> list[str]:
+REATTACH_ALL_BUTTON = "付録をまとめて付け直す"
+APPENDIX_STALE_LIST_SUMMARY = "付録が古いトピックの一覧"  # lsAppendixStaleListHtml の既定（サーバの値が無いとき）
+VERSIONS_ENTRY_LABEL = "版の管理を開く"  # lsTopicDeliveryInnerHtml の既定（entry.label が無いとき）
+
+
+def course_unpublished_lines(structure: dict) -> list[str]:
+    """lsRenderCourseTree の見出し（第 9 波・IK-1079）: ``lsCourseCanSave()`` かつ ``delivery.unpublished_changes === true``
+    のときだけ、``delivery.unpublished_changes_note`` と［版の管理を開く］（``delivery.versions_entry`` があるとき・札は
+    ``versions_entry.label``）。変更が無い・比べられない・editor では何も出さない。"""
+    s = structure or {}
+    if s.get("can_save") is False:
+        return []
+    delivery = s.get("delivery") if isinstance(s.get("delivery"), dict) else {}
+    if delivery.get("unpublished_changes") is not True:
+        return []
+    out = [str(delivery["unpublished_changes_note"])] if delivery.get("unpublished_changes_note") else []
+    entry = delivery.get("versions_entry") if isinstance(delivery.get("versions_entry"), dict) else None
+    if entry is not None:
+        out.append(f"［{entry.get('label') or VERSIONS_ENTRY_LABEL}］")
+    return out
+
+
+def work_note_course_lines(structure: dict) -> list[str]:
+    """lsRenderCourseTree の作業メモの区画（第 9 波・IK-1081）: ``work_note_course_notice`` + 折りたたみに 1 行 1 題名
+    （左の一覧と同じ「章.トピック 題名」）。題名が 1 つも無ければ何も出さない。
+
+    第 10 波（IK-1081 の残り）: ``work_note_list_summaries = {body, cautions}`` があれば一覧を残っている場所で 2 つに分ける
+    （``places`` に ``body`` を含むトピック → 本文の「注」の段落 / それ以外 → 注意点だけ。件数なし）。無ければ従来の 1 つ。"""
+    s = structure or {}
+    topics = [t for t in s.get("work_note_topics") or [] if isinstance(t, dict)]
+    if not (topics and s.get("work_note_course_notice")):
+        return []
+    pos: dict[str, str] = {}
+    for ci, ch in enumerate(s.get("chapters") or []):
+        for ti, t in enumerate((ch or {}).get("topics") or [] if isinstance(ch, dict) else []):
+            if isinstance(t, dict) and t.get("id"):
+                pos[str(t["id"])] = f"{ci + 1}.{ti + 1} "
+
+    def items(rows: list[dict]) -> list[str]:
+        return [x for x in (pos.get(str(t.get("id") or ""), "") + str(t.get("title") or "") for t in rows) if x.strip()]
+
+    def block(rows: list[dict], summary: str) -> list[str]:
+        xs = items(rows)
+        if not xs:
+            return []  # lsAppendixStaleListHtml: 項目が無ければ折りたたみごと出さない
+        return [f"▸ {summary}（折りたたみ・各項目で左の一覧のトピックを開く）"] + [f"  - {x}" for x in xs]
+
+    lines = [str(s["work_note_course_notice"])]
+    summaries = s.get("work_note_list_summaries") if isinstance(s.get("work_note_list_summaries"), dict) else {}
+    if summaries.get("body"):
+        body_rows = [t for t in topics if "body" in (t.get("places") or [])]
+        caution_rows = [t for t in topics if "body" not in (t.get("places") or [])]
+        lines += block(body_rows, str(summaries["body"]))
+        lines += block(caution_rows, str(summaries.get("cautions") or s.get("appendix_stale_list_summary")
+                                          or APPENDIX_STALE_LIST_SUMMARY))
+    else:
+        lines += block(topics, str(s.get("work_note_list_summary") or s.get("appendix_stale_list_summary")
+                                   or APPENDIX_STALE_LIST_SUMMARY))
+    return lines
+
+
+def appendix_stale_lines(structure: dict) -> list[str]:
+    """lsRenderCourseTree の付録が古いトピックの行（第 6 波・オーナー判断 1）: ``appendix_stale_course_notice``（題名の列挙）+
+    ［付録をまとめて付け直す］。editor（``appendix_reattach_all_notice`` あり）はボタンが押せず、理由の文を 1 行。"""
+    s = structure or {}
+    topics = [t for t in s.get("appendix_stale_topics") or [] if isinstance(t, dict)]
+    if not (topics and s.get("appendix_stale_course_notice")):
+        return []
+    # 第 7 波（IK-1054）: 題名を文の括弧に連結しない。折りたたみ（appendix_stale_list_summary）に 1 行 1 題名
+    # （左の一覧と同じ「章.トピック 題名」）— lsAppendixStaleListHtml
+    pos: dict[str, str] = {}
+    for ci, ch in enumerate(s.get("chapters") or []):
+        for ti, t in enumerate((ch or {}).get("topics") or [] if isinstance(ch, dict) else []):
+            if isinstance(t, dict) and t.get("id"):
+                pos[str(t["id"])] = f"{ci + 1}.{ti + 1} "
+    items = [pos.get(str(t.get("id") or ""), "") + str(t.get("title") or "") for t in topics]
+    items = [x for x in items if x.strip()]
+    notice = str(s.get("appendix_reattach_all_notice") or "")
+    lines = [str(s["appendix_stale_course_notice"])]
+    if items:
+        lines.append(f"▸ {s.get('appendix_stale_list_summary') or APPENDIX_STALE_LIST_SUMMARY}（折りたたみ・各項目で左の一覧のトピックを開く）")
+        lines += [f"  - {x}" for x in items]
+    lines.append(f"［{REATTACH_ALL_BUTTON}］" + ("（押せない）" if notice else ""))
+    if notice:
+        lines.append(notice)
+    return lines
+
+
+def _readiness_lines(state: str, structure: Optional[dict] = None) -> list[str]:
     if state == "ready":
         return ["コース設定メニュー: 「音声生成を実行する」は押せる（押すと読み上げ言語を選ぶモーダルが開く）"]
-    reason, action = AUDIO_GUIDANCE.get(state, ("", ""))
+    if state == "owner_only":
+        # 第 6 波（オーナー判断 2）: 理由はサーバの audio_generate_notice（無ければ save_notice）。第 8 波（IK-1071）: 押せない
+        # 「→ 所有者に依頼する」は無くなり、理由の横にボタン［依頼の文をコピー］（サーバの audio_request.label）が出る
+        st = structure or {}
+        reason = str(st.get("audio_generate_notice") or st.get("save_notice") or "")
+        req = st.get("audio_request") if isinstance(st.get("audio_request"), dict) else {}
+        return ["コース設定メニュー: 「音声生成を実行する」は押せない（グレーアウト）",
+                f"  {reason}" + (f" ［{req['label']}］" if req.get("label") else "")]
+    else:
+        reason, action = AUDIO_GUIDANCE.get(state, ("", ""))
     return ["コース設定メニュー: 「音声生成を実行する」は押せない（グレーアウト）",
             f"  {reason}" + (f" → {action}" if action else "")]
 
@@ -1661,7 +2473,9 @@ def _draft_lines(view: dict) -> list[str]:
         lines.append(_clip(draft.get("material") or "", 2600) or "（空）")
         lines.append("本文説明（編集欄・音声読み上げ対象）:")
         lines.append(_clip(draft.get("spoken") or "", 1600) or "（空）")
-        lines.append("［+ スライド区切りを挿入］［🖼 図を挿入］ " + str(split.get("indicator") or ""))
+        # 第 5 波（IK-0878）: ［+ 両方の欄に区切りを挿入］と、1 枚に統合されるときだけ［読み上げ欄の区切りを教材欄に揃える］
+        align = f"［{ALIGN_MARKERS_BUTTON}］" if (split.get("mismatch") and not split.get("error")) else ""
+        lines.append(f"［+ スライド区切りを挿入］［{INSERT_BOTH_BUTTON}］{align}［🖼 図を挿入］ " + str(split.get("indicator") or ""))
     else:
         lines.append("教材:")
         lines.append(_clip(render_material_text({"text": draft.get("material") or "", "formulas": formulas,
@@ -1682,16 +2496,38 @@ def _draft_lines(view: dict) -> list[str]:
     lines.append("確認問題: " + (str(qs[0].get("question") or "") if qs else "（なし）"))
     pill = coverage_label(topic)
     lines.append("根拠リンク: " + (f"[{pill}] " if pill else "") + coverage_message(topic))
-    st = evidence_state(topic)
-    if st and st.get("unmapped_heading"):
+    st = evidence_state(topic) or {}
+    # lsCourseEvidenceChipsHtml（第 5 波・IK-1010）: 教員が加えた資料（教材欄に埋め込んだ順）の区画が先頭
+    # （data-evidence-section="teacher_added"・見出しは teacher_added_heading）→ unmapped_heading + 解析の候補。
+    # 第 25 周第 5 周 H28: 製品の画面は全件を描く — 件数で切らない
+    teacher, machine = split_teacher_added(topic, [e for e in evidence if isinstance(e, dict)])
+
+    def chip_text(items: list) -> str:
+        return " / ".join(f"{evidence_kind_text(e)}: {e.get('title') or e.get('summary') or ''}".strip()[:60]
+                          for e in items)
+
+    if teacher:
+        lines.append(f"  {st.get('teacher_added_heading') or ''}".rstrip() or "  ")
+        lines.append("    " + chip_text(teacher))
+    if machine:
+        if st.get("unmapped_heading"):
+            lines.append(f"  {st['unmapped_heading']}")
+        elif teacher and st.get("analysis_heading"):
+            # 第 6 波（IK-1010 の残り）: 根拠ありでも教員の区画があれば解析の候補に見出し（data-evidence-section="analysis"）
+            lines.append(f"  {st['analysis_heading']}")
+        lines.append(("    " if teacher else "  ") + chip_text(machine))
+    elif not teacher and st.get("unmapped_heading"):
         lines.append(f"  {st['unmapped_heading']}")
-    chips = [f"{KIND_LABELS.get(str(e.get('kind')), str(e.get('kind')))}: {e.get('title') or e.get('summary') or ''}".strip()
-             for e in evidence if isinstance(e, dict)]
-    if chips:
-        lines.append("  " + " / ".join(c[:60] for c in chips[:10]) + (" …ほか" if len(chips) > 10 else ""))
     # lsCourseDraftHtml（第 2 波）: 付録の状態 → 保存できない理由 → 届き方 → 音声の事実文の順（data-appendix-stale /
     # data-topic-save-notice / data-topic-delivery-notice / data-topic-audio-save-notice）
     saveable = view.get("can_save", True) is not False
+    # 第 9 波（IK-1081）: 根拠リンクの区画の後・付録の状態の前に作業メモの名残の事実文（data-work-note-state="1"）
+    work_note = topic.get("work_note_state") if isinstance(topic.get("work_note_state"), dict) else None
+    if work_note and work_note.get("message"):
+        lines.append(str(work_note["message"]))
+        # 第 10 波（IK-1081）: 注意点の「埋め込んでいません」がいまの本文の埋め込みと食い違う（data-work-note-embed-conflict）
+        if work_note.get("embed_conflict_note"):
+            lines.append(str(work_note["embed_conflict_note"]))
     appendix = topic.get("appendix_state") if isinstance(topic.get("appendix_state"), dict) else None
     if appendix and appendix.get("message"):
         lines.append(str(appendix["message"]))
@@ -1700,11 +2536,25 @@ def _draft_lines(view: dict) -> list[str]:
         lines.append(str(view["save_block_notice"]))
     if saveable and view.get("delivery_message"):
         lines.append(str(view["delivery_message"]))
+        # 第 7 波（IK-1053）: 届き方の文の下に未発行の変更の事実文（data-topic-unpublished-changes）と、
+        # 所有者だけ［版の管理を開く］（data-ls-open-versions）
+        if view.get("unpublished_changes_note"):
+            lines.append(str(view["unpublished_changes_note"]))
+        if view.get("versions_entry_label"):
+            lines.append(f"［{view['versions_entry_label']}］")
     lines.append(DRAFT_HELP)
     if topic.get("has_topic_audio") and view.get("save_notice"):
         lines.append(str(view["save_notice"]))  # 保存の前の事実文（topic_audio_save_notice — IK-0877）
-    lines.append("［原稿を保存する］" + ("" if saveable else "（押せない）") + "［AI で書き換え］")
+    # lsUpdateAssistantContext（IK-0950）: 保存できないときだけ書き換えのモーダルに［案をコピー］が出る
+    lines.append("［原稿を保存する］" + ("" if saveable else "（押せない）") + "［AI で書き換え］"
+                 + ("" if saveable else f"（書き換えのモーダルに［{COPY_BUTTON}］）"))
     return lines
+
+
+def evidence_kind_text(item: dict) -> str:
+    """lsEvidenceItemKindText（IK-0949・第 3 波）: 種類の印は 1 箇所。教員が作った説明図はサーバの ``origin_label``
+   （「教員が作った説明図」）、無ければ種類のラベル（「図」など）。旧サーバ（origin_label なし）は種類のラベル。"""
+    return str(item.get("origin_label") or "") or KIND_LABELS.get(str(item.get("kind")), str(item.get("kind")))
 
 
 def _evidence_lines(topic: dict) -> list[str]:
@@ -1712,15 +2562,65 @@ def _evidence_lines(topic: dict) -> list[str]:
     lines = ["右ペイン: 根拠リンク"]
     if not items:
         return lines + [coverage_message(topic) or EVIDENCE_EMPTY]  # lsRenderCourseEvidence（IK-0875）
-    for e in items[:20]:
-        kind = KIND_LABELS.get(str(e.get("kind")), str(e.get("kind")))
+    def card(e: dict) -> str:
+        kind = evidence_kind_text(e)
         title = str(e.get("title") or "").strip()
         summary = str(e.get("summary") or e.get("caption") or "").strip()
         head = f"- {kind}" + (f": {title}" if title and title != summary and not e.get("title_is_excerpt") else "")
-        lines.append(head + (f" — {summary[:160]}" if summary else (f" — $$${e['latex']}$$" if e.get("latex") else "")))
-    if len(items) > 20:
-        lines.append("- …ほか")
+        # 壊れた復元（latex_withheld・IK-1008）はサーバが latex を空にして返す — 空の式を描かない
+        return head + (f" — {summary[:160]}" if summary else (f" — $${e['latex']}$$" if e.get("latex") else ""))
+
+    # lsCourseEvidenceHtml（第 5 波・IK-1010）: 教員が加えた資料の区画（.ls-course-evidence-teacher）が先頭、解析の候補は後ろ。
+    # 第 25 周第 5 周 H28: 製品は全件を描く（切らない）
+    teacher, machine = split_teacher_added(topic, items)
+    if teacher:
+        st = evidence_state(topic) or {}
+        if st.get("teacher_added_heading"):
+            lines.append(str(st["teacher_added_heading"]))
+        lines += [card(e) for e in teacher]
+        # 第 6 波（IK-1010 の残り）: 教員の区画があるとき、解析の区画にも見出し（analysis_heading）
+        if machine and st.get("analysis_heading"):
+            lines.append(str(st["analysis_heading"]))
+    lines += [card(e) for e in machine]
     return lines
+
+
+def split_teacher_added(topic: dict, items: list) -> tuple[list, list]:
+    """admin-lecture-studio.js ``lsSplitTeacherAddedEvidence``（第 5 波・IK-1010）: ``teaching``（根拠リンクの
+    ``extra.teaching`` を lsTopicEvidenceItems が写したもの）か ``role == "teaching_figure"`` の項目を教員が加えた資料に分け、教材欄の ``![[figure:id]]`` の位置順に並べる（埋め込みの無いものは
+    末尾・元の並びを保つ）。残りは解析が拾った候補（元の並び）。"""
+    text = topic_material_source(topic)
+    teacher, machine = [], []
+    for e in items:
+        extra = e.get("extra") if isinstance(e.get("extra"), dict) else {}
+        (teacher if (e.get("teaching") or extra.get("teaching") or e.get("role") == "teaching_figure")
+         else machine).append(e)
+
+    def pos(pair: tuple[int, dict]) -> tuple[float, int]:
+        idx, e = pair
+        fid = str(e.get("figure_id") or e.get("id") or "")
+        at = text.find("![[figure:" + fid) if fid else -1
+        return (float("inf") if at < 0 else float(at), idx)
+
+    teacher = [e for _, e in sorted(enumerate(teacher), key=pos)]
+    return teacher, machine
+
+
+def teaching_evidence_titles(items: list) -> list[str]:
+    """教員が加えた図（``kind=figure`` かつ ``extra.teaching``、または ``origin_label`` 付き）の題名（H28）。"""
+    out = []
+    for e in items or []:
+        if not isinstance(e, dict):
+            continue
+        extra = e.get("extra") if isinstance(e.get("extra"), dict) else {}
+        if (e.get("kind") == "figure" and extra.get("teaching")) or e.get("origin_label"):
+            out.append(str(e.get("title") or e.get("caption") or e.get("summary") or "（題名なし）")[:60])
+    return out
+
+
+def harness_teaching_note(titles: list[str]) -> str:
+    """製品の並びでは教員が加えた図が後ろに埋もれるので、別の行でも名前を出す（ハーネスの注記・H28）。"""
+    return "（ハーネス: 教員が加えた図: " + " / ".join(titles) + " — 上の並びの中にもある。これは画面の文ではない）"
 
 
 def _stumble_lines(view: dict) -> list[str]:
@@ -1863,6 +2763,8 @@ def _toggle_lines(view: dict) -> list[str]:
 def _deck_lines(view: dict) -> list[str]:
     slides = view.get("slides") or []
     lines = ["レクチャー（再生画面）: ◀ ▶ 進捗 ▶ ❓ 質問" + (f"（{LECTURE_STALE_TITLE}）" if view.get("stale") else "")]
+    if view.get("resumed"):
+        lines.append("（モードバーの「▶ 再開」で、止めた位置のスライドから再生が続いた）")
     if not slides:
         return lines + ["（スライドが無い）"]
     # 第 25 周 studio H16: いま表示しているスライド 1 枚だけ（画面の #lecture-slide-stage）
@@ -1897,7 +2799,12 @@ def project(action_id: str, status: Optional[int], body: Any) -> Optional[str]:
         return None  # 既存の投影（_generic 等）に任せる
     kind = view.get("kind")
     if kind == "course":
-        lines = _course_lines(view.get("structure") or {}, view.get("settings")) + _readiness_lines(view.get("readiness") or "")
+        lines = _course_lines(view.get("structure") or {}, view.get("settings")) + _readiness_lines(view.get("readiness") or "",
+                                                                                        view.get("structure") or {})
+        if view.get("status_line"):
+            lines = ["（表示: " + str(view["status_line"]) + "）"] + lines
+    elif kind == "versions":
+        lines = list(view.get("lines") or [])
     elif kind == "topic_miss":
         lines = [f"「{view.get('hint')}」に合うトピックがコースツリーに無い。トピック:"] + \
                 [f"  {r['no']}. {r['topic'].get('title') or '無題'}" for r in view.get("rows") or []]
@@ -1913,7 +2820,9 @@ def project(action_id: str, status: Optional[int], body: Any) -> Optional[str]:
         st = view.get("structure") or {}
         meta = course_meta(st)
         lines = [f"コース: {st.get('title') or ''}（{meta}）・読み上げ言語: {LANG_LABELS.get(view.get('language'), view.get('language'))}"] + \
-            _readiness_lines(view.get("state") or "")
+            _readiness_lines(view.get("state") or "", st)
+        if view.get("status_line"):
+            lines.append(str(view["status_line"]))
     elif kind == "suggestions":
         lines = _suggestion_lines(view)
     elif kind == "figure_studio":

@@ -607,6 +607,204 @@ pre-mortem: `id-namespace-conflated`（主張参照の 2 つの ID 空間 → �
 `information-dropped-as-unrepresentable`（条件を札まで運ぶ）。残した課題: 地図に主張の点を足す層・札から台帳を開く展開・
 `_compute_with_observation_scope` に局所 ID の旧クライアントが観測を渡したときの範囲判定（選択肢は UUID に揃えたので画面からは来ない）。
 
+### 16.7 第 4 波の追補（2026-10-25）: 提案の常設・範囲の明示・閾値の母集団・記帳なしの言い方
+
+- **検証提案は台帳の一部（IK-0968）**: 台帳 GET の `challenges[]` に `status_label` と `proposals[]`（`proposal` /
+  `external_check` / `reachability_label` / `status_label` / `proposer_name` / `created_at`。提案者の UUID は出さない・取り下げた
+  提案も状態つきで残す）を載せる。画面は疑義の下に提案カードを常設し、昇格・状態遷移の後は**台帳を読み直す**（作成応答の
+  `proposal_id` でその場に描く旧実装は撤去）。コース単位の提案一覧（前提の地図の区画）は次段。
+- **閲覧だけの台帳（IK-0969）**: `disableLedgerWrites` が覆る条件の AI 候補の予約と提案の状態遷移も無効にする。台帳 GET は
+  `falsification_refresh_note`（予約の範囲はコースの教材全体）を返し、ボタンの下に出す。
+- **段の閾値の母集団（IK-0970）**: `load_percentiles(..., exclusion=ClaimChainExclusion)` が一覧と同じ除外（導出の手順）を
+  閾値の母集団にも掛ける（行を読んでアプリ側で `percentiles_from_scores`。閾値の計算では `excluded` の印を立てない）。
+  前提の地図・未検証合意リスト（ゼミ前ブリーフ経由を含む）・台帳詳細の負荷段が通る。教員のトリアージ
+  （`core/teacher_triage.py` の `sort=load`）はまだ除外前の母集団（残した課題）。
+- **記帳なしは 200（IK-0971）**: 学習者の台帳 GET も、受講ゲートと対象がコースの教材に実在することを通れば行が無くても
+  200（`exists: false`・「この内容の検証スコープはまだ記帳されていません。」）。出典タブは同じ文を 1 行に畳み、主語を並べる。
+  SA層 `verification` 解決器（`learner_ledger_line`）は従来どおり行なしで何も言わない。
+- **開幕の空（IK-0972）**: 「確かめていないこと」の空は区画専用の `OPENING_UNVERIFIED_EMPTY_NOTE`（記帳の不在を言う）。
+  ゼミ前ブリーフの汎用 `SECTION_EMPTY_NOTE` は教員向けのまま。
+- **マイニングの状態（IK-0853）**: 前提の一覧の `mining_note` が「候補あり / 実行中 / 実行し終えて候補なし / 失敗 / 範囲に
+  候補なし」を言い分ける（状態はプロセス内・永続化しない。再起動後は範囲の事実だけ）。画面は一覧の頭に 1 行。
+
+pre-mortem: `threshold-reused-across-regimes`（閾値と表示の母集団を揃える）/ `available-but-unwired`（保存済みの提案を読む経路）/
+`permission-and-affordance-asymmetric`（後から足したボタンの無効化漏れ）/ `information-dropped-as-unrepresentable`（記帳なしを
+404 で表さない）/ `wording-mismatch`（否定の見出しの下の汎用の空文）。
+
+### 16.8 第 5 波の追補（2026-10-27）: 拒否の順序・論文単位の依存の広がり・終端状態の居場所・欄の出所
+
+第 25 周 面 B 第 5 周（`uxsim/runs/round25/judge_doubt_r5.md`）の IK-0998〜IK-1005 の是正。
+
+- **権限の検査は入力の検査より先（IK-0999）**: 台帳の書き込みルート（スコープ・検証状態・覆る条件・根拠の線・疑義・
+  検証提案（作成と状態遷移）・前提の手動登録と確定）は、対象の解決と権限（`_require_editable_ledger_target` /
+  `_ledger_target_access` / `_require_viewable_challenge_target` / `_require_viewable_proposal_target`（新設） /
+  `_require_editable_assumption` / コース・論文の編集ゲート）を本文の 422 より前に呼ぶ。404（不在と権限なしは同一）・422 の意味は
+  不変で、権限の無い教員は入力の欠けた要求でも 404 を受ける（「直せば通る」と読める拒否を返さない）。例外はパスの形
+  （`target_type` の語彙外）の 422 で、本文に依らないので先に残す。根拠の線の「形の検証は DB を開く前」（P4-R8 当時の規律）は
+  この順序に置き換えた。検証提案の状態遷移（`PATCH /proposals/{id}`）は権限の検査を持っていなかったので、疑義の対象を閲覧できる
+  教員に限った（不在と同一の 404）。
+- **依存の広がりは論文単位で保存（IK-1001・オーナー判断・推奨どおり）**: `recompute_load_scores` は範囲に何本の論文があっても
+  台帳行ごとにその行の論文（行キー — IK-0899）1 本の依存グラフで計算する。グラフのノード ID（`theory_op_*` / `eq_*`）は論文の
+  中でしか一意でなく、論文の集合を 1 枚に混ぜると別の論文の同じ ID が繋がって下流到達が膨らむ — 解析完了時（論文 1 本）と
+  前提の地図の［再計算］（コースの論文）で同じ行の値が食い違い、段の並びが入れ替わっていた。仮説は読み取り 1 本
+  `compare_load_scopes`（同じ行を論文 1 本とコース全体で計算して並べる・書き込みなし）で確かめ、テストで固定した。コースの地図は
+  読み時に論文ごとの値を並べ、段の閾値だけをコースの母集団（導出の手順を外した後 — IK-0970）で取る。台帳詳細の段は従来どおり
+  対象の論文の母集団（コースの文脈を持たない画面）。論文をまたぐ依存を見せたくなったら別の列か読み時の集計で足す。
+- **既定のコースは本人所有（IK-1000）**: 前提の地図の既定は `role=owner` の先頭、無ければ従来どおり一覧の先頭。選択肢に役割
+  （`role_label` — コース一覧の正本）を併記。前回の選択を端末に覚える案は入れていない（所有の優先で第 5 周の症状は止まる）。
+- **取り下げた疑義の居場所（IK-0998）**: 台帳 GET は従来どおり取り下げ済みの行を返し、画面は疑義区画の末尾に折りたたみ
+  「取り下げ済みの疑義（読み取りのみ）」（`data-ui-anchor="doubt-atlas.withdrawn-challenges"`・操作ボタンなし・件数なし）で描く。
+  取り下げ API は事実文 `CHALLENGE_WITHDRAWN_NOTE` を返し、画面は台帳を読み直してその文を添える。
+- **支える主張の印（IK-1003）**: `supporting_claims[]` の各行に `challenge_state`（`challenged` / `proposed` / `in_progress` — 取り下げは
+  数えない・優先は着手 > 提案 > 疑義）と `challenge_state_label`、ノードへは事実文 `supporting_challenge_note` 1 行（件数なし）。
+- **欄の出所（IK-1002）**: 欄名の正本は `label_vocab.LEDGER_FIELD_LABELS`（検証状態（教員の記帳）/ 観測からの支持線 /
+  依存の広がり（理論操作グラフの下流・段階）/ 行動上の合意（解析時に数えた参照））で、台帳 GET と未検証合意リストが
+  `field_labels` + `field_sources_note` として渡す（JS にミラーしない）。状態が未記帳でスコープだけあるときは
+  `verification_status_note`（「検証状態はまだ記帳されていません（…スコープを記帳しても検証状態は変わりません）」）。
+  行動上の合意を再計算で更新するかは決めていない（欄名で別の量と言い分けるにとどめた）。
+- **学習チャット（IK-1004 / IK-1005・面 A と同じ `routes/learning.py`）**: 逆質問の直後に前提の説明へ流すのは、前提名に触れる
+  発話か、別の語を主語に立てない否定・説明要求（「いいえ」「それってどういう意味」）だけ（`_names_other_subject`）。
+  「『未訪問』ってどういう意味」は通常の経路で答え、逆質問は保留のまま。使い方の回答の直後に同じ発話を送り直したとき
+  （`_is_resend_after_usage_help`）と、地図で開いた場所の名前・札・地図に触れる問い（`view.atlas_node_label` がある — SA層の
+  事実文が届く。`_is_screen_fact_question`）は、pre-route でも分類の USAGE_HELP でも HELP に回さず RAG へ
+  （`_usage_help_goes_to_rag` 1 箇所・`manual_help_kb_design.md` §9 の根 4 と同じ規律。案内の文言は不変で、案内どおりに動く）。
+
+#### 16.8.1 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 拒否の理由が最初に失敗した検査で決まる | `gate-position-wrong` | 全書き込みルートで権限を先に。ソースの順序をガードレール（AST）で固定 |
+| 同じ列を違う範囲で計算して上書き | `threshold-reused-across-regimes` | 保存は論文単位 1 つに。2 範囲で計算して比べる読み取りで仮説を確かめた |
+| 一覧の先頭を既定にする | `condition-not-propagated` | 所有の役割を既定の選び方に渡す |
+| 終端状態（取り下げ）を画面が描かない | `information-dropped-as-unrepresentable` | 折りたたみで読み取りのみ描く（消さない） |
+| 下位の記録が上位の入口に見えない | `last-mile-missing` | 支える主張の行に印・ノードに事実文 |
+| 別の量を同じ語で並べる | `duplicate-canonical-sources` | 欄名の正本を label_vocab に 1 つ |
+| 会話の状態で次の発話の意味を決める | `completion-defined-by-proxy` | 話題の一致（前提名・別の主語）を条件に足す |
+| 案内した出口が同じ経路に戻る | `available-but-unwired` | 送り直しを判定して RAG へ |
+
+当たらない族: 再実行と削除（行の削除・再生成なし）/ 外部 API（呼ばない）。
+
+#### 16.8.2 残した課題
+
+- IK-1006（無効な出典の目印の除去で名詞の位置が空になる）は面を跨ぐ別枠で触っていない。
+- 台帳詳細の段（論文の母集団）と前提の地図の段（コースの母集団）は母集団が違う。両者を同じ画面に並べたときの言い分けは未対応。
+- 行動上の合意（解析時の参照数）を依存の広がりと同じ再計算で更新するかは未決（欄名で言い分けた）。
+- `core/teacher_triage.py` の `sort=load` は §16.7 の残課題のまま。
+
+### 16.9 第 6 波の追補（2026-10-27）: 出現順の辺を依存に数えない・拒否の文・前提から台帳へ・地図の場所の事実
+
+第 25 周 面 B 第 6 周（`uxsim/runs/round25/judge_doubt_r6.md`）の IK-1030 / IK-1001 の残り / IK-1027 / IK-1028 / IK-1031 /
+IK-0853 の残り③の是正。
+
+- **依存の広がりと反実仮想は主張の出現順の辺を数えない（IK-1030・オーナー判断・推奨どおり）**: D層 D2-1 の「下流到達」は
+  「偽なら崩れる」関係の到達で、論文の主張を出現順に並べた claim チェーンの辺（読む順）はそれではない。負荷（`recompute_load_scores`
+  と読み取り `compare_load_scopes`）と反実仮想（`compute_counterfactual`）は `build_dependency_graph(..., exclude_claim_sequence_edges=True)`
+  で作ったグラフを使い、claim チェーン由来ノードに接する辺を依存に数えない。**判定の正本は一覧の母集合（IK-0933）と同じ**
+  `core/theory_modules/builder.py::claim_sequence_node_ids`（`derivation_chain` の `chain_type`）で、D層は
+  `population.claim_sequence_ids_for_payload`（成果物の読みはセーブポイントの中・判定できなければ外さない）を通すだけ。
+  ノードと主張・式の参照は残す（台帳行の種は消えない — 下流が出現順の辺を通らないだけ）。**反実仮想の伝播規則
+  （collapsed / indeterminate / surviving の区分）は変えていない**（辺の母集合だけ）。支持線・ゼミ前ブリーフ・反証条件の入力は
+  既定（外さない）のままで、同じ判定を使うかは別に決める。仮説は読み取り 1 本 `compare_scores_with_and_without`（純関数・同じ台帳行を
+  辺あり / なしで並べる）+ `compare_claim_sequence_edges`（1 論文・書き込みなし）で確かめる形にし、テストで「出現順の先頭の主張だけが
+  辺を外すと縮み、式の主張は変わらない」を固定した。**実データでの確かめ（Cepheus TeX 1 論文で上の読み取りを 1 回）と全論文の
+  再計算は運転側の作業**（`POST /api/admin/doubt/courses/{id}/load/recompute`。是正前の値が台帳に残っているので、これをしないと
+  一覧は序論のまま — IK-1001 の残り）。
+- **台帳への書き込みを断る文（IK-1027）**: `_require_editable_ledger_target` は、対象の論文を閲覧できるが編集できない相手には
+  **403 + 画面と同じ理由文**（`label_vocab.LEDGER_READ_ONLY_NOTE` — 台帳 GET の `can_edit_note` と同じオブジェクト。正本を
+  `core/doubt/scope.py` から `label_vocab` に移し、scope.py は再エクスポート）、閲覧もできない・対象が解決できないときは
+  **日本語の同一の 404**（`LEDGER_WRITE_TARGET_NOT_FOUND_NOTE`「この台帳の対象は見つからないか、記帳できません。」— 存在の有無を
+  言わない = fail-closed は維持）。閲覧できる相手には台帳 GET が既に存在を見せているので 403 で漏れる情報は無い。判定の順序
+  （IK-0999: 権限 → 入力）は不変。
+- **確定済みの前提から台帳へ（IK-1028）**: `GET /courses/{id}/assumptions` の各項目に `origin_label` / `status_label`
+  （`label_vocab.ASSUMPTION_ORIGIN_LABELS` / `ASSUMPTION_STATUS_LABELS` — migration 030 の CHECK と同じ語彙・語彙外は事実語）を足し、
+  確定済み（confirmed / operationalized）には `ledger_document_id`（結ばれた論文のうちコースの範囲のものを優先した先頭）か、
+  論文に結ばれていなければ `ledger_note`（`ASSUMPTION_NOT_LINKED_TO_DOCUMENT_NOTE`）を返す。画面はカードに［台帳を開く］
+  （`data-ui-anchor="doubt-atlas.assumption-open-ledger"`）を置き、散布図・未検証合意リストと同じ `renderNodeLedgerSection` で
+  台帳を開く（別の詳細を作らない）。台帳行は論文単位（IK-0899）なので、行が無い論文でも開いた画面から記帳すれば行ができる
+  （記帳のときに作る — 既存の規則）。論文に結ばれていない前提に行キーを作る規則は決めていない（事実文で止める）。
+- **確定済みの表示で候補の文を出さない（IK-0853 の残り③）**: `mining_note` は候補・すべての表示だけに返し、確定済み・却下の表示では
+  `null`（画面は描かない）。
+- **地図の場所の事実（IK-1031・SA層 §11 の範囲内）**: 学習画面は分野の地図で開いた場所の参照 `view.atlas_node_id` を足す
+  （表示しない・パネルの文や論文の題名は送らない = SA1）。ルート（`_screen_atlas_node_sources`）が受講ゲート済みのコースから
+  分野を導き、凍結骨格の状態キャッシュ（`GET /api/atlas/node` と同じ行）の検証・承認の行と、`learner_landscape_for_documents`
+  （遮断はそちらの正本）で引いたその場所に置かれたコースの論文の題名（最大 3・出所ラベル付き）を `sources["atlas_node"]` にし、
+  `view` 解決器が事実文にする（「その場所の詳細パネルに出ている行: …」「このコースの論文のうち、…置かれているもの: 『…』（教員確認済み）
+  …出典タブの「分野の中の位置づけ」で読めます」/ 引けたうえで無ければ「置かれているものはありません」）。論文の母集合は
+  `grounding_document_ids` だけ（DM1）・LLM 回数は不変・`cycle_mode=elicit`（`kinds=("view",)`）では引かない（DB 0 本の規律）。
+
+#### 16.9.1 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 表示の並びのための辺を依存の計算に使う | `extent-decided-by-proxy-signal` | 出現順の辺を依存グラフから外す。判定は一覧の母集合と同じ正本 1 つ |
+| 判定を 2 か所で持つ | `duplicate-canonical-sources` | `claim_sequence_node_ids` を通すだけ（D層で再判定しない） |
+| 是正前の値が保存列に残る | `stale-derivative-served` | 全論文の再計算を運転側の作業として明記（自動の一括再計算は入れていない） |
+| 隠すための畳み込みを既に見せた相手にも使う | `wording-mismatch` | 閲覧できる相手は 403 + 画面と同じ文、他は日本語の同一 404 |
+| 確定の次の操作への入口が無い | `last-mile-missing` | カードに［台帳を開く］・行の無い場合は事実文 |
+| 画面にある事実が AI に届かない | `available-but-unwired` | 参照だけを渡しサーバが解決（SA1 / SA2） |
+| 画面の参照で範囲が広がる | `scope-widened-silently` | 論文はコースの範囲（grounding）からだけ |
+
+当たらない族: 外部 API（呼ばない）/ 行の削除（しない）。
+
+#### 16.9.2 残した課題
+
+- 実データでの仮説の確かめ（`compare_claim_sequence_edges` を Cepheus TeX で 1 回）と全論文の load の再計算は運転側（砂場 DB に
+  触れない是正者は走らせていない）。
+- 支持線・ゼミ前ブリーフ・反証条件の入力が出現順の辺を使い続けるか（同じ判定に揃えるか）は未決。
+- 論文に結ばれていない前提に台帳行を作る行キーの規則（前提を論文に結ぶ UI も無い）。
+- 地図の場所の事実は検証・承認の行と論文の題名まで。どの論文のどの主張がその場所の根拠かまでは渡していない。
+
+### 16.10 第 7 波の追補（2026-10-28）: 支持線も出現順の辺を数えない・前提に結ばれた論文の題名
+
+第 25 周 面 B 第 7 周（`uxsim/runs/round25/judge_doubt_r7.md`）の IK-1048 / IK-1028 の残りの是正（同じ波の学習者側は
+`assistant_screen_adapter_design.md` §11.20）。
+
+- **観測からの支持線も主張の出現順の辺を数えない（IK-1048・第 6 波のオーナー判断の適用範囲を広げるだけ — 新しい判断ではない）**:
+  §16.9 で「別に決める」とした支持線・ゼミ前ブリーフ・反証条件の入力を同じ判定に揃えた。`build_support_context` は既定で
+  `build_dependency_graph(..., exclude_claim_sequence_edges=True)` を作り、`_qualified_adjacency` は**同じグラフが外した
+  claim チェーン由来ノードの集合**（`DependencyGraph.claim_sequence_node_ids`）に接する資格付きエッジを数えない。辺の判定は
+  `dependency.is_claim_sequence_edge` の 1 つで、依存グラフと隣接リストが別々に判定しない。ゼミ前ブリーフの読める名前の
+  依存グラフと反証条件の候補の入力（下流の名前）も同じ除外を渡す。最大流・最小カット・事実文（SL1）・段階語は変えていない
+  （辺の母集合だけ）。**仮説は読み取り 1 本で確かめる形**: `compare_support_levels`（純関数）+
+  `compare_support_lines_with_and_without`（1 論文・書き込みなし・段階語だけを返す = SL4）。`exclude_claim_sequence_edges=False`
+  を渡してよいのはこの比較だけ。テストは run の形（序論の背景文 2 つが出現順の辺で式どうしの依存の主張に届き「複数」になり、
+  外すと観測の手順 1 本の「単一」になって背景文が支持根から消える）を固定した。
+- **確定済みの前提のカードに結ばれた論文の題名（IK-1028 の残り）**: 同じ文面の確定済みの前提を見分けられるよう、`ledger_document_id`
+  がコースの範囲の論文のときだけ `ledger_document_line`（「結ばれた論文: 『…』（［台帳を開く］はこの論文の台帳の行を開きます）」・
+  題名は `_document_title_entry` の正本）を返し、画面はその文を素通しで描く。範囲外の論文の名前は出さない。
+
+#### 16.10.1 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 1 つの計算から外した辺を同じグラフを読む別の計算が数え続ける | `rule-enforced-per-surface` | 支持線・ゼミ前ブリーフ・反証条件の入力を列挙して同じ除外を通した。隣接リストはグラフが外した集合を受け取る（再判定しない） |
+| 判定を 2 か所で持つ | `duplicate-canonical-sources` | `is_claim_sequence_edge` と `claim_sequence_node_ids` の 1 つ |
+| 仮説のまま直す | `extent-decided-by-proxy-signal` | 辺あり / なしの読み取りを先に置き、テストで run の形を確かめた |
+| 同じ文面のカードを見分けられない | `wording-mismatch` | 結ばれた論文の題名の事実文（範囲内だけ） |
+
+当たらない族: 外部 API（呼ばない）/ 行の削除（しない）/ 数値の表示（段階語だけ）。
+
+#### 16.10.2 残した課題
+
+- 実データでの読み取り（`compare_support_lines_with_and_without` を Cepheus TeX で 1 回）は運転側（是正者は砂場 DB に触れない）。
+- 支持線の段階は保存していない（読み時の計算）ので再計算は要らないが、負荷の再計算（§16.9）はまだ運転側の作業。
+- PDF 版の序論が依存「高」に残る理由は未確定（IK-1030 の残り）。
+
+#### 16.11 第 25 周 第 11 波（2026-10-31）: 到達可能性に「本文・文献の読み直し」（IK-1148）
+
+到達可能性（SL3・人間専用語彙）は覆る条件向けの観測の語だけで、定義の疑義から作る「本文の式の前後と付録を
+読み直して確かめる」提案に当てはまる語が無かった。値 `by_document`（「本文・文献の読み直しで確かめられる」）を
+`REACHABILITY_LEVELS` に additive に足し、`verification_proposals.reachability` の CHECK を migration 097 で同じ
+語彙に揃えた（既存行・既存値の意味は不変）。人間専用の規律（worker が書かない・LLM 候補から剥ぐ）は値が増えても
+同じ。SL-4 の要約の優先は reachable > by_document > next_generation > unreachable > unassessed で、
+「到達可能な反証条件がある項目だけ」の絞り込みは従来どおり reachable のみ。JS の表は逐語ミラー
+（`test_doubt_vocab_mirror.py`）。
+
+| 変更の性質（pre-mortem） | 型 | 扱い |
+|---|---|---|
+| 別の対象向けの語彙の流用 | `wording-mismatch` | 値を足す（欄ごとのラベルの分岐は作らない — 正本を 2 つにしない） |
+| 語彙表の新設・CHECK と語彙の二重 | `duplicate-canonical-sources` | 正本は `core/doubt/schema.py`、CHECK と JS は一致検査で追随 |
+
 ---
 
 *出典: vision_expansion_proposals_2026-08.md 提案3（結合案「賭け金の台帳」「観測の一点吊り

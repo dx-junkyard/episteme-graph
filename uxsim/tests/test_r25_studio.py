@@ -80,8 +80,11 @@ def test_actions_registered_with_handlers_and_anchors():
     assert all(a.llm_cost == "product" for a in ACTIONS if a.id in (
         "admin.lecture_studio.rewrite_topic", "admin.figure_studio.turn", "admin.figure_studio.build_from_suggestion",
         "admin.figure_studio.suggestions_generate"))
-    # 音声生成（TTS）・パイプラインの再実行は行為にしない
-    assert not any("lecture-audio/generate" in p or "lecture-scripts/generate" in p for a in ACTIONS for _, p in a.all_api)
+    # パイプラインの再実行は行為にしない。音声生成（TTS）は第 6 周（第 7 周の前提）から押す行為を 1 つだけ持つ
+    # （admin.lecture_studio.audio_generate — 言語を切り替えない = 原稿の作り直しを起こさない）
+    assert not any("lecture-scripts/generate" in p for a in ACTIONS for _, p in a.all_api)
+    assert [a.id for a in ACTIONS if any("lecture-audio/generate" in p for _, p in a.all_api)] == \
+        ["admin.lecture_studio.audio_generate"]
 
 
 def test_split_insert_save_flow_projects_indicator_and_digest():
@@ -147,6 +150,14 @@ def test_figure_turn_adopt_inserts_embed_and_notice():
                                                "degraded": False}
     routes[("POST", "/teaching-figures")] = {"figure_id": "f9", "figure": {}, "evidence_link": {"kind": "figure", "figure_id": "f9"},
                                              "linked_figure_ids": ["f9"], "image_snapshot_failed": False}
+    # 第 4 波（IK-0979）: 採用の知らせは course-structure の figure_adopt_notice_parts から組む（固定文は廃止）
+    parts = {"lead": "図を教材欄に入れました。トピックを保存すると確定します。",
+             "audio": "保存すると、このトピックの生成済み音声は作り直しになります。",
+             "delivery": "このコースは版を発行していないので、保存した内容はすぐ受講者に届きます。"}
+    structure = json.loads(json.dumps(STRUCTURE))
+    structure["figure_adopt_notice_parts"] = parts
+    structure["chapters"][0]["topics"][0]["has_topic_audio"] = True
+    routes[("GET", "/lecture-studio/course-structure")] = structure
     client = _client(seen, routes)
     s = PersonaSession(persona_id="te-01", course_id="c1", role="TEACHER")
     _run("admin.lecture_studio.open_course", {}, s, client)
@@ -158,7 +169,7 @@ def test_figure_turn_adopt_inserts_embed_and_notice():
     assert s.scratch["studio_draft"]["material"].endswith("![[figure:f9]]")
     assert any(t.digest.get("studio_adopt", {}).get("linked") for t in traces)
     shown = sx.project("admin.figure_studio.adopt", s.last_status, s.last_body)
-    assert sx.ADOPT_NOTICE in shown
+    assert " ".join(parts.values()) in shown and sx.ADOPT_NOTICE_LEGACY not in shown
     traces = _run("admin.lecture_studio.save_topic", {}, s, client)
     saved = next(t.digest["studio_saved"] for t in traces if "studio_saved" in t.digest)
     assert saved["notice_shown_before"] is True and saved["figure_embeds"] == ["f9"]

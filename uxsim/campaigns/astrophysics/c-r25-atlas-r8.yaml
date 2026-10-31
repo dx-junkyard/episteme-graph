@@ -1,0 +1,66 @@
+id: c-astro-r25-atlas-r8
+domain: astrophysics
+snapshot: corpus-astro-tex-r25g
+course_id: 1bad7d9f
+personas:
+  teachers: [te-04-copilot-intro, te-01-rookie-seminar]
+  students: [st-03-d1-from-particle, st-01-m1-radio, st-08-m1-rprocess-lecture]
+scenarios:
+  teacher: [t-atlas-edge-review, t-atlas-draft-freeze]
+  student: [s-atlas-threads-and-placement, s-atlas-sea-map]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 4, persona_llm_calls: 300, wall_clock_minutes: 240}
+notes: |
+  第 25 周 面 C「分野の地図の運用」第 8 周（judge_atlas_r7.md §6・r8_prereqs.md の面 atlas と共通 1〜5・harness_fixes_r7_summary.md の H41〜H43）。
+  前提状態を変える周の 2 回目。教員 2 × 学生 3・5 場面:
+  te-04 × t-atlas-edge-review（**指揮者は下書きを用意しない** — 下書きなし・論文由来の候補 0 件のまま、関係を採用 1・見送り 1 → 反映の確認で
+  「次版の下書きがありません」の文と、分野の区画に下書きを作る入口が出るか = IK-1044 の是正後）→ te-01 × t-atlas-draft-freeze（場面の固定手
+  ［次版の下書きを作る］で画面から下書きを作り、te-04 の採用を反映して 2026.5 = 関係だけの版上げの 2 回目・反映の確認の向きの一文 IK-1047）→
+  st-03 × s-atlas-threads-and-placement（足跡あり・**固定コース 1bad7d9f を H43 の pin_course で**。2026.3・2026.4 で確定した関係が 2026.5 の後も実線か
+  事実文に残るか = IK-1045）/ st-01 × s-atlas-threads-and-placement（足跡なし × 固定コース = IK-1017 の本来の確かめ方の条件。omitted_note の括弧が
+  「このコースの論文が置かれている場所と…」から始まり骨格順の先頭に戻らないこと）/ st-08 × s-atlas-sea-map（海の版の表示 IK-0942）。
+  組の例外（P-0025）: te-04 × edge-review は第 5 周と同じ組（第 5 周は下書きの有無を問わない採否。今回は下書きなしで画面から作る入口の確かめ）。
+  te-01 × draft-freeze は第 6 周と同じ組（第 6 周は下書きなしからの起点。今回は IK-1044 の是正後に同じ固定手が画面のどの入口を押すか・関係だけの
+  2 回目）。st-03 × threads は第 6・7 周と同じ学生・同じ場面（審判 §6 の指定 — 固定コースで開く前後比較）。st-01 × threads は新しい組
+  （第 1 周の st-01 は海。地図の場面を 1 周しか歩いていない学生 — 審判の例）。st-08 × sea は第 6・7 周と同じ組（版表示の是正後の確かめ）。
+  学生の面: st-01 は atlas と studio の講義（2 面）・st-08 は atlas と studio の (d')（2 面）・st-03 は atlas だけ。3 面に出る学生はいない。
+  st-01 の atlas は足跡なしが条件なので、studio の講義（6be229e1）より前に歩く（ST01_DONE_R8）。
+
+  一括の確かめと用意: `backend/.venv/bin/python uxsim/runs/round25/r8_prereqs.py --dry-run`（= r5_prereqs.py --round 8。ROUND_DEFAULTS[8] の
+  freeze_teacher te-01・footprint_student st-03・footprintless_student st-01 はこの campaign の組と一致）。
+
+  ── 周の前に指揮者が用意するもの（この順。r8_prereqs の項目名）──
+   1. 製品の第 7 波（IK-1044〜1047・IK-0942 の是正）と H41〜H43 のハーネス是正 → 投影の同期 → この前提 → 周（共通 1）。snapshot は
+      corpus-astro-tex-r25g。persona_profile_names（共通 2）— 確認者・作成方法の欄の名前がログイン ID でないこと。
+   2. atlas_frozen_and_pending: 現行の凍結版 2026.4（第 7 周 te-05）・採用済み未反映なし。atlas_freeze_version: te-01 の freeze_version が 2026.5
+      （scenario_params/t-atlas-draft-freeze.yaml の te-01 を差し替え済み）。
+   3. atlas_no_draft（読み手 te-05）: 下書きが無いこと。**このスクリプトも指揮者も下書きを作らない**。下書きが残っていたら破棄するかは指揮者の判断
+      （破棄しないなら te-04 は下書きのある状態で歩くことになり IK-1044 の確かめにならない — run の記録に書く）。
+   4. atlas_footprint_student（st-03）: 足跡が無ければ、所有者の［対応を提案］の current から結ばれたトピックを選んで 1 問（`--allow-learner-chat`・
+      製品 LLM 1 回 — この campaign の予算の外。H41）。第 7 周の足跡が r25g に残っていれば何もしない。
+   5. atlas_footprintless_student（st-01）: 固定コースの地図にいまここが無いこと。足跡を作らない（st-01 は周の前に固定コースで質問しない）。
+   6. atlas_added_items（te-05 / te-01）: 周の前に 1 回読み、版ごとの項目名を state に控える。凍結の後（mailbox_atlas/FREEZE_DONE_R8）にもう一度読み、
+      加わった項目が無い（関係だけの版上げ）ことを state と run の記録に残して mailbox_atlas/ADDED_READ_R8 を出す。
+   7. 教員確認済みの配置が 1 件以上（Cepheus B → ダスト）。コース 1bad7d9f が公開のまま。binding を API で書く必要があれば body は
+      `topic_bindings: [{topic_id, atlas_node_id}]`（H42）。
+
+  ── レーンの順（face_atlas_r8.sh。--persona X --scenario Y で 1 場面ずつ・この順で）──
+   1. te-04-copilot-intro × t-atlas-edge-review（下書きなし・候補 0 件。採用 1・見送り 1・反映の確認・見送り済み）→ mailbox_atlas/EDGE_DONE_R8
+   2. te-01-rookie-seminar × t-atlas-draft-freeze（画面から下書きを作る → te-04 の採用を反映 → 凍結の影響 → 凍結 2026.5）→ mailbox_atlas/FREEZE_DONE_R8
+   3. ⇢ 指揮者の用意 6 → mailbox_atlas/ADDED_READ_R8
+   4. st-03-d1-from-particle × s-atlas-threads-and-placement（足跡あり・固定コース）
+   5. st-01-m1-radio × s-atlas-threads-and-placement（足跡なし・固定コース）→ mailbox_atlas/ST01_DONE_R8（studio の st-01 の講義がこれを待つ）
+   6. st-08-m1-rprocess-lecture × s-atlas-sea-map → mailbox_atlas/ST08_DONE_R8（studio の st-08 の (d') がこれを待つ）
+  最後に mailbox_atlas/LANE_DONE_R8。
+
+  場面に足りない手（ハーネスへの申し送り・この campaign では足していない）:
+   - t-atlas-edge-review に［現在の版から次版の下書きを作る］（admin.atlas.gaps.draft_from_frozen）と反映（edges.incorporate_apply）の手が無い。審判の
+     「te-04 が採用 → 画面から下書きを作る → 反映の確認（向きの一文）→ 反映」は、te-04 では入口の有無と文を読むまで、作成と反映は te-01 の凍結の
+     場面の固定手（draft_from_frozen・edges.incorporate_apply）が画面から行う形で代える（指揮者は下書きを API で作らない）。
+   - browser runner が無いので L2 の線・糸の描画は API の levels["2"]・omitted_note・threads.undrawn_note で読む（第 6 周 H32 と同じ）。
+
+  LLM 予算の見積り: 製品のチャット LLM は呼ばない（候補の導出・反映・凍結の影響は決定論）。product_llm_calls は embedding の従量の上限で、索引の
+  再構築 1 回 + 凍結の後に製品が裏で始める新しい版の索引 1 回 = 2 回の見込み（余裕を見て 4）。st-03 の足跡づくりのチャット 1 回は周の前の指揮者の
+  手でこの予算の外。ペルソナ頭脳は 5 場面 × 50〜60 手 ≒ 250〜300（上限 300）。外部 API は呼ばない。
