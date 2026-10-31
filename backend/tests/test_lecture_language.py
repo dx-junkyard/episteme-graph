@@ -29,6 +29,14 @@ if _API_DIR not in sys.path:
     sys.path.insert(0, _API_DIR)
 
 
+@pytest.fixture(autouse=True)
+def _audio_generation_owner_ok():
+    """第 25 周 第 6 波（オーナー判断 2）: 音声生成の所有者判定は DB を読むので、ここでは通す。
+    所有者だけの規約そのものは ``test_lecture_studio_round25_r6.py`` が固定する。"""
+    with patch("api.routes.lecture_studio.scripts._ensure_audio_generation_owner"):
+        yield
+
+
 _CHUNK_ID = "550e8400-e29b-41d4-a716-446655440000"
 
 _LECTURE_STUDIO_SOURCE = os.path.join(

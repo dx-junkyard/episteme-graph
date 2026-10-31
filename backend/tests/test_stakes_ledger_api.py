@@ -672,6 +672,11 @@ class TestCreateVerificationProposal:
 
 
 class TestPatchVerificationProposal:
+    @pytest.fixture(autouse=True)
+    def _viewable(self, monkeypatch):
+        # IK-0999（第 5 波）: 提案の遷移は疑義の対象を閲覧できる教員だけ。ここでは遷移規則だけを見る。
+        monkeypatch.setattr(doubt, "_require_viewable_proposal_target", lambda *a, **k: None)
+
     def _session_with_status(self, status: str) -> _FakeSession:
         def _is_proposal_select(sql):
             return "SELECT status FROM verification_proposals" in sql
@@ -1129,8 +1134,9 @@ class TestEvidenceLineRequiresDocumentEdit:
         assert session.committed == 0
         assert not any("UPDATE epistemic_ledger" in sql for sql, _ in session.calls)
 
-    def test_an_invalid_body_is_still_422_before_the_db(self, monkeypatch):
-        """形の検証は DB を開く前（対象の有無を漏らさない）。"""
+    def test_an_invalid_body_is_422_only_after_the_edit_gate(self, monkeypatch):
+        """IK-0999（第 5 波）: 権限の検査が形の検証より先。権限を通った要求だけが 422 を受ける。"""
+        monkeypatch.setattr(doubt, "_require_editable_ledger_target", lambda *a, **k: "doc-a")
         monkeypatch.setattr(doubt, "_pg_session", _no_session)
         with pytest.raises(HTTPException) as exc:
             doubt.add_evidence_line(
@@ -1139,6 +1145,20 @@ class TestEvidenceLineRequiresDocumentEdit:
                 current_user={"id": "u1"},
             )
         assert exc.value.status_code == 422
+
+    def test_an_invalid_body_without_edit_rights_is_404(self, monkeypatch):
+        def _deny(*a, **k):
+            raise HTTPException(status_code=404, detail="not found")
+
+        monkeypatch.setattr(doubt, "_require_editable_ledger_target", _deny)
+        monkeypatch.setattr(doubt, "_pg_session", _no_session)
+        with pytest.raises(HTTPException) as exc:
+            doubt.add_evidence_line(
+                "claim", "c1",
+                doubt.EvidenceLineCreateRequest(line_kind="bogus", reason="r"),
+                current_user={"id": "u1"},
+            )
+        assert exc.value.status_code == 404
 
     def test_assumption_targets_resolve_through_their_documents(self, monkeypatch):
         session = _FakeSession([

@@ -62,7 +62,14 @@ def _patch_shared_part(monkeypatch, *, shared_links):
             "summary": "静水圧平衡",
             # source_document_ids は読まない（IK-0920: 手で作ったエントリは空になり得る）
             "source_document_ids": [_DOC_A, _DOC_D],
+            "latest_version_no": 1,
         },
+    )
+    # IK-0954: 学生は凍結版の content を読む。
+    monkeypatch.setattr(
+        component_context.library_store_mod,
+        "get_version",
+        lambda _eid, _no: {"content": {"name": "TOV 方程式", "summary": "静水圧平衡"}},
     )
     monkeypatch.setattr(component_context, "_user_display_name", lambda _uid: "")
     monkeypatch.setattr(
@@ -336,11 +343,77 @@ class TestAdminBoundParts:
         src = _ADMIN_JS.read_text(encoding="utf-8")
         assert 'data-ui-anchor="knowledge-library.bound-parts"' in src or '"knowledge-library.bound-parts"' in src
         start = src.index("function loadLibraryEntryBoundParts(")
-        block = src[start:start + 3500]
+        # 第 5 波（IK-0982 / IK-0983）で行の描画を _libraryBoundLinksHtml に分けたので、両方を見る。
+        block = src[start:src.index("\n  function ", start + 10)]
+        rows_start = src.index("function _libraryBoundLinksHtml(")
+        rows = src[rows_start:src.index("\n  function ", rows_start + 10)]
         assert '"/admin/deliberation/shared-parts/"' in block
         assert "/identity-links" in block
-        assert "instance_document_title" in block
-        assert "instance_label" in block
         assert "hidden_count" in block
-        # 確定・却下の操作は置かない（表示のみ）
-        assert "/confirm" not in block and "/reject" not in block
+        assert "instance_document_title" in rows
+        assert "instance_label" in rows
+        assert "library-bound-part-revoke" in rows
+        assert "instance_document_version_label" in rows
+        # IK-0982: 候補の行に［確認］［見送り］（エントリを確定しても未決のリンクの置き場を残す）。
+        assert "library-bound-part-confirm" in rows and "library-bound-part-reject" in rows
+        assert 'data-ui-anchor="knowledge-library.bound-part-decide"' in rows
+        # IK-0983: 記号の結び付きは別の区画。
+        assert 'instance_element_type === "symbol"' in block
+        assert "library-bound-symbols-list" in block
+
+
+# ---------------------------------------------------------------------------
+# 第 4 波（IK-0954 / IK-0959）: 学生は凍結版だけを読む・未評価は出さない
+# ---------------------------------------------------------------------------
+
+
+class TestLearnerReadsFrozenOnly:
+    def _links(self, monkeypatch):
+        monkeypatch.setattr(
+            component_context.identity_links_mod,
+            "list_for_instance",
+            lambda *a, **k: [{"status": "confirmed", "shared_part_id": _SP, "decided_by": ""}],
+        )
+        monkeypatch.setattr(component_context.identity_links_mod, "list_for_shared_part", lambda _sp: [])
+        monkeypatch.setattr(component_context, "_user_display_name", lambda _uid: "")
+
+    def test_unfrozen_entry_is_not_shown(self, monkeypatch):
+        self._links(monkeypatch)
+        monkeypatch.setattr(
+            component_context.library_store_mod,
+            "get_entry",
+            lambda _eid: {"status": library_schema.STATUS_ACTIVE, "name": "下書きの名前", "latest_version_no": 0},
+        )
+        called = []
+        monkeypatch.setattr(
+            component_context.library_store_mod, "get_version", lambda *a: called.append(a) or None
+        )
+        assert component_context._build_shared_part(_COMP, _DOC_A, {_COMP}) is None
+        assert called == []
+
+    def test_frozen_content_wins_over_draft(self, monkeypatch):
+        self._links(monkeypatch)
+        monkeypatch.setattr(
+            component_context.library_store_mod,
+            "get_entry",
+            lambda _eid: {
+                "status": library_schema.STATUS_ACTIVE,
+                "name": "下書きで直した名前",
+                "summary": "下書きの要約",
+                "latest_version_no": 3,
+                "standardization_status": library_schema.STANDARDIZATION_STATUS_UNKNOWN,
+            },
+        )
+        monkeypatch.setattr(
+            component_context.library_store_mod,
+            "get_version",
+            lambda _eid, no: {"content": {"name": "凍結した名前", "summary": "凍結した要約"}} if no == 3 else None,
+        )
+        result = component_context._build_shared_part(_COMP, _DOC_A, {_COMP})
+        assert result["entry"]["name"] == "凍結した名前"
+        assert result["entry"]["summary"] == "凍結した要約"
+        assert "下書き" not in repr(result)
+        # 未評価は学生に何も出さない（キー自体が無い）
+        assert "standardization_note" not in result["entry"]
+        assert "standardization_status" not in result["entry"]
+        assert "未評価" not in repr(result)

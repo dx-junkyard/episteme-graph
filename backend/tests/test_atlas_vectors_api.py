@@ -371,6 +371,7 @@ class TestVectorStatus:
                 atlas_review_display.VECTOR_INDEX_CURRENT.format(version="2026.1"),
             ],
             "stale": False,
+            "building": False,  # IK-0993: 凍結が裏で始めた構築の途中か（第 25 周 第 5 波）
         }
 
     def test_partial_coverage_is_reported_honestly(self, client_and_tokens, env):

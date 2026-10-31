@@ -334,6 +334,8 @@ _NON_INDICATOR_ROUTES: dict[str, str] = {
     "/api/admin/status/overview": _R_STATE,
     "/api/admin/tasks/{task_id}": _R_STATE,
     "/api/admin/theory-components/{component_id}/explanations": _R_OBJECT,
+    # 第 25 周 第 7 波（IK-1012 の残り）: 再解析前の部品に付いたままの説明の読み取り専用の列挙（集約ではない）。
+    "/api/admin/theory-components/{component_id}/stranded-explanations": _R_OBJECT,
     # -- SB層（検証シミュレーション。差の数値は simulation-agreement が計器） ------
     "/api/admin/simulation/documents/{document_id}/overview": _R_OBJECT,
     "/api/admin/simulation/documents/{document_id}/wirings": _R_OBJECT,

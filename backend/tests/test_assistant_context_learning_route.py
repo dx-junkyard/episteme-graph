@@ -495,10 +495,27 @@ class TestScreenContextBlock:
         assert "このコーパスの中では検証記録がありません" in _system(captured)
         assert _system(captured).endswith(LEARNING_VERIFICATION_OUTPUT_CONSTRAINT)
 
-    def test_without_a_ledger_row_the_constraint_is_not_added(self, chat_env, monkeypatch):
+    def test_without_a_ledger_row_the_unrecorded_line_is_given(self, chat_env, monkeypatch):
+        # IK-1147（第 25 周 第 11 波）: 行が無くても、部品の説明の一行と同じ「記録はまだありません」を
+        # 画面文脈に渡す（「無い」と「分からない」を出口ごとに分けない）。閉世界の拘束も付く。
         captured: dict = {}
         _set_generation(monkeypatch, captured)
         chat_env.ledger_mock.return_value = None
+        monkeypatch.setattr(
+            learning_mod, "learner_unrecorded_ledger_line",
+            lambda *a, **k: {"exists": False, "fact_line": "この内容の検証の記録はまだありません。"},
+        )
+
+        _chat(_make_body(screen_context=_screen_context()))
+
+        assert BLOCK_HEADER_LEARNING in _last_user(captured)
+        assert "この内容の検証の記録はまだありません。" in _last_user(captured)
+
+    def test_without_any_ledger_line_the_constraint_is_not_added(self, chat_env, monkeypatch):
+        captured: dict = {}
+        _set_generation(monkeypatch, captured)
+        chat_env.ledger_mock.return_value = None
+        monkeypatch.setattr(learning_mod, "learner_unrecorded_ledger_line", lambda *a, **k: None)
 
         _chat(_make_body(screen_context=_screen_context()))
 
@@ -567,9 +584,11 @@ class TestScreenContextBlock:
 
 
 class TestModeMatrix:
-    def test_casual_gets_no_structure_block_but_keeps_the_selection(
+    def test_casual_gets_only_the_selected_element_and_keeps_the_selection(
         self, chat_env, monkeypatch
     ):
+        """第 25 周 第 5 波（IK-0986）: casual（音声）でも選んでいる要素（部品の文脈・教員の説明）
+        だけは渡す。表示モード・台帳・位置づけは短い会話調と衝突するので引かない。"""
         captured: dict = {}
         _set_generation(monkeypatch, captured)
 
@@ -582,9 +601,70 @@ class TestModeMatrix:
         )
 
         content = _last_user(captured)
-        assert BLOCK_HEADER_LEARNING not in content
+        assert BLOCK_HEADER_LEARNING in content
         assert SELECTION_BLOCK_HEADER in content
+        chat_env.component_mock.assert_called()
+        chat_env.ledger_mock.assert_not_called()
+        chat_env.landscape_mock.assert_not_called()
+        # 表示モードの事実（kind view）は casual では載せない。
+        assert "学習者は" not in content.split(SELECTION_BLOCK_HEADER)[0].replace("学習者が選んでいる", "")
+
+    def test_casual_without_a_selected_element_adds_no_screen_block(self, chat_env, monkeypatch):
+        captured: dict = {}
+        _set_generation(monkeypatch, captured)
+
+        _chat(
+            _make_body(
+                intent_mode="casual",
+                screen_context=_screen_context(
+                    selection={"kind": "topic", "element_type": "", "element_id": ""}
+                ),
+            )
+        )
+
+        assert BLOCK_HEADER_LEARNING not in _last_user(captured)
         chat_env.component_mock.assert_not_called()
+
+    def test_casual_gets_the_atlas_node_the_learner_selected(self, chat_env, monkeypatch):
+        """第 25 周 第 7 波（IK-1049・オーナー判断 = 渡す）: 音声・casual でも、利用者が分野の地図で
+        選んだ場所（名前・札の文・パネルの行・置かれた論文）の事実は要素と同じく渡す。
+        表示モードの事実・台帳・位置づけの射影は引かないまま（推定は増やさない）。"""
+        captured: dict = {}
+        state = _set_generation(monkeypatch, captured)
+        atlas_calls: list = []
+
+        def _atlas(ctx, **kwargs):
+            atlas_calls.append(kwargs)
+            return {
+                "node_id": "n_ns",
+                "verify_line": "検証: 台帳に記帳なし。",
+                "endorse_line": "承認: 承認記録なし",
+                "papers": [{"title": "Neutron star radius", "provenance_label": "教員確認済み"}],
+                "papers_resolved": True,
+            }
+
+        monkeypatch.setattr(learning_mod, "_screen_atlas_node_sources", _atlas)
+        _chat(
+            _make_body(
+                "この場所の札はどういう意味？",
+                intent_mode="casual",
+                screen_context=_screen_context(
+                    selection={"kind": "topic", "element_type": "", "element_id": ""},
+                    view={"atlas_node_label": "中性子星", "atlas_node_id": "n_ns",
+                          "atlas_node_ledger_status": "unrecorded"},
+                ),
+            )
+        )
+
+        content = _last_user(captured)
+        assert BLOCK_HEADER_LEARNING in content
+        assert "分野の地図で「中性子星」を開きました" in content
+        assert "検証: 台帳に記帳なし" in content
+        assert "『Neutron star radius』（教員確認済み）" in content
+        assert "を見ています" not in content  # 表示モードの事実は casual では渡さない
+        assert len(atlas_calls) == 1
+        chat_env.ledger_mock.assert_not_called()
+        assert state["calls"] == 1  # LLM 回数は不変
 
     def test_elicit_gets_only_the_view_fact(self, chat_env, monkeypatch):
         """Elicit に主張本文・検証事実を渡すと問いの答えを手渡すことになる（§11.5）。"""
@@ -749,6 +829,7 @@ class TestReconstructionHiddenFieldsAreUnreachable:
         "_screen_element_sources",
         "_screen_element_document_id",
         "_component_context_with_explanation",
+        "resolve_learner_component_context",
     )
 
     def test_helpers_do_not_read_reconstruction_tables(self):

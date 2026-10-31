@@ -133,10 +133,20 @@ class TestModalContract:
         assert '"/teaching-figures/" + encodeURIComponent(item.id) + "/image"' in src
 
     def test_adopt_shows_double_gate_fact_statement(self):
-        """FG2 の二重ゲート（採用 → トピック保存）と音声の作り直しを事実文で出す。"""
+        """FG2 の二重ゲート（採用 → トピック保存）と音声の作り直しを事実文で出す。
+
+        第 25 周 第 4 波（IK-0979）: 文の正本はサーバ（lecture_studio_state.figure_adopt_notice_parts）。
+        図スタジオは固定文を持たず、音声の有無と届き方を見て部品を組む。
+        """
         src = _read(FIGURE_STUDIO_JS)
-        assert "保存するとこのトピックの生成済み音声は作り直しになります。" in src
-        assert "トピックを保存するまで学習者には表示されません。" in src
+        assert "var ADOPT_NOTICE" not in src
+        assert "studio.adoptNoticeParts" in src
+        assert "studio.hasTopicAudio && parts.audio" in src
+        from core import lecture_studio_state as st
+
+        parts = st.figure_adopt_notice_parts(None)
+        assert "トピックを保存すると確定します。" in parts["lead"]
+        assert parts["audio"] == st.TOPIC_AUDIO_SAVE_NOTICE
 
     def test_error_text_uses_server_detail_without_numbers(self):
         """429 / degraded はサーバの detail をそのまま出す（上限値を UI に書かない）。"""
@@ -506,7 +516,7 @@ class TestCourseSlideIndicatorAutoPaginate:
         # optional 追加（未指定なら body に document_id を含めない＝従来挙動不変）。
         src = _read(ADMIN_LS_JS)
         start = src.index(
-            "function lsFetchSplitSlides(displayText, spokenText, formulas, autoPaginate, documentId) {"
+            "function lsFetchSplitSlides(displayText, spokenText, formulas, autoPaginate, documentId, topicContext) {"
         )
         block = src[start : src.index("\n  }", start)]
         assert "auto_paginate: !!autoPaginate," in block
@@ -515,7 +525,8 @@ class TestCourseSlideIndicatorAutoPaginate:
 
     def test_course_topic_indicator_requests_auto_pagination(self):
         src = _read(ADMIN_LS_JS)
-        assert "lsFetchSplitSlides(dText, sText, [], true)" in src
+        # IK-0975: 配信と同じ入力の正規化のため、トピックの番地も渡す。
+        assert "lsFetchSplitSlides(dText, sText, [], true, null, {" in src
 
     def test_chunk_indicator_keeps_the_previous_behaviour(self):
         """チャンク編集側の呼び出しは auto_paginate=false のまま（WMレンズの

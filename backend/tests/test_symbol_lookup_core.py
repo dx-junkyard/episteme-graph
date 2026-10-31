@@ -247,7 +247,7 @@ class TestNoDefinition:
         assert FACT_NO_DEFINITION in result["facts"]
         # 定義状態のラベルは element_vocab の既存訳語（新しい訳語表を作らない）。
         assert "定義なし" in result["facts"]
-        assert result["scope_label"] == "この式の中だけ"
+        assert result["scope_label"] == "この式の中で定義されています"
 
     @pytest.mark.parametrize("status", ["used", "defined", "redefined", "unknown", ""])
     def test_no_definition_never_paired_with_a_label_implying_one_exists(self, status):
@@ -397,7 +397,7 @@ class TestNoLeakage:
     def test_unit_and_scope_are_included(self):
         result = self._result()
         assert result["unit"] == "GeV"
-        assert result["scope_label"] == "論文全体"
+        assert result["scope_label"] == "論文全体で使われます"
         assert result["source"] == "Semileptonic B decays"
 
 
@@ -718,7 +718,7 @@ class TestDocumentAndScopeFacts:
             session, symbol="λ", document_ids=[DOC, OTHER_DOC], chunk_id=CHUNK_2
         )
         assert "mass-to-flux" in result["definition"]["text"]
-        assert result["scope_label"] == "この節の中"
+        assert result["scope_label"] == "この節の中で定義されています"
         # 所在の残っていない定義文なので位置の事実文（同じ論文なのでタイトルは足さない）。
         # 別の論文にも同じ記号があることは題名だけ添える（定義は持ってこない・第 15 周）。
         assert result["facts"] == [

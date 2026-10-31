@@ -267,12 +267,15 @@ class TestIdentityCandidates:
         body = client.get(_CANDIDATES, headers=_auth(teacher)).json()
         item = body["candidates"][0]["links"][0]
         assert "confidence" not in item
+        # 第 5 波: 根拠の事実文（IK-0981）と確定の問い（IK-0917）を足した。数値キーは無い。
         assert set(item) == {
             "link_id", "instance", "document_title", "local_expression",
-            "status", "mapping_justification",
+            "status", "mapping_justification", "reason", "confirm_question",
+            # 第 7 波（IK-1050）: 札の訳語（rejected / revoked まで覆う）。
+            "status_label",
         }
 
-    def test_confirmed_entries_are_not_listed(
+    def test_confirmed_entries_without_undecided_links_are_not_listed(
         self, client_and_tokens, candidates_env, monkeypatch
     ):
         monkeypatch.setattr(
@@ -281,12 +284,72 @@ class TestIdentityCandidates:
         )
         monkeypatch.setattr(
             candidates_env._identity_links, "list_for_shared_parts",
-            lambda entry_ids: {_ENTRY_ID: [_link("l1", _DOC_OK)]},
+            lambda entry_ids: {_ENTRY_ID: [_link("l1", _DOC_OK, status="confirmed")]},
         )
         client, _student, teacher = client_and_tokens
         body = client.get(_CANDIDATES, headers=_auth(teacher)).json()
         assert body["candidates"] == []
         assert body["facts"]
+
+    def test_confirmed_entry_with_undecided_link_stays_in_the_queue(
+        self, client_and_tokens, candidates_env, monkeypatch
+    ):
+        """IK-0982: エントリを確定しても、未決のリンクを決める置き場を閉じない。"""
+        monkeypatch.setattr(
+            candidates_env.library_store, "list_entries",
+            lambda **kwargs: [_entry(review_status="confirmed")],
+        )
+        monkeypatch.setattr(
+            candidates_env._identity_links, "list_for_shared_parts",
+            lambda entry_ids: {_ENTRY_ID: [
+                _link("l1", _DOC_OK), _link("l2", _DOC_OK, status="confirmed"),
+            ]},
+        )
+        client, _student, teacher = client_and_tokens
+        body = client.get(_CANDIDATES, headers=_auth(teacher)).json()
+        [candidate] = body["candidates"]
+        assert [item["link_id"] for item in candidate["links"]] == ["l1"]  # 未決だけ
+        assert candidate["entry"]["links_pending_note"] == candidates_env.ENTRY_LINKS_PENDING_NOTE
+        assert "confirm_question" not in candidate["entry"]
+
+    def test_candidate_entry_carries_the_entry_confirm_question(
+        self, client_and_tokens, candidates_env, monkeypatch
+    ):
+        """IK-0917 / IK-0982: エントリの確定の前の問い（結び付きは別の判断）。"""
+        monkeypatch.setattr(
+            candidates_env.library_store, "list_entries", lambda **kwargs: [_entry()]
+        )
+        monkeypatch.setattr(
+            candidates_env._identity_links, "list_for_shared_parts",
+            lambda entry_ids: {_ENTRY_ID: [_link("l1", _DOC_OK)]},
+        )
+        client, _student, teacher = client_and_tokens
+        body = client.get(_CANDIDATES, headers=_auth(teacher)).json()
+        entry = body["candidates"][0]["entry"]
+        assert "結び付き" in entry["confirm_question"]
+        assert "links_pending_note" not in entry
+
+    def test_same_paper_basis_is_not_called_lexical(
+        self, client_and_tokens, candidates_env, monkeypatch
+    ):
+        """IK-0981: 版の規則の対は「同じ論文の別の版での一致」と呼び、何が一致したかを返す。"""
+        from core.library import identity_candidates as ic
+
+        link = _link("l1", _DOC_OK)
+        link["evidence"] = [{"basis": ic.SAME_PAPER_BASIS, "matched": ["式 (12)"]}]
+        link["reason"] = ic.SAME_PAPER_REASON_EQUATION + ic.SAME_PAPER_MATCHED_PREFIX + "式 (12)。"
+        monkeypatch.setattr(
+            candidates_env.library_store, "list_entries", lambda **kwargs: [_entry()]
+        )
+        monkeypatch.setattr(
+            candidates_env._identity_links, "list_for_shared_parts",
+            lambda entry_ids: {_ENTRY_ID: [link]},
+        )
+        client, _student, teacher = client_and_tokens
+        body = client.get(_CANDIDATES, headers=_auth(teacher)).json()
+        item = body["candidates"][0]["links"][0]
+        assert item["basis_label"] == ic.SAME_PAPER_BASIS_LABEL
+        assert "式 (12)" in item["reason"]
 
     def test_include_dismissed_is_opt_in(
         self, client_and_tokens, candidates_env, monkeypatch

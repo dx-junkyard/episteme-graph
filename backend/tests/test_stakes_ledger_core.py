@@ -437,13 +437,13 @@ class TestComputeSupportLinesIntegration:
         )
         assert result["level"] == "single"
         assert result["cut_members"] == [
-            {"node_id": "root-node-1", "label": "Diagnostic / application"}
+            {"node_id": "root-node-1", "label": "診断・応用"}  # IK-0901: 段名は日本語
         ]
         assert result["observation_roots"] == [
             {"claim_id": "claim-1", "label": "診断的主張の一例", "identified_via": "theory_stage"}
         ]
         assert "単一の支持線に立っています" in result["fact_line"]
-        assert "Diagnostic / application" in result["fact_line"]
+        assert "『診断・応用』" in result["fact_line"]  # IK-0901
 
     def test_two_independent_roots_give_several_level(self):
         graph_json = {

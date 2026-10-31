@@ -250,7 +250,8 @@ class TestNoRawNumbersInDtos:
             [_row()], _index(), [{"domain_key": "astrophysics"}], "astrophysics"
         )
         evidence = dto["documents"][0]["placements"][0]["evidence"]
-        assert evidence == [{"quote": "原文の逐語"}]
+        assert [{"quote": e["quote"]} for e in evidence] == [{"quote": "原文の逐語"}]
+        assert all(set(e) == {"quote", "source_label"} for e in evidence)  # IK-0677
 
     def test_projection_module_has_no_raw_weight_key_literals(self):
         src = (LANDSCAPE_DIR / "projection.py").read_text(encoding="utf-8")

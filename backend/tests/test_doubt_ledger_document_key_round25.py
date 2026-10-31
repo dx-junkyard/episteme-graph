@@ -324,6 +324,8 @@ class TestLedgerEntryKeys:
 
 class TestRecordSurfaceFacts:
     def test_scope_422_uses_screen_words(self, monkeypatch):
+        # IK-0999（第 5 波）: 権限の検査が入力の検査より先なので、編集権限を通した上で 422 を見る。
+        monkeypatch.setattr(doubt, "_require_editable_ledger_target", lambda *a, **k: _DOC_A)
         monkeypatch.setattr(doubt, "_pg_session", lambda: (_ for _ in ()).throw(AssertionError("no db")))
         with pytest.raises(HTTPException) as exc:
             doubt.add_ledger_scope(

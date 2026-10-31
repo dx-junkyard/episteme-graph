@@ -133,7 +133,7 @@ class TestSectionContract:
     def test_missing_skeleton_hides_the_group(self):
         """骨格なし（404）は領域ごと非表示（fail-closed。空の枠を出さない）。"""
         seg = _edge_segment()
-        block = _fn_block(seg, "function loadEdgeCandidates() {")
+        block = _fn_block(seg, "function loadEdgeCandidates(keepStatus) {")
         assert "if (res.status === 404) return null;" in block
         assert 'edgesGroupEl.style.display = "none";' in block
 
@@ -204,7 +204,7 @@ class TestCandidateCard:
         seg = _edge_segment()
         assert 'id="atlas-edges-show-dismissed"' in seg
         assert "見送り済みも表示" in seg
-        load = _fn_block(seg, "function loadEdgeCandidates() {")
+        load = _fn_block(seg, "function loadEdgeCandidates(keepStatus) {")
         assert 'if (edgeIncludeDismissed) edgeQuery.push("include_dismissed=true");' in load
         # IK-0887: 畳んだ近さだけの候補を全部出す指定も同じ問い合わせに載せる。
         assert 'if (edgeShowAll) edgeQuery.push("show_all=true");' in load
@@ -261,7 +261,7 @@ class TestEdgeKindVocabularyMirror:
 class TestDecisionButtons:
     def test_decide_endpoint_and_actions(self):
         seg = _edge_segment()
-        block = _fn_block(seg, "function edgeDecide(edgeKey, action, note, kind) {")
+        block = _fn_block(seg, "function edgeDecide(edgeKey, action, note, kind, fromNode) {")
         assert 'edgesPath() + "/decide"' in block
         assert 'method: "POST"' in block
         assert "edge_key: edgeKey" in block
@@ -278,7 +278,7 @@ class TestDecisionButtons:
         assert "var kind = _edgeKindFromCard(card);" in block
         assert "if (!kind) { setEdgesStatus(EDGE_KIND_REQUIRED, true); return; }" in block
         idx_guard = block.index("if (!kind)")
-        idx_call = block.index('edgeDecide(edgeKey, "accept", memo, kind);')
+        idx_call = block.index('edgeDecide(edgeKey, "accept", memo, kind, fromNode);')
         assert idx_guard < idx_call
 
     def test_accept_note_states_that_the_draft_is_unchanged(self):

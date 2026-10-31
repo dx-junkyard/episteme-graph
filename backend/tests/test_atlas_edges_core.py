@@ -673,6 +673,8 @@ class TestFreezeIntegration:
             "from_id": "b",
             "to_id": "d",
             "edge_kind": "depends",
+            # IK-1149: 向きの記録なし（migration 096 より前の採用）は False で正直に。
+            "direction_recorded": False,
             "review_note": "",
         }
 
@@ -806,6 +808,7 @@ class TestThreads:
             "from_label",
             "to_label",
             "nearness_label",
+            "basis_line",  # IK-0887: 糸ごとの根拠の一文（組の名前・数値なし）
         }
 
     def test_dismissed_edges_disappear(self, monkeypatch):

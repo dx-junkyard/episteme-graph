@@ -608,7 +608,10 @@ class TestOpeningUiSubjectSections:
         assert "この論文が答えようとした問い" in fn
         assert "thesis.central_question" in fn
         assert "thesis.paper_goal" in fn
-        assert 'if (!question && !goal) return ""' in fn
+        # IK-1013（第 25 周 第 7 波）: 問いも目標も無いときは、サーバの事実文（解析の代替語だった
+        # ときだけ central_question_note が付く）を 1 行だけ描き、無ければ何も描かない。
+        assert "if (!question && !goal) {" in fn
+        assert "thesis.central_question_note" in fn
 
     def test_thesis_section_renders_synthesised_statement(self):
         fn = _extract_js_function(_DISCUSS_JS, "function renderThesisSection(doc) {")

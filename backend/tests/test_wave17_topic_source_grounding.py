@@ -209,7 +209,9 @@ class TestReconstructedFormulaFacts:
             {"id": "b", "label": "(3)", "latex": "y"},
         ])
         assert "eq_tex" not in line
-        assert "番号のない式" in line and "式 (3)" in line
+        # 第 25 周 第 5 波（IK-1009）: 番号の無い復元式は式本文の先頭で名指す。
+        assert "$x$ の式［" in line and "式 (3)" in line
+        assert "印の無い式は原文の数式です" in line
         assert formula_fact_line([{"id": "c", "latex": "z"}]) == ""
 
 

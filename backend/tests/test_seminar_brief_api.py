@@ -434,7 +434,10 @@ class TestStructuralGuardrails:
         assert "document_ids,\n" in _OPEN_ASSUMPTIONS_SRC or "*,\n    document_ids," in _OPEN_ASSUMPTIONS_SRC
         assert "WHERE course_id = :course" not in _OPEN_ASSUMPTIONS_SRC
         assert "document_scope_clause(scope_ids)" in _OPEN_ASSUMPTIONS_SRC
-        # 支持線の共有文脈にも同じ範囲を渡す
-        assert "build_support_context(session, document_ids=scope_ids)" in _OPEN_ASSUMPTIONS_SRC
+        # 支持線の共有文脈は行の対象の document（範囲で絞った行の論文 — 台帳と同じ・IK-1120）。
+        # 行の document が引けない旧行だけ範囲全体に戻す。
+        assert "ids = [document_id] if document_id else scope_ids" in _OPEN_ASSUMPTIONS_SRC
+        assert "build_support_context(session, document_ids=ids)" in _OPEN_ASSUMPTIONS_SRC
         # percentile の基準は範囲（既定）か呼び出し側が渡す範囲（「高」の意味を呼び出し側が保つ）
-        assert "load_percentiles(session, document_ids=basis_ids)" in _OPEN_ASSUMPTIONS_SRC
+        # IK-0970: 閾値の母集団は一覧と同じ除外（導出の手順を外した後）。
+        assert "load_percentiles(session, document_ids=basis_ids, exclusion=exclusion)" in _OPEN_ASSUMPTIONS_SRC

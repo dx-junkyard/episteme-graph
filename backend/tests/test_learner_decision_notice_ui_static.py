@@ -160,5 +160,5 @@ class TestCacheBuster:
         html = _read(INDEX_HTML)
         assert re.search(r'<script src="/js/app\.js\?v=[^"]+"></script>', html)
         assert re.search(r'<script src="/js/discuss\.js\?v=[^"]+"></script>', html)
-        assert re.search(r'<script src="/js/atlas-overlay\.js\?v=ik0412-[^"]+"></script>', html)
+        assert re.search(r'<script src="/js/atlas-overlay\.js\?v=(ik0412|ik0989)-[^"]+"></script>', html)
         assert re.search(r'<script src="/js/corpus-sea\.js\?v=ik0847-[^"]+"></script>', html)

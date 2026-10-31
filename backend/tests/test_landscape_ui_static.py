@@ -119,7 +119,10 @@ class TestScriptLoading:
         """§10.4: 学習者側マーカー/ポップオーバー・出典タブのスタイル追加に合わせて
         atlas.css / styles.css の ?v= を更新する（古い CSS のままだと効かない）。"""
         html = _read(INDEX_HTML)
-        assert "/css/atlas.css?v=knowledge-landscape-20260804" in html
+        # atlas.css も以降の追加（IK-0989 の層の事実文 2026-10-27）で上げる。日付が
+        # landscape の版以上であることを見る。
+        m_atlas = re.search(r'/css/atlas\.css\?v=[A-Za-z0-9_-]*?(\d{8})', html)
+        assert m_atlas and m_atlas.group(1) >= "20260804"
         # styles.css は以降の追加（復元式の注記 2026-09-19 等）でも上げる。ここは
         # 「landscape の版（20260804）以上の日付に更新されている」ことを見る
         # （版文字列は固定しないが、日付が巻き戻っていないことは検査する）。

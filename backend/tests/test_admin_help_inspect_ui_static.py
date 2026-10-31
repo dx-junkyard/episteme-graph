@@ -237,6 +237,8 @@ _ADMIN_FRONTEND_SOURCES = [
     ROOT / "frontend" / "public" / "js" / "versioning.js",
     ROOT / "frontend" / "public" / "js" / "deliberation.js",
     ROOT / "frontend" / "public" / "js" / "doubt-atlas.js",
+    # 人に見せる名前（IK-1007）。担体は admin.html の header.profile-name ボタン。
+    ROOT / "frontend" / "public" / "js" / "profile-name.js",
 ]
 
 

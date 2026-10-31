@@ -316,7 +316,7 @@ class TestDensityIsGradedNotNumeric:
         block = _extract_function_body(js, "function renderMap() {")
         head = block[: block.index("if (!lvl) {")]
         assert "densityLegendHtml()" not in head
-        assert "box.innerHTML = svg + densityLegendHtml();" in block
+        assert "box.innerHTML = svg + densityLegendHtml() + versionLineHtml();" in block  # IK-0942（第 7 波）
 
 
 class TestAnchorFilter:

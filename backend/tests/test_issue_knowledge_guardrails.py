@@ -524,7 +524,6 @@ class TestSolutionPrinciples:
 # この allowlist は**減らす方向のみ**（新しい設計書をここに足してはならない）。
 _PREMORTEM_LEGACY_ALLOWLIST = frozenset(
     {
-        "account_lifecycle_management_design.md",
         "assistant_common_infra_design.md",
         "assistant_screen_adapter_design.md",
         "atlas_binding_lifecycle_design.md",
@@ -551,7 +550,6 @@ _PREMORTEM_LEGACY_ALLOWLIST = frozenset(
         "equation_hover_content_design.md",
         "exposition_layer_design.md",
         "figure_concept_linking_design.md",
-        "focus_document_design.md",
         "generation_language_design.md",
         "graph_dialogue_review_design.md",
         "graph_paper_layer_design.md",
@@ -561,7 +559,6 @@ _PREMORTEM_LEGACY_ALLOWLIST = frozenset(
         "image_pipeline_knowledge_library_design.md",
         "indicator_governance_design.md",
         "knowledge_landscape_design.md",
-        "knowledge_objects_design.md",
         "knowledge_transfer_design.md",
         "label_vocab_design.md",
         "learner_element_context_design.md",

@@ -289,7 +289,7 @@ class TestFixtureParity:
         assert st.endorse_line_for(st.STATUS_VERIFIED, signals) == "承認: 2名の教員が承認"
         signals, _ = _FIXTURE_CASES["dual"]
         assert st.endorse_line_for(st.STATUS_ASSUMED, signals) == (
-            "承認: 承認記録なし — 台帳のスコープ欄は空欄"
+            "承認: このコーパスの中では、教員の承認の記録がありません"
         )
         signals, _ = _FIXTURE_CASES["vcb"]
         assert st.endorse_line_for(st.STATUS_CONTESTED, signals) == (

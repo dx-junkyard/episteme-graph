@@ -251,12 +251,12 @@ class TestLearnerScopeLine:
         from core.personal_graph.queries import ComponentLedgerStatuses
 
         ledger = ComponentLedgerStatuses({"theory_op_0001": "directly_verified", "theory_op_0002": "untested"})
-        ledger.scope_lines["theory_op_0001"] = "記帳された条件: 領域「分子雲」"
-        assert _verification("theory_op_0001", ledger)["scope_line"] == "記帳された条件: 領域「分子雲」"
+        ledger.scope_lines["theory_op_0001"] = "記録された条件: 領域「分子雲」"
+        assert _verification("theory_op_0001", ledger)["scope_line"] == "記録された条件: 領域「分子雲」"
         assert "scope_line" not in _verification("theory_op_0002", ledger)
         # 既存の plain dict の読み手（テスト・旧経路）は壊さない。
         assert _verification("x", {"x": "directly_verified"}) == {
-            "status": "directly_verified", "label": "直接検証の記帳あり",
+            "status": "directly_verified", "label": "直接検証の記録あり",
         }
 
     def test_map_renders_scope_line_and_ai_fact_matches(self):

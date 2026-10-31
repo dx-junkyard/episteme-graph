@@ -44,7 +44,10 @@ class TestAppendix:
         text = _appendix([{"equation_id": "eq_dcf", "label": "eq:modified_dcf", "latex": "a=b"}], linked=["eq_dcf"])
         assert "eq:modified_dcf" not in text
         assert "eq_dcf\n" not in text.replace("![[equation:eq_dcf]]", "")  # TeX ラベル由来の ID も名前にしない
-        assert "- この節の式" in text
+        # 第 25 周 第 5 波（IK-0872 ②）: 番号も名前も無い式は定める記号から名前を付ける
+        # （「この節の式」に落とさない）。
+        assert "- $a$ を定める式" in text
+        assert "- この節の式" not in text
 
     def test_digit_only_label_becomes_printed_number(self):
         text = _appendix([{"equation_id": "eq_x", "label": "6", "latex": r"S=\int R"}], linked=["eq_x"])

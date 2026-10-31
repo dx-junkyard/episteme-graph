@@ -586,7 +586,8 @@ class TestGetAtlasNode:
             "/api/atlas/node/dual?cartridge=particle_physics", headers=_headers()
         ).json()
         assert data["status"] == "assumed"
-        assert "記帳された直接検証なし" in data["verify_line"]
+        # IK-1018 残り（第 7 波）: 学習者には「台帳」「記帳」を出さない（読み時の投影）。
+        assert "直接確かめた記録なし" in data["verify_line"]
         assert data["endorsements"] == []
 
     def test_unknown_node_is_404(self, client, warm_cache):
@@ -841,6 +842,7 @@ class TestLearnerLedgerHonesty:
         data = res.json()
         assumed = [n for n in data["nodes"].values() if n.get("status") == "assumed"]
         for node in assumed:
-            assert node["pill_note"] == label_vocab.ATLAS_PILL_NOTES["assumed"]
+            # IK-1018 残り（第 7 波）: 学習者向けは「台帳」「記帳」を読み替えた文。
+            assert node["pill_note"] == label_vocab.learner_atlas_wording(label_vocab.ATLAS_PILL_NOTES["assumed"])
         for entry in data["nodes_list"]:
             assert "pill_note" in entry["panel"]

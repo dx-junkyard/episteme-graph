@@ -392,6 +392,9 @@ class TestEdgeCandidateQueue:
             "skeleton_version",
             "draft_exists",
             "draft_revision",
+            # IK-0993（第 25 周 第 5 波）: 保存済みアンカーが無い（この fixture は共起だけ）ので、
+            # 説明文の近さの候補を出していない理由の一文が付く。
+            "index_note",
         }
         assert body["skeleton_version"] == "2026.1"
         assert len(body["candidates"]) == 1
@@ -911,8 +914,8 @@ class TestFreezeGateAndStamp:
         )
         assert response.status_code == 409
         detail = response.json()["detail"]
-        # ラベルの列挙で示す（件数を書かない = RE4）。
-        assert detail["pending_edges"] == ["宇宙マイクロ波背景放射 — 活動銀河核"]
+        # ラベルの列挙で示す（件数を書かない = RE4）。IK-1118: 種別の句を添える（凍結の影響と同じ形）。
+        assert detail["pending_edges"] == ["宇宙マイクロ波背景放射 — 活動銀河核（関連）"]
         assert not any(ch.isdigit() for ch in detail["message"])
         assert [r for r in skeleton_db.skeleton_rows if r["status"] == "frozen"] == []
 

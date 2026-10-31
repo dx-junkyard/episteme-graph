@@ -469,7 +469,7 @@ class TestLedgerProjection:
         line = doubt.learner_ledger_line(
             session, "claim", "target-1", document_id=None, include_support_lines=False,
         )
-        assert line["evidence_lines_fact"] == "根拠の線が記帳されています（種類: 観測・導出）。"
+        assert line["evidence_lines_fact"] == "根拠の線が記録されています（種類: 観測・導出）。"  # IK-1059 学習者の語
         assert "evidence_lines" not in line
         serialized = json.dumps(line, ensure_ascii=False)
         assert "teacher-1" not in serialized

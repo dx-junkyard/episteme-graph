@@ -304,6 +304,12 @@ class TestNoLiteralRedefinition:
 # 日本語を含む**表（= 表示ラベル表）。訳語表以外（SQL 断片・英語語彙）は拾わない。
 
 _ALLOWED_VALUE_SPLITS = {
+    # 記号の適用範囲: 教員向け・降下路の短い語（element_vocab）と、学生の記号の吹き出しの文
+    # （symbol_lookup。使える範囲を断言せず「どこで定義されたか」を言う — IK-0961）。宛先が違う。
+    ("core/element_vocab.py::SYMBOL_SCOPE_LABELS", "core/symbol_lookup.py::LEARNER_SYMBOL_SCOPE_LABELS"),
+    # 役割の印: コース（editor 共有でもトピックの保存は所有者 — IK-0908）と教材（editor 共有で
+    # 台帳の記帳・再解析ができる）で、編集共有にできることが違う（IK-0974）。別の一覧に出る。
+    ("core/label_vocab.py::COURSE_ROLE_LABELS", "core/label_vocab.py::MATERIAL_ROLE_LABELS"),
     # 共有の権限語: コース（受講・閲覧 / 編集。トピックの保存は所有者）と教材の解析成果
     # （閲覧・引用 / 編集・再解析）で、できることが違う（IK-0911）。同じ画面には併記されない。
     (

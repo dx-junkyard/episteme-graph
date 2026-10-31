@@ -450,4 +450,6 @@ class TestStandardExplanationFollowsSummary:
         src = inspect.getsource(tc.list_component_explanations)
         assert "_standard_body_note(" in src
         assert "_citations_for_explanations(" in src
-        assert "_row_to_explanation_out(row, current_user)" in src
+        assert "_row_to_explanation_out(" in src
+        # IK-0984: 標準の説明の査読者と査読できるかを一覧と同じ規則で渡す。
+        assert "standard_reviewable=" in src and "_standard_reviewers(" in src

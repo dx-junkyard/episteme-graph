@@ -373,7 +373,12 @@ class TestBuildSharedPart:
                 "summary": "共通部品の説明",
                 "standardization_status": "field_standard",
                 "source_document_ids": [_DOC_A, _DOC_B, "doc-other"],
+                "latest_version_no": 2,
             },
+        )
+        monkeypatch.setattr(
+            component_context.library_store_mod, "get_version",
+            lambda eid, no: {"content": {"name": "共通部品X", "aliases": ["alias1"], "summary": "共通部品の説明"}},
         )
         monkeypatch.setattr(component_context, "_user_display_name", lambda uid: "山田先生")
 
@@ -388,6 +393,9 @@ class TestBuildSharedPart:
         assert result["heading"] == component_context.SHARED_PART_HEADING
         assert result["link"]["confirmed_by"] == "山田先生"
         assert result["provenance"] == "identity_link_confirmed + library_entry"
+        # IK-0959: 評価済みは学生向けの 1 文。生の enum は渡さない。
+        assert "standardization_status" not in result["entry"]
+        assert result["entry"]["standardization_note"].startswith("教員は")
 
     def test_missing_shared_part_id_on_link_returns_none(self, monkeypatch):
         monkeypatch.setattr(

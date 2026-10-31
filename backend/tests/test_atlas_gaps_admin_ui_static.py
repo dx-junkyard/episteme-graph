@@ -265,7 +265,7 @@ class TestDecisionButtons:
 
     def test_from_frozen_confirm_is_a_fact_sentence(self):
         seg = _gap_segment()
-        block = _fn_block(seg, "function gapCreateDraftFromFrozen() {")
+        block = _fn_block(seg, "function gapCreateDraftFromFrozen(setStatusFn) {")  # IK-1044: 押された区画の結果欄を受ける
         assert (
             'confirm("現行版 " + version + " を複製して下書きを作ります。'
             '下書きは学習者には表示されません")'

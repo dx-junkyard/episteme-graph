@@ -285,14 +285,14 @@ class TestElementResolver:
         sources = _sources()
         del sources["element"]["context"]["instance"]["explanation"]["status"]
         facts = lr.resolve_element(_ctx(), sources)
-        assert any(f.startswith("この要素の説明（承認済み）: ") for f in facts)
+        assert any(f.startswith("学習者の画面に出ているこの要素の「教員の説明」（承認済み）: ") for f in facts)
         assert not any("候補（未承認）" in f for f in facts)
 
     def test_approved_explanation_keeps_its_own_label(self):
         sources = _sources()
         sources["element"]["context"]["instance"]["explanation"]["status"] = "approved"
         facts = lr.resolve_element(_ctx(), sources)
-        assert any(f.startswith("この要素の説明（承認済み）: ") for f in facts)
+        assert any(f.startswith("学習者の画面に出ているこの要素の「教員の説明」（承認済み）: ") for f in facts)
 
     def test_summary_replaces_the_role_line_when_the_role_is_missing(self):
         sources = _sources()

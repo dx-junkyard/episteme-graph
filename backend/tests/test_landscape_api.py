@@ -890,7 +890,9 @@ class TestLearnerLandscape:
         placement = body["documents"][0]["placements"][0]
         assert placement["provenance_label"] == "AIによる推定（未確認）"
         assert placement["weight_label"] == "強い関連"
-        assert placement["evidence"] == [{"quote": "we measure the expansion rate"}]
+        assert placement["evidence"] == [
+            {"quote": "we measure the expansion rate", "source_label": "論文の主張からの引用"}
+        ]  # IK-0677: 出所の印
 
         keys = _keys_recursive(body)
         assert "weight" not in keys

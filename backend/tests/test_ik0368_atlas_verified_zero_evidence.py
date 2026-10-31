@@ -17,7 +17,8 @@ def test_seed_verified_with_zero_evidence_states_seed_origin():
     assert "0本" not in line
     assert "裏付け" not in line
     assert line == st.SEED_VERIFY_LINE
-    assert "骨格（教員レビュー済）" in line
+    assert "分野の地図（教員レビュー済）" in line
+    assert "骨格" not in line  # IK-0942: 学習者に「骨格」を出さない
     assert st.find_evaluative_language(line) == []
 
 
@@ -48,5 +49,5 @@ def test_positive_evidence_wording_unchanged():
 def test_seed_wording_for_other_statuses_unchanged():
     signals = _signals(seed_status=st.STATUS_ASSUMED)
     assert st.verify_line_for(st.STATUS_UNKNOWN, signals) == (
-        "検証: 台帳に記帳なし。骨格（教員レビュー済）の初期表示。"
+        "検証: 台帳に記帳なし。分野の地図（教員レビュー済）の初期表示。"
     )

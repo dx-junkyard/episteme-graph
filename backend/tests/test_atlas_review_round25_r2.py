@@ -242,18 +242,23 @@ class TestFreezeReadiness:
         frozen = _skeleton()
         draft = _skeleton([atlas_module.SkeletonEdge(from_id="a", to_id="c", kind="depends")])
         changes = atlas_lifecycle.edge_changes(draft, frozen)
-        assert changes == {"added_edges": ["降着円盤 — 磁場（依存）"], "removed_edges": []}
+        # IK-1072（第 9 波）: 有向の関係は向きの句を添える（反映の確認と同じ正本）。
+        assert changes == {
+            "added_edges": ["降着円盤 — 磁場（依存: 「降着円盤」が「磁場」に依存する）"],
+            "removed_edges": [],
+            "redirected_edges": [],
+        }
         facts = atlas_lifecycle._freeze_impact_facts(
             set(), set(), has_frozen=True, added_edges=changes["added_edges"]
         )
         assert atlas_lifecycle.FACT_SAME_NODE_SET not in facts
         assert atlas_lifecycle.FACT_SAME_NODES_EDGES_CHANGED in facts
-        assert "次版で加わる関係: 降着円盤 — 磁場（依存）" in facts
+        assert "次版で加わる関係: 降着円盤 — 磁場（依存: 「降着円盤」が「磁場」に依存する）" in facts
 
     def test_same_nodes_and_edges_says_same(self):
         frozen = _skeleton([atlas_module.SkeletonEdge(from_id="a", to_id="c", kind="related")])
         changes = atlas_lifecycle.edge_changes(frozen, frozen)
-        assert changes == {"added_edges": [], "removed_edges": []}
+        assert changes == {"added_edges": [], "removed_edges": [], "redirected_edges": []}
         facts = atlas_lifecycle._freeze_impact_facts(set(), set(), has_frozen=True)
         assert atlas_lifecycle.FACT_SAME_NODE_SET in facts
 

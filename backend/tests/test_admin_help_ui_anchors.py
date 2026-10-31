@@ -252,7 +252,29 @@ class TestAdminUiAnchorsModule:
         #   IK-0913）/ lecture-studio.reattach-appendix（付録を付け直す — IK-0872 / IK-0880）。
         # 第 25 周 面 A 第 3 周（2026-10-23）: +1 = knowledge-library.bound-parts（結びついた教材の部品 — IK-0920）。
         # 同上: +1 = knowledge-library.atlas-link-manual（地図の概念を選んで手で対応を付ける — IK-0927）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 386
+        # 第 25 周 面 A 第 4 周（2026-10-25）: +1 = deliberation.identity-link-revoke（確定した同一性リンクを
+        #   理由を書いて取り消す — IK-0953。深く検討の同一性リンク区画とライブラリの結びついた教材の部品）。
+        #   +1 = lecture-studio.explanation-evidence-open（標準の説明の根拠の主張を開く — IK-0960）。
+        # 第 25 周 面 C 第 5 波（2026-10-27）: +1 = atlas.published-contents（下書きが無いとき公開中の版の
+        #   項目と関係を読み取り専用で読み返す — IK-0992）。
+        # 第 25 周 面 A 第 5 波（2026-10-27）: +4 = knowledge-library.bound-part-decide（詳細で未決の結び付きを
+        #   確認・見送り — IK-0982）/ knowledge-library.bound-symbols・symbol-derive（記号 → 概念 — IK-0983）/
+        #   lecture-studio.explanation-second-review（標準の説明のもう一人の査読者 — IK-0984）。
+        # 第 25 周 面 B 第 5 波（2026-10-27）: +1 = doubt-atlas.withdrawn-challenges（取り下げ済みの疑義を
+        #   台帳の疑義区画で読み取りのみ畳んで読む — IK-0998）。
+        # 第 25 周 面 D 第 5 波（2026-10-27）: +2 = lecture-studio.insert-slide-marker-both（両方の欄に
+        #   区切りを挿入）/ lecture-studio.align-slide-markers（読み上げ欄の区切りを教材欄に揃える — IK-0878）。
+        # 第 25 周 面 B 第 6 波（2026-10-27）: +1 = doubt-atlas.assumption-open-ledger（確定済みの前提の
+        #   カードから台帳を開く — IK-1028）。
+        # 第 25 周 面 D 第 6 波（2026-10-27）: +1 = lecture-studio.reattach-appendix-all（付録を
+        #   まとめて付け直す — 所有者の一括確定・オーナー判断 1）。
+        # 第 25 周 面 D 第 7 波（2026-10-28）: +2 = lecture-studio.appendix-stale-list（付録が古い
+        #   トピックの折りたたみの一覧 — IK-1054）/ lecture-studio.open-versions（版の管理を開く — IK-1053）。
+        # 第 25 周 面 A 第 8 波（2026-10-28）: +1 = deliberation.identity-link-restore（見送り・確定を
+        #   取り消した同一性リンクを理由を書いて候補に戻す — IK-1062）。
+        # 第 25 周 面 D 第 8 波（2026-10-28）: +1 = lecture-studio.audio-request-copy（共有コースで
+        #   音声を所有者に頼む文を写す — IK-1071）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 409
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""
