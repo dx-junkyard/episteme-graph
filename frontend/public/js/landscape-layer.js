@@ -352,17 +352,31 @@
     if (placement.reason) {
       const reason = document.createElement("div");
       reason.className = "landscape-popup-reason";
-      reason.textContent = placement.reason;
+      // IK-0967: 理由は AI の要約。印はサーバが解決した文を素通し（JS に表を持たない）。
+      reason.textContent =
+        (placement.reason_label ? "〔" + placement.reason_label + "〕" : "") + placement.reason;
       row.appendChild(reason);
+      if (placement.reason_note) {
+        const note = document.createElement("div");
+        note.className = "landscape-popup-reason-note";
+        note.textContent = placement.reason_note;
+        row.appendChild(note);
+      }
     }
 
-    // LS4: 原文逐語 quote を必ず辿れるようにする
+    // LS4: 原文逐語 quote を必ず辿れるようにする（IK-0677: 引用の出所の印を添える）
     ((placement.evidence) || []).forEach((ev) => {
       if (!ev || !ev.quote) return;
       const quote = document.createElement("div");
       quote.className = "landscape-popup-quote";
       quote.textContent = "「" + ev.quote + "」";
       row.appendChild(quote);
+      if (ev.source_label) {
+        const src = document.createElement("div");
+        src.className = "landscape-popup-quote-source";
+        src.textContent = ev.source_label;
+        row.appendChild(src);
+      }
     });
 
     container.appendChild(row);

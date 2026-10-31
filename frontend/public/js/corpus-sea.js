@@ -451,6 +451,16 @@
     return html + "</div>";
   }
 
+  // IK-0942（第 25 周 第 7 波）: 地図の版をほかの面と同じ呼び方（「地図 版 X」）で添える。
+  // 文はサーバの skeleton_version_label（label_vocab.atlas_version_label）を素通しで描く。
+  function versionLineHtml() {
+    const l = state.landscape;
+    const label = l && typeof l.skeleton_version_label === "string" ? l.skeleton_version_label : "";
+    if (!label) return "";
+    return '<div class="corpus-sea-version" style="font-size:11.5px;color:var(--color-text-secondary,#666);margin-top:4px">' +
+      esc(label) + "</div>";
+  }
+
   function renderMap() {
     const box = el("corpus-sea-map");
     if (!box) return;
@@ -506,7 +516,7 @@
         anchorRadius(countOf(density.anchors, anchorId)) + '"></circle></g>';
     });
     svg += "</svg>";
-    box.innerHTML = svg + densityLegendHtml();
+    box.innerHTML = svg + densityLegendHtml() + versionLineHtml();
     box.querySelectorAll("[data-corpus-anchor]").forEach(function (g) {
       const pick = function () { selectAnchor(g.getAttribute("data-corpus-anchor")); };
       g.addEventListener("click", pick);

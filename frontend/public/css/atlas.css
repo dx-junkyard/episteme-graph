@@ -316,6 +316,13 @@
   gap: 6px;
 }
 
+/* IK-0989: 層ごとの事実文（L2 で項目の一部だけを描いたとき） */
+.atlas-level-note {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin: 6px 0 0;
+}
+
 /* フッター: 骨格の版数 (出所の常時明示) */
 .atlas-foot {
   font-size: 11px;

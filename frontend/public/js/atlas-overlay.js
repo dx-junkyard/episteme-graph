@@ -36,6 +36,9 @@
     footprint: "#378ADD",
   };
 
+  // 版の呼び名（IK-0942。core/label_vocab.py::ATLAS_VERSION_PREFIX の逐語ミラー）。
+  const ATLAS_VERSION_PREFIX = "地図 版 ";
+
   const PILL_STYLES = {
     verified: { bg: "#E1F5EE", fg: "#085041", dashed: false },
     contested: { bg: "#FAEEDA", fg: "#633806", dashed: false },
@@ -129,6 +132,10 @@
 
     // マップキャンバス
     sheet.appendChild(el("div", { class: "atlas-canvas", id: "atlas-canvas" }));
+    // IK-0989: 層ごとの事実文（L2 で項目の一部だけを描いたとき、サーバの omitted_note を素通し）。
+    const levelNote = el("p", { class: "atlas-level-note", id: "atlas-level-note" });
+    levelNote.hidden = true;
+    sheet.appendChild(levelNote);
 
     // 詳細パネル (プレースホルダ。中身とアクションは C-1/C-2/D-1)
     const panel = el("div", { class: "atlas-panel", id: "atlas-detail-panel" });
@@ -387,15 +394,35 @@
     const pos = {};
     nodes.forEach((n) => { pos[n.id] = n; });
 
+    // IK-1072（第 25 周 第 9 波）: 向きのある関係（依存）はサーバの directed_edges（from → to）に
+    // 矢じりを付ける。向きの判定はサーバ（label_vocab）— ここで種別を解釈しない。
+    const directed = {};
+    for (const [fromId, toId] of levelData.directed_edges || []) directed[fromId + "\u0000" + toId] = true;
+    if (Object.keys(directed).length) {
+      const defs = svgEl("defs");
+      const marker = svgEl("marker", {
+        id: "atlas-l2-arrow", viewBox: "0 0 10 10", refX: 8, refY: 5,
+        markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse",
+      });
+      marker.appendChild(svgEl("path", {
+        d: "M2 1L8 5L2 9", fill: "none", stroke: C.edge,
+        "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round",
+      }));
+      defs.appendChild(marker);
+      svg.appendChild(defs);
+    }
+
     // 実線エッジ
     for (const [fromId, toId] of levelData.edges || []) {
       const a = pos[fromId], b = pos[toId];
       if (!a || !b) continue;
       const line = trimmedLine(a, b, nodeRadius(fromId), nodeRadius(toId));
-      svg.appendChild(svgEl("line", {
+      const attrs = {
         x1: line.x1, y1: line.y1, x2: line.x2, y2: line.y2,
         stroke: C.edge, "stroke-width": 0.75,
-      }));
+      };
+      if (directed[fromId + "\u0000" + toId]) attrs["marker-end"] = "url(#atlas-l2-arrow)";
+      svg.appendChild(svgEl("line", attrs));
     }
 
     for (const node of nodes) {
@@ -489,7 +516,17 @@
     });
     ov.querySelector("#atlas-crumb").textContent = (state.data.crumbs || {})[String(level)] || "";
     const canvas = ov.querySelector("#atlas-canvas");
-    canvas.replaceChildren(RENDERERS[level](state.data.levels[String(level)] || { viewBox: [680, 370] }));
+    const levelData = state.data.levels[String(level)] || { viewBox: [680, 370] };
+    canvas.replaceChildren(RENDERERS[level](levelData));
+    // IK-0989: 描かなかった項目があることを画面の言葉で言う（件数は出さない・文はサーバ）。
+    const levelNote = ov.querySelector("#atlas-level-note");
+    if (levelNote) {
+      // IK-1072 / IK-1073（第 25 周 第 9 波）: 向きの一文・いまここが無い理由も同じ事実文の行に（文はサーバ）。
+      const noteText = [levelData.now_note, levelData.omitted_note, levelData.relations_note]
+        .filter(Boolean).map(String).join(" ");
+      levelNote.textContent = noteText;
+      levelNote.hidden = !noteText;
+    }
     const initial = (state.data.initial_selection || {})[String(level)];
     if (initial) selectNode(initial, { silent: false });
     // 個人知識ネットワーク (Phase P-1): L1 かつ「わたしの地図」ON のときだけ本人の痕跡ドットを
@@ -587,8 +624,9 @@
     state.lastFocus = document.activeElement;
     let ov = document.getElementById("atlas-overlay");
     if (!ov) ov = buildShell();
+    // IK-0942: 版の呼び名は core/label_vocab.py::ATLAS_VERSION_PREFIX の逐語ミラー。
     ov.querySelector("#atlas-foot").textContent =
-      "骨格 " + (state.data.skeleton_version || "—") + " / " + (state.data.provenance || "AI生成");
+      ATLAS_VERSION_PREFIX + (state.data.skeleton_version || "—") + " / " + (state.data.provenance || "AI生成");
     ov.removeAttribute("hidden");
     // C-2: 再オープン時は直前のレベル・選択を復元する (初回は L1 + 初期選択)。
     // 導線からの明示オープン (opts.level / opts.focus) は復元より優先する。
@@ -607,8 +645,8 @@
     const contextEl = ov.querySelector("#atlas-context");
     if (contextEl) {
       contextEl.textContent = contextId && state.data.nodes && state.data.nodes[contextId]
-        ? "現在地: 「" + (state.data.nodes[contextId].label || contextId) + "」。ノードを選ぶと、記帳された根拠と学習への入口を確認できます。"
-        : "ノードを選ぶと、その位置に記帳された根拠と学習への入口を確認できます。";
+        ? "現在地: 「" + (state.data.nodes[contextId].label || contextId) + "」。ノードを選ぶと、記録された根拠と学習への入口を確認できます。"
+        : "ノードを選ぶと、その位置に記録された根拠と学習への入口を確認できます。";
     }
     if (opts.highlight) pulseNode(restoreSel || state.selected);
     setIntroNote(!!opts.intro);

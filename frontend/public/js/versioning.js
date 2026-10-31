@@ -57,12 +57,22 @@
       return '発行した版は履歴として記録され、共有先へ更新通知が届きます。引用（再利用）はその時点の版に固定されます。' +
              '※解析成果ビューの版固定表示は今後対応予定で、現在は共有先にも最新の解析結果が表示されます。';
     }
-    return '発行した版だけが共有先に見え、共有先は同意するまで自分の版に留まります。';
+    // 第 25 周 第 10 波（IK-1127）: コースの届き方は宛先ごと（受講者 / 閲覧の共有先 / 編集の共有先）に
+    // サーバの version-state.audience_note を素通しで描く（文の正本は label_vocab）。ここでは言わない。
+    return '';
   }
 
-  function openModal(objectType, objectId, title) {
+  // options.onClose（任意・第 25 周 第 7 波 IK-1053）: モーダルを閉じたときに呼ぶ。原稿スタジオが
+  // 発行の後に「未発行の変更」の事実を取り直すために使う（発行の判断・操作はこのモーダルのまま）。
+  function openModal(objectType, objectId, title, options) {
     var existing = document.getElementById("vg-modal");
     if (existing) existing.remove();
+    var onClose = options && typeof options.onClose === "function" ? options.onClose : null;
+    function closeModal() {
+      if (!overlay.parentNode) return;
+      overlay.remove();
+      if (onClose) { try { onClose(); } catch (e) { /* 呼び出し側の失敗で閉じる操作を止めない */ } }
+    }
 
     var overlay = document.createElement("div");
     overlay.id = "vg-modal";
@@ -78,8 +88,8 @@
         '<div id="vg-body"><p style="font-size:12px;color:var(--color-text-tertiary)">読み込み中...</p></div>' +
       '</div>';
     document.body.appendChild(overlay);
-    overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
-    document.getElementById("vg-close").addEventListener("click", function () { overlay.remove(); });
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) closeModal(); });
+    document.getElementById("vg-close").addEventListener("click", function () { closeModal(); });
 
     _loadModal(objectType, objectId, title);
   }
@@ -200,6 +210,25 @@
     body.innerHTML =
       '<div style="margin-bottom:14px">' +
         '<div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px">現在の最新版: <b>' + (latest ? 'v' + esc(latest) : '未発行') + '</b></div>' +
+        // 第 25 周 第 9 波（IK-1079）: 所有者には、いまの内容が受講者の版と同じか・発行の後に保存した
+        // 変更があるかの事実文（サーバの version-state の文をそのまま描く。原稿スタジオと同じ正本）。
+        // 第 10 波（IK-1127）: 発行した版が宛先ごとにどう届くか（全員）と、受講者の見ている版（所有者）。
+        (state.audience_note
+          ? '<div data-vg-audience-note="1" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px">' + esc(state.audience_note) + '</div>'
+          : '') +
+        (isOwner && state.learner_version_note
+          ? '<div data-vg-learner-version="1" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px">' + esc(state.learner_version_note) + '</div>'
+          : '') +
+        (isOwner && state.unpublished_changes_note
+          ? '<div data-vg-unpublished-changes="' + (state.unpublished_changes ? '1' : '0') + '" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px">' + esc(state.unpublished_changes_note) + '</div>'
+          : '') +
+        // 第 10 波（studio 頭脳の所見）: 発行の前に、何が変わったか（トピックの題名・件数なし）。
+        (isOwner && state.changed_topic_titles && state.changed_topic_titles.length
+          ? '<details data-vg-changed-topics="1" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"><summary>' +
+              esc(state.changed_topics_label || "") + '</summary><ul style="margin:4px 0 4px 18px;padding:0">' +
+              state.changed_topic_titles.map(function (t) { return '<li>' + esc(t) + '</li>'; }).join("") +
+            '</ul></details>'
+          : '') +
         (isOwner ? '' :
           '<div style="font-size:12px;color:var(--color-text-secondary);border:1px solid var(--color-border,#ddd);border-radius:6px;padding:8px 10px;margin-bottom:8px;background:rgba(0,100,200,0.04)">' + esc(_viewingLine(state, releases)) + '</div>') +
         publishHtml +

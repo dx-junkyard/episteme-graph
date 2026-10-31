@@ -110,7 +110,9 @@
   var IDENTITY_LINK_STATUS_LABELS = {
     candidate: "候補（未確定）",
     confirmed: "確定済み",
-    rejected: "却下"
+    rejected: "却下",
+    // IK-0953: 確定を教員が取り消した（行は残す）
+    revoked: "確定を取り消し"
   };
 
   // 要素説明（element_explanations, migration 056）の kind/status ラベル。
@@ -1960,9 +1962,11 @@
     var statusLabel = IDENTITY_LINK_STATUS_LABELS[link.status] || link.status || "";
     var localExpr = link.local_expression || {};
     var exprLabel = localExpr.label || localExpr.notation || "";
-    var pending = link.status === "candidate";
+    // IK-1076: 判断の対象でない行（置き換わった部品・見送った概念）は判断のボタンを出さない（ライブラリと同じ述語）。
+    var decidable = link.decidable !== false;
+    var pending = link.status === "candidate" && decidable;
     return '<div class="deliberation-identity-link-row" data-identity-link-id="' + escHtml(link.id) + '">' +
-      '<span class="deliberation-annotation-status ' + (link.status === "confirmed" ? "committed" : (link.status === "rejected" ? "dismissed" : "")) + '">' +
+      '<span class="deliberation-annotation-status ' + (link.status === "confirmed" ? "committed" : ((link.status === "rejected" || link.status === "revoked") ? "dismissed" : "")) + '">' +
         escHtml(statusLabel) +
       '</span>' +
       (exprLabel ? '<div class="deliberation-annotation-body">' + escHtml(exprLabel) + '</div>' : '') +
@@ -1983,7 +1987,9 @@
             escHtml(link.instance_type_label || "要素") + ': ' +
             escHtml(link.instance_label || "（名前を読めませんでした）") +
             (link.instance_summary ? '｜' + escHtml(link.instance_summary) : '') +
-            (link.instance_document_title ? '（論文『' + escHtml(link.instance_document_title) + '』）' : '') +
+            (link.instance_document_title ? '（論文『' + escHtml(link.instance_document_title) + '』' +
+              // IK-0956: 同じ題名の論文が 2 本以上あるときだけ、サーバがどの版かの手がかりを添える。
+              (link.instance_document_version_label ? '・' + escHtml(link.instance_document_version_label) : '') + '）' : '') +
             ((link.instance_inputs && link.instance_inputs.length)
               ? '<div class="deliberation-identity-io">入力: ' + escHtml(link.instance_inputs.join(" ／ ")) + '</div>' : '') +
             ((link.instance_outputs && link.instance_outputs.length)
@@ -1993,6 +1999,14 @@
       (link.reason ? '<div class="deliberation-annotation-reason">' + escHtml(link.reason) + '</div>' : '') +
       (link.provenance_label ? '<span class="deliberation-identity-provenance">' + escHtml(link.provenance_label) + '</span>' : '') +
       (link.confidence_label ? '<span class="deliberation-annotation-confidence">' + escHtml(link.confidence_label) + '</span>' : '') +
+      _identityLinkActorsHtml(link) +
+      (link.undecidable_note ? '<p class="deliberation-identity-confirm-note" data-identity-undecidable>' + escHtml(link.undecidable_note) + '</p>' : '') +
+      // IK-0917: 確定の直前に両側を名指しして「同じものか」を問う 1 文と、種別が違うときの
+      // 一段強い確認の事実文（正本はサーバ。JS は素通し）。
+      (pending && link.confirm_question
+        ? '<p class="deliberation-identity-confirm-question">' + escHtml(link.confirm_question) + '</p>' : '') +
+      (pending && link.granularity_note
+        ? '<p class="deliberation-identity-granularity-note" data-identity-granularity-mismatch>' + escHtml(link.granularity_note) + '</p>' : '') +
       (pending && link.confirm_note
         ? '<p class="deliberation-identity-confirm-note">' + escHtml(link.confirm_note) + '</p>' : '') +
       (pending
@@ -2001,9 +2015,63 @@
             '<button type="button" class="deliberation-annotation-btn dismiss" data-identity-action="reject" data-ui-anchor="deliberation.identity-link-decide">却下</button>' +
           '</div>'
         : '') +
+      // IK-0953: 確定した行にだけ［確定を取り消す］（理由必須・行は残る）。
+      (link.status === "confirmed"
+        ? (link.revoke_note ? '<p class="deliberation-identity-revoke-note">' + escHtml(link.revoke_note) + '</p>' : '') +
+          '<div class="deliberation-annotation-actions" data-ui-anchor="deliberation.identity-link-revoke">' +
+            '<button type="button" class="deliberation-annotation-btn dismiss" data-identity-action="revoke" data-ui-anchor="deliberation.identity-link-revoke">確定を取り消す</button>' +
+          '</div>'
+        : '') +
+      // IK-1062: 見送り・取り消し済みの行にだけ［候補に戻す］（理由必須・前の判断の記録は残る）。
+      ((link.status === "rejected" || link.status === "revoked") && decidable
+        ? (link.restore_note ? '<p class="deliberation-identity-revoke-note">' + escHtml(link.restore_note) + '</p>' : '') +
+          '<div class="deliberation-annotation-actions" data-ui-anchor="deliberation.identity-link-restore">' +
+            '<button type="button" class="deliberation-annotation-btn" data-identity-action="restore" data-ui-anchor="deliberation.identity-link-restore">候補に戻す</button>' +
+          '</div>'
+        : '') +
       // 確定・却下失敗時の表示先。catch 側が引く専用クラス（スタイルは annotation-error を流用）
       '<div class="deliberation-annotation-error deliberation-identity-link-error" style="display:none"></div>' +
     '</div>';
+  }
+
+  // IK-0953: 誰が作り・確定し・取り消したかを表示名で（サーバが解決した表示名の素通し）。
+  function _identityLinkActorsHtml(link) {
+    var parts = [];
+    if (link.created_by_label) parts.push("作成: " + link.created_by_label);
+    if (link.decided_by_label && link.status !== "candidate") {
+      parts.push((link.status === "rejected" ? "却下: " : "確定: ") + link.decided_by_label);
+    }
+    if (link.status === "revoked") {
+      // IK-0953 の残り: 取り消した人・日付と元の確定（サーバの revoke_line が正本）。
+      if (link.revoke_line) parts.push(link.revoke_line);
+      else if (link.revoked_by_label) {
+        parts.push("取り消し: " + link.revoked_by_label + (link.revoked_at ? "（" + String(link.revoked_at).slice(0, 10) + "）" : ""));
+      }
+    }
+    var html = parts.length
+      ? '<div class="deliberation-identity-actors" data-identity-actors>' + escHtml(parts.join(" ／ ")) + '</div>' : '';
+    if (link.self_confirmed_note) {
+      html += '<div class="deliberation-identity-self-confirmed">' + escHtml(link.self_confirmed_note) + '</div>';
+    }
+    if (link.status === "revoked" && link.revoke_reason) {
+      html += '<div class="deliberation-identity-revoke-reason">取り消しの理由: ' + escHtml(link.revoke_reason) + '</div>';
+    }
+    // IK-1062: 候補に戻した行の記録（サーバの restore_line / restore_reason_line）。
+    if (link.restore_line) {
+      html += '<div class="deliberation-identity-actors" data-identity-restore-line>' + escHtml(link.restore_line) + '</div>';
+    }
+    if (link.restore_reason_line) {
+      html += '<div class="deliberation-identity-revoke-reason" data-identity-restore-reason>' + escHtml(link.restore_reason_line) + '</div>';
+    }
+    // IK-1062 の残り（第 10 波）: 戻す前の判断の誰・いつ・なぜ（サーバの prior_decision_line）。
+    if (link.prior_decision_line) {
+      html += '<div class="deliberation-identity-revoke-reason" data-identity-prior-decision>' + escHtml(link.prior_decision_line) + '</div>';
+    }
+    // IK-1050: 見送った行の理由（サーバの decision_reason_line）。
+    if (link.status === "rejected" && link.decision_reason_line) {
+      html += '<div class="deliberation-identity-revoke-reason" data-identity-decision-reason>' + escHtml(link.decision_reason_line) + '</div>';
+    }
+    return html;
   }
 
   function _bindIdentityLinkActions(root) {
@@ -2018,9 +2086,49 @@
 
   function _decideIdentityLink(linkId, action, row) {
     if (!linkId) return;
+    var options = { method: "POST" };
+    if (action === "confirm") {
+      // IK-0917: 種別が違う対は一段強い確認（両側を名指しした問いと種別の違いを読んでから確定）。
+      var mismatch = row.querySelector("[data-identity-granularity-mismatch]");
+      if (mismatch) {
+        var questionEl = row.querySelector(".deliberation-identity-confirm-question");
+        var message = (questionEl ? questionEl.textContent + "\n\n" : "") + mismatch.textContent +
+          "\n\nそれでも同じものとして確定しますか。";
+        if (!window.confirm(message)) return;
+      }
+    } else if (action === "reject") {
+      // IK-1050: 見送り（却下）も理由必須（KR7）。理由は行と監査に残る。
+      var rejectReason = window.prompt("見送る理由を書いてください（必須。記録に残ります）。", "");
+      if (rejectReason === null) return;
+      rejectReason = String(rejectReason).trim();
+      if (!rejectReason) {
+        window.alert("見送りの理由を書いてください。");
+        return;
+      }
+      options.body = JSON.stringify({ reason: rejectReason });
+    } else if (action === "restore") {
+      // IK-1062: 否定の判断を候補に戻すのも理由必須。前の判断の記録は残る。
+      var restoreReason = window.prompt("候補に戻す理由を書いてください（必須。記録に残ります）。", "");
+      if (restoreReason === null) return;
+      restoreReason = String(restoreReason).trim();
+      if (!restoreReason) {
+        window.alert("候補に戻す理由を書いてください。");
+        return;
+      }
+      options.body = JSON.stringify({ reason: restoreReason });
+    } else if (action === "revoke") {
+      var reason = window.prompt("確定を取り消す理由を書いてください（必須。記録に残ります）。", "");
+      if (reason === null) return;
+      reason = String(reason).trim();
+      if (!reason) {
+        window.alert("取り消しの理由を書いてください。");
+        return;
+      }
+      options.body = JSON.stringify({ reason: reason });
+    }
     var buttons = row.querySelectorAll("[data-identity-action]");
     Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
-    apiFetch("/admin/deliberation/identity-links/" + encodeURIComponent(linkId) + "/" + action, { method: "POST" })
+    apiFetch("/admin/deliberation/identity-links/" + encodeURIComponent(linkId) + "/" + action, options)
       .then(_parseJsonResponse)
       .then(function (link) {
         var wrapper = document.createElement("div");

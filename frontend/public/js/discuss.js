@@ -605,7 +605,14 @@
     var thesis = doc.thesis || {};
     var question = thesis.central_question || "";
     var goal = thesis.paper_goal || "";
-    if (!question && !goal) return "";
+    // IK-1013: 解析が問いを埋められなかった（生の "unknown"）ときは区画を出さず、
+    // サーバの事実文 1 行だけを描く（文言はサーバ正本 central_question_note）。
+    if (!question && !goal) {
+      var unsettled = thesis.central_question_note || "";
+      return unsettled
+        ? '<div class="discuss-section-sub discuss-question-note" data-discuss-question-note>' + esc(unsettled) + '</div>'
+        : "";
+    }
     var html = '<div class="discuss-section discuss-section-question">';
     html += '<div class="discuss-section-hd">この論文が答えようとした問い</div>';
     html += '<div class="discuss-section-sub">ここから議論を始めると、話がつながります。</div>';
@@ -616,6 +623,10 @@
       html += '<button type="button" class="discuss-claim-ask" data-discuss-ask="' +
         esc(askText(question)) + '">この問いから聞く</button>';
       html += '</div></div>';
+    }
+    if (!question && thesis.central_question_note) {
+      html += '<div class="discuss-section-sub discuss-question-note" data-discuss-question-note>' +
+        esc(thesis.central_question_note) + '</div>';
     }
     if (goal) {
       html += '<div class="discuss-section-sub discuss-paper-goal">この論文が目指したこと: ' +

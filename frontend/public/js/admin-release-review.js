@@ -388,7 +388,12 @@
         '<div class="release-review-evidence-quote">' +
         "&quot;" +
         esc(quote) +
-        "&quot;</div>";
+        "&quot;" +
+        // IK-0677: 引用の出所の印。
+        (items[i].source_label
+          ? '<div class="release-review-evidence-empty">' + esc(items[i].source_label) + "</div>"
+          : "") +
+        "</div>";
     }
     if (!inner) {
       inner =
@@ -459,8 +464,13 @@
     if (placement && placement.reason) {
       html +=
         '<div class="release-review-placement-reason">' +
+        // IK-0967: 理由は AI の要約（印の文はサーバが解決）。
+        (placement.reason_label ? "〔" + esc(placement.reason_label) + "〕" : "") +
         esc(placement.reason) +
-        "</div>";
+        "</div>" +
+        (placement.reason_note
+          ? '<div class="release-review-placement-reason">' + esc(placement.reason_note) + "</div>"
+          : "");
     }
     // 改訂原則1（確定文脈）: 何を見て判断したかを再構成できるように、判断の材料
     // （論文からの逐語引用）を各行に畳んで置く。既定は閉じたまま（RR1: 画面を

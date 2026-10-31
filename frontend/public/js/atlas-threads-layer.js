@@ -199,6 +199,31 @@
       return;
     }
     state.factEl.textContent = factText(threads);
+    // IK-0989: 端点がこの画面に描かれていない糸があるときの一文（サーバ文の素通し・本数なし）。
+    if (threads.undrawn_note) {
+      const undrawn = document.createElement("div");
+      undrawn.className = "threads-undrawn";
+      undrawn.textContent = String(threads.undrawn_note);
+      state.factEl.appendChild(undrawn);
+    }
+    // IK-0887: 糸ごとの根拠の一文（サーバが組の名前で解決した文を素通し・数値なし）。
+    const bases = (threads.items || [])
+      .map((item) => (item && item.basis_line) ? String(item.basis_line) : "")
+      .filter(Boolean);
+    if (bases.length) {
+      const details = document.createElement("details");
+      details.className = "threads-basis";
+      const summary = document.createElement("summary");
+      summary.textContent = "糸ごとの根拠";
+      details.appendChild(summary);
+      bases.forEach((text) => {
+        const line = document.createElement("div");
+        line.className = "threads-basis-line";
+        line.textContent = text;
+        details.appendChild(line);
+      });
+      state.factEl.appendChild(details);
+    }
     state.factEl.hidden = false;
   }
 

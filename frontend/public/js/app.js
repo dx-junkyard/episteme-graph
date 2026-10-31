@@ -191,11 +191,15 @@
     // L2 位置・復帰: いまの正確な読み位置 {topic_id, segment_id, scroll_offset}。
     // 寄り道に入る瞬間にこれを送ると、origin（戻り先）が正確な位置を保持する。
     currentAnchor: function () {
-      var seg = (typeof lectureState !== "undefined" && lectureState.active)
-        ? (lectureState.currentSegmentIndex || 0) : 0;
       var area = document.getElementById("chat-area");
       var scroll = area ? Math.round(area.scrollTop) : 0;
-      return { topic_id: state.currentTopicId, segment_id: seg, scroll_offset: scroll };
+      var anchor = { topic_id: state.currentTopicId, scroll_offset: scroll };
+      // IK-1122: 区画はレクチャー中（表示している区画が分かるとき）だけ報告する。それ以外で 0 を
+      // 既定にしない — サーバの構造帰属が「見ていた区画」と読んでしまう（復帰位置の既定値の流用）。
+      if (typeof lectureState !== "undefined" && lectureState.active) {
+        anchor.segment_id = lectureState.currentSegmentIndex || 0;
+      }
+      return anchor;
     },
     // origin（戻り先）の正確な位置へ復帰する（セグメント＋スクロール、ベストエフォート）。
     // レクチャーはデッキ（スライド）基準で進行するため、対象セグメントの先頭スライドへ
@@ -2109,6 +2113,15 @@
         return;
       }
       const data = await res.json();
+      // 第 7 波（IK-1021 doubt 側）: 凍結時の部品が置き換わり後継が決まらないときは、見出しに
+      // 凍結時の部品名・本文にサーバの事実文だけ（別の部品の検証状態の一行は添えない）。
+      if (data && data.available === false) {
+        var expTitle = pop.querySelector(".src-popup-title");
+        if (expTitle && data.frozen_label) expTitle.textContent = data.frozen_label;
+        body.textContent = data.frozen_label_line || data.note || "説明を取得できませんでした。";
+        body.setAttribute("data-component-superseded", "1");
+        return;
+      }
       const items = (data && data.explanations) || [];
       if (!items.length) {
         body.textContent = (data && data.note) || "承認済みの説明はまだありません。";
@@ -2165,7 +2178,7 @@
           var axes = (data.scopes || []).map(function (s) {
             return [s.condition, s.domain, s.precision, s.system].filter(Boolean).join(" / ");
           }).filter(Boolean);
-          if (axes.length > 1) text += "（記帳スコープ: " + axes.join("；") + "）";
+          if (axes.length > 1) text += "（記録された検証スコープ: " + axes.join("；") + "）";
           // IK-0855: 部品を理論操作グラフの段へ写して引いた記録なら、どの段の記録かを添える
           if (data.target_note) text += " " + data.target_note;
         }
@@ -2186,7 +2199,8 @@
   }
 
   // D層 (D3-6): 対象 claim/equation/component の検証状態の一行事実文を併記する。
-  // 台帳未記帳 (404)・取得失敗時はセクション自体を出さない（fail-closed）。
+  // IK-0971: 行の無い対象もサーバは 200（exists:false・「まだ記帳されていません」）を返すので
+  // 一行が出る。404（対象が無い・教材外）・取得失敗時だけセクション自体を出さない（fail-closed）。
   // 検証済みスコープも未記帳も同じ精度で示す（§8-1・8-2 — 不安を煽らない中立文言）。
   async function appendLearnerLedgerLine(container, targetType, targetId) {
     if (!container) return;
@@ -3067,6 +3081,8 @@
           if (s.origin) html += '<span class="lx-origin-badge">' + escHtml(ORIGIN_LABEL[s.origin] || s.origin) + '</span>';
           html += '<span class="lx-badge ' + c + '">' + escHtml(TIER_LABEL[s.tier] || s.tier) + '</span></span></div>';
           if (s.cited === false) html += '<div class="lx-src-meta">この出典は回答本文では引用していません（回答の出所を決めた資料です）。</div>';
+          // 第 25 周 第 5 波（IK-0996）: 同じ論文の別の版の同じ箇所を畳んだ事実文（サーバ文言の素通し）。
+          if (s.version_note) html += '<div class="lx-src-meta">' + escHtml(s.version_note) + '</div>';
           if (s.meta) html += '<div class="lx-src-meta">' + escHtml(s.meta) +
             (s.tier === "source" ? "（未承認）" : "") + '</div>';
           if (s.tier === "out_of_source") {
@@ -3211,9 +3227,20 @@
         var evidence = (p.evidence || []).filter(function (ev) { return ev && ev.quote; });
         if (p.reason || evidence.length) {
           html += '<details class="lx-placement-detail"><summary>根拠を見る</summary>';
-          if (p.reason) html += '<div class="lx-placement-reason">' + escHtml(p.reason) + "</div>";
+          // IK-0967 / IK-0677: 理由は「AIの要約」の印、引用には出所の印（文はサーバが解決）。
+          if (p.reason) {
+            html += '<div class="lx-placement-reason">' +
+              (p.reason_label ? "〔" + escHtml(p.reason_label) + "〕" : "") +
+              escHtml(p.reason) + "</div>";
+          }
+          if (p.reason && p.reason_note) {
+            html += '<div class="lx-placement-reason-note">' + escHtml(p.reason_note) + "</div>";
+          }
           evidence.forEach(function (ev) {
             html += '<div class="lx-placement-quote">「' + escHtml(ev.quote) + "」</div>";
+            if (ev.source_label) {
+              html += '<div class="lx-placement-quote-source">' + escHtml(ev.source_label) + "</div>";
+            }
           });
           html += "</details>";
         }
@@ -3345,20 +3372,29 @@
       }).concat(claimEntries.map(function (e) {
         return { kind: "claim", id: e.id, label: e.label, prefix: "主張 " };
       }));
-      var shown = {};
-      var count = 0;
-      // 1カード最大3行（過密防止）。equation・claim を合算した上限で維持する。
-      for (var i = 0; i < combined.length && count < 3; i++) {
+      // IK-0971: 同じ事実文は出典ごとに 1 行へ畳み、主語を並べる（「まだ記帳されていません」が
+      // 式・主張ごとに反復しない）。1カード最大3行（過密防止）は畳んだ後の行数で維持する。
+      var groups = [];
+      var byText = {};
+      for (var i = 0; i < combined.length; i++) {
         var text = await fetchLearnerLedgerFactLine(combined[i].kind, combined[i].id);
         if (!text) continue;
         // IK-0901: 主語はサーバの表示名を優先（式の TeX ラベル・空の主語で行を出さない）。
         var subject = learnerLedgerTargetLabel(combined[i].kind, combined[i].id) || combined[i].label;
-        var line = subject ? (combined[i].prefix + subject + " — " + text) : text;
-        if (shown[line]) continue; // 同一文言の重複行は出さない
-        shown[line] = true;
-        count++;
-        if (card.isConnected) card.appendChild(makeLedgerLineDiv(line));
+        var group = byText[text];
+        if (!group) {
+          if (groups.length >= 3) continue;
+          group = { text: text, subjects: [] };
+          byText[text] = group;
+          groups.push(group);
+        }
+        var named = subject ? (combined[i].prefix + subject) : "";
+        if (named && group.subjects.indexOf(named) < 0) group.subjects.push(named);
       }
+      groups.forEach(function (g) {
+        var line = g.subjects.length ? (g.subjects.join("・") + " — " + g.text) : g.text;
+        if (card.isConnected) card.appendChild(makeLedgerLineDiv(line));
+      });
     } catch (_) { /* fail-closed */ }
   }
 
@@ -3380,9 +3416,12 @@
       body.innerHTML = items.map(function (item) {
         var line = escHtml(item.statement || item.target_id);
         var meta = [];
-        if (item.scope_count_is_zero) meta.push("検証スコープの記帳なし");
-        else meta.push("検証: 記帳あり");
-        if (item.has_verification_proposal) meta.push("検証提案あり");
+        // IK-1059: 学習者の語（「台帳」「記帳」を出さない — 正本は label_vocab.ATLAS_LEARNER_WORDING）。
+        // 第 25 周 第 10 波: 行の札を見出し（「検証の記録がない前提」）と同じ語に揃える。
+        if (item.scope_count_is_zero) meta.push("検証の記録なし");
+        else meta.push("記録された条件あり");
+        // IK-1121: 提案の進み具合の語はサーバの verification_proposal_label（正本 label_vocab）。
+        if (item.has_verification_proposal) meta.push(item.verification_proposal_label || "検証提案あり");
         return '<div style="padding:6px 0;border-bottom:1px dashed var(--color-border,#eee)">' + line +
           '<div style="color:var(--color-text-tertiary);font-size:11px;margin-top:2px">' +
           escHtml(meta.join(" ・ ")) + '</div></div>';
@@ -3774,6 +3813,7 @@
       deactivateLecture();
     }
     state.currentTopicId = topicId;
+    state.atlasNodeFreshForTurn = false; // FD-note 4: トピックを移ったら地図の「今の選択」を落とす
     state.chatMessages = [];
     state.editingMessageId = null; // 機能3: トピック切替で書き直し状態を解除
     hideEditIndicator();
@@ -4580,7 +4620,18 @@
     try {
       const p = payload || {};
       const anchor = Session.currentAnchor() || {};
-      const elementId = String(p.element_id || "");
+      let elementId = String(p.element_id || "");
+      let openedType = "";
+      let openedLabel = "";
+      // 第 25 周 第 5 波（IK-0986）: 明示の要素が無い送信（音声・ラッチなし）でも、いま開いて
+      // 表示中の部品の文脈があればその部品を選択として申告する（閉じていれば申告しない）。
+      const opened = state.openContextElement;
+      if (!elementId && opened && opened.pop && opened.pop.isConnected && !opened.pop.hidden &&
+          window.getComputedStyle(opened.pop).display !== "none") {
+        elementId = String(opened.element_id || "");
+        openedType = String(opened.element_type || "");
+        openedLabel = String(opened.element_label || "");
+      }
       // 区画は「実際に区画を指しているとき」だけ申告する: ①「ここについて質問」の
       // 明示選択（selection_segment_id。サーバは既にこちらを信頼している）②レクチャー
       // 再生中の表示スライド。通常のチャットでは currentAnchor().segment_id が常に 0 を
@@ -4592,7 +4643,7 @@
                  anchor.segment_id !== undefined && anchor.segment_id !== null) {
         segmentId = String(anchor.segment_id);
       }
-      const elementType = screenContextElementType(p, latchKind);
+      const elementType = screenContextElementType(p, latchKind) || openedType;
       const selection = {
         course_id: String(state.courseId || ""),
         topic_id: String(state.currentTopicId || ""),
@@ -4601,6 +4652,15 @@
       if (segmentId) selection.segment_id = segmentId;
       if (elementId) selection.element_id = elementId;
       if (elementType) selection.element_type = elementType;
+      // IK-1064: 選んだ要素の名前（ラッチの名前 → 開いている部品の名前）。分類器が「この部品」を解決する。
+      // 第 25 周 第 11 波（製品頭脳 B 4330）: 明示の要素が開いている部品と同じなら、その名前を使う。
+      if (!openedLabel && opened && String(p.element_id || "") &&
+          String(opened.element_id || "") === String(p.element_id || "")) {
+        openedLabel = String(opened.element_label || "");
+      }
+      const elementLabel = String(p.element_label || "") ||
+        ((!String(p.element_id || "") || String(opened && opened.element_id || "") === String(p.element_id || "")) ? openedLabel : "");
+      if (elementId && elementLabel) selection.element_label = elementLabel.slice(0, 40);
       if (p.chunk_id) selection.chunk_id = String(p.chunk_id);
       // 焦点論文の参照（FD1 の「画面で選んだ論文」段）: discuss では開幕で選んだ論文、
       // それ以外は表示中トピックの教材が束ねる論文（1つのときだけ）。サーバはスコープとの
@@ -4614,6 +4674,23 @@
       const simulationRunId = (window.SimulationLab && typeof window.SimulationLab.getSelectedRunId === "function")
         ? String(window.SimulationLab.getSelectedRunId() || "") : "";
       if (simulationRunId) selection.simulation_run_id = simulationRunId;
+      // 第 25 周 第 10 波（IK-1113）: 「わたしの地図」で見ている場所の参照（パネルが開いているときだけ）。
+      const pmRefs = (window.PersonalMapHome && typeof window.PersonalMapHome.getScreenContext === "function")
+        ? window.PersonalMapHome.getScreenContext() : null;
+      if (pmRefs && pmRefs.personal_map_node_id) {
+        selection.personal_map_node_id = String(pmRefs.personal_map_node_id);
+        if (pmRefs.personal_map_center_component_id) {
+          selection.personal_map_center_component_id = String(pmRefs.personal_map_center_component_id);
+        }
+      }
+      // 第 25 周 第 10 波（FD-note 4）: 分野の地図で場所を選んだ直後の 1 往復（地図はモーダルなので
+      // 閉じてから尋ねる）と地図を開いている間だけ、開いた場所を「今の選択」として selection に載せる。
+      // その往復を送ったら落とす（最後に開いた場所は view に残る）。トピックを移っても落とす。
+      if ((state.atlasOverlayOpen || state.atlasNodeFreshForTurn) &&
+          state.atlasLastNode && state.atlasLastNode.node_id) {
+        selection.atlas_node_id = String(state.atlasLastNode.node_id).slice(0, 160);
+      }
+      state.atlasNodeFreshForTurn = false;
       const view = {
         mode: resolveScreenMode(),
         precision_reading: isPrecisionReadingOn(state.courseId),
@@ -4624,6 +4701,15 @@
       // IK-0907: この学習の中で「わたしの地図」を開いたか（真偽値のみ）。サーバは地図に何が出て
       // 何が出ないかの事実を添え、AI が地図に無い情報へ案内しないようにする。
       if (state.personalMapSeen) view.personal_map_seen = true;
+      // IK-0907（第 4 周）: 分野の地図で最後に開いた場所の名前と状態の enum だけを申告する。
+      // 札の意味の文はサーバの正本から引く（画面の文を送らない = SA1）。
+      if (state.atlasLastNode && state.atlasLastNode.label) {
+        view.atlas_node_label = String(state.atlasLastNode.label).slice(0, 40);
+        if (state.atlasLastNode.status) view.atlas_node_status = String(state.atlasLastNode.status);
+        if (state.atlasLastNode.ledger_status) view.atlas_node_ledger_status = String(state.atlasLastNode.ledger_status);
+        // IK-1031: 参照（node_id）だけを渡す。パネルの文・論文の題名は送らない（SA1）。
+        if (state.atlasLastNode.node_id) view.atlas_node_id = String(state.atlasLastNode.node_id).slice(0, 160);
+      }
       return {
         screen: SCREEN_CONTEXT_SCREEN,
         selection: selection,
@@ -4634,6 +4720,29 @@
       return null;
     }
   }
+
+  // IK-0907（第 4 周）: 分野の地図で開いた場所を覚えておく（画面文脈の view にだけ使う）。
+  document.addEventListener("atlas:nodeselect", function (e) {
+    try {
+      var nodeId = e && e.detail && e.detail.node_id;
+      var data = window.AtlasOverlay && window.AtlasOverlay.data;
+      var info = (nodeId && data && data.nodes && data.nodes[nodeId]) || null;
+      if (!info || !info.label) return;
+      state.atlasLastNode = {
+        // IK-1031: 場所の参照（表示しない）。検証・承認の行と置かれた論文はサーバが解決する。
+        node_id: String(nodeId),
+        label: String(info.label),
+        status: String(info.status || ""),
+        ledger_status: String(info.ledger_status || ""),
+      };
+      // FD-note 4: 選んだ直後の 1 往復だけ「今の選択」。
+      state.atlasNodeFreshForTurn = true;
+    } catch (_) { /* fail-soft */ }
+  });
+
+  // FD-note 4: 分野の地図が開いているか（selection に場所を載せるのは開いている間だけ）。
+  document.addEventListener("atlas:opened", function () { state.atlasOverlayOpen = true; });
+  document.addEventListener("atlas:closed", function () { state.atlasOverlayOpen = false; });
 
   // 画面文脈アダプターの契約（window.<Screen>.getScreenContext）。
   window.LearningScreen = {
@@ -5712,10 +5821,17 @@
     }
     html += '</div>';
     if (definition && definition.text) {
-      html += '<div class="symbol-lookup-definition">' + escHtml(definition.text) + '</div>';
+      // 第 25 周 第 9 波（IK-0571）: 原文の言語のままの定義の文には、サーバの原文の印を添える。
+      html += '<div class="symbol-lookup-definition">' + escHtml(definition.text) +
+        (definition.original_mark ? '<span class="original-text-mark" style="margin-left:4px;font-size:0.85em;opacity:0.75">' + escHtml(definition.original_mark) + '</span>' : '') +
+        '</div>';
       // IK-0869: 式だけで定義された記号は、定義式の本文を数式として添える。
-      if (definition.latex) {
-        html += '<div class="symbol-lookup-definition">' + renderMaterialKatex(definition.latex, true) + '</div>';
+      if (definition.latex || definition.latex_withheld) {
+        // IK-0977: 復元の印は教材・講義と同じ描き方（印と事実文はサーバの値）。
+        // IK-1008: 壊れた復元（latex_withheld）は式として描かず事実文だけ（renderMaterialEquationBody）。
+        html += '<div class="symbol-lookup-definition">' + (definition.reconstructed
+          ? renderMaterialEquationBody(definition)
+          : renderMaterialKatex(definition.latex, true)) + '</div>';
       }
       if (definition.equation_label) {
         html += '<div class="symbol-lookup-fact">' + escHtml(definition.equation_label) + '</div>';
@@ -5727,13 +5843,18 @@
     // IK-0893: 定義の文が無いとき、この論文の主張での使われ方（出所付き・定義ではない）。
     ((data && data.mentions) || []).forEach(function (mention) {
       if (!mention || !mention.text) return;
-      html += '<div class="symbol-lookup-definition">「' + renderTextWithInlineMath(mention.text) + '」</div>';
+      // 第 25 周 第 7 波（IK-0571）: 原文の言語のままの例文には、サーバの原文の印を添える。
+      html += '<div class="symbol-lookup-definition">「' + renderTextWithInlineMath(mention.text) + '」' +
+        (mention.original_mark ? '<span class="original-text-mark" style="margin-left:4px;font-size:0.85em;opacity:0.75">' + escHtml(mention.original_mark) + '</span>' : '') +
+        '</div>';
     });
     // IK-0870: 事実文が名指す式（番号の無い式も）を、呼び名と式本文で並べる。
     ((data && data.equations) || []).forEach(function (eq) {
-      if (!eq || !eq.latex) return;
+      if (!eq || !(eq.latex || eq.latex_withheld)) return;
       html += '<div class="symbol-lookup-fact">' + escHtml(eq.name || "") + '</div>' +
-        '<div class="symbol-lookup-definition">' + renderMaterialKatex(eq.latex, true) + '</div>';
+        '<div class="symbol-lookup-definition">' + (eq.reconstructed
+          ? renderMaterialEquationBody(eq)
+          : renderMaterialKatex(eq.latex, true)) + '</div>';
     });
     if (data && data.concept_ref && data.concept_ref.name) {
       html += '<div class="symbol-lookup-concept">概念: ' + escHtml(data.concept_ref.name) + '（登録済み）</div>';
@@ -7963,6 +8084,13 @@
       var norm = normalizeMaterialEvidenceId(item.id);
       evidenceByRef[item.kind + ":" + norm] = item;
       if (!Object.prototype.hasOwnProperty.call(evidenceById, norm)) evidenceById[norm] = item;
+      // 第 25 周 第 6 波（IK-1034）: 別名（source:summary 等）は解決の索引だけ（項目は 1 つ）。
+      (item.alt_ids || []).forEach(function (altId) {
+        var altNorm = normalizeMaterialEvidenceId(altId);
+        if (!altNorm) return;
+        if (!evidenceByRef[item.kind + ":" + altNorm]) evidenceByRef[item.kind + ":" + altNorm] = item;
+        if (!Object.prototype.hasOwnProperty.call(evidenceById, altNorm)) evidenceById[altNorm] = item;
+      });
     });
     function lookupEvidenceItem(kind, normId) {
       return evidenceByRef[kind + ":" + normId] || evidenceById[normId] || null;
@@ -7990,9 +8118,9 @@
     var embedBlocks = [];
     var mathBlocks = [];
     var figureBlocks = [];
-    function preserveMath(expr, display) {
+    function preserveMath(expr, display, formula) {
       var idx = mathBlocks.length;
-      mathBlocks.push({ expr: expr, display: display });
+      mathBlocks.push({ expr: expr, display: display, formula: formula || null });
       return "\x00MATERIAL_MATH_" + idx + "\x00";
     }
     function preserveEmbed(kind, id, inline) {
@@ -8017,7 +8145,7 @@
     });
     preserved = preserved.replace(/\[\[([^\[\]:]+)\]\]/g, function (m, id) {
       var formula = formulaById[m] || formulaById[id] || formulaById[normalizeMaterialEvidenceId(id)];
-      if (formula) return preserveMath(formula.latex || formula.summary || id, true);
+      if (formula) return preserveMath(formula.latex || formula.summary || id, true, formula);
       var figure = figureById[m] || figureById[id];
       if (figure) return preserveFigure(figure);
       return m;
@@ -8044,6 +8172,12 @@
 
     html = html.replace(/\x00MATERIAL_MATH_(\d+)\x00/g, function (_m, idx) {
       var block = mathBlocks[parseInt(idx, 10)];
+      // IK-0977: 本文に書き写された式でも、サーバが元の式の記録から引き直した復元の印
+      // （reconstructed_mark / reconstructed_note）を式カードと同じ描き方で添える。
+      if (block && block.formula && block.formula.reconstructed &&
+          (block.formula.latex || block.formula.latex_withheld)) {
+        return renderMaterialEquationBody(block.formula);
+      }
       return block ? renderMaterialKatex(block.expr, block.display) : "";
     });
     html = html.replace(/\x00MATERIAL_EMBED_(\d+)\x00/g, function (_m, idx) {
@@ -8169,10 +8303,15 @@
   function renderMaterialEvidenceChip(kind, embedId, evidenceItem, resolver) {
     var ref = kind + ":" + embedId;
     registerMaterialEvidenceChipEntry(ref, evidenceItem, resolver);
-    var label = evidenceItem.title || evidenceItem.label || evidenceItem.id || embedId;
+    // 第 25 周 第 7 波（IK-0571 の studio 側）: 表示名（display_label = 親 unit の日本語の見出し）を
+    // 優先し、表示する名前が原文の言語のままならサーバの原文の印を添える（翻訳しない）。
+    var label = evidenceItem.display_label || evidenceItem.title || evidenceItem.label || evidenceItem.id || embedId;
     return '<button type="button" class="ls-material-evidence-chip" data-evidence-ref="' + escHtml(ref) + '" data-evidence-kind="' + escHtml(kind) + '">' +
       '<span class="ls-material-evidence-chip-icon">⚓</span>' +
       '<span class="ls-material-evidence-chip-label">' + escHtml(label) + '</span>' +
+      (evidenceItem.title_original_mark
+        ? '<span class="original-text-mark" style="margin-left:4px;font-size:0.85em;opacity:0.75">' + escHtml(evidenceItem.title_original_mark) + '</span>'
+        : '') +
     '</button>';
   }
 
@@ -8202,11 +8341,16 @@
     var item = entry && entry.item;
     if (!item) return;
     var kind = item.kind === "component" ? "component" : "claim";
-    var title = item.title || item.label || item.id || "";
+    // IK-0571（第 7 波）: 見出しも表示名を優先し、原文のままなら印を添える。
+    var title = (item.display_label || item.title || item.label || item.id || "") +
+      (item.title_original_mark || "");
 
     var pop = document.createElement("div");
     pop.className = "src-popup evidence-chip-popover";
     pop.id = "src-popup";
+    // 文脈パネル（instance.component.label = 解析の英語名のことがある）が見出しを上書きしないよう、
+    // ⚓ の表示名を控える（第 7 波・IK-0571）。
+    if (item.display_label) pop.setAttribute("data-display-label", item.display_label);
     pop.innerHTML = evidenceChipPopoverHead(kind, title) +
       '<div class="src-popup-body evidence-chip-popover-body">' +
         (kind === "component" ? renderComponentChipPopoverBody(item, entry.resolver) : renderClaimChipPopoverBody(item)) +
@@ -8284,8 +8428,8 @@
     '</div>';
   }
 
-  // 前提/入力/出力/注意/数式/主張のうち「非ゼロのみ」の摘要行（例: 前提 2件 · 数式 3件）。
-  // これは学習内容の構成数であり評価数値ではない（設計書 §5.4）。
+  // 前提/入力/出力/注意/数式/主張のうち「中身のある欄だけ」の摘要行（例: 前提 · 数式）。
+  // 第 25 周 第 10 波: 件数は出さない（学習者に数値を見せない規律。欄の名前で足りる）。
   function renderSupportsSummaryLine(supports) {
     var groups = [
       ["前提", supports.preconditions],
@@ -8298,7 +8442,7 @@
     var parts = [];
     groups.forEach(function (pair) {
       var list = pair[1];
-      if (list && list.length) parts.push(pair[0] + " " + list.length + "件");
+      if (list && list.length) parts.push(pair[0]);
     });
     if (!parts.length) return "";
     return '<div class="evidence-chip-popover-summary-line">' + escHtml(parts.join(" · ")) + '</div>';
@@ -8307,7 +8451,10 @@
   // preconditions/inputs/outputs/cautions は { text, claim_ids?, equation_ids? } の配列。
   // 裸のIDは出さず text のみを文リストにする（設計書 §5.4）。
   function renderSupportsTextSection(label, list) {
-    var texts = (list || []).map(function (it) { return it && it.text; }).filter(Boolean);
+    // 第 25 周 第 8 波（IK-0571）: 原文の言語のままの項目にはサーバの原文の印（主張と同じ扱い）。
+    var texts = (list || []).map(function (it) {
+      return it && it.text ? it.text + (it.original_mark || "") : "";
+    }).filter(Boolean);
     if (!texts.length) return "";
     return '<div class="evidence-chip-popover-section">' +
       '<div class="evidence-chip-popover-section-title">' + escHtml(label) + '</div>' +
@@ -8395,6 +8542,14 @@
       if (!res.ok) { body.textContent = "詳細情報を取得できませんでした。"; return; }
       var data = await res.json();
       renderComponentContextPanel(pop, body, data, resolver);
+      // 第 25 周 第 5 波（IK-0986）: 開いている部品の文脈（教員の説明を含む）を、ラッチが無い
+      // 送信（音声ループ等）でも画面文脈の選択として申告できるよう控える（参照だけ = SA1）。
+      // IK-1064: 部品の名前も控える（意図分類の画面の 1 行「教材の「…」を選んでいます」に使う。40 字・参照と名前だけ = SA1）。
+      var openedComponent = (data && data.instance && data.instance.component) || {};
+      state.openContextElement = {
+        element_type: "component", element_id: String(componentId), pop: pop,
+        element_label: String(openedComponent.label || (data && data.frozen_label) || "").slice(0, 40),
+      };
     } catch (_) {
       body.textContent = "詳細情報を取得できませんでした。";
     }
@@ -8417,11 +8572,14 @@
       focus: {
         element_type: "theory_component",
         element_id: (data && data.component_id) || graphFocus.id || "",
-        label: component.label || graphFocus.label || "",
+        // 第 25 周 第 7 波（IK-0571 の studio 側）: 原文の言語のままの名前・位置づけには
+        // サーバの原文の印を添える（翻訳しない。日本語の候補はサーバが先に選んでいる）。
+        label: (component.label || graphFocus.label || "") +
+          (component.label ? (component.label_original_mark || "") : ""),
         // 「この論文での位置づけ」の優先順（narrative_role → teaching_takeaway →
         // summary）は既存表示と同一。
-        intrinsic_summary: inPaper.narrative_role || component.teaching_takeaway ||
-          component.summary || "",
+        intrinsic_summary: (inPaper.narrative_role || component.teaching_takeaway ||
+          component.summary || "") + (inPaper.narrative_role ? (inPaper.narrative_role_original_mark || "") : ""),
       },
       upper: learnerElementCardItems(graph.upper),
       lower: learnerElementCardItems(graph.lower),
@@ -8453,13 +8611,31 @@
   }
 
   function renderComponentContextPanel(pop, body, data, resolver) {
+    // 第 6 波（IK-1021）: 凍結時の部品が解析のやり直しで置き換わり、後継が決まらないときはサーバの事実文だけ。
+    if (data && data.available === false) {
+      // 第 7 波（IK-1021 doubt 側）: 見出しに凍結時の部品名、本文にサーバの事実文
+      // （frozen_label_line — 「…再解析で置き換わり、後継が決まっていません。」）。
+      var supersededTitle = pop.querySelector(".src-popup-title");
+      if (supersededTitle && data.frozen_label) {
+        supersededTitle.textContent = materialEvidenceKindLabel("component") + " ・ " + data.frozen_label;
+      }
+      body.innerHTML = '<div class="evidence-chip-context-exit" data-component-superseded>' +
+        escHtml(data.frozen_label_line || data.note || "詳細情報を取得できませんでした。") + '</div>';
+      return;
+    }
     var instance = (data && data.instance) || {};
     var sharedPart = data && data.shared_part;
     var graph = data && data.graph;
 
     var headTitle = pop.querySelector(".src-popup-title");
-    if (headTitle && instance.component && instance.component.label) {
-      headTitle.textContent = materialEvidenceKindLabel("component") + " ・ " + instance.component.label;
+    // 第 25 周 第 7 波（IK-0571 の studio 側）: ⚓ の表示名（日本語の見出し）があればそれを保ち、
+    // 無ければ部品名にサーバの原文の印を添える（翻訳はしない）。
+    var displayLabel = pop.getAttribute ? (pop.getAttribute("data-display-label") || "") : "";
+    if (headTitle && displayLabel) {
+      headTitle.textContent = materialEvidenceKindLabel("component") + " ・ " + displayLabel;
+    } else if (headTitle && instance.component && instance.component.label) {
+      headTitle.textContent = materialEvidenceKindLabel("component") + " ・ " + instance.component.label +
+        (instance.component.label_original_mark || "");
     }
 
     var cardDto = componentContextToCardDto(data);
@@ -8472,6 +8648,10 @@
       (sharedPart ? '<button type="button" class="evidence-chip-context-tab" data-tab="shared">共通部品として</button>' : "") +
     '</div>' +
     '<div class="evidence-chip-context-pane" data-pane="instance">' +
+      // 第 6 波（IK-1021）: 置き換わった部品を出典の重なりで新しい部品へつないだ事実（サーバの文）。
+      (data && data.version_note
+        ? '<div class="evidence-chip-context-exit" data-component-remapped>' + escHtml(data.version_note) + '</div>'
+        : "") +
       componentContextCardOrFallbackHtml(cardDto, cardOpts) +
       componentContextExitsHtml(graph) +
       renderContextInstanceDetails(instance, resolver) +
@@ -8595,7 +8775,7 @@
       if (!d) return "";
       var t = d.reason || "";
       if (d.target_label) t = t ? (d.target_label + " — " + t) : d.target_label;
-      return t;
+      return t ? t + (d.original_mark || "") : t;
     }).filter(Boolean);
     if (!texts.length) return "";
     return '<div class="evidence-chip-popover-section">' +
@@ -8606,7 +8786,10 @@
   }
 
   function renderContextClaimSection(claims) {
-    var texts = (claims || []).map(function (c) { return c && c.excerpt; }).filter(Boolean);
+    // 第 25 周 第 7 波（IK-0571 の studio 側）: 原文の言語のままの主張にはサーバの原文の印。
+    var texts = (claims || []).map(function (c) {
+      return c && c.excerpt ? c.excerpt + (c.original_mark || "") : "";
+    }).filter(Boolean);
     if (!texts.length) return "";
     return '<div class="evidence-chip-popover-section">' +
       '<div class="evidence-chip-popover-section-title">主張</div>' +
@@ -8625,9 +8808,10 @@
       html += '<div class="evidence-chip-context-shared-aliases">別名: ' + escHtml(entry.aliases.join(" ・ ")) + '</div>';
     }
     if (entry.summary) html += '<div class="evidence-chip-popover-position">' + escHtml(entry.summary) + '</div>';
-    if (entry.standardization_status) {
-      var statusLabel = MATERIAL_LIBRARY_STATUS_LABELS[entry.standardization_status] || entry.standardization_status;
-      html += '<div class="evidence-chip-context-shared-status">標準化状況: ' + escHtml(statusLabel) + '</div>';
+    // IK-0959: 標準化の評価は教員が確定した値だけを、サーバが学生向けの 1 文にして返す
+    // （未評価はキー自体が無い）。生の enum を語表で引いて描かない。
+    if (entry.standardization_note) {
+      html += '<div class="evidence-chip-context-shared-status" data-shared-part-standardization>' + escHtml(entry.standardization_note) + '</div>';
     }
     // IK-0920: 他の論文は確定リンクから導いた題名で列挙する（件数は出さない）。前置き・空の事実文はサーバ固定文。
     var otherDocs = (entry.other_documents || []).map(function (d) { return d && d.title; }).filter(Boolean);
@@ -9283,6 +9467,18 @@
   // nothing renderable is available (issue 未解決の数式).
   function renderMaterialEquationBody(formula) {
     if (!formula) return "";
+    // 第 25 周 第 5 波（IK-1008）: 壊れた復元はサーバが latex を空にして latex_withheld を立てる
+    // （印と表示の可否の正本は learner_context_common.equation_display_fields）。崩れた原文も
+    // 描かず、印と事実文だけを出す（文言はサーバの値・JS に直書きしない）。
+    if (formula.latex_withheld) {
+      var withheldMark = formula.reconstructed_mark || "";
+      var withheldNote = formula.reconstructed_note || "";
+      if (!withheldMark && !withheldNote) return "";
+      return '<span class="ls-material-formula-withheld" data-latex-source="reconstruction">' +
+        (withheldMark ? '<span class="ls-material-formula-reconstructed-mark">' + escHtml(withheldMark) + '</span>' : "") +
+        (withheldNote ? '<span class="ls-material-formula-withheld-note">' + escHtml(withheldNote) + '</span>' : "") +
+        '</span>';
+    }
     var latex = formula.latex || formula.summary || "";
     if (latex) {
       var rendered = renderMaterialKatex(latex, true);

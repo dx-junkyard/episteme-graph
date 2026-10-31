@@ -25,7 +25,7 @@ window.ATLAS_FIXTURE = {
     "ope":   { "label": "演算子積展開", "pill": "原文に裏付け", "status": "verified", "verify": "検証: 短距離展開として複数過程で確認。スコープ: 高エネルギー・摂動領域。", "endorse": "承認: 標準の説明＋A先生の説明が並存", "learn": true, "evid": true },
     "disp":  { "label": "分散関係", "pill": "原文に裏付け", "status": "verified", "verify": "検証: 解析性に基づく厳密な関係。原文2本に導出の記帳あり。", "endorse": "承認: 2名の教員が承認", "learn": true, "evid": true },
     "qft":   { "label": "場の量子論の基礎", "pill": "原文に裏付け・習得済み", "status": "verified", "verify": "検証: 前提知識チェックを通過済み。", "endorse": "承認: 標準の説明", "learn": true, "evid": true },
-    "dual":  { "label": "クォーク・ハドロン双対性", "pill": "暗黙の前提", "status": "assumed", "verify": "検証: 記帳された直接検証なし。多数の導出が依存（行動上の合意は強い）。", "endorse": "承認: 承認記録なし — 台帳のスコープ欄は空欄", "learn": true, "evid": true },
+    "dual":  { "label": "クォーク・ハドロン双対性", "pill": "暗黙の前提", "status": "assumed", "verify": "検証: 記帳された直接検証なし。多数の導出が依存（行動上の合意は強い）。", "endorse": "承認: このコーパスの中では、教員の承認の記録がありません", "learn": true, "evid": true },
     "vcb":   { "label": "Vcb の測定間の不一致", "pill": "解釈が分かれる", "status": "contested", "verify": "検証: 包括的・排他的の2系統の測定が併存し、値が一致しない。", "endorse": "承認: 2つの解釈が帰属つきで並存", "learn": true, "evid": true },
     "spec":  { "label": "スペクトル密度", "pill": "未訪問", "status": "unvisited", "verify": "検証: 原文に記帳あり。まだ訪れていない概念。", "endorse": "承認: 標準の説明", "learn": true, "evid": true },
     "borel": { "label": "ボレル変換", "pill": "未訪問", "status": "unvisited", "glow": true, "verify": "検証: 原文に記帳あり。まだ訪れていない概念。", "endorse": "承認: 標準の説明", "learn": true, "evid": true },
