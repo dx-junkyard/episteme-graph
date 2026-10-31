@@ -98,6 +98,12 @@ from core import document_refs as _document_refs
 from core.paper_discovery import schema as pd_schema
 from core.config import get_settings
 from core.label_vocab import COURSE_ROLE_LABELS, atlas_binding_coverage_label
+from core.label_vocab import ACCOUNT_NAME_UNREGISTERED  # IK-1007: 名前の登録なしの事実文
+from core.label_vocab import (
+    MATERIAL_EDIT_REQUEST_TEMPLATE,
+    MATERIAL_EDIT_REQUEST_UNKNOWN,
+    MATERIAL_ROLE_LABELS,
+)
 from core.course_data import (
     course_cartridge_id,
     course_chapters,
@@ -1277,6 +1283,32 @@ def _material_visibility_clauses(user_groups: list, params: dict) -> tuple[str, 
     return group_clause, course_mat_clause, doc_perm_clause
 
 
+def _material_role_fields(record, current_user: dict) -> dict:
+    """教材一覧の行の役割（IK-0974）。判定は ``user_can_edit_document`` と同じ条件
+    （所有者 / document の editor 共有 / SYSTEM_ADMIN は台帳の記帳と同じく編集可）を一括で読む。
+    行が古い形（列が無い）なら何も足さない（fail-soft）。
+    """
+    try:
+        is_owner = bool(record[13])
+        is_editor = bool(record[14])
+        owner_name = str(record[15] or "").strip()
+    except (IndexError, TypeError):
+        return {}
+    if is_owner:
+        role = "owner"
+    elif is_editor or current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        role = "editor"
+    else:
+        role = "viewer"
+    out = {"role": role, "role_label": MATERIAL_ROLE_LABELS.get(role, "")}
+    if role == "viewer":
+        out["edit_request_note"] = (
+            MATERIAL_EDIT_REQUEST_TEMPLATE.format(owner=owner_name)
+            if owner_name else MATERIAL_EDIT_REQUEST_UNKNOWN
+        )
+    return out
+
+
 @router.get("/materials", response_model=list[MaterialOut])
 def list_materials(
     include: str | None = None,
@@ -1310,8 +1342,18 @@ def list_materials(
                        COALESCE(d.visibility, 'private'), d.group_id,
                        COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count,
                        d.id::text AS document_id,
-                       COALESCE(d.authors, '{{}}') AS authors, d.year, d.doc_type
+                       COALESCE(d.authors, '{{}}') AS authors, d.year, d.doc_type,
+                       (d.uploaded_by = CAST(:user_id AS uuid)) AS is_owner,
+                       EXISTS (
+                           SELECT 1 FROM object_group_permissions rp
+                           JOIN group_members rgm ON rgm.group_id = rp.group_id
+                           WHERE rp.object_type = 'document' AND rp.permission = 'editor'
+                             AND rp.object_id = d.id::text
+                             AND rgm.user_id = CAST(:user_id AS uuid)
+                       ) AS is_editor,
+                       COALESCE(NULLIF(BTRIM(owner_u.profile_name), ''), '') AS owner_name
                 FROM documents d
+                LEFT JOIN users owner_u ON owner_u.id = d.uploaded_by
                 LEFT JOIN (
                     SELECT material_id, COUNT(*) AS chunk_count
                     FROM chunks
@@ -1514,6 +1556,7 @@ def list_materials(
                         section_outline.append(str(sec_title))
 
         uploaded_at = r[4].isoformat() if r[4] else ""
+        role_fields = _material_role_fields(r, current_user)
         materials.append(MaterialOut(
             material_id=mid,
             document_id=r[9],
@@ -1540,6 +1583,7 @@ def list_materials(
             ),
             reference_health=reference_health,
             analysis_degradation=analysis_degradation,
+            **role_fields,
             authors=authors,
             year=year,
             doc_type=doc_type,
@@ -1549,6 +1593,7 @@ def list_materials(
             top_concepts=top_concepts[:6],
             section_outline=section_outline,
             has_course=has_course,
+            format_label=_material_format_label(r[1]),
         ))
 
     return materials
@@ -1661,7 +1706,18 @@ def get_material(
         knowledge_graph=kg,
         visibility=record[6] or "private",
         group_id=str(record[7]) if record[7] else None,
+        format_label=_material_format_label(record[1]),
     )
+
+
+def _material_format_label(filename: object) -> str:
+    """教材の取り込み元の形式（``TeX 版`` / ``PDF 版`` / 空文字・第 10 波 IK-0956 の面）。fail-soft。"""
+    try:
+        from core.deliberation.identity_links import document_format_label
+
+        return document_format_label(filename)
+    except Exception:  # noqa: BLE001 — 見出しの補助（言えなければ言わない）
+        return ""
 
 
 @router.get("/materials/{material_id}/pdf")
@@ -4060,7 +4116,7 @@ def list_unanswered_queries(
         rows = session.execute(
             sa_text("""
                 SELECT uql.id, uql.topic_id, uql.question, uql.asked_at,
-                       u.display_name AS student_name
+                       COALESCE(NULLIF(BTRIM(u.profile_name), ''), '') AS student_name
                 FROM unanswered_query_logs uql
                 JOIN users u ON uql.user_id = u.id
                 WHERE uql.course_id = :course_id
@@ -4077,7 +4133,8 @@ def list_unanswered_queries(
             "topic_id": r[1],
             "question": r[2],
             "asked_at": r[3].isoformat() if r[3] else "",
-            "student_name": r[4] or "",
+            # IK-1007: 学生の名前は本人が登録した名前だけ（ログイン ID を教員へ出さない）。
+            "student_name": r[4] or ACCOUNT_NAME_UNREGISTERED,
         }
         for r in rows
     ]
@@ -4307,7 +4364,8 @@ _MAX_GRACE_DAYS = 365
 
 _USER_COLUMNS_SQL = """
     id::text, display_name, email, role, status,
-    created_at, last_login_at, last_seen_at, status_reason, purge_after
+    created_at, last_login_at, last_seen_at, status_reason, purge_after,
+    profile_name
 """
 
 
@@ -4334,6 +4392,8 @@ def _user_row_to_dict(row) -> dict:
         "last_seen_at": _iso(row[7]),
         "status_reason": row[8] or "",
         "purge_after": _iso(row[9]),
+        # migration 094: 本人が登録した人に見せる名前（空 = 登録なし。ログインの照合列とは別）。
+        "profile_name": (row[10] or "") if len(row) > 10 else "",
     }
 
 
@@ -4583,6 +4643,7 @@ def list_users(
             id=item["id"], username=item["username"], email=item["email"], role=item["role"],
             status=item["status"], created_at=item["created_at"],
             last_login_at=item["last_login_at"], last_seen_at=item["last_seen_at"],
+            profile_name=item["profile_name"],
         ))
     return UserListResponse(users=users, total=int(total_row[0]) if total_row else 0)
 

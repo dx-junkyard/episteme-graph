@@ -43,6 +43,7 @@ from services import (
     user_can_edit_document,
     user_can_view_document,
 )
+from core import account_display as _account_display  # IK-1007: 人に見せる名前の正本
 from core.schema import (
     AUDIT_ENTITY_CITATION,
     AUDIT_ENTITY_CLAIM,
@@ -51,7 +52,11 @@ from core.schema import (
     AUDIT_ENTITY_EXPLANATION,
     CITATION_INTENTS,
 )
-from core.label_vocab import CITATION_INTENT_LABELS, explanation_support_label
+from core.label_vocab import (
+    CITATION_INTENT_LABELS,
+    EXPLANATION_SUPPORT_LEVEL_LABELS,
+    explanation_support_label,
+)
 from core import explanation_governance as _xgov
 from core.atlas_vectors import builder as atlas_vectors_builder
 from core.concept_normalizer import normalize_concept, normalize_concepts, normalize_key
@@ -4584,6 +4589,107 @@ class ExplanationOut(BaseModel):
     body_note: str = ""
     # IK-0924: 引用の列挙（引用先コースの題名・意図・引用者・日時。件数は出さない）。
     citations: list[dict] = Field(default_factory=list)
+    # IK-0925: この利用者が有効な支持をしているか（［支持を取り消す］はこのときだけ出す）。
+    my_support: bool = False
+    # IK-0960: 標準の説明の根拠（部品の evidence_claims を読み時に解決した主張。本文の抜粋のみ）。
+    evidence_claims: list[dict] = Field(default_factory=list)
+    evidence_document_id: str = ""
+    evidence_note: str = ""
+    # IK-0984: 査読（学生への公開）の設定ができるか。標準の説明（著者なし）は、その論文を
+    # 編集できる教員も査読できる（本文の書き換えは can_edit のまま）。
+    can_review: bool = False
+    # IK-0984: 承認済みの標準の説明に、この利用者がもう一人の査読者として査読できるか。
+    second_review_available: bool = False
+    # IK-0985: 操作の後の知らせ（方向・届く先を言う。PATCH の応答だけに入る）。
+    outcome_fact: str = ""
+    # IK-1023 の残り（第 7 波）: 誰がいつ査読したか（いまの承認の期間の査読者・名前と日付）。
+    review_line: str = ""
+    # IK-1077（第 9 波）: この利用者が別のコースで引用できるか（``cite_explanation`` の 403 と同じ条件）と、
+    # できないときの事実文。
+    can_cite: bool = True
+    cite_note: str = ""
+
+
+#: IK-0960: 標準の説明の根拠の主張を解決できなかったときの事実文。
+STANDARD_EXPLANATION_NO_EVIDENCE_NOTE = (
+    "この部品に根拠の主張の記録が無いため、根拠へは渡れません。"
+    "部品の「深く検討」から、部品が拠る式・主張を確かめられます。"
+)
+#: 根拠の主張の抜粋の長さ。
+_EVIDENCE_CLAIM_EXCERPT_CHARS = 160
+#: 標準の説明に添える根拠の主張の上限（多い部品でもカードを縦に伸ばさない）。
+_EVIDENCE_CLAIM_LIMIT = 6
+
+
+def _standard_evidence_claims(component: Any) -> tuple[list[dict], str]:
+    """部品の ``evidence_claims`` を live の主張に解決する（IK-0960・fail-soft・読み時）。
+
+    戻り値は ``([{claim_id, text}], document_id)``。``claim_id`` は DB UUID（要素文脈で開ける）、
+    ``text`` は本文の抜粋。解決できないものは落とす（推測で結ばない）。
+    """
+    refs = [str(r) for r in (getattr(component, "evidence_claims", None) or []) if str(r or "").strip()]
+    scope = getattr(component, "source_scope", None)
+    document_id = str(getattr(scope, "document_id", "") or "").strip()
+    if not refs:
+        return [], document_id
+    session = _pg_session()
+    try:
+        params: dict[str, Any] = {"ids": refs}
+        where_doc = ""
+        if document_id and _is_db_uuid(document_id):
+            where_doc = " AND document_id = CAST(:doc AS uuid)"
+            params["doc"] = document_id
+        rows = session.execute(
+            sa_text(
+                "SELECT id::text, text, document_id::text FROM theory_claims_live "
+                "WHERE (id::text = ANY(:ids) OR (jsonb_typeof(source_scope->'legacy_ids') = 'array' "
+                "AND (source_scope->'legacy_ids') ?| CAST(:ids AS text[])))" + where_doc
+            ),
+            params,
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 表示の補助（fail-soft）
+        logger.debug("standard explanation evidence lookup failed", exc_info=True)
+        return [], document_id
+    finally:
+        session.close()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        claim_id = str(row[0] or "")
+        if not claim_id or claim_id in seen:
+            continue
+        seen.add(claim_id)
+        text = " ".join(str(row[1] or "").split())
+        if len(text) > _EVIDENCE_CLAIM_EXCERPT_CHARS:
+            text = text[: _EVIDENCE_CLAIM_EXCERPT_CHARS] + "…"
+        out.append({"claim_id": claim_id, "text": text})
+        if not document_id and len(row) > 2 and row[2]:
+            document_id = str(row[2])
+        if len(out) >= _EVIDENCE_CLAIM_LIMIT:
+            break
+    return out, document_id
+
+
+def _my_active_supports(explanation_ids: list[str], user_id: str) -> set[str]:
+    """利用者が有効な支持（取り消していない）をしている説明の id（IK-0925・fail-soft）。"""
+    if not explanation_ids or not user_id or not _is_db_uuid(user_id):
+        return set()
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                "SELECT explanation_id::text FROM component_endorsements "
+                "WHERE explanation_id = ANY(CAST(:ids AS uuid[])) "
+                "AND endorser_id = CAST(:uid AS uuid) AND NOT revoked"
+            ),
+            {"ids": explanation_ids, "uid": user_id},
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        logger.debug("my support lookup failed", exc_info=True)
+        return set()
+    finally:
+        session.close()
+    return {str(r[0]) for r in rows}
 
 
 class EndorsementOut(BaseModel):
@@ -4620,7 +4726,7 @@ def _iso(value: Any) -> str:
 
 _EXPLANATION_SELECT = """
     SELECT e.id, e.component_id, e.course_id, e.kind, e.author_id,
-           COALESCE(u.display_name, ''), e.title, e.body, e.backing_claims,
+           COALESCE(NULLIF(BTRIM(u.profile_name), ''), ''), e.title, e.body, e.backing_claims,
            e.origin_query_id, e.review_status, e.shared, e.created_at, e.updated_at,
            COALESCE(s.endorser_count, 0), COALESCE(s.strong_count, 0),
            COALESCE(s.provisional_count, 0), COALESCE(s.expertise_breadth, 0),
@@ -4636,6 +4742,17 @@ _EXPLANATION_SELECT = """
 """
 
 
+def _explanation_can_cite(author_id: str, shared: bool, viewer: dict | None) -> bool:
+    """別のコースで引用できるか（IK-1077。``cite_explanation`` の 403 と同じ条件の正本）。"""
+    if shared:
+        return True
+    if not viewer:
+        return False
+    if viewer.get("role") == ROLE_SYSTEM_ADMIN:
+        return True
+    return bool(author_id) and author_id == str(viewer.get("id") or "")
+
+
 def _explanation_can_edit(author_id: str, viewer: dict | None) -> bool:
     """公開・共有・本文を変えられるか（``patch_explanation`` の 403 と同じ条件 — IK-0925）。"""
     if not viewer:
@@ -4645,7 +4762,108 @@ def _explanation_can_edit(author_id: str, viewer: dict | None) -> bool:
     return bool(author_id) and author_id == str(viewer.get("id") or "")
 
 
-def _row_to_explanation_out(row: Any, viewer: dict | None = None) -> ExplanationOut:
+def _standard_reviewers(explanation_ids: list[str]) -> dict[str, list[str]]:
+    """標準の説明ごとの、いまの承認の期間の査読者（IK-0984・正本の SQL は governance）。
+
+    取れなければ空（fail-soft — 呼び出し側は「記帳なし」として扱う）。
+    """
+    ids = [i for i in explanation_ids if i]
+    if not ids:
+        return {}
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                "SELECT e.id::text, ARRAY(SELECT DISTINCT x.changed_by::text FROM ("
+                + _xgov.STANDARD_REVIEWERS_SQL
+                + ") x) FROM component_explanations e WHERE e.id::text = ANY(:ids)"
+            ),
+            {"ids": ids},
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        session.rollback()
+        logger.warning("Failed to load standard explanation reviewers", exc_info=True)
+        return {}
+    finally:
+        session.close()
+    return {str(r[0]): [str(u) for u in (r[1] or []) if u] for r in rows}
+
+
+def _explanation_review_lines(rows: list[Any]) -> dict[str, str]:
+    """承認済みの説明ごとの「査読: 名前・日付（著者）／ 名前・日付」（IK-1023 の残り・fail-soft）。
+
+    材料は governance の :data:`~core.explanation_governance.STANDARD_REVIEWERS_SQL` と同じ
+    いまの承認の期間の記帳（遷移とも一人の査読）。人に見せる名前は profile_name だけ。
+    """
+    approved = {
+        str(r[0]): str(r[4] or "")
+        for r in rows
+        if str(r[10] or "") == "teacher_approved"
+    }
+    if not approved:
+        return {}
+    session = _pg_session()
+    try:
+        recs = session.execute(
+            sa_text(
+                "SELECT e.id::text, rv.changed_by::text, rv.created_at,"
+                " COALESCE(NULLIF(BTRIM(u.profile_name), ''), '')"
+                " FROM component_explanations e"
+                " JOIN theory_review_events rv ON rv.entity_type = :entity AND rv.entity_id = e.id::text"
+                " LEFT JOIN users u ON u.id = rv.changed_by"
+                " WHERE e.id::text = ANY(:ids)"
+                " AND rv.id IN (SELECT x.id FROM ("
+                + _xgov.STANDARD_REVIEWERS_SQL.replace("SELECT rv.changed_by", "SELECT rv.id", 1)
+                + ") x)"
+                " ORDER BY rv.created_at ASC"
+            ),
+            {"ids": list(approved), "entity": AUDIT_ENTITY_EXPLANATION},
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 名前が引けなくても説明カードは出す
+        session.rollback()
+        logger.warning("Failed to load explanation review records", exc_info=True)
+        return {}
+    finally:
+        session.close()
+    parts: dict[str, list[str]] = {}
+    seen: dict[str, set[str]] = {}
+    for exp_id, changed_by, created_at, profile_name in recs:
+        exp_id = str(exp_id)
+        who = str(changed_by or "")
+        if who in seen.setdefault(exp_id, set()):
+            continue
+        seen[exp_id].add(who)
+        name = _account_display.label_or_unregistered(profile_name)
+        date = _iso(created_at)[:10]
+        role = "（著者）" if who and who == approved.get(exp_id) else ""
+        parts.setdefault(exp_id, []).append(f"{name}・{date}{role}" if date else f"{name}{role}")
+    return {k: "査読: " + " ／ ".join(v) for k, v in parts.items() if v}
+
+
+def _can_review_standard(component: Any, current_user: dict | None) -> bool:
+    """標準の説明を査読できるか（IK-0984: 管理者か、部品の論文を編集できる教員）。"""
+    if not current_user or component is None:
+        return False
+    if current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        return True
+    try:
+        _ensure_component_editable(component, current_user)
+        return True
+    except HTTPException:
+        return False
+    except Exception:  # noqa: BLE001 — 判定できなければ査読させない（fail-closed）
+        logger.warning("standard explanation review permission check failed", exc_info=True)
+        return False
+
+
+def _row_to_explanation_out(
+    row: Any,
+    viewer: dict | None = None,
+    *,
+    standard_reviewable: bool = False,
+    standard_reviewers: list[str] | None = None,
+    personal_reviewers: list[str] | None = None,
+) -> ExplanationOut:
     summary = {
         "endorser_count": int(row[14] or 0),
         "strong_count": int(row[15] or 0),
@@ -4660,13 +4878,39 @@ def _row_to_explanation_out(row: Any, viewer: dict | None = None) -> Explanation
     author_endorsed = bool(row[19]) if len(row) > 19 else False
     non_author_reviewed = bool(row[20]) if len(row) > 20 else False
     can_edit = _explanation_can_edit(author_id, viewer)
+    is_standard = kind == "standard"
+    reviewers = list(standard_reviewers or []) if is_standard else []
+    viewer_id = str((viewer or {}).get("id") or "")
+    # IK-1023（第 6 波・オーナー判断の推奨）: 教員の説明は、部品の論文を編集できる教員（著者以外）が、
+    # 著者が査読して共有 ON にした説明に「もう一人の査読者として査読する」を記帳できる。判定の材料
+    # （編集できるか）は標準の説明と同じ ``standard_reviewable``（呼び出し側が 1 回だけ判定する）。
+    personal_second = bool(
+        not is_standard
+        and not can_edit
+        and standard_reviewable
+        and review_status == "teacher_approved"
+        and shared
+        and not non_author_reviewed
+        and viewer_id
+        and viewer_id != author_id
+        and viewer_id not in (personal_reviewers or [])
+    )
+    can_review = can_edit or (is_standard and standard_reviewable) or personal_second
+    if can_edit or (is_standard and standard_reviewable):
+        edit_note = ""
+    elif is_standard:
+        edit_note = _xgov.EXPLANATION_STANDARD_REVIEWER_NOTE
+    else:
+        # 本文・題名・共有の設定は著者だけ（もう一人の査読者になれる教員にも同じ事実文を出す）。
+        edit_note = _xgov.EXPLANATION_AUTHOR_ONLY_NOTE
     return ExplanationOut(
         id=str(row[0]),
         component_id=str(row[1]),
         course_id=course_id,
         kind=kind,
         author_id=author_id,
-        author_name=str(row[5] or ""),
+        # IK-1007: 人に見せる名前は profile_name だけ（ログイン ID を出さない）。
+        author_name=_account_display.label_or_unregistered(row[5]) if author_id else "",
         title=str(row[6] or ""),
         body=str(row[7] or ""),
         backing_claims=_json_value(row[8], []),
@@ -4679,7 +4923,25 @@ def _row_to_explanation_out(row: Any, viewer: dict | None = None) -> Explanation
         created_at=_iso(row[12]),
         updated_at=_iso(row[13]),
         can_edit=can_edit,
-        edit_note="" if can_edit else _xgov.EXPLANATION_AUTHOR_ONLY_NOTE,
+        can_review=can_review,
+        second_review_available=bool(
+            (
+                is_standard
+                and can_review
+                and review_status == "teacher_approved"
+                and len(reviewers) == 1
+                and viewer_id
+                and viewer_id not in reviewers
+            )
+            or personal_second
+        ),
+        edit_note=edit_note,
+        can_cite=_explanation_can_cite(author_id, shared, viewer),
+        cite_note=(
+            ""
+            if _explanation_can_cite(author_id, shared, viewer)
+            else _xgov.citation_blocked_note(is_standard=is_standard)
+        ),
         support_note=_xgov.EXPLANATION_AUTHOR_SUPPORT_NOT_COUNTED_NOTE if author_endorsed else "",
         delivery_note=_xgov.explanation_delivery_note(
             kind=kind,
@@ -4687,6 +4949,7 @@ def _row_to_explanation_out(row: Any, viewer: dict | None = None) -> Explanation
             shared=shared,
             has_source_course=bool(course_id),
             non_author_reviewed=non_author_reviewed,
+            standard_reviewers=len(reviewers) if is_standard else None,
         ),
     )
 
@@ -4703,7 +4966,8 @@ def _citations_for_explanations(explanation_ids: list[str]) -> dict[str, list[di
         rows = session.execute(
             sa_text("""
                 SELECT ci.explanation_id::text, COALESCE(lc.title, ''), ci.citation_intent,
-                       COALESCE(u.display_name, ''), ci.created_at
+                       COALESCE(NULLIF(BTRIM(u.profile_name), ''), ''), ci.created_at,
+                       COALESCE(ci.citing_course_id::text, ''), COALESCE(ci.citing_user_id::text, '')
                   FROM component_citations ci
                   LEFT JOIN learning_courses lc ON lc.id = ci.citing_course_id
                   LEFT JOIN users u ON u.id = ci.citing_user_id
@@ -4719,12 +4983,19 @@ def _citations_for_explanations(explanation_ids: list[str]) -> dict[str, list[di
     finally:
         session.close()
     out: dict[str, list[dict]] = {}
+    seen: set[tuple] = set()
     for r in rows:
         intent = str(r[2] or "")
+        # IK-1154: 同じ説明・同じ引用先・同じ意図・同じ引用者の重複行は 1 行に畳む（行は消さない・最初の引用を見せる）。
+        key = (str(r[0]), str(r[5] or "") if len(r) > 5 else "", intent, str(r[6] or "") if len(r) > 6 else "")
+        if len(r) > 6 and key[1] and key[3]:
+            if key in seen:
+                continue
+            seen.add(key)
         out.setdefault(str(r[0]), []).append({
             "course_title": str(r[1] or ""),
             "citation_intent_label": CITATION_INTENT_LABELS.get(intent, "") if intent else "",
-            "citer_name": str(r[3] or ""),
+            "citer_name": _account_display.label_or_unregistered(r[3]),
             "cited_at": _iso(r[4]),
         })
     return out
@@ -4765,8 +5036,24 @@ def _get_explanation_out(explanation_id: str, viewer: dict | None = None) -> Exp
         session.close()
     if not row:
         return None
-    out = _row_to_explanation_out(row, viewer)
+    kwargs: dict[str, Any] = {}
+    is_standard_row = str(row[3] or "") == "standard"
+    viewer_is_author = bool(row[4]) and str(row[4]) == str((viewer or {}).get("id") or "")
+    if is_standard_row or (viewer and not viewer_is_author):
+        # IK-0984 / IK-1023: 査読者と、この利用者が（もう一人の）査読者になれるかを一覧と同じ規則で。
+        reviewers = _standard_reviewers([str(row[0])]).get(str(row[0]), [])
+        if is_standard_row:
+            kwargs["standard_reviewers"] = reviewers
+        else:
+            kwargs["personal_reviewers"] = reviewers
+        try:
+            component = _get_component(str(row[1]))
+        except Exception:  # noqa: BLE001 — 判定できなければ査読させない（fail-closed）
+            component = None
+        kwargs["standard_reviewable"] = _can_review_standard(component, viewer)
+    out = _row_to_explanation_out(row, viewer, **kwargs)
     out.citations = _citations_for_explanations([out.id]).get(out.id, [])
+    out.review_line = _explanation_review_lines([row]).get(out.id, "")
     return out
 
 
@@ -4978,8 +5265,15 @@ def list_component_explanations(
     if not component:
         raise HTTPException(status_code=404, detail="Theory component not found")
     _ensure_component_viewable(component, current_user)
+    header_facts: list[str] = []
     if not _ensure_standard_explanation(component):
-        response.headers["X-Explanation-Fact"] = quote(STANDARD_EXPLANATION_UNAVAILABLE_FACT)
+        header_facts.append(STANDARD_EXPLANATION_UNAVAILABLE_FACT)
+    # 第 6 波（IK-1012）: 再解析で置き換わり、新しい部品へ付け替えられなかった説明を消さずに言う。
+    stranded = _stranded_explanations_fact(component)
+    if stranded:
+        header_facts.append(stranded)
+    if header_facts:
+        response.headers["X-Explanation-Fact"] = quote(" ".join(header_facts))
     session = _pg_session()
     try:
         rows = session.execute(
@@ -4992,12 +5286,44 @@ def list_component_explanations(
         ).fetchall()
     finally:
         session.close()
-    items = [_row_to_explanation_out(row, current_user) for row in rows]
+    standard_ids = [str(row[0]) for row in rows if str(row[3] or "") == "standard"]
+    viewer_id = str(current_user.get("id") or "")
+    # IK-1023: 他の教員の説明（著者が自分でない教員の説明）も、もう一人の査読者の材料を読む。
+    others_ids = [
+        str(row[0]) for row in rows
+        if str(row[3] or "") != "standard" and str(row[4] or "") != viewer_id
+    ]
+    reviewers_by_id = _standard_reviewers(standard_ids + others_ids)
+    # IK-0984 / IK-1023: 部品の論文を編集できる教員かの判定は 1 回（標準の説明の査読と、
+    # 教員の説明のもう一人の査読の両方に使う）。
+    standard_reviewable = bool(standard_ids or others_ids) and _can_review_standard(component, current_user)
+    items = [
+        _row_to_explanation_out(
+            row,
+            current_user,
+            standard_reviewable=standard_reviewable,
+            standard_reviewers=reviewers_by_id.get(str(row[0]), []),
+            personal_reviewers=reviewers_by_id.get(str(row[0]), []),
+        )
+        for row in rows
+    ]
     citations = _citations_for_explanations([it.id for it in items])
+    review_lines = _explanation_review_lines(list(rows))
+    for it in items:
+        it.review_line = review_lines.get(it.id, "")
+    my_supports = _my_active_supports([it.id for it in items], str(current_user.get("id") or ""))
+    evidence: tuple[list[dict], str] | None = None
     for it in items:
         it.citations = citations.get(it.id, [])
+        it.my_support = it.id in my_supports
         if it.kind == "standard":
             it.body_note = _standard_body_note(it.id, it.review_status)
+            # IK-0960: 標準の説明は部品の要約なので、根拠は部品の evidence_claims。
+            if evidence is None:
+                evidence = _standard_evidence_claims(component)
+            it.evidence_claims, it.evidence_document_id = evidence
+            if not it.evidence_claims:
+                it.evidence_note = STANDARD_EXPLANATION_NO_EVIDENCE_NOTE
     return items
 
 
@@ -5072,12 +5398,48 @@ def patch_explanation(
     ctx = _explanation_context(explanation_id)
     if not ctx:
         raise HTTPException(status_code=404, detail="Explanation not found")
-    _component_id, course_id, author_id, _shared, old_review_status = ctx
+    _component_id, course_id, author_id, old_shared, old_review_status = ctx
     is_admin = current_user.get("role") == ROLE_SYSTEM_ADMIN
-    if not is_admin and author_id != current_user.get("id"):
-        raise HTTPException(status_code=403, detail="Only the author or an admin can edit this explanation")
+    is_author = bool(author_id) and author_id == current_user.get("id")
+    is_standard = not author_id and _explanation_is_standard(explanation_id)
+    personal_second_review = False
+    if not is_admin and not is_author:
+        if not is_standard and author_id:
+            # IK-1023（第 6 波・オーナー判断の推奨）: 教員の説明に著者以外ができるのは、著者が査読して
+            # 共有 ON にした説明への「もう一人の査読者として査読する」だけ（部品の論文を編集できる
+            # 教員に限る）。本文・題名・根拠の主張・共有の設定は著者のまま。
+            only_review = (
+                body.review_status == "teacher_approved"
+                and body.title is None and body.body is None
+                and body.backing_claims is None and body.shared is None
+            )
+            if not (
+                only_review
+                and old_review_status == "teacher_approved"
+                and old_shared
+                and _can_review_standard(_get_component(_component_id), current_user)
+            ):
+                raise HTTPException(status_code=403, detail=_xgov.EXPLANATION_PERSONAL_SECOND_REVIEW_ONLY)
+            personal_second_review = True
+        # IK-0984（オーナー判断の推奨）: 著者のいない標準の説明は、部品の論文を編集できる
+        # 教員が査読・共有を設定できる。本文・題名・根拠の主張は管理者だけ（AI の要約を
+        # 査読者が黙って書き換えない）。
+        elif not (is_standard and _can_review_standard(_get_component(_component_id), current_user)):
+            raise HTTPException(status_code=403, detail="Only the author or an admin can edit this explanation")
+        if body.title is not None or body.body is not None or body.backing_claims is not None:
+            raise HTTPException(status_code=403, detail=_xgov.EXPLANATION_STANDARD_BODY_ADMIN_ONLY)
     if body.review_status is not None and body.review_status not in _EXPLANATION_REVIEW_STATUSES:
         raise HTTPException(status_code=422, detail="Invalid review_status")
+    # IK-0984: 承認済みの標準の説明への査読は「もう一人の査読者」としての記帳（状態は変わらない）。
+    additional_review = bool(
+        (is_standard or personal_second_review)
+        and body.review_status == "teacher_approved"
+        and old_review_status == "teacher_approved"
+    )
+    if additional_review and str(current_user.get("id") or "") in _standard_reviewers(
+        [explanation_id]
+    ).get(explanation_id, []):
+        raise HTTPException(status_code=409, detail=_xgov.EXPLANATION_ALREADY_REVIEWED_BY_YOU)
 
     sets = ["updated_at = now()"]
     params: dict[str, Any] = {"id": explanation_id}
@@ -5115,6 +5477,12 @@ def patch_explanation(
         _record_review_event(
             AUDIT_ENTITY_EXPLANATION, explanation_id, old_review_status, body.review_status, current_user.get("id"),
         )
+    elif additional_review:
+        # IK-0984: もう一人の査読者（査読者は changed_by に残る — 新しい列を作らない）。
+        _record_review_event(
+            AUDIT_ENTITY_EXPLANATION, explanation_id, old_review_status, old_review_status, current_user.get("id"),
+            {"action": _xgov.STANDARD_ADDITIONAL_REVIEW_ACTION},
+        )
     if body.body is not None or body.title is not None:
         # IK-0923: 人が本文・題名を書き換えた記帳。以後、標準の説明を要約へ自動で追随させない。
         _record_review_event(
@@ -5142,7 +5510,32 @@ def patch_explanation(
     out = _get_explanation_out(explanation_id, current_user)
     if not out:
         raise HTTPException(status_code=404, detail="Explanation not found")
+    # IK-0985: 何が変わったかを方向付きで言い、いまの届く先を続ける（文言の正本は governance）。
+    head = ""
+    if additional_review:
+        head = _xgov.EXPLANATION_SECOND_REVIEW_FACT
+    elif body.review_status == "teacher_approved" and old_review_status != "teacher_approved":
+        head = _xgov.EXPLANATION_APPROVED_FACT
+    elif body.shared is not None and bool(body.shared) != bool(old_shared):
+        head = _xgov.EXPLANATION_SHARED_ON_FACT if body.shared else _xgov.EXPLANATION_SHARED_OFF_FACT
+    if head:
+        out.outcome_fact = " ".join(v for v in (head, out.delivery_note) if v)
     return out
+
+
+def _explanation_is_standard(explanation_id: str) -> bool:
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT kind FROM component_explanations WHERE id = CAST(:id AS uuid)"),
+            {"id": explanation_id},
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        session.rollback()
+        return False
+    finally:
+        session.close()
+    return bool(row) and str(row[0] or "") == "standard"
 
 
 # --- Phase 1: 承認の重み -----------------------------------------------------
@@ -5163,12 +5556,18 @@ def endorse_explanation(
     if level not in _ENDORSEMENT_LEVELS:
         raise HTTPException(status_code=422, detail="Invalid endorsement level")
     session = _pg_session()
+    prior_revoked: bool | None = None  # IK-1154: None = 支持の行が無かった
     try:
+        # IK-1154: prior（同じ文のスナップショット = upsert 前の行）で、付け直しか・取り消しの復帰かを知る。
         # RETURNING (xmax = 0) は Postgres の定番イディオムで「本当に INSERT されたか
         # （ON CONFLICT で UPDATE に倒れたのではないか）」を区別する。新規承認時のみ
         # 通知するため（再承認・revoked 解除での重複通知を避けるため, N14）に使う。
         row = session.execute(
             sa_text("""
+                WITH prior AS (
+                    SELECT revoked FROM component_endorsements
+                     WHERE explanation_id = CAST(:eid AS uuid) AND endorser_id = CAST(:uid AS uuid)
+                )
                 INSERT INTO component_endorsements
                     (explanation_id, endorser_id, level, expertise_tag, note, revoked, updated_at)
                 VALUES
@@ -5179,7 +5578,7 @@ def endorse_explanation(
                               note = EXCLUDED.note,
                               revoked = FALSE,
                               updated_at = now()
-                RETURNING (xmax = 0) AS inserted
+                RETURNING (xmax = 0) AS inserted, (SELECT revoked FROM prior) AS prior_revoked
             """),
             {
                 "eid": explanation_id,
@@ -5191,6 +5590,10 @@ def endorse_explanation(
         ).fetchone()
         session.commit()
         is_new_endorsement = bool(row[0]) if row else False
+        if row is not None and len(row) > 1 and row[1] is not None:
+            prior_revoked = bool(row[1])
+        elif row is not None and not is_new_endorsement:
+            prior_revoked = False  # 付け直し（前の行の取り消しの有無が読めないときは有効だったとみなす）
     except Exception:
         session.rollback()
         logger.exception("Failed to endorse explanation %s", explanation_id)
@@ -5218,7 +5621,19 @@ def endorse_explanation(
     out = _get_explanation_out(explanation_id, current_user)
     if not out:
         raise HTTPException(status_code=404, detail="Explanation not found")
+    # IK-1154: 新しい支持か、既にある支持の付け直しかを言い分ける（行は 1 つのまま）。
+    out.outcome_fact = endorsement_outcome_fact(is_new_endorsement, prior_revoked, level)
     return out
+
+
+def endorsement_outcome_fact(is_new: bool, prior_revoked: bool | None, level: str) -> str:
+    """IK-1154: 支持の後の知らせ。新しい支持は空文字（画面の既定の「支持しました」）。"""
+    if is_new or prior_revoked is None:
+        return ""
+    level_label = EXPLANATION_SUPPORT_LEVEL_LABELS.get(level, level)
+    if prior_revoked:
+        return _xgov.ENDORSEMENT_RESTORED_FACT.format(level=level_label)
+    return _xgov.ENDORSEMENT_REAPPLIED_FACT.format(level=level_label)
 
 
 @router.delete("/explanations/{explanation_id}/endorse", response_model=ExplanationOut)
@@ -5272,7 +5687,7 @@ def list_endorsements(
     try:
         rows = session.execute(
             sa_text("""
-                SELECT en.id, en.explanation_id, en.endorser_id, COALESCE(u.display_name, ''),
+                SELECT en.id, en.explanation_id, en.endorser_id, COALESCE(NULLIF(BTRIM(u.profile_name), ''), ''),
                        en.level, en.expertise_tag, en.note, en.created_at
                 FROM component_endorsements en
                 LEFT JOIN users u ON u.id = en.endorser_id
@@ -5288,7 +5703,7 @@ def list_endorsements(
             id=str(r[0]),
             explanation_id=str(r[1]),
             endorser_id=str(r[2]),
-            endorser_name=str(r[3] or ""),
+            endorser_name=_account_display.label_or_unregistered(r[3]),
             level=str(r[4] or "endorsed"),
             expertise_tag=str(r[5] or ""),
             note=str(r[6] or ""),
@@ -5334,18 +5749,27 @@ def cite_explanation(
     if not ctx:
         raise HTTPException(status_code=404, detail="Explanation not found")
     _component_id, _course_id, author_id, shared, _review_status = ctx
-    # 共有されている、または自分の説明のみ引用できる。
-    if not shared and author_id != current_user.get("id") and current_user.get("role") != ROLE_SYSTEM_ADMIN:
-        raise HTTPException(status_code=403, detail="This explanation is not shared")
+    # 共有されている、または自分の説明のみ引用できる（判定の正本は _explanation_can_cite — カードと同じ）。
+    if not _explanation_can_cite(str(author_id or ""), bool(shared), current_user):
+        # IK-1077: 断りの文は日本語の事実文（引用できない理由と、共有を ON にできる人）。
+        raise HTTPException(
+            status_code=403,
+            detail=_xgov.citation_blocked_note(is_standard=not str(author_id or "")),
+        )
     _ensure_editable(citing_course_id, current_user)
     session = _pg_session()
+    already = False
     try:
+        # IK-1154: 同じ説明・同じ引用先・同じ意図・同じ引用者の行があれば新しい行を作らない。
         row = session.execute(
             sa_text("""
-                INSERT INTO component_citations
-                    (explanation_id, citing_course_id, citing_user_id, citation_intent)
-                VALUES (CAST(:eid AS uuid), :course_id, CAST(:uid AS uuid), :intent)
-                RETURNING id
+                SELECT id FROM component_citations
+                 WHERE explanation_id = CAST(:eid AS uuid)
+                   AND citing_course_id = :course_id
+                   AND citing_user_id = CAST(:uid AS uuid)
+                   AND citation_intent IS NOT DISTINCT FROM :intent
+                 ORDER BY created_at ASC
+                 LIMIT 1
             """),
             {
                 "eid": explanation_id,
@@ -5354,6 +5778,9 @@ def cite_explanation(
                 "intent": intent,
             },
         ).fetchone()
+        already = row is not None
+        if not already:
+            row = _insert_citation(session, explanation_id, citing_course_id, current_user["id"], intent)
         session.commit()
     except Exception:
         session.rollback()
@@ -5361,6 +5788,11 @@ def cite_explanation(
         raise HTTPException(status_code=500, detail="Failed to cite explanation")
     finally:
         session.close()
+    if already:
+        return _citation_response(
+            str(row[0]), explanation_id, citing_course_id, intent, _component_id, _review_status,
+            current_user, recorded_fact=_xgov.CITATION_ALREADY_RECORDED_FACT,
+        )
     # V層（migration 037）: 引用の版固定 + 引用元 document への auto-pin（best-effort）。
     # 引用元が更新されても、取り込むまでは引用時点の版に留まる。
     try:
@@ -5372,13 +5804,241 @@ def cite_explanation(
         {"action": "cite", "citing_course_id": citing_course_id,
          **({"citation_intent": intent} if intent else {})},
     )
+    return _citation_response(
+        str(row[0]), explanation_id, citing_course_id, intent, _component_id, _review_status,
+        current_user, recorded_fact=_xgov.CITATION_RECORDED_FACT,
+    )
+
+
+def _insert_citation(session: Any, explanation_id: str, citing_course_id: str, uid: Any, intent: Any):
+    return session.execute(
+        sa_text("""
+            INSERT INTO component_citations
+                    (explanation_id, citing_course_id, citing_user_id, citation_intent)
+            VALUES (CAST(:eid AS uuid), :course_id, CAST(:uid AS uuid), :intent)
+            RETURNING id
+        """),
+        {"eid": explanation_id, "course_id": citing_course_id, "uid": uid, "intent": intent},
+    ).fetchone()
+
+
+def _citation_response(
+    citation_id: str, explanation_id: str, citing_course_id: str, intent: Any,
+    _component_id: str, _review_status: str, current_user: dict, *, recorded_fact: str,
+) -> dict:
+    # IK-1023: 引用は届く理由にしない。引用先のコースの学生に届くかを、学習者向けの配信条件
+    # （``LEARNER_EXPLANATION_SCOPE_SQL``）を引用先のコースで評価して言う。
+    # IK-1061: 学生は部品の ⚓（コースの教材の論文の部品）から説明を読む。引用先のコースの
+    # sources がその部品の論文を含まなければ、公開条件を満たしていても届かない。
+    # IK-1126: 論文の有無（sources）だけでなく、トピックに部品の ⚓ があるか（学生の画面の道）で言う。
+    _course_reach = _citing_course_has_component_document(
+        citing_course_id, _component_id, current_user,
+    )
+    delivery_fact = _xgov.citation_delivery_fact(
+        review_status=_review_status,
+        delivered=_explanation_delivered_to_course(explanation_id, citing_course_id),
+        course_has_part=_course_reach["has_part"],
+        part_anchored=_course_reach["anchored"],
+    )
+    scope_fact = _xgov.citation_course_scope_fact(_course_reach.get("visibility"))
+    if scope_fact and delivery_fact:
+        delivery_fact = delivery_fact + " " + scope_fact
     return {
-        "citation_id": str(row[0]),
+        "citation_id": citation_id,
         "explanation_id": explanation_id,
         "citing_course_id": citing_course_id,
         "citation_intent": intent,
         "citation_intent_label": CITATION_INTENT_LABELS.get(intent, "") if intent else "",
+        "delivery_fact": delivery_fact,
+        "outcome_fact": " ".join(v for v in (recorded_fact, delivery_fact) if v),
+        # IK-1154: 新しい引用の記録を作らなかった（既に同じ引用がある）。
+        "already_cited": recorded_fact == _xgov.CITATION_ALREADY_RECORDED_FACT,
     }
+
+
+#: IK-1012 の残り: 種類の表示（読み取り専用の一覧）。
+_STRANDED_KIND_LABELS = {"standard": "標準の説明", "personal": "教員の説明"}
+
+
+@router.get("/theory-components/{component_id}/stranded-explanations")
+def list_stranded_explanations(
+    component_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """部品の論文で、再解析前の部品に付いたまま後継の決まらない説明（読み取り専用・IK-1012 の残り）。
+
+    行は付け替えず・書き換えず・消さない。返すのは表示の材料だけ（UUID を返さない）。
+    作成者の行には新しい部品へ書き直す案内、それ以外には「作成者だけが書き直せる」の文を付ける。
+    権限は部品の閲覧（説明一覧と同じ）。
+    """
+    component = _get_component(component_id)
+    if not component:
+        raise HTTPException(status_code=404, detail="Theory component not found")
+    _ensure_component_viewable(component, current_user)
+    from core.knowledge_objects import remap as _ko_remap
+
+    scope = getattr(component, "source_scope", None)
+    document_id = str(getattr(scope, "document_id", "") or "").strip()
+    records: list[dict] = []
+    if document_id:
+        session = _pg_session()
+        try:
+            records = _ko_remap.stranded_component_explanation_records(session, document_id)
+        except Exception:  # noqa: BLE001
+            session.rollback()
+            logger.debug("stranded explanation records lookup failed", exc_info=True)
+            records = []
+        finally:
+            session.close()
+    viewer_id = str(current_user.get("id") or "")
+    items: list[dict] = []
+    for rec in records:
+        kind = rec.get("kind") or "personal"
+        is_standard = kind == "standard"
+        author = "" if is_standard else _account_display.label_or_unregistered(rec.get("author_profile_name"))
+        origin = f"再解析前の部品「{rec.get('component_name') or '名前の無い部品'}」に付いた説明"
+        if author:
+            origin += f"（作成: {author}"
+            origin += f"・{rec['created_on']}）" if rec.get("created_on") else "）"
+        if is_standard:
+            rewrite_note = _ko_remap.STRANDED_EXPLANATION_STANDARD
+        elif rec.get("author_id") and rec.get("author_id") == viewer_id:
+            rewrite_note = _ko_remap.STRANDED_EXPLANATION_REWRITE_OWN
+        else:
+            rewrite_note = _ko_remap.STRANDED_EXPLANATION_REWRITE_OTHERS
+        items.append({
+            "kind": kind,
+            "kind_label": _STRANDED_KIND_LABELS.get(kind, "説明"),
+            "title": rec.get("title") or "",
+            "body": rec.get("body") or "",
+            "origin_line": origin,
+            "rewrite_note": rewrite_note,
+            "read_only": True,
+        })
+    facts = [_ko_remap.STRANDED_EXPLANATIONS_READONLY_NOTE] if items else []
+    return {"items": items, "facts": facts}
+
+
+def _stranded_explanations_fact(component: Any) -> str:
+    """部品の論文に、再解析前の部品に付いたままの説明があればその事実文（fail-soft）。"""
+    scope = getattr(component, "source_scope", None)
+    document_id = str(getattr(scope, "document_id", "") or "").strip()
+    if not document_id:
+        return ""
+    from core.knowledge_objects import remap as _ko_remap
+
+    session = _pg_session()
+    try:
+        items = _ko_remap.stranded_component_explanations(session, document_id)
+    except Exception:  # noqa: BLE001
+        session.rollback()
+        logger.debug("stranded explanations lookup failed", exc_info=True)
+        return ""
+    finally:
+        session.close()
+    return _ko_remap.stranded_explanations_fact(items)
+
+
+def _citing_course_has_component_document(
+    course_id: str, component_id: str | None, current_user: dict,
+) -> dict:
+    """引用先のコースで、学生がこの部品の説明へ辿り着けるか（IK-1061 / IK-1126）。
+
+    戻り値 ``{"has_part", "anchored", "visibility"}``:
+
+    - ``has_part``（IK-1061）: コースの教材（sources）が部品の論文を含むか。学習者の説明 API
+      （``get_component_explanations_for_learner``）は部品をコースの教材の document に限って
+      解決するので、ここも同じ集合（``list_course_source_document_ids``）で見る。部品が live で
+      なければ偽。
+    - ``anchored``（IK-1126）: コースのどこかのトピックにこの部品の ⚓ があるか（学生が説明を
+      開く画面の道。判定は ``course_content_builder.course_has_component_anchor`` — 学習画面の
+      ⚓ と同じ材料）。論文が無ければ判定しない（``None``）。
+    - ``visibility``: コースの公開範囲（引けなければ ``None``）。
+
+    取れなければ ``None``（届くと言わない — fail-closed）。
+    """
+    out: dict = {"has_part": None, "anchored": None, "visibility": None}
+    if not component_id:
+        return out
+    try:
+        from core.course_content_builder import course_has_component_anchor
+        from services import list_course_source_document_ids
+
+        course_data = get_editable_course_data(current_user["id"], course_id)
+        if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+            course_data = _system_admin_course_data(course_id)
+        if not course_data:
+            return out
+        doc_ids = {str(d) for d in list_course_source_document_ids(course_data)}
+        session = _pg_session()
+        try:
+            row = session.execute(
+                sa_text(
+                    "SELECT document_id::text, source_scope FROM theory_components_live "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
+                {"id": component_id},
+            ).fetchone()
+            try:
+                vis_row = session.execute(
+                    sa_text("SELECT COALESCE(visibility, 'private') FROM learning_courses WHERE id = :cid"),
+                    {"cid": course_id},
+                ).fetchone()
+                out["visibility"] = str(vis_row[0]) if vis_row and vis_row[0] else None
+            except Exception:  # noqa: BLE001 — 公開範囲は補足の事実（言えなければ言わない）
+                session.rollback()
+                out["visibility"] = None
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001
+        logger.debug("citing course part check failed for %s", course_id, exc_info=True)
+        return out
+    if not row or not row[0]:
+        out["has_part"] = False
+        return out
+    document_id = str(row[0])
+    out["has_part"] = document_id in doc_ids
+    if not out["has_part"]:
+        return out
+    scope = row[1] if isinstance(row[1], dict) else {}
+    if not scope and isinstance(row[1], str):
+        try:
+            scope = json.loads(row[1]) or {}
+        except Exception:  # noqa: BLE001
+            scope = {}
+    keys = {str(component_id)}
+    keys.update(str(k) for k in (scope.get("legacy_ids") or []) if str(k or "").strip())
+    try:
+        out["anchored"] = course_has_component_anchor(
+            course_data, component_keys=keys, document_id=document_id,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("citing course anchor check failed for %s", course_id, exc_info=True)
+        out["anchored"] = None
+    return out
+
+
+def _explanation_delivered_to_course(explanation_id: str, course_id: str) -> bool:
+    """説明がそのコースの学生に届く条件を満たすか（IK-1023・判定の正本は governance の SQL）。
+
+    取れなければ偽（届くと言わない — fail-closed）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                "SELECT EXISTS (SELECT 1 FROM component_explanations e "
+                "WHERE e.id = CAST(:id AS uuid)" + _xgov.LEARNER_EXPLANATION_SCOPE_SQL + ")"
+            ),
+            {"id": explanation_id, "course_id": course_id},
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        session.rollback()
+        logger.debug("citation delivery check failed for %s", explanation_id, exc_info=True)
+        return False
+    finally:
+        session.close()
+    return bool(row and row[0])
 
 
 def _stamp_citation_source_version(citation_id: str, component_id: str | None, user_id: str | None) -> None:

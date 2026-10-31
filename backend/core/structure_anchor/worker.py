@@ -67,6 +67,30 @@ _confirm_prompt_counts: dict[tuple, int] = _confirm_gate.counts
 _today = today_str
 
 
+def reported_segment_id(position_anchor: object) -> int | None:
+    """問いの痕跡の復帰位置から「学習者が見ていた区画」を読む（IK-1122）。
+
+    ``position_anchor.segment_id`` は寄り道からの**戻る先**で、報告が無ければ先頭(0)に埋まる。
+    それを「見ていた区画」と読むと、地図の場所など教材の外について尋ねた問いがトピックの先頭区画に
+    結ばれる。区画に結ぶのは位置が分かるときだけ（縮退順 claim → concept → chunk → segment の
+    最後の段を、報告のあるときに限る）:
+
+    - ``segment_reported`` があればそれに従う（偽なら None）。
+    - 旧い痕跡（キーなし）は、0 だけでは報告か既定値か区別できないので結ばない（1 以上は
+      レクチャー中の報告でしか生じないので結ぶ）。
+    """
+    pos = position_anchor if isinstance(position_anchor, dict) else {}
+    seg = pos.get("segment_id")
+    if isinstance(seg, bool) or not isinstance(seg, (int, float, str)):
+        return None
+    if not str(seg).lstrip("-").isdigit():
+        return None
+    seg_id = int(seg)
+    if "segment_reported" in pos:
+        return seg_id if bool(pos.get("segment_reported")) else None
+    return seg_id if seg_id > 0 else None
+
+
 def _check_and_count_llm_call(user_id: str, course_id: str, topic_id: str) -> bool:
     """コスト上限内なら True を返しカウントを進める。上限超過なら False。
 
@@ -263,8 +287,7 @@ def run_anchor_mining(user_id: str, course_id: str, topic_id: str | None) -> int
                 continue
             payload = r[1] if isinstance(r[1], dict) else json.loads(r[1] or "{}")
             pos = payload.get("position_anchor") or {}
-            seg = pos.get("segment_id")
-            seg_id = int(seg) if isinstance(seg, (int, float, str)) and str(seg).lstrip("-").isdigit() else None
+            seg_id = reported_segment_id(pos)
             cited = [str(c) for c in (payload.get("cited_chunk_ids") or []) if c]
             all_cited.extend(c for c in cited if c not in all_cited)
             questions.append(QuestionRecord(

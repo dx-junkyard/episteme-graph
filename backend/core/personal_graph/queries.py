@@ -727,8 +727,12 @@ def fetch_library_entry_names(entry_ids: list[str]) -> dict[str, str]:
         try:
             rows = session.execute(
                 sa_text(f"""
-                    SELECT id::text, name FROM library_entries
-                    WHERE id IN ({placeholders}) AND status = 'active'
+                    SELECT e.id::text, COALESCE(NULLIF(fv.content->>'name', ''), e.name)
+                      FROM library_entries e
+                      -- IK-0954: 学習者の旅は凍結版の名前だけを読む（凍結版の無いエントリは落ちる）。
+                      JOIN library_entry_versions fv
+                        ON fv.entry_id = e.id AND fv.version_no = e.latest_version_no
+                     WHERE e.id IN ({placeholders}) AND e.status = 'active'
                 """),
                 {f"id_{i}": entry_id for i, entry_id in enumerate(ids)},
             ).fetchall()

@@ -222,6 +222,23 @@ def get_atlas_vector_status(
         stale = coverage["total_rows"] == 0 and _has_any_embeddings(
             session, cartridge_id
         )
+        # IK-0993: 凍結が裏で始めた構築の途中か（プロセス内の印・数値は返さない）。
+        building = vector_builder.build_in_progress(cartridge_id)
+        # 再構築と同じ材料の指紋で「作り直しが要るか」を見る（IK-0965・fail-soft）。
+        changed_ids: list[str] = []
+        if not stale:
+            try:
+                changed_ids = vector_builder.material_changed_node_ids(session, cartridge_id)
+            except Exception:  # noqa: BLE001 — 状態の表示を止めない
+                logger.warning(
+                    "atlas vectors status: material check skipped for %s",
+                    cartridge_id, exc_info=True,
+                )
+                try:
+                    session.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                changed_ids = []
     finally:
         session.close()
 
@@ -242,8 +259,11 @@ def get_atlas_vector_status(
             total_nodes=len(labels),
             embedded_nodes=embedded_nodes,
             stale=bool(stale),
+            changed_labels=[labels.get(node_id, node_id) for node_id in changed_ids],
+            building=bool(building),
         ),
         "stale": bool(stale),
+        "building": bool(building),
     }
 
 
@@ -271,6 +291,14 @@ def refresh_atlas_vectors(
     finally:
         session.close()
 
+    # IK-0993: 凍結が裏で構築している最中は二重に embedding を走らせない（スキップの理由と
+    # 事実文を返す。builder の skipped と同じ形）。
+    if vector_builder.build_in_progress(cartridge_id):
+        return {
+            "status": "skipped",
+            "skipped_reason": "building_in_progress",
+            "fact": atlas_review_display.VECTOR_INDEX_BUILDING_REFRESH,
+        }
     try:
         summary = vector_builder.build_anchor_embeddings(cartridge_id)
     except Exception as exc:  # noqa: BLE001
@@ -291,7 +319,19 @@ def refresh_atlas_vectors(
         },
     )
     # 作り直しの結果の一文（IK-0889。全件再利用なら「変更はありませんでした」）。
-    fact = atlas_review_display.vector_refresh_fact(summary or {})
+    labels: dict[str, str] = {}
+    if (summary or {}).get("embedded_node_ids"):
+        label_session = None
+        try:
+            label_session = _session()
+            frozen = _frozen_skeleton(label_session, cartridge_id)
+            labels = _node_labels(frozen) if frozen is not None else {}
+        except Exception:  # noqa: BLE001 — 名前が引けなくても結果文は出す
+            labels = {}
+        finally:
+            if label_session is not None:
+                label_session.close()
+    fact = atlas_review_display.vector_refresh_fact(summary or {}, labels)
     if fact:
         summary = dict(summary, fact=fact)
     return summary

@@ -133,6 +133,10 @@ SYMBOL_ROLE_LABELS: dict[str, str] = {
 # 表を増やすと「黙った分裂」になるため、個別の文字列定数として置く。
 EXPLANATION_STATUS_APPROVED_LABEL = "承認済み"
 EXPLANATION_STATUS_CANDIDATE_LABEL = "候補（未承認）"
+#: 学習画面で承認済みの説明を出す区画の見出し（``app.js`` の部品の文脈「教員の説明」）。
+#: 学習チャットの事実文が同じ語で指すことで、学生の「先生の説明」が AI 自身の前の回答と
+#: 取り違えられない（第 25 周 第 5 波・IK-0986）。
+LEARNER_EXPLANATION_SECTION_LABEL = "教員の説明"
 
 # ---------------------------------------------------------------------------
 # 事実文（固定文）
@@ -208,6 +212,9 @@ LEARNING_VERIFICATION_OUTPUT_CONSTRAINT = (
     "コーパスの外（分野全体・学界・世界）で確かめられているかどうかは、"
     "この文脈からは分からないので述べないでください。"
     "検証記録が無いことを、価値・新規性・優先度の主張に言い換えないでください。"
+    # 第 25 周 第 9 波: developer の「一般知識で補完」規則と引っ張り合わないよう、どちらが勝つかを書く。
+    "検証の記録（どの範囲で確かめられたか）については、一般知識で補わず、この文脈の記録だけで答えてください"
+    "（一般知識で補ってよいのは概念の説明までです）。"
 )
 
 # --- 学習側の解決器の項目上限（§11.3 の表）---------------------------------
@@ -259,10 +266,50 @@ LEARNING_VIEW_MODE_LABELS: dict[str, str] = {
 #: （IK-0907。AI が「地図で記帳の条件を見てください」と、地図に無い情報へ案内しないため。
 #: 地図は検証の状態の札だけを出し、記帳のスコープは出典タブの台帳の一行に出る）。
 LEARNING_PERSONAL_MAP_SCREEN_FACT = (
+    # IK-1059 残り（第 9 波）: 学習者の画面と同じ語（「記録」）。AI の材料に「記帳」を入れない。
     "学習者はこの学習の中で「わたしの地図」を開いています。地図の検証の札が直接検証・間接的な支持・"
-    "反証の記帳のときは、札の下に記帳された条件（成立条件と領域）が 1 行で出ます。"
-    "根拠の引用・記帳した人・精度は地図には出ません"
+    "反証の記録のときは、札の下に記録された条件（成立条件と領域）が 1 行で出ます。"
+    "根拠の引用・記録した人・精度は地図には出ません"
 )
+
+#: 学習者が分野の地図で最後に開いた場所（IK-0907 第 4 周）。画面は場所の名前（40 字以内の題名）と
+#: 状態の enum だけを ``view`` に載せ、札の意味の文はサーバの正本（``label_vocab.ATLAS_PILL_NOTES``
+#: — 地図の詳細パネルに出ている文と同じ）から引く。AI が地図の札を知らずに「地図の使い方」へ
+#: 戻すのを防ぐ（``topic`` / ``visible`` の解決器は作らない — 地図の札の事実に限る）。
+LEARNING_ATLAS_NODE_FACT_TEMPLATE = "学習者は分野の地図で「{label}」を開きました"
+LEARNING_ATLAS_PILL_NOTE_TEMPLATE = "その場所の札の説明として地図に出ている文: {note}"
+#: IK-1031: 同じ場所の詳細パネルに出ている検証・承認の行（サーバが凍結骨格の状態キャッシュから
+#: 引いた文をそのまま — 画面の文を送らせない = SA1）と、このコースの論文のうちその場所に置かれて
+#: いるもの（題名は最大 3・出所ラベルを剥がさない）。読める場所は出典タブの「分野の中の位置づけ」。
+LEARNING_ATLAS_PANEL_LINE_TEMPLATE = "その場所の詳細パネルに出ている行: {line}"
+LEARNING_ATLAS_PAPERS_TEMPLATE = (
+    "このコースの論文のうち、分野の地図でこの場所に置かれているもの: {titles}"
+    "（どの論文がどこに置かれているかは、出典タブの「分野の中の位置づけ」で読めます）"
+)
+LEARNING_ATLAS_NO_PAPERS_FACT = "このコースの論文のうち、分野の地図でこの場所に置かれているものはありません"
+
+#: 学習者が「わたしの地図」で見ている場所（第 25 周 第 10 波・IK-1113）。画面は参照だけを
+#: ``selection.personal_map_node_id``（本人の痕跡ノード）と ``selection.personal_map_center_component_id``
+#: （点ビューで中心にした主グラフのノード）に載せ、事実は route が近傍関係ビューの正本
+#: （``core.personal_graph.nearby.nearby_for_person_node`` — 本人ゲート・閲覧可否ゲート込み）で引く。
+#: 範囲ビュー（中心なし）は範囲の論文と理論構成、点ビューは中心と前後 1 階層。数値は載せない。
+LEARNING_PERSONAL_MAP_SELECTION_KEYS: tuple[str, ...] = (
+    "personal_map_node_id",
+    "personal_map_center_component_id",
+)
+LEARNING_PERSONAL_MAP_RANGE_FACT = (
+    "学習者は「わたしの地図」で範囲のビューを見ています（中心となる 1 点はありません）"
+)
+LEARNING_PERSONAL_MAP_RANGE_DOCUMENT_TEMPLATE = "論文『{title}』の理論構成として地図に出ているもの: {nodes}"
+LEARNING_PERSONAL_MAP_CENTER_TEMPLATE = "学習者は「わたしの地図」で{label}を中心に見ています"
+LEARNING_PERSONAL_MAP_UPSTREAM_TEMPLATE = "地図でこれが前提にしているもの: {labels}"
+LEARNING_PERSONAL_MAP_DOWNSTREAM_TEMPLATE = "地図でこれに依存しているもの: {labels}"
+LEARNING_PERSONAL_MAP_FACT_LINE_TEMPLATE = "わたしの地図に出ている事実: {line}"
+LEARNING_PERSONAL_MAP_TOUCHED_MARK = "（このトピックが触れた部分）"
+#: 事実の上限（SA7 の予算はコード定数）。
+MAX_PERSONAL_MAP_DOCUMENTS = 2
+MAX_PERSONAL_MAP_NODES = 6
+MAX_PERSONAL_MAP_DTO_FACTS = 3
 
 #: discuss の検索範囲（既存 ``discuss_scope`` の2語彙）。
 LEARNING_DISCUSS_SCOPE_LABELS: dict[str, str] = {

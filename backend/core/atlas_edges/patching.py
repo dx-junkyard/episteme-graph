@@ -28,7 +28,7 @@ from typing import Any, Mapping
 
 from core import atlas as atlas_module
 from core.atlas_edges import schema
-from core.label_vocab import EDGE_KIND_LABELS
+from core.label_vocab import EDGE_KIND_LABELS, edge_relation_phrase
 
 
 class EdgePatchError(ValueError):
@@ -150,7 +150,9 @@ def build_edge_patch(
             _add_op(
                 f"{prefix}/edges/-",
                 value,
-                after=f"{labels[left]} — {labels[right]}",
+                # IK-1118: 関係を名前で言う面は label_vocab の句を通す（依存は向き込み）。
+                after=edge_relation_phrase(edge_kind, labels[left], labels[right])
+                or f"{labels[left]} — {labels[right]}",
             )
         ],
         "from_id": left,

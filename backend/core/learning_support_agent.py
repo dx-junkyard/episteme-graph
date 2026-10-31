@@ -255,8 +255,18 @@ _LATEX_PLAIN = {
     "sim": "∼", "simeq": "≃", "propto": "∝", "times": "×", "cdot": "·", "pm": "±",
     "infty": "∞", "partial": "∂", "nabla": "∇", "to": "→", "rightarrow": "→",
 }
-_LATEX_DROP = frozenset({"rm", "mathrm", "text", "mathit", "mathbf", "bf", "it", "left", "right", "displaystyle"})
+_LATEX_DROP = frozenset({
+    "rm", "mathrm", "text", "mathit", "mathbf", "bf", "it", "left", "right", "displaystyle",
+    # IK-1125: 修飾・書体（引数は素の記号として残す）と空白の制御綴り。名前の断片（hat・mathcal）を
+    # ボタンに残さない。
+    "hat", "widehat", "bar", "overline", "underline", "tilde", "widetilde", "vec", "dot", "ddot",
+    "check", "breve", "acute", "grave", "mathcal", "mathbb", "mathsf", "mathtt", "mathfrak",
+    "mathscr", "boldsymbol", "bm", "operatorname", "textrm", "textit", "textbf", "textsf", "mbox",
+    "scriptstyle", "textstyle", "scriptscriptstyle", "quad", "qquad", "limits", "nolimits",
+})
 _LATEX_CMD_RE = re.compile(r"\\([A-Za-z]+)")
+#: IK-1125: 英字でない空白・間隔の制御綴り（``\!`` ``\,`` ``\;`` ``\:`` ``\ ``）。平文では捨てる。
+_LATEX_SPACING_RE = re.compile(r"\\[!,;:> ]")
 _SOURCE_MARKER_IN_LABEL_RE = re.compile(r"\s*\[出典\s*\d+\]")
 _REF_NUMBER_IN_LABEL_RE = re.compile(r"\[(\d[\d,\s–\-]*)\]")
 
@@ -268,7 +278,9 @@ def _latex_to_plain(text: str) -> str:
             return ""
         return _LATEX_PLAIN.get(name, name)
 
-    out = _LATEX_CMD_RE.sub(_cmd, text or "")
+    # ``\!``（負の間隔）は詰め、ほかの間隔は空白 1 つ（連続は下で畳む）。
+    out = _LATEX_SPACING_RE.sub(lambda m: "" if m.group(0) == "\\!" else " ", text or "")
+    out = _LATEX_CMD_RE.sub(_cmd, out)
     out = out.replace("{", "").replace("}", "")
     out = re.sub(r"([_^]) +", r"\1", out)
     return re.sub(r"[ \t]{2,}", " ", out)

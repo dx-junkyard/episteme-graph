@@ -57,6 +57,7 @@ __all__ = [
     "BASIS_DISCOVERY_INGEST_BATCH",
     "BASIS_EXPLANATION_REVIEW_BULK",
     "BASIS_KNOWLEDGE_IMPORT_BUNDLE",
+    "BASIS_LECTURE_STUDIO_APPENDIX_REATTACH_ALL",
     "BASIS_RELEASE_REVIEW_PLACEMENTS",
     "BASIS_VALUES",
     "DECISION_CONTEXT_KEY",
@@ -100,6 +101,9 @@ BASIS_CLAIM_REVIEW_SINGLE = "claim_review.single"
 #: 1 操作で外部インスタンスの主張・部品・式・根拠・導出がこの教材に着地する
 #: 一括確定で、dry-run で提示した種別×件数がそのまま提示集合になる）。
 BASIS_KNOWLEDGE_IMPORT_BUNDLE = "knowledge_import.bundle"
+#: 原稿スタジオの［付録をまとめて付け直す］（第 25 周 第 6 波・オーナー判断 1）。保存済みの付録は
+#: システムが書き直さず、所有者がこの 1 操作で一覧のトピックの付録を付け直して保存する。
+BASIS_LECTURE_STUDIO_APPENDIX_REATTACH_ALL = "lecture_studio.appendix_reattach_all"
 
 #: basis 語彙のカタログ（「画面.操作」規約の検査用。**検証はしない** —
 #: :func:`build_decision_context` は任意の basis を受ける。経路が定数を使うことは
@@ -115,6 +119,7 @@ BASIS_VALUES = (
     BASIS_DISCOVERY_INGEST_BATCH,
     BASIS_EXPLANATION_REVIEW_BULK,
     BASIS_KNOWLEDGE_IMPORT_BUNDLE,
+    BASIS_LECTURE_STUDIO_APPENDIX_REATTACH_ALL,
     BASIS_RELEASE_REVIEW_PLACEMENTS,
 )
 

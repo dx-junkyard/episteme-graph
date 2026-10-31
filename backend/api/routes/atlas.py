@@ -285,6 +285,23 @@ def _pending_edge_candidates(
         return []
 
 
+def _derived_edge_origins(
+    session, cartridge_id: str, pending_edges: list[dict], recorded: dict
+) -> dict:
+    """出所の記録が無い採用に、いまの導出の出所を引く（IK-0962・fail-soft）。
+
+    実体は関係（辺）候補ルートの ``derived_origins_for_unrecorded``（遅延 import で
+    ルーター間の循環を作らない）。
+    """
+    try:
+        from routes.atlas_edges import derived_origins_for_unrecorded
+    except Exception:  # noqa: BLE001
+        return {}
+    return derived_origins_for_unrecorded(
+        session, cartridge_id, [item.get("edge_key") for item in pending_edges], recorded
+    )
+
+
 def _edge_pair_label(
     item: dict, *labels_from: atlas.AtlasSkeleton | None
 ) -> str:
@@ -301,7 +318,14 @@ def _edge_pair_label(
             labels.setdefault(region.id, region.label or region.id)
     left = str(item.get("from_id") or "")
     right = str(item.get("to_id") or "")
-    return f"{labels.get(left, left)} — {labels.get(right, right)}"
+    # IK-1118（第 25 周 第 10 波）: 採用の種別があれば凍結の影響と同じ句（向き込み）で言う。
+    # IK-1149: 向きが採用のときに選ばれていない関係はその事実を添える（store が direction_recorded を付ける）。
+    return atlas_lifecycle.edge_change_label(
+        labels.get(left, left),
+        labels.get(right, right),
+        str(item.get("edge_kind") or ""),
+        direction_unrecorded=item.get("direction_recorded") is False,
+    )
 
 
 def _freeze_readiness(
@@ -327,13 +351,17 @@ def _freeze_readiness(
     if pending_gaps or pending_edges:
         # 止めている採用の帰属と根拠（IK-0939）。写しが作れなくても判定は変えない（fail-soft）。
         try:
+            recorded_origins = edge_store.origins_for_decisions(
+                session, [item.get("edge_key") for item in pending_edges]
+            )
             pending_items = atlas_review_display.pending_freeze_items(
                 session,
                 gap_items=pending_gaps,
                 edge_items=pending_edges,
                 edge_label=lambda item: _edge_pair_label(item, draft, frozen),
-                edge_origins=edge_store.origins_for_decisions(
-                    session, [item.get("edge_key") for item in pending_edges]
+                edge_origins=recorded_origins,
+                edge_derived_origins=_derived_edge_origins(
+                    session, cartridge_id, pending_edges, recorded_origins
                 ),
                 visible_document_ids=(
                     services.list_visible_document_ids(str(current_user.get("id") or ""))
@@ -731,18 +759,24 @@ def create_atlas_skeleton_draft_from_frozen(
         if atlas_store.load_draft(session, cartridge_id) is not None:
             raise HTTPException(
                 status_code=409,
-                detail="draft が既に存在します。現在の下書きを編集するか、破棄してからやり直してください",
+                # IK-1044（第 25 周 第 7 波）: 関係の区画からも押されるので、内部語でなく事実文で言う。
+                detail="次版の下書きが既にあります。画面を更新すると、その下書きへ反映できます（作り直す場合は下書きを破棄してから）。",
             )
         # 同梱のみの骨格専用ドメイン (atlas_domains/<key>/skeleton.yaml) でも複製できる
         # よう、DB 凍結版 → 同梱ファイルの順で解決する learner_skeleton を使う。
         frozen = atlas_store.load_learner_skeleton(cartridge_id, session)
         if frozen is None:
             raise HTTPException(status_code=404, detail="複製できる凍結済みの骨格がありません")
+        # IK-0991: 作成方法は版ごと。前の版の generated_by を写さず「前の版からの改訂」を記す
+        # （系列の起点の作られ方は前の版の履歴行が言う）。
+        from core.atlas_review_display import revision_generated_by
+
+        revision_token = revision_generated_by(frozen.version)
         draft = atlas.AtlasSkeleton(
             cartridge=cartridge_id,
             status=atlas.STATUS_DRAFT,
             version="",
-            generated_by=frozen.generated_by,
+            generated_by=revision_token,
             reviewed_by=(),
             # 版の履歴は引き継ぐ (凍結時に新しい版のエントリが積まれる)。
             changelog=frozen.changelog,
@@ -759,7 +793,7 @@ def create_atlas_skeleton_draft_from_frozen(
             draft,
             expected_revision=None,
             user_id=str(current_user.get("id") or "") or None,
-            generated_by=frozen.generated_by,
+            generated_by=revision_token,
         )
         session.commit()
     except atlas_store.DraftRevisionConflict as exc:
@@ -1047,6 +1081,11 @@ def freeze_atlas_skeleton(
         import threading
 
         def _atlas_anchor_embed() -> None:
+            # IK-0993: 構築中の印（プロセス内）。状態表示と関係の候補が「再構築してください」
+            # 「理由なしに空」と言わないため。成功・失敗にかかわらず外す。
+            from core.atlas_vectors import builder as _vector_progress
+
+            _vector_progress.mark_build_started(cartridge_id, "")
             try:
                 from core.atlas_vectors.builder import build_anchor_embeddings
 
@@ -1054,6 +1093,8 @@ def freeze_atlas_skeleton(
                 logger.info("atlas anchor embeddings after freeze: %s", result)
             except Exception:  # noqa: BLE001
                 logger.warning("atlas anchor embedding after freeze failed", exc_info=True)
+            finally:
+                _vector_progress.mark_build_finished(cartridge_id)
 
         threading.Thread(
             target=_atlas_anchor_embed, name="atlas-anchor-embed", daemon=True
@@ -1209,6 +1250,8 @@ def freeze_atlas_skeleton(
         logger.warning("atlas skeleton freeze notify failed", exc_info=True)
         notified = 0
 
+    # 応答の形は変えない（VA4）。凍結が裏で始めた索引の構築は、索引の状態
+    # （vectors/status の building）と関係の候補の index_note が言う（IK-0993）。
     return {
         "cartridge_id": cartridge_id,
         "frozen": _skeleton_payload(frozen),
@@ -1252,6 +1295,13 @@ def get_atlas_freeze_impact(
         impact["correspondence"] = _correspondence_preview(
             session, cartridge_id, draft_row["skeleton"], frozen
         )
+        # 第 25 周 第 10 波（te-01）: 消えるノードが無く対応を付けるものが無いときは、区画を出さない
+        # 代わりに「対応は要らない」ことを事実文で言う（区画が無いことを推し量らせない）。
+        correspondence_note = atlas_correspondence.no_correspondence_needed_fact(
+            impact["correspondence"], frozen
+        )
+        if correspondence_note:
+            impact["facts"] = list(impact.get("facts") or []) + [correspondence_note]
         # 凍結の可否（IK-0885）。freeze が止める条件を、押す前の確認画面で先に言う。
         impact["readiness"] = _freeze_readiness(
             session, cartridge_id, draft_row["skeleton"], frozen, current_user

@@ -137,6 +137,61 @@ def resolve_focus_document(
     return NO_FOCUS
 
 
+def with_paper_versions(focus: Any, siblings: Mapping[str, Iterable[str]] | None) -> FocusDocument:
+    """焦点に同じ論文の別の版（TeX 版・PDF 版）を足す（第 25 周 第 6 波・FD1 の補足）。
+
+    焦点が PDF 版の document でも、検索は TeX 版の同じ論文のチャンクを返す（版の畳み込みは
+    同じ箇所だけを畳み、別の箇所は畳まない）。版を焦点に含めないと、焦点の外として扱われた
+    TeX 版の行が「焦点内の最良」を作らず、別の論文（無関係な分野）の行が FD3 の除外を
+    すり抜ける（IK-0987）。``siblings`` は ``{焦点の document: 同じ論文の別の版}`` で、
+    呼び出し側がスコープとの積を取って渡す（範囲を広げない = FD2）。段（``source``）は変えない。
+    """
+    if not isinstance(focus, FocusDocument) or not focus:
+        return focus if isinstance(focus, FocusDocument) else NO_FOCUS
+    ordered = list(focus.document_ids)
+    for doc in focus.document_ids:
+        for other in sorted(str(v).strip() for v in (siblings or {}).get(doc, ()) or () if v):
+            if other and other not in ordered:
+                ordered.append(other)
+    if len(ordered) == len(focus.document_ids):
+        return focus
+    return FocusDocument(document_ids=tuple(ordered), source=focus.source)
+
+
+def with_screen_place_documents(
+    focus: Any,
+    place_document_ids: Any,
+    *,
+    allowed_document_ids: Iterable[str] | None,
+    selected_now: bool = False,
+) -> FocusDocument:
+    """画面で開いた場所（分野の地図の場所）に置かれた論文を焦点に**加える**（第 25 周 第 9 波・FD-note 3）。
+
+    段の勝ち負けは変えない — 既存の焦点の論文を先に残し、置かれた論文を後ろに足す（並べ替えでは
+    トピックの論文が先のまま）。足すのはスコープ（``allowed_document_ids``）の内だけ（FD2）。焦点が
+    無ければ置かれた論文を④段（画面で選んだ論文）として焦点にする。スコープが空なら何も足さない。
+    """
+    base = focus if isinstance(focus, FocusDocument) else NO_FOCUS
+    allowed = set(_ordered_ids(allowed_document_ids))
+    if not allowed:
+        return base
+    if selected_now:
+        # 第 25 周 第 10 波（FD-note 4）: 地図の場所を**今の往復で**選んでいる（画面の selection に
+        # 場所の参照がある）ときは、場所に置かれた論文が明示の焦点になる。トピックの段は外す
+        # （残すと FD3 がトピックの論文の行を優先し、場所の問いにトピック教材の出典が先に並ぶ）。
+        # 置かれた論文がスコープに 1 つも無ければ従来の焦点のまま（材料の無い焦点を作らない）。
+        placed = [d for d in _ordered_ids(place_document_ids) if d in allowed]
+        if placed:
+            return FocusDocument(document_ids=tuple(placed), source=SOURCE_EXPLICIT)
+        return base
+    extra = [d for d in _ordered_ids(place_document_ids) if d in allowed and d not in base.document_ids]
+    if not extra:
+        return base
+    if not base:
+        return FocusDocument(document_ids=tuple(extra), source=SOURCE_OPENING)
+    return FocusDocument(document_ids=tuple(list(base.document_ids) + extra), source=base.source)
+
+
 def _focus_id_set(focus: Any) -> set[str]:
     return set(_ordered_ids(focus))
 
@@ -350,4 +405,6 @@ __all__ = [
     "resolve_in_focus",
     "scope_chunks_to_focus",
     "unique_row_lookup",
+    "with_paper_versions",
+    "with_screen_place_documents",
 ]

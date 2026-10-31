@@ -46,6 +46,15 @@ _OBSERVATION_CLAIM_TYPES = ("observable_definition", "diagnostic_claim")
 
 _MEASURES_PREDICATE = "MEASURES"
 
+# IK-1057: 観測記録として数えない主張。式から合成した主張（origin=equation_synthesis —
+# 「この論文の式は X を定義する」は式の言い直しで、観測の記録ではない）はどの段でも数えない。
+# 段（B）は集約ノードの分類による代理の同定なので、主張自身の種類が背景（prior_work）と
+# 言っているものは段の代理より主張自身の分類を採る（A・C は主張そのものの記述なので外さない）。
+_NON_OBSERVATION_ORIGINS = ("equation_synthesis",)
+# 第 9 波（IK-1057 残り）: 手法の選択（method_choice —「^13CO is used to trace …」）も観測の記録ではなく
+# 手法の記述。実データ（Cepheus TeX の台帳 1925 行）で段階語の変化は 0・主張 42c4e2e8 の根から 1 件消える。
+_STAGE_PROXY_EXCLUDED_CLAIM_TYPES = ("prior_work", "method_choice")
+
 _IDENTIFIED_VIA_DSL = "dsl_measures"
 _IDENTIFIED_VIA_STAGE = "theory_stage"
 _IDENTIFIED_VIA_CLAIM_TYPE = "claim_type"
@@ -161,6 +170,42 @@ def _claim_labels(session, claim_ids: set[str]) -> dict[str, str]:
     return {str(r[0]): str(r[1] or "")[:_LABEL_MAX_CHARS] for r in rows}
 
 
+def _claim_kinds(session, claim_ids: set[str]) -> dict[str, tuple[str, str]]:
+    """主張の ``(origin, claim_type)``（IK-1057）。引けない主張は辞書に無い（外さない）。"""
+    if not claim_ids:
+        return {}
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id::text, COALESCE(origin, ''), COALESCE(claim_type, '')
+                FROM theory_claims_live
+                WHERE id::text = ANY(:ids)
+            """),
+            {"ids": list(claim_ids)},
+        ).fetchall()
+    except Exception:
+        logger.debug("observation target claim kind lookup failed", exc_info=True)
+        return {}
+    out: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        if len(row) < 3:
+            continue
+        out[str(row[0])] = (str(row[1] or ""), str(row[2] or ""))
+    return out
+
+
+def _counts_as_observation(kind, identified_via: str) -> bool:
+    """IK-1057: 観測記録として数えるか。種類が引けない主張は従来どおり数える（fail-soft）。"""
+    if not kind:
+        return True
+    origin, claim_type = kind
+    if origin in _NON_OBSERVATION_ORIGINS:
+        return False
+    if identified_via == _IDENTIFIED_VIA_STAGE and claim_type in _STAGE_PROXY_EXCLUDED_CLAIM_TYPES:
+        return False
+    return True
+
+
 def observation_claim_targets(
     session,
     *,
@@ -245,6 +290,10 @@ def observation_claim_targets(
             "identified_via": via,
             "document_id": doc,
         }
-    items = list(merged.values())
+    kinds = _claim_kinds(session, set(merged.keys()))
+    items = [
+        item for item in merged.values()
+        if _counts_as_observation(kinds.get(item["claim_id"]), item["identified_via"])
+    ]
     items.sort(key=lambda item: item["claim_id"])
     return items

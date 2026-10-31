@@ -44,7 +44,7 @@ from core.element_explanations import (
 from core import display_projection as _dp
 from core import element_vocab
 from core.knowledge_objects.references import claim_ref_variants, normalize_claim_ref
-from core.label_vocab import SUPPORT_SECTION_LABELS
+from core.label_vocab import SUPPORT_SECTION_LABELS, VERIFICATION_PROPOSAL_PRESENCE_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +247,24 @@ def _skeleton_entry_text(skeleton: dict[str, Any] | None, key: str) -> str:
     return str(entry or "").strip()
 
 
+#: 解析が値を埋められなかったときの代替語（IK-1013）。この語だけの欄は中身として扱わない。
+_UNFILLED_VALUE_TOKENS = frozenset({"unknown", "none", "null", "n/a", "na", "unspecified", "不明"})
+
+#: 中心の問いが解析で整理されていないときの事実文（IK-1013・2026-10-28 第 7 波）。
+CENTRAL_QUESTION_UNSETTLED_NOTE = "この論文の中心の問いはまだ整理されていません。"
+
+
+def is_unfilled_value(text: Any) -> bool:
+    """解析の代替語（生の "unknown" 等）だけの値か（IK-1013・純関数）。"""
+    value = str(text or "").strip().strip(".。").strip().casefold()
+    return bool(value) and value in _UNFILLED_VALUE_TOKENS
+
+
+def _filled(text: Any) -> str:
+    value = str(text or "").strip()
+    return "" if is_unfilled_value(value) else value
+
+
 def project_thesis(
     thesis: dict[str, Any] | None,
     claim_label_index: dict[str, str],
@@ -342,19 +360,22 @@ def project_thesis(
             continue
         alternatives.append({"text": text, "attribution_label": _ALTERNATIVE_ATTRIBUTION_LABEL})
 
-    return {
-        # 「この論文が答えようとした問い」（主語=論文）。thesis artifact の
-        # central_question を優先し、無ければ paper_skeleton の同名エントリへ縮退する。
-        "central_question": (
-            str(thesis.get("central_question") or "").strip()
-            or _skeleton_entry_text(skeleton, "central_question")
-        ),
-        "paper_goal": _skeleton_entry_text(skeleton, "paper_goal"),
+    # 「この論文が答えようとした問い」（主語=論文）。thesis artifact の
+    # central_question を優先し、無ければ paper_skeleton の同名エントリへ縮退する。
+    # 生の "unknown" 等（解析が埋められなかった代替語）は問いとして出さない（IK-1013）。
+    raw_question = (
+        str(thesis.get("central_question") or "").strip()
+        or _skeleton_entry_text(skeleton, "central_question")
+    )
+    central_question = _filled(raw_question) or _filled(_skeleton_entry_text(skeleton, "central_question"))
+    projected = {
+        "central_question": central_question,
+        "paper_goal": _filled(_skeleton_entry_text(skeleton, "paper_goal")),
         # 「この論文の主張」（主語=論文）。agent が合成した命題文。無ければ
         # headline_claim（同じく合成値）へ縮退する。claim の生ラベルは
         # central_claims 側に従来どおり残す（置き換えない）。
         "central_thesis_text": (
-            str(central.get("text") or "").strip() or str(thesis.get("headline_claim") or "").strip()
+            _filled(central.get("text")) or _filled(thesis.get("headline_claim"))
         ),
         "central_claims": central_claims,
         "central_equations": central_equations,
@@ -362,6 +383,10 @@ def project_thesis(
         # 「別の見方（AI の提示）」。出典を持たないため attribution_label 付き（OA7）。
         "alternatives": alternatives,
     }
+    if not central_question and raw_question:
+        # 代替語しか無かった = 問いの区画は出さず事実文 1 行（キーは代替語のときだけ足す）。
+        projected["central_question_note"] = CENTRAL_QUESTION_UNSETTLED_NOTE
+    return projected
 
 
 def _thesis_is_empty(thesis: dict[str, Any] | None) -> bool:
@@ -671,6 +696,15 @@ def _assumption_fact_line(item: dict[str, Any]) -> str:
             base = "反証の記録がある前提です。"
         else:
             base = "検証状況の記録がある前提です。"
+
+    # 第 25 周 第 10 波（IK-1121）: 出典タブの一覧と同じ「検証提案あり（完了）」の語を、開幕の
+    # 「確かめていないこと」にも添える（同じ主張の進み具合を画面ごとに食い違わせない — 語の正本は
+    # ``label_vocab.VERIFICATION_PROPOSAL_PRESENCE_LABELS``・件数は言わない）。
+    proposal_label = str(item.get("verification_proposal_label") or "").strip()
+    if not proposal_label and bool(item.get("has_verification_proposal")):
+        proposal_label = VERIFICATION_PROPOSAL_PRESENCE_LABELS["open"]
+    if proposal_label:
+        base = _join_fact_sentences(base, f"{proposal_label}です。")
 
     if "has_falsification_condition" not in item and "falsification_not_formulable" not in item:
         return base
@@ -1136,9 +1170,11 @@ def build_opening(
     if ids and not any(
         isinstance(f, dict) and f.get("kind") == "assumption" for f in fragile_points
     ):
-        from core.doubt.scope import SECTION_EMPTY_NOTE
+        # IK-0972: 区画専用の文（記帳の不在を言う）。汎用の「該当がありません」は見出しの
+        # 否定（確かめていないこと）と重なって「すべて確かめた」に読めるので使わない。
+        from core.doubt.scope import OPENING_UNVERIFIED_EMPTY_NOTE
 
-        result["paper_unverified_empty_note"] = SECTION_EMPTY_NOTE
+        result["paper_unverified_empty_note"] = OPENING_UNVERIFIED_EMPTY_NOTE
     return _strip_numeric_keys(result)
 
 

@@ -70,6 +70,10 @@ from core.deliberation.schema import (
 )
 from core.library import schema as library_schema
 from core.library import store as library_store_mod
+from core.label_vocab import learner_standardization_note
+from core.label_vocab import ORIGINAL_TEXT_MARK, original_text_mark_for_origin
+from core.schema import infer_claim_origin
+from core.text_excerpt import is_untranslated_text
 
 logger = logging.getLogger(__name__)
 
@@ -380,17 +384,22 @@ def _document_title(document_id: str) -> str:
 
 
 def _user_display_name(user_id: str) -> str:
+    """確定した人の表示名（IK-1007: 本人が登録した名前だけ。ログイン ID は出さない）。
+
+    確定者の記録が無ければ空、記録があり名前の登録が無ければ名前なしの事実語。
+    """
     if not str(user_id or "").strip():
         return ""
+    from core.account_display import NAME_UNREGISTERED_ACTOR, fetch_display_labels
+
     session = get_session()
     try:
-        row = session.execute(
-            sa_text("SELECT display_name FROM users WHERE id = CAST(:id AS uuid) LIMIT 1"),
-            {"id": user_id},
-        ).fetchone()
+        labels = fetch_display_labels(session, [user_id])
     finally:
         session.close()
-    return str(row[0] or "") if row else ""
+    if str(user_id).strip() not in labels:
+        return ""
+    return labels[str(user_id).strip()] or NAME_UNREGISTERED_ACTOR
 
 
 # ---------------------------------------------------------------------------
@@ -404,18 +413,22 @@ def _narrative_role(
 ) -> str:
     node_narratives = _json_dict(narrative.get("node_narratives"))
     node = node_narratives.get(component_db_id)
+    candidates: list[str] = []
     if isinstance(node, dict):
-        role = str(node.get("narrative_role") or "").strip()
-        if role:
-            return role
+        candidates.append(str(node.get("narrative_role") or "").strip())
     thesis_context = _json_dict(component_row.get("thesis_context"))
-    role_in_thesis = str(thesis_context.get("role_in_thesis") or "").strip()
-    if role_in_thesis:
-        return role_in_thesis
-    teaching_takeaway = str((assembly_record or {}).get("teaching_takeaway") or "").strip()
-    if teaching_takeaway:
-        return teaching_takeaway
-    return str(component_row.get("summary") or "").strip()
+    candidates.append(str(thesis_context.get("role_in_thesis") or "").strip())
+    candidates.append(str((assembly_record or {}).get("teaching_takeaway") or "").strip())
+    candidates.append(str(component_row.get("summary") or "").strip())
+    candidates = [c for c in candidates if c]
+    if not candidates:
+        return ""
+    # 第 25 周 第 7 波（IK-0571 の studio 側）: 優先順は不変のまま、日本語の候補があれば
+    # 原文の言語のままの候補より先に使う（翻訳はしない — 既にある日本語を選ぶだけ）。
+    for candidate in candidates:
+        if not is_untranslated_text(candidate):
+            return candidate
+    return candidates[0]
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +446,11 @@ def _build_field_refs(record: dict, key: str) -> list[dict]:
             continue
         claim_ids = [str(c) for c in _json_list(ref.get("claim_ids")) if str(c or "").strip()]
         equation_ids = [str(e) for e in _json_list(ref.get("equation_ids")) if str(e or "").strip()]
-        items.append({"text": text, "refs": {"claim_ids": claim_ids, "equation_ids": equation_ids}})
+        item = {"text": text, "refs": {"claim_ids": claim_ids, "equation_ids": equation_ids}}
+        # 第 25 周 第 8 波（IK-0571）: 前提・入力・出力にも主張と同じ「（原文）」の印（区画で揃える）。
+        if is_untranslated_text(text):
+            item["original_mark"] = ORIGINAL_TEXT_MARK
+        items.append(item)
         if len(items) >= _MAX_FIELD_REF_ITEMS:
             break
     return items
@@ -450,7 +467,11 @@ def _build_cautions(record: dict) -> list[dict]:
         if not text or contains_pipeline_policy_token(text):
             # 解析層の方針語（semantic_hint_only 等）を含む注意は学習者に意味をなさない（IK-0862）。
             continue
-        items.append({"text": text})
+        item = {"text": text}
+        # 第 25 周 第 8 波（IK-0571）: 注意にも「（原文）」の印（区画で揃える）。
+        if is_untranslated_text(text):
+            item["original_mark"] = ORIGINAL_TEXT_MARK
+        items.append(item)
         if len(items) >= _MAX_FIELD_REF_ITEMS:
             break
     return items
@@ -470,7 +491,12 @@ def _equation_role_map(record: dict) -> dict[str, str]:
     return role_map
 
 
-def _build_equations(record: dict, equations_by_id: dict[str, dict]) -> list[dict]:
+def _build_equations(
+    record: dict,
+    equations_by_id: dict[str, dict],
+    reconstruction_index: Any = None,
+    document_id: str = "",
+) -> list[dict]:
     items: list[dict] = []
     for eq_id, role in _equation_role_map(record).items():
         eq_record = equations_by_id.get(eq_id)
@@ -486,7 +512,14 @@ def _build_equations(record: dict, equations_by_id: dict[str, dict]) -> list[dic
                 item["latex"] = latex
         # 復元由来の式には事実文を1行添える（`_equation_label` は reconstruction を
         # 優先して本文にするため、ここを黙って抽出結果と同じ顔で出さない）。
-        note = _reconstructed_equation_note(eq_record) if eq_record else None
+        # 第 25 周 第 6 波（IK-0895）: 判定は本文・講義・付録・チャットと同じ
+        # ``equation_is_reconstructed``（生きた式の記録の索引 — artifact と chunks.formulas）。
+        note = (
+            _reconstructed_equation_note(
+                eq_record, index=reconstruction_index, document_id=document_id
+            )
+            if eq_record else None
+        )
         if note:
             item["label_note"] = note
         items.append(item)
@@ -506,7 +539,12 @@ def _build_claims(record: dict, claims_by_id: dict[str, dict]) -> list[dict]:
         excerpt = str(claim.get("text") or claim.get("normalized_text") or "").strip()
         if not excerpt:
             continue
-        items.append({"id": key, "excerpt": excerpt})
+        item = {"id": key, "excerpt": excerpt}
+        # 第 25 周 第 7 波（IK-0571 の studio 側）: 原文の言語のままの主張は「（原文）」の印（翻訳しない）。
+        # IK-1155: 印は出所で分ける（原子化の言い換え・式から組み立てた文を「原文」と言わない）。
+        if is_untranslated_text(excerpt):
+            item["original_mark"] = original_text_mark_for_origin(infer_claim_origin(claim))
+        items.append(item)
     return items
 
 
@@ -523,7 +561,14 @@ def _build_dependencies(record: dict, components_by_agent_id: dict[str, dict]) -
                 continue
             target = components_by_agent_id.get(ref_key)
             target_label = str((target or {}).get("label") or ref_key)
-            items.append({"type": dep_type, "target_label": target_label, "reason": reason})
+            item = {"type": dep_type, "target_label": target_label, "reason": reason}
+            # 第 25 周 第 8 波（IK-0571）: 関連の理由・相手の名前が原文のままなら「（原文）」の印。
+            # 相手が引けず生の参照に縮退した名前（内部 ID）には印を付けない。
+            if (reason and is_untranslated_text(reason)) or (
+                not reason and target is not None and is_untranslated_text(target_label)
+            ):
+                item["original_mark"] = ORIGINAL_TEXT_MARK
+            items.append(item)
     return items
 
 
@@ -532,13 +577,17 @@ def _build_supports(
     claims_by_id: dict[str, dict],
     equations_by_id: dict[str, dict],
     components_by_agent_id: dict[str, dict],
+    reconstruction_index: Any = None,
+    document_id: str = "",
 ) -> dict:
     return {
         "preconditions": _build_field_refs(assembly_record, "preconditions"),
         "inputs": _build_field_refs(assembly_record, "inputs"),
         "outputs": _build_field_refs(assembly_record, "outputs"),
         "cautions": _build_cautions(assembly_record),
-        "equations": _build_equations(assembly_record, equations_by_id),
+        "equations": _build_equations(
+            assembly_record, equations_by_id, reconstruction_index, document_id
+        ),
         "claims": _build_claims(assembly_record, claims_by_id),
         "dependencies": _build_dependencies(assembly_record, components_by_agent_id),
     }
@@ -606,6 +655,30 @@ def _document_titles(document_ids: list[str]) -> dict[str, str]:
     return {str(r[0]): str(r[1] or r[2] or "") for r in rows if str(r[1] or r[2] or "").strip()}
 
 
+def _document_format_labels(document_ids: list[str]) -> dict[str, str]:
+    """``{document_id: "TeX 版" | "PDF 版"}``（IK-0956。形式が分からない id はキーを持たない）。"""
+    keys = [str(d) for d in document_ids if str(d or "").strip()]
+    if not keys:
+        return {}
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                "SELECT id::text, filename, source_url FROM documents "
+                "WHERE id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"ids": keys},
+        ).fetchall()
+    finally:
+        session.close()
+    out: dict[str, str] = {}
+    for row in rows:
+        label = identity_links_mod.document_format_label(row[1], row[2])
+        if label:
+            out[str(row[0])] = label
+    return out
+
+
 def _other_confirmed_documents(
     shared_part_id: str, document_id: str, readable_document_ids: set[str] | None
 ) -> tuple[list[dict], bool]:
@@ -630,7 +703,18 @@ def _other_confirmed_documents(
     if not ordered:
         return [], False
     titles = _document_titles(ordered)
-    items = [{"title": titles[d]} for d in ordered if titles.get(d)]
+    kept = [d for d in ordered if titles.get(d)]
+    items = [{"title": titles[d]} for d in kept]
+    # IK-0956: 同じ題名の論文（TeX 版と PDF 版など）が並ぶときだけ、形式を括弧で添える。
+    title_list = [it["title"] for it in items]
+    if len(set(title_list)) < len(title_list):
+        try:
+            formats = _document_format_labels(kept)
+        except Exception:  # noqa: BLE001 — 表示の補助（fail-soft）
+            formats = {}
+        for doc, item in zip(kept, items):
+            if title_list.count(item["title"]) > 1 and formats.get(doc):
+                item["title"] = f"{item['title']}（{formats[doc]}）"
     truncated = len(items) > SHARED_PART_OTHER_DOCUMENTS_MAX
     return items[:SHARED_PART_OTHER_DOCUMENTS_MAX], truncated
 
@@ -649,8 +733,10 @@ def _build_shared_part(
         shared_part_id = str(link.get("shared_part_id") or "").strip()
         if not shared_part_id:
             return None
-        entry = library_store_mod.get_entry(shared_part_id)
-        if not entry or str(entry.get("status") or "") != library_schema.STATUS_ACTIVE:
+        # IK-0954: 学生は凍結版だけを読む（下書きは教員の保存で即座に変わり、凍結の弁を
+        # 通らない）。凍結版が無い・retired のエントリは共通部品の面ごと出さない。
+        entry = library_store_mod.get_frozen_entry_for_learner(shared_part_id)
+        if not entry:
             return None
         try:
             other_documents, other_truncated = _other_confirmed_documents(
@@ -666,13 +752,15 @@ def _build_shared_part(
             "name": str(entry.get("name") or ""),
             "aliases": list(entry.get("aliases") or []),
             "summary": str(entry.get("summary") or ""),
-            "standardization_status": str(
-                entry.get("standardization_status") or library_schema.STANDARDIZATION_STATUS_UNKNOWN
-            ),
             # IK-0920: 他の論文は確定リンクから導いた**題名**で言う（件数をやめる）。
             "other_documents": other_documents,
             "other_documents_truncated": other_truncated,
         }
+        # IK-0959: 標準化の評価は教員が確定した値だけを学生向けの 1 文で出す。未評価
+        # （教員の内部手続の状態）は学生に何も出さない — 生の enum も渡さない。
+        standardization_note = learner_standardization_note(entry.get("standardization_status"))
+        if standardization_note:
+            entry_dto["standardization_note"] = standardization_note
         if other_documents:
             entry_dto["other_documents_lead"] = SHARED_PART_OTHER_DOCUMENTS_LEAD
         else:
@@ -1123,6 +1211,12 @@ def build_component_context(
     except Exception:  # noqa: BLE001
         logger.warning("component_context: equation index failed for document %s", document_id, exc_info=True)
         equations_by_id = {}
+    try:
+        from core.equation_reconstruction import load_equation_reconstruction_index
+
+        reconstruction_index = load_equation_reconstruction_index([document_id])
+    except Exception:  # noqa: BLE001 — 索引が無ければ記録自身の判定
+        reconstruction_index = None
 
     try:
         narrative = _load_graph_narrative(document_id)
@@ -1166,11 +1260,20 @@ def build_component_context(
             "narrative_role": narrative_role,
             "graph_summary_excerpt": graph_summary_excerpt,
         },
-        "supports": _build_supports(assembly_record, claims_by_id, equations_by_id, components_by_agent_id),
+        "supports": _build_supports(
+            assembly_record, claims_by_id, equations_by_id, components_by_agent_id,
+            reconstruction_index, document_id,
+        ),
         # 出所ラベルの位置は DTO 契約（component は instance の中、claim / equation は
         # トップレベル）。値だけを共有定数に寄せ、位置は動かさない。
         "provenance": PROVENANCE_COURSE_FREEZE,
     }
+    # 第 25 周 第 7 波（IK-0571 の studio 側）: 部品名・位置づけが原文の言語のままなら「（原文）」の
+    # 印を添える（翻訳はしない・LLM 0 回）。画面は日本語の表示名（⚓ の display_label）を優先する。
+    if is_untranslated_text(label):
+        instance["component"]["label_original_mark"] = ORIGINAL_TEXT_MARK
+    if narrative_role and is_untranslated_text(narrative_role):
+        instance["in_paper"]["narrative_role_original_mark"] = ORIGINAL_TEXT_MARK
 
     shared_part = _build_shared_part(
         component_db_id,

@@ -79,7 +79,7 @@ def _downstream_labels_for_target(session, target_type: str, target_id: str) -> 
     if not document_id:
         return []
     try:
-        graph = build_dependency_graph(session, document_ids=[document_id])
+        graph = build_dependency_graph(session, document_ids=[document_id], exclude_claim_sequence_edges=True)
         seeds = seed_nodes_for_target(graph, target_type, target_id)
         if not seeds:
             return []

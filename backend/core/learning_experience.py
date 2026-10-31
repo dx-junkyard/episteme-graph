@@ -147,18 +147,27 @@ def build_position_anchor(
     topic_id: str,
     segment_id: str | int | None = None,
     scroll_offset: float | int | None = None,
+    *,
+    segment_reported: bool | None = None,
 ) -> dict[str, Any]:
     """復帰位置アンカー {topic_id, segment_id, scroll_offset} を組み立てる（L2）。
 
     segment_id / scroll_offset はクライアントが報告した実際の現在位置。未指定なら
     先頭(0)。トピックを跨がない単段の DetourStack 入口として origin に保持され、
     「本筋へ戻る」で同じ位置に復帰する。
+
+    ``segment_reported``（IK-1122）: 区画をクライアントが報告したか。渡されたときだけ
+    ``segment_reported`` キーを足す。先頭(0)は**戻る先**の既定値であって「見ていた区画」
+    ではないので、構造帰属（``core.structure_anchor.worker``）は偽なら区画に結ばない。
     """
-    return {
+    anchor = {
         "topic_id": topic_id,
         "segment_id": int(segment_id) if segment_id is not None else 0,
         "scroll_offset": int(scroll_offset) if scroll_offset is not None else 0,
     }
+    if segment_reported is not None:
+        anchor["segment_reported"] = bool(segment_reported)
+    return anchor
 
 
 # ---------------------------------------------------------------------------

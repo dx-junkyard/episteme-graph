@@ -370,47 +370,54 @@ def _fallback_spoken_text(chunk_text: str) -> dict:
 _PLACEHOLDER_RE = re.compile(r"\[\[FORMULA_\d+\]\]")
 
 
-_BROKEN_LATEX_CHARS = frozenset("\ufffd")
-
-
 def is_broken_reconstructed_latex(latex: object) -> bool:
-    """AI 復元の LaTeX が表示に耐えない壊れ方をしているか（決定論・TRIAGE14）。
+    """AI 復元の LaTeX が表示に耐えない壊れ方をしているか（正本は
+    ``learner_context_common.is_broken_reconstructed_latex`` — 第 25 周 第 5 波で移した）。"""
+    from core.learner_context_common import is_broken_reconstructed_latex as _is_broken
 
-    置換文字（U+FFFD）・C0 制御文字を含む / 数式本体が空で ``\\tag{..}`` や句読点の
-    断片だけ、を壊れているとみなす。判断に迷うものは壊れていない側に倒す（情報を落とさない）。
-    """
-    text = str(latex or "")
-    if not text.strip():
-        return True
-    if any(ch in _BROKEN_LATEX_CHARS for ch in text):
-        return True
-    if any(ord(ch) < 32 and ch not in "\n\t\r" for ch in text):
-        return True
-    body = re.sub(r"\\tag\*?\{[^}]*\}", "", text)
-    body = re.sub(r"[\s;,.:]", "", body)
-    return not body
+    return _is_broken(latex)
 
 
-def annotate_reconstructed_formulas(formulas: list[dict]) -> list[dict]:
+def annotate_reconstructed_formulas(
+    formulas: list[dict],
+    *,
+    index: object = None,
+    document_id: object = None,
+) -> list[dict]:
     """復元由来（``reconstructed``）の式に、サーバ文言の印と事実文を載せる。
 
     ``chunks.formulas[].reconstructed``（PDF 由来で AI が文脈から復元した LaTeX）を
     学習者に抽出結果と同じ顔で出さないための目印。文言の正本は ``label_vocab``
     （``RECONSTRUCTED_EQUATION_MARK`` / ``RECONSTRUCTED_EQUATION_NOTE``）で、JS は
     ``reconstructed_mark`` / ``reconstructed_note`` を素通しで描く。入力を mutate せず、
-    dict でない要素はそのまま返す。
+    dict でない要素はそのまま返す。印と表示の可否（壊れた復元は ``latex_withheld``）は
+    ``learner_context_common.equation_display_fields`` から式の単位で受け取る（IK-1008）。
     """
+    from core.learner_context_common import equation_display_fields  # 印と可否の正本
+
     out: list[dict] = []
     for formula in formulas or []:
-        if isinstance(formula, dict) and formula.get("reconstructed"):
+        # 第 6 波（IK-0895）: ``index``（生きた式の記録の索引）を渡すと、印はその答えから。
+        fields = (
+            equation_display_fields(formula, index=index, document_id=document_id)
+            if isinstance(formula, dict) else {}
+        )
+        if fields:
             annotated = dict(formula)
-            annotated.setdefault("reconstructed_mark", RECONSTRUCTED_EQUATION_MARK)
-            annotated.setdefault("reconstructed_note", RECONSTRUCTED_EQUATION_NOTE)
+            annotated.setdefault("reconstructed_mark", fields["reconstructed_mark"])
+            annotated.setdefault("reconstructed_note", fields["reconstructed_note"])
+            annotated["reconstructed"] = True
+            annotated.pop("reconstruction_checked", None)  # 内部の印（画面には出さない）
             # 壊れた復元は式として描かせない（事実文 reconstructed_note だけを残す）。
-            if is_broken_reconstructed_latex(annotated.get("latex")):
+            if fields.get("latex_withheld"):
                 annotated["latex"] = ""
                 annotated["latex_withheld"] = True
             out.append(annotated)
+        elif isinstance(formula, dict) and "reconstruction_checked" in formula:
+            plain = dict(formula)
+            plain.pop("reconstruction_checked", None)
+            plain.pop("reconstructed", None)
+            out.append(plain)
         else:
             out.append(formula)
     return out
@@ -702,7 +709,26 @@ def _sentence_units(text: str) -> list[str]:
     return [s.strip() for s in out if s.strip()]
 
 
-def _display_length(text: str | None) -> int:
+def formula_length_map(formulas: list | None) -> dict[str, int]:
+    """文中の小さな式（``is_display`` が偽の ``[[FORMULA_N]]``）の表示長を式の実文字数で返す。
+
+    第 25 周 第 8 波（IK-0976）: 60 字換算は表示式（独立した行の式）のページ見積りの値で、文中の
+    ``$r$`` のような小さな式にも同じ値を当てると、2 文の解説が 240 字を超えて「短い解説」と
+    判定されなくなっていた。ここに載らない式（表示式・``is_display`` 不明）は従来どおり 60 字。
+    表示・音声・readiness が同じ :func:`auto_paginate_slides` を通るので境目の一致は崩さない。
+    """
+    out: dict[str, int] = {}
+    for formula in formulas or []:
+        if not isinstance(formula, dict) or formula.get("is_display") is not False:
+            continue
+        fid = str(formula.get("id") or "")
+        if not fid:
+            continue
+        out[fid] = max(1, len(str(formula.get("latex") or "").strip()))
+    return out
+
+
+def _display_length(text: str | None, formula_lengths: dict[str, int] | None = None) -> int:
     """``[[FORMULA_N]]`` / ``[[FIGURE_N]]`` / 未解決の ``![[figure:...]]`` を
     一定長に換算した表示長を返す（ページ分割の目安計算用。図1個=200字、Phase 4 §7.2）。
 
@@ -713,14 +739,16 @@ def _display_length(text: str | None) -> int:
     """
     if not text:
         return 0
-    formula_count = len(_SLIDE_FORMULA_ID_RE.findall(text))
+    formula_ids = _SLIDE_FORMULA_ID_RE.findall(text)
+    lengths = formula_lengths or {}
+    formula_len = sum(lengths.get(fid, _FORMULA_PLACEHOLDER_LEN) for fid in formula_ids)
     figure_count = len(_SLIDE_FIGURE_ID_RE.findall(text)) + len(_FIGURE_EMBED_RE.findall(text))
     plain = _SLIDE_FORMULA_ID_RE.sub("", text)
     plain = _SLIDE_FIGURE_ID_RE.sub("", plain)
     plain = _FIGURE_EMBED_RE.sub("", plain)
     return (
         len(plain)
-        + formula_count * _FORMULA_PLACEHOLDER_LEN
+        + formula_len
         + figure_count * _FIGURE_PLACEHOLDER_LEN
     )
 
@@ -742,23 +770,146 @@ def _paragraph_units(text: str | None) -> list[str]:
     return sents if sents else [text.strip()]
 
 
-def _group_units_by_size(units: list[str], max_chars: int) -> list[tuple[int, int]]:
-    """段落を表示長 ``max_chars`` 以下のページ（連続 index 範囲）に貪欲にまとめる。"""
+_HEADING_UNIT_RE = re.compile(r"^#{1,6}\s+\S")
+_FORMULA_ONLY_STRIP_RE = re.compile(
+    r"\[\[FORMULA_\d+\]\]|\$\$[\s\S]+?\$\$|!\[\[equation:[^\]]+\]\]|[\s。．.,，、:：;；]"
+)
+
+
+def _is_heading_unit(unit: str) -> bool:
+    """段落が見出しだけか（Markdown の ``#`` 見出し 1 行。IK-0976）。"""
+    text = str(unit or "").strip()
+    return bool(text) and "\n" not in text and bool(_HEADING_UNIT_RE.match(text))
+
+
+def _is_formula_only_unit(unit: str) -> bool:
+    """段落が式だけか（``[[FORMULA_N]]`` / ``$$…$$`` / 式の埋め込みと句読点だけ。IK-0976）。"""
+    text = str(unit or "").strip()
+    if not text:
+        return False
+    has_formula = bool(
+        _SLIDE_FORMULA_ID_RE.search(text) or "$$" in text or "![[equation:" in text
+    )
+    return has_formula and not _FORMULA_ONLY_STRIP_RE.sub("", text)
+
+
+_ANCHOR_EMBED_RE = re.compile(r"!\[\[(?:component|claim|source):[^\]]+\]\]")
+_ANCHOR_ONLY_STRIP_RE = re.compile(r"!\[\[(?:component|claim|source):[^\]]+\]\]|[\s。．.,，、:：;；]")
+
+
+def _is_anchor_embed_only_unit(unit: str) -> bool:
+    """段落が ⚓ の埋め込み（``![[component:…]]`` / ``![[claim:…]]`` / ``![[source:…]]``）だけか。
+
+    第 25 周 第 8 波（IK-0976）: 教材では節の末尾に置かれる根拠のチップなので、式だけの段落と同じく
+    直前の段落と結ぶ（次のスライドの先頭に回さない）。
+    """
+    text = str(unit or "").strip()
+    return bool(text) and bool(_ANCHOR_EMBED_RE.search(text)) and not _ANCHOR_ONLY_STRIP_RE.sub("", text)
+
+
+#: 「導入」「式・箇条書きの直後の解説」とみなす段落の上限（第 25 周 第 6 波 → 第 7 波・IK-0976）。
+#: 第 7 波で 1 文 → 2 文に広げた（実データの導入・解説は 2 文が多い — 第 7 周 t1 / t11）。
+_LEAD_IN_MAX_SENTENCES = 2
+_LEAD_IN_MAX_CHARS = 240
+_LIST_OR_TABLE_UNIT_RE = re.compile(r"^(?:[-*+]\s|\||\d+[.)]\s)")
+_LIST_UNIT_RE = re.compile(r"^(?:[-*+]\s|\d+[.)]\s)")
+
+
+def _is_short_lead_unit(unit: str, formula_lengths: dict[str, int] | None = None) -> bool:
+    """2 文までの短い散文の段落か（見出し・式だけ・箇条書き・表は除く。IK-0976 第 7 波）。"""
+    text = str(unit or "").strip()
+    if not text or "\n" in text or _is_heading_unit(text) or _is_formula_only_unit(text):
+        return False
+    if _LIST_OR_TABLE_UNIT_RE.match(text):
+        return False
+    if _display_length(text, formula_lengths) > _LEAD_IN_MAX_CHARS:
+        return False
+    return len(_sentence_units(text)) <= _LEAD_IN_MAX_SENTENCES
+
+
+
+def _is_list_unit(unit: str) -> bool:
+    """段落が箇条書きか（先頭行が ``- `` / ``* `` / ``1. `` 等。IK-0976 第 7 波）。"""
+    text = str(unit or "").strip()
+    return bool(text) and bool(_LIST_UNIT_RE.match(text))
+
+
+def _reading_blocks(
+    units: list[str], formula_lengths: dict[str, int] | None = None
+) -> list[tuple[int, int]]:
+    """段落を「読みの単位」（連続 index 範囲）に結ぶ（IK-0976。正本はここ 1 箇所）。
+
+    - 見出しだけの段落は**次の**段落と結ぶ（見出しをスライドの末尾に残さない）。
+    - 式だけの段落は**直前の**段落と結ぶ（式を導く文と式を別のスライドに分けない）。
+    - 第 25 周 第 6 波: 見出しの直後の**導入 1 文**（と ``：`` で終わる導入の段落）は、その次の
+      本体（箇条書き・表・本文）とも結ぶ（「見出し + 導入 1 文」でスライドが終わらない）。
+    - 第 25 周 第 6 波: 式だけの段落の**直後の解説 1 文**は式と結ぶ（解説 1 文だけのスライドを作らない）。
+    - 第 25 周 第 7 波: 上の「導入」「解説」は **2 文まで**（:func:`_is_short_lead_unit`）。加えて
+      **箇条書きの直後の解説**（2 文まで）は箇条書きと結ぶ（解説で次のスライドが始まらない）。
+    - 第 25 周 第 8 波: 「2 文まで・240 字」の判定は文中の小さな式を実文字数で数える
+      （:func:`formula_length_map`）。⚓ の埋め込みだけの段落は直前の段落と結ぶ。
+    結んだ単位が目安の 2 倍を超えるときは従来どおり段落で切る（:func:`_group_units_by_size`）。
+    境目は段落の境界のままなので、表示と読み上げの段落の対応（同じ index 境界）は崩さない。
+    """
+    blocks: list[list[int]] = []
+    join_next = False
+    lead_in_next = False  # 導入の段落が次（本体）を引き寄せている
+    for i, unit in enumerate(units):
+        after_formula = (
+            i > 0
+            and (_is_formula_only_unit(units[i - 1]) or _is_list_unit(units[i - 1]))
+            and _is_short_lead_unit(unit, formula_lengths)
+        )
+        # 導入が引き寄せるのは本体だけ（次の見出しは引き寄せない）。
+        pulled = join_next or (lead_in_next and not _is_heading_unit(unit))
+        if blocks and (
+            pulled or _is_formula_only_unit(unit) or _is_anchor_embed_only_unit(unit) or after_formula
+        ):
+            blocks[-1][1] = i + 1
+        else:
+            blocks.append([i, i + 1])
+        heading_lead = join_next and _is_short_lead_unit(unit, formula_lengths)
+        intro = str(unit or "").rstrip().endswith((":", "：")) and not _is_heading_unit(unit)
+        join_next = _is_heading_unit(unit)
+        lead_in_next = heading_lead or intro
+    return [(s, e) for s, e in blocks]
+
+
+def _group_units_by_size(
+    units: list[str], max_chars: int, formula_lengths: dict[str, int] | None = None
+) -> list[tuple[int, int]]:
+    """段落を表示長 ``max_chars`` 以下のページ（連続 index 範囲）に貪欲にまとめる。
+
+    詰める単位は段落ではなく :func:`_reading_blocks` の読みの単位（IK-0976）。結んだ単位が
+    目安を大きく（2 倍を超えて）上回るときだけ、その単位の中を段落の境界で切る。
+    """
     groups: list[tuple[int, int]] = []
     start = 0
     cur = 0
-    for i, unit in enumerate(units):
-        ulen = _display_length(unit)
-        if i > start and cur + ulen > max_chars:
-            groups.append((start, i))
-            start = i
+    for b_start, b_end in _reading_blocks(units, formula_lengths):
+        blen = sum(_display_length(units[i], formula_lengths) for i in range(b_start, b_end))
+        if b_start > start and cur + blen > max_chars:
+            groups.append((start, b_start))
+            start = b_start
             cur = 0
-        cur += ulen
+        if blen > max_chars * 2 and b_end - b_start > 1:
+            # 大き過ぎる単位: 単位の中を段落ごとに詰め直す（従来の規則に縮退）。
+            for i in range(b_start, b_end):
+                ulen = _display_length(units[i], formula_lengths)
+                if i > start and cur + ulen > max_chars:
+                    groups.append((start, i))
+                    start = i
+                    cur = 0
+                cur += ulen
+            continue
+        cur += blen
     groups.append((start, len(units)))
     return groups
 
 
-def _balance_units_into_n(units: list[str], n: int) -> list[tuple[int, int]] | None:
+def _balance_units_into_n(
+    units: list[str], n: int, formula_lengths: dict[str, int] | None = None
+) -> list[tuple[int, int]] | None:
     """段落をちょうど ``n`` 個の非空ページ（連続 index 範囲）に均す。作れなければ None。
 
     表示（display）が n ページに分かれたとき、読み上げ（spoken）も同数ページに揃えるための
@@ -766,7 +917,7 @@ def _balance_units_into_n(units: list[str], n: int) -> list[tuple[int, int]] | N
     """
     if n <= 0 or len(units) < n:
         return None
-    lengths = [_display_length(u) for u in units]
+    lengths = [_display_length(u, formula_lengths) for u in units]
     total = sum(lengths) or 1
     target = total / n
     ranges: list[tuple[int, int]] = []
@@ -815,14 +966,16 @@ def auto_paginate_slides(
     if _SLIDE_MARKER_RE.search(display_text or "") or _SLIDE_MARKER_RE.search(spoken_text or ""):
         return split_slides(display_text, spoken_text, formulas, figures)
 
-    if _display_length(display_text) <= max_chars:
+    # IK-0976 第 8 波: 文中の小さな式は実文字数・表示式だけ 60 字換算。
+    formula_lengths = formula_length_map(formulas)
+    if _display_length(display_text, formula_lengths) <= max_chars:
         return split_slides(display_text, spoken_text, formulas, figures)
 
     units_d = _paragraph_units(display_text)
     if len(units_d) < 2:
         return split_slides(display_text, spoken_text, formulas, figures)
 
-    groups_d = _group_units_by_size(units_d, max_chars)
+    groups_d = _group_units_by_size(units_d, max_chars, formula_lengths)
     if len(groups_d) < 2:
         return split_slides(display_text, spoken_text, formulas, figures)
 
@@ -837,7 +990,7 @@ def auto_paginate_slides(
             spoken_pages = ["\n\n".join(units_s[s:e]) for s, e in groups_d]
         else:
             # 構造が異なる → n ページへ比例分割（近似整合）。割れなければタイマー送りへ。
-            groups_s = _balance_units_into_n(units_s, n)
+            groups_s = _balance_units_into_n(units_s, n, formula_lengths)
             if groups_s is not None:
                 spoken_pages = ["\n\n".join(units_s[s:e]) for s, e in groups_s]
 
@@ -974,13 +1127,28 @@ def get_course_lecture_language(course_data: dict | None) -> str:
 
 
 def topic_student_material(topic: dict) -> str:
-    """トピックの授業用教材本文（表示ソース）を返す。student_material 最優先。"""
+    """トピックの授業用教材本文（表示ソース）を返す。student_material 最優先。
+
+    第 25 周 第 9 波（IK-1081）: 是正前の生成規則で保存された本文に残る教員宛ての作業メモの
+    「注」の段落（``> 注: 紐づく主張（claim）6件は…``）は、ここで外して受講者に届けない
+    （保存物は書き直さない — 外す判定の正本は ``course_content_builder.split_work_note_paragraphs``）。
+    IK-1156: 埋め込みを囲むバッククォートも同じく読み時で外す（``unwrap_backticked_embeds``）。
+    受講画面・講義・音声・readiness・原稿スタジオのプレビューが同じ本文を通る。
+    """
+    from core.course_content_builder import (  # 循環 import を避ける
+        split_work_note_paragraphs,
+        unwrap_backticked_embeds,
+    )
+
     material = topic.get("student_material")
     if isinstance(material, dict):
         text = str(material.get("source_text") or "").strip()
         if text:
-            return text
-    return str(topic.get("content") or topic.get("summary") or "").strip()
+            text = split_work_note_paragraphs(text)[0].strip()
+        if text:
+            # IK-1156: 埋め込みを囲むバッククォートは読み時で外す（保存物は書き換えない）。
+            return unwrap_backticked_embeds(text)
+    return unwrap_backticked_embeds(str(topic.get("content") or topic.get("summary") or "").strip())
 
 
 def topic_spoken_script(topic: dict) -> str:
@@ -1037,6 +1205,28 @@ def _normalize_formula_key(value: object) -> str:
     return key.strip().upper()
 
 
+def _equation_unit_reconstructed(*records: object) -> dict:
+    """同じ式（同じ id）の記録のどれかが復元なら ``{"reconstructed": True}``（式の単位の印・IK-0895）。
+
+    判定は ``learner_context_common.equation_latex_is_reconstructed`` だけを通す。印の文言と
+    表示の可否は後段の :func:`annotate_reconstructed_formulas` が同じ正本から付ける。
+    """
+    from core.learner_context_common import (
+        RECONSTRUCTION_CHECKED_KEY,
+        equation_latex_is_reconstructed,
+    )
+
+    for record in records:
+        if isinstance(record, dict) and record:
+            try:
+                if equation_latex_is_reconstructed(record):
+                    # 第 6 波（IK-0895）: 決まった答えとして運ぶ（写しの文字と原文の照合で引き直さない）。
+                    return {"reconstructed": True, RECONSTRUCTION_CHECKED_KEY: True}
+            except Exception:  # noqa: BLE001 — 印が決まらないなら付けない
+                continue
+    return {}
+
+
 def resolve_topic_formula_placeholders(
     text: str,
     topic: dict,
@@ -1085,6 +1275,9 @@ def resolve_topic_formula_placeholders(
                 "label": str(item.get("label") or ""),
                 "plain_text": plain_text,
                 "raw_text": raw_text,
+                # 第 25 周 第 5 波（IK-0895）: 印は式の記録の判定を式の単位で運ぶ
+                # （content_blocks の項目が復元なら写しにも同じ印）。
+                **_equation_unit_reconstructed(item),
             })
         return placeholder
 
@@ -1162,6 +1355,10 @@ def _resolve_equation_embeds(
                 # 読み上げは人間向けテキストを優先する（生 TeX を読み上げない）。
                 "spoken": plain_text or summary or body,
                 "is_display": True,
+                # 第 25 周 第 5 波（IK-0895）: 埋め込みは式の id を持つので、印は写しの LaTeX の
+                # 一致ではなく式の単位（同じ id の根拠リンクと content_blocks の記録のどちらかが
+                # 復元なら復元）で決める。描く LaTeX が根拠リンク側でも印が落ちない。
+                **_equation_unit_reconstructed(link or {}, block),
             })
             return placeholder
         # 解決できない場合は埋め込みを除去する（生テキストを見せない）
@@ -1290,10 +1487,54 @@ def build_topic_slides(
         ``([], "", "", [])``。図メタデータは ``slide_dicts[i]["figures"]``
         （スライド単位で割り当て済み）に含まれる。
     """
+    display_text, spoken_text, formulas, figures = prepare_topic_slide_input(topic, figures_by_id)
+    if not display_text and not spoken_text:
+        return [], "", "", []
+    slide_dicts, _mismatch = auto_paginate_slides(display_text, spoken_text, formulas, figures=figures)
+    return slide_dicts, display_text, spoken_text, formulas
+
+
+def _mark_reconstructed_formula_copies(formulas: list[dict], topic: dict) -> list[dict]:
+    """本文に書き写された式（``$…$`` から作った ``[[FORMULA_N]]`` 等）に、元の式の記録の
+    復元の印を引き直す（IK-0977。照合と判定の正本は ``learner_context_common``）。"""
+    from core.learner_context_common import latex_copy_is_reconstructed, reconstructed_latex_keys
+
+    records: list[dict] = list(_topic_block_formula_items(topic))
+    records.extend(
+        link for link in (topic or {}).get("evidence_links") or []
+        if isinstance(link, dict) and link.get("kind") == "equation"
+    )
+    keys = reconstructed_latex_keys(records)
+    out: list[dict] = []
+    for formula in formulas or []:
+        if (
+            isinstance(formula, dict)
+            and not formula.get("reconstructed")
+            and latex_copy_is_reconstructed(formula.get("latex"), keys)
+        ):
+            formula = dict(formula, reconstructed=True)
+        out.append(formula)
+    return annotate_reconstructed_formulas(out)
+
+
+def prepare_topic_slide_input(
+    topic: dict,
+    figures_by_id: dict[str, dict] | None = None,
+) -> tuple[str, str, list[dict], list[dict]]:
+    """スライド分割にかける前の入力を作る（配信とプレビューが共有する正本・IK-0975）。
+
+    display=student_material（無ければ content/summary）、spoken=spoken_script を、数式
+    プレースホルダー正規化・``![[equation:xxx]]`` 解決・``![[figure:xxx]]`` 解決のうえ返す。
+    式・図を一定の長さに数える形へ直すのはここだけで、:func:`build_topic_slides` と
+    原稿スタジオのプレビュー（``preview-split`` の ``auto_paginate``）の両方がこれを通る
+    （プレビューの「表示 N 枚」と学生の枚数・境目を同じ入力から出す）。
+
+    Returns ``(display_text, spoken_text, formulas, figures)``。教材が無ければ空。
+    """
     display_text = topic_student_material(topic)
     spoken_text = topic_spoken_script(topic)
     if not display_text and not spoken_text:
-        return [], "", "", []
+        return "", "", [], []
 
     evidence_links = topic.get("evidence_links") or []
     normalized, formulas = normalize_to_placeholder_format(display_text or spoken_text, [])
@@ -1311,9 +1552,9 @@ def build_topic_slides(
     # 読み上げ原稿には図を含めない（spoken_text からは埋め込みを除去する）。
     display_text, figures = resolve_figure_embeds(display_text, figures_by_id)
     spoken_text = strip_figure_embeds(spoken_text)
-
-    slide_dicts, _mismatch = auto_paginate_slides(display_text, spoken_text, formulas, figures=figures)
-    return slide_dicts, display_text, spoken_text, formulas
+    # IK-0977: 書き写された式にも、元の式の記録の復元の印を運ぶ（読む・講義・音声が同じ値）。
+    formulas = _mark_reconstructed_formula_copies(formulas, topic)
+    return display_text, spoken_text, formulas, figures
 
 
 def topic_material_delivery_segments(

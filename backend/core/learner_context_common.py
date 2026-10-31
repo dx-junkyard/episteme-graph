@@ -385,6 +385,9 @@ def equation_focus_label(label: str, element_id: str) -> str:
     ``eq_tex_b14`` のような合成 ID は見出しにしない（空 = 種別チップのみ）。
     """
     text = str(label or "").strip()
+    # IK-0681（第 9 波）: TeX の label キー（``eq:tovnet``）は印字番号ではない — 見出しにしない。
+    if text and _dp.is_tex_label_key(text):
+        text = ""
     if text and not looks_like_tex_math(text) and not is_internal_id_label(
         text, ELEMENT_EQUATION, element_id
     ):
@@ -440,9 +443,23 @@ def equation_latex_is_reconstructed(record: Any) -> bool:
     - 平坦形（``reconstructed`` 真偽値のみ）はその値を尊重する。
     """
     data = json_dict(record)
+    # 第 25 周 第 6 波（IK-0895）: 写し（凍結した content_blocks・根拠リンク）が生きた式の記録から
+    # 引いた状態を持つときは、それが答え（:func:`overlay_equation_reconstruction` が読み時に、
+    # 新しい freeze が書くときに付ける）。写しの文字と原文の照合では引き直さない。
+    if data.get(RECONSTRUCTION_CHECKED_KEY) is True:
+        return data.get("reconstructed") is True
     reconstruction = json_dict(data.get("reconstruction"))
     if not reconstruction:
-        return data.get("reconstructed") is True
+        if data.get("reconstructed") is not True:
+            return False
+        # 第 25 周 第 4 波（IK-0977 / IK-0895）: 平坦形（``chunks.formulas`` の旧い run）にも
+        # 「原文と一致する復元には印を付けない」を効かせる。原文の LaTeX（``source_latex``）か
+        # 原文（``raw_text``）と正規化後に一致するなら、表示する式は原文そのもの。
+        flat_latex = data.get("latex")
+        for source_key in ("source_latex", "raw_text"):
+            if reconstruction_matches_source(flat_latex, data.get(source_key)):
+                return False
+        return True
     status = str(reconstruction.get("status") or "none").strip()
     if not status or status == "none":
         return False
@@ -456,13 +473,303 @@ def equation_latex_is_reconstructed(record: Any) -> bool:
     return True
 
 
-def reconstructed_equation_note(record: Any) -> str | None:
+_COPY_LATEX_KEYS = ("latex", "latex_canonical", "normalized_latex")
+
+
+def reconstructed_latex_keys(records: Any) -> set[str]:
+    """復元の印が付く式の LaTeX を、写しと突き合わせるための鍵の集合にする（IK-0977）。
+
+    生成した教材本文の ``$…$``・記号の吹き出し・教材図スタジオの資料は式の記録の番地を
+    持たない写しなので、写しの LaTeX をこの鍵と（正規化後の完全一致で）照らして印を
+    引き直す。判定は :func:`equation_latex_is_reconstructed` だけを通す（印の正本は 1 つ）。
+    """
+    keys: set[str] = set()
+    for record in records or []:
+        if not isinstance(record, dict) or not equation_latex_is_reconstructed(record):
+            continue
+        for key in _COPY_LATEX_KEYS:
+            normalized = normalize_latex_for_comparison(record.get(key))
+            if normalized:
+                keys.add(normalized)
+    return keys
+
+
+def latex_copy_is_reconstructed(latex: Any, keys: set[str] | None) -> bool:
+    """式の写し（LaTeX）が、復元の印の付く式の記録と同じ式か（正規化後の完全一致・IK-0977）。
+
+    部分一致・近似一致は取らない（印を付け過ぎない側に倒す）。
+    """
+    if not keys:
+        return False
+    normalized = normalize_latex_for_comparison(latex)
+    return bool(normalized) and normalized in keys
+
+
+# ---------------------------------------------------------------------------
+# 生きた式の記録から引く復元の状態（第 25 周 第 6 波・IK-0895）
+# ---------------------------------------------------------------------------
+#
+# 凍結した写し（content_blocks の式・根拠リンク・講義の式）は、凍結の時点で式の記録が持って
+# いた復元の状態を載せていないことがある（旧い freeze）。部品の文脈とチャットは生きた記録
+# （採用 run の equation_semantics artifact・chunks.formulas）を読むので、画面ごとに印が
+# 食い違った。ここでは生きた記録の判定（:func:`equation_latex_is_reconstructed`）を式の id・
+# 印字番号・正規化した LaTeX の鍵で引ける索引にし、写しの判定はこの索引の答えを使う。
+
+#: 写しが「生きた式の記録から状態を引いた」ことを示すキー（値は ``reconstructed`` の真偽）。
+RECONSTRUCTION_CHECKED_KEY = "reconstruction_checked"
+
+_EQUATION_ID_KEYS = ("equation_id", "id", "target_id")
+_EQUATION_LATEX_KEYS = ("latex", "latex_canonical", "normalized_latex")
+
+
+def _equation_key_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.lower().startswith("equation:"):
+        text = text.split(":", 1)[1].strip()
+    if not text or text.startswith("[[") or text.upper().startswith("TOPIC_FORMULA_"):
+        return ""
+    return text
+
+
+def _equation_printed_key(record: dict) -> str:
+    """印字番号（``label`` — TeX の ``\\label`` キーは番号ではない）を鍵にする。"""
+    label = str(record.get("label") or "").strip().strip("()（）").strip()
+    if not label or _dp.is_tex_label_key(label) or len(label) > 12:
+        return ""
+    return label
+
+
+def _equation_latex_keys(record: dict, extra: Any = None) -> set[str]:
+    keys: set[str] = set()
+    values: list[Any] = [record.get(k) for k in _EQUATION_LATEX_KEYS]
+    reconstruction = json_dict(record.get("reconstruction"))
+    source = json_dict(record.get("source_extraction"))
+    values.extend([reconstruction.get("latex"), source.get("latex"), record.get("source_latex"), extra])
+    for value in values:
+        normalized = normalize_latex_for_comparison(value)
+        if normalized:
+            keys.add(normalized)
+    return keys
+
+
+class EquationReconstructionIndex:
+    """生きた式の記録（document 単位）の復元の判定を、写しの鍵で引く索引（純データ・DB 非依存）。
+
+    鍵は式の id → 印字番号 → 正規化した LaTeX の順に引く。同じ鍵の記録が複数あれば、
+    どれかが復元なら復元（式の単位の OR）。document が分からない写しで、鍵が論文ごとに
+    違う答えを持つときはその鍵では決めない（次の鍵へ）。どの鍵でも決まらなければ ``None``。
+    """
+
+    def __init__(self) -> None:
+        self._by_kind: dict[str, dict[str, dict[str, bool]]] = {"id": {}, "number": {}, "latex": {}}
+
+    def add(self, document_id: Any, record: Any) -> None:
+        if not isinstance(record, dict):
+            return
+        try:
+            answer = equation_latex_is_reconstructed(record)
+        except Exception:  # noqa: BLE001 — 判定できない記録は索引に入れない
+            return
+        doc = str(document_id or "").strip()
+        keys: dict[str, set[str]] = {
+            "id": {k for k in (_equation_key_id(record.get(n)) for n in _EQUATION_ID_KEYS) if k},
+            "number": {k for k in [_equation_printed_key(record)] if k},
+            "latex": _equation_latex_keys(record),
+        }
+        for kind, values in keys.items():
+            table = self._by_kind[kind]
+            for key in values:
+                per_doc = table.setdefault(key, {})
+                per_doc[doc] = per_doc.get(doc, False) or answer
+
+    def __bool__(self) -> bool:
+        return any(self._by_kind[k] for k in self._by_kind)
+
+    def _answer(self, kind: str, key: str, document_id: str) -> bool | None:
+        per_doc = self._by_kind[kind].get(key)
+        if not per_doc:
+            return None
+        if document_id and document_id in per_doc:
+            return per_doc[document_id]
+        answers = set(per_doc.values())
+        return answers.pop() if len(answers) == 1 else None
+
+    def lookup(self, record: Any, *, latex: Any = None, document_id: Any = None) -> bool | None:
+        data = json_dict(record)
+        doc = str(document_id or data.get("document_id") or "").strip()
+        for name in _EQUATION_ID_KEYS:
+            key = _equation_key_id(data.get(name))
+            if key:
+                found = self._answer("id", key, doc)
+                if found is not None:
+                    return found
+        number = _equation_printed_key(data)
+        if number:
+            found = self._answer("number", number, doc)
+            if found is not None:
+                return found
+        for key in sorted(_equation_latex_keys(data, latex)):
+            found = self._answer("latex", key, doc)
+            if found is not None:
+                return found
+        return None
+
+
+def build_equation_reconstruction_index(
+    records_by_document: dict[str, list[dict]] | None,
+) -> EquationReconstructionIndex:
+    """``{document_id: [式の記録…]}``（artifact の式・chunks.formulas の平坦形）から索引を作る。"""
+    index = EquationReconstructionIndex()
+    for document_id, records in (records_by_document or {}).items():
+        for record in records or []:
+            index.add(document_id, record)
+    return index
+
+
+def equation_is_reconstructed(
+    record: Any,
+    *,
+    latex: Any = None,
+    index: EquationReconstructionIndex | None = None,
+    document_id: Any = None,
+) -> bool:
+    """式 1 つが「AI が文脈から復元した式」か — 本文・講義・付録・部品の文脈・チャットの共通の答え。
+
+    索引（生きた式の記録）で鍵が引ければその答え、引けなければ記録自身の判定
+    （:func:`equation_latex_is_reconstructed`）。
+    """
+    if index:
+        try:
+            found = index.lookup(record, latex=latex, document_id=document_id)
+        except Exception:  # noqa: BLE001
+            found = None
+        if found is not None:
+            return found
+    try:
+        return equation_latex_is_reconstructed(record)
+    except Exception:  # noqa: BLE001 — 印が決まらないなら付けない
+        return False
+
+
+def overlay_equation_reconstruction(topic: Any, index: EquationReconstructionIndex | None) -> Any:
+    """トピックの写し（content_blocks の式・式の根拠リンク）に、索引から引いた状態を載せた複製を返す。
+
+    入力は mutate しない。索引で決まらない写しはそのまま（新しい freeze が書いた状態か、
+    写し自身の判定に任せる）。保存データは書き換えない（読み時だけ）。
+    """
+    if not isinstance(topic, dict) or not index:
+        return topic
+
+    def _stamp(item: dict) -> dict:
+        found = index.lookup(item)
+        if found is None:
+            return item
+        return {**item, "reconstructed": bool(found), RECONSTRUCTION_CHECKED_KEY: True}
+
+    out = dict(topic)
+    blocks = topic.get("content_blocks")
+    if isinstance(blocks, list):
+        new_blocks = []
+        for block in blocks:
+            if isinstance(block, dict) and block.get("type") == "equations":
+                block = {
+                    **block,
+                    "items": [
+                        _stamp(item) if isinstance(item, dict) else item
+                        for item in block.get("items") or []
+                    ],
+                }
+            new_blocks.append(block)
+        out["content_blocks"] = new_blocks
+    links = topic.get("evidence_links")
+    if isinstance(links, list):
+        out["evidence_links"] = [
+            _stamp(link) if isinstance(link, dict) and link.get("kind") == "equation" else link
+            for link in links
+        ]
+    return out
+
+
+#: 式として描けない壊れ方の印（置換文字・PDF の箇条書きの点）。第 25 周 第 5 波（IK-1008）で
+#: 箇条書きの点（結果の値の列挙が式の候補に入った形）を加えた。
+_BROKEN_LATEX_CHARS = frozenset("\ufffd\u2022")
+
+
+def is_broken_reconstructed_latex(latex: object) -> bool:
+    """AI 復元の LaTeX が表示に耐えない壊れ方をしているか（決定論・TRIAGE14）。
+
+    置換文字（U+FFFD）・箇条書きの点（U+2022）・C0 制御文字を含む / 数式本体が空で
+    ``\\tag{..}`` や句読点の断片だけ、を壊れているとみなす。判断に迷うものは壊れていない
+    側に倒す（情報を落とさない）。正本はここ（``core.lecture`` は再エクスポート）。
+    """
+    text = str(latex or "")
+    if not text.strip():
+        return True
+    if any(ch in _BROKEN_LATEX_CHARS for ch in text):
+        return True
+    if any(ord(ch) < 32 and ch not in "\n\t\r" for ch in text):
+        return True
+    body = re.sub(r"\\tag\*?\{[^}]*\}", "", text)
+    body = re.sub(r"[\s;,.:]", "", body)
+    return not body
+
+
+def equation_display_fields(
+    record: Any,
+    *,
+    latex: Any = None,
+    reconstructed: bool | None = None,
+    index: "EquationReconstructionIndex | None" = None,
+    document_id: Any = None,
+) -> dict:
+    """式 1 つの（確からしさの印・表示の可否）の組を返す正本（第 25 周 第 5 波・IK-1008 / IK-0895）。
+
+    記号の吹き出し・講義・読む表示・本文の写し・根拠の式・図スタジオの資料は、印と
+    「式として描いてよいか」をこの 1 関数から**式の単位で**受け取る（印だけを借りて
+    伏せる規則を借りない、を構造的に塞ぐ）。
+
+    - ``reconstructed`` を渡さなければ :func:`equation_latex_is_reconstructed` で判定する
+      （同じ式の記録が複数あるときは、呼び出し側が式の単位で OR を取って渡す）。
+      ``index`` を渡すと生きた式の記録（採用 run の artifact・chunks.formulas）から引く（第 6 波）。
+    - 復元でなければ空 dict（キーを足さない）。
+    - 復元なら ``reconstructed`` / ``reconstructed_mark`` / ``reconstructed_note``。
+      描く LaTeX（``latex``、省略時は ``record["latex"]``）が壊れていれば
+      ``latex: ""`` と ``latex_withheld: True`` も返す（事実文だけを残す）。
+    """
+    from core.label_vocab import RECONSTRUCTED_EQUATION_MARK  # 循環 import を避ける
+
+    if reconstructed is None:
+        # 第 6 波（IK-0895）: 生きた式の記録の索引があればその答え（:func:`equation_is_reconstructed`）。
+        reconstructed = equation_is_reconstructed(
+            record, latex=latex, index=index, document_id=document_id
+        )
+    if not reconstructed:
+        return {}
+    out: dict[str, Any] = {
+        "reconstructed": True,
+        "reconstructed_mark": RECONSTRUCTED_EQUATION_MARK,
+        "reconstructed_note": RECONSTRUCTED_EQUATION_NOTE,
+    }
+    target = latex if latex is not None else json_dict(record).get("latex")
+    if is_broken_reconstructed_latex(target):
+        out["latex"] = ""
+        out["latex_withheld"] = True
+    return out
+
+
+def reconstructed_equation_note(
+    record: Any,
+    *,
+    index: "EquationReconstructionIndex | None" = None,
+    document_id: Any = None,
+) -> str | None:
     """復元式に添える学習者向けの事実文（1行・数値なし）。該当しなければ ``None``。
 
     文言の正本は ``core/label_vocab.RECONSTRUCTED_EQUATION_NOTE``（JS 側にミラー
     しない）。confidence・一致度などの数値は**出さない** — 出るのはこの1文だけ。
+    判定は :func:`equation_is_reconstructed`（第 6 波・索引があれば生きた記録の答え）。
     """
-    if not equation_latex_is_reconstructed(record):
+    if not equation_is_reconstructed(record, index=index, document_id=document_id):
         return None
     return RECONSTRUCTED_EQUATION_NOTE
 

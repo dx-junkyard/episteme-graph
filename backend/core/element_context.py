@@ -643,7 +643,10 @@ def _project_mini_ref(value: Any) -> dict | None:
     if not element_type and not str(element_id or "").strip() and not label:
         return None
     is_symbol = element_type == _ITEM_TYPE_SYMBOL  # 記号は TeX でも遮断しない（§5.4）
-    if (not is_symbol and looks_like_tex_math(label)) or _is_internal_id_label(
+    # IK-0681（第 9 波）: TeX の label キー（``eq:tovnet``）も番号ではないので一般ラベルへ。
+    from core.display_projection import is_tex_label_key  # 遅延 import（推移的純粋性の保護）
+
+    if (not is_symbol and (looks_like_tex_math(label) or is_tex_label_key(label))) or _is_internal_id_label(
         label, element_type, element_id
     ):
         label = _generic_item_label(element_type)

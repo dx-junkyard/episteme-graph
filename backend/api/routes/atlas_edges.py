@@ -155,6 +155,45 @@ def _anchors_for(session, cartridge_id: str, skeleton_version: str) -> tuple:
         return ()
 
 
+def derived_origins_for_unrecorded(
+    session, cartridge_id: str, edge_keys, recorded: dict
+) -> dict:
+    """出所の記録が無い判断だけ、いまの導出の出所を引く（IK-0962・fail-soft）。
+
+    記録がある判断には触れない（採用の時点の記録が正）。現行の凍結版が無い・導出に
+    失敗したときは空 dict — 根拠の一文が「記録はありません」に留まるだけで、判断も
+    凍結のゲートも変わらない。読むのは保存済みアンカーだけ（embedding を呼ばない = RE6）。
+    """
+    missing = [
+        str(k or "").strip()
+        for k in (edge_keys or ())
+        if str(k or "").strip() and not (recorded or {}).get(str(k or "").strip())
+    ]
+    if not missing:
+        return {}
+    try:
+        frozen = atlas_store.load_learner_skeleton(cartridge_id, session)
+        if frozen is None:
+            return {}
+        version = str(getattr(frozen, "version", "") or "")
+        return edge_derive.derived_origins_for_keys(
+            session,
+            domain_key=cartridge_id,
+            skeleton=frozen,
+            edge_keys=missing,
+            anchors=_anchors_for(session, cartridge_id, version),
+        )
+    except Exception:  # noqa: BLE001 — 根拠の補いが作れなくても確認・凍結は止めない
+        logger.warning(
+            "atlas edges: derived origins skipped for %s", cartridge_id, exc_info=True
+        )
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # リクエストモデル
 # ---------------------------------------------------------------------------
@@ -175,6 +214,13 @@ class DecideEdgeCandidateRequest(BaseModel):
         description=(
             "候補の出所（vector | co_occurrence）。"
             "「なぜこの関係を立てられたか」の記録に変換する（概念レジストリ KR4）"
+        ),
+    )
+    from_node_id: str = Field(
+        default="",
+        description=(
+            "採用のときに教員が選ぶ記載の始点（依存では「依存する側」・IK-1149）。"
+            "この関係の 2 つの項目のどちらか。空なら向きを記録しない"
         ),
     )
 
@@ -263,7 +309,10 @@ def list_atlas_edge_candidates(
             ):
                 if decision["edge_key"] in derived_keys:
                     continue
-                _d, left, right = edge_schema.parse_edge_key(decision["edge_key"])
+                # IK-1149: 教員が選んだ記載の向き（無ければ従来の並び）。
+                left, right, _recorded = edge_schema.decision_direction(
+                    decision["edge_key"], decision
+                )
                 orphan_rows.append(
                     {
                         "edge_key": decision["edge_key"],
@@ -293,6 +342,7 @@ def list_atlas_edge_candidates(
 
     labels = _concept_labels(frozen, draft_row["skeleton"] if draft_row else None)
     draft_pairs = _draft_pair_set(draft_row["skeleton"]) if draft_row else set()
+    draft_directions = _draft_direction_map(draft_row["skeleton"]) if draft_row else {}
     # 判断済みを先頭の帯に（IK-0938）: 採用済み・未反映 → 下書きに入っている → 未判断。
     # 帯の中は導出の順（共起 → 近さ）のまま。畳み（cap_for_review）は入力の順を保つ。
     candidates = atlas_review_display.order_decided_first(
@@ -307,9 +357,11 @@ def list_atlas_edge_candidates(
     folded = False
     if not show_all:
         candidates, folded = edge_derive.cap_for_review(candidates, keep_keys=keep)
-    candidates = [_annotate_candidate(c, labels, draft_pairs) for c in candidates]
+    candidates = [
+        _annotate_candidate(c, labels, draft_pairs, draft_directions) for c in candidates
+    ]
     for item in orphaned:
-        _annotate_candidate(item, labels, draft_pairs)
+        _annotate_candidate(item, labels, draft_pairs, draft_directions)
         if not item.get("basis_line"):
             item["basis_line"] = atlas_review_display.PENDING_EDGE_BASIS_NONE
         item.pop("origins", None)
@@ -331,11 +383,27 @@ def list_atlas_edge_candidates(
     )
     if dismissed_note:
         payload["dismissed_note"] = dismissed_note
+    # IK-0993: 保存済みアンカーが無く、説明文の近さによる候補が出せないときは理由を言う
+    # （凍結の直後の構築中か、索引がまだ無いか）。共起由来の候補は出ているかもしれないので
+    # 一覧の上の注記（index_note）に置く（候補ゼロのときも同じ位置に出る = 空の理由）。
+    if not anchors:
+        try:
+            from core.atlas_vectors import builder as _vector_builder
+
+            building = _vector_builder.build_in_progress(cartridge_id)
+        except Exception:  # noqa: BLE001
+            building = False
+        index_note = (
+            atlas_review_display.EDGE_INDEX_BUILDING_NOTE
+            if building
+            else atlas_review_display.EDGE_INDEX_MISSING_NOTE
+        )
+        payload["index_note"] = index_note
     if folded:
         payload["folded_note"] = atlas_review_display.EDGE_FOLDED_NOTE
     if orphaned:
         payload["orphaned_decisions"] = orphaned
-        payload["orphaned_note"] = atlas_review_display.EDGE_ORPHANED_NOTE
+        payload["orphaned_note"] = atlas_review_display.orphaned_note(orphaned, edge=True)
     return payload
 
 
@@ -357,30 +425,94 @@ def _draft_pair_set(skeleton) -> set[tuple[str, str]]:
     return out
 
 
+def _draft_direction_map(skeleton) -> dict[tuple[str, str], tuple[str, str]]:
+    """下書きの辺の無向ペア → 記載の順 ``(from, to)``（同じペアが重複すれば最初の辺）。"""
+    out: dict[tuple[str, str], tuple[str, str]] = {}
+    for edge in getattr(skeleton, "edges", ()) or ():
+        a, b = str(edge.from_id or ""), str(edge.to_id or "")
+        if a and b:
+            out.setdefault(edge_schema.undirected_pair(a, b), (a, b))
+    return out
+
+
 def _annotate_candidate(
-    candidate: dict, labels: dict[str, str], draft_pairs: set[tuple[str, str]]
+    candidate: dict,
+    labels: dict[str, str],
+    draft_pairs: set[tuple[str, str]],
+    draft_directions: dict[tuple[str, str], tuple[str, str]] | None = None,
 ) -> dict:
-    """候補 1 件に表示の文（根拠・向き・下書きの状態）を足す（IK-0886 / IK-0887）。"""
+    """候補 1 件に表示の文（根拠・向き・下書きの状態）を足す（IK-0886 / IK-0887）。
+
+    IK-1149: 向きの文は、下書きに入っていれば下書きの辺の記載順（実際に公開される向き）、
+    入っていなければ判断に記録された向き、どちらも無ければ従来の並び + 「選ばれていない」事実文。
+    """
     basis = atlas_review_display.edge_basis_line(candidate.get("origins") or ())
     if basis:
         candidate["basis_line"] = basis
     decision = candidate.get("decision") if isinstance(candidate.get("decision"), dict) else None
     kind = str((decision or {}).get("edge_kind") or "")
+    pair = edge_schema.undirected_pair(candidate.get("from_id"), candidate.get("to_id"))
     if decision and decision.get("status") == edge_schema.DECISION_STATUS_ACCEPTED and kind:
-        left = str(candidate.get("from_id") or "")
-        right = str(candidate.get("to_id") or "")
+        left, right, recorded = edge_schema.decision_direction(
+            str(candidate.get("edge_key") or ""), decision
+        )
+        if not left:
+            left = str(candidate.get("from_id") or "")
+            right = str(candidate.get("to_id") or "")
+        drafted = (draft_directions or {}).get(pair)
+        if drafted is not None:
+            # 下書きの辺が公開される向きの正本（教員が下書きで入れ替えたときもそれを言う）。
+            recorded = recorded or drafted != (left, right)
+            left, right = drafted
+        # カードの見出し（A — B）も記載の向きで並べる（向きの文と食い違わせない）。
+        if left and right:
+            candidate["from_id"], candidate["to_id"] = left, right
+            candidate["from_label"] = labels.get(left, left)
+            candidate["to_label"] = labels.get(right, right)
+        # IK-1072（第 25 周 第 9 波）: 下書きに入った後は「記載されています」（反映前の未来形を残さない）。
         direction = atlas_review_display.edge_direction_line(
             kind,
             candidate.get("from_label") or labels.get(left, left),
             candidate.get("to_label") or labels.get(right, right),
+            in_draft=pair in draft_pairs,
         )
         if direction:
             candidate["direction_line"] = direction
-    pair = edge_schema.undirected_pair(candidate.get("from_id"), candidate.get("to_id"))
+        from core.label_vocab import edge_kind_is_directed
+
+        if not recorded and edge_kind_is_directed(kind):
+            candidate["direction_unrecorded_note"] = (
+                atlas_review_display.EDGE_DIRECTION_UNRECORDED_NOTE
+            )
     if pair in draft_pairs:
         candidate["in_draft"] = True
         candidate["in_draft_note"] = atlas_review_display.EDGE_IN_DRAFT
+        # H54（第 25 周 第 10 波）: 下書きに入った採用は見送れない（decide が 409 で断る）。画面は［見送り…］を出さない。
+        if decision and decision.get("status") == edge_schema.DECISION_STATUS_ACCEPTED:
+            candidate["dismiss_locked"] = True
+            candidate["dismiss_locked_note"] = atlas_review_display.EDGE_DISMISS_LOCKED_IN_DRAFT
     return candidate
+
+
+def _dismiss_locked_detail(session, cartridge_id: str, edge_key: str) -> str:
+    """採用済みの関係を見送れないときの事実文（H54）。見送れるなら空文字。
+
+    判断と次の公開版が食い違わないよう、次版の下書きがあれば「下書きに入っているか」で、
+    無ければ「公開中の版に入っているか」で判定する（下書きから外してあれば見送れる）。
+    """
+    _d, left, right = edge_schema.parse_edge_key(edge_key)
+    pair = edge_schema.undirected_pair(left, right)
+    draft_row = atlas_store.load_draft(session, cartridge_id)
+    if draft_row is not None:
+        if pair in _draft_pair_set(draft_row["skeleton"]):
+            return atlas_review_display.EDGE_DISMISS_LOCKED_IN_DRAFT
+        return ""
+    frozen = atlas_store.load_learner_skeleton(cartridge_id, session)
+    if frozen is not None and pair in _draft_pair_set(frozen):
+        return atlas_review_display.EDGE_DISMISS_LOCKED_IN_FROZEN.format(
+            version=str(getattr(frozen, "version", "") or "")
+        )
+    return ""
 
 
 def _project_own_decision(decision: dict | None, current_user: dict) -> dict | None:
@@ -435,6 +567,16 @@ def decide_atlas_edge_candidate(
             and existing.get("status") == edge_schema.DECISION_STATUS_ACCEPTED
             and str(existing.get("decided_by") or "").strip() != decided_by
         )
+        # H54（第 25 周 第 10 波）: 下書き・公開版に入った採用の見送りは 409（判断と版を食い違わせない）。
+        if (
+            action == edge_schema.ACTION_DISMISS
+            and existing
+            and existing.get("status") == edge_schema.DECISION_STATUS_ACCEPTED
+        ):
+            locked = _dismiss_locked_detail(session, cartridge_id, edge_key)
+            if locked:
+                session.rollback()
+                raise HTTPException(status_code=409, detail=locked)
         result = edge_store.decide(
             session,
             edge_key=edge_key,
@@ -445,6 +587,7 @@ def decide_atlas_edge_candidate(
             mapping_justification=_JUSTIFICATION_BY_ORIGIN.get(
                 str(body.origin or "").strip()
             ),
+            from_node_id=str(body.from_node_id or "") if action == edge_schema.ACTION_ACCEPT else "",
             record_audit=lambda **kwargs: pending_audits.append(dict(kwargs)),
         )
         if result is None:
@@ -483,10 +626,47 @@ def decide_atlas_edge_candidate(
                 ),
             },
         )
-    return {
+    response = {
         "cartridge_id": cartridge_id,
         "decision": _project_own_decision(result.get("decision"), current_user),
     }
+    # IK-0994: 判断の結果を組の名前で言う（見送りはカードが既定表示から消えるため）。
+    result_line = _decide_result_line(
+        cartridge_id, edge_key, action, str(body.kind or ""), result.get("decision")
+    )
+    if result_line:
+        response["result_line"] = result_line
+    return response
+
+
+def _decide_result_line(
+    cartridge_id: str, edge_key: str, action: str, kind: str = "", decision: dict | None = None
+) -> str:
+    """判断の結果文（fail-soft: 名前が引けなければ空文字 = 画面は従来どおり）。
+
+    IK-1149: 採用で教員が向きを選んだときは、その向き（判断の記載順）で言う。
+    """
+    session = None
+    try:
+        session = _session()
+        left, right, _recorded = edge_schema.decision_direction(edge_key, decision)
+        frozen = atlas_store.load_learner_skeleton(cartridge_id, session)
+        draft_row = atlas_store.load_draft(session, cartridge_id)
+        labels = _concept_labels(
+            *[s for s in (frozen, draft_row["skeleton"] if draft_row else None) if s is not None]
+        )
+        return atlas_review_display.edge_decide_result_line(
+            action, labels.get(left, ""), labels.get(right, ""), kind
+        )
+    except Exception:  # noqa: BLE001 — 結果文が作れなくても判断は成立している
+        logger.warning("atlas edges: decide result line skipped", exc_info=True)
+        return ""
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -514,17 +694,21 @@ def preview_atlas_edge_incorporation(
     """
     edge_key = str(body.edge_key or "").strip()
     _assert_edge_belongs_to_domain(edge_key, cartridge_id)
-    _domain, from_id, to_id = edge_schema.parse_edge_key(edge_key)
 
     session = _session()
     try:
         decision = edge_store.get_decision(session, edge_key)
         if decision is None or decision["status"] != edge_schema.DECISION_STATUS_ACCEPTED:
             raise HTTPException(status_code=409, detail=_DETAIL_NOT_ACCEPTED)
+        # IK-1149: 下書きに書く from → to は教員が採用のときに選んだ向き（無ければ従来の並び）。
+        from_id, to_id, direction_recorded = edge_schema.decision_direction(
+            edge_key, decision
+        )
         draft_row = _draft_or_409(session, cartridge_id)
         # 確認画面に写す帰属と根拠（IK-0939）。写しが作れなくても確認は出す（fail-soft）。
         context: dict = {}
         try:
+            recorded_origins = edge_store.origins_for_decisions(session, [edge_key])
             items = atlas_review_display.pending_freeze_items(
                 session,
                 edge_items=[
@@ -535,7 +719,10 @@ def preview_atlas_edge_incorporation(
                     }
                 ],
                 edge_label=lambda _item: "—",
-                edge_origins=edge_store.origins_for_decisions(session, [edge_key]),
+                edge_origins=recorded_origins,
+                edge_derived_origins=derived_origins_for_unrecorded(
+                    session, cartridge_id, [edge_key], recorded_origins
+                ),
             )
             context = items[0] if items else {}
         except Exception:  # noqa: BLE001
@@ -557,6 +744,13 @@ def preview_atlas_edge_incorporation(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     patched, validation = _apply_and_validate(draft_dict, built["patch"])
+    from core.label_vocab import edge_kind_is_directed
+
+    direction_note = (
+        atlas_review_display.EDGE_DIRECTION_UNRECORDED_NOTE
+        if not direction_recorded and edge_kind_is_directed(built["kind"])
+        else ""
+    )
     return {
         "cartridge_id": cartridge_id,
         "edge_key": edge_key,
@@ -571,6 +765,8 @@ def preview_atlas_edge_incorporation(
             _concept_labels(draft_row["skeleton"]).get(built["from_id"], built["from_id"]),
             _concept_labels(draft_row["skeleton"]).get(built["to_id"], built["to_id"]),
         ),
+        # IK-1149: 向きが採用のときに選ばれていない（記録なし）ときの事実文。選ばれていれば空文字。
+        "direction_note": direction_note,
         "patched_draft": patched,
         "validation": validation,
         "revision": draft_row["revision"],
@@ -660,11 +856,23 @@ def mark_atlas_edge_incorporated(
         },
     )
     labels = _concept_labels(draft_row["skeleton"])
+    # IK-1118（第 25 周 第 10 波）: 下書きに保存された辺の種別と記載順で言う（向きを落とさない）。
+    drawn_from, drawn_to, drawn_kind = from_id, to_id, str(decision.get("edge_kind") or "")
+    for edge in getattr(draft_row["skeleton"], "edges", ()) or ():
+        if edge_schema.undirected_pair(
+            getattr(edge, "from_id", ""), getattr(edge, "to_id", "")
+        ) == edge_schema.undirected_pair(from_id, to_id):
+            drawn_from = str(getattr(edge, "from_id", "") or from_id)
+            drawn_to = str(getattr(edge, "to_id", "") or to_id)
+            drawn_kind = str(getattr(edge, "kind", "") or drawn_kind)
+            break
     return {
         "cartridge_id": cartridge_id,
         "decision": _project_own_decision(decision, current_user),
         # 何を足したかを名指す結果文（IK-0938）。
-        "result_line": atlas_review_display.INCORPORATED_EDGE_RESULT.format(
-            label=f"{labels.get(from_id, from_id)} — {labels.get(to_id, to_id)}"
+        "result_line": atlas_review_display.incorporated_edge_result_line(
+            drawn_kind,
+            labels.get(drawn_from, drawn_from),
+            labels.get(drawn_to, drawn_to),
         ),
     }

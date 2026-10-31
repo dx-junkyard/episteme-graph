@@ -8,6 +8,9 @@
 「独立な支持線」= 資格付きエッジ（source_backing_status が source_backed /
 partially_source_backed のもの。review_required / inferred / 空文字＝フォールバック
 簡易 edge は数えない）だけを辿る、観測系 claim（root）から対象ノードまでのパス。
+主張の出現順の並び（claim チェーン由来ノードに接する辺）は「観測から支える経路」に数えない
+（IK-1048 / 2026-10-28 第 7 波。判定の正本は依存グラフと同じ ``dependency.is_claim_sequence_edge`` と
+``DependencyGraph.claim_sequence_node_ids`` — 負荷・反実仮想（IK-1030）と同じ 1 つの判定）。
 dependency.DependencyGraph は edge の source_backing_status を保持しない
 （build_dependency_graph は非改変）ため、このモジュールは独自に graph_json を
 読んで資格フィルタを適用する。
@@ -29,9 +32,15 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core import display_projection as _dp
-from core.doubt.dependency import DependencyGraph, build_dependency_graph, seed_nodes_for_target
+from core.doubt.dependency import (
+    DependencyGraph,
+    build_dependency_graph,
+    is_claim_sequence_edge,
+    seed_nodes_for_target,
+)
 from core.doubt.scope import document_scope_clause, normalize_document_ids
 from core.doubt.observation_targets import observation_claim_targets
+from core.element_vocab import theory_stage_display_label
 from core.knowledge_objects.references import normalize_claim_ref
 
 logger = logging.getLogger(__name__)
@@ -53,6 +62,10 @@ _MAX_OBSERVATION_ROOTS = 5
 # 段階の事実文（SL1: 分野レベルの不在言明を作らず、コーパス内の記録の有無だけを言う）
 FACT_LINE_NONE = "この対象への、観測記録からの支持線はこのコーパスの中では見つかりません。"
 FACT_LINE_SEVERAL = "この対象は複数の独立した支持線に支えられています。"
+#: IK-1057 残り: 単一の支持線の切れ目が主グラフの集約ノードのときに添える事実文（段の集約を通る）。
+SUPPORT_LINE_AGGREGATE_NOTE_TEMPLATE = (
+    "（{labels}は理論の段をまとめたノードで、この支持線はその段の集約を通ります）"
+)
 
 
 def _as_list(value: Any) -> list:
@@ -72,10 +85,12 @@ def _graph_payload(raw: Any) -> dict:
 
 
 def _qualified_adjacency(
-    session, document_ids, node_ids: set[str],
+    session, document_ids, node_ids: set[str], *, excluded_node_ids=frozenset(),
 ) -> dict[str, set[str]]:
     """資格付きエッジ（source_backing_status が source_backed /
     partially_source_backed）の隣接リストを graph_json から直接読む。
+
+    ``excluded_node_ids``（claim チェーン由来ノード）に接する辺は数えない（IK-1048）。
 
     範囲は document 集合（``core/doubt/scope.py`` — 空なら SQL を出さない。IK-0852）。
     """
@@ -106,6 +121,8 @@ def _qualified_adjacency(
                 continue
             backing = str(edge.get("source_backing_status") or "").strip()
             if backing not in _QUALIFIED_BACKING_STATUSES:
+                continue
+            if is_claim_sequence_edge(source, target, excluded_node_ids):
                 continue
             adjacency.setdefault(source, set()).add(target)
     return adjacency
@@ -200,6 +217,8 @@ def _readable_member_label(label: Any) -> str:
     text = str(label or "").strip()
     if not text or _dp.is_internal_id_token(text):
         return _dp.UNIDENTIFIED_ELEMENT_TEXT
+    # IK-0901: 主グラフの集約ノードのラベルは英語の段の名前（#308）。事実文には日本語の段名で出す。
+    text = theory_stage_display_label(text) or text
     return _dp.mask_internal_ids(text)
 
 
@@ -294,15 +313,23 @@ def build_support_context(
     session,
     *,
     document_ids,
+    exclude_claim_sequence_edges: bool = True,
+    claim_sequence_resolver=None,
 ) -> SupportPathContext | None:
     """document 集合の範囲の共有文脈を1回だけ構築する（fail-soft: 失敗時は None）。
 
     範囲は ``document_ids``（必須・IK-0852）。空集合はグラフが空になり、対象は解決されない。
+    ``exclude_claim_sequence_edges`` は既定 True（IK-1048）。False は仮説の確かめの読み取り
+    （:func:`compare_support_lines_with_and_without`）だけが渡す。
     """
     document_ids = normalize_document_ids(document_ids)
 
     try:
-        graph = build_dependency_graph(session, document_ids=document_ids)
+        graph = build_dependency_graph(
+            session, document_ids=document_ids,
+            exclude_claim_sequence_edges=exclude_claim_sequence_edges,
+            claim_sequence_resolver=claim_sequence_resolver,
+        )
     except Exception:
         logger.warning("support path dependency graph build failed", exc_info=True)
         return None
@@ -313,7 +340,10 @@ def build_support_context(
         logger.warning("support path observation target lookup failed", exc_info=True)
         obs_targets = []
 
-    adjacency = _qualified_adjacency(session, document_ids, graph.node_ids)
+    adjacency = _qualified_adjacency(
+        session, document_ids, graph.node_ids,
+        excluded_node_ids=frozenset(graph.claim_sequence_node_ids),
+    )
     return SupportPathContext(graph=graph, obs_targets=obs_targets, adjacency=adjacency)
 
 
@@ -406,6 +436,17 @@ def compute_support_lines_from_context(
             f"この対象は単一の支持線に立っています。"
             f"『{labels}』が同時に崩れると、観測からの支持が途切れます。"
         )
+        # IK-1057 残り（第 25 周 第 10 波・審判推奨）: 切れ目が主グラフの集約ノード（理論の段を
+        # まとめたノード）なら、その名前が 1 つの主張ではなく段の集約であることを事実で添える
+        # （集約ノードを根・切れ目にしてよいかの判断は未決のまま据え置く）。
+        aggregate_labels = [
+            m["label"] for m in cut_members
+            if (graph.node_layers.get(m["node_id"]) or "main") == "main"
+        ]
+        if aggregate_labels:
+            fact_line += SUPPORT_LINE_AGGREGATE_NOTE_TEMPLATE.format(
+                labels="、".join(f"『{lab}』" for lab in aggregate_labels)
+            )
         return {
             "level": "single",
             "fact_line": fact_line,
@@ -442,3 +483,55 @@ def compute_support_lines(
     """
     ctx = build_support_context(session, document_ids=document_ids)
     return compute_support_lines_from_context(ctx, target_type, target_id)
+
+
+def compare_support_levels(
+    ctx_with: SupportPathContext | None,
+    ctx_without: SupportPathContext | None,
+    rows,
+) -> list[dict]:
+    """同じ台帳行の支持線の段階を、出現順の辺あり / なしで並べる（IK-1048 の仮説の確かめ・純関数）。
+
+    ``rows`` は ``(target_id, target_type)`` の列。戻り値は段階語（none / single / several / None）のみで、
+    経路数・容量は出さない（SL4）。
+    """
+    out: list[dict] = []
+    for target_id, target_type in rows or []:
+        with_lines = compute_support_lines_from_context(ctx_with, target_type, target_id)
+        without_lines = compute_support_lines_from_context(ctx_without, target_type, target_id)
+        out.append({
+            "target_type": str(target_type),
+            "target_id": str(target_id),
+            "with_sequence_edges": (with_lines or {}).get("level"),
+            "without_sequence_edges": (without_lines or {}).get("level"),
+        })
+    return out
+
+
+def compare_support_lines_with_and_without(session, *, document_id: str) -> list[dict]:
+    """1 論文の台帳行を出現順の辺あり / なしで支持線の段階を並べる読み取り（書き込みなし）。"""
+    document_id = str(document_id or "").strip()
+    if not document_id:
+        return []
+    clause = document_scope_clause([document_id])
+    if clause is None:
+        return []
+    where, params = clause
+    try:
+        rows = session.execute(
+            sa_text(f"""
+                SELECT target_id, target_type
+                FROM epistemic_ledger
+                WHERE {where}
+                ORDER BY target_type, target_id
+            """),
+            params,
+        ).fetchall()
+    except Exception:
+        logger.warning("support line comparison ledger lookup failed", exc_info=True)
+        return []
+    ctx_with = build_support_context(
+        session, document_ids=[document_id], exclude_claim_sequence_edges=False,
+    )
+    ctx_without = build_support_context(session, document_ids=[document_id])
+    return compare_support_levels(ctx_with, ctx_without, [(r[0], r[1]) for r in rows or []])

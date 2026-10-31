@@ -77,6 +77,7 @@ from routes import llm_usage as llm_usage_routes
 from routes import llm_models as llm_models_routes
 from routes import personal_map as personal_map_routes
 from routes import my_records as my_records_routes
+from routes import my_profile as my_profile_routes  # IK-1007: 人に見せる名前（本人のみ）
 from routes import landscape as landscape_routes
 from routes import paper_discovery as paper_discovery_routes
 from routes import corpus as corpus_routes
@@ -434,6 +435,8 @@ app.include_router(personal_map_routes.me_router)
 # わたしの記録（主権台帳v1、trace_registry_sovereignty_ledger_design.md §3.3）。
 # 読み取り専用・本人のみ（/api/me 配下、personal_map.me_router と同型）。
 app.include_router(my_records_routes.me_router)
+# 人に見せる名前の登録（本人のみ・migration 094。IK-0848 / IK-1007）。
+app.include_router(my_profile_routes.me_router)
 # 知識ランドスケープ（knowledge_landscape_design.md §9.2）の学習者向け読み取り。
 # ルーター自身が /api/learning プレフィックスを持つため追加 prefix は付けない。
 app.include_router(landscape_routes.learning_router)

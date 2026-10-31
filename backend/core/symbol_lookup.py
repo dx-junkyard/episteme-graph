@@ -19,7 +19,7 @@
   載せない。載せるのは ``unit`` / ``scope_label`` / 出所（論文タイトル）。
 - **KR8 閉世界の正直さ**: 「この記号はどこにも定義が無い」とは言わない。言えるのは
   「**この論文には**定義の記述が見つかりませんでした」だけ。順序が解けないときも
-  黙って先頭を出さず「位置を特定できないため、最初の定義を表示しています」と書く。
+  黙って先頭を出さず「論文の中で最初に定義されている箇所を表示しています（…）」と書く（IK-0961 で文言を学生向けに）。
 - **KR10 権限 fail-closed**: ``document_ids``（= 受講コースの sources）を
   ``document_id = ANY(CAST(:doc_ids AS uuid[]))`` で **SQL の中で**強制する。
   空集合なら SQL を発行せずに「記号が見つからない」へ落とす。
@@ -42,6 +42,7 @@ from core.latex_display import delimit_bare_tex
 from core.learner_context_common import is_uuid
 from core.schema import NON_SOURCE_TEXT_CLAIM_ORIGINS
 from core.text_hygiene import strip_control_sequences
+from core.theory_modules.schema import strip_tex_spacing
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,15 @@ FACT_DEFINED_LATER = "この位置より後で定義されています。"
 FACT_NO_DEFINITION = "この論文には定義の記述が見つかりませんでした。"
 
 #: タップ位置の順序が解けなかったとき（黙って先頭を出さない）。
-FACT_POSITION_UNKNOWN = "位置を特定できないため、最初の定義を表示しています。"
+#: IK-0961: 内部事情（位置の解決）ではなく、学生に見えている事実で言う。
+FACT_POSITION_UNKNOWN = "論文の中で最初に定義されている箇所を表示しています（いま見ている位置との前後は分かりません）。"
+
+#: 記号の適用範囲の学生向けの言い方（IK-0961。キーは element_vocab.SYMBOL_SCOPE_LABELS と同じ）。
+LEARNER_SYMBOL_SCOPE_LABELS: dict[str, str] = {
+    "equation_local": "この式の中で定義されています",
+    "section": "この節の中で定義されています",
+    "document": "論文全体で使われます",
+}
 
 #: 記号レジストリに当該記号の行が1つも無いとき（IK-0386。``available=False`` を
 #: 事実文なしで返さない）。主語は「このコースの論文」— 分野レベルの不在は言わない（KR8）。
@@ -250,6 +259,8 @@ def symbol_key(value: Any) -> str:
     if not text:
         return ""
     text = text.replace("$", "")
+    # TeX の間隔命令（``F_{\\!EOS}`` の ``\\!``）は見た目だけ — 落とす（IK-1022。正本は theory_modules.schema）。
+    text = strip_tex_spacing(text)
     text = _FONT_COMMANDS_RE.sub("", text)
     text = _TEX_COMMAND_RE.sub(lambda m: _TEX_GREEK.get(m.group(1), "\\" + m.group(1)), text)
     for src, dst in _UNICODE_VARIANTS.items():
@@ -335,7 +346,7 @@ def _load_equation_positions(session: Any, document_ids: list[str]) -> dict[tupl
             sa_text(
                 """
                 SELECT document_id::text AS document_id, agent_equation_id,
-                       block_id, page, label, latex
+                       block_id, page, label, latex, agent_payload
                   FROM knowledge_equations
                  WHERE document_id = ANY(CAST(:doc_ids AS uuid[]))
                    AND superseded_at IS NULL
@@ -395,7 +406,23 @@ def _load_document_titles(session: Any, document_ids: list[str]) -> dict[str, st
         .mappings()
         .fetchall()
     )
-    return {str(r.get("id") or ""): _clean(r.get("title")) for r in (rows or [])}
+    titles = {str(r.get("id") or ""): _clean(r.get("title")) for r in (rows or [])}
+    # 第 25 周 第 10 波: 題名が arXiv 番号そのもの・空の取り込みは、論文の呼び方の正本
+    # （``document_refs.resolve_paper_titles`` — 同じ論文の別の取り込み → arXiv の写し）で引き直す。
+    # 兄弟の範囲はコースの sources（``document_ids``）に限る（広げない）。外部 API は呼ばない。
+    from core.document_refs import resolve_paper_titles, title_is_readable  # 遅延 import
+
+    unreadable = [d for d, t in titles.items() if not title_is_readable(t)]
+    if unreadable:
+        try:
+            resolved = resolve_paper_titles(session, unreadable, sibling_ids=document_ids)
+        except Exception:  # noqa: BLE001 — 引けなければ保存値のまま（fail-soft）
+            resolved = {}
+        for doc_id in unreadable:
+            better = _clean(resolved.get(doc_id))
+            if title_is_readable(better):
+                titles[doc_id] = better
+    return titles
 
 
 def _load_concept_ref(session: Any, *, document_id: str, agent_symbol_id: str) -> Optional[dict]:
@@ -415,9 +442,14 @@ def _load_concept_ref(session: Any, *, document_id: str, agent_symbol_id: str) -
             session.execute(
                 sa_text(
                     """
-                    SELECT e.id::text AS entry_id, e.name AS name, e.entry_type AS entry_type
+                    SELECT e.id::text AS entry_id,
+                           COALESCE(NULLIF(fv.content->>'name', ''), e.name) AS name,
+                           e.entry_type AS entry_type
                       FROM element_identity_links l
                       JOIN library_entries e ON e.id = l.shared_part_id
+                      -- IK-0954: 学生は凍結版だけを読む（凍結版の無いエントリは JOIN で落ちる）。
+                      JOIN library_entry_versions fv
+                        ON fv.entry_id = e.id AND fv.version_no = e.latest_version_no
                      WHERE l.instance_element_type = 'symbol'
                        AND l.status = 'confirmed'
                        AND l.instance_element_id = :symbol_id
@@ -524,6 +556,51 @@ def _other_documents_fact(titles: dict[str, str], other_docs: list[str]) -> str:
     return FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS.format(titles="・".join(names))
 
 
+_LATEX_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
+_SYMBOL_ARGUMENT_RE = re.compile(r"\s*\(.*\)\s*$")
+
+
+def _symbol_base(name: Any) -> str:
+    """記号名から引数（``m(r)`` の ``(r)``）と外側の ``$`` を外した本体。"""
+    text = str(name or "").strip().strip("$").strip()
+    return _SYMBOL_ARGUMENT_RE.sub("", text).strip()
+
+
+def equation_defines_symbol(latex: Any, symbol_names: Any) -> bool:
+    """式の左辺（最初の ``=`` より前）に記号が現れるか（第 25 周 第 6 波・IK-1033・決定論）。
+
+    ``=`` を持たない式は判定しない（True — 落とさない側）。記号名が取れないときも True。
+    ``\\frac{dm}{dr}`` のような微分の左辺は ``d`` を外して見る。判断に迷うものは定める側に倒す
+    のではなく、**左辺に記号の字が無いことが確かなときだけ** False にする。
+    """
+    text = str(latex or "")
+    if "=" not in text:
+        return True
+    lhs = text.split("=", 1)[0]
+    bases = [b for b in (_symbol_base(n) for n in (symbol_names or [])) if b]
+    if not bases:
+        return True
+    for base in bases:
+        if base.startswith("\\"):
+            command = re.match(r"\\[A-Za-z]+", base)
+            if command and re.search(re.escape(command.group(0)) + r"(?![A-Za-z])", lhs):
+                return True
+            continue
+        core_name = _LATEX_COMMAND_RE.sub(" ", base).strip() or base
+        cleaned = _LATEX_COMMAND_RE.sub(" ", lhs)
+        cleaned = re.sub(r"(?<![A-Za-z])d(?=[A-Za-z])", " ", cleaned)
+        letters = re.sub(r"[^A-Za-z0-9]", "", core_name)
+        if not letters:
+            if core_name in lhs:
+                return True
+            continue
+        if re.search(r"(?<![A-Za-z])" + re.escape(letters[0]) + r"(?![A-Za-z])", cleaned) and (
+            len(letters) == 1 or re.search(re.escape(letters), re.sub(r"[^A-Za-z0-9]", "", cleaned))
+        ):
+            return True
+    return False
+
+
 def _definition_candidates(
     symbol_row: dict,
     *,
@@ -538,6 +615,7 @@ def _definition_candidates(
     抜き出した「定義の文」で、evidence 行は本文の根拠箇所）。
     """
     document_id = str(symbol_row.get("document_id") or "")
+    symbol_names = [symbol_row.get("canonical_symbol"), *_as_list(symbol_row.get("notation_variants"))]
     texts = [_clean(t, limit=_MAX_DEFINITION_CHARS) for t in _as_list(symbol_row.get("definition_evidence_texts"))]
     texts = [t for t in texts if t]
 
@@ -554,6 +632,14 @@ def _definition_candidates(
         latex = ""
         if source == "equation":
             latex = _clean(row.get("latex"), limit=_MAX_DEFINITION_CHARS)
+            # 第 25 周 第 6 波（IK-1033）: 定義の文に添える式は、その記号を**左辺で定める**式だけ。
+            # 記号表の defining_equation_ids に別の式（境界条件など）が混ざっても、左辺に記号が
+            # 無い式は添えない（文と式が別の対象を指す吹き出しを作らない）。
+            if latex and not equation_defines_symbol(latex, symbol_names):
+                if not text:
+                    return  # 文も無い — 「式 (N) で定義」と言える式ではないので候補にしない
+                latex = ""
+                row = {k: v for k, v in row.items() if k != "label"}
             if not text and row:
                 # IK-0869: 記号レジストリは「式だけで定義された記号」を正規に作る（逐語の
                 # 定義文が無い）。以前はここで候補ごと捨てていたので、定義式が教材に見えている
@@ -563,9 +649,14 @@ def _definition_candidates(
             {
                 "source": source,
                 "text": text,
-                "equation_label": _clean(row.get("label")) if source == "equation" else "",
+                # IK-0681（第 7 波）: TeX の label キー（``eq:tov_residual``）は印字番号ではない — 出さない。
+                "equation_label": _printed_equation_label(row.get("label")) if source == "equation" else "",
                 "latex": latex,
                 "order": _order_key(row.get("block_id"), row.get("page"), block_order),
+                # IK-0977: 定義式が AI の復元した式なら印を運ぶ（agent_payload は式の記録の全体）。
+                "reconstructed": bool(
+                    source == "equation" and latex and _registry_latex_is_reconstructed(row.get("agent_payload"))
+                ),
             }
         )
 
@@ -975,15 +1066,39 @@ def _plain_symbol_re(symbol: str) -> Optional["re.Pattern[str]"]:
     return re.compile(r"(?<![\w\\])" + re.escape(text) + r"(?!\w)")
 
 
+_SPLIT_SUBSCRIPT_KEY_RE = re.compile(r"^([^\W\d_]{1,3})_([^\W_]{1,4})$")
+
+
+def _split_subscript_re(wanted: str) -> Optional["re.Pattern[str]"]:
+    """PDF の文字層で添字が割れた形（``N c`` / ``Nc`` / ``N_c``）を地の文で探す正規表現（IK-1157）。
+
+    照合キーが「英字 1〜3 字 + ``_`` + 英数字 1〜4 字」の記号だけ。基底が 1 字の記号は誤一致を
+    避けるため、後ろに関係記号（``=`` ``≈`` ``<`` …）か数値が続く形に限る（「N c = 64」）。
+    数式区間（``$…$``）の照合は従来どおりで、ここは数式の外の地の文だけを見る。
+    """
+    match = _SPLIT_SUBSCRIPT_KEY_RE.match(wanted or "")
+    if not match:
+        return None
+    base, sub = match.group(1), match.group(2)
+    body = r"(?<![\w\\])" + re.escape(base) + r"(?:[ \t]|_)?" + re.escape(sub) + r"(?!\w)"
+    if len(base) == 1:
+        body += r"(?=\s*(?:[=≈~<>≤≥∼]|\d))"
+    return re.compile(body)
+
+
 def _mentions_symbol(text: str, wanted: str, plain_re: Optional["re.Pattern[str]"]) -> bool:
     for span in _DOLLAR_MATH_RE.findall(text):
         key = symbol_key(span)
         if key == wanted or _contains_symbol(key, wanted):
             return True
+    outside = _DOLLAR_MATH_RE.sub(" ", text)
     if plain_re is not None:
-        outside = _DOLLAR_MATH_RE.sub(" ", text)
         if plain_re.search(outside):
             return True
+    # 第 25 周 第 11 波（IK-1157）: 添字が空白で割れた形（PDF の文字層）も同じ記号として数える。
+    split_re = _split_subscript_re(wanted)
+    if split_re is not None and split_re.search(outside):
+        return True
     return False
 
 
@@ -1042,7 +1157,15 @@ def _claim_mentions(session: Any, document_ids: list[str], *, symbol: str) -> li
         if not quoted or quoted in seen:
             continue
         seen.add(quoted)
-        out.append({"text": quoted})
+        mention = {"text": quoted}
+        # 第 25 周 第 7 波（IK-0571 の studio 側）: 使われ方の例文は原文の引用。原文の言語の
+        # ままなら「（原文）」の印を添える（翻訳はしない・LLM 0 回）。
+        from core.label_vocab import ORIGINAL_TEXT_MARK  # 遅延 import（推移的純粋性の保護）
+        from core.text_excerpt import is_untranslated_text
+
+        if is_untranslated_text(quoted):
+            mention["original_mark"] = ORIGINAL_TEXT_MARK
+        out.append(mention)
         if len(out) >= _MAX_CLAIM_MENTIONS:
             break
     return out
@@ -1090,15 +1213,31 @@ def _contains_symbol(haystack: str, needle: str) -> bool:
 
 
 def _where_text(labels: list[str], unlabeled: bool) -> str:
-    parts = [f"式 ({label})" for label in labels[:_MAX_FALLBACK_LABELS]]
+    # IK-0681（第 9 波）: 呼び名と同じ判定を通す（TeX の label キーは番号ではない — 番号の無い式として数える）。
+    printed = [label for label in (_printed_equation_label(raw) for raw in labels) if label]
+    if len(printed) < len([raw for raw in labels if _clean(raw)]):
+        unlabeled = True
+    parts = [f"式 ({_clean(label, limit=12)})" for label in printed[:_MAX_FALLBACK_LABELS]]
     if unlabeled and len(parts) < _MAX_FALLBACK_LABELS:
         parts.append("番号の無い式")
     return "・".join(parts)
 
 
+def _printed_equation_label(label: Any) -> str:
+    """論文の印字番号だけを返す（TeX の label キー ``eq:…`` は空にする — IK-0681・第 7 波）。
+
+    判定の正本は ``core.display_projection.is_tex_label_key``（新しい判定表を作らない）。
+    """
+    from core.display_projection import is_tex_label_key
+
+    cleaned = _clean(label)
+    # 切り詰め済みの値（末尾「…」）が来ても判定をすり抜けない（IK-0681・第 9 波）。
+    return "" if not cleaned or is_tex_label_key(cleaned.rstrip("…").rstrip()) else cleaned
+
+
 def _equation_name(label: Any) -> str:
     """式の呼び名（印字番号があれば「式 (3)」、無ければ「番号の無い式」）。"""
-    cleaned = _clean(label, limit=12)
+    cleaned = _clean(_printed_equation_label(label), limit=12)
     return f"式 ({cleaned})" if cleaned else "番号の無い式"
 
 
@@ -1192,7 +1331,8 @@ def _formula_fallback(
             latex = str(formula.get("latex") or "")
             if not latex.strip():
                 continue
-            label = _clean(formula.get("label"), limit=12)
+            # IK-0681（第 9 波）: 印字番号かどうかの判定は切り詰めの前に（「eq:tov_resid…」は判定をすり抜けた）。
+            label = _printed_equation_label(formula.get("label"))
             lhs = latex.split("=", 1)[0] if "=" in latex else ""
             lhs_key = _strip_argument(_loose_symbol_key(lhs))
             bucket = None
@@ -1212,8 +1352,15 @@ def _formula_fallback(
                 entry["unlabeled"] = True
             # IK-0870: 番号の無い式も画面で名指せるよう、式本文を一緒に返す（数式として描く）。
             if len(entry["equations"]) < _MAX_FALLBACK_LABELS:
+                shown_latex = _clean(latex, limit=_MAX_DEFINITION_CHARS)
                 entry["equations"].append(
-                    {"name": _equation_name(label), "latex": _clean(latex, limit=_MAX_DEFINITION_CHARS)}
+                    {
+                        "name": _equation_name(label),
+                        "latex": shown_latex,
+                        # IK-0977 / IK-1008: 教材・講義と同じ印と表示の可否（壊れた復元は
+                        # latex を空にして latex_withheld）。正本は learner_context_common。
+                        **_reconstructed_mark_fields(formula, latex=shown_latex),
+                    }
                 )
 
     if registered:
@@ -1238,11 +1385,45 @@ def _formula_fallback(
         "symbol": display_symbol,
         "definition": None,
         "facts": facts,
-        "equations": [eq for eq in entry["equations"] if eq.get("latex")],
+        "equations": [eq for eq in entry["equations"] if eq.get("latex") or eq.get("latex_withheld")],
         "source": titles.get(document_id, ""),
         "concept_ref": None,
         "registered": registered,
     }
+
+
+def _reconstructed_mark_fields(record: Any, *, latex: Any = None) -> dict:
+    """式の記録が AI の復元した式なら、教材・講義と同じ印・事実文・表示の可否を返す
+    （IK-0977 / 第 25 周 第 5 波 IK-1008）。
+
+    印と可否は ``learner_context_common.equation_display_fields`` から式の単位で受け取る
+    （印だけを借りて伏せる規則を借りない、をしない）。壊れた復元（置換文字・箇条書きの点を
+    含む等）は ``latex: ""`` + ``latex_withheld: True`` を返し、吹き出しは式として描かない。
+    復元でなければ空（キーを足さない）。
+    """
+    from core.learner_context_common import equation_display_fields
+
+    return equation_display_fields(record, latex=latex)
+
+
+def _registry_latex_is_reconstructed(payload: Any) -> bool:
+    """``knowledge_equations.latex`` が復元本文から来ているか（IK-0977）。
+
+    永続化は原文の LaTeX（``source_extraction.latex``）を優先し、無いときだけ復元本文を
+    ``latex`` に入れる。原文の LaTeX がある式は、表示する式が原文なので印を付けない。
+    """
+    data = payload if isinstance(payload, dict) else {}
+    if not data:
+        try:
+            import json as _json
+
+            data = _json.loads(payload) if isinstance(payload, str) else {}
+        except Exception:  # noqa: BLE001
+            data = {}
+    extraction = data.get("source_extraction") if isinstance(data, dict) else None
+    if isinstance(extraction, dict) and str(extraction.get("latex") or "").strip():
+        return False
+    return bool(_reconstructed_mark_fields(data))
 
 
 def _title_fact(template: str, title: str) -> str:
@@ -1277,9 +1458,20 @@ def _build_result(
     definition: Optional[dict] = None
     if chosen is not None:
         definition = {"text": chosen["text"]}
+        # 第 25 周 第 9 波（IK-0571 の残り）: 定義の文は論文の逐語。原文の言語のままなら、使われ方の
+        # 例文（``_claim_mentions``）・部品の文脈と同じ「（原文）」の印を添える（翻訳しない・LLM 0 回）。
+        from core.label_vocab import ORIGINAL_TEXT_MARK  # 遅延 import（推移的純粋性の保護）
+        from core.text_excerpt import is_untranslated_text
+
+        if is_untranslated_text(str(chosen.get("text") or "")):
+            definition["original_mark"] = ORIGINAL_TEXT_MARK
         if chosen.get("latex"):
             # 定義式の本文（画面が数式として描く・IK-0869）。
             definition["latex"] = chosen["latex"]
+            if chosen.get("reconstructed"):
+                definition.update(
+                    _reconstructed_mark_fields({"reconstructed": True}, latex=chosen["latex"])
+                )
         if chosen.get("equation_label"):
             # 論文の印字番号（``(12)``）は読者に可読な出所。内部 ID は入れない（PL7）。
             definition["equation_label"] = chosen["equation_label"]
@@ -1311,7 +1503,9 @@ def _build_result(
     # 「この節の中」「この式の中だけ」はタップ位置の論文に対して相対的な言葉。
     # タップ位置が無い・別の論文の記号へ倒したときは、どの節かを指せないので出さない（IK-0387）。
     if scope_key not in _RELATIVE_SCOPES or relative_scope_ok:
-        scope_label = element_vocab.symbol_scope_label(scope_key)
+        # IK-0961: 学生向けは「どこで定義されたか」を言う文にする（「この式の中だけ」は
+        # 記号台帳のスコープ判定の内部語で、論文全体で使う記号にも付き得る — 使える範囲を断言しない）。
+        scope_label = LEARNER_SYMBOL_SCOPE_LABELS.get(scope_key) or element_vocab.symbol_scope_label(scope_key)
         if scope_label:
             result["scope_label"] = scope_label
     return result

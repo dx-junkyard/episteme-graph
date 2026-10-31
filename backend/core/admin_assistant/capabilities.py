@@ -851,6 +851,41 @@ _REGISTRY: list[Capability] = [
                   "タブ上部の「同一性の候補」で、候補ごとに「確認」か「見送り」を押します"),
         ),
     ),
+    # IK-0958: 「凍結していなくても学生に見えるか」「確定の取り消しはどこから」に答える節。
+    Capability(
+        id="library.what_students_see",
+        keywords=('学生に見え', '見える', '学生の画面に', '凍結していな', '凍結しないと', '届く', '学生に出'),
+        screen="knowledge-library",
+        title="確定すると学生に何が見えるか",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/library.md#what-students-see",
+        description="同一性リンクの確定・見送り・取り消し、エントリの凍結で、学生の画面に何が"
+                    "届くか（学生に出るのは凍結した版だけ）を案内する。",
+        locate_steps=(
+            _step("knowledge-library", "library_entries_list", "エントリ一覧から対象のエントリを開きます"),
+            _step("knowledge-library", "library_bound_parts_section",
+                  "詳細の「結びついた教材の部品」で、確定した結び付きを確かめます",
+                  precondition="entry_selected"),
+        ),
+    ),
+    Capability(
+        id="library.revoke_identity_link",
+        keywords=('取り消', '取消', '撤回', '確定を取り消', '確定を戻', '間違えて確定'),
+        screen="knowledge-library",
+        title="確定した結び付きを取り消す",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/library.md#revoke-identity-link",
+        description="誤って確定した同一性リンクを、エントリの詳細の「結びついた教材の部品」か"
+                    "部品の「深く検討」から、理由を書いて取り消す（行と記録は残る）。",
+        locate_steps=(
+            _step("knowledge-library", "library_entries_list", "エントリ一覧から対象のエントリを開きます"),
+            _step("knowledge-library", "library_bound_parts_section",
+                  "詳細の「結びついた教材の部品」で、確定の行の「確定を取り消す」を押します",
+                  precondition="entry_selected"),
+        ),
+    ),
     Capability(
         id="library.labels",
         keywords=('別名', '隠しラベル', 'ラベル', '表記ゆれ'),

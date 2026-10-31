@@ -195,7 +195,8 @@ REGION_PLACED_ONLY_VERIFY_LINE = (
 )
 
 # 骨格 seed 由来の検証行 (コーパス由来の状態が無い概念の弱い初期表示)
-SEED_VERIFY_LINE = "検証: 台帳に記帳なし。骨格（教員レビュー済）の初期表示。"
+#: IK-0942: 学習者に見える語は「骨格」ではなく「分野の地図」（版の呼び名の正本と揃える）。
+SEED_VERIFY_LINE = "検証: 台帳に記帳なし。分野の地図（教員レビュー済）の初期表示。"
 # verified だが原文の引用が 0 本のとき (IK-0368 — 「原文0本に裏付け」を組まない)
 VERIFIED_WITHOUT_EVIDENCE_LINE = "検証: 原文の引用は台帳に記録されていません。"
 
@@ -361,9 +362,24 @@ def endorse_line_for(status: str, signals: ConceptSignals) -> str:
         return f"承認: 標準の説明と{authors}の説明が並存"
     if signals.standard_explanation or signals.personal_shared_count >= 1:
         return "承認: 標準の説明"
-    if status == STATUS_ASSUMED:
-        return "承認: 承認記録なし — 台帳のスコープ欄は空欄"
-    return "承認: 承認記録なし"
+    # IK-1018: 承認の行は承認だけを言う（内部の欄名を学習者に出さない）。
+    # IK-1056（第 25 周 第 8 波）: 記録が無いことは状態に依らず 1 つの閉世界の文で言う。
+    return label_vocab.ATLAS_ENDORSE_NONE_LINE
+
+
+def learner_endorse_line(line: str) -> str:
+    """状態キャッシュに残る旧い承認行を、学習者向けの文へ読み時に置き換える（IK-1018）。
+
+    キャッシュ（``atlas_overlay_cache``）は版ごとに作られ、是正前に作った行が残る。
+    書き換えずに読む側で置き換える（キャッシュの再計算を待たない）。
+    """
+    text = str(line or "")
+    if text in (
+        label_vocab.ATLAS_ENDORSE_LEGACY_SCOPE_LINE,
+        label_vocab.ATLAS_ENDORSE_LEGACY_NONE_LINE,  # IK-1056: 状態で言い分けていた旧い短い文
+    ):
+        return label_vocab.ATLAS_ENDORSE_NONE_LINE
+    return text
 
 
 def actions_for(status: str) -> tuple[bool, bool]:
@@ -428,7 +444,7 @@ _GRAPHS_SQL = """
 
 _EXPLANATIONS_SQL = """
     SELECT e.component_id::text, e.id::text, e.kind, e.shared, e.review_status,
-           COALESCE(u.display_name, '') AS author_name,
+           COALESCE(NULLIF(BTRIM(u.profile_name), ''), '') AS author_name,  -- IK-1007: 人に見せる名前のみ
            COALESCE(s.endorser_count, 0) AS endorser_count,
            COALESCE(s.strong_count, 0) AS strong_count,
            COALESCE(s.expertise_breadth, 0) AS expertise_breadth

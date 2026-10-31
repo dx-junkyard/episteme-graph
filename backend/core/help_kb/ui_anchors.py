@@ -42,6 +42,7 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "composer.send",
         "composer.voice",
         "topbar.inspect",
+        "topbar.profile-name",
         "topbar.atlas",
         "topbar.my-map",
         "rightpanel.tab-context",
@@ -148,6 +149,8 @@ UI_ANCHORS: dict[str, str] = {
     "topbar.my-map": "student/02-student.md#personal-map",
     # 「❓ 使い方」ボタン＝インスペクト・モードの ON/OFF。
     "topbar.inspect": "student/02-student.md#inspect-mode",
+    # 「👤 名前」ボタン＝人に見せる名前の登録（IK-1007）。
+    "topbar.profile-name": "student/02-student.md#profile-name",
     # 右パネル Context タブ＝前提知識・誤解メモ・寄り道からの復帰導線の節。
     "rightpanel.tab-context": "student/02-student.md#context-tab",
     # 右パネル Progress タブ＝学習の現在地・問いの軌跡・学習サマリの節

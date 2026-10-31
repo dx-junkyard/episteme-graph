@@ -24,6 +24,7 @@ import re
 __all__ = [
     "excerpt",
     "first_sentence",
+    "is_untranslated_text",
     "looks_like_tex_math",
     "normalize_whitespace",
     "split_sentences",
@@ -333,3 +334,24 @@ def is_prose_with_delimited_math(text: object) -> bool:
     if _TEX_MATH_ENV_RE.search(outside) or _TEX_COMMAND_RE.search(outside) or "$" in outside:
         return False
     return bool(_PROSE_WORD_RE.search(outside))
+
+
+# ── 原文の言語のままの文（第 25 周 第 7 波・IK-0571 の studio 側）────────────────
+
+_JAPANESE_CHAR_RE = re.compile(r"[\u3040-\u30FF\u3400-\u9FFF]")
+_LATIN_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+_MATH_SPAN_RE = re.compile(r"\$[^$]*\$")
+
+
+def is_untranslated_text(text: object) -> bool:
+    """日本語の画面に原文（英語など）のまま出る文か（決定論・翻訳しない）。
+
+    数式区間（``$…$``）を除いた本文に和文の文字が 1 つも無く、英字の語（2 字以上）が
+    あるとき True。記号だけ・数式だけの文は False（「原文」の印を付ける対象ではない）。
+    呼び出し側はこの判定で「（原文）」の印を添える（印の文字列の正本は
+    ``label_vocab.ORIGINAL_TEXT_MARK``）。
+    """
+    body = _MATH_SPAN_RE.sub(" ", normalize_inline_math_delimiters(text))
+    if _JAPANESE_CHAR_RE.search(body):
+        return False
+    return bool(_LATIN_WORD_RE.search(body))

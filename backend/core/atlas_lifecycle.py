@@ -138,7 +138,12 @@ FACT_SAME_NODES_EDGES_CHANGED = "下書きの領域・概念は現在の公開�
 
 #: 関係の増減の列挙（IK-0885。「A — B（依存）」をラベルで並べる・件数なし）。
 FACT_ADDED_EDGES_TEMPLATE = "次版で加わる関係: {edges}"
+#: 加わる項目の列挙（IK-0963。概念は「名前（親領域）」、領域は「名前（領域）」・件数なし）。
+FACT_ADDED_NODES_TEMPLATE = "次版で加わる項目: {nodes}"
+ADDED_REGION_SUFFIX = "領域"
 FACT_REMOVED_EDGES_TEMPLATE = "次版で外れる関係: {edges}"
+#: IK-1149（第 25 周 第 11 波）: 種別は同じで向き（記載の順）だけが入れ替わる関係（新しい向きで言う）。
+FACT_REDIRECTED_EDGES_TEMPLATE = "次版で向きが変わる関係: {edges}"
 
 #: 凍結を止める条件の列挙（IK-0885。freeze と freeze-impact が同じ判定を読む）。
 FACT_BLOCKED_BY_GAPS_TEMPLATE = (
@@ -185,19 +190,46 @@ def _edge_directed(skeleton) -> dict[tuple[str, str], tuple[str, str]]:
     return out
 
 
-def edge_change_label(from_label: str, to_label: str, kind: str) -> str:
-    """「A — B（依存）」（種別は ``label_vocab.EDGE_KIND_LABELS`` の表示語）。"""
-    from core.label_vocab import EDGE_KIND_LABELS
+def edge_change_label(
+    from_label: str, to_label: str, kind: str, *, direction_unrecorded: bool = False
+) -> str:
+    """「A — B（依存: 「A」が「B」に依存する）」（種別は ``label_vocab.EDGE_KIND_LABELS`` の表示語）。
+
+    IK-1072（第 25 周 第 9 波）: 有向の関係（依存）は向きの句（``label_vocab.edge_direction_phrase`` —
+    反映の確認と同じ正本）を添える。凍結の影響だけを見る人にも、どちらがどちらに依存するかが読める。
+
+    IK-1149（第 25 周 第 11 波）: 向きを採用のときに選んだ記録が無い関係（``direction_unrecorded``）は
+    句の直後にその事実を添える（記載の順は 2 つの項目の内部の並び — 凍結する人が向きを確かめられるように）。
+    """
+    from core.label_vocab import (
+        EDGE_KIND_LABELS,
+        edge_direction_phrase,
+        edge_direction_with_record,
+    )
 
     kind_label = EDGE_KIND_LABELS.get(str(kind or ""), "")
     text = f"{from_label} — {to_label}"
-    return f"{text}（{kind_label}）" if kind_label else text
+    if not kind_label:
+        return text
+    direction = edge_direction_with_record(
+        edge_direction_phrase(kind, from_label, to_label), direction_unrecorded
+    )
+    if direction:
+        return f"{text}（{kind_label}: {direction}）"
+    return f"{text}（{kind_label}）"
 
 
-def edge_changes(draft_skeleton, frozen_skeleton) -> dict[str, list[str]]:
-    """下書きと現行凍結版の関係の増減（無向で比較・種別の変更は外れて加わる扱い）。"""
+def edge_changes(
+    draft_skeleton, frozen_skeleton, *, direction_unrecorded=None
+) -> dict[str, list[str]]:
+    """下書きと現行凍結版の関係の増減（無向で比較・種別の変更は外れて加わる扱い）。
+
+    ``direction_unrecorded``（IK-1149）は向きを採用のときに選んだ記録が無い関係の無向ペア
+    （``frozenset``）の集合。該当する関係の句に事実を添える。
+    """
+    unrecorded = direction_unrecorded or set()
     if draft_skeleton is None:
-        return {"added_edges": [], "removed_edges": []}
+        return {"added_edges": [], "removed_edges": [], "redirected_edges": []}
     labels = _node_labels(draft_skeleton, frozen_skeleton)
     new_edges = _edge_set(draft_skeleton)
     old_edges = _edge_set(frozen_skeleton) if frozen_skeleton is not None else {}
@@ -206,7 +238,12 @@ def edge_changes(draft_skeleton, frozen_skeleton) -> dict[str, list[str]]:
 
     def _label(key, kind, directed):
         a, b = directed.get(key, key)
-        return edge_change_label(labels.get(a, a), labels.get(b, b), kind)
+        return edge_change_label(
+            labels.get(a, a),
+            labels.get(b, b),
+            kind,
+            direction_unrecorded=frozenset(key) in unrecorded,
+        )
 
     added = [
         _label(k, kind, new_dir)
@@ -218,7 +255,19 @@ def edge_changes(draft_skeleton, frozen_skeleton) -> dict[str, list[str]]:
         for k, kind in sorted(old_edges.items())
         if new_edges.get(k) != kind
     ]
-    return {"added_edges": added, "removed_edges": removed}
+    from core.label_vocab import edge_kind_is_directed
+
+    # IK-1149: 同じ種別の有向の関係で、記載の順だけが入れ替わったもの（新しい向きで言う）。
+    redirected = [
+        _label(k, kind, new_dir)
+        for k, kind in sorted(new_edges.items())
+        if old_edges.get(k) == kind
+        and edge_kind_is_directed(kind)
+        and k in old_dir
+        and k in new_dir
+        and old_dir[k] != new_dir[k]
+    ]
+    return {"added_edges": added, "removed_edges": removed, "redirected_edges": redirected}
 
 
 def _freeze_impact_facts(
@@ -228,6 +277,8 @@ def _freeze_impact_facts(
     has_frozen: bool = True,
     added_edges: list[str] | None = None,
     removed_edges: list[str] | None = None,
+    added_nodes: list[str] | None = None,
+    redirected_edges: list[str] | None = None,
 ) -> list[str]:
     """影響プレビューに添える事実文（該当するものだけ・順序は決定論）。"""
     facts: list[str] = []
@@ -235,8 +286,11 @@ def _freeze_impact_facts(
         facts.append(FACT_REMOVED_NODES_HIDE_LEARNER_TRACES)
     elif has_frozen:
         facts.append(FACT_NO_REMOVED_NODES)
-    edges_changed = bool(added_edges or removed_edges)
+    edges_changed = bool(added_edges or removed_edges or redirected_edges)
     if added_ids:
+        # IK-0963: 何が加わるかを関係と同じ形で名前で（初回凍結は全項目になるので出さない）。
+        if has_frozen and added_nodes:
+            facts.append(FACT_ADDED_NODES_TEMPLATE.format(nodes="、".join(added_nodes)))
         facts.append(FACT_ADDED_NODES_NEED_REANALYSIS)
     elif has_frozen and not removed_ids:
         facts.append(FACT_SAME_NODES_EDGES_CHANGED if edges_changed else FACT_SAME_NODE_SET)
@@ -244,7 +298,30 @@ def _freeze_impact_facts(
         facts.append(FACT_ADDED_EDGES_TEMPLATE.format(edges="、".join(added_edges)))
     if has_frozen and removed_edges:
         facts.append(FACT_REMOVED_EDGES_TEMPLATE.format(edges="、".join(removed_edges)))
+    if has_frozen and redirected_edges:
+        facts.append(FACT_REDIRECTED_EDGES_TEMPLATE.format(edges="、".join(redirected_edges)))
     return facts
+
+
+def added_node_labels(
+    draft_skeleton: atlas_module.AtlasSkeleton | None, added_ids: set[str]
+) -> list[str]:
+    """加わる項目を「名前（親領域）」「名前（領域）」の列にする（IK-0963・骨格の順）。
+
+    ラベルが空なら id のまま（fail-soft。名前が引けないことで列挙を欠かさない）。
+    """
+    if draft_skeleton is None or not added_ids:
+        return []
+    out: list[str] = []
+    for region in getattr(draft_skeleton, "regions", ()) or ():
+        region_label = str(getattr(region, "label", "") or region.id)
+        if region.id in added_ids:
+            out.append(f"{region_label}（{ADDED_REGION_SUFFIX}）")
+        for concept in getattr(region, "concepts", ()) or ():
+            if concept.id in added_ids:
+                label = str(getattr(concept, "label", "") or concept.id)
+                out.append(f"{label}（{region_label}）")
+    return out
 
 
 def freeze_readiness(
@@ -279,6 +356,29 @@ def freeze_readiness(
     return out
 
 
+def _direction_unrecorded_for_changes(session, domain_key, draft_skeleton, frozen_skeleton) -> set:
+    """向きの記録が無い有向の関係（IK-1149）。増減に有向の関係が無ければ照会しない（fail-soft）。"""
+    from core.label_vocab import edge_kind_is_directed
+
+    new_edges = _edge_set(draft_skeleton) if draft_skeleton is not None else {}
+    old_edges = _edge_set(frozen_skeleton) if frozen_skeleton is not None else {}
+    new_dir = _edge_directed(draft_skeleton) if draft_skeleton is not None else {}
+    old_dir = _edge_directed(frozen_skeleton) if frozen_skeleton is not None else {}
+    changed = [
+        kind
+        for key, kind in list(new_edges.items()) + list(old_edges.items())
+        if new_edges.get(key) != old_edges.get(key) or new_dir.get(key) != old_dir.get(key)
+    ]
+    if session is None or not any(edge_kind_is_directed(k) for k in changed):
+        return set()
+    try:
+        from core.atlas_edges import store as edge_store
+
+        return edge_store.direction_unrecorded_pairs(session, domain_key)
+    except Exception:  # noqa: BLE001 — 添え書きが出ないだけ
+        return set()
+
+
 def compute_freeze_impact(
     session,
     domain_key: str,
@@ -301,9 +401,11 @@ def compute_freeze_impact(
             "frozen_version": frozen_skeleton.version if frozen_skeleton else "",
             "removed_node_ids": [],
             "added_node_ids": [],
+            "added_nodes": [],
             "affected_courses": [],
             "added_edges": [],
             "removed_edges": [],
+            "redirected_edges": [],
             "facts": [],
         }
 
@@ -322,17 +424,30 @@ def compute_freeze_impact(
         frozen_version = frozen_skeleton.version
 
     affected_courses = _affected_courses_for_domain(session, domain_key, removed_ids)
-    changes = edge_changes(draft_skeleton, frozen_skeleton)
+    changes = edge_changes(
+        draft_skeleton,
+        frozen_skeleton,
+        direction_unrecorded=_direction_unrecorded_for_changes(
+            session, domain_key, draft_skeleton, frozen_skeleton
+        ),
+    )
+    added_nodes = (
+        added_node_labels(draft_skeleton, added_ids) if frozen_skeleton is not None else []
+    )
 
     return {
         "cartridge_id": domain_key,
         "frozen_version": frozen_version,
         "removed_node_ids": sorted(removed_ids),
         "added_node_ids": sorted(added_ids),
+        # 加わる項目の名前（IK-0963。件数なし・初回凍結は空）。
+        "added_nodes": added_nodes,
         "affected_courses": affected_courses,
         # 関係（辺）の増減（IK-0885。ラベルの列挙・件数なし）。
         "added_edges": changes["added_edges"],
         "removed_edges": changes["removed_edges"],
+        # IK-1149: 向きだけが入れ替わる関係（無ければ空の列）。
+        "redirected_edges": changes["redirected_edges"],
         # 差分の意味を教員向けの事実文で添える（数値・督促は書かない。§5.5）。
         "facts": _freeze_impact_facts(
             removed_ids,
@@ -340,5 +455,7 @@ def compute_freeze_impact(
             has_frozen=frozen_skeleton is not None,
             added_edges=changes["added_edges"],
             removed_edges=changes["removed_edges"],
+            added_nodes=added_nodes,
+            redirected_edges=changes["redirected_edges"],
         ),
     }

@@ -16,6 +16,8 @@ FastAPI / sqlalchemy / LLM を import しない（DB の読みは呼び出し側
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from typing import Any, Iterable
 
 # ---------------------------------------------------------------------------
@@ -51,6 +53,15 @@ EVIDENCE_UNITS_ONLY_MESSAGE = (
 #: 「対応付けられていません」の直後に式が並んで矛盾に見えるのを避ける（IK-0875）。
 EVIDENCE_UNMAPPED_HEADING = "対応付けられていない候補（同じ節から拾った式・根拠）"
 
+#: 教員が加えた資料（教材図スタジオで採用した図など）の見出し（第 25 周 第 5 波・IK-1010）。
+#: 解析が拾った候補と同じ区画に混ぜず、教材欄に埋め込んだ順に先頭へ並べる。
+#: 解析の対応付けの状態（``status``）には数えない（判定は変えない）。
+EVIDENCE_TEACHER_ADDED_HEADING = "教員が加えた資料（教材欄に埋め込んだ順）"
+
+#: 教員が加えた資料と並ぶ、論文の解析から拾った候補の区画の見出し（第 25 周 第 6 波・IK-1010 の残り）。
+#: 根拠の状態が missing 以外（unmapped_heading が出ない）でも、教員の区画があれば解析の区画に見出しを付ける。
+EVIDENCE_ANALYSIS_HEADING = "論文の解析から拾った根拠（式・主張・原文抜粋・概要）"
+
 #: AI 書き換えの根拠が全部空のとき（LLM を呼ばず、上限も消費しない — IK-0874）。
 REWRITE_NO_GROUNDING_NOTICE = (
     "このトピックにはまだ根拠の材料がありません（学ぶ単位も、コース内容生成の結果もありません）。"
@@ -76,6 +87,24 @@ def studio_share_mark() -> str:
     from core.label_vocab import COURSE_ROLE_LABELS
 
     return f"〔{COURSE_ROLE_LABELS['editor']}〕"
+
+
+#: 共有教員が［案をコピー］で写したときの知らせ（第 25 周 第 4 波・IK-0978）。``{sections}`` は
+#: 写した区画の名前（画面が並べる）・``{recipient}`` は渡す相手（所有者の表示名があれば名前入り）。
+PROPOSAL_COPY_NOTICE = "{sections}をクリップボードに写しました。{recipient}に渡してください。"
+PROPOSAL_COPY_RECIPIENT = "所有者"
+PROPOSAL_COPY_RECIPIENT_NAMED = "所有者（{name}）"
+#: 共有教員の原稿スタジオの見出しに出す所有者（IK-0978。オーナー判断 §6-1 = 見せる・教員間だけ）。
+COURSE_OWNER_NOTICE = "このコースの所有者: {name}"
+
+
+def proposal_copy_notice(owner_display_name: str | None) -> str:
+    """［案をコピー］の知らせ（``{sections}`` を残した形）。名前が無ければ「所有者」とだけ言う。"""
+    name = str(owner_display_name or "").strip()
+    recipient = (
+        PROPOSAL_COPY_RECIPIENT_NAMED.replace("{name}", name) if name else PROPOSAL_COPY_RECIPIENT
+    )
+    return PROPOSAL_COPY_NOTICE.replace("{recipient}", recipient)
 
 
 #: 保存でこのトピックの生成済み音声を消したとき（IK-0877）。
@@ -120,7 +149,184 @@ TOPIC_DELIVERY_MESSAGES: dict[str, str] = {
         "受講者は発行済みの版（版 {version}）を見ています。"
         "保存した内容を受講者に届けるには、新しい版を発行してください。"
     ),
+    # 第 25 周 第 8 波（IK-1070）: いまの内容が版と同じとき（未発行の変更なし）は指示文を出さない。
+    # 指示文と事実文を同じ値（unpublished_changes）から作る。
+    "release_current": "受講者は発行済みの版（版 {version}）を見ています。",
 }
+
+#: 第 25 周 第 7 波（IK-1053・オーナー判断: 発行は所有者の明示操作のまま）: 版ありのコースで、いまの
+#: 内容（HEAD）が受講者の見ている版と違うかの事実文。督促・自動発行はしない（事実と入口だけ）。
+TOPIC_UNPUBLISHED_CHANGES_NOTES: dict[bool, str] = {
+    True: "版 {version} の発行の後に保存した変更があります。受講者はまだ版 {version} を見ています。",
+    False: "いまの内容は版 {version} と同じです。発行は要りません。",
+}
+#: 版の管理（V層 ``Versioning.openModal``）への入口の札。発行は所有者だけ（V層の確定仕様）。
+TOPIC_VERSIONS_ENTRY_LABEL = "版の管理を開く"
+
+
+def course_has_unpublished_changes(release_snapshot: Any, live_snapshot: Any) -> bool | None:
+    """受講者の見ている版の写しと、いまの working copy（HEAD）が違うか（IK-1053）。
+
+    比べるのは V層の写しの形（``{title, description, data}``）そのもの。どちらかが読めなければ
+    None（言わない — 推測で「変更あり / なし」を作らない）。
+    """
+    if not isinstance(release_snapshot, dict) or not isinstance(live_snapshot, dict):
+        return None
+    import json
+
+    def _canon(snap: dict) -> str:
+        return json.dumps(
+            {k: snap.get(k) for k in ("title", "description", "data")},
+            ensure_ascii=False, sort_keys=True, default=str,
+        )
+
+    return _canon(release_snapshot) != _canon(live_snapshot)
+
+
+def course_release_comparison(course_id: str) -> tuple[int | None, bool | None]:
+    """コースの受講者の版の番号と、HEAD がその版と違うか（``(版番号, 未発行の変更)``・IK-1053 / IK-1079）。
+
+    版が無ければ ``(None, None)``、写しが読めなければ ``(版番号, None)``（比べられない — 事実文を
+    出さない）。原稿スタジオの保存の届き方と V層の版の管理モーダル（``version-state``）が同じ
+    比較を通す（未発行の変更の事実の正本を 1 本にする）。読み取りのみ・fail-soft。
+    """
+    release_version_no: int | None = None
+    unpublished_changes: bool | None = None
+    try:
+        from core.versioning import releases as _releases  # 遅延 import（core の推移的純粋性）
+
+        state = _releases.get_state("course", course_id) or {}
+        if state.get("active_release_id"):
+            release_version_no = int(state.get("latest_version_no") or 0) or None
+            try:
+                release = _releases.get_release(str(state["active_release_id"])) or {}
+                unpublished_changes = course_has_unpublished_changes(
+                    release.get("snapshot"), _releases.build_course_snapshot(course_id)
+                )
+            except Exception:  # noqa: BLE001 — 写しが読めなければ比べない
+                unpublished_changes = None
+    except Exception:  # noqa: BLE001 — 版の状態が読めなければ版なし扱い
+        return None, None
+    return release_version_no, unpublished_changes
+
+
+def changed_topic_titles(release_snapshot: Any, live_snapshot: Any) -> list[str] | None:
+    """受講者の版の写しといまの内容（HEAD）で、中身の違うトピックの題名（いまの題名・コース順）。
+
+    第 25 周 第 10 波（studio 頭脳の所見）: 発行の前に「何が変わったか」を版の管理で言う。
+    追加されたトピックはいまの題名、版にだけあるトピックは版の題名を末尾に並べる。件数は出さない。
+    どちらかが読めなければ None（言わない）。純関数・決定論。
+    """
+    if not isinstance(release_snapshot, dict) or not isinstance(live_snapshot, dict):
+        return None
+    import json
+
+    from core.course_data import iter_all_topics
+
+    def _topics(snap: dict) -> list[dict]:
+        data = snap.get("data") if isinstance(snap.get("data"), dict) else {}
+        return [t for t in iter_all_topics(data) if isinstance(t, dict)]
+
+    def _canon(topic: dict) -> str:
+        return json.dumps(topic, ensure_ascii=False, sort_keys=True, default=str)
+
+    before = {str(t.get("id") or ""): t for t in _topics(release_snapshot)}
+    titles: list[str] = []
+    seen: set[str] = set()
+    for topic in _topics(live_snapshot):
+        tid = str(topic.get("id") or "")
+        seen.add(tid)
+        old = before.get(tid)
+        if old is None or _canon(old) != _canon(topic):
+            title = str(topic.get("title") or "").strip()
+            if title and title not in titles:
+                titles.append(title)
+    for tid, old in before.items():
+        if tid not in seen:
+            title = str(old.get("title") or "").strip()
+            if title and title not in titles:
+                titles.append(title)
+    return titles
+
+
+def course_release_changed_topics(course_id: str) -> list[str] | None:
+    """受講者の版と HEAD で中身の違うトピックの題名（読めなければ None・fail-soft・読み取りのみ）。"""
+    try:
+        from core.versioning import releases as _releases  # 遅延 import
+
+        state = _releases.get_state("course", course_id) or {}
+        if not state.get("active_release_id"):
+            return None
+        release = _releases.get_release(str(state["active_release_id"])) or {}
+        return changed_topic_titles(release.get("snapshot"), _releases.build_course_snapshot(course_id))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def version_state_course_facts(course_id: str, *, is_owner: bool) -> dict:
+    """版の管理（``version-state``）のコースの事実文（IK-1079 / IK-1127・宛先ごと）。
+
+    - 全員: ``audience_note``（発行した版が受講者・閲覧の共有先・編集の共有先にどう届くか）。
+    - 所有者: 未発行の変更の事実文（IK-1079）+ 受講者の見ている版の文（``learner_version_note`` =
+      原稿スタジオのトピックの区画と同じ ``release_current``）+ 発行の後に変わったトピックの題名。
+    """
+    from core import label_vocab
+
+    out: dict = {"audience_note": label_vocab.VERSION_AUDIENCE_NOTE_COURSE}
+    if not is_owner:
+        return out
+    version, unpublished = course_release_comparison(course_id)
+    out.update(unpublished_changes_facts(version, unpublished))
+    try:
+        version_no = int(version or 0)
+    except (TypeError, ValueError):
+        version_no = 0
+    if version_no > 0:
+        out["learner_version_note"] = TOPIC_DELIVERY_MESSAGES["release_current"].format(version=version_no)
+    if unpublished:
+        titles = course_release_changed_topics(course_id)
+        if titles:
+            out["changed_topics_label"] = label_vocab.VERSION_CHANGED_TOPICS_LABEL
+            out["changed_topic_titles"] = titles
+    return out
+
+
+def unpublished_changes_facts(release_version_no: int | None, unpublished_changes: bool | None) -> dict:
+    """未発行の変更の事実文（``{unpublished_changes, unpublished_changes_note}``・比べられなければ空）。"""
+    try:
+        version = int(release_version_no or 0)
+    except (TypeError, ValueError):
+        version = 0
+    if version <= 0 or unpublished_changes is None:
+        return {}
+    return {
+        "unpublished_changes": bool(unpublished_changes),
+        "unpublished_changes_note": TOPIC_UNPUBLISHED_CHANGES_NOTES[bool(unpublished_changes)].format(version=version),
+    }
+
+
+#: 受講者に届く経路の無いコース（非公開・版なし）で、保存しても受講者に見えないこと（IK-0979）。
+TOPIC_DELIVERY_NONE_NOTICE = "このコースは受講者に公開されていないため、保存しても受講者には見えません。"
+
+#: 教材図スタジオで図を採用（または既存の図を挿入）した直後の知らせの先頭（IK-0979）。
+FIGURE_ADOPT_LEAD_NOTICE = "図を教材欄に入れました。トピックを保存すると確定します。"
+
+
+def figure_adopt_notice_parts(delivery: dict | None) -> dict:
+    """図の採用の知らせの部品（IK-0979。保存側と同じ値・同じ文の正本から組む）。
+
+    - ``lead``: 先頭の事実文（常に出す）。
+    - ``audio``: 保存で音声が作り直しになる文（画面はトピックに音声があるときだけ添える）。
+    - ``delivery``: 保存がいつ受講者に届くか（``topic_save_facts`` の delivery と同じ文。
+      届く経路が無いコースでは「保存しても受講者には見えません」）。
+    """
+    message = str((delivery or {}).get("message") or "").strip()
+    return {
+        "lead": FIGURE_ADOPT_LEAD_NOTICE,
+        "audio": TOPIC_AUDIO_SAVE_NOTICE,
+        "delivery": message or TOPIC_DELIVERY_NONE_NOTICE,
+    }
+
 
 #: 決定論付録（「この節で使う数式」「この節で参照する図」）が、いまの根拠から作る形と違うとき
 #: （IK-0872 / IK-0880 の残り。保存済みの付録は読み時に付け直さない — 教員の明示操作で付け直す）。
@@ -136,6 +342,141 @@ APPENDIX_REATTACH_CONFIRM = (
 )
 APPENDIX_REATTACH_APPLIED_NOTICE = "付録を付け直して編集欄に入れました。保存すると確定します。"
 APPENDIX_REATTACH_UNCHANGED_NOTICE = "付録はいまの根拠から作る形と同じです（変更はありません）。"
+#: 第 25 周 第 6 波（IK-1032）: 付け直しの結果の分岐ごとの知らせ（固定文 1 つで言わない）。
+APPENDIX_REATTACH_REMOVED_NOTICE = (
+    "いまの根拠からは付録に載せる式・図が無いため、付録を外しました。保存すると確定します。"
+)
+APPENDIX_REATTACH_ADDED_NOTICE = "いまの根拠から付録を作り、編集欄の末尾に入れました。保存すると確定します。"
+
+#: 付け直しの結果の語彙（``course_content_builder.reattach_generated_appendix`` の ``outcome``）。
+APPENDIX_REATTACH_OUTCOMES = ("replaced", "removed", "added", "unchanged")
+
+
+def appendix_reattach_notice(outcome: str) -> str:
+    """付け直しの結果の語（``APPENDIX_REATTACH_OUTCOMES``）に対応する知らせ（IK-1032）。"""
+    return {
+        "removed": APPENDIX_REATTACH_REMOVED_NOTICE,
+        "added": APPENDIX_REATTACH_ADDED_NOTICE,
+        "unchanged": APPENDIX_REATTACH_UNCHANGED_NOTICE,
+    }.get(str(outcome or ""), APPENDIX_REATTACH_APPLIED_NOTICE)
+
+
+#: 第 25 周 第 6 波（オーナー判断 1）: 保存済みの付録はシステムが書き直さない。所有者への道案内は
+#: 原稿スタジオのコース見出しの事実文 + 一覧の題名 + ［付録をまとめて付け直す］（所有者の明示操作）。
+APPENDIX_STALE_COURSE_NOTICE = (
+    "付録が古いトピックがあります（下の一覧）。"
+    "末尾の付録（この節で使う数式・参照する図）が、いまの根拠から作る形と違います。"
+    "保存済みの付録はシステムが書き直さないため、付け直すまで受講者には保存済みの付録が届きます。"
+)
+#: 第 25 周 第 7 波（IK-1054）: 対象のトピックは文に連結せず、折りたたみの一覧（1 行 1 題名）で出す。
+APPENDIX_STALE_LIST_SUMMARY = "付録が古いトピックの一覧"
+APPENDIX_REATTACH_ALL_CONFIRM = (
+    "一覧のトピックの末尾の付録を、いまの根拠から作り直して保存します。"
+    "付け直したトピックの生成済み音声は作り直しになり、スライドの区切りが変わることがあります。"
+    "付録の他の本文は変えません。"
+)
+APPENDIX_REATTACH_ALL_OWNER_ONLY_NOTICE = (
+    "付録のまとめての付け直しは、トピックの保存と同じくコースの所有者だけができます。"
+)
+APPENDIX_REATTACH_ALL_DONE_NOTICE = "付録を付け直して保存しました: {titles}"
+APPENDIX_REATTACH_ALL_NONE_NOTICE = "付け直しが必要なトピックはありませんでした（変更はありません）。"
+#: 第 25 周 第 9 波（IK-1080）: まとめての知らせも結果の分岐ごとに段を分けて言う（1 件の経路の
+#: ``appendix_reattach_notice`` と同じ分岐の語彙。件数は出さず題名を列挙する）。
+APPENDIX_REATTACH_ALL_LEAD = "付録を付け直して保存しました。"
+APPENDIX_REATTACH_ALL_OUTCOME_LABELS: dict[str, str] = {
+    "removed": "付録を外したトピック（いまの根拠からは付録に載せる式・図がありません）",
+    "replaced": "付録を作り直したトピック",
+    "added": "付録を新しく付けたトピック",
+}
+
+
+def appendix_reattach_all_outcome_groups(items: list[tuple[str, str]]) -> list[dict]:
+    """``[(outcome, title), ...]`` を分岐ごとの段 ``[{outcome, label, titles}]`` にまとめる（IK-1080）。
+
+    段の順は外した → 作り直した → 新しく付けた（受講者の見る付録が消えるものを先に言う）。
+    ``unchanged`` は段にしない（保存していない）。語彙外の結果は「作り直した」に数える
+    （``appendix_reattach_notice`` の既定と同じ）。
+    """
+    titles_by: dict[str, list[str]] = {}
+    for outcome, title in items or []:
+        key = str(outcome or "")
+        if key == "unchanged":
+            continue
+        if key not in APPENDIX_REATTACH_ALL_OUTCOME_LABELS:
+            key = "replaced"
+        name = str(title or "").strip()
+        if name:
+            titles_by.setdefault(key, []).append(name)
+    return [
+        {"outcome": key, "label": APPENDIX_REATTACH_ALL_OUTCOME_LABELS[key], "titles": titles_by[key]}
+        for key in ("removed", "replaced", "added")
+        if titles_by.get(key)
+    ]
+
+
+def appendix_reattach_all_notice(items: list[tuple[str, str]]) -> str:
+    """まとめての付け直しの知らせ（分岐ごとの段を 1 文ずつ。何も保存していなければ「無し」の文）。"""
+    groups = appendix_reattach_all_outcome_groups(items)
+    if not groups:
+        return APPENDIX_REATTACH_ALL_NONE_NOTICE
+    return APPENDIX_REATTACH_ALL_LEAD + "".join(
+        f" {group['label']}: {' / '.join(group['titles'])}。" for group in groups
+    )
+
+#: 第 25 周 第 6 波（オーナー判断 2）: 音声生成はトピックの保存と同じく所有者だけ。
+TOPIC_AUDIO_GENERATE_OWNER_ONLY_NOTICE = (
+    "このコースの音声生成は、トピックの保存と同じくコースの所有者だけができます。"
+    "音声の作り直しは所有者に依頼してください。"
+)
+TOPIC_AUDIO_GENERATE_FORBIDDEN_DETAIL = TOPIC_AUDIO_GENERATE_OWNER_ONLY_NOTICE
+
+#: 第 25 周 第 8 波（IK-1071）: 音声を頼む相手を名前で言う（名前が引けなければ従来の文）。
+TOPIC_AUDIO_GENERATE_OWNER_ONLY_NOTICE_NAMED = (
+    "このコースの音声生成は、トピックの保存と同じくコースの所有者だけができます。"
+    "音声の作り直しは所有者（{name}）に依頼してください。"
+)
+#: 音声の依頼の文を写すボタンの札と、写す文の部品（［案をコピー］と同じ受け渡し — 教員間の
+#: 通知経路は作らない。数値は載せない）。
+AUDIO_REQUEST_COPY_LABEL = "依頼の文をコピー"
+AUDIO_REQUEST_LINE = "このコースの音声の生成（作り直し）をお願いします。"
+AUDIO_REQUEST_SECTION_LABELS: dict[str, str] = {
+    "course": "コース",
+    "request": "お願い",
+    "language": "読み上げの言語",
+    "audio_state": "音声の状態",
+    "topics": "音声の無いトピック",
+}
+AUDIO_REQUEST_LANGUAGE_LABELS: dict[str, str] = {"ja": "日本語", "en": "英語"}
+AUDIO_REQUEST_COPY_NOTICE = "音声の依頼の文をクリップボードに写しました。{recipient}に渡してください。"
+
+
+def audio_generate_owner_only_notice(owner_display_name: str | None) -> str:
+    """音声生成が所有者だけであることの文（IK-1071。名前があれば頼む相手を名前で言う）。"""
+    name = str(owner_display_name or "").strip()
+    if not name:
+        return TOPIC_AUDIO_GENERATE_OWNER_ONLY_NOTICE
+    return TOPIC_AUDIO_GENERATE_OWNER_ONLY_NOTICE_NAMED.replace("{name}", name)
+
+
+def audio_request_facts(owner_display_name: str | None) -> dict:
+    """共有教員が所有者に音声を頼むときの受け渡しの部品（IK-1071）。
+
+    宛先（所有者の表示名）・渡す中身の見出しと依頼の 1 文・写した後の知らせを返す。中身の値
+    （コース名・言語・音声の状態・音声の無いトピック）は画面がいま持っている course-structure から
+    組む（サーバは語だけを持つ — 文の正本はここ・JS に日本語の表を置かない）。
+    """
+    name = str(owner_display_name or "").strip()
+    recipient = (
+        PROPOSAL_COPY_RECIPIENT_NAMED.replace("{name}", name) if name else PROPOSAL_COPY_RECIPIENT
+    )
+    return {
+        "label": AUDIO_REQUEST_COPY_LABEL,
+        "recipient": recipient,
+        "request_line": AUDIO_REQUEST_LINE,
+        "section_labels": dict(AUDIO_REQUEST_SECTION_LABELS),
+        "language_labels": dict(AUDIO_REQUEST_LANGUAGE_LABELS),
+        "copy_notice": AUDIO_REQUEST_COPY_NOTICE.replace("{recipient}", recipient),
+    }
 
 #: 書き換えの根拠を予算に収めるために一部を省いたとき（IK-0909。何を省いたかを言う）。
 REWRITE_GROUNDING_TRIMMED_NOTICE = (
@@ -218,7 +559,106 @@ def topic_evidence_state(topic: dict | None, evidence_items: Iterable[dict] | No
     }
     if status == "missing" and real:
         out["unmapped_heading"] = EVIDENCE_UNMAPPED_HEADING
+    # IK-1010: 教員が加えた資料があれば、その区画の見出しを別に返す（解析の候補の見出しを
+    # 教員の図に掛けない）。
+    if any(_is_teacher_added_item(item) for item in (evidence_items or [])):
+        out["teacher_added_heading"] = EVIDENCE_TEACHER_ADDED_HEADING
+        # 第 6 波（IK-1010 の残り）: 根拠ありのトピックでも、解析の候補を見出しで教員の資料と区別する
+        # （missing のときは unmapped_heading がその役）。
+        if "unmapped_heading" not in out and any(
+            not _is_teacher_added_item(item) for item in (evidence_items or [])
+            if isinstance(item, dict)
+        ):
+            out["analysis_heading"] = EVIDENCE_ANALYSIS_HEADING
     return out
+
+
+# ---------------------------------------------------------------------------
+# 書き換えの申し送りの根拠（第 25 周 第 5 波・IK-1011）
+# ---------------------------------------------------------------------------
+
+#: 申し送りが外した・取り下げた理由に、教員の画面で読める箇所の引用を添えていないとき、
+#: その項目の末尾に付ける事実文（項目は落とさない — 原則3）。
+HANDOFF_UNVERIFIED_BASIS_NOTE = "（根拠の表示なし: 教員の画面で読める箇所の引用がありません）"
+
+_HANDOFF_QUOTE_RE = re.compile(r"「([^「」]{4,240})」")
+#: 人の書いた記述（注意点・本文）を外す・取り下げることを言う語。
+_HANDOFF_REMOVAL_RE = re.compile(r"取り下げ|取りやめ|外し|外した|削除|削っ|除い|除外|省い|省き")
+
+
+def _visible_key(text: Any) -> str:
+    """引用と画面の文を照らすための正規化（NFKC・空白除去。意味の比較ではない）。"""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(text or "")))
+
+
+def teacher_visible_texts(
+    topic: dict | None,
+    draft: dict | None,
+    evidence_items: Iterable[dict] | None,
+) -> list[str]:
+    """書き換えの時点で教員の原稿スタジオに出ている文（申し送りの根拠の照合先・IK-1011）。
+
+    前の版の下書き（教材欄・読み上げ・注意点・確認問題）・トピックの題名と概要・右ペインの
+    根拠の一覧（``build_topic_evidence_items`` の見出し・要約・式・図題）。grounding にだけ
+    渡す材料（論理ブロックの要約・content_blocks の内部の欄）は含めない。
+    """
+    texts: list[str] = []
+
+    def _add(value: Any) -> None:
+        if isinstance(value, str) and value.strip():
+            texts.append(value)
+        elif isinstance(value, list):
+            for v in value:
+                _add(v)
+        elif isinstance(value, dict):
+            for v in value.values():
+                _add(v)
+
+    topic = topic or {}
+    _add(topic.get("title"))
+    _add(topic.get("summary"))
+    _add(draft or {})
+    for item in evidence_items or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("title", "summary", "caption", "latex", "plain_text", "raw_text", "section_label"):
+            _add(item.get(key))
+    return texts
+
+
+def qualify_handoff_basis(notes: Iterable[Any], visible_texts: Iterable[str]) -> list[str]:
+    """申し送りの各項目の根拠が教員の画面で確かめられるかを決定論で検査する（IK-1011）。
+
+    - 「…」の引用が教員の画面の文に（正規化後の部分一致で）無い項目 → 末尾に
+      :data:`HANDOFF_UNVERIFIED_BASIS_NOTE`。
+    - 人の書いた記述を外す・取り下げると言う項目で、画面の文と照合できる引用が 1 つも無い
+      項目 → 同じく末尾に事実文。
+    項目は落とさない（取り下げの提案そのものは教員が判断する）。
+    """
+    haystack = "\n".join(_visible_key(t) for t in visible_texts or [] if t)
+    out: list[str] = []
+    for raw in notes or []:
+        note = str(raw or "").strip()
+        if not note:
+            continue
+        if note.endswith(HANDOFF_UNVERIFIED_BASIS_NOTE):
+            out.append(note)
+            continue
+        quotes = [q for q in _HANDOFF_QUOTE_RE.findall(note) if _visible_key(q)]
+        verified = [q for q in quotes if _visible_key(q) in haystack]
+        unverified_quote = len(verified) < len(quotes)
+        removal_without_basis = bool(_HANDOFF_REMOVAL_RE.search(note)) and not verified
+        if unverified_quote or removal_without_basis:
+            note = note + HANDOFF_UNVERIFIED_BASIS_NOTE
+        out.append(note)
+    return out
+
+
+def _is_teacher_added_item(item: Any) -> bool:
+    """教員が加えた根拠の項目か（教材図スタジオの図 = ``role == "teaching_figure"`` / ``teaching``）。"""
+    return isinstance(item, dict) and (
+        str(item.get("role") or "") == "teaching_figure" or bool(item.get("teaching"))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -382,8 +822,14 @@ def topic_save_facts(
     is_system_admin: bool = False,
     delivered: bool = False,
     release_version_no: int | None = None,
+    owner_display_name: str | None = None,
+    unpublished_changes: bool | None = None,
 ) -> dict:
     """閲覧者がトピックを保存できるか・保存がいつ受講者に届くかを 1 つの値で返す。
+
+    第 25 周 第 7 波（IK-1053）: 版ありのとき ``unpublished_changes``（HEAD と受講者の版が違うか・
+    分からなければ None）を事実文 ``unpublished_changes_note`` にし、所有者にだけ版の管理への入口
+    ``versions_entry`` を添える（発行は所有者の明示操作のまま・自動発行も督促もしない）。
 
     - ``can_save``: 保存 API（所有者 / SYSTEM_ADMIN のみ）と同じ判定。False のときは
       ``save_notice`` に所有者へ依頼する事実文を添える。
@@ -397,15 +843,36 @@ def topic_save_facts(
         out["save_notice"] = TOPIC_SAVE_OWNER_ONLY_NOTICE
         # IK-0950: スタジオの見出しにも共有・保存不可の印（トピックを開く前に分かる）。
         out["share_mark"] = studio_share_mark()
+        # IK-0978: 案を誰に渡すか（所有者の表示名。共有教員の画面だけ — 受講者の DTO には出さない）。
+        name = str(owner_display_name or "").strip()
+        if name:
+            out["owner_display_name"] = name
+            out["owner_notice"] = COURSE_OWNER_NOTICE.replace("{name}", name)
+        out["proposal_copy_notice"] = proposal_copy_notice(name)
+        # 第 25 周 第 6 波（オーナー判断 2）: 音声生成もトピックの保存と同じく所有者だけ。
+        # IK-1071: 頼む相手の名前と、頼む中身を写す部品（［案をコピー］と同じ受け渡し）。
+        out["audio_generate_notice"] = audio_generate_owner_only_notice(name)
+        out["audio_request"] = audio_request_facts(name)
     try:
         version = int(release_version_no or 0)
     except (TypeError, ValueError):
         version = 0
     if version > 0:
-        out["delivery"] = {
+        # IK-1070: 「発行してください」は未発行の変更がある（True）か、比べられない（None）ときだけ。
+        message_key = "release_current" if unpublished_changes is False else "release"
+        delivery: dict = {
             "status": "release",
-            "message": TOPIC_DELIVERY_MESSAGES["release"].format(version=version),
+            "message": TOPIC_DELIVERY_MESSAGES[message_key].format(version=version),
         }
+        facts = unpublished_changes_facts(version, unpublished_changes)
+        if facts:
+            delivery.update(facts)
+            out["unpublished_changes_note"] = facts["unpublished_changes_note"]
+        if is_owner:
+            entry = {"label": TOPIC_VERSIONS_ENTRY_LABEL, "object_type": "course"}
+            delivery["versions_entry"] = entry
+            out["versions_entry"] = entry
+        out["delivery"] = delivery
     elif delivered:
         out["delivery"] = {"status": "immediate", "message": TOPIC_DELIVERY_MESSAGES["immediate"]}
     return out
@@ -670,10 +1137,99 @@ def topic_appendix_state(topic: dict | None) -> dict | None:
     return {"stale": True, "message": APPENDIX_STALE_NOTICE}
 
 
+# ---------------------------------------------------------------------------
+# 旧い生成規則の作業メモの名残（IK-1081）
+# ---------------------------------------------------------------------------
+
+#: 名残のある場所の語（本文の注の段落 / 注意点）。
+WORK_NOTE_PLACE_LABELS: dict[str, str] = {"body": "本文の「注」の段落", "cautions": "注意点"}
+WORK_NOTE_TOPIC_NOTICE = (
+    "このトピックの{places}に、古い生成規則の作業メモ（教員宛ての注・内部の番号）が残っています。"
+    "本文の注の段落は受講者には表示していません。保存済みの本文・注意点はシステムが書き直さないため、"
+    "外すか書き直して保存してください。"
+)
+WORK_NOTE_COURSE_NOTICE = (
+    "古い生成規則の作業メモ（教員宛ての注・内部の番号）が残るトピックがあります（下の一覧・残っている場所ごと）。"
+    "本文の注の段落は受講者には表示していません。注意点は受講者の画面に出ない欄です。"
+    "システムは保存済みの本文・注意点を書き直さないため、外すには各トピックを開いて編集し、保存してください。"
+)
+WORK_NOTE_LIST_SUMMARY = "作業メモが残るトピックの一覧"
+#: 第 25 周 第 10 波（IK-1081 の残り）: 一覧を残っている場所で分ける（件数は出さない）。
+WORK_NOTE_LIST_SUMMARY_BODY = "本文の「注」の段落に作業メモが残るトピック"
+WORK_NOTE_LIST_SUMMARY_CAUTIONS = "注意点だけに作業メモが残るトピック"
+
+
+def work_note_list_summaries() -> dict[str, str]:
+    """一覧の見出し（残っている場所のキー → 見出し）。"""
+    return {"body": WORK_NOTE_LIST_SUMMARY_BODY, "cautions": WORK_NOTE_LIST_SUMMARY_CAUTIONS}
+#: 注意点の作業メモが「埋め込んでいません」と言う図・式が、いまの本文に入っているときの事実文。
+WORK_NOTE_EMBED_CONFLICT_NOTICE = (
+    "注意点の作業メモに「埋め込んでいません」とある図・式は、いまの本文（付録を含む）には埋め込まれています。"
+    "このメモは本文より前の生成時の記録で、いまの本文とは食い違っています。"
+)
+
+
+def topic_work_note_state(topic: dict | None) -> dict | None:
+    """保存済みの本文・注意点に作業メモの名残があるときだけ ``{message, places}``（IK-1081）。"""
+    from core.course_content_builder import topic_work_note_residue
+
+    try:
+        residue = topic_work_note_residue(topic or {})
+    except Exception:  # noqa: BLE001 — 判定できないときは何も言わない（fail-soft）
+        return None
+    place_keys = [
+        key for key in ("body", "cautions")
+        if residue.get("body_notes" if key == "body" else "caution_notes")
+    ]
+    if not place_keys:
+        return None
+    places = [WORK_NOTE_PLACE_LABELS[key] for key in place_keys]
+    state = {
+        "message": WORK_NOTE_TOPIC_NOTICE.format(places="と".join(places)),
+        "places": places,
+        "place_keys": place_keys,
+    }
+    try:
+        from core.course_content_builder import work_note_embed_conflicts
+
+        if work_note_embed_conflicts(topic or {}):
+            state["embed_conflict_note"] = WORK_NOTE_EMBED_CONFLICT_NOTICE
+    except Exception:  # noqa: BLE001 — 突き合わせられなければ何も足さない（fail-soft）
+        pass
+    return state
+
+
 __all__ = [
+    "WORK_NOTE_COURSE_NOTICE",
+    "changed_topic_titles",
+    "course_release_changed_topics",
+    "version_state_course_facts",
+    "WORK_NOTE_EMBED_CONFLICT_NOTICE",
+    "WORK_NOTE_LIST_SUMMARY_BODY",
+    "WORK_NOTE_LIST_SUMMARY_CAUTIONS",
+    "work_note_list_summaries",
+    "WORK_NOTE_LIST_SUMMARY",
+    "WORK_NOTE_PLACE_LABELS",
+    "WORK_NOTE_TOPIC_NOTICE",
+    "topic_work_note_state",
+    "course_release_comparison",
+    "unpublished_changes_facts",
+    "APPENDIX_REATTACH_ALL_LEAD",
+    "APPENDIX_REATTACH_ALL_OUTCOME_LABELS",
+    "appendix_reattach_all_outcome_groups",
+    "appendix_reattach_all_notice",
+    "APPENDIX_REATTACH_ADDED_NOTICE",
+    "APPENDIX_REATTACH_ALL_CONFIRM",
+    "APPENDIX_REATTACH_ALL_DONE_NOTICE",
+    "APPENDIX_REATTACH_ALL_NONE_NOTICE",
+    "APPENDIX_REATTACH_ALL_OWNER_ONLY_NOTICE",
     "APPENDIX_REATTACH_APPLIED_NOTICE",
     "APPENDIX_REATTACH_CONFIRM",
+    "APPENDIX_REATTACH_OUTCOMES",
+    "APPENDIX_REATTACH_REMOVED_NOTICE",
     "APPENDIX_REATTACH_UNCHANGED_NOTICE",
+    "APPENDIX_STALE_COURSE_NOTICE",
+    "APPENDIX_STALE_LIST_SUMMARY",
     "APPENDIX_STALE_NOTICE",
     "REWRITE_EVIDENCE_LIMIT",
     "REWRITE_GROUNDING_KEY_LABELS",
@@ -685,16 +1241,28 @@ __all__ = [
     "course_is_delivered",
     "rewrite_grounding_trimmed_notice",
     "studio_equation_titles",
+    "appendix_reattach_notice",
     "topic_appendix_state",
     "topic_save_facts",
     "EVIDENCE_STATE_LABELS",
     "EVIDENCE_STATE_MESSAGES",
     "EVIDENCE_UNITS_ONLY_MESSAGE",
     "EVIDENCE_UNMAPPED_HEADING",
+    "EVIDENCE_TEACHER_ADDED_HEADING",
+    "EVIDENCE_ANALYSIS_HEADING",
+    "HANDOFF_UNVERIFIED_BASIS_NOTE",
+    "qualify_handoff_basis",
+    "teacher_visible_texts",
     "REWRITE_APPLIED_NOTICE",
     "REWRITE_PROPOSAL_UNSAVABLE_NOTICE",
     "REWRITE_NO_GROUNDING_NOTICE",
     "REWRITE_UNCHANGED_NOTICE",
+    "TOPIC_AUDIO_GENERATE_FORBIDDEN_DETAIL",
+    "TOPIC_AUDIO_GENERATE_OWNER_ONLY_NOTICE",
+    "TOPIC_AUDIO_GENERATE_OWNER_ONLY_NOTICE_NAMED",
+    "AUDIO_REQUEST_COPY_LABEL",
+    "audio_generate_owner_only_notice",
+    "audio_request_facts",
     "TOPIC_AUDIO_INVALIDATED_NOTICE",
     "TOPIC_AUDIO_SAVE_NOTICE",
     "TOPIC_AUDIO_STATUS_MESSAGES",

@@ -31,6 +31,7 @@ from schemas import (
     LectureTTSResponse,
 )
 from services import (
+    overlay_topic_equation_reconstruction,
     detect_and_record_misconception,
     get_course_data,
     list_course_source_document_ids,
@@ -58,6 +59,7 @@ from core.lecture import (
 )
 from core.course_content_builder import (
     build_topic_evidence_items,
+    topic_with_claim_origins,
     drop_unresolved_evidence_embeds,
 )
 from core.learning_support_agent import extract_inline_actions
@@ -112,6 +114,8 @@ def get_lecture_sequence(
     # build_topic_slides）。
     topic_segment = None
     if lecture_uses_topic_material(topic_info):
+        # 第 25 周 第 6 波（IK-0895）: 講義の式の印は、教材本文と同じく生きた式の記録から引く。
+        topic_info = overlay_topic_equation_reconstruction(topic_info, course_data)
         topic_segment = _build_topic_draft_segment(course_id, topic_id, topic_info, course_data)
     if topic_segment:
         return LectureSequenceResponse(
@@ -923,7 +927,7 @@ def _build_topic_draft_segment(
     # 解決できるようにし、引けない埋め込みは表示本文から外す（学習者に内部 ID を見せない）。
     # 外すのはスライド分割の**後**の表示本文だけ（build_topic_slides のページ境界・
     # slide_index・読み上げ原稿は変えない）。
-    evidence_items = build_topic_evidence_items(topic or {})
+    evidence_items = build_topic_evidence_items(topic_with_claim_origins(topic))  # IK-1155
 
     # 各スライドの音声は topic_lecture_audio_cache から解決する（教員が生成済みなら has_audio=True）。
     topic_audio_map = _get_topic_slide_audio_map(course_id, topic_id)

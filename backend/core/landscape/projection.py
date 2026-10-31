@@ -126,6 +126,27 @@ def _node_info(
 # ---------------------------------------------------------------------------
 
 
+def _reason_marks(row: Mapping[str, Any]) -> dict:
+    """理由文の印と、理由が引用の範囲を越える語の一文（IK-0967）。
+
+    ``reason_label`` は理由があるとき常に「AIの要約」。``reason_note`` は理由の固有の語が
+    引用に現れないときだけ（キー自体を付けない — 未該当はキーなし）。
+    """
+    reason = str(row.get("reason") or "")
+    if not reason.strip():
+        return {}
+    out = {"reason_label": schema.REASON_SOURCE_LABEL}
+    quotes = [
+        str(e.get("quote") or "")
+        for e in (row.get("evidence") or [])
+        if isinstance(e, Mapping)
+    ]
+    note = schema.reason_beyond_quote_note(reason, quotes)
+    if note:
+        out["reason_note"] = note
+    return out
+
+
 def admin_placement_dto(
     row: Mapping[str, Any],
     node_index: Mapping[tuple[str, str], dict],
@@ -173,8 +194,14 @@ def admin_placement_dto(
         "provenance": str(row.get("provenance") or ""),
         "provenance_label": schema.provenance_label(status),
         "reason": str(row.get("reason") or ""),
+        **_reason_marks(row),
         "evidence": [
-            {"quote": str(e.get("quote") or ""), "claim_id": e.get("claim_id") or None}
+            {
+                "quote": str(e.get("quote") or ""),
+                "claim_id": e.get("claim_id") or None,
+                # 引用の出所の印（IK-0677）。
+                "source_label": schema.evidence_source_label(e),
+            }
             for e in (row.get("evidence") or [])
             if isinstance(e, Mapping)
         ],
@@ -214,9 +241,13 @@ def _learner_placement_dto(
         "status": status,
         "provenance_label": schema.provenance_label(status),
         "reason": str(row.get("reason") or ""),
-        # 学習者 DTO は quote のみ（claim_id を落とす。chunk 遡及は Phase 2）。
+        **_reason_marks(row),
+        # 学習者 DTO は quote と出所の印のみ（claim_id を落とす。chunk 遡及は Phase 2）。
         "evidence": [
-            {"quote": str(e.get("quote") or "")}
+            {
+                "quote": str(e.get("quote") or ""),
+                "source_label": schema.evidence_source_label(e),
+            }
             for e in (row.get("evidence") or [])
             if isinstance(e, Mapping) and str(e.get("quote") or "").strip()
         ],

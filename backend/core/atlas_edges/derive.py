@@ -417,6 +417,34 @@ def derive_edge_candidates(
     return out
 
 
+def derived_origins_for_keys(
+    session: Any,
+    *,
+    domain_key: str,
+    skeleton: Any,
+    edge_keys: Iterable[str],
+    anchors: Sequence[Any] = (),
+) -> dict[str, list[str]]:
+    """``edge_key -> origins``（**いま**候補として導出される組だけ。IK-0962）。
+
+    採用の時点に出所（``mapping_justification``）を記録していない過去の判断に、
+    いまの導出の出所を「いまの導出では」と時点を明示して添えるための読み取り。
+    導出されない組はキー自体を付けない（推測で埋めない = KR4）。空入力では
+    導出を走らせない（SQL も発行しない）。
+    """
+    keys = {_clean(k) for k in (edge_keys or ()) if _clean(k)}
+    if not keys:
+        return {}
+    out: dict[str, list[str]] = {}
+    for entry in derive_edge_candidates(
+        session, domain_key=domain_key, skeleton=skeleton, anchors=anchors
+    ):
+        key = _clean(entry.get("edge_key"))
+        if key in keys and entry.get("origins"):
+            out[key] = list(entry["origins"])
+    return out
+
+
 def cap_for_review(
     candidates: Sequence[Mapping[str, Any]],
     *,

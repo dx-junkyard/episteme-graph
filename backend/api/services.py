@@ -1683,6 +1683,39 @@ def topic_source_document_ids(topic: dict | None) -> set[str]:
     return ids
 
 
+def topic_equation_reconstruction_index(topic: dict | None, course_data: dict | None = None):
+    """トピックの論文の生きた式の記録の索引（第 25 周 第 6 波・IK-0895。正本は
+    ``core.equation_reconstruction``）。論文はトピックが束ねる論文（無ければコースの論文）。"""
+    from core.equation_reconstruction import load_equation_reconstruction_index
+
+    try:
+        ids = topic_source_document_ids(topic)
+        if not ids and course_data:
+            ids = list_course_source_document_ids(course_data)
+        return load_equation_reconstruction_index(ids)
+    except Exception:  # noqa: BLE001 — 索引が無ければ写し自身の判定に戻る
+        logger.debug("topic equation reconstruction index failed", exc_info=True)
+        return None
+
+
+def overlay_topic_equation_reconstruction(topic: dict | None, course_data: dict | None = None):
+    """トピックの式の写しに、生きた式の記録から引いた復元の状態を載せた複製を返す（IK-0895）。
+
+    本文・講義・付録（教材本文の式）・チャットの「表示中の教材」はこの複製を読む（保存データは
+    書き換えない）。正本は ``learner_context_common.overlay_equation_reconstruction``。
+    """
+    from core.learner_context_common import overlay_equation_reconstruction
+
+    if not isinstance(topic, dict):
+        return topic
+    index = topic_equation_reconstruction_index(topic, course_data)
+    try:
+        return overlay_equation_reconstruction(topic, index)
+    except Exception:  # noqa: BLE001
+        logger.debug("topic equation reconstruction overlay failed", exc_info=True)
+        return topic
+
+
 def list_course_source_document_ids(course_data: dict | None) -> set[str]:
     """コースの ``sources[]`` が指す document.id（テキスト表現）の集合を返す
     （discuss モード設計書 §6.2 Phase 1: discuss_scope='course_sources' の既定検索範囲の正本）。
@@ -1755,6 +1788,9 @@ def resolve_course_source_titles(course_data: dict | None) -> dict[str, str]:
                 sa_text("SELECT id::text, title FROM documents WHERE id::text = ANY(:ids)"),
                 {"ids": doc_ids},
             ).fetchall() if doc_ids else []
+            # IK-0664（第 25 周 第 7 波）: arXiv 番号のままの題名は、arXiv メタデータの写し
+            # （外部事実のキャッシュの読みだけ）から読める題名を引く（無ければ番号のまま）。
+            paper_titles = _document_refs.resolve_paper_titles(session, doc_ids)
         finally:
             session.close()
     except Exception as exc:  # noqa: BLE001 — fail-soft
@@ -1763,6 +1799,9 @@ def resolve_course_source_titles(course_data: dict | None) -> dict[str, str]:
     title_by_doc = {
         str(row[0]): str(row[1]).strip() for row in rows if row[0] and str(row[1] or "").strip()
     }
+    for doc_id, readable in (paper_titles or {}).items():
+        if doc_id in title_by_doc and _document_refs.title_is_readable(readable):
+            title_by_doc[doc_id] = readable
     # キーは保存された ``material_id`` のまま（source_path でも documents.id でも。IK-0550）。
     return {
         ref: title_by_doc[entry["document_id"]]
@@ -1823,6 +1862,20 @@ _LOCATION_HEAD_CHARS = 40
 _LEADING_WORD_FRAGMENT_RE = re.compile(r"^[a-z0-9,;:'\)\]\.-]{1,12}\s+")
 
 
+#: 段落頭の走り込み見出し（REVTeX の「Four-phase training.—」）。語 1〜8 個 + ピリオド + ダッシュで本文に
+#: 続く形だけ（決定論・文の途中は見ない）。出典の行（routes/learning.py の _source_section_note）と出典の
+#: 一覧の手がかり（chunk_location_hint）の共通正本（第 25 周 第 11 波・IK-1144 の再発）。
+RUN_IN_HEADING_RE = re.compile(
+    r"^([A-Z][A-Za-z0-9\-]*(?:[ \t][A-Za-z0-9\-()]+){0,7})\.[—―]"
+)
+
+
+def run_in_heading(text: object) -> str:
+    """抜粋の頭の走り込み見出し（無ければ ``""``）。"""
+    match = RUN_IN_HEADING_RE.match(strip_control_sequences(str(text or "")).lstrip())
+    return match.group(1).strip() if match else ""
+
+
 def chunk_location_hint(*, section_title: object, text: object) -> str:
     """出典チャンクの「論文の中のどこか」を表す短い手がかり（IK-0381）。
 
@@ -1839,6 +1892,10 @@ def chunk_location_hint(*, section_title: object, text: object) -> str:
     raw_section = strip_control_sequences(str(section_title or ""))
     if section_title_rejection_reason(raw_section) is not None:
         raw_section = ""
+    if not raw_section.strip():
+        # IK-1144 の再発（第 25 周 第 11 波）: 節の無いチャンクは走り込み見出しを節として添える
+        # （本文の出典行 _source_section_note と一覧の手がかりを揃える）。
+        raw_section = run_in_heading(text)
     section = excerpt(raw_section, _LOCATION_SECTION_CHARS)
     body = _FORMULA_PLACEHOLDER_RE.sub("（数式）", strip_control_sequences(str(text or ""))).lstrip()
     # チャンクの切れ目が語の途中のことがある（'s was assumed…'）。ラテン文字の断片で始まるときは
@@ -1961,6 +2018,26 @@ _OUTLINE_SENTENCE_RE = re.compile(
     re.IGNORECASE,
 )
 _SECTION_REF_RE = re.compile(r"\bSec(?:tion)?s?\.?\s*\d|第\s*\d+\s*章|\d+\s*節", re.IGNORECASE)
+#: 第 25 周 第 5 波（IK-0987）: TeX の ``\ref`` が解決されず番号の落ちた節参照（``in Sec. .``）。
+_SECTION_WORD_RE = re.compile(r"\bSec(?:tion)?s?\b\.?", re.IGNORECASE)
+
+
+def _is_paper_outline_paragraph(raw: str, words: int) -> bool:
+    """論文の構成を述べる定型段落（「This paper is organized as follows …」）か（IK-0987）。
+
+    どの論文にもある段落で、問いの内容を答える材料にならない（焦点の外の論文から類似度だけで
+    出典に混ざる）。構成の文が無ければ偽。あれば ①節参照（番号付き、または TeX の参照が
+    落ちて番号の無い ``Sec.``）が 2 つ以上、または ②構成の文から後ろが段落の過半、の
+    どちらかで真。長い段落（本文の導入に構成の 1 文が付いた区画）は落とさない。
+    """
+    if words > 150:
+        return False
+    match = _OUTLINE_SENTENCE_RE.search(raw)
+    if not match:
+        return False
+    if len(_SECTION_REF_RE.findall(raw)) + len(_SECTION_WORD_RE.findall(raw)) >= 2 and words <= 90:
+        return True
+    return len(raw[match.start():].split()) / max(1, words) >= 0.5
 
 
 def non_content_chunk_reason(text: object) -> str | None:
@@ -2015,7 +2092,7 @@ def non_content_chunk_reason(text: object) -> str | None:
         return "acknowledgments"
     if words <= 80 and _TITLE_BLOCK_RE.search(raw):
         return "title_block"
-    if words <= 90 and _OUTLINE_SENTENCE_RE.search(raw) and len(_SECTION_REF_RE.findall(raw)) >= 2:
+    if _is_paper_outline_paragraph(raw, words):
         return "outline"
     # IK-0445: 表題・著者・所属の区画（所属機関の行が3つ以上・行の4分の1以上）。
     lines = [ln for ln in raw.splitlines() if ln.strip()]
@@ -2085,6 +2162,8 @@ def search_chunks_with_metadata(
     top_k: int = 8,
     *,
     allowed_document_ids: "set[str] | list[str] | None",
+    prefer_document_ids: "tuple[str, ...] | list[str] | set[str]" = (),
+    prefer_chunk_ids: "tuple[str, ...] | list[str] | set[str]" = (),
 ) -> list[dict]:
     """システム全域の chunks をベクトル検索し、出典情報を付けて返す。
 
@@ -2104,6 +2183,10 @@ def search_chunks_with_metadata(
     引いてから ``top_k`` 件に詰める）。
     IK-0391: 返す ``text`` は ``[[FORMULA_i]]`` を ``chunks.formulas`` の LaTeX で解決した
     本文（:func:`resolve_formula_placeholders`）。解決前の本文は ``raw_text`` に残す。
+    第 25 周 第 5 波（IK-0996）: 同じ論文の別の版（TeX 版と PDF 版）の同じ箇所は
+    ``core.source_versions.collapse_paper_versions`` で 1 行に畳む（``prefer_document_ids`` =
+    焦点の論文の版を先に残し、次に AI が復元した式の少ない版）。畳んだ行は ``version_note``
+    （事実文）を持つ。
     """
     if allowed_document_ids is not None and len(allowed_document_ids) == 0:
         return []
@@ -2143,7 +2226,9 @@ def search_chunks_with_metadata(
                            c.material_id,
                            COALESCE(c.source_metadata->>'section_title', '') AS section_title,
                            c.formulas,
-                           c.document_id
+                           c.document_id,
+                           COALESCE(d.source_url, '') AS source_url,
+                           COALESCE(d.source_path, '') AS source_path
                     FROM chunks c
                     LEFT JOIN documents d ON c.document_id = d.id
                     WHERE c.embedding IS NOT NULL
@@ -2159,7 +2244,7 @@ def search_chunks_with_metadata(
             kept_rows = [
                 row for row in rows
                 if row[1] and non_content_chunk_reason(row[1]) is None
-            ][: max(int(top_k), 0)]
+            ]
             results = [
                 {
                     "id": str(row[0]),
@@ -2177,7 +2262,12 @@ def search_chunks_with_metadata(
                     "document_id": str(row[8]) if len(row) > 8 and row[8] else "",
                     # IK-0577: 出典ポップアップが描く式の事実（印字番号・AI復元の印）を
                     # チャットの文脈にも渡す1行（学習者 DTO には載せない）。
-                    "formula_facts": _formula_fact_line(row[7] if len(row) > 7 else None),
+                    "formula_facts": _formula_fact_line(
+                        row[7] if len(row) > 7 else None,
+                        str(row[8]) if len(row) > 8 and row[8] else None,
+                    ),
+                    # 第 6 波: 版をまたいだ照合に使う式の記録（返す前に外す・DTO に載せない）。
+                    "_formulas": row[7] if len(row) > 7 else None,
                     # 同じ論文の出典どうしを見分ける箇所の手がかり（IK-0381）。
                     "location_hint": chunk_location_hint(
                         section_title=(row[6] if len(row) > 6 else "") or "",
@@ -2186,6 +2276,16 @@ def search_chunks_with_metadata(
                 }
                 for row in kept_rows
             ]
+            results = _collapse_search_paper_versions(
+                results, kept_rows,
+                prefer_document_ids=prefer_document_ids,
+                prefer_chunk_ids=prefer_chunk_ids,
+            )[: max(int(top_k), 0)]
+            # 第 25 周 第 6 波（IK-1009 の残り）: 同じ式 (N) が PDF 版の抜粋で［AI復元］・TeX 版の
+            # 教材で原文、と食い違わないよう、同じ論文の別の版の原文の式で照合し直す。
+            results = confirm_formula_facts_across_versions(
+                results, allowed_document_ids=allowed_document_ids
+            )
             # L1 信頼性: 教員承認(teacher_reviewed)に紐づく chunk へ approved を付与してから tier 判定。
             approved = approved_chunk_ids(session, [r["id"] for r in results])
             for r in results:
@@ -2198,14 +2298,230 @@ def search_chunks_with_metadata(
         return []
 
 
-def _formula_fact_line(formulas: object) -> str:
-    """チャンクの式の事実1行（IK-0577。正本は ``core.formula_facts``）。失敗は空。"""
+def _collapse_search_paper_versions(
+    results: list[dict],
+    rows: list,
+    *,
+    prefer_document_ids: "tuple[str, ...] | list[str] | set[str]" = (),
+    prefer_chunk_ids: "tuple[str, ...] | list[str] | set[str]" = (),
+) -> list[dict]:
+    """検索結果の同じ論文の別の版の同じ箇所を畳む（IK-0996。正本は ``core.source_versions``）。
+
+    行のメタ（題名・ファイル名・source_url・source_path）と式の復元の数（並べ替えにだけ使う
+    内部値で、返す dict には残さない）を組み、失敗したら畳まずにそのまま返す。
+    """
+    try:
+        from core.learner_context_common import equation_latex_is_reconstructed
+        from core.source_versions import collapse_paper_versions
+
+        meta: dict[str, dict] = {}
+        counts: dict[str, int] = {}
+        for row in rows:
+            doc_id = str(row[8]) if len(row) > 8 and row[8] else ""
+            if doc_id and doc_id not in meta:
+                meta[doc_id] = {
+                    "title": row[2] or "",
+                    "filename": row[3] or "",
+                    "source_url": (row[9] if len(row) > 9 else "") or "",
+                    "source_path": (row[10] if len(row) > 10 else "") or "",
+                }
+            formulas = row[7] if len(row) > 7 else None
+            if isinstance(formulas, str):
+                try:
+                    formulas = json.loads(formulas)
+                except Exception:  # noqa: BLE001
+                    formulas = None
+            counts[str(row[0])] = sum(
+                1 for f in (formulas or []) if isinstance(f, dict) and equation_latex_is_reconstructed(f)
+            )
+        if len(meta) < 2:
+            return results
+        staged = [dict(r, _reconstructed_formula_count=counts.get(r["id"], 0)) for r in results]
+        collapsed = collapse_paper_versions(
+            staged, meta,
+            prefer_document_ids=tuple(prefer_document_ids or ()),
+            prefer_chunk_ids=tuple(prefer_chunk_ids or ()),
+            reconstructed_key="_reconstructed_formula_count",
+        )
+        for r in collapsed:
+            r.pop("_reconstructed_formula_count", None)
+        return collapsed
+    except Exception:  # noqa: BLE001 - 畳めなければ従来どおり（検索を止めない）
+        logger.debug("paper version collapse failed", exc_info=True)
+        return results
+
+
+def _formula_fact_line(formulas: object, document_id: object = None) -> str:
+    """チャンクの式の事実1行（IK-0577。正本は ``core.formula_facts``）。失敗は空。
+
+    第 25 周 第 6 波（IK-0895）: チャンクの論文の生きた式の記録の索引から印を引く
+    （本文・講義・付録・部品の文脈と同じ答え）。
+    """
     try:
         from core.formula_facts import formula_fact_line
 
-        return formula_fact_line(formulas)
+        index = None
+        if document_id and formulas and formulas not in ("[]", "null"):
+            try:
+                from core.equation_reconstruction import load_equation_reconstruction_index
+
+                index = load_equation_reconstruction_index([document_id])
+            except Exception:  # noqa: BLE001
+                index = None
+        return formula_fact_line(formulas, index=index, document_id=document_id)
     except Exception:  # noqa: BLE001
         return ""
+
+
+def paper_version_siblings(
+    document_ids: "Iterable[str]",
+    *,
+    allowed_document_ids: "set[str] | list[str] | None",
+) -> dict[str, set[str]]:
+    """``document_ids`` の各 document と同じ論文の別の版（スコープ内）の集合（第 25 周 第 6 波）。
+
+    同じ論文かの判定は正本 ``core.library.identity_candidates.same_paper``（IK-0919）。
+    スコープ（``allowed_document_ids``）の外の版は返さない（範囲を広げない = DM1 / FD2）。
+    ``None`` / 空のスコープ・失敗は ``{}``（fail-closed — 版を足さない）。自分自身は含めない。
+    """
+    wanted = sorted({str(d).strip() for d in (document_ids or []) if str(d or "").strip()})
+    allowed = sorted({str(d).strip() for d in (allowed_document_ids or []) if str(d or "").strip()})
+    if not wanted or not allowed or allowed_document_ids is None:
+        return {}
+    try:
+        from core.library.identity_candidates import same_paper
+
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text(
+                    """
+                    SELECT id::text, title, filename, source_url, source_path
+                      FROM documents
+                     WHERE id = ANY(CAST(:document_ids AS uuid[]))
+                    """
+                ),
+                {"document_ids": allowed},
+            ).fetchall()
+        finally:
+            session.close()
+        meta = {
+            str(r[0]): {"title": r[1], "filename": r[2], "source_url": r[3], "source_path": r[4]}
+            for r in rows
+            if r and r[0]
+        }
+        out: dict[str, set[str]] = {}
+        for doc in wanted:
+            mine = meta.get(doc)
+            if mine is None:
+                continue
+            siblings = {
+                other for other, row in meta.items()
+                if other != doc and same_paper(dict(mine), dict(row))
+            }
+            if siblings:
+                out[doc] = siblings
+        return out
+    except Exception:  # noqa: BLE001 - 版が引けなければ足さない
+        logger.debug("paper version siblings failed", exc_info=True)
+        return {}
+
+
+def paper_original_formula_latex(
+    document_ids: "Iterable[str]",
+    *,
+    allowed_document_ids: "set[str] | list[str] | None",
+) -> dict[str, list[str]]:
+    """``document_ids`` の各 document について、同じ論文の別の版の**原文の式**の LaTeX（第 6 波）。
+
+    同じ式 (N) が TeX 版では原文、PDF 版では復元（［AI復元］）と判定され、教材と出典の抜粋で
+    印が食い違う（IK-1009 の残り）。復元の印の判定材料を揃えるため、スコープ内の別の版の
+    チャンクの式のうち印の付かない式（``equation_latex_is_reconstructed`` が偽）の LaTeX を返す。
+    版が無い document はキーを持たない。失敗は ``{}``（印は従来どおり — 情報を落とさない側）。
+    """
+    siblings = paper_version_siblings(document_ids, allowed_document_ids=allowed_document_ids)
+    if not siblings:
+        return {}
+    every = sorted({d for group in siblings.values() for d in group})
+    try:
+        from core.learner_context_common import equation_latex_is_reconstructed
+
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text(
+                    """
+                    SELECT document_id::text, formulas
+                      FROM chunks
+                     WHERE document_id = ANY(CAST(:document_ids AS uuid[]))
+                       AND formulas IS NOT NULL
+                    """
+                ),
+                {"document_ids": every},
+            ).fetchall()
+        finally:
+            session.close()
+        originals_by_doc: dict[str, list[str]] = {}
+        for doc_id, formulas in rows:
+            if isinstance(formulas, str):
+                try:
+                    formulas = json.loads(formulas)
+                except Exception:  # noqa: BLE001
+                    continue
+            for formula in formulas or []:
+                if not isinstance(formula, dict) or equation_latex_is_reconstructed(formula):
+                    continue
+                latex = str(formula.get("latex") or "").strip()
+                if latex:
+                    originals_by_doc.setdefault(str(doc_id), []).append(latex)
+        out: dict[str, list[str]] = {}
+        for doc, group in siblings.items():
+            merged: list[str] = []
+            for other in sorted(group):
+                for latex in originals_by_doc.get(other, []):
+                    if latex not in merged:
+                        merged.append(latex)
+            if merged:
+                out[doc] = merged
+        return out
+    except Exception:  # noqa: BLE001
+        logger.debug("paper original formulas failed", exc_info=True)
+        return {}
+
+
+def confirm_formula_facts_across_versions(
+    rows: "list[dict]",
+    *,
+    allowed_document_ids: "set[str] | list[str] | None",
+) -> "list[dict]":
+    """検索結果の ``formula_facts`` を、同じ論文の別の版の原文の式で照合し直す（第 6 波）。
+
+    ``_formulas`` を持つ行のうち、印の付いた式を含む行だけを対象にし、照合できた式の印を外した
+    事実行に置き換える。``_formulas`` は返す前に必ず外す（学習者 DTO・プロンプトに載せない）。
+    """
+    try:
+        from core.formula_facts import has_reconstructed_fact
+
+        targets = [r for r in rows if has_reconstructed_fact(str(r.get("formula_facts") or ""))]
+        if targets:
+            originals = paper_original_formula_latex(
+                {str(r.get("document_id") or "") for r in targets},
+                allowed_document_ids=allowed_document_ids,
+            )
+            if originals:
+                from core.formula_facts import formula_fact_line
+
+                for r in targets:
+                    confirmed = originals.get(str(r.get("document_id") or ""))
+                    if confirmed:
+                        r["formula_facts"] = formula_fact_line(
+                            r.get("_formulas"), confirmed_latex=confirmed
+                        )
+    except Exception:  # noqa: BLE001 - 照合できなければ従来の事実行のまま
+        logger.debug("formula facts cross-version check failed", exc_info=True)
+    for r in rows:
+        r.pop("_formulas", None)
+    return rows
 
 
 def get_chunks_for_prompt(
@@ -2266,7 +2582,7 @@ def get_chunks_for_prompt(
                     "material_id": str(row[4]) if row[4] else "",
                     "section_title": row[5] or "",
                     "document_id": str(row[7]) if row[7] else "",
-                    "formula_facts": _formula_fact_line(row[6]),
+                    "formula_facts": _formula_fact_line(row[6], str(row[7]) if row[7] else None),
                     "location_hint": chunk_location_hint(section_title=row[5] or "", text=row[1]),
                 }
             results = [by_id[c] for c in ids if c in by_id]

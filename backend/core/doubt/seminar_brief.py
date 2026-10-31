@@ -175,7 +175,7 @@ class _ReadableLabels:
         try:
             from core.doubt.dependency import build_dependency_graph
 
-            graph = build_dependency_graph(session, document_ids=[document_id])
+            graph = build_dependency_graph(session, document_ids=[document_id], exclude_claim_sequence_edges=True)
         except Exception:  # noqa: BLE001
             logger.debug("seminar brief node labels unavailable for %s", document_id, exc_info=True)
         if graph is not None:

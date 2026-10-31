@@ -29,7 +29,7 @@ from .schema import (
     infer_selection_kind,
     normalize_screen_context,
 )
-from .selection import render_selection_block
+from .selection import render_selection_block, selection_formula_lines
 
 from . import resolvers  # noqa: E402,F401  # import 副作用で解決器を登録する
 
@@ -51,5 +51,6 @@ __all__ = [
     "registered_kinds",
     "render_block",
     "render_selection_block",
+    "selection_formula_lines",
     "resolve",
 ]

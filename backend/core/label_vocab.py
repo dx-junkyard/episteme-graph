@@ -44,7 +44,13 @@ from types import MappingProxyType
 from core.status import schema as status_schema
 
 __all__ = [
+    "VERSION_AUDIENCE_NOTE_COURSE",
+    "VERSION_CHANGED_TOPICS_LABEL",
     "AI_READING_LABEL",
+    "ORIGINAL_TEXT_MARK",
+    "REWRITTEN_TEXT_MARK",
+    "SYNTHESIZED_TEXT_MARK",
+    "original_text_mark_for_origin",
     "ANCHOR_LANDING_SCALE",
     "ANCHOR_LANDING_THRESHOLD_MID",
     "ANCHOR_LANDING_THRESHOLD_NEAR",
@@ -74,6 +80,7 @@ __all__ = [
     "DISCOVERY_RELEVANCE_THRESHOLD_HIGH",
     "DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM",
     "EDGE_KIND_LABELS",
+    "EDGE_DIRECTION_UNRECORDED_SUFFIX",
     "EVIDENCE_LINE_KIND_LABELS",
     "GradedScale",
     "LEARNING_STANCE_LABELS",
@@ -326,6 +333,60 @@ EDGE_KIND_LABELS = MappingProxyType(
         "related": "関連",
     }
 )
+
+
+#: IK-1072（第 25 周 第 9 波）: 関係の向きの句の正本（依存だけが向きを持つ — 骨格の辺の from → to）。
+#: 反映の確認・カード（``atlas_review_display.edge_direction_line``）・凍結の影響
+#: （``atlas_lifecycle.edge_change_label``）・学生の L2 と右パネル（``routes/atlas_view.py``）が
+#: すべてこの句を通す（面ごとに向きの言い方を作らない）。時制や「関係として…」の結びは各面が足す。
+EDGE_DIRECTION_PHRASE_DEPENDS = "「{from_label}」が「{to_label}」に依存する"
+#: 向きの無い種別（隣接・関連）の句。種別の表示語は :data:`EDGE_KIND_LABELS`。
+EDGE_UNDIRECTED_PHRASE = "「{from_label}」と「{to_label}」（{kind_label}）"
+
+
+#: 向きを持つ種別（骨格の辺の from → to が意味を持つもの）。
+EDGE_DIRECTED_KINDS = frozenset({"depends"})
+
+#: IK-1149（第 25 周 第 11 波）: 有向の関係の向きを、採用のときに教員が選んだ記録が無い（migration 096 より前の
+#: 採用 — 記載の順は 2 つの項目の内部の並び）ことを、向きの句の直後に添える事実（学習者・教員の両方の面）。
+EDGE_DIRECTION_UNRECORDED_SUFFIX = "（向きは、採用のときに選ばれた記録がありません）"
+
+
+def edge_direction_with_record(phrase: object, direction_unrecorded: object = False) -> str:
+    """向きの句に「選ばれた記録がない」事実を添える（IK-1149）。句が空・記録ありならそのまま。"""
+    text = str(phrase or "")
+    if text and direction_unrecorded:
+        return text + EDGE_DIRECTION_UNRECORDED_SUFFIX
+    return text
+
+
+def edge_kind_is_directed(kind: object) -> bool:
+    """種別が向きを持つか（依存だけ）。"""
+    return str(kind or "") in EDGE_DIRECTED_KINDS
+
+
+def edge_direction_phrase(kind: object, from_label: object, to_label: object) -> str:
+    """依存の向きの句（「A」が「B」に依存する）。依存以外・語彙外は空文字（向きを言わない）。"""
+    if not edge_kind_is_directed(kind):
+        return ""
+    return EDGE_DIRECTION_PHRASE_DEPENDS.format(
+        from_label=str(from_label or ""), to_label=str(to_label or "")
+    )
+
+
+def edge_relation_phrase(kind: object, from_label: object, to_label: object) -> str:
+    """関係 1 本の句。依存は向きの句、隣接・関連は「「A」と「B」（隣接）」。語彙外は空文字。"""
+    kind_text = str(kind or "")
+    if kind_text not in EDGE_KIND_LABELS:
+        return ""
+    directed = edge_direction_phrase(kind_text, from_label, to_label)
+    if directed:
+        return directed
+    return EDGE_UNDIRECTED_PHRASE.format(
+        from_label=str(from_label or ""),
+        to_label=str(to_label or ""),
+        kind_label=EDGE_KIND_LABELS[kind_text],
+    )
 
 
 # ── キーフレーズの供給元（論文ディスカバリー / 論文レーダー, PD3）─────────────────
@@ -658,6 +719,29 @@ REVIEW_PENDING_LABEL = "未レビューの要素あり"
 # して使う（JS 側に日本語をミラーしない）。
 
 RECONSTRUCTED_EQUATION_NOTE = "AI が文脈から復元した式です（原文の数式とは未照合）"
+
+#: 第 25 周 第 7 波（IK-0571 の studio 側）: 解析が原文の言語（英語など）のまま残した名前・
+#: 主張・例文に添える印。翻訳はしない（LLM 0 回）— 原文の引用であることを言うだけ。
+#: 判定は ``text_excerpt.is_untranslated_text``。JS は素通しで描く（日本語をミラーしない）。
+ORIGINAL_TEXT_MARK = "（原文）"
+#: IK-1155: 原子化（atomic rewrite）で解析が言い換えた主張 — 原文の言語だが論文の逐語ではない。
+REWRITTEN_TEXT_MARK = "（原文の言い換え）"
+#: IK-1155: 式から決定論で組み立てた主張（論文の文を持たない — schema.NON_SOURCE_TEXT_CLAIM_ORIGINS）。
+SYNTHESIZED_TEXT_MARK = "（式から組み立てた文）"
+
+
+def original_text_mark_for_origin(origin: str | None) -> str:
+    """IK-1155: 原文の言語のまま出す主張の印を、主張の出所（theory_claims.origin）で選ぶ。
+
+    逐語（span / claim_object / 出所不明）は「（原文）」、原子化の言い換えは「（原文の言い換え）」、
+    式から組み立てた文は「（式から組み立てた文）」。言語の判定（is_untranslated_text）は呼び出し側。
+    """
+    key = str(origin or "").strip()
+    if key == "atomic_rewrite":
+        return REWRITTEN_TEXT_MARK
+    if key == "equation_synthesis":
+        return SYNTHESIZED_TEXT_MARK
+    return ORIGINAL_TEXT_MARK
 
 #: 教材本文の式に添える短い印（バッジ）。文は ``RECONSTRUCTED_EQUATION_NOTE`` が言う。
 #: ``core/lecture.py::annotate_reconstructed_formulas`` が chunks.formulas の投影に
@@ -1017,7 +1101,33 @@ ATLAS_PILL_NOTES = MappingProxyType({
         "論文がこの場所に置かれているかどうかは「論文の位置」で示します。"
     ),
     "fog": "この領域には、まだコーパスの論文が関係づけられていません。",
+    # IK-0964: 札が個人の訪問状態を名乗るときは、説明も訪問の軸で言う（台帳の状態は
+    # 検証行だけが言う — 2 つの軸を 1 枚の札と注記に重ねない）。
+    "unvisited": (
+        # IK-0964 残り（第 5 波）: 訪問は学習の痕跡で数え、地図で選ぶことは数えない。
+        "あなたはまだこの場所から学んでいません（地図で選ぶだけでは数えず、"
+        "［ここから学ぶ］などで学習を始めると変わります）。"
+        "確かめられているかどうかは「検証」の行で示します。"
+    ),
+    "now": (
+        "あなたがいま学習している場所です。"
+        "確かめられているかどうかは「検証」の行で示します。"
+    ),
 })
+
+#: 論文の配置の根拠の出所の印（IK-0677。キーは ``core/landscape/schema.py`` の
+#: ``EVIDENCE_SOURCE_*``）。verbatim 検査（LS4）を通った引用でも、照合先には解析が
+#: 論文全体を再構成した文が含まれるので、原文の逐語と同じ顔で出さない。
+LANDSCAPE_EVIDENCE_SOURCE_LABELS = MappingProxyType({
+    "claim": "論文の主張からの引用",
+    "paper_summary": "解析が論文全体を再構成した文からの引用（原文の逐語ではありません）",
+    # 出所の記録が無い旧行で claim_id も無いもの（推測で「再構成」と断定しない）。
+    "unrecorded": "論文全体の記述からの引用（原文の逐語とは限りません）",
+})
+#: 配置の理由文の印（IK-0967。理由は常に AI の要約）。
+LANDSCAPE_REASON_SOURCE_LABEL = "AIの要約"
+#: 理由が引用に現れない固有の語を含むときの一文（語の列挙・件数なし）。
+LANDSCAPE_REASON_BEYOND_QUOTE_TEMPLATE = "理由に挙がる {terms} は、引用には現れません。"
 
 #: 分野（atlas ドメイン）の表示名が登録されていないときの学習者向けの呼び名。
 #: domain_key（内部キー）を表示名の代わりに出さない。
@@ -1028,6 +1138,276 @@ ATLAS_DOMAIN_UNNAMED_LABEL = "名前が登録されていない分野"
 #: （admin.js / landscape-layer.js / atlas-threads-layer.js / app.js の ``ATLAS_VERSION_PREFIX``。
 #: 一致は ``test_atlas_review_round25_r3.py`` が固定）。
 ATLAS_VERSION_PREFIX = "地図 版 "
+
+#: 学習者の地図の「コース」層（L2）で、上限（§13）のために骨格の項目の一部を描かなかった
+#: ときの事実文（IK-0989・第 25 周 第 5 波）。件数・上限値は言わない。
+ATLAS_L2_OMITTED_NOTE = (
+    "この画面では、分野の地図の項目の一部だけを描いています（いま学んでいる場所と、"
+    "そのつながりを優先しています）。描いていない項目は「分野」の層で見られます。"
+    "関係の実線は、ここに描いている項目どうしの間にだけ引いています。"
+)
+#: 学習者の地図の右パネル「承認」の行で、承認の記録が無い「暗黙の前提」の概念に出す事実文
+#: （IK-1018・第 25 周 第 6 波）。承認の行は承認（C層）だけを言い、検証の範囲（D層の欄）は
+#: 検証の行に任せる。閉世界（SL1）: 「このコーパスの中では」を付け、分野全体の不在は言わない。
+ATLAS_ENDORSE_NONE_ASSUMED_LINE = "承認: このコーパスの中では、教員の承認の記録がありません"
+#: IK-1056（第 25 周 第 8 波）: 承認の記録が無いことは状態に依らず 1 つの文で言う（暗黙の前提だけ
+#: 閉世界の文・ほかは「承認記録なし」と言い分けていた）。正本はこの 1 定数（上の名前は互換の別名）。
+ATLAS_ENDORSE_NONE_LINE = ATLAS_ENDORSE_NONE_ASSUMED_LINE
+#: 置き換える前の短い文（状態キャッシュに残る行を読み時に置き換えるためだけに持つ）。
+ATLAS_ENDORSE_LEGACY_NONE_LINE = "承認: 承認記録なし"
+#: 置き換える前の固定文（地図の状態キャッシュに残っている行を読み時に置き換えるためだけに持つ）。
+ATLAS_ENDORSE_LEGACY_SCOPE_LINE = "承認: 承認記録なし — 台帳のスコープ欄は空欄"
+#: 学習者の地図のパネルの文に出してはいけない内部の欄名（IK-1018 のガードレールが検査する）。
+ATLAS_LEARNER_PANEL_DENYLIST = ("スコープ欄", "verification_scopes", "source_scope")
+
+#: IK-1018 残り（第 25 周 第 7 波）: 学習者の地図の札・検証の行・札の説明に初出で出ていた
+#: 内部の語（「台帳」「記帳」）を学習者の語に読み替える表。上から順に置換する（長い句を先に）。
+#: 状態キャッシュの行（教員側の画面・ガードレールが読む正本の文）は書き換えず、学習者向けの
+#: ルート（``routes/atlas_view.py``）が読み時に通す。意味は変えない（「記録が無い」は無いまま）。
+ATLAS_LEARNER_WORDING = (
+    ("台帳に根拠の記帳がありません", "根拠の記録がありません"),
+    ("台帳に記帳がありません", "検証の記録がありません"),
+    ("台帳に記帳なし", "検証の記録なし"),
+    ("原文の引用は台帳に記録されていません", "原文の引用の記録がありません"),
+    ("検証の記録（台帳）", "検証の記録"),
+    ("記録は台帳にありません", "記録はありません"),
+    ("記帳された直接検証なし", "直接確かめた記録なし"),
+    ("台帳の記帳情報がありません", "検証の記録がありません"),
+    ("台帳", "検証の記録"),
+    ("記帳", "記録"),
+)
+#: 読み替えの後に学習者の地図の文へ残ってはいけない語（ガードレールが検査する）。
+ATLAS_LEARNER_WORDING_DENYLIST = ("台帳", "記帳")
+
+
+def learner_atlas_wording(text: object) -> str:
+    """学習者の地図の文から「台帳」「記帳」を学習者の語へ読み替える（IK-1018 残り）。決定論。"""
+    out = str(text or "")
+    for old, new in ATLAS_LEARNER_WORDING:
+        if old in out:
+            out = out.replace(old, new)
+    return out
+
+#: L2 の代表選出で実際に使った手がかりの語（IK-1017・第 25 周 第 6 波）。
+#: ``atlas_l2_omitted_note`` が並べて事実文にする。数値・版の番号は言わない。
+#: IK-1055（第 25 周 第 8 波）: 「いま学んでいる場所」は学習者本人の状態（焦点のトピック・いまここ・足跡）が
+#: 効いたときだけ言う。教員がコースのトピックに結んだ地図の場所は別の語で言う（足跡の無い学生に
+#: 「いま学んでいる場所」と言わない）。
+ATLAS_L2_HINT_LEARNING = "いま学んでいる場所"
+ATLAS_L2_HINT_COURSE_TOPICS = "このコースのトピックが結ばれている場所"
+ATLAS_L2_HINT_PLACEMENTS = "このコースの論文が置かれている場所"
+#: IK-1045（第 25 周 第 7 波）: 直近の凍結だけでなく、過去の改訂で加わった関係も手がかりに含めるので
+#: 「新しい版で」ではなく「版の改訂で」と言う（選出と一致させる）。
+#: IK-1119（第 25 周 第 10 波）: 集合は最初の版以降の全改訂。「これまでの」で範囲を言い、直近の版の差と
+#: 読ませない（どの版で加わったかは右パネルの関係の行だけが版の事実として言う）。
+ATLAS_L2_HINT_ADDED_RELATIONS = "これまでの版の改訂で加わった関係"
+ATLAS_L2_HINTS = (
+    ATLAS_L2_HINT_LEARNING,
+    ATLAS_L2_HINT_COURSE_TOPICS,
+    ATLAS_L2_HINT_PLACEMENTS,
+    ATLAS_L2_HINT_ADDED_RELATIONS,
+)
+#: 手がかりが 1 つも無かったとき（足跡が無く、コースの論文の配置もトピックの対応も無い）。
+ATLAS_L2_NO_HINT_CLAUSE = (
+    "このコースには地図の上の手がかりがまだ無いため、地図の並び順で先頭の項目を描いています"
+)
+
+
+#: IK-1045（第 25 周 第 8 波）: 版の改訂で加わった（教員が確定した）関係のうち、端点が上限のために
+#: この画面に描かれなかったものを名前で言う文の前置き。件数は言わない。名前を挙げきれないときは
+#: :data:`ATLAS_L2_UNDRAWN_RELATIONS_MORE` を足す（「ほか」— 数は言わない）。
+ATLAS_L2_UNDRAWN_RELATIONS_PREFIX = "これまでの版の改訂で加わった関係のうち、ここには描いていないもの: "
+ATLAS_L2_UNDRAWN_RELATIONS_MORE = "ほか"
+#: 名前で挙げる関係の上限（文の長さのため。数値は文に出さない）。
+ATLAS_L2_UNDRAWN_RELATIONS_MAX_NAMED = 6
+
+
+def atlas_l2_undrawn_relations_line(pairs) -> str:
+    """描かなかった確定済みの関係を名前で言う一文（IK-1045 / IK-1118）。
+
+    ``pairs`` の各要素は (kind, from_label, to_label)。関係は :func:`edge_relation_phrase` の句
+    （依存は「「A」が「B」に依存する」・隣接/関連は「「A」と「B」（隣接）」— 向きを落とさない）。
+    種別の無い (ラベル, ラベル) は「A — B」（種別が分からない事実のまま）。空なら空文字。件数は言わない。
+    """
+    named: list[str] = []
+    for pair in pairs or ():
+        try:
+            unrecorded = False
+            if len(pair) == 4:
+                kind, a, b, unrecorded = pair
+            elif len(pair) == 3:
+                kind, a, b = pair
+            else:
+                kind = ""
+                a, b = pair
+        except (TypeError, ValueError):
+            continue
+        a, b = str(a or "").strip(), str(b or "").strip()
+        if not a or not b:
+            continue
+        text = edge_relation_phrase(kind, a, b) if kind else ""
+        if text and edge_kind_is_directed(kind):
+            text = edge_direction_with_record(text, unrecorded)
+        if not text:
+            text = f"{a} — {b}"
+        if text not in named:
+            named.append(text)
+    if not named:
+        return ""
+    shown = named[:ATLAS_L2_UNDRAWN_RELATIONS_MAX_NAMED]
+    body = "、".join(shown)
+    if len(named) > len(shown):
+        body += f"、{ATLAS_L2_UNDRAWN_RELATIONS_MORE}"
+    return f"{ATLAS_L2_UNDRAWN_RELATIONS_PREFIX}{body}。"
+
+
+def atlas_l2_omitted_note(hints, undrawn_relations=None) -> str:
+    """L2 で骨格の項目の一部だけを描いたときの事実文（IK-0989 / IK-1017 / IK-1045）。
+
+    ``hints`` は :data:`ATLAS_L2_HINTS` の語の列（実際に描いた項目に効いた手がかりだけ）。
+    空なら「手がかりが無いので並び順」と言い、優先が働いたかのようには言わない。
+    ``undrawn_relations`` は描かなかった確定済みの関係の (ラベル, ラベル) の列で、あれば
+    名前で言う一文を末尾に足す（件数なし）。
+    """
+    used = [h for h in ATLAS_L2_HINTS if h in set(hints or [])]
+    if not used:
+        clause = ATLAS_L2_NO_HINT_CLAUSE
+    else:
+        clause = "と、".join(used) + "と、そのつながりを優先しています"
+    note = (
+        f"この画面では、分野の地図の項目の一部だけを描いています（{clause}）。"
+        "描いていない項目は「分野」の層で見られます。"
+        "関係の実線は、ここに描いている項目どうしの間にだけ引いています。"
+    )
+    undrawn = atlas_l2_undrawn_relations_line(undrawn_relations)
+    return note + undrawn if undrawn else note
+
+
+#: IK-1072（第 25 周 第 9 波）: L2 に描いた有向の関係（依存）の向きを言う一文の前置き。
+#: 実線の矢じりと同じ向き（依存する側 → 依存される側）。件数は言わない。
+ATLAS_L2_DIRECTED_RELATIONS_PREFIX = "矢印のある線は向きのある関係です（矢印は依存する側から依存される側へ）: "
+ATLAS_L2_DIRECTED_RELATIONS_MAX_NAMED = 6
+
+
+def atlas_l2_directed_relations_line(triples) -> str:
+    """L2 に描いた依存の関係を向きの句で並べる一文。``triples`` は (kind, from_label, to_label) の列。
+
+    依存（向きのある種別）が無ければ空文字。挙げきれないときは「ほか」（数は言わない）。
+    """
+    named: list[str] = []
+    for item in triples or ():
+        try:
+            if len(item) == 4:
+                kind, a, b, unrecorded = item
+            else:
+                kind, a, b = item
+                unrecorded = False
+        except (TypeError, ValueError):
+            continue
+        phrase = edge_direction_with_record(edge_direction_phrase(kind, a, b), unrecorded)
+        if phrase and phrase not in named:
+            named.append(phrase)
+    if not named:
+        return ""
+    shown = named[:ATLAS_L2_DIRECTED_RELATIONS_MAX_NAMED]
+    body = "、".join(shown)
+    if len(named) > len(shown):
+        body += f"、{ATLAS_L2_UNDRAWN_RELATIONS_MORE}"
+    return f"{ATLAS_L2_DIRECTED_RELATIONS_PREFIX}{body}。"
+
+
+#: 右パネル（L1/L2 で選んだ概念）に添える、その概念に結ばれた確定済みの関係の行（名前の列挙・件数なし）。
+ATLAS_PANEL_RELATIONS_PREFIX = "地図の関係: "
+ATLAS_PANEL_RELATIONS_MAX_NAMED = 6
+
+
+#: IK-1119（第 25 周 第 10 波・オーナー判断＝推奨どおり）: 右パネルの関係の行にだけ、その関係が加わった版を
+#: 事実として添える（地図の上に印・NEW バッジ・告知は作らない — category_gap_candidates_design §5.6）。
+#: 最初の版から在る関係には添えない。
+ATLAS_PANEL_RELATION_ADDED_IN = "（版 {version} で加わった）"
+
+
+def atlas_panel_relations_line(triples) -> str:
+    """選んだ概念の確定済みの関係を句で並べる一文（``edge_relation_phrase`` を通す）。無ければ空文字。
+
+    各要素は (kind, from_label, to_label) か (kind, from_label, to_label, added_version)、
+    または末尾に ``direction_unrecorded``（IK-1149: 有向の関係の向きが採用のときに選ばれていない）を足した 5 要素。
+    ``added_version`` があればその句に :data:`ATLAS_PANEL_RELATION_ADDED_IN` を添える（IK-1119）。
+    """
+    named: list[str] = []
+    for item in triples or ():
+        try:
+            unrecorded = False
+            if len(item) == 5:
+                kind, a, b, added_version, unrecorded = item
+            elif len(item) == 4:
+                kind, a, b, added_version = item
+            else:
+                kind, a, b = item
+                added_version = ""
+        except (TypeError, ValueError):
+            continue
+        phrase = edge_relation_phrase(kind, a, b)
+        if phrase and edge_kind_is_directed(kind):
+            phrase = edge_direction_with_record(phrase, unrecorded)
+        version_text = str(added_version or "").strip()
+        if phrase and version_text:
+            phrase += ATLAS_PANEL_RELATION_ADDED_IN.format(version=version_text)
+        if phrase and phrase not in named:
+            named.append(phrase)
+    if not named:
+        return ""
+    shown = named[:ATLAS_PANEL_RELATIONS_MAX_NAMED]
+    body = "、".join(shown)
+    if len(named) > len(shown):
+        body += f"、{ATLAS_L2_UNDRAWN_RELATIONS_MORE}"
+    return f"{ATLAS_PANEL_RELATIONS_PREFIX}{body}。"
+
+
+#: 右パネル（選んだ概念）に添える、その場所に置かれたこのコースの論文の名前の行（第 25 周 第 10 波）。
+#: 「論文の位置」レイヤーと往復しなくても読めるよう名前だけを並べる（件数なし）。配置ごとに出所ラベル
+#: （教員確認済み / AIによる推定（未確認））を必ず添える（LS8 / AC-005 — 推定を確定に見せない）。
+ATLAS_PANEL_PAPERS_PREFIX = "ここに置かれているこのコースの論文: "
+ATLAS_PANEL_PAPERS_MAX_NAMED = 4
+
+
+def atlas_panel_papers_line(items) -> str:
+    """``items`` は (論文の呼び方, 出所ラベル) の列。無ければ空文字。挙げきれないと「ほか」（数は言わない）。"""
+    named: list[str] = []
+    for item in items or ():
+        try:
+            title, provenance = item
+        except (TypeError, ValueError):
+            continue
+        title = str(title or "").strip()
+        provenance = str(provenance or "").strip()
+        if not title:
+            continue
+        text = f"『{title}』" + (f"（{provenance}）" if provenance else "")
+        if text not in named:
+            named.append(text)
+    if not named:
+        return ""
+    shown = named[:ATLAS_PANEL_PAPERS_MAX_NAMED]
+    body = "、".join(shown)
+    if len(named) > len(shown):
+        body += f"、{ATLAS_L2_UNDRAWN_RELATIONS_MORE}"
+    return f"{ATLAS_PANEL_PAPERS_PREFIX}{body}。"
+
+
+#: IK-1073（第 25 周 第 9 波）: 地図の場所に結びついた学習の記録（足跡）が無く「いまここ」を付けられない
+#: ときの事実文。いまここを目次の「学習中」から推定して付けない（学習の行為の無い位置を現在地と言わない）。
+ATLAS_NOW_ABSENT_NOTE = (
+    "まだ地図の場所に結びついた学習の記録がないため、「いまここ」は表示していません"
+    "（コースの目次の「学習中」は、学ぶ順番や開いたトピックから付く印で、地図の「いまここ」とは別に付きます）。"
+)
+
+
+#: 推定の糸の一部の端点が L2 に描かれていないときの事実文（IK-0989）。本数は言わない。
+ATLAS_THREADS_UNDRAWN_NOTE = (
+    "糸の一部は、この画面に描いていない項目につながるため線にしていません。"
+    "下の「糸ごとの根拠」には、すべての糸を挙げています。"
+)
 
 
 def atlas_version_label(version: object) -> str:
@@ -1133,6 +1513,18 @@ COURSE_ROLE_LABELS = MappingProxyType({
     "viewer": "共有（閲覧のみ）",
 })
 
+#: 教材一覧の役割の印（IK-0974。コース一覧の COURSE_ROLE_LABELS と同じ語で、教材の
+#: 編集権限 — 記帳・再解析・説明の追加 — の有無を操作の前に言う）。
+MATERIAL_ROLE_LABELS = MappingProxyType({
+    "owner": "所有",
+    "editor": "共有（編集可）",
+    "viewer": "閲覧のみ",
+})
+
+#: 閲覧のみの教材に添える、編集の共有を頼む先（IK-0974。教員向けの一覧だけで使う）。
+MATERIAL_EDIT_REQUEST_TEMPLATE = "編集（台帳の記帳・再解析など）の共有は、所有者の{owner}さんに頼めます。"
+MATERIAL_EDIT_REQUEST_UNKNOWN = "編集（台帳の記帳・再解析など）の共有は、この教材の所有者に頼めます。"
+
 #: コースのグループ共有の権限語（IK-0911。共有モーダルの選択肢と現在の設定の表で同じ語）。
 COURSE_SHARE_PERMISSION_LABELS = MappingProxyType({
     "viewer": "受講・閲覧できる",
@@ -1170,6 +1562,8 @@ EXPLANATION_ACTION_LABELS = MappingProxyType({
     "approve": "学生に公開してよいと査読する",
     "endorse": "支持する",
     "revoke": "支持を取り消す",
+    # IK-0984: 承認済みの標準の説明に、別の教員がもう一人の査読者として査読する。
+    "second_review": "もう一人の査読者として査読する",
 })
 
 #: 支持の段階（``component_endorsements.level`` の CHECK 語彙）の語（IK-0924）。
@@ -1226,3 +1620,316 @@ def atlas_binding_coverage_label(bound: int, total: int) -> str:
     if bound >= total:
         return ATLAS_BINDING_COVERAGE_LABELS["all"]
     return ATLAS_BINDING_COVERAGE_LABELS["some"]
+
+
+# ── 学生の「共通部品として」: 標準化の評価の 1 文（IK-0959）─────────────────────────
+#: 教員が W層の標準化判定を確定した値だけを学生向けの 1 文にする。``unknown``（未評価）は
+#: 教員の内部手続の状態なので学生には何も出さない（キー自体を作らない）。語の正本は
+#: ``core/library/schema.py::STANDARDIZATION_STATUS_LABELS``（教員向けの短い語）で、
+#: ここは学生向けの文。JS にミラーしない（サーバが解決した文を素通しで描く）。
+LEARNER_STANDARDIZATION_NOTES: dict[str, str] = {
+    "standard": "教員は、この共通部品を広く標準的に使われるものと判断しています。",
+    "field_standard": "教員は、この共通部品をこの分野で標準的に使われるものと判断しています。",
+    "emerging_common": "教員は、この共通部品を複数の論文で共通に使われ始めているものと判断しています。",
+    "novel": "教員は、この共通部品をこの論文に新しく現れたものと判断しています。",
+}
+
+
+def learner_standardization_note(status: object) -> str:
+    """標準化の評価を学生向けの 1 文にする（未評価・語彙外は空文字 = 出さない）。"""
+    return LEARNER_STANDARDIZATION_NOTES.get(str(status or ""), "")
+
+
+# ── 前提の地図・台帳の欄の出所（IK-1002 / IK-1003 / IK-0998・第 25 周 面 B 第 5 波）──────
+#: 台帳の 1 画面・未検証合意リストの 1 行に並ぶ欄は、それぞれ別の記録から読む（人の記帳の
+#: 検証状態・検証スコープ・観測からの支持線・理論操作グラフの下流・解析時に数えた参照）。
+#: 欄名でその出所を言い分け、同じ語（「支持」「依存」）が別の量を指して矛盾に読めないようにする。
+#: JS にミラーしない（サーバが ``field_labels`` として渡し、画面はそのまま描く）。
+LEDGER_FIELD_LABELS = MappingProxyType({
+    "verification": "検証状態（教員の記帳）",
+    "support_line": "観測からの支持線",
+    "load": "依存の広がり（理論操作グラフの下流・段階）",
+    "behavioral": "行動上の合意（解析時に数えた参照）",
+    # IK-1120（第 25 周 第 10 波）: 合意リストの「到達可能性」は覆る条件の量で、検証提案の到達可能性
+    # （台帳の提案カード）とは別の量。同じ語のまま並べない。
+    "falsification_reachability": "覆る条件の到達可能性",
+    "proposal_reachability": "検証提案の到達可能性",
+})
+
+#: IK-1120: 合意リストの支持線は、各行の対象が載っている論文の範囲で読む（台帳と同じ範囲 — IK-0852）。
+#: 一覧と詳細で範囲が違うと、同じ欄名のまま「複数」と「単一」が並ぶ。件数は言わない。
+OPEN_ASSUMPTIONS_SUPPORT_SCOPE_NOTE = (
+    "観測からの支持線は、各行の対象が載っている論文の中で読んでいます（台帳と同じ範囲です）。"
+)
+
+#: 欄の出所の違いを 1 行で言う事実文（数値なし）。
+LEDGER_FIELD_SOURCES_NOTE = (
+    "検証状態・観測からの支持線・依存の広がり・行動上の合意は、それぞれ別の記録から読んでいます"
+    "（一方が「あり」で他方が「なし」でも矛盾ではありません）。"
+)
+
+#: 検証状態が未記帳（unknown）のままスコープだけが記帳されている台帳の 1 文。
+#: スコープの記帳は検証状態を変えない（状態の記帳は教員の別の操作）。
+LEDGER_STATUS_UNRECORDED_WITH_SCOPES_NOTE = (
+    "検証状態はまだ記帳されていません（検証スコープの記帳はあります。スコープを記帳しても"
+    "検証状態は変わりません）。"
+)
+
+#: 支える主張ごとの疑義・提案の段階語（IK-1003）。件数は出さない。
+SUPPORTING_CLAIM_CHALLENGE_STATE_LABELS = MappingProxyType({
+    "challenged": "疑義あり",
+    "proposed": "検証提案あり",
+    "in_progress": "検証に着手済み",
+})
+
+#: 部品・式の台帳で、支える主張のどれかに疑義・提案が残っているときの事実文（IK-1003）。
+SUPPORTING_CLAIMS_CHALLENGED_NOTE = (
+    "この対象そのものへの疑義はありませんが、支える主張に疑義・検証提案が残っています"
+    "（主張の台帳で読めます）。"
+)
+
+#: 取り下げた疑義の折りたたみの見出しと、取り下げ直後の事実文（IK-0998）。
+WITHDRAWN_CHALLENGES_HEADING = "取り下げ済みの疑義（読み取りのみ）"
+CHALLENGE_WITHDRAWN_NOTE = "取り下げました。記録は台帳に残り、「取り下げ済みの疑義」で読めます。"
+#: 第 25 周 第 9 波（面 B・軽）: 同じ対象に同じ型・同じ理由の未取り下げの疑義が既にあるときの告知。
+#: 記帳は止めない（重ねて記帳する判断は教員のもの）— 事実だけを言う。件数は言わない。
+CHALLENGE_DUPLICATE_NOTE = (
+    "記帳しました。この対象には、同じ型・同じ理由の疑義がすでに残っています（取り下げていないもの）。"
+)
+
+#: IK-1060（第 25 周 第 8 波）: 疑義の行の「誰が・いつ」。取り下げは本人のみ（取り下げた人 = 記帳者）。
+#: 日時は日本時間の分まで（同じ日に同じ文面の取り下げが 2 件あっても見分けられる）。数値スコアではない。
+CHALLENGE_RECORDED_TEMPLATE = "記帳: {name}（{at}）"
+CHALLENGE_WITHDRAWN_BY_TEMPLATE = "取り下げ: {name}（{at}・記帳者本人）"
+CHALLENGE_TIME_UNKNOWN = "日時の記録なし"
+
+
+def challenge_timestamp_text(value: object) -> str:
+    """疑義の日時を「YYYY-MM-DD HH:MM」（日本時間）にする。引けなければ固定文（IK-1060）。"""
+    if value is None or value == "":
+        return CHALLENGE_TIME_UNKNOWN
+    from datetime import datetime, timedelta, timezone
+
+    dt = value
+    if not isinstance(dt, datetime):
+        try:
+            dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return CHALLENGE_TIME_UNKNOWN
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M")
+
+
+def challenge_record_line(
+    challenger_name: object, created_at: object, status: object, updated_at: object = None,
+) -> str:
+    """疑義の帰属と時刻の 1 行（IK-1060）。取り下げ済みなら取り下げの日時と取り下げた人を足す。"""
+    name = str(challenger_name or "").strip()
+    line = CHALLENGE_RECORDED_TEMPLATE.format(name=name, at=challenge_timestamp_text(created_at))
+    if str(status or "") == "withdrawn":
+        line += " ／ " + CHALLENGE_WITHDRAWN_BY_TEMPLATE.format(
+            name=name, at=challenge_timestamp_text(updated_at)
+        )
+    return line
+
+# ── 台帳への書き込みを断る文・前提の出所と状態（IK-1027 / IK-1028・第 25 周 面 B 第 6 波）──────
+#: 閲覧はできるが編集できない教員に台帳の画面が添える文（IK-0900）。台帳への書き込みを
+#: サーバが断るとき（403）の detail も同じ文にする（IK-1027 — 画面とサーバで理由を言い分けない）。
+LEDGER_READ_ONLY_NOTE = (
+    "この論文の編集権限が無いため、台帳への記帳はできません（閲覧と疑義の記帳はできます）。"
+)
+
+#: 台帳の対象が解決できない・閲覧もできないときの書き込み拒否（404）の文（IK-1027）。
+#: 存在の有無は言わない（fail-closed — 閲覧できない相手に対象の存在を漏らさない）。
+LEDGER_WRITE_TARGET_NOT_FOUND_NOTE = "この台帳の対象は見つからないか、記帳できません。"
+
+#: 前提（assumption_nodes.origin）の出所の画面の語（IK-1028。``a.origin`` の生の値を描かない）。
+#: 語彙の正本は migration 030 の CHECK（mined_gap / mined_corpus / naive_aggregate / manual）。
+ASSUMPTION_ORIGIN_LABELS = MappingProxyType({
+    "mined_gap": "前提マイニング",
+    "mined_corpus": "コーパス監査",
+    "naive_aggregate": "素朴な問いの集約",
+    "manual": "教員が手で記帳",
+})
+
+#: 前提（assumption_nodes.status）の段階の画面の語（IK-1028）。
+ASSUMPTION_STATUS_LABELS = MappingProxyType({
+    "candidate": "候補（未確定）",
+    "confirmed": "確定済み",
+    "operationalized": "確定済み（検証に着手）",
+    "dismissed": "却下",
+})
+
+#: 語彙外の出所・段階に添える語（生の値を出さない）。
+ASSUMPTION_LABEL_UNKNOWN = "記録の語が読めません"
+
+#: 論文に結ばれていない前提のカードに添える事実文（IK-1028。台帳行は論文単位なので作れない）。
+ASSUMPTION_NOT_LINKED_TO_DOCUMENT_NOTE = (
+    "この前提はどの論文にも結ばれていないため、台帳の行がありません（検証スコープは論文に結んだ前提にだけ記帳できます）。"
+)
+
+#: IK-1058（第 25 周 第 8 波）: 依存の広がり（負荷）を計算できない前提（手で記帳し、グラフ上の主張・式・
+#: ノードに結ばれていない前提）。値が無いことを「載せない」と読まず、計算できない段として言う。
+#: 散布図の縦の位置は決められないので点にせず、地図の下に並べる。一覧・台帳にも同じ文。
+ASSUMPTION_LOAD_UNCOMPUTABLE_NOTE = (
+    "依存の広がり: 計算できません（この前提はグラフ上の主張・式に結ばれていないため、"
+    "依存する範囲を辿れません）。"
+)
+ASSUMPTION_ATLAS_UNPLOTTED_HEADING = (
+    "依存の広がりを計算できない前提（グラフ上の主張・式に結ばれていないため、散布図の縦の位置を決められません）"
+)
+#: IK-1074（第 25 周 第 9 波）: 「計算できない前提」の各行に添える区別の 1 行。散布図では横の位置が
+#: 運ぶ検証スコープの被覆と、行キーの論文・前提を記帳した日時（同じ文面の前提を見分ける — IK-1060
+#: と同じ「同文は日時で見分ける」形）。件数・生数値は言わない。
+ASSUMPTION_UNPLOTTED_DETAIL_TEMPLATE = "検証スコープの被覆: {coverage} ／ 論文『{title}』 ／ 記帳: {at}"
+
+
+def assumption_unplotted_detail_line(coverage_label: object, title: object, created_at: object) -> str:
+    """「計算できない前提」の行の区別の 1 行（IK-1074）。題名が無ければ論文の欄を省く。"""
+    coverage = str(coverage_label or "").strip() or ASSUMPTION_LABEL_UNKNOWN
+    name = str(title or "").strip()
+    at = challenge_timestamp_text(created_at)
+    if not name:
+        return f"検証スコープの被覆: {coverage} ／ 記帳: {at}"
+    return ASSUMPTION_UNPLOTTED_DETAIL_TEMPLATE.format(coverage=coverage, title=name, at=at)
+
+
+# ── 検証提案の完了の帰属と下流の語（IK-1121・第 25 周 第 10 波）──────────────────────
+#: 完了の帰属の 1 行（取り下げの IK-1060 と同じ「誰が・いつ」の形）。日時は日本時間の分まで。
+PROPOSAL_COMPLETED_BY_TEMPLATE = "完了: {name}（{at}）"
+#: 完了の根拠（何を確かめたか）が書かれていないときの事実語。
+PROPOSAL_COMPLETION_NOTE_EMPTY = "確かめたことの記帳なし"
+PROPOSAL_COMPLETION_NOTE_TEMPLATE = "確かめたこと: {note}"
+#: 完了しても検証状態は変わらない（人が別の操作で記帳する — SL1・AI に疑わせない）ことの事実文。
+PROPOSAL_COMPLETED_STATUS_UNCHANGED_NOTE = (
+    "提案の完了を記録しても、検証状態は変わりません（検証状態は教員が［検証状態を記帳する］で書きます）。"
+)
+#: 合意リスト・学習者の一覧・開幕の「確かめていないこと」で、検証提案の進み具合を言い分ける段階語。
+#: 件数は言わない。キー: open（未完了だけ）/ completed（完了だけ）/ mixed（両方）。
+VERIFICATION_PROPOSAL_PRESENCE_LABELS = MappingProxyType({
+    "open": "検証提案あり",
+    "completed": "検証提案あり（完了）",
+    "mixed": "検証提案あり（完了と未完了）",
+})
+
+
+def proposal_completed_line(actor_name: object, completed_at: object) -> str:
+    """検証提案の完了の帰属の 1 行（IK-1121）。名前は呼び出し側が表示名に解決して渡す。"""
+    name = str(actor_name or "").strip() or ACCOUNT_NAME_UNREGISTERED
+    return PROPOSAL_COMPLETED_BY_TEMPLATE.format(name=name, at=challenge_timestamp_text(completed_at))
+
+
+def proposal_completion_note_line(note: object) -> str:
+    """完了の根拠の 1 行（空なら記帳なしの事実語）。"""
+    text = str(note or "").strip()
+    return PROPOSAL_COMPLETION_NOTE_TEMPLATE.format(note=text) if text else PROPOSAL_COMPLETION_NOTE_EMPTY
+
+
+def verification_proposal_presence(open_count: int, completed_count: int) -> str:
+    """検証提案の段階キー（件数は外へ出さない）。どちらも無ければ空文字。"""
+    if open_count > 0 and completed_count > 0:
+        return "mixed"
+    if completed_count > 0:
+        return "completed"
+    if open_count > 0:
+        return "open"
+    return ""
+
+
+def assumption_origin_label(origin: object) -> str:
+    """前提の出所の画面の語（語彙外は :data:`ASSUMPTION_LABEL_UNKNOWN`）。"""
+    return ASSUMPTION_ORIGIN_LABELS.get(str(origin or ""), ASSUMPTION_LABEL_UNKNOWN)
+
+
+def assumption_status_label(status: object) -> str:
+    """前提の段階の画面の語（語彙外は :data:`ASSUMPTION_LABEL_UNKNOWN`）。"""
+    return ASSUMPTION_STATUS_LABELS.get(str(status or ""), ASSUMPTION_LABEL_UNKNOWN)
+
+# ---------------------------------------------------------------------------
+# 人に見せる名前（IK-0848 / IK-1007・第 25 周 第 5 波）
+# ---------------------------------------------------------------------------
+# ``users.display_name`` はログインの照合列を兼ねるので、帰属・所有者・査読者・記帳者の
+# 表示には使わない。表示は本人が登録した ``users.profile_name`` だけで、空なら下の事実文に
+# 戻る（ログイン ID へフォールバックしない）。読み手は ``core/account_display.py``。
+
+#: 名前の登録が無いことの事実文（単独の行・欄に出す）。
+ACCOUNT_NAME_UNREGISTERED = "名前の登録がありません"
+
+#: 文の主語として名前の代わりに置く事実語（「〜が採用しました」の主語）。
+ACCOUNT_NAME_UNREGISTERED_ACTOR = "名前を登録していない利用者"
+
+#: 本人が名前を登録・変更したときの事実文。
+ACCOUNT_PROFILE_NAME_SAVED = "名前を保存しました。共有先の画面には、この名前が出ます。"
+
+#: 本人が名前を空にしたときの事実文。
+ACCOUNT_PROFILE_NAME_CLEARED = (
+    "名前を消しました。共有先の画面には「" + ACCOUNT_NAME_UNREGISTERED + "」と出ます。"
+)
+
+
+# ---------------------------------------------------------------------------
+# 凍結した教材の ⚓ が指す部品が置き換わったとき（IK-1021 doubt 側・第 25 周 第 7 波）
+# ---------------------------------------------------------------------------
+# 学習者の部品ポップアップ・説明ポップアップは、後継が決まらないとき凍結時の部品名を見出しに置き、
+# 次の 1 行で事実を言う（推測で別の部品へ結ばない — 第 6 波の判断どおり）。
+
+#: 凍結時の部品名が引けたときの事実文（``{label}`` は凍結時の部品名）。
+FROZEN_COMPONENT_SUPERSEDED_LINE = (
+    "教材を作ったときの部品『{label}』は、再解析で置き換わり、後継が決まっていません。"
+)
+
+#: 凍結時の部品名が引けないときの事実文。
+FROZEN_COMPONENT_SUPERSEDED_LINE_UNNAMED = (
+    "教材を作ったときの部品は、再解析で置き換わり、後継が決まっていません。"
+)
+
+
+#: 第 7 波（IK-1051・面 A）: 出典の重なる新しい部品が 1 つも無かったとき（「決まらない」と言わない）。
+FROZEN_COMPONENT_NOT_FOUND_LINE = (
+    "教材を作ったときの部品『{label}』は、再解析で置き換わりました。出典の重なる新しい部品は見つかりません。"
+)
+FROZEN_COMPONENT_NOT_FOUND_LINE_UNNAMED = (
+    "教材を作ったときの部品は、再解析で置き換わりました。出典の重なる新しい部品は見つかりません。"
+)
+
+
+def frozen_component_superseded_line(label: object, reason: object = "") -> str:
+    """置き換わって後継の決まらない部品の事実文（凍結時の名前があれば名指す）。
+
+    ``reason == "not_found"``（出典の重なる新しい部品が 1 つも無い — 第 7 波 IK-1051）は
+    「見つかりません」と言う。それ以外（1 対 1 に決まらない）は「後継が決まっていません」。
+    """
+    name = str(label or "").strip()
+    if str(reason or "") == "not_found":
+        return FROZEN_COMPONENT_NOT_FOUND_LINE.format(label=name) if name else FROZEN_COMPONENT_NOT_FOUND_LINE_UNNAMED
+    return FROZEN_COMPONENT_SUPERSEDED_LINE.format(label=name) if name else FROZEN_COMPONENT_SUPERSEDED_LINE_UNNAMED
+
+
+#: 第 25 周 第 10 波（IK-1127）: 版の管理モーダルで、発行した版が宛先ごとにどう届くかの事実文
+#: （V層の確定仕様: 受講者 = 有効な版を同意なしに読む / 閲覧の共有先 = 取り込むまでピンした版 /
+#: 編集の共有先 = 常に最新の内容）。``versioning.js`` は ``version-state`` の文を素通しで描く。
+VERSION_AUDIENCE_NOTE_COURSE = (
+    "発行すると、受講者（学習者）はその時点から新しい版を見ます（受講者の同意は要りません）。"
+    "共有先の教員のうち閲覧の共有先は、取り込む（同意する）まで自分の版に留まります。"
+    "編集の共有先は常にいまの内容を見ます。"
+)
+#: 発行の後に変わったトピックの題名の一覧の見出し（件数は出さない）。
+VERSION_CHANGED_TOPICS_LABEL = "発行の後に変わったトピック"
+
+
+#: IK-1124（第 25 周 第 10 波）: ナレッジライブラリのエントリを凍結する確認文に添える、学生の画面への
+#: 効果の事実文。学習者向けの「共通部品として」（部品の文脈）と記号の吹き出しの概念名は、確定した
+#: 結び付きに加えて凍結版があるときだけ出る（``library_store.get_frozen_entry_for_learner`` /
+#: ``symbol_lookup`` の凍結版の join）。admin.js の凍結の確認文は逐語ミラー（一致はテストで固定）。
+LIBRARY_FREEZE_LEARNER_EFFECT_NOTE = (
+    "凍結すると、この共通部品に確定済みで結び付いた教材の部品・記号が、学生の画面"
+    "（部品の文脈の「共通部品として」・記号の吹き出しの概念名）に出るようになります。"
+)
+#: IK-1152: 記号と概念の結び付きを確定した直後の知らせ（部品の「共通部品として」ではなく
+#: 記号の吹き出しの概念名に出る。JS にミラーしない — サーバの文を素通しで描く）。
+SYMBOL_LINK_CONFIRMED_FACT = (
+    "記号と概念の結び付きを確定しました（{line}）。学生の記号の吹き出しに概念名として出るのは、"
+    "この共通部品に凍結した版があるときです。取り消すときは、エントリの詳細の［確定を取り消す］から"
+    "理由を書いて取り消します。"
+)

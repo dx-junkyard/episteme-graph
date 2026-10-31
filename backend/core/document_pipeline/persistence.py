@@ -313,6 +313,49 @@ def _apply_remaps(
     return summary
 
 
+def _reanchor_superseded_components(
+    session,
+    *,
+    document_id: str,
+    run_id: str | None,
+    superseded_ids: list[str],
+    inserted_ids: list[str],
+) -> dict:
+    """:func:`core.knowledge_objects.remap.reanchor_superseded_components` の薄いラッパ（第 6 波）。
+
+    savepoint の内側で動かし、失敗しても部品の同期そのものは止めない（付け替えられなかった記録は
+    旧行に残り、画面が事実文で言う — 消えるより正直）。
+    """
+    if not superseded_ids:
+        return {}
+    try:
+        nested = session.begin_nested()
+    except Exception:  # noqa: BLE001 — fake session 等は savepoint なしで続ける
+        nested = None
+    try:
+        summary = ko_remap.reanchor_superseded_components(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            superseded_ids=superseded_ids,
+            inserted_ids=inserted_ids,
+        )
+        if nested is not None:
+            nested.commit()
+        return summary
+    except Exception:  # noqa: BLE001
+        if nested is not None:
+            try:
+                nested.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+        logger.warning(
+            "superseded component reanchor failed (records stay on the old rows): document=%s",
+            document_id, exc_info=True,
+        )
+        return {"failed": True}
+
+
 def _assign_item_stable_keys(items: list[dict]) -> list[dict]:
     """同一 run 内の stable_key 衝突を項目ごとに解く（KO2）。``items`` を破壊的に更新する。
 
@@ -2190,6 +2233,18 @@ def persist_components(
             remaps=sync.remaps,
             key_remaps=sync.key_remaps,
         )
+        # 第 6 波（IK-1012 / IK-1020 / IK-1021・オーナー判断の推奨）: 名前が変わって supersede された
+        # 部品の人の記録を、出典の重なりで 1 対 1 に決まる新部品へ付け替える（決まらなければ旧行に残す）。
+        superseded_summary = _reanchor_superseded_components(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            superseded_ids=list(getattr(sync, "superseded_ids", []) or []),
+            inserted_ids=list(getattr(sync, "inserted_ids", []) or []),
+        )
+        if superseded_summary:
+            remap_summary = dict(remap_summary)
+            remap_summary["superseded_component"] = superseded_summary
         _record_knowledge_audit(
             session,
             document_id=document_id,

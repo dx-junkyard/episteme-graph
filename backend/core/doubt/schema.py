@@ -391,7 +391,9 @@ PROPOSAL_STATUS_LABELS = {
 FALSIFICATION_KINDS = ("observation_value", "auxiliary_hypothesis", "not_formulable")
 
 # 到達可能性区分（SL3: 人間専用語彙）。既定 unassessed。
-REACHABILITY_LEVELS = ("reachable", "next_generation", "unreachable", "unassessed")
+# 第 25 周 第 11 波（IK-1148）: by_document = 本文・文献の読み直しで確かめられる（観測ではない
+# 確かめ方。定義の疑義から作った検証提案向け）。migration 097 が CHECK を同じ語彙に揃える。
+REACHABILITY_LEVELS = ("reachable", "next_generation", "by_document", "unreachable", "unassessed")
 
 # 人間専用フィールド（LLM 候補に含めさせない・混入は validator が剥ぐ）。
 HUMAN_ONLY_FALSIFICATION_FIELDS = ("reachability",)
@@ -405,6 +407,7 @@ FALSIFICATION_KIND_LABELS = {
 REACHABILITY_LABELS = {
     "reachable": "現在の観測で検証可能",
     "next_generation": "次世代の装置・観測なら可能",
+    "by_document": "本文・文献の読み直しで確かめられる",
     "unreachable": "現状では困難",
     "unassessed": "未評価",
 }
@@ -540,11 +543,12 @@ class EvidenceLine(BaseModel):
 LEARNER_SCOPE_LINE_STATUSES = ("directly_verified", "indirectly_supported", "refuted")
 
 #: 学習者向けの 1 行の頭（数値なし。閉世界: 記帳の事実であって分野の事実ではない）。
-LEARNER_SCOPE_LINE_PREFIX = "記帳された条件: "
+#: IK-1059 残り（第 9 波）: 学習者の語（``label_vocab.ATLAS_LEARNER_WORDING``）に揃えて「記録」。
+LEARNER_SCOPE_LINE_PREFIX = "記録された条件: "
 
 #: 1 行に並べる条件の上限（それ以上は「ほかにも条件の記帳があります」— 件数は言わない）。
 _LEARNER_SCOPE_LINE_MAX = 2
-LEARNER_SCOPE_LINE_MORE = "（ほかにも条件の記帳があります）"
+LEARNER_SCOPE_LINE_MORE = "（ほかにも条件の記録があります）"
 
 
 def learner_scope_line(status: str, scopes: list) -> str:

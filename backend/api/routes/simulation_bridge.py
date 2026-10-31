@@ -375,20 +375,18 @@ def _symbol_rows(session: Any, document_id: str, equations: list[dict]) -> list[
 
 
 def _user_display_names(session: Any, user_ids: list[str]) -> dict[str, str]:
-    """共有した人の表示名（user id は DTO に出さない）。引けなければ空。"""
+    """共有した人の表示名（user id は DTO に出さない）。引けなければ空。
+
+    IK-1007: 本人が登録した名前（``users.profile_name``）だけを出す。登録が無ければ名前なしの
+    事実語（ログイン ID へフォールバックしない）。読みは ``core/account_display.py`` が正本。
+    """
+    from core.account_display import NAME_UNREGISTERED_ACTOR, fetch_display_labels
+
     ids = sorted({str(u) for u in user_ids if str(u or "").strip()})
     if not ids:
         return {}
-    try:
-        rows = session.execute(
-            sa_text("SELECT id::text, display_name FROM users WHERE id::text = ANY(:ids)"),
-            {"ids": ids},
-        ).fetchall()
-    except Exception:  # noqa: BLE001 — 表示名が引けなくても一覧は返す
-        logger.debug("simulation: user display names unavailable", exc_info=True)
-        service.rollback_quietly(session)
-        return {}
-    return {str(r[0]): str(r[1] or "") for r in rows or [] if r and r[0]}
+    labels = fetch_display_labels(session, ids)
+    return {uid: (label or NAME_UNREGISTERED_ACTOR) for uid, label in labels.items()}
 
 
 #: 共有した人の表示名が引けないときのラベル。

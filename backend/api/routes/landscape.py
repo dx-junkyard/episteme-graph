@@ -37,6 +37,7 @@ from core import atlas_correspondence
 from core import atlas_state
 from core import atlas_store
 from core import decision_context
+from core import document_refs
 from core import label_vocab
 from core.course_data import course_cartridge_id, course_source_material_ids
 from core.landscape import builder as landscape_builder
@@ -310,6 +311,35 @@ def _gap_signal_domains(session, document_id: str) -> set[str]:
     return {str(row.get("domain_key") or "") for row in rows if row.get("domain_key")}
 
 
+def _gap_signal_topics(session, document_id: str) -> dict[str, list[str]]:
+    """この論文が記録した「地図に置けなかった主題」の名前（domain_key → 主題名の列）。
+
+    IK-0995（第 25 周 第 5 波）: 分野の地図タブの候補ゼロの理由が「置けなかった主題の記録は
+    あります」と言うので、その記録を論文の画面で名前として読めるようにする（件数・確からしさ
+    は返さない = LS5。教員の判断（decisions）は読まない）。照会に失敗しても空（fail-soft）。
+    """
+    try:
+        from core.atlas_gaps import store as gap_store
+
+        rows = gap_store.list_active_signals(session, document_id=str(document_id or ""))
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "landscape: failed to read category gap topics for %s (non-fatal)",
+            document_id, exc_info=True,
+        )
+        return {}
+    out: dict[str, list[str]] = {}
+    for row in rows or ():
+        domain = str(row.get("domain_key") or "")
+        label = str(row.get("proposed_label") or "").strip()
+        if not domain or not label:
+            continue
+        labels = out.setdefault(domain, [])
+        if label not in labels:
+            labels.append(label)
+    return out
+
+
 def _unplaced_from_artifacts(document_id: str, names: Mapping[str, str]) -> list[dict]:
     """最新 run の ``landscape_placement`` artifact から ``unplaced_domains``（LS10）。
 
@@ -397,6 +427,7 @@ def list_document_landscape_placements(
         names = _domain_names(session)
         unplaced = _unplaced_from_artifacts(document_id, names)
         gap_domains = _gap_signal_domains(session, document_id)
+        gap_topics = _gap_signal_topics(session, document_id)
         domain_keys = {str(r.get("domain_key") or "") for r in rows}
         domain_keys.update(str(u.get("domain_key") or "") for u in unplaced)
         skeletons = _load_skeletons(session, {k for k in domain_keys if k})
@@ -406,6 +437,9 @@ def list_document_landscape_placements(
 
     for entry in unplaced:
         entry["gap_signals_recorded"] = entry.get("domain_key") in gap_domains
+        topics = gap_topics.get(str(entry.get("domain_key") or "")) or []
+        if topics:
+            entry["gap_topics"] = list(topics)
 
     node_index = projection.skeleton_node_index(skeletons)
     return {
@@ -1030,10 +1064,13 @@ def get_course_landscape(
         raise HTTPException(status_code=404, detail="コースが見つかりません")
 
     document_ids = services.list_course_source_document_ids(course_data)
-    return {"course_id": course_id, **learner_landscape_for_documents(course_data, document_ids)}
+    return {
+        "course_id": course_id,
+        **learner_landscape_for_documents(course_data, document_ids, viewer_id=current_user["id"]),
+    }
 
 
-def learner_landscape_for_documents(course_data: dict, document_ids) -> dict:
+def learner_landscape_for_documents(course_data: dict, document_ids, *, viewer_id=None) -> dict:
     """学習者向け「論文の位置づけ」DTO（``course_id`` 付与前）を組み立てる。
 
     ``get_course_landscape``（受講ゲート済み）と、画面文脈アダプター Phase 4
@@ -1062,8 +1099,21 @@ def learner_landscape_for_documents(course_data: dict, document_ids) -> dict:
         resolve = _node_resolve(session, {k for k in domain_keys if k})
         names = _domain_names(session)
         rows = _document_rows(session, document_ids)
+        # IK-0664（第 25 周 第 7 波）: 論文の呼び方は題名を正本にする（arXiv 番号のままの取り込みは、
+        # 閲覧できる同じ論文の別の取り込み・arXiv メタデータの写しから題名を引く。無ければ番号のまま）。
+        paper_titles: dict[str, str] = {}
+        try:
+            sibling_ids = services.list_visible_document_ids(viewer_id) if viewer_id else []
+            paper_titles = document_refs.resolve_paper_titles(
+                session, [row[0] for row in rows], sibling_ids=sibling_ids
+            )
+        except Exception:  # noqa: BLE001 — 呼び方の解決の失敗で位置づけを壊さない
+            logger.warning("learner landscape: paper titles unavailable (non-fatal)", exc_info=True)
+            paper_titles = {}
     finally:
         session.close()
+    if paper_titles:
+        rows = [(r[0], paper_titles.get(r[0]) or r[1], r[2]) for r in rows]
 
     # コースの sources 順を保つ（DTO の documents 並び順は document_titles の順序）。
     title_by_id = {row[0]: row[1] for row in rows}

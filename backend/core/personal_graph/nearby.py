@@ -62,7 +62,7 @@ from collections.abc import Callable
 
 from core.element_vocab import theory_stage_key, theory_stage_label
 from core.focus_document import resolve_focus_document
-from core.label_vocab import VERIFICATION_STATUS_LABELS_LEDGER
+from core.label_vocab import VERIFICATION_STATUS_LABELS_LEDGER, learner_atlas_wording
 from core.personal_graph import queries
 from core.personal_graph.derive import derive_person_network
 from core.personal_graph.schema import (
@@ -172,11 +172,13 @@ def is_discussion_node(node: PersonalNode) -> bool:
     )
 
 
-#: 教材のテキストを選んで質問した痕跡（帰属が区画・チャンク）の出口案内（IK-0896）。
-#: 選択質問は済んでいるので、残る操作（帰属カードで主張・式を選んで確定）だけを言う。
+#: 教材のテキストを選んで質問した痕跡（帰属が区画・チャンク）の出口案内（IK-0896 → IK-1025）。
+#: 帰属カードは AI の帰属候補（``llm_candidate``）しか並べず、テキスト選択の問いは候補を経ずに
+#: 確定するので、この痕跡の出所ではカードに何も出ない（第 6 周: 案内された先が空だった）。
+#: 実行できる出口だけ — 式や主張の文に絞って選び直して問う — を言う。
 FACT_SELECTED_SHARPEN = (
-    "この記録は教材の選んだ箇所に帰属しています。帰属カードで主張や式を選んで確定すると、"
-    "1点に絞り込まれ、道がたどれます。"
+    "この記録は教材の選んだ箇所に帰属しています。1点に絞り込むには、教材の中の式か主張の文だけを"
+    "選び直して質問してください。帰属カードには AI の帰属の候補だけが並ぶため、この記録はそこには出ません。"
 )
 
 #: 帰属がテキスト選択の区画・チャンク（主張・式に降りていない）であるアンカー種別。
@@ -187,8 +189,9 @@ def sharpen_fact_for(node: PersonalNode | None) -> str:
     """痕跡の出所（帰属の種類）に応じた「1点に絞り込む」出口案内（実行できる操作だけ）。
 
     - 議論の疑似トピック由来 → 着地画面の帰属カード / 開幕画面の支持構造
-    - 教材のテキスト選択に帰属済み（segment / chunk）→ 帰属カードでの確定だけ（IK-0896:
-      済んだ操作 = 「テキストを選んで質問」を勧めない）
+    - 教材のテキスト選択に帰属済み（segment / chunk）→ 式・主張の文に絞って選び直す問いだけ
+      （IK-1025: この出所の痕跡は帰属カードに出ないので、カードでの確定を勧めない。
+      IK-0896: 同じ「テキストを選んで質問」を繰り返させず、絞る先を言う）
     - それ以外（トピック縮退など）→ テキスト選択か帰属カード
     """
     if node is not None and is_discussion_node(node):
@@ -424,7 +427,9 @@ def _verification(component_id: str, ledger: dict[str, str]) -> dict | None:
     status = str(ledger.get(component_id) or "").strip()
     if not status:
         return None
-    label = VERIFICATION_STATUS_LABELS_LEDGER.get(status, "")
+    # IK-1059 残り（第 9 波）: 札は学習者の画面に出る — 地図と同じ学習者の語の表を通す
+    # （「直接検証の記帳あり」→「直接検証の記録あり」。教員の台帳画面の語は変えない）。
+    label = learner_atlas_wording(VERIFICATION_STATUS_LABELS_LEDGER.get(status, ""))
     if not label:
         return None
     out = {"status": status, "label": label}
@@ -432,7 +437,7 @@ def _verification(component_id: str, ledger: dict[str, str]) -> dict | None:
     # 添える（``queries.ComponentLedgerStatuses.scope_lines``。根拠の逐語・記帳者・数値なし）。
     scope_line = str((getattr(ledger, "scope_lines", None) or {}).get(component_id) or "").strip()
     if scope_line:
-        out["scope_line"] = scope_line
+        out["scope_line"] = learner_atlas_wording(scope_line)
     return out
 
 

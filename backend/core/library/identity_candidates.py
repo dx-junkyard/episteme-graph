@@ -28,6 +28,17 @@
    同じ 3 経路のどれかに持つ他 document の live 親 component →
    candidate entry + 同一性リンク候補 2 本（``vector_similarity``）。
 
+**同じ論文の別の版どうしには規則 ③ を当てない**（IK-0980・オーナー判断・2026-10-27）。2 版の
+本文はほぼ同じなので、文の近さは「同じ文の近くにある別の部品」を指し、同一性の材料にならない。
+別の版の部品は規則 ②b だけで対にし、②b の理由には一致した材料（式の表示ラベル・主張の冒頭）を
+書き、リンクの ``evidence`` に ``basis = same_paper_version`` を残す（IK-0981）。以前の規則で
+立った未決の chunk-proxy 候補だけを持つ部品は、段の再実行で ②b にかけ直す（旧候補は消さない =
+KR7。新しい対は ``candidate_key`` に接尾辞を付けた別のエントリに置く）。
+
+規則 ⑥（記号 → 概念・IK-0983）: ``core/library/symbol_concepts.py``。記号の定義の文に確定済み
+エントリの名前・別名が語として現れたら、記号から当該エントリへの candidate リンク
+（``lexical_match``）。entry は作らない。
+
 規則 ④（主張の概念接地・``claim_concept_grounding_design.md`` §7）: 当該 document の
 ``theory_claims_live`` のうち ``concepts`` 要素に ``entry_id`` を持つ行 → その主張
 （``theory_claim``・DB UUID）から当該エントリへの同一性リンク候補。``entry`` は**作らない**
@@ -318,6 +329,41 @@ def _linked_component_ids(session: Any, component_ids: list[str]) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
+def _undecided_proxy_only_component_ids(session: Any, component_ids: list[str]) -> set[str]:
+    """同一性リンクが「未決の文の近さ（chunk-proxy）の候補」だけの component の id 集合。
+
+    IK-0980: 規則 ③ が同じ論文の別の版どうしで立てた誤った候補は消さない（KR7）が、
+    それがあるせいで段の再実行で規則 ②b が走らないと作り直せない。人が判断した行
+    （確定・却下・取り消し）や他の規則の行を 1 本でも持つ部品は含めない（判断を上書きしない）。
+    """
+    keys = [cid for cid in component_ids if cid]
+    if not keys:
+        return set()
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT instance_element_id
+                  FROM element_identity_links
+                 WHERE instance_element_type = :element_type
+                   AND instance_element_id = ANY(:ids)
+                 GROUP BY instance_element_id
+                HAVING bool_and(status = 'candidate'
+                                AND mapping_justification = :vector)
+                """
+            ),
+            {
+                "element_type": ELEMENT_THEORY_COMPONENT,
+                "ids": keys,
+                "vector": schema.JUSTIFICATION_VECTOR,
+            },
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 判定できなければ従来どおり「結ばれている」とみなす
+        logger.warning("undecided proxy link lookup failed (non-fatal)", exc_info=True)
+        return set()
+    return {str(row[0]) for row in rows}
+
+
 _CHUNK_NEIGHBOR_SQL = """
     WITH q AS (
         SELECT embedding FROM chunks WHERE id = CAST(:chunk_id AS uuid)
@@ -385,6 +431,50 @@ SAME_PAPER_VERSIONS_NOTE = (
     "同じ論文の別の版（TeX と PDF など）の部品は、名前が違っても、根拠の式や主張の本文が"
     "同じなら候補になります。"
 )
+
+# ── 規則の版（IK-0957）─────────────────────────────────────────────────────────
+#: 候補づくりの規則の版。規則を足した・変えたときに上げる（コード定数・env 非依存）。
+#: 段の artifact に ``rules_version`` として残し、一覧の空状態が「いまの規則で探していない
+#: 教材」を言い分けるのに使う。``r6-same-paper`` = IK-0919 の「同じ論文の別の版」規則
+#: （2026-10-24）を含む版。これより前に走った段の artifact には版が無い。
+#: ``r7-same-paper-symbols``（2026-10-27・第 5 波）= 同じ論文の別の版どうしに規則 ③ を
+#: 当てない（IK-0980）・版の規則の理由に一致した材料を書く（IK-0981）・記号 → 概念の
+#: 規則 ⑥（IK-0983）。誤った旧候補は消さず（KR7）、段の再実行で作り直す。
+IDENTITY_RULES_VERSION = "r7-same-paper-symbols"
+#: いまの規則で探していない教材があるときの事実文（題名の列挙・件数なし）。
+IDENTITY_RULES_UNSCANNED_FACT = (
+    "いまの候補づくりの規則で、まだ候補を探していない教材があります: {titles}。"
+    "教材管理のその教材の行の「パイプラインを実行 ▼」から「共通する概念の候補づくり」を実行すると、"
+    "いまの規則で探し直します。"
+)
+#: 列挙を打ち切ったときの一文（件数は書かない）。
+IDENTITY_RULES_UNSCANNED_MORE_FACT = "ほかにも、いまの規則でまだ探していない教材があります。"
+#: 閲覧できる解析済みの教材をすべていまの規則で探したときの事実文。
+IDENTITY_RULES_ALL_SCANNED_FACT = (
+    "閲覧できる解析済みの教材は、すべていまの規則で探しました。そのうえで候補は見つかっていません。"
+)
+#: 列挙する題名の上限。
+IDENTITY_RULES_UNSCANNED_TITLE_LIMIT = 6
+
+
+def documents_not_scanned_by_current_rules(resolved_runs: dict) -> list[str]:
+    """採用 run の ``identity_candidates`` がいまの規則の版で走っていない document（純関数）。
+
+    ``resolved_runs`` は ``persistence.resolve_artifact_runs(..., policy="adopted")`` の戻り値。
+    completed でない run（走行中・失敗）は判定しない（まだ結果が無いのであって、探していない
+    のではない）。artifact が無い・``rules_version`` が違うものを返す（document_id 昇順）。
+    """
+    out: list[str] = []
+    for document_id, entry in (resolved_runs or {}).items():
+        if not isinstance(entry, dict) or str(entry.get("status") or "") != "completed":
+            continue
+        stage_outputs = entry.get("stage_outputs") or {}
+        artifacts = stage_outputs.get("_artifacts") if isinstance(stage_outputs, dict) else None
+        payload = artifacts.get("identity_candidates") if isinstance(artifacts, dict) else None
+        if not isinstance(payload, dict) or payload.get("rules_version") != IDENTITY_RULES_VERSION:
+            out.append(str(document_id))
+    return sorted(out)
+
 
 _CLAIM_REF_KEYS = ("claim_ids", "evidence_claims", "linked_claim_ids")
 _CLAIM_REF_SCALAR_KEYS = ("claim_id",)
@@ -581,7 +671,7 @@ def resolve_same_paper_documents(
 
 
 _EQUATION_MATERIAL_SQL = """
-    SELECT document_id::text, agent_equation_id, latex, plain_text
+    SELECT document_id::text, agent_equation_id, latex, plain_text, label
       FROM knowledge_equations_live
      WHERE document_id = ANY(CAST(:document_ids AS uuid[]))
        AND agent_equation_id = ANY(:refs)
@@ -589,9 +679,18 @@ _EQUATION_MATERIAL_SQL = """
 
 
 def load_equation_keys(
-    session: Any, *, document_ids: list[str], refs: list[str]
+    session: Any,
+    *,
+    document_ids: list[str],
+    refs: list[str],
+    display_labels: Optional[dict[str, str]] = None,
 ) -> dict[tuple[str, str], str]:
-    """``{(document_id, agent_equation_id): 正規化 LaTeX}``（live ビューのみ）。"""
+    """``{(document_id, agent_equation_id): 正規化 LaTeX}``（live ビューのみ）。
+
+    ``display_labels`` を渡すと ``{正規化 LaTeX: 表示ラベル}``（「式 (12)」等・正本は
+    ``graph_paper_layer.schema.equation_display_label``）を書き込む（IK-0981: 版の規則の
+    対が「何が一致したか」を事実文で言うため。内部 ID はラベルにしない = PL7）。
+    """
     doc_ids = sorted({d for d in document_ids if d})
     ref_list = sorted({r for r in refs if r})
     if not doc_ids or not ref_list:
@@ -612,7 +711,23 @@ def load_equation_keys(
         key = normalize_equation_for_hash(row[2], row[3])
         if len(key) >= SAME_PAPER_MIN_EQUATION_CHARS:
             out[(str(row[0] or ""), str(row[1] or ""))] = key
+            if display_labels is not None and key not in display_labels:
+                display_labels[key] = _equation_display(row)
     return out
+
+
+def _equation_display(row: Any) -> str:
+    """式の行の表示ラベル（fail-soft・取れなければ空文字）。"""
+    try:
+        from core.graph_paper_layer.schema import equation_display_label
+
+        return equation_display_label({
+            "label": row[4] if len(row) > 4 else "",
+            "latex": row[2] or "",
+            "plain_text": row[3] or "",
+        })
+    except Exception:  # noqa: BLE001 — 表示の補助
+        return ""
 
 
 def component_material_keys(
@@ -620,8 +735,12 @@ def component_material_keys(
     *,
     claim_index: dict[tuple[str, str], dict],
     equation_keys: dict[tuple[str, str], str],
+    claim_excerpts: Optional[dict[str, str]] = None,
 ) -> set[tuple[str, str]]:
-    """部品の名前によらない材料 ``{("equation"|"claim", 正規化文字列)}``（純関数）。"""
+    """部品の名前によらない材料 ``{("equation"|"claim", 正規化文字列)}``（純関数）。
+
+    ``claim_excerpts`` を渡すと ``{正規化本文: 主張の冒頭}`` を書き込む（IK-0981）。
+    """
     from episteme_graph.agents.content_normalization import normalize_text_for_hash
 
     keys: set[tuple[str, str]] = set()
@@ -633,7 +752,49 @@ def component_material_keys(
         text = normalize_text_for_hash(claim["normalized_text"] or claim["text"])
         if len(text) >= SAME_PAPER_MIN_CLAIM_CHARS:
             keys.add(("claim", text))
+            if claim_excerpts is not None and text not in claim_excerpts:
+                claim_excerpts[text] = _claim_head(claim["text"] or claim["normalized_text"])
     return keys
+
+
+#: 一致した主張の冒頭として理由に載せる文字数（全文は載せない）。
+SAME_PAPER_CLAIM_HEAD_CHARS = 40
+#: 理由に並べる一致した材料の上限。
+SAME_PAPER_MATCHED_ITEMS_MAX = 3
+#: 版の規則の対であることの印（リンクの ``evidence`` に残し、一覧・詳細が根拠の種類を
+#: 「表記の一致」ではなく「同じ論文の別の版での一致」と言い分ける — IK-0981）。
+SAME_PAPER_BASIS = "same_paper_version"
+#: 版の規則の対の根拠の呼び名（``mapping_justification`` の訳語とは別に添える）。
+SAME_PAPER_BASIS_LABEL = "同じ論文の別の版での一致"
+
+
+def _claim_head(text: Any) -> str:
+    raw = " ".join(str(text or "").split())
+    if len(raw) <= SAME_PAPER_CLAIM_HEAD_CHARS:
+        return raw
+    return raw[:SAME_PAPER_CLAIM_HEAD_CHARS].rstrip() + "…"
+
+
+def same_paper_matched_items(
+    shared: set[tuple[str, str]],
+    *,
+    equation_labels: dict[str, str],
+    claim_excerpts: dict[str, str],
+) -> list[str]:
+    """一致した材料を読める語に（式は「式 (12)」、主張は冒頭の引用。決定論の順・上限あり）。"""
+    out: list[str] = []
+    for kind, key in sorted(shared, key=lambda pair: (pair[0] != "equation", pair[1])):
+        if kind == "equation":
+            label = (equation_labels.get(key) or "").strip()
+            item = label or "番号のない式"
+        else:
+            head = (claim_excerpts.get(key) or "").strip()
+            item = f"主張「{head}」" if head else ""
+        if item and item not in out:
+            out.append(item)
+        if len(out) >= SAME_PAPER_MATCHED_ITEMS_MAX:
+            break
+    return out
 
 
 def same_paper_twin(
@@ -662,12 +823,22 @@ def same_paper_twin(
     return best, {kind for kind, _ in best_shared}
 
 
-def _same_paper_reason(kinds: set[str]) -> str:
+def _same_paper_reason(kinds: set[str], matched_items: Optional[list[str]] = None) -> str:
+    """版の規則の理由（材料の種類の文 + 一致した材料の列挙 — IK-0981）。"""
     if {"equation", "claim"} <= kinds:
-        return SAME_PAPER_REASON_BOTH
-    if "equation" in kinds:
-        return SAME_PAPER_REASON_EQUATION
-    return SAME_PAPER_REASON_CLAIM
+        base = SAME_PAPER_REASON_BOTH
+    elif "equation" in kinds:
+        base = SAME_PAPER_REASON_EQUATION
+    else:
+        base = SAME_PAPER_REASON_CLAIM
+    items = [i for i in (matched_items or []) if i]
+    if not items:
+        return base
+    return base + SAME_PAPER_MATCHED_PREFIX + "、".join(items) + "。"
+
+
+#: 一致した材料の列挙の前置き（IK-0981）。
+SAME_PAPER_MATCHED_PREFIX = "一致したもの: "
 
 
 # ---------------------------------------------------------------------------
@@ -675,11 +846,19 @@ def _same_paper_reason(kinds: set[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: 規則 ②b の作り直し（IK-0980）で、同じ名前の旧候補エントリ（文の近さで立った誤った対）に
+#: 正しい対を相乗りさせないための ``candidate_key`` の接尾辞。
+SAME_PAPER_REBUILD_KEY_SUFFIX = "same-paper"
+
+
 def _ensure_candidate_entry(
-    *, domain_key: str, name: str, component: dict, other: dict, justification: str
+    *, domain_key: str, name: str, component: dict, other: dict, justification: str,
+    key_suffix: str = "",
 ) -> Optional[dict]:
     """候補エントリを 1 行確保する（``dismissed`` は再提案しない = LS3）。"""
     candidate_key = schema.build_candidate_key(domain_key, name)
+    if key_suffix:
+        candidate_key = schema.KEY_SEPARATOR.join((candidate_key, key_suffix))
     try:
         existing = library_store.get_entry_by_candidate_key(candidate_key)
     except Exception:  # noqa: BLE001
@@ -802,7 +981,7 @@ def _link_claim(
 
 def _link(
     component: dict, entry_id: str, *, justification: str, reason: str,
-    confidence: Optional[float] = None,
+    confidence: Optional[float] = None, evidence: Optional[list] = None,
 ) -> Optional[dict]:
     """同一性リンク候補を 1 本作る（既存行があればそのまま返る = P4）。"""
     try:
@@ -810,6 +989,7 @@ def _link(
             _element_ref(component["id"], component["document_id"]),
             entry_id,
             local_expression={"name": component.get("name") or ""},
+            evidence=evidence,
             reason=reason,
             confidence=confidence,
             mapping_justification=justification,
@@ -916,8 +1096,17 @@ def run_identity_candidates(
             logger.warning("structural module candidates failed (non-fatal)", exc_info=True)
             module_stats = _empty_module_stats(reasons=["module_rule_failed"])
 
+        # -- 規則 ⑥: 記号 → 概念（IK-0983。確定済みエントリの名前・別名の語境界一致）--
+        try:
+            from core.library.symbol_concepts import derive_symbol_concept_candidates
+
+            symbol_stats = derive_symbol_concept_candidates(sess, document_ids=[doc_id])
+        except Exception:  # noqa: BLE001 — 規則 ⑥ が落ちても ①〜⑤ の候補は残す
+            logger.warning("symbol concept candidates failed (non-fatal)", exc_info=True)
+            symbol_stats = {"symbols_scanned": 0, "links_created": 0, "truncated": False}
+
         entries_created = base["entries_created"]
-        links_created = base["links_created"]
+        links_created = base["links_created"] + int(symbol_stats.get("links_created") or 0)
         duplicate_by_component = base["duplicate_by_component"]
 
         # -- 4. duplicate_candidates への書き戻し + 監査 ---------------------
@@ -966,6 +1155,7 @@ def run_identity_candidates(
             base["processed"],
             base["reasons"],
             module_stats=module_stats,
+            symbol_stats=symbol_stats,
         )
 
 
@@ -987,15 +1177,6 @@ def _run_component_and_claim_rules(
         if parents
         else {}
     )
-    others_by_normalized: dict[str, list[dict]] = {}
-    others_by_chunk: dict[str, list[dict]] = {}
-    for other in others:
-        others_by_normalized.setdefault(
-            schema.normalize_label(other["name"]), []
-        ).append(other)
-        for chunk_id in component_origin_chunk_ids(other, claim_index):
-            others_by_chunk.setdefault(chunk_id, []).append(other)
-
     # IK-0919 規則 ②b: 先に文書単位で「同じ論文の別の版」を解き、その版の部品とだけ
     # 式・主張の本文の一致で対にする（名前を使わない）。
     same_paper_docs = (
@@ -1007,8 +1188,24 @@ def _run_component_and_claim_rules(
         if parents
         else set()
     )
+    others_by_normalized: dict[str, list[dict]] = {}
+    others_by_chunk: dict[str, list[dict]] = {}
+    for other in others:
+        others_by_normalized.setdefault(
+            schema.normalize_label(other["name"]), []
+        ).append(other)
+        # IK-0980（オーナー判断）: 同じ論文の別の版どうしでは文の近さ（chunk-proxy）を
+        # 候補の材料にしない — 2 版の本文は一致して当然で、近傍は「同じ文の近くにある別の
+        # 部品」を指す。別の版の部品は規則 ②b（式・主張の本文の一致）だけで対にする。
+        if other["document_id"] in same_paper_docs:
+            continue
+        for chunk_id in component_origin_chunk_ids(other, claim_index):
+            others_by_chunk.setdefault(chunk_id, []).append(other)
+
     same_paper_others = [o for o in others if o["document_id"] in same_paper_docs]
     materials: dict[str, set[tuple[str, str]]] = {}
+    equation_labels: dict[str, str] = {}
+    claim_excerpts: dict[str, str] = {}
     if same_paper_others:
         equation_keys = load_equation_keys(
             sess,
@@ -1018,10 +1215,14 @@ def _run_component_and_claim_rules(
                 for c in [*parents, *same_paper_others]
                 for ref in component_equation_refs(c)
             ],
+            display_labels=equation_labels,
         )
         for target in [*parents, *same_paper_others]:
             materials[target["id"]] = component_material_keys(
-                target, claim_index=claim_index, equation_keys=equation_keys
+                target,
+                claim_index=claim_index,
+                equation_keys=equation_keys,
+                claim_excerpts=claim_excerpts,
             )
 
     linked = (
@@ -1031,6 +1232,17 @@ def _run_component_and_claim_rules(
         if parents
         else set()
     )
+
+    # IK-0980: 同じ論文の別の版があるときだけ、未決の chunk-proxy 候補しか持たない部品を
+    # 規則 ②b にもう一度かける（誤った旧候補は残したまま、正しい対を作り直す）。
+    proxy_only = (
+        _undecided_proxy_only_component_ids(
+            sess, [c["id"] for c in parents] + [o["id"] for o in same_paper_others]
+        )
+        if same_paper_others
+        else set()
+    )
+    linked_for_same_paper = linked - proxy_only
 
     entries_created = 0
     links_created = 0
@@ -1073,24 +1285,39 @@ def _run_component_and_claim_rules(
                 )
             continue
 
-        if component["id"] in linked:
+        retry_same_paper_only = component["id"] in linked and component["id"] in proxy_only
+        if component["id"] in linked and not retry_same_paper_only:
             continue
 
         # -- 2. 他 document の component との語彙一致 --------------------
-        twin = _first_unlinked(others_by_normalized.get(normalized), linked)
+        twin = (
+            None
+            if retry_same_paper_only
+            else _first_unlinked(others_by_normalized.get(normalized), linked)
+        )
         justification = schema.JUSTIFICATION_LEXICAL
         similarity: Optional[float] = None
         reason: Optional[str] = None
+        link_evidence: Optional[list] = None
         if twin is None and same_paper_others:
             # -- 2b. 同じ論文の別の版の部品と、式・主張の本文が一致（IK-0919）--
             twin, kinds = same_paper_twin(
                 component,
                 candidates=same_paper_others,
                 materials=materials,
-                linked=linked,
+                linked=linked_for_same_paper,
             )
             if twin is not None:
-                reason = _same_paper_reason(kinds)
+                shared = (materials.get(component["id"]) or set()) & (
+                    materials.get(twin["id"]) or set()
+                )
+                matched = same_paper_matched_items(
+                    shared, equation_labels=equation_labels, claim_excerpts=claim_excerpts
+                )
+                reason = _same_paper_reason(kinds, matched)
+                link_evidence = [{"basis": SAME_PAPER_BASIS, "matched": matched}]
+        if twin is None and retry_same_paper_only:
+            continue
         if twin is None:
             # -- 3. chunk-proxy ベクトル近傍 ----------------------------
             twin, similarity = _chunk_proxy_twin(
@@ -1110,6 +1337,7 @@ def _run_component_and_claim_rules(
             component=component,
             other=twin,
             justification=justification,
+            key_suffix=SAME_PAPER_REBUILD_KEY_SUFFIX if retry_same_paper_only else "",
         )
         if entry is None:
             continue
@@ -1122,11 +1350,13 @@ def _run_component_and_claim_rules(
                 justification=justification,
                 reason=reason or _twin_reason(justification, component, twin),
                 confidence=target_similarity,
+                evidence=link_evidence,
             )
             if link is None:
                 continue
             links_created += 1
             linked.add(target["id"])
+            linked_for_same_paper.add(target["id"])
             duplicate_by_component.setdefault(target["id"], []).append(
                 {
                     "component_id": target["id"],
@@ -1238,10 +1468,12 @@ def _result(
     reasons: list[str],
     *,
     module_stats: dict | None = None,
+    symbol_stats: dict | None = None,
 ) -> dict:
     from episteme_graph.agents.coverage_report import build_coverage_report
 
     stats = module_stats or _empty_module_stats()
+    symbols = symbol_stats or {}
     return {
         "document_id": document_id,
         "domain_key": domain_key,
@@ -1258,6 +1490,11 @@ def _result(
         "module_entries_created": stats["module_entries_created"],
         "module_links_created": stats["module_links_created"],
         "coverage_modules": stats["coverage_modules"],
+        # IK-0957: どの規則の版で探したか（一覧の空状態が「探していない」を言い分ける）。
+        "rules_version": IDENTITY_RULES_VERSION,
+        # IK-0983: 規則 ⑥（記号 → 概念）の内部報告（画面に数値を出さない）。
+        "symbol_links_created": int(symbols.get("links_created") or 0),
+        "symbol_candidates_truncated": bool(symbols.get("truncated")),
     }
 
 

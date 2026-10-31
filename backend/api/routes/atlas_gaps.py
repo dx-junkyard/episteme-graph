@@ -326,7 +326,7 @@ def list_atlas_gap_candidates(
             payload["empty_notes"] = empty_notes
     if orphaned:
         payload["orphaned_decisions"] = orphaned
-        payload["orphaned_note"] = atlas_review_display.ORPHANED_NOTE
+        payload["orphaned_note"] = atlas_review_display.orphaned_note(orphaned)
     return payload
 
 

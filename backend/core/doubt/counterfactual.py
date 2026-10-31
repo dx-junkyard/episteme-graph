@@ -18,6 +18,10 @@
   - それ以外 → surviving
 
 閉路対応: 到達可能性は dependency.py（visited set BFS）を再利用。
+
+辺の母集合（IK-1030・2026-10-27）: 負荷と同じく、論文の主張を出現順に並べた claim チェーンの
+辺は依存に数えない（``build_dependency_graph(exclude_claim_sequence_edges=True)``）。上の区分の
+規則は変えていない。
 """
 
 from __future__ import annotations
@@ -151,7 +155,9 @@ def compute_counterfactual(
         {"toggled_assumption_ids", "collapsed_node_ids", "surviving_node_ids",
          "indeterminate_node_ids", "node_labels", "warnings"}
     """
-    graph = build_dependency_graph(session, document_ids=document_ids)
+    # 辺の母集合は負荷と同じ（IK-1030）: 主張の出現順の辺は「偽なら崩れる」関係ではないので
+    # 依存に数えない。伝播規則（compute_propagation）そのものは変えない。
+    graph = build_dependency_graph(session, document_ids=document_ids, exclude_claim_sequence_edges=True)
     seeds, unresolved = _seeds_for_assumptions(session, graph, toggled_assumption_ids)
     result = compute_propagation(graph, seeds)
     result.toggled_assumption_ids = [str(a) for a in toggled_assumption_ids]

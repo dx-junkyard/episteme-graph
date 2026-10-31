@@ -23,8 +23,9 @@ from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core.account_display import NAME_UNREGISTERED_ACTOR, display_label
 from core.document_refs import is_document_uuid
-from core.label_vocab import ATLAS_VERSION_PREFIX  # 版の呼び名の正本（IK-0942）
+from core.label_vocab import ATLAS_VERSION_PREFIX, atlas_version_label  # 版の呼び名の正本（IK-0942）
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ def fetch_actor_labels(session: Any, user_ids: Iterable[Any]) -> dict[str, str]:
     try:
         rows = session.execute(
             sa_text(
-                "SELECT id::text, COALESCE(display_name, ''), COALESCE(status, '') "
+                "SELECT id::text, COALESCE(profile_name, ''), COALESCE(status, '') "
                 "FROM users WHERE id::text = ANY(:ids)"
             ),
             {"ids": ids},
@@ -88,17 +89,19 @@ def fetch_actor_labels(session: Any, user_ids: Iterable[Any]) -> dict[str, str]:
         if not user_id:
             continue
         status = str(row[2] if len(row) > 2 else "").strip()
-        name = str(row[1] or "").strip()
         if status == "deleted":
             out[user_id] = DECISION_ACTOR_DELETED
-        elif name:
-            out[user_id] = name
+            continue
+        # 人に見せる名前は profile_name だけ（IK-1007: display_name はログイン ID を兼ねる）。
+        # 登録が無ければ名前なしの事実語に戻す（ログイン ID へフォールバックしない）。
+        out[user_id] = display_label({"profile_name": row[1]}) or NAME_UNREGISTERED_ACTOR
     return out
 
 
 #: 表示語として固定の主語（名前ではないので鉤括弧で囲まない）。
 _DESCRIPTIVE_ACTORS = frozenset(
-    {DECISION_ACTOR_UNRECORDED, DECISION_ACTOR_UNKNOWN, DECISION_ACTOR_DELETED}
+    {DECISION_ACTOR_UNRECORDED, DECISION_ACTOR_UNKNOWN, DECISION_ACTOR_DELETED,
+     NAME_UNREGISTERED_ACTOR}
 )
 
 
@@ -173,18 +176,14 @@ def project_decision_for_response(
 ) -> dict | None:
     """判断 API の応答を表示用に写す（判断者の UUID を応答に出さない）。
 
-    判断者が操作した本人ならその表示名を使い、別の教員（取り込みの記録で先の採用者が
-    残る場合）なら ``session_factory()`` のセッションで ``users`` から引く。
+    判断者の表示名は ``session_factory()`` のセッションで ``users.profile_name`` から引く
+    （本人でも同じ — トークンの利用者名はログイン ID なので表示に使わない。IK-1007）。
     """
     if decision is None:
         return None
     actor_id = str(decision.get("decided_by") or "").strip()
-    own_id = str(current_user.get("id") or "").strip()
-    name = str(current_user.get("display_name") or "").strip()
     labels: dict[str, str] = {}
-    if actor_id and actor_id == own_id and name:
-        labels = {actor_id: name}
-    elif actor_id and session_factory is not None:
+    if actor_id and session_factory is not None:
         try:
             session = session_factory()
         except Exception:  # noqa: BLE001 — 表示名が引けなくても応答は返す
@@ -224,6 +223,18 @@ GENERATED_BY_REFERENCE_MAP = "同梱の基準地図から取り込み"
 GENERATED_BY_MODEL = "AIによる生成（教員の確認を経て公開）"
 GENERATED_BY_UNRECORDED = "記録なし"
 GENERATED_BY_OTHER = "作成方法の記録あり（表示名なし）"
+#: 次版の下書きを前の凍結版から作ったときのトークン接頭辞（IK-0991・第 25 周 第 5 波）。
+#: 作成方法は版ごと — 前の版の generated_by を写さない。``revision_of:{前の版}``。
+GENERATED_BY_REVISION_PREFIX = "revision_of:"
+GENERATED_BY_REVISION_TEMPLATE = (
+    "前の版（{version}）からの改訂（候補・関係の取り込みと教員の編集）"
+)
+GENERATED_BY_REVISION_UNKNOWN = "前の版からの改訂（候補・関係の取り込みと教員の編集）"
+
+
+def revision_generated_by(previous_version: Any) -> str:
+    """次版の下書きの ``generated_by`` トークン（IK-0991）。"""
+    return f"{GENERATED_BY_REVISION_PREFIX}{str(previous_version or '').strip()}"
 
 REVIEWER_REFERENCE_IMPORT = "基準地図の取り込み時の確認"
 REVIEWER_BUNDLED = "同梱データの確認"
@@ -236,6 +247,11 @@ def generated_by_label(token: Any) -> str:
     if not text:
         return GENERATED_BY_UNRECORDED
     lowered = text.lower()
+    if lowered.startswith(GENERATED_BY_REVISION_PREFIX):
+        previous = atlas_version_label(text[len(GENERATED_BY_REVISION_PREFIX):])
+        if previous:
+            return GENERATED_BY_REVISION_TEMPLATE.format(version=previous)
+        return GENERATED_BY_REVISION_UNKNOWN
     if lowered.startswith("reference_map:"):
         return GENERATED_BY_REFERENCE_MAP
     if lowered.startswith("model:"):
@@ -331,6 +347,8 @@ EMPTY_NO_SIGNALS = (
 EMPTY_BELOW_THRESHOLD = (
     "置けなかった主題の記録はありますが、2 本以上の論文で同じ主題が繰り返されていないため、"
     "候補にしていません（1 本の論文だけの主題は分野のカテゴリとして扱いません）。"
+    # IK-0995（第 25 周 第 5 波）: 記録の所在を言う（存在だけを言って読めない場所にしない）。
+    "各論文の置けなかった主題は、教材管理で論文の行の［⋯］→［位置づけ（分野マップ）…］を開くと読めます。"
 )
 EMPTY_FOLDED_DUPLICATES = (
     "同じ論文を別の形式（PDF 版と TeX 版など）で取り込んだものは 1 本と数えます。"
@@ -361,9 +379,15 @@ def empty_reason_notes(report: Mapping[str, Any] | None) -> list[str]:
 
 
 #: 導出から外れた判断の枠の見出しの説明（``orphaned_note``）。
+#: IK-0966: 区画の冒頭は定義の文にする（行の状態を見ない断言をしない）。凍結を止める
+#: 一文は、下書きに入っていない行があるときだけ :func:`orphaned_note` が足す。
 ORPHANED_NOTE = (
-    "次の候補は採用済みですが、いまの論文からは候補として導出されなくなりました。"
-    "採用は残っているので、次版の下書きへ取り込むか、候補へ戻すまで公開（凍結）はできません。"
+    "次の候補は採用済みですが、いまの論文からは候補として導出されなくなった判断です。"
+    "採用は残っています。"
+)
+#: 下書きに入っていない行があるときだけ足す一文（IK-0966）。
+ORPHANED_BLOCKS_FREEZE = (
+    "次版の下書きに入っていない候補があるあいだは、取り込むか候補へ戻すまで公開（凍結）はできません。"
 )
 
 #: 導出から外れた理由（``orphaned_decisions[].reason_fact``）。
@@ -456,6 +480,11 @@ PENDING_PAPERS_TEMPLATE = "根拠の論文: {titles}"
 PENDING_PAPERS_HIDDEN = "閲覧できない論文も根拠に含まれています。"
 PENDING_PAPERS_NONE = "根拠だった論文の記録はもうありません（再解析または削除）。"
 PENDING_EDGE_BASIS_NONE = "採用の根拠（論文の配置か説明文の近さか）の記録はありません。"
+#: 採用の時点の出所は記録されていないが、いまの導出では候補として立つ組（IK-0962）。
+#: 採用の時点の根拠だと偽らないよう「いまの導出では」と時点を明示する（推測で埋めない）。
+PENDING_EDGE_BASIS_DERIVED_TEMPLATE = (
+    "採用の時点の根拠は記録されていません。いまの導出では: {basis}"
+)
 PENDING_KIND_GAP = "gap"
 PENDING_KIND_EDGE = "edge"
 
@@ -473,6 +502,7 @@ def pending_freeze_items(
     edge_items: Iterable[Mapping[str, Any]] = (),
     edge_label: Any = None,
     edge_origins: Mapping[str, Iterable[str]] | None = None,
+    edge_derived_origins: Mapping[str, Iterable[str]] | None = None,
     visible_document_ids: Iterable[str] | None = None,
 ) -> list[dict]:
     """凍結を止めている採用 1 件ずつの「ラベル + 帰属の一行 + 根拠の一文 + メモ」（IK-0939）。
@@ -495,6 +525,7 @@ def pending_freeze_items(
     except Exception:  # noqa: BLE001 — 表示名が引けなくても止め理由は出す
         labels = {}
     origins = dict(edge_origins or {})
+    derived = dict(edge_derived_origins or {})
     out: list[dict] = []
 
     def _base(kind: str, label: str, item: Mapping[str, Any]) -> dict:
@@ -513,6 +544,8 @@ def pending_freeze_items(
         if not label:
             continue
         entry = _base(PENDING_KIND_GAP, label, item)
+        # IK-1019: ［止めている候補を見る］がこのカードへ着地するための番地（表示しない）。
+        entry["target_key"] = str(item.get("cluster_key") or "")
         docs, hidden = gate_documents(item.get("documents") or (), visible_document_ids)
         lines = []
         titles = _paper_titles_line(docs)
@@ -529,7 +562,14 @@ def pending_freeze_items(
         if not label:
             continue
         entry = _base(PENDING_KIND_EDGE, label, item)
-        basis = edge_basis_line(origins.get(str(item.get("edge_key") or ""), ()))
+        key = str(item.get("edge_key") or "")
+        entry["target_key"] = key  # IK-1019（表示しない番地）
+        basis = edge_basis_line(origins.get(key, ()))
+        if not basis:
+            # 記録の無い過去の採用（IK-0962）: いま導出される組なら時点を明示して添える。
+            now_basis = edge_basis_line(derived.get(key, ()))
+            if now_basis:
+                basis = PENDING_EDGE_BASIS_DERIVED_TEMPLATE.format(basis=now_basis)
         entry["basis_line"] = basis or PENDING_EDGE_BASIS_NONE
         out.append(entry)
     return out
@@ -546,6 +586,31 @@ INCORPORATE_TIMING_GAP = (
 
 #: 反映した直後の結果文（IK-0938。何を足したかを名指す）。
 INCORPORATED_EDGE_RESULT = "「{label}」を次版の下書きに追加しました。"
+#: IK-1118（第 25 周 第 10 波）: 関係の反映の知らせは種別の句（``label_vocab.edge_relation_phrase``）で言う
+#: — 依存は「「A」が「B」に依存する関係を…」で向きを落とさない。種別が引けなければ従来の文。
+INCORPORATED_EDGE_RESULT_RELATION = "{phrase}関係を次版の下書きに追加しました。"
+
+
+def incorporated_edge_result_line(kind: str, from_label: str, to_label: str) -> str:
+    """反映の知らせ（IK-0938 / IK-1118）。向きの句は ``label_vocab.edge_relation_phrase`` が正本。"""
+    from core.label_vocab import edge_relation_phrase
+
+    phrase = edge_relation_phrase(kind, from_label, to_label)
+    if phrase:
+        return INCORPORATED_EDGE_RESULT_RELATION.format(phrase=phrase)
+    return INCORPORATED_EDGE_RESULT.format(label=f"{from_label} — {to_label}")
+
+
+#: H54（第 25 周 第 10 波）: 次版の下書きに入った（または公開中の版に入っている）関係の見送りは受けない。
+#: 判断だけ見送りになり、下書き・公開版には関係が残る食い違いを作らないため。外す操作は下書きの編集。
+EDGE_DISMISS_LOCKED_IN_DRAFT = (
+    "この関係は次版の下書きに入っているため、見送れません。"
+    "見送るときは、先に次版の下書きからこの関係を外して保存してください。"
+)
+EDGE_DISMISS_LOCKED_IN_FROZEN = (
+    "この関係は公開中の地図（版 {version}）に入っているため、見送れません。"
+    "外すときは、次版の下書きを作ってこの関係を外し、凍結してください。"
+)
 INCORPORATED_GAP_RESULT = "「{label}」を次版の下書きに追加しました。"
 
 
@@ -586,26 +651,65 @@ EDGE_FOLDED_NOTE = (
 EDGE_IN_DRAFT = "次版の下書きに入っています（公開すると地図の関係になります）。"
 
 #: 向きの文（``direction_line``）。依存だけが向きを持つ（記載順 from → to）。
+#: IK-1072（第 25 周 第 9 波）: 向きの句は ``label_vocab.edge_direction_phrase`` が正本で、ここは結びだけを持つ。
+#: 反映前（採用直後・反映の確認）は「記載されます」、次版の下書きに入った後は「記載されています」。
 EDGE_DIRECTION_DEPENDS = "「{from_label}」が「{to_label}」に依存する関係として記載されます。"
 EDGE_DIRECTION_UNDIRECTED = "「{from_label}」と「{to_label}」の関係として記載されます（向きはありません）。"
+EDGE_DIRECTION_SUFFIX_PENDING = "関係として記載されます。"
+EDGE_DIRECTION_SUFFIX_IN_DRAFT = "関係として次版の下書きに記載されています。"
+EDGE_DIRECTION_UNDIRECTED_IN_DRAFT = (
+    "「{from_label}」と「{to_label}」の関係として次版の下書きに記載されています（向きはありません）。"
+)
 
 
-def edge_direction_line(kind: str, from_label: str, to_label: str) -> str:
-    """種別の向きの一文（語彙外の種別は空文字）。種別の表示語は ``EDGE_KIND_LABELS``。"""
-    from core.label_vocab import EDGE_KIND_LABELS
+def edge_direction_line(
+    kind: str, from_label: str, to_label: str, *, in_draft: bool = False
+) -> str:
+    """種別の向きの一文（語彙外の種別は空文字）。種別の表示語は ``EDGE_KIND_LABELS``。
+
+    ``in_draft`` が真なら（次版の下書きに入った後）現在形で言う（IK-1072 の頭脳 NEW — 反映後も未来形の文が残っていた）。
+    """
+    from core.label_vocab import EDGE_KIND_LABELS, edge_direction_phrase
 
     kind = str(kind or "")
     if kind not in EDGE_KIND_LABELS:
         return ""
-    template = EDGE_DIRECTION_DEPENDS if kind == "depends" else EDGE_DIRECTION_UNDIRECTED
+    phrase = edge_direction_phrase(kind, from_label, to_label)
+    if phrase:
+        suffix = EDGE_DIRECTION_SUFFIX_IN_DRAFT if in_draft else EDGE_DIRECTION_SUFFIX_PENDING
+        return phrase + suffix
+    template = EDGE_DIRECTION_UNDIRECTED_IN_DRAFT if in_draft else EDGE_DIRECTION_UNDIRECTED
     return template.format(from_label=from_label or "", to_label=to_label or "")
 
 
+#: IK-1149（第 25 周 第 11 波）: 有向の関係の向きが採用のときに選ばれていない（migration 096 より前の採用）ことの事実文。
+#: カード・反映の確認に出す。記載の順は 2 つの項目の内部の並びで、教員の判断ではない。
+EDGE_DIRECTION_UNRECORDED_NOTE = (
+    "この関係の向きは、採用のときに選ばれていません（2 つの項目の内部の並びで記載されています）。"
+    "向きが違うときは、次版の下書きでこの関係の向きを入れ替えて保存してください。"
+)
+
 #: 導出から外れた辺の判断（IK-0884 と同じ構造）。
 EDGE_ORPHANED_NOTE = (
-    "次の関係は採用済みですが、いまの索引・論文からは候補として導出されなくなりました。"
-    "次版の下書きへ反映するか、候補へ戻すまで公開（凍結）はできません。"
+    "次の関係は採用済みですが、いまの索引・論文からは候補として導出されなくなった判断です。"
+    "採用は残っています。"
 )
+#: 下書きに入っていない関係があるときだけ足す一文（IK-0966 の辺版）。
+EDGE_ORPHANED_BLOCKS_FREEZE = (
+    "次版の下書きに入っていない関係があるあいだは、反映するか候補へ戻すまで公開（凍結）はできません。"
+)
+
+
+def orphaned_note(items: Iterable[Mapping[str, Any]], *, edge: bool = False) -> str:
+    """外れた判断の区画の冒頭文（IK-0966）。定義 + 未取り込みの行があるときだけ止める一文。"""
+    rows = [item for item in items or () if isinstance(item, Mapping)]
+    if edge:
+        base, blocks = EDGE_ORPHANED_NOTE, EDGE_ORPHANED_BLOCKS_FREEZE
+    else:
+        base, blocks = ORPHANED_NOTE, ORPHANED_BLOCKS_FREEZE
+    if any(not item.get("in_draft") for item in rows):
+        return base + blocks
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -628,8 +732,73 @@ VECTOR_INDEX_NONE = (
 VECTOR_INDEX_STALE = (
     "地図が新しい版になり、索引は前の版のままです。［索引を再構築］で作り直してください。"
 )
+#: 索引はあるが、説明の材料（別名・確認済み配置の引用）が変わった項目がある（IK-0965。
+#: 再構築と同じ ``source_hash`` の比較で判定する。件数は書かず名前で）。
+VECTOR_INDEX_MATERIAL_CHANGED = (
+    "現在の公開版（" + ATLAS_VERSION_PREFIX + "{version}）の索引のうち、説明の材料"
+    "（別名・確認済み配置の引用）が変わった項目があります: {labels}。［索引を再構築］で反映されます。"
+)
 VECTOR_REFRESH_UNCHANGED = "変更はありませんでした（すべての項目の索引をそのまま使いました）。"
 VECTOR_REFRESH_UPDATED = "索引を作り直しました（変わった項目だけ新しく索引しました）。"
+#: 新しく索引した項目を名前で言う結果文（IK-0965）。
+VECTOR_REFRESH_UPDATED_NAMED = "索引を作り直しました。新しく索引した項目: {labels}。"
+
+
+#: 凍結の直後、裏で新しい版の索引を作っている間の一文（IK-0993・第 25 周 第 5 波）。
+#: 手作業（［索引を再構築］）を促さない。所要時間の数値は言わない。
+VECTOR_INDEX_BUILDING = (
+    "地図が新しい版（" + ATLAS_VERSION_PREFIX + "{version}）になったので、索引を作っています。"
+    "作り終わると状態がここに出ます（作り直しの操作は要りません）。"
+)
+#: 構築中に［索引を再構築］を押したときの一文（二重に embedding を走らせない）。
+VECTOR_INDEX_BUILDING_REFRESH = (
+    "いま新しい版の索引を作っています。作り終わるまで再構築は始めません。"
+    "少し時間をおいて状態を読み直してください。"
+)
+#: 関係の候補のうち、説明文の近さによる候補が索引の不在で出せないときの一文（IK-0993）。
+EDGE_INDEX_BUILDING_NOTE = (
+    "新しい版の索引を作っているため、説明文どうしの近さによる関係の候補はまだ出していません。"
+    "作り終わると、ここに戻ります。"
+)
+EDGE_INDEX_MISSING_NOTE = (
+    "現在の公開版の索引が無いため、説明文どうしの近さによる関係の候補は出していません。"
+    "「ベクトル索引」の［索引を再構築］で作れます。"
+)
+
+#: 関係の候補の判断の結果文（IK-0994）。組の名前で言い、件数・近さの数値は言わない。
+EDGE_DECIDE_RESULT_TEMPLATES = {
+    "accept": "「{left}」と「{right}」を関係として採用しました。次版の下書きへの反映は別の操作です。",
+    "dismiss": (
+        "「{left}」と「{right}」の関係の候補を見送りました（理由を記録しました）。"
+        "［見送り済みも表示］で確かめられます。"
+    ),
+    "restore": "「{left}」と「{right}」の見送りを取り消し、候補に戻しました。",
+}
+
+
+#: IK-1118（第 25 周 第 10 波）: 採用の結果文は採用した種別の句で言う（依存は向きを落とさない）。
+EDGE_ACCEPT_RESULT_RELATION = "{phrase}関係として採用しました。次版の下書きへの反映は別の操作です。"
+
+
+def edge_decide_result_line(action: str, left: str, right: str, kind: str = "") -> str:
+    """関係の候補の判断の結果文（IK-0994）。語彙外の操作・名前なしは空文字。
+
+    採用で種別が分かるときは ``label_vocab.edge_relation_phrase`` の句で言う（IK-1118。
+    ``left`` → ``right`` は edge_key の記載順 = カードの向きの文と同じ）。
+    """
+    action_text = str(action or "").strip()
+    template = EDGE_DECIDE_RESULT_TEMPLATES.get(action_text)
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not template or not left_text or not right_text:
+        return ""
+    if action_text == "accept" and kind:
+        from core.label_vocab import edge_relation_phrase
+
+        phrase = edge_relation_phrase(kind, left_text, right_text)
+        if phrase:
+            return EDGE_ACCEPT_RESULT_RELATION.format(phrase=phrase)
+    return template.format(left=left_text, right=right_text)
 
 
 def display_datetime(value: Any) -> str:
@@ -641,34 +810,74 @@ def display_datetime(value: Any) -> str:
 
 
 def vector_status_facts(
-    *, version: str, total_nodes: int, embedded_nodes: int, stale: bool
+    *,
+    version: str,
+    total_nodes: int,
+    embedded_nodes: int,
+    stale: bool,
+    changed_labels: Iterable[str] = (),
+    building: bool = False,
 ) -> list[str]:
-    """索引の状態の事実文（用途 → 要否）。"""
+    """索引の状態の事実文（用途 → 要否）。
+
+    ``changed_labels`` は材料が変わった項目の名前（IK-0965。再構築と同じ判定）。
+    全項目が索引済みでも、これがあれば「作り直す必要はありません」とは言わない。
+    """
     facts = [VECTOR_INDEX_PURPOSE]
+    changed = [str(label) for label in changed_labels or () if str(label or "").strip()]
+    if building and (stale or embedded_nodes < total_nodes):
+        # IK-0993: 凍結が裏で始めた構築の途中。手作業を促さない。
+        facts.append(VECTOR_INDEX_BUILDING.format(version=version))
+        return facts
     if stale:
         facts.append(VECTOR_INDEX_STALE)
     elif embedded_nodes <= 0:
         facts.append(VECTOR_INDEX_NONE.format(version=version))
     elif embedded_nodes < total_nodes:
         facts.append(VECTOR_INDEX_PARTIAL.format(version=version))
+        if changed:
+            facts.append(
+                VECTOR_INDEX_MATERIAL_CHANGED.format(version=version, labels="、".join(changed))
+            )
+    elif changed:
+        facts.append(
+            VECTOR_INDEX_MATERIAL_CHANGED.format(version=version, labels="、".join(changed))
+        )
     else:
         facts.append(VECTOR_INDEX_CURRENT.format(version=version))
     return facts
 
 
-def vector_refresh_fact(summary: Mapping[str, Any]) -> str:
-    """再構築の要約 → 一文（完了したときだけ。スキップの理由は呼び出し側の既存表示）。"""
+def vector_refresh_fact(
+    summary: Mapping[str, Any], labels: Mapping[str, str] | None = None
+) -> str:
+    """再構築の要約 → 一文（完了したときだけ。スキップの理由は呼び出し側の既存表示）。
+
+    ``labels``（node_id → 名前）が渡され、新しく索引した項目が分かれば名前で言う（IK-0965）。
+    """
     if str(summary.get("status") or "") != "completed":
         return ""
     embedded = summary.get("embedded")
     if isinstance(embedded, int) and embedded == 0:
         return VECTOR_REFRESH_UNCHANGED
+    names = [
+        str((labels or {}).get(str(node_id), "") or "").strip()
+        for node_id in summary.get("embedded_node_ids") or ()
+    ]
+    names = [name for name in names if name]
+    if names:
+        return VECTOR_REFRESH_UPDATED_NAMED.format(labels="、".join(names))
     return VECTOR_REFRESH_UPDATED
 
 
 __all__ = [
     "ACCEPTED_PENDING_NOTE",
     "INCORPORATED_EDGE_RESULT",
+    "INCORPORATED_EDGE_RESULT_RELATION",
+    "incorporated_edge_result_line",
+    "EDGE_ACCEPT_RESULT_RELATION",
+    "EDGE_DISMISS_LOCKED_IN_DRAFT",
+    "EDGE_DISMISS_LOCKED_IN_FROZEN",
     "INCORPORATED_GAP_RESULT",
     "INCORPORATE_TIMING_EDGE",
     "INCORPORATE_TIMING_GAP",
@@ -685,6 +894,9 @@ __all__ = [
     "EMPTY_RESOLVED",
     "ORPHANED_IN_DRAFT",
     "ORPHANED_NOTE",
+    "ORPHANED_BLOCKS_FREEZE",
+    "EDGE_ORPHANED_BLOCKS_FREEZE",
+    "orphaned_note",
     "ORPHANED_REASON_FACTS",
     "VECTOR_INDEX_PURPOSE",
     "display_datetime",

@@ -577,6 +577,11 @@ def verbatim_shape_dto(text: str) -> dict:
 
 _CORRECTION_KEYWORDS = ("訂正", "より正確です", "誤解")
 _CORRECTION_MAX_CHARS = 200
+#: 訂正の前置きだけの文（中身は次の文にある）。語の追加ではなく文の形で見る。
+_CORRECTION_PREFACE_RE = re.compile(
+    r"^[^。！？!?]{0,12}訂正(?:を)?(?:させてください|させて下さい|します|しておきます|があります|"
+    r"させていただきます|いたします)[。！？!?]?$"
+)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?])\s*|\n+")
 
 
@@ -599,7 +604,18 @@ def previous_correction_fact(history: list | None) -> str | None:
     # 逆質問（区切り以降）は訂正ではないので外す。
     text = last_assistant.split(GATE_SEPARATOR, 1)[0]
     sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s and s.strip()]
-    hits = [s for s in sentences if any(k in s for k in _CORRECTION_KEYWORDS)]
+    hits: list[str] = []
+    for i, s in enumerate(sentences):
+        if not any(k in s for k in _CORRECTION_KEYWORDS):
+            continue
+        if s not in hits:
+            hits.append(s)
+        # 第 25 周 IK-1083: 「一つ訂正させてください。」のような前置きだけの文は中身を
+        # 持たない。前置きのときは続く 1 文（訂正の中身）を逐語で添える。
+        if _CORRECTION_PREFACE_RE.match(s) and i + 1 < len(sentences):
+            following = sentences[i + 1]
+            if following not in hits:
+                hits.append(following)
     if not hits:
         return None
     fact = " ".join(hits)

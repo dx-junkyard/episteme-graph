@@ -381,6 +381,19 @@ _SYMBOL_NORM_BARE_RE = re.compile(
     r"\\(?:mathrm|mathcal|mathbf|mathit|textrm|textbf|textit|mathsf|mathtt|mathbb|mathfrak|mathscr|"
     r"boldsymbol|bm|pmb)(?![A-Za-z])\s*(?=[A-Za-z0-9\\])"
 )
+#: TeX の間隔命令（見た目の間隔にしか効かない — IK-1022）。``F_{\\!EOS}`` と ``F_EOS`` を同じ記号にする。
+#: 非英字の命令（``\\!`` ``\\,`` ``\\;`` ``\\:`` ``\\>`` ``\\ ``）と、語の命令（``\\quad`` ``\\qquad``
+#: ``\\enspace`` ``\\thinspace`` ``\\medspace`` ``\\thickspace`` ``\\negthinspace``）。
+TEX_SPACING_COMMAND_RE = re.compile(
+    r"\\(?:[!,;:> ]|(?:qquad|quad|enspace|thinspace|medspace|thickspace|negthinspace|negmedspace|negthickspace)(?![A-Za-z]))"
+)
+
+
+def strip_tex_spacing(text: Any) -> str:
+    """TeX の間隔命令を落とす（記号の照合・表示の正本 — IK-1022）。``symbol_lookup.symbol_key`` も使う。"""
+    return TEX_SPACING_COMMAND_RE.sub("", str(text or ""))
+
+
 _COMMAND_RE = re.compile(r"\\([A-Za-z]+)")
 _BARE_COMMAND_RE = re.compile(r"\\([A-Za-z]+)\s*(?:_.*)?")
 _PROSE_RE = re.compile(r"[A-Za-z]{2,}\s+[A-Za-z]{2,}")
@@ -394,7 +407,7 @@ def symbol_match_key(name: Any) -> str:
     """記号名の照合キー。``core.simulation_bridge.codegen.normalize_symbol`` と同じ規則
     （逐語の一致はテストで固定。theory_modules は simulation_bridge を import しない層なので
     ここに置き、正本を 1 つにするときは codegen 側がこちらへ委譲する）。"""
-    text = str(name or "").replace("$", "")
+    text = strip_tex_spacing(str(name or "").replace("$", ""))
     for _ in range(3):
         text = _SYMBOL_NORM_RE.sub(r"\1", text)
     # 書体の切り替え（``{\\cal L}``）は命令名ごと外す（「call」にしない — IK-0835）。
@@ -430,7 +443,7 @@ def clean_symbol_name(raw: Any) -> str:
     """
     if not isinstance(raw, str):
         return ""
-    name = strip_control_sequences(raw).strip().strip("$").strip()
+    name = strip_tex_spacing(strip_control_sequences(raw)).strip().strip("$").strip()
     if not name or len(name) > SYMBOL_DISPLAY_MAX_CHARS:
         return ""
     if contains_internal_id(name) or _dp.contains_internal_id(name) or _DICT_REPR_RE.match(name):

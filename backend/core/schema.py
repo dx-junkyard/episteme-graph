@@ -673,6 +673,26 @@ CLAIM_ORIGINS: tuple[str, ...] = (
 #: 共有する述語の正本。
 NON_SOURCE_TEXT_CLAIM_ORIGINS: tuple[str, ...] = (CLAIM_ORIGIN_EQUATION_SYNTHESIS,)
 
+def infer_claim_origin(record: dict | None) -> str:
+    """IK-1155: 主張の dict（DB 行 or claim_object_builder の claim）から出所を言う。
+
+    明示の ``origin`` が語彙内ならそれ。無ければ persistence と同じ規則（親 claim あり =
+    atomic_rewrite / synthesis_method か ``synth_claim_`` = equation_synthesis / それ以外は空）。
+    """
+    if not isinstance(record, dict):
+        return ""
+    explicit = str(record.get("origin") or "").strip()
+    if explicit in CLAIM_ORIGINS:
+        return explicit
+    if str(record.get("parent_claim_id") or "").strip():
+        return CLAIM_ORIGIN_ATOMIC_REWRITE
+    if str(record.get("synthesis_method") or "").strip() or str(
+        record.get("claim_id") or ""
+    ).startswith("synth_claim_"):
+        return CLAIM_ORIGIN_EQUATION_SYNTHESIS
+    return ""
+
+
 #: element_id_remap.object_kind / stable_key の種別接頭辞。
 KNOWLEDGE_OBJECT_KINDS: tuple[str, ...] = (
     "claim", "component", "equation", "evidence", "derivation_step", "symbol",

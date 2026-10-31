@@ -43,7 +43,19 @@ _pair_cache: dict[tuple[str, str], list[dict]] = {}
 _CACHE_MAX_ENTRIES = 64
 
 #: 糸の DTO に載せるキー（**これ以外を足さない** — 生スコア・edge_key・判断は出さない）。
-_ITEM_KEYS = ("from", "to", "from_label", "to_label", "nearness_label")
+_ITEM_KEYS = ("from", "to", "from_label", "to_label", "nearness_label", "basis_line")
+
+#: 糸ごとの根拠の一文（IK-0887。教員側の ``EDGE_BASIS_VECTOR`` と同じ根拠を組の名前で言う。
+#: 学習者の糸は説明文の近さ由来だけなので、論文の配置の根拠が無いことも併記する。数値なし）。
+THREAD_BASIS_TEMPLATE = (
+    "「{from_label}」と「{to_label}」は、説明文（ラベル・別名・確認済み配置の引用）どうしが"
+    "近いという推定です。論文の配置の根拠はありません。"
+)
+
+
+def thread_basis_line(from_label: str, to_label: str) -> str:
+    """糸 1 本の根拠の一文（IK-0887）。"""
+    return THREAD_BASIS_TEMPLATE.format(from_label=from_label, to_label=to_label)
 
 
 def reset_cache() -> None:
@@ -102,6 +114,7 @@ def _candidate_pairs(session: Any, domain_key: str) -> tuple[list[dict], str]:
             "from_label": item["from_label"],
             "to_label": item["to_label"],
             "nearness_label": item["nearness_label"],
+            "basis_line": thread_basis_line(item["from_label"], item["to_label"]),
         }
         for item in derive.derive_vector_pairs(skeleton, anchors)
     ]
@@ -132,7 +145,7 @@ def threads_for_domain(session: Any, domain_key: str) -> dict:
 
     Returns:
         ``{"available": True, "skeleton_version": str, "items": [{"from", "to",
-        "from_label", "to_label", "nearness_label"}, ...]}``。導出できないときは
+        "from_label", "to_label", "nearness_label", "basis_line"}, ...]}``。導出できないときは
         ``{"available": False}`` のみ（キーを増やさない = 呼び出し側はレイヤーごと
         非表示にする）。**例外は送出しない**。
     """

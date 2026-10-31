@@ -140,6 +140,11 @@ class MaterialOut(BaseModel):
     # 落ちたステージの事実を ``core/analysis_degradation.py`` の 1 投影から
     # ``{status, facts}`` **だけ**で返す（facts は数字なし。details は行に出さない）。
     analysis_degradation: dict | None = None
+    # 閲覧者にとっての役割（IK-0974）。owner / editor / viewer と表示語。閲覧のみの行には
+    # 編集の共有を頼む先（所有者の表示名を含む事実文・教員向け一覧のみ）を添える。
+    role: str | None = None
+    role_label: str | None = None
+    edit_request_note: str | None = None
     # --- メタデータ（教材選択UIの情報提示用。documents 列から常時付与）---
     authors: list[str] = Field(default_factory=list)
     year: int | None = None
@@ -151,6 +156,10 @@ class MaterialOut(BaseModel):
     top_concepts: list[str] = Field(default_factory=list)  # legacy knowledge_graph 概念名
     section_outline: list[str] = Field(default_factory=list)  # 文書構造のセクション見出し
     has_course: bool = False  # 自分がこの教材からコースを作成済みか（コース未作成リスト用）
+    # 第 25 周 第 10 波（IK-0956 の面）: 取り込み元の形式（``TeX 版`` / ``PDF 版`` / 空文字）。
+    # 同じ題名の PDF 版と TeX 版を共有画面の見出しで区別する。判定の正本は
+    # ``core.deliberation.identity_links.document_format_label``（ファイル名だけで決める）。
+    format_label: str | None = None
 
 
 class VisibilityUpdateRequest(BaseModel):
@@ -498,6 +507,9 @@ class SourceTierItem(BaseModel):
     origin: str = "other_material"  # course_material（このコースの教材）| other_material（別の資料）
     # 回答本文が [出典N] で引用したか（第 14 周）。False は「出所を決めたが本文では引用していない」。
     cited: bool = True
+    # 第 25 周 第 5 波（IK-0996）: 同じ論文の別の版（TeX 版・PDF 版）の同じ箇所を 1 件に畳んだ
+    # ときの事実文（数値なし）。畳んでいなければ空。
+    version_note: str = ""
 
 
 class LearningChatResponse(BaseModel):
@@ -817,6 +829,12 @@ class LectureFormulaItem(BaseModel):
     source_location: dict | None = None
     needs_math_review: bool = False
     review_reason: list[str] = Field(default_factory=list)
+    # IK-0977: 復元の印（core/lecture.annotate_reconstructed_formulas が載せる。文言の正本は
+    # label_vocab）。以前はこの DTO が落としていたので、講義のスライドだけ印が出なかった。
+    reconstructed: bool = False
+    reconstructed_mark: str | None = None
+    reconstructed_note: str | None = None
+    latex_withheld: bool = False
 
 
 class LectureFigureItem(BaseModel):
@@ -1785,6 +1803,8 @@ class UserListItem(BaseModel):
     created_at: Optional[str] = None
     last_login_at: Optional[str] = None
     last_seen_at: Optional[str] = None
+    #: migration 094: 本人が登録した人に見せる名前（空 = 登録なし。``username`` はログイン ID）。
+    profile_name: str = ""
 
 
 class UserListResponse(BaseModel):

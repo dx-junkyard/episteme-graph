@@ -144,11 +144,20 @@ class RelationCreateRequest(BaseModel):
     reason: str = ""
 
 
+class RelationDecisionReasonRequest(BaseModel):
+    """理由の無い確定に理由を書き足す（第 25 周 第 10 波・確定した本人のみ）。"""
+
+    reason: str
+    viewer_entry_id: str = ""
+
+
 class DecideRequest(BaseModel):
     """関係 / node リンクの判断（``confirmed`` / ``dismissed`` / ``candidate``）。"""
 
     status: str
     review_note: str = ""
+    #: IK-1063: 関係の判断の応答で、向きをどの概念から見て言うか（任意。既定は subject）。
+    viewer_entry_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -285,8 +294,33 @@ LIBRARY_SEARCH_NOT_FOUND = (
 #: 凍結版の有無の事実文。
 LIBRARY_VERSION_NONE = "まだ凍結していません"
 #: 「いまの扱い」が確定のときの補足（確定と凍結は別の操作）。
+# ── 第 5 波（第 25 周 面 A 第 5 周の是正・2026-10-27）の事実文（JS は素通し）─────────
+#: IK-0982 / IK-0917: エントリ（概念）の確定の直前に問う 1 文。エントリの確定は「この概念を
+#: ライブラリに置くこと」で、部品との結び付き（同一性リンク）の確定ではない。
+ENTRY_CONFIRM_QUESTION = (
+    "「{name}」を概念としてライブラリに確定しますか。確定するのは概念を置くことだけで、"
+    "論文の部品との結び付き（各行）は確定されません。結び付きは行ごとに別に確かめます。"
+)
+#: IK-0982: エントリを確定したあとの知らせ（未決の結び付きの置き場を言う）。
+ENTRY_CONFIRMED_FACT = (
+    "概念「{name}」を確定しました。部品との結び付きは別の判断です。候補のまま残っている"
+    "結び付きは、同一性の候補の一覧と、このエントリの「結びついた教材の部品」で確認・見送りできます。"
+)
+ENTRY_DISMISSED_FACT = "概念の候補「{name}」を見送りました（理由と記録は残ります）。"
+ENTRY_RESTORED_FACT = "概念「{name}」を候補に戻しました。"
+#: IK-0982: 概念は確定済みで、結び付きの判断だけが残っている候補カードの 1 文。
+ENTRY_LINKS_PENDING_NOTE = (
+    "この概念は確定済みです。部品との結び付きのうち、まだ判断していないものがあります。"
+)
+#: IK-0980: 同じ論文の別の版どうしを文の近さで結んだ旧候補の 1 文（いまの規則では作らない）。
+STALE_SAME_PAPER_PROXY_NOTE = (
+    "この候補は、同じ論文の別の版どうしを文の近さで結んだものです。いまの候補づくりでは、"
+    "別の版どうしは根拠の式・主張の本文の一致だけで結びます。名前と役割が違えば見送ってください。"
+)
+
 LIBRARY_REVIEW_CONFIRMED_NOTE = (
     "概念として確定しています。確定は凍結とは別の操作で、解析が参照するのは凍結した版だけです。"
+    "学生の画面（部品の文脈の「共通部品」）に出るのも凍結した版だけで、凍結版が無いうちは学生には出ません。"
 )
 
 
@@ -340,7 +374,8 @@ def _display_entries(entries: list[dict]) -> list[dict]:
     try:
         labels = fetch_actor_labels(
             session,
-            [e.get("updated_by") for e in items] + [e.get("created_by") for e in items],
+            [e.get("updated_by") for e in items] + [e.get("created_by") for e in items]
+            + [e.get("decided_by") for e in items],
         )
         domain_cache: dict[str, str] = {}
         for item in items:
@@ -348,8 +383,29 @@ def _display_entries(entries: list[dict]) -> list[dict]:
             item["created_by_label"] = _library_actor_label(item.get("created_by"), labels)
             item["domain_label"] = _library_domain_label(session, item.get("domain_key"), domain_cache)
             item["version_line"] = _library_version_line(item)
+            # IK-1050 の残り: 確定・見送りの判断の記録（判断の印・人・日付）を詳細にも出す。
+            # 判断した人の記録が無い確定（同梱・この規則より前）は推測で埋めず「記録なし」と言う（第 9 波）。
+            if not item.get("decided_by"):
+                unrecorded = library_schema.entry_decision_unrecorded_line(
+                    str(item.get("review_status") or "confirmed")
+                )
+                if unrecorded:
+                    item["review_decision_line"] = unrecorded
+            if item.get("decided_by"):
+                decision = library_schema.relation_decision_line(
+                    str(item.get("review_status") or ""),
+                    _library_actor_label(item.get("decided_by"), labels),
+                    item.get("decided_at"),
+                )
+                if decision:
+                    item["review_decision_line"] = decision
             if str(item.get("review_status") or "confirmed") == library_schema.REVIEW_STATUS_CONFIRMED:
                 item["review_status_note"] = LIBRARY_REVIEW_CONFIRMED_NOTE
+            elif str(item.get("review_status") or "") == library_schema.REVIEW_STATUS_CANDIDATE:
+                # IK-0917 / IK-0982: エントリの確定の直前に問う 1 文。
+                item["review_confirm_question"] = ENTRY_CONFIRM_QUESTION.format(
+                    name=item.get("name") or ""
+                )
     except Exception:  # noqa: BLE001
         logger.warning("library display labels failed (non-fatal)", exc_info=True)
     finally:
@@ -734,7 +790,102 @@ def review_entry(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if entry is None:
         raise HTTPException(status_code=404, detail="library entry not found")
-    return {"entry": entry}
+    # IK-0982: 何が済んで何が残ったかを知らせる（文言の正本はここ・JS は素通し）。
+    fact_template = {
+        library_schema.REVIEW_STATUS_CONFIRMED: ENTRY_CONFIRMED_FACT,
+        library_schema.REVIEW_STATUS_DISMISSED: ENTRY_DISMISSED_FACT,
+        library_schema.REVIEW_STATUS_CANDIDATE: ENTRY_RESTORED_FACT,
+    }.get(str(payload.status or ""), "")
+    facts = [fact_template.format(name=entry.get("name") or "")] if fact_template else []
+    return {"entry": entry, "facts": facts}
+
+
+#: IK-0983: 記号の候補づくりの結果（数値なし・JS は素通し）。
+SYMBOL_CANDIDATES_CREATED_FACT = (
+    "記号の候補を作りました。下の「結びついた記号」で、記号の定義と概念を見比べて確認・見送りできます。"
+)
+SYMBOL_CANDIDATES_NONE_FACT = (
+    "閲覧できる教材の記号の定義の文に、この概念の名前・別名は語として現れませんでした。"
+    "別名を足すと、その語でも探します。"
+)
+#: IK-1153: 名前が語として現れた記号はあるが、どれも既に行がある（新しく作らなかった）とき。
+SYMBOL_CANDIDATES_DECIDED_FACT = (
+    "判断済みの一致: {items}。定義の文に名前（または別名）が語として現れた記号はありますが、"
+    "どれもすでに判断された結び付きなので、新しい候補は作りませんでした。"
+    "下の「結びついた記号」の［候補に戻す］から判断し直せます。"
+)
+SYMBOL_CANDIDATES_EXISTING_FACT = (
+    "定義の文に名前（または別名）が語として現れた記号は、すでに下の「結びついた記号」にあります: {items}。"
+    "新しい候補は作りませんでした。"
+)
+SYMBOL_CANDIDATES_NOT_CONFIRMED_DETAIL = "確定した概念にだけ、記号の候補を探します。先に概念を確定してください。"
+#: 1 回の候補づくりで照らす閲覧可能な document の上限（重い全件走査を避ける）。
+_SYMBOL_DERIVE_DOCUMENT_LIMIT = 200
+
+
+@router.post("/entries/{entry_id}/symbol-candidates/derive")
+def derive_entry_symbol_candidates(
+    entry_id: str,
+    current_user: dict = Depends(_require_teacher),
+):
+    """この概念に結びそうな記号の候補を作る（IK-0983・決定論・LLM 0 回・embedding 0 回）。
+
+    閲覧できる教材の ``knowledge_symbols_live`` の定義の文に、このエントリの名前か別名が
+    語として現れた記号から candidate リンクを作る。確定は既存のリンクの確定の弁
+    （``/api/admin/deliberation/identity-links/{id}/confirm``）だけ（KR2）。
+    """
+    from core.library.symbol_concepts import derive_symbol_concept_candidates
+
+    uid = str(_uid(current_user) or "")
+    entry = _get_entry_or_404(entry_id)
+    if entry.get("status") == library_schema.STATUS_RETIRED:
+        raise HTTPException(status_code=409, detail="公開を止めたエントリは読み取り専用です。")
+    if entry.get("review_status") != library_schema.REVIEW_STATUS_CONFIRMED:
+        raise HTTPException(status_code=409, detail=SYMBOL_CANDIDATES_NOT_CONFIRMED_DETAIL)
+    try:
+        visible = sorted(services.list_visible_document_ids(uid))[:_SYMBOL_DERIVE_DOCUMENT_LIMIT]
+    except Exception:  # noqa: BLE001 — 可視性が判定できなければ何も作らない（fail-closed）
+        logger.warning("visible documents lookup failed", exc_info=True)
+        visible = []
+    session = get_session()
+    try:
+        stats = derive_symbol_concept_candidates(
+            session, document_ids=visible, entry_ids=[entry["id"]]
+        )
+    finally:
+        session.close()
+    created = int(stats.get("links_created") or 0)
+    if created:
+        _audit(
+            AUDIT_ENTITY_LIBRARY_ENTRY, entry["id"], "", "", uid,
+            {"action": "symbol_candidates_derived", "links_created": created},
+        )
+    return {"facts": [_symbol_derive_fact(created, stats.get("existing_matches") or [])]}
+
+
+def _symbol_derive_fact(created: int, existing: list) -> str:
+    """IK-1153: 新しく作らなかった理由（一致なし／一致は判断済み／一致は既に候補・確定）を言い分ける。"""
+    if created:
+        return SYMBOL_CANDIDATES_CREATED_FACT
+    from core.deliberation import identity_links as _il
+
+    marks = dict(_il.DECISION_MARKS)
+    marks.setdefault(_il.IDENTITY_LINK_STATUS_CANDIDATE, "候補")
+
+    def _items(rows: list) -> str:
+        seen: list[str] = []
+        for row in rows:
+            item = f"{row.get('symbol') or '記号'}（{marks.get(str(row.get('status') or ''), '判断済み')}）"
+            if item not in seen:
+                seen.append(item)
+        return "・".join(seen)
+
+    decided = [r for r in existing if str(r.get("status") or "") in ("rejected", "revoked")]
+    if decided:
+        return SYMBOL_CANDIDATES_DECIDED_FACT.format(items=_items(decided))
+    if existing:
+        return SYMBOL_CANDIDATES_EXISTING_FACT.format(items=_items(existing))
+    return SYMBOL_CANDIDATES_NONE_FACT
 
 
 @router.get("/entries/{entry_id}/labels")
@@ -748,11 +899,46 @@ def list_entry_labels(
     ``preferred`` は ``library_entries.name`` が正本なので行として存在しない（§4.3）。
     """
     _get_entry_or_404(entry_id)
-    return {
-        "labels": library_registry.list_labels(
-            entry_id, include_dismissed=include_dismissed
+    labels = library_registry.list_labels(entry_id, include_dismissed=include_dismissed)
+    if include_dismissed:
+        _attach_label_decision_lines(labels)
+    return {"labels": labels}
+
+
+#: IK-1024: 見送り済みのラベルの行（理由・見送った人・日時）。日時は日付まで。
+LABEL_DISMISSED_LINE = "見送り: {reason}（{actor}・{date}）"
+LABEL_DISMISSED_FACT = (
+    "「{label}」を見送りました。見送り済みの行は、この区画の「見送り済みのラベル」に理由とともに残り、"
+    "［見送りを取り消す］で戻せます。"
+)
+LABEL_RESTORED_FACT = "「{label}」の見送りを取り消しました（理由は記録に残ります）。"
+
+
+def _attach_label_decision_lines(labels: list[dict]) -> None:
+    """見送り済みの行に ``decision_line``（理由・見送った人・日付）を添える（fail-soft・内部 ID を出さない）。"""
+    dismissed = [l for l in labels if str(l.get("status") or "") == library_schema.LABEL_STATUS_DISMISSED]
+    if not dismissed:
+        return
+    labels_by_actor: dict[str, str] = {}
+    try:
+        from core.atlas_review_display import fetch_actor_labels
+
+        session = get_session()
+        try:
+            labels_by_actor = fetch_actor_labels(session, [l.get("decided_by") for l in dismissed])
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — 名前が引けなくても理由は出す
+        logger.debug("label decider labels unavailable", exc_info=True)
+    for label in dismissed:
+        actor = _library_actor_label(label.get("decided_by"), labels_by_actor) or "記録なし"
+        date = str(label.get("updated_at") or "")[:10]
+        label["decided_by_label"] = actor
+        label["decision_line"] = LABEL_DISMISSED_LINE.format(
+            reason=str(label.get("review_note") or "（理由の記録なし）"),
+            actor=actor,
+            date=date or "日時の記録なし",
         )
-    }
 
 
 #: ラベル追加の結果の事実文（IK-0897。JS にミラーしない）。
@@ -761,8 +947,15 @@ LABEL_OUTCOME_FACTS = {
     ("hidden", "created"): "隠しラベルを追加しました。",
     ("alternate", "existing"): "この別名は既に登録されています。変更はありません。",
     ("hidden", "existing"): "この隠しラベルは既に登録されています。変更はありません。",
-    ("alternate", "dismissed"): "この別名は見送り済みです。追加し直しても見送りは取り消しません。",
-    ("hidden", "dismissed"): "この隠しラベルは見送り済みです。追加し直しても見送りは取り消しません。",
+    # IK-1024 の残り（第 7 波）: 足し直しでは見送りを取り消さないことに加えて、戻す手を指す。
+    ("alternate", "dismissed"): (
+        "この別名は見送り済みです。追加し直しても見送りは取り消しません。"
+        "戻すときは、この区画の「見送り済みのラベル」を開き、その行の［見送りを取り消す］から理由を書いて戻します。"
+    ),
+    ("hidden", "dismissed"): (
+        "この隠しラベルは見送り済みです。追加し直しても見送りは取り消しません。"
+        "戻すときは、この区画の「見送り済みのラベル」を開き、その行の［見送りを取り消す］から理由を書いて戻します。"
+    ),
 }
 #: 関係の記録の結果の事実文（IK-0897）。
 RELATION_OUTCOME_FACTS = {
@@ -770,6 +963,34 @@ RELATION_OUTCOME_FACTS = {
     "existing": "この関係は既に記録されています。変更はありません。",
     "dismissed": "この関係は見送り済みです。戻すときは見送り済みの一覧から差し戻します。",
 }
+#: IK-1063 の残り（第 9 波）: 既にある関係を足し直したときに書いた理由の行方（黙って捨てない）。
+RELATION_REASON_ADDED_FACT = "この関係は既に記録されていました。書いた理由を、理由の無かったこの関係の記録に足しました。"
+RELATION_REASON_KEPT_FACT = (
+    "この関係は既に理由付きで記録されています。記録済みの理由は書き換えないため、"
+    "書いた理由は保存していません: {reason}"
+)
+RELATION_REASON_NOT_OWN_FACT = (
+    "この関係は既に記録されています。関係を足した人の記録に別の人の理由は足さないため、"
+    "書いた理由は保存していません: {reason}"
+)
+
+
+def _relation_readd_reason_fact(relation: dict, reason: str, actor_id: Any) -> tuple[dict, str]:
+    """既にある関係を足し直したときの理由の扱い（IK-1063 の残り）。``(relation, fact)``。"""
+    text = str(reason or "").strip()
+    if not text or text == str(relation.get("reason") or "").strip():
+        return relation, ""
+    if str(relation.get("reason") or "").strip():
+        return relation, RELATION_REASON_KEPT_FACT.format(reason=text)
+    filled = library_registry.add_relation_reason(
+        str(relation.get("id") or ""),
+        reason=text,
+        actor_id=str(actor_id or ""),
+        record_audit=_registry_audit,
+    )
+    if filled is None:
+        return relation, RELATION_REASON_NOT_OWN_FACT.format(reason=text)
+    return filled, RELATION_REASON_ADDED_FACT
 
 
 def _label_outcome_fact(kind: str, outcome: str) -> str:
@@ -834,7 +1055,33 @@ def dismiss_entry_label(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if label is None or label["entry_id"] != entry_id:
         raise HTTPException(status_code=404, detail="label not found")
-    return {"label": label}
+    return {"label": label, "facts": [LABEL_DISMISSED_FACT.format(label=label.get("label") or "")]}
+
+
+@router.post("/entries/{entry_id}/labels/{label_id}/restore")
+def restore_entry_label(
+    entry_id: str,
+    label_id: str,
+    payload: LabelDismissRequest = Body(default=LabelDismissRequest()),
+    current_user: dict = Depends(_require_teacher),
+):
+    """見送ったラベルを戻す（IK-1024・理由必須・行は 1 本のまま・監査 ``label_restore``）。"""
+    uid = _uid(current_user)
+    _get_entry_or_404(entry_id)
+    try:
+        label = library_registry.restore_label(
+            label_id,
+            actor_id=str(uid or ""),
+            review_note=payload.review_note,
+            record_audit=_registry_audit,
+        )
+    except LibraryRetiredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if label is None or label["entry_id"] != entry_id:
+        raise HTTPException(status_code=404, detail="見送り済みのラベルが見つかりません。")
+    return {"label": label, "facts": [LABEL_RESTORED_FACT.format(label=label.get("label") or "")]}
 
 
 def _entry_names(entry_ids: list[str]) -> dict[str, str]:
@@ -867,7 +1114,70 @@ def list_relations(
     for relation in relations:
         relation["subject_name"] = names.get(relation["subject_entry_id"], "")
         relation["object_name"] = names.get(relation["object_entry_id"], "")
+    _describe_relations(relations, entry_id, viewer_user_id=_uid(current_user))
     return {"relations": relations}
+
+
+def _describe_relations(
+    relations: list[dict], viewer_entry_id: str | None, *, viewer_user_id: Any = None,
+) -> None:
+    """関係の行に判断の記録（人・日付・理由）と向きの文を添える（IK-1063・fail-soft）。
+
+    同一性リンクの ``decision_line`` と同じ形。表示名は本人が登録した名前だけ
+    （``fetch_actor_labels``）で、UUID は値として残るだけ（画面の文には出さない）。
+    """
+    if not relations:
+        return
+    from core.atlas_review_display import fetch_actor_labels
+
+    ids = {
+        str(r.get(k) or "").strip()
+        for r in relations for k in ("created_by", "decided_by")
+    } - {""}
+    labels: dict[str, str] = {}
+    if ids:
+        session = get_session()
+        try:
+            labels = fetch_actor_labels(session, list(ids))
+        except Exception:  # noqa: BLE001 — 表示の補助（fail-soft）
+            labels = {}
+        finally:
+            session.close()
+    viewer = str(viewer_entry_id or "").strip()
+    # IK-1151: 閲覧者のユーザー id は別の名前で 1 回だけ作る（viewer を上書きしない）。
+    viewer_uid = str(viewer_user_id or "").strip()
+    for r in relations:
+        is_subject = (not viewer) or r.get("subject_entry_id") == viewer
+        counterpart = r.get("object_name") if is_subject else r.get("subject_name")
+        r["counterpart_name"] = counterpart or ""
+        r["kind_label"] = library_schema.relation_kind_label_for_viewer(
+            r.get("kind") or "", viewer_is_subject=is_subject
+        )
+        r["direction_line"] = library_schema.relation_direction_line(
+            r.get("kind") or "", viewer_is_subject=is_subject, counterpart_name=counterpart or ""
+        )
+        decided = str(r.get("decided_by") or "").strip()
+        created = str(r.get("created_by") or "").strip()
+        decided_label = _library_actor_label(decided, labels)
+        created_label = _library_actor_label(created, labels)
+        r["decision_line"] = library_schema.relation_decision_line(
+            r.get("status") or "", decided_label, r.get("decided_at")
+        )
+        r["decision_reason_line"] = library_schema.relation_decision_reason_line(
+            r.get("status") or "", r.get("review_note")
+        )
+        r["added_line"] = library_schema.relation_added_line(
+            created_label, r.get("created_at"), r.get("reason")
+        )
+        # 第 25 周 第 10 波: 理由の無い確定に、確定した本人だけが後から理由を書き足せる。
+        if (
+            viewer_uid
+            and str(r.get("status") or "") == "confirmed"
+            and not str(r.get("review_note") or "").strip()
+            and decided == viewer_uid
+        ):
+            r["can_add_decision_reason"] = True
+            r["decision_reason_add_note"] = library_schema.RELATION_DECISION_REASON_ADD_NOTE
 
 
 @router.post("/relations", status_code=201)
@@ -904,10 +1214,16 @@ def create_relation(
     outcome = str(relation.pop("outcome", "") or library_registry.OUTCOME_CREATED)
     if outcome != library_registry.OUTCOME_CREATED:
         response.status_code = 200
+    facts = [RELATION_OUTCOME_FACTS.get(outcome, "")]
+    if outcome == library_registry.OUTCOME_EXISTING:
+        # IK-1063 の残り: 足し直しで書いた理由を黙って捨てない（本人の空欄なら足す・それ以外は言う）。
+        relation, reason_fact = _relation_readd_reason_fact(relation, payload.reason, uid)
+        if reason_fact:
+            facts = [reason_fact]
     return {
         "relation": relation,
         "outcome": outcome,
-        "facts": [RELATION_OUTCOME_FACTS.get(outcome, "")],
+        "facts": facts,
     }
 
 
@@ -931,7 +1247,52 @@ def decide_relation(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if relation is None:
         raise HTTPException(status_code=404, detail="relation not found")
-    return {"relation": relation}
+    # IK-1063: 判断の直後にも、誰が・いつ・なぜ判断したかを同じ形で返す。
+    names = _entry_names([relation["subject_entry_id"], relation["object_entry_id"]])
+    relation["subject_name"] = names.get(relation["subject_entry_id"], "")
+    relation["object_name"] = names.get(relation["object_entry_id"], "")
+    _describe_relations(
+        [relation], payload.viewer_entry_id or relation["subject_entry_id"], viewer_user_id=uid,
+    )
+    facts = [relation["decision_line"]] if relation.get("decision_line") else []
+    return {"relation": relation, "facts": facts}
+
+
+@router.patch("/relations/{relation_id}/decision-reason")
+def add_relation_decision_reason(
+    relation_id: str,
+    payload: RelationDecisionReasonRequest,
+    current_user: dict = Depends(_require_teacher),
+):
+    """理由の書かれていない確定の行に、確定した本人が理由を書き足す（第 25 周 第 10 波）。
+
+    書き換え・他人の判断への追記はしない（409 の事実文）。行は消さず、書き足した事実は監査に残る。
+    """
+    uid = _uid(current_user)
+    text = str(payload.reason or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="書き足す理由を書いてください。")
+    relation = library_registry.add_relation_decision_reason(
+        relation_id,
+        reason=text,
+        actor_id=str(uid or ""),
+        record_audit=_registry_audit,
+    )
+    if relation is None:
+        raise HTTPException(
+            status_code=409, detail=library_schema.RELATION_DECISION_REASON_NOT_ALLOWED,
+        )
+    relation = dict(relation)
+    names = _entry_names([relation["subject_entry_id"], relation["object_entry_id"]])
+    relation["subject_name"] = names.get(relation["subject_entry_id"], "")
+    relation["object_name"] = names.get(relation["object_entry_id"], "")
+    _describe_relations(
+        [relation], payload.viewer_entry_id or relation["subject_entry_id"], viewer_user_id=uid,
+    )
+    return {
+        "relation": relation,
+        "facts": [library_schema.RELATION_DECISION_REASON_ADDED_FACT],
+    }
 
 
 @router.get("/atlas-links")
@@ -1195,6 +1556,58 @@ def _document_titles(document_ids: list[str]) -> dict[str, str]:
     return {str(row[0]): str(row[1] or "") for row in rows}
 
 
+#: 空状態の判定で版を照らす document の上限（重い全件走査を避ける。超えた分は判定しない）。
+_IDENTITY_RULES_SCAN_DOCUMENT_LIMIT = 300
+
+
+def _identity_rules_scan_facts(user_id: str) -> list[str]:
+    """候補が空のとき、いまの規則で探していない教材を題名で言う（IK-0957・fail-soft）。
+
+    閲覧できる document の採用 run（completed）の ``identity_candidates`` artifact の
+    ``rules_version`` を照らす。判定できないときは何も足さない（「探した」と断定しない）。
+    """
+    from core.document_pipeline.persistence import resolve_artifact_runs
+    from core.library import identity_candidates as _ic
+
+    try:
+        visible = sorted(services.list_visible_document_ids(user_id) if user_id else [])
+    except Exception:  # noqa: BLE001 — 表示の補助
+        logger.debug("visible documents lookup failed", exc_info=True)
+        return []
+    if not visible:
+        return []
+    truncated_scan = len(visible) > _IDENTITY_RULES_SCAN_DOCUMENT_LIMIT
+    visible = visible[:_IDENTITY_RULES_SCAN_DOCUMENT_LIMIT]
+    session = get_session()
+    try:
+        resolved = resolve_artifact_runs(session, visible, policy="adopted")
+    except Exception:  # noqa: BLE001 — 判定できなければ黙る
+        logger.debug("identity rules scan lookup failed", exc_info=True)
+        return []
+    finally:
+        session.close()
+    analyzed = [d for d, e in resolved.items() if str((e or {}).get("status") or "") == "completed"]
+    if not analyzed:
+        return []
+    stale = _ic.documents_not_scanned_by_current_rules(resolved)
+    if not stale:
+        return [] if truncated_scan else [_ic.IDENTITY_RULES_ALL_SCANNED_FACT]
+    titles_by_id = _document_titles(stale)
+    titles = [titles_by_id.get(d) or "" for d in stale]
+    titles = [t for t in titles if t]
+    limit = _ic.IDENTITY_RULES_UNSCANNED_TITLE_LIMIT
+    if not titles:
+        return []
+    facts = [
+        _ic.IDENTITY_RULES_UNSCANNED_FACT.format(
+            titles=" / ".join("『" + t + "』" for t in titles[:limit])
+        )
+    ]
+    if len(titles) > limit or truncated_scan:
+        facts.append(_ic.IDENTITY_RULES_UNSCANNED_MORE_FACT)
+    return facts
+
+
 def _live_component_ids(links_by_entry: dict[str, list[dict]]) -> set[str]:
     """候補リンクが指す component のうち、いま ``theory_components_live`` にある id（P3-R9）。
 
@@ -1266,14 +1679,320 @@ def _live_module_ids(links_by_entry: dict[str, list[dict]]) -> set[str]:
 def _link_resolves_to_live_component(
     link: dict, live_component_ids: set[str], live_module_ids: set[str] | None = None
 ) -> bool:
-    """component / 理論モジュールへのリンクを live 実在で絞る（他の要素型はそのまま通す）。"""
+    """component / 理論モジュールへのリンクを live 実在で絞る（他の要素型はそのまま通す）。
+
+    IK-1076: 判定の正本は ``identity_links.instance_is_live``（詳細の判断可否と同じ述語）。
+    """
+    return _identity_links.instance_is_live(
+        link.get("instance_element_type"),
+        link.get("instance_element_id"),
+        live_component_ids,
+        live_module_ids,
+    )
+
+
+def _document_display(document_ids: list[Any]) -> dict[str, dict]:
+    """``{document_id: {title, version_label, identity}}``（fail-soft）。
+
+    題名は :func:`_document_titles`（正本の名前引き）。``version_label`` は同じ題名の論文が
+    2 本以上のときだけ（IK-0956 の一覧側）。``identity`` は「同じ論文の別の版」の判定材料
+    （画面には出さない）。版の手がかりが引けなくても題名は返す。
+    """
+    keys = sorted({str(d or "") for d in document_ids if str(d or "")})
+    if not keys:
+        return {}
+    titles = _document_titles(keys)
+    out: dict[str, dict] = {
+        key: {"title": titles.get(key, ""), "version_label": "", "identity": {}} for key in keys
+    }
+    try:
+        session = get_session()
+    except Exception:  # noqa: BLE001
+        return out
+    try:
+        rows = session.execute(
+            sa_text(
+                "SELECT d.id::text, COALESCE(d.title, ''), d.filename, d.source_url, d.source_path, "
+                "(SELECT count(*) FROM documents o WHERE o.title = d.title) "
+                "FROM documents d WHERE d.id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"ids": keys},
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 版の手がかりが引けなくても一覧は返す
+        logger.debug("document version lookup failed", exc_info=True)
+        return out
+    finally:
+        session.close()
+    for row in rows:
+        key = str(row[0])
+        if key not in out:
+            continue
+        if len(row) > 5 and int(row[5] or 0) > 1:
+            out[key]["version_label"] = _identity_links.document_version_hint(row[2], row[3])
+        out[key]["identity"] = {
+            "title": str(row[1] or ""), "filename": row[2], "source_url": row[3], "source_path": row[4],
+        }
+        # IK-1026: 対の確認の問いに版（TeX / PDF）を言う（ファイル名は出さない）。
+        out[key]["format_label"] = _identity_links.document_format_label(row[2], row[3])
+    return out
+
+
+def _component_display(links_by_entry: dict[str, list[dict]]) -> dict[str, dict]:
+    """リンクが指す部品の要約・種別（``{component_id: {summary, component_type}}``・1 クエリ）。"""
+    ids = sorted({
+        str(link.get("instance_element_id") or "")
+        for links in links_by_entry.values()
+        for link in links
+        if str(link.get("instance_element_type") or "") == _ELEMENT_THEORY_COMPONENT
+        and str(link.get("instance_element_id") or "")
+    })
+    if not ids:
+        return {}
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                "SELECT id::text, COALESCE(summary, ''), COALESCE(component_type, '') "
+                "FROM theory_components_live WHERE id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"ids": ids},
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 表示の補助（fail-soft）
+        logger.debug("component display lookup failed", exc_info=True)
+        return {}
+    finally:
+        session.close()
+    return {
+        str(row[0]): {"summary": str(row[1] or "")[:160], "component_type": str(row[2] or "")}
+        for row in rows
+    }
+
+
+def _link_basis(link: dict) -> str:
+    for item in link.get("evidence") or ():
+        if isinstance(item, dict) and str(item.get("basis") or ""):
+            return str(item.get("basis"))
+    return ""
+
+
+def _identity_candidate_item(
+    link: dict, *, entry: dict, document_id: str, display: dict, component: dict | None
+) -> dict:
+    """候補一覧の 1 リンク行（既存キーは不変・第 5 波で表示の材料を追加）。"""
+    from core.library.identity_candidates import SAME_PAPER_BASIS, SAME_PAPER_BASIS_LABEL
+
     element_type = str(link.get("instance_element_type") or "")
-    element_id = str(link.get("instance_element_id") or "")
-    if element_type == _ELEMENT_THEORY_COMPONENT:
-        return element_id in live_component_ids
-    if element_type == _ELEMENT_THEORY_MODULE:
-        return element_id in (live_module_ids or set())
-    return True
+    local = link.get("local_expression") or {}
+    instance_label = str(local.get("name") or "") if isinstance(local, dict) else str(local or "")
+    item: dict[str, Any] = {
+        "link_id": link["id"],
+        "instance": {
+            "element_type": element_type,
+            "element_id": link.get("instance_element_id") or "",
+            "document_id": document_id,
+        },
+        "document_title": display.get("title", ""),
+        "local_expression": local,
+        "status": link.get("status") or "",
+        "mapping_justification": link.get("mapping_justification"),
+        # IK-0981: 何を根拠に立ったかの事実文（相手の名前を含めない = KR10）。
+        "reason": str(link.get("reason") or ""),
+        # 内部の材料（_attach_identity_pair_facts が使って落とす。応答に残さない）。
+        "_instance_label": instance_label,
+        "_format_label": display.get("format_label", ""),
+        "_decided_by": link.get("decided_by") or "",
+        "_decided_at": link.get("decided_at"),
+        "_revoked_by": link.get("revoked_by") or "",
+        "_revoked_at": link.get("revoked_at"),
+        # IK-1062: 候補に戻した記録（_attach_identity_pair_facts が restore_line にして落とす）。
+        "_restored_by": link.get("restored_by") or "",
+        "_restored_at": link.get("restored_at"),
+        "_restored_from": link.get("restored_from") or "",
+        "_restore_reason": link.get("restore_reason") or "",
+        # IK-1062 の残り（第 10 波）: 戻す前の判断の理由（prior_decision_line にして落とす）。
+        "_revoke_reason": link.get("revoke_reason") or "",
+        # IK-1050: 札の訳語はサーバの表（rejected / revoked まで覆う）。
+        "status_label": _identity_links.IDENTITY_LINK_STATUS_LABELS.get(str(link.get("status") or ""), ""),
+    }
+    # IK-1050: 見送った行の理由（判断の印の後ろ）。
+    reason_line = _identity_links.decision_reason_line(link.get("status"), link.get("revoke_reason"))
+    if reason_line:
+        item["decision_reason_line"] = reason_line
+    if str(link.get("status") or "") in _identity_links.RESTORE_VOCABULARIES:
+        # IK-1062: 否定の判断の行には戻す手の事実文（［候補に戻す］の前に添える）。
+        item["restore_note"] = _identity_links.RESTORE_NOTE
+    if _link_basis(link) == SAME_PAPER_BASIS:
+        # IK-0981: 版の規則の対は「表記の一致」と呼ばない。
+        item["basis_label"] = SAME_PAPER_BASIS_LABEL
+    if display.get("version_label"):
+        # IK-0956（一覧側）: 同じ題名の論文が並ぶときだけ版の手がかり。
+        item["document_version_label"] = display["version_label"]
+    if component and component.get("summary"):
+        # IK-0980 ③: 候補カードに部品の要約（教員の判断材料）。
+        item["instance_summary"] = component["summary"]
+    if str(link.get("status") or "") == "candidate":
+        # IK-0917: 一覧の［確認］でも、両側を名指しして同じものかを問う。
+        item["confirm_question"] = _identity_links.confirm_question(
+            _identity_links.INSTANCE_TYPE_DISPLAY.get(element_type, "要素"),
+            instance_label,
+            str(entry.get("name") or ""),
+        )
+        note = _identity_links.granularity_note(
+            (component or {}).get("component_type"), entry.get("entry_type")
+        )
+        if note:
+            item["granularity_note"] = note
+    return item
+
+
+def _attach_identity_pair_facts(items: list[dict], *, entry: dict, unresolved: bool) -> None:
+    """候補カードの行に、対の確認の問い（IK-1026）・相手の置き換わり（IK-1020）・判断の印（IK-0953）。
+
+    表示の補助だけ（判断は既存のリンクの確定・見送りの弁のまま）。入力の ``items`` を書き換える。
+    """
+    labels: dict[str, str] = {}
+    actor_ids = [str(it.get("_decided_by") or "") for it in items if it.get("_decided_by")]
+    actor_ids += [str(it.get("_revoked_by") or "") for it in items if it.get("_revoked_by")]
+    actor_ids += [str(it.get("_restored_by") or "") for it in items if it.get("_restored_by")]
+    if actor_ids:
+        try:
+            from core.atlas_review_display import fetch_actor_labels
+
+            session = get_session()
+            try:
+                labels = fetch_actor_labels(session, actor_ids)
+            finally:
+                session.close()
+        except Exception:  # noqa: BLE001 — 名前が引けなくても印と日付は出す
+            logger.debug("identity decision actor labels unavailable", exc_info=True)
+    for it in items:
+        decided_by = str(it.pop("_decided_by", "") or "")
+        decided_at = it.pop("_decided_at", None)
+        revoked_by = str(it.pop("_revoked_by", "") or "")
+        revoked_at = it.pop("_revoked_at", None)
+        restored_by = str(it.pop("_restored_by", "") or "")
+        restored_at = it.pop("_restored_at", None)
+        restored_from = it.pop("_restored_from", "")
+        restore_reason = str(it.pop("_restore_reason", "") or "").strip()
+        revoke_reason = str(it.pop("_revoke_reason", "") or "").strip()
+        if str(it.get("status") or "") == "candidate" and restored_at:
+            # IK-1062: 否定の判断から候補に戻した行（戻した人・日付・前の判断・理由）。
+            it["restore_line"] = _identity_links.restore_line(
+                _library_actor_label(restored_by, labels) if restored_by else "", restored_at, restored_from,
+            )
+            if restore_reason:
+                it["restore_reason_line"] = _identity_links.restore_reason_line(restore_reason)
+            # IK-1062 の残り（第 10 波）: 戻す前の判断の誰・いつ・なぜ（記録の列は上書きしていない）。
+            prior = _identity_links.prior_decision_line(
+                restored_from,
+                decided_by_label=_library_actor_label(decided_by, labels) if decided_by else "",
+                decided_at=decided_at,
+                revoked_by_label=_library_actor_label(revoked_by, labels) if revoked_by else "",
+                revoked_at=revoked_at,
+                reason=revoke_reason,
+            )
+            if prior:
+                it["prior_decision_line"] = prior
+        decided_label = _library_actor_label(decided_by, labels) if decided_by else ""
+        line = _identity_links.decision_line(it.get("status"), decided_label, decided_at)
+        if line:
+            it["decision_line"] = line
+        elif str(it.get("status") or "") == "revoked":
+            # IK-0953 の残り: 取り消しの行は取り消した人・日付と元の確定を 1 文で。
+            it["decision_line"] = _identity_links.revoke_line(
+                _library_actor_label(revoked_by, labels) if revoked_by else "",
+                revoked_at,
+                decided_label,
+                decided_at,
+            )
+    for it in items:
+        own_type = str((it.get("instance") or {}).get("element_type") or "")
+        partners = [
+            o for o in items
+            if o is not it
+            and str(o.get("status") or "") in ("candidate", "confirmed")
+            and str((o.get("instance") or {}).get("element_type") or "") == own_type
+        ]
+        if str(it.get("status") or "") != "candidate":
+            # IK-1050: 判断した行でも、組の相手が置き換わった事実を保存値（「別の論文の…」）より先に言う。
+            if unresolved and not partners:
+                it["recorded_reason"] = str(it.get("reason") or "")
+                it["reason"] = _identity_links.PARTNER_REPLACED_REASON
+            continue
+        type_label = _identity_links.INSTANCE_TYPE_DISPLAY.get(own_type, "要素")
+        side = _identity_links.instance_side_label(it.get("_format_label"), it.get("document_title"))
+        if partners:
+            it["confirm_question"] = _identity_links.pair_confirm_question(
+                instance_type_label=type_label,
+                instance_label=str(it.get("_instance_label") or ""),
+                instance_side=side,
+                partners=[
+                    (
+                        _identity_links.INSTANCE_TYPE_DISPLAY.get(
+                            str((o.get("instance") or {}).get("element_type") or ""), "要素"
+                        ),
+                        str(o.get("_instance_label") or ""),
+                        _identity_links.instance_side_label(o.get("_format_label"), o.get("document_title")),
+                    )
+                    for o in partners
+                ],
+                shared_part_name=str(entry.get("name") or ""),
+            )
+        elif unresolved:
+            # 組の相手は再解析で置き換わった — 「別の論文の記述と…」の保存値を言わない。
+            it["recorded_reason"] = str(it.get("reason") or "")
+            it["reason"] = _identity_links.PARTNER_REPLACED_REASON
+            it["confirm_question"] = _identity_links.partner_replaced_question(
+                type_label, str(it.get("_instance_label") or ""), side, str(entry.get("name") or "")
+            )
+    for it in items:
+        for key in ("_instance_label", "_format_label"):
+            it.pop(key, None)
+
+
+#: IK-1050: 見送った概念のカードの判断の行（判断の印・人・日付）と、戻す手の案内。
+ENTRY_DISMISSED_DECISION_LINE = "〔見送り〕 見送り: {actor}・{date}"
+ENTRY_DISMISSED_REASON_LINE = "見送りの理由: {reason}"
+ENTRY_DISMISSED_RESTORE_NOTE = (
+    "この概念は見送り済みです（この一覧では判断のボタンを出しません）。"
+    "候補に戻すときは、エントリの詳細の［候補に戻す］から理由を書いて戻します。"
+)
+
+
+def _dismissed_entry_decision(entry: dict, actor_labels: dict[str, str]) -> dict:
+    """見送った概念の判断の記録（理由・誰・いつ）。内部 ID は出さない。"""
+    actor = _library_actor_label(entry.get("decided_by"), actor_labels) or "記録なし"
+    date = str(entry.get("decided_at") or "")[:10] or "日付の記録なし"
+    reason = str(entry.get("review_note") or "").strip() or "記録なし"
+    return {
+        "decision_line": ENTRY_DISMISSED_DECISION_LINE.format(actor=actor, date=date),
+        "decision_reason_line": ENTRY_DISMISSED_REASON_LINE.format(reason=reason),
+        "restore_note": ENTRY_DISMISSED_RESTORE_NOTE,
+    }
+
+
+def _is_stale_same_paper_proxy(entry: dict, links: list[dict], doc_display: dict) -> bool:
+    """文の近さで立った候補エントリのリンクが同じ論文の別の版どうしか（IK-0980）。"""
+    if str(entry.get("mapping_justification") or "") != library_schema.JUSTIFICATION_VECTOR:
+        return False
+    doc_ids = sorted({
+        str(l.get("instance_document_id") or "")
+        for l in links
+        if str(l.get("mapping_justification") or "") == library_schema.JUSTIFICATION_VECTOR
+    })
+    if len(doc_ids) < 2:
+        return False
+    try:
+        from core.library.identity_candidates import same_paper
+
+        first = (doc_display.get(doc_ids[0]) or {}).get("identity")
+        return bool(first) and all(
+            same_paper(first, (doc_display.get(d) or {}).get("identity") or {})
+            for d in doc_ids[1:]
+            if (doc_display.get(d) or {}).get("identity")
+        )
+    except Exception:  # noqa: BLE001 — 判定できなければ何も言わない
+        return False
 
 
 @router.get("/identity-candidates")
@@ -1298,26 +2017,68 @@ def list_identity_candidates(
     if include_dismissed:
         statuses.append(library_schema.REVIEW_STATUS_DISMISSED)
 
-    entries = _display_entries([
+    # IK-0982: 済み = エントリとリンクの両方が決まったこと。確定済みエントリでも未決のリンクを
+    # 持つものはキューに残す（エントリの確定でリンクの判断の置き場を閉じない）。
+    all_entries = [
         entry
         for entry in library_store.list_entries(
             domain_key=domain_key, include_retired=True, include_candidates=True
         )
         if entry.get("review_status") in statuses
+        or entry.get("review_status") == library_schema.REVIEW_STATUS_CONFIRMED
+    ]
+    candidate_links_by_entry = _identity_links.list_for_shared_parts([e["id"] for e in all_entries])
+    entries = _display_entries([
+        entry
+        for entry in all_entries
+        if entry.get("review_status") in statuses
+        or any(
+            str(link.get("status") or "") == "candidate"
+            for link in candidate_links_by_entry.get(entry["id"], [])
+        )
     ])
 
     _can_view = _document_access_checker(uid)
 
     # P3-R11: エントリ 1 件ごとに 1 クエリ（N+1）を投げず、まとめて 1 回で引く。
-    links_by_entry = _identity_links.list_for_shared_parts([entry["id"] for entry in entries])
+    links_by_entry = {e["id"]: candidate_links_by_entry.get(e["id"], []) for e in entries}
     live_components = _live_component_ids(links_by_entry)
     live_modules = _live_module_ids(links_by_entry)
 
     candidates: list[dict] = []
     hidden_unresolved_any = False
+    doc_display = _document_display(
+        [link.get("instance_document_id") for links in links_by_entry.values() for link in links]
+    )
+    component_facts = _component_display(links_by_entry)
+    # IK-1050: 見送った概念のカードに、見送った人・日付・理由を出す（名前はまとめて 1 回で引く）。
+    dismissed_actor_labels: dict[str, str] = {}
+    dismissed_actors = [
+        str(e.get("decided_by") or "")
+        for e in entries
+        if e.get("review_status") in (
+            library_schema.REVIEW_STATUS_DISMISSED, library_schema.REVIEW_STATUS_CONFIRMED,
+        ) and e.get("decided_by")
+    ]
+    if dismissed_actors:
+        try:
+            from core.atlas_review_display import fetch_actor_labels
+
+            _session = get_session()
+            try:
+                dismissed_actor_labels = fetch_actor_labels(_session, dismissed_actors)
+            finally:
+                _session.close()
+        except Exception:  # noqa: BLE001 — 名前が引けなくても理由と日付は出す
+            logger.debug("dismissed entry actor labels unavailable", exc_info=True)
     for entry in entries:
+        entry_confirmed = entry.get("review_status") == library_schema.REVIEW_STATUS_CONFIRMED
         links = links_by_entry.get(entry["id"], [])
+        if entry_confirmed:
+            # 確定済みのエントリは未決のリンクだけを並べる（残っている判断だけを見せる）。
+            links = [l for l in links if str(l.get("status") or "") == "candidate"]
         visible: list[dict] = []
+        unresolved: list[dict] = []
         hidden = 0
         hidden_unresolved = False
         for link in links:
@@ -1329,47 +2090,87 @@ def list_identity_candidates(
                 # P3-R9: live に解決できない component へのリンクは教員が判断できない
                 # （消えた要素の名前だけが残る）。落として事実文で報告する。
                 hidden_unresolved = True
+                unresolved.append(link)
                 continue
             visible.append(link)
         if hidden_unresolved:
             hidden_unresolved_any = True
-        titles = _document_titles([l.get("instance_document_id") for l in visible])
         supporting_titles: list[str] = []
         items: list[dict] = []
         for link in visible:
             document_id = str(link.get("instance_document_id") or "")
-            title = titles.get(document_id, "")
+            display = doc_display.get(document_id) or {}
+            title = display.get("title", "")
             if title and title not in supporting_titles:
                 supporting_titles.append(title)
             items.append(
-                {
-                    "link_id": link["id"],
-                    "instance": {
-                        "element_type": link.get("instance_element_type") or "",
-                        "element_id": link.get("instance_element_id") or "",
-                        "document_id": document_id,
-                    },
-                    "document_title": title,
-                    "local_expression": link.get("local_expression") or {},
-                    "status": link.get("status") or "",
-                    "mapping_justification": link.get("mapping_justification"),
-                }
+                _identity_candidate_item(
+                    link,
+                    entry=entry,
+                    document_id=document_id,
+                    display=display,
+                    component=component_facts.get(str(link.get("instance_element_id") or "")),
+                )
             )
         if not items and hidden == 0 and not hidden_unresolved and not include_dismissed:
             # リンクがまだ 1 本も無い候補（entry だけ先にできた状態）は出さない
             # （教員が判断する材料が無いため）。
             continue
+        if entry_confirmed and not items:
+            # 確定済みエントリの未決リンクが全部見えない（閲覧不可・解決不能）なら出さない。
+            continue
+        entry_out = {
+            "id": entry["id"],
+            "name": entry["name"],
+            "entry_type": entry["entry_type"],
+            "review_status": entry["review_status"],
+            "domain_key": entry["domain_key"],
+            "domain_label": entry.get("domain_label") or "",
+            "mapping_justification": entry.get("mapping_justification"),
+        }
+        if entry_confirmed:
+            entry_out["links_pending_note"] = ENTRY_LINKS_PENDING_NOTE
+            # IK-1050 の残り: 確定済みの概念にも、確定した人・日付（記録があるときだけ）。
+            if entry.get("decided_by"):
+                confirmed_line = library_schema.relation_decision_line(
+                    library_schema.REVIEW_STATUS_CONFIRMED,
+                    _library_actor_label(entry.get("decided_by"), dismissed_actor_labels),
+                    entry.get("decided_at"),
+                )
+                if confirmed_line:
+                    entry_out["decision_line"] = confirmed_line
+            else:
+                # IK-1050 の残り（第 9 波）: 記録の無い旧い確定も黙らない（詳細と同じ文）。
+                entry_out["decision_line"] = library_schema.ENTRY_CONFIRMED_UNRECORDED_LINE
+        elif entry.get("review_status") == library_schema.REVIEW_STATUS_CANDIDATE:
+            entry_out["confirm_question"] = ENTRY_CONFIRM_QUESTION.format(name=entry["name"])
+        elif entry.get("review_status") == library_schema.REVIEW_STATUS_DISMISSED:
+            entry_out.update(_dismissed_entry_decision(entry, dismissed_actor_labels))
+        # IK-1076: 判断の対象にできるか（詳細と同じ述語 — 見送った概念の行は判断しない。
+        # 置き換わった部品の行は上で落としてある）。
+        for it in items:
+            note = _identity_links.link_undecidable_note({}, entry_review_status=entry.get("review_status"))
+            if note:  # 判断できる行にはキーを足さない（既存の DTO の形を保つ）
+                it["decidable"] = False
+                it["undecidable_note"] = note
+        # IK-1020: 旧規則の判定はリンク全体（再解析で置き換わって隠した行も含む）で行う。
+        if _is_stale_same_paper_proxy(entry, visible + unresolved, doc_display):
+            entry_out["stale_rule_note"] = STALE_SAME_PAPER_PROXY_NOTE
+            # IK-0980: 行の根拠の文も「別の論文の…」と言わない（保存値は recorded_reason）。
+            for it in items:
+                reworded = _identity_links.reworded_same_paper_reason(
+                    it.get("reason"), partner_is_same_paper=True
+                )
+                if reworded:
+                    it["recorded_reason"] = str(it.get("reason") or "")
+                    it["reason"] = reworded
+        # IK-1026 / IK-1020 / IK-0953: 対の相手を名指しした問い・片側が置き換わった事実・判断の印。
+        _attach_identity_pair_facts(items, entry=entry, unresolved=bool(unresolved))
+        if unresolved and items:
+            entry_out["partner_replaced_note"] = _identity_links.PARTNER_REPLACED_NOTE
         candidates.append(
             {
-                "entry": {
-                    "id": entry["id"],
-                    "name": entry["name"],
-                    "entry_type": entry["entry_type"],
-                    "review_status": entry["review_status"],
-                    "domain_key": entry["domain_key"],
-                    "domain_label": entry.get("domain_label") or "",
-                    "mapping_justification": entry.get("mapping_justification"),
-                },
+                "entry": entry_out,
                 "links": items,
                 "supporting_titles": supporting_titles,
                 "hidden_count": hidden,
@@ -1392,6 +2193,8 @@ def list_identity_candidates(
         from core.library.identity_candidates import SAME_PAPER_VERSIONS_NOTE
 
         facts.append(SAME_PAPER_VERSIONS_NOTE)
+        # IK-0957: 「探して無かった」と「まだ探していない」を言い分ける。
+        facts.extend(_identity_rules_scan_facts(uid))
     if hidden_unresolved_any:
         # P3-R9: 件数は出さない（KR6）。「何が起きたか」だけを事実文で書く。
         facts.append(

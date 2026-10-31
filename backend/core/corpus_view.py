@@ -41,7 +41,9 @@ from core import atlas_correspondence
 from core import atlas_state
 from core import atlas_store
 from core import document_refs
+from core import label_vocab
 from core.atlas_gaps import schema as gap_schema
+from core.atlas_gaps import store as gap_store
 from core.landscape import schema as landscape_schema
 
 logger = logging.getLogger(__name__)
@@ -372,7 +374,8 @@ def _visible_gap_signals(session: Any, domain_key: str, doc_ids: Sequence[str]) 
             """
             SELECT s.parent_region_id,
                    COALESCE(NULLIF(d.title, ''), NULLIF(d.filename, ''), '') AS title,
-                   s.document_id::text
+                   s.document_id::text,
+                   s.normalized_label
               FROM landscape_gap_signals s
               JOIN documents d ON d.id = s.document_id
              WHERE s.domain_key = :domain_key
@@ -395,6 +398,7 @@ def _build_fringe(
     *,
     representatives: dict[str, str] | None = None,
     rep_titles: dict[str, str] | None = None,
+    resolved_labels: set[str] | None = None,
 ) -> list[dict]:
     """信号行 → 領域単位の縁（``[{region_id, region_label, fact_line, paper_titles}]``）。
 
@@ -405,7 +409,13 @@ def _build_fringe(
     代表の取り込み（読める題名を持つもの）の題名で列挙する（IK-0846 第 2 周の残存。
     地図の配置・論文リストと同じ ``_domain_paper_representatives`` の代表を使う）。
     行の 3 列目（``document_id``）が無い旧形の行は題名の文字列で畳む（従来どおり）。
+
+    IK-0990（第 25 周 第 5 波）: 信号の主題（4 列目 ``normalized_label``）が現行凍結版で
+    解消済み（``resolved_labels`` = 教員側の候補キューと同じ判定
+    :func:`core.atlas_gaps.store.resolved_label_set`）なら縁に出さない。取り込み・凍結の後も
+    「まだ地図に置かれていない主題」と言い続けないため。信号の行は DB に残る（P4）。
     """
+    resolved = resolved_labels or set()
     reps = representatives or {}
     titles_of = rep_titles or {}
     grouped: dict[str, list[str]] = {}
@@ -413,6 +423,9 @@ def _build_fringe(
     for row in rows or ():
         region_id = _clean(row[0])
         if region_id not in regions:
+            continue
+        signal_label = gap_schema.normalize_label(_clean(row[3])) if len(row) > 3 else ""
+        if signal_label and signal_label in resolved:
             continue
         raw_doc_id = _clean(row[2]) if len(row) > 2 else ""
         paper_id = reps.get(raw_doc_id, raw_doc_id) if raw_doc_id else ""
@@ -537,12 +550,16 @@ def build_corpus_landscape(
     return {
         "domain_key": key,
         "skeleton_version": skeleton_version,
+        # IK-0942（第 25 周 第 7 波）: 海の画面も、学習者の地図・出典タブと同じ呼び方で版を言う。
+        # 版が空なら空文字（版を捏造しない）。正本は label_vocab.atlas_version_label。
+        "skeleton_version_label": label_vocab.atlas_version_label(skeleton_version),
         "placements": placements,
         "fringe": _build_fringe(
             _visible_gap_signals(session, key, doc_ids),
             regions,
             representatives=representatives,
             rep_titles=rep_titles,
+            resolved_labels=gap_store.resolved_label_set(skeleton),
         ),
         "outer": _build_outer(session, key),
         # 読み替えできなかった配置の事実文（縁の事実文と同じ作法で1行ずつ・件数なし）。

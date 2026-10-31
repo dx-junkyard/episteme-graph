@@ -26,10 +26,12 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 from core.display_projection import contains_internal_id as _display_internal_id
 from core.element_vocab import claim_type_label, theory_stage_key, theory_stage_label
+from core.label_vocab import ATLAS_PILL_NOTES, learner_atlas_wording
 from core.learner_context_common import contains_internal_id, is_internal_id_label, safe_text
 from core.simulation_bridge.schema import FACT_NOT_VERIFICATION, RUN_STATUS_SUCCEEDED
 from core.text_excerpt import excerpt as _excerpt
@@ -39,10 +41,26 @@ from ..registry import register
 from ..schema import (
     EXPLANATION_STATUS_APPROVED_LABEL,
     EXPLANATION_STATUS_CANDIDATE_LABEL,
+    LEARNER_EXPLANATION_SECTION_LABEL,
     LEARNING_DISCUSS_SCOPE_LABELS,
     LEARNING_ELEMENT_TYPE_LABELS,
     LEARNING_ELEMENT_TYPES,
     LEARNING_PERSONAL_MAP_SCREEN_FACT,
+    LEARNING_PERSONAL_MAP_CENTER_TEMPLATE,
+    LEARNING_PERSONAL_MAP_DOWNSTREAM_TEMPLATE,
+    LEARNING_PERSONAL_MAP_FACT_LINE_TEMPLATE,
+    LEARNING_PERSONAL_MAP_RANGE_DOCUMENT_TEMPLATE,
+    LEARNING_PERSONAL_MAP_RANGE_FACT,
+    LEARNING_PERSONAL_MAP_TOUCHED_MARK,
+    LEARNING_PERSONAL_MAP_UPSTREAM_TEMPLATE,
+    MAX_PERSONAL_MAP_DOCUMENTS,
+    MAX_PERSONAL_MAP_DTO_FACTS,
+    MAX_PERSONAL_MAP_NODES,
+    LEARNING_ATLAS_NODE_FACT_TEMPLATE,
+    LEARNING_ATLAS_NO_PAPERS_FACT,
+    LEARNING_ATLAS_PANEL_LINE_TEMPLATE,
+    LEARNING_ATLAS_PAPERS_TEMPLATE,
+    LEARNING_ATLAS_PILL_NOTE_TEMPLATE,
     LEARNING_VIEW_MODE_LABELS,
     MAX_LEARNING_CLAIM_EXCERPT_CHARS,
     MAX_LEARNING_ELEMENT_FACTS,
@@ -174,6 +192,15 @@ def _shared_part_facts(context: Mapping[str, Any]) -> list[str]:
     return facts
 
 
+#: 第 25 周 第 10 波（製品頭脳 B 4315・IK-0755 の AI 側）: 解析が英語で生成した文（役割・要約・前提）は
+#: 保存データのままなので、出所を添えて渡す（学習者には日本語で言い換えさせる。文を書き換えない）。
+GENERATED_ENGLISH_NOTE = "（この文は論文の解析が英語で生成したものです。学習者には日本語で言い換えて伝えてください）"
+
+
+def _generated_english_note(text: str) -> str:
+    return GENERATED_ENGLISH_NOTE if _is_english_sentence(text) else ""
+
+
 def _component_facts(context: Mapping[str, Any]) -> list[str]:
     instance = _dict(_dict(context).get("instance"))
     component = _dict(instance.get("component"))
@@ -192,11 +219,11 @@ def _component_facts(context: Mapping[str, Any]) -> list[str]:
     # 論文の流れの中での役割。引けなければ要約で代替する（どちらも無ければ行ごと省く）。
     role = _safe(in_paper.get("narrative_role"), MAX_TEXT_CHARS)
     if role:
-        facts.append(f"「{label}」の論文の流れの中での役割: {role}")
+        facts.append(f"「{label}」の論文の流れの中での役割{_generated_english_note(role)}: {role}")
     else:
         summary = _safe(component.get("summary"), MAX_TEXT_CHARS)
         if summary:
-            facts.append(f"「{label}」の要約: {summary}")
+            facts.append(f"「{label}」の要約{_generated_english_note(summary)}: {summary}")
 
     # IK-0920: 教員が確定した共通部品（上限で切られないよう要約の直後に置く）。
     facts.extend(_shared_part_facts(context))
@@ -211,7 +238,11 @@ def _component_facts(context: Mapping[str, Any]) -> list[str]:
     if texts:
         shown, truncated = _capped(texts, MAX_LEARNING_SUPPORT_ITEMS)
         tail = f"{_quoted(shown)}・{MORE_ITEMS_MARK}" if truncated else _quoted(shown)
-        facts.append(f"「{label}」が前提にしているのは{tail}です")
+        english = any(_is_english_sentence(text) for text in shown)
+        facts.append(
+            f"「{label}」が前提にしているのは{tail}です"
+            + (GENERATED_ENGLISH_NOTE if english else "")
+        )
 
     equations: list[str] = []
     for equation in _list(supports.get("equations")):
@@ -249,12 +280,24 @@ def _component_facts(context: Mapping[str, Any]) -> list[str]:
         # 「候補（未承認）」を付ける（未承認を承認済みと言わない側の誤りを防ぐため、
         # ``candidate`` / ``pending`` / ``draft`` は候補扱い）。
         status = _text(explanation.get("status") or explanation.get("review_status"))
-        status_label = (
-            EXPLANATION_STATUS_CANDIDATE_LABEL
-            if status in ("candidate", "pending", "draft", "review_required")
-            else EXPLANATION_STATUS_APPROVED_LABEL
+        if status in ("candidate", "pending", "draft", "review_required"):
+            facts.append(f"この要素の説明（{EXPLANATION_STATUS_CANDIDATE_LABEL}）: {body}")
+        else:
+            # 第 25 周 第 5 波（IK-0986）: 学習画面の区画名（「教員の説明」）で指す。
+            facts.append(
+                f"学習者の画面に出ているこの要素の「{LEARNER_EXPLANATION_SECTION_LABEL}」"
+                f"（{EXPLANATION_STATUS_APPROVED_LABEL}）: {body}"
+            )
+            # IK-1064: 説明の出所（誰が書いたか）を問われたときに答えられるよう、学習者の画面に
+            # 出ている書いた教員の名前（本人が登録した名前だけ）を添える。標準の説明は名前なし。
+            author = _safe(explanation.get("author_name"), 40)
+            if author and str(explanation.get("kind") or "") != "standard":
+                facts.append(f"この「{LEARNER_EXPLANATION_SECTION_LABEL}」を書いた教員: {author}")
+    elif instance:
+        # IK-1064: 説明が無いことも画面に出ている事実（「承認済みの説明がまだありません」）。
+        facts.append(
+            f"学習者の画面のこの要素には、承認済みの「{LEARNER_EXPLANATION_SECTION_LABEL}」はまだありません。"
         )
-        facts.append(f"この要素の説明（{status_label}）: {body}")
 
     return facts
 
@@ -308,6 +351,21 @@ def _figure_facts(item: Mapping[str, Any]) -> list[str]:
     return []
 
 
+def _superseded_component_facts(context: Mapping[str, Any], item: Mapping[str, Any]) -> list[str]:
+    """後継の決まらない凍結の ⚓（IK-1075）。名前と、パネルと同じ事実文（``frozen_label_line``）。"""
+    row = _dict(context)
+    label = _safe(row.get("frozen_label"), MAX_TEXT_CHARS) or _safe(
+        _dict(item).get("title"), MAX_TEXT_CHARS
+    )
+    facts: list[str] = []
+    if label and not contains_internal_id(label):
+        facts.append(f"学習者が選んでいるのは論理要素「{label}」です")
+    line = _safe(row.get("frozen_label_line"), MAX_TEXT_CHARS) or _safe(row.get("note"), MAX_TEXT_CHARS)
+    if line and not contains_internal_id(line):
+        facts.append(line.rstrip("。"))
+    return facts[:MAX_LEARNING_ELEMENT_FACTS]
+
+
 def resolve_element(ctx: ScreenContext, sources: Mapping[str, Any]) -> list[str]:
     """選択中のチップ1件を事実文にする（§11.3 kind ``element``）。"""
     element_type, payload = _selected_element(ctx, sources)
@@ -316,6 +374,10 @@ def resolve_element(ctx: ScreenContext, sources: Mapping[str, Any]) -> list[str]
     context = _dict(payload.get("context"))
     item = _dict(payload.get("item"))
 
+    if element_type == "component" and context.get("available") is False:
+        # IK-1075: 凍結の ⚓ の後継が決まらない（パネルと同じ解決点の結果）。別の部品の役割・式・
+        # 検証を語らせないため、凍結時の名前と画面と同じ事実文だけを渡す（題名の縮退にも落とさない）。
+        return _superseded_component_facts(context, item)
     if element_type == "component":
         facts = _component_facts(context)
     elif element_type == "figure":
@@ -431,7 +493,9 @@ def resolve_placement(ctx: ScreenContext, sources: Mapping[str, Any]) -> list[st
         fact = f"{subject}は、{map_name}の{place}に置かれています"
         if provenance:
             fact += f"（{provenance}）"
-        facts.append(fact)
+        # 第 25 周 第 9 波: 観点（perspective）だけが違う配置は同じ文になる — 同じ事実を 2 行渡さない。
+        if fact not in facts:
+            facts.append(fact)
     return facts
 
 
@@ -470,6 +534,141 @@ def resolve_view(ctx: ScreenContext, sources: Mapping[str, Any]) -> list[str]:
     # （AI が地図に無い「記帳の条件」へ案内しない — 画面の案内は画面の事実に従わせる）。
     if ctx.view.get("personal_map_seen") is True:
         facts.append(LEARNING_PERSONAL_MAP_SCREEN_FACT + "。")
+    facts.extend(_atlas_node_facts(ctx.view, sources))
+    facts.extend(_personal_map_node_facts(ctx.selection, sources))
+    return facts
+
+
+def _personal_map_node_label(node: Mapping[str, Any], *, with_touched: bool = False) -> str:
+    label = _safe(node.get("label"), 40)
+    if not label or contains_internal_id(label) or _display_internal_id(label):
+        return ""
+    text = f"『{label}』"
+    verification = _dict(node.get("verification"))
+    ver_label = _safe(verification.get("label"), 40)
+    if ver_label:
+        scope = _safe(verification.get("scope_line"), MAX_TEXT_CHARS)
+        text += f"（{ver_label}" + (f"・記録された条件: {scope.rstrip('。')}" if scope else "") + "）"
+    if with_touched and node.get("touched") is True:
+        text += LEARNING_PERSONAL_MAP_TOUCHED_MARK
+    return text
+
+
+def _personal_map_node_facts(selection: Mapping[str, Any], sources: Mapping[str, Any] | None) -> list[str]:
+    """「わたしの地図」で見ている場所の事実（第 25 周 第 10 波・IK-1113）。
+
+    材料は route が本人ゲート・閲覧可否ゲートの内側で引いた近傍関係ビュー（``sources["personal_map"]``）で、
+    画面の ``selection.personal_map_node_id`` と一致するときだけ使う。範囲ビューは範囲の論文と理論構成、
+    点ビューは中心と前後 1 階層。検証の札と記録された条件は地図の札と同じ学習者の語（数値なし）。
+    """
+    node_id = _text(_dict(selection).get("personal_map_node_id"))
+    data = _dict(_dict(sources).get("personal_map"))
+    if not node_id or _text(data.get("node_id")) != node_id:
+        return []
+    view = _dict(data.get("view"))
+    if view.get("available") is not True:
+        return []
+    facts: list[str] = []
+    center = _dict(view.get("center"))
+    if view.get("mode") == "range" or not center:
+        facts.append(LEARNING_PERSONAL_MAP_RANGE_FACT + "。")
+        for document in _list(view.get("range_documents"))[:MAX_PERSONAL_MAP_DOCUMENTS]:
+            row = _dict(document)
+            title = _safe(row.get("title"), MAX_TEXT_CHARS)
+            if not title or contains_internal_id(title):
+                continue
+            labels = [
+                text for text in (
+                    _personal_map_node_label(_dict(n), with_touched=True)
+                    for n in _list(row.get("nodes"))[:MAX_PERSONAL_MAP_NODES]
+                ) if text
+            ]
+            if labels:
+                facts.append(
+                    LEARNING_PERSONAL_MAP_RANGE_DOCUMENT_TEMPLATE.format(title=title, nodes="、".join(labels)) + "。"
+                )
+    else:
+        center_text = _personal_map_node_label(center)
+        if not center_text:
+            return []
+        facts.append(LEARNING_PERSONAL_MAP_CENTER_TEMPLATE.format(label=center_text) + "。")
+        for key, template in (("upstream", LEARNING_PERSONAL_MAP_UPSTREAM_TEMPLATE),
+                              ("downstream", LEARNING_PERSONAL_MAP_DOWNSTREAM_TEMPLATE)):
+            labels = [
+                text for text in (
+                    _personal_map_node_label(_dict(n)) for n in _list(view.get(key))[:MAX_PERSONAL_MAP_NODES]
+                ) if text
+            ]
+            if labels:
+                facts.append(template.format(labels="、".join(labels)) + "。")
+    for line in _list(view.get("facts"))[:MAX_PERSONAL_MAP_DTO_FACTS]:
+        text = _safe(line, MAX_TEXT_CHARS)
+        if text and not contains_internal_id(text):
+            facts.append(LEARNING_PERSONAL_MAP_FACT_LINE_TEMPLATE.format(line=text.rstrip("。")) + "。")
+    return facts
+
+
+def resolve_selected_atlas_node(ctx: ScreenContext, sources: Mapping[str, Any]) -> list[str]:
+    """利用者が分野の地図で選んだ場所の事実だけ（IK-1049・2026-10-28 第 7 波）。
+
+    音声・casual の往復は表示モード・台帳・位置づけを渡さない（§11.5）が、利用者が**明示に
+    選んだもの**（地図の場所の名前と札の文・詳細パネルの検証と承認の行・置かれた論文の題名）は
+    要素と同じく渡す（2026-10-28 オーナー判断 = 「選択」は要素に限らず明示の選択全般）。
+    推定は増やさない — 画面が申告した ``view.atlas_node_*`` と、route が権限ゲート内で引いた
+    ``sources["atlas_node"]`` だけを読む。kind としては登録しない（登録 kind 集合は不変）。
+    """
+    # 第 10 波（IK-1113）: わたしの地図で見ている場所も利用者の明示の選択（地図の場所と同じ扱い）。
+    return _atlas_node_facts(ctx.view, sources) + _personal_map_node_facts(ctx.selection, sources)
+
+
+def _atlas_node_facts(view: Mapping[str, Any], sources: Mapping[str, Any] | None = None) -> list[str]:
+    """分野の地図で最後に開いた場所の事実 1〜2 行（IK-0907 第 4 周）。
+
+    名前は画面の題名（内部 ID・TeX は出さない）、札の意味は ``label_vocab.ATLAS_PILL_NOTES``
+    の正本（詳細パネルと同じ文）を表示状態 → 台帳の状態の順で引く。どちらも引けなければ出さない。
+    """
+    label = _safe(view.get("atlas_node_label"), 40)
+    if not label or contains_internal_id(label):
+        return []
+    facts = [LEARNING_ATLAS_NODE_FACT_TEMPLATE.format(label=label) + "。"]
+    note = ATLAS_PILL_NOTES.get(_text(view.get("atlas_node_status"))) or ATLAS_PILL_NOTES.get(
+        _text(view.get("atlas_node_ledger_status"))
+    )
+    if note:
+        # IK-1059 残り（第 9 波）: 札の説明もパネル（routes/atlas_view.py）と同じ学習者の語に読み替える
+        # （「…記録は台帳にありません」を AI の材料に入れない — 英語の回答で ledger と訳される）。
+        facts.append(LEARNING_ATLAS_PILL_NOTE_TEMPLATE.format(note=learner_atlas_wording(note)))
+    facts.extend(_atlas_node_panel_facts(view, sources))
+    return facts
+
+
+def _atlas_node_panel_facts(view: Mapping[str, Any], sources: Mapping[str, Any] | None) -> list[str]:
+    """同じ場所の詳細パネルの検証・承認の行と、そこに置かれた論文（IK-1031）。
+
+    材料はルートが権限ゲート内で引いた ``sources["atlas_node"]``（画面の ``view.atlas_node_id``
+    と一致するときだけ使う）。文はサーバの状態キャッシュの行そのまま・題名は最大 3。
+    """
+    node = _dict(_dict(sources).get("atlas_node"))
+    node_id = _text(view.get("atlas_node_id"))
+    if not node or not node_id or _text(node.get("node_id")) != node_id:
+        return []
+    facts: list[str] = []
+    for key in ("verify_line", "endorse_line"):
+        line = _safe(node.get(key), MAX_TEXT_CHARS)
+        if line and not contains_internal_id(line):
+            facts.append(LEARNING_ATLAS_PANEL_LINE_TEMPLATE.format(line=line.rstrip("。")) + "。")
+    papers = []
+    for paper in _list(node.get("papers"))[:3]:
+        row = _dict(paper)
+        title = _safe(row.get("title"), MAX_TEXT_CHARS)
+        if not title or contains_internal_id(title):
+            continue
+        provenance = _safe(row.get("provenance_label"), MAX_TEXT_CHARS)
+        papers.append(f"『{title}』" + (f"（{provenance}）" if provenance else ""))
+    if papers:
+        facts.append(LEARNING_ATLAS_PAPERS_TEMPLATE.format(titles="、".join(papers)) + "。")
+    elif node.get("papers_resolved") is True:
+        facts.append(LEARNING_ATLAS_NO_PAPERS_FACT + "。")
     return facts
 
 
@@ -566,9 +765,28 @@ def _retrieved_node_fact(claim: Mapping[str, Any]) -> str:
     detail_source = _text(node.get("display_label"), MAX_TEXT_CHARS) or raw_label
     detail = detail_source.split(":", 1)[1].strip() if ":" in detail_source else ""
     detail = _safe(detail, MAX_TEXT_CHARS)
+    # 第 25 周 第 6 波: 理論対象が英語の文（解析層の生成した説明。日本語を含まず語が並ぶ）なら
+    # 括弧ごと添えない。上限で切ると「…as a conti」のような途中切りの英語が学習者に届く
+    # （IK-0571 と同じ根 — 英語の生成文を学習者向けの事実文にしない）。短い対象名は残す。
+    if detail and _is_english_sentence(detail):
+        detail = ""
     if detail and detail.lower() != raw_label.lower():
         fact += f"（{detail}）"
     return fact
+
+
+_JAPANESE_CHAR_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]")
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z][A-Za-z'\-]*")
+#: 英語の文とみなす語数の下限（短い対象名「TOV equations」は残す）。
+_ENGLISH_SENTENCE_MIN_WORDS = 4
+
+
+def _is_english_sentence(text: str) -> bool:
+    """日本語を含まず英単語が並ぶ（文の形の）文字列か。数式（``$``）を含むものは対象外。"""
+    value = str(text or "")
+    if not value or "$" in value or _JAPANESE_CHAR_RE.search(value):
+        return False
+    return len(_ENGLISH_WORD_RE.findall(value)) >= _ENGLISH_SENTENCE_MIN_WORDS
 
 
 def resolve_retrieved_structure(

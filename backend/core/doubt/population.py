@@ -10,7 +10,10 @@ claim チェーンが「理論の構造ではない」という判断は理論�
 外す目印）。D層はその判定を**そのまま**通す（判定を二重に持たない — canonical_source）。
 
 外したことは一覧に事実文 1 行で残す（情報を落とさない — 行は台帳に残り、詳細は開ける）。
-依存の伝播（反実仮想・負荷・支持線）は従来どおり全ノードで計算する（ここは表示の母集合だけ）。
+依存の伝播のうち負荷（load）と反実仮想は、2026-10-27 第 6 波（IK-1030・オーナー判断）から
+同じ判定で claim チェーンの辺（主張の出現順の並び）を依存に数えない
+（``claim_sequence_ids_for_payload`` → ``dependency.build_dependency_graph(exclude_claim_sequence_edges=True)``）。
+支持線・ゼミ前ブリーフ・反証条件の入力は従来どおり全ノード・全辺で計算する（別に決める）。
 FastAPI / LLM 非 import。失敗は fail-soft（外さない = 従来どおり）。
 """
 
@@ -40,6 +43,50 @@ def _graph_payload(raw: Any) -> dict:
         except Exception:  # noqa: BLE001
             return {}
     return {}
+
+
+def claim_sequence_ids_for_payload(session: Any, document_id: str, payload: Any) -> set[str]:
+    """1 論文のグラフ payload について claim チェーン由来ノードの集合を返す（IK-1030）。
+
+    判定は ``core/theory_modules/builder.py::claim_sequence_node_ids`` をそのまま通す
+    （一覧の母集合 = IK-0933 と、依存の広がり・反実仮想の辺の採用 = IK-1030 が同じ正本）。
+    成果物の読みは呼び出し側のトランザクションを壊さないよう、可能ならセーブポイントの中で行う。
+    判定できないときは空集合（= 外さない・従来どおり）。
+    """
+    doc = str(document_id or "").strip().lower()
+    nodes = [n for n in (_graph_payload(payload).get("nodes") or []) if isinstance(n, dict)]
+    if not doc or not nodes:
+        return set()
+    try:
+        from core.document_pipeline.persistence import document_run_artifacts
+        from core.theory_modules.builder import claim_sequence_node_ids
+
+        nested = None
+        begin_nested = getattr(session, "begin_nested", None)
+        if callable(begin_nested):
+            try:
+                nested = begin_nested()
+            except Exception:  # noqa: BLE001 — セーブポイントが張れない = そのまま読む
+                nested = None
+        try:
+            artifacts = document_run_artifacts(doc, session=session) or {}
+        except Exception:  # noqa: BLE001
+            if nested is not None:
+                try:
+                    nested.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
+        else:
+            if nested is not None:
+                try:
+                    nested.commit()
+                except Exception:  # noqa: BLE001
+                    pass
+        return set(claim_sequence_node_ids(graph_json={"nodes": nodes}, artifacts=artifacts))
+    except Exception:  # noqa: BLE001 — 判定できない = 外さない（従来どおり）
+        logger.debug("claim sequence ids unavailable for %s", doc, exc_info=True)
+        return set()
 
 
 class ClaimChainExclusion:
@@ -99,4 +146,4 @@ class ClaimChainExclusion:
         return hit
 
 
-__all__ = ["CLAIM_CHAIN_EXCLUDED_NOTE", "ClaimChainExclusion"]
+__all__ = ["CLAIM_CHAIN_EXCLUDED_NOTE", "ClaimChainExclusion", "claim_sequence_ids_for_payload"]

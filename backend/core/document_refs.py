@@ -314,3 +314,171 @@ def representative_document_ids(entries: Iterable[Mapping[str, Any]]) -> dict[st
         for _, doc_id in members:
             out[doc_id] = representative
     return out
+
+
+# ---------------------------------------------------------------------------
+# 論文の呼び方（IK-0664・第 25 周 第 7 波）: 題名を正本・無ければ arXiv 番号
+# ---------------------------------------------------------------------------
+
+
+def title_is_readable(title: Any) -> bool:
+    """読める題名か（空でも arXiv 番号そのものでもない）。"""
+    text = str(title or "").strip()
+    return bool(text) and not title_is_arxiv_number(text)
+
+
+def choose_paper_titles(
+    entries: Iterable[Mapping[str, Any]],
+    *,
+    siblings: Iterable[Mapping[str, Any]] = (),
+    cached_titles: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """``document_id -> 画面に出す論文の呼び方`` を返す（純関数・決定論。IK-0664）。
+
+    順: ①その取り込み自身の読める題名 → ②同じ論文（:func:`paper_identity_key` が一致）の
+    別の取り込み（``siblings`` — 呼び出し側が閲覧できると確かめた行だけ）の読める題名
+    （``document_id`` 昇順の先頭）→ ③arXiv メタデータの写し（``cached_titles`` —
+    version 抜き arXiv ID → 題名。外部事実のキャッシュの読みだけ）→ ④保存されている値
+    （arXiv 番号・ファイル名。無ければ空 — 題名を捏造しない）。
+
+    面ごとに題名と arXiv 番号が混ざらないよう、論文の一覧・地図の「論文の位置」・出典タブが
+    同じ規則で呼ぶ（論文の海の代表選出 :func:`representative_document_ids` と同じ読める判定）。
+    """
+    by_key: dict[str, list[tuple[str, str]]] = {}
+    for sib in siblings or ():
+        doc_id = str(sib.get("document_id") or "").strip()
+        title = str(sib.get("title") or "").strip()
+        if not doc_id or not title_is_readable(title):
+            continue
+        key = paper_identity_key(
+            doc_id,
+            source_url=sib.get("source_url"),
+            filename=sib.get("filename"),
+            title=title,
+        )
+        if key.startswith(PAPER_KEY_ARXIV_PREFIX):
+            by_key.setdefault(key, []).append((doc_id, title))
+    cache = cached_titles or {}
+    out: dict[str, str] = {}
+    for entry in entries or ():
+        doc_id = str(entry.get("document_id") or "").strip()
+        if not doc_id:
+            continue
+        own = str(entry.get("title") or "").strip()
+        if title_is_readable(own):
+            out[doc_id] = own
+            continue
+        key = paper_identity_key(
+            doc_id,
+            source_url=entry.get("source_url"),
+            filename=entry.get("filename"),
+            title=own,
+        )
+        chosen = ""
+        if key.startswith(PAPER_KEY_ARXIV_PREFIX):
+            candidates = sorted(by_key.get(key) or [])
+            if candidates:
+                chosen = candidates[0][1]
+            else:
+                cached = str(cache.get(key[len(PAPER_KEY_ARXIV_PREFIX):]) or "").strip()
+                if title_is_readable(cached):
+                    chosen = cached
+        out[doc_id] = chosen or own or str(entry.get("filename") or "").strip()
+    return out
+
+
+def _paper_rows(session: Any, ids: list[str]) -> list[dict[str, str]]:
+    if not ids:
+        return []
+    rows = session.execute(
+        sa_text(
+            """
+            SELECT id::text, COALESCE(title, ''), COALESCE(source_url, ''), COALESCE(filename, '')
+              FROM documents
+             WHERE id::text = ANY(:ids)
+            """
+        ),
+        {"ids": ids},
+    ).fetchall()
+    return [
+        {
+            "document_id": str(r[0]),
+            "title": str(r[1] or ""),
+            "source_url": str(r[2] or ""),
+            "filename": str(r[3] or ""),
+        }
+        for r in rows
+    ]
+
+
+def resolve_paper_titles(
+    session: Any,
+    document_ids: Iterable[Any] | None,
+    *,
+    sibling_ids: Iterable[Any] | None = None,
+) -> dict[str, str]:
+    """``document_id -> 論文の呼び方``（:func:`choose_paper_titles` の規則・IK-0664）。
+
+    ``sibling_ids`` は閲覧できる document の集合（呼び出し側が可視性を解決済み）。読める題名が
+    無い取り込みだけ、同じ論文の別の取り込みと arXiv メタデータの写しを引く（外部 API は
+    呼ばない）。失敗は fail-soft（取れた範囲の題名・取れなければ空 dict）。
+    """
+    ids = sorted({str(d).strip() for d in (document_ids or []) if str(d or "").strip()})
+    if not ids:
+        return {}
+    try:
+        entries = _paper_rows(session, ids)
+    except Exception:  # noqa: BLE001
+        _safe_rollback(session)
+        return {}
+    unreadable = [e for e in entries if not title_is_readable(e["title"])]
+    if not unreadable:
+        return {e["document_id"]: e["title"].strip() for e in entries}
+    siblings: list[dict[str, str]] = []
+    sib_ids = sorted(
+        {str(d).strip() for d in (sibling_ids or []) if str(d or "").strip()} - set(ids)
+    )
+    try:
+        siblings = _paper_rows(session, sib_ids)
+    except Exception:  # noqa: BLE001
+        _safe_rollback(session)
+        siblings = []
+    arxiv_ids = sorted(
+        {
+            key[len(PAPER_KEY_ARXIV_PREFIX):]
+            for key in (
+                paper_identity_key(
+                    e["document_id"],
+                    source_url=e["source_url"],
+                    filename=e["filename"],
+                    title=e["title"],
+                )
+                for e in unreadable
+            )
+            if key.startswith(PAPER_KEY_ARXIV_PREFIX)
+        }
+    )
+    cached: dict[str, str] = {}
+    if arxiv_ids:
+        try:
+            rows = session.execute(
+                sa_text(
+                    """
+                    SELECT arxiv_id, title FROM paper_discovery_arxiv_metadata_cache
+                     WHERE arxiv_id = ANY(:ids) AND title <> ''
+                    """
+                ),
+                {"ids": arxiv_ids},
+            ).fetchall()
+            cached = {str(r[0]): str(r[1] or "") for r in rows}
+        except Exception:  # noqa: BLE001 — 写しが無い環境でも題名の解決は続ける
+            _safe_rollback(session)
+            cached = {}
+    return choose_paper_titles(entries, siblings=siblings, cached_titles=cached)
+
+
+def _safe_rollback(session: Any) -> None:
+    try:
+        session.rollback()
+    except Exception:  # noqa: BLE001
+        pass

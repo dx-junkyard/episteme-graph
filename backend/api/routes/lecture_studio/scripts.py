@@ -54,6 +54,7 @@ from core.lecture import (
     generate_spoken_text_and_formulas,
     get_course_lecture_language,
     lecture_uses_topic_material,
+    prepare_topic_slide_input,
     split_slides,
 )
 from core import lecture_wm
@@ -71,6 +72,7 @@ from ._shared import (
     _get_course_chunks,
     _get_system_admin_course_data,
     consume_lecture_rewrite_quota,
+    ensure_course_owner,
 )
 
 logger = logging.getLogger(__name__)
@@ -579,6 +581,13 @@ class LecturePreviewSplitRequestWithPagination(LecturePreviewSplitRequest):
 
     auto_paginate: bool = False
     document_id: str | None = None
+    # IK-0975: コーストピックのプレビューは、配信と同じ入力の正規化（式・図の埋め込みの解決）を
+    # 通してから分割する。トピックの文脈（evidence_links / content_blocks）を引くための番地。
+    # 省略時は文脈なし（本文だけ）で同じ正規化を通す。閲覧できないコースは黙って文脈なしに倒す。
+    course_id: str | None = None
+    topic_id: str | None = None
+    chapter_index: int | None = None
+    topic_index: int | None = None
 
 
 class LecturePreviewSplitResponseWithPagination(LecturePreviewSplitResponse):
@@ -627,7 +636,14 @@ def preview_split_slides(
     suppressed = bool(body.auto_paginate) and auto_paginate_suppressed(body.display_text, body.spoken_text)
 
     if body.auto_paginate:
-        slides, mismatch = auto_paginate_slides(body.display_text, body.spoken_text, body.formulas)
+        # IK-0975: 配信の正本（build_topic_slides）と同じ入力の正規化を通してから分割する
+        # （式 1 個・図 1 個を一定の長さに数える形。生の本文を分割にかけない）。
+        display_in, spoken_in, formulas_in, figures_in = prepare_topic_slide_input(
+            _preview_topic_context(body, current_user)
+        )
+        slides, mismatch = auto_paginate_slides(
+            display_in, spoken_in, formulas_in or body.formulas, figures=figures_in
+        )
         if not mismatch:
             # マーカー分割が無く自動ページ分割が働いた場合、実効ページ数（受講画面で
             # 実際に出る枚数）を返す。mismatch=True のときはマーカー由来の区切り数を
@@ -673,6 +689,37 @@ def preview_split_slides(
     except Exception:  # noqa: BLE001 — 計器の失敗でプレビューを止めない（TT4）
         logger.warning("WM lens annotation failed; returning plain preview", exc_info=True)
     return payload
+
+
+def _preview_topic_context(body: "LecturePreviewSplitRequestWithPagination", current_user: dict) -> dict:
+    """プレビューの本文を、保存済みトピックの文脈に重ねた疑似トピックにする（IK-0975）。
+
+    編集欄の本文（未保存）を student_material / spoken_script に置き、式・図の解決に要る
+    文脈（evidence_links / content_blocks）は保存済みのトピックから借りる。閲覧できない・
+    見つからないときは文脈なし（本文だけ）にする — 文脈の有無で応答の形は変えない。
+    """
+    topic: dict = {}
+    if body.course_id and (body.topic_id or body.topic_index is not None):
+        try:
+            from core.course_data import find_course_topic
+
+            course_data = get_viewable_course_data(current_user["id"], body.course_id)
+            if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+                course_data = _get_system_admin_course_data(body.course_id)
+            found = find_course_topic(
+                course_data or {}, body.topic_id or "", body.chapter_index, body.topic_index
+            )
+            if isinstance(found, dict):
+                topic = dict(found)
+        except Exception:  # noqa: BLE001 — 文脈が引けなくてもプレビューは止めない（fail-soft）
+            logger.debug("preview-split topic context unavailable", exc_info=True)
+            topic = {}
+    topic["student_material"] = {
+        "source_format": "eg-markdown-v1",
+        "source_text": str(body.display_text or ""),
+    }
+    topic["spoken_script"] = str(body.spoken_text or "")
+    return topic
 
 
 def _load_chunk_slide_audio_map(chunk_ids: list[str]) -> dict[str, set[int]]:
@@ -1681,6 +1728,20 @@ def _batch_generate_and_audio_worker(
     _batch_audio_worker(task_id, course_id, fresh_chunks, target_language, course_data)
 
 
+def _ensure_audio_generation_owner(course_id: str, current_user: dict) -> None:
+    """音声生成は所有者 / SYSTEM_ADMIN だけ（保存と同じ ``ensure_course_owner``・理由は事実文）。"""
+    from core import lecture_studio_state as studio_state
+
+    try:
+        ensure_course_owner(course_id, current_user)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            raise HTTPException(
+                status_code=403, detail=studio_state.TOPIC_AUDIO_GENERATE_FORBIDDEN_DETAIL
+            ) from exc
+        raise
+
+
 @router.post(
     "/courses/{course_id}/lecture-audio/generate",
     response_model=LectureAudioGenerateStartResponse,
@@ -1715,6 +1776,9 @@ def batch_generate_audio(
         course_data = _get_system_admin_course_data(course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
+    # 第 25 周 第 6 波（オーナー判断 2）: 音声の生成・作り直しは受講者への配信と費用を変えるので、
+    # トピックの保存と同じく所有者 / SYSTEM_ADMIN だけ（editor 共有の教員には保存と同じ理由文）。
+    _ensure_audio_generation_owner(course_id, current_user)
 
     current_language = _normalize_lecture_language(get_course_lecture_language(course_data))
     requested_language = body.language if body else None

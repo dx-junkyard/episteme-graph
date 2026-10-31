@@ -508,6 +508,17 @@ def _skeleton_index(frozen_skeleton: Any) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def resolved_label_set(frozen_skeleton: Any) -> set[str]:
+    """現行凍結版で解消済みとみなす正規化ラベルの集合（IK-0990・純粋）。
+
+    教員側の候補キュー（:func:`derive_candidates`）が「現行凍結版に同名の項目があって外す」
+    ときと同じ判定（:func:`_skeleton_index` の ``resolved``）を、学習者側の論文の海の縁
+    （``core/corpus_view.py``）も使うための公開の入口。判定を 2 か所に書かない。
+    教員の判断（decisions）は読まない。
+    """
+    return set(_skeleton_index(frozen_skeleton)["resolved"])
+
+
 def _fetch_decisions(session: Any, cluster_keys: Iterable[str]) -> dict[str, dict]:
     keys = sorted({_clean(k) for k in (cluster_keys or []) if _clean(k)})
     if not keys:
