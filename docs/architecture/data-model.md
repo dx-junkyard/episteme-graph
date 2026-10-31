@@ -565,6 +565,7 @@ claim 紐づけの最終確定は必ず教員が行い、AI 候補は `backing_c
 | `093_identity_link_revoke.sql` | W層 / 概念レジストリ — 同一性リンク `element_identity_links` の status CHECK に `revoked`（教員が確定を取り消した）を足し、列 `revoked_by`（FK なし）/ `revoked_at` / `revoke_reason` を足す。確定者 `decided_by` は上書きしない。DELETE 文なし（IK-0953。正本は `docs/features/concept_registry_design.md` 第 4 波の追補） |
 | `094_users_profile_name.sql` | アカウントライフサイクル — `users.profile_name TEXT NULL`（本人が登録する、人に見せる名前。ログインの照合には使わない・既存行はバックフィルしない。帰属・所有者名の表示は `core/account_display.py::display_label` だけがこの列を読み、空なら名前なしの事実文に戻る。IK-0848 / IK-1007。正本は `docs/features/account_lifecycle_management_design.md` 2026-10-27 第 5 波の追補） |
 | `095_verification_proposal_completion.sql` | D層 / SL層 — `verification_proposals` に `completed_by UUID REFERENCES users(id) ON DELETE SET NULL` / `completed_at TIMESTAMPTZ` / `completion_note TEXT`（検証提案の完了の帰属・日時・根拠。台帳の提案カードに「完了: 名前（日時）」と「確かめたこと」を出す。既存の完了行は `theory_review_events` の監査から 1 回だけ埋める・行削除なし。完了しても `epistemic_ledger.verification_status` は変えない。IK-1121） |
+| `096_atlas_edge_decision_direction.sql` | 分野の地図 RE層 — `atlas_edge_decisions` に `from_node_id` / `to_node_id`（教員が採用のときに選ぶ記載の向き。edge_key は無向のまま・既存行は NULL = 向きの記録なし）。IK-1149 |
 | `097_verification_proposal_reachability_by_document.sql` | D層 / SL層 — `verification_proposals.reachability` の CHECK を `verification_proposals_reachability_vocab_check`（`reachable` / `next_generation` / `by_document` / `unreachable` / `unassessed`）に置き換える。`by_document` = 本文・文献の読み直しで確かめられる（定義の疑義から作る提案向け）。既存行は書き換えない。IK-1148 |
 
 > 注（2026-07 アーキテクチャ整理 Tier 3-13 で更新）: マイグレーションの実行方式を一本化した。

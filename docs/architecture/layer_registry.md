@@ -205,6 +205,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 093 | `093_identity_link_revoke` | W層・概念レジストリ — 同一性リンクの確定を取り消す遷移 `confirmed → revoked`（理由必須・取り消した人と日時の列・確定者は残す。IK-0953。正本は `docs/features/concept_registry_design.md` 第 4 波の追補） |
 | 094 | `094_users_profile_name` | アカウントライフサイクル — `users.profile_name`（人に見せる名前。ログイン ID の開示をやめる。IK-0848 / IK-1007。正本は `docs/features/account_lifecycle_management_design.md` 2026-10-27 第 5 波の追補） |
 | 095 | `095_verification_proposal_completion` | D層 / SL層 — `verification_proposals.completed_by` / `completed_at` / `completion_note`（検証提案の完了の帰属・日時・根拠。既存の完了行は監査から 1 回だけ埋める。完了しても検証状態は変えない。IK-1121・第 25 周 第 10 波。正本は `docs/features/stakes_ledger_design.md`） |
+| 096 | `096_atlas_edge_decision_direction` | 分野の地図 RE層 — `atlas_edge_decisions.from_node_id` / `to_node_id`（採用のときに教員が選ぶ有向の関係の記載の向き。edge_key は無向のまま・既存行は NULL = 向きの記録なし。IK-1149・第 25 周 第 11 波。正本は `docs/features/atlas_relation_edges_design.md`） |
 | 097 | `097_verification_proposal_reachability_by_document` | D層 / SL層 — `verification_proposals.reachability` の CHECK に `by_document`（本文・文献の読み直しで確かめられる）を足す（067 の自動名の CHECK を名前付きに置き換え・既存行は不変。語彙の正本は `core/doubt/schema.py::REACHABILITY_LEVELS`。IK-1148・第 25 周 第 11 波。正本は `docs/features/stakes_ledger_design.md`） |
 
 次の空き番号は **098**（E層など新規レイヤーはここから採番する）。
