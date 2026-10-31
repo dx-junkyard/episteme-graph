@@ -17,9 +17,11 @@ import logging
 import re
 
 from episteme_graph.agents.cartridge_loader import load_cartridge_or_none
+from episteme_graph.agents.coverage_report import build_coverage_report
 
 from .cartridge_loader import CartridgeContext, CartridgeLoader
 from .schema import (
+    MAX_SYMBOL_LENGTH,
     SYMBOL_REGISTRY_VERSION,
     SymbolRecord,
     SymbolRegistryResult,
@@ -60,6 +62,99 @@ def normalize_symbol(raw: str) -> str:
     text = text.replace("{", "").replace("}", "")
     text = re.sub(r"\s+", "", text)
     return text
+
+
+# ---------------------------------------------------------------------------
+# 候補の形式ゲート（2026-09-19）
+#
+# 上流（equation_semantics）の ``defined_symbols`` / ``used_symbols`` には記号で
+# ないものが混ざる。2026-09-15 のコーパスでは ``0.015`` ``1`` ``10^-2`` のような
+# 数値リテラル、``angular variables / basis functions`` のような語句、
+# ``\begin{pmatrix}…`` のような環境、``Equation12`` ``Eq. (3.7)`` のような参照語が
+# canonical_symbol として登録されていた。判定は**書式だけ**で行い、分野語は
+# ハードコードしない。弾いた候補は捨てずに coverage に理由付きで残す（P4）。
+# ---------------------------------------------------------------------------
+
+# 文書内参照の語（Eq. (3.7) / Equation12 / Fig. 2 / Table III / Sec. 4）。言語
+# レベルの構造語であって分野語彙ではない。
+_REFERENCE_WORD_RE = re.compile(
+    r"^(?:eq|eqn|eqs|equation|equations|fig|figs|figure|figures|tab|table|tables"
+    r"|sec|section|sections|app|appendix|chap|chapter|ref|refs|thm|theorem|lemma)"
+    r"\.?\s*\(?[0-9IVXivx][0-9A-Za-z.\-]*\)?$",
+    re.IGNORECASE,
+)
+
+# 3 文字以上の英字の連なり（語らしさの指標）。
+_WORD_RUN_RE = re.compile(r"[A-Za-z]{3,}")
+
+_LATEX_ENVIRONMENT_MARKERS = ("\\begin", "\\end")
+
+
+def exclusion_reason(raw: str, normalized: str) -> str | None:
+    """候補を記号として登録しない理由（登録してよければ ``None``）。
+
+    ``raw`` は上流が渡した生の文字列、``normalized`` は
+    :func:`normalize_symbol` を通した後の形。
+    """
+    raw_text = str(raw or "").strip()
+    token = str(normalized or "").strip()
+    if not token:
+        return None  # 空は呼び出し側が既に落としている
+    lowered = raw_text.lower()
+    if any(marker in lowered for marker in _LATEX_ENVIRONMENT_MARKERS):
+        return "latex_environment"
+    if _REFERENCE_WORD_RE.match(token) or _REFERENCE_WORD_RE.match(raw_text):
+        return "document_reference"
+    if not any(ch.isalpha() for ch in token):
+        # 英字もギリシャ文字も無い = 数値・演算子の並び（0.015 / 2! / (3,2)）。
+        return "numeric_literal"
+    if token.startswith("("):
+        # 括弧で始まるのは式・組（``(2π)^3``）であって記号の名前ではない。
+        return "expression"
+    if "\\" not in raw_text and len(_WORD_RUN_RE.findall(raw_text)) >= 2 and (
+        " " in raw_text or "/" in raw_text or "," in raw_text
+    ):
+        # 3 文字以上の語が 2 つ以上並ぶ区切り付きの文字列は語句であって記号でない。
+        # LaTeX 制御綴りを含むもの（``f_{\mathrm{Nyq}}``）は除外しない。
+        return "phrase"
+    if len(token) > MAX_SYMBOL_LENGTH:
+        return "too_long"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 単位の抽出（2026-09-19）
+#
+# ``unit`` は 100 % 空だった。原文が単位を明示している形のうち、決定論で確実に
+# 取れるものだけを拾う。単位「語彙」はハードコードしない（分野固有になる）ので、
+# 拾った語が単位記号の**書式**（大文字か数字か ``/ ^ ⊙`` を含む: Mpc / GeV /
+# km/s / h^-1）を満たすときに限り採用する。``in units of the critical density``
+# のような全小文字の語句は採らない（保守側に倒す）。原文に無ければ None のまま。
+# ---------------------------------------------------------------------------
+
+_UNIT_PHRASE_RE = re.compile(r"\bin\s+units?\s+of\s+([^\s,.;:()]+)", re.IGNORECASE)
+_UNIT_BRACKET_RE = re.compile(r"\bunits?\s*[:=]?\s*\[([^\]\s]+)\]", re.IGNORECASE)
+_MAX_UNIT_LENGTH = 16
+
+
+def _looks_like_unit(token: str) -> bool:
+    text = str(token or "").strip().strip(".,;:")
+    if not text or len(text) > _MAX_UNIT_LENGTH:
+        return False
+    if not any(ch.isalpha() for ch in text):
+        return False
+    return any(ch.isupper() or ch.isdigit() or ch in "/^⊙" for ch in text)
+
+
+def extract_unit(texts) -> str | None:
+    """First unit stated verbatim by the definition evidence (else ``None``)."""
+    for text in texts or []:
+        for pattern in (_UNIT_BRACKET_RE, _UNIT_PHRASE_RE):
+            for match in pattern.finditer(str(text or "")):
+                token = match.group(1).strip().strip(".,;:")
+                if _looks_like_unit(token):
+                    return token
+    return None
 
 
 def _slug(text: str) -> str:
@@ -110,6 +205,8 @@ class SymbolRegistryBuilder:
 
         alias_map = self._alias_map(cartridge)
         accumulators: dict[str, _SymbolAccumulator] = {}
+        excluded: list[dict] = []
+        excluded_index: dict[tuple[str, str], dict] = {}
 
         for record in records:
             eq_id = str(getattr(record, "equation_id", "") or "")
@@ -127,7 +224,11 @@ class SymbolRegistryBuilder:
                 raw = str(getattr(ds, "symbol", "") or "")
                 if not raw:
                     continue
-                acc = self._accumulator(accumulators, raw, alias_map)
+                acc = self._accumulator_or_exclude(
+                    accumulators, raw, alias_map, eq_id, excluded, excluded_index
+                )
+                if acc is None:
+                    continue
                 acc.add_variant(raw)
                 if section_id:
                     acc.section_ids.add(section_id)
@@ -149,7 +250,11 @@ class SymbolRegistryBuilder:
                 raw = str(raw or "")
                 if not raw:
                     continue
-                acc = self._accumulator(accumulators, raw, alias_map)
+                acc = self._accumulator_or_exclude(
+                    accumulators, raw, alias_map, eq_id, excluded, excluded_index
+                )
+                if acc is None:
+                    continue
                 acc.add_variant(raw)
                 acc.add_used(eq_id)
                 if section_id:
@@ -165,12 +270,20 @@ class SymbolRegistryBuilder:
                 records, alias_map, symbol_id_by_key, record_by_id
             )
 
+        excluded_keys = {entry["normalized"] for entry in excluded}
         return SymbolRegistryResult(
             document_id=document_id,
             registry_version=SYMBOL_REGISTRY_VERSION,
             cartridge_id=cartridge.cartridge_id if cartridge else cartridge_id,
             records=symbol_records,
             validation_issues=[],
+            coverage=build_coverage_report(
+                population=len(symbol_records) + len(excluded_keys),
+                processed=len(symbol_records),
+                reasons=[entry["reason"] for entry in excluded],
+                unit="symbol_candidates",
+                details={"excluded": excluded} if excluded else None,
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -205,6 +318,43 @@ class SymbolRegistryBuilder:
         if canonical:
             return normalize_symbol(canonical)
         return normalized
+
+    @classmethod
+    def _accumulator_or_exclude(
+        cls,
+        accumulators: dict[str, _SymbolAccumulator],
+        raw: str,
+        alias_map: dict[str, str],
+        eq_id: str,
+        excluded: list[dict],
+        excluded_index: dict[tuple[str, str], dict],
+    ) -> _SymbolAccumulator | None:
+        """Accumulator for ``raw``, or ``None`` when the candidate is not a symbol.
+
+        A candidate the cartridge itself declares (it is in ``alias_map``) is
+        always accepted — the domain vocabulary wins over the format gate.
+        """
+        normalized = normalize_symbol(raw)
+        if not normalized:
+            return None
+        if normalized not in alias_map:
+            reason = exclusion_reason(raw, normalized)
+            if reason:
+                key = (raw, reason)
+                entry = excluded_index.get(key)
+                if entry is None:
+                    entry = {
+                        "raw": raw,
+                        "normalized": normalized,
+                        "reason": reason,
+                        "equation_ids": [],
+                    }
+                    excluded_index[key] = entry
+                    excluded.append(entry)
+                if eq_id and eq_id not in entry["equation_ids"]:
+                    entry["equation_ids"].append(eq_id)
+                return None
+        return cls._accumulator(accumulators, raw, alias_map)
 
     @classmethod
     def _accumulator(
@@ -271,7 +421,7 @@ class SymbolRegistryBuilder:
                 canonical_symbol=acc.canonical,
                 notation_variants=list(acc.variants),
                 kind=self._classify_kind(acc, cartridge),
-                unit=None,
+                unit=extract_unit(acc.evidence_texts),
                 domain_constraints=[],
                 scope=self._scope(acc),
                 defining_equation_ids=list(acc.defining_equation_ids),

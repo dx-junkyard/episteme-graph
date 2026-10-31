@@ -219,6 +219,8 @@ _ADMIN_FRONTEND_SOURCES = [
     # 束の取り込み（知識の転用層 P4-1）。モーダル本体とアンカー担体を持つ。
     ROOT / "frontend" / "public" / "js" / "admin-knowledge-import.js",
     ROOT / "frontend" / "public" / "js" / "admin-graph-review.js",
+    # 検証シミュレーション層（simulation_bridge_design.md §7）。モーダル本体とアンカー担体を持つ。
+    ROOT / "frontend" / "public" / "js" / "admin-simulation-bridge.js",
     # DOM 非依存の音声エンジン（アンカー担体は admin-graph-review.js 側）。
     # 将来ここに UI が生えたときの登録漏れを検出するため対象に入れる。
     ROOT / "frontend" / "public" / "js" / "admin-voice-chat.js",
@@ -235,6 +237,8 @@ _ADMIN_FRONTEND_SOURCES = [
     ROOT / "frontend" / "public" / "js" / "versioning.js",
     ROOT / "frontend" / "public" / "js" / "deliberation.js",
     ROOT / "frontend" / "public" / "js" / "doubt-atlas.js",
+    # 人に見せる名前（IK-1007）。担体は admin.html の header.profile-name ボタン。
+    ROOT / "frontend" / "public" / "js" / "profile-name.js",
 ]
 
 

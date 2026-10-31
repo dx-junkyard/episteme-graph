@@ -1,0 +1,78 @@
+id: s-db-ledger-lines
+population: students
+runner: [api]
+# 第 25 周 H6: 第 1 周の st-06 が同名の別コースを受講して進んだ。学生は campaign の固定コースへ明示で入る
+pin_course: true
+preconditions:
+  - 教員レーン（前提の地図の確定・スコープ・疑義）を先に歩いた周の後に走る。教員が記帳した台帳のうち、部品・式・主張は
+    コースをまたいで学生の画面に出るが、前提（assumption）は記帳したコースの未検証合意リストにしか出ない
+  # 第 25 周 第 8 周 H48: 開くトピックは題名ではなく「⚓（部品）があるか」で選ぶ。材料 topic_id（周の前に r{N}_prereqs の
+  # doubt_ledger_anchor_topic が固定コースの ⚓ のあるトピックを確かめて写す）があればそれで開く。⚓ を開く手の対象が
+  # 無ければ runner が meta の blocked_precondition に残す（check: component_anchor）
+  - 開くトピックの教材に ⚓（部品）がある（題名が同じでもコースによって ⚓ の有無が違う）
+goal: "{{goal_text}} のために、回答の出典・部品の文脈・議論の開幕・わたしの地図で、どこまで確かめられているかを読む"
+params_required: [goal_text, topic_hint, topic_hint_terms, seed_questions, map_question]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.enroll
+    note: 受講中でなければ受講を始める
+  - do: learning.course.open
+  - do: learning.topic.open
+    with: {topic_id: "{{topic_id}}", topic_hint_terms: "{{topic_hint_terms}}"}
+    note: "{{topic_hint}} に合うトピックを開く"
+  # 第 25 周 第 7 周 H46: 「この部品」と問う前に ⚓ の部品の文脈を開く（開いたまま尋ねると画面文脈に部品が載る）
+  - choose:
+      - do: learning.component.context
+        note: 教材の ⚓ の部品チップを 1 つ開く（承認済みの説明の無い部品なら、検証状態の一行がどう出るかを読む）
+    optional: true
+  - do: learning.chat.ask
+    with: {message: "{{seed_questions | next}}"}
+    note: 開いた部品について尋ねる（「この部品」は開いている部品を指す）
+  # 第 25 周 第 3 周（judge_doubt_r2 §4）: 出典タブ → 部品の説明ポップアップ → 未検証の前提一覧 → 地図の札 の順で読む
+  - do: learning.ledger.sources_tab
+    note: 出典タブの根拠カードに、検証状態の一行が添えられているかを見る
+  - do: learning.ledger.component_line
+    note: 教材の「◯◯の説明」（理論コンポーネント）を開き、説明の下の検証状態の一行を読む
+  - do: learning.ledger.open_assumptions
+    note: 出典タブの「未検証の前提を見る」の折りたたみを開き、前提が名前で読めるかを見る
+  - choose:
+      - do: learning.atlas.view
+        note: 分野の地図を開き、項目の札（検証の記録の文）が開いている論文の行かを読む
+    optional: true
+  # 第 25 周第 5 周 H36: 札の名前を画面文脈に載せるため、地図の問いの前に札の付いた概念を選ぶ
+  - choose:
+      - do: learning.atlas.select_node
+        with: {node_hint: "{{map_node_hint}}"}
+        note: 札の付いた概念を選んで右のパネルを読む（地図を開いたときだけ。問いはその後に送る）
+    optional: true
+  - choose:
+      - do: learning.chat.ask
+        with: {message: "{{map_question}}"}
+        note: 地図の札について AI に尋ね、案内された画面の詳細が実際にあるかを確かめる（IK-0907）
+    optional: true
+  - do: learning.discuss.opening
+    note: 議論の開幕の「この論文が確かめていないこと」を読む
+  - do: learning.personal_network.nearby
+    note: いまここの周りの枠線（確かめられているか）を見る
+  - choose:
+      - do: learning.chat.ask
+        with: {message: "{{seed_questions | next}}"}
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#answer-origin-badge
+  - manual: student/02-student.md#material-element-anchor
+  - manual: student/02-student.md#discuss-opening
+  - manual: student/02-student.md#personal-map
+watch_for:
+  - 検証の不在は「このコーパスの中では」の範囲で語られ、「この分野では未検証」「誰も検証していない」と言わない
+  - 未検証と検証済みが同じ精度の一行で並び、不安を煽る色や語が無い
+  - 学生の画面に記帳者・最小カットの構成・生の数値（件数・負荷）が出ない
+  - 台帳の記帳が無い対象には何も出ない（エラーや空の枠を出さない）
+  - 未検証の前提の一覧の入口の文言が「この分野」ではなく、このコースの教材の範囲で語られる（IK-0856 の是正後）
+  - コースを作らずに解析した教材から組んだコースでも、未検証の前提の一覧と開幕の「この論文が確かめていないこと」が
+    空にならない（IK-0852 の是正後）。空のときは「失敗」と「該当なし」が別の文で読める（IK-0853 の是正後）
+  - 同じ論文の検証状態が、出典タブ・部品の説明・前提の地図で食い違って見えない（違うならその軸の違いが一行で分かる — IK-0855）
+  - 承認済みの説明の無い部品でも、台帳の記帳があれば検証状態の一行が出る（IK-0906 の是正後）
+  - 地図の札について尋ねたとき、AI は画面に無い詳細へ案内しない（IK-0907 の是正後）

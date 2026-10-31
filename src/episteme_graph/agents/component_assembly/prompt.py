@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+from episteme_graph.agents.generation_language import apply_generation_language
+
 from .schema import ASSEMBLY_HINT_TYPES, ComponentAssemblyLLMInput
 
 _SYSTEM_CONTENT = """\
@@ -25,7 +27,11 @@ define, parameterize, linearize, solve, substitute, eliminate, derive, compare,
 diagnose, forecast, limit. Do NOT keep a parameter-solving step, a residual /
 final-constraint relation, an application / forecast, and a validity caveat
 inside one component.
-Each component should set "operation" to its single main operation.
+Each component should set "operation" to its single main operation, written as
+one of the closed forms in the "Allowed Operations" section (a listed full name,
+or <prefix>_<object> with a listed prefix). Words outside that list (for example
+limit, parameterize, verify, couple, qualify, classify, forecast) are treated as
+generic by the theory graph and cannot appear in its main graph.
 Each component should set "responsibility_type" to one of:
 definition, model, observation_model, observable_basis, equation_system,
 derivation, constraint, application, limitation.
@@ -120,7 +126,7 @@ _OUTPUT_SCHEMA = {
             "component_id": "comp_001",
             "component_type": "allowed component type",
             "responsibility_type": "definition | model | observation_model | observable_basis | equation_system | derivation | constraint | application | limitation",
-            "operation": "single main theoretical operation (define/linearize/eliminate/substitute/solve/derive/constrain/diagnose/forecast/compare/...)",
+            "operation": "single main theoretical operation from the Allowed Operations list (full name, or <prefix>_<object> with a listed prefix)",
             "primary_operation": "string",
             "secondary_operations": [],
             "support_role": "theory_base | observable_bridge | derivation_core | result | application | limitation",
@@ -191,14 +197,45 @@ _OUTPUT_SCHEMA = {
 }
 
 
+#: 解析 run の生成言語（run options ``language``）で書かせる、生成した文章のフィールド。
+#: 論文の逐語・記号・ID・語彙値は含めない（``generation_language`` の不変条項）。
+GENERATED_PROSE_FIELDS: tuple[str, ...] = (
+    # IK-0571 §6: summary は後段の構造導出（internal_flow の relation / operation の補完 /
+    # support_role の補完）が語彙値（operation / primary_operation / responsibility_type）を
+    # 先に読むようにしたので対象に加えた。label は同一性キーと名前照合の材料なので対象外。
+    "components[].summary",
+    "components[].teaching_takeaway",
+    "components[].dependencies[].reason",
+    "components[].review_notes",
+    "assembly_hints[].reason",
+    "review_notes",
+)
+
+
 class ComponentAssemblyPromptFactory:
-    def build_messages(self, llm_input: ComponentAssemblyLLMInput) -> list[dict]:
+    #: 解析 run の生成言語（``ja`` / ``en``）。``None`` なら prompt は従来と同一。
+    language: str | None = None
+
+    def __init__(self, language: str | None = None) -> None:
+        self.language = language
+
+    def build_messages(self, *args, **kwargs) -> list[dict]:
+        return apply_generation_language(
+            self._base_messages(*args, **kwargs), self.language, GENERATED_PROSE_FIELDS
+        )
+
+    def build_repair_messages(self, *args, **kwargs) -> list[dict]:
+        return apply_generation_language(
+            self._base_repair_messages(*args, **kwargs), self.language, GENERATED_PROSE_FIELDS
+        )
+
+    def _base_messages(self, llm_input: ComponentAssemblyLLMInput) -> list[dict]:
         return [
             {"role": "system", "content": _SYSTEM_CONTENT},
             {"role": "user", "content": self._build_user_content(llm_input)},
         ]
 
-    def build_repair_messages(
+    def _base_repair_messages(
         self,
         llm_input: ComponentAssemblyLLMInput,
         previous_output: dict,
@@ -247,13 +284,24 @@ class ComponentAssemblyPromptFactory:
             "claim_centered_plan": llm_input.claim_centered_plan,
         }
         available = {
-            "available_claims": llm_input.available_claims,
+            "available_claims": (
+                llm_input.prompt_available_claims
+                if llm_input.prompt_available_claims is not None
+                else llm_input.available_claims
+            ),
             "available_evidence": llm_input.available_evidence,
             "available_equations": llm_input.available_equations,
             "available_dsl_nodes": llm_input.available_dsl_nodes,
             "available_dsl_edges": llm_input.available_dsl_edges,
             "available_derivation_ids": llm_input.available_derivation_ids,
         }
+        if llm_input.prompt_available_claims is not None:
+            # Input budget (component_assembly input_builder): the claim list
+            # below is a subset. accepted_claims IDs are always valid too.
+            available["available_claims_note"] = (
+                "available_claims lists a subset of the paper's claims to fit the "
+                "input size; every claim_id in accepted_claims is also available."
+            )
         parts = [
             "## Task",
             "Assemble reusable knowledge components. Return ONLY JSON.",
@@ -270,6 +318,8 @@ class ComponentAssemblyPromptFactory:
             ", ".join(llm_input.allowed_component_types),
             "\n## Allowed Dependency Types",
             ", ".join(llm_input.allowed_dependency_types),
+            "\n## Allowed Operations (closed list for operation / primary_operation)",
+            operation_vocabulary_text(),
             "\n## Output Schema",
             json.dumps(_OUTPUT_SCHEMA, ensure_ascii=False, indent=2),
             "\n## Assembly Hint Types",
@@ -296,6 +346,38 @@ class ComponentAssemblyPromptFactory:
             "- Return ONLY valid JSON, no markdown fences",
         ]
         return "\n".join(parts)
+
+
+def operation_vocabulary_text() -> str:
+    """The operation vocabulary the theory graph accepts, as a closed list (IK-0754).
+
+    The table is read from ``component_graph.schema`` (``OPERATION_FULL_NAMES`` /
+    ``OPERATION_PREFIX_FAMILIES`` / ``GENERIC_OPERATIONS``) — the same objects
+    ``classify_operation`` uses — so the prompt cannot drift from the validator.
+    Imported lazily: ``component_graph`` imports ``component_assembly.schema``.
+    """
+    from episteme_graph.agents.component_graph.schema import (
+        GENERIC_OPERATIONS,
+        OPERATION_FULL_NAMES,
+        OPERATION_PREFIX_FAMILIES,
+    )
+
+    lines = [
+        "Choose operation (and primary_operation) ONLY from these forms. The arrow",
+        "shows the theory-graph relation the word becomes.",
+        "Prefix families (write <prefix> or <prefix>_<object>, e.g. solve_linear_system):",
+    ]
+    for prefix, (_verb, edge_type) in OPERATION_PREFIX_FAMILIES.items():
+        lines.append(f"- {prefix} -> {edge_type}")
+    lines.append("Full names (use exactly as written):")
+    for name, (_verb, edge_type) in OPERATION_FULL_NAMES.items():
+        lines.append(f"- {name} -> {edge_type}")
+    generic = sorted(op for op in GENERIC_OPERATIONS if op)
+    lines.append(
+        "Generic (do not use as a main operation): " + ", ".join(generic)
+        + ". Any word not listed above is also treated as generic."
+    )
+    return "\n".join(lines)
 
 
 def _issue_payload(issue, llm_input: ComponentAssemblyLLMInput) -> dict:

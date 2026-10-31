@@ -1,0 +1,42 @@
+id: c-astro-vision5-teachers
+domain: astrophysics
+snapshot: corpus-astro-tex-v1
+personas:
+  teachers: [te-02-veteran-intro, te-03-meticulous-seminar]
+  students: []
+scenarios:
+  teacher: [t-v5-release-skip-step2, t-v5-release-click-through, t-v5-release-meticulous]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 30, persona_llm_calls: 200, wall_clock_minutes: 120}
+notes: |
+  第 23 周 F5（リリース前の確認と確定文脈 — RR1〜RR7・DC1〜DC4・vision §5.1）。審判 E6 が run の窓の教員ペルソナの
+  theory_review_events（action = accept_on_release / course_visibility の公開）の metadata.decision_context を読み、
+  presented / applied / alternatives_available / truncated から「何を見て何を選べたか」が再構成できるかを判定する。
+
+  教員のコース: 砂場で te-02 / te-03 はコースを所有していない（所有は te-01 の 6be229e1 = private・未公開と、
+  te-04 の 1bad7d9f = public）。既定は「各教員が自分のコースを作る」— 経路の前提 owns_course（runner が
+  GET /api/admin/courses で確かめる）が欠けていれば、種まき経路 t-v5-register-own-course（コースビルダーで砂場の
+  4 本から作って登録まで。公開・リリース前の確認はしない）を先に歩く。t-build-course-from-corpus を種にしないのは、
+  あの経路が自分で「次へ」と公開まで進めてしまい、(5a)〜(5c) の材料（未確認の配置・未公開のコース）を先に消すため。
+  代替案（教員を 2 名のまま増やさない）: 種まきの LLM 費用を避けたいときは、te-01 の未公開コース 6be229e1 を
+  te-01 で開いて (5b) の流れを歩く（campaign の personas.teachers に te-01-rookie-seminar を一時的に足し、
+  --persona te-01-rookie-seminar --scenario t-v5-release-meticulous で走らせる）。この場合 te-01 の教材権限
+  （editor の有無）を先に確かめ、(5b) の「editor あり」の前提が成り立つかを notes に残す。
+
+  権限の差（watch_for に書いたとおり。権限は足さない）:
+   - 4 教材（1771872a / ce667c63 / d82c5f0a / 910101fb）は public。editor 共有は group「uxsim 担当教員」の te-03 と te-04 だけ。
+   - te-02 は閲覧のみ: 「次へ」は編集権限のある document の inferred しか confirmed にせず、権限の無い論文は静かに除外して
+     事実文（skipped_note）だけ返す（RR7）。(5a) は「権限の無い教員が『次へ』を押したとき画面が何を事実として言うか」。
+   - te-03 は editor あり: (5b) の却下・再検討・「次へ」は教材単位の配置（landscape_placements）を実際に動かす。
+     砂場の inferred は 42 件（コース sources の 4 論文分）。凍結骨格 astrophysics 2026.1。
+
+  レーンの順（学生レーンと交互になる — c-vision5-students.yaml の依存）:
+   te-02: (5c) t-v5-release-skip-step2（種まきで自分のコースを作る → ステップ 2 を「あとで」→ 公開）
+          ⇢ 学生 st-05 の s-v5-landscape-check（後）⇢ (5a) t-v5-release-click-through（同じコースで「次へ」連打 → 公開。
+          公開済みのコースでも「確認して公開」は開ける。公開の記帳はもう一度残る）
+   te-03: (5b) t-v5-release-meticulous（種まきで自分のコースを作る → 根拠を読み、却下 1・再検討 1 → 次へ → 公開）
+          — 学生の (5c) 前後比較が終わってから。te-03 の確定で inferred が confirmed に変わるので、砂場の配置は
+          この周の後に元に戻らない（次の周の前に snapshot から戻すか、landscape の状態を事実として記録する）。
+  LLM 予算: 種まきのコースビルダーが教員 1 人あたり 2〜3 回。リリース前の確認自体は LLM を呼ばない。

@@ -38,8 +38,12 @@ from typing import Any, Iterable, Sequence
 from sqlalchemy import text as sa_text
 
 from core import atlas_correspondence
+from core import atlas_state
 from core import atlas_store
+from core import document_refs
+from core import label_vocab
 from core.atlas_gaps import schema as gap_schema
+from core.atlas_gaps import store as gap_store
 from core.landscape import schema as landscape_schema
 
 logger = logging.getLogger(__name__)
@@ -52,7 +56,9 @@ __all__ = [
     "build_corpus_landscape",
     "list_corpus_domains",
     "list_corpus_documents",
+    "list_unrelated_visible_titles",
     "outer_fact_line",
+    "unrelated_documents_fact",
 ]
 
 
@@ -206,7 +212,10 @@ def list_corpus_domains(
         out.append(
             {
                 "domain_key": domain_key,
-                "domain_name": _clean(entry.get("domain_name")) or domain_key,
+                # IK-0413: 内部キーを表示名の代わりに出さない（未登録は正直にそう言う）。
+                "domain_name": atlas_state.learner_domain_label(
+                    _clean(entry.get("domain_name")), domain_key
+                ),
                 "frozen_version": frozen_version,
                 "has_visible_papers": domain_key in placed,
             }
@@ -276,6 +285,80 @@ def _visible_placements(session: Any, domain_key: str, doc_ids: Sequence[str]) -
     ).fetchall()
 
 
+def _domain_paper_representatives(
+    session: Any, domain_key: str, doc_ids: Sequence[str]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """この分野に関係づけられた可視論文の「論文の代表 document_id」と題名（IK-0846）。
+
+    同じ論文の重複取り込み（PDF 版と TeX 版など）は 1 本の論文として数え、読める題名を
+    持つ取り込みを代表にする（判定の正本は ``core.document_refs``）。母集合は論文リスト
+    （:func:`list_corpus_documents`）と同じ「配置あり ∪ 置けなかった信号あり」で、地図の
+    厚みと論文リストが同じ代表を指す（アンカーの絞り込みが一覧の行と一致する）。
+
+    Returns:
+        ``(document_id -> 代表 document_id, document_id -> 題名)``。取れなければ空（呼び出し側は
+        document_id をそのまま使う — fail-soft）。
+    """
+    if not doc_ids:
+        return {}, {}
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT d.id::text,
+                       COALESCE(NULLIF(d.title, ''), NULLIF(d.filename, ''), '') AS title,
+                       COALESCE(d.source_url, '') AS source_url,
+                       COALESCE(d.filename, '') AS filename
+                  FROM documents d
+                 WHERE d.id::text = ANY(:doc_ids)
+                   AND (
+                       EXISTS (
+                           SELECT 1 FROM landscape_placements p
+                            WHERE p.document_id = d.id
+                              AND p.domain_key = :domain_key
+                              AND p.status = ANY(:statuses)
+                       )
+                       OR EXISTS (
+                           SELECT 1 FROM landscape_gap_signals s
+                            WHERE s.document_id = d.id
+                              AND s.domain_key = :domain_key
+                              AND s.status = :active
+                       )
+                   )
+                """
+            ),
+            {
+                "domain_key": domain_key,
+                "doc_ids": list(doc_ids),
+                "statuses": list(landscape_schema.LEARNER_VISIBLE_STATUSES),
+                "active": gap_schema.SIGNAL_STATUS_ACTIVE,
+            },
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 畳めなくても地図と一覧は返す
+        logger.warning("corpus view: paper identities unavailable (non-fatal)", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            logger.debug("corpus view: rollback failed (non-fatal)", exc_info=True)
+        return {}, {}
+    entries = []
+    titles: dict[str, str] = {}
+    for row in rows or ():
+        doc_id = _clean(row[0])
+        if not doc_id:
+            continue
+        titles[doc_id] = _title(row[1])
+        entries.append(
+            {
+                "document_id": doc_id,
+                "title": _clean(row[1]),
+                "source_url": row[2] if len(row) > 2 else "",
+                "filename": row[3] if len(row) > 3 else "",
+            }
+        )
+    return document_refs.representative_document_ids(entries), titles
+
+
 def _visible_gap_signals(session: Any, domain_key: str, doc_ids: Sequence[str]) -> list:
     """縁の材料（§6.1）。
 
@@ -290,7 +373,9 @@ def _visible_gap_signals(session: Any, domain_key: str, doc_ids: Sequence[str]) 
         sa_text(
             """
             SELECT s.parent_region_id,
-                   COALESCE(NULLIF(d.title, ''), NULLIF(d.filename, ''), '') AS title
+                   COALESCE(NULLIF(d.title, ''), NULLIF(d.filename, ''), '') AS title,
+                   s.document_id::text,
+                   s.normalized_label
               FROM landscape_gap_signals s
               JOIN documents d ON d.id = s.document_id
              WHERE s.domain_key = :domain_key
@@ -307,18 +392,49 @@ def _visible_gap_signals(session: Any, domain_key: str, doc_ids: Sequence[str]) 
     ).fetchall()
 
 
-def _build_fringe(rows: Iterable[Any], regions: dict[str, str]) -> list[dict]:
+def _build_fringe(
+    rows: Iterable[Any],
+    regions: dict[str, str],
+    *,
+    representatives: dict[str, str] | None = None,
+    rep_titles: dict[str, str] | None = None,
+    resolved_labels: set[str] | None = None,
+) -> list[dict]:
     """信号行 → 領域単位の縁（``[{region_id, region_label, fact_line, paper_titles}]``）。
 
     現行の凍結骨格に無い ``parent_region_id`` の信号は落とす（地図に描けないため。
     行そのものは DB に残り、教員のレビュー候補には出続ける — P4）。
+
+    同じ論文の重複取り込み（PDF 版と TeX 版など）は論文の同一性キーで 1 本に畳み、
+    代表の取り込み（読める題名を持つもの）の題名で列挙する（IK-0846 第 2 周の残存。
+    地図の配置・論文リストと同じ ``_domain_paper_representatives`` の代表を使う）。
+    行の 3 列目（``document_id``）が無い旧形の行は題名の文字列で畳む（従来どおり）。
+
+    IK-0990（第 25 周 第 5 波）: 信号の主題（4 列目 ``normalized_label``）が現行凍結版で
+    解消済み（``resolved_labels`` = 教員側の候補キューと同じ判定
+    :func:`core.atlas_gaps.store.resolved_label_set`）なら縁に出さない。取り込み・凍結の後も
+    「まだ地図に置かれていない主題」と言い続けないため。信号の行は DB に残る（P4）。
     """
+    resolved = resolved_labels or set()
+    reps = representatives or {}
+    titles_of = rep_titles or {}
     grouped: dict[str, list[str]] = {}
+    seen_papers: dict[str, set[str]] = {}
     for row in rows or ():
         region_id = _clean(row[0])
         if region_id not in regions:
             continue
-        title = _title(row[1])
+        signal_label = gap_schema.normalize_label(_clean(row[3])) if len(row) > 3 else ""
+        if signal_label and signal_label in resolved:
+            continue
+        raw_doc_id = _clean(row[2]) if len(row) > 2 else ""
+        paper_id = reps.get(raw_doc_id, raw_doc_id) if raw_doc_id else ""
+        title = _title(titles_of.get(paper_id) or row[1]) if paper_id else _title(row[1])
+        papers = seen_papers.setdefault(region_id, set())
+        if paper_id:
+            if paper_id in papers:
+                continue
+            papers.add(paper_id)
         titles = grouped.setdefault(region_id, [])
         if title and title not in titles:
             titles.append(title)
@@ -394,7 +510,9 @@ def build_corpus_landscape(
     resolve = _node_resolve(session, key)
 
     doc_ids = _visible_ids(visible_doc_ids)
+    representatives, rep_titles = _domain_paper_representatives(session, key, doc_ids)
     placements: list[dict] = []
+    seen_placements: set[tuple[str, str, str]] = set()
     unmapped_versions: set[str] = set()
     for row in _visible_placements(session, key, doc_ids):
         node_id = _clean(row[2])
@@ -407,10 +525,17 @@ def build_corpus_landscape(
             continue
         status = _clean(row[4])
         perspective = _clean(row[3])
+        # 同じ論文の重複取り込みは代表の 1 本に畳む（IK-0846。厚みは論文の数で決まる）。
+        raw_doc_id = _clean(row[0])
+        paper_id = representatives.get(raw_doc_id, raw_doc_id)
+        dedupe = (paper_id, node_id, perspective)
+        if dedupe in seen_placements:
+            continue
+        seen_placements.add(dedupe)
         placements.append(
             {
-                "document_id": _clean(row[0]),
-                "document_title": _title(row[1]),
+                "document_id": paper_id,
+                "document_title": rep_titles.get(paper_id) or _title(row[1]),
                 "anchor_node_id": node_id,
                 "node_label": info["label"],
                 "region_id": info["region_id"],
@@ -425,8 +550,17 @@ def build_corpus_landscape(
     return {
         "domain_key": key,
         "skeleton_version": skeleton_version,
+        # IK-0942（第 25 周 第 7 波）: 海の画面も、学習者の地図・出典タブと同じ呼び方で版を言う。
+        # 版が空なら空文字（版を捏造しない）。正本は label_vocab.atlas_version_label。
+        "skeleton_version_label": label_vocab.atlas_version_label(skeleton_version),
         "placements": placements,
-        "fringe": _build_fringe(_visible_gap_signals(session, key, doc_ids), regions),
+        "fringe": _build_fringe(
+            _visible_gap_signals(session, key, doc_ids),
+            regions,
+            representatives=representatives,
+            rep_titles=rep_titles,
+            resolved_labels=gap_store.resolved_label_set(skeleton),
+        ),
         "outer": _build_outer(session, key),
         # 読み替えできなかった配置の事実文（縁の事実文と同じ作法で1行ずつ・件数なし）。
         "facts": [
@@ -505,14 +639,108 @@ def list_corpus_documents(
             "active": gap_schema.SIGNAL_STATUS_ACTIVE,
         },
     ).fetchall()
-    return [
+    # 同じ論文の重複取り込み（PDF 版と TeX 版など）は 1 行に畳む（IK-0846）。行は代表
+    # （読める題名を持つ取り込み）の値で、``placed`` はどれかの取り込みが置かれていれば真。
+    # 並びは同じ論文の取り込みのうち最も新しいものの位置。
+    representatives, _ = _domain_paper_representatives(session, key, doc_ids)
+    by_id = {_clean(row[0]): row for row in rows}
+    out: list[dict] = []
+    index_of: dict[str, int] = {}
+    for row in rows:
+        doc_id = _clean(row[0])
+        paper_id = representatives.get(doc_id, doc_id)
+        source = by_id.get(paper_id, row)
+        if paper_id in index_of:
+            if bool(row[4]):
+                out[index_of[paper_id]]["placed"] = True
+            continue
+        index_of[paper_id] = len(out)
+        out.append(
+            {
+                "document_id": paper_id if paper_id in by_id else doc_id,
+                "title": _title(source[1]),
+                "authors": _authors(source[2]),
+                "year": int(source[3]) if source[3] is not None else None,
+                "placed": bool(row[4]) or bool(source[4]),
+                "can_discuss": True,
+            }
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 論文リストの外側（IK-0414 / CR4 閉世界の正直さ）
+# ---------------------------------------------------------------------------
+
+#: 論文リストに出ない閲覧可能な論文を、題名で並べるときの上限（件数は言わない）。
+UNRELATED_TITLES_LIMIT = 8
+
+#: 論文リストの外側の事実文。「この分野の論文ではない」とは言わない（関係づけの記録が
+#: 無いだけ — 解析が届いていない論文を分野から外したと読ませない）。件数を出さない。
+_FACT_UNRELATED_TEMPLATE = (
+    "閲覧できる論文のうち、次の論文はこの分野の地図との関係づけが記録されていないため、"
+    "この一覧と地図には出ていません: {titles}"
+)
+
+
+def unrelated_documents_fact(titles: Sequence[str], more: bool) -> str:
+    """論文リストの外側の事実文（題名の列挙・件数なし）。題名が無ければ空文字。"""
+    shown = [f"「{t}」" for t in titles if str(t or "").strip()]
+    if not shown:
+        return ""
+    text = "".join(shown)
+    if more:
+        text += "ほか"
+    return _FACT_UNRELATED_TEMPLATE.format(titles=text)
+
+
+def list_unrelated_visible_titles(
+    session: Any,
+    domain_key: str,
+    visible_doc_ids: Iterable[str] | None,
+    *,
+    limit: int = UNRELATED_TITLES_LIMIT,
+) -> tuple[list[str], bool]:
+    """本人が閲覧できるのに、この分野の論文リストに出ない論文の題名（新しい順）。
+
+    ``list_corpus_documents`` の母集合（配置あり ∪ gap 信号あり）の**補集合**を、
+    同じ可視集合の中で引く。地図の位置には置かない（位置の捏造をしない — LS1）。
+    ``(titles, more)`` を返し、``more`` は上限を超えたかの bool（件数は数えない）。
+    可視集合・domain_key が空なら SQL を発行しない（CR1）。
+    """
+    key = _clean(domain_key)
+    doc_ids = _visible_ids(visible_doc_ids)
+    if not key or not doc_ids:
+        return [], False
+    rows = session.execute(
+        sa_text(
+            """
+            SELECT COALESCE(NULLIF(d.title, ''), NULLIF(d.filename, ''), '') AS title
+              FROM documents d
+             WHERE d.id::text = ANY(:doc_ids)
+               AND NOT EXISTS (
+                   SELECT 1 FROM landscape_placements p
+                    WHERE p.document_id = d.id
+                      AND p.domain_key = :domain_key
+                      AND p.status = ANY(:statuses)
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM landscape_gap_signals s
+                    WHERE s.document_id = d.id
+                      AND s.domain_key = :domain_key
+                      AND s.status = :active
+               )
+             ORDER BY d.created_at DESC, d.id
+             LIMIT :lim
+            """
+        ),
         {
-            "document_id": _clean(row[0]),
-            "title": _title(row[1]),
-            "authors": _authors(row[2]),
-            "year": int(row[3]) if row[3] is not None else None,
-            "placed": bool(row[4]),
-            "can_discuss": True,
-        }
-        for row in rows
-    ]
+            "domain_key": key,
+            "doc_ids": list(doc_ids),
+            "statuses": list(landscape_schema.LEARNER_VISIBLE_STATUSES),
+            "active": gap_schema.SIGNAL_STATUS_ACTIVE,
+            "lim": int(limit) + 1,
+        },
+    ).fetchall()
+    titles = [_title(r[0]) for r in rows if _title(r[0])]
+    return titles[:limit], len(rows) > limit

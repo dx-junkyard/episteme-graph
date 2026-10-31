@@ -156,6 +156,7 @@ class TestNoUnguardedFetch:
             "DomainNotAllowedError",
             "PrivateAddressError",
             "FetchFailedError",
+            "RateLimitedError",
             "UnsupportedContentError",
             "TooLargeError",
         }

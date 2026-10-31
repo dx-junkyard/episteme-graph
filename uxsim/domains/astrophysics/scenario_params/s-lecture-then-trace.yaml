@@ -1,0 +1,68 @@
+scenario: s-lecture-then-trace
+domain: astrophysics
+params:
+  goal_text: 講義の前に中性子星の状態方程式の章を一度通して聴き、分からない式を辿っておくこと
+  topic_hint: 二重ネットワークとTOV方程式の課し方（PINN による中性子星状態方程式）
+  topic_hint_terms:
+  - TOV
+  - 二重ネットワーク
+  - 状態方程式
+  - PINN
+  symbol_hints:
+  - P
+  - \rho
+  - c_s^2
+  - M
+  - R
+  interrupt_questions:
+  - いまのスライドの TOV 方程式というのは、何と何の釣り合いの式ですか？
+  - ネットワークを二つに分けるのは、何を別々に学習させるためですか？
+  - 読み上げとスライドの式が合っていない気がします。いまはどの式の話ですか？
+per_archetype:
+  non_native:
+    goal_text: listening once through the neutron-star EoS chapter
+    interrupt_questions:
+    - What balance does the TOV equation on this slide express?
+    - Why are there two networks?
+personas:
+  st-06-skeptic-bao:
+    # 第 4 周（judge_studio_r3 §5）: 数式の多いトピックで、講義のスライドの式が読む表示と一致するか（IK-0944 の是正後）、
+    # 記号 → ⚓ → 質問（受講ゲートの統一 IK-0945 の後）
+    interrupt_questions:
+      - スライドの式と教材の式で、記号や添字が違って見えます。どちらが論文の式ですか？
+      - この式の残差をネットワークに課すと、何が保証されて何は保証されないのですか？
+      - いまの説明の根拠は、論文のどの節に書いてありますか？
+  st-02-m2-lensing-theory:
+    # 第 5 周（judge_studio_r4 §5）: t16（Horndeski）で講義のスライドの式 → 記号 → ⚓ → チャット。復元の印が教材・スライド・
+    # 吹き出し・⚓・チャットで一致するか（IK-0977）。te-01 が同じ周に区切りと図を入れて保存したトピック
+    goal_text: 修正重力の章を講義で通して聴き、braiding の式の記号と根拠を辿っておくこと
+    topic_hint: Horndeski設定と音速・kineticityからのbraiding導出（暗黒エネルギーと修正重力の音速の論文）
+    topic_hint_terms: [kineticityからのbraiding導出]
+    symbol_hints: ['\alpha_B', '\alpha_K', 'c_s^2', 'X', '\phi']
+    interrupt_questions:
+      - スライドの braiding の式は、論文の式そのものですか、それとも復元した式ですか？
+      - 音速の二乗が負になるのは、kineticity と braiding のどんな組み合わせのときですか？
+      - いまの説明の根拠は、論文のどの節に書いてありますか？
+  st-05-night-solarwind:
+    # 第 6 周（judge_studio_r5 §5）: 部品チップのある t11（既定）で式 → 記号 → ⚓ → チャット。復元の印が本文・講義・付録・吹き出し・
+    # チャットの 5 か所で揃うか（壊れた復元の latex_withheld を含む・IK-1008 / 1009 の是正後）
+    interrupt_questions:
+      - スライドの TOV 方程式は論文の式そのものですか、それとも AI が復元した式ですか？
+      - ネットワークを二つに分けるのは、何を別々に学習させるためですか？
+      - いまの説明の根拠は、論文のどの節に書いてありますか？
+  st-07-m1-grb-voice:
+    # 第 7 周（judge_studio_r6 §7）: 部品チップのある t11（既定）で講義 → 講義中の質問 → モードバーの「▶ 再開」（H33・
+    # learning.lecture.resume）で止めた位置から続くか。IK-0895 の是正後に復元の印が本文・講義・付録・⚓・チャットの 5 か所で揃うか
+    interrupt_questions:
+      - いま読み上げている TOV 方程式は、論文の式そのものですか、それとも復元した式ですか？
+      - ネットワークを二つに分けるのは、何を別々に学習させるためですか？
+      - いまの説明の根拠は、論文のどの節に書いてありますか？
+  st-08-m1-rprocess-lecture:
+    symbol_hints: ['N_c', 'P', '\mathcal{L}_{\mathrm{TOV}}', '\rho_0']  # 第 11 周: 定義の文のある記号（N_c）を先頭に — IK-0571
+    # 第 8 周（judge_studio_r7 §7）: st-07 が share・doubt に出るため（3 面に出さない）st-08 に替えた。部品チップのある t11（既定）で
+    # 講義 → 講義中の質問 →「▶ 再開」。IK-0976 の見直し後に式で終わる枚と解説 2 文が同じ枚に入るか・復元の印と（原文）の印が
+    # 5 か所で揃うか。発行の前（版 1）に歩く
+    interrupt_questions:
+      - いまのスライドの TOV 方程式は、論文の式そのものですか、それとも AI が復元した式ですか？
+      - ネットワークを二つに分けるのは、何を別々に学習させるためですか？
+      - いまの説明の根拠は、論文のどの節に書いてありますか？

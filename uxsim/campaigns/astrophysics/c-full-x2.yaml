@@ -1,0 +1,17 @@
+id: c-astro-full-x2
+domain: astrophysics
+snapshot: corpus-astro-v1
+personas:
+  teachers: [te-01-rookie-seminar, te-04-copilot-intro]
+  students: [st-01-m1-radio, st-03-d1-from-particle, st-04-intl-exoplanet, st-06-skeptic-bao]
+scenarios:
+  teacher: [t-build-course-from-corpus]
+  student: [s-enroll-and-first-topic, s-ask-until-confused, s-check-and-object, s-discuss-one-paper, s-lecture, s-return-next-day, s-maps-and-records]
+runner: api
+flags: {}
+sessions_per_student: 2
+budget: {product_llm_calls: 800, persona_llm_calls: 1200, wall_clock_minutes: 300}
+notes: |
+  さらなる検証（2026-09-28）: 埋め込みは本物の OpenAI（proxy 素通し）、対話は Claude Code の頭脳のまま。
+  台本 5 → 8（確認問題・レクチャー・翌日の再訪を追加）、セッション 2。第 4 周まで一度も走らなかった
+  確認問題・レクチャー・帰還の扉を必ず踏み、RAG 検索が効く状態での出典の付き方を見る。

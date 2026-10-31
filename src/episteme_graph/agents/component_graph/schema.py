@@ -48,6 +48,66 @@ VALID_EDGE_TYPES = [
     "eliminates_bias",
 ]
 
+# 辺推論で LLM が選ぶ関係語彙（プロンプトの Edge inference rules と 1 対 1）。
+# VALID_EDGE_TYPES の小文字語は normalizer が operation から決定論で付ける edge_type で、
+# LLM には渡さない（IK-0791: 定義の無い語を推測で選ばせない）。validator は両方を受理する。
+LLM_RELATION_EDGE_TYPES = [
+    "REQUIRES",
+    "PRODUCES_FOR",
+    "TRANSFORMS",
+    "DERIVES_FROM",
+    "QUALIFIES",
+    "ENABLES",
+    "INHIBITS",
+    "CHECKED_BY",
+    "DEFINES",
+    "CONFLICTS_WITH",
+    "RELATED_TO",
+]
+
+GENERIC_RELATION_EDGE_TYPE = "RELATED_TO"
+
+# DSL の core_predicate（dsl_linking.schema.CORE_PREDICATES = backend CorePredicate の 10 語）
+# → component 辺の edge_type の写像の正本（IK-0791・X1 seq 3289）。
+# reverse=True は向きを入れ替える（DSL「診断 MEASURES 観測量」→ 部品「観測量 CHECKED_BY 診断」）。
+# INHIBITS（DSL = 抑える・補正する）は component 辺の INHIBITS（矛盾・妥当性の否定）と意味が
+# 違うので QUALIFIES に写す（「Jeffreys 事前分布が Laplace 項を否定」と読ませない）。
+# 対応する関係の無い述語（CONTAINS / CORRELATES / CAUSES / EQUIVALENT）は generic の
+# RELATED_TO に写し、mapping_note で「固有の対応なし」と残す（落とさない）。
+CORE_PREDICATE_TO_EDGE_TYPE: dict[str, dict] = {
+    "REQUIRES": {"edge_type": "REQUIRES", "reverse": False},
+    "PRODUCES": {"edge_type": "PRODUCES_FOR", "reverse": False},
+    "TRANSFORMS": {"edge_type": "TRANSFORMS", "reverse": False},
+    "DEFINES": {"edge_type": "DEFINES", "reverse": False},
+    "MEASURES": {"edge_type": "CHECKED_BY", "reverse": True},
+    "INHIBITS": {"edge_type": "QUALIFIES", "reverse": False},
+}
+CORE_PREDICATE_NO_SPECIFIC_EDGE_TYPE = "no_specific_edge_type"
+
+
+def edge_type_for_core_predicate(core_predicate: str | None) -> dict:
+    """DSL の core_predicate を component 辺の edge_type に写す（決定論・落とさない）。
+
+    戻り値は ``{"edge_type", "reverse", "generic", "mapping_note"}``。写像表に無い述語
+    （未知語を含む）は ``RELATED_TO`` + ``generic=True`` + ``mapping_note`` で返す。
+    """
+    key = str(core_predicate or "").strip().upper()
+    hit = CORE_PREDICATE_TO_EDGE_TYPE.get(key)
+    if hit:
+        return {
+            "edge_type": hit["edge_type"],
+            "reverse": bool(hit["reverse"]),
+            "generic": False,
+            "mapping_note": "",
+        }
+    return {
+        "edge_type": GENERIC_RELATION_EDGE_TYPE,
+        "reverse": False,
+        "generic": True,
+        "mapping_note": CORE_PREDICATE_NO_SPECIFIC_EDGE_TYPE,
+    }
+
+
 # Source-backing classification for theory-operation nodes (issue #302).
 SOURCE_BACKING_STATUSES = [
     "source_backed",
@@ -73,7 +133,33 @@ REVIEW_REASONS = [
     # Issue #358: two-layer linkage gaps recorded on the node itself.
     "orphan_detail_node",
     "empty_main_node",
+    # The only equations backing this node/edge were reconstructed from context by
+    # the AI rather than extracted from the paper, so the structure is kept but
+    # never confirmed (a human decides). See RECONSTRUCTION_BACKED_STEP_REASON.
+    "reconstructed_equation_backing",
+    # The derivation step declared an elimination but named no eliminated symbol,
+    # so it is kept as a generic step (never an ``eliminates`` edge) instead of
+    # tripping the elimination_missing_eliminated_symbols hard error.
+    "elimination_target_unresolved",
+    # The node failed a node-scoped hard validation rule after generation; the
+    # orchestrator moved it to the debug layer (review_required) so the rest of
+    # the graph can still be persisted instead of discarding the whole graph.
+    "validation_demoted",
 ]
+
+VALIDATION_DEMOTED_REASON = "validation_demoted"
+
+ELIMINATION_TARGET_UNRESOLVED_REASON = "elimination_target_unresolved"
+# Operation substituted for an elimination step with no eliminated symbol. Must be
+# a GENERIC_OPERATIONS member and must not contain "eliminat".
+UNRESOLVED_ELIMINATION_OPERATION = "transform"
+
+#: Marker a derivation step carries in ``review_reason`` when the equations it uses
+#: were reconstructed from context instead of extracted from the paper. The value is
+#: produced by DerivationChainAgent (``RECONSTRUCTION_BACKED_REASON``); the two are
+#: pinned to each other by a test. Refusing to confirm on such backing is this
+#: module's responsibility.
+RECONSTRUCTION_BACKED_STEP_REASON = "reconstructed_equation_backing"
 
 # Edge types that are too generic to publish as confirmed theory structure.
 GENERIC_EDGE_TYPES = {"related_to", "correlates", "supports", "transforms", "relate"}
@@ -159,6 +245,25 @@ _EDGE_TYPE_TO_STAGE = {
     # entry never promotes a generic step to the main graph).
     "transforms": THEORY_STAGE_EQUATION_SYSTEM,
 }
+
+
+def derivation_step_ref(derivation_id: str, step_id: str) -> str:
+    """Document-unique reference for a derivation step: ``"{derivation_id}:{step_id}"``.
+
+    A step's ``step_id`` (``step_001`` …) is only unique *within* its chain — every
+    chain restarts the numbering — so a bare ``step_id`` in the graph cannot be
+    matched to one specific step of the document. Downstream readers therefore
+    address a step by this composite form.
+
+    Graph nodes / edges keep the bare ``step_id`` as well (older graphs and the
+    derivation artifact index are keyed by it); the composite is emitted *next to*
+    it so a reader can resolve either spelling.
+    """
+    chain = str(derivation_id or "").strip()
+    step = str(step_id or "").strip()
+    if not chain:
+        return step
+    return f"{chain}:{step}" if step else chain
 
 
 def stage_for_edge_type(edge_type: str) -> str:
@@ -306,6 +411,15 @@ _OPERATION_PREFIX_MAP = {
 }
 
 
+#: Public, read-only names for the operation vocabulary above (IK-0754). Upstream
+#: generators (component_assembly's prompt / validator) present this exact table
+#: to the LLM so the words they choose are the ones ``classify_operation`` accepts.
+#: These are the same objects, not copies — the tables above stay the single
+#: canonical source.
+OPERATION_FULL_NAMES = _OPERATION_FULL_MAP
+OPERATION_PREFIX_FAMILIES = _OPERATION_PREFIX_MAP
+
+
 def classify_operation(operation: str) -> tuple[str, str, bool]:
     """Map a derivation operation to a (verb, edge_type, is_generic) triple.
 
@@ -448,6 +562,12 @@ class ComponentGraphEdge:
     # "" non-polar). Mirrors DSLEdge.polarity; carried to the UI so polarity is
     # visualised from the field, never guessed from the relation label string.
     polarity: str = ""
+    # Graph layer of the edge, mirroring ComponentGraphNode.graph_layer (issue #306).
+    # Nodes carried the layer from the start but edges did not, so a reader could
+    # only infer an edge's layer from its endpoints. Main-graph edges are "main",
+    # per-step edges "equation_detail", and edges touching a fallback/inferred node
+    # "debug".
+    graph_layer: str = GRAPH_LAYER_MAIN
 
 
 
@@ -550,6 +670,7 @@ class ComponentGraphResult:
                     "review_status": e.review_status,
                     "review_reasons": e.review_reasons,
                     "polarity": e.polarity,
+                    "graph_layer": e.graph_layer,
                     "evidence": {
                         "evidence_claims": e.evidence_claims,
                         "evidence_equation_ids": e.evidence_equation_ids,

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+from episteme_graph.agents.generation_language import apply_generation_language
+
 from .schema import GRAPH_RELATIONS, SUPPORT_SECTIONS, SUPPORT_TYPES, CartridgeContext, ThesisLLMInput
 
 _SYSTEM_CONTENT = """\
@@ -22,6 +24,17 @@ Be conservative and evidence-based. If multiple thesis formulations are plausibl
 Return ONLY valid JSON matching the schema.
 """
 
+#: support_structure の各要素の形（``SupportEntry`` のフィールドと一致させる。
+#: 一致は ``test_prompt_contract.py`` が固定する）。
+_SUPPORT_ENTRY_EXAMPLE = {
+    "text": "string",
+    "claim_ids": [],
+    "equation_ids": [],
+    "support_type": "one of support_type values",
+    "reason": "string",
+    "confidence": 0.0,
+}
+
 _OUTPUT_SCHEMA = {
     "document_id": "string",
     "thesis_version": "v1",
@@ -37,14 +50,11 @@ _OUTPUT_SCHEMA = {
     "alternative_theses": [
         {"text": "string", "reason": "string", "confidence": 0.0}
     ],
+    # 各節は SupportEntry（schema.py）の項目を持つ要素の配列。validator は
+    # support_type（direct_supports では SUPPORT_TYPES の値）/ claim_ids・equation_ids /
+    # confidence を読み、下流（dsl_linking の thesis_nodes）は text を読む。
     "support_structure": {
-        "direct_supports": [],
-        "assumptions": [],
-        "derivation_core": [],
-        "correction_sources": [],
-        "uncertainty_sources": [],
-        "diagnostic_consequences": [],
-        "future_requirements": [],
+        section: [dict(_SUPPORT_ENTRY_EXAMPLE)] for section in SUPPORT_SECTIONS
     },
     "excluded_from_core": [
         {"category": "prior_work | meta | figure_narration", "claim_ids": [], "reason": "string"}
@@ -57,8 +67,38 @@ _OUTPUT_SCHEMA = {
 }
 
 
+#: 解析 run の生成言語（run options ``language``）で書かせる、生成した文章のフィールド。
+#: 論文の逐語・記号・ID・語彙値は含めない（``generation_language`` の不変条項）。
+GENERATED_PROSE_FIELDS: tuple[str, ...] = (
+    "central_thesis.text",
+    "central_thesis.reason",
+    "alternative_theses[].text",
+    "alternative_theses[].reason",
+    "support_structure.*[].text",
+    "support_structure.*[].reason",
+    "excluded_from_core[].reason",
+    "review_notes",
+)
+
+
 class ThesisReconstructionPromptFactory:
-    def build_messages(
+    #: 解析 run の生成言語（``ja`` / ``en``）。``None`` なら prompt は従来と同一。
+    language: str | None = None
+
+    def __init__(self, language: str | None = None) -> None:
+        self.language = language
+
+    def build_messages(self, *args, **kwargs) -> list[dict]:
+        return apply_generation_language(
+            self._base_messages(*args, **kwargs), self.language, GENERATED_PROSE_FIELDS
+        )
+
+    def build_repair_messages(self, *args, **kwargs) -> list[dict]:
+        return apply_generation_language(
+            self._base_repair_messages(*args, **kwargs), self.language, GENERATED_PROSE_FIELDS
+        )
+
+    def _base_messages(
         self,
         llm_input: ThesisLLMInput,
         cartridge: CartridgeContext | None = None,
@@ -68,7 +108,7 @@ class ThesisReconstructionPromptFactory:
             {"role": "user", "content": self._build_user_content(llm_input, cartridge)},
         ]
 
-    def build_repair_messages(
+    def _base_repair_messages(
         self,
         llm_input: ThesisLLMInput,
         previous_output: dict,
@@ -133,6 +173,8 @@ class ThesisReconstructionPromptFactory:
             "\n## Constraints",
             "- central_thesis must not be prior-work, figure narration, or section meta\n"
             "- direct_supports must contain at least one evidence-backed entry\n"
+            "- every support_structure entry must have text, claim_ids, equation_ids, "
+            "support_type, reason, and confidence (claim_ids/equation_ids taken from the input)\n"
             "- prior_work/meta/figure narration should go to excluded_from_core\n"
             "- confidence values must be between 0.0 and 1.0\n"
             "- Return ONLY valid JSON, no markdown fences",

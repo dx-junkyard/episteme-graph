@@ -55,6 +55,48 @@ SPOKEN_CONTRACT = (
 
 
 # ---------------------------------------------------------------------------
+# 立場ラベルの重複除去（表示専用のラベルを本文・読み上げから落とす）
+# ---------------------------------------------------------------------------
+
+#: ラベルの直後に置かれがちな区切り（全角コロン・ダッシュ・空白）。
+_STANCE_PREFIX_SEPARATORS = "：:—–-ー・、,. \t\u3000"
+
+#: ラベルの囲み方（素のラベル・鉤括弧・丸括弧・角括弧・墨付き括弧）。
+_STANCE_PREFIX_WRAPPERS = (
+    ("", ""),
+    ("「", "」"),
+    ("【", "】"),
+    ("（", "）"),
+    ("(", ")"),
+    ("[", "]"),
+)
+
+
+def strip_stance_prefix(text: str, label: str) -> str:
+    """応答本文の先頭に書かれた立場ラベルを落とす（純粋関数）。
+
+    ラベルは**画面のチップが引き受ける表示専用の留保**なので、本文に書かれると
+    (1) 画面でラベルが二重に出る (2) 読み上げがラベルから始まる、という二つの事故に
+    なる（2026-09-22 オーナー指摘）。プロンプト側でも「本文に書かない」と指示するが、
+    LLM が従わない回のために受け取り側でも落とす（表示の規約を生成に依存させない）。
+
+    先頭にあるときだけ落とす（文中に現れたラベルは本文の一部として残す）。
+    """
+    if not label:
+        return text
+    remainder = text.lstrip()
+    for _ in range(2):  # 「ラベル：ラベル：」のような繰り返しも1回だけ余分に見る
+        for opener, closer in _STANCE_PREFIX_WRAPPERS:
+            prefix = opener + label + closer
+            if remainder.startswith(prefix):
+                remainder = remainder[len(prefix):].lstrip(_STANCE_PREFIX_SEPARATORS).lstrip()
+                break
+        else:
+            break
+    return remainder
+
+
+# ---------------------------------------------------------------------------
 # 読み上げモードの structured output スキーマ
 # ---------------------------------------------------------------------------
 
@@ -238,6 +280,8 @@ def structured_turn(
 
     raw_reply = str(getattr(parsed, "reply", "") or "")
     reply = (hygiene(raw_reply) if hygiene else raw_reply).strip()
+    # 表示専用のラベルが本文の頭に書かれていたら落とす（画面の二重表示・読み上げの防止）。
+    reply = strip_stance_prefix(reply, stance_label or "")
     if not reply:
         fallback = degraded_reply if isinstance(empty_reply_fallback, _Unset) else empty_reply_fallback
         if fallback is not None:
@@ -250,6 +294,7 @@ def structured_turn(
             if spoken_resolver
             else reply
         )
+        spoken_text = strip_stance_prefix(spoken_text, stance_label or "")
     return TurnResult(
         reply=reply,
         parsed=parsed,
@@ -267,5 +312,6 @@ __all__ = [
     "TurnResult",
     "build_turn_messages",
     "spoken_variant",
+    "strip_stance_prefix",
     "structured_turn",
 ]

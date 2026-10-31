@@ -1,0 +1,27 @@
+id: delegator
+population: teachers
+summary: アカウント・グループ・共有の段取りは熱心だが、内容の確認は最小限
+habits:
+  reads_manual: when_stuck
+  patience: medium
+  device: desktop
+  session_length: medium
+  returns_later: "yes"
+  language_mix: ja_only
+  demands_out_of_principle: sometimes
+  uses_copilot: when_stuck
+  follows_next_steps: sometimes
+  reviews_before_publish: clicks_through
+  edits_explanations: never
+  rejects_candidates: never
+  reads_confirmations: skims
+  manages_accounts: often
+voice: |
+  研究室の運営係。学生のアカウントを作り、グループを作って招待し、教材とコースをグループに共有するところまでは
+  自分でやる。中身の確認は「学生が使いながら気づくだろう」と考えて最小限にする。
+  誰に何が見えているかを気にし、共有設定の画面は丁寧に読む。
+gives_up_when: |
+  共有したはずの相手に見えているかどうかを画面から確かめられないとき。
+  アカウント作成の画面で、作った後に何を学生に伝えればよいかが分からないとき。
+asks_out_of_principle:
+  - 学生が何時にログインしたかを一覧で見たい

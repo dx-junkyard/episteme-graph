@@ -77,10 +77,11 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
@@ -111,8 +112,10 @@ from core.deliberation.schema import (
     ELEMENT_SHARED_PART,
     DIALOGUE_SESSION_ELEMENT_TYPES,
     IDENTITY_LINKABLE_ELEMENT_TYPES,
+    IDENTITY_LINK_STATUS_CANDIDATE,
     IDENTITY_LINK_STATUS_CONFIRMED,
     IDENTITY_LINK_STATUS_REJECTED,
+    IDENTITY_LINK_STATUS_REVOKED,
     SCOPE_DOCUMENT,
     ElementResolutionError,
 )
@@ -145,6 +148,15 @@ _RESOLUTION_ERROR_DETAILS = {
     # 例: 行が無い / この教材の解析結果に含まれない / document_id が必要な要素型で未指定。
     "not_found": "この要素は見つかりませんでした。",
 }
+
+
+#: 主グラフの集約ノード（graph-native ID）。theory_components の行を持たない。
+_AGGREGATED_MAIN_NODE_RE = re.compile(r"^theory_op_\d+$")
+FACT_AGGREGATED_MAIN_NODE = (
+    "主グラフのノードは複数の手順をまとめたもので、単独の部品ではないため、このノードのまま対話は開けません。"
+    "ノードの代表の部品か、「式の詳細」層の手順を選んで開いてください。"
+    "論文全体について尋ねるときは「グラフ全体」の対話をご利用ください。"
+)
 
 
 def _http_from_resolution_error(exc: ElementResolutionError) -> HTTPException:
@@ -183,8 +195,33 @@ def _identity_link_response(link: dict[str, Any]) -> dict[str, Any]:
     """
     response = dict(link)
     raw_confidence = response.pop("confidence", None)
-    response["confidence_label"] = identity_links.confidence_label(raw_confidence)
+    response.pop("outcome", None)  # 作成の結果は create のレスポンス本体で別に返す（IK-0918）
+    # IK-0916: 確信度の段階は AI・照合由来の未確定の行だけ。手で作った行・人が判断した
+    # 行には段階を付けず、出所（教員が作成 / 教員が確定）を別の語で返す。
+    response["confidence_label"] = (
+        identity_links.confidence_label(raw_confidence)
+        if identity_links.shows_confidence(link)
+        else None
+    )
+    response["provenance_label"] = identity_links.provenance_label(link)
+    # IK-0916 / IK-0917: 結んだ相手（部品側）を名前・要約・入出力・論文の題名で読めるようにする。
+    try:
+        response.update(identity_links.describe_instance(link))
+    except Exception:  # noqa: BLE001 — 表示の補助（fail-soft）
+        logger.warning("deliberation: instance describe failed", exc_info=True)
+    component_type = response.pop("_component_type", "")
+    # IK-0953: 誰が作り・確定し・取り消したかを表示名で（UUID は値として残る）。
+    try:
+        response.update(identity_links.describe_actors(link))
+    except Exception:  # noqa: BLE001 — 表示の補助（fail-soft）
+        logger.warning("deliberation: identity link actors failed", exc_info=True)
+    status = str(link.get("status") or "")
+    if status == IDENTITY_LINK_STATUS_CANDIDATE:
+        response["confirm_note"] = identity_links.CONFIRM_NOTE
+    elif status == IDENTITY_LINK_STATUS_CONFIRMED:
+        response["revoke_note"] = identity_links.REVOKE_NOTE
     shared_part_id = str(link.get("shared_part_id") or "").strip()
+    entry = None
     if shared_part_id:
         try:
             entry = library_store.get_entry(shared_part_id)
@@ -197,6 +234,29 @@ def _identity_link_response(link: dict[str, Any]) -> dict[str, Any]:
         if entry:
             response["shared_part_name"] = entry.get("name") or ""
             response["shared_part_summary"] = str(entry.get("summary") or "")[:160]
+            if status == IDENTITY_LINK_STATUS_CANDIDATE:
+                # IK-0917: 両側の種別が違うときは一段強い確認の事実文を添える。
+                note = identity_links.granularity_note(component_type, entry.get("entry_type"))
+                if note:
+                    response["granularity_note"] = note
+    # IK-1076: 判断の対象にできるか（置き換わった部品の記録・見送った概念の行は判断しない）。
+    # 述語は一覧（library の候補）と同じ — 画面ごとに別の規則で決めない。
+    undecidable = identity_links.link_undecidable_note(
+        response, entry_review_status=(entry or {}).get("review_status") if shared_part_id else None
+    )
+    if undecidable:  # 判断できる行にはキーを足さない（既存の DTO の形を保つ・JS は ``!== false``）
+        response["decidable"] = False
+        response["undecidable_note"] = undecidable
+        response.pop("confirm_note", None)
+        response.pop("granularity_note", None)
+        return response
+    if status == IDENTITY_LINK_STATUS_CANDIDATE:
+        # IK-0917: 流し読みでも止まるよう、両側を名指しして「同じものか」を問う 1 文。
+        response["confirm_question"] = identity_links.confirm_question(
+            str(response.get("instance_type_label") or ""),
+            str(response.get("instance_label") or ""),
+            str(response.get("shared_part_name") or ""),
+        )
     return response
 
 
@@ -346,6 +406,25 @@ def _apply_cross_corpus_gate(positioning_payload: dict[str, Any], current_user: 
     lens["hidden_count"] = hidden
 
 
+def _teacher_view(document_id: str | None, payload: dict[str, Any]) -> dict[str, Any]:
+    """教員向けの名指しの面（要素の内訳・文脈・グラフ全体対話）の表示投影（DP7）。
+
+    deliberation ルーター全体には掛けない（要素インベントリの ``counts`` など件数を正当に
+    返す API が同居する）。エンドポイントの戻り値に ``project_for_teacher`` を明示的に通す。
+    """
+    from routes.theory_components import project_teacher_dto
+
+    if not document_id:
+        from core.display_projection import project_for_teacher
+
+        try:
+            return project_for_teacher(payload)
+        except Exception:  # noqa: BLE001 — DP6
+            logger.warning("teacher display projection failed", exc_info=True)
+            return payload
+    return project_teacher_dto(document_id, payload)
+
+
 @router.get("/elements/{element_type}/{element_id}/overview")
 def get_element_overview(
     element_type: str,
@@ -467,13 +546,16 @@ def get_element_overview(
             "note": "説明の取得に失敗しました",
         }
 
-    return {
-        "ref": ref.to_dict(),
-        "decomposition": breakdown,
-        "positioning": positioning_payload,
-        "context": context_payload,
-        "explanations": explanations_payload,
-    }
+    return _teacher_view(
+        ref.document_id,
+        {
+            "ref": ref.to_dict(),
+            "decomposition": breakdown,
+            "positioning": positioning_payload,
+            "context": context_payload,
+            "explanations": explanations_payload,
+        },
+    )
 
 
 @router.get("/elements/{element_type}/{element_id}/context")
@@ -524,7 +606,7 @@ def get_element_context(
 
     if context_result is None:
         return {"available": False, "note": "この要素型にはコンテキスト投影がありません"}
-    return {"available": True, **context_result}
+    return _teacher_view(ref.document_id, {"available": True, **context_result})
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +635,7 @@ class IdentityLinkCreateRequest(BaseModel):
 @router.post("/identity-links")
 def create_identity_link(
     body: IdentityLinkCreateRequest,
+    response: Response,
     current_user: dict = Depends(_require_teacher),
 ) -> dict[str, Any]:
     """インスタンス要素 ↔ 共通部品（shared_part）の同一性リンク候補を1件作成する。
@@ -589,42 +672,191 @@ def create_identity_link(
         # KR4（概念レジストリ §4.6）: W層 UI からの手動作成は教員の判断そのもの。
         mapping_justification=MAPPING_JUSTIFICATION_MANUAL,
     )
-    record_review_event(
-        AUDIT_ENTITY_DELIBERATION,
-        link["id"],
-        "",
-        link["status"],
-        current_user.get("id"),
-        {
-            "action": "identity_link.create",
-            "instance_element_type": instance_ref.element_type,
-            "instance_element_id": instance_ref.element_id,
-            "instance_document_id": instance_ref.document_id,
-            "shared_part_id": shared_part_ref.element_id,
-        },
-    )
-    return _identity_link_response(link)
+    outcome = str(link.get("outcome") or identity_links.LINK_OUTCOME_CREATED)
+    if outcome == identity_links.LINK_OUTCOME_CREATED:
+        # 監査は状態が変わったときだけ（既存行を返しただけなら記帳しない）。
+        record_review_event(
+            AUDIT_ENTITY_DELIBERATION,
+            link["id"],
+            "",
+            link["status"],
+            current_user.get("id"),
+            {
+                "action": "identity_link.create",
+                "instance_element_type": instance_ref.element_type,
+                "instance_element_id": instance_ref.element_id,
+                "instance_document_id": instance_ref.document_id,
+                "shared_part_id": shared_part_ref.element_id,
+            },
+        )
+        response.status_code = 201
+    # IK-0918: 新規・既存（候補のまま / 確定済み / 却下済み）を事実文で言い分ける。
+    # 既存のキー集合は保ったまま outcome / facts を足す（追加のみ）。
+    payload = _identity_link_response(link)
+    payload["outcome"] = outcome
+    payload["facts"] = [identity_links.LINK_OUTCOME_FACTS.get(outcome, "")]
+    return payload
 
 
-def _decide_identity_link(link_id: str, status: str, current_user: dict) -> dict[str, Any]:
+def _ensure_identity_link_decidable(existing: dict[str, Any]) -> None:
+    """IK-1076: 判断の対象でない行への確定・候補に戻すを 409（日本語の事実文）で断る。"""
+    try:
+        decidable = _identity_link_response(existing).get("decidable", True)
+    except Exception:  # noqa: BLE001 — 判定できないときは止めない（fail-open・従来どおり）
+        logger.debug("identity link decidable check failed", exc_info=True)
+        return
+    if decidable is False:
+        raise HTTPException(status_code=409, detail=identity_links.LINK_UNDECIDABLE_CONFLICT)
+
+
+def _decide_identity_link(
+    link_id: str, status: str, current_user: dict, *, reason: str = ""
+) -> dict[str, Any]:
     existing = identity_links.get_by_id(link_id)
     if not existing:
         raise HTTPException(status_code=404, detail="identity link not found")
     _ensure_document_editable(existing["instance_document_id"], current_user)
+    if status == IDENTITY_LINK_STATUS_CONFIRMED:
+        # IK-1076: 判断の対象でない行（置き換わった部品・見送った概念）は確定しない。
+        _ensure_identity_link_decidable(existing)
 
-    result = identity_links.decide(link_id, status=status, decided_by=current_user.get("id"))
+    result = identity_links.decide(
+        link_id, status=status, decided_by=current_user.get("id"), reason=reason
+    )
     if result is None:
         raise HTTPException(status_code=409, detail="identity link already decided")
 
+    metadata: dict[str, Any] = {"action": f"identity_link.{status}"}
+    if reason:
+        metadata["reason"] = reason[:500]
     record_review_event(
         AUDIT_ENTITY_DELIBERATION,
         link_id,
         existing["status"],
         status,
         current_user.get("id"),
-        {"action": f"identity_link.{status}"},
+        metadata,
     )
-    return _identity_link_response(result)
+    response = _identity_link_response(result)
+    # IK-0953: 判断の直後の知らせ（印・判断した人・日付と、学生に出る条件）。
+    fact = identity_links.decision_outcome_fact(
+        status,
+        str(response.get("decision_line") or ""),
+        instance_element_type=existing.get("instance_element_type"),
+    )
+    if fact:
+        response["outcome_fact"] = fact
+    return response
+
+
+def _reword_same_paper_reasons(responses: list[dict[str, Any]]) -> None:
+    """IK-0980: 組の相手が同じ論文の別の版なのに「別の論文の記述と…」と言う根拠の文を言い換える。
+
+    表示だけ（保存値は ``recorded_reason`` に残す）。判定は ``identity_candidates.same_paper``
+    （arXiv ID → 題名の決定論）。DB に届かなければ何もしない（fail-soft）。
+    """
+    targets = [
+        r for r in responses
+        if str(r.get("reason") or "").startswith(identity_links.OTHER_PAPER_REASON_PREFIX)
+    ]
+    if not targets:
+        return
+    doc_ids = sorted({str(r.get("instance_document_id") or "") for r in responses} - {""})
+    if len(doc_ids) < 2:
+        return
+    try:
+        from core.library.identity_candidates import resolve_same_paper_documents
+        from core.postgres import get_session as _get_session
+
+        session = _get_session()
+        try:
+            same_by_doc = {
+                d: resolve_same_paper_documents(session, document_id=d, candidate_document_ids=doc_ids)
+                for d in {str(r.get("instance_document_id") or "") for r in targets} - {""}
+            }
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — 表示の補助（fail-soft）
+        logger.debug("same paper lookup failed", exc_info=True)
+        return
+    for r in targets:
+        part = str(r.get("shared_part_id") or "")
+        doc = str(r.get("instance_document_id") or "")
+        partner_docs = {
+            str(o.get("instance_document_id") or "")
+            for o in responses
+            if o is not r and str(o.get("shared_part_id") or "") == part
+        } - {"", doc}
+        same = bool(partner_docs) and partner_docs <= same_by_doc.get(doc, set())
+        reworded = identity_links.reworded_same_paper_reason(r.get("reason"), partner_is_same_paper=same)
+        if reworded:
+            r["recorded_reason"] = str(r.get("reason") or "")
+            r["reason"] = reworded
+
+
+def _attach_pair_confirm_questions(responses: list[dict[str, Any]]) -> None:
+    """同じ共通部品に結び付いた行どうしを対として問い直す（IK-1026 / IK-1020・表示だけ）。
+
+    候補の行の ``confirm_question`` を、比べる相手（版・論文題名・部品名）を名指しした問いに
+    差し替える。相手の行の部品が live に無い（再解析で置き換わった）ときは、その事実を先に言う
+    問いと根拠の文にする。
+    """
+    by_part: dict[str, list[dict[str, Any]]] = {}
+    for item in responses:
+        by_part.setdefault(str(item.get("shared_part_id") or ""), []).append(item)
+    for items in by_part.values():
+        for item in items:
+            if item.get("decidable") is False:
+                # IK-1076: 判断の対象でない行には問いを作らない（名前の引けない部品を名指ししない）。
+                item.pop("confirm_question", None)
+                continue
+            if str(item.get("status") or "") != IDENTITY_LINK_STATUS_CANDIDATE:
+                # IK-1050（第 7 波）: 判断した行でも、組の相手が全部置き換わっていれば保存値の根拠
+                # （「別の論文の記述と…」）より先に置き換わりの事実を言う（元の文は recorded_reason）。
+                peers = [
+                    o for o in items
+                    if o is not item
+                    and str(o.get("instance_element_type") or "") == str(item.get("instance_element_type") or "")
+                ]
+                if peers and not any(str(o.get("instance_label") or "").strip() for o in peers):
+                    item["recorded_reason"] = str(item.get("reason") or "")
+                    item["reason"] = identity_links.PARTNER_REPLACED_REASON
+                continue
+            others = [
+                o for o in items
+                if o is not item
+                and str(o.get("status") or "") in (IDENTITY_LINK_STATUS_CANDIDATE, IDENTITY_LINK_STATUS_CONFIRMED)
+                and str(o.get("instance_element_type") or "") == str(item.get("instance_element_type") or "")
+            ]
+            live = [o for o in others if str(o.get("instance_label") or "").strip()]
+            side = identity_links.instance_side_label(
+                item.get("instance_document_format_label"), item.get("instance_document_title")
+            )
+            if live:
+                item["confirm_question"] = identity_links.pair_confirm_question(
+                    instance_type_label=str(item.get("instance_type_label") or ""),
+                    instance_label=str(item.get("instance_label") or ""),
+                    instance_side=side,
+                    partners=[
+                        (
+                            str(o.get("instance_type_label") or ""),
+                            str(o.get("instance_label") or ""),
+                            identity_links.instance_side_label(
+                                o.get("instance_document_format_label"), o.get("instance_document_title")
+                            ),
+                        )
+                        for o in live
+                    ],
+                    shared_part_name=str(item.get("shared_part_name") or ""),
+                )
+            elif others:
+                item["confirm_question"] = identity_links.partner_replaced_question(
+                    str(item.get("instance_type_label") or ""),
+                    str(item.get("instance_label") or ""),
+                    side,
+                    str(item.get("shared_part_name") or ""),
+                )
+                item["reason"] = identity_links.PARTNER_REPLACED_REASON
 
 
 @router.post("/identity-links/{link_id}/confirm")
@@ -636,13 +868,126 @@ def confirm_identity_link(
     return _decide_identity_link(link_id, IDENTITY_LINK_STATUS_CONFIRMED, current_user)
 
 
+class IdentityLinkRejectRequest(BaseModel):
+    reason: str = ""
+
+
+#: IK-1050: 見送りの理由が空のときの文（エントリの見送り・確定の取り消しと同じ作法）。
+IDENTITY_LINK_REJECT_REASON_REQUIRED = "見送りの理由を書いてください（記録に残ります）。"
+
+
 @router.post("/identity-links/{link_id}/reject")
 def reject_identity_link(
     link_id: str,
+    body: IdentityLinkRejectRequest | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict[str, Any]:
-    """同一性リンク候補を却下する（status 遷移で保持・P4。行削除はしない）。"""
-    return _decide_identity_link(link_id, IDENTITY_LINK_STATUS_REJECTED, current_user)
+    """同一性リンク候補を見送る（status 遷移で保持・P4。行削除はしない）。
+
+    IK-1050（第 7 波）: 理由必須（KR7）。body ``{"reason": "…"}`` が無い・空は 422。
+    理由は行（``revoke_reason`` 列 = 否定の判断の理由）と監査の両方に残る。
+    """
+    reason = str((body.reason if body is not None else "") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail=IDENTITY_LINK_REJECT_REASON_REQUIRED)
+    return _decide_identity_link(
+        link_id, IDENTITY_LINK_STATUS_REJECTED, current_user, reason=reason
+    )
+
+
+class IdentityLinkRevokeRequest(BaseModel):
+    reason: str = ""
+
+
+@router.post("/identity-links/{link_id}/revoke")
+def revoke_identity_link(
+    link_id: str,
+    body: IdentityLinkRevokeRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """確定した同一性リンクを取り消す（IK-0953。confirmed → revoked・理由必須・行は残す）。
+
+    権限は確定と同じ（インスタンス側の論文の編集権限）。確定でない行は 409、理由が空は 422。
+    確定者の記録は上書きせず、取り消した人・理由・日時を別に残し、監査
+    ``identity_link.revoked`` を記帳する。学生側は確定（confirmed）だけを読むので、
+    取り消した結び付きは学生の「共通部品」から消える。
+    """
+    reason = str(body.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="取り消しの理由を書いてください。")
+    existing = identity_links.get_by_id(link_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="identity link not found")
+    _ensure_document_editable(existing["instance_document_id"], current_user)
+    if str(existing.get("status") or "") != IDENTITY_LINK_STATUS_CONFIRMED:
+        raise HTTPException(status_code=409, detail="確定した結び付きだけを取り消せます。")
+    result = identity_links.revoke(link_id, revoked_by=current_user.get("id"), reason=reason)
+    if result is None:
+        raise HTTPException(status_code=409, detail="確定した結び付きだけを取り消せます。")
+    record_review_event(
+        AUDIT_ENTITY_DELIBERATION,
+        link_id,
+        IDENTITY_LINK_STATUS_CONFIRMED,
+        IDENTITY_LINK_STATUS_REVOKED,
+        current_user.get("id"),
+        {
+            "action": "identity_link.revoked",
+            "reason": reason[:500],
+            "confirmed_by": existing.get("decided_by"),
+            "shared_part_id": existing.get("shared_part_id"),
+        },
+    )
+    return _identity_link_response(result)
+
+
+class IdentityLinkRestoreRequest(BaseModel):
+    reason: str = ""
+
+
+#: IK-1062: 候補に戻す理由が空のときの文。
+IDENTITY_LINK_RESTORE_REASON_REQUIRED = "候補に戻す理由を書いてください（記録に残ります）。"
+IDENTITY_LINK_RESTORE_CONFLICT = "見送った結び付きか、確定を取り消した結び付きだけを候補に戻せます。"
+
+
+@router.post("/identity-links/{link_id}/restore")
+def restore_identity_link(
+    link_id: str,
+    body: IdentityLinkRestoreRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """見送った・確定を取り消した同一性リンクを候補に戻す（IK-1062。人間のみ・理由必須・行は残す）。
+
+    権限は確定と同じ（インスタンス側の論文の編集権限）。否定の状態（rejected / revoked）でない行は
+    409、理由が空は 422。前の判断の記録は上書きせず、戻した人・日時・理由・前の状態を残し、監査
+    ``identity_link.restored`` を記帳する。戻すのは教員の操作だけで、パイプラインは戻さない（KR2）。
+    学生の画面は confirmed だけを読むので、改めて確定するまで変わらない。
+    """
+    reason = str(body.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail=IDENTITY_LINK_RESTORE_REASON_REQUIRED)
+    existing = identity_links.get_by_id(link_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="identity link not found")
+    _ensure_document_editable(existing["instance_document_id"], current_user)
+    if str(existing.get("status") or "") not in identity_links.RESTORE_VOCABULARIES:
+        raise HTTPException(status_code=409, detail=IDENTITY_LINK_RESTORE_CONFLICT)
+    _ensure_identity_link_decidable(existing)  # IK-1076
+    result = identity_links.restore(
+        link_id,
+        restored_by=current_user.get("id"),
+        reason=reason,
+        audit_entity_type=AUDIT_ENTITY_DELIBERATION,
+        record_audit=record_review_event,
+    )
+    if result is None:
+        raise HTTPException(status_code=409, detail=IDENTITY_LINK_RESTORE_CONFLICT)
+    response = _identity_link_response(result)
+    fact = identity_links.decision_outcome_fact(
+        IDENTITY_LINK_STATUS_CANDIDATE, str(response.get("restore_line") or "")
+    )
+    if fact:
+        response["outcome_fact"] = fact
+    return response
 
 
 @router.get("/elements/{element_type}/{element_id}/identity-links")
@@ -691,6 +1036,10 @@ def list_shared_part_candidates_for_element(
         default="",
         description="検索テキスト。空なら対象要素の内訳（label・text 等）から自動で組み立てる。",
     ),
+    domain_key: str = Query(
+        default="",
+        description="教員が選んだ分野（IK-0890）。指定があればサーバの推定より優先する。",
+    ),
     current_user: dict = Depends(_require_teacher),
 ) -> dict[str, Any]:
     """手動の同一性リンク作成用: 同分野の類似 library_entries 候補を返す（N2）。
@@ -718,13 +1067,38 @@ def list_shared_part_candidates_for_element(
     _require_identity_linkable(ref.element_type)
     _ensure_document_viewable(ref.document_id or "", current_user)
 
-    domain_key = dialogue.document_domain_key(ref.document_id or "")
-    if not domain_key:
+    # IK-0890: 分野は「教員の選択 > 解析 run > コース > 配置」の段順で決める。
+    # 複数・ゼロのときはサーバが黙って決めず、分野の選択肢（表示名付き）を返す。
+    resolved_keys, domain_source = dialogue.resolve_document_domains(ref.document_id or "")
+    selected = str(domain_key or "").strip()
+    domain_choices = _shared_part_domain_choices(resolved_keys)
+    if selected:
+        if selected not in {c["domain_key"] for c in domain_choices}:
+            raise HTTPException(status_code=422, detail="選んだ分野が見つかりません。")
+        domain_key = selected
+        domain_source = SHARED_PART_DOMAIN_SOURCE_SELECTED
+    elif len(resolved_keys) == 1:
+        domain_key = resolved_keys[0]
+    else:
         return {
             "domain_key": "",
+            "domain_label": "",
+            "domain_source": domain_source,
+            "domains": domain_choices,
             "entries": [],
-            "note": "この教材の分野（カートリッジ）が特定できないため、共通部品を検索できません。",
+            "note": (
+                SHARED_PART_DOMAIN_NOTE_MULTIPLE if resolved_keys else SHARED_PART_DOMAIN_NOTE_UNDECIDED
+            ),
         }
+    domain_label = next(
+        (c["domain_label"] for c in domain_choices if c["domain_key"] == domain_key), ""
+    )
+    base: dict[str, Any] = {
+        "domain_key": domain_key,
+        "domain_label": domain_label,
+        "domain_source": domain_source,
+        "domains": domain_choices,
+    }
 
     query_text = (q or "").strip()
     if not query_text:
@@ -733,11 +1107,7 @@ def list_shared_part_candidates_for_element(
         except ElementResolutionError as exc:
             raise _http_from_resolution_error(exc) from exc
     if not query_text:
-        return {
-            "domain_key": domain_key,
-            "entries": [],
-            "note": "検索テキストを入力してください。",
-        }
+        return {**base, "entries": [], "note": "検索テキストを入力してください。"}
 
     settings = get_settings()
     top_k = int(getattr(settings, "deliberation_identity_candidates_top_k", 5))
@@ -746,6 +1116,9 @@ def list_shared_part_candidates_for_element(
         text=query_text,
         entry_type=dialogue.identity_entry_type_for_element(ref.element_type),
         top_k=top_k,
+        # IK-0928: 教員の検索の埋め込みを U層の機能に帰属させる。
+        feature=library_search.FEATURE_SHARED_PART_SEARCH,
+        user_id=current_user.get("id"),
     )
     entries = [
         {
@@ -757,10 +1130,54 @@ def list_shared_part_candidates_for_element(
         for hit in hits
         if hit.get("entry_id")
     ]
-    response: dict[str, Any] = {"domain_key": domain_key, "entries": entries}
+    response: dict[str, Any] = {**base, "entries": entries}
     if not entries:
         response["note"] = "同分野の共通部品が見つかりません。"
     return response
+
+
+#: 分野の出所: 教員が選んだ（IK-0890。``dialogue.DOMAIN_SOURCE_*`` と並ぶ）。
+SHARED_PART_DOMAIN_SOURCE_SELECTED = "selected"
+#: 分野が決まっていない教材（解析・コース・配置のどれにも分野が無い）の事実文。
+SHARED_PART_DOMAIN_NOTE_UNDECIDED = "この教材は分野が決まっていません。分野を選ぶと共通部品を探せます。"
+#: 複数の分野に関わる教材の事実文。
+SHARED_PART_DOMAIN_NOTE_MULTIPLE = "この教材は複数の分野に関わっています。分野を選ぶと共通部品を探せます。"
+
+
+def _shared_part_domain_choices(resolved_keys: list[str]) -> list[dict[str, str]]:
+    """共通部品を探せる分野の選択肢（表示名付き・ライブラリの分野一覧と同じ表示名）。
+
+    並びは「この教材に当たった分野 → ライブラリにエントリがある分野」。fail-soft。
+    """
+    keys: list[str] = [k for k in resolved_keys if k]
+    try:
+        for d in library_store.domain_summary():
+            key = str(d.get("domain_key") or "").strip()
+            if key and key not in keys:
+                keys.append(key)
+    except Exception:  # noqa: BLE001 — 一覧が引けなくても当たった分野は出す
+        logger.debug("library domain summary unavailable", exc_info=True)
+    choices: list[dict[str, str]] = []
+    try:
+        from core.atlas_state import domain_display_name
+        from core.library import schema as _lib_schema
+        from core.postgres import get_session as _get_session
+
+        session = _get_session()
+        try:
+            for key in keys:
+                label = (
+                    _lib_schema.DOMAIN_UNASSIGNED_LABEL
+                    if key == _lib_schema.DOMAIN_KEY_UNASSIGNED
+                    else domain_display_name(session, key)
+                )
+                choices.append({"domain_key": key, "domain_label": label})
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001
+        logger.debug("domain labels unavailable", exc_info=True)
+        choices = [{"domain_key": k, "domain_label": ""} for k in keys]
+    return choices
 
 
 @router.get("/shared-parts/{shared_part_id}/identity-links")
@@ -785,9 +1202,13 @@ def list_identity_links_for_shared_part(
     visible, hidden = _filter_by_document_view(
         links, "instance_document_id", _make_document_view_checker(current_user)
     )
+    responses = [_identity_link_response(link) for link in visible]
+    # IK-1026 / IK-1020: 対の相手を名指しした確認の問い（相手が置き換わった行はその事実を言う）。
+    _attach_pair_confirm_questions(responses)
+    _reword_same_paper_reasons(responses)
     return {
         "ref": ref.to_dict(),
-        "identity_links": [_identity_link_response(link) for link in visible],
+        "identity_links": responses,
         "hidden_count": hidden,
     }
 
@@ -939,6 +1360,10 @@ def create_deliberation_session(
             body.element_type, body.element_id, document_id=body.document_id
         )
     except ElementResolutionError as exc:
+        if _AGGREGATED_MAIN_NODE_RE.match(str(body.element_id or "")):
+            # 主グラフの集約ノードは部品の行を持たない（設計どおり）。何をすれば開けるかを
+            # 事実で返す（第 14 周 brain-te03 seq16: 理由の無い「見つかりませんでした」）。
+            raise HTTPException(status_code=404, detail=FACT_AGGREGATED_MAIN_NODE) from exc
         raise _http_from_resolution_error(exc) from exc
     if ref.scope != body.scope:
         raise HTTPException(
@@ -1188,7 +1613,7 @@ def open_graph_dialogue_session(
                 "element_id": doc_id,
             },
         )
-    return {"session": _session_response(session), "created": created}
+    return _teacher_view(doc_id, {"session": _session_response(session), "created": created})
 
 
 @router.post("/documents/{document_id}/graph-sessions/{session_id}/messages")
@@ -1268,12 +1693,15 @@ def post_graph_dialogue_message(
 
     # spoken / stance_label は保存しない（append_messages は reply のみ）。
     # ラベルは対話結果（共通骨格 chat_turn.TurnResult 由来）から素通しする。
-    return {
-        "reply": result.reply,
-        "degraded": result.degraded,
-        "spoken": result.spoken,
-        "stance_label": result.stance_label or AI_READING_LABEL,
-    }
+    return _teacher_view(
+        doc_id,
+        {
+            "reply": result.reply,
+            "degraded": result.degraded,
+            "spoken": result.spoken,
+            "stance_label": result.stance_label or AI_READING_LABEL,
+        },
+    )
 
 
 @router.get("/elements/{element_type}/{element_id}/annotations")

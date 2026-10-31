@@ -1,0 +1,38 @@
+scenario: s-sim-share-measured
+domain: astrophysics
+# 第 22 周 (e'') st-04（non_native・英語話者）。Cepheus B 論文（document 1771872a…）の DCF 法のトピック t2・σ_ξ の外枠。
+# 観測系の主張を 2 つ（教員 (g') が 1 件確定・1 件見送りを通すため）。claim_hints は観測系の主張のラベル（論文の英語のまま）の
+# 部分一致で、砂場 DB の theory_claims_live（claim_type=observable_definition）で各 1 件だけに当たることを確かめた:
+#   "This value represented the polarization angle dispersion at the central pixel of the box."
+#   "v denotes the velocity dispersion of the 13CO molecular line."（^13CO の別の主張には当たらない）
+# 第 21 周の (e) の論文（遅延時間分布）は読める観測系の主張が 1 件しか無いので 2 件の候補が立たない。
+params:
+  goal_text: 磁場の推定のまとまりを模擬の観測に通して動かした結果を、関係する主張 2 つに結びつけて担当の先生に見せること
+  topic_hint: DCF法による磁場強度の推定（Cepheus B の磁場トポロジーと星形成の論文）
+  topic_hint_terms:
+  - DCF法
+  - 磁場強度
+  module_hint: σ_ξ
+  input_hints:
+    delta_theta: 0.2
+    sigma_v: 1.0
+    n: 1000.0
+  wiring_name: 雑音と平均化
+  wiring_parts:
+  - ガウス雑音
+  - 平均化
+  wiring_params:
+    ガウス雑音:
+      sigma: 0.02
+    平均化:
+      n: 16
+  claim_hints:
+  - polarization angle dispersion at the central pixel
+  - velocity dispersion of the 13CO molecular line
+  questions:
+  - 共有すると、誰に何が見えて、そのあと何が起きますか？
+per_archetype:
+  non_native:
+    goal_text: showing my teacher the result of running the magnetic-field estimate through a simulated measurement, linked to two related claims
+    questions:
+    - If I share this run, who will see what, and what happens next?

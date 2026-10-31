@@ -1,0 +1,44 @@
+id: t-studio-reattach-all
+population: teachers
+runner: [api]
+# 第 25 周 第 8 周 studio H39（judge_studio_r8 §7「te-01 × 所有者の［付録をまとめて付け直す］」— オーナー判断 1 の初観察）:
+# 所有者が付録の古いトピックをまとめて付け直し、版ありのコースなら発行の前後で学生の付録が変わるかを、周またぎの審判
+# （run_all --campaign --student-api の before / after）で突き合わせる。学生 API は教員の場面からは引かない
+preconditions:
+  - text: このペルソナは自分が所有するコースを持っている（付録のまとめての付け直しは所有者だけができる）
+    check: owns_course
+goal: "{{goal_text}}"
+params_required: [goal_text]
+steps:
+  - do: auth.login
+  - do: admin.courses.list
+    note: 自分のコースを確かめる
+  - do: admin.lecture_studio.open_course
+    with: {course_id: "{{studio_course_id}}"}
+    note: 原稿スタジオでそのコースを選び、付録が古いトピックの一覧（事実文）が出ているかを読む
+  - do: admin.lecture_studio.reattach_appendix_all
+    note: ［付録をまとめて付け直す］を押す。確認の文（何が変わり、受講者にいつ届くか）を読んでから進む
+  - do: admin.lecture_studio.audio_readiness
+    note: 付け直しの後に、音声の状態と理由（付け直しで作り直しになる音声があるか）を読む
+  - choose:
+      - do: admin.lecture_studio.open_versions
+        note: 版ありのコースなら、付け直しが受講者に届いていないかを［版の管理を開く］で読む
+    optional: true
+  - choose:
+      - do: admin.lecture_studio.publish_release
+        note: 受講者に届けてよければ［共有版として発行］を押す（迷えば発行しない）
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/14-admin-lecture-studio.md#reattach-appendix-all
+  - manual: teacher/14-admin-lecture-studio.md#appendix-stale-list
+  - manual: teacher/14-admin-lecture-studio.md#open-versions
+watch_for:
+  - 押す前の確認の文が、付け直すトピックを名前で挙げ、受講者にいつ届くか（版ありなら発行の後）を言う
+  - 付け直しの後、付録の古いトピックの一覧から付け直したトピックが消える
+  - 付け直しで作り直しになる音声があれば、そのことが知らせの文で分かる
+  - 付録の項目名に TeX のラベル（eq:… など）や英語の内部名が出ない（IK-0872）
+  # 第 9 波（sync_keys_wave9 面 D・IK-1080 / IK-1079）
+  - 付け直しの知らせは段（外した → 作り直した → 新しく付けた）ごとに題名を並べ、件数を言わない。発行の後に保存した変更があれば、受講者の版と違うことが同じ知らせとコースの見出しの［版の管理を開く］で分かる
+  # 第 10 波（sync_keys_wave10 面 D・IK-1127）
+  - 版の管理に、受講者・閲覧の共有先・編集の共有先それぞれへの届き方と、受講者が見ている版、発行の後に変わったトピックの題名が出る（件数なし）

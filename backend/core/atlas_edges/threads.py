@@ -43,7 +43,19 @@ _pair_cache: dict[tuple[str, str], list[dict]] = {}
 _CACHE_MAX_ENTRIES = 64
 
 #: 糸の DTO に載せるキー（**これ以外を足さない** — 生スコア・edge_key・判断は出さない）。
-_ITEM_KEYS = ("from", "to", "from_label", "to_label", "nearness_label")
+_ITEM_KEYS = ("from", "to", "from_label", "to_label", "nearness_label", "basis_line")
+
+#: 糸ごとの根拠の一文（IK-0887。教員側の ``EDGE_BASIS_VECTOR`` と同じ根拠を組の名前で言う。
+#: 学習者の糸は説明文の近さ由来だけなので、論文の配置の根拠が無いことも併記する。数値なし）。
+THREAD_BASIS_TEMPLATE = (
+    "「{from_label}」と「{to_label}」は、説明文（ラベル・別名・確認済み配置の引用）どうしが"
+    "近いという推定です。論文の配置の根拠はありません。"
+)
+
+
+def thread_basis_line(from_label: str, to_label: str) -> str:
+    """糸 1 本の根拠の一文（IK-0887）。"""
+    return THREAD_BASIS_TEMPLATE.format(from_label=from_label, to_label=to_label)
 
 
 def reset_cache() -> None:
@@ -102,6 +114,7 @@ def _candidate_pairs(session: Any, domain_key: str) -> tuple[list[dict], str]:
             "from_label": item["from_label"],
             "to_label": item["to_label"],
             "nearness_label": item["nearness_label"],
+            "basis_line": thread_basis_line(item["from_label"], item["to_label"]),
         }
         for item in derive.derive_vector_pairs(skeleton, anchors)
     ]
@@ -132,7 +145,7 @@ def threads_for_domain(session: Any, domain_key: str) -> dict:
 
     Returns:
         ``{"available": True, "skeleton_version": str, "items": [{"from", "to",
-        "from_label", "to_label", "nearness_label"}, ...]}``。導出できないときは
+        "from_label", "to_label", "nearness_label", "basis_line"}, ...]}``。導出できないときは
         ``{"available": False}`` のみ（キーを増やさない = 呼び出し側はレイヤーごと
         非表示にする）。**例外は送出しない**。
     """
@@ -158,7 +171,42 @@ def threads_for_domain(session: Any, domain_key: str) -> dict:
         return {"available": False}
 
 
+# 糸が出ない理由の事実文（第 14 周。数値なし・学習者向け。RE 設計書 §11.x）。
+NOTE_NO_FROZEN_SKELETON = "この分野の地図は、まだ公開された版がないため、推定の糸を表示できません。"
+NOTE_VECTORS_NOT_BUILT = (
+    "この分野の地図の版（版 {version}）では、概念どうしの近さの索引がまだ作られていないため、"
+    "推定の糸を表示できません。"
+)
+NOTE_NO_CANDIDATES = (
+    "この分野の地図の版（版 {version}）では、推定の糸として示せる概念の組がありません。"
+)
+NOTE_UNKNOWN = "推定の糸を、いまは表示できません。"
+
+
+def threads_unavailable_note(session: Any, domain_key: str) -> str:
+    """糸が ``available: False`` になった理由を1文で返す（例外は送出しない）。"""
+    domain = _clean(domain_key)
+    if not domain:
+        return NOTE_NO_FROZEN_SKELETON
+    try:
+        from core import atlas_store
+        from core.atlas_vectors import builder
+
+        skeleton = atlas_store.load_frozen_skeleton(session, domain)
+        version = _clean(getattr(skeleton, "version", "")) if skeleton is not None else ""
+        if not version:
+            return NOTE_NO_FROZEN_SKELETON
+        anchors, anchor_version = builder.anchors_with_labels(session, domain, version)
+        if not anchors or _clean(anchor_version) != version:
+            return NOTE_VECTORS_NOT_BUILT.format(version=version)
+        return NOTE_NO_CANDIDATES.format(version=version)
+    except Exception:  # noqa: BLE001 — 理由文も付加物（fail-soft）
+        logger.debug("atlas_edges: failed to explain missing threads", exc_info=True)
+        return NOTE_UNKNOWN
+
+
 __all__ = [
     "reset_cache",
     "threads_for_domain",
+    "threads_unavailable_note",
 ]

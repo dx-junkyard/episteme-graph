@@ -103,6 +103,9 @@ claim 側 `figure_ids` は populate **しない**。理由:
   （既存の caption 由来分を先頭に維持しつつ重複排除・文書順）。
 - 既存の caption block_id ルックアップは無害なので残す。
 - `figure_missing_linked_claim_ids` 警告はメンションが無い図には引き続き立つ（正直）。
+- 表示（2026-09-25 追補）: このリンクは段落単位の同時言及なので、W層の図の文脈では証拠関係ではなく
+  「を述べる本文で参照される」（`cited_for_claim`）として、メンション文と共に読み時に提示する
+  （リンク自体は非改変。正本は `element_context_presentation_redesign.md` §11）。
 
 粒度は **block 単位**（メンションと claim スパンが同一 block にあればリンク）。
 span 単位の精密化は非スコープ（§7）。本文が図番号を明示引用している事実に基づく

@@ -42,6 +42,8 @@
   const NODE_GAP = 3;
   // 出所ラベルの固定文（RE2。サーバの段階ラベルは v1 では描かない = RE4）
   const PROVENANCE_TEXT = "AIによる推定（未確認）";
+  // 分野の地図の版の呼び名（IK-0942。正本 core/label_vocab.py::ATLAS_VERSION_PREFIX の逐語ミラー）
+  const ATLAS_VERSION_PREFIX = "地図 版 ";
 
   const state = {
     enabled: false,
@@ -74,7 +76,7 @@
   function factText(threads) {
     const version = (threads && threads.skeleton_version) ? String(threads.skeleton_version) : "";
     // RE2: 出所と骨格版を必ず併記する。件数・近さの数値は出さない（RE4）
-    return version ? PROVENANCE_TEXT + "・骨格 版" + version : PROVENANCE_TEXT;
+    return version ? PROVENANCE_TEXT + "・" + ATLAS_VERSION_PREFIX + version : PROVENANCE_TEXT;
   }
 
   // -------------------------------------------------------------------
@@ -197,6 +199,31 @@
       return;
     }
     state.factEl.textContent = factText(threads);
+    // IK-0989: 端点がこの画面に描かれていない糸があるときの一文（サーバ文の素通し・本数なし）。
+    if (threads.undrawn_note) {
+      const undrawn = document.createElement("div");
+      undrawn.className = "threads-undrawn";
+      undrawn.textContent = String(threads.undrawn_note);
+      state.factEl.appendChild(undrawn);
+    }
+    // IK-0887: 糸ごとの根拠の一文（サーバが組の名前で解決した文を素通し・数値なし）。
+    const bases = (threads.items || [])
+      .map((item) => (item && item.basis_line) ? String(item.basis_line) : "")
+      .filter(Boolean);
+    if (bases.length) {
+      const details = document.createElement("details");
+      details.className = "threads-basis";
+      const summary = document.createElement("summary");
+      summary.textContent = "糸ごとの根拠";
+      details.appendChild(summary);
+      bases.forEach((text) => {
+        const line = document.createElement("div");
+        line.className = "threads-basis-line";
+        line.textContent = text;
+        details.appendChild(line);
+      });
+      state.factEl.appendChild(details);
+    }
     state.factEl.hidden = false;
   }
 

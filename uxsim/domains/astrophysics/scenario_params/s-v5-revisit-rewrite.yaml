@@ -1,0 +1,12 @@
+scenario: s-v5-revisit-rewrite
+domain: astrophysics
+params:
+  goal_text: µ(a) と音速の論文の続き
+  revisit_answer_text: 準静的近似は音速が小さいほど広い尺度で崩れるので、µ と音速の関係は小さな尺度でしか使えないと思う。
+  carryover_answer: 持ち越しの問いへの答えとして、準静的近似は音速が小さいほど広い尺度で崩れると考えました。
+  rewritten_answer: 書き直します。準静的近似が崩れるのは音速が小さいときの大きな尺度で、小さな尺度ではむしろ保たれると考え直しました。
+per_archetype:
+  confident_theorist:
+    revisit_answer_text: c_s^2 が小さいとき音響ホライズンが縮むので、準静的近似はホライズン近くの大尺度で破れる。
+    carryover_answer: 持ち越しの問いへの答え。c_s^2 が小さいと音響ホライズンが縮み、準静的近似は大尺度で破れる。
+    rewritten_answer: 書き直す。音響ホライズンより内側では準静的近似は保たれ、破れるのは音響ホライズンより外の尺度だ。

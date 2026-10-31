@@ -1,0 +1,36 @@
+scenario: t-db-ledger-readonly-probe
+domain: astrophysics
+# 第 25 周 第 4 周（te-01）。te-01 は PINN の教材を閲覧だけできる状態で歩く（指揮者が周の前に共有を確かめる）
+params:
+  goal_text: 編集権限の無い論文の台帳に、書けるかどうかと書けない理由を確かめること
+  course_hint: ""
+  foreign_material_hint: Neutron Star Equation of State via Physics Informed Neural Network
+  node_hint_with_row: "1"
+  node_hint_without_row: "2"
+  foreign_scope_condition: 状態方程式が単調に増える範囲で
+  scope_reason: この範囲では学習した状態方程式が観測と矛盾しないと読める。
+per_archetype:
+  veteran_clicks_through:
+    scope_reason: 単調な範囲。
+personas:
+  te-02-veteran-intro:
+    # 第 5 周（judge_doubt_r4 §4）: te-02 は PINN を閲覧だけ（editor 共有なし）で歩く。node "1" の台帳には周の前に指揮者が
+    # PINN の editor を持つ教員（te-03 か te-04）として行を 1 件用意する。最後の画面を経ない 1 手（scope_record_raw）の
+    # サーバの拒否文（IK-0900）。share の te-02 への PINN の editor 共有は、この場面が終わってから与える
+    scope_reason: 単調な範囲で矛盾なし。
+  te-05-delegator-lab:
+    # 第 6 周（judge_doubt_r5 §4）: te-05 は PINN を閲覧だけ（editor 共有なし — probe_teacher_view_only で確かめる）。最後の
+    # scope_record_raw は軸・根拠・理由を揃えた有効な body で送り、サーバの権限の弁（404）を初めて当てる（H34）。
+    # サーバが受け付けた場合は PINN の台帳にスコープが 1 件増える — 周の後に確かめる
+    scope_reason: 単調に増える範囲では観測と矛盾しないと読める。院生に確認させる前提で記帳を試す
+    # 第 8 周（judge_doubt_r7 §4）: 閲覧もできない教員（doubt_no_view_teacher の既定 te-05）として同じ場面を歩き、PINN が教材の一覧に
+    # 出ないこと・画面を経ない記帳の拒否が日本語の 404 の文で返ること。te-05 が PINN を見られる状態（第 7 周の share で editor、
+    # 6be229e1 の editor 経由のコースの開示）なら成り立たない。周の前の実測で砂場の 5 教員とも PINN を閲覧できたので、第 8 周はこの組を走らせない
+    # （日本語の 404 は未評価のまま — campaign notes）
+  te-01-rookie-seminar:
+    # 第 7 周（judge_doubt_r6 §4）: te-01 から PINN の editor を外した状態（pinn_editor_removed — 所有者が te-01 専用グループの
+    # PINN 共有を解除）で、記帳ボタンの無効と理由・サーバの拒否文（IK-1027 の是正後に画面と同じ文か）。不完全な body で権限 →
+    # 入力の順（IK-0999 の残り）を当てる手は runner に無い（scope_record_raw は根拠・理由を既定値で埋める H34 — campaign notes）
+    scope_reason: この範囲では学習した状態方程式が観測と矛盾しないように読めます（自信はありません）
+    # 第 8 周（judge_doubt_r7 §4・H43）: PINN の viewer のまま。場面の末尾の不完全な body（admin.doubt.scope_record_raw_incomplete —
+    # 根拠を空のまま）で、権限の拒否が入力の検査より先に返るか（IK-0999 の残り）

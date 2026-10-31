@@ -1,0 +1,56 @@
+id: s-read-backbone
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、教材 {{topic_hint}} の ⚓ を順に開き、この論文が何を主張し何で支えているかをつかむ'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- seed_questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- repeat:
+    until: persona_decides_to_stop or steps > 5
+    max: 5
+    steps:
+    - choose:
+      - do: learning.component.context
+        note: 教材の ⚓ を開き、中心命題の中での役割と位置を読む
+      - do: learning.element.context
+        note: 主張や式の文脈を開く
+      - do: learning.source_chunk.open
+        note: 出典の原文を開いて確かめる
+- do: learning.chat.ask
+  with:
+    message: '{{seed_questions | next}}'
+  note: 読んだ構造を自分の言葉で確かめる
+- choose:
+  - do: learning.chat.ask
+    with:
+      message: '{{seed_questions | next}}'
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#material-element-anchor
+- manual: student/02-student.md#context-tab
+- manual: student/02-student.md#answer-origin-badge
+watch_for:
+- 要素文脈で、その要素が論文の中心命題のどこを支えているかが読める
+- 内部 ID（eq_op_・ev_・sec_runin・UUID）や英語の生成文が学習者の画面に出ない
+- 件数や確信度の数値が出ない
+- 検証の事実文は「このコーパスの中では」という範囲の言い方で出る
+- ⚓ から出典の原文を開ける

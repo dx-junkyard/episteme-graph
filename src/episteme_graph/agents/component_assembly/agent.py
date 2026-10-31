@@ -1,6 +1,8 @@
 """ComponentAssemblyAgent: assemble reusable components from claims, equations, thesis, and DSL."""
 from __future__ import annotations
 
+from episteme_graph.agents.generation_language import normalize_generation_language
+
 import logging
 
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult
@@ -66,7 +68,10 @@ class ComponentAssemblyAgent:
         evidence_registry=None,
         derivations=None,
         apparatus_semantics=None,
+        language: str | None = None,
     ) -> ComponentAssemblyResult:
+        # 解析 run の生成言語（IK-0571）。未指定なら prompt は従来と同一。
+        self._prompt_factory.language = normalize_generation_language(language)
         cartridge = self._load_cartridge(cartridge_id)
         llm_input = self._input_builder.build(
             qualified_claims,
@@ -80,6 +85,10 @@ class ComponentAssemblyAgent:
             derivations=derivations,
         )
         diagnostics: dict = {}
+        if llm_input.input_coverage:
+            # Input budget (MAX_INPUT_CHARS): which available_claims were not
+            # rendered into the prompt — reported, not dropped silently.
+            diagnostics["component_assembly_input_coverage"] = dict(llm_input.input_coverage)
         # Defensively strip dangling equation references (#368 follow-up): a
         # claim / thesis / DSL ref to an equation absent from the final set must
         # not collapse the whole assembly into a deterministic fallback.

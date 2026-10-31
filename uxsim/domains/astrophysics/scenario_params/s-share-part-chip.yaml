@@ -1,0 +1,72 @@
+scenario: s-share-part-chip
+domain: astrophysics
+params:
+  goal_text: 教材の部品が、ほかの論文でも同じ部品として使われているかを知ること
+  topic_hint: 二重ネットワークとTOV方程式の課し方（PINN による中性子星状態方程式）
+  topic_hint_terms: [TOV, 二重ネットワーク, 中性子星, 状態方程式]
+  # 第 25 周 第 9 波（share H55）: ⚓ の開くトピックを id で固定する材料（空 = 題名の語で選ぶ）
+  # 第 10 波（judge_share_r10 H60）: 第 10 周は campaign の (d) が st-05 で、t1 は st-07 の材料にだけあった（材料がペルソナに
+  # 付いて行かなかった）。既定を t1（固定コース 1bad7d9f で ⚓ が開く）にして全学生に効かせる。コースに t1 が無ければ runner は
+  # 題名の語で選び直す（actions_exec._topic_open・runner_note に残す）
+  topic_id: t1
+  seed_questions:
+    - この部品は、ほかの論文でも同じ形で出てきますか？
+    - 先生の説明と論文の書き方で、違うところはありますか？
+per_archetype:
+  non_native:
+    goal_text: finding out whether a component in the material is shared with other papers
+    seed_questions:
+      - Does this component appear in other papers in the same form?
+personas:
+  st-03-d1-from-particle:
+    seed_questions:
+      - 素粒子の状態方程式の扱いと比べて、この部品の前提は何が違いますか？
+  st-09-d2-from-datasci:
+    seed_questions:
+      - このネットワークの部品は、ほかの論文のどの手法と同じものとして扱われていますか？
+  st-01-m1-radio:
+    # 第 4 周（judge_share_r3 §6）: 「共通部品として」の他の論文の題名（IK-0920）・見出しの意味（IK-0917）・選択質問が共通部品を知っているか
+    seed_questions:
+      - この「共通部品として」というのは、どの論文と同じ部品だという意味ですか？
+      - この部品について、先生が書いた説明と論文の書き方はどこが違いますか？
+  st-07-m1-grb-voice:
+    # 第 8 周（judge_share_r7 §6・テキスト）: 前提①（対の再確定・凍結）の後に、固定コース 6be229e1（1bad7d9f は ⚓ が 0 個）の t11 で
+    # ⚓ → 部品の文脈 →「共通部品として」→ 別の論文へ（IK-0920 の 4 周目）。「ほかの論文でも同じか」を選択質問で（IK-1041）
+    # 第 5 周（judge_share_r4 §6）: 音声中心の学生が、区画を選んで質問 → 帰属の候補 → 確定（H33）→ 旅で「共通部品として」が届くか
+    # （IK-0920 の残り）。(a) の te-02 の確定の後に走らせる
+    # 第 9 周（judge_share_r8 §4 H50）: この場面は「テキスト」の予定だが、第 8 周は音声のペルソナとして casual で送られ IK-1041 を
+    # 評価できなかった。voice: false でこの経路のチャットを文字で送る（runner の apply_scenario_voice）。選択質問の後に
+    # 「この部品の説明は誰が書いたか」（IK-1064）を続ける
+    voice: false
+    # 第 10 周（judge_share_r9 §4 H55）: 第 9 周は材料が t11 の題名のままで ⚓ が 3 個とも開かなかった。1bad7d9f で ⚓ の開く t1 に固定する
+    # （周の前に r10_prereqs の share_st07_anchor_topic で確かめる。t1 で開かなければ t5）
+    topic_id: t1
+    seed_questions:
+      - この部品は、ほかの論文でも同じものとして使われていますか？
+      - 先生が書いた説明と、論文の書き方で違うところはどこですか？
+      - この部品の説明は、誰が書いたものですか？
+  st-08-m1-rprocess-lecture:
+    # 第 6 周（judge_share_r5 §6）: (d) 未担当・テキストの学生。te-03 の (a) で確定したリンクが「共通部品として」に凍結版で
+    # 届くか（IK-0954 の学生側・IK-0920）。部品の ⚓ から質問して旅（IK-0988 の対照 = 部品帰属の旅）
+    seed_questions:
+      - この部品は、ほかの論文でも同じ部品として扱われていますか？どの論文ですか？
+      - 先生の説明と論文の書き方で、違うところはどこですか？
+  st-05-night-solarwind:
+    # 第 7 周（judge_share_r6 §6）: (d) 未担当・テキストの学生。前提① share_pair_frozen（te-03 が PINN の TeX ⇄ PDF の対の両リンクを
+    # 確定 → エントリ確定 → 凍結）の後に、凍結版のある共通部品が「共通部品として」に出るか・旅が共通部品を通るか（IK-0920 /
+    # IK-0954 を初めて凍結版で）。同じ周の te-05 の (a) で確定 → 取り消した別のリンクが出ないこと（取り消し後）。⚓ が凍結時の部品を開くか（IK-1021）
+    seed_questions:
+      - この部品は、ほかの論文（同じ論文の別の版を含めて）でも同じ部品として扱われていますか？どの論文ですか？
+      - 先生の説明と論文の書き方で、違うところはどこですか？
+      # 第 10 波（H60）: 3 問目（IK-1064「誰が書いたか」— ⚓ を開いたまま）。topic_id は既定の t1
+      - この部品の説明は、誰が書いたものですか？
+  st-10-d3-21cm-receiver:
+    # 第 8 周（judge_share_r7 §6 の「他コース 6be229e1 の学生の場面」）: 引用先のコース 6be229e1 の学生として、te-02 の (b2) で
+    # 6be229e1 へ引用された te-04 の説明（TeX 版の部品「TOV residual loss at collocation points」）が、部品の「説明」に届くかを読む。
+    # share の campaign の固定コースが 6be229e1（1bad7d9f は ⚓ が 0 個 — r8_prereqs.md「周の前の実測」）。トピックは t11（既定の題名）
+    # 第 10 波: 既定の topic_id が t1 になったので、この材料は従来どおり題名の語で選ぶ（空 = 題名の語）
+    topic_id: ""
+    goal_text: 別のコースの先生が書いた部品の説明が、このコースの教材の部品でも読めるかを確かめること
+    seed_questions:
+      - この部品の説明は、どの先生が書いたものですか？このコースの先生の説明ですか？
+      - この部品は、ほかの論文でも同じ部品として扱われていますか？

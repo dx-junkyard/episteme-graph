@@ -8,6 +8,8 @@ is provisional (maturity_source="llm_proposed").
 """
 from __future__ import annotations
 
+from episteme_graph.agents.generation_language import normalize_generation_language
+
 import logging
 
 from episteme_graph.agents.cartridge_loader import load_cartridge_or_none
@@ -43,7 +45,10 @@ class NarrativeAnnotator:
         derivations=None,
         cartridge_id: str | None = None,
         config: dict | None = None,
+        language: str | None = None,
     ) -> NarrativeAnnotationResult:
+        # 解析 run の生成言語（IK-0571）。未指定なら prompt は従来と同一。
+        self._prompt_factory.language = normalize_generation_language(language)
         cartridge = self._load_cartridge(cartridge_id)
         document_id = str(getattr(graph, "document_id", "") or "")
         graph_snapshot = graph.to_dict() if hasattr(graph, "to_dict") else None

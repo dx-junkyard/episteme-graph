@@ -1,0 +1,61 @@
+id: c-astro-r25-atlas-r6
+domain: astrophysics
+snapshot: corpus-astro-tex-r25e
+course_id: 1bad7d9f
+personas:
+  teachers: [te-03-meticulous-seminar, te-02-veteran-intro, te-01-rookie-seminar]
+  students: [st-03-d1-from-particle, st-08-m1-rprocess-lecture]
+scenarios:
+  teacher: [t-atlas-gap-review, t-atlas-edge-review, t-atlas-draft-freeze]
+  student: [s-atlas-threads-and-placement, s-atlas-sea-map]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 4, persona_llm_calls: 300, wall_clock_minutes: 240}
+notes: |
+  第 25 周 面 C「分野の地図の運用」第 6 周（judge_atlas_r5.md §8 と r6_prereqs.md の面 atlas・共通 1〜4）。教員 3 × 学生 2・5 場面。
+  主題は 2 回目の版上げ（2026.2 → 2026.3）: te-03 × 候補（行き止まりの読み方）/ te-02 × 辺のレビューを凍結の前に（下書きがある
+  状態で反映の確認まで）/ te-01 × 下書き → 反映 → 凍結 2026.3 / 凍結の後に地図の場面を歩いていない学生 2 名（st-03・st-08）。
+  組の差し替え（P-0025）: 審判の候補 st-01 × threads・st-04 × sea-map は第 1・2 周に地図を歩いた学生なので、地図の場面が初めての
+  st-03 と st-08（第 1〜5 周で地図を歩いていない学生はこの 2 名だけ）に替えた。browser runner はハーネスに無い（API runner のみ）
+  ので、IK-0989 の描画の確かめは API の levels["2"]（描く範囲）・omitted_note・threads.undrawn_note を読む（H32）。
+  組の例外: te-02 × edge-review は第 2 周、te-03 × gap-review は第 1 周と同じ組（辺・候補とも 5 教員が歩き済み）。第 2 周の te-02 は
+  下書きの無い状態で反映の確認に届かず、今回は下書きのある状態で反映の確認まで読むので観察が重ならない。te-03 の候補は 0 件の
+  見込みで、行き止まり（候補ゼロの理由と置けなかった主題の所在 IK-0995）を几帳面に読む場面。
+
+  一括の確かめと用意: `backend/.venv/bin/python uxsim/runs/round25/r6_prereqs.py --dry-run`（= r5_prereqs.py --round 6。役の既定
+  ROUND_DEFAULTS[6] はこの campaign の組と一致）→ 書き込みは `--allow-reanalyze`（LLM）/ `--allow-confirmed-assumption` /
+  `--allow-topic-write` を指揮者が明示したときだけ。identity_rerun の記録の鍵はこの campaign の snapshot 名（r25e）。
+
+  ── 周の前に指揮者が用意するもの（この順）──
+   1. 砂場（共通 1）: share と同じ corpus-astro-tex-r25e。取り直しで前の周の判断・下書きが残ったか消えたかを run の記録に残す。
+      名前の登録（共通 3）— 判断の帰属・凍結の影響の文に出る名前がログイン ID でないこと。
+   2. 是正の前提: 第 5 波の面 C（L2 の代表選出・索引・関係の候補の結果文）と投影の同期 H30〜H34、IK-0989・0990・0993 の是正。
+   3. 現行の凍結版は 2026.2・下書きなし（atlas_frozen_and_pending）。te-01 の freeze_version は 2026.3（atlas_freeze_version）。
+      凍結は取り消せない — この周で 1 名・1 回だけ。
+   4. 残存する採用済み・未反映の判断（頭脳に名前で渡す）: 関係「ブラックホール — 超大質量ブラックホール」（te-04・2026-10-27・
+      メモつき）。周の前に関係の候補一覧の先頭帯を確かめ、ほかに残っていれば名前でここに足す。
+   5. **次版の下書き（辺のレビューの前）**: 製品の［現在の版から次版の下書きを作る］はギャップ候補のカードにしか出ず、関係の候補の
+      区画からは作れない（H35）。候補は 0 件の見込みでカードも出ないので、te-03 のレーンの後・te-02 のレーンの前に、指揮者が
+      te-01 として POST /api/admin/cartridges/{id}/atlas/skeleton/draft/from-frozen で次版の下書きを作り、mailbox_atlas/DRAFT_READY_R6 を
+      出す（下書きがあるとき runner は［次版の下書きを作る］を選択肢から外す — H34。te-01 の場面の draft_from_frozen は既存の下書きを
+      使う）。te-01 が自分で下書きを作る観察（IK-0991 の作成方法）はこの周では見られない — 審判に申し送る。
+   6. 候補の材料（atlas_gap_material）: 論文由来の候補は 5 周連続 0 件。同主題の 2 本目の論文を砂場に入れるかは指揮者の判断
+      （取り込みは外部 API を使う）。入れないなら te-03 は空の説明の再確認に留まる。
+   7. 教員確認済みの配置が 1 件以上（confirmed_placement・Cepheus B → ダスト）。コース 1bad7d9f が公開のまま。
+
+  ── レーンの順（face_atlas_r6.sh。--persona X --scenario Y で 1 場面ずつ・この順で）──
+   1. te-03-meticulous-seminar × t-atlas-gap-review（下書きの無い状態で。候補ゼロの理由・外れた枠・置けなかった主題の所在）
+   2. ⇢ te-03 の後に mailbox_atlas/GAP_DONE_R6 が出る → 指揮者が次版の下書きを作り mailbox_atlas/DRAFT_READY_R6 を touch する（用意 5）
+   3. te-02-veteran-intro × t-atlas-edge-review（下書きのある状態で、採用 1・理由付きの見送り 1 → 反映の確認まで。反映はしない。
+      見送りの結果文 IK-0994）
+   4. te-01-rookie-seminar × t-atlas-draft-freeze（索引の再構築 → te-02 の採用と te-04 の残存「ブラックホール — 超大質量ブラックホール」を
+      メモで読んで反映 → 凍結の影響 → 凍結 2026.3。新任が 2 回目の凍結を 1 画面ずつ読めるか・公開中の版の中身 IK-0992）
+   5. st-03-d1-from-particle × s-atlas-threads-and-placement（⇢ 4。版 2026.3 の地図・加わった関係が L2 で描く範囲に入るか IK-0989・
+      見送った関係が糸に出ないこと RE8・縁の解消 IK-0990）
+   6. st-08-m1-rprocess-lecture × s-atlas-sea-map（⇢ 4 と share の mailbox_share/ST08_DONE_R6。海と L1 の霧の一致・円の名前）
+  最後に mailbox_atlas/LANE_DONE_R6 を出す（studio の st-03 がこれを待つ — 同じ学生の run を同時に走らせない）。
+
+  LLM 予算の見積り: 製品のチャット LLM は呼ばない（候補の導出・取り込み・凍結の影響は決定論）。product_llm_calls は embedding の
+  従量の上限で、索引の再構築 1 回 + 凍結の後に製品が裏で始める新しい版の索引 1 回 = 2 回の見込み（余裕を見て 4）。ペルソナ頭脳は
+  5 場面 × 50〜60 手 ≒ 250〜300（上限 300）。arXiv は呼ばない（用意 6 で 2 本目を入れる場合は指揮者の判断・この予算の外）。

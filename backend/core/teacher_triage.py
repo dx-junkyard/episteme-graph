@@ -90,9 +90,10 @@ def load_levels_for_targets(
     """台帳バッチ読み: (target_type, target_id) → 段階キー（'' = 導出不能）。
 
     - ``epistemic_ledger`` は ``target_id = ANY(:ids)`` の**1クエリ**で引く。
-    - ``load_percentiles(session, course_id)`` は**キューにつき1回**。course_id は
-      台帳行から取得し、混在（複数コース）・不在（全行が空）のときは percentile の
-      基準が定まらないため**全件を導出不能扱い**にする（§5 精査②の正直な縮退。
+    - ``load_percentiles(session, document_ids=...)`` は**キューにつき1回**。段階の基準は
+      台帳行が属する document の集合（IK-0852, 2026-10-23: 台帳行の course_id 列は解析を
+      コース無しで走らせると常に空なので基準にしない）。document が1つも引けないときは
+      percentile の基準が定まらないため**全件を導出不能扱い**にする（§5 精査②の正直な縮退。
       percentile クエリ自体を発行しない）。
     - ``load_score IS NULL`` の行・台帳行の無い target は '' を返す。
     - 生値（load_score）は返却値に含めない（TT2）。
@@ -110,39 +111,34 @@ def load_levels_for_targets(
     ids = sorted({target_id for _type, target_id in wanted})
     rows = session.execute(
         sa_text(
-            "SELECT target_type, target_id, load_score, course_id "
+            "SELECT target_type, target_id, load_score, document_id::text "
             "FROM epistemic_ledger WHERE target_id = ANY(:ids)"
         ),
         {"ids": ids},
     ).fetchall()
 
-    by_target: dict[tuple[str, str], tuple[float | None, str]] = {}
-    course_ids: set[str] = set()
+    by_target: dict[tuple[str, str], float | None] = {}
+    document_ids: set[str] = set()
     for row in rows:
         key = (str(row[0] or ""), str(row[1] or ""))
         if key not in wanted:
             continue
         score = float(row[2]) if row[2] is not None else None
-        course_id = str(row[3] or "")
-        by_target[key] = (score, course_id)
-        if course_id:
-            course_ids.add(course_id)
+        by_target[key] = score
+        document_id = str(row[3] or "")
+        if document_id:
+            document_ids.add(document_id)
 
-    if len(course_ids) != 1:
-        # course_id の混在・不在: 段階の基準（コーパス内パーセンタイル）が定まらない。
-        # 黙って別コースの基準を流用せず、全件を導出不能として正直に返す。
+    if not document_ids:
+        # document が引けない: 段階の基準（範囲内パーセンタイル）が定まらない。
         return {key: "" for key in wanted}
 
-    course_id = next(iter(course_ids))
-    p50, p90, p99 = load_percentiles(session, course_id)
+    p50, p90, p99 = load_percentiles(session, document_ids=sorted(document_ids))
 
     out: dict[tuple[str, str], str] = {}
     for key in wanted:
-        score, row_course = by_target.get(key, (None, ""))
-        if score is None or row_course != course_id:
-            out[key] = ""
-        else:
-            out[key] = load_level_for_score(score, p50, p90, p99)
+        score = by_target.get(key)
+        out[key] = "" if score is None else load_level_for_score(score, p50, p90, p99)
     return out
 
 

@@ -540,3 +540,12 @@ LLM コールが減り、casual_light がテキストで成立する）→ ②�
 **migration: なし**（DB スキーマ変更なし。`interest_traces.payload` / `discuss_metric_events.payload`
 はいずれも既存 JSONB のキー追加のみ）。**新エンドポイント・新 env・新 LLM コール・新指標
 （`core/indicator_catalog.py`）もいずれも無し。**
+
+### 13.x 第 22 周の追補（2026-10-04）— 結果の言葉の問いは HELP に回さない
+
+「🧪 動かして確かめる」のパネルが開いている（`screen_context.selection.simulation_run_id` = 画面の明示状態・LC4 の許された入力）とき、
+実行結果の言葉（未測定・一致・分離・記載値 / 英語 unmeasured・agreement・separation・reference value）を含む発話は、[0] HELP pre-route でも
+[3] 分類の USAGE_HELP でも HELP に回さず DOMAIN_RAG へ流す（SA層 4-e の事実文 + `LEARNING_SIMULATION_OUTPUT_CONSTRAINT` が載る経路）。
+変えるのは様相ではなくルート（LC1 と衝突しない）・非LLM（LC5）・明示 `usage_help` は勝つ（LC2）・下流の条件式は無改変で `intent` の再代入
+1 行（LC8・`_is_casual = True` と同型）。正本は `manual_help_kb_design.md` §9（根 4）。
+

@@ -38,6 +38,7 @@ Warnings (kept, never block):
 """
 from __future__ import annotations
 
+from .reason_scope import reason_terms_beyond_quote
 from .input_builder import LandscapePlacementInputBuilder, normalize_for_quote_match
 from .schema import (
     CategoryGapRecord,
@@ -172,6 +173,21 @@ class LandscapePlacementValidator:
                 )
 
             self._check_quote(placement, field, haystack, error)
+
+            # IK-0967: 理由が引用の範囲を越える固有の語を含むときは warning で残す
+            # （LS4 の verbatim 検査は緩めず、理由も配置も落とさない — P4）。
+            if placement.reason and placement.evidence_quote:
+                beyond = reason_terms_beyond_quote(
+                    placement.reason, [placement.evidence_quote]
+                )
+                if beyond:
+                    warn(
+                        "placement_reason_terms_beyond_quote",
+                        f"{field} reason mentions {', '.join(beyond)} which do not "
+                        "appear in evidence_quote (keep the reason within what the "
+                        "quote says)",
+                        field,
+                    )
 
             if placement.claim_id and placement.claim_id not in known_claim_ids:
                 error(

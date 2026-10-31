@@ -112,6 +112,9 @@ _INSTRUCTION_HEADER = (
     # 文ごとの留保をやめ、不確かさは返答全体に1つ付くラベル（AI_READING_LABEL）で示す。
     "文ごとに「〜の可能性があります」のような留保を繰り返さず、簡潔な断定調で書いてください。"
     "不確かさは返答全体に付く「" + AI_READING_LABEL + "」のラベルで示されます。"
+    # ラベルは画面のチップが引き受ける表示専用の留保（2026-09-22・グラフ対話レビュー
+    # 設計書 §18）。本文に書かれると画面で二重に出て、読み上げもラベルから始まる。
+    "このラベルは画面が自動で表示します。返答本文にラベルを書かないでください。"
     + _MATH_DELIMITER_INSTRUCTION +
     "もし対話の中で注釈として記録する価値がある解釈・"
     "意味づけ・内訳の補足などがあれば、annotations に候補として追加してください"
@@ -279,6 +282,76 @@ def document_domain_key(document_id: str) -> str:
         return ""
 
 
+# 分野の出所（IK-0890）。教員の選択 > 解析 run > コース > 配置 の段順。
+DOMAIN_SOURCE_RUN = "analysis_run"
+DOMAIN_SOURCE_COURSE = "course"
+DOMAIN_SOURCE_PLACEMENT = "placement"
+
+
+def resolve_document_domains(document_id: str) -> tuple[list[str], str]:
+    """document の分野（library domain_key と同一名前空間）を段順で解決する（IK-0890）。
+
+    段順: ①採用解析 run の ``cartridge_id`` → ②この教材を sources に含むコースの
+    ``cartridge_id``（``paper_discovery.corpus.document_domain_keys``）→ ③live な
+    ``landscape_placements`` の ``domain_key``。最初に値が出た段の分野を返す（複数あり得る。
+    複数のときは呼び出し側が教員に選ばせる — サーバが黙って 1 つに決めない）。
+
+    Returns:
+        ``(domain_keys, source)``。どの段にも無ければ ``([], "")``。fail-soft（例外は握る）。
+    """
+    doc_id = str(document_id or "").strip()
+    if not doc_id:
+        return [], ""
+    run_key = document_domain_key(doc_id)
+    if run_key:
+        return [run_key], DOMAIN_SOURCE_RUN
+    try:
+        session = get_session()
+    except Exception:  # noqa: BLE001
+        logger.warning("deliberation dialogue: domain resolution session failed", exc_info=True)
+        return [], ""
+    try:
+        try:
+            from core.paper_discovery import corpus as _corpus  # 遅延 import
+
+            course_keys = [k for k in _corpus.document_domain_keys(session, doc_id) if k]
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "deliberation dialogue: course domain resolution failed for %s", doc_id, exc_info=True,
+            )
+            session.rollback()
+            course_keys = []
+        if course_keys:
+            return course_keys, DOMAIN_SOURCE_COURSE
+        try:
+            rows = session.execute(
+                sa_text(
+                    """
+                    SELECT domain_key, MIN(created_at) AS first_at
+                      FROM landscape_placements
+                     WHERE document_id::text = :doc
+                       AND status NOT IN ('superseded', 'rejected')
+                       AND COALESCE(domain_key, '') <> ''
+                     GROUP BY domain_key
+                     ORDER BY first_at, domain_key
+                    """
+                ),
+                {"doc": doc_id},
+            ).fetchall()
+            placement_keys = [str(r[0]).strip() for r in rows if str(r[0] or "").strip()]
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "deliberation dialogue: placement domain resolution failed for %s", doc_id, exc_info=True,
+            )
+            session.rollback()
+            placement_keys = []
+        if placement_keys:
+            return placement_keys, DOMAIN_SOURCE_PLACEMENT
+        return [], ""
+    finally:
+        session.close()
+
+
 def identity_query_text(breakdown: dict[str, Any]) -> str:
     """内訳から同一性候補検索用のクエリテキストを組み立てる（非LLM・決定論的）。"""
     parts: list[str] = [str(breakdown.get("label") or "")]
@@ -314,8 +387,9 @@ def collect_identity_candidates(ref: ElementRef, breakdown: dict[str, Any]) -> l
         # 設計書 §16: evidence / derivation は共通部品化の対象外なので、同一性候補の
         # 材料自体を供給しない（LLM に「共通部品と同じもの」提案の余地を与えない）。
         return []
-    domain_key = document_domain_key(ref.document_id or "")
-    if not domain_key:
+    # IK-0890: 分野は段順の 1 関数で解決（run → コース → 配置）。複数のときは各分野を引く。
+    domain_keys, _source = resolve_document_domains(ref.document_id or "")
+    if not domain_keys:
         return []
     query_text = identity_query_text(breakdown)
     if not query_text:
@@ -325,12 +399,17 @@ def collect_identity_candidates(ref: ElementRef, breakdown: dict[str, Any]) -> l
     if top_k <= 0:
         return []
     try:
-        hits = search_frozen_entries(
-            domain_key=domain_key,
-            query_text=query_text,
-            entry_type=identity_entry_type_for_element(ref.element_type),
-            top_k=top_k,
-        )
+        hits = []
+        for domain_key in domain_keys:
+            hits.extend(
+                search_frozen_entries(
+                    domain_key=domain_key,
+                    query_text=query_text,
+                    entry_type=identity_entry_type_for_element(ref.element_type),
+                    top_k=top_k,
+                )
+            )
+        hits = hits[:top_k] if len(domain_keys) == 1 else hits[: top_k * len(domain_keys)]
     except Exception:  # noqa: BLE001 — search は例外を投げない契約だが防御的に（非致命）
         logger.warning(
             "deliberation dialogue: identity candidate retrieval failed for %s:%s",
@@ -511,12 +590,29 @@ def grounding_to_text(grounding: dict[str, Any]) -> str:
                 generic_line += f"（標準化状態: {generic.get('standardization_status')}）"
             lines.append(generic_line)
 
+        # element_context_presentation_redesign.md §11: 図を参照する本文の文
+        # （メンション文・論文の逐語）。図が何を示すかを論文自身が述べる文なので、
+        # 上位構造より先に置く。
+        placement = focus.get("placement") if isinstance(focus.get("placement"), dict) else {}
+        mentions = [m for m in (placement.get("mentions") or []) if isinstance(m, dict)]
+        mention_lines = []
+        for mention in mentions:
+            mention_text = str(mention.get("text") or "").strip()
+            if not mention_text:
+                continue
+            section = str(mention.get("section_label") or "").strip()
+            mention_lines.append(f"- {section}: {mention_text}" if section else f"- {mention_text}")
+        if mention_lines:
+            lines.append("[文脈: 本文での言及]")
+            lines.extend(mention_lines)
+
+        # 主張は切り詰めの見出しではなく全文（full_text）を渡す（§11.3）。
         upper_items = [i for i in (context.get("upper") or []) if isinstance(i, dict)]
         if upper_items:
             lines.append("[文脈: 上位構造]")
             for item in upper_items:
                 lines.append(
-                    f"- {item.get('relation_label', '')}: {item.get('label', '')}"
+                    f"- {item.get('relation_label', '')}: {item.get('full_text') or item.get('label', '')}"
                     f"（{_context_status_label(item.get('relation_status'))}）"
                 )
 
@@ -525,7 +621,7 @@ def grounding_to_text(grounding: dict[str, Any]) -> str:
             lines.append("[文脈: 下位構造]")
             for item in lower_items:
                 lines.append(
-                    f"- {item.get('relation_label', '')}: {item.get('label', '')}"
+                    f"- {item.get('relation_label', '')}: {item.get('full_text') or item.get('label', '')}"
                     f"（{_context_status_label(item.get('relation_status'))}）"
                 )
 

@@ -262,6 +262,12 @@ _NON_INDICATOR_ROUTES: dict[str, str] = {
     # （知識の転用層 P4-3 / knowledge_transfer_design.md §6・T-3）。
     "/api/admin/documents/{document_id}/reference-health": _R_STATE,
     "/api/admin/documents/{document_id}/revisions": _R_OBJECT,
+    # 1 論文の式の導出を「接点の狭さ」で区切った読み時射影（論文層と同じ扱い）。件数・接点の本数・
+    # 閾値を返さない（theory_module_layer_design.md TM6）。
+    "/api/admin/documents/{document_id}/theory-modules": _R_OBJECT,
+    # 同じ構造のモジュールを持つ論文のタイトル列挙（§13.7）。集約ではなく 1 論文の事実で、数値は
+    # hidden（真偽値）以外に返さない。
+    "/api/admin/documents/{document_id}/theory-modules/related": _R_OBJECT,
     "/api/admin/documents/{document_id}/revisions/{revision_id}": _R_OBJECT,
     "/api/admin/documents/{document_id}/revisions/{revision_id}/report": _R_OBJECT,
     "/api/admin/documents/{document_id}/revisions/{revision_id}/run-status": _R_STATE,
@@ -294,6 +300,7 @@ _NON_INDICATOR_ROUTES: dict[str, str] = {
     "/api/admin/library/entries/{entry_id}/labels": _R_OBJECT,
     "/api/admin/library/relations": _R_OBJECT,
     "/api/admin/library/atlas-links": _R_OBJECT,
+    "/api/admin/library/atlas-links/nodes": _R_OBJECT,  # 地図の概念の名前検索（IK-0927・集約なし）
     # 教員が確定するための同一性候補（candidate entry + 同一性リンク）そのものの提示。
     # 返す数値は「閲覧できない論文を何本隠したか」（hidden_count）だけで、これは
     # 集約値ではなく**隠し方の事実**（W-β と同じ扱い）。
@@ -327,6 +334,13 @@ _NON_INDICATOR_ROUTES: dict[str, str] = {
     "/api/admin/status/overview": _R_STATE,
     "/api/admin/tasks/{task_id}": _R_STATE,
     "/api/admin/theory-components/{component_id}/explanations": _R_OBJECT,
+    # 第 25 周 第 7 波（IK-1012 の残り）: 再解析前の部品に付いたままの説明の読み取り専用の列挙（集約ではない）。
+    "/api/admin/theory-components/{component_id}/stranded-explanations": _R_OBJECT,
+    # -- SB層（検証シミュレーション。差の数値は simulation-agreement が計器） ------
+    "/api/admin/simulation/documents/{document_id}/overview": _R_OBJECT,
+    "/api/admin/simulation/documents/{document_id}/wirings": _R_OBJECT,
+    "/api/admin/simulation/parts": _R_OBJECT,
+    "/api/admin/simulation/runs/{run_id}": _R_OBJECT,
     "/api/admin/url-fetch-domains": _R_SETTING,
     # -- AL層（アカウント運用。個票は account-activity が計器） ---------------
     "/api/admin/users": _R_ACCOUNT,
@@ -351,6 +365,9 @@ _TRIAGED_AS_INDICATORS = (
 #: 本人だけが自分の記録を読む経路は `_get_current_user` で足りるため、ここに宣言する。
 _NON_ROLE_GATED_INDICATOR_ROUTES = {
     "/api/me/records": "本人のみが自分の記録を読む（ロールゲートではなく本人ゲート）",
+    "/api/learning/courses/{course_id}/components/{component_id}/explanations": (
+        "受講者が受講しているコースに届いた説明の段階の言葉を読む（受講ゲート。IK-0926）"
+    ),
 }
 
 

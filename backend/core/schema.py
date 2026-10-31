@@ -555,6 +555,12 @@ AUDIT_ENTITY_KNOWLEDGE_OBJECT = "knowledge_object"
 # 監査に載せない。取り込んだ人は束の中には書かず、この行の changed_by だけに残る。
 AUDIT_ENTITY_IMPORT = "import"
 
+# 検証シミュレーション層（simulation_bridge_design.md SB7）: 理論プログラム / 実験機の配線 /
+# run / 台帳候補の遷移を記帳する。entity_id は program_id / wiring_id / run_id / 台帳の
+# target_id。action は core/simulation_bridge/schema.py::AUDIT_ACTIONS。生成コード本文・
+# 数値は監査に載せない。
+AUDIT_ENTITY_SIMULATION = "simulation"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -604,6 +610,7 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_EXPORT,
     AUDIT_ENTITY_KNOWLEDGE_OBJECT,
     AUDIT_ENTITY_IMPORT,
+    AUDIT_ENTITY_SIMULATION,
 )
 
 
@@ -661,6 +668,31 @@ CLAIM_ORIGINS: tuple[str, ...] = (
     CLAIM_ORIGIN_EQUATION_SYNTHESIS,
 )
 
+#: 論文の文を持たない主張の出所（式から決定論で合成した定型文）。論文の文として引用・
+#: 抽出の材料にしてはいけない消費者（D層のスコープ候補 IK-0790・記号の使用例 IK-0922）が
+#: 共有する述語の正本。
+NON_SOURCE_TEXT_CLAIM_ORIGINS: tuple[str, ...] = (CLAIM_ORIGIN_EQUATION_SYNTHESIS,)
+
+def infer_claim_origin(record: dict | None) -> str:
+    """IK-1155: 主張の dict（DB 行 or claim_object_builder の claim）から出所を言う。
+
+    明示の ``origin`` が語彙内ならそれ。無ければ persistence と同じ規則（親 claim あり =
+    atomic_rewrite / synthesis_method か ``synth_claim_`` = equation_synthesis / それ以外は空）。
+    """
+    if not isinstance(record, dict):
+        return ""
+    explicit = str(record.get("origin") or "").strip()
+    if explicit in CLAIM_ORIGINS:
+        return explicit
+    if str(record.get("parent_claim_id") or "").strip():
+        return CLAIM_ORIGIN_ATOMIC_REWRITE
+    if str(record.get("synthesis_method") or "").strip() or str(
+        record.get("claim_id") or ""
+    ).startswith("synth_claim_"):
+        return CLAIM_ORIGIN_EQUATION_SYNTHESIS
+    return ""
+
+
 #: element_id_remap.object_kind / stable_key の種別接頭辞。
 KNOWLEDGE_OBJECT_KINDS: tuple[str, ...] = (
     "claim", "component", "equation", "evidence", "derivation_step", "symbol",
@@ -706,6 +738,8 @@ LEARNING_UNIT_KINDS_FOR_COURSE: tuple[str, ...] = (
 LIBRARY_ENTRY_TYPES: tuple[str, ...] = (
     "apparatus", "theory_component", "concept", "theory", "method",
     "observable", "assumption", "quantity", "process",
+    # 検証シミュレーション層の実験機部品（simulation_bridge_design.md §4.1・migration 088）。
+    "instrument_model", "noise_source", "signal_processing",
 )
 
 #: library_entry_labels.kind（SKOS の prefLabel / altLabel / hiddenLabel）。
@@ -725,6 +759,8 @@ CONCEPT_RELATION_KINDS: tuple[str, ...] = (
 MAPPING_JUSTIFICATIONS: tuple[str, ...] = (
     "manual_curation", "lexical_match", "vector_similarity",
     "cartridge_declared", "corpus_cooccurrence", "llm_candidate",
+    # 理論モジュールの構造の指紋の完全一致（theory_module_layer_design.md §13.8・migration 086）。
+    "structural_match",
 )
 
 

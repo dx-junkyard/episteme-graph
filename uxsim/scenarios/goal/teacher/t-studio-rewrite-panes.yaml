@@ -1,0 +1,45 @@
+id: t-studio-rewrite-panes
+population: teachers
+runner: [api]
+preconditions:
+  - text: このペルソナは自分が所有するコースを持っている（原稿スタジオでの保存は所有者だけができる）
+    check: owns_course
+seed_scenarios: [t-v5-register-own-course]
+goal: "{{goal_text}}"
+params_required: [goal_text, rewrite_prompt]
+steps:
+  - do: auth.login
+  - do: admin.courses.list
+  - do: admin.lecture_studio.open_course
+  - do: admin.lecture_studio.select_topic
+    with: {prefer: first}
+    note: 先頭のトピックの授業用ドラフトを開く
+  - do: admin.lecture_studio.right_pane_evidence
+    note: このドラフトを支える根拠（論理要素・主張・数式・図）を確かめる
+  - do: admin.lecture_studio.right_pane_stumble
+    note: 学習者のつまづきの集計を見る（人数が少ない項目は出ないはず）
+  - do: admin.lecture_studio.rewrite_topic
+    with: {prompt: "{{rewrite_prompt}}"}
+    note: AI に書き換えを頼み、埋め込み（部品・式・図）が残っているかを読む
+  - choose:
+      - do: admin.lecture_studio.save_topic
+        note: 提案でよければ保存する
+      - do: admin.lecture_studio.edit_draft
+        with: {field: material, append: "{{material_append | next}}"}
+        note: 提案に一言足してから保存するつもりで書き足す
+    optional: true
+  - choose:
+      - do: admin.lecture_studio.save_topic
+      - do: admin.lecture_studio.audio_readiness
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/14-admin-lecture-studio.md#stumble-tabs
+  - manual: teacher/14-admin-lecture-studio.md#assistant-modal
+  - manual: teacher/14-admin-lecture-studio.md#course-draft
+  - manual: teacher/14-admin-lecture-studio.md#save-btn
+watch_for:
+  - AI の書き換えは提案として欄に入り、保存するまで受講者に届かないことが画面で分かる（マニュアルの言い方と食い違わない）
+  - 書き換えで消えた図の埋め込みは戻され、戻したことが分かる
+  - つまづきは段階ラベルとレンジだけで、人数の少ない項目は「まだデータなし」になる
+  - 根拠リンクはこのトピックの論文の要素を指す

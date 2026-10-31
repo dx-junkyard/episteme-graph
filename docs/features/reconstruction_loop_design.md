@@ -332,6 +332,8 @@ backend/core/reconstruction/
   prompt.py          → item オーサリング用プロンプト
   llm_client.py      → structured output（オーサリングのみ）
   input_builder.py   → LLM 入力整形（claim の concepts/equation/scope）
+  claim_context.py   → オーサリング前の claim 整形（空欄の補完・本文の正規化・対象の選別。
+                        非LLM・純関数。IK-0479〜IK-0482）
   validator.py       → item スキーマ検証（expected が response_space に含まれる等）
   repair.py          → 検証失敗時の再試行（2回失敗で item を生成しない=配信しない）
   diff.py            → 実行時構造照合（非LLM・同期）
@@ -349,6 +351,24 @@ backend/core/reconstruction/
 - 出題対象クエリ: `theory_claims` から `support_status='source_backed'` かつ
   `review_status IN ('teacher_approved', 'teacher_reviewed', 'endorsed')`
   （実装で確定済み。正本は `backend/core/reconstruction/schema.py` の `APPROVED_REVIEW_STATUSES`）。
+- オーサリング入力の整形（2026-09-28・IK-0479〜IK-0482、正本は `claim_context.py`）:
+  ①live 行の空欄（出典文・節見出し・式・親 claim の概念）を同じ文書の live 構造
+  （親 claim / 同じ block の `knowledge_evidence` / `chunks.source_metadata` /
+  `knowledge_equations.linked_claim_ids`）から推測せずに補う。
+  ②PDF の行末ハイフネーション・改行を入力と保存する問い文の両方で畳む。
+  ③`claim_type='unknown'` と 60 字以下の否定文（問いに答えが入る）は対象外にし、理由別件数を
+  `worker.last_authoring_report(document_id)` とログに残す（行は消さない）。
+  ④同じ文書のオーサリングはプロセス内で直列化し、INSERT は claim 単位の advisory lock 下で
+  非 retired item の不在を再確認する。同じ本文・親子の claim には 1 件だけ（atomic child 優先）。
+- predict の下地（`item_builder.elicit_mode_decision`）は関係型 claim + 役割付き概念 2 個以上か
+  関係型の式を要する。式は claim 行の `equation.equation_ids` / `equation_stable_keys`（無ければ親、
+  次に式側の `linked_claim_ids`）で `knowledge_equations` から解決し、**PDF からそのまま抽出できた**
+  式（`confidence_policy`）で種類が relation / result / approximation / constraint・記号 2 つ以上の
+  ときだけ `relation_type` を付ける（復元した式は答えキーにしない。付けない理由は
+  `equation.relation_withheld`）。restate にした理由は item 生成の監査 metadata `restate_reason` と
+  `last_authoring_report` の `restate_reasons` に残す（IK-0483 / IK-0502）。分野未指定の解析では
+  概念の枝は空のまま。同じ文書の別 claim を誤答に使う案は、誤答が論文中の正しい主張になり
+  選択肢の排他性と非LLM DIFF の意味を壊すので採らない。
 
 ### 4.3 API
 

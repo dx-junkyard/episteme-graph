@@ -1,0 +1,7 @@
+# --- snapshot record (appended by snapshot.py) ---
+snapshot_record:
+  name: corpus-astro-v1
+  created_at: 2026-09-27T03:27:26+00:00
+  git_commit: fd9454e
+  migration_head: '087'
+  note: "CC-BY astro-ph 4 本を解析済み・コース無し（IK-0360 の是正前イメージで解析）"

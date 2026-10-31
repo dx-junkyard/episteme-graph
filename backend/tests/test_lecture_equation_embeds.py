@@ -50,14 +50,25 @@ def test_resolve_equation_embeds_prefers_link_latex_over_summary():
     assert formulas[0]["spoken"] == "R_Lambda_c 比から R_D 比と R_D* 比を引くと delta_R になる"
 
 
-def test_resolve_equation_embeds_falls_back_to_summary_when_no_latex():
+def test_resolve_equation_embeds_does_not_render_prose_summary_as_formula():
+    """IK-0455: latex の無い式の散文 summary を数式として描かない（埋め込みを外す）。"""
     resolve = _load_resolve_equation_embeds()
 
     text, formulas = resolve("[[equation:eq_summary_only]]", _links(), [])
 
+    assert "[[FORMULA_" not in text
+    assert "[[equation:" not in text
+    assert formulas == []
+
+
+def test_resolve_equation_embeds_uses_math_like_summary_when_no_latex():
+    resolve = _load_resolve_equation_embeds()
+    links = [{"kind": "equation", "target_id": "eq_m", "summary": r"\begin{aligned} a &= b \end{aligned}"}]
+
+    text, formulas = resolve("![[equation:eq_m]]", links, [])
+
     assert "[[FORMULA_0]]" in text
-    assert formulas[0]["latex"] == "運動方程式の線形化。"
-    assert formulas[0]["spoken"] == "運動方程式の線形化。"
+    assert formulas[0]["latex"] == r"\begin{aligned} a &= b \end{aligned}"
 
 
 def test_resolve_equation_embeds_removes_unresolvable_embeds():

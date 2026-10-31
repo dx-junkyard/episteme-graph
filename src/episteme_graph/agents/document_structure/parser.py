@@ -77,6 +77,7 @@ class PDFBlockExtractor:
                 text, font_size, font_name, is_bold = self._extract_text_props(
                     raw_block
                 )
+                dominant_size = self._dominant_font_size(raw_block)
                 text = text.strip()
                 if not text:
                     continue
@@ -94,6 +95,7 @@ class PDFBlockExtractor:
                         font_name=font_name,
                         is_bold=is_bold,
                         is_centered=is_centered,
+                        dominant_font_size=dominant_size,
                     )
                 )
                 order += 1
@@ -138,6 +140,22 @@ class PDFBlockExtractor:
             max(set(font_names), key=font_names.count) if font_names else None
         )
         return text, avg_size, dominant_font, is_bold
+
+    @staticmethod
+    def _dominant_font_size(raw_block: dict) -> float | None:
+        """文字数で重み付けした最頻の文字サイズ（0.1pt 単位で丸めて数える）。"""
+        weights: dict[float, int] = {}
+        for line in raw_block.get("lines", []):
+            for span in line.get("spans", []):
+                size = span.get("size")
+                chars = len(str(span.get("text", "")).strip())
+                if not size or chars <= 0:
+                    continue
+                key = round(float(size), 1)
+                weights[key] = weights.get(key, 0) + chars
+        if not weights:
+            return None
+        return max(weights.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
     @staticmethod
     def _is_centered(bbox: tuple, page_width: float, tolerance: float = 0.15) -> bool:

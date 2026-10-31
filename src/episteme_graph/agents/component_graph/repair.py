@@ -24,6 +24,43 @@ from .schema import (
 logger = logging.getLogger(__name__)
 _MAX_REPAIR_ATTEMPTS = MAX_REPAIR_ATTEMPTS
 
+#: Validation rules the edge-returning LLM can actually fix by changing its
+#: output (IK-0729). The repair prompt only ever returns ``edges`` (+ a top-level
+#: ``confidence``); node-side issues (generic operation, missing equation /
+#: derivation / claim links, labels, ...) belong to the deterministic
+#: normalizer / graph demotion and must not drive LLM repair calls — otherwise
+#: the loop spends its budget on errors it cannot change and finally discards
+#: the LLM edges via the fallback.
+EDGE_REPAIRABLE_RULE_IDS: frozenset[str] = frozenset({
+    "missing_source",
+    "missing_target",
+    "unknown_source_component",
+    "unknown_target_component",
+    "self_loop",
+    "invalid_edge_type",
+    "duplicate_edge",
+    "bidirectional_component_edge_pair",
+    "invalid_evidence_claims",
+    "invalid_evidence_equation_ids",
+    "edge_confidence_out_of_range",
+    "confidence_out_of_range",
+    "component_graph_dependency_cycle",
+})
+
+
+def edge_repairable_issues(issues: list[ValidationIssue]) -> list[ValidationIssue]:
+    """Subset of ``issues`` that the edge LLM can fix (IK-0729)."""
+    return [i for i in issues if getattr(i, "rule_id", "") in EDGE_REPAIRABLE_RULE_IDS]
+
+
+def needs_edge_repair(issues: list[ValidationIssue]) -> bool:
+    """True only when at least one *edge-repairable* issue is a hard error.
+
+    Node-side errors alone never trigger a repair call (IK-0729: no call when
+    nothing the LLM returns could change the outcome).
+    """
+    return any(i.severity == "error" for i in edge_repairable_issues(issues))
+
 
 class ComponentGraphRepairer:
     def repair(
@@ -55,13 +92,17 @@ class ComponentGraphRepairer:
             parse=lambda raw: _parse_raw(
                 raw, llm_input.document_id, llm_input.cartridge_id, nodes
             ),
-            validate=lambda result: validator.validate(  # type: ignore[attr-defined]
-                result, cartridge, llm_input=llm_input
+            # Only edge-repairable issues steer the loop and the repair prompt;
+            # node-side issues are re-validated after normalization (agent.run).
+            validate=lambda result: edge_repairable_issues(
+                validator.validate(  # type: ignore[attr-defined]
+                    result, cartridge, llm_input=llm_input
+                )
             ),
             on_success=attach_issues,
             on_exhausted=_on_exhausted,
             raw_output=raw_output,
-            validation_issues=validation_issues,
+            validation_issues=edge_repairable_issues(validation_issues),
             log_label="ComponentGraph",
         )
 

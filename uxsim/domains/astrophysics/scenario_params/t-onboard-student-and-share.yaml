@@ -1,0 +1,7 @@
+scenario: t-onboard-student-and-share
+domain: astrophysics
+params:
+  student_usernames: [uxsim-lab-m1-a, uxsim-lab-m1-b, uxsim-lab-m1-c]
+  student_email_domain: example.test    # 砂場専用。実在しない予約ドメインにする（実人間のデータを混ぜない = PE8）
+  group_name: 宇宙論研究室 2026 年度 新入生
+  copilot_question: 新入生の学生アカウントを作って、研究室のグループに入れて、コースを見られるようにしたいです。どの画面から始めればいいですか？

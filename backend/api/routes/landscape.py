@@ -31,10 +31,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 import services
 from core import atlas_correspondence
+from core import atlas_state
 from core import atlas_store
 from core import decision_context
+from core import document_refs
+from core import label_vocab
 from core.course_data import course_cartridge_id, course_source_material_ids
 from core.landscape import builder as landscape_builder
 from core.landscape import projection
@@ -50,7 +54,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/landscape", tags=["Landscape"])
 
 # 学習者向け（main.py がそのまま登録する。フルパスを自前で持つ）
-learning_router = APIRouter(prefix="/api/learning", tags=["Learning"])
+learning_router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +311,35 @@ def _gap_signal_domains(session, document_id: str) -> set[str]:
     return {str(row.get("domain_key") or "") for row in rows if row.get("domain_key")}
 
 
+def _gap_signal_topics(session, document_id: str) -> dict[str, list[str]]:
+    """この論文が記録した「地図に置けなかった主題」の名前（domain_key → 主題名の列）。
+
+    IK-0995（第 25 周 第 5 波）: 分野の地図タブの候補ゼロの理由が「置けなかった主題の記録は
+    あります」と言うので、その記録を論文の画面で名前として読めるようにする（件数・確からしさ
+    は返さない = LS5。教員の判断（decisions）は読まない）。照会に失敗しても空（fail-soft）。
+    """
+    try:
+        from core.atlas_gaps import store as gap_store
+
+        rows = gap_store.list_active_signals(session, document_id=str(document_id or ""))
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "landscape: failed to read category gap topics for %s (non-fatal)",
+            document_id, exc_info=True,
+        )
+        return {}
+    out: dict[str, list[str]] = {}
+    for row in rows or ():
+        domain = str(row.get("domain_key") or "")
+        label = str(row.get("proposed_label") or "").strip()
+        if not domain or not label:
+            continue
+        labels = out.setdefault(domain, [])
+        if label not in labels:
+            labels.append(label)
+    return out
+
+
 def _unplaced_from_artifacts(document_id: str, names: Mapping[str, str]) -> list[dict]:
     """最新 run の ``landscape_placement`` artifact から ``unplaced_domains``（LS10）。
 
@@ -394,6 +427,7 @@ def list_document_landscape_placements(
         names = _domain_names(session)
         unplaced = _unplaced_from_artifacts(document_id, names)
         gap_domains = _gap_signal_domains(session, document_id)
+        gap_topics = _gap_signal_topics(session, document_id)
         domain_keys = {str(r.get("domain_key") or "") for r in rows}
         domain_keys.update(str(u.get("domain_key") or "") for u in unplaced)
         skeletons = _load_skeletons(session, {k for k in domain_keys if k})
@@ -403,6 +437,9 @@ def list_document_landscape_placements(
 
     for entry in unplaced:
         entry["gap_signals_recorded"] = entry.get("domain_key") in gap_domains
+        topics = gap_topics.get(str(entry.get("domain_key") or "")) or []
+        if topics:
+            entry["gap_topics"] = list(topics)
 
     node_index = projection.skeleton_node_index(skeletons)
     return {
@@ -705,17 +742,22 @@ def accept_course_landscape_placements(
     """
     _, viewable, editable_ids, hidden = _course_source_access(course_id, current_user)
     # edit できないソース論文は確認の対象外（除外件数として正直に返す — RR7）。
-    skipped_documents = hidden + len([d for d in viewable if d not in editable_ids])
+    not_editable = len([d for d in viewable if d not in editable_ids])
+    skipped_documents = hidden + not_editable
+    # IK-0376: 件数だけだと失敗と読まれるので、飛ばした理由を事実文で添える。
+    skipped_note = _release_skipped_note(not_editable=not_editable, hidden=hidden)
     reviewer_id = str(current_user.get("id") or "").strip()
 
     session = _session()
     try:
         # DC2: 「提示されていたもの」はサーバが更新前に取り直す（クライアント申告に
-        # 依存しない）。edit できる document の live な inferred が「次へ」の対象として
-        # 画面に出ていた集合である。
+        # 依存しない）。GET .../placements と同じく**閲覧できる全ソース論文**の live な
+        # inferred が「次へ」の画面に出ていた集合である（第 23 周 F5: 以前は edit できる
+        # document だけで組んでいたため、閲覧のみの教員が 8 件を見て 0 件確認しても
+        # 「一致しています」と記帳されていた）。
         presented_rows = landscape_store.list_for_documents(
             session,
-            sorted(editable_ids),
+            sorted(viewable),
             statuses=[landscape_schema.STATUS_INFERRED],
         )
         updated = landscape_store.accept_inferred_for_documents(
@@ -759,10 +801,24 @@ def accept_course_landscape_placements(
             reported["evidence_shown"] = bool(body.evidence_shown)
         client_reported = reported or None
 
+    # 第 23 周 F5: 提示されたが編集権限が無く対象外だった配置を別キーで残す。
+    # （焦点論文の優先規則ではなく、権限による対象外の切り分け。）
+    skipped_rows = []
+    for row in presented_rows:
+        row_document_id = str(row.get("document_id") or "")
+        if row_document_id in editable_ids:
+            continue
+        skipped_rows.append(row)
+    skipped_document_ids = sorted(
+        {str(r.get("document_id") or "") for r in skipped_rows if r.get("document_id")}
+    )
     ctx = decision_context.build_decision_context(
         basis=decision_context.BASIS_RELEASE_REVIEW_PLACEMENTS,
         presented_ids=[str(r.get("id") or "") for r in presented_rows],
         applied_ids=[str(r.get("id") or "") for r in updated],
+        skipped_ids=[str(r.get("id") or "") for r in skipped_rows],
+        skipped_document_ids=skipped_document_ids,
+        skipped_reason=RELEASE_SKIPPED_REASON_NOT_EDITABLE,
         # RR4: 各行の [却下] [再検討] と、ステップの「あとで」が常に出ている。
         alternatives=(
             decision_context.ALT_REJECT,
@@ -798,13 +854,82 @@ def accept_course_landscape_placements(
             ),
         )
 
-    return {
+    if not updated:
+        # 第 23 周 F5: 1 件も確認しなかった「次へ」も手続として残す（DC1。以前は
+        # confirmed 1 件ごとのループだけだったため、閲覧のみの教員の「次へ」が監査に
+        # 1 行も残らず、「見たが確認しなかった」ことが再構成できなかった）。
+        # 遷移は無いので old/new は同じ status（遷移なしの事実）+ ``no_transition``。
+        services.record_review_event(
+            AUDIT_ENTITY_LANDSCAPE_PLACEMENT,
+            course_id,
+            landscape_schema.STATUS_INFERRED,
+            landscape_schema.STATUS_INFERRED,
+            current_user.get("id"),
+            decision_context.attach_decision_context(
+                {
+                    "action": RELEASE_ACCEPT_ACTION,
+                    "course_id": course_id,
+                    "scope": "course",
+                    "no_transition": True,
+                },
+                ctx,
+            ),
+        )
+
+    result: dict = {
         "course_id": course_id,
         "confirmed": len(updated),
         "skipped_documents": skipped_documents,
         # 画面が「提示と適用が一致したか」を事実文で出せるように同じ dict を返す。
         "decision_context": ctx,
     }
+    if skipped_note:
+        # 飛ばした教材があるときだけキーを足す（無いときは従来のレスポンスと同じ形）。
+        result["skipped_note"] = skipped_note
+    decision_note = _release_decision_note(ctx)
+    if decision_note:
+        # 提示と確認が一致しないときだけ（DC2: 一致を偽らない事実文）。
+        result["decision_note"] = decision_note
+    return result
+
+
+#: 第 23 周 F5: 対象外にした理由の語（``decision_context.skipped.reason``）。
+RELEASE_SKIPPED_REASON_NOT_EDITABLE = "not_editable"
+
+
+def _release_decision_note(ctx: Mapping[str, Any]) -> str:
+    """提示と確認が一致しないときの事実文（一致していれば ``""``）。
+
+    件数はサーバ導出の集合（``presented`` / ``applied`` / ``skipped``）から取る。
+    """
+    if ctx.get("presented_matches_applied"):
+        return ""
+    presented = int((ctx.get("presented") or {}).get("count") or 0)
+    applied = int((ctx.get("applied") or {}).get("count") or 0)
+    note = label_vocab.RELEASE_DECISION_PARTIAL_NOTE.format(
+        presented=presented, applied=applied
+    )
+    skipped = ctx.get("skipped") or {}
+    documents = len(skipped.get("document_ids") or [])
+    if int(skipped.get("count") or 0) > 0 and documents > 0:
+        note = note[:-1] + label_vocab.RELEASE_DECISION_NOT_EDITABLE_SUFFIX.format(
+            documents=documents
+        ) + "。"
+    return note
+
+
+def _release_skipped_note(*, not_editable: int, hidden: int) -> str:
+    """accept で対象外にした教材の理由を事実文にする（IK-0376）。
+
+    理由ごとに1文（``core/label_vocab.py`` が正本）で、数字は入れない。該当が無ければ
+    ``""``。
+    """
+    parts: list[str] = []
+    if not_editable > 0:
+        parts.append(label_vocab.RELEASE_SKIPPED_NOT_EDITABLE_NOTE)
+    if hidden > 0:
+        parts.append(label_vocab.RELEASE_SKIPPED_NOT_VISIBLE_NOTE)
+    return "".join(parts)
 
 
 @router.get("/overview")
@@ -939,10 +1064,13 @@ def get_course_landscape(
         raise HTTPException(status_code=404, detail="コースが見つかりません")
 
     document_ids = services.list_course_source_document_ids(course_data)
-    return {"course_id": course_id, **learner_landscape_for_documents(course_data, document_ids)}
+    return {
+        "course_id": course_id,
+        **learner_landscape_for_documents(course_data, document_ids, viewer_id=current_user["id"]),
+    }
 
 
-def learner_landscape_for_documents(course_data: dict, document_ids) -> dict:
+def learner_landscape_for_documents(course_data: dict, document_ids, *, viewer_id=None) -> dict:
     """学習者向け「論文の位置づけ」DTO（``course_id`` 付与前）を組み立てる。
 
     ``get_course_landscape``（受講ゲート済み）と、画面文脈アダプター Phase 4
@@ -971,8 +1099,21 @@ def learner_landscape_for_documents(course_data: dict, document_ids) -> dict:
         resolve = _node_resolve(session, {k for k in domain_keys if k})
         names = _domain_names(session)
         rows = _document_rows(session, document_ids)
+        # IK-0664（第 25 周 第 7 波）: 論文の呼び方は題名を正本にする（arXiv 番号のままの取り込みは、
+        # 閲覧できる同じ論文の別の取り込み・arXiv メタデータの写しから題名を引く。無ければ番号のまま）。
+        paper_titles: dict[str, str] = {}
+        try:
+            sibling_ids = services.list_visible_document_ids(viewer_id) if viewer_id else []
+            paper_titles = document_refs.resolve_paper_titles(
+                session, [row[0] for row in rows], sibling_ids=sibling_ids
+            )
+        except Exception:  # noqa: BLE001 — 呼び方の解決の失敗で位置づけを壊さない
+            logger.warning("learner landscape: paper titles unavailable (non-fatal)", exc_info=True)
+            paper_titles = {}
     finally:
         session.close()
+    if paper_titles:
+        rows = [(r[0], paper_titles.get(r[0]) or r[1], r[2]) for r in rows]
 
     # コースの sources 順を保つ（DTO の documents 並び順は document_titles の順序）。
     title_by_id = {row[0]: row[1] for row in rows}
@@ -987,10 +1128,16 @@ def learner_landscape_for_documents(course_data: dict, document_ids) -> dict:
             ordered.append(document_id)
     titles = {document_id: title_by_id.get(document_id, "") for document_id in ordered}
 
+    # IK-0413: 学習者には分野の内部キー（domain_key）を表示名の代わりに見せない。
+    # 表示名が未登録の分野は「名前が登録されていない分野」と正直に言う（教員側の
+    # 一覧は従来どおり key へ縮退する — ここは学習者投影だけ）。
+    learner_names = {
+        key: atlas_state.learner_domain_label(names.get(key), key) for key in skeletons
+    }
     dto = projection.learner_landscape_dto(
         placements,
         projection.skeleton_node_index(skeletons),
-        _domain_facts(skeletons, names),
+        _domain_facts(skeletons, learner_names),
         course_domain_key or None,
         document_titles=titles,
         source_document_count=len(document_ids),

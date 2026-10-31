@@ -31,6 +31,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user
 from services import (
     list_visible_document_ids,
@@ -43,7 +44,7 @@ from core import corpus_view
 logger = logging.getLogger(__name__)
 
 # main.py が直接登録する（cycle.py / reconstruction.py と同型の学習者向け router）。
-learning_router = APIRouter(prefix="/api/learning", tags=["Learning"])
+learning_router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 _DETAIL_DOMAIN_REQUIRED = "分野を指定してください。"
 _DETAIL_NO_SKELETON = "この分野には凍結済みの骨格がありません。"
@@ -114,11 +115,24 @@ def get_corpus_documents(
 
     visible = list_visible_document_ids(current_user["id"])
     session = _session()
+    facts: list[str] = []
     try:
         documents = corpus_view.list_corpus_documents(session, key, visible)
+        # IK-0414（CR4）: 一覧に出ない閲覧可能な論文（学習中のコースの論文を含む）を
+        # 題名で言う。地図の位置には置かない。取れなければ事実文だけ落とす（fail-soft）。
+        try:
+            titles, more = corpus_view.list_unrelated_visible_titles(session, key, visible)
+            fact = corpus_view.unrelated_documents_fact(titles, more)
+            if fact:
+                facts.append(fact)
+        except Exception:  # noqa: BLE001
+            logger.warning("corpus unrelated titles unavailable", exc_info=True)
     finally:
         session.close()
-    return {"documents": documents}
+    result: dict = {"documents": documents}
+    if facts:
+        result["facts"] = facts
+    return result
 
 
 class FrontierInterestRequest(BaseModel):

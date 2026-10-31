@@ -1,0 +1,62 @@
+id: t-db-scope-promote
+population: teachers
+runner: [api]
+preconditions:
+  - text: このペルソナは自分のコース（前提の地図タブのコース選択に並ぶもの）を持っている
+    check: owns_course
+  - 原稿スタジオのグラフのノードの台帳を開ける（前提の地図が空でもこの入口は開く）。地図に点があれば前提・主張の台帳も開く
+seed_scenarios: [t-v5-register-own-course]
+goal: "{{goal_text}} のために、台帳に検証スコープを記帳してから検証状態を記帳する"
+params_required: [goal_text, course_hint, material_hint, node_hint, scope_condition, scope_domain, scope_quote,
+                  scope_reason, status_reason, second_material_hint]
+steps:
+  - do: auth.login
+  - do: admin.doubt.tab_open
+    with: {course_hint: "{{course_hint}}"}
+  # 第 25 周 H8: 前提の地図が空でも開ける台帳の入口（原稿スタジオのノード詳細）を先に通る。第 1 周は地図が空で
+  # 台帳に一度も届かず、記帳の経路が評価できなかった
+  - do: admin.materials.list
+  - do: admin.doubt.studio_node_ledger
+    with: {material_hint: "{{material_hint}}", node_hint: "{{node_hint}}"}
+    note: 原稿スタジオのグラフでノードを選び、その台帳の区画を開く（前提の地図が空でも開ける）
+  - do: admin.doubt.verification_status
+    with: {status: 直接検証の記帳あり, reason: "{{status_reason}}"}
+    note: スコープを書く前に「直接検証」を選ぼうとする（画面がどう止めるかを見る）
+  - do: admin.doubt.scope_record
+    with: {reason: "{{scope_reason}}"}
+    note: 軸を書かずに記帳を押してしまう
+  - do: admin.doubt.scope_record
+    with: {condition: "{{scope_condition}}", domain: "{{scope_domain}}", evidence_quote: "{{scope_quote}}", reason: "{{scope_reason}}"}
+  - do: admin.doubt.verification_status
+    with: {status: 直接検証の記帳あり, reason: "{{status_reason}}"}
+  - choose:
+      - do: admin.doubt.ledger_open
+        note: 前提の地図の点か未検証合意リストの行から、同じ論文の前提・主張の台帳も開く（地図に点が出ていれば）
+    optional: true
+  - choose:
+      - do: admin.doubt.scope_record
+        with: {condition: "{{scope_condition}}", evidence_quote: "{{scope_quote}}", reason: "{{scope_reason}}"}
+        note: 地図から開いた台帳にもスコープを記帳する（学生の出典タブ・部品の説明の一行に出るかを後で学生が見る）
+    optional: true
+  # 第 25 周 第 3 周（judge_doubt_r2 §4 = IK-0899 の確認）: 同じ番号のノードを持つ別の論文の台帳を開き、
+  # いま記帳した論文の記帳が出ていない（空）ことを読む。是正前は論文をまたいで 1 行を共有しているので記帳が見える
+  - choose:
+      - do: admin.doubt.studio_node_ledger
+        with: {material_hint: "{{second_material_hint}}", node_hint: "{{node_hint}}"}
+        note: 別の論文の同じ番号のノードの台帳を開き、いまの記帳が出ていないか（出ているなら、どの論文の記帳かが分かるか）を読む
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: teacher/18-admin-doubt-atlas.md#record-scope
+  - manual: teacher/18-admin-doubt-atlas.md#record-verification-status
+  - manual: teacher/14-admin-lecture-studio.md#counterfactual-mode
+watch_for:
+  - スコープ 0 件では「直接検証の記帳あり」は選べず、理由の事実文（空欄は異常ではなく発見）が出る
+  - 軸が空のスコープの記帳は、次に何を書けばよいかが日本語の事実文で返る
+  - スコープを 1 件記帳した後は「直接検証の記帳あり」に上げられ、台帳にスコープと記帳者が並ぶ
+  - 記帳者の欄が名前で読める（内部 ID が出ていない）
+  - グラフのノードの台帳でスコープの記帳ができるか、できないならその理由が事実文で出る
+  - 別の論文の同じ番号のノードの台帳に、この論文の記帳が出ない（IK-0899 の是正後）
+  - コースを作らずに解析した教材から組んだコースでも（成果の行に course_id が無くても）、前提の地図に点が出て、
+    台帳を地図からも開ける（IK-0852 の是正後）。点が無いときは「材料がコースに届いていない／未実行／該当なし」が
+    別々の事実文で読め、原稿スタジオのノード詳細への導線がある（IK-0853 の是正後）

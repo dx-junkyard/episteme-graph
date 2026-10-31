@@ -243,3 +243,32 @@ def test_tex_source_equation_is_trusted_and_not_reconstructed():
     assert inputs[0].extraction_source == "tex_source"
     assert inputs[0].source_is_trusted is True
     assert inputs[0].needs_reconstruction is False
+
+
+# --- J0 / J1（2026-10-16）: 文脈の抜粋を数式・語の途中で切らない・節をまたがない ----------------
+
+def test_context_excerpt_does_not_cut_inside_math_or_words():
+    from episteme_graph.agents.equation_semantics.input_builder import context_excerpt
+
+    text = "We set the value to $25 + x^2$ in the general formalism of the paper"
+    head = context_excerpt(text, 22)
+    assert head == "We set the value to…"
+    assert context_excerpt(text, 30) == "We set the value to $25 + x^2$…"
+    tail = context_excerpt(text, 30, keep_end=True)
+    assert tail == "…general formalism of the paper"
+    for excerpt in (head, tail, context_excerpt(text, 26, keep_end=True)):
+        assert excerpt.count("$") % 2 == 0
+    assert context_excerpt("short", 30) == "short"
+
+
+def test_neighbor_context_stays_within_the_equation_section():
+    blocks = [
+        _typed("b1", "Conclusion paragraph that must not leak.", "body_paragraph", 0, section_id="sec_9"),
+        _typed("b2", "In this appendix we derive the kernels:", "body_paragraph", 1, section_id="sec_10"),
+        _typed("b3", "K_1 = b_1", "equation_block", 2, section_id="sec_10"),
+        _typed("b4", "Next appendix starts.", "body_paragraph", 3, section_id="sec_11"),
+    ]
+    prev = EquationSemanticsInputBuilder._neighbor_texts(blocks, 2, -1, 6)
+    nxt = EquationSemanticsInputBuilder._neighbor_texts(blocks, 2, 1, 6)
+    assert prev == ["[b2] In this appendix we derive the kernels:"]
+    assert nxt == []

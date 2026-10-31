@@ -9,4 +9,5 @@ FastAPI / LLM を import しない（純関数 + SQL ヘルパ）。A層（``src
 - :mod:`.sync` — live 行の同期（一致 = 同 UUID 更新 / 不一致 = superseded 刻印 / 新規 = INSERT。KO3）
 - :mod:`.remap` — agent ID の付け替え記録と参照の再係留（KO8）
 - :mod:`.backfill` — 既存行への stable_key バックフィル（起動時・fail-open）
+- :mod:`.references` — agent 側の参照 ID の表記ゆれ（``claim:`` 接頭辞）の正規化（純関数）
 """

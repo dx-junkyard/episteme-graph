@@ -768,3 +768,132 @@ A層非改変のまま日本語 headline が手に入る唯一の経路。
 - 教材本文の決定論注入（`_ensure_required_equations_in_material` の「この節で使う数式」行）は
   `label or equation_id` のままで `headline` を使っていない。指示書 §5.1 が挙げた4画面
   （S1〜S4）の外なので今回は変更しなかった
+
+---
+
+## 11. 図の文脈の可読性 — 「図と強く結びつく文章」を全体で意味が通る形にする（2026-09-25）
+
+状態: **設計確定・実装済み（§11.6 実装記録）**。オーナー報告（fujimoto_d.pdf の「深く検討 — Figure 1.1」
+で、支える主張の欄が「主張 に証拠を与える The possible mass range for dark matter is distributed over… 出典に裏付け 背景」
+のような断片の羅列になり、一目で意味が通じない）への是正。A層（`src/episteme_graph/agents/`）は非改変・再解析不要・
+LLM 0 回・読み時導出（既存 artifact と live 行だけを材料にする）。
+
+### 11.1 実物で確かめた原因（fujimoto_d.pdf・図 125 件・主張行 431 件）
+
+| # | 原因 | 実測 |
+|---|---|---|
+| RC-F1 | **関係語が事実より強い**。`FigureRecord.linked_claim_ids` は `crosslink.py` の**段落単位**のメンション（"Fig. 1.1" を含む body_paragraph の block_id → その段落の全 claim）で付くが、W層は `provides_evidence_for`「に証拠を与える」、役割文は「…を裏づける」と描く。模式図（Figure 5.21）に「手法の選択」の主張 12 件が「証拠を与える」相手として並ぶ | 主張行 431 件すべてが段落メンション由来 |
+| RC-F2 | **いちばん読める文が出ていない**。段落には「Figure 1.1 shows a classification of dark matter candidates by mass」のように**図が何を示すかを論文自身が述べる文**（メンション文）があるが、どこにも表示されない。代わりに同じ段落の主張が 60 字で切られて並ぶ | ラベル切り詰め 396/431 |
+| RC-F3 | **親主張と atomic 子主張の重複**。`claim_object` の親文（"The lower limit arises …, while the upper limit …"）と、その `atomic_rewrite` 子 2 件（lower bound / upper bound）が別行で並ぶ | Figure 1.1 の 4 行中 3 行が同じ内容 |
+| RC-F4 | **補足行が種別ラベルだけ**。`claim_label` の sublabel は「claim_type 訳 + evidence_text 第 1 文」だが、live 行の `evidence_text` は**全件空**なので「背景」「不明」だけが裸で残る。atomic 子は `claim_type='unknown'` で「不明」になるが `claim_tier='background'` は持っている | evidence_text 空 431/431・`unknown` 172 |
+| RC-F5 | **語順が逆**。`RELATION_LABELS` は全て後置の動詞句（「に証拠を与える」「の導出で得られる」…。設計 §3.2「主語は常に focus、focus が ITEM に〜する」）なのに、カードは 種別チップ → 関係語 → ラベル の順で描く。「主張 に証拠を与える The possible…」 | 全要素種別に共通 |
+| RC-F6 | **掲載節が空**。`placement.section_label` は caption block → section でしか引かず、§18（caption の位置は文字層）以降 caption_block_id を持たない図（30/125）や、caption block が section を持たない図で空になる。メンション段落は section を持つ | Figure 1.1 の掲載節が空 |
+
+### 11.2 設計判断
+
+- **図の文脈の主役はメンション文**。読み手の問い「この図は何を示し、本文のどこで何のために参照されているか」に
+  直接答えるのは、caption と、図を参照する本文の文（論文自身の言明・逐語・出典に裏付け）である。主張はその段落の
+  内容として**メンション文の後ろに従属して**見せる。
+- **関係は事実の強さどおりに言う**。段落メンション由来の主張は「図が主張に証拠を与える」ではなく
+  「図は『主張』を述べる本文で参照される」（新関係語 `cited_for_claim`）。`provides_evidence_for` は
+  caption block 由来（claim の block_id が caption block）の場合にだけ残す。
+- **主張は文として読ませる**。ラベルは従来どおり 60 字の見出し（他画面の互換）だが、ITEM に**全文** `full_text` を
+  additive に載せ、カードは全文を主文に描く。親が同じ一覧にいる atomic 子は行にしない（親文が内容を含む。
+  親の補足行に「細分化した主張 N 件を含む」と事実で書く）。
+- **意味の無いラベルを裸で出さない**（CP10 の裏面）。`claim_type='unknown'` は「不明」と描かず、
+  `claim_tier` の訳（新表 `CLAIM_TIER_LABELS`）へ落とし、それも無ければ補足行を出さない。
+- **語順は「ITEM → 関係語」**。カードの 1 行目を 種別チップ → ラベル（全文） → 関係語 → qualifier → 裏付け に
+  改める。全要素種別の可読性が同時に直る（設計 §3.2 の主語規約と一致）。
+- **掲載節はメンション段落から補う**。caption block で引けないときだけ、最初のメンション段落の section を使う
+  （出所は `placement.section_source = "caption" | "mention"`）。
+
+### 11.3 DTO 契約（additive・既存キー不変）
+
+- `ITEM.full_text`（str・省略可）: theory_claim のみ。`label` が切り詰めのときだけ載せる（同一文字列なら省略）。
+- `ITEM.relation = "cited_for_claim"` / `relation_label = "を述べる本文で参照される"`。group は新設 `mention_claim`
+  （ゾーン = positioning・小見出し「この図を参照している本文の主張」）。caption 由来は従来の `claim`。
+- `ITEM.sublabel`（claim）: claim_type 訳 → `claim_tier` 訳（`CLAIM_TIER_LABELS`）→ ""。`unknown` は訳さない。
+  親に畳んだ子がいれば「細分化した主張 N 件を含む」を末尾に足す。
+- `focus.placement.mentions`（list・省略可）: `[{text, section_label, page}]`。`text` はメンション文の逐語
+  （空白正規化のみ・切らない）。文書順・上限 6（超過は `notes` に事実文）。
+- `focus.placement.section_source`（"caption" | "mention"・省略可）。
+- `focus.contextual_role`（figure）: メンションがあれば「{section_label}の本文で参照されている」
+  （section が無ければ「本文で参照されている」）・`source_backed`・`structural`。無ければ従来のラダー。
+  他種別の `_STRUCTURAL_ROLE_TEMPLATES[claim]` は「『{label}』を裏づける」に鉤括弧を足すだけ（意味不変）。
+
+### 11.4 実装の置き場
+
+- backend: `core/text_excerpt.py::split_sentences`（文境界の唯一実装に相乗り）/ 新規
+  `core/deliberation/figure_mentions.py`（純関数・FastAPI/DB 非 import。図番号の導出とメンション正規表現は
+  `core/document_pipeline/figure_context.py` の同名ヘルパーを import して二重実装しない）/
+  `context_lens._build_figure` / `labels.claim_label`（`Label.full_text`）/ `element_vocab.CLAIM_TIER_LABELS` /
+  `dialogue.py` の grounding（メンション文を「[文脈: 本文での言及]」として注入・claim は full_text 優先）。
+- frontend: `element-card.js`（語順・full_text・「本文での言及」行）/ `element-vocab.js`（ミラー）/
+  `styles.css` / `admin.html` の `?v=`。
+- 学習者射影（`element_context.py`）は figure を対象にしていないので不変。`project_item` は未知キーを落とすため
+  `full_text` は学習者に出ない（claim 文脈 API で必要になったら別途）。
+
+### 11.5 非スコープ
+
+- crosslink を文単位にする A層変更（再解析が要る。今回は読み時に同じ結果を得る）/ 図の LLM 説明 /
+  学習者向けの図の文脈 / 表（table）の同型是正（同じ関数で扱えるが画面が無い）。
+
+### 11.6 実装記録（2026-09-25）
+
+Fable 5.1 が設計・指揮、Opus 5.5 の 3 体（backend / frontend / docs）が並列実装。migration なし・A層非改変・
+LLM 0 回。**未コミット**。
+
+**backend**: `core/text_excerpt.py::split_sentences`（文境界の唯一実装に相乗り）/ 新規
+`core/deliberation/figure_mentions.py`（`find_figure_mentions` / `mention_block_ids` / `figure_mention_pattern`。
+図番号とパターン断片は `core/document_pipeline/figure_context.py` から import）/ `labels.py`（`Label.full_text`・
+claim の sublabel は claim_type → `claim_tier` → 空。`unknown` は訳さない）/ `element_vocab.py::CLAIM_TIER_LABELS` /
+`context_lens.py`（`cited_for_claim`・`GROUP_MENTION_CLAIM`・`_figure_claim_items` の親子畳み込み・
+`_figure_contextual_role`・`_figure_placement`。`_claims_by_id` が `normalized_text` / `claim_tier` /
+`parent_claim_id` / `source_scope` を併せて 1 クエリで引く）/ `learner_context_common.ITEM_GROUPS` に `mention_claim` /
+`dialogue.py`（grounding に `[文脈: 本文での言及]`・ITEM は `full_text` 優先）。
+
+**実データで決めた追加規則**（§11.3 の補足。いずれも読み時のみで、A層 crosslink の挙動は不変）:
+- メンション正規表現の否定先読みは `(?![0-9]|\s*\.\s*[0-9])`。§11.3 の形 `(?!\.?[0-9])` だと図 8 が
+  "Figure 8 .1"（GROBID の空白混入）に当たる。
+- 付録の図番号は英字を保つ（"Figure C.8" → "C.8"。`_derive_figure_number` は "8" を返す）。
+- **本文に混入した caption の複写は言及に数えない**（GROBID は "Figure 6 .17: …" で始まる caption 文を
+  body_paragraph に入れることがある。fujimoto では 6 件）。
+- **役割文はメンション文が取れなくても `mention_claim` の主張があれば「{節}の本文で参照されている」**
+  （A層のクロスリンクが段落メンション由来である事実に基づく。切り詰めた主張を役割文に流用しない）。
+- **主張行と同じ文は「本文での言及」に重ねない**（空白正規化 + casefold の完全一致、または 40 字以上の
+  一方が他方を含む場合 = atomic 化で節だけが主張になった文。`_mention_covered_by_claims`）。
+- 図の section ITEM は他種別と同じ `GROUP_SECTION`（「関連」区画に孤立させない）。
+
+**frontend**: `element-card.js`（1 行目を 種別チップ → 主文 → 関係語 → qualifier → 裏付け に。`full_text` のある行は
+『全文』と関係語を同じ span に入れてインラインで流す = 後置の関係語が次行に取り残されない / 「本文での言及」行
+`INTRINSIC_LABEL_MENTIONS` / `unknown` の qualifier・役割チップを描かない）/ `element-vocab.js`（`CLAIM_TIER_LABELS` +
+`claimTierLabel` / `GROUP_ZONES.mention_claim` / `GROUP_HEADINGS.mention_claim` / `isUnknownKey`）/ `styles.css`
+（`.element-card-item-fulltext` / `.element-card-mention*`）/ `admin.html` `index.html` の `?v=`。
+
+**docs**: 教員マニュアル `24-admin-deliberation.md#context-lens` に段落追加（新アンカーなし）/ 課題ナレッジ
+**IK-0359**（型 `available-but-unwired`）/ CLAUDE.md W層節に 1 項目 / `figure_concept_linking_design.md` §F1 に注記。
+
+**ガードレール**: 新規 `test_figure_mentions.py`、拡張 `test_text_excerpt.py` / `test_element_labels.py` /
+`test_deliberation_context_lens.py`（caption 由来 vs メンション由来の関係語・親子畳み込み・placement.mentions・
+節のフォールバック・役割文・committed 注釈の優先・重複文の非再掲）/ `test_deliberation_dialogue.py` /
+`test_context_lens_readability.py`（RL8 に `cited_for_claim` と `mention_claim`、RL9 に `full_text`）/
+`test_element_vocab_mirror.py`（`CLAIM_TIER_LABELS`）/ `test_element_card_ui_static.py::TestFigureContextReadability`
+（語順・全文・言及行・unknown 非表示・CSS）。backend 全件 / src 全件とも pass。
+
+**fujimoto_d.pdf（図 125 件）での before / after**（読み時の再計算。DB 非変更）:
+
+| | before | after |
+|---|---|---|
+| 主張の行 | 431（全件 60 字で切り詰め・種別「不明」172） | 200（197 件に全文・「不明」0） |
+| 「本文での言及」を持つ図 | — | 55（文 66。主張行と重なる文は除外） |
+| 役割文 | 「〈切り詰めた主張〉を裏づける」72 / 未同定 53 | 「{節}の本文で参照されている」74 / 未同定 51（切り詰め 0） |
+| 掲載節が空の図 | 114 | 51（caption 由来 11・メンション由来 63） |
+
+Figure 1.1 の after: 意味 = caption / 掲載 = Candidates for dark matter / 本文での言及 = 『Figure 1 .1 shows a classification
+of dark matter candidates by mass, including WIMPs.』（p.15）/ 役割 = 「Candidates for dark matter の本文で参照されている」/
+主張 2 行（『The possible mass range …』『The lower limit arises …, while the upper limit …』を述べる本文で参照される、
+後者に「細分化した主張 2 件を含む」）。
+
+**確かめていないこと**: docker 実機の深く検討モーダル（本セッションから docker daemon に到達できず、静的ハーネスで
+`ElementCard.render` の実出力を確認した）/ 表（table）要素 / 和文論文の「図 N」メンション / 原稿スタジオの根拠リンク
+ペインでの見え方（同じカードなので語順・全文は同時に変わる）。

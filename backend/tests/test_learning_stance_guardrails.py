@@ -229,7 +229,9 @@ class TestExistingLayersUnchanged:
     def test_downstream_conditions_are_verbatim(self):
         for literal in (
             "None if (_is_casual or _is_discuss or _atlas_ctx) else check_prerequisites(",
-            "if overall_tier == TIER_OUT_OF_SOURCE and not _is_casual:",
+            # IK-0378（2026-09-28）: 注意書きの付与条件は model_generated（採用根拠ゼロ）に
+            # 変わった。casual で省く点は不変。
+            "if _no_adopted_grounding and not _is_casual and not degraded",
             "if not _is_casual and topic_info and any(",
             '"casual": _is_casual',
             '(body.intent_mode or "").strip() in ("on_path", "casual", "discuss"):',

@@ -1,0 +1,5 @@
+scenario: s-v5-predict-resume
+domain: astrophysics
+params:
+  goal_text: 昨日書いた予想を出典と並べること
+  prediction_text: 音速が小さいと µ のずれは大きく見えると思う。理由はまだうまく言えない。

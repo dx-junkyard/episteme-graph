@@ -55,6 +55,9 @@ resolution:
     - backend/api/routes/learning.py
     - backend/tests/test_llm_streaming_guardrails.py
     - docs/features/llm_response_streaming_design.md §3.2
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0311]
 view_of: []
 history:

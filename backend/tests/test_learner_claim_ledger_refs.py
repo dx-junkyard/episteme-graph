@@ -106,6 +106,7 @@ class TestGetChunkClaimRefsService:
         assert result == [{
             "id": "11111111-1111-1111-1111-111111111111",
             "claim_type": "diagnostic_claim",
+            "claim_type_label": "診断的主張",
             "label": "normalized body",
         }]
         assert fake.closed is True
@@ -203,7 +204,8 @@ class TestGetChunkClaimRefsService:
         monkeypatch.setattr(services, "_pg_session", lambda: fake)
 
         result = services.get_chunk_claim_refs(_course_data(["mat-1"]), "chunk-1")
-        assert set(result[0].keys()) == {"id", "claim_type", "label"}
+        # 表示投影層（DP2）で日本語の種別名 claim_type_label を足した。数値キーは無いまま。
+        assert set(result[0].keys()) == {"id", "claim_type", "claim_type_label", "label"}
 
 
 # ===========================================================================
@@ -227,7 +229,9 @@ class TestGetChunkClaimRefsUserVisibilityFallback:
         result = services.get_chunk_claim_refs(
             _course_data(["mat-1"]), "chunk-1", user_id="user-1",
         )
-        assert result == [{"id": "id-1", "claim_type": "diagnostic_claim", "label": "norm"}]
+        assert result == [
+            {"id": "id-1", "claim_type": "diagnostic_claim", "claim_type_label": "診断的主張", "label": "norm"}
+        ]
 
     def test_returns_none_when_not_in_course_and_not_visible(self, monkeypatch):
         """コース sources にも本人可視集合にも属さない → fail-closed で None のまま。"""
@@ -284,7 +288,9 @@ class TestGetChunkClaimRefsUserVisibilityFallback:
         result = services.get_chunk_claim_refs(
             _course_data(["mat-1"]), "chunk-1", user_id="user-1",
         )
-        assert result == [{"id": "id-1", "claim_type": "diagnostic_claim", "label": "norm"}]
+        assert result == [
+            {"id": "id-1", "claim_type": "diagnostic_claim", "claim_type_label": "診断的主張", "label": "norm"}
+        ]
 
 
 # ===========================================================================

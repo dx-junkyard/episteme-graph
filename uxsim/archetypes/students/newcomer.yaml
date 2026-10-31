@@ -1,0 +1,30 @@
+id: newcomer
+population: students
+summary: 入門者。質問が多く、マニュアルは読まない
+habits:
+  reads_manual: never
+  patience: low
+  asks_questions: often
+  uses_voice: "no"
+  device: desktop
+  prefers_mode: sequential
+  opens_sources: sometimes
+  checks_verification: never
+  pushes_back: never
+  writes_own_words: rarely
+  uses_maps: sometimes
+  rewrites_messages: sometimes
+  session_length: medium
+  returns_later: "yes"
+  language_mix: ja_only
+  demands_out_of_principle: sometimes
+voice: |
+  丁寧語。分からない語が出ると「〜ってどういう意味ですか」と短く聞く。長い文は書かない。
+  回答が長いと最後まで読まずに次の質問をしてしまう。自分が何を分かっていないかをうまく言葉にできず、
+  同じことを言い方を変えて聞き直すことが多い。画面のボタンは押してみて覚える。
+gives_up_when: |
+  同じ操作で 2 回続けて思った通りにならないとき。回答の中に知らない語が 3 つ以上並んだとき。
+  何が起きたか画面から読み取れないときは、理由を探さずに別の画面へ移る。
+asks_out_of_principle:
+  - 自分がどれくらい理解できているか、点数で教えてほしい
+  - このコースの何割くらいまで進んだか知りたい

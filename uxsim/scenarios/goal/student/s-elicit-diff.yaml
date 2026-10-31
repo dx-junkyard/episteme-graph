@@ -1,0 +1,48 @@
+id: s-elicit-diff
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、{{topic_hint}} で先に予想を書き、そのあと出典と並べて自分の理解を確かめる'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- prediction_text
+- seed_questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.chat.cycle
+  with:
+    cycle_mode: elicit
+    message: '{{prediction_text}}'
+  note: 答えを見る前に予想を書く
+- do: learning.chat.cycle
+  with:
+    cycle_mode: diff
+    message: '{{prediction_text}}'
+  note: 予想と出典を並べる
+- choose:
+  - do: learning.discuss.ask
+    with:
+      message: '{{seed_questions | next}}'
+    note: 画面では予想の枠のあとも同じ議論の会話に続けて書く
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#understanding-cycle
+watch_for:
+- 正誤・点数の語彙が出ない
+- 並置が事実の並びとして出て、食い違いは可能性として語られる

@@ -321,6 +321,8 @@ def build(document_id: str) -> dict[str, Any]:
                            page, status
                     FROM document_figures
                     WHERE document_id = :document_id
+                      -- 絵のある最新の行だけ（failed / superseded は一覧に出さない。§18）
+                      AND status = 'extracted'
                     ORDER BY page ASC NULLS LAST, created_at ASC
                     """
                 ),

@@ -16,7 +16,16 @@ LS5「数値を見せない」: weight / confidence の生値を返す関数は�
 
 from __future__ import annotations
 
+import re
+
+from collections.abc import Iterable, Mapping
+from typing import Any
+
 from core.label_vocab import (
+    LANDSCAPE_EVIDENCE_SOURCE_LABELS as _EVIDENCE_SOURCE_LABELS,
+    LANDSCAPE_REASON_BEYOND_QUOTE_TEMPLATE as REASON_BEYOND_QUOTE_TEMPLATE,
+    LANDSCAPE_REASON_SOURCE_LABEL as REASON_SOURCE_LABEL,
+    LANDSCAPE_STATUS_LABELS as _LANDSCAPE_STATUS_LABELS,
     WEIGHT_LABELS,
     WEIGHT_LEVEL_SCALE,
     WEIGHT_RELATION,
@@ -106,13 +115,9 @@ LEARNER_VISIBLE_STATUSES = (
 #: 再解析で ``superseded`` へ落として良い状態（LS3: 教員の判断は AI が上書きしない）。
 SUPERSEDABLE_STATUSES = (STATUS_INFERRED,)
 
-STATUS_LABELS: dict[str, str] = {
-    STATUS_INFERRED: "AI推定（未確認）",
-    STATUS_CONFIRMED: "教員確認済み",
-    STATUS_REJECTED: "却下",
-    STATUS_REVIEW_REQUIRED: "再検討中",
-    STATUS_SUPERSEDED: "再解析により置換",
-}
+#: 教員向けの状態名。正本は ``core/label_vocab.py::LANDSCAPE_STATUS_LABELS``（第 23 波 F5:
+#: 管理画面 2 か所の JS フォールバックが逐語ミラーする相手を 1 つにする）。
+STATUS_LABELS = _LANDSCAPE_STATUS_LABELS
 
 
 def is_valid_status(value: str) -> bool:
@@ -149,6 +154,168 @@ def provenance_label(status: str) -> str:
     :data:`DEFAULT_PROVENANCE_LABEL`（AI推定側）へ倒す。
     """
     return PROVENANCE_LABELS.get(status, DEFAULT_PROVENANCE_LABEL)
+
+
+# ---------------------------------------------------------------------------
+# 根拠の出所と理由の印（IK-0677 / IK-0967）
+# ---------------------------------------------------------------------------
+#
+# 配置の「根拠」は verbatim 検査（LS4）を通った引用だが、照合先には解析が論文全体を
+# 再構成した文（中心の問い・命題・目標。日本語のこともある）も含まれる。引用の出所を
+# 印で言い分け、理由文（LLM の要約）には要約の印を付ける。LS4 の検査自体は緩めない。
+
+#: 引用の出所: 論文の主張（claim）の本文から。
+EVIDENCE_SOURCE_CLAIM = "claim"
+#: 引用の出所: 解析が論文全体を再構成した文（問い・命題・目標・見出しの主張）から。
+EVIDENCE_SOURCE_PAPER_SUMMARY = "paper_summary"
+EVIDENCE_SOURCES = (EVIDENCE_SOURCE_CLAIM, EVIDENCE_SOURCE_PAPER_SUMMARY)
+#: 出所の記録が無い旧行で ``claim_id`` も無いもの（表示だけの区分・保存しない）。
+EVIDENCE_SOURCE_UNRECORDED = "unrecorded"
+
+#: 出所 → 印（正本は ``label_vocab.LANDSCAPE_EVIDENCE_SOURCE_LABELS``）。
+EVIDENCE_SOURCE_LABELS = _EVIDENCE_SOURCE_LABELS
+
+
+def evidence_source_for(quote: str, claim_id: Any, claim_texts: Iterable[str] = ()) -> str:
+    """引用の出所を決める（決定論）。
+
+    ``claim_id`` があるか、引用が主張の本文に逐語で現れれば :data:`EVIDENCE_SOURCE_CLAIM`。
+    それ以外は論文全体の記述（解析の再構成）から引いたもの。
+    """
+    if str(claim_id or "").strip():
+        return EVIDENCE_SOURCE_CLAIM
+    needle = " ".join(str(quote or "").split())
+    if needle:
+        for text in claim_texts or ():
+            if needle in " ".join(str(text or "").split()):
+                return EVIDENCE_SOURCE_CLAIM
+    return EVIDENCE_SOURCE_PAPER_SUMMARY
+
+
+def evidence_source_label(entry: Mapping[str, Any]) -> str:
+    """1 件の evidence → 出所の印（記録が無い旧行は ``claim_id`` の有無で決める）。
+
+    旧行（``source`` 未記録）で ``claim_id`` が null の引用は、再構成文からと断定せず
+    「原文の逐語とは限りません」の印にする（推測で埋めない）。
+    """
+    source = str(entry.get("source") or "")
+    if source not in EVIDENCE_SOURCES:
+        source = (
+            EVIDENCE_SOURCE_CLAIM
+            if str(entry.get("claim_id") or "").strip()
+            else EVIDENCE_SOURCE_UNRECORDED
+        )
+    return EVIDENCE_SOURCE_LABELS[source]
+
+
+def _is_proper_term(term: str) -> bool:
+    """固有の語らしいか（IK-0967 残り・第 25 周 第 5 波）。
+
+    要約が英語の句を日本語の文に混ぜただけの普通の語（``dynamical`` / ``dark`` / ``energy``
+    のような小文字だけの語）は注意の対象から外し、略語・固有名・型番（大文字を含む・数字を
+    含む: ``BAO`` / ``Ia`` / ``Cepheus`` / ``DR2``）だけを挙げる。照合の正本（A層の
+    ``reason_scope``）は変えず、表示の段で絞る。
+    """
+    text = str(term or "")
+    return any(ch.isupper() or ch.isdigit() for ch in text)
+
+
+#: 頭字語の展開で読み飛ばしてよい機能語（「Large Magellanic Cloud」は LMC、「equation of state」は EoS）。
+_ACRONYM_SKIP_WORDS = frozenset({"of", "the", "and", "for", "in", "on", "to", "a", "an", "de"})
+_ACRONYM_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+
+
+def acronym_expanded_in(term: str, quotes: Iterable[str]) -> bool:
+    """頭字語 ``term`` の正式名（連続する語の頭文字の連なり）が引用に現れるか（IK-1046）。
+
+    「TOV」と「Tolman-Oppenheimer-Volkoff equations」のように、引用の連続する語
+    （ハイフン区切りも語の区切り）の頭文字を大小無視で並べたものが ``term`` と一致すれば、
+    引用に現れたと数える。機能語（of / the 等）は頭文字に使わずに読み飛ばしてよい。
+    頭字語らしくない語（大文字 2 文字以上を含まない・6 文字を超える）は照合しない。
+    決定論・LLM 0 回。
+    """
+    text = str(term or "")
+    letters = [ch for ch in text if ch.isalpha()]
+    if len(letters) < 2 or len(letters) > 6 or len(letters) != len(text):
+        return False
+    if sum(1 for ch in letters if ch.isupper()) < 2:
+        return False
+    target = [ch.lower() for ch in letters]
+    for quote in quotes or ():
+        words = _ACRONYM_WORD_RE.findall(str(quote or ""))
+        for start in range(len(words)):
+            if words[start][0].lower() != target[0]:
+                continue
+            pos = 0
+            idx = start
+            while idx < len(words) and pos < len(target):
+                word = words[idx]
+                if word[0].lower() == target[pos]:
+                    pos += 1
+                elif word.lower() in _ACRONYM_SKIP_WORDS:
+                    pass
+                else:
+                    break
+                idx += 1
+            if pos == len(target):
+                return True
+    return False
+
+
+#: 切り詰めた略（「Cep」= Cepheus）と見なす最短の長さ。2 文字（Ia 等）は照合しない。
+_TRUNCATION_MIN_LEN = 3
+
+
+def truncation_matched_in(term: str, quotes: Iterable[str]) -> bool:
+    """語 ``term`` と引用の語が、片方を切り詰めた略の関係にあるか（IK-1046 残り・第 25 周 第 8 波）。
+
+    「Cepheus」と引用の「Cep B」のように、大文字で始まる英字だけの語どうしで、短い方（3 文字以上）が
+    長い方の先頭と大小無視で一致すれば、同じものの別表記として「引用に現れた」と数える。
+    頭字語（:func:`acronym_expanded_in`）の双対。数字を含む型番（DR2 等）・2 文字以下は照合しない。
+    決定論・LLM 0 回。
+    """
+    text = str(term or "")
+    if not text.isalpha() or not text[:1].isupper() or len(text) < _TRUNCATION_MIN_LEN:
+        return False
+    low = text.lower()
+    for quote in quotes or ():
+        for word in _ACRONYM_WORD_RE.findall(str(quote or "")):
+            if not word.isalpha() or not word[:1].isupper() or len(word) < _TRUNCATION_MIN_LEN:
+                continue
+            w = word.lower()
+            if w == low:
+                continue
+            short, long_ = (w, low) if len(w) < len(low) else (low, w)
+            if long_.startswith(short):
+                return True
+    return False
+
+
+def reason_beyond_quote_note(reason: str, quotes: Iterable[str]) -> str:
+    """理由が引用の範囲を越える固有の語を含むときの一文（無ければ空文字）。
+
+    照合の正本は agent 側 ``landscape_placement.reason_scope``（validator の warning と
+    同じ関数）。読めないときは空文字（fail-soft — 一文が出ないだけ）。
+    """
+    try:
+        from episteme_graph.agents.landscape_placement.reason_scope import (
+            reason_terms_beyond_quote,
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    quote_list = [str(q or "") for q in quotes or ()]
+    # IK-1046（第 25 周 第 7 波）: 略称の正式名が引用にあれば「現れない」と言わない。
+    terms = [
+        t
+        for t in reason_terms_beyond_quote(reason, quote_list)
+        if _is_proper_term(t)
+        and not acronym_expanded_in(t, quote_list)
+        # IK-1046 残り（第 8 波）: 切り詰めた略（Cep ⇔ Cepheus）も同じものの別表記として数える。
+        and not truncation_matched_in(t, quote_list)
+    ]
+    if not terms:
+        return ""
+    return REASON_BEYOND_QUOTE_TEMPLATE.format(terms="・".join(f"「{t}」" for t in terms))
 
 
 # ---------------------------------------------------------------------------

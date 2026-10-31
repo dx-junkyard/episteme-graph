@@ -1,0 +1,66 @@
+id: s-sim-share-meaning
+population: students
+runner:
+- api
+# 場面 (e)。「共有する」を押す前に、共有すると誰に何が見えて何が起きるかを理解できるかを見る。
+goal: '{{goal_text}} のために、{{topic_hint}} の理論のまとまりを動かし、共有の意味を確かめてから担当教員に共有する'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_hint
+- input_hints
+- claim_hint
+- questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+- do: learning.simlab.generate
+  note: コードの下書きを AI に作らせる（この経路で 1 回だけ）
+- do: learning.simlab.adopt
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    claim_hint: '{{claim_hint}}'
+    wiring: none
+  note: 関係する主張を 1 つ選んで動かす。入力の記号は io_contract.inputs に合わせて置き換える
+- do: learning.chat.ask
+  with:
+    message: '{{questions | next}}'
+  note: 共有を押す前に、共有すると誰に何が見えて何が起きるかを聞く
+- do: learning.simlab.share
+  with:
+    claim_hint: '{{claim_hint}}'
+  note: 納得できたら最新の実行を共有する。納得できなければ共有せずにやめてよい
+- choose:
+  - do: learning.chat.ask
+    with:
+      message: '{{questions | next}}'
+    note: 共有のあとに残った疑問を聞く
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-share
+- manual: student/02-student.md#simulation-lab-own-records
+- manual: student/02-student.md#simulation-lab-not-verification
+watch_for:
+- 共有する前に、その実行だけが表示名とともに担当の教員に見えるようになることが分かる
+- 共有のあと、主張の記録に候補として書き添えられ、確かなものとして扱うかは教員が決めることが事実文で出る
+- 共有されるのはその実行だけで、ほかの実行や予想の下書きは共有されないことが分かる
+- 関係する主張の名前に内部の番号や「本文を特定できない要素」のような文字が出ない
+- 英語話者のペルソナにも、共有の意味を英語で聞いたときに同じ内容が返る

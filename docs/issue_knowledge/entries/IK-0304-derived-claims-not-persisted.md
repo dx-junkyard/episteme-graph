@@ -53,6 +53,9 @@ resolution:
   landed_in:
     - backend/api/routes/theory_components.py
     - docs/features/graph_dialogue_review_design.md §14
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0303, IK-0019]
 view_of: [IK-0019, IK-0105]
 history:

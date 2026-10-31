@@ -1,0 +1,64 @@
+# 仕込む誤解。ペルソナの misconceptions はここの id を参照する。
+# statement はペルソナが口にする言い方（誤った信念そのもの）、correct_gist は審判が参照する正しい要旨。
+# concept は concepts.yaml の concepts[].id。誤解検出・誤解メモの異議・確認問題の自己確認の経路を踏ませるために置く。
+misconceptions:
+  - id: expansion_is_motion_through_space
+    statement: 宇宙膨張というのは、銀河が空間の中を私たちから遠ざかるように動いていることですよね。
+    correct_gist: 膨張は空間そのものの伸びとして記述され、銀河が静止した空間の中を走っているのではない。遠方銀河の後退は空間の伸びによる。
+    concept: cosmic_expansion
+  - id: redshift_is_only_doppler
+    statement: 赤方偏移はドップラー効果なので、遠ざかる速さだけで決まると思っています。
+    correct_gist: 宇宙論的赤方偏移は光が伝わる間の空間の伸び（スケール因子の比）で決まる。特異速度によるドップラー成分や重力赤方偏移とは区別される。
+    concept: cosmic_expansion
+  - id: dark_matter_is_dark_energy
+    statement: 暗黒物質と暗黒エネルギーは、見えないものを別の言い方で呼んでいるだけで、同じ種類のものですよね。
+    correct_gist: 暗黒物質は重力で集まり構造形成を助ける物質成分、暗黒エネルギーは宇宙の加速膨張を起こす成分で、振る舞い（状態方程式）がまったく異なる。
+    concept: dark_matter
+  - id: black_hole_vacuum_cleaner
+    statement: ブラックホールは周りのものを何でも吸い込む掃除機みたいなものだから、近くの星はいずれ全部落ちていくはずです。
+    correct_gist: 十分遠方ではブラックホールの重力は同じ質量の星と変わらず、周回軌道は安定に存在する。落ち込むのは角運動量を失ったものだけ。
+    concept: black_holes
+  - id: all_supernovae_same_brightness
+    statement: 超新星はどれも同じ明るさで爆発するから、どの超新星でも距離を測る物差しに使えるんですよね。
+    correct_gist: 標準光源として使うのは主に Ia 型で、それも光度曲線の形による補正を経て明るさをそろえる。重力崩壊型は明るさのばらつきが大きい。
+    concept: supernovae
+  - id: cmb_from_single_point
+    statement: 宇宙背景放射は、ビッグバンが起きた一点から四方に広がってきた光だと理解しています。
+    correct_gist: 背景放射は宇宙の晴れ上がり時にあらゆる場所から放たれた光で、特定の中心は無い。どの方向からもほぼ一様に届く。
+    concept: cmb
+  - id: cosmic_variance_is_measurement_error
+    statement: 宇宙分散というのは観測装置の測定誤差のことで、もっと良い装置で測れば消せるものだと思います。
+    correct_gist: 宇宙分散は観測できる宇宙が一つしかないことから来る統計的な限界で、装置の精度を上げても大角度スケールでは減らせない。
+    concept: cmb
+  - id: lensing_is_refraction
+    statement: 重力レンズは、光がレンズ天体の中の物質を通るときに屈折して曲がる現象ですよね。
+    correct_gist: 重力レンズは光が物質の中を通過するのではなく、質量が作る時空の曲がりに沿って光の進路が曲がる現象で、光の波長によらない。
+    concept: gravitational_lensing
+  - id: gw_are_em_waves
+    statement: 重力波も電磁波の一種なので、十分大きな望遠鏡があれば光として見えるはずです。
+    correct_gist: 重力波は時空の計量のゆらぎが伝わるもので電磁波ではない。干渉計による距離変化の測定で検出する。同じ現象が電磁波も出すことはある。
+    concept: gravitational_waves
+  - id: neutron_star_simple_ball
+    statement: 中性子星は中性子がぎっしり詰まっているだけの単純な玉なので、中身はもう分かっていると思います。
+    correct_gist: 中性子星内部の高密度物質の状態方程式は未確定で、質量と半径の観測・合体の重力波から制約している途中である。
+    concept: neutron_stars
+  - id: transit_depth_gives_mass
+    statement: トランジットで暗くなる深さを測れば、その惑星の質量が分かるんですよね。
+    correct_gist: 減光の深さが与えるのは主星に対する惑星の半径比で、質量は視線速度法など別の観測で決める。
+    concept: exoplanets
+  - id: solar_wind_is_radiation_pressure
+    statement: 太陽風は太陽の光の圧力で粒子が押し出されて吹いているものだと思っていました。
+    correct_gist: 太陽風は高温のコロナのプラズマが太陽の重力を振り切って流れ出す流れで、光の圧力が主な駆動ではない。
+    concept: solar_wind
+  - id: prior_does_not_matter
+    statement: ベイズ推定の事前分布はどうせ結果にほとんど影響しないので、何を選んでも同じだと思っています。
+    correct_gist: データが弱く制約するパラメータでは事前分布の選び方が事後分布を大きく左右する。事前分布の選択とその影響の確認は解析の一部である。
+    concept: statistical_inference
+  - id: simulation_resolution_converges_to_obs
+    statement: シミュレーションは分解能を上げていけば、必ず観測に近づいていくものですよね。
+    correct_gist: 分解能を上げても、分解できない過程を表すサブグリッドの模型や初期条件の仮定が結果を左右する。収束性の確認と観測との比較は別の問題である。
+    concept: numerical_simulation
+  - id: jets_come_from_inside_black_hole
+    statement: 活動銀河核のジェットは、ブラックホールの中から物質が噴き出しているものなんですよね。
+    correct_gist: ジェットは事象の地平面の外側、降着円盤とその磁場・ブラックホールの回転のエネルギーによって打ち出される。地平面の内側からは何も出てこない。
+    concept: accretion_and_jets

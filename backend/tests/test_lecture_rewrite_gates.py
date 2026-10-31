@@ -427,6 +427,8 @@ def _fake_course_data():
             {
                 "id": "t1",
                 "title": "Topic 1",
+                # 書き換えの根拠（IK-0874: 根拠も本文も空のトピックは LLM を呼ばない）。
+                "summary": "トピックの要約",
                 "key_concepts": [],
                 "student_material": {},
                 "spoken_script": "",

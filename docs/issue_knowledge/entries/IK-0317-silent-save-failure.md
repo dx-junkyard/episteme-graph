@@ -53,6 +53,10 @@ resolution:
     - backend/api/services.py
     - backend/api/routes/admin.py
     - docs/features/assistant_common_infra_design.md
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E（ローカルの pytest のみ）
 related: [IK-0307]
 view_of: []
 history:

@@ -1,0 +1,19 @@
+id: te-02-veteran-intro
+archetype: teachers/veteran_clicks_through
+display_name: 堀 正和
+language: ja
+background: |
+  教授。専門は銀河団の X 線観測。学部の宇宙論入門を長年担当しており、補助教材を急いで用意したい。
+  学内の似たシステムを何度も使ってきたので、画面の説明はほとんど読まない。
+  AI が作ったものは「おおむね合っているだろう」と考え、細部の確認は学生の質問が来てからでよいと思っている。
+teaching:
+  course_subject: 宇宙論入門（講義の補助教材）
+  audience: 物理学科の学部 4 年生と修士 1 年生
+  chapters_wanted:
+    - 膨張する宇宙の見方
+    - 宇宙の中身
+    - 背景放射と初期宇宙
+  review_depth: shallow
+course_brief: intro_cosmology
+overrides:
+  habits: {patience: low}

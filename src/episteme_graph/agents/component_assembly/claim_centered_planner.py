@@ -131,10 +131,53 @@ def _best_headline_claim(accepted_claims: list[dict]) -> dict:
     return sorted(accepted_claims, key=score, reverse=True)[0]
 
 
+#: IK-0571: 宣言された responsibility_type（語彙値）→ support_role。
+_RESPONSIBILITY_SUPPORT_ROLES = {
+    "limitation": "limitation",
+    "application": "application",
+    "constraint": "result",
+    "derivation": "derivation_core",
+    "observation_model": "observable_bridge",
+    "observable_basis": "observable_bridge",
+    "equation_system": "observable_bridge",
+    "definition": "theory_base",
+    "model": "theory_base",
+}
+
+#: IK-0571: 宣言された operation（語彙値）→ support_role（上から順に当てる）。
+_OPERATION_SUPPORT_ROLES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("forecast", "diagnos", "application"), "application"),
+    (("constrain", "consisten"), "result"),
+    (("eliminat", "deriv", "solv"), "derivation_core"),
+    (("observable",), "observable_bridge"),
+)
+
+
+def _declared_support_role(responsibility: str, operation: str) -> str:
+    """宣言された語彙値だけから support_role を決める。決められなければ ""。
+
+    IK-0571: responsibility_type / operation は生成言語の指定で翻訳されない語彙値なので、
+    ここで決まった component では summary（散文）を読まない — support_role が言語に依らない。
+    """
+    mapped = _RESPONSIBILITY_SUPPORT_ROLES.get(responsibility)
+    if mapped:
+        return mapped
+    if operation:
+        for needles, role in _OPERATION_SUPPORT_ROLES:
+            if any(n in operation for n in needles):
+                return role
+        return "theory_base"
+    return ""
+
+
 def _infer_support_role(component) -> str:
-    text = _component_text(component)
     responsibility = str(getattr(component, "responsibility_type", "") or "").lower()
     operation = str(getattr(component, "operation", "") or getattr(component, "primary_operation", "") or "").lower()
+    declared = _declared_support_role(responsibility, operation)
+    if declared:
+        return declared
+    # responsibility_type も operation も宣言していない component だけ本文照合に落ちる。
+    text = _component_text(component)
     if responsibility == "limitation" or any(k in text for k in ("limitation", "caveat", "invalid")):
         return "limitation"
     if responsibility == "application" or any(k in operation + " " + text for k in ("forecast", "diagnos", "application")):

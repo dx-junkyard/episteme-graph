@@ -1,0 +1,24 @@
+id: c-astro-r25-atlas-r10
+domain: astrophysics
+snapshot: corpus-astro-tex-r25i
+course_id: 1bad7d9f
+personas:
+  teachers: [te-02-veteran-intro, te-01-rookie-seminar]
+  students: [st-03-d1-from-particle, st-01-m1-radio]
+scenarios:
+  teacher: [t-atlas-edge-review, t-atlas-draft-freeze]
+  student: [s-atlas-threads-and-placement]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 4, persona_llm_calls: 260, wall_clock_minutes: 240}
+notes: |
+  第 25 周・面 C の第 10 周（judge_atlas_r9.md §6・r10_prereqs.md・harness_fixes_r9_summary.md の H48〜H50）。第 9 波の是正後（IK-1072 向き・IK-1073 いまここの不在・軽 3 件）。
+  周の前の実測（r10_prereqs）: atlas_frozen_and_pending = 現行の凍結版 2026.6（第 9 周 te-03）・下書きなし・採用済み未反映なし。atlas_freeze_version: te-01 の freeze_version が 2026.7。
+  確定済みの関係 6 本（うち有向 3 本）。**指揮者は API で下書きを作らない**。
+  教員 2 × 学生 2・4 レーン（依存の順・LANE_DEPS）:
+  te-02 × t-atlas-edge-review（有向の「依存」を 1 本採用 → 画面のボタンで下書き → 反映）→ te-01 × t-atlas-draft-freeze（凍結 2026.7・凍結の影響に向きの一文 IK-1072）→
+  st-03 × s-atlas-threads-and-placement（足跡あり・L2 の有向 4 本の向きが読めるか・7 本目で「描いていない確定済みの関係」の名前の行が出るか IK-1045）→
+  st-01 × s-atlas-threads-and-placement（足跡なし・L1 にいまここの不在の事実文 IK-1073・目次の「学習中」と並べて読む）。
+  組の例外（P-0025）: st-03・st-01 は第 9 周と同じ組（是正の前後比較・審判の指定）。te-02 × edge-review・te-01 × freeze は第 10 周の新しい組（te-01 の凍結は第 8 周以来）。
+  学生の面: st-01 は atlas と studio（atlas が先）。

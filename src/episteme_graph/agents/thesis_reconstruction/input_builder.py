@@ -1,4 +1,16 @@
-"""Build ThesisReconstructionAgent LLM input."""
+"""Build ThesisReconstructionAgent LLM input.
+
+上限（``_MAX_CLAIMS`` / ``_MAX_EQUATIONS`` / ``_MAX_LOGICAL_BLOCKS``）は「全部渡す」の
+代わりの**文脈サンプリング**としてそのまま残す（中心命題の再構成は文書全体の代表を
+見れば足り、claim の選抜は重要度ベースの ``claim_selection`` が既に担う）。ただし
+**どれだけ渡さなかったかは報告する** — :meth:`compute_input_coverage` が母集合・
+処理数・理由コードを返し、orchestrator が stage payload の ``coverage`` に載せる
+（P0-10）。
+
+式（``major_equations``）は先頭切り捨てをやめ、``equation_selection`` の正本規則
+（主張が参照する式 → 結果系の節・結果の式 → 残りを節単位の層化サンプリング）で選ぶ
+（再現性レビュー J-3。先頭 16 式で頭打ちになり主結果の式が材料に入らなかった）。
+"""
 from __future__ import annotations
 
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult
@@ -7,6 +19,12 @@ from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
 from episteme_graph.agents.claim_selection import (
     headline_text_for_selection,
     select_claim_rows,
+)
+from episteme_graph.agents.equation_selection import (
+    SELECTION_RULE,
+    linked_equation_ids_from_claims,
+    priority_section_ids_from_skeleton,
+    select_equation_indices,
 )
 from episteme_graph.agents.id_canonicalization import (
     canonical_claim_id_for_span,
@@ -39,7 +57,11 @@ class ThesisReconstructionInputBuilder:
         )
         accepted_claims = claim_selection.selected
         major_equations = self._major_equations(
-            equations, int(cfg.get("max_equations", _MAX_EQUATIONS))
+            equations,
+            int(cfg.get("max_equations", _MAX_EQUATIONS)),
+            claim_rows=accepted_claims,
+            claim_objects=claim_objects,
+            skeleton=skeleton,
         )
         logical_blocks = self._logical_blocks(
             skeleton, int(cfg.get("max_logical_blocks", _MAX_LOGICAL_BLOCKS))
@@ -60,6 +82,66 @@ class ThesisReconstructionInputBuilder:
             normalized_terms=self._build_normalized_terms(cartridge) if cartridge else None,
             excluded_from_pipeline_input=claim_selection.excluded,
         )
+
+    def compute_input_coverage(
+        self,
+        skeleton: PaperSkeletonResult,
+        qualified_claims: ClaimQualificationResult,
+        equations: EquationSemanticsResult | None = None,
+        config: dict | None = None,
+        claim_objects=None,
+    ) -> dict:
+        """入力文脈の母集合・処理数の**事実**を返す（``build_coverage_report`` の引数）。
+
+        3 種（claim / equation / logical_block）は単位が違うので、母集合は
+        「LLM に渡し得た文脈要素の総数」として合算し、どの種別が上限に当たったかを
+        理由コード（``max_claims`` / ``max_equations`` / ``max_logical_blocks``）で
+        区別する。件数は population / processed / truncated の 3 値で尽くす。
+        """
+        cfg = config or {}
+        max_claims = int(cfg.get("max_claims", _MAX_CLAIMS))
+        max_equations = int(cfg.get("max_equations", _MAX_EQUATIONS))
+        max_logical_blocks = int(cfg.get("max_logical_blocks", _MAX_LOGICAL_BLOCKS))
+
+        available_claims = len(getattr(qualified_claims, "qualified_spans", []) or [])
+        selected_claim_rows = self._accepted_claims(
+            qualified_claims,
+            max_claims,
+            claim_objects=claim_objects,
+            skeleton=skeleton,
+        ).selected
+        selected_claims = len(selected_claim_rows)
+        equation_selection = self._equation_selection(
+            equations,
+            max_equations,
+            claim_rows=selected_claim_rows,
+            claim_objects=claim_objects,
+            skeleton=skeleton,
+        )
+        available_equations = equation_selection.population
+        selected_equations = len(equation_selection.indices)
+        available_blocks = len(getattr(skeleton, "logical_blocks", []) or [])
+        selected_blocks = min(available_blocks, max(max_logical_blocks, 0))
+
+        reasons: list[str] = []
+        if available_claims > selected_claims:
+            reasons.append("max_claims")
+        if available_equations > selected_equations:
+            reasons.append("max_equations")
+        if available_blocks > selected_blocks:
+            reasons.append("max_logical_blocks")
+
+        return {
+            "population": available_claims + available_equations + available_blocks,
+            "processed": selected_claims + selected_equations + selected_blocks,
+            "reasons": reasons,
+            "unit": "context_items",
+            "details": {
+                "scope": "claims_equations_logical_blocks",
+                "equation_selection": SELECTION_RULE,
+                "unprocessed_equation_sections": equation_selection.unprocessed_sections,
+            },
+        }
 
     @staticmethod
     def _entry_text(entry: dict) -> str | None:
@@ -122,14 +204,43 @@ class ThesisReconstructionInputBuilder:
         )
 
     @staticmethod
-    def _major_equations(
+    def _equation_selection(
         equations: EquationSemanticsResult | None,
         limit: int,
+        *,
+        claim_rows: list[dict] | None = None,
+        claim_objects=None,
+        skeleton=None,
+    ):
+        records = list(getattr(equations, "equations", None) or []) if equations else []
+        return select_equation_indices(
+            records,
+            limit,
+            linked_equation_ids=linked_equation_ids_from_claims(
+                (row.get("claim_id") for row in claim_rows or []), claim_objects
+            ),
+            priority_section_ids=priority_section_ids_from_skeleton(skeleton),
+        )
+
+    @classmethod
+    def _major_equations(
+        cls,
+        equations: EquationSemanticsResult | None,
+        limit: int,
+        *,
+        claim_rows: list[dict] | None = None,
+        claim_objects=None,
+        skeleton=None,
     ) -> list[dict]:
         if not equations:
             return []
+        records = list(equations.equations)
+        selection = cls._equation_selection(
+            equations, limit,
+            claim_rows=claim_rows, claim_objects=claim_objects, skeleton=skeleton,
+        )
         result = []
-        for record in equations.equations[:limit]:
+        for record in (records[i] for i in selection.indices):
             src = record.source_extraction
             sem = record.semantics
             loc = src.source_location if src.source_location else {}

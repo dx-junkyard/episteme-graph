@@ -345,6 +345,10 @@ class TestAgentLayerIsUntouched:
         "learning_units",
         "knowledge_unit_kinds",
         "parent_agent_component_id",
+        # 理論モジュール層 Phase 1（theory_module_layer_design.md §13.2 / migration 086）の
+        # 保存行も A層には持ち込まない。
+        "knowledge_theory_modules",
+        "knowledge_theory_modules_live",
     )
 
     def test_src_does_not_learn_the_knowledge_object_vocabulary(self):

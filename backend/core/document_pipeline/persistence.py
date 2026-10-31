@@ -14,6 +14,7 @@ from sqlalchemy import text as sa_text
 from core.knowledge_objects import learning_units as ko_units
 from core.knowledge_objects import remap as ko_remap
 from core.knowledge_objects import stable_key as ko_keys
+from core.knowledge_objects import theory_modules as ko_modules
 from core.knowledge_objects.schema import (
     DEFAULT_REVIEW_STATUS,
     TABLE_ARTIFACTS,
@@ -24,6 +25,7 @@ from core.knowledge_objects.schema import (
     TABLE_EVIDENCE,
     TABLE_LEARNING_UNITS,
     TABLE_SYMBOLS,
+    TABLE_THEORY_MODULES,
     normalize_claim_type,
     normalize_component_type,
 )
@@ -195,6 +197,85 @@ def record_knowledge_audit(
     )
 
 
+#: run の ``stage_outputs`` に知識オブジェクト保存の結果要約を置くキー。
+#: 読み手（調査・G層・教員向けの状態表示）が「何件入って・何件が supersede され・
+#: どこが失敗したか」を artifact を開かずに run 行だけで読めるようにする。
+KNOWLEDGE_OBJECTS_STAGE_OUTPUT_KEY = "knowledge_objects"
+
+
+def _record_knowledge_stage_output(
+    session,
+    *,
+    run_id: str | None,
+    summary: dict | None,
+) -> None:
+    """``document_analysis_runs.stage_outputs.knowledge_objects`` に要約を合流させる。
+
+    既存キーを消さないよう **浅いマージ**（``||``）で足す。呼び出し元のトランザクション
+    に同乗するので、保存が巻き戻れば要約も巻き戻る（「入ったことになっている」不整合を
+    作らない）。``run_id`` が無いとき（単体テスト・旧経路）は何もしない。
+
+    例外は握らない（:func:`_record_knowledge_audit` と同じ理由 — PostgreSQL では
+    失敗した文の後の commit がどのみち通らないので、黙って続ける方が事故になる）。
+    失敗したときの記録は :func:`record_knowledge_stage_output_failure` が別セッションで
+    行う。
+    """
+    if not run_id or not summary:
+        return
+    session.execute(
+        sa_text(
+            """
+            UPDATE document_analysis_runs
+            SET stage_outputs = COALESCE(stage_outputs, '{}'::jsonb)
+                || jsonb_build_object(
+                    :key,
+                    COALESCE(stage_outputs -> :key, '{}'::jsonb) || CAST(:payload AS jsonb)
+                )
+            WHERE id = CAST(:run_id AS uuid)
+            """
+        ),
+        {
+            "key": KNOWLEDGE_OBJECTS_STAGE_OUTPUT_KEY,
+            "payload": _json_dumps(dict(summary)),
+            "run_id": run_id,
+        },
+    )
+
+
+def record_knowledge_stage_output_failure(
+    *,
+    run_id: str | None,
+    kind: str,
+    error: str,
+) -> None:
+    """保存が失敗した事実を run の ``stage_outputs.knowledge_objects`` に残す。
+
+    失敗経路は呼び出し元のトランザクションが巻き戻っているので、別セッションで
+    1行だけ書く。ここは本当に fail-soft（記録の失敗で解析を落とさない）。
+    """
+    if not run_id or not kind:
+        return
+    session = _pg_session()
+    try:
+        _record_knowledge_stage_output(
+            session,
+            run_id=run_id,
+            summary={kind: {"failed": True, "error": str(error)[:500]}},
+        )
+        session.commit()
+    except Exception:  # noqa: BLE001 - 記録の失敗で解析を落とさない
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning(
+            "failed to record knowledge stage output failure (non-fatal): run=%s kind=%s",
+            run_id, kind, exc_info=True,
+        )
+    finally:
+        session.close()
+
+
 def _apply_remaps(
     session,
     *,
@@ -230,6 +311,49 @@ def _apply_remaps(
             summary = dict(summary)
             summary["rekeyed"] = rekeyed
     return summary
+
+
+def _reanchor_superseded_components(
+    session,
+    *,
+    document_id: str,
+    run_id: str | None,
+    superseded_ids: list[str],
+    inserted_ids: list[str],
+) -> dict:
+    """:func:`core.knowledge_objects.remap.reanchor_superseded_components` の薄いラッパ（第 6 波）。
+
+    savepoint の内側で動かし、失敗しても部品の同期そのものは止めない（付け替えられなかった記録は
+    旧行に残り、画面が事実文で言う — 消えるより正直）。
+    """
+    if not superseded_ids:
+        return {}
+    try:
+        nested = session.begin_nested()
+    except Exception:  # noqa: BLE001 — fake session 等は savepoint なしで続ける
+        nested = None
+    try:
+        summary = ko_remap.reanchor_superseded_components(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            superseded_ids=superseded_ids,
+            inserted_ids=inserted_ids,
+        )
+        if nested is not None:
+            nested.commit()
+        return summary
+    except Exception:  # noqa: BLE001
+        if nested is not None:
+            try:
+                nested.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+        logger.warning(
+            "superseded component reanchor failed (records stay on the old rows): document=%s",
+            document_id, exc_info=True,
+        )
+        return {"failed": True}
 
 
 def _assign_item_stable_keys(items: list[dict]) -> list[dict]:
@@ -320,10 +444,14 @@ def _equation_key_for_fields(document_id: str, fields: dict) -> str:
     )
 
 
-def _equation_stable_key_map(document_id: str, equations: Any) -> dict[str, str]:
+def equation_stable_key_map(document_id: str, equations: Any) -> dict[str, str]:
     """``agent equation_id -> stable_key``（純計算・DB を読まない）。
 
     claim の ``equation_stable_keys`` / derivation step / symbol のキー材料に使う。
+    理論モジュールの ``module_key`` / 保存行の材料（theory_module_layer_design.md §13.3）にも
+    使い、**route（``GET .../theory-modules``）とパイプラインステージ ``theory_modules`` の両方が
+    この関数を呼ぶ**（写像の計算を二重実装しない。同じ run の同じ ``equation_semantics`` を
+    渡せば画面の ``module_key`` と保存行の ``agent_module_key`` が一致する）。
 
     式 ID は印字番号由来（``eq_7``）なので **同じ ID のレコードが2件以上あり得る**。
     その場合は最初のレコードのキーを採る（``assign_stable_keys`` が素のキーを渡すのも
@@ -338,6 +466,10 @@ def _equation_stable_key_map(document_id: str, equations: Any) -> dict[str, str]
             continue
         out[agent_id] = _equation_key_for_fields(document_id, fields)
     return out
+
+
+#: 旧名（知識オブジェクト層の内部呼び出しとテストが使う）。正本は :func:`equation_stable_key_map`。
+_equation_stable_key_map = equation_stable_key_map
 
 
 def _resolved_equation_keys(agent_ids: Any, key_map: dict[str, str]) -> list[str]:
@@ -833,11 +965,12 @@ def persist_equation_previews_to_chunks(document_id: str, equations: Any) -> int
 
     session = _pg_session()
     updated = 0
+    allow_page_fallback = _page_fallback_allowed(previews)
     try:
         rows = session.execute(
             sa_text(
                 """
-                SELECT id, display_text, spoken_text, formulas, page_start, page_end
+                SELECT id, display_text, spoken_text, formulas, page_start, page_end, block_ids
                 FROM chunks
                 WHERE document_id = CAST(:doc_id AS uuid)
                 ORDER BY chunk_index
@@ -852,8 +985,16 @@ def persist_equation_previews_to_chunks(document_id: str, equations: Any) -> int
             formulas = row[3] if isinstance(row[3], list) else []
             page_start = row[4]
             page_end = row[5]
+            chunk_block_ids = _chunk_block_ids(row[6]) if len(row) > 6 else []
 
-            merged = _merge_equation_previews_for_chunk(formulas, previews, page_start, page_end)
+            merged = _merge_equation_previews_for_chunk(
+                formulas,
+                previews,
+                page_start,
+                page_end,
+                chunk_block_ids=chunk_block_ids,
+                allow_page_fallback=allow_page_fallback,
+            )
             patched_display = _replace_equation_preview_text(display_text, merged)
             patched_spoken = _spoken_text_from_formulas(patched_display, merged)
             if patched_display == display_text and _json_dumps(merged) == _json_dumps(formulas):
@@ -894,6 +1035,12 @@ def persist_equation_previews_to_chunks(document_id: str, equations: Any) -> int
         session.close()
 
 
+#: ``chunks.formulas[].latex_source`` の語彙（列は増やさない・migration を切らない）。
+#: ``reconstruction`` = LLM が文脈から復元した式 / ``extraction`` = 抽出できた式。
+EQUATION_LATEX_SOURCE_RECONSTRUCTION = "reconstruction"
+EQUATION_LATEX_SOURCE_EXTRACTION = "extraction"
+
+
 def _equation_previews(equations: Any) -> list[dict]:
     records = getattr(equations, "equations", []) or []
     previews: list[dict] = []
@@ -904,8 +1051,16 @@ def _equation_previews(equations: Any) -> list[dict]:
             continue
         source_location = dict(getattr(src, "source_location", {}) or {})
         source_image = getattr(src, "source_image", None)
-        latex = getattr(rec, "latex", None) if rec and getattr(rec, "status", "none") != "none" else getattr(src, "latex", None)
-        plain_text = getattr(rec, "plain_text", None) if rec and getattr(rec, "status", "none") != "none" else getattr(src, "plain_text", None)
+        reconstructed = bool(rec and getattr(rec, "status", "none") != "none")
+        if reconstructed:
+            # IK-0895: 復元本文が原文の LaTeX と一致するなら復元の印を付けない
+            # （判定の正本は core.learner_context_common）。
+            from core.learner_context_common import reconstruction_matches_source
+
+            if reconstruction_matches_source(getattr(rec, "latex", None), getattr(src, "latex", None)):
+                reconstructed = False
+        latex = getattr(rec, "latex", None) if reconstructed else getattr(src, "latex", None)
+        plain_text = getattr(rec, "plain_text", None) if reconstructed else getattr(src, "plain_text", None)
         previews.append({
             "id": getattr(record, "equation_id", "") or f"eq_{len(previews)}",
             "latex": latex or "",
@@ -918,6 +1073,13 @@ def _equation_previews(equations: Any) -> list[dict]:
             "raw_text": getattr(src, "raw_text", "") or "",
             "needs_math_review": bool(getattr(src, "needs_math_review", False)),
             "review_reason": list(getattr(src, "review_reason", []) or []),
+            # latex の出所（列は増やさず、この投影に事実として持たせる）。PDF 由来の
+            # 式はほぼ全件が「AI が文脈から復元した式」で、原文の数式と照合できて
+            # いない。読み手（チャンク表示・学習者向け射影）がそれを黙って
+            # 抽出結果と同じ顔で出さないための目印。
+            "reconstructed": reconstructed,
+            "latex_source": EQUATION_LATEX_SOURCE_RECONSTRUCTION if reconstructed
+            else EQUATION_LATEX_SOURCE_EXTRACTION,
         })
     return previews
 
@@ -927,12 +1089,32 @@ def _merge_equation_previews_for_chunk(
     previews: list[dict],
     page_start: int | None,
     page_end: int | None,
+    *,
+    chunk_block_ids: list[str] | None = None,
+    allow_page_fallback: bool = True,
 ) -> list[dict]:
+    """1 チャンクに載せる式プレビューを選ぶ。
+
+    **第一条件は block_id の一致**（``block_id ∈ chunk.block_ids``）。ページ一致は
+    block_id が引けないときだけの保険で、しかも ``allow_page_fallback`` が False
+    （= ページ番号が信用できない文書）なら使わない。
+
+    以前はページ一致だけで判定していたため、GROBID 経路で ``page=1`` が誤って大量に
+    付く文書では文書中のほぼ全式が1つのチャンクに流れ込んでいた（実測: 当該チャンクの
+    ``block_ids`` 外の式が 87〜94%）。
+    """
     merged = [dict(f) for f in formulas if isinstance(f, dict)]
     by_block = {str(f.get("block_id")): f for f in merged if f.get("block_id")}
     by_id = {str(f.get("id")): f for f in merged if f.get("id")}
+    block_ids = {str(b) for b in (chunk_block_ids or []) if b}
     for preview in previews:
-        if not _preview_matches_page(preview, page_start, page_end):
+        if not _preview_matches_chunk(
+            preview,
+            block_ids,
+            page_start,
+            page_end,
+            allow_page_fallback=allow_page_fallback,
+        ):
             continue
         target = by_block.get(str(preview.get("block_id") or "")) or by_id.get(str(preview.get("id") or ""))
         if target is None:
@@ -940,6 +1122,58 @@ def _merge_equation_previews_for_chunk(
         else:
             target.update({k: v for k, v in preview.items() if v not in (None, "", [])})
     return merged
+
+
+def _chunk_block_ids(value: Any) -> list[str]:
+    """``chunks.block_ids``（jsonb）を文字列リストに正規化する（形が違えば空）。"""
+    raw = value
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if item]
+
+
+def _preview_matches_chunk(
+    preview: dict,
+    chunk_block_ids: set[str],
+    page_start: int | None,
+    page_end: int | None,
+    *,
+    allow_page_fallback: bool = True,
+) -> bool:
+    """式プレビューがこのチャンクのものか（block_id 優先・page はフォールバック）。"""
+    preview_block_id = str(preview.get("block_id") or "").strip()
+    if preview_block_id and chunk_block_ids:
+        # 出所の block が分かっていて、チャンクも block を持っているなら、それが答え。
+        # ページ一致で拾い直さない（拾い直すと誤付与ページの事故が戻る）。
+        return preview_block_id in chunk_block_ids
+    if not allow_page_fallback:
+        return False
+    return _preview_matches_page(preview, page_start, page_end)
+
+
+def _page_fallback_allowed(previews: list[dict]) -> bool:
+    """ページ番号をフォールバックに使ってよいか（2種類以上のページが実在するか）。
+
+    抽出した式が全部同じページ番号（典型的には GROBID 既定の ``page=1``）なら、その
+    番号は「どこにあるか」を何も言っていないので、フォールバックに使わない。
+    """
+    pages: set[int] = set()
+    for preview in previews:
+        loc = preview.get("source_location") if isinstance(preview.get("source_location"), dict) else {}
+        try:
+            page = int(loc.get("page"))
+        except (TypeError, ValueError):
+            continue
+        if page > 0:
+            pages.add(page)
+        if len(pages) >= 2:
+            return True
+    return False
 
 
 def _preview_matches_page(preview: dict, page_start: int | None, page_end: int | None) -> bool:
@@ -983,17 +1217,42 @@ def _equation_text_variants(raw_text: str) -> list[str]:
     })
 
 
-def _spoken_text_from_formulas(text: str, formulas: list[dict]) -> str:
+#: 読み上げに書く式の印字番号（``12`` / ``(3a)`` / ``A.1``）。TeX のラベルキーは番号ではない。
+_SPOKEN_PRINTED_NUMBER_RE = re.compile(r"^\(?\s*([A-Z]?\d+[a-z]?(?:[.\-]\d+[a-z]?)*)\s*\)?$")
+
+
+def _spoken_equation_fallback(formula: dict, language: str) -> str:
+    """読み上げ文が無い式の代わりの語（IK-0881）。講義の言語に合わせ、印字番号があれば添える。"""
+    match = _SPOKEN_PRINTED_NUMBER_RE.match(str(formula.get("label") or "").strip())
+    if str(language or "ja").lower().startswith("en"):
+        return f"equation ({match.group(1)})" if match else "the equation"
+    return f"式 ({match.group(1)})" if match else "数式"
+
+
+def _spoken_text_from_formulas(text: str, formulas: list[dict], language: str = "ja") -> str:
+    """表示文の式の置き換え（``[[eq_x]]`` / ``eq_x`` / ``[[FORMULA_N]]``）を読み上げの語へ。
+
+    IK-0881: 表示文は ``[[eq_x]]`` の両括弧形でも裸の ID でも式を指すので、両方を同じキーで
+    置き換える（括弧形を先に — 裸の形だけ置き換えると ``[[式 (5)]]`` のように括弧が残る）。
+    読み上げ文の無い式は講義の言語の語（「数式」/「式 (N)」）にし、固定の英語を読ませない。
+    ``chunks.spoken_language`` が NULL のときは ja とみなす規約に合わせ、既定は ja。
+    """
     spoken = text or ""
     for idx, formula in enumerate(formulas or []):
         if not isinstance(formula, dict):
             continue
-        placeholder = str(formula.get("id") or f"[[FORMULA_{idx}]]")
-        replacement = str(formula.get("spoken") or "")
-        if not replacement:
-            label = str(formula.get("label") or "").strip()
-            replacement = f"equation {label}" if label else f"equation {idx + 1}"
-        spoken = spoken.replace(placeholder, replacement)
+        key = str(formula.get("id") or f"[[FORMULA_{idx}]]").strip()
+        replacement = str(formula.get("spoken") or "").strip() or _spoken_equation_fallback(formula, language)
+        bare = key[2:-2] if key.startswith("[[") and key.endswith("]]") else key
+        if not bare:
+            continue
+        spoken = spoken.replace(f"[[{bare}]]", replacement)
+        # 裸の ID は語の境目でだけ置き換える（``eq_1`` が ``eq_10`` の頭に当たらないように）。
+        spoken = re.sub(
+            r"(?<![A-Za-z0-9_])" + re.escape(bare) + r"(?![A-Za-z0-9_])",
+            lambda _m: replacement,
+            spoken,
+        )
     return spoken
 
 
@@ -1578,6 +1837,11 @@ def persist_qualified_claims(
             run_id=run_id,
             stats={"claim": sync.stats, "remap": remap_summary},
         )
+        _record_knowledge_stage_output(
+            session,
+            run_id=run_id,
+            summary={"claims": {**dict(sync.stats), "remap": remap_summary.get("recorded", 0)}},
+        )
 
         saved: list[dict] = []
         for item in items:
@@ -1969,11 +2233,28 @@ def persist_components(
             remaps=sync.remaps,
             key_remaps=sync.key_remaps,
         )
+        # 第 6 波（IK-1012 / IK-1020 / IK-1021・オーナー判断の推奨）: 名前が変わって supersede された
+        # 部品の人の記録を、出典の重なりで 1 対 1 に決まる新部品へ付け替える（決まらなければ旧行に残す）。
+        superseded_summary = _reanchor_superseded_components(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            superseded_ids=list(getattr(sync, "superseded_ids", []) or []),
+            inserted_ids=list(getattr(sync, "inserted_ids", []) or []),
+        )
+        if superseded_summary:
+            remap_summary = dict(remap_summary)
+            remap_summary["superseded_component"] = superseded_summary
         _record_knowledge_audit(
             session,
             document_id=document_id,
             run_id=run_id,
             stats={"component": sync.stats, "remap": remap_summary},
+        )
+        _record_knowledge_stage_output(
+            session,
+            run_id=run_id,
+            summary={"components": {**dict(sync.stats), "remap": remap_summary.get("recorded", 0)}},
         )
         session.commit()
         logger.info(
@@ -2291,13 +2572,17 @@ def persist_knowledge_objects(
         _record_knowledge_audit(
             session, document_id=document_id, run_id=run_id, stats=summary,
         )
+        _record_knowledge_stage_output(session, run_id=run_id, summary=summary)
         session.commit()
         logger.info(
             "Synced knowledge objects for document %s: %s", document_id, summary
         )
         return summary
-    except Exception:
+    except Exception as exc:
         session.rollback()
+        record_knowledge_stage_output_failure(
+            run_id=run_id, kind="knowledge_objects_sync", error=str(exc)
+        )
         raise
     finally:
         session.close()
@@ -2396,13 +2681,164 @@ def persist_learning_units(
             run_id=run_id,
             stats={"learning_units": summary},
         )
+        _record_knowledge_stage_output(
+            session, run_id=run_id, summary={"learning_units": summary},
+        )
         session.commit()
         logger.info(
             "Synced learning_units for document %s: %s", document_id, summary
         )
         return summary
-    except Exception:
+    except Exception as exc:
         session.rollback()
+        # 派生表の失敗は run を落とさない（P2-R7）が、**黙って completed にしない**。
+        # 呼び出し側（orchestrator）は artifact に残すので、run 行にも同じ事実を残す。
+        record_knowledge_stage_output_failure(
+            run_id=run_id, kind="learning_units", error=str(exc)
+        )
+        raise
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# 理論モジュール（theory_module_layer_design.md §13.2 / §13.5・migration 086）
+# ---------------------------------------------------------------------------
+
+
+def load_stored_component_graph_json(document_id: str) -> dict:
+    """``theory_component_graphs`` の最新行の ``graph_json`` をそのまま返す（読むだけ）。
+
+    パイプラインステージ ``theory_modules`` が builder に渡す入力。route の
+    ``_stored_component_graph`` + ``_normalize_stored_component_graph`` と同じ行を読むが、
+    正規化は掛けない（builder が読む 5 つのフィールド — ``graph_layer`` /
+    ``linked_derivation_ids`` / 入出力式 / ``source_backing_status`` — を正規化は変えない。
+    同じ fixture で両経路の ``module_key`` 集合が一致することは
+    ``test_theory_module_store.py`` が固定する）。行が無い・JSON でないときは ``{}``。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                SELECT graph_json
+                FROM theory_component_graphs
+                WHERE document_id = :document_id
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            ),
+            {"document_id": document_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return {}
+    graph = row[0]
+    if isinstance(graph, str):
+        try:
+            graph = json.loads(graph)
+        except (TypeError, ValueError):
+            return {}
+    return graph if isinstance(graph, dict) else {}
+
+
+def sync_theory_modules(
+    session,
+    *,
+    document_id: str,
+    run_id: str | None,
+    records: Any,
+    rule_version: str,
+) -> dict:
+    """理論モジュールの live 行を ``records`` に同期する（呼び出し側のセッション・commit しない）。
+
+    ``sync_live_rows`` 経由（**DELETE を書かない**。stable_key 一致 = 同 UUID で内容更新 /
+    不一致 = ``superseded_at`` 刻印 / 新規 = INSERT）。人間の確定列を持たないので
+    ``preserved_columns`` は空、近似キーのバックフィルもしないので ``fallback_match_column`` も
+    使わない（設計書 §13.2）。``records`` が空なら全 live 行が superseded になる（TM14 の後半 —
+    呼び出し側は「式の手順が 0 だった」ときだけ空で呼ぶ）。
+
+    Returns:
+        ``{"updated", "inserted", "superseded", "outer", "inner", "rule_version"}``（件数は内部報告）。
+    """
+    items = ko_modules.build_theory_module_items(
+        document_id, list(records or []), rule_version=rule_version,
+    )
+    sync = sync_live_rows(
+        session,
+        table=TABLE_THEORY_MODULES,
+        document_id=document_id,
+        run_id=run_id,
+        incoming=items,
+        content_columns=ko_modules.THEORY_MODULE_CONTENT_COLUMNS,
+        preserved_columns=(),
+        agent_id_column=ko_modules.AGENT_ID_COLUMN,
+    )
+    return {
+        "updated": int(sync.stats.get("updated", 0)),
+        "inserted": int(sync.stats.get("inserted", 0)),
+        "superseded": int(sync.stats.get("superseded", 0)),
+        **ko_modules.level_counts(items),
+        "rule_version": rule_version,
+    }
+
+
+def persist_theory_modules(
+    *,
+    document_id: str,
+    run_id: str | None = None,
+    module_records: Any,
+) -> dict:
+    """理論モジュールを ``knowledge_theory_modules`` へ**同期**する（§13.5・migration 086）。
+
+    ``module_records`` は ``core.theory_modules.build_theory_module_records`` の戻り値そのもの。
+    ``persistable`` が False（builder の例外 / 導出の解析結果が無い・導出に失敗した）なら
+    **SQL を一切発行しない**（素材が無いことを「モジュールが全部消えた」と解釈しない = TM14）。
+
+    監査は run 単位の要約 1 行（``AUDIT_ENTITY_KNOWLEDGE_OBJECT``・件数のみ）、run 行には
+    ``stage_outputs.knowledge_objects.theory_modules`` に同じ要約を残す。失敗は巻き戻して
+    ``record_knowledge_stage_output_failure(kind="theory_modules")`` で事実を残し、例外を
+    呼び出し側（非致命のステージ）へ返す。
+
+    Returns:
+        同期したとき ``{"updated", "inserted", "superseded", "outer", "inner", "rule_version"}``。
+        保存しなかったとき ``{"skipped_reason", "rule_version"}``。
+    """
+    payload = module_records if isinstance(module_records, dict) else {}
+    rule_version = _text(payload.get("rule_version"))
+    if not payload.get("persistable"):
+        return {
+            "skipped_reason": _text(payload.get("skip_reason")) or "not_persistable",
+            "rule_version": rule_version,
+        }
+
+    session = _pg_session()
+    try:
+        summary = sync_theory_modules(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            records=payload.get("records") or [],
+            rule_version=rule_version,
+        )
+        _record_knowledge_audit(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            stats={"theory_modules": summary},
+        )
+        _record_knowledge_stage_output(
+            session, run_id=run_id, summary={"theory_modules": summary},
+        )
+        session.commit()
+        logger.info("Synced theory_modules for document %s: %s", document_id, summary)
+        return summary
+    except Exception as exc:
+        session.rollback()
+        record_knowledge_stage_output_failure(
+            run_id=run_id, kind="theory_modules", error=str(exc)
+        )
         raise
     finally:
         session.close()
@@ -2856,6 +3292,232 @@ def persist_document_embedding(
 
 
 # ---------------------------------------------------------------------------
+# documents.title の書き戻し（IK-0366）
+# ---------------------------------------------------------------------------
+
+#: 構造化が取り出した題名を ``documents.title`` に採る上限（これ以上は題名でない断片とみなす）。
+DOCUMENT_TITLE_MAX_CHARS = 300
+_TITLE_SOURCE_SUFFIXES = (".tar.gz", ".tgz", ".pdf")
+
+
+def _filename_stem(filename: Any) -> str:
+    """アップロード時の仮題名と同じ規則でファイル名の語幹を返す。
+
+    ``api/routes/admin.py::_source_title`` と同じ規則（core から API 層を import しない
+    ため写しで持つ）: ``.tar.gz`` / ``.tgz`` / ``.pdf`` を落とし、それ以外は最後の拡張子を落とす。
+    """
+    name = _text(filename)
+    if not name:
+        return ""
+    lower = name.lower()
+    for suffix in _TITLE_SOURCE_SUFFIXES:
+        if lower.endswith(suffix):
+            return name[: -len(suffix)]
+    base, dot, _ext = name.rpartition(".")
+    return base if dot and base else name
+
+
+def extracted_document_title(artifacts: Any) -> str:
+    """``document_structure`` artifact の ``metadata.title`` を題名として採れる形で返す。
+
+    採らない（空文字を返す）のは: artifact / metadata が無い・題名が空・改行を含む・
+    ``DOCUMENT_TITLE_MAX_CHARS`` 以上。改行を含む題名は組版ヘッダ等の断片である
+    ことが多いので、つなぎ直して推測しない。
+    """
+    if not isinstance(artifacts, dict):
+        return ""
+    structure = _plain(artifacts.get("document_structure"))
+    if not isinstance(structure, dict):
+        return ""
+    metadata = structure.get("metadata")
+    if not isinstance(metadata, dict):
+        return ""
+    raw = metadata.get("title")
+    if not isinstance(raw, str):
+        return ""
+    if "\n" in raw or "\r" in raw:
+        return ""
+    title = raw.strip()
+    if not title or len(title) >= DOCUMENT_TITLE_MAX_CHARS:
+        return ""
+    return title
+
+
+def document_title_is_placeholder(
+    current_title: Any, *, filename: Any = None, source_path: Any = None
+) -> bool:
+    """``documents.title`` がまだ入口の仮の値か（人が付けた題名ではないか）。
+
+    仮の値 = 空 / ファイル名の語幹 / ファイル名そのもの / ``source_path``（material_id）/
+    アップロードの既定名 ``document``。これ以外は人が編集した可能性があるので上書きしない。
+    """
+    title = _text(current_title)
+    if not title:
+        return True
+    placeholders = {
+        _filename_stem(filename),
+        _text(filename),
+        _text(source_path),
+        "document",
+    }
+    placeholders.discard("")
+    return title in placeholders
+
+
+def sync_document_title_from_structure(document_id: Any, artifacts: Any) -> bool:
+    """構造化が取り出した題名を、仮の題名のままの ``documents.title`` に書き戻す（IK-0366）。
+
+    - 書き戻すのは ``extracted_document_title`` が非空で、現在の題名が
+      ``document_title_is_placeholder`` のときだけ（人が編集した題名は上書きしない）。
+    - 冪等: 同じ題名が入っていれば何もしない。UPDATE は読んだ題名との一致を条件にし、
+      読んでから書くまでに誰かが題名を変えていたら書かない。
+    - fail-soft: 例外は握りつぶして False（解析 run を止めない）。自前のセッションで
+      行い、呼び出し側のトランザクションに乗らない。
+
+    Returns:
+        書き戻したら True。
+    """
+    doc_id = _text(document_id)
+    title = extracted_document_title(artifacts)
+    if not doc_id or not title:
+        return False
+    session = None
+    try:
+        session = _pg_session()
+        row = session.execute(
+            sa_text(
+                """
+                SELECT title, filename, source_path
+                FROM documents
+                WHERE id = CAST(:id AS uuid)
+                """
+            ),
+            {"id": doc_id},
+        ).fetchone()
+        if row is None:
+            return False
+        current_title, filename, source_path = row[0], row[1], row[2]
+        if _text(current_title) == title:
+            return False
+        if not document_title_is_placeholder(
+            current_title, filename=filename, source_path=source_path
+        ):
+            return False
+        result = session.execute(
+            sa_text(
+                """
+                UPDATE documents
+                SET title = :title
+                WHERE id = CAST(:id AS uuid)
+                  AND title IS NOT DISTINCT FROM :current_title
+                """
+            ),
+            {"id": doc_id, "title": title, "current_title": current_title},
+        )
+        session.commit()
+        return bool(getattr(result, "rowcount", 0))
+    except Exception:  # noqa: BLE001 — 題名が仮のまま残るだけ（run は止めない）
+        logger.warning("document title sync failed for %s", doc_id, exc_info=True)
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                logger.debug("document title sync rollback failed", exc_info=True)
+        return False
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("document title sync close failed", exc_info=True)
+
+
+#: 題名バックフィル（IK-0419）の advisory lock キー。stable_key バックフィル
+#: （``knowledge_objects.backfill.BACKFILL_LOCK_KEY``）とは別のキー。
+DOCUMENT_TITLE_BACKFILL_LOCK_KEY = 4155251703
+
+
+def backfill_document_titles_from_structure(session) -> int:
+    """題名の書き戻し（IK-0366）より前に解析された教材の題名を、1回だけ直す（IK-0419）。
+
+    ``documents.title`` がまだ入口の仮の値（``document_title_is_placeholder`` — ファイル名・
+    arXiv ID 等）の教材について、**採用 run**（``_ARTIFACT_RUN_SELECT_SQL["adopted"]`` =
+    ``resolve_artifact_runs`` と同じ選び方）の ``document_structure`` artifact だけを読み、
+    ``extracted_document_title`` が採れれば書き戻す。
+
+    - 冪等: 題名が直った教材は次回から仮の値でなくなり対象から外れる。題名が採れない
+      教材は仮のまま残る（推測で題名を作らない）。
+    - 人が付けた題名は上書きしない（UPDATE は読んだ題名との一致を条件にする）。
+    - 呼び出し側のセッション・トランザクションで動く（commit は呼び出し側。lifespan は
+      advisory xact lock の配下で呼ぶ）。
+    - artifact は ``document_structure`` 段だけを読む（全段の payload を起動時に読まない）。
+
+    Returns:
+        書き戻した教材の数（ログ用。学習者・教員には出さない）。
+    """
+    rows = session.execute(
+        sa_text("SELECT id::text, title, filename, source_path FROM documents")
+    ).fetchall()
+    targets = {
+        str(row[0]): row[1]
+        for row in rows
+        if row[0] and document_title_is_placeholder(
+            row[1], filename=row[2], source_path=row[3]
+        )
+    }
+    if not targets:
+        return 0
+    ids = sorted(targets)
+    placeholders = ", ".join(f":doc_{i}" for i in range(len(ids)))
+    params = {f"doc_{i}": did for i, did in enumerate(ids)}
+    run_rows = session.execute(
+        sa_text(
+            f"""
+            WITH targets AS (
+                SELECT d.id::text AS document_id,
+                       {_ARTIFACT_RUN_SELECT_SQL["adopted"]} AS run_id
+                FROM documents d
+                WHERE d.id::text IN ({placeholders})
+            )
+            SELECT t.document_id, a.payload
+            FROM targets t
+            JOIN {TABLE_ARTIFACTS} a
+              ON a.run_id = t.run_id AND a.stage = 'document_structure'
+            """
+        ),
+        params,
+    ).fetchall()
+    updated = 0
+    for row in run_rows:
+        doc_id = str(row[0] or "")
+        payload = row[1]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                continue
+        title = extracted_document_title({"document_structure": payload})
+        if not doc_id or not title or doc_id not in targets:
+            continue
+        current_title = targets[doc_id]
+        if _text(current_title) == title:
+            continue
+        result = session.execute(
+            sa_text(
+                """
+                UPDATE documents
+                SET title = :title
+                WHERE id = CAST(:id AS uuid)
+                  AND title IS NOT DISTINCT FROM :current_title
+                """
+            ),
+            {"id": doc_id, "title": title, "current_title": current_title},
+        )
+        updated += int(getattr(result, "rowcount", 0) or 0)
+    return updated
+
+
+# ---------------------------------------------------------------------------
 # document_analysis_runs
 # ---------------------------------------------------------------------------
 
@@ -2882,10 +3544,18 @@ def upsert_analysis_run(
     ``None`` のときは既存値を保持する（呼び出し側が毎回 options を意識せず
     呼べるようにするため）。
 
+    ``cartridge_id`` は**この run の実効の分野**で、新規作成・更新の両方で必ず書く
+    （``None`` / ``""`` は NULL = 分野中立）。「前回 run の分野を引き継ぐ」解決は
+    呼び出し側（route の ``_previous_run_cartridge_id`` / orchestrator の env 解決）が
+    済ませてから渡す — persistence で ``None`` を「変更なし」と読むと、resume 経路で
+    「指定しない」への解除が表現できない（IK-0702。options と違い、ここに保持の分岐を
+    置かない）。
+
     ``stage_outputs`` の ``_artifacts`` は **stage_outputs に書かず**、生成ログ表
     ``document_analysis_artifacts`` へ stage ごと upsert する（§6 / KO6）。読み手の
     契約（``document_run_artifacts()``）は getter 側の hydrate で不変に保つ。
     """
+    cartridge_id = (cartridge_id or "").strip() or None
     payload = dict(stage_outputs or {})
     artifacts = payload.pop(ARTIFACTS_KEY, None)
     stage_outputs = payload
@@ -2922,6 +3592,7 @@ def upsert_analysis_run(
             new_run_id = str(row[0])
             _upsert_run_artifacts(session, new_run_id, artifacts)
             session.commit()
+            _maybe_sync_document_title(document_id, artifacts)
             return new_run_id
         else:
             session.execute(
@@ -2929,6 +3600,7 @@ def upsert_analysis_run(
                     """
                     UPDATE document_analysis_runs SET
                         status = :status,
+                        cartridge_id = :cartridge_id,
                         current_stage = :current_stage,
                         error_message = :error_message,
                         stage_outputs = stage_outputs || CAST(:stage_outputs AS jsonb),
@@ -2942,6 +3614,7 @@ def upsert_analysis_run(
                 {
                     "id": run_id,
                     "status": status,
+                    "cartridge_id": cartridge_id,
                     "current_stage": current_stage,
                     "error_message": error_message or "",
                     "stage_outputs": _json_dumps(stage_outputs or {}),
@@ -2951,12 +3624,19 @@ def upsert_analysis_run(
             )
             _upsert_run_artifacts(session, run_id, artifacts)
             session.commit()
+            _maybe_sync_document_title(document_id, artifacts)
             return run_id
     except Exception:
         session.rollback()
         raise
     finally:
         session.close()
+
+
+def _maybe_sync_document_title(document_id: Any, artifacts: Any) -> None:
+    """``document_structure`` を書いた upsert のときだけ題名の書き戻しを試す（IK-0366）。"""
+    if isinstance(artifacts, dict) and "document_structure" in artifacts:
+        sync_document_title_from_structure(document_id, artifacts)
 
 
 def get_latest_analysis_run(

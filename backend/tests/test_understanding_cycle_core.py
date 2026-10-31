@@ -137,7 +137,7 @@ class TestBuildLandingCandidates:
         rows = [_tension_row("t1", "残しておきたい問い")]
         candidates = build_landing_candidates(rows)
         assert len(candidates) == 1
-        assert set(candidates[0].keys()) == {"trace_id", "kind", "label", "revisit"}
+        assert set(candidates[0].keys()) == {"trace_id", "kind", "label", "text", "revisit"}
 
     def test_priority_order(self):
         rows = [

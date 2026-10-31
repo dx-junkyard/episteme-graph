@@ -54,6 +54,10 @@ resolution:
     - backend/core/decision_context.py
     - docs/features/decision_context_design.md
     - docs/architecture/vision_ux_gap_six_lenses_2026-09-10.md §4 第1波 6
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E
 related: [IK-0008, IK-0012]
 view_of: []
 history:

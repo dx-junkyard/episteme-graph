@@ -29,18 +29,333 @@ from sqlalchemy import text as sa_text
 from core import atlas as atlas_module
 from core import atlas_state
 from core import atlas_placement
+from core import label_vocab
 from core.course_data import course_cartridge_id, course_topics
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/atlas", tags=["Atlas"])
+router = APIRouter(prefix="/api/atlas", tags=["Atlas"], route_class=LearnerDisplayRoute)
 
 # フィクスチャと同じ viewBox (§4.1)
 _VIEWBOX = {1: (680, 370), 2: (680, 330), 3: (680, 400)}
 
 # §13 ノード数の上限目安 (超過時は代表選出。全件表示はしない)
 _MAX_L2_NODES = 20
+
+
+def select_l2_concept_ids(
+    concept_ids: list[str],
+    edges: list[tuple[str, str]],
+    *,
+    priority: list[str],
+    limit: int,
+    course_hints: list[str] | None = None,
+    leading: list[str] | None = None,
+    relation_pairs: list[tuple[str, str]] | None = None,
+    relation_reserve: int = 0,
+) -> set[str]:
+    """L2（コースの概念マップ）に描く骨格概念を決定論で選ぶ（IK-0989 / IK-1017 / IK-1045）。
+
+    順: ⓪leading（焦点・いまここ）→ ⓪'relation_pairs（版の改訂で加わった＝教員が確定した関係。
+    直近 → 古い順）を**組ごとに両端そろえて**、端点が ``relation_reserve`` 枠に収まる範囲で →
+    ①priority（コースのトピックに対応する概念・足跡）→ ②course_hints（コースの論文が置かれている
+    概念）→ ②'枠に入らなかった relation_pairs（組ごと）→ ③ここまでと骨格の関係で 1 hop の概念
+    （骨格の並び順）→ ④残りを骨格の並び順。上限 ``limit``。
+    関係は離散の辺（原則①′）なので、片端だけを入れて線の無い点を増やさない（組で入らなければ
+    その組は飛ばす）。トピックの対応・配置が多いコースでも確定済みの関係が上限の外へ押し出され
+    ないよう、関係に枠を先に配る（IK-1045 第 8 周: 優先の列の最後に置くと押し出された）。
+    手がかりが全部空なら骨格の並び順の先頭になる（事実文はそれを言い分ける）。
+    """
+    known = [c for c in concept_ids if c]
+    known_set = set(known)
+    order = {cid: i for i, cid in enumerate(known)}
+    chosen: list[str] = []
+    seen: set[str] = set()
+
+    def _take(cid: str) -> None:
+        if cid in known_set and cid not in seen and len(chosen) < limit:
+            chosen.append(cid)
+            seen.add(cid)
+
+    def _take_pairs(budget: int) -> None:
+        used = 0
+        for pair in relation_pairs or []:
+            try:
+                a, b = str(pair[0] or ""), str(pair[1] or "")
+            except (TypeError, IndexError):
+                continue
+            if a not in known_set or b not in known_set or a == b:
+                continue
+            new = [c for c in (a, b) if c not in seen]
+            if not new:
+                continue
+            if used + len(new) > budget or len(chosen) + len(new) > limit:
+                continue
+            for c in new:
+                _take(c)
+            used += len(new)
+
+    for cid in list(leading or []):
+        _take(str(cid or ""))
+    _take_pairs(max(0, int(relation_reserve or 0)))
+    for cid in list(priority) + list(course_hints or []):
+        _take(str(cid or ""))
+    _take_pairs(limit)
+    seeds = set(chosen)
+    neighbors: set[str] = set()
+    for a, b in edges:
+        if a in seeds and b in known_set:
+            neighbors.add(b)
+        if b in seeds and a in known_set:
+            neighbors.add(a)
+    for cid in sorted(neighbors, key=lambda c: order.get(c, 0)):
+        _take(cid)
+    for cid in known:
+        _take(cid)
+    return set(chosen)
+
+
+def course_placement_concept_ids(
+    placements: list[dict],
+    *,
+    domain_key: str,
+    concept_ids: set[str],
+    resolve=None,
+) -> list[str]:
+    """コースの論文が置かれている骨格概念の id を返す（IK-1017）。
+
+    ``placements`` は ``landscape_store.list_for_documents``（学習者に見せてよい状態のみ）。
+    この分野の配置だけを使い、confirmed → それ以外（inferred / review_required）の順、
+    同じ状態の中は渡された順（store の並び = node_id 順で決定論）。旧版の node_id は
+    ``resolve(node_id) -> current_node_id`` で現行版へ読み替える（NC5。読み替えるだけ）。
+    現行の骨格概念に無いもの（領域・対応の無い旧ノード）は落とす。
+    """
+    confirmed: list[str] = []
+    others: list[str] = []
+    for row in placements or []:
+        if not isinstance(row, dict) or str(row.get("domain_key") or "") != domain_key:
+            continue
+        node_id = str(row.get("node_id") or "")
+        if resolve is not None and node_id not in concept_ids:
+            try:
+                node_id = str(resolve(node_id) or "")
+            except Exception:  # noqa: BLE001
+                node_id = ""
+        if not node_id or node_id not in concept_ids:
+            continue
+        bucket = confirmed if str(row.get("status") or "") == "confirmed" else others
+        if node_id not in bucket:
+            bucket.append(node_id)
+    ordered: list[str] = []
+    for cid in confirmed + others:
+        if cid not in ordered:
+            ordered.append(cid)
+    return ordered
+
+
+def course_papers_by_concept(
+    session, placements: list[dict], *, domain_key: str, concept_ids: set[str], resolve=None
+) -> dict[str, list[tuple[str, str]]]:
+    """骨格概念 id → そこに置かれたコースの論文の (呼び方, 出所ラベル)（第 25 周 第 10 波）。
+
+    母集合は :func:`course_placement_concept_ids` と同じ（学習者に見せてよい状態の配置だけ・旧 node は
+    読み替え）。名前は ``document_refs.resolve_paper_titles``（外部 API なし）。出所ラベルは
+    ``landscape.schema.provenance_label``（未知は AI 推定側へ倒す）。数値・件数は返さない。
+    """
+    from core import document_refs
+    from core.landscape import schema as landscape_schema
+
+    pairs: list[tuple[str, str, str]] = []
+    for row in placements or []:
+        if not isinstance(row, dict) or str(row.get("domain_key") or "") != domain_key:
+            continue
+        node_id = str(row.get("node_id") or "")
+        if resolve is not None and node_id not in concept_ids:
+            try:
+                node_id = str(resolve(node_id) or "")
+            except Exception:  # noqa: BLE001
+                node_id = ""
+        document_id = str(row.get("document_id") or "")
+        if not node_id or node_id not in concept_ids or not document_id:
+            continue
+        pairs.append((node_id, document_id, str(row.get("status") or "")))
+    if not pairs:
+        return {}
+    titles = document_refs.resolve_paper_titles(session, sorted({p[1] for p in pairs})) or {}
+    out: dict[str, list[tuple[str, str]]] = {}
+    # 教員確認済みを先に（同じ状態の中は渡された順）。
+    for node_id, document_id, status in sorted(
+        pairs, key=lambda p: 0 if p[2] == landscape_schema.STATUS_CONFIRMED else 1
+    ):
+        title = str(titles.get(document_id) or "").strip()
+        if not title:
+            continue
+        item = (title, landscape_schema.provenance_label(status))
+        bucket = out.setdefault(node_id, [])
+        if all(existing[0] != title for existing in bucket):
+            bucket.append(item)
+    return out
+
+
+def added_relation_pairs(history: list, current_version: str) -> list[tuple[str, str]]:
+    """現行凍結版の関係のうち、過去の版の改訂で加わったものの端点の組を返す（IK-1017 / IK-1045）。
+
+    ``history`` は ``atlas_store.load_frozen_history``（古い順）。現行版が履歴の末尾で
+    前の版があるときだけ差を取る（無向で比較）。各関係は「その関係が最後に加わった版」
+    （前の版に無く、その版にある）で決め、**直近の改訂で加わった関係 → 古い改訂で加わった
+    関係**の順に並べる（同じ版の中は現行版の並び順）。系列の最初の版から在る関係は含めない。
+    直近の差だけを読むと、版上げのたびに前の改訂で確定した関係が手がかりから外れる
+    （IK-1045・第 25 周 第 7 波）。読めなければ空（主張しない）。数値は返さない。
+    """
+    return [pair for pair, _version in _added_relations_with_version(history, current_version)]
+
+
+def added_relation_versions(history: list, current_version: str) -> dict[frozenset, str]:
+    """``frozenset({from_id, to_id}) -> その関係が最後に加わった版``（IK-1119・第 25 周 第 10 波）。
+
+    :func:`added_relation_pairs` と同じ判定（同じ内部関数）。系列の最初の版から在る関係は含めない。
+    右パネルの関係の行に版の事実を添えるためだけに使う（地図の上に印を付けない）。
+    """
+    return {
+        frozenset(pair): version
+        for pair, version in _added_relations_with_version(history, current_version)
+        if version
+    }
+
+
+def _added_relations_with_version(
+    history: list, current_version: str
+) -> list[tuple[tuple[str, str], str]]:
+    if not history or len(history) < 2:
+        return []
+    current = history[-1]
+    if str(getattr(current, "version", "") or "") != str(current_version or ""):
+        return []
+    edge_sets = [
+        {frozenset((e.from_id, e.to_id)) for e in (getattr(h, "edges", None) or [])}
+        for h in history
+    ]
+    ranked: list[tuple[int, int, tuple[str, str], str]] = []
+    for pos, e in enumerate(getattr(current, "edges", None) or []):
+        key = frozenset((e.from_id, e.to_id))
+        added_at = -1
+        # 末尾から遡り、連続して在る範囲の始まり（＝最後に加わった版）を探す。
+        for i in range(len(history) - 1, 0, -1):
+            if key in edge_sets[i] and key not in edge_sets[i - 1]:
+                added_at = i
+                break
+            if key not in edge_sets[i]:
+                break
+        if added_at < 1:
+            continue
+        ranked.append(
+            (-added_at, pos, (e.from_id, e.to_id), str(getattr(history[added_at], "version", "") or ""))
+        )
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return [(pair, version) for _neg, _pos, pair, version in ranked]
+
+
+def _l2_course_hints(
+    session, skeleton, cartridge_id: str, course_data: dict | None, extras: dict | None = None
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """L2 の代表選出に渡す「コースの論文の配置」と「凍結で加わった関係」（IK-1017）。
+
+    配置はコースの sources に解決した document の、学習者に見せてよい状態の配置だけ
+    （学習者の論文の位置レイヤーと同じ母集合）。fail-soft: 失敗は空で返す。
+
+    ``extras`` を渡すと（第 25 周 第 10 波）、同じ材料から右パネル向けの 2 つを詰める:
+    ``added_versions``（:func:`added_relation_versions` — IK-1119）と ``papers_by_concept``
+    （現行の骨格概念 id → [(論文の呼び方, 出所ラベル)]・名前の列挙だけ）。戻り値の形は不変。
+    """
+    if session is None:
+        return [], []
+    concept_ids = {c.id for r in skeleton.regions for c in r.concepts}
+    history: list = []
+    try:
+        from core import atlas_store
+
+        history = atlas_store.load_frozen_history(session, cartridge_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas L2: frozen history unavailable (non-fatal)", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        history = []
+    added = added_relation_pairs(history, skeleton.version)
+    if extras is not None:
+        extras["added_versions"] = added_relation_versions(history, skeleton.version)
+        # IK-1149（第 25 周 第 11 波）: 向きを採用のときに選んだ記録が無い有向の関係（無向ペアの集合）。
+        try:
+            from core.atlas_edges import store as edge_store
+
+            extras["direction_unrecorded"] = edge_store.direction_unrecorded_pairs(
+                session, cartridge_id
+            )
+        except Exception:  # noqa: BLE001 — 添え書きが出ないだけ
+            logger.warning("atlas L2: direction records unavailable (non-fatal)", exc_info=True)
+            extras["direction_unrecorded"] = set()
+    placed: list[str] = []
+    if course_data is not None:
+        try:
+            import services
+            from core import atlas_correspondence
+            from core.landscape import schema as landscape_schema
+            from core.landscape import store as landscape_store
+
+            document_ids = sorted(services.list_course_source_document_ids(course_data))
+            rows = landscape_store.list_for_documents(
+                session,
+                document_ids,
+                statuses=landscape_schema.LEARNER_VISIBLE_STATUSES,
+            )
+            resolver = atlas_correspondence.build_node_resolver(history) if history else None
+
+            def _resolve(node_id: str) -> str:
+                if resolver is None:
+                    return node_id
+                return str(resolver.resolve(node_id).get("current_node_id") or "")
+
+            placed = course_placement_concept_ids(
+                rows, domain_key=cartridge_id, concept_ids=concept_ids, resolve=_resolve
+            )
+            if extras is not None:
+                extras["papers_by_concept"] = course_papers_by_concept(
+                    session, rows, domain_key=cartridge_id, concept_ids=concept_ids, resolve=_resolve
+                )
+        except Exception:  # noqa: BLE001 — 手がかりの失敗で地図を壊さない
+            logger.warning("atlas L2: course placements unavailable (non-fatal)", exc_info=True)
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            placed = []
+    return placed, added
+
+
+#: 学習者の地図の文のキー（IK-1018 残り・第 25 周 第 7 波）。読み時に「台帳」「記帳」を読み替える。
+_LEARNER_WORDING_KEYS = ("pill", "pill_note", "verify", "endorse", "verify_line", "endorse_line")
+
+
+def _apply_learner_wording(obj):
+    """学習者の地図の DTO の文（札・説明・検証・承認の行）を学習者の語にする（IK-1018 残り）。
+
+    ``label_vocab.learner_atlas_wording`` を _LEARNER_WORDING_KEYS の文字列にだけ掛ける。
+    状態キャッシュの行は書き換えない（読み時の投影）。入れ子の dict / list を辿る。
+    """
+    if isinstance(obj, dict):
+        for key, value in list(obj.items()):
+            if key in _LEARNER_WORDING_KEYS and isinstance(value, str):
+                obj[key] = label_vocab.learner_atlas_wording(value)
+            elif isinstance(value, (dict, list)):
+                _apply_learner_wording(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, (dict, list)):
+                _apply_learner_wording(item)
+    return obj
 
 
 def _load_learner_skeleton(cartridge_id: str, session=None) -> atlas_module.AtlasSkeleton:
@@ -183,6 +498,10 @@ def get_atlas(
         raise HTTPException(status_code=422, detail="level は 1..3 を指定してください")
     session = _session()
     resolved_focus = focus
+    course_placed_concepts: list[str] = []
+    added_pairs: list[tuple[str, str]] = []
+    # 右パネル向けの材料（版の事実 IK-1119・置かれた論文の名前）。取れなければ空のまま。
+    panel_extras: dict = {}
     relation_threads: dict | None = None  # 推定の糸 (RE層 §6)。既定は「キーなし」
     try:
         # --- カートリッジ決定 (course 指定時はコースから導出。gap3) ---
@@ -255,6 +574,15 @@ def get_atlas(
                 topic_info, skeleton, bound_concept_id=bound
             )
 
+        # --- 分野の表示名 (IK-0412。パンくずに内部キーを出さない) ---
+        domain_label = atlas_state.domain_display_name(session, cartridge_id)
+
+        # --- L2 の手がかり（IK-1017・第 25 周 第 6 波）: コースの論文の配置と、
+        # 凍結で加わった関係。どちらも読み取りだけで、取れなければ空（従来動作へ縮退）。
+        course_placed_concepts, added_pairs = _l2_course_hints(
+            session, skeleton, cartridge_id, course_data, panel_extras
+        )
+
         # --- 推定の糸 (RE層 §6。optional トップレベルキー threads) ---
         # 付加物なので、導出できないときはキーごと落とす (fail-soft = RE2/RE6)。
         # セッションが要るので取得はここで行い、レスポンスへのマージは組み立て後に行う。
@@ -263,6 +591,13 @@ def get_atlas(
                 from core.atlas_edges.threads import threads_for_domain
 
                 relation_threads = threads_for_domain(session, cartridge_id)
+                if isinstance(relation_threads, dict) and not relation_threads.get("available"):
+                    from core.atlas_edges.threads import threads_unavailable_note
+
+                    relation_threads = {
+                        "available": False,
+                        "note": threads_unavailable_note(session, cartridge_id),
+                    }
             except Exception:  # noqa: BLE001 — 糸の失敗で地図を壊さない
                 logger.warning(
                     "atlas relation threads unavailable for %s (non-fatal)",
@@ -292,6 +627,32 @@ def get_atlas(
         for e in skeleton.edges
         if e.from_id in concept_region and e.to_id in concept_region
     ]
+    # IK-1072（第 25 周 第 9 波）: 関係の種別（向き）を面をまたいで落とさない。L2 の矢じり・向きの一文と、
+    # 右パネルの「地図の関係」は、骨格の辺の from → to と種別から label_vocab の句で組み立てる。
+    concept_edge_kind = {
+        (e.from_id, e.to_id): str(getattr(e, "kind", "") or "")
+        for e in skeleton.edges
+        if e.from_id in concept_region and e.to_id in concept_region
+    }
+    skeleton_label_by_id = {c.id: c.label for r in skeleton.regions for c in r.concepts}
+    skeleton_label_by_id.update({r.id: r.label for r in skeleton.regions})
+    relations_by_node: dict[str, list[tuple[str, str, str, str]]] = {}
+    added_versions = panel_extras.get("added_versions") or {}
+    direction_unrecorded = panel_extras.get("direction_unrecorded") or set()
+    for e in skeleton.edges:
+        triple = (
+            str(getattr(e, "kind", "") or ""),
+            skeleton_label_by_id.get(e.from_id) or "",
+            skeleton_label_by_id.get(e.to_id) or "",
+            # IK-1119: その関係が加わった版（最初の版から在る関係は空 = 添えない）。
+            str(added_versions.get(frozenset((e.from_id, e.to_id))) or ""),
+            # IK-1149: 向きを採用のときに選んだ記録が無い有向の関係。
+            frozenset((e.from_id, e.to_id)) in direction_unrecorded,
+        )
+        if not triple[1] or not triple[2]:
+            continue
+        for end in (e.from_id, e.to_id):
+            relations_by_node.setdefault(end, []).append(triple)
     adjacency: dict[str, set[str]] = {}
     for a, b in concept_edges:
         adjacency.setdefault(a, set()).add(b)
@@ -308,15 +669,22 @@ def get_atlas(
     nodes: dict[str, dict] = {}
     nodes_list: list[dict] = []
     for entry_id, row in node_rows.items():
-        ledger_status = row["status"]
-        display_status = ledger_status
-        pill = atlas_state.PILL_LABELS.get(ledger_status, ledger_status)
+        node_status = row["status"]
+        # IK-0412: ledger_status は検証行（「台帳に記帳なし」等）と食い違わない値にする。
+        # seed 由来・コーパス状態なし・引用 0 本の verified は unrecorded。表示状態と色は不変。
+        ledger_status = atlas_state.learner_ledger_status(
+            node_status,
+            row.get("status_source"),
+            (row.get("evidence") or {}).get("evidence_count"),
+        )
+        display_status = node_status
+        pill = atlas_state.learner_pill(node_status, ledger_status)
         verify = row["verify_line"]
         if now_id == entry_id:
             display_status = "now"
             pill = atlas_state.PILL_LABELS["now"]
             verify = verify + "あなたの学習の現在地。"
-        elif entry_id not in visited and ledger_status in (
+        elif entry_id not in visited and node_status in (
             atlas_state.STATUS_VERIFIED,
             atlas_state.STATUS_UNKNOWN,
         ):
@@ -324,18 +692,36 @@ def get_atlas(
             # 減衰させるが、検証行には台帳状態をそのまま残す。
             display_status = "unvisited"
             pill = atlas_state.PILL_LABELS["unvisited"]
+        # ピルの意味の1行（「暗黙の前提」とは何か等）。札と同じ軸で引く（IK-0964）:
+        # 札が未訪問・いまここ（個人の状態）なら説明も個人の状態を言い、台帳の状態は
+        # 検証行だけが言う。札が台帳の状態なら台帳の状態で引く。
+        if display_status in ("unvisited", "now"):
+            pill_note = atlas_state.pill_note_for(display_status, display_status)
+        else:
+            pill_note = atlas_state.pill_note_for(node_status, ledger_status)
         node_view = {
             "label": row["label"],
             "pill": pill,
+            "pill_note": pill_note,
             "status": display_status,
             "ledger_status": ledger_status,
             "verify": verify,
-            "endorse": row["endorse_line"],
+            "endorse": atlas_state.learner_endorse_line(row["endorse_line"]),
             "learn": row["learn_enabled"],
             "evid": row["evid_enabled"],
         }
         if entry_id in glow:
             node_view["glow"] = True
+        # IK-1072 頭脳 NEW: 選んだ概念に結ばれた確定済みの関係を名前で（件数なし）。
+        relations_line = label_vocab.atlas_panel_relations_line(relations_by_node.get(entry_id))
+        if relations_line:
+            node_view["relations"] = relations_line
+        # 第 25 周 第 10 波: その場所に置かれたこのコースの論文の名前（出所ラベル付き・件数なし）。
+        papers_line = label_vocab.atlas_panel_papers_line(
+            (panel_extras.get("papers_by_concept") or {}).get(entry_id)
+        )
+        if papers_line:
+            node_view["papers"] = papers_line
         nodes[entry_id] = node_view
         # 骨格概念の layout は領域内相対。nodes_list はキャンバス絶対座標を前提と
         # するため絶対化する (コーパス概念は既に絶対なのでそのまま)。
@@ -359,9 +745,12 @@ def get_atlas(
                 "region_id": row["region_id"],
                 "personal": {"visited": entry_id in visited},
                 "panel": {
+                    "pill_note": pill_note,
                     "verify": verify,
-                    "endorse": row["endorse_line"],
+                    "endorse": atlas_state.learner_endorse_line(row["endorse_line"]),
                     "actions": {"learn": row["learn_enabled"], "evid": row["evid_enabled"]},
+                    **({"relations": relations_line} if relations_line else {}),
+                    **({"papers": papers_line} if papers_line else {}),
                 },
             }
         )
@@ -386,7 +775,7 @@ def get_atlas(
                 "status": status,
                 "layout": layout,
                 "verify": row["verify_line"] if row else atlas_state.FOG_VERIFY_LINE,
-                "endorse": row["endorse_line"] if row else atlas_state.FOG_ENDORSE_LINE,
+                "endorse": atlas_state.learner_endorse_line(row["endorse_line"]) if row else atlas_state.FOG_ENDORSE_LINE,
             }
         )
         region_box = {
@@ -407,8 +796,12 @@ def get_atlas(
             nodes.setdefault(
                 region.id,
                 {
-                    "label": f"{region.label}（霧の領域）",
+                    # 名前は名前だけ（IK-0941）。霧の状態は pill（状態語）が言う。
+                    "label": region.label,
                     "pill": atlas_state.PILL_LABELS[atlas_state.STATUS_FOG],
+                    "pill_note": atlas_state.pill_note_for(
+                        atlas_state.STATUS_FOG, atlas_state.STATUS_FOG
+                    ),
                     "status": atlas_state.STATUS_FOG,
                     "ledger_status": atlas_state.STATUS_FOG,
                     "verify": atlas_state.FOG_VERIFY_LINE,
@@ -443,13 +836,58 @@ def get_atlas(
                     leaders.append(pair)
 
     # --- L2 (コースレベル / 概念マップ) ---
+    # IK-0989（第 25 周 第 5 波）: 骨格の全概念を返してフロントが先頭 20 件で黙って切って
+    # いたのをやめ、サーバが「いま学んでいる場所とそのつながり」を優先して代表選出する
+    # （§13 の上限 ≤ 20 は維持）。描かなかった項目があるときは事実文 omitted_note を付ける。
     w2, h2 = _VIEWBOX[2]
     l2_nodes = []
     skeleton_concept_ids = set(concept_region.keys())
+    drawable_concepts = [
+        c.id
+        for r in skeleton.regions
+        for c in r.concepts
+        if c.layout is not None and c.id in node_rows
+    ]
+    course_bound = []
+    if course_data is not None:
+        for t in course_topics(course_data):
+            if isinstance(t, dict):
+                nid = str(t.get("atlas_node_id") or "").strip()
+                if nid:
+                    course_bound.append(nid)
+    # IK-1055（第 25 周 第 8 波）: 学習者本人の状態（焦点・いまここ・足跡）と、教員がコースの
+    # トピックに結んだ場所を分けて持つ（事実文で別の語にする）。
+    learner_leading = [focus_value for focus_value in (resolved_focus, now_id) if focus_value]
+    learner_footprints = list(me["footprints"])
+    learner_state_ids = learner_leading + learner_footprints
+    # IK-1045（第 25 周 第 8 波）: 版の改訂で加わった（教員が確定した）関係に上限の半分を先に配る。
+    l2_selected = select_l2_concept_ids(
+        drawable_concepts,
+        concept_edges,
+        leading=learner_leading,
+        relation_pairs=list(added_pairs),
+        relation_reserve=_MAX_L2_NODES // 2,
+        priority=course_bound + learner_footprints,
+        course_hints=list(course_placed_concepts),
+        limit=_MAX_L2_NODES,
+    )
+    l2_omitted = len(l2_selected) < len(drawable_concepts)
+    # 事実文は実際に使った手がかりを言う（IK-1017）。描いた概念に効いたものだけを数える。
+    l2_hints: list[str] = []
+    if any(cid in l2_selected for cid in learner_state_ids):
+        l2_hints.append(label_vocab.ATLAS_L2_HINT_LEARNING)
+    if any(cid in l2_selected for cid in course_bound):
+        l2_hints.append(label_vocab.ATLAS_L2_HINT_COURSE_TOPICS)
+    if any(cid in l2_selected for cid in course_placed_concepts):
+        l2_hints.append(label_vocab.ATLAS_L2_HINT_PLACEMENTS)
+    if any(a in l2_selected and b in l2_selected for a, b in added_pairs):
+        l2_hints.append(label_vocab.ATLAS_L2_HINT_ADDED_RELATIONS)
     for region in skeleton.regions:
         region_layout = region_layout_by_id.get(region.id, {})
         for concept in region.concepts:
             if concept.layout is None or concept.id not in node_rows:
+                continue
+            if concept.id not in l2_selected:
                 continue
             # 骨格概念の layout は領域内相対 → 領域 box を適用して絶対化する
             ax, ay = _concept_abs(concept.layout.x, concept.layout.y, region_layout)
@@ -480,7 +918,39 @@ def get_atlas(
                 "y": _scale(row["layout"].get("y", 0.5), h2),
             }
         )
-    l2_edges = [[a, b] for a, b in concept_edges]
+    l2_drawn_ids = {n["id"] for n in l2_nodes}
+    # 関係の実線は描いた項目どうしの間だけ（端点の無い線を送らない）。
+    l2_edges = [[a, b] for a, b in concept_edges if a in l2_drawn_ids and b in l2_drawn_ids]
+    # IK-1072（第 25 周 第 9 波）: 描いた実線のうち向きのある関係（依存）は from → to の組で別に渡し、
+    # フロントが矢じりを付ける。向きの一文（label_vocab の句）を添える。版の印（NEW）は付けない。
+    l2_directed_edges = [
+        [a, b] for a, b in l2_edges if label_vocab.edge_kind_is_directed(concept_edge_kind.get((a, b)))
+    ]
+    l2_relations_note = label_vocab.atlas_l2_directed_relations_line(
+        [
+            (
+                concept_edge_kind.get((a, b)),
+                skeleton_label_by_id.get(a) or "",
+                skeleton_label_by_id.get(b) or "",
+                frozenset((a, b)) in direction_unrecorded,
+            )
+            for a, b in l2_directed_edges
+        ]
+    )
+    # IK-1045（第 25 周 第 8 波）: 版の改訂で加わった（教員が確定した）関係のうち、端点が上限の
+    # ために描かれなかったものは事実文で名前を言う（件数なし・直近の改訂 → 古い改訂の順）。
+    concept_label_by_id = {c.id: c.label for r in skeleton.regions for c in r.concepts}
+    # IK-1118（第 25 周 第 10 波）: 種別と記載順（from → to）を持たせ、label_vocab の句で向きを言う。
+    l2_undrawn_relations = [
+        (
+            concept_edge_kind.get((a, b), ""),
+            concept_label_by_id.get(a) or "",
+            concept_label_by_id.get(b) or "",
+            frozenset((a, b)) in direction_unrecorded,
+        )
+        for a, b in added_pairs
+        if not (a in l2_drawn_ids and b in l2_drawn_ids)
+    ]
 
     # --- L3 (導出レベル) ---
     chain = list((chain_row or {}).get("evidence", {}).get("chain") or [])
@@ -497,7 +967,9 @@ def get_atlas(
         "3": focus_id if focus_id in chain else default_gap,
     }
 
-    cartridge_label = skeleton.cartridge or cartridge_id
+    # IK-0412: パンくずは分野の表示名（atlas_domain_meta / domain.json）。内部キー
+    # （cartridge_id）を表示名の代わりに出さない。名前が無ければ「名前が登録されていない分野」。
+    cartridge_label = domain_label
     crumbs = {
         "1": f"{cartridge_label} › 全体　—　ノードを選ぶと下に詳細",
         "2": f"{cartridge_label} › コース（概念マップ）",
@@ -507,6 +979,7 @@ def get_atlas(
     payload: dict = {
         "skeleton_version": skeleton.version,
         "cartridge": cartridge_id,
+        "domain_name": domain_label,
         "provenance": "AI生成・教員レビュー済",
         "level": level,
         "focus": focus_id,
@@ -522,6 +995,8 @@ def get_atlas(
                 "nodes": l1_nodes,
                 "footprints": footprints_l1,
                 "leaders": leaders,
+                # IK-1073（第 25 周 第 9 波）: いまここが無いときは無いことを事実文で言う（推定で付けない）。
+                **({} if now_id else {"now_note": label_vocab.ATLAS_NOW_ABSENT_NOTE}),
             },
             "2": {
                 "viewBox": list(_VIEWBOX[2]),
@@ -529,6 +1004,18 @@ def get_atlas(
                 "svgDesc": "骨格とコーパス概念を合成した概念マップ",
                 "nodes": l2_nodes,
                 "edges": l2_edges,
+                "directed_edges": l2_directed_edges,
+                **({"relations_note": l2_relations_note} if l2_relations_note else {}),
+                **({} if now_id else {"now_note": label_vocab.ATLAS_NOW_ABSENT_NOTE}),
+                **(
+                    {
+                        "omitted_note": label_vocab.atlas_l2_omitted_note(
+                            l2_hints, l2_undrawn_relations
+                        )
+                    }
+                    if l2_omitted
+                    else {}
+                ),
             },
             "3": {
                 "viewBox": list(_VIEWBOX[3]),
@@ -553,7 +1040,26 @@ def get_atlas(
     # 推定の糸は「導出できたときだけ」載せる。available が偽ならキー自体を付けない
     # (フロントはコントロールごと非表示 = RE2 の fail-closed)。
     if isinstance(relation_threads, dict) and relation_threads.get("available"):
+        # IK-0989: 端点がこの画面（コース）に描かれていない糸があることを事実文で言う
+        # （本数は言わない）。根拠の一覧は全部の糸を挙げたまま。
+        if any(
+            isinstance(item, dict)
+            and (item.get("from") not in l2_drawn_ids or item.get("to") not in l2_drawn_ids)
+            for item in (relation_threads.get("items") or [])
+        ):
+            relation_threads = {
+                **relation_threads,
+                "undrawn_note": label_vocab.ATLAS_THREADS_UNDRAWN_NOTE,
+            }
         payload["threads"] = relation_threads
+    elif isinstance(relation_threads, dict) and relation_threads.get("note"):
+        # 第 14 周: 糸が出ない理由を事実文で返す（フロントは available !== true で
+        # レイヤーを出さないまま、理由文だけを読める）。
+        payload["threads"] = {"available": False, "note": str(relation_threads["note"])}
+    # IK-1018 残り: 札・検証の行・札の説明・承認の行を学習者の語にする（「台帳」「記帳」を出さない）。
+    for key in ("nodes", "regions", "nodes_list"):
+        if key in payload:
+            _apply_learner_wording(payload[key])
     return payload
 
 
@@ -587,14 +1093,14 @@ def get_atlas_node(
         from routes.theory_components import _endorsement_label  # 遅延 import(循環回避)
 
         endorsements.append({"label": _endorsement_label(evidence)})
-    return {
+    return _apply_learner_wording({
         "node_id": node_id,
         "label": row["label"],
         "status": row["status"],
         "verify_line": row["verify_line"],
-        "endorse_line": row["endorse_line"],
+        "endorse_line": atlas_state.learner_endorse_line(row["endorse_line"]),
         "evidence_refs": list(evidence.get("evidence_refs") or []),
         "endorsements": endorsements,
         "actions": {"learn": row["learn_enabled"], "evid": row["evid_enabled"]},
         "skeleton_version": skeleton.version,
-    }
+    })

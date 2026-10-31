@@ -238,6 +238,13 @@ def list_labels(
     return [_label_row_to_dict(row) for row in rows]
 
 
+#: 追加系の操作の結果（IK-0897）。``created`` = 新しく記録した / ``existing`` = 既にあった
+#: （変更なし・表示テキストだけ更新しうる）/ ``dismissed`` = 見送り済みの行があり復帰させなかった。
+OUTCOME_CREATED = "created"
+OUTCOME_EXISTING = "existing"
+OUTCOME_DISMISSED = "dismissed"
+
+
 def add_label(
     entry_id: str,
     *,
@@ -279,6 +286,25 @@ def add_label(
 
     with _session_scope(session) as sess:
         _require_not_retired(sess, key)
+        # IK-0897: どの分岐を通ったか（新規 / 既存 / 見送り済み）を呼び出し側へ返す。
+        prior = sess.execute(
+            sa_text(
+                """
+                SELECT status FROM library_entry_labels
+                 WHERE entry_id = CAST(:entry_id AS uuid)
+                   AND kind = :kind AND normalized_label = :normalized_label
+                 LIMIT 1
+                """
+            ),
+            {"entry_id": key, "kind": kind, "normalized_label": normalized},
+        ).fetchone()
+        prior_status = str(prior[0] or "") if prior else ""
+        if not prior_status:
+            outcome = OUTCOME_CREATED
+        elif prior_status == schema.LABEL_STATUS_CONFIRMED:
+            outcome = OUTCOME_EXISTING
+        else:
+            outcome = OUTCOME_DISMISSED
         row = sess.execute(
             sa_text(
                 f"""
@@ -336,8 +362,10 @@ def add_label(
             new_status=result["status"],
             actor_id=actor,
             reason="",
-            metadata={"label_id": result["id"], "kind": kind},
+            metadata={"label_id": result["id"], "kind": kind, "outcome": outcome},
         )
+    # IK-0897: 結果の種類（created / existing / dismissed）を添える（route が取り出す）。
+    result["outcome"] = outcome
     return result
 
 
@@ -393,6 +421,73 @@ def dismiss_label(
             action=schema.AUDIT_ACTION_LABEL_DISMISS,
             old_status=schema.LABEL_STATUS_CONFIRMED,
             new_status=schema.LABEL_STATUS_DISMISSED,
+            actor_id=actor,
+            reason=note,
+            metadata={"label_id": result["id"], "kind": result["kind"]},
+        )
+    return result
+
+
+def restore_label(
+    label_id: str,
+    *,
+    actor_id: str,
+    review_note: str,
+    record_audit: Callable[..., Any] | None = None,
+    session: Any = None,
+) -> dict | None:
+    """見送ったラベルを使う状態（``confirmed``）に戻す（IK-1024。**行は 1 本のまま** — KR7）。
+
+    戻すのも理由必須（空は ``ValueError``）。見送り済みでない行・対象が無いときは ``None``
+    （呼び出し側は 404 / 事実文）。見送りの理由は監査行（``label_dismiss``）に残っている。
+    """
+    actor = _require_actor(actor_id)
+    note = _clean(review_note)
+    if not note:
+        raise ValueError("review_note is required when restoring a label")
+    key = _uuid_or_none(label_id)
+    if key is None:
+        return None
+
+    with _session_scope(session) as sess:
+        prior = sess.execute(
+            sa_text("SELECT entry_id::text FROM library_entry_labels WHERE id = CAST(:id AS uuid)"),
+            {"id": key},
+        ).fetchone()
+        if prior is not None:
+            _require_not_retired(sess, str(prior[0]))
+        row = sess.execute(
+            sa_text(
+                f"""
+                UPDATE library_entry_labels
+                   SET status = :confirmed,
+                       review_note = :review_note,
+                       decided_by = CAST(NULLIF(:actor_id, '') AS uuid),
+                       updated_at = now()
+                 WHERE id = CAST(:id AS uuid)
+                   AND status = :dismissed
+                RETURNING {_LABEL_COLUMNS_SQL}
+                """
+            ),
+            {
+                "id": key,
+                "confirmed": schema.LABEL_STATUS_CONFIRMED,
+                "dismissed": schema.LABEL_STATUS_DISMISSED,
+                "review_note": note,
+                "actor_id": _uuid_or_none(actor) or "",
+            },
+        ).fetchone()
+        if row is None:
+            return None
+        result = _label_row_to_dict(row)
+
+    if record_audit is not None:
+        record_audit(
+            entity_type=AUDIT_ENTITY_LIBRARY_ENTRY,
+            entity_id=result["entry_id"],
+            action=schema.AUDIT_ACTION_LABEL_RESTORE,
+            old_status=schema.LABEL_STATUS_DISMISSED,
+            new_status=schema.LABEL_STATUS_CONFIRMED,
             actor_id=actor,
             reason=note,
             metadata={"label_id": result["id"], "kind": result["kind"]},
@@ -535,6 +630,9 @@ def create_relation(
 ) -> dict:
     """概念どうしの関係を1件作る（既定は ``candidate``。KR2）。
 
+    戻り値の ``outcome`` は結果の種類（IK-0897）: 新しく記録した ``created`` / 既に候補・確定
+    として在った ``existing`` / 見送り済みの行があった ``dismissed``。
+
     **リンクであってマージではない**（KR3）— 2行は並存したままで、``name`` も
     ``aliases`` も書き換えない。対称な kind（``related`` / ``exact_match`` /
     ``close_match``）は ``relation_key`` で A—B と B—A を同じ行に畳む。既存行があれば
@@ -607,6 +705,12 @@ def create_relation(
         if row is None:
             raise RegistryError("failed to record the relation")
         result = _relation_row_to_dict(row)
+        if created:
+            outcome = OUTCOME_CREATED
+        elif result.get("status") == schema.CANDIDATE_STATUS_DISMISSED:
+            outcome = OUTCOME_DISMISSED
+        else:
+            outcome = OUTCOME_EXISTING
 
     if created and record_audit is not None:
         record_audit(
@@ -624,6 +728,107 @@ def create_relation(
                 "object_entry_id": result["object_entry_id"],
                 "mapping_justification": result["mapping_justification"],
             },
+        )
+    result["outcome"] = outcome
+    return result
+
+
+def add_relation_reason(
+    relation_id: str,
+    *,
+    reason: str,
+    actor_id: str | None,
+    record_audit: Callable[..., Any] | None = None,
+    session: Any = None,
+) -> dict | None:
+    """理由の無い関係に理由を足す（IK-1063 の残り・第 9 波）。
+
+    足せるのは**関係を足した本人**が、理由の欄が空の行に書くときだけ（「追加: 名前（理由: …）」の
+    帰属を偽らない）。書き換え・他人の理由の上書きはしない。足せなければ ``None``（行は不変）。
+    """
+    key = _uuid_or_none(relation_id)
+    actor = _uuid_or_none(actor_id)
+    text = _clean(reason)
+    if key is None or actor is None or not text:
+        return None
+    with _session_scope(session) as sess:
+        row = sess.execute(
+            sa_text(
+                f"""
+                UPDATE library_entry_relations
+                   SET reason = :reason, updated_at = now()
+                 WHERE id = CAST(:id AS uuid)
+                   AND COALESCE(reason, '') = ''
+                   AND created_by = CAST(:actor AS uuid)
+                RETURNING {_RELATION_COLUMNS_SQL}
+                """
+            ),
+            {"reason": text, "id": key, "actor": actor},
+        ).fetchone()
+        if row is None:
+            return None
+        result = _relation_row_to_dict(row)
+    if record_audit is not None:
+        record_audit(
+            entity_type=AUDIT_ENTITY_LIBRARY_ENTRY,
+            entity_id=result["subject_entry_id"],
+            action=schema.AUDIT_ACTION_RELATION_REASON_ADD,
+            old_status=result["status"],
+            new_status=result["status"],
+            actor_id=_clean(actor_id),
+            reason=text,
+            metadata={"relation_id": result["id"], "relation_key": result["relation_key"]},
+        )
+    return result
+
+
+def add_relation_decision_reason(
+    relation_id: str,
+    *,
+    reason: str,
+    actor_id: str | None,
+    record_audit: Callable[..., Any] | None = None,
+    session: Any = None,
+) -> dict | None:
+    """理由の書かれていない確定に、確定した本人が後から理由を書き足す（第 25 周 第 10 波）。
+
+    足せるのは ``status='confirmed'`` で ``review_note`` が空の行に、``decided_by`` 本人が書くとき
+    だけ（他人の判断に理由を足すと帰属を偽る・記録済みの理由は書き換えない）。足せなければ
+    ``None``（行は不変）。書き足した事実は監査（``relation_decision_reason_add``）に残る。
+    """
+    key = _uuid_or_none(relation_id)
+    actor = _uuid_or_none(actor_id)
+    text = _clean(reason)
+    if key is None or actor is None or not text:
+        return None
+    with _session_scope(session) as sess:
+        row = sess.execute(
+            sa_text(
+                f"""
+                UPDATE library_entry_relations
+                   SET review_note = :reason, updated_at = now()
+                 WHERE id = CAST(:id AS uuid)
+                   AND status = 'confirmed'
+                   AND COALESCE(review_note, '') = ''
+                   AND decided_by = CAST(:actor AS uuid)
+                RETURNING {_RELATION_COLUMNS_SQL}
+                """
+            ),
+            {"reason": text, "id": key, "actor": actor},
+        ).fetchone()
+        if row is None:
+            return None
+        result = _relation_row_to_dict(row)
+    if record_audit is not None:
+        record_audit(
+            entity_type=AUDIT_ENTITY_LIBRARY_ENTRY,
+            entity_id=result["subject_entry_id"],
+            action=schema.AUDIT_ACTION_RELATION_DECISION_REASON_ADD,
+            old_status=result["status"],
+            new_status=result["status"],
+            actor_id=_clean(actor_id),
+            reason=text,
+            metadata={"relation_id": result["id"], "relation_key": result["relation_key"]},
         )
     return result
 

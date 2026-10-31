@@ -119,8 +119,16 @@ class TestScriptLoading:
         """§10.4: 学習者側マーカー/ポップオーバー・出典タブのスタイル追加に合わせて
         atlas.css / styles.css の ?v= を更新する（古い CSS のままだと効かない）。"""
         html = _read(INDEX_HTML)
-        assert "/css/atlas.css?v=knowledge-landscape-20260804" in html
-        assert "/css/styles.css?v=knowledge-landscape-20260804" in html
+        # atlas.css も以降の追加（IK-0989 の層の事実文 2026-10-27）で上げる。日付が
+        # landscape の版以上であることを見る。
+        m_atlas = re.search(r'/css/atlas\.css\?v=[A-Za-z0-9_-]*?(\d{8})', html)
+        assert m_atlas and m_atlas.group(1) >= "20260804"
+        # styles.css は以降の追加（復元式の注記 2026-09-19 等）でも上げる。ここは
+        # 「landscape の版（20260804）以上の日付に更新されている」ことを見る
+        # （版文字列は固定しないが、日付が巻き戻っていないことは検査する）。
+        m = re.search(r'/css/styles\.css\?v=[A-Za-z0-9_-]*?(\d{8})"', html)
+        assert m, "styles.css の ?v= に8桁の日付が見つかりません"
+        assert m.group(1) >= "20260804"
 
     def test_landscape_layer_file_exists(self):
         assert LANDSCAPE_JS.is_file(), "frontend/public/js/landscape-layer.js がありません"
@@ -422,7 +430,7 @@ class TestCorpusHonesty:
         js = _read(APP_JS)
         block = _extract_function_body(js, "function paperPlacementCorpusFact(data) {")
         assert "source_document_count" in block
-        assert "骨格版 " in block
+        assert '"地図 版 "' in block  # IK-0942
         assert "AI推定を含む" in block
 
 

@@ -1,0 +1,37 @@
+scenario: s-sim-reference-value
+domain: astrophysics
+# 第 22 周 (i) st-10（newcomer・D3・21cm 受信機）— 代わりに st-03 でも走る。Cepheus B 論文（document 1771872a…）の
+# DCF 法のトピック t2。まとまりは内側「近似: 式 (eq:mod_dcf)」（B_0 ≈ sqrt(4π μ m_H n_H2) σ_v [⟨δB²⟩/B_0²]^(-1/2)）。
+# 砂場 DB で確かめた記載値（theory_claims_live / knowledge_equations_live）:
+#   - n_H2 = 1.06e5 cm^-3 / σ_v = 0.65 km/s（"We adopt a average value of 1.06 10^5 cm^-3 for n_H_2 and 0.65 km s^-1 for _v"）
+#   - ⟨δB²⟩/⟨B_0²⟩ = 0.47（ACF 解析の当てはめ）→ 磁場 153 ± 6 μG（"ACF ... 0.47 0.02 and an estimated B-field strength of 153 6"）
+#   - 構造関数（SF）解析の 181 ± 9 μG は修正 DCF（eq:modified_dcf, b を使う式）の値で、このまとまりの式とは別
+# 記載値の記号は io_contract.outputs に、単位は理論の出力に合わせる（cgs で G を返すなら 1.53e-4）。
+params:
+  goal_text: 磁場強度を出すまとまりを論文の入力値で動かし、論文が書いている値と並べて自分の理解のずれを見ること
+  topic_hint: DCF法による磁場強度の推定（Cepheus B の磁場トポロジーと星形成の論文）
+  topic_hint_terms:
+  - DCF法
+  - 磁場強度
+  module_hint: mod_dcf
+  input_hints:
+    n_H2: 106000.0
+    sigma_v: 0.65
+    ratio: 0.47
+  reference_hint:
+    B_0:
+      value: 153.0
+      unit: μG
+      source_note: ACF 解析の 153 ± 6 μG（論文の本文）
+  questions:
+  - 「記載値との一致」の段階の言葉は、何と何を比べた言葉ですか？
+  - 単位を μG と G で取り違えたら、この段階の言葉はどう変わりますか？
+personas:
+  st-10-d3-21cm-receiver:
+    questions:
+    - 受信機の較正で既知の信号と比べるのと同じで、「記載値との一致」は論文の値と理論の出力を比べた言葉だと読んでよいですか？
+    - 単位を μG と G で取り違えたら、この段階の言葉はどう変わりますか？
+  st-03-d1-from-particle:
+    questions:
+    - 素粒子の実験値との比較と同じように、「記載値との一致」は論文の値と理論の出力の相対差を段階にしたものですか？
+    - 単位を μG と G で取り違えたら、この段階の言葉はどう変わりますか？

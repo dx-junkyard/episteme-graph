@@ -28,6 +28,8 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core.doubt.schema import VerificationStatus
+# IK-0926: 明示的合意（支持）の人数は著者を除き取り消しを除いた数。
+from core.explanation_governance import COUNTED_ENDORSEMENT_SUMMARY_SQL
 from core.postgres import get_session
 
 logger = logging.getLogger(__name__)
@@ -248,7 +250,7 @@ def _collect_targets(
                            COALESCE(SUM(s.strong_count), 0),
                            COALESCE(SUM(s.provisional_count), 0)
                     FROM component_explanations ce
-                    JOIN component_explanation_endorsement_summary s
+                    JOIN """ + COUNTED_ENDORSEMENT_SUMMARY_SQL + """ s
                       ON s.explanation_id = ce.id
                     WHERE ce.component_id::text = ANY(:ids)
                     GROUP BY ce.component_id
@@ -295,11 +297,9 @@ def _upsert_targets(session, targets: list[dict], document_id: str, course_id: s
                 VALUES
                     (:tid, :ttype, CAST(NULLIF(:doc, '') AS uuid), :course, :status,
                      CAST(:explicit AS jsonb), :behavioral)
-                ON CONFLICT (target_id, target_type) DO UPDATE SET
-                    -- migration 080 以降 document_id は uuid（未紐づけは '' ではなく NULL）。
-                    document_id = CASE
-                        WHEN epistemic_ledger.document_id IS NULL THEN EXCLUDED.document_id
-                        ELSE epistemic_ledger.document_id END,
+                -- IK-0899（migration 092）: 行キーは (document_id, target_type, target_id)。
+                -- ノード id・式 id は論文の中でしか一意でないので、論文ごとに別の行になる。
+                ON CONFLICT ON CONSTRAINT epistemic_ledger_document_target_key DO UPDATE SET
                     course_id = CASE
                         WHEN epistemic_ledger.course_id = '' THEN EXCLUDED.course_id
                         ELSE epistemic_ledger.course_id END,

@@ -162,7 +162,8 @@ class TestEnqueueItems:
             if "INSERT INTO paper_discovery_ingest_items" in sql
         )
         assert insert["arxiv_id"] == "2608.20293"
-        assert insert["source_url"] == "https://arxiv.org/pdf/2608.20293"
+        # 2026-09-30 以降、形式の指定が無いときの既定は TeX（論文レーダー設計書 §15.9）。
+        assert insert["source_url"] == "https://arxiv.org/src/2608.20293"
         assert insert["domain_key"] == "astrophysics"
 
     def test_source_format_selects_the_stored_url(self):
@@ -178,10 +179,18 @@ class TestEnqueueItems:
         insert = next(params for sql, params in session.calls if "INSERT INTO" in sql)
         assert insert["source_url"] == "https://arxiv.org/src/2608.20293"
 
-    def test_unspecified_source_format_stays_on_pdf(self):
+    def test_unspecified_source_format_defaults_to_tex(self):
+        """既定は TeX（§15.9）。TeX が使えない論文は worker の取得時に PDF へ倒す。"""
         q = self._queue()
         session = FakeSession()
         q.enqueue_items(session, [{"arxiv_id": "2608.20293"}])
+        insert = next(params for sql, params in session.calls if "INSERT INTO" in sql)
+        assert insert["source_url"] == "https://arxiv.org/src/2608.20293"
+
+    def test_explicit_pdf_is_stored_as_pdf(self):
+        q = self._queue()
+        session = FakeSession()
+        q.enqueue_items(session, [{"arxiv_id": "2608.20293"}], source_format="pdf")
         insert = next(params for sql, params in session.calls if "INSERT INTO" in sql)
         assert insert["source_url"] == "https://arxiv.org/pdf/2608.20293"
 
@@ -198,7 +207,7 @@ class TestEnqueueItems:
         result = q.enqueue_items(FakeSession(), [{"arxiv_id": "not-an-id"}])
         assert result["queued"] == []
         assert result["skipped"] == [
-            {"arxiv_id": "not-an-id", "detail": q.SKIP_INVALID_ID}
+            {"arxiv_id": "not-an-id", "detail": q.SKIP_INVALID_ID, "reason": q.REASON_INVALID_ID}
         ]
 
     def test_skip_already_ingested(self):
@@ -207,7 +216,7 @@ class TestEnqueueItems:
         result = q.enqueue_items(session, [{"arxiv_id": "2608.20293"}])
         assert result["queued"] == []
         assert result["skipped"] == [
-            {"arxiv_id": "2608.20293", "detail": q.SKIP_ALREADY_INGESTED}
+            {"arxiv_id": "2608.20293", "detail": q.SKIP_ALREADY_INGESTED, "reason": q.REASON_ALREADY_INGESTED}
         ]
         assert not [s for s in session.sqls() if "INSERT INTO" in s]
 
@@ -216,7 +225,33 @@ class TestEnqueueItems:
         session = FakeSession(active_ids=["2608.20293"])
         result = q.enqueue_items(session, [{"arxiv_id": "2608.20293"}])
         assert result["skipped"] == [
-            {"arxiv_id": "2608.20293", "detail": q.SKIP_ALREADY_QUEUED}
+            {"arxiv_id": "2608.20293", "detail": q.SKIP_ALREADY_QUEUED, "reason": q.REASON_ALREADY_QUEUED}
+        ]
+
+    def test_visible_ingested_documents_decide_and_carry_the_existing_document(self):
+        # IK-0796: API 層が投入者の可視集合から作った対応を渡すと、それで判定し、
+        # 既存教材（解析結果への導線）を skip 行に事実として添える。
+        q = self._queue()
+        # 全 documents には他人の非公開取り込み（2608.00009）があるが、投入者には見えない。
+        session = FakeSession(source_urls=["https://arxiv.org/src/2608.00009"])
+        result = q.enqueue_items(
+            session,
+            [{"arxiv_id": "2608.20293v2"}, {"arxiv_id": "2608.00009"}],
+            ingested_documents={
+                "2608.20293": {
+                    "document_id": "doc-1", "material_id": "mat-1",
+                    "title": "Dark energy", "analysis_status": "completed",
+                }
+            },
+        )
+        assert [entry["arxiv_id"] for entry in result["queued"]] == ["2608.00009"]
+        assert result["skipped"] == [
+            {
+                "arxiv_id": "2608.20293",
+                "detail": q.SKIP_ALREADY_INGESTED,
+                "reason": q.REASON_ALREADY_INGESTED,
+                "existing": {"document_id": "doc-1", "material_id": "mat-1", "title": "Dark energy"},
+            }
         ]
 
     def test_duplicate_within_the_same_request_is_skipped_once(self):
@@ -431,11 +466,20 @@ class TestWorkerIsolation:
         assert_source_does_not_import(
             _WORKER_SRC, ["requests", "httpx", "urllib.request"], context="api/ingest_worker.py"
         )
-        assert "url_fetch.fetch_source_from_url" in _WORKER_SRC
+        # 取得は source_resolution 経由（TeX → PDF の同期フォールバック）。その中で
+        # url_fetch の唯一の公開取得関数を呼ぶ。
+        assert "source_resolution.fetch_url_source(" in _WORKER_SRC
+        resolution_src = (WORKER_SOURCE.parent / "source_resolution.py").read_text(encoding="utf-8")
+        assert "url_fetch.fetch_source_from_url(" in resolution_src
+        assert_source_does_not_import(
+            resolution_src, ["requests", "httpx", "urllib.request"],
+            context="api/source_resolution.py",
+        )
 
     def test_worker_calls_the_existing_acceptance_path(self):
         assert "_accept_material_source" in _WORKER_SRC
-        assert "source_url=source_url" in _WORKER_SRC
+        # 出所は実際にバイト列を返した URL（フォールバック時は /pdf/）。
+        assert "source_url=resolved.source_url" in _WORKER_SRC
 
     def test_no_delete_from_in_queue_or_worker(self):
         assert_source_forbids(_QUEUE_SRC, ["DELETE FROM"], context="ingest_queue.py")
@@ -533,10 +577,15 @@ def worker_env(monkeypatch):
         return session
 
     monkeypatch.setattr(ingest_worker, "get_session", _session)
-    monkeypatch.setattr(
-        ingest_worker, "_claim_next",
-        lambda: state["claims"].pop(0) if state["claims"] else None,
-    )
+    # 429 の backoff はモジュール状態 — テスト間で持ち越さない。
+    monkeypatch.setattr(ingest_worker, "_backoff_until", None)
+    state["claim_calls"] = 0
+
+    def _claim():
+        state["claim_calls"] += 1
+        return state["claims"].pop(0) if state["claims"] else None
+
+    monkeypatch.setattr(ingest_worker, "_claim_next", _claim)
     monkeypatch.setattr(
         ingest_worker, "_allowed_domains",
         lambda: list(state["domains"][0]),
@@ -546,6 +595,9 @@ def worker_env(monkeypatch):
         state["finished"].append((item_id, accepted, detail))
 
     monkeypatch.setattr(ingest_worker, "_finish", _finish)
+    # 取得直前の「取り込み済み」判定（IK-0796）。既定は該当なし。
+    state["existing"] = None
+    monkeypatch.setattr(ingest_worker, "_already_ingested", lambda item: state["existing"])
 
     def _fetch(url, allowed):
         state["fetches"].append((url, list(allowed)))
@@ -585,6 +637,17 @@ def _item(**overrides):
 
 
 class TestProcessItem:
+    def test_already_ingested_item_is_not_fetched(self, worker_env):
+        # IK-0796: キューに積まれた後に同じ論文が入っていたら、arXiv も受理も呼ばない。
+        worker_env["existing"] = {"document_id": "doc-1", "material_id": "mat-1", "title": "Dark energy"}
+        assert worker_env["module"].process_item(_item()) is False
+        assert worker_env["fetches"] == []
+        assert worker_env["accepted"] == []
+        item_id, accepted, detail = worker_env["finished"][0]
+        assert item_id == "i-1" and accepted is None
+        assert detail.startswith(worker_env["module"].ingest_queue.SKIP_ALREADY_INGESTED)
+        assert "Dark energy" in detail
+
     def test_success_marks_accepted_with_ids(self, worker_env):
         assert worker_env["module"].process_item(_item()) is True
         item_id, accepted, detail = worker_env["finished"][0]
@@ -658,6 +721,39 @@ class TestProcessItem:
         assert worker_env["accepted"][0]["filename"] == "2608.20293.pdf"
 
 
+class TestAlreadyIngestedCheck:
+    """取得直前の判定は投入者の可視集合で行う（IK-0796・IK-0701）。"""
+
+    def test_uses_the_requesters_visible_documents(self, monkeypatch):
+        import ingest_worker
+
+        seen: dict = {}
+        monkeypatch.setattr(ingest_worker, "get_session", lambda: FakeSession())
+        monkeypatch.setattr(
+            ingest_worker.services, "list_visible_document_ids",
+            lambda user_id: seen.setdefault("user", user_id) and {"doc-1"},
+        )
+
+        def _visible(session, *, visible_document_ids):
+            seen["visible"] = set(visible_document_ids)
+            return {"2608.20293": {"document_id": "doc-1", "material_id": "mat-1", "title": "T"}}
+
+        monkeypatch.setattr(ingest_worker.ingest_queue, "visible_ingested_documents", _visible)
+        found = ingest_worker._already_ingested(_item(arxiv_id="2608.20293v3"))
+        assert found["document_id"] == "doc-1"
+        assert seen["user"] == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        assert seen["visible"] == {"doc-1"}
+
+    def test_check_failure_falls_back_to_fetching(self, monkeypatch):
+        import ingest_worker
+
+        def _boom():
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(ingest_worker, "get_session", _boom)
+        assert ingest_worker._already_ingested(_item()) is None
+
+
 class TestDrainLoop:
     def test_processes_every_queued_item(self, worker_env):
         mod = worker_env["module"]
@@ -688,6 +784,77 @@ class TestDrainLoop:
         worker_env["accept_error"] = RuntimeError("boom")
         assert mod.drain_once(sleep=worker_env["sleeps"].append) == 2
         assert all(entry[1] is None for entry in worker_env["finished"])
+
+
+class TestRateLimitBackoff:
+    """429 を受けたら周を止め、クールダウンの間は取り出さない（2026-10-01 レビュー M6）。"""
+
+    def _clock(self, start=1000.0):
+        now = {"t": start}
+        return now, (lambda: now["t"])
+
+    def test_default_backoff_matches_the_search_client_default(self):
+        import ingest_worker
+        from core.paper_discovery import arxiv_client
+
+        assert ingest_worker.DEFAULT_RATE_LIMIT_BACKOFF_SECONDS == (
+            arxiv_client.DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
+        )
+
+    def test_429_stops_the_pass_and_records_backoff(self, worker_env, monkeypatch):
+        mod = worker_env["module"]
+        monkeypatch.setattr(mod, "_rate_limit_backoff_seconds", lambda: 600.0)
+        now, clock = self._clock()
+        worker_env["claims"] = [_item(item_id=f"i-{i}") for i in range(4)]
+        worker_env["fetch_error"] = mod.url_fetch.RateLimitedError("制限")
+
+        processed = mod.drain_once(sleep=worker_env["sleeps"].append, clock=clock)
+
+        assert processed == 1
+        assert worker_env["claim_calls"] == 1
+        assert len(worker_env["fetches"]) == 1  # 429 では PDF にも倒さない
+        assert len(worker_env["claims"]) == 3  # 残りは queued のまま（claim していない）
+        assert worker_env["finished"][0][0] == "i-0"
+        assert worker_env["finished"][0][1] is None
+        assert mod._backoff_until == pytest.approx(1600.0)
+
+    def test_next_pass_honours_the_backoff_then_resumes(self, worker_env, monkeypatch):
+        mod = worker_env["module"]
+        monkeypatch.setattr(mod, "_rate_limit_backoff_seconds", lambda: 600.0)
+        now, clock = self._clock()
+        worker_env["claims"] = [_item(item_id="i-0"), _item(item_id="i-1")]
+        worker_env["fetch_error"] = mod.url_fetch.RateLimitedError("制限")
+        mod.drain_once(sleep=worker_env["sleeps"].append, clock=clock)
+        calls_after_first = worker_env["claim_calls"]
+
+        now["t"] = 1599.0
+        assert mod.drain_once(sleep=worker_env["sleeps"].append, clock=clock) == 0
+        assert worker_env["claim_calls"] == calls_after_first
+        assert len(worker_env["fetches"]) == 1
+
+        now["t"] = 1600.0
+        worker_env["fetch_error"] = None
+        assert mod.drain_once(sleep=worker_env["sleeps"].append, clock=clock) == 1
+        assert mod._backoff_until is None
+        assert worker_env["finished"][-1][0] == "i-1"
+
+    def test_zero_cooldown_disables_the_backoff(self, worker_env, monkeypatch):
+        mod = worker_env["module"]
+        monkeypatch.setattr(mod, "_rate_limit_backoff_seconds", lambda: 0.0)
+        worker_env["claims"] = [_item(item_id="i-0")]
+        worker_env["fetch_error"] = mod.url_fetch.RateLimitedError("制限")
+        mod.drain_once(sleep=worker_env["sleeps"].append)
+        assert mod._backoff_until is None
+
+    def test_backoff_seconds_read_the_shared_setting(self, monkeypatch):
+        import ingest_worker
+        from core import config
+
+        class _S:
+            arxiv_rate_limit_cooldown_seconds = 42
+
+        monkeypatch.setattr(config, "get_settings", lambda: _S())
+        assert ingest_worker._rate_limit_backoff_seconds() == 42.0
 
 
 # ===========================================================================
@@ -751,3 +918,71 @@ class TestStartupWiring:
         block = src.split("start_background_worker()", 1)[1][:400]
         assert "except Exception" in block
         assert "logger.warning" in block
+
+
+# ===========================================================================
+# 解析の分野（cartridge_id）— migration 090・2026-10-16
+# （condition-not-propagated の是正: キュー行が分野を運び、worker が受理へ渡す）
+# ===========================================================================
+
+
+class TestCartridgeIdThroughTheQueue:
+    def test_migration_090_adds_the_column(self):
+        sql = _SQL_LINE_COMMENT_RE.sub("", read_migration_sql(BACKEND, 90))
+        assert "ALTER TABLE paper_discovery_ingest_items" in sql
+        assert "ADD COLUMN IF NOT EXISTS cartridge_id TEXT" in sql
+        assert "DELETE" not in sql.upper()
+
+    def test_enqueue_stores_the_domain(self):
+        from core.paper_discovery import ingest_queue
+
+        session = FakeSession()
+        ingest_queue.enqueue_items(
+            session, [{"arxiv_id": "2608.20293"}], cartridge_id="astrophysics"
+        )
+        insert = next(params for sql, params in session.calls if "INSERT INTO" in sql)
+        assert insert["cartridge_id"] == "astrophysics"
+        sql = next(sql for sql, _p in session.calls if "INSERT INTO" in sql)
+        assert "cartridge_id" in sql
+
+    def test_enqueue_keeps_null_and_empty_distinct(self):
+        from core.paper_discovery import ingest_queue
+
+        session = FakeSession()
+        ingest_queue.enqueue_items(session, [{"arxiv_id": "2608.20293"}])
+        ingest_queue.enqueue_items(session, [{"arxiv_id": "2608.20294"}], cartridge_id="")
+        inserts = [params for sql, params in session.calls if "INSERT INTO" in sql]
+        assert inserts[0]["cartridge_id"] is None
+        assert inserts[1]["cartridge_id"] == ""
+
+    def test_claimed_row_carries_the_domain(self):
+        from core.paper_discovery import ingest_queue
+
+        session = FakeSession(
+            rows_by_fragment={
+                "UPDATE paper_discovery_ingest_items": [ITEM_ROW + ("astrophysics",)]
+            }
+        )
+        item = ingest_queue.claim_next(session)
+        assert item["cartridge_id"] == "astrophysics"
+        assert "cartridge_id" in extract_function_source(_QUEUE_SRC, "_row_to_item")
+
+    def test_legacy_row_without_the_column_is_none(self):
+        from core.paper_discovery import ingest_queue
+
+        session = FakeSession(
+            rows_by_fragment={"UPDATE paper_discovery_ingest_items": [ITEM_ROW + (None,)]}
+        )
+        assert ingest_queue.claim_next(session)["cartridge_id"] is None
+
+    def test_worker_passes_the_domain_to_acceptance(self, worker_env):
+        worker_env["module"].process_item(_item(cartridge_id="astrophysics"))
+        assert worker_env["accepted"][0]["cartridge_id"] == "astrophysics"
+
+    def test_worker_passes_none_when_unspecified(self, worker_env):
+        worker_env["module"].process_item(_item())
+        assert worker_env["accepted"][0]["cartridge_id"] is None
+
+    def test_worker_passes_explicit_none_choice(self, worker_env):
+        worker_env["module"].process_item(_item(cartridge_id=""))
+        assert worker_env["accepted"][0]["cartridge_id"] == ""

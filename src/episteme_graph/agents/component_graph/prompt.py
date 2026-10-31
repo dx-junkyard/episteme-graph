@@ -28,7 +28,12 @@ Edge inference rules:
 Inference strategy (in priority order):
 1. Check explicit `dependencies` in Material 1 — these yield declared edges.
 2. Check if Component A's `outputs` match Component B's `inputs` or `preconditions` — yields PRODUCES_FOR / ENABLES.
-3. Use cross-component DSL edges in Material 2 — core_predicate maps to edge_type.
+3. Use cross-component DSL edges in Material 2 — use each entry's suggested_edge_type with
+   suggested_source_component_id → suggested_target_component_id (the mapping from core_predicate
+   is fixed: an INHIBITS predicate means a correction or suppression, so it is offered as QUALIFIES,
+   not as a contradiction). Entries with mapping_note "no_specific_edge_type" are offered as
+   RELATED_TO; replace it only when another source (dependencies, I/O, derivation) supports a
+   more specific edge_type.
 4. Use derivation chains in Material 3 — sequence of linked_component_ids yields DERIVES_FROM / TRANSFORMS.
 5. Use evidence texts in Material 4 to select appropriate evidence_claims.
 
@@ -68,6 +73,58 @@ _OUTPUT_SCHEMA = {
 }
 
 
+#: Character budget for the previous output quoted in a repair prompt. The
+#: output is never cut mid-string (IK-0763): edges are thinned from the end and
+#: the remainder is re-serialized, so the quoted text is always valid JSON.
+PREVIOUS_OUTPUT_MAX_CHARS = 3000
+
+
+def previous_output_excerpt(
+    previous_output: dict, max_chars: int = PREVIOUS_OUTPUT_MAX_CHARS
+) -> tuple[str, str]:
+    """Return ``(json_text, note)`` for the repair prompt (IK-0763).
+
+    ``json_text`` is always parseable JSON. When the full output does not fit,
+    the ``edges`` array is reduced to its first N entries and ``note`` names
+    the range shown so the model knows the rest still exists.
+    """
+    full = json.dumps(previous_output, ensure_ascii=False)
+    if len(full) <= max_chars:
+        return full, ""
+    edges = previous_output.get("edges") if isinstance(previous_output, dict) else None
+    if not isinstance(edges, list):
+        # Not the expected shape: show only the top-level keys rather than a
+        # broken fragment.
+        keys = list(previous_output.keys()) if isinstance(previous_output, dict) else []
+        return json.dumps({"keys": keys}, ensure_ascii=False), (
+            "(The previous output was too long to quote; only its keys are shown.)"
+        )
+    rest = {k: v for k, v in previous_output.items() if k != "edges"}
+    keep = len(edges)
+    text = full
+    while keep > 0:
+        keep -= 1
+        text = json.dumps({**rest, "edges": edges[:keep]}, ensure_ascii=False)
+        if len(text) <= max_chars:
+            break
+    if keep == 0:
+        text = json.dumps({**rest, "edges": []}, ensure_ascii=False)
+        note = (
+            "(None of the previous edges fit in this excerpt; return the complete "
+            "corrected edge list.)"
+        )
+    else:
+        last = edges[keep - 1]
+        first_id = edges[0].get("edge_id", "") if isinstance(edges[0], dict) else ""
+        last_id = last.get("edge_id", "") if isinstance(last, dict) else ""
+        note = (
+            f"(Only the leading edges {first_id} .. {last_id} of the previous output "
+            "are quoted; the later edges are omitted here. Return the complete "
+            "corrected edge list, not just the quoted part.)"
+        )
+    return text, note
+
+
 class ComponentGraphPromptFactory:
     def build_messages(self, llm_input: ComponentGraphLLMInput) -> list[dict]:
         user_content = self._build_user_content(llm_input)
@@ -84,10 +141,13 @@ class ComponentGraphPromptFactory:
         issue_lines = "\n".join(
             f"- [{i.severity}] {i.rule_id}: {i.message}" for i in issues
         )
+        previous_text, previous_note = previous_output_excerpt(previous_output)
         repair_note = (
             f"Your previous output had validation errors:\n{issue_lines}\n\n"
             "Please fix these issues and return corrected JSON.\n\n"
-            f"Previous output:\n{json.dumps(previous_output, ensure_ascii=False)[:3000]}\n\n"
+            f"Previous output:\n{previous_text}\n"
+            + (f"{previous_note}\n" if previous_note else "")
+            + "\n"
         )
         user_content = repair_note + self._build_user_content(llm_input)
         return [

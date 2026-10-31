@@ -640,3 +640,210 @@ index.html を **200 で**返し、フロントの `res.ok` 判定をすり抜�
 `routes/atlas_vectors.py`（vectors status / refresh・aliases）と
 `routes/atlas_edges.py`（edge-candidates 系）が加わっている。本数を数え直す場合は
 `backend/api/routes/atlas*.py` の実定義を一次情報とすること。
+
+## 14. 追補（2026-09-28 ペルソナ通し受講 第 8 周・IK-0412）
+
+- `GET /api/atlas` の `ledger_status` は検証行と食い違わない値にする
+  （`atlas_state.learner_ledger_status`）。骨格 seed 由来（`status_source='seed'`）・
+  コーパス由来の状態なし（`unknown`）・引用 0 本の `verified` は **`unrecorded`**
+  （語の正本 `label_vocab.ATLAS_LEDGER_STATUS_UNRECORDED`）。表示状態 `status` とノードの色は
+  フロント互換のため不変。seed の「原文に裏付け」ピルは「骨格の初期表示（台帳に記帳なし）」。
+- ノードに `pill_note`（ピルの意味の1行。正本 `label_vocab.ATLAS_PILL_NOTES`、nodes_list は
+  `panel.pill_note`）。**フロント（`atlas-panel.js` / `atlas-overlay.js`）はまだ描いていない**。
+- パンくずは分野の表示名（`atlas_domain_meta.name` → 同梱 `domain.json`）。無ければ
+  「名前が登録されていない分野」。トップレベルに `domain_name` を追加（`cartridge` は取得キー
+  として互換のまま）。
+
+## 15. 追補（2026-10-23 第 25 周 第 3 波・IK-0940 / IK-0941 / IK-0942・migration なし）
+
+- **霧の定義の是正（IK-0940）**: L1 の霧（`kind="fog"`）は「論文の配置も解析成果もない領域」。
+  `atlas_state.load_corpus_snapshot` が `landscape_placements` の生きている配置（`status ∈
+  landscape_schema.LEARNER_VISIBLE_STATUSES` = confirmed / inferred / review_required。旧版の node_id は
+  `atlas_correspondence.build_node_resolver` で現行版へ読み替え）を `CorpusSnapshot.placed_node_ids` に読み、
+  `compute_overlay_rows` が領域そのもの・その概念のどれかに配置があれば灯す。論文の海（`corpus_view` /
+  `corpus-sea.js` の `densityIndex` — IK-0847）と同じ状態集合で、霧の判定の正本はこの 1 箇所。
+  - 配置は**真偽だけ**を使い、記帳の件数（`evidence.coverage`）には足さない（CR3）。配置だけで灯った領域の
+    検証行は `atlas_state.REGION_PLACED_ONLY_VERIFY_LINE`「この領域には論文が置かれています（論文の位置）。
+    検証の記録（台帳）はまだありません。」。
+  - キャッシュの陳腐化検知（`_SIGNATURE_SQL`）に `landscape_placements.updated_at` の最大値を足した。
+  - CR2（コース学習の非改変）は霧の**定義の是正**であって学習経路の変更ではない、として抵触しないと判断した
+    （指揮者の判断・推奨どおり）。霧の固定文 `FOG_VERIFY_LINE` / ピル注記は意味どおりになった。
+  - 残課題: L1 のキャッシュはドメイン単位のため、配置の有無は**全利用者の配置**で決まる（海は本人が閲覧できる
+    論文だけで決める）。L1 が言うのは「灯り／霧」の真偽だけで題名・件数は出さないので開示の差は小さいが、
+    閲覧できない論文だけが置かれた領域では L1 が灯り、海は霧になりうる。利用者別の判定にするかは実例を待つ。
+- **状態を名前に焼かない（IK-0941）**: 霧の領域を詳細パネル用の `nodes[region_id]` に載せるときの `label` は
+  領域名のまま（旧「〇〇（霧の領域）」）。霧であることは `pill`（「論文未投入」）が言う。論文の海の
+  `anchorLabel` は領域アンカーなら `regionById` の名前を最初に引く。
+- **版の呼び名（IK-0942）**: 教員・学習者とも「地図 版 X」の 1 形式。正本 `label_vocab.ATLAS_VERSION_PREFIX` /
+  `atlas_version_label()`、JS は逐語ミラー（admin.js `atlasVersionText` / landscape-layer.js /
+  atlas-threads-layer.js / app.js / admin-release-review.js。一致は `test_atlas_review_round25_r3.py`）。
+  分野の地図タブの状態行から「学習者に公開中: 版 X」を外した（要約カードが言う）。論文ディスカバリー・
+  レーダーの「骨格 版」は面 C の外として残した（残課題）。
+
+## 16. 追補（2026-10-25 第 25 周 第 4 波・IK-0964 / IK-0942 残り・migration なし）
+
+- 札と説明の軸を揃える: 札が個人の状態（「未訪問」「いまここ」）のとき、ピルの説明（`pill_note`）も訪問の軸で言い
+  （`label_vocab.ATLAS_PILL_NOTES["unvisited" | "now"]`）、台帳の状態は検証行だけが言う。札が台帳の状態なら従来どおり台帳の状態で引く。
+- 学習者に「骨格」を出さない: オーバーレイのフッターは `ATLAS_VERSION_PREFIX`（「地図 版 」）の逐語ミラー、seed 由来の検証行は
+  「検証: 台帳に記帳なし。分野の地図（教員レビュー済）の初期表示。」。
+
+## 17. 追補（2026-10-27 第 25 周 第 5 波・IK-0989〜0995 / IK-0942・0964・0967 の残り・migration なし）
+
+凍結が初めて成立した第 5 周で見えた「版が上がった後の派生面の追随」と「確定の前後の対称性」の是正。
+地形は人間・関係は離散の辺（`field_map_display_principles_2026-08-29.md`）は変えない — 描く範囲と、描かなかった事実の言い方だけを変える。
+
+- **IK-0989 L2 の代表選出をサーバへ**: `routes/atlas_view.py::select_l2_concept_ids` が骨格概念を
+  ①焦点・いまここ・コースのトピックに対応する概念（`topics[].atlas_node_id`）・足跡 → ②それらの 1 hop（骨格の関係）→
+  ③骨格の並び順 で上限 `_MAX_L2_NODES`（§13 の 20）まで選ぶ（決定論）。描かなかった概念があれば
+  `levels["2"].omitted_note`（正本 `label_vocab.ATLAS_L2_OMITTED_NOTE`・件数なし）、実線は描いた概念どうしの間だけ送る。
+  推定の糸の端点が描かれていなければ `threads.undrawn_note`（`ATLAS_THREADS_UNDRAWN_NOTE`）。フロントは
+  `#atlas-level-note` / `.threads-undrawn` に素通し（`LIMITS.l2Nodes` は安全弁として残す）。
+- **IK-0964 残り**: 札「未訪問」の説明は「まだこの場所から学んでいません（地図で選ぶだけでは数えず…）」— 訪問は
+  `interest_traces` の atlas 痕跡で数えることを言う。
+- 他面の是正（索引の構築中・公開中の版の読み返し・作成方法・辺の結果文・置けなかった主題の所在・縁の解消・配置の理由）は
+  各設計書の第 5 波の節（`atlas_vector_anchoring_design.md` §13.3 / `atlas_relation_edges_design.md` §11.z4 /
+  `category_gap_candidates_design.md` §10-9 / `corpus_roaming_design.md` §14.3 / `knowledge_landscape_design.md` §15.y）。
+- ガードレール: `backend/tests/test_atlas_review_round25_r5.py`。
+
+### 17.1 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い（採る部品・見送る派生形） |
+|---|---|---|
+| 描画上限で母集合を切る | `information-dropped-as-unrepresentable` | 切る判断をサーバの 1 箇所に寄せ、描かなかった事実を事実文で返す（件数なし）。上限を撤廃して全 50 概念を描く派生形は §13 の目安と可読性から見送る |
+| 縁と候補キューが同じ信号から別々に導出 | `rule-enforced-per-surface` / `duplicate-canonical-sources` | 解消済みの判定を `atlas_gaps.store.resolved_label_set` 1 つに寄せ、縁はそれを呼ぶだけ（新しい判定を書かない）。教員の判断（decisions）は縁で読まない（§5.6） |
+| 凍結の後処理（索引）が非同期 | `stale-derivative-served` | 構築中の印（プロセス内・失敗しても必ず外す）で状態表示と関係の候補が「進行中」を名乗る。凍結の応答の形は変えない（VA4） |
+| 版ごとの来歴欄 | `same-name-different-referents` | 次版の下書きの `generated_by` を `revision_of:{前の版}` にし、系列の起点は履歴行に任せる |
+| 確定の後に結果を読み返す面・否定の判断の結果 | `last-mile-missing` / `negative-decision-second-class` | 公開中の版を既存のプレビュー部品で読み取り専用に・判断の結果文を組の名前で |
+
+当たらない族: 再実行と削除（行を消さない・書き込み経路を増やさない）/ 順序と予算（外部 API・LLM 呼び出しを増やさない）。
+
+## 18. 追補（2026-10-27 第 25 周 第 6 波・IK-1017 / IK-1018 / IK-1019 / IK-0992 の残り・migration なし）
+
+第 6 周で凍結 2026.3 が成立し、確定した関係が学生の L2 に届くかを観察した。第 5 波は「黙って切る」を直したが「何を選ぶか」が残った。
+
+- **IK-1017 L2 の手がかりにコースの論文の配置と凍結で加わった関係を足す**: `select_l2_concept_ids(..., course_hints=)` の順は
+  ①焦点・いまここ・トピックの対応（`topics[].atlas_node_id`）・足跡 → ②コースの論文が置かれている概念
+  （`course_placement_concept_ids`: コース sources の `landscape_placements` のうち学習者に見せてよい状態 = 学習者の
+  「論文の位置」レイヤーと同じ母集合・confirmed 優先・旧版の node_id は `atlas_correspondence.build_node_resolver` で読み替える
+  だけ = NC5）→ 凍結で加わった関係の両端（`added_relation_pairs`: `atlas_store.load_frozen_history` の末尾 2 版の無向差）→
+  ③それらの 1 hop → ④骨格の並び順。読みは `_l2_course_hints` に寄せ、失敗は空（従来動作へ縮退・fail-soft）。
+  事実文は `label_vocab.atlas_l2_omitted_note(hints)` が**描いた概念に実際に効いた手がかり**の語
+  （`ATLAS_L2_HINT_LEARNING` / `_PLACEMENTS` / `_ADDED_RELATIONS`）を並べて言い、手がかりが無いときは
+  「このコースには地図の上の手がかりがまだ無いため、地図の並び順で先頭の項目を描いています」と言う（優先が働いたように言わない）。
+  学習の手がかりだけのときは第 5 波の `ATLAS_L2_OMITTED_NOTE` と同文。数値・件数は言わない。
+- **IK-1018 承認の行は承認だけを言う**: 「暗黙の前提」で承認の記録が無いときの行は
+  `label_vocab.ATLAS_ENDORSE_NONE_ASSUMED_LINE`「承認: このコーパスの中では、教員の承認の記録がありません」（SL1 の閉世界）。
+  状態キャッシュに残る旧文は `atlas_state.learner_endorse_line` が読み時に置き換える（キャッシュを書き換えない）。
+  学習者のパネルの文に出さない内部の欄名は `ATLAS_LEARNER_PANEL_DENYLIST`。
+- **IK-1019 ［止めている候補を見る］はカードへ**: `readiness.pending_items[]` に表示しない番地 `target_key`
+  （関係 = `edge_key` / 論文由来の候補 = `cluster_key`）を足し、`admin.js::scrollToFreezeBlocker` が先頭の理由のカード
+  （`[data-edge-key]` / `[data-cluster-key]`）へ着地して枠を一時強調する。カードが無ければその種類のグループ、それも無ければ区画。
+- **IK-0992 の残り**: 下書きがある間も `#atlas-published-view` を出す。見出しは
+  「公開中の版（地図 版 X）を見る（読み取り専用 — 下で編集している次版の下書きとは別です）」で閉じた状態。
+- ガードレール: `backend/tests/test_atlas_review_round25_r6.py`。
+
+### 18.1 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い（採る部品・見送る派生形） |
+|---|---|---|
+| 優先順位の関数に手元の手がかりを足す | `available-but-unwired` | 学習者の「論文の位置」と同じ母集合（`LEARNER_VISIBLE_STATUSES`・コース sources）を同じ store 関数で読む。L2 専用の新しい配置判定を書かない |
+| 手がかりの有無で文を変える | `wording-mismatch` / `rule-enforced-per-surface` | 文は `label_vocab` 1 箇所の関数で組み、route は「実際に描いた概念に効いた」手がかりだけを渡す（入力したが効かなかった手がかりを言わない） |
+| 版をまたぐ node_id | `same-name-different-referents` | 旧版の配置は読み替えるだけ（`landscape_placements` を書き換えない）。読み替えできない旧ノードは手がかりにしない |
+| 学習者向け固定文が内部の欄名を持つ | `wording-mismatch` | 文の正本を `label_vocab` に移し、キャッシュの旧文は読み時に置き換える（キャッシュの再計算を待たない） |
+| 確認画面の「そこへ行く」 | `last-mile-missing` | 番地は表示しない `target_key` だけをサーバが添え、着地先の解決はフロントの既存カード属性で行う |
+
+当たらない族: 再実行と削除（行を消さない・`atlas_skeletons` への書き込み経路を増やさない）/ 順序と予算（外部 API・LLM・
+embedding 呼び出しを増やさない）。
+
+## 19. 追補（2026-10-28 第 25 周 第 7 波・IK-1044〜1047 + IK-0942 / IK-1018 / IK-0664 の残り・migration なし）
+
+第 7 周で凍結 2026.4（関係だけの版上げ）が成立し、学生の L2 に「確定済みの関係」が残るかを観察した。
+
+- **IK-1045 L2 の手がかりは改訂で加わった全部の関係**: `added_relation_pairs` は末尾 2 版の差ではなく、
+  `load_frozen_history` の全版を遡り、現行凍結版の各関係が**最後に加わった版**を決めて「直近の改訂 → 古い改訂」の順に並べる
+  （系列の最初の版から在る関係は含めない・同じ版の中は現行版の並び順）。直近の差だけだと、版上げ 1 回で前の改訂で確定した
+  関係が手がかりから外れていた。手がかりの語 `ATLAS_L2_HINT_ADDED_RELATIONS` は「地図の版の改訂で加わった関係」（選出と一致）。
+- **IK-1018 残り 学習者の地図の文に「台帳」「記帳」を出さない**: 正本の文（`atlas_state` の検証行・`label_vocab.ATLAS_PILL_*` /
+  `ATLAS_PILL_NOTES` — 教員側・ガードレールが読む）は変えず、学習者ルート `routes/atlas_view.py` が `_apply_learner_wording` で
+  `pill` / `pill_note` / `verify` / `endorse`（`/node` は `verify_line` / `endorse_line`）にだけ
+  `label_vocab.learner_atlas_wording`（置換表 `ATLAS_LEARNER_WORDING`・長い句から順・決定論）を掛ける。名前（label）は触らない。
+  `atlas-panel.js` の既定文は「検証の記録がありません。」、`atlas-overlay.js` の案内は「記録された根拠」。
+- **IK-0942 残り 論文の海も「地図 版 X」**: `corpus_view.build_corpus_landscape` が `skeleton_version_label`
+  （`label_vocab.atlas_version_label`・空なら空文字）を返し、`corpus-sea.js::versionLineHtml` が凡例の下に素通しで描く。
+- **IK-0664 論文の呼び方は題名を正本・無ければ arXiv 番号**: `core/document_refs.choose_paper_titles`（純関数）/
+  `resolve_paper_titles`（SQL）が ①その取り込みの読める題名 → ②閲覧できる同じ論文の別の取り込みの読める題名 → ③arXiv メタデータの写し
+  （`paper_discovery_arxiv_metadata_cache` の読みだけ・外部 API は呼ばない）→ ④保存値（番号）の順で決める。学習者の「論文の位置」
+  （`learner_landscape_for_documents(..., viewer_id=)`・兄弟の母集合は `list_visible_document_ids`）と「登録済み教材」
+  （`resolve_course_source_titles` は写しだけ・`_with_resolved_source_titles` は arXiv 番号の写しを仮の値と見なす。教員の読める題名は
+  上書きしない）が同じ規則を通る。画面文脈アダプターの経路（viewer なし）は写しまで。
+- IK-1044 / IK-1046 / IK-1047 は `atlas_relation_edges_design.md` §11.z5 と `knowledge_landscape_design.md`（配置の理由の注記）。
+- ガードレール: `backend/tests/test_atlas_review_round25_r7.py`。
+
+### 19.1 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い（採る部品・見送る派生形） |
+|---|---|---|
+| 「確定済み」を「最近変わった」で代えていた | `stale-derivative-served` | 全版の差から「最後に加わった版」を導出し直す（関係を保存しない・読み時導出のまま） |
+| 学習者向けの語の置換 | `wording-mismatch` / `rule-enforced-per-surface` | 置換表は `label_vocab` 1 箇所、route は 1 つの関数で文のキーにだけ掛ける。正本の文・キャッシュは書き換えない |
+| 呼び方の判定が面ごとに別 | `rule-enforced-per-surface` | 読める題名の判定は `document_refs.title_is_readable`（論文の海の代表選出と同じ `title_is_arxiv_number`）に寄せる |
+| 他の取り込みから題名を借りる | `scope-widened-silently` | 兄弟は閲覧できる document だけ（呼び出し側の `list_visible_document_ids`）。viewer が無い経路は兄弟を引かない |
+
+当たらない族: 再実行と削除（行を消さない・`atlas_skeletons` への書き込み経路なし）/ 順序と予算（外部 API・LLM・embedding を増やさない）。
+
+## 20. 追補（2026-10-28 第 25 周 第 8 波・IK-1045 / IK-1055 / IK-1056 + IK-1046・IK-1044 の残り・migration なし）
+
+第 8 周（固定コース = 8 トピックの binding あり）で、トピックの対応と配置だけで L2 の上限が埋まり、改訂で加わった関係の両端が
+列の最後で押し出された（IK-1045 STILL）。
+
+- **IK-1045 確定済みの関係に枠を先に配る**: `select_l2_concept_ids` に `leading`（焦点・いまここ）/ `relation_pairs`（改訂で加わった
+  関係。直近 → 古い順）/ `relation_reserve`（`_MAX_L2_NODES // 2`）を足し、順を ⓪leading → ⓪'関係（**組ごとに両端そろえて**・枠内）→
+  ①トピックの対応・足跡 → ②配置 → ②'枠に入らなかった関係（組ごと）→ ③1 hop → ④骨格順 にした。片端だけを入れない（原則①′
+  「関係は離散の辺」— 線の無い点を増やさない）。それでも描けなかった確定済みの関係は `omitted_note` の末尾に
+  `label_vocab.atlas_l2_undrawn_relations_line` で**名前で言う**（「A — B」・件数なし・挙げきれなければ「ほか」）。
+- **IK-1055 手がかりの語を入力で分ける**: `ATLAS_L2_HINT_LEARNING`「いま学んでいる場所」は学習者本人の状態（焦点・いまここ・足跡）が
+  描いた項目に効いたときだけ。コースのトピックの `atlas_node_id` は `ATLAS_L2_HINT_COURSE_TOPICS`「このコースのトピックが結ばれている場所」。
+- **IK-1056 承認の記録なしは 1 つの文**: `atlas_state.endorse_line_for` の記録なしの枝は状態に依らず `label_vocab.ATLAS_ENDORSE_NONE_LINE`
+  （閉世界「このコーパスの中では、教員の承認の記録がありません」）。状態キャッシュに残る旧い「承認: 承認記録なし」は
+  `learner_endorse_line` が読み時に置き換える。
+- **IK-1046 残り 切り詰めた略**: `core/landscape/schema.truncation_matched_in`（大文字始まり・英字のみ・3 文字以上で、短い方が長い方の
+  先頭と一致 — Cep ⇔ Cepheus）を `reason_beyond_quote_note` の除外に足した（A層の照合の正本は不変・表示の段で絞る）。
+- **IK-1044 残り（管理）**: 見送った判断のメモは見出し「見送りの理由」（採用のメモは「判断のメモ」のまま）。下書きの無いときの未採用カードは
+  `EDGE_NOT_ACCEPTED_NO_DRAFT_TEXT`「[採用] を押し、この区画の先頭の［現在の版から次版の下書きを作る］で下書きを作ると反映できます。」。
+
+pre-mortem: 当たる型は `extent-decided-by-proxy-signal`（確定済みを「優先の列の後ろ」で代えていた）・`wording-mismatch`・
+`rule-enforced-per-surface`・`substring-match-false-positive`。当たらない族: 再実行と削除 / 順序と予算（外部 API・LLM・embedding を増やさない）。
+
+## 21. 追補（2026-10-31 第 25 周 第 10 波・IK-1118 / IK-1119 + H54・te-01 の軽 2 件・migration なし）
+
+第 10 周（凍結 2026.7・確定済みの関係 7 本・うち有向 4 本）で、描けなかった有向の 1 本と教員の反映の知らせから向きが落ち（IK-1118）、
+学生は「改訂で加わった関係」を直近の版の差と読んだ（IK-1119）。
+
+- **IK-1118 関係を名前で言う全ての出口を句に通す（同じ型の 4 回目）**: 面を足していく直し方をやめ、出口を列挙した。L2 の
+  「ここには描いていないもの」（`l2_undrawn_relations` を (kind, from_label, to_label) に・`atlas_l2_undrawn_relations_line` が
+  `edge_relation_phrase`）/ 反映の知らせ（`atlas_review_display.incorporated_edge_result_line` — 下書きに保存された辺の種別と記載順）/
+  採用の結果文（`edge_decide_result_line(..., kind)`）/ 凍結を止めている採用の一覧（`routes/atlas.py::_edge_pair_label` →
+  `atlas_lifecycle.edge_change_label`）/ JSON Patch の `after`。既にあった面（カード・反映の確認・凍結の影響・L2 の実線と
+  `relations_note`・右パネル）と合わせ、「A — B」を f-string で組む関数は同じ関数で句の関数を通すことを AST で固定した
+  （`test_atlas_review_round25_r10.py::test_no_dash_join_outside_phrase_functions`。種別が引けないときだけ「A — B」の fallback）。
+- **IK-1119 版の範囲の語と版の事実（オーナー判断 = 推奨どおり）**: L2 の手がかりの語と描いていない行の前置きは「**これまでの**版の
+  改訂で加わった関係」（全改訂の集合であることを言う）。版の事実は**右パネルの「地図の関係:」の行にだけ**「（版 2026.7 で加わった）」
+  （`label_vocab.ATLAS_PANEL_RELATION_ADDED_IN`。判定は `added_relation_pairs` と同じ内部関数の `added_relation_versions`。最初の版から
+  在る関係には添えない）。**地図の上には印・NEW バッジ・告知を付けない**（category_gap_candidates_design §5.6 の「版更新の告知を作らない」を
+  維持 — 学生が選んだ概念について尋ねたときだけ見える属性は告知に当たらない、と読む）。
+- **H54 反映済みの採用は見送れない**: `POST …/edge-candidates/decide` の `dismiss` は、採用済みの関係が次版の下書きに入っていれば
+  （下書きが無ければ公開中の版に入っていれば）409 の事実文（`EDGE_DISMISS_LOCKED_IN_DRAFT` / `_IN_FROZEN`）。判断と次の公開版の食い違いを
+  作らない。下書きから外して保存すれば見送れる。カードは `dismiss_locked` / `dismiss_locked_note` を受けて［見送り…］を出さない。
+- **te-01 対応の要らない凍結**: 凍結で消えるノードが無く対応の区画が出ないときは、`freeze-impact` の `facts` に
+  `atlas_correspondence.FACT_NO_CORRESPONDENCE_NEEDED`「この凍結で消えるノードはないため、前の版のノードとの対応を付ける必要はありません。」。
+- **右パネルの置かれた論文**: `panel.papers` / `nodes[*].papers` =「ここに置かれているこのコースの論文: 『…』（教員確認済み）、『…』（AIによる
+  推定（未確認））。」（名前の列挙・件数なし・出所ラベル必須 = LS8。母集合は L2 の手がかりの配置と同じ・`course_papers_by_concept`）。
+
+### 21.1 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 同じ事実（関係の向き）を言う面が複数 | `rule-enforced-per-surface` | 正本の句 1 つ + 出口の AST 走査（原理 `route-all-surfaces-through-one-point` を consulted） |
+| 集計範囲を広げた集合の呼び名 | `same-name-different-referents` | 語に範囲（「これまでの」）を入れ、版はパネルの属性として別に言う |
+| 判断と公開物の 2 つの状態 | `contract-changed-one-side` | 判断の遷移側で版の状態を見て断る（UI の非表示は補助） |
+
+当たらない族: 再実行と削除（行削除・migration なし）/ 順序と予算（外部 API・LLM・embedding を増やさない）。

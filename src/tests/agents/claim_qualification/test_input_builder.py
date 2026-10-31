@@ -114,3 +114,29 @@ def test_cartridge_terms_are_attached():
     inputs = BUILDER.build(_structure(), _skeleton(), _roles(), cartridge=cartridge)
     assert inputs[0].cartridge_id == "test"
     assert inputs[0].normalized_terms[0]["canonical"] == "R Lambda c"
+
+
+def test_long_source_block_keeps_the_span_and_marks_the_cut():
+    """IK-0808: 原文ブロックを先頭 1,800 字で語の途中に切らず、対象 span を含む窓にする。"""
+    filler = "the overall agreement between the two implementations as evidence " * 40
+    span_text = "We assume the late-time span is the target."
+    text = filler + span_text + " " + filler
+    block = TypedBlock("b1", 1, 0, text, "body_paragraph")
+    block.section_id = "sec_1"
+    structure = _structure()
+    structure.blocks = [block]
+    start = text.index(span_text)
+    span = SpanAnnotation("s1", span_text, start, start + len(span_text), ["assumption"], True, False, 0.9, "m")
+    roles = RhetoricalRoleResult(
+        document_id="doc", cartridge_id=None,
+        role_annotations=[BlockRoleAnnotation("b1", "sec_1", "assumptions", [span])],
+        summary_stats={},
+    )
+    inputs, coverage = BUILDER.build_with_coverage(structure, _skeleton(), roles)
+    source = inputs[0].source_block_text
+    assert span_text in source
+    assert source.startswith("…") and source.endswith("…")
+    assert len(source) <= 1800 + 2
+    assert coverage["details"]["truncated_blocks"] == [
+        {"block_id": "b1", "reason": "source_block_over_char_limit"}
+    ]

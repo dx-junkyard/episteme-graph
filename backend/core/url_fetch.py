@@ -98,6 +98,16 @@ class FetchFailedError(UrlFetchError):
     """ネットワーク障害・HTTP エラー・リダイレクト過多などの取得失敗。"""
 
 
+class RateLimitedError(FetchFailedError):
+    """配信側が HTTP 429（アクセス制限）を返した。
+
+    :class:`FetchFailedError` の部分型なので既存の呼び出し側の写像は変わらない。
+    区別したい呼び出し側（arXiv の TeX→PDF フォールバック）は、これを受けたら
+    **2回目の取得を試みない**（制限中に叩き続けるとブロックが延びる — 論文レーダー
+    設計書 §14）。
+    """
+
+
 class UnsupportedContentError(UrlFetchError):
     """取得できたが PDF でも gzip アーカイブでもなかった。"""
 
@@ -496,6 +506,7 @@ def fetch_source_from_url(url: str, allowed_domains: Sequence[str]) -> FetchedSo
         NoDomainsConfiguredError: 許可リストが空。
         DomainNotAllowedError: scheme 不正、またはドメイン（リダイレクト先含む）が不許可。
         PrivateAddressError: 名前解決の結果が内部アドレス。
+        RateLimitedError: 取得先が HTTP 429 を返した（``FetchFailedError`` の部分型）。
         FetchFailedError: 通信失敗・HTTP エラー・リダイレクト過多。
         TooLargeError: サイズ上限超過。
         UnsupportedContentError: PDF でも gzip アーカイブでもない。
@@ -535,6 +546,8 @@ def fetch_source_from_url(url: str, allowed_domains: Sequence[str]) -> FetchedSo
                     current_url = urljoin(current_url, location)
                     continue
 
+                if response.status_code == 429:
+                    raise RateLimitedError("取得先からアクセスを制限されています")
                 if response.status_code != 200:
                     raise FetchFailedError("URLからの取得に失敗しました")
 

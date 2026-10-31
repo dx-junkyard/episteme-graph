@@ -378,3 +378,20 @@ def test_concept_name_list_symbol_format_rules():
     # 残る: 2 文字以上の非 ASCII 概念名 / 通常の語 / snake_case の概念名
     for name in ("重力", "Galaxy bias", "abc", "zero_recoil_limit"):
         assert concept_name_list([name]) == [name], name
+
+
+def test_concept_name_list_drops_function_forms_and_propositions():
+    """2026-09-19: P0-3 の穴（関数形・途中の制御綴り・命題文）を塞ぐ。
+
+    ``w(\\theta)`` / ``n(z, \\theta)`` / ``N_{\\mathrm{side}}`` は英字で始まるため
+    旧規則（先頭 ``\\`` のみ）を通っていた。DSL の node_value がそのまま概念名に
+    なる経路では 60 字超の命題文も通っていた。
+    """
+    for name in (
+        r"w(\theta)", r"n(z, \theta)", r"N_{\mathrm{side}}", "C(l)", "P_L(k)",
+        "x" * 61,
+    ):
+        assert concept_name_list([name]) == [], name
+    # 括弧付きでも頭が語なら概念のまま（``Eq. (3.7)`` のような参照語も落とさない）。
+    for name in ("power spectrum (linear)", "重力", "galaxy bias", "zero_recoil_limit"):
+        assert concept_name_list([name]) == [name], name

@@ -13,6 +13,8 @@ structure_anchor と同型）。骨格は非LLM・同期（UC8）。intention / 
   structure_anchor 経路A（``attribution_source='learner_selected'``）へ相乗りし、
   ``core.structure_anchor.schema.build_anchor_payload`` を必ず使う。
 - ``GET .../cycle/landing-candidates``: LEAVE の選択リスト（設計書 §5.5）。
+- ``GET .../cycle/margin-marks``: 欄外の印（return_door_design.md §2.3・第 23 波 F1）。
+  母集合は登録簿の ``margin_marks`` 宣言（問いの軌跡の一覧を流用しない）。
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from core import label_vocab
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user
 from services import (
     dismiss_cycle_intention,
@@ -31,6 +35,7 @@ from services import (
 )
 from core.cycle.derive import (
     build_landing_candidates,
+    build_margin_marks,
     build_return_door,
     build_revisit_facts,
     build_todays_words,
@@ -41,11 +46,13 @@ from core.cycle.queries import (
     fetch_active_leave_note,
     fetch_landing_candidates,
     fetch_last_owned_tension,
+    fetch_margin_mark_traces,
     fetch_recent_traces_since,
     fetch_todays_user_words,
 )
 from core.cycle.schema import INTENTION_ROLES, QUICK_LABELS
 from core.personal_graph.derive import derive_personal_network
+from core.trace_registry import MARGIN_MARK_KINDS
 from core.structure_anchor.schema import (
     ATTRIBUTION_LEARNER_SELECTED,
     anchor_type_for_element,
@@ -56,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 # main.py で直接 include される学習者向け router（reconstruction.py / discuss_observation.py
 # と同型。admin.router 経由の二段ネストにしない — Tier 3-17c）。
-learning_router = APIRouter(prefix="/api/learning", tags=["Learning"])
+learning_router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 
 class CycleIntentionRequest(BaseModel):
@@ -252,7 +259,7 @@ def get_cycle_return_door_route(
     """
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if not course_data:
-        raise HTTPException(status_code=404, detail="Course not found")
+        raise HTTPException(status_code=404, detail=label_vocab.COURSE_NOT_AVAILABLE_NOTICE)
 
     try:
         leave_note_row = fetch_active_leave_note(current_user["id"], course_id)
@@ -262,6 +269,28 @@ def get_cycle_return_door_route(
     except Exception:
         logger.warning("Failed to build return door", exc_info=True)
         return {"empty": True}
+
+
+def _topic_labels(course_id: str, course_data, rows) -> dict[str, str]:
+    """``{topic_id: 表示名}``（IK-0417）。実在トピックは題名、予約疑似トピック
+    （``_discussion``）は ``core.topic_labels`` の表示名。内部 id を学習者に出さない。"""
+    from core.course_data import iter_all_topics
+    from core.topic_labels import reserved_topic_label
+
+    labels: dict[str, str] = {}
+    try:
+        for topic in iter_all_topics(course_data or {}):
+            if isinstance(topic, dict) and topic.get("id"):
+                labels[str(topic["id"])] = str(topic.get("title") or "")
+    except Exception:  # noqa: BLE001 — 見出しが引けないだけで発話は返す
+        logger.warning("todays-words topic labels unavailable", exc_info=True)
+    for row in rows or []:
+        topic_id = str((row or {}).get("topic_id") or "")
+        if topic_id and topic_id not in labels:
+            reserved = reserved_topic_label(course_id, topic_id)
+            if reserved:
+                labels[topic_id] = reserved
+    return labels
 
 
 @learning_router.get("/courses/{course_id}/cycle/todays-words")
@@ -281,7 +310,7 @@ def get_cycle_todays_words_route(
 
     try:
         rows = fetch_todays_user_words(current_user["id"], course_id)
-        return build_todays_words(rows)
+        return build_todays_words(rows, topic_labels=_topic_labels(course_id, course_data, rows))
     except Exception:
         logger.warning("Failed to build todays words", exc_info=True)
         return {"words": [], "truncated": False}
@@ -304,3 +333,27 @@ def get_cycle_landing_candidates_route(
         logger.warning("Failed to build landing candidates", exc_info=True)
         candidates = []
     return {"candidates": candidates}
+
+
+@learning_router.get("/courses/{course_id}/cycle/margin-marks")
+def get_cycle_margin_marks_route(
+    course_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """欄外の印（return_door_design.md §2.3）— 読み取り専用・本人のみ・非LLM。
+
+    第 23 波 F1: 欄外の印は「問いの軌跡」（``GET .../interest-traces``）の一覧を流用して
+    いたため、軌跡から除外される「教材に付けた印」（anchor_mark）が一度も出なかった。
+    母集合は登録簿の ``margin_marks`` 宣言（``MARGIN_MARK_KINDS``）で決め、問いの軌跡の
+    除外は変えない。導出失敗は印なしへ縮退する（fail-open — 印が出ないだけ）。
+    """
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    try:
+        rows = fetch_margin_mark_traces(current_user["id"], course_id, MARGIN_MARK_KINDS)
+        return build_margin_marks(rows)
+    except Exception:
+        logger.warning("Failed to build margin marks", exc_info=True)
+        return {"marks": []}

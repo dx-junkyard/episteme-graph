@@ -216,3 +216,16 @@ def test_result_round_trips_via_dict():
     assert reloaded.graph_summary == result.graph_summary
     assert len(reloaded.node_narratives) == len(result.node_narratives)
     assert reloaded.maturity_source == "llm_proposed"
+
+
+def test_validator_accepts_japanese_narratives():
+    """生成言語 ja（IK-0571）: 日本語の読み物は長さ規則にも語彙規則にも当たらない。"""
+    raw = _llm_output()
+    raw["graph_summary"] = "この論文は中心命題を、理論の土台から整合関係へ順に支えている。"
+    for item in raw["node_narratives"]:
+        item["narrative_role"] = "この段は前提となる式の体系を用意する。"
+        item["reason"] = "ノードの説明に基づく"
+    for item in raw["edge_narratives"]:
+        item["transition_text"] = "前の段の結果を次の段の入力として渡す。"
+    issues, _ = _validate(raw)
+    assert not [i for i in issues if i.severity == "error"]

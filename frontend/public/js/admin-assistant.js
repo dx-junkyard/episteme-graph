@@ -61,6 +61,9 @@
 
   function renderMarkdown(text) {
     var html = escHtml(text);
+    // IK-0958: KB 本文の節内リンク「[見出し](#anchor)」「[見出し](file.md#anchor)」は、
+    // 画面では飛べないので見出しの文字だけにする（生の Markdown を出さない）。
+    html = html.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, "「$1」");
     html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
     html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
     html = html.split("\n\n").map(function (p) { return "<p>" + p + "</p>"; }).join("");

@@ -322,3 +322,51 @@ def test_llm_failure_returns_deferred_fallback_record():
     assert result.summary_stats["deferred"] == 1
     assert result.deferred_spans[0]["qualification"]["status"] == "deferred"
     assert result.deferred_spans[0]["confidence"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# R-6（2026-09-19 レビュー）: 上限撤廃後の LLM 呼び出し回数を summary_stats に残す
+# ---------------------------------------------------------------------------
+
+
+class _CountingClient:
+    """ProviderJSONLLMClient と同じ ``calls`` 計器を持つ偽クライアント。"""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+
+    def generate(self, messages, response_schema=None):
+        self.calls += 1
+        return self._responses.pop(0)
+
+
+def test_llm_call_count_is_recorded_in_summary_stats():
+    agent = ClaimQualificationAgent()
+    agent._llm_client = _CountingClient([
+        _response("s1", "b1", "We assume X.", ["assumption"], "accepted", "paper_core", "assumption"),
+        _response("s2", "b2", "In figure 1, we show Y.", ["figure_narration"], "rejected", "meta", "meta"),
+        _response("s3", "b3", "Reference [6] employed the BGL approach.", ["prior_work"], "rejected", "prior_work", "prior_work"),
+    ])
+    result = agent.run(_structure(), _skeleton(), _roles())
+    assert result.summary_stats["llm_calls"] == 3
+
+
+def test_llm_call_count_is_per_run_not_cumulative():
+    agent = ClaimQualificationAgent()
+    responses = [
+        _response("s1", "b1", "We assume X.", ["assumption"], "accepted", "paper_core", "assumption"),
+        _response("s2", "b2", "In figure 1, we show Y.", ["figure_narration"], "rejected", "meta", "meta"),
+        _response("s3", "b3", "Reference [6] employed the BGL approach.", ["prior_work"], "rejected", "prior_work", "prior_work"),
+    ]
+    agent._llm_client = _CountingClient(responses + responses)
+    agent.run(_structure(), _skeleton(), _roles())
+    second = agent.run(_structure(), _skeleton(), _roles())
+    assert second.summary_stats["llm_calls"] == 3
+
+
+def test_provider_client_counts_its_calls():
+    from episteme_graph.agents.llm_json_client import ProviderJSONLLMClient
+
+    client = ProviderJSONLLMClient()
+    assert client.calls == 0

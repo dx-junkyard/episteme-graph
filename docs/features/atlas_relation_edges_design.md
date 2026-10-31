@@ -240,3 +240,98 @@ Fable 5 指揮 + Opus 5 サブエージェント4体（core / 管理UI / 学習�
   ペア集合は再起動まで版キーで保持 — 凍結版不変なので問題にならない）②co_occurrence
   は配置の質（inferred 込み）に依存 — 教員候補のみで学習者には出さない（RE8/§10）
   ③Docker E2E（migration 076 実適用・freeze 実走）未実施。
+
+### 11.x 糸が出ない理由の事実文（2026-09-30 追補・ペルソナ通し受講 第 14 周・migration なし）
+
+学習者が「推定の糸が表示されていない」と受け取り、理由が画面から分からなかった（砂場では
+`atlas_anchor_embeddings` が 0 行 = VA層の索引が未構築で、`threads_for_domain` は
+`{"available": False}` を返しキーごと落ちていた）。`GET /api/atlas` は導出できないときも
+`threads: {"available": false, "note": <事実文>}` を返す。理由文は
+`core/atlas_edges/threads.py::threads_unavailable_note` の3種（公開版なし / 当該版の近さの
+索引が未構築 / 示せる組なし）で、数値を含まない（RE4）。`threads_for_domain` の戻り値契約
+（`{"available": False}` のみ）は不変で、理由文は route 層で合流する。フロントの
+`threads.available !== true` によるレイヤー非表示（RE2）も不変。
+
+### 11.y 第 25 周の是正（2026-10-23 追補・migration なし・IK-0846 / 0848 / 0849 / 0851）
+
+共起候補の `MIN_DOCUMENTS_FOR_EDGE` は論文の数で数える（同じ論文の重複取り込みは
+`core/document_refs.py` の同一性キーで 1 本に畳み、`documents` も 1 行）。`documents[]` の各行は両端の配置の
+理由と先頭の逐語引用を optional `endpoints[{node_id, node_label, reason, evidence_quote}]` で運ぶ
+（`weight` / `confidence` は SELECT もしない = RE4）。判断の帰属は gap と同じ `core/atlas_review_display.py` の
+投影（`provenance_line` は「AIによる推定 → …」）。採用済みの辺は[採用]と種類の選択を押せなくした（種類を
+変える操作は未提供）。見送り済みの表示で該当ゼロなら `dismissed_note`。学習者の「推定の糸」は不変。
+
+### 11.z 第 25 周 第 2 周の是正（2026-10-23 追補・migration なし・IK-0886 / 0887 / 0884 の辺版）
+
+- **並びと畳み（IK-0887）**: `derive_edge_candidates` の最終整列は「共起を持つ組 → 近さの順位
+  （`derive_vector_pairs` の順。値は持ち出さない）→ (from, to)」。教員の一覧は
+  `derive.cap_for_review`（近さだけの組は 1 ノード `REVIEW_MAX_PER_NODE`=2・全体 `REVIEW_MAX_TOTAL`=30。
+  共起と判断済みは畳まない）で絞り、畳んだら `folded_note`（件数なし）。`?show_all=true` で全部。
+  近さの段階ラベルは最上位帯しか通らず全件同じになるため**教員カードでは描かず**、`basis_line`
+  （何が近いと言っているか・論文の根拠の有無）を出す（DTO の `nearness_label` キーは互換のため残す）。
+  閾値は未校正のまま（仮説）。校正は `backend/scripts/atlas_anchor_pair_distribution.py`（保存済みベクトルを
+  読むだけ）の分位を VA 設計書 §9 に記録してから行う。
+- **下書きの状態（IK-0886）**: 一覧は下書きの edges を重ね、同じ無向ペアがあれば `in_draft: true` +
+  `in_draft_note`（[次版の下書きへ反映…] は押せない）。採用済みで種類があれば `direction_line`
+  （「A が B に依存する関係として記載されます」— 依存の向きは記載順 from → to）。preview にも `direction_line`。
+  下書きプレビュー（地図プレビュー）の下に「関係（辺）」の節を足した（アンカー `atlas.draft-relations`）。
+- **導出から外れた採用（IK-0884 の辺版）**: `store.list_unapplied_accepted` から今回の導出に無い行を
+  `orphaned_decisions` + `orphaned_note` で返す。辺の restore は見送りからしか戻せないので、画面の出口は
+  [見送り…]（理由必須）と [次版の下書きへ反映…]。
+
+
+### 11.z2 第 25 周 第 3 周の是正（2026-10-23 追補・第 3 波・migration なし・IK-0938 / 0939 / 0937 の辺版 / 0943）
+
+- **並び（IK-0938）**: route が `cap_for_review` の**前に** `atlas_review_display.order_decided_first` で
+  「採用済み・未反映（`pending_note`）→ 下書きに入っている → 未判断（共起 → 近さの順のまま）」に並べ直す
+  （畳みは入力の順を保つので帯は崩れない）。mark-incorporated に `result_line`（「『A — B』を次版の下書きに
+  追加しました。」）。
+- **帰属と根拠（IK-0939 / IK-0937 の辺版）**: 採用の根拠は採用時に記録した `mapping_justification`
+  （`vector_similarity` / `corpus_cooccurrence`）から `store.origins_for_decisions` で引き、`edge_basis_line` の
+  文にする（記録が無ければ `PENDING_EDGE_BASIS_NONE`。推測で埋めない = KR4）。導出から外れた判断・
+  freeze-impact の `pending_items`・incorporate-preview（`decision_line` / `basis_line` / `note_line` /
+  `timing_line`）に載せる。採用に任意のメモ。他の教員の採用を見送るとき（元から理由必須）は監査 metadata に
+  `overrides_other_teacher` と理由を残す。
+- **区画の説明（IK-0943）**: `EDGE_GROUP_INTRO` を定義の文に（出所チップの語「プロトタイプ近傍」「共起」の
+  意味を括弧で言う）。
+
+### 11.z3 第 25 周 第 4 周の是正（2026-10-25 追補・第 4 波・migration なし・IK-0962 / 0966 の辺版 / 0887 残り）
+
+- **IK-0962**: 管理画面の採用操作が候補の `origins` から `origin` を送る（論文の共起を優先）。記録の無い過去の採用は、反映の確認と
+  凍結の止め理由で `derive.derived_origins_for_keys`（いま導出される組だけ・保存済みアンカーの読みのみ = RE6）から
+  「採用の時点の根拠は記録されていません。いまの導出では: …」と**時点を明示して**添える。導出されない組は「記録はありません」のまま（推測で埋めない）。
+- **IK-0966**: 外れた辺の判断の区画の冒頭は定義の文（`EDGE_ORPHANED_NOTE`）で、凍結を止める一文は下書きに入っていない関係があるときだけ
+  （`atlas_review_display.orphaned_note(..., edge=True)`）。
+- **IK-0887 残り**: 学習者の糸に `basis_line`（組の名前で根拠を言う一文・数値なし。正本 `threads.THREAD_BASIS_TEMPLATE`）。
+  `_ITEM_KEYS` は 6 キーに（RE4 は不変 — 文であって数値ではない）。画面は「糸ごとの根拠」の折りたたみ。閾値の校正と一色は残課題。
+
+### 11.z4 第 25 周 第 5 周の是正（2026-10-27 追補・第 5 波・migration なし・IK-0993 / 0994 / 0989 の糸）
+
+- **IK-0994**: `POST .../edge-candidates/decide` の応答に `result_line`（組の名前の結果文・正本
+  `atlas_review_display.edge_decide_result_line` = 採用 / 見送り / 戻す）。画面は結果文を出したまま一覧を読み直す
+  （`loadEdgeCandidates(keepStatus)`）。名前が引けなければキーごと付けない（fail-soft）。
+- **IK-0993**: 保存済みアンカーが無いとき一覧に `index_note`（凍結の直後の構築中 `EDGE_INDEX_BUILDING_NOTE` /
+  索引なし `EDGE_INDEX_MISSING_NOTE`）。RE6 は不変（embedding を呼ばない — 状態を言うだけ）。
+- **IK-0989（糸）**: 学習者の L2 に描かれない端点の糸があることを `threads.undrawn_note` で言う（`field_atlas_overlay_spec.md` §17）。
+- pre-mortem は `field_atlas_overlay_spec.md` §17.1。
+
+### 11.z5 第 25 周 第 7 周の是正（2026-10-28 追補・第 7 波・migration なし・IK-1044 / IK-1047 / IK-1046）
+
+- **IK-1044 次版の下書きを作る入口を関係の区画にも**: 第 7 周まで［現在の版から次版の下書きを作る］は論文由来の候補（採用済み）の
+  カードにしか無く、候補 0 件の分野では関係を採用しても画面から下書きを作れなかった（関係カードの文は画面に無いボタンを指していた）。
+  `admin.js::_edgeDraftCreateHtml` が関係（辺）の候補区画の先頭と「候補の条件から外れた採用済みの関係」の区画に、下書きが無いときだけ
+  事実文 + ボタン（アンカー `atlas.edge-draft-from-frozen`・廃止済みは押せない理由の一文）を出す。動作は既存の
+  `gapCreateDraftFromFrozen(setStatusFn)`（`POST .../atlas/skeleton/draft/from-frozen` を呼ぶだけ・既にあれば 409 の事実文を結果欄へ）。
+  **新しい書き込み経路は作らない**（VA9 / RE3 / AB4 不変 — 骨格を書くのは教員の明示操作の既存経路だけ）。関係カードの案内
+  `EDGE_NO_DRAFT_TEXT` は「この区画の先頭の［現在の版から次版の下書きを作る］を押すと反映できます」と画面にある導線を指す。
+  マニュアル `teacher/17-admin-atlas.md#edge-draft-from-frozen`。
+- **IK-1047 反映の確認に向きの一文**: `openEdgeIncorporateConfirm` が種類の直後に `preview.direction_line`（無ければ候補の
+  `direction_line`）を並べる（サーバは既に返していた）。
+- **IK-1046 配置の理由の注記の略称**: `core/landscape/schema.acronym_expanded_in` — 頭字語（英字 2〜6・大文字 2 以上）が引用の
+  連続する語（ハイフンも語の区切り・機能語 of/the/and 等は読み飛ばし可）の頭文字の連なりと大小無視で一致すれば「引用に現れた」と
+  数え、`reason_beyond_quote_note` の注記から外す（A層の `reason_scope` と validator の warning は変えない — 表示の段で絞る）。
+- ガードレール: `backend/tests/test_atlas_review_round25_r7.py`。
+
+pre-mortem: 入口が下位部品のカードの責務になっていた（`last-mile-missing`）→ 分野単位の操作の入口を区画に置き、動作は既存関数を共有
+（二重実装しない）。確認画面がサーバの応答キーを読まない（`available-but-unwired`）→ 応答キーを読む 1 行。表記一致だけの照合
+（`substring-match-false-positive`）→ 決定論の頭字語照合を表示の段に足し、照合の正本（A層）は変えない。当たらない族: 再実行と削除・順序と予算。

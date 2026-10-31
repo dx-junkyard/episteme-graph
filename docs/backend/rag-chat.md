@@ -80,9 +80,62 @@
 > AI が暗黙に推定する沈黙適応（UC5 / §3.6）だった。判定の根拠は本人への明示的な問いと
 > その答えだけに寄せてある。
 
+> **2026-09-28 是正（IK-0383）**: 逆質問を**2回続けて出さない**。直前の assistant ターンが
+> このトピックの逆質問（定型 `PREREQUISITE_GATE_MARKER`）なら、`check_prerequisites` は
+> 呼ぶ（肯定の記帳はそちらの責務）が介入は捨てる。逆質問への「いいえ・教えて」と、前提名
+> （名前全体か、名前の頭の語 = 3文字以上。例「DCF法」）を挙げて説明を求める発話
+> （「とは」「教えて」等）は、typed action が無ければ意図分類を経ずに `LEARNING_ADVICE` の
+> ①-b（その前提1つの説明）へ流す（`_prerequisite_followup`・決定論・非LLM）。この経路の生成は
+> ナビゲーターの案内（全体像・構成要素・「解説はまだしない」）ではなく、その前提の説明を書かせる
+> （`_generate_learning_advice_response(..., explain_prerequisite=)`・LLM は1コールのまま）。
+> **楽屋（backstage）は前提ゲートを通さない**（楽屋の問いを逆質問に吸い込ませない。回答は
+> 通常の RAG のまま）。
+
+> **2026-09-28 是正（IK-0396）**: 逆質問に「理解している」と答えた往復は、記帳（上記）の
+> うえで、逆質問を引き起こした**元の質問**（履歴で逆質問の直前にある学習者発話・
+> `_question_before_prerequisite_gate`）に同じリクエストの中で答える。検索・生成・教材の関わり
+> の判定・痕跡の本文は元の質問（`_turn_question`）で、保存する学習者発話は本人が打った文のまま。
+> 回答の LLM は1回で意図分類の LLM は追加しない。回答の先頭に事実文
+> `label_vocab.PREREQUISITE_ACK_RESUME_NOTICE`（「前提の確認を記録しました。元の質問に答えます。」）を添える。
+
+> **2026-09-28 是正（IK-0422〜IK-0425）**: 逆質問は **(トピック, セッション) につき1回**。履歴の
+> どこかにこのトピックの逆質問がある往復（`_prerequisite_gate_asked_in_history`）と書き直し
+> （`replace_message_id`）の往復では出し直さず、通常どおり答えて先頭に
+> `label_vocab.PREREQUISITE_GATE_SKIPPED_NOTICE`（確認はまだ記録していない事実文）を添える
+> （IK-0422）。前提名の内容語（漢字・カタカナの2字以上 / 英字2字以上の語。英字は語境界付き）が
+> 2つ以上重なる問いは前提そのものへの問いとして説明へ流す（IK-0423・`_prerequisite_content_overlap`）。
+> 英語の発話（`_is_mostly_latin` か `_is_kana_kanji_free` = `_fixed_text_language`）には逆質問・回答済みの目印・選択肢を
+> 英語で出し（`label_vocab.PREREQUISITE_GATE_FULL_EN` ほか。IK-0574 — 旧 IK-0424 の「日本語の逆質問 + 英語の1文」を置換）、
+> 事実文も英語にする。履歴の判定器は日英両方の逆質問を読む（`_is_prerequisite_gate_for_topic`）。
+> 英語の「I understand / I'm familiar with」等と、逆質問直後の素の「yes / はい」を理解の答えとして
+> 記帳し、英語の否定形（no / I don't / not familiar / please explain）は説明へ流す（IK-0424）。
+> 英語の回答のドリルダウン目印 `[Ask more about X]` / `[Ask about X]` / `[Tell me more about X]` も
+> `extract_inline_actions` が drilldown にする（IK-0425）。
+
+> **2026-09-28 是正（IK-0398）**: 前提が同コースのトピック（`topic_id` で結ばれる、または題名が
+> 一致する）で、本人がそのトピックを確認問題で完了している（`progress_data.completed_topics`）
+> なら、その前提は聞き直さない（読み時の判定。記帳キーは変えない）。同じ完了記録から
+`GET /api/learning/courses/{id}` もトピック・章の状態と `progress_pct` を読み時に導出して重ねる
+（`routes/learning.py::_overlay_learner_progress`: 完了トピック → `completed`、その直後の `locked`
+トピック → `in_progress`、章は全完了 → `completed` / 一部 → `in_progress`。保存データは変えず、
+取得に失敗したらマスターの値のまま = fail-open）。
+
+#### ①-a 逆質問は1トピック1回・質問は落とさない（第 14 周 是正, 2026-09-30）
+
+- 逆質問は **1 コース × 1 トピック × 1 学習者につき一度だけ**。提示した事実を
+  `learning_states.progress_data.prerequisite_gates_presented`（topic_id → ISO8601）に残し
+  （`services.record_prerequisite_gate_presented` / `get_prerequisite_gate_presented`）、以後は出さない。
+  提示の記録であって理解度・能力の推定ではない（UC5）。
+- 逆質問を出すターンでも**元の質問に通常の RAG 経路で答え**、逆質問は回答の後ろに
+  `PREREQUISITE_GATE_ANSWERED_MARKER`（「ご質問には上で答えました。」）付きで添える（LLM は通常の往復と同じ1回）。
+  はい/いいえの選択肢は `next_actions` に足す。
+- 目印付きの逆質問に「理解している」とだけ答えた往復は、記帳のうえ固定文（`PREREQUISITE_ACK_ONLY_REPLY`・LLM 0 回）。
+  元の質問は答え直さない（IK-0396 の resume は目印の無い旧形式の逆質問だけに効く）。
+- 「前提「X」の確認はまだ記録していません。そのまま答えます。」の前置き（IK-0422/0446）は内部都合なので廃止。
+
 ### ①-b 前提知識の説明（3段解決 / `routes/learning.py`）
 前提の**説明**（`support_action ∈ _PREREQUISITE_ACTIONS` または「前提知識…確認/復習/必要」の
-発話 → `LEARNING_ADVICE`）は、`_resolve_prerequisite_context()` が段階的に解決する。
+発話、または IK-0383 の説明要求 → `LEARNING_ADVICE`）は、`_resolve_prerequisite_context()` が段階的に解決する。
 LLM の追加コールは無い（②相当の検索1回 = 通常の RAG ターンと同じ、生成は既存 advice の1コール）。
 
 1. **同コースの topic** に前提名が一致すれば、その `student_material` を抜粋にする
@@ -97,18 +150,80 @@ LLM の追加コールは無い（②相当の検索1回 = 通常の RAG ター�
    分野レベルの不在は言わない）をサーバ側で添える。
 
 `LEARNING_ADVICE` のどの分岐でも `content_grounding` を `None` にしない（原則8）。
-学習相談の一般アドバイスは `model_generated`。教員側には G層ルール
+学習相談の一般アドバイスは `model_generated`。一般アドバイスに並べる主要概念・トピック一覧・
+「〜の説明に進む」ボタンは表示中トピック（`topic.key_concepts`・現在の章）に寄せ、トピックに概念が無いときだけ
+コース全体の `concepts` へ落とす（第 17 周 C-seq10。`_advice_concepts` / `_advice_topics`）。教員側には G層ルール
 `course.prerequisite_uncovered`（recommended・道案内のみ）が対応する。
+第 18 周: 逆質問中の素の詰まり（「むずい」）は前提の説明へ流さず足場 1 つ（逆質問は保留）、「はい、…」＋中身は肯定を記帳して中身に答える。
+学習相談は表示中トピックの構造から見出しなしの平文（5 文以内）で答え、表示中の教材の出典を引用したときだけ `course_material` + 出典チップ（引用の無い前提説明も `model_generated`）。
 
 ### ② ベクトル検索（`services.py::search_chunks_with_metadata`）
 コースの特定教材には絞らず、**本人が閲覧できる document 集合**（§2.5）の範囲でチャンクを pgvector 類似度検索し（`top_k=8`）、各チャンクに tier（L1信頼性、教員承認状況から導出）を付与して返します。スコア `>= 0.30` のチャンクのみ回答コンテキストの根拠として採用します。
+
+各出典（`sources[]` の `SourceTierItem`）の `meta` は、同じ論文からの出典どうしを見分けるための
+**論文の中の箇所の手がかり**です（IK-0381）。同じ SELECT で chunk 行の
+`source_metadata->>'section_title'` を読み、`services.chunk_location_hint()` が
+「節「見出し」・冒頭「区画の書き出し」」（節が無ければ冒頭だけ）を作ります。追加クエリは無く、
+数値（類似度・区画番号）は入れません（切り詰めは `core/text_excerpt.excerpt`、PDF 由来なので
+`strip_control_sequences` を通す）。学習チャット本体と前提説明（①-b）の2つの組み立て箇所は
+`routes/learning.py::_source_location_meta` を共有し、手がかりが無いときだけファイル名に縮退します。
+
+**トピックの論文を先に並べる**（IK-0472, 2026-09-28）: トピック内の問い（discuss 以外・document
+直付けでない往復）では、`services.topic_source_document_ids(topic)`（`topic.document_id` /
+`units[].document_id` / `evidence_links[].document_id` / `material_chunk_ids` のチャンクの document）
+のチャンクを先に置く。検索は1回のまま `top_k=12` で引き、`routes/learning.py::_prefer_topic_documents`
+（`(score < 0.30, トピックの論文でない, -score)` の安定ソート）で並べてから 8 件に切る。採用の下限と
+`content_grounding` の判定は変えない（採用できる別論文のチャンクが、採用できないトピック内のチャンクに
+押し出されることはない）。
+
+**出典番号の範囲は (course, topic) の会話**（IK-0432 の設計・IK-0467 で再確認, 2026-09-28）: 会話履歴の
+保存単位（`learning_chat_history` の (user, course, topic) 行）と学習画面の会話区画がトピックごとなので、
+採番器 `_SessionCitationNumbers` もトピックごとに 1 から数える。**別のトピックの会話で同じチャンクが別の
+番号になるのは設計どおり**で、トピックを跨いで番号を揃えることはしない（跨ぐ会話を1本にするなら保存単位
+から変える別の判断になる）。会話の中では番号は単調で、**一度出した番号を別のチャンクへ振り直さない**
+（IK-0466: 書き直しで取り除いた往復の番号も `truncate_chat_and_supersede` が残る最後の assistant ターンの
+`citation_map` に残し、採番器は `removed_history` も予約する。同じ番号を2つのチャンクが持つ旧い履歴は
+先に見た対応だけを採る）。
+
+**本文ではない区画は出典にしない**（IK-0390, 2026-09-28）: 同じ1本の SQL に、節の見出しを
+正規化（前後空白・先頭の節番号を除去・小文字化）した**完全一致**で参考文献・データの所在・謝辞
+（`services.NON_CONTENT_SECTION_TITLES`・日本語の参考文献/謝辞を含む。付録は残す）と
+`acknowledg` / `data availability` の前方一致を除外する述語を入れる。見出しの無い区画は落とさない。
+見出しで捕まらない書誌の列・一語一行の目盛り・URL だけの区画は `services.non_content_chunk_reason()`
+で後段で落とすため、`top_k` の2倍を引いて `top_k` に詰める。
+
+**数式のプレースホルダーを解決して渡す**（IK-0391）: 同じ SELECT で `c.formulas` を読み、
+返す `text` の `[[FORMULA_i]]` を `$<latex>$` に置き換える（`services.resolve_formula_placeholders`。
+LaTeX が空・抽出エラー・対応なしは「（数式）」）。解決前の本文は `raw_text` に残る。
 
 ### ③ 出所判定（content_grounding・overall_tier）
 採用チャンクの `material_id` が現在コースの `sources[].material_id` に含まれれば `course_material`、含まれなければ `other_material`、採用チャンクが一つもなければ `model_generated` と判定します（`tier` = 教員承認状況とは別軸）。
 また採用チャンクの tier を `aggregate_overall_tier()` で最弱根拠へ安全側集約し、採用根拠が無ければ `out_of_source` になります。
 
+**未踏ガードと注意書きの付与条件は tier ではなく出所**（IK-0378, 2026-09-28）: 採用するのは
+スコア `>= 0.30` のチャンクだが、tier が `source` になるのは `>= 0.45` のチャンクだけなので、
+最弱集約の `overall_tier` は類似度 0.30〜0.45 の出典が1件混じるだけで `out_of_source` になる。
+旧実装はこの値でガード（「教材では確認できない」と先に述べて予想を求める）と注意書きを付けて
+いたため、8〜14 出典の回答にも付き、tutor の即答・discuss の〔鏡〕と衝突した。現在は
+**`content_grounding == "model_generated"`（採用した根拠が1つも無い）ときだけ**付ける。
+`overall_tier` の値（UI の格表示）は変えない。
+
+**内容語の無い追い発話の検索**（IK-0395）: 「はい、そう読みました。合っているんですか」のように
+内容語（IK-0382 の `_grounding_content_terms`）が無い発話は、その発話だけで検索すると 1 件も
+当たらない。`_retrieval_query_for_turn` が、履歴のうち内容語のある直近の学習者発話を前に足して
+検索する（検索は1回のまま・LLM なし）。テキスト選択・要素タップ・チャンク指定がある往復は
+借りない。
+
 ### ④⑤ プロンプト組み立てと生成（`routes/learning.py::learning_chat`）
-system プロンプトは通常モードで `_get_integrated_tutor_system_prompt()`、casual モードで `_get_casual_teacher_system_prompt()`、discuss モードで `_get_discuss_system_prompt()`（理解サイクルの `cycle_mode` があればそちらが優先）を使い、`overall_tier == out_of_source` のときは `out_of_source_guard_instruction()`（断定回避・予想促し）を全モード共通で追加注入します。
+system プロンプトは通常モードで `_get_integrated_tutor_system_prompt()`、casual モードで `_get_casual_teacher_system_prompt()`、discuss モードで `_get_discuss_system_prompt()`（理解サイクルの `cycle_mode` があればそちらが優先）を使い、`content_grounding == model_generated`（採用した根拠が1つも無い — IK-0378）のときは `out_of_source_guard_instruction()`（断定回避・予想促し）と優先順位の一文（`_OUT_OF_SOURCE_GUARD_PRECEDENCE`: ガードは出典・表示中の教材で裏づけられない主張にだけ適用し、裏づけられる内容は即答の規則どおりに答える）を全モード共通で追加注入します。
+
+> **2026-09-28 是正（IK-0471 / IK-0473 / IK-0470）**: ガードと注意書きは**教材で確かめる内容の問い**にだけ付ける。
+> 意図分類が CHIT_CHAT（→ casual_light）の往復と、お礼・締めくくりで始まり問いを含まない発話
+> （`_is_closing_led_statement`。定型句だけの発話は IK-0434 の pre-route が先に受ける）には付けない。discuss では
+> 規則1（即答）と衝突する「予想を先に引き出す」段を持たない `_DISCUSS_OUT_OF_SOURCE_GUARD` を使う（DM1 の事実行と
+> 「この論文の抜粋では確認できない」の明示は残る）。同じ往復は構造帰属（方法B）と引っかかりのヒントの対象にも
+> しない（痕跡 payload に `anchor_skip_reason`、worker の未帰属クエリが除外）。方法Bに渡す `cited_chunk_ids` は
+> **回答本文が `[出典N]` で引用したチャンク**（引用順・3件まで。`_chunk_ids_cited_in_answer`）。
 
 - SMILES DSL を使って因果・関係グラフを説明する
 - 回答末尾に **ドリルダウンリンク**（関連子ノード・前提ノード・親ノード）を Markdown のリストで提示する
@@ -118,7 +233,9 @@ system プロンプトは通常モードで `_get_integrated_tutor_system_prompt
   - [親概念Cの全体像について詳しく聞く]
   ```
 
-生成は `generate_text(messages, temperature=0.3)`（精度重視）。`overall_tier == out_of_source` かつ非 casual のときは、`out_of_source_notice()` の注意書きを回答冒頭に追加します（discuss でも維持 — §3.5）。
+生成は `generate_text(messages, temperature=0.3)`（精度重視）。`content_grounding == model_generated` かつ非 casual のときは、`out_of_source_notice()` の注意書きを応答の `answer` の冒頭に追加します（discuss でも維持 — §3.5）。**注意書きは表示であって回答本文ではないので履歴には保存しない**（IK-0378。保存は注意書きなしの本文・画面は `overall_tier` / `content_grounding` からも出所を描ける）。クライアントが送り返す履歴に注意書きが付いていても、LLM へ渡す前に `_history_without_out_of_source_notice` が剥がす。
+
+出典の `quote`（出典タブの引用）は `core/text_excerpt.excerpt(..., 80, keep_dollar_math=True)` で切り詰め、`$…$` の数式区間の途中では切らない（IK-0394）。
 
 #### ④-b 画面文脈ブロック・選択箇所ブロック（SA層 Phase 4）
 
@@ -261,7 +378,10 @@ LLM へ渡す会話履歴は、必ず横断基盤の
 `core/llm_worker/history.py::window_history(history, max_messages, max_chars, head_keep, current_message)`
 を通します（チャット型 AI の共通規約。**保存用の履歴はウィンドウ化しない**）。
 
-- 学習チャット本体: **20 件 / 2000 字**
+- 学習チャット本体: **20 件 / 4000 字・境界で切る**（IK-0394, 2026-09-28。旧 2000 字では tutor の
+  回答（2,500〜4,000 字が常態）が途中で切れたまま再注入されていた。`trim_at_boundary=True` で
+  段落 → 文 → 文字数の順に切り、末尾に「…」を付ける。`$…$` の数式区間の途中では切らない。
+  既定は False で他の呼び出し元の挙動は変えない）
 - グラフ要素タップの説明生成パス（承認済み説明が無いとき）: **6 件 / 2000 字**
 
 他のチャット型 AI の窓（コースビルダー 20/4000/head_keep=2、W層 16/4000/head_keep=1、
@@ -309,6 +429,13 @@ tension プレフィルタも常に打ち消されます（SD4）。
    **手前**。音声・casual 経路にマニュアル回答を届ける唯一の位置。テキスト経路は
    マニュアル本文の素通し + `manual_citations` で **LLM 0 回・quota 非消費**、
    音声 / casual 経路のみ 1 コールで会話調に整えます（U層 feature `learning:help_usage`）
+3-b. **理解度の点数・割合の要求**（IK-0397）— 非LLM の `_is_understanding_score_request()`
+   （日本語は「何点・何割・何パーセント」か、直後に漢字・カタカナが続かない「点数・スコア」
+   （「スコア関数」「点数分布」は数えない）と、理解・自分・確認問題・成績等の語の**両方**がある
+   発話。英語は `my … score/grade/points` / `grade me` / `how many points did I` の形だけ —
+   「I don't get the main points」のような内容の発話は拾わない）。固定の事実文 `label_vocab.UNDERSTANDING_SCORE_REQUEST_REPLY` +
+   `content_grounding="model_generated"` を返す（**LLM 0 回・quota 非消費**・痕跡は記録しない =
+   新しい kind を作らない）。usage_help と同じく `atlas_context` が無いときのみ
 4. casual 判定（`_is_casual`）
 5. discuss 判定（`_is_discuss`）と `discuss_scope` の検証（**422**。書き直しによる履歴
    truncate よりも前）
@@ -445,20 +572,47 @@ explore）」の 3 軸を 1 つの enum に畳んでいました。入口統合 
 
 | 値 | 意味 |
 |---|---|
-| `course_material` | このコースの教材に基づく（cited チャンクの `material_id` がコースの `sources[].material_id` に含まれる、**または現在表示中のトピック教材（`student_material` 等）をコンテキストに注入した場合**） |
+| `course_material` | このコースの教材に基づく（cited チャンクの `material_id` がコースの `sources[].material_id` に含まれる、**または現在表示中のトピック教材（`student_material` 等）が問いに関わる場合** — IK-0382） |
 | `other_material` | 別の資料（cited はあるがコース教材外） |
 | `model_generated` | RAG ヒットもトピック教材も無い — モデルの一般知識（出典なし） |
 
 判定は `search_chunks_with_metadata`（`services.py`）が返す `material_id` を使うため、
 **この関数のクエリを変更する際は `material_id` の SELECT を落とさないこと**。
 
-トピック教材はプロンプトへ `[現在表示中の教材]` として注入される。この場合、回答には
-実根拠があるため `overall_tier` の集約結果を `source` を下限に引き上げる
+トピック教材はプロンプトへ `[現在表示中の教材]` として注入される（毎ターン・問いを問わず）。
+**注入しただけでは根拠に数えない**（IK-0382, 2026-09-28）: 教材と無関係な問いで検索が
+1件も当たらないのに「📘 教材から回答」と出ていたため、`_topic_material_engages_message`
+（決定論・非LLM）が「教材の箇所・要素を明示している / 問いに内容語が無い（指示語だけ）/
+問いの内容語の過半が教材本文に逐語で現れる」のどれかを満たすときだけ根拠に数える。
+満たさなければ出典ゼロのターンは `model_generated`（楽屋も同じ経路）。
+根拠に数えるとき、回答には実根拠があるため `overall_tier` の集約結果を `source` を下限に引き上げる
 （`tier_floor(overall_tier, TIER_SOURCE)`、`routes/learning.py`）。これにより
 「📘 教材から回答」と「参考（out_of_source）+ 未踏ガード」の矛盾表示は発生しない。
 承認チェーン由来ではないため **approved へは昇格させない**（不可侵の一線）。
 
 ---
+
+- 引用ゼロ × 表示中教材が問いに無関係なら model_generated（第 14 周の裁定。採用した出典があっても本文が1つも引用しなければ資料に基づく回答とは名乗らない）。
+
+- **表示中の教材の出典も番号付き出典にする**（第 17 周 A1・2026-10-01）: `[現在表示中の教材]` の直後に、そのトピックの
+  `material_chunk_ids`（→ `linked_chunk_ids`、正本 `core.course_data.topic_material_chunk_ids`）を `get_chunks_for_prompt`
+  （`allowed_document_ids` を SQL 内で強制）で最大3件読み、焦点の論文を先に並べ（`prefer_focus`）、検索・持ち越しと重ねずに
+  `_adopted_source_entry` で `[出典N]（表示中の教材の出典）` として登録する（`_topic_source_rows`）。検索が何も採用しない往復でも
+  出典チップが出て往復を始められる。番号は会話の採番器（IK-0432/0444）のまま。elicit では登録しない。本文が引用しなければ上の規則どおり。
+  答え方を指すメタ語（一言・根拠・要約・短く・つまり・どこ 等）は `_GROUNDING_GENERIC_TERMS` に入れ、出所がターンごとに反転しない。
+- **式の事実をチャットにも渡す**（IK-0577・SA層 4-c の一部）: 出典ポップアップが描く印字番号と AI復元の印を、チャンクごと
+  （`formula_facts`・`services` が `core.formula_facts.formula_fact_line` で作る）と表示中の教材（本文が参照する式）に1行で添え、
+  復元式があるときだけ system に `RECONSTRUCTED_FORMULA_INSTRUCTION`（復元式を原文の式として断定しない）を足す。LLM 回数は不変。
+
+### 4.x 出典の並びと採用の絞り込み（第 15 波 = ペルソナ通し受講 第 14 周 c-astro-structure-30 の是正・2026-09-30。課題ナレッジ IK-0512〜0514）
+
+- `sources` は出典番号の順に並べ、各項目 `SourceTierItem.cited` で本文が引用したかを示す（引用していない出典は画面で
+  「本文では引用していません」と区別）。番号と出典の対応は正しく、同番号が別チャンクに見えるのは LLM の誤帰属（検査は未実装・IK-0545）。
+- 採用前に `_drop_off_topic_chunks` が表示中トピックの論文外のチャンクを落とし、`non_content_chunk_reason` は見出しだけの
+  短すぎるチャンクを `too_short` として除外する。
+- 出典本文（source-chunk）は途中始まり・途中終わりに「…」を付け、`text_excerpt.normalize_source_line_breaks` で PDF の行末改行を
+  畳む。見つからないときの 404 は日本語の事実文。
+
 
 ## 5. tension プレフィルタと TensionMiningAgent（B層）
 
@@ -467,6 +621,9 @@ explore）」の 3 軸を 1 つの enum に畳んでいました。入口統合 
 1. **Stage 0（同期）** — `core/tension/prefilter.py: judge_tension_hint(message, 直近のユーザー発話)`。
    ヘッジ/逆接マーカー（「気がする」「でも」「矛盾」等）や直近 3 往復内の同語再訪でヒント判定し、
    関心痕跡（`interest_traces`）の `payload.tension_hint` に保存。納得クロース（「なるほど」等）はヒントを打ち消す。
+   英語は逆接・矛盾・疑いのマーカー（but / however / contradict / doesn't that 等）を語境界で見て、同語再訪は
+   英字を**語単位**（機能語を除く）で照合する。マーカーの無い定義の質問・依頼（「〜とは何ですか」
+   「確認問題を出してください」「What does X mean」）は再訪一致だけではヒントを立てない（IK-0392）。
 2. **Stage 1（非同期）** — ヒントが立つと `core/tension/worker.py: maybe_schedule_tension_mining()` を
    best-effort で起動（失敗してもチャットは止めない）。未解析ヒント累積 5 件 or セッション終了（20分無活動）で
    `TensionMiningAgent` が LLM 1 コール/会話窓で候補を抽出し、`kind='tension'` / `status='candidate'` で保存。
@@ -543,3 +700,123 @@ UI 側の扱いは [学習機能](../features/learning.md)・[フロントエン
 ---
 
 [← コアエンジン](core-engine.md) ｜ 次へ: [パイプライン概要 →](../pipeline/overview.md)
+
+## 追補（2026-09-30・ペルソナ通し受講 第 16 波）
+
+- **議論中の論文の優先**（IK-0556）: `_discussed_document_ids` を前提説明の `prefer_document_ids` と痕跡 cited_chunk_ids の document スコープへ渡す。
+- **否定文中の出典は引用に数えない**（IK-0557）: `_affirmative_citation_indices` が「出典N は…述べていません」型の [出典N] を除く。
+- **直前の引用チャンクを id で読み出す**（IK-0558）: 「さっきの出典」への問い返しは検索せず、直前の cited chunk を id 指定で読む。
+- **無内容チャンク 3 種**（IK-0559）: `non_content_chunk_reason` に acknowledgments / title_block / outline。
+- **ゲート後の分岐**（IK-0560）: 「まだ」「わからん」「むずい」等の口語の否定を否定の返事に含め、前提トピックの教材本文を説明の入力に渡す。
+  英語話者にも日本語のゲート文が出る件は未解決（IK-0574）。
+
+## 追補（2026-10-02）回答の逐語引用と出典本文の一致検査（IK-0545）
+
+LLM が別のチャンクの文を `[出典N]` に帰属させる誤帰属は、出典チップが付いている限り
+「裏付けがある」ように見えたまま通っていた（第 14 周 seq135）。RAG 応答の後処理で、
+回答本文の**逐語引用**を引用先チャンクの本文と突き合わせ、一致を確認できないものを事実として返す。
+
+- **正本**: `backend/core/citation_check.py::check_citations(answer, passages)`（純関数・非LLM・同期・決定論。
+  FastAPI / sqlalchemy / LLM 非 import）。`passages` は出典番号 → LLM の文脈に置いたチャンク本文
+  （`_adopted_source_entry` の内部キー `passage`。応答 DTO・履歴メタには載らない）。
+- **検査の対象**: 「」『』“” "" で括られた逐語のうち、正規化後 8 字以上のもの（短い引用は用語の強調とみなす）。
+  同じ文の中で引用の**直後**に続く `[出典N]`（連続するマーカーはどれかの本文に含まれれば一致）、無ければ
+  引用の**直前**の `[出典N]` に結び付ける。文の区切り（引用の外の `。．！？!?` 改行）を越えては結び付けない。
+  引用符の無い言い換えは逐語一致の対象にならないので検査しない（一致しないのが正常な文を不一致と言わない）。
+  省略記号（…・...・‥）で区切った断片は順に検査する。
+- **正規化**: SA層 `core/assistant_context/selection.py` と同じ作法（制御シーケンス除去 → 空白除去）に、NFKC・
+  大文字小文字・`$`・引用末尾の句読点の違いを吸収するだけ。比較キーを作るだけで本文・抜粋は書き換えない。
+- **DTO**: `LearningChatResponse.citation_check`（RAG 応答の最終 return のみ。検査した引用が無ければ `None`）—
+  `{"checked": ["1", …], "unmatched": [{"citation": "N", "quotes": ["…"], "note": "引用文は出典本文と一致を確認できていません"}]}`。
+  番号は本文の `[出典N]` の N。件数・一致度・類似度の数値は載せない。degraded ターンは `None`。
+  SSE の `final` も同じ後処理を通るので同じ値が載る。
+- **本文・保存文は不変**（P4 / RS5）。引用を落とさず書き換えず、`citation_map`（IK-0444）・出典番号の意味論も変えない。
+- **画面**: `app.js` の `renderCitationCheckLine` が `unmatched` の出典ごとに `[出典N]`（出典チップ）+ サーバの `note` を
+  1 行添える（`.citation-check-line`・警告色なし・文言はフロントに焼き込まない）。履歴の再読み込み後は出さない（保存しないため）。
+- **観測**: 不一致があった往復だけ `discuss_metric_events` に `citation_quote_unmatched`（payload 空・サーバ側記録）。
+- ガードレール: `test_citation_check_{core,route,ui_static}.py`。
+- 適用範囲: `_learning_chat_core` の RAG 応答（コース経路・document 直付け discuss の両方。同じコアを通る）。
+  前提知識の説明（LEARNING_ADVICE）などの早期 return には未適用。言い換えの意味的一致（LLM・embedding による検査）はしない。
+
+## 追補（2026-10-27・第 25 周 第 5 波）面を跨ぐ学習チャット / RAG の是正
+
+第 25 周の 4 面（共有・疑義・分野の地図・原稿スタジオ）の審判と製品頭脳の所見で、どの面からでも同じ学習チャットの
+組み立てに戻る 5 件を根で束ねた（新しい固定文の継ぎ足しで LLM を制御しない・LLM 回数不変・保存文の形不変 = RS5）。
+
+- **出典の目印の除去は 1 箇所**（IK-1006）: 正本は `core/text_hygiene.remove_citation_markers`（`CITATION_MARKER_RE` も
+  ここへ移した）。根拠の無い番号を空文字にするだけだと、目印を名詞として使った文（「前の回答の「[出典3]」は」）が
+  「前の回答の「」は」と欠ける。目印だけを囲んだ引用符・名詞の位置（直前が「の」・文頭・読点、直後が助詞）は句
+  （応答本文 = 「確認できない出典」、前の往復の持ち越し = 「前の回答で挙げた出典」／直前が「の」なら「出典」）に置き換え、
+  付記の位置は前後の空白ごと取り除く（括弧だけが残る「（）」も残さない）。`_reconcile_citation_markers` と
+  `_correction_source_text`（`previous_correction_fact` の入力）が同じ関数を通る。
+- **同じ論文の別の版を畳む**（IK-0996 + IK-0846 の RAG 面）: `search_chunks_with_metadata` の後処理で
+  `core/source_versions.collapse_paper_versions` を通す。同じ論文かは IK-0919 の正本 `identity_candidates.same_paper`
+  （arXiv ID / 題名の正規化完全一致）、同じ箇所かは式のプレースホルダを除いた本文の一致で決める。残す版は
+  ①焦点の論文（`prefer_document_ids` = `_focus.document_ids`）→ ②AI が復元した式の少ない版 → ③TeX の取り込み →
+  ④検索の順位。残した行は群の最高の類似度を引き継ぎ、`version_note`（事実文・数値なし）を `sources[]`
+  （`SourceTierItem.version_note`）と履歴メタに載せる。出典カードは `.lx-src-meta` に 1 行で描く。
+- **論文の構成の段落を採用しない**（IK-0987）: `non_content_chunk_reason` の `outline` を `_is_paper_outline_paragraph` に。
+  TeX の `\ref` が解決されず番号の落ちた節参照（「in Sec. .」）も節参照に数え、構成の文から後ろが段落の過半ならそれだけで
+  outline。長い導入に構成の 1 文が付いた区画は落とさない。焦点の優先規則（FD3）の閾値は変えていない。
+- **式の事実は式単位**（IK-0997 / IK-1009）: `core/formula_facts.formula_fact_line` は番号の無い復元式を式本文の先頭
+  （`$…$`・論文層の `equation_latex_snippet`）か定める記号で 1 つずつ名指し、印の判定は
+  `equation_latex_is_reconstructed`（TeX 原文と一致すれば印なし）だけを使う。復元式と印の無い式が同じ箇所にあれば
+  「印の無い式は原文の数式です」を添える。印の説明（［AI復元］= …）は行ごとに繰り返さず
+  `RECONSTRUCTED_FORMULA_INSTRUCTION` に 1 回だけ置く。
+- **音声（casual）でも選んでいる要素は渡す**（IK-0986・仮説の是正）: 画面文脈は casual のとき `kinds=("element",)` で
+  選択中の要素だけを解決する（表示モード・台帳・位置づけ・実行記録は引かない）。学習画面の承認済みの説明は事実文で
+  「学習者の画面に出ているこの要素の「教員の説明」（承認済み）」と区画名で指す。フロントは開いている部品の文脈を
+  `state.openContextElement` に控え、ラッチの無い送信（音声ループ）でも表示中なら `selection.element_*` として申告する。
+  保存 message・痕跡は不変（SA6）。
+
+### 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 目印の除去が文の要素を壊す | `information-dropped-as-unrepresentable` | 空にせず句へ置き換える（除去の正本 1 つ） |
+| 版を別物として数える | `same-name-different-referents` | 同一視は IK-0919 の正本を使い、新しい規則を作らない |
+| 印を式ではなく抜粋に付ける | `extent-decided-by-proxy-signal` | 判定は `equation_latex_is_reconstructed` の 1 つ、名指しは式単位 |
+| 見えている材料が音声の往復に渡らない | `available-but-unwired` | casual でも element だけ解決し、フロントは開いている部品を申告 |
+| 新しい判定を面ごとに足す | `duplicate-canonical-sources` | 目印の正規表現を `text_hygiene` に移し、learning.py は別名だけ持つ |
+
+検証: `backend/tests/test_round25_wave5_chat_rag.py` + `test_assistant_context_learning_route.py`（casual の行列）+
+`test_wave17_topic_source_grounding.py`（式の事実）。確かめていない範囲: 砂場での再演（docker を使わない波）、
+`get_chunks_for_prompt`（表示中の教材の出典・持ち越し）と検索結果の間の版の重複、音声で部品を開いたままの実機の往復。
+
+## 追補（2026-10-27・第 25 周 第 6 波）面を跨ぐ学習チャット / RAG の是正（2 回目）
+
+第 6 周の再演と製品頭脳の所見で残った 9 件のうち 6 件を根で束ねた（LLM 回数不変・保存文の形不変 = RS5・`assemble` は不変）。
+
+- **焦点を同じ論文の別の版まで広げる**（IK-1035 / IK-0987 STILL）: `focus_document.with_paper_versions` +
+  `services.paper_version_siblings`（`same_paper` の正本・スコープとの積だけ）。正本の説明は
+  `docs/features/focus_document_design.md` の第 6 波追補。
+- **出典番号を版の選び直しで変えない**（IK-1037）: `search_chunks_with_metadata(..., prefer_chunk_ids=)` に会話の
+  採番器の対応表（`_SessionCitationNumbers.mapping()`）を渡し、`collapse_paper_versions` は番号を持つチャンクを最優先で残す。
+- **式の印を同じ論文の原文で照合する**（IK-1040 / IK-1009 の残り）: `services.paper_original_formula_latex` がスコープ内の
+  同じ論文の別の版のチャンクから印の付かない式の LaTeX を集め、`formula_fact_line(confirmed_latex=)` が一致する復元式の
+  印を外す（一致の判定は `reconstruction_matches_source` の 1 つ）。出典の抜粋（`confirm_formula_facts_across_versions`）と
+  表示中の教材（`_topic_formula_fact_line(..., allowed_document_ids=)`）の両方が通る。照合の材料に使う行の式の記録
+  `_formulas` は返す前に外す（DTO・プロンプトに載せない）。照合できなければ印は従来どおり。
+- **文中の埋め込みを外して文を欠かさない**（IK-1036）: `material_text_for_prompt` は行の途中の
+  `![[claim|component|source:…]]` を参照先の本文の引用（「…」・120 字）にする。引けない・内部 ID 形なら種別の語。
+  行単独のブロック埋め込みは従来どおり外す。
+- **構造ブロックに英語の文を添えない**（IK-1039）: `_retrieved_node_fact` は理論対象が日本語を含まず英単語が並ぶ文なら
+  括弧ごと添えない（短い対象名と数式は残す）。
+- **意図分類に画面の文脈を 1 行**（IK-1043）: `_intent_screen_hint` が地図で開いた場所の名前 → 選んだ要素の名前を
+  40 字で「画面の文脈: …」として分類のプロンプトに添える（本文・選択テキストは渡さない = SA1）。
+
+記帳のみ: IK-1038（前提名の結果の値 — 教材の内容の値で数値非表示の対象外・rejected）、IK-1041（構造ブロックに同一性リンクが
+渡らない — 解決器の種類を足す設計が要る）、IK-1042（帰属の候補の重複・式由来の合成主張の不正な依存 — A層の合成規則と併せて扱う）。
+
+### 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 焦点を広げてスコープを広げないか | `scope-widened-silently` | 版はスコープとの積だけ。`None` / 空のスコープは足さない |
+| 写しごとの材料で判定が割れる | `id-not-stable-across-versions` | 同じ論文の原文の式で照合する。番号は番号を持つチャンクを代表に |
+| 印の判定を新設しない | `duplicate-canonical-sources` | `reconstruction_matches_source` と `same_paper` を呼ぶだけ |
+| 参照記法の除去で文が欠ける | `information-dropped-as-unrepresentable` | 行の途中だけ本文の引用、行単独は外す |
+| 前段に文脈を渡さない | `available-but-unwired` | 分類に名前の 1 行だけ（本文は渡さない） |
+
+検証: `backend/tests/test_round25_wave6_chat_rag.py`。確かめていない範囲: 砂場での再演（docker を使わない波）、焦点の
+document が PDF 版であることの実データ、照合の SQL の応答時間。

@@ -1,0 +1,19 @@
+scenario: s-sim-reconstructed-voice
+domain: astrophysics
+# 場面 (h) st-07（voice_first・GRB・未受講）。PINN による中性子星状態方程式の論文。
+# この論文のモジュールは入力の式がすべて PDF から復元された式（「制約を適用・定義: L_TOV、L」を選ぶ）。
+params:
+  goal_text: 移動の合間に、中性子星の論文の理論を動かすときの注意書きの意味を耳で理解すること
+  topic_hint: 二重ネットワークとTOV方程式の課し方（PINN による中性子星状態方程式の論文）
+  topic_hint_terms:
+  - TOV
+  - 二重ネットワーク
+  module_hint: L_TOV
+  questions:
+  - PDF から復元された式っていう注意書き、あれ何を気をつければいいってこと？
+  - じゃあ、その式で動かした結果って、論文の結果と同じものだと思っちゃだめ？
+per_archetype:
+  voice_first:
+    questions:
+    - えっと、PDF から復元された式ってあったけど、あれ何に気をつけろってこと？
+    - じゃあさ、それで動かした結果って、論文の結果と同じって思っちゃだめ？

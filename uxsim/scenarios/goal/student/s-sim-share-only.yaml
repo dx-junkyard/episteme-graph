@@ -1,0 +1,40 @@
+id: s-sim-share-only
+population: students
+runner:
+- api
+goal: '{{goal_text}} のために、前に動かした実行の記録を見直し、共有の意味を画面の文で確かめてから担当教員に共有する'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- claim_hint
+preconditions:
+- このペルソナが同じ論文で成功した実行を少なくとも 1 つ持っている（s-sim-share-meaning などを先に歩いている）
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+  note: 前に動かした実行の記録が並んでいることを確かめる
+- do: learning.simlab.share
+  with:
+    claim_hint: '{{claim_hint}}'
+  note: 画面の文（誰に見えるか・台帳の候補になるか・確定は教員）を読んで、納得できたら最新の実行を共有する。納得できなければ共有せずにやめてよい
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-share
+- manual: student/02-student.md#simulation-lab-own-records
+watch_for:
+- 共有の前に、その実行だけが表示名とともに担当の教員に見えるようになることが画面の文で分かる
+- 共有のあと、主張の記録に候補として書き添えられ、確かなものとして扱うかは教員が決めることが事実文で出る
+- 共有した実行に「共有済み」の印が付き、ほかの実行には付かない

@@ -1,0 +1,32 @@
+id: c-r25-doubt-r1
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 1bad7d9f
+personas:
+  teachers: [te-03-meticulous-seminar, te-02-veteran-intro]
+  students: [st-06-skeptic-bao, st-02-m2-lensing-theory]
+scenarios:
+  teacher: [t-db-assumption-review, t-db-scope-promote, t-db-challenge-propose, t-db-counterfactual-brief]
+  student: [s-db-ledger-lines]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 40, persona_llm_calls: 360, wall_clock_minutes: 180}
+notes: |
+  第 25 周・面 B（D層の教員側 ⇄ 学生の検証状態）の第 1 周。精読の教員（te-03）とクリックスルーの教員（te-02）が前提の地図で
+  (a) 前提候補の確定・却下 → (b) スコープの記帳と検証状態 → (c) 疑義と検証提案 → (d) 反実仮想とゼミ前ブリーフ を歩き、
+  その後で懐疑の学生（st-06）と理論の学生（st-02）がコース 1bad7d9f で (e) 出典タブ・部品の文脈・議論の開幕・いまここの周りの
+  検証状態の一行を読む（plan の順は教員 → 学生）。
+
+  コースの前提: 前提の地図タブのコース選択は GET /api/admin/courses（所有・共有されたコース）だけを並べる。te-02 / te-03 は
+  砂場でコースを所有しないので、経路の前提 owns_course が欠けて種まき t-v5-register-own-course（コースビルダー 2〜3 回の LLM）を
+  先に歩く。教員の記帳はそのコースで行うので、前提（assumption）の台帳は学生のコース 1bad7d9f の未検証合意リストには出ない
+  （学生の (e) で「出ない」ことを事実として見る）。部品・式・主張の台帳は対象単位なので、原稿スタジオのグラフのノードに記帳した
+  スコープは学生の部品の文脈の一行に出うる。
+
+  権限の差（足さない）: 4 教材の editor 共有は te-03（と te-04）だけ。te-02 は閲覧のみ。D層の台帳の書き込み・前提の確定・
+  コース単位の監査や負荷再計算は `_require_teacher` だけで、教材の編集権限を見ていない（観測系の主張の一覧と素朴な問いだけが
+  コースの編集権限ゲートを通す）。審判 DB4 がこの食い違いを transcript から拾う。
+  LLM 予算: 種まき（教員 1 人 2〜3 回）+ 前提マイニング（任意・非同期）+ 学生の質問 1〜2 回。前提の地図そのものは LLM を呼ばない。
+  砂場で確かめていないこと: 台帳の既存行の course_id・load_score の有無（散布図・未検証合意リストが空なら ledger_open は
+  確定した前提へ縮退する — runner_note に残る）。

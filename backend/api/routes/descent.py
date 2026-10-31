@@ -17,8 +17,9 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user
-from services import get_accessible_course_data
+from services import get_accessible_course_data, learner_focus_document
 from core.descent import (
     BACKSTAGE_DECLARATION,
     SUPPORTED_ELEMENT_TYPES,
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # main.py で直接 include される学習者向け router（cycle.py と同型。
 # admin.router 経由の二段ネストにしない — Tier 3-17c）。
-learning_router = APIRouter(prefix="/api/learning", tags=["Learning"])
+learning_router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 
 def _require_course(user_id: str, course_id: str) -> dict:
@@ -40,11 +41,32 @@ def _require_course(user_id: str, course_id: str) -> dict:
     return course_data
 
 
+def _focus_ids(
+    current_user: dict, course_data: dict, course_id: str, topic_id: str, document_id: str
+) -> tuple[str, ...]:
+    """焦点論文（``core.focus_document`` FD1）。指定が無ければ焦点なし（従来と同じ解決）。
+
+    段の組み立ては ``services.learner_focus_document`` が正本（明示 → トピック → 直前の引用）。
+    """
+    if not str(topic_id or "").strip() and not str(document_id or "").strip():
+        return ()
+    try:
+        return learner_focus_document(
+            current_user, course_data, course_id, topic_id,
+            explicit_document_id=str(document_id or "").strip() or None,
+        ).document_ids
+    except Exception:  # noqa: BLE001 — 焦点は補助（従来の解決へ縮退）
+        logger.debug("descent focus unavailable", exc_info=True)
+        return ()
+
+
 @learning_router.get("/courses/{course_id}/descent/ladder")
 def get_descent_ladder(
     course_id: str,
     element_type: str = Query(...),
     element_id: str = Query(...),
+    topic_id: str = Query(""),
+    document_id: str = Query(""),
     current_user: dict = Depends(_get_current_user),
 ) -> dict:
     """足場ダイヤルの梯子（想起プロンプト → stage 骨格事実文 → 記号 → 出典リビール）。
@@ -58,6 +80,12 @@ def get_descent_ladder(
         raise HTTPException(status_code=422, detail="Unsupported element_type")
     course_data = _require_course(current_user["id"], course_id)
     try:
+        focus_ids = _focus_ids(current_user, course_data, course_id, topic_id, document_id)
+        if focus_ids:
+            return build_ladder(
+                course_data, course_id, element_type, element_id,
+                preferred_document_ids=focus_ids,
+            )
         return build_ladder(course_data, course_id, element_type, element_id)
     except Exception:  # noqa: BLE001
         logger.warning(
@@ -72,6 +100,8 @@ def get_descent_backstage_path(
     course_id: str,
     element_type: str = Query(...),
     element_id: str = Query(...),
+    topic_id: str = Query(""),
+    document_id: str = Query(""),
     current_user: dict = Depends(_get_current_user),
 ) -> dict:
     """楽屋の降下路（notation_patterns → 記号定義 → 前提概念の generic 説明）。
@@ -84,6 +114,12 @@ def get_descent_backstage_path(
         raise HTTPException(status_code=422, detail="Unsupported element_type")
     course_data = _require_course(current_user["id"], course_id)
     try:
+        focus_ids = _focus_ids(current_user, course_data, course_id, topic_id, document_id)
+        if focus_ids:
+            return build_backstage_path(
+                course_data, course_id, element_type, element_id,
+                preferred_document_ids=focus_ids,
+            )
         return build_backstage_path(course_data, course_id, element_type, element_id)
     except Exception:  # noqa: BLE001
         logger.warning(

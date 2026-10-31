@@ -53,6 +53,10 @@ resolution:
     - backend/core/knowledge_import/bundle.py
     - backend/api/routes/export.py
     - docs/features/knowledge_transfer_design.md §14.1
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 実 DB（docker）での束の取り込みの往復 E2E（docker 復帰後）
 related: [IK-0110, IK-0115]
 view_of: []
 history:

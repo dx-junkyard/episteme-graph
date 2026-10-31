@@ -55,6 +55,9 @@ resolution:
     - frontend/public/js/reconstruction.js
     - frontend/public/js/personal-map.js
     - docs/architecture/vision_ux_gap_survey_2026-07.md §6
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0204]
 view_of: []
 pattern: information-dropped-as-unrepresentable

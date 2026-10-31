@@ -18,6 +18,9 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import text as sa_text
 
+from core import account_display as _account_display  # IK-1007: 人に見せる名前の正本
+from core.display_projection import contains_internal_id
+from display_route import LearnerDisplayRoute, project_learner_model  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user
 from quota import consume_daily_quota
 from schemas import (
@@ -34,14 +37,21 @@ from schemas import (
     LearningCheckSelfCheckResponse,
     LearningCourseDetail,
     LearningCourseLayeredResponse,
+    LearningCourseCreateOut,
     LearningCourseOut,
+    LearningEnrollOut,
     LearningProgress,
     PersonalLayer,
     TopicMaterialResponse,
 )
 from services import (
+    RUN_IN_HEADING_RE,
+    run_in_heading,
     calculate_progress,
     check_prerequisites,
+    get_prerequisite_gate_presented,
+    record_prerequisite_gate_presented,
+    _is_explicit_prerequisite_acknowledgement,
     confirm_anchor_trace,
     confirm_tension_trace,
     connect_tension_trace,
@@ -52,11 +62,15 @@ from services import (
     get_anchor_digest,
     get_tension_digest,
     resolve_course_source_titles,
+    with_course_source_document_ids,
     course_deletion_notice,
     enroll_user_in_course,
     get_course_chunks_ordered,
     get_course_completion,
+    list_learner_touched_topic_ids,
     get_course_data,
+    course_open_for_enrollment,
+    resolve_course_entry,
     get_course_live_llm_models,
     get_editable_course_data,
     get_viewable_course_data,
@@ -68,6 +82,11 @@ from services import (
     get_trace_map_exclusion_flags,
     get_user_group_ids,
     log_unanswered_query,
+    load_stored_chat_history,
+    learner_focus_document,
+    CITATION_MAP_KEY as _SERVICES_CITATION_MAP_KEY,
+    topic_source_document_ids,
+    overlay_topic_equation_reconstruction,
     persist_chat_history,
     truncate_chat_and_supersede,
     recent_duplicate_ui_anchor_event as _recent_duplicate_ui_anchor_event_shared,
@@ -85,6 +104,9 @@ from services import (
     delete_course_data,
     list_course_source_document_ids,
     list_visible_document_ids,
+    get_chunks_for_prompt,
+    paper_original_formula_latex,
+    paper_version_siblings,
     search_chunks_with_metadata,
     user_can_access_group,
     user_can_view_course,
@@ -92,28 +114,53 @@ from services import (
 from pydantic import BaseModel
 from core.course_data import (
     course_cartridge_id,
+    course_content_is_preparing,
+    course_content_state,
     course_focus,
     course_llm_models,
     course_source_material_ids,
     course_title as _course_title,
+    course_titles_with_raw_tex,
     course_topics,
     find_course_topic,
     is_symbol_concept_name,
     iter_all_topics,
     learner_topic_units_projection,
+    topic_key_concepts,
+    topic_material_chunk_ids,
     topic_unit_keys,
+)
+from core.formula_facts import (
+    RECONSTRUCTED_FORMULA_INSTRUCTION,
+    OFFSCREEN_FORMULA_FACT_INSTRUCTION,
+    offscreen_formula_fact_block,
+    formula_fact_line,
+    has_reconstructed_fact,
 )
 from core.teaching_figures import store as teaching_figures_store
 from core import decision_context
+from core import document_refs as _document_refs
 from core.course_prerequisites import resolve_prerequisite_topic_ids
-from core.course_units import candidate_keys, list_unit_candidates, resolve_unit_handles
+from core.course_units import (
+    candidate_keys,
+    list_unit_candidates,
+    resolve_unit_refs,
+)
 from core.schema import AUDIT_ENTITY_COURSE_TOPIC
 from core.cartridges import load_cartridge
 from core.config import get_settings
-from core.lecture import build_topic_slides, find_figure_embed_ids, resolve_figure_embeds
+from core.lecture import (
+    annotate_reconstructed_formulas,
+    build_topic_slides,
+    find_figure_embed_ids,
+    resolve_figure_embeds,
+    topic_material_delivery_segments,
+)
 from core import check_review
 from core import element_explanations
+from core import explanation_governance as _explanation_governance
 from core import llm_policy
+from core import label_vocab
 from core.llm import (
     generate_text,
     generate_text_stream,
@@ -126,9 +173,19 @@ from core.llm_worker.client import resolve_model
 from core.llm_worker.cost_gate import CostGate
 from core.llm_worker.history import window_history
 from core.llm_worker.single_shot import json_call
-from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE, strip_control_sequences
+from core.text_hygiene import (
+    CARRIED_CITATION_REFERENT,
+    CARRIED_CITATION_REFERENT_AFTER_GENITIVE,
+    CITATION_MARKER_RE,
+    UNTRUSTED_SOURCE_NOTICE,
+    remove_citation_markers,
+    sanitize_source_text_for_prompt,
+    scrub_internal_placeholders,
+    strip_control_sequences,
+)
 from core.tts import generate_tts_audio, strip_text_for_speech
 from core.learning_experience import (
+    TIER_APPROVED,
     TIER_OUT_OF_SOURCE,
     TIER_SOURCE,
     aggregate_overall_tier,
@@ -151,11 +208,22 @@ from core.assistant_context import (
     render_block,
     render_selection_block,
     resolve as resolve_screen_context,
+    selection_formula_lines,
 )
+from core.assistant_context.resolvers.learning import resolve_selected_atlas_node
 from core.assistant_context.schema import (
     LEARNING_ELEMENT_TYPES,
     LEARNING_VERIFICATION_OUTPUT_CONSTRAINT,
     MAX_LEARNING_RETRIEVED_CLAIMS_PER_SOURCE,
+    selected_simulation_run_id,
+)
+# 画面文脈 4-e（assistant_screen_adapter_design.md §11.17）: 学習者が開いている自分の
+# 検証シミュレーションの実行記録。読みは store の 1 関数だけ・本人所有の判定も store。
+from core.simulation_bridge import store as simulation_store
+from core.simulation_bridge.schema import (
+    FACT_NOT_VERIFICATION as SIMULATION_FACT_NOT_VERIFICATION,
+    LEARNING_SIMULATION_OUTPUT_CONSTRAINT,
+    mentions_simulation_result,
 )
 from core.learning_support_agent import (
     LearningSupportAgent,
@@ -164,7 +232,11 @@ from core.learning_support_agent import (
 )
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
-from core.component_context import build_component_context
+from core.component_context import (
+    build_component_context,
+    component_matches_multiple_documents,
+    resolve_course_component_id,
+)
 # 知識の転用層 P4-2: 理論操作グラフの読み出しは W層の既存関数を再利用する
 # （main 層ノードの review_status 合成も含め、二重実装しない）。
 from core.deliberation.graph_dialogue import load_latest_graph
@@ -175,8 +247,28 @@ from core.element_context import (
 # 概念レジストリ P3-5（concept_registry_design.md §7）: 記号の「直前の定義」。
 # 読み取り専用・LLM 0 回・コース sources へ SQL 内でスコープ強制する。
 from core.symbol_lookup import lookup_symbol_definition
+from core.focus_document import (
+    FocusDocument,
+    prefer_focus,
+    with_screen_place_documents,
+    resolve_focus_document,
+    scope_chunks_to_focus,
+    with_paper_versions,
+)
 from core.discuss.opening import build_opening as build_discussion_opening
-from core.discuss.mirroring import extract_mirror
+from core.discuss.opening import document_thesis_fact_lines
+from core.discuss.mirroring import MIRROR_MOVED_NOTE, MIRROR_MOVED_NOTE_EN, extract_mirror
+from core.citation_check import check_citations
+from core.dialogue_shape import (
+    assemble as assemble_response_shape,
+    is_stuck_reply,
+    mirror_core,
+    previous_correction_fact,
+    render_answer_text,
+    shape_dto,
+    strip_preamble,
+    verbatim_shape_dto,
+)
 # コーパス回遊 Phase B（docs/features/corpus_roaming_design.md §5.1）: コース無し論文議論の
 # 会話コンテキスト・センチネル。**"_doc:" の組み立て・判定はこの正本関数以外に書かない**。
 from core.discuss.context import document_context_id, parse_document_context
@@ -184,10 +276,14 @@ from core.discuss import observation as discuss_observation
 from core.cycle.derive import build_intention_dto
 from core.cycle.queries import fetch_active_carryover, fetch_intentions
 from core.course_content_builder import (
+    strip_generated_reference_appendix,
     build_course_content_background,
     build_topic_evidence_items,
+    topic_with_claim_origins,
     normalize_evidence_id,
+    material_text_for_prompt,
 )
+from core.text_excerpt import excerpt
 from core.atlas_path import build_learning_path_card
 from core.tension.prefilter import judge_tension_hint
 from core.tension.worker import maybe_schedule_tension_mining
@@ -221,7 +317,7 @@ from routes.lecture import (
 # 画面文脈アダプター Phase 4（§11.3「生テーブルを引かない」）: 台帳・配置の**学習者向け
 # 射影**は各エンドポイントと同じ関数を通す（遮断を2箇所に書かない）。private helper の
 # クロスルーター再利用は routes.lecture / routes.teaching_figures と同じ既存パターン。
-from routes.doubt import learner_ledger_line
+from routes.doubt import learner_ledger_line, learner_unrecorded_ledger_line
 from routes.landscape import learner_landscape_for_documents
 # agent 側 ID（DB 行を持たない集約ノード等）を台帳の照会に流さないための事前判定。
 # 正本は routes/theory_components.py（定義を二重化しない）。
@@ -264,7 +360,7 @@ except Exception:  # pragma: no cover - 並行実装中のモジュール不在�
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/learning", tags=["Learning"])
+router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 # discuss モード（「論文と話す」, discuss モード設計書 §6.2 Phase 1）: topic_id の予約キー。
 # find_course_topic はこの id を持つトピックを持たないため None を返し、既存の
@@ -294,6 +390,16 @@ _learning_chat_cost_gate = CostGate()
 #: LLM 失敗時の degraded 固定文（設計書 I3「会話は死なせない」）。チャット本体と
 #: グラフ要素説明の2経路が同じ文を返す（経路ごとに言い換えない）。
 _CHAT_DEGRADED_MESSAGE = "AI 応答を生成できませんでした。しばらくしてからもう一度お試しください。"
+
+
+def _source_location_meta(result: dict) -> str:
+    """出典1件の ``meta``（論文の中の箇所の手がかり）。IK-0381。
+
+    ``search_chunks_with_metadata`` が chunk 行から作った ``location_hint``（節の見出し +
+    区画の冒頭）を優先し、無いとき（旧データ・テストのスタブ）だけファイル名に縮退する。
+    learning_chat と前提説明の2つの組み立て箇所で同じ値にするための1関数。
+    """
+    return str(result.get("location_hint") or result.get("source_file") or "")
 
 
 def _consume_learning_chat_quota(user_id: str, quota_state: dict) -> None:
@@ -363,20 +469,14 @@ def _ordered_source_document_ids(
     visible = set(list_visible_document_ids(user_id) or [])
     if not visible:
         return []
-    placeholders = ", ".join(f":mid_{i}" for i in range(len(ordered)))
-    rows = session.execute(
-        sa_text(
-            f"SELECT source_path, id::text AS doc_id FROM documents "
-            f"WHERE source_path IN ({placeholders})"
-        ),
-        {f"mid_{i}": mid for i, mid in enumerate(ordered)},
-    ).fetchall()
-    by_material = {
-        str(r[0]): str(r[1])
-        for r in rows
-        if r and r[0] and r[1] and str(r[1]) in visible
+    # どの document 行か（両形: documents.id / source_path）の解決は core.document_refs だけ（IK-0595）。
+    resolved = _document_refs.resolve_document_refs(session, ordered)
+    by_ref = {
+        ref: str(row.get("document_id") or "")
+        for ref, row in resolved.items()
+        if row and row.get("document_id") and str(row.get("document_id")) in visible
     }
-    return list(dict.fromkeys(by_material[m] for m in ordered if m in by_material))
+    return list(dict.fromkeys(by_ref[m] for m in ordered if m in by_ref))
 
 
 def _preserve_topic_units(incoming_topics: list[dict], existing_topics: object) -> list[dict]:
@@ -436,18 +536,29 @@ def _bind_topic_units(session, data: dict, *, user_id: str) -> tuple[list[dict],
     candidates = list_unit_candidates(session, document_ids) if document_ids else []
     applied: list[str] = []
     unresolved = False
+    outside_sources = False
     for topic in topics:
         raw = topic.get("units")
         requested = [u for u in raw if isinstance(u, (str, dict))] if isinstance(raw, list) else []
-        resolved = resolve_unit_handles(candidates, requested) if candidates else []
+        # IK-0371: 草案が参照キー付き（{handle, 参照キー}）なら参照キーで引く — handle は
+        # 草案を出したターンの候補表の位置で、登録時の sources の候補表では別の単位を
+        # 指し得る。参照キーが登録時の候補表に無い単位（その論文が sources から外れた等）は
+        # 捨て、その事実を記帳する（別の単位を黙って付けない）。
+        if candidates:
+            resolved, stats = resolve_unit_refs(candidates, requested)
+        else:
+            resolved, stats = [], {"key_missing": any(isinstance(u, dict) for u in requested)}
         if len(resolved) < len(requested):
             unresolved = True
+        if stats.get("key_missing"):
+            outside_sources = True
         topic["units"] = resolved
         applied.extend(topic_unit_keys(topic))
     info = {
         "presented": candidate_keys(candidates),
         "applied": list(dict.fromkeys(k for k in applied if k)),
         "unresolved": unresolved,
+        "outside_sources": outside_sources,
     }
     return topics, info
 
@@ -478,6 +589,9 @@ def _record_course_registration(course_id: str, user_id: str, info: dict) -> Non
                 "course_id": course_id,
                 # 選ばれた handle のうち候補に無かったものを捨てた事実（件数は載せない・LU5）。
                 "unit_handles_unresolved": bool(info.get("unresolved")),
+                # IK-0371: 草案のターンの候補表で選ばれた単位のうち、登録時の sources の
+                # 候補表に無かったもの（論文が外された等）を捨てた事実（件数なし・LU5）。
+                "unit_refs_outside_sources": bool(info.get("outside_sources")),
             },
             ctx,
         )
@@ -502,8 +616,24 @@ def _project_topics_for_learner(data: dict) -> dict:
         projected["units"] = learner_topic_units_projection(topic)
         return projected
 
+    def _with_status_label(topic):
+        # 第 23 周（st-02・st-06）: locked を説明なしに出さない（推奨順であって禁止では
+        # ない）。表示語の正本は label_vocab.TOPIC_STATUS_LABELS。
+        if not isinstance(topic, dict):
+            return topic
+        status = str(topic.get("status") or "locked")
+        return {**topic, "status_label": label_vocab.TOPIC_STATUS_LABELS.get(status, "")}
+
     if isinstance(out.get("topics"), list):
-        out["topics"] = [_project(t) for t in out["topics"]]
+        out["topics"] = [_with_status_label(_project(t)) for t in out["topics"]]
+    # IK-0384: ``course_content_status`` はコース生成の内部記録（件数・document_id・
+    # draft_errors・uncovered_sections(_dropped) など）を任意キーで積む free-form dict で、
+    # 学習者に出すものではない（KO10 / 数値非表示）。学習画面が読めるのは状態の語だけ
+    # （``course_content_state`` = ``status`` の trim 済み文字列）。教員向けの経路
+    # （原稿スタジオの course-structure・PUT の応答）は射影しない。
+    if "course_content_status" in out:
+        _state = course_content_state(data)
+        out["course_content_status"] = {"status": _state} if _state else {}
     if isinstance(out.get("chapters"), list):
         chapters = []
         for ch in out["chapters"]:
@@ -567,11 +697,11 @@ def _split_symbol_concepts(concepts: list) -> tuple[list, list[str]]:
     return kept, excluded
 
 
-@router.post("/courses", response_model=LearningCourseOut, status_code=201)
+@router.post("/courses", response_model=LearningCourseCreateOut, status_code=201)
 def create_course(
     body: CourseCreateRequest,
     current_user: dict = Depends(_get_current_user),
-) -> LearningCourseOut:
+) -> LearningCourseCreateOut:
     """新しいコースを作成する。
 
     学ぶ単位の一級化 Phase 2: ①前提を同コース topic の ID 参照に（`resolve_prerequisite_topic_ids`、
@@ -644,13 +774,17 @@ def create_course(
     ).start()
 
     logger.info("Created course '%s' (id=%s) for user=%s", body.title, course_id, current_user["id"])
-    return LearningCourseOut(
+    # IK-0951: 題名に生の TeX 記法が残るなら保存時に知らせる（保存は止めない）。
+    raw_tex_titles = course_titles_with_raw_tex(data)
+    return LearningCourseCreateOut(
         id=course_id,
         title=body.title,
         is_template=body.is_template,
         visibility=body.visibility,
         group_id=body.group_id if body.visibility == "group" else None,
         description=body.description,
+        title_notice=label_vocab.COURSE_TITLE_RAW_TEX_NOTICE if raw_tex_titles else "",
+        raw_tex_titles=raw_tex_titles,
     )
 
 
@@ -776,7 +910,21 @@ def list_courses(
         )
         for r in own_records
     ]
-    # 受講中のマスターコースも「マイコース」として並べる（is_enrollable=False）
+    # 受講中のマスターコースも「マイコース」として並べる（is_enrollable=False）。
+    # IK-0945: 受付が止まった（非公開化された）受講中のコースには事実文を添える
+    # （受講者は読み続けられる。判定は入場判定の正本 course_open_for_enrollment）。
+    def _enrolled_notice(r) -> str:
+        try:
+            open_ = course_open_for_enrollment(
+                current_user["id"], str(r[0]),
+                visibility=r[4], group_id=r[5],
+                is_published=bool(r[3]), is_template=bool(r[2]),
+            )
+        except Exception:  # noqa: BLE001 — 事実文が付かないだけ（一覧は止めない）
+            logger.warning("enrollment openness check failed for %s", r[0], exc_info=True)
+            return ""
+        return "" if open_ else label_vocab.COURSE_ENROLLED_BUT_CLOSED_NOTICE
+
     courses.extend(
         LearningCourseOut(
             id=r[0],
@@ -787,6 +935,7 @@ def list_courses(
             visibility=r[4] or "private",
             group_id=str(r[5]) if r[5] else None,
             description=r[6] or "",
+            enrollment_notice=_enrolled_notice(r),
         )
         for r in enrolled_records
     )
@@ -840,6 +989,7 @@ def _with_resolved_source_titles(data: dict) -> dict:
     """
     if not isinstance(data, dict) or not data.get("sources"):
         return data
+    data = with_course_source_document_ids(data)  # IK-0550: document は常に document_id（UUID）で渡す
     try:
         titles = resolve_course_source_titles(data)
     except Exception:  # noqa: BLE001 — fail-soft
@@ -856,7 +1006,13 @@ def _with_resolved_source_titles(data: dict) -> dict:
         material_id = str(src.get("material_id") or "").strip()
         resolved = titles.get(material_id, "")
         stored = str(src.get("title") or "").strip()
-        if resolved and resolved != stored and (not stored or stored == material_id):
+        # IK-0664（第 25 周 第 7 波）: 作成時の写しが arXiv 番号のままの行も仮の値と見なす
+        # （題名を正本・無ければ番号のまま）。教員が付けた読める題名は上書きしない。
+        stored_is_number = _document_refs.title_is_arxiv_number(stored)
+        if resolved and resolved != stored and (
+            (not stored or stored == material_id)
+            or (stored_is_number and _document_refs.title_is_readable(resolved))
+        ):
             new_src = dict(src)
             new_src["title"] = resolved
             if stored and not str(src.get("subtitle") or "").strip():
@@ -887,12 +1043,107 @@ def get_course(
         raise HTTPException(status_code=404, detail="Course not found")
 
     personal = get_personal_layer(current_user["id"], course_id)
+    # IK-0398: トピック・章の状態（completed / in_progress / locked）と progress_pct は
+    # マスターコースの既定値（作成時の値）のままで、確認問題で本人が完了したトピックが
+    # 反映されていなかった。本人の完了記録（learning_states.progress_data.completed_topics）
+    # から読み時に導出して重ねる（保存データは変えない・新しい表なし）。取得に失敗しても
+    # コースは返す（fail-open = 従来どおりマスターの値）。
+    try:
+        completed_ids = list(
+            get_course_completion(current_user["id"], course_id, data).get("completed_topic_ids") or []
+        )
+    except Exception:
+        logger.warning("Failed to read course completion for course view", exc_info=True)
+        completed_ids = []
+    # 第 23 周（st-02・st-06）: 読んで質問したトピックが「まだ順番が来ていない」のままに
+    # 見えていた。本人が会話したトピックを「学習中」として重ねる（表示だけ・fail-open）。
+    try:
+        touched_ids = list_learner_touched_topic_ids(current_user["id"], course_id)
+    except Exception:
+        logger.warning("Failed to read touched topics for course view", exc_info=True)
+        touched_ids = []
     return LearningCourseLayeredResponse(
         master_course=LearningCourseDetail(
-            **_project_topics_for_learner(_with_resolved_source_titles(data))
+            **_project_topics_for_learner(
+                _overlay_learner_progress(
+                    _with_resolved_source_titles(data), completed_ids, touched_ids
+                )
+            )
         ),
         personal_layer=PersonalLayer(**personal),
     )
+
+
+def _overlay_learner_progress(
+    data: dict,
+    completed_topic_ids: list[str],
+    touched_topic_ids: list[str] | tuple = (),
+) -> dict:
+    """本人の完了記録からトピック・章の状態と progress_pct を導出して重ねたコピーを返す（IK-0398）。
+
+    規則（決定論・保存データは変更しない）:
+      - 完了記録のあるトピック → ``completed``
+      - その直後のトピック（フラット ``topics[]`` の順）が ``locked`` なら ``in_progress``
+        （確認を終えたら次が開く、の表示を揃える。ロックは表示であって API は
+        ロック中のトピックも開ける — 学習者を閉め出さない既存挙動は変えない）
+      - 章: 全トピック完了 → ``completed`` / どれかが完了か進行中 → ``in_progress``。
+        ``progress_pct`` は章内の完了トピックの割合（既存の DTO 項目を実値に揃えるだけ）
+      - 本人が会話したトピック（``touched_topic_ids``）で完了記録の無いもの → ``locked``
+        なら ``in_progress``（第 23 周: 読んで質問したトピックが「まだ順番が来ていない」の
+        ままに見えていた。接触は理解の根拠にならないので ``completed`` にはしない — F4）
+    完了記録も会話の記録も無ければ何も変えない（マスターの値のまま）。
+    """
+    completed = {str(t) for t in (completed_topic_ids or []) if t}
+    touched = {str(t) for t in (touched_topic_ids or []) if t}
+    if not isinstance(data, dict) or not (completed or touched):
+        return data
+    out = dict(data)
+    flat = [t for t in (data.get("topics") or []) if isinstance(t, dict)]
+    status_by_id: dict[str, str] = {}
+    previous_completed = False
+    for topic in flat:
+        topic_id = str(topic.get("id") or "")
+        status = str(topic.get("status") or "locked")
+        if topic_id in completed:
+            status = "completed"
+        elif (previous_completed or topic_id in touched) and status == "locked":
+            status = "in_progress"
+        if topic_id:
+            status_by_id[topic_id] = status
+        previous_completed = topic_id in completed
+
+    def _with_status(topic):
+        if not isinstance(topic, dict):
+            return topic
+        topic_id = str(topic.get("id") or "")
+        if topic_id not in status_by_id:
+            return topic
+        return {**topic, "status": status_by_id[topic_id]}
+
+    out["topics"] = [_with_status(t) for t in (data.get("topics") or [])]
+    if isinstance(data.get("chapters"), list):
+        chapters = []
+        for ci, chapter in enumerate(data["chapters"]):
+            if not isinstance(chapter, dict):
+                chapters.append(chapter)
+                continue
+            chapter = dict(chapter)
+            if isinstance(chapter.get("topics"), list):
+                chapter["topics"] = [_with_status(t) for t in chapter["topics"]]
+            members = [t for t in flat if t.get("chapter_index") == ci]
+            if not members and isinstance(chapter.get("topics"), list):
+                members = [t for t in chapter["topics"] if isinstance(t, dict)]
+            statuses = [status_by_id.get(str(t.get("id") or ""), str(t.get("status") or "locked")) for t in members]
+            if statuses:
+                done = sum(1 for st in statuses if st == "completed")
+                if done == len(statuses):
+                    chapter["status"] = "completed"
+                elif done or any(st == "in_progress" for st in statuses):
+                    chapter["status"] = "in_progress"
+                chapter["progress_pct"] = int(round(100 * done / len(statuses)))
+            chapters.append(chapter)
+        out["chapters"] = chapters
+    return out
 
 
 @router.get("/courses/{course_id}/version-notice")
@@ -1046,11 +1297,11 @@ def get_progress(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/courses/{course_id}/enroll", response_model=LearningCourseOut, status_code=201)
+@router.post("/courses/{course_id}/enroll", response_model=LearningEnrollOut, status_code=201)
 def enroll_course(
     course_id: str,
     current_user: dict = Depends(_get_current_user),
-) -> LearningCourseOut:
+) -> LearningEnrollOut:
     """受講可能なコース（公開/グループ共有）に受講登録する。
 
     Issue #133: 旧仕様ではマスターコースを丸ごとクローンしていたが、
@@ -1063,7 +1314,8 @@ def enroll_course(
         record = session.execute(
             sa_text("""
                 SELECT title, COALESCE(visibility, 'private'), group_id,
-                       COALESCE(is_published, false), COALESCE(is_template, false)
+                       COALESCE(is_published, false), COALESCE(is_template, false),
+                       COALESCE(description, '')
                 FROM learning_courses
                 WHERE id = :course_id
                 LIMIT 1
@@ -1074,30 +1326,43 @@ def enroll_course(
         session.close()
 
     if not record:
-        raise HTTPException(status_code=404, detail="Course not found")
+        raise HTTPException(status_code=404, detail=label_vocab.COURSE_NOT_AVAILABLE_NOTICE)
 
-    title, visibility, group_id, is_published, is_template = record
-    enrollable = False
-    if visibility == "public" and is_published and is_template:
-        enrollable = True
-    elif visibility == "group" and group_id and user_can_access_group(
-        current_user["id"], str(group_id)
-    ):
-        enrollable = True
-    elif user_can_view_course(current_user["id"], course_id):
-        # object_group_permissions（object_type='course'）経由で viewer/editor 権限を持つ場合
-        enrollable = True
+    title, visibility, group_id, is_published, is_template = tuple(record)[:5]
+    description = tuple(record)[5] if len(tuple(record)) > 5 else ""
+    # IK-0945: 入場判定の正本（services.resolve_course_entry）を読む。受講中なら（非公開化の
+    # 後でも）「すでに受講中」で返し、受講の行が無く受付も止まっていれば 403 の事実文。
+    entry = resolve_course_entry(current_user["id"], course_id)
+    if not (entry.is_owner or entry.is_enrolled or entry.open_for_enrollment):
+        raise HTTPException(status_code=403, detail=label_vocab.COURSE_ENROLLMENT_CLOSED_NOTICE)
 
-    if not enrollable:
-        raise HTTPException(status_code=403, detail="このコースを受講する権限がありません")
-
-    enroll_user_in_course(current_user["id"], course_id)
+    newly_enrolled = enroll_user_in_course(current_user["id"], course_id) is not False
 
     logger.info(
         "User=%s enrolled in master course %s (learning_states row created)",
         current_user["id"], course_id,
     )
-    return LearningCourseOut(id=course_id, title=title or "")
+    # IK-0369: 応答は一覧（GET /courses）の「受講中」行と同じ投影で埋める。id / title だけを
+    # 埋めて他の列を既定値（非公開・受講不可）のまま返すと、公開コースに登録した直後の
+    # 画面がそれを事実として読む。受講登録した後なので is_enrollable は一覧と同じく False。
+    # IK-0385: is_enrollable=False を「受講できなかった」と読まれないよう、成立した事実を
+    # enrolled / notice で添える（既存フィールドは不変・追加のみ）。
+    return LearningEnrollOut(
+        enrolled=True,
+        notice=(
+            label_vocab.COURSE_ENROLLED_NOTICE
+            if newly_enrolled
+            else label_vocab.COURSE_ALREADY_ENROLLED_NOTICE
+        ),
+        id=course_id,
+        title=title or "",
+        is_template=bool(is_template),
+        is_published=bool(is_published),
+        is_enrollable=False,
+        visibility=visibility or "private",
+        group_id=str(group_id) if group_id else None,
+        description=description or "",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1151,7 +1416,42 @@ _CONTENT_QUESTION_TERMS = (
     "式", "方程式", "定理", "法則", "証明", "導出", "定義", "公式",
     "理論", "概念", "仮定", "前提条件", "モデル", "計算", "関数", "係数",
     "変数", "近似", "観測", "実験", "論文",
+    # IK-0476: 英語で問う受講者の学問一般語（分野語は書かない）。
+    "equation", "theorem", "derivation", "definition", "theory", "hypothesis",
+    "assumption", "approximation", "parameter", "observation", "measurement",
+    "constraint", "the paper", "this paper",
 )
+
+#: コースデータから内容語を引くときの区切り（トピック題名「主結果：CMB・BAO・SN・宇宙シア」等）。
+_COURSE_TERM_SPLIT_RE = re.compile(r"[\s：:・、，,／/（）()「」『』\[\]【】—\-–~〜]+")
+_COURSE_TERM_LIMIT = 200
+
+
+def _course_content_terms(course_data: dict | None) -> tuple[str, ...]:
+    """コースのトピック題名・概念名から「教材内容語」を集める（IK-0476・決定論・非LLM）。
+
+    分野語をコードに書かずに、分野未指定（cartridge_id 空）のコースでも一次判定が教材の
+    語を知るための供給口。題名は区切り記号で割り、3文字以上の断片だけを使う（"SN" の
+    ような短い略語は部分一致の誤判定を招くので使わない — ``_CARTRIDGE_TERM_MIN_LEN`` と同じ）。
+    """
+    if not isinstance(course_data, dict):
+        return ()
+    raw: list[str] = []
+    for topic in iter_all_topics(course_data):
+        raw.extend(_COURSE_TERM_SPLIT_RE.split(str(topic.get("title") or "")))
+        for concept in topic.get("concepts") or []:
+            raw.append(str(concept.get("name") if isinstance(concept, dict) else concept or ""))
+    for concept in course_data.get("concepts") or []:
+        raw.append(str(concept.get("name") if isinstance(concept, dict) else concept or ""))
+    terms: list[str] = []
+    for term in raw:
+        term = term.strip()
+        if len(term) < _CARTRIDGE_TERM_MIN_LEN or term in terms:
+            continue
+        terms.append(term)
+        if len(terms) >= _COURSE_TERM_LIMIT:
+            break
+    return tuple(terms)
 
 # カートリッジ由来の内容語を引くときの下限文字数（"SM" のような短い別名を
 # 部分一致に使うと、無関係な文が内容語ありと誤判定されるため）。
@@ -1250,6 +1550,7 @@ def _classify_intent(
     course_title: str,
     *,
     on_llm_call: Callable[[], None] | None = None,
+    screen_hint: str = "",
 ) -> str:
     """ユーザーメッセージの意図を分類する (Intent Routing)。
 
@@ -1281,8 +1582,13 @@ def _classify_intent(
         # 分野名をハードコードしない（コースごとに分野が異なる）。コース名は
         # プロンプト冒頭で提示済みなので、ここでは「このコースが扱う専門分野」と書く。
         "- DOMAIN_RAG: このコースが扱う専門分野の知識・概念に関する質問\n\n"
-        "教材の内容についての質問か操作方法についての質問か迷う場合は、DOMAIN_RAG に分類してください（安全側）。\n\n"
-        f"質問: {message}\n\n"
+        "教材の内容についての質問か操作方法についての質問か迷う場合は、DOMAIN_RAG に分類してください（安全側）。\n"
+        # IK-1064: 画面に出た事実の意味・出所を問う発話は使い方ではない。
+        "画面に出ている要素の事実（説明の有無・誰が書いたか・承認や検証の記録）を問う質問も DOMAIN_RAG です。\n\n"
+        # 第 25 周 第 6 波: 画面で開いているものを 1 行だけ添える（「この項目」「ここ」を解決させる。
+        # 画面の参照から組んだ 40 字以内の名前だけで、本文は渡さない = SA1）。
+        + (f"画面の文脈: {screen_hint}\n" if screen_hint else "")
+        + f"質問: {message}\n\n"
         "上記のルートの中から最も適切な1つだけを返してください（説明不要）:"
     )
 
@@ -1304,6 +1610,85 @@ def _classify_intent(
     return "DOMAIN_RAG"
 
 
+def _intent_screen_hint(body: "LearningChatRequest", *, course_id: str) -> str:
+    """意図分類に添える画面の文脈 1 行（第 25 周 第 6 波・決定論・非LLM）。
+
+    「この項目」「ここ」が何を指すかを分類器に渡す。材料は画面の参照（分野の地図で開いた
+    場所の名前・選んだ要素の名前）だけで 40 字に切る。本文・選択テキストは渡さない（SA1 —
+    分類は内容語の有無を見るだけで、学習資料の本文は不要）。無ければ ``""``。
+    """
+    payload = getattr(body, "screen_context", None)
+    if payload is None:
+        return ""
+    try:
+        ctx = normalize_screen_context(payload.model_dump())
+    except Exception:  # pragma: no cover - 正規化は例外を出さない契約
+        return ""
+    if ctx is None or ctx.screen != SCREEN_LEARNING:
+        return ""
+    declared_course_id = str(ctx.selection.get("course_id") or "")
+    if declared_course_id and declared_course_id != str(course_id):
+        return ""
+
+    def _name(value: object) -> str:
+        text = " ".join(strip_control_sequences(str(value or "")).split())[:40]
+        return "" if (not text or contains_internal_id(text)) else text
+
+    # 第 25 周 第 10 波（製品頭脳 B 4308）: 今の往復の明示の選択を先に（地図で今選んだ場所 →
+    # 選んだ要素 → 選んだ一節 → わたしの地図で見ている場所）、最後に開いた地図の場所は最後に。
+    atlas = _name(ctx.view.get("atlas_node_label"))
+    if atlas and str(ctx.selection.get("atlas_node_id") or "").strip():
+        return f"学習者は分野の地図で「{atlas}」を開いています（「この項目」「ここ」はこれを指します）"
+    element = _name(ctx.selection.get("element_label"))
+    if element:
+        return f"学習者は教材の「{element}」を選んでいます（「この部品」「この項目」「ここ」はこれを指します）"
+    # 第 25 周 第 11 波（製品頭脳 B 4330・IK-1145 の残り）: 名前が届かなくても要素を選んでいる
+    # 事実は渡す（名前は推測しない — 内部 ID は渡さない）。
+    if str(ctx.selection.get("element_id") or "").strip():
+        return "学習者は教材の要素を 1 つ選んでいます（「この部品」「この項目」「ここ」はこれを指します）"
+    if str(getattr(body, "selection_text", "") or "").strip():
+        return "学習者は教材の一節を選んで尋ねています（「ここ」はその一節を指します）"
+    if str(ctx.selection.get("personal_map_node_id") or "").strip():
+        return "学習者は「わたしの地図」で見ている場所について尋ねています（「ここ」はそれを指します）"
+    if atlas:
+        return f"学習者は分野の地図で「{atlas}」を開いています（「この項目」「ここ」はこれを指します）"
+    return ""
+
+
+def _advice_concepts(topic_info: dict | None, course_data: dict | None) -> list[str]:
+    """学習相談に並べる主要概念（第 17 周 C-seq10）。トピックの key_concepts を優先する。"""
+    concepts = topic_key_concepts(topic_info)
+    if concepts:
+        return concepts
+    out: list[str] = []
+    for c in (course_data or {}).get("concepts", []) or []:
+        name = c.get("name", c) if isinstance(c, dict) else str(c)
+        name = str(name or "").strip()
+        if name and not is_symbol_concept_name(name) and name not in out:
+            out.append(name)
+    return out
+
+
+def _advice_topics(topic_info: dict | None, course_data: dict | None, limit: int = 10) -> list[dict]:
+    """学習相談に並べるトピック（現在の章 → 現在のトピックの前後 → 先頭、最大 ``limit`` 件）。"""
+    topics = course_topics(course_data)
+    if not topics:
+        return []
+    if not isinstance(topic_info, dict):
+        return topics[:limit]
+    chapter = topic_info.get("chapter_index")
+    if chapter is not None:
+        same = [t for t in topics if t.get("chapter_index") == chapter]
+        if same:
+            return same[:limit]
+    current = str(topic_info.get("id") or "")
+    index = next((i for i, t in enumerate(topics) if str(t.get("id") or "") == current), None)
+    if index is None:
+        return topics[:limit]
+    start = max(0, min(index - limit // 2, len(topics) - limit))
+    return topics[start:start + limit]
+
+
 def _generate_learning_advice_response(
     course_title: str,
     topic_title: str,
@@ -1313,6 +1698,8 @@ def _generate_learning_advice_response(
     course_data: dict | None = None,
     on_llm_call: Callable[[], None] | None = None,
     source_context: str | None = None,
+    explain_prerequisite: str | None = None,
+    topic_source_context: str | None = None,
 ) -> str:
     """学習相談・メタ質問・学習開始への応答を生成する（ルート②: ナビゲーター）。
 
@@ -1322,6 +1709,11 @@ def _generate_learning_advice_response(
     （``[出典N]`` 付きの context block）。渡された場合だけ、説明を抜粋に基づかせ、
     抜粋外の内容は一般的な学術知識であることを明示させる（原則8: 出所の正直さ）。
     LLM コール数は渡しても渡さなくても1回のまま。
+
+    ``explain_prerequisite`` は IK-0383: 学習者がその前提そのものの説明を求めたとき
+    （逆質問への「いいえ・教えて」、前提名を挙げた問い）に渡す前提名。渡したときは
+    ナビゲーターの案内（全体像・構成要素の列挙・「解説はまだしない」）ではなく、
+    その前提の説明を書かせる（問いに答えないまま案内を返さない）。
     """
     params = get_llm_params("standard")
 
@@ -1334,21 +1726,20 @@ def _generate_learning_advice_response(
             if name:
                 prerequisites.append(name)
 
-    if course_data:
-        for c in course_data.get("concepts", []):
-            name = c.get("name", c) if isinstance(c, dict) else str(c)
-            if name:
-                concepts.append(name)
+    # 第 17 周（C-seq10）: 主要概念は表示中トピックのもの（コース全体の concepts は複数の論文に
+    # またがるため、トピックの概念が無いときだけ使う）。
+    concepts = _advice_concepts(topic_info, course_data)
 
-    # コース全体のトピック一覧（最大10件）
+    # トピック一覧は現在の章（同じ論文）のトピック（最大10件）。章が分からなければ現在の
+    # トピックの前後。コースの先頭10件にすると現在の論文のトピックが入らないことがある。
     topics_block = ""
     if course_data:
-        topics = course_topics(course_data)
+        topics = _advice_topics(topic_info, course_data)
         if topics:
             topics_list = "\n".join(
-                f"  - {t.get('title', t.get('id', ''))}" for t in topics[:10]
+                f"  - {t.get('title', t.get('id', ''))}" for t in topics
             )
-            topics_block = f"■ コースのトピック一覧:\n{topics_list}\n\n"
+            topics_block = f"■ コースのトピック一覧（現在の章）:\n{topics_list}\n\n"
 
     concepts_block = ""
     if concepts:
@@ -1368,30 +1759,88 @@ def _generate_learning_advice_response(
 
     source_block = ""
     if source_context:
+        # IK-0430: 出典マーカーの指示は、抜粋に番号付き出典が実際にあるときだけ出す
+        # （コース内トピックの教材だけの抜粋に「[出典1] を挿入せよ」と指示すると、
+        # 番号の無い抜粋に対して捏造を誘う）。
+        if _CITATION_MARKER_RE.search(source_context):
+            citation_rule = (
+                "  - 抜粋を参照したときは、付された番号付き出典マーカー `[出典N]` を"
+                "本文に自然に挿入すること（番号は提示されたものに対応させ、独自の番号や"
+                "『書籍名』形式は使わないこと）。\n"
+            )
+        else:
+            citation_rule = "  - 抜粋には番号付き出典が無いので、出典マーカーは書かないこと。\n"
         source_block = (
             f"{source_context}\n\n"
             "■ 上の抜粋の扱い（出所の正直さ）:\n"
             "  - 前提知識の説明は、まず上の抜粋に基づいて書くこと。\n"
-            "  - 抜粋を参照したときは、付された番号付き出典マーカー `[出典1]` `[出典2]` … を"
-            "本文に自然に挿入すること（番号は提示されたものに対応させ、独自の番号や"
-            "『書籍名』形式は使わないこと）。\n"
-            "  - 抜粋に無い内容を補ったときは、資料由来ではないことが読み手に分かるように書くこと。\n\n"
+            + citation_rule
+            + "  - 抜粋に無い内容を補ったときは、資料由来ではないことが読み手に分かるように書くこと。\n\n"
         )
 
+    explain_target = (explain_prerequisite or "").strip()
+    if explain_target:
+        prompt = (
+            f"あなたは「{course_title}」の学習をサポートする教授です。\n"
+            f"学生は現在「{topic_title}」のトピックを学習しており、その前提知識"
+            f"「{explain_target}」の説明を求めています。\n\n"
+            f"{persona_block}"
+            f"{source_block}"
+            f"学生からのメッセージ: {message}\n\n"
+            f"前提知識「{explain_target}」そのものを、次の構成で説明してください:\n"
+            "1. 【ひとことで】何をする考え方・方法なのかを1〜2文で述べる。\n"
+            "2. 【しくみ】考え方の要点を具体的に説明する（必要なら数式を $...$ で示してよい）。\n"
+            f"3. 【このトピックとのつながり】「{topic_title}」でこの前提がどう使われるかを1〜2文で述べる。\n\n"
+            f"※注意: 「{topic_title}」は学生がいま開いているトピックです。「次のトピック」と呼ばないこと。\n"
+            "※注意: 学生のメッセージに具体的な問いが含まれていれば、それに必ず答えること。\n"
+            "※注意: 学生のメッセージが「まだ」「わからない」のような短い返事だけなら、それは前提を"
+            "まだ理解していないという返事です。問い返さず、上の構成で前提そのものを最初から説明すること。"
+            "前提トピックの教材が上に示されていれば、それを優先して使うこと。\n"
+            "※注意: 選択肢ボタンはシステムが自動付与するので、本文に [ ] 形式のボタン記法は書かないこと。"
+        )
+        if on_llm_call:
+            on_llm_call()
+        try:
+            return generate_text(
+                messages=[{"role": "user", "content": prompt}],
+                model=params["model"],
+                reasoning_effort=params["reasoning_effort"],
+            )
+        except Exception:
+            logger.warning("Prerequisite explanation LLM call failed, returning fallback")
+            return f"「{explain_target}」の説明を生成できませんでした。"
+
+    # 第 18 周（G2）: 学習相談（「どこから読めばいい？」）は固定構成の見出し（旧【歓迎と目標】
+    # 【構成要素】…）をやめ、表示中のトピック自身の構造（題名・主要概念・章の次のトピック）から
+    # 短い平文（5文以内・見出しなし・数値なし）で答える。表示中の教材の出典の抜粋が渡されたときは
+    # 教材に触れた箇所に [出典N] を添えさせる（出典チップは本文が引用したものだけ = IK-0494）。
+    next_topic = _advice_next_topic(topic_info, course_data)
+    next_block = f"■ 章の次のトピック: {next_topic}\n\n" if next_topic else ""
+    topic_source_block = ""
+    if topic_source_context and _CITATION_MARKER_RE.search(topic_source_context):
+        topic_source_block = (
+            f"{topic_source_context}\n\n"
+            "■ 上の出典の扱い: 表示中の教材に触れたところには、付された番号付き出典マーカー"
+            " `[出典N]` を本文に自然に挿入すること（番号は提示されたものに対応させ、独自の番号は"
+            "使わないこと）。\n\n"
+        )
     prompt = (
-        f"あなたは「{course_title}」の学習をサポートするナビゲーター教授です。\n"
+        f"あなたは「{course_title}」の学習をサポートする教授です。\n"
         f"学生は現在「{topic_title}」のトピックを学習しています。\n\n"
         f"{persona_block}"
         f"{topics_block}"
         f"{concepts_block}"
         f"{prereqs_block}"
+        f"{next_block}"
         f"{source_block}"
+        f"{topic_source_block}"
         f"学生からのメッセージ: {message}\n\n"
-        "コース全体の構造と学生の現在位置を踏まえ、以下の構成で回答してください:\n"
-        "1. 【歓迎と目標】このトピックで学ぶことの全体像と、最終的な学習目標を簡潔に説明する。\n"
-        "2. 【構成要素】習得すべき主要な概念をリストアップする。\n"
-        "3. 【前提知識の確認】このトピックを学ぶために必要な前提知識を提示する。\n"
-        "4. 【次の一歩】最後に、学生がこの後どう進めばよいかを1〜2文で促す。\n\n"
+        "上の材料（現在のトピックの題名・主要概念・章の次のトピック・表示中の教材の出典）だけを使って、"
+        "学生のメッセージに直接答えてください。\n"
+        "  - 5文以内の平易な文章で書くこと。見出し・【】で囲んだ区切り・箇条書き・番号付きリストは使わないこと。\n"
+        "  - 件数・割合・時間などの数値は書かないこと。\n"
+        "  - 歓迎の挨拶や学習目標の前置きは書かず、まず答えから書くこと。\n"
+        "  - 問い返しは書かないこと。\n"
         "※注意: ここでは具体的な解説（数式展開など）はまだ行わないこと。\n"
         "※注意: 選択肢ボタンはシステムが自動付与するので、本文に [ ] 形式のボタン記法は書かないこと。"
     )
@@ -1407,13 +1856,53 @@ def _generate_learning_advice_response(
         )
     except Exception:
         logger.warning("Learning advice response LLM call failed, returning fallback")
-        return (
-            f"「{course_title}」の学習サポートへようこそ！\n\n"
-            f"これから「{topic_title}」の学習を始めます。\n\n"
-            + (f"**習得すべき主要概念:** {', '.join(concepts)}\n\n" if concepts else "")
-            + (f"**必要な前提知識:** {', '.join(prerequisites)}\n\n" if prerequisites else "")
-            + "下の選択肢から、前提知識の確認に進むか、最初の概念の説明に進むかを選んでください。"
-        )
+        # 決定論の短い平文（見出し・数値・挨拶なし）。
+        parts = [f"「{course_title}」の「{topic_title}」は、表示中の教材を最初から読むところから始められます。"]
+        if concepts:
+            parts.append(f"このトピックでは{'、'.join(concepts[:3])}を中心に扱います。")
+        if next_topic:
+            parts.append(f"読み終えたら、章の次のトピック「{next_topic}」へ進めます。")
+        return "".join(parts)
+
+
+def _advice_next_topic(topic_info: dict | None, course_data: dict | None) -> str:
+    """表示中のトピックの章で次に来るトピックの題名（無ければ空文字。決定論）。"""
+    if not isinstance(topic_info, dict):
+        return ""
+    topics = _advice_topics(topic_info, course_data, limit=10**6)
+    current = str(topic_info.get("id") or "")
+    for i, t in enumerate(topics):
+        if str(t.get("id") or "") == current:
+            if i + 1 < len(topics):
+                return str(topics[i + 1].get("title") or "").strip()
+            return ""
+    return ""
+
+
+#: 学習相談の平文に残す文数の上限（第 18 周 G2）。
+_ADVICE_MAX_SENTENCES = 5
+_ADVICE_HEADING_RE = re.compile(r"^\s*(?:#{1,6}\s+|\d+[.)．]\s*)?【[^】\n]{1,20}】\s*|^\s*#{1,6}\s+", re.MULTILINE)
+
+
+def _shape_advice_answer(answer: str, message: str, *, plain: bool) -> str:
+    """学習相談・前提説明の早期 return を応答の骨格に通す（IK-0586 の残り）。
+
+    ``assemble`` で答え先頭・問い返し 1 つまで（stuck は早期 return に来ない）。``plain`` の
+    学習相談は見出し・【】の区切りを外し、5文に切り詰める（数式・コードを含む段落は切らない）。
+    """
+    text = str(answer or "")
+    if plain:
+        text = _ADVICE_HEADING_RE.sub("", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        if "$" not in text and "```" not in text:
+            sentences = [m.group(0) for m in re.finditer(r"[^。！？!?]+(?:[。！？!?]+|$)", text)]
+            sentences = [x for x in sentences if x.strip()]
+            if len(sentences) > _ADVICE_MAX_SENTENCES:
+                text = "".join(sentences[:_ADVICE_MAX_SENTENCES]).strip()
+    shape = assemble_response_shape(
+        answer=text, learner_message=message, is_discuss=False, gate_text=None, degraded=False,
+    )
+    return render_answer_text(shape)
 
 
 # ---------------------------------------------------------------------------
@@ -1458,14 +1947,40 @@ def _prerequisite_terms(message: str, topic_info: dict | None) -> list[str]:
     return mentioned + rest
 
 
+#: 教材本文の埋め込みのうち、LLM に渡しても中身の無い参照（出典・部品・主張のチップ）。
+#: 図・数式は ``scrub_internal_placeholders`` が「（図）」「（数式）」の事実語に置き換える。
+_EXCERPT_REFERENCE_EMBED_RE = re.compile(
+    r"!\[\[\s*(?:source|component|claim):[^\]\n]*\]\]", re.IGNORECASE
+)
+
+
+def _scrub_excerpt_embeds(text: str) -> str:
+    """前提説明のプロンプトへ載せる抜粋から、表示用の埋め込み記法を外す（IK-0430）。
+
+    ``![[figure:<uuid>]]`` → 「（図）」、``![[equation:…]]`` / ``[[FORMULA_N]]`` →
+    「（数式）」（``core.text_hygiene`` の正本）、``![[source:…]]`` 等のチップ参照は取り除く。
+    描画には使わない（表示は各画面の解決器が正本）。
+    """
+    # 生成時の決定論付録（「### この節で参照する図」+ 埋め込み行）は本文ではないので先に外す
+    # （付録の形の判定は course_content_builder が正本。埋め込みを置き換える前に通す）。
+    cleaned = strip_generated_reference_appendix(str(text or ""))
+    cleaned = scrub_internal_placeholders(cleaned)
+    return _EXCERPT_REFERENCE_EMBED_RE.sub("", cleaned)
+
+
 def _resolve_prerequisite_context(
     user_id: str,
     course_data: dict,
     terms: list[str],
     *,
     max_search_terms: int = 3,
+    citation_numbers: "_SessionCitationNumbers | None" = None,
+    prefer_document_ids: "Iterable[str] | None" = None,
 ) -> dict:
     """前提知識の①②を解決し、context block / 出典 / grounding / 未解決名を返す。
+
+    ``citation_numbers`` は会話の出典採番器（IK-0432）。省略時はこの往復だけの新しい
+    採番器（1 から）を使う。
 
     Returns
     -------
@@ -1477,22 +1992,38 @@ def _resolve_prerequisite_context(
     blocks: list[str] = []
     cited_sources: list[dict] = []
     has_course_topic_material = False
+    if citation_numbers is None:
+        citation_numbers = _SessionCitationNumbers()
 
     if terms:
         course_material_ids = set(course_source_material_ids(course_data))
 
         # ① 同コースの topic（章ネストも走査する。走査は course_data アクセサに委譲）
         topics_by_title: dict[str, dict] = {}
+        topics_by_id: dict[str, dict] = {}
         for topic in iter_all_topics(course_data):
             title = str(topic.get("title") or "").strip().casefold()
             if title and title not in topics_by_title:
                 topics_by_title[title] = topic
+            if topic.get("id"):
+                topics_by_id.setdefault(str(topic.get("id")), topic)
+        # 第 15 周: 前提の名前が前提トピックの題名と違う（``{"name", "topic_id"}`` で結ばれた）とき、
+        # 名前からその前提トピックを引く（名前だけで照合して教材本文が渡らなかった）。
+        for topic in iter_all_topics(course_data):
+            for prereq in topic.get("prerequisites") or []:
+                if not isinstance(prereq, dict):
+                    continue
+                name = str(prereq.get("name") or "").strip().casefold()
+                linked = topics_by_id.get(str(prereq.get("topic_id") or "").strip())
+                if name and linked and name not in topics_by_title:
+                    topics_by_title[name] = linked
         for term in terms:
             topic = topics_by_title.get(term.strip().casefold())
             material = _topic_student_material(topic) if topic else ""
             if material:
                 blocks.append(
-                    f"[コース内トピック『{topic.get('title') or term}』の教材]\n{material[:3000]}"
+                    f"[コース内トピック『{topic.get('title') or term}』の教材]\n"
+                    f"{_scrub_excerpt_embeds(material)[:3000]}"
                 )
                 has_course_topic_material = True
                 if term not in resolved:
@@ -1502,34 +2033,36 @@ def _resolve_prerequisite_context(
         pending = [t for t in terms if t not in resolved]
         if pending:
             allowed_document_ids = list_visible_document_ids(user_id)
+            _prefer = tuple(prefer_document_ids or ())
+            if _prefer:
+                # 第 25 周 第 6 波（IK-0987）: 焦点の論文の別の版（TeX 版・PDF 版）も焦点に含める。
+                _prefer = with_paper_versions(
+                    FocusDocument(document_ids=_prefer),
+                    paper_version_siblings(_prefer, allowed_document_ids=allowed_document_ids),
+                ).document_ids
             chunk_results = search_chunks_with_metadata(
                 "、".join(pending[:max_search_terms]),
-                top_k=6,
+                top_k=10 if _prefer else 6,
                 allowed_document_ids=allowed_document_ids,
+                prefer_document_ids=_prefer,
+                prefer_chunk_ids=tuple(citation_numbers.mapping()),
             )
+            if _prefer:
+                # 焦点の論文を優先し、他論文はそれより類似度が高いときだけ残す（FD3 の1規則）。
+                chunk_results = prefer_focus(chunk_results, _prefer, limit=6)
             matched_text: list[str] = []
             for r in chunk_results:
                 if float(r.get("score") or 0.0) < 0.30:
                     continue
-                _n = len(cited_sources) + 1
                 text = str(r.get("text") or "")
-                blocks.append(f"[出典{_n}] 『{r.get('source_title', '')}』\n{text}")
+                # 出典番号は会話の中で固定（IK-0432。本体 RAG と同じ採番器・同じ組み立て）。
+                _source = _adopted_source_entry(citation_numbers, r, course_material_ids)
+                cited_sources.append(_source)
+                blocks.append(
+                    f"[出典{_source['index']}] 『{r.get('source_title', '')}』{_source_section_note(r)}\n"
+                    f"{sanitize_source_text_for_prompt(_scrub_excerpt_embeds(text))}"
+                )
                 matched_text.append(text)
-                _quote = text.strip().replace("\n", " ")
-                cited_sources.append({
-                    "index": _n,
-                    "chunk_id": r.get("id", ""),
-                    "source_title": r.get("source_title", "不明な教材"),
-                    "tier": r.get("tier", TIER_OUT_OF_SOURCE),
-                    "score": round(float(r.get("score", 0.0)), 3),
-                    "quote": (_quote[:80] + "…") if len(_quote) > 80 else _quote,
-                    "meta": r.get("source_file") or "",
-                    "origin": (
-                        "course_material"
-                        if r.get("material_id") in course_material_ids
-                        else "other_material"
-                    ),
-                })
             # 「その前提を扱っている」の判定は逐語一致だけ（決定論・追加コストなし）。
             # ベクトル近傍で引けただけの資料を「この前提を扱っている」とは言わない。
             haystack = " ".join(matched_text).casefold()
@@ -1580,6 +2113,409 @@ def _prerequisite_closed_world_note(unresolved: list[str]) -> str:
     return f"{PREREQUISITE_CLOSED_WORLD_FACT}（対象: {listed}）"
 
 
+# ---------------------------------------------------------------------------
+# 前提確認の逆質問への答え・前提そのものへの問い（IK-0383）
+# ---------------------------------------------------------------------------
+#
+# 前提確認の逆質問（`check_prerequisites` の介入文 + はい/いいえ）のあと、学習者が
+# ボタンではなく「いいえ、DCF法から教えてください」と打つと、`check_prerequisites` の
+# 言及判定（前提の**名前全体**が発話に含まれるか）に掛からず、同じ逆質問がそのまま
+# 返っていた（3回続いた実例あり）。「DCF法とは何ですか」のような前提そのものへの問いも
+# 同じ理由で逆質問に吸い込まれ、問いに答えないままになっていた。
+# ここでは決定論・非LLMで、①直前の往復が逆質問だったか ②発話が前提そのものの説明を
+# 求めているか を判定し、説明の3段解決（是正 F4）へ流す。**逆質問を2回続けて出さない**。
+# 「理解している」の記帳は従来どおり `check_prerequisites` 側だけが行う（否定形は記帳しない）。
+
+#: `services.check_prerequisites` が組み立てる逆質問の定型部分（直前の往復が逆質問だったかの判定用）。
+#: 文言の一致は test_prerequisite_routing.py が固定する（片方だけ変えると判定が外れる）。
+PREREQUISITE_GATE_MARKER = "を理解するには、まず以下の前提知識を押さえる必要があります"
+#: TRIAGE14: 逆質問を回答の後ろに添えた往復（質問には同じターンで答えた）の目印。
+#: この目印のある逆質問に「理解している」と答えても、元の質問を答え直さない。
+PREREQUISITE_GATE_ANSWERED_MARKER = "ご質問には上で答えました。"
+#: 回答済みの逆質問に「理解している」とだけ答えた往復の固定文（LLM 0 回）。
+PREREQUISITE_ACK_ONLY_REPLY = "わかりました。「{prerequisite}」は理解している前提で進めます。続けて質問してください。"
+PREREQUISITE_ACK_ONLY_REPLY_EN = 'Got it. We will go on assuming you understand "{prerequisite}". Feel free to ask your next question.'
+_PREREQUISITE_GATE_FIRST_RE = re.compile(r"まず「(.+?)」から説明します")
+#: 英語の逆質問の「最初に説明する前提」（IK-0574。正本は label_vocab.PREREQUISITE_GATE_FIRST_EN）。
+_PREREQUISITE_GATE_FIRST_EN_RE = re.compile(
+    re.escape(label_vocab.PREREQUISITE_GATE_FIRST_EN).replace(re.escape("{first}"), "(.+?)")
+)
+#: 逆質問を回答の後ろに添えた往復の目印（日本語 / 英語。IK-0574）。
+_PREREQUISITE_GATE_ANSWERED_MARKERS = (
+    PREREQUISITE_GATE_ANSWERED_MARKER,
+    label_vocab.PREREQUISITE_GATE_ANSWERED_MARKER_EN.strip(),
+)
+
+#: 「理解していない・教えてほしい」の答え（逆質問の直後に効く）。
+_PREREQ_NEGATIVE_MARKERS = (
+    "いいえ", "いや、", "わからない", "分からない", "わかりません", "分かりません",
+    "知らない", "知りません", "理解していません", "理解できていません", "自信がない",
+    "自信がありません", "まだ", "わからん", "分からん", "むずい",
+)
+#: 前提そのものの説明を求める言い方（逆質問が無くても、前提名と併せて効く）。
+_PREREQ_TEACH_MARKERS = (
+    "教えて", "説明して", "から説明", "から学", "とは", "って何", "ってなに", "ってどういう",
+    "わからない", "分からない", "わかりません", "分かりません",
+)
+_PREREQ_HEAD_SPLIT_RE = re.compile(r"による|における|について|の|と|を|が|は|で|\s")
+#: IK-0424: 英語の「理解していない・説明してほしい」（逆質問の直後に効く）。小文字化して語で見る。
+_PREREQ_NEGATIVE_EN_RE = re.compile(
+    r"^\s*no\b|\bi\s+don'?t\b|\bi\s+do\s+not\b|\bnot\s+familiar\b|\bplease\s+explain\b"
+)
+#: IK-0424: 英語の説明要求（前提名・前提の内容語と併せて効く）。
+_PREREQ_TEACH_EN_RE = re.compile(r"\bexplain\b|\bwhat\s+is\b|\bwhat's\b|\btell\s+me\b")
+#: IK-0423: 前提の内容語が2つ以上重なる発話を「前提そのものへの問い」と読むときの、問いの形の目印。
+_PREREQ_QUESTION_MARKERS = ("？", "?", "どう", "なぜ", "何", "違", "とは")
+_PREREQ_QUESTION_EN_RE = re.compile(r"\b(?:why|how|what|which|explain)\b")
+#: IK-0423: 前提名の内容語（漢字・カタカナの2字以上の連なり / 英字2字以上の語）。
+_PREREQ_CONTENT_WORD_RE = re.compile(r"[\u3400-\u9fff々〆ヵヶ]{2,}|[\u30a1-\u30faー]{2,}|[A-Za-z][A-Za-z0-9]+")
+#: 内容語が何個重なれば「前提そのものへの問い」と読むか（前提名の言い換えを拾う）。
+_PREREQ_CONTENT_OVERLAP_MIN = 2
+
+
+def _prerequisite_display_names(topic_info: dict | None, course_data: dict | None) -> list[str]:
+    """現在トピックの前提の名前（と topic_id で結ばれた題名）を保存順で返す。"""
+    topics_by_id = {
+        str(t.get("id")): t for t in iter_all_topics(course_data or {}) if isinstance(t, dict) and t.get("id")
+    }
+    names: list[str] = []
+    for prereq in ((topic_info or {}).get("prerequisites") or []):
+        if isinstance(prereq, dict):
+            candidates = [str(prereq.get("name") or "").strip()]
+            linked = topics_by_id.get(str(prereq.get("topic_id") or "").strip())
+            if linked:
+                candidates.append(str(linked.get("title") or "").strip())
+        else:
+            candidates = [str(prereq or "").strip()]
+        for name in candidates:
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def _prerequisite_mentioned(message: str, names: list[str]) -> str | None:
+    """発話が言及している前提の名前を返す（名前全体か、名前の頭の語 = 3文字以上）。"""
+    msg = (message or "").casefold()
+    if not msg:
+        return None
+    for name in names:
+        if name.casefold() in msg:
+            return name
+    for name in names:
+        head = _PREREQ_HEAD_SPLIT_RE.split(name, maxsplit=1)[0].strip()
+        if len(head) >= 3 and head != name and head.casefold() in msg:
+            return name
+    return None
+
+
+def _prerequisite_content_overlap(message: str, names: list[str]) -> str | None:
+    """前提名の内容語が発話に2つ以上現れるなら、その前提名を返す（IK-0423・決定論）。
+
+    内容語は漢字・カタカナの2字以上の連なりと英字2字以上の語。英字の語は語境界付きの照合
+    （``alias_matching`` の正本。``GR`` が ``gravity`` の途中に当たらない）、漢字・カタカナは
+    部分文字列で見る。略語の展開（MG ≈ 修正重力）は見ない — 重なりは原文の語だけで数える。
+    """
+    msg = message or ""
+    if not msg:
+        return None
+    from episteme_graph.agents.alias_matching import text_mentions_alias
+
+    for name in names:
+        words: list[str] = []
+        for word in _PREREQ_CONTENT_WORD_RE.findall(name):
+            if word not in words:
+                words.append(word)
+        if len(words) < _PREREQ_CONTENT_OVERLAP_MIN:
+            continue
+        hits = 0
+        for word in words:
+            if word.isascii():
+                if text_mentions_alias(msg, word):
+                    hits += 1
+            elif word in msg:
+                hits += 1
+        if hits >= _PREREQ_CONTENT_OVERLAP_MIN:
+            return name
+    return None
+
+
+def _is_question_shaped(message: str) -> bool:
+    """問いの形の発話か（？・どう・なぜ・何・違い・とは / why・how・what・which・explain）。"""
+    msg = message or ""
+    return any(m in msg for m in _PREREQ_QUESTION_MARKERS) or bool(
+        _PREREQ_QUESTION_EN_RE.search(msg.casefold())
+    )
+
+
+def _prerequisite_gate_asked_in_history(history: list[dict] | None, topic_title: str) -> bool:
+    """このトピックの逆質問が、履歴のどこかの assistant ターンに既にあるか（IK-0422）。
+
+    逆質問は (トピック, セッション) につき1回だけにする。直前の往復だけを見ると、逆質問の
+    あとに1往復挟んだ次の問いでまた同じ逆質問が返っていた。
+    """
+    for turn in history or []:
+        if not isinstance(turn, dict) or turn.get("role") != "assistant":
+            continue
+        content = str(turn.get("content") or "")
+        if _is_prerequisite_gate_for_topic(content, topic_title):
+            return True
+    return False
+
+
+def _is_mostly_latin(text: str) -> bool:
+    """ラテン文字が文字の大半を占める発話か（IK-0424。_answer_language_line と同じ基準）。"""
+    body = str(text or "")
+    latin = sum(1 for ch in body if ("a" <= ch <= "z") or ("A" <= ch <= "Z"))
+    cjk = sum(1 for ch in body if "\u3040" <= ch <= "\u30ff" or "\u3400" <= ch <= "\u9fff")
+    return latin >= 8 and latin > cjk * 4
+
+
+def _is_kana_kanji_free(text: str) -> bool:
+    """かな・漢字を1字も含まず、ラテン文字を含む発話か（IK-0450）。
+
+    定型文の言語を選ぶ目印。短い定型句（"Thanks!" / "Can you tell me my score?"）は
+    ``_is_mostly_latin`` の 8 文字基準では拾えないため、こちらを使う。
+    """
+    body = str(text or "")
+    if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", body):
+        return False
+    return bool(re.search(r"[A-Za-z]", body))
+
+
+def _fixed_text_language(text: str) -> str:
+    """固定文（前提の逆質問・目印・選択肢）を出す言語 ``"ja"`` / ``"en"``（IK-0574）。
+
+    判定器は新設せず、既存の 2 つ（``_is_mostly_latin`` = IK-0424 / ``_is_kana_kanji_free`` =
+    IK-0450）の和で読む（当該発話だけ・数値なし・会話を跨がない）。
+    """
+    return "en" if (_is_mostly_latin(text) or _is_kana_kanji_free(text)) else "ja"
+
+
+def _is_prerequisite_gate_for_topic(content: str, topic_title: str) -> bool:
+    """assistant 本文がこのトピックの前提の逆質問か（日本語 / 英語の両方を読む。IK-0574）。"""
+    text = str(content or "")
+    if PREREQUISITE_GATE_MARKER in text and f"「{topic_title}」" in text:
+        return True
+    return label_vocab.PREREQUISITE_GATE_MARKER_EN in text and f'"{topic_title}"' in text
+
+
+def _prerequisite_gate_first_name(content: str) -> str:
+    """逆質問が挙げた最初の前提名（読めなければ空文字。日本語 / 英語の両方）。"""
+    text = str(content or "")
+    match = _PREREQUISITE_GATE_FIRST_RE.search(text) or _PREREQUISITE_GATE_FIRST_EN_RE.search(text)
+    return match.group(1).strip() if match else ""
+
+
+def _prerequisite_gate_text(intervention: dict, topic_title: str, language: str) -> str:
+    """このターンに添える逆質問の本文（目印は ``assemble`` 側が前置する。IK-0574）。
+
+    日本語は ``services.check_prerequisites`` の本文そのまま。英語は ``label_vocab`` の
+    英語版（同じ前提の並び・同じ最初の前提）を組み立てる（LLM 0 回）。
+    """
+    if language != "en":
+        return intervention["message"]
+    unlearned = [str(x) for x in (intervention.get("unlearned") or []) if str(x).strip()]
+    first = str(intervention.get("first_prerequisite") or (unlearned[0] if unlearned else ""))
+    return label_vocab.PREREQUISITE_GATE_FULL_EN.format(
+        topic=topic_title,
+        prerequisites=", ".join(unlearned[:3]) or first,
+        first=first,
+    )
+
+
+def _history_has_gate_skipped_notice(history: list | None) -> bool:
+    """履歴の assistant ターンに「前提の確認はまだ記録していません」の1行が既にあるか（IK-0446）。"""
+    patterns = []
+    for template in (
+        label_vocab.PREREQUISITE_GATE_SKIPPED_NOTICE,
+        label_vocab.PREREQUISITE_GATE_SKIPPED_NOTICE_EN,
+    ):
+        head, _, tail = template.partition("{prerequisite}")
+        patterns.append(re.compile(re.escape(head) + r".{1,200}?" + re.escape(tail)))
+    for turn in history or []:
+        if not isinstance(turn, dict) or turn.get("role") != "assistant":
+            continue
+        content = str(turn.get("content") or "")
+        if any(p.search(content) for p in patterns):
+            return True
+    return False
+
+
+#: IK-1004: 「X って / X とは / X の意味 / X について」の X（問いの主語）の手前で切る目印。
+_PREREQ_SUBJECT_SPLIT_MARKERS = ("って", "とは", "の意味", "について", "という")
+#: 主語の手前に残っても主語とみなさない語（指示語・否定の返事）。
+_PREREQ_SUBJECT_FILLERS = re.compile(
+    r"いいえ|いや|はい|それ|これ|あれ|その|この|あの|そこ|ここ|わからない|分からない|わかりません|"
+    r"分かりません|知らない|知りません|まだ|[\s、,，。.!！?？「」『』\"'…~〜]"
+)
+_PREREQ_SUBJECT_EN_RE = re.compile(r"\bwhat\s+(?:is|does|do|are)\s+(?:the\s+|a\s+|an\s+)?([a-z][\w\-]{2,})")
+_PREREQ_SUBJECT_EN_STOP = {"it", "this", "that", "mean", "means", "they", "these", "those"}
+
+
+def _names_other_subject(message: str) -> bool:
+    """逆質問の直後の発話が、別の語を主語に立てた問いか（IK-1004・決定論・非LLM）。
+
+    「X ってどういう意味」「X とは」の X に内容語（漢字・カタカナ・英字）か鉤括弧の語が
+    残れば真。指示語（「それって」）・否定の返事（「いいえ」「わからない」）だけなら偽で、
+    逆質問への答えとして読む。前提名に触れるかは呼び出し側が先に見る（ここでは見ない）。
+    """
+    msg = message or ""
+    if re.search(r"「[^」]+」|『[^』]+』", msg):
+        return True
+    cut = len(msg)
+    for marker in _PREREQ_SUBJECT_SPLIT_MARKERS:
+        pos = msg.find(marker)
+        if 0 <= pos < cut:
+            cut = pos
+    if cut < len(msg):
+        head = _PREREQ_SUBJECT_FILLERS.sub("", msg[:cut])
+        if _PREREQ_CONTENT_WORD_RE.search(head):
+            return True
+    match = _PREREQ_SUBJECT_EN_RE.search(msg.casefold())
+    if match and match.group(1) not in _PREREQ_SUBJECT_EN_STOP:
+        return True
+    return False
+
+
+def _is_bare_yes(message: str) -> bool:
+    """逆質問への素の「はい / yes」（IK-0424。逆質問の直後だけ理解の答えとして読む）。"""
+    normalized = re.sub(r"[\s。．.!！、,]+", "", (message or "").casefold())
+    return normalized in {"yes", "yeah", "yep", "はい"}
+
+
+def _previous_turn_was_prerequisite_gate(history: list[dict] | None, topic_title: str) -> str | None:
+    """直前の assistant ターンがこのトピックの逆質問なら、その逆質問が挙げた最初の前提名を返す。
+
+    該当しなければ None。前提名が読めない逆質問は空文字を返す（「逆質問だった」事実は残す）。
+
+    第 18 周（詰まりの区画）: 逆質問の後に学習者が「むずい」「わからない」とだけ返した往復
+    （足場 1 つの応答）は飛ばして、その前の逆質問をまだ答えを待っている逆質問として読む
+    （詰まりは逆質問への答えではない。逆質問は次の中身のある往復まで保留にする）。
+    """
+    turns = [t for t in (history or []) if isinstance(t, dict)]
+    index = len(turns) - 1
+    while index >= 0:
+        turn = turns[index]
+        if turn.get("role") != "assistant":
+            index -= 1
+            continue
+        content = str(turn.get("content") or "")
+        if _is_prerequisite_gate_for_topic(content, topic_title):
+            return _prerequisite_gate_first_name(content)
+        # 直前の学習者発話が詰まりだけなら、この往復を飛ばして前の assistant ターンを見る。
+        user_index = next(
+            (i for i in range(index - 1, -1, -1) if turns[i].get("role") == "user"), None
+        )
+        if user_index is not None and is_stuck_reply(str(turns[user_index].get("content") or "")):
+            index = user_index - 1
+            continue
+        return None
+    return None
+
+
+#: G4: 逆質問への肯定の返事として読む先頭の語（services の肯定の返事 + 了解の語）。
+_ACK_CONTENT_LEADS = ("はい", "ええ", "うん", "わかりました", "分かりました", "了解", "yes", "yeah", "yep", "ok", "okay", "sure")
+#: G4: 肯定の後に続いても「前提を説明してほしい」と読む明示の語（「とは」は「ことは」に当たるので含めない）。
+_ACK_CONTENT_EXPLAIN_MARKERS = (
+    "教えて", "説明して", "わからない", "分からない", "わかりません", "分かりません",
+    "知らない", "知りません",
+)
+_ACK_CONTENT_CONTRAST = ("でも", "けど", "だけど", "ただ", "しかし", "but ")
+_ACK_LEAD_SEP = "、,，。.!！ 　…~〜\n\t"
+
+
+def _affirmative_lead_content(message: str) -> str:
+    """肯定の返事で始まり中身が続く発話なら、前置きを剥がした中身を返す（無ければ空文字）。
+
+    決定論・非LLM。前置きの境界は ``core.dialogue_shape.strip_preamble`` の規則（語の後ろに
+    区切りか文末）。中身が逆接（「でも」「けど」…）で始まるときは肯定とみなさず空文字。
+    """
+    raw = str(message or "").strip()
+    lowered = raw.casefold()
+    lead = next(
+        (
+            w for w in _ACK_CONTENT_LEADS
+            if lowered.startswith(w) and (len(raw) == len(w) or raw[len(w)] in _ACK_LEAD_SEP)
+        ),
+        None,
+    )
+    if lead is None:
+        return ""
+    core = strip_preamble(raw)
+    if not core or core.casefold().startswith(_ACK_CONTENT_CONTRAST):
+        return ""
+    return core
+
+
+def _prerequisite_followup(
+    message: str,
+    history: list[dict] | None,
+    topic_info: dict | None,
+    topic_title: str,
+    course_data: dict | None,
+) -> tuple[str | None, str | None]:
+    """前提確認まわりの発話を分類する（決定論・非LLM）。
+
+    Returns
+    -------
+    (kind, target)
+        ``kind`` は ``"explain"``（前提そのものの説明へ = 3段解決）/ ``"after_gate"``
+        （直前が逆質問だった。逆質問を繰り返さない）/ ``"gated_before"``（このトピックの
+        逆質問が履歴のもっと前にある。出し直さず、事実文1行を添えて答える = IK-0422）/
+        ``"ack_content"``（直前の逆質問に肯定で答え、中身の問いが続いた。肯定を記帳し、
+        中身に通常の RAG で答える = 第 18 周 G4。``target`` は前置きを剥がした中身）/
+        ``None``（従来どおり）。
+        ``target`` は説明する前提の名前（``"explain"`` のときだけ）。
+    """
+    names = _prerequisite_display_names(topic_info, course_data)
+    if not names:
+        return None, None
+    msg = message or ""
+    lowered = msg.casefold()
+    gate_first = _previous_turn_was_prerequisite_gate(history, topic_title)
+    mentioned = _prerequisite_mentioned(msg, names)
+    overlap = _prerequisite_content_overlap(msg, names)
+    acknowledged = _is_explicit_prerequisite_acknowledgement(msg)
+    negative = any(m in msg for m in _PREREQ_NEGATIVE_MARKERS) or bool(
+        _PREREQ_NEGATIVE_EN_RE.search(lowered)
+    )
+    teach = any(m in msg for m in _PREREQ_TEACH_MARKERS) or bool(_PREREQ_TEACH_EN_RE.search(lowered))
+    if gate_first is not None:
+        # 第 18 周（詰まりの区画）: 「むずい」「わからない」とだけの返事は逆質問への「いいえ」
+        # ではなく詰まり。前提の説明へ流さず、いまの問いへの足場 1 つで答える（逆質問は保留）。
+        # 「いいえ」「わからないので説明して」のように明示した答えは従来どおり explain。
+        if is_stuck_reply(msg):
+            return "after_gate", None
+        if acknowledged or _is_bare_yes(msg):
+            return "after_gate", None
+        # 第 18 周（G4）: 「はい、そうですね、分かりました。<中身>」のように肯定の返事で始まり
+        # 中身が続く発話は、逆質問への「はい」＋中身の問い。逆質問の答えとして丸ごと消費せず
+        # （前提の説明へ流さない）、肯定を記帳したうえで中身に通常の RAG で答える。
+        # 「はい、でも説明して」のように前提の説明を明示的に求める中身は従来どおり explain。
+        core = _affirmative_lead_content(msg)
+        if core and not (
+            any(m in core for m in _ACK_CONTENT_EXPLAIN_MARKERS) and (mentioned or overlap)
+        ):
+            return "ack_content", core
+        if mentioned or overlap:
+            return "explain", mentioned or overlap
+        # IK-1004（第 25 周 面 B 第 5 波）: 説明を求める語があっても、前提名に触れず別の語を
+        # 主語に立てた問い（「『未訪問』ってどういう意味」）は新しい問い。前提の説明へ流さず
+        # 通常の経路で答え、逆質問は保留のまま（一度きりの記録は変えない）。
+        if (negative or teach) and not _names_other_subject(msg):
+            return "explain", gate_first or names[0]
+        return "after_gate", None
+    if mentioned and teach and not acknowledged:
+        return "explain", mentioned
+    # IK-0423: 前提名の言い換え（内容語が2つ以上重なる問い）も前提そのものへの問いとして読む。
+    if overlap and (teach or _is_question_shaped(msg)) and not acknowledged:
+        return "explain", overlap
+    # IK-0422: 逆質問は (トピック, セッション) につき1回。履歴のどこかに既にあれば出し直さない。
+    if _prerequisite_gate_asked_in_history(history, topic_title):
+        return "gated_before", None
+    return None, None
+
+
 def _get_integrated_tutor_system_prompt(domain: str, response_persona: str | None = None) -> str:
     """知識統合型チューターのシステムプロンプトを生成する。
 
@@ -1601,6 +2537,9 @@ def _get_integrated_tutor_system_prompt(domain: str, response_persona: str | Non
 4. 【解説の深さ】前提知識の確認で長々と引き留めず、まずは直球で疑問に答えてください。必要に応じて数式（LaTeX）や具体例を交えてください。
 5. 【ドリルダウン】回答の末尾に、関連して深掘りできそうなトピックを `[〇〇について詳しく聞く]` の形式で1〜2つ提示してください。
    ただし、クリック可能なボタンとして提示したい場合は必ず `[ACTION_BUTTON: 〇〇について聞く]` の形式を使ってください。
+   英語で回答するときは、この目印を `[Ask more about X]` の形式で書いてください。
+6. 【詰まり】学生が「わからない」「むずかしい」とだけ返したときは、全体を要約し直さず、最初の一歩になる足場を1つだけ（3文以内）示してください。問い返しはしないでください。
+7. 【確からしさ】自分の確からしさを数値・割合・点数で示さない（「論文に明記 / 論文から推定 / 一般知識」の3段の言葉で示す）。
 
 **フォーマット要件:**
 - 数式は必ず LaTeX 記法で記述（インラインは $...$、ディスプレイは $$...$$）
@@ -1644,7 +2583,8 @@ def _get_casual_teacher_system_prompt(
         _format_rule = """5. 【書き方】数式が要るところは LaTeX（インラインは $...$、ディスプレイは $$...$$）で
    そのまま書いてかまいません。教材のコンテキストに番号付き出典（`[出典1]` …）があれば、
    言及したところに自然に添えてください（無い場合は出典マーカーを書かないこと）。
-   `[ACTION_BUTTON: ...]` などのシステム記法は出力しないでください。"""
+   `[ACTION_BUTTON: ...]` などのシステム記法は出力しないでください。
+   自分の確からしさを数値・割合・点数で示さない（「論文に明記 / 論文から推定 / 一般知識」の3段の言葉で示す）。"""
     return f"""あなたは{domain_label}が大好きで、学生と雑談するのが楽しみな「気軽に話せる先生」です。
 研究室の廊下やゼミ後の立ち話のように、教材で扱っている題材について肩の力を抜いて一緒に面白がってください。
 
@@ -1705,8 +2645,14 @@ def _get_discuss_system_prompt(domain: str, response_persona: str | None = None)
    学生に選ばせてください。
    言い直しは、冒頭に 〔鏡〕あなたは「＜学生の直前の発話からの逐語引用＞」と捉えている、で合っていますか？〔/鏡〕
    の形で書いてください。「」の中は学生の発話の言葉をそのまま（言い換えずに）引用してください。
+   引用は学生の発話の核心の語句に限り、同意・挨拶・前置き（「はい」「そうですね」など）は引用しないでください。
+   英語で返答するときは 〔鏡〕You read it as "＜学生の直前の発話からの逐語引用＞" — is that right?〔/鏡〕
+   の形でもかまいません（引用符は「」でも "" でも、中身は学生の発話の逐語引用にしてください）。
    〔鏡〕の中には論文の内容・一般知識・教科書的な正解を持ち込まず、学生の発話の言い直しだけを
    書いてください。学生の能力・傾向・人物像について述べてはいけません。
+   〔鏡〕…〔/鏡〕 は返答の先頭に置いてください。鏡の前に前置き文や予告文（「次に、あなたの
+   言い直しについてです。」等）を書かず、鏡の後に本文を続けてください（鏡で返答を終えないで
+   ください）。ルール4で先に質問へ答える場合だけ、その答えの直後に鏡を置いてください。
 3. 【詰まりには一点だけの足場かけ】学生が混乱や詰まりを見せたときは、全体を解説し直すのではなく、
    詰まっている一点だけを短く補い、学生自身の言葉での言い直しで埋まったかを確かめてください。
    詰まりの言い直し確認にも、ルール2と同じ 〔鏡〕…〔/鏡〕 の形式を使ってください。
@@ -1727,6 +2673,8 @@ def _get_discuss_system_prompt(domain: str, response_persona: str | None = None)
    してください。どの学生にも使い回せる汎用の決まり文句は不可です。
    なお、ルール2・3の言い直しのターンでは、「その理解で合っていますか」という確認の問い自体が
    この必須要素を満たします。確認の問いに、さらに別の why / how 型の問いを重ねないでください。
+   末尾の問いは1つだけにしてください（サーバは末尾に連なる問いを1つだけ残し、確認のあるターンでは
+   問い返しを残しません）。問いを重ねて並べないでください。
 7. 【出所の正直さ】提供される「教材からのコンテキスト」に無い内容を話すときは、
    「これはこの論文に書かれている内容ではなく、一般的な学術知識からの補足ですが」
    のように、その部分がこの論文由来ではないことを一言明示してください。
@@ -1786,6 +2734,65 @@ def _get_cycle_diff_system_prompt(domain: str, response_persona: str | None = No
 # 追記する拘束。要素（定義・事実・関係）の伝授は行い、組み立て（要素をどう繋いで答えに
 # するか）は学習者に委ねる。既存の system プロンプトを置き換えるのではなく、選ばれた
 # プロンプトの末尾に追記して応答様式だけを変える（RAG 検索・痕跡記録・コスト計上は不変）。
+#: IK-0576（応答の骨格 設計書 §6）: 直前の往復で AI が訂正したとき、その訂正文を次の往復の
+#: system に持ち越す見出しと拘束。毎回の検索で出典の抜粋が入れ替わるだけで前の訂正を
+#: 黙って覆す（再訂正する）のを防ぐ。撤回そのものは禁じない — 撤回するなら撤回だと明示させる。
+_PREVIOUS_CORRECTION_HEADER = "[前の往復での訂正]"
+_PREVIOUS_CORRECTION_INSTRUCTION = (
+    "前の回答の訂正を撤回する場合は撤回だと明示してください"
+    "（検索結果の違いだけで結論を変えないでください）。"
+)
+
+
+#: 訂正文を system へ持ち越す前に剥がすシステム記法（ドリルダウン・鏡・移設注記）。
+#: 出典番号は ``_CITATION_MARKER_RE`` で剥がす。
+_CORRECTION_SYSTEM_MARKUP_RE = re.compile(
+    r"\[ACTION_BUTTON:[^\]]*\]|\[[^\]\n]*について詳しく聞く\]|\[Ask more about[^\]]*\]"
+    r"|〔鏡〕.*?〔/鏡〕|〔/?鏡〕",
+    re.DOTALL,
+)
+
+
+def _correction_source_text(text: str) -> str:
+    """訂正文の抽出元から、制御文字・システム記法・出典番号・鏡を剥がす（m2）。"""
+    cleaned = strip_control_sequences(str(text or ""))
+    cleaned = _CORRECTION_SYSTEM_MARKUP_RE.sub("", cleaned)
+    # 第 25 周 第 5 波（IK-1006）: 目印が文の要素（「前の回答の「[出典3]」は」）のときは
+    # 空にせず句へ置き換える（持ち越しの訂正文が「前の回答の「」は」と欠けない）。正本は
+    # ``core.text_hygiene.remove_citation_markers``。
+    cleaned = remove_citation_markers(
+        cleaned,
+        referent=CARRIED_CITATION_REFERENT,
+        referent_after_genitive=CARRIED_CITATION_REFERENT_AFTER_GENITIVE,
+    )
+    for note in (MIRROR_MOVED_NOTE, MIRROR_MOVED_NOTE_EN):
+        cleaned = cleaned.replace(note, "")
+    return cleaned
+
+
+def _previous_correction_block(history: list | None) -> str:
+    """直前の往復の訂正文を system へ持ち越すブロック（無ければ空文字）。
+
+    ``history`` は**サーバに保存された履歴**を渡す（クライアントが送り返した
+    ``body.history`` の本文を system へ持ち上げない — m2）。本文は
+    :func:`_correction_source_text` でシステム記法・出典番号・鏡を剥がしてから読む。
+    """
+    sanitized = [
+        {**turn, "content": _correction_source_text(turn.get("content"))}
+        if isinstance(turn, dict) and turn.get("role") == "assistant"
+        else turn
+        for turn in (history or [])
+    ]
+    fact = previous_correction_fact(sanitized)
+    if not fact:
+        return ""
+    return (
+        f"{_PREVIOUS_CORRECTION_HEADER}\n"
+        f"直前のあなたの回答は次のように訂正しました:「{fact}」\n"
+        f"{_PREVIOUS_CORRECTION_INSTRUCTION}"
+    )
+
+
 _CHECK_SCAFFOLD_INSTRUCTION = """**確認問題の壁打ちモード（厳守）:**
 1. 【解答そのものを出さない】確認問題への解答そのもの・模範解答・結論の言い切りを
    提示しないでください。
@@ -1802,10 +2809,9 @@ _CHECK_SCAFFOLD_INSTRUCTION = """**確認問題の壁打ちモード（厳守）
    自力の再回答を促してください。"""
 
 
-# 本文中の出典マーカー。フロント（app.js linkifyCitations）が扱えるのは半角 [出典N] のみ
-# だが、LLM は全角括弧・全角数字の表記ゆれを出すことがあるため広めに受ける。
-_CITATION_MARKER_RE = re.compile(r"[\[［【〔]\s*出典\s*([0-9０-９]+)\s*[\]］】〕]")
-_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+# 本文中の出典マーカー。正本は ``core.text_hygiene.CITATION_MARKER_RE``（第 25 周 第 5 波で
+# 除去の規則と一緒に移した。ここは既存の参照のための別名）。
+_CITATION_MARKER_RE = CITATION_MARKER_RE
 
 
 def _reconcile_citation_markers(answer: str, valid_indices: set[int]) -> str:
@@ -1817,15 +2823,596 @@ def _reconcile_citation_markers(answer: str, valid_indices: set[int]) -> str:
     出典番号」として学習者に見えてしまう（出典の内容を確認できない）。ここで
     ①根拠のある番号は半角 [出典N] に正規化（表記ゆれをリンク可能な形に戻す）、
     ②根拠の無い番号は本文から取り除く（確認できない出典番号を見せない）。
+    第 25 周 第 5 波（IK-1006）: 根拠の無い番号が文の要素（「前の回答の「[出典3]」は」）として
+    使われているときは空にせず「確認できない出典」の句に置き換える（文を欠けさせない）。
+    除去の規則の正本は ``core.text_hygiene.remove_citation_markers``。
+    """
+    return remove_citation_markers(answer or "", keep_indices=set(valid_indices))
+
+
+# ---------------------------------------------------------------------------
+# 出典番号を会話の中で安定させる（IK-0432）
+# ---------------------------------------------------------------------------
+#
+# 従来は毎ターン採用した出典を 1..k の連番で振り直していた。履歴に残った過去の回答の
+# ``[出典2]`` と今回の ``[出典2]`` が別のチャンクを指し、プロンプトに再注入される履歴の
+# 番号とも食い違っていた。番号は (course, topic) の会話ごとに固定する:
+#   ①その会話で既に番号を持つチャンクは同じ番号を使う（最初に振った番号）
+#   ②新しいチャンクはこれまでの最大番号の続きから振る
+# 検索（top_k・閾値）は変えない。変えるのは番号の振り方だけ。
+
+#: 保存済み履歴から assistant へ戻す描画メタのキー（``persist_chat_history`` の assistant_meta）。
+_HISTORY_META_KEYS = ("sources", "overall_tier", "content_grounding", "manual_citations")
+
+
+def _history_meta_match_key(content: object) -> str:
+    """履歴の assistant 本文を突き合わせるキー（表示用の注意書きを剥がし、空白を詰める）。"""
+    text = str(content or "").strip()
+    notice = out_of_source_notice()
+    if text.startswith(notice):
+        text = text[len(notice):].strip()
+    # IK-0444: 保存本文はドリルダウンのマーカー込み（``[〇〇について詳しく聞く]``）で、
+    # 応答で返す本文はマーカーを抜いた形。送り返された本文と突き合うよう両方から抜く。
+    text, _ = extract_inline_actions(text)
+    return re.sub(r"\s+", " ", text)
+
+
+def _rehydrate_history_sources(history: list | None, stored: list | None) -> list:
+    """クライアントが描画メタを落として送り返した assistant ターンに、保存済みのメタを戻す。
+
+    UI は ``sources`` 付きで履歴を送るが、``{role, content}`` だけを送るクライアントもある。
+    その往復を保存すると ``sources`` が失われ、次の往復で番号の対応が辿れなくなる。
+    保存済み assistant ターンとは ``id`` → ``reply_to_id``（直前の user ``id``）→ 本文（注意書きを
+    剥がした形）の順に突き合わせ、一致したもののメタだけを戻す（推測で結び付けない。一致しなければ
+    そのまま）。入力は変更しない。
+    """
+    turns = list(history or [])
+    if not turns or not stored:
+        return turns
+    # 突き合わせの順: assistant の ``id`` → 直前の user ``id``（クライアントの ``reply_to_id``）
+    # → 本文。応答本文は表示投影で内部 ID を置き換えて返すため（display_projection）、
+    # 送り返された本文が保存本文と一致しないことがある。id が引ければ本文を見ない。
+    meta_by_content: dict[str, dict] = {}
+    meta_by_id: dict[str, dict] = {}
+    meta_by_reply_to: dict[str, dict] = {}
+    previous_user_id = ""
+    for turn in stored:
+        if not isinstance(turn, dict):
+            continue
+        if turn.get("role") == "user":
+            previous_user_id = str(turn.get("id") or "")
+            continue
+        if turn.get("role") != "assistant":
+            continue
+        meta = {k: turn[k] for k in _HISTORY_META_KEYS if turn.get(k) not in (None, "", [], {})}
+        reply_to, previous_user_id = previous_user_id, ""
+        if not meta:
+            continue
+        key = _history_meta_match_key(turn.get("content"))
+        if key:
+            meta_by_content.setdefault(key, meta)
+        if turn.get("id"):
+            meta_by_id.setdefault(str(turn["id"]), meta)
+        if reply_to:
+            meta_by_reply_to.setdefault(reply_to, meta)
+    if not (meta_by_content or meta_by_id or meta_by_reply_to):
+        return turns
+    out: list = []
+    for turn in turns:
+        if (
+            isinstance(turn, dict)
+            and turn.get("role") == "assistant"
+            and not turn.get("sources")
+        ):
+            meta = (
+                meta_by_id.get(str(turn.get("id") or ""))
+                or meta_by_reply_to.get(str(turn.get("reply_to_id") or ""))
+                or meta_by_content.get(_history_meta_match_key(turn.get("content")))
+            )
+            if meta:
+                merged = dict(meta)
+                merged.update({
+                    k: v for k, v in turn.items()
+                    if not (k in _HISTORY_META_KEYS and v in (None, "", [], {}))
+                })
+                turn = merged
+        out.append(turn)
+    return out
+
+
+class _SessionCitationNumbers:
+    """(course, topic) の会話で出典番号を固定する採番器（IK-0432・決定論・非LLM）。
+
+    IK-0467: 範囲は (course, topic) の会話（会話履歴の保存単位・学習画面の会話区画と同じ）。
+    トピックを跨いで番号を揃えないのは設計どおり（docs/backend/rag-chat.md §②）。
+
+    IK-0466: 番号は単調で、一度どこかのチャンクに出した番号は別のチャンクへ振り直さない。
+    読み込む対応表の番号の最大値を次の番号の起点にし、同じ番号を別のチャンクが持って
+    いる入力（旧来の振り直しの名残）は、先に見た対応だけを採る。
     """
 
-    def _sub(m: re.Match) -> str:
-        n = int(m.group(1).translate(_FULLWIDTH_DIGITS))
-        return f"[出典{n}]" if n in valid_indices else ""
+    def __init__(self, *histories: list | None) -> None:
+        self._by_chunk: dict[str, int] = {}
+        self._owner: dict[int, str] = {}
+        self._max = 0
+        self._used: set[int] = set()
+        for history in histories:
+            for turn in history or []:
+                if not isinstance(turn, dict) or turn.get("role") != "assistant":
+                    continue
+                # IK-0444: 会話全体の「チャンク → 番号」の控え（サーバが書く累積の対応表）。
+                # クライアントが履歴を窓で切ったり sources を落として送り返したりしても、
+                # 保存済みの最新 assistant ターンにこの控えが残っていれば対応を失わない。
+                citation_map = turn.get(CITATION_MAP_KEY)
+                if isinstance(citation_map, dict):
+                    for chunk_id, raw_index in citation_map.items():
+                        self._reserve(chunk_id, raw_index)
+                for source in turn.get("sources") or []:
+                    if isinstance(source, dict):
+                        # 最初に振った番号を正とする（旧来の振り直しで同じチャンクに複数の
+                        # 番号が付いた履歴でも、最初の対応に揃える）。
+                        self._reserve(source.get("chunk_id"), source.get("index"))
 
-    text = _CITATION_MARKER_RE.sub(_sub, answer or "")
-    # マーカー除去で句読点の直前に残った空白だけを軽く掃除する（本文には触れない）。
-    return re.sub(r"[ \t]+([。、．，])", r"\1", text)
+    def _reserve(self, chunk_id: object, raw_index: object) -> None:
+        try:
+            index = int(raw_index or 0)
+        except (TypeError, ValueError):
+            return
+        if index <= 0:
+            return
+        # 番号そのものは、対応が採れなくても「出したことがある」として起点に数える。
+        self._max = max(self._max, index)
+        cid = str(chunk_id or "").strip()
+        if not cid or cid in self._by_chunk or index in self._owner:
+            return
+        self._by_chunk[cid] = index
+        self._owner[index] = cid
+
+    def assign(self, chunk_id: object) -> int:
+        """このターンで採用した出典に番号を振る（同じターン内で番号は重複しない）。"""
+        cid = str(chunk_id or "").strip()
+        index = self._by_chunk.get(cid) if cid else None
+        if index is None or index in self._used:
+            self._max += 1
+            index = self._max
+            if cid and cid not in self._by_chunk:
+                self._by_chunk[cid] = index
+                self._owner[index] = cid
+        self._used.add(index)
+        return index
+
+    def mapping(self) -> dict[str, int]:
+        """会話全体の「チャンク → 番号」（最初に振った番号）。履歴に控えとして焼き込む。"""
+        return dict(self._by_chunk)
+
+
+#: assistant ターンに焼き込む累積の対応表のキー（IK-0444）。正本は services（IK-0466）。
+CITATION_MAP_KEY = _SERVICES_CITATION_MAP_KEY
+
+
+def _carry_citation_map(history: list | None, numbers: "_SessionCitationNumbers") -> list:
+    """送られてきた履歴の最後の assistant ターンに、会話全体の対応表の控えを載せる（IK-0444）。
+
+    どの経路の ``persist_chat_history`` も ``body.history`` を丸ごと書き直すので、ここで
+    控えを載せておけば、クライアントが sources を落とした・窓で切った履歴を送っても、
+    保存後の行に対応表が残る。入力は変更しない（載せるターンだけ複製する）。
+    """
+    turns = list(history or [])
+    mapping = numbers.mapping()
+    if not mapping:
+        return turns
+    for i in range(len(turns) - 1, -1, -1):
+        turn = turns[i]
+        if isinstance(turn, dict) and turn.get("role") == "assistant":
+            carried = dict(turn)
+            carried[CITATION_MAP_KEY] = mapping
+            turns[i] = carried
+            break
+    return turns
+
+
+def _prefer_topic_documents(results: list[dict], topic_doc_ids: set[str]) -> list[dict]:
+    """焦点の論文のチャンクを先に並べる（IK-0472）。実体は ``core.focus_document.prefer_focus``。
+
+    並べ替えだけを行い除外はしない（互換の薄い委譲。優先規則の正本は FD3）。
+    """
+    return prefer_focus(results, topic_doc_ids, drop_off_focus=False)
+
+
+#: 第 15 周: 内容の無い短い返事（相槌・「まだ」）。構造帰属（方法B）の対象にしない。
+_CONTENTLESS_REPLIES = frozenset({
+    "まだ", "まだです", "わからん", "わからない", "分からない", "わかりません", "分かりません",
+    "むずい", "むずかしい", "難しい", "はい", "いいえ", "うん", "ううん", "ok", "okay", "yes", "no",
+    "なるほど", "へえ", "へー", "ふーん", "了解", "りょうかい", "not yet", "i don't know", "idk",
+})
+_CONTENTLESS_STRIP_RE = re.compile(r"[\s。、．，！？!?.,…ー〜~「」『』()（）]+")
+
+
+def _is_contentless_reply(message: str | None) -> bool:
+    """発話が内容の無い短い返事だけか（非LLM・決定論）。問いの痕跡そのものは残す（P4）。"""
+    raw = (message or "").strip()
+    if not raw or len(raw) > 16:
+        return False
+    normalized = raw.casefold()
+    if normalized.strip(" 。、．，！？!?.,…") in _CONTENTLESS_REPLIES:
+        return True
+    return _CONTENTLESS_STRIP_RE.sub("", normalized) in {
+        _CONTENTLESS_STRIP_RE.sub("", w) for w in _CONTENTLESS_REPLIES
+    }
+
+
+def _scope_chunk_ids_to_documents(
+    chunk_ids: list[str], chunk_document: dict[str, str], focus_document_ids: set[str]
+) -> list[str]:
+    """帰属の手がかりに渡すチャンクを焦点の論文に絞る（``core.focus_document`` への委譲）。"""
+    return scope_chunks_to_focus(chunk_ids, chunk_document, focus_document_ids)
+
+
+def _discussed_document_ids(previous_cited_rows: list[dict]) -> set[str]:
+    """discuss の「議論中の論文」= 直前の回答が本文で引用したチャンクの document（第 15 周）。
+
+    引用が無い（開幕直後・引用の無い往復）なら空集合で、並べ替えも除外もしない。
+    """
+    return {
+        str(r.get("document_id") or "").strip()
+        for r in previous_cited_rows or []
+        if isinstance(r, dict) and str(r.get("document_id") or "").strip()
+    }
+
+
+#: 学習者の非チャット操作の焦点論文（正本は ``services.learner_focus_document`` →
+#: ``core.focus_document.resolve_focus_document`` FD1）。
+_learner_focus = learner_focus_document
+
+
+def _drop_off_topic_chunks(results: list[dict], topic_doc_ids: set[str]) -> list[dict]:
+    """焦点の論文で答えられるときは、それより類似度の低い別論文のチャンクを外す（第 14 周）。
+
+    並びは変えない互換の薄い委譲。規則（焦点内の最良より**厳密に高い**ものだけ残す）の
+    正本は ``core.focus_document.prefer_focus``（FD3）。
+    """
+    return prefer_focus(results, topic_doc_ids, reorder=False)
+
+
+def _source_section_note(row: dict) -> str:
+    """出典行に添える節の見出し（第 25 周 第 9 波・製品頭脳 A 4299）。
+
+    抜粋の頭に見出しが入る出典だけ節が言え、ほかは「節不明」になっていた。チャンクの
+    ``source_metadata.section_title``（解析の文書構造由来）があれば「・節「…」」を添える。
+    資料由来の文字列なので制御文字を除き、内部 ID の形・長すぎる見出しは載せない。無ければ空文字。
+    """
+    title = strip_control_sequences(str((row or {}).get("section_title") or "")).strip()
+    title = re.sub(r"\s+", " ", title)
+    if not title:
+        # 第 25 周 第 10 波（製品頭脳 B 4318）: 段落頭の走り込み見出し（REVTeX の
+        # 「Four-phase training.—」）は文書構造の節にならない。抜粋の頭にあればそれを節として添える。
+        title = run_in_heading((row or {}).get("text"))
+    if not title or len(title) > 80 or contains_internal_id(title):
+        return ""
+    return f"・節「{title}」"
+
+
+#: 段落頭の走り込み見出しの判定の正本は ``services.RUN_IN_HEADING_RE``（一覧の手がかりと共有）。
+_RUN_IN_HEADING_RE = RUN_IN_HEADING_RE
+
+
+#: 第 25 周 第 10 波（製品頭脳 A 4302）: 「検証・確認の記録の有無」を問う発話（決定論・語の一致）。
+_VERIFICATION_RECORD_QUESTION_RE = re.compile(
+    r"検証|確かめられ|確かめた|確認され|記録(?:は|が|って|の有無|された)|"
+    r"\bverif(?:y|ied|ication)\b|\btested\b|\brecords?\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_about_verification_record(message: str | None) -> bool:
+    """発話が検証・確認の記録（あるか・どの範囲で確かめられたか）を問うているか。"""
+    return bool(_VERIFICATION_RECORD_QUESTION_RE.search(str(message or "")))
+
+
+_CITED_MARKER_RE = re.compile(r"\[出典(\d+)\]")
+#: 第 15 周: 「[出典3] は無関係なので使っていません」のような否定の言及を引用と数えない。
+#: マーカーを含む文（。．！？!?\n で区切る）にこの語があれば、その文のマーカーは引用ではない。
+_CITATION_NEGATION_RE = re.compile(
+    r"使っていません|使っていない|使いません|使わない|用いていません|用いていない|"
+    r"無関係|関係がありません|関係ありません|関係がない|関係のない|引用していません|引用していない|"
+    r"引用しません|扱っていません|扱っていない|根拠にしていません|根拠にしない|"
+    r"\bnot\s+(?:used|cited|relevant|related)\b|\bunrelated\b|\birrelevant\b|\bdid\s+not\s+use\b|"
+    # 第 25 周 第 11 波（IK-1150）: 英語の否定の言い回しを足す（IK-1143 の残り）。
+    r"\b(?:do|does|did)\s+not\s+(?:use|cite|rely\s+on|draw\s+on)\b|\bnot\s+(?:about|based\s+on|drawn\s+on)\b|"
+    r"\bwithout\s+(?:using|citing|relying\s+on|drawing\s+on)\b",
+    re.IGNORECASE,
+)
+_SENTENCE_SPLIT_RE = re.compile(r"[^。．！？!?\n]*[。．！？!?\n]?")
+
+
+def _affirmative_citation_indices(answer: str) -> list[int]:
+    """本文で肯定的に引用された ``[出典N]`` の番号を出現順に返す（決定論）。
+
+    否定の言及（その出典を使っていない・無関係と述べる文）の中のマーカーは数えない。
+    """
+    out: list[int] = []
+    for sentence in _SENTENCE_SPLIT_RE.findall(answer or ""):
+        if not sentence or "出典" not in sentence:
+            continue
+        for match in _CITED_MARKER_RE.finditer(sentence):
+            if _marker_is_negated(sentence, match.end()):
+                continue
+            index = int(match.group(1))
+            if index not in out:
+                out.append(index)
+    return out
+
+
+#: 第 25 周 IK-1078: 否定は「マーカーを主語・目的語にする節」に限る。マーカーの直後に
+#: （並列のマーカーを挟んで）助詞が続き、その後ろに否定の語があるときだけ否定の言及。
+#: 文末の帰属（「…を使わない点が違う、と書かれています [出典9]」）は内容の否定であって
+#: 出典の否定ではない。
+_MARKER_SUBJECT_RE = re.compile(
+    r"(?:\s*(?:と|、|,|や|および|及び|and)?\s*\[出典\d+\])*"
+    r"\s*(?:は|も|が|を|について|に関して|とは|is\b|was\b|are\b|were\b)",
+    re.IGNORECASE,
+)
+
+
+def _marker_is_negated(sentence: str, marker_end: int) -> bool:
+    rest = sentence[marker_end:]
+    subject = _MARKER_SUBJECT_RE.match(rest)
+    if not subject:
+        return False
+    clause = rest[subject.end():]
+    # 後ろに別のマーカーがあれば、その手前までがこのマーカーの節（後ろの否定は後ろのマーカーのもの）。
+    following = _CITED_MARKER_RE.search(clause)
+    if following:
+        clause = clause[: following.start()]
+    return bool(_CITATION_NEGATION_RE.search(clause))
+
+
+def _chunk_ids_cited_in_answer(answer: str, cited_sources: list[dict]) -> list[str]:
+    """回答本文の ``[出典N]`` が指すチャンク id を引用順に返す（IK-0470・決定論）。
+
+    ``cited_sources`` に無い番号は捨てる（本文照合済みの番号だけ）。本文が1つも引用して
+    いなければ空（推測で検索上位を足さない）。
+    """
+    by_index = {
+        int(s["index"]): str(s.get("chunk_id") or "")
+        for s in cited_sources or []
+        if isinstance(s, dict) and s.get("chunk_id") and str(s.get("index") or "").isdigit()
+    }
+    out: list[str] = []
+    for index in _affirmative_citation_indices(answer):
+        chunk_id = by_index.get(index)
+        if chunk_id and chunk_id not in out:
+            out.append(chunk_id)
+    return out
+
+
+def _sources_cited_in_answer(answer: str, sources: list[dict]) -> list[dict]:
+    """学習者に見せる出典を、回答本文が ``[出典N]`` で実際に引用したものだけに絞る（IK-0494）。
+
+    文脈に採用した出典（``sources``）のうち本文が引いていないもの（別の論文の近いチャンク等）は
+    出典の一覧に並べない。番号は振り直さない（会話の採番器の番号のまま = IK-0432/0444）。
+    並びは ``sources`` の順。本文が1つも引用していなければ空。入力は変更しない。
+    """
+    cited = set(_affirmative_citation_indices(answer))
+    if not cited:
+        return []
+    out: list[dict] = []
+    for s in sources or []:
+        try:
+            index = int(s.get("index"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if index in cited:
+            out.append(s)
+    return out
+
+
+#: 出典・教材そのものを指す語（否定の言及の主語になり得るもの）。
+#: 第 25 周 第 11 波（IK-1150）: 英語の passages / retrieved / 「the provided paper」と、
+#: 「取り出した箇所」を足す。素の paper / 論文 は内容の否定（「論文はこの手法を使っていない」）と
+#: 区別できないので足さない — 検索・提示された資料を指す形に限る。
+_SOURCE_NOUN_RE = re.compile(
+    r"出典|教材|資料|抜粋|(?:取り出した|検索で得た|検索された|示された)箇所|"
+    r"\bsources?\b|\bmaterials?\b|\bexcerpts?\b|\bpassages?\b|\bretrieved\b|"
+    r"\b(?:provided|retrieved|given)\s+(?:papers?|documents?|context|texts?)\b",
+    re.IGNORECASE,
+)
+
+
+def _answer_disclaims_sources(answer: str) -> bool:
+    """本文が出典・教材を使っていない（無関係）と述べる文を含むか（決定論）。"""
+    for sentence in _SENTENCE_SPLIT_RE.findall(answer or ""):
+        if sentence and _SOURCE_NOUN_RE.search(sentence) and _CITATION_NEGATION_RE.search(sentence):
+            return True
+    return False
+
+
+def _grounding_from_cited_answer(
+    answer: str,
+    cited_sources: list[dict],
+    content_grounding: str | None,
+    *,
+    topic_material_grounds: bool,
+) -> str | None:
+    """出所（content_grounding）を本文が肯定的に引用した出典で確定する（第 25 周 第 10 波）。
+
+    - 本文が肯定的に引いた出典があれば: その中に教材（course_material）があるか、表示中の教材が
+      問いに関わっていれば course_material、無ければ other_material。
+    - 1 つも引いていない: 表示中の教材が問いに関わり、かつ本文が出典・教材を否定していなければ
+      従来どおり。否定していれば model_generated（「使っていない」と言う出典で教材を名乗らない）。
+    """
+    if content_grounding not in ("course_material", "other_material"):
+        return content_grounding
+    cited = _sources_cited_in_answer(answer, cited_sources)
+    if cited:
+        if topic_material_grounds or any(s.get("origin") == "course_material" for s in cited):
+            return "course_material"
+        return "other_material"
+    if _answer_disclaims_sources(answer):
+        return "model_generated"
+    return content_grounding
+
+
+def _displayed_sources_for(answer: str, sources: list[dict], content_grounding: str | None) -> list[dict]:
+    """学習者に見せる出典（IK-0494）。出所の帯（content_grounding）と食い違わないようにする。
+
+    ①本文が引用した出典があればそれだけ。②本文が1つも引用していないのに出所が
+    course_material / other_material のときは、その出所を決めた出典（origin が出所と同じもの）を
+    並べる — 出所の判定（IK-0382）は「文脈に置いて問いに関わった資料」で決まり引用の有無では
+    決まらないので、帯だけ「教材に基づく」で出典が空、という食い違いを作らない。
+    第 17 周（A1）: 表示中の教材の出典チャンクも番号付き出典として登録されるので、トピック教材で
+    course_material になった往復にも ② の出典が並ぶ（チャンクを持たない旧コースだけ空のまま）。
+
+    第 14 周: 並びは番号順（会話内で番号は固定なので、提示順ではなく番号で並べる）。②の
+    「本文が引用していない出典」には ``cited: False`` を付け、画面で「本文では引用して
+    いません」と区別する（本文が引いた出典と同じ顔で並べない）。
+    """
+    def _by_index(items: list[dict]) -> list[dict]:
+        def key(s: dict):
+            try:
+                return int(s.get("index"))
+            except (TypeError, ValueError, AttributeError):
+                return 10**9
+        return sorted(items, key=key)
+
+    cited = _sources_cited_in_answer(answer, sources)
+    if cited or content_grounding not in ("course_material", "other_material"):
+        return _by_index([dict(s, cited=True) for s in cited])
+    return _by_index([
+        dict(s, cited=False)
+        for s in sources or [] if isinstance(s, dict) and s.get("origin") == content_grounding
+    ])
+
+
+#: IK-0475: 直前の回答の引用を次の往復の文脈へ戻す上限（件数・1件の字数）。
+_CARRIED_CHUNK_MAX = 3
+_CARRIED_CHUNK_MAX_CHARS = 1200
+
+
+def _previous_turn_cited_refs(history: list | None) -> list[dict]:
+    """直前の assistant ターンが本文で引用した出典 ``{index, chunk_id, tier}`` を引用順に返す。
+
+    本文の ``[出典N]`` と、そのターンに焼き込まれた ``sources`` の両方にある番号だけ
+    （推測で結ばない）。直前の assistant ターンが無い・出典が無ければ空。
+    """
+    for turn in reversed(list(history or [])):
+        if not isinstance(turn, dict) or turn.get("role") != "assistant":
+            continue
+        by_index: dict[int, dict] = {}
+        for source in turn.get("sources") or []:
+            if not isinstance(source, dict):
+                continue
+            if source.get("cited") is False:
+                continue  # 第 15 周: 本文で引用していない出典は持ち越さない
+            try:
+                index = int(source.get("index"))
+            except (TypeError, ValueError):
+                continue
+            chunk_id = str(source.get("chunk_id") or "").strip()
+            if index > 0 and chunk_id and index not in by_index:
+                by_index[index] = {"index": index, "chunk_id": chunk_id, "tier": source.get("tier")}
+        # 第 15 周: sources が落ちた履歴でも、会話の対応表の控え（IK-0444）から番号→チャンクを引く。
+        mapping = turn.get(CITATION_MAP_KEY)
+        if isinstance(mapping, dict):
+            for chunk_id, raw in mapping.items():
+                try:
+                    index = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                if index > 0 and str(chunk_id).strip() and index not in by_index:
+                    by_index[index] = {"index": index, "chunk_id": str(chunk_id).strip(), "tier": None}
+        out: list[dict] = []
+        for index in _affirmative_citation_indices(str(turn.get("content") or "")):
+            ref = by_index.get(index)
+            if ref and ref not in out:
+                out.append(ref)
+        return out
+    return []
+
+
+def _carry_previous_cited_sources(
+    history: list | None,
+    numbers: "_SessionCitationNumbers",
+    *,
+    exclude_chunk_ids: set,
+    allowed_document_ids,
+) -> list[dict]:
+    """直前の回答が引用したチャンクを、次の往復の文脈へ戻す検索結果の形で返す（IK-0475）。
+
+    - 今回の検索に既にあるチャンク（``exclude_chunk_ids``）は戻さない（二重にしない）。
+    - 会話の採番器の番号と履歴の番号が一致するものだけ（元の番号で戻せないものは戻さない）。
+    - 可視性は ``get_chunks_for_prompt`` が ``allowed_document_ids`` を SQL 内で強制する。
+    - 上限 :data:`_CARRIED_CHUNK_MAX` 件。tier は保存時の値を使う（類似度が無いので再判定しない）。
+    """
+    mapping = numbers.mapping()
+    refs = [
+        ref for ref in _previous_turn_cited_refs(history)
+        if ref["chunk_id"] not in exclude_chunk_ids and mapping.get(ref["chunk_id"]) == ref["index"]
+    ][:_CARRIED_CHUNK_MAX]
+    if not refs:
+        return []
+    rows = get_chunks_for_prompt(
+        [ref["chunk_id"] for ref in refs], allowed_document_ids=allowed_document_ids
+    )
+    tier_by_chunk = {ref["chunk_id"]: ref.get("tier") for ref in refs}
+    out: list[dict] = []
+    for row in rows or []:
+        row = dict(row)
+        stored_tier = tier_by_chunk.get(str(row.get("id") or ""))
+        if stored_tier in (TIER_APPROVED, TIER_SOURCE, TIER_OUT_OF_SOURCE):
+            row["tier"] = stored_tier
+        out.append(row)
+    return out
+
+
+def _adopted_source_entry(
+    numbers: _SessionCitationNumbers, result: dict, course_material_ids: set
+) -> dict:
+    """検索結果1件を採用した出典（``cited_sources`` の1要素）にする。2つの組み立て箇所の正本。
+
+    類似度の生値（cosine）は載せない（IK-0433: 学習者に数値を返さない。tier の判定は
+    ``search_chunks_with_metadata`` の内側で済んでいる）。
+    """
+    quote = sanitize_source_text_for_prompt(result.get("text") or "").strip().replace("\n", " ")
+    return {
+        "index": numbers.assign(result.get("id", "")),
+        "chunk_id": result.get("id", ""),
+        "source_title": result.get("source_title", "不明な教材"),
+        "tier": result.get("tier", TIER_OUT_OF_SOURCE),
+        # 数式区間（``$…$``）の途中では切らない（IK-0394。切り詰めは
+        # ``core.text_excerpt.excerpt`` の1実装）。
+        "quote": excerpt(quote, 80, keep_dollar_math=True),
+        # IK-0545: 文脈に置いたチャンク本文（逐語引用の一致検査の突き合わせ先）。応答 DTO
+        # （SourceTierItem）・履歴メタ（_history_source_meta）には載らない。
+        "passage": sanitize_source_text_for_prompt(result.get("text") or ""),
+        "meta": _source_location_meta(result),
+        "origin": (
+            "course_material" if result.get("material_id") in course_material_ids else "other_material"
+        ),
+        # 焦点論文（FD1）の「直前の引用」段の入力。応答 DTO（SourceTierItem）には載らない
+        # （未知キーは落ちる）。履歴メタへ写して次の往復・非チャットの操作が引く。
+        "document_id": str(result.get("document_id") or ""),
+        # 第 25 周 第 5 波（IK-0996）: 同じ論文の別の版の同じ箇所を畳んだ事実文（数値なし）。
+        **({"version_note": str(result["version_note"])} if result.get("version_note") else {}),
+    }
+
+
+def _history_source_meta(cited_sources: list[dict]) -> list[dict]:
+    """履歴に焼き込む出典メタ（チップ描画とポップアップ起動に要る最小フィールドのみ）。"""
+    return [
+        {
+            "index": s["index"],
+            "chunk_id": s["chunk_id"],
+            "source_title": s["source_title"],
+            "tier": s["tier"],
+            # 本文で引用していない出典の区別は再読み込み後も保つ（第 14 周。True は省く）。
+            **({"cited": False} if s.get("cited") is False else {}),
+            # 焦点論文の「直前の引用」段（FD1）。旧履歴には無いキー（読み手はチャンクから解決）。
+            **({"document_id": s["document_id"]} if s.get("document_id") else {}),
+            **({"version_note": s["version_note"]} if s.get("version_note") else {}),
+        }
+        for s in cited_sources
+    ]
 
 
 def _screen_selection_element_type(selection: dict) -> str:
@@ -2107,22 +3694,42 @@ def _screen_element_sources(
     *,
     course_id: str,
     topic_info: dict | None,
+    course_data: dict | None = None,
     grounding_document_ids: set[str],
+    preferred_document_ids: "tuple[str, ...]" = (),
+    user_id: str = "",
 ) -> dict:
-    """kind ``element`` の sources（選択チップ1件の射影 + evidence item）。"""
+    """kind ``element`` の sources（選択チップ1件の射影 + evidence item）。
+
+    ``preferred_document_ids`` は当該往復の焦点論文（``core.focus_document`` FD1）。
+    論文をまたいで衝突する ID（``eq_5`` / ``comp_001``）は焦点の論文で先に解決する（FD4）。
+    """
     element_type = _screen_selected_element_type(ctx)
     element_id = str(ctx.selection.get("element_id") or "").strip()
     if not element_type or not element_id:
         return {}
 
+    preferred = tuple(d for d in (preferred_document_ids or ()) if d in grounding_document_ids)
     context = None
     if element_type == "component":
-        context = _component_context_with_explanation(
-            element_id, course_id, set(grounding_document_ids)
+        # IK-1075: パネル（部品の文脈 API）と同じ解決点を通す — 凍結の ⚓ の後継が決まらなければ
+        # 別の live 部品へ解決せず、「後継が決まっていません」の事実だけを AI へ渡す。
+        context = resolve_learner_component_context(
+            course_data or {}, element_id, course_id, set(grounding_document_ids),
+            topic_id=str((topic_info or {}).get("id") or ""),
+            preferred_document_ids=preferred,
+            user_id=user_id,
         )
     elif element_type in CONTEXT_ELEMENT_TYPES:  # claim / equation
-        context = build_element_context(
-            element_type, element_id, set(grounding_document_ids)
+        context = (
+            build_element_context(
+                element_type, element_id, set(grounding_document_ids),
+                preferred_document_ids=preferred,
+            )
+            if preferred
+            else build_element_context(
+                element_type, element_id, set(grounding_document_ids)
+            )
         )
 
     # 題名だけの縮退材料。トピックに**公開済み**の参照からしか引かない
@@ -2166,6 +3773,226 @@ def _screen_element_document_id(element: dict, ctx, grounding_document_ids: set[
     return ""
 
 
+def _screen_simulation_run(
+    ctx, *, user_id: str, grounding_document_ids: set[str]
+) -> dict:
+    """``selection.simulation_run_id`` が指す**本人の** run 行（無ければ ``{}``）。
+
+    画面文脈 4-e（§11.17 / simulation_bridge_design.md §14.4）。fail-closed:
+    UUID でない・行が無い・本人の所有でない（所有者の無い v1 の旧行を含む）・run の
+    document が grounding の範囲外 → いずれも黙って空（他人の run の存在を明かさない）。
+    """
+    run_id = selected_simulation_run_id(getattr(ctx, "selection", None))
+    if not run_id or not str(user_id or "").strip() or not grounding_document_ids:
+        return {}
+    session = _pg_session()
+    try:
+        run = simulation_store.get_run(session, run_id)
+        # 第 22 周 (j): 共有した run への教員の判断の状態（run DTO と同じ `ledger_decision`）を解決器にも渡す。
+        # 読めなければ無いだけ（事実文が 1 行減るだけで run 自体は落とさない）。
+        if run and run.get("shared_at"):
+            try:
+                run = dict(run)
+                run["ledger_decision"] = simulation_store.ledger_decisions_for_run(session, run_id)
+            except Exception:  # noqa: BLE001
+                logger.debug("screen_context: ledger decision lookup failed", exc_info=True)
+    except Exception:  # noqa: BLE001 - 読めないなら載せないだけ（SA2）
+        logger.debug("screen_context: simulation run lookup failed", exc_info=True)
+        return {}
+    finally:
+        session.close()
+    if not run or not simulation_store.is_owner(run, user_id):
+        return {}
+    # 範囲の判定は所属の検査であって論文の優先ではない（焦点論文の規則とは別）。
+    run_document = str(run.get("document_id") or "")
+    if run_document not in grounding_document_ids:
+        return {}
+    return run
+
+
+#: 地図の場所に置かれた論文として画面文脈へ渡す題名の上限（IK-1031。SA7 の予算はコード定数）。
+_SCREEN_ATLAS_NODE_MAX_PAPERS = 3
+
+
+def _screen_atlas_node_sources(
+    ctx, *, course_data: dict, grounding_document_ids: set[str]
+) -> dict:
+    """地図で開いた場所の事実の材料（IK-1031・SA1 / SA2 / DM1）。
+
+    画面からは ``view.atlas_node_id``（参照）だけを受け、検証・承認の行はコースの分野の
+    凍結骨格の状態キャッシュ（``GET /api/atlas/node`` と同じ行）から、論文は学習者向けの
+    位置づけ射影（``learner_landscape_for_documents`` — 遮断はそちらの正本）から引く。
+    論文の母集合は ``grounding_document_ids``（受講ゲート済みのコースの範囲）だけで、範囲を
+    広げない（DM1）。どこかで引けなければその材料だけ欠く（fail-soft）。
+    """
+    node_id = str(ctx.view.get("atlas_node_id") or "").strip()
+    if not node_id or not grounding_document_ids or not isinstance(course_data, dict):
+        return {}
+    out: dict = {"node_id": node_id}
+    from core import atlas_state as _atlas_state
+    from core import atlas_store as _atlas_store
+
+    session = _pg_session()
+    try:
+        cartridge_id = _atlas_state.resolve_course_cartridge(session, course_data) or ""
+        if cartridge_id:
+            skeleton = _atlas_store.load_learner_skeleton(cartridge_id, session)
+            if skeleton is not None:
+                rows = _atlas_state.fetch_overlay_rows(session, cartridge_id, skeleton.version)
+                row = next(
+                    (r for r in rows or [] if r.get("entry_type") in ("node", "region")
+                     and str(r.get("entry_id") or "") == node_id),
+                    None,
+                )
+                if row is not None:
+                    # IK-1059: 画面のパネル（routes/atlas_view.py）と同じ学習者の語に読み替えて渡す
+                    # （AI に「パネルに出ている行」と言いながら別の文を渡さない）。
+                    out["verify_line"] = label_vocab.learner_atlas_wording(
+                        str(row.get("verify_line") or "")
+                    )
+                    out["endorse_line"] = label_vocab.learner_atlas_wording(
+                        _atlas_state.learner_endorse_line(str(row.get("endorse_line") or ""))
+                    )
+    except Exception:  # noqa: BLE001
+        logger.debug("screen_context: atlas node row unavailable", exc_info=True)
+    finally:
+        session.close()
+
+    try:
+        landscape = learner_landscape_for_documents(course_data, sorted(grounding_document_ids))
+    except Exception:  # noqa: BLE001
+        landscape = {}
+    papers: list[dict] = []
+    for document in (landscape or {}).get("documents") or []:
+        if not isinstance(document, dict):
+            continue
+        title = str(document.get("title") or "").strip()
+        if not title:
+            continue
+        for placement in document.get("placements") or []:
+            if not isinstance(placement, dict):
+                continue
+            placed_at = {
+                str(placement.get("node_id") or ""),
+                str(placement.get("current_node_id") or ""),
+            }
+            if node_id in placed_at:
+                papers.append({
+                    "title": title,
+                    "provenance_label": str(placement.get("provenance_label") or ""),
+                })
+                break
+        if len(papers) >= _SCREEN_ATLAS_NODE_MAX_PAPERS:
+            break
+    out["papers"] = papers
+    out["papers_resolved"] = bool(landscape)
+    return out
+
+
+def _screen_atlas_node_id(body: LearningChatRequest, *, course_id: str) -> str:
+    """画面が分野の地図で開いている場所（``view.atlas_node_id``）。無ければ空文字。
+
+    画面が別のコースを指しているなら無視する（``_screen_selection_for_anchor`` と同じ扱い）。
+    """
+    payload = getattr(body, "screen_context", None)
+    if payload is None:
+        return ""
+    try:
+        ctx = normalize_screen_context(payload.model_dump())
+    except Exception:  # pragma: no cover - 正規化は例外を出さない契約
+        return ""
+    if ctx is None or ctx.screen != SCREEN_LEARNING:
+        return ""
+    declared_course_id = str(ctx.selection.get("course_id") or "")
+    if declared_course_id and declared_course_id != str(course_id):
+        return ""
+    # 第 25 周 第 10 波（FD-note 4）: 今の往復で選んでいる場所（selection）を最後に開いた場所（view）より先に読む。
+    return (
+        str(ctx.selection.get("atlas_node_id") or "").strip()
+        or str(ctx.view.get("atlas_node_id") or "").strip()
+    )
+
+
+def _screen_atlas_node_selected_now(body: LearningChatRequest, *, course_id: str) -> bool:
+    """地図の場所を**今の往復で**選んでいるか（``selection.atlas_node_id`` があるか・FD-note 4）。
+
+    ``view.atlas_node_id`` は「最後に開いた場所」で地図を閉じた後も残る。画面は地図を開いている
+    間だけ ``selection`` に場所の参照を載せ、閉じたら落とす（app.js）。
+    """
+    selection = _screen_selection_for_anchor(body, course_id=course_id) or {}
+    return bool(str(selection.get("atlas_node_id") or "").strip())
+
+
+def _screen_atlas_node_document_ids(
+    body: LearningChatRequest,
+    *,
+    course_id: str,
+    course_data: dict,
+    allowed_document_ids,
+) -> "list[str] | None":
+    """分野の地図で開いた場所に置かれた論文（焦点の④段の入力・FD-note 3）。
+
+    画面が ``view.atlas_node_id`` を渡していなければ ``None``（地図の場所を開いていない）。
+    開いていれば、コースの論文 ∩ スコープの中でその場所に配置のある document_id を返す
+    （無ければ空 list — トピックの段は入れない）。論文の母集合と遮断は
+    ``learner_landscape_for_documents`` の正本に任せ、範囲を広げない（FD2 = DM1）。
+    """
+    node_id = _screen_atlas_node_id(body, course_id=course_id)
+    if not node_id:
+        return None
+    allowed = {str(d) for d in (allowed_document_ids or [])}
+    scope = [d for d in list_course_source_document_ids(course_data) if str(d) in allowed]
+    if not scope:
+        return []
+    try:
+        landscape = learner_landscape_for_documents(course_data, sorted(scope))
+    except Exception:  # noqa: BLE001
+        logger.debug("focus: atlas node placements unavailable", exc_info=True)
+        return []
+    out: list[str] = []
+    for document in (landscape or {}).get("documents") or []:
+        if not isinstance(document, dict):
+            continue
+        document_id = str(document.get("document_id") or "")
+        if not document_id or document_id not in allowed or document_id in out:
+            continue
+        for placement in document.get("placements") or []:
+            if isinstance(placement, dict) and node_id in {
+                str(placement.get("node_id") or ""),
+                str(placement.get("current_node_id") or ""),
+            }:
+                out.append(document_id)
+                break
+    return out
+
+
+def _screen_personal_map_sources(ctx, *, user_id: str) -> dict:
+    """「わたしの地図」で見ている場所の材料（第 25 周 第 10 波・IK-1113・SA1 / SA2）。
+
+    画面からは ``selection.personal_map_node_id``（本人の痕跡ノード）と任意の
+    ``selection.personal_map_center_component_id``（点ビューの中心）だけを受け、事実は画面と同じ
+    近傍関係ビューの正本 ``nearby_for_person_node`` で引く（本人の個人ネットワークに無いノードは
+    None = 何も載せない・閲覧できない論文は ``user_can_view_document`` で外れる）。読めなければ空。
+    """
+    node_id = str(ctx.selection.get("personal_map_node_id") or "").strip()
+    if not node_id or not user_id:
+        return {}
+    center = str(ctx.selection.get("personal_map_center_component_id") or "").strip() or None
+    try:
+        from core.personal_graph.nearby import nearby_for_person_node
+        from services import user_can_view_document
+
+        view = nearby_for_person_node(
+            user_id, node_id, center_component_id=center, can_view_document=user_can_view_document,
+        )
+    except Exception:  # noqa: BLE001 - 読めないなら載せないだけ（SA2）
+        logger.debug("screen_context: personal map nearby unavailable", exc_info=True)
+        return {}
+    if not isinstance(view, dict):
+        return {}
+    return {"node_id": node_id, "view": view}
+
+
 def _learning_screen_sources(
     ctx,
     *,
@@ -2174,8 +4001,13 @@ def _learning_screen_sources(
     topic_info: dict | None,
     grounding_document_ids: set[str],
     kinds: tuple[str, ...] | None = None,
+    preferred_document_ids: "tuple[str, ...]" = (),
+    user_id: str = "",
+    include_atlas_node: bool = False,
 ) -> dict:
     """画面文脈の解決に渡す ``sources``（§11.3 の契約）を権限ゲート内で組む。
+
+    ``include_atlas_node=True`` は casual（音声）でも利用者が地図で選んだ場所を引く（IK-1049）。
 
     ``grounding_document_ids`` が空なら**何も引かない**（fail-closed）。
     ``selection.course_id`` が URL の course_id と一致しないときは呼び出し側で弾く。
@@ -2185,16 +4017,49 @@ def _learning_screen_sources(
     if not grounding_document_ids:
         return {}
     wanted = None if kinds is None else set(kinds)
-    if wanted is not None and not wanted & {"element", "verification", "placement"}:
+    if wanted is not None and not wanted & {
+        "element", "verification", "placement", "simulation"
+    }:
         return {}
 
     sources: dict = {}
+    if wanted is None or "simulation" in wanted:
+        simulation_run = _screen_simulation_run(
+            ctx, user_id=user_id, grounding_document_ids=grounding_document_ids
+        )
+        if simulation_run:
+            sources["simulation"] = simulation_run
+    if wanted is not None and not wanted & {"element", "verification", "placement"}:
+        return sources
+
+    # IK-1031: 分野の地図で開いた場所（参照 = node_id だけを画面から受ける）の、詳細パネルに
+    # 出ている検証・承認の行と、そこに置かれたこのコースの論文の題名（最大 3）。
+    # IK-1049（第 7 波）: casual でも利用者の明示の選択なので引く（kinds は要素だけのまま）。
+    if wanted is None or include_atlas_node:
+        try:
+            atlas_node = _screen_atlas_node_sources(
+                ctx, course_data=course_data, grounding_document_ids=grounding_document_ids,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("screen_context: atlas node projection failed", exc_info=True)
+            atlas_node = {}
+        if atlas_node:
+            sources["atlas_node"] = atlas_node
+        # 第 25 周 第 10 波（IK-1113）: 「わたしの地図」で見ている場所（参照 = 本人の痕跡ノード id と
+        # 点ビューの中心だけを画面から受ける）。事実は近傍関係ビューの正本で引く。
+        personal_map = _screen_personal_map_sources(ctx, user_id=user_id)
+        if personal_map:
+            sources["personal_map"] = personal_map
+
     try:
         element = _screen_element_sources(
             ctx,
             course_id=course_id,
             topic_info=topic_info,
+            course_data=course_data,
             grounding_document_ids=grounding_document_ids,
+            preferred_document_ids=preferred_document_ids,
+            user_id=user_id,
         )
     except Exception:  # noqa: BLE001
         logger.debug("screen_context: element projection failed", exc_info=True)
@@ -2218,7 +4083,15 @@ def _learning_screen_sources(
         if target_id and _is_db_uuid(target_id):
             session = _pg_session()
             try:
-                line = learner_ledger_line(session, ledger_target, target_id)
+                # IK-0899: 台帳の行キーは論文を含む（要素の論文で引く）。
+                # IK-1147: 行が無ければ部品の説明の一行と同じ「記録はまだありません」を渡す
+                # （要素は grounding の範囲で解決済み = 教材に実在する）。
+                _ledger_document = _screen_element_document_id(element, ctx, grounding_document_ids) or None
+                line = learner_ledger_line(
+                    session, ledger_target, target_id, document_id=_ledger_document,
+                ) or learner_unrecorded_ledger_line(
+                    session, ledger_target, target_id, document_id=_ledger_document,
+                )
                 if line:
                     sources["ledger"] = line
             except Exception:  # noqa: BLE001
@@ -2251,6 +4124,9 @@ def _learning_screen_context_block(
     topic_info: dict | None,
     grounding_document_ids: set[str],
     kinds: tuple[str, ...] | None = None,
+    preferred_document_ids: "tuple[str, ...]" = (),
+    user_id: str = "",
+    selected_atlas_node: bool = False,
 ) -> tuple[str, bool]:
     """``(事実文ブロック, 台帳由来の事実を含むか)``。解決できなければ ``("", False)``。
 
@@ -2288,6 +4164,9 @@ def _learning_screen_context_block(
             topic_info=topic_info,
             grounding_document_ids=grounding_document_ids,
             kinds=kinds,
+            preferred_document_ids=preferred_document_ids,
+            user_id=user_id,
+            include_atlas_node=selected_atlas_node,
         )
     except Exception:  # noqa: BLE001
         logger.debug("screen_context: sources assembly failed", exc_info=True)
@@ -2295,6 +4174,10 @@ def _learning_screen_context_block(
 
     try:
         facts = resolve_screen_context(ctx, sources, kinds=kinds)
+        # IK-1049（第 7 波）: casual は表示モードの事実（kind view）を渡さないが、利用者が地図で
+        # 選んだ場所の事実（名前・札の文・パネルの行・置かれた論文）は要素と同じく渡す。
+        if selected_atlas_node:
+            facts = list(facts) + resolve_selected_atlas_node(ctx, sources)
         block = render_block(
             facts,
             header=BLOCK_HEADER_LEARNING,
@@ -2508,6 +4391,8 @@ def _learning_retrieved_structure_block(
 
 # 方法C の1タップ選択肢（unclassified は「その他」として提示しない — 未選択のまま
 # 閉じれば unclassified が保たれる）
+#: 方法C の確認プロンプトの見出し（何を選ぶ欄か。画面 app.js の見出しと同じ文）。
+ANCHOR_CONFIRM_PROMPT = "この疑問はどれに近いですか？（任意・1タップ）"
 _ANCHOR_CONFIRM_DOUBT_OPTIONS = [
     {"doubt_type": d, "label": DOUBT_TYPE_LABELS[d]}
     for d in ("definition", "justification_gap", "premise", "prior_conflict", "scope", "connection")
@@ -2677,7 +4562,9 @@ def _generate_graph_element_explanation(
             user_id, course_id, topic_id,
             body.history, user_message, approved_answer,
         )
-        return LearningChatResponse(answer=approved_answer, course_update=None)
+        return LearningChatResponse(
+            answer=approved_answer, course_update=None, shape=verbatim_shape_dto(approved_answer),
+        )
 
     degraded = False
     graph_description = (context.get("graph_description") or "").strip()
@@ -2753,20 +4640,508 @@ def _generate_graph_element_explanation(
                 answer = answer.replace(formula_id, f"${target_formula_latex}$")
             if target_formula_latex not in answer:
                 answer = f"対象の数式は次の式です。\n\n$${target_formula_latex}$$\n\n" + answer
+        if not degraded:
+            # 応答の骨格（RS1〜RS3）: 「最後に短い確認文を1つ」の指示を LLM の自制に任せず、
+            # 末尾に連なる問いは最後の 1 つだけ残す（保存文も同じ本文）。
+            answer = render_answer_text(assemble_response_shape(
+                answer=answer, learner_message=user_message, is_discuss=False,
+                gate_text=None, degraded=False,
+            ))
     persist_chat_history(
         user_id, course_id, topic_id,
         body.history, user_message, answer,
     )
-    return LearningChatResponse(answer=answer, course_update=None, degraded=degraded)
+    return LearningChatResponse(
+        answer=answer, course_update=None, degraded=degraded,
+        shape=None if degraded else verbatim_shape_dto(answer),
+    )
+
+
+#: 第 17 周（A1）: 表示中の教材から番号付き出典として登録するチャンクの上限・1件の字数。
+_TOPIC_SOURCE_CHUNK_MAX = 3
+_TOPIC_SOURCE_CHUNK_MAX_CHARS = 1200
+
+
+def _topic_source_rows(
+    topic: dict | None,
+    *,
+    allowed_document_ids,
+    focus=None,
+    exclude_chunk_ids: set | None = None,
+) -> list[dict]:
+    """表示中のトピック教材の出典チャンクを検索結果の形で返す（第 17 周 A1・読み取り専用）。
+
+    入力は ``topic.material_chunk_ids``（→ ``linked_chunk_ids``）。可視性は
+    ``get_chunks_for_prompt`` が ``allowed_document_ids`` を SQL 内で強制する（空集合は
+    SQL 非発行）。焦点の論文を先に並べ（``prefer_focus``・類似度は無いので順序だけ）、
+    ``exclude_chunk_ids`` を落とし、上限 :data:`_TOPIC_SOURCE_CHUNK_MAX` 件。失敗は空。
+    """
+    ids = [c for c in topic_material_chunk_ids(topic) if c not in (exclude_chunk_ids or set())]
+    if not ids:
+        return []
+    try:
+        rows = get_chunks_for_prompt(ids, allowed_document_ids=allowed_document_ids)
+    except Exception:  # noqa: BLE001
+        logger.debug("topic source rows: read failed", exc_info=True)
+        return []
+    rows = [dict(r) for r in rows or [] if isinstance(r, dict)]
+    if focus is not None:
+        rows = prefer_focus(rows, focus, drop_off_focus=False)
+    return rows[:_TOPIC_SOURCE_CHUNK_MAX]
+
+
+def _advice_topic_source_context(
+    topic_info: dict,
+    course_data: dict,
+    numbers: "_SessionCitationNumbers",
+    *,
+    user_id: str,
+    scope_document_ids,
+) -> tuple[list[dict], str | None]:
+    """学習相談に渡す表示中の教材の出典（第 18 周 G2）。``(出典リスト, 番号付き抜粋)``。
+
+    可視性は ``get_chunks_for_prompt`` が SQL 内で強制する（``_topic_source_rows``）。
+    失敗は ``([], None)``（学習相談そのものは止めない）。
+    """
+    try:
+        allowed = scope_document_ids if scope_document_ids is not None else list_visible_document_ids(user_id)
+        material_ids = set(course_source_material_ids(course_data))
+        sources: list[dict] = []
+        chunks: list[str] = []
+        for r in _topic_source_rows(topic_info, allowed_document_ids=allowed):
+            source = _adopted_source_entry(numbers, r, material_ids)
+            sources.append(source)
+            chunks.append(
+                f"[出典{source['index']}] 『{r['source_title']}』{_source_section_note(r)}（表示中の教材の出典）\n"
+                f"{sanitize_source_text_for_prompt(r['text'])[:_TOPIC_SOURCE_CHUNK_MAX_CHARS]}"
+            )
+        if not chunks:
+            return [], None
+        return sources, "## 表示中の教材の出典\n" + "\n\n".join(chunks)
+    except Exception:  # noqa: BLE001
+        logger.debug("advice topic sources failed", exc_info=True)
+        return [], None
+
+
+def _formula_fact_suffix(row: dict, sink: list[str]) -> str:
+    """出典1件の式の事実行（IK-0577）。あれば改行付きで返し ``sink`` に控える。"""
+    line = str((row or {}).get("formula_facts") or "").strip()
+    if not line:
+        return ""
+    sink.append(line)
+    return "\n" + line
+
+
+def _topic_selection_formulas(topic: dict | None) -> list[dict]:
+    """選択箇所に添える式の材料（第 25 周 第 10 波・製品頭脳 A 4313）。
+
+    表示中の教材の式の記録（``content_blocks`` の式・印は生きた式の記録で付け直したもの）を
+    ``{latex, label, mark}`` にする。壊れた復元で本文を伏せた式は渡さない。読めなければ空。
+    """
+    if not isinstance(topic, dict):
+        return []
+    try:
+        from core.course_content_builder import equation_printed_label
+
+        topic = overlay_topic_equation_reconstruction(topic)
+        items = [
+            item
+            for block in topic.get("content_blocks") or []
+            if isinstance(block, dict) and block.get("type") == "equations"
+            for item in block.get("items") or []
+            if isinstance(item, dict)
+        ]
+        out: list[dict] = []
+        for item in annotate_reconstructed_formulas(items):
+            latex = "" if item.get("latex_withheld") else str(item.get("latex") or "").strip()
+            if not latex:
+                continue
+            out.append({
+                "latex": latex,
+                "label": equation_printed_label(item) or "",
+                "mark": f"［{label_vocab.RECONSTRUCTED_EQUATION_MARK}］" if item.get("reconstructed_mark") else "",
+            })
+        return out
+    except Exception:  # noqa: BLE001
+        logger.debug("selection formulas unavailable", exc_info=True)
+        return []
+
+
+def _topic_formula_fact_line(
+    topic: dict | None, *, allowed_document_ids: "set[str] | list[str] | None" = None
+) -> str:
+    """表示中のトピック教材の式の事実行（IK-0577）。教材本文が参照する式だけ。
+
+    第 25 周 第 6 波: ``allowed_document_ids`` を渡すと、印の付いた式を同じ論文の別の版
+    （TeX 版）の原文の式で照合し直す（出典の抜粋の事実行と同じ材料 = ``paper_original_formula_latex``）。
+    """
+    if not isinstance(topic, dict):
+        return ""
+    try:
+        # 第 6 波（IK-0895）: 本文・講義と同じく、生きた式の記録から引いた状態を写しに載せる。
+        topic = overlay_topic_equation_reconstruction(topic)
+        # content_blocks の式（``reconstructed`` は A層の写し — course_content_builder が載せる）。
+        formulas = [
+            item
+            for block in topic.get("content_blocks") or []
+            if isinstance(block, dict) and block.get("type") == "equations"
+            for item in block.get("items") or []
+            if isinstance(item, dict)
+        ]
+        material = _topic_student_material(topic)
+        referenced = {
+            normalize_evidence_id(m.group(1))
+            for m in re.finditer(r"!\[\[equation:([^\]|]+)", material)
+        }
+        if referenced:
+            formulas = [
+                f for f in formulas
+                if normalize_evidence_id(f.get("equation_id") or f.get("id")) in referenced
+            ]
+        line = formula_fact_line(formulas)
+        if allowed_document_ids and has_reconstructed_fact(line):
+            originals = paper_original_formula_latex(
+                topic_source_document_ids(topic), allowed_document_ids=allowed_document_ids
+            )
+            confirmed = [latex for group in originals.values() for latex in group]
+            if confirmed:
+                line = formula_fact_line(formulas, confirmed_latex=confirmed)
+        return line
+    except Exception:  # noqa: BLE001
+        logger.debug("topic formula facts failed", exc_info=True)
+        return ""
 
 
 def _topic_student_material(topic: dict) -> str:
-    material = topic.get("student_material")
-    if isinstance(material, dict):
-        text = str(material.get("source_text") or "").strip()
-        if text:
-            return text
-    return str(topic.get("content") or topic.get("summary") or "").strip()
+    # 正本は core.lecture.topic_student_material（IK-1081: 教員宛ての作業メモの注を外す）。
+    from core.lecture import topic_student_material
+
+    return topic_student_material(topic)
+
+
+# ---------------------------------------------------------------------------
+# トピック教材が「この問いの根拠」と言えるか（IK-0382）
+# ---------------------------------------------------------------------------
+#
+# 表示中のトピック教材は毎ターン `[現在表示中の教材]` として文脈に注入される。従来は
+# 注入しただけで `content_grounding="course_material"`（📘 教材から回答）・tier 下限
+# `source` にしていたため、教材と無関係な問い（別トピックの概念・一般知識）に検索が
+# 1件も当たらなくても「教材に基づく」と表示された（出所の正直さ・原則8 に反する）。
+# ここでは**決定論・非LLM・追加コストなし**で、トピック教材がその問いに関わっているか
+# だけを判定する。判定を落としても教材の注入自体は変えない（プロンプトは不変）。
+#
+# 関わっている、とみなすのは次のいずれか:
+#   - 学習者が教材の箇所・要素を明示している（テキスト選択 / 要素タップ / チャンク指定）
+#   - 問いに内容語が無い（「ここはどういう意味？」のような指示語だけの問い = 画面の教材を指す）
+#   - 問いの内容語の過半が教材本文に逐語で現れる
+# 内容語は「ひらがな・記号で区切った漢字・カタカナ・英数の連なり（2文字以上）」と
+# 「」『』で括られた語。ASCII の語は略号（大文字2つ以上か数字を含む）だけを数える
+# （英語の問いを日本語の教材と逐語比較しない — 判定できない問いは従来どおり扱う）。
+
+_GROUNDING_QUOTED_RE = re.compile(r"[「『]([^」』]{2,40})[」』]")
+_GROUNDING_COMPOUND_RE = re.compile(r"[\u30A1-\u30FA\u30FC\u4E00-\u9FFF\u3005A-Za-z0-9\-]+")
+_GROUNDING_CJK_RE = re.compile(r"[\u30A1-\u30FA\u4E00-\u9FFF]")
+#: 問いの主題を示さない汎用語（内容語から外す）。分野語は書かない。
+_GROUNDING_GENERIC_TERMS = frozenset({
+    "意味", "理解", "説明", "質問", "回答", "教材", "論文", "本文", "部分", "場合",
+    "具体的", "初歩的", "確認", "問題", "答え", "出典", "箇所", "内容", "トピック",
+    "何", "今", "今回", "方法", "理由", "関係", "結果",
+    # 第 17 周: 答え方・問い方を指すメタ語（説明の中身ではない）。これらが内容語に
+    # 数えられると「根拠はどこ？一言で。」のような画面を指す問いが教材と無関係と判定され、
+    # 出所がターンごとに反転していた。
+    "一言", "根拠", "要約", "簡単", "短く", "つまり", "結局", "要点", "ポイント",
+    "全体", "全体像", "どこ", "どれ", "ここ", "それ", "これ", "以上",
+    # 第 25 周 面 D 第 2 周（IK-0912）: 問いの枠の語（どの媒体で・どう言い直すか）。
+    # 「教材の L TOV の式、言葉で言うとどういう意味？」の「言葉」が内容語に数えられ、
+    # 教材を読んで答えたのに出所が「出典を追えない AI の説明」になっていた。
+    "言葉", "講義", "数式", "言い方", "言い換え", "読み方", "日本語",
+})
+
+#: 教材側の照合用に TeX の制御語・括弧・添字記号を外す（IK-0912。``\mathcal{L}_{\rm TOV}``
+#: を「L TOV」として問いの語と照合できるように。プロンプトの本文は変えない）。
+_GROUNDING_TEX_COMMAND_RE = re.compile(r"\\[A-Za-z]+")
+_GROUNDING_TEX_PUNCT_RE = re.compile(r"[{}_^$\\]")
+
+
+def _grounding_haystack(topic_material: str) -> str:
+    text = topic_material or ""
+    plain = _GROUNDING_TEX_PUNCT_RE.sub(" ", _GROUNDING_TEX_COMMAND_RE.sub(" ", text))
+    return (text + "\n" + plain).casefold()
+
+
+def _grounding_content_terms(message: str) -> list[str]:
+    """問いの内容語を決定論的に取り出す（重複除去・出現順）。"""
+    msg = message or ""
+    terms: list[str] = []
+
+    def _add(term: str) -> None:
+        term = term.strip()
+        if len(term) < 2 or term in _GROUNDING_GENERIC_TERMS or term in terms:
+            return
+        terms.append(term)
+
+    for quoted in _GROUNDING_QUOTED_RE.findall(msg):
+        _add(quoted)
+    for run in _GROUNDING_COMPOUND_RE.findall(msg):
+        if _GROUNDING_CJK_RE.search(run):
+            _add(run)
+        elif sum(1 for ch in run if ch.isupper()) >= 2 or any(ch.isdigit() for ch in run):
+            _add(run)
+    return terms
+
+
+def _topic_material_engages_message(
+    body: "LearningChatRequest",
+    topic_material: str,
+    message: str | None = None,
+) -> bool:
+    """トピック教材がこの問いの根拠と言えるか（決定論・非LLM）。
+
+    ``message`` を渡すとそれを問いとして判定する（前提確認の往復で元の質問に答える
+    とき = IK-0396。既定は ``body.message``）。
+    """
+    if not topic_material:
+        return False
+    if (body.selection_text or "").strip() or body.element_id or body.chunk_id:
+        return True
+    terms = _grounding_content_terms(body.message if message is None else message)
+    if not terms:
+        return True
+    haystack = _grounding_haystack(topic_material)
+    hits = sum(1 for t in terms if t.casefold() in haystack)
+    return hits * 2 > len(terms)
+
+
+def _retrieval_query_for_turn(body: "LearningChatRequest", message: str) -> str:
+    """RAG 検索に渡す問い文を決める（IK-0395。決定論・非LLM・検索は1回のまま）。
+
+    「はい、そう読みました。合っているんですか」のような内容語の無い相づち・追い質問は、
+    その発話だけで検索すると 1 件も当たらず、直前まで出典のあった会話が
+    「AI の一般知識」へ縮退する。内容語の判定は IK-0382 と同じ
+    ``_grounding_content_terms`` を使い、内容語が無いときだけ、履歴のうち内容語のある
+    直近の学習者発話を前に足す。テキスト選択・要素タップ・チャンク指定がある往復は
+    画面の箇所を指しているので借りない（従来どおり）。
+    """
+    msg = message or ""
+    if _grounding_content_terms(msg):
+        return msg
+    if (body.selection_text or "").strip() or body.element_id or body.chunk_id:
+        return msg
+    current = msg.strip()
+    for turn in reversed(body.history or []):
+        if not isinstance(turn, dict) or turn.get("role") != "user":
+            continue
+        content = str(turn.get("content") or "").strip()
+        if not content or content == current:
+            continue
+        if _grounding_content_terms(content):
+            return f"{content}\n{msg}" if msg else content
+    return msg
+
+
+def _history_without_out_of_source_notice(history: list | None) -> list:
+    """LLM に再注入する履歴から、表示用の注意書き（out_of_source_notice）を剥がす（IK-0378）。
+
+    注意書きは画面向けの表示で、回答本文ではない。クライアントが受け取った回答
+    （注意書き付き）をそのまま履歴として送り返すため、剥がさないと次の往復で
+    「教材の裏づけはない」という文が回答の一部としてモデルに戻る。
+    """
+    notice = out_of_source_notice()
+    cleaned: list = []
+    for turn in history or []:
+        if (
+            isinstance(turn, dict)
+            and turn.get("role") == "assistant"
+            and isinstance(turn.get("content"), str)
+            and turn["content"].lstrip().startswith(notice)
+        ):
+            turn = {**turn, "content": turn["content"].lstrip()[len(notice):].lstrip()}
+        cleaned.append(turn)
+    return cleaned
+
+
+#: 未踏ガードの優先順位（IK-0378）。ガードは採用した出典が1件も無いときだけ付くが、
+#: 表示中の教材は注入されていることがあるので、即答の規則と衝突しない範囲を明示する。
+_OUT_OF_SOURCE_GUARD_PRECEDENCE = (
+    "（優先順位）このガードは、提示された出典や表示中の教材で裏づけられない主張にだけ"
+    "適用すること。出典（[出典N]）や表示中の教材で裏づけられる内容については、回答を"
+    "控えたり予想を先に求めたりせず、上の応答規則どおりに答えること。"
+)
+
+
+#: discuss 用の未踏ガード（IK-0473）。discuss の規則1（質問には即答・出し惜しみ禁止）と
+#: 衝突する「予想を先に引き出す」段を持たない。断定しない・出所を分ける・推測を混ぜない、は残す。
+_DISCUSS_OUT_OF_SOURCE_GUARD = (
+    "【重要・未踏ガード（議論モード）】この質問は選択中の範囲の論文に十分な根拠が見つかっていません。"
+    "次のとおり応答すること:\n"
+    "1. 「この論文の抜粋では確認できない」と最初に一言明示する。\n"
+    "2. そのうえで質問にはすぐに答える（予想を先に求めたり、答えを保留したりしない）。\n"
+    "3. 一般知識で補う部分は『この論文に書かれている内容ではない参考情報』と区別して示す。\n"
+    "4. 確実な事実と推測を混ぜない。誇張・断定表現を避ける。"
+)
+
+
+#: document 直付け議論の要旨ブロックの見出し（IK-0436）。番号付き出典ではないことを明示する。
+_DOCUMENT_THESIS_HEADING = (
+    "## この論文の要旨（論文から解析で再構成したもの。番号付き出典ではないので [出典N] を付けないこと）"
+)
+#: 要旨ブロックがあるときの未踏ガードの補足（IK-0436）。
+_DOCUMENT_THESIS_GUARD_PRECEDENCE = (
+    "（要旨の扱い）「この論文の要旨」に書かれた問い・目的・主張については、このガードの対象外として"
+    "答えてよい。答えるときは、論文の解析結果の要旨に基づくことを一言添えること。"
+)
+
+
+# ---------------------------------------------------------------------------
+# 理解度の点数・割合を求める発話（IK-0397。非LLM の pre-route）
+# ---------------------------------------------------------------------------
+#
+# 数値非表示の原則（学習者に点数・正答率を見せない）を、LLM に言い換えさせず固定の
+# 事実文で答える。誤爆を避けるため、点数の語と「自分・理解・確認問題」の語の両方が
+# ある発話だけを拾う（「スコア関数」のような内容語だけでは拾わない）。
+
+#: 常に「点数・割合を尋ねている」語（後ろに何が続いても点数の問い）。
+_SCORE_REQUEST_ASK_JA = ("何点", "何割", "何パーセント", "何％", "何%")
+#: 名詞の頭にもなる語（「スコア関数」「点数分布」）。直後が漢字・カタカナのときは数えない。
+_SCORE_REQUEST_NOUN_JA = ("点数", "スコア")
+_SCORE_REQUEST_SELF_JA = ("理解", "わた", "私", "自分", "僕", "俺", "確認問題", "成績")
+_SCORE_NOUN_CONTINUES_RE = re.compile(r"[\u3400-\u9fff\u30a0-\u30ffー]")
+#: 英語は「自分の点数」を指す形だけ（``my score`` / ``grade my …`` / ``how many points``）。
+#: 「I don't get the main points」のような内容の発話は拾わない。
+_SCORE_REQUEST_EN_RES = (
+    re.compile(r"\bmy\s+(?:\w+\s+){0,2}?(?:score|grade|points?|percentage|marks?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:grade|score|rate|mark)\s+(?:me|my)\b", re.IGNORECASE),
+    re.compile(r"\bhow\s+many\s+points\s+(?:do|did|would)\s+i\b", re.IGNORECASE),
+)
+
+
+def _score_noun_asked(msg: str) -> bool:
+    for term in _SCORE_REQUEST_NOUN_JA:
+        start = 0
+        while True:
+            index = msg.find(term, start)
+            if index < 0:
+                break
+            following = msg[index + len(term): index + len(term) + 1]
+            if not following or not _SCORE_NOUN_CONTINUES_RE.match(following):
+                return True
+            start = index + len(term)
+    return False
+
+
+def _is_understanding_score_request(message: str) -> bool:
+    msg = message or ""
+    if not msg.strip():
+        return False
+    asked = any(t in msg for t in _SCORE_REQUEST_ASK_JA) or _score_noun_asked(msg)
+    if asked and any(t in msg for t in _SCORE_REQUEST_SELF_JA):
+        return True
+    return any(pattern.search(msg) for pattern in _SCORE_REQUEST_EN_RES)
+
+
+# ---------------------------------------------------------------------------
+# お礼・締めくくりだけの発話（IK-0434。非LLM の pre-route）
+# ---------------------------------------------------------------------------
+#
+# 「ありがとうございました、今日はここまでにします」「Thank you, that is very helpful!」に
+# 検索・回答生成を走らせると、無関係な出典が並び、discuss は必須の問い返しで終える。
+# 定型句と、定型句を強めるだけの語を取り除いて**何も残らない**発話だけを拾う
+# （「ありがとう、でも µ はなぜ負？」のように内容が残る発話は拾わない — 狭く保つ）。
+
+#: お礼・締めくくりの定型句（長いものから順に取り除く。casefold 後の形で書く）。
+_CLOSING_PHRASES_JA = (
+    "どうもありがとうございました", "どうもありがとうございます", "ありがとうございました",
+    "ありがとうございます", "ありがとう", "助かりました", "助かります", "参考になりました",
+    "勉強になりました", "今日はここまでにします", "今日はここまでにしておきます", "今日はここまで",
+    "ここまでにします", "ここまでにしておきます", "終わりにします", "おしまいにします",
+    "お疲れさまでした", "お疲れ様でした", "失礼します", "また来ます", "またよろしくお願いします",
+)
+_CLOSING_PHRASES_EN = (
+    "thank you so much", "thank you very much", "thanks so much", "thanks a lot", "thank you",
+    "thanks", "that is very helpful", "that's very helpful", "that was very helpful",
+    "that is helpful", "that's helpful", "that was helpful", "this is very helpful",
+    "this is helpful", "very helpful", "really helpful", "helpful", "that's all for today",
+    "that is all for today", "i'm done for today", "i am done for today", "done for today",
+    "see you next time", "see you", "goodbye", "bye", "have a nice day", "cheers",
+)
+#: 定型句を強めるだけで内容を持たない語（定型句を取り除いた残りに現れてよい）。
+#: IK-0493: 「なるほど、ありがとうございます。」のような相づち＋お礼も定型句だけの発話として拾う
+#: （相づちは内容を持たない。問いの形・内容が残る発話は従来どおり拾わない）。
+_CLOSING_FILLER_JA = (
+    "本当に", "ほんとうに", "とても", "大変", "すごく", "では", "じゃあ", "それでは",
+    "なるほど", "分かりました", "わかりました", "了解しました", "了解です", "承知しました",
+    "よくわかりました", "よく分かりました", "はい",
+)
+_CLOSING_FILLER_EN = (
+    "really", "very", "so", "much", "ok", "okay", "great", "and", "for", "today",
+    "i", "see", "got", "it", "understood", "ah", "oh", "alright", "right",
+)
+_CLOSING_PUNCT_RE = re.compile(r"[\s。．.!！?？、,，〜~…・'’\"「」😊🙏]+")
+
+
+def _is_closing_utterance(message: str) -> bool:
+    """お礼・締めくくりだけの発話か（決定論・非LLM）。"""
+    text = (message or "").casefold().replace("’", "'")
+    if not text.strip() or len(text) > 120:
+        return False
+    found = False
+    for phrase in sorted(_CLOSING_PHRASES_JA + _CLOSING_PHRASES_EN, key=len, reverse=True):
+        if phrase in text:
+            if phrase.isascii():
+                pattern = re.compile(r"(?<![a-z])" + re.escape(phrase) + r"(?![a-z])")
+                if not pattern.search(text):
+                    continue
+                text = pattern.sub(" ", text)
+            else:
+                text = text.replace(phrase, " ")
+            found = True
+    if not found:
+        return False
+    for filler in _CLOSING_FILLER_JA:
+        text = text.replace(filler, " ")
+    words = [w for w in _CLOSING_PUNCT_RE.split(text) if w]
+    return all(w in _CLOSING_FILLER_EN for w in words)
+
+
+def _is_closing_led_statement(message: str) -> bool:
+    """お礼・締めくくりで始まり、問いを含まない発話か（IK-0471・決定論・非LLM）。
+
+    「ありがとうございました。これでゼミで説明できそうです。」のように定型句の後に一言が
+    続く発話は IK-0434 の締めくくり pre-route（定型句だけの発話）には当たらないが、教材で
+    確かめる内容の問いではない。未踏ガードの注入・構造帰属・引っかかりのヒントの対象から
+    外すための判定で、回答の生成そのものは止めない（狭く保つ: 問いの形なら偽）。
+    """
+    if _is_closing_utterance(message):
+        return True
+    text = (message or "").casefold().replace("’", "'")
+    if not text.strip() or len(text) > 160 or _is_question_shaped(message):
+        return False
+    if any(phrase in text for phrase in _CLOSING_PHRASES_JA):
+        return True
+    return any(
+        re.search(r"(?<![a-z])" + re.escape(phrase) + r"(?![a-z])", text)
+        for phrase in ("thank you", "thanks", "that is very helpful", "that's very helpful")
+    )
+
+
+def _question_before_prerequisite_gate(history: list | None, topic_title: str) -> str | None:
+    """直前の assistant ターンがこのトピックの逆質問なら、その直前の学習者の質問を返す（IK-0396）。"""
+    turns = [t for t in (history or []) if isinstance(t, dict)]
+    for index in range(len(turns) - 1, -1, -1):
+        turn = turns[index]
+        if turn.get("role") != "assistant":
+            continue
+        content = str(turn.get("content") or "")
+        if not _is_prerequisite_gate_for_topic(content, topic_title):
+            return None
+        if any(marker in content for marker in _PREREQUISITE_GATE_ANSWERED_MARKERS):
+            return None  # TRIAGE14: 元の質問にはその逆質問のターンで答え済み
+        for prev in reversed(turns[:index]):
+            if prev.get("role") == "user":
+                question = str(prev.get("content") or "").strip()
+                return question or None
+        return None
+    return None
 
 
 def _normalize_check_question_item(item: object) -> dict:
@@ -2794,17 +5169,26 @@ def _normalize_check_question_item(item: object) -> dict:
 
 
 def _select_check_question(topic: dict, requested_question: str = "", request_item: dict | None = None) -> dict:
-    if request_item:
-        normalized = _normalize_check_question_item(request_item)
-        if normalized.get("question"):
-            return normalized
     questions = topic.get("check_questions") or topic.get("assessment_prompts") or []
     normalized_questions = [_normalize_check_question_item(item) for item in questions]
     requested = (requested_question or "").strip()
+
+    def _key(text: str) -> str:
+        return " ".join(str(text or "").split())
+
+    # TRIAGE14(st-06 seq21): 学習者が答えた問い（question）を正本にする。クライアントが添えた
+    # check_question が別の問い（前に出題した 1 問目など）でも、その要件・解答例を流用しない。
     if requested:
         for item in normalized_questions:
-            if item.get("question") == requested:
+            if _key(item.get("question")) == _key(requested):
                 return item
+    if request_item:
+        normalized = _normalize_check_question_item(request_item)
+        if normalized.get("question") and (
+            not requested or _key(normalized.get("question")) == _key(requested)
+        ):
+            return normalized
+    if requested:
         return _normalize_check_question_item(requested)
     for item in normalized_questions:
         if item.get("question"):
@@ -2839,6 +5223,11 @@ def _topic_formulas_from_content_blocks(topic: dict) -> list[dict]:
                 "plain_text": plain_text,
                 "raw_text": raw_text,
                 "is_display": True,
+                # 第 25 周 第 6 波（IK-0895）: 写しの復元の状態を運ぶ（印は後段の正本が付ける）。
+                **{
+                    k: item[k] for k in ("reconstructed", "reconstruction_checked")
+                    if item.get(k) is True
+                },
             })
     return formulas
 
@@ -2874,6 +5263,9 @@ def get_topic_material(
 
     topic_text = _topic_student_material(topic or {})
     if topic_text.strip():
+        # 第 25 周 第 6 波（IK-0895）: 凍結した式の写しに、生きた式の記録（採用 run の artifact・
+        # chunks.formulas）から引いた復元の状態を載せる。本文・付録・講義・チャットが同じ答え。
+        topic = overlay_topic_equation_reconstruction(topic, course_data)
         formulas = _topic_formulas_from_content_blocks(topic or {})
         # ![[figure:id]] 埋め込みを [[FIGURE_N]] プレースホルダーに解決する
         # （Phase 4 図のコース流通 §7.2。レクチャー表示の build_topic_slides と同じ解決を通す）。
@@ -2884,15 +5276,15 @@ def get_topic_material(
         # ``![[component:id]]`` / ``![[claim:id]]`` / ``![[source:id]]`` を学習画面でも
         # 解決できるよう、トピックに公開済みの参照だけから読み取り専用 DTO を渡す
         # （管理画面 lsTopicEvidenceItems と同一規則。DB 上の任意 ID は解決しない）。
-        evidence_items = build_topic_evidence_items(topic or {})
+        evidence_items = build_topic_evidence_items(topic_with_claim_origins(topic))  # IK-1155
         # 教材区画の粒度は ``core/lecture.py::build_topic_slides`` のページ境界に揃える
         # （P2-R3）。表示・音声・readiness と**同じ決定論分割**なので、学習者が見る
         # 区画の並びとレクチャーのスライドの並びが一致し、テキスト選択の区画番号
         # （``data-segment-index`` / ``resolve_selection_segment``）が意味を持つ。
         # 分割できない（短い）教材は従来どおり1区画。
-        segment_texts = _topic_material_segment_texts(topic or {}, figures_by_id)
-        if len(segment_texts) < 2:
-            segment_texts = [resolved_text]
+        # IK-0389 / IK-0455（配信側）: 区画の本文と、その本文が引く formulas を同じ関数から
+        # 受け取り、引けない ``[[FORMULA_N]]`` / 根拠埋め込みを片付ける（正本は core/lecture.py）。
+        segment_texts, formulas = topic_material_delivery_segments(topic or {}, figures_by_id, resolved_text, formulas, evidence_items)
         chunks = [
             ChunkContent(
                 id=f"topic:{topic_id}",
@@ -2913,7 +5305,9 @@ def get_topic_material(
             )
             for seg_index, segment_text in enumerate(segment_texts)
         ]
-        return TopicMaterialResponse(topic_id=topic_id, chunks=chunks)
+        return TopicMaterialResponse(
+            topic_id=topic_id, chunks=chunks, document_id=_topic_single_document_id(topic)
+        )
 
     all_chunks = get_course_chunks_ordered(course_data)
     if topic_index < len(all_chunks):
@@ -2931,7 +5325,50 @@ def get_topic_material(
     else:
         chunks = []
 
-    return TopicMaterialResponse(topic_id=topic_id, chunks=chunks)
+    # IK-0375: 解説がまだ無く論文の本文をそのまま出すときは、その事実を1文添える
+    # （何も言わずに論文の表紙が出ると、学習者はコースが壊れていると読む）。
+    # 本文を返さないとき（chunks 空）は「そのまま表示しています」が偽になるので付けない。
+    # 表示するチャンクの選び方はここでは変えない。
+    # IK-0947: 返す本文が無いときも空だと言う（空白のまま配らない）。
+    return TopicMaterialResponse(
+        topic_id=topic_id,
+        chunks=chunks,
+        preparation_notice=(
+            _topic_material_fallback_notice(course_data) if chunks
+            else _topic_material_empty_notice(course_data)
+        ),
+    )
+
+
+def _topic_single_document_id(topic: dict | None) -> str | None:
+    """トピックが束ねる論文がちょうど1つならその document_id（焦点論文の画面申告用）。
+
+    画面文脈に載る参照であって権限の根拠ではない（サーバは受け取った値をスコープとの積で
+    しか使わない — ``core.focus_document`` FD2）。取れない・複数なら None。
+    """
+    try:
+        ids = topic_source_document_ids(topic)
+    except Exception:  # noqa: BLE001 — 補助
+        return None
+    return next(iter(ids)) if len(ids) == 1 else None
+
+
+def _topic_material_empty_notice(course_data: dict) -> str:
+    """トピックの教材が空のときの事実文（IK-0947。生成中なら準備中）。"""
+    if course_content_is_preparing(course_data):
+        return label_vocab.TOPIC_MATERIAL_EMPTY_PREPARING_NOTICE
+    return label_vocab.TOPIC_MATERIAL_EMPTY_NOTICE
+
+
+def _topic_material_fallback_notice(course_data: dict) -> str:
+    """論文の本文をそのまま返すときの事実文を、コースの解説生成の記録から選ぶ。
+
+    生成中と記録されていれば「準備中」、それ以外（記録なし・完了だがこのトピックの
+    解説が無い・パイプライン待ち・失敗）は「生成されていません」。数字は入れない。
+    """
+    if course_content_is_preparing(course_data):
+        return label_vocab.MATERIAL_PREPARING_NOTICE
+    return label_vocab.MATERIAL_NOT_GENERATED_NOTICE
 
 
 # ---------------------------------------------------------------------------
@@ -3144,7 +5581,7 @@ def check_topic_understanding(
     ]
     explanation = str(check_item.get("explanation") or "").strip()
 
-    material_text = _topic_student_material(topic)
+    material_text = material_text_for_prompt(topic, _topic_student_material(topic))
     requirements_text = "\n".join(f"- {r}" for r in answer_requirements) or "(未設定)"
     params = get_llm_params("fast")
     prompt = (
@@ -3162,12 +5599,21 @@ def check_topic_understanding(
         f"回答に必要な要素:\n{requirements_text}\n\n"
         f"解説（設定済みの場合は explanation に反映する）:\n{explanation or '(未設定)'}\n\n"
         f"受講者の回答: {body.answer}\n\n"
+        f"{_answer_language_line(body.answer)}"
         "観点の書き方: 合否・正誤の判定は書かないでください。requirement は上の"
         "「回答に必要な要素」の文字列をそのまま使い、リストに無い要素を作らないでください"
-        "（要素が未設定のときは observations を空にして構いません）。observations は最大"
-        f"{check_review.MAX_OBSERVATIONS}件までにし、触れられていない可能性のある要素を"
-        "優先してください。statement は「…への言及は見当たらないようです」"
-        "「…には触れているようです」のような推量形の1文にしてください。\n"
+        "（要素が未設定のときは observations を空にして構いません）。"
+        # IK-0409: 要素が設定されているときは全要素に1件ずつ観点を付ける（要素5つのうち
+        # 3つだけ見て残りを黙って落とさない）。
+        "要素が設定されているときは、リストの**すべての要素について1件ずつ**、リストの順に"
+        "observations を書いてください（要素を省かないでください）。statement は"
+        "「…への言及は見当たらないようです」「…には触れているようです」のような推量形の"
+        "1文にしてください。\n"
+        # IK-0409: 英語で答えた受講者に日本語だけで返さない。
+        "言語: statement・model_answer・explanation は**受講者の回答と同じ言語**で書いて"
+        "ください（受講者が英語で答えたら英語で書く）。JSON のキー名と status の値"
+        "（covered / not_mentioned）は変えないでください。requirement は上のリストの文字列を"
+        "そのまま使ってください。\n"
         "禁止: 合格・不合格・正解・採点という語、点数・正解率・達成度のような数値、"
         "評価の言い切り、褒め言葉の羅列。次に進むかどうかを指示しないでください"
         "（それは受講者本人が決めます）。"
@@ -3206,7 +5652,16 @@ def check_topic_understanding(
     if degraded:
         logger.warning("Check question juxtaposition failed; degrading to facts")
 
-    observations = check_review.parsed_observations(parsed, answer_requirements)
+    # IK-0409: 要素が設定されていれば全要素ぶんの観点を受け取る（上限は要素数。
+    # 要素が無いときの上限 MAX_OBSERVATIONS は従来どおり）。
+    observations = check_review.parsed_observations(
+        parsed, answer_requirements,
+        limit=max(check_review.MAX_OBSERVATIONS, len(answer_requirements)),
+    )
+    # IK-0409: LLM が一部の要素にしか観点を付けなくても、残りを黙って落とさない
+    # （「観点が得られなかった」事実を unclear で補う。degraded の往復は従来どおり空）。
+    if not degraded:
+        observations = check_review.fill_missing_requirements(observations, answer_requirements)
     covered, not_mentioned = check_review.split_observations(observations)
     statements = check_review.build_statements(body.answer, observations, degraded=degraded)
     model_answer = str(parsed.get("model_answer") or expected_model_answer or material_text[:800])
@@ -3243,6 +5698,46 @@ def check_topic_understanding(
     )
 
 
+def _answer_language_line(answer: str) -> str:
+    """受講者の回答の言語を決定論で見て、並置の言語を1行で指示する（IK-0409）。
+
+    ラテン文字が文字の大半を占める回答だけ「英語で書く」と明示する（「受講者の回答と
+    同じ言語で」だけでは日本語の指示文に引きずられて日本語で返ることがあった）。
+    それ以外は空文字（従来どおり）。
+    """
+    text = str(answer or "")
+    latin = sum(1 for ch in text if ("a" <= ch <= "z") or ("A" <= ch <= "Z"))
+    cjk = sum(
+        1 for ch in text
+        if "\u3040" <= ch <= "\u30ff" or "\u3400" <= ch <= "\u9fff"
+    )
+    if latin >= 20 and latin > cjk * 4:
+        return (
+            "受講者の回答は英語で書かれています。statement・model_answer・explanation は"
+            "英語で書いてください。\n\n"
+        )
+    return ""
+
+
+def _self_check_disagreed_notice(user_id: str, course_id: str, topic_id: str) -> str:
+    """「違っていた」の事実文。このトピックの直近の発話が英語なら英語で返す（IK-0450）。
+
+    自己確認のリクエストは本文を持たないので、保存済みの会話の最後の発話で言語を選ぶ
+    （読めなければ日本語 — fail-soft）。
+    """
+    last_user = next(
+        (
+            str(m.get("content") or "")
+            for m in reversed(load_stored_chat_history(user_id, course_id, topic_id))
+            if m.get("role") == "user" and str(m.get("content") or "").strip()
+        ),
+        "",
+    )
+    if last_user and _is_kana_kanji_free(last_user):
+        return label_vocab.CHECK_SELF_CHECK_DISAGREED_NOTICE_EN
+    return label_vocab.CHECK_SELF_CHECK_DISAGREED_NOTICE
+
+
 @router.post(
     "/courses/{course_id}/topics/{topic_id}/check/self-check",
     response_model=LearningCheckSelfCheckResponse,
@@ -3256,9 +5751,10 @@ def self_check_topic_understanding(
     """確認問題の並置を見たあとの自己確認（本人の 1 タップ・非LLM）。
 
     是正 F1: トピック完了を確定できるのはこの経路だけで、確定するのは本人が
-    「合っていた」/「違っていた（が、見比べて先へ進むと決めた）」を押したときに限る。
-    ``verdict_wrong``（AI の観点提示がおかしい）は申告として記録するが完了には使わない
-    — かつ進行を止めない（本人が改めて他の2択を押せば進める）。語彙は R層と共有
+    「合っていた」を押したときに限る（IK-0399: 「違っていた」は本人の見立てが要件と
+    合わなかったという申告なので完了にしない — ``notice`` に事実文を返す）。
+    ``disagreed`` / ``verdict_wrong``（AI の観点提示がおかしい）は申告として記録するが
+    完了には使わない — かつ進行を止めない（トピックはロック表示でも開ける）。語彙は R層と共有
     （``core/reconstruction/schema.py::SELF_CHECK_VALUES``）。
     """
     self_check = str(body.self_check or "").strip()
@@ -3282,9 +5778,10 @@ def self_check_topic_understanding(
             )
             topic_completed = bool(completion.get("topic_completed"))
         else:
-            # 申告の記録（本人の逐語・回答は残さない。AI の観点提示への異議という事実だけ）。
+            # 申告の記録（本人の逐語・回答は残さない。「違っていた」の申告 / AI の観点提示への
+            # 異議という事実だけ。IK-0399: disagreed も完了にしない）。
             logger.info(
-                "check self-check verdict_wrong course=%s topic=%s", course_id, topic_id,
+                "check self-check %s course=%s topic=%s", self_check, course_id, topic_id,
             )
             completion = get_course_completion(current_user["id"], course_id, course_data)
         course_completed = bool(completion.get("course_completed"))
@@ -3300,6 +5797,11 @@ def self_check_topic_understanding(
         topic_completed=topic_completed,
         course_completed=course_completed,
         completed_topic_ids=completed_topic_ids,
+        # IK-0399: 「違っていた」は完了にしない。その事実を1文で返す（数字なし）。
+        notice=(
+            _self_check_disagreed_notice(current_user["id"], course_id, topic_id)
+            if self_check == "disagreed" else ""
+        ),
     )
 
 
@@ -3330,6 +5832,11 @@ def get_chat_history(
         return LearningChatHistoryResponse(history=[])
 
     history = record[0] if isinstance(record[0], list) else []
+    # IK-0444: 出典番号の対応表の控えはサーバの内部の記帳。学習者向けの履歴には載せない。
+    history = [
+        {k: v for k, v in m.items() if k != CITATION_MAP_KEY} if isinstance(m, dict) else m
+        for m in history
+    ]
     return LearningChatHistoryResponse(history=history)
 
 
@@ -3392,7 +5899,7 @@ def delete_chat_message_from(
 
     try:
         result = truncate_chat_and_supersede(
-            current_user["id"], course_id, topic_id, message_id
+            current_user["id"], course_id, topic_id, message_id, reason="delete"
         )
     except Exception:
         logger.exception(
@@ -3404,7 +5911,13 @@ def delete_chat_message_from(
     if result is None:
         raise HTTPException(status_code=404, detail="Message not found")
 
-    return {"status": "deleted", "removed_count": result["removed_count"]}
+    # 第 23 波 F2: 取り消しの直後に、往復は会話から外れたが痕跡は状態を変えて残る事実を返す
+    # （文言の正本は core/label_vocab.py。画面は JS に焼き込まずこの文をそのまま描く）。
+    return {
+        "status": "deleted",
+        "removed_count": result["removed_count"],
+        "fact": label_vocab.CHAT_TURN_WITHDRAWN_FACT,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -3524,7 +6037,7 @@ def _atlas_action_response(
             body.history, body.message, answer,
             user_message_id=body.message_id or None,
         )
-        return LearningChatResponse(answer=answer, course_update=None)
+        return LearningChatResponse(answer=answer, course_update=None, shape=verbatim_shape_dto(answer))
 
     if action == "learn":
         interest_view = get_interest_traces(user_id, course_id, topic_id)
@@ -3556,13 +6069,127 @@ def _atlas_action_response(
             body.history, body.message, answer,
             user_message_id=body.message_id or None,
         )
-        return LearningChatResponse(answer=answer, course_update=None, atlas_path_card=card)
+        return LearningChatResponse(
+            answer=answer, course_update=None, atlas_path_card=card, shape=verbatim_shape_dto(answer),
+        )
 
     return None
 
 
+# 第 22 周 A2（IK-0611 派生）: 「🧪 動かして確かめる」パネルの UI 論理アンカー。パネルが開いて
+# いる（画面文脈に ``selection.simulation_run_id`` がある）往復では、使い方の検索をこの節の一族に
+# 寄せる。パネルが開いていることは画面の明示状態で、推定ではない（LC4 の許された入力）。
+_SIMULATION_LAB_UI_ANCHOR = "material.simulation-lab"
+
+
+def _simulation_panel_open(body: LearningChatRequest, *, course_id: str) -> bool:
+    """学習者が検証シミュレーションのパネルで実行を開いているか（画面文脈の参照だけで判定）。"""
+    return bool(
+        selected_simulation_run_id(_screen_selection_for_anchor(body, course_id=course_id))
+    )
+
+
+def _is_simulation_result_question(body: LearningChatRequest, *, course_id: str) -> bool:
+    """開いている実行の**結果の言葉**（未測定・一致・分離・記載値…）を問う発話か。
+
+    これは画面の使い方ではなく、その実行の結果の意味を問うもの。使い方マニュアルの経路
+    （LLM 0 回・本文素通し）では SA層 4-e の実行の事実文が届かないので、HELP に回さず通常の
+    RAG 経路へ流す（非LLM・当該発話 + 画面の明示状態だけ = LC4 / LC5。様相は変えない = LC1）。
+    """
+    return mentions_simulation_result(body.message) and _simulation_panel_open(
+        body, course_id=course_id
+    )
+
+
 _USAGE_HELP_FOOTER = "教材の内容についての質問なら、そのまま送り直してください。"
+
+
+def _normalize_for_resend(text: str) -> str:
+    return re.sub(r"[\s。．.!！?？、,，]+", "", (text or "").casefold())
+
+
+def _is_resend_after_usage_help(body: LearningChatRequest) -> bool:
+    """使い方の回答の直後に、同じ発話がそのまま送り直されたか（IK-1005・決定論・非LLM）。
+
+    使い方の回答は末尾で「教材の内容についての質問なら、そのまま送り直してください」と
+    案内する。分類は当該発話だけで決まる（LC4）ので、同じ文を送り直すと同じ使い方の回答に
+    戻る行き止まりだった。直前の assistant ターンが使い方の回答（末尾がこの案内）で、その前の
+    user ターンと今の発話が同じなら、案内どおり教材の内容の問いとして通常の RAG へ流す。
+    入力は当該発話 + 直前の往復（画面に見えている会話）だけ（セッションを跨がない）。
+    """
+    history = list(getattr(body, "history", None) or [])
+    current = _normalize_for_resend(getattr(body, "message", "") or "")
+    if not current or len(history) < 2:
+        return False
+    last = history[-1] if isinstance(history[-1], dict) else {}
+    if str(last.get("role") or "") != "assistant":
+        return False
+    content = str(last.get("content") or "").rstrip()
+    if not (content.endswith(_USAGE_HELP_FOOTER) or content.endswith(_USAGE_HELP_FOOTER_EN)):
+        return False
+    previous_user = history[-2] if isinstance(history[-2], dict) else {}
+    if str(previous_user.get("role") or "") != "user":
+        return False
+    return _normalize_for_resend(str(previous_user.get("content") or "")) == current
+
+
+def _is_screen_fact_question(body: LearningChatRequest, *, course_id: str) -> bool:
+    """画面に出ている札・事実文の意味を、画面文脈（SA層）を伴って問う発話か（IK-1005）。
+
+    分野の地図で場所を開いている（``view.atlas_node_label`` = IK-0907 第 4 波の画面の明示状態）
+    とき、その場所の名前か「札」「地図」に触れる問いは、使い方マニュアルの一般論ではなく
+    その場所の事実（札の説明と台帳の状態 — SA層の解決器が渡す）で答えるべきもの。HELP に
+    回さず RAG へ流す（``manual_help_kb_design.md`` §9 の根 4 と同じ規律・LLM を増やさない）。
+    """
+    payload = getattr(body, "screen_context", None)
+    if payload is None:
+        return False
+    try:
+        ctx = normalize_screen_context(payload.model_dump())
+    except Exception:  # pragma: no cover - 正規化は例外を出さない契約
+        return False
+    if ctx is None or ctx.screen != SCREEN_LEARNING:
+        return False
+    declared_course_id = str(ctx.selection.get("course_id") or "")
+    if declared_course_id and declared_course_id != str(course_id):
+        return False
+    msg = getattr(body, "message", "") or ""
+    # IK-1064: 教材の要素（部品の文脈など）を開いて、その要素の説明・出所・検証の事実を問う発話も
+    # 使い方ではなく画面の事実（SA層の element の解決器が渡す）で答える。
+    element_label = str(ctx.selection.get("element_label") or "").strip()
+    if str(ctx.selection.get("element_id") or "").strip() and (
+        (element_label and element_label in msg)
+        or any(word in msg for word in _SCREEN_ELEMENT_REFERENCE_WORDS)
+    ) and any(word in msg for word in _SCREEN_ELEMENT_FACT_WORDS):
+        return True
+    label = str(ctx.view.get("atlas_node_label") or "").strip()
+    if not label:
+        return False
+    return label in msg or "札" in msg or "地図" in msg
+
+
+#: IK-1064: 開いている要素を指す語と、画面に出た事実（説明・出所・承認・検証）を問う語。
+_SCREEN_ELEMENT_REFERENCE_WORDS = ("この部品", "この要素", "この説明", "この主張", "この式", "ここ")
+_SCREEN_ELEMENT_FACT_WORDS = ("説明", "書いた", "書いて", "先生", "教員", "承認", "検証", "確か", "共通部品")
+
+
+def _usage_help_goes_to_rag(body: LearningChatRequest, *, course_id: str) -> bool:
+    """使い方に見える発話を HELP に回さず RAG へ流すか（推定の経路だけに効く・明示は HELP）。"""
+    return (
+        _is_simulation_result_question(body, course_id=course_id)
+        or _is_resend_after_usage_help(body)
+        or _is_screen_fact_question(body, course_id=course_id)
+    )
 _USAGE_HELP_NOT_DOCUMENTED = "その使い方の説明はまだ整備されていません。"
+# 英語の問い（かな・漢字を含まない発話）への固定文。使い方マニュアルは日本語だけなので、
+# 語の照合では節に当たらない（英語の語が日本語の節に偶然重なって目次・無関係な節が返っていた）。
+_USAGE_HELP_JA_ONLY_NOTE_EN = (
+    "The usage guide is written in Japanese. Here is the section that matches what you have open."
+)
+_USAGE_HELP_FOOTER_EN = "If this is a question about the course material, please send it again."
+_USAGE_HELP_NOT_DOCUMENTED_EN = (
+    "I could not find the part of the usage guide (written in Japanese) that answers this."
+)
 
 
 def _usage_help_response(
@@ -3572,8 +6199,12 @@ def _usage_help_response(
     body: LearningChatRequest,
     *,
     on_llm_call: Callable[[], None] | None = None,
-) -> LearningChatResponse:
+    return_none_if_undocumented: bool = False,
+) -> LearningChatResponse | None:
     """学生 HELP ルートのハンドラ（設計 §1-3、ui_anchor 優先は §5.2/§9-1）。
+
+    ``return_none_if_undocumented``（IK-0936）: 該当節が無いとき固定文を返さず、痕跡も履歴も
+    残さずに ``None`` を返す（呼び出し側が通常の RAG 経路へ戻す）。分類経由の英語の問いだけが使う。
 
     docs/manual/student/ の凍結索引を検索し、テキスト経路は本文素通し（パラフレーズ
     禁止・quota 非消費）、音声・casual 経路は 1 LLM コールで会話調へ整形する
@@ -3615,11 +6246,41 @@ def _usage_help_response(
                 "documented": True,
             }]
 
-    if not hits and _search_manual is not None:
+    # 第 22 周 A2: 英語の問いは日本語マニュアルに語で当たらない（偶然の重なりで目次・無関係な節が
+    # 返る）ので語の照合を使わず、ベクトル補助層 → 開いているパネルの節の順に当たる。
+    # パネルが開いていれば、その節の一族を検索の先頭に寄せる（画面の明示状態だけを使う）。
+    english_query = _is_kana_kanji_free(body.message)
+    panel_section: dict | None = None
+    if (
+        not ui_anchor_id
+        and _resolve_ui_anchor is not None
+        and _split_manual_ref is not None
+        and _simulation_panel_open(body, course_id=course_id)
+    ):
         try:
-            hits = _search_manual(
-                body.message, audience="student", limit=3, screen=body.screen_mode,
-            ) or []
+            panel_resolved = _resolve_ui_anchor(_SIMULATION_LAB_UI_ANCHOR)
+        except Exception:
+            logger.debug("resolve_ui_anchor failed for simulation panel", exc_info=True)
+            panel_resolved = None
+        if panel_resolved:
+            panel_file, panel_anchor = _split_manual_ref(panel_resolved.get("manual_anchor", ""))
+            if panel_file and panel_anchor:
+                panel_section = {
+                    "file": panel_file,
+                    "anchor": panel_anchor,
+                    "title": panel_resolved.get("title", ""),
+                    "body": panel_resolved.get("body", ""),
+                    "audience": "student",
+                    "citation": f"manual/student/{panel_file}#{panel_anchor}",
+                    "documented": bool(str(panel_resolved.get("body") or "").strip()),
+                }
+
+    if not hits and _search_manual is not None and not english_query:
+        search_kwargs: dict = {"audience": "student", "limit": 3, "screen": body.screen_mode}
+        if panel_section:
+            search_kwargs["prefer_anchor"] = panel_section["anchor"]
+        try:
+            hits = _search_manual(body.message, **search_kwargs) or []
         except Exception:
             logger.warning("search_manual failed for usage help route; falling back to no-hit", exc_info=True)
             hits = []
@@ -3641,9 +6302,24 @@ def _usage_help_response(
             )
             vector_hits = []
         if vector_hits:
+            if panel_section:
+                # 開いているパネルの節の一族に当たったものを先に（並べ替えだけ・足さない）。
+                family = panel_section["anchor"]
+                vector_hits = sorted(
+                    vector_hits,
+                    key=lambda h: 0 if (
+                        str(h.get("anchor") or "") == family
+                        or str(h.get("anchor") or "").startswith(family + "-")
+                    ) else 1,
+                )
             top = vector_hits[0]
             documented = bool(top.get("documented", True))
             used_vector = True
+
+    # 第 22 周 A2: どの検索にも当たらず、パネルが開いているなら、その節を返す（画面の明示状態）。
+    if not documented and panel_section and panel_section.get("documented"):
+        top = panel_section
+        documented = True
 
     is_casual = (body.intent_mode or "").strip() == "casual"
     degraded = False
@@ -3652,8 +6328,14 @@ def _usage_help_response(
     # 未指定時は従来どおり search_manual/vector が見つけた節の citation を使う。
     trace_anchor = f"ui:{ui_anchor_id}" if ui_anchor_id else None
 
+    footer = _USAGE_HELP_FOOTER_EN if english_query else _USAGE_HELP_FOOTER
+    if not documented and return_none_if_undocumented:
+        return None
     if not documented:
-        answer = f"{_USAGE_HELP_NOT_DOCUMENTED}\n\n{_USAGE_HELP_FOOTER}"
+        not_documented = (
+            _USAGE_HELP_NOT_DOCUMENTED_EN if english_query else _USAGE_HELP_NOT_DOCUMENTED
+        )
+        answer = f"{not_documented}\n\n{footer}"
         manual_citations = None
         record_interest_trace(
             user_id, course_id, topic_id,
@@ -3689,14 +6371,23 @@ def _usage_help_response(
                 ).strip()
                 if not formatted:
                     raise ValueError("empty response")
-                answer = f"{formatted}\n\n{_USAGE_HELP_FOOTER}"
+                # 応答の骨格（RS3）: 整形した会話調の本文だけを区画に通す（問い返しは 1 つまで）。
+                # マニュアル本文そのもの（下のテキスト経路・整形失敗の素通し）は組み替えない。
+                formatted = render_answer_text(assemble_response_shape(
+                    answer=formatted, learner_message=body.message, is_discuss=False,
+                    gate_text=None, degraded=False,
+                ))
+                answer = f"{formatted}\n\n{footer}"
             except Exception:
                 logger.warning("usage help casual LLM formatting failed; falling back to raw body", exc_info=True)
-                answer = f"{body_text}\n\n{_USAGE_HELP_FOOTER}"
+                answer = f"{body_text}\n\n{footer}"
                 degraded = True
         else:
             # テキスト経路: 凍結本文を素通し（パラフレーズによる意味ドリフトをゼロにする）。
-            answer = f"{body_text}\n\n[出典1]\n\n{_USAGE_HELP_FOOTER}"
+            answer = f"{body_text}\n\n[出典1]\n\n{footer}"
+            if english_query:
+                # 英語の問いには、本文が日本語であることを先に一行で言う（本文は言い換えない）。
+                answer = f"{_USAGE_HELP_JA_ONLY_NOTE_EN}\n\n{answer}"
         trace_payload = {
             "help_anchor": trace_anchor or (citation or None),
             "documented": True,
@@ -3726,6 +6417,8 @@ def _usage_help_response(
         course_update=None,
         manual_citations=manual_citations,
         degraded=degraded,
+        # 応答の骨格: マニュアル本文・無ヒット固定文は組み替えず区画を読むだけ。
+        shape=verbatim_shape_dto(answer),
     )
 
 
@@ -3882,6 +6575,22 @@ def _learning_chat_core(
         )
         if _trunc is not None:
             body.history = _trunc["truncated_history"]
+    else:
+        _trunc = None
+
+    # IK-0432: 出典番号を会話の中で固定する。保存済み履歴の assistant ターンが持つ
+    # ``sources`` から「チャンク → 番号」を引き、描画メタを落として送り返された往復には
+    # 保存済みのメタを戻す（その往復の保存で sources を失わない）。書き直しで切り詰めた
+    # 場合は body.history がサーバ正本そのものなので追加の読み出しをしない。
+    _stored_history = [] if _trunc is not None else load_stored_chat_history(
+        current_user["id"], course_id, topic_id
+    )
+    body.history = _rehydrate_history_sources(body.history, _stored_history)
+    # IK-0466: 書き直しで取り除いた往復が出した番号も予約する（その番号を別のチャンクへ
+    # 振り直さない — 学習者の画面には直前まで出ていた番号）。
+    _removed_turns = list((_trunc or {}).get("removed_history") or [])
+    _citation_numbers = _SessionCitationNumbers(_stored_history, body.history, _removed_turns)
+    body.history = _carry_citation_map(body.history, _citation_numbers)
 
     topic_info = find_course_topic(course_data, topic_id)
     # discuss モード（設計 §6.2）: 予約 topic_id は既存トピックに存在しないため
@@ -3907,6 +6616,8 @@ def _learning_chat_core(
     # 寄り道に入っても同じ位置へ正確に復帰できるようにする。
     _anchor = body.position_anchor or {}
     _seg = int(_anchor.get("segment_id") or 0)
+    # IK-1122: 区画を報告したか（app.js はレクチャー中だけ送る）。構造帰属は報告の無い 0 を区画にしない。
+    _seg_reported = _anchor.get("segment_id") is not None
     _scroll = int(_anchor.get("scroll_offset") or 0)
     # レビュー確定の修正4: origin_for_topic に topic_info=None を渡すと
     # LearningSupportOrigin.topic_title が生の topic_id（"_discussion"）にフォールバック
@@ -3922,7 +6633,10 @@ def _learning_chat_core(
             current_user["id"], course_id, topic_id,
             body.history, body.message, result.answer,
         )
-        return LearningChatResponse(**result.model_dump(), course_update=None)
+        # 応答の骨格: 固定文は組み替えず区画を読むだけ（早期 return でも shape を埋める）。
+        return LearningChatResponse(
+            **result.model_dump(), course_update=None, shape=verbatim_shape_dto(result.answer),
+        )
 
     # UIサジェスト由来の明示アクションは自然文の意図分類より優先する。
     if body.action == "EXPLAIN_GRAPH_ELEMENT":
@@ -3966,6 +6680,8 @@ def _learning_chat_core(
             **result.model_dump(),
             course_update=graph_response.course_update,
             structure_anchor=_tap_anchor,
+            # 応答の骨格: 生成本文は _generate_graph_element_explanation が assemble 済み。
+            shape=verbatim_shape_dto(result.answer),
         )
 
     # 学生 HELP ルート（設計 §1-3）: casual バイパス（次の _is_casual 判定）より手前に
@@ -3979,9 +6695,14 @@ def _learning_chat_core(
             _route_for_typed_action(body.support_action) == "USAGE_HELP"
             # 分野語彙（内容質問の誤爆ガード）はコースのカートリッジから読む
             # （分野名をコードに書かない。導出できないコースでは分野非依存語のみ）。
-            or _is_usage_question(
-                body.message,
-                cartridge_id=course_cartridge_id(course_data) or None,
+            or (
+                _is_usage_question(
+                    body.message,
+                    cartridge_id=course_cartridge_id(course_data) or None,
+                )
+                # 第 22 周 A2: 開いている実行の結果の言葉を問うなら使い方ではない（RAG 経路へ）。
+                # IK-1005: 使い方の回答の直後の送り直し・画面の札の意味の問い（SA層あり）も RAG へ。
+                and not _usage_help_goes_to_rag(body, course_id=course_id)
             )
         )
         if _is_usage_help:
@@ -3990,6 +6711,59 @@ def _learning_chat_core(
                     current_user["id"], course_id, topic_id, body,
                     on_llm_call=_consume_quota,
                 )
+
+        # IK-0397: 理解度を点数・割合で求める発話は、意図分類（LLM）の前に固定の事実文で
+        # 答える（非LLM・quota 非消費・数値非表示の原則を LLM に言い換えさせない）。
+        # 痕跡は新しい kind を作らない（学習相談の一般アドバイスと同じく記録しない）。
+        if _is_understanding_score_request(body.message):
+            _score_reply = (
+                label_vocab.UNDERSTANDING_SCORE_REQUEST_REPLY_EN
+                if _is_kana_kanji_free(body.message)
+                else label_vocab.UNDERSTANDING_SCORE_REQUEST_REPLY
+            )
+            persist_chat_history(
+                current_user["id"], course_id, topic_id,
+                body.history, body.message, _score_reply,
+                user_message_id=body.message_id or None,
+                assistant_meta={"content_grounding": "model_generated"},
+            )
+            return LearningChatResponse(
+                answer=_score_reply,
+                course_update=None,
+                content_grounding="model_generated",
+                shape=verbatim_shape_dto(_score_reply),
+            )
+
+        # IK-0434: お礼・締めくくりだけの発話は、検索も回答生成もせず固定の1文で応じる
+        # （非LLM・quota 非消費・出典なし・問い返しなし。discuss も同じ）。typed action・
+        # テキスト選択・理解サイクル・確認問題の壁打ちがある往復は対象にしない（狭く保つ）。
+        if (
+            not body.support_action
+            and not (body.selection_text or "").strip()
+            and not (body.cycle_mode or "").strip()
+            and not body.check_scaffold
+            and _is_closing_utterance(body.message)
+        ):
+            # 定型句だけの短い発話なので、「かな・漢字を含まない」を英語の目印にする
+            # （``_is_mostly_latin`` の 8 文字基準では "Thanks!" を拾えない）。
+            _closing_reply = (
+                label_vocab.CLOSING_UTTERANCE_REPLY_EN
+                if _is_kana_kanji_free(body.message)
+                else label_vocab.CLOSING_UTTERANCE_REPLY
+            )
+            # IK-0447: 締めくくりの定型文は内容の説明ではないので出所の分類を付けない
+            # （model_generated にすると「出典なしの AI の説明」の出所行が付く）。
+            persist_chat_history(
+                current_user["id"], course_id, topic_id,
+                body.history, body.message, _closing_reply,
+                user_message_id=body.message_id or None,
+            )
+            return LearningChatResponse(
+                answer=_closing_reply,
+                course_update=None,
+                content_grounding=None,
+                shape=verbatim_shape_dto(_closing_reply),
+            )
 
     # カジュアル対話モード（気軽に話せる先生・ハンズフリー音声会話）:
     # 意図分類（雑談拒否）・前提知識ゲート・誤解検出をバイパスし、RAG検索と
@@ -4026,6 +6800,44 @@ def _learning_chat_core(
         if _atlas_response is not None:
             return _atlas_response
 
+    # IK-0383: 前提確認の逆質問への答え・前提そのものへの問い（決定論・非LLM）。
+    #   - "explain": 前提そのものの説明（是正 F4 の3段解決）へ流す。typed action が無い往復だけ
+    #     （UI ボタンの明示は従来どおり優先する）。下の一次判定の直後で LEARNING_ADVICE を確定し、
+    #     意図分類の LLM コールを省く。
+    #   - "after_gate": 直前が逆質問だった。逆質問を2回続けて出さない（下の前提ゲートで捨てる）。
+    #   楽屋（backstage）は通常の RAG 回答のまま（記録面の私有化を崩さない）で、前提ゲート自体を
+    #   通さない。casual / discuss / 地図アクション / 確認問題の壁打ちも従来どおり対象外。
+    _prereq_followup: str | None = None
+    _prereq_target: str | None = None
+    if not (_is_casual or _is_discuss or _atlas_ctx or _is_backstage or body.check_scaffold):
+        _prereq_followup, _prereq_target = _prerequisite_followup(
+            body.message, body.history, topic_info, topic_title, course_data,
+        )
+        if _prereq_followup in ("explain", "ack_content") and _route_for_typed_action(body.support_action):
+            # 明示の typed action が勝つ（逆質問の繰り返しだけは after_gate として抑える）。
+            _prereq_followup, _prereq_target = "after_gate", None
+    # IK-0396: 逆質問に「理解している」と答えた往復は、記帳（check_prerequisites 側）のうえで
+    # 逆質問を引き起こした**元の質問**に答える。元の質問は履歴の逆質問の直前の学習者発話。
+    # 同じリクエストの中で通常の RAG 経路を通し（回答の LLM は1回・意図分類は追加しない）、
+    # 回答の先頭に事実文を1行添える。見つからなければ従来どおり（この発話そのものに応じる）。
+    _prereq_resume_question: str | None = None
+    # IK-0424: 逆質問の直後の素の「はい / yes」も、逆質問への明示的な答えとして読む。
+    _prereq_bare_yes = _prereq_followup == "after_gate" and _is_bare_yes(body.message)
+    if _prereq_followup == "after_gate" and (
+        _is_explicit_prerequisite_acknowledgement(body.message) or _prereq_bare_yes
+    ):
+        _prereq_resume_question = _question_before_prerequisite_gate(body.history, topic_title)
+    # 第 18 周（G4）: 逆質問への「はい、…」に中身が続いた往復。答えるのは前置きを剥がした中身
+    # （肯定の記帳は下の check_prerequisites に定型の答えを渡して行う = 素の「はい」と同じ）。
+    _prereq_ack_content = _prereq_target if _prereq_followup == "ack_content" else None
+    # この往復で答える問い（検索・生成・教材の関わり・痕跡の本文）。保存する学習者発話は
+    # body.message のまま（本人が打った文を書き換えない）。
+    _turn_question = _prereq_resume_question or _prereq_ack_content or body.message
+    # IK-0424: 「Yes, I understand. … which part …?」のように、理解の答えに新しい問いを続けた
+    # 往復では、元の質問だけに差し替えず新しい問いも併せて答える（新しい問いを落とさない）。
+    if _prereq_resume_question and not _prereq_bare_yes and _is_question_shaped(body.message):
+        _turn_question = f"{_prereq_resume_question}\n\n{body.message}"
+
     # 入口統合 Phase 1（docs/features/learning_chat_entry_unification_design.md §4.2 の
     # [2] 段）: 非LLM の一次判定。「明らかに教材内容の問い」だけを DOMAIN_RAG として
     # 先に確定させ、意図分類の LLM コールを省く（LC5: どの経路でも現行を上回らない）。
@@ -4047,8 +6859,23 @@ def _learning_chat_core(
                 _cartridge_content_terms(_stance_cartridge_id)
                 if _stance_cartridge_id
                 else ()
-            ),
+            )
+            # IK-0476: コースのトピック題名・概念名（分野未指定のコースでも教材の語を知る）。
+            + _course_content_terms(course_data),
         )
+    if _prereq_followup == "explain":
+        _prejudged = "LEARNING_ADVICE"  # IK-0383: 前提そのものの説明（上の判定）
+    if _prereq_resume_question or _prereq_ack_content:
+        _prejudged = "DOMAIN_RAG"  # IK-0396 / G4: 問いに答える（分類の LLM を追加しない）
+    # 第 18 周（詰まりの区画）: 「むずい」「わからない」とだけの往復は、学習相談・前提の説明へ
+    # 分類させず通常の RAG 回答へ流す（足場 1 つは下流の骨格 assemble(stuck=True) が作る）。
+    # 検索は内容語の無い発話なので直前の問いを借りる（_retrieval_query_for_turn）。
+    if (
+        is_stuck_reply(body.message)
+        and not (_is_casual or _is_discuss or _atlas_ctx or _is_backstage)
+        and _prereq_followup != "explain"
+    ):
+        _prejudged = "DOMAIN_RAG"
     # 明示 casual（音声ループ等が intent_mode="casual" を送った往復）と、CHIT_CHAT 判定から
     # 合流する推定 casual_light を後段で区別するため、再代入より前の値を控える（LC6）。
     _explicit_casual = _is_casual
@@ -4059,7 +6886,10 @@ def _learning_chat_core(
         intent = None if (_is_casual or _is_discuss or _atlas_ctx) else (
             _route_for_typed_action(body.support_action)
             or _prejudged
-            or _classify_intent(body.message, course_title, on_llm_call=_consume_quota)
+            or _classify_intent(
+                body.message, course_title, on_llm_call=_consume_quota,
+                screen_hint=_intent_screen_hint(body, course_id=course_id),
+            )
         )
 
     # ルート①: 雑談まじりの発話 → **拒否しない**。軽い調子（casual_light）の様相として
@@ -4084,12 +6914,30 @@ def _learning_chat_core(
     # （テキスト経路は quota 非消費・本文素通し、音声/casual 経路は 1 LLM コール）は
     # Phase 1 と同一で、二重に interest_trace を記録することもない
     # （pre-route はここに到達する前に早期 return しているため一度しか通らない）。
+    # 第 22 周 A2（IK-0611 派生）: 分類が USAGE_HELP でも、開いている実行の結果の言葉（未測定・
+    # 一致・分離・記載値…）を問う発話は使い方マニュアルに回さず、SA層 4-e の実行の事実文が載る
+    # 通常の RAG 経路へ流す（非LLM・画面の明示状態だけで判定・LLM を増やさない）。型付き
+    # アクション usage_help（明示）は上の pre-route で処理済みなので、ここは分類の結果だけ。
+    # IK-1005（第 25 周 面 B 第 5 波）: 使い方の回答の案内どおりに同じ発話を送り直したとき・
+    # 地図で開いた場所の札の意味を問うとき（画面文脈あり）も、分類の USAGE_HELP を RAG へ戻す。
+    if intent == "USAGE_HELP" and _usage_help_goes_to_rag(body, course_id=course_id):
+        intent = "DOMAIN_RAG"
+    # IK-0936（第 25 周 第 3 波）: 分類（推定）で使い方に回った**英語の**問いに日本語マニュアルの
+    # 該当節が無いときは、固定文で終えず通常の RAG 経路へ戻す（内容と画面の両方を含む問いの
+    # 分類の取り違えの戻り道。LLM 呼び出しは増やさない — 分類は済み・回答は 1 コールのまま）。
+    # 日本語の無ヒットは従来どおり固定文（使い方の需要信号を G層へ残す）。型付きの usage_help
+    # （明示）は上の pre-route で処理済みでここには来ない。
     if intent == "USAGE_HELP":
+        _help_fallback_to_rag = _is_kana_kanji_free(body.message)
         with usage_context("learning:help_usage", user_id=current_user["id"], course_id=course_id):
-            return _usage_help_response(
+            _help_response = _usage_help_response(
                 current_user["id"], course_id, topic_id, body,
                 on_llm_call=_consume_quota,
+                return_none_if_undocumented=_help_fallback_to_rag,
             )
+        if _help_response is not None:
+            return _help_response
+        intent = "DOMAIN_RAG"
 
     # ルート②: 学習相談・メタ質問 → RAGをスキップし、コース情報をベースにアドバイス
     if intent == "LEARNING_ADVICE":
@@ -4097,25 +6945,62 @@ def _learning_chat_core(
         # ②本人が閲覧できる document のチャンク（検索1回）→ その抜粋を同じ1コールへ渡し、
         # ③どこにも無ければ model_generated として返す。どの分岐でも
         # `content_grounding` を None にしない（原則8: 出所の正直さ）。
+        # IK-0383: 逆質問への「いいえ・教えて」と前提そのものへの問いは、その前提1つの説明にする。
+        _explain_target = _prereq_target if _prereq_followup == "explain" else None
         is_prereq = (
             body.support_action in _PREREQUISITE_ACTIONS
             or LearningSupportAgent.is_prerequisite_request(body.message)
+            or bool(_explain_target)
         )
         prereq_context: dict | None = None
         if is_prereq:
             prereq_context = _resolve_prerequisite_context(
                 current_user["id"], course_data,
-                _prerequisite_terms(body.message, topic_info),
+                [_explain_target] if _explain_target else _prerequisite_terms(body.message, topic_info),
+                citation_numbers=_citation_numbers,
+                # 焦点論文（FD1）: 明示 → トピック → 直前の引用。直前の引用の段は議論中
+                # （``_discussion``）の前提の説明にも効く（IK-0556 の是正）。
+                prefer_document_ids=_learner_focus(
+                    current_user, course_data, course_id, topic_id,
+                    explicit_document_id=(
+                        next(iter(scope_document_ids)) if scope_document_ids and len(scope_document_ids) == 1 else None
+                    ),
+                    allowed_document_ids=scope_document_ids,
+                    # 画面で選んだ論文（④段）も chat core の焦点と同じく渡す（FD1）。
+                    opening_document_id=(
+                        _screen_selection_for_anchor(body, course_id=course_id) or {}
+                    ).get("document_id"),
+                ).document_ids,
             )
+        # 第 18 周（G2）: 学習相談の一般アドバイスにも表示中の教材の出典チャンクを番号付きで渡し、
+        # 教材に触れた箇所の出典チップを本文の引用どおりに出す（可視性は get_chunks_for_prompt が
+        # SQL 内で強制。前提の説明は前提の資料を引くので対象外）。
+        _advice_topic_sources, _advice_topic_context = (
+            _advice_topic_source_context(
+                topic_info, course_data, _citation_numbers,
+                user_id=current_user["id"], scope_document_ids=scope_document_ids,
+            )
+            if not is_prereq and topic_info
+            else ([], None)
+        )
         with usage_context("learning:chat", user_id=current_user["id"], course_id=course_id):
             advice_answer = _generate_learning_advice_response(
                 course_title, topic_title, body.message,
                 topic_info=topic_info, course_data=course_data,
                 on_llm_call=_consume_quota,
                 source_context=(prereq_context or {}).get("context_block"),
+                explain_prerequisite=_explain_target,
+                topic_source_context=_advice_topic_context,
             )
         advice_answer, inline_actions = extract_inline_actions(advice_answer)
+        # IK-0586 の残り: 早期 return も応答の骨格に通す（答え先頭・問い返し 1 つまで）。
+        # 学習相談は見出しを外した短い平文にする（G2）。
+        advice_answer = _shape_advice_answer(advice_answer, body.message, plain=not is_prereq)
         if is_prereq and prereq_context is not None:
+            # IK-0430: 根拠の無い [出典N]（番号付き出典の無い抜粋への捏造）を本文から除く。
+            advice_answer = _reconcile_citation_markers(
+                advice_answer, {s["index"] for s in prereq_context["cited_sources"]}
+            )
             # 解決できなかった前提は、閉世界の事実文でサーバ側から添える（LLM に
             # 言わせない・分野レベルの不在は言わない, SL1）。
             _closed_world = _prerequisite_closed_world_note(prereq_context["unresolved"])
@@ -4128,25 +7013,24 @@ def _learning_chat_core(
                 origin=support_origin,
                 extra_actions=inline_actions,
             )
-            _prereq_sources = prereq_context["cited_sources"]
+            # IK-0494: 見せる出典は本文が引用したものだけ（番号は振り直さない）。
+            _prereq_sources = _displayed_sources_for(
+                result.answer, prereq_context["cited_sources"], prereq_context["content_grounding"]
+            )
             _prereq_grounding = prereq_context["content_grounding"]
             _prereq_tier = prereq_context["overall_tier"]
+            # 第 18 周（G4・原則8）: 本文が何も引用せず見せる出典も無い説明に「教材に基づく」を
+            # 付けない（出所の帯と出典チップを食い違わせない）。
+            if not _prereq_sources and _prereq_grounding in ("course_material", "other_material"):
+                _prereq_grounding = "model_generated"
             persist_chat_history(
                 current_user["id"], course_id, topic_id,
                 body.history, body.message, result.answer,
                 assistant_meta={
-                    "sources": [
-                        {
-                            "index": s["index"],
-                            "chunk_id": s["chunk_id"],
-                            "source_title": s["source_title"],
-                            "tier": s["tier"],
-                            "score": s["score"],
-                        }
-                        for s in _prereq_sources
-                    ],
+                    "sources": _history_source_meta(_prereq_sources),
                     "overall_tier": _prereq_tier,
                     "content_grounding": _prereq_grounding,
+                    CITATION_MAP_KEY: _citation_numbers.mapping(),
                 },
             )
             return LearningChatResponse(
@@ -4155,20 +7039,54 @@ def _learning_chat_core(
                 sources=_prereq_sources,
                 overall_tier=_prereq_tier,
                 content_grounding=_prereq_grounding,
+                shape=verbatim_shape_dto(result.answer),
             )
         # 学習開始・一般アドバイスはパス上（detour ではない）。前進アクションを型付きで提示。
+        # 第 18 周（G2）: 本文が表示中の教材の出典を引用していれば course_material + その出典
+        # チップ、引用していなければ model_generated（出所を空欄にしない = 原則8）。
+        advice_answer = _reconcile_citation_markers(
+            advice_answer, {s["index"] for s in _advice_topic_sources}
+        )
+        _advice_cited = _sources_cited_in_answer(advice_answer, _advice_topic_sources)
+        _advice_grounding = (
+            "course_material"
+            if any(s.get("origin") == "course_material" for s in _advice_cited)
+            else ("other_material" if _advice_cited else "model_generated")
+        )
+        _advice_sources = _displayed_sources_for(advice_answer, _advice_topic_sources, _advice_grounding)
+        _advice_tier = (
+            aggregate_overall_tier([s["tier"] for s in _advice_sources]) if _advice_sources else None
+        )
         persist_chat_history(
             current_user["id"], course_id, topic_id,
             body.history, body.message, advice_answer,
-            assistant_meta={"content_grounding": "model_generated"},
+            assistant_meta=(
+                {
+                    "sources": _history_source_meta(_advice_sources),
+                    "overall_tier": _advice_tier,
+                    "content_grounding": _advice_grounding,
+                    CITATION_MAP_KEY: _citation_numbers.mapping(),
+                }
+                if _advice_sources
+                else {"content_grounding": "model_generated"}
+            ),
         )
-        first_concept = ""
-        for _c in (course_data.get("concepts") or []):
-            _name = _c.get("name", _c) if isinstance(_c, dict) else str(_c)
-            if _name:
-                first_concept = str(_name)
-                break
+        # 第 17 周（C-seq10）: ボタンの行き先は表示中トピックの最初の概念（無ければコース全体）。
+        _advice_concept_list = _advice_concepts(topic_info, course_data)
+        first_concept = _advice_concept_list[0] if _advice_concept_list else ""
         advice_next = support_agent.advice_actions(support_origin, topic_title, first_concept)
+        if _advice_sources:
+            # 表示中の教材の出典を本文が引用した（第 18 周 G2）。
+            return LearningChatResponse(
+                answer=advice_answer,
+                course_update=None,
+                origin=asdict(support_origin),
+                next_actions=[asdict(a) for a in (advice_next + inline_actions)],
+                sources=_advice_sources,
+                overall_tier=_advice_tier,
+                content_grounding=_advice_grounding,
+                shape=verbatim_shape_dto(advice_answer),
+            )
         return LearningChatResponse(
             answer=advice_answer,
             course_update=None,
@@ -4177,29 +7095,83 @@ def _learning_chat_core(
             # 学習相談の一般アドバイスは資料に基づかない（コース構造とモデルの知識だけ）。
             # 出所を空欄のままにせず model_generated と正直に言う（是正 F4 / 原則8）。
             content_grounding="model_generated",
+            shape=verbatim_shape_dto(advice_answer),
         )
 
     # 3. Adaptive Routing: 前提知識の自動判定 (ルート③/④の前に実行)
     # casual / discuss モードでは会話を止めない（前提確認の逆質問ゲートを挟まない）。
     prerequisite_intervention = None if (_is_casual or _is_discuss or _atlas_ctx) else check_prerequisites(
-        current_user["id"], course_id, course_data, topic_title, body.message
+        current_user["id"], course_id, course_data, topic_title,
+        # IK-0424: 逆質問の直後の素の「はい / yes」は、逆質問への明示的な答えとして記帳させる
+        # （check_prerequisites の記帳判定が読む定型の答えに置き換えて渡す。保存する発話は不変）。
+        "はい、理解しています" if (_prereq_bare_yes or _prereq_ack_content) else body.message,
     )
-    if prerequisite_intervention:
-        choice_actions = support_agent.prerequisite_choice_actions(
-            prerequisite_intervention.get("first_prerequisite", "")
-        )
-        result = support_agent.with_learning_actions(
-            answer=prerequisite_intervention["message"],
-            mode="prerequisite_review",
-            origin=support_origin,
-            include_continue=False,
-            extra_actions=choice_actions,
-        )
+    # IK-0383: 楽屋は前提ゲートを通さない（楽屋の問いを逆質問に吸い込ませない）。直前が逆質問
+    # だった往復でも同じ逆質問を繰り返さない。check_prerequisites は呼んだまま（「理解している」の
+    # 明示的な答えの記帳はそちらの責務。否定形は記帳しない）で、介入だけを捨てる。
+    # IK-0422: 逆質問は (トピック, セッション) につき1回。履歴のもっと前に同じトピックの逆質問が
+    # ある往復（gated_before）と、書き直し（replace_message_id。切り詰めで消えたのは逆質問の
+    # 往復であり得る）でも出し直さない。確認がまだ記録されていないことは事実文1行で添える。
+    # TRIAGE14: 回答済みの逆質問に「理解している」とだけ答えた往復は、記帳（上の
+    # check_prerequisites）のうえで固定文を返す（元の質問は逆質問のターンで答え済み。LLM 0 回）。
+    _prev_gate_first = _previous_turn_was_prerequisite_gate(body.history, topic_title)
+    if (
+        _prereq_followup == "after_gate"
+        and not _prereq_resume_question
+        and (_is_explicit_prerequisite_acknowledgement(body.message) or _prereq_bare_yes)
+        and not _is_question_shaped(body.message)
+        and _prev_gate_first is not None
+    ):
+        _ack_name = _prev_gate_first or (_prerequisite_display_names(topic_info, course_data) or [""])[0]
+        _ack_answer = (
+            PREREQUISITE_ACK_ONLY_REPLY_EN if _is_kana_kanji_free(body.message) else PREREQUISITE_ACK_ONLY_REPLY
+        ).format(prerequisite=_ack_name)
         persist_chat_history(
             current_user["id"], course_id, topic_id,
-            body.history, body.message, result.answer,
+            body.history, body.message, _ack_answer,
         )
-        return LearningChatResponse(**result.model_dump(), course_update=None)
+        return LearningChatResponse(
+            answer=_ack_answer, course_update=None, support_mode="normal",
+            shape=verbatim_shape_dto(_ack_answer),
+        )
+    if _is_backstage or _prereq_followup in ("after_gate", "gated_before", "ack_content") or body.replace_message_id:
+        prerequisite_intervention = None
+    # 応答の骨格（詰まりの区画, 第 17 周）: 「わからない」とだけ返した往復は足場 1 つで答え、
+    # 前提の逆質問はこの往復には添えず次の往復へ回す（提示の記帳もしない = 1 回だけの規則を保つ）。
+    _turn_is_stuck = (
+        is_stuck_reply(body.message) and not (_is_casual or _is_discuss or _is_backstage)
+    )
+    if _turn_is_stuck:
+        prerequisite_intervention = None
+    # TRIAGE14 (a): 逆質問は 1 コース × 1 トピック × 1 学習者につき一度だけ。提示した事実を
+    # learning_states.progress_data に残し、以後は出さない（提示の記録であって能力推定ではない = UC5）。
+    if prerequisite_intervention:
+        try:
+            if get_prerequisite_gate_presented(current_user["id"], course_id, topic_id):
+                prerequisite_intervention = None
+        except Exception:
+            logger.warning("Failed to read prerequisite gate record", exc_info=True)
+    # TRIAGE14 (c): 逆質問を出すターンでも元の質問を落とさない。質問には通常の RAG 経路で
+    # 答え、逆質問は回答の後ろに添える（LLM 回数は通常の往復と同じ 1 回）。
+    # 応答の骨格（core/dialogue_shape.py）へ渡す逆質問の本文（目印は assemble 側で前置する）。
+    _prereq_gate_text_for_shape: str | None = None
+    _prereq_gate_actions: list = []
+    _prereq_gate_language = "ja"
+    if prerequisite_intervention:
+        try:
+            record_prerequisite_gate_presented(current_user["id"], course_id, topic_id)
+        except Exception:
+            logger.warning("Failed to record prerequisite gate", exc_info=True)
+        # IK-0574: 英語で問うた受講者には逆質問・目印・選択肢を英語で出す（IK-0424 の
+        # 「日本語の逆質問 + 英語の1文」をやめる）。言語は当該発話だけで決める。
+        _prereq_gate_language = _fixed_text_language(body.message)
+        _prereq_gate_actions = list(support_agent.prerequisite_choice_actions(
+            prerequisite_intervention.get("first_prerequisite", ""),
+            language=_prereq_gate_language,
+        ))
+        _prereq_gate_text_for_shape = _prerequisite_gate_text(
+            prerequisite_intervention, topic_title, _prereq_gate_language
+        )
 
     # 4. RAG: システム全域のチャンクを検索し、コンテキストを構築
     #    search_chunks_with_metadata は各チャンクに tier(L1信頼性) を付与して返す。
@@ -4226,44 +7198,189 @@ def _learning_chat_core(
         allowed_document_ids = list_course_source_document_ids(course_data)
     else:
         allowed_document_ids = list_visible_document_ids(current_user["id"])
-    chunk_results = search_chunks_with_metadata(
-        body.message, top_k=8, allowed_document_ids=allowed_document_ids,
+    # 第 15 周: 直前の回答が本文で引用したチャンクを先に引く（検索ではなく id 指定の読み出し）。
+    # ①今回の候補に必ず戻す（ターン間の検索の揺れで前の根拠が消えない）②discuss では
+    # その論文を「議論中の論文」として優先する。予想を引き出す往復（elicit）では引かない。
+    _previous_cited_rows = (
+        _carry_previous_cited_sources(
+            body.history,
+            _citation_numbers,
+            exclude_chunk_ids=set(),
+            allowed_document_ids=allowed_document_ids,
+        )
+        if _cycle_mode != "elicit"
+        else []
     )
+    # IK-0472: トピック内の問い（discuss 以外）では、トピックが束ねる論文のチャンクを先に並べる
+    # （コースの別の論文のチャンクが類似度だけで上位を占めない）。検索は1回のまま、候補を
+    # 少し多めに取って並べ替えてから 8 件に切る（決定論・安定ソート）。
+    # 焦点論文（docs/features/focus_document_design.md FD1）: 「どの論文についての往復か」を
+    # ここで**1回だけ**決め、検索の並べ替え・前提の説明・画面文脈の要素解決・痕跡の
+    # cited_chunk_ids が同じ値を受け取る。段は 明示（document 直付け discuss）→ トピックの
+    # 論文 → 直前の回答が引用した論文 → 画面で選んだ論文（discuss 開幕の選択）。
+    # スコープ（allowed_document_ids）との積だけを採り、範囲を広げない（DM1）。
+    _screen_sel_for_focus = _screen_selection_for_anchor(body, course_id=course_id) or {}
+    # 第 25 周 第 9 波（FD-note 3）: 分野の地図で最後に開いた場所に置かれた論文を焦点に加える
+    # （段は変えない・トピックの論文を外さない）。地図の場所を尋ねた往復で、トピックの論文だけが
+    # FD3 を通って地図の論文が落ちるのを防ぐ。None / 空 = 地図の場所を開いていない・置かれた論文なし。
+    _atlas_node_doc_ids = _screen_atlas_node_document_ids(
+        body, course_id=course_id, course_data=course_data,
+        allowed_document_ids=allowed_document_ids,
+    ) if not _is_discuss else None
+    _focus = resolve_focus_document(
+        allowed_document_ids=allowed_document_ids,
+        # FD-note 1: document 直付けで all_visible を明示したときは単一 document を明示の段に
+        # 入れない（学習者が明示した広いスコープを焦点で狭めない）。
+        explicit_document_id=(
+            list(scope_document_ids)
+            if scope_document_ids is not None
+            and len(scope_document_ids) == 1
+            and not (_is_discuss and _discuss_scope == "all_visible")
+            else None
+        ),
+        topic_document_ids=(
+            topic_source_document_ids(topic_info) if topic_info and not _is_discuss else ()
+        ),
+        # FD-note 2: 直前の引用の段は discuss だけ（通常のトピックで前回の論文へ張り付かない）。
+        previous_cited_document_ids=(
+            [str(r.get("document_id") or "") for r in _previous_cited_rows if isinstance(r, dict)]
+            if _is_discuss
+            else ()
+        ),
+        opening_document_id=_screen_sel_for_focus.get("document_id"),
+    )
+    # 第 10 波（FD-note 4）: 地図の場所を今の往復で選んでいれば、置かれた論文が明示の焦点（トピックの段は外す）。
+    _atlas_place_selected_now = bool(_atlas_node_doc_ids) and _screen_atlas_node_selected_now(
+        body, course_id=course_id
+    )
+    if _atlas_node_doc_ids:
+        _focus = with_screen_place_documents(
+            _focus, _atlas_node_doc_ids, allowed_document_ids=allowed_document_ids,
+            selected_now=_atlas_place_selected_now,
+        )
+    # 第 25 周 第 6 波（IK-0987）: 焦点の論文の別の版（TeX 版・PDF 版）も焦点に含める。PDF 版が
+    # 焦点のとき TeX 版の行が焦点の外に数えられ、無関係な論文の行が FD3 の除外をすり抜けていた。
+    # 版はスコープ（allowed_document_ids）との積だけ（範囲を広げない）。段（source）は不変。
+    if _focus:
+        _focus = with_paper_versions(
+            _focus,
+            paper_version_siblings(_focus.document_ids, allowed_document_ids=allowed_document_ids),
+        )
+    _focus_doc_ids = set(_focus.document_ids)
+    # IK-0364: 質問文の埋め込み（RAG 検索）も当該ターンの feature に帰属させる。分岐の正本は後段の
+    # `_chat_feature` の決定（cycle > discuss > casual > chat）で、ここはそれを同じ順序で先取りする
+    # （test_llm_usage_attribution が両者の一致を固定する）。generator の yield はこの with の外にある。
+    _retrieval_feature = _cycle_chat_feature or (
+        "learning:chat_discuss" if _is_discuss else ("learning:chat_casual" if _is_casual else "learning:chat")
+    )
+    with usage_context(_retrieval_feature, user_id=current_user["id"], course_id=course_id):
+        chunk_results = search_chunks_with_metadata(
+            _retrieval_query_for_turn(body, _turn_question),
+            top_k=12 if _focus_doc_ids else 8, allowed_document_ids=allowed_document_ids,
+            # 第 25 周 第 5 波（IK-0996）: 同じ論文の別の版を畳むとき焦点の論文の版を先に残す。
+            prefer_document_ids=tuple(_focus.document_ids),
+            # 第 6 波: 前の往復で番号を振った版のチャンクを残す（出典番号を会話の中で揃える）。
+            prefer_chunk_ids=tuple(_citation_numbers.mapping()),
+        )
+    if _focus_doc_ids:
+        chunk_results = prefer_focus(chunk_results, _focus, limit=8)
     cited_chunks = []
     cited_sources: list[dict] = []  # L1: 文脈に採用した根拠の tier 一覧
     has_topic_material = False
+    # IK-0382: 注入したトピック教材を「この回答の根拠」と数えてよいか。注入（プロンプト）は
+    # 従来どおりで、出所分類と tier 下限だけがこの判定に従う。
+    topic_material_grounds = False
+    #: IK-0577: 文脈に置いた式の事実行（復元式が1つでもあれば system に1文を足す）。
+    _formula_fact_lines: list[str] = []
+    _offscreen_formula_block = False
     if topic_info:
-        topic_material = _topic_student_material(topic_info)
+        topic_material = material_text_for_prompt(topic_info, _topic_student_material(topic_info))
         if topic_material:
             has_topic_material = True
-            cited_chunks.append(f"[現在表示中の教材]\n{topic_material[:5000]}")
+            topic_material_grounds = _topic_material_engages_message(body, topic_material, message=_turn_question)
+            # IK-0577: 画面の教材に添えている式の事実（印字番号・AI復元の印）。
+            # 第 25 周 第 11 波（IK-1158）: 教材本文の区画にはつなげず、画面に出ない補助情報の
+            # 別区画に置く（AI が画面に無い「教材の末尾の行」を指さない）。
+            _topic_formula_facts = _topic_formula_fact_line(
+                topic_info, allowed_document_ids=allowed_document_ids
+            )
+            if _topic_formula_facts:
+                _formula_fact_lines.append(_topic_formula_facts)
+                _offscreen_formula_block = True
+            cited_chunks.append(
+                f"[現在表示中の教材]\n{sanitize_source_text_for_prompt(topic_material[:5000])}"
+            )
+            if _topic_formula_facts:
+                cited_chunks.append(offscreen_formula_fact_block(_topic_formula_facts))
     for r in chunk_results:
         if r["score"] >= 0.30:
-            _n = len(cited_sources) + 1  # 連番出典 [出典N]（cited_sources と 1 対 1）
-            cited_chunks.append(f"[出典{_n}] 『{r['source_title']}』\n{r['text']}")
-            _quote = (r.get("text") or "").strip().replace("\n", " ")
-            _origin = "course_material" if r.get("material_id") in course_material_ids else "other_material"
-            cited_sources.append({
-                "index": _n,
-                "chunk_id": r.get("id", ""),
-                "source_title": r.get("source_title", "不明な教材"),
-                "tier": r.get("tier", TIER_OUT_OF_SOURCE),
-                "score": round(float(r.get("score", 0.0)), 3),
-                "quote": (_quote[:80] + "…") if len(_quote) > 80 else _quote,
-                "meta": r.get("source_file") or "",
-                "origin": _origin,
-            })
+            # 出典番号は会話の中で固定（IK-0432）。cited_sources と 1 対 1 のまま。
+            _source = _adopted_source_entry(_citation_numbers, r, course_material_ids)
+            cited_sources.append(_source)
+            # IK-0492: 文脈に置く写しだけを整える（U+FFFD・arXiv の版の刻印。保存データは不変）。
+            if _cycle_mode == "elicit":
+                # TRIAGE14: 予想を引き出す往復では論文の結論（答え）を LLM に手渡さない。
+                # 問いを論文に結び付けるため資料名だけを置き、本文は置かない。
+                cited_chunks.append(
+                    f"[出典{_source['index']}] 『{r['source_title']}』（本文は予想の前には示しません）"
+                )
+                continue
+            cited_chunks.append(
+                f"[出典{_source['index']}] 『{r['source_title']}』{_source_section_note(r)}\n"
+                f"{sanitize_source_text_for_prompt(r['text'])}"
+                + _formula_fact_suffix(r, _formula_fact_lines)
+            )
+    # IK-0475: 直前の回答が本文で引用したチャンクのうち今回の検索に無いものを、元の番号の
+    # まま文脈へ戻す（最大3件・1件1200字）。番号の対応は会話の採番器（IK-0432/0444）と一致する
+    # ものだけ、可視性は今回の allowed_document_ids を SQL 内で強制する（範囲を広げない）。
+    # 予想を引き出す往復（elicit）では前の回答の根拠を手渡さない。
+    if _cycle_mode != "elicit":
+        _in_context = {s["chunk_id"] for s in cited_sources}
+        _carried = [r for r in _previous_cited_rows if str(r.get("id") or "") not in _in_context]
+        for r in _carried:
+            _source = _adopted_source_entry(_citation_numbers, r, course_material_ids)
+            cited_sources.append(_source)
+            cited_chunks.append(
+                f"[出典{_source['index']}] 『{r['source_title']}』{_source_section_note(r)}（前の回答で引用した箇所）\n"
+                f"{sanitize_source_text_for_prompt(r['text'])[:_CARRIED_CHUNK_MAX_CHARS]}"
+                + _formula_fact_suffix(r, _formula_fact_lines)
+            )
+    # 第 17 周（A1）: 表示中の教材の出典チャンク（topic.material_chunk_ids）を番号付き出典として
+    # 登録する。教材本文は毎ターン [現在表示中の教材] として文脈に入るのに、引用できる出典としては
+    # 登録されず、検索が何も採用しない往復では出典チップが構造上出なかった（往復を始められない）。
+    # 可視性は get_chunks_for_prompt が allowed_document_ids を SQL 内で強制し、焦点の論文を先に
+    # 並べ（FD3）、検索・持ち越しで既に文脈にあるものは重ねない。上限は
+    # _TOPIC_SOURCE_CHUNK_MAX。予想を引き出す往復（elicit）では教材の出典を手渡さない。
+    # 本文が1つも引用しなければ、出所は後段の TRIAGE14 の規則どおり正直に扱う。
+    # 第 10 波（FD-note 4）: 地図の場所を今の往復で選んでいる問いでは、トピック教材のチャンクを
+    # 番号付き出典として足さない（場所の問いにトピックの論文の出典を並べない）。教材本文の注入は従来どおり。
+    if has_topic_material and _cycle_mode != "elicit" and not _atlas_place_selected_now:
+        for r in _topic_source_rows(
+            topic_info,
+            allowed_document_ids=allowed_document_ids,
+            focus=_focus if _focus_doc_ids else None,
+            exclude_chunk_ids={s["chunk_id"] for s in cited_sources},
+        ):
+            _source = _adopted_source_entry(_citation_numbers, r, course_material_ids)
+            cited_sources.append(_source)
+            cited_chunks.append(
+                f"[出典{_source['index']}] 『{r['source_title']}』{_source_section_note(r)}（表示中の教材の出典）\n"
+                f"{sanitize_source_text_for_prompt(r['text'])[:_TOPIC_SOURCE_CHUNK_MAX_CHARS]}"
+                + _formula_fact_suffix(r, _formula_fact_lines)
+            )
 
     # L1: 回答全体の格を最弱根拠へ安全側集約。採用根拠が無ければ未踏(out_of_source)。
     overall_tier = aggregate_overall_tier([s["tier"] for s in cited_sources])
-    # トピック教材をコンテキストに注入済みなら回答には実根拠があり、out_of_source
+    # トピック教材が問いに関わっているなら回答には実根拠があり、out_of_source
     # （「教材の裏づけなし」バナー + 未踏ガード）は事実と矛盾する。承認チェーン由来
     # ではないため approved には昇格させず、source を下限に引き上げる。
-    if has_topic_material:
+    # IK-0382: 「注入した」だけでは根拠にしない（教材と無関係な問いで 📘 教材から回答 と
+    # 表示しない）。関わりの判定は `_topic_material_engages_message`（決定論）。
+    if topic_material_grounds:
         overall_tier = tier_floor(overall_tier, TIER_SOURCE)
     # 回答内容の出所分類（tier=教員承認状況とは別軸）:
     #   教材(このコース) > 別の資料 > 出典を追えないモデル生成、の優先度で決める。
-    if has_topic_material or any(s["origin"] == "course_material" for s in cited_sources):
+    if topic_material_grounds or any(s["origin"] == "course_material" for s in cited_sources):
         content_grounding = "course_material"
     elif cited_sources:
         content_grounding = "other_material"
@@ -4295,6 +7412,20 @@ def _learning_chat_core(
         if not _is_backstage:
             log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
 
+    # IK-0436: document 直付けの議論（論文の海）では、開幕画面と同じ論文の問い・目的・主張を
+    # 事実行として文脈の先頭に置く（要約の問いはチャンク検索で当たらないことがある）。
+    # 番号付き出典ではない（cited_sources・content_grounding に数えない）。スコープは広げない（DM1）。
+    _document_thesis_lines: list[str] = []
+    if _document_context_id and _is_discuss:
+        _document_thesis_lines = document_thesis_fact_lines(_document_context_id)
+    if _document_thesis_lines:
+        context_block = (
+            _DOCUMENT_THESIS_HEADING + "\n"
+            + UNTRUSTED_SOURCE_NOTICE + "\n"
+            + "\n".join(_document_thesis_lines)
+            + "\n\n" + context_block
+        )
+
     # 入口統合 Phase 1（設計 §4.1 / §4.4）: casual に畳まれていた「様相（軽い調子）」と
     # 「伝達形式（読み上げ向き）」を分離する。読み上げ向きに倒すのは
     #   ① 画面が音声モード（body.screen_mode == "voice"。app.js が全送信経路で付与）
@@ -4325,8 +7456,30 @@ def _learning_chat_core(
     # 禁じ・要素の説明は許し・組み立ては学習者に委ねる拘束を末尾へ追記する。
     if body.check_scaffold:
         _system_prompt += "\n\n" + _CHECK_SCAFFOLD_INSTRUCTION
-    if overall_tier == TIER_OUT_OF_SOURCE:
-        _system_prompt += "\n\n" + out_of_source_guard_instruction()
+    # IK-0378: 未踏ガードは**採用した根拠が1つも無いとき**（出所が model_generated）だけ付ける。
+    # 旧条件の ``overall_tier == out_of_source`` は最弱集約なので、類似度が 0.30〜0.45 の
+    # 出典が1件混じるだけで 8〜14 出典の回答にもガード（先に「確認できない」と言い予想を
+    # 求める）が付き、tutor の即答・discuss の〔鏡〕と衝突していた。tier の値（UI の格表示）
+    # は変えない。
+    _no_adopted_grounding = content_grounding == "model_generated"
+    # IK-0471: ガードは教材で確かめる**内容の問い**にだけ付ける。雑談（CHIT_CHAT → casual_light）
+    # とお礼・締めくくりの発話に付けると、挨拶への返答に「教材では確認できない」「教材で
+    # 確かめる対象はありません」が混ざる（第 11 周 00040 / 00072）。
+    _guard_applies = (
+        _no_adopted_grounding
+        and intent != "CHIT_CHAT"
+        and not _is_closing_led_statement(body.message)
+    )
+    if _guard_applies and _is_discuss:
+        # IK-0473: discuss は「質問には即答」（規則1）なので、ガードの「予想を先に引き出す」を
+        # 外した形にする（出所の正直さ = DM1 の事実行と「教材では確認できない」の明示は残す）。
+        _system_prompt += "\n\n" + _DISCUSS_OUT_OF_SOURCE_GUARD
+        if _document_thesis_lines:
+            _system_prompt += "\n" + _DOCUMENT_THESIS_GUARD_PRECEDENCE
+    elif _guard_applies:
+        _system_prompt += "\n\n" + out_of_source_guard_instruction() + "\n" + _OUT_OF_SOURCE_GUARD_PRECEDENCE
+        if _document_thesis_lines:
+            _system_prompt += "\n" + _DOCUMENT_THESIS_GUARD_PRECEDENCE
     # アンカー優先ラダー（設計 §7、IH6）: typed action（EXPLAIN_GRAPH_ELEMENT）・
     # usage_help pre-route はこの行より前段で早期 return 済みのため、ここに到達する
     # のは通常の学習チャット（casual/discuss 含む）のみ。追加の LLM コールは作らず、
@@ -4334,6 +7487,18 @@ def _learning_chat_core(
     _anchor_ladder_hint = _build_anchor_ladder_hint(body, body.history)
     if _anchor_ladder_hint:
         _system_prompt += "\n\n" + _anchor_ladder_hint
+    # IK-0577: 文脈に AI が復元した式があるときだけ、それを原文の式として断定させない1文を足す。
+    if any(has_reconstructed_fact(line) for line in _formula_fact_lines):
+        _system_prompt += "\n\n" + RECONSTRUCTED_FORMULA_INSTRUCTION
+    if _offscreen_formula_block:
+        _system_prompt += "\n\n" + OFFSCREEN_FORMULA_FACT_INSTRUCTION
+    # IK-0576（応答の骨格 §6）: 前の往復の訂正を持ち越す（casual / elicit では持ち越さない）。
+    _correction_block = "" if _is_casual or _cycle_mode == "elicit" else _previous_correction_block(
+        # m2: サーバ正本の履歴（書き直しなら切り詰め済みのサーバ履歴）から読む。
+        _trunc["truncated_history"] if _trunc is not None else _stored_history
+    )
+    if _correction_block:
+        _system_prompt += "\n\n" + _correction_block
     # レビュー確定の修正3（DA1/DA2）: 足場メッセージ（context 注入の user ターンと
     # それを受ける assistant ターン）は全モード共通で「以下の質問に答えてください」/
     # 「お答えします」という Q&A フレームを強制していた。system プロンプトが
@@ -4344,27 +7509,26 @@ def _learning_chat_core(
     # 確認問題の壁打ちモードも同型の問題を抱える（system で「解答そのものを出さない」と
     # 指示した直後に、足場の「以下の質問に答えてください」が直答を再誘導する）ため、
     # discuss より優先して足場を中立化する。
+    # IK-0495: 以前は足場の user ターンの直後に「はい、（トピック名）について…答えます」
+    # のような assistant ターンを**作り話で**置いていた（モデルが言っていない発話を履歴に混ぜる・
+    # 日本語固定で英語の会話にも入る）。応じ方の指示は足場の user ターンの指示文に含め、
+    # assistant ターンは作らない（足場の直後は実際の会話履歴か、今回の発話が続く）。
     if body.check_scaffold:
         _scaffold_user_instruction = (
             "上記のコンテキストを踏まえ（不足している場合は補完して）、"
             "壁打ちモードの規則に従って学習者の発話に応じてください。"
-        )
-        _scaffold_assistant_ack = (
-            "はい。答えの組み立ては学習者に委ね、構成要素の説明と問いかけで支援します。"
+            "答えの組み立ては学習者に委ね、構成要素の説明と問いかけで支援してください。"
         )
     elif _is_discuss:
         _scaffold_user_instruction = (
             "上記のコンテキストを踏まえ（不足している場合は補完して）、"
             "発話タイプ別の応答ルールに従って、以下の学生の発話に応じてください。"
-        )
-        _scaffold_assistant_ack = (
-            "はい。学生の発話のタイプ（質問 / 解釈・立場の表明 / 詰まり）を見きわめて応じます。"
+            "学生の発話のタイプ（質問 / 解釈・立場の表明 / 詰まり）を見きわめて応じてください。"
         )
     else:
         _scaffold_user_instruction = (
             "上記のコンテキストを踏まえ（不足している場合は補完して）、以下の質問に答えてください。"
         )
-        _scaffold_assistant_ack = f"はい、「{topic_title}」についてですね。お答えします。"
     messages: list[dict] = [
         {"role": "system", "content": _system_prompt},
         {"role": "user", "content": (
@@ -4373,13 +7537,16 @@ def _learning_chat_core(
             f"{context_block}\n\n"
             f"{_scaffold_user_instruction}"
         )},
-        {"role": "assistant", "content": _scaffold_assistant_ack},
     ]
-    # チャット型AI支援の共通基盤整理 §2-2: 直近20メッセージ・2000字/件へウィンドウ化
+    # チャット型AI支援の共通基盤整理 §2-2: 直近20メッセージへウィンドウ化
     # （教材・RAGコンテキストは上の messages で毎回別途注入されるため先頭保護は不要, head_keep=0）。
-    for turn in window_history(body.history, max_messages=20, max_chars=2000):
+    # IK-0394: 1件の上限は 4000 字（tutor の回答は 2000 字超が常態で、途中で切れた回答が
+    # 再注入されていた）。超えるときは段落・文の境界で切って「…」を付ける（数式は割らない）。
+    # IK-0378: 表示用の注意書きは回答本文ではないので剥がしてから渡す。
+    _prompt_history = _history_without_out_of_source_notice(body.history)
+    for turn in window_history(_prompt_history, max_messages=20, max_chars=4000, trim_at_boundary=True):
         messages.append({"role": turn["role"], "content": turn["content"]})
-    messages.append({"role": "user", "content": body.message})
+    messages.append({"role": "user", "content": _turn_question})
 
     # discuss モード（設計 §6.2 Phase 1）: U層タグを "learning:chat_discuss" に分離し、
     # casual / 通常チャットと独立にコストを実測する（専用上限は Phase 3 で実測後に判断）。
@@ -4406,14 +7573,18 @@ def _learning_chat_core(
     # ままで不変**（SA6）。
     #
     # モード別（§11.5 の表）:
-    #   casual            → 画面文脈ブロックなし・選択ブロックあり（短い会話調と衝突する）
+    #   casual            → 利用者が選んだもの（要素 kind ``element`` と、第 7 波 IK-1049 から
+    #                       分野の地図で選んだ場所の事実）だけ + 選択ブロック。第 25 周
+    #                       第 5 波（IK-0986）: 音声の学生が開いている部品の「教員の説明」は
+    #                       話題そのもので、渡さないと「先生の説明」を AI の前の回答と取り違える。
+    #                       表示モード・台帳・位置づけ・実行記録は短い会話調と衝突するので渡さない。
     #   cycle_mode=elicit → 表示モードの事実1行だけ（主張本文・検証事実は問いの答えの
     #                       手渡しになる）・選択ブロックあり
     #   それ以外          → 両方（tutor / discuss / diff / 楽屋 / 確認問題の壁打ち）
     # -----------------------------------------------------------------------
     _screen_block = ""
     _screen_has_ledger = False
-    if body.screen_context is not None and not _is_casual:
+    if body.screen_context is not None:
         # 解決に使う document 集合は**明示スコープ**だけ（discuss の all_visible でも
         # 広げない = 画面文脈が範囲を広げてはならない・DM1 / §11.5）。画面文脈を
         # 送ってこないリクエストでは1クエリも増やさない（従来と完全に同じ経路）。
@@ -4428,7 +7599,14 @@ def _learning_chat_core(
             course_data=course_data,
             topic_info=topic_info,
             grounding_document_ids=_screen_grounding_document_ids,
-            kinds=("view",) if _cycle_mode == "elicit" else None,
+            kinds=(
+                ("view",) if _cycle_mode == "elicit"
+                else ("element",) if _is_casual
+                else None
+            ),
+            preferred_document_ids=_focus.document_ids,
+            user_id=str(current_user["id"]),
+            selected_atlas_node=bool(_is_casual and _cycle_mode != "elicit"),
         )
     # -----------------------------------------------------------------------
     # 知識の転用層 P4-2（knowledge_transfer_design.md §5）— RAG の構造 1 hop
@@ -4446,6 +7624,9 @@ def _learning_chat_core(
     _selection_block = render_selection_block(
         body.selection_text,
         _topic_student_material(topic_info) if topic_info else "",
+        selection_formula_lines(body.selection_text, _topic_selection_formulas(topic_info))
+        if body.selection_text and topic_info
+        else None,
     )
     if _screen_block or _retrieved_block or _selection_block:
         # 信頼境界（TB1〜TB4）: 画面文脈ブロック（claim 抜粋・逐語引用を含む）・検索由来の
@@ -4453,19 +7634,29 @@ def _learning_chat_core(
         # ``UNTRUSTED_SOURCE_NOTICE`` を添える。足場ターン（messages[1]）に既に同じ文が
         # あるときは重複させない（cited_chunks が空のターンでは足場に注意書きが無い —
         # そのときだけここで補う）。
-        _turn_parts = [_screen_block, _retrieved_block, _selection_block, body.message]
+        _turn_parts = [_screen_block, _retrieved_block, _selection_block, _turn_question]
         if UNTRUSTED_SOURCE_NOTICE not in str(messages[1].get("content") or ""):
             _turn_parts.insert(0, UNTRUSTED_SOURCE_NOTICE)
         messages[-1] = {
             "role": "user",
             "content": "\n\n".join([part for part in _turn_parts if part]),
         }
-    if _screen_has_ledger:
+    if _screen_has_ledger or _asks_about_verification_record(_turn_question):
+        # 第 25 周 第 10 波（製品頭脳 A 4302）: 記録の有無を問う発話では、台帳の事実が画面文脈に
+        # 載らない往復（後継の決まらない部品・地図の場所だけ等）でも閉世界の拘束を掛ける（開発者の
+        # 「教材に無ければ一般知識で補う」規則が、無い記録を一般知識で埋める誘因にならないように）。
         # §11.13-2 の2段構え: 台帳の事実を渡すときだけ、出力側にも閉世界の拘束を掛ける
         # （SL1 の denylist はサーバが書く文字列にしか効かないため）。
         messages[0] = {
             "role": "system",
             "content": messages[0]["content"] + "\n\n" + LEARNING_VERIFICATION_OUTPUT_CONSTRAINT,
+        }
+    if SIMULATION_FACT_NOT_VERIFICATION in _screen_block:
+        # 画面文脈 4-e（§11.17）: 実行記録の事実（SB1「一致は検証ではない」）が実際に
+        # ブロックへ載ったときだけ、出力側にも同じ拘束を掛ける（台帳と同じ2段構え）。
+        messages[0] = {
+            "role": "system",
+            "content": messages[0]["content"] + "\n\n" + LEARNING_SIMULATION_OUTPUT_CONSTRAINT,
         }
     if _screen_block or _retrieved_block:
         # §11.7: 構造 grounding が載ったターンの**種別だけ**を1ビット記録する
@@ -4547,15 +7738,93 @@ def _learning_chat_core(
     # レスポンス・履歴焼き込み・関心痕跡のすべてに同じ本文が流れる。
     if not degraded:
         answer = _reconcile_citation_markers(answer, {s["index"] for s in cited_sources})
+    # IK-0494: 学習者に見せる出典（応答の sources・履歴の焼き込み）は、本文が実際に引用した
+    # ものだけ。文脈に採用しただけの別論文のチャンクを一覧に並べない。番号は振り直さない
+    # （採番器の対応表 CITATION_MAP_KEY は採用した全チャンクの番号を控え続ける）。
+    # tier・出所の分類は文脈に採用した出典から決めたまま（ガードの判定と揃える）。
+    # IK-0493: お礼・締めくくりで始まる発話への返答が何も引用していなければ、内容の説明
+    # ではないので出所の分類を付けない（IK-0447 の定型文と同じ扱い。model_generated にすると
+    # 「出典を追えない AI の説明」の出所行が付く）。
+    if (
+        not degraded
+        and not _sources_cited_in_answer(answer, cited_sources)
+        and _is_closing_led_statement(body.message)
+    ):
+        content_grounding = None
+    # TRIAGE14: 検索で出典を採用しても、回答本文がそのどれも引用せず、表示中の教材も問いに
+    # 関わっていないなら、回答は資料に基づいていない。出所を「教材 / 別の資料」と名乗らず
+    # model_generated と正直に言う（原則8。本文の実態とラベルを食い違わせない）。
+    elif (
+        not degraded
+        and content_grounding in ("course_material", "other_material")
+        and cited_sources
+        and not topic_material_grounds
+        and not _sources_cited_in_answer(answer, cited_sources)
+    ):
+        content_grounding = "model_generated"
+    elif not degraded and content_grounding in ("course_material", "other_material"):
+        # 第 25 周 第 10 波（judge doubt r10 STILL・IK-1078 の延長）: 出所は本文が肯定的に引用した
+        # 出典で確定する。本文が出典・教材を「使っていない」と言い 1 つも肯定的に引かないなら、
+        # 文脈に置いた教材があっても「教材に基づく」と名乗らない。引用した出典が別の資料だけなら
+        # その出所にする。
+        content_grounding = _grounding_from_cited_answer(
+            answer, cited_sources, content_grounding, topic_material_grounds=topic_material_grounds
+        )
+    # 引用が無いのに出所が教材・別の資料のときは、その出所を決めた出典を並べる（帯と一覧を揃える）。
+    _displayed_sources = _displayed_sources_for(answer, cited_sources, content_grounding)
 
     # L1 OutOfSourceGuard: 未踏なら断定せず、根拠が弱い旨を先頭に明示する。
     # casual では可視プレフィックスのみ省略（音声で毎回読み上げると会話が壊れるため）。
     # tier 自体はレスポンスで返し、UI のバッジ表示で担保する。degraded な固定文には
     # 付与しない（回答本文に依存する装飾のため、設計書 §4）。
     # discuss では意図的にこの明示を維持する（DM1: 出所の正直さを弱めない）。
-    if overall_tier == TIER_OUT_OF_SOURCE and not _is_casual:
-        if not degraded:
-            answer = out_of_source_notice() + "\n\n" + answer
+    # IK-0378: 付けるのはガードと同じ条件（採用した根拠が1つも無い = model_generated）
+    # だけ。注意書きは表示であって回答本文ではないので、**履歴には保存しない**
+    # （保存・再注入すると次の往復の回答の一部としてモデルに戻る）。応答の answer にだけ
+    # 前置する（下の persist_chat_history の後）。
+    _visible_out_of_source_notice = (
+        out_of_source_notice()
+        if _no_adopted_grounding and not _is_casual and not degraded
+        # IK-0471: お礼・締めくくりの往復には注意書きも付けない（ガードと同じ条件）。
+        and _guard_applies
+        else ""
+    )
+    # IK-0396: 前提確認の往復で元の質問に答えたときは、その事実を1行添える（保存する）。
+    if _prereq_resume_question and not degraded:
+        _resume_notice = (
+            label_vocab.PREREQUISITE_ACK_RESUME_NOTICE_EN
+            if _is_kana_kanji_free(body.message) or _is_kana_kanji_free(_prereq_resume_question)
+            else label_vocab.PREREQUISITE_ACK_RESUME_NOTICE
+        )
+        answer = _resume_notice + "\n\n" + answer
+    # 応答の骨格（docs/features/dialogue_response_shape_design.md RS1〜RS5）:
+    # 答え → （鏡の確認）→ 問い返し（最後の 1 つだけ）→ 前提の逆質問 の順に区画へ分け、
+    # 確認の区画（逆質問・鏡）があるターンでは末尾の問い返しを落とす。鏡は学習者の発話の
+    # 核心語だけを映す形に狭める（IK-0575）。保存文の形（本文 → ``\n\n---\n\n`` + 目印 +
+    # 逆質問）は不変で、履歴の判定器（``_prerequisite_gate_asked_in_history`` ほか）が
+    # そのまま効く（RS5）。TRIAGE14 (c): このターンで初めて出す逆質問は回答の後ろに添える。
+    # 「前提の確認はまだ記録していません」の前置き（IK-0422/0446）は内部都合なので出さない。
+    _response_shape = assemble_response_shape(
+        answer=answer,
+        learner_message=body.message,
+        is_discuss=_is_discuss,
+        gate_text=_prereq_gate_text_for_shape,
+        degraded=degraded,
+        gate_marker=(
+            label_vocab.PREREQUISITE_GATE_ANSWERED_MARKER_EN
+            if _prereq_gate_language == "en"
+            else PREREQUISITE_GATE_ANSWERED_MARKER
+        ),
+        stuck=_turn_is_stuck,
+    )
+    answer = render_answer_text(_response_shape)
+    # IK-0545: 回答本文の逐語引用（「…」[出典N]）が出典 N のチャンク本文に含まれるかを
+    # 決定論で突き合わせる（core/citation_check.py・非LLM）。本文は変えず事実だけを返す（P4）。
+    _citation_check = None if degraded else check_citations(
+        answer, {s["index"]: s.get("passage") for s in cited_sources}
+    )
+    if _citation_check and _citation_check["unmatched"]:
+        _record_document_discuss_event("citation_quote_unmatched", current_user["id"], course_id)
 
     # 誤解検出（マイルドな表現にも対応）。casual では採点・訂正の圧を掛けない。
     # degraded ターンは回答本文が根拠を伴わない固定文のため、本文依存の後処理はスキップする
@@ -4563,42 +7832,41 @@ def _learning_chat_core(
     # 是正 F5: 記録されるのは **candidate**（AI が訂正を提案した箇所）だけで、「誤解」として
     # 確定するのは本人の3択（POST .../misconceptions/{id}/review）に限る。
     course_update = None
+    # 第 23 周（st-06）: user メッセージ id はここで確定させ、誤解候補と永続履歴の両方に
+    # 同じ値を焼き込む（以前は body.message_id が無いと誤解候補だけ None になり、
+    # 書き直し・取り消しで supersede できなかった）。
+    _user_message_id = body.message_id or str(uuid.uuid4())
     if not degraded:
         if not _is_casual and topic_info and any(
             kw in answer for kw in ["訂正", "より正確です", "誤解"]
         ):
             course_update = detect_and_record_misconception(
                 current_user["id"], course_id, course_data, topic_id, body.message, answer,
-                # 機能3（書き直し・削除）で派生痕跡を supersede する将来の連携のため、
-                # 当該ターンの user メッセージ id を候補に持たせる（無い経路では None）。
-                message_id=body.message_id or None,
+                # 機能3（書き直し・削除）で派生した誤解候補を同じ理由で supersede する
+                # ため、当該ターンの user メッセージ id を候補に持たせる。
+                message_id=_user_message_id,
             )
 
     _persisted = persist_chat_history(
         current_user["id"], course_id, topic_id,
         body.history, body.message, answer,
-        user_message_id=body.message_id or None,
+        user_message_id=_user_message_id,
         # 履歴復元後も本文中の [出典N] を出典チップに戻せるようにする（sources を焼き込まないと
         # リロード・トピック切替・discuss モード遷移のあとプレーンテキストに退化する）。
         # 保存するのはチップ描画とポップアップ起動に要る最小フィールドのみ（quote / meta /
         # origin は「いまの回答」を扱う出典タブ専用で、復元メッセージからは参照されない）。
         assistant_meta={
-            "sources": [
-                {
-                    "index": s["index"],
-                    "chunk_id": s["chunk_id"],
-                    "source_title": s["source_title"],
-                    "tier": s["tier"],
-                    "score": s["score"],
-                }
-                for s in cited_sources
-            ],
+            "sources": _history_source_meta(_displayed_sources),
             "overall_tier": overall_tier,
             "content_grounding": content_grounding,
+            # IK-0444: 会話全体の対応表の控え（このターンで振った番号を含む）。
+            CITATION_MAP_KEY: _citation_numbers.mapping(),
         },
     )
+    if _visible_out_of_source_notice:
+        answer = _visible_out_of_source_notice + "\n\n" + answer
     # L2: クライアント報告の実位置で position_anchor を構築（mock ではない）。
-    position_anchor = build_position_anchor(topic_id, _seg, _scroll)
+    position_anchor = build_position_anchor(topic_id, _seg, _scroll, segment_reported=_seg_reported)
     # L3 資産化: この往復を関心痕跡として安価に記録（LLM不使用）。
     # kind は既存シグナルから決定: 楽屋→backstage_question（記録は本人のみ・集計対象外）/
     # 誤解検出→misconception / それ以外→question。
@@ -4615,6 +7883,18 @@ def _learning_chat_core(
     # tension_hint を立てない・tension mining をスケジュールしないことで、楽屋の質問を
     # 解析対象から構造的に外す（SD4）。
     _tension_hint = False if _is_backstage else judge_tension_hint(body.message, _recent_user_texts)
+    # IK-0470: 教材内容の問いでない往復（雑談・お礼や締めくくり・理解サイクルの予想の表明）は
+    # 構造帰属（方法B）と引っかかりのヒントの対象にしない。問いの痕跡そのものは残す（P4）。
+    _anchor_skip_reason = (
+        "not_a_content_question"
+        if intent == "CHIT_CHAT"
+        or _is_closing_led_statement(body.message)
+        or _cycle_mode == "elicit"
+        or _is_contentless_reply(body.message)
+        else None
+    )
+    if _anchor_skip_reason:
+        _tension_hint = False
     # 構造帰属（方法A・同期・非LLM）: テキスト選択・要素タップの明示アンカーがあれば
     # learner_selected で確定記録する。無ければ方法B（非同期LLM）の帰属対象になる。
     # 学ぶ単位 P2-7（設計 §8）: ①区画番号が申告されていないテキスト選択は教材区画本文
@@ -4634,8 +7914,18 @@ def _learning_chat_core(
         "casual": _is_casual,
         # 「この問いに戻る」で元の往復へジャンプするための逆引き（この問いを発した user メッセージ id）。
         "message_id": _persisted.get("user_message_id"),
-        # 方法Bの帰属コンテキスト用: この回答が実際に引用したチャンク（上位3件）。
-        "cited_chunk_ids": [s["chunk_id"] for s in cited_sources[:3] if s.get("chunk_id")],
+        # 方法Bの帰属コンテキスト用: この回答が**本文で実際に引用した**チャンク（引用順・3件まで。
+        # IK-0470: 以前は検索上位3件で、回答が引いていない箇所が帰属の手がかりになっていた）。
+        "cited_chunk_ids": _scope_chunk_ids_to_documents(
+            _chunk_ids_cited_in_answer(answer, cited_sources),
+            {
+                str(r.get("id") or ""): str(r.get("document_id") or "")
+                for r in list(chunk_results or []) + list(_previous_cited_rows or [])
+                if isinstance(r, dict)
+            },
+            _focus_doc_ids,
+        )[:3],
+        **({"anchor_skip_reason": _anchor_skip_reason} if _anchor_skip_reason else {}),
         # 分野の地図由来の質問 (根拠を見る ↗ など) は帰属を構造化して焼き込む (Issue C-2)
         **({"atlas": _atlas_attribution(_atlas_ctx)} if _atlas_ctx else {}),
         # discuss モード（設計 §6.2 Phase 1）: 後から U層・k-匿名集計・personal_graph が
@@ -4674,7 +7964,8 @@ def _learning_chat_core(
     _trace_id = record_interest_trace(
         current_user["id"], course_id, topic_id,
         kind=_trace_kind,
-        text=body.message,
+        # IK-0396: 前提確認の往復で元の質問に答えたときは、その質問を問いとして残す。
+        text=_turn_question,
         context_label=_ctx_label,
         extra_payload=_trace_payload,
     )
@@ -4686,7 +7977,7 @@ def _learning_chat_core(
     # 未帰属の問いが累積していればバックグラウンドで StructureAnchorAgent を起動
     # （方法B・非同期。明示アンカー付きの問いは最初から対象外。楽屋の質問は
     # _trace_kind='backstage_question' のためこの条件で自動的に対象外になる）。
-    if _trace_kind == "question" and not _sel_anchor:
+    if _trace_kind == "question" and not _sel_anchor and not _anchor_skip_reason:
         maybe_schedule_anchor_mining(current_user["id"], course_id, topic_id)
     # 方法C: 回答末尾の帰属確認プロンプト。tension_hint が立った往復か、明示アンカーは
     # あるが疑いの様相が未分類の往復に限り、セッション内上限までゲートして提示する（P7）。
@@ -4698,12 +7989,16 @@ def _learning_chat_core(
         _trace_id
         and not _is_casual
         and not _is_backstage
+        # 応答の骨格 RS2: 確認の区画は 1 往復に 1 つまで（逆質問・鏡があれば出さない）。
+        and _response_shape.allows_anchor_confirm
         and (_tension_hint or _sel_anchor is not None)
         and check_and_count_confirm_prompt(current_user["id"], course_id, topic_id)
     ):
         _anchor_confirm = {
             "trace_id": _trace_id,
-            "question": (body.message or "")[:120],
+            # 第 15 周: 発言の再掲は先頭 40 字まで（何を選ぶ欄かは prompt が言う）。
+            "question": excerpt((body.message or "").strip(), 40),
+            "prompt": ANCHOR_CONFIRM_PROMPT,
             "options": _ANCHOR_CONFIRM_DOUBT_OPTIONS,
         }
     # 本文中のドリルダウンマーカーは構造化アクションへ正規化する。degraded ターンは
@@ -4712,6 +8007,8 @@ def _learning_chat_core(
         clean_answer, inline_actions = answer, []
     else:
         clean_answer, inline_actions = extract_inline_actions(answer)
+    if _prereq_gate_actions and not degraded:
+        inline_actions = list(inline_actions) + _prereq_gate_actions
     # 鏡面化 move（seminar_brief_mirroring_design.md §2/§3 精査①③、EX-3b）: discuss の
     # ときのみ、本文中の 〔鏡〕…〔/鏡〕 マーカーをサーバ側で決定論抽出して構造化フィールド
     # （LearningChatResponse.mirror）へ正規化する（extract_inline_actions と同じ規律 —
@@ -4724,6 +8021,10 @@ def _learning_chat_core(
     _mirror = None
     if _is_discuss and not degraded:
         clean_answer, _mirror = extract_mirror(clean_answer, body.message)
+        _mirror = mirror_core(_mirror, body.message)
+        # IK-0468: 英語の会話では在処の事実文も英語にする（IK-0450 と同じ規則）。
+        if _mirror is not None and _is_kana_kanji_free(body.message):
+            clean_answer = clean_answer.replace(MIRROR_MOVED_NOTE, MIRROR_MOVED_NOTE_EN)
 
     # 送信意図で分岐（教材/チャット2区画 UX）:
     #  - on_path : 本筋維持。detour にせず origin/status_label を返さない（フロントは寄り道化しない）
@@ -4750,17 +8051,20 @@ def _learning_chat_core(
     return LearningChatResponse(
         **result.model_dump(),
         course_update=course_update,
-        sources=cited_sources,
+        sources=_displayed_sources,
         overall_tier=overall_tier,
         content_grounding=content_grounding,
         position_anchor=position_anchor,
         structure_anchor=_sel_anchor,
         anchor_confirm=_anchor_confirm,
         mirror=_mirror,
+        # 応答の骨格（RS1〜RS5）: 問い返し・逆質問の有無・鏡の有無だけ（数値なし）。
+        shape=shape_dto(_response_shape, mirror=_mirror),
         # 入口統合 Phase 1（設計 §5、LC6）: 推定したことを隠さず事実として返す。
         # RAG 応答（この最終 return）だけが設定し、HELP / 学習相談 / 地図 / 要素説明の
         # 早期 return は None のまま。数値キーは持たない（LC7）。
         stance=build_stance_dto(_stance, _stance_source),
+        citation_check=_citation_check,
         mock=False,
         degraded=degraded,
     )
@@ -4808,7 +8112,8 @@ def _sse_frames(gen, first):
                     if cleaned:
                         yield _sse_frame("delta", {"t": cleaned})
         except StopIteration as stop:
-            response = stop.value
+            # DP1: 非ストリームの JSON 応答と同じ表示投影を ``final`` にも通す。
+            response = project_learner_model(stop.value)
         cleaned_tail = strip_control_sequences(pending)
         if cleaned_tail:
             yield _sse_frame("delta", {"t": cleaned_tail})
@@ -5137,7 +8442,8 @@ def delete_document_discussion_message_from(
     document_id, _source_path, _title = _resolve_discuss_document(current_user["id"], document_ref)
     try:
         result = truncate_chat_and_supersede(
-            current_user["id"], document_context_id(document_id), DISCUSSION_TOPIC_ID, message_id
+            current_user["id"], document_context_id(document_id), DISCUSSION_TOPIC_ID, message_id,
+            reason="delete",
         )
     except Exception:
         logger.exception(
@@ -5149,7 +8455,13 @@ def delete_document_discussion_message_from(
     if result is None:
         raise HTTPException(status_code=404, detail="Message not found")
 
-    return {"status": "deleted", "removed_count": result["removed_count"]}
+    # 第 23 波 F2: 取り消しの直後に、往復は会話から外れたが痕跡は状態を変えて残る事実を返す
+    # （文言の正本は core/label_vocab.py。画面は JS に焼き込まずこの文をそのまま描く）。
+    return {
+        "status": "deleted",
+        "removed_count": result["removed_count"],
+        "fact": label_vocab.CHAT_TURN_WITHDRAWN_FACT,
+    }
 
 
 @router.get("/courses/{course_id}/source-chunk/{chunk_id}")
@@ -5176,12 +8488,67 @@ def get_source_chunk_route(
     """
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if course_data is None:
-        raise HTTPException(status_code=404, detail="Source chunk not found")
+        raise HTTPException(status_code=404, detail=_SOURCE_CHUNK_NOT_FOUND_DETAIL)
     allowed_document_ids = list_course_source_document_ids(course_data)
     passage = get_chunk_passage(chunk_id, allowed_document_ids=allowed_document_ids)
     if not passage:
-        raise HTTPException(status_code=404, detail="Source chunk not found")
-    return passage
+        raise HTTPException(status_code=404, detail=_SOURCE_CHUNK_NOT_FOUND_DETAIL)
+    return _learner_source_passage(passage)
+
+
+#: 出典ポップアップ（app.js ``openSourcePopup`` → ``renderMaterialChunk``）が読むキー（IK-0448）。
+_LEARNER_PASSAGE_KEYS = ("chunk_id", "text", "section", "source_title", "formulas", "figures")
+#: 式1件のうち描画に使うキー（``renderMaterialEquationBody`` と置換の索引）。
+_LEARNER_FORMULA_KEYS = (
+    "id", "latex", "summary", "plain_text", "raw_text", "label",
+    "reconstructed", "reconstructed_mark", "reconstructed_note", "latex_note", "label_note",
+)
+
+
+def _learner_source_passage(passage: dict) -> dict:
+    """出典ポップアップ用のチャンクを学習者向けに射影する（IK-0448）。
+
+    ``chunks.formulas`` の要素は解析の内部情報（``review_reason`` / ``source_location`` の bbox /
+    切り出し画像の base64 / ``block_id`` / ``section_id`` など）を丸ごと持っている。学習者に
+    返すのは、ポップアップが描画に使うキーだけ（数値・内部 ID・画像データを載せない）。
+    復元由来の式には、教材表示と同じ印と事実文を載せる。
+    """
+    out = {k: passage[k] for k in _LEARNER_PASSAGE_KEYS if k in passage}
+    formulas = []
+    for formula in passage.get("formulas") or []:
+        if not isinstance(formula, dict):
+            continue
+        projected = {k: formula[k] for k in _LEARNER_FORMULA_KEYS if k in formula}
+        # 式の ``id`` は置換の索引（番地）なので残す。表示に使う ``label`` が内部 ID
+        # （``eq_tex_b14`` 等）なら印字番号ではないので出さない（DP2・論文の式番号は残る）。
+        if contains_internal_id(projected.get("label")):
+            projected.pop("label", None)
+        formulas.append(projected)
+    out["formulas"] = annotate_reconstructed_formulas(formulas)
+    # 第 14 周: チャンクの境界は取り込み時の区切りで、語・文の途中で始まり・終わることがある
+    # （「for th」で切れる）。本文は変えず、途中から・途中までであることを「…」で示す。
+    text = str(out.get("text") or "")
+    if text.strip():
+        stripped = text.strip()
+        if _PASSAGE_MID_START_RE.match(stripped):
+            text = "…" + stripped
+            stripped = text
+        if not _PASSAGE_END_RE.search(stripped):
+            text = stripped + "…"
+        out["text"] = text
+    return out
+
+
+#: 出典本文が語・文の途中から始まる（小文字のラテン文字・句読点で始まる）。
+_PASSAGE_MID_START_RE = re.compile(r"^[a-z,;.)\]]")
+#: 文として終わっている（句点・終止符・閉じ括弧・数式区切り・プレースホルダーで終わる）。
+_PASSAGE_END_RE = re.compile(r"([.!?。．！？」』)\]$:]|FORMULA_\d+\]\])\s*$")
+
+#: 出典本文を開けなかったときの事実文（第 14 周: 英語の "Source chunk not found" だけだった）。
+_SOURCE_CHUNK_NOT_FOUND_DETAIL = (
+    "この出典の本文は、このコースの教材からは開けません。"
+    "コースの教材ではない資料の出典か、すでに無くなった箇所です。"
+)
 
 
 @router.get("/courses/{course_id}/symbols/lookup")
@@ -5190,6 +8557,7 @@ def get_symbol_lookup_route(
     symbol: str = "",
     equation_id: str = "",
     chunk_id: str = "",
+    topic_id: str = "",
     current_user: dict = Depends(_get_current_user),
 ) -> dict:
     """記号の「直前の定義」（概念レジストリ P3-5 / ``concept_registry_design.md`` §7）。
@@ -5216,9 +8584,16 @@ def get_symbol_lookup_route(
 
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if course_data is None:
-        raise HTTPException(status_code=404, detail="Course not found")
+        raise HTTPException(status_code=404, detail=label_vocab.COURSE_NOT_AVAILABLE_NOTICE)
 
     allowed_document_ids = list_course_source_document_ids(course_data)
+    # 定義は「この論文」から引く（別の論文の同名記号を持ってこない）。焦点論文の段は
+    # タップ位置のチャンクの論文（core 側の明示段）→ 表示中トピックの論文 → 議論で直前に
+    # 引用した論文（FD1。``_discussion`` でも効く）。
+    focus = _learner_focus(
+        current_user, course_data, course_id, topic_id,
+        allowed_document_ids=allowed_document_ids,
+    )
     session = _pg_session()
     try:
         return lookup_symbol_definition(
@@ -5227,6 +8602,7 @@ def get_symbol_lookup_route(
             document_ids=sorted(allowed_document_ids),
             equation_id=equation_id,
             chunk_id=chunk_id,
+            focus_document_ids=list(focus.document_ids),
         )
     finally:
         session.close()
@@ -5414,7 +8790,11 @@ def get_tension_digest_route(
     for (tid,) in topic_rows:
         maybe_schedule_tension_mining(current_user["id"], course_id, tid, session_end_check=True)
 
-    return get_tension_digest(current_user["id"], course_id)
+    digest = get_tension_digest(current_user["id"], course_id)
+    # IK-0437: 候補ゼロを空配列だけで返すと「無い」のか「まだ作られていない」のか読めない。
+    if isinstance(digest, dict) and not digest.get("items"):
+        digest = {**digest, "facts": [label_vocab.TENSION_DIGEST_EMPTY_FACT]}
+    return digest
 
 
 @router.post("/tension/{trace_id}/confirm")
@@ -5430,7 +8810,7 @@ def confirm_tension_route(
     result = confirm_tension_trace(current_user["id"], trace_id, body.learner_text)
     if result is None:
         raise HTTPException(status_code=404, detail="Tension candidate not found")
-    return {"ok": True, **result}
+    return _learner_tension_decision_dto(result)
 
 
 @router.post("/tension/{trace_id}/dismiss")
@@ -5442,7 +8822,7 @@ def dismiss_tension_route(
     result = dismiss_tension_trace(current_user["id"], trace_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Tension candidate not found")
-    return {"ok": True, **result}
+    return _learner_tension_decision_dto(result)
 
 
 # ---------------------------------------------------------------------------
@@ -5492,7 +8872,11 @@ def get_anchor_digest_route(
     for (tid,) in topic_rows:
         maybe_schedule_anchor_mining(current_user["id"], course_id, tid, session_end_check=True)
 
-    return get_anchor_digest(current_user["id"], course_id)
+    digest = get_anchor_digest(current_user["id"], course_id)
+    # IK-0437: 候補ゼロのときは事実文を添える（tension digest と同じ形）。
+    if isinstance(digest, dict) and not digest.get("items"):
+        digest = {**digest, "facts": [label_vocab.ANCHOR_DIGEST_EMPTY_FACT]}
+    return digest
 
 
 @router.post("/anchors/{trace_id}/confirm")
@@ -5534,7 +8918,9 @@ def confirm_anchor_route(
                 result["related_assumption"] = related
     except Exception:
         logger.debug("related assumption lookup skipped", exc_info=True)
-    return {"ok": True, **result}
+    return _learner_anchor_decision_dto(
+        result, status="confirmed", notice=label_vocab.ANCHOR_CONFIRMED_NOTICE,
+    )
 
 
 @router.post("/anchors/{trace_id}/dismiss")
@@ -5549,7 +8935,52 @@ def dismiss_anchor_route(
     result = dismiss_anchor_trace(current_user["id"], trace_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Anchor candidate not found")
-    return {"ok": True, **result}
+    return _learner_anchor_decision_dto(
+        result, status="dismissed", notice=label_vocab.ANCHOR_DISMISSED_NOTICE,
+    )
+
+
+def _learner_anchor_decision_dto(result: dict, *, status: str, notice: str) -> dict:
+    """帰属の確定・却下の応答を学習者向けに射影する（IK-0411）。
+
+    ``services.confirm_anchor_trace`` は保存した ``structure_anchor`` を丸ごと返す。そこには
+    LLM 候補の ``confidence``（生の数値）・英語の ``reason``（内部の claim ID を含み得る）・
+    ``anchor_id``（内部 ID）・``detector_version`` が載っていて、学習者に出すものではない
+    （P3 / P7 / KO10）。ダイジェスト（``get_anchor_digest``）と同じラベルの投影だけを返す
+    — 許可リスト方式で、新しいキーが payload に増えても応答へは漏れない。
+    関連する前提（D3-6）は本文 ``statement`` だけを通す（前提の内部 ID は出さない）。
+    """
+    from core.structure_anchor.schema import ANCHOR_TYPE_LABELS, DOUBT_TYPE_LABELS
+
+    result = result if isinstance(result, dict) else {}
+    anchor = result.get("structure_anchor") if isinstance(result.get("structure_anchor"), dict) else {}
+    dto: dict = {
+        "ok": True,
+        "trace_id": str(result.get("trace_id") or ""),
+        "status": status,
+        "notice": notice,
+    }
+    if anchor:
+        atype = str(anchor.get("anchor_type") or "segment")
+        dtype = str(anchor.get("doubt_type") or "unclassified")
+        dto["anchor_label"] = str(anchor.get("anchor_label") or "")
+        dto["anchor_type_label"] = ANCHOR_TYPE_LABELS.get(atype, "")
+        dto["doubt_type"] = dtype if dtype in DOUBT_TYPE_LABELS else "unclassified"
+        dto["doubt_type_label"] = DOUBT_TYPE_LABELS.get(dtype, DOUBT_TYPE_LABELS["unclassified"])
+    related = result.get("related_assumption")
+    if isinstance(related, dict) and str(related.get("statement") or "").strip():
+        dto["related_assumption"] = {"statement": str(related.get("statement") or "")}
+    return dto
+
+
+def _learner_tension_decision_dto(result: dict) -> dict:
+    """tension の確定・却下・接続の応答を許可リストで射影する（IK-0411 と同じ規律）。"""
+    result = result if isinstance(result, dict) else {}
+    return {
+        "ok": True,
+        "trace_id": str(result.get("trace_id") or ""),
+        "status": str(result.get("status") or ""),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -5850,7 +9281,23 @@ def connect_tension_route(
     )
     if result is None:
         raise HTTPException(status_code=400, detail="Could not connect tension trace")
-    return {"ok": True, **result}
+    return _learner_tension_decision_dto(result)
+
+
+#: 学生向け説明一覧の事実文（IK-0861。固定文の正本はサーバ — JS にミラーしない）。
+COMPONENT_EXPLANATIONS_EMPTY_NOTE = "この部品には、承認済みの説明がまだありません。"
+COMPONENT_EXPLANATIONS_NOT_IN_COURSE = "この部品は、このコースの教材の中では見つかりませんでした。"
+#: 部品の ID がコースの複数の論文に当たり、どの論文の部品か決められないとき（IK-0892）。
+COMPONENT_EXPLANATIONS_AMBIGUOUS = (
+    "どの論文の部品か特定できませんでした。表示中のトピックの教材から開き直すと説明を出せます。"
+)
+
+#: 学生へ届く説明の条件（IK-0861 + IK-0926・オーナー判断の推奨どおり）。承認済みに限り、
+#: 標準の説明（document 単位）はコースをまたいで届き、教員の説明は書いたコース（出所
+#: ``course_id``）の学生に届く。共有 ON の説明がほかのコースの学生に届くのは、著者以外の
+#: 査読承認を受けたときだけ（e.shared = TRUE かつ最新の査読承認の記帳者が著者でない）。
+#: 正本は ``core.explanation_governance.LEARNER_EXPLANATION_SCOPE_SQL``。
+_LEARNER_EXPLANATION_SCOPE_SQL = _explanation_governance.LEARNER_EXPLANATION_SCOPE_SQL
 
 
 @router.get("/courses/{course_id}/components/{component_id}/explanations")
@@ -5858,32 +9305,72 @@ def get_component_explanations_for_learner(
     course_id: str,
     component_id: str,
     current_user: dict = Depends(_get_current_user),
+    topic_id: str | None = None,
+    document_id: str | None = None,
 ) -> dict:
     """学習者向け: 1つの理論・概念の説明バージョン(標準/各教員の説明)を返す(C層 Phase 2)。
 
     承認済み(teacher_approved)の説明のみを返す。標準説明は kind='standard'。
     承認の厚みは段階ラベルで示し、数値スコアは学習者に提示しない(点数化を避ける)。
+
+    ゲートは受講（``get_accessible_course_data``）で、部品はコースの教材の document に
+    限って解決する（agent ID も UUID に解決してから引く — CAST しない）。範囲は
+    ``_LEARNER_EXPLANATION_SCOPE_SQL``（IK-0861。2026-10-23 に部品の course_id 一致から
+    切り替えた）。
     """
     from routes.theory_components import _endorsement_label  # 遅延 import(循環回避)
 
-    if not get_viewable_course_data(current_user["id"], course_id):
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
+    course_document_ids = set(_course_document_ids(course_data))
+    # IK-0892: 部品の文脈と同じ焦点論文（FD1/FD4）で解決する。「どの論文か」の条件式は
+    # ここに書かず、焦点の解決（learner_focus_document）と resolve_in_focus に委ねる。
+    focus = (
+        _learner_focus(
+            current_user, course_data, course_id, topic_id,
+            explicit_document_id=str(document_id or "").strip() or None,
+            allowed_document_ids=course_document_ids,
+        )
+        if str(topic_id or "").strip() or str(document_id or "").strip()
+        else FocusDocument()
+    )
+    # 第 6 波（IK-1021）: 部品の文脈と同じく、凍結の ⚓ が指した部品を版をまたいで辿る。
+    frozen_resolution = _resolve_frozen_component_ref(
+        course_data, component_id, str(topic_id or ""), course_document_ids
+    )
+    if frozen_resolution is not None and frozen_resolution.get("status") in ("live", "remapped"):
+        component_db_id = str(frozen_resolution.get("id") or "") or None
+    else:
+        component_db_id = resolve_course_component_id(
+            component_id, course_document_ids, preferred_document_ids=focus.document_ids,
+        )
+    if frozen_resolution is not None and frozen_resolution.get("status") == "superseded":
+        # IK-1021 doubt 側（第 7 波）: 404 で文だけ返すと説明ポップアップの見出しに名前が無い。
+        # 凍結時の部品名と「置き換わり、後継が決まっていない」の事実文を 200 で返す（説明は空）。
+        # IK-1051（面 A・第 7 波）: 出典の重なる新しい部品が 0 件なら「見つからない」と言う。
+        return _superseded_component_payload(
+            frozen_resolution, _superseded_learner_note(frozen_resolution), explanations=True
+        )
+    if not component_db_id:
+        if component_matches_multiple_documents(component_id, course_document_ids):
+            raise HTTPException(status_code=404, detail=COMPONENT_EXPLANATIONS_AMBIGUOUS)
+        raise HTTPException(status_code=404, detail=COMPONENT_EXPLANATIONS_NOT_IN_COURSE)
     session = _pg_session()
     try:
         rows = session.execute(
             sa_text("""
-                SELECT e.id, e.kind, COALESCE(u.display_name, ''), e.title, e.body,
+                SELECT e.id, e.kind, COALESCE(NULLIF(BTRIM(u.profile_name), ''), ''), e.title, e.body,
                        COALESCE(s.endorser_count, 0), COALESCE(s.strong_count, 0),
                        COALESCE(s.provisional_count, 0), COALESCE(s.expertise_breadth, 0)
                 FROM component_explanations e
                 LEFT JOIN users u ON u.id = e.author_id
-                LEFT JOIN component_explanation_endorsement_summary s ON s.explanation_id = e.id
+                LEFT JOIN """ + _explanation_governance.COUNTED_ENDORSEMENT_SUMMARY_SQL + """ s ON s.explanation_id = e.id
                 WHERE e.component_id = CAST(:cid AS uuid)
-                  AND e.course_id = :course_id
-                  AND e.review_status = 'teacher_approved'
+            """ + _LEARNER_EXPLANATION_SCOPE_SQL + """
                 ORDER BY (e.kind = 'standard') DESC, COALESCE(s.endorser_count, 0) DESC, e.created_at ASC
             """),
-            {"cid": component_id, "course_id": course_id},
+            {"cid": component_db_id, "course_id": course_id},
         ).fetchall()
     finally:
         session.close()
@@ -5898,20 +9385,28 @@ def get_component_explanations_for_learner(
         explanations.append({
             "id": str(r[0]),
             "kind": str(r[1] or "personal"),
-            "author_name": str(r[2] or ""),
+            # IK-1007: 説明を書いた教員は本人が登録した名前だけ（ログイン ID を学習者へ出さない）。
+            "author_name": "" if str(r[1] or "") == "standard" else _account_display.label_or_unregistered(r[2]),
             "title": str(r[3] or ""),
             "body": str(r[4] or ""),
             "endorsement_label": _endorsement_label(summary),
         })
-    return {"component_id": component_id, "explanations": explanations}
+    result = {
+        "component_id": component_db_id,
+        "explanations": explanations,
+        "indicator_id": "explanation-support-label",
+    }
+    if not explanations:
+        result["note"] = COMPONENT_EXPLANATIONS_EMPTY_NOTE
+    return result
 
 
 def _first_approved_component_explanation(component_id: str, course_id: str) -> dict | None:
     """承認済み(teacher_approved)の component_explanations を1件返す(C層)。
 
-    ``get_component_explanations_for_learner`` と同じ承認条件・course スコープ・
-    並び順（標準優先 → 承認厚み → 作成順）で、先頭1件のみを
-    ``get_course_component_context`` の ``instance.explanation`` に充填する。
+    ``get_component_explanations_for_learner`` と同じ承認条件・範囲
+    （``_LEARNER_EXPLANATION_SCOPE_SQL``）・並び順（標準優先 → 承認厚み → 作成順）で、
+    先頭1件のみを ``get_course_component_context`` の ``instance.explanation`` に充填する。
     """
     from routes.theory_components import _endorsement_label  # 遅延 import(循環回避)
 
@@ -5919,15 +9414,14 @@ def _first_approved_component_explanation(component_id: str, course_id: str) -> 
     try:
         row = session.execute(
             sa_text("""
-                SELECT e.kind, COALESCE(u.display_name, ''), e.title, e.body,
+                SELECT e.kind, COALESCE(NULLIF(BTRIM(u.profile_name), ''), ''), e.title, e.body,
                        COALESCE(s.endorser_count, 0), COALESCE(s.strong_count, 0),
                        COALESCE(s.provisional_count, 0), COALESCE(s.expertise_breadth, 0)
                 FROM component_explanations e
                 LEFT JOIN users u ON u.id = e.author_id
-                LEFT JOIN component_explanation_endorsement_summary s ON s.explanation_id = e.id
+                LEFT JOIN """ + _explanation_governance.COUNTED_ENDORSEMENT_SUMMARY_SQL + """ s ON s.explanation_id = e.id
                 WHERE e.component_id = CAST(:cid AS uuid)
-                  AND e.course_id = :course_id
-                  AND e.review_status = 'teacher_approved'
+            """ + _LEARNER_EXPLANATION_SCOPE_SQL + """
                 ORDER BY (e.kind = 'standard') DESC, COALESCE(s.endorser_count, 0) DESC, e.created_at ASC
                 LIMIT 1
             """),
@@ -5947,22 +9441,48 @@ def _first_approved_component_explanation(component_id: str, course_id: str) -> 
         "kind": str(row[0] or "personal"),
         "title": str(row[2] or ""),
         "body": str(row[3] or ""),
-        "author_name": str(row[1] or ""),
+        "author_name": "" if str(row[0] or "") == "standard" else _account_display.label_or_unregistered(row[1]),  # IK-1007
         "endorsement_label": _endorsement_label(summary),
     }
 
 
 def _component_context_with_explanation(
-    component_id: str, course_id: str, course_document_ids: set[str]
+    component_id: str,
+    course_id: str,
+    course_document_ids: set[str],
+    *,
+    preferred_document_ids: "tuple[str, ...]" = (),
+    user_id: str = "",
 ) -> dict | None:
     """コーススコープの component 文脈 DTO（C層の承認済み説明を充填済み）。解決不能なら ``None``。
+
+    ``user_id`` があれば「共通部品として」の他の論文を、コースの sources ∪ 本人の可視集合
+    （``list_visible_document_ids``）の中からだけ題名で列挙する（IK-0920）。無ければ
+    コースの sources だけ（fail-closed）。
 
     ``get_course_component_context``（エンドポイント）と、画面文脈アダプター Phase 4
     （``assistant_screen_adapter_design.md`` §11.3 kind ``element``）の共通正本。
     document スコープの強制は ``core.component_context`` の SQL 内
     （``ANY(:doc_ids)``）が持つ — ここで再実装しない。
     """
-    context = build_component_context(component_id, course_id, course_document_ids)
+    readable_document_ids = set(course_document_ids)
+    if str(user_id or "").strip():
+        try:
+            readable_document_ids |= {str(d) for d in (list_visible_document_ids(user_id) or [])}
+        except Exception:  # noqa: BLE001 - 読めなければコースの sources だけ（fail-closed）
+            logger.debug("component context: visible documents unavailable", exc_info=True)
+    context = (
+        build_component_context(
+            component_id, course_id, course_document_ids,
+            preferred_document_ids=preferred_document_ids,
+            readable_document_ids=readable_document_ids,
+        )
+        if preferred_document_ids
+        else build_component_context(
+            component_id, course_id, course_document_ids,
+            readable_document_ids=readable_document_ids,
+        )
+    )
     if context is None:
         return None
     explanation = _first_approved_component_explanation(context["component_id"], course_id)
@@ -5971,11 +9491,67 @@ def _component_context_with_explanation(
     return context
 
 
+def resolve_learner_component_context(
+    course_data: dict,
+    component_id: str,
+    course_id: str,
+    course_document_ids: set[str],
+    *,
+    topic_id: str = "",
+    preferred_document_ids: "tuple[str, ...]" = (),
+    user_id: str = "",
+) -> dict | None:
+    """学習者に届く部品の文脈の**唯一の解決点**（IK-1075・2026-10-31 第 9 波）。
+
+    凍結の ⚓（教材に焼き込まれた部品の参照）は、まず凍結時の記録から版をまたいで後継を辿り
+    （``_resolve_frozen_component_ref`` — IK-1021 / IK-1051）、後継が決まらなければ
+    ``_superseded_component_payload``（``available: False`` + 事実文）を返す。後継があれば
+    その部品で、凍結の記録が無ければ従来どおり焦点論文で解決する。
+
+    部品の文脈 API（``get_course_component_context``）と学習チャットの画面文脈
+    （``_screen_element_sources`` — SA層 kind ``element``）の両方がここを通る。画面が
+    「後継が決まっていません」と言う ⚓ を、AI の材料だけが別の live 部品へ素の agent ID で
+    解決することを構造的に塞ぐ（経路の一覧は ``assistant_screen_adapter_design.md`` §11.18）。
+    """
+    version_note = ""
+    frozen_resolution = _resolve_frozen_component_ref(
+        course_data, component_id, topic_id, course_document_ids
+    )
+    if frozen_resolution is not None:
+        status = frozen_resolution.get("status")
+        if status == "superseded":
+            return _superseded_component_payload(
+                frozen_resolution, _superseded_learner_note(frozen_resolution)
+            )
+        if status == "remapped":
+            from core.knowledge_objects.remap import REMAPPED_COMPONENT_NOTE
+
+            version_note = REMAPPED_COMPONENT_NOTE
+        component_id = str(frozen_resolution.get("id") or component_id)
+    context = (
+        _component_context_with_explanation(
+            component_id, course_id, course_document_ids,
+            preferred_document_ids=preferred_document_ids,
+            user_id=user_id,
+        )
+        if preferred_document_ids
+        else _component_context_with_explanation(
+            component_id, course_id, course_document_ids,
+            user_id=user_id,
+        )
+    )
+    if context is not None and version_note and isinstance(context, dict):
+        context["version_note"] = version_note
+    return context
+
+
 @router.get("/courses/{course_id}/components/{component_id}/context")
 def get_course_component_context(
     course_id: str,
     component_id: str,
     current_user: dict = Depends(_get_current_user),
+    topic_id: str = "",
+    document_id: str = "",
 ) -> dict:
     """コーススコープ component 文脈 API（component_evidence_redesign Phase 2/3）。
 
@@ -5993,15 +9569,97 @@ def get_course_component_context(
     """
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if not course_data:
-        raise HTTPException(status_code=404, detail="Course not found")
+        raise HTTPException(status_code=404, detail=label_vocab.COURSE_NOT_AVAILABLE_NOTICE)
 
     course_document_ids = set(_course_document_ids(course_data))
-    context = _component_context_with_explanation(
-        component_id, course_id, course_document_ids
+    # 焦点論文（FD1/FD4）: agent 側 ID（``comp_001``）は論文をまたいで衝突するので、
+    # 明示の論文 → 表示中トピックの論文 → 直前に引用した論文の順で先に解決する。
+    # 焦点の外で複数の論文に当たるときは解決しない（fail-closed）。
+    focus = (
+        _learner_focus(
+            current_user, course_data, course_id, topic_id,
+            explicit_document_id=str(document_id or "").strip() or None,
+            allowed_document_ids=course_document_ids,
+        )
+        if str(topic_id or "").strip() or str(document_id or "").strip()
+        else FocusDocument()
+    )
+    # 第 6 波（IK-1021）の凍結の ⚓ の後継解決は、画面文脈と共通の 1 点（IK-1075）。
+    context = resolve_learner_component_context(
+        course_data, component_id, course_id, course_document_ids,
+        topic_id=topic_id,
+        preferred_document_ids=focus.document_ids,
+        user_id=current_user["id"],
     )
     if context is None:
         raise HTTPException(status_code=404, detail="Component not found")
     return context
+
+
+def _superseded_component_payload(resolution: dict, note: str, *, explanations: bool = False) -> dict:
+    """後継の決まらない凍結の ⚓ の学習者向け応答（IK-1021 doubt 側・第 7 波）。
+
+    ``available: False`` + ``note``（従来の文）に、凍結時の部品名 ``frozen_label`` と事実文
+    ``frozen_label_line``（``label_vocab.frozen_component_superseded_line``）を足す。内部 ID は出さない。
+    """
+    frozen_label = str((resolution or {}).get("frozen_label") or "").strip()
+    payload: dict = {
+        "available": False,
+        "note": note,
+        "frozen_label_line": label_vocab.frozen_component_superseded_line(
+            frozen_label, (resolution or {}).get("reason") or ""
+        ),
+    }
+    if frozen_label:
+        payload["frozen_label"] = frozen_label
+    if explanations:
+        payload["explanations"] = []
+    return payload
+
+
+def _superseded_learner_note(resolution: dict | None) -> str:
+    """後継の決まらない凍結の ⚓ の学習者向けの文（0 件と「決まらない」を言い分ける・IK-1051）。"""
+    from core.knowledge_objects.remap import (
+        READ_TIME_NOT_FOUND,
+        SUPERSEDED_COMPONENT_LEARNER_NOTE,
+        SUPERSEDED_COMPONENT_NOT_FOUND_LEARNER_NOTE,
+    )
+
+    if str((resolution or {}).get("reason") or "") == READ_TIME_NOT_FOUND:
+        return SUPERSEDED_COMPONENT_NOT_FOUND_LEARNER_NOTE
+    return SUPERSEDED_COMPONENT_LEARNER_NOTE
+
+
+def _resolve_frozen_component_ref(
+    course_data: dict, component_id: str, topic_id: str, course_document_ids: set[str]
+) -> dict | None:
+    """凍結の ⚓ を今の部品に解決する（正本は ``core.frozen_component_refs``・fail-soft）。
+
+    解決できたときは凍結時の部品名を ``frozen_label`` として添える（置き換わった事実を名指すため）。
+    """
+    try:
+        from core.frozen_component_refs import frozen_component_ref, resolve_frozen_component
+
+        frozen = frozen_component_ref(course_data, component_id, topic_id)
+        if not frozen:
+            return None
+        session = _pg_session()
+        try:
+            resolved = resolve_frozen_component(
+                session, component_id=component_id, frozen=frozen, document_ids=course_document_ids
+            )
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — 読み時の補助。引けなければ従来の解決
+        logger.debug("frozen component ref resolution failed", exc_info=True)
+        return None
+    if isinstance(resolved, dict) and str(frozen.get("label") or "").strip():
+        resolved = {**resolved, "frozen_label": str(frozen.get("label") or "").strip()}
+    return resolved
+
+
+#: 要素文脈が特定できなかったときの事実文（数値・内部 ID を含めない）。
+ELEMENT_CONTEXT_UNRESOLVED_NOTE = "この要素の文脈は、このコースの教材からは特定できませんでした。"
 
 
 @router.get("/courses/{course_id}/elements/{element_type}/{element_id}/context")
@@ -6010,6 +9668,8 @@ def get_course_element_context(
     element_type: str,
     element_id: str,
     current_user: dict = Depends(_get_current_user),
+    topic_id: str = "",
+    document_id: str = "",
 ) -> dict:
     """学習者向け claim / equation 文脈 API（learner_element_context_design Phase 3）。
 
@@ -6034,10 +9694,29 @@ def get_course_element_context(
 
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if not course_data:
-        raise HTTPException(status_code=404, detail="Course not found")
+        raise HTTPException(status_code=404, detail=label_vocab.COURSE_NOT_AVAILABLE_NOTICE)
 
     course_document_ids = set(_course_document_ids(course_data))
-    context = build_element_context(element_type, element_id, course_document_ids)
+    # ⚓ が属する論文で先に解決する（式 ID の論文間衝突）。焦点論文の段は 明示 →
+    # 表示中トピックの論文 → 直前に引用した論文（FD1/FD4）。
+    preferred_document_ids: tuple[str, ...] = ()
+    if str(topic_id or "").strip() or str(document_id or "").strip():
+        preferred_document_ids = _learner_focus(
+            current_user, course_data, course_id, topic_id,
+            explicit_document_id=str(document_id or "").strip() or None,
+            allowed_document_ids=course_document_ids,
+        ).document_ids
+    context = (
+        build_element_context(
+            element_type, element_id, course_document_ids,
+            preferred_document_ids=preferred_document_ids,
+        )
+        if preferred_document_ids
+        else build_element_context(element_type, element_id, course_document_ids)
+    )
     if context is None:
-        raise HTTPException(status_code=404, detail="Element not found")
+        # 教材に表示された ⚓ が特定できない（コース外 / 曖昧 / 未知）ときは、英語の
+        # エラーではなく事実文で縮退する（TRIAGE14）。コース外と不在は同じ応答で、
+        # 存在を漏らさない（受講ゲート・未対応 element_type の 404 は上で維持）。
+        return {"available": False, "note": ELEMENT_CONTEXT_UNRESOLVED_NOTE}
     return context

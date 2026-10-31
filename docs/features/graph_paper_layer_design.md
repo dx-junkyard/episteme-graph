@@ -423,3 +423,33 @@ DTO 契約（§3）・core・route・migration・アンカーはいずれも変�
   （既存 `graph-review.paper-view` 内の描画追加）。
 - テスト: `test_graph_paper_layer_p09.py`（23 件）+ `test_graph_paper_layer_core.py` /
   `test_graph_review_ui_static.py` の追随。
+
+## 13. 追補 — 見出し誤認の畳み込み（第 15 波 = ペルソナ通し受講 第 14 周 c-astro-structure-30 の是正・2026-09-30。課題ナレッジ IK-0526・IK-0527）
+
+`builder.is_heading_like_title` が見出しらしくない節題（式・長文・テンプレート題）を判定し、その節を直前の章へ畳んで
+`folded_section_ids` に残す（冒頭に章が無い場合は「冒頭（見出しなし）」）。SA層 document_graph 解決器は主ノードごとの章・式の所在を
+事実文にし、無いときは「章・番号付きの式との対応は解析結果にありません」。
+
+## 追補（2026-09-30・ペルソナ通し受講 第 16 波）
+
+- **表の見出しは章にしない**（IK-0567）: `_looks_like_table_header` で表の見出し行を章候補から外し、親を失った要素は
+  `_reattach_orphan_parents` で付け直す。
+
+## 14. 追補 — 番号の無い式の表示ラベル（PL7 の順・第 21 周 R2・2026-10-03）
+
+印字番号の無い式の表示ラベル（`schema.equation_display_label`）は、A層の英語要約（`plain_text`）を先に取っていたため、TeX 経路の
+教材で学習者・教員の一覧が「番号なし: Defines the …」（40 字で切れた英語）で埋まった（ペルソナ通し受講 第 21 周・検証シミュレーションの
+まとまりの一覧）。PL7 の「番号の無い式は『番号なし』+ 本文先頭」を次の**順**で読み替える:
+
+1. 印字番号があれば「式 (N)」（従来どおり）。
+2. 無ければ `latex` の先頭（`番号なし: $…$`）。表示用に数式環境の枠・`\label` / `\tag`・`&`・外側の区切りを落とし、
+   `LABEL_SNIPPET_MAX` 字で切るときは `\` コマンドを割らず、引数の欠けたコマンド・末尾の `^` / `_` を落として KaTeX が描ける形で
+   閉じる（決定論）。
+3. `latex` が無ければ定義する記号の列挙（`番号なし: $M_J$、… を定義する式`・上限 `LABEL_SYMBOLS_MAX`）。
+4. どちらも無いときだけ平文（英語要約）の先頭。
+
+同じ正本から `equation_latex_snippet`（`LATEX_SNIPPET_MAX` 字）と `equation_defined_symbols` を公開し、理論モジュール層の
+`member_equations`（`theory_module_layer_design.md` §12.7）が使う。理論モジュール側の `equation_display_label` は番号の無い式を
+この関数に委ねる（ラベル規則の複製を持たない = P-0014）。内部 ID を含む結果は使わない（PL7）。テストは
+`test_graph_paper_layer_core.py` の期待値を新しい順に合わせた。
+

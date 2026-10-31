@@ -55,6 +55,9 @@ resolution:
     - docs/features/field_atlas_overlay_spec.md
     - docs/development_checklist.md §5-5
     - backend/tests/test_docs_registry_guardrails.py
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0221]
 view_of: []
 pattern: referenced-source-does-not-exist

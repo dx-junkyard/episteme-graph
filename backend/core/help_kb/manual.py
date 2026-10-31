@@ -176,6 +176,7 @@ def search_manual(
     audience: str,
     limit: int = 3,
     screen: Optional[str] = None,
+    prefer_anchor: Optional[str] = None,
 ) -> list[dict]:
     """``audience`` から見える節のうち query に最も近いものを返す。
 
@@ -186,9 +187,20 @@ def search_manual(
     が一致する節を検索ランキングの第一候補にする（語彙重なりスコアが正の節に限る。
     詳細は ``index.score_sections`` を参照）。``screen=None`` は完全に従来挙動
     （後方互換）。返却 dict の形（キー集合）は screen 指定の有無で変わらない。
+
+    （第 22 周 A2）語の切り方は :func:`index.tokenize_cjk_ngrams`（かな漢字の 2 字を強く数え、
+    ひらがな 1 字を数えない）。本文がリンクの並びだけの節（目次）は答えの候補に入れない
+    （:func:`index.is_navigation_section`）。``prefer_anchor`` は開いているパネルの節の一族を
+    優先する（呼び出し側が明示した画面状態からだけ渡す）。
     """
-    sections = _sections_for_audience(audience)
-    scored = _index.score_sections(query, sections, limit=limit, screen=screen)
+    sections = [
+        sec for sec in _sections_for_audience(audience)
+        if not _index.is_navigation_section(sec)
+    ]
+    scored = _index.score_sections(
+        query, sections, limit=limit, screen=screen,
+        cjk_ngrams=True, prefer_anchor=prefer_anchor,
+    )
     results: list[dict] = []
     for sec in scored:
         sec_audience = sec.get("audience", audience)

@@ -49,9 +49,13 @@ migration: **不要**（`interest_traces` の kind 追加なし。`intention` �
 - サーバ API `GET /api/learning/courses/{id}/cycle/todays-words` は
   `learning_chat_history` から**本人・user ロールのみ**を返す（assistant 行を返す
   経路を作らない — ガードレールで role フィルタを固定）。「当日」の実装は
-  **直近24時間窓（`updated_at >= now() - interval '24 hours'`、TZ 非依存）**の近似
-  （`CURRENT_DATE` だと DB タイムゾーン（UTC想定）の暦日で切れ、JST 学習者の朝の発話が
-  同日昼に消える）。
+  **日本時間の今日の 0 時以降（`core/learner_time.py::learner_today_start_utc`）**で、
+  発話の時刻は**その発話が記録した痕跡（`interest_traces.payload.message_id`）の
+  `created_at`**（2026-09-28 是正・IK-0417。旧実装の「直近24時間 × 行 `updated_at`」は
+  行内の前日の発話を混ぜ、全発話に同じ時刻を付けていた）。痕跡の無い発話は時刻が
+  分からないので載せない。相づち・了解だけの発話（「はい、理解しています。」等。
+  語彙の正本は `core/cycle/schema.py` の `FILLER_*`）は並べない。DTO は `topic_id` を
+  出さず `topic_label`（題名 / 予約疑似トピックの表示名）を返す。
 - 表示には常に「あなたの言葉」ラベルを付す。
 - これは UC7 が唯一許す個人化「本人の産出物を本人に見せる」に該当する（migration 0・LLM 0）。
 
@@ -65,6 +69,15 @@ migration: **不要**（`interest_traces` の kind 追加なし。`intention` �
 - `map_excluded` の痕跡は表示しない（既存の訂正操作を尊重）。opt-out 可（表示トグル。
   サーバに設定テーブルを作らず localStorage — 精読モードと同型）。
 - 表示上限（新しい順に最大 12 点。間引きは数を見せずに行う）。減衰表示は v2。
+- **母集合は登録簿の `margin_marks` 宣言**（2026-10-09・第 23 波 F1）。読み元は
+  `GET /api/learning/courses/{id}/cycle/margin-marks`（`core/cycle/queries.py::
+  fetch_margin_mark_traces` が `trace_registry.MARGIN_MARK_KINDS` = 問い・引っかかり・
+  教材に付けた印 を受け、`core/cycle/derive.py::build_margin_marks` が kind ごとに本人が
+  引き受けたものだけを通す）。以前は「問いの軌跡」（interest-traces）の一覧を流用しており、
+  軌跡から除外される「教材に付けた印」（anchor_mark）が一度も出なかった。問いの軌跡の
+  除外は変えない。印を付けた・引っかかりや問いの帰属を確定した・🗑 で取り消した直後に
+  取り直す（以前はコース切替までキャッシュを捨てなかった）。差し替え・取り消し済み
+  （`superseded`）は出さない。並びは `created_at` の新しい順（下の①の近似は解消）。
 
 ## 3. 対話から思考を掬う仕事の委譲（明文化）
 
@@ -103,6 +116,11 @@ migration: **不要**（`interest_traces` の kind 追加なし。`intention` �
   ③最後の確定 tension は `TENSION_OWNED_STATUSES` 正本を使用
   （リテラル再掲禁止を優先 — dead status `abstracted` も形式上対象）。
   ④扉 DTO は非空時 `empty: false` を同梱・carryover には `trace_id` を含む。
+  空の扉は `{"empty": true, "fact", "hint"}`（2026-09-28・IK-0418。何が無いのか・
+  どうすれば残せるかの事実文。正本は `core/cycle/schema.py::EMPTY_DOOR_*`。画面は RD3
+  どおり空の扉を描かない。導出失敗時は `{"empty": true}` のまま — 「残っていない」と
+  言い切らない）。開いた動機（`opening_motive`）は扉の3部品に入らない（設計どおり）。
+  ②の「直近24時間窓」は 2026-09-28 に日本時間の今日 × 痕跡時刻へ置き換えた（§2.2）。
 - 設計判断の明文化（2026-08-15 レビュー是正時に追記）:
   - **扉の last_tension は `payload.map_excluded` を意図的に尊重しない。**
     `map_excluded` は「わたしの地図」スコープの訂正操作（地図に反映しない）であり、
@@ -124,3 +142,27 @@ migration: **不要**（`interest_traces` の kind 追加なし。`intention` �
 - 扉の内側の想起リンク＋二列並置（右列既定畳み）・精読モード限定の1タップ想起ゲート
 - 減衰表示（時間定数の設計込み）
 - leave_note の「わたしの地図」時間層表示
+
+## 7. 追補（2026-10-09・第 23 周）— 持ち越しの逐語と保存の成否
+
+uxsim 第 23 周（[ペルソナ通し受講テスト](../architecture/persona_enactment_testing_design.md) §20）の F1 で見えた
+RD1 の破れと、保存の成否を偽る表示の是正。migration なし・LLM 0 回。欄外の印の読み元の是正は §2.3 に追記した。
+
+- **持ち越しの問いは候補の本文を保存する（RD1・IK-0650）**: 着地の「次に持ち越すなら」の候補
+  （`GET .../cycle/landing-candidates`）は、選択肢に出す**表示専用**の `label`（80 字・印は 60 字で切り、印の種類の接頭辞
+  「気になる: 」等を付けた文）と、元の痕跡の**本文そのもの** `text`（切り詰めず・接頭辞を付けない）の 2 つを持つ
+  （`core/cycle/derive.py::build_landing_candidates`）。以前は `label` を持ち越しの本文として保存しており、扉と開幕に出る
+  「本人の言葉」が切り詰めと接頭辞の付いた表示文になっていた。保存するのは `text` で、本文の無い印だけは `label`
+  （印の種類の語）を使う（`discuss.js`）。是正前に保存された行は書き換えない（P4）ので、その行は扉に表示文のまま出る。
+- **保存の成否を事実文で返す（IK-0651）**: 持ち越し・開いた動機・予想・予想との違いの 4 か所が応答を見ずに
+  「記録しました」「残しました」と出していた。書き置き（`saveLeaveNote`）と同じ作法に揃え、失敗したら書いた文章を消さず、
+  押したボタンを戻し、その場に「保存できませんでした。入力はそのまま残しています。」を 1 行出す（`discuss.js` の
+  `SAVE_FAILED_FACT` / `showSaveFailed`）。成功のときだけ成功の文を出す。
+- **欄外の印**（§2.3 の追記）: 母集合を登録簿の `margin_marks` 宣言で決める `GET .../cycle/margin-marks`（登録簿の消費者
+  宣言 `cycle_margin_marks`）。教材に付けた印が初めて出るようになり、印を付けた・確定した・🗑 で取り消した直後に取り直す。
+- テスト: `backend/tests/test_round23_learner_cycle.py`（`TestCarryoverKeepsTheWholeText` / `TestSavesReportTheirOutcome` /
+  `TestMarginMarks` / `TestMarginMarksRoute`）+ `test_return_door_ui_static.py`。
+- **未解決（課題として記帳済み）**: 持ち越しの問いに答えても扉は答える前と同じ（IK-0668）/ 候補が 1 つも無いときの見出し
+  （IK-0669）/ 議論の AI が「持ち越しの問い、受け取りました」と言う（持ち越しは画面の操作でだけ残る — IK-0670）/
+  切り上げの挨拶や予想が「問い［未解決］」として記録・軌跡に並ぶ（IK-0667）/ 前日に書いた予想に扉・開幕から辿れない
+  （第 23 周の所見。扉の 3 部品に予想を足すかは RD1〜RD3 の範囲の判断として未着手）。

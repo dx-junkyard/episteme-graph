@@ -1,0 +1,54 @@
+# 第 25 周 第 8 周 doubt H50 / H51: 根拠・理由の固定文は場面の材料。runner が送るときに観察へ「この欄は場面の材料」を添える
+# （doubt_exec.note_scenario_material）。第 10 波（H60）: 文の頭の「（場面の材料・第 N 周）」は外した（周ごとに理由が変わり、
+# 疑義の重複の告知 — 同じ型・同じ理由の完全一致 — に当たらなかった）。目印は材料の値との一致で観察に付く
+scenario: t-db-assumption-review
+domain: astrophysics
+# 第 25 周・面 B (a)。コースは前提の地図タブのコース選択（GET /api/admin/courses = 自分が所有・共有されたもの）から選ぶ。
+# te-02 / te-03 は砂場でコースを所有しないので、経路の前提 owns_course の種まき t-v5-register-own-course で作る。
+# 候補の番号は前提候補の一覧（作成順）の番号。候補の文面は監査の結果次第なので番号で指す（ペルソナが読んで選び直してよい）。
+params:
+  goal_text: ゼミで扱う論文が暗黙に置いている前提を、根拠を読んで引き受けるかどうか決めること
+  course_hint: ""
+  confirm_pick: "1"
+  confirm_reason: 出所の逐語を読み、この導出が明示せずに依存している前提だと判断した。
+  dismiss_pick: "2"
+  # 第 25 周 第 5 周: 確定した前提の台帳に記帳するスコープ（任意の手）
+  premise_scope_condition: 論文の導出が置いている近似が成り立つ範囲で
+  premise_scope_quote: 論文の方法の節の、この前提を使う導出の箇所
+  premise_scope_reason: 論文はこの前提を明示せずにこの範囲の導出で使っているため、その範囲に限って記帳する
+per_archetype:
+  veteran_clicks_through:
+    confirm_reason: 妥当。
+personas:
+  te-04-copilot-intro:
+    course_hint: 1bad7d9f
+    # 第 6 周（judge_doubt_r5 §4）: 第 2 周の te-04 は前提の候補が立たず確定・スコープに届かなかった（5 教員とも歩き済み）。
+    # 前提を結ぶコースは本人が所有する 1bad7d9f（H35・manual_assumption が state に書く）。手動の前提は製品が confirmed で作る
+    # ので、確定の手ではなく台帳 → スコープの記帳までを見る（候補で置けないことは r6_prereqs の注記）
+    confirm_reason: 出所の逐語を読み、この導出が明示せずに使っている前提だと判断した。範囲はスコープに書く。
+    premise_scope_condition: 状態方程式が因果律を満たし、音速が光速を超えない範囲で
+    premise_scope_reason: 論文はこの範囲での推定としてこの前提を使っており、範囲の外では確かめていないため
+  te-05-delegator-lab:
+    # 第 25 周 第 4 周（judge_doubt_r3 §4）: 前提の地図・合意リストの母集合が前提・主張で埋まるか（IK-0933）、確定した前提の
+    # 台帳の見出しに論文の題名と段の日本語名が出るか（IK-0934・IK-0901 残り）。コースは te-05 自身のコース（一覧の先頭）
+    confirm_reason: 出所の逐語どおり、この導出が書かずに使っている前提。院生にも確認させる。
+  te-03-meticulous-seminar:
+    # 第 5 周（judge_doubt_r4 §4・r5_prereqs H32）: 指揮者が周の前に te-03 のコースの教材へ手動で前提を 1 件置く
+    # （POST /api/admin/doubt/assumptions・candidate）。それを確定 → 台帳でスコープを記帳 → 地図・合意リストに載るか（IK-0970）。
+    # te-03 × この場面は第 1 周と同じ組（5 教員とも歩き済み）だが、第 1 周は候補が 0 件で確定に届かなかった — campaign notes 参照
+    confirm_pick: "1"
+    confirm_reason: 出所の逐語を読み、導出がこの前提を明示せずに使っていると確かめたので確定する。適用範囲はスコープに書く。
+    premise_scope_condition: 磁場の乱れが小さく、等分配の仮定が成り立つ範囲で
+    premise_scope_reason: 論文はこの範囲での推定としてこの前提を使っており、範囲の外では確かめていないため
+  te-02-veteran-intro:
+    # 第 7 周（judge_doubt_r6 §4・H41）: 前提をコースの sources ではなく Cepheus B の論文（TeX 版）に結んだ状態（manual_assumption
+    # --assumption-on-cepheus・cepheus_editor = te-02）で、確定済みのカード → 台帳 → スコープ（IK-1028 の是正後。是正前なら散布図の
+    # 前提の点から開く）。［再計算］で入れ替わらないこと（doubt_load_recompute を是正の後に済ませる — IK-1030）。
+    # course_hint は Cepheus TeX を sources に持つ固定コース 1bad7d9f（te-02 は第 5 周の grant_te02 で editor）。manual_assumption の
+    # check が別のコースを選んだら、その「course_hint へ写す」の id でここを差し替える
+    course_hint: 1bad7d9f
+    confirm_reason: 逐語を読めば分かる。導出が書かずに使っている前提。範囲はスコープに書く。
+    premise_scope_condition: 磁場の乱れが小さく、等分配の仮定が成り立つ範囲で
+    premise_scope_reason: 論文はこの範囲での推定としてこの前提を使っており、範囲の外では確かめていないため
+    # 第 8 周（judge_doubt_r7 §4・H44 の是正後）: 確定済みの前提の一覧 → カードの［台帳を開く］（assumption_open_ledger）→ スコープの
+    # 記帳 → 前提の地図・合意リストへの載り方（7 周未到達）。同文の旧い前提は残したまま（結ばれた論文名の有無を見る）

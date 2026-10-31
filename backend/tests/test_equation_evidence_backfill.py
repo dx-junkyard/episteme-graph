@@ -144,6 +144,8 @@ def _step(step_id: str, *, outputs=("eq_1",), inputs=("eq_in",), evidence=()) ->
         step_id=step_id,
         input_equation_ids=list(inputs),
         operation="eliminate_second_order_parameter",
+        # 消去対象の記号が無い eliminate は generic に落ちる（2026-10-16 是正）。
+        eliminated_symbols=["b2"],
         output_equation_ids=list(outputs),
         source_evidence_ids=list(evidence),
         review_status="teacher_review_required",

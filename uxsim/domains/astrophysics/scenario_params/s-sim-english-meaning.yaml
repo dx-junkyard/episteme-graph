@@ -1,0 +1,18 @@
+scenario: s-sim-english-meaning
+domain: astrophysics
+# 第 22 周 (j) st-04（non_native・英語話者）。(e'') と同じ Cepheus B 論文のトピック t2 で、最新の自分の実行を開いたまま聞く。
+params:
+  goal_text: 自分の実行の結果の言葉と、共有したら何が起きるかを、英語で確かめること
+  topic_hint: DCF法による磁場強度の推定（Cepheus B の磁場トポロジーと星形成の論文）
+  topic_hint_terms:
+  - DCF法
+  - 磁場強度
+  questions:
+  - この実行の「未測定」はどういう意味ですか？
+  - この実行を共有したら何が起きますか？ 誰が見ますか？
+per_archetype:
+  non_native:
+    goal_text: checking in English what the words in my run's result mean and what happens if I share it
+    questions:
+    - What does unmeasured mean here?
+    - What happens if I share this run? Who sees it?

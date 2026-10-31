@@ -58,6 +58,14 @@ OPERATION_ONTOLOGY = [
 # is explicitly flagged for review.
 CONTROLLED_OPERATIONS = frozenset(OPERATION_ONTOLOGY)
 
+#: step の ``review_reason``。この step の式が「抽出された式」ではなく「AI が文脈から
+#: 復元した式」であることを表す。下流（理論操作グラフ ``component_graph.schema.
+#: RECONSTRUCTION_BACKED_STEP_REASON``）が step を強い根拠として扱わないための目印で、
+#: 確定（``source_backed``）に昇格させない規律はグラフ側の責務。ローカル chain と
+#: system 導出（``system_derivation``）の**両方**がこの値を書く（2026-09-19 レビュー R-1:
+#: system 導出だけ印が無く、復元式だけのノードが ``source_backed`` に到達しえた）。
+RECONSTRUCTION_BACKED_REASON = "reconstructed_equation_backing"
+
 STEP_REVIEW_STATUSES = [
     "auto_accepted",
     "teacher_review_required",
@@ -68,9 +76,13 @@ STEP_REVIEW_STATUSES = [
 @dataclass
 class DerivationStep:
     step_id: str
-    input_equation_ids: list[str]
-    operation: str
-    output_equation_ids: list[str]
+    # 式 step（equation_chain）では埋まり、claim だけの step（claim_chain）では空。
+    # 既定値を持たせてあるのは**空が正常な状態**だからで、位置引数の順序は不変
+    # （既存の ``DerivationStep(step_id=..., input_equation_ids=..., operation=...,
+    # output_equation_ids=...)`` はそのまま通る）。
+    input_equation_ids: list[str] = field(default_factory=list)
+    operation: str = DEFAULT_OPERATION
+    output_equation_ids: list[str] = field(default_factory=list)
     # Issue #433: two-layer operation model for steps. ``operation`` must be a
     # CONTROLLED_OPERATIONS verb; a domain-specific name is carried here with
     # ``subtype_source`` provenance ("cartridge" / "source_text" / "inferred" /
@@ -146,6 +158,11 @@ class DerivationChainResult:
     cartridge_id: str | None
     chains: list[DerivationChainRecord] = field(default_factory=list)
     validation_issues: list[ValidationIssue] = field(default_factory=list)
+    #: 取りこぼしの量（``coverage``。正本は
+    #: :func:`episteme_graph.agents.coverage_report.build_coverage_report`）と、
+    #: 導出に使えなかった式の ID。式が1本も使えなかった事実をここと
+    #: ``validation_issues`` の両方に残す（黙って claim だけの chain に落ちない）。
+    summary_stats: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -215,4 +232,5 @@ class DerivationChainResult:
             cartridge_id=d.get("cartridge_id"),
             chains=chains,
             validation_issues=issues,
+            summary_stats=dict(d.get("summary_stats") or {}),
         )

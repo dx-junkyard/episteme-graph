@@ -58,8 +58,10 @@ Signals AGAINST (classify as NOT tension; do not emit a candidate):
 3. turn_ids MUST reference turn ids present in the input.
 4. paraphrase MUST be written in the learner's language, in a tentative,
    non-assertive register. In Japanese end with 「〜かもしれません」 or
-   「〜ように見えます」. NEVER use assertive forms like 「〜と感じています」
-   「あなたは〜だ」. Max 120 characters. Address the tension, not the learner's ability.
+   「〜ように見えます」. In English use a tentative form such as "may", "might",
+   "seems" or "perhaps". NEVER use assertive forms like 「〜と感じています」
+   「あなたは〜だ」 or "you feel", "definitely". Max 120 characters. Address the
+   tension, not the learner's ability.
 5. is_tension_not_gap: set false and DO NOT emit the entry as a candidate if the
    moment is a comprehension gap; instead list it under rejected_as_gap with a reason.
 6. Emit AT MOST {max_candidates} candidates, ranked by confidence descending.
@@ -92,30 +94,34 @@ Signals AGAINST (classify as NOT tension; do not emit a candidate):
 """
 
 # Few-shot 3例（examples/ と同一ソース）。
+# IK-0474: 例の turn id は実会話の ``msg_{index:04d}`` と衝突しない形（``example_*``）にする
+# （実会話の msg_0010 / msg_0011 と同じ id だと、モデルが例の発話を実会話の発話と取り違える）。
 # (b)(c) の陰性例は「空出力が正解になり得る」ことをモデルに固定するために入れる
 # （過検出がこのエージェント最大の失敗モード）。
 _FEW_SHOT = """\
 
 ## Worked examples
 
+(The turn ids below such as `example_a_1` belong to these examples only. They never appear in the Session; cite only turn ids that appear in the Session.)
+
 ### Example (a) — positive: definition_unease
 Input excerpt:
-[turn id=msg_0010 role=learner] 有効場理論のカットオフの定義はわかりました。高エネルギーの自由度を積分で落とすんですよね。
-[turn id=msg_0011 role=tutor tier=approved] その通りです。（説明…）
-[turn id=msg_0012 role=learner tension_hint=true] 定義は復唱できるんですが、カットオフの選び方が恣意的に思えて、なんとなく腑に落ちないんです。
-[turn id=msg_0014 role=learner tension_hint=true] さっきのカットオフの話に戻るんですが、物理量が本当に依存しないと言い切れるんでしょうか。
+[turn id=example_a_1 role=learner] 有効場理論のカットオフの定義はわかりました。高エネルギーの自由度を積分で落とすんですよね。
+[turn id=example_a_2 role=tutor tier=approved] その通りです。（説明…）
+[turn id=example_a_3 role=learner tension_hint=true] 定義は復唱できるんですが、カットオフの選び方が恣意的に思えて、なんとなく腑に落ちないんです。
+[turn id=example_a_4 role=learner tension_hint=true] さっきのカットオフの話に戻るんですが、物理量が本当に依存しないと言い切れるんでしょうか。
 Correct output:
 {
   "candidates": [
     {
       "tension_type": "definition_unease",
       "evidence_quote": "定義は復唱できるんですが、カットオフの選び方が恣意的に思えて、なんとなく腑に落ちないんです。",
-      "turn_ids": ["msg_0012", "msg_0014"],
+      "turn_ids": ["example_a_3", "example_a_4"],
       "target_refs": {"component_ids": [], "chunk_ids": [], "topic_id": "t_01", "edge_ids": []},
       "is_tension_not_gap": true,
       "paraphrase": "定義を理解した上で、カットオフの恣意性に引っかかりが残っているのかもしれません",
       "confidence": 0.82,
-      "reason": "Correct restatement (msg_0010, msg_0012) followed by hedged unease markers 「なんとなく」「腑に落ちない」 (msg_0012) and a revisit of the same concept without acknowledgement (msg_0014)."
+      "reason": "Correct restatement (example_a_1, example_a_3) followed by hedged unease markers 「なんとなく」「腑に落ちない」 (example_a_3) and a revisit of the same concept without acknowledgement (example_a_4)."
     }
   ],
   "rejected_as_gap": []
@@ -123,20 +129,20 @@ Correct output:
 
 ### Example (b) — negative: comprehension gap (NOT a tension)
 Input excerpt:
-[turn id=msg_0020 role=learner] 群論がまだ全然わからないので、リー群の定義から教えてください。
+[turn id=example_b_1 role=learner] 群論がまだ全然わからないので、リー群の定義から教えてください。
 Correct output:
 {
   "candidates": [],
   "rejected_as_gap": [
-    {"turn_ids": ["msg_0020"], "reason": "Explicit statement of not understanding (「わからない」) with a definition lookup request; belongs to the question/misconception pipeline, not a tension."}
+    {"turn_ids": ["example_b_1"], "reason": "Explicit statement of not understanding (「わからない」) with a definition lookup request; belongs to the question/misconception pipeline, not a tension."}
   ]
 }
 
 ### Example (c) — negative: satisfied close
 Input excerpt:
-[turn id=msg_0030 role=learner] 繰り込み群方程式の導出はどうやるんですか。
-[turn id=msg_0031 role=tutor tier=source] （導出の説明…）
-[turn id=msg_0032 role=learner] なるほど、納得しました。ありがとうございます。
+[turn id=example_c_1 role=learner] 繰り込み群方程式の導出はどうやるんですか。
+[turn id=example_c_2 role=tutor tier=source] （導出の説明…）
+[turn id=example_c_3 role=learner] なるほど、納得しました。ありがとうございます。
 Correct output:
 {
   "candidates": [],
@@ -151,8 +157,20 @@ def build_instruction(max_candidates: int) -> str:
 
 
 def build_repair_prompt(previous_output: str, errors: list[str]) -> str:
-    """validation 失敗時の修復プロンプト（設計書 §7、A層と同方式）。"""
+    """validation 失敗時の修復プロンプト（設計書 §7、A層と同方式）。
+
+    直前の出力が読めなかった（空・JSON 以外）うえに、それより前に読めた出力も無いときは、
+    空の「Your previous output」区画を渡さない（「違反だけを直せ」と言いながら直す対象を
+    渡さない矛盾を避ける — IK-0402）。その場合は最初から出力し直すよう指示する。
+    """
     error_lines = "\n".join(f"- {e}" for e in errors)
+    if not str(previous_output or "").strip():
+        return (
+            "Your previous output violated these rules:\n"
+            f"{error_lines}\n"
+            "No readable previous output was received, so produce the full JSON again "
+            "from the conversation above, following all rules. Return the JSON only."
+        )
     return (
         "Your previous output violated these rules:\n"
         f"{error_lines}\n"

@@ -546,6 +546,35 @@ _SPECS: tuple[IndicatorSpec, ...] = (
         consumer="core/doubt/seminar_brief.py::build_seminar_brief",
         design_doc="docs/features/seminar_brief_mirroring_design.md",
     ),
+    # -- 検証シミュレーション層（SB層） ---------------------------------------
+    IndicatorSpec(
+        id="simulation-agreement",
+        label="検証シミュレーションの一致",
+        definition=(
+            "1つの論文の理論モジュールを数値で走らせ、実験機の配線を通した模擬観測と"
+            "突き合わせた差です。理論の出力と模擬観測の相対差・効果とばらつきの比・"
+            "（入力したときだけ）論文の記載値との相対差を、実行ごとに段階ラベル"
+            "「一致 / おおむね一致 / 乖離」「分離できる / 境界 / 埋もれる」と数値で示します。"
+            "**言えるのは「このモデルと配線のもとでは」までで、検証ではありません**"
+            "（台帳に入れても「間接的に支持」より上には上がりません）。"
+        ),
+        purpose=(
+            "論文が言う観測量が、その理論とその装置の組み合わせで本当に見えるのかを、"
+            "教員・研究者が自分で確かめ、検証の方法を比べるため。"
+            "人の評価や論文の優劣づけには使いません。"
+        ),
+        values_audience=AUDIENCE_TEACHER,
+        granularity=GRANULARITY_PER_ITEM_NO_PERSON,
+        source="simulation_runs.result.comparison.metrics（migration 088）",
+        retention=(
+            "実行記録は append-only で保持します（失敗・実行前に止めた実行も残します。"
+            "削除 API はありません）。"
+        ),
+        k_anonymity=False,
+        route="/api/admin/simulation/documents/{document_id}/runs",
+        consumer="core/simulation_bridge/comparator.py::compare",
+        design_doc="docs/features/simulation_bridge_design.md",
+    ),
     # -- discuss 観測基盤 ---------------------------------------------------
     IndicatorSpec(
         id="discuss-observation-status",
@@ -744,6 +773,34 @@ _SPECS: tuple[IndicatorSpec, ...] = (
         route="/api/admin/courses/{course_id}/sharing-dashboard",
         consumer="api/routes/theory_components.py::sharing_dashboard",
         design_doc="docs/features/admin.md",
+    ),
+    IndicatorSpec(
+        id="explanation-support-label",
+        label="説明への教員の支持（段階ラベル）",
+        definition=(
+            "部品の説明に添える「2名の教員が支持」のような段階の言葉です。"
+            "数えるのは、その説明を支持した教員のうち**説明を書いた本人を除き**、"
+            "**支持を取り消した人を除いた**人数です（書いた本人の支持も記録には残りますが、"
+            "人数には数えません）。暫定の支持だけなら「暫定的に」、強い支持があれば"
+            "「強い支持」、専門タグが2分野以上なら分野の広がりを添えます。"
+            "学習者が受講しているコースに届いた説明について、その学習者が読みます。"
+            "点数・順位は返しません。"
+        ),
+        purpose=(
+            "学習者が、説明がほかの教員にどれだけ支持されているかを知るため。"
+            "説明の正しさの判定や、教員・学習者の評価には使いません。"
+        ),
+        values_audience=AUDIENCE_LEARNER_SELF,
+        granularity=GRANULARITY_PER_ITEM_ATTRIBUTED,
+        source="component_endorsements（著者・取り消しを除く）/ component_explanations（migration 021）",
+        retention=(
+            "支持の取り消しは行削除ではなく取り消し状態への遷移で残ります。"
+            "段階の言葉は保存せず、読むたびに導出します。"
+        ),
+        k_anonymity=False,
+        route="/api/learning/courses/{course_id}/components/{component_id}/explanations",
+        consumer="core/explanation_governance.py::COUNTED_ENDORSEMENT_SUMMARY_SQL",
+        design_doc="docs/features/indicator_governance_design.md",
     ),
     # -- 配置層（知識ランドスケープ） --------------------------------------
     IndicatorSpec(

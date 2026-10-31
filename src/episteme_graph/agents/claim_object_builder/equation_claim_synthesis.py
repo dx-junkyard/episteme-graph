@@ -17,10 +17,26 @@ source-backed policy:
 """
 from __future__ import annotations
 
+import re
 from typing import Iterable
+
+from episteme_graph.agents.component_assembly.schema import is_symbol_like_concept_name
 
 from .schema import ClaimConcept, ClaimObjectRecord
 
+
+# A synthesised system-level claim is "one minimal proposition" only while it
+# names a handful of symbols. Beyond this it summarises a multi-step system
+# (IK-0798: one claim eliminating 4 and retaining 4 symbols, backed by ~150
+# evidence ids, was marked atomic and used as strong graph backing). The count is
+# of the proposition's arguments (eliminated + retained symbols), never of the
+# evidence ids — evidence volume says nothing about how many propositions the
+# text makes.
+MAX_SYMBOLS_PER_ATOMIC_SYSTEM_CLAIM = 6
+# Same idea for the rendered text: an atomic claim is a short sentence. Longer
+# synthesised prose means many symbols were enumerated.
+MAX_ATOMIC_SYNTH_TEXT_CHARS = 300
+NON_ATOMIC_SYSTEM_CLAIM_REASON = "non_atomic_system_claim"
 
 # General, domain-neutral claim types (issue #388).
 DEFINITION_CLAIM = "definition_claim"
@@ -41,7 +57,7 @@ _OPERATION_TO_CLAIM_TYPE = {
 
 
 def _math(symbol: object) -> str:
-    """Wrap a symbol as inline math (``$...$``) for the synthesised prose.
+    """Render a symbol for the synthesised prose, delimiting math as ``$...$``.
 
     Symbols come straight out of the equation / derivation artifacts and are raw
     LaTeX (``\\mathbf{k}``, ``P_{\\rm L}(k)``). Interpolated bare into a sentence
@@ -49,6 +65,13 @@ def _math(symbol: object) -> str:
     through here. Idempotent: an already delimited symbol (``$x$`` / ``\\(x\\)``)
     is returned untouched, and an empty symbol stays empty. Concept names keep the
     bare symbol — only the prose carries the delimiters.
+
+    Not everything the upstream extraction calls a "used symbol" is a symbol:
+    the 2026-09-15 corpus contains entries like ``Eq. (3.7)`` and
+    ``radial derivative``. Wrapping those in ``$...$`` renders them as broken
+    math, so a non-symbol name is written as plain prose. The symbol/word test is
+    the shared P0-3 one (:func:`is_symbol_like_concept_name`) — no new table, no
+    domain vocabulary.
     """
     s = str(symbol or "").strip()
     if not s:
@@ -57,12 +80,74 @@ def _math(symbol: object) -> str:
         return s
     if s.startswith("\\(") and s.endswith("\\)"):
         return s
+    if not is_symbol_like_concept_name(s):
+        return s
     return f"${s}$"
 
 
 def _math_list(symbols: Iterable[str], limit: int = 4) -> str:
     """``", "``-joined inline math for the first ``limit`` non-empty symbols."""
     return ", ".join(m for m in (_math(s) for s in list(symbols)[:limit]) if m)
+
+
+# A printed equation number as a reader sees it: "12", "3.7", "A.2", "S3".
+# Deliberately narrow — anything else (an internal pipeline id such as
+# ``eq_eqcand_inline_blk_4aac98cb_1678_9f0ed0ad``, a raw block id) is not a
+# printed label and must never reach a claim sentence.
+_PRINTED_LABEL_RE = re.compile(r"^[A-Za-z]{0,2}\.?\d+(?:\.\d+)*[a-z]?$")
+_MAX_PRINTED_LABEL_LENGTH = 12
+
+#: Wording used when the equation carries no printed number.
+_UNNUMBERED_EQUATION = "an equation of this paper"
+
+
+def is_printed_equation_label(label: object) -> bool:
+    """True when ``label`` is an equation number the reader can see in the PDF.
+
+    ``EquationRecord.label`` is ``None`` for unnumbered display equations, and
+    the synthesiser used to fall back to ``equation_id`` — which put internal
+    identifiers into ``theory_claims.text`` (and therefore into the learner
+    projection, where they cannot be filtered out any more).
+    """
+    text = str(label or "").strip().strip("()").strip()
+    if not text or len(text) > _MAX_PRINTED_LABEL_LENGTH or "_" in text:
+        return False
+    return bool(_PRINTED_LABEL_RE.match(text))
+
+
+def _equation_reference(record) -> tuple[str, str]:
+    """``(subject, locative)`` phrases naming the equation in prose.
+
+    ``("Equation (12)", "In equation (12)")`` when the equation is numbered,
+    otherwise a neutral phrase with no identifier at all.
+    """
+    label = str(getattr(record, "label", "") or "").strip().strip("()").strip()
+    if is_printed_equation_label(label):
+        return f"Equation ({label})", f"In equation ({label})"
+    return (
+        _UNNUMBERED_EQUATION[0].upper() + _UNNUMBERED_EQUATION[1:],
+        f"In {_UNNUMBERED_EQUATION}",
+    )
+
+
+def _dependency_inputs(target: str, used: Iterable[str]) -> list[str]:
+    """Distinct used symbols other than ``target`` (no "X depends on X").
+
+    The upstream ``used_symbols`` list repeats the defined symbol and its own
+    duplicates, which produced self-referential claim sentences on 14〜59 claims
+    per paper. Comparison is on the trimmed string — no normalisation, so two
+    genuinely different notations stay different.
+    """
+    skip = str(target or "").strip()
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in used:
+        value = str(raw or "").strip()
+        if not value or value == skip or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
 
 
 def _concepts(symbols: Iterable[str]) -> list[ClaimConcept]:
@@ -125,7 +210,7 @@ def synthesize_equation_claims(
         defined = [s.symbol for s in (sem.defined_symbols or [])
                    if getattr(s, "definition_status", "") in ("defined", "redefined") and s.symbol]
         used = [s for s in (sem.used_symbols or []) if s]
-        label = str(getattr(r, "label", "") or eq_id)
+        subject_phrase, locative_phrase = _equation_reference(r)
 
         primary = str(sem.equation_type or "")
         review_reasons: list[str] = []
@@ -140,7 +225,7 @@ def synthesize_equation_claims(
             claim = _make_claim(
                 index, document_id,
                 claim_type=DEFINITION_CLAIM,
-                text=f"Equation ({label}) defines {_math(symbol)}.",
+                text=f"{subject_phrase} defines {_math(symbol)}.",
                 equation_ids=[eq_id],
                 evidence_ids=evidence_ids,
                 concepts=_concepts(defined),
@@ -150,18 +235,24 @@ def synthesize_equation_claims(
             )
         elif primary in ("relation", "result", "constraint", "transformation") and len(used) >= 2:
             target = defined[0] if defined else used[0]
-            inputs = _math_list(used)
-            claim = _make_claim(
-                index, document_id,
-                claim_type=RESULT_CLAIM if primary == "result" else DEPENDENCY_CLAIM,
-                text=f"In equation ({label}), {_math(target)} depends on {inputs}.",
-                equation_ids=[eq_id],
-                evidence_ids=evidence_ids,
-                concepts=_concepts([target] + used),
-                support_status="equation_backed" if source_backed else "review_required",
-                review_reasons=review_reasons,
-                section_id=getattr(r, "section_id", None) or (r.source_extraction.source_location or {}).get("section_id"),
-            )
+            # "X depends on X" is not a proposition: the dependency claim is only
+            # written when at least one *other* symbol is involved. When it is
+            # not, no claim is synthesised — nothing is lost, the equation record
+            # itself keeps the symbols.
+            input_symbols = _dependency_inputs(target, used)
+            inputs = _math_list(input_symbols)
+            if inputs:
+                claim = _make_claim(
+                    index, document_id,
+                    claim_type=RESULT_CLAIM if primary == "result" else DEPENDENCY_CLAIM,
+                    text=f"{locative_phrase}, {_math(target)} depends on {inputs}.",
+                    equation_ids=[eq_id],
+                    evidence_ids=evidence_ids,
+                    concepts=_concepts([target] + input_symbols),
+                    support_status="equation_backed" if source_backed else "review_required",
+                    review_reasons=review_reasons,
+                    section_id=getattr(r, "section_id", None) or (r.source_extraction.source_location or {}).get("section_id"),
+                )
         if claim is not None:
             out.append(claim)
             index += 1
@@ -203,10 +294,28 @@ def synthesize_equation_claims(
             derivation_ids=[getattr(chain, "derivation_id", "")],
             synthesis_method="system_derivation",
         )
+        n_symbols = len({str(x) for x in retained + eliminated if x})
+        if (
+            n_symbols > MAX_SYMBOLS_PER_ATOMIC_SYSTEM_CLAIM
+            or len(text) > MAX_ATOMIC_SYNTH_TEXT_CHARS
+        ):
+            _mark_non_atomic(claim)
         out.append(claim)
         index += 1
 
     return out
+
+
+def _mark_non_atomic(claim: ClaimObjectRecord) -> None:
+    """Keep the claim but stop it from acting as strong backing (IK-0798, #317)."""
+    claim.atomicity = "split_required"
+    claim.is_atomic = False
+    claim.support_status = "review_required"
+    claim.qualification_reason = (
+        "system-level claim bundles many symbols; not a single minimal proposition"
+    )
+    if NON_ATOMIC_SYSTEM_CLAIM_REASON not in claim.review_reasons:
+        claim.review_reasons.append(NON_ATOMIC_SYSTEM_CLAIM_REASON)
 
 
 def _make_claim(

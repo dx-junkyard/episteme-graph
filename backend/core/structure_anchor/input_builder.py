@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 
 from core.structure_anchor.schema import AnchorContext, QuestionRecord
+from core.topic_labels import is_reserved_topic_id
+from core.text_hygiene import scrub_internal_placeholders
 
 # 候補ブロック各行の text/head 切り詰め長
 BLOCK_TEXT_LIMIT = 160
@@ -22,12 +24,17 @@ MAX_QUESTIONS = 10
 
 
 def _trim_block(items: list[dict], limit: int) -> list[dict]:
+    """候補ブロックの本文を切り詰める。内部参照プレースホルダー（``[[FORMULA_0]]`` /
+    ``[[eq_…]]`` 等）は切り詰めの前に「（数式）」「（図）」へ置き換える（IK-0403: 内部 ID を
+    帰属 LLM に読ませない。id 列には触れない）。"""
     out = []
     for b in items:
         b2 = dict(b)
         for key in ("text", "head", "label"):
-            if isinstance(b2.get(key), str) and len(b2[key]) > limit:
-                b2[key] = b2[key][:limit] + "…"
+            if isinstance(b2.get(key), str):
+                b2[key] = scrub_internal_placeholders(b2[key])
+                if len(b2[key]) > limit:
+                    b2[key] = b2[key][:limit] + "…"
         out.append(b2)
     return out
 
@@ -48,11 +55,17 @@ def build_user_content(context: AnchorContext) -> str:
     文字数上限超過時は候補ブロックを先に短縮し、それでも超えるなら古い問いから落とす
     （問いは新しい側を優先して残す）。
     """
+    # 予約疑似トピックは内部 id を出さない（表示名は worker が topic_title に入れる。
+    # 帰属の出力は topic_id を参照しないので行ごと省いてよい — IK-0403）。
+    topic_line = (
+        "" if is_reserved_topic_id(context.topic_id) else f"topic_id: {context.topic_id}\n"
+    )
+
     def render(questions: list[QuestionRecord], block_limit: int) -> str:
         head = (
             "## Session\n"
             f"course_id: {context.course_id}\n"
-            f"topic_id: {context.topic_id}\n"
+            f"{topic_line}"
             f"topic_title: {context.topic_title}\n\n"
             "## Anchor candidates (the ONLY ids you may reference; never invent ids)\n"
             f"stages:           {json.dumps(list(context.stages), ensure_ascii=False)}\n"

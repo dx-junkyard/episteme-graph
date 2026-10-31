@@ -1,0 +1,10 @@
+scenario: s-map-to-sea-to-discuss
+domain: astrophysics
+params:
+  goal_text: いま読んでいる論文の分野での位置と、周りの論文とのつながりを知ること
+  atlas_region_hint: 宇宙論・大規模構造の領域の、暗黒エネルギーと修正重力
+  corpus_question: この論文は、コースで読んでいる修正重力の論文と同じ宇宙論パラメータを別の方法で測っているんですか？
+per_archetype:
+  non_native:
+    goal_text: finding where this paper sits in the field and how it connects to others
+    corpus_question: Does this paper constrain the same cosmological parameters as the course paper with a different method?

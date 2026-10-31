@@ -160,6 +160,9 @@
 
 ### 4-2. 抽出方式 — 埋め込み画像 + 領域レンダリングの2段構え
 
+> **2026-09-24 改訂**: 図領域の推定・埋め込み画像の採否・情報量判定・caption と対応しない
+> 画像の扱いは **§17 が現行仕様**（下の 1〜2 と「caption との対応付け」の段落は初版の記録）。
+
 物理の装置図・設計図は**ベクター描画**が多く、埋め込み画像抽出だけでは取れないため:
 
 1. **埋め込み画像**: PyMuPDF `page.get_images()` + `doc.extract_image(xref)` で
@@ -704,3 +707,177 @@ vision×UX ギャップ調査（`docs/architecture/vision_ux_gap_survey_2026-07-
   エントリが裏で書き換わったり新版が発行されると、provenance と監査の読みが崩れる。
   restore を必ず経由させることで「引退の取り消し」自体が監査に残る（P4 と整合）。
 - 閲覧（GET）・版履歴・provenance 表示は retired でも従来どおり可能（情報は落とさない）。
+
+## 17. 追補 — 図領域推定の改訂（幾何 + インクの連結成分 + 情報量判定, migration なし, 2026-09-24）
+
+§4-2 の初版実装を、実際の学位論文（190 頁・図 97 枚）で照合して見つかった失敗から改訂した。
+正本は `backend/core/document_pipeline/figure_regions.py`（FastAPI / DB / LLM 非 import・PyMuPDF のみ）
+と `figure_images.py::extract_document_figures`。
+
+### 17-1. 実測された失敗と原因
+
+| 症状（図） | 原因 |
+|---|---|
+| 図の上に本文が大きく入る（Figure 1.1） | 図領域の上端を **reading order で直前のブロック**の下端にしていた。order と幾何がずれる PDF ではページ上端へ縮退し本文ごと切り出す |
+| 図の両端が切れる（Figure 1.2） | 図領域の横幅を **caption の横幅**（+ 3%）にしていた。caption より広い図は必ず切れる |
+| 何もない黒い帯が図として出る（Figure 2.1） | caption 直上の埋め込み画像を無条件に図とみなしていた。実物はベクター図で、埋め込み画像は部品として4箇所に置かれた波線の sprite。しかも SMask（透過マスク）を落として黒く塗りつぶしていた |
+| 本文段落が2枚目の図になる | classifier が `Figure 1.2 shows ...` のような本文中の図参照を caption と判定していた（同論文で 21 件） |
+| 同じ図が2回出る | 埋め込まれた別 PDF の図に含まれる caption（見えない位置に切り抜かれた `FIG. 1.`）が本物の caption と重なっていた |
+| 付録の図が caption 無しの画像になる | `Figure E.1` のような付録ラベルを caption と認識していなかった |
+| 小さな文字が潰れる | 領域レンダリングが 72dpi 固定だった |
+
+### 17-2. 図領域の決め方（`locate_figure_region`）
+
+1. **障害物をページの組版から判定する**（`analyze_page`）: 本文（本文サイズで複数行・段幅の 45% 以上、
+   または 1 行でも段幅の半分以上）/ 見出し（全て太字・左余白に揃う）/ 番号付き式 / 他の図表 caption /
+   柱（ヘッダ・フッタ。ページ上下 12% にあり、数字を伏せた文言が 2 頁以上に出るもの + そのすぐ下の罫線）。
+   reading order は使わない。枠線で囲まれた文章は図の中の説明文として障害物にしない。
+2. **caption の上（何も無ければ下）の、障害物に挟まれた帯**を種にする。横方向は 1 段組ならページ幅
+   （図は本文幅より広くてよい）、2 段組で caption が片方の段に収まるならその段。
+3. ページを 0.75 倍（≈54dpi）のグレースケールで描き、障害物の矩形を消したインクの**連結成分**を求める
+   （横 4px / 縦 3px までの隙間は連結）。帯に掛かる成分をすべて集めて外接矩形 + 4pt の余白を図領域とする。
+   **成分は帯の外へはみ出してよい** — 切り抜き境界の向こうに連続する要素があれば取り込む、という検査を
+   連結成分がそのまま実行している。
+4. **連続が障害物に阻まれた場合**: 成分が障害物の縁に接していれば、その障害物を貫いて線が続いていた証拠。
+   障害物が短い文字塊（6 行・320 字以下）で、その反対側の縁にも別の成分が接していれば「図 → 文字塊 → 図」と
+   連続しているので、図の中の文章を本文と誤認したとみなして障害物から外し、やり直す（`demoted_obstacles`）。
+   長い段落は外さない。外せないまま接している辺・ページ端に接する辺は `truncated_edges` として正直に返し、
+   `region_confidence` を 0.3 下げる。
+5. 障害物に接する細い切れ端（表の下罫など、太さ 4px 以下・画素の 10% 以下）は捨てる。
+6. 成分が 1 つも無ければ図領域は求まらない（空白を図として提示しない）。caption に bbox が無い経路だけが
+   初版のロジック（`_find_best_image_match` / `_estimate_region_bbox`）に縮退する。
+
+### 17-3. 埋め込み画像の採否と画質
+
+- 図領域の **90% 以上を 1 つの画像配置が覆うときだけ** `extraction_method='embedded'`。それ以外
+  （ベクター図・部品画像を含む合成図・複数パネル）は `region_render`。
+- どちらも**配置矩形を描き直して** PNG にする（`embedded` は元画像の解像度に合わせて最大 4 倍、
+  `region_render` は 2.5 倍 ≈180dpi、長辺 4096px で頭打ち）。描き直すことで透過マスク・回転・
+  クリップが正しく反映される（xref から画素を直接取り出す旧経路 `_extract_embedded_image_png` は
+  SMask を落として透明部分を黒くしていたため撤去した）。
+- 画像配置の列挙は `page.get_image_info()` の 1 回（`get_image_rects` は xref ごとにページを走査し直し、
+  画像の多い文書で 190 頁 17 秒かかっていた）。ページの描画は display list を作って使い回す。
+
+### 17-4. 情報量の判定（`assess_information`）
+
+> §18 で改訂: 絵の無い caption は行を作らない（下の「`status='failed'` の行として残す」は初版の記録）。
+
+長辺 160px のグレースケールに縮め、**インク比**（背景の階調と異なる画素の割合）と**エッジ密度**
+（隣接画素の段差が 40 を超える割合）を測る。インク比 0.3% 未満は `blank`、エッジ密度 0.4% 未満は
+`flat`（一様な塗りつぶし・帯）で `low_information`。16 階調のエントロピーも記録するが判定には使わない
+（線画は白地が大半でエントロピーが低く、情報の多い図まで落とすため）。
+
+- caption 付きの図が `low_information` なら画像を保存せず `status='failed'` の行として残す（P4）。
+- caption の無い画像（旧 Phase 3）は、**見えている範囲**（`visible_content_bbox`。クリップで一部しか
+  見えない配置の断片を拾わない）で判定し、図領域の中にあるもの（部品）・長辺 36pt 未満・
+  `low_information`・同じ画像の 2 つ目以降の配置は保存しない。件数は artifact の `skipped` に数える。
+
+### 17-5. caption の選別（`_filter_figure_captions` / classifier）
+
+- ラベルの直後に小文字の語が続くもの（`Figure 1.2 shows ...`）は本文。classifier
+  （`document_structure/classifier.py::looks_like_caption_label` が正本）で弾き、抽出側
+  （`figure_regions.looks_like_figure_caption`）も同じ関数を呼ぶ（GROBID 経路や旧 artifact の caption にも効くように）。
+- 付録ラベル（`Figure E.1` / `Fig. S2` / `Table C.1`）を caption として認める。
+- 同じページで bbox が 30% 以上重なる caption は、文書で多数派の表記（`Figure` / `Fig` / `図`）の方を残す。
+
+### 17-6. artifact（`stage_outputs._artifacts.figure_image_extraction`）
+
+従来の `figures / embedded / region_render / failed / figure_ids` に加えて、`truncated`（切れた辺が残る図の数）、
+`low_information`、`skipped`（`non_caption` / `overlapping_caption` / `inside_figure` / `small` /
+`low_information` / `duplicate_image`）、`quality[]`（図ごとの `method` / `region_source` / `side` /
+`truncated_edges` / `demoted_obstacles` / `information`）。DB の列は増やさない（migration なし）。
+
+### 17-7. 既存行との関係
+
+- 旧 run で caption と対応せず `p{page}_i{n}` として保存された行は、新しい図領域の中に bbox が収まれば
+  caption 付きの新しい key へ引き継ぐ（UUID と教員レビュー列を保持。完全一致を優先）。
+- 引き継がれなかった旧 run の行は消さない。§18 以降は抽出が最後まで通ったときに `status='superseded'` になり一覧から外れる。反映には教材の再解析が要る。
+
+### 17-8. 実測（fujimoto_d.pdf, 190 頁）
+
+caption 97 件すべてが図全体を覆い、本文の巻き込み・端の切断・空白画像はゼロ（目視確認）。
+所要は約 36 秒で、大半は巨大な埋め込み画像（最大 6000×4800px）の復号。
+
+### 17-9. テスト
+
+`backend/tests/core/test_figure_regions.py`（合成 PDF で 3 つの実測失敗・2 段組・柱・図中文章の
+障害物解除・切断の報告・情報量判定を固定）/ `test_figure_images.py::TestExtractDocumentFiguresEndToEnd` /
+`TestFilterFigureCaptions` / `src/tests/agents/document_structure/test_classifier.py`（付録ラベル・本文中の参照）。
+
+### 17-10. 非スコープ
+
+- `quality` の DB 保存と教員 UI での表示（切れている可能性のある図の目印）— 必要になれば列を足す
+- 表（table）の画像化 / caption の無いベクター図の検出
+- ページをまたぐ図（左右見開き・次頁へ続く図）
+
+## 18. 追補 — 絵の無い図を一覧に出さない・caption の位置を PDF の文字層に結び付ける（migration 087, 2026-09-25）
+
+§17 の実装を実環境（GROBID 経路の文書構造）で走らせた結果、fujimoto_d.pdf の「図・画像」一覧に
+絵の無い行（`Figure 5` / `p1_i0` / `p1_i2` / `p1_i3` / `p1_i4`、いずれも p.1）と、前回までの抽出の
+残り（caption の無い部品画像の断片 30 行）が並んだ。オーナー指示は「絵が無いのであれば一覧で表示する
+必要はない」。
+
+### 18-1. 原因
+
+| 症状 | 原因 |
+|---|---|
+| 絵の無い行が p.1 に並ぶ | GROBID の figure 要素のうち PDF の行と突合できなかったもの（中身は数式や崩れた本文）が `figure_caption` として **bbox なし・頁は既定値 1** で渡り、図の領域を決められないまま `status='failed'` の行として保存された |
+| `Figure 5` という key | 崩れた本文「Figure 5 . 4 ) 4 shows ...」から、ラベルを英数字とピリオドの貪欲一致で取っていた |
+| 前回の残りが一覧に出続ける | 抽出は upsert だけで、今回作られなかった行を区別する状態が無かった |
+| 本物の図が caption なしの画像になる（Figure 5.22 / 6.10） | GROBID 経路の caption が**別の頁**（p.169）の行に突合されていた |
+| 本文段落・数式が図として切り出される | GROBID 経路で本文段落が caption と判定されていた（ラベルで始まらない） |
+| 付録の図が抽出されない（A.1 / C.1 など） | GROBID 経路の文書構造にその caption が無い |
+| arXiv 論文で key が `fig_1_theflowchart...` になる | 文字層に空白が無い（語を位置だけで並べた PDF）ため、ラベルの貪欲一致が本文まで取った |
+| 2 段組で図の上部が切れる | 頁の上端にある図のタイトル・凡例が 2 頁で一致しただけで柱と判定された / 軸の目盛りの数字をページ番号と判定した |
+| 図の上に前の図の caption の尾や短い本文行が入る | caption が文字層で複数の塊に分かれていた / 「where ...」のような短い本文行が本文と判定されなかった |
+
+### 18-2. 決めたこと
+
+1. **絵の無いものは行を作らない**。位置の取れない caption・結び付かない caption・情報量の乏しい画像は
+   保存せず、artifact の `skipped`（件数）と `not_saved`（理由・caption の抜粋）に残す。
+   `status='failed'` は MinIO への保存失敗だけ。
+2. **抽出が最後まで通ったら、今回作られなかった前回までの行を `status='superseded'` にする**
+   （migration 087。行・教員のレビュー列・画像は消さない。同じ key が再び作られれば upsert が
+   `extracted` に戻す）。
+3. **一覧に出すのは `status='extracted'` だけ**（`figure_images.is_listed_figure`）。適用先: 図・画像
+   一覧（`GET /api/admin/documents/{id}/figures` の 2 経路）・検出要素一覧（`deliberation/inventory.py`）・
+   G層「未レビューの図分類」（`next_steps`）・二層説明の図の入力（`contextual_explanation_inputs`）。
+   画像配信と参照解決は id で従来どおり引ける。
+4. **caption の位置の正本は PDF の文字層**（`figure_regions.anchor_caption`）。文書全体の文字層から
+   「図ラベルで始まる塊」を索引し（`collect_document_stats` の `caption_anchors`）、
+   - ラベルが取れる caption は同じラベルの塊へ（複数なら申告頁に近いもの）、
+   - ラベルが取れない caption は申告位置に重なる塊がラベルで始まるときだけ、
+   結び付けて頁・位置・key をそこから取る。結び付かないものは画像を作らない。同じ塊に複数が
+   結び付いたら文字列がいちばん近いものを残し、重なりの判定（多数派の表記を残す）は結び付けた後に掛ける。
+5. **文書構造に無い caption は文字層から足す**（`caption_block_id` なし・`quality[].caption_source =
+   "text_layer"`）。ラベルの直後が「:」「.」の厳しめの形だけを、ラベルごとに 1 つ。
+6. **ラベルの切り出しは `caption_label_raw`**。空白の崩れ（「5 . 4」）を吸収し、枝番は小文字 1 文字
+   （「2a」）だけ・直後に小文字が続けば語の頭として取らない（「5.19shows」）。classifier の本文判定も
+   「ラベル直後に小文字が 2 文字以上」を本文とする（空白の無い文字層）。
+7. **柱の判定を厳しくする**: 繰り返しは 3 頁以上かつ全体の 1/4 以上、数字だけの行は繰り返しに数えない、
+   ページ番号はその頁のいちばん上/下の文字のときだけ、柱の罫線は直上（下端なら直下）に文字があるもの。
+8. **caption の続きの塊**（すぐ下・同じ左端・同じ字の大きさ）を caption の障害物に含める。**短い本文行**
+   （本文の書体・本文サイズで段の左端から始まる行）を障害物にする。見出しの左端判定は各段の左端を使う。
+9. 構造化の caption に位置があり、ページの解析もできて図の中身が見つからなかったときは、初版の推定
+   （`_estimate_region_bbox`）に**縮退しない**（本文ごと切り出すため）。初版の推定はページ解析が失敗した
+   ときだけ使う。
+
+### 18-3. 実測（2026-09-25）
+
+- fujimoto_d.pdf: PyMuPDF 経路・GROBID 経路（実環境に保存されていた文書構造）とも caption 付きの図 97 枚で、
+  **2 経路の画像がバイト単位で一致**。絵の無い行・caption なしの画像はゼロ。
+- 実環境にある arXiv 論文 6 本（多くが 2 段組・文書構造に caption が 1 件も無いものを含む）: caption 付きの図
+  62 枚をすべて目視し、上部の切断・本文や前の caption の混入はゼロ（旧実装はこれらの論文で caption なしの
+  画像しか保存していなかった）。
+
+### 18-4. 反映
+
+既存の教材は再解析（「パイプラインを実行 ▼」→「文書構造を読む」の「文書構造の復元」）で反映される。
+一覧から絵の無い行（`failed`）が消えるのは api-server の再ビルド直後、前回までの残り（`superseded`）が
+消えるのは再解析後。
+
+### 18-5. テスト
+
+`test_figure_regions.py::TestCaptionAnchoring` / `TestHeaderAndBodyDetection`、
+`test_figure_images.py`（位置の無い caption・絵の無い caption・superseded・文字層の caption・頁違いの
+caption・一覧のフィルタ・migration 087）、`test_classifier.py`（空白の無い本文参照）。

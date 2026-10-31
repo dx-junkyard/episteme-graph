@@ -56,6 +56,10 @@ resolution:
     - backend/tests/test_prerequisite_resolution.py
     - docs/backend/rag-chat.md §①
     - docs/architecture/vision_ux_gap_six_lenses_2026-09-10.md §4 第1波 4
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E
 related: [IK-0001, IK-0003]
 view_of: []
 history:

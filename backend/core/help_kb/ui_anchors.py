@@ -42,6 +42,7 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "composer.send",
         "composer.voice",
         "topbar.inspect",
+        "topbar.profile-name",
         "topbar.atlas",
         "topbar.my-map",
         "rightpanel.tab-context",
@@ -87,6 +88,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # 記号の「直前の定義」（docs/features/concept_registry_design.md §7 / P3-5）:
         # 教材の数式の中の記号をタップしたときに出るポップオーバー。
         "material.symbol-lookup",
+        # 動かして確かめる（docs/features/simulation_bridge_design.md §14.4 / v1.1）:
+        # 教材区画の「🧪 動かして確かめる」ボタンと、開いたパネル（本人の試行のみ）。
+        "material.simulation-lab",
     }
 )
 
@@ -145,6 +149,8 @@ UI_ANCHORS: dict[str, str] = {
     "topbar.my-map": "student/02-student.md#personal-map",
     # 「❓ 使い方」ボタン＝インスペクト・モードの ON/OFF。
     "topbar.inspect": "student/02-student.md#inspect-mode",
+    # 「👤 名前」ボタン＝人に見せる名前の登録（IK-1007）。
+    "topbar.profile-name": "student/02-student.md#profile-name",
     # 右パネル Context タブ＝前提知識・誤解メモ・寄り道からの復帰導線の節。
     "rightpanel.tab-context": "student/02-student.md#context-tab",
     # 右パネル Progress タブ＝学習の現在地・問いの軌跡・学習サマリの節
@@ -186,6 +192,8 @@ UI_ANCHORS: dict[str, str] = {
     "chat.stance-chip": "student/02-student.md#stance-chip",
     # 数式の中の記号をタップして「直前の定義」を見る（概念レジストリ P3-5）。
     "material.symbol-lookup": "student/02-student.md#symbol-lookup",
+    # 理論モジュールをコードにして予想を書いてから動かす（検証シミュレーション v1.1）。
+    "material.simulation-lab": "student/02-student.md#simulation-lab",
 }
 
 

@@ -1,0 +1,166 @@
+# 宇宙物理の概念語彙。ペルソナの knowledge.{knows,vague,unknown} はここの label だけを使う。
+# concepts は凍結骨格 backend/atlas_domains/astrophysics/skeleton.yaml の概念と id・label を完全に一致させる
+# （地図との対応を名前で保つ — §11.1）。sub_concepts は骨格より細かい語で、parent は concepts の id。
+# 行動型（uxsim/archetypes/）には、ここの label を一つも書かない。
+regions:
+  - {id: cosmology, label: 宇宙論・大規模構造}
+  - {id: galaxies, label: 銀河・銀河団}
+  - {id: ism_star_formation, label: 星間物質・星形成}
+  - {id: high_energy, label: 高エネルギー天体・コンパクト天体}
+  - {id: stars, label: 恒星・恒星進化}
+  - {id: fundamental_physics, label: 基礎物理・重力・素粒子宇宙}
+  - {id: sun_heliosphere, label: 太陽・太陽圏}
+  - {id: planetary, label: 惑星系・系外惑星}
+  - {id: fundamental_astronomy, label: 基礎天文学・天体力学}
+  - {id: observation_methods, label: 観測・装置・データ解析}
+
+concepts:
+  # cosmology
+  - {id: early_universe_inflation, label: 初期宇宙・インフレーション, region: cosmology}
+  - {id: cmb, label: 宇宙背景放射, region: cosmology}
+  - {id: cosmic_expansion, label: 宇宙膨張, region: cosmology}
+  - {id: dark_matter, label: 暗黒物質, region: cosmology}
+  - {id: dark_energy, label: 暗黒エネルギー, region: cosmology}
+  - {id: large_scale_structure, label: 大規模構造形成, region: cosmology}
+  # galaxies
+  - {id: galaxy_formation_evolution, label: 銀河形成・進化, region: galaxies}
+  - {id: agn, label: 活動銀河核, region: galaxies}
+  - {id: supermassive_black_holes, label: 超大質量ブラックホール, region: galaxies}
+  - {id: galaxy_clusters, label: 銀河団, region: galaxies}
+  - {id: gravitational_lensing, label: 重力レンズ, region: galaxies}
+  # ism_star_formation
+  - {id: molecular_clouds, label: 分子雲, region: ism_star_formation}
+  - {id: interstellar_dust, label: ダスト, region: ism_star_formation}
+  - {id: star_formation, label: 星形成, region: ism_star_formation}
+  - {id: stellar_feedback, label: フィードバック, region: ism_star_formation}
+  # high_energy
+  - {id: black_holes, label: ブラックホール, region: high_energy}
+  - {id: neutron_stars, label: 中性子星, region: high_energy}
+  - {id: supernovae, label: 超新星, region: high_energy}
+  - {id: gamma_ray_bursts, label: ガンマ線バースト, region: high_energy}
+  - {id: cosmic_rays, label: 宇宙線, region: high_energy}
+  - {id: accretion_and_jets, label: 降着・ジェット, region: high_energy}
+  # stars
+  - {id: stellar_interiors, label: 恒星内部構造, region: stars}
+  - {id: stellar_atmospheres, label: 恒星大気, region: stars}
+  - {id: binary_stars, label: 連星, region: stars}
+  - {id: variable_stars, label: 変光星, region: stars}
+  - {id: nucleosynthesis, label: 元素合成, region: stars}
+  - {id: late_stellar_evolution, label: 晩期進化, region: stars}
+  # fundamental_physics
+  - {id: general_relativity, label: 一般相対論, region: fundamental_physics}
+  - {id: gravitational_waves, label: 重力波, region: fundamental_physics}
+  - {id: particles_and_fields, label: 素粒子・場, region: fundamental_physics}
+  - {id: dark_sector_physics, label: 暗黒成分の物理, region: fundamental_physics}
+  - {id: early_universe_physics, label: 初期宇宙の物理, region: fundamental_physics}
+  # sun_heliosphere
+  - {id: solar_magnetism_atmosphere, label: 太陽磁場・太陽大気, region: sun_heliosphere}
+  - {id: solar_wind, label: 太陽風, region: sun_heliosphere}
+  - {id: space_weather, label: 宇宙天気, region: sun_heliosphere}
+  # planetary
+  - {id: planet_formation, label: 惑星形成, region: planetary}
+  - {id: exoplanets, label: 系外惑星, region: planetary}
+  - {id: protoplanetary_disks, label: 原始惑星系円盤, region: planetary}
+  - {id: planetary_atmospheres, label: 惑星大気, region: planetary}
+  - {id: habitability, label: 生命可能性, region: planetary}
+  # fundamental_astronomy
+  - {id: astrometry, label: 位置天文学, region: fundamental_astronomy}
+  - {id: orbital_dynamics, label: 軌道力学, region: fundamental_astronomy}
+  - {id: distance_scale, label: 距離尺度, region: fundamental_astronomy}
+  # observation_methods
+  - {id: multiwavelength_observation, label: 多波長観測, region: observation_methods}
+  - {id: time_domain_astronomy, label: 時間領域天文学, region: observation_methods}
+  - {id: spectroscopy_photometry, label: 分光・測光, region: observation_methods}
+  - {id: statistical_inference, label: 統計推論, region: observation_methods}
+  - {id: numerical_simulation, label: シミュレーション, region: observation_methods}
+  - {id: instruments_and_detectors, label: 装置・検出器, region: observation_methods}
+
+sub_concepts:
+  # cosmology
+  - {id: redshift, label: 赤方偏移, parent: cosmic_expansion}
+  - {id: hubble_constant, label: ハッブル定数, parent: cosmic_expansion}
+  - {id: cosmological_constant, label: 宇宙定数, parent: dark_energy}
+  - {id: dark_energy_eos, label: 暗黒エネルギーの状態方程式, parent: dark_energy}
+  - {id: rotation_curve, label: 回転曲線, parent: dark_matter}
+  - {id: cmb_anisotropy, label: 宇宙背景放射の温度ゆらぎ, parent: cmb}
+  - {id: cosmic_variance, label: 宇宙分散, parent: cmb}
+  - {id: bao, label: バリオン音響振動, parent: large_scale_structure}
+  - {id: linear_growth_rate, label: 線形成長率, parent: large_scale_structure}
+  - {id: perturbation_theory, label: 摂動論, parent: large_scale_structure}
+  - {id: power_spectrum, label: パワースペクトル, parent: large_scale_structure}
+  - {id: slow_roll, label: スローロール条件, parent: early_universe_inflation}
+  # galaxies
+  - {id: luminosity_function, label: 光度関数, parent: galaxy_formation_evolution}
+  - {id: star_formation_history, label: 星形成史, parent: galaxy_formation_evolution}
+  - {id: agn_feedback, label: AGN フィードバック, parent: agn}
+  - {id: m_sigma, label: M-σ 関係, parent: supermassive_black_holes}
+  - {id: cluster_xray_gas, label: 銀河団ガスのX線放射, parent: galaxy_clusters}
+  - {id: sz_effect, label: スニヤエフ・ゼルドビッチ効果, parent: galaxy_clusters}
+  - {id: weak_lensing, label: 弱重力レンズ, parent: gravitational_lensing}
+  # ism_star_formation
+  - {id: co_line, label: CO 輝線, parent: molecular_clouds}
+  - {id: dust_extinction, label: ダスト減光, parent: interstellar_dust}
+  - {id: jeans_instability, label: ジーンズ不安定性, parent: star_formation}
+  - {id: imf, label: 初期質量関数, parent: star_formation}
+  # high_energy
+  - {id: schwarzschild_radius, label: シュワルツシルト半径, parent: black_holes}
+  - {id: event_horizon, label: 事象の地平面, parent: black_holes}
+  - {id: eos_dense_matter, label: 状態方程式, parent: neutron_stars}
+  - {id: pulsar_timing, label: パルサータイミング, parent: neutron_stars}
+  - {id: kilonova, label: キロノバ, parent: neutron_stars}
+  - {id: type_ia_supernova, label: Ia型超新星, parent: supernovae}
+  - {id: core_collapse, label: 重力崩壊, parent: supernovae}
+  - {id: standard_candle, label: 標準光源, parent: supernovae}
+  - {id: grb_afterglow, label: 残光, parent: gamma_ray_bursts}
+  - {id: synchrotron, label: シンクロトロン放射, parent: gamma_ray_bursts}
+  - {id: shock_acceleration, label: 衝撃波加速, parent: cosmic_rays}
+  - {id: accretion_disk, label: 降着円盤, parent: accretion_and_jets}
+  - {id: eddington_luminosity, label: エディントン光度, parent: accretion_and_jets}
+  # stars
+  - {id: main_sequence, label: 主系列, parent: stellar_interiors}
+  - {id: hr_diagram, label: HR図, parent: stellar_interiors}
+  - {id: asteroseismology, label: 星震学, parent: stellar_interiors}
+  - {id: radiative_transfer, label: 輻射輸送, parent: stellar_atmospheres}
+  - {id: eclipsing_binary, label: 食連星, parent: binary_stars}
+  - {id: cepheid, label: ケフェイド, parent: variable_stars}
+  - {id: r_process, label: r過程, parent: nucleosynthesis}
+  - {id: white_dwarf, label: 白色矮星, parent: late_stellar_evolution}
+  # fundamental_physics
+  - {id: metric, label: 計量, parent: general_relativity}
+  - {id: geodesic, label: 測地線, parent: general_relativity}
+  - {id: equivalence_principle, label: 等価原理, parent: general_relativity}
+  - {id: chirp_mass, label: チャープ質量, parent: gravitational_waves}
+  - {id: standard_model, label: 標準模型, parent: particles_and_fields}
+  - {id: effective_field_theory, label: 有効場の理論, parent: particles_and_fields}
+  - {id: neutrino_mass, label: ニュートリノ質量, parent: particles_and_fields}
+  - {id: wimp, label: WIMP, parent: dark_sector_physics}
+  - {id: modified_gravity, label: 修正重力理論, parent: dark_sector_physics}
+  - {id: hi_21cm, label: 21cm 線, parent: early_universe_physics}
+  - {id: reionization, label: 宇宙再電離, parent: early_universe_physics}
+  # sun_heliosphere
+  - {id: coronal_heating, label: コロナ加熱, parent: solar_magnetism_atmosphere}
+  - {id: magnetic_reconnection, label: 磁気リコネクション, parent: solar_magnetism_atmosphere}
+  - {id: imf_heliospheric, label: 惑星間空間磁場, parent: solar_wind}
+  - {id: cme, label: コロナ質量放出, parent: space_weather}
+  # planetary
+  - {id: transit_spectroscopy, label: トランジット分光, parent: planetary_atmospheres}
+  - {id: radial_velocity, label: 視線速度法, parent: exoplanets}
+  - {id: dust_growth, label: ダスト成長, parent: protoplanetary_disks}
+  - {id: habitable_zone, label: ハビタブルゾーン, parent: habitability}
+  # fundamental_astronomy
+  - {id: annual_parallax, label: 年周視差, parent: astrometry}
+  - {id: keplerian_motion, label: ケプラー運動, parent: orbital_dynamics}
+  - {id: luminosity_distance, label: 光度距離, parent: distance_scale}
+  # observation_methods
+  - {id: sed, label: スペクトルエネルギー分布, parent: multiwavelength_observation}
+  - {id: frb, label: 高速電波バースト, parent: time_domain_astronomy}
+  - {id: dispersion_measure, label: 分散量度, parent: time_domain_astronomy}
+  - {id: blackbody, label: 黒体放射, parent: spectroscopy_photometry}
+  - {id: doppler_effect, label: ドップラー効果, parent: spectroscopy_photometry}
+  - {id: mcmc, label: MCMC, parent: statistical_inference}
+  - {id: bayesian_inference, label: ベイズ推定, parent: statistical_inference}
+  - {id: systematic_error, label: 系統誤差, parent: statistical_inference}
+  - {id: nbody, label: N体シミュレーション, parent: numerical_simulation}
+  - {id: hydro_sim, label: 流体計算, parent: numerical_simulation}
+  - {id: radio_interferometer, label: 電波干渉計, parent: instruments_and_detectors}
+  - {id: detector_calibration, label: 検出器の較正, parent: instruments_and_detectors}

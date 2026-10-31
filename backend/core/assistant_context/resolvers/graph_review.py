@@ -19,6 +19,9 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from core.element_vocab import theory_stage_display_label
+from core.text_excerpt import excerpt as _excerpt
+
 from ..registry import register
 from ..schema import (
     EQUATION_ROLE_LABELS,
@@ -58,9 +61,10 @@ def _list(value: Any) -> list:
 
 
 def _text(value: Any, limit: int | None = None) -> str:
+    """``limit`` を超えるときは語境界・文境界で切る（IK-0393。正本は ``core.text_excerpt``）。"""
     text = str(value or "").strip()
     if limit is not None and len(text) > limit:
-        return text[:limit]
+        return _excerpt(text, limit)
     return text
 
 
@@ -110,8 +114,16 @@ def _join(items: list[str], *, truncated: bool = False) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _node_head_fact(node: Mapping[str, Any]) -> str:
+def _node_display_label(node: Mapping[str, Any]) -> str:
+    """ノードの表示名。main の英語の stage 名（#308）は日本語の段名にする（IK-0546）。"""
     label = _text(node.get("label"), MAX_TEXT_CHARS)
+    if (_text(node.get("graph_layer")) or "main") != "main":
+        return label
+    return theory_stage_display_label(label)
+
+
+def _node_head_fact(node: Mapping[str, Any]) -> str:
+    label = _node_display_label(node)
     layer = GRAPH_LAYER_LABELS.get(_text(node.get("graph_layer")), "")
     if not label:
         return ""
@@ -310,6 +322,9 @@ def _coverage_fact(dto: Mapping[str, Any], key: str, label_key: str, prefix: str
     return f"{prefix}: " + _join(labels[:MAX_COVERAGE_ITEMS], truncated=truncated)
 
 
+FACT_MAIN_NODE_NO_LOCATION = "章・番号付きの式との対応は解析結果にありません"
+
+
 def resolve_document_graph(ctx: ScreenContext, sources: Mapping[str, Any]) -> list[str]:
     """論文順の背骨（章 → ノード）と被覆を事実文にする（§4.3 kind ``document_graph``）。"""
     dto = _paper_layer(sources)
@@ -327,7 +342,7 @@ def resolve_document_graph(ctx: ScreenContext, sources: Mapping[str, Any]) -> li
         return facts
 
     labels = {
-        node_id: _text(_dict(node).get("label"), _MAX_LABEL_CHARS)
+        node_id: _text(_node_display_label(_dict(node)), _MAX_LABEL_CHARS)
         for node_id, node in _dict(dto.get("nodes")).items()
     }
     for section in _list(_dict(dto.get("paper")).get("sections"))[:MAX_SECTION_LINES]:
@@ -344,6 +359,40 @@ def resolve_document_graph(ctx: ScreenContext, sources: Mapping[str, Any]) -> li
             facts.append(f"章「{title}」 → ノード: " + _join(node_labels))
         else:
             facts.append(f"章「{title}」 → {FACT_SECTION_UNBOUND}")
+
+    # 主グラフのノードごとの所在（章・印字番号のある式）。教員が「どの章・どの式か」と
+    # 尋ねたときに答えられる材料（第 14 周 brain-te03 seq11 / product-1 seq89・91）。
+    from core.graph_paper_layer.builder import is_heading_like_title
+
+    main_lines = 0
+    for node_id, node in _dict(dto.get("nodes")).items():
+        row = _dict(node)
+        if _text(row.get("graph_layer")) not in ("", "main") or main_lines >= MAX_SECTION_LINES:
+            continue
+        label = labels.get(_text(node_id), "")
+        if not label:
+            continue
+        chapters: list[str] = []
+        for section in _list(row.get("sections")):
+            title = _text(_dict(section).get("title"), _MAX_LABEL_CHARS)
+            if title and is_heading_like_title(title) and title not in chapters:
+                chapters.append(title)
+        printed: list[str] = []
+        for equation in _list(row.get("equations")):
+            eq_label = _text(_dict(equation).get("display_label"), _MAX_LABEL_CHARS)
+            if eq_label.startswith("式 (") and eq_label not in printed:
+                printed.append(eq_label)
+        parts: list[str] = []
+        if chapters:
+            truncated = len(chapters) > MAX_COVERAGE_ITEMS
+            parts.append("章 " + _join([f"「{c}」" for c in chapters[:MAX_COVERAGE_ITEMS]], truncated=truncated))
+        if printed:
+            truncated = len(printed) > MAX_EQUATION_ITEMS
+            parts.append(_join(printed[:MAX_EQUATION_ITEMS], truncated=truncated))
+        if not parts:
+            parts.append(FACT_MAIN_NODE_NO_LOCATION)
+        facts.append(f"ノード「{label}」の論文での所在: " + "、".join(parts))
+        main_lines += 1
 
     for key, label_key, prefix in (
         ("unbound_sections", "title", "フレームに掛かっていない章"),

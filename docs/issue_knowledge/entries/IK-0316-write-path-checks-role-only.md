@@ -52,6 +52,15 @@ resolution:
   landed_in:
     - backend/api/routes/lecture_studio/_shared.py
     - docs/features/assistant_common_infra_design.md
+  principles:
+    - principle: enforce-condition-in-query-with-required-argument
+      use: extracted
+      note: >-
+        採った部品は ②の派生形（書き込み経路が通す共通関数 1 本）③。固有の差分: 役割ゲートだけで通していた書き込み経路で、同型の欠如を数えて同時に是正した。
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E（ローカルの pytest のみ）
 related: [IK-0314]
 view_of: []
 history:

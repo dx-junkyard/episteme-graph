@@ -1,0 +1,24 @@
+id: c-astro-r25-share-r11
+domain: astrophysics
+snapshot: corpus-astro-tex-r25j
+course_id: 1bad7d9f
+personas:
+  teachers: [te-03-meticulous-seminar, te-02-veteran-intro]
+  students: [st-04-intl-exoplanet, st-05-night-solarwind]
+scenarios:
+  teacher: [t-share-labels-atlas, t-share-explain-endorse-cite]
+  student: [s-share-symbol-concept, s-share-part-chip]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 10, persona_llm_calls: 300, wall_clock_minutes: 240}
+notes: |
+  第 25 周 share の第 11 周（judge_share_r10.md §6・r11_prereqs.md・harness_fixes_r10_summary.md）。第 10 波の是正後（IK-1126 / 1123 / 1124 / 1125 / 1062 小）と
+  材料の是正（H59 entry_hint を id 67727cb0 に・H60 (d) の既定 topic_id t1 と 3 問・H62 N_TOV・H65 到達点による依存）。固定コースは 1bad7d9f（前周と同じ）。
+  教員 2 × 学生 2・4 場面（依存の順・到達点で判定）:
+  te-03 × (c) t-share-labels-atlas（67727cb0 で記号を［候補に戻す］→ 定義の文を読んで確認 / 見送り → 凍結 — 判断は頭脳。地図の対応は［対応を付ける］まで）→
+  st-04 × (e) s-share-symbol-concept（(c) の到達点 `bound_link_decide=confirm` と `entry_freeze` に依存。L_TOV の概念名 IK-0983・5 周目 / N_TOV の式の名前 IK-0681）/
+  te-02 × (b2) t-share-explain-endorse-cite（自分の説明を書く → 共有 ON → 0d70b5d0 へ引用 — IK-1126 の是正後に ⚓ の無いコースへの引用の文が言い分けられるか）/
+  st-05 × (d) s-share-part-chip（t1 の ⚓ → 部品の文脈 → 共通部品 → 別の論文 IK-0920 → 選択質問 IK-1041 → ⚓ を開いたまま「誰が書いたか」IK-1064。doubt の st-05 の後）。
+  (a) は IK-1076 / 1062 GONE・確定してよい組が砂場に無いので今周は休ませる（審判の指定）。
+  組の例外（P-0025）: 4 組とも第 10 周と同じ組（材料の是正後の前後比較・審判の指定）。

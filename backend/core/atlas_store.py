@@ -192,6 +192,22 @@ def _bundled_domain_keys() -> list[str]:
 def _bundled_domain_meta(domain_key: str) -> dict | None:
     """`atlas_domains/<key>/domain.json` (任意)。無い・壊れていれば None。"""
     path = ATLAS_BUNDLED_DOMAINS_DIR / domain_key / _BUNDLED_DOMAIN_META_FILENAME
+    if not path.is_file():
+        # TRIAGE14: カートリッジ同梱の骨格も `cartridges/<id>/atlas/domain.json` で表示名を
+        # 宣言できる（無ければ従来どおり None = 「名前が登録されていない分野」）。
+        try:
+            from core import cartridges as cartridges_module
+
+            candidate = (
+                cartridges_module._cartridges_root()
+                / domain_key
+                / "atlas"
+                / _BUNDLED_DOMAIN_META_FILENAME
+            )
+            if candidate.is_file():
+                path = candidate
+        except Exception:  # noqa: BLE001
+            pass
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:

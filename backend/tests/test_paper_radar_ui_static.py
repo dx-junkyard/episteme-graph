@@ -414,7 +414,7 @@ class TestCompareAnalysis:
     def test_compare_falls_back_to_common_ground_without_overlaps(self):
         """overlaps を返さない旧レスポンスでも共通点を落とさない（後方互換）。"""
         body = _extract_function(self.src, "compareBlockHtml")
-        assert "} else if (item.common_ground) {" in body
+        assert "} else if (item.common_ground && !isNone) {" in body
         assert "COMPARE_COMMON_HEAD" in body
 
     def test_compare_empty_notice_needs_both_sections_empty(self):
@@ -735,10 +735,12 @@ class TestCandidateStates:
     def setup_method(self):
         self.src = _read(RADAR_JS)
 
-    def test_ingested_is_labelled_and_not_selectable(self):
+    def test_ingested_is_labelled_and_selectable_only_for_compare(self):
+        """取り込み済みは取り込みの対象にしない。比較の対象にだけ選べる（§24 C・IK-0759）。"""
         body = _extract_function(self.src, "candidateCardHtml")
         assert "INGESTED_BADGE_LABEL" in body
         assert 'status === "new"' in body
+        assert "pr-select-compare-only" in body
 
     def test_ingested_badge_sits_on_the_title_row(self):
         """取り込み済みは一覧を流し読みしても分かる位置（タイトル行）に出す。
@@ -905,7 +907,7 @@ class TestArxivProvenanceRegistration:
 class TestCacheBuster:
     def test_admin_html_bumps_the_radar_cache_buster(self):
         src = _read(ADMIN_HTML)
-        assert "js/admin-paper-radar.js?v=paper-radar-20260916-1" in src
+        assert "js/admin-paper-radar.js?v=paper-radar-20261022-wave24" in src
 
 
 # ---------------------------------------------------------------------------
@@ -1098,3 +1100,385 @@ class TestArxivBlockedBanner:
     def test_no_countdown_or_auto_retry(self):
         for banned in ("setTimeout", "setInterval", "retryAfter", "retry_after"):
             assert banned not in self.code, f"自動再試行・カウントダウンの痕跡: {banned}"
+
+
+class TestRadarIngestDomain:
+    """レーダーの取り込み「解析の分野」（2026-10-16・paper_radar_design.md §16）。"""
+
+    def test_row_and_anchor(self):
+        src = _read(RADAR_JS)
+        assert 'id="pr-ingest-domain-row" data-ui-anchor="materials.radar-ingest-domain"' in src
+
+    def test_default_is_seed_material_domain(self):
+        src = _read(RADAR_JS)
+        assert "state.seedCartridgeId = (options && options.cartridgeId)" in src
+        assert "loadIngestDomainOptions(state.seedCartridgeId);" in src
+
+    def test_domain_key_stays_audit_only(self):
+        src = _read(RADAR_JS)
+        assert "payload.cartridge_id = selectedIngestDomain();" in src
+        assert "payload.domain_key = seedDomainKey();" in src
+
+
+# ---------------------------------------------------------------------------
+# キーフレーズの供給（設計書 §16 — 承認前の教材でも出所と縮退を正直に言う）
+# ---------------------------------------------------------------------------
+
+DISCOVERY_JS = FRONTEND_DIR / "js" / "admin-paper-discovery.js"
+
+
+def _js_source_labels(src: str) -> dict:
+    block = src.split("var SOURCE_LABELS = {", 1)[1].split("};", 1)[0]
+    return dict(re.findall(r'(\w+):\s*"([^"]*)"', block))
+
+
+class TestKeyphraseSupply:
+    def setup_method(self):
+        self.src = _read(RADAR_JS)
+
+    def test_source_labels_mirror_label_vocab(self):
+        """両モジュールの SOURCE_LABELS は label_vocab の逐語ミラー。"""
+        import sys
+
+        backend = str(ROOT / "backend")
+        if backend not in sys.path:
+            sys.path.insert(0, backend)
+        from core.label_vocab import KEYPHRASE_SOURCE_LABELS
+        from core.paper_discovery.schema import KEYPHRASE_SOURCES
+
+        assert set(KEYPHRASE_SOURCE_LABELS) == set(KEYPHRASE_SOURCES)
+        for path in (RADAR_JS, DISCOVERY_JS):
+            assert _js_source_labels(_read(path)) == dict(KEYPHRASE_SOURCE_LABELS), path.name
+
+    def test_supply_note_container_and_render(self):
+        assert 'id="pr-keyphrase-supply-note"' in self.src
+        body = _extract_function(self.src, "renderKeyphraseSupplyNote")
+        assert "state.keyphraseSupplyNote" in body
+        # 文言はサーバの素通し（クライアントで作らない）。
+        assert "textContent" in body
+        assert "innerHTML" not in body
+
+    def test_seed_supply_note_is_read_from_the_server(self):
+        body = _extract_function(self.src, "applySeed")
+        assert "keyphrase_supply" in body
+
+    def test_chips_render_the_supply_note(self):
+        body = _extract_function(self.src, "renderKeyphraseChips")
+        assert "renderKeyphraseSupplyNote()" in body
+
+    def test_search_without_keyphrases_note_is_shown(self):
+        assert "keyphrase_note" in _extract_function(self.src, "runSearch")
+        assert "state.keyphraseNote" in _extract_function(self.src, "renderQueryNote")
+
+    def test_no_new_anchor_for_fact_lines(self):
+        """事実表示なので data-ui-anchor を付けない（admin-indicators.js と同じ規律）。"""
+        idx = self.src.index('id="pr-keyphrase-supply-note"')
+        line = self.src[self.src.rfind("\n", 0, idx): self.src.find("\n", idx)]
+        assert "data-ui-anchor" not in line
+
+
+# ---------------------------------------------------------------------------
+# ⑲ 第 2 波 — 縮退の事実文・カテゴリの既定・取り込み済みの導線・関係の種類・題名
+#    （paper_radar_design.md §19）
+# ---------------------------------------------------------------------------
+
+
+class TestRadarWave2:
+    src = _read(RADAR_JS)
+    admin = _read(ADMIN_JS)
+
+    def test_facts_are_rendered_from_the_server(self):
+        body = _extract_function(self.src, "renderFacts")
+        assert "state.facts" in body
+        assert 'el("pr-facts")' in body
+        run = _extract_function(self.src, "runSearch")
+        assert "state.facts = (data && data.facts) || [];" in run
+        assert 'id="pr-facts"' in self.src
+
+    def test_only_enabled_categories_are_sent(self):
+        run = _extract_function(self.src, "runSearch")
+        assert "categories: enabledCategories()," in run
+        chips = _extract_function(self.src, "categoryChipsFromSeed")
+        assert "seed.category_candidates" in chips
+        assert "entry.enabled !== false" in chips
+
+    def test_category_chips_toggle_with_strike_through(self):
+        body = _extract_function(self.src, "renderCategoryChips")
+        assert "chipStyle(chip.enabled)" in body
+        assert ".pr-category-chip" in body
+
+    def test_ingested_actions_carry_the_four_anchors(self):
+        body = _extract_function(self.src, "ingestedActionsHtml")
+        for anchor in (
+            "materials.radar-ingested-open-material",
+            "materials.radar-ingested-graph-review",
+            "materials.radar-ingested-landscape",
+            "materials.radar-chain-seed",
+        ):
+            assert anchor in body
+
+    def test_not_ready_buttons_are_disabled_with_a_reason(self):
+        body = _extract_function(self.src, "ingestedActionButtonHtml")
+        assert "disabled title=" in body
+        actions = _extract_function(self.src, "ingestedActionsHtml")
+        assert "material.status === ANALYSIS_COMPLETED" in actions
+
+    def test_chain_reopens_the_modal_with_the_new_seed(self):
+        body = _extract_function(self.src, "bindIngestedActions")
+        assert "openModal(" in body
+        assert 'button.getAttribute("data-document-id")' in body
+        assert "cartridgeId:" in body
+
+    def test_accepted_items_remember_the_material(self):
+        body = _extract_function(self.src, "handleIngestResult")
+        assert "state.acceptedById[arxivId]" in body
+        assert "item.material_id" in body
+
+    def test_materials_reload_notifies_the_radar_without_polling(self):
+        render = _extract_function(self.admin, "renderMaterials")
+        assert "window.PaperRadar.onMaterialsUpdated" in render
+        hook = _extract_function(self.src, "onMaterialsUpdated")
+        assert "api(" not in hook
+        assert "setInterval" not in self.src
+
+    def test_admin_injects_the_navigation_deps(self):
+        for key in (
+            "getMaterial: findMaterialInList",
+            "focusMaterialRow: focusMaterialRow",
+            "openGraphReview:",
+            "openLandscape: openLandscapeModal",
+        ):
+            assert key in self.admin
+
+    def test_compare_relation_label_is_passed_through(self):
+        body = _extract_function(self.src, "compareBlockHtml")
+        assert "item.relation_label" in body
+        assert "RELATION_NONE_KIND" in body
+        assert 'RELATION_NONE_KIND = "no_notable_common_ground"' in self.src
+
+    def test_seed_header_prefers_the_display_title(self):
+        body = _extract_function(self.src, "renderSeed")
+        assert "seed.display_title || seed.title" in body
+        assert "seed.title_note" in body
+        meta = _extract_function(self.src, "applySeedMeta")
+        assert "previous.display_title" in meta
+
+
+# ---------------------------------------------------------------------------
+# 第 3 波（設計書 §20）: 当たらなかった語・網を広げている語・帯と関係の読み方
+# ---------------------------------------------------------------------------
+
+
+class TestRadarWave3:
+    def setup_method(self):
+        self.src = _read(RADAR_JS)
+
+    def test_search_reads_hits_and_notes(self):
+        body = _extract_function(self.src, "runSearch")
+        for key in ("keyphrase_hits", "keyphrase_hits_note", "keyphrase_widening_note",
+                    "reading_note"):
+            assert key in body
+        # 当たり外れのチップの印を検索のたびに描き直す。
+        assert "renderKeyphraseChips()" in body
+
+    def test_hits_note_container_is_a_fact_line_without_anchor(self):
+        assert 'id="pr-keyphrase-hits-note"' in self.src
+        idx = self.src.index('id="pr-keyphrase-hits-note"')
+        assert "data-ui-anchor" not in self.src[idx - 200: idx + 200]
+        body = _extract_function(self.src, "renderKeyphraseHitsNote")
+        assert "state.keyphraseHitsNote" in body and "state.keyphraseWideningNote" in body
+        assert "renderKeyphraseHitsNote()" in _extract_function(self.src, "renderKeyphraseChips")
+
+    def test_missed_chip_gets_a_mark_not_a_strikethrough(self):
+        """当たらなかった語は「外した」とは別の印（打ち消し表示にしない）。"""
+        body = _extract_function(self.src, "renderKeyphraseChips")
+        assert "KEYPHRASE_MISS_MARK" in body
+        assert "hitInfo.hit === false" in body
+        # 打ち消しは enabled だけで決まる（当たり外れで chipStyle を変えない）。
+        assert "chipStyle(entry.enabled)" in body
+
+    def test_client_does_not_build_hit_sentences(self):
+        """事実文はサーバの素通し（クライアントで「当たらなかった語:」を組み立てない）。"""
+        assert "当たらなかった語: " not in self.src
+        assert "網を広げて" not in self.src
+
+    def test_reading_note_only_with_relation_labels(self):
+        body = _extract_function(self.src, "renderFacts")
+        assert "state.readingNote && hasRelationLabels()" in body
+        assert "relation_label" in _extract_function(self.src, "hasRelationLabels")
+        assert "renderFacts()" in _extract_function(self.src, "applyCompareResult")
+        # 文言はサーバ（radar.READING_NOTE_*）が持つ。
+        assert "要旨どうしの近さ" not in self.src
+
+    def test_hits_are_reset_on_open(self):
+        body = _extract_function(self.src, "openModal")
+        for key in ("state.keyphraseHits = {}", 'state.keyphraseHitsNote = ""',
+                    'state.keyphraseWideningNote = ""', 'state.readingNote = ""'):
+            assert key in body
+
+    def test_hits_carry_no_counts(self):
+        """PD4: 当たった件数を読まない・描かない（真偽だけ）。"""
+        body = _extract_function(self.src, "runSearch")
+        assert "hit.count" not in body and "hit_count" not in self.src
+
+
+class TestRadarWave4:
+    """§21 B / C / D — 取り込み済みカードの配置の対比・構造照合の成立条件・前の起点。"""
+
+    def setup_method(self):
+        self.src = _read(RADAR_JS)
+
+    def test_contrast_three_lines_are_drawn_on_ingested_cards(self):
+        body = _extract_function(self.src, "placementContrastHtml")
+        for key in ("placement_contrast", "shared", "seed_only", "candidate_only",
+                    "placement_contrast_note", "module_match_note"):
+            assert key in body
+        assert "item.provenance_label" in _extract_function(self.src, "contrastItemText")
+        assert "placementContrastHtml(candidate)" in self.src
+
+    def test_contrast_does_not_draw_numbers(self):
+        body = _extract_function(self.src, "placementContrastHtml")
+        for word in ("weight", "confidence", ".length +", "toFixed"):
+            assert word not in body
+
+    def test_previous_seed_is_drawn_from_the_in_memory_history_only(self):
+        assert "previousSeedTitle" in _extract_function(self.src, "openModal")
+        assert 'id="pr-seed-previous"' in _extract_function(self.src, "renderSeed")
+        chain = _extract_function(self.src, "bindIngestedActions")
+        assert "previousSeedTitle" in chain
+        # 保存しない（localStorage / API に送らない）。
+        for line in self.src.splitlines():
+            if "previousSeedTitle" in line:
+                assert "localStorage" not in line and "fetch" not in line
+
+
+class TestRadarWave5:
+    """§22 C — 対比を観点ごと・領域と概念を分けて描く（観点の訳語は JS に持たない）。"""
+
+    def setup_method(self):
+        self.src = _read(RADAR_JS)
+
+    def test_items_are_grouped_by_server_perspective_label(self):
+        body = _extract_function(self.src, "contrastByPerspective")
+        assert "item.perspective_label" in body
+
+    def test_region_and_concept_are_drawn_apart(self):
+        body = _extract_function(self.src, "contrastItemsText")
+        assert 'item.layer === "region"' in body
+        assert 'item.layer === "concept"' in body
+        assert "CONTRAST_LAYER_REGION" in body and "CONTRAST_LAYER_CONCEPT" in body
+
+    def test_no_perspective_vocabulary_table_in_js(self):
+        for key in ("PERSPECTIVE_LABELS", "方法から", "観測から", "応用から"):
+            assert key not in self.src
+
+
+class TestSoleWideningChipMark:
+    """§23.5: 網を広げる語のチップに印（当たらずと同じ添え方）・title はサーバ文言の素通し。"""
+
+    def test_chip_marks_widening_word(self):
+        src = _read(RADAR_JS)
+        assert 'var KEYPHRASE_WIDENS_MARK = "網を広げる";' in src
+        assert "hit.widens_note" in src
+        assert "hitInfo.widensNote" in src
+        assert "pr-keyphrase-widens" in src
+        # 日本語の事実文はサーバが正本（JS に焼き込まない）。
+        assert "この語だけに一致した候補が多く" not in src
+
+
+class TestCompareCandidateAnalysisSource:
+    """IK-0818 / §22.5: 取り込み済み候補の解析結果に由来する重なり・違いの出所を添える。"""
+
+    def test_source_note_is_rendered_from_the_server(self):
+        src = _read(RADAR_JS)
+        body = _extract_function(src, "compareBlockHtml")
+        assert "compareSourceNoteHtml(overlap.source_note)" in body
+        assert "compareSourceNoteHtml(diff.source_note)" in body
+        assert "item.analysis_note" in body
+        assert "pr-compare-source-note" in src
+        # 出所の日本語はサーバが正本（JS に焼き込まない）。
+        assert "候補側の解析結果から" not in src
+        assert "教員の承認前" not in src
+
+    def test_no_new_anchor_for_the_source_note(self):
+        src = _read(RADAR_JS)
+        helper = _extract_function(src, "compareSourceNoteHtml")
+        assert "data-ui-anchor" not in helper
+
+
+class TestRadarWave24:
+    """§24 — 網の偏り（A）・帯の母集団（B）・取り込み済みの比較（C）・起点の系譜（D）。"""
+
+    def setup_method(self):
+        self.src = _read(RADAR_JS)
+
+    def test_dominant_note_is_a_server_pass_through(self):
+        assert "keyphrase_dominant_note" in _extract_function(self.src, "runSearch")
+        assert "state.keyphraseDominantNote" in _extract_function(self.src, "renderKeyphraseHitsNote")
+        assert 'state.keyphraseDominantNote = ""' in _extract_function(self.src, "openModal")
+        # 文言はサーバ（radar.NOTE_KEYPHRASE_DOMINANT_TEMPLATE）が持つ。
+        assert "一般語に寄って" not in self.src
+
+    def test_band_population_note_is_drawn_once_near_the_legend(self):
+        assert "band_population_note" in _extract_function(self.src, "runSearch")
+        body = _extract_function(self.src, "renderCandidates")
+        legend = body.index("relationLegendHtml()")
+        assert body.index("bandPopulationNoteHtml()") > legend
+        assert body.count("bandPopulationNoteHtml()") == 1
+        note = _extract_function(self.src, "bandPopulationNoteHtml")
+        assert "state.bandPopulationNote" in note
+        assert "available === false" in note
+        assert 'id="pr-band-population-note"' in note
+        assert "data-ui-anchor" not in note, "事実の段落はアンカーにしない"
+        assert "取得していない論文" not in self.src, "文言はサーバの素通し"
+
+    def test_ingested_candidates_are_selectable_for_compare_only(self):
+        body = _extract_function(self.src, "candidateCardHtml")
+        assert 'status === "ingested"' in body
+        assert "pr-select-compare-only" in body
+        assert "INGESTED_COMPARE_HINT" in body
+        ingest_ids = _extract_function(self.src, "selectedIngestIds")
+        assert 'candidate.status !== "new"' in ingest_ids
+        assert "selectedIngestIds()" in _extract_function(self.src, "runIngest")
+        assert "selectedIngestIds()" in _extract_function(self.src, "renderIngestSummary")
+        # 比較は従来どおり選択した全件（取り込み済みを含む）。
+        assert "selectedIds()" in _extract_function(self.src, "runCompare")
+
+    def test_ingest_sends_the_seed_document(self):
+        body = _extract_function(self.src, "runIngest")
+        assert "payload.seed_document_id" in body
+        for line in self.src.splitlines():
+            if "seed_document_id" in line:
+                assert "localStorage" not in line
+
+    def test_lineage_is_drawn_from_the_server_line(self):
+        assert "seed.lineage_line" in _extract_function(self.src, "applySeed")
+        body = _extract_function(self.src, "renderSeed")
+        assert 'id="pr-seed-lineage"' in body
+        assert "state.lineageLine" in body and "state.lineageNote" in body
+        # 系譜があるときは JS 内の 1 段だけの「前の起点」行に優先する。
+        assert body.index("state.lineageLine") < body.index("state.previousSeedTitle")
+        assert "この起点の系譜" not in self.src, "見出しの文言もサーバの素通し"
+        open_body = _extract_function(self.src, "openModal")
+        assert 'state.lineageLine = ""' in open_body and 'state.lineageNote = ""' in open_body
+
+
+class TestRadarWave24WideningChip:
+    """§24 A — 網を広げる語（dominant を含む）のチップに印と「外して探し直す」の案内。"""
+
+    def setup_method(self):
+        self.src = _read(RADAR_JS)
+
+    def test_dominant_words_get_the_widening_mark_and_action_title(self):
+        body = _extract_function(self.src, "renderKeyphraseChips")
+        assert "hitInfo.dominant === true" in body
+        assert "KEYPHRASE_WIDENS_ACTION_TITLE" in body
+        assert "dominant_note" in _extract_function(self.src, "runSearch")
+
+    def test_removal_stays_the_teachers_click(self):
+        """外すのはチップのクリック（enabled の反転）だけで、自動で外さない・自動で検索しない。"""
+        body = _extract_function(self.src, "renderKeyphraseChips")
+        assert "runSearch" not in body
+        assert ".enabled = !state.keyphrases[index].enabled" in body
+        run = _extract_function(self.src, "runSearch")
+        assert "enabled = false" not in run

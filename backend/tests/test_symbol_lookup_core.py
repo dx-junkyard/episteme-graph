@@ -238,13 +238,47 @@ class TestNoDefinition:
             chunks=_chunks(),
             documents=_documents(),
         )
-        result = lookup_symbol_definition(session, symbol="q", document_ids=[DOC])
+        # タップ位置（チャンク）がこの論文にあるときだけ「この式の中だけ」を出す（IK-0387）。
+        result = lookup_symbol_definition(
+            session, symbol="q", document_ids=[DOC], chunk_id=CHUNK_1
+        )
         assert result["available"] is True
         assert result["definition"] is None
         assert FACT_NO_DEFINITION in result["facts"]
         # 定義状態のラベルは element_vocab の既存訳語（新しい訳語表を作らない）。
         assert "定義なし" in result["facts"]
-        assert result["scope_label"] == "この式の中だけ"
+        assert result["scope_label"] == "この式の中で定義されています"
+
+    @pytest.mark.parametrize("status", ["used", "defined", "redefined", "unknown", ""])
+    def test_no_definition_never_paired_with_a_label_implying_one_exists(self, status):
+        """IK-0380: 定義なしのとき「定義は別の箇所」「この論文で定義」を並べない。"""
+        session = FakeSession(
+            symbols=[
+                {
+                    "document_id": DOC,
+                    "agent_symbol_id": "sym_%s_alpha" % DOC,
+                    "canonical_symbol": "alpha",
+                    "notation_variants": [],
+                    "kind": "",
+                    "unit": "",
+                    "scope": "",
+                    "definition_status": status,
+                    "defining_equation_ids": [],
+                    "source_evidence_ids": [],
+                    "definition_evidence_texts": [],
+                }
+            ],
+            chunks=_chunks(),
+            documents=_documents(),
+        )
+        result = lookup_symbol_definition(session, symbol="alpha", document_ids=[DOC])
+        assert result["definition"] is None
+        assert FACT_NO_DEFINITION in result["facts"]
+        joined = "\n".join(result["facts"])
+        assert "別の箇所" not in joined
+        assert "この論文で定義" not in joined
+        assert "この論文で再定義" not in joined
+        assert result["facts"] == [FACT_NO_DEFINITION]
 
     def test_closed_world_wording_never_claims_the_field(self):
         """「この分野には無い」「誰も定義していない」とは言わない（KR8 / SL1）。"""
@@ -363,7 +397,7 @@ class TestNoLeakage:
     def test_unit_and_scope_are_included(self):
         result = self._result()
         assert result["unit"] == "GeV"
-        assert result["scope_label"] == "論文全体"
+        assert result["scope_label"] == "論文全体で使われます"
         assert result["source"] == "Semileptonic B decays"
 
 
@@ -514,3 +548,272 @@ class TestCoreGuardrails:
     def test_display_strings_go_through_hygiene(self):
         """制御文字は表示前に落とす（core/text_hygiene.py が正本）。"""
         assert symbol_lookup._clean("a\x1b[0mb") == "ab"
+
+
+# ---------------------------------------------------------------------------
+# 8. IK-0386 / IK-0387 — 事実文なしの unavailable・大文字小文字・論文をまたぐ定義
+# ---------------------------------------------------------------------------
+
+
+from core.symbol_lookup import (  # noqa: E402
+    FACT_DEFINITION_FROM,
+    FACT_DEFINITION_FROM_OTHER_DOCUMENT,
+    FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS,
+    FACT_SYMBOL_NOT_IN_THIS_DOCUMENT,
+    FACT_NO_SOURCE_DOCUMENTS,
+    FACT_SYMBOL_NOT_REGISTERED,
+    symbol_key,
+)
+
+
+def _symbol_row(document_id, canonical, *, texts, scope="section", variants=()):
+    return {
+        "document_id": document_id,
+        "agent_symbol_id": "sym_%s_%s" % (document_id[:4], canonical),
+        "canonical_symbol": canonical,
+        "notation_variants": list(variants),
+        "kind": "",
+        "unit": "",
+        "scope": scope,
+        "definition_status": "defined",
+        "defining_equation_ids": [],
+        "source_evidence_ids": [],
+        "definition_evidence_texts": list(texts),
+    }
+
+
+class TestUnavailableAlwaysStatesAFact:
+    """IK-0386: ``available=False`` は必ず事実文を1つ持つ。"""
+
+    def test_symbol_absent_from_registry(self):
+        session = FakeSession(
+            symbols=[_symbol_row(DOC, "F", texts=["F is the form factor."])],
+            chunks=_chunks(),
+            documents=_documents(),
+        )
+        result = lookup_symbol_definition(session, symbol="B_{3D}", document_ids=[DOC])
+        assert result["available"] is False
+        assert result["facts"] == [FACT_SYMBOL_NOT_REGISTERED]
+
+    def test_no_source_documents(self):
+        result = lookup_symbol_definition(FakeSession(), symbol="F", document_ids=[])
+        assert result["available"] is False
+        assert result["facts"] == [FACT_NO_SOURCE_DOCUMENTS]
+
+    def test_symbol_that_normalizes_to_nothing(self):
+        session = FakeSession(symbols=[], documents=_documents())
+        result = lookup_symbol_definition(session, symbol="{}", document_ids=[DOC])
+        assert result["available"] is False
+        assert result["facts"] == [FACT_SYMBOL_NOT_REGISTERED]
+
+    @pytest.mark.parametrize(
+        "line", [FACT_SYMBOL_NOT_REGISTERED, FACT_NO_SOURCE_DOCUMENTS]
+    )
+    def test_closed_world_wording(self, line):
+        for word in ("分野", "世界", "誰も", "どこにも"):
+            assert word not in line
+        assert not any(ch.isdigit() for ch in line)
+
+
+class TestSymbolKeyIsCaseSensitive:
+    """IK-0387: ``λ`` と ``Λ``、``B`` と ``b`` は別の記号。"""
+
+    @pytest.mark.parametrize(
+        "a,b",
+        [
+            ("\\lambda", "λ"),
+            ("\\Lambda", "Λ"),
+            ("V_{cb}", "V_cb"),
+            ("B_{\\rm 3D}", "B_3D"),
+            ("B_{\\mathrm{3D}}", "B_{3D}"),
+            ("$\\rho$", "ρ"),
+        ],
+    )
+    def test_notation_variants_fold_together(self, a, b):
+        assert symbol_key(a) == symbol_key(b)
+
+    @pytest.mark.parametrize(
+        "a,b",
+        [("\\lambda", "\\Lambda"), ("λ", "Λ"), ("B", "b"), ("\\delta", "\\Delta"), ("V_cb", "V^cb")],
+    )
+    def test_case_and_script_are_kept(self, a, b):
+        assert symbol_key(a) != symbol_key(b)
+
+    def test_lowercase_lambda_does_not_hit_capital_lambda_row(self):
+        session = FakeSession(
+            symbols=[
+                _symbol_row(
+                    OTHER_DOC,
+                    "\\Lambda",
+                    texts=["xi(Lambda) is the selection function"],
+                )
+            ],
+            documents=[{"id": OTHER_DOC, "title": "Binary black holes"}],
+        )
+        result = lookup_symbol_definition(
+            session, symbol="\\lambda", document_ids=[DOC, OTHER_DOC]
+        )
+        assert result["available"] is False
+        assert result["facts"] == [FACT_SYMBOL_NOT_REGISTERED]
+
+    def test_unicode_tap_matches_tex_row(self):
+        session = FakeSession(
+            symbols=[_symbol_row(DOC, "\\lambda", texts=["lambda is the mass-to-flux ratio."])],
+            chunks=_chunks(),
+            documents=_documents(),
+        )
+        result = lookup_symbol_definition(session, symbol="λ", document_ids=[DOC])
+        assert result["available"] is True
+        assert "mass-to-flux" in result["definition"]["text"]
+
+
+class TestDocumentAndScopeFacts:
+    """IK-0387: 出所の論文を言う・相対的な有効範囲はタップ位置の論文でだけ出す。"""
+
+    def _session(self):
+        return FakeSession(
+            symbols=[
+                _symbol_row(OTHER_DOC, "\\lambda", texts=["lambda is a coupling in the other paper."]),
+                _symbol_row(DOC, "F", texts=["F is the form factor."]),
+            ],
+            chunks=_chunks()
+            + [{"id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1", "document_id": OTHER_DOC,
+                "chunk_index": 0, "block_ids": ["o1"]}],
+            documents=[
+                {"id": DOC, "title": "Magnetic fields in Cep B"},
+                {"id": OTHER_DOC, "title": "Binary black holes"},
+            ],
+        )
+
+    def test_no_tap_position_names_the_paper_and_drops_section_label(self):
+        result = lookup_symbol_definition(
+            self._session(), symbol="λ", document_ids=[DOC, OTHER_DOC]
+        )
+        assert result["available"] is True
+        assert "scope_label" not in result
+        assert FACT_DEFINITION_FROM.format(title="Binary black holes") in result["facts"]
+        assert FACT_POSITION_UNKNOWN in result["facts"]
+
+    def test_fallback_to_other_paper_is_stated(self):
+        """タップした論文（DOC）に λ が無いとき、別の論文の定義は持ってこない（第 15 周）。
+
+        記号は論文ごとに意味が違う。題名だけを事実文で並べ、定義は出さない。
+        """
+        result = lookup_symbol_definition(
+            self._session(), symbol="λ", document_ids=[DOC, OTHER_DOC], chunk_id=CHUNK_1
+        )
+        assert result["available"] is False
+        assert result["definition"] is None
+        assert result["facts"] == [
+            FACT_SYMBOL_NOT_IN_THIS_DOCUMENT,
+            FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS.format(titles="『Binary black holes』"),
+        ]
+
+    def test_same_paper_row_is_preferred(self):
+        session = self._session()
+        session.symbols.append(
+            _symbol_row(DOC, "\\lambda", texts=["lambda is the mass-to-flux ratio."])
+        )
+        result = lookup_symbol_definition(
+            session, symbol="λ", document_ids=[DOC, OTHER_DOC], chunk_id=CHUNK_2
+        )
+        assert "mass-to-flux" in result["definition"]["text"]
+        assert result["scope_label"] == "この節の中で定義されています"
+        # 所在の残っていない定義文なので位置の事実文（同じ論文なのでタイトルは足さない）。
+        # 別の論文にも同じ記号があることは題名だけ添える（定義は持ってこない・第 15 周）。
+        assert result["facts"] == [
+            FACT_POSITION_UNKNOWN,
+            FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS.format(titles="『Binary black holes』"),
+        ]
+
+    def test_titles_carry_no_internal_ids(self):
+        result = lookup_symbol_definition(
+            self._session(), symbol="λ", document_ids=[DOC, OTHER_DOC], chunk_id=CHUNK_1
+        )
+        for value in result["facts"]:
+            assert not contains_internal_id(value), value
+            assert OTHER_DOC not in value
+
+
+# ---------------------------------------------------------------------------
+# 第 14 周: レジストリに行が無いときの式フォールバック（PDF 経路の取り逃がし）
+# ---------------------------------------------------------------------------
+
+
+class TestFormulaFallback:
+    def _session(self):
+        chunks = [
+            {
+                "id": CHUNK_1, "document_id": DOC, "chunk_index": 0, "block_ids": ["b1"],
+                "formulas": [
+                    {"label": "17", "latex": r"\mu (a) = \Sigma(a) = 1 + \alpha 2 B 2c2"},
+                    {"label": "", "latex": r"D = \alpha K + 3 \alpha B"},
+                ],
+            }
+        ]
+        return FakeSession(chunks=chunks, documents=_documents())
+
+    def test_lhs_match_reports_printed_label_without_tex(self):
+        result = lookup_symbol_definition(self._session(), symbol=r"\mu(a)", document_ids=[DOC])
+        assert result["available"] is True
+        assert result["registered"] is False
+        assert result["definition"] is None
+        assert "式 (17)" in result["facts"][0] and "左辺" in result["facts"][0]
+        assert not any("\\" in f for f in result["facts"])
+
+    def test_micro_sign_is_mu(self):
+        result = lookup_symbol_definition(self._session(), symbol="µ", document_ids=[DOC])
+        assert "式 (17)" in result["facts"][0]
+
+    def test_subscript_lost_in_pdf_is_found_as_use(self):
+        result = lookup_symbol_definition(self._session(), symbol=r"\alpha_B", document_ids=[DOC])
+        assert result["available"] is True
+        assert "の中に現れます" in result["facts"][0]
+
+    def test_no_boundary_no_hit(self):
+        result = lookup_symbol_definition(self._session(), symbol="Bx", document_ids=[DOC])
+        assert result["available"] is False
+
+
+# ---------------------------------------------------------------------------
+# 第 15 周: 表示中トピックの論文に限定する（chunk_id / equation_id が無いとき）
+# ---------------------------------------------------------------------------
+
+
+class TestTopicFocus:
+    def _session(self):
+        return FakeSession(
+            symbols=[
+                _symbol_row(OTHER_DOC, "c_s^2", texts=["c_s^2 = dP/d epsilon is the sound speed."]),
+            ],
+            chunks=_chunks(),
+            documents=[
+                {"id": DOC, "title": "Dark energy"},
+                {"id": OTHER_DOC, "title": "Neutron stars"},
+            ],
+        )
+
+    def test_topic_document_without_symbol_does_not_borrow_other_definition(self):
+        result = lookup_symbol_definition(
+            self._session(), symbol="c_s^2", document_ids=[DOC, OTHER_DOC],
+            focus_document_ids=[DOC],
+        )
+        assert result["definition"] is None
+        assert all("dP" not in f for f in result["facts"])
+        assert FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS.format(titles="『Neutron stars』") in result["facts"]
+
+    def test_topic_document_with_symbol_uses_it(self):
+        result = lookup_symbol_definition(
+            self._session(), symbol="c_s^2", document_ids=[DOC, OTHER_DOC],
+            focus_document_ids=[OTHER_DOC],
+        )
+        assert "sound speed" in result["definition"]["text"]
+        assert not any("別の論文" in f for f in result["facts"])
+
+    def test_focus_outside_course_is_ignored(self):
+        result = lookup_symbol_definition(
+            self._session(), symbol="c_s^2", document_ids=[OTHER_DOC],
+            focus_document_ids=[DOC],
+        )
+        # 焦点がコースの sources 外なら従来どおりコース全体（広げも狭めもしない）。
+        assert "sound speed" in result["definition"]["text"]

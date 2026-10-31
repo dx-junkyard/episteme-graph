@@ -208,7 +208,10 @@ class TestRightPaneEvidenceList:
         start = src.index("function lsCourseEvidenceChipsHtml(topic) {")
         end = src.index("function lsCourseEvidenceHtml(topic) {")
         block = src[start:end]
-        assert "lsEvidenceKindLabel(item.kind)" in block
+        # IK-0949: 種類の印は lsEvidenceItemKindText（origin_label → lsEvidenceKindLabel）の 1 箇所。
+        assert "lsEvidenceItemKindText(item)" in block
+        helper = src[src.index("function lsEvidenceItemKindText(item) {"):start]
+        assert "lsEvidenceKindLabel(item && item.kind)" in helper
 
     def test_evidence_cards_use_kind_and_role_only_meta_labels(self):
         """右ペインのカードも kind は正本語彙、メタ行は役割のみ（CP9）。
@@ -217,7 +220,8 @@ class TestRightPaneEvidenceList:
         start = src.index("function lsCourseEvidenceHtml(topic) {")
         end = src.index("function lsFocusEvidence(key) {")
         block = src[start:end]
-        assert "lsEvidenceKindLabel(item.kind)" in block
+        # IK-0949: 種類の印は lsEvidenceItemKindText（origin_label → lsEvidenceKindLabel）の 1 箇所。
+        assert "lsEvidenceItemKindText(item)" in block
         assert "lsEvidenceMetaLabel(item.role)" in block
         assert "lsEvidenceMetaLabel(item.role, item.confidence)" not in block
         # カード本体のコードに「対応付け」の文言が混ざらない

@@ -1,0 +1,80 @@
+id: c-astro-r25-share-r8
+domain: astrophysics
+snapshot: corpus-astro-tex-r25g
+course_id: 6be229e1
+personas:
+  teachers: [te-01-rookie-seminar, te-03-meticulous-seminar, te-02-veteran-intro]
+  students: [st-07-m1-grb-voice, st-04-intl-exoplanet, st-10-d3-21cm-receiver]
+scenarios:
+  teacher: [t-share-identity-queue, t-share-labels-atlas, t-share-explain-endorse-cite]
+  student: [s-share-part-chip, s-share-symbol-concept]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 12, persona_llm_calls: 340, wall_clock_minutes: 260}
+notes: |
+  第 25 周 share の第 8 周（judge_share_r7.md §6・r8_prereqs.md の面 share と共通 1〜5・同末尾「周の前の実測」・harness_fixes_r7_summary.md）。
+  前提状態を変える周の 2 回目。教員 3 × 学生 3・6 場面:
+  te-01 × (a) t-share-identity-queue（PINN の viewer = pinn_editor_removed。権限の無い教員が同一性の候補で何を読め、何を押せないか・判断の行の
+  読み手 IK-1050。**主は確定の手（候補 → 確認の問い → 確定）と理由付きの見送り（422 の是正後）**。前提①（67727cb0）以外の確定リンクは 0 本
+  （周の前の実測 — 前提スクリプトが自動で確定した 4 本は取り消した）なので、取り消しの手は対象なし = 場面の任意の手として飛ぶ。revoke_target_hint は空・
+  対は revoke_protect_entry_ids で守る — H45）/ te-03 × (c) t-share-labels-atlas（TeX 版の記号候補 L_TOV / N_TOV / F_EOS が残っている状態で、確定済み
+  エントリの記号の結び・見送り済みラベル・地図との対応を読む。**記号候補の確定 → 凍結は場面に手が無い**ので、te-03 の run の後に指揮者が te-03 として
+  判断する — 下の用意 4）/ st-07 × (d) s-share-part-chip テキスト（⚓ → 部品の文脈 → 共通部品 → 別の論文・選択質問 IK-1041）/ st-04 × (e)
+  s-share-symbol-concept 再（英語・記号の確定・凍結の後に L_TOV の概念名が出るか IK-0983）/ te-02 × (b2) t-share-explain-endorse-cite（2 人目の
+  査読者として・引用先は cite_course_id 6be229e1 — H43 の是正後に CITE_NOT_SENT にならないか・引用の outcome_fact・査読者名 IK-1023 の残り）/
+  st-10 × (d) s-share-part-chip（(b2) の後に、引用先 6be229e1 の学生として te-04 の説明が部品の「説明」に届くか — 審判の「他コース 6be229e1 の学生の場面」）。
+  **固定コースは 6be229e1**（周の前の実測: 1bad7d9f は学習者の API で ⚓（部品）が 0 個。6be229e1 は ⚓ があり、旧 freeze の部品を読み時に後継へ
+  つなぐ IK-1051 の是正を当てられる）。6be229e1 は (b2) の引用先でもあるので、st-07 の (d) は引用の前、st-10 の (d) は引用の後の同じコースになる
+  （前後比較）。説明を開く te-02 のコースは scenario_params の studio_course_id（1bad7d9f）で固定のまま。
+  組の例外（P-0025）: te-01 × (a) は第 1 周と同じ組（第 1 周は候補ゼロの文を読んだ。今回は確定済み・取り消し済みのリンクがある状態を viewer で、判断の
+  行の読み手の是正後）。te-03 × (c) は新しい組。st-07 × (d) は第 5 周と同じ組（第 5 周は音声・前提①の凍結の前。今回はテキスト・凍結版の後・
+  6be229e1）。st-04 × (e) は第 7 周と同じ組（審判の「(e) 再」= 記号の確定 → 凍結の後の前後比較）。te-02 × (b2) は第 5 周と同じ組（第 5 周は他人の
+  説明の支持。今回は 2 人目の査読者・id の引用先）。st-10 × (d) は新しい組。
+  学生の面: st-07 は share (d) と doubt の地図の問い（2 面）。studio の (d') は st-08 に替えた（指揮者の組は st-07 を 3 面に置いていた — doubt は音声の
+  学生が要る IK-1049、share (d) は審判の指定なので、講義の場面を地図 1 面だけの st-08 へ）。st-04・st-10 は share だけ。
+
+  一括の確かめと用意: `backend/.venv/bin/python uxsim/runs/round25/r8_prereqs.py --dry-run`（= r5_prereqs.py --round 8）→ 書き込みは
+  `--allow-*` を指揮者が明示したときだけ（人の判断を自動化しない — H44。周の前の実測で share_pair_frozen にも自動確定が残っていた）。
+
+  ── 周の前に指揮者が用意するもの（この順。r8_prereqs の項目名）──
+   1. 製品の第 7 波 → 投影の同期 → この前提 → 周（共通 1）。4 面とも snapshot は corpus-astro-tex-r25g。persona_profile_names（共通 2）。
+   2. share_fixed_course_anchors（実測済み）: 1bad7d9f の ⚓ は 0 個 → 固定コースを 6be229e1 にした（この campaign の course_id）。st-07・st-10 の
+      topic_hint は既定の t11（二重ネットワークとTOV方程式の課し方）で、6be229e1 の t11 は ⚓ がある（第 7 周の studio の st-07）。
+   3. share_pair_frozen（実測済み）: 対 67727cb0 の再確定・凍結し直し。自動で確定した TeX 版 2 本 67e29895 / 9a7d14e9 は指揮者が理由付きで取り消し、
+      エントリを凍結し直した。前提①以外の確定リンクは 0 本。
+   4. **記号の確定（人の判断）**: share_symbol_link_frozen は候補を探して state の share_symbol_candidates に控えるだけ（TeX 版に L_TOV / N_TOV / F_EOS が
+      残る）。PDF 版 L_TOV / N_TOV の誤確定は share_symbol_misconfirm_revoked で取り消し済み。te-03 の (c) の run の後（mailbox_share/TE03_DONE_R8）に、
+      指揮者が te-03 として候補を読み、教材の TeX 版・定義の文あり・記号名一致のもの（L_TOV が第一）を確定 → 凍結し直して mailbox_share/SYMBOL_DECIDED_R8、
+      確定しない判断なら mailbox_share/SYMBOL_SKIP_R8 を出す。st-04 の (e) はどちらかを待つ（確定の手が場面に入れば te-03 の run の中で行う形に戻す）。
+   5. share_alias_tov: 別名「TOV」は見送ったまま（H42 の誤った見送り）。戻すかは指揮者の判断で、記号の候補はこの別名に依存させない。
+   6. pinn_editor_removed（te-01 = PINN の viewer。doubt と共通。実測では全教員がコース経由で PINN を閲覧できる）/ pinn_editor・b2_course_editor
+      （te-02 に PINN 2 版・1bad7d9f の editor）。**te-02 に 6be229e1 の editor が要る**（引用先の選択肢に出ないと H43 の CITE_NOT_SENT。r8_prereqs の既定に
+      無い — `--only studio_course_editor --studio-editor te-02-veteran-intro` で確かめ、付与するかは指揮者の判断）。
+   7. **te-02 の 2 人目の査読**（場面に手が無い）: te-02 の (b2) の前に、指揮者が te-02 として te-04 の説明「AI と下書きした説明 — TOV の残差損失」
+      （TeX 版の部品「TOV residual loss at collocation points」・コース 1bad7d9f）に PATCH /api/admin/explanations/{id}（second_review）を 1 回送り
+      mailbox_share/TE02_REVIEW_R8 を出す（第 7 周に済んでいれば送らずに合図だけ）。押さない判断なら TE02_REVIEW_SKIP_R8。
+   8. コース 6be229e1・1bad7d9f が公開のまま（studio_visibility）。st-07・st-04・st-10 が 6be229e1 を受講していなければ場面の enroll が始める。
+
+  ── レーンの順（face_share_r8.sh。--persona X --scenario Y で 1 場面ずつ。⇢ は他の用意・合図を待つ）──
+   1. te-01-rookie-seminar × t-share-identity-queue（viewer。取り消しは対象なしで飛ぶ）
+   2. te-03-meticulous-seminar × t-share-labels-atlas → mailbox_share/TE03_DONE_R8
+   3. st-07-m1-grb-voice × s-share-part-chip（テキスト・引用の前）→ mailbox_share/ST07_DONE_R8（doubt の st-07 の地図の問いがこれを待つ — 同じ学生の
+      run を同時に走らせない）
+   4. ⇢ 用意 4（SYMBOL_DECIDED_R8 か SYMBOL_SKIP_R8）⇢ st-04-intl-exoplanet × s-share-symbol-concept（英語）
+   5. ⇢ TE02_REVIEW_R8 か TE02_REVIEW_SKIP_R8 ⇢ te-02-veteran-intro × t-share-explain-endorse-cite → mailbox_share/B2_DONE_R8
+   6. st-10-d3-21cm-receiver × s-share-part-chip（引用の後）
+  最後に mailbox_share/LANE_DONE_R8。教員の run は学習の状態を持たないので、te-01（doubt・atlas・studio）・te-03（doubt）・te-02（doubt）は他の面の
+  レーンと並走してよい。
+
+  場面に足りない手（ハーネスへの申し送り・この campaign では足していない）:
+   - (c) t-share-labels-atlas に［記号の候補を探す］（admin.library.symbol_derive）・記号リンクの確定・凍結し直し・地図の対応を手で付ける手
+     （admin.library.atlas_link_manual）が無い。指揮者の「te-03 × (c) で TeX 版の記号候補を画面で確定 → 凍結」は、te-03 の run では候補の読みまで、
+     確定・凍結は用意 4 の指揮者の判断（te-03 として）で代える。
+   - (b2) に 2 人目の査読（admin.explanations.update の second_review）の手が無い — 用意 7 で代える（審判は「te-02 が自分で押す」を求めた）。
+   - 他コースの学生の場面は s-share-part-chip の流用（「引用された説明」を見るための専用の手は無い。部品の「説明」の一覧で読む）。
+   - (a) の取り消しは対象なし（前提①以外の確定リンク 0 本）。取り消しの読み手（IK-1050）を viewer の目で見るのは、取り消し済みのリンクの行の表示まで。
+
+  LLM 予算の見積り: 製品の LLM は (d) の選択質問 2 回 × 2 人（st-07・st-10）・共通部品の検索の埋め込み 1〜2 回・Copilot 0〜2 回（(a) の任意の手）・
+  (c)(e)(b2) 0 回 = 5〜8 回（余裕を見て 12）。用意 2〜7 は LLM を使わない。ペルソナ頭脳は 6 場面 × 45〜60 手 ≒ 270〜340（上限 340）。外部 API は
+  呼ばない。

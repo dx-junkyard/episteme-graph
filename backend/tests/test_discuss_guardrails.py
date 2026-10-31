@@ -78,15 +78,37 @@ class TestSingleFilteredSearchFeedsCitedSources:
 
     def test_cited_sources_appended_exactly_once_from_chunk_results_loop(self):
         body = self._learning_chat_body()
-        # cited_sources へ書き込むのは1箇所のみ（他ソースからの混入経路が無い）。
-        assert body.count("cited_sources.append(") == 1
-        # その1箇所が `for r in chunk_results:` ループの内側にあること。
+        # cited_sources へ書き込むのは3箇所だけ: ①検索結果のループ ②直前の回答が引用した
+        # チャンクを戻すループ（IK-0475）③表示中の教材の出典チャンク（第 17 周 A1）。
+        # ②③は検索ではなく id 指定の読み出しで、当該往復の allowed_document_ids を
+        # そのまま渡す（範囲を広げない = DM1/DM2）。
+        assert body.count("cited_sources.append(") == 3
+        # 1つ目が `for r in chunk_results:` ループの内側にあること。
         loop_start = body.index("for r in chunk_results:")
         append_idx = body.index("cited_sources.append(")
         assert loop_start < append_idx
         # ループと append の間に別の検索呼び出しが挟まっていないこと。
         between = body[loop_start:append_idx]
         assert "search_chunks_with_metadata(" not in between
+        # 2つ目は _carry_previous_cited_sources の結果だけを回し、可視集合を差し替えない。
+        second_idx = body.index("cited_sources.append(", append_idx + 1)
+        # 第 15 周: 直前の引用は検索の前に id 指定で読み出す（議論中の論文の優先に使う）。
+        carry_idx = body.index("_carry_previous_cited_sources(")
+        search_idx = body.index("search_chunks_with_metadata(")
+        assert carry_idx < search_idx
+        carry_call = body[carry_idx:search_idx]
+        assert "allowed_document_ids=allowed_document_ids" in carry_call
+        assert "list_visible_document_ids" not in carry_call
+        loop_idx = body.index("for r in _carried:")
+        assert append_idx < loop_idx < second_idx
+        assert "_previous_cited_rows" in body[append_idx:loop_idx]
+        # 3つ目は _topic_source_rows（topic.material_chunk_ids の id 指定読み出し）だけを回す。
+        third_idx = body.index("cited_sources.append(", second_idx + 1)
+        topic_idx = body.index("for r in _topic_source_rows(")
+        assert second_idx < topic_idx < third_idx
+        topic_call = body[topic_idx:third_idx]
+        assert "allowed_document_ids=allowed_document_ids" in topic_call
+        assert "list_visible_document_ids" not in topic_call
 
     def test_no_second_search_or_scope_widening_after_initial_call(self):
         """最初の（唯一の）検索呼び出しより後ろに、2回目の検索呼び出しや

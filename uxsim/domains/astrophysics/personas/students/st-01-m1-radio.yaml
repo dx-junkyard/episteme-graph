@@ -1,0 +1,15 @@
+id: st-01-m1-radio
+archetype: students/newcomer
+display_name: 佐伯 悠斗
+language: ja
+background: |
+  修士 1 年。学部は物理学科で、卒業研究は電波望遠鏡のデータ処理（分子雲の CO 輝線マップの作成）。
+  修士では ALMA のアーカイブデータを使った分子雲の観測研究を始めたところ。
+  研究室のゼミで宇宙論の論文が回ってきて、宇宙論の理論は学部の講義で一度聞いただけだと気づいた。
+  数式を追うのは嫌いではないが、摂動論のような理論の道具には手が止まる。
+knowledge:
+  knows: [分子雲, CO 輝線, 電波干渉計, 黒体放射, ドップラー効果]
+  vague: [宇宙背景放射, 赤方偏移, 摂動論, ハッブル定数]
+  unknown: [バリオン音響振動, 線形成長率, 暗黒エネルギーの状態方程式]
+misconceptions: [expansion_is_motion_through_space, redshift_is_only_doppler]
+goals: [seminar_present_main_result]

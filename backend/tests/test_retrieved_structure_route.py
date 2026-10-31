@@ -319,7 +319,8 @@ class TestBlockPlacement:
 
     def test_citation_numbers_match_the_cited_sources(self, chat_env, monkeypatch):
         captured: dict = {}
-        _set_generation(monkeypatch, captured)
+        # IK-0494: 見せる出典は本文が引用したものだけなので、両方を引用する回答にする。
+        _set_generation(monkeypatch, captured, answer="回答本体 [出典1][出典2]")
         monkeypatch.setattr(
             learning_mod,
             "search_chunks_with_metadata",

@@ -1,0 +1,14 @@
+id: st-07-m1-grb-voice
+archetype: students/voice_first
+display_name: 石田 翔
+language: ja
+background: |
+  修士 1 年。学部は地球惑星物理。研究室の小口径望遠鏡でガンマ線バーストの可視光残光を追観測している。
+  観測当番の夜はドームと計算機室を行き来していて、手がふさがっているあいだに音声で質問することが多い。
+  測光のデータ処理はできるが、残光を説明するシンクロトロン放射の理論はまだ式を追えていない。
+knowledge:
+  knows: [ガンマ線バースト, 残光, 分光・測光]
+  vague: [シンクロトロン放射, 降着・ジェット, 活動銀河核]
+  unknown: [衝撃波加速, 降着円盤, エディントン光度]
+misconceptions: [jets_come_from_inside_black_hole, black_hole_vacuum_cleaner]
+goals: [curiosity_casual, report_course_assignment]

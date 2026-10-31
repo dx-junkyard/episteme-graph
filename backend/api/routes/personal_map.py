@@ -47,6 +47,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user
 from services import get_accessible_course_data, user_can_view_document
 from core.personal_graph.atlas_fog import atlas_neighbors_for_person_node
@@ -62,10 +63,10 @@ from core.personal_graph.provisional import derive_provisional_nodes
 from core.personal_graph.queries import fetch_course_titles
 from core.personal_graph.schema import PersonalNetwork
 
-router = APIRouter(prefix="/api/learning", tags=["Learning"])
+router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 # Phase P-0.5（提案書 §5.3）: 本人スコープの正本 API。
-me_router = APIRouter(prefix="/api/me", tags=["Learning"])
+me_router = APIRouter(prefix="/api/me", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 # context_type の許可語彙。提案書 §5.3 は course/document/anchor_id 等を将来像として
 # 挙げているが、Phase P-0.5 の実装範囲は course のみ（document 単位のコンテキストは

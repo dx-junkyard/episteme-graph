@@ -1,0 +1,6 @@
+scenario: t-atlas-freeze-impact-read
+domain: astrophysics
+params:
+  domain_hint: astrophysics
+  accept_hint: "1"
+  freeze_version: "2026.2"

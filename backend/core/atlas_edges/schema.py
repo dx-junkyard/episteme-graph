@@ -43,6 +43,12 @@ THREADS_MAX_PER_NODE = 2
 #: 1ドメインの糸の総数上限。
 THREADS_MAX_TOTAL = 30
 
+#: 教員のレビュー一覧で、説明文どうしの近さだけの候補を 1 ノードあたり何本まで出すか
+#: （IK-0887。残りは「ほかにもあります」に畳む。共起と判断済みの候補は数えない）。
+REVIEW_MAX_PER_NODE = 2
+#: 同じく全体の上限（学習者の糸 ``THREADS_MAX_TOTAL`` と同じ桁にそろえる）。
+REVIEW_MAX_TOTAL = 30
+
 # ---------------------------------------------------------------------------
 # 教員の判断（atlas_edge_decisions.status）— 確定は人間のみ（RE3 / KN-3）
 # ---------------------------------------------------------------------------
@@ -171,6 +177,40 @@ def parse_edge_key(edge_key: str) -> tuple[str, str, str]:
     return (domain, left, right)
 
 
+def oriented_pair(edge_key: str, from_node_id: object) -> tuple[str, str] | None:
+    """教員が選んだ記載の始点 ``from_node_id`` から ``(from, to)`` を組む（IK-1149）。
+
+    ``from_node_id`` が edge_key の 2 端点のどちらでもなければ ``None``（向きの記録として
+    受けない — 別の組の id を混ぜない fail-closed）。空なら ``None``（記録なし）。
+    """
+    _domain, left, right = parse_edge_key(edge_key)
+    chosen = _clean(from_node_id)
+    if not left or not chosen:
+        return None
+    if chosen == left:
+        return (left, right)
+    if chosen == right:
+        return (right, left)
+    return None
+
+
+def decision_direction(edge_key: str, decision: object = None) -> tuple[str, str, bool]:
+    """判断の記載順 ``(from, to, recorded)``（IK-1149）。
+
+    判断の行に教員が選んだ向き（``from_node_id`` / ``to_node_id``・migration 096）があればそれを、
+    無ければ edge_key の正規化順（node_id の辞書順）を返し ``recorded=False`` にする。
+    呼び出し側は ``recorded=False`` かつ有向の種別のとき「向きは選ばれていない」事実を言う。
+    """
+    _domain, left, right = parse_edge_key(edge_key)
+    if isinstance(decision, dict):
+        stored_from = _clean(decision.get("from_node_id"))
+        stored_to = _clean(decision.get("to_node_id"))
+        oriented = oriented_pair(edge_key, stored_from) if stored_from else None
+        if oriented is not None and (not stored_to or stored_to == oriented[1]):
+            return (oriented[0], oriented[1], True)
+    return (left, right, False)
+
+
 def edge_key_domain_prefix(domain_key: str) -> str:
     """``domain_key`` で判断行を絞るための edge_key 前方一致プレフィックス。
 
@@ -211,9 +251,11 @@ __all__ = [
     "THREADS_MAX_PER_NODE",
     "THREADS_MAX_TOTAL",
     "build_edge_key",
+    "decision_direction",
     "decision_status_label",
     "edge_key_domain_prefix",
     "is_valid_decision_status",
+    "oriented_pair",
     "parse_edge_key",
     "undirected_pair",
 ]

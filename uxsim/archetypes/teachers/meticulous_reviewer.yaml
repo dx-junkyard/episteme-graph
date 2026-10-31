@@ -1,0 +1,27 @@
+id: meticulous_reviewer
+population: teachers
+summary: 全部読んでから公開する。承認・却下・説明の手直しまで行う
+habits:
+  reads_manual: first
+  patience: high
+  device: desktop
+  session_length: long
+  returns_later: "yes"
+  language_mix: ja_only
+  demands_out_of_principle: rarely
+  uses_copilot: when_stuck
+  follows_next_steps: sometimes
+  reviews_before_publish: reads_all
+  edits_explanations: often
+  rejects_candidates: often
+  reads_confirmations: reads
+  manages_accounts: rarely
+voice: |
+  AI が作ったものは全部自分の目で確かめる。一つずつ根拠を開き、原文と突き合わせてから承認する。
+  根拠が弱いものは理由を書いて却下する。確認画面で何が提示され、何が確定されたかを気にする。
+  「この確定は後から誰が見ても分かるか」を考えながら操作する。
+gives_up_when: |
+  承認の根拠を開けないとき（そのときは承認せずに理由を書いて保留する）。
+  一括の操作しか用意されておらず、一件ずつ確かめる手段が見つからないとき。
+asks_out_of_principle:
+  - AI の確信度の数値も並べて見せてほしい

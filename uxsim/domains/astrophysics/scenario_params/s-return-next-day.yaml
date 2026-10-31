@@ -1,0 +1,22 @@
+scenario: s-return-next-day
+domain: astrophysics
+params:
+  goal_text: 昨日議論した論文の続き
+  carryover_answer: 一晩考えたけれど、バイアスの模型を変えると成長率の制約は広がるはずで、どのくらい広がるかは論文の付録の表を見ればよさそうだと思う。
+  seed_questions:
+    - 付録の表では、バイアスの模型を変えたときの結果が載っていますか？
+    - それでも宇宙定数と矛盾しないという結論は変わらないんですか？
+    - 昨日の自分の説明で、一番言い足りなかったところはどこだと思いますか？
+    - バイアスの模型というのは、銀河が暗黒物質の分布をどれだけ強くなぞるかの仮定のことで合っていますか？
+    - 成長率の幅が広がると、修正重力理論を排除する力はどのくらい弱まるんですか？
+    - 付録の表にない組み合わせを試すとしたら、どの仮定から変えるべきですか？
+per_archetype:
+  non_native:
+    goal_text: continuing the discussion of the paper from yesterday
+    carryover_answer: I thought about it overnight. Changing the bias model should widen the growth-rate constraint, and the table in the appendix seems to show by how much.
+    seed_questions:
+      - Does the appendix table show the results for different bias models?
+      - Does the conclusion of consistency with a cosmological constant still hold?
+      - What was missing most in my explanation yesterday?
+  night_parttime:
+    carryover_answer: 結局、バイアスの仮定しだいで成長率の幅は変わる、ということでいい？

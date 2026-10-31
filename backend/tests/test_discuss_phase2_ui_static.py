@@ -28,6 +28,7 @@
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -174,7 +175,9 @@ class TestOpeningScreenSections:
         点線枠などの控えめな差にとどめ、警告色・強調色にしない（設計 §3.3）。"""
         js = _read(DISCUSS_JS)
         block = _extract_function_body(js, "function renderBackboneSection(doc) {")
-        assert "source_backed" in block
+        # 第 23 周: 学習者 DTO は内部語 source_backing_status を落とし ``backed`` の真偽を返す
+        # （JS は ``n.backed`` を読む。移行中は旧キーの比較でも可）。
+        assert "backed" in block
         assert "discuss-backbone-node--review" in block
         css = _read(STYLES_CSS)
         review_rule = css.split(".discuss-backbone-node--review {")[1].split("}")[0]
@@ -573,11 +576,13 @@ class TestLandingConnectNote:
 class TestIndexHtmlWiring:
     def test_discuss_js_script_tag_present(self):
         html = _read(INDEX_HTML)
-        assert '<script src="/js/discuss.js"></script>' in html
+        # キャッシュバスター（``?v=...``）は付いていてよい（外さない — JS 変更時に上げる）。
+        m_discuss = re.search(r'<script src="/js/discuss\.js(?:\?v=[^"]*)?"></script>', html)
+        m_recon = re.search(r'<script src="/js/reconstruction\.js(?:\?v=[^"]*)?"></script>', html)
+        assert m_discuss is not None
+        assert m_recon is not None
         # reconstruction.js より後に読み込む（既存の並び順を踏襲）
-        idx_recon = html.index('<script src="/js/reconstruction.js"></script>')
-        idx_discuss = html.index('<script src="/js/discuss.js"></script>')
-        assert idx_recon < idx_discuss
+        assert m_recon.start() < m_discuss.start()
 
     def test_landing_modal_root_present_and_hidden_by_default(self):
         html = _read(INDEX_HTML)

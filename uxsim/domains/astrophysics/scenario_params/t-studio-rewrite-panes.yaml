@@ -1,0 +1,12 @@
+scenario: t-studio-rewrite-panes
+domain: astrophysics
+params:
+  goal_text: 先頭のトピックの授業用ドラフトを、根拠とつまづきを見たうえで AI に分かりやすく書き換えてもらい、残すかどうかを決める
+  rewrite_prompt: 修士1年が初めて読む前提で、式の意味を一言ずつ添えて、段落を短くしてください。式と図の埋め込みは消さないでください。
+  material_append:
+    - （補足）この式の各記号は、教材の式一覧で確かめられます。
+per_archetype:
+  delegator:
+    rewrite_prompt: いい感じに分かりやすくしておいてください。
+  meticulous_reviewer:
+    rewrite_prompt: 論文に書かれていないことは足さず、式の意味を一言ずつ添えてください。埋め込み（![[...]]）は位置も含めて残してください。

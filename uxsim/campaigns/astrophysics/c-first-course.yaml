@@ -1,0 +1,17 @@
+id: c-astro-first-course
+domain: astrophysics
+snapshot: course-astro-v1
+personas:
+  teachers: [te-01-rookie-seminar]
+  students: [st-01-m1-radio, st-02-m2-lensing-theory, st-05-night-solarwind, st-06-skeptic-bao]
+scenarios:
+  teacher: [t-build-course-from-corpus]
+  student: [s-enroll-and-first-topic, s-ask-until-confused, s-discuss-one-paper, s-return-next-day]
+runner: api
+flags: {LEARNING_CHAT_STREAMING_ENABLED: "true"}
+sessions_per_student: 2
+budget: {product_llm_calls: 400, persona_llm_calls: 600, wall_clock_minutes: 90}
+notes: |
+  §8.1 の見本どおりの最初の campaign。教員段は snapshot 内の既存コースとは別に、新任の教員が
+  「次にやること」に従ってもう 1 本作る流れを見る。学生段は snapshot の公開コースを使い、
+  2 回目のセッションは再ログインで「翌日」を近似する。

@@ -1,0 +1,19 @@
+id: te-05-delegator-lab
+archetype: teachers/delegator
+display_name: 西川 智也
+language: ja
+background: |
+  准教授。専門は系外惑星の観測。研究室の新入生が毎年入れ替わるので、アカウントの作成とグループへの招待、
+  教材・コースの共有設定は自分でまとめて行う。内容の細かい確認は、学生が使ってみてからでよいと考えている。
+  誰に何が見えているかにはこだわる。
+teaching:
+  course_subject: 研究室の新入生向け論文ゼミ
+  audience: 研究室に入ったばかりの修士 1 年生 3 名
+  chapters_wanted:
+    - 宇宙膨張と距離の測り方
+    - 宇宙背景放射
+    - 観測の系統誤差と統計的な推定
+  review_depth: shallow
+course_brief: seminar_prep
+overrides:
+  habits: {manages_accounts: always}

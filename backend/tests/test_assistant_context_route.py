@@ -44,6 +44,8 @@ _SESSION = "55555555-5555-5555-5555-555555555555"
 _NODE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 _NODE_LABEL = "Equation system"
+#: IK-0546: main の英語の stage 名（#308）は grounding では日本語の段名になる。
+_NODE_LABEL_JA = "式の体系"
 _EQUATION_LABEL = "式 (12)"
 
 
@@ -191,7 +193,7 @@ class TestGraphSessionScreenContext:
         assert result["reply"] == "仮説です"
         llm_input = harness.seen["llm_user_content"]
         assert llm_input.startswith(BLOCK_HEADER)
-        assert _NODE_LABEL in llm_input
+        assert _NODE_LABEL_JA in llm_input
         assert _EQUATION_LABEL in llm_input
         assert llm_input.endswith("ここは何をしている？")
         # 論文層は当該 document のものだけを引く。
@@ -240,6 +242,7 @@ class TestGraphSessionScreenContext:
         llm_input = harness.seen["llm_user_content"]
         assert llm_input.startswith(BLOCK_HEADER)
         assert _NODE_LABEL not in llm_input
+        assert _NODE_LABEL_JA not in llm_input
         assert llm_input.endswith("質問")
 
     def test_without_screen_context_input_is_unchanged(self, monkeypatch):
@@ -337,7 +340,7 @@ class TestElementSessionScreenContext:
         assert result["reply"] == "回答です"
         llm_input = harness.seen["llm_user_content"]
         assert llm_input.startswith(BLOCK_HEADER)
-        assert _NODE_LABEL in llm_input
+        assert _NODE_LABEL_JA in llm_input
         assert llm_input.endswith("これは何ですか？")
 
     def test_block_precedes_the_selected_context_hint(self, monkeypatch):

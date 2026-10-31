@@ -16,6 +16,8 @@
  *   ElementVocab.zoneHeading(zone)        ゾーン見出し
  *   ElementVocab.groupHeading(group)      ゾーン内の group 小見出し
  *   ElementVocab.qualifierLabel(type,key) ITEM の qualifier（種別内サブ種別）の表示名
+ *                                         （"unknown" は "" — 「不明」チップを描かない）
+ *   ElementVocab.claimTierLabel(key)      主張の階層（CLAIM_TIER_LABELS）の表示名
  * kindLabel / elementTypeLabel は未知キーをそのまま返す（fail-soft・情報を落とさない）。
  * statusLabel だけは未知キーで "" を返す（呼び出し側がバッジ自体を出さない判断に使う。
  * 内部語彙をそのまま画面に出さないため — 既存 lsContextStatusBadgeHtml の挙動）。
@@ -50,7 +52,9 @@
     thesis: "中心命題",
     symbol: "記号",
     stage: "理論ステージ",
-    part: "パーツ"
+    part: "パーツ",
+    // 理論モジュール（theory_module_layer_design.md §13.9）。同一性候補のリンク行に出す。
+    theory_module: "理論モジュール"
   };
 
   // 関係・役割の裏付け状態（context_lens ITEM の relation_status /
@@ -218,6 +222,10 @@
     uncertainty: "不確かさ",
     diagnostic_claim: "診断的主張",
     method_choice: "手法の選択",
+    definition_claim: "式による定義",
+    dependency_claim: "式の依存関係",
+    equation_system_claim: "連立式",
+    result_claim: "式の結果",
     method: "手法",
     method_motivation: "手法の動機",
     background: "背景",
@@ -228,6 +236,18 @@
     structural_property: "構造的性質",
     interpretation: "解釈",
     unknown: "不明"
+  };
+
+  // 主張の階層（core/schema.py の CLAIM_TIERS と1対1。claim_qualification の tier 語彙）。
+  // claim_type='unknown'（atomic 子主張に多い）の補足行を「不明」と裸で出さず、階層の訳へ
+  // 落とすための表（docs/features/element_context_presentation_redesign.md §11.2）。
+  // 補足行（ITEM.sublabel）はサーバが組み立てるので、ここはミラーとして持つ。
+  var CLAIM_TIER_LABELS = {
+    paper_core: "論文の中心となる主張",
+    paper_supporting: "論文を支える主張",
+    background: "背景",
+    prior_work: "先行研究",
+    meta: "メタ"
   };
 
   // ──────────────────────────────────────────────────────────────────────
@@ -251,6 +271,8 @@
     stage: ZONE_POSITIONING,
     thesis: ZONE_POSITIONING,
     claim: ZONE_POSITIONING,
+    // 図を参照する本文段落の主張（§11.3。関係語は「を述べる本文で参照される」）。
+    mention_claim: ZONE_POSITIONING,
     section: ZONE_POSITIONING,
     symbol_defined: ZONE_COMPOSITION,
     symbol_used: ZONE_COMPOSITION,
@@ -285,6 +307,7 @@
     section: "掲載",
     thesis: "中心命題",
     claim: "支える主張",
+    mention_claim: "この図を参照している本文の主張",
     operation: "式の詳細層"
   };
 
@@ -293,6 +316,10 @@
   // （訳語文字列をここに新設しない = CP4）。
   var QUALIFIER_EQUATION_DETAIL = "equation_detail";
   var QUALIFIER_EQUATION_DETAIL_LABEL = "式の詳細";
+  // 「不明」を意味するキー。qualifier チップ・役割行には描かない（§11.2「意味の無い
+  // ラベルを裸で出さない」）。訳語表（CLAIM_TYPE_LABELS.unknown 等）自体はミラーの
+  // ため残し、描画側の lookup だけが "" を返す。
+  var QUALIFIER_UNKNOWN = "unknown";
 
   function lookup(table, key) {
     var raw = String(key == null ? "" : key);
@@ -389,6 +416,10 @@
     return strictLookup(CLAIM_TYPE_LABELS, key);
   }
 
+  function claimTierLabel(key) {
+    return strictLookup(CLAIM_TIER_LABELS, key);
+  }
+
   // group → ゾーン。未知・未設定は "related"（捨てずに「関連」区画へ）。
   function zoneForGroup(group) {
     var raw = String(group == null ? "" : group).replace(/^\s+|\s+$/g, "");
@@ -404,11 +435,16 @@
     return strictLookup(GROUP_HEADINGS, group);
   }
 
+  // 「不明」キーか（element-card.js の役割行が訳語表を総当たりする前に弾くため）。
+  function isUnknownKey(key) {
+    return String(key == null ? "" : key).replace(/^\s+|\s+$/g, "") === QUALIFIER_UNKNOWN;
+  }
+
   // 要素種別 × qualifier キー → 表示名。未知は ""（内部語彙を画面に出さない）。
   function qualifierLabel(elementType, key) {
     var type = String(elementType == null ? "" : elementType).replace(/^\s+|\s+$/g, "");
     var raw = String(key == null ? "" : key).replace(/^\s+|\s+$/g, "");
-    if (!raw) return "";
+    if (!raw || raw === QUALIFIER_UNKNOWN) return "";
     if (type === "derivation") return chainTypeLabel(raw);
     if (type === "stage") return theoryStageLabel(raw);
     if (type === "theory_component") {
@@ -432,6 +468,8 @@
     definitionStatusLabel: definitionStatusLabel,
     symbolScopeLabel: symbolScopeLabel,
     claimTypeLabel: claimTypeLabel,
+    claimTierLabel: claimTierLabel,
+    isUnknownKey: isUnknownKey,
     zoneForGroup: zoneForGroup,
     zoneHeading: zoneHeading,
     groupHeading: groupHeading,

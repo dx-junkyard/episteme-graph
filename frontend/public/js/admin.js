@@ -152,6 +152,14 @@
   }
 
   // ── Utilities ──────────────────────────────────────────────────────
+  // 分野の地図の版の呼び名（IK-0942）。正本は core/label_vocab.py::ATLAS_VERSION_PREFIX
+  // （逐語ミラー — 一致は test_atlas_review_round25_r3.py が固定）。
+  var ATLAS_VERSION_PREFIX = "地図 版 ";
+  function atlasVersionText(version) {
+    var v = version === null || version === undefined ? "" : String(version).trim();
+    return v ? ATLAS_VERSION_PREFIX + v : "";
+  }
+
   function escHtml(s) {
     if (s === null || s === undefined || s === "") return "";
     s = String(s);
@@ -331,15 +339,53 @@
         ["export_validation", "整合性の最終チェック"],
       ],
     },
+    {
+      // 保存済みの結果を読む後段（theory_module_layer_design.md §13.5）。表示名は
+      // サーバの進捗ラベル表（lecture_studio/pipeline.py の DOCUMENT_PIPELINE_STAGE_LABELS）と同じ。
+      // 「理論モジュールの保存」から始めると、続けて同一性の候補づくりも走る。
+      label: "保存した結果を照合する",
+      stages: [
+        ["theory_modules", "理論モジュールの保存"],
+        ["identity_candidates", "共通する概念の候補づくり"],
+      ],
+    },
   ];
   var materialPipelineStages = materialPipelineStageGroups.reduce(function (stages, group) {
     return stages.concat(group.stages);
   }, []);
 
+  // 教材一覧（最後に描いたもの）から material_id で1行を引く（論文レーダーの導線用）。
+  function findMaterialInList(materialId) {
+    var list = state.materialsList || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && String(list[i].material_id) === String(materialId)) return list[i];
+    }
+    return null;
+  }
+
+  // 教材一覧の行へスクロールして一時的に強調する（論文レーダーの「この教材の行へ」）。
+  // 行がまだ一覧に無い（再読込前）ときは一覧を読み直してから探す。
+  function focusMaterialRow(materialId) {
+    if (!materialId) return;
+    var row = document.querySelector('#materials-tbody tr[data-material-id="' + CSS.escape(String(materialId)) + '"]');
+    if (!row) {
+      loadMaterials();
+      return;
+    }
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    row.classList.add("material-row-focus");
+    setTimeout(function () { row.classList.remove("material-row-focus"); }, 2500);
+  }
+
   function renderMaterials(materials) {
     var tbody = document.getElementById("materials-tbody");
     // 解析再開モーダルが直近の analysis_options を復元できるよう、一覧取得のたびにキャッシュする。
     state.materialsList = materials || [];
+    // 論文レーダーの取り込み済み候補は、この一覧の解析状態で導線を出し分ける（§19 C）。
+    // 再読込のたびに知らせるだけで、レーダー側からはポーリングしない（PR5）。
+    if (window.PaperRadar && window.PaperRadar.onMaterialsUpdated) {
+      setTimeout(function () { window.PaperRadar.onMaterialsUpdated(); }, 0);
+    }
     if (!materials || materials.length === 0) {
       tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--color-text-tertiary)">教材がまだアップロードされていません</td></tr>';
       return;
@@ -388,7 +434,14 @@
       // N36: 開示範囲（Public/Group/Private）をコース側（G5-2 の courseVisibilityBadgeHtml）と
       // 対称のバッジ様式でインライン表示する（変更は従来どおり「共有設定」モーダルから）。
       html += "<td>" + escHtml(m.title) +
-        '<div style="margin-top:2px">' + courseVisibilityBadgeHtml({ visibility: m.visibility || "private" }) + '</div></td>';
+        '<div style="margin-top:2px">' + courseVisibilityBadgeHtml({ visibility: m.visibility || "private" }) +
+        // IK-0974: 自分にとっての役割（所有 / 共有（編集可） / 閲覧のみ。語はサーバの role_label）。
+        (m.role_label ? ' <span class="admin-material-role" data-material-role="' + escHtml(m.role || "") +
+          '" style="font-size:11px;color:var(--color-text-secondary)">' + escHtml(m.role_label) + '</span>' : '') +
+        '</div>' +
+        (m.edit_request_note ? '<div class="admin-material-edit-request" style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px">' +
+          escHtml(m.edit_request_note) + '</div>' : '') +
+        '</td>';
       var hasPdf = m.has_pdf === true;
       var chunkCount = typeof m.chunk_count === "number" ? m.chunk_count : null;
       // status=failed のみ PDF 再登録を促す。縮退(completed)はチャンクが存在するため不要
@@ -427,6 +480,8 @@
       // 件数バッジ・比率は作らない。「切れがあります」も運用上の事実であって失敗ではない
       // ので警告色にしない（未確認は薄色で「まだ確認されていない」ことだけを言う）。
       html += materialReferenceHealthChipHtml(m);
+      // 解析の縮退（IK-0715）: AI の応答が得られず決定論の代替で作られた段があるときだけ 1 行。
+      html += materialAnalysisDegradationChipHtml(m);
       html += "</td>";
       html += "<td>" + escHtml(uploadedAt) + "</td>";
       var resumeBtn = canResume
@@ -434,7 +489,7 @@
         : "";
       // 機能1: 解析成果のグループ共有 + 開示範囲（G1-1）（document_id が必要）
       var shareBtn = m.document_id
-        ? '<button class="ls-menu-item admin-share-doc-btn" type="button" data-ui-anchor="materials.row-share" data-document-id="' + escHtml(m.document_id) + '" data-material-id="' + escHtml(m.material_id || "") + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" data-visibility="' + escHtml(m.visibility || "private") + '" data-group-id="' + escHtml(m.group_id || "") + '" title="グループ共有・開示範囲（公開/グループ限定/非公開）を設定します">共有設定…</button>'
+        ? '<button class="ls-menu-item admin-share-doc-btn" type="button" data-ui-anchor="materials.row-share" data-document-id="' + escHtml(m.document_id) + '" data-material-id="' + escHtml(m.material_id || "") + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" data-format-label="' + escHtml(m.format_label || "") + '" data-visibility="' + escHtml(m.visibility || "private") + '" data-group-id="' + escHtml(m.group_id || "") + '" title="グループ共有・開示範囲（公開/グループ限定/非公開）を設定します">共有設定…</button>'
         : "";
       // V層: 共有版（リリース）の発行・履歴・削除予約（document_id が必要。上の「共有設定」とは別機能）
       var versionBtn = m.document_id
@@ -450,13 +505,18 @@
       // ⋯ メニューではなく行のアイコンボタン（📡）として「パイプラインを実行 ▼」の隣に出す。
       var radarTitle = "近い論文を探す — この論文を起点に、距離（近い/中間/同じ分野の別テーマ）を選んで arXiv から候補を探します";
       var radarBtn = m.document_id
-        ? '<button class="admin-action-btn material-row-icon-btn admin-radar-doc-btn" type="button" data-ui-anchor="materials.row-radar" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="' + escHtml(radarTitle) + '" aria-label="近い論文を探す"><span class="material-row-icon material-row-icon-emoji" aria-hidden="true">📡</span></button>'
+        ? '<button class="admin-action-btn material-row-icon-btn admin-radar-doc-btn" type="button" data-ui-anchor="materials.row-radar" data-document-id="' + escHtml(m.document_id) + '" data-analysis-cartridge-id="' + escHtml(m.analysis_cartridge_id || "") + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="' + escHtml(radarTitle) + '" aria-label="近い論文を探す"><span class="material-row-icon material-row-icon-emoji" aria-hidden="true">📡</span></button>'
         : "";
       // ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1）: 輪講の前にこの論文の
       // 「賭け金」（脆い前提・一点吊りの支持線・晴れ間）を10分で把握する read-only
       // 合成ビュー（新テーブル・新LLMゼロ、SB1。document_id が必要）
       var seminarBriefBtn = m.document_id
         ? '<button class="ls-menu-item admin-seminar-brief-btn" type="button" data-ui-anchor="materials.row-seminar-brief" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="輪講の前に、この論文の脆い前提・一点吊りの支持線・晴れ間を確認します（読み取り専用）">ゼミ前ブリーフ…</button>'
+        : "";
+      // 検証シミュレーション（simulation_bridge_design.md §7）: 理論モジュールをコード化し、
+      // 実験機の配線を通した模擬観測と比べる教員向けモーダル（document_id が必要）。
+      var simulationBtn = m.document_id
+        ? '<button class="ls-menu-item admin-simulation-bridge-btn" type="button" data-ui-anchor="materials.row-simulation" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="理論モジュールをコード化し、実験機の配線を通した模擬観測と比べます（一致は検証ではなく候補です）">検証シミュレーション…</button>'
         : "";
       // 束の取り込み（knowledge_transfer_design.md P4-1 / §4.3）: 別インスタンスで
       // 書き出した束（zip）をこの教材の知識として取り込む。取り込みは編集権限が要る操作で、
@@ -510,6 +570,7 @@
             versionBtn +
             landscapeBtn +
             seminarBriefBtn +
+            simulationBtn +
             referenceHealthBtn +
             importBtn +
             estimateBtn +
@@ -547,7 +608,8 @@
           this.getAttribute("data-title"),
           this.getAttribute("data-material-id"),
           this.getAttribute("data-visibility"),
-          this.getAttribute("data-group-id")
+          this.getAttribute("data-group-id"),
+          this.getAttribute("data-format-label")
         );
       });
     });
@@ -592,7 +654,9 @@
         if (window.PaperRadar) {
           window.PaperRadar.openModal(
             this.getAttribute("data-document-id"),
-            this.getAttribute("data-title")
+            this.getAttribute("data-title"),
+            // 取り込みの「解析の分野」の既定 = seed 教材の採用 run の分野（無ければ「指定しない」）。
+            { cartridgeId: this.getAttribute("data-analysis-cartridge-id") || "" }
           );
         }
       });
@@ -602,6 +666,15 @@
     tbody.querySelectorAll(".admin-seminar-brief-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         openSeminarBriefModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+      });
+    });
+
+    // 検証シミュレーション（simulation_bridge_design.md §7）: 4 区画のフルモーダル
+    tbody.querySelectorAll(".admin-simulation-bridge-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (window.SimulationBridge) {
+          window.SimulationBridge.open(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+        }
       });
     });
 
@@ -1194,6 +1267,32 @@
     return _reanalyzeDomain.value || "";
   }
 
+  // 再解析モーダルの「生成する言語」区画。previous は前回 run の options.language。
+  function _reanalyzeLanguageInit(lastOpts) {
+    var row = document.getElementById("reanalyze-language-row");
+    if (!row) return;
+    var previous = (lastOpts && GENERATION_LANGUAGE_LABELS[lastOpts.language]) ? lastOpts.language : "";
+    row.innerHTML =
+      '<div>前回の解析の生成する言語: ' + escHtml(generationLanguageLabel(previous)) + '</div>' +
+      '<label style="display:block;margin-top:4px">この解析の生成する言語' +
+        '<select id="reanalyze-language-select" style="margin-left:6px;font-size:12.5px">' +
+          '<option value="">前回と同じ</option>' +
+          '<option value="none">指定しない</option>' +
+          '<option value="ja">日本語</option>' +
+          '<option value="en">英語</option>' +
+        '</select>' +
+      '</label>';
+  }
+
+  // 再解析リクエストに載せる生成言語。「前回と同じ」なら null（送らない＝前回から継承）、
+  // 「指定しない」なら ""（明示的な解除として送る — 分野の cartridge_id と同じ約束）。
+  function getReanalyzeLanguage() {
+    var el = document.getElementById("reanalyze-language-select");
+    var value = el ? String(el.value || "") : "";
+    if (value === "none") return "";
+    return GENERATION_LANGUAGE_LABELS[value] ? value : null;
+  }
+
   // 「解析再開」ボタンのフローにもアップロード時と同じチェックボックスを出す。
   function openReanalyzeOptionsModal(docId, filename, triggerBtn) {
     var existing = document.getElementById("reanalyze-options-modal");
@@ -1216,6 +1315,8 @@
         /* 分野の適合（概念レジストリ P3-7）: 選択中の分野の「形の宣言」と、この論文の
            解析結果との適合を事実文で示す。中身は admin-cartridge-fit.js が描く。 */
         '<div id="reanalyze-domain-fit-row" data-ui-anchor="materials.reanalyze-domain-fit" style="font-size:11.5px;color:var(--color-text-tertiary);margin-bottom:10px"></div>' +
+        /* 生成する言語（run options.language）: 前回値を事実文で示し、この解析だけ変更できる */
+        '<div id="reanalyze-language-row" data-ui-anchor="materials.upload-language" style="font-size:12.5px;color:var(--color-text-secondary);margin-bottom:10px"></div>' +
         '<div id="reanalyze-llm-model-row" style="margin-bottom:16px"></div>' +
         '<div style="display:flex;gap:8px;justify-content:flex-end">' +
           '<button id="reanalyze-cancel-btn" class="admin-action-btn">キャンセル</button>' +
@@ -1233,6 +1334,10 @@
     // 分野（提案 C1）: 前回 run の分野を事実文で示し、この解析だけ選び直せる。
     // 触らなければ cartridge_id を送らず、サーバ側が前回 run の分野を継承する。
     _reanalyzeDomainInit(lastMaterial);
+
+    // 生成する言語: 前回 run の options.language を事実文で示す。「前回と同じ」のままなら
+    // language を送らず、サーバ側が前回 run の値を引き継ぐ。
+    _reanalyzeLanguageInit(lastOpts);
 
     // 分野の適合（概念レジストリ P3-7 / concept_registry_design.md §8）: 選択中の
     // 分野の形の宣言（shape.json）と、この論文の解析結果との適合を事実文で示す。
@@ -1261,6 +1366,7 @@
       var analyzeImages = document.getElementById("reanalyze-analyze-images").checked;
       var llmModels = window.AdminLlmModels ? window.AdminLlmModels.getReanalyzeModels(lastOpts, analyzeImages) : null;
       var reanalyzeCartridgeId = getReanalyzeCartridgeId();
+      var reanalyzeLanguage = getReanalyzeLanguage();
       // N6残: 前回 run が analyze_images=true で、今回チェックを外して実行する場合は
       // 未レビューの AI 図分類・装置候補が失われることを明示確認してから実行する
       // （明示 OFF はユーザーの意思なのでブロックはしないが、警告なしには通さない）。
@@ -1270,14 +1376,14 @@
         if (confirmBtn) confirmBtn.disabled = true; // 件数取得中の二重クリック防止
         _confirmExplicitImagesOff(docId, function () {
           overlay.remove();
-          performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels, reanalyzeCartridgeId);
+          performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels, reanalyzeCartridgeId, reanalyzeLanguage);
         }, function () {
           if (confirmBtn) confirmBtn.disabled = false; // キャンセル時は選び直せる
         });
         return;
       }
       overlay.remove();
-      performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels, reanalyzeCartridgeId);
+      performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels, reanalyzeCartridgeId, reanalyzeLanguage);
     });
   }
 
@@ -1332,7 +1438,7 @@
       });
   }
 
-  function performReanalyze(docId, filename, btn, analyzeImages, models, cartridgeId) {
+  function performReanalyze(docId, filename, btn, analyzeImages, models, cartridgeId, language) {
     if (btn) { btn.disabled = true; btn.textContent = "再開中..."; }
     var body = { analyze_images: !!analyzeImages };
     // M層（LLM モデル選択, migration 061）: 未指定（null）なら前回 run の options から自動継承される。
@@ -1340,11 +1446,22 @@
     // 分野（提案 C1）: null（教員が触っていない）なら送らず、サーバ側が前回 run の
     // 分野を引き継ぐ。"" は「指定しない」への明示的な解除として送る。
     if (cartridgeId !== null && cartridgeId !== undefined) body.cartridge_id = cartridgeId;
+    // 生成する言語: 選び直したときだけ送る（null はサーバ側で前回 run から継承、
+    // "" は「指定しない」への明示的な解除）。
+    if (language !== null && language !== undefined) body.language = language;
     apiFetch("/admin/documents/" + docId + "/reanalyze", {
       method: "POST",
       body: JSON.stringify(body),
     })
       .then(function (res) {
+        // 409 = この教材の解析が実行中（重ねて起動しない。IK-0702）。サーバの事実文を出す。
+        if (res.status === 409) {
+          return res.json().catch(function () { return {}; }).then(function (d) {
+            var err = new Error("status 409");
+            err.detail = (d && typeof d.detail === "string") ? d.detail : "";
+            throw err;
+          });
+        }
         if (!res.ok) throw new Error("status " + res.status);
         return res.json();
       })
@@ -1353,9 +1470,9 @@
         if (data.task_id) startTaskPolling(data.task_id, filename);
         loadMaterials();
       })
-      .catch(function () {
+      .catch(function (err) {
         if (btn) { btn.disabled = false; btn.textContent = "解析再開"; }
-        showUploadStatus("解析の再開に失敗しました。", "error");
+        showUploadStatus((err && err.detail) || "解析の再開に失敗しました。", "error");
       });
   }
 
@@ -2303,10 +2420,15 @@
     if (!listEl) return;
     var allActive = !_libraryTabState.selectedDomain;
     var html = '<button type="button" class="library-domain-item admin-action-btn" data-ui-anchor="knowledge-library.domains-list" data-domain-key="" style="' + _libraryDomainButtonStyle(allActive) + '">すべての分野</button>';
+    // IK-0866: 分野の表示名（サーバの domain_label）を控え、確認文などで英字キーを出さない。
+    _libraryTabState.domainLabels = {};
+    domains.forEach(function (d) {
+      if (d && d.domain_key && d.domain_label) _libraryTabState.domainLabels[d.domain_key] = d.domain_label;
+    });
     domains.forEach(function (d) {
       var active = _libraryTabState.selectedDomain === d.domain_key;
       html += '<button type="button" class="library-domain-item admin-action-btn" data-ui-anchor="knowledge-library.domains-list" data-domain-key="' + escHtml(d.domain_key) + '" style="' + _libraryDomainButtonStyle(active) + '">' +
-        '<span>' + escHtml(d.domain_key) + '</span>' +
+        '<span>' + escHtml(d.domain_label || d.domain_key) + '</span>' +
         '<span style="color:var(--color-text-tertiary);font-size:11px">' + (d.entry_count || 0) + '件 / 凍結' + (d.frozen_count || 0) + '</span>' +
       '</button>';
     });
@@ -2369,8 +2491,9 @@
           _libraryReviewChipHtml(e.review_status) +
         '</div>' +
         '<div style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(_libraryEntryTypeLabel(e.entry_type)) +
-          ' ・ 版 ' + (e.latest_version_no || 0) +
-          (e.updated_by ? ' ・ 更新: ' + escHtml(e.updated_by) : '') +
+          // IK-0866: 版・更新者・分野はサーバの表示語（UUID・取込経路のトークンを出さない）。
+          (e.version_line ? ' ・ ' + escHtml(e.version_line) : '') +
+          (e.updated_by_label ? ' ・ 更新: ' + escHtml(e.updated_by_label) : '') +
         '</div>' +
       '</button>';
     });
@@ -2427,13 +2550,13 @@
     var isApparatus = entry.entry_type === "apparatus";
     var b = entry.body || {};
     var parts = b.typical_parts || [];
-    var aliasesStr = (entry.aliases || []).join(", ");
     var isRetired = entry.status === "retired";
 
     var html =
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px">' +
-        '<div style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(entry.domain_key) + ' ・ ' + escHtml(_libraryEntryTypeLabel(entry.entry_type)) + (isRetired ? ' ・ <span style="color:var(--color-text-danger)">廃止済み</span>' : '') + '</div>' +
-        '<div style="font-size:11px;color:var(--color-text-tertiary)">版 ' + (entry.latest_version_no || 0) + ' / revision ' + entry.revision + '</div>' +
+        '<div style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(entry.domain_label || entry.domain_key) + ' ・ ' + escHtml(_libraryEntryTypeLabel(entry.entry_type)) + (isRetired ? ' ・ <span style="color:var(--color-text-danger)">廃止済み</span>' : '') + '</div>' +
+        // IK-0866: 楽観ロックの revision は出さない（保存時の照合にだけ使う内部値）。
+        '<div style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(entry.version_line || "") + (entry.updated_by_label ? ' ・ 更新: ' + escHtml(entry.updated_by_label) : '') + '</div>' +
       '</div>' +
 
       // N1: Phase S 標準化判定バッジ + shared_part の「深く検討」入口。
@@ -2450,8 +2573,9 @@
       '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">名称</label>' +
       '<input type="text" id="lib-detail-name" value="' + escHtml(entry.name) + '" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:8px;box-sizing:border-box">' +
 
-      '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">別名 (カンマ区切り)</label>' +
-      '<input type="text" id="lib-detail-aliases" value="' + escHtml(aliasesStr) + '" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:8px;box-sizing:border-box">' +
+      // IK-0867: 別名の正本は下の「別名・隠しラベル」区画（ラベル表）。編集面に 2 つ目の
+      // 一覧を置くと片方向のミラーで食い違うので、ここには入力欄を置かない。
+      '<div style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:8px">別名は下の「別名・隠しラベル」区画で足し・外します。</div>' +
 
       '<label style="font-size:12px;color:var(--color-text-secondary);display:block;margin-bottom:2px">要約</label>' +
       '<textarea id="lib-detail-summary" rows="2" style="width:100%;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary);margin-bottom:8px;box-sizing:border-box">' + escHtml(entry.summary || "") + '</textarea>';
@@ -2568,11 +2692,10 @@
 
   function saveLibraryEntryEdits(entry) {
     var name = document.getElementById("lib-detail-name").value.trim();
-    var aliasesRaw = document.getElementById("lib-detail-aliases").value.trim();
     var summary = document.getElementById("lib-detail-summary").value.trim();
-    var aliases = aliasesRaw ? aliasesRaw.split(",").map(function (s) { return s.trim(); }).filter(Boolean) : [];
 
-    var payload = { expected_revision: entry.revision, name: name, aliases: aliases, summary: summary };
+    // IK-0867: aliases は送らない（別名はラベル区画が正本。送ると区画の外した語が戻る）。
+    var payload = { expected_revision: entry.revision, name: name, summary: summary };
 
     if (entry.entry_type === "apparatus") {
       payload.body = {
@@ -2628,7 +2751,8 @@
     if (note === null) return; // cancelled
     openDangerConfirmModal({
       title: "ライブラリエントリの凍結",
-      message: ["凍結版はパイプラインの解析に使われます。取り消せません（修正は次版で行います）。", "よろしいですか？"],
+      // IK-1124: 学生の画面への効果も言う（文は label_vocab.LIBRARY_FREEZE_LEARNER_EFFECT_NOTE の逐語ミラー）。
+      message: ["凍結版はパイプラインの解析に使われます。取り消せません（修正は次版で行います）。", "凍結すると、この共通部品に確定済みで結び付いた教材の部品・記号が、学生の画面（部品の文脈の「共通部品として」・記号の吹き出しの概念名）に出るようになります。", "よろしいですか？"],
       confirmLabel: "凍結する",
     }, function () {
       _libraryDetailStatus("凍結しています...", "info");
@@ -2725,6 +2849,9 @@
     assumption: "前提",
     quantity: "量",
     process: "過程",
+    instrument_model: "装置モデル",
+    noise_source: "ノイズ源",
+    signal_processing: "信号処理の工夫",
   };
   var _libraryLabelKindLabels = {
     preferred: "主ラベル",
@@ -2744,6 +2871,7 @@
     cartridge_declared: "分野の宣言",
     corpus_cooccurrence: "コーパス内の共起",
     llm_candidate: "AI の候補",
+    structural_match: "構造の一致",
   };
   var _libraryReviewStatusLabels = {
     candidate: "候補",
@@ -2785,6 +2913,19 @@
     return _libraryReviewChipHtml(status);
   }
 
+  // IK-1050: リンクの札はサーバの status_label（rejected / revoked まで覆う）。無ければ詳細と同じ表。
+  function _libraryLinkStatusChipHtml(link) {
+    var status = (link && link.status) || "";
+    if (!status || status === "confirmed") return "";
+    var label = (link && link.status_label) ||
+      (_libraryIdentityLinkStatusLabels.hasOwnProperty(status) ? _libraryIdentityLinkStatusLabels[status] : "");
+    if (!label) return "";
+    var style = status === "candidate"
+      ? "background:var(--color-text-warning);color:#fff"
+      : "background:var(--color-background-tertiary,#eeeef0);color:var(--color-text-secondary)";
+    return ' <span class="admin-status" style="font-size:10.5px;padding:1px 6px;' + style + '">' + escHtml(label) + '</span>';
+  }
+
   // 見送りは理由必須（KR7）。空欄・取り消しのときは送らない。
   function _libraryPromptDismissReason(what) {
     var reason = prompt("「" + what + "」を見送る理由を入力してください（記録に残ります）");
@@ -2795,6 +2936,28 @@
       return null;
     }
     return reason;
+  }
+
+  // 同一性リンク行の要素型の訳語（theory_module_layer_design.md §13.9）。訳語表は
+  // element-vocab.js（ElementVocab.elementTypeLabel）が正本（新しい表を作らない）。未ロード・
+  // 空の型では何も出さない（生の element_type を画面に出さない）。
+  function _libraryInstanceTypeLabel(elementType) {
+    var type = String(elementType || "");
+    if (!type) return "";
+    var vocab = window.ElementVocab;
+    var label = vocab && vocab.elementTypeLabel ? String(vocab.elementTypeLabel(type) || "") : "";
+    return label && label !== type ? label : "";
+  }
+
+  // リンク行の表記。local_expression はオブジェクト（{"name": ...}）で届くので name を
+  // 取り出す（旧実装はオブジェクトをそのまま文字列にしていた）。文字列の旧データも受ける。
+  function _libraryLocalExpressionText(localExpression) {
+    if (!localExpression) return "";
+    if (typeof localExpression === "string") return localExpression.trim();
+    if (typeof localExpression === "object" && localExpression.name != null) {
+      return String(localExpression.name).trim();
+    }
+    return "";
   }
 
   function _librarySectionTitleHtml(title, anchorId, note) {
@@ -2835,7 +2998,7 @@
       html += '<div style="color:var(--color-text-secondary)">' + escHtml(f) + '</div>';
     });
     if (!candidates.length) {
-      html += '<div>いま確認をお待ちしている同一性の候補はありません。</div>';
+      // IK-0864: 空の状態の文言の正本はサーバの facts（ここで固定文を重ねない）。
       el.innerHTML = html;
       return;
     }
@@ -2849,44 +3012,113 @@
         '</div>' +
         '<div style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:4px">' +
           escHtml(_libraryEntryTypeLabel(entry.entry_type)) +
-          (entry.domain_key ? ' ・ ' + escHtml(entry.domain_key) : '') +
+          (entry.domain_label || entry.domain_key ? ' ・ ' + escHtml(entry.domain_label || entry.domain_key) : '') +
         '</div>';
       if (titles.length) {
         html += '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:4px">この候補を支持する論文: ' +
           titles.map(escHtml).join(" / ") + '</div>';
       }
+      // 第 5 波: サーバの事実文（確定済みで結び付きだけ残る / 旧規則の候補）を素通し。
+      if (entry.links_pending_note) {
+        html += '<div data-identity-links-pending style="font-size:11px;color:var(--color-text-secondary);margin-bottom:4px">' + escHtml(entry.links_pending_note) + '</div>';
+      }
+      if (entry.stale_rule_note) {
+        html += '<div data-identity-stale-rule style="font-size:11px;color:var(--color-text-secondary);margin-bottom:4px">' + escHtml(entry.stale_rule_note) + '</div>';
+      }
+      // IK-1020: 片側の部品が再解析で置き換わった候補（相手は残っていない）— サーバの文を素通し。
+      if (entry.partner_replaced_note) {
+        html += '<div data-identity-partner-replaced style="font-size:11px;color:var(--color-text-secondary);margin-bottom:4px">' + escHtml(entry.partner_replaced_note) + '</div>';
+      }
       links.forEach(function (link) {
         var inst = link.instance || {};
-        html += '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;font-size:11.5px;padding:3px 0">' +
+        var typeLabel = _libraryInstanceTypeLabel(inst.element_type);
+        var expression = _libraryLocalExpressionText(link.local_expression);
+        // IK-0956（一覧側）: 同じ題名の論文が並ぶときだけサーバが版の手がかりを添える。
+        var versionLabel = String(link.document_version_label || "").trim();
+        // IK-0981: 版の規則の対は根拠の呼び名を差し替える（「表記の一致」と呼ばない）。
+        var basisHtml = link.basis_label
+          ? '<span style="color:var(--color-text-tertiary)">（' + escHtml(link.basis_label) + '）</span>'
+          : _libraryJustificationHtml(link.mapping_justification);
+        // IK-1076: 判断の対象でない行（見送った概念・置き換わった部品）にはボタンを出さず、サーバの文を出す。
+        var isCandidate = link.status === "candidate" && link.decidable !== false;
+        html += '<div class="library-identity-link-row" style="font-size:11.5px;padding:3px 0">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap">' +
           '<span>' + escHtml(link.document_title || inst.document_id || "") +
-            (link.local_expression ? '「' + escHtml(link.local_expression) + '」' : '') +
-            _libraryStatusChipHtml(link.status) + ' ' + _libraryJustificationHtml(link.mapping_justification) +
+            (versionLabel ? '<span data-identity-version style="color:var(--color-text-tertiary)">・' + escHtml(versionLabel) + '</span>' : '') +
+            (typeLabel ? ' <span style="color:var(--color-text-tertiary)">' + escHtml(typeLabel) + '</span>' : '') +
+            (expression ? '「' + escHtml(expression) + '」' : '') +
+            _libraryLinkStatusChipHtml(link) + ' ' + basisHtml +
           '</span>' +
-          '<span style="display:flex;gap:4px">' +
-            '<button type="button" class="library-identity-link-confirm admin-action-btn" data-link-id="' + escHtml(link.link_id) + '" style="font-size:11px;padding:1px 7px">確認</button>' +
-            '<button type="button" class="library-identity-link-reject admin-action-btn" data-link-id="' + escHtml(link.link_id) + '" style="font-size:11px;padding:1px 7px">見送り</button>' +
-          '</span>' +
+          // IK-0985 と同じ規律: 決まった行に判断のボタンを並べない。
+          (isCandidate
+            ? '<span style="display:flex;gap:4px">' +
+                '<button type="button" class="library-identity-link-confirm admin-action-btn" data-link-id="' + escHtml(link.link_id) + '" data-confirm-question="' + escHtml(link.confirm_question || "") + '" data-granularity-note="' + escHtml(link.granularity_note || "") + '" style="font-size:11px;padding:1px 7px">確認</button>' +
+                '<button type="button" class="library-identity-link-reject admin-action-btn" data-link-id="' + escHtml(link.link_id) + '" style="font-size:11px;padding:1px 7px">見送り</button>' +
+              '</span>'
+            : '') +
+          '</div>' +
+          (link.undecidable_note ? '<div data-identity-undecidable style="font-size:11px;color:var(--color-text-secondary)">' + escHtml(link.undecidable_note) + '</div>' : '') +
+          (link.instance_summary ? '<div data-identity-summary style="font-size:11px;color:var(--color-text-tertiary)">要約: ' + escHtml(link.instance_summary) + '</div>' : '') +
+          (link.reason ? '<div data-identity-reason style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(link.reason) + '</div>' : '') +
+          // IK-0953: 判断した行の印・判断した人・日付（〔確定〕 確定: 名前・日付）。
+          (link.decision_line ? '<div data-identity-decision style="font-size:11px;color:var(--color-text-secondary)">' + escHtml(link.decision_line) + '</div>' : '') +
+          // IK-1050: 見送った行の理由（判断の印の後ろ）。
+          (link.decision_reason_line ? '<div data-identity-decision-reason style="font-size:11px;color:var(--color-text-secondary)">' + escHtml(link.decision_reason_line) + '</div>' : '') +
+          // IK-1062: 候補に戻した行の記録（戻した人・日付・前の判断・理由）と、否定の判断を戻す手。
+          _libraryIdentityRestoreHtml(link, link.link_id) +
         '</div>';
       });
       if (c.hidden_count) {
         html += '<div style="font-size:11px;color:var(--color-text-tertiary)">閲覧できない論文由来の候補が別にあります。</div>';
       }
-      html += '<div data-ui-anchor="knowledge-library.entry-review" style="display:flex;gap:4px;margin-top:6px">' +
-          '<button type="button" class="library-entry-confirm admin-action-btn" data-entry-id="' + escHtml(entry.id) + '" style="font-size:11px;padding:1px 7px;background:var(--color-text-success);color:#fff">確定</button>' +
-          '<button type="button" class="library-entry-dismiss admin-action-btn" data-entry-id="' + escHtml(entry.id) + '" data-entry-name="' + escHtml(entry.name || "") + '" style="font-size:11px;padding:1px 7px">見送り</button>' +
-        '</div>' +
-      '</div>';
+      // IK-1050: 見送った概念は判断の記録（人・日付・理由）と戻し方を出し、判断のボタンは出さない。
+      if (entry.decision_line) {
+        html += '<div data-identity-entry-decision style="font-size:11px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(entry.decision_line) + '</div>';
+      }
+      if (entry.decision_reason_line) {
+        html += '<div data-identity-entry-decision-reason style="font-size:11px;color:var(--color-text-secondary)">' + escHtml(entry.decision_reason_line) + '</div>';
+      }
+      if (entry.restore_note) {
+        html += '<div data-identity-entry-restore-note style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(entry.restore_note) + '</div>';
+      }
+      // IK-0982: 概念が確定済みのカードはエントリの操作を出さない（残りはリンクの判断だけ）。
+      // IK-1050: 見送り済みのカードにも出さない（判断のボタンは候補のときだけ）。
+      if (entry.review_status === "candidate") {
+        html += '<div data-ui-anchor="knowledge-library.entry-review" style="display:flex;gap:4px;margin-top:6px">' +
+            '<button type="button" class="library-entry-confirm admin-action-btn" data-entry-id="' + escHtml(entry.id) + '" data-confirm-question="' + escHtml(entry.confirm_question || "") + '" style="font-size:11px;padding:1px 7px;background:var(--color-text-success);color:#fff">確定</button>' +
+            '<button type="button" class="library-entry-dismiss admin-action-btn" data-entry-id="' + escHtml(entry.id) + '" data-entry-name="' + escHtml(entry.name || "") + '" style="font-size:11px;padding:1px 7px">見送り</button>' +
+          '</div>';
+      }
+      html += '</div>';
     });
     el.innerHTML = html;
 
     el.querySelectorAll(".library-identity-link-confirm").forEach(function (btn) {
-      btn.addEventListener("click", function () { _libraryDecideIdentityLink(this.getAttribute("data-link-id"), "confirm"); });
+      btn.addEventListener("click", function () {
+        if (!_libraryConfirmIdentityLinkDialog(this.getAttribute("data-confirm-question"), this.getAttribute("data-granularity-note"))) return;
+        _libraryDecideIdentityLink(this.getAttribute("data-link-id"), "confirm");
+      });
+    });
+    el.querySelectorAll(".library-identity-link-restore").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        _libraryRestoreIdentityLink(this.getAttribute("data-link-id"), this.getAttribute("title") || "");
+      });
     });
     el.querySelectorAll(".library-identity-link-reject").forEach(function (btn) {
-      btn.addEventListener("click", function () { _libraryDecideIdentityLink(this.getAttribute("data-link-id"), "reject"); });
+      btn.addEventListener("click", function () {
+        // IK-1050: リンクの見送りも理由必須（KR7。エントリの見送り・確定の取り消しと同じ作法）。
+        var reason = _libraryPromptDismissReason("この結び付き");
+        if (!reason) return;
+        _libraryDecideIdentityLink(this.getAttribute("data-link-id"), "reject", null, reason);
+      });
     });
     el.querySelectorAll(".library-entry-confirm").forEach(function (btn) {
-      btn.addEventListener("click", function () { decideLibraryEntryReview(this.getAttribute("data-entry-id"), "confirmed", ""); });
+      btn.addEventListener("click", function () {
+        // IK-0917 / IK-0982: 概念の確定の前に、結び付きは別の判断であることを問う（文言はサーバ）。
+        var question = this.getAttribute("data-confirm-question") || "";
+        if (question && !window.confirm(question)) return;
+        decideLibraryEntryReview(this.getAttribute("data-entry-id"), "confirmed", "");
+      });
     });
     el.querySelectorAll(".library-entry-dismiss").forEach(function (btn) {
       btn.addEventListener("click", function () {
@@ -2897,14 +3129,59 @@
     });
   }
 
+  // IK-0917: リンクの確定の直前に、両側を名指しした問いと（種別が違えば）種別の文で確かめる。
+  // 文言はサーバ（confirm_question / granularity_note）が正本。問いが無ければ確かめずに進む。
+  function _libraryConfirmIdentityLinkDialog(question, granularityNote) {
+    var lines = [question || "", granularityNote || ""].filter(function (v) { return v; });
+    if (!lines.length) return true;
+    return window.confirm(lines.join("\n\n") + "\n\n同じものとして確定しますか。");
+  }
+
   // リンク1本 = 判断1回（entry を確定してもリンクは自動確定しない）。
-  function _libraryDecideIdentityLink(linkId, action) {
-    apiFetch("/admin/deliberation/identity-links/" + encodeURIComponent(linkId) + "/" + action, { method: "POST" })
+  function _libraryDecideIdentityLink(linkId, action, onDone, reason) {
+    var options = { method: "POST" };
+    if (reason) options.body = JSON.stringify({ reason: reason });
+    apiFetch("/admin/deliberation/identity-links/" + encodeURIComponent(linkId) + "/" + action, options)
       .then(function (res) {
         if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "更新に失敗しました"); });
+        return res.json().catch(function () { return {}; });
+      })
+      .then(function (data) {
         loadLibraryIdentityCandidates();
+        // IK-0953: 確定・見送りの知らせ（誰が・いつ・学生に出る条件）。文はサーバの outcome_fact。
+        if (data && data.outcome_fact) _libraryShowOutcomeFacts("library-identity-candidates", [data.outcome_fact]);
+        if (onDone) onDone();
       })
       .catch(function (err) { alert(err.message || "更新に失敗しました"); });
+  }
+
+  // IK-0868: 関係の相手を名前・別名で検索して候補つき選択にする（分野をまたいで探す）。
+  // 見つからないときの文はサーバの facts をそのまま描く。
+  function searchLibraryRelationCounterparts(entry) {
+    var queryEl = document.getElementById("library-relation-query");
+    var selectEl = document.getElementById("library-relation-object");
+    var factsEl = document.getElementById("library-relation-search-facts");
+    var q = queryEl ? queryEl.value.trim() : "";
+    if (!q || !selectEl) return;
+    apiFetch("/admin/library/entries?q=" + encodeURIComponent(q))
+      .then(function (res) { if (!res.ok) throw new Error("status " + res.status); return res.json(); })
+      .then(function (data) {
+        var found = ((data && data.entries) || []).filter(function (e) { return e && e.id !== entry.id; });
+        selectEl.innerHTML = found.map(function (e) {
+          var meta = [_libraryEntryTypeLabel(e.entry_type), e.domain_label || e.domain_key].filter(Boolean).join(" ・ ");
+          return '<option value="' + escHtml(e.id) + '">' + escHtml(e.name || "") + (meta ? "（" + escHtml(meta) + "）" : "") + '</option>';
+        }).join("");
+        selectEl.disabled = !found.length;
+        if (!found.length) selectEl.innerHTML = '<option value="">（該当なし）</option>';
+        if (factsEl) {
+          var facts = (data && data.facts) || [];
+          factsEl.innerHTML = facts.map(function (f) { return '<div>' + escHtml(f) + '</div>'; }).join("");
+          factsEl.hidden = !facts.length;
+        }
+      })
+      .catch(function () {
+        if (factsEl) { factsEl.textContent = "検索できませんでした。"; factsEl.hidden = false; }
+      });
   }
 
   function decideLibraryEntryReview(entryId, status, reviewNote, onDone) {
@@ -2913,10 +3190,16 @@
     apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/review", { method: "POST", body: JSON.stringify(payload) })
       .then(function (res) {
         if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "更新に失敗しました"); });
+        return res.json().catch(function () { return {}; });
+      })
+      .then(function (data) {
         loadLibraryIdentityCandidates();
         loadLibraryEntries();
+        // IK-0982: 何が済んで何が残ったかの知らせ（サーバの facts を素通し）。
+        var facts = (data && data.facts) || [];
+        _libraryShowOutcomeFacts("library-identity-candidates", facts);
         // 詳細ペインからの操作は、反映後に読み直してから再描画する（先に描くと古い扱いが残る）。
-        if (onDone) onDone();
+        if (onDone) onDone(facts);
       })
       .catch(function (err) { alert(err.message || "更新に失敗しました"); });
   }
@@ -2932,7 +3215,7 @@
     openDangerConfirmModal({
       title: "地図との対応を導出",
       message: [
-        "分野「" + domainKey + "」の現在の凍結骨格と、この分野のライブラリエントリを突き合わせて、対応の候補を作ります。",
+        "分野「" + ((_libraryTabState.domainLabels || {})[domainKey] || "選んだ分野") + "」の現在の凍結骨格と、この分野のライブラリエントリを突き合わせて、対応の候補を作ります。",
         "作られるのは候補だけで、分野の地図（骨格）は書き換わりません。確定は候補ごとの操作で行います。",
       ],
       confirmLabel: "導出する",
@@ -2942,7 +3225,14 @@
           if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "導出に失敗しました"); });
           return res.json();
         })
-        .then(function () {
+        .then(function (data) {
+          // IK-0864: 導出結果の事実文（索引が無い・候補なし等）を捨てずに描く。
+          var factsEl = document.getElementById("library-atlas-derive-facts");
+          if (factsEl) {
+            var facts = (data && data.facts) || [];
+            factsEl.innerHTML = facts.map(function (f) { return '<div>' + escHtml(f) + '</div>'; }).join("");
+            factsEl.hidden = !facts.length;
+          }
           loadLibraryEntries();
           loadLibraryIdentityCandidates();
         })
@@ -2978,23 +3268,56 @@
             '<option value="exact_match">' + escHtml(_libraryRelationKindLabels.exact_match) + '</option>' +
             '<option value="close_match">' + escHtml(_libraryRelationKindLabels.close_match) + '</option>' +
           '</select>' +
-          '<input type="text" id="library-relation-object" placeholder="相手のエントリ ID..." style="flex:1;min-width:120px;font-size:11.5px;padding:2px 6px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">' +
+          // IK-0868: 相手は ID の手入力ではなく、名前で検索して候補から選ぶ（ID は送信値にだけ持つ）。
+          '<input type="text" id="library-relation-query" placeholder="相手の名前・別名で検索..." style="flex:1;min-width:120px;font-size:11.5px;padding:2px 6px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">' +
+          '<button type="button" id="library-relation-search" class="admin-action-btn" style="font-size:11px;padding:1px 7px">検索</button>' +
+          '<select id="library-relation-object" style="font-size:11.5px;padding:2px 6px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)" disabled><option value="">（先に検索してください）</option></select>' +
+          // IK-1063: 関係を足す理由（任意。行と監査に残り、別の教員が読み返せる）。
+          '<input type="text" id="library-relation-reason" placeholder="関係を足す理由（任意）" style="flex:1 1 100%;font-size:11.5px;padding:2px 6px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">' +
           '<button type="button" id="library-relation-add" class="admin-action-btn" style="font-size:11px;padding:1px 7px">追加</button>' +
         '</div>' +
+        '<div id="library-relation-search-facts" style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px" hidden></div>' +
+      '</div>' +
+
+      // IK-0920: 確定した同一性リンクの読み手（表示のみ。確定・却下は部品の「深く検討」）。
+      _librarySectionTitleHtml("結びついた教材の部品", "knowledge-library.bound-parts",
+        "教材の部品のうち、この共通部品と同じものとして結び付けられたもの。確定した結び付きは、この共通部品に凍結した版があるとき学生の「共通部品として」に出ます（凍結した版が無いうちは学生には出ません）。") +
+        '<div id="library-bound-parts-list" style="font-size:11.5px;color:var(--color-text-secondary)">読み込み中...</div>' +
+      '</div>' +
+
+      // IK-0983: 記号 → 概念の結び付き（学生の記号の吹き出しの「どの概念か」の書き手）。
+      _librarySectionTitleHtml("結びついた記号", "knowledge-library.bound-symbols",
+        "教材の式の記号のうち、この概念に当たると結び付けたもの。確定した結び付きは、凍結した版があるとき学生の記号の吹き出しに概念名として出ます。") +
+        '<div id="library-bound-symbols-list" style="font-size:11.5px;color:var(--color-text-secondary)">読み込み中...</div>' +
+        '<div style="margin-top:4px"><button type="button" id="library-symbol-derive" class="admin-action-btn" data-ui-anchor="knowledge-library.symbol-derive" style="font-size:11px;padding:1px 7px"' +
+          ((entry.review_status || "confirmed") === "confirmed" && entry.status !== "retired" ? '' : ' disabled title="確定した概念にだけ、記号の候補を探します。"') +
+          '>記号の候補を探す</button></div>' +
       '</div>' +
 
       _librarySectionTitleHtml("分野の地図との対応", "knowledge-library.atlas-links",
         "分野の地図（骨格）のどのノードに当たるかの対応です。対応を確定しても骨格は書き換わりません。") +
         '<div id="library-atlas-links-list" style="font-size:11.5px;color:var(--color-text-secondary)">読み込み中...</div>' +
+        // IK-0927: 候補が出ないときに教員が手で対応を付ける入口（概念を名前で探して選ぶ）。
+        '<div data-ui-anchor="knowledge-library.atlas-link-manual" style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-top:4px">' +
+          '<input type="text" id="library-atlas-node-query" placeholder="地図の概念を名前で検索..." style="flex:1;min-width:120px;font-size:11.5px;padding:2px 6px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">' +
+          '<button type="button" id="library-atlas-node-search" class="admin-action-btn" style="font-size:11px;padding:1px 7px">検索</button>' +
+          '<select id="library-atlas-node-select" style="font-size:11.5px;padding:2px 6px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)" disabled><option value="">（先に検索してください）</option></select>' +
+          '<button type="button" id="library-atlas-link-add" class="admin-action-btn" style="font-size:11px;padding:1px 7px">対応を付ける</button>' +
+        '</div>' +
+        '<div id="library-atlas-node-facts" style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px" hidden></div>' +
       '</div>' +
 
       _librarySectionTitleHtml("この概念の扱い", "knowledge-library.entry-review",
         "候補のままのエントリは凍結できず、解析パイプラインや学習者には届きません。") +
         '<div id="library-entry-review-row" style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">' +
           '<span>いまの扱い: ' + escHtml(_libraryReviewStatusLabels.hasOwnProperty(entry.review_status || "confirmed") ? _libraryReviewStatusLabels[entry.review_status || "confirmed"] : (entry.review_status || "")) + '</span>' +
+          // IK-1050 の残り: 判断の記録（〔確定〕 確定: 名前・日付）。文はサーバ。
+          (entry.review_decision_line ? '<span data-entry-review-decision style="color:var(--color-text-secondary)">' + escHtml(entry.review_decision_line) + '</span>' : '') +
           (entry.review_note ? '<span style="color:var(--color-text-tertiary)">理由: ' + escHtml(entry.review_note) + '</span>' : '') +
-          '<button type="button" id="library-entry-review-confirm" class="admin-action-btn" style="font-size:11px;padding:1px 7px">確定にする</button>' +
-          '<button type="button" id="library-entry-review-dismiss" class="admin-action-btn" style="font-size:11px;padding:1px 7px">見送る</button>' +
+          (entry.review_status_note ? '<span style="color:var(--color-text-tertiary)">' + escHtml(entry.review_status_note) + '</span>' : '') +
+          // IK-0955: いまの扱いで取れる操作だけを出す（候補 = 確定 / 見送り、見送り済み = 候補に戻す、
+          // 確定済み = 操作なし — 確定から先へ動く遷移は無い）。
+          _libraryEntryReviewButtonsHtml(entry.review_status || "confirmed") +
         '</div>' +
       '</div>';
 
@@ -3010,10 +3333,23 @@
       })
         .then(function (res) {
           if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "追加に失敗しました"); });
-          if (textEl) textEl.value = "";
-          loadLibraryEntryLabels(entry.id);
+          return res.json().catch(function () { return {}; }).then(function (data) {
+            if (textEl) textEl.value = "";
+            // IK-0897: 結果（追加した / 既にある / 見送り済み）はサーバの事実文を描く。
+            _libraryShowOutcomeFacts("library-labels-list", data && data.facts);
+            loadLibraryEntryLabels(entry.id);
+          });
         })
         .catch(function (err) { alert(err.message || "追加に失敗しました"); });
+    });
+
+    var relationSearch = document.getElementById("library-relation-search");
+    if (relationSearch) relationSearch.addEventListener("click", function () {
+      searchLibraryRelationCounterparts(entry);
+    });
+    var relationQuery = document.getElementById("library-relation-query");
+    if (relationQuery) relationQuery.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") { ev.preventDefault(); searchLibraryRelationCounterparts(entry); }
     });
 
     var relationAdd = document.getElementById("library-relation-add");
@@ -3022,24 +3358,32 @@
       var objectEl = document.getElementById("library-relation-object");
       var objectId = objectEl ? objectEl.value.trim() : "";
       if (!objectId) return;
+      var relationReasonEl = document.getElementById("library-relation-reason");
       apiFetch("/admin/library/relations", {
         method: "POST",
         body: JSON.stringify({
           subject_entry_id: entry.id,
           object_entry_id: objectId,
           kind: kindEl ? kindEl.value : "related",
+          reason: relationReasonEl ? relationReasonEl.value.trim() : "",
         }),
       })
         .then(function (res) {
           if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "追加に失敗しました"); });
-          if (objectEl) objectEl.value = "";
-          loadLibraryEntryRelations(entry.id);
+          return res.json().catch(function () { return {}; }).then(function (data) {
+            if (objectEl) objectEl.value = "";
+            if (relationReasonEl) relationReasonEl.value = "";
+            _libraryShowOutcomeFacts("library-relations-list", data && data.facts);
+            loadLibraryEntryRelations(entry.id);
+          });
         })
         .catch(function (err) { alert(err.message || "追加に失敗しました"); });
     });
 
     var reviewConfirm = document.getElementById("library-entry-review-confirm");
     if (reviewConfirm) reviewConfirm.addEventListener("click", function () {
+      // IK-0917 / IK-0982: 概念の確定と結び付きの確定は別の判断（文言はサーバ）。
+      if (entry.review_confirm_question && !window.confirm(entry.review_confirm_question)) return;
       decideLibraryEntryReview(entry.id, "confirmed", "", function () { selectLibraryEntry(entry.id); });
     });
     var reviewDismiss = document.getElementById("library-entry-review-dismiss");
@@ -3048,10 +3392,242 @@
       if (!reason) return;
       decideLibraryEntryReview(entry.id, "dismissed", reason, function () { selectLibraryEntry(entry.id); });
     });
+    var reviewRestore = document.getElementById("library-entry-review-restore");
+    if (reviewRestore) reviewRestore.addEventListener("click", function () {
+      decideLibraryEntryReview(entry.id, "candidate", "", function () { selectLibraryEntry(entry.id); });
+    });
 
     loadLibraryEntryLabels(entry.id);
     loadLibraryEntryRelations(entry.id);
     loadLibraryEntryAtlasLinks(entry);
+    _libraryBindManualAtlasLink(entry);
+    loadLibraryEntryBoundParts(entry.id);
+    _libraryBindSymbolDerive(entry);
+  }
+
+  // IK-0955: エントリの扱いの状態ごとに出す操作（確定済みには［確定にする］を並べない）。
+  function _libraryEntryReviewButtonsHtml(reviewStatus) {
+    var style = 'style="font-size:11px;padding:1px 7px"';
+    if (reviewStatus === "candidate") {
+      return '<button type="button" id="library-entry-review-confirm" class="admin-action-btn" ' + style + '>確定にする</button>' +
+        '<button type="button" id="library-entry-review-dismiss" class="admin-action-btn" ' + style + '>見送る</button>';
+    }
+    if (reviewStatus === "dismissed") {
+      return '<button type="button" id="library-entry-review-restore" class="admin-action-btn" ' + style + '>候補に戻す</button>';
+    }
+    return "";
+  }
+
+  // ── 結びついた教材の部品（IK-0920） ───────────────────────────────
+  // 既存 GET /admin/deliberation/shared-parts/{id}/identity-links を読む（閲覧できない論文由来の
+  // 行はサーバが落として hidden_count を返す）。部品名・論文の題名は応答の instance_label /
+  // instance_document_title（無ければ local_expression の名前）。確定を先に並べる。
+  var _libraryIdentityLinkStatusLabels = { confirmed: "確定", candidate: "候補", rejected: "見送り", revoked: "確定を取り消し" };
+
+  function loadLibraryEntryBoundParts(entryId) {
+    var el = document.getElementById("library-bound-parts-list");
+    if (!el) return;
+    apiFetch("/admin/deliberation/shared-parts/" + encodeURIComponent(entryId) + "/identity-links")
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var target = document.getElementById("library-bound-parts-list");
+        if (!target) return;
+        var all = (data && data.identity_links) || [];
+        var order = { confirmed: 0, candidate: 1, rejected: 2, revoked: 3 };
+        all = all.slice().sort(function (a, b) {
+          var oa = order.hasOwnProperty(a.status) ? order[a.status] : 3;
+          var ob = order.hasOwnProperty(b.status) ? order[b.status] : 3;
+          return oa - ob;
+        });
+        // IK-0983: 記号の結び付きは「結びついた記号」の区画へ分ける。
+        var parts = all.filter(function (l) { return l.instance_element_type !== "symbol"; });
+        var symbols = all.filter(function (l) { return l.instance_element_type === "symbol"; });
+        var html = parts.length
+          ? _libraryBoundLinksHtml(parts)
+          : '<div>この共通部品と結び付けられた教材の部品は、まだありません。</div>';
+        if (data && data.hidden_count) {
+          html += '<div style="color:var(--color-text-tertiary);margin-top:4px" data-bound-parts-hidden>' +
+            escHtml(data.hidden_note || "あなたが閲覧できない論文に由来する結び付きもあります（中身は表示しません）。") +
+            '</div>';
+        }
+        target.innerHTML = html;
+        var symbolsEl = document.getElementById("library-bound-symbols-list");
+        if (symbolsEl) {
+          symbolsEl.innerHTML = symbols.length
+            ? _libraryBoundLinksHtml(symbols)
+            : '<div>この概念と結び付けられた記号は、まだありません。</div>';
+        }
+        _libraryBindBoundLinkActions(target, entryId);
+        if (symbolsEl) _libraryBindBoundLinkActions(symbolsEl, entryId);
+      })
+      .catch(function () {
+        _libraryHideSection("library-bound-parts-list");
+        _libraryHideSection("library-bound-symbols-list");
+      });
+  }
+
+  // 結び付きの行（部品・記号で共通）。確定の行は［確定を取り消す］、候補の行は［確認］［見送り］（IK-0982）。
+  function _libraryBoundLinksHtml(links) {
+    return '<ul style="margin:0;padding-left:16px">' + links.map(function (link) {
+      var part = String(link.instance_label || "").trim() || _libraryLocalExpressionText(link.local_expression);
+      var title = String(link.instance_document_title || "").trim();
+      var typeLabel = String(link.instance_type_label || "").trim() || _libraryInstanceTypeLabel(link.instance_element_type);
+      var statusLabel = link.status_label || (_libraryIdentityLinkStatusLabels.hasOwnProperty(link.status)
+        ? _libraryIdentityLinkStatusLabels[link.status] : "");
+      // IK-0956: 同じ題名の論文が 2 本以上あるときだけサーバが版の手がかりを添える。
+      var versionLabel = String(link.instance_document_version_label || "").trim();
+      // IK-0953: 確定・取り消しの帰属（表示名はサーバが解決）。
+      var actors = [];
+      if (link.status === "confirmed" && link.decided_by_label) actors.push("確定: " + link.decided_by_label + (link.decided_on ? "・" + link.decided_on : ""));
+      // IK-0953 の残り: 取り消しの行は取り消した人・日付と元の確定（サーバの revoke_line）。
+      // IK-1123 の残り: 札と同じ行なので、印の無い形（decision_actor_line）を先に使う。
+      if (link.status === "revoked") {
+        if (link.decision_actor_line || link.revoke_line) actors.push(link.decision_actor_line || link.revoke_line);
+        else if (link.revoked_by_label) actors.push("取り消し: " + link.revoked_by_label);
+      }
+      // IK-1123: 札（status_label）と同じ行なので、印の無い形（decision_actor_line）を使う。
+      if (link.status === "rejected" && (link.decision_actor_line || link.decision_line)) actors.push(link.decision_actor_line || link.decision_line);
+      // IK-1076: 判断の対象でない行（置き換わった部品・見送った概念）は判断のボタンを出さない（一覧と同じ述語）。
+      var isCandidate = link.status === "candidate" && link.decidable !== false;
+      return '<li data-bound-part-status="' + escHtml(link.status || "") + '" data-link-id="' + escHtml(link.id || "") + '">' +
+        (title ? '論文『' + escHtml(title) + (versionLabel ? '・' + escHtml(versionLabel) : '') + '』 ' : '') +
+        (part ? '「' + escHtml(part) + '」' : '（部品名を引けませんでした）') +
+        (typeLabel ? ' <span style="color:var(--color-text-tertiary)">' + escHtml(typeLabel) + '</span>' : '') +
+        (statusLabel ? ' <span class="admin-status" style="font-size:10.5px;padding:1px 6px">' + escHtml(statusLabel) + '</span>' : '') +
+        (actors.length ? ' <span style="color:var(--color-text-tertiary)" data-bound-part-actors>' + escHtml(actors.join(" ／ ")) + '</span>' : '') +
+        (link.self_confirmed_note ? ' <span style="color:var(--color-text-tertiary)">' + escHtml(link.self_confirmed_note) + '</span>' : '') +
+        (link.status === "revoked" && link.revoke_reason ? '<div style="color:var(--color-text-tertiary)">取り消しの理由: ' + escHtml(link.revoke_reason) + '</div>' : '') +
+        (link.status === "rejected" && link.decision_reason_line ? '<div data-bound-part-decision-reason style="color:var(--color-text-tertiary)">' + escHtml(link.decision_reason_line) + '</div>' : '') +
+        // IK-1012 / IK-1020: 再解析で置き換わった部品に付いたままの記録（消さずに事実文）。
+        (link.instance_stranded_note ? '<div data-bound-part-stranded style="color:var(--color-text-tertiary)">' + escHtml(link.instance_stranded_note) + '</div>' : '') +
+        (link.undecidable_note ? '<div data-bound-part-undecidable style="color:var(--color-text-secondary)">' + escHtml(link.undecidable_note) + '</div>' : '') +
+        // IK-1062: 候補に戻した記録と、見送り・取り消し済みの行の［候補に戻す］。
+        _libraryIdentityRestoreHtml(link, link.id) +
+        (isCandidate && link.instance_summary ? '<div style="color:var(--color-text-tertiary)">' + escHtml(link.instance_summary) + '</div>' : '') +
+        (isCandidate && link.reason ? '<div style="color:var(--color-text-tertiary)">' + escHtml(link.reason) + '</div>' : '') +
+        (link.status === "confirmed"
+          ? ' <button type="button" class="library-bound-part-revoke admin-action-btn" data-ui-anchor="deliberation.identity-link-revoke" data-link-id="' + escHtml(link.id || "") + '" title="' + escHtml(link.revoke_note || "") + '" style="font-size:11px;padding:1px 7px">確定を取り消す</button>'
+          : '') +
+        (isCandidate
+          ? ' <span data-ui-anchor="knowledge-library.bound-part-decide" style="display:inline-flex;gap:4px">' +
+              '<button type="button" class="library-bound-part-confirm admin-action-btn" data-link-id="' + escHtml(link.id || "") + '" data-confirm-question="' + escHtml(link.confirm_question || "") + '" data-granularity-note="' + escHtml(link.granularity_note || "") + '" style="font-size:11px;padding:1px 7px">確認</button>' +
+              '<button type="button" class="library-bound-part-reject admin-action-btn" data-link-id="' + escHtml(link.id || "") + '" style="font-size:11px;padding:1px 7px">見送り</button>' +
+            '</span>'
+          : '') +
+        '</li>';
+    }).join("") + '</ul>';
+  }
+
+  // IK-1062: 同一性リンクの否定の判断（見送り・確定の取り消し）を候補に戻す手と、戻した記録の行。
+  // 文言はサーバ（restore_line / restore_reason_line / restore_note）が正本。
+  function _libraryIdentityRestoreHtml(link, linkId) {
+    var html = "";
+    if (link.restore_line) html += '<div data-identity-restore-line style="font-size:11px;color:var(--color-text-secondary)">' + escHtml(link.restore_line) + '</div>';
+    if (link.restore_reason_line) html += '<div data-identity-restore-reason style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(link.restore_reason_line) + '</div>';
+    // IK-1062 の残り（第 10 波）: 戻す前の判断の誰・いつ・なぜ（サーバの prior_decision_line）。
+    if (link.prior_decision_line) html += '<div data-identity-prior-decision style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(link.prior_decision_line) + '</div>';
+    if ((link.status === "rejected" || link.status === "revoked") && link.decidable !== false) {
+      html += ' <button type="button" class="library-identity-link-restore admin-action-btn" data-ui-anchor="deliberation.identity-link-restore" data-link-id="' + escHtml(linkId || "") + '" title="' + escHtml(link.restore_note || "") + '" style="font-size:11px;padding:1px 7px">候補に戻す</button>';
+    }
+    return html;
+  }
+
+  function _libraryRestoreIdentityLink(linkId, restoreNote, onDone) {
+    if (!linkId) return;
+    var reason = window.prompt((restoreNote ? restoreNote + "\n\n" : "") + "候補に戻す理由を書いてください（必須）。", "");
+    if (reason === null) return;
+    reason = String(reason).trim();
+    if (!reason) { alert("候補に戻す理由を書いてください。"); return; }
+    _libraryDecideIdentityLink(linkId, "restore", onDone, reason);
+  }
+
+  function _libraryBindBoundLinkActions(container, entryId) {
+    container.querySelectorAll(".library-identity-link-restore").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        _libraryRestoreIdentityLink(this.getAttribute("data-link-id"), this.getAttribute("title") || "", function () { loadLibraryEntryBoundParts(entryId); });
+      });
+    });
+    container.querySelectorAll(".library-bound-part-revoke").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        _libraryRevokeIdentityLink(this.getAttribute("data-link-id"), this.getAttribute("title") || "", entryId);
+      });
+    });
+    container.querySelectorAll(".library-bound-part-confirm").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (!_libraryConfirmIdentityLinkDialog(this.getAttribute("data-confirm-question"), this.getAttribute("data-granularity-note"))) return;
+        _libraryDecideIdentityLink(this.getAttribute("data-link-id"), "confirm", function () { loadLibraryEntryBoundParts(entryId); });
+      });
+    });
+    container.querySelectorAll(".library-bound-part-reject").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var reason = _libraryPromptDismissReason("この結び付き");
+        if (!reason) return;
+        _libraryDecideIdentityLink(this.getAttribute("data-link-id"), "reject", function () { loadLibraryEntryBoundParts(entryId); }, reason);
+      });
+    });
+  }
+
+  // IK-0983: この概念に結びそうな記号の候補を作る（決定論・確定は行ごとの［確認］）。
+  function _libraryBindSymbolDerive(entry) {
+    var btn = document.getElementById("library-symbol-derive");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      apiFetch("/admin/library/entries/" + encodeURIComponent(entry.id) + "/symbol-candidates/derive", { method: "POST" })
+        .then(function (res) {
+          return res.json().catch(function () { return {}; }).then(function (data) {
+            if (!res.ok) throw new Error((data && data.detail) || "記号の候補を探せませんでした");
+            return data;
+          });
+        })
+        .then(function (data) {
+          loadLibraryEntryBoundParts(entry.id);
+          _libraryShowOutcomeFacts("library-bound-symbols-list", (data && data.facts) || []);
+        })
+        .catch(function (err) { alert(err.message || "記号の候補を探せませんでした"); })
+        .then(function () { btn.disabled = false; });
+    });
+  }
+
+  // IK-0953: 確定した結び付きを取り消す（理由必須・行は残る）。文言の正本はサーバの revoke_note。
+  function _libraryRevokeIdentityLink(linkId, revokeNote, entryId) {
+    if (!linkId) return;
+    var reason = window.prompt((revokeNote ? revokeNote + "\n\n" : "") + "取り消す理由を書いてください（必須）。", "");
+    if (reason === null) return;
+    reason = String(reason).trim();
+    if (!reason) { alert("取り消しの理由を書いてください。"); return; }
+    apiFetch("/admin/deliberation/identity-links/" + encodeURIComponent(linkId) + "/revoke", {
+      method: "POST",
+      body: JSON.stringify({ reason: reason }),
+    })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "取り消しに失敗しました"); });
+        loadLibraryEntryBoundParts(entryId);
+      })
+      .catch(function (err) { alert(err.message || "取り消しに失敗しました"); });
+  }
+
+  // IK-0897: 追加操作の結果の事実文（サーバの facts を素通し・JS に文言を持たない）を
+  // 一覧の直前に 1 行で出す。次の操作で置き換える。
+  function _libraryShowOutcomeFacts(listElId, facts) {
+    var list = document.getElementById(listElId);
+    if (!list || !list.parentNode) return;
+    var noteId = listElId + "-outcome";
+    var note = document.getElementById(noteId);
+    if (!note) {
+      note = document.createElement("div");
+      note.id = noteId;
+      note.className = "library-outcome-fact";
+      note.style.cssText = "font-size:12px;color:var(--color-text-secondary);margin:4px 0";
+      list.parentNode.insertBefore(note, list);
+    }
+    var lines = (facts || []).filter(function (f) { return f; });
+    note.textContent = lines.join(" ");
+    note.hidden = !lines.length;
   }
 
   // 取得失敗は区画ごと畳む（fail-soft。「無い」と断定しない）。
@@ -3065,7 +3641,8 @@
   function loadLibraryEntryLabels(entryId) {
     var el = document.getElementById("library-labels-list");
     if (!el) return;
-    apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/labels")
+    // IK-1024: 見送り済みも読み、理由・見送った人と［見送りを取り消す］を折りたたみに残す（行を消さない）。
+    apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/labels?include_dismissed=true")
       .then(function (res) {
         if (!res.ok) throw new Error("status " + res.status);
         return res.json();
@@ -3074,19 +3651,55 @@
         var labels = (data && data.labels) || [];
         var target = document.getElementById("library-labels-list");
         if (!target) return;
+        var live = labels.filter(function (l) { return l.status !== "dismissed"; });
+        var dismissedRows = labels.filter(function (l) { return l.status === "dismissed"; });
         if (!labels.length) { target.innerHTML = "別名・隠しラベルはまだありません。"; return; }
-        var html = "";
-        labels.forEach(function (l) {
-          var dismissed = l.status === "dismissed";
-          html += '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:2px 0;opacity:' + (dismissed ? "0.6" : "1") + '">' +
+        var html = live.length ? "" : '<div>別名・隠しラベルはまだありません。</div>';
+        live.forEach(function (l) {
+          html += '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:2px 0">' +
             '<span>' + escHtml(l.label || "") +
               ' <span style="color:var(--color-text-tertiary)">' + escHtml(_libraryLabelKindLabels.hasOwnProperty(l.kind) ? _libraryLabelKindLabels[l.kind] : (l.kind || "")) + '</span>' +
               _libraryStatusChipHtml(l.status) + ' ' + _libraryJustificationHtml(l.mapping_justification) +
             '</span>' +
-            (dismissed ? '' : '<button type="button" class="library-label-dismiss admin-action-btn" data-label-id="' + escHtml(l.id) + '" data-label-text="' + escHtml(l.label || "") + '" style="font-size:11px;padding:1px 7px">見送り</button>') +
+            '<button type="button" class="library-label-dismiss admin-action-btn" data-label-id="' + escHtml(l.id) + '" data-label-text="' + escHtml(l.label || "") + '" style="font-size:11px;padding:1px 7px">見送り</button>' +
           '</div>';
         });
+        if (dismissedRows.length) {
+          html += '<details class="library-labels-dismissed" data-ui-anchor="knowledge-library.labels-dismissed" style="margin-top:4px">' +
+            '<summary>見送り済みのラベル</summary>';
+          dismissedRows.forEach(function (l) {
+            html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;padding:2px 0;opacity:0.75">' +
+              '<span>' + escHtml(l.label || "") +
+                ' <span style="color:var(--color-text-tertiary)">' + escHtml(_libraryLabelKindLabels.hasOwnProperty(l.kind) ? _libraryLabelKindLabels[l.kind] : (l.kind || "")) + '</span>' +
+                _libraryStatusChipHtml(l.status) +
+                (l.decision_line ? '<br><span style="color:var(--color-text-tertiary)">' + escHtml(l.decision_line) + '</span>' : '') +
+              '</span>' +
+              '<button type="button" class="library-label-restore admin-action-btn" data-ui-anchor="knowledge-library.label-restore" data-label-id="' + escHtml(l.id) + '" data-label-text="' + escHtml(l.label || "") + '" style="font-size:11px;padding:1px 7px">見送りを取り消す</button>' +
+            '</div>';
+          });
+          html += '</details>';
+        }
         target.innerHTML = html;
+        target.querySelectorAll(".library-label-restore").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var text = this.getAttribute("data-label-text") || "このラベル";
+            var reason = window.prompt("「" + text + "」の見送りを取り消す理由を入力してください（記録に残ります）。", "");
+            if (!reason || !String(reason).trim()) return;
+            apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/labels/" + encodeURIComponent(this.getAttribute("data-label-id")) + "/restore", {
+              method: "POST",
+              body: JSON.stringify({ review_note: String(reason).trim() }),
+            })
+              .then(function (res) {
+                if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "更新に失敗しました"); });
+                return res.json();
+              })
+              .then(function (data) {
+                loadLibraryEntryLabels(entryId);
+                if (data && data.facts && data.facts.length) _libraryShowOutcomeFacts("library-labels-list", data.facts);
+              })
+              .catch(function (err) { alert(err.message || "更新に失敗しました"); });
+          });
+        });
         target.querySelectorAll(".library-label-dismiss").forEach(function (btn) {
           btn.addEventListener("click", function () {
             var reason = _libraryPromptDismissReason(this.getAttribute("data-label-text") || "このラベル");
@@ -3097,7 +3710,12 @@
             })
               .then(function (res) {
                 if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "更新に失敗しました"); });
+                return res.json();
+              })
+              .then(function (data) {
+                // IK-1024: 見送った事実と、どこで見られて・どう戻すかをサーバの文で知らせる。
                 loadLibraryEntryLabels(entryId);
+                if (data && data.facts && data.facts.length) _libraryShowOutcomeFacts("library-labels-list", data.facts);
               })
               .catch(function (err) { alert(err.message || "更新に失敗しました"); });
           });
@@ -3123,21 +3741,35 @@
         relations.forEach(function (r) {
           var isSubject = r.subject_entry_id === entryId;
           var other = isSubject ? (r.object_name || r.object_entry_id) : (r.subject_name || r.subject_entry_id);
-          var kindLabel = _libraryRelationKindLabels.hasOwnProperty(r.kind) ? _libraryRelationKindLabels[r.kind] : (r.kind || "");
+          // IK-1063: 種類の札は見ている概念から見た語（上位 / 下位）をサーバが返す。
+          var kindLabel = r.kind_label || (_libraryRelationKindLabels.hasOwnProperty(r.kind) ? _libraryRelationKindLabels[r.kind] : (r.kind || ""));
+          var relationRecord = "";
+          if (r.direction_line) relationRecord += '<div data-relation-direction style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(r.direction_line) + '</div>';
+          if (r.added_line) relationRecord += '<div data-relation-added style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(r.added_line) + '</div>';
+          else if (r.reason) relationRecord += '<div style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(r.reason) + '</div>';
+          if (r.decision_line) relationRecord += '<div data-relation-decision style="font-size:11px;color:var(--color-text-secondary)">' + escHtml(r.decision_line) + '</div>';
+          if (r.decision_reason_line) relationRecord += '<div data-relation-decision-reason style="font-size:11px;color:var(--color-text-secondary)">' + escHtml(r.decision_reason_line) + '</div>';
           html += '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;padding:2px 0">' +
             '<span>' + escHtml(kindLabel) + ': ' + escHtml(other || "") +
               _libraryStatusChipHtml(r.status) + ' ' + _libraryJustificationHtml(r.mapping_justification) +
-              (r.reason ? ' <span style="color:var(--color-text-tertiary)">' + escHtml(r.reason) + '</span>' : '') +
+              relationRecord +
             '</span>' +
             '<span style="display:flex;gap:4px">' +
               (r.status === "confirmed" ? '' : '<button type="button" class="library-relation-confirm admin-action-btn" data-relation-id="' + escHtml(r.id) + '" style="font-size:11px;padding:1px 7px">確定</button>') +
               (r.status === "dismissed" ? '' : '<button type="button" class="library-relation-dismiss admin-action-btn" data-relation-id="' + escHtml(r.id) + '" data-relation-label="' + escHtml(kindLabel + ": " + (other || "")) + '" style="font-size:11px;padding:1px 7px">見送り</button>') +
+              // 第 25 周 第 10 波: 理由の無い確定に、確定した本人が理由を書き足す（可否はサーバ）。
+              (r.can_add_decision_reason ? '<button type="button" class="library-relation-decision-reason admin-action-btn" data-ui-anchor="knowledge-library.relation-decision-reason" data-relation-id="' + escHtml(r.id) + '" title="' + escHtml(r.decision_reason_add_note || "") + '" style="font-size:11px;padding:1px 7px">確定の理由を書き足す</button>' : '') +
             '</span>' +
           '</div>';
         });
         target.innerHTML = html;
         target.querySelectorAll(".library-relation-confirm").forEach(function (btn) {
-          btn.addEventListener("click", function () { _libraryDecideRelation(entryId, this.getAttribute("data-relation-id"), "confirmed", ""); });
+          btn.addEventListener("click", function () {
+            // IK-1063: 確定の理由（任意）。キャンセルは確定しない。
+            var note = window.prompt("確定の理由があれば書いてください（任意。記録に残ります）。", "");
+            if (note === null) return;
+            _libraryDecideRelation(entryId, this.getAttribute("data-relation-id"), "confirmed", String(note).trim());
+          });
         });
         target.querySelectorAll(".library-relation-dismiss").forEach(function (btn) {
           btn.addEventListener("click", function () {
@@ -3146,17 +3778,40 @@
             _libraryDecideRelation(entryId, this.getAttribute("data-relation-id"), "dismissed", reason);
           });
         });
+        target.querySelectorAll(".library-relation-decision-reason").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var note = this.getAttribute("title") || "";
+            var reason = window.prompt((note ? note + "\n\n" : "") + "確定の理由を書いてください（必須）。", "");
+            if (reason === null) return;
+            reason = String(reason).trim();
+            if (!reason) { alert("確定の理由を書いてください。"); return; }
+            var relationId = this.getAttribute("data-relation-id");
+            apiFetch("/admin/library/relations/" + encodeURIComponent(relationId) + "/decision-reason", { method: "PATCH", body: JSON.stringify({ reason: reason, viewer_entry_id: entryId }) })
+              .then(function (res) {
+                if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "書き足せませんでした"); });
+                return res.json().catch(function () { return {}; }).then(function (data) {
+                  loadLibraryEntryRelations(entryId);
+                  _libraryShowOutcomeFacts("library-relations-list", (data && data.facts) || []);
+                });
+              })
+              .catch(function (err) { alert(err.message || "書き足せませんでした"); });
+          });
+        });
       })
       .catch(function () { _libraryHideSection("library-relations-list"); });
   }
 
   function _libraryDecideRelation(entryId, relationId, status, reviewNote) {
-    var payload = { status: status };
+    var payload = { status: status, viewer_entry_id: entryId };
     if (reviewNote) payload.review_note = reviewNote;
     apiFetch("/admin/library/relations/" + encodeURIComponent(relationId) + "/decide", { method: "POST", body: JSON.stringify(payload) })
       .then(function (res) {
         if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "更新に失敗しました"); });
-        loadLibraryEntryRelations(entryId);
+        return res.json().catch(function () { return {}; }).then(function (data) {
+          loadLibraryEntryRelations(entryId);
+          // IK-1063: 判断の直後の 1 行（〔確定〕 確定: 名前・日付）。文はサーバ。
+          _libraryShowOutcomeFacts("library-relations-list", (data && data.facts) || []);
+        });
       })
       .catch(function (err) { alert(err.message || "更新に失敗しました"); });
   }
@@ -3210,6 +3865,56 @@
       .catch(function () { _libraryHideSection("library-atlas-links-list"); });
   }
 
+  // IK-0927: 地図の概念を名前で探し、手で対応を付ける（作るのは候補。確定は一覧の［確定］）。
+  function _libraryBindManualAtlasLink(entry) {
+    var searchBtn = document.getElementById("library-atlas-node-search");
+    var addBtn = document.getElementById("library-atlas-link-add");
+    var select = document.getElementById("library-atlas-node-select");
+    var factsEl = document.getElementById("library-atlas-node-facts");
+    function showFacts(list) {
+      if (!factsEl) return;
+      var text = (list || []).filter(function (f) { return !!f; }).join(" ");
+      factsEl.textContent = text;
+      factsEl.hidden = !text;
+    }
+    if (searchBtn) searchBtn.addEventListener("click", function () {
+      var q = (document.getElementById("library-atlas-node-query") || {}).value || "";
+      apiFetch("/admin/library/atlas-links/nodes?domain_key=" + encodeURIComponent(entry.domain_key || "") + "&q=" + encodeURIComponent(q))
+        .then(function (res) {
+          if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "検索に失敗しました"); });
+          return res.json();
+        })
+        .then(function (data) {
+          var nodes = (data && data.nodes) || [];
+          if (select) {
+            select.innerHTML = nodes.length
+              ? nodes.map(function (n) {
+                  return '<option value="' + escHtml(n.node_id) + '">' + escHtml(n.label) +
+                    (n.region_label ? '（' + escHtml(n.region_label) + '）' : '') + '</option>';
+                }).join("")
+              : '<option value="">（該当なし）</option>';
+            select.disabled = !nodes.length;
+          }
+          showFacts(data && data.facts);
+        })
+        .catch(function (err) { showFacts([err.message || "検索に失敗しました"]); });
+    });
+    if (addBtn) addBtn.addEventListener("click", function () {
+      var nodeId = select ? select.value : "";
+      if (!nodeId) { showFacts(["先に地図の概念を検索して選んでください。"]); return; }
+      apiFetch("/admin/library/entries/" + encodeURIComponent(entry.id) + "/atlas-links", {
+        method: "POST",
+        body: JSON.stringify({ domain_key: entry.domain_key || "", node_id: nodeId })
+      })
+        .then(function (res) {
+          if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "対応を付けられませんでした"); });
+          showFacts(["対応の候補を付けました。一覧の［確定］で確定します。"]);
+          loadLibraryEntryAtlasLinks(entry);
+        })
+        .catch(function (err) { showFacts([err.message || "対応を付けられませんでした"]); });
+    });
+  }
+
   function _libraryDecideAtlasLink(entry, linkId, status, reviewNote) {
     var payload = { status: status };
     if (reviewNote) payload.review_note = reviewNote;
@@ -3243,13 +3948,15 @@
     daily_call_limit_reached: "本日の配置候補の生成上限に達しました。翌日以降に再度お試しください。",
     llm_call_failed: "配置候補の生成に失敗しました。しばらく待ってから再度お試しください。"
   };
-  // サーバの status_label が取れないときのフォールバック（fail-soft・断定しない語）。
+  // サーバの status_label が取れないときのフォールバック。正本は
+  // backend/core/label_vocab.py::LANDSCAPE_STATUS_LABELS の逐語ミラー
+  // （test_landscape_status_vocab_mirror.py。行のボタン「再検討」の結果は「再検討中」）。
   var LANDSCAPE_STATUS_FALLBACK_LABELS = {
+    inferred: "AI推定（未確認）",
     confirmed: "教員確認済み",
-    inferred: "AIによる推定（未確認）",
-    review_required: "確認待ち（AI推定）",
     rejected: "却下",
-    superseded: "旧候補"
+    review_required: "再検討中",
+    superseded: "再解析により置換"
   };
   var LANDSCAPE_STATUS_ACTIONS = [
     ["confirmed", "確認"],
@@ -3372,6 +4079,8 @@
       inner += '<div style="font-size:12px;color:var(--color-text-secondary);border-left:2px solid var(--color-border-tertiary);padding:2px 0 2px 8px;margin:4px 0">' +
         escHtml(quote) +
         (ev && ev.claim_id ? ' <code style="font-size:10px;color:var(--color-text-tertiary)">' + escHtml(ev.claim_id) + '</code>' : "") +
+        // IK-0677: 引用の出所の印（文はサーバが解決・JS に表を持たない）。
+        (ev && ev.source_label ? '<div style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(ev.source_label) + '</div>' : "") +
       '</div>';
     });
     if (!inner) {
@@ -3445,9 +4154,9 @@
     var versions = [];
     groups.forEach(function (group) {
       var version = _landscapeFrozenVersion(data, group);
-      if (version) versions.push(group.domain_name + " 骨格版 " + version);
+      if (version) versions.push(group.domain_name + " " + atlasVersionText(version));
     });
-    if (versions.length) facts.push("使用した骨格: " + versions.join(" ・ "));
+    if (versions.length) facts.push("使用した地図: " + versions.join(" ・ "));
     return '<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--color-border-tertiary);font-size:11px;color:var(--color-text-tertiary)">' +
       escHtml(LANDSCAPE_CORPUS_NOTICE) +
       (facts.length ? '<div style="margin-top:4px">' + escHtml(facts.join(" ・ ")) + '</div>' : "") +
@@ -3470,7 +4179,10 @@
         escHtml("この論文は「" + name + "」の地図に配置できませんでした: " + reason) +
         (item && item.gap_signals_recorded
           ? '<div class="landscape-gap-signal-row" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' +
-              escHtml(LANDSCAPE_GAP_SIGNAL_NOTICE) +
+              // IK-0995: 記録した主題を名前で（件数は出さない）。
+              escHtml((item.gap_topics && item.gap_topics.length
+                ? "置けなかった主題: " + item.gap_topics.join("、") + "。"
+                : "") + LANDSCAPE_GAP_SIGNAL_NOTICE) +
             '</div>'
           : "") +
       '</div>';
@@ -3495,7 +4207,7 @@
       var version = _landscapeFrozenVersion(data, group);
       html += '<div class="landscape-domain-group" data-domain-key="' + escHtml(group.domain_key) + '" style="margin-bottom:14px">' +
         '<div style="font-size:13px;font-weight:600;color:var(--color-text-primary)">' + escHtml(group.domain_name) + '</div>' +
-        (version ? '<div style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:4px">骨格版 ' + escHtml(version) + '</div>' : '<div style="margin-bottom:4px"></div>');
+        (version ? '<div style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:4px">' + escHtml(atlasVersionText(version)) + '</div>' : '<div style="margin-bottom:4px"></div>');
       group.rows.forEach(function (p) {
         var meta = [];
         if (p && p.perspective_label) meta.push(p.perspective_label);
@@ -3507,7 +4219,8 @@
             _landscapeStatusChipHtml(p) +
             _landscapeNodeStatusChipHtml(p) +
           '</div>' +
-          ((p && p.reason) ? '<div style="font-size:12px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(p.reason) + '</div>' : "") +
+          ((p && p.reason) ? '<div style="font-size:12px;color:var(--color-text-secondary);margin-top:4px">' + (p.reason_label ? '〔' + escHtml(p.reason_label) + '〕' : "") + escHtml(p.reason) + '</div>' : "") +
+          ((p && p.reason && p.reason_note) ? '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px">' + escHtml(p.reason_note) + '</div>' : "") +
           _landscapeEvidenceHtml(p) +
           ((p && p.review_note) ? '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:4px">メモ: ' + escHtml(p.review_note) + '</div>' : "") +
           _landscapeActionsHtml(p) +
@@ -3642,6 +4355,20 @@
       ';margin-top:2px;">' + escHtml(label) + "</div>";
   }
 
+  // ── 解析の縮退（IK-0715）────────────────────────────────────────────────
+  // 判定はサーバ（core/analysis_degradation.py）の 1 投影だけが持つ。行に出すのは
+  // status === "degraded" のときの事実文 1 行（詳細の事実文は title のツールチップ）だけで、
+  // 件数・段の数は出さない。ok / unchecked のときは何も描かない（操作要素ではない事実の表示）。
+  function materialAnalysisDegradationChipHtml(m) {
+    var deg = m && m.analysis_degradation;
+    if (!deg || deg.status !== "degraded") return "";
+    var facts = Array.isArray(deg.facts) ? deg.facts : [];
+    var tip = facts.join("\n");
+    return '<div class="admin-analysis-degradation-chip" style="font-size:11px;color:var(--color-text-secondary);margin-top:2px;"' +
+      (tip ? ' title="' + escHtml(tip) + '"' : "") + ">" +
+      escHtml("解析: 一部は AI の応答なしの代替") + "</div>";
+  }
+
   function openReferenceHealthModal(documentId, title) {
     var existing = document.getElementById("reference-health-modal");
     if (existing) existing.remove();
@@ -3750,13 +4477,14 @@
   // 正本: docs/features/seminar_brief_mirroring_design.md
   //   SB1 新テーブル・新LLMゼロ（既存投影の読み時合成 — このモーダルは読むだけ。書き込みAPIなし）
   //   SB2 数値を見せない（件数・人数の生値なし。段階ラベル・事実文のみ描画する）
-  //   SB3 第4区画「学習者からの問い」は v1 空欄で予約（空欄は発見の流儀 — 警告色・催促文にしない）
+  //   SB3 第4区画「学習者からの問い」は素朴な問いシグナルの k-匿名集約（名前とレンジのみ）。
+  //       記録が無いときは「まだありません」の事実文（空欄は発見の流儀 — 警告色・催促文にしない）
   //   SB4 学習者個人・学習者別件数への導線を作らない
   // 描画は createElement / textContent 基調（本文変数を innerHTML に渡さない）。
 
   // 第4区画の note がサーバから取れないときの固定文
-  // （正本: core/doubt/seminar_brief.py::LEARNER_HANDOFF_RESERVED_NOTE の逐語）。
-  var SEMINAR_BRIEF_RESERVED_NOTE = "（この区画は、学習者からの手渡しの仕組みの実装後に使われます）";
+  // （正本: core/doubt/seminar_brief.py::LEARNER_HANDOFF_NO_RECORD_NOTE の逐語）。
+  var SEMINAR_BRIEF_HANDOFF_EMPTY_NOTE = "このコースの学習者の詰まりの記録はまだありません。";
   // 支持線の段階ラベル。正本は backend/core/doubt/schema.py::SUPPORT_LEVEL_BADGE_LABELS
   // （test_seminar_brief_ui_static.py が逐語ミラーを固定。SL4: 経路数・カットのサイズは出さない）。
   var SEMINAR_SUPPORT_LEVEL_LABELS = {
@@ -3838,12 +4566,19 @@
   }
 
   // 区画の枠。行が空なら null（＝区画ごと静かに省略する。空を告げる置き文を書かない）。
-  function _sbSection(heading, rowEls) {
-    if (!rowEls || !rowEls.length) return null;
+  // IK-0853: 空の区画は見出しを残し、サーバの閉世界の一文（data.empty_notes）を淡色で添える。
+  // サーバが一文を返さない区画は従来どおり省略する（JS に固定文を持たない）。
+  function _sbSection(heading, rowEls, emptyNote) {
+    var hasRows = !!(rowEls && rowEls.length);
+    if (!hasRows && !(typeof emptyNote === "string" && emptyNote)) return null;
     var section = _sbEl("div", "margin-bottom:16px");
     section.className = "seminar-brief-section";
     section.appendChild(_sbEl("div", "font-size:13px;font-weight:600;color:var(--color-text-primary);margin-bottom:6px", heading));
-    rowEls.forEach(function (el) { section.appendChild(el); });
+    if (hasRows) {
+      rowEls.forEach(function (el) { section.appendChild(el); });
+    } else {
+      section.appendChild(_sbEl("div", "font-size:12px;color:var(--color-text-tertiary)", emptyNote));
+    }
     return section;
   }
 
@@ -3881,6 +4616,11 @@
     return ["つまづき — " + parts.join(" ・ ")];
   }
 
+  // 同じ文面の項目をサーバがまとめたときの事実文（IK-0593。件数は出さない）。
+  function _sbMergedFacts(item) {
+    return (item && typeof item.merged_note === "string" && item.merged_note) ? [item.merged_note] : [];
+  }
+
   function _sbStatementRow(statement, facts) {
     var row = _sbEl("div", "padding:6px 0;border-bottom:1px solid var(--color-border-tertiary)");
     row.className = "seminar-brief-row";
@@ -3903,40 +4643,51 @@
       return;
     }
 
+    var emptyNotes = data.empty_notes || {};
+
     // 1. 脆い前提（未検証 × 下流影響の段階ラベル。並びはサーバが決める）
     var fragileRows = [];
     (data.fragile_assumptions || []).forEach(function (item) {
       if (!item || !item.statement) return;
-      fragileRows.push(_sbStatementRow(item.statement, _sbFragileMeta(item).concat(_sbStumbleFacts(item.stumble))));
+      fragileRows.push(_sbStatementRow(item.statement, _sbFragileMeta(item).concat(_sbStumbleFacts(item.stumble), _sbMergedFacts(item))));
     });
-    var fragileSection = _sbSection("脆い前提", fragileRows);
+    var fragileSection = _sbSection("脆い前提", fragileRows, emptyNotes.fragile_assumptions);
     if (fragileSection) body.appendChild(fragileSection);
+    // IK-0933: 導出の手順（前提ではない）を外したことの事実文（サーバの population_note）。
+    if (data.population_note) {
+      body.appendChild(_sbEl("div", "padding:0 16px 8px;color:var(--color-text-secondary);font-size:12px",
+        data.population_note));
+    }
 
     // 2. 一点吊りの支持線（SL層 support_paths level=single の事実文）
     var singleRows = [];
     (data.single_support_lines || []).forEach(function (item) {
       if (!item || !item.statement) return;
-      singleRows.push(_sbStatementRow(item.statement, item.fact_line ? [item.fact_line] : []));
+      singleRows.push(_sbStatementRow(item.statement, (item.fact_line ? [item.fact_line] : []).concat(_sbMergedFacts(item))));
     });
-    var singleSection = _sbSection("一点吊りの支持線", singleRows);
+    var singleSection = _sbSection("一点吊りの支持線", singleRows, emptyNotes.single_support_lines);
     if (singleSection) body.appendChild(singleSection);
 
     // 3. 晴れ間（SL1 閉世界語彙の事実文。サーバの文をそのまま出す — 言い換えない）
     var clearingRows = [];
     (data.clear_skies || []).forEach(function (item) {
       if (!item || !item.statement) return;
-      clearingRows.push(_sbStatementRow(item.statement, item.fact_line ? [item.fact_line] : []));
+      clearingRows.push(_sbStatementRow(item.statement, (item.fact_line ? [item.fact_line] : []).concat(_sbMergedFacts(item))));
     });
-    var clearingSection = _sbSection("晴れ間", clearingRows);
+    var clearingSection = _sbSection("晴れ間", clearingRows, emptyNotes.clear_skies);
     if (clearingSection) body.appendChild(clearingSection);
 
-    // 4. 学習者からの問い — v1 は空欄予約（SB3）。空でもこの区画だけは常に出し、
-    //    淡色の note のみを添える（警告色・催促文にしない）。
+    // 4. 学習者からの問い — 素朴な問いシグナルの k-匿名集約（名前とレンジのみ, SB3/SB4）。
+    //    空でもこの区画だけは常に出し、淡色の note を添える（警告色・催促文にしない）。
     var handed = data.learner_handoff || {};
     var handedSection = _sbEl("div", "margin-bottom:16px");
     handedSection.className = "seminar-brief-section seminar-brief-handed";
     handedSection.appendChild(_sbEl("div", "font-size:13px;font-weight:600;color:var(--color-text-primary);margin-bottom:6px", "学習者からの問い"));
-    handedSection.appendChild(_sbEl("div", "font-size:12px;color:var(--color-text-tertiary)", handed.note || SEMINAR_BRIEF_RESERVED_NOTE));
+    (handed.items || []).forEach(function (item) {
+      if (!item || !item.statement) return;
+      handedSection.appendChild(_sbStatementRow(item.statement, item.fact_line ? [item.fact_line] : []));
+    });
+    handedSection.appendChild(_sbEl("div", "font-size:12px;color:var(--color-text-tertiary)", handed.note || SEMINAR_BRIEF_HANDOFF_EMPTY_NOTE));
     body.appendChild(handedSection);
   }
 
@@ -4106,6 +4857,22 @@
     return _uploadDomain.value || "";
   }
 
+  // ── 生成する言語（run options.language, discuss_opening_authoring_design.md §14）──
+  // 解析が生成する文章（議論のきっかけ・二層説明）の言語。語彙はサーバが正本（ja / en）。
+  // 「指定しない」は送らない（サーバ側の既定 = 議論のきっかけは env、説明は素材の言語）。
+  // 選択は run 単位（ユーザー既定として保存しない）。LLM の呼び出し回数は変わらない。
+  var GENERATION_LANGUAGE_LABELS = { ja: "日本語", en: "英語" };
+
+  function getUploadLanguage() {
+    var el = document.getElementById("upload-language-select");
+    var value = el ? String(el.value || "") : "";
+    return GENERATION_LANGUAGE_LABELS[value] ? value : "";
+  }
+
+  function generationLanguageLabel(value) {
+    return GENERATION_LANGUAGE_LABELS[value] || "指定しない";
+  }
+
   // ── Task Polling State ──────────────────────────────────────────
   var _activePollingTimers = {};
 
@@ -4134,6 +4901,9 @@
     // （サーバ側で分野中立の解析になる）。
     var uploadCartridgeId = getUploadCartridgeId();
     if (uploadCartridgeId) formData.append("cartridge_id", uploadCartridgeId);
+    // 生成する言語: 選ばれていれば run へ渡す。「指定しない」は送らない。
+    var uploadLanguage = getUploadLanguage();
+    if (uploadLanguage) formData.append("language", uploadLanguage);
 
     apiFetchRaw("/admin/materials/upload", {
       method: "POST",
@@ -4285,6 +5055,45 @@
   // 受理後は既存のファイルアップロードと同じ経路（handleUploadAccepted）へ合流する。
   var _urlUploadSubmitting = false;
 
+  // arXiv の論文 URL のときだけ出す「取得する形式」（論文レーダー / arXivから探す と同型。
+  // paper_radar_design.md §15.9）。語彙の正本はサーバ（SOURCE_FORMATS）で、ここは値を
+  // 送る担体。クライアントで arXiv の URL を組み立てない（書き換えはサーバが行う）。
+  var URL_FORMAT_OPTIONS = [
+    { value: "tex", label: "TeX ソース" },
+    { value: "pdf", label: "PDF" }
+  ];
+  var URL_DEFAULT_SOURCE_FORMAT = "tex";
+  // 逐語でレーダー / arXivから探す の FORMAT_NOTICE と揃える（テストで固定）。
+  var URL_FORMAT_NOTICE =
+    "TeX ソースが公開されていない論文や、TeX ソースとして読めない論文では、PDF を取り込みます。";
+  var _urlUploadFormat = URL_DEFAULT_SOURCE_FORMAT;
+
+  // 形式スイッチを出すかどうかの判定（表示のためだけ。書き換えの判定はサーバが正本）。
+  function _isArxivPaperUrl(url) {
+    return /^https?:\/\/(www\.|export\.)?arxiv\.org\/(abs|pdf|src|e-print)\//i.test(String(url || "").trim());
+  }
+
+  function _urlUploadFormatRadiosHtml() {
+    var html = "";
+    for (var i = 0; i < URL_FORMAT_OPTIONS.length; i++) {
+      var option = URL_FORMAT_OPTIONS[i];
+      html +=
+        '<label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--color-text-secondary)">' +
+          '<input type="radio" name="url-upload-format-choice" class="url-upload-format-choice" value="' + escHtml(option.value) + '"' +
+          (option.value === _urlUploadFormat ? " checked" : "") + ">" +
+          escHtml(option.label) +
+        "</label>";
+    }
+    return html;
+  }
+
+  function _urlUploadSyncFormatRow() {
+    var row = document.getElementById("url-upload-format-row");
+    var input = document.getElementById("url-upload-input");
+    if (!row) return;
+    row.hidden = !_isArxivPaperUrl(input ? input.value : "");
+  }
+
   function initUrlUpload() {
     var link = document.getElementById("url-upload-link");
     if (!link) return;
@@ -4312,6 +5121,8 @@
   function openUrlUploadModal() {
     closeUrlUploadModal();
     _urlUploadSubmitting = false;
+    // 形式はモーダルを開くたびに既定（TeX）へ戻す（保存しない — PR1）。
+    _urlUploadFormat = URL_DEFAULT_SOURCE_FORMAT;
 
     var overlay = document.createElement("div");
     overlay.id = "url-upload-modal";
@@ -4326,6 +5137,16 @@
         '<label for="url-upload-input" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:4px">教材のURL</label>' +
         '<input type="text" id="url-upload-input" placeholder="https://arxiv.org/pdf/2401.00001" ' +
           'style="padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-primary);color:var(--color-text-primary)">' +
+        /* arXiv の論文 URL のときだけ出す取得形式（既定 TeX・保存しない・§15.9） */
+        '<div id="url-upload-format-row" data-ui-anchor="materials.url-upload-format" hidden style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:8px">' +
+          '<span style="font-size:12px;color:var(--color-text-secondary)">取得する形式</span>' +
+          _urlUploadFormatRadiosHtml() +
+          '<span style="font-size:11.5px;color:var(--color-text-tertiary)">' + escHtml(URL_FORMAT_NOTICE) + '</span>' +
+        '</div>' +
+        /* 生成する言語は教材管理のアップロード欄の選択を引き継ぐ（分野と同じ流儀） */
+        '<div id="url-upload-language-note" style="font-size:12px;color:var(--color-text-tertiary);margin-top:8px">' +
+          '生成する言語: ' + escHtml(generationLanguageLabel(getUploadLanguage())) + '（教材管理の「生成する言語」の選択を使います）' +
+        '</div>' +
         '<div id="url-upload-domains-note" style="font-size:12px;color:var(--color-text-tertiary);margin-top:8px">許可ドメインを確認しています。</div>' +
         '<div id="url-upload-status" class="upload-status" style="display:none;margin-top:10px"></div>' +
         '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">' +
@@ -4340,6 +5161,13 @@
     document.getElementById("url-upload-cancel").addEventListener("click", closeUrlUploadModal);
     document.getElementById("url-upload-submit").addEventListener("click", submitUrlUpload);
     var input = document.getElementById("url-upload-input");
+    input.addEventListener("input", _urlUploadSyncFormatRow);
+    var formatNodes = overlay.querySelectorAll(".url-upload-format-choice");
+    for (var fi = 0; fi < formatNodes.length; fi++) {
+      formatNodes[fi].addEventListener("change", function () {
+        if (this.checked) _urlUploadFormat = this.value;
+      });
+    }
     input.addEventListener("keydown", function (e) {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -4419,6 +5247,11 @@
     // 分野（提案 C1）: ファイル選択時と同じ「分野」行の選択を引き継ぐ。
     var urlCartridgeId = getUploadCartridgeId();
     if (urlCartridgeId) payload.cartridge_id = urlCartridgeId;
+    // arXiv の論文 URL のときだけ取得形式を送る（書き換え・PDF への切り替えはサーバ）。
+    if (_isArxivPaperUrl(url)) payload.source_format = _urlUploadFormat;
+    // 生成する言語: アップロード欄の選択を引き継ぐ。「指定しない」は送らない。
+    var urlLanguage = getUploadLanguage();
+    if (urlLanguage) payload.language = urlLanguage;
 
     _urlUploadSubmitting = true;
     if (btn) btn.disabled = true;
@@ -5101,8 +5934,11 @@
     document.getElementById("cb-chat-input").value = "";
 
     // Issue #50: インポートされたコースの場合、AIに現在の構成を伝えるためにコンテキストを付与
+    // IK-0859: 2 往復目以降も毎回、**最新の**構成案を先頭の疑似ターン 1 組として入れる
+    // （履歴の本文からは JSON を剥がしているので、入れないと AI が現在の構成を見られない）。
+    // サーバの window_history は head_keep=2 でこの 2 件を守る。state.chatHistory には積まない。
     var chatHistory = state.chatHistory;
-    if (state.courseDraft && chatHistory.length <= 1) {
+    if (state.courseDraft) {
       var draftContext = {
         role: "user",
         content: "【現在のコース構成（JSON）】\n```json\n" + JSON.stringify(state.courseDraft, null, 2) + "\n```\nこの構成をベースに再編集を行います。",
@@ -5238,30 +6074,51 @@
   }
 
   // ── 学ぶ単位（learning_units_design.md §6.2）─────────────────────────
-  // 下書きの topic が持つ units を「候補 handle の文字列配列」に正規化する。
-  // AI が dict を返した場合は handle / unit キーを拾い、それ以外（数値・オブジェクト）は
-  // **捨てる**（サーバ側の候補表照合が最終の弁だが、ここでも型を絞る）。
-  function cbDraftUnitHandles(topic) {
+  // 下書きの topic が持つ units を登録ペイロード用に正規化する。
+  // 要素は ①文字列 handle（"U3"）か ②{handle, stable_key}。handle は「草案を出した
+  // ターンの候補表の位置」で、登録時の教材集合が違うと別の単位を指す（IK-0371）ため、
+  // 参照キー（stable_key）を知っているときは必ず添えて渡す。参照キーの出所は
+  // ①要素自身の stable_key ②下書きに同梱された対応表 draft.unit_candidate_keys
+  // （サーバがそのターンの候補表から作ったもの）。どちらも無い handle は文字列のまま
+  // 渡す（参照キーを作らない = 捏造ガード。最終の弁はサーバ側の候補表照合）。
+  // それ以外（数値・オブジェクト）は **捨てる**。
+  function cbDraftUnitHandles(topic, draft) {
     if (!topic || typeof topic !== "object") return [];
     var raw = topic.units;
     if (!raw || !Array.isArray(raw)) return [];
+    var src = draft || state.courseDraft || {};
+    var keyTable = (src && src.unit_candidate_keys && typeof src.unit_candidate_keys === "object")
+      ? src.unit_candidate_keys : {};
     var handles = [];
+    var seen = [];
     raw.forEach(function (item) {
       var handle = "";
+      var stableKey = "";
       if (typeof item === "string") {
         handle = item;
       } else if (item && typeof item === "object") {
         handle = item.handle || item.unit || "";
+        stableKey = typeof item.stable_key === "string" ? item.stable_key : "";
       }
       handle = String(handle || "").trim();
-      if (handle && handles.indexOf(handle) === -1) handles.push(handle);
+      stableKey = String(stableKey || "").trim();
+      if (!stableKey && handle) {
+        var mapped = keyTable[handle.toUpperCase()];
+        if (typeof mapped === "string" && mapped) stableKey = mapped;
+      }
+      if (!handle && !stableKey) return;
+      var ident = stableKey ? ("k:" + stableKey) : ("h:" + handle.toUpperCase());
+      if (seen.indexOf(ident) !== -1) return;
+      seen.push(ident);
+      handles.push(stableKey ? { handle: handle, stable_key: stableKey } : handle);
     });
     return handles;
   }
 
-  // handle（U3）を候補表の名前に直す。候補表が無い / 載っていない handle は
-  // **handle のまま**返す（存在しない名前を作らない = 捏造ガード）。
+  // handle（U3、または {handle, stable_key}）を候補表の名前に直す。候補表が無い /
+  // 載っていない handle は **handle のまま**返す（存在しない名前を作らない = 捏造ガード）。
   function cbUnitDisplayName(handle) {
+    if (handle && typeof handle === "object") handle = handle.handle || "";
     var key = String(handle || "").trim().toUpperCase();
     var table = state.unitCandidatesByHandle || {};
     var found = table[key];
@@ -5528,6 +6385,15 @@
       .then(function (data) {
         btn.textContent = "登録完了!";
         btn.style.background = "var(--color-text-success)";
+        // IK-0951: 題名に生の TeX 記法が残るならサーバの事実文と該当の題名を添える（登録は済んでいる）。
+        if (data && data.title_notice && btn.parentNode) {
+          var titleNote = document.createElement("p");
+          titleNote.className = "cb-title-notice";
+          titleNote.setAttribute("role", "note");
+          titleNote.textContent = data.title_notice +
+            ((data.raw_tex_titles || []).length ? "（" + data.raw_tex_titles.join(" / ") + "）" : "");
+          btn.parentNode.insertBefore(titleNote, btn.nextSibling);
+        }
 
         var newCourseId = data.id;
 
@@ -6160,7 +7026,7 @@
         return !c.atlas_cartridge_id || total === 0 || bound < total;
       });
 
-      var publishedText = frozen ? ("版 " + escHtml(frozen.version || "—")) : "未公開";
+      var publishedText = frozen ? escHtml(atlasVersionText(frozen.version) || "—") : "未公開";
       var draftText = draft
         ? ("編集中" + ((validation.errors || []).length ? "・エラー " + validation.errors.length + "件" : "・確認可能") )
         : "なし";
@@ -6256,6 +7122,52 @@
           }
         },
       });
+      _appendDraftRelationsSection(previewView, skeleton);
+    }
+
+    // IK-0886: 下書きプレビューの「関係」の節。領域・概念の図だけでは、下書きへ反映した
+    // 関係を確かめられないので、両端の名前・種類・向きを文で並べ、現在の公開版に無い
+    // 関係には「次版で加わる」と添える（件数は出さない）。
+    function _appendDraftRelationsSection(container, skeleton, opts) {
+      if (!container || !skeleton) return;
+      opts = opts || {};
+      var labels = {};
+      (skeleton.regions || []).forEach(function (r) {
+        labels[r.id] = r.label || r.id;
+        (r.concepts || []).forEach(function (c) { labels[c.id] = c.label || c.id; });
+      });
+      // IK-0992: 公開中の版そのものを描くとき（opts.published）は「次版で加わる」を付けない。
+      var frozenSkel = opts.published ? null : (latestAtlasState && latestAtlasState.frozen && latestAtlasState.frozen.skeleton);
+      var frozenPairs = {};
+      ((frozenSkel && frozenSkel.edges) || []).forEach(function (e) {
+        var k = e.from < e.to ? e.from + "|" + e.to : e.to + "|" + e.from;
+        frozenPairs[k] = e.kind || "";
+      });
+      var edges = skeleton.edges || [];
+      var section = document.createElement("div");
+      section.className = "atlas-draft-relations";
+      section.setAttribute("data-ui-anchor", "atlas.draft-relations");
+      section.style.cssText = "margin-top:10px;font-size:12px;color:var(--color-text-secondary)";
+      var html = '<div style="color:var(--color-text-primary);margin-bottom:4px"><strong>関係（辺）</strong></div>';
+      if (!edges.length) {
+        html += opts.published
+          ? '<div>この版には関係（辺）がありません。</div>'
+          : '<div>この下書きには関係（辺）がありません。</div>';
+      }
+      edges.forEach(function (e) {
+        var from = labels[e.from] || e.from;
+        var to = labels[e.to] || e.to;
+        var kindLabel = EDGE_KIND_LABELS[e.kind] || "";
+        var text = e.kind === "depends"
+          ? "「" + from + "」が「" + to + "」に依存する"
+          : "「" + from + "」と「" + to + "」" + (kindLabel ? "（" + kindLabel + "）" : "");
+        var k = e.from < e.to ? e.from + "|" + e.to : e.to + "|" + e.from;
+        var isNew = frozenSkel && (!frozenPairs.hasOwnProperty(k) || frozenPairs[k] !== (e.kind || ""));
+        html += '<div class="atlas-draft-relation">' + escHtml(text) +
+          (isNew ? ' <span style="color:var(--color-text-tertiary)">— 次版で加わる関係</span>' : "") + '</div>';
+      });
+      section.innerHTML = html;
+      container.appendChild(section);
     }
 
     function switchView(view) {
@@ -6273,15 +7185,55 @@
     // §3.1: JSON編集タブでの編集は blur 時に (構文が通れば) プレビューへ即時反映する
     if (editor) editor.addEventListener("blur", function () { if (activeView === "preview") renderPreview(); });
 
+    // IK-0992（第 25 周 第 5 波）: 下書きが無いとき、公開中の版の項目と関係を同じプレビュー
+    // 部品で読み取り専用に描く（凍結の直後に「何が公開版に入ったか」を読み返す面）。
+    // IK-0992 の残り（第 6 波）: 下書きがある間も出す（下書きと公開版を並べて読む手）。
+    // 見出しで「下の下書きとは別の、公開中の版」と言い分け、閉じた状態で置く。
+    var ATLAS_PUBLISHED_VIEW_WITH_DRAFT_TEXT =
+      "公開中の版（{version}）を見る（読み取り専用 — 下で編集している次版の下書きとは別です）";
+
+    function renderPublishedView(frozenSkeleton, data) {
+      var wrap = document.getElementById("atlas-published-view");
+      var body = document.getElementById("atlas-published-preview");
+      var summary = document.getElementById("atlas-published-summary");
+      if (!wrap || !body) return;
+      if (!frozenSkeleton || !window.AtlasDraftPreview) {
+        wrap.style.display = "none";
+        body.innerHTML = "";
+        return;
+      }
+      var withDraft = !!(data && data.draft);
+      var version = (data && data.frozen && data.frozen.version) || frozenSkeleton.version || "";
+      if (summary) {
+        var versionText = atlasVersionText(version);
+        summary.textContent = withDraft
+          ? ATLAS_PUBLISHED_VIEW_WITH_DRAFT_TEXT.replace("{version}", versionText || "地図")
+          : "公開中の版" + (versionText ? "（" + versionText + "）" : "") +
+            "の項目と関係を見る（読み取り専用）";
+      }
+      wrap.setAttribute("data-with-draft", withDraft ? "1" : "0");
+      window.AtlasDraftPreview.render(body, frozenSkeleton, {
+        errorIssues: [],
+        warningIssues: [],
+        selectedId: null,
+        onSelect: function () {},
+      });
+      _appendDraftRelationsSection(body, frozenSkeleton, { published: true });
+      wrap.style.display = "";
+    }
+
     function renderState(data) {
       latestAtlasState = data || null;
       hasDraft = !!(data && data.draft);
       var frozen = data && data.frozen ? data.frozen.skeleton : null;
       if (frozen) {
-        var reviewers = (frozen.reviewed_by || []).join(", ");
+        // 作成方法・確認者はサーバが表示語に写した provenance を描く（IK-0850。
+        // 取込経路のトークン・確認者の UUID を画面に出さない）。
+        var provenance = (data.frozen && data.frozen.provenance) || {};
+        var reviewers = (provenance.reviewed_by_labels || []).join(", ");
         var infoHtml =
-          "学習者に公開中: 版 <b>" + escHtml(frozen.version) + "</b>" +
-          " ／ 作成方法: " + escHtml(frozen.generated_by || "—") +
+          // 公開中の版は上の要約カードが言う（IK-0942: 同じ事実を 2 度描かない）。
+          "作成方法: " + escHtml(provenance.generated_by_label || "—") +
           " ／ 確認者: " + escHtml(reviewers || "—") +
           "（公開済みの版は直接変更せず、次版として編集します）";
         // changelog と修正報告者への帰属 credits の表示 (Issue D-3, 受け入れ条件3)
@@ -6290,7 +7242,7 @@
           infoHtml += "<div style='margin-top:6px'>これまでの変更:</div><ul style='margin:2px 0 0 18px;padding:0'>";
           for (var ci = entries.length - 1; ci >= 0; ci--) {
             var entry = entries[ci];
-            infoHtml += "<li>版 " + escHtml(entry.version) + " — " + escHtml(entry.note || "");
+            infoHtml += "<li>" + escHtml(atlasVersionText(entry.version)) + " — " + escHtml(entry.note || "");
             if ((entry.credits || []).length) {
               infoHtml += "（修正報告の帰属: " + escHtml(entry.credits.join(", ")) + "）";
             }
@@ -6302,6 +7254,7 @@
       } else {
         frozenInfoEl.textContent = "公開中の分野マップはまだありません（学習者には地図が表示されません）。";
       }
+      renderPublishedView(frozen, data);
       if (hasDraft) {
         draftArea.style.display = "";
         editor.value = JSON.stringify({ atlas_skeleton: data.draft.skeleton }, null, 2);
@@ -6330,6 +7283,7 @@
         latestReportsData = null;
         frozenInfoEl.textContent = "";
         draftArea.style.display = "none";
+        renderPublishedView(null, null);
         renderReports(null);
         setStatus("カートリッジを選択してください");
         renderAtlasOverview();
@@ -6433,7 +7387,7 @@
         }
         html += "</div>";
         html += "<div style='margin:6px 0;white-space:pre-wrap'>" + escHtml(r.report_text) + "</div>";
-        html += "<div style='color:var(--color-text-tertiary);font-size:11.5px'>報告者: " + escHtml(r.reporter_name || r.reporter_id) +
+        html += "<div style='color:var(--color-text-tertiary);font-size:11.5px'>報告者: " + escHtml(r.reporter_label || r.reporter_name || "名前を登録していない利用者") +
           " ／ " + escHtml((r.created_at || "").slice(0, 16).replace("T", " ")) + "</div>";
         if (r.resolution_note) {
           html += "<div style='color:var(--color-text-secondary);font-size:12px;margin-top:4px'>処理メモ: " + escHtml(r.resolution_note) + "</div>";
@@ -6693,15 +7647,16 @@
         lines.push(VECTOR_NO_SKELETON_TEXT);
         if (vectorsRefreshBtn) vectorsRefreshBtn.disabled = true;
       } else {
-        var embedded = data.embedded_nodes;
-        var total = data.total_nodes;
-        if (typeof embedded === "number" && typeof total === "number") {
-          lines.push("索引済み: " + embedded + "/" + total + " ノード（骨格 版" + (data.skeleton_version || "") + "）");
-        } else if (data.skeleton_version) {
-          lines.push("骨格 版" + data.skeleton_version);
+        // IK-0889: 用途 → 要否の一文はサーバの facts を素通しし、日時は表示語
+        // （built_at_label）で出す。保存値（件数・ISO 時刻）はそのまま描かない。
+        var facts = data.facts || [];
+        if (facts.length) {
+          facts.forEach(function (fact) { if (fact) lines.push(fact); });
+        } else {
+          if (data.skeleton_version) lines.push(atlasVersionText(data.skeleton_version));
+          if (data.stale) lines.push(VECTOR_STALE_TEXT);
         }
-        if (data.built_at) lines.push("最後に作成: " + data.built_at);
-        if (data.stale) lines.push(VECTOR_STALE_TEXT);
+        if (data.built_at_label) lines.push("最後に作成: " + data.built_at_label);
         if (vectorsRefreshBtn) {
           vectorsRefreshBtn.disabled = !!select.value && domainLifecycles[select.value] === "retired";
         }
@@ -6736,15 +7691,17 @@
     // サーバの要約を日本語の事実文にする（スキップの理由も隠さない）。
     function vectorRefreshFactText(summary) {
       if (summary.status === "skipped") {
+        // IK-0993: 構築中のスキップ等、サーバが事実文を付けたときはそれを使う。
+        if (summary.fact) return summary.fact;
         if (summary.skipped_reason === "daily_call_limit_reached") return VECTOR_LIMIT_TEXT;
         if (summary.skipped_reason === "no_frozen_skeleton") return VECTOR_NO_SKELETON_TEXT;
         return "索引は作り直されませんでした" + (summary.skipped_reason ? "（" + summary.skipped_reason + "）" : "");
       }
-      var parts = [VECTOR_DONE_TEXT];
-      if (typeof summary.embedded === "number") parts.push("新しく索引した項目: " + summary.embedded);
-      if (typeof summary.reused === "number") parts.push("そのまま使った項目: " + summary.reused);
-      if (summary.skeleton_version) parts.push("骨格 版" + summary.skeleton_version);
-      return parts.join(" / ");
+      // IK-0889: 結果の一文はサーバの fact（全件再利用なら「変更はありませんでした」）。
+      if (summary.fact) {
+        return summary.fact + (summary.skeleton_version ? "（" + atlasVersionText(summary.skeleton_version) + "）" : "");
+      }
+      return VECTOR_DONE_TEXT + (summary.skeleton_version ? "（" + atlasVersionText(summary.skeleton_version) + "）" : "");
     }
 
     // 別名の一覧（node_id ごとにまとめる）。見送り済みは打ち消しではなく淡色で残す。
@@ -6868,7 +7825,11 @@
     //   G1 / PN-2 キューはサーバの読み時導出。完了フラグをクライアントに持たない
     //   LS9  読み取り・patch 生成とも非LLM。ポーリングしない（タブ表示時と操作成功後のみ）
     var GAP_GROUP_TITLE = "論文の解析から見つかった候補";
-    var GAP_GROUP_INTRO = "複数の論文が、この地図にまだ無い項目に触れています。";
+    // IK-0943: 区画の定義の文（候補が無いときも矛盾しない — 断言しない）。
+    var GAP_GROUP_INTRO = "2 本以上の論文が、この地図にまだ無い同じ項目に触れたとき、ここに候補として出ます。";
+    var GAP_ACCEPT_MEMO_PROMPT = "採用のメモ（任意）\nほかの教員が公開（凍結）するときに、採用の理由として表示されます。";
+    var GAP_RESTORE_REASON_PROMPT = "候補へ戻す理由\nほかの教員が採用した候補を戻すときは必須です（記録に残ります）。";
+    var GAP_DOCUMENTS_HIDDEN_TEXT = "閲覧できない論文も根拠に含まれています。";
     var GAP_ORIGIN_LABEL = "AIによる検出（未確認）";
     var GAP_ACCEPT_NOTE = "[採用] は「カテゴリとして妥当」という判断だけを記録します。次版の下書きはこの操作では変わりません。";
     var GAP_DISMISS_NOTE = "この分野で同じ名前の候補は今後表示されません。「見送り済み」フィルタから戻せます。";
@@ -7004,6 +7965,104 @@
         escHtml("この候補は版 " + version + " の地図に対するものです") + '</span>';
     }
 
+    // IK-0848: 判断のある候補は「AIによる… → 〇〇が 日付 に採用しました」の 1 行
+    // （サーバの provenance_line）を出所の位置に出す。判断が無ければ従来の出所ラベル。
+    function _reviewOriginText(decision, fallback) {
+      return (decision && decision.provenance_line) || fallback;
+    }
+
+    // 見送りから戻した候補など、出所の行に入らない判断の 1 行（サーバの decision_line）。
+    function _reviewDecisionLineHtml(decision) {
+      if (!decision || decision.provenance_line || !decision.decision_line) return "";
+      return '<div class="atlas-review-decision-line" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' +
+        escHtml(decision.decision_line) + '</div>';
+    }
+
+    // IK-0851: 候補一覧の上に添えるサーバの事実文（照合の状態・見送り済みゼロ）。
+    // 文言はサーバが持ち、画面は素通しする。
+    function _reviewListNotesHtml(data) {
+      var html = "";
+      var check = data && data.near_anchor_check;
+      if (check && check.note) {
+        html += '<div class="atlas-review-note" data-near-anchor-state="' + escHtml(check.state || "") +
+          '" style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:6px">' + escHtml(check.note) + '</div>';
+      }
+      if (data && data.dismissed_note) {
+        html += '<div class="atlas-review-note" style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:6px">' +
+          escHtml(data.dismissed_note) + '</div>';
+      }
+      // IK-0993: 索引が無い・作っている最中で、説明文の近さによる候補を出していない理由。
+      if (data && data.index_note) {
+        html += '<div class="atlas-review-note atlas-edge-index-note" style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:6px">' +
+          escHtml(data.index_note) + '</div>';
+      }
+      return html;
+    }
+
+    // IK-0851 第 2 周: 候補ゼロの理由（サーバの事実文の列。信号なし / 反復に届かない /
+    // 重複を畳んだ / 現行版で解消 / すべて判断済み）。無ければ従来の一文だけ。
+    function _reviewEmptyHtml(data, fallbackText) {
+      var html = '<div style="color:var(--color-text-tertiary)">' + escHtml(fallbackText) + '</div>';
+      var notes = (data && data.empty_notes) || [];
+      for (var i = 0; i < notes.length; i++) {
+        html += '<div class="atlas-review-empty-note" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' +
+          escHtml(notes[i]) + '</div>';
+      }
+      return html;
+    }
+
+    // IK-0884: 導出から外れた「採用済み・未反映」の判断（凍結のゲートが読む行）。
+    // 候補へ戻す（判断を未判断へ遷移・行は消さない）／次版の下書きへ取り込むの入口を置く。
+    function _gapOrphanedHtml(data, draftExists, retired) {
+      var items = (data && data.orphaned_decisions) || [];
+      if (!items.length) return "";
+      var html = '<div class="atlas-gap-orphaned" data-ui-anchor="atlas.gap-orphaned" style="margin-top:12px;border-top:1px dashed var(--color-border);padding-top:8px">' +
+        '<div style="font-size:13px;margin-bottom:4px"><strong>候補の条件から外れた採用済みの判断</strong></div>';
+      if (data.orphaned_note) {
+        html += '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:6px">' + escHtml(data.orphaned_note) + '</div>';
+      }
+      items.forEach(function (item) {
+        var decision = item.decision || null;
+        html += '<div class="atlas-gap-card atlas-gap-orphaned-card" data-cluster-key="' + escHtml(item.cluster_key || "") +
+          '" style="border:1px solid var(--color-border);border-radius:6px;padding:8px 10px;margin-bottom:8px">' +
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+            '<span style="font-size:13px">' + escHtml(item.proposed_label || "") + '</span>' +
+            '<span style="font-size:11.5px;color:var(--color-text-secondary)">' + escHtml(item.layer_label || "") + '</span>' +
+          '</div>';
+        html += _reviewDecisionLineHtml(decision);
+        if (decision && decision.provenance_line) {
+          html += '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(decision.provenance_line) + '</div>';
+        }
+        if (item.reason_fact) {
+          html += '<div class="atlas-gap-orphaned-reason" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(item.reason_fact) + '</div>';
+        }
+        // IK-0937: 外れた判断にも、通常の候補と同じ根拠（論文の題名・理由・原文の逐語）。
+        html += _gapDocumentsHtml(item);
+        if (item.documents_hidden) {
+          html += '<div class="atlas-gap-documents-hidden" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' + escHtml(GAP_DOCUMENTS_HIDDEN_TEXT) + '</div>';
+        }
+        if (decision && decision.review_note) {
+          html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">' + (decision.status === "dismissed" ? "見送りの理由" : "判断のメモ") + ': ' + escHtml(decision.review_note) + '</div>';
+        }
+        if (item.in_draft_note) {
+          html += '<div class="atlas-gap-in-draft" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(item.in_draft_note) + '</div>';
+        }
+        html += '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">' +
+          '<button type="button" class="admin-action-btn" data-gap-action="restore"' +
+            (retired ? " disabled" : "") + '>候補へ戻す</button>';
+        if (!draftExists) {
+          html += '<button type="button" class="admin-action-btn" data-gap-action="draft-from-frozen"' +
+            (retired ? " disabled" : "") + '>現在の版から次版の下書きを作る</button>';
+        } else {
+          html += '<button type="button" class="admin-action-btn" data-gap-action="incorporate"' +
+            (retired || item.in_draft ? " disabled" : "") + '>次版の下書きに取り込む…</button>';
+        }
+        html += '</div></div>';
+      });
+      html += '</div>';
+      return html;
+    }
+
     // LS5: 支持論文は件数バッジではなくタイトルの列挙。行を開くと理由と原文の逐語が出る。
     function _gapDocumentsHtml(candidate) {
       var docs = (candidate && candidate.documents) || [];
@@ -7036,7 +8095,7 @@
       if (!near || !near.node_label) return "";
       var parts = [];
       if (near.nearness_label) parts.push(near.nearness_label);
-      if (near.skeleton_version) parts.push("骨格 版" + near.skeleton_version);
+      if (near.skeleton_version) parts.push(atlasVersionText(near.skeleton_version));
       var text = "既存の『" + near.node_label + "』の別表記の可能性があります" +
         (parts.length ? "（" + parts.join("・") + "）" : "");
       return '<div class="atlas-gap-near-anchor" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' +
@@ -7076,16 +8135,20 @@
         '<input type="text" class="atlas-gap-label-input" value="' + escHtml(labelValue) +
           '" style="font-size:13px;padding:3px 6px;border:1px solid var(--color-border);border-radius:4px;min-width:220px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
         '<span class="atlas-gap-layer" style="font-size:11.5px;color:var(--color-text-secondary)">' + escHtml(_gapLayerBadgeText(candidate)) + '</span>' +
-        '<span class="atlas-gap-origin" style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(GAP_ORIGIN_LABEL) + '</span>' +
+        '<span class="atlas-gap-origin" style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(_reviewOriginText(decision, GAP_ORIGIN_LABEL)) + '</span>' +
         (decision && decision.status_label
           ? '<span class="atlas-gap-decision" style="font-size:11px;color:var(--color-text-secondary);border:1px solid var(--color-border);border-radius:4px;padding:0 6px">' + escHtml(decision.status_label) + '</span>'
           : "") +
         _gapVersionChipHtml(candidate) +
       '</div>';
+      html += _reviewDecisionLineHtml(decision);
+      if (candidate && candidate.pending_note) {
+        html += '<div class="atlas-review-pending-note" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(candidate.pending_note) + '</div>';
+      }
       html += _gapDocumentsHtml(candidate);
       html += _gapNearAnchorHtml(candidate);
       if (decision && decision.review_note) {
-        html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">判断のメモ: ' + escHtml(decision.review_note) + '</div>';
+        html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">' + (decision.status === "dismissed" ? "見送りの理由" : "判断のメモ") + ': ' + escHtml(decision.review_note) + '</div>';
       }
 
       html += '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">';
@@ -7112,7 +8175,6 @@
 
       if (!suppressed) {
         html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">' + escHtml(GAP_ACCEPT_NOTE) + '</div>';
-        html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' + escHtml(GAP_DISMISS_NOTE) + '</div>';
         var blocked = _gapBlockedText(candidate, accepted, draftExists, retired);
         if (blocked) {
           html += '<div class="atlas-gap-blocked" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:2px">' + escHtml(blocked) + '</div>';
@@ -7128,15 +8190,17 @@
       var candidates = (data && data.candidates) || [];
       var draftExists = !!(data && data.draft_exists);
       var retired = !!select.value && domainLifecycles[select.value] === "retired";
+      var notes = _reviewListNotesHtml(data);
+      var orphaned = _gapOrphanedHtml(data, draftExists, retired);
       if (!candidates.length) {
-        gapsListEl.innerHTML = '<div style="color:var(--color-text-tertiary)">' + escHtml(GAP_EMPTY_TEXT) + '</div>';
+        gapsListEl.innerHTML = notes + _reviewEmptyHtml(data, GAP_EMPTY_TEXT) + orphaned;
         return;
       }
-      var html = "";
+      var html = notes;
       candidates.forEach(function (candidate) {
         html += _gapCandidateCardHtml(candidate, draftExists, retired);
       });
-      gapsListEl.innerHTML = html;
+      gapsListEl.innerHTML = html + orphaned;
     }
 
     // インライン編集した提案ラベル（空欄なら候補の表記をサーバ側で使う）。
@@ -7147,13 +8211,26 @@
 
     function handleGapAction(clusterKey, action, card) {
       if (!clusterKey || gapBusy) return;
-      if (action === "accept" || action === "restore") {
-        gapDecide(clusterKey, action, "");
+      if (action === "accept") {
+        // IK-0939: 採用に任意のメモ（凍結する教員が止め理由と一緒に読む）。取消で中止。
+        var memo = prompt(GAP_ACCEPT_MEMO_PROMPT, "");
+        if (memo === null) return;
+        gapDecide(clusterKey, action, memo);
+        return;
+      }
+      if (action === "restore") {
+        var orphanedCard = card && card.classList && card.classList.contains("atlas-gap-orphaned-card");
+        if (!orphanedCard) { gapDecide(clusterKey, action, ""); return; }
+        // 採用済みを候補へ戻す: ほかの教員の採用なら理由必須（サーバが 422 で強制）。
+        var reason = prompt(GAP_RESTORE_REASON_PROMPT, "");
+        if (reason === null) return;
+        gapDecide(clusterKey, action, reason);
         return;
       }
       if (action === "dismiss") {
         // 見送りは理由必須（空は送信しない。サーバ側も 422 で拒否する）。
-        var note = prompt("却下の理由（必須）") || "";
+        // 却下の説明は却下の操作の場で出す（IK-0848。採用・取り込みの説明と並べない）。
+        var note = prompt("却下の理由（必須）\n" + GAP_DISMISS_NOTE) || "";
         if (!note.trim()) { setGapsStatus(GAP_DISMISS_REASON_REQUIRED, true); return; }
         gapDecide(clusterKey, "dismiss", note);
         return;
@@ -7190,24 +8267,28 @@
     }
 
     // 次版の下書きを現行凍結版から複製する（決定論・LLM 不使用）。
-    function gapCreateDraftFromFrozen() {
-      if (!select.value || gapBusy) return;
-      var version = (latestGapData && latestGapData.skeleton_version) || "";
+    // IK-1044（第 25 周 第 7 波）: 分野単位の操作なので、関係（辺）の区画からも呼ぶ。
+    // setStatusFn は押された区画の結果欄（無ければ論文由来の候補の欄）。
+    function gapCreateDraftFromFrozen(setStatusFn) {
+      var report = (typeof setStatusFn === "function") ? setStatusFn : setGapsStatus;
+      if (!select.value || gapBusy || edgeBusy) return;
+      var version = (latestGapData && latestGapData.skeleton_version) ||
+        (latestEdgeData && latestEdgeData.skeleton_version) || "";
       if (!confirm("現行版 " + version + " を複製して下書きを作ります。下書きは学習者には表示されません")) return;
       gapBusy = true;
-      setGapsStatus("次版の下書きを作成中...");
+      report("次版の下書きを作成中...");
       apiFetch("/admin/cartridges/" + encodeURIComponent(select.value) + "/atlas/skeleton/draft/from-frozen", {
         method: "POST",
       })
         .then(_gapResponse)
         .then(function () {
           gapBusy = false;
-          setGapsStatus("次版の下書きを作りました");
+          report("次版の下書きを作りました");
           loadState();
         })
         .catch(function (err) {
           gapBusy = false;
-          setGapsStatus("下書きを作れませんでした: " + err.message, true);
+          report("下書きを作れませんでした: " + err.message, true);
         });
     }
 
@@ -7243,10 +8324,10 @@
       var validation = preview.validation || {};
       var lines = [];
       if (preview.summary) lines.push(preview.summary);
-      if (preview.node_id) lines.push("追加する項目のid: " + preview.node_id);
+      // id は保存の内部値で判断に要らないので出さない。親領域は名前で言う（IK-0850）。
       if (preview.proposed_label) lines.push("名前: " + preview.proposed_label);
-      if (preview.layer === "concept" && preview.parent_region_id) {
-        lines.push("親領域: " + preview.parent_region_id);
+      if (preview.layer === "concept" && preview.parent_region_label) {
+        lines.push("親領域: " + preview.parent_region_label);
       }
       (validation.errors || []).forEach(function (issue) {
         var text = _gapIssueText(issue);
@@ -7260,7 +8341,11 @@
         setGapsStatus("この項目は下書きに追加できませんでした: " + (lines.join(" / ") || "内容を確認してください"), true);
         return;
       }
-      lines.push("この内容を次版の下書きに保存します。学習者には表示されません。");
+      // IK-0939: 誰の採用か・何を根拠にしたか・採用のメモ・いつ学習者に見えるか。
+      if (preview.decision_line) lines.push("採用: " + preview.decision_line);
+      if (preview.basis_line) lines.push(preview.basis_line);
+      if (preview.note_line) lines.push(preview.note_line);
+      lines.push("この内容を次版の下書きに保存します。" + (preview.timing_line || ""));
       openDangerConfirmModal({
         title: "次版の下書きに取り込む",
         message: lines,
@@ -7281,11 +8366,12 @@
             body: JSON.stringify({ cluster_key: clusterKey, draft_node_id: preview.node_id || "" }),
           }).then(_gapResponse);
         })
-        .then(function () {
+        .then(function (marked) {
           gapBusy = false;
           // 取り込み済みの候補は次の導出で消えるので、編集中の名前も持ち越さない。
           if (gapLabelEdits.hasOwnProperty(clusterKey)) delete gapLabelEdits[clusterKey];
-          setGapsStatus("次版の下書きに追加しました");
+          // IK-0938: 何を足したかを名指す（サーバの結果文。無ければ従来の一文）。
+          setGapsStatus((marked && marked.result_line) || "次版の下書きに追加しました");
           loadGapCandidates();
         })
         .catch(function (err) {
@@ -7310,11 +8396,19 @@
     //   RE6  候補はサーバの読み時導出。完了フラグをクライアントに持たず、ポーリングも
     //        しない（分野の選択・画面の更新・各操作の成功後だけ読み直す）
     var EDGE_GROUP_TITLE = "関係（辺）の候補";
-    var EDGE_GROUP_INTRO = "アンカーのプロトタイプ近傍と、論文の配置の共起から導かれた関係の候補です。採用して次版の下書きに反映し、公開するまで地図の関係は変わりません。";
+    // IK-0943: 区画の定義の文（候補が無いときも矛盾しない）。
+    var EDGE_GROUP_INTRO = "項目の説明文どうしが近いと推定された組（プロトタイプ近傍）や、同じ論文が両方の項目に置かれている組（共起）が、ここに関係の候補として出ます。採用して次版の下書きに反映し、公開するまで地図の関係は変わりません。";
+    var EDGE_ACCEPT_MEMO_PROMPT = "採用のメモ（任意）\nほかの教員が公開（凍結）するときに、採用の理由として表示されます。";
     //: SkeletonEdge.kind → 日本語。正本は backend/core/label_vocab.py::EDGE_KIND_LABELS
     //  （フロントはミラー規律。ズレは backend/tests/test_atlas_edges_admin_ui_static.py が検出する）。
     var EDGE_KIND_LABELS = { "adjacent": "隣接", "depends": "依存", "related": "関連" };
     var EDGE_KIND_ORDER = ["adjacent", "depends", "related"];
+    //: 依存の向きの句。正本は backend/core/label_vocab.py::EDGE_DIRECTION_PHRASE_DEPENDS（逐語ミラー）。
+    var EDGE_DIRECTION_PHRASE_DEPENDS = "「{from_label}」が「{to_label}」に依存する";
+    //: 向きを持つ種別。正本は label_vocab.EDGE_DIRECTED_KINDS。
+    var EDGE_DIRECTED_KINDS = { "depends": true };
+    // IK-1149（第 25 周 第 11 波）: 依存を採用するときは、どちらがどちらに依存するかを教員が選ぶ（既定は提示順）。
+    var EDGE_DIRECTION_LABEL = "向き:";
     var EDGE_ORIGIN_VECTOR_LABEL = "プロトタイプ近傍";
     var EDGE_ORIGIN_CO_OCCURRENCE_LABEL = "共起";
     var EDGE_ORIGIN_NOTE = "AIによる推定（未確認）";
@@ -7322,19 +8416,28 @@
     var EDGE_DISMISS_REASON_REQUIRED = "見送りには理由が必要です";
     var EDGE_ACCEPT_NOTE = "[採用] は「この関係は妥当」という判断だけを記録します。次版の下書きはこの操作では変わりません。";
     var EDGE_DISMISS_NOTE = "見送った関係は既定の一覧に出なくなります。「見送り済みも表示」から戻せます。";
-    var EDGE_NO_DRAFT_TEXT = "次版の下書きがまだありません。「現在の版から次版の下書きを作る」を実行すると反映できます。";
+    // IK-1044: 指す先のボタンはこの区画の先頭に出る（論文由来の候補の有無に依らない）。
+    var EDGE_NO_DRAFT_TEXT = "次版の下書きがまだありません。この区画の先頭の［現在の版から次版の下書きを作る］を押すと反映できます。";
+    var EDGE_DRAFT_CREATE_NOTE = "編集中の次版の下書きはありません。採用した関係を地図に加えるには、先に公開中の版を複製して次版の下書きを作ります（AI は使いません）。";
+    var EDGE_DRAFT_CREATE_RETIRED_NOTE = "この分野は廃止済みのため、次版の下書きは作れません。「復帰する」で戻すと作れます。";
     var EDGE_NOT_ACCEPTED_TEXT = "[採用] を押すと、次版の下書きへ反映できます。";
+    // 第 25 周 第 8 波（IK-1044 残り）: 下書きが無いときは区画の先頭の文と食い違わないよう、下書きを作る手順も言う。
+    var EDGE_NOT_ACCEPTED_NO_DRAFT_TEXT = "[採用] を押し、この区画の先頭の［現在の版から次版の下書きを作る］で下書きを作ると反映できます。";
     var EDGE_RETIRED_TEXT = "この分野は廃止済みです。「復帰する」で戻すと操作できます。";
     var EDGE_EMPTY_TEXT = "いまレビューする関係の候補はありません。";
     // 公開（freeze）の 409 ゲート（routes/atlas.py::freeze_atlas_skeleton の pending_edges）。
     var EDGE_FREEZE_PENDING_TEXT = "採用済みでまだ次版に反映されていない関係（辺）の候補が残っています";
 
     var edgeIncludeDismissed = false;
+    // IK-0887: 畳んだ近さだけの候補を全部出すか（分野を切り替えると畳みに戻す）。
+    var edgeShowAll = false;
     var edgeBusy = false;
     var latestEdgeData = null;
     // 教員がその場で選んだ関係の種類（edge_key → kind）。判断のたびに一覧を読み直す
     // ため、選択途中の値が消えないようクライアント側で保持する。
     var edgeKindSelections = {};
+    // 教員がその場で選んだ依存の向き（edge_key → 始点の node_id）。
+    var edgeDirectionSelections = {};
     var edgesGroupEl = null;
     var edgesListEl = null;
     var edgesStatusEl = null;
@@ -7379,11 +8482,27 @@
       });
       edgesListEl.addEventListener("change", function (e) {
         var sel = e.target;
-        if (!sel || !sel.classList || !sel.classList.contains("atlas-edge-kind-select")) return;
+        if (!sel || !sel.classList || !(sel.classList.contains("atlas-edge-kind-select") || sel.classList.contains("atlas-edge-direction-select"))) return;
         var owner = sel.closest ? sel.closest("[data-edge-key]") : null;
-        if (owner) edgeKindSelections[owner.getAttribute("data-edge-key")] = sel.value;
+        if (!owner) return;
+        if (sel.classList.contains("atlas-edge-direction-select")) {
+          edgeDirectionSelections[owner.getAttribute("data-edge-key")] = sel.value;
+          return;
+        }
+        edgeKindSelections[owner.getAttribute("data-edge-key")] = sel.value;
+        // 依存を選んだときだけ向きの選択を出す。
+        var dirWrap = owner.querySelector(".atlas-edge-direction-choice");
+        if (dirWrap) dirWrap.style.display = EDGE_DIRECTED_KINDS[sel.value] ? "" : "none";
       });
       edgesListEl.addEventListener("click", function (e) {
+        var showAll = e.target.closest ? e.target.closest("[data-edge-show-all]") : null;
+        if (showAll) { edgeShowAll = true; loadEdgeCandidates(); return; }
+        // IK-1044: 次版の下書きを作る（分野単位。既存の draft/from-frozen を呼ぶだけ）。
+        var draftBtn = e.target.closest ? e.target.closest("[data-edge-draft-create]") : null;
+        if (draftBtn) {
+          if (!draftBtn.disabled) gapCreateDraftFromFrozen(setEdgesStatus);
+          return;
+        }
         var btn = e.target.closest ? e.target.closest("[data-edge-action]") : null;
         if (!btn || btn.disabled) return;
         var card = btn.closest("[data-edge-key]");
@@ -7393,14 +8512,18 @@
     }
 
     // 骨格が無い分野（404）はグループごと非表示にする（fail-closed。空の枠を出さない）。
-    function loadEdgeCandidates() {
+    // keepStatus: 直前の操作の結果文（IK-0994 / IK-0938）を読み直しで消さない。
+    function loadEdgeCandidates(keepStatus) {
       if (!edgesGroupEl) return;
       if (!select.value) {
         latestEdgeData = null;
         edgesGroupEl.style.display = "none";
         return;
       }
-      apiFetch(edgesPath() + (edgeIncludeDismissed ? "?include_dismissed=true" : ""))
+      var edgeQuery = [];
+      if (edgeIncludeDismissed) edgeQuery.push("include_dismissed=true");
+      if (edgeShowAll) edgeQuery.push("show_all=true");
+      apiFetch(edgesPath() + (edgeQuery.length ? "?" + edgeQuery.join("&") : ""))
         .then(function (res) {
           if (res.status === 404) return null;
           if (!res.ok) throw new Error("HTTP " + res.status);
@@ -7414,7 +8537,7 @@
           }
           edgesGroupEl.style.display = "";
           renderEdgeCandidates(data);
-          setEdgesStatus("");
+          if (keepStatus !== true) setEdgesStatus("");
         })
         .catch(function (err) {
           latestEdgeData = null;
@@ -7424,17 +8547,16 @@
         });
     }
 
-    // RE4: 出所チップ。近さは nearness_label（サーバが確定した段階の言葉）をそのまま
-    // 描く（生の類似度・閾値をフロントで持たない）。共起は件数を出さず、下の論文
-    // タイトルの列挙で支持を示す。
+    // RE4: 出所チップ。近さの段階ラベルは最上位帯しか通らず全件同じになるので描かない
+    // （IK-0887）。何が近いと言っているかはサーバの basis_line をチップの下に出す。
+    // 共起は件数を出さず、下の論文タイトルの列挙で支持を示す。
     function _edgeOriginChipsHtml(candidate) {
       var origins = (candidate && candidate.origins) || [];
       var chips = "";
       origins.forEach(function (origin) {
         var text = "";
         if (origin === "vector") {
-          text = EDGE_ORIGIN_VECTOR_LABEL +
-            (candidate.nearness_label ? "（" + candidate.nearness_label + "）" : "");
+          text = EDGE_ORIGIN_VECTOR_LABEL;
         } else if (origin === "co_occurrence") {
           text = EDGE_ORIGIN_CO_OCCURRENCE_LABEL;
         }
@@ -7451,9 +8573,31 @@
       if (!docs.length) return "";
       var html = '<div class="atlas-edge-documents" style="margin-top:6px">' +
         '<div style="font-size:11.5px;color:var(--color-text-tertiary)">両方の項目に配置がある論文</div>';
+      // IK-0849: 行を開くと、両端それぞれの配置の理由と原文の逐語が出る（gap と同じ形）。
       docs.forEach(function (d) {
-        html += '<div class="atlas-edge-document" style="font-size:12px;color:var(--color-text-secondary);padding-left:12px">' +
-          escHtml((d && d.title) || "無題の論文") + '</div>';
+        var endpoints = (d && d.endpoints) || [];
+        if (!endpoints.length) {
+          html += '<div class="atlas-edge-document" style="font-size:12px;color:var(--color-text-secondary);padding-left:12px">' +
+            escHtml((d && d.title) || "無題の論文") + '</div>';
+          return;
+        }
+        html += '<details class="atlas-edge-document" style="margin:2px 0">' +
+          '<summary style="font-size:12px;color:var(--color-text-secondary);cursor:pointer">' +
+            escHtml((d && d.title) || "無題の論文") +
+          '</summary>';
+        endpoints.forEach(function (e) {
+          html += '<div class="atlas-edge-endpoint" style="padding:2px 0 0 12px">' +
+            '<div style="font-size:11.5px;color:var(--color-text-tertiary)">' + escHtml((e && e.node_label) || "") + '</div>';
+          if (e && e.reason) {
+            html += '<div style="font-size:12px;color:var(--color-text-secondary)">' + escHtml(e.reason) + '</div>';
+          }
+          if (e && e.evidence_quote) {
+            html += '<div style="font-size:12px;color:var(--color-text-secondary);border-left:2px solid var(--color-border-tertiary);padding:2px 0 2px 8px;margin:4px 0">' +
+              escHtml(e.evidence_quote) + '</div>';
+          }
+          html += '</div>';
+        });
+        html += '</details>';
       });
       html += '</div>';
       return html;
@@ -7477,6 +8621,34 @@
       return html;
     }
 
+    function _edgeDirectionPhrase(fromLabel, toLabel) {
+      return EDGE_DIRECTION_PHRASE_DEPENDS.replace("{from_label}", fromLabel).replace("{to_label}", toLabel);
+    }
+
+    // IK-1149: 依存の向きの 2 択（既定は提示順 = カードの「A — B」の A が依存する側）。
+    function _edgeDirectionChoiceHtml(edgeKey, candidate, decision, disabled) {
+      var fromId = (candidate && candidate.from_id) || "";
+      var toId = (candidate && candidate.to_id) || "";
+      var fromLabel = (candidate && candidate.from_label) || fromId;
+      var toLabel = (candidate && candidate.to_label) || toId;
+      var selected = edgeDirectionSelections.hasOwnProperty(edgeKey)
+        ? edgeDirectionSelections[edgeKey]
+        : ((decision && decision.from_node_id) || fromId);
+      var visible = EDGE_DIRECTED_KINDS[_edgeSelectedKind(edgeKey, decision)];
+      return '<span class="atlas-edge-direction-choice" data-ui-anchor="atlas.edge-direction" style="font-size:12px;color:var(--color-text-secondary);display:' + (visible ? "inline-flex" : "none") + ';gap:4px;align-items:center">' +
+        escHtml(EDGE_DIRECTION_LABEL) +
+        '<select class="atlas-edge-direction-select" style="font-size:12px;padding:2px 4px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)"' +
+        (disabled ? " disabled" : "") + '>' +
+        '<option value="' + escHtml(fromId) + '"' + (selected === fromId ? " selected" : "") + '>' + escHtml(_edgeDirectionPhrase(fromLabel, toLabel)) + '</option>' +
+        '<option value="' + escHtml(toId) + '"' + (selected === toId ? " selected" : "") + '>' + escHtml(_edgeDirectionPhrase(toLabel, fromLabel)) + '</option>' +
+        '</select></span>';
+    }
+
+    function _edgeDirectionFromCard(card) {
+      var sel = card ? card.querySelector(".atlas-edge-direction-select") : null;
+      return sel ? sel.value : "";
+    }
+
     function _edgeCandidateByKey(edgeKey) {
       var candidates = (latestEdgeData && latestEdgeData.candidates) || [];
       for (var i = 0; i < candidates.length; i++) {
@@ -7488,7 +8660,7 @@
     // 反映ボタンが押せない理由の事実文（督促・数値を出さない）。
     function _edgeBlockedText(accepted, draftExists, retired) {
       if (retired) return EDGE_RETIRED_TEXT;
-      if (!accepted) return EDGE_NOT_ACCEPTED_TEXT;
+      if (!accepted) return draftExists ? EDGE_NOT_ACCEPTED_TEXT : EDGE_NOT_ACCEPTED_NO_DRAFT_TEXT;
       if (!draftExists) return EDGE_NO_DRAFT_TEXT;
       return "";
     }
@@ -7510,7 +8682,7 @@
       html += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
         '<span class="atlas-edge-pair" style="font-size:13px;color:var(--color-text-primary)">' + escHtml(_edgePairText(candidate)) + '</span>' +
         _edgeOriginChipsHtml(candidate) +
-        '<span class="atlas-edge-note" style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(EDGE_ORIGIN_NOTE) + '</span>' +
+        '<span class="atlas-edge-note" style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(_reviewOriginText(decision, EDGE_ORIGIN_NOTE)) + '</span>' +
         (decision && decision.status_label
           ? '<span class="atlas-edge-decision" style="font-size:11px;color:var(--color-text-secondary);border:1px solid var(--color-border);border-radius:4px;padding:0 6px">' + escHtml(decision.status_label) + '</span>'
           : "") +
@@ -7518,29 +8690,53 @@
           ? '<span class="atlas-edge-applied" style="font-size:11px;color:var(--color-text-secondary);border:1px solid var(--color-border);border-radius:4px;padding:0 6px">' + escHtml("版" + appliedVersion + "で反映済み") + '</span>'
           : "") +
       '</div>';
+      html += _reviewDecisionLineHtml(decision);
+      if (candidate && candidate.pending_note) {
+        html += '<div class="atlas-review-pending-note" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(candidate.pending_note) + '</div>';
+      }
+      if (candidate && candidate.basis_line) {
+        html += '<div class="atlas-edge-basis" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(candidate.basis_line) + '</div>';
+      }
+      if (candidate && candidate.direction_line) {
+        html += '<div class="atlas-edge-direction" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(candidate.direction_line) + '</div>';
+      }
+      if (candidate && candidate.direction_unrecorded_note) {
+        html += '<div class="atlas-edge-direction-unrecorded" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:2px">' + escHtml(candidate.direction_unrecorded_note) + '</div>';
+      }
+      // IK-0886: 下書きに入っている関係は状態として言い、もう一度反映させない。
+      if (candidate && candidate.in_draft_note) {
+        html += '<div class="atlas-edge-in-draft" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(candidate.in_draft_note) + '</div>';
+      }
       html += _edgeDocumentsHtml(candidate);
       if (decision && decision.review_note) {
-        html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">判断のメモ: ' + escHtml(decision.review_note) + '</div>';
+        html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">' + (decision.status === "dismissed" ? "見送りの理由" : "判断のメモ") + ': ' + escHtml(decision.review_note) + '</div>';
       }
 
       html += '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;align-items:center">';
       if (suppressed) {
         html += '<button type="button" class="admin-action-btn" data-edge-action="restore">見送りから戻す</button>';
       } else {
-        html += _edgeKindSelectHtml(edgeKey, decision, !!retired);
+        // 採用済みの辺は[採用]と種類の選択を押せなくする（IK-0848。gap と同じ）。
+        html += _edgeKindSelectHtml(edgeKey, decision, !!retired || accepted);
+        html += _edgeDirectionChoiceHtml(edgeKey, candidate, decision, !!retired || accepted);
         html += '<button type="button" class="admin-action-btn" data-edge-action="accept"' +
-          (retired ? " disabled" : "") + '>採用</button>';
-        html += '<button type="button" class="admin-action-btn" data-edge-action="dismiss"' +
-          (retired ? " disabled" : "") + '>見送り…</button>';
+          (accepted || retired ? " disabled" : "") + '>採用</button>';
+        // H54（第 25 周 第 10 波）: 下書きに入った採用は見送れない（サーバも 409）。ボタンを出さず理由を言う。
+        if (!(candidate && candidate.dismiss_locked)) {
+          html += '<button type="button" class="admin-action-btn" data-edge-action="dismiss"' +
+            (retired ? " disabled" : "") + '>見送り…</button>';
+        }
         html += '<button type="button" class="admin-action-btn" data-edge-action="incorporate" data-ui-anchor="atlas.edge-incorporate"' +
-          (!accepted || !draftExists || retired ? " disabled" : "") + '>次版の下書きへ反映…</button>';
+          (!accepted || !draftExists || retired || (candidate && candidate.in_draft) ? " disabled" : "") + '>次版の下書きへ反映…</button>';
       }
       html += '</div>';
 
+      if (!suppressed && candidate && candidate.dismiss_locked_note) {
+        html += '<div class="atlas-edge-dismiss-locked" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(candidate.dismiss_locked_note) + '</div>';
+      }
       if (!suppressed) {
         html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">' + escHtml(EDGE_ACCEPT_NOTE) + '</div>';
-        html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' + escHtml(EDGE_DISMISS_NOTE) + '</div>';
-        var blocked = _edgeBlockedText(accepted, draftExists, retired);
+        var blocked = (candidate && candidate.in_draft) ? "" : _edgeBlockedText(accepted, draftExists, retired);
         if (blocked) {
           html += '<div class="atlas-edge-blocked" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:2px">' + escHtml(blocked) + '</div>';
         }
@@ -7549,21 +8745,91 @@
       return html;
     }
 
+    // IK-1044（第 25 周 第 7 波）: 次版の下書きを作る入口を分野の区画に置く。論文由来の
+    // 候補が 0 件でも、関係を採用して下書きへ反映し凍結まで画面だけで運べるように。
+    // 押せないとき（廃止済み）は理由の一文。下書きがあるときは出さない。
+    function _edgeDraftCreateHtml(draftExists, retired, extraClass) {
+      if (draftExists) return "";
+      return '<div class="atlas-edge-draft-create' + (extraClass ? " " + extraClass : "") + '" style="font-size:11.5px;color:var(--color-text-secondary);margin:4px 0 10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+        '<span>' + escHtml(retired ? EDGE_DRAFT_CREATE_RETIRED_NOTE : EDGE_DRAFT_CREATE_NOTE) + '</span>' +
+        '<button type="button" class="admin-action-btn" data-edge-draft-create="1" data-ui-anchor="atlas.edge-draft-from-frozen"' +
+          (retired ? " disabled" : "") + '>現在の版から次版の下書きを作る</button>' +
+        '</div>';
+    }
+
     function renderEdgeCandidates(data) {
       latestEdgeData = data || null;
       if (!edgesListEl) return;
       var candidates = (data && data.candidates) || [];
       var draftExists = !!(data && data.draft_exists);
       var retired = !!select.value && domainLifecycles[select.value] === "retired";
+      var notes = _reviewListNotesHtml(data) + _edgeDraftCreateHtml(draftExists, retired);
+      var orphaned = _edgeOrphanedHtml(data, draftExists, retired);
       if (!candidates.length) {
-        edgesListEl.innerHTML = '<div style="color:var(--color-text-tertiary)">' + escHtml(EDGE_EMPTY_TEXT) + '</div>';
+        edgesListEl.innerHTML = notes + _reviewEmptyHtml(data, EDGE_EMPTY_TEXT) + orphaned;
         return;
       }
-      var html = "";
+      var html = notes;
       candidates.forEach(function (candidate) {
         html += _edgeCandidateCardHtml(candidate, draftExists, retired);
       });
-      edgesListEl.innerHTML = html;
+      // IK-0887: 説明文どうしの近さだけの候補は上限で畳む（件数は出さない）。
+      if (data && data.folded_note) {
+        html += '<div class="atlas-edge-folded" style="font-size:11.5px;color:var(--color-text-secondary);margin:6px 0">' +
+          escHtml(data.folded_note) +
+          ' <button type="button" class="admin-action-btn" data-edge-show-all="1" data-ui-anchor="atlas.edge-show-all">すべて表示</button></div>';
+      }
+      edgesListEl.innerHTML = html + orphaned;
+    }
+
+    // IK-0884 と同じ構造: 導出から外れた「採用済み・未反映」の関係（凍結のゲートが読む）。
+    // 見送る（理由必須）か、次版の下書きへ反映するまで公開できない。
+    function _edgeOrphanedHtml(data, draftExists, retired) {
+      var items = (data && data.orphaned_decisions) || [];
+      if (!items.length) return "";
+      var html = '<div class="atlas-edge-orphaned" data-ui-anchor="atlas.edge-orphaned" style="margin-top:12px;border-top:1px dashed var(--color-border);padding-top:8px">' +
+        '<div style="font-size:13px;margin-bottom:4px"><strong>候補の条件から外れた採用済みの関係</strong></div>';
+      if (data.orphaned_note) {
+        html += '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:6px">' + escHtml(data.orphaned_note) + '</div>';
+      }
+      // IK-1044: 「採用済み・未反映」の区画にも、反映の前提となる下書きの入口を置く。
+      html += _edgeDraftCreateHtml(draftExists, retired, "atlas-edge-draft-create-orphaned");
+      items.forEach(function (item) {
+        var decision = item.decision || null;
+        html += '<div class="atlas-edge-card atlas-edge-orphaned-card" data-edge-key="' + escHtml(item.edge_key || "") +
+          '" style="border:1px solid var(--color-border);border-radius:6px;padding:8px 10px;margin-bottom:8px">' +
+          '<div style="font-size:13px">' + escHtml(_edgePairText(item)) + '</div>';
+        html += _reviewDecisionLineHtml(decision);
+        if (decision && decision.provenance_line) {
+          html += '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(decision.provenance_line) + '</div>';
+        }
+        // IK-0937（辺版）: 採用の根拠（記録された出所）とメモ。
+        if (item.basis_line) {
+          html += '<div class="atlas-edge-basis" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(item.basis_line) + '</div>';
+        }
+        if (decision && decision.review_note) {
+          html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">' + (decision.status === "dismissed" ? "見送りの理由" : "判断のメモ") + ': ' + escHtml(decision.review_note) + '</div>';
+        }
+        if (item.direction_line) {
+          html += '<div class="atlas-edge-direction" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(item.direction_line) + '</div>';
+        }
+        if (item.direction_unrecorded_note) {
+          html += '<div class="atlas-edge-direction-unrecorded" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:2px">' + escHtml(item.direction_unrecorded_note) + '</div>';
+        }
+        if (item.in_draft_note) {
+          html += '<div class="atlas-edge-in-draft" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(item.in_draft_note) + '</div>';
+        }
+        if (item.dismiss_locked_note) {
+          html += '<div class="atlas-edge-dismiss-locked" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(item.dismiss_locked_note) + '</div>';
+        }
+        html += '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">' +
+          (item.dismiss_locked ? '' : '<button type="button" class="admin-action-btn" data-edge-action="dismiss"' + (retired ? " disabled" : "") + '>見送り…</button>') +
+          '<button type="button" class="admin-action-btn" data-edge-action="incorporate"' +
+            (!draftExists || retired || item.in_draft ? " disabled" : "") + '>次版の下書きへ反映…</button>' +
+          '</div></div>';
+      });
+      html += '</div>';
+      return html;
     }
 
     function _edgeKindFromCard(card) {
@@ -7581,12 +8847,26 @@
         // 採用には関係の種類が要る（未選択のまま送らない。サーバも 422 で拒否する）。
         var kind = _edgeKindFromCard(card);
         if (!kind) { setEdgesStatus(EDGE_KIND_REQUIRED, true); return; }
-        edgeDecide(edgeKey, "accept", "", kind);
+        // IK-0939: 採用に任意のメモ（凍結する教員が止め理由と一緒に読む）。取消で中止。
+        // IK-1149: 依存は選んだ向きを確認の文に出し、判断に記録させる。
+        var fromNode = EDGE_DIRECTED_KINDS[kind] ? _edgeDirectionFromCard(card) : "";
+        var promptText = EDGE_ACCEPT_MEMO_PROMPT;
+        if (fromNode) {
+          var c = _edgeCandidateByKey(edgeKey) || {};
+          var fwd = fromNode === c.from_id;
+          promptText = "採用する向き: " + _edgeDirectionPhrase(
+            fwd ? (c.from_label || c.from_id) : (c.to_label || c.to_id),
+            fwd ? (c.to_label || c.to_id) : (c.from_label || c.from_id)
+          ) + "\n\n" + promptText;
+        }
+        var memo = prompt(promptText, "");
+        if (memo === null) return;
+        edgeDecide(edgeKey, "accept", memo, kind, fromNode);
         return;
       }
       if (action === "dismiss") {
         // 見送りは理由必須（空は送信しない。サーバ側も 422 で拒否する）。
-        var note = prompt("見送りの理由（必須）") || "";
+        var note = prompt("見送りの理由（必須）\n" + EDGE_DISMISS_NOTE) || "";
         if (!note.trim()) { setEdgesStatus(EDGE_DISMISS_REASON_REQUIRED, true); return; }
         edgeDecide(edgeKey, "dismiss", note, "");
         return;
@@ -7594,18 +8874,37 @@
       if (action === "incorporate") edgeIncorporate(edgeKey);
     }
 
-    function edgeDecide(edgeKey, action, note, kind) {
+    function edgeDecide(edgeKey, action, note, kind, fromNode) {
       edgeBusy = true;
       setEdgesStatus("処理中...");
       var body = { edge_key: edgeKey, action: action, review_note: note || "" };
       if (kind) body.kind = kind;
+      if (fromNode) body.from_node_id = fromNode;
+      // IK-0962: 採用のときは候補の出所を送り、判断に記帳させる（反映の確認と凍結の
+      // 影響が「採用の根拠の記録はありません」と言わないように）。論文の共起を優先。
+      if (action === "accept") {
+        var accepted = _edgeCandidateByKey(edgeKey);
+        var acceptedOrigins = (accepted && accepted.origins) || [];
+        if (acceptedOrigins.indexOf("co_occurrence") >= 0) {
+          body.origin = "co_occurrence";
+        } else if (acceptedOrigins.indexOf("vector") >= 0) {
+          body.origin = "vector";
+        }
+      }
       apiFetch(edgesPath() + "/decide", {
         method: "POST",
         body: JSON.stringify(body),
       })
         // サーバの detail（事実文）をそのまま使う共通ヘルパ。
         .then(_gapResponse)
-        .then(function () { edgeBusy = false; setEdgesStatus(""); loadEdgeCandidates(); })
+        // IK-0994（第 25 周 第 5 波）: 判断の結果を組の名前で言う（見送りはカードが既定表示から
+        // 消えるので、結果文が無いと消えたことでしか分からない）。文はサーバの result_line。
+        .then(function (resp) {
+          edgeBusy = false;
+          var line = (resp && resp.result_line) || "";
+          setEdgesStatus(line);
+          loadEdgeCandidates(!!line);
+        })
         .catch(function (err) { edgeBusy = false; setEdgesStatus("処理に失敗しました: " + err.message, true); });
     }
 
@@ -7641,6 +8940,13 @@
       if (preview.kind) {
         lines.push("関係の種類: " + (EDGE_KIND_LABELS[preview.kind] || preview.kind));
       }
+      // IK-1047（第 25 周 第 7 波）: 依存の向き（サーバの direction_line・記載の順）を種類の直後に。
+      if (preview.direction_line) {
+        lines.push(preview.direction_line);
+      } else if (candidate && candidate.direction_line) {
+        lines.push(candidate.direction_line);
+      }
+      if (preview.direction_note) lines.push(preview.direction_note);
       (validation.warnings || []).forEach(function (issue) {
         var text = _gapIssueText(issue);
         if (text) lines.push("検証: " + text);
@@ -7657,7 +8963,11 @@
         );
         return;
       }
-      lines.push("この内容を次版の下書きに保存します。学習者には表示されません。");
+      // IK-0939: 誰の採用か・何を根拠にしたか・採用のメモ・いつ学習者に見えるか。
+      if (preview.decision_line) lines.push("採用: " + preview.decision_line);
+      if (preview.basis_line) lines.push(preview.basis_line);
+      if (preview.note_line) lines.push(preview.note_line);
+      lines.push("この内容を次版の下書きに保存します。" + (preview.timing_line || ""));
       openDangerConfirmModal({
         title: "次版の下書きへ反映する",
         message: lines,
@@ -7678,12 +8988,14 @@
             body: JSON.stringify({ edge_key: edgeKey }),
           }).then(_gapResponse);
         })
-        .then(function () {
+        .then(function (marked) {
           edgeBusy = false;
           // 反映済みの候補は次の導出で消えるので、選択中の種類も持ち越さない。
           if (edgeKindSelections.hasOwnProperty(edgeKey)) delete edgeKindSelections[edgeKey];
-          setEdgesStatus("次版の下書きに追加しました");
-          loadEdgeCandidates();
+          if (edgeDirectionSelections.hasOwnProperty(edgeKey)) delete edgeDirectionSelections[edgeKey];
+          // IK-0938: 何を足したかを名指す（サーバの結果文。無ければ従来の一文）。
+          setEdgesStatus((marked && marked.result_line) || "次版の下書きに追加しました");
+          loadEdgeCandidates(true);
         })
         .catch(function (err) {
           edgeBusy = false;
@@ -8166,7 +9478,49 @@
 
     // 影響確認モーダル（従来の confirm() の置き換え）。上段は既存の事実文、
     // 中段は対応区画、下段は「この対応で凍結」。区画が無ければ従来どおりの確認だけ。
-    function openFreezeImpactModal(summaryLines, correspondenceHtml, onProceed) {
+    // blocked=true（IK-0885: 凍結を止める条件があると freeze-impact が言った）のときは
+    // [凍結する]を押せなくし、止める理由と行き先（候補区画）を先に言う。
+    // IK-1019（第 25 周 第 6 波）: ［止めている候補を見る］は止めている採用のカードそのものへ
+    // 着地させる（区画の先頭ではなく）。番地は readiness.pending_items[].target_key（関係 =
+    // edge_key / 論文由来の候補 = cluster_key）。カードが見つからなければその種類のグループへ、
+    // それも無ければ区画へ。着地したカードは一時的に枠を強調する（数値は出さない）。
+    function _findAtlasCardByKey(attrName, key) {
+      if (!key) return null;
+      var cards = document.querySelectorAll("[" + attrName + "]");
+      for (var i = 0; i < cards.length; i++) {
+        if (cards[i].getAttribute(attrName) === key) return cards[i];
+      }
+      return null;
+    }
+
+    function scrollToFreezeBlocker(pendingItems) {
+      var items = pendingItems || [];
+      var first = null;
+      for (var i = 0; i < items.length; i++) {
+        if (items[i] && items[i].target_key) { first = items[i]; break; }
+      }
+      if (!first) { scrollToAtlasSection("atlas-reports-section"); return; }
+      var isEdge = first.kind === "edge";
+      var card = _findAtlasCardByKey(isEdge ? "data-edge-key" : "data-cluster-key", first.target_key);
+      var target = card || document.getElementById(isEdge ? "atlas-edges-group" : "atlas-gaps-group");
+      if (!target) { scrollToAtlasSection("atlas-reports-section"); return; }
+      document.querySelectorAll("[data-atlas-section]").forEach(function (btn) {
+        btn.classList.toggle("on", btn.getAttribute("data-atlas-section") === "atlas-reports-section");
+      });
+      try { target.scrollIntoView({ behavior: "smooth", block: "center" }); }
+      catch (e) { target.scrollIntoView(); }
+      if (card) {
+        card.setAttribute("data-freeze-blocker", "1");
+        var prevOutline = card.style.outline;
+        card.style.outline = "2px solid var(--color-text-warning, #d97706)";
+        setTimeout(function () {
+          card.style.outline = prevOutline;
+          card.removeAttribute("data-freeze-blocker");
+        }, 4000);
+      }
+    }
+
+    function openFreezeImpactModal(summaryLines, correspondenceHtml, onProceed, blocked, pendingItems) {
       var existing = document.getElementById("atlas-freeze-impact-modal");
       if (existing) existing.remove();
 
@@ -8188,9 +9542,12 @@
           (correspondenceHtml || "") +
           '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">' +
             '<button id="atlas-freeze-impact-cancel" style="padding:6px 16px;border:1px solid var(--color-border);border-radius:4px;background:none;color:var(--color-text-secondary);cursor:pointer;font-size:13px">キャンセル</button>' +
-            '<button id="atlas-freeze-impact-proceed" style="padding:6px 16px;border:none;border-radius:4px;background:var(--color-text-danger);color:#fff;cursor:pointer;font-size:13px">' +
-              (correspondenceHtml ? "この対応で凍結" : "凍結する") +
-            "</button>" +
+            (blocked
+              ? '<button id="atlas-freeze-impact-goto" data-ui-anchor="atlas.freeze-blocked-goto" style="padding:6px 16px;border:1px solid var(--color-border);border-radius:4px;background:none;color:var(--color-text-primary);cursor:pointer;font-size:13px">止めている候補を見る</button>' +
+                '<button id="atlas-freeze-impact-proceed" disabled style="padding:6px 16px;border:none;border-radius:4px;background:var(--color-border);color:var(--color-text-tertiary);cursor:not-allowed;font-size:13px">公開できません</button>'
+              : '<button id="atlas-freeze-impact-proceed" style="padding:6px 16px;border:none;border-radius:4px;background:var(--color-text-danger);color:#fff;cursor:pointer;font-size:13px">' +
+                  (correspondenceHtml ? "この対応で凍結" : "凍結する") +
+                "</button>") +
           "</div>" +
         "</div>";
 
@@ -8199,7 +9556,15 @@
       document.getElementById("atlas-freeze-impact-cancel").addEventListener("click", function () {
         overlay.remove();
       });
+      var gotoBtn = document.getElementById("atlas-freeze-impact-goto");
+      if (gotoBtn) {
+        gotoBtn.addEventListener("click", function () {
+          overlay.remove();
+          scrollToFreezeBlocker(pendingItems);
+        });
+      }
       document.getElementById("atlas-freeze-impact-proceed").addEventListener("click", function () {
+        if (blocked) return;
         var pairs = _freezeCollectIdMigrations(overlay);
         overlay.remove();
         if (typeof onProceed === "function") onProceed(pairs);
@@ -8240,7 +9605,8 @@
 
       function openFreezeChecklist() {
         openDangerConfirmModal({
-          title: "分野の地図骨格を公開前チェック",
+          // IK-0942 残り（第 5 波）: 版の呼び名を「地図 版 X」に揃える（「骨格」を出さない）。
+          title: atlasVersionText(version) + " を公開する前の確認",
           message: checkLines,
           confirmLabel: "公開する",
         }, function () {
@@ -8281,7 +9647,7 @@
             })
             .then(function () {
               // 追加した項目に既存の論文が並ぶのは再解析のときであることを事実で添える。
-              setStatus("版 " + version + " を学習者向けに公開しました。" + GAP_FREEZE_REANALYSIS_TEXT);
+              setStatus(atlasVersionText(version) + " を学習者向けに公開しました。" + GAP_FREEZE_REANALYSIS_TEXT);
               loadState();
               loadReports();
             })
@@ -8299,6 +9665,27 @@
           // サーバが添える事実文（facts[]）はそのまま公開前チェックへ差し込む。
           // 件数を足したり言い換えたりしない（category_gap_candidates_design.md §5.5）。
           var facts = impact ? (impact.facts || []) : [];
+          // IK-0885: 凍結の可否は freeze と同じ判定（readiness）。止める条件があれば
+          // 押す前に言い、[公開する]へ進ませない（押してから 409 で止めない）。
+          var readiness = impact && impact.readiness;
+          if (readiness && readiness.ready === false) {
+            var blockedLines = (readiness.facts || []).slice();
+            // IK-0939: 止めている採用ごとに、誰がいつ採用したか・根拠・採用のメモ（サーバの写し）。
+            (readiness.pending_items || []).forEach(function (item) {
+              if (!item || !item.label) return;
+              var parts = [item.label];
+              if (item.decision_line) parts.push(item.decision_line);
+              if (item.basis_line) parts.push(item.basis_line);
+              if (item.note_line) parts.push(item.note_line);
+              blockedLines.push("・" + parts.join(" ／ "));
+            });
+            facts.forEach(function (fact) { if (fact) blockedLines.push(fact); });
+            openFreezeImpactModal(blockedLines, "", null, true, readiness.pending_items || []);
+            return;
+          }
+          if (readiness && readiness.facts) {
+            readiness.facts.forEach(function (fact) { if (fact) facts = facts.concat([fact]); });
+          }
           if (facts.length) {
             var question = checkLines.pop();
             facts.forEach(function (fact) { if (fact) checkLines.push(fact); });
@@ -8333,6 +9720,7 @@
     select.addEventListener("change", function () {
       // 分野を切り替えたら選択ヒント・ビュー・AI agent をリセットする
       selectionHint = null;
+      edgeShowAll = false;
       switchView("preview");
       if (assistPanelEl) assistPanelEl.style.display = "none";
       if (window.AtlasAssistPanel && window.AtlasAssistPanel.reset) window.AtlasAssistPanel.reset();
@@ -8657,6 +10045,12 @@
             setNewDomainStatus("仮予約の保存に失敗しました: " + err.message, true);
           });
       });
+    }
+    // リリース前の確認（第 23 波・第 2 波 F5）: 保存ボタンの行に呼び出し側の副ボタン
+    // （「あとで」）を並べられるよう、描画後に行を渡す。既定（options.onRendered なし）は不変。
+    if (typeof options.onRendered === "function") {
+      var abSaveBtn = bodyEl.querySelector("[data-role='ab-save']");
+      options.onRendered(abSaveBtn);
     }
   }
 
@@ -11164,7 +12558,9 @@
   }
   function courseAtlasBindingText(c) {
     if (c.atlas_cartridge_id) {
-      return "地図: " + c.atlas_cartridge_id + "（" + (c.atlas_topic_count || 0) + "/" + (c.topic_count || 0) + " トピック）";
+      // IK-0929: 内部キーと比を出さない。分野の表示名と段階の語はサーバが返す（素通し）。
+      return "地図: " + (c.atlas_domain_label || "分野名を読めませんでした") +
+        (c.atlas_binding_coverage_label ? "（" + c.atlas_binding_coverage_label + "）" : "");
     }
     return "地図: 未設定";
   }
@@ -11178,14 +12574,12 @@
     }
     var html = "";
     _cmState.courses.forEach(function (c) {
-      var roleBadge;
-      if (c.role === "owner") {
-        roleBadge = '<span style="font-size:10px;background:var(--color-text-success);color:#fff;padding:1px 6px;border-radius:3px">所有</span>';
-      } else if (c.role === "viewer") {
-        roleBadge = '<span style="font-size:10px;background:var(--color-text-tertiary);color:#fff;padding:1px 6px;border-radius:3px">viewer</span>';
-      } else {
-        roleBadge = '<span style="font-size:10px;background:var(--color-text-info);color:#fff;padding:1px 6px;border-radius:3px">editor</span>';
-      }
+      // IK-0911: 役割の印はサーバの日本語の事実（role_label = label_vocab.COURSE_ROLE_LABELS）。
+      // 英語の owner / editor / viewer を画面に出さない。色だけ役割で分ける。
+      var roleColor = c.role === "owner" ? "var(--color-text-success)"
+        : (c.role === "viewer" ? "var(--color-text-tertiary)" : "var(--color-text-info)");
+      var roleBadge = '<span style="font-size:10px;background:' + roleColor + ';color:#fff;padding:1px 6px;border-radius:3px">' +
+        escHtml(c.role_label || (c.role === "owner" ? "所有" : "共有")) + '</span>';
       var perms = c._perms || [];
       var permsHtml;
       if (!perms.length) {
@@ -11194,7 +12588,7 @@
         permsHtml = perms.map(function (p) {
           var color = p.permission === "editor" ? "var(--color-text-info)" : "var(--color-text-success)";
           return '<span style="display:inline-block;margin:0 4px 4px 0;padding:2px 8px;font-size:11px;background:' + color + ';color:#fff;border-radius:3px">' +
-            escHtml(p.group_name || p.group_id) + ' (' + escHtml(p.permission) + ')</span>';
+            escHtml(p.group_name || p.group_id) + '（' + escHtml(p.permission_label || "共有") + '）</span>';
         }).join("");
       }
       var actionHtml;
@@ -11305,7 +12699,7 @@
           title: action === "publish" ? "コースを公開" : "コースの公開を止める",
           message: action === "publish"
             ? "このコースを公開します。学生が受講できるようになります。"
-            : "このコースの公開を止めます（非公開に切り替えます）。学生の新規受講はできなくなります。",
+            : "このコースの公開を止めます（非公開に切り替えます）。学生の新規受講はできなくなります。受講中の学生はこれまでどおり読めます。",
           confirmLabel: action === "publish" ? "公開する" : "公開を止める",
         }, function () {
           setCmStatus(action === "publish" ? "公開しています..." : "非公開にしています...", "info");
@@ -11315,8 +12709,10 @@
           }).then(function (res) {
             if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || "更新に失敗しました"); });
             return res.json();
-          }).then(function () {
-            setCmStatus(action === "publish" ? "公開しました" : "非公開にしました", "success");
+          }).then(function (data) {
+            // IK-0947: 本文の無いトピックが残るまま公開したならサーバの事実文を添える。
+            var note = data && data.readiness_note ? " " + data.readiness_note : "";
+            setCmStatus((action === "publish" ? "公開しました" : "非公開にしました") + note, "success");
             loadCourseManagement();
             if (window.AdminNextSteps) window.AdminNextSteps.refresh();
           }).catch(function (e) {
@@ -11629,8 +13025,10 @@
         '<div style="display:flex;gap:8px;align-items:center">' +
           '<select id="cm-perm-group-select" style="flex:1;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)"></select>' +
           '<select id="cm-perm-role-select" style="padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
-            '<option value="viewer">viewer (受講可)</option>' +
-            '<option value="editor">editor (編集可)</option>' +
+            // IK-0911: 選択肢の語は label_vocab.COURSE_SHARE_PERMISSION_LABELS の逐語ミラー
+            // （一致は test_lecture_studio_round25_r2.py が固定）。
+            '<option value="viewer">受講・閲覧できる</option>' +
+            '<option value="editor">編集できる（トピックの保存は所有者）</option>' +
           '</select>' +
           '<button id="cm-perm-add-btn" data-ui-anchor="course-management.perm-add" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">追加</button>' +
         '</div>' +
@@ -11709,8 +13107,9 @@
       }).then(function (res) {
         if (!res.ok) return res.json().then(function (d) { throw new Error(d.detail || "更新に失敗しました"); });
         return res.json();
-      }).then(function () {
-        setCmVisibilityStatus("更新しました", "success");
+      }).then(function (data) {
+        // IK-0947: 公開（public / group）で本文の無いトピックが残るならサーバの事実文を添える。
+        setCmVisibilityStatus("更新しました" + (data && data.readiness_note ? " " + data.readiness_note : ""), "success");
         loadCourseManagement();
         if (window.AdminNextSteps) window.AdminNextSteps.refresh();
       }).catch(function (e) {
@@ -11761,7 +13160,7 @@
     _cmState.perms.forEach(function (p) {
       html += '<tr>' +
         '<td>' + escHtml(p.group_name || p.group_id) + '</td>' +
-        '<td>' + escHtml(p.permission) + '</td>' +
+        '<td>' + escHtml(p.permission_label || "共有") + '</td>' +
         '<td><button class="cm-perm-remove-btn admin-action-btn" data-gid="' + escHtml(p.group_id) + '" style="background:var(--color-text-danger);color:#fff">削除</button></td>' +
         '</tr>';
     });
@@ -11859,7 +13258,7 @@
     return el;
   }
 
-  function openDocumentShareModal(documentId, title, materialId, visibility, groupId) {
+  function openDocumentShareModal(documentId, title, materialId, visibility, groupId, formatLabel) {
     _docShareState.documentId = documentId;
     _docShareState.materialId = materialId || "";
     _docShareState.title = title || "";
@@ -11878,7 +13277,8 @@
           '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">教材の共有・開示範囲</h3>' +
           '<button id="doc-share-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
         '</div>' +
-        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 12px">教材「' + escHtml(title || "") + '」の設定です。</p>' +
+        // 第 10 波（IK-0956 の面）: 同じ題名の PDF 版と TeX 版を見出しで区別する（形式はサーバの format_label）。
+        '<p data-doc-share-heading style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 12px">教材「' + escHtml(title || "") + '」' + (formatLabel ? '（' + escHtml(formatLabel) + '）' : '') + 'の設定です。</p>' +
         '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">開示範囲</h4>' +
         '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 8px">誰がこの教材（と解析成果）を見られるかを設定します。</p>' +
         '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">' +
@@ -11893,7 +13293,7 @@
         '<div id="doc-visibility-status" class="upload-status" style="display:none;margin-bottom:12px"></div>' +
         '<hr style="border:none;border-top:1px solid var(--color-border);margin:4px 0 12px 0">' +
         '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">解析成果のグループ共有</h4>' +
-        '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 8px">解析成果（理論コンポーネント・グラフ・Claim）を指定グループへ個別に共有します。viewer=閲覧・引用／editor=編集・再解析。</p>' +
+        '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 8px">解析成果（理論の部品・グラフ・主張）を指定グループへ個別に共有します。「閲覧・引用できる」か「編集・再解析できる」かを選びます。</p>' +
         '<div id="doc-share-status" class="upload-status" style="display:none;margin-bottom:12px"></div>' +
         '<h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">現在の共有設定</h4>' +
         '<div id="doc-share-current" style="margin-bottom:16px;overflow-y:auto;flex:1"></div>' +
@@ -11902,8 +13302,8 @@
         '<div style="display:flex;gap:8px;align-items:center">' +
           '<select id="doc-share-group" style="flex:1;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)"></select>' +
           '<select id="doc-share-role" style="padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">' +
-            '<option value="viewer">viewer (閲覧・引用)</option>' +
-            '<option value="editor">editor (編集・再解析)</option>' +
+            '<option value="viewer">閲覧・引用できる</option>' +
+            '<option value="editor">編集・再解析できる</option>' +
           '</select>' +
           '<button id="doc-share-add" class="admin-action-btn" style="background:var(--color-text-info);color:#fff">追加</button>' +
         '</div>' +
@@ -12024,7 +13424,7 @@
     }
     var html = '<table class="admin-table"><thead><tr><th>グループ</th><th>権限</th><th>操作</th></tr></thead><tbody>';
     _docShareState.perms.forEach(function (p) {
-      html += '<tr><td>' + escHtml(p.group_name || p.group_id) + '</td><td>' + escHtml(p.permission) + '</td>' +
+      html += '<tr><td>' + escHtml(p.group_name || p.group_id) + '</td><td>' + escHtml(p.permission_label || p.permission) + '</td>' +
         '<td><button class="doc-share-remove admin-action-btn" data-gid="' + escHtml(p.group_id) + '" style="background:var(--color-text-danger);color:#fff">削除</button></td></tr>';
     });
     html += "</tbody></table>";
@@ -12547,6 +13947,8 @@
           apiFetch: apiFetch,
           escHtml: escHtml,
           onUploadAccepted: handleUploadAccepted,
+          // 取り込みの「解析の分野」の選択肢は教材アップロードと同じ合成の1本を共有する。
+          loadDomainOptions: loadDomainOptions,
         });
         var discoveryLink = document.getElementById("paper-discovery-link");
         if (discoveryLink) {
@@ -12563,6 +13965,14 @@
           apiFetch: apiFetch,
           escHtml: escHtml,
           onUploadAccepted: handleUploadAccepted,
+          loadDomainOptions: loadDomainOptions,
+          // 取り込み済み・受理直後の候補から先へ進む導線（paper_radar_design.md §19 C）。
+          getMaterial: findMaterialInList,
+          focusMaterialRow: focusMaterialRow,
+          openGraphReview: function (documentId, title) {
+            if (window.GraphReview) window.GraphReview.open(documentId, title);
+          },
+          openLandscape: openLandscapeModal,
         });
       }
       // 束の取り込み（knowledge_transfer_design.md P4-1 / §4.3）— 教材行の
@@ -12591,6 +14001,10 @@
       // グラフ対話レビュー（graph_dialogue_review_design.md）— 教材行のグラフアイコンボタン。
       if (window.GraphReview) {
         window.GraphReview.init({ apiFetch: apiFetch, escHtml: escHtml, getToken: getAuthToken });
+      }
+      // 検証シミュレーション（simulation_bridge_design.md §7）— 教材行の ⋯ メニューから開く。
+      if (window.SimulationBridge) {
+        window.SimulationBridge.init({ apiFetch: apiFetch, escHtml: escHtml, getToken: getAuthToken });
       }
     }
     initStumbles();
@@ -12753,6 +14167,8 @@
       material_figures_button: function (id) {
         return _matRowActionAnchor(id, ".admin-figures-btn");
       },
+      // 図を深く検討（materials.deliberate_figure）: 図モーダル内の最初の「深く検討」。
+      figure_deliberate_button: function () { return document.querySelector(".figure-deliberate-btn"); },
       // W層/開幕素材レビュー: 教材行の「検出要素」ボタン（要素インベントリを開く）。
       material_inventory_button: function (id) {
         return _matRowActionAnchor(id, ".admin-inventory-btn");
@@ -12761,9 +14177,18 @@
       material_graph_review_button: function (id) {
         return _matRowActionAnchor(id, ".admin-graph-review-btn");
       },
+      // 再現性レビュー 第 2 波: 行の「パイプラインを実行 ▼」（⋯メニュー外）。G層の
+      // material.explanations_skipped / ingest_incomplete の道案内先。開くのは本人。
+      material_pipeline_run_button: function (id) {
+        return _matRowActionAnchor(id, ".material-pipeline-trigger");
+      },
       // ゼミ前ブリーフ: 教材行の「ゼミ前ブリーフ…」ボタン（⋯メニュー内）。
       seminar_brief_button: function (id) {
         return _matRowActionAnchor(id, ".admin-seminar-brief-btn");
+      },
+      // 検証シミュレーション: 教材行の「検証シミュレーション…」ボタン（⋯メニュー内）。
+      simulation_bridge_button: function (id) {
+        return _matRowActionAnchor(id, ".admin-simulation-bridge-btn");
       },
       // 開幕素材レビュー（discuss の「議論のきっかけ」）: 要素インベントリ内の
       // 「説明レビュー」ボタン。インベントリを開くまでは DOM に存在しないので、
@@ -12915,7 +14340,16 @@
     // L層（G6）: ナレッジライブラリタブの分野・エントリ一覧、凍結ボタン。
     AA.registerUiAnchors("knowledge-library", {
       library_domain_list: function () { return document.getElementById("library-domains-list"); },
-      library_entry_freeze_button: function () { return document.getElementById("lib-detail-freeze"); }
+      library_entry_freeze_button: function () { return document.getElementById("lib-detail-freeze"); },
+      // 概念レジストリの 4 区画（IK-0865）。詳細の区画は動的描画なので data-ui-anchor で解決する。
+      library_identity_candidates: function () { return document.getElementById("library-identity-candidates"); },
+      library_entries_list: function () { return document.getElementById("library-entries-list"); },
+      library_atlas_derive_button: function () { return document.getElementById("library-atlas-derive-btn"); },
+      library_labels_section: function () { return document.querySelector('[data-ui-anchor="knowledge-library.labels"]'); },
+      library_relations_section: function () { return document.querySelector('[data-ui-anchor="knowledge-library.relations"]'); },
+      library_atlas_links_section: function () { return document.querySelector('[data-ui-anchor="knowledge-library.atlas-links"]'); },
+      // IK-0953 / IK-0958: 確定した結び付きの取り消しは「結びついた教材の部品」の行から。
+      library_bound_parts_section: function () { return document.querySelector('[data-ui-anchor="knowledge-library.bound-parts"]'); }
     });
     // N31: つまづきデータタブ（コース選択 → 未回答クエリ一覧）。
     AA.registerUiAnchors("stumbles", {

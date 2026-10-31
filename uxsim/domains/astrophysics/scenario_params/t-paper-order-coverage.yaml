@@ -1,0 +1,7 @@
+scenario: t-paper-order-coverage
+domain: astrophysics
+params:
+  goal_text: 論文のどの章がグラフに掛かっていないかを確かめること
+  material_hint: グラフと論文層がある教材（「Neutron Star Equation of State via Physics Informed Neural Network」か「2606.02318v1」の行。どちらかを開く）
+  graph_questions:
+  - 論文の順で見て、掛かっていない章は何を扱っている章ですか？

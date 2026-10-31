@@ -20,6 +20,7 @@ import logging
 from fastapi import APIRouter, Depends
 
 from dependencies import _require_teacher
+from display_route import TeacherDisplayRoute
 from routes.theory_components import _ensure_document_viewable
 from core.doubt.seminar_brief import build_seminar_brief
 from core.postgres import get_session as _pg_session
@@ -27,7 +28,8 @@ from core.postgres import get_session as _pg_session
 logger = logging.getLogger(__name__)
 
 # main.py で prefix="/api/admin" を付けて直接登録される admin 系子ルーター（prefix なし）
-admin_router = APIRouter(tags=["SeminarBrief"])
+# 教員向けの名指しの面（表示投影 DP7）: 戻り値は ``project_for_teacher`` を通る。
+admin_router = APIRouter(tags=["SeminarBrief"], route_class=TeacherDisplayRoute)
 
 
 @admin_router.get("/documents/{document_ref}/seminar-brief")

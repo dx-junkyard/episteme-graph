@@ -145,6 +145,30 @@ backend/atlas_domains/<domain_key>/
   カートリッジを持つ分野はその `atlas/skeleton.yaml` が骨格になり、`astrophysics` のように
   骨格だけの分野はここに置く。詳細 → [知識ランドスケープ 設計書](../features/knowledge_landscape_design.md)。
 
+
+---
+
+## 6. 再解析での分野の引き継ぎと解除（2026-10-16 追補・IK-0702）
+
+再解析（`POST /api/admin/documents/{id}/reanalyze`）の `cartridge_id` は 3 値で、route → orchestrator →
+persistence の全段で同じ意味を持つ。
+
+| 入口の値 | route | orchestrator | run 行（`document_analysis_runs.cartridge_id`） |
+|---|---|---|---|
+| 未指定（`None`） | 前回 run の分野を引き継ぐ（前回が分野中立なら `""`） | `None` のときだけ env 既定 | 実効値を書く |
+| `""`（指定しない） | そのまま渡す | `None`（分野中立）に正規化。env へ戻さない | NULL を書く |
+| 分野キー | 選択肢に実在するか検証（422） | そのまま | その値を書く |
+
+- **継承の解決は route と orchestrator だけが行う**。persistence（`upsert_analysis_run`）は渡された値を
+  「この run の実効の分野」として新規・更新の**両方**で書く（空は NULL）。`options` のような「None なら保持」の
+  分岐を分野には置かない — resume は既存の run 行を同じ id で更新するため、置くと「指定しない」への解除が
+  表現できない（2026-10-16 まで UPDATE が列を書かず、解除が run 行に残らなかった）。
+- agent へ渡るのは orchestrator が正規化した `ctx.cartridge_id` だけで、run 行や artifact から分野を読み戻さない。
+- **同じ教材の解析が走っている間の再解析は 409**（「この教材の解析が実行中です。…」）。resume は未完了の run を
+  同じ id で拾うので、重ねて起動すると前回の分野で動いている旧スレッドが止まらず並走し、その LLM 呼び出しに
+  前回の分野の語彙が載り続ける。判定は api-server プロセス内の解析状態だけを見る（複数プロセス構成は未対応）。
+- ガードレールは `backend/tests/test_pipeline_cartridge_resume.py`。
+
 ---
 
 [← PDF 解析 Agent 詳細](agents.md) ｜ 次へ: [DSL と理論操作グラフ →](theory-graph.md)

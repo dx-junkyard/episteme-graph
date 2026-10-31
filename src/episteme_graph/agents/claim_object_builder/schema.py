@@ -123,6 +123,13 @@ CLAIM_TYPE_ONTOLOGY = [
     "derivation_result",
     "main_result",
     "interpretation",
+    # claim_qualification の CORE_CLAIM_TYPE_FALLBACKS（プロンプトが許す型）に在って
+    # ここに無かった 4 型。正本 backend/core/schema.py::CLAIM_TYPES には在るのに
+    # _normalize_claim_type が unknown に丸めていた（2026-10-17・頭脳 W1 seq 3283）。
+    "relation",
+    "correction",
+    "uncertainty",
+    "diagnostic_claim",
     "unknown",
 ]
 

@@ -1,0 +1,43 @@
+id: s-v5-precision-elicit
+population: students
+runner: [api, browser]
+session: 1
+goal: '{{goal_text}} のために、精読モードで答えを見る前に予想を書き、出典と並べ、気になった箇所に印を付けて、持ち越す問いを選んで終える'
+params_required: [goal_text, topic_hint_terms, prediction_text, quick_label, carryover_pick, carryover_question_text]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.enroll
+    note: 受講中でなければ受講を始める
+  - do: learning.course.open
+  - do: learning.topic.open
+    with: {topic_hint_terms: '{{topic_hint_terms}}'}
+  - do: learning.discuss.opening
+    note: 「この論文と議論する」に切り替え、精読モードの入口を探す
+  - do: learning.cycle.precision_toggle
+    note: 精読モードを ON にする（画面だけの切り替え。API の試験では押せない）
+  - do: learning.chat.cycle
+    with: {cycle_mode: elicit, message: '{{prediction_text}}'}
+    note: 答えを見る前に予想を書く
+  - do: learning.chat.cycle
+    with: {cycle_mode: diff, message: '{{prediction_text}}'}
+    note: 予想と出典を並べる
+  - do: learning.cycle.anchor
+    with: {quick_label: '{{quick_label}}'}
+    note: 並置で気になった教材の箇所に軽い印を付ける
+  - do: learning.cycle.landing_candidates
+  - choose:
+      - do: learning.cycle.intention
+        with: {role: carryover_question, pick: '{{carryover_pick}}'}
+      - do: learning.cycle.intention
+        with: {role: carryover_question, text: '{{carryover_question_text}}'}
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#understanding-cycle
+  - manual: student/02-student.md#quick-anchor
+  - manual: student/02-student.md#discuss-end
+watch_for:
+  - 精読モードの入口が、使い方の説明どおりの場所に 1 操作で見つかる（見つからなければどこを探したかを残す）
+  - 予想の枠は答えを先に言わず、自分の予想を書くことだけを求める
+  - 並置は正誤・点数を出さず、出典の文と自分の予想を並べ、食い違いは可能性として語る
+  - 付けた印と選んだ持ち越しの問いが、自分の言葉のまま残る

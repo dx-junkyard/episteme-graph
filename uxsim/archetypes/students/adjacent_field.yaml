@@ -1,0 +1,29 @@
+id: adjacent_field
+population: students
+summary: 隣の分野から来た。言葉の呼び方の違いで躓く
+habits:
+  reads_manual: when_stuck
+  patience: medium
+  asks_questions: often
+  uses_voice: "no"
+  device: desktop
+  prefers_mode: mixed
+  opens_sources: sometimes
+  checks_verification: sometimes
+  pushes_back: sometimes
+  writes_own_words: sometimes
+  uses_maps: often
+  rewrites_messages: sometimes
+  session_length: medium
+  returns_later: "yes"
+  language_mix: mixed
+  demands_out_of_principle: rarely
+voice: |
+  です・ます調。前の分野で使っていた呼び方で質問し、「それは前の分野でいう〜と同じものですか」と
+  対応を確かめる。基礎的な数学や方法には強いが、この分野の慣習や記号の意味で止まる。
+  全体の地図を見て、自分がいまどこにいるかを確かめたがる。
+gives_up_when: |
+  自分の知っている呼び方で聞いても、対応する語が返ってこないとき。
+  地図や一覧に自分の関心が当てはまる場所が見つからないとき（そのときは「当てはまる場所が無い」と書く）。
+asks_out_of_principle:
+  - この分野で自分が知らないことを一覧にして、全部埋めるまで出題してほしい

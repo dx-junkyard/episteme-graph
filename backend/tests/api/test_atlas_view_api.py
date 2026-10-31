@@ -459,11 +459,16 @@ class TestGetAtlas:
     def test_relation_threads_key_is_absent_without_the_edges_layer(
         self, client, warm_cache
     ):
-        """推定の糸 (RE層 §6) は導出できないときキー自体を付けない (RE2 の fail-closed)。"""
+        """推定の糸 (RE層 §6) は導出できないとき items を持たず、理由の事実文だけを返す
+        (RE2: フロントは available !== true でレイヤーを出さない。第 14 周で note を追加)。"""
         data = client.get(
             "/api/atlas?cartridge=particle_physics", headers=_headers()
         ).json()
-        assert "threads" not in data
+        threads = data.get("threads")
+        if threads is not None:
+            assert threads["available"] is False
+            assert set(threads) == {"available", "note"}
+            assert threads["note"]
 
     def test_relation_threads_are_merged_when_available(
         self, client, warm_cache, monkeypatch
@@ -555,7 +560,7 @@ class TestGetAtlasNode:
         assert "原文3本に裏付け" in data["verify_line"]
         assert "式(12)" in data["evidence_refs"]
         # C層原則1: 学習者も叩けるルートなので承認は段階ラベルのみ（生数値は出さない）。
-        assert data["endorsements"][0] == {"label": "強い支持: 3名の教員が承認(専門2分野)"}
+        assert data["endorsements"][0] == {"label": "強い支持: 3名の教員が支持(専門2分野)"}
         assert data["skeleton_version"] == "2026.1"
 
     def test_detail_panel_never_leaks_raw_endorsement_counts(self, client, warm_cache):
@@ -581,7 +586,8 @@ class TestGetAtlasNode:
             "/api/atlas/node/dual?cartridge=particle_physics", headers=_headers()
         ).json()
         assert data["status"] == "assumed"
-        assert "記帳された直接検証なし" in data["verify_line"]
+        # IK-1018 残り（第 7 波）: 学習者には「台帳」「記帳」を出さない（読み時の投影）。
+        assert "直接確かめた記録なし" in data["verify_line"]
         assert data["endorsements"] == []
 
     def test_unknown_node_is_404(self, client, warm_cache):
@@ -803,3 +809,40 @@ class TestTopicAttributionGap1:
             {}, {"id": "t", "title": "全く無関係な題目zzz9"}
         )
         assert out is None
+
+
+class TestLearnerLedgerHonesty:
+    """IK-0412: ledger_status は検証行と食い違わない・パンくずに内部キーを出さない。"""
+
+    def test_ledger_status_agrees_with_verify_line(self, client, warm_cache):
+        res = client.get("/api/atlas?cartridge=particle_physics", headers=_headers())
+        assert res.status_code == 200
+        data = res.json()
+        for node_id, node in data["nodes"].items():
+            verify = node.get("verify") or ""
+            if "記帳なし" in verify or "記帳がありません" in verify:
+                assert node["ledger_status"] in ("unrecorded", "fog"), (node_id, node)
+            if node["ledger_status"] == "verified":
+                assert "記帳なし" not in verify and "記録されていません" not in verify
+
+    def test_crumbs_use_display_name_not_domain_key(self, client, warm_cache):
+        res = client.get("/api/atlas?cartridge=particle_physics", headers=_headers())
+        data = res.json()
+        for crumb in data["crumbs"].values():
+            assert "particle_physics" not in crumb
+        assert data["domain_name"]
+        assert data["domain_name"] != "particle_physics"
+        # フロントの取得キーは互換のまま残る
+        assert data["cartridge"] == "particle_physics"
+
+    def test_assumed_pill_has_fact_note(self, client, warm_cache):
+        from core import label_vocab
+
+        res = client.get("/api/atlas?cartridge=particle_physics", headers=_headers())
+        data = res.json()
+        assumed = [n for n in data["nodes"].values() if n.get("status") == "assumed"]
+        for node in assumed:
+            # IK-1018 残り（第 7 波）: 学習者向けは「台帳」「記帳」を読み替えた文。
+            assert node["pill_note"] == label_vocab.learner_atlas_wording(label_vocab.ATLAS_PILL_NOTES["assumed"])
+        for entry in data["nodes_list"]:
+            assert "pill_note" in entry["panel"]

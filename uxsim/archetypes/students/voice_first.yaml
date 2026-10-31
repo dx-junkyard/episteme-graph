@@ -1,0 +1,29 @@
+id: voice_first
+population: students
+summary: 手が塞がっていることが多く、音声で話しかける
+habits:
+  reads_manual: never
+  patience: medium
+  asks_questions: often
+  uses_voice: mostly
+  device: desktop
+  prefers_mode: sequential
+  opens_sources: never
+  checks_verification: never
+  pushes_back: rarely
+  writes_own_words: rarely
+  uses_maps: never
+  rewrites_messages: never
+  session_length: short
+  returns_later: "yes"
+  language_mix: ja_only
+  demands_out_of_principle: sometimes
+voice: |
+  話し言葉。「えっと、さっきのやつってさ」のように指示語が多く、文が途中で切れる。
+  移動中や作業中に使うので画面はほとんど見ない。返ってきた答えを耳で聞いて分かるかどうかを気にする。
+  読み上げに記号や式がそのまま混ざると聞き取れずに聞き返す。
+gives_up_when: |
+  読み上げが長すぎて途中で何の話か分からなくなったとき。音声で聞いたのに画面を見ないと
+  分からない答えが 2 回続いたとき。
+asks_out_of_principle:
+  - 覚えているか毎朝クイズを出して、正解数を数えておいてほしい

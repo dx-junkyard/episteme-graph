@@ -28,7 +28,10 @@ from typing import Any, Optional
 
 from sqlalchemy import text as sa_text
 
+from core import analysis_degradation
 from core import atlas_store
+from core import coverage_facts
+from core import document_refs as _document_refs
 from core import element_explanations as element_explanations_store
 from core import privacy
 from core.admin_assistant import capabilities as caps
@@ -63,6 +66,27 @@ RULE_COURSE_AUDIO_MISSING = "course.audio_missing"
 # 実装しない（vision_ux_gap_survey_2026-07-17.md §5-5 の見送り推奨, G4）。
 RULE_FIGURE_UNREVIEWED_MODES = "figure.unreviewed_modes"
 
+# 計器の空振り是正（2026-09-19 実測）: 解析は「completed」で終わっているのに、
+# 上流が黙って欠けている 2 つの状態を教員に見せる。どちらも参照の健全性
+# （core/reference_health.py）では ok と読める（参照は解決しているため）。
+#   - material.explanations_skipped: 要素の二層説明が日次上限で 1 件も生成されなかった
+#     （実測 8/11 本。stage_outputs に skipped_by_limit が残るだけで誰にも見えない）。
+#   - material.ingest_incomplete: 取り込みの完全性チェックが complete=false
+#     （実測 11/12 本。document_completeness artifact 止まりで画面に出ない）。
+RULE_MATERIAL_EXPLANATIONS_SKIPPED = "material.explanations_skipped"
+RULE_MATERIAL_INGEST_INCOMPLETE = "material.ingest_incomplete"
+
+# IK-0362（2026-09-27 ペルソナ通し受講）: 解析の途中で AI 提供元の呼び出しが失敗した
+# （課金残高切れ・利用上限など）のに、各ステージが縮退として吸収して run は completed に
+# なる。採用 run の ``stage_outputs.llm_failures``（orchestrator が完了時に U層の失敗行から
+# 書く事実ブロック）があれば、成果の一部が欠けている可能性を事実文で伝え、再実行へ道案内する。
+RULE_MATERIAL_ANALYSIS_LLM_FAILED = "material.analysis_llm_failed"
+
+# IK-0363（2026-09-27 ペルソナ通し受講）: 本人所有の教材がゼロでも、公開・グループ共有された
+# 教材からコースを作れる。そのとき「登録されている教材がまだありません」とだけ案内すると
+# 次の一歩（コース作成）を隠すので、所有ゼロ・利用可能ありの状態を別ルールで案内する。
+RULE_MATERIALS_SHARED_AVAILABLE = "materials.shared_available"
+
 # discuss_opening_authoring_design.md §6.2: 生成は document 単位だが、添削の動機は
 # コースを作るときに生まれる。所有コースのソース論文に未確認の「議論のきっかけ」
 # （element_explanations の element_type='document' / role='discussion_seed'）が残っている。
@@ -79,6 +103,12 @@ RULE_COURSE_PREREQUISITE_UNCOVERED = "course.prerequisite_uncovered"
 # 無い。freeze は承認を経由しないため「承認0のまま配信」が構造上起こりうる（C-6）。
 # **配信は止めず**（LU8 / RR7）、事実だけを教員に見せる（学習者へは何も変えない）。
 RULE_COURSE_DELIVERED_UNREVIEWED = "course.delivered_unreviewed"
+
+# 第 25 周 面 D 第 2 周（IK-0872 / IK-0880 の残り）: 所有コースのトピックに、保存済みの
+# 決定論付録（「この節で使う数式」「この節で参照する図」）がいまの根拠から作る形と違うものが
+# ある。保存済みの付録は読み時に付け直さない（スライド境界・音声の番号が黙って動くため）ので、
+# 教員に事実を見せて原稿スタジオの [付録を付け直す] へ道案内だけする（代行しない）。
+RULE_COURSE_TOPIC_APPENDIX_STALE = "course.topic_appendix_stale"
 
 # 利用者マニュアル KB（help_kb, manual_help_kb_design.md §4-1）: 需要側 + 供給側の
 # 両面計器。改善ループを閉じるための3ルール（2026-07-25 追加）。
@@ -98,6 +128,11 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
     RULE_MATERIALS_NONE: {
         "severity": SEVERITY_REQUIRED,
         "capability_id": "materials.upload",
+    },
+    # IK-0363: 所有ゼロでも共有教材でコースを作れる。道案内はコース構築（material.no_course と同じ）。
+    RULE_MATERIALS_SHARED_AVAILABLE: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "course_builder.open",
     },
     RULE_MATERIAL_ANALYSIS_FAILED: {
         "severity": SEVERITY_REQUIRED,
@@ -131,6 +166,27 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "severity": SEVERITY_RECOMMENDED,
         "capability_id": "materials.review_figures",  # 道案内のみ（図モーダルへ, #496）
     },
+    # 2026-09-19: どちらも解消手段は「その教材の行でパイプラインを実行し直す」。
+    # 専用 capability は作らず、教材行そのものへ案内する既存 capability を再利用する
+    # （G3: registry を単一の真実源に保ち、道案内の粒度で新規登録を増やさない）。
+    # 解消手段は行の「パイプラインを実行 ▼」（要素の説明だけなら個別ステージ）。第 2 波で
+    # 専用 capability materials.rerun_pipeline（道案内のみ）を足した（2026-09-19）。
+    RULE_MATERIAL_EXPLANATIONS_SKIPPED: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "materials.rerun_pipeline",  # 道案内のみ
+    },
+    RULE_MATERIAL_INGEST_INCOMPLETE: {
+        # optional: PDF 経路はページ被覆の理由でほぼ全教材が complete=false になるため、
+        # recommended にすると上限 10 件の一覧を埋め尽くして他の To-Do を押し出す
+        # （2026-09-19 再現性レビュー §7）。事実は計器（reference_health の facts）にも出る。
+        "severity": SEVERITY_OPTIONAL,
+        "capability_id": "materials.rerun_pipeline",  # 道案内のみ（全実行 / PDF再登録）
+    },
+    # IK-0362: 解消手段は同じく「パイプラインを実行し直す」。既存 capability を再利用する（G3）。
+    RULE_MATERIAL_ANALYSIS_LLM_FAILED: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "materials.rerun_pipeline",  # 道案内のみ
+    },
     RULE_COURSE_DISCUSS_OPENING_UNREVIEWED: {
         "severity": SEVERITY_RECOMMENDED,
         "capability_id": "course.discuss_opening_review",  # 道案内のみ（説明レビューキューへ）
@@ -146,6 +202,12 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
     RULE_COURSE_DELIVERED_UNREVIEWED: {
         "severity": SEVERITY_RECOMMENDED,
         "capability_id": "materials.graph_review",  # 道案内のみ
+    },
+    # 道案内は原稿スタジオのコース選択まで（以降の手順は理由の文が言う）。既存の
+    # guidance_only capability を再利用し、新規登録しない（G3）。
+    RULE_COURSE_TOPIC_APPENDIX_STALE: {
+        "severity": SEVERITY_OPTIONAL,
+        "capability_id": "lecture_studio.generate_audio",  # 道案内のみ（最初の 1 段だけ使う）
     },
     # manual_help_kb_design.md §4-1: 需要側 + 供給側の両面計器。
     RULE_MANUAL_HELP_GAPS_PENDING: {
@@ -167,6 +229,10 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
 _HELP_GAP_NO_HIT_BUCKET = "no_hit"
 
 MAX_STEPS = 10
+
+#: 取り込みの完全性レポートが保存される artifact の stage 名
+#: （``core/document_pipeline/orchestrator.py::_record_document_completeness``）。
+_COMPLETENESS_STAGE = "document_completeness"
 
 # §8: 操作アシスタント初回ログイン cue の一度きりフラグ。専用テーブルを増やさず
 # assistant_step_dismissals の 1 行で代用する（step_key はどのルールとも衝突しない）。
@@ -212,12 +278,21 @@ def _iso(value: Any) -> str:
     return str(value or "")
 
 
-def _locate_plan_for(capability_id: str, ctx: Optional[dict] = None) -> dict:
-    """capability の locate_steps を ctx（{course_id: ...} 等）で具体化した dict。"""
+def _locate_plan_for(
+    capability_id: str, ctx: Optional[dict] = None, *, steps_limit: Optional[int] = None
+) -> dict:
+    """capability の locate_steps を ctx（{course_id: ...} 等）で具体化した dict。
+
+    ``steps_limit`` は、既存 capability を再利用するルールが先頭の段（画面・コースの選択）
+    だけを使うときの切り詰め（G3: 道案内の粒度のために capability を増やさない）。
+    """
     cap = caps.get_capability(capability_id)
     if cap is None:
         return {"capability_id": capability_id, "steps": []}
-    return {"capability_id": capability_id, "steps": cap.locate_steps_as_dicts(ctx or {})}
+    steps = cap.locate_steps_as_dicts(ctx or {})
+    if steps_limit is not None:
+        steps = steps[: max(0, int(steps_limit))]
+    return {"capability_id": capability_id, "steps": steps}
 
 
 def _make_step(
@@ -229,6 +304,7 @@ def _make_step(
     target: dict,
     ctx: Optional[dict] = None,
     dismissible: bool = True,
+    locate_steps_limit: Optional[int] = None,
 ) -> NextStep:
     rule = RULE_CATALOG[rule_id]
     capability_id = rule["capability_id"]
@@ -239,7 +315,7 @@ def _make_step(
         title=title,
         reason=reason,
         capability_id=capability_id,
-        locate_plan=_locate_plan_for(capability_id, ctx),
+        locate_plan=_locate_plan_for(capability_id, ctx, steps_limit=locate_steps_limit),
         target=target,
         dismissible=dismissible,
     )
@@ -275,18 +351,124 @@ def _course_needs_atlas_binding(data: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _eval_materials_none(session, uid: str) -> list[tuple[NextStep, str]]:
-    count = session.execute(
-        sa_text("SELECT count(*) FROM documents WHERE uploaded_by = CAST(:uid AS uuid)"),
+#: 教員がコース構築で使える教材（= 教材一覧に出る教材）の可視性条件。
+#: ``api/routes/admin.py::list_materials`` の WHERE と同じ意味論を SQL 断片として持つ
+#: （core は api.services を import しない。グループ所属は SQL 内で group_members に当てる）:
+#:   - 本人所有（uploaded_by）
+#:   - visibility='public'
+#:   - visibility='group' かつ本人がその group に所属
+#:   - object_group_permissions（object_type='document', viewer/editor）のグループに所属
+#: ``list_materials`` の「共有コースの sources 経由」の開示は、コース構築の素材選択で
+#: 教材そのものを選べる根拠ではない（コースへのアクセス = sources の閲覧）ため含めない。
+_USABLE_MATERIAL_SQL = """
+    d.filename IS NOT NULL
+    AND (
+        d.uploaded_by = CAST(:uid AS uuid)
+        OR COALESCE(d.visibility, 'private') = 'public'
+        OR (
+            COALESCE(d.visibility, 'private') = 'group'
+            AND d.group_id IS NOT NULL
+            AND EXISTS (
+                SELECT 1 FROM group_members gm
+                WHERE gm.group_id = d.group_id AND gm.user_id = CAST(:uid AS uuid)
+            )
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM object_group_permissions dgp
+            JOIN group_members gm2 ON gm2.group_id = dgp.group_id
+            WHERE dgp.object_type = 'document'
+              AND dgp.object_id = d.id::text
+              AND dgp.permission IN ('viewer', 'editor')
+              AND gm2.user_id = CAST(:uid AS uuid)
+        )
+    )
+"""
+
+
+def _material_availability(session, uid: str) -> tuple[bool, bool]:
+    """(本人所有の教材があるか, 本人がコース構築で使える教材があるか) を返す。
+
+    「使える」は所有を含む（所有している教材は使える教材でもある）。1 文の SQL で両方を読む。
+    """
+    row = session.execute(
+        sa_text(f"""
+            SELECT
+                EXISTS (
+                    SELECT 1 FROM documents WHERE uploaded_by = CAST(:uid AS uuid)
+                ) AS owns_any,
+                EXISTS (
+                    SELECT 1 FROM documents d WHERE {_USABLE_MATERIAL_SQL}
+                ) AS usable_any
+        """),
         {"uid": uid},
-    ).scalar() or 0
-    if count > 0:
+    ).mappings().fetchone()
+    if not row:
+        return (False, False)
+    owns_any = bool(row["owns_any"])
+    usable_any = bool(row["usable_any"]) or owns_any
+    return (owns_any, usable_any)
+
+
+def _eval_materials_none(session, uid: str) -> list[tuple[NextStep, str]]:
+    """本人がコース構築で使える教材が1件も無い（所有も公開・共有も無い）。
+
+    IK-0363: 以前は所有だけを数えていたため、公開・共有教材でコースを作れる教員にも
+    「登録されている教材がまだありません」と案内していた。判定の対象集合を「使える教材」
+    （教材一覧と同じ可視性）に広げる。所有ゼロ・利用可能ありは
+    ``materials.shared_available`` が案内する。
+    """
+    _owns_any, usable_any = _material_availability(session, uid)
+    if usable_any:
         return []
     step = _make_step(
         rule_id=RULE_MATERIALS_NONE,
         target_id="global",
         title="教材をアップロードする",
         reason="登録されている教材がまだありません。",
+        target={},
+    )
+    return [(step, "")]
+
+
+
+def _owns_any_course(session, uid: str) -> bool:
+    """本人が所有するコースが 1 件以上あるか（無ければ False。読めなければ False = 案内を消さない側に倒さない）。"""
+    try:
+        row = session.execute(
+            sa_text("SELECT EXISTS (SELECT 1 FROM learning_courses WHERE user_id = CAST(:uid AS uuid)) AS owns_course"),
+            {"uid": uid},
+        ).mappings().fetchone()
+    except Exception:  # noqa: BLE001
+        return False
+    if not row:
+        return False
+    try:
+        return bool(row.get("owns_course", False))
+    except AttributeError:
+        return False
+
+
+def _eval_materials_shared_available(session, uid: str) -> list[tuple[NextStep, str]]:
+    """本人所有の教材は無いが、公開・共有された教材からコースを作れる（IK-0363）。
+
+    - 点灯: 所有ゼロ かつ 使える教材（公開・グループ共有・教材の直接共有）が1件以上。
+    - 消滅: 本人が教材を登録するか、使える教材が無くなれば導出されなくなる（G1）。
+    - 事実文に件数を書かない（G6）。
+    """
+    owns_any, usable_any = _material_availability(session, uid)
+    if owns_any or not usable_any:
+        return []
+    if _owns_any_course(session, uid):
+        # 共有教材から既にコースを作っている教員には出さない（第 5 周: 公開まで終えた教員の一番上に残り続けた）
+        return []
+    step = _make_step(
+        rule_id=RULE_MATERIALS_SHARED_AVAILABLE,
+        target_id="global",
+        title="共有されている教材からコースを作成する",
+        reason=(
+            "あなたが登録した教材はまだありませんが、共有されている教材からコースを作れます。"
+        ),
         target={},
     )
     return [(step, "")]
@@ -516,7 +698,7 @@ def _eval_course_atlas_binding_stale(session, uid: str) -> list[tuple[NextStep, 
             target_id=cid,
             title=f"コース『{title}』の学習マップ対応を確認する",
             reason=(
-                f"コース『{title}』のトピック対応 {stale_count} 件が、"
+                f"コース『{title}』のトピック対応の一部が、"
                 "現在の地図に存在しない概念を指しています。"
             ),
             target={"course_id": cid},
@@ -576,6 +758,7 @@ def _eval_figure_unreviewed_modes(session, uid: str) -> list[tuple[NextStep, str
             -- documents.id とそのまま突き合わせる（文字列化しない）。
             JOIN document_figures f ON f.document_id = d.id
             WHERE d.uploaded_by = CAST(:uid AS uuid)
+              AND f.status = 'extracted'
               AND f.mode_review_status = 'pending'
               AND f.suggested_mode <> 'unknown'
             GROUP BY d.id, d.source_path, d.title, d.created_at
@@ -595,12 +778,213 @@ def _eval_figure_unreviewed_modes(session, uid: str) -> list[tuple[NextStep, str
             rule_id=RULE_FIGURE_UNREVIEWED_MODES,
             target_id=doc_id,
             title=f"教材『{title}』の図・画像の分類を確認する",
-            reason=f"教材『{title}』に AI が分類した図・画像が {count} 件あり、まだ確認されていません。",
+            reason=f"教材『{title}』に、AI が分類してまだ確認されていない図・画像があります。",
             target={"material_id": doc_id},
             ctx={"material_id": material_row_id},
         )
         out.append((step, _iso(row["created_at"])))
     return out
+
+
+#: 成果物 run（採用 run）の解決。``persistence.resolve_artifact_runs`` の "adopted"
+#: ポリシと同じ式を SQL 断片として持つ（core/admin_assistant は persistence を import
+#: しない。ポリシの意味は P0-8 の1語彙「adopted」で、latest は使わない）。
+_ADOPTED_RUN_SQL = """
+    SELECT d.id AS document_id, d.source_path, d.title, d.created_at,
+           COALESCE(
+               d.active_analysis_run_id,
+               (SELECT r2.id FROM document_analysis_runs r2
+                 WHERE r2.document_id = d.id AND r2.status = 'completed'
+                 ORDER BY r2.completed_at DESC NULLS LAST, r2.created_at DESC, r2.id DESC
+                 LIMIT 1)
+           ) AS run_id
+    FROM documents d
+    WHERE d.uploaded_by = CAST(:uid AS uuid)
+"""
+
+#: 事実文に並べる完全性の理由の上限（件数は書かない — 名前だけを列挙する, G6）。
+_COMPLETENESS_MAX_REASONS_IN_REASON = 2
+
+
+def _eval_material_explanations_skipped(session, uid: str) -> list[tuple[NextStep, str]]:
+    """要素の二層説明が、日次上限に達したため 1 件も生成されていない教材（2026-09-19）。
+
+    - 点灯: 採用 run の ``stage_outputs.contextual_explanation.skipped_by_limit`` が真で、
+      かつその教材に生きた要素の説明（``kind='contextual'`` / 議論のきっかけを除く /
+      ``candidate`` または ``approved``）が1件も無い。
+    - 消滅: 説明が1件でも生成されれば導出されなくなる（G1: 完了フラグを持たない）。
+    - 事実文に件数・残回数を書かない（G6 / 原則4）。上限の意味論は変えない — **見えるようにする**。
+    """
+    rows = session.execute(
+        sa_text(f"""
+            WITH adopted AS ({_ADOPTED_RUN_SQL})
+            SELECT a.document_id::text AS id, a.source_path, a.title, a.created_at
+            FROM adopted a
+            JOIN document_analysis_runs r ON r.id = a.run_id
+            WHERE (r.stage_outputs -> 'contextual_explanation' ->> 'skipped_by_limit') = 'true'
+              AND NOT EXISTS (
+                  SELECT 1 FROM element_explanations e
+                  WHERE e.document_id = a.document_id
+                    AND e.kind = :kind AND e.role IS NULL
+                    AND e.status IN (:candidate, :approved)
+              )
+            ORDER BY a.created_at ASC
+        """),
+        {
+            "uid": uid,
+            "kind": element_explanations_store.KIND_CONTEXTUAL,
+            "candidate": element_explanations_store.STATUS_CANDIDATE,
+            "approved": element_explanations_store.STATUS_APPROVED,
+        },
+    ).mappings().fetchall()
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        doc_id = row["id"]
+        title = row["title"] or doc_id
+        material_row_id = row["source_path"] or doc_id
+        step = _make_step(
+            rule_id=RULE_MATERIAL_EXPLANATIONS_SKIPPED,
+            target_id=doc_id,
+            title=f"教材『{title}』の要素の説明を確認する",
+            reason=(
+                f"教材『{title}』は解析が完了していますが、要素の説明は当日の実行上限に達したため"
+                "生成されていません。"
+            ),
+            target={"material_id": doc_id},
+            ctx={"material_id": material_row_id},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
+def _eval_material_ingest_incomplete(session, uid: str) -> list[tuple[NextStep, str]]:
+    """取り込みの完全性チェックが「完全ではない」と記録している教材（2026-09-19）。
+
+    - 点灯: 採用 run の ``document_completeness`` artifact が ``complete=false``。
+    - 消滅: 取り込み直しで ``complete=true`` になれば導出されなくなる
+      （G1: 完了フラグを持たない）。見送りは既存の dismiss（G5）で保持される。
+    - 理由は ``core/coverage_facts.py`` の事実文をそのまま並べる（数字を書かない, G6）。
+    """
+    rows = session.execute(
+        sa_text(f"""
+            WITH adopted AS ({_ADOPTED_RUN_SQL})
+            SELECT a.document_id::text AS id, a.source_path, a.title, a.created_at,
+                   art.payload AS payload
+            FROM adopted a
+            JOIN document_analysis_artifacts art
+              ON art.run_id = a.run_id AND art.stage = :stage
+            WHERE (art.payload ->> 'complete') = 'false'
+            ORDER BY a.created_at ASC
+        """),
+        {"uid": uid, "stage": _COMPLETENESS_STAGE},
+    ).mappings().fetchall()
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        payload = row["payload"] if isinstance(row["payload"], dict) else {}
+        reasons = payload.get("review_reasons")
+        reasons = [str(r) for r in reasons] if isinstance(reasons, (list, tuple)) else []
+        facts: list[str] = []
+        for reason in reasons:
+            fact = coverage_facts.completeness_fact(reason)
+            if fact not in facts:
+                facts.append(fact)
+        doc_id = row["id"]
+        title = row["title"] or doc_id
+        material_row_id = row["source_path"] or doc_id
+        detail = "".join(facts[:_COMPLETENESS_MAX_REASONS_IN_REASON])
+        if len(facts) > _COMPLETENESS_MAX_REASONS_IN_REASON:
+            detail += "ほかにも記録があります。"
+        step = _make_step(
+            rule_id=RULE_MATERIAL_INGEST_INCOMPLETE,
+            target_id=doc_id,
+            title=f"教材『{title}』の取り込み状況を確認する",
+            reason=(
+                f"教材『{title}』は、原本のすべてを取り込めたとは確認できていません。{detail}"
+            ),
+            target={"material_id": doc_id},
+            ctx={"material_id": material_row_id},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
+def _eval_material_analysis_llm_failed(session, uid: str) -> list[tuple[NextStep, str]]:
+    """解析中に AI の応答が得られなかった記録が残る教材（IK-0362 / IK-0715）。
+
+    - 点灯: 採用 run の ``stage_outputs.llm_failures`` が存在する（orchestrator が完了時に
+      U層 ``llm_usage_events`` の失敗行から書く）、または ``core.analysis_degradation`` の
+      投影が ``degraded``（agent が打ち切り・提供元障害で決定論の代替／空の成果に落ちた。
+      打ち切りは U層に失敗行を残さないので ``llm_failures`` だけでは点かなかった — IK-0715）。
+      判定は投影の 1 関数が持ち、教材行のチップ・グラフレビューのバナーと同じ根拠で点く。
+    - 消滅: 再実行して縮退の無い run が採用されれば導出されなくなる（G1）。
+    - 事実文に件数・提供元の生メッセージ・URL を書かない（G6 / 原則4）。利用上限・残高の
+      制限による失敗は ``rate_limited`` を見て言い分ける。
+    """
+    rows = session.execute(
+        sa_text(f"""
+            WITH adopted AS ({_ADOPTED_RUN_SQL})
+            SELECT a.document_id::text AS id, a.source_path, a.title, a.created_at,
+                   r.stage_outputs -> 'llm_failures' AS llm_failures,
+                   r.stage_outputs -> 'analysis_degradation' AS analysis_degradation,
+                   r.stage_outputs -> 'component_assembly' AS component_assembly
+            FROM adopted a
+            JOIN document_analysis_runs r ON r.id = a.run_id
+            WHERE jsonb_typeof(r.stage_outputs -> 'llm_failures') = 'object'
+               OR (r.stage_outputs -> 'analysis_degradation' ->> 'status') = 'degraded'
+               OR (r.stage_outputs -> 'component_assembly' ->> 'fallback') = 'true'
+            ORDER BY a.created_at ASC
+        """),
+        {"uid": uid},
+    ).mappings().fetchall()
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        llm_failures = row.get("llm_failures")
+        doc_id = row["id"]
+        title = row["title"] or doc_id
+        material_row_id = row["source_path"] or doc_id
+        if llm_failures is not None:
+            block = llm_failures if isinstance(llm_failures, dict) else {}
+            rate_limited = block.get("rate_limited") is True
+            if rate_limited:
+                cause = "AI 提供元の利用上限または残高の制限により呼び出しが受け付けられず"
+            else:
+                cause = "AI 提供元の呼び出しが失敗し"
+            reason = (
+                f"教材『{title}』の解析中に{cause}、成果の一部が欠けている可能性があります。"
+                "再実行で補えます。"
+            )
+        else:
+            stage_outputs: dict = {}
+            for key in ("analysis_degradation", "component_assembly"):
+                value = row.get(key)
+                if isinstance(value, dict):
+                    stage_outputs[key] = value
+            view = analysis_degradation.public_view(
+                analysis_degradation.summarize_run_degradation(stage_outputs)
+            )
+            if view["status"] != analysis_degradation.STATUS_DEGRADED:
+                continue
+            reason = (
+                f"教材『{title}』の解析は完了していますが、一部は AI の応答が得られず"
+                f"決定論の代替で作られています。{view['facts'][0] if view['facts'] else ''}"
+                "再実行で補えます。"
+            )
+        step = _make_step(
+            rule_id=RULE_MATERIAL_ANALYSIS_LLM_FAILED,
+            target_id=doc_id,
+            title=f"教材『{title}』の解析をやり直す",
+            reason=reason,
+            target={"material_id": doc_id},
+            ctx={"material_id": material_row_id},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
+def _ref_to_document_id(session, refs) -> dict[str, str]:
+    """教材 ref（documents.id / source_path）→ documents.id。正本は core/document_refs。"""
+    resolved = _document_refs.resolve_document_refs(session, sorted(refs))
+    return {ref: entry["document_id"] for ref, entry in resolved.items() if entry.get("document_id")}
 
 
 def _eval_course_discuss_opening_unreviewed(session, uid: str) -> list[tuple[NextStep, str]]:
@@ -640,20 +1024,8 @@ def _eval_course_discuss_opening_unreviewed(session, uid: str) -> list[tuple[Nex
         return []
 
     # sources[].material_id は documents.id / documents.source_path のどちらでも
-    # 参照されうる（_resolve_document の慣例）ため両方で突合する。
-    doc_rows = session.execute(
-        sa_text(
-            "SELECT id::text AS id, source_path FROM documents "
-            "WHERE id::text = ANY(:refs) OR source_path = ANY(:refs)"
-        ),
-        {"refs": sorted(refs)},
-    ).mappings().fetchall()
-    ref_to_doc: dict[str, str] = {}
-    for row in doc_rows:
-        doc_id = str(row["id"])
-        ref_to_doc[doc_id] = doc_id
-        if row["source_path"]:
-            ref_to_doc[str(row["source_path"])] = doc_id
+    # 参照されうる。両形の突き合わせは core/document_refs に委ねる（IK-0550）。
+    ref_to_doc = _ref_to_document_id(session, refs)
     if not ref_to_doc:
         return []
 
@@ -706,7 +1078,7 @@ def _eval_course_discuss_opening_unreviewed(session, uid: str) -> list[tuple[Nex
             target_id=cid,
             title=f"コース『{title}』の議論のきっかけを確認する",
             reason=(
-                f"コース『{title}』のソース論文に、未確認の議論のきっかけが {pending} 件あります。"
+                f"コース『{title}』のソース論文に、未確認の議論のきっかけがあります。"
             ),
             target={"course_id": cid, "material_id": ref_to_doc.get(anchor_ref, "")},
             # locate の行アンカーは教材一覧の data-material-id（= source_path）で
@@ -797,21 +1169,8 @@ def _eval_course_prerequisite_uncovered(session, uid: str) -> list[tuple[NextSte
     terms = terms[:_PREREQ_MAX_TERMS_PER_EVALUATION]
 
     # sources[].material_id は documents.id / documents.source_path のどちらでも
-    # 参照されうる（_resolve_document の慣例）ため両方で突合する。
-    ref_to_doc: dict[str, str] = {}
-    if refs:
-        doc_rows = session.execute(
-            sa_text(
-                "SELECT id::text AS id, source_path FROM documents "
-                "WHERE id::text = ANY(:refs) OR source_path = ANY(:refs)"
-            ),
-            {"refs": sorted(refs)},
-        ).mappings().fetchall()
-        for row in doc_rows:
-            doc_id = str(row["id"])
-            ref_to_doc[doc_id] = doc_id
-            if row["source_path"]:
-                ref_to_doc[str(row["source_path"])] = doc_id
+    # 参照されうる。両形の突き合わせは core/document_refs に委ねる（IK-0550）。
+    ref_to_doc = _ref_to_document_id(session, refs) if refs else {}
 
     doc_ids = sorted(set(ref_to_doc.values()))[:_PREREQ_MAX_DOCUMENTS_PER_EVALUATION]
 
@@ -1134,8 +1493,62 @@ def _eval_manual_todo_unresolved(session, uid: str) -> list[tuple[NextStep, str]
     return [(step, "")]
 
 
+#: 付録の付け直しの道案内で名前を挙げるトピックの上限（件数は書かない — G6）。
+_APPENDIX_STALE_MAX_NAMES = 3
+
+
+def _eval_course_topic_appendix_stale(session, uid: str) -> list[tuple[NextStep, str]]:
+    """所有コースに、保存済みの付録がいまの根拠から作る形と違うトピックがある。
+
+    判定は決定論・非LLM（G2）。生成時と同じ付録の組み立て（``core.lecture_studio_state``
+    経由の純関数）を保存済みの本文に当て、違うトピックだけを数える。教員が付録を消した
+    トピックは対象にしない。付け直して保存すれば項目は自動で消える（G1）。
+    """
+    from core.lecture_studio_state import topic_appendix_state
+
+    rows = session.execute(
+        sa_text(
+            "SELECT id, title, data, created_at FROM learning_courses "
+            "WHERE user_id = CAST(:uid AS uuid) ORDER BY created_at ASC"
+        ),
+        {"uid": uid},
+    ).mappings().fetchall()
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        data = row["data"] if isinstance(row["data"], dict) else {}
+        stale_titles: list[str] = []
+        for topic in iter_all_topics(data):
+            if not isinstance(topic, dict):
+                continue
+            if topic_appendix_state(topic):
+                stale_titles.append(str(topic.get("title") or "").strip() or "無題のトピック")
+        if not stale_titles:
+            continue
+        cid = row["id"]
+        title = row["title"] or cid
+        names = "・".join(f"『{t}』" for t in stale_titles[:_APPENDIX_STALE_MAX_NAMES])
+        if len(stale_titles) > _APPENDIX_STALE_MAX_NAMES:
+            names += " など"
+        step = _make_step(
+            rule_id=RULE_COURSE_TOPIC_APPENDIX_STALE,
+            target_id=str(cid),
+            title=f"コース『{title}』のトピックの付録を付け直す",
+            reason=(
+                f"コース『{title}』のトピック {names} の末尾の付録は、いまの根拠から作る形と違います。"
+                "原稿スタジオでトピックを開き [付録を付け直す] で作り直してから保存できます"
+                "（保存すると、そのトピックの生成済み音声は作り直しになります）。"
+            ),
+            target={"course_id": str(cid)},
+            ctx={"course_id": str(cid)},
+            locate_steps_limit=1,
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
 _RULE_EVALUATORS = {
     RULE_MATERIALS_NONE: _eval_materials_none,
+    RULE_MATERIALS_SHARED_AVAILABLE: _eval_materials_shared_available,
     RULE_MATERIAL_ANALYSIS_FAILED: _eval_material_analysis_failed,
     RULE_MATERIAL_NO_COURSE: _eval_material_no_course,
     RULE_COURSE_NOT_PUBLISHED: _eval_course_not_published,
@@ -1144,9 +1557,13 @@ _RULE_EVALUATORS = {
     RULE_COURSE_ATLAS_BINDING_STALE: _eval_course_atlas_binding_stale,
     RULE_COURSE_AUDIO_MISSING: _eval_course_audio_missing,
     RULE_FIGURE_UNREVIEWED_MODES: _eval_figure_unreviewed_modes,
+    RULE_MATERIAL_EXPLANATIONS_SKIPPED: _eval_material_explanations_skipped,
+    RULE_MATERIAL_INGEST_INCOMPLETE: _eval_material_ingest_incomplete,
+    RULE_MATERIAL_ANALYSIS_LLM_FAILED: _eval_material_analysis_llm_failed,
     RULE_COURSE_DISCUSS_OPENING_UNREVIEWED: _eval_course_discuss_opening_unreviewed,
     RULE_COURSE_PREREQUISITE_UNCOVERED: _eval_course_prerequisite_uncovered,
     RULE_COURSE_DELIVERED_UNREVIEWED: _eval_course_delivered_unreviewed,
+    RULE_COURSE_TOPIC_APPENDIX_STALE: _eval_course_topic_appendix_stale,
     RULE_MANUAL_HELP_GAPS_PENDING: _eval_manual_help_gaps_pending,
     RULE_ASSISTANT_KB_UNDOCUMENTED: _eval_assistant_kb_undocumented,
     RULE_MANUAL_TODO_UNRESOLVED: _eval_manual_todo_unresolved,

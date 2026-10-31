@@ -1,0 +1,14 @@
+id: st-08-m1-rprocess-lecture
+archetype: students/lecture_listener
+display_name: 中西 あかり
+language: ja
+background: |
+  修士 1 年。学部は原子核物理。修士では中性子星合体での r 過程元素合成の理論計算（核反応ネットワーク）に取り組む。
+  文章を読み込むより、講義を聴いて全体の流れをつかんでから細部を読むほうが性に合っている。
+  核の側は分かるが、合体そのものや重力波による観測の話になると言葉が追えなくなる。
+knowledge:
+  knows: [元素合成, r過程]
+  vague: [キロノバ, 状態方程式, 中性子星, 白色矮星]
+  unknown: [チャープ質量, 重力波, 計量]
+misconceptions: [gw_are_em_waves, neutron_star_simple_ball]
+goals: [report_course_assignment]

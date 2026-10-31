@@ -1,0 +1,72 @@
+scenario: s-db-ledger-lines
+domain: astrophysics
+# 第 25 周・面 B (e)。コース 1bad7d9f の Cepheus B 論文の DCF 法のトピック（教員の (b) と同じ論文）。
+params:
+  goal_text: 教材の主張がどこまで確かめられているのかを、出典と台帳の一行で確かめること
+  topic_hint: DCF法による磁場強度の推定（Cepheus B の磁場トポロジーと星形成の論文）
+  topic_hint_terms: [DCF法, 磁場強度]
+  # 第 25 周 第 8 周 H48: ⚓ のあるトピックを id で固定する材料（空なら topic_hint_terms の題名で選ぶ）
+  topic_id: ""
+  seed_questions:
+    - この磁場強度の推定は、どの条件のもとで確かめられているのですか？
+    - この推定が成り立たなくなるのは、どんな観測が出たときですか？
+  map_question: 分野の地図のこの項目に「記帳」と書いてあるのは、何を確かめた記録のことですか？どこで詳しく見られますか？
+  # 第 25 周第 5 周 H36: 地図の問いの前に選ぶ、札（検証の記録の文）の付いた概念の名前
+  map_node_hint: 暗黒エネルギー
+per_archetype:
+  skeptic:
+    seed_questions:
+      - DCF 法の等分配の仮定は、この論文の中で検証されていますか？
+      - 検証されていないなら、それはどこにそう書いてありますか？
+  confident_theorist:
+    seed_questions:
+      - 等分配の仮定が崩れたとき、推定はどちらに偏りますか？
+      - その偏りを確かめた記録はありますか？
+  non_native:
+    goal_text: checking how far the claims in the material have been verified
+    seed_questions:
+      - Under what conditions has this magnetic field estimate been verified?
+      - What observation would make this estimate fail?
+    map_question: On the field map, what does the note on this item mean, and where can I see the details?
+# 第 25 周 第 4 周（doubt H20）: (e) のトピックは教材に ⚓ の部品チップがあるものにする（Cepheus の t0〜t4 には
+# ⚓ が無く、部品の説明ポップアップの一行 IK-0906 が 2 周続けて不達だった）。過去の run で ⚓ を確認したのは
+# PINN の「二重ネットワークとTOV方程式の課し方」（t11・comp_001 / comp_003）と「主結果：R1.4と音速の軟化」（t13・comp_011）
+personas:
+  st-07-m1-grb-voice:
+    topic_hint: 二重ネットワークとTOV方程式の課し方（PINN による中性子星の状態方程式の論文）
+    topic_hint_terms: [二重ネットワーク, TOV方程式]
+    seed_questions:
+      - TOV 方程式をネットワークに課すやり方は、どの条件のもとで確かめられているのですか？
+      - この課し方が成り立たなくなるのは、どんな観測が出たときですか？
+  st-10-d3-21cm-receiver:
+    topic_hint: 主結果：R1.4と音速の軟化（PINN による中性子星の状態方程式の論文）
+    topic_hint_terms: [R1.4, 音速の軟化]
+    seed_questions:
+      - この半径の推定は、どの観測との比較で確かめられているのですか？
+      - 音速の軟化が見えなくなるのは、どんな観測が出たときですか？
+  st-05-night-solarwind:
+    # 第 8 周（judge_doubt_r7 §4・IK-1051 の是正後）: 固定コースは 6be229e1（1bad7d9f は学習者の API で ⚓ が 0 個 — r8_prereqs.md
+    # 「周の前の実測」）。旧 freeze の ⚓ が読み時に後継の部品へつながるか。6be229e1 に t13 が無ければ t11 に差し替える。開けば ⚓ を開いてから「この部品」と問い、部品チップから記帳ありの一行を読む（H37 の 8 周目）。開かなければ
+    # 「記帳なし」の見え方の再確認として run の記録に書く（固定コースの再凍結は指揮者の判断）。トピックは第 6 周と同じ t13
+    # 第 6 周（judge_doubt_r5 §4 の st-08 は atlas の地図の場面も担うため、ledger-lines 未担当の st-05 に替えた）。記帳は学生の
+    # コースの版の部品に（H37・pinn_comp011_scope）: 固定コース 1bad7d9f の t13 で学習者の API が解決する部品の台帳の一行
+    # （記帳あり）と、教材外の出典カードの文（IK-0971 の残り・H38）。地図の問いの前にノードを選ぶ（H36）
+    # 第 9 周（judge_doubt_r8 §4・H48）: t13 は 6be229e1 でも 1bad7d9f でも ⚓（部品）を持たない（2026-10-31 の読み取り: 6be229e1 で
+    # ⚓ があるのは t5・t7・t9・t11・t12・t14、1bad7d9f は t1・t5・t6・t8・t11・t13）。トピックは題名ではなく ⚓ の有無で選び、
+    # 両コースで ⚓ のある PINN の t11 を topic_id で固定する（周の前に r9_prereqs の doubt_ledger_anchor_topic で確かめる）
+    topic_id: t1  # 第 11 周: 後継の決まる ⚓ のあるトピック（1bad7d9f の t1 / t5 / t6 / t8）— 記帳ありの部品の一行（H37 の 11 周目）。t11 は第 10 周で閉じた
+    topic_hint: 二重ネットワークとTOV方程式の課し方（PINN による中性子星の状態方程式の論文）
+    topic_hint_terms: [二重ネットワーク, TOV方程式]
+    seed_questions:
+      - この部品の主張は、どの条件のもとで確かめられているのですか？
+      - これが成り立たなくなるのは、どんな観測が出たときですか？
+  st-08-m1-rprocess-lecture:
+    # 第 7 周（judge_doubt_r6 §4・面 B 初出）: ⚓ の名前と開く部品が一致するトピックの部品に台帳スコープを記帳した状態
+    # （ledger_lines_unmoved_component — IK-1021 を避ける・H37 の 7 周目）で、記帳ありの部品の一行と教材外の出典カードの文。
+    # topic_hint / topic_hint_terms は既定で t11 を指す。指揮者は周の前に ledger_lines_unmoved_component の
+    # 「s-db-ledger-lines の学生の topic_hint へ写す」の行（トピックの題名）でここを差し替える
+    topic_hint: 二重ネットワークとTOV方程式の課し方（PINN による中性子星の状態方程式の論文）
+    topic_hint_terms: [二重ネットワーク, TOV方程式]
+    seed_questions:
+      - この部品の主張は、どの条件のもとで確かめられているのですか？
+      - これが成り立たなくなるのは、どんな観測が出たときですか？

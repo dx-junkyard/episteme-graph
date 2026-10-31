@@ -12,11 +12,13 @@ from .schema import (
     GRANULARITIES,
     QUALIFICATION_STATUSES,
     REVIEWABILITY,
+    CAUSAL_REWRITE_GUIDANCE,
     CartridgeContext,
     QualificationLLMInput,
+    leading_connector_list_text,
 )
 
-_SYSTEM_CONTENT = """\
+_SYSTEM_CONTENT_TEMPLATE = """\
 You are evaluating whether a span from a scientific paper should become a reusable claim,
 and—when the span mixes several statements—rewriting it into atomic claims.
 
@@ -38,6 +40,9 @@ Rules:
 - Prior-work statements may be preserved, but must not be paper_core.
 - If uncertain, prefer deferred over an overconfident rejected/accepted decision.
 - Prefer cartridge-normalized terminology when available.
+- If Adjacent Equations are given, an introduction ("… can be written as") or continuation
+  ("is the Hessian …", "The last factor …") refers to them: judge adoption with that equation
+  as the referent, but never turn the equation itself into a claim.
 
 Atomic rewrite (the formal responsibility of this step):
 - If the span contains multiple propositions (long sentence, several sentences,
@@ -46,7 +51,8 @@ Atomic rewrite (the formal responsibility of this step):
 - Each atomic claim MUST be a complete standalone sentence:
   * supply the omitted subject (do NOT start with "Shows ...", "And yields ...").
   * resolve pronouns / "this result" into the concrete referent.
-  * never begin with a connector (and / but / therefore / then / thus / hence / moreover ...).
+  * never begin with a connector ({connectors}).
+  * {causal_rewrite}
 - Preserve the full meaning of the original span across the atomic claims; drop nothing.
 - For each atomic claim set atomicity="atomic" and status="accepted".
 - If you CANNOT confidently atomize part of the span, keep that piece as an
@@ -58,6 +64,11 @@ Atomic rewrite (the formal responsibility of this step):
   copy the supporting source phrase into evidence_quote.
 - Return ONLY valid JSON matching the provided schema.
 """
+
+_SYSTEM_CONTENT = _SYSTEM_CONTENT_TEMPLATE.format(
+    connectors=leading_connector_list_text(),
+    causal_rewrite=CAUSAL_REWRITE_GUIDANCE,
+)
 
 _OUTPUT_SCHEMA = {
     "span_id": "string",
@@ -197,6 +208,21 @@ class ClaimQualificationPromptFactory:
         if llm_input.source_block_text:
             parts.append("\n## Source Block")
             parts.append(llm_input.source_block_text)
+        if llm_input.adjacent_equations:
+            parts.append(
+                "\n## Adjacent Equations (display equations right before/after the Source Block "
+                "in the same subsection; the span may introduce or continue them)"
+            )
+            for eq in llm_input.adjacent_equations:
+                head = f"- {eq.get('position')}: block_id={eq.get('block_id')}"
+                if eq.get("label"):
+                    head += f" label={eq.get('label')}"
+                if eq.get("printed_number"):
+                    head += f" printed_number=({eq.get('printed_number')})"
+                parts.append(head)
+                parts.append(
+                    "  " + (eq.get("latex") or "[EQUATION_TEXT_FROM_PDF_OMITTED_AS_UNTRUSTED]")
+                )
 
         if llm_input.normalized_terms:
             parts.append("\n## Cartridge Normalized Terms")
@@ -235,7 +261,9 @@ class ClaimQualificationPromptFactory:
             "- prior_work may be accepted as prior_work tier, but must not be paper_core\n"
             "- figure_narration / section_meta / meta_discourse should usually be rejected as meta\n"
             "- too_broad / multi-proposition spans MUST set should_split=true and fill atomic_claims\n"
-            "- every atomic claim must be a standalone sentence (full subject, no leading connector)\n"
+            "- every atomic claim must be a standalone sentence (full subject, no leading connector: "
+            + leading_connector_list_text()
+            + ")\n"
             "- atomic claims together must preserve the full meaning of the span (drop nothing)\n"
             "- if a piece cannot be atomized set its atomicity=non_atomic, status=review_required\n"
             "- too_narrow spans should normally be deferred/rejected or suggest merge\n"

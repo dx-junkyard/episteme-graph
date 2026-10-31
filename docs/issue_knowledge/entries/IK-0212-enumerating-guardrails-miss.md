@@ -55,6 +55,10 @@ resolution:
     - backend/tests/test_admin_help_inspect_ui_static.py
     - frontend/public/js/personal-map.js
     - docs/development_checklist.md §4
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 実行時の DOM 契約（静的検査の範囲外。実行系テストの追加は残課題として記録）
 related: [IK-0211, IK-0203]
 view_of: []
 pattern: guardrail-does-not-cover-new-path

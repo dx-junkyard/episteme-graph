@@ -1,0 +1,56 @@
+id: s-sim-voice-result
+population: students
+runner:
+- api
+# 第 22 周 (k)。音声中心の学生が実行し、音声経路（casual・screen_mode voice）で結果の意味を聞く。
+# SA層 simulation の事実文は casual では載せない設計なので、答えが「結果は手元に無い」と正直に縮退するか・断定しないかを見る。
+goal: '{{goal_text}} のために、{{topic_hint}} の理論のまとまりを動かし、移動の合間に声で結果の意味を聞く'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_hint
+- input_hints
+- questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+- do: learning.simlab.generate
+  note: コードの下書きを AI に作らせる（この経路で 1 回だけ）
+- do: learning.simlab.adopt
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    wiring: none
+  note: 入力の記号は io_contract.inputs に合わせて置き換える
+- repeat:
+    until: persona_decides_to_stop or steps > 2
+    max: 2
+    do: learning.chat.ask
+    with:
+      message: '{{questions | next}}'
+      simulation_run_id: latest
+    note: 声で結果の意味を聞く（音声のペルソナでは runner が intent_mode=casual + screen_mode=voice で送る）
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-levels
+- manual: student/02-student.md#simulation-lab-not-verification
+watch_for:
+- 声の答えが、手元に無い実行結果を見たかのように数値や段階を断定しない（無いなら無いと言う）
+- 声の答えが結果の言葉の意味（未測定・一致・分離）を一般論として短く説明でき、画面のどこを見ればよいかを言う
+- 声の答えに LaTeX や記号の書式がそのまま出ない

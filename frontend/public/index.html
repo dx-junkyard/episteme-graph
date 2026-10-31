@@ -11,8 +11,8 @@
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
   <!-- ?v=: レイアウト（1画面に収める）系の修正は CSS が古いままだと効かないので、
        atlas.css と同じくバージョンクエリでキャッシュを切る。 -->
-  <link rel="stylesheet" href="/css/styles.css?v=knowledge-landscape-20260804">
-  <link rel="stylesheet" href="/css/atlas.css?v=knowledge-landscape-20260804">
+  <link rel="stylesheet" href="/css/styles.css?v=round25-doubt-w3-20261023">
+  <link rel="stylesheet" href="/css/atlas.css?v=ik0989-20261027-atlas5">
 </head>
 <body>
   <div class="app">
@@ -28,24 +28,26 @@
       <!-- 2026-09-05: 「◯日連続学習中」を撤去（理解サイクル UC4: 連続日数・督促・
            未消化バッジを作らない）。セッション間に何も置かないこと自体が設計。 -->
       <div class="topbar-r">
-        <button id="groups-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="グループ管理">グループ <span id="groups-badge" style="display:none;background:var(--color-text-danger,#e53935);color:#fff;border-radius:8px;padding:1px 6px;margin-left:2px;font-size:10px">0</span></button>
-        <span style="opacity:.3">|</span>
-        <button id="atlas-btn" data-ui-anchor="topbar.atlas" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="分野の地図を開く">地図</button>
-        <span style="opacity:.3">|</span>
-        <button id="my-map-btn" data-ui-anchor="topbar.my-map" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="わたしの地図を開く">わたしの地図</button>
-        <span style="opacity:.3">|</span>
+        <button id="groups-btn" class="topbar-btn" title="グループ管理">グループ <span id="groups-badge" style="display:none;background:var(--color-text-danger,#e53935);color:#fff;border-radius:8px;padding:1px 6px;margin-left:2px;font-size:10px">0</span></button>
+        <span class="topbar-sep" aria-hidden="true">|</span>
+        <button id="atlas-btn" data-ui-anchor="topbar.atlas" class="topbar-btn" title="分野の地図を開く">地図</button>
+        <span class="topbar-sep" aria-hidden="true">|</span>
+        <button id="my-map-btn" data-ui-anchor="topbar.my-map" class="topbar-btn" title="わたしの地図を開く">わたしの地図</button>
+        <span class="topbar-sep" aria-hidden="true">|</span>
         <!-- 主権台帳 v1（trace_registry_sovereignty_ledger_design.md §3.4）:
              本人の全痕跡の一覧と持ち出し。パネル本体は my-records.js が遅延生成する。 -->
-        <button id="my-records-btn" data-ui-anchor="topbar.my-records" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="わたしの記録を開く">わたしの記録</button>
-        <span style="opacity:.3">|</span>
+        <button id="my-records-btn" data-ui-anchor="topbar.my-records" class="topbar-btn" title="わたしの記録を開く">わたしの記録</button>
+        <span class="topbar-sep" aria-hidden="true">|</span>
         <!-- 学習UI再編 Phase 1（§4）: composer から画面全体トグルの定位置＝トップバーへ移設。
              ID・typed action 配線（support_action="usage_help"）は不変。
              Phase 2: 押下は「使い方インスペクト・モード」の ON/OFF トグルになった
              （旧・押下即送信の typed action 送信は composer/音声側の発話経路へ移設。§4）。 -->
-        <button id="help-usage-btn" class="help-usage-btn" data-ui-anchor="topbar.inspect" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="この画面の使い方インスペクト・モードを ON/OFF（ON中は部品にカーソルを合わせると説明が出ます）">❓ 使い方</button>
-        <span style="opacity:.3">|</span>
-        <span id="username"></span>
-        <button id="logout-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit">ログアウト</button>
+        <button id="help-usage-btn" class="help-usage-btn topbar-btn" data-ui-anchor="topbar.inspect" title="この画面の使い方インスペクト・モードを ON/OFF（ON中は部品にカーソルを合わせると説明が出ます）">❓ 使い方</button>
+        <span class="topbar-sep" aria-hidden="true">|</span>
+        <span id="username" class="topbar-username"></span>
+        <!-- 人に見せる名前の登録（IK-1007）。ログインに使うユーザー名はほかの人に見せない。 -->
+        <button id="profile-name-btn" class="topbar-btn" data-profile-name-btn data-ui-anchor="topbar.profile-name" title="ほかの人に見せる名前を登録します">👤 名前</button>
+        <button id="logout-btn" class="topbar-btn">ログアウト</button>
       </div>
     </div>
 
@@ -65,6 +67,12 @@
 
     <!-- Main Chat Area -->
     <div class="mn">
+      <!-- 受講登録が成立した事実文（IK-0405）。本文はサーバの enroll 応答の notice を
+           textContent で素通しする（フロントに文言を焼き込まない）。次のコース切替で消える。
+           事実の表示であって操作要素ではないため data-ui-anchor は付けない。
+           第 23 波・第 2 波 V1: トップバーの中では右側の項目と幅を取り合って切れたため、
+           バーの外（主カラムの先頭の 1 行・flex: 0 0 auto）へ移した。 -->
+      <div class="course-enroll-notice" id="course-enroll-notice" role="status" hidden></div>
       <!-- 帰還の扉（再入口インレイ, docs/features/return_door_design.md §2.1）:
            本人の書き置き・持ち越しの問い・最後に確定した引っかかりの逐語のみを表示する
            （RD1: AI要約ゼロ）。empty なら描画しない・経過日数は出さない（RD2/RD5）。
@@ -88,6 +96,13 @@
                状態は localStorage eg_margin_marks:<courseId>（精読モードと同型の許容例外）。
                既定は表示 ON。アイコンは「段差でつまずく人」（app.js の createStumbleIcon と同図形）。 -->
           <button type="button" class="margin-marks-toggle" id="margin-marks-toggle" aria-pressed="true" title="あなたが確定した引っかかり・問いの印を、教材の余白に表示します（もう一度押すと非表示）" hidden><svg class="stumble-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M0.8 13.9H8.6v-2.4h6.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M8.9 4.9 5.6 8.5M8.2 5.7 11.4 7.4M5.6 8.5 2.8 13.6M5.6 8.5 7.4 10.4 6.7 13.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="10.1" cy="3.2" r="1.9" fill="currentColor"/></svg>引っかかり</button>
+          <!-- 理解サイクル Phase 1（精読モード, docs/features/understanding_cycle_design.md
+               §4.3/§5.3）: 既定 off。ON にすると開幕のたびに「予想してから開く」の欄が
+               開いた状態で出る（OFF でも小さなリンクから入れる）。第 23 波・第 2 波 V3':
+               「順番に学ぶ」側でも見つかるよう、議論の帯ではなく教材区画の見出し行
+               （読む / 講義 / 引っかかり と同じ部品）に置く。状態の正本は localStorage
+               `eg_precision_reading:<courseId>` のまま。コース・トピック選択時のみ表示。 -->
+          <button type="button" class="material-header-toggle cycle-precision-toggle" id="cycle-precision-toggle" aria-pressed="false" title="ONにすると、論文と議論の開幕で予想を書く欄が開いた状態で表示されます" hidden>精読モード</button>
           <button type="button" class="lecture-fullscreen-btn" id="lecture-fullscreen-btn" title="スライドを全画面表示" hidden>⛶ 全画面</button>
         </div>
         <div class="material-body" id="material-body"></div>
@@ -106,6 +121,10 @@
             <button type="button" class="quick-anchor-btn" data-quick-anchor="return_later">あとで戻る</button>
             <button type="button" class="quick-anchor-btn" data-quick-anchor="connects">何かとつながりそう</button>
           </div>
+          <!-- 動かして確かめる（検証シミュレーション v1.1, docs/features/simulation_bridge_design.md §14.4）:
+               本人が押したときだけ教材区画の中にパネルを開く（自動では開かない・督促しない）。
+               コース・トピック選択時のみ表示（simulation-lab.js が hidden を切り替える）。 -->
+          <button type="button" class="simulation-lab-btn" id="simulation-lab-btn" data-ui-anchor="material.simulation-lab" aria-pressed="false" title="この論文の理論モジュールをコードにして、予想を書いてから動かしてみます" hidden>🧪 動かして確かめる</button>
           <button class="next-topic-btn" id="next-topic-btn" data-ui-anchor="material.next-topic" style="display:none" title="次のトピックへ進む">確認して次へ</button>
         </div>
         <!-- 記号の「直前の定義」（概念レジストリ P3-5,
@@ -115,6 +134,8 @@
         <div class="symbol-lookup-popover" id="symbol-lookup-popover" data-ui-anchor="material.symbol-lookup" hidden></div>
         <!-- 再構成ループ (R層): 「再構成に挑戦」導線。自動では開かない（本人が開く） -->
         <div class="reconstruction-region" id="reconstruction-region" hidden></div>
+        <!-- 動かして確かめる（§14.4）: 開いている間だけ教材本文の場所を使う（1画面レイアウトを保つ）。 -->
+        <div class="simulation-lab-region" id="simulation-lab-region" hidden></div>
       </div>
       <!-- 分割ハンドル: 教材区画と下段（読み上げ行＋ホワイトボード）の比率をドラッグで調整 -->
       <div class="split-handle" id="split-handle" title="ドラッグして教材の表示比率を調整"><span class="split-grip"></span></div>
@@ -161,10 +182,6 @@
           <button type="button" class="discuss-scope-opt" data-discuss-scope="course_sources">このコースのソース論文</button>
           <button type="button" class="discuss-scope-opt" data-discuss-scope="all_visible">閲覧できる周辺資料まで</button>
         </div>
-        <!-- 理解サイクル Phase 1（精読モード, docs/features/understanding_cycle_design.md
-             §4.3/§5.3）: 既定 off。ON でも開幕は自動で変わらず、「予想してから開く」の
-             既定表示だけが変わる（OFF でも小さなリンクから入れる）。 -->
-        <button type="button" class="lx-filter cycle-precision-toggle" id="cycle-precision-toggle" aria-pressed="false" title="ONにすると、論文を開く前に予想を書く画面が既定で表示されます">精読モード</button>
         <!-- 音声会話の非対応を近傍に事実文で示す（設計 §6.4: 音声版はこのモードの
              非スコープ。app.js の updateVoiceAvailability が hidden を切り替える）。 -->
         <span class="discuss-voice-note" id="discuss-voice-note" hidden>音声会話は「順番に学ぶ」モードで利用できます。</span>
@@ -176,6 +193,9 @@
            入力欄の直上に1行。文言は GET /api/disclosure が正本（provider はサーバが
            実行時の設定から差し込む）。同意ボタン・閉じるボタンを持たない常設の段落で、
            取得できないときは何も描かない（disclosure-note.js の fail-soft）。 -->
+      <!-- 第 23 波 F3 / 第 2 波 V3': 精読トグルを押した直後の事実文（状態と次に変わること）。
+           帯の中に入れると範囲チップと「議論を終える」が折れるため、入力欄の上の 1 行に置く。 -->
+      <div class="cycle-precision-fact" id="cycle-precision-fact" role="status" aria-live="polite" hidden></div>
       <div class="disclosure-note-slot" data-disclosure-note="learning_chat"></div>
       <div class="ia">
         <input type="text" id="chat-input" data-ui-anchor="composer.input" placeholder="質問や考えを入力…（Enterで送信）">
@@ -221,38 +241,42 @@
     <div class="discuss-landing-overlay" id="discuss-landing-region" hidden></div>
   </div>
 
-  <script src="/js/element-vocab.js?v=element-vocab-20260801-2"></script>
+  <script src="/js/element-vocab.js?v=wave14-20260929-1"></script>
   <!-- ↑ 要素種別の表示名の正本（admin_ux_issues_2026-08-01.md §3.3 Phase 0）。app.js より前に読み込む。 -->
-  <script src="/js/element-card.js?v=element-card-20260801-1"></script>
+  <script src="/js/element-card.js?v=share-r2-20261023-1"></script>
   <!-- ↑ 統一パーツカード（§3.2）の編集不可バリアント。element-vocab.js の後・app.js より前。 -->
   <!-- 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2）:
        入力欄のそばに1行だけ置く。文言はサーバ（GET /api/disclosure）が正本で、
        取得できないときは何も描かない。app.js が init() で注入するため先に読み込む。 -->
   <script src="/js/disclosure-note.js?v=disclosure-20260910-1"></script>
-  <script src="/js/app.js"></script>
-  <script src="/js/atlas-fixture.js"></script>
+  <script src="/js/app.js?v=round25-share-20261023-3-db3-atlas3-studio3-atlas4-doubt4-share4-studio4-studio5-chat5-doubt6-studio6-share6-doubt7-studio7-studio8-share8-doubt8-studio9-doubt10-studio10-chat10-chat11"></script>
+  <script src="/js/profile-name.js?v=round25-name5"></script>
+  <script src="/js/atlas-fixture.js?v=ik1018-20261027-atlas6"></script>
   <script src="/js/atlas-data.js"></script>
-  <script src="/js/atlas-overlay.js?v=field-atlas-20260713-1"></script>
-  <script src="/js/atlas-panel.js?v=field-atlas-20260713-1"></script>
-  <script src="/js/atlas-report.js"></script>
+  <script src="/js/atlas-overlay.js?v=ik0989-20261027-atlas5-atlas7-atlas9"></script>
+  <script src="/js/atlas-panel.js?v=field-atlas-20260713-1-atlas7-atlas9-atlas10-atlas11"></script>
+  <script src="/js/atlas-report.js?v=atlas4-20261025"></script>
   <script src="/js/atlas-minimap.js"></script>
   <script src="/js/atlas-cues.js"></script>
   <script src="/js/personal-map.js"></script>
-  <script src="/js/personal-map-home.js"></script>
-  <script src="/js/my-records.js"></script>
+  <script src="/js/personal-map-home.js?v=round25-doubt-w8-20261031-chat10"></script>
+  <script src="/js/my-records.js?v=round23-polish-20261009"></script>
   <!-- 知識ランドスケープ（docs/features/knowledge_landscape_design.md §10.1）:
        地図オーバーレイの「論文の位置」レイヤー + 出典タブへのデータ供給。
        atlas-overlay.js のフックから呼ばれるので personal-map.js の後に読み込む。 -->
-  <script src="/js/landscape-layer.js?v=knowledge-landscape-20260804"></script>
+  <script src="/js/landscape-layer.js?v=ik0942-atlas-r3-20261023-atlas4"></script>
   <!-- 推定の糸（docs/features/atlas_relation_edges_design.md §6）:
        地図オーバーレイ L2 の「推定の糸」レイヤー（確定前の関係を点線で重ねる・既定オフ）。
        atlas-overlay.js のフックから呼ばれるので landscape-layer.js の後に読み込む。 -->
-  <script src="/js/atlas-threads-layer.js?v=relation-threads-20260829"></script>
-  <script src="/js/reconstruction.js"></script>
-  <script src="/js/discuss.js"></script>
+  <script src="/js/atlas-threads-layer.js?v=ik0989-20261027-atlas5"></script>
+  <script src="/js/reconstruction.js?v=ik0410-20260928"></script>
+  <script src="/js/discuss.js?v=round25-doubt-20261028-doubt7"></script>
+  <!-- 動かして確かめる（検証シミュレーション v1.1, simulation_bridge_design.md §14.4）:
+       app.js の initApp（DOMContentLoaded）が SimulationLab.init を呼ぶため、同期読み込みで足りる。 -->
+  <script src="/js/simulation-lab.js?v=simulation-lab-20261004-round22"></script>
   <!-- コーパス回遊層（docs/features/corpus_roaming_design.md §4.2）:
        コース非依存の「論文の海」（コーパス地図・論文リスト・地図の端・コース無し論文議論）。
        開幕画面は discuss.js を document 文脈で再利用するため、その後に読み込む。 -->
-  <script src="/js/corpus-sea.js?v=corpus-roaming-20260827"></script>
+  <script src="/js/corpus-sea.js?v=ik0847-ik0941-round25-20261023-atlas7"></script>
 </body>
 </html>

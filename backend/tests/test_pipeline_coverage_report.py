@@ -358,16 +358,52 @@ def test_figure_table_semantics_reports_caption_coverage(stage_payloads):
     assert report["population"] == 1
 
 
-def test_equation_semantics_reports_equation_block_coverage(stage_payloads):
+def test_equation_semantics_reports_equation_candidate_coverage(stage_payloads):
     payload = stage_payloads.get("equation_semantics")
     assert payload is not None
     report = payload["coverage"]
-    assert report["unit"] == "equation_blocks"
+    # 母集合は display の式ブロック + inline 数式候補（片方だけ数えると、枠を
+    # 分け合った論文で inline の切り捨てが truncated:0 に見える）。
+    assert report["unit"] == "equation_candidates"
     assert report["population"] == 1
     # モック agent は候補を返さないので、見ていない式ブロックが正直に残る。
     assert report["processed"] == 0
     assert report["truncated"] == 1
-    assert report["reasons"] == ["max_equations"]
+    # 理由コードは実際に効いた弁だけ。既定は上限なしなので、モック agent が候補を
+    # 返さなかっただけの取りこぼしに ``max_equations`` を付けない（2026-09-19 レビュー）。
+    assert report["reasons"] == []
+    assert report["details"]["sort_key"] in {"order", "page_order"}
+
+
+def test_paper_skeleton_reports_section_coverage(stage_payloads):
+    payload = stage_payloads.get("paper_skeleton")
+    assert payload is not None
+    report = payload["coverage"]
+    assert report["unit"] == "sections"
+    # フィクスチャの level-1 節は 1 件。既定は上限なしなので取りこぼし 0。
+    assert report["population"] == 1
+    assert report["processed"] == 1
+    assert report["truncated"] == 0
+
+
+def test_claim_qualification_keeps_its_existing_keys(stage_payloads):
+    """coverage は agent の summary_stats 由来（モック agent は出さない）。
+
+    母集合が導けないときに報告をでっち上げないこと自体が契約なので、ここでは
+    既存キーの後方互換だけを固定する（実データでの coverage は
+    `test_stage_input_coverage.py`）。
+    """
+    payload = stage_payloads.get("claim_qualification")
+    assert payload is not None
+    assert "qualified_count" in payload
+
+
+def test_thesis_reconstruction_reports_context_coverage(stage_payloads):
+    payload = stage_payloads.get("thesis_reconstruction")
+    assert payload is not None
+    report = payload["coverage"]
+    assert report["unit"] == "context_items"
+    assert "total" in payload and "processed" in payload
 
 
 def test_contextual_explanation_reports_element_coverage(stage_payloads):
@@ -450,9 +486,13 @@ def test_apparatus_semantics_omits_coverage_when_population_is_unknown():
     assert "coverage" not in captured["apparatus_semantics"]
 
 
-def test_resumed_stage_does_not_get_a_freshly_computed_coverage():
-    """resume で artifact を再利用したステージは今回の母集合を捏造しない
-    （前回 payload をそのまま報告する = 既存の resume 挙動と同じ）。"""
+def test_resumed_stage_reports_coverage_derived_from_the_artifact():
+    """resume で artifact を再利用したステージも取りこぼしを報告する。
+
+    ただし「今回の入力から数え直した母集合」ではなく、**前回 run の artifact から
+    導ける事実**だけを載せ、``details.source = "artifact"`` で出所を明示する
+    （resume した run だけ coverage が丸ごと消えると、切断の有無が読めなくなる）。
+    """
     from types import SimpleNamespace
 
     from core.document_pipeline import orchestrator
@@ -462,7 +502,11 @@ def test_resumed_stage_does_not_get_a_freshly_computed_coverage():
         document_id="doc-1",
         material_id="mat-1",
         cartridge_id=None,
-        structure=SimpleNamespace(blocks=[_Block("eq1", 1, 0, "x=1", block_type="equation_block")]),
+        structure=SimpleNamespace(
+            blocks=[_Block("eq1", 1, 0, "x=1", block_type="equation_block")],
+            sections=[],
+            document_id="doc-1",
+        ),
         skeleton=None,
         roles=None,
         equations=None,
@@ -483,4 +527,16 @@ def test_resumed_stage_does_not_get_a_freshly_computed_coverage():
 
     orchestrator._stage_equation_semantics(ctx)
 
-    assert "coverage" not in captured["equation_semantics"]
+    report = captured["equation_semantics"]["coverage"]
+    assert report["details"]["source"] == "artifact"
+    assert report["population"] == 1
+    assert report["processed"] == 0
+
+
+def test_resume_marker_is_only_added_on_resume(stage_payloads):
+    """通常実行の coverage には前回 run 由来の印を付けない。"""
+    for stage, payload in stage_payloads.items():
+        report = payload.get("coverage")
+        if not report:
+            continue
+        assert (report.get("details") or {}).get("source") != "artifact", stage

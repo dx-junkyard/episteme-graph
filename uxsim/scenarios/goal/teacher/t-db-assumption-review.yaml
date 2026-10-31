@@ -1,0 +1,75 @@
+id: t-db-assumption-review
+population: teachers
+runner: [api]
+preconditions:
+  - text: このペルソナは自分のコース（前提の地図タブのコース選択に並ぶもの）を持っている
+    check: owns_course
+  - 砂場のコースの教材は TeX 経路の解析済みの 4 本（snapshot corpus-astro-tex-r23）。前提候補はコーパス監査（非LLM）で出し、足りなければ前提マイニング（非同期 LLM）を押す
+seed_scenarios: [t-v5-register-own-course]
+goal: "{{goal_text}} のために、前提の地図で暗黙の前提の候補を読み、根拠のあるものは確定し、根拠の弱いものは却下する"
+params_required: [goal_text, course_hint, confirm_pick, confirm_reason, dismiss_pick]
+steps:
+  - do: auth.login
+  - do: admin.doubt.tab_open
+    with: {course_hint: "{{course_hint}}"}
+    note: 前提の地図タブを開き、自分のコースを選ぶ
+  - do: admin.doubt.audit_run
+    note: コーパス監査を実行して、依存されているのに主張も引用も無いノードを前提候補にする
+  - choose:
+      - do: admin.doubt.mining_run
+        note: 候補が無い・少ないときは前提マイニングも押す（非同期 — 押した直後は変わらないことがある）
+    optional: true
+  - do: admin.doubt.refresh
+  # 第 25 周 第 5 周: 候補が 0 件でも止めない。手動で足した前提（POST /api/admin/doubt/assumptions）は候補を経ずに
+  # 確定で生まれる（本人が書いた前提は本人の確定 — P1）ので、候補が無ければ確定の手を飛ばし、確定済みの前提の台帳へ進む
+  - choose:
+      - do: admin.doubt.assumption_confirm
+        with: {pick: "{{confirm_pick}}", reason: "{{confirm_reason}}"}
+        note: 出所の逐語が付いている候補を読んで、暗黙の前提として引き受けられるものを確定する（候補が無ければ飛ばす）
+    optional: true
+  - choose:
+      - do: admin.doubt.assumption_dismiss
+        with: {pick: "{{dismiss_pick}}"}
+        note: 根拠の弱い候補を却下する
+    optional: true
+  - do: admin.doubt.assumption_filter
+    with: {status: 却下済み}
+    note: 却下した候補が消えずに残っているかを見る
+  - do: admin.doubt.load_recompute
+    note: 確定した前提が散布図に点として載るよう、依存の広がりを計算し直す
+  # 第 25 周 第 7 周 H44: 確定済みの前提のカードの［台帳を開く］（第 6 波で runner にある）を場面に入れる。散布図・合意リストに
+  # 点が無くても、カードから前提の台帳へ移れる（前提 → 台帳 → スコープは 7 周未到達だった）
+  # 第 25 周 第 9 波（doubt H52）: 散布図の下の「依存の広がりを計算できない前提」区画のボタンを先頭に（第 9 周は台帳を開く行為が
+  # この区画の行を開けず、前提 → 台帳 → スコープが 9 周目も未到達だった）
+  - choose:
+      - do: admin.doubt.unplotted_open
+        note: 散布図の下の「依存の広がりを計算できない前提」で、確定した前提のボタンを押して台帳を開く（区画の中の番号か前提文で選ぶ）
+      - do: admin.doubt.assumption_open_ledger
+        note: 前提候補の一覧（確定済み）のカードで［台帳を開く］を押し、前提の台帳を開く
+      - do: admin.doubt.ledger_open
+        note: 散布図の点か未検証合意リストの行から、確定した前提の台帳を開く
+  # 第 25 周 第 5 周（judge_doubt_r4 §4・r5_prereqs H32）: 確定した前提の台帳にスコープを記帳するまでを 1 場面で通す
+  # （前提の確定 → スコープの記帳が 4 周続けて未到達だった。scope-promote を別に回さずに済ませる）
+  - choose:
+      - do: admin.doubt.scope_record
+        with: {condition: "{{premise_scope_condition}}", evidence_quote: "{{premise_scope_quote}}", reason: "{{premise_scope_reason}}"}
+        note: 確定した前提の台帳に、どの条件で確かめられているかのスコープを記帳する（地図・合意リストにどう載るかを後で読む）
+    optional: true
+  - choose:
+      - do: admin.doubt.refresh
+        note: 記帳の後、前提の地図と未検証合意リストにこの前提がどう載るかを読み直す（IK-0970）
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: teacher/18-admin-doubt-atlas.md#audit-run
+  - manual: teacher/18-admin-doubt-atlas.md#assumption-confirm
+  - manual: teacher/18-admin-doubt-atlas.md#assumption-dismiss
+  - manual: teacher/18-admin-doubt-atlas.md#plot-detail
+watch_for:
+  - 確定した前提の台帳は「未検証」で検証スコープが空のまま生まれ、空欄は警告色ではなく「検証スコープの記帳なし」という事実として読める
+  - 確定の理由は本人の言葉で書くまで送れない（既定文のプリフィルが無い）
+  - 却下した候補は「却下済み（保持）」に残り、行として消えない
+  - 散布図に評価語・推奨マーク・生の数値が描かれない（軸の名前と段階だけ）
+  - コースを作らずに解析した教材から組んだコースでも、コーパス監査が教材を読み（教材が 0 件扱いにならない）、
+    前提候補が出る（IK-0852 の是正後）。監査・マイニングを押した結果（実行した／受け付けた／材料が無い／該当なし）が
+    事実文で読める（IK-0853 の是正後）

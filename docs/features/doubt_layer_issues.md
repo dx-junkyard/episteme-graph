@@ -570,3 +570,45 @@ D2-2 → D3-5(マイニングB)
 5. **Field Atlas との命名衝突**: 構想の「前提の地図（Assumption Atlas）」と実装済みの
    「分野の地図（Field Atlas）」は別物。コード・API・UI 文言のすべてで `doubt-` / `assumption-`
    プレフィックスを使い分ける（D2-3 に明記）。
+
+---
+
+## 追補（2026-10-23）: コース範囲の正本の切り替え（IK-0852）
+
+**状態: 実装済み**（第 25 周 面 B 第 1 周の是正。migration なし）。
+
+**何を変えたか.** D層のコース単位の読み出し（前提の地図・前提一覧・未検証合意リスト（教員・学生）・
+観測系の主張・コーパス監査・前提マイニング・負荷の再計算・スコープ／反証条件候補の再生成・反実仮想・
+discuss 開幕の「この論文が確かめていないこと」・ゼミ前ブリーフ）は、範囲を**成果の行に焼かれた
+`course_id` 列との一致**で決めていた。その列は解析 run に course_id が渡ったときだけ値を持つので、
+教材を解析してからコースを作る現行の標準経路では常に空で、どのコースからも成果が届かなかった。
+
+**現行の規約.**
+
+- 範囲の正本は **コースの教材（sources）から求めた document 集合**。route 層が
+  `services.list_course_source_document_ids(course_data)` で解決する（`routes/doubt.py::_course_scope_document_ids`
+  = 編集権限ゲート `_require_editable_course_or_404` + 教材の document 集合。`/courses/{course_id}/...` の
+  admin ルートはすべてここを先頭で通す — IK-0857、AST ガードレール）。学生側は受講ゲート済みのコースから同じ関数で求める。
+- core の関数（`dependency.build_dependency_graph` / `observation_targets.observation_claim_targets` /
+  `support_paths.build_support_context`・`compute_support_lines` / `open_assumptions.compile_open_assumptions` /
+  `load_calculator.recompute_load_scores`・`load_percentiles` / `assumption_mining.corpus_audit.run_corpus_audit`・
+  `detector.detect_gap_clusters` / `counterfactual.compute_counterfactual` / `discuss.opening._compile_open_assumptions`）は
+  `document_ids` を**必須キーワード引数**で受け、`document_id::text = ANY(:doc_ids)` で絞る。**空集合は SQL を出さずに空**
+  （fail-closed）。WHERE 断片の正本は `core/doubt/scope.py::document_scope_clause`。
+- 行の `course_id` 列（台帳・前提・反実仮想セッション）は「どのコースの画面で記帳したか」の**出所**の意味に退き、
+  範囲の絞り込みには使わない（前提一覧だけは出所 course_id の一致も和集合に含める — そのコースで記帳した前提を落とさない）。
+  学習者シグナル（naive signal）は受講コースの痕跡なので course_id のまま。
+- 反実仮想は document_id があればその 1 件（閲覧権限を確かめる）、無ければ course_id のコースの教材。どちらも無ければ空
+  （全トグルが warnings に載る）。ゼミ前ブリーフは「この論文」1 件で読み、可否は台帳行の有無で決める（IK-0531 の個別対応を
+  この正本へ寄せた）。教員トリアージ（`core/teacher_triage.py`）の負荷段階の基準も台帳行の document 集合に変えた。
+- 帰結: 同じ論文を教材に持つ別のコースにも、同じ前提・台帳の記帳が見える（台帳は対象単位で、元々コースを跨いで共有）。
+  コースごとに別の台帳を持つ設計にはしていない（必要なら別の層として設計し直す — 後戻りしにくい構造として記録）。
+
+**併せて入れたもの.** IK-0853（空・未実行の理由をサーバの事実文 `core/doubt/scope.py` で返し画面が描く）/ IK-0854（反実仮想の
+warnings を名前で・トグル中の前提を名前で・共有範囲を `label_vocab.SHARED_SCOPE_LABELS` で）/ IK-0855（部品の台帳対象の解決を
+`core/doubt/ledger_targets.py::resolve_component_ledger_target` の 1 関数に — UUID の部品は主張・式の交差でグラフの段へ写す）/
+IK-0856（学習者の入口「このコースの教材で、検証の記録がない前提を見る」+ 「この分野」と検証の不在が同じ文に並ぶことの近接検査）/
+IK-0857（コース単位ルートのゲート + 学生の台帳 GET は教材 ∩ 対象の document）/ IK-0858（ゼミ前ブリーフの一点吊りを切断点で束ねる）。
+
+**ガードレール.** `backend/tests/test_doubt_course_scope_round25.py`（必須引数・空集合で SQL なし・course_id 列の絞りを戻さない・
+コース単位ルートのゲート（AST）・部品の台帳対象・切断点の束ね・事実文に数字なし）。

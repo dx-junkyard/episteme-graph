@@ -69,11 +69,23 @@ html.learn-page > body {
   background: var(--color-background-primary);
 }
 
+/* 第 23 波・第 2 波 V1: 幅 1280 でも右側の項目を折り返さない。左（ロゴ・コース選択）が
+   先に縮み、右は nowrap の 1 行のまま。アカウント名は長ければ省略表示。 */
 .topbar-l {
   display: flex;
   align-items: center;
   gap: 10px;
   font-size: 14px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.topbar-l .logo {
+  white-space: nowrap;
+}
+.topbar-l .course-select {
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
 .topbar-l .logo {
@@ -95,7 +107,35 @@ html.learn-page > body {
   color: var(--color-text-secondary);
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  margin-left: 12px;
+}
+.topbar-r .topbar-btn {
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  padding: 2px 4px;
+  white-space: nowrap;
+}
+.topbar-r .topbar-btn:hover {
+  color: var(--color-text-primary);
+}
+.topbar-r .topbar-sep {
+  opacity: 0.3;
+}
+.topbar-r .topbar-username {
+  display: inline-block;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
 }
 
 /* ── Sidebar ────────────────────────────────────────────────────── */
@@ -313,13 +353,26 @@ html.learn-page > body {
   overflow-y: auto;
   padding: 12px 14px;
 }
+/* 第 23 波・第 2 波 V2: フッタ（軽量アンカーの帯・次へ）は本文の流れの外の固定行。
+   flex: 0 0 auto で縮まず、縮むのは本文（.material-body）だけ — 帯が本文や
+   discuss 開幕の「最初の一手」に重なって隠すことがない。背景を持たせ、本文の
+   スクロール領域とは境界線で分ける。帯が長いときはこの行の中で折り返す。 */
+.material-region .material-header {
+  flex: 0 0 auto;
+}
 .material-region .material-foot {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px 10px;
   padding: 8px 12px;
-  border-top: 0.5px solid var(--color-border-tertiary);
+  border-top: 1px solid var(--color-border);
+  box-shadow: 0 -6px 8px -8px rgba(0, 0, 0, 0.18);
+  background: var(--color-background-secondary, #fafbfd);
 }
 
 /* ── 帰還の扉（再入口インレイ, docs/features/return_door_design.md §2.1）──────
@@ -409,7 +462,8 @@ html.learn-page > body {
 .margin-mark-dot:focus {
   opacity: 0.95;
 }
-.margin-marks-toggle {
+.margin-marks-toggle,
+.material-header-toggle {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
@@ -424,7 +478,8 @@ html.learn-page > body {
   font-family: inherit;
   white-space: nowrap;
 }
-.margin-marks-toggle[aria-pressed="true"] {
+.margin-marks-toggle[aria-pressed="true"],
+.material-header-toggle[aria-pressed="true"] {
   color: var(--color-text-info);
   border-color: var(--color-text-info);
 }
@@ -1361,6 +1416,23 @@ html.learn-page > body {
   border-color: var(--color-text-info);
 }
 
+/* 受講登録が成立した事実文（IK-0405）。警告色にしない・通常の二次テキスト。
+   第 23 波・第 2 波 V1: トップバーの外、主カラムの先頭の 1 行（縮まない薄い行）。 */
+.course-enroll-notice {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  background: var(--color-background-secondary, #fafbfd);
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: 8px;
+  padding: 6px 12px;
+  margin-bottom: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#course-enroll-notice[hidden] { display: none !important; }
+
 /* ── No-course empty state ─────────────────────────────────────── */
 .no-course-message {
   display: flex;
@@ -1443,6 +1515,17 @@ html.learn-page > body {
   color: var(--color-text-tertiary, #8899bb);
   text-transform: uppercase;
   margin-bottom: 10px;
+}
+
+/* IK-0375: 教材が準備中・未生成で PDF 由来チャンクを出しているときの事実文1行。
+   警告色・枠の強調にしない（事実の段落であって注意喚起ではない）。
+   #material-body の中に置くので、画面全体の縦幅は増やさない（1画面レイアウトの規律）。 */
+.material-notice {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary, #aab4cc);
+  margin: 0 0 8px;
 }
 
 .material-chunk {
@@ -1711,6 +1794,20 @@ html.learn-page > body {
   margin-top: 8px;
   font-size: 11px;
   color: var(--color-text-tertiary);
+}
+
+/* 自己確認の応答に付くサーバの事実文（IK-0399。警告色にしない）。 */
+.check-selfcheck-notice {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+/* 帰属の確定・外したときのサーバの事実文（IK-0411）。 */
+.lx-digest-notice {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
 }
 
 /* 解答例・解説は畳んで出す（一等地は並置の事実文だけ）。 */
@@ -6286,6 +6383,20 @@ button.ls-course-evidence-head {
   color: var(--color-text-tertiary);
 }
 .stance-fact { color: var(--color-text-tertiary); }
+
+/* ── 逐語引用と出典本文の一致検査（IK-0545, docs/backend/rag-chat.md）──
+   一致を確認できなかった出典に添える事実の 1 行。事実であって警告ではないので、
+   警告色・強調色・バッジは使わない（.stance-line と同じ控えめなトーン）。数値は描かない。 */
+.citation-check-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+.citation-check-fact { color: var(--color-text-tertiary); }
 .stance-correct-btn { font-size: 12px; padding: 3px 10px; }
 
 /* ===== 右パネル再設計（episteme-right-panel-mock 由来。lx- 接頭辞で既存と分離）===== */
@@ -6580,6 +6691,19 @@ button.ls-course-evidence-head {
   font-size: 10px;
   font-weight: 700;
 }
+.evidence-chip-popover-equation-note,
+.ls-material-formula-reconstructed-mark {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.ls-material-formula-reconstructed-mark {
+  border: 1px solid var(--color-border, #d2d2d7);
+  border-radius: 999px;
+  padding: 0 6px;
+  vertical-align: middle;
+}
 .evidence-chip-popover-footer {
   margin-top: 10px;
   padding-top: 8px;
@@ -6656,6 +6780,8 @@ button.ls-course-evidence-head {
 
 /* Phase 3: 1-hop 近傍グラフ（「グラフで見る」・「旅」） */
 .evidence-chip-context-graph-toggle { margin: 8px 0; }
+/* IK-0570: 中心命題・支持構造への次の一歩（事実文・警告色にしない） */
+.evidence-chip-context-exit { margin: 6px 0; font-size: 12px; color: var(--color-text-secondary, #6e6e73); }
 .evidence-chip-context-graph-btn {
   appearance: none;
   border: 1px solid var(--color-border-secondary, #d2d2d7);
@@ -8096,11 +8222,52 @@ body.admin-inspect-mode textarea:disabled {
   flex: 0 0 auto;
 }
 .pm-home-node-label { font-size: 13px; color: var(--color-text-primary, #1d1d1f); }
+/* わたしの記録（第 23 波 F4）: 差し替え・取り消し・見送りの行と AI の候補は、有効な行と
+   同じ見た目にしない。打ち消し線は使わず（本文は本人の言葉のまま読める）、行を淡くして
+   状態チップを中立色にする — 状態はチップの語（サーバの status_label）で読む。 */
+.my-records-item-superseded,
+.my-records-item-dismissed,
+.my-records-item-candidate {
+  background: var(--color-background-secondary, #f5f5f7);
+}
+.my-records-item-superseded .my-records-item-text,
+.my-records-item-dismissed .my-records-item-text,
+.my-records-item-candidate .my-records-item-text {
+  color: var(--color-text-secondary, #6e6e73);
+}
+.my-records-item-superseded .my-records-status-chip,
+.my-records-item-dismissed .my-records-status-chip,
+.my-records-item-candidate .my-records-status-chip {
+  color: var(--color-text-secondary, #6e6e73);
+  background: var(--color-background-tertiary, #ececf0);
+}
 .pm-home-node-ctx {
   font-size: 11px;
   color: var(--color-text-tertiary, #aeaeb2);
   margin-top: 3px;
 }
+/* わたしの記録（第 23 波・第 2 波 V4'）: 行は 本文 → 日付・コース → 状態 の 3 段。
+   状態の段はチップと補足を 1 行に並べる（公表文は系統の見出しの下に 1 回だけ）。 */
+.my-records-item-text { line-height: 1.55; }
+.my-records-item-meta { margin-top: 4px; }
+.my-records-item-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 6px;
+}
+.my-records-item-state .pm-home-node-ctx { margin-top: 0; }
+.my-records-system { margin-bottom: 14px; }
+.my-records-system-note { margin: 2px 0 8px; }
+/* 外部 AI への送り先の事実文（V6）: 常設注記の直下に 1 回・警告色にしない。 */
+.my-records-disclosure {
+  padding: 6px 18px;
+  border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+}
+.my-records-disclosure .disclosure-note { flex: 0 0 auto; padding: 0; }
+.my-records-disclosure:empty { display: none; }
+.my-records-provenance { margin-top: 14px; }
 .pm-home-facts {
   margin: 6px 0 0;
   padding-left: 18px;
@@ -8224,6 +8391,9 @@ body.admin-inspect-mode textarea:disabled {
   padding: 4px;
 }
 .pm-home-nb-graph svg { display: block; width: 100%; height: auto; }
+/* IK-0932: 札の下の「記帳された条件」の 1 行（事実文 — 警告色にしない） */
+.pm-home-nb-scope-lines { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary, #555); }
+.pm-home-nb-scope-line { margin: 2px 0; }
 .pm-home-nb-lane-line { stroke: #f0f0f3; stroke-width: 1; }
 .pm-home-nb-lane-label { font-size: 9.5px; fill: #a1a1a6; }
 .pm-home-nb-link { fill: none; stroke: #cfcfd6; stroke-width: 1.3; }
@@ -9698,6 +9868,13 @@ body.admin-inspect-mode textarea:disabled {
   padding: 8px 10px;
   margin-bottom: 10px;
 }
+/* 応答の骨格（dialogue_response_shape_design.md RS3）: 末尾の問い返し 1 つを独立段落に。
+   本文と区別できる程度の控えめな区切り（強調色・バッジは使わない）。 */
+.closing-question {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--color-border-secondary);
+}
 .mirror-label {
   font-size: 11px;
   color: var(--color-text-tertiary);
@@ -10094,6 +10271,9 @@ body.admin-inspect-mode textarea:disabled {
   background: var(--color-background-secondary);
   border: 0.5px solid var(--color-border-tertiary);
 }
+/* 第 23 波・第 2 波 V3': 予想の欄の階層（宣言 → 問い → 補足 → 入力 → 送り先の事実文）。 */
+.cycle-predict-question { margin: 2px 0 4px; }
+.cycle-disclosure-slot .disclosure-note { flex: 0 0 auto; padding: 0 0 6px; }
 .cycle-textarea {
   width: 100%;
   min-height: 44px;
@@ -10214,6 +10394,16 @@ body.admin-inspect-mode textarea:disabled {
   box-sizing: border-box;
 }
 .cycle-precision-toggle { white-space: nowrap; }
+.material-header-toggle[hidden] { display: none; }
+/* 第 23 波 F3: トグル直後の事実文（状態と次に変わること）。第 2 波 V3': 入力欄の上の
+   1 行（下段の行なので縮まない — 1 画面レイアウトの規律）。 */
+.cycle-precision-fact {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  padding: 2px 2px 0;
+}
+.cycle-precision-fact[hidden] { display: none; }
 
 /* ── 軽量アンカー4ボタン（ANCHOR, §5.4）: 常設ストリップ + 選択ポップオーバー ── */
 .quick-anchor-strip {
@@ -10222,6 +10412,7 @@ body.admin-inspect-mode textarea:disabled {
   gap: 6px;
   flex-wrap: wrap;
   margin-right: auto;
+  min-width: 0;
 }
 .quick-anchor-strip[hidden] { display: none; }
 .quick-anchor-btn {
@@ -10812,6 +11003,39 @@ button.element-card-item:focus-visible .element-card-item-label {
 
 .element-card-item-label {
   color: var(--color-text-primary);
+}
+
+/* 主張の全文（ITEM.full_text、§11.3）。文として1行を占有させ、関係語・裏付けは
+   次の行へ回す（語順は「主張 → 関係語」）。 */
+.element-card-item-fulltext {
+  flex: 1 1 100%;
+  white-space: normal;
+}
+
+.element-card-item-fulltext .element-card-item-relation {
+  margin-left: 2px;
+}
+
+/* 「本文での言及」（focus.placement.mentions）。メンション文は逐語・切り詰めない。 */
+.element-card-mentions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.element-card-mention {
+  color: var(--color-text-primary);
+  font-weight: 400;
+  line-height: 1.6;
+}
+
+.element-card-mention-meta {
+  margin-left: 4px;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
 }
 
 .element-card-notes,
@@ -11835,6 +12059,19 @@ button.element-card-item:focus-visible .element-card-item-label {
   color: var(--color-text-info, #3730a3);
 }
 .graph-review-layer-count { opacity: 0.65; margin-left: 2px; }
+/* 理論モジュール層（theory_module_layer_design.md §8.1）。層ボタンは件数を持たない（TM6）。 */
+.graph-review-module-btn { margin-left: 6px; }
+/* キャンバス位置の事実文（式の導出が無い・取得中 など）。警告色にしない。 */
+.graph-review-canvas-fact {
+  padding: 24px 20px;
+  max-width: 560px;
+  color: var(--color-text-secondary, #64748b);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.graph-review-module-members { list-style: none; padding-left: 0; margin: 4px 0; }
+.graph-review-module-members li { margin: 3px 0; }
+.graph-review-module-member { text-align: left; cursor: pointer; }
 .graph-review-filter { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
 .graph-review-count { color: var(--color-text-secondary, #475569); }
 /* ノードをドラッグで動かせること・位置がこの端末に残ることの事実文（操作要素ではない） */
@@ -11956,6 +12193,18 @@ button.element-card-item:focus-visible .element-card-item-label {
   border-radius: 999px;
   padding: 0 7px;
   margin-bottom: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--color-text-tertiary, #6b7280);
+  white-space: nowrap;
+}
+/* 会話の最後に置く注記ラベル（未レビューの要素あり）。警告色にしない・件数を出さない。 */
+.graph-review-chat-notes {
+  display: inline-block;
+  border: 1px solid var(--color-border, #cbd5e1);
+  border-radius: 999px;
+  padding: 0 7px;
+  margin-top: 2px;
   font-size: 11px;
   line-height: 1.6;
   color: var(--color-text-tertiary, #6b7280);
@@ -12085,6 +12334,9 @@ button.element-card-item:focus-visible .element-card-item-label {
 .graph-review-paper-subtitle { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
 .graph-review-paper-strong { font-weight: 600; }
 .graph-review-paper-note { color: var(--color-text-secondary, #64748b); font-size: 12px; }
+.graph-review-paper-explanation-source { font-style: normal; }
+.graph-review-paper-item-explanation { margin-top: 4px; padding-left: 8px; border-left: 2px solid var(--color-border, #e2e8f0); font-size: 12.5px; color: var(--color-text-secondary, #64748b); }
+.graph-review-paper-explanation-lead { font-weight: 600; }
 /* 概念関係（DSL 層。P0-9）の述語表記 `A —[verb / PREDICATE]→ B` を主語より弱く出す。 */
 .graph-review-paper-rel { color: var(--color-text-tertiary, #6b7280); font-size: 11.5px; }
 .graph-review-paper-flow { font-size: 12px; }
@@ -12150,12 +12402,479 @@ button.element-card-item:focus-visible .element-card-item-label {
   flex: 0 0 auto;
   margin: 0;
   padding: 4px 2px 0;
-  color: var(--color-text-tertiary, #6b7280);
-  font-size: 11px;
-  line-height: 1.5;
+  /* 第 23 波・第 2 波 V6: 探す場所として読めるよう、三次色 11px → 二次色 12px
+     （警告色にはしない・大きさは本文より一段小さいまま）。 */
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 /* 学習画面の composer 直上の担体（1行のみ・区切り線は composer 側が持つ）。 */
 .disclosure-note-slot {
   flex: 0 0 auto;
+}
+
+/* IK-0376: リリース前の確認で一括確認の対象外になった論文の事実文（色で強調しない）。 */
+.release-review-skipped-note {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin: 0 0 8px;
+}
+
+.release-review-skipped-note[hidden] {
+  display: none;
+}
+
+/* ── リリース前の確認（第 23 波・第 2 波 F5）: inline style をやめてここに集める ──
+   幅は min(600px, 96vw)（狭い画面で横にはみ出さない）。状態の区別は左罫の色で、
+   語はサーバの status_label のまま（label_vocab.LANDSCAPE_STATUS_LABELS の逐語）。 */
+.release-review-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+.release-review-dialog {
+  background: var(--color-background-primary);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 10px;
+  padding: 20px 22px;
+  width: min(760px, 96vw);
+  min-width: min(600px, 96vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+.release-review-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.release-review-title {
+  margin: 0;
+  font-size: 16px;
+  color: var(--color-text-primary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.release-review-close {
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 18px;
+  padding: 4px;
+}
+/* ステップの部品: 済み・現在・未を色と番号の丸で分ける（語は足さない）。 */
+.release-review-stepbar {
+  display: flex;
+  gap: 6px;
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  flex-wrap: wrap;
+}
+.release-review-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 0;
+  min-width: 150px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-tertiary);
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+.release-review-step-num {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  border: 1px solid currentColor;
+}
+.release-review-step.is-current {
+  border-color: var(--color-border-info);
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+.release-review-step.is-current .release-review-step-num {
+  background: var(--color-text-info);
+  border-color: var(--color-text-info);
+  color: var(--color-background-primary);
+}
+.release-review-step.is-done {
+  color: var(--color-text-secondary);
+}
+/* 済みの番号は ✓ に置き換える（番号の文字は font-size:0 で隠し、読み上げ用に残す）。 */
+.release-review-step.is-done .release-review-step-num {
+  background: var(--color-background-secondary);
+  font-size: 0;
+}
+.release-review-step.is-done .release-review-step-num::before {
+  content: "\2713";
+  font-size: 11px;
+}
+.release-review-intro,
+.release-review-notice,
+.release-review-next-meaning,
+.release-review-map-status,
+.release-review-landscape-intro {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin: 0 0 8px;
+  line-height: 1.6;
+}
+.release-review-notice:empty { display: none; }
+.release-review-notice-error { color: var(--color-text-danger, #e53935); }
+.release-review-next-meaning { margin: 10px 0 0; }
+.release-review-next-meaning[hidden] { display: none; }
+.release-review-body {
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 180px;
+}
+.release-review-empty,
+.release-review-landscape-body {
+  font-size: 13px;
+  color: var(--color-text-tertiary);
+}
+.release-review-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border-tertiary);
+}
+.release-review-facts {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  min-width: 0;
+}
+.release-review-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.release-review-primary {
+  background: var(--color-text-info);
+  color: var(--color-background-primary);
+  border-color: var(--color-text-info);
+}
+.release-review-document { margin-bottom: 14px; }
+.release-review-document-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin-bottom: 4px;
+}
+/* 配置行: 左罫の色で状態を区別（確認済み=成功色・推定=情報色・却下=淡色・再検討=注意色）。 */
+.release-review-placement-row {
+  padding: 7px 0 7px 10px;
+  margin: 4px 0;
+  border-left: 3px solid var(--color-border-tertiary);
+  border-bottom: 1px solid var(--color-border-tertiary);
+}
+.release-review-placement-row[data-status="confirmed"] { border-left-color: var(--color-text-success); }
+.release-review-placement-row[data-status="inferred"] { border-left-color: var(--color-text-info); }
+.release-review-placement-row[data-status="review_required"] { border-left-color: var(--color-text-warning); }
+.release-review-placement-row[data-status="rejected"] { border-left-color: var(--color-border-secondary); opacity: 0.7; }
+.release-review-placement-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.release-review-placement-label {
+  font-size: 13px;
+  color: var(--color-text-primary);
+}
+.release-review-placement-status,
+.release-review-node-status {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: 10px;
+  padding: 0 7px;
+  white-space: nowrap;
+}
+.release-review-placement-meta {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
+}
+.release-review-placement-reason {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin-top: 3px;
+}
+.release-review-evidence { margin-top: 3px; }
+.release-review-evidence > summary {
+  font-size: 11.5px;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+}
+.release-review-evidence-quote,
+.release-review-evidence-empty {
+  font-size: 11.5px;
+  margin-top: 3px;
+  color: var(--color-text-secondary);
+}
+.release-review-evidence-empty { color: var(--color-text-tertiary); }
+.release-review-row-actions {
+  margin-top: 4px;
+  display: flex;
+  gap: 6px;
+}
+.release-review-row-btn {
+  font-size: 11px;
+  padding: 1px 7px;
+}
+.release-review-unplaced {
+  font-size: 11.5px;
+  color: var(--color-text-tertiary);
+  padding: 3px 0;
+}
+.release-review-recorded {
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  background: var(--color-background-secondary);
+}
+.release-review-recorded-hd {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin-bottom: 4px;
+}
+.release-review-recorded-list,
+.release-review-publish-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+.release-review-recorded-list li,
+.release-review-publish-list li { margin-bottom: 4px; }
+.release-review-published {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--color-text-success);
+}
+
+/* 分野の地図: ピルの意味の1行（atlas-overlay.js がサーバの pill_note を textContent で入れる）。 */
+.atlas-panel-pill-note {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--color-text-tertiary, #94a3b8);
+}
+
+/* 論文の海: 一覧の下の事実文（corpus-sea.js がサーバの facts をそのまま出す。IK-0414）。 */
+.corpus-sea-doc-fact {
+  margin: 8px 4px 0;
+  font-size: 11.5px;
+  color: var(--color-text-tertiary, #94a3b8);
+}
+
+/* ===========================================================================
+   検証シミュレーション（simulation_bridge_design.md §7）
+   外枠はグラフレビュー（graph-review-modal / -frame / -header）を再利用する。
+   識別子は simulation- プレフィックス。警告色は使わない（事実文は中立色）。
+   =========================================================================== */
+.simulation-frame { overflow: auto; }
+.simulation-lead {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border, #e2e8f0);
+  font-size: 13px;
+}
+.simulation-disclaimer { margin: 0; color: var(--color-text-secondary, #475569); }
+.simulation-sandbox-fact {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 6px;
+  color: var(--color-text-secondary, #475569);
+}
+.simulation-sandbox-fact[hidden] { display: none; }
+.simulation-body { padding: 12px 16px 24px; display: flex; flex-direction: column; gap: 16px; }
+.simulation-section {
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.simulation-section-title { margin: 0 0 8px; font-size: 14px; }
+.simulation-module { padding: 8px 0; border-top: 1px dashed var(--color-border, #e2e8f0); }
+.simulation-module.is-inner { margin-left: 24px; }
+.simulation-module-head { display: flex; gap: 8px; align-items: center; }
+.simulation-module-label { font-weight: 600; }
+.simulation-io, .simulation-chain { margin: 4px 0; font-size: 12.5px; }
+.simulation-arrow { color: var(--color-text-secondary, #64748b); margin: 0 4px; }
+.simulation-assumptions { margin: 2px 0 4px 18px; font-size: 12.5px; }
+.simulation-muted { color: var(--color-text-secondary, #64748b); font-size: 12.5px; }
+.simulation-fact-line { margin: 4px 0; font-size: 12.5px; color: var(--color-text-secondary, #475569); }
+.simulation-facts { margin: 6px 0; padding-left: 18px; font-size: 12.5px; color: var(--color-text-secondary, #475569); }
+.simulation-chip {
+  display: inline-block;
+  border: 1px solid var(--color-border, #cbd5e1);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11.5px;
+}
+.simulation-chip-muted { opacity: 0.75; }
+.simulation-chip-ai { border-style: dashed; }
+.simulation-chip-label { background: var(--color-background-info, #eef2ff); }
+.simulation-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+.simulation-decide { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
+.simulation-disabled-reason { font-size: 12px; color: var(--color-text-secondary, #64748b); }
+.simulation-program-card, .simulation-wiring-card, .simulation-run-card, .simulation-builder, .simulation-proposal {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 8px;
+}
+.simulation-wiring-card.is-ai-proposal, .simulation-proposal { border-style: dashed; }
+.simulation-card-head { font-weight: 600; font-size: 13px; margin: 6px 0 4px; }
+.simulation-source {
+  max-height: 280px;
+  overflow: auto;
+  font-size: 12px;
+  background: var(--color-background-secondary, #f8fafc);
+  padding: 8px;
+  border-radius: 6px;
+}
+.simulation-table { border-collapse: collapse; font-size: 12.5px; margin: 6px 0; }
+.simulation-table th, .simulation-table td {
+  border: 1px solid var(--color-border, #e2e8f0);
+  padding: 3px 8px;
+  text-align: left;
+}
+.simulation-params { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 4px 0; }
+.simulation-param { font-size: 12.5px; display: inline-flex; gap: 4px; align-items: center; }
+.simulation-param input[type="number"] { width: 110px; }
+.simulation-builder-list { padding-left: 20px; }
+.simulation-builder-part { margin: 6px 0; }
+.simulation-claims { display: flex; flex-direction: column; gap: 2px; margin: 4px 0; }
+.simulation-claim { font-size: 12.5px; }
+.simulation-ref-row { font-size: 12.5px; margin: 4px 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.simulation-inst-slot { margin: 4px 0; font-size: 12.5px; }
+.simulation-history ul { list-style: none; padding-left: 0; margin: 4px 0; }
+.simulation-history-btn {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12.5px;
+  padding: 2px 0;
+  text-align: left;
+}
+.simulation-history-btn.is-active { font-weight: 700; }
+.simulation-statement { margin: 4px 0; font-size: 13px; }
+.simulation-notice { padding: 6px 10px; border-radius: 6px; font-size: 12.5px; margin: 4px 0; border: 1px solid var(--color-border, #e2e8f0); }
+.simulation-notice.is-error { border-color: var(--color-border-danger, #fca5a5); }
+.simulation-notice.is-success { border-color: var(--color-border-success, #86efac); }
+
+/* ── 動かして確かめる（検証シミュレーション v1.1, simulation_bridge_design.md §14.4）──
+   パネルは教材区画（.material-region）の中に開き、開いている間は教材本文の場所を使う
+   （1画面レイアウト: 下段の flex: 0 0 auto 規約に触れず、区画内でだけスクロールする）。
+   予想の列には判定の色を付けない（SB14 / UC2）。 */
+.simulation-lab-btn {
+  border: 1px solid var(--color-border-secondary, #d0d7de);
+  background: var(--color-background-primary, #fff);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.simulation-lab-btn[hidden] { display: none; }
+.simulation-lab-btn[aria-pressed="true"] { background: var(--color-background-secondary, #f3f5f8); }
+.simulation-lab-region {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+}
+.simulation-lab-region[hidden] { display: none; }
+.material-region.simulation-lab-open { max-height: 70%; }
+.material-region.simulation-lab-open .material-body { display: none; }
+.sim-lab-card {
+  border: 1px solid var(--lx-line, #d0d7de);
+  border-radius: 10px;
+  background: var(--color-background-primary, #fff);
+  padding: 10px 12px;
+  font-size: 13px;
+}
+.sim-lab-head { display: flex; align-items: center; justify-content: space-between; }
+.sim-lab-title { font-weight: 600; font-size: 14px; }
+.sim-lab-close { border: none; background: none; font-size: 18px; cursor: pointer; color: var(--color-text-secondary, #57606a); }
+.sim-lab-lead { margin: 4px 0; }
+.sim-lab-muted { color: var(--color-text-secondary, #57606a); font-size: 12px; }
+.sim-lab-fact { margin: 4px 0; color: var(--color-text-secondary, #57606a); }
+.sim-lab-facts { margin: 4px 0 4px 18px; padding: 0; color: var(--color-text-secondary, #57606a); font-size: 12px; }
+.sim-lab-doc { margin: 4px 0; font-size: 12px; }
+.sim-lab-steps { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.sim-lab-step { border-top: 0.5px solid var(--color-border-tertiary, #e5e7eb); padding-top: 8px; }
+.sim-lab-step-head { font-weight: 600; margin-bottom: 4px; }
+.sim-lab-step-no { display: inline-block; min-width: 1.4em; }
+.sim-lab-sub { font-weight: 600; font-size: 12px; margin: 6px 0 2px; }
+.sim-lab-modules, .sim-lab-wirings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.sim-lab-module.is-inner { margin-left: 18px; }
+.sim-lab-module.is-active .sim-lab-module-btn { border-color: var(--color-text-primary, #1f2328); font-weight: 600; }
+.sim-lab-module-btn, .sim-lab-btn {
+  border: 1px solid var(--color-border-secondary, #d0d7de);
+  background: var(--color-background-primary, #fff);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sim-lab-module-btn[disabled], .sim-lab-btn[disabled] { opacity: 0.55; cursor: default; }
+.sim-lab-primary { font-weight: 600; }
+.sim-lab-link { border: none; background: none; padding: 0; color: var(--color-text-link, #0969da); cursor: pointer; font-size: 12px; }
+.sim-lab-io { font-size: 12px; }
+.sim-lab-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.sim-lab-share-note { flex: 1 1 240px; margin: 0; }
+.sim-lab-legend { margin: 2px 0 6px; }
+.sim-lab-params { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0; }
+.sim-lab-param input { width: 7em; }
+.sim-lab-claims { display: flex; flex-direction: column; gap: 2px; }
+.sim-lab-code {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  min-height: 10em;
+}
+.sim-lab-chip {
+  display: inline-block;
+  border: 1px solid var(--color-border-secondary, #d0d7de);
+  border-radius: 10px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+.sim-lab-wiring.is-candidate { border: 1px dotted var(--color-border-secondary, #d0d7de); border-radius: 6px; padding: 4px 6px; }
+.sim-lab-chip-candidate { border-style: dotted; }
+.sim-lab-table { border-collapse: collapse; font-size: 12px; margin: 6px 0; }
+.sim-lab-table th, .sim-lab-table td { border: 0.5px solid var(--color-border-tertiary, #e5e7eb); padding: 2px 6px; text-align: left; }
+.sim-lab-run, .sim-lab-program, .sim-lab-proposal { margin-top: 6px; }
+.sim-lab-card-head { font-weight: 600; margin-bottom: 4px; }
+.sim-lab-statement { margin: 4px 0; }
+
+/* 論文レーダー「この教材の行へ」で行を一時的に強調する（paper_radar_design.md §19 C） */
+#materials-tbody tr.material-row-focus > td {
+  background: rgba(37, 99, 235, 0.12);
+  transition: background 0.4s ease;
 }

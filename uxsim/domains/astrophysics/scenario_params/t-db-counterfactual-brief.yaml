@@ -1,0 +1,14 @@
+scenario: t-db-counterfactual-brief
+domain: astrophysics
+params:
+  goal_text: 前提が崩れたときに論文のどこまでが一緒に揺らぐかを見て、ゼミで扱う順番を決めること
+  course_hint: ""
+  material_hint: Cepheus
+  node_hint: "1"
+  claim_hint: "1"
+  cf_notes: 等分配の仮定を倒すと、磁場強度の推定から先がまとめて揺らぐ。ゼミではここから入る。
+personas:
+  te-04-copilot-intro:
+    course_hint: 1bad7d9f
+  te-05-delegator-lab:
+    cf_notes: 等分配が崩れると推定の先が全部揺らぐ。ゼミの最初に扱う。

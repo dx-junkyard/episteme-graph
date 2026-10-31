@@ -150,8 +150,9 @@ class TestStagedScope:
         """Phase 4（4-a/4-b/4-d）の4つ + 知識の転用層 P4-2 の ``retrieved_structure``。
 
         P4-2 は**別ブロック**（``BLOCK_HEADER_RETRIEVED`` / 検索由来）として描画される
-        ため末尾に登録する。件数を増やすときは設計書（P4-2 は
-        ``knowledge_transfer_design.md`` §5）に沿って本テストも更新する。
+        ため末尾に登録する。4-e の ``simulation``（学習者が開いている自分の検証
+        シミュレーションの実行記録 = 設計書 §11.17）はその後ろ。件数を増やすときは設計書
+        （P4-2 は ``knowledge_transfer_design.md`` §5）に沿って本テストも更新する。
         """
         assert registered_kinds(SCREEN_LEARNING) == (
             "element",
@@ -159,6 +160,7 @@ class TestStagedScope:
             "placement",
             "view",
             "retrieved_structure",
+            "simulation",
         )
 
     def test_topic_and_visible_resolvers_are_not_registered(self):
@@ -252,3 +254,59 @@ class TestPhase1IsUnchanged:
     def test_selection_block_always_declares_whether_it_matched(self):
         assert ac_schema.SELECTION_MATCH_CONFIRMED != ac_schema.SELECTION_MATCH_UNCONFIRMED
         assert "確認できていません" in ac_schema.SELECTION_MATCH_UNCONFIRMED
+
+
+# ---------------------------------------------------------------------------
+# 学習者向けの AI 材料の経路（§11.21・IK-1075 / IK-1059）
+# ---------------------------------------------------------------------------
+
+
+class TestLearnerAiMaterialPaths:
+    """部品の参照の解決と学習者の語の表が、AI に材料を渡す全経路を通ることを固定する。"""
+
+    _LEARNING_ROUTE = BACKEND / "api" / "routes" / "learning.py"
+    #: 部品の文脈を組んでよい関数（解決点と、その下請け）。これ以外が直接組むと凍結の ⚓ の
+    #: 後継解決（IK-1021 / IK-1051）を素通りする（IK-1075）。
+    _COMPONENT_CONTEXT_BUILDERS = frozenset({
+        "resolve_learner_component_context",
+        "_component_context_with_explanation",
+    })
+
+    def _callers_of(self, callee: str) -> set[str]:
+        tree = ast.parse(self._LEARNING_ROUTE.read_text(encoding="utf-8"))
+        out: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call) and getattr(sub.func, "id", None) == callee:
+                    out.add(node.name)
+        return out
+
+    def test_only_the_resolution_point_builds_component_context(self):
+        callers = self._callers_of("_component_context_with_explanation") | self._callers_of(
+            "build_component_context"
+        )
+        assert callers <= self._COMPONENT_CONTEXT_BUILDERS, sorted(callers - self._COMPONENT_CONTEXT_BUILDERS)
+
+    def test_resolution_point_applies_frozen_anchor_succession(self):
+        callers = self._callers_of("_resolve_frozen_component_ref")
+        assert "resolve_learner_component_context" in callers
+        assert "_screen_element_sources" in self._callers_of("resolve_learner_component_context")
+
+    def test_atlas_material_passes_the_learner_wording(self):
+        source = LEARNING_RESOLVER.read_text(encoding="utf-8")
+        assert "learner_atlas_wording(note)" in source
+        route = self._LEARNING_ROUTE.read_text(encoding="utf-8")
+        assert route.count("label_vocab.learner_atlas_wording(") >= 2  # verify_line / endorse_line
+
+    def test_fixed_learning_facts_have_no_ledger_words(self):
+        from core.label_vocab import ATLAS_LEARNER_WORDING_DENYLIST
+
+        for name in dir(ac_schema):
+            if not name.startswith("LEARNING_"):
+                continue
+            value = getattr(ac_schema, name)
+            if isinstance(value, str):
+                for word in ATLAS_LEARNER_WORDING_DENYLIST:
+                    assert word not in value, (name, word)

@@ -26,6 +26,7 @@ from sqlalchemy import text as sa_text
 
 from core.config import get_settings
 from core.course_data import course_chapters, course_topics
+from core.topic_labels import reserved_topic_label
 from core.llm_usage.context import bind_usage_context
 from core.llm_worker.cost_gate import CostGate, InMemoryCounterGate, today_str
 from core.postgres import get_session as _pg_session
@@ -66,6 +67,30 @@ _confirm_prompt_counts: dict[tuple, int] = _confirm_gate.counts
 _today = today_str
 
 
+def reported_segment_id(position_anchor: object) -> int | None:
+    """問いの痕跡の復帰位置から「学習者が見ていた区画」を読む（IK-1122）。
+
+    ``position_anchor.segment_id`` は寄り道からの**戻る先**で、報告が無ければ先頭(0)に埋まる。
+    それを「見ていた区画」と読むと、地図の場所など教材の外について尋ねた問いがトピックの先頭区画に
+    結ばれる。区画に結ぶのは位置が分かるときだけ（縮退順 claim → concept → chunk → segment の
+    最後の段を、報告のあるときに限る）:
+
+    - ``segment_reported`` があればそれに従う（偽なら None）。
+    - 旧い痕跡（キーなし）は、0 だけでは報告か既定値か区別できないので結ばない（1 以上は
+      レクチャー中の報告でしか生じないので結ぶ）。
+    """
+    pos = position_anchor if isinstance(position_anchor, dict) else {}
+    seg = pos.get("segment_id")
+    if isinstance(seg, bool) or not isinstance(seg, (int, float, str)):
+        return None
+    if not str(seg).lstrip("-").isdigit():
+        return None
+    seg_id = int(seg)
+    if "segment_reported" in pos:
+        return seg_id if bool(pos.get("segment_reported")) else None
+    return seg_id if seg_id > 0 else None
+
+
 def _check_and_count_llm_call(user_id: str, course_id: str, topic_id: str) -> bool:
     """コスト上限内なら True を返しカウントを進める。上限超過なら False。
 
@@ -103,6 +128,8 @@ def _fetch_pending_questions(session, user_id: str, course_id: str, topic_id: st
               AND status <> 'superseded'
               AND payload->'structure_anchor' IS NULL
               AND payload->>'anchor_analyzed_at' IS NULL
+              -- IK-0470: 教材内容の問いでない往復（お礼・雑談・予想の表明）は帰属しない
+              AND payload->>'anchor_skip_reason' IS NULL
             ORDER BY created_at ASC
         """),
         {"uid": user_id, "cid": course_id, "tid": topic_id},
@@ -183,10 +210,26 @@ def _collect_context_blocks(session, course_id: str, cited_chunk_ids: list[str])
         except Exception as exc:
             logger.info("anchor context: theory_claims lookup skipped: %s", exc)
     try:
-        rows = session.execute(
-            sa_text("SELECT id, name FROM theory_components_live WHERE course_id = :cid LIMIT :lim"),
-            {"cid": course_id, "lim": _MAX_CONCEPT_BLOCKS},
-        ).fetchall()
+        if cited_chunk_ids:
+            # 焦点論文（docs/features/focus_document_design.md）: 回答が引用したチャンクの
+            # 論文の概念だけを候補にする（コース全体の別論文の概念へ帰属させない）。
+            # cited_chunk_ids は記録時に焦点の論文へ絞り済み（core.focus_document）。
+            rows = session.execute(
+                sa_text("""
+                    SELECT id, name FROM theory_components_live
+                    WHERE document_id IN (
+                        SELECT document_id FROM chunks
+                        WHERE id::text = ANY(:ids) AND document_id IS NOT NULL
+                    )
+                    LIMIT :lim
+                """),
+                {"ids": cited_chunk_ids, "lim": _MAX_CONCEPT_BLOCKS},
+            ).fetchall()
+        else:
+            rows = session.execute(
+                sa_text("SELECT id, name FROM theory_components_live WHERE course_id = :cid LIMIT :lim"),
+                {"cid": course_id, "lim": _MAX_CONCEPT_BLOCKS},
+            ).fetchall()
         blocks["concepts"] = [{"id": str(r[0]), "label": r[1] or ""} for r in rows]
     except Exception as exc:
         logger.info("anchor context: theory_components lookup skipped: %s", exc)
@@ -244,8 +287,7 @@ def run_anchor_mining(user_id: str, course_id: str, topic_id: str | None) -> int
                 continue
             payload = r[1] if isinstance(r[1], dict) else json.loads(r[1] or "{}")
             pos = payload.get("position_anchor") or {}
-            seg = pos.get("segment_id")
-            seg_id = int(seg) if isinstance(seg, (int, float, str)) and str(seg).lstrip("-").isdigit() else None
+            seg_id = reported_segment_id(pos)
             cited = [str(c) for c in (payload.get("cited_chunk_ids") or []) if c]
             all_cited.extend(c for c in cited if c not in all_cited)
             questions.append(QuestionRecord(
@@ -271,7 +313,9 @@ def run_anchor_mining(user_id: str, course_id: str, topic_id: str | None) -> int
     if not questions:
         return 0
 
-    topic_title, _context_label = _topic_labels(course_row[0] if course_row else None, topic_id)
+    topic_title, _context_label = _topic_labels(
+        course_row[0] if course_row else None, topic_id, course_id=course_id,
+    )
     context = AnchorContext(
         course_id=course_id,
         topic_id=topic_id or "",
@@ -344,8 +388,17 @@ def run_anchor_mining(user_id: str, course_id: str, topic_id: str | None) -> int
     return saved
 
 
-def _topic_labels(course_data, topic_id: str | None) -> tuple[str, str]:
-    """course_data からトピック表示名と context_label（章·トピック）を引く。"""
+def _topic_labels(
+    course_data, topic_id: str | None, *, course_id: str | None = None,
+) -> tuple[str, str]:
+    """course_data からトピック表示名と context_label（章·トピック）を引く。
+
+    予約疑似トピックは内部 id のまま出さず、``core.topic_labels.reserved_topic_label`` の
+    表示名にする（IK-0403）。
+    """
+    pseudo = reserved_topic_label(course_id, topic_id)
+    if pseudo:
+        return pseudo, pseudo
     data = course_data
     if isinstance(data, str):
         try:

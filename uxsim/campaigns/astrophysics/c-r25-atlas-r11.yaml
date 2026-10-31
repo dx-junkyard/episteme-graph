@@ -1,0 +1,24 @@
+id: c-astro-r25-atlas-r11
+domain: astrophysics
+snapshot: corpus-astro-tex-r25j
+course_id: 1bad7d9f
+personas:
+  teachers: [te-05-delegator-lab, te-04-copilot-intro]
+  students: [st-03-d1-from-particle, st-01-m1-radio]
+scenarios:
+  teacher: [t-atlas-edge-review, t-atlas-draft-freeze]
+  student: [s-atlas-threads-and-placement]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 4, persona_llm_calls: 260, wall_clock_minutes: 240}
+notes: |
+  第 25 周・面 C の第 11 周（judge_atlas_r10.md §6・r11_prereqs.md・harness_fixes_r10_summary.md の H51〜H54）。第 10 波の是正後（IK-1118 向きの全出口・IK-1119 推奨どおり
+  右パネルに版の事実・H54 反映済みの見送りは 409・軽 2 件）。周の前の実測（r11_prereqs）: atlas_frozen_and_pending = 現行の凍結版 2026.7・下書きなし・採用済み未反映なし。
+  atlas_freeze_version: te-04 の freeze_version が 2026.8（freeze_note から周番号を外した H51）。**指揮者は API で下書きを作らない**。
+  教員 2 × 学生 2・4 レーン（依存の順・LANE_DEPS）:
+  te-05 × t-atlas-edge-review（有向の「依存」を採用 → 画面のボタンで下書き → 反映 → **反映済みのカードで［見送り…］を押す任意の手（H54）** — 409 の事実文で判断と公開版が
+  食い違わないか）→ te-04 × t-atlas-draft-freeze（凍結 2026.8・凍結の影響に向きの一文・概念が変わらないとき「対応を付ける必要はありません」）→ st-03 ×
+  s-atlas-threads-and-placement（名前の行「惑星形成 → 星形成」の向き IK-1118・右パネルの関係の行に「（版 X で加わった）」IK-1119・`papers`）→ st-01 × 同（足跡なし・版上げを 1 回
+  挟んだ後に「これまでの版の改訂で加わった関係」の範囲を誤読しないか）。矢じりの見え方（H53）は指揮者が Browser pane でスクリーンショットを 1 枚残す。
+  組の例外（P-0025）: st-03・st-01 は第 10 周と同じ組（是正の前後比較）。te-05 × edge-review・te-04 × freeze は新しい組（te-05 は第 7 周以来・te-04 の凍結は初）。

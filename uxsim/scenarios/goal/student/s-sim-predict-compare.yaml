@@ -1,0 +1,63 @@
+id: s-sim-predict-compare
+population: students
+runner:
+- api
+# 場面 (c)。予想を書いてから動かし、予想と結果が並ぶだけで採点されないことが分かるかを見る。
+goal: '{{goal_text}} のために、{{topic_hint}} の理論のまとまりで先に出力の予想を書き、動かして結果と並べて見る'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_hint
+- input_hints
+- prediction_hint
+- questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+  note: 前に入力と出力を読んだのと同じまとまりを選ぶ
+- do: learning.simlab.generate
+  note: コードの下書きを AI に作らせる（この経路で 1 回だけ）
+- do: learning.simlab.adopt
+- do: learning.simlab.predict
+  with:
+    prediction: '{{prediction_hint}}'
+  note: 動かす前に、出力の記号 1 つについて値を予想して書く。記号は io_contract.outputs のものに合わせる
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    wiring: none
+  note: 配線なしで動かす。入力の記号は io_contract.inputs に合わせて置き換える
+- repeat:
+    until: persona_decides_to_stop or steps > 2
+    max: 2
+    do: learning.chat.ask
+    with:
+      message: '{{questions | next}}'
+    note: 予想と結果の並びの読み方、段階の言葉が何と何を比べたものかを確かめる
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-prediction
+- manual: student/02-student.md#simulation-lab-not-verification
+- manual: student/02-student.md#simulation-lab-own-records
+watch_for:
+- 予想は結果と並べて表示されるだけで、合っていたかどうかの判定・色分け・点数が付かない
+- 段階の言葉は理論の出力と模擬観測のあいだにだけ付き、予想には付かない
+- 配線なしのとき、模擬観測が理論の出力そのものであることが事実文で分かる
+- チャットの答えが予想の当たり外れを採点する言い方をしない
+- 記録が本人にだけ見え、成績に使われないことが画面の文で分かる

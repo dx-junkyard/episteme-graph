@@ -1,0 +1,48 @@
+id: s-ask-where-from
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、{{topic_hint}} で式や回答の出所を構造として問う'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- seed_questions
+- where_from_questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.chat.ask
+  with:
+    message: '{{seed_questions | next}}'
+- repeat:
+    until: persona_decides_to_stop or steps > 4
+    max: 4
+    do: learning.chat.ask
+    with:
+      message: '{{where_from_questions | next}}'
+    note: 前の回答の根拠や式の出所を問い続ける
+- choose:
+  - do: learning.source_chunk.open
+  - do: learning.element.context
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#ai-chat
+- manual: student/02-student.md#answer-origin-badge
+watch_for:
+- 式の出所を問うと、どの主張・どの段階から来たかで答える
+- 前の回答の出典番号が次の往復でも同じものを指す
+- 出所のラベルと本文が食い違わない

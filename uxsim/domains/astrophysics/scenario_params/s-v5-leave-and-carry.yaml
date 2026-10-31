@@ -1,0 +1,27 @@
+scenario: s-v5-leave-and-carry
+domain: astrophysics
+params:
+  goal_text: µ(a) と音速の論文の主結果を、自分の立場から説明できるようになること
+  seed_questions:
+    - 音速が小さいと µ のずれが大きく見えるのは、どの近似の下での話ですか？
+    - 安定性の条件は、この結論をどれくらい狭めるんですか？
+    - 著者が確かめていない前提は何ですか？
+  carryover_pick: "1"
+  carryover_question_text: 準静的近似が崩れる尺度では、µ と音速の関係はどう変わるのか
+  leave_note_text: 次は安定性の条件の節を読む。準静的近似の範囲が自分の説明の弱いところ。
+per_archetype:
+  night_parttime:
+    goal_text: 仕事のあとの 30 分で、µ(a) と音速の論文の主結果をつかむこと
+    seed_questions:
+      - 短く教えてください。音速が小さいと何が起きるんですか？
+      - 今日はここまでにします。明日のために一番大事な点だけ教えてください。
+    leave_note_text: 明日は安定性の条件のところから。30 分しかないので図だけ先に見る。
+  confident_theorist:
+    seed_questions:
+      - α_K ∝ α_B の仮定を外すと、音速と µ の関係はどこまで保たれますか？
+      - 準静的近似は c_s が小さいときほど怪しくなると思うのですが、どう扱っていますか？
+    carryover_question_text: 準静的近似を外した数値計算で、µ − 1 と c_s^2 の関係は保たれるのか
+  skeptic:
+    seed_questions:
+      - この結論のうち、データから直接言えることと、模型の仮定から出ていることを分けてください。
+      - 著者が確かめていない前提は何ですか？

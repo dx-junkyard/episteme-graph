@@ -592,6 +592,60 @@ class TestClaimLabel:
         assert generic.unresolved is True
 
 
+    # ── §11.3（図の文脈の可読性）: full_text と sublabel の種別語 ─────────────
+
+    def test_full_text_is_set_only_when_the_label_is_truncated(self):
+        long_text = (
+            "The possible mass range for dark matter is distributed over "
+            "a very wide range of scales,   from ultralight bosons to heavy compact objects."
+        )
+        label = L.claim_label({"text": long_text, "claim_type": "background"})
+        assert label.text.endswith("…")
+        # 全文は空白正規化のみ・切らない。
+        assert label.full_text == " ".join(long_text.split())
+        assert label.full_text != label.text
+
+        short = L.claim_label({"text": "短い主張", "claim_type": "background"})
+        assert short.text == "短い主張"
+        assert short.full_text == ""
+
+    def test_full_text_falls_back_to_normalized_text(self):
+        label = L.claim_label({"text": "", "normalized_text": "x" * 20 + " " + "y" * 70})
+        assert label.text.endswith("…")
+        assert label.full_text == "x" * 20 + " " + "y" * 70
+
+    def test_generic_label_has_no_full_text(self):
+        generic = L.claim_label({"text": "claim_span_001_56_sub01"})
+        assert generic.text == "主張"
+        assert generic.full_text == ""
+
+    def test_unknown_claim_type_falls_back_to_the_claim_tier(self):
+        label = L.claim_label(
+            {"text": "The lower bound is set by X.", "claim_type": "unknown", "claim_tier": "background"}
+        )
+        assert label.sublabel == "背景"
+        assert "不明" not in label.sublabel
+        # qualifier は統制語彙キーのまま（訳は表示側）。
+        assert label.qualifier == "unknown"
+
+    def test_known_claim_type_wins_over_the_tier(self):
+        label = L.claim_label(
+            {"text": "A.", "claim_type": "method_choice", "claim_tier": "paper_core"}
+        )
+        assert label.sublabel == "手法の選択"
+
+    def test_missing_type_uses_tier_and_nothing_left_means_no_sublabel(self):
+        assert L.claim_label({"text": "A.", "claim_tier": "paper_core"}).sublabel == "論文の中心となる主張"
+        for row in (
+            {"text": "A.", "claim_type": "unknown"},
+            {"text": "A.", "claim_type": "unknown", "claim_tier": "no_such_tier"},
+            {"text": "A."},
+        ):
+            label = L.claim_label(row)
+            assert label.sublabel == "", row
+            assert "不明" not in label.sublabel
+
+
 class TestComponentLabel:
     def test_name_and_narrative_role(self):
         label = L.component_label(

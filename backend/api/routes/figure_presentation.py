@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from dependencies import _require_teacher
 from core import figure_reanalysis
 from core.deliberation.identity_links import confidence_label
-from core.document_pipeline.figure_images import load_document_figures
+from core.document_pipeline.figure_images import is_listed_figure, load_document_figures
 from core.document_pipeline.persistence import document_run_artifacts
 from core.figure_presentation import presentation_payload, set_reviewed_mode
 from core.schema import AUDIT_ENTITY_FIGURE_PRESENTATION
@@ -72,7 +72,7 @@ def list_document_figures_with_presentation(
             "viewer_is_owner resolution failed for document=%s", document_id, exc_info=True,
         )
         viewer_is_owner = False
-    rows = load_document_figures(canonical_document_id)
+    rows = [row for row in load_document_figures(canonical_document_id) if is_listed_figure(row)]
     artifacts = _adopted_records(canonical_document_id)
     figures: list[dict] = []
     for row in rows:

@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from core import atlas_review_display
+
 try:
     import fastapi  # noqa: F401
     _HAS_FASTAPI = True
@@ -362,7 +364,14 @@ class TestVectorStatus:
             "total_nodes": 3,  # region 2 + concept 1
             "embedded_nodes": 3,
             "built_at": _BUILT_AT.isoformat(),
+            # IK-0889: 日時の表示語と、用途 → 要否の一文（サーバ定数）。
+            "built_at_label": atlas_review_display.display_datetime(_BUILT_AT.isoformat()),
+            "facts": [
+                atlas_review_display.VECTOR_INDEX_PURPOSE,
+                atlas_review_display.VECTOR_INDEX_CURRENT.format(version="2026.1"),
+            ],
             "stale": False,
+            "building": False,  # IK-0993: 凍結が裏で始めた構築の途中か（第 25 周 第 5 波）
         }
 
     def test_partial_coverage_is_reported_honestly(self, client_and_tokens, env):
@@ -433,6 +442,7 @@ class TestVectorRefresh:
             "total_nodes": 3,
             "embedded": 3,
             "reused": 0,
+            "fact": atlas_review_display.VECTOR_REFRESH_UPDATED,
         }
         assert env["builds"] == [{"domain_key": _DOMAIN}]
 

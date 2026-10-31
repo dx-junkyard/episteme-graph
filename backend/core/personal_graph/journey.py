@@ -88,6 +88,23 @@ FACT_TOPIC_RANGE_PREAMBLE_NO_LABEL = (
 #: [1'] 範囲エントリの各行。
 FACT_TOPIC_RANGE_NODE = "論文『{title}』の理論構成『{label}』に触れています。"
 
+#: [1'] の「直前の引用」段（焦点論文 FD1）: トピック⇄claim の対応が引けない痕跡
+#: （議論 ``_discussion`` など）で、この問いへの回答が引用した論文の理論構成を範囲として
+#: たどる（第 17 周 D1）。どこに触れたかは主張しない（論文単位の対応）。
+FACT_CITED_RANGE_PREAMBLE = (
+    "この問いへの回答が引用した論文の理論構成をたどります（論文単位の対応）。"
+)
+FACT_CITED_RANGE_NODE = "論文『{title}』には理論構成『{label}』があります。"
+
+#: 区画（segment）に帰属した問いで、区画の本文に埋め込まれた部品が一意のときの前置き
+#: （IK-0920 ④。決定論 — 区画に部品が 1 つだけ埋め込まれている事実だけを言う）。
+FACT_SEGMENT_COMPONENT = "教材の選んだ箇所に埋め込まれた部品『{label}』からたどります。"
+#: 区画経由の [2] の事実文（主語は問いではなく埋め込まれた部品）。
+FACT_SEGMENT_SHARED_PART = "部品『{label}』は共通部品『{name}』の教材での表れとして教員が確かめています"
+
+#: 区画アンカーの型（structure_anchor の語彙。schema に定数が無いので生文字列）。
+_ANCHOR_SEGMENT = "segment"
+
 #: タイトルが引けない document のラベル（捏造しない・件数に言及しない）。
 _UNTITLED_DOCUMENT_LABEL = "この教材"
 
@@ -102,6 +119,17 @@ def _node_kind_ja(node: PersonalNode) -> str:
 def _sort_key(row: dict) -> tuple:
     """(created_at, id) の決定論順キー（derive.py と同じ規約）。"""
     return (str(row.get("created_at") or ""), str(row.get("id") or ""))
+
+
+def _main_node_label(node: dict) -> str:
+    """学習者に見せる main ノード名（IK-0546: 英語の stage 名を日本語の段名へ）。
+
+    graph_json の ``label`` は #308 の規律で英語の stage 表示名のまま。訳語の正本は
+    ``core.element_vocab``（純データ）で、stage に引けないラベルはそのまま返す。
+    """
+    from core.element_vocab import theory_stage_display_label
+
+    return theory_stage_display_label(node.get("label"))
 
 
 def _find_main_node(nodes: list[dict], anchor_type: str, anchor_id: str) -> dict | None:
@@ -163,6 +191,29 @@ def _resolved_atlas_node_id(node: PersonalNode, topic_atlas: dict[str, str]) -> 
     return node.anchor.atlas_node_id or topic_atlas.get(str(node.topic_id or "")) or None
 
 
+def _segment_component(anchor_type: str, segment_component: dict | None) -> dict | None:
+    """区画アンカーに一意の埋め込み部品が解決されていればその dict（無ければ None）。"""
+    if anchor_type != _ANCHOR_SEGMENT or not isinstance(segment_component, dict):
+        return None
+    if not str(segment_component.get("component_id") or "").strip():
+        return None
+    return segment_component
+
+
+def _segment_preamble_step(segment_component: dict, start_node: PersonalNode) -> dict:
+    # ref は既存の種別（起点の痕跡）に揃える — 画面の種別ラベル表を増やさない。
+    label = str(segment_component.get("label") or "") or "この部品"
+    return {
+        "fact": FACT_SEGMENT_COMPONENT.format(label=label),
+        "ref": {
+            "kind": "personal_node",
+            "id": start_node.id,
+            "label": start_node.label,
+            "course_id": start_node.course_id,
+        },
+    }
+
+
 def build_journey(
     start_node: PersonalNode,
     network: PersonalNetwork,
@@ -171,8 +222,14 @@ def build_journey(
     library_entries: dict[str, dict],
     topic_atlas: dict[str, str],
     course_document_ids: set,
+    *,
+    segment_component: dict | None = None,
 ) -> dict:
     """§6 の旅の traversal 本体（純粋関数・非LLM・決定論）。
+
+    ``segment_component``（kw-only・既定 None = 従来どおり）は区画（segment）に帰属した
+    起点で、区画の本文に埋め込まれた部品が一意に解決できたときの ``{"component_id",
+    "label"}``。このときだけ [2][3] をその部品の確定リンクから辿る（IK-0920 ④）。
 
     引数はすべて事前に読み込み済みのプレーンなデータ（dict/list/set）で、DB へは一切
     アクセスしない。呼び出し側（:func:`journey_for_node`）の責務:
@@ -211,14 +268,14 @@ def build_journey(
         main_node = _find_main_node(all_nodes, anchor_type, anchor_id)
         if main_node is not None:
             main_id = str(main_node.get("component_id") or "")
-            main_label = str(main_node.get("label") or main_id)
+            main_label = _main_node_label(main_node) or main_id
             steps.append({
                 "fact": f"この{kind_ja}は理論構成『{main_label}』の一部です",
                 "ref": {"kind": "graph_node", "id": main_id, "label": main_label},
             })
             neighbors = _adjacent_main_nodes(local_graph, main_id, nodes_by_id)
             for neighbor in neighbors[:MAX_FANOUT_PER_SEGMENT]:
-                n_label = str(neighbor.get("label") or neighbor.get("component_id") or "")
+                n_label = _main_node_label(neighbor) or str(neighbor.get("component_id") or "")
                 steps.append({
                     "fact": f"『{main_label}』は『{n_label}』ともつながっています",
                     "ref": {
@@ -229,7 +286,11 @@ def build_journey(
                 })
 
     # ---- [2] 同一性リンク（confirmed のみ・PN-6） + [3] L層ハブ → 他インスタンス ----
-    if anchor_type in _DOCUMENT_LOCAL_ANCHOR_TYPES:
+    # 区画に帰属した起点は、区画に埋め込まれた部品が一意のときだけその部品から辿る（IK-0920 ④）。
+    seg_component = _segment_component(anchor_type, segment_component)
+    if seg_component is not None:
+        steps.append(_segment_preamble_step(seg_component, start_node))
+    if anchor_type in _DOCUMENT_LOCAL_ANCHOR_TYPES or seg_component is not None:
         capped_links = sorted(identity_links, key=_sort_key)[:MAX_FANOUT_PER_SEGMENT]
 
         shared_part_ids_in_order: list[str] = []
@@ -245,8 +306,14 @@ def build_journey(
                 # （generic な「共通部品」名へのフォールバックもしない）。
                 continue
             name = entry.get("name") or "共通部品"
+            if seg_component is not None:
+                fact_2 = FACT_SEGMENT_SHARED_PART.format(
+                    label=str(seg_component.get("label") or "") or "この部品", name=name
+                )
+            else:
+                fact_2 = f"この{kind_ja}は共通部品『{name}』の教材での表れとして確認されています"
             steps.append({
-                "fact": f"この{kind_ja}は共通部品『{name}』の教材での表れとして確認されています",
+                "fact": fact_2,
                 "ref": {"kind": "shared_part", "id": shared_part_id, "label": name},
             })
             if shared_part_id not in shared_part_ids_in_order:
@@ -391,6 +458,7 @@ def build_person_journey(
     viewable_document_ids: set,
     *,
     topic_range: dict | None = None,
+    segment_component: dict | None = None,
 ) -> dict:
     """§6 の旅の traversal（コース横断版・Phase P-2「コース横断の橋」）。
 
@@ -441,12 +509,16 @@ def build_person_journey(
         range_entries = [e for e in (topic_range.get("entries") or []) if isinstance(e, dict)]
         if range_entries:
             topic_label = str(topic_range.get("topic_label") or "")
+            cited_basis = topic_range.get("basis") == "cited"
+            if cited_basis:
+                preamble = FACT_CITED_RANGE_PREAMBLE
+            elif topic_label:
+                preamble = FACT_TOPIC_RANGE_PREAMBLE.format(topic_label=topic_label)
+            else:
+                preamble = FACT_TOPIC_RANGE_PREAMBLE_NO_LABEL
+            node_template = FACT_CITED_RANGE_NODE if cited_basis else FACT_TOPIC_RANGE_NODE
             steps.append({
-                "fact": (
-                    FACT_TOPIC_RANGE_PREAMBLE.format(topic_label=topic_label)
-                    if topic_label
-                    else FACT_TOPIC_RANGE_PREAMBLE_NO_LABEL
-                ),
+                "fact": preamble,
                 "ref": {
                     "kind": "personal_node",
                     "id": start_node.id,
@@ -458,7 +530,7 @@ def build_person_journey(
                 entry_label = str(entry.get("label") or "")
                 entry_title = str(entry.get("document_title") or "") or _UNTITLED_DOCUMENT_LABEL
                 steps.append({
-                    "fact": FACT_TOPIC_RANGE_NODE.format(title=entry_title, label=entry_label),
+                    "fact": node_template.format(title=entry_title, label=entry_label),
                     "ref": {
                         "kind": "graph_node",
                         "id": str(entry.get("component_id") or ""),
@@ -476,14 +548,14 @@ def build_person_journey(
         main_node = _find_main_node(all_nodes, anchor_type, anchor_id)
         if main_node is not None:
             main_id = str(main_node.get("component_id") or "")
-            main_label = str(main_node.get("label") or main_id)
+            main_label = _main_node_label(main_node) or main_id
             steps.append({
                 "fact": f"この{kind_ja}は理論構成『{main_label}』の一部です",
                 "ref": {"kind": "graph_node", "id": main_id, "label": main_label},
             })
             neighbors = _adjacent_main_nodes(local_graph, main_id, nodes_by_id)
             for neighbor in neighbors[:MAX_FANOUT_PER_SEGMENT]:
-                n_label = str(neighbor.get("label") or neighbor.get("component_id") or "")
+                n_label = _main_node_label(neighbor) or str(neighbor.get("component_id") or "")
                 steps.append({
                     "fact": f"『{main_label}』は『{n_label}』ともつながっています",
                     "ref": {
@@ -494,7 +566,11 @@ def build_person_journey(
                 })
 
     # ---- [2] 同一性リンク（confirmed のみ・PN-6） + [3] L層ハブ → 他インスタンス ----
-    if anchor_type in _DOCUMENT_LOCAL_ANCHOR_TYPES:
+    # 区画に帰属した起点は、区画に埋め込まれた部品が一意のときだけその部品から辿る（IK-0920 ④）。
+    seg_component = _segment_component(anchor_type, segment_component)
+    if seg_component is not None:
+        steps.append(_segment_preamble_step(seg_component, start_node))
+    if anchor_type in _DOCUMENT_LOCAL_ANCHOR_TYPES or seg_component is not None:
         capped_links = sorted(identity_links, key=_sort_key)[:MAX_FANOUT_PER_SEGMENT]
 
         shared_part_ids_in_order: list[str] = []
@@ -510,8 +586,14 @@ def build_person_journey(
                 # （generic な「共通部品」名へのフォールバックもしない）。
                 continue
             name = entry.get("name") or "共通部品"
+            if seg_component is not None:
+                fact_2 = FACT_SEGMENT_SHARED_PART.format(
+                    label=str(seg_component.get("label") or "") or "この部品", name=name
+                )
+            else:
+                fact_2 = f"この{kind_ja}は共通部品『{name}』の教材での表れとして確認されています"
             steps.append({
-                "fact": f"この{kind_ja}は共通部品『{name}』の教材での表れとして確認されています",
+                "fact": fact_2,
                 "ref": {"kind": "shared_part", "id": shared_part_id, "label": name},
             })
             if shared_part_id not in shared_part_ids_in_order:
@@ -592,6 +674,99 @@ def build_person_journey(
         steps = steps[:MAX_STEPS]
 
     return {"steps": steps, "frontier_note": frontier_note, "truncated": truncated}
+
+
+def _segment_index(anchor_id: str) -> int | None:
+    """``seg_N`` → N（形が違えば None。``seg_0`` を既定にしない）。"""
+    text = str(anchor_id or "")
+    if not text.startswith("seg_"):
+        return None
+    tail = text[4:]
+    return int(tail) if tail.isdigit() else None
+
+
+def _segment_link_inputs(
+    queries,
+    user_id: str,
+    start_node: PersonalNode,
+    can_view_document=None,
+) -> tuple[dict | None, list[dict], dict[str, dict], set]:
+    """区画に帰属した起点の [2][3] 材料（IK-0920 ④。決定論・推測しない）。
+
+    区画の本文（``build_topic_slides`` の区画 = 配信・痕跡帰属と同じ粒度）に埋め込まれた
+    部品（``![[component:…]]``）が**ちょうど 1 つ**で、コースの論文の範囲で一意に解決でき、
+    その論文を本人が読めるときだけ、その部品の確定リンクを返す。それ以外は
+    ``(None, [], {}, set())``（従来どおり）。
+
+    戻り値: ``(segment_component, matched_links, library_entries, other_document_ids)``。
+    """
+    empty: tuple[dict | None, list[dict], dict[str, dict], set] = (None, [], {}, set())
+    anchor = start_node.anchor
+    if anchor.anchor_type != _ANCHOR_SEGMENT:
+        return empty
+    index = _segment_index(anchor.anchor_id)
+    course_id = str(start_node.course_id or "")
+    topic_id = str(start_node.topic_id or "")
+    if index is None or not course_id or not topic_id:
+        return empty
+    try:
+        topic = queries.fetch_topic(course_id, topic_id)
+        refs = queries.segment_component_refs(topic, index)
+        if len(refs) != 1:
+            return empty
+        course_document_ids = queries.fetch_course_document_ids(course_id)
+        component_id = queries.resolve_course_component(refs[0], set(course_document_ids or set()))
+        if not component_id:
+            return empty
+        document_id = queries.fetch_component_document_id(component_id)
+        if not document_id:
+            return empty
+        if callable(can_view_document) and not can_view_document(user_id, document_id):
+            return empty
+        matched_links = sorted(
+            (
+                row for row in queries.fetch_confirmed_identity_links(document_id)
+                if row.get("instance_element_type") == "theory_component"
+                and str(row.get("instance_element_id") or "") == str(component_id)
+            ),
+            key=_sort_key,
+        )[:MAX_FANOUT_PER_SEGMENT]
+        shared_part_ids: list[str] = []
+        for row in matched_links:
+            shared_part_id = str(row.get("shared_part_id") or "")
+            if shared_part_id and shared_part_id not in shared_part_ids:
+                shared_part_ids.append(shared_part_id)
+        library_entries: dict[str, dict] = {}
+        all_other: set = set()
+        if shared_part_ids:
+            names = queries.fetch_library_entry_names(shared_part_ids)
+            per_entry: dict[str, list[str]] = {}
+            for shared_part_id in shared_part_ids:
+                if shared_part_id not in names:
+                    continue
+                others = {
+                    str(row.get("instance_document_id") or "")
+                    for row in queries.fetch_confirmed_links_for_shared_part(shared_part_id)
+                }
+                others.discard("")
+                others.discard(document_id)
+                per_entry[shared_part_id] = sorted(others)
+                all_other.update(others)
+            titles = queries.fetch_document_titles(sorted(all_other))
+            for shared_part_id, others in per_entry.items():
+                library_entries[shared_part_id] = {
+                    "name": names.get(shared_part_id, ""),
+                    "other_documents": [
+                        {"document_id": d, "title": titles.get(d, "")} for d in others
+                    ],
+                }
+        segment_component = {
+            "component_id": str(component_id),
+            "label": queries.fetch_component_name(component_id),
+        }
+        return segment_component, matched_links, library_entries, all_other
+    except Exception:  # noqa: BLE001 - 辿れないだけ（従来どおりに縮退）
+        return empty
 
 
 def journey_for_node(
@@ -700,6 +875,12 @@ def journey_for_node(
                         ],
                     }
 
+    segment_component = None
+    if anchor.anchor_type == _ANCHOR_SEGMENT:
+        segment_component, matched_links, library_entries, _others = _segment_link_inputs(
+            queries, user_id, start_node, can_view_document,
+        )
+
     topic_atlas = queries.fetch_topic_atlas_binding(course_id)
     course_document_ids = queries.fetch_course_document_ids(course_id)
 
@@ -711,6 +892,7 @@ def journey_for_node(
         library_entries,
         topic_atlas,
         course_document_ids,
+        segment_component=segment_component,
     )
     result["cross_course_hint"] = _cross_course_hint(user_id, start_node)
     return result
@@ -741,7 +923,7 @@ def _cross_course_hint(user_id: str, start_node: PersonalNode) -> dict | None:
     return None
 
 
-def _empty_journey_facts() -> list[str]:
+def _empty_journey_facts(start_node: PersonalNode | None = None) -> list[str]:
     """空の旅に添える出口案内の事実文（文言の正本は ``nearby.FACT_RANGE_SHARPEN``）。
 
     「いまここの周り」の unavailable 分岐と**同じ1行**を使う（同義の別文言を増やさない）。
@@ -749,15 +931,18 @@ def _empty_journey_facts() -> list[str]:
     ``build_journey`` / :func:`build_person_journey` の純粋部を sqlalchemy 無しで
     検証できる本モジュールの規約を守るために遅延 import する。解決できないときは
     行を1つ減らすだけに留める（fail-soft。同じ文字列を複製しない）。
+
+    議論（``_discussion``）由来の痕跡には、discuss で実行できる出口
+    （``nearby.FACT_DISCUSS_SHARPEN``）を案内する（選べる教材テキストが無いため）。
     """
     try:
-        from core.personal_graph.nearby import FACT_RANGE_SHARPEN
+        from core.personal_graph.nearby import sharpen_fact_for
     except Exception:
         return []
-    return [FACT_RANGE_SHARPEN]
+    return [sharpen_fact_for(start_node)]
 
 
-def _with_empty_journey_notice(result: dict) -> dict:
+def _with_empty_journey_notice(result: dict, start_node: PersonalNode | None = None) -> dict:
     """steps が空のときだけ ``notice`` / ``facts`` を足す（非空なら DTO 完全不変）。
 
     欠落を無言の空リストで返さず、事実文（何が記録されていないか）と出口案内を添える。
@@ -767,8 +952,56 @@ def _with_empty_journey_notice(result: dict) -> dict:
     if result.get("steps"):
         return result
     result["notice"] = NOTICE_JOURNEY_EMPTY
-    result["facts"] = _empty_journey_facts()
+    result["facts"] = _empty_journey_facts(start_node)
     return result
+
+
+def _cited_range_for_node(
+    user_id: str,
+    start_node: PersonalNode,
+    can_view_document=None,
+) -> dict | None:
+    """[1'] の「直前の引用」段: この問いへの回答が引用した論文の理論構成（第 17 周 D1）。
+
+    「いまここの周り」の範囲モードと同じ焦点論文の段（``queries.fetch_trace_cited_document_ids``
+    → ``resolve_focus_document``、スコープ = 痕跡のコース sources ∩ 閲覧可能）を使う。
+    どのノードに触れたかは主張せず（touched なし）、論文単位の対応として列挙する。
+    ``can_view_document`` が callable でなければ何も返さない（fail-closed）。
+    """
+    if not callable(can_view_document) or not start_node.course_id:
+        return None
+    try:
+        from core.focus_document import resolve_focus_document
+        from core.personal_graph import nearby, queries
+
+        course_scope = nearby._documents_for_anchor(
+            start_node, can_view_document=can_view_document, user_id=user_id
+        )
+        cited_docs = queries.fetch_trace_cited_document_ids(start_node.id)
+        focus = resolve_focus_document(
+            allowed_document_ids=course_scope,
+            previous_cited_document_ids=cited_docs,
+        )
+        document_ids = [d for d in focus.document_ids if can_view_document(user_id, d)]
+        if not document_ids:
+            return None
+        titles = queries.fetch_document_titles(document_ids)
+        entries: list[dict] = []
+        for document_id in document_ids:
+            graph = queries.fetch_component_graph(document_id)
+            if not graph:
+                continue
+            for node in nearby.main_nodes(graph):
+                entries.append({
+                    "component_id": str(node.get("component_id") or ""),
+                    "label": nearby.node_display_label(node),
+                    "document_title": titles.get(document_id, ""),
+                })
+        if not entries:
+            return None
+        return {"topic_label": "", "entries": entries[:MAX_FANOUT_PER_SEGMENT], "basis": "cited"}
+    except Exception:
+        return None
 
 
 def _topic_range_for_node(
@@ -964,6 +1197,17 @@ def journey_for_person_node(
                         if can_view_document(user_id, doc_id):
                             viewable_document_ids.add(doc_id)
 
+    segment_component = None
+    if anchor.anchor_type == _ANCHOR_SEGMENT:
+        segment_component, matched_links, library_entries, segment_others = _segment_link_inputs(
+            queries, user_id, start_node, can_view_document,
+        )
+        # [3] の閲覧可否は component 起点と同じく 1 件ずつ（callable でなければ空 = fail-closed）。
+        if callable(can_view_document):
+            for doc_id in segment_others:
+                if can_view_document(user_id, doc_id):
+                    viewable_document_ids.add(doc_id)
+
     course_ids = sorted({str(n.course_id) for n in network.nodes if n.course_id})
     atlas_by_course = (
         queries.fetch_topic_atlas_binding_for_courses(course_ids) if course_ids else {}
@@ -975,6 +1219,12 @@ def journey_for_person_node(
         topic_range = _topic_range_for_node(
             user_id, start_node, can_view_document=can_view_document,
         )
+        if topic_range is None:
+            # 第 17 周 D1: トピック⇄claim の対応が引けない痕跡（議論など）は、この問いへの
+            # 回答が引用した論文を範囲の入口にする（nearby と同じ焦点論文の段）。
+            topic_range = _cited_range_for_node(
+                user_id, start_node, can_view_document=can_view_document,
+            )
 
     result = build_person_journey(
         start_node,
@@ -986,5 +1236,6 @@ def journey_for_person_node(
         course_titles,
         viewable_document_ids,
         topic_range=topic_range,
+        segment_component=segment_component,
     )
-    return _with_empty_journey_notice(result)
+    return _with_empty_journey_notice(result, start_node)

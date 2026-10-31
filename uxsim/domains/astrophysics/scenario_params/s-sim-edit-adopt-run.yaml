@@ -1,0 +1,22 @@
+scenario: s-sim-edit-adopt-run
+domain: astrophysics
+# 場面 (b) st-03（adjacent_field・素粒子出身）。暗黒エネルギーと修正重力の音速の論文の Horndeski のトピック。
+# 「定義: L_2」は式の本文があり復元式を入力に含まない outer モジュール。
+params:
+  goal_text: 制限付き Horndeski 設定の一つの定義を、自分でコードに直して動かし、式の意味を手で確かめること
+  topic_hint: 制限付きHorndeski設定とbraidingの導出（暗黒エネルギーと修正重力の音速の論文）
+  topic_hint_terms:
+  - Horndeski
+  - braiding
+  module_hint: L_2
+  edit_hint: パラメータの既定値か係数を 1 つだけ自分の想定する値に書き換える（例として params.get の既定値を 1.0 から 0.5 にする）
+  input_hints:
+    X: 0.5
+    phi: 1.0
+    k: "0.1, 0.2, 0.3"
+  questions:
+  - 素粒子の場の理論のラグランジアンと同じ読み方でよいですか？ 出力の値は何を表していますか？
+per_archetype:
+  adjacent_field:
+    questions:
+    - 素粒子の有効場の理論でいうラグランジアン密度と同じ読み方でよいですか？ 出力の値は何を表していますか？

@@ -105,10 +105,14 @@ class TestBuildTopicEvidenceItems:
     def test_topic_summary_and_source_summary_resolve(self):
         from core.course_content_builder import build_topic_evidence_items
 
-        by_ref = _items_by_ref(build_topic_evidence_items({"summary": "概要テキスト"}))
+        items = build_topic_evidence_items({"summary": "概要テキスト"})
+        by_ref = _items_by_ref(items)
         assert by_ref["source:topic_summary"]["title"] == "トピック概要"
-        assert by_ref["source:summary"]["title"] == "トピック概要"
         assert "概要テキスト" in by_ref["source:topic_summary"]["summary"]
+        # 第 25 周 第 6 波（IK-1034）: 別名 source:summary は項目を作らず alt_ids（解決の索引）に畳む。
+        assert "source:summary" not in by_ref
+        assert "summary" in by_ref["source:topic_summary"].get("alt_ids", [])
+        assert sum(1 for i in items if i.get("title") == "トピック概要") == 1
 
     def test_component_fallback_from_content_blocks(self):
         """evidence_links に無い linked_component_id は content_blocks から補完する。"""

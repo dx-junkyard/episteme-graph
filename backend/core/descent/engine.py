@@ -58,7 +58,12 @@ from core.descent.resolve import (
     ELEMENT_TYPE_COMPONENT,
     ELEMENT_TYPE_EQUATION,
     SUPPORTED_ELEMENT_TYPES,
+    UNRESOLVED_AMBIGUOUS,
+    UNRESOLVED_NO_DOCUMENTS,
+    UNRESOLVED_NOT_FOUND,
+    UNRESOLVED_NOT_IN_FOCUS,
     ResolvedElement,
+    explain_unresolved,
     resolve_element,
 )
 from core.element_vocab import (
@@ -109,6 +114,54 @@ _STAGE_DESCRIPTION_LIMIT = 160
 # 出典リビールの事実文（素材ゼロを隠さない — 空は沈黙ではない）。
 REVEAL_NOTE_WITH_ITEMS = "出典の導出チェーンの記述を逐語で示しています。"
 REVEAL_NOTE_EMPTY = "この要素に対応する導出ステップは出典から同定できていません。"
+# 空になった理由（第 14 周: 「同定できていません」で終わらせない）。
+REVEAL_REASON_NO_EQUATION_LINK = (
+    "この要素は解析で式に結び付いていないため、式をたどる導出ステップを探せませんでした。"
+)
+REVEAL_REASON_NO_STEP = (
+    "式には結び付いていますが、その式を含む導出ステップが解析結果にありません。"
+)
+
+# 梯子を組めなかった理由の事実文（第 17 周 D3: available:false を理由なしで返さない）。
+UNRESOLVED_FACTS: dict[str, str] = {
+    UNRESOLVED_NO_DOCUMENTS: "このコースには、解析済みの教材がまだ結び付いていません。",
+    UNRESOLVED_AMBIGUOUS: (
+        "同じ番号の要素が複数の論文にあり、どの論文のものか決められませんでした。"
+    ),
+    UNRESOLVED_NOT_IN_FOCUS: "この要素は、いま見ている論文の解析結果の中に見つかりませんでした。",
+    UNRESOLVED_NOT_FOUND: "この要素は、このコースの教材の解析結果の中に見つかりませんでした。",
+}
+# 次の一手（実行できる操作だけを案内する）。
+UNRESOLVED_EXIT_EQUATION = (
+    "式の中の記号をタップすると定義を確認できます。要素の文脈（⚓）からも関係をたどれます。"
+)
+UNRESOLVED_EXIT_OTHER = "要素の文脈（⚓）から関係をたどれます。"
+
+
+def unavailable_ladder(
+    element_type: str,
+    element_id: str,
+    course_data: dict | None,
+    *,
+    preferred_document_ids: "tuple[str, ...] | list[str]" = (),
+) -> dict[str, Any]:
+    """解決できなかった梯子の DTO（理由の事実文 + 次の一手。数値なし・fail-soft）。"""
+    try:
+        reason = explain_unresolved(
+            element_type, element_id, course_data,
+            preferred_document_ids=preferred_document_ids,
+        )
+    except Exception:  # noqa: BLE001 — 診断は補助（理由を言えないときも次の一手は示す）
+        reason = UNRESOLVED_NOT_FOUND
+    exit_line = (
+        UNRESOLVED_EXIT_EQUATION if element_type == ELEMENT_TYPE_EQUATION else UNRESOLVED_EXIT_OTHER
+    )
+    return {
+        "available": False,
+        "reason": reason,
+        "facts": [UNRESOLVED_FACTS.get(reason, UNRESOLVED_FACTS[UNRESOLVED_NOT_FOUND]), exit_line],
+    }
+
 
 # graph_layer の語彙（component_graph/schema.py と同じ3層）。
 _GRAPH_LAYER_MAIN = "main"
@@ -330,11 +383,14 @@ def _reveal_rung(
                         ],
                     }
                 )
-    return {
+    reveal: dict[str, Any] = {
         "kind": "reveal",
         "items": items,
         "note": REVEAL_NOTE_WITH_ITEMS if items else REVEAL_NOTE_EMPTY,
     }
+    if not items:
+        reveal["reason"] = REVEAL_REASON_NO_STEP if eq_set else REVEAL_REASON_NO_EQUATION_LINK
+    return reveal
 
 
 def compose_ladder(
@@ -344,6 +400,7 @@ def compose_ladder(
     stage_description: str,
     symbol_items: list[dict[str, Any]],
     reveal: dict[str, Any],
+    target_label: str = "",
 ) -> dict[str, Any]:
     """素材から梯子を決定論的に組む純粋関数（テスト可能な合成部）。
 
@@ -362,21 +419,39 @@ def compose_ladder(
     if symbol_items:
         rungs.append({"kind": "symbols", "items": symbol_items})
     rungs.append(reveal)
-    return {"available": True, "rungs": rungs}
+    result: dict[str, Any] = {"available": True, "rungs": rungs}
+    if target_label:
+        # どの要素の段かを示す（主張本文 80 字 / 部品名 / 式の印字番号。内部 ID は入れない）。
+        result["target_label"] = target_label
+    return result
 
 
 def build_ladder(
-    course_data: dict | None, course_id: str, element_type: str, element_id: str
+    course_data: dict | None,
+    course_id: str,
+    element_type: str,
+    element_id: str,
+    *,
+    preferred_document_ids: "tuple[str, ...] | list[str]" = (),
 ) -> dict[str, Any]:
     """足場ダイヤルの梯子を組む（設計書 §2。全段を一度に返す — 開示順制御はフロント）。
 
-    要素がコース sources 内で解決できなければ ``{"available": False}``（fail-closed。
+    要素がコース sources 内で解決できなければ ``available: False`` + 理由の事実文 ``facts``（fail-closed。
     エラーにしない）。``course_id`` は呼び出し文脈の記録用引数で、スコープの実体は
     ``course_data``（受講ゲート通過済みの版ビュー）から導く。
     """
-    resolved = resolve_element(element_type, element_id, course_data)
+    resolved = (
+        resolve_element(
+            element_type, element_id, course_data, preferred_document_ids=preferred_document_ids
+        )
+        if preferred_document_ids
+        else resolve_element(element_type, element_id, course_data)
+    )
     if resolved is None:
-        return {"available": False}
+        return unavailable_ladder(
+            element_type, element_id, course_data,
+            preferred_document_ids=preferred_document_ids,
+        )
 
     artifacts = document_run_artifacts(resolved.document_id)
     nodes = _graph_nodes(fetch_component_graph(resolved.document_id))
@@ -397,6 +472,7 @@ def build_ladder(
         stage_description=stage_description,
         symbol_items=symbol_items,
         reveal=reveal,
+        target_label=resolved.label,
     )
 
 
@@ -496,7 +572,12 @@ def compose_backstage_path(
 
 
 def build_backstage_path(
-    course_data: dict | None, course_id: str, element_type: str, element_id: str
+    course_data: dict | None,
+    course_id: str,
+    element_type: str,
+    element_id: str,
+    *,
+    preferred_document_ids: "tuple[str, ...] | list[str]" = (),
 ) -> dict[str, Any]:
     """楽屋の降下路（設計書 §4: 規約差 → 記号定義 → 前提概念の generic 説明）。
 
@@ -508,7 +589,13 @@ def build_backstage_path(
 
     symbol_items: list[dict[str, Any]] = []
     generic_items: list[dict[str, Any]] = []
-    resolved = resolve_element(element_type, element_id, course_data)
+    resolved = (
+        resolve_element(
+            element_type, element_id, course_data, preferred_document_ids=preferred_document_ids
+        )
+        if preferred_document_ids
+        else resolve_element(element_type, element_id, course_data)
+    )
     if resolved is not None:
         artifacts = document_run_artifacts(resolved.document_id)
         nodes = _graph_nodes(fetch_component_graph(resolved.document_id))

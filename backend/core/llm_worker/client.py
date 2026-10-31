@@ -15,6 +15,7 @@ import re
 
 from core.llm import generate_text
 from core.llm_policy import resolve_for_setting
+from core.llm_worker.single_shot import json_mode_kwargs
 
 
 def resolve_model(model_setting_key: str, *, fallback: str = "fast") -> str:
@@ -39,10 +40,24 @@ def resolve_model(model_setting_key: str, *, fallback: str = "fast") -> str:
     return resolve_for_setting(model_setting_key, fallback=fallback)
 
 
+class LLMOutputNotJSONError(ValueError):
+    """LLM 応答が JSON として読めなかった（``ValueError`` の部分型・既存の except は不変）。
+
+    ``raw_text`` に読めなかった生の応答を持つ。修復ループ（``repair.run_with_repair``）が
+    これを「Your previous output」として次の試行へ渡す（IK-0402: 読めなかった出力を
+    捨てて空の区画を渡していた）。
+    """
+
+    def __init__(self, message: str, raw_text: str = ""):
+        super().__init__(message)
+        self.raw_text = str(raw_text or "")
+
+
 def parse_json_response(text: str) -> dict:
     """LLM 応答から JSON を取り出す（markdown フェンス・前後プロースを許容）。
 
-    パース不能なら ValueError（呼び出し側の repair 対象）。
+    パース不能なら :class:`LLMOutputNotJSONError`（``ValueError`` の部分型。呼び出し側の
+    repair 対象）。
     """
     raw = (text or "").strip()
     if raw.startswith("```"):
@@ -54,8 +69,13 @@ def parse_json_response(text: str) -> dict:
         # 前後に説明文が付いた場合は最外の {...} を試す
         start, end = raw.find("{"), raw.rfind("}")
         if start >= 0 and end > start:
-            return json.loads(raw[start:end + 1])
-        raise ValueError("LLM output is not valid JSON")
+            try:
+                return json.loads(raw[start:end + 1])
+            except json.JSONDecodeError as exc:
+                raise LLMOutputNotJSONError(
+                    "LLM output is not valid JSON", raw_text=text or "",
+                ) from exc
+        raise LLMOutputNotJSONError("LLM output is not valid JSON", raw_text=text or "")
 
 
 class BaseJSONLLMClient:
@@ -68,9 +88,15 @@ class BaseJSONLLMClient:
         self._model = model
 
     def complete_json(self, content: str) -> dict:
-        """user ロール1本で呼び出し、JSON dict を返す。"""
+        """user ロール1本で呼び出し、JSON dict を返す。
+
+        JSON モード（``response_format={"type": "json_object"}``）を要求する
+        （IK-0452。7系統の worker がプロンプト文面でしか JSON を求めていなかった）。
+        取り出しは従来どおり :func:`parse_json_response`（修復ループの入力は不変）。
+        """
         answer = generate_text(
             messages=[{"role": "user", "content": content}],
             model=self._model or resolve_model(self._model_setting_key),
+            **json_mode_kwargs(generate_text),
         )
         return parse_json_response(answer)

@@ -54,6 +54,11 @@ resolution:
     - backend/core/label_vocab.py
     - backend/core/atlas_vectors/query.py
     - docs/features/atlas_vector_anchoring_design.md §9
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E（実 DB への migration 適用・freeze フックの実走・実 embedding）
+      - 閾値の妥当性（運用での実測による見直しを前提としている）
 related: []
 view_of: []
 history:

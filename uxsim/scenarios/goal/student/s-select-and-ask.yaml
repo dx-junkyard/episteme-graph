@@ -1,0 +1,42 @@
+id: s-select-and-ask
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、教材の一文を選択して、そこが分からないと質問する'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- selection_text
+- selection_question
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.chat.ask_selection
+  with:
+    selection_text: '{{selection_text}}'
+    message: '{{selection_question}}'
+- do: learning.anchors.digest
+- choose:
+  - do: learning.anchors.confirm
+  - do: learning.anchors.dismiss
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#selection-ask
+- manual: student/02-student.md#tension-digest
+watch_for:
+- 選んだ箇所が教材と一致したかどうかの確認文が出る
+- 帰属カードに何についての引っかかりとして記録されるかが表示される

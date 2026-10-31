@@ -823,3 +823,27 @@ Opus 5 読み取り専用レビューの指摘を同日修正（migration 追加
    `svg_source` フェイルソフト（MinIO 取得失敗時は DB 正本の svg_source を配信、
    空なら従来どおり 404）は `routes/learning.py` に適用済み。
    docker E2E（実 DB / MinIO / LLM）は未実施のまま。
+
+## 2026-10-23 追補（第 25 周 面 D 第 1 周の是正）
+
+- **図の埋め込みは段落として（IK-0880）**: `lsApplyFigureInsert` は前後を空行で区切って差し込み
+  （`lsAsParagraph`）、カーソルが決定論付録の中・後ろにあれば付録の見出しの直前へ寄せる
+  （`lsMoveCursorBeforeGeneratedAppendix`。見出しの文字列は course-structure の `generated_appendix_headings` で
+  サーバから受ける）。`strip_generated_reference_appendix` は 1 行に埋め込みが複数ある行も付録の行と認め、その行の図は
+  付録と一緒に消さず本文の段落として残す。
+- **図スタジオ・つまづきの論文（IK-0876）**: course-structure がコースの論文（`documents`）と各トピックの論文
+  （`document_ids` = 学ぶ単位 → 部品 → 教材チャンク。コースの論文が 1 本ならそれ）を返し、`documentIds` と
+  つまづきの集計はトピックの論文を先に使う。決まらなければ `topic_document_unresolved_notice` を出す。
+- ガードレール: `test_lecture_studio_round25.py`。
+
+## 2026-10-23 追補（第 25 周 面 D 第 2 周の是正）
+
+- **採用後の根拠リンク（IK-0910）**: 採用はサーバ側でトピックの `evidence_links` / `linked_figure_ids` に図を登録するが、
+  根拠リンクの一覧は course-structure の派生（`evidence_items`）だった。`onInsert` の後に
+  `lsRefreshTopicServerFacts(topic, {keepDraft: true})` が当該トピックのサーバ派生だけを取り直す（編集中の本文には触れない）。
+  保存の後も同じ関数で取り直す。
+- **図の連結が保存済みのトピック（IK-0880 の残り）**: 読み時には付け直さない。原稿スタジオの [付録を付け直す]
+  （`lecture_slide_sync_design.md` の同日追補）が、付録の行に連結された図を本文の段落として残したまま付録を作り直す。
+- **保存できない閲覧者（IK-0908）**: 図の生成・採用はすでに所有者ゲート（§8）。トピックの保存も所有者だけで、
+  course-structure の `can_save` / `save_notice` で保存の前から言う。
+- ガードレール: `test_lecture_studio_round25_r2.py`。

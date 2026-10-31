@@ -406,7 +406,8 @@ class TestDeriveEdgeCandidates:
             "skeleton_version",
         }
 
-    def test_sorted_by_node_ids(self):
+    def test_sorted_by_nearness_then_node_ids(self):
+        """IK-0887: 近さだけの組は近い順（値は出さない）。a—d は完全一致で a—c より近い。"""
         sk = skeleton(regions=[("r1", ["a"]), ("r2", ["c", "d"])])
         out = derive.derive_edge_candidates(
             placement_session([]),
@@ -418,7 +419,7 @@ class TestDeriveEdgeCandidates:
                 FakeAnchor("d", [1.0, 0.0]),
             ],
         )
-        assert [(i["from_id"], i["to_id"]) for i in out] == [("a", "c"), ("a", "d")]
+        assert [(i["from_id"], i["to_id"]) for i in out] == [("a", "d"), ("a", "c")]
 
     def test_empty_skeleton_is_fail_closed(self):
         session = placement_session([("d1", "Alpha", "a")])
@@ -665,11 +666,15 @@ class TestFreezeIntegration:
             session, domain_key=DOMAIN, draft_edge_pairs=[("c", "a")]
         )
         assert [p["edge_key"] for p in pending] == [other]
-        assert pending[0] == {
+        # 帰属の材料（IK-0939）は ``decision`` として足される（表示用の写しは route）。
+        assert pending[0]["decision"]["status"] == "accepted"
+        assert {k: v for k, v in pending[0].items() if k != "decision"} == {
             "edge_key": other,
             "from_id": "b",
             "to_id": "d",
             "edge_kind": "depends",
+            # IK-1149: 向きの記録なし（migration 096 より前の採用）は False で正直に。
+            "direction_recorded": False,
             "review_note": "",
         }
 
@@ -803,6 +808,7 @@ class TestThreads:
             "from_label",
             "to_label",
             "nearness_label",
+            "basis_line",  # IK-0887: 糸ごとの根拠の一文（組の名前・数値なし）
         }
 
     def test_dismissed_edges_disappear(self, monkeypatch):
@@ -866,6 +872,17 @@ class TestThreads:
 
     def test_empty_domain_is_unavailable(self):
         assert threads.threads_for_domain(FakeSession(), "") == {"available": False}
+
+    def test_unavailable_note_explains_reason_without_numbers(self, monkeypatch):
+        """第 14 周: 糸が出ない理由（骨格なし / 索引未構築）を事実文で言い分ける。"""
+        import re as _re
+
+        patch_sources(monkeypatch, sk=None, anchors=[])
+        assert threads.threads_unavailable_note(FakeSession(), DOMAIN) == threads.NOTE_NO_FROZEN_SKELETON
+        patch_sources(monkeypatch, sk=SKELETON, anchors=[])
+        note = threads.threads_unavailable_note(FakeSession(), DOMAIN)
+        assert "索引がまだ作られていない" in note
+        assert not _re.search(r"\d+\s*(件|本|個|%)", note)
 
     def test_pairs_are_cached_per_domain_and_version(self, monkeypatch):
         calls = {"n": 0}

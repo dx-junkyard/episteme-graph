@@ -1,0 +1,39 @@
+scenario: t-share-identity-queue
+domain: astrophysics
+params:
+  goal_text: 別々の論文に出てくる同じ部品を、学生に共通部品として見せてよいかを判断すること
+  dismiss_reason: 支持する論文の表記だけでは同じ部品と言える根拠が読めないため
+  revoke_reason: 確定したが、読み直すと一方が他方を使うだけの関係で同じ部品とは言えないため
+  # 第 25 周 第 7 周 H45: 前提①（share_pair_frozen）で確定・凍結した PINN の TeX ⇄ PDF の対のエントリ（id の頭）。この確定リンクは
+  # 場面の材料なので取り消さない。取り消しの対象を指すときは revoke_target_hint（部品名・論文の題名・「リンクN」）を足す
+  revoke_protect_entry_ids: 67727cb0
+  revoke_target_hint: ""
+  copilot_questions:
+    - 同一性の候補を確認・見送りすると、学生の画面では何が変わりますか？
+    - リンクの見送りと概念の見送りは何が違いますか？
+personas:
+  te-01-rookie-seminar:
+    dismiss_reason: 同じものかどうか自分では判断できないため、いったん見送ります
+    # 第 8 周（judge_share_r7 §6）: te-01 は PINN の viewer（pinn_editor_removed）。権限の無い教員が同一性の候補で何を読め、何を
+    # 押せないか（判断の行の読み手 IK-1050 を別の教員の目で）。主は確定の手（候補 → 確認の問い → 確定）と理由付きの見送り（422 の是正後）。
+    # 前提①（67727cb0）以外の確定リンクは 0 本（周の前の実測）なので取り消しは対象なし = 任意の手として飛ぶ（revoke_target_hint は空のまま）
+    revoke_reason: 確定の根拠を読み直したが、自分には同じ部品だと言い切れないため取り消したい
+  te-05-delegator-lab:
+    # 第 7 周（judge_share_r6 §6。te-05 の (a) は第 2 周以来 — 取り消しの手も段の分割も無かった）: H39 で段を分けた場面で「確認 → 詳細を開く → ［確定を取り消す］（理由）」と
+    # 別のリンクの理由付きの見送り（IK-0953 の初評価）。PINN の TeX ⇄ PDF の対（10 番）は前提①で te-03 が確定・凍結済み —
+    # 取り消すのは te-05 がこの run で確認した別のリンク（凍結した対を取り消すと st-05 の (d) が見るものが変わる。campaign notes）。
+    # te-05 に PINN 2 版の editor が要る（無いと確認・見送り・取り消しが 404 — 周の前に pinn_editor --pinn-editor-teacher te-05）
+    dismiss_reason: 確認する時間が取れないため見送り。必要なら院生に再確認させる
+    revoke_reason: 確定したが、詳細の逐語を読むと一方が他方を入力として使うだけに見える。院生に再確認させるまで取り消しておく
+  te-02-veteran-intro:
+    # 第 5 周（judge_share_r4 §6）: PINN の TeX 版・PDF 版で同一性の候補づくりを再実行した後に、TeX ⇄ PDF の対が候補に出るか
+    # （IK-0919 の砂場での確かめ）を最初に読み、確認・見送りする。PINN 2 版の editor 共有は doubt の t-db-ledger-readonly-probe の
+    # 後に与える（campaign notes）。確定の取り消しの手（IK-0953）は第 4 波の同期で行為 admin.library.identity_link_revoke を足した（任意の手）
+    dismiss_reason: 同じ部品とは読めない。見送り
+  te-03-meticulous-seminar:
+    # 第 6 周（judge_share_r5 §6）: te-03 は (a) 未担当（第 1 周は (a') bind-versions）。PINN の TeX 版の再解析 → identity の再実行の
+    # 後の候補を読み、根拠の読めるリンクを 1 本確認 → 名前の違う対を理由付きで見送り → 確認した 1 本を理由付きで取り消す
+    # （IK-0917 の弁・IK-0953 の取り消しを初めて実地で。リンクは「リンクN」で選べる = H35）。確認と見送りは場面の同じ choose に
+    # 並ぶので 1 run でどちらか一方になる（campaign notes の「場面に足りない手」）
+    dismiss_reason: 支持する論文の表記を読むと、片方は状態方程式の部品で、もう片方は損失関数の部品なので、同じ部品とは言えない
+    revoke_reason: 確定した後に両方の逐語を読み直すと、一方は他方を入力として使うだけで、同じ部品とは言えないと分かったため取り消す

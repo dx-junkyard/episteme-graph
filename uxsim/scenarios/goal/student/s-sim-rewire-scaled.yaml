@@ -1,0 +1,93 @@
+id: s-sim-rewire-scaled
+population: students
+runner:
+- api
+# 第 22 周 (d')。第 21 周 (d) で雑音の sigma が理論の出力の桁より 8 桁大きく、配線の差が段階の言葉に出なかった場面の再設計。
+# 部品パラメータの注記（sigma は理論の出力と同じ単位の絶対値）が効いて、1 回目の実行で理論の出力の桁を読んでから sigma を
+# 決め直せるかを見る。改訂案はこの経路で 1 回だけ。
+goal: '{{goal_text}} のために、{{topic_hint}} の理論のまとまりを、雑音の大きさを出力の桁に合わせた配線に通して差を見比べる'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_hint
+- input_hints
+- wiring_names
+- wiring_parts
+- wiring_params
+- questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+- do: learning.simlab.generate
+  note: コードの下書きを AI に作らせる（この経路で 1 回だけ）
+- do: learning.simlab.adopt
+- do: learning.simlab.wiring_save
+  with:
+    name: '{{wiring_names | next}}'
+    parts: '{{wiring_parts | next}}'
+    params: '{{wiring_params | next}}'
+  note: 1 つ目の配線（雑音だけ・sigma は部品の既定値のまま）を保存する。部品の注記（sigma の単位）を読む
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    wiring: '{{wiring_names | current}}'
+  note: 入力の記号は io_contract.inputs に合わせて置き換える。理論の出力の桁（10 の何乗か）を読む
+- do: learning.simlab.wiring_save
+  with:
+    name: '{{wiring_names | next}}'
+    parts: '{{wiring_parts | next}}'
+    params: '{{wiring_params | next}}'
+  note: 雑音だけの配線を、sigma を理論の出力の桁に合わせて（出力のおよそ 1 割の大きさに）保存し直す。台本の sigma は仮の値なので、読んだ桁で置き換える
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    wiring: '{{wiring_names | current}}'
+  note: 同じ入力で動かし、1 回目と段階の言葉・ばらつきが変わったかを見る
+- do: learning.simlab.wiring_save
+  with:
+    name: '{{wiring_names | next}}'
+    parts: '{{wiring_parts | next}}'
+    params: '{{wiring_params | next}}'
+  note: 桁を合わせた sigma のまま、雑音のあとに平均化を足した配線を保存する（sigma は直前と同じ値に置き換える）
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    wiring: '{{wiring_names | current}}'
+  note: 同じ入力で動かし、平均化で分離の段階の言葉が変わったかを見る
+- do: learning.simlab.propose_revision
+  note: 部品の組み替えの提案を AI に求める（この経路で 1 回だけ）。提案が採用済みの扱いになっていないかを見る
+- choose:
+  - do: learning.chat.ask
+    with:
+      message: '{{questions | next}}'
+      simulation_run_id: latest
+    note: 開いている最新の実行について、配線の差が何から来たのかを聞く
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-steps
+- manual: student/02-student.md#simulation-lab-levels
+- manual: student/02-student.md#simulation-lab-not-verification
+watch_for:
+- 部品のパラメータに、sigma が理論の出力と同じ単位の絶対値だという注記が添えられている
+- 1 回目の実行で理論の出力の桁が読め、sigma をその桁に合わせ直せる
+- 桁を合わせたあと、雑音だけと雑音と平均化で、分離の段階の言葉が違って出る
+- 改訂案は「AI の提案（未確認）」として並ぶだけで、配線が勝手に置き換わらない
+- 段階の言葉が「軸名: 段階」の形で、何と何を比べた言葉かが分かる
+- 模擬観測と理論の出力が近くても、論文の主張が確かめられたという言い方にならない

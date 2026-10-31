@@ -131,7 +131,9 @@ class TestLocalGraphSegment:
         graph_steps = [s for s in result["steps"] if s["ref"]["kind"] == "graph_node"]
         assert len(graph_steps) == 1
         assert graph_steps[0]["ref"]["id"] == "c1"
-        assert "Equation system" in graph_steps[0]["fact"]
+        # IK-0546: main の英語の stage 名は日本語の段名で見せる（graph_json は不変）。
+        assert "式の体系" in graph_steps[0]["fact"]
+        assert "Equation system" not in graph_steps[0]["fact"]
 
     def test_component_anchor_resolves_via_member_component_ids(self):
         start = _node(id_="n1", anchor=_component_anchor("detail_c"))

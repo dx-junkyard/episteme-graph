@@ -57,6 +57,7 @@
 | `indicator_catalog` | 制度指標カタログ |
 | `disclosure_axes` | 可視性6軸の宣言 |
 | `decision_context` | 確定文脈の記帳 |
+| `simulation_bridge_sb` | SB層 検証シミュレーション層（Simulation Bridge） |
 | `shared_infra` | 横断基盤（共有ユーティリティ） |
 | `rag_chat` | （索引表外）学習チャット・RAG 経路・前提知識ゲート・確認問題（`routes/learning.py` 中核） |
 | `course_builder` | （索引表外）コースビルダー・コース登録・freeze（`course_content_builder`） |

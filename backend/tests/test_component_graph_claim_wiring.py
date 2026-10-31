@@ -283,6 +283,9 @@ def _derivations(claim_ids: list[str]) -> DerivationChainResult:
         output_equation_ids=["eq_d"],
         review_status="teacher_review_required",
         required_claim_ids=list(claim_ids),
+        # 消去対象の記号が無い eliminate step は generic に落ちる（2026-10-16 是正）ので、
+        # この fixture は消去対象を明示する（本テストの主題は claim の配線）。
+        eliminated_symbols=["b2"],
     )
     return DerivationChainResult(
         document_id="doc",

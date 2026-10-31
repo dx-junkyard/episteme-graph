@@ -148,6 +148,65 @@ def _evidence_blocks(evidence_registry: Any) -> dict[str, str]:
     return index
 
 
+def _block_sections(skeleton: Any, evidence_registry: Any) -> dict[str, str]:
+    """``block_id -> section_id``（実所在のみ・推定しない）。
+
+    ``section_block`` 以外の 3 種別（thesis_support / parent_component / dsl_node）は
+    ``section_ids`` が常に空だった。素材側に章が書かれていないわけではなく、
+    ``EvidenceRecord.source`` が ``block_id`` と ``section_id`` を両方持っており、
+    ``PaperSkeletonResult.logical_blocks`` も ``evidence_block_ids`` と ``section_ids``
+    を並べて持っている — 読んでいなかっただけである。この2つだけを材料にして
+    block → section を引く（本文の推定・見出しの当てはめはしない = PL3 と同じ規律）。
+
+    skeleton の論理ブロックは複数章にまたがり得るので、``section_ids`` が
+    ちょうど1つのときだけ採る（曖昧なら引かない）。evidence 側が先勝ち（1 block =
+    1 evidence 所在で曖昧さが無い）。
+    """
+    index: dict[str, str] = {}
+    for record in getattr(evidence_registry, "records", None) or []:
+        source = getattr(record, "source", None)
+        block_id = _text(getattr(source, "block_id", ""))
+        section_id = _text(getattr(source, "section_id", ""))
+        if block_id and section_id:
+            index.setdefault(block_id, section_id)
+    for block in getattr(skeleton, "logical_blocks", None) or []:
+        data = _plain(block)
+        if not isinstance(data, dict):
+            continue
+        section_ids = _id_list(data.get("section_ids"))
+        if len(section_ids) != 1:
+            continue
+        for block_id in _id_list(data.get("evidence_block_ids")):
+            index.setdefault(block_id, section_ids[0])
+    return index
+
+
+def _sections_for_blocks(
+    block_ids: Iterable[str], block_sections: Mapping[str, str]
+) -> list[str]:
+    """出典 block の並び → 章 ID の並び（順序保持・重複除去・引けないものは落とす）。"""
+    out: list[str] = []
+    for block_id in _id_list(block_ids):
+        section_id = _text(block_sections.get(block_id))
+        if section_id and section_id not in out:
+            out.append(section_id)
+    return out
+
+
+def _sections_for_claims(
+    agent_claim_ids: Iterable[str],
+    claim_blocks: Mapping[str, list[str]],
+    block_sections: Mapping[str, str],
+) -> list[str]:
+    """agent claim ID の並び → 章 ID の並び（claim → 出典 block → 章）。"""
+    blocks: list[str] = []
+    for agent_id in _id_list(agent_claim_ids):
+        for block_id in claim_blocks.get(agent_id, ()):
+            if block_id not in blocks:
+                blocks.append(block_id)
+    return _sections_for_blocks(blocks, block_sections)
+
+
 def _resolve_claims(agent_ids: Iterable[Any], claim_id_map: Mapping[str, str]) -> list[str]:
     """agent claim ID の並びを DB UUID に写す（解決できないものは落とす = 推測しない）。"""
     out: list[str] = []
@@ -340,7 +399,15 @@ def _thesis_nodes(thesis: Any) -> list[dict]:
     """
     if not thesis:
         return []
-    central = getattr(thesis, "central_thesis", None)
+
+    def _field(name: str) -> Any:
+        # 保存済み artifact（dict）と agent の結果（オブジェクト）の両方を読む
+        # （IK-0453。コース側は artifact の dict から同じノードを組み直す）。
+        if isinstance(thesis, dict):
+            return thesis.get(name)
+        return getattr(thesis, name, None)
+
+    central = _plain(_field("central_thesis"))
     if not isinstance(central, dict):
         central = {}
     nodes: list[dict] = [{
@@ -351,7 +418,7 @@ def _thesis_nodes(thesis: Any) -> list[dict]:
         "equation_ids": _id_list(central.get("equation_ids")),
         "evidence_block_ids": _id_list(central.get("evidence_block_ids")),
     }]
-    support_structure = getattr(thesis, "support_structure", None)
+    support_structure = _plain(_field("support_structure"))
     if isinstance(support_structure, dict):
         for section, entries in support_structure.items():
             if not isinstance(entries, list):
@@ -371,9 +438,43 @@ def _thesis_nodes(thesis: Any) -> list[dict]:
     return nodes
 
 
+def thesis_support_nodes(thesis: Any) -> list[dict]:
+    """``thesis_support`` の単位を作る元になるノード（中身の無いものは除く）。
+
+    各ノードは ``thesis_ref`` / ``kind`` / ``text`` / ``claim_ids`` /
+    ``equation_ids`` / ``evidence_block_ids`` を持つ。``claim_ids`` は thesis 側の
+    綴り（``"claim:{block_id}:{span_id}"``）のまま。コース側はこれを
+    :func:`thesis_support_stable_key` で単位の行と突き合わせ、単位が参照する主張を
+    引く（IK-0453。単位の行は claim を DB UUID でしか持たないため）。
+    """
+    return [
+        node for node in _thesis_nodes(thesis)
+        if node["text"] or node["claim_ids"] or node["equation_ids"]
+    ]
+
+
+def thesis_support_stable_key(document_id: str, node: Mapping[str, Any]) -> str:
+    """:func:`thesis_support_nodes` の1ノードに対応する単位の stable_key（衝突接尾辞なし）。"""
+    return ko_keys.learning_unit_stable_key(
+        document_id,
+        KIND_THESIS_SUPPORT,
+        _text(node.get("text")),
+        [
+            _text(node.get("thesis_ref")),
+            *_id_list(node.get("claim_ids")),
+            *_id_list(node.get("equation_ids")),
+        ],
+    )
+
+
 def _thesis_support_units(
-    document_id: str, thesis: Any, claim_id_map: Mapping[str, str]
+    document_id: str,
+    thesis: Any,
+    claim_id_map: Mapping[str, str],
+    block_sections: Mapping[str, str] | None = None,
 ) -> list[dict]:
+    block_sections = block_sections or {}
+    claim_blocks = _claim_blocks_by_agent_id(claim_id_map)
     items: list[dict] = []
     for index, node in enumerate(_thesis_nodes(thesis)):
         text = node["text"]
@@ -394,6 +495,11 @@ def _thesis_support_units(
             summary=text,
             order_index=index,
             teaches=_teaches(claim_ids=resolved_claims, equation_ids=equation_ids),
+            # 出典 block（あれば）→ claim の出典 block、の順で章を引く（実所在のみ）。
+            section_ids=(
+                _sections_for_blocks(node["evidence_block_ids"], block_sections)
+                or _sections_for_claims(claim_ids, claim_blocks, block_sections)
+            ),
             source_block_ids=node["evidence_block_ids"],
             linked_claim_ids=resolved_claims,
             linked_equation_ids=equation_ids,
@@ -408,6 +514,7 @@ def _parent_component_units(
     claim_id_map: Mapping[str, str],
     component_id_map: Mapping[str, str],
     evidence_registry: Any,
+    block_sections: Mapping[str, str] | None = None,
 ) -> list[dict]:
     """``component_refinement.component_refinement_records`` → LLM 原案 1 件 = 1 単位。
 
@@ -499,6 +606,7 @@ def _parent_component_units(
                 claim_ids=_resolve_claims(source_claim_ids, claim_id_map),
                 equation_ids=source_equation_ids,
             ),
+            section_ids=_sections_for_blocks(block_ids, block_sections or {}),
             source_block_ids=block_ids,
             linked_claim_ids=_resolve_claims(source_claim_ids, claim_id_map),
             linked_equation_ids=source_equation_ids,
@@ -513,9 +621,13 @@ def _parent_component_units(
 
 
 def _dsl_node_units(
-    document_id: str, dsl: Any, claim_id_map: Mapping[str, str]
+    document_id: str,
+    dsl: Any,
+    claim_id_map: Mapping[str, str],
+    block_sections: Mapping[str, str] | None = None,
 ) -> list[dict]:
     nodes = getattr(dsl, "nodes", None) or []
+    claim_blocks = _claim_blocks_by_agent_id(claim_id_map)
     items: list[dict] = []
     for index, node in enumerate(nodes):
         data = _plain(node)
@@ -540,6 +652,7 @@ def _dsl_node_units(
             summary=node_type,
             order_index=index,
             teaches=_teaches(concepts=[node_value]),
+            section_ids=_sections_for_claims(claim_ids, claim_blocks, block_sections or {}),
             linked_claim_ids=_resolve_claims(claim_ids, claim_id_map),
             linked_equation_ids=equation_ids,
             agent_payload={
@@ -622,17 +735,25 @@ def build_learning_unit_items(
     claim_id_map = dict(claim_id_map or {})
     component_id_map = dict(component_id_map or {})
 
+    # 章の解決表（実所在のみ）。``section_block`` 以外の種別もこれで章に張る。
+    block_sections = _block_sections(skeleton, evidence_registry)
+
     by_kind: dict[str, list[dict]] = {kind: [] for kind in LEARNING_UNIT_KINDS}
     if skeleton is not None:
         by_kind[KIND_SECTION_BLOCK] = _section_block_units(document_id, skeleton, claim_id_map)
     if thesis is not None:
-        by_kind[KIND_THESIS_SUPPORT] = _thesis_support_units(document_id, thesis, claim_id_map)
+        by_kind[KIND_THESIS_SUPPORT] = _thesis_support_units(
+            document_id, thesis, claim_id_map, block_sections
+        )
     if component_result is not None:
         by_kind[KIND_PARENT_COMPONENT] = _parent_component_units(
-            document_id, component_result, claim_id_map, component_id_map, evidence_registry
+            document_id, component_result, claim_id_map, component_id_map, evidence_registry,
+            block_sections,
         )
     if dsl is not None:
-        by_kind[KIND_DSL_NODE] = _dsl_node_units(document_id, dsl, claim_id_map)
+        by_kind[KIND_DSL_NODE] = _dsl_node_units(
+            document_id, dsl, claim_id_map, block_sections
+        )
     if figures is not None:
         by_kind[KIND_FIGURE] = _figure_units(document_id, figures, claim_id_map)
 

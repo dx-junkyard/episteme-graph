@@ -85,10 +85,13 @@
       if (!res.ok) throw new Error("next failed");
       var data = await res.json();
       if (!data.item) {
-        el.innerHTML = cardShell(
-          '<div class="recon-muted">この範囲で挑戦できる再構成課題はまだありません。' +
-          '教員が承認した主張が揃うと自動で用意されます。学習を進めると増えていきます。</div>'
-        );
+        // サーバの事実文（IK-0410）を先に出し、無いときだけ従来の固定文に落とす
+        var facts = Array.isArray(data.facts) ? data.facts.filter(function (f) { return typeof f === "string" && f; }) : [];
+        var body = facts.length
+          ? facts.map(function (f) { return '<div class="recon-muted">' + esc(f) + '</div>'; }).join("")
+          : '<div class="recon-muted">この範囲で挑戦できる再構成課題はまだありません。' +
+            '教員が承認した主張が揃うと自動で用意されます。学習を進めると増えていきます。</div>';
+        el.innerHTML = cardShell(body);
         bindClose();
         return;
       }

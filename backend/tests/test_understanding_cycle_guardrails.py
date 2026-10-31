@@ -214,7 +214,7 @@ class TestNoNumericCountLanguage:
         candidates = build_landing_candidates(self._sample_rows())
         assert candidates, "candidates が空では検査できない"
         for c in candidates:
-            assert set(c.keys()) == {"trace_id", "kind", "label", "revisit"}
+            assert set(c.keys()) == {"trace_id", "kind", "label", "text", "revisit"}
             for pat in self._COUNT_PATTERNS:
                 assert not re.search(pat, c["label"]), (
                     f"count-shaped text {pat!r} in candidate label: {c['label']}"

@@ -590,10 +590,16 @@ class TestManualIdentityLinkCreation:
 
     def test_creation_is_candidate_only_messaging(self):
         """KN-3: 作成されるのは候補であり、確定は別操作であることを UI 文言で明示する。"""
+        # IK-0918: 文言の正本はサーバ（新規 / 既存を言い分ける）。JS は facts を素通しで描く。
+        from core.deliberation import identity_links
+
+        created = identity_links.LINK_OUTCOME_FACTS[identity_links.LINK_OUTCOME_CREATED]
+        assert "候補を作成" in created
+        assert "確定・却下できます" in created
         src = _read(DELIBERATION_JS)
-        assert "候補を作成" in src
         block = self._function_block(src, "_createIdentityLink")
-        assert "確定・却下できます" in block
+        assert "result.facts" in block
+        assert "候補を作成しました" not in block
 
     def test_zero_results_show_factual_message(self):
         src = _read(DELIBERATION_JS)

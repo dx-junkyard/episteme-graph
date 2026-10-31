@@ -402,6 +402,13 @@ class Settings(BaseSettings):
         default=20,
         validation_alias=AliasChoices("IDENTITY_CANDIDATES_MAX_PER_DOCUMENT"),
     )
+    # 規則 ⑤（理論モジュールの構造の一致・theory_module_layer_design.md §13.8）の上限。
+    # 規則 ①〜④ の上限とは**別枠**（合算しない — ①〜④ が先に走るので、合算すると
+    # 規則 ⑤ が常に予算切れになる）。0 で規則 ⑤ だけを止める。超過は coverage_modules。
+    identity_module_candidates_max_per_document: int = Field(
+        default=10,
+        validation_alias=AliasChoices("IDENTITY_MODULE_CANDIDATES_MAX_PER_DOCUMENT"),
+    )
 
     # --- 分野マップのベクトル係留層（VA層, migration 074） ---
     # 正本: docs/features/atlas_vector_anchoring_design.md §5
@@ -497,6 +504,38 @@ class Settings(BaseSettings):
     grobid_url: str = Field(
         default="http://localhost:8070",
         validation_alias=AliasChoices("GROBID_URL"),
+    )
+
+    # --- 検証シミュレーション層（SB層） ---
+    # sandbox（sim-runner コンテナ）の到達先。空 = 未構成（run は常に失敗事実文・compose が設定する）
+    sim_runner_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("SIM_RUNNER_URL"),
+    )
+    # 1 run の上限秒数
+    simulation_run_timeout_seconds: int = Field(
+        default=20,
+        validation_alias=AliasChoices("SIMULATION_RUN_TIMEOUT_SECONDS"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    simulation_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("SIMULATION_LLM_MODEL"),
+    )
+    # 理論プログラム生成（simulation:codegen）の 1 日あたり LLM コール上限
+    simulation_codegen_max_calls_per_day: int = Field(
+        default=20,
+        validation_alias=AliasChoices("SIMULATION_CODEGEN_MAX_CALLS_PER_DAY"),
+    )
+    # 配線の改訂提案（simulation:revision）の 1 日あたり LLM コール上限
+    simulation_revision_max_calls_per_day: int = Field(
+        default=20,
+        validation_alias=AliasChoices("SIMULATION_REVISION_MAX_CALLS_PER_DAY"),
+    )
+    # v1.1（§14.3）: 学習者が起動する生成・改訂提案の 1 日あたり LLM コール上限（本人キー・2 本で共有）
+    simulation_learner_max_calls_per_day: int = Field(
+        default=20,
+        validation_alias=AliasChoices("SIMULATION_LEARNER_MAX_CALLS_PER_DAY"),
     )
 
     # --- ISOM ---
@@ -671,6 +710,45 @@ class Settings(BaseSettings):
     rhetorical_role_max_blocks: int = Field(
         default=0,
         validation_alias=AliasChoices("RHETORICAL_ROLE_MAX_BLOCKS"),
+    )
+
+    # --- A層パイプライン: 他ステージの入力上限（P0-1 と同じ是正・2026-09-19） ---
+    # いずれも **0 = 上限なし（既定）**。上限を敷く運用だけが明示的に値を入れる。
+    # 上限がある場合も先頭切り捨てではなく節単位の層化サンプリング
+    # （`src/episteme_graph/agents/stratified_sampling.py`）で配分し、取りこぼしは
+    # stage_outputs の `coverage` に必ず報告される。
+    # ※値の正本は env そのもの（A層 agent は src/backend の依存方向の制約でこの
+    #   Settings を読めないため、各 input_builder が同じ env を直接読む）。
+
+    # claim_qualification: 採否判定にかける span 数の上限。かつて 96 がハードコード
+    # され、文書順の先頭 96 span で打ち切られていたため、結論・限界の節が 1 件も
+    # claim 化されない論文があった。
+    claim_qualification_max_spans: int = Field(
+        default=0,
+        validation_alias=AliasChoices("CLAIM_QUALIFICATION_MAX_SPANS"),
+    )
+
+    # equation_semantics: 式候補（display の equation_block + inline 数式）数の上限。
+    # かつて 64 がハードコードされ、実測 10 本中 8 本が**ちょうど 64**で切れていた。
+    equation_semantics_max_equations: int = Field(
+        default=0,
+        validation_alias=AliasChoices("EQUATION_SEMANTICS_MAX_EQUATIONS"),
+    )
+
+    # equation_semantics: inline 数式候補（本文中の `x = 1` 等を正規表現で拾う弱い
+    # 候補）だけの上限。**既定 32**（0 = 上限なし）。display の式ブロックは上限なしの
+    # ままで、1 件 1 LLM コールを消費する inline 側だけを抑える。打ち切りは coverage の
+    # 理由コード `max_inline_equations` に必ず出る。
+    equation_semantics_max_inline_equations: int = Field(
+        default=32,
+        validation_alias=AliasChoices("EQUATION_SEMANTICS_MAX_INLINE_EQUATIONS"),
+    )
+
+    # paper_skeleton: 骨格判断に見せる level-1 節数の上限。かつて 12 がハードコード
+    # され、先頭 12 節しか見せていなかった（付録は従来どおり対象外）。
+    paper_skeleton_max_sections: int = Field(
+        default=0,
+        validation_alias=AliasChoices("PAPER_SKELETON_MAX_SECTIONS"),
     )
 
     # --- M層（LLM モデル選択, core/llm_policy.py） ---

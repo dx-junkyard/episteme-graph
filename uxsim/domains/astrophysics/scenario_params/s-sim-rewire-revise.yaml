@@ -1,0 +1,37 @@
+scenario: s-sim-rewire-revise
+domain: astrophysics
+# 場面 (d) st-06（skeptic・BAO）。音速の論文の観測量への影響のトピック。
+# 「近似・定義を適用: ξ_±^ij(θ)」は式の本文があり復元式を入力に含まない outer モジュール。部品は目録の名前で書く。
+params:
+  goal_text: 観測量の予言が、測定の雑音と平均化でどこまで見分けられるかを自分で確かめること
+  topic_hint: GRとMGでの観測量への影響（暗黒エネルギーと修正重力の音速の論文）
+  topic_hint_terms:
+  - 観測量
+  - GR
+  - MG
+  module_hint: ξ_±
+  input_hints:
+    theta: "1.0, 3.0, 10.0, 30.0"
+    A: 1.0
+  wiring_names:
+  - 雑音だけ
+  - 雑音と平均化
+  wiring_parts:
+  - - ガウス雑音
+  - - ガウス雑音
+    - 平均化
+  wiring_params:
+  - ガウス雑音:
+      sigma: 0.05
+  - ガウス雑音:
+      sigma: 0.05
+    平均化:
+      n: 16
+  questions:
+  - 2 つの実行で段階の言葉が変わったのは、理論の違いではなく配線の違いから来ていると読んでよいですか？
+  - AI の改訂案は、採用しない限り私の配線を変えないと考えてよいですか？
+per_archetype:
+  skeptic:
+    questions:
+    - 平均化を足して「近い」に変わったのは、雑音を均しただけで、理論が確かめられたわけではないですよね？
+    - AI の改訂案は、どの部品のどの値を、何を根拠に変えようとしているのですか？

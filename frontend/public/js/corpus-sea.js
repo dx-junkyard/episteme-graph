@@ -82,6 +82,8 @@
     landscape: null,
     skeleton: null,
     documents: [],
+    // 一覧に出ない閲覧可能な論文についてのサーバの事実文（IK-0414・optional）。
+    documentFacts: [],
     selectedDocumentId: "",
     // 地図のアンカー円を押したときの論文リスト絞り込み。null で全件。
     // 押しても地図の見え方は変わらない（右のリストの範囲が変わるだけ）。
@@ -300,6 +302,7 @@
     state.landscape = null;
     state.skeleton = null;
     state.documents = [];
+    state.documentFacts = [];
     state.loading = true;
     renderDomains();
     renderMap();
@@ -319,6 +322,10 @@
     state.landscape = landscape;
     state.skeleton = skeleton;
     state.documents = (documents && Array.isArray(documents.documents)) ? documents.documents : [];
+    // facts は optional。無い・形が違うときは何も出さない（fail-soft）。
+    state.documentFacts = (documents && Array.isArray(documents.facts))
+      ? documents.facts.filter(function (f) { return typeof f === "string" && f; })
+      : [];
     renderMap();
     renderPapers();
     renderDetail();
@@ -336,11 +343,21 @@
 
   // 配置先アンカーの座標を L1 データから解決する（landscape-layer.js と同じ規則。
   // 概念ノードはノード脇、領域は箱の右上寄り）。描かれていない位置は null で省く。
-  function anchorPoint(nodeId, posById, regionById) {
+  // 概念ノードが L1 に描かれていない（骨格側で霧の領域の概念は出ない）配置は、
+  // 配置の region_id（landscape 応答）の箱の中に並べる（IK-0847。slot は領域内の順番）。
+  function anchorPoint(nodeId, posById, regionById, density) {
     const node = posById[nodeId];
     if (node) return [node.x + CONCEPT_OFFSET[0], node.y + CONCEPT_OFFSET[1]];
     const region = regionById[nodeId];
     if (region) return [region.x + region.w - 20, region.y + 22];
+    const home = density && density.anchorRegion ? density.anchorRegion[nodeId] : "";
+    const box = home ? regionById[home] : null;
+    if (box) {
+      const slot = density.anchorSlot[nodeId] || 0;
+      const perRow = Math.max(1, Math.floor((box.w - 20) / 28));
+      const row = Math.floor(slot / perRow);
+      return [box.x + 20 + (slot - row * perRow) * 28, box.y + 40 + row * 28];
+    }
     return null;
   }
 
@@ -358,21 +375,34 @@
   // 出さない（描画・DOM・aria のいずれにも件数を出さない — CR3）。
 
   // アンカー（概念ノード id / 領域 id）と領域ごとに、置かれた論文の集合を作る。
+  // 霧も厚みもこの配置の集合から決める（IK-0847。骨格側の被覆＝ r.kind では決めない —
+  // コース側の地図の霧の意味は変えない = CR2）。
   function densityIndex(posById, regionById) {
     const anchors = {};
     const regions = {};
+    const anchorRegion = {};
+    const anchorSlot = {};
+    const slotsUsed = {};
     placements().forEach(function (p) {
       const anchorId = p.anchor_node_id || "";
       const docId = p.document_id || "";
       if (!anchorId || !docId) return;
       (anchors[anchorId] = anchors[anchorId] || {})[docId] = true;
       const node = posById[anchorId];
-      // 概念ノードは帰属領域へ、領域そのものへの配置はその領域へ寄せる。
-      const regionId = node ? (node.region || "") : (regionById[anchorId] ? anchorId : "");
-      if (!regionId) return;
+      // 概念ノードは帰属領域へ、領域そのものへの配置はその領域へ寄せる。L1 に概念ノードが
+      // 無ければ配置が持つ region_id へ寄せる。
+      const regionId = node
+        ? (node.region || "")
+        : (regionById[anchorId] ? anchorId : (p.region_id || ""));
+      if (!regionId || !regionById[regionId]) return;
       (regions[regionId] = regions[regionId] || {})[docId] = true;
+      if (!node && !regionById[anchorId] && !(anchorId in anchorRegion)) {
+        anchorRegion[anchorId] = regionId;
+        anchorSlot[anchorId] = slotsUsed[regionId] || 0;
+        slotsUsed[regionId] = anchorSlot[anchorId] + 1;
+      }
     });
-    return { anchors: anchors, regions: regions };
+    return { anchors: anchors, regions: regions, anchorRegion: anchorRegion, anchorSlot: anchorSlot };
   }
 
   function countOf(index, key) {
@@ -398,13 +428,15 @@
   }
 
   // アンカーの表示名（概念ノード → 骨格ノード辞書 → 領域 → id の順。作らない）。
+  // 領域アンカーは領域そのものの名前を先に引く（IK-0941。骨格側の詳細パネル用の辞書は
+  // 状態を名前に混ぜていた時期があり、海の塗りと食い違う状態を名乗った）。
   function anchorLabel(anchorId, posById, regionById) {
+    const region = regionById[anchorId];
+    if (region && region.label) return region.label;
     const node = posById[anchorId];
     if (node && node.label) return node.label;
     const meta = ((state.skeleton && state.skeleton.nodes) || {})[anchorId];
     if (meta && meta.label) return meta.label;
-    const region = regionById[anchorId];
-    if (region && region.label) return region.label;
     return anchorId;
   }
 
@@ -417,6 +449,16 @@
         '<span class="corpus-sea-density-label">' + esc(label) + "</span></span>";
     });
     return html + "</div>";
+  }
+
+  // IK-0942（第 25 周 第 7 波）: 地図の版をほかの面と同じ呼び方（「地図 版 X」）で添える。
+  // 文はサーバの skeleton_version_label（label_vocab.atlas_version_label）を素通しで描く。
+  function versionLineHtml() {
+    const l = state.landscape;
+    const label = l && typeof l.skeleton_version_label === "string" ? l.skeleton_version_label : "";
+    if (!label) return "";
+    return '<div class="corpus-sea-version" style="font-size:11.5px;color:var(--color-text-secondary,#666);margin-top:4px">' +
+      esc(label) + "</div>";
   }
 
   function renderMap() {
@@ -440,9 +482,11 @@
 
     let svg = '<svg viewBox="0 0 ' + vb[0] + " " + vb[1] + '" class="corpus-sea-svg" role="img" ' +
       'aria-label="この分野の地図と、閲覧できる論文の位置">';
-    // 領域（塗りは「厚み」の段階。霧の領域は骨格側の表現を上書きしない＝密度で塗らない）
+    // 領域（塗りは「厚み」の段階）。霧は「この海で閲覧できる論文の配置が無い領域」で、
+    // 骨格側の被覆（r.kind）では決めない（IK-0847）。
     (lvl.regions || []).forEach(function (r) {
-      const fog = r.kind === "fog";
+      const level = regionDensityLevel(countOf(density.regions, r.id));
+      const fog = level === 0;
       const cls = fog
         ? "corpus-sea-region fog"
         : "corpus-sea-region d" + regionDensityLevel(countOf(density.regions, r.id));
@@ -463,7 +507,7 @@
     });
     // アンカーごとに円1つ。半径は段階ビン（羅列も「…」も持たない＝数を数えさせない）。
     Object.keys(density.anchors).forEach(function (anchorId) {
-      const point = anchorPoint(anchorId, posById, regionById);
+      const point = anchorPoint(anchorId, posById, regionById, density);
       if (!point) return;
       const label = anchorLabel(anchorId, posById, regionById);
       svg += '<g class="corpus-sea-anchor-dot" data-corpus-anchor="' + esc(anchorId) +
@@ -472,7 +516,7 @@
         anchorRadius(countOf(density.anchors, anchorId)) + '"></circle></g>';
     });
     svg += "</svg>";
-    box.innerHTML = svg + densityLegendHtml();
+    box.innerHTML = svg + densityLegendHtml() + versionLineHtml();
     box.querySelectorAll("[data-corpus-anchor]").forEach(function (g) {
       const pick = function () { selectAnchor(g.getAttribute("data-corpus-anchor")); };
       g.addEventListener("click", pick);
@@ -515,6 +559,16 @@
   // Phase A: 論文リストと詳細パネル
   // -------------------------------------------------------------------
 
+  // 一覧の下に置くサーバの事実文（この分野の地図に結びついていない閲覧可能な論文の題名）。
+  // 文言はサーバが組む（JS で語彙・件数を足さない）。地図の位置には置かない。
+  function documentFactsHtml() {
+    const facts = state.documentFacts || [];
+    if (!facts.length) return "";
+    return facts.map(function (f) {
+      return '<div class="corpus-sea-doc-fact">' + esc(f) + "</div>";
+    }).join("");
+  }
+
   function renderPapers() {
     const box = el("corpus-sea-papers");
     if (!box) return;
@@ -527,7 +581,8 @@
       return;
     }
     if (!state.documents.length) {
-      box.innerHTML = '<div class="corpus-sea-empty">この分野で閲覧できる論文はまだありません。</div>';
+      box.innerHTML = '<div class="corpus-sea-empty">この分野で閲覧できる論文はまだありません。</div>' +
+        documentFactsHtml();
       return;
     }
     const filter = state.anchorFilter;
@@ -560,6 +615,7 @@
       }
       html += "</button>";
     });
+    html += documentFactsHtml();
     box.innerHTML = html;
     const clearBtn = box.querySelector("#corpus-sea-filter-clear");
     if (clearBtn) clearBtn.addEventListener("click", clearAnchorFilter);
@@ -925,10 +981,21 @@
         method: "DELETE",
       });
       if (!res.ok) return;
+      let deleted = null;
+      try { deleted = await res.json(); } catch (_) { deleted = null; }
       const idx = findMessageIndex(msgId);
       if (idx !== -1) state.discuss.messages = state.discuss.messages.slice(0, idx);
       if (state.discuss.editingMessageId === msgId) state.discuss.editingMessageId = "";
       renderChat();
+      // 第 23 波 F2: 取り消しの事実文（文言はサーバ）を会話の末尾に1行添える。
+      const area = el("corpus-sea-chat");
+      if (area && deleted && typeof deleted.fact === "string") {
+        const note = document.createElement("div");
+        note.className = "corpus-sea-withdrawn-fact";
+        note.style.cssText = "font-size:12px;color:var(--color-text-tertiary,#94a3b8);margin:6px 12px";
+        note.textContent = deleted.fact;
+        area.appendChild(note);
+      }
     } catch (e) {
       /* 失敗時は表示を変えない */
     }

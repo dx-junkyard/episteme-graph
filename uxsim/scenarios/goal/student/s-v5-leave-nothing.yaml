@@ -1,0 +1,29 @@
+id: s-v5-leave-nothing
+population: students
+runner: [api, browser]
+session: 1
+goal: '{{goal_text}} のために、論文と少しだけ議論して、何も書き残さずにその日を終える'
+params_required: [goal_text, seed_questions]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.enroll
+    note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+  - do: learning.course.open
+  - do: learning.cycle.return_door
+    note: コースを開いた画面の最上部を見る（前の日の自分の言葉が出ているか）
+  - do: learning.discuss.opening
+  - repeat:
+      until: "persona_decides_to_stop or steps > 2"
+      max: 2
+      do: learning.discuss.ask
+      with: {message: '{{seed_questions | next}}'}
+  - do: learning.cycle.landing_candidates
+    note: 議論の終わりに「次に持ち越すなら」を見るが、選ばずに閉じる（書き置きも残さない）
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#discuss-end
+  - manual: student/02-student.md#return-door
+watch_for:
+  - 何も残さずに終えるときに、書き置きや持ち越しを促す確認・督促が出ない
+  - 持ち越しの選択肢を選ばずに閉じても、選ばなかったことが責められる文にならない

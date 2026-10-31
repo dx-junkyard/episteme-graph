@@ -217,8 +217,14 @@ class TestFactualWording:
         assert "根拠の記録なし" in seg
 
     def test_empty_queue_does_not_claim_the_corpus_is_clean(self):
+        """IK-0864: 空の状態の文言の正本はサーバの facts 1 つ（画面は固定文を重ねない）。"""
         seg = _registry_segment()
-        assert "いま確認をお待ちしている同一性の候補はありません。" in seg
+        assert "いま確認をお待ちしている同一性の候補はありません。" not in seg
+        from api.routes import library as library_route
+
+        assert library_route.IDENTITY_CANDIDATES_EMPTY == "確認をお待ちしている同一性の候補はありません。"
+        assert "見送り済みを含めても" in library_route.IDENTITY_CANDIDATES_EMPTY_WITH_DISMISSED
+        assert "パイプラインを実行" in library_route.IDENTITY_CANDIDATES_ORIGIN_FACT
 
 
 # ===========================================================================

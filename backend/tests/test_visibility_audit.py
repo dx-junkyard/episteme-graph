@@ -53,6 +53,10 @@ class _FakeSession:
 
     def execute(self, stmt, params=None):
         self.statements.append(str(stmt))
+        if "ANY(:refs)" in str(stmt):
+            # core.document_refs の両形解決（IK-0550）。updated=False（他人の教材・不在）でも
+            # 教材は解決できる — 404 は所有者条件付きの UPDATE が 0 行のときに出る。
+            return _Rows([("aaaaaaaa-0000-0000-0000-00000000000d", MATERIAL_ID)])
         return self._results.pop(0) if self._results else _Rows([])
 
     def commit(self):
@@ -259,4 +263,10 @@ class TestCourseVisibilityIsAudited:
         out = admin_module.update_course_visibility(
             COURSE_ID, body=_Body("public"), current_user=_user(),
         )
-        assert set(out) == {"course_id", "visibility", "group_id"}
+        # IK-0947（第 25 周 第 3 波）: 本文の無いトピックが残るときだけ readiness_note が足る
+        # （確定文脈ではない事実文）。確定文脈はレスポンスに載せない。
+        assert {"course_id", "visibility", "group_id"} <= set(out)
+        assert set(out) - {"course_id", "visibility", "group_id"} <= {"readiness_note"}
+        from core import decision_context as dc
+
+        assert dc.DECISION_CONTEXT_KEY not in out

@@ -67,6 +67,8 @@ from routes import course_prerequisites as course_prerequisites_routes
 from routes import cartridge_shape as cartridge_shape_routes
 from routes import reference_health as reference_health_routes
 from routes import seminar_brief as seminar_brief_routes
+from routes import simulation_bridge as simulation_bridge_routes
+from routes import simulation_lab as simulation_lab_routes
 from routes import discuss_observation as discuss_observation_routes
 from routes import cycle as cycle_routes
 from routes import descent as descent_routes
@@ -75,6 +77,7 @@ from routes import llm_usage as llm_usage_routes
 from routes import llm_models as llm_models_routes
 from routes import personal_map as personal_map_routes
 from routes import my_records as my_records_routes
+from routes import my_profile as my_profile_routes  # IK-1007: 人に見せる名前（本人のみ）
 from routes import landscape as landscape_routes
 from routes import paper_discovery as paper_discovery_routes
 from routes import corpus as corpus_routes
@@ -180,15 +183,52 @@ async def _lifespan(application: FastAPI):
             except Exception:  # noqa: BLE001
                 logger.warning("bundled library seed import skipped", exc_info=True)
 
+            # IK-0419: 題名の書き戻し（IK-0366）より前に解析された教材は、題名が
+            # ファイル名・arXiv ID のまま残っている。採用 run の文書構造から題名が採れる
+            # 教材だけを1回直す（冪等・人が付けた題名は上書きしない）。stable_key と同じく
+            # 専用キーの advisory xact lock 配下で走らせ、失敗しても起動は止めない。
+            try:
+                from core.document_pipeline.persistence import (
+                    DOCUMENT_TITLE_BACKFILL_LOCK_KEY,
+                    backfill_document_titles_from_structure,
+                )
+
+                title_session = _pg_session()
+                try:
+                    title_session.execute(
+                        sa_text("SELECT pg_advisory_xact_lock(:key)"),
+                        {"key": DOCUMENT_TITLE_BACKFILL_LOCK_KEY},
+                    )
+                    fixed = backfill_document_titles_from_structure(title_session)
+                    title_session.commit()
+                    if fixed:
+                        logger.info("documents: title backfill updated %d row(s)", fixed)
+                except Exception:  # noqa: BLE001
+                    title_session.rollback()
+                    logger.warning("documents: title backfill skipped", exc_info=True)
+                finally:
+                    title_session.close()
+            except Exception:  # noqa: BLE001
+                logger.warning("documents: title backfill unavailable", exc_info=True)
+
             # 知識オブジェクト層（migration 078）: live 行の stable_key バックフィル。
             # fail-open — 失敗しても起動は続ける（旧行は stable_key NULL のまま残り、
             # 次回起動か次の再解析で付く）。対象ゼロなら何もしない（冪等）。
             #
-            # migration と同じく **pg_advisory_lock（専用キー）配下**で走らせる（P1-R7）:
+            # migration と同じく **advisory lock（専用キー）配下**で走らせる（P1-R7）:
             # 複数レプリカ（uvicorn worker / 複数コンテナ）が同時起動すると、同じ NULL 行に
             # 対して両方がキーを計算し、同じ ``#n`` を取り合って部分一意索引
             # （uq_*_stable_key_live）で片方が落ちる。ロックを取れなかった側は待つ
             # （他プロセスが終われば対象ゼロになり、即座に抜ける）。
+            #
+            # ロックは **トランザクションスコープ（pg_advisory_xact_lock）** で取る。
+            # ORM Session は commit のたびに接続をプールへ返すため、セッションスコープの
+            # ``pg_advisory_lock`` を取って commit 後に ``pg_advisory_unlock`` を呼ぶと、
+            # 解放が別の接続に乗って Postgres が
+            # ``WARNING: you don't own a lock of type ExclusiveLock`` を出し、ロック本体は
+            # 元の接続に握られたまま残る（2026-09-21 に起動ログで実測）。xact lock なら
+            # バックフィルを含む単一トランザクションの commit / rollback で必ず外れ、
+            # unlock の呼び出し自体が要らない（atlas_store / help_kb と同じ作法）。
             try:
                 from core.knowledge_objects.backfill import (
                     BACKFILL_LOCK_KEY,
@@ -198,7 +238,8 @@ async def _lifespan(application: FastAPI):
                 ko_session = _pg_session()
                 try:
                     ko_session.execute(
-                        sa_text("SELECT pg_advisory_lock(:key)"), {"key": BACKFILL_LOCK_KEY}
+                        sa_text("SELECT pg_advisory_xact_lock(:key)"),
+                        {"key": BACKFILL_LOCK_KEY},
                     )
                     counts = backfill_stable_keys(ko_session)
                     ko_session.commit()
@@ -210,14 +251,6 @@ async def _lifespan(application: FastAPI):
                     ko_session.rollback()
                     logger.warning("knowledge_objects: stable_key backfill skipped", exc_info=True)
                 finally:
-                    # advisory lock はセッションに紐づくので、close の前に必ず外す。
-                    try:
-                        ko_session.execute(
-                            sa_text("SELECT pg_advisory_unlock(:key)"), {"key": BACKFILL_LOCK_KEY}
-                        )
-                        ko_session.commit()
-                    except Exception:  # noqa: BLE001
-                        logger.debug("knowledge_objects: backfill advisory unlock failed", exc_info=True)
                     ko_session.close()
             except Exception:  # noqa: BLE001
                 logger.warning("knowledge_objects: stable_key backfill unavailable", exc_info=True)
@@ -402,6 +435,8 @@ app.include_router(personal_map_routes.me_router)
 # わたしの記録（主権台帳v1、trace_registry_sovereignty_ledger_design.md §3.3）。
 # 読み取り専用・本人のみ（/api/me 配下、personal_map.me_router と同型）。
 app.include_router(my_records_routes.me_router)
+# 人に見せる名前の登録（本人のみ・migration 094。IK-0848 / IK-1007）。
+app.include_router(my_profile_routes.me_router)
 # 知識ランドスケープ（knowledge_landscape_design.md §9.2）の学習者向け読み取り。
 # ルーター自身が /api/learning プレフィックスを持つため追加 prefix は付けない。
 app.include_router(landscape_routes.learning_router)
@@ -450,6 +485,14 @@ app.include_router(reconstruction_routes.admin_router, prefix="/api/admin")
 # （GET /api/admin/documents/{ref}/seminar-brief）。reconstruction.admin_router と同型。
 app.include_router(seminar_brief_routes.admin_router, prefix="/api/admin")
 app.include_router(discuss_observation_routes.admin_router, prefix="/api/admin")
+# 検証シミュレーション層（simulation_bridge_design.md §6, migration 088）。理論プログラムの
+# 生成・配線・sim-runner での実行・比較・台帳候補（/api/admin/simulation/...）。
+# 既存 admin ルーターとパスが衝突しないためフラット登録で足りる（Tier 3-17c と同型）。
+app.include_router(simulation_bridge_routes.admin_router, prefix="/api/admin")
+# 検証シミュレーション層 v1.1「主語は学習者」（simulation_bridge_design.md §14, migration 089）。
+# 学習者が作って試す「動かして確かめる」（/api/learning/...）。ルーター自身が /api/learning
+# プレフィックスを持つ（cycle / descent と同型）。
+app.include_router(simulation_lab_routes.learning_router)
 # コースビルダーの前提知識 半順序チェック（learning_units_design.md §6.4 / P2-4）。
 # 下書きだけを入力に取る読み取り専用 API 1本（POST /api/admin/course-builder/prerequisite-check）。
 # routes/admin.py の /course-builder/* とはパスが衝突しないためフラット登録で足りる。

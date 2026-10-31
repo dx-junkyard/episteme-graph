@@ -30,6 +30,7 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core.doubt.assumption_mining.schema import DETECTOR_VERSION, MIN_CORPUS_DOCUMENTS
+from core.doubt.scope import document_scope_clause, normalize_document_ids
 from core.postgres import get_session
 
 logger = logging.getLogger(__name__)
@@ -58,20 +59,24 @@ def _graph_payload(raw: Any) -> dict:
     return {}
 
 
-def run_corpus_audit(course_id: str = "") -> dict:
-    """コーパス横断で「依存されているが被主張がない」ノードを候補化する。"""
+def run_corpus_audit(*, document_ids, course_id: str = "") -> dict:
+    """コーパス横断で「依存されているが被主張がない」ノードを候補化する。
+
+    範囲は ``document_ids``（必須・IK-0852。route がコースの教材から解決する）。
+    ``course_id`` は登録する前提候補の出所（どのコースの画面で走らせたか）にだけ使う。
+    範囲が空なら DB に触れず ``{"skipped": True, "documents": 0, "reason": "no_documents"}``。
+    """
+    scope_ids = normalize_document_ids(document_ids)
+    if not scope_ids:
+        return {"skipped": True, "documents": 0, "registered": 0, "reason": "no_documents"}
     session = get_session()
     try:
-        filters = ["TRUE"]
-        params: dict[str, Any] = {}
-        if course_id:
-            filters.append("course_id = :course")
-            params["course"] = course_id
+        where, params = document_scope_clause(scope_ids)
         rows = session.execute(
             sa_text(f"""
                 SELECT document_id::text AS document_id, graph_json
                 FROM theory_component_graphs
-                WHERE {' AND '.join(filters)}
+                WHERE {where}
             """),
             params,
         ).fetchall()
@@ -82,7 +87,10 @@ def run_corpus_audit(course_id: str = "") -> dict:
                 "corpus audit skipped: corpus too small (%d < %d documents)",
                 len(document_ids), MIN_CORPUS_DOCUMENTS,
             )
-            return {"skipped": True, "documents": len(document_ids), "registered": 0}
+            reason = "no_analysis" if not document_ids else "corpus_too_small"
+            return {
+                "skipped": True, "documents": len(document_ids), "registered": 0, "reason": reason,
+            }
 
         # concept_key → {documents, depended_documents, claim_backed, node_ids, labels}
         concepts: dict[str, dict] = {}

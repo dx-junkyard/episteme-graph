@@ -52,6 +52,11 @@ resolution:
   landed_in:
     - backend/db/080_document_id_uuid.sql
     - backend/core/versioning/deletion.py
+  verification:
+    methods: [scratch_db, guardrail]
+    unverified:
+      - docker で組み上げた実機での教材管理・D層・W層のスモーク
+      - 本番 DB に material_id 形の document_id が残っている場合の 080 適用（開発 DB の複製では該当行なし）
 related: [IK-0105, IK-0109]
 view_of: []
 history:

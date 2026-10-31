@@ -12,6 +12,7 @@ docs/features/image_pipeline_knowledge_library_design.md §6 を正本とする�
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -38,6 +39,11 @@ ENTRY_TYPE_OBSERVABLE = "observable"
 ENTRY_TYPE_ASSUMPTION = "assumption"
 ENTRY_TYPE_QUANTITY = "quantity"
 ENTRY_TYPE_PROCESS = "process"
+# 検証シミュレーション層の実験機部品（simulation_bridge_design.md §4.1・migration 088）。
+# body の規約は core/simulation_bridge/schema.py::PART_BODY_KEYS（L層 store は検査しない）。
+ENTRY_TYPE_INSTRUMENT_MODEL = "instrument_model"
+ENTRY_TYPE_NOISE_SOURCE = "noise_source"
+ENTRY_TYPE_SIGNAL_PROCESSING = "signal_processing"
 
 #: entry_type の語彙。正本は ``core/schema.py::LIBRARY_ENTRY_TYPES``（migration 082 の
 #: 語彙表 ``knowledge_entry_types`` が同じ列挙をシードする）。ここは再エクスポートで、
@@ -209,6 +215,8 @@ JUSTIFICATION_VECTOR = "vector_similarity"
 JUSTIFICATION_CARTRIDGE = "cartridge_declared"
 JUSTIFICATION_COOCCURRENCE = "corpus_cooccurrence"
 JUSTIFICATION_LLM = "llm_candidate"
+#: 理論モジュールの構造の指紋の完全一致（theory_module_layer_design.md §13.8）。
+JUSTIFICATION_STRUCTURAL = "structural_match"
 JUSTIFICATIONS = MAPPING_JUSTIFICATIONS
 
 
@@ -335,6 +343,33 @@ def build_candidate_key(domain_key: str, name: str) -> str:
     )
 
 
+#: 構造エントリ（理論モジュールの構造の一致・§13.8）の ``candidate_key`` の接頭辞。
+STRUCTURAL_CANDIDATE_KEY_PREFIX = "tm"
+#: 指紋の sha256 のうち ``candidate_key`` に使う桁数。
+STRUCTURAL_CANDIDATE_DIGEST_CHARS = 32
+
+
+def build_structural_candidate_key(structure_fingerprint: str) -> str:
+    """理論モジュールの構造エントリの ``candidate_key`` を導出する（§13.8）。
+
+    形式: ``cand|tm|{sha256(structure_fingerprint)[:32]}``。**指紋を平文で持たない**
+    （TM12: 指紋は内部表現）。``domain_key`` を含めないのは、分野をまたいだ同じ構造を
+    1 行に畳むため（構造の型は分野中立 = TM5）。空の指紋からキーを作らない（呼び出し側が
+    空を渡したら ``ValueError``）。
+    """
+    fingerprint = str(structure_fingerprint or "").strip()
+    if not fingerprint:
+        raise ValueError("structure_fingerprint is required")
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+    return KEY_SEPARATOR.join(
+        (
+            CANDIDATE_KEY_PREFIX,
+            STRUCTURAL_CANDIDATE_KEY_PREFIX,
+            digest[:STRUCTURAL_CANDIDATE_DIGEST_CHARS],
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # 日本語ラベル（フロント3表と同じく admin.js のミラー正本）
 #
@@ -358,6 +393,9 @@ ENTRY_TYPE_LABELS = {
     "assumption": "前提",
     "quantity": "量",
     "process": "過程",
+    "instrument_model": "装置モデル",
+    "noise_source": "ノイズ源",
+    "signal_processing": "信号処理の工夫",
 }
 
 LABEL_KIND_LABELS = {
@@ -380,6 +418,7 @@ JUSTIFICATION_LABELS = {
     "cartridge_declared": "分野の宣言",
     "corpus_cooccurrence": "コーパス内の共起",
     "llm_candidate": "AI の候補",
+    "structural_match": "構造の一致",
 }
 
 REVIEW_STATUS_LABELS = {
@@ -387,6 +426,106 @@ REVIEW_STATUS_LABELS = {
     "confirmed": "確定",
     "dismissed": "見送り",
 }
+
+
+# IK-1063（第 25 周 面 A 第 8 波）: 関係の行の判断の記録と向き（同一性リンクの decision_line と
+# 同じ形 — 判断の印・判断した人・日付・理由）。文言の正本はここ（JS は素通し）。
+RELATION_DECISION_MARKS = {
+    "confirmed": "確定",
+    "dismissed": "見送り",
+}
+
+
+def relation_direction_line(kind: str, *, viewer_is_subject: bool, counterpart_name: str) -> str:
+    """関係の向きを、いま開いている概念から見た 1 文で言う（``broader`` だけ向きがある）。
+
+    ``broader`` の行は subject が下位・object が上位（``rel|broader|{narrower}|{broader}``）。
+    """
+    name = str(counterpart_name or "").strip() or "相手の概念"
+    if kind == "broader":
+        if viewer_is_subject:
+            return f"「{name}」がこの概念の上位です（この概念は「{name}」の下位）。"
+        return f"「{name}」はこの概念の下位です（この概念が「{name}」の上位）。"
+    if kind == "related":
+        return f"この概念と「{name}」は関連します（向きはありません）。"
+    if kind == "exact_match":
+        return f"この概念と「{name}」は同じ概念として扱えます（2 つのエントリは並存したままです）。"
+    if kind == "close_match":
+        return f"この概念と「{name}」は近い概念です（同じとまでは言いません）。"
+    return ""
+
+
+def relation_kind_label_for_viewer(kind: str, *, viewer_is_subject: bool) -> str:
+    """一覧の札の種類名（``broader`` を object 側から見たときは「下位」）。"""
+    if kind == "broader" and not viewer_is_subject:
+        return "下位"
+    return relation_kind_label(kind)
+
+
+def _date_only(value: Any) -> str:
+    text = value.isoformat() if hasattr(value, "isoformat") else str(value or "")
+    return text[:10]
+
+
+def relation_decision_line(status: str, actor_label: str, decided_at: Any) -> str:
+    """判断した関係の行の 1 文（``〔確定〕 確定: 名前・2026-10-28``）。候補は空文字。"""
+    mark = RELATION_DECISION_MARKS.get(str(status or ""))
+    if not mark:
+        return ""
+    who = str(actor_label or "").strip() or "記録なし"
+    date = _date_only(decided_at)
+    return f"〔{mark}〕 {mark}: {who}" + (f"・{date}" if date else "")
+
+
+def relation_decision_reason_line(status: str, review_note: Any) -> str:
+    """判断の理由の 1 行（確定は任意・見送りは必須。確定で理由が無ければ空文字）。"""
+    note = str(review_note or "").strip()
+    if str(status or "") == "dismissed":
+        return f"見送りの理由: {note}" if note else "見送りの理由: 記録なし（理由を取る前に見送られた行です）"
+    if str(status or "") == "confirmed":
+        # IK-1063 の残り（第 9 波）: 理由の無い確定も黙らない（理由は任意 — 書かれていない事実を言う）。
+        return f"確定の理由: {note}" if note else RELATION_CONFIRMED_REASON_UNRECORDED
+    return ""
+
+
+#: IK-1063 の残り（第 9 波）: 理由の書かれていない確定の行（任意の理由が空・理由の欄より前の行）。
+RELATION_CONFIRMED_REASON_UNRECORDED = "確定の理由: 記録なし（理由は書かれていません）"
+#: 第 25 周 第 10 波（頭脳 NEW）: 理由の無い確定に、確定した本人だけが後から理由を書き足せる
+#: （他の人の判断に理由を足すと帰属を偽るため）。書き足した事実は監査に残る。
+RELATION_DECISION_REASON_ADD_NOTE = (
+    "確定したときに理由を書いていません。確定した本人は、後から理由を書き足せます"
+    "（書き足した日時は記録に残ります。書いた理由は書き換えられません）。"
+)
+RELATION_DECISION_REASON_ADDED_FACT = "確定の理由を書き足しました。"
+RELATION_DECISION_REASON_NOT_ALLOWED = (
+    "理由を書き足せるのは、理由の書かれていない確定の行に、確定した本人が書くときだけです。"
+)
+#: IK-1050 の残り（第 9 波）: 判断した人の記録が無い概念の確定・見送り（同梱・記録の規則より前の行）。
+ENTRY_CONFIRMED_UNRECORDED_LINE = (
+    "確定した人・日付の記録なし（同梱の初期データか、判断の記録を取る前に確定された行です）"
+)
+ENTRY_DISMISSED_UNRECORDED_LINE = "見送った人・日付の記録なし（判断の記録を取る前に見送られた行です）"
+
+
+def entry_decision_unrecorded_line(status: Any) -> str:
+    """判断した人の記録が無い概念の確定・見送りの 1 文（候補・不明は空文字）。"""
+    value = str(status or "")
+    if value == "confirmed":
+        return ENTRY_CONFIRMED_UNRECORDED_LINE
+    if value == "dismissed":
+        return ENTRY_DISMISSED_UNRECORDED_LINE
+    return ""
+
+
+def relation_added_line(actor_label: str, created_at: Any, reason: Any) -> str:
+    """関係を足した人・日付・理由の 1 行（``追加: 名前・日付（理由: …）``）。"""
+    who = str(actor_label or "").strip()
+    text = str(reason or "").strip()
+    if not who and not text:
+        return ""
+    date = _date_only(created_at)
+    head = f"追加: {who or '記録なし'}" + (f"・{date}" if date else "")
+    return head + (f"（理由: {text}）" if text else "")
 
 
 def entry_type_label(value: str) -> str:
@@ -418,10 +557,16 @@ AUDIT_ACTION_REVIEW_DISMISS = "review_dismiss"
 AUDIT_ACTION_REVIEW_RESTORE = "review_restore"
 AUDIT_ACTION_LABEL_ADD = "label_add"
 AUDIT_ACTION_LABEL_DISMISS = "label_dismiss"
+#: IK-1024: 見送ったラベルを使う状態に戻した（行は 1 本のまま・理由必須）。
+AUDIT_ACTION_LABEL_RESTORE = "label_restore"
 AUDIT_ACTION_RELATION_ADD = "relation_add"
 AUDIT_ACTION_RELATION_CONFIRM = "relation_confirm"
 AUDIT_ACTION_RELATION_DISMISS = "relation_dismiss"
 AUDIT_ACTION_RELATION_RESTORE = "relation_restore"
+#: IK-1063 の残り（第 9 波）: 理由の無かった関係に、足した本人が後から理由を足した（行は 1 本のまま）。
+AUDIT_ACTION_RELATION_REASON_ADD = "relation_reason_add"
+#: 第 25 周 第 10 波（頭脳 NEW）: 理由の書かれていない確定に、確定した本人が後から理由を書き足す。
+AUDIT_ACTION_RELATION_DECISION_REASON_ADD = "relation_decision_reason_add"
 AUDIT_ACTION_NODE_LINK_ADD = "node_link_add"
 AUDIT_ACTION_NODE_LINK_CONFIRM = "node_link_confirm"
 AUDIT_ACTION_NODE_LINK_DISMISS = "node_link_dismiss"
@@ -436,10 +581,13 @@ REGISTRY_AUDIT_ACTIONS = (
     AUDIT_ACTION_REVIEW_RESTORE,
     AUDIT_ACTION_LABEL_ADD,
     AUDIT_ACTION_LABEL_DISMISS,
+    AUDIT_ACTION_LABEL_RESTORE,
     AUDIT_ACTION_RELATION_ADD,
     AUDIT_ACTION_RELATION_CONFIRM,
     AUDIT_ACTION_RELATION_DISMISS,
     AUDIT_ACTION_RELATION_RESTORE,
+    AUDIT_ACTION_RELATION_REASON_ADD,
+    AUDIT_ACTION_RELATION_DECISION_REASON_ADD,
     AUDIT_ACTION_NODE_LINK_ADD,
     AUDIT_ACTION_NODE_LINK_CONFIRM,
     AUDIT_ACTION_NODE_LINK_DISMISS,
@@ -465,6 +613,8 @@ IDENTITY_CHUNK_TOPK = 8
 #: いう事実**をこのキーで持つ。候補導出（``atlas_links`` / ``identity_candidates``）は
 #: この値を実在する分野名として扱わない。
 DOMAIN_KEY_UNASSIGNED = "unassigned"
+#: 「分野を限らない」共通の部品（``domain_key='unassigned'``）の表示語（正本。routes/library・W層が使う）。
+DOMAIN_UNASSIGNED_LABEL = "分野を限らない（共通）"
 
 
 # ---------------------------------------------------------------------------

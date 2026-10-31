@@ -54,6 +54,9 @@ resolution:
     - backend/core/label_vocab.py
     - backend/core/deliberation/graph_dialogue.py
     - docs/features/graph_dialogue_review_design.md §15
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0302]
 view_of: []
 history:

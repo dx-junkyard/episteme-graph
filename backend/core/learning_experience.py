@@ -13,6 +13,11 @@ from typing import Any
 
 from sqlalchemy import text as _sa_text
 
+from core.label_vocab import (
+    TRACE_TRAJECTORY_KIND_LABELS as _TRACE_KIND_LABELS,
+    TRACE_TRAJECTORY_KIND_WORDS as _TRACE_KIND_WORD,
+)
+
 # ---------------------------------------------------------------------------
 # tier 定義（L1 信頼性レイヤー）
 # ---------------------------------------------------------------------------
@@ -142,18 +147,27 @@ def build_position_anchor(
     topic_id: str,
     segment_id: str | int | None = None,
     scroll_offset: float | int | None = None,
+    *,
+    segment_reported: bool | None = None,
 ) -> dict[str, Any]:
     """復帰位置アンカー {topic_id, segment_id, scroll_offset} を組み立てる（L2）。
 
     segment_id / scroll_offset はクライアントが報告した実際の現在位置。未指定なら
     先頭(0)。トピックを跨がない単段の DetourStack 入口として origin に保持され、
     「本筋へ戻る」で同じ位置に復帰する。
+
+    ``segment_reported``（IK-1122）: 区画をクライアントが報告したか。渡されたときだけ
+    ``segment_reported`` キーを足す。先頭(0)は**戻る先**の既定値であって「見ていた区画」
+    ではないので、構造帰属（``core.structure_anchor.worker``）は偽なら区画に結ばない。
     """
-    return {
+    anchor = {
         "topic_id": topic_id,
         "segment_id": int(segment_id) if segment_id is not None else 0,
         "scroll_offset": int(scroll_offset) if scroll_offset is not None else 0,
     }
+    if segment_reported is not None:
+        anchor["segment_reported"] = bool(segment_reported)
+    return anchor
 
 
 # ---------------------------------------------------------------------------
@@ -161,15 +175,9 @@ def build_position_anchor(
 # ---------------------------------------------------------------------------
 
 
-_TRACE_KIND_WORD = {
-    "misconception": "誤答",
-    "question": "問い",
-    "detour": "寄り道",
-    # 構造の降下路（structure_descent_design.md §4）: 楽屋の質問は本人の「問いの軌跡」
-    # には見える（learner_trajectory=True）。表示語を用意しないと既定の「問い」に
-    # 縮退して楽屋であることが読めない（2026-08-15 レビュー是正）。
-    "backstage_question": "楽屋の質問",
-}
+# 表示語の正本は ``core/label_vocab.py``（第 23 周: 質問の行に「誤答」と付けない）。
+# 構造の降下路（structure_descent_design.md §4）: 楽屋の質問は本人の「問いの軌跡」
+# には見える（learner_trajectory=True）ので表示語を持つ（2026-08-15 レビュー是正）。
 
 
 def _days_ago(dt) -> int | None:
@@ -204,6 +212,8 @@ def build_traces_view(rows: list) -> dict[str, Any]:
             "id": str(r[0]),
             "kind": r[1],
             "status": r[2],
+            # 第 23 周: 種別の表示語はサーバが返す（「誤答」という評価語を JS に持たせない）。
+            "kind_label": _TRACE_KIND_LABELS.get(r[1], "記録"),
             "text": (payload or {}).get("text", ""),
             "context_label": (payload or {}).get("context_label", ""),
             # 「この問いに戻る」の逆引き（元の往復へジャンプ）。旧行には無いので空文字許容。

@@ -1,0 +1,7 @@
+# --- snapshot record (appended by snapshot.py) ---
+snapshot_record:
+  name: corpus-astro-tex-r25d
+  created_at: 2026-10-27T07:04:38+00:00
+  git_commit: b7bbb628
+  migration_head: '093'
+  note: ""

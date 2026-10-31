@@ -1,0 +1,42 @@
+id: s-v5-rewrite-delete
+population: students
+runner: [api, browser]
+session: 1
+goal: '{{goal_text}} のために質問し、言い方を書き直し、出した質問を取り消して、取り消したものが記録にどう残るかを確かめる'
+params_required: [goal_text, topic_hint_terms, seed_questions, rewritten_question]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.enroll
+    note: 受講中でなければ受講を始める
+  - do: learning.course.open
+  - do: learning.topic.open
+    with: {topic_hint_terms: '{{topic_hint_terms}}'}
+  - do: learning.chat.ask
+    with: {message: '{{seed_questions | next}}'}
+  - do: learning.chat.ask
+    with: {message: '{{seed_questions | next}}'}
+  - do: learning.chat.rewrite
+    with: {message: '{{rewritten_question}}'}
+    note: 2 つ目の質問を ✏️ で書き直す（聞き方が曖昧だった）
+  - do: learning.chat.ask
+    with: {message: '{{seed_questions | next}}'}
+  - do: learning.chat.delete_message
+    with: {nth_from_last: 1}
+    note: 最後の質問を 🗑 で取り消す（聞くべきでなかった）
+  - do: learning.chat.history
+    note: 会話に何が残っているかを見る
+  - do: learning.traces.list
+    note: 進捗タブの問いの軌跡を見る
+  - do: learning.records.mine
+    note: 書き直し・取り消しした問いが、わたしの記録でどう見えるかを見る
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#edit-delete-message
+  - manual: student/02-student.md#progress-tab
+  - manual: student/02-student.md#my-records
+watch_for:
+  - 取り消す前に「このメッセージ以降の会話を削除します」と、何が消えるかが確認される
+  - 取り消した往復は会話からは消えるが、わたしの記録には取り消された状態の名前付きで残り、行ごと消えていない
+  - 問いの軌跡には取り消した問いが残らず、書き直した後の問いだけが出る
+  - 取り消しの理由を求められたり、取り消しが評価に使われるような文が出ない

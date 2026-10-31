@@ -1,0 +1,22 @@
+id: c-r25-doubt-r2
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 1bad7d9f
+personas:
+  teachers: [te-04-copilot-intro, te-01-rookie-seminar]
+  students: [st-03-d1-from-particle, st-09-d2-from-datasci]
+scenarios:
+  teacher: [t-db-assumption-review, t-db-scope-promote, t-db-challenge-propose, t-db-counterfactual-brief]
+  student: [s-db-ledger-lines]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 30, persona_llm_calls: 360, wall_clock_minutes: 180}
+notes: |
+  第 25 周・面 B の第 2 周（第 1 周とペルソナを入れ替える）。AI 頼みの教員（te-04・学生のコース 1bad7d9f の所有者・editor 共有あり）と
+  To-Do に従う新人の教員（te-01・6be229e1 を所有・private）が同じ 4 場面を歩き、隣接分野の学生（st-03 素粒子 / st-09 データサイエンス）が
+  (e) を読む。te-04 はコース 1bad7d9f で前提を確定・記帳するので、第 1 周と違い前提の台帳が学生の未検証合意リスト・議論の開幕に
+  届きうる（第 1 周との差が「記帳したコース」の効き目）。種まきは不要（両者ともコースを所有している）。
+  te-01 は教材の editor 共有を持たない（閲覧のみ）— 第 1 周の te-02 と同じく審判 DB4 の対象。
+  te-05（委任型）は使わない: 面 B の学生側に届く記帳を作れるのが学生のコースの所有者 te-04 だけで、委任型を入れると (e) の前段が
+  第 1 周と同じ「別コースの記帳」になる。

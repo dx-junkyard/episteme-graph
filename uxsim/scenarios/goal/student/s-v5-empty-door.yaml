@@ -1,0 +1,31 @@
+id: s-v5-empty-door
+population: students
+runner: [api, browser]
+session: 2
+preconditions:
+  - 前のセッションでこのペルソナは書き置きも持ち越しの問いも残していない（s-v5-leave-nothing の翌日。周の前に痕跡をリセット）
+goal: '{{goal_text}} の続きをするために翌日ログインし、前の日に何も残さなかったときの画面を確かめる'
+params_required: [goal_text, seed_questions]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.open
+  - do: learning.cycle.return_door
+    note: 何も残していないので、扉に何が出るか（何も出ないか）を見る
+  - do: learning.cycle.todays_words
+    note: 着地の「今日のあなたの言葉」を開く（まだ今日は話していない）
+  - do: learning.records.mine
+    note: 前の日の自分の記録がどこに残っているかを見る
+  - choose:
+      - do: learning.discuss.ask
+        with: {message: '{{seed_questions | next}}'}
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#return-door
+  - manual: student/02-student.md#return-door-inlay
+  - manual: student/02-student.md#my-records
+watch_for:
+  - 扉が空のとき、空の枠・督促・経過日数・件数がどこにも出ない（何も出ないこと自体が設計どおり）
+  - 前の日に何も残さなかったことを責める文、「続けましょう」のような促しが出ない
+  - 前の日の議論で自分が書いた問いは、わたしの記録で読める

@@ -1510,3 +1510,15 @@ class TestRegistryGaps20260905:
     def test_teacher_can_reach_all_four(self):
         teacher_ids = {c.id for c in caps.capabilities_for("TEACHER")}
         assert set(self._EXPECTED) <= teacher_ids
+
+
+def test_figure_deliberation_is_not_routed_to_figure_classification():
+    """第 14 周: 「図を深く検討」は分類確認ではなく深く検討の道案内へ。"""
+    from core.admin_assistant.intent import heuristic_classify
+    from core.admin_assistant import capabilities as caps
+
+    result = heuristic_classify("図を深く検討するには？", "TEACHER", None)
+    assert result.capability_id == "materials.deliberate_figure"
+    cap = caps.get("materials.deliberate_figure") if hasattr(caps, "get") else None
+    if cap is not None:
+        assert cap.locate_steps[-1].anchor_id == "figure_deliberate_button"

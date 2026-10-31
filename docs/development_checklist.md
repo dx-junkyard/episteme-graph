@@ -9,6 +9,15 @@
 
 ---
 
+## 0. vision → UX → feature の接続を確認
+
+- [ ] [機能見直しとヒアリング](feature_review.md) の利用場面から、望む変化 → 操作列 →
+      既存機能 → 不足する境界 → 受入場面を説明できるか。新設・接続修正・既存で足りるを区別したか
+- [ ] 本人の回答・観察事実・提案・未決事項を分けたか。未回答を合意として扱っていないか
+- [ ] 原則改訂・開示/保持/撤回・機能間の受け渡しの変更では、[サービスデザイン](service_design.md) の
+      要約・UX・対応表と該当するヒアリング場面、仕様・マニュアルを同時に照合したか
+- [ ] 実装済み・単体検証済み・通し検証済みを区別したか。リンク実在の検査だけで意味の整合を保証していないか
+
 ## 1. ガイダンス機構の追随（Copilot / KB / G層）
 
 新しい画面・操作・API を足したら、**ユーザーへの案内系が追随しているか**を明記する
@@ -168,10 +177,12 @@ CLAUDE.md 内でアンカー件数の 4 値（228/244/248/255）が併存した�
 [課題ナレッジ](issue_knowledge/README.md) に 1 課題 = 1 エントリで記帳する（正本は起票元の文書の
 まま。エントリは「原因の性質による分類・発見観点・解決観点・型」を引くための索引層）。
 
-- [ ] **設計時（pre-mortem）**: 変更に「再実行・削除・既定値・AI の判定・段階間の受け渡し・
-      派生物・ID や版・語彙表の新設・外部呼び出し」が含まれるなら、
-      [課題ナレッジ README §3.3b](issue_knowledge/README.md) の表で該当する族の型の「見分け方」を
-      先に当て、該当しないなら「該当なし」と PR に書く
+- [ ] **設計時（pre-mortem）**: 先に [想起シート](issue_knowledge/recall.md)（短い 1 枚）を読み、
+      変更に「再実行・削除・既定値・AI の判定・段階間の受け渡し・派生物・ID や版・語彙表の新設・外部呼び出し・
+      新しい画面や経路」が含まれるなら、該当する族の型の「見分け方」を先に当て、当たる型の slug を設計書の
+      pre-mortem 節に書く。該当しないなら設計書に「該当なし」と書く（新しい `*_design.md` は節が無いと
+      `test_issue_knowledge_guardrails.py` が落ちる）。当てた型に [解決原理](issue_knowledge/principles.md)
+      が結びついていれば（索引 §15）、併用する部品・派生形・非適用を読み、採る部品と見送る派生形を設計書に書く
 - [ ] 新しい課題に `docs/issue_knowledge/entries/IK-NNNN-*.md` を作り、4 軸の座標を
       [taxonomy.md §1.2](issue_knowledge/taxonomy.md) の手順（**原因の性質**。無い軸は none、
       見ていない軸は unknown）で決めたか。症状の場所・修正行数・修正手段で決めていないか
@@ -182,6 +193,12 @@ CLAUDE.md 内でアンカー件数の 4 値（228/244/248/255）が併存した�
 - [ ] 解消時に `status: resolved` / `resolution.perspective`（最大 2・先頭が主）/ `landed_in`（実在する
       コードのパスかコミットを最低 1 つ）を書き、分類が変わったなら `history` に残したか
       （起票元への解消注記 §5-3 とは別に）
+- [ ] 解消時に `resolution.verification`（確かめた方法 `methods` / 確かめていない範囲 `unverified`。語彙は
+      [taxonomy.md §8](issue_knowledge/taxonomy.md)）を書いたか。飛ばした検証（E2E・同時実行・旧形式データ）を
+      `unverified` に残し、確かめていないなら `not_verified` と書いたか（省略は「記録なし」）
+- [ ] 解消時に解決原理（[principles.md](issue_knowledge/principles.md)）に当たるなら `resolution.principles`
+      （`principle` / `use` = 設計前に読んだ `consulted` か後付けの `extracted` / `note` = 採った部品と固有の差分）を
+      書いたか。原理に無い解き方なら書かない
 - [ ] AI が起こしたエントリは `classification.review: candidate` のままか。人が確定したなら
       `confirmed` + `reviewed_by` + `reviewed_at` を書いたか
 - [ ] `backend/scripts/issue_knowledge_index.py` で index.md を再生成し、

@@ -58,6 +58,9 @@ resolution:
     - backend/tests/test_admin_help_inspect_ui_static.py
     - docs/development_checklist.md §1
     - docs/development_checklist.md §4
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0201, IK-0221]
 view_of: [IK-0201]
 pattern: doc-drifts-from-code

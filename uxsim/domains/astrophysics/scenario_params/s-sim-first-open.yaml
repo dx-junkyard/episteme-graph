@@ -1,0 +1,21 @@
+scenario: s-sim-first-open
+domain: astrophysics
+# 場面 (a) st-01（newcomer・電波/分子雲）。TeX 経路の Cepheus B 論文の DCF 法のトピック。
+# モジュールはラベルの部分一致か先頭からの番号で引く（内部 ID・module_key を書かない）。
+params:
+  goal_text: ゼミで扱う論文の理論が、何を受け取って何を出す計算なのかを自分の言葉で言えるようになること
+  topic_hint: DCF法による磁場強度の推定（Cepheus B の磁場トポロジーと星形成の論文）
+  topic_hint_terms:
+  - DCF法
+  - 磁場強度
+  module_numbers:
+  - "1"
+  - "2"
+  - "3"
+  module_hint: σ_ξ
+  questions:
+  - いま選んだまとまりは、何を入力にして何を出す計算なのですか？
+  - このまとまりの前提に書かれていることは、論文のどこから来ていますか？
+personas:
+  st-10-d3-21cm-receiver:
+    goal_text: 受信機の信号処理と同じ感覚で、理論のまとまりの入力と出力の対応を確かめること

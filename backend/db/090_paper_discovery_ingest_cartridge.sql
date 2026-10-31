@@ -1,0 +1,21 @@
+-- Migration 090: 論文ディスカバリー層 — バッチ取り込みキューに「解析の分野」を持たせる
+--
+-- 設計正本: docs/features/paper_discovery_design.md §12（2026-10-16 追補。
+--           教材起点の類似論文探索の取り込みも同じ /ingest-batch を通る）。
+-- このファイルが DDL の正本。適用は backend/core/migrations.py のランナーが起動時に行う
+-- （冪等・毎起動・番号順に全ファイルを再実行）。
+--
+-- 何をするか（列追加のみ・既存行の意味は変えない）:
+--   paper_discovery_ingest_items に cartridge_id TEXT NULL を足す。値の意味は
+--   POST /api/admin/materials/upload の cartridge_id と同一:
+--     NULL : 未指定（run_document_pipeline が env 既定 → 分野中立の順で決める。既存行はこれ）
+--     ''   : 教員が「指定しない」を明示した（分野語彙を注入しない）
+--     それ以外 : 選択肢に実在する分野キー（投入時に API 層が検証済み。worker は再検証しない）
+--
+-- 設計上の要点:
+--   - 取り込み経路が分野を受けず env 既定が黙って適用されていた（condition-not-propagated）
+--     ことの是正。キュー行が分野を運ばないと、非同期 worker の受理で分野が落ちる。
+--   - 行を消さない（P4）。本ファイルにも DELETE 文は無い。シード行も入れない。
+--   - SQL 本文は psql で読める plain SQL で書く。
+
+ALTER TABLE paper_discovery_ingest_items ADD COLUMN IF NOT EXISTS cartridge_id TEXT;

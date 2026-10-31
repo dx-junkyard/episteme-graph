@@ -110,6 +110,29 @@ class TestPresentedAndApplied:
         # DC2: 切り詰めは表示上の都合であって、一致判定は切り詰め前の集合で行う。
         assert ctx["presented_matches_applied"] is True
 
+    def test_skipped_block_is_absent_by_default(self):
+        assert "skipped" not in _ctx()
+
+    def test_skipped_block_records_unapplied_targets(self):
+        """第 23 周 F5: 提示されたが適用できなかった対象を別キーで残す。"""
+        ctx = _ctx(
+            presented_ids=["a", "b"],
+            applied_ids=[],
+            skipped_ids=["b", "a", "a"],
+            skipped_document_ids=["d1", "d1"],
+            skipped_reason="not_editable",
+        )
+        assert ctx["skipped"] == {
+            "count": 2,
+            "ids": ["a", "b"],
+            "truncated": False,
+            "document_ids": ["d1"],
+            "reason": "not_editable",
+        }
+        # 一致は presented と applied の集合比較のまま（skipped は混ぜない）。
+        assert ctx["presented_matches_applied"] is False
+        json.dumps(ctx)
+
     def test_empty_applied_is_allowed(self):
         ctx = _ctx(presented_ids=["a"], applied_ids=[])
         assert ctx["applied"] == {"count": 0, "ids": [], "truncated": False}

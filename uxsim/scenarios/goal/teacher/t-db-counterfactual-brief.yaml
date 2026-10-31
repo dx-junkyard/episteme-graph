@@ -1,0 +1,46 @@
+id: t-db-counterfactual-brief
+population: teachers
+runner: [api]
+preconditions:
+  - text: このペルソナは自分のコース（前提の地図タブのコース選択に並ぶもの）を持っている
+    check: owns_course
+  - 原稿スタジオで自分のコースの教材のグラフを開ける
+seed_scenarios: [t-v5-register-own-course]
+goal: "{{goal_text}} のために、反実仮想で前提を仮に倒して依存する範囲を見てから、ゼミ前ブリーフを開く"
+params_required: [goal_text, course_hint, material_hint, node_hint, claim_hint, cf_notes]
+steps:
+  - do: auth.login
+  - do: admin.doubt.tab_open
+    with: {course_hint: "{{course_hint}}"}
+  - do: admin.materials.list
+  - do: admin.doubt.counterfactual_toggle
+    with: {material_hint: "{{material_hint}}", node_hint: "{{node_hint}}"}
+    note: 反実仮想モードを ON にして、主グラフの前提のノードを仮に偽にする
+  # 第 25 周 第 3 周（judge_doubt_r2 §4 = IK-0903 の確認）から必須: 観測の選択肢が開いている論文の観測だけかを読んでから倒す
+  - do: admin.doubt.counterfactual_observation
+    with: {claim_hint: "{{claim_hint}}", aspect: 較正・装置などの補助仮説}
+    note: 観測を仮に倒す（較正・装置の補助仮説のほうを疑う）。選択肢に別の論文の観測が混ざっていないかを読む
+  - do: admin.doubt.counterfactual_save
+    with: {notes: "{{cf_notes}}"}
+  - do: admin.doubt.refresh
+    note: 前提の地図タブの「反実仮想セッション」に保存したものが並ぶか
+  - do: admin.seminar_brief.view
+    with: {material_hint: "{{material_hint}}"}
+    note: "{{material_hint}} の行からゼミ前ブリーフを開く"
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: teacher/14-admin-lecture-studio.md#counterfactual-mode
+  - manual: teacher/18-admin-doubt-atlas.md#counterfactual-observation-toggle
+  - manual: teacher/18-admin-doubt-atlas.md#counterfactual-sessions
+  - manual: teacher/11-admin-materials.md#seminar-brief
+watch_for:
+  - 仮に倒した結果が「崩壊」ではなく「この前提に依存する範囲」と事実で語られる
+  - 依存する範囲・両者に依存（判定不能）・影響を受けない範囲の 3 区分のどれに何があるかが、画面から読み取れる
+  - 元のグラフは変更されない（モードを外すと戻る）
+  - 観測を仮に倒すときの選択肢は、開いている論文の観測だけ（IK-0903 の是正後）
+  - ゼミ前ブリーフの「確かめられていないこと」は「このコーパスの中では」の範囲で語られ、学生の詰まりは k-匿名の段階表示で件数が出ない
+  - 試算が前提をグラフ上に見つけられなかったとき、それが「依存する範囲なし」と区別できる事実文で出る（IK-0854 の是正後）。
+    コースを作らずに解析した教材から組んだコースでも、依存する範囲が出る（IK-0852 の是正後）
+  - 倒した前提が名前で並び、共有範囲が日本語の語で読める（private 等の内部値が出ない — IK-0854）
+  - ゼミ前ブリーフの空の区画が見出しごと消えず、閉世界の一文で「無い」と読める（IK-0853）。同じ切断点の一文が対象ごとに
+    繰り返されない（IK-0858）

@@ -51,6 +51,11 @@ resolution:
   landed_in:
     - backend/core/atlas_correspondence.py
     - docs/features/atlas_node_correspondence_design.md §11.1
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 実 DB での凍結 → 読み替えの E2E（docker 復帰後）
+      - 同一主題の改訂版に対する候補導出の有効性（開発 DB にある凍結版は互いに別主題でラベル一致が無く測れていない）
 related: [IK-0106]
 view_of: []
 history:

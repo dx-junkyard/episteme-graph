@@ -1,0 +1,12 @@
+scenario: t-sim-review-shared
+domain: astrophysics
+# 場面 (g) te-03（meticulous）/ te-04（copilot・コース所有）。学生が共有した実行のある教材を開く。
+params:
+  goal_text: 学生が共有した検証シミュレーションの実行を確かめ、台帳の候補を確定するかを自分で決めること
+  material_hint: Sub-Populations  # 教材一覧の題名の部分一致。(e) st-04 が共有する遅延時間分布の論文の行
+  copilot_questions:
+  - 学生が共有した実行の台帳の候補は、どこで確定するのですか？ 確定すると何が起きますか？
+per_archetype:
+  meticulous_reviewer:
+    copilot_questions:
+    - 台帳の候補を確定したとき、その主張の検証状態はどう変わりますか？ シミュレーションの一致を検証済みとして扱うことはありますか？

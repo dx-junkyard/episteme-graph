@@ -1,0 +1,61 @@
+id: c-astro-r25-share-r5
+domain: astrophysics
+snapshot: corpus-astro-tex-r25d
+course_id: 1bad7d9f
+personas:
+  teachers: [te-04-copilot-intro, te-02-veteran-intro]
+  students: [st-10-d3-21cm-receiver, st-07-m1-grb-voice]
+scenarios:
+  teacher: [t-share-identity-queue, t-share-explain-write, t-share-explain-endorse-cite]
+  student: [s-share-symbol-concept, s-share-part-chip]
+runner: api
+flags: {}
+budget: {product_llm_calls: 10, persona_llm_calls: 300, wall_clock_minutes: 240}
+notes: |
+  第 25 周 share の第 5 周（judge_share_r4.md §6・§7 の組。r5_prereqs.md の面 share と共通 1〜4）。組はすべて第 1〜4 周と別
+  （P-0025）: te-02 × (a) 候補レビュー / te-04 × (b1) 書く → te-02 × (b2) 支持・引用 / st-10 × (e) / st-07 × (d)（音声）。
+  教員 2 × 学生 2・5 場面。審判の総括どおり (a) の候補レビューと (b1) → (b2) の連なりに絞る。
+  審判の提案のうち te-04 × (c) t-share-labels-atlas と st-08 × (d) は第 6 周へ回す（場面 5・学生 2 の上限。(c) は総括の
+  「絞って見る」対象の外、st-08 は第 4 周に (e) を歩いた学生で、(d) の材料は st-07 で取る）。
+  確定の取り消し（IK-0953）: 第 4 波の投影の同期で行為 admin.library.identity_link_revoke を足し、(a) の任意の手として
+  場面に入れた（確定済みの行があるときだけ押せる・理由必須。projection_sync_wave4.md）。
+
+  ── 周の前に指揮者が用意するもの（この順）──
+   1. 砂場（共通 1・H34）: TeX 取り込みの是正（6c7f187）と IK-0755 の是正の後に snapshot を取り直し、取り直した名前を
+      manifest に載せてこの campaign の snapshot（いまは corpus-astro-tex-r23）を差し替える。4 面とも同じ名前にする。
+   2. 製品の第 4 波 → projection_sync → 周の順（共通 2）。IK-0953（撤回）・IK-0957（候補の空の事実）の是正は (a) の前提。
+      IK-0954（学生に届く共通部品の版）はオーナー判断（judge_share_r4 §5-1）の後。判断の前に回すなら、(d)(e) の版の所見は
+      既知の残存として読む。
+   3. 取り直した snapshot で、PINN（Neutron Star Equation of State via Physics Informed Neural Network）の TeX 版・PDF 版の
+      2 版について identity_candidates ステージを再実行する（教材行「パイプラインを実行 ▼」→ target_stage=identity_candidates、
+      2 版とも。H34）。(a) の冒頭の候補一覧が IK-0919 の新規則の結果になる。
+   4. 共有（grant_document_editors.py・所有者の共有 API）。**doubt の te-02 × t-db-ledger-readonly-probe が終わってから**
+      （mailbox_doubt/PROBE_DONE_R5 が出てから）与え、与えたら mailbox_share/GRANT_TE02_R5 を touch する:
+      - te-02 に PINN の TeX 版・PDF 版の教材の editor 共有（無いと (a) の確認・見送りが 404 になる）。
+      - te-02 にコース 1bad7d9f の editor 共有（所有者 te-04 の共有 API。(b2) で説明を開く入口 = te-02 の /api/admin/courses に
+        PINN の部品を含むコースが要る）。引用先は te-02 自身のコース（一覧の先頭。第 4 周の studio で公開した 0d70b5d0 は
+        周の前に非公開に戻しておく — studio の用意 4）。
+      te-02 は doubt では PINN を閲覧だけで歩くので、順序を逆にすると doubt の場面が成り立たない。
+   5. 部品名（H29・H32）: te-04 の原稿スタジオ（コース 1bad7d9f = TeX 版）の部品一覧で「TOV network map」が完全一致で 1 件
+      引けることを確かめる（te-02 も (b2) で同じ名前で開く）。引けなければ t-share-explain-write / t-share-explain-endorse-cite の
+      personas 節の component_hint を実在の名前に差し替える。
+   6. コース 1bad7d9f が公開のままであること（学生は固定コース 1bad7d9f を受講する）。
+   7. (d) の s-share-part-chip は H33 の「区画を選んで質問 → 帰属の候補 → 確定」を旅の前に歩く。(a) の確定の後に走らせる。
+
+  ── レーンの順（face_share_r5.sh。--persona X --scenario Y で 1 場面ずつ。→ は続けて、⇢ は他レーン・用意を待つ）──
+   1. te-04: (b1) t-share-explain-write — TeX 版の「TOV network map」に独自解釈を足す → 共有 ON → 査読（2 軸の語 IK-0924）。
+   2. te-02: ⇢ 用意 4（GRANT_TE02_R5）⇢ (a) t-share-identity-queue — 候補に TeX ⇄ PDF の対が出るか（IK-0919）を最初に読み、
+      確認・見送りする。候補が空なら空の事実文が「まだ探していない」と「探して無い」を言い分けるか（IK-0957）。
+   3. st-10: ⇢ 2 ⇢ (e) s-share-symbol-concept — r・P・F_EOS・L_BC の 4 記号を全部タップ。終わったら mailbox_share/ST10_DONE_R5
+      を出す（doubt の st-10 がこれを待つ — 同じ学生の run を同時に走らせない）。
+   4. st-07: ⇢ 2 ⇢ (d) s-share-part-chip — 区画を選んで質問 → 帰属の確定 → 旅で「共通部品として」と他の論文の題名（IK-0920）。
+   5. te-02: ⇢ 1 ⇢ (b2) t-share-explain-endorse-cite — te-04 の説明を支持・引用し、支持した教員の一覧を開く（自己承認 IK-0926・
+      引用の列挙 IK-0924）。
+  依存: snapshot 取り直し → 段の再実行 → (a) → (d)(e)。(b1) → (b2)。
+
+  LLM 予算の見積り: 製品の LLM は (d) の選択質問 1〜2 回・共通部品の検索の埋め込み 2 回・Copilot 0〜2 回（te-04 の (b1) と
+  te-02 の (a) の任意の手）・(e) の記号は 0 回 = 3〜6 回（余裕を見て 10）。ペルソナ頭脳は 5 場面 × 45〜60 手 ≒ 230〜290
+  （上限 300）。外部 API は呼ばない。
+
+   前提の実測（2026-10-27）: PINN TeX / PDF で identity_candidates を再実行し TeX ⇄ PDF の候補 10 件。te-04 の部品一覧で「TOV network map」完全一致 1 件。
+   te-02 は周の開始時点で PINN 2 版とも viewer（第 3 周グループ A を viewer に落とした）。editor は doubt の PROBE_DONE_R5 後に `r5_prereqs.py --grant-te02` で与える。

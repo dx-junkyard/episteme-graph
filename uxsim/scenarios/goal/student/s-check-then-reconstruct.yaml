@@ -1,0 +1,48 @@
+id: s-check-then-reconstruct
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、{{topic_hint}} の確認問題に答え、違っていたら再構成で式を追い直す'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- wrong_answer_to_give
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.check.take
+  note: '{{wrong_answer_to_give}} という趣旨で答える'
+- do: learning.check.self_check
+- do: learning.reconstruction.next
+  note: 次の段を予測する問題で式が画面に出るかを見る
+- do: learning.reconstruction.submit
+  with:
+    answer: '{{wrong_answer_to_give}}'
+- choose:
+  - do: learning.reconstruction.self_check
+    with:
+      verdict: disagreed
+  - do: learning.reconstruction.descend
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#comprehension-check
+- manual: student/02-student.md#check-options
+- manual: student/02-student.md#reconstruction-challenge
+watch_for:
+- 出題文が問うている式そのものを示している
+- 正誤・点数・合否の語彙が出ず、並置と自己確認として出る
+- 照合は「食い違いの可能性」として仮説の言い方で出る

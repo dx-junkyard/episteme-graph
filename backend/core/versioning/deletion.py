@@ -223,15 +223,19 @@ def _purge_document(session, document_id: str) -> PurgedDocument:
     # 1) この教材を source に含む所有者のコースを削除（delete_material と同スコープ）
     teaching_figure_keys: list[str] = []
     course_ids: list[str] = []
-    if owner and source_path:
-        needle = json.dumps([{"material_id": source_path}])
+    if owner:
+        # sources[].material_id は source_path 形のほか documents.id（UUID）形でも書かれる
+        # （IK-0550）。どちらの形で教材を参照するコースも「この教材を source に含む」に数える。
+        needle = json.dumps([{"material_id": source_path or document_id}])
+        needle_by_id = json.dumps([{"material_id": str(document_id)}])
         course_rows = session.execute(
             sa_text("""
                 SELECT id FROM learning_courses
                 WHERE user_id = CAST(:owner AS uuid)
-                  AND data->'sources' @> CAST(:needle AS jsonb)
+                  AND (data->'sources' @> CAST(:needle AS jsonb)
+                       OR data->'sources' @> CAST(:needle_by_id AS jsonb))
             """),
-            {"owner": owner, "needle": needle},
+            {"owner": owner, "needle": needle, "needle_by_id": needle_by_id},
         ).fetchall()
         for (cid,) in course_rows:
             course_id = str(cid)

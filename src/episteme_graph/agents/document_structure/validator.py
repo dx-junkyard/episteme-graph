@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 
+from .classifier import _FIGURE_RE, looks_like_caption_label
 from .schema import (
     BLOCK_TYPES,
     CartridgeContext,
@@ -20,8 +21,6 @@ from .schema import (
     ValidationIssue,
 )
 
-_FIGURE_RE = re.compile(r"^(Figure|Fig\.?|FIG\.?|図)\s*\d+", re.IGNORECASE)
-_TABLE_RE = re.compile(r"^(Table|TABLE|表)\s*\d+", re.IGNORECASE)
 _REF_ENTRY_PREFIX_RE = re.compile(r"^\[\d+\]")
 
 _MAX_SECTION_TITLE_LEN = 200
@@ -88,7 +87,11 @@ class StructureValidator:
     ) -> list[ValidationIssue]:
         issues = []
         for b in blocks:
-            if b.block_type == "body_paragraph" and _FIGURE_RE.match(b.text):
+            if (
+                b.block_type == "body_paragraph"
+                and _FIGURE_RE.match(b.text)
+                and looks_like_caption_label(b.text)
+            ):
                 issues.append(
                     ValidationIssue(
                         rule_id="figure_caption_as_body",

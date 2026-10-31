@@ -55,6 +55,9 @@ resolution:
     - frontend/public/js/element-vocab.js
     - frontend/public/js/element-card.js
     - docs/architecture/admin_ux_issues_2026-08-01.md §3.3
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0216, IK-0217]
 view_of: []
 pattern: duplicate-canonical-sources

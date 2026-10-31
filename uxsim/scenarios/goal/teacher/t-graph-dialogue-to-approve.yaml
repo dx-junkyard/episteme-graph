@@ -1,0 +1,45 @@
+id: t-graph-dialogue-to-approve
+population: teachers
+runner:
+- api
+- browser
+preconditions:
+- 砂場に解析済みの教材（グラフ・論文層あり）が入っていて、このペルソナがそれを閲覧できる。教材の取り込み・コース登録・公開はしない
+goal: '{{goal_text}} のために、グラフ全体の対話で理論構成をつかみ、ノード対話で確かめて、根拠の主張を承認する'
+params_required:
+- goal_text
+- material_hint
+- graph_questions
+- node_questions
+steps:
+- do: auth.login
+- do: admin.materials.list
+- do: admin.graph_review.open
+  note: '{{material_hint}} の行からグラフ画面を開く'
+- do: admin.graph_review.chat
+  with:
+    message: '{{graph_questions | next}}'
+- repeat:
+    until: persona_decides_to_stop or steps > 3
+    max: 3
+    do: admin.graph_review.node_chat
+    with:
+      message: '{{node_questions | next}}'
+- choose:
+  - do: admin.graph_review.approve_claim
+    note: 原文と照らして納得した根拠の主張を承認する
+  - do: admin.deliberation.overview
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: teacher/26-admin-graph-review.md#graph-chat
+- manual: teacher/26-admin-graph-review.md#node-chat
+- manual: teacher/26-admin-graph-review.md#claim-approve
+watch_for:
+- 論文の事実と処理・レビューの記録が混ざらない
+- 「AIの読み（未確認）」が二重に出ない
+- 承認は人の操作でだけ起きる

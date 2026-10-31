@@ -7,7 +7,7 @@
   キューにつき1回（行ごとに呼ばない — routes/doubt.py のアンチパターンを再現しない）。
 - agent ID 解決経路: 説明キューの claim / component は agent 側 ID → DB UUID の
   索引で解決してから台帳を引く。equation は素通し、figure / document は導出不能。
-- NULL / 未解決 / course 混在の末尾配置と正直な縮退ラベル「影響度を導出できない候補」。
+- NULL / 未解決 / document 不在の末尾配置と正直な縮退ラベル「影響度を導出できない候補」。
 - 段階ラベルが ``core/doubt/schema.py``（LOAD_LEVEL_LABELS = 低/中/高/最高位）由来で
   あること（TT2: 独自辞書を作らない）。
 - 生値（load_score）非漏洩: 付与されるのは段階キーとラベルの2キーのみ。
@@ -58,7 +58,7 @@ class FakeLedgerSession:
             self.ledger_queries += 1
             ids = set(params["ids"])
             rows = [
-                (r["target_type"], r["target_id"], r["load_score"], r["course_id"])
+                (r["target_type"], r["target_id"], r["load_score"], r["document_id"])
                 for r in self.ledger_rows
                 if r["target_id"] in ids
             ]
@@ -72,12 +72,12 @@ class FakeLedgerSession:
         pass
 
 
-def _row(target_id, load_score, course_id="course-1", target_type="claim"):
+def _row(target_id, load_score, document_id="doc-1", target_type="claim"):
     return {
         "target_type": target_type,
         "target_id": target_id,
         "load_score": load_score,
-        "course_id": course_id,
+        "document_id": document_id,
     }
 
 
@@ -132,20 +132,21 @@ class TestLoadLevelsForTargets:
         )
         assert levels[("claim", "no-ledger-row")] == ""
 
-    def test_mixed_course_ids_degrade_all_without_percentile_query(self):
-        """course 混在は percentile の基準が定まらない → 全件導出不能（正直な縮退）。"""
+    def test_mixed_documents_share_one_percentile_basis(self):
+        """IK-0852: 段階の基準は台帳行の document 集合（course_id 列は使わない）。
+        複数 document にまたがっても percentile は 1 回だけ引き、全件を段階化する。"""
         fake = FakeLedgerSession([
-            _row("c1", 60.0, course_id="course-1"),
-            _row("c2", 60.0, course_id="course-2"),
+            _row("c1", 60.0, document_id="doc-1"),
+            _row("c2", 60.0, document_id="doc-2"),
         ])
         levels = teacher_triage.load_levels_for_targets(
             fake, [("claim", "c1"), ("claim", "c2")]
         )
-        assert levels == {("claim", "c1"): "", ("claim", "c2"): ""}
-        assert fake.percentile_queries == 0
+        assert levels == {("claim", "c1"): "high", ("claim", "c2"): "high"}
+        assert fake.percentile_queries == 1
 
-    def test_absent_course_ids_degrade_all(self):
-        fake = FakeLedgerSession([_row("c1", 60.0, course_id="")])
+    def test_absent_document_ids_degrade_all(self):
+        fake = FakeLedgerSession([_row("c1", 60.0, document_id="")])
         levels = teacher_triage.load_levels_for_targets(fake, [("claim", "c1")])
         assert levels == {("claim", "c1"): ""}
         assert fake.percentile_queries == 0

@@ -57,6 +57,10 @@ resolution:
     - backend/tests/guardrail_helpers.py
     - backend/tests/test_route_registry_guardrails.py
     - backend/tests/test_admin_assistant.py
+  verification:
+    methods: [reproduction_rerun, guardrail]
+    unverified:
+      - FastAPI 0.139 未満の版での再実行（同じ結果になる設計だが、venv を最新版に上げた後は走らせていない）
 related: [IK-0212, IK-0120, IK-0324]
 view_of: []
 history: []

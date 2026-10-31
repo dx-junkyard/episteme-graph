@@ -1,0 +1,51 @@
+id: c-astro-r25-atlas-r3
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 1bad7d9f
+personas:
+  teachers: [te-05-delegator-lab, te-03-meticulous-seminar]
+  students: [st-02-m2-lensing-theory, st-09-d2-from-datasci]
+scenarios:
+  teacher: [t-atlas-gap-review, t-atlas-edge-review, t-atlas-draft-freeze]
+  student: [s-atlas-threads-and-placement, s-atlas-sea-map]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 4, persona_llm_calls: 300, wall_clock_minutes: 240}
+notes: |
+  第 25 周 面 C「分野の地図の運用」第 3 周（judge_atlas_r2.md §5 の組。第 1・2 周と同じペルソナ × 場面の組は使わない — P-0025）。
+  審判の提案のうち te-03 × t-atlas-edge-review は第 1 周と同じ組なので te-05 に替え、te-03 には第 1・2 周で歩いていない
+  t-atlas-draft-freeze を渡した（几帳面な読み = 大量の近傍候補・下書きに入った札・公開前チェックの言い方は、draft-freeze の
+  関係の一覧（第 3 周で必須に足した 1 手）と凍結の影響の手で見る）。
+
+  ── 周の前に指揮者が用意するもの（この順）──
+   1. 砂場の reset: 第 1・2 周の判断（atlas_gap_decisions / atlas_edge_decisions・下書き・2026.2 の凍結）を消して
+      corpus-astro-tex-r23 に戻す。戻さないなら、残った判断を前提に書き換える（te-05 の gap-review は「導出から外れた採用判断の
+      別枠」（IK-0884）を読む場面になり、te-03 の freeze_version は 2026.2 が既にあるので 2026.3 に差し替える — params の
+      te-03-meticulous-seminar 節）。どちらにしたかを run の記録に残す。
+   2. 教員確認済みの配置を正規経路で 1 件以上作る（judge_atlas_r2 §5・H17）: 教材管理の［位置づけ（分野マップ）…］の
+      PATCH .../landscape/placements/{id}（status=confirmed）を te-03 として 1 件。st-02 の「確認済みと推定の読み分け」の材料。
+   3. 投影の同期（ハーネス H10〜H14）を製品の是正に合わせて終えておく。同期しないと B11・B12・B13 が投影の古さを製品の
+      課題として拾い続ける。
+   4. 是正の前提: IK-0884（採用判断の別枠）・IK-0885（公開前チェックの一本化）・IK-0886（下書きに入った札）・IK-0887
+      （辺候補の近さ順と上限）・IK-0888（台帳の文が層を名乗る）・IK-0851 / IK-0846 の残存。是正前に回すと第 2 周と同じ所で止まる
+      （特に te-03 の凍結は IK-0884 の未是正なら 409 で止まる）。
+
+  ── 場面の組とレーンの順（runner は全組を走らせるので --persona X --scenario Y で 1 場面ずつ・この順で）──
+   (a3) te-05-delegator-lab × t-atlas-gap-review（委任型: 候補ゼロの理由の一文・別枠の採用判断を読み、1 採用・1 見送り）
+   (c3) te-05-delegator-lab × t-atlas-edge-review（採用 1（関連）・理由付きの見送り 1 — 学生の糸に出ないことの材料 = RE8 / 審判 B5）
+   (d3) te-03-meticulous-seminar × t-atlas-draft-freeze（索引の再構築 → 候補と関係の反映 → 関係の一覧を読み直す → 公開前チェック →
+        凍結。**この周で 1 名・1 回だけ**。凍結は取り消せない。周の後は snapshot から戻す）
+   (e3) st-02-m2-lensing-theory × s-atlas-threads-and-placement（凍結の後: 新しい版の糸、採用・見送りした関係の現れ方、
+        確認済みと推定の配置の読み分け、項目の文と配置の矛盾（IK-0888））
+   (f3) st-09-d2-from-datasci × s-atlas-sea-map（投影を直した上で厚みの段階と円（IK-0847）・縁の重複（IK-0846 残存））
+  順序は教員の判断・凍結 → 学生の地図（審判 B5 の前提）。
+
+  LLM 予算の見積り: 製品のチャット LLM は呼ばない（候補の導出・取り込み・凍結の影響は決定論）。product_llm_calls は embedding の
+  従量の上限で、(d3) の索引の再構築 1 回 + 凍結の後に製品が裏で始める新しい版の索引 1 回 = 2 回の見込み（余裕を見て 4）。
+  ペルソナ頭脳は 5 場面 × 50〜60 手。arXiv は呼ばない。
+
+  ── 投影の同期（第 2 波・projection_sync_wave2.md）──
+  第 2 波の新しい行為: admin.atlas.edges.show_all（［すべて表示］）/ admin.atlas.gaps.orphaned_{restore,incorporate} /
+  admin.atlas.edges.orphaned_{dismiss,incorporate}（候補の条件から外れた採用済みの判断）/ admin.atlas.freeze_blocked_goto
+  （［止めている候補を見る］）。t-atlas-gap-review / edge-review / draft-freeze に任意の 1 手として入れた。

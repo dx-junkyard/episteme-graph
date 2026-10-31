@@ -60,6 +60,10 @@ resolution:
     - backend/core/disclosure_axes.py
     - backend/api/routes/disclosure.py
     - docs/features/disclosure_axes_design.md
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E
 related: [IK-0012, IK-0021, IK-0022]
 view_of: []
 history:

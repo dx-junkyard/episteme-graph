@@ -1,0 +1,51 @@
+id: s-share-symbol-concept
+population: students
+# 第 25 周 第 7 周 atlas H43: 是正の確かめが固定コース（campaign の course_id）に依存する場面は最初の open を固定する。
+# 同題名のコースを人がどう見分けるか（IK-0407）を観察したい場面とは分ける（その場面には pin_course を付けない）
+pin_course: true
+runner: [api, browser]
+# 第 25 周 share (e)。記号の意味を引き、概念の参照が確定した結び付きのときだけ出ることを見る。
+goal: '{{goal_text}} のために、{{topic_hint}} の式の記号を順にタップし、その記号がどの概念に当たるかが分かるかを確かめる'
+params_required: [goal_text, topic_hint, topic_hint_terms, symbol_hints]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.enroll
+    note: 受講中でなければ受講を始める
+  - do: learning.course.open
+  - do: learning.topic.open
+    with: {topic_hint_terms: '{{topic_hint_terms}}'}
+    note: '{{topic_hint}} に合うトピックを開く'
+  # 第 25 周 第 3 周（judge_share_r2 §5）: 第 2 周は repeat で頭脳が 3 つ目で止め、登録の無い記号が未実行だった。
+  # 定義の 3 状態（本文に定義の文 / 定義式だけ / 登録なし）を必ず見るため 4 つを 1 つずつ必須でタップする
+  - do: learning.symbol.lookup
+    with: {symbol: '{{symbol_hints | next}}'}
+    note: 1 つ目の記号をタップして定義と概念を見る
+  - do: learning.symbol.lookup
+    with: {symbol: '{{symbol_hints | next}}'}
+    note: 2 つ目の記号
+  - do: learning.symbol.lookup
+    with: {symbol: '{{symbol_hints | next}}'}
+    note: 3 つ目の記号（定義式だけの記号なら、定義の文が無いことがどう言われるかを読む）
+  - do: learning.symbol.lookup
+    with: {symbol: '{{symbol_hints | next}}'}
+    note: 4 つ目の記号（登録の無い記号なら、無いことがどう言われるかを読む）
+  # 第 25 周 第 10 波（judge_share_r10 H62）: 材料に 5 つ目の記号があれば（st-04 の N_TOV — 式の中に現れる経路・IK-0681）
+  # タップする。材料が尽きていれば飛ばしてよい
+  - choose:
+      - do: learning.symbol.lookup
+        with: {symbol: '{{symbol_hints | next}}'}
+        note: 5 つ目の記号（式の中に現れる記号なら、どの式の記号として言われるかを読む）
+    optional: true
+  - choose:
+      - do: learning.component.context
+        note: 記号が出てくる部品の ⚓ を開く
+      - do: learning.component.shared_part
+        note: 部品の「共通部品として」を見る
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#symbol-lookup
+watch_for:
+  - 記号の概念は、先生が確定した結び付きのときだけ名前と種別で出て、無いときは無いことが分かる（推測で概念名を埋めない）
+  - 記号の意味の吹き出しに内部 ID・数値が出ない

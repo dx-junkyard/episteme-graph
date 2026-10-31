@@ -1,0 +1,81 @@
+id: t-db-challenge-propose
+population: teachers
+runner: [api]
+preconditions:
+  - text: このペルソナは自分のコース（前提の地図タブのコース選択に並ぶもの）を持っている
+    check: owns_course
+  - 確定済みの前提か主張の台帳を開ける（疑義のボタンは前提と主張の台帳にだけある）。地図が空なら原稿スタジオの
+    ノード詳細の台帳までは開けるが、そこには疑義のボタンが無い
+seed_scenarios: [t-v5-register-own-course]
+goal: "{{goal_text}} のために、前提に疑義を型で残し、確かめる手立てがあるものは検証提案に昇格させる"
+params_required: [goal_text, course_hint, material_hint, node_hint, challenge_reason, second_reason, proposal_text,
+                  external_check, foreign_material_hint, foreign_scope_condition]
+steps:
+  - do: auth.login
+  - do: admin.doubt.tab_open
+    with: {course_hint: "{{course_hint}}"}
+  # 第 25 周 H8: 地図が空でも開ける台帳の入口（原稿スタジオのノード詳細）を先に通る。ノード（部品）の台帳には
+  # 「疑義を残す」が無い（前提・主張の台帳にだけある）ので、その事実を読んでから地図の前提・主張の台帳へ移る
+  - do: admin.materials.list
+  - do: admin.doubt.studio_node_ledger
+    with: {material_hint: "{{material_hint}}", node_hint: "{{node_hint}}"}
+    note: 原稿スタジオのグラフでノードを選び、その台帳の区画を読む（疑義のボタンがあるかを見る）
+  # 第 25 周 第 2 波（IK-0904）: 部品・式の台帳には疑義の入口が無い理由と、支える主張の台帳へ辿る［この主張の台帳を開く］が出る
+  - choose:
+      - do: admin.doubt.supporting_claim_ledger
+        note: 支える主張の台帳を同じ論文で開き、そこで疑義を残す
+      - do: admin.doubt.audit_run
+    optional: true
+  - do: admin.doubt.audit_run
+    note: 前提の地図に点・候補が無ければ、コーパス監査を押して前提候補を出す
+  - do: admin.doubt.ledger_open
+    note: 前提の地図の点か未検証合意リストの行から、前提か主張の台帳を開く
+  - do: admin.doubt.challenge_record
+    with: {challenge_type: 外挿}
+    note: 理由を書かずに疑義を残そうとしてしまう
+  - do: admin.doubt.challenge_record
+    with: {challenge_type: 外挿, reason: "{{challenge_reason}}"}
+  - do: admin.doubt.challenge_propose
+    with: {proposal: "{{proposal_text}}"}
+    note: コーパス外の確認を書かずに提案しようとする
+  - do: admin.doubt.challenge_propose
+    with: {proposal: "{{proposal_text}}", external_check: "{{external_check}}", reachability: 次世代の装置・観測なら可能}
+  - do: admin.doubt.proposal_status
+    with: {status: 検証に着手}
+  - do: admin.doubt.challenge_record
+    with: {challenge_type: 定義, challenge_mode: 主張と根拠のつながりへ, reason: "{{second_reason}}"}
+  - do: admin.doubt.challenge_withdraw
+    note: 二つ目の疑義を取り下げる（行が消えずに残るかを見る）
+  - do: admin.doubt.refresh
+    note: 未検証合意リストで、検証提案の有無が段階で見えるか
+  # 第 25 周 第 3 周（judge_doubt_r2 §4 = IK-0900 の確認）: 編集権限の無い教材の台帳で 1 回だけ書き込みを試す。
+  # 書けないこと・理由・誰に頼めばよいかが画面で分かるか（是正前は書けてしまう）
+  - choose:
+      - do: admin.doubt.studio_node_ledger
+        with: {material_hint: "{{foreign_material_hint}}", node_hint: "{{node_hint}}"}
+        note: 自分が編集権限を持たない教材のグラフでノードを選び、台帳の区画を開く
+    optional: true
+  - choose:
+      - do: admin.doubt.scope_record
+        with: {condition: "{{foreign_scope_condition}}", reason: "{{challenge_reason}}"}
+        note: その台帳にスコープを書こうとする（書けないならその理由が事実文で出るかを読む）
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: teacher/18-admin-doubt-atlas.md#record-challenge
+  - manual: teacher/18-admin-doubt-atlas.md#challenge-mode
+  - manual: teacher/18-admin-doubt-atlas.md#manage-challenge
+  - manual: teacher/18-admin-doubt-atlas.md#open-assumptions
+watch_for:
+  - 疑義の主語は型で、投稿者の名前が添えられる（匿名の疑義が無い）
+  - コーパス外の確認が空の提案は登録されず、何が足りないかが事実文で出る
+  - 提案にした疑義は「検証提案へ昇格済み」になり、取り下げた疑義は台帳から消えずに状態として残る
+  - 未検証合意リストに疑義・検証提案の有無が段階のバッジで出て、件数は出ない
+  - 原稿スタジオのノード（部品）の台帳に疑義の入口が無いことが、画面から読み取れる（「どこで疑義を残せるか」が分かる）
+  - 式・部品の台帳から、それを支える主張の台帳へ移って疑義を残せる（IK-0904 の是正後）
+  - 編集権限の無い教材の台帳は書き込みが閉じ、理由が事実文で出る（IK-0900 の是正後）
+  - コースを作らずに解析した教材から組んだコースでも、前提の地図・未検証合意リストに前提・主張が出て、そこから台帳を
+    開いて疑義を残せる（IK-0852 の是正後）
+  # 第 10 波（sync_keys_wave10 面 B・IK-1120 / IK-1121）
+  - 未検証合意リストの到達可能性は「覆る条件の到達可能性」、台帳の提案カードは「検証提案の到達可能性」と別の欄名で書かれ、同じ主張でリストと台帳の支持線の段階が一致する
+  - 完了を記録した提案は「完了: 名前（日時）」と確かめたこと（無ければ「記帳なし」）が残り、検証状態が変わらないことが事実文で分かる

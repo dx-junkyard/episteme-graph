@@ -1,0 +1,4 @@
+scenario: s-v5-records-export
+domain: astrophysics
+params:
+  goal_text: このシステムに自分が何を残したかを把握すること

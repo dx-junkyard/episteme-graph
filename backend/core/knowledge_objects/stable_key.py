@@ -155,6 +155,27 @@ def learning_unit_stable_key(
     ])
 
 
+def theory_module_stable_key(
+    document_id: str,
+    rule_version: str,
+    level: str,
+    produced_equation_keys: Iterable[str],
+) -> str:
+    """理論モジュール（theory_module_layer_design.md §13.2・migration 086）。
+
+    材料は ``document_id`` + 規則の版 + 段（outer / inner）+ 成員 step が生む式の
+    **equation stable_key の集合**（写像に無い式は ``eqid:`` + equation_id）。式の stable_key が
+    内容由来（KO2）なので、再解析で同じ式を生むモジュールは同じキーになる。derivation step の
+    stable_key は位置を材料に含む（KO2 の明示例外）ので使わない。run_id・出現順・``module_key``
+    （agent 側 ID）も材料にしない。**規則の版を材料に含む**ので、版を上げると全行が superseded に
+    なる（§5.7「旧キーとの対応は取らない」の帰結）。
+    """
+    return digest([
+        "theory_module", _clean(document_id), _clean(rule_version), _clean(level),
+        _join_sorted(produced_equation_keys),
+    ])
+
+
 # ---------------------------------------------------------------------------
 # 同一 run 内の衝突解消
 # ---------------------------------------------------------------------------

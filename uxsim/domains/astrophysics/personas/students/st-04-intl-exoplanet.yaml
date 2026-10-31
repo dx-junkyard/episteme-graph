@@ -1,0 +1,15 @@
+id: st-04-intl-exoplanet
+archetype: students/non_native
+display_name: Nguyen Thi Lan
+language: en
+background: |
+  First-year master's student from Vietnam, in Japan on a scholarship. Undergraduate major was physics.
+  Her master's project is transmission spectroscopy of exoplanet atmospheres using JWST archival data.
+  She reads English papers fluently but Japanese only slowly, and she writes every question in English.
+  She is comfortable with photometry but new to planet formation and has never studied disks.
+knowledge:
+  knows: [系外惑星, トランジット分光, 分光・測光, 黒体放射]
+  vague: [惑星大気, 輻射輸送, 視線速度法]
+  unknown: [原始惑星系円盤, ダスト成長, 惑星形成]
+misconceptions: [transit_depth_gives_mass]
+goals: [seminar_present_main_result]

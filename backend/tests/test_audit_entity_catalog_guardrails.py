@@ -38,6 +38,8 @@ _AUDIT_CALLER_FILES = [
     _BACKEND / "api" / "routes" / "paper_discovery.py",
     # 是正 F11（2026-09-10）: 記帳の無い状態変更を塞いだ経路も呼び出し元に加える。
     _BACKEND / "api" / "routes" / "lecture_studio" / "topics.py",
+    # 検証シミュレーション層（simulation_bridge_design.md SB7）。
+    _BACKEND / "api" / "routes" / "simulation_bridge.py",
 ]
 
 # 監査 INSERT 呼び出しのパターン（関数名 + 開き括弧の直後）。

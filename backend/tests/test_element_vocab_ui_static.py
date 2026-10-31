@@ -114,6 +114,7 @@ class TestCanonicalLabels:
             "symbol": "記号",
             "stage": "理論ステージ",
             "part": "パーツ",
+            "theory_module": "理論モジュール",
         }
 
     def test_unknown_keys_fall_back_to_the_key_itself(self):

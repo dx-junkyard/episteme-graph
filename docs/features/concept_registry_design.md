@@ -256,11 +256,11 @@ API `POST /api/admin/library/atlas-links/derive?domain_key=`（TEACHER・retired
 - **学習者 API** `GET /api/learning/courses/{course_id}/symbols/lookup?symbol=&equation_id=&chunk_id=`
   （`core/symbol_lookup.py::lookup_symbol_definition`。受講ゲート `get_accessible_course_data` → `list_course_source_document_ids` →
   `knowledge_symbols_live` を `document_id = ANY(:doc_ids)` で読む。**LLM 0 回・既存データのみ**）:
-  1. `canonical_symbol` または `notation_variants` に一致する live 行を集める（一致は `normalize_key`（`concept_normalizer`）の完全一致・部分一致なし）。
+  1. `canonical_symbol` または `notation_variants` に一致する live 行を集める（一致は記号専用キー `symbol_lookup.symbol_key` の完全一致・部分一致なし。**大文字小文字を区別する** — `λ` と `Λ` は別の記号。TeX ⇄ Unicode・波括弧・書体指定だけを畳む。旧実装は概念名向けの `normalize_key` を流用して `λ` / `Λ` を同じキーにしていた = IK-0387）。タップ位置の論文（式またはチャンクから）の記号を先に当て、別の論文へ倒したときと、タップ位置が無いときは出所の論文タイトルを事実文で添える。「この節の中」「この式の中だけ」はタップ位置の論文の記号でだけ出す。`available: false` は必ず事実文を1つ持つ（IK-0386）。
   2. **ScholarPhi 規則 = 直前の定義**: タップ位置（`equation_id` → `knowledge_equations_live` の `block_id` / `section_id` の順序、
      無ければ `chunk_id` の `chunk_index`）より**前**にある `defining_equation_ids` / `source_evidence_ids` の定義のうち最も近いものを 1 件
      （`definition_evidence_texts` の逐語）。前に無ければ後方の最初の定義を「この位置より後で定義されています」の事実文付きで返す。
-     定義が無ければ `definition_status` のラベル（`element_vocab.DEFINITION_STATUS_LABELS`）と「この論文には定義の記述が見つかりませんでした」。
+     定義が無ければ「この論文には定義の記述が見つかりませんでした」（`definition_status` のラベルは、これと食い違わない `definition_missing` =「定義なし」のときだけ添える。`used` の「定義は別の箇所」等は含意が逆になるため出さない — IK-0380）。
   3. `concept_ref`: 当該 symbol に `confirmed` の識別リンクがあれば `{entry_id, name, entry_type_label}`、無ければ `null`（candidate は出さない）。
   4. DTO に `confidence` / `stable_key` / 内部 ID を載せない（KO10 / PL7）。`unit` / `scope_label` は載せる。
 - **UI（`app.js`）**: 教材の KaTeX 描画済み数式（`.katex`）内の記号トークン（`.mord.mathnormal` / `.mop` / `.mord` の textContent）クリックで
@@ -485,3 +485,324 @@ Phase 3 の敵対的レビューで挙がった P3-R1〜R14 のうち、本層�
 **行は消さない**（P4）— 出さないだけで DB の値も symbol_registry からの辿りも失われない。
 既存行の接地バックフィルは orchestrator / grounding hook 側の担当（本班の所有外）。
 ガードレールは `test_concept_registry_dictionary.py::TestLearnerConceptGate`。
+
+## 追補（2026-09-30・ペルソナ通し受講 第 16 波）
+
+- **P3-5 記号 lookup は「この論文」に限る**（IK-0552）: 探索範囲は chunk の document、無ければ表示中トピックの論文（`topic_id` を受ける）。
+  コースの別論文の定義は持ってこない。別論文に同じ記号があるときは `FACT_SAME_SYMBOL_IN_OTHER_DOCUMENTS`、この論文に無いときは
+  `FACT_SYMBOL_NOT_IN_THIS_DOCUMENT` の事実文を返す。式本文は返さない（位置の事実文まで・IK-0578 で未決）。
+
+## 追補（2026-10-23・第 25 周 面 A 第 1 周の是正）
+
+- 同一性の候補の空の状態の文言はサーバの `facts` が正本（見送り済みを含めたかで文を分け、候補の出所と
+  作り直す道を添える）。地図との対応の導出結果の `facts` は画面がボタンの下に描く（IK-0864）。
+- 一覧・詳細の表示語は route 層で足す: `updated_by_label`（シードは「同梱の初期データ」・帰属の解決は
+  `core.atlas_review_display.fetch_actor_labels` を共有）/ `domain_label` / `version_line`（「凍結版 N」
+  「まだ凍結していません」・revision は出さない）/ `review_status_note`（確定と凍結は別）（IK-0866）。
+- 別名の正本はラベル区画。詳細の編集面から別名の欄を外し、保存は aliases を送らない（IK-0867）。
+- 関係の相手は名前・別名で検索して選ぶ（`GET /entries?q=` の結果が空なら `facts` で事実文）（IK-0868）。
+- 記号の照会: 式だけで定義された記号は「式 (3)で定義されています。」+ 定義式の本文 / 登録の行に定義が無くても
+  配信済みの式から探す / 但し書きは取り込み形式で分ける / 別の論文の同じ字形は意味の注記つき / 画面が上付きを
+  添字に結合して送った記号は、完全一致の後に `symbol_key_fallbacks` で 1 段ずつ照合し直す（IK-0869 / IK-0870）。
+- Copilot の capability に概念レジストリの 4 項目（案内専用）を足した（IK-0865）。
+
+## 追補（2026-10-23・第 25 周 面 A 第 2 周の是正）
+
+- **共通部品の検索の分野**（IK-0890）: 分野は `core/deliberation/dialogue.py::resolve_document_domains` の 1 関数が
+  段順（採用解析 run の `cartridge_id` → 教材を sources に含むコースの `cartridge_id`（`corpus.document_domain_keys`）→
+  live な `landscape_placements.domain_key`）で決める。深く検討の検索 route（`GET /api/admin/deliberation/elements/
+  {type}/{id}/shared-part-candidates`）と W層の対話の同一性候補の両方がここを通る。route は教員の選択（クエリ
+  `domain_key`）を最優先し、1 つに決まらない（複数・どこにも無い）ときは**サーバが黙って選ばず**、表示名付きの
+  `domains`（`{domain_key, domain_label}`。当たった分野 → ライブラリにエントリがある分野）と事実文を返す
+  （「カートリッジ」の語は出さない）。応答に `domain_label` / `domain_source`（`analysis_run` / `course` /
+  `placement` / `selected`）を添える。表示名の正本は `atlas_state.domain_display_name`、共通の分野は
+  `core/library/schema.DOMAIN_UNASSIGNED_LABEL`。
+- **ラベル・関係の追加の結果**（IK-0897）: `registry.add_label` / `create_relation` は戻り値に `outcome`
+  （`created` / `existing` / `dismissed`）を添える。route は新規だけ 201・それ以外は 200 で、固定文の `facts`
+  （`LABEL_OUTCOME_FACTS` / `RELATION_OUTCOME_FACTS`）を返し、画面は区画の一覧の直前に描く。見送り済みの行は
+  追加し直しても復帰させない（KR7 は不変）。
+- **記号の照会の第 3 の供給源**（IK-0893）: 登録簿に定義の文が無いときだけ、同じ論文の主張本文での使われ方
+  （`mentions`・最大 2 件・数式区間を割らない）を固定文 `FACT_CLAIM_MENTIONS`（「定義の文ではありません」）付きで
+  添える。式の左辺による定義の推定は `P = …` / `P(ε) = …` に限る（`P(R_*) = 0` の値の代入を定義に数えない）。
+- 導出の確認ダイアログの分野名は分野一覧の `domain_label`（IK-0866 の残り）。
+
+### pre-mortem（第 2 周の是正の設計時の検査）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 入口で任意になった分野を後段が唯一の材料として要求 | `available-but-unwired` | 同じ値を持つ別の正本へ段順で後退し、最後は教員に選ばせる |
+| 同じ問い（記号の意味）に画面ごとに別の材料で答える | `duplicate-canonical-sources` | 部品の文脈と同じ主張本文を第 3 の供給源にし、定義と断定しない |
+| 3 つの結果を 1 つの成功で表す | 該当なし（表現の欠落。`outcome` の一級化で解消） | — |
+
+## 追補（2026-10-23・第 25 周 面 A 第 3 周の是正）
+
+- **同一性リンクの行**（IK-0916 / IK-0917）: `_identity_link_response` が部品側を `identity_links.describe_instance`
+  （名前・要約・入出力・論文の題名。live ビューのみ・fail-soft）で同梱し、内部の要素型名・UUID は画面の本文に出さない。
+  確信度の段階（`confidence_label`）は AI・照合由来（`MACHINE_JUSTIFICATIONS`）の未確定の行だけに付け、それ以外は
+  `None`。人の判断の状態は別キー `provenance_label`（教員が作成 / 教員が確定 / 教員が却下 / 照合による候補）。
+  未確定の行には確定の直前に読む `confirm_note`（同じものとして扱う・学生の画面に何が出る・使う関係なら確定しない）。
+  **リンクの種類は足さない**（指揮者の判断・KN-2 の「同じもの」を保つ。使う・満たす関係は v1 で記録しない）。
+- **作成の結果**（IK-0918）: `create_candidate` が `outcome`（`created` / `existing_candidate` /
+  `existing_confirmed` / `existing_rejected`）を返し、route は新規だけ 201 + 監査、既存は 200 + `facts`
+  （`LINK_OUTCOME_FACTS`）。IK-0897 と同じ作法。
+- **同じ論文の別の版**（IK-0919）: `identity_candidates` に規則②b。arXiv ID（`source_url` → `filename` →
+  `source_path`）か題名の正規化完全一致で別の版の組を先に解き、その中で根拠の式の正規化 LaTeX・主張の正規化本文の
+  一致から部品の対を選ぶ（名前を使わない・`lexical_match`・`SAME_PAPER_REASON_*`）。規則③の起点は代表チャンク →
+  出典チャンク → 根拠の主張の `chunk_id`（最大 4）。LLM 0 回・embedding 0 回（KR5 不変）。
+- **確定リンクの読み手**（IK-0920）: ライブラリのエントリ詳細「結びついた教材の部品」・学生の部品の文脈（他の論文は
+  確定リンク ∩ 読める論文の**題名**の列挙。件数キー `other_documents_count` は廃止）・学習チャットの element 解決器の
+  事実 1 行・旅（区画に一意の部品が埋め込まれているときだけ [2] へ）。
+- **地図との対応**（IK-0927）: 導出の事実文に「凍結していないエントリは名前・別名の一致だけで照合」と手動の入口。
+  `GET /api/admin/library/atlas-links/nodes`（現行凍結骨格の概念を名前で検索）+
+  `POST /api/admin/library/entries/{id}/atlas-links`（`manual_curation` の候補・現行版に無い node は 422・骨格に
+  書かない = KR2）。教員の手動作成を即確定にするかは決めていない（候補で入り、既存の確定で確定する）。
+- **検索の帰属**（IK-0928）: `library.search` は `feature` を受けると `embed_with_context` で帰属を張る
+  （`embedding:library_search` / `embedding:shared_part_search`）。
+- **記号の使用例**（IK-0922 / IK-0898）: 論文の文を持たない主張の出所の述語の正本 `core.schema.NON_SOURCE_TEXT_CLAIM_ORIGINS`
+  で合成主張を除き、区切りの無い TeX は切り詰めの前に `delimit_bare_tex` で区切る。
+
+### pre-mortem（第 3 周の是正の設計時の検査）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 確定リンクを作る側だけがあり読む側が無い | `available-but-unwired` | 読み手 4 面を既存 API・既存の解決器・既存の旅の hop に配線（新しい kind・新しい API を作らない） |
+| 意図の語表が登録簿と別にある | `duplicate-canonical-sources` | 語を `Capability.keywords` に移し intent は読むだけ |
+| 合成主張を論文の文として扱う消費者が増える | `rule-enforced-per-surface` | 述語を `core/schema.py` に 1 つ置き 2 消費者が共有 |
+| 作り直しで既存行を返して「作成しました」 | `failure-reported-as-success` | `outcome` の一級化 |
+| 他の論文の題名を学生に出す | `condition-not-propagated` | 読める論文の集合を呼び出し側が組んで渡し、その積だけを列挙（未指定はコースの sources = fail-closed） |
+
+## 第 4 波の追補（2026-10-25・第 25 周 面 A 第 4 周の是正）
+
+- **確定の取り消し**（IK-0953・migration **093**）: 同一性リンクの状態に `revoked`（教員が確定を取り消した）を足した。
+  遷移は `confirmed → revoked` だけで、`identity_links.revoke(link_id, revoked_by=, reason=)` が理由・帰属を必須にし
+  （空は `ValueError`）、確定者 `decided_by` / `decided_at` は上書きせず `revoked_by` / `revoked_at` / `revoke_reason` に
+  別に残す（行は消さない = P4 / W4）。route `POST /api/admin/deliberation/identity-links/{id}/revoke`（`{reason}`・
+  理由空は 422・確定でない行は 409・権限は確定と同じインスタンス側の論文の編集）、監査 `AUDIT_ENTITY_DELIBERATION` の
+  `action="identity_link.revoked"`（確定者も metadata に残す）。学生側・旅・ライブラリの読み手は `status='confirmed'`
+  だけを読む既存の述語のままで、取り消した結び付きは追加の変更なしに消える。同じ組の作り直しは `existing_revoked`
+  （新しくは作らない）。行の応答は `describe_actors` で作成者・確定者・取り消した人の**表示名**（引けなければ
+  「表示名を確認できない利用者」）と、作成者 = 確定者のときの `self_confirmed_note`「作成者が確定しました。」
+  （自己確定は禁じない — オーナー判断の推奨どおり事実で並べる）、確定の行に `revoke_note`。UI は deliberation.js の
+  確定の行とライブラリの「結びついた教材の部品」の確定の行に［確定を取り消す］（理由を問う・アンカー
+  `deliberation.identity-link-revoke`）。KB `library.md#revoke-identity-link`。
+- **粒度の確認**（IK-0917 残り）: 未確定の行に `confirm_question`（両側を名指しして「同じものですか（一方が他方を
+  使う・満たすだけではありませんか）」）と、部品の種別（`entry_type_for_component_type(component_type)`）と共通部品の
+  `entry_type` が違うときだけ `granularity_note`。UI は種別が違う対の［確定］でもう一度確かめるダイアログ。
+  **リンクの種類は引き続き足さない**（使う・満たす関係は v1 で記録しない）。
+- **学生は凍結版だけを読む**（IK-0954・オーナー判断の推奨で実装）: `library.store.get_frozen_entry_for_learner` が
+  active かつ凍結版を持つエントリの最新凍結版の content を返し、`component_context._build_shared_part` と
+  `symbol_lookup._load_concept_ref` はこれ（または凍結版との JOIN）だけを読む。凍結版が無いエントリは確定リンクが
+  あっても学生の「共通部品として」・記号の概念名に出さない（fail-closed）。L層の「パイプラインは凍結版だけ」と
+  同じ規律を学生にも。標準化の評価は `standardization_status`（ガバナンス列・版を持たない）を読む。
+- **学生向けの標準化の文**（IK-0959）: `label_vocab.learner_standardization_note` が教員の確定した 4 値だけを 1 文にし、
+  未評価は何も出さない（学生 DTO から生の `standardization_status` を外した）。
+- **版の手がかり**（IK-0956）: `describe_instance` が同じ題名の document が 2 本以上のときだけ
+  `instance_document_version_label`（`document_version_hint` =「TeX 版・ファイル名」「PDF 版・ファイル名」）を返す。
+  学生の「ほかの論文」は同じ題名が並ぶときだけ形式（TeX 版 / PDF 版）を括弧で添える（ファイル名は出さない）。
+- **規則の版**（IK-0957）: `identity_candidates.IDENTITY_RULES_VERSION`（`r6-same-paper`）を段の artifact に
+  `rules_version` として残す。候補一覧の空状態は、閲覧できる document の採用 run（completed）の artifact を照らし、
+  いまの規則で探していない教材を題名で列挙して「パイプラインを実行 ▼」の道を言うか、すべて探したことを言う
+  （判定できなければ何も足さない）。規則を足す・変えるときは版を上げる。
+- **Copilot**（IK-0958）: `renderMarkdown` が節内リンクを見出しの文字に落とす。登録簿に `library.what_students_see` /
+  `library.revoke_identity_link`。
+- **エントリの扱いの操作**（IK-0955）: 状態ごとに出し分け（候補 = 確定 / 見送り、見送り済み = 候補に戻す、確定済み = なし）。
+
+### pre-mortem（第 4 周の是正の設計時の検査）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 人の確定に撤回の遷移が無い | `negative-decision-second-class` | 撤回を状態遷移で足し、確定者を上書きせず別の列に取り消しを記録（行は残す） |
+| 学生の読み口が凍結の弁を通らない | `stale-derivative-served` | 学生向けの読み口を凍結版の 1 関数にし、凍結版が無ければ面ごと出さない |
+| 規則を足しても既存の成果は古い規則のまま | `completion-defined-by-proxy` | 規則の版を artifact に残し、空状態が版を照らして「まだ探していない」を言う |
+| 同じ題名の 2 版が区別できない | `same-name-different-referents` | 同題名のときだけ版の手がかりを運ぶ（常時は出さない） |
+| 内部の管理値を学生へ | `projection-mistaken-for-source` | 学生向けの文の表を label_vocab に置き、未評価はキーを作らない |
+
+## 第 5 波の追補（2026-10-27・第 25 周 面 A 第 5 周の是正）
+
+審判 `uxsim/runs/round25/judge_share_r5.md`（§3 是正案・§5 オーナー判断の候補）を根で束ねて是正した。
+オーナー判断 2 件は推奨どおりに決定し、ここに記す。
+
+**オーナー判断（推奨どおり）**
+
+| # | 判断 | 採用 | 実装 |
+|---|---|---|---|
+| IK-0984 | 著者のいない（AI が作った）標準の説明を、誰が学生への公開を査読できるか | **その部品の論文を編集できる教員**が査読・共有を設定できる。査読者は既存の監査（`AUDIT_ENTITY_EXPLANATION` の `changed_by`）に残す。査読した教員を「著者に準じる者」とし、1 人の査読ではその教員のコース（`learning_courses` の所有者）の学生にだけ届く。**この部品を使うほかのコースへ広げるには、いまの承認の期間に別の教員の査読がもう 1 件要る**（AI の要約を 1 人の判断で全コースへ配らない） | `core/explanation_governance.py` の `STANDARD_REVIEWERS_SQL` / `STANDARD_DELIVERY_SQL`（`LEARNER_EXPLANATION_SCOPE_SQL` が使う）・`STANDARD_ADDITIONAL_REVIEW_ACTION`。`routes/theory_components.py` の `_can_review_standard`（管理者 or `_ensure_component_editable`）・`ExplanationOut.can_review` / `second_review_available` / `outcome_fact`。PATCH は標準の説明の本文・題名・根拠の主張を管理者だけに残す（403 `EXPLANATION_STANDARD_BODY_ADMIN_ONLY`）。承認済みの標準の説明への 2 人目の査読は状態を変えず `action="additional_review"` の記帳だけ（同じ人は 409） |
+| IK-0980 | 同じ論文の 2 版の部品の同一性を、文の近さで候補にしてよいか | **しない**。同じ論文の別の版どうし（`resolve_same_paper_documents` が真）では規則 ③（chunk-proxy）を使わず、規則 ②b（式・主張の本文の一致）だけで対を作る。既に立った誤った候補は消さず（KR7）、段の再実行で作り直す | `identity_candidates._run_component_and_claim_rules` が別の版の部品を `others_by_chunk` に入れない。未決の chunk-proxy 候補（`status='candidate'` ∧ `vector_similarity`）しか持たない部品は再実行で ②b にかけ直し、新しい対は `candidate_key` に接尾辞 `same-paper` を付けた別エントリに置く（旧エントリに相乗りさせない）。規則の版 `IDENTITY_RULES_VERSION` を `r7-same-paper-symbols` に上げた |
+
+**判断の補足（IK-0984）**: いまの承認の期間に説明カードからの査読の記帳が 1 件も無い承認（部品の承認から
+引き継いだ標準の説明・この規則より前の承認）は、従来どおり部品を使うコースへ届く。記帳の無い承認の承認者を
+推測で決めない（`changed_by` の無い承認を 1 人とも 0 人とも数えない）ための縮退で、部品の承認（グラフレビュー）
+から生まれた標準の説明をこの規則の対象にするかは**次の判断の材料**として残す（下の「残した課題」①）。
+標準の説明は共有の ON / OFF を届く範囲に使わない（査読者の人数で決まる）ので、カードに共有の切り替えを出さない。
+
+**是正（根ごと）**
+
+- **同一性の候補の材料**（IK-0980・IK-0981）: 上の判断に加え、②b の理由に一致した材料（式は
+  `graph_paper_layer.schema.equation_display_label` の表示ラベル「式 (12)」、主張は冒頭 40 字の引用・上限 3 件）を
+  `SAME_PAPER_MATCHED_PREFIX`「一致したもの: 」に続けて書き、リンクの `evidence` に
+  `{"basis": "same_paper_version", "matched": [...]}` を残す。**語彙表（`mapping_justification`）に値を足さず**
+  `lexical_match` のまま、一覧の行に `basis_label`「同じ論文の別の版での一致」を添える（migration を足さない —
+  他面と並行する波で採番が衝突しないため。語彙表に一級の値を足すかは次の判断）。一覧の各リンク行に `reason`・
+  部品の要約 `instance_summary`。以前の規則で別の版どうしを文の近さで結んだ候補エントリには
+  `stale_rule_note`（`STALE_SAME_PAPER_PROXY_NOTE`）。
+- **判断の単位**（IK-0982・IK-0917 のエントリ単位）: キューは「candidate のエントリ」∪「candidate のリンクを持つ
+  確定済みエントリ」。確定済みのカードは未決のリンクだけを並べ `links_pending_note` を添え、エントリの操作を出さない。
+  候補のエントリには `confirm_question`（`ENTRY_CONFIRM_QUESTION`：確定するのは概念を置くことだけで結び付きは別）、
+  エントリ詳細には `review_confirm_question`。`POST /entries/{id}/review` は `facts`（確定・見送り・候補に戻す）を
+  返す。詳細の「結びついた教材の部品」の候補の行に［確認］［見送り］（既存の deliberation の confirm / reject・
+  確定の前に `confirm_question` / `granularity_note` を並べた確認）。一覧の［確認］も同じ確認を通る。
+- **書き手の無い読み手**（IK-0983）: 規則 ⑥ `core/library/symbol_concepts.py::derive_symbol_concept_candidates`
+  （`knowledge_symbols_live` の `definition_evidence_texts` × 確定・公開中のエントリの `name` / `alternate` の
+  `text_mentions_alias` 語境界一致・記号のような語は除く・hidden は使わない → `element_identity_links`
+  `instance_element_type='symbol'` の candidate。LLM 0 回・embedding 0 回・DELETE なし・1 document 20 本・1 記号 2 エントリ）。
+  パイプラインの `identity_candidates` 段と、ライブラリの `POST /api/admin/library/entries/{id}/symbol-candidates/derive`
+  （確定済みエントリだけ・閲覧できる document だけ・409 は事実文）の 2 つの入口。詳細に「結びついた記号」区画
+  （`describe_instance` が記号の表記と定義の文を返す）。確定は既存のリンクの確定の弁だけ（KR2）。
+- **状態と操作**（IK-0985）: 査読ボタンは未査読のときだけ。PATCH の応答 `outcome_fact` が「共有を ON / OFF に
+  しました。」「学生に公開してよいと査読しました。」「もう一人の査読者として査読しました。」+ いまの届く先を言い、
+  JS はこれを優先して出す。
+- **一覧の版の手がかり**（IK-0956 の一覧側）: 同じ題名の論文が 2 本以上のときだけ `document_version_label`。
+
+**未評価のまま残すもの（製品は変えない）**: IK-0953（確定の取り消し）・IK-0920（確定リンクの読み手）は確定リンクが
+作られず実地で評価されていない（H35）。
+
+**残した課題**: ①部品の承認（グラフレビュー）から承認済みで生まれた標準の説明は、説明カードの査読の記帳が無いので
+従来どおり部品を使うコースへ届く（1 人の判断で全コースへ配らない、を部品の承認にも当てるかは次の判断）。
+②`mapping_justification` の語彙表に「同じ論文の別の版での一致」を一級の値として足すか（いまは evidence の印と
+表示の呼び名）。③学生の記号の吹き出しで、概念との対応が無いときに「まだ記録されていません」と言う事実文は
+入れていない（学習画面は面を跨ぐ共有ファイルのため・次の波）。④標準の説明の査読を取り消す（査読待ちに戻す）
+操作はカードに無い（C層の状態遷移の語彙と合わせて決める）。
+
+### pre-mortem（第 5 周の是正の設計時の検査）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 文の近さで同一性を決める | `extent-decided-by-proxy-signal` | 同じ論文の別の版どうしでは代理の手がかりを使わず、本文の一致だけで対を作る |
+| 版の規則の根拠を既存語彙に寄せて別の名で見せる | `wording-mismatch` | 印を evidence に残し、一覧が根拠の呼び名と一致した材料を出す |
+| 親（エントリ）の確定で子（リンク）の判断の置き場を閉じる | `completion-defined-by-proxy` | 済み = 親と子の両方が決まったこと。確定済みエントリも未決リンクがあればキューに残す |
+| 確定済みの記録だけを読む表示に書き手が無い | `last-mile-missing` | 記号の候補づくり（規則 ⑥）と詳細の区画・入口を作り、確定は既存の弁 |
+| 著者に結んだ権限で、機械生成物の判断者が宙に浮く | `permission-and-affordance-asymmetric` | 論文の編集者を査読者にし、広げるにはもう一人。画面の可否（`can_review`）と PATCH の 403 は同じ判定 |
+| 既存の判断（却下・確定）を作り直しで上書きする | `negative-decision-second-class` | 作り直すのは未決の chunk-proxy 候補だけの部品だけ。人の判断が 1 本でもあれば触らない |
+
+## 第 6 波の追補（2026-10-27・第 25 周 面 A 第 6 周の是正）
+
+審判 `uxsim/runs/round25/judge_share_r6.md`（§3 是正案・§5 オーナー判断の候補）を根で束ねて是正した。
+オーナー判断 2 件は推奨どおりに決定し、ここと `knowledge_objects_design.md` §12.5 に記す。
+
+**オーナー判断（推奨どおり）**
+
+| # | 判断 | 採用 | 実装 |
+|---|---|---|---|
+| IK-1012 / IK-1020 / IK-1021 | 再解析で名前が変わった部品に付いた人の記録と参照を、新しい部品へ付け替えるか | **出典（block）の重なりで旧部品 ⇄ 新部品が 1 対 1 に決まるときだけ**付け替え、`element_id_remap` に `remap_kind="superseded_component"` で記録する。決まらなければ旧行に残し、教員・学生の画面で「この記録は再解析前の部品に付いています」と事実文で見せる（消さない）。凍結したコースの ⚓ は新しい凍結から DB UUID でも部品を指し、旧い凍結は読み時に記録を辿る | `knowledge_objects_design.md` §12.5（`remap.reanchor_superseded_components` / `core/frozen_component_refs.py`） |
+| IK-1023 | 教員の説明を他コースへ広げる「著者以外の査読者」は誰か | **標準の説明と同じく、その部品の論文を編集できる教員**（著者以外）。著者が査読して共有 ON にした説明にだけ「もう一人の査読者として査読する」を記帳でき（状態は変えず `action="additional_review"`・`changed_by` が査読者 = 監査に残る）、既存の `NON_AUTHOR_REVIEWED_SQL` がそのまま「著者以外の査読承認」として読む。本文・題名・共有は著者のまま。**引用は届く理由にしない** — 引用の応答は引用先の学生に届くかを `LEARNER_EXPLANATION_SCOPE_SQL` で評価して言う | `core/explanation_governance.py`（`EXPLANATION_PERSONAL_SECOND_REVIEW_ONLY` / `citation_delivery_fact`）・`routes/theory_components.py`（`_row_to_explanation_out(..., personal_reviewers=)`・`patch_explanation` の `personal_second_review`・`cite_explanation` の `outcome_fact`） |
+
+**是正（根ごと）**
+
+- **版をまたぐ同一性の候補**（IK-1020）: 片側の部品が superseded でリンクが一覧から隠れた候補は、残ったリンクに
+  「別の論文の記述と…」の保存値を言わせず `PARTNER_REPLACED_REASON` に差し替え（元の文は `recorded_reason`）、
+  カードに `partner_replaced_note`。旧規則の注記（`stale_rule_note`）の判定は**隠したリンクも含めたリンク全体**で行う。
+  付け替えが決まった組は remap でリンクが新部品へ移り、そもそも半端にならない。
+- **対の判断の材料**（IK-1026・IK-0953 の一覧）: 候補の行の確認の問いは、同じエントリの他の行を相手として
+  「部品「A」（TeX 版『題名』）と部品「B」（PDF 版『題名』）は、同じものですか（…）」と名指しする
+  （`identity_links.pair_confirm_question`・版は `document_format_label` を常に運ぶ・相手が無ければ従来の問い）。
+  決めた行に `decision_line`「〔確定〕 確定: 名前・日付」（見送りも同型）、リンクの確定・見送りの応答に
+  `outcome_fact`（判断した人・日付・学生に出る条件）。エントリ詳細の確定者にも日付。
+- **否定の判断の読み手**（IK-1024）: ラベルの見送りは行を消さず、詳細の区画の折りたたみ「見送り済みのラベル」に
+  「見送り: 理由（見送った人・日付）」と［見送りを取り消す］（`POST /entries/{id}/labels/{label_id}/restore`・
+  理由必須・監査 `label_restore`・行は 1 本のまま・retired は 409）。見送りの応答に `facts`。
+- **照合キーの正規化**（IK-1022）: 記号の照合キーで TeX の間隔命令（`\!` `\,` `\;` `\:` `\>` `\ ` と `\quad` `\qquad`
+  ほか）を落とす。正本は `core/theory_modules/schema.py::strip_tex_spacing`、`symbol_match_key` / `clean_symbol_name` /
+  `symbol_lookup.symbol_key` が使う。
+- **出口の案内の契約**（IK-1025）: テキスト選択で帰属した痕跡（segment / chunk）の旅の出口は、帰属カード
+  （AI の帰属候補だけを並べる）を勧めず、式・主張の文だけを選び直して問う手だけを言う
+  （`personal_graph.nearby.FACT_SELECTED_SHARPEN`）。
+- **注記の粗さ**（IK-0954 の残り）: 「結びついた教材の部品」の区画注記に凍結の条件
+  （この共通部品に凍結した版があるとき・無いうちは学生に出ない）を足した。
+
+**新しいアンカー**: `knowledge-library.labels-dismissed` / `knowledge-library.label-restore`（マニュアル
+`teacher/19-admin-knowledge-library.md#labels-dismissed` / `#label-restore`）。
+
+**残した課題**: ①旧い凍結で、凍結時の部品名が live・superseded のどの行とも一致しない ⚓ は従来の解決のまま
+（再凍結で `db_id` が付く）。②付け替え先が決まらなかった説明・リンクを教員が手で新しい部品へ移す操作は無い
+（事実文で見せるだけ — 手で移す入口は次の判断）。③段の再実行で古い対の候補を作り直す（superseded にする）
+処理は入れていない（付け替えで足りない残りは事実文）。④教員の説明の査読を取り消す遷移は C層の状態語彙と合わせて決める。
+
+### pre-mortem（第 6 周の是正の設計時の検査）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 再解析で人の記録が取り残される | `reexecution-overwrites-human-decision` | 出典の重なりで 1 対 1 に決まる組だけ運び、決まらなければ事実文 |
+| 凍結の参照が run ごとの番号 | `id-not-stable-across-versions` | 凍結に UUID を足し、旧い凍結は凍結時の名前と記録だけで辿る |
+| 部品名の写しの共通部品と比べる問い | `same-name-different-referents` | 対の相手（版・題名・部品名）を名指しして問う |
+| 規則はあるが操作する人がいない（著者以外の査読） | `permission-and-affordance-asymmetric` | 論文の編集者に入口を出し、PATCH の 403 と画面の可否を同じ判定にする |
+| 見送りが見えない・戻せない | `negative-decision-second-class` | 見送り済みを理由・判断者付きで残し、戻すのも理由必須の遷移 |
+| 案内先が空 | `last-mile-missing` | 痕跡の出所で実行できる出口だけを言う |
+| 照合キーの正規化が二重 | `duplicate-canonical-sources` | 間隔命令の除去は theory_modules の 1 関数を両方の照合キーが使う |
+
+原理 `sync-by-stable-key-and-protect-human-decisions` を読んだ（consulted — 参照の結び直しを出典の重なりへ広げた）。
+
+## 第 7 波の追補（2026-10-28・第 25 周 面 A 第 7 周の是正）
+
+審判 `uxsim/runs/round25/judge_share_r7.md`（§3 是正案・§5 オーナー判断の候補 1）を根で束ねて是正した。
+オーナー判断 1 件は推奨どおりに決定し、ここと `knowledge_objects_design.md` §12.6 に記す。
+
+**オーナー判断（推奨どおり）**
+
+| # | 判断 | 採用 | 実装 |
+|---|---|---|---|
+| IK-1051 / IK-1012 | 再解析より前に凍結したコースの ⚓ を、再解析の後どう扱うか | **凍結した本文は変えない**。⚓ の参照だけを、出典（block）の重なりで 1 対 1 に決まるときに限り後継へつなぐ（新しい凍結・再解析時の付け替えと**同じ規則** `remap.match_superseded_components` を読み時に当てる）。決まらなければ学生には凍結時の部品名 + 事実文（1 対 1 に決まらない =「後継が決まっていません」/ 重なる新しい部品が 0 件 =「見つかりません」）、所有者には原稿スタジオの見出しで凍結し直しの案内（G層 To-Do は作らない・**自動で凍結し直さない**） | `knowledge_objects_design.md` §12.6（`remap.read_time_superseded_successor` / `frozen_component_refs.stale_frozen_component_labels` / `frozen_anchor_stale_notice`） |
+
+**是正（根ごと）**
+
+- **判断の後の読み手**（IK-1050・IK-0953 の残り・IK-1024 の残り）: 同一性リンクの［見送り］は**理由必須**
+  （`POST /api/admin/deliberation/identity-links/{id}/reject` が body `{"reason": "…"}` を取り、空は 422 —
+  KR7 をエントリの見送り・確定の取り消しとそろえた）。理由は行の `revoke_reason` 列に入れ、監査 metadata にも残す
+  （**列の読み替え**: `revoke_reason` は「否定の判断（見送り・取り消し）の理由」の列。見送った行は取り消せない
+  ＝ 2 つの理由が同じ行に並ぶことは無い。migration を増やさない判断）。判断した行は「片側の置き換わり
+  （`PARTNER_REPLACED_REASON` — 判断した行にも保存値より先に出す・元の文は `recorded_reason`）→ 判断の印
+  （`decision_line`）→ 理由（新キー `decision_reason_line`「見送りの理由: …」・理由の無い旧い行は「記録なし」）」の
+  順に出る。札の訳語はサーバの `identity_links.IDENTITY_LINK_STATUS_LABELS`（新キー `status_label` — candidate /
+  confirmed / rejected「見送り」/ revoked「確定を取り消し」まで覆う）で、admin.js の一覧も詳細もこれを優先する
+  （英語の「[rejected]」は出ない）。取り消しの行は新キー `revoke_line`「〔取り消し済み〕 取り消し: 名前・日付（元の
+  確定: 名前・日付）」（一覧では `decision_line` に入る）。見送った概念のカード（`include_dismissed=true`）は
+  `decision_line`「〔見送り〕 見送り: 名前・日付」/ `decision_reason_line` / `restore_note`（戻すのは詳細の
+  ［候補に戻す］）を出し、**判断のボタンは候補のときだけ**。ラベルの足し直しの文は戻す手（「見送り済みのラベル」の
+  ［見送りを取り消す］）を指す。
+- **候補の規則の粒度**（IK-1052・`core/library/symbol_concepts.py`）: ①1 文がほかの記号も定義するときは、
+  照らす範囲を**その記号を述べる部分**（直前のほかの記号の後ろ〜直後のほかの記号の前）に絞り、記号の名前（自分・
+  ほか）は伏せてから語境界一致を見る（`_symbol_clause`）。②別名がほかの記号名の一部（「TOV」⊂ `N_TOV`）なら、
+  その別名では候補を立てない（`_alias_inside_other_symbol` — 正式名は対象外）。③同じ論文の別の版（`same_paper`）で
+  照合キー（`symbol_lookup.symbol_key`）の同じ記号には、一方の版の候補・確定の結び付きを、もう一方の版に **candidate**
+  として写す（`_carry_over_same_paper_versions`・理由「同じ論文の別の版の同じ記号「…」が、概念「…」と結び付いています
+  （確定済み）。…」・確定は 1 本ずつ教員 = KR2・見送り・取り消しは写さない）。複数の記号を定義する文から立った候補の
+  理由には「この定義の文はほかの記号（…）も定義しています。照らしたのは、この記号を述べる部分だけです。」を足す。
+  ASCII の 1 文字の記号（`r`）は区切りの手がかりにしない（本文の語と紛れるため）。
+- **査読の帰属**（IK-1023 の残り）: 説明カードに新キー `review_line`「査読: 名前・日付（著者）／ 名前・日付」
+  （いまの承認の期間の記帳 = `STANDARD_REVIEWERS_SQL` と同じ材料・名前は profile_name）。
+- **取り残された説明の置き場**（IK-1012 の残り）: `GET /api/admin/theory-components/{id}/stranded-explanations`
+  （読み取り専用・UUID を返さない・`facts` + 各行 `kind_label` / `title` / `body` / `origin_line` / `rewrite_note`）。
+  作成者の行には「新しい部品の［追加］から書き直してください（元の記録は残ります）」、ほかの行には「書き直せるのは作成者
+  だけです」、標準の説明には「新しい部品の要約から作り直されます」。原稿スタジオの説明一覧に
+  ［再解析前の説明を開く（読み取り専用）］。
+- **TeX のラベル**（IK-0681 の学生の吹き出しの面）: `symbol_lookup` は式の表示名・`definition.equation_label` に
+  TeX の label キー（`eq:tov_residual`）を出さない（判定の正本 `display_projection.is_tex_label_key`）。
+
+**新しいアンカー**: `lecture-studio.explanation-stranded-open`（マニュアル `teacher/14-admin-lecture-studio.md#explanation-stranded-open`）。
+
+**残した課題**: ①凍結した教材の**主張**の ⚓（`![[claim:…]]`）の版をまたぐ解決は本波の対象外（部品の ⚓ だけ）。
+②読み時の付け替えは `element_id_remap` に記帳しない（書かない読み時の導出）— 凍結し直すと新しい凍結の `db_id` で直接つながる。
+③見送った同一性リンクを候補に戻す遷移は無い（見送りは理由付きで残るが、戻すときは別の組として作り直すしかない）。
+④IK-0681 の本体（TeX 経路の式に印字番号が無い）は残る。
+
+### pre-mortem（第 7 周の是正の設計時の検査）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 判断前の行だけ整え、判断後の行が保存値・生の状態語に戻る | `negative-decision-second-class` | 判断した行も片側の置き換わり → 印 → 理由の順に出し、札は状態語彙を全部覆うサーバの表で引く。リンクの見送りも理由必須 |
+| 旧い凍結の参照が再解析で一斉に切れる | `id-not-stable-across-versions` | 新しい凍結と同じ規則を読み時に当て、決まらないときは原因（0 件 / 決まらない）を言い、所有者に凍結し直しを案内（自動で凍結し直さない） |
+| 1 文の語の出現を複数の記号の性質とみなす | `substring-match-false-positive` | その記号を述べる部分だけを照らし、記号名を伏せ、記号名の一部の別名を使わない |
+| 同じ論文の別の版で記号リンクが届かない | `id-namespace-conflated` | 照合キーの同じ記号へ candidate として写す（確定は人） |
+| 学生の画面に内部の TeX label キー | `contract-changed-one-side` | 判定の正本 `is_tex_label_key` をサーバの DTO で通す（JS は素通しのまま） |
+
+原理 `sync-by-stable-key-and-protect-human-decisions` を読んだ（consulted — 「参照を結び直す」部品を書き込みの無い読み時の
+導出へ広げた。非適用: 読み時に `element_id_remap` へ記帳する派生形 — 読み手が書くと閲覧が記録を変える）。

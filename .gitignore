@@ -217,3 +217,9 @@ __marimo__/
 # Codex の作業ディレクトリ（ローカル生成物。リポジトリ管理外）
 .codex-build/
 .codex-finalizer/
+
+# uxsim（ペルソナ通し受講テスト）: run の生ログ・砂場の秘密・snapshot 実体
+uxsim/runs/
+uxsim/sandbox/.env.uxsim
+uxsim/snapshots/*/db.dump
+uxsim/snapshots/*/minio.tgz

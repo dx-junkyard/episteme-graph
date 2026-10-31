@@ -54,6 +54,10 @@ resolution:
     - backend/tests/test_lecture_no_silent_adaptation_guardrails.py
     - docs/architecture/vision_ux_gap_six_lenses_2026-09-10.md §4 第1波 3
     - docs/manual/student/02-student.md
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E
 related: [IK-0001, IK-0004]
 view_of: []
 history:

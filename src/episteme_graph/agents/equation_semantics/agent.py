@@ -38,7 +38,12 @@ from .schema import (
     EquationSourceExtraction,
     derive_role_in_argument,
 )
-from .validator import EquationSemanticsValidator
+from .validator import (
+    EquationSemanticsValidator,
+    restrict_io_links_to_neighbors,
+    scrub_internal_ids_from_summary,
+    restrict_linked_spans_to_candidates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +184,7 @@ class EquationSemanticsAgent:
         # Step 4: LLM semantics analysis
         candidate_by_id = {c.candidate_id: c for c in reconstructable}
         records: list[EquationRecord] = []
+        neighbor_issues: list = []
         total = len(llm_inputs)
 
         for idx, llm_input in enumerate(llm_inputs, start=1):
@@ -249,6 +255,13 @@ class EquationSemanticsAgent:
                     image=image.__dict__ if image else None,
                 )
                 _attach_source_image(record, image)
+            neighbor_issues.extend(
+                restrict_io_links_to_neighbors(record, llm_input.neighbor_equations)
+            )
+            neighbor_issues.extend(
+                restrict_linked_spans_to_candidates(record, llm_input.candidate_text_spans)
+            )
+            neighbor_issues.extend(scrub_internal_ids_from_summary(record))
             # accepted_equation_id を candidate に書き込む
             if candidate:
                 candidate.accepted_equation_id = record.equation_id
@@ -288,7 +301,7 @@ class EquationSemanticsAgent:
         # referential integrity, unverifiable symbol loss). Run before final
         # validation so blocked policies are validated consistently.
         fidelity_issues = apply_fidelity_guards(result)
-        result.validation_issues = self._validator.validate(result, cartridge) + fidelity_issues
+        result.validation_issues = self._validator.validate(result, cartridge) + fidelity_issues + neighbor_issues
         return result
 
     @staticmethod

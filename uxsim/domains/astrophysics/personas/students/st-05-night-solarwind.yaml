@@ -1,0 +1,15 @@
+id: st-05-night-solarwind
+archetype: students/night_parttime
+display_name: 小野寺 由美子
+language: ja
+background: |
+  社会人博士課程の 1 年。昼は衛星メーカーで観測機器の運用とデータ解析を担当している。
+  研究テーマは探査機による太陽風の in-situ 観測データを使った宇宙天気の研究。
+  平日は夜に 30 分ほどしか時間が取れず、週末にまとめて進める。機器の較正には強いが、
+  太陽大気の物理や磁気流体の理論は独学で、基礎から説明されると助かる。
+knowledge:
+  knows: [太陽風, 宇宙天気, 惑星間空間磁場, 検出器の較正]
+  vague: [磁気リコネクション, コロナ質量放出, 太陽磁場・太陽大気]
+  unknown: [コロナ加熱, 衝撃波加速]
+misconceptions: [solar_wind_is_radiation_pressure]
+goals: [research_prereq_new_topic, curiosity_casual]

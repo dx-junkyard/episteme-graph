@@ -14,69 +14,126 @@ F-1・F-18）の是正:
    ``agents/coverage_report.py::build_coverage_report`` の共通形式で母集合・処理数・
    打ち切り数・理由・未処理節を返し、agent が ``summary_stats["coverage"]`` に載せる。
 
-ソートキーの判定規則（F-1 (c)）:
-    ``TypedBlock.order`` は PyMuPDF パーサ・GROBID TEI パーサのどちらでも
-    **文書全体で単調増加する通し番号**として振られる（ページ内で振り直されない）。
-    一方 ``page`` は GROBID 経路では既定 1 で、PDF 本文との突合に成功したブロックだけ
-    実ページに書き換わるため、**突合に失敗したブロックが page=1 のまま残る**（実測:
-    936 ブロック中 212）。``(page, order)`` で並べるとこの取りこぼし群が文書先頭に
-    集まり、順序が内容と無関係になる。
-    そこで:
-      - ``order`` が全ブロックで**一意**なら、それは文書全体の通し番号なので
-        ``order`` のみで並べる（``sort_key = "order"``）。
-      - 一意でないなら通し番号として信用できないので、従来どおり ``(page, order)``
-        で並べる（``sort_key = "page_order"``）。
-    どちらの規則で並べたかは coverage 報告の ``details.sort_key`` に必ず残す。
-
-層化サンプリングの規則（F-1 (b)）:
-    上限 ``max_blocks`` が対象ブロック数より小さいとき、各節（``block.section_id``。
-    None は ``""`` の擬似節1つにまとめる）へ**対象ブロック数に比例**して配分する。
-      1. 各節に最低 1 件（節数が上限を超える場合は、対象数の多い節から順に 1 件ずつ
-         配って上限で止める）。
-      2. 残り枠を ``floor(上限 × 節の対象数 / 全対象数)`` で配分（既に配った 1 件を含む）。
-      3. 端数は「対象数の多い節」→「節の初出順」の順に 1 件ずつ配る。
-      4. 節の中では**順序どおり先頭から**採る。
-    節の初出順・対象数による比較はすべて決定論で、同数の節は初出順で安定する。
+ソートキーの判定規則（F-1 (c)）と層化サンプリングの規則（F-1 (b)）の**正本は
+``episteme_graph.agents.stratified_sampling``**（他ステージと共有）。このモジュールは
+そこへ委譲し、ブロック種別の選別と RoleLLMInput の組み立てだけを持つ。
 """
 from __future__ import annotations
 
-import os
+import re
+
 
 from episteme_graph.agents.coverage_report import build_coverage_report
 from episteme_graph.agents.document_structure.schema import DocumentStructureResult, TypedBlock
+from episteme_graph.agents.equation_semantics.input_builder import (
+    EquationSemanticsInputBuilder,
+    context_excerpt,
+)
+from episteme_graph.agents.equation_semantics.normalizer import EquationNormalizer
 from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
+from episteme_graph.agents.text_truncation import truncate_text
+from episteme_graph.agents.stratified_sampling import (
+    NO_SECTION_KEY,
+    order_blocks,
+    resolve_limit,
+    select_indices,
+    unprocessed_section_entries,
+)
 
 from .schema import CartridgeContext, RoleLLMInput
 
 _TARGET_BLOCK_TYPES = {"body_paragraph"}
+
+
+def _is_table_body(block: object) -> bool:
+    """表本体として残された body_paragraph か（``raw.in_table`` / ``raw.from_table``）。"""
+    raw = getattr(block, "raw", None)
+    if not isinstance(raw, dict):
+        return False
+    return bool(raw.get("in_table") or raw.get("from_table"))
 _CONTEXT_BLOCK_TYPES = {"body_paragraph", "equation_block"}
 # 0 = 上限なし（既定）。かつての 64 打ち切りは P0-1 で廃止した。
 _DEFAULT_MAX_BLOCKS = 0
 _MAX_BLOCKS_ENV = "RHETORICAL_ROLE_MAX_BLOCKS"
 _MAX_CONTEXT_CHARS = 280
 _MAX_BLOCK_CHARS = 1800
+#: ``preceding_equation`` で渡す式の長さの上限。
+_MAX_PRECEDING_EQUATION_CHARS = 400
+#: 式の続きとして書かれた段落の書き出し（IK-0714 精密化・2026-10-17 X1 seq 3334/3361）。
+#: 小文字始まり（``up to an additive constant``）か、ここに挙げた続き語で始まるときだけ
+#: 直前の式を材料に入れる。話題の変わった段落（``The problem of PVE …``）には渡さない。
+_CONTINUATION_START_RE = re.compile(
+    r"^(?:where\b|which\b|i\.\s*e\.|e\.\s*g\.|this\s+is\s+because\b|that\s+is\b"
+    r"|in\s+the\s+(?:first|second|third|fourth|last|final)\s+line\b|here\s*,|with\b"
+    r"|in\s+which\b|so\s+that\b|and\b)",
+    re.IGNORECASE,
+)
 
-_NO_SECTION_KEY = ""
+
+def starts_as_continuation(text: str) -> bool:
+    """段落の書き出しが直前の式の続きに見えるか（決定論）。"""
+    head = (text or "").lstrip(" \t\n,;:")
+    if not head:
+        return False
+    if head[0].isalpha() and head[0].islower():
+        return True
+    return bool(_CONTINUATION_START_RE.match(head))
+
+
+#: 直前の式を名指しする書き出し（IK-0714 claim_qualification 側・X2 seq 3428）。
+#: 「The last factor encodes …」「This expression …」は大文字始まりでも直前の式の続き。
+_EQUATION_ANAPHORA_START_RE = re.compile(
+    r"^(?:the\s+(?:first|second|third|fourth|last|final|remaining|latter|former)\s+"
+    r"(?:term|factor|line|piece|contribution|integral|expression)s?\b"
+    r"|th(?:is|ese)\s+(?:equation|expression|relation|formula|integral)s?\b)",
+    re.IGNORECASE,
+)
+
+
+def refers_to_preceding_equation(text: str) -> bool:
+    """段落の書き出しが直前の式の続きか、直前の式を名指ししているか（決定論）。
+
+    rhetorical_role の ``preceding_equation`` と claim_qualification の
+    ``adjacent_equations``（前側）が共有する規則の正本。
+    """
+    if starts_as_continuation(text):
+        return True
+    head = (text or "").lstrip(" \t\n,;:")
+    return bool(_EQUATION_ANAPHORA_START_RE.match(head))
+
+
+#: 表示式を導入して終わる段落（「… can be written as」「… parameters,」「… given by:」）か。
+#: 文末記号（. ! ?）で閉じていなければ、続く表示式が文の残り（IK-0714 claim_qualification 側）。
+def ends_as_equation_intro(text: str) -> bool:
+    tail = (text or "").rstrip()
+    if not tail:
+        return False
+    return tail[-1] not in ".!?…"
+_ELLIPSIS = "…"
+
+
+def truncate_block_text(text: str, limit: int = _MAX_BLOCK_CHARS) -> tuple[str, bool]:
+    """ブロック本文を ``limit`` 字以内（印込み）で、文境界か語境界で切る（O0 seq 2220 / IK-0808）。
+
+    規則の正本は ``episteme_graph.agents.text_truncation.truncate_text``（文境界 → 語境界・
+    ``$…$`` の外・切った側に ``…``）。戻り値の 2 つ目は切ったかどうか（切った事実は coverage に
+    残す — P4）。切った本文は元の本文の先頭と同じ文字列なので、span のオフセットは元の本文に
+    対しても同じ位置を指す。
+    """
+    text = text or ""
+    if limit <= 0 or len(text) <= limit:
+        return text, False
+    budget = limit - len(_ELLIPSIS)
+    if budget <= 0:
+        return _ELLIPSIS, True
+    return truncate_text(text, budget)
+
+#: 対象ブロックの本文を上限で切って渡した理由（coverage ``details.truncated_blocks``）。
+TRUNCATED_BLOCK_TEXT_REASON = "block_text_over_char_limit"
+
+_NO_SECTION_KEY = NO_SECTION_KEY
 _COVERAGE_UNIT = "blocks"
 _TRUNCATION_REASON = "max_blocks"
-
-
-def _env_max_blocks() -> int:
-    """env ``RHETORICAL_ROLE_MAX_BLOCKS`` を既定上限として読む。
-
-    A層 agent は backend の ``core.config`` を import できない（src は backend に
-    依存しない）ため、ここで直接 env を読む。``core/config.py`` 側の
-    ``rhetorical_role_max_blocks`` は同じ env の**宣言**で、値の正本は env そのもの。
-    数値でない・負の値は 0（上限なし）として扱う（設定ミスで静かに打ち切らない）。
-    """
-    raw = os.environ.get(_MAX_BLOCKS_ENV)
-    if raw is None:
-        return _DEFAULT_MAX_BLOCKS
-    try:
-        value = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return _DEFAULT_MAX_BLOCKS
-    return value if value > 0 else _DEFAULT_MAX_BLOCKS
 
 
 class RhetoricalRoleInputBuilder:
@@ -109,15 +166,9 @@ class RhetoricalRoleInputBuilder:
     ) -> tuple[list[RoleLLMInput], dict]:
         """LLM 入力と、取りこぼし報告（``build_coverage_report`` 形式）を返す。"""
         cfg = config or {}
-        if "max_blocks" in cfg:
-            try:
-                max_blocks = int(cfg.get("max_blocks") or 0)
-            except (TypeError, ValueError):
-                max_blocks = _DEFAULT_MAX_BLOCKS
-            if max_blocks < 0:
-                max_blocks = _DEFAULT_MAX_BLOCKS
-        else:
-            max_blocks = _env_max_blocks()
+        max_blocks = resolve_limit(
+            cfg, "max_blocks", _MAX_BLOCKS_ENV, default=_DEFAULT_MAX_BLOCKS
+        )
         include_equation_blocks = bool(cfg.get("include_equation_blocks", False))
 
         target_types = set(_TARGET_BLOCK_TYPES)
@@ -130,10 +181,17 @@ class RhetoricalRoleInputBuilder:
         normalized_terms = self._build_normalized_terms(cartridge) if cartridge else None
         headline_claim = self._headline_text(skeleton)
 
+        # 表本体（GROBID の <figure type="table"> を行テキストで残した body_paragraph、
+        # ``raw.in_table``）は主張の候補ではないので母集合から外す（2026-09-19 レビュー
+        # R-4: 役割判定 → 主張採否の母集合に表のセルが並んでいた）。除外した block は
+        # ``details.excluded_table_block_ids`` に ID で残す（件数は書かない）。
+        excluded_table_block_ids = [
+            block.block_id for block in ordered_blocks if _is_table_body(block)
+        ]
         target_indices = [
             idx
             for idx, block in enumerate(ordered_blocks)
-            if block.block_type in target_types
+            if block.block_type in target_types and not _is_table_body(block)
         ]
         selected_indices = self._select_indices(
             ordered_blocks, target_indices, max_blocks
@@ -141,9 +199,13 @@ class RhetoricalRoleInputBuilder:
         selected_set = set(selected_indices)
 
         inputs: list[RoleLLMInput] = []
+        truncated_text_block_ids: list[str] = []
         for idx in selected_indices:
             block = ordered_blocks[idx]
             section = sections_by_id.get(block.section_id or "")
+            block_text, text_truncated = truncate_block_text(block.text, _MAX_BLOCK_CHARS)
+            if text_truncated:
+                truncated_text_block_ids.append(block.block_id)
             inputs.append(RoleLLMInput(
                 document_id=structure.document_id,
                 cartridge_id=cartridge.cartridge_id if cartridge else structure.cartridge_id,
@@ -152,10 +214,17 @@ class RhetoricalRoleInputBuilder:
                 section_title=section.title if section else None,
                 backbone_block_type=backbone_by_section.get(block.section_id or ""),
                 headline_claim=headline_claim,
-                block_text=block.text[:_MAX_BLOCK_CHARS],
+                block_text=block_text,
                 prev_text=self._neighbor_text(ordered_blocks, idx, direction=-1),
                 next_text=self._neighbor_text(ordered_blocks, idx, direction=1),
                 normalized_terms=normalized_terms,
+                preceding_equation=self._preceding_equation(ordered_blocks, idx),
+                prev_text_other_section=self._neighbor_crosses_section(
+                    ordered_blocks, idx, direction=-1
+                ),
+                next_text_other_section=self._neighbor_crosses_section(
+                    ordered_blocks, idx, direction=1
+                ),
             ))
 
         coverage = self._build_coverage(
@@ -165,6 +234,19 @@ class RhetoricalRoleInputBuilder:
             sections_by_id=sections_by_id,
             sort_key_name=sort_key_name,
         )
+        if excluded_table_block_ids:
+            coverage.setdefault("details", {})["excluded_table_block_ids"] = (
+                excluded_table_block_ids
+            )
+        if truncated_text_block_ids:
+            # 上限で本文の後ろを切って渡したブロック（ID のみ・件数は書かない）。ブロック自体は
+            # 処理済みなので母集合・処理数・打ち切り数は変えない。
+            coverage.setdefault("details", {})["truncated_text_block_ids"] = truncated_text_block_ids
+            # 3 ステージ共通の形（IK-0808）: どのブロックを・なぜ切ったか。
+            coverage["details"]["truncated_blocks"] = [
+                {"block_id": block_id, "reason": TRUNCATED_BLOCK_TEXT_REASON}
+                for block_id in truncated_text_block_ids
+            ]
         return inputs, coverage
 
     # ------------------------------------------------------------------
@@ -173,27 +255,8 @@ class RhetoricalRoleInputBuilder:
 
     @staticmethod
     def _ordered_blocks(blocks: list[TypedBlock]) -> tuple[list[TypedBlock], str]:
-        """並べ替えたブロックと、採用したソートキー名を返す。
-
-        判定規則はモジュール docstring の「ソートキーの判定規則」を参照。
-        """
-        orders = [int(getattr(b, "order", 0) or 0) for b in blocks]
-        order_is_unique = len(set(orders)) == len(orders)
-        if order_is_unique:
-            return (
-                sorted(blocks, key=lambda b: int(getattr(b, "order", 0) or 0)),
-                "order",
-            )
-        return (
-            sorted(
-                blocks,
-                key=lambda b: (
-                    int(getattr(b, "page", 0) or 0),
-                    int(getattr(b, "order", 0) or 0),
-                ),
-            ),
-            "page_order",
-        )
+        """並べ替えたブロックと、採用したソートキー名を返す（正本へ委譲）。"""
+        return order_blocks(blocks)
 
     @classmethod
     def _select_indices(
@@ -202,69 +265,13 @@ class RhetoricalRoleInputBuilder:
         target_indices: list[int],
         max_blocks: int,
     ) -> list[int]:
-        """対象ブロックの添字から、処理する添字を決定論的に選ぶ。
-
-        上限なし（``max_blocks <= 0``）または上限が母集合以上なら全件。
-        それ以外は節単位の層化サンプリング（モジュール docstring 参照）。
-        """
-        if max_blocks <= 0 or len(target_indices) <= max_blocks:
-            return list(target_indices)
-
-        # 節ごとの対象添字（節の初出順を保つ）
-        by_section: dict[str, list[int]] = {}
-        for idx in target_indices:
-            key = ordered_blocks[idx].section_id or _NO_SECTION_KEY
-            by_section.setdefault(key, []).append(idx)
-
-        section_keys = list(by_section.keys())
-        first_seen = {key: pos for pos, key in enumerate(section_keys)}
-        total = len(target_indices)
-
-        quota: dict[str, int] = {key: 0 for key in section_keys}
-        remaining = max_blocks
-
-        # 1. 各節に最低1件（枠が節数より少なければ、対象数の多い節から順に）
-        priority = sorted(
-            section_keys,
-            key=lambda key: (-len(by_section[key]), first_seen[key]),
+        """対象ブロックの添字から、処理する添字を決定論的に選ぶ（正本へ委譲）。"""
+        return select_indices(
+            ordered_blocks,
+            target_indices,
+            max_blocks,
+            section_key_of=lambda b: b.section_id or _NO_SECTION_KEY,
         )
-        for key in priority:
-            if remaining <= 0:
-                break
-            quota[key] = 1
-            remaining -= 1
-
-        # 2. 比例配分（既に配った1件を含む上限まで）
-        if remaining > 0:
-            for key in section_keys:
-                if remaining <= 0:
-                    break
-                size = len(by_section[key])
-                share = (max_blocks * size) // total
-                extra = min(share - quota[key], size - quota[key], remaining)
-                if extra > 0:
-                    quota[key] += extra
-                    remaining -= extra
-
-        # 3. 端数は「対象数の多い節」→「初出順」で1件ずつ
-        while remaining > 0:
-            progressed = False
-            for key in priority:
-                if remaining <= 0:
-                    break
-                if quota[key] < len(by_section[key]):
-                    quota[key] += 1
-                    remaining -= 1
-                    progressed = True
-            if not progressed:
-                break
-
-        # 4. 節内は順序どおり先頭から
-        selected: list[int] = []
-        for key in section_keys:
-            selected.extend(by_section[key][: quota[key]])
-        selected.sort()
-        return selected
 
     @staticmethod
     def _build_coverage(
@@ -279,21 +286,13 @@ class RhetoricalRoleInputBuilder:
         processed = len(selected_set)
         truncated = population - processed
 
-        unprocessed_sections: list[dict] = []
-        seen: set[str] = set()
-        for idx in target_indices:
-            if idx in selected_set:
-                continue
-            block = ordered_blocks[idx]
-            key = block.section_id or _NO_SECTION_KEY
-            if key in seen:
-                continue
-            seen.add(key)
-            section = sections_by_id.get(key)
-            unprocessed_sections.append({
-                "section_id": block.section_id,
-                "title": getattr(section, "title", None) if section else None,
-            })
+        unprocessed_sections = unprocessed_section_entries(
+            ordered_blocks,
+            target_indices,
+            selected_set,
+            section_key_of=lambda b: b.section_id or _NO_SECTION_KEY,
+            title_of=lambda key: getattr(sections_by_id.get(key), "title", None),
+        )
 
         details: dict = {"sort_key": sort_key_name}
         if unprocessed_sections:
@@ -334,9 +333,69 @@ class RhetoricalRoleInputBuilder:
         i = index + direction
         while 0 <= i < len(blocks):
             block = blocks[i]
-            if block.block_type in _CONTEXT_BLOCK_TYPES:
-                return block.text[:_MAX_CONTEXT_CHARS]
+            # 表本体（``raw.in_table``）は前後の文脈にしない（IK-0806）。
+            if block.block_type in _CONTEXT_BLOCK_TYPES and not _is_table_body(block):
+                # 前の文脈は対象に近い末尾側、後ろの文脈は先頭側を残し、切った側に
+                # 「…」を付ける（語の途中で切らない — IK-0808）。
+                return truncate_text(
+                    block.text or "", _MAX_CONTEXT_CHARS, keep_end=direction < 0
+                )[0]
             i += direction
+        return None
+
+    @staticmethod
+    def _neighbor_crosses_section(
+        blocks: list[TypedBlock], index: int, direction: int
+    ) -> bool:
+        """``_neighbor_text`` が拾う文脈ブロックが別の節のものか（X1 seq 3376 / 3316）。
+
+        前後の文脈は節境界をまたいで拾う（節の最初の段落にも前の流れを見せる）が、
+        別の節の文だと分かる見出しを付けないと、前節の末尾（付録への言及など）を
+        この段落の前置きとして読ませてしまう。
+        """
+        if not (0 <= index < len(blocks)):
+            return False
+        own_section = getattr(blocks[index], "section_id", None)
+        i = index + direction
+        while 0 <= i < len(blocks):
+            block = blocks[i]
+            if block.block_type in _CONTEXT_BLOCK_TYPES and not _is_table_body(block):
+                return getattr(block, "section_id", None) != own_section
+            i += direction
+        return False
+
+    @staticmethod
+    def _preceding_equation(blocks: list[TypedBlock], index: int) -> dict | None:
+        """直前の文脈ブロックが同じ小節の式ブロックで、本文が続き語で始まるときだけその式。
+
+        IK-0714 の精密化（2026-10-17 X1 seq 3334 / 3361）: 「直前 2 ブロック以内」では
+        話題の変わった段落にも前の式を「continue from it」で渡し、誤帰属を誘った。
+        常には渡さない（入力長を増やさない）。TeX 由来の式だけ本文を載せ、PDF 由来の式は
+        信用しないので ``latex`` を None にしてラベルだけ渡す（信頼境界 TB1）。
+        """
+        if not (0 <= index < len(blocks)):
+            return None
+        current = blocks[index]
+        if not refers_to_preceding_equation(getattr(current, "text", "") or ""):
+            return None
+        own_section = getattr(current, "section_id", None)
+        i = index - 1
+        while i >= 0:
+            block = blocks[i]
+            if getattr(block, "section_id", None) != own_section:
+                return None
+            if block.block_type in _CONTEXT_BLOCK_TYPES:
+                if block.block_type != "equation_block":
+                    return None
+                label = (
+                    EquationNormalizer.extract_label(block.text or "")
+                    or getattr(block, "equation_label", None)
+                )
+                latex = None
+                if EquationSemanticsInputBuilder._is_trusted_tex_block(block):
+                    latex = context_excerpt(block.text or "", _MAX_PRECEDING_EQUATION_CHARS)
+                return {"block_id": block.block_id, "label": label, "latex": latex}
+            i -= 1
         return None
 
     @staticmethod

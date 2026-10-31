@@ -29,6 +29,7 @@ import logging
 import os
 from typing import Any, Mapping
 
+from core.landscape import schema
 from core.llm_worker.cost_gate import CostGate, today_str
 
 logger = logging.getLogger(__name__)
@@ -526,7 +527,14 @@ def build_and_store_placements(
     payload["category_gaps_total"] = len(gaps)
 
     candidates = (
-        _to_store_candidates(result, domains, created_by=created_by)
+        _to_store_candidates(
+            result,
+            domains,
+            created_by=created_by,
+            claim_texts=[
+                _clean(c.get("text")) for c in agent_input.get("claim_summaries") or []
+            ],
+        )
         if result.placements
         else []
     )
@@ -572,6 +580,7 @@ def _to_store_candidates(
     domains: list[dict],
     *,
     created_by: str,
+    claim_texts: list[str] | None = None,
 ) -> list[dict]:
     """agent の配置候補 → ``store.supersede_and_insert_candidates`` の入力行。
 
@@ -594,6 +603,10 @@ def _to_store_candidates(
                 {
                     "quote": placement.evidence_quote,
                     "claim_id": placement.claim_id or None,
+                    # 引用の出所（IK-0677。主張の本文 / 解析が再構成した論文全体の文）。
+                    "source": schema.evidence_source_for(
+                        placement.evidence_quote, placement.claim_id, claim_texts or ()
+                    ),
                 }
             )
         candidates.append(

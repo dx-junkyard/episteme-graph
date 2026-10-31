@@ -393,11 +393,13 @@ class TestMetricEventVocabAndPayloadWhitelist:
         # 画面文脈アダプター Phase 4（assistant_screen_adapter_design.md §11.7）:
         # 構造 grounding が回答プロンプトに載ったターンの1ビット（サーバ側 best-effort 記録）。
         "structured_grounding_present",
+        # IK-0545: 回答の逐語引用が出典本文と一致を確認できなかったターンの1ビット（サーバ側記録）。
+        "citation_quote_unmatched",
     }
 
-    def test_vocab_matches_design_doc_24_events(self):
+    def test_vocab_matches_design_doc_25_events(self):
         assert observation.METRIC_EVENT_VOCAB == self._EXPECTED_VOCAB
-        assert len(observation.METRIC_EVENT_VOCAB) == 24
+        assert len(observation.METRIC_EVENT_VOCAB) == 25
 
     def test_sanitize_event_payload_keeps_only_whitelisted_keys(self):
         out = observation.sanitize_event_payload(

@@ -74,6 +74,35 @@ def test_figure_caption_japanese():
     assert classify("図 2 実験装置の概略図") == "figure_caption"
 
 
+@pytest.mark.parametrize("text", [
+    "Figure E.1: Photo of the entire experimental setup.",
+    "Figure A.1: The basis vectors used in this appendix.",
+    "Fig. S2 Supplementary spectra.",
+    "Figure5.22:Photooftheapparatus.",
+    "Figure 3a: Subfigure caption.",
+])
+def test_appendix_figure_captions(text):
+    assert classify(text) == "figure_caption"
+
+
+@pytest.mark.parametrize("text", [
+    "Figure 1.2 shows an overview of the entire project and the position of this thesis.",
+    "Figure 3.4 illustrates the shot noise-limited target sensitivity.",
+    "Fig. 2 and 3 show the measured spectra.",
+    "Figure5.19showsthemeasuredopen-looptransferfunction.",
+])
+def test_prose_figure_reference_is_not_a_caption(text):
+    assert classify(text) != "figure_caption"
+
+
+def test_table_prose_reference_is_not_a_caption():
+    assert classify("Table 5.2 lists the parameters of the input optical system.") != "table_caption"
+
+
+def test_appendix_table_caption():
+    assert classify("Table C.1: Component values.") == "table_caption"
+
+
 # ── table_caption ────────────────────────────────────────────────────────────
 
 def test_table_caption_english():
