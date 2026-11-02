@@ -45,7 +45,7 @@ resolution:
     第 25 周 第 7 波（2026-10-28）。知らせ `APPENDIX_STALE_COURSE_NOTICE` を「付録が古いトピックがあります（下の一覧）。…」にし、
     題名は文の括弧に連結せず、折りたたみ（`<details>`・見出しはサーバの `appendix_stale_list_summary`・アンカー
     `lecture-studio.appendix-stale-list`）に 1 行 1 題名・左のトピック一覧と同じ「章.トピック」の番号で並べる。各項目は左の一覧の
-    該当トピックを開く。件数は出さない。ハーネスの投影は `sync_keys_wave7.md` の面 D 節に追随の要点を残した。
+    該当トピックを開く。件数は出さない。ハーネスの投影は 「sync_keys_wave7.md」 の面 D 節に追随の要点を残した。
   landed_in:
     - "backend/core/lecture_studio_state.py"
     - "backend/api/routes/lecture_studio/topics.py"

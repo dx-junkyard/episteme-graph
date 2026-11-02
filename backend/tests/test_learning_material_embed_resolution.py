@@ -248,7 +248,13 @@ process.stdout.write(JSON.stringify({
             ],
         }
 
-        backend_keys = {f"{it['kind']}:{it['id']}" for it in build_topic_evidence_items(topic)}
+        # 別名（``alt_ids``）も解決キーに含める。トピック概要は IK-1034 で項目 1 つ +
+        # ``alt_ids: ["summary"]`` になったので、``source:summary`` は別名として引ける。
+        backend_keys = {
+            f"{it['kind']}:{rid}"
+            for it in build_topic_evidence_items(topic)
+            for rid in [it["id"], *(it.get("alt_ids") or [])]
+        }
 
         topic_file = tmp_path / "topic.json"
         topic_file.write_text(json.dumps(topic), encoding="utf-8")
