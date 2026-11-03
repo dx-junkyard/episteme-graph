@@ -1,0 +1,20 @@
+id: c-sandbox-p01-tov
+domain: astrophysics
+snapshot: corpus-astro-tex-r25j
+course_id: 1bad7d9f
+personas:
+  teachers: []
+  students: [st-11-m1-neutron-first-sim]
+scenarios:
+  student: [s-sim-first-open]
+runner: api
+flags:
+  OPENAI_BASE_URL: "https://api.openai.com/v1"
+sessions_per_student: 1
+budget: {product_llm_calls: 20, persona_llm_calls: 60, wall_clock_minutes: 40}
+notes: |
+  sim-sandbox（../sim-sandbox/docs）の P-01 の最初の周。episteme-graph で中性子星状態方程式の論文（2605.31198）の
+  理論のまとまりを初めて開き、入力と出力が読めるか・最大質量の主張を自分で確かめる足場になるかを見る。
+  製品の LLM は claude_proxy（8090）ではなく本物の OpenAI に向ける（flags は宣言のみ。実際は
+  uxsim/sandbox/docker-compose.openai-direct.yml を重ねて api-server を作り直す）。
+  コースは 1bad7d9f に固定（pin_course --yes 済）。生成（learning.simlab.generate）はこの経路では 0 回。

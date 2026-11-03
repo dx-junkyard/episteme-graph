@@ -1,0 +1,9 @@
+# 砂場の api-server の LLM を claude_proxy（8090）ではなく本物の OpenAI に向ける overlay。
+# .env.uxsim の OPENAI_BASE_URL（proxy 向け）を environment で上書きする（environment は env_file より優先）。
+# 使い方:
+#   docker compose -p episteme-uxsim -f docker-compose.yml -f uxsim/sandbox/docker-compose.uxsim.yml \
+#       -f uxsim/sandbox/docker-compose.openai-direct.yml up -d api-server
+services:
+  api-server:
+    environment:
+      OPENAI_BASE_URL: "https://api.openai.com/v1"

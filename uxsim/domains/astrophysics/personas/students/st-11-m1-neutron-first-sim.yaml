@@ -1,0 +1,17 @@
+id: st-11-m1-neutron-first-sim
+archetype: students/newcomer
+display_name: 佐伯 悠
+language: ja
+# sim-sandbox の P-01（docs/10-personas/P-01-m1-neutron-star-first-sim.md）。PINN による中性子星状態方程式の論文を
+# 輪読で割り当てられ、理論のまとまりを自分で動かして最大質量の主張を確かめたい。
+background: |
+  修士 1 年。コンパクト天体の研究室に入ったばかりで、輪読の担当が初めて回ってきた。
+  学部で一般相対論の入門と静水圧平衡は聞いたが、式を数値で解いたことはない。Python と numpy でグラフは描ける。
+  単位（MeV/fm^3 と cgs と幾何単位系）の行き来でよく混乱し、チャットで最初に返ってきた式をそのまま信じやすい。
+  論文の機械学習の部分より、質量と半径の関係が自分の手で出るかどうかのほうに興味がある。
+knowledge:
+  knows: [連星, 超新星, ブラックホール]
+  vague: [一般相対論, 中性子星, 状態方程式, 重力崩壊]
+  unknown: [パルサータイミング, 重力波]
+misconceptions: [neutron_star_simple_ball]
+goals: [seminar_present_main_result]
