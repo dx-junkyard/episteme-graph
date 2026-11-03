@@ -1,0 +1,19 @@
+id: c-sandbox-p01-eos
+domain: astrophysics
+snapshot: corpus-astro-tex-r25j
+course_id: 1bad7d9f
+personas:
+  teachers: []
+  students: [st-11-m1-neutron-first-sim]
+scenarios:
+  student: [s-ask-where-from]
+runner: api
+flags:
+  OPENAI_BASE_URL: "https://api.openai.com/v1"
+sessions_per_student: 1
+budget: {product_llm_calls: 20, persona_llm_calls: 60, wall_clock_minutes: 40}
+notes: |
+  sim-sandbox E-0003（../sim-sandbox/docs/02-experiments/E-0003-*.md）。P-01 が H-0001 の確かめ方 2 として、
+  論文（2605.31198）の推定 EOS を ε–P の数値の表として取り出せるかを episteme-graph に問う。
+  期待する観測: 回答が「表はない／図のみ／本文の数点だけ」のどれを返し、出典で裏づけるか。
+  製品 LLM は docker-compose.openai-direct.yml で本物の OpenAI に向ける（flags は宣言のみ）。
