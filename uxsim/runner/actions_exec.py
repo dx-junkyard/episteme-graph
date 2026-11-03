@@ -761,7 +761,7 @@ def _chat_history(ctx: _Ctx) -> None:
 
 
 def _corpus_discuss(ctx: _Ctx) -> None:
-    doc = ctx.args.get("document_id") or ctx.session.latest("corpus_documents") or ctx.session.latest("documents")
+    doc = _doc_arg(ctx) or ctx.session.latest("corpus_documents") or ctx.session.latest("documents")
     _mark_voice_discuss(ctx)
     _chat(ctx, topic_id=f"_doc:{doc}", overrides={"document_id": doc}, intent_mode="discuss")
 
@@ -1182,7 +1182,7 @@ def _upload_url(ctx: _Ctx) -> None:
 
 
 def _graph_open(ctx: _Ctx) -> None:
-    doc = ctx.args.get("document_id") or ctx.session.latest("documents")
+    doc = _doc_arg(ctx) or ctx.session.latest("documents")
     status, body = ctx.main(overrides={"document_id": doc} if doc else None)
     if status == 200 and doc:
         ctx.session.remember("graph_documents", doc)
@@ -1208,6 +1208,16 @@ def _graph_open(ctx: _Ctx) -> None:
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
 
+def _doc_arg(ctx: "_Ctx") -> str:
+    """ペルソナが引数で渡した ``document_id`` は UUID の形のときだけ採用する。
+
+    第 26 周（sim-sandbox E-0006）: 教員ペルソナが material_hint の語「Cepheus B」を document_id に入れ、
+    graph-sessions の URL に題名の断片が入って 404 → blocked になった。画面は文書 id しか送れないので、
+    UUID でない値は「画面で開いている文書」（呼び出し側の fallback）に戻す。"""
+    v = str(ctx.args.get("document_id") or "").strip()
+    return v if v and _UUID_RE.match(v) else ""
+
+
 def deliberation_target_id(node: dict) -> str:
     """admin-graph-review.js ``deliberationTargetId`` の写し: DB UUID → 代表要素 → linked_component_ids の先頭。
     どれも無ければ空（画面はリクエストせず事実文を出す）。第 14 周: main ノード id をそのまま送り 404 になった。"""
@@ -1225,7 +1235,7 @@ def deliberation_target_id(node: dict) -> str:
 
 def _graph_chat(ctx: _Ctx) -> None:
     s = ctx.session
-    doc = ctx.args.get("document_id") or s.latest("graph_documents") or s.latest("documents")
+    doc = _doc_arg(ctx) or s.latest("graph_documents") or s.latest("documents")
     sid = s.maps.setdefault("graph_sessions", {}).get(doc or "")
     if not sid:
         status, body = ctx.call("POST", "/api/admin/deliberation/documents/{document_id}/graph-sessions",
@@ -1481,7 +1491,7 @@ def _copilot(ctx: _Ctx) -> None:
 
 
 def _discuss_review(ctx: _Ctx) -> None:
-    doc = ctx.args.get("document_id") or ctx.session.latest("documents")
+    doc = _doc_arg(ctx) or ctx.session.latest("documents")
     ctx.main(params={"role": "discussion_seed"}, overrides={"document_id": doc} if doc else None)
 
 
@@ -1703,7 +1713,7 @@ def _atlas_neighbors(ctx: _Ctx) -> None:
 
 def _doc_of(ctx: _Ctx) -> str:
     s = ctx.session
-    return str(ctx.args.get("document_id") or s.latest("graph_documents") or s.latest("documents") or "")
+    return str(_doc_arg(ctx) or s.latest("graph_documents") or s.latest("documents") or "")
 
 
 def _doc_view(ctx: _Ctx) -> None:

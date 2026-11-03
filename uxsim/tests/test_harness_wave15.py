@@ -118,12 +118,24 @@ def test_brain_latency_marked_harness():
 
 
 def test_graph_chat_sends_screen_context():
+    # 第 26 周: 引数の document_id は UUID のときだけ採用（_doc_arg）。題名の断片などは画面の文書に戻る
+    doc = "1771872a-a372-4d3b-b8e9-40390c7344d2"
     s = _session()
-    s.maps["graph_sessions"] = {"D": "S"}
+    s.maps["graph_sessions"] = {doc: "S"}
     c = FakeClient()
-    actions_exec.execute("admin.graph_review.chat", {"document_id": "D", "message": "m"}, s, c)
+    actions_exec.execute("admin.graph_review.chat", {"document_id": doc, "message": "m"}, s, c)
     sc = c.calls[-1][2]["screen_context"]
-    assert sc["screen"] == "graph_review" and sc["selection"]["document_id"] == "D" and "view" in sc
+    assert sc["screen"] == "graph_review" and sc["selection"]["document_id"] == doc and "view" in sc
+
+
+def test_graph_chat_ignores_non_uuid_document_argument():
+    doc = "1771872a-a372-4d3b-b8e9-40390c7344d2"
+    s = _session()
+    s.remember("graph_documents", doc)
+    s.maps["graph_sessions"] = {doc: "S"}
+    c = FakeClient()
+    actions_exec.execute("admin.graph_review.chat", {"document_id": "Cepheus B", "message": "m"}, s, c)
+    assert c.calls[-1][2]["screen_context"]["selection"]["document_id"] == doc
 
 
 def test_materials_list_projects_health_chip():
