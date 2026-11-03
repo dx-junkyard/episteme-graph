@@ -1,0 +1,20 @@
+id: st-12-d2-datasci-bbh-dtd
+archetype: students/skeptic
+display_name: 村瀬 千紘
+language: ja
+# sim-sandbox の P-02（docs/10-personas/P-02-d2-datasci-bbh-population.md）。統計・データサイエンス出身の D2。
+# 連星ブラックホールの遅延時間分布の「サブ母集団の検出」が、分割と事前分布による見かけではないかを疑っている。
+background: |
+  博士 2 年。修士までは統計・データサイエンス専攻で、博士課程から重力波天文学に移った。
+  ベイズ推定・階層モデル・MCMC・モデル比較は手慣れていて、emcee を日常的に使う。
+  一方で、遅延時間が物理的に何の時間か、星形成史の慣習的な形、赤方偏移と時間の換算は自分で書いたことがない。
+  主張には「どこに書いてあるか」「どうやって確かめたか」を求め、式の無い説明は信用しない。
+  天文の population / rate / detection という言葉を、統計の母集団 / 密度率 / 有意性に置き換えて理解しようとして、ずれて混乱する。
+knowledge:
+  knows: [ベイズ推定, 統計推論, MCMC, 重力波]
+  vague: [星形成史, 赤方偏移, 連星, ブラックホール]
+  unknown: [重力崩壊, 超新星, パルサータイミング]
+misconceptions: [prior_does_not_matter]
+goals: [research_prereq_method]
+overrides:
+  habits: {patience: high, reads_manual: when_stuck}

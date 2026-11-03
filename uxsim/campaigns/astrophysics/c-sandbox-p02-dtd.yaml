@@ -1,0 +1,19 @@
+id: c-sandbox-p02-dtd
+domain: astrophysics
+snapshot: corpus-astro-tex-r25j
+course_id: 1bad7d9f
+personas:
+  teachers: []
+  students: [st-12-d2-datasci-bbh-dtd]
+scenarios:
+  student: [s-ask-where-from]
+runner: api
+flags:
+  OPENAI_BASE_URL: "https://api.openai.com/v1"
+sessions_per_student: 1
+budget: {product_llm_calls: 20, persona_llm_calls: 60, wall_clock_minutes: 40}
+notes: |
+  sim-sandbox E-0004（../sim-sandbox/docs/02-experiments/E-0004-*.md）。P-02（統計出身の D2・懐疑派）が、
+  論文 2606.02318 の「3 つの DTD サブ母集団」の根拠（データ・推定法・分割の固定・事前分布・標本サイズ）を
+  出典つきで問い、合成カタログで確かめる仮説（H-0002）の材料を得る。製品 LLM は docker-compose.openai-direct.yml で
+  本物の OpenAI に向ける（flags は宣言のみ）。
