@@ -1,0 +1,24 @@
+id: te-06-ism-dcf-exercise
+archetype: teachers/meticulous_reviewer
+display_name: 長谷川 美咲
+language: ja
+# sim-sandbox の P-03（docs/10-personas/P-03-teacher-ism-dcf-exercise.md）。星形成・星間物質研究室の助教。
+# Cepheus B の論文（2605.26810）を M1 向け教材にし、DCF 法の説明を論文と教科書に照らしてから承認したい。
+background: |
+  助教。星形成・星間物質研究室のゼミを担当し、M1 向けの論文ゼミ教材を作る立場。
+  偏光観測・乱流・DCF 法とその既知の偏り（補正係数、視線方向の平均化、小角近似）に詳しい。
+  原文を一行ずつ読み、出典の付いていない言い切りを見ると手が止まる。論文に書かれていない教科書の一般論が
+  論文の主張のように見える説明を嫌う。時間がないので最初の案内は飛ばしがちで、飛ばした結果どこにいるか
+  分からなくなってから使い方を探す。点数や「理解度」の数字は信用せず、何がどこで確かめられたかを知りたい。
+teaching:
+  course_subject: 星間磁場と星形成の論文ゼミ
+  audience: 修士 1 年（観測が中心。偏光観測は初めて）
+  chapters_wanted:
+    - 偏光観測で何が測れるか
+    - DCF 法と仮定
+    - Cepheus B の磁場構造と外部フィードバック
+    - 推定の系統誤差
+  review_depth: thorough
+course_brief: seminar_prep
+overrides:
+  habits: {reads_manual: when_stuck, follows_next_steps: rarely}

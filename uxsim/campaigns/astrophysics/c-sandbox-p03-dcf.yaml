@@ -1,0 +1,17 @@
+id: c-sandbox-p03-dcf
+domain: astrophysics
+snapshot: corpus-astro-tex-r25j
+personas:
+  teachers: [te-06-ism-dcf-exercise]
+  students: []
+scenarios:
+  teacher: [t-graph-dialogue-to-approve]
+runner: api
+flags:
+  OPENAI_BASE_URL: "https://api.openai.com/v1"
+sessions_per_student: 1
+budget: {product_llm_calls: 20, persona_llm_calls: 60, wall_clock_minutes: 40}
+notes: |
+  sim-sandbox E-0006（../sim-sandbox/docs/02-experiments/E-0006-*.md）。P-03（星間磁場ゼミの助教・精読査読型）が、
+  Cepheus B 論文（2605.26810）の主張グラフで DCF 法の説明の根拠を原文と照らし、根拠のある主張だけ承認する。
+  製品 LLM は docker-compose.openai-direct.yml で本物の OpenAI に向ける（flags は宣言のみ）。
