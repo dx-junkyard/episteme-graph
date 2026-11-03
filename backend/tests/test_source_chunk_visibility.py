@@ -181,12 +181,16 @@ class TestNoRouteExplicitlyDisablesTheFilter:
         紐づかない別 course / public 文書のチャンクまで読めてしまう。
         """
         learning_src = (_ROUTES_DIR / "learning.py").read_text(encoding="utf-8")
-        block = learning_src.split("def get_source_chunk_route(")[1][:2000]
+        block = learning_src.split("def get_source_chunk_route(")[1][:2600]
         assert 'get_accessible_course_data(current_user["id"], course_id)' in block
         assert "allowed_document_ids = list_course_source_document_ids(course_data)" in block
         assert "get_chunk_passage(chunk_id, allowed_document_ids=allowed_document_ids)" in block
-        # 全域可視集合を混ぜない（積集合も和集合も取らない）。
+        # 全域可視集合そのものを混ぜない（積集合も和集合も取らない）。足してよいのは course sources と
+        # 同じ論文の別の版だけで、その可視性は paper_version_siblings のスコープ引数で判定する
+        # （sim-sandbox E-0003: 検索は別版の出典を出すのに、開くと 404 だった）。
+        assert "set(allowed_document_ids).union(*siblings.values())" in block
         assert "list_visible_document_ids(current_user" not in block
+        assert "union(list_visible_document_ids" not in block
 
 
 # ---------------------------------------------------------------------------
@@ -501,3 +505,55 @@ class TestGraphElementRouteWiring:
 
         assert captured["allowed_document_ids"] == {"doc-course", "doc-own"}
         assert "概念の説明。" in resp.answer
+
+
+# ---------------------------------------------------------------------------
+# 6. ルート: 同じ論文の別の版（本人可視）のチャンクは course 経由で開ける（sim-sandbox E-0003）
+# ---------------------------------------------------------------------------
+
+
+class TestGetSourceChunkRouteSiblingVersions:
+    """学習チャットは `paper_version_siblings` で別版（TeX 版・PDF 版）のチャンクも出典に出す。
+    出典を開く側が course sources だけだと、その出典が 404 になる（検索の範囲と開く範囲の不一致）。"""
+
+    def _wire(self, monkeypatch, *, siblings, visible):
+        from api.routes import learning as learning_module
+
+        captured = {}
+        monkeypatch.setattr(
+            learning_module, "get_accessible_course_data", lambda uid, cid: {"sources": [{}]},
+        )
+        monkeypatch.setattr(
+            learning_module, "list_course_source_document_ids", lambda cd: {"doc-course"},
+        )
+        monkeypatch.setattr(
+            learning_module, "list_visible_document_ids", lambda uid: visible,
+        )
+
+        def _siblings(document_ids, *, allowed_document_ids):
+            captured["sibling_scope"] = set(allowed_document_ids or [])
+            return siblings
+
+        monkeypatch.setattr(learning_module, "paper_version_siblings", _siblings)
+
+        def _passage(chunk_id, allowed_document_ids=None):
+            captured["allowed"] = set(allowed_document_ids or [])
+            return {"chunk_id": chunk_id, "text": "本文", "section": "", "source_title": "", "formulas": [], "figures": []}
+
+        monkeypatch.setattr(learning_module, "get_chunk_passage", _passage)
+        return learning_module, captured
+
+    def test_visible_sibling_version_is_added_to_the_scope(self, monkeypatch):
+        learning_module, captured = self._wire(
+            monkeypatch, siblings={"doc-course": {"doc-tex"}}, visible={"doc-course", "doc-tex", "doc-other"},
+        )
+        learning_module.get_source_chunk_route("course-1", "chunk-1", current_user={"id": "user-1"})
+        assert captured["allowed"] == {"doc-course", "doc-tex"}
+        # 全域可視集合は別版の可視性判定にだけ使い、スコープそのものには混ぜない。
+        assert captured["sibling_scope"] == {"doc-course", "doc-tex", "doc-other"}
+        assert "doc-other" not in captured["allowed"]
+
+    def test_no_siblings_keeps_course_scope_only(self, monkeypatch):
+        learning_module, captured = self._wire(monkeypatch, siblings={}, visible={"doc-course"})
+        learning_module.get_source_chunk_route("course-1", "chunk-1", current_user={"id": "user-1"})
+        assert captured["allowed"] == {"doc-course"}

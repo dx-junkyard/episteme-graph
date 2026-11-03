@@ -8485,11 +8485,23 @@ def get_source_chunk_route(
     course への正規アクセスが source 文書の開示根拠であるという設計はそのまま
     （`list_visible_document_ids` との積集合は取らない — 取ると教員 private のコース教材が
     受講者から読めなくなり、コース経由開示が壊れる）。
+
+    4. 同じ論文の別の版（TeX 版・PDF 版）は、本人が閲覧できるものに限って足す
+       （sim-sandbox E-0003）。学習チャットの検索は第 25 周 第 6 波（IK-0987）から
+       `paper_version_siblings` で別版のチャンクも引いて出典に出すが、ここが course の
+       source だけだと、その出典を開いた途端に 404 になる（検索の範囲と出典を開く範囲の不一致）。
+       別版の可視性は検索側と同じく `list_visible_document_ids` で fail-closed。
     """
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if course_data is None:
         raise HTTPException(status_code=404, detail=_SOURCE_CHUNK_NOT_FOUND_DETAIL)
     allowed_document_ids = list_course_source_document_ids(course_data)
+    if allowed_document_ids:
+        user_id = current_user["id"]
+        siblings = paper_version_siblings(
+            allowed_document_ids, allowed_document_ids=list_visible_document_ids(user_id),
+        )
+        allowed_document_ids = set(allowed_document_ids).union(*siblings.values())
     passage = get_chunk_passage(chunk_id, allowed_document_ids=allowed_document_ids)
     if not passage:
         raise HTTPException(status_code=404, detail=_SOURCE_CHUNK_NOT_FOUND_DETAIL)
