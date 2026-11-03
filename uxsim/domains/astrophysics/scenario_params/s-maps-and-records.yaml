@@ -1,0 +1,12 @@
+scenario: s-maps-and-records
+domain: astrophysics
+params:
+  goal_text: いま読んでいる論文が分野の中のどこにあるのかを確かめ、周りの論文も知っておくこと
+  atlas_region_hint: 宇宙論・大規模構造の領域の、大規模構造形成と暗黒エネルギー
+  corpus_question: この論文は、コースで読んでいる論文と同じ量を別の方法で測っているんですか？
+per_archetype:
+  adjacent_field:
+    atlas_region_hint: 基礎物理・重力・素粒子宇宙の領域の、暗黒成分の物理
+  non_native:
+    goal_text: finding where the paper I am reading sits in the field and knowing the papers around it
+    corpus_question: Does this paper measure the same quantity as the course paper, but with a different method?

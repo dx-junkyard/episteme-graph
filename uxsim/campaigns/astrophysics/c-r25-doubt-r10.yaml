@@ -1,0 +1,23 @@
+id: c-r25-doubt-r10
+domain: astrophysics
+snapshot: corpus-astro-tex-r25i
+course_id: 1bad7d9f
+personas:
+  teachers: [te-02-veteran-intro, te-03-meticulous-seminar]
+  students: [st-05-night-solarwind, st-08-m1-rprocess-lecture]
+scenarios:
+  teacher: [t-db-assumption-review, t-db-challenge-from-node]
+  student: [s-db-ledger-lines, s-db-map-ask-en]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 10, persona_llm_calls: 260, wall_clock_minutes: 240}
+notes: |
+  第 25 周・面 B の第 10 周（judge_doubt_r9.md §4・r10_prereqs.md・harness_fixes_r9_summary.md の H52〜H54）。第 9 波の是正後（IK-1075 / 1059 残り / 1074 / 1057 部分）。
+  **固定コースは 1bad7d9f のまま — 初めて同じコース・トピックでの前後比較ができる周**。教員 2 × 学生 2・4 場面:
+  te-02 × t-db-assumption-review（区画「計算できない前提」のボタン（`unplotted_open`・H52）→ 前提の台帳 → スコープ記帳 → 区画の行に被覆の段（IK-1074）— 前提 → 台帳 →
+  スコープ → 地図を画面で 1 本通す・9 周未達）/ te-03 × t-db-challenge-from-node（course_hint 1bad7d9f・提案の［完了を記録］（H54・9 周未到達）→ 合意リストの Cepheus の行
+  「検証提案あり」）/ st-05 × s-db-ledger-lines（t11 の ⚓ を開いたまま尋ねて AI が「後継が決まっていない」と同じ事実で答えるか — IK-1075。share の (d) の前に走らせる）/
+  st-08 × s-db-map-ask-en（文字・1 回だけ。札の説明が「記録」で AI に渡り英語の回答に ledger が出ないか — IK-1059 残り）。
+  組の例外（P-0025）: 4 組とも第 9 周と同じ組（同じコースでの前後比較・審判の指定）。
+  周の前の実測（r10_prereqs）: IK-1057 の 3 変種読み取りは第 9 周と同じ（段による同定を外すと 147 件が変わる・背景文と手法の選択の除外は既定に含まれる）。

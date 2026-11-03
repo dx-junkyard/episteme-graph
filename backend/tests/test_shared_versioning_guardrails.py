@@ -46,14 +46,16 @@ class TestCourseVersionViewCentralized:
     def test_shared_helper_used_by_all_read_paths(self):
         # get_course_data / get_viewable_course_data / get_accessible_course_data(public+group)
         assert "def _apply_course_version_view" in _SERVICES_SRC
-        assert _SERVICES_SRC.count("_apply_course_version_view(course_id, user_id") >= 4
+        # 第 25 周 第 3 波（IK-0945）: get_course_data / get_accessible_course_data は入場判定
+        # resolve_course_entry に委譲したので呼び出し箇所は 3（主経路・viewable・accessible）。
+        assert _SERVICES_SRC.count("_apply_course_version_view(course_id, user_id") >= 3
 
     def test_learner_primary_path_is_version_resolved(self):
         # 学習者の主経路 get_course_data も版解決を通す（旧実装は live HEAD 直返しだった）
         idx = _SERVICES_SRC.find("def get_course_data(")
         end = _SERVICES_SRC.find("def get_personal_layer(")
         body = _SERVICES_SRC[idx:end]
-        assert "_apply_course_version_view(course_id, user_id, data)" in body
+        assert "_apply_course_version_view(course_id, user_id, entry.data)" in body
 
     def test_editor_reads_head_in_shared_helper(self):
         # owner/editor は helper 内で HEAD（live）を読む（get_accessible の editor 免除ズレを解消）

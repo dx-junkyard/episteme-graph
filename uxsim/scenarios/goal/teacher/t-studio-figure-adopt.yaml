@@ -1,0 +1,50 @@
+id: t-studio-figure-adopt
+population: teachers
+runner: [api]
+preconditions:
+  - text: このペルソナは自分が所有するコースを持っている（図の保存・採用は所有者だけができる）
+    check: owns_course
+seed_scenarios: [t-v5-register-own-course]
+goal: "{{goal_text}}"
+params_required: [goal_text, figure_topic_hint, figure_instruction, figure_refine, figure_after_heading]
+steps:
+  - do: auth.login
+  - do: admin.courses.list
+  - do: admin.lecture_studio.open_course
+  - do: admin.lecture_studio.select_topic
+    with: {topic_hint: "{{figure_topic_hint}}"}
+    note: 図で補いたいトピックを開く（学生が最初に開くトピック）
+  - do: admin.figure_studio.suggestions
+    note: 右ペインの「図の提案」を見る
+  - choose:
+      - do: admin.figure_studio.build_from_suggestion
+        note: 提案があれば「この図を作る」で教材図スタジオを開く
+      - do: admin.figure_studio.turn
+        with: {instruction: "{{figure_instruction}}"}
+        note: 提案が無い・合わないなら、自分で頼む
+  - repeat:
+      until: "persona_decides_to_stop or steps > 1"
+      max: 1
+      do: admin.figure_studio.turn
+      with: {instruction: "{{figure_refine}}"}
+      note: 図を一度だけ直してもらう
+  - do: admin.figure_studio.adopt
+    with: {after_heading: "{{figure_after_heading}}"}
+    note: 教材欄の図を入れたい見出しの直後にカーソルを置いて「採用して挿入」を押し、教材欄に図が入ったことと
+      インジケータの変化を読む（after_heading は見出しの一部か番号。画面ではカーソルを置いた位置に入る）
+  - do: admin.lecture_studio.save_topic
+    note: 保存して受講者に届くようにする
+  - do: admin.course.visibility
+    with: {visibility: public}
+    note: 学生が受講できるようにコースを公開する（公開済みならそのまま）
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/14-admin-lecture-studio.md#figure-suggestions
+  - manual: teacher/14-admin-lecture-studio.md#figure-studio
+  - manual: teacher/14-admin-lecture-studio.md#insert-figure
+  - manual: teacher/14-admin-lecture-studio.md#save-btn
+watch_for:
+  - 図の提案は候補であって確定ではないことが分かり、確かさは段階ラベルで出る
+  - 採用すると図がトピックに登録され、保存するまで受講者に表示されないことと、音声が作り直しになることが言われる
+  - 図を入れたことでスライドの枚数が変わるなら、インジケータがそれを言う
+  - 生成に失敗したときは「生成できなかった」と「候補が無い」を区別して言う

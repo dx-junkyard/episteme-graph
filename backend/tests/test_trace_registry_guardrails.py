@@ -78,10 +78,12 @@ class TestVocabularySingleSource:
             "help_usage", "intention", "anchor_mark", "backstage_question",
             # コーパス回遊層 Phase D（corpus_roaming_design.md §7）
             "frontier_interest",
+            # 検証シミュレーション層 v1.1（simulation_bridge_design.md §14 SB15）
+            "verification_attempt",
         })
         # 露出3宣言は dataclass 必須フィールドで構文的にも強制されるが、
-        # dead 語彙（detour）も含めて10件存在することをここで固定する（TR3）。
-        assert len(TRACE_KINDS) == 10
+        # dead 語彙（detour）も含めて11件存在することをここで固定する（TR3）。
+        assert len(TRACE_KINDS) == 11
 
     def test_only_detour_is_dead(self):
         dead = {kind for kind, spec in TRACE_KINDS.items() if spec.dead}
@@ -308,7 +310,7 @@ class TestTeacherAggregationHonesty:
     def test_kinds_without_any_teacher_consumption_have_empty_aggregations(self):
         """教員向け消費が本当に無い kind は宣言も空のまま（過剰宣言で
         「匿名集計に含まれることがあります」を濫発しない — こちらも TR5）。"""
-        for kind in ("backstage_question", "intention", "anchor_mark"):
+        for kind in ("backstage_question", "intention", "anchor_mark", "verification_attempt"):
             spec = TRACE_KINDS[kind]
             assert not spec.teacher_dashboard
             assert spec.teacher_aggregations == ()

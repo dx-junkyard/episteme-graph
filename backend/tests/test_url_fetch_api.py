@@ -431,8 +431,11 @@ class TestUploadFromUrl:
         assert set(body) == {
             "task_id", "material_id", "filename", "title",
             "source_kind", "status", "uploaded_at", "analyze_images",
+            "effective_format", "fell_back",
         }
         assert body["source_kind"] == "pdf"
+        assert body["effective_format"] == "pdf"
+        assert body["fell_back"] is False
         assert body["filename"] == "1711.03050.pdf"
 
         assert len(env["accepted"]) == 1
@@ -510,3 +513,127 @@ class TestUploadFromUrl:
             headers=_auth(env, "teacher"),
         )
         assert env["audits"] == []
+
+
+class TestUploadFromUrlArxivRewriting:
+    """arXiv の論文 URL は形式を解決して取り直す（TeX 既定・PDF への同期フォールバック・≤2 回）。
+
+    正本: ``docs/features/url_material_upload_design.md`` の追補 / ``api/source_resolution.py``。
+    """
+
+    PATH = "/api/admin/materials/upload-from-url"
+
+    def test_abs_url_with_tex_fetches_the_source(self, env):
+        env["session"].domains = ["arxiv.org"]
+        res = env["client"].post(
+            self.PATH,
+            json={"url": "https://arxiv.org/abs/1711.03050", "source_format": "tex"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 202
+        assert [url for url, _ in env["fetches"]] == ["https://arxiv.org/src/1711.03050"]
+        # /src/ が PDF を返した = PDF のみの投稿。1 回で終わり、出所は /src/。
+        assert env["accepted"][0]["source_url"] == "https://arxiv.org/src/1711.03050"
+        assert res.json()["effective_format"] == "pdf"
+        assert res.json()["fell_back"] is False
+
+    def test_pdf_url_with_tex_switch_goes_to_src(self, env):
+        env["session"].domains = ["arxiv.org"]
+        env["client"].post(
+            self.PATH,
+            json={"url": "https://arxiv.org/pdf/1711.03050", "source_format": "tex"},
+            headers=_auth(env, "teacher"),
+        )
+        assert [url for url, _ in env["fetches"]] == ["https://arxiv.org/src/1711.03050"]
+
+    def test_unreadable_tex_falls_back_and_records_the_pdf_url(self, env):
+        import gzip
+
+        env["session"].domains = ["arxiv.org"]
+        calls: list[str] = []
+        routes = env["routes"]
+
+        def _fetch(url, allowed_domains):
+            calls.append(url)
+            if "/src/" in url:
+                return routes.url_fetch.FetchedSource(
+                    content=gzip.compress(b"not tex"), source_kind="tex_archive",
+                    filename="x.tar.gz",
+                )
+            return routes.url_fetch.FetchedSource(
+                content=PDF_BYTES, source_kind="pdf", filename="1711.03050.pdf",
+            )
+
+        import pytest as _pytest
+
+        mp = _pytest.MonkeyPatch()
+        mp.setattr(routes.url_fetch, "fetch_source_from_url", _fetch)
+        try:
+            res = env["client"].post(
+                self.PATH,
+                json={"url": "https://arxiv.org/abs/1711.03050", "source_format": "tex"},
+                headers=_auth(env, "teacher"),
+            )
+        finally:
+            mp.undo()
+        assert res.status_code == 202
+        assert calls == [
+            "https://arxiv.org/src/1711.03050", "https://arxiv.org/pdf/1711.03050",
+        ]
+        assert env["accepted"][0]["source_url"] == "https://arxiv.org/pdf/1711.03050"
+        assert res.json()["fell_back"] is True
+        assert res.json()["effective_format"] == "pdf"
+
+    def test_rate_limited_is_502_with_the_fact_and_one_call(self, env):
+        import source_resolution
+
+        env["session"].domains = ["arxiv.org"]
+        env["fetch_error"] = env["routes"].url_fetch.RateLimitedError("x")
+        res = env["client"].post(
+            self.PATH,
+            json={"url": "https://arxiv.org/abs/1711.03050", "source_format": "tex"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 502
+        assert res.json()["detail"] == source_resolution.DETAIL_ARXIV_RATE_LIMITED
+        assert len(env["fetches"]) == 1
+        assert env["accepted"] == []
+
+    def test_non_arxiv_url_is_fetched_as_is(self, env):
+        env["session"].domains = ["example.com"]
+        env["client"].post(
+            self.PATH,
+            json={"url": "https://example.com/p.pdf", "source_format": "tex"},
+            headers=_auth(env, "teacher"),
+        )
+        assert [url for url, _ in env["fetches"]] == ["https://example.com/p.pdf"]
+        assert env["accepted"][0]["source_url"] == "https://example.com/p.pdf"
+
+    def test_unknown_source_format_is_422_and_fetches_nothing(self, env):
+        env["session"].domains = ["arxiv.org"]
+        res = env["client"].post(
+            self.PATH,
+            json={"url": "https://arxiv.org/abs/1711.03050", "source_format": "html"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 422
+        assert env["fetches"] == []
+
+    def test_language_reaches_the_acceptance(self, env):
+        env["session"].domains = ["arxiv.org"]
+        env["client"].post(
+            self.PATH,
+            json={"url": "https://arxiv.org/pdf/1711.03050", "language": "en"},
+            headers=_auth(env, "teacher"),
+        )
+        assert env["accepted"][0]["language"] == "en"
+
+    def test_unknown_language_is_422(self, env):
+        env["session"].domains = ["arxiv.org"]
+        res = env["client"].post(
+            self.PATH,
+            json={"url": "https://arxiv.org/pdf/1711.03050", "language": "fr"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 422
+        assert env["fetches"] == []

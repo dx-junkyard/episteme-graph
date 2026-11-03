@@ -39,8 +39,11 @@ def fake():
 
 
 @pytest.fixture(autouse=True)
-def _patch_store_session(fake, monkeypatch):
+def _patch_store_session(fake, monkeypatch, tmp_path):
     monkeypatch.setattr(store, "get_session", make_session_factory(fake))
+    # 共通部品（backend/library_common）は件数を固定するシード取込テストの外に置く
+    # （取り込むと凍結時の embedding が外部 API に向かう）。
+    monkeypatch.setattr(library_seed, "LIBRARY_COMMON_DIR", tmp_path / "no_library_common")
 
 
 def _make_entry(**overrides) -> dict:

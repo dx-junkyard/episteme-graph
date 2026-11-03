@@ -222,6 +222,38 @@ class TestChatBubbleAndStance:
         # 控えめな注記であって警告ではない（警告色を使わない）。
         assert "red" not in rule and "#ef4444" not in rule
 
+    def test_pending_review_label_replaces_the_prose_caveat(self):
+        """§18: 網羅性の但し書きは本文ではなく、会話の最後の1枚のラベルが引き受ける。"""
+        from core.label_vocab import REVIEW_PENDING_LABEL
+
+        block = self._chat_log_block()
+        assert "graph-review-chat-notes" in block
+        assert "REVIEW_PENDING_LABEL" in block
+        # 現在のグラフ状態からの導出（保存しない・承認が進めば消える）。
+        assert "hasPendingReviewElements()" in block
+        assert 'state.chatMode === "graph"' in block
+        # 文言の正本はサーバの label_vocab で、JS は逐語ミラー1箇所だけ。
+        assert 'var REVIEW_PENDING_LABEL = "' + REVIEW_PENDING_LABEL + '";' in JS_SRC
+        assert JS_SRC.count(REVIEW_PENDING_LABEL) == 1
+        # 件数は出さない（GR3）。
+        notes = block[block.index("graph-review-chat-notes"):]
+        assert "length" not in notes[: notes.index("\n")]
+
+    def test_pending_review_label_uses_the_grounding_population(self):
+        """AI が読む grounding と同じ母集合（debug 層を除く全ノード）で判定する。"""
+        start = JS_SRC.index("function hasPendingReviewElements(")
+        block = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert '"debug"' in block
+        assert "isUnreviewedNode(node)" in block
+        # 層トグル（filterByLayer）には依らない — 見えていない層の未レビューも数に入る。
+        assert "filterByLayer" not in block
+
+    def test_notes_css_is_muted_and_not_a_warning(self):
+        assert ".graph-review-chat-notes" in CSS_SRC
+        rule = CSS_SRC[CSS_SRC.index(".graph-review-chat-notes"):]
+        rule = rule[: rule.index("}")]
+        assert "red" not in rule and "#ef4444" not in rule
+
     def test_es5_in_chat_blocks(self):
         block = self._chat_log_block()
         assert "=>" not in block
@@ -1150,3 +1182,42 @@ class TestNodePositionPersistence:
         # 位置は端末の都合。サーバへ送らない（保存 API も新しい列も作らない）。
         assert "/positions" not in JS_SRC
         assert not re.search(r"apiFetch\([^)]*position", JS_SRC, re.IGNORECASE)
+
+
+class TestPaperLayerExplanations:
+    """第 2 波（2026-09-19）: 説明の出所と、主張・式の行単位の説明を描く。"""
+
+    def test_explanation_source_uses_element_vocab_not_raw_type(self):
+        start = JS_SRC.index("function explanationSourceHtml(")
+        block = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert "explanation_element" in JS_SRC
+        assert "window.ElementVocab" in block and "elementTypeLabel" in block
+        # 表示名が引けない種別は出所行ごと出さない（生の element_type・内部 ID を漏らさない）。
+        assert 'if (!typeLabel) return "";' in block
+        assert "element_id" not in block
+
+    def test_item_level_explanations_are_rendered_for_claims_and_equations(self):
+        assert "itemExplanationHtml(claim.explanation)" in JS_SRC
+        assert "itemExplanationHtml(equation.explanation)" in JS_SRC
+        start = JS_SRC.index("function itemExplanationHtml(")
+        block = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert "explanationChipsHtml" in block
+        assert "richText(" in block  # 数式は richText のみ（独自の数式描画を作らない）
+
+    def test_node_explanation_block_shows_source(self):
+        start = JS_SRC.index('block("この論文での説明"')
+        block = JS_SRC[start: start + 400]
+        assert "explanationSourceHtml(entry.explanation_element)" in block
+
+
+class TestEdgeLayerFilter:
+    """辺の graph_layer を層トグルに使う（E-8 で辺に層が付いた）。"""
+
+    def test_edges_follow_their_own_layer_when_present(self):
+        start = STUDIO_SRC.index("function lsGraphFilterByLayer(")
+        block = STUDIO_SRC[start: STUDIO_SRC.index("\n  }\n", start) + 4]
+        assert "edge.graph_layer" in block
+        # 層の無い旧グラフの辺は端点の可視性だけで判定する（後方互換）。
+        assert 'if (!edgeLayer) return true;' in block
+        assert 'if (filter === "main") return edgeLayer === "main";' in block
+        assert 'edgeLayer === "equation_detail" || edgeLayer === "debug"' in block

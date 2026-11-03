@@ -295,8 +295,8 @@ def _guidance_response(
     message: str, role: str, cap, screen_context: dict | None = None,
 ) -> AssistantChatResponse:
     allowed = caps.capabilities_for(role)
-    results = kb.search(message, allowed, limit=3)
     hint_screen = (screen_context or {}).get("tab") or None
+    results = kb.search(message, allowed, limit=3, screen=hint_screen)
     manual_hits = _manual_hits(message, role, hint_screen)
     citations: list = []
     parts: list[str] = []

@@ -35,6 +35,8 @@ from core import atlas as atlas_module
 from core import embedder as embedder_module
 from core.deliberation import labels as labels_mod
 from core.label_vocab import SUPPORT_SECTION_LABELS, VERIFICATION_STATUS_LABELS_LENS
+# IK-0926: 支持の人数は著者を除き取り消しを除いた数。
+from core.explanation_governance import COUNTED_ENDORSEMENT_SUMMARY_SQL
 from core.atlas_store import load_learner_skeleton
 from core.llm_usage import usage_context
 from core.postgres import get_session
@@ -806,7 +808,7 @@ def _build_endorsement(ref: ElementRef) -> list[dict[str, str]] | None:
                        COALESCE(s.endorser_count, 0) AS endorser_count,
                        COALESCE(c.cnt, 0) AS citation_count
                 FROM component_explanations e
-                LEFT JOIN component_explanation_endorsement_summary s
+                LEFT JOIN """ + COUNTED_ENDORSEMENT_SUMMARY_SQL + """ s
                        ON s.explanation_id = e.id
                 LEFT JOIN (
                     SELECT explanation_id, COUNT(*) AS cnt
@@ -832,18 +834,29 @@ def _build_epistemic(ref: ElementRef) -> list[dict[str, str]] | None:
     target_type = _EPISTEMIC_TARGET_TYPE.get(ref.element_type)
     if target_type is None:
         return None
+    from core.doubt.ledger_targets import LedgerDocumentRequired, ledger_row_filter
+
+    try:
+        # IK-0899: 行キーは (document_id, target_type, target_id)。ノード id・式 id は論文の中でしか
+        # 一意でないので、要素の論文で引く（分からなければ D層レンズを出さない）。
+        ledger_where, ledger_params = ledger_row_filter(
+            target_type=target_type, target_id=ref.element_id,
+            document_id=getattr(ref, "document_id", None),
+        )
+    except LedgerDocumentRequired:
+        return None
     session = get_session()
     try:
         ledger_row = session.execute(
             sa_text(
-                """
+                f"""
                 SELECT verification_status, verification_scopes
                 FROM epistemic_ledger
-                WHERE target_type = :target_type AND target_id = :target_id
+                WHERE {ledger_where}
                 LIMIT 1
                 """
             ),
-            {"target_type": target_type, "target_id": ref.element_id},
+            ledger_params,
         ).fetchone()
         challenge_rows = []
         # challenges.target_type は 'assumption' / 'claim' のみ（migration 031 の CHECK）。

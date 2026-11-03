@@ -761,6 +761,10 @@ class TestDoubtCourseScopedRoutes:
         monkeypatch.setattr(
             _routes_admin, "_fetch_course_data_row", _fake_fetch_course_data_row,
         )
+        # IK-0852: 範囲（コースの教材の document 集合）の解決は DB に触れないよう固定する。
+        monkeypatch.setattr(
+            doubt_module, "list_course_source_document_ids", lambda _course: {"doc-1"},
+        )
 
     @pytest.mark.parametrize(
         "user", [_user(OWNER), _user(EDITOR), _user(ADMIN, role="SYSTEM_ADMIN")],
@@ -819,7 +823,7 @@ class TestDoubtCourseScopedRoutes:
         monkeypatch.setattr(doubt_module, "_pg_session", lambda: session)
         monkeypatch.setattr(
             doubt_module, "observation_claim_targets",
-            lambda _s, course_id=None: [{"claim_id": "c1", "identified_via": "dsl"}],
+            lambda _s, **_k: [{"claim_id": "c1", "identified_via": "dsl"}],
         )
 
         result = doubt_module.get_observation_targets(COURSE_ID, current_user=user)
@@ -860,8 +864,14 @@ class TestDoubtCourseScopedRoutes:
         assert signals.index("_require_editable_course_or_404") < signals.index(
             "aggregate_naive_signals(course_id)"
         )
+        # IK-0852 / IK-0857: コース単位ルートはゲートと範囲の正本
+        # （_course_scope_document_ids = _require_editable_course_or_404 + 教材の document 集合）を通す。
         targets = extract_function_source(_DOUBT_SRC, "get_observation_targets")
-        assert targets.index("_require_editable_course_or_404") < targets.index("_pg_session()")
+        assert targets.index("_course_scope_document_ids(") < targets.index("_pg_session()")
+        scope_helper = extract_function_source(_DOUBT_SRC, "_course_scope_document_ids")
+        assert scope_helper.index("_require_editable_course_or_404") < scope_helper.index(
+            "list_course_source_document_ids"
+        )
 
     def test_gate_is_the_shared_helper_not_a_viewer_gate(self):
         """閲覧ゲート（get_accessible_course_data 等）を認可に流用しない。"""

@@ -56,6 +56,25 @@ SKIP_INVALID_ID = "arXiv ID として解釈できませんでした。"
 SKIP_ALREADY_INGESTED = "この論文は既に取り込み済みです。"
 SKIP_ALREADY_QUEUED = "この論文は既にキューに登録されています。"
 
+#: ``skipped[]`` の機械可読の理由（2026-10-16・IK-0796）。``detail`` は事実文のまま。
+REASON_INVALID_ID = "invalid_arxiv_id"
+REASON_ALREADY_INGESTED = "already_ingested"
+REASON_ALREADY_QUEUED = "already_queued"
+
+
+def existing_document_ref(entry: Any) -> dict:
+    """「取り込み済み」の既存教材を事実として返す形（解析結果への導線に使う）。
+
+    入力は :func:`core.paper_discovery.search.visible_ingested_documents` の値。
+    ``analysis_status`` など判定に要らない列は載せない。
+    """
+    data = entry if isinstance(entry, dict) else {}
+    return {
+        "document_id": str(data.get("document_id") or ""),
+        "material_id": str(data.get("material_id") or ""),
+        "title": str(data.get("title") or ""),
+    }
+
 _ITEM_COLUMNS = """
     id::text,
     domain_key,
@@ -72,7 +91,8 @@ _ITEM_COLUMNS = """
     task_id,
     requested_at,
     started_at,
-    finished_at
+    finished_at,
+    cartridge_id
 """
 
 
@@ -113,7 +133,17 @@ def _row_to_item(row) -> dict:
         "requested_at": _iso(row[13]),
         "started_at": _iso(row[14]),
         "finished_at": _iso(row[15]),
+        # migration 090: 解析の分野。None = 未指定（env 既定）/ "" = 「指定しない」の明示。
+        # NULL と "" を区別したまま運ぶ（worker が受理の経路へそのまま渡す）。
+        "cartridge_id": _cartridge_value(row[16] if len(row) > 16 else None),
     }
+
+
+def _cartridge_value(value: Any) -> Optional[str]:
+    """キュー行の ``cartridge_id`` 列の値（NULL は None のまま・文字列は前後空白を落とす）。"""
+    if value is None:
+        return None
+    return str(value).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +189,51 @@ def _ingested_arxiv_ids(session) -> set[str]:
     return out
 
 
+def visible_ingested_documents(session, *, visible_document_ids: Any) -> dict[str, dict]:
+    """閲覧者に**見える** document のうち、URL 経由で取り込まれたものの arXiv ID 対応。
+
+    論文レーダーの「取り込み済み」判定の正本（設計書 paper_radar §19 C・IK-0701）。
+    :func:`ingested_arxiv_ids` は全 documents から作るので、他の教員が非公開で取り込んだ
+    論文も「取り込み済み」になり、閲覧者は開くことも取り込むこともできなかった（存在だけが
+    漏れる）。ここでは可視性を**必須引数**で受け、問い合わせの内側（``ANY(:visible_ids)``）
+    で強制する。空・``None`` は SQL を発行せず空を返す（fail-closed — 見えない対象を
+    取り込み済みにしない）。
+
+    Returns:
+        ``{arxiv_id: {document_id, material_id, analysis_status, title}}``。同じ論文が
+        複数の見える教材にあるときは、解析が完了したもの → 新しいものを優先する。
+    """
+    ids = sorted({str(value) for value in (visible_document_ids or ()) if str(value or "").strip()})
+    if not ids:
+        return {}
+    rows = session.execute(
+        sa_text(
+            """
+            SELECT id::text, COALESCE(source_path, ''), COALESCE(title, ''),
+                   COALESCE(status, ''), source_url
+              FROM documents
+             WHERE source_url IS NOT NULL
+               AND source_url <> ''
+               AND id::text = ANY(:visible_ids)
+             ORDER BY (status = 'completed') DESC, created_at DESC
+            """
+        ),
+        {"visible_ids": ids},
+    ).fetchall()
+    out: dict[str, dict] = {}
+    for row in rows:
+        arxiv_id = normalize_arxiv_id(row[4])
+        if not arxiv_id or arxiv_id in out:
+            continue
+        out[arxiv_id] = {
+            "document_id": str(row[0] or ""),
+            "material_id": str(row[1] or ""),
+            "title": str(row[2] or ""),
+            "analysis_status": str(row[3] or ""),
+        }
+    return out
+
+
 def enqueue_items(
     session,
     items: Iterable[Any],
@@ -168,6 +243,8 @@ def enqueue_items(
     analyze_images: bool = False,
     models: Optional[dict] = None,
     source_format: Any = DEFAULT_SOURCE_FORMAT,
+    cartridge_id: Optional[str] = None,
+    ingested_documents: Optional[dict] = None,
 ) -> dict:
     """取り込み対象をまとめてキューへ積む。
 
@@ -193,11 +270,24 @@ def enqueue_items(
     列を増やさないのは、worker が読むのは「どの URL を取りに行くか」だけで、形式の
     語彙そのものを知る必要が無いため（worker は取得したバイト列のマジックで形式を
     決める）。語彙外の値は :func:`source_url_for` が既定形式へ落とす。
+
+    ``ingested_documents``（``{arxiv_id: {document_id, material_id, title, ...}}``）を
+    渡すと、条件 2 は**その集合**（API 層が投入者の可視集合から作る —
+    ``search.visible_ingested_documents``）で判定し、skip 行に ``existing``
+    （既存教材の document_id / material_id / title）を添える（IK-0796）。
+    ``None`` のときは従来どおり全 documents の ``source_url`` から判定する。
+    各 skip 行には機械可読の ``reason`` を付ける。
     """
     key = str(domain_key or "").strip() or DEFAULT_DOMAIN_KEY
     payload = json.dumps(models, ensure_ascii=False) if models else None
+    cartridge = _cartridge_value(cartridge_id)
 
-    already_ingested = _ingested_arxiv_ids(session)
+    if ingested_documents is None:
+        already_ingested: Any = _ingested_arxiv_ids(session)
+        existing_map: dict = {}
+    else:
+        existing_map = dict(ingested_documents)
+        already_ingested = set(existing_map)
     pending = _active_arxiv_ids(session)
 
     queued: list[dict] = []
@@ -215,13 +305,24 @@ def enqueue_items(
         raw_text = str(raw_id or "")
         arxiv_id = normalize_arxiv_id(raw_text)
         if not arxiv_id:
-            skipped.append({"arxiv_id": raw_text, "detail": SKIP_INVALID_ID})
+            skipped.append(
+                {"arxiv_id": raw_text, "detail": SKIP_INVALID_ID, "reason": REASON_INVALID_ID}
+            )
             continue
         if arxiv_id in already_ingested:
-            skipped.append({"arxiv_id": arxiv_id, "detail": SKIP_ALREADY_INGESTED})
+            skip = {
+                "arxiv_id": arxiv_id,
+                "detail": SKIP_ALREADY_INGESTED,
+                "reason": REASON_ALREADY_INGESTED,
+            }
+            if arxiv_id in existing_map:
+                skip["existing"] = existing_document_ref(existing_map[arxiv_id])
+            skipped.append(skip)
             continue
         if arxiv_id in pending or arxiv_id in seen_in_request:
-            skipped.append({"arxiv_id": arxiv_id, "detail": SKIP_ALREADY_QUEUED})
+            skipped.append(
+                {"arxiv_id": arxiv_id, "detail": SKIP_ALREADY_QUEUED, "reason": REASON_ALREADY_QUEUED}
+            )
             continue
 
         row = session.execute(
@@ -229,11 +330,11 @@ def enqueue_items(
                 """
                 INSERT INTO paper_discovery_ingest_items
                     (domain_key, arxiv_id, source_url, title, requested_by,
-                     analyze_images, models, status)
+                     analyze_images, models, status, cartridge_id)
                 VALUES
                     (:domain_key, :arxiv_id, :source_url, :title,
                      CAST(:requested_by AS uuid), :analyze_images,
-                     CAST(:models AS jsonb), 'queued')
+                     CAST(:models AS jsonb), 'queued', :cartridge_id)
              RETURNING id::text
                 """
             ),
@@ -245,6 +346,7 @@ def enqueue_items(
                 "requested_by": str(requested_by) if requested_by else None,
                 "analyze_images": bool(analyze_images),
                 "models": payload,
+                "cartridge_id": cartridge,
             },
         ).fetchone()
 

@@ -27,8 +27,11 @@
   // 常設注記（わたしの地図と同文。設計 §3.4）。
   const PRIVACY_NOTE = "この記録はあなたにだけ表示されます。成績評価には使用されません。";
 
-  // 封印は v2 の専用設計を経る（設計 §4）。偽のボタンを置かず、事実文だけを常設する。
-  const SEAL_NOTE = "封印の仕組みは、封印したという事実を残したまま内容を読めなくする形で設計中です。";
+  // 封印は v2 の専用設計を経る（設計 §4）。偽のボタンを置かず、現物の事実だけを常設する
+  // （第 23 波 F4: 「設計中です」という設計メモ調の約束を画面に出さない）。
+  const SEAL_NOTE = "この画面でできるのは、一覧を見ることと持ち出すことです。記録の内容を読めなくする（封印する）操作はありません。";
+  // 第 23 波 F4（P-0008）: 中身の無い系統を見出しごと並べず、末尾の1行に畳む。
+  const EMPTY_SYSTEMS_PREFIX = "まだ記録の無い種類: ";
 
   const state = {
     deps: {},
@@ -93,16 +96,23 @@
     return '<p class="pm-home-loading my-records-loading">読み込み中…</p>';
   }
 
-  function itemHtml(item) {
+  // 第 23 波・第 2 波 V4': 行の公表文が系統の見出しの下の文に含まれるなら行には繰り返さない
+  // （見出しの下に 1 回だけ）。行ごとに違う文（AI の候補など）だけを行に出す。
+  function rowPublicityDiffers(publicity, systemNote) {
+    if (!publicity) return false;
+    if (!systemNote) return true;
+    return systemNote.indexOf(publicity) === -1;
+  }
+
+  // 行の階層: 本文（1 段目）→ 日付・コース（2 段目）→ 状態チップと補足（3 段目）。
+  function itemHtml(item, systemNote) {
     const flags = (item && item.flags) || {};
     let cls = "pm-home-node-row my-records-item";
     if (flags.superseded) cls += " my-records-item-superseded";
     if (flags.candidate) cls += " my-records-item-candidate";
+    if (flags.dismissed) cls += " my-records-item-dismissed";
     let html = '<div class="' + cls + '">';
     html += '<div class="pm-home-node-top">';
-    if (item.status_label) {
-      html += '<span class="pm-home-node-kind my-records-status-chip">' + esc(item.status_label) + "</span>";
-    }
     html += '<span class="pm-home-node-label my-records-item-text">' + esc(item.text || "") + "</span>";
     html += "</div>";
     const metaParts = [];
@@ -113,11 +123,18 @@
     if (metaParts.length) {
       html += '<div class="pm-home-node-ctx my-records-item-meta">' + esc(metaParts.join(" · ")) + "</div>";
     }
-    if (flags.map_excluded) {
-      html += '<div class="pm-home-node-ctx my-records-item-flag">地図には出していません</div>';
+    const stateParts = [];
+    if (item.status_label) {
+      stateParts.push('<span class="pm-home-node-kind my-records-status-chip">' + esc(item.status_label) + "</span>");
     }
-    if (item.publicity) {
-      html += '<div class="pm-home-node-ctx my-records-item-publicity">' + esc(item.publicity) + "</div>";
+    if (flags.map_excluded) {
+      stateParts.push('<span class="pm-home-node-ctx my-records-item-flag">地図には出していません</span>');
+    }
+    if (rowPublicityDiffers(item.publicity, systemNote)) {
+      stateParts.push('<span class="pm-home-node-ctx my-records-item-publicity">' + esc(item.publicity) + "</span>");
+    }
+    if (stateParts.length) {
+      html += '<div class="my-records-item-state">' + stateParts.join("") + "</div>";
     }
     html += "</div>";
     return html;
@@ -129,14 +146,9 @@
     if (sys.publicity_note) {
       html += '<div class="pm-home-node-ctx my-records-system-note">' + esc(sys.publicity_note) + "</div>";
     }
-    const items = sys.items || [];
-    if (!items.length) {
-      html += '<p class="pm-home-empty my-records-empty">この系統の記録はまだありません。</p>';
-    } else {
-      items.forEach((item) => {
-        html += itemHtml(item);
-      });
-    }
+    (sys.items || []).forEach((item) => {
+      html += itemHtml(item, sys.publicity_note || "");
+    });
     html += "</div>";
     return html;
   }
@@ -147,9 +159,18 @@
     if (!systems.length) {
       html += '<p class="pm-home-empty my-records-empty">まだ記録がありません。学習の中で問いを残すと、ここに現れます。</p>';
     }
+    // 中身のある系統だけを見出しごと出し、空の系統は名前を1行に畳む（P-0008）。
+    const emptyLabels = [];
     systems.forEach((sys) => {
-      html += systemHtml(sys);
+      if ((sys.items || []).length) html += systemHtml(sys);
+      else if (sys.label) emptyLabels.push(sys.label);
     });
+    if (emptyLabels.length && emptyLabels.length < systems.length) {
+      html += '<p class="pm-home-node-ctx my-records-empty-systems">' +
+        esc(EMPTY_SYSTEMS_PREFIX + emptyLabels.join("・")) + "</p>";
+    } else if (systems.length && emptyLabels.length === systems.length) {
+      html += '<p class="pm-home-empty my-records-empty">まだ記録がありません。学習の中で問いを残すと、ここに現れます。</p>';
+    }
     if (data && data.truncated) {
       // 省略の事実だけを言う（TR5。件数は出さない TR6。「すべて」と断言しない —
       // 持ち出しにも読み出し上限があり、ごく大量の記録では上限までになる）。
@@ -157,7 +178,7 @@
     }
     if (data && data.provenance_note) {
       html += '<div class="my-records-provenance">';
-      html += '<div class="pm-home-related-heading my-records-provenance-heading">来歴</div>';
+      html += '<div class="pm-home-related-heading my-records-provenance-heading">匿名集計に使われたかどうか（来歴）</div>';
       html += '<p class="pm-home-node-ctx my-records-provenance-note">' + esc(data.provenance_note) + "</p>";
       html += "</div>";
     }
@@ -256,6 +277,15 @@
     note.className = "pm-home-note";
     note.textContent = PRIVACY_NOTE;
     panel.appendChild(note);
+
+    // 第 23 波・第 2 波 V6: 「入力した文がどこへ送られるか」を 1 操作で確かめられる場所として、
+    // 学習画面の入力欄の上と同じ事実文をここにも 1 回置く（文言はサーバの正本。
+    // disclosure-note.js の mount が埋める・取れなければ何も描かない）。
+    const disclosure = document.createElement("div");
+    disclosure.className = "my-records-disclosure";
+    disclosure.setAttribute("data-disclosure-note", "learning_chat");
+    panel.appendChild(disclosure);
+    if (window.DisclosureNote) window.DisclosureNote.mount(disclosure, "learning_chat");
 
     // 持ち出し（台帳の唯一の操作。読み取り専用のダウンロードで DB は変更しない）。
     const actions = document.createElement("div");

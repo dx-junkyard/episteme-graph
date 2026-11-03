@@ -1,0 +1,62 @@
+id: c-r25-doubt-r7
+domain: astrophysics
+snapshot: corpus-astro-tex-r25f
+course_id: 1bad7d9f
+personas:
+  teachers: [te-01-rookie-seminar, te-03-meticulous-seminar, te-02-veteran-intro]
+  students: [st-08-m1-rprocess-lecture, st-07-m1-grb-voice]
+scenarios:
+  teacher: [t-db-ledger-readonly-probe, t-db-challenge-from-node, t-db-assumption-review]
+  student: [s-db-ledger-lines, s-db-map-ask-en]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 10, persona_llm_calls: 300, wall_clock_minutes: 220}
+notes: |
+  第 25 周・面 B の第 7 周（judge_doubt_r6.md §4 と r7_prereqs.md の面 doubt・共通 1〜6）。全組が既出なので前提状態を変える。教員 3 × 学生 2・5 場面:
+  te-01 × t-db-ledger-readonly-probe（PINN の editor を外した状態 pinn_editor_removed で、記帳ボタンの無効と理由・IK-1027 の是正後の
+  サーバの拒否文）/ te-03 × t-db-challenge-from-node（H39 の是正後に自分の未対応の疑義を提案化 → もう 1 件を取り下げ → 取り下げの note と
+  折りたたみの中身 — 6 周未到達）/ te-02 × t-db-assumption-review（Cepheus TeX に結んだ確定済みの前提 → 台帳 → スコープ。［再計算］で
+  入れ替わらないこと IK-1030）/ st-08 × s-db-ledger-lines（⚓ の名前と開く部品が一致するトピックで記帳ありの一行 — H37 の 7 周目・面 B 初出）/
+  st-07 × s-db-map-ask-en（論文の配置があるノード「中性子星」を選んでから、場面の材料 map_question の日本語の問いで 2 回 — IK-1031。
+  H47: 場面の手順の注記が「英語で尋ねる」だったので頭脳は英語で送った — 注記を材料の言語に揃えた）。
+  組の例外（P-0025）: te-01 × probe と te-03 × challenge-from-node は第 4 周と同じ組。te-01 は PINN の editor を外した状態と IK-1027 の是正後の
+  文、te-03 は H39 の是正後で提案化・取り下げに初めて届く状態で歩く。te-02 × assumption-review は新しい組（第 1 周の te-02 は種まきの
+  t-v5-register-own-course と challenge-propose / counterfactual-brief を歩いた — 自分のコースを持つ）。
+  学生: st-08 は atlas の s-atlas-sea-map にも、st-07 は studio の s-lecture-then-trace にも出る（2 面ずつ。3 面に出る学生はいない）。
+  学生の 2 組は新しい組（st-08 は面 B 初出、st-07 の第 4 周は s-db-ledger-lines で、地図の問いは初めて — 第 4 周の地図の問いは st-04）。
+
+  一括の確かめと用意: `backend/.venv/bin/python uxsim/runs/round25/r7_prereqs.py --dry-run`（= r5_prereqs.py --round 7。役の既定
+  ROUND_DEFAULTS[7] = probe_teacher te-01・assumption_teacher te-02・cepheus_teacher te-02・assumption_on_cepheus はこの campaign の組と一致）。
+
+  ── 周の前に指揮者が用意するもの（この順。r7_prereqs の項目名）──
+   1. 製品の第 6 波（IK-1027〜1031 の是正を含む）→ 投影の同期 → この前提 → 周（共通 1）。snapshot は corpus-astro-tex-r25f。名前の登録
+      persona_profile_names（共通 2）。コース 1bad7d9f が公開のまま。
+   2. pinn_editor_removed（te-01）: 所有者が te-01 専用グループの PINN 共有を解除。別経路で editor が残れば事実を返す — 手で確かめる。
+      PINN のノード "1" の台帳行（第 6 周の pinn_node1_ledger）が r25f に残っているか（場面の expect_row）。
+   3. cepheus_editor（te-02）→ manual_assumption（te-02・--assumption-on-cepheus・--allow-confirmed-assumption）: 前提を Cepheus TeX に結ぶ。
+      check が「結んだ教材 1 件以上・前提の地図に点あり」を言うこと。check が選んだコースが 1bad7d9f でなければ、その「course_hint へ写す」の
+      id で scenario_params の te-02 の course_hint を差し替える。
+   4. doubt_load_recompute（4 コース・--allow-recompute）: IK-1030 の是正が砂場に入った後にだけ。doubt_claim_sequence_compare は指揮者が api
+      コンテナで 1 行走らせ、出力を --claim-seq-json で渡す（実測を r7_prereqs.md に事実文で残す）。
+   5. te-03 に Cepheus TeX の editor（第 4 周に与えたもの）が残っているか: cepheus_editor は te-02 を見るので
+      `--only cepheus_editor --cepheus-teacher te-03-meticulous-seminar` で確かめる（無ければ do）。te-03 が自分のコースを持つ（owns_course）。
+   6. ledger_lines_unmoved_component: ⚓ の名前と開く部品が一致するトピックの部品に台帳スコープを記帳し、その出力の
+      「s-db-ledger-lines の学生の topic_hint へ写す」で scenario_params の st-08 の topic_hint / topic_hint_terms を差し替える（既定は t11）。
+      一致するトピックが無い（全トピックで IK-1021）なら st-08 の台帳の行は「記帳なし」の見え方の再確認になる — run の記録に書く。
+
+  ── レーンの順（face_doubt_r7.sh。--persona X --scenario Y で 1 場面ずつ）──
+   1. te-01-rookie-seminar × t-db-ledger-readonly-probe → mailbox_doubt/PROBE_DONE_R7（記録のみ）
+   2. te-03-meticulous-seminar × t-db-challenge-from-node
+   3. te-02-veteran-intro × t-db-assumption-review
+   4. st-08-m1-rprocess-lecture × s-db-ledger-lines → mailbox_doubt/ST08_DONE_R7（atlas の st-08 がこれを待つ — 同じ学生の run を同時に走らせない）
+   5. st-07-m1-grb-voice × s-db-map-ask-en → mailbox_doubt/ST07_DONE_R7（studio の st-07 がこれを待つ）
+  最後に mailbox_doubt/LANE_DONE_R7。教員の run は他の面（te-01 studio・te-02 share / atlas・te-03 は前提の手のみ）と並走してよい。
+
+  場面に足りない手（ハーネスへの申し送り・この campaign では足していない）:
+   - 不完全な body で権限 → 入力の順を当てる手が無い（IK-0999 の残り）。scope_record_raw は根拠・理由を既定値で埋めて有効な body にする
+     （H34）ので、te-01 の run は「有効な body に対する権限の弁」を再確認するだけになる。
+   - 前提候補の確定・却下の手は場面にあるが、砂場では候補が立たない（IK-0970）— te-02 は確定済みの前提から台帳へ。
+
+  LLM 予算の見積り: 学生の質問（st-08 2〜3 回・st-07 2 回 = 4〜5）+ 前提マイニング（任意・非同期 0〜2）= 最大 7 回（余裕を見て 10）。
+  台帳・前提の地図・疑義・再計算は LLM を呼ばない。ペルソナ頭脳は 5 場面 × 35〜60 手 ≒ 220〜270（上限 300）。外部 API は呼ばない。

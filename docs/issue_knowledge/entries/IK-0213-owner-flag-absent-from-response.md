@@ -54,6 +54,9 @@ resolution:
     - backend/api/routes/figure_presentation.py
     - frontend/public/js/versioning.js
     - docs/architecture/vision_ux_gap_survey_2026-07-17.md 追補
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0206]
 view_of: []
 pattern: permission-and-affordance-asymmetric

@@ -27,10 +27,12 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Iterable, Mapping, Sequence
 
 from sqlalchemy import text as sa_text
 
+from core import document_refs
 from core.atlas_edges import schema
 from core.atlas_vectors.query import cosine_similarity
 from core.label_vocab import ANCHOR_NEARNESS_SCALE, ANCHOR_NEARNESS_THRESHOLD_NEAR
@@ -168,17 +170,24 @@ def derive_vector_pairs(skeleton: Any, anchors: Iterable[Any]) -> list[dict]:
 
 
 def _fetch_placements(session: Any, domain_key: str) -> list:
-    """当該ドメインの live 配置（``document_id`` / タイトル / ``node_id``）。
+    """当該ドメインの live 配置（``document_id`` / タイトル / ``node_id`` / 論文の同一性の
+    材料 / 配置の理由と逐語）。
 
     ``corpus_view._visible_placements`` と同じ形だが、**可視性ゲートを持たない**
     （教員のレビューキュー用。学習者向けの糸は vector 由来のみで、共起は使わない）。
+    列順: ``document_id, title, node_id, source_url, filename, reason, evidence``。
+    ``weight`` / ``confidence`` は SELECT しない（RE4）。
     """
     return session.execute(
         sa_text(
             """
             SELECT p.document_id::text,
                    COALESCE(NULLIF(d.title, ''), NULLIF(d.filename, ''), '') AS title,
-                   p.node_id
+                   p.node_id,
+                   COALESCE(d.source_url, '') AS source_url,
+                   COALESCE(d.filename, '') AS filename,
+                   COALESCE(p.reason, '') AS reason,
+                   p.evidence
               FROM landscape_placements p
               JOIN documents d ON d.id = p.document_id
              WHERE p.domain_key = :domain_key
@@ -193,14 +202,43 @@ def _fetch_placements(session: Any, domain_key: str) -> list:
     ).fetchall()
 
 
+def _row_cell(row: Any, index: int) -> Any:
+    return row[index] if len(row) > index else None
+
+
+def _first_evidence_quote(value: Any) -> str:
+    """配置の ``evidence``（``[{"quote", "claim_id"}]`` の JSONB）から先頭の逐語引用。"""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return ""
+    if isinstance(value, Mapping):
+        value = [value]
+    for item in value or ():
+        if isinstance(item, Mapping):
+            quote = _clean(item.get("quote"))
+            if quote:
+                return quote
+    return ""
+
+
 def derive_co_occurrence_pairs(
     session: Any, *, domain_key: str, skeleton: Any
 ) -> list[dict]:
     """同じ論文群に配置されている concept ペア（§4 ②）。
 
     戻り値の各要素は ``{from_id, from_label, to_id, to_label, documents}``。
-    ``documents`` は ``{document_id, title}`` を ``(title, document_id)`` 昇順で
+    ``documents`` は ``{document_id, title[, endpoints]}`` を ``(title, document_id)`` 昇順で
     並べたもの（**件数は載せない** — RE4。教員には論文タイトルを列挙する）。
+
+    - 反復の閾値は「論文」の数で数える（IK-0846）。同じ論文の重複取り込み（PDF 版と
+      TeX 版など）は :func:`core.document_refs.representative_document_ids` で 1 本に畳み、
+      読める題名を持つ取り込みを代表として 1 行にする。
+    - ``endpoints`` は両端の配置が持つ理由と先頭の逐語引用（IK-0849。
+      ``[{node_id, node_label, reason, evidence_quote}]``・端点の順は ``from`` → ``to``）。
+      理由も逐語も無い端点は載せず、両端とも無ければキー自体を付けない。
+      ``weight`` / ``confidence`` は運ばない（RE4）。
     """
     domain = _clean(domain_key)
     concepts = concept_index(skeleton)
@@ -208,16 +246,51 @@ def derive_co_occurrence_pairs(
         return []
     edge_pairs = existing_edge_pairs(skeleton)
 
-    # node_id -> {document_id: title}（骨格に無い node の配置は最初に落とす）
-    by_node: dict[str, dict[str, str]] = {}
-    for row in _fetch_placements(session, domain) or []:
+    rows = [
+        row
+        for row in (_fetch_placements(session, domain) or [])
+        if _clean(row[2]) in concepts and _clean(row[0])
+    ]
+    titles: dict[str, str] = {}
+    for row in rows:
+        titles.setdefault(_clean(row[0]), _clean(row[1]))
+    representatives = document_refs.representative_document_ids(
+        {
+            "document_id": _clean(row[0]),
+            "title": _clean(row[1]),
+            "source_url": _row_cell(row, 3),
+            "filename": _row_cell(row, 4),
+        }
+        for row in rows
+    )
+
+    # node_id -> {代表 document_id: {document_id(実際の取り込み): {reason, quote}}}
+    by_node: dict[str, dict[str, dict[str, dict]]] = {}
+    for row in rows:
         node_id = _clean(row[2])
-        if node_id not in concepts:
-            continue
         document_id = _clean(row[0])
-        if not document_id:
-            continue
-        by_node.setdefault(node_id, {}).setdefault(document_id, _clean(row[1]))
+        paper = representatives.get(document_id, document_id)
+        slot = by_node.setdefault(node_id, {}).setdefault(paper, {})
+        if document_id not in slot:
+            slot[document_id] = {
+                "reason": _clean(_row_cell(row, 5)),
+                "evidence_quote": _first_evidence_quote(_row_cell(row, 6)),
+            }
+
+    def _endpoint(node_id: str, paper: str) -> dict | None:
+        placements = by_node[node_id].get(paper) or {}
+        # 代表の取り込みの配置を先に、無ければ同じ論文の別の取り込みの配置。
+        ordered = [placements[paper]] if paper in placements else []
+        ordered += [placements[d] for d in sorted(placements) if d != paper]
+        for placement in ordered:
+            if placement["reason"] or placement["evidence_quote"]:
+                return {
+                    "node_id": node_id,
+                    "node_label": concepts[node_id]["label"],
+                    "reason": placement["reason"],
+                    "evidence_quote": placement["evidence_quote"],
+                }
+        return None
 
     node_ids = sorted(by_node)
     out: list[dict] = []
@@ -231,16 +304,19 @@ def derive_co_occurrence_pairs(
             shared = set(by_node[left_id]) & set(by_node[right_id])
             if len(shared) < schema.MIN_DOCUMENTS_FOR_EDGE:
                 continue
-            documents = sorted(
-                (
-                    {
-                        "document_id": document_id,
-                        "title": by_node[left_id].get(document_id, ""),
-                    }
-                    for document_id in shared
-                ),
-                key=lambda d: (d["title"], d["document_id"]),
-            )
+            documents = []
+            for paper in shared:
+                entry: dict[str, Any] = {
+                    "document_id": paper,
+                    "title": titles.get(paper, ""),
+                }
+                endpoints = [
+                    e for e in (_endpoint(left, paper), _endpoint(right, paper)) if e
+                ]
+                if endpoints:
+                    entry["endpoints"] = endpoints
+                documents.append(entry)
+            documents.sort(key=lambda d: (d["title"], d["document_id"]))
             out.append(
                 {
                     "from_id": left,
@@ -277,7 +353,7 @@ def derive_edge_candidates(
           "to_id": str,   "to_label": str,
           "origins": [str, ...],    # ソート済み（vector / co_occurrence）
           "nearness_label": str,    # vector 由来のときだけ
-          "documents": [{"document_id", "title"}, ...],  # co_occurrence 由来のときだけ
+          "documents": [{"document_id", "title"[, "endpoints"]}, ...],  # co_occurrence 由来のときだけ
           "skeleton_version": str,
         }
 
@@ -309,10 +385,13 @@ def derive_edge_candidates(
             merged[key] = entry
         return entry
 
-    for item in derive_vector_pairs(skeleton, anchors):
+    # 近さの順位（derive_vector_pairs は近い順に並ぶ — 値ではなく順位だけを持つ）。
+    nearness_rank: dict[tuple[str, str], int] = {}
+    for rank, item in enumerate(derive_vector_pairs(skeleton, anchors)):
         entry = _slot(item)
         entry["origins"].append(schema.ORIGIN_VECTOR)
         entry["nearness_label"] = item["nearness_label"]
+        nearness_rank[(item["from_id"], item["to_id"])] = rank
 
     for item in derive_co_occurrence_pairs(
         session, domain_key=domain, skeleton=skeleton
@@ -324,12 +403,93 @@ def derive_edge_candidates(
     out = list(merged.values())
     for entry in out:
         entry["origins"] = sorted(set(entry["origins"]))
-    out.sort(key=lambda entry: (entry["from_id"], entry["to_id"]))
+    # 並び（IK-0887）: 論文の根拠（共起）を持つ組を先に、続いて説明文どうしの近さの順
+    # （順位だけを使う。値は外へ出さない — RE4）。順位の無い組は (from, to) 昇順で後ろ。
+    unranked = len(nearness_rank)
+    out.sort(
+        key=lambda entry: (
+            0 if schema.ORIGIN_CO_OCCURRENCE in entry["origins"] else 1,
+            nearness_rank.get((entry["from_id"], entry["to_id"]), unranked),
+            entry["from_id"],
+            entry["to_id"],
+        )
+    )
     return out
+
+
+def derived_origins_for_keys(
+    session: Any,
+    *,
+    domain_key: str,
+    skeleton: Any,
+    edge_keys: Iterable[str],
+    anchors: Sequence[Any] = (),
+) -> dict[str, list[str]]:
+    """``edge_key -> origins``（**いま**候補として導出される組だけ。IK-0962）。
+
+    採用の時点に出所（``mapping_justification``）を記録していない過去の判断に、
+    いまの導出の出所を「いまの導出では」と時点を明示して添えるための読み取り。
+    導出されない組はキー自体を付けない（推測で埋めない = KR4）。空入力では
+    導出を走らせない（SQL も発行しない）。
+    """
+    keys = {_clean(k) for k in (edge_keys or ()) if _clean(k)}
+    if not keys:
+        return {}
+    out: dict[str, list[str]] = {}
+    for entry in derive_edge_candidates(
+        session, domain_key=domain_key, skeleton=skeleton, anchors=anchors
+    ):
+        key = _clean(entry.get("edge_key"))
+        if key in keys and entry.get("origins"):
+            out[key] = list(entry["origins"])
+    return out
+
+
+def cap_for_review(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    keep_keys: Iterable[str] = (),
+    max_per_node: int = schema.REVIEW_MAX_PER_NODE,
+    max_total: int = schema.REVIEW_MAX_TOTAL,
+) -> tuple[list[dict], bool]:
+    """教員のレビュー一覧の上限と畳み（IK-0887）。``(表示する候補, 畳んだか)`` を返す。
+
+    - 共起（論文の根拠）を持つ候補と ``keep_keys``（教員の判断がある候補）は常に残す
+      （判断した候補を一覧から消さない — IK-0884 と同じ規律）。
+    - 説明文どうしの近さだけの候補は、入力の順（:func:`derive_edge_candidates` の
+      近さ順）に、1 ノードあたり ``max_per_node``・全体 ``max_total`` まで残す。
+    - 畳んだ件数は返さない（真偽だけ — RE4）。
+    """
+    keep = {str(k or "") for k in keep_keys or () if str(k or "")}
+    shown: list[dict] = []
+    per_node: dict[str, int] = {}
+    folded = False
+    vector_only_shown = 0
+    for candidate in candidates or ():
+        item = dict(candidate)
+        origins = set(item.get("origins") or ())
+        if schema.ORIGIN_CO_OCCURRENCE in origins or str(item.get("edge_key") or "") in keep:
+            shown.append(item)
+            continue
+        left = str(item.get("from_id") or "")
+        right = str(item.get("to_id") or "")
+        if (
+            vector_only_shown >= max_total
+            or per_node.get(left, 0) >= max_per_node
+            or per_node.get(right, 0) >= max_per_node
+        ):
+            folded = True
+            continue
+        per_node[left] = per_node.get(left, 0) + 1
+        per_node[right] = per_node.get(right, 0) + 1
+        vector_only_shown += 1
+        shown.append(item)
+    return shown, folded
 
 
 __all__ = [
     "EXCLUDED_PLACEMENT_STATUSES",
+    "cap_for_review",
     "NODE_KIND_CONCEPT",
     "concept_index",
     "derive_co_occurrence_pairs",

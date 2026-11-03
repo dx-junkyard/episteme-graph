@@ -97,7 +97,7 @@ class TestLectureSequenceUsesTopicMaterialFirst:
 
 class TestAudioStatusUsesTopicReadiness:
     def test_gate_uses_topic_material_predicate(self):
-        body = _extract_func("get_topic_audio_status")
+        body = _extract_func("_topic_audio_status_payload")
         assert "if lecture_uses_topic_material(topic_info):" in body
         # readiness 判定は core の正本（compute_topic_audio_readiness）を呼ぶこと。
         assert "compute_topic_audio_readiness(" in body

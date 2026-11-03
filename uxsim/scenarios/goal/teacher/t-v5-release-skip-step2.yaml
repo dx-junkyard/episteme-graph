@@ -1,0 +1,30 @@
+id: t-v5-release-skip-step2
+population: teachers
+runner: [api, browser]
+preconditions:
+  - text: このペルソナは自分が所有する未公開のコースを持っている
+    check: owns_course
+    requires: [unpublished]
+seed_scenarios: [t-v5-register-own-course]
+goal: "自分のコースを「確認して公開」から公開する。論文の位置づけのステップは今は見ずに「あとで」で飛ばす"
+params_required: []
+steps:
+  - do: auth.login
+  - do: admin.courses.list
+    with: {prefer: unpublished}
+    note: コース管理で自分のコースの「確認して公開」を押す
+  - do: admin.release_review.placements
+    note: ステップ 2「論文の位置づけ」を開くが、読まずに「あとで」を押して次へ進む（「この配置で次へ」は押さない）
+  - do: admin.course.visibility
+    with: {visibility: public}
+    note: ステップ 3 で「公開する」を押す
+  - do: admin.courses.list
+    note: 公開したコースが一覧でどう見えるかを確かめる
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/13-admin-course-management.md#release-review-modal
+  - manual: teacher/13-admin-course-management.md#release-review-publish
+watch_for:
+  - ステップ 2 を「あとで」で飛ばしても公開でき、公開のステップに未確認の位置づけが「AIによる推定（未確認）」のまま届くと書かれる
+  - 飛ばしたことで位置づけの状態（未確認 / 教員確認済み）は変わらず、学習者側の論文の位置づけ表示も変わらない（学生 st-05 の s-v5-landscape-check の前後で読む）
+  - 公開の確定に「何を見て何を選べたか」が記録される（審判 E6 が監査の行を読む）

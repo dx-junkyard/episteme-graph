@@ -201,13 +201,17 @@ class TestGapCandidateQueue:
         response = client.get(_QUEUE_PATH, headers=_auth(teacher))
         assert response.status_code == 200
         body = response.json()
+        # near_anchor_check は照合の状態（IK-0851）。この fake DB ではアンカーが読めず
+        # 「照合できなかった」になる。
         assert set(body) == {
             "cartridge_id",
             "candidates",
             "skeleton_version",
             "draft_exists",
             "draft_revision",
+            "near_anchor_check",
         }
+        assert body["near_anchor_check"]["state"] == "unavailable"
         assert len(body["candidates"]) == 1
         candidate = body["candidates"][0]
         assert candidate["cluster_key"] == _CLUSTER

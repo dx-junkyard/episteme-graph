@@ -46,6 +46,9 @@ VERSION_BEARING_STRUCTURES: dict[str, str] = {
     "atlas_anchor_aliases": "atlas_anchor_aliases",
     "landscape_placements": "landscape_placements",
     "element_explanations": "element_explanations",
+    "knowledge_theory_modules": "knowledge_theory_modules",
+    "simulation_programs": "simulation_programs",
+    "instrument_wirings": "instrument_wirings",
 }
 
 

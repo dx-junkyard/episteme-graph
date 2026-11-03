@@ -397,7 +397,7 @@ class TestArtifactsFetchedOncePerDocument:
         monkeypatch.setattr(opening, "_document_titles", lambda ids: {})
         monkeypatch.setattr(opening, "_load_graph_nodes", lambda document_id: [])
         monkeypatch.setattr(opening, "_claim_label_index", lambda document_id, artifacts: {})
-        monkeypatch.setattr(opening, "_compile_open_assumptions", lambda course_id: [])
+        monkeypatch.setattr(opening, "_compile_open_assumptions", lambda course_id, **_kw: [])
         # Phase 3（承認済み素材の配信）の DB 読み出しもここでは無効化する（この test の
         # 対象は artifacts の再取得回数だけ）。
         monkeypatch.setattr(opening, "_load_approved_discussion_seeds", lambda document_id: [])

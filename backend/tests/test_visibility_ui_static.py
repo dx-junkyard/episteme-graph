@@ -189,7 +189,8 @@ class TestMaterialVisibilityUi:
 
     def test_open_document_share_modal_accepts_visibility_args(self):
         assert re.search(
-            r"function openDocumentShareModal\(documentId,\s*title,\s*materialId,\s*visibility,\s*groupId\)",
+            # 第 25 周 第 10 波: 末尾に formatLabel（版の見出し）を足した（先頭 5 引数は不変）。
+            r"function openDocumentShareModal\(documentId,\s*title,\s*materialId,\s*visibility,\s*groupId(,\s*formatLabel)?\)",
             self.js,
         )
 

@@ -188,6 +188,27 @@ def aggregate_naive_signals(course_id: str) -> dict:
     return {"course_id": course_id, "signals": aggregate_entries(entries)}
 
 
+def aggregate_naive_signals_for_courses(session, course_ids) -> list[dict]:
+    """複数コースにまたがる素朴な問いシグナルを anchor 単位で k-匿名集計する（ゼミ前ブリーフ ④）。
+
+    同じ論文を複数のコースが教材にしているとき、コースごとに数えると k-匿名の閾値を
+    下回って何も出ないので、本人が引き受けた行を合算してから :func:`aggregate_entries` に
+    通す（ユニーク学習者で数える・n<3 は出さない・件数はレンジのみ — 規律は同じ）。
+    session は呼び出し側が持つ（読み取り専用）。取得失敗は空リスト（fail-soft）。
+    """
+    entries: list[tuple[str, str, str, str, str]] = []
+    for course_id in sorted({str(c or "").strip() for c in (course_ids or [])} - {""}):
+        try:
+            entries.extend(_collect_anchor_rows(session, course_id))
+        except Exception:
+            logger.warning("naive signal aggregation failed for course=%s", course_id, exc_info=True)
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+    return aggregate_entries(entries)
+
+
 def has_naive_signal(anchor_type: str, anchor_id: str, course_id: str = "") -> bool:
     """特定 anchor に k≥3 のシグナルがあるか（台帳表示の「学習者の問い」行, D1-5）。
 

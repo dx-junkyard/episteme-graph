@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 #: 1 回の起動で処理する上限（巨大 DB で起動を止めないための安全弁。残りは次回起動で処理する）。
 MAX_ROWS_PER_RUN = 20000
 
-#: 起動時バックフィルを直列化する ``pg_advisory_lock`` のキー（呼び出し側 = main.py が握る）。
+#: 起動時バックフィルを直列化する advisory lock のキー（呼び出し側 = main.py が
+#: ``pg_advisory_xact_lock`` で握る — セッションスコープの ``pg_advisory_lock`` は使わない）。
 #: 値そのものに意味はなく、``core/migrations.py::MIGRATION_LOCK_KEY`` と**別の値**である
 #: ことだけが前提（同じ DB で他に使っていないこと）。複数レプリカが同時起動したとき、
 #: 同じ NULL 行に同じ ``#n`` を割り当てて部分一意索引で落ちるのを防ぐ（P1-R7）。

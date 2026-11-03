@@ -45,6 +45,17 @@ def _doc_row(doc_id="doc-1", source_path="mat-1", status="uploaded", chunk_count
     return {"id": doc_id, "source_path": source_path, "status": status, "chunk_count": chunk_count, "updated_at": updated_at}
 
 
+def _docs_result(docs):
+    """documents の解決クエリ（``core.document_refs.resolve_document_rows``）の結果。
+
+    両形の突き合わせは document_refs が行う（IK-0550）ので、行は
+    ``(id, source_path, status, chunk_count, updated_at)`` のタプルで返す。
+    """
+    return _result(fetchall=[
+        (d["id"], d["source_path"], d["status"], d["chunk_count"], d["updated_at"]) for d in docs
+    ])
+
+
 def _run_row(run_id="run-1", document_id="doc-1", material_id="mat-1", status="running",
              current_stage="paper_skeleton", error_message="", updated_at=None, completed_at=None,
              created_at=None):
@@ -165,17 +176,17 @@ class TestProjectMaterialStatusesBulk:
 
         # 単体呼び出し（フェイク session 1回ずつ）
         s1 = MagicMock()
-        s1.execute.side_effect = [_result(mappings_fetchone=doc1), _result(mappings_fetchone=run1)]
+        s1.execute.side_effect = [_docs_result([doc1]), _result(mappings_fetchone=run1)]
         single1 = projector.project_material_status(s1, "mat-1")
 
         s2 = MagicMock()
-        s2.execute.side_effect = [_result(mappings_fetchone=doc2), _result(mappings_fetchone=run2)]
+        s2.execute.side_effect = [_docs_result([doc2]), _result(mappings_fetchone=run2)]
         single2 = projector.project_material_status(s2, "mat-2")
 
         # バッチ呼び出し（フェイク session は documents 1クエリ + runs 1クエリのみ）
         sb = MagicMock()
         sb.execute.side_effect = [
-            _result(mappings_all=[doc1, doc2]),
+            _docs_result([doc1, doc2]),
             _result(mappings_all=[run1, run2]),
         ]
         bulk = projector.project_material_statuses_bulk(sb, ["mat-1", "mat-2"])
@@ -207,12 +218,12 @@ class TestProjectMaterialStatusesBulk:
                            updated_at=newer, completed_at=newer, created_at=newer)
 
         s1 = MagicMock()
-        s1.execute.side_effect = [_result(mappings_fetchone=doc), _result(mappings_fetchone=run_new)]
+        s1.execute.side_effect = [_docs_result([doc]), _result(mappings_fetchone=run_new)]
         single = projector.project_material_status(s1, "mat-1")
 
         sb = MagicMock()
         sb.execute.side_effect = [
-            _result(mappings_all=[doc]),
+            _docs_result([doc]),
             _result(mappings_all=[run_new, run_old]),  # created_at DESC
         ]
         bulk = projector.project_material_statuses_bulk(sb, ["mat-1"])["mat-1"]
@@ -237,7 +248,7 @@ class TestProjectMaterialStatusesBulk:
 
         sb = MagicMock()
         sb.execute.side_effect = [
-            _result(mappings_all=[doc]),
+            _docs_result([doc]),
             _result(mappings_all=[run_new, run_old]),
         ]
         bulk = projector.project_material_statuses_bulk(sb, ["mat-1"])["mat-1"]
@@ -246,7 +257,7 @@ class TestProjectMaterialStatusesBulk:
 
     def test_bulk_unknown_for_missing_document(self):
         sb = MagicMock()
-        sb.execute.side_effect = [_result(mappings_all=[]), _result(mappings_all=[])]
+        sb.execute.side_effect = [_docs_result([]), _result(mappings_all=[])]
         bulk = projector.project_material_statuses_bulk(sb, ["missing-ref"])
         assert bulk["missing-ref"].state == schema.MATERIAL_STATE_UNKNOWN
         # documents 0件なら runs クエリは発行しない（ids が空のため）。
@@ -267,7 +278,7 @@ class TestProjectMaterialStatusesBulk:
         runs = [_run_row(f"run-{i}", f"doc-{i}", f"mat-{i}", status="completed") for i in range(n)]
 
         sb = MagicMock()
-        sb.execute.side_effect = [_result(mappings_all=docs), _result(mappings_all=runs)]
+        sb.execute.side_effect = [_docs_result(docs), _result(mappings_all=runs)]
         bulk = projector.project_material_statuses_bulk(sb, refs)
 
         assert len(bulk) == n
@@ -281,7 +292,7 @@ class TestListMaterialStatusesUsesBulk:
         refs = ["mat-1", "mat-2", "mat-3"]
         docs = [_doc_row(f"doc-{i}", r, "uploaded", 0) for i, r in enumerate(refs)]
         sb = MagicMock()
-        sb.execute.side_effect = [_result(mappings_all=docs), _result(mappings_all=[])]
+        sb.execute.side_effect = [_docs_result(docs), _result(mappings_all=[])]
         out = projector.list_material_statuses(sb, refs)
         assert len(out) == 3
         assert sb.execute.call_count == 2
@@ -289,7 +300,7 @@ class TestListMaterialStatusesUsesBulk:
     def test_preserves_input_order_and_unknown_fallback(self):
         docs = [_doc_row("doc-1", "mat-1", "uploaded", 0)]
         sb = MagicMock()
-        sb.execute.side_effect = [_result(mappings_all=docs), _result(mappings_all=[])]
+        sb.execute.side_effect = [_docs_result(docs), _result(mappings_all=[])]
         out = projector.list_material_statuses(sb, ["mat-1", "missing"])
         assert [s.material_id for s in out] == ["mat-1", "missing"]
         assert out[1].state == schema.MATERIAL_STATE_UNKNOWN
@@ -408,8 +419,9 @@ class TestGetMaterialReflectsRun:
 
         mock_session = MagicMock()
         mock_session.execute.side_effect = [
+            _docs_result([doc_row]),  # document_refs の両形解決（IK-0550）
             _result(fetchone=own_record),
-            _result(mappings_fetchone=doc_row),
+            _docs_result([doc_row]),
             _result(mappings_fetchone=run_row),
         ]
         mock_pg_session.return_value = mock_session
@@ -429,8 +441,9 @@ class TestGetMaterialReflectsRun:
 
         mock_session = MagicMock()
         mock_session.execute.side_effect = [
+            _docs_result([doc_row]),  # document_refs の両形解決（IK-0550）
             _result(fetchone=own_record),
-            _result(mappings_fetchone=doc_row),
+            _docs_result([doc_row]),
             _result(mappings_fetchone=run_row),
         ]
         mock_pg_session.return_value = mock_session
@@ -446,7 +459,7 @@ class TestGetMaterialReflectsRun:
         import routes.admin as admin_mod
 
         mock_session = MagicMock()
-        mock_session.execute.side_effect = [_result(fetchone=None)]
+        mock_session.execute.side_effect = [_docs_result([])]
         mock_pg_session.return_value = mock_session
 
         with pytest.raises(HTTPException) as exc_info:
@@ -464,8 +477,9 @@ class TestGetMaterialReflectsRun:
 
         mock_session = MagicMock()
         mock_session.execute.side_effect = [
+            _docs_result([doc_row]),  # document_refs の両形解決（IK-0550）
             _result(fetchone=own_record),
-            _result(mappings_fetchone=doc_row),
+            _docs_result([doc_row]),
             _result(mappings_fetchone=None),  # no run
         ]
         mock_pg_session.return_value = mock_session
@@ -514,7 +528,7 @@ class TestListAndGetMaterialConsistency:
         # get_material 相当（project_material_status 経由）
         s = MagicMock()
         s.execute.side_effect = [
-            _result(mappings_fetchone=_doc_row("doc-1", "mat-1", doc_status, chunk_count)),
+            _docs_result([_doc_row("doc-1", "mat-1", doc_status, chunk_count)]),
             _result(mappings_fetchone=run),
         ]
         get_mstatus = projector.project_material_status(s, "mat-1")

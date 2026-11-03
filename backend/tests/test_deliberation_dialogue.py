@@ -289,6 +289,47 @@ class TestGroundingToTextContextLens:
         assert "- を構成要素として含む: 下位要素（AI候補）" in text
         assert "(注記) 注記事実" in text
 
+    def test_figure_mentions_and_claim_full_text_are_grounded(self):
+        """§11: メンション文を「[文脈: 本文での言及]」で注入し、主張は全文を渡す。"""
+        context = {
+            "focus": {
+                "label": "Figure 1.1",
+                "contextual_role": None,
+                "contextual_role_status": "unidentified",
+                "placement": {
+                    "mentions": [
+                        {"text": "Figure 1 .1 shows a classification.", "section_label": "Candidates", "page": 2},
+                        {"text": "As in Fig. 1.1, WIMPs.", "section_label": "", "page": 3},
+                    ]
+                },
+            },
+            "upper": [
+                {
+                    "relation_label": "を述べる本文で参照される",
+                    "label": "The possible mass range…",
+                    "full_text": "The possible mass range for dark matter is wide.",
+                    "relation_status": "source_backed",
+                },
+            ],
+            "lower": [],
+            "notes": [],
+        }
+        text = dialogue.grounding_to_text(self._base_grounding(context))
+        assert "[文脈: 本文での言及]" in text
+        assert "- Candidates: Figure 1 .1 shows a classification." in text
+        assert "- As in Fig. 1.1, WIMPs." in text
+        assert "- を述べる本文で参照される: The possible mass range for dark matter is wide.（原文根拠）" in text
+        assert text.index("[文脈: 本文での言及]") < text.index("[文脈: 上位構造]")
+
+    def test_no_mentions_means_no_mention_block(self):
+        context = {
+            "focus": {"label": "f", "contextual_role": None, "contextual_role_status": "unidentified",
+                      "placement": {"section_label": ""}},
+            "upper": [], "lower": [], "notes": [],
+        }
+        text = dialogue.grounding_to_text(self._base_grounding(context))
+        assert "[文脈: 本文での言及]" not in text
+
     def test_empty_lanes_are_omitted_entirely(self):
         context = {
             "focus": {"label": "f", "contextual_role": None, "contextual_role_status": "unidentified"},

@@ -1,0 +1,55 @@
+id: c-r25-doubt-r4
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 1bad7d9f
+personas:
+  teachers: [te-01-rookie-seminar, te-03-meticulous-seminar, te-05-delegator-lab]
+  students: [st-07-m1-grb-voice, st-04-intl-exoplanet]
+scenarios:
+  teacher: [t-db-ledger-readonly-probe, t-db-challenge-from-node, t-db-assumption-review]
+  student: [s-db-ledger-lines, s-db-map-ask-en]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 20, persona_llm_calls: 300, wall_clock_minutes: 200}
+notes: |
+  第 25 周・面 B の第 4 周（judge_doubt_r3.md §4 の組）。組はすべて第 1〜3 周と別（P-0025）: te-01 × 台帳の閲覧だけの確認（新設）/
+  te-03 × ノード起点の疑義（新設）/ te-05 × 前提の確認 / st-07 × (e) / st-04 × 英語の地図の問い（新設）。教員 3 × 学生 2・5 場面。
+  教員を 3 人にしたのは、権限の確認（te-01 は PINN を閲覧だけ）と書き込みの通し（te-03 は Cepheus の editor）を同じペルソナで
+  兼ねられないため（新設 2 場面はどちらも短い）。
+  審判の提案のうち te-05 の t-db-scope-promote は回さない — 台帳の見出し（IK-0934）は te-03 の t-db-challenge-from-node の移った先の
+  見出しと te-05 の t-db-assumption-review の最後の台帳で見られるため。st-10 × s-db-ledger-lines は第 5 周へ回す（params の
+  personas 節は用意済み）。
+
+  ── 周の前に指揮者が用意するもの（この順）──
+   1. 是正の前提: **(c) t-db-challenge-from-node は IK-0930 / 0904 の是正後、t-db-ledger-readonly-probe は IK-0900 / 0931 の是正後、
+      t-db-assumption-review は IK-0933（母集合）・IK-0934（台帳の見出し）の是正後にだけ回す**。st-04 の s-db-map-ask-en は
+      IK-0936 の是正前に回すと揺れの確認だけになる（そう記録する）。審判の規則 H25〜H27 の更新と、観察の畳み H19・H23 を終えておく。
+   2. 砂場: share と同じ snapshot（取り直した場合は差し替え）。コース 1bad7d9f が公開のままであること（share の用意 3）。
+   3. 共有の確かめ（grant_document_editors.py・所有者の共有 API）:
+      - **te-01 は PINN（`foreign_material_hint`）を閲覧だけできる**こと（editor 共有が無いこと）を周の前に確かめる。PINN の
+        主グラフの番号 "1"（`node_hint_with_row`）のノードに台帳の行があること（無ければ行のある番号に差し替える）。"2" は行の無い
+        ノード（あれば別の番号へ）。
+      - te-03 に Cepheus B の論文（TeX 版）の editor 共有を与える。
+   4. コースの前提（owns_course）: te-01 は 6be229e1 を所有。te-03・te-05 は前の周の種まきのコースが残っていればそれを使い、
+      無ければ t-v5-register-own-course（コースビルダー 2〜3 回の LLM）を先に歩く。
+   5. 学生の材料: st-07 の (e) のトピックは ⚓ のある PINN の t11（params の personas 節）。PINN の部品に教員の台帳の記帳が無いと、
+      部品の説明の一行（IK-0906）は「記帳なし」の側だけが観察される — この周の教員レーンは PINN に記帳しない（te-01 は閲覧だけ・
+      te-03 は Cepheus・te-05 は自分のコースの前提）ので、**「台帳の行がある部品」側は未確認のまま**と記録する
+      （確認したいなら、指揮者が周の前に PINN の editor を持つ教員で部品 1 件にスコープを記帳しておく）。
+   6. s-db-map-ask-en は教員レーンが地図の台帳に記帳した後に走らせる（te-03 の疑義 → 検証提案の後）。
+
+  ── 場面の組とレーンの順（--persona X --scenario Y で 1 場面ずつ・この順で）──
+   1. te-01-rookie-seminar × t-db-ledger-readonly-probe（PINN の台帳を行のあるノード・行の無いノードの 2 つ開き、記帳ボタンが無効で
+      理由の事実文が出るか。1 回だけ書き込みを試す — サーバの拒否文）
+   2. te-03-meticulous-seminar × t-db-challenge-from-node（原稿スタジオのノード台帳 → 支える主張の台帳 → 疑義 → 検証提案 → 2 つ目の
+      疑義を取り下げ。地図の点からの入口は使わない）
+   3. te-05-delegator-lab × t-db-assumption-review（前提の地図・合意リストの母集合・確定した前提の台帳の見出し）
+   4. st-07-m1-grb-voice × s-db-ledger-lines（⇢ 1〜3。出典タブ → 部品の説明の一行 → 未検証の前提一覧 → 地図の札 → 地図の札を AI に
+      尋ねる（IK-0907・0932））
+   5. st-04-intl-exoplanet × s-db-map-ask-en（⇢ 2。同じ英語の地図の問いを 2 回）
+  1〜3 は互いに依存しない（並べ替えてよい）が、学生は教員の 3 本の後。
+
+  LLM 予算の見積り: 種まき（無ければ教員 1 人 2〜3 回 × 最大 2 人 = 0〜6）+ 学生の質問（st-07 2〜3 回・st-04 2 回 = 4〜5）+
+  前提マイニング（任意・非同期 0〜4）= 最大 15 回（余裕を見て 20）。台帳・前提の地図・疑義は LLM を呼ばない。ペルソナ頭脳は
+  5 場面 × 35〜60 手（新設 2 場面は短い）≒ 220〜260（上限 300）。外部 API は呼ばない。

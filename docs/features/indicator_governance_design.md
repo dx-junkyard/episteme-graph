@@ -123,6 +123,7 @@ W8 …）。この原則は**個人を比較・順位付けする数値**に対�
 | `seminar-brief` | `/api/admin/documents/{document_ref}/seminar-brief` | teacher | per_item_no_person | – |
 | `unanswered-queries` | `/api/admin/courses/{course_id}/unanswered-queries` | teacher | **per_learner_identified** | – |
 | `sharing-dashboard` | `/api/admin/courses/{course_id}/sharing-dashboard` | teacher | per_item_attributed | – |
+| `explanation-support-label` | `/api/learning/courses/{course_id}/components/{component_id}/explanations` | learner_self | per_item_attributed | – |
 | `landscape-overview` | `/api/admin/landscape/overview` | teacher | per_item_no_person | – |
 
 ### 3.1 `unanswered-queries` — 個票のまま宣言した（オーナー判断待ち） {#unanswered-queries}
@@ -351,3 +352,20 @@ fail（宣言されていない集約が生まれた合図）。
 **触っていないもの**: 各計器の実装・権限ゲート・レスポンス（値の宛先は不変 = IG1）、
 `admin-indicators.js`（カタログを汎用に描くだけで id を持たないため変更不要）、
 migration・新テーブル・LLM 呼び出し（いずれも無し）。
+
+## 9.2 実装記録（2026-10-23）— 説明への教員の支持（段階ラベル）を宣言 {#record-2026-10-23}
+
+第 25 周 面 A 第 3 周（IK-0926）。学生に見せる「2名の教員が支持」の段階ラベルが、**説明を書いた
+本人の支持を数え**ていた（著者が自分の説明を支持すると 1 名に数えられた）。改訂原則 4（制度指標は
+定義を公開する）に照らし、数え方を変えたうえでカタログに 1 件（`explanation-support-label`）宣言した。
+
+- **数え方**: 著者本人を除き、取り消した支持を除いた人数。著者の支持の行は記録として残す（P4）。
+  正本は `backend/core/explanation_governance.py::COUNTED_ENDORSEMENT_SUMMARY_SQL`（集計ビュー
+  `component_explanation_endorsement_summary` は書き換えず、読み手がこの断片を JOIN する — migration なし）。
+  段階の言葉の正本は `core/label_vocab.py::explanation_support_label`（査読の「承認」と分けて「支持」の語 — IK-0924）。
+- **宛先**: 学習者が受講しているコースに届いた説明について、その学習者が読む（`learner_self`・
+  ロールゲートではないので `_NON_ROLE_GATED_INDICATOR_ROUTES` に宣言）。学習者向け応答は
+  `indicator_id: "explanation-support-label"` を名乗る。
+- **配信の弁（同時に変えたもの）**: 共有 ON の説明が書いたコース以外の学生に届くのは、最新の査読承認の
+  記帳者（`theory_review_events.changed_by`）が著者でないときだけ（`LEARNER_EXPLANATION_SCOPE_SQL`）。
+  書いたコースの学生には著者の査読のままで届く。

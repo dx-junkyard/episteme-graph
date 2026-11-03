@@ -1,0 +1,39 @@
+id: t-deliberation-figure
+population: teachers
+runner:
+- api
+- browser
+preconditions:
+- 砂場に解析済みの教材（グラフ・論文層あり）が入っていて、このペルソナがそれを閲覧できる。教材の取り込み・コース登録・公開はしない
+goal: '{{goal_text}} のために、図を深く検討し、本文での言及→主張→要素と読み、分からない手順は AI アシスタントに聞く'
+params_required:
+- goal_text
+- material_hint
+- copilot_questions
+steps:
+- do: auth.login
+- do: admin.materials.list
+- do: admin.materials.get
+  note: '{{material_hint}} の図を探す'
+- do: admin.deliberation.overview
+  note: 図を深く検討し、本文での言及を先に読む
+- do: admin.copilot.chat
+  with:
+    message: '{{copilot_questions | next}}'
+- choose:
+  - do: admin.copilot.chat
+    with:
+      message: '{{copilot_questions | next}}'
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: teacher/24-admin-deliberation.md#context-lens
+- manual: teacher/24-admin-deliberation.md#overview
+watch_for:
+- 本文での言及の文が主役として出る
+- カードは要素→関係語の語順で読める
+- AI アシスタントは道案内までで代わりに操作しない

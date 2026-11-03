@@ -299,31 +299,54 @@ class TestProposalPromotionExternalCheck:
 
 
 class TestProposalStatusTransitions:
-    """proposal の status 遷移（最小: 既存カード内のボタン群）。"""
+    """proposal の status 遷移（IK-0968: 台帳 GET の proposals を常設し、遷移後に読み直す）。"""
 
     def test_status_labels_and_buttons(self):
         src = _read()
-        block = _function_block(src, "renderProposalStatusCard")
+        block = _function_block(src, "proposalCardsHtml")
         assert "検証に着手" in block
         assert "完了を記録" in block
         assert "取り下げ" in block
+        # 本文・コーパス外の確認・到達可能性・提案者を描く（状態の一語だけにしない）
+        for key in ("p.proposal", "p.external_check", "p.reachability_label", "p.proposer_name", "p.status_label"):
+            assert key in block
 
     def test_uses_patch_to_proposals_endpoint(self):
         src = _read()
-        block = _function_block(src, "renderProposalStatusCard")
+        block = _function_block(src, "bindProposalStatusButtons")
         assert "/admin/doubt/proposals/" in block
         assert 'method: "PATCH"' in block
+        assert "refreshLedgerSection(container, targetType, targetId)" in block
 
-    def test_status_card_wired_after_successful_promotion(self):
+    def test_ledger_rereads_after_successful_promotion(self):
         src = _read()
         block = _function_block(src, "bindChallengeActions")
-        assert "renderProposalStatusCard(slot, proposalId, \"proposed\")" in block
+        assert "renderProposalStatusCard" not in src
+        assert "refreshLedgerSection(container, targetType, targetId)" in block
+
+    def test_proposals_rendered_under_challenge(self):
+        src = _read()
+        block = _function_block(src, "renderLedgerInto")
+        assert "proposalCardsHtml(c.proposals || [])" in block
+        assert "bindProposalStatusButtons(container, targetType, targetId)" in block
 
     def test_button_prevents_double_submit(self):
         src = _read()
-        block = _function_block(src, "renderProposalStatusCard")
+        block = _function_block(src, "bindProposalStatusButtons")
         assert "if (btn.disabled) return;" in block
         assert "btn.disabled = true;" in block
+
+    def test_readonly_disables_refresh_and_proposal_status(self):
+        """IK-0969: 閲覧だけの台帳では AI 候補の予約と提案の状態遷移も無効にする。"""
+        src = _read()
+        block = _function_block(src, "disableLedgerWrites")
+        assert "[data-doubt-falsification-refresh]" in block
+        assert "[data-doubt-proposal-status]" in block
+
+    def test_refresh_scope_note_from_server(self):
+        src = _read()
+        block = _function_block(src, "falsificationSectionHtml")
+        assert "entry.falsification_refresh_note" in block
 
 
 class TestAbsoluteConstraints:
@@ -358,7 +381,7 @@ class TestAbsoluteConstraints:
             "falsificationSectionHtml", "supportLinesFactHtml", "bindFalsificationSection",
             "bindFalsificationForm", "bindFalsificationCandidateButtons", "bindFalsificationRefresh",
             "renderObservationToggleForm", "addToggledObservation", "removeToggledObservation",
-            "recomputeCounterfactual", "renderProposalStatusCard", "renderOpenAssumptionsList",
+            "recomputeCounterfactual", "proposalCardsHtml", "bindProposalStatusButtons", "renderOpenAssumptionsList",
         ]
         for name in new_fn_names:
             block = _function_block(src, name)

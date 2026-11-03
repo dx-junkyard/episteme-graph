@@ -180,7 +180,7 @@ class TestEndorsementNotification:
         monkeypatch.setattr(tc, "_record_review_event", lambda *a, **k: None)
         monkeypatch.setattr(
             tc, "_get_explanation_out",
-            lambda eid: tc.ExplanationOut(id=eid, component_id="comp-1", course_id="course-1", kind="standard"),
+            lambda eid, viewer=None: tc.ExplanationOut(id=eid, component_id="comp-1", course_id="course-1", kind="standard"),
         )
         calls = []
 
@@ -239,6 +239,8 @@ class TestEndorsementNotification:
 class TestChallengeNotification:
     def _setup(self, monkeypatch, *, recorder_id, notify_raises=False):
         import routes.doubt as doubt_routes
+        # IK-0900: 疑義は対象の論文を閲覧できる教員が残す（ゲートの検査は別ファイル）。
+        monkeypatch.setattr(doubt_routes, "_ledger_target_access", lambda *a, **k: {"document_id": "d", "can_edit": True})
 
         monkeypatch.setattr(doubt_routes, "_pg_session", lambda: _ScriptedSession([("challenge-1",)]))
         monkeypatch.setattr(doubt_routes, "_record_doubt_event", lambda *a, **k: None)

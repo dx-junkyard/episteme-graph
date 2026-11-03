@@ -8,16 +8,22 @@ Generates the 4 prompt-context materials defined in the issue:
 """
 from __future__ import annotations
 
+import logging
+
+from episteme_graph.agents.coverage_report import build_coverage_report
 from episteme_graph.agents.component_assembly.schema import ComponentAssemblyResult
 from episteme_graph.agents.derivation_chain.schema import DerivationChainResult
 from episteme_graph.agents.dsl_linking.schema import DSLLinkingResult
 
 from .schema import (
-    VALID_EDGE_TYPES,
+    LLM_RELATION_EDGE_TYPES,
+    edge_type_for_core_predicate,
     CartridgeContext,
     ComponentGraphLLMInput,
     ComponentGraphNode,
 )
+
+logger = logging.getLogger(__name__)
 
 _MAX_COMPONENTS = 32
 _MAX_CROSS_EDGES = 48
@@ -25,7 +31,52 @@ _MAX_DERIVATIONS = 16
 _MAX_CLAIM_TEXTS = 64
 
 
+def _parent_key(component_id: str) -> str:
+    """Original (pre-refinement) component id: ``comp_004__op2`` → ``comp_004``."""
+    return str(component_id or "").split("__", 1)[0]
+
+
+def select_components_within_limit(components: list, limit: int) -> tuple[list, list[str]]:
+    """Pick at most ``limit`` components without starving trailing parents (IK-0765).
+
+    The refiner can split early parents into many ``__opN`` / ``__rN`` children.
+    Taking the head of the list then dropped every later parent — typically the
+    result, diagnostic and limitation components, which carry no equations and
+    are never split. Selection is round-robin over the original parents (first
+    every parent's first child, then second children, …) so each parent keeps at
+    least one representative whenever ``limit`` allows; the selected components
+    keep their original order. Returns ``(selected, dropped_ids)``.
+    """
+    if limit < 0:
+        limit = 0
+    if len(components) <= limit:
+        return list(components), []
+    groups: dict[str, list[int]] = {}
+    for idx, comp in enumerate(components):
+        groups.setdefault(_parent_key(getattr(comp, "component_id", "")), []).append(idx)
+    chosen: set[int] = set()
+    depth = 0
+    while len(chosen) < limit:
+        progressed = False
+        for members in groups.values():
+            if depth < len(members) and len(chosen) < limit:
+                chosen.add(members[depth])
+                progressed = True
+        if not progressed:
+            break
+        depth += 1
+    selected = [comp for idx, comp in enumerate(components) if idx in chosen]
+    dropped = [
+        str(getattr(comp, "component_id", ""))
+        for idx, comp in enumerate(components)
+        if idx not in chosen
+    ]
+    return selected, dropped
+
+
 class ComponentGraphInputBuilder:
+    last_component_coverage: dict | None = None
+
     def build(
         self,
         components: ComponentAssemblyResult,
@@ -42,8 +93,24 @@ class ComponentGraphInputBuilder:
         max_derivs = int(cfg.get("max_derivations", _MAX_DERIVATIONS))
         max_claims = int(cfg.get("max_claim_texts", _MAX_CLAIM_TEXTS))
 
-        comp_list = components.components[:max_comps]
+        comp_list, dropped_ids = select_components_within_limit(
+            list(components.components), max_comps
+        )
         component_ids = [c.component_id for c in comp_list]
+        # IK-0765: report what did not fit instead of dropping it silently.
+        self.last_component_coverage = build_coverage_report(
+            population=len(components.components),
+            processed=len(comp_list),
+            reasons=["max_components"] if dropped_ids else [],
+            unit="component",
+            details={"dropped_component_ids": dropped_ids} if dropped_ids else None,
+        )
+        if dropped_ids:
+            logger.warning(
+                "ComponentGraph input: %d component(s) beyond max_components=%d "
+                "were not offered for edge building: %s",
+                len(dropped_ids), max_comps, dropped_ids,
+            )
 
         # Reverse map: dsl_node_id → component_id (for cross-edge detection)
         node_to_comp: dict[str, str] = {}
@@ -165,7 +232,14 @@ class ComponentGraphInputBuilder:
             tgt_comp = node_to_comp.get(edge.to_node_id)
             if not src_comp or not tgt_comp or src_comp == tgt_comp:
                 continue
-            cross_edges.append({
+            mapped = edge_type_for_core_predicate(edge.core_predicate)
+            if mapped["generic"]:
+                logger.warning(
+                    "ComponentGraph input: DSL edge %s core_predicate=%r has no specific "
+                    "component edge_type; offered as %s",
+                    edge.edge_id, edge.core_predicate, mapped["edge_type"],
+                )
+            entry = {
                 "edge_id": edge.edge_id,
                 "from_node_id": edge.from_node_id,
                 "from_component_id": src_comp,
@@ -176,7 +250,14 @@ class ComponentGraphInputBuilder:
                 "polarity": edge.polarity,
                 "evidence_refs": edge.evidence_refs,
                 "confidence": edge.confidence,
-            })
+                # 写像の正本は schema.CORE_PREDICATE_TO_EDGE_TYPE（IK-0791）。
+                "suggested_edge_type": mapped["edge_type"],
+                "suggested_source_component_id": tgt_comp if mapped["reverse"] else src_comp,
+                "suggested_target_component_id": src_comp if mapped["reverse"] else tgt_comp,
+            }
+            if mapped["mapping_note"]:
+                entry["mapping_note"] = mapped["mapping_note"]
+            cross_edges.append(entry)
             if len(cross_edges) >= limit:
                 break
         return cross_edges
@@ -266,7 +347,8 @@ class ComponentGraphInputBuilder:
 
     @staticmethod
     def _valid_edge_types(cartridge: CartridgeContext | None) -> list[str]:
-        types = list(VALID_EDGE_TYPES)
+        # LLM に選ばせるのはプロンプトで定義した関係語彙だけ（IK-0791）。
+        types = list(LLM_RELATION_EDGE_TYPES)
         if cartridge:
             raw = cartridge.relation_types.get("relation_types") or []
             for item in raw:

@@ -1,0 +1,63 @@
+id: c-r25-doubt-r6
+domain: astrophysics
+snapshot: corpus-astro-tex-r25e
+course_id: 1bad7d9f
+personas:
+  teachers: [te-05-delegator-lab, te-01-rookie-seminar, te-04-copilot-intro]
+  students: [st-05-night-solarwind, st-06-skeptic-bao]
+scenarios:
+  teacher: [t-db-ledger-readonly-probe, t-db-challenge-from-node, t-db-assumption-review]
+  student: [s-db-ledger-lines, s-db-map-ask-en]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 10, persona_llm_calls: 300, wall_clock_minutes: 220}
+notes: |
+  第 25 周・面 B の第 6 周（judge_doubt_r5.md §4 の組と r6_prereqs.md の面 doubt・共通 1〜4）。教員 3 × 学生 2・5 場面:
+  te-05 × 台帳の閲覧だけの確認（有効な body で権限の弁 404 を当てる H34）/ te-01 × ノードから疑義（取り下げ済みの折りたたみ
+  IK-0998・支える主張の印 IK-1003）/ te-04 × 前提の確認（本人のコース 1bad7d9f・手動の前提は confirmed のまま → 台帳 → スコープ）/
+  st-05 × 台帳の行（学生のコースの版の部品・H37）/ st-06（日本語）× 地図の問い（ノードを選んでから尋ねる・IK-0907 / 1005）。
+  組の差し替え（P-0025）: 審判の提案の st-08 × s-db-ledger-lines は、st-08 が atlas の地図の場面（地図を歩いていない学生は st-03 と
+  st-08 だけ）と share の (d) も担うため、ledger-lines 未担当の st-05 に替えた（同じ学生が 3 面に出ないようにする）。
+  組の例外: te-04 × t-db-assumption-review は第 2 周と同じ組（前提の確認は 5 教員とも歩き済み）。第 2 周の te-04 は候補が立たず
+  確定・スコープに届かなかったので、手動の前提 → 台帳 → スコープを通す今回は観察が重ならない。
+
+  一括の確かめと用意: `backend/.venv/bin/python uxsim/runs/round25/r6_prereqs.py --dry-run`（= r5_prereqs.py --round 6。役の既定
+  ROUND_DEFAULTS[6] はこの campaign の組と一致）→ 書き込みは `--allow-reanalyze`（LLM）/ `--allow-confirmed-assumption` /
+  `--allow-topic-write` を指揮者が明示したときだけ。identity_rerun の記録の鍵はこの campaign の snapshot 名（r25e）。
+
+  ── 周の前に指揮者が用意するもの（この順）──
+   1. 砂場（共通 1）: share と同じ corpus-astro-tex-r25e。コース 1bad7d9f が公開のまま。名前の登録（共通 3）。
+   2. te-05 の権限（probe_teacher_view_only）: te-05 が PINN を閲覧だけできる（editor 共有が無い）。PINN のノード "1" の台帳行
+      （スコープ + 直接検証。記帳者は閲覧だけの教員以外 — pinn_node1_ledger）、"2" は行の無いノード。最後の scope_record_raw を
+      サーバが受け付けた場合は PINN の台帳にスコープが 1 件増える — 周の後に確かめる（IK-0999 の是正後は不完全な body でも 404）。
+   3. te-01 に Cepheus B の論文（TeX 版）の editor 共有（cepheus_editor）。昇格済みの疑義を選ぶと取り下げが出ない（H28）。
+   4. 前提を結ぶコース（manual_assumption・H35）: te-04 の course_hint は 1bad7d9f（scenario_params）。手動の前提は製品の API で
+      confirmed でしか置けない（POST /api/admin/doubt/assumptions は origin=manual・status=confirmed。候補はマイニング・監査だけが作り、
+      砂場の 4 本では立たない — IK-0970）。この周は `--allow-confirmed-assumption` で確定済みの前提を 1 件置き、確定の手ではなく
+      台帳 → スコープの記帳と地図・合意リストの読み直しを見る（候補の確定の手を見るには同主題の論文を足すしかない — 指揮者の判断）。
+   5. 学生の材料（pinn_comp011_scope・H37）: 固定コース 1bad7d9f の t13「主結果：R1.4と音速の軟化」で学習者の API（部品の文脈）が
+      解決する component の DB id と document に、PINN の editor を持つ教員としてスコープを 1 件記帳し、学生の画面と同じ GET の一行で
+      確かめる。
+   6. 地図の札の材料: st-05 / st-06 の地図の問いは、教員レーン（te-01 の疑義 → 検証提案・te-04 のスコープ）の後に走らせる。
+      地図の問いの前に select_node（map_node_hint・既定 暗黒エネルギー）を選ぶ（H36）。
+
+  ── レーンの順（face_doubt_r6.sh。--persona X --scenario Y で 1 場面ずつ）──
+   1. te-05-delegator-lab × t-db-ledger-readonly-probe（行のあるノード・行の無いノードの台帳 → 記帳ボタンの無効と理由 → 画面を経ない
+      有効な body の 1 手のサーバの拒否文）。終わったら mailbox_doubt/PROBE_DONE_R6 を出す（記録のみ — この周の share は te-05 に
+      共有を与えないので待つ面は無い）。
+   2. te-01-rookie-seminar × t-db-challenge-from-node（ノード台帳 → 支える主張の台帳（印 IK-1003）→ 疑義 → 検証提案 → 2 つ目を取り下げ →
+      開き直して取り下げ済みが折りたたみで読めるか IK-0998）
+   3. te-04-copilot-intro × t-db-assumption-review（1bad7d9f の確定済みの手動の前提 → 台帳でスコープを記帳 → 地図・合意リストを読み直す）
+   4. st-05-night-solarwind × s-db-ledger-lines（⇢ 1〜3。出典タブ（教材外の出典カードの文 H38）→ t13 の部品の説明の一行（記帳あり）→
+      未検証の前提一覧 → ノードを選んで地図の札 → 開幕の末尾区画）。終わったら mailbox_doubt/ST05_DONE_R6 を出す（studio の st-05 が
+      これを待つ — 同じ学生の run を同時に走らせない）。
+   5. st-06-skeptic-bao × s-db-map-ask-en（⇢ 2・3。ノードを選んでから同じ地図の問いを日本語で 2 回）
+
+  LLM 予算の見積り: 学生の質問（st-05 2〜3 回・st-06 2 回 = 4〜5）+ 前提マイニング（任意・非同期 0〜2）= 最大 7 回（余裕を見て 10）。
+  種まきは不要（te-04 は 1bad7d9f を所有）。台帳・前提の地図・疑義は LLM を呼ばない。ペルソナ頭脳は 5 場面 × 35〜60 手 ≒
+  220〜270（上限 300）。外部 API は呼ばない。
+
+   前提の実測（2026-10-27・第 6 周の前）: 固定コース 6be229e1 の t13 は学ぶ単位（section_block）で組まれ、学習者の教材 API に部品の参照（⚓ / evidence_items）が無い。
+   そのため「学生が開く部品」に台帳を置く項目（pinn_comp011_scope）は成立せず、st-05 の台帳の行は「記帳なし」の見え方の確認になる（記帳ありの一行は第 7 周以降・
+   部品チップのあるトピックで）。第 5 周に所有者が置いた PDF 版の部品 2 件のスコープは r25e に残っている。

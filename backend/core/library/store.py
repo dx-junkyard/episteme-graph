@@ -316,6 +316,42 @@ def get_entry(entry_id: str) -> dict | None:
     return _row_to_entry(row) if row else None
 
 
+def get_frozen_entry_for_learner(entry_id: str) -> dict | None:
+    """学生の画面へ出してよい凍結版の内容を返す（IK-0954）。
+
+    L層の規律「パイプラインが読むのは凍結版だけ」を学生側にも揃える読み口。下書き
+    （``library_entries`` の行）はどの教員の保存でも即座に変わり、凍結（レビューの弁）を
+    通らずに学生へ届いてしまうため、学生向けの面は**最新の凍結版の content** だけを読む。
+
+    次のいずれかなら ``None``（呼び出し側は共通部品の面ごと出さない — fail-closed）:
+    エントリが無い / ``status`` が active でない（retired）/ 凍結版が 1 つも無い。
+    戻り値は凍結版の content（name / aliases / summary ほか）に、ガバナンス列の
+    ``standardization_status``（下書き編集から書けない列 = 版を持たない）と
+    ``version_no`` を足した dict。
+    """
+    entry = get_entry(entry_id)
+    if not entry or str(entry.get("status") or "") != schema.STATUS_ACTIVE:
+        return None
+    latest = int(entry.get("latest_version_no") or 0)
+    if latest <= 0:
+        return None
+    version = get_version(entry_id, latest)
+    if not version:
+        return None
+    content = dict(version.get("content") or {})
+    return {
+        "id": str(entry.get("id") or entry_id),
+        "name": str(content.get("name") or ""),
+        "aliases": list(content.get("aliases") or []),
+        "summary": str(content.get("summary") or ""),
+        "entry_type": str(content.get("entry_type") or entry.get("entry_type") or ""),
+        "standardization_status": str(
+            entry.get("standardization_status") or schema.STANDARDIZATION_STATUS_UNKNOWN
+        ),
+        "version_no": latest,
+    }
+
+
 def get_entry_by_candidate_key(candidate_key: str) -> dict | None:
     """``candidate_key`` でエントリを1件取得する（無ければ ``None``）。
 

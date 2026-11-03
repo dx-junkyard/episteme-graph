@@ -61,7 +61,8 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from core.element_vocab import theory_stage_key, theory_stage_label
-from core.label_vocab import VERIFICATION_STATUS_LABELS_LEDGER
+from core.focus_document import resolve_focus_document
+from core.label_vocab import VERIFICATION_STATUS_LABELS_LEDGER, learner_atlas_wording
 from core.personal_graph import queries
 from core.personal_graph.derive import derive_person_network
 from core.personal_graph.schema import (
@@ -145,6 +146,62 @@ FACT_RANGE_SHARPEN = (
     "教材のテキストを選んで質問するか、帰属カードで確定すると、1点に絞り込まれます。"
 )
 
+#: 議論（discuss / ``_discussion``）由来の痕跡の出口案内。discuss には選べる教材テキストが
+#: 無いので、``FACT_RANGE_SHARPEN`` の「テキストを選んで質問する」は実行できない（第 17 周）。
+FACT_DISCUSS_SHARPEN = (
+    "議論の着地画面で帰属カードを確定するか、開幕画面の支持構造から論文の構成をたどると、"
+    "1点に絞り込まれます。"
+)
+
+#: 焦点（この問いへの回答が引用した論文）にグラフが1つも無いとき、コース全体へ黙って
+#: 広げずに止める notice（第 17 周 D2: 無関係な論文が並ぶのを防ぐ。件数なし）。
+NOTICE_CITED_DOCUMENTS_NO_GRAPH = (
+    "この問いで話していた論文は、理論構成のグラフがまだ作られていないため、周りを表示できません。"
+)
+
+#: 議論の疑似トピック（``derive._DISCUSSION_TOPIC_ID`` と同じ値）。
+_DISCUSSION_TOPIC_ID = "_discussion"
+
+
+def is_discussion_node(node: PersonalNode) -> bool:
+    """議論（``_discussion`` 疑似トピック）由来の痕跡か。"""
+    anchor = getattr(node, "anchor", None)
+    return (
+        getattr(anchor, "anchor_type", None) == ANCHOR_TYPE_TOPIC
+        and str(getattr(anchor, "anchor_id", "") or "") == _DISCUSSION_TOPIC_ID
+    )
+
+
+#: 教材のテキストを選んで質問した痕跡（帰属が区画・チャンク）の出口案内（IK-0896 → IK-1025）。
+#: 帰属カードは AI の帰属候補（``llm_candidate``）しか並べず、テキスト選択の問いは候補を経ずに
+#: 確定するので、この痕跡の出所ではカードに何も出ない（第 6 周: 案内された先が空だった）。
+#: 実行できる出口だけ — 式や主張の文に絞って選び直して問う — を言う。
+FACT_SELECTED_SHARPEN = (
+    "この記録は教材の選んだ箇所に帰属しています。1点に絞り込むには、教材の中の式か主張の文だけを"
+    "選び直して質問してください。帰属カードには AI の帰属の候補だけが並ぶため、この記録はそこには出ません。"
+)
+
+#: 帰属がテキスト選択の区画・チャンク（主張・式に降りていない）であるアンカー種別。
+_SELECTED_TEXT_ANCHOR_TYPES = frozenset({"segment", "chunk"})
+
+
+def sharpen_fact_for(node: PersonalNode | None) -> str:
+    """痕跡の出所（帰属の種類）に応じた「1点に絞り込む」出口案内（実行できる操作だけ）。
+
+    - 議論の疑似トピック由来 → 着地画面の帰属カード / 開幕画面の支持構造
+    - 教材のテキスト選択に帰属済み（segment / chunk）→ 式・主張の文に絞って選び直す問いだけ
+      （IK-1025: この出所の痕跡は帰属カードに出ないので、カードでの確定を勧めない。
+      IK-0896: 同じ「テキストを選んで質問」を繰り返させず、絞る先を言う）
+    - それ以外（トピック縮退など）→ テキスト選択か帰属カード
+    """
+    if node is not None and is_discussion_node(node):
+        return FACT_DISCUSS_SHARPEN
+    anchor = getattr(node, "anchor", None) if node is not None else None
+    if str(getattr(anchor, "anchor_type", "") or "") in _SELECTED_TEXT_ANCHOR_TYPES:
+        return FACT_SELECTED_SHARPEN
+    return FACT_RANGE_SHARPEN
+
+
 #: コース範囲フォールバック（トピック⇄claim の対応が引けないときに、コース sources の
 #: 解析済み論文の理論構成をそのまま範囲として見せる）の事実文。**粗いことを隠さず、
 #: 粗いとラベルして見せる**ための1行（PMN-1 の正直さ。件数・数値は言わない = PMN-4）。
@@ -152,6 +209,21 @@ FACT_RANGE_COURSE_FALLBACK = (
     "このトピックと論文の対応はまだ記録されていません。"
     "かわりに、このコースのソース論文の理論構成を表示しています。"
 )
+
+#: 焦点論文の「直前の引用」段（``core.focus_document`` FD1）: トピック⇄claim の対応が
+#: 引けないとき、コース全体の前に**この問いへの回答が引用した論文**へ絞る（議論中の
+#: ``_discussion`` の痕跡がコース全体へ広がらない）。粗さは隠さずラベルする（PMN-1）。
+FACT_RANGE_CITED_DOCUMENTS = (
+    "このトピックと論文の対応はまだ記録されていません。"
+    "かわりに、この問いへの回答が引用した論文の理論構成を表示しています。"
+)
+
+#: 範囲表示の対象になり得たコース sources の論文のうち、理論構成のグラフがまだ無いもの
+#: （第 14 周: 聞いた論文が黙って欠けて見えないようにする。タイトルのみ・件数なし）。
+_FACT_RANGE_NO_GRAPH_TEMPLATE = (
+    "論文『{title}』は、理論構成のグラフがまだ作られていないため、ここには表示していません。"
+)
+_MAX_NO_GRAPH_FACTS = 3
 
 #: 装置2（共通部品の糸）の事実文テンプレート。
 _SHARED_PART_FACT_TEMPLATE = "共通部品『{name}』は、論文『{title}』にも現れます。"
@@ -355,10 +427,18 @@ def _verification(component_id: str, ledger: dict[str, str]) -> dict | None:
     status = str(ledger.get(component_id) or "").strip()
     if not status:
         return None
-    label = VERIFICATION_STATUS_LABELS_LEDGER.get(status, "")
+    # IK-1059 残り（第 9 波）: 札は学習者の画面に出る — 地図と同じ学習者の語の表を通す
+    # （「直接検証の記帳あり」→「直接検証の記録あり」。教員の台帳画面の語は変えない）。
+    label = learner_atlas_wording(VERIFICATION_STATUS_LABELS_LEDGER.get(status, ""))
     if not label:
         return None
-    return {"status": status, "label": label}
+    out = {"status": status, "label": label}
+    # IK-0932: 直接検証・間接的な支持・反証の札には、記帳された条件（成立条件・領域）の 1 行を
+    # 添える（``queries.ComponentLedgerStatuses.scope_lines``。根拠の逐語・記帳者・数値なし）。
+    scope_line = str((getattr(ledger, "scope_lines", None) or {}).get(component_id) or "").strip()
+    if scope_line:
+        out["scope_line"] = learner_atlas_wording(scope_line)
+    return out
 
 
 def _claim_excerpt(node: dict, claim_summaries: dict[str, dict] | None) -> str | None:
@@ -738,6 +818,8 @@ def build_topic_range(
     atlas_concept_context: dict | None = None,
     fallback_fact: str = "",
     claim_summaries: dict[str, dict] | None = None,
+    missing_graph_titles: list[str] | None = None,
+    sharpen_fact: str = FACT_RANGE_SHARPEN,
 ) -> dict:
     """範囲モード（topic アンカーの事実ベース粗表示）の DTO を組み立てる（純関数）。
 
@@ -776,10 +858,12 @@ def build_topic_range(
         graph = doc.get("graph") or {}
         touched_claim_ids = doc.get("touched_claim_ids") or set()
         nodes_out: list[dict] = []
+        # IK-0899: 論文ごとの台帳があればそれを当てる（無ければ従来の共通の dict）。
+        doc_ledger = doc.get("ledger") if isinstance(doc.get("ledger"), dict) else ledger
         for node in main_nodes(graph):
             dto = _node_dto(
                 node,
-                ledger=ledger,
+                ledger=doc_ledger,
                 personal_nodes=personal_nodes,
                 is_center=False,
                 claim_summaries=claim_summaries,
@@ -815,9 +899,11 @@ def build_topic_range(
         facts.append("このトピックの教材が触れている理論構成：" + _enumerate(ordered_labels))
     if not fallback_fact:
         facts.append(FACT_RANGE_UNKNOWN_POINT)
+    for title in [t for t in (missing_graph_titles or []) if t][:_MAX_NO_GRAPH_FACTS]:
+        facts.append(_FACT_RANGE_NO_GRAPH_TEMPLATE.format(title=title))
     if verification_suppressed:
         facts.append(FACT_NO_VERIFICATION_RECORDS)
-    facts.append(FACT_RANGE_SHARPEN)
+    facts.append(sharpen_fact or FACT_RANGE_SHARPEN)
 
     if atlas_concept_context:
         region_label = str(atlas_concept_context.get("region_label") or "")
@@ -983,8 +1069,9 @@ def _nearby_for_topic_anchor(
     「偽精度の禁止」は粗い対応を隠すことではなく、粗いとラベルして見せることなので、
     ``touched`` を推測で立てない限りこの表示は事実のままである。
     """
+    sharpen = sharpen_fact_for(start)
     if not start.course_id:
-        return unavailable(mode, facts=[FACT_RANGE_SHARPEN])
+        return unavailable(mode, facts=[sharpen])
 
     if center_component_id:
         for document_id in _documents_for_anchor(
@@ -1005,7 +1092,7 @@ def _nearby_for_topic_anchor(
                 continue
             mains = main_nodes(graph)
             ledger = queries.fetch_component_ledger_statuses(
-                [str(n.get("component_id") or "") for n in mains]
+                [str(n.get("component_id") or "") for n in mains], document_id=document_id
             )
             support_fact_line = queries.fetch_center_support_fact_line(
                 center_component_id,
@@ -1067,34 +1154,84 @@ def _nearby_for_topic_anchor(
         )
 
     fallback_fact = ""
+    missing_graph_ids: list[str] = [d for d in document_ids if d not in doc_to_claims or not any(
+        doc["document_id"] == d for doc in documents
+    )]
     if not documents:
-        # コース範囲フォールバック: touched は立てず、粗いことを事実文で明示する。
-        fallback_fact = FACT_RANGE_COURSE_FALLBACK
-        for document_id in _documents_for_anchor(
+        # 焦点論文の「直前の引用」段（FD1）: コース全体へ広げる前に、この問いへの回答が
+        # 引用した論文（コース sources ∩ 閲覧可能）に絞る。引けなければコース範囲。
+        course_candidates = _documents_for_anchor(
             start, can_view_document=can_view_document, user_id=user_id
-        ):
-            graph = queries.fetch_component_graph(document_id)
-            if not graph:
-                continue
-            all_main_ids.extend(
-                str(n.get("component_id") or "") for n in main_nodes(graph)
-            )
-            documents.append(
-                {
-                    "document_id": document_id,
-                    "graph": graph,
-                    "touched_claim_ids": set(),
-                }
+        )
+        try:
+            cited_docs = queries.fetch_trace_cited_document_ids(start.id)
+        except Exception:  # noqa: BLE001 — 補助（コース範囲へ縮退）
+            cited_docs = []
+        focus = resolve_focus_document(
+            allowed_document_ids=course_candidates,
+            previous_cited_document_ids=cited_docs,
+        )
+        # コース範囲フォールバック: touched は立てず、粗いことを事実文で明示する。
+        # 第 17 周 D2: 焦点（引用した論文）があるときはそこで止める。焦点の論文に
+        # グラフが無くても、コース全体へ黙って広げない（無関係な論文を並べない）。
+        # コース範囲は焦点が1つも無いときだけ。
+        tiers = []
+        if focus:
+            tiers.append((FACT_RANGE_CITED_DOCUMENTS, list(focus.document_ids)))
+        else:
+            tiers.append((FACT_RANGE_COURSE_FALLBACK, course_candidates))
+        for tier_fact, tier_documents in tiers:
+            fallback_fact = tier_fact
+            missing_graph_ids = []
+            for document_id in tier_documents:
+                graph = queries.fetch_component_graph(document_id)
+                if not graph:
+                    missing_graph_ids.append(document_id)
+                    continue
+                all_main_ids.extend(
+                    str(n.get("component_id") or "") for n in main_nodes(graph)
+                )
+                documents.append(
+                    {
+                        "document_id": document_id,
+                        "graph": graph,
+                        "touched_claim_ids": set(),
+                    }
+                )
+            if documents:
+                break
+        if not documents and focus:
+            no_graph_titles = queries.fetch_document_titles(missing_graph_ids)
+            return unavailable(
+                mode,
+                NOTICE_CITED_DOCUMENTS_NO_GRAPH,
+                facts=[
+                    _FACT_RANGE_NO_GRAPH_TEMPLATE.format(title=t)
+                    for t in [no_graph_titles.get(d, "") for d in missing_graph_ids]
+                    if t
+                ][:_MAX_NO_GRAPH_FACTS]
+                + [sharpen],
             )
 
     if not documents:
-        return unavailable(mode, NOTICE_TOPIC_NO_MAPPING, facts=[FACT_RANGE_SHARPEN])
+        return unavailable(mode, NOTICE_TOPIC_NO_MAPPING, facts=[sharpen])
 
-    titles = queries.fetch_document_titles([d["document_id"] for d in documents])
+    titles = queries.fetch_document_titles(
+        [d["document_id"] for d in documents] + list(missing_graph_ids)
+    )
     for doc in documents:
         doc["title"] = titles.get(doc["document_id"], "")
+    missing_graph_titles = [titles.get(d, "") for d in missing_graph_ids]
 
-    ledger = queries.fetch_component_ledger_statuses(all_main_ids)
+    # IK-0899: 台帳は論文ごと（ノード id は論文の中でしか一意でない）。論文ごとに引き、
+    # 範囲の各論文のノードにはその論文の行だけを当てる（``doc["ledger"]``）。
+    ledger: dict[str, str] = {}
+    for doc in documents:
+        doc["ledger"] = queries.fetch_component_ledger_statuses(
+            [str(n.get("component_id") or "") for n in main_nodes(doc["graph"])],
+            document_id=doc["document_id"],
+        )
+        ledger.update({f'{doc["document_id"]}:{k}': v for k, v in doc["ledger"].items()})
     atlas_concept_context = _resolve_range_atlas_context(
         str(start.course_id or ""), str(start.anchor.anchor_id or "")
     )
@@ -1109,6 +1246,8 @@ def _nearby_for_topic_anchor(
         atlas_concept_context=atlas_concept_context,
         fallback_fact=fallback_fact,
         claim_summaries=claim_summaries,
+        missing_graph_titles=missing_graph_titles,
+        sharpen_fact=sharpen,
     )
 
 
@@ -1175,7 +1314,7 @@ def nearby_for_person_node(
 
         mains = main_nodes(graph)
         ledger = queries.fetch_component_ledger_statuses(
-            [str(n.get("component_id") or "") for n in mains]
+            [str(n.get("component_id") or "") for n in mains], document_id=document_id
         )
         support_fact_line = queries.fetch_center_support_fact_line(
             str(center_node.get("component_id") or ""),

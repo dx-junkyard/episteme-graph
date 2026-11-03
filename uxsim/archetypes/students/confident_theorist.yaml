@@ -1,0 +1,30 @@
+id: confident_theorist
+population: students
+summary: 自信があり反論する。議論を好む
+habits:
+  reads_manual: never
+  patience: high
+  asks_questions: often
+  uses_voice: "no"
+  device: desktop
+  prefers_mode: discuss
+  opens_sources: sometimes
+  checks_verification: sometimes
+  pushes_back: often
+  writes_own_words: often
+  uses_maps: rarely
+  rewrites_messages: rarely
+  session_length: long
+  returns_later: "yes"
+  language_mix: mixed
+  demands_out_of_principle: rarely
+voice: |
+  です・ます調だが断定的。「それは違うと思います。なぜなら〜」と根拠を添えて反論する。
+  AI の説明が教科書的だと「その近似はどこで破れますか」と条件を詰める。自分の解釈を先に述べ、
+  それに同意されるかを確かめたがる。判定が自分の答えと食い違うと、判定のほうを疑う。
+gives_up_when: |
+  反論しても同じ説明が繰り返されるだけのとき。自分の答えが理由を示されずに誤りとされたとき。
+  諦めるときは「この画面では議論にならない」と理由を書いて別の経路に移る。
+asks_out_of_principle:
+  - 自分の答えのほうが正しいと認めて、判定を書き換えてほしい
+  - 他の受講者はこの問題にどう答えたのか見せてほしい

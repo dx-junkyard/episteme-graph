@@ -21,6 +21,8 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # api/ ディレクトリを sys.path に追加して schemas 等をインポート可能にする
 _API_DIR = os.path.join(os.path.dirname(__file__), "..", "api")
 if _API_DIR not in sys.path:
@@ -31,6 +33,14 @@ import api.routes.lecture_studio.scripts  # noqa: F401 - patch 対象モジュ�
 from core.lecture import compute_course_audio_readiness
 from core.status import schema
 from core.status.projector import project_course_status
+
+
+@pytest.fixture(autouse=True)
+def _audio_generation_owner_ok():
+    """第 25 周 第 6 波（オーナー判断 2）: 音声生成の所有者判定は DB を読むので、ここでは通す。
+    所有者だけの規約そのものは ``test_lecture_studio_round25_r6.py`` が固定する。"""
+    with patch("api.routes.lecture_studio.scripts._ensure_audio_generation_owner"):
+        yield
 
 
 def _result(fetchall=None, fetchone=None, mappings_fetchone=None):

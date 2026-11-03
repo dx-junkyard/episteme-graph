@@ -58,6 +58,9 @@ resolution:
     - backend/api/routes/admin.py
     - docs/admin_operations/course.md
     - docs/development_checklist.md §2
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0203, IK-0204]
 view_of: [IK-0203]
 history:

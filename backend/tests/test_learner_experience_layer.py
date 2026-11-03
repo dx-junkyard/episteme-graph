@@ -153,9 +153,13 @@ def test_build_traces_view_shape_and_cue():
     view = build_traces_view(rows)
     assert [t["id"] for t in view["traces"]] == ["t1", "t2", "t3"]  # 入力順を保持
     assert view["traces"][0]["text"] == "符号ミス"
-    # 再訪のころ合いは「最も古い未解決の誤答」を優先して選ぶ
+    # 再訪のころ合いは「最も古い未解決の訂正ありの行」を優先して選ぶ
     assert view["revisit_cue"] is not None
-    assert "誤答" in view["revisit_cue"]["headline"]
+    assert view["revisit_cue"]["sub"].startswith("5日前の問い")
+    # 第 23 周（st-06）: 質問の行に「誤答」という評価語を付けない（事実語「訂正あり」）。
+    assert view["traces"][0]["kind_label"] == "訂正あり"
+    assert view["traces"][1]["kind_label"] == "問い"
+    assert all("誤答" not in str(v) for v in [view["revisit_cue"], view["traces"]])
 
 
 def test_build_traces_view_exposes_message_id_for_jump():

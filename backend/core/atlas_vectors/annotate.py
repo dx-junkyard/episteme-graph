@@ -39,6 +39,12 @@ _label_vectors: dict[tuple[str, str, str], list[float]] = {}
 #: キャッシュの上限（プロセス内。超えたら丸ごと捨てる — LRU を持つほどの規模ではない）。
 _CACHE_MAX_ENTRIES = 2000
 
+#: 照合の状態（``report["state"]``。語彙の正本は core/atlas_review_display.py の
+#: NEAR_ANCHOR_* — 本モジュールは atlas_review_display を import しないので値だけ一致させる）。
+_STATE_CHECKED = "checked"
+_STATE_NO_INDEX = "no_index"
+_STATE_UNAVAILABLE = "unavailable"
+
 
 def reset_cache() -> None:
     """in-process キャッシュを初期化する（テスト用。本番コードから呼ばない）。"""
@@ -65,6 +71,7 @@ def annotate_gap_clusters(
     clusters: Sequence[Mapping[str, Any]],
     *,
     daily_limit: Optional[int] = None,
+    report: Optional[dict] = None,
 ) -> list[dict]:
     """ギャップ候補 cluster に ``near_anchor`` 注記を付ける（fail-soft）。
 
@@ -80,10 +87,17 @@ def annotate_gap_clusters(
         skeleton_version: 現行凍結版（アンカーの版と一致しなければ注記しない）。
         clusters: ``derive_candidates`` の返り値（変更しない）。
         daily_limit: 省略時は ``ATLAS_VECTOR_MAX_CALLS_PER_DAY``。
+        report: 渡されたら照合の状態を ``report["state"]`` に書く（IK-0851。
+            ``checked`` = 現行版のアンカーと照合した / ``no_index`` = 現行版のアンカーが
+            無いので照合していない / ``unavailable`` = 照合できなかった）。
 
     Returns:
         注記済み clusters（複製）。何も注記できないときは入力と同じ内容の複製。
     """
+    def _state(value: str) -> None:
+        if report is not None:
+            report["state"] = value
+
     items = [dict(c) for c in (clusters or [])]
     if not items:
         return items
@@ -91,6 +105,7 @@ def annotate_gap_clusters(
     domain = str(domain_key or "").strip()
     version = str(skeleton_version or "").strip()
     if not domain or not version:
+        _state(_STATE_NO_INDEX)
         return items
 
     try:
@@ -100,8 +115,10 @@ def annotate_gap_clusters(
             "atlas anchor annotate: anchors unavailable for %s (non-fatal)",
             domain, exc_info=True,
         )
+        _state(_STATE_UNAVAILABLE)
         return items
     if not anchors or resolved_version != version:
+        _state(_STATE_NO_INDEX)
         return items
 
     # ラベルごとに1つだけ埋め込む（同一クラスタ名の重複は1回で済ませる）。
@@ -127,9 +144,11 @@ def annotate_gap_clusters(
                 daily_limit = get_settings().atlas_vector_max_calls_per_day
             except Exception:  # noqa: BLE001 — 設定が読めないなら注記しない
                 logger.warning("atlas anchor annotate: settings unavailable", exc_info=True)
+                _state(_STATE_UNAVAILABLE)
                 return items
         if not builder.check_daily_gate(int(daily_limit)):
             # 予算切れ = 静かに注記なし（VA4。既存レスポンスと後方互換）。
+            _state(_STATE_UNAVAILABLE)
             return items
         keys = list(wanted)
         try:
@@ -139,12 +158,14 @@ def annotate_gap_clusters(
                 "atlas anchor annotate: label embedding failed for %s (non-fatal)",
                 domain, exc_info=True,
             )
+            _state(_STATE_UNAVAILABLE)
             return items
         if len(vectors) != len(keys):
             logger.warning(
                 "atlas anchor annotate: embedding count mismatch (%s vs %s)",
                 len(keys), len(vectors),
             )
+            _state(_STATE_UNAVAILABLE)
             return items
         _store_cached(
             {key: list(vector) for key, vector in zip(keys, vectors) if vector}
@@ -172,6 +193,7 @@ def annotate_gap_clusters(
             "skeleton_version": version,
         }
 
+    _state(_STATE_CHECKED)
     return items
 
 

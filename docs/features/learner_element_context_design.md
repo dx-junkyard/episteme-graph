@@ -383,3 +383,6 @@ backend/api/routes/learning.py                  ← 変更(endpoint 追加)
 | 4 | equation 走査が document ごとに巨大 JSONB を二重読みしていた | `document_run_artifacts` を1回読み `equation_records(doc, artifacts=…)` へ渡す(§5) |
 | 5 | `navigable:true` の契約(再フェッチできる)が equation 以外で成立していなかった | 学習者の実フェッチ可能性で再計算(§3 の表) |
 | 6 | 設計書のレーン上限の記述と実挙動が食い違い、§8.3 のフロント未実装記述が古かった | §4 に適用順序と理由(LE6)を明記、フロント実装済みに更新 |
+
+**追補（2026-10-01・IK-0588 / IK-0570）**: component 文脈 API の `graph` は分割の親子（「の構成要素である」/「を構成要素として含む」）と依存の逆向き（「に利用される」）を同じ論文の live 行へ解決して navigable で足す（`component_context._hierarchy_lane_items`）。
+中心命題・支持構造（`element_type="thesis"`）は学習者が開けないため `id` キーを省き、レーンに1回 `graph.exits`（開幕画面への事実文）を返す — claim / equation の ITEM v2 経路は従来どおり。

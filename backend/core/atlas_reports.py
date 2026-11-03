@@ -26,6 +26,8 @@ from typing import Any, Iterable
 
 from sqlalchemy import text as sa_text
 
+from core.account_display import label_or_unregistered
+
 # ---------------------------------------------------------------------------
 # 定数
 # ---------------------------------------------------------------------------
@@ -77,7 +79,7 @@ _REPORT_COLUMNS = (
 _SELECT_REPORTS = """
     SELECT r.id::text, r.cartridge_id, r.skeleton_version, r.node_id, r.region_id,
            r.level, r.node_label, r.report_text, r.reporter_id::text,
-           COALESCE(u.display_name, r.reporter_id::text) AS reporter_name,
+           COALESCE(NULLIF(BTRIM(u.profile_name), ''), '') AS reporter_name,
            r.status, r.resolution_note, r.resolved_by::text, r.resolved_at,
            r.merged_into::text, r.incorporated_at, r.incorporated_by::text,
            r.incorporation_note, r.applied_version, r.notified_at, r.created_at
@@ -93,6 +95,8 @@ def _rows_to_dicts(rows: Iterable[Any]) -> list[dict[str, Any]]:
         for key in ("resolved_at", "incorporated_at", "notified_at", "created_at"):
             if rec.get(key) is not None:
                 rec[key] = str(rec[key])
+        # IK-1007: 報告者の名前は本人が登録した名前だけ（ログイン ID・UUID へフォールバックしない）。
+        rec["reporter_label"] = label_or_unregistered(rec.get("reporter_name"))
         out.append(rec)
     return out
 
@@ -185,7 +189,8 @@ def credits_from_reports(reports: list[dict[str, Any]]) -> list[str]:
     seen: set[str] = set()
     credits: list[str] = []
     for report in reports:
-        name = str(report.get("reporter_name") or report.get("reporter_id") or "").strip()
+        # 名前の登録が無い報告者はクレジットに載せない（UUID・ログイン ID を出さない。IK-1007）。
+        name = str(report.get("reporter_name") or "").strip()
         if name and name not in seen:
             seen.add(name)
             credits.append(name)

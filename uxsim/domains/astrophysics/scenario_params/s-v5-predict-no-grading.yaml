@@ -1,0 +1,8 @@
+scenario: s-v5-predict-no-grading
+domain: astrophysics
+params:
+  goal_text: 自分の予想が出典とどこで食い違うかを、判定ではなく根拠で確かめること
+  prediction_text: 音速を自由にすると、データはほとんど何も排除できないと予想する。制約は事前分布で決まっているはずだ。
+  seed_questions:
+    - 並置で示された出典の箇所は、本当に私の予想と食い違っていると言えますか？
+    - 事前分布の影響は、論文のどこで確かめられていますか？

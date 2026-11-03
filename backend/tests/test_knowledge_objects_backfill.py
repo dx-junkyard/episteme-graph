@@ -11,7 +11,9 @@ UPDATE のパラメータを捕捉して検証する。DB も LLM も使わな�
 
 from __future__ import annotations
 
+import logging
 import re
+import textwrap
 import sys
 from pathlib import Path
 
@@ -266,3 +268,131 @@ class TestModuleDiscipline:
     def test_selects_only_live_rows(self):
         source = Path(backfill_mod.__file__).read_text(encoding="utf-8")
         assert source.count("superseded_at IS NULL") >= 4
+
+
+# ---------------------------------------------------------------------------
+# 起動時ロックの規律（main.py 側）
+# ---------------------------------------------------------------------------
+
+MAIN_PY = ROOT / "backend" / "api" / "main.py"
+_BLOCK_START = "# 知識オブジェクト層（migration 078）"
+_BLOCK_END = "# M層（LLM モデル選択"
+
+
+def _startup_backfill_block() -> str:
+    """main.py の lifespan からバックフィル区画（try 文 1 つ）だけを切り出す。"""
+    source = MAIN_PY.read_text(encoding="utf-8")
+    start = source.rfind("\n", 0, source.index(_BLOCK_START)) + 1
+    end = source.rfind("\n", 0, source.index(_BLOCK_END, start)) + 1
+    return source[start:end]
+
+
+class _PooledSession(_FakeSession):
+    """ORM Session のプール挙動を模す fake。
+
+    commit / rollback でトランザクションが閉じると接続をプールへ返し、次の execute は
+    **別の接続**を checkout する（QueuePool は FIFO なので、他のセッションが先に返した
+    接続が先頭にある起動時はこうなる）。各 SQL がどの接続で流れたかを記録する。
+    """
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._next_conn = 1
+        self._conn = None
+        self.trace: list[tuple[int, str]] = []
+        self.commits = 0
+        self.rollbacks = 0
+        self.closed = False
+
+    def _checkout(self) -> int:
+        if self._conn is None:
+            self._conn = self._next_conn
+            self._next_conn += 1
+        return self._conn
+
+    def execute(self, stmt, params=None):
+        conn = self._checkout()
+        sql = " ".join(str(stmt).split())
+        self.trace.append((conn, sql))
+        if "pg_advisory" in sql:
+            return _FakeResult([])
+        return super().execute(stmt, params)
+
+    def commit(self):
+        self.commits += 1
+        self._conn = None
+
+    def rollback(self):
+        self.rollbacks += 1
+        self._conn = None
+
+    def close(self):
+        self.closed = True
+
+
+def _run_startup_block(session: _PooledSession) -> None:
+    block = textwrap.dedent(_startup_backfill_block())
+    namespace = {
+        "_pg_session": lambda: session,
+        "sa_text": lambda s: s,
+        "logger": logging.getLogger("test.startup_backfill"),
+    }
+    exec(compile(block, str(MAIN_PY), "exec"), namespace)  # noqa: S102
+
+
+class TestStartupLockDiscipline:
+    """バックフィルの直列化ロックは xact スコープで取り、unlock を呼ばない。
+
+    セッションスコープの ``pg_advisory_lock`` を ORM Session で取ると、commit で接続が
+    プールへ返り、``pg_advisory_unlock`` が別の接続に乗って Postgres が
+    ``WARNING: you don't own a lock of type ExclusiveLock`` を出す（2026-09-21 起動ログ）。
+    ロック本体は元の接続に残り、別レプリカの起動を待たせ続ける。
+    """
+
+    def test_block_uses_xact_lock_and_never_unlocks(self):
+        # 説明コメントは経緯として旧 API 名を挙げてよいので、コード行だけを検査する。
+        code = "\n".join(
+            line for line in _startup_backfill_block().splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert "pg_advisory_xact_lock" in code
+        assert "pg_advisory_unlock" not in code
+        assert not re.search(r"pg_advisory_lock\s*\(", code)
+
+    def test_lock_and_backfill_share_one_transaction(self):
+        session = _PooledSession(pending_claims=[_claim_row("c1")])
+        _run_startup_block(session)
+
+        assert session.commits == 1
+        assert session.rollbacks == 0
+        assert session.closed
+        conns = {conn for conn, _sql in session.trace}
+        assert len(conns) == 1, session.trace
+        first_sql = session.trace[0][1]
+        assert "pg_advisory_xact_lock" in first_sql
+        assert session.claim_updates, "ロック取得後にバックフィルが同一トランザクションで走る"
+        assert not any("pg_advisory_unlock" in sql for _c, sql in session.trace)
+
+    def test_failure_rolls_back_without_touching_another_connection(self):
+        class _Broken(_PooledSession):
+            def execute(self, stmt, params=None):
+                sql = " ".join(str(stmt).split())
+                if "FROM theory_claims" in sql and "claim_text" in sql:
+                    self._checkout()
+                    self.trace.append((self._conn, sql))
+                    raise RuntimeError("boom")
+                return super().execute(stmt, params)
+
+        session = _Broken()
+        _run_startup_block(session)
+
+        assert session.rollbacks == 1
+        assert session.commits == 0
+        assert session.closed
+        assert len({conn for conn, _sql in session.trace}) == 1
+        assert not any("pg_advisory_unlock" in sql for _c, sql in session.trace)
+
+    def test_backfill_module_does_not_commit_inside(self):
+        """xact lock が commit まで生き続ける前提: バックフィル本体は commit / rollback しない。"""
+        source = Path(backfill_mod.__file__).read_text(encoding="utf-8")
+        assert not re.search(r"session\.(commit|rollback)\s*\(", source)

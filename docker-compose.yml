@@ -20,6 +20,26 @@ services:
     networks:
       - episteme
 
+  # ── 検証シミュレーション層（SB層）の隔離実行 ─────────────────────────
+  # 正本: docs/features/simulation_bridge_design.md §5.5（SB3）。LLM が生成したコードを
+  # api-server の外で実行する。ports なし・外へ出られない内部ネットワーク（sim-internal）
+  # にだけ参加し、api-server からは http://sim-runner:8080 で到達する（SIM_RUNNER_URL 既定）。
+  sim-runner:
+    build:
+      context: ./simrunner
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 768m
+    pids_limit: 64
+    restart: unless-stopped
+    networks:
+      - sim-internal
+
   # ── Application ───────────────────────────────────────────────────
   api-server:
     build:
@@ -65,6 +85,8 @@ services:
       GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/app/.gcp/application_default_credentials.json}
       # ① コンテナ間はサービス名で解決する（ホスト側の localhost:8070 とは別）
       GROBID_URL: ${GROBID_URL:-http://grobid:8070}
+      # ① sandbox もサービス名で解決する（ホスト側の localhost:8080 とは別。Settings の既定は空 = 未構成）
+      SIM_RUNNER_URL: ${SIM_RUNNER_URL:-http://sim-runner:8080}
     # ローカルの .gcp/ をコンテナに読み取り専用でマウントする。
     # ファイルが存在しない場合は空ディレクトリとしてマウントされる（エラーにはならない）。
     # サービスアカウントキーを使う場合: .gcp/credentials.json に配置する。
@@ -79,8 +101,11 @@ services:
         condition: service_started
       grobid:
         condition: service_started
+      sim-runner:
+        condition: service_started
     networks:
       - episteme
+      - sim-internal
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -102,3 +127,7 @@ volumes:
 networks:
   episteme:
     driver: bridge
+  # sim-runner 専用。internal: true で外部（インターネット）への経路を持たない。
+  sim-internal:
+    driver: bridge
+    internal: true

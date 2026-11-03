@@ -56,6 +56,8 @@ SCENE_DELIBERATION = "deliberation"
 SCENE_ASSISTANT = "assistant"
 SCENE_FIGURE_STUDIO = "figure_studio"
 SCENE_DISCOVERY_COMPARE = "discovery_compare"
+#: 検証シミュレーション層（SB層）。正本は core/simulation_bridge/schema.py::SCENE_SIMULATION と同値。
+SCENE_SIMULATION = "simulation"
 
 _SCENE_LABELS: dict[str, str] = {
     SCENE_PIPELINE: "教材の解析",
@@ -71,6 +73,7 @@ _SCENE_LABELS: dict[str, str] = {
     SCENE_ASSISTANT: "管理アシスタント",
     SCENE_FIGURE_STUDIO: "教材図スタジオ",
     SCENE_DISCOVERY_COMPARE: "類似論文の比較分析",
+    SCENE_SIMULATION: "検証シミュレーション",
 }
 
 
@@ -109,6 +112,11 @@ def scene_for_feature(feature: str) -> str | None:
         return SCENE_PIPELINE_VISION
     if feature == "pipeline" or feature.startswith("pipeline:"):
         return SCENE_PIPELINE
+    if feature in ("learning:simulation_codegen", "learning:simulation_revision"):
+        # 検証シミュレーション層 v1.1（simulation_bridge_design.md §14.3）。学習者が起動するが、
+        # 実体は教員の生成・改訂提案と同じコード生成なので学習チャットの場面ではなく
+        # ``simulation`` scene に束ねる（下の learning:* 分岐より前に置くこと）。
+        return SCENE_SIMULATION
     if feature in (
         "learning:chat",
         "learning:chat_casual",
@@ -165,6 +173,10 @@ def scene_for_feature(feature: str) -> str | None:
         # ``discovery:ranking`` は embedding なので scene を持たない（上の分岐で None）—
         # モデルを選べるのはテキスト生成のこの1本だけ。
         return SCENE_DISCOVERY_COMPARE
+    if feature.startswith("simulation:"):
+        # 検証シミュレーション層（simulation_bridge_design.md §5.1 / §5.4）。理論プログラムの
+        # 生成と配線の改訂提案は教員から見て同じ場面なので 1 つの scene に束ねる（text）。
+        return SCENE_SIMULATION
     if feature == "admin:assistant":
         return SCENE_ASSISTANT
     if feature == "admin:component_candidates":
@@ -263,6 +275,7 @@ _SCENE_REPRESENTATIVE_FEATURE: dict[str, str] = {
     SCENE_ASSISTANT: "admin:assistant",
     SCENE_FIGURE_STUDIO: "admin:figure_studio",
     SCENE_DISCOVERY_COMPARE: "discovery:compare",
+    SCENE_SIMULATION: "simulation:codegen",
 }
 
 
@@ -391,6 +404,12 @@ _FEATURE_ENV_SETTINGS: dict[str, tuple[str, str]] = {
     "admin:figure_suggest": ("figure_studio_llm_model", "fast"),
     # 論文レーダーの比較分析（paper_radar_design.md §5.6）。
     "discovery:compare": ("discovery_compare_llm_model", "fast"),
+    # 検証シミュレーション層（simulation_bridge_design.md §8）: 生成と改訂提案で同一の設定キーを共有する。
+    "simulation:codegen": ("simulation_llm_model", "fast"),
+    "simulation:revision": ("simulation_llm_model", "fast"),
+    # v1.1（§14.3）: 学習者起動の生成・改訂提案も同じ設定キー（場面は simulation）。
+    "learning:simulation_codegen": ("simulation_llm_model", "fast"),
+    "learning:simulation_revision": ("simulation_llm_model", "fast"),
 }
 
 # 特例: Settings に専用フィールドが無く、呼び出し元が os.getenv で直接読んでいる feature

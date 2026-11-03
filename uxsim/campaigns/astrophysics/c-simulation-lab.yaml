@@ -1,0 +1,31 @@
+id: c-astro-simulation-lab
+domain: astrophysics
+snapshot: corpus-astro-tex-v1
+course_id: 1bad7d9f
+personas:
+  teachers: []
+  students: [st-01-m1-radio, st-03-d1-from-particle, st-04-intl-exoplanet, st-06-skeptic-bao, st-07-m1-grb-voice,
+             st-10-d3-21cm-receiver]
+scenarios:
+  student: [s-sim-first-open, s-sim-edit-adopt-run, s-sim-predict-compare, s-sim-rewire-revise, s-sim-share-meaning,
+            s-sim-failure-recovery, s-sim-reconstructed-voice, s-sim-share-only]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 60, persona_llm_calls: 400, wall_clock_minutes: 300}
+notes: |
+  検証シミュレーション層（SB層・学習画面「🧪 動かして確かめる」）の場面。正本は docs/features/simulation_bridge_design.md
+  （SB1〜SB15）と docs/manual/student/02-student.md §19。主題は構造の見やすさ・関係を辿る理解・対話支援（P-0013）。
+  教材は TeX 経路の 4 本（snapshot corpus-astro-tex-v1）。学生はコース 1bad7d9f に固定（周の前に pin_course --yes）。
+  LLM 生成（learning.simlab.generate）は各経路 1 回、改訂案（learning.simlab.propose_revision）は (d) だけ。
+  runner は「ペルソナ × 経路の全組」を走らせるので、運転は --persona X --scenario Y で 1 場面ずつ（c-structure-30 と同じ）。
+  場面の組（誰 × 経路）:
+   (a) st-01-m1-radio × s-sim-first-open（Cepheus B / DCF 法・生成なし）
+   (b) st-03-d1-from-particle × s-sim-edit-adopt-run（音速の論文 / Horndeski・1 行直して採用・ベクトル入力）
+   (c) st-01-m1-radio × s-sim-predict-compare（(a) と同じまとまり・予想 → 配線なし実行）
+   (d) st-06-skeptic-bao × s-sim-rewire-revise（音速の論文 / 観測量・配線 2 種・改訂案 1 回）
+   (e) st-04-intl-exoplanet × s-sim-share-meaning（遅延時間分布 / 階層ベイズ・共有の意味を聞いてから共有）
+   (f) st-10-d3-21cm-receiver × s-sim-failure-recovery（Cepheus B / 主結果・入力欠けの失敗 → 復帰）
+   (g) te-03 / te-04 × t-sim-review-shared は c-simulation-lab-teacher.yaml（(e) の共有の後に走らせる）
+   (h) st-07-m1-grb-voice × s-sim-reconstructed-voice（PINN / TOV・未受講から受講・復元式の印・音声経路）
+   (e') st-04-intl-exoplanet × s-sim-share-only（(e) で共有に至らなかったときの短い共有だけの経路。LLM 生成なし）

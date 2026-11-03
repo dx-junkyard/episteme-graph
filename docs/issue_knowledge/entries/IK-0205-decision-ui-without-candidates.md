@@ -59,6 +59,9 @@ resolution:
     - frontend/public/js/deliberation.js
     - frontend/public/js/admin.js
     - docs/architecture/vision_ux_gap_survey_2026-07-17.md 追補
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0204]
 view_of: []
 pattern: last-mile-missing

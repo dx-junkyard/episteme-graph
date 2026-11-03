@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import json
 import logging
@@ -13,6 +14,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from core import course_units as course_units_mod
+from core import display_projection as _dp
+from core import label_vocab
 from core import element_explanations as element_explanations_store
 from core.course_data import (
     UNIT_SOURCE_TITLE_MATCH,
@@ -25,12 +28,23 @@ from core.course_data import (
 from core.deliberation import labels as labels_mod
 from core.document_pipeline.figure_images import normalize_figure_join_key
 from core.knowledge_objects import learning_units as ko_learning_units
+from core.knowledge_objects.references import normalize_claim_ref
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.llm_usage.context import usage_context
 from core.llm_worker.single_shot import structured_call
 from core.postgres import get_session as _pg_session
-from core.text_excerpt import excerpt, looks_like_tex_math
-from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE
+from core.schema import CLAIM_ORIGIN_SPAN, infer_claim_origin
+from core.text_excerpt import (
+    excerpt,
+    is_untranslated_text,
+    looks_like_tex_math,
+    normalize_source_line_breaks,
+)
+from core.text_hygiene import (
+    INTERNAL_FORMULA_PLACEHOLDER_TEXT,
+    UNTRUSTED_SOURCE_NOTICE,
+    scrub_internal_placeholders,
+)
 from episteme_graph.agents.equation_semantics.schema import (
     LINK_STATUSES,
     ROLE_IN_ARGUMENT_VOCAB,
@@ -60,7 +74,12 @@ def _json_dumps(value: Any) -> str:
 
 
 def build_course_content_background(user_id: str, course_id: str) -> None:
-    """Best-effort background entrypoint for course registration."""
+    """Best-effort background entrypoint for course registration.
+
+    失敗時の ``course_content_status = failed`` の記帳は ``build_course_content`` の
+    except 経路が行う（原稿スタジオの2系統の呼び出しも同じ関数を通るため、ここだけで
+    記帳すると他の呼び出しで ``processing`` のまま残る。IK-0375）。
+    """
     try:
         build_course_content(user_id, course_id)
     except Exception:
@@ -75,6 +94,7 @@ def build_course_content(user_id: str, course_id: str) -> dict:
     source materials.
     """
     session = _pg_session()
+    started = False
     try:
         row = session.execute(
             sa_text("""
@@ -91,7 +111,16 @@ def build_course_content(user_id: str, course_id: str) -> dict:
             return {"status": "forbidden", "updated_topics": 0}
 
         course = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        # 開始時点の写し（IK-0374）。書き戻しはこの写しと生成結果の差だけを、書き戻す
+        # 時点の live 行へ重ねる。生成は十数分かかることがあり、その間に教員が地図の
+        # 割り当て（cartridge_id / topics[].atlas_node_id）や議論テーマ等を保存する —
+        # 開始時点の dict を丸ごと書き戻すとそれを消してしまう。
+        snapshot = copy.deepcopy(course)
         _set_content_status(course, "processing")
+        # 生成中であることを行に残す（IK-0375）。学習画面が「準備中」を出せるように、
+        # course_content_status だけを原子的に書く（他のキーには触れない）。
+        _persist_content_status(session, course_id, course["course_content_status"])
+        started = True
 
         material_ids = _course_material_ids(course)
         document_ids = _load_document_ids(session, material_ids)
@@ -101,7 +130,7 @@ def build_course_content(user_id: str, course_id: str) -> dict:
                 "waiting_for_pipeline",
                 "コースの教材に紐づく解析済みドキュメントが見つかりません。",
             )
-            _save_course(session, course_id, course)
+            _save_course(session, course_id, course, snapshot=snapshot)
             return {"status": "waiting_for_pipeline", "updated_topics": 0}
 
         artifacts_by_doc = _load_latest_artifacts(session, document_ids)
@@ -110,29 +139,37 @@ def build_course_content(user_id: str, course_id: str) -> dict:
         # (document_id, equation_id) — agent 側の equation ID は論文間で再利用され
         # 得るため、equation ID 単独では別論文の説明と混線する。
         equation_explanations = _load_approved_equation_explanations(session, document_ids)
-        bundle = _collect_structured_content(artifacts_by_doc, equation_explanations)
+        claim_rows = _load_claim_address_rows(session, document_ids)
+        bundle = _collect_structured_content(artifacts_by_doc, equation_explanations, claim_rows)
         if not bundle["mapping_topics"] and not bundle["components"]:
             _set_content_status(
                 course,
                 "waiting_for_pipeline",
                 "CourseMappingAgent または ComponentAssemblyAgent の成果物がまだありません。",
             )
-            _save_course(session, course_id, course)
+            _save_course(session, course_id, course, snapshot=snapshot)
             return {"status": "waiting_for_pipeline", "updated_topics": 0}
 
         chunks_by_material = _load_chunks(session, material_ids)
         figures_index = _load_document_figures_index(session, document_ids)
         course_topic_list = course_topics(course)
         units_by_key = _load_learning_units(session, document_ids)
+        # 第 6 波（IK-1021）: ⚓ の部品を凍結時の DB UUID でも指せるよう、live 行の対応を読む。
+        component_uuid_index = _load_component_uuid_index(session, document_ids)
         unit_notes: dict = {}
         enriched_topics = _enrich_topics(
             course_topic_list, bundle, chunks_by_material, figures_index, units_by_key,
             notes=unit_notes,
         )
+        # 読み取りのトランザクションを LLM 生成の前に閉じる（数分〜十数分、行を読んだ
+        # まま idle in transaction にしない。書き戻しは _save_course が行を読み直す）。
+        session.rollback()
         draft_result = _generate_course_topic_drafts(
             course, enriched_topics, user_id=str(user_id), course_id=str(course_id)
         )
         course["topics"] = enriched_topics
+        # 第 6 波（IK-1021）: 凍結の部品参照に db_id（UUID）を足す（本文の ``![[component:…]]`` は不変）。
+        _stamp_component_db_ids(enriched_topics, component_uuid_index)
         # referenced_sections は生成しない（2026-07-26）。トピック→component_id の内部対応表を
         # そのまま学習者の出典タブに出しており、内部 ID（comp_001）と agent クラス名だけが
         # 並ぶ「学習者に何も伝えない」表示になっていた。根拠となる論理要素は教材本文の
@@ -142,8 +179,8 @@ def build_course_content(user_id: str, course_id: str) -> dict:
             "document_ids": document_ids,
             "updated_topics": len(enriched_topics),
             "mapping_topics": len(bundle["mapping_topics"]),
-            "components": len(bundle["components"]),
-            "equations": len(bundle["equations"]),
+            "components": _BundleScope(bundle).count("components"),
+            "equations": _BundleScope(bundle).count("equations"),
             "drafted_topics": draft_result["drafted_topics"],
             "draft_errors": draft_result["draft_errors"],
         }
@@ -153,13 +190,23 @@ def build_course_content(user_id: str, course_id: str) -> dict:
             status_extra["units_note"] = UNRESOLVED_UNITS_NOTE
         # 解析で「学ぶ単位」が立たなかった章（P2-R11）。題名の列挙だけで、件数も
         # 「なぜ立たなかったか」の推定も書かない（PL3）。
-        uncovered = _uncovered_section_titles(artifacts_by_doc)
+        # 見出しでない断片（IK-0370）は除き、除いた原文は run 内部の記録に残す。
+        uncovered_dropped: list[str] = []
+        uncovered = _uncovered_section_titles(artifacts_by_doc, dropped=uncovered_dropped)
         if uncovered:
             status_extra["uncovered_sections_note"] = UNCOVERED_SECTIONS_NOTE
             status_extra["uncovered_sections"] = uncovered
+        if uncovered_dropped:
+            status_extra["uncovered_sections_dropped"] = uncovered_dropped
+        # IK-0459: 式として読めない候補を材料から外した事実（P4。保存する content_blocks は
+        # そのまま。理由の語付きで run の記録として残す）。該当が無ければキーを足さない。
+        excluded_equations = excluded_equation_candidates_record(enriched_topics)
+        if excluded_equations:
+            status_extra["excluded_equation_candidates_note"] = label_vocab.EXCLUDED_EQUATION_CANDIDATES_NOTE
+            status_extra["excluded_equation_candidates"] = excluded_equations
         _set_content_status(course, "completed", "", status_extra)
         _invalidate_topic_lecture_audio_cache(session, course_id)
-        _save_course(session, course_id, course)
+        _save_course(session, course_id, course, snapshot=snapshot)
         return {
             "status": "completed",
             "updated_topics": len(enriched_topics),
@@ -168,9 +215,46 @@ def build_course_content(user_id: str, course_id: str) -> dict:
         }
     except Exception:
         session.rollback()
+        if started:
+            # 生成が途中で落ちた事実を行に残す（IK-0375）。processing のまま放置すると
+            # 学習画面が「準備中」を出し続ける。記帳の失敗で元の例外を隠さない。
+            try:
+                _persist_content_status(
+                    session,
+                    course_id,
+                    _content_status_payload("failed", CONTENT_BUILD_FAILED_MESSAGE),
+                )
+            except Exception:  # noqa: BLE001 — 元の例外を優先する
+                session.rollback()
+                logger.warning(
+                    "Failed to record failed course content status: course_id=%s",
+                    course_id,
+                    exc_info=True,
+                )
         raise
     finally:
         session.close()
+
+
+def _load_component_uuid_index(session, document_ids: list[str]) -> dict:
+    """``(document_id, agent component ID) -> UUID``（正本は ``core.frozen_component_refs``・fail-soft）。"""
+    try:
+        from core.frozen_component_refs import load_component_uuid_index
+
+        return load_component_uuid_index(session, document_ids)
+    except Exception:  # noqa: BLE001 — db_id が付かないだけで凍結は止めない
+        logger.warning("course_content: component uuid index unavailable", exc_info=True)
+        return {}
+
+
+def _stamp_component_db_ids(topics: list[dict], index: dict) -> int:
+    try:
+        from core.frozen_component_refs import stamp_component_db_ids
+
+        return stamp_component_db_ids(topics, index)
+    except Exception:  # noqa: BLE001
+        logger.warning("course_content: component db_id stamping failed", exc_info=True)
+        return 0
 
 
 def _invalidate_topic_lecture_audio_cache(session, course_id: str) -> None:
@@ -389,9 +473,22 @@ def _explanatory_text(value) -> str:
     （``_spoken_plain_text`` と同じ方針。表示用の latex / raw_text は温存する）。
     """
     text = str(value or "").strip()
-    if not text or _looks_like_tex_math(text):
+    if not text or _looks_like_tex_math(text) or is_uninformative_equation_summary(text):
         return ""
     return text
+
+
+#: 解析段が「推定できなかった」ときに書く要約（A層 ``equation_semantics/repair.py`` の
+#: 修復失敗の出力）。状態を言う文であって式の意味ではないので、名前・説明の材料にしない
+#: （IK-0873）。一致は ``test_lecture_studio_round25.py`` が A層のソースと突き合わせて固定する。
+UNINFORMATIVE_EQUATION_SUMMARIES: frozenset[str] = frozenset({
+    "equation semantics could not be inferred.",
+})
+
+
+def is_uninformative_equation_summary(text: object) -> bool:
+    """式の要約が「推定できなかった」という状態の文か（IK-0873）。"""
+    return str(text or "").strip().casefold() in UNINFORMATIVE_EQUATION_SUMMARIES
 
 
 def _equation_link_status(eq: dict) -> str:
@@ -688,9 +785,13 @@ def _document_sections_by_id(artifacts: dict) -> dict[str, dict]:
 
 
 def _section_title(section: dict | None) -> str:
+    """節見出し。見出しでない断片（IK-0370）は空を返し、呼び出し側は掲載節を出さない。"""
     if not isinstance(section, dict):
         return ""
-    return str(section.get("title") or "").strip()
+    raw = str(section.get("title") or "")
+    if not is_valid_section_title(raw):
+        return ""
+    return raw.strip()
 
 
 def _equation_section_id(eq: dict) -> str:
@@ -705,9 +806,201 @@ def _equation_section_id(eq: dict) -> str:
     return str(eq.get("section_id") or "").strip()
 
 
+# ---------------------------------------------------------------------------
+# 論文内ローカル ID の document スコープ（IK-0377）
+# ---------------------------------------------------------------------------
+#
+# component_id（``comp_001``）/ equation_id（``eq_1`` — 印字番号由来）/ claim_id /
+# evidence_id（``ev_*``）/ block_id は **document の中でしか一意でない**。旧実装は
+# これらを素の ID だけで引く平たい索引に集めていたため、2本の論文から作ったコースで
+# 片方の論文のトピックに別論文の同名の式・主張・原文抜粋が付いた（観測: 中性子星の
+# 状態方程式の章に Cep B フィラメント論文の ``eq_1``〜``eq_7`` が並んだ）。
+#
+# 規則: ローカル ID は必ず「それを参照している要素の document」の中で解決する。
+# 別 document の同名 ID へは**決して落ちない**。document が決まらない参照は解決しない
+# （空のまま）。
+
+#: ビルド中だけ artifact レコードに添える「このレコードを読んだ document」の印。
+#: 値は ``artifacts_by_doc`` のキー（= ``documents.id`` の文字列）で、agent が
+#: レコードに書いた ``document_id``（material_id 形のことがある）より優先する。
+#: 投影は明示したキーだけを拾うので snapshot には出ない（``_APPROVED_EXPLANATION_KEY``
+#: と同じ扱い）。
+_SCOPE_DOC_KEY = "_course_scope_document_id"
+
+
+def _scope_doc(item: Any) -> str:
+    """レコードの document（スコープ印 → ``document_id`` の順）。無ければ空文字。"""
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get(_SCOPE_DOC_KEY) or item.get("document_id") or "").strip()
+
+
+class _BundleScope:
+    """``_collect_structured_content`` の bundle を ``(document_id, ローカル ID)`` で引く。
+
+    bundle に ``scoped``（``_collect_structured_content`` が常に付ける）があれば
+    それだけを読む（厳密: document が空・不一致なら解決しない）。``scoped`` の無い
+    手組みの bundle（単一論文前提のテスト double）は平たい索引を読み、レコード側と
+    参照側の document が**両方分かっていて食い違うときだけ**拒否する（従来互換）。
+    """
+
+    def __init__(self, bundle: dict | None):
+        bundle = bundle if isinstance(bundle, dict) else {}
+        scoped = bundle.get("scoped")
+        self._scoped: dict | None = scoped if isinstance(scoped, dict) else None
+        self._flat = bundle
+
+    @property
+    def strict(self) -> bool:
+        return self._scoped is not None
+
+    def get(self, kind: str, document_id: object, local_id: object) -> dict | None:
+        local_id = str(local_id or "").strip()
+        if not local_id:
+            return None
+        document_id = str(document_id or "").strip()
+        if self._scoped is not None:
+            if not document_id:
+                return None
+            item = (self._scoped.get(kind) or {}).get((document_id, local_id))
+            return item if isinstance(item, dict) else None
+        item = (self._flat.get(kind) or {}).get(local_id)
+        if not isinstance(item, dict):
+            return None
+        item_doc = _scope_doc(item)
+        if document_id and item_doc and item_doc != document_id:
+            return None
+        return item
+
+    def iter_components(self) -> list[tuple[str, str, dict]]:
+        """``(document_id, component_id, component)`` を索引の順に返す。"""
+        if self._scoped is not None:
+            return [
+                (doc, cid, comp)
+                for (doc, cid), comp in (self._scoped.get("components") or {}).items()
+                if isinstance(comp, dict)
+            ]
+        return [
+            (_scope_doc(comp), str(cid), comp)
+            for cid, comp in (self._flat.get("components") or {}).items()
+            if isinstance(comp, dict)
+        ]
+
+    def iter_kind(self, kind: str, document_id: object) -> list[tuple[str, dict]]:
+        """``(ローカル ID, レコード)`` を **その document の中だけ**、索引の順に返す。
+
+        厳密（``scoped``）では document が空なら何も返さない。手組みの平たい索引では
+        :meth:`get` と同じく、レコード側と参照側の document が両方分かっていて食い違う
+        ものだけを落とす（従来互換）。
+        """
+        document_id = str(document_id or "").strip()
+        if self._scoped is not None:
+            if not document_id:
+                return []
+            return [
+                (local_id, item)
+                for (doc, local_id), item in (self._scoped.get(kind) or {}).items()
+                if doc == document_id and isinstance(item, dict)
+            ]
+        out: list[tuple[str, dict]] = []
+        for local_id, item in (self._flat.get(kind) or {}).items():
+            if not isinstance(item, dict):
+                continue
+            item_doc = _scope_doc(item)
+            if document_id and item_doc and item_doc != document_id:
+                continue
+            out.append((str(local_id), item))
+        return out
+
+    def figure_links(self, document_id: object, claim_id: object) -> list[dict]:
+        claim_id = str(claim_id or "").strip()
+        document_id = str(document_id or "").strip()
+        if not claim_id:
+            return []
+        if self._scoped is not None:
+            if not document_id:
+                return []
+            return list((self._scoped.get("figure_claim_links") or {}).get((document_id, claim_id)) or [])
+        return [
+            link
+            for link in (self._flat.get("figure_claim_links") or {}).get(claim_id) or []
+            if isinstance(link, dict)
+            and not (
+                document_id
+                and str(link.get("document_id") or "")
+                and str(link.get("document_id") or "") != document_id
+            )
+        ]
+
+    def claim_address(self, document_id: object, claim_id: object) -> str:
+        """教材に書く主張の宛先（``assign_claim_addresses``）。索引に無ければ素の ID。"""
+        claim_id = str(claim_id or "").strip()
+        if not claim_id or self._scoped is None:
+            return claim_id
+        address = (self._scoped.get("claim_addresses") or {}).get(
+            (str(document_id or "").strip(), claim_id)
+        )
+        return str(address or claim_id)
+
+    def narrative(self, document_id: object, component_id: object) -> dict | None:
+        component_id = str(component_id or "").strip()
+        document_id = str(document_id or "").strip()
+        if self._scoped is not None:
+            entry = (self._scoped.get("narrative_by_component") or {}).get((document_id, component_id))
+        else:
+            entry = (self._flat.get("narrative_by_component") or {}).get(component_id)
+        return entry if isinstance(entry, dict) else None
+
+    def has_narrative(self) -> bool:
+        if self._scoped is not None:
+            return bool(self._scoped.get("narrative_by_component"))
+        return bool(self._flat.get("narrative_by_component"))
+
+    def count(self, kind: str) -> int:
+        if self._scoped is not None:
+            return len(self._scoped.get(kind) or {})
+        return len(self._flat.get(kind) or {})
+
+
+def _scope_for_flat(
+    *,
+    claims: dict | None = None,
+    evidence: dict | None = None,
+    figure_claim_links: dict | None = None,
+) -> _BundleScope:
+    """平たい索引を直接受け取る旧シグネチャ用の（従来互換の）スコープ。"""
+    return _BundleScope({
+        "claims": claims or {},
+        "evidence": evidence or {},
+        "figure_claim_links": figure_claim_links or {},
+    })
+
+
+def _linked_refs(components: list[dict], field: str, *, include_evidence_refs: bool = False) -> list[tuple[str, str]]:
+    """component が参照するローカル ID を **その component の document** 付きで集める。
+
+    並びは ``_linked_ids`` と同じ（component の宣言順・初出優先の重複除去）。
+    ``include_evidence_refs`` のときは ``evidence_refs.<field から linked_ を除いた名>``
+    も、``linked_*`` を全 component 分集めた**後に**続ける（旧 ``ref_ids`` と同じ順）。
+    """
+    refs: list[tuple[str, str]] = []
+    for component in components:
+        doc = _scope_doc(component)
+        refs.extend((doc, str(item)) for item in _as_list(component.get(field)) if item)
+    if include_evidence_refs:
+        sub_field = field.replace("linked_", "")
+        for component in components:
+            evidence_refs = component.get("evidence_refs")
+            if isinstance(evidence_refs, dict):
+                doc = _scope_doc(component)
+                refs.extend((doc, str(v)) for v in _as_list(evidence_refs.get(sub_field)) if v)
+    return list(dict.fromkeys(refs))
+
+
 def _collect_structured_content(
     artifacts_by_doc: dict[str, dict],
     equation_explanations: dict[tuple[str, str], str] | None = None,
+    claim_rows: list[dict] | None = None,
 ) -> dict:
     """artifact 群から course snapshot の素材を集める。
 
@@ -716,6 +1009,9 @@ def _collect_structured_content(
     中だけ**で equation レコードへ添え、見出し生成の材料にする（省略時は従来どおり
     説明なしのラダー）。document ごとのループ内で引くため、別論文の同名 equation ID
     と混線しない。
+
+    ``claim_rows`` は ``_load_claim_address_rows`` が返す live 行で、教材に書く主張の宛先を
+    論文内で一意にする材料（``assign_claim_addresses``）。省略時は live 行なしとして扱う。
     """
     equation_explanations = equation_explanations or {}
     mapping_topics: list[dict] = []
@@ -732,13 +1028,38 @@ def _collect_structured_content(
     # の決定）であり、claim 側には figure_ids が populate されないため、ここで明示的に
     # 逆方向へたどる（Phase 4 §7.1）。
     figure_claim_links: dict[str, list[dict]] = {}
+    # (document_id, 論文内ローカル ID) で引く索引（IK-0377）。component_id / equation_id /
+    # claim_id / evidence_id は **document 内でしか一意でない**（``eq_1`` は印字番号由来で
+    # 論文ごとに振り直される）。上の平たい索引は後勝ちで別論文の同名 ID を潰すため、
+    # トピックの肉付け（``_enrich_topics``）は必ずこちらを ``_BundleScope`` 経由で読む。
+    # 平たい索引は既存の呼び出し面（件数・テスト）のために残す。
+    scoped: dict[str, dict] = {
+        "components": {},
+        "equations": {},
+        "claims": {},
+        "evidence": {},
+        "figure_claim_links": {},
+        "narrative_by_component": {},
+        # thesis_support の単位 → 論文の中心命題・支持構造のノード（IK-0453）。
+        # キーは単位の stable_key と ``text:`` + 正規化本文（stable_key が衝突接尾辞で
+        # ずれたとき用）。単位の行は claim を DB UUID でしか持たないので、単位が
+        # 参照する主張はこのノードの thesis 側 claim 参照から引く。
+        "thesis_nodes": {},
+    }
+    thesis_nodes: dict[str, dict] = {}
+    # (document_id, agent claim_id) -> claim_object_builder の中での出現数。rhetorical_role の
+    # span_id は block ごとに振り直されるため、同じ agent claim_id が1論文の中で2回以上
+    # 現れ得る（教材の ⚓ 宛先を一意にする材料。focus_document_design.md §追補）。
+    claim_id_counts: dict[tuple[str, str], int] = {}
 
     for document_id, artifacts in artifacts_by_doc.items():
+        document_id = str(document_id or "").strip()
         mapping = _as_dict(artifacts.get("course_mapping"))
         for topic in _as_list(mapping.get("topics")):
             if isinstance(topic, dict):
                 topic = dict(topic)
                 topic.setdefault("document_id", document_id)
+                topic[_SCOPE_DOC_KEY] = document_id
                 mapping_topics.append(topic)
 
         # narrative_annotator（#360）は TheoryOperationGraph 主グラフノードの
@@ -774,13 +1095,17 @@ def _collect_structured_content(
             narrative_order += 1
             for component_id in _as_list(step.get("linked_component_ids")):
                 component_id = str(component_id or "").strip()
-                if not component_id or component_id in narrative_by_component:
+                if not component_id:
                     continue
-                narrative_by_component[component_id] = {
+                entry = {
                     "role": role,
                     "visual_strategy": visual_strategy,
                     "order": narrative_order,
                 }
+                scoped["narrative_by_component"].setdefault((document_id, component_id), entry)
+                if component_id in narrative_by_component:
+                    continue
+                narrative_by_component[component_id] = entry
 
         assembly = _as_dict(artifacts.get("component_assembly"))
         for component in _as_list(assembly.get("components")):
@@ -791,7 +1116,9 @@ def _collect_structured_content(
                 narrative_role = narrative_role_by_component_id.get(comp_id)
                 if narrative_role:
                     item["narrative_role"] = narrative_role
+                item[_SCOPE_DOC_KEY] = document_id
                 components[comp_id] = item
+                scoped["components"].setdefault((document_id, comp_id), item)
 
         # 掲載節（element_context_presentation_redesign.md §5.1 / RC12）。式は
         # source_location.section_id を持つが、節**見出し**は document_structure に
@@ -805,8 +1132,11 @@ def _collect_structured_content(
                 continue
             eq = dict(equation)
             eq.setdefault("document_id", document_id)
+            eq[_SCOPE_DOC_KEY] = document_id
             section_label = _section_title(sections_by_id.get(_equation_section_id(eq)))
-            if section_label:
+            # IK-0442: 文書構造の「節」には図の軸ラベル（「B-field strength (mG)」）や
+            # 目盛りが混ざる。見出しとして妥当なものだけを掲載節として載せる。
+            if section_label and section_title_rejection_reason(section_label) is None:
                 eq["section_label"] = section_label
             # equation_semantics の生成物はネスト構造（source_extraction / reconstruction）で
             # 保存されており、トップレベルに latex / plain_text を持たない。後段の
@@ -820,6 +1150,7 @@ def _collect_structured_content(
                 if approved_body:
                     eq[_APPROVED_EXPLANATION_KEY] = approved_body
                 equations[eq_id] = eq
+                scoped["equations"].setdefault((document_id, eq_id), eq)
 
         # claims.json (ClaimObjectBuilder) を取り込み、claim を根拠アイテム化できるようにする。
         claim_artifact = _as_dict(artifacts.get("claim_object_builder"))
@@ -827,7 +1158,11 @@ def _collect_structured_content(
             if isinstance(claim, dict) and claim.get("claim_id"):
                 item = dict(claim)
                 item.setdefault("document_id", document_id)
+                item[_SCOPE_DOC_KEY] = document_id
                 claims[str(item["claim_id"])] = item
+                scoped["claims"].setdefault((document_id, str(item["claim_id"])), item)
+                claim_key = (document_id, str(item["claim_id"]))
+                claim_id_counts[claim_key] = claim_id_counts.get(claim_key, 0) + 1
 
         # evidence_registry (EvidenceRegistryBuilder) を取り込み、PDF 原文スパンを
         # kind=source の根拠アイテム化できるようにする。
@@ -836,7 +1171,17 @@ def _collect_structured_content(
             if isinstance(record, dict) and record.get("evidence_id"):
                 item = dict(record)
                 item.setdefault("document_id", document_id)
+                item[_SCOPE_DOC_KEY] = document_id
+                # IK-0584: 出典カードの見出しは掲載節の見出し（式と同じ規則で解決できた
+                # ものだけ）。見出しが無ければ見出しを出さず、引用だけを描く。
+                evidence_source = item.get("source") if isinstance(item.get("source"), dict) else {}
+                evidence_section = _section_title(
+                    sections_by_id.get(str(evidence_source.get("section_id") or ""))
+                )
+                if evidence_section and section_title_rejection_reason(evidence_section) is None:
+                    item["section_label"] = evidence_section
                 evidence[str(item["evidence_id"])] = item
+                scoped["evidence"].setdefault((document_id, str(item["evidence_id"])), item)
 
         # figure_table_semantics (FigureRecord) を claim_id → 図 の逆引き索引にする。
         # FigureRecord.figure_id は caption ラベルをそのまま使う表記（例 'fig_3.3'、
@@ -847,6 +1192,21 @@ def _collect_structured_content(
         # し figure_key のまま保持しておいて、_topic_evidence_links 側で
         # figures_index（_resolve_figure_ref 経由、normalize_figure_join_key で
         # 両辺を正規化してから突合）を使って解決する。
+        for node in ko_learning_units.thesis_support_nodes(
+            _as_dict(artifacts.get("thesis_reconstruction"))
+        ):
+            item = dict(node)
+            item["document_id"] = document_id
+            item[_SCOPE_DOC_KEY] = document_id
+            for key in (
+                ko_learning_units.thesis_support_stable_key(document_id, node),
+                _thesis_text_key(node.get("text")),
+            ):
+                if not key:
+                    continue
+                thesis_nodes.setdefault(key, item)
+                scoped["thesis_nodes"].setdefault((document_id, key), item)
+
         fig_tbl_artifact = _as_dict(artifacts.get("figure_table_semantics"))
         for fig in _as_list(fig_tbl_artifact.get("figures")):
             if not isinstance(fig, dict):
@@ -859,11 +1219,15 @@ def _collect_structured_content(
                 claim_id = str(claim_id or "").strip()
                 if not claim_id:
                     continue
-                figure_claim_links.setdefault(claim_id, []).append({
+                link = {
                     "document_id": document_id,
                     "figure_key": figure_key,
                     "caption": caption,
-                })
+                }
+                figure_claim_links.setdefault(claim_id, []).append(link)
+                scoped["figure_claim_links"].setdefault((document_id, claim_id), []).append(link)
+
+    scoped["claim_addresses"] = assign_claim_addresses(scoped, claim_id_counts, claim_rows)
 
     return {
         "mapping_topics": mapping_topics,
@@ -873,7 +1237,137 @@ def _collect_structured_content(
         "evidence": evidence,
         "figure_claim_links": figure_claim_links,
         "narrative_by_component": narrative_by_component,
+        "thesis_nodes": thesis_nodes,
+        "scoped": scoped,
     }
+
+
+# ---------------------------------------------------------------------------
+# 教材の主張の宛先（``![[claim:…]]`` / evidence_links の claim target）
+# ---------------------------------------------------------------------------
+# claim_object_builder の agent claim_id（``claim_span_007``）は span_id 由来で、span_id は
+# block ごとに振り直されるため**1論文の中でも一意でない**（第 17 周: 同じ ``claim_span_007``
+# が論文内の複数の主張に当たり、学習者の ⚓ が「特定できません」になった）。新しい freeze
+# では教材に書く宛先を論文内で一意にする（focus_document_design.md §追補「主張の宛先」）:
+#
+# 1. DB UUID（``theory_claims.id``）— live 行に1対1で着地できるとき。
+# 2. ``{block_id}:{agent_claim_id}`` — UUID に着地できないが、出典 block が分かるとき
+#    （live 行が引けたのに曖昧 / 同じ claim_id が artifact に複数ある）。
+# 3. 素の agent claim_id — それ以外（live 行が読めず artifact の中でも一意 = 従来どおり）。
+#
+# 読み手（``core.element_context._resolve_claim``）は3形すべてを受け、この順に狭める。
+# 旧教材の素の ID は ``legacy_ids`` で従来どおり解決する（推測はしない）。
+
+
+def _load_claim_address_rows(session, document_ids: list[str]) -> list[dict]:
+    """主張の宛先を UUID にするための live 行（読み取り専用・失敗は空 = 従来の宛先）。"""
+    if not document_ids:
+        return []
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id::text AS id, document_id::text AS document_id,
+                       parent_claim_id::text AS parent_claim_id, origin,
+                       source_scope->'legacy_ids' AS legacy_ids,
+                       source_scope->>'block_id' AS block_id
+                FROM theory_claims_live
+                WHERE document_id = ANY(CAST(:doc_ids AS uuid[]))
+            """),
+            {"doc_ids": [str(d) for d in document_ids]},
+        ).mappings().fetchall()
+    except Exception:  # noqa: BLE001
+        logger.warning("course_content: claim address rows read failed", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+    out: list[dict] = []
+    for row in rows or []:
+        try:
+            out.append(dict(row))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _claim_row_legacy_ids(row: dict) -> list[str]:
+    raw = row.get("legacy_ids")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            raw = []
+    return [str(x) for x in raw] if isinstance(raw, list) else []
+
+
+def claim_address_for(
+    claim: dict,
+    document_id: str,
+    claim_id: str,
+    *,
+    block_ids: list[str],
+    rows: list[dict] | None,
+    duplicated: bool,
+) -> str:
+    """1つの主張の教材上の宛先（上の3形のどれか）を決める純関数。
+
+    ``rows`` はその document の live 行（``_load_claim_address_rows``）。``None`` / 空は
+    「live 行を読めなかった」= UUID 化しない。UUID 化は agent claim_id を legacy_ids に持つ
+    主張オブジェクトの行（origin != span）がちょうど1行に絞れるときだけ（出典 block →
+    親子の重複除去の順で狭める。推測で1行を選ばない）。
+    """
+    del claim  # 将来の材料（stable_key 等）のための引数。現状は ID と block だけで決まる。
+    claim_id = str(claim_id or "").strip()
+    if not claim_id:
+        return claim_id
+    if rows:
+        candidates = [
+            r for r in rows
+            if str(r.get("origin") or "") != CLAIM_ORIGIN_SPAN
+            and claim_id in _claim_row_legacy_ids(r)
+        ]
+        if len(candidates) > 1 and block_ids:
+            primary = [r for r in candidates if str(r.get("block_id") or "") == block_ids[0]]
+            if not primary:
+                primary = [r for r in candidates if str(r.get("block_id") or "") in block_ids]
+            if primary:
+                candidates = primary
+        if len(candidates) > 1:
+            parents = {str(r.get("parent_claim_id") or "") for r in candidates}
+            candidates = [r for r in candidates if str(r.get("id") or "") not in parents]
+        if len(candidates) == 1 and str(candidates[0].get("id") or "").strip():
+            return str(candidates[0]["id"]).strip()
+    if (rows or duplicated) and block_ids:
+        return f"{block_ids[0]}:{claim_id}"
+    return claim_id
+
+
+def assign_claim_addresses(
+    scoped: dict,
+    claim_id_counts: dict[tuple[str, str], int] | None,
+    claim_rows: list[dict] | None,
+) -> dict[tuple[str, str], str]:
+    """``(document_id, agent claim_id) -> 教材上の宛先`` の索引（scoped の claims 全件）。"""
+    rows_by_doc: dict[str, list[dict]] = {}
+    for row in claim_rows or []:
+        if isinstance(row, dict):
+            rows_by_doc.setdefault(str(row.get("document_id") or "").strip(), []).append(row)
+    counts = claim_id_counts or {}
+    scope = _BundleScope({"scoped": scoped})
+    addresses: dict[tuple[str, str], str] = {}
+    for (doc, claim_id), claim in (scoped.get("claims") or {}).items():
+        if not isinstance(claim, dict):
+            continue
+        addresses[(doc, claim_id)] = claim_address_for(
+            claim,
+            doc,
+            claim_id,
+            block_ids=_claim_block_ids(claim, doc, scope),
+            rows=rows_by_doc.get(doc),
+            duplicated=counts.get((doc, claim_id), 0) > 1,
+        )
+    return addresses
 
 
 def _load_chunks(session, material_ids: list[str]) -> dict[str, list[dict]]:
@@ -1049,12 +1543,150 @@ UNCOVERED_SECTIONS_NOTE = (
 )
 
 
-def _uncovered_section_titles(artifacts_by_doc: dict[str, dict]) -> list[str]:
+# ---------------------------------------------------------------------------
+# 節見出しの妥当性（IK-0370）
+# ---------------------------------------------------------------------------
+#
+# 文書構造の ``sections`` には見出しでないブロック（図の軸目盛・表のセル・論文ヘッダ・
+# 参考文献・雑誌のフッタ）が「節」として混ざることがある（根本は文書構造側の節判定で、
+# そちらは別課題）。本モジュールがその題名を「章の名前」として利用者向けの文に載せる前に、
+# 決定論的な検査で見出しでない断片を除く。**除いた事実は run 内部の記録に残す**
+# （``uncovered_sections_dropped``）— 黙って落とさない。学習者向けの事実文に件数は書かない。
+
+#: 数値に添えられる単位・目盛の記号（「40′」「100 kpc」「0.5 GeV」等を数値断片と判定する）。
+_SECTION_UNIT_TOKENS = frozenset({
+    "deg", "arcmin", "arcsec", "mas", "pc", "kpc", "mpc", "gpc", "au", "ly",
+    "ev", "kev", "mev", "gev", "tev", "hz", "khz", "mhz", "ghz", "thz",
+    "k", "mk", "s", "ms", "us", "ns", "yr", "kyr", "myr", "gyr",
+    "m", "cm", "mm", "um", "nm", "km", "g", "kg", "mag", "dex", "jy", "mjy", "ujy",
+    "msun", "m⊙", "%", "σ", "sigma",
+})
+_SECTION_NUMERIC_TOKEN_RE = re.compile(
+    r"^[\-+−–—±~≈<>≤≥(\[]*"
+    r"(?:\d[\d.,]*(?:[eE×x][\-+−]?\d+)?|[.,]\d+)"
+    r"[)\]′″'\"°%]*,?$"
+)
+#: 記号だけのトークン（区切り・括弧・引用符・演算子）。
+_SECTION_PUNCT_TOKEN_RE = re.compile(r"^[\W_]+$", re.UNICODE)
+#: 空白を含まない1語の中に数式・軸ラベル様の記号が混じる（``RSFR(z)/RSFR,0`` 等）。
+_SECTION_FORMULA_CHARS_RE = re.compile(r"[/()=^_{}\\|<>\[\]]")
+#: 既知の定型（参考文献・謝辞・組版ヘッダ・arXiv ヘッダ・雑誌フッタ）。番号付き見出しの
+#: 「7 References」「7. ACKNOWLEDGMENTS」も同じ扱いにする。
+_SECTION_BOILERPLATE_RES = (
+    re.compile(
+        r"^(?:[\dIVXivx]+[.)]?\s*)?(?:references?|bibliography|literature\s+cited|"
+        r"acknowledg(?:e)?ments?|funding|data\s+availability|author\s+contributions?|"
+        r"conflicts?\s+of\s+interest|competing\s+interests?)\s*[.:]?$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^(?:[\dIVXivx]+[.)]?\s*)?(?:参考文献|引用文献|文献|謝辞)$"),
+    re.compile(r"typeset\s+using", re.IGNORECASE),
+    re.compile(r"^draft\s+version\b", re.IGNORECASE),
+    re.compile(r"\barxiv\s*:\s*\d{4}\.\d{4,5}", re.IGNORECASE),
+    re.compile(r"^(?:preprint|accepted|received|submitted)\b.*\d{4}", re.IGNORECASE),
+    # 雑誌フッタ: 「MNRAS 000, 1–16 (2026)」「ApJ 123, 45-67」
+    re.compile(r"^[A-Z][A-Za-z&.]{1,11}\s+\d{1,4}\s*,\s*\d+\s*[–—\-]\s*\d+"),
+    re.compile(r"©|\bcopyright\b|\be-?mail\b|corresponding\s+author", re.IGNORECASE),
+    # 参考文献の行: 「Abbott, B. P., et al. 2016, PhRvL, 116, 061102」
+    re.compile(r"\bet\s+al\."),
+    re.compile(r"^[A-Z][\w'’\-]+,\s+(?:[A-Z]\.\s*[,-]?\s*)+"),
+    re.compile(r"\b(?:19|20)\d{2}[a-z]?,\s*[A-Z][A-Za-z&.]+,\s*\d+"),
+)
+#: 表の列見出しとして現れる一般語（IK-0370 追補。砂場で ``Count`` が章の名前として出た）。
+#: 見出し全体が（末尾の括弧書きの単位を除いて）この語と**完全一致**するときだけ断片と
+#: みなす — 「Case study」「Column density profiles」のような実在の見出しは残す。
+#: 「Model」「Results」「Parameters」のように実際の節見出しになりうる語は入れない。
+_SECTION_TABLE_HEADER_WORDS = frozenset({
+    "count", "counts",
+    "case", "cases",
+    "cut", "cuts",
+    "estimate", "estimates",
+    "column density", "column densities",
+    "value", "values",
+    "total",
+    "mean", "median",
+})
+#: 列見出しの末尾に付く括弧書きの単位（「P (%)」「Column Density (cm^-2)」）。
+_SECTION_TRAILING_UNIT_RE = re.compile(r"\s*[(\[][^()\[\]]*[)\]]\s*$")
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]")
+#: 図の軸ラベルの末尾の単位（「B-field strength (mG)」「Velocity (km/s)」「n (cm-3)」）。
+#: 括弧の中が**単位の記号だけ**のときに限る（「Standard Model (SM)」のような略語は残す。
+#: IK-0442）。記号は大小を区別して照合する（``mG`` と略語 ``MG`` を分ける）。
+_AXIS_LABEL_UNIT_PAREN_RE = re.compile(r"^(?P<head>.*\S)\s*[(\[](?P<unit>[^()\[\]]{1,16})[)\]]\s*$")
+_AXIS_LABEL_UNIT_SPLIT_RE = re.compile(r"[\s/^·⋅*\-−–]+")
+_AXIS_LABEL_UNITS = frozenset({
+    "G", "mG", "µG", "μG", "uG", "nG", "T", "mT", "K", "mK", "Jy", "mJy", "µJy", "μJy",
+    "cm", "mm", "m", "km", "pc", "kpc", "Mpc", "Gpc", "au", "AU", "ly",
+    "s", "ms", "yr", "kyr", "Myr", "Gyr", "Hz", "kHz", "MHz", "GHz",
+    "eV", "keV", "MeV", "GeV", "TeV", "erg", "W", "g", "kg", "Msun", "M⊙",
+    "deg", "arcsec", "arcmin", "mas", "rad", "sr", "mag", "dex", "%",
+})
+_WORD_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
+
+
+def section_title_rejection_reason(title: Any) -> str | None:
+    """節見出しとして妥当でなければ理由の語（``newline`` 等）を、妥当なら None を返す。
+
+    決定論・非LLM。番号付き見出し（``2.1 Astrophysical modeling``・``2. METHODS``）は残す。
+    日本語の2文字見出し（「序論」「結論」）は短さの規則の例外にする。
+    """
+    raw = str(title or "")
+    text = raw.strip()
+    if not text:
+        return "empty"
+    if "\n" in raw or "\r" in raw:
+        return "newline"
+    cjk_count = len(_CJK_RE.findall(text))
+    if len(text) < 3 and cjk_count < 2:
+        return "too_short"
+    tokens = text.split()
+    if all(
+        _SECTION_NUMERIC_TOKEN_RE.match(tok)
+        or _SECTION_PUNCT_TOKEN_RE.match(tok)
+        or tok.lower().strip(".,") in _SECTION_UNIT_TOKENS
+        for tok in tokens
+    ):
+        return "numeric"
+    for pattern in _SECTION_BOILERPLATE_RES:
+        if pattern.search(text):
+            return "boilerplate"
+    if len(tokens) == 1 and _SECTION_FORMULA_CHARS_RE.search(text):
+        return "formula_like"
+    header_core = " ".join(_SECTION_TRAILING_UNIT_RE.sub("", text).split()).strip(" .:").casefold()
+    if header_core in _SECTION_TABLE_HEADER_WORDS:
+        return "table_header"
+    if not cjk_count and not _WORD_RE.search(text):
+        # 2文字以上の語を1つも含まない（「S8」「40′ 20′」等の目盛・記号の断片）
+        return "no_word"
+    axis = _AXIS_LABEL_UNIT_PAREN_RE.match(text)
+    if axis:
+        unit_tokens = [
+            re.sub(r"[0-9]+", "", tok) for tok in _AXIS_LABEL_UNIT_SPLIT_RE.split(axis.group("unit"))
+        ]
+        unit_tokens = [tok for tok in unit_tokens if tok]
+        if unit_tokens and all(tok in _AXIS_LABEL_UNITS for tok in unit_tokens):
+            # 図の軸ラベル（IK-0442。式の「掲載節」に軸ラベルが入っていた）
+            return "axis_label"
+    return None
+
+
+def is_valid_section_title(title: Any) -> bool:
+    """``section_title_rejection_reason`` の真偽版。"""
+    return section_title_rejection_reason(title) is None
+
+
+def _uncovered_section_titles(
+    artifacts_by_doc: dict[str, dict], *, dropped: list[str] | None = None
+) -> list[str]:
     """「学ぶ単位」が立たなかった章の題名（document 横断・順序保持・重複除去。P2-R11）。
 
     判定の正本は ``core/knowledge_objects/learning_units.py::uncovered_sections``
     （決定論・非LLM）。ここは artifact の取り出しと題名の平坦化だけを行い、
     読めない document は静かに飛ばす（freeze を止めない = LU8）。
+
+    見出しでない断片（図の目盛・表セル・ヘッダ・参考文献。IK-0370）は
+    ``is_valid_section_title`` で除き、``dropped`` が渡されていれば除いた原文を
+    順序保持・重複除去で追記する（run 内部の記録。利用者向けの文には出さない）。
     """
     titles: list[str] = []
     for artifacts in (artifacts_by_doc or {}).values():
@@ -1068,8 +1700,15 @@ def _uncovered_section_titles(artifacts_by_doc: dict[str, dict]) -> list[str]:
             logger.warning("uncovered section listing failed", exc_info=True)
             continue
         for row in rows:
-            title = str((row or {}).get("title") or "").strip()
-            if title and title not in titles:
+            raw_title = str((row or {}).get("title") or "")
+            title = raw_title.strip()
+            if not title:
+                continue
+            if not is_valid_section_title(raw_title):
+                if dropped is not None and title not in dropped:
+                    dropped.append(title)
+                continue
+            if title not in titles:
                 titles.append(title)
     return titles
 
@@ -1143,7 +1782,11 @@ def _merge_topic_units(
 
     if unit_parent_index:
         for component in components:
-            row = unit_parent_index.get(str(component.get("component_id") or ""))
+            # 逆引きは (document, component_id)。別論文の同名 component の unit を
+            # 後付けしない（IK-0377）。
+            row = unit_parent_index.get(
+                (_scope_doc(component), str(component.get("component_id") or ""))
+            )
             if not isinstance(row, dict):
                 continue
             key = str(row.get("stable_key") or "")
@@ -1175,42 +1818,62 @@ def _units_for_topic(topic: dict, units_by_key: dict[str, dict]) -> list[tuple[d
     return resolved
 
 
-def _component_ids_from_units(
-    unit_rows: list[dict], components: dict[str, dict]
-) -> tuple[list[str], dict[str, str]]:
-    """unit が束ねる component の agent ID 一覧と、``component_id -> 親 unit label``。
+def _unit_document_id(row: dict) -> str:
+    return str((row or {}).get("document_id") or "").strip()
+
+
+def _component_refs_from_units(
+    unit_rows: list[dict], scope: "_BundleScope"
+) -> tuple[list[tuple[str, str]], dict[str, str]]:
+    """unit が束ねる component の ``(document_id, agent ID)`` と ``component_id -> 親 unit label``。
 
     突合に使うのは ``agent_payload.linked_component_agent_ids`` だけ（設計書 §4.1）。
     ``linked_component_ids`` は DB UUID で artifact の component 索引とは別名前空間
     なので混ぜない。artifact に居ない component は落とす（推測しない）。
+    **unit 行の document の中でだけ**引く（IK-0377。別論文の同名 component に落ちない）。
     """
-    ids: list[str] = []
+    refs: list[tuple[str, str]] = []
     display_labels: dict[str, str] = {}
     for row in unit_rows:
         unit_label = str(row.get("label") or "").strip()
+        doc = _unit_document_id(row)
         for component_id in course_units_mod.unit_component_agent_ids(row):
-            if component_id not in components:
+            if scope.get("components", doc, component_id) is None:
                 continue
             if component_id not in display_labels and unit_label:
                 display_labels[component_id] = unit_label
-            ids.append(component_id)
-    return list(dict.fromkeys(ids)), display_labels
+            refs.append((doc, component_id))
+    return list(dict.fromkeys(refs)), display_labels
 
 
-def _equations_from_units(unit_rows: list[dict], equations: dict[str, dict]) -> list[str]:
-    """unit が束ねる式の agent equation_id（artifact に実在するものだけ）。"""
-    ids: list[str] = []
+def _equation_refs_from_units(unit_rows: list[dict], scope: "_BundleScope") -> list[tuple[str, str]]:
+    """unit が束ねる式の ``(document_id, agent equation_id)``（その document の artifact に実在するものだけ）。"""
+    refs: list[tuple[str, str]] = []
     for row in unit_rows:
-        ids.extend(
-            eq_id
+        doc = _unit_document_id(row)
+        refs.extend(
+            (doc, eq_id)
             for eq_id in course_units_mod.unit_equation_agent_ids(row)
-            if eq_id in equations
+            if scope.get("equations", doc, eq_id) is not None
         )
-    return list(dict.fromkeys(ids))
+    return list(dict.fromkeys(refs))
 
 
-def _claim_ids_from_units(unit_rows: list[dict], claims: dict[str, dict]) -> list[str]:
-    """unit が束ねる claim の agent claim_id（artifact に実在するものだけ）。
+def _claim_refs_from_units(unit_rows: list[dict], scope: "_BundleScope") -> list[tuple[str, str]]:
+    """``_claim_ids_from_units`` の document 付き版（宛先の解決に document が要る）。"""
+    refs: list[tuple[str, str]] = []
+    for row in unit_rows:
+        doc = _unit_document_id(row)
+        refs.extend(
+            (doc, claim_id)
+            for claim_id in course_units_mod.unit_claim_agent_ids(row)
+            if scope.get("claims", doc, claim_id) is not None
+        )
+    return list(dict.fromkeys(refs))
+
+
+def _claim_ids_from_units(unit_rows: list[dict], scope: "_BundleScope") -> list[str]:
+    """unit が束ねる claim の agent claim_id（**unit の document の** artifact に実在するものだけ）。
 
     ``learning_units.linked_claim_ids`` は DB UUID なので、そのままでは
     ``![[claim:id]]`` の解決先（claim_object_builder の claim_id 名前空間）と
@@ -1219,40 +1882,407 @@ def _claim_ids_from_units(unit_rows: list[dict], claims: dict[str, dict]) -> lis
     """
     ids: list[str] = []
     for row in unit_rows:
+        doc = _unit_document_id(row)
         ids.extend(
             claim_id
             for claim_id in course_units_mod.unit_claim_agent_ids(row)
-            if claim_id in claims
+            if scope.get("claims", doc, claim_id) is not None
         )
     return list(dict.fromkeys(ids))
 
 
-def _unit_parent_index(units_by_key: dict[str, dict]) -> dict[str, dict]:
-    """``component agent ID -> その component を束ねている unit 行``（救済の逆引き）。
+#: 章立ての単位（section_block）から引く主張・式の上限（1 トピックに並べて読める量）。
+_SECTION_UNIT_CLAIM_LIMIT = 8
+_SECTION_UNIT_EQUATION_LIMIT = 6
+
+
+def _claim_block_ids(claim: dict, doc: str, scope: "_BundleScope") -> list[str]:
+    """claim の出典 block（``source_evidence_ids`` → evidence ``source.block_id``）。"""
+    blocks: list[str] = []
+    for evidence_id in _as_list(claim.get("source_evidence_ids")):
+        record = scope.get("evidence", doc, evidence_id)
+        if not isinstance(record, dict):
+            continue
+        source = record.get("source") if isinstance(record.get("source"), dict) else {}
+        block_id = str(source.get("block_id") or "").strip()
+        if block_id and block_id not in blocks:
+            blocks.append(block_id)
+    return blocks
+
+
+def section_block_share(units_by_key: dict[str, dict]) -> dict[tuple[str, str], int]:
+    """``(document_id, block_id) -> その block を載せている章立ての単位の数``（IK-0465）。
+
+    要旨（abstract）の block は同じ論文のほとんどの章立ての単位に入る（解析が要旨を各章の
+    根拠に含める）。単位の主張を引くとき、要旨の block の主張が上限を先に埋めると、
+    別の章を選んだトピックが同じ主張の並びになる。どの単位にも入る block を後回しに
+    するための数（外に出さない）。
+    """
+    share: dict[tuple[str, str], int] = defaultdict(int)
+    for row in (units_by_key or {}).values():
+        if str((row or {}).get("unit_kind") or "") != ko_learning_units.KIND_SECTION_BLOCK:
+            continue
+        doc = _unit_document_id(row)
+        for block_id in set(course_units_mod.unit_source_block_ids(row)):
+            share[(doc, block_id)] += 1
+    return dict(share)
+
+
+def _section_unit_refs(
+    unit_rows: list[dict],
+    scope: "_BundleScope",
+    block_share: dict[tuple[str, str], int] | None = None,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[tuple[str, str]]]:
+    """章立ての単位（``section_block``）が載せている主張・式・出典 block を引く（IK-0388）。
+
+    section_block の単位は component を束ねない（``agent_payload`` は ``block_type``
+    だけ）。``linked_claim_ids`` も DB UUID で artifact の claim 名前空間とは突合
+    できない。そのため従来は、章だけを選んだトピックに根拠が1つも付かなかった。
+
+    ここでは**実所在だけ**で引く（推定しない・LLM を呼ばない）:
+
+    - 主張: 出典 block（evidence ``source.block_id``）が単位の ``source_block_ids`` に
+      あるもの、または ``section_id`` が単位の ``section_ids`` にあるもの。
+      atomic 子を持つ親（``subclaim_ids`` 非空）は子で代表させて落とす。
+    - 式: ``source_location`` の block / section が単位に入るもの + 採った主張の
+      ``equation_ids``。
+    - 出典 block: 単位の ``source_block_ids`` そのもの（チャンク交差の材料）。
+
+    **単位の document の中でだけ**引く（IK-0377）。document が空の行は何も引かない。
+    並びは「block 一致 → section 一致」、同順位は artifact の並び。上限を超えた分は
+    落とすだけで、件数は外に出さない。
+    """
+    claim_refs: list[tuple[str, str]] = []
+    equation_refs: list[tuple[str, str]] = []
+    block_refs: list[tuple[str, str]] = []
+    for row in unit_rows:
+        if str(row.get("unit_kind") or "") != ko_learning_units.KIND_SECTION_BLOCK:
+            continue
+        doc = _unit_document_id(row)
+        if not doc:
+            continue
+        blocks = set(course_units_mod.unit_source_block_ids(row))
+        sections = set(course_units_mod.unit_section_ids(row))
+        if not blocks and not sections:
+            continue
+        share = block_share or {}
+
+        def block_rank(block_id: str) -> int:
+            return int(share.get((doc, block_id), 1) or 1)
+
+        # IK-0465: 多くの単位に共通する block（要旨）は後ろへ（同順位は単位の並び）。
+        unit_blocks = course_units_mod.unit_source_block_ids(row)
+        for block_id in sorted(unit_blocks, key=block_rank):
+            block_refs.append((doc, block_id))
+
+        by_block: list[tuple[int, tuple[str, str]]] = []
+        by_section: list[tuple[str, str]] = []
+        for claim_id, claim in scope.iter_kind("claims", doc):
+            if _as_list(claim.get("subclaim_ids")):
+                continue
+            claim_blocks = _claim_block_ids(claim, doc, scope)
+            matched = [block for block in claim_blocks if block in blocks] if blocks else []
+            if matched:
+                by_block.append((min(block_rank(b) for b in matched), (doc, claim_id)))
+            elif sections and str(claim.get("section_id") or "").strip() in sections:
+                by_section.append((doc, claim_id))
+        by_block.sort(key=lambda entry: entry[0])  # 安定ソート（同順位は artifact の並び）
+        specific = [ref for rank, ref in by_block if rank <= 1]
+        shared = [ref for rank, ref in by_block if rank > 1]
+        picked = list(dict.fromkeys(specific + by_section + shared))[:_SECTION_UNIT_CLAIM_LIMIT]
+        claim_refs.extend(picked)
+
+        eq_ids: list[str] = []
+        for eq_id, equation in scope.iter_kind("equations", doc):
+            if (blocks and _equation_block_id(equation) in blocks) or (
+                sections and _equation_section_id(equation) in sections
+            ):
+                eq_ids.append(eq_id)
+        for _doc, claim_id in picked:
+            claim = scope.get("claims", doc, claim_id) or {}
+            for eq_id in _as_list(claim.get("equation_ids")):
+                eq_id = str(eq_id or "").strip()
+                if eq_id and scope.get("equations", doc, eq_id) is not None:
+                    eq_ids.append(eq_id)
+        equation_refs.extend(
+            (doc, eq_id) for eq_id in list(dict.fromkeys(eq_ids))[:_SECTION_UNIT_EQUATION_LIMIT]
+        )
+    return (
+        list(dict.fromkeys(claim_refs)),
+        list(dict.fromkeys(equation_refs)),
+        list(dict.fromkeys(block_refs)),
+    )
+
+
+#: 単位の主張から引く部品（component）の上限（1 トピックに並べて読める量）。
+_CLAIM_LINKED_COMPONENT_LIMIT = 4
+
+
+def _components_linked_to_claims(
+    claim_refs: list[tuple[str, str]],
+    scope: "_BundleScope",
+    *,
+    exclude: set[int] | None = None,
+) -> list[dict]:
+    """``(document_id, claim_id)`` を ``linked_claim_ids`` に持つ component（同じ論文の中だけ）。
+
+    並びは主張の並び → artifact の並び。上限を超えた分は落とすだけ（件数は外に出さない）。
+    """
+    wanted: dict[str, list[str]] = {}
+    for doc, claim_id in claim_refs or []:
+        wanted.setdefault(doc, []).append(str(claim_id))
+    picked: list[dict] = []
+    seen = set(exclude or set())
+    for doc, claim_ids in wanted.items():
+        order = {cid: i for i, cid in enumerate(claim_ids)}
+        ranked: list[tuple[int, int, dict]] = []
+        for pos, (_cid, component) in enumerate(scope.iter_kind("components", doc)):
+            if id(component) in seen:
+                continue
+            hits = [order[c] for c in (str(x) for x in _as_list(component.get("linked_claim_ids"))) if c in order]
+            if hits:
+                ranked.append((min(hits), pos, component))
+        for _rank, _pos, component in sorted(ranked, key=lambda e: (e[0], e[1])):
+            seen.add(id(component))
+            picked.append(component)
+    return picked[:_CLAIM_LINKED_COMPONENT_LIMIT]
+
+
+def _thesis_text_key(text: object) -> str:
+    """thesis ノードを本文で引くキー（空白を畳んだ本文。空なら空文字）。"""
+    normalized = " ".join(str(text or "").split())
+    return f"text:{normalized}" if normalized else ""
+
+
+def _thesis_node_for_unit(row: dict, scope: "_BundleScope") -> dict | None:
+    """thesis_support の単位の行に対応する thesis ノード（単位の document の中だけ）。
+
+    まず stable_key（衝突接尾辞 ``#2`` を外したもの）で、次に本文（単位の
+    ``summary`` は thesis ノードの本文そのもの）で引く。どちらでも引けなければ None。
+    """
+    doc = _unit_document_id(row)
+    if not doc:
+        return None
+    stable_key = str(row.get("stable_key") or "").strip().split("#", 1)[0]
+    for key in (stable_key, _thesis_text_key(row.get("summary"))):
+        if not key:
+            continue
+        node = scope.get("thesis_nodes", doc, key)
+        if node is not None:
+            return node
+    return None
+
+
+def _claim_span_keys(claim: dict, doc: str, scope: "_BundleScope") -> set[str]:
+    """claim が名乗る ``{block_id}:{span_id}`` の集合（出典 block × source span）。"""
+    spans = [str(span or "").strip() for span in _as_list(claim.get("source_span_ids"))]
+    spans = [span for span in spans if span]
+    if not spans:
+        return set()
+    return {
+        f"{block}:{span}"
+        for block in _claim_block_ids(claim, doc, scope)
+        for span in spans
+    }
+
+
+def _thesis_support_unit_refs(
+    unit_rows: list[dict], scope: "_BundleScope"
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[tuple[str, str]]]:
+    """中心命題・支持構造の単位（``thesis_support``）が参照する主張・式・出典 block（IK-0453）。
+
+    thesis_support の単位は component を束ねず、``linked_claim_ids`` は DB UUID で
+    artifact の claim 名前空間と突合できない。そのため「主結果」「確かめられていない点」
+    のトピックに根拠が1つも付かなかった。ここでは**単位が実際に参照しているもの**
+    だけを引く（章全体へは広げない・推定しない・LLM を呼ばない）:
+
+    - 主張: thesis ノードの claim 参照（``claim:{block}:{span}``）と同じ出典 block ×
+      source span を持つ claim、claim_id が参照と一致する claim、単位の
+      ``source_block_ids``（thesis の ``evidence_block_ids``）に出典 block がある claim。
+      atomic 子が同じく当たった親は子で代表させて落とす。
+    - 式: 単位の ``linked_equation_ids``（呼び出し側で別に足す）+ 採った主張の
+      ``equation_ids``。
+    - 出典 block: 単位の ``source_block_ids``（チャンク交差の材料）。
+
+    **単位の document の中でだけ**引く（IK-0377）。上限は章立ての単位と同じ。
+    """
+    claim_refs: list[tuple[str, str]] = []
+    equation_refs: list[tuple[str, str]] = []
+    block_refs: list[tuple[str, str]] = []
+    for row in unit_rows:
+        if str(row.get("unit_kind") or "") != ko_learning_units.KIND_THESIS_SUPPORT:
+            continue
+        doc = _unit_document_id(row)
+        if not doc:
+            continue
+        blocks = course_units_mod.unit_source_block_ids(row)
+        node = _thesis_node_for_unit(row, scope) or {}
+        if not blocks:
+            blocks = [str(b).strip() for b in _as_list(node.get("evidence_block_ids")) if str(b or "").strip()]
+        for block_id in blocks:
+            block_refs.append((doc, block_id))
+        block_set = set(blocks)
+
+        refs = [str(r or "").strip() for r in _as_list(node.get("claim_ids"))]
+        ref_keys = {normalize_claim_ref(r) for r in refs if r}
+        ref_keys.discard("")
+
+        by_ref: list[str] = []
+        by_block: list[str] = []
+        for claim_id, claim in scope.iter_kind("claims", doc):
+            if claim_id in ref_keys or normalize_claim_ref(claim_id) in ref_keys or (
+                ref_keys & _claim_span_keys(claim, doc, scope)
+            ):
+                by_ref.append(claim_id)
+            elif block_set and any(b in block_set for b in _claim_block_ids(claim, doc, scope)):
+                by_block.append(claim_id)
+        matched = list(dict.fromkeys(by_ref + by_block))
+        matched_set = set(matched)
+        picked: list[str] = []
+        for claim_id in matched:
+            claim = scope.get("claims", doc, claim_id) or {}
+            children = {str(c or "").strip() for c in _as_list(claim.get("subclaim_ids"))}
+            if children & matched_set:
+                continue
+            picked.append(claim_id)
+        picked = picked[:_SECTION_UNIT_CLAIM_LIMIT]
+        claim_refs.extend((doc, claim_id) for claim_id in picked)
+
+        eq_ids: list[str] = []
+        for claim_id in picked:
+            claim = scope.get("claims", doc, claim_id) or {}
+            for eq_id in _as_list(claim.get("equation_ids")):
+                eq_id = str(eq_id or "").strip()
+                if eq_id and scope.get("equations", doc, eq_id) is not None:
+                    eq_ids.append(eq_id)
+        equation_refs.extend(
+            (doc, eq_id) for eq_id in list(dict.fromkeys(eq_ids))[:_SECTION_UNIT_EQUATION_LIMIT]
+        )
+    return (
+        list(dict.fromkeys(claim_refs)),
+        list(dict.fromkeys(equation_refs)),
+        list(dict.fromkeys(block_refs)),
+    )
+
+
+def _figure_unit_refs(
+    unit_rows: list[dict], scope: "_BundleScope"
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[tuple[str, str]]]:
+    """図の単位（``figure``）が指す図と、その図に結びついた主張・出典 block（IK-0456）。
+
+    図の単位は component を束ねず、``linked_claim_ids`` は DB UUID で artifact の claim
+    名前空間と突合できない。そのため図だけを選んだトピックに根拠が1つも付かなかった。
+    ここでは**実在の結び付きだけ**で引く（推定しない・LLM を呼ばない）:
+
+    - 図: 単位の ``linked_figure_ids``（``FigureRecord.figure_id``）。``document_figures``
+      への解決は ``_topic_evidence_links`` が ``figures_index`` で行う（抽出されていない図は
+      そこで静かに落ちる）。
+    - 主張: ``FigureRecord.linked_claim_ids``（図⇄主張の正本。``figure_claim_links``）で
+      その図に結びついた claim。atomic 子が同じく当たった親は子で代表させて落とす。
+    - 出典 block: 単位の ``source_block_ids``（caption block。チャンク交差の材料）。
+
+    **単位の document の中でだけ**引く（IK-0377）。上限は章立ての単位と同じ。
+    """
+    claim_refs: list[tuple[str, str]] = []
+    figure_refs: list[tuple[str, str]] = []
+    block_refs: list[tuple[str, str]] = []
+    for row in unit_rows:
+        if str(row.get("unit_kind") or "") != ko_learning_units.KIND_FIGURE:
+            continue
+        doc = _unit_document_id(row)
+        if not doc:
+            continue
+        figure_keys = [
+            str(key).strip() for key in _as_list(row.get("linked_figure_ids")) if str(key or "").strip()
+        ]
+        for key in figure_keys:
+            figure_refs.append((doc, key))
+        for block_id in course_units_mod.unit_source_block_ids(row):
+            block_refs.append((doc, block_id))
+        wanted = {normalize_figure_join_key(key) for key in figure_keys}
+        wanted.discard("")
+        if not wanted:
+            continue
+        matched: list[str] = []
+        for claim_id, _claim in scope.iter_kind("claims", doc):
+            links = scope.figure_links(doc, claim_id)
+            if any(normalize_figure_join_key(link.get("figure_key")) in wanted for link in links):
+                matched.append(claim_id)
+        matched_set = set(matched)
+        picked: list[str] = []
+        for claim_id in matched:
+            claim = scope.get("claims", doc, claim_id) or {}
+            children = {str(c or "").strip() for c in _as_list(claim.get("subclaim_ids"))}
+            if children & matched_set:
+                continue
+            picked.append(claim_id)
+        claim_refs.extend((doc, claim_id) for claim_id in picked[:_SECTION_UNIT_CLAIM_LIMIT])
+    return (
+        list(dict.fromkeys(claim_refs)),
+        list(dict.fromkeys(figure_refs)),
+        list(dict.fromkeys(block_refs)),
+    )
+
+
+def _unit_binds_knowledge(row: dict, scope: "_BundleScope") -> bool:
+    """1つの単位が、主張・式・部品・図のどれかに結びつくか（IK-0456 の事実文の判定）。
+
+    章の本文（出典 block）だけが結びつく単位は False（構造化された根拠が無い）。
+    図は ``linked_figure_ids`` があるだけでは数えず、図に結びついた主張があるときだけ
+    数える（図の実在は配信時の図索引で決まるため、ここでは主張の有無で判定する）。
+    """
+    rows = [row]
+    if _component_refs_from_units(rows, scope)[0] or _equation_refs_from_units(rows, scope):
+        return True
+    if _claim_ids_from_units(rows, scope):
+        return True
+    for refs in (_section_unit_refs(rows, scope), _thesis_support_unit_refs(rows, scope)):
+        if refs[0] or refs[1]:
+            return True
+    return bool(_figure_unit_refs(rows, scope)[0])
+
+
+def _unit_parent_index(units_by_key: dict[str, dict]) -> dict[tuple[str, str], dict]:
+    """``(document_id, component agent ID) -> その component を束ねている unit 行``（救済の逆引き）。
 
     ``_best_mapping`` の文字列一致で当たった component が何かの unit の子なら、
     その unit を ``topic.units`` に ``source="title_match"`` で後付けするために使う
     （設計書 §6.3。教員が選んだ ``teacher_selected`` とは ``source`` で区別する）。
+    キーに document を含めるのは、別論文の同名 component（``comp_001``）の unit を
+    後付けしないため（IK-0377）。
     """
-    index: dict[str, dict] = {}
+    index: dict[tuple[str, str], dict] = {}
     for row in units_by_key.values():
+        doc = _unit_document_id(row)
         for component_id in course_units_mod.unit_component_agent_ids(row):
-            index.setdefault(component_id, row)
+            index.setdefault((doc, component_id), row)
     return index
 
 
-def _topic_narrative(components: list[dict], narrative_by_component: dict[str, dict]) -> dict:
+def _topic_narrative(
+    components: list[dict],
+    narrative_by_component: dict[str, dict],
+    *,
+    scope: "_BundleScope | None" = None,
+) -> dict:
     """束ねた component から語りの弧（blueprint）を導出する（§6.5 / P2-6）。
 
     ``roles`` は弧の順で重複を除いたもの、``visual_strategy`` は弧の先頭の非 ``none``。
     ``rationale`` と数値は載せない（LU5）。材料が無ければ空 dict（呼び出し側が
-    キー自体を足さない）。
+    キー自体を足さない）。``scope`` があれば (document, component_id) で引く。
     """
-    if not narrative_by_component:
+    if scope is not None:
+        if not scope.has_narrative():
+            return {}
+    elif not narrative_by_component:
         return {}
     entries: list[dict] = []
     for component in components:
-        entry = narrative_by_component.get(str(component.get("component_id") or ""))
+        component_id = str(component.get("component_id") or "")
+        if scope is not None:
+            entry = scope.narrative(_scope_doc(component), component_id)
+        else:
+            entry = narrative_by_component.get(component_id)
         if isinstance(entry, dict):
             entries.append(entry)
     if not entries:
@@ -1298,32 +2328,104 @@ def _enrich_topics(
     units_by_key = units_by_key or {}
     narrative_by_component = bundle.get("narrative_by_component") or {}
     unit_parent_index = _unit_parent_index(units_by_key)
+    block_share = section_block_share(units_by_key)
+    # 論文内ローカル ID は必ず (document, ID) で引く（IK-0377）。
+    scope = _BundleScope(bundle)
     for index, raw_topic in enumerate(topics):
         topic = dict(raw_topic) if isinstance(raw_topic, dict) else {"title": str(raw_topic)}
+        # IK-0440: 前の生成で builder が付けた事実文（対応付けなし・単位の論文不明・
+        # 数式を引けない・要約の重複）は、いまの材料で付け直す。残したまま再計算すると、
+        # 根拠が付いたトピックに「対応付けられていません」が残る。書き戻しは
+        # 「生成結果に無いキーは live を残す」ので、消すときは空にして明示する。
+        _clear_generated_topic_notes(topic)
         mapping, mapping_confidence = _best_mapping(topic, bundle["mapping_topics"], index)
 
         # --- 束ねの決定（units 優先・文字列一致は救済）-----------------------
         # 教員が選んだ「学ぶ単位」があれば、それが成果との結合の正本になる
         # （learning_units_design.md §6.3）。units が空のときだけ従来の
-        # _best_mapping / _component_ids_for_topic（タイトル文字列の重なり）へ落ちる。
+        # _best_mapping / _component_refs_for_topic（タイトル文字列の重なり）へ落ちる。
         selected_units = _units_for_topic(topic, units_by_key)
         unit_rows = [row for _entry, row in selected_units]
         display_labels: dict[str, str] = {}
         if unit_rows:
-            component_ids, display_labels = _component_ids_from_units(unit_rows, bundle["components"])
+            component_refs, display_labels = _component_refs_from_units(unit_rows, scope)
+            component_ids = list(dict.fromkeys(cid for _doc, cid in component_refs))
         else:
-            component_ids = _component_ids_for_topic(topic, mapping, bundle["components"])
-        components = [bundle["components"][cid] for cid in component_ids if cid in bundle["components"]]
-        equations = _equations_for_components(components, bundle["equations"])
+            component_ids, component_refs = _component_refs_for_topic(topic, mapping, scope)
+        components: list[dict] = []
+        seen_components: set[int] = set()
+        for doc, cid in component_refs:
+            component = scope.get("components", doc, cid)
+            if component is None or id(component) in seen_components:
+                continue
+            seen_components.add(id(component))
+            components.append(component)
+        equations = _equations_for_components(components, bundle.get("equations") or {}, scope=scope)
         if unit_rows:
             # unit が直接指している式も足す（component 経由で拾えない式を落とさない）。
+            # unit 行の document の中でだけ引く（IK-0377）。
             known_equation_ids = {
                 str(eq.get("equation_id") or eq.get("id") or "") for eq in equations
             }
-            for eq_id in _equations_from_units(unit_rows, bundle["equations"]):
-                if eq_id not in known_equation_ids:
-                    known_equation_ids.add(eq_id)
-                    equations.append(bundle["equations"][eq_id])
+            for doc, eq_id in _equation_refs_from_units(unit_rows, scope):
+                # snapshot の参照（``![[equation:id]]`` / linked_equation_ids）は素の ID
+                # なので、1トピックの中で同じ素の ID を2つの論文から並べない（初出優先）。
+                if eq_id in known_equation_ids:
+                    continue
+                equation = scope.get("equations", doc, eq_id)
+                if equation is None:
+                    continue
+                known_equation_ids.add(eq_id)
+                equations.append(equation)
+        # 章立ての単位（section_block）は component を束ねないので、その章に実際に
+        # 載っている主張・式・出典 block を引く（IK-0388。実所在のみ・推定しない）。
+        section_claim_refs: list[tuple[str, str]] = []
+        section_block_refs: list[tuple[str, str]] = []
+        unit_figure_refs: list[tuple[str, str]] = []
+        if unit_rows:
+            section_claim_refs, section_equation_refs, section_block_refs = _section_unit_refs(
+                unit_rows, scope, block_share
+            )
+            # 中心命題・支持構造の単位（thesis_support）が参照する主張・式・出典 block も
+            # 同じ経路で足す（IK-0453。主結果・確かめられていない点のトピック）。
+            thesis_claim_refs, thesis_equation_refs, thesis_block_refs = _thesis_support_unit_refs(
+                unit_rows, scope
+            )
+            # 図の単位（figure）が指す図と、その図に結びついた主張も足す（IK-0456）。
+            figure_claim_refs, unit_figure_refs, figure_block_refs = _figure_unit_refs(unit_rows, scope)
+            section_claim_refs = list(dict.fromkeys(
+                section_claim_refs + thesis_claim_refs + figure_claim_refs
+            ))
+            section_equation_refs = list(dict.fromkeys(section_equation_refs + thesis_equation_refs))
+            section_block_refs = list(dict.fromkeys(
+                section_block_refs + thesis_block_refs + figure_block_refs
+            ))
+            known_equation_ids = {
+                str(eq.get("equation_id") or eq.get("id") or "") for eq in equations
+            }
+            for doc, eq_id in section_equation_refs:
+                if eq_id in known_equation_ids:
+                    continue
+                equation = scope.get("equations", doc, eq_id)
+                if equation is None:
+                    continue
+                known_equation_ids.add(eq_id)
+                equations.append(equation)
+        # 章立て・支持構造・図の単位は component を束ねない。単位から引いた主張を
+        # ``linked_claim_ids`` に持つ component（同じ論文の中だけ）を、根拠チップ・
+        # content_blocks の部品投影に足す（TRIAGE14: 部品 ⚓ が 1 つも出ず、部品の
+        # 文脈へ入れなかった）。結びつきは A層の claim 参照だけ（推定しない）。
+        # 散文（summary / content）は変えない — 教員が選んだ単位の説明を保つ。
+        claim_linked_components = _components_linked_to_claims(
+            section_claim_refs, scope, exclude=seen_components
+        ) if unit_rows and not components else []
+        projected_components = components + claim_linked_components
+        # 選んだ単位の document が決まらない（行に document が無い / コースの解析結果に
+        # その document が無い）ときは、別論文から式・主張・原文を借りない — 空のまま
+        # 事実を残す（IK-0377。原則8）。
+        unscoped_units = bool(unit_rows) and any(
+            not _unit_document_id(row) for row in unit_rows
+        )
         # 教員が選んだが live に居ない unit（再解析で supersede された等）は**落とさない**
         # （P2-R1 / LU2「情報を落とさない」）。保存順を保ったまま resolved=False を付けて
         # 残し、救済（title_match）は上書きではなく**追記**にする。
@@ -1352,28 +2454,31 @@ def _enrich_topics(
         teaching_takeaways = _as_str_list([c.get("teaching_takeaway") for c in components if c.get("teaching_takeaway")])
         evidence_ids = _linked_ids(components, "linked_evidence_ids")
         evidence_links = _topic_evidence_links(
-            components,
+            projected_components,
             equations,
             bundle.get("claims") or {},
             bundle.get("evidence") or {},
             mapping_confidence,
             figures_index=figures_index,
             figure_claim_links=bundle.get("figure_claim_links") or {},
+            scope=scope,
+            extra_claim_refs=section_claim_refs,
+            extra_figure_refs=unit_figure_refs,
         )
 
         # --- 出典（material_chunk_ids / source_excerpt）の決定論導出 ---------
         # 位置代入（旧 _fallback_chunk_for_topic）は廃止した。根拠 evidence の
         # block_id と chunk.block_ids の交差だけが出典の根拠で、交差が無ければ空。
-        source_chunks = _topic_source_chunks(
-            all_chunks,
-            _topic_source_block_refs(
-                components,
-                equations,
-                bundle.get("claims") or {},
-                bundle.get("evidence") or {},
-            ),
-            block_index,
+        source_block_refs = _topic_source_block_refs(
+            components,
+            equations,
+            bundle.get("claims") or {},
+            bundle.get("evidence") or {},
+            scope=scope,
+            extra_claim_refs=section_claim_refs,
+            extra_block_refs=section_block_refs,
         )
+        source_chunks = _topic_source_chunks(all_chunks, source_block_refs, block_index)
         content = _compose_topic_content(
             summary,
             learning_objectives,
@@ -1382,29 +2487,55 @@ def _enrich_topics(
             assessment_prompts,
         )
         # content_blocks へ足すチャンク由来の式は「このトピックが実際に参照する式」
-        # だけに絞る（linked_equation_ids ∪ 本文参照。C-10）。
-        allowed_formula_ids = {
-            normalize_evidence_id(eq_id)
-            for eq_id in _linked_ids(components, "linked_equation_ids")
-            if str(eq_id or "").strip()
-        }
-        for component in components:
-            evidence_refs = component.get("evidence_refs")
-            if isinstance(evidence_refs, dict):
-                allowed_formula_ids.update(
-                    normalize_evidence_id(eq_id)
-                    for eq_id in _as_list(evidence_refs.get("equation_ids"))
-                    if str(eq_id or "").strip()
-                )
-        allowed_formula_ids.update(_referenced_formula_ids(summary, content))
-        allowed_formula_ids.discard("")
-        relevant_formulas = _relevant_chunk_formulas(source_chunks, allowed_formula_ids)
+        # だけに絞る（linked_equation_ids ∪ 本文参照。C-10）。式 ID は論文ごとに
+        # 振り直されるので、許可は **(document, 式 ID)** で持ち、チャンクの document の
+        # 許可だけで照合する（IK-0377）。
+        allowed_formula_refs: dict[str, set[str]] = {}
+        for doc, eq_id in _linked_refs(components, "linked_equation_ids", include_evidence_refs=True):
+            normalized = normalize_evidence_id(eq_id)
+            if normalized:
+                allowed_formula_refs.setdefault(doc, set()).add(normalized)
+        # このトピックに結びつけた式（unit / 章立ての単位から引いたものを含む）も
+        # ``linked_equation_ids`` として許す（IK-0388。component を経ない式を落とさない）。
+        for equation in equations:
+            normalized = normalize_evidence_id(equation.get("equation_id") or equation.get("id") or "")
+            if normalized:
+                allowed_formula_refs.setdefault(_scope_doc(equation), set()).add(normalized)
+        topic_documents = [
+            doc for doc in dict.fromkeys(
+                [_scope_doc(c) for c in components] + [_unit_document_id(r) for r in unit_rows]
+            ) if doc
+        ]
+        # 本文（summary / content）が参照する式 ID は、このトピックの document の中に
+        # だけ許す（別論文の同名 ID を拾わない）。
+        referenced_ids = _referenced_formula_ids(summary, content)
+        for doc in topic_documents:
+            allowed_formula_refs.setdefault(doc, set()).update(referenced_ids)
+        if not scope.strict and not topic_documents and referenced_ids:
+            # 手組み bundle（document を持たない単一論文のテスト double）の従来互換。
+            allowed_formula_refs.setdefault("", set()).update(referenced_ids)
+        for ids in allowed_formula_refs.values():
+            ids.discard("")
+        allowed_formula_ids = set().union(*allowed_formula_refs.values()) if allowed_formula_refs else set()
+        relevant_formulas = _relevant_chunk_formulas(
+            source_chunks, allowed_formula_ids, allowed_by_document=allowed_formula_refs
+        )
 
         # 対応付けが取れなかったトピック（mapping も component も無い）は、出典を
         # 捏造せず空のまま事実文だけを載せる（原則8）。units 経由で束ねたトピックは
         # component が付いているので unlinked にならない。
-        unlinked = mapping_confidence == "none" and not components
+        # 章立ての単位から主張・式・出典 block が引けたトピックも unlinked にしない（IK-0388）。
+        unlinked = (
+            mapping_confidence == "none"
+            and not components
+            and not (section_claim_refs or section_block_refs or equations)
+        )
 
+        topic_claim_refs = list(dict.fromkeys(
+            _linked_refs(components, "linked_claim_ids")
+            + (_claim_refs_from_units(unit_rows, scope) if unit_rows else [])
+            + list(section_claim_refs)
+        ))
         topic.update({
             "summary": summary,
             "content": content,
@@ -1416,6 +2547,11 @@ def _enrich_topics(
                 assessment_prompts,
                 relevant_formulas,
                 display_labels=display_labels,
+                projected_components=claim_linked_components,
+                component_label_for=lambda doc, cid: (
+                    (scope.get("components", doc, cid) or {}).get("label") or ""
+                ),
+                claim_address_for_ref=scope.claim_address,
             ),
             "learning_objectives": learning_objectives,
             "prerequisite_concepts": prerequisite_concepts,
@@ -1424,18 +2560,21 @@ def _enrich_topics(
             "expected_misconceptions": _as_str_list(
                 mapping_for_prose.get("expected_misconceptions") if mapping_for_prose else []
             ),
-            "linked_component_ids": component_ids,
+            "linked_component_ids": list(dict.fromkeys(
+                component_ids
+                + [str(c.get("component_id") or "") for c in claim_linked_components if c.get("component_id")]
+            )),
             "linked_equation_ids": [str(e.get("equation_id") or e.get("id")) for e in equations if e.get("equation_id") or e.get("id")],
+            # 主張は evidence_links と同じ宛先（論文内で一意な形）で並べる。
             "linked_claim_ids": list(dict.fromkeys(
-                _linked_ids(components, "linked_claim_ids")
-                + (_claim_ids_from_units(unit_rows, bundle.get("claims") or {}) if unit_rows else [])
+                scope.claim_address(doc, cid) for doc, cid in topic_claim_refs
             )),
             "source_evidence_ids": evidence_ids,
             "evidence_links": evidence_links,
             "teaching_takeaways": teaching_takeaways,
             "material_chunk_ids": [] if unlinked else [c["id"] for c in source_chunks if c.get("id")],
             "source_excerpt": "" if unlinked or not source_chunks
-            else _short_excerpt(source_chunks[0].get("text", "")),
+            else topic_source_excerpt(source_chunks, source_block_refs),
             "content_source": UNIT_SELECTION_CONTENT_SOURCE if unit_rows
             else ("unlinked" if unlinked else "agent_mapping"),
             # units 経由でも、散文が mapping 由来（exact_title 一致）なら実態を区別して
@@ -1447,7 +2586,10 @@ def _enrich_topics(
                 if unit_rows else mapping_confidence
             ),
         })
-        narrative = _topic_narrative(components, narrative_by_component)
+        # 前の生成で保存済みの本文（下書きの保持・生成の縮退時）にある素の主張番号を、
+        # このトピックで一意に対応する宛先へ書き換える（宛先が変わっても ⚓ が外れない）。
+        _rewrite_topic_claim_embeds(topic, _claim_address_map(topic_claim_refs, scope))
+        narrative = _topic_narrative(components, narrative_by_component, scope=scope)
         if narrative:
             # 材料が無ければキー自体を足さない（§6.5。空の語りの弧を作らない）。
             topic["narrative"] = narrative
@@ -1462,10 +2604,81 @@ def _enrich_topics(
                 "status": "missing",
                 "message": UNLINKED_TOPIC_GROUNDING_NOTE,
             }
+        if unit_rows and not unscoped_units and not unlinked:
+            # 選んだ単位の一部が主張・式・図・部品のどれにも結びつかなかった事実を残す
+            # （IK-0456。章の本文だけが根拠のとき、それを黙って「根拠あり」に見せない）。
+            # 既に別の事実が入っていれば上書きしない。件数は書かない。
+            if any(not _unit_binds_knowledge(row, scope) for row in unit_rows):
+                if not topic.get("grounding_note"):
+                    topic["grounding_note"] = label_vocab.UNITS_WITHOUT_KNOWLEDGE_NOTE
+                coverage = topic.get("coverage")
+                if not (isinstance(coverage, dict) and coverage.get("status")):
+                    topic["coverage"] = {
+                        "status": "weak" if evidence_links else "missing",
+                        "message": label_vocab.UNITS_WITHOUT_KNOWLEDGE_NOTE,
+                    }
+        if unscoped_units:
+            # 事実文はサーバ定数（件数なし）。何も付かなかったトピックでは、汎用の
+            # 「対応付けられていません」より具体的な理由（単位の論文が特定できない）を
+            # 出す。一部でも付いたトピックでは既存の事実文を上書きしない。
+            if not components:
+                topic["grounding_note"] = UNSCOPED_UNITS_GROUNDING_NOTE
+                topic["coverage"] = {
+                    "status": "missing",
+                    "message": UNSCOPED_UNITS_GROUNDING_NOTE,
+                }
+            else:
+                if not topic.get("grounding_note"):
+                    topic["grounding_note"] = UNSCOPED_UNITS_GROUNDING_NOTE
         enriched.append(topic)
+    _flag_duplicate_topic_summaries(enriched)
     if isinstance(notes, dict) and unresolved_unit_topics:
         notes["unresolved_units"] = True
     return enriched
+
+
+def _clear_generated_topic_notes(topic: dict) -> None:
+    """builder が付けた ``grounding_note`` / ``coverage`` を空にする（IK-0440）。
+
+    教員や他の経路が書いた文は触らない（builder の定数と一致するものだけ）。
+    """
+    if str(topic.get("grounding_note") or "") in GENERATED_DRAFT_NOTES:
+        topic["grounding_note"] = ""
+    coverage = topic.get("coverage")
+    if isinstance(coverage, dict) and (
+        str(coverage.get("message") or "") in GENERATED_DRAFT_NOTES
+        or coverage.get("duplicate_summary_of")
+    ):
+        topic["coverage"] = {}
+
+
+def _flag_duplicate_topic_summaries(topics: list[dict]) -> None:
+    """同じ要約を持つトピックを ``coverage`` に事実として残す（IK-0441。決定論）。
+
+    要約は部品・単位から決定論的に作るので、同じ単位を束ねた2つのトピックは同じ文に
+    なる。書き直しは生成モデル（プロンプトの ``summary_shared_with``）に任せ、ここでは
+    教員が気付けるように印を付けるだけ。既に状態のある coverage（対応付けなし等）は
+    上書きせず、``duplicate_summary_of`` だけを足す。件数は書かない。
+    """
+    by_summary: dict[str, list[dict]] = defaultdict(list)
+    for topic in topics:
+        summary = " ".join(str(topic.get("summary") or "").split())
+        if summary:
+            by_summary[summary].append(topic)
+    for group in by_summary.values():
+        if len(group) < 2:
+            continue
+        for topic in group:
+            others = [
+                str(other.get("id") or other.get("title") or "")
+                for other in group if other is not topic
+            ]
+            coverage = topic.get("coverage") if isinstance(topic.get("coverage"), dict) else {}
+            coverage = dict(coverage)
+            coverage["duplicate_summary_of"] = [o for o in others if o]
+            if not coverage.get("message"):
+                coverage["message"] = label_vocab.DUPLICATE_TOPIC_SUMMARY_NOTE
+            topic["coverage"] = coverage
 
 
 # TeX 判定の実装は ``core/text_excerpt.py`` へ移設した（切り詰め正本 ``excerpt`` と
@@ -1490,6 +2703,9 @@ def _topic_evidence_links(
     *,
     figures_index: dict[str, dict] | None = None,
     figure_claim_links: dict[str, list[dict]] | None = None,
+    scope: _BundleScope | None = None,
+    extra_claim_refs: list[tuple[str, str]] | None = None,
+    extra_figure_refs: list[tuple[str, str]] | None = None,
 ) -> list[dict]:
     """Build the authoritative 根拠リンク list consumed by the lecture studio UI.
 
@@ -1510,6 +2726,12 @@ def _topic_evidence_links(
     """
     figures_index = figures_index or {}
     figure_claim_links = figure_claim_links or {}
+    # claim / evidence / 図の逆引きは **参照元 component の document の中で**引く
+    # （IK-0377）。``scope`` 未指定は平たい索引を受ける旧シグネチャ（従来互換）。
+    if scope is None:
+        scope = _scope_for_flat(
+            claims=claims_by_id, evidence=evidence_by_id, figure_claim_links=figure_claim_links
+        )
     links: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
@@ -1601,22 +2823,30 @@ def _topic_evidence_links(
         )
 
     # claim は component の linked_claim_ids 経由で参照される。claims.json に実体が
-    # あるものだけを根拠化する（存在しない id はリンクにしない）。
-    for claim_id in _linked_ids(components, "linked_claim_ids"):
-        claim = claims_by_id.get(str(claim_id))
+    # あるものだけを根拠化する（存在しない id はリンクにしない）。章立ての単位
+    # （section_block）の章に載っている claim（``extra_claim_refs``）も同じ扱い（IK-0388）。
+    claim_refs = list(dict.fromkeys(
+        _linked_refs(components, "linked_claim_ids") + list(extra_claim_refs or [])
+    ))
+    for claim_doc, claim_id in claim_refs:
+        claim = scope.get("claims", claim_doc, claim_id)
         if not claim:
             continue
         add(
             "claim",
-            claim_id,
+            # 教材の ⚓ の宛先は論文内で一意な形（UUID / block 付き）にする
+            # （focus_document_design.md §追補「主張の宛先」）。
+            scope.claim_address(claim_doc, claim_id),
             claim.get("normalized_text") or claim.get("text") or "",
             str(claim.get("support_status") or "claim"),
+            # IK-1155: 主張の出所（「（原文）」の印を逐語か言い換えかで分ける材料）。
+            extra={"origin": infer_claim_origin(claim)},
         )
 
     # source span は component の linked_evidence_ids 経由で参照される。
     # evidence_registry に実体がある PDF 原文引用だけを kind=source で根拠化する。
-    for evidence_id in _linked_ids(components, "linked_evidence_ids"):
-        record = evidence_by_id.get(str(evidence_id))
+    for evidence_doc, evidence_id in _linked_refs(components, "linked_evidence_ids"):
+        record = scope.get("evidence", evidence_doc, evidence_id)
         if not record:
             continue
         evidence_text = str(record.get("evidence_text") or "")
@@ -1625,10 +2855,14 @@ def _topic_evidence_links(
         # \begin{aligned}...\end{aligned} 全体）。summary 経由にすると 220 字で
         # 切り詰められて TeX が壊れるため、全文を latex として渡し UI に数式
         # 描画させる。role が別でも本文が TeX なら同様に扱う。
+        evidence_section = str(record.get("section_label") or "")
         if evidence_role == "equation_quote" or _looks_like_tex_math(evidence_text):
             add("source", evidence_id, "", evidence_role, latex=evidence_text)
         else:
-            add("source", evidence_id, evidence_text, evidence_role)
+            add(
+                "source", evidence_id, evidence_text, evidence_role,
+                extra={"section_label": evidence_section or None},
+            )
 
     def add_figure(figure_ref: dict | None) -> None:
         if not figure_ref:
@@ -1663,15 +2897,15 @@ def _topic_evidence_links(
         add_figure(_resolve_figure_ref(
             figures_index,
             figure_id=comp_figure_id,
-            document_id=component.get("document_id"),
+            document_id=_scope_doc(component),
             figure_key=comp_figure_key,
         ))
 
     # 経路2: component の linked_claim_ids から、その claim を参照している図
     # （FigureRecord.linked_claim_ids の逆引き、figure_claim_links）を辿る。
     # claim → 図の対応が無い（本文メンション無し）図は正直にスキップする（P4）。
-    for claim_id in _linked_ids(components, "linked_claim_ids"):
-        for figure_link in figure_claim_links.get(str(claim_id), []):
+    for claim_doc, claim_id in claim_refs:
+        for figure_link in scope.figure_links(claim_doc, claim_id):
             resolved = _resolve_figure_ref(
                 figures_index,
                 document_id=figure_link.get("document_id"),
@@ -1680,6 +2914,16 @@ def _topic_evidence_links(
             if resolved and not resolved.get("caption") and figure_link.get("caption"):
                 resolved = {**resolved, "caption": figure_link["caption"]}
             add_figure(resolved)
+
+    # 経路3: 教員が選んだ図の単位（figure）が指す図そのもの（IK-0456）。
+    # ``FigureRecord.figure_id`` → ``document_figures`` を figures_index で解決する。
+    # 抽出されていない図は解決できず、黙って落ちる（捏造しない）。
+    for figure_doc, figure_key in extra_figure_refs or []:
+        add_figure(_resolve_figure_ref(
+            figures_index,
+            document_id=figure_doc,
+            figure_key=figure_key,
+        ))
 
     return links
 
@@ -1760,6 +3004,13 @@ def _topic_content_block_formulas(topic: dict) -> list[dict]:
                 "assumptions": [
                     str(a).strip() for a in _as_list(item.get("assumptions")) if str(a or "").strip()
                 ][:_EQUATION_ASSUMPTION_LIMIT],
+                # IK-0977: 復元の印の元（凍結時の A層 reconstruction の写し）を運ぶ。
+                **({"reconstructed": True} if item.get("reconstructed") is True else {}),
+                # 第 6 波（IK-0895）: 生きた式の記録から引いた（または新しい freeze が書いた）決まった状態。
+                **(
+                    {"reconstruction_checked": True}
+                    if item.get("reconstruction_checked") is True else {}
+                ),
             })
     return formulas
 
@@ -1823,6 +3074,86 @@ def _merge_component_rich_projection(item: dict, rich: dict | None) -> None:
     }
 
 
+def source_excerpt_evidence_id(topic: dict) -> str:
+    """原文抜粋（``topic.source_excerpt``）を指す ``![[source:id]]`` の id（両画面共通）。
+
+    ``linked_chunk_ids`` の先頭（無ければ ``excerpt``）の正規化。生成の閉世界
+    （``available_references``）と配信（``build_topic_evidence_items``）が同じ id を使う
+    （IK-0455。かつて生成側は ``topic_summary`` を「原文抜粋」として渡し、配信側は同じ id を
+    「トピック概要」で解決していた）。
+    """
+    chunk_ids = (topic or {}).get("linked_chunk_ids") or []
+    return normalize_evidence_id(str(chunk_ids[0]) if chunk_ids else "excerpt")
+
+
+def _same_display_text(a: str, b: str) -> bool:
+    return " ".join(str(a or "").split()).casefold() == " ".join(str(b or "").split()).casefold()
+
+
+def _source_item_heading(link: dict, summary: str) -> str:
+    """出典（source）カードの見出し（IK-0584）。
+
+    掲載節の見出し（``label`` / ``section_label``）だけを使い、引用本文（summary）を
+    見出しに流用しない。見出しが引用と同じ文になるときも空にする（二重表示の防止）。
+    """
+    for key in ("label", "section_label"):
+        heading = str(link.get(key) or "").strip()
+        if heading and not _same_display_text(heading, summary):
+            return heading
+    return ""
+
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def topic_with_claim_origins(topic: dict | None) -> dict:
+    """IK-1155: 主張の出所（origin）を持たない旧い凍結の evidence_links に読み時で補う。
+
+    保存物は書き換えない（浅いコピーを返す）。宛先が UUID の主張だけ ``theory_claims_live``
+    から origin を引く。引けなければそのまま（従来どおり「（原文）」— fail-soft）。
+    """
+    topic = topic or {}
+    links = topic.get("evidence_links") or []
+    wanted = sorted({
+        str(link.get("target_id") or "").strip()
+        for link in links
+        if isinstance(link, dict) and link.get("kind") == "claim" and not link.get("origin")
+        and _UUID_RE.match(str(link.get("target_id") or "").strip())
+    })
+    if not wanted:
+        return topic
+    origins: dict[str, str] = {}
+    try:
+        session = _pg_session()
+    except Exception:  # noqa: BLE001
+        return topic
+    try:
+        rows = session.execute(
+            sa_text(
+                "SELECT id::text, COALESCE(origin, '') FROM theory_claims_live "
+                "WHERE id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"ids": wanted},
+        ).fetchall()
+        origins = {str(r[0]): str(r[1] or "") for r in rows if r[1]}
+    except Exception:  # noqa: BLE001 — 印の材料が引けなくても教材は出す
+        session.rollback()
+        logger.debug("claim origin lookup failed", exc_info=True)
+        return topic
+    finally:
+        session.close()
+    if not origins:
+        return topic
+    new_links = []
+    for link in links:
+        if isinstance(link, dict) and link.get("kind") == "claim" and not link.get("origin"):
+            origin = origins.get(str(link.get("target_id") or "").strip().lower())
+            if origin:
+                link = dict(link, origin=origin)
+        new_links.append(link)
+    return dict(topic, evidence_links=new_links)
+
+
 def build_topic_evidence_items(topic: dict) -> list[dict]:
     """学習画面向けの読み取り専用 evidence DTO を、トピックに公開済みの参照だけから
     決定論的に組み立てる（admin ``lsTopicEvidenceItems`` と同一規則）。
@@ -1874,7 +3205,7 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
             # 落とし、ホバーの「意味の要約」行に生 TeX を出さない（EH1/EH2 —
             # 再 freeze なしで既存スナップショットに効かせる防衛）。
             summary = link.get("summary") or ""
-            if _looks_like_tex_math(summary):
+            if _looks_like_tex_math(summary) or is_uninformative_equation_summary(summary):
                 summary = ""
             title_record = _equation_title_record(link, formula, norm)
             items.append({
@@ -1906,22 +3237,36 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
                 "link_status": title_record["link_status"],
                 "assumptions": _equation_item_assumptions(link, formula),
                 "confidence": link.get("confidence") or "",
+                # IK-0977: 復元の印は式の記録（content_blocks の式・リンク）の判定をそのまま運ぶ
+                # （図スタジオの資料・右ペインの根拠が同じ印を見る。復元でなければキーを足さない）。
+                # 第 5 波（IK-1008）: 壊れた復元は latex を空にして latex_withheld（同じ 1 関数）。
+                **_evidence_reconstructed_fields(
+                    link, formula, latex=link.get("latex") or formula.get("latex") or ""
+                ),
             })
             continue
         if kind == "figure":
             fig_id = str(link.get("figure_id") or raw_id or "")
             caption = link.get("caption") or ""
-            items.append({
+            extra = link.get("extra") if isinstance(link.get("extra"), dict) else {}
+            teaching = bool(extra.get("teaching") or link.get("teaching"))
+            item = {
                 "kind": "figure",
                 "id": normalize_evidence_id(fig_id),
                 "figure_id": fig_id,
                 "figure_key": link.get("figure_key") or "",
                 "caption": caption,
-                "title": "図: " + _short_excerpt(caption or fig_id or "図", limit=40),
+                # IK-0949: 種類の印（「図:」）は描く側が 1 箇所で付ける。見出しに重ねない。
+                "title": _short_excerpt(caption or fig_id or "図", limit=40),
                 "summary": caption,
-                "role": link.get("support_role") or "figure",
+                "role": "teaching_figure" if teaching else (link.get("support_role") or "figure"),
                 "confidence": link.get("confidence") or "",
-            })
+            }
+            if teaching:
+                # IK-0949: 教員が教材図スタジオで作った図は論文の根拠と区別する（根拠の状態に数えない）。
+                item["teaching"] = True
+                item["origin_label"] = label_vocab.TEACHING_FIGURE_ORIGIN_LABEL
+            items.append(item)
             continue
         # source / claim / component。equation_quote など生 TeX を summary に持つ source は
         # latex に移して数式描画させる（admin と同じ切り詰め回避ガード）。
@@ -1938,6 +3283,11 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
             # component_evidence_redesign.md Phase 1 §4: title に summary を流用
             # しない（同じ文が title/summary に二重表示される症状の解消）。
             title = link.get("label") or (rich_component or {}).get("label") or "論理コンポーネント"
+        elif kind == "source":
+            # IK-0584: 見出しの欄に引用（summary）を流用しない（component と同じ規則）。
+            # 見出しは掲載節の見出しだけ。引用と同じ文になる・見出しが無いときは
+            # title を持たせず、カードは引用だけを描く（freeze 済みの旧教材にも読み時で効く）。
+            title = _source_item_heading(link, summary)
         else:
             title = summary or str(raw_id) or kind
         item = {
@@ -1948,10 +3298,15 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
             "role": link.get("support_role") or "",
             "confidence": link.get("confidence") or "",
         }
+        if kind == "source" and not latex and not title:
+            del item["title"]
         if latex:
             item["latex"] = latex
         if kind == "component":
             _merge_component_rich_projection(item, rich_component)
+        if kind == "claim" and link.get("origin"):
+            # IK-1155: 印の材料（表示の後で外す — DTO に出所の内部語を残さない）。
+            item["_claim_origin"] = str(link.get("origin") or "")
         items.append(item)
 
     # 2) linked_component_ids: evidence_links に無い component を content_blocks から補う。
@@ -1996,15 +3351,15 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
             "link_status": title_record["link_status"],
             "assumptions": _equation_item_assumptions(None, formula),
             "confidence": confidence,
+            # 第 6 波（IK-0895）: content_blocks の式も根拠リンクの式と同じ 1 関数から印を受け取る。
+            **_evidence_reconstructed_fields({}, formula, latex=formula.get("latex") or ""),
         })
 
     # 4) source_excerpt（原文抜粋）。
     if topic.get("source_excerpt"):
-        chunk_ids = topic.get("linked_chunk_ids") or []
-        excerpt_id = str(chunk_ids[0]) if chunk_ids else "excerpt"
         items.append({
             "kind": "source",
-            "id": normalize_evidence_id(excerpt_id),
+            "id": source_excerpt_evidence_id(topic),
             "title": "原文抜粋",
             "summary": topic.get("source_excerpt") or "",
             "role": "source_span",
@@ -2013,17 +3368,20 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
 
     # 5) トピック概要（``![[source:topic_summary]]`` / ``![[source:summary]]``）。
     #    course_content_builder のプロンプトが明示的に許可する参照（本文が概要を指す）。
+    #    第 25 周 第 6 波（IK-1034）: 別名は解決の索引（``alt_ids``）に留め、一覧の項目は 1 つ
+    #    （以前は別名ごとに項目を作り、根拠の一覧に「トピック概要」が 2 回並んだ）。画面は
+    #    ``alt_ids`` でも引く（app.js ``lookupEvidenceItem`` / 原稿スタジオ ``lsEvidenceItemByRef``）。
     if topic.get("summary"):
         summary_text = _short_excerpt(str(topic.get("summary") or ""), limit=260)
-        for sid in ("topic_summary", "summary"):
-            items.append({
-                "kind": "source",
-                "id": sid,
-                "title": "トピック概要",
-                "summary": summary_text,
-                "role": "summary",
-                "confidence": confidence,
-            })
+        items.append({
+            "kind": "source",
+            "id": "topic_summary",
+            "alt_ids": ["summary"],
+            "title": "トピック概要",
+            "summary": summary_text,
+            "role": "summary",
+            "confidence": confidence,
+        })
 
     # dedup（``kind:normalized_id``、先勝ち — evidence_links を content_blocks より優先）。
     seen: set[str] = set()
@@ -2034,7 +3392,261 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
             continue
         seen.add(key)
         deduped.append(item)
+    # 原文の行分割（図キャプションの 1 語ごとの改行・行末ハイフン）を表示前に畳む
+    # （TRIAGE14。LLM を呼ばない決定論の正規化・式の latex には触れない）。
+    for item in deduped:
+        for field in ("title", "summary", "caption"):
+            value = item.get(field)
+            if isinstance(value, str) and value:
+                item[field] = normalize_source_line_breaks(value)
+        # 第 25 周 第 7 波（IK-0571 の studio 側）: ⚓ の部品名・主張は表示名（display_label —
+        # 親 unit の日本語の見出し）を優先し、表示する名前が原文の言語のままなら「（原文）」の印を
+        # 添える（翻訳はしない・LLM 0 回）。画面はこのキーを素通しで描く。
+        # IK-1155: 主張の印は出所で分ける（原子化の言い換えを「（原文）」と言わない）。
+        claim_origin = item.pop("_claim_origin", "")
+        if item.get("kind") in ("component", "claim"):
+            shown = str(item.get("display_label") or item.get("title") or "")
+            if shown and is_untranslated_text(shown):
+                item["title_original_mark"] = (
+                    label_vocab.original_text_mark_for_origin(claim_origin)
+                    if item.get("kind") == "claim" else label_vocab.ORIGINAL_TEXT_MARK
+                )
     return deduped
+
+
+# ---------------------------------------------------------------------------
+# 引けない根拠埋め込みの後始末と、プロンプト向けの本文（IK-0455）
+# ---------------------------------------------------------------------------
+#
+# 学習画面（app.js ``renderMaterialChunk``）は ``![[component|claim|source:id]]`` を
+# 配信した ``evidence_items`` で引き、引けなければ「未解決」カードに ``kind:id``（内部 ID）
+# をそのまま出す。生成モデルが閉世界（``available_references``）の外の ID を書いたとき、
+# 保存済みコースの参照先が再解析で消えたとき、それが学習者に見えていた。ここで学習画面と
+# **同じ引き方**（``kind:正規化ID`` → 同じ ID の別 kind）で引けるかを判定し、引けない
+# ものだけを外す（根拠を捏造しない・外した事実は ``grounding_note`` に残す）。
+# ``equation`` / ``figure`` は専用の経路（``replace_unresolved_formula_placeholders`` /
+# 図の配信ゲート）が扱うのでここでは触れない。
+
+_EVIDENCE_EMBED_RE = re.compile(r"!\[\[\s*([a-z_]+)\s*:\s*([^\]\n]*?)\s*\]\]", re.IGNORECASE)
+_EVIDENCE_EMBED_KINDS = frozenset({"component", "claim", "source"})
+
+
+def _evidence_item_keys(evidence_items: list[dict]) -> tuple[set[str], set[str]]:
+    by_ref: set[str] = set()
+    by_id: set[str] = set()
+    for item in evidence_items or []:
+        if not isinstance(item, dict) or not item.get("kind"):
+            continue
+        # 第 6 波（IK-1034）: 別名（``alt_ids``）でも引ける（一覧の項目は 1 つのまま）。
+        for raw in [item.get("id"), *(item.get("alt_ids") or [])]:
+            norm = normalize_evidence_id(raw)
+            if not norm:
+                continue
+            by_ref.add(f"{item['kind']}:{norm}")
+            by_id.add(norm)
+    return by_ref, by_id
+
+
+def drop_unresolved_evidence_embeds(text: str, evidence_items: list[dict]) -> tuple[str, bool]:
+    """``text`` 中の引けない ``![[component|claim|source:id]]`` を外す（IK-0455）。
+
+    引けるかの判定は学習画面と同じ（``kind:正規化ID`` か、同じ ID の別 kind）。
+    外した埋め込みが1行を占めていたら、その空行も詰める。戻り値は
+    ``(外した後の本文, 外したか)``。数式・図の埋め込みには触れない。
+    """
+    if not text or "![[" not in str(text):
+        return text or "", False
+    by_ref, by_id = _evidence_item_keys(evidence_items)
+    dropped = False
+
+    def _replace(match: re.Match) -> str:
+        nonlocal dropped
+        kind = match.group(1).lower()
+        if kind not in _EVIDENCE_EMBED_KINDS:
+            return match.group(0)
+        norm = normalize_evidence_id(match.group(2))
+        if norm and (f"{kind}:{norm}" in by_ref or norm in by_id):
+            return match.group(0)
+        dropped = True
+        return ""
+
+    out = _EVIDENCE_EMBED_RE.sub(_replace, str(text))
+    if dropped:
+        out = re.sub(r"[ \t]+\n", "\n", out)
+        out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out, dropped
+
+
+_CLAIM_EMBED_REWRITE_RE = re.compile(r"(!\[\[\s*claim\s*:\s*)([^\]\n]*?)(\s*\]\])", re.IGNORECASE)
+
+
+def _claim_address_map(claim_refs: list[tuple[str, str]], scope: "_BundleScope") -> dict[str, str]:
+    """``素の agent claim_id -> 宛先``（トピックの中でちょうど1つの宛先に対応するものだけ）。
+
+    同じ素の番号がトピックの中で2つの宛先（別論文 / 同じ論文の別 block）に対応するときは
+    書き換えない（推測しない）。宛先が素の番号のままのものも載せない。
+    """
+    seen: dict[str, set[str]] = {}
+    for doc, claim_id in claim_refs or []:
+        claim_id = str(claim_id or "").strip()
+        if not claim_id:
+            continue
+        seen.setdefault(claim_id, set()).add(scope.claim_address(doc, claim_id))
+    return {
+        cid: next(iter(addresses))
+        for cid, addresses in seen.items()
+        if len(addresses) == 1 and next(iter(addresses)) != cid
+    }
+
+
+def rewrite_claim_embeds(text: str, address_map: dict[str, str]) -> str:
+    """``![[claim:素の番号]]`` を ``address_map`` の宛先へ書き換える（他の埋め込みは触らない）。"""
+    if not text or not address_map:
+        return text
+
+    def _sub(match: "re.Match[str]") -> str:
+        raw = match.group(2)
+        address = address_map.get(normalize_evidence_id(raw))
+        return f"{match.group(1)}{address}{match.group(3)}" if address else match.group(0)
+
+    return _CLAIM_EMBED_REWRITE_RE.sub(_sub, text)
+
+
+def _rewrite_topic_claim_embeds(topic: dict, address_map: dict[str, str]) -> None:
+    if not isinstance(topic, dict) or not address_map:
+        return
+    material = topic.get("student_material")
+    if isinstance(material, dict) and material.get("source_text"):
+        topic["student_material"] = {
+            **material,
+            "source_text": rewrite_claim_embeds(str(material.get("source_text") or ""), address_map),
+        }
+    elif isinstance(material, str) and material:
+        topic["student_material"] = rewrite_claim_embeds(material, address_map)
+    spoken = topic.get("spoken_script")
+    if isinstance(spoken, str) and spoken:
+        topic["spoken_script"] = rewrite_claim_embeds(spoken, address_map)
+
+
+def _sanitize_topic_evidence_embeds(topic: dict) -> bool:
+    """トピックの配信本文から引けない根拠埋め込みを外す（生成直後の後始末。IK-0455）。
+
+    外したときは ``grounding_note`` に事実文を残す（既に別の事実が入っていれば
+    上書きしない）。戻り値は外したか。
+    """
+    if not isinstance(topic, dict):
+        return False
+    items = build_topic_evidence_items(topic)
+    changed = False
+    material = topic.get("student_material")
+    if isinstance(material, dict):
+        text, did = drop_unresolved_evidence_embeds(str(material.get("source_text") or ""), items)
+        if did:
+            topic["student_material"] = {**material, "source_text": text}
+            changed = True
+    elif isinstance(material, str) and material:
+        text, did = drop_unresolved_evidence_embeds(material, items)
+        if did:
+            topic["student_material"] = text
+            changed = True
+    spoken = topic.get("spoken_script")
+    if isinstance(spoken, str) and spoken:
+        text, did = drop_unresolved_evidence_embeds(spoken, items)
+        if did:
+            topic["spoken_script"] = text
+            changed = True
+    if changed and not topic.get("grounding_note"):
+        topic["grounding_note"] = label_vocab.UNRESOLVED_EMBED_GROUNDING_NOTE
+    return changed
+
+
+#: プロンプト向け本文で数式・図の埋め込みを置き換える語（``core.text_hygiene`` と同じ語）。
+_PROMPT_FORMULA_WORD = "（数式）"
+_PROMPT_FIGURE_WORD = "（図）"
+
+
+#: 文中に埋め込まれた参照の中身が引けないときの語（内部 ID は書かない）。
+_PROMPT_INLINE_REFERENT_WORDS = {"claim": "（主張）", "component": "（論理要素）", "source": "（出典の抜粋）"}
+#: 文中に入れる参照先の本文の上限（字）。
+_PROMPT_INLINE_REFERENT_MAX = 120
+
+
+def _embed_is_inline(match: re.Match) -> bool:
+    """埋め込みが行の途中（前後の同じ行に文字がある）にあるか。"""
+    text = match.string
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    line_end = text.find("\n", match.end())
+    line_end = len(text) if line_end == -1 else line_end
+    return bool(text[line_start:match.start()].strip()) and bool(text[match.end():line_end].strip())
+
+
+def _inline_referent_text(item: dict | None, kind: str) -> str:
+    """文中の参照を本文の引用にする（第 6 波）。引けない・内部 ID 形なら種別の語。"""
+    from core.display_projection import contains_internal_id
+
+    fallback = _PROMPT_INLINE_REFERENT_WORDS.get(kind, "")
+    if not isinstance(item, dict):
+        return fallback
+    for key in ("text", "title", "summary"):
+        value = " ".join(str(item.get(key) or "").split())
+        if value and not contains_internal_id(value):
+            return f"「{_short_excerpt(value, limit=_PROMPT_INLINE_REFERENT_MAX)}」"
+    return fallback
+
+
+def material_text_for_prompt(topic: dict | None, text: str | None) -> str:
+    """学習チャット等のプロンプトへ「現在表示中の教材」として載せる本文（IK-0455）。
+
+    表示用の埋め込み記法をモデルに渡さない:
+
+    - ``![[equation:id]]`` → そのトピックの式の本体（``$latex$``。latex が無ければ短い
+      原文 ``inline_formula_text``、それも無ければ「（数式）」）。内部 ID は書かない。
+    - ``![[figure:id]]`` → 「（図）」。
+    - ``![[component|claim|source:id]]`` → 外す（本文の説明がその中身を既に書いている）。
+    - ``[[FORMULA_N]]`` / ``[[FIGURE_N]]`` は ``core.text_hygiene`` の事実語へ。
+
+    生成時の決定論付録（「この節で使う数式」等）も外す。描画には使わない。
+    """
+    from core.text_hygiene import scrub_internal_placeholders
+
+    raw = strip_generated_reference_appendix(str(text or ""))
+    if not raw:
+        return ""
+    formulas: dict[str, dict] = {}
+    for formula in _topic_content_block_formulas(topic or {}):
+        norm = normalize_evidence_id(formula.get("id"))
+        if norm:
+            formulas.setdefault(norm, formula)
+    referents: dict[tuple[str, str], dict] = {}
+    for item in build_topic_evidence_items(topic or {}):
+        if item.get("kind") == "equation":
+            formulas.setdefault(normalize_evidence_id(item.get("id")), item)
+        elif item.get("kind") in _EVIDENCE_EMBED_KINDS:
+            referents.setdefault(
+                (str(item.get("kind")), normalize_evidence_id(item.get("id"))), item
+            )
+
+    def _replace(match: re.Match) -> str:
+        kind = match.group(1).lower()
+        if kind == "equation":
+            formula = formulas.get(normalize_evidence_id(match.group(2))) or {}
+            latex = str(formula.get("latex") or "").strip()
+            if latex and not _INTERNAL_EQUATION_ID_RE.search(latex):
+                return f"${latex.strip('$').strip()}$"
+            return inline_formula_text(formula) or _PROMPT_FORMULA_WORD
+        if kind == "figure":
+            return _PROMPT_FIGURE_WORD
+        # 第 25 周 第 6 波: 文の途中に埋め込まれた主張・部品（「半径を ![[claim:…]] と報告」）は
+        # 外すと文が欠ける（値の抜けた「半径を  と報告」）。行の途中にあるときだけ参照先の本文を
+        # 引用で入れる（行単独のブロック埋め込みは従来どおり外す — 本文が中身を書いている）。
+        if _embed_is_inline(match):
+            return _inline_referent_text(referents.get((kind, normalize_evidence_id(match.group(2)))), kind)
+        return ""
+
+    out = _EVIDENCE_EMBED_RE.sub(_replace, raw)
+    out = scrub_internal_placeholders(out)
+    out = re.sub(r"[ \t]+\n", "\n", out)
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
 
 
 def _best_mapping(topic: dict, mapping_topics: list[dict], index: int) -> tuple[dict, str]:
@@ -2054,34 +3666,57 @@ def _best_mapping(topic: dict, mapping_topics: list[dict], index: int) -> tuple[
     return {}, "none"
 
 
-def _component_ids_for_topic(topic: dict, mapping: dict, components: dict[str, dict]) -> list[str]:
+def _component_refs_for_topic(
+    topic: dict, mapping: dict, scope: _BundleScope
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """``(linked_component_ids に残す ID, 解決に使う (document, ID))``。
+
+    CourseMapping の ``linked_component_ids`` は **その mapping topic の document** の
+    中で引く（IK-0377）。ID 自体は従来どおり（解決できなくても）残す。mapping が
+    component を名指ししないときは題名の重なりで component を選ぶ — 候補は各
+    component 自身の document を持ったまま返す。
+    """
     ids = [str(cid) for cid in _as_list(mapping.get("linked_component_ids") if mapping else []) if cid]
     if ids:
-        return list(dict.fromkeys(ids))
+        ids = list(dict.fromkeys(ids))
+        doc = _scope_doc(mapping)
+        return ids, [(doc, cid) for cid in ids]
     title = str(topic.get("title") or "")
     scored = sorted(
         (
-            (_overlap_score(title, f"{c.get('label', '')} {c.get('summary', '')} {c.get('teaching_takeaway', '')}"), cid)
-            for cid, c in components.items()
+            (_overlap_score(title, f"{c.get('label', '')} {c.get('summary', '')} {c.get('teaching_takeaway', '')}"), (doc, cid))
+            for doc, cid, c in scope.iter_components()
         ),
         key=lambda item: item[0],
         reverse=True,
     )
-    return [cid for score, cid in scored[:3] if score >= 0.12]
+    refs = [ref for score, ref in scored[:3] if score >= 0.12]
+    return list(dict.fromkeys(cid for _doc, cid in refs)), refs
 
 
-def _equations_for_components(components: list[dict], equations: dict[str, dict]) -> list[dict]:
-    ids = _linked_ids(components, "linked_equation_ids")
-    for component in components:
-        evidence_refs = component.get("evidence_refs") if isinstance(component.get("evidence_refs"), dict) else {}
-        ids.extend(str(eid) for eid in _as_list(evidence_refs.get("equation_ids")) if eid)
+def _equations_for_components(
+    components: list[dict],
+    equations: dict[str, dict],
+    *,
+    scope: _BundleScope | None = None,
+) -> list[dict]:
+    """component が参照する式（**各 component の document の中で**解決。IK-0377）。
+
+    1トピックの中で同じ素の equation_id を2つの論文から並べない（snapshot の参照は
+    素の ID なので、並べると ``![[equation:id]]`` がどちらを指すか決まらない）— 初出優先。
+    """
+    if scope is None:
+        scope = _BundleScope({"equations": equations})
     seen: set[str] = set()
     out: list[dict] = []
-    for eq_id in ids:
-        if eq_id in seen or eq_id not in equations:
+    for doc, eq_id in _linked_refs(components, "linked_equation_ids", include_evidence_refs=True):
+        if eq_id in seen:
+            continue
+        equation = scope.get("equations", doc, eq_id)
+        if equation is None:
             continue
         seen.add(eq_id)
-        out.append(equations[eq_id])
+        out.append(equation)
     return out[:5]
 
 
@@ -2117,6 +3752,28 @@ UNLINKED_TOPIC_GROUNDING_NOTE = (
     "この項目は、論文の解析結果のどの要素にも対応付けられていません。"
 )
 
+#: 選んだ単位の論文（document）が特定できず、数式・主張・原文抜粋を付けなかった
+#: トピックに載せる事実文（IK-0377。別論文の同名 ID から借りない）。
+UNSCOPED_UNITS_GROUNDING_NOTE = (
+    "選んだ単位がどの論文のものか特定できないため、数式・主張・原文抜粋を付けていません。"
+)
+
+#: builder が生成のたびに付け直す事実文（IK-0440）。前の生成のものは、次の生成の
+#: 「現在の下書き」（注意点・本文の行）と ``grounding_note`` / ``coverage`` から外す。
+#: **定数との一致だけで判定する**（モデルが書いた自由文は判定しない）。
+GENERATED_DRAFT_NOTES = frozenset({
+    UNLINKED_TOPIC_GROUNDING_NOTE,
+    UNSCOPED_UNITS_GROUNDING_NOTE,
+    UNRESOLVED_UNITS_NOTE,
+    UNCOVERED_SECTIONS_NOTE,
+    label_vocab.UNRESOLVED_FORMULA_GROUNDING_NOTE,
+    label_vocab.UNRESOLVED_EMBED_GROUNDING_NOTE,
+    label_vocab.UNITS_WITHOUT_KNOWLEDGE_NOTE,
+    label_vocab.RECONSTRUCTED_EQUATION_NOTE,
+    label_vocab.RECONSTRUCTED_TOPIC_CAUTION,
+    label_vocab.DUPLICATE_TOPIC_SUMMARY_NOTE,
+})
+
 #: 1トピックが持つ出典チャンクの上限（既存の根拠投影 ``_required_equation_items`` /
 #: ``_required_figure_items`` の limit=5 に合わせる）。
 _TOPIC_SOURCE_CHUNK_LIMIT = 5
@@ -2146,6 +3803,10 @@ def _topic_source_block_refs(
     equations: list[dict],
     claims_by_id: dict[str, dict],
     evidence_by_id: dict[str, dict],
+    *,
+    scope: _BundleScope | None = None,
+    extra_claim_refs: list[tuple[str, str]] | None = None,
+    extra_block_refs: list[tuple[str, str]] | None = None,
 ) -> list[tuple[str, str]]:
     """トピックの根拠が載っている ``(document_id, block_id)`` を決定論的に集める。
 
@@ -2160,46 +3821,56 @@ def _topic_source_block_refs(
 
     順序は上記の並び（= component の宣言順）で、重複は先勝ちで落とす。
     """
+    if scope is None:
+        scope = _scope_for_flat(claims=claims_by_id, evidence=evidence_by_id)
     refs: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
 
-    def add_evidence(evidence_id: object) -> None:
-        record = evidence_by_id.get(str(evidence_id or "").strip())
+    # evidence / claim / 式は **参照元の document の中で**引き、出典の document は
+    # そのレコードを読んだ document（スコープ印）にする（IK-0377。block_id も
+    # document 内でしか一意でない）。
+    def add_evidence(evidence_doc: str, evidence_id: object) -> None:
+        record = scope.get("evidence", evidence_doc, evidence_id)
         if not isinstance(record, dict):
             return
         source = record.get("source") if isinstance(record.get("source"), dict) else {}
         block_id = str(source.get("block_id") or "").strip()
         if not block_id:
             return
-        key = (str(record.get("document_id") or ""), block_id)
+        key = (_scope_doc(record), block_id)
         if key in seen:
             return
         seen.add(key)
         refs.append(key)
 
-    def ref_ids(field: str) -> list[str]:
-        ids = _linked_ids(components, field)
-        for component in components:
-            evidence_refs = component.get("evidence_refs")
-            if isinstance(evidence_refs, dict):
-                ids.extend(str(v) for v in _as_list(evidence_refs.get(field.replace("linked_", ""))) if v)
-        return list(dict.fromkeys(ids))
+    for evidence_doc, evidence_id in _linked_refs(components, "linked_evidence_ids", include_evidence_refs=True):
+        add_evidence(evidence_doc, evidence_id)
 
-    for evidence_id in ref_ids("linked_evidence_ids"):
-        add_evidence(evidence_id)
-
-    for claim_id in ref_ids("linked_claim_ids"):
-        claim = claims_by_id.get(str(claim_id))
+    claim_refs = list(dict.fromkeys(
+        _linked_refs(components, "linked_claim_ids", include_evidence_refs=True)
+        + list(extra_claim_refs or [])
+    ))
+    for claim_doc, claim_id in claim_refs:
+        claim = scope.get("claims", claim_doc, claim_id)
         if not isinstance(claim, dict):
             continue
         for evidence_id in _as_list(claim.get("source_evidence_ids")):
-            add_evidence(evidence_id)
+            add_evidence(_scope_doc(claim) or claim_doc, evidence_id)
+
+    # 章立ての単位の出典 block（IK-0388）。単位の document のまま使う。
+    for block_doc, block_id in extra_block_refs or []:
+        block_id = str(block_id or "").strip()
+        key = (str(block_doc or "").strip(), block_id)
+        if not block_id or key in seen:
+            continue
+        seen.add(key)
+        refs.append(key)
 
     for equation in equations:
         block_id = _equation_block_id(equation)
         if not block_id:
             continue
-        key = (str(equation.get("document_id") or ""), block_id)
+        key = (_scope_doc(equation), block_id)
         if key in seen:
             continue
         seen.add(key)
@@ -2248,15 +3919,178 @@ def _topic_source_chunks(
     交差が空なら空リスト。位置による代入は**しない**。
     """
     by_doc_block, unique_by_block = block_index
+    # block_id 単独の救済は「参照側の document がチャンク側のどの document とも
+    # 一致しない」（artifact の document_id が material_id 形などで食い違う）ときだけ。
+    # document が一致しているのにその document に該当 block が無いなら、出典は空 —
+    # 別論文の同名 block のチャンクを借りない（IK-0377）。
+    chunk_documents = {str(chunk.get("document_id") or "") for chunk in chunks}
     positions: set[int] = set()
     for document_id, block_id in block_refs:
         matched = by_doc_block.get((document_id, block_id))
-        if matched is None:
+        if matched is None and (not document_id or document_id not in chunk_documents):
             matched = unique_by_block.get(block_id)
         for position in matched or []:
             positions.add(position)
     ordered = sorted(positions)[:limit]
     return [chunks[position] for position in ordered]
+
+
+# ---------------------------------------------------------------------------
+# 原文抜粋の選び方（IK-0464）
+# ---------------------------------------------------------------------------
+#
+# 旧実装は出典チャンクの先頭（論文の並びで最初のチャンク）の冒頭をそのまま切っていた。
+# 先頭チャンクは表題・著者・所属の区画や図のキャプションのことがあり、区画の境目が
+# 語の途中にあることもある。ここでは本文として読めるチャンクを、トピックの根拠 block の
+# 並び（単位に固有の block が前）で選び、冒頭の書きかけの文を落とす。
+#
+# 判定は ``api/services.py::non_content_chunk_reason`` と同じ発想の最小の写し（所属の行・
+# 書誌の形）。core から api を import できず、あちらはテストが所在を固定しているので
+# 移さない（重複は IK-0464 に記録）。
+
+_EXCERPT_AFFILIATION_RE = re.compile(
+    r"\b(?:University|Universit[àäé]|Institute|Institut|Department|Dept\.|Observatory|"
+    r"Laborator(?:y|ies)|Cent(?:er|re) for|School of|Faculty of)\b|@[\w.-]+\.\w+"
+)
+_EXCERPT_YEAR_RE = re.compile(r"\b(?:1[6-9]|20)\d{2}[a-z]?\b")
+_EXCERPT_ET_AL_RE = re.compile(r"\bet\s+al\.?", re.IGNORECASE)
+_EXCERPT_CAPTION_HEAD_RE = re.compile(r"\b(?:FIG\.|Fig\.|Figure|FIGURE|TABLE|Table)\s*\d+[.:]")
+_EXCERPT_ABSTRACT_RE = re.compile(r"\b(?:ABSTRACT|Abstract)\b\s*[.:—-]?\s*")
+#: 文の切れ目（IK-0487: 次の文が大文字・CJK で始まるところだけ。``et al. (2001)`` /
+#: ``Fig. 2`` / ``Eq. 3`` / 名前の頭文字 ``L. S.`` の点では切らない）。
+_EXCERPT_SENTENCE_END_RE = re.compile(
+    r"(?<![Aa]l\.)(?<!Fig\.)(?<!Eq\.)(?<!e\.g\.)(?<!i\.e\.)(?<![\s(&][A-Z]\.)(?<=[.!?。])\s+(?=[A-Z\u3040-\u30ff\u3400-\u9fff])"
+)
+_EXCERPT_HEAD_WINDOW = 120
+#: 図の説明の続き（``Same as Figure 2 but …``）。キャプションの見出しが前のチャンクにある。
+_EXCERPT_CAPTION_CONT_RE = re.compile(
+    r"^\s*(?:Same as|As in|Similar to)\s+(?:FIG\.?|Fig\.?|Figure|FIGURE|Table|TABLE)\s*\d+", re.IGNORECASE
+)
+#: 図の凡例（``Profile 1 Profile 2 Profile 3``：同じ語に番号を付けた並び）。
+_EXCERPT_LEGEND_RUN_RE = re.compile(r"\b([A-Za-z]{3,})\s+\d+\s+\1\s+\d+\s+\1\s+\d+\b")
+_EXCERPT_TABLE_MIN_TOKENS = 8
+_EXCERPT_TABLE_DIGIT_RATIO = 0.4
+#: 節番号の見出し（``1. INTRODUCTION`` / ``2.1 Methods``）。数字で始まっても本文の始まり。
+_EXCERPT_SECTION_HEAD_RE = re.compile(r"^(?:\d+(?:\.\d+)*\.?|[A-Z]\.)\s+[A-Z]")
+#: 本文に残った内部参照（``[[FORMULA_0]]`` / ``[[eq_eqcand_…]]``）。
+_EXCERPT_PLACEHOLDER_RE = re.compile(r"\[\[[^\]\n]*\]\]")
+
+
+def _looks_like_table_or_legend(text: str) -> bool:
+    """表の行・図の凡例のチャンクか（IK-0487。数字を含む語の割合・同じ語の番号の並び）。"""
+    head = " ".join(str(text or "").split())[:300]
+    if _EXCERPT_LEGEND_RUN_RE.search(head):
+        return True
+    tokens = head.split()[:40]
+    if len(tokens) < _EXCERPT_TABLE_MIN_TOKENS:
+        return False
+    digits = sum(1 for tok in tokens if any(ch.isdigit() for ch in tok))
+    return digits / len(tokens) >= _EXCERPT_TABLE_DIGIT_RATIO
+
+
+def _starts_mid_text(text: str) -> bool:
+    """冒頭が文の途中か（小文字・句読点・数式の断片・内部参照で始まる。節番号の見出しは除く）。"""
+    if not text:
+        return False
+    first = text[0]
+    if first.islower() or first in ",.;:)]}":
+        return True
+    if text.startswith("[["):
+        return True
+    if (first.isdigit() or first in "+-−=<>≈∝±") and not _EXCERPT_SECTION_HEAD_RE.match(text):
+        return True
+    return False
+
+
+def clean_excerpt_text(text: object) -> str:
+    """抜粋の本文を整える（IK-0487）: 冒頭を本文の始まりに寄せ、内部参照を事実語にする。"""
+    trimmed = trim_excerpt_start(text)
+    return scrub_excerpt_placeholders(trimmed) if trimmed else ""
+
+
+def scrub_excerpt_placeholders(text: object) -> str:
+    """抜粋の本文に残った内部参照を事実語「（数式）」「（図）」にする（IK-0487）。"""
+    cleaned = scrub_internal_placeholders(str(text or ""))
+    # 事実語に置き換えられない形の内部参照（``[[…]]``）も本文に残さない。
+    cleaned = _EXCERPT_PLACEHOLDER_RE.sub(INTERNAL_FORMULA_PLACEHOLDER_TEXT, cleaned)
+    return " ".join(cleaned.split())
+
+
+def source_excerpt_rejection_reason(text: object) -> str | None:
+    """原文抜粋にしないチャンクの理由（``affiliation`` / ``bibliography`` / ``figure_caption``）。"""
+    raw = str(text or "")
+    head = raw[:400]
+    if _EXCERPT_AFFILIATION_RE.search(head) and not _EXCERPT_ABSTRACT_RE.search(raw[:600]):
+        return "affiliation"
+    words = max(1, len(raw.split()))
+    if len(_EXCERPT_YEAR_RE.findall(raw)) >= 4 and len(_EXCERPT_ET_AL_RE.findall(raw)) >= 2 \
+            and len(_EXCERPT_YEAR_RE.findall(raw)) / words >= 0.05:
+        return "bibliography"
+    if _EXCERPT_CAPTION_HEAD_RE.search(raw[:_EXCERPT_HEAD_WINDOW]) or _EXCERPT_CAPTION_CONT_RE.match(raw):
+        return "figure_caption"
+    if _looks_like_table_or_legend(raw):
+        return "table_or_legend"
+    return None
+
+
+def trim_excerpt_start(text: object) -> str:
+    """抜粋の冒頭を本文の始まりに寄せる（所属の後の ABSTRACT / 書きかけの文を落とす）。"""
+    raw = " ".join(str(text or "").split())
+    if not raw:
+        return ""
+    abstract = _EXCERPT_ABSTRACT_RE.search(raw[:600])
+    if abstract and _EXCERPT_AFFILIATION_RE.search(raw[: abstract.start()]):
+        raw = raw[abstract.start():]
+    # IK-0487: 数式の断片・内部参照で始まる冒頭（``4𝜋𝜌𝜎𝑣 [[FORMULA_0]] ≈9.3 …``）も
+    # 書きかけの文として落とす（2文まで）。
+    for _ in range(2):
+        if not raw or not _starts_mid_text(raw):
+            break
+        parts = _EXCERPT_SENTENCE_END_RE.split(raw, maxsplit=1)
+        raw = parts[1] if len(parts) > 1 else ""
+    return raw.strip()
+
+
+def topic_source_excerpt(chunks: list[dict], block_refs: list[tuple[str, str]] | None = None) -> str:
+    """トピックの原文抜粋（IK-0464。決定論）。
+
+    チャンクを「トピックの根拠 block の並びで最初に当たる位置」の順に見て、本文として
+    読めるもの（所属・書誌・図のキャプションで始まらないもの）の冒頭を使う。どれも
+    読めなければ、冒頭の書きかけの文だけを落とした先頭チャンクを使う（抜粋を捏造しない）。
+    """
+    if not chunks:
+        return ""
+    order = {ref: index for index, ref in enumerate(block_refs or [])}
+    block_order = {block: index for (doc, block), index in reversed(list(order.items()))}
+
+    def rank(item: tuple[int, dict]) -> tuple[int, int]:
+        position, chunk = item
+        doc = str(chunk.get("document_id") or "")
+        hits = [
+            order.get((doc, str(b)), block_order.get(str(b)))
+            for b in _as_list(chunk.get("block_ids"))
+        ]
+        hits = [h for h in hits if h is not None]
+        return (min(hits) if hits else len(order), position)
+
+    ranked = [chunk for _pos, chunk in sorted(enumerate(chunks), key=rank)]
+    # IK-0487: 冒頭に内部参照（数式の差し込み位置）の無いチャンクを先に選ぶ。
+    readable: list[str] = []
+    for chunk in ranked:
+        text = chunk.get("text", "")
+        if source_excerpt_rejection_reason(text):
+            continue
+        trimmed = trim_excerpt_start(text)
+        if trimmed:
+            readable.append(trimmed)
+    for trimmed in readable:
+        if not _EXCERPT_PLACEHOLDER_RE.search(trimmed[:_EXCERPT_HEAD_WINDOW]):
+            return _short_excerpt(clean_excerpt_text(trimmed))
+    if readable:
+        return _short_excerpt(clean_excerpt_text(readable[0]))
+    raw_first = str(ranked[0].get("text", ""))
+    trimmed = clean_excerpt_text(raw_first) or scrub_excerpt_placeholders(raw_first)
+    return _short_excerpt(trimmed) if trimmed.strip() else ""
 
 
 def _referenced_formula_ids(*texts: str) -> set[str]:
@@ -2272,7 +4106,12 @@ def _referenced_formula_ids(*texts: str) -> set[str]:
     return {value for value in found if value}
 
 
-def _relevant_chunk_formulas(source_chunks: list[dict], allowed_ids: set[str]) -> list[dict]:
+def _relevant_chunk_formulas(
+    source_chunks: list[dict],
+    allowed_ids: set[str],
+    *,
+    allowed_by_document: dict[str, set[str]] | None = None,
+) -> list[dict]:
     """出典チャンクの ``formulas`` のうち、このトピックが実際に参照する式だけを返す。
 
     旧実装は位置代入チャンクの ``formulas`` を丸ごと ``content_blocks`` に足して
@@ -2283,17 +4122,33 @@ def _relevant_chunk_formulas(source_chunks: list[dict], allowed_ids: set[str]) -
     """
     if not allowed_ids:
         return []
+    # ``allowed_by_document``（document -> 許可する式 ID）があれば、チャンクの式は
+    # **そのチャンクの document の許可**でだけ照合する（IK-0377。``eq_1`` は論文ごと）。
+    # チャンクの document が分からないときは、許可が1つの document にしか無い場合に
+    # 限ってその許可を使う（どの論文か決まらないのに借りない）。
+    known_allowed = {doc: ids for doc, ids in (allowed_by_document or {}).items() if ids}
     out: list[dict] = []
     seen: set[str] = set()
     for chunk in source_chunks:
         formulas = chunk.get("formulas")
         if not isinstance(formulas, list):
             continue
+        chunk_allowed = allowed_ids
+        if allowed_by_document is not None:
+            chunk_doc = str(chunk.get("document_id") or "")
+            if chunk_doc in known_allowed:
+                chunk_allowed = known_allowed[chunk_doc]
+            elif not chunk_doc and len(known_allowed) == 1:
+                chunk_allowed = next(iter(known_allowed.values()))
+            elif not chunk_doc and "" in known_allowed:
+                chunk_allowed = known_allowed[""]
+            else:
+                continue
         for formula in formulas:
             if not isinstance(formula, dict):
                 continue
             formula_id = normalize_evidence_id(formula.get("id") or formula.get("equation_id") or "")
-            if not formula_id or formula_id in seen or formula_id not in allowed_ids:
+            if not formula_id or formula_id in seen or formula_id not in chunk_allowed:
                 continue
             seen.add(formula_id)
             out.append(dict(formula))
@@ -2322,12 +4177,23 @@ def _compose_topic_content(
             lines.append(f"- {label}: {text}" if text else f"- {label}")
         lines.append("")
     if equations:
-        lines.append("重要な数式")
+        rows: list[str] = []
         for equation in equations:
             label = equation.get("label") or equation.get("equation_id") or equation.get("id") or ""
-            latex = equation.get("latex") or equation.get("latex_canonical") or equation.get("normalized_latex") or ""
-            lines.append(f"- {label}: {latex}" if label else f"- {latex}")
-        lines.append("")
+            # IK-0486: LaTeX の無い式は原文（plain_text / raw_text）を書く。本体がどこにも
+            # 無い式は行にしない（「- 27: 」のような値の空の行を作らない）。
+            body = (
+                equation.get("latex") or equation.get("latex_canonical") or equation.get("normalized_latex")
+                or equation.get("plain_text") or equation.get("raw_text") or ""
+            )
+            body = " ".join(str(body).split())
+            if not body:
+                continue
+            rows.append(f"- {label}: {body}" if label else f"- {body}")
+        if rows:
+            lines.append("重要な数式")
+            lines.extend(rows)
+            lines.append("")
     if assessment_prompts:
         lines.append("確認問題")
         lines.extend(f"- {item}" for item in assessment_prompts)
@@ -2358,11 +4224,21 @@ def _component_field_refs(value: Any, limit: int = 8) -> list[dict]:
     return out
 
 
-def _component_dependency_refs(value: Any, limit: int = 8) -> list[dict]:
+def _component_dependency_refs(
+    value: Any,
+    limit: int = 8,
+    *,
+    label_for: Any = None,
+) -> list[dict]:
     """ComponentDependency のリストを components 投影用に正規化する。
 
     ``reason`` と ``targets``(component_refs) のどちらも空の要素は落とす
     （説明文の無いエッジを投影に持ち込まない）。
+
+    ``label_for``（``target_id -> 名前``）が渡されたら、依存先を**同じ論文の中で**
+    解決できた名前を ``target_labels``（``targets`` と同じ並び・解決できなければ空文字）に
+    添える（IK-0442。``comp_003__r1`` のような ID だけではモデルにも教員にも読めない）。
+    ``targets`` 自体は変えない。
     """
     out: list[dict] = []
     for raw in _as_list(value):
@@ -2372,14 +4248,87 @@ def _component_dependency_refs(value: Any, limit: int = 8) -> list[dict]:
         reason = str(raw.get("reason") or "").strip()
         if not targets and not reason:
             continue
-        out.append({
+        dep = {
             "type": str(raw.get("dependency_type") or ""),
             "targets": targets,
             "reason": reason,
-        })
+        }
+        if label_for is not None and targets:
+            labels = [str(label_for(t) or "") for t in targets]
+            if any(labels):
+                dep["target_labels"] = labels
+        out.append(dep)
         if len(out) >= limit:
             break
     return out
+
+
+#: 部品の前提（``ComponentRecord.assumptions``）を投影に載せる上限（IK-0443）。
+_COMPONENT_ASSUMPTION_LIMIT = 4
+
+
+def _component_assumptions(value: Any) -> list[str]:
+    out: list[str] = []
+    for raw in _as_list(value):
+        text = str(raw.get("text") if isinstance(raw, dict) else raw or "").strip()
+        if text and text not in out:
+            out.append(_short_excerpt(text, limit=_EQUATION_ASSUMPTION_TEXT_LIMIT))
+        if len(out) >= _COMPONENT_ASSUMPTION_LIMIT:
+            break
+    return out
+
+
+def _evidence_reconstructed_fields(link: dict, formula: dict, *, latex: Any = None) -> dict:
+    """根拠の式の項目に載せる復元の印と表示の可否（IK-0977 / 第 5 波 IK-1008）。
+
+    印は式の単位（同じ式の記録のどちらかが復元なら復元）で決め、印・事実文・
+    壊れた復元の伏せ（``latex: ""`` + ``latex_withheld``）は
+    ``learner_context_common.equation_display_fields`` から受け取る。
+    """
+    from core.learner_context_common import equation_display_fields
+
+    reconstructed = _equation_is_reconstructed(formula) or _equation_is_reconstructed(link)
+    return equation_display_fields(formula, latex=latex, reconstructed=reconstructed)
+
+
+def _frozen_reconstruction_state(eq: dict) -> dict:
+    """凍結する式の写しに載せる復元の状態（第 25 周 第 6 波・IK-0895）。
+
+    記録が復元の状態を持つ（``reconstruction`` か平坦形の ``reconstructed``）ときだけ、判定の
+    結果と ``reconstruction_checked`` を書く。状態を持たない記録には何も書かない（読み時に
+    生きた式の記録から引く）。復元でない式に ``reconstructed`` キーは足さない（従来の形）。
+    """
+    if not isinstance(eq, dict):
+        return {}
+    has_state = isinstance(eq.get("reconstruction"), dict) or isinstance(eq.get("reconstructed"), bool)
+    if not has_state:
+        return {}
+    if _equation_is_reconstructed(eq):
+        return {"reconstructed": True, "reconstruction_checked": True}
+    return {"reconstruction_checked": True}
+
+
+def _equation_is_reconstructed(eq: dict) -> bool:
+    """式が AI の復元した式か（A層 ``reconstruction.status`` の写し。IK-0443）。
+
+    判定は ``persistence.py`` の chunks.formulas と同じ（``status != "none"``）。
+    既に平坦化された項目（``reconstructed``）はそれを尊重する。
+    """
+    if not isinstance(eq, dict):
+        return False
+    rec = eq.get("reconstruction")
+    if isinstance(rec, dict):
+        # IK-0895: 判定の正本は learner_context_common（原文の LaTeX と一致する復元は
+        # 印を付けない）。平坦化済みの項目（``reconstructed``）だけが残る場合は尊重する。
+        from core.learner_context_common import equation_latex_is_reconstructed
+
+        return equation_latex_is_reconstructed(eq)
+    if eq.get("reconstructed") is not True:
+        return False
+    # IK-0977: 平坦化済みの項目も印の正本を通す（原文と一致する復元には印を付けない）。
+    from core.learner_context_common import equation_latex_is_reconstructed
+
+    return equation_latex_is_reconstructed(eq)
 
 
 # ComponentRecord の役割別 equation id フィールド → role 語彙（順序が dedupe の優先順位）。
@@ -2425,8 +4374,18 @@ def _content_blocks(
     fallback_formulas: list[dict] | None = None,
     *,
     display_labels: dict[str, str] | None = None,
+    component_label_for: Any = None,
+    projected_components: list[dict] | None = None,
+    claim_address_for_ref: Any = None,
 ) -> list[dict]:
     """トピックの構造化本文ブロック。
+
+    ``claim_address_for_ref`` は ``(document_id, agent claim_id) -> 教材上の宛先``
+    （``_BundleScope.claim_address``）。部品の ``claims`` を evidence_links と同じ宛先で
+    並べる（省略時は素の ID = 従来どおり）。
+
+    ``projected_components`` は単位の主張から引いた部品（散文には使わず、部品の
+    投影 = ⚓ チップの材料にだけ足す）。
 
     ``fallback_formulas`` はチャンク由来の数式（equation_semantics を通っていない
     もの）の補充枠。**そのトピックが参照する式だけ**を渡すこと（正本は
@@ -2439,40 +4398,60 @@ def _content_blocks(
     内部名は ``label`` に残す（情報を落とさない）。UI は ``display_label`` を優先する。
     """
     display_labels = display_labels or {}
+
+    def _dependency_label_for(component: dict):
+        if component_label_for is None:
+            return None
+        doc = component.get("document_id") or _scope_doc(component)
+        return lambda target: component_label_for(doc, target)
+
+    def _component_item(c: dict) -> dict:
+        item = {
+            "component_id": c.get("component_id"),
+            "label": c.get("label"),
+            # learning_units_design.md §5.1: unit 経由で束ねた子 component は
+            # 親 unit の label を表示名として併記する（内部名は label に残す）。
+            "display_label": display_labels.get(str(c.get("component_id") or ""), ""),
+            "summary": c.get("summary"),
+            "teaching_takeaway": c.get("teaching_takeaway"),
+            # component_evidence_redesign.md Phase 1: 裸IDではなく接続の
+            # 説明文を運ぶ（narrative_role / 下位接続の text・reason 付き
+            # 投影 / 数式の役割分類）。
+            "narrative_role": c.get("narrative_role") or "",
+            "document_id": c.get("document_id") or "",
+            "preconditions": _component_field_refs(c.get("preconditions")),
+            "inputs": _component_field_refs(c.get("inputs")),
+            "outputs": _component_field_refs(c.get("outputs")),
+            "cautions": _component_field_refs(c.get("cautions")),
+            "dependencies": _component_dependency_refs(
+                c.get("dependencies"), label_for=_dependency_label_for(c)
+            ),
+            "equations": _component_equations_with_roles(c),
+            "claims": [
+                (claim_address_for_ref(c.get("document_id") or _scope_doc(c), cid)
+                 if claim_address_for_ref is not None else str(cid))
+                for cid in _as_list(c.get("linked_claim_ids")) if str(cid).strip()
+            ][:12],
+        }
+        # IK-0443: 部品の前提（"15 seeds aggregated" 等）も授業用ドラフトの材料に運ぶ。
+        # 無ければキーを足さない（旧スナップショットと同じ形）。
+        assumptions = _component_assumptions(c.get("assumptions"))
+        if assumptions:
+            item["assumptions"] = assumptions
+        return item
+
     blocks: list[dict] = []
     if summary:
         blocks.append({"type": "summary", "text": summary})
     if learning_objectives:
         blocks.append({"type": "learning_objectives", "items": learning_objectives})
-    if components:
+    projected = list(components) + [
+        c for c in (projected_components or []) if not any(c is x for x in components)
+    ]
+    if projected:
         blocks.append({
             "type": "components",
-            "items": [
-                {
-                    "component_id": c.get("component_id"),
-                    "label": c.get("label"),
-                    # learning_units_design.md §5.1: unit 経由で束ねた子 component は
-                    # 親 unit の label を表示名として併記する（内部名は label に残す）。
-                    "display_label": display_labels.get(str(c.get("component_id") or ""), ""),
-                    "summary": c.get("summary"),
-                    "teaching_takeaway": c.get("teaching_takeaway"),
-                    # component_evidence_redesign.md Phase 1: 裸IDではなく接続の
-                    # 説明文を運ぶ（narrative_role / 下位接続の text・reason 付き
-                    # 投影 / 数式の役割分類）。
-                    "narrative_role": c.get("narrative_role") or "",
-                    "document_id": c.get("document_id") or "",
-                    "preconditions": _component_field_refs(c.get("preconditions")),
-                    "inputs": _component_field_refs(c.get("inputs")),
-                    "outputs": _component_field_refs(c.get("outputs")),
-                    "cautions": _component_field_refs(c.get("cautions")),
-                    "dependencies": _component_dependency_refs(c.get("dependencies")),
-                    "equations": _component_equations_with_roles(c),
-                    "claims": [
-                        str(cid) for cid in _as_list(c.get("linked_claim_ids")) if str(cid).strip()
-                    ][:12],
-                }
-                for c in components[:5]
-            ],
+            "items": [_component_item(c) for c in projected[:5]],
         })
     equation_items = [
         {
@@ -2488,6 +4467,11 @@ def _content_blocks(
             # （役割 / 意味の要約 / 記号の意味）。無ければ空のまま運ぶ（UI 側が
             # IH8 の固定文へ落ちる）。
             **_equation_semantic_projection(e),
+            # IK-0443: AI が文脈から復元した式の目印（A層の reconstruction の写し）。
+            # 復元でない式ではキーを足さない。
+            # 第 25 周 第 6 波（IK-0895）: 記録が復元の状態を持つときは、判定した事実
+            # （``reconstruction_checked``）も写しに書く（読み時に照合し直さない）。
+            **_frozen_reconstruction_state(e),
         }
         for e in equations
     ]
@@ -2507,6 +4491,8 @@ def _content_blocks(
             # チャンク由来の fallback formula は equation_semantics を通っていないため
             # 説明材料を持たない。空で運ぶ（推測で埋めない, EH2）。
             **_equation_semantic_projection(f),
+            # 第 6 波（IK-0895）: chunks.formulas の ``reconstructed`` も写しへ運ぶ（以前は落ちていた）。
+            **_frozen_reconstruction_state(f),
         })
     if equation_items:
         blocks.append({
@@ -2516,6 +4502,183 @@ def _content_blocks(
     if assessment_prompts:
         blocks.append({"type": "assessment_prompts", "items": assessment_prompts})
     return blocks
+
+
+# ---------------------------------------------------------------------------
+# トピック下書きの欄の規則表（第 25 周 第 3 波・IK-0948）
+# ---------------------------------------------------------------------------
+#
+# 同じ成果物（トピックの授業用下書き）を作る 2 つの生成指示 — コース内容生成
+# （本モジュール ``_COURSE_CONTENT_DRAFT_PROMPT``）と原稿スタジオの AI 書き換え
+# （``api/routes/lecture_studio/topics.py::_COURSE_TOPIC_DRAFT_PROMPT``）— が**この 1 つの表**を
+# 読む。片方だけが欄の用途と禁止事項を持つと、もう片方の経路で注意点に AI の作業メモ・
+# 内部 ID が入る。教員宛ての申し送りは書き換えの経路だけが別キー ``handoff_notes`` で返す。
+
+TOPIC_DRAFT_FIELD_RULES = (
+    "- `cautions`（注意点）は**学生に見せる欄**。誤解しやすい点・式や主張の適用条件・前提だけを書く\n"
+    "- 注意点・本文説明・本文の地の文で式や部品に触れるときは、`available_references` の id"
+    "（`eq_…` / `comp_…` / `claim_…` のような内部の番地）を書かず、式は印字番号（「式 (12)」）か"
+    "式の短い原文、部品・主張はその名前で書く（id は埋め込み記法 `![[kind:id]]` の中にだけ書く）\n"
+    "- 作業の記録（何を外した・何が材料に無かった・教員に確認してほしいこと）や、材料の欄の名前"
+    "（`evidence_links` / `content_blocks` / `available_references` など）は、注意点にも教材欄にも書かない\n"
+)
+
+TOPIC_DRAFT_HANDOFF_RULE = (
+    "- 教員に伝えたいこと（材料に無かったもの・書き換えで外したもの・確認してほしいこと）は"
+    " `handoff_notes` に日本語で書く（学生には見せない。注意点に入れない）\n"
+    # 第 25 周 第 5 波（IK-1011）: 申し送りに挙げてよい根拠は教員の画面で読める材料だけ。
+    "- 前の版の注意点・本文を外す・取り下げるときは、その根拠を「現在の授業用ドラフト」か"
+    "根拠候補の `evidence_links` の見出し・要約・式から**逐語の引用**（「…」）で添える。"
+    "`content_blocks` の論理ブロックの要約など教員の画面に出ない材料は根拠に挙げない"
+    "（挙げられる引用が無ければ、外さずに「確認してほしいこと」として申し送りに書く）\n"
+)
+
+#: 注意点に紛れた作業メモを見分ける材料の欄名（プロンプトの JSON キー）。
+_DRAFT_WORK_NOTE_KEYS = (
+    "evidence_links", "available_references", "content_blocks", "grounding_facts",
+    "linked_component_ids", "linked_equation_ids", "source_evidence_ids", "source_excerpt",
+    "component_cautions", "figures_note", "units",
+)
+_DRAFT_WORK_NOTE_KEY_RE = re.compile(r"\b(?:" + "|".join(_DRAFT_WORK_NOTE_KEYS) + r")\b")
+
+
+#: 第 25 周 第 9 波（IK-1081）: 旧い生成規則が教材欄・注意点に残した作業メモの語
+#: （生成プロンプトの材料の呼び名・埋め込みの作業記録・教員への依頼）。学生向けの説明には現れない。
+#: 第 25 周 第 10 波（IK-1081 の残り）: 生成の過程を語る語（抽出の誤り・教材に載せなかった判断）も
+#: 同じ表へ。「…式として誤って取り込まれたもので…教材には載せていません」は作業の記録で、
+#: 学生向けの説明（式や現象そのもの）には現れない。
+_WORK_NOTE_PHRASE_RE = re.compile(
+    r"根拠候補|[（(]\s*claim\s*[）)]|埋め込(?:ん|ま|み)|本文が(?:供給|読め|載って)|教員が"
+    r"|誤抽出|誤って[^。\n]{0,16}取り込|取り込まれた(?:もの|断片)"
+    r"|(?:教材|本文|下書き)(?:に|には|では|へは)[^。\n]{0,8}(?:載せ|含め|入れ)て(?:い)?ません"
+)
+#: 教材欄の「注」の段落の頭（``> 注:`` / ``注：`` / ``※``）。
+_NOTE_PARAGRAPH_HEAD_RE = re.compile(r"^\s*(?:>\s*)*(?:注\s*[:：]|※)")
+_EMBED_ONLY_RE = re.compile(r"!\[\[[^\]]*\]\]")
+
+
+def is_work_note_text(text: object) -> bool:
+    """注意点・注の段落が教員宛ての作業メモか（内部 ID・材料の欄名・作業記録の語。IK-0948 / IK-1081）。
+
+    判定の正本は 1 つ（生成時の後始末 ``split_cautions_and_handoff`` と、是正前に保存された
+    本文・注意点の読み時の検出 ``split_work_note_paragraphs`` / ``topic_work_note_residue`` が通る）。
+    埋め込み記法（``![[equation:eq_4]]``）の中の ID は数えない。
+    """
+    body = _EMBED_ONLY_RE.sub(" ", str(text or ""))
+    if not body.strip():
+        return False
+    return bool(
+        contains_learner_internal_id(body)
+        or _DRAFT_WORK_NOTE_KEY_RE.search(body)
+        or _WORK_NOTE_PHRASE_RE.search(body)
+    )
+
+
+def split_cautions_and_handoff(cautions: object) -> tuple[list[str], list[str]]:
+    """注意点のうち学生に見せられない行（内部 ID・材料の欄名を含む作業メモ）を申し送りへ移す。
+
+    決定論の後始末（IK-0948）。行は落とさず ``handoff_notes`` へ移す（原則3）。
+    判定は :func:`is_work_note_text`（IK-1081 で作業記録の語も同じ表へ）。
+    """
+    keep: list[str] = []
+    handoff: list[str] = []
+    for item in _clean_str_list(cautions):
+        if is_work_note_text(item):
+            handoff.append(item)
+        else:
+            keep.append(item)
+    return keep, handoff
+
+
+#: IK-1156: インラインコード（バッククォート）で囲まれた埋め込み。生成のプロンプトが記法を
+#: `![[kind:id]]` と示すので、LLM が本文にもバッククォートごと写すことがある。
+_BACKTICKED_EMBED_RE = re.compile(r"`{1,2}[ \t]*(!\[\[\s*[A-Za-z_]+\s*:[^\]\n]*\]\])[ \t]*`{1,2}")
+
+
+def unwrap_backticked_embeds(text: object) -> str:
+    """IK-1156: 埋め込み（``![[kind:id]]``）を囲むバッククォートを外す（決定論・純関数）。
+
+    埋め込みはコードではない。学習画面の教材描画はインラインコードを扱わないので、
+    囲みが残ると ⚓ の前後に裸の「`」が出て、学習チャットの AI も真似る。保存物は書き換えず
+    読み時（``core.lecture.topic_student_material``）で外す。埋め込み以外のバッククォートは触らない。
+    """
+    source = str(text or "")
+    if "`" not in source or "![[" not in source:
+        return source
+    return _BACKTICKED_EMBED_RE.sub(r"\1", source)
+
+
+def split_work_note_paragraphs(text: object) -> tuple[str, list[str]]:
+    """教材本文から、教員宛ての作業メモの「注」の段落を外した本文と、外した段落を返す（IK-1081）。
+
+    是正前の生成規則で保存された本文には「> 注: 紐づく主張（claim）6件は本文が根拠候補に…」の
+    ような教員宛ての注が残る。保存物は書き直さない（オーナー判断）ので、学習者に届ける読み時
+    （``core.lecture.topic_student_material``）でこの段落だけを外す。対象は「注」の段落
+    （``> 注:`` / ``注：`` / ``※`` で始まる）で、かつ :func:`is_work_note_text` が作業メモと
+    判定するものだけ（地の文は外さない）。外す段落が無ければ入力をそのまま返す（決定論・純関数）。
+    """
+    source = str(text or "")
+    if not source:
+        return "", []
+    parts = re.split(r"(\n[ \t]*\n)", source)
+    kept: list[tuple[str, str]] = []
+    removed: list[str] = []
+    for index in range(0, len(parts), 2):
+        paragraph = parts[index]
+        separator = parts[index - 1] if index > 0 else ""
+        if _NOTE_PARAGRAPH_HEAD_RE.match(paragraph) and is_work_note_text(paragraph):
+            removed.append(paragraph.strip())
+            continue
+        kept.append((separator, paragraph))
+    if not removed:
+        return source, []
+    out = ""
+    for position, (separator, paragraph) in enumerate(kept):
+        out += (paragraph if position == 0 else separator + paragraph)
+    return out.strip(), removed
+
+
+def topic_work_note_residue(topic: dict | None) -> dict:
+    """保存済みのトピックに残る作業メモ（本文の注の段落・注意点の行）を返す（IK-1081・読み取りのみ）。
+
+    戻り値 ``{"body_notes": [...], "caution_notes": [...]}``（無ければ空のリスト）。
+    """
+    topic = topic or {}
+    material = topic.get("student_material") if isinstance(topic.get("student_material"), dict) else {}
+    _, body_notes = split_work_note_paragraphs(str(material.get("source_text") or ""))
+    caution_notes = [item for item in _clean_str_list(topic.get("cautions")) if is_work_note_text(item)]
+    return {"body_notes": body_notes, "caution_notes": caution_notes}
+
+
+_NOT_EMBEDDED_PHRASE_RE = re.compile(r"埋め込(?:んで(?:い)?ません|みません|みを見送)")
+_NOTE_HEX_TOKEN_RE = re.compile(r"\b([0-9a-f]{8})(?:-[0-9a-f]{1,4})*")
+_NOTE_EQ_TOKEN_RE = re.compile(r"\b(eq_[A-Za-z0-9_]+)")
+_BODY_EMBED_ID_RE = re.compile(r"!\[\[\s*(figure|equation)\s*:\s*([^\]\s]+)\s*\]\]")
+
+
+def work_note_embed_conflicts(topic: dict | None) -> list[str]:
+    """注意点の作業メモが「埋め込んでいません」と言う図・式が、いまの本文に埋め込まれていれば、その行を返す。
+
+    第 25 周 第 10 波（IK-1081 の残り）: 是正前の生成時の注意点は、その後の付録の付け直しで
+    本文に図・式が入っても書き換わらない（保存物は書き直さない）。教員の画面で「メモは古い記録で
+    いまの本文と食い違う」と言えるよう、メモに書かれた番号（UUID の先頭 8 桁・``eq_…``）と本文の
+    埋め込み（``![[figure:…]]`` / ``![[equation:…]]``）を突き合わせる（決定論・読み取りのみ）。
+    """
+    topic = topic or {}
+    material = topic.get("student_material") if isinstance(topic.get("student_material"), dict) else {}
+    body = str(material.get("source_text") or "")
+    embedded = [m.group(2).strip() for m in _BODY_EMBED_ID_RE.finditer(body)]
+    if not embedded:
+        return []
+    out: list[str] = []
+    for note in _clean_str_list(topic.get("cautions")):
+        if not _NOT_EMBEDDED_PHRASE_RE.search(note) or not is_work_note_text(note):
+            continue
+        hex_prefixes = {m.group(1) for m in _NOTE_HEX_TOKEN_RE.finditer(note)}
+        eq_ids = {m.group(1) for m in _NOTE_EQ_TOKEN_RE.finditer(note)}
+        if any(emb in eq_ids or emb[:8] in hex_prefixes for emb in embedded):
+            out.append(note)
+    return out
 
 
 _COURSE_CONTENT_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフト作成を支援するアシスタントです。
@@ -2535,14 +4698,25 @@ _COURSE_CONTENT_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフ�
 - ブロック数式は `$$...$$`
 - `\\(...\\)` や `\\[...\\]` は使わず、必ず `$...$` / `$$...$$` を使う
 - 埋め込みは `![[equation:id]]`, `![[component:id]]`, `![[claim:id]]`, `![[source:id]]`, `![[figure:id]]` の形式を使う
+- 本文に書く埋め込みはバッククォート（`）で囲まない（ここでの `…` は表記の説明。埋め込みはコードではない）
 - 埋め込みに使ってよい kind と id の組み合わせは、根拠候補の `available_references` に列挙されたものだけ
 - `available_references` に無い id を発明してはならない。また id 本来の kind を変えて埋め込んではならない（例: component の id を `claim:` や `equation:` で埋め込まない）
 - 該当する根拠が `available_references` に無い場合は埋め込みを使わず、本文の言葉だけで説明する
-- `![[source:id]]` は `available_references` にある source span の id、または原文抜粋(source_excerpt)を指す `![[source:topic_summary]]` のみを使う
+- `![[source:id]]` は `available_references` にある kind='source' の id のみを使う（原文抜粋 source_excerpt も一覧にある id で指す。`topic_summary` / `summary` のような一覧に無い id を書かない）
 - `![[figure:id]]` は `available_references` にある kind='figure' の id（供給された figure の id）のみ使用可。一覧に無い id を発明しない
 - 根拠候補の `content_blocks` に equations がある場合、トピック理解に必須の式を `![[equation:id]]` で教材欄に埋め込む
+- 原文抜粋に現れる `[[FORMULA_N]]` はチャンク内の通し番号であり、本文に写さない（式は `![[equation:id]]` だけで参照し、該当する式が無ければ言葉で説明する）
 - 数式を埋め込む前後には、その式が何を定義・変換・制約しているかを短く説明する
 - 数式を単に列挙せず、授業の流れの中で使う
+- `available_references` の各項目の `text` はその根拠の中身の抜粋（主張の本文・図のキャプション・原文の冒頭・式の本体）。埋め込む前に、説明したい内容と合っているかを `text` で確かめる
+- `figures_note` がある場合、原文抜粋に出てくる図は供給されていない。その図を埋め込まず、必要なら言葉で説明する
+- `component_cautions` は論文の部品に付いた注意書き・前提。授業に関わるものは注意点（cautions）に日本語で書く。`reconstructed_equation` が付いたものは、その式が AI の復元した式であることを必ず注意点に書く
+""" + TOPIC_DRAFT_FIELD_RULES + """- 「現在の下書き」は前回の生成時点の根拠に基づく。注意点・注記のうち、いまの根拠候補と食い違うもの（「図・式・主張が紐づいていない」「根拠に無い」など）は引き継がない
+- 現在のセクションに `summary_shared_with` がある場合、その要約はコース内の別のトピックと同じ文になっている。要約を繰り返さず、トピックの題名に沿って何が違うかを書き分ける
+- `grounding_facts` はいまの根拠候補に何が供給されているかの事実。根拠の有無について注記・注意点を書くときは `grounding_facts` と食い違うことを書かない
+- `reconstructed_equation_ids` にある式（`available_references` で `reconstructed` が付いた式）は AI が文脈から復元した式（原文の数式とは未照合）。これらの式を使うときは、そのことを注意点に書く。`reconstruction_note` が付いた式は原文（`raw_text`）が短く、LaTeX の多くが復元なので、LaTeX を原文の数式として断定しない
+- `excluded_equations_note` / `omitted_claims_note` がある場合、一覧から外した候補がある。外された式・主張を発明して補わない
+- 確認問題の `answer_requirements` は、その問いの模範解答に含まれる要点だけから書く（トピックの重要概念を問いと無関係に並べない）
 
 出力は必ずJSONのみ。
 JSON文字列内のLaTeXバックスラッシュは必ず `\\Lambda` のように二重化してください。
@@ -2659,7 +4833,572 @@ def _generate_course_topic_drafts(
                     topic.get("id") or topic.get("title"),
                 )
                 _apply_deterministic_topic_draft_fallback(topic)
+            # IK-0440: この下書きを作ったときの根拠候補を記録する。次の生成で根拠が
+            # 変わっていれば、前の注意点（前の根拠についての文）を持ち越さない。
+            topic["draft_reference_key"] = current_reference_key(topic)
+            # 配信する本文に、引けない ``[[FORMULA_N]]`` を残さない（IK-0389）。
+            _sanitize_topic_formula_placeholders(topic)
+            # 引けない根拠埋め込み（閉世界の外の ID）を残さない（IK-0455）。
+            _sanitize_topic_evidence_embeds(topic)
     return {"drafted_topics": drafted, "draft_errors": errors}
+
+
+# ---------------------------------------------------------------------------
+# 引けない数式プレースホルダーの後始末（IK-0389）
+# ---------------------------------------------------------------------------
+#
+# 生成モデルは出典チャンクの抜粋に現れる ``[[FORMULA_N]]``（チャンク内の通し番号）を
+# 本文へ写すことがある。学習画面（app.js ``renderMaterialChunk``）は
+# ``[[FORMULA_N]]`` を配信された ``formulas``（= ``content_blocks`` の式）の **id か
+# 位置** で引くので、C-10 で ``content_blocks`` の式を「実際に参照する式」に絞った後は
+# 引けないプレースホルダーが生のまま学習者に出ていた。ここで学習画面と**同じ引き方**で
+# 引けるかを判定し、引けないものだけを事実の文に置き換える（式を捏造しない）。
+
+_FORMULA_ONLY_PLACEHOLDER_RE = re.compile(r"\[\[\s*(FORMULA_\d+)\s*\]\]", re.IGNORECASE)
+
+
+def _formula_keys(formula: dict, idx: int) -> set[str]:
+    """1つの数式を学習画面が引けるキー（app.js ``formulaById`` と同じ規則・大文字）。"""
+    raw_id = str(formula.get("id") or f"FORMULA_{idx}")
+    normalized = normalize_evidence_id(raw_id)
+    return {key.upper() for key in (raw_id, normalized, f"FORMULA_{idx}") if key}
+
+
+def _resolvable_formula_keys(formulas: list[dict]) -> set[str]:
+    """学習画面が ``[[FORMULA_N]]`` を**描ける**キー（app.js ``formulaById`` と同じ規則）。
+
+    学習画面は ``[[FORMULA_N]]`` を ``formula.latex || formula.summary`` で描き、どちらも
+    無ければ式の ID をそのまま出す（IK-0454: ``eq_eqcand_inline_blk_…`` が本文に出た）。
+    そのため描けるのは latex か summary を持つ式だけで、plain_text / raw_text しか無い式は
+    ここでは「描けない」に数え、:func:`replace_unresolved_formula_placeholders` が短い
+    原文を本文へ直接書き込む。
+    """
+    keys: set[str] = set()
+    for idx, formula in enumerate(formulas or []):
+        if not isinstance(formula, dict):
+            continue
+        if not str(formula.get("latex") or formula.get("summary") or "").strip():
+            continue
+        keys.update(_formula_keys(formula, idx))
+    return keys
+
+
+#: 学習者に見せない抽出段の式 ID（``eq_eqcand_inline_blk_…`` / ``eqcand_…`` / ``eq_op_…``）。
+_INTERNAL_EQUATION_ID_RE = _dp.COURSE_CONTENT_INTERNAL_EQUATION_ID_RE  # 正本は display_projection（DP2）
+
+
+def is_internal_equation_id(text: object) -> bool:
+    """文字列が抽出段の式 ID（学習者に見せない）を含むか。"""
+    return bool(_INTERNAL_EQUATION_ID_RE.search(str(text or "")))
+
+
+#: 本文へ直接書き込んでよい原文の長さ（inline 式候補の ``J=3–2`` / ``w0`` / ``αK`` 程度）。
+_INLINE_FORMULA_TEXT_MAX_CHARS = 40
+_TEX_LIKE_CHARS_RE = re.compile(r"\\[A-Za-z]+|[\\_^{}]")
+
+
+def inline_formula_text(formula: dict) -> str:
+    """latex の無い短い式を本文に書くときの表記（書けなければ空文字）。
+
+    本体は ``plain_text`` → ``raw_text`` の順。40 字以内・改行なしのときだけ使い、
+    TeX らしい（``\\cmd`` / ``_`` / ``^`` / 波括弧を含む）なら ``$…$`` で包む。
+    それ以外（``J=3–2`` / ``w0`` / ``µ(a)``）はそのままの文字として書く（IK-0454）。
+    内部 ID のような本体は書かない。
+    """
+    if not isinstance(formula, dict):
+        return ""
+    for key in ("plain_text", "raw_text"):
+        body = str(formula.get(key) or "").strip()
+        if not body:
+            continue
+        if "\n" in body or "\r" in body or len(body) > _INLINE_FORMULA_TEXT_MAX_CHARS:
+            return ""
+        if _INTERNAL_EQUATION_ID_RE.search(body):
+            return ""
+        body = body.strip("$").strip()
+        if not body:
+            return ""
+        if _TEX_LIKE_CHARS_RE.search(body):
+            return f"${body}$"
+        return body
+    return ""
+
+
+def replace_unresolved_formula_placeholders(text: str, formulas: list[dict]) -> tuple[str, bool]:
+    """``text`` 中の描けない ``[[FORMULA_N]]`` を片付ける。
+
+    - latex を持たないが短い原文（plain_text / raw_text）を持つ式は、その原文を本文へ
+      直接書き込む（IK-0454。``J=3–2`` のような自明な記号を事実文で潰さない）。
+    - それ以外の描けないものは事実の文に置き換える（式を捏造しない）。
+
+    戻り値は ``(置き換え後の本文, 事実の文に置き換えたか)``。描けるプレースホルダーと
+    ``![[equation:ID]]`` / ``[[FIGURE_N]]`` には触れない。原文の書き込みは本文を
+    変えるが「載せられていない」事実ではないので、戻り値の真偽には数えない。
+    """
+    if not text or "FORMULA_" not in str(text).upper():
+        return text or "", False
+    keys = _resolvable_formula_keys(formulas)
+    inline_by_key: dict[str, str] = {}
+    for idx, formula in enumerate(formulas or []):
+        if not isinstance(formula, dict):
+            continue
+        inline = inline_formula_text(formula)
+        if not inline:
+            continue
+        for key in _formula_keys(formula, idx):
+            inline_by_key.setdefault(key, inline)
+    changed = False
+
+    def _replace(match: re.Match) -> str:
+        nonlocal changed
+        key = match.group(1).upper()
+        if key in keys:
+            return match.group(0)
+        inline = inline_by_key.get(key)
+        if inline:
+            return inline
+        changed = True
+        return label_vocab.UNRESOLVED_FORMULA_PLACEHOLDER_TEXT
+
+    return _FORMULA_ONLY_PLACEHOLDER_RE.sub(_replace, str(text)), changed
+
+
+def _sanitize_topic_formula_placeholders(topic: dict) -> bool:
+    """トピックの配信本文（student_material / spoken_script）の引けない数式を片付ける。
+
+    置き換えたときは ``grounding_note`` と ``coverage`` に事実文を残す（既に別の
+    事実が入っていれば上書きしない）。戻り値は置き換えたか。
+    """
+    if not isinstance(topic, dict):
+        return False
+    formulas = _topic_content_block_formulas(topic)
+    changed = False
+    material = topic.get("student_material")
+    # 短い原文を書き込んだだけ（IK-0454）でも本文は変わるので書き戻す。事実文
+    # （grounding_note / coverage）は「載せられていない」ものがあったときだけ付ける。
+    if isinstance(material, dict):
+        original = str(material.get("source_text") or "")
+        text, did = replace_unresolved_formula_placeholders(original, formulas)
+        if text != original:
+            topic["student_material"] = {**material, "source_text": text}
+        changed = changed or did
+    elif isinstance(material, str) and material:
+        text, did = replace_unresolved_formula_placeholders(material, formulas)
+        if text != material:
+            topic["student_material"] = text
+        changed = changed or did
+    spoken = topic.get("spoken_script")
+    if isinstance(spoken, str) and spoken:
+        text, did = replace_unresolved_formula_placeholders(spoken, formulas)
+        if text != spoken:
+            topic["spoken_script"] = text
+        changed = changed or did
+    if changed:
+        if not topic.get("grounding_note"):
+            topic["grounding_note"] = label_vocab.UNRESOLVED_FORMULA_GROUNDING_NOTE
+        if not (isinstance(topic.get("coverage"), dict) and topic["coverage"].get("status")):
+            topic["coverage"] = {
+                "status": "weak",
+                "message": label_vocab.UNRESOLVED_FORMULA_GROUNDING_NOTE,
+            }
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# プロンプトへ渡す JSON の予算（IK-0379）
+# ---------------------------------------------------------------------------
+# 旧実装は ``json.dumps(...)[:N]`` で文字列の途中を切っており、JSON が閉じないまま
+# 生成モデルへ渡っていた（``available_references`` が読めない）。ここでは
+#   1. 空の値（空文字・空リスト・空 dict）を渡す前に落とす
+#   2. 予算を超えたら、長文の末尾を「…」で切る → 要素数の多いリストの末尾要素を落とす
+#      → 残りの文字列を切る → 最後に保護キー（``available_references``）の末尾要素を落とす
+# の順で**要素単位**に間引き、残る JSON は常に ``json.loads`` できる形に保つ。
+# 間引いたときは ``_omitted`` に事実文を1つ足す（件数は書かない）。
+
+PROMPT_JSON_OMITTED_KEY = "_omitted"
+PROMPT_JSON_OMITTED_NOTE = (
+    "文字数の都合で一部の項目を省略しています（項目単位で落とし、長い文は末尾を「…」で切っています）。"
+)
+_PROMPT_JSON_PROTECTED_KEYS = frozenset({"available_references"})
+_PROMPT_JSON_UNCUT_STRING_KEYS = frozenset({"latex", "id", "target_id", "kind", "type"})
+_PROMPT_JSON_LONG_STRING = 400
+_PROMPT_JSON_MIN_STRING = 80
+_PROMPT_JSON_MAX_STEPS = 20000
+
+
+def _prompt_json_dumps(value: Any) -> str:
+    return json.dumps(_strip_nuls(value), ensure_ascii=False, indent=2)
+
+
+def _is_empty_prompt_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, dict)):
+        return not value
+    return False
+
+
+def _drop_empty_prompt_values(value: Any) -> Any:
+    """空文字・空リスト・空 dict を再帰的に取り除いた複製を返す（None と数値は残す）。"""
+    if isinstance(value, BaseModel):
+        value = value.model_dump()
+    if isinstance(value, dict):
+        out: dict = {}
+        for key, item in value.items():
+            cleaned = _drop_empty_prompt_values(item)
+            if _is_empty_prompt_value(cleaned):
+                continue
+            out[key] = cleaned
+        return out
+    if isinstance(value, (list, tuple)):
+        items = [_drop_empty_prompt_values(item) for item in value]
+        return [item for item in items if not _is_empty_prompt_value(item)]
+    return value
+
+
+def _prompt_json_nodes(value: Any, *, protected: bool = False, protected_keys: frozenset | None = None):
+    """(container, key, node, protected) を列挙する（トップレベル自身は含めない）。"""
+    keys = _PROMPT_JSON_PROTECTED_KEYS if protected_keys is None else protected_keys
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == PROMPT_JSON_OMITTED_KEY:
+                continue
+            item_protected = protected or key in keys
+            yield value, key, item, item_protected
+            yield from _prompt_json_nodes(item, protected=item_protected, protected_keys=keys)
+    elif isinstance(value, list):
+        for idx, item in enumerate(value):
+            yield value, idx, item, protected
+            yield from _prompt_json_nodes(item, protected=protected, protected_keys=keys)
+
+
+def _trim_longest_string(nodes: list, excess: int, floor: int) -> bool:
+    strings = [
+        (container, key, node)
+        for container, key, node, prot in nodes
+        if not prot
+        and isinstance(node, str)
+        and key not in _PROMPT_JSON_UNCUT_STRING_KEYS
+        and len(node) > floor + 1
+    ]
+    if not strings:
+        return False
+    container, key, node = max(strings, key=lambda t: len(t[2]))
+    keep = max(floor, len(node) - max(excess, 1) - 1)
+    container[key] = node[:keep] + "…"
+    return True
+
+
+def _pop_from_longest_list(
+    nodes: list, *, allow_protected: bool, keep: set[int] | None = None
+) -> bool:
+    """要素数の多いリストの末尾要素を落とす。``keep``（``id()`` の集合）の要素は落とさない。"""
+    keep = keep or set()
+    lists = [
+        (container, key, node)
+        for container, key, node, prot in nodes
+        if isinstance(node, list) and node and (allow_protected or not prot)
+        and any(id(element) not in keep for element in node)
+    ]
+    if not lists:
+        return False
+    container, key, node = max(
+        lists, key=lambda t: (len(t[2]), len(_prompt_json_dumps(t[2])))
+    )
+    for index in range(len(node) - 1, -1, -1):
+        if id(node[index]) not in keep:
+            node.pop(index)
+            break
+    if not node:
+        if isinstance(container, dict):
+            container.pop(key, None)
+        else:
+            container.pop(key)
+    return True
+
+
+def _trim_prompt_payload_once(
+    payload: Any, excess: int, keep: set[int] | None = None, protected_keys: frozenset | None = None
+) -> bool:
+    """1段だけ間引く。間引けたら True。
+
+    順序: 長文（``_PROMPT_JSON_LONG_STRING`` 超）の末尾を切る → 要素数の多いリストの
+    末尾要素を落とす → 残った文字列を ``_PROMPT_JSON_MIN_STRING`` まで切る →
+    保護キー（``available_references``）の末尾要素を落とす。``latex`` / ``id`` の
+    ような途中で切ると意味が壊れる値は切らない（要素ごと落とす）。
+
+    ``keep``（``id()`` の集合）に入っている要素（本文・単位が参照する式とその入れ物。
+    IK-0439）は、それ以外を落とし尽くすまで落とさない。
+    """
+    nodes = list(_prompt_json_nodes(payload, protected_keys=protected_keys))
+    return (
+        _trim_longest_string(nodes, excess, _PROMPT_JSON_LONG_STRING)
+        or _pop_from_longest_list(nodes, allow_protected=False, keep=keep)
+        or _trim_longest_string(nodes, excess, _PROMPT_JSON_MIN_STRING)
+        or (bool(keep) and _pop_from_longest_list(nodes, allow_protected=False))
+        or _pop_from_longest_list(nodes, allow_protected=True)
+    )
+
+
+def _prompt_json(
+    value: Any,
+    max_chars: int,
+    *,
+    reducers: tuple = (),
+    keep_predicate: Any = None,
+    protected_keys: frozenset | None = None,
+) -> str:
+    """予算内に収まる、常に読める JSON 文字列を返す（IK-0379）。
+
+    ``reducers`` は汎用の間引きより先に1つずつ試す段（``payload -> bool``。何か
+    減らせたら True）。``keep_predicate``（``node -> bool``）が真の dict 要素と、それを
+    含む入れ物は、汎用の間引きでは最後まで落とさない（IK-0439）。
+    """
+    payload = _drop_empty_prompt_values(value)
+    text = _prompt_json_dumps(payload)
+    if len(text) <= max_chars:
+        return text
+    if not isinstance(payload, dict):
+        payload = {"items": payload}
+    payload[PROMPT_JSON_OMITTED_KEY] = PROMPT_JSON_OMITTED_NOTE
+    for reducer in reducers:
+        for _ in range(_PROMPT_JSON_MAX_STEPS):
+            text = _prompt_json_dumps(payload)
+            if len(text) <= max_chars:
+                return text
+            if not reducer(payload):
+                break
+    keep = _kept_node_ids(payload, keep_predicate) if keep_predicate else None
+    for _ in range(_PROMPT_JSON_MAX_STEPS):
+        text = _prompt_json_dumps(payload)
+        if len(text) <= max_chars:
+            return text
+        if not _trim_prompt_payload_once(payload, len(text) - max_chars, keep, protected_keys):
+            break
+    return _prompt_json_dumps({PROMPT_JSON_OMITTED_KEY: PROMPT_JSON_OMITTED_NOTE})
+
+
+def _kept_node_ids(payload: Any, predicate: Any) -> set[int]:
+    """``predicate`` が真の dict と、それを含む dict / list の ``id()``。"""
+    kept: set[int] = set()
+
+    def walk(node: Any) -> bool:
+        hit = False
+        if isinstance(node, dict):
+            hit = bool(predicate(node))
+            for key, child in node.items():
+                if key != PROMPT_JSON_OMITTED_KEY and walk(child):
+                    hit = True
+        elif isinstance(node, list):
+            for child in node:
+                if walk(child):
+                    hit = True
+        if hit:
+            kept.add(id(node))
+        return hit
+
+    walk(payload)
+    return kept
+
+
+# ---------------------------------------------------------------------------
+# 根拠候補の予算の優先順位（IK-0439）
+# ---------------------------------------------------------------------------
+#
+# 汎用の間引き（要素数の多いリストの末尾から落とす）だけだと、``content_blocks`` の
+# 末尾にある equations ブロックが丸ごと落ち、式が ID だけになっていた（第 9 周の
+# t7 / t11）。根拠候補では
+#   1. 重複する材料（``content`` = 要約と式の行の再掲、``teaching_takeaways`` = 部品の再掲）
+#   2. 原文抜粋の長さ
+#   3. 参照一覧の主張の本文の長さ
+#   4. 本文・単位が参照しない式
+# の順に減らし、本文（下書き）・単位が参照する式とその本体は最後まで残す。
+
+_EVIDENCE_DUPLICATE_KEYS = ("content", "teaching_takeaways", "source_evidence_ids")
+_EVIDENCE_EXCERPT_SHORT_LIMIT = 200
+
+
+#: 予算の都合で参照一覧から主張を外したときにプロンプトへ添える事実文（IK-0463）。
+OMITTED_CLAIMS_NOTE = (
+    "文字数の都合で、このトピックの主張の一部を参照一覧から外しています（外した主張は埋め込めません）。"
+)
+
+
+def _evidence_reducers(priority_equation_ids: set[str], priority_claim_ids: set[str] | None = None) -> tuple:
+    priority_claim_ids = priority_claim_ids or set()
+
+    def drop_duplicates(payload: dict) -> bool:
+        for key in _EVIDENCE_DUPLICATE_KEYS:
+            if key in payload:
+                payload.pop(key)
+                return True
+        return False
+
+    def shorten_excerpt(payload: dict) -> bool:
+        text = payload.get("source_excerpt")
+        if isinstance(text, str) and len(text) > _EVIDENCE_EXCERPT_SHORT_LIMIT + 1:
+            payload["source_excerpt"] = _short_excerpt(text, limit=_EVIDENCE_EXCERPT_SHORT_LIMIT)
+            return len(payload["source_excerpt"]) < len(text)
+        return False
+
+    def drop_trailing_claim(payload: dict) -> bool:
+        # IK-0463: 主張の本文を短く切る前に、主張の件数を後ろから減らす（本文を 55 字に
+        # 切ると兄弟の主張が同じ文になり、埋め込む前に確かめられない）。
+        refs = payload.get("available_references") or []
+        claim_positions = [
+            i for i, ref in enumerate(refs)
+            if isinstance(ref, dict) and ref.get("kind") == "claim"
+            and str(ref.get("id") or "") not in priority_claim_ids
+        ]
+        total_claims = sum(1 for ref in refs if isinstance(ref, dict) and ref.get("kind") == "claim")
+        if not claim_positions or total_claims <= _CLAIM_REFERENCE_FLOOR:
+            return False
+        removed = refs.pop(claim_positions[-1])
+        linked = payload.get("linked_claim_ids")
+        if isinstance(linked, list):
+            payload["linked_claim_ids"] = [c for c in linked if str(c) != str(removed.get("id"))]
+        payload["omitted_claims_note"] = OMITTED_CLAIMS_NOTE
+        return True
+
+    def shorten_reference_texts(payload: dict) -> bool:
+        before = [
+            (id(r), r.get("text")) for r in payload.get("available_references") or [] if isinstance(r, dict)
+        ]
+        originals: dict[int, str] = {}
+        for ref in payload.get("available_references") or []:
+            if not isinstance(ref, dict) or ref.get("kind") in ("equation", "claim"):
+                continue
+            text = ref.get("text")
+            if isinstance(text, str) and len(text) > _REFERENCE_TEXT_SHORT_LIMIT + 1:
+                originals[id(ref)] = text
+                ref["text"] = _short_excerpt(text, limit=_REFERENCE_TEXT_SHORT_LIMIT)
+        # IK-0487: 短くして別の参照と同じ文になったもの（同じ段落の続きの ev_0042 / ev_0043）は、
+        # 区別できるところまで長さを戻す（同じ文の参照は埋め込む前に確かめられない）。
+        refs = [r for r in payload.get("available_references") or [] if isinstance(r, dict)]
+        by_text: dict[str, list[dict]] = {}
+        for ref in refs:
+            if id(ref) in originals:
+                by_text.setdefault(str(ref.get("text")), []).append(ref)
+        for text, group in by_text.items():
+            others = [r for r in refs if r not in group and str(r.get("text")) == text]
+            group = group + others
+            if len(group) < 2:
+                continue
+            full = [originals.get(id(r), str(r.get("text") or "")) for r in group]
+            common = len(_common_prefix(full))
+            for ref, original in zip(group, full):
+                if id(ref) in originals:
+                    restored = _short_excerpt(original, limit=max(_REFERENCE_TEXT_SHORT_LIMIT, common + 30))
+                    ref["text"] = restored if len(restored) < len(original) else original
+        after = [
+            (id(r), r.get("text")) for r in payload.get("available_references") or [] if isinstance(r, dict)
+        ]
+        return after != before
+
+    def drop_unreferenced_equation(payload: dict) -> bool:
+        for block in reversed(payload.get("content_blocks") or []):
+            if not isinstance(block, dict) or block.get("type") != "equations":
+                continue
+            items = block.get("items") or []
+            for index in range(len(items) - 1, -1, -1):
+                item = items[index]
+                eq_id = str((item or {}).get("equation_id") or "") if isinstance(item, dict) else ""
+                if eq_id not in priority_equation_ids:
+                    items.pop(index)
+                    if not items:
+                        payload["content_blocks"].remove(block)
+                    return True
+        return False
+
+    return (
+        drop_duplicates, shorten_excerpt, drop_trailing_claim, shorten_reference_texts,
+        drop_unreferenced_equation,
+    )
+
+
+def _common_prefix(texts: list[str]) -> str:
+    if not texts:
+        return ""
+    prefix = texts[0]
+    for text in texts[1:]:
+        while prefix and not text.startswith(prefix):
+            prefix = prefix[:-1]
+    return prefix
+
+
+_DRAFT_EQUATION_EMBED_RE = re.compile(r"!\[\[\s*equation:([^\]\s]+)\s*\]\]", re.IGNORECASE)
+
+
+def _priority_equation_ids(topic: dict) -> set[str]:
+    """予算で最後まで残す式（IK-0439）。
+
+    トピックに結びついた式（``linked_equation_ids`` = 単位・部品から引いた式）、
+    下書きの本文が ``![[equation:…]]`` で埋め込んでいる式、部品が役割付きで参照する式
+    （components ブロックの ``equations`` と注意書き・前提の ``equation_ids``）。
+    これ以外（チャンク由来の補充式）が先に落ちる。
+    """
+    ids: set[str] = {str(e) for e in _as_list(topic.get("linked_equation_ids")) if str(e or "").strip()}
+    material = topic.get("student_material")
+    text = material.get("source_text") if isinstance(material, dict) else material
+    for match in _DRAFT_EQUATION_EMBED_RE.finditer(str(text or "")):
+        ids.add(match.group(1).strip())
+    for block in topic.get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "components":
+            continue
+        for item in block.get("items") or []:
+            if isinstance(item, dict):
+                for eq in _as_list(item.get("equations")):
+                    if isinstance(eq, dict) and eq.get("id"):
+                        ids.add(str(eq["id"]))
+                for field in ("preconditions", "inputs", "outputs", "cautions"):
+                    for ref in _as_list(item.get(field)):
+                        if isinstance(ref, dict):
+                            ids.update(str(e) for e in _as_list(ref.get("equation_ids")) if e)
+    return ids
+
+
+_DRAFT_CLAIM_EMBED_RE = re.compile(r"!\[\[\s*claim:([^\]\s]+)\s*\]\]", re.IGNORECASE)
+
+
+def _priority_claim_ids(topic: dict) -> set[str]:
+    """予算で最後まで残す主張（下書きの本文が埋め込んでいる主張。IK-0463）。"""
+    material = topic.get("student_material")
+    text = material.get("source_text") if isinstance(material, dict) else material
+    return {m.group(1).strip() for m in _DRAFT_CLAIM_EMBED_RE.finditer(str(text or ""))}
+
+
+#: 根拠候補の予算で最後まで落とさないキー（IK-0489）。埋め込みの閉世界（参照一覧）と、
+#: その読み方を決める短い事実（根拠の有無・復元式・トピックに結びついた ID・注記）。
+#: 汎用の間引きは「要素数の多いリスト」から落とすので、保護しないと数件しかない
+#: ``grounding_facts`` / ``reconstructed_equation_ids`` / ``linked_*`` が長い
+#: ``content_blocks`` より先に消えていた。保護したキーは、ほかを落とし尽くした後の最終段でだけ落ちる。
+EVIDENCE_PROMPT_PROTECTED_KEYS = frozenset({
+    "available_references",
+    "grounding_facts",
+    "reconstructed_equation_ids",
+    "linked_equation_ids",
+    "linked_claim_ids",
+    "linked_component_ids",
+    "figures_note",
+    "omitted_claims_note",
+    "excluded_equations_note",
+})
+
+
+def _evidence_prompt_json(topic: dict, max_chars: int) -> str:
+    """根拠候補の JSON（IK-0439 の優先順位で予算に収める）。"""
+    priority = _priority_equation_ids(topic)
+    return _prompt_json(
+        _topic_evidence_for_prompt(topic),
+        max_chars,
+        protected_keys=EVIDENCE_PROMPT_PROTECTED_KEYS,
+        reducers=_evidence_reducers(priority, _priority_claim_ids(topic)),
+        keep_predicate=lambda node: (
+            isinstance(node, dict)
+            and "equation_id" in node
+            and str(node.get("equation_id") or "") in priority
+        ),
+    )
 
 
 def _generate_single_topic_draft(
@@ -2671,11 +5410,13 @@ def _generate_single_topic_draft(
     reasoning_effort: str | None,
 ) -> dict:
     prompt = _COURSE_CONTENT_DRAFT_PROMPT.format(
-        course_json=json.dumps(course_context, ensure_ascii=False, indent=2)[:8000],
-        topic_json=json.dumps(_topic_context_for_prompt(topic), ensure_ascii=False, indent=2)[:4000],
-        sequence_json=json.dumps(_topic_sequence_context(topics, index), ensure_ascii=False, indent=2)[:3000],
-        evidence_json=json.dumps(_topic_evidence_for_prompt(topic), ensure_ascii=False, indent=2)[:8000],
-        draft_json=json.dumps(_topic_existing_draft(topic), ensure_ascii=False, indent=2)[:6000],
+        # IK-0379: 文字数予算は JSON 文字列の途中を切る ``[:N]`` ではなく、要素単位で
+        # 間引く（残る JSON は常に読める・空の項目は渡さない）。
+        course_json=_prompt_json(course_context, 8000),
+        topic_json=_prompt_json(_topic_context_for_prompt(topic, topics), 4000),
+        sequence_json=_prompt_json(_topic_sequence_context(topics, index), 3000),
+        evidence_json=_evidence_prompt_json(topic, 8000),
+        draft_json=_prompt_json(_topic_existing_draft(topic), 6000),
     )
     # 構造化出力 → 失敗時のみテキスト JSON へ1回降格する（共通実装
     # ``core/llm_worker/single_shot.py::structured_call``。原稿スタジオの
@@ -2696,6 +5437,8 @@ def _generate_single_topic_draft(
         log_label="course content topic draft",
     )
     result = _normalize_topic_draft_response(parsed)
+    _strip_contradicted_draft_notes(result, topic)
+    _ensure_reconstruction_caution(result, topic)
     _ensure_required_equations_in_material(result, topic)
     _ensure_required_figures_in_material(result, topic)
     _ensure_check_question_details(result, topic)
@@ -2708,6 +5451,27 @@ def _generate_single_topic_draft(
     ]):
         raise ValueError("empty draft response")
     return result
+
+
+def _ensure_reconstruction_caution(result: dict, topic: dict) -> None:
+    """トピックが AI の復元した式を差し出しているのに、生成された注意点に復元の
+    事実が無ければ、固定文を1つ足す（IK-0443 / IK-0460。非LLM）。
+
+    「復元した式を差し出す」は、式として読める式（``_unpresentable_equation_ids`` の
+    外）の ``reconstructed``（A層 reconstruction の写し）と、部品の注意書きの
+    ``equation_ids`` の交差のどちらかで決める。旧実装は後者だけを見ていたため、部品の
+    注意書きを持たないトピック（大半）では復元式を配っても注意点が付かなかった。
+    モデルが書いた注意点に復元のことが書いてあるかは「復元」の語で見る（重複して足さない）。
+    """
+    if not (
+        topic_reconstructed_equation_ids(topic)
+        or any(row.get("reconstructed_equation") for row in _component_cautions_for_prompt(topic))
+    ):
+        return
+    cautions = result.setdefault("cautions", [])
+    if any("復元" in str(c) for c in cautions):
+        return
+    cautions.append(label_vocab.RECONSTRUCTED_TOPIC_CAUTION)
 
 
 def _course_context_for_prompt(course: dict, topics: list[dict]) -> dict:
@@ -2736,7 +5500,7 @@ def _course_context_for_prompt(course: dict, topics: list[dict]) -> dict:
     }
 
 
-def _topic_context_for_prompt(topic: dict) -> dict:
+def _topic_context_for_prompt(topic: dict, topics: list[dict] | None = None) -> dict:
     context = {
         "id": topic.get("id") or "",
         "title": topic.get("title") or "",
@@ -2746,6 +5510,15 @@ def _topic_context_for_prompt(topic: dict) -> dict:
         "expected_misconceptions": topic.get("expected_misconceptions") or [],
         "content_confidence": topic.get("content_confidence") or "",
     }
+    # IK-0441: 要約が別のトピックと同じ文なら、そのトピックの題名を渡して書き分けさせる。
+    coverage = topic.get("coverage") if isinstance(topic.get("coverage"), dict) else {}
+    shared = [str(t) for t in _as_list(coverage.get("duplicate_summary_of")) if str(t).strip()]
+    if shared:
+        title_by_id = {
+            str(t.get("id") or ""): str(t.get("title") or "")
+            for t in (topics or []) if isinstance(t, dict)
+        }
+        context["summary_shared_with"] = [title_by_id.get(t) or t for t in shared]
     # learning_units_design.md §6.5 (P2-6): 語りの弧（blueprint 由来）。散文生成が
     # 「このトピックが論文の語りの中で果たす役割」を参照できるようにする。
     # ``roles`` / ``visual_strategy`` だけで、``rationale`` も数値も渡さない（LU5）。
@@ -2778,40 +5551,618 @@ def _topic_sequence_context(topics: list[dict], index: int) -> dict:
     }
 
 
+#: ``available_references`` の各項目に添える短い本文の上限（IK-0438）。主張の本文・図の
+#: キャプション・原文抜粋の冒頭は 120 字、式は本体が 200 字以内のときだけ本体を載せる
+#: （途中で切ると TeX が壊れるので、長い本体は載せず content_blocks に任せる）。
+REFERENCE_TEXT_LIMIT = 120
+REFERENCE_EQUATION_BODY_LIMIT = 200
+#: 主張の本文の上限（IK-0463。兄弟の atomic 子を区別でき、埋め込む前に確かめられる長さ）。
+CLAIM_REFERENCE_TEXT_LIMIT = 240
+#: 予算を超えたときに主張の本文を詰める長さ（式より先に詰める。IK-0439）。
+_REFERENCE_TEXT_SHORT_LIMIT = 60
+
+#: 原文抜粋に図の見出し（``FIG. 1.`` / ``Figure 2`` / ``図3``）が現れるのに、その図が
+#: 根拠候補に kind='figure' として供給されていないときの事実文（IK-0438）。
+SOURCE_FIGURE_NOT_PROVIDED_NOTE = (
+    "原文抜粋に図への言及がありますが、その図はこのトピックの根拠候補に供給されていません"
+    "（埋め込めないので、必要なら言葉で説明してください）。"
+)
+_SOURCE_FIGURE_MENTION_RE = re.compile(r"\b(?:FIG|Fig|Figure|FIGURE)\.?\s*\d+|図\s*\d+")
+
+
+def _topic_equation_items_by_id(topic: dict) -> dict[str, dict]:
+    by_id: dict[str, dict] = {}
+    for block in topic.get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "equations":
+            continue
+        for item in block.get("items") or []:
+            if isinstance(item, dict):
+                eq_id = str(item.get("equation_id") or item.get("id") or "").strip()
+                if eq_id and eq_id not in by_id:
+                    by_id[eq_id] = item
+    return by_id
+
+
+def _reference_text(link: dict, equation_item: dict | None) -> str:
+    """参照一覧の1項目に添える短い本文（IK-0438）。無ければ空。"""
+    kind = str(link.get("kind") or "")
+    if kind == "equation":
+        body = _equation_body_text(equation_item or {}) or str(
+            link.get("latex") or link.get("plain_text") or ""
+        ).strip()
+        if body and len(body) <= REFERENCE_EQUATION_BODY_LIMIT:
+            return body
+        # IK-0486: 本体が長い式を空の text にしない（「埋め込む前に text で確かめる」が
+        # できない）。LaTeX は途中で切ると壊れるので、読み（plain_text）を短く切って渡す。
+        plain = " ".join(str(
+            (equation_item or {}).get("plain_text") or link.get("plain_text") or link.get("summary") or ""
+        ).split())
+        return _short_excerpt(plain, limit=REFERENCE_EQUATION_BODY_LIMIT) if plain else ""
+    if kind == "claim":
+        # IK-0463: 主張は兄弟の atomic 子が同じ書き出しを持つので、短く切ると区別できない。
+        text = str(link.get("summary") or "").strip()
+        return _short_excerpt(text, limit=CLAIM_REFERENCE_TEXT_LIMIT) if text else ""
+    if kind == "figure":
+        extra = link.get("extra") if isinstance(link.get("extra"), dict) else {}
+        text = str(link.get("caption") or extra.get("caption") or link.get("summary") or "").strip()
+    elif kind == "component":
+        text = str(link.get("label") or link.get("summary") or "").strip()
+    else:
+        text = str(link.get("summary") or "").strip()
+        if not text and kind == "source":
+            # TeX の原文（equation_quote）は summary を持たず latex に全文がある。
+            latex = str(link.get("latex") or "").strip()
+            return latex if latex and len(latex) <= REFERENCE_TEXT_LIMIT else ""
+        if text and kind == "source":
+            # IK-0487: 原文の証拠も抜粋と同じく、語の途中・数式の断片から始めず、
+            # 内部参照（``[[FORMULA_0]]``）を本文に残さない。整えて空になれば原文のまま。
+            text = clean_excerpt_text(text) or scrub_excerpt_placeholders(text)
+    return _short_excerpt(text, limit=REFERENCE_TEXT_LIMIT) if text else ""
+
+
+def _reference_shows_reconstructed_latex(item: object) -> bool:
+    """復元された式で、表示する LaTeX が原文（raw_text）と違うか（IK-0485）。"""
+    if not isinstance(item, dict) or not _equation_is_reconstructed(item):
+        return False
+    latex = _equation_latex(item)
+    if not latex:
+        return False
+    raw = str(item.get("raw_text") or item.get("text") or "").strip()
+    return not raw or normalized_equation_key(latex) != normalized_equation_key(raw)
+
+
+def _topic_available_references(topic: dict, dropped_equation_ids: set[str]) -> list[dict]:
+    """埋め込みに使ってよい (kind, id) と、その中身の短い本文（IK-0438）。"""
+    equation_items = _topic_equation_items_by_id(topic)
+    references: list[dict] = []
+    for link in topic.get("evidence_links") or []:
+        if not (isinstance(link, dict) and link.get("kind") and link.get("target_id")):
+            continue
+        kind = link.get("kind")
+        target_id = link.get("target_id")
+        if kind == "equation" and str(target_id) in dropped_equation_ids:
+            continue
+        ref = {"kind": kind, "id": target_id}
+        equation_item = equation_items.get(str(target_id))
+        if kind == "equation" and not (
+            _equation_body_text(equation_item or {}) or _equation_body_text(link)
+            or str(link.get("summary") or "").strip()
+        ):
+            # IK-0486: 本体がどこにも無い式（content_blocks にも evidence_links にも
+            # latex / plain_text / raw_text が無い）は、中身を確かめられないので一覧に載せない。
+            continue
+        text = _reference_text(link, equation_item)
+        if text:
+            ref["text"] = text
+        if kind == "equation" and _reference_shows_reconstructed_latex(equation_item or link):
+            # IK-0485: 一覧の text が原文ではなく AI の復元した LaTeX であること
+            # （``reconstructed_equation_ids`` が予算で落ちても、項目自身に残る）。
+            ref["reconstructed"] = True
+        if kind == "equation" and reconstruction_beyond_raw(equation_item or link):
+            # IK-0460: 原文は短い（``Mmax = 2``）のに LaTeX は先まで書かれている式。
+            # 原文を並べ、LaTeX が復元であることを添える。
+            raw = str((equation_item or link).get("raw_text") or "").strip()
+            if raw:
+                ref["raw_text"] = _short_excerpt(raw, limit=REFERENCE_TEXT_LIMIT)
+            ref["reconstruction_note"] = label_vocab.RECONSTRUCTED_BEYOND_RAW_NOTE
+        references.append(ref)
+    references = _dedupe_and_cap_claim_references(references, topic)
+    excerpt_text = str(topic.get("source_excerpt") or "").strip()
+    if excerpt_text:
+        # 原文抜粋は配信側と同じ id で渡す（IK-0455。``topic_summary`` は配信・原稿スタジオとも
+        # 「トピック概要」＝ ``topic.summary`` に解決されるので、抜粋の id にしない）。
+        ref = {"kind": "source", "id": source_excerpt_evidence_id(topic)}
+        ref["text"] = _short_excerpt(
+            clean_excerpt_text(excerpt_text) or scrub_excerpt_placeholders(excerpt_text), limit=REFERENCE_TEXT_LIMIT
+        )
+        references.append(ref)
+    return _dedupe_source_references(references, topic)
+
+
+def _dedupe_source_references(references: list[dict], topic: dict) -> list[dict]:
+    """同じ本文の原文参照（``ev_0042`` と ``ev_0043``・証拠と原文抜粋）を1つにする（IK-0487）。
+
+    本文の一致は主張と同じ正規化（一方が他方の切り詰めでも一致）。前に並ぶ方を残し、
+    後ろの方が下書きの本文に埋め込まれていて前の方が埋め込まれていないときだけ後ろを残す。
+    本文の無い参照は重複判定をしない。
+    """
+    embedded = _draft_embedded_refs(topic)
+    kept: list[dict] = []
+    for ref in references:
+        if ref.get("kind") != "source":
+            kept.append(ref)
+            continue
+        key = _claim_text_key(ref.get("text") or "")
+        duplicate = None
+        if key:
+            for other in kept:
+                if other.get("kind") != "source":
+                    continue
+                other_key = _claim_text_key(other.get("text") or "")
+                if other_key and (other_key == key or other_key.startswith(key) or key.startswith(other_key)):
+                    duplicate = other
+                    break
+        if duplicate is None:
+            kept.append(ref)
+        elif ("source", str(ref.get("id"))) in embedded and ("source", str(duplicate.get("id"))) not in embedded:
+            kept[kept.index(duplicate)] = ref
+    return kept
+
+
+def _draft_embedded_refs(topic: dict) -> set[tuple[str, str]]:
+    """いまの下書き本文が埋め込んでいる (kind, id)。"""
+    material = topic.get("student_material")
+    text = material.get("source_text") if isinstance(material, dict) else material
+    return {
+        (m.group(1).lower(), m.group(2).strip())
+        for m in _EVIDENCE_EMBED_RE.finditer(str(text or ""))
+    }
+
+
+#: 参照一覧に載せる主張の上限（IK-0463）。本文を短く切って件数を保つのではなく、
+#: 本文を読める長さで残して件数を抑える。外した主張は ``omitted_claims_note`` で知らせる。
+CLAIM_REFERENCE_LIMIT = 12
+#: 予算で主張を間引くときの下限（これより少なくはしない。その先は汎用の間引きに任せる）。
+_CLAIM_REFERENCE_FLOOR = 4
+_CLAIM_TEXT_KEY_TRAIL_RE = re.compile(r"[\s.。…,、;:]+$")
+
+
+def _claim_text_key(text: str) -> str:
+    return _CLAIM_TEXT_KEY_TRAIL_RE.sub("", " ".join(str(text or "").casefold().split()))
+
+
+def _dedupe_and_cap_claim_references(references: list[dict], topic: dict) -> list[dict]:
+    """主張の参照を本文で重複除去し、件数を上限で抑える（IK-0463。決定論）。
+
+    同じ本文（正規化して一致、または一方が他方の切り詰め）の主張は長い方を残す。
+    上限を超えた分は並びの後ろから外す（部品・単位から引いた順が前）。本文の無い
+    主張は重複判定をしない（ID しか無いので区別できる）。
+    """
+    claims = [ref for ref in references if ref.get("kind") == "claim"]
+    if not claims:
+        return references
+    kept: list[dict] = []
+    for ref in claims:
+        key = _claim_text_key(ref.get("text") or "")
+        duplicate = None
+        if key:
+            for other in kept:
+                other_key = _claim_text_key(other.get("text") or "")
+                if other_key and (other_key == key or other_key.startswith(key) or key.startswith(other_key)):
+                    duplicate = other
+                    break
+        if duplicate is None:
+            kept.append(ref)
+        elif len(str(ref.get("text") or "")) > len(str(duplicate.get("text") or "")):
+            kept[kept.index(duplicate)] = ref
+    # IK-0488: 上限で外すのは下書きが埋め込んでいない主張から（埋め込んだ主張が上限で
+    # 一覧から消えると、下書きの埋め込みを外すことになる）。並びは保つ。
+    if len(kept) > CLAIM_REFERENCE_LIMIT:
+        embedded = _priority_claim_ids(topic)
+        priority = [ref for ref in kept if str(ref.get("id") or "") in embedded][:CLAIM_REFERENCE_LIMIT]
+        rest = [ref for ref in kept if ref not in priority]
+        chosen = {id(ref) for ref in priority + rest[: CLAIM_REFERENCE_LIMIT - len(priority)]}
+        kept = [ref for ref in kept if id(ref) in chosen]
+    kept_ids = {id(ref) for ref in kept}
+    return [ref for ref in references if ref.get("kind") != "claim" or id(ref) in kept_ids]
+
+
+def _topic_claim_link_ids(topic: dict) -> list[str]:
+    return [
+        str(link.get("target_id")) for link in topic.get("evidence_links") or []
+        if isinstance(link, dict) and link.get("kind") == "claim" and link.get("target_id")
+    ]
+
+
+def reference_key(references: list[dict]) -> list[str]:
+    """下書きを作ったときの根拠候補の指紋（``kind:id`` の整列リスト。IK-0440）。"""
+    return sorted({
+        f"{ref.get('kind')}:{ref.get('id')}"
+        for ref in references
+        if isinstance(ref, dict) and ref.get("kind") and ref.get("id")
+    })
+
+
+def _component_label_index(topic: dict) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for block in topic.get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "components":
+            continue
+        for item in block.get("items") or []:
+            if isinstance(item, dict) and item.get("component_id"):
+                labels[str(item["component_id"])] = str(
+                    item.get("display_label") or item.get("label") or ""
+                )
+    return labels
+
+
+def _reconstructed_equation_ids(topic: dict) -> set[str]:
+    return {
+        eq_id for eq_id, item in _topic_equation_items_by_id(topic).items()
+        if item.get("reconstructed")
+    }
+
+
+def _component_cautions_for_prompt(topic: dict) -> list[dict]:
+    """部品の注意書き・前提を一か所に並べる（IK-0443。予算で落ちにくい前の方へ置く）。
+
+    ``reconstructed`` は注意書きが指す式が AI の復元した式であること（A層の
+    ``reconstruction.status`` の写し）。本文から推定しない。
+    """
+    reconstructed = _reconstructed_equation_ids(topic)
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for block in topic.get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "components":
+            continue
+        for item in block.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("display_label") or item.get("label") or "").strip()
+            for field, kind in (("cautions", "caution"), ("assumptions", "assumption")):
+                for entry in _as_list(item.get(field)):
+                    text = str(entry.get("text") if isinstance(entry, dict) else entry or "").strip()
+                    if not text or (label, text) in seen:
+                        continue
+                    seen.add((label, text))
+                    row = {"component": label, "kind": kind, "text": _short_excerpt(text, limit=REFERENCE_TEXT_LIMIT)}
+                    eq_ids = entry.get("equation_ids") if isinstance(entry, dict) else None
+                    if any(str(e) in reconstructed for e in _as_list(eq_ids)):
+                        row["reconstructed_equation"] = True
+                    out.append(row)
+    return out
+
+
+def _prompt_component_dependencies(blocks: list, reference_ids: set[str]) -> list:
+    """components の依存先のうち、参照一覧に無い ID を外す（IK-0442）。
+
+    外した依存先は、組み立て時に同じ論文の中で解決できた名前（``target_labels``）だけを
+    残す。名前も無い依存先は ID ごと外す（参照できない ID をモデルに見せない）。
+    保存する content_blocks は変えない（プロンプトの写しだけ）。
+    """
+    out: list = []
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "components":
+            items = []
+            for item in block.get("items") or []:
+                if not isinstance(item, dict):
+                    items.append(item)
+                    continue
+                deps = []
+                for dep in _as_list(item.get("dependencies")):
+                    if not isinstance(dep, dict):
+                        continue
+                    targets = [str(t) for t in _as_list(dep.get("targets"))]
+                    labels = dict(zip(targets, [str(x) for x in _as_list(dep.get("target_labels"))]))
+                    kept = [t for t in targets if t in reference_ids]
+                    names = [labels[t] for t in targets if t not in reference_ids and labels.get(t)]
+                    dep = {k: v for k, v in dep.items() if k not in ("targets", "target_labels")}
+                    if kept:
+                        dep["targets"] = kept
+                    if names:
+                        dep["target_names"] = names
+                    if dep.get("targets") or dep.get("target_names") or dep.get("reason"):
+                        deps.append(dep)
+                item = {**item, "dependencies": deps}
+                items.append(item)
+            block = {**block, "items": items}
+        out.append(block)
+    return out
+
+
+#: 根拠の種類 → 注記で使う名前（IK-0461。``grounding_facts`` と注記の照合に使う）。
+_GROUNDING_KIND_WORDS = (
+    ("claim", "主張", ("主張", "claim")),
+    ("figure", "図", ("図",)),
+    ("equation", "式", ("数式", "式")),
+    ("component", "部品", ("部品", "コンポーネント", "論理要素")),
+    ("source", "原文抜粋", ("原文", "抜粋")),
+)
+
+
+def grounding_facts_for_references(references: list[dict]) -> list[str]:
+    """いまの根拠候補の種類ごとの有無を事実文にする（IK-0461。件数は書かない）。"""
+    present = {str(ref.get("kind") or "") for ref in references if isinstance(ref, dict)}
+    if not present:
+        return []  # 根拠候補が1つも無いときは一覧ごと出さない（空のキーを渡さない）
+    facts = []
+    for kind, name, _words in _GROUNDING_KIND_WORDS:
+        template = (
+            label_vocab.GROUNDING_KIND_SUPPLIED_FACT if kind in present
+            else label_vocab.GROUNDING_KIND_NOT_SUPPLIED_FACT
+        )
+        facts.append(template.format(kind=name))
+    return facts
+
+
+#: 注記の「無い」を言う言い回し（IK-0461）。モデルが書いた注記が、いまの根拠候補に
+#: ある種類について「紐づいていない」「根拠に無い」と言っていれば外す。
+_ABSENCE_PHRASE_RE = re.compile(
+    r"紐づ(?:いて)?(?:おらず|いない|いません|かない)|紐付(?:いて)?(?:おらず|いない|いません)"
+    r"|供給されて(?:おらず|いない|いません)|含まれて(?:おらず|いない|いません)"
+    r"|根拠(?:候補)?に(?:は)?(?:無い|ない|ありません)|見当たりません|ありません"
+)
+_DRAFT_NOTE_BLOCK_RE = re.compile(r"^\s*>\s*(?:注|※|Note)", re.IGNORECASE)
+_GROUNDING_META_RE = re.compile(r"根拠|紐づ|紐付|供給|対応付け")
+
+
+def _note_contradicts_references(line: str, present_kinds: set[str]) -> bool:
+    if not _ABSENCE_PHRASE_RE.search(line):
+        return False
+    for kind, _name, words in _GROUNDING_KIND_WORDS:
+        if kind in present_kinds and any(word in line for word in words):
+            return True
+    return False
+
+
+def strip_contradicted_grounding_notes(text: str, references: list[dict], *, drop_meta_notes: bool = False) -> str:
+    """本文から、いまの根拠候補と食い違う「根拠が無い」注記の行を外す（IK-0461）。
+
+    ``drop_meta_notes`` が真なら、前の生成の「> 注: …根拠…」の行を種類にかかわらず外す
+    （前回の根拠についての注記で、次の生成では付け直す）。
+    """
+    if not text:
+        return text
+    present = {str(ref.get("kind") or "") for ref in references if isinstance(ref, dict)}
+    kept: list[str] = []
+    for line in str(text).split("\n"):
+        is_note = bool(_DRAFT_NOTE_BLOCK_RE.match(line))
+        if is_note and drop_meta_notes and _GROUNDING_META_RE.search(line):
+            continue
+        if _GROUNDING_META_RE.search(line) and _note_contradicts_references(line, present):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _strip_contradicted_draft_notes(result: dict, topic: dict) -> None:
+    """生成結果の本文・注意点から、いまの根拠候補と食い違う注記を外す（IK-0461）。"""
+    references = _topic_available_references(topic, _unpresentable_equation_ids(topic))
+    material = result.get("student_material")
+    if isinstance(material, dict):
+        material["source_text"] = strip_contradicted_grounding_notes(
+            str(material.get("source_text") or ""), references
+        )
+    present = {str(ref.get("kind") or "") for ref in references}
+    result["cautions"] = [
+        c for c in _clean_str_list(result.get("cautions"))
+        if not (_GROUNDING_META_RE.search(c) and _note_contradicts_references(c, present))
+    ]
+
+
 def _topic_evidence_for_prompt(topic: dict) -> dict:
     # 埋め込みに使ってよい (kind, id) の組み合わせは、実際に解決可能な evidence_links
     # からそのまま導出する。これにより LLM が kind を取り違えたり存在しない id を
     # 発明したりするのを防ぐ（提示する候補＝解決できる候補、を保証する）。
-    available_references = [
-        {"kind": link.get("kind"), "id": link.get("target_id")}
-        for link in (topic.get("evidence_links") or [])
-        if isinstance(link, dict) and link.get("kind") and link.get("target_id")
+    # IK-0438: 各項目にその中身の短い本文（主張の本文・図のキャプション・原文の冒頭・
+    # 200 字以内の式の本体）を添える。ID だけでは何を埋め込むのかモデルに読めない。
+    #
+    # IK-0429: 図の軸目盛り（``22h58m00s`` / ``62°42'00"``）・式の断片（``J=3``）・
+    # 同じ式の重複を「重要な数式」としてプロンプトへ渡さない。落とすのはプロンプトの
+    # 材料だけで、保存する content_blocks（学習画面の [[FORMULA_N]] の位置引き）と
+    # A層の artifact には触れない。
+    dropped_equation_ids = _unpresentable_equation_ids(topic)
+    available_references = _topic_available_references(topic, dropped_equation_ids)
+    reference_ids = {str(ref.get("id")) for ref in available_references}
+    content_blocks = _prompt_component_dependencies(
+        _prompt_content_blocks(topic.get("content_blocks") or [], dropped_equation_ids),
+        reference_ids,
+    )
+    source_excerpt = topic.get("source_excerpt") or ""
+    figures_note = ""
+    if (
+        source_excerpt
+        and _SOURCE_FIGURE_MENTION_RE.search(str(source_excerpt))
+        and not any(ref.get("kind") == "figure" for ref in available_references)
+    ):
+        figures_note = SOURCE_FIGURE_NOT_PROVIDED_NOTE
+    referenced_claim_ids = {
+        str(ref.get("id")) for ref in available_references if ref.get("kind") == "claim"
+    }
+    omitted_claims_note = (
+        OMITTED_CLAIMS_NOTE
+        if any(cid not in referenced_claim_ids for cid in _topic_claim_link_ids(topic))
+        else ""
+    )
+    # IK-0459: 式として読めない候補を外した事実（理由の語だけ。件数・ID は書かない）。
+    junk_reasons = topic_junk_equation_reasons(topic)
+    excluded_equations_note = ""
+    if junk_reasons:
+        labels = [
+            label_vocab.JUNK_EQUATION_REASON_LABELS.get(reason, reason)
+            for reason in dict.fromkeys(junk_reasons.values())
+        ]
+        excluded_equations_note = label_vocab.EXCLUDED_EQUATION_CANDIDATES_NOTE + "（" + "・".join(labels) + "）"
+    # IK-0460: このトピックが差し出す式のうち AI が復元した式（原文とは未照合）。
+    reconstructed_ids = [
+        eq_id for eq_id in topic_reconstructed_equation_ids(topic) if eq_id in reference_ids
     ]
-    if topic.get("source_excerpt"):
-        available_references.append({"kind": "source", "id": "topic_summary"})
+    # IK-0461: 根拠の有無についての注記は、いまの根拠候補の件数から決める（前の生成の
+    # 「図・式・主張は紐づいていない」を持ち越さない）。
+    grounding_facts = grounding_facts_for_references(available_references)
+    # IK-0379: ``available_references`` は埋め込みの閉世界そのものなので先頭に置く
+    # （旧実装は長い ``content_blocks`` の後ろに置き、文字数予算で切られて読めなかった）。
     return {
-        "summary": topic.get("summary") or "",
-        "content": topic.get("content") or "",
-        "content_blocks": topic.get("content_blocks") or [],
-        "source_excerpt": topic.get("source_excerpt") or "",
-        "linked_component_ids": topic.get("linked_component_ids") or [],
-        "linked_equation_ids": topic.get("linked_equation_ids") or [],
-        "linked_claim_ids": topic.get("linked_claim_ids") or [],
-        "source_evidence_ids": topic.get("source_evidence_ids") or [],
         "available_references": available_references,
+        "grounding_facts": grounding_facts,
+        "figures_note": figures_note,
+        "omitted_claims_note": omitted_claims_note,
+        "excluded_equations_note": excluded_equations_note,
+        "reconstructed_equation_ids": reconstructed_ids,
+        "component_cautions": _component_cautions_for_prompt(topic),
+        "summary": topic.get("summary") or "",
+        "content": _drop_equation_lines(topic.get("content") or "", topic, dropped_equation_ids),
+        "content_blocks": content_blocks,
+        "source_excerpt": source_excerpt,
+        "linked_component_ids": topic.get("linked_component_ids") or [],
+        "linked_equation_ids": [
+            eq_id for eq_id in (topic.get("linked_equation_ids") or [])
+            if str(eq_id) not in dropped_equation_ids
+        ],
+        "linked_claim_ids": [
+            cid for cid in (topic.get("linked_claim_ids") or [])
+            if str(cid) in referenced_claim_ids or not _topic_claim_link_ids(topic)
+        ],
+        "source_evidence_ids": topic.get("source_evidence_ids") or [],
         "assessment_prompts": topic.get("assessment_prompts") or [],
         "teaching_takeaways": topic.get("teaching_takeaways") or [],
     }
 
 
 def _topic_existing_draft(topic: dict) -> dict:
+    """プロンプトに渡す「現在の下書き」。
+
+    IK-0427: 下書きの末尾の「この節で使う数式 / この節で参照する図」と確認問題の
+    「数式 … の意味または役割に触れる」は、生成のたびにそのときのトピックから
+    決定論的に付け直す部分で、モデルが書いたものではない。前の生成（別の解析結果・
+    旧実装）で付いたものをそのまま渡すと、いまの根拠候補では別の式を指す ID に古い
+    説明（別論文の式の説明）が付いた行をモデルが読むことになる。ここで外してから渡す。
+    """
+    material = topic.get("student_material") or {}
+    if isinstance(material, dict):
+        material = dict(material)
+        material["source_text"] = strip_generated_draft_notes(strip_generated_reference_appendix(
+            str(material.get("source_text") or "")
+        ))
+        references = _topic_available_references(topic, _unpresentable_equation_ids(topic))
+        if _draft_is_generated(topic):
+            # IK-0461: 前の生成が書いた「> 注: …根拠…」は前の根拠についての文。
+            # いまの根拠候補と食い違うものを含め、生成の注記は持ち越さない。
+            material["source_text"] = strip_contradicted_grounding_notes(
+                material["source_text"],
+                references,
+                drop_meta_notes=True,
+            )
+        # IK-0488: 前の出力の埋め込みのうち、いまの参照一覧に無い (kind, id)（``source:topic_summary``・
+        # 解析し直しで消えた主張・一覧から外した式）は、写して使わないよう下書きから外す。
+        material["source_text"] = strip_embeds_outside_references(material["source_text"], references)
+    # IK-0440: builder が付けた事実文（「対応付けられていません」等の定数）は外す。
+    # さらに、下書きを作ったときの根拠候補（``draft_reference_key``）がいまと違う
+    # （または記録の無い旧い下書き）なら、生成された注意点は前の根拠についての文なので
+    # 渡さない（「図・式・主張が紐づいていない」が、根拠の付いた再生成に持ち越される）。
+    # 教員が書いた下書き（draft_source が生成でない）の注意点は根拠が変わっても渡す。
+    cautions = [
+        c for c in _clean_str_list(topic.get("cautions"))
+        if not _is_generated_draft_note(c)
+    ]
+    if _draft_is_generated(topic) and _draft_reference_key_changed(topic):
+        cautions = []
+    questions = topic.get("check_questions") or topic.get("assessment_prompts") or []
+    # IK-0462: 旧実装が要件の末尾に足していた重要概念・学習目標（問いと無関係）を外す。
+    padded = set(_as_str_list(topic.get("key_concepts"))) | set(_as_str_list(topic.get("learning_objectives")))
+    if isinstance(questions, list) and _draft_is_generated(topic):
+        # IK-0484: 足したのは前の生成の重要概念なので、いまの重要概念と一致しないことがある。
+        # 全問に同じ要件・重要概念と同じ見出しの要件は、答えに根ざさない限り外す。
+        questions = strip_padded_requirements(questions, _topic_concept_texts(topic))
+    if isinstance(questions, list):
+        cleaned: list = []
+        for question in questions:
+            if isinstance(question, dict):
+                question = dict(question)
+                question["answer_requirements"] = [
+                    req for req in _clean_str_list(question.get("answer_requirements"))
+                    if not _is_generated_requirement(req)
+                    and not (_draft_is_generated(topic) and req in padded)
+                ]
+            cleaned.append(question)
+        questions = cleaned
     return {
         "key_concepts": topic.get("key_concepts") or [],
-        "student_material": topic.get("student_material") or {},
+        "student_material": material,
         "spoken_script": topic.get("spoken_script") or topic.get("content") or "",
-        "cautions": topic.get("cautions") or [],
-        "check_questions": topic.get("check_questions") or topic.get("assessment_prompts") or [],
+        "cautions": cautions,
+        "check_questions": questions,
     }
+
+
+_ANY_EMBED_RE = re.compile(r"!\[\[\s*([a-z_]+)\s*:\s*([^\]\n]*?)\s*\]\]", re.IGNORECASE)
+_REFERENCE_EMBED_KINDS = frozenset({"component", "claim", "source", "equation", "figure"})
+
+
+def strip_embeds_outside_references(text: str, references: list[dict]) -> str:
+    """本文から、参照一覧に無い (kind, id) の埋め込みを外す（IK-0488。決定論）。
+
+    埋め込みだけの行は行ごと外す。文中の埋め込みは記法だけを外し、前後の文は残す。
+    参照一覧の kind に無い埋め込み（未知の kind）は触らない。
+    """
+    if not text or "![[" not in text:
+        return text
+    allowed = {
+        (str(ref.get("kind") or "").lower(), str(ref.get("id") or "").strip())
+        for ref in references if isinstance(ref, dict)
+    }
+
+    def stale(match: re.Match) -> bool:
+        kind = match.group(1).lower()
+        return kind in _REFERENCE_EMBED_KINDS and (kind, match.group(2).strip()) not in allowed
+
+    out: list[str] = []
+    for line in text.split("\n"):
+        matches = list(_ANY_EMBED_RE.finditer(line))
+        if not matches or not any(stale(m) for m in matches):
+            out.append(line)
+            continue
+        cleaned = _ANY_EMBED_RE.sub(lambda m: "" if stale(m) else m.group(0), line)
+        if cleaned.strip():
+            out.append(re.sub(r"[ \t]{2,}", " ", cleaned).rstrip())
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out))
+
+
+def _draft_is_generated(topic: dict) -> bool:
+    return str(topic.get("draft_source") or "").startswith("course_content_generation")
+
+
+def current_reference_key(topic: dict) -> list[str]:
+    """いまのトピックの根拠候補の指紋（IK-0440）。"""
+    return reference_key(_topic_available_references(topic, _unpresentable_equation_ids(topic)))
+
+
+def _draft_reference_key_changed(topic: dict) -> bool:
+    stored = topic.get("draft_reference_key")
+    if not isinstance(stored, list):
+        return True
+    return sorted(str(x) for x in stored) != current_reference_key(topic)
+
+
+def _is_generated_draft_note(text: str) -> bool:
+    stripped = str(text or "").strip()
+    return any(note in stripped for note in GENERATED_DRAFT_NOTES)
+
+
+_DRAFT_NOTE_LINE_PREFIX_RE = re.compile(r"^(?:>\s*)?(?:[-*]\s*)?(?:注[:：]\s*)?")
+
+
+def strip_generated_draft_notes(text: str) -> str:
+    """本文から builder の事実文だけの行を外し、引けない数式の置き換え文を消す（IK-0440）。"""
+    if not text:
+        return text
+    kept: list[str] = []
+    for line in text.split("\n"):
+        core = _DRAFT_NOTE_LINE_PREFIX_RE.sub("", line.strip()).strip()
+        if core and core in GENERATED_DRAFT_NOTES:
+            continue
+        kept.append(line.replace(label_vocab.UNRESOLVED_FORMULA_PLACEHOLDER_TEXT, ""))
+    return "\n".join(kept)
 
 
 def _apply_deterministic_topic_draft_fallback(topic: dict) -> None:
@@ -2832,7 +6183,10 @@ def _fallback_student_material(topic: dict) -> str:
         lines.append("## " + str(topic["title"]))
     if topic.get("summary"):
         lines.extend(["", str(topic["summary"])])
+    dropped = _unpresentable_equation_ids(topic)
     for eq_id in topic.get("linked_equation_ids") or []:
+        if str(eq_id) in dropped:
+            continue  # IK-0459: 式として読めない候補は埋め込まない
         lines.extend(["", f"![[equation:{eq_id}]]"])
     return "\n".join(lines).strip()
 
@@ -2869,28 +6223,253 @@ def _ensure_required_equations_in_material(result: dict, topic: dict) -> None:
         material = {"source_format": "eg-markdown-v1", "source_text": str(material or "")}
         result["student_material"] = material
     material["source_format"] = material.get("source_format") or "eg-markdown-v1"
-    source_text = str(material.get("source_text") or "").strip()
+    # IK-0427: 前の生成で付いた付録（別の解析結果の式・図の説明）を持ち越さない。
+    # 付録はいまのトピックから付け直す（数式 → 図の順に呼ばれるので、ここで両方外す）。
+    source_text = strip_generated_reference_appendix(str(material.get("source_text") or "")).strip()
     required = _required_equation_items(topic)
+    # IK-0872: 付録は「本文で使う式」の一覧。トピックに明示的に結ばれた式
+    # （linked_equation_ids）か本文が言及する式だけを足し、content_blocks に同じ節の式として
+    # 載っているだけの式は足さない。生成した注意点が触れた式（「式ではない」「使わない」と
+    # 判断して埋め込まなかった式）も足さない — 本文側の判断を後付けで覆さない。
+    linked_ids = {str(eq_id) for eq_id in topic.get("linked_equation_ids") or [] if str(eq_id)}
+    caution_text = "\n".join(_clean_str_list(result.get("cautions")))
     missing = [
         item for item in required
         if item.get("equation_id") and f"![[equation:{item['equation_id']}]]" not in source_text
+        and not _is_unmentioned_parameter_value(item, source_text)
+        and (str(item["equation_id"]) in linked_ids or _text_mentions_equation(source_text, item))
+        and not _text_mentions_equation(caution_text, item)
+        # 第 25 周 第 4 波（IK-0872 ② / IK-0977）: AI が復元した式（印の正本は
+        # learner_context_common）は、本文が自分で触れていない限り付録に足さない — 結ばれて
+        # いるだけの復元式を「この節で使う数式」として原文の式の顔で末尾に貼らない。
+        and not (_reference_shows_reconstructed_latex(item) and not _text_mentions_equation(source_text, item))
+        # 第 25 周 第 5 波（IK-0872 ②）: 本文が「ここでは追わない」と言う式（同じ文の中で
+        # その式の記号・その添字の族に触れて扱わないと書く）は足さない — 本文との整合。
+        and not _text_declines_equation(source_text, item)
+    ]
+    # IK-0872 ②: 本文に既に埋め込んだ式と同じ記号を定める式（同じ式が 2 つの id で
+    # 供給された断片など）は足さない。
+    embedded_symbols = {
+        sym for sym in (
+            _equation_defined_symbol(it) for it in required
+            if it.get("equation_id") and f"![[equation:{it['equation_id']}]]" in source_text
+        ) if sym
+    }
+    missing = [
+        item for item in missing
+        if not (_equation_defined_symbol(item) and _equation_defined_symbol(item) in embedded_symbols)
     ]
     if not missing:
         material["source_text"] = source_text
         return
     lines = [source_text] if source_text else []
-    lines.extend(["", "### この節で使う数式"])
+    lines.extend(["", GENERATED_EQUATIONS_HEADING])
     for item in missing:
         eq_id = str(item.get("equation_id") or "")
-        label = str(item.get("label") or eq_id)
+        renderable = _equation_has_renderable_body(item)
+        if is_internal_equation_id(eq_id) and not renderable:
+            # IK-0454: 抽出段の式 ID しか名乗れず、描ける本体も無い式は付録に出さない
+            # （ID が学習者に見える / 必ず「準備中」になる）。
+            continue
+        has_latex = bool(
+            item.get("latex") or item.get("latex_canonical") or item.get("normalized_latex")
+        )
+        inline = "" if has_latex else inline_formula_text(item)
+        label = _appendix_equation_label(item, eq_id, inline)
+        if label == APPENDIX_GENERIC_EQUATION_NAME:
+            # 名前の無い式の行（「- この節の式」）は何の式かを言わない（IK-0872 ②）。
+            # 印字番号・人の付けた名前・定める記号・短い原文のどれも無い式は付録に足さない。
+            continue
         description = _equation_material_description(item)
-        lines.append(f"- {label}: {description}")
+        # IK-0872: 根拠のある説明が無い式には説明の行を作らない（固定文で埋めない）。
+        lines.append(f"- {label}: {description}" if description else f"- {label}")
         # 未解決の数式 fix: 描画できる本体（LaTeX / reading / 原文）を持つ式だけ
         # `![[equation:id]]` を埋め込む。本体の無い式（linked_equation_ids だけの
         # 裸ID 等）に埋め込みを出すと、必ず「未解決の数式」になるため埋め込まない。
-        if _equation_has_renderable_body(item):
+        if renderable:
             lines.append(f"![[equation:{eq_id}]]")
     material["source_text"] = "\n".join(line for line in lines if line is not None).strip()
+
+
+_PARAMETER_VALUE_RE = re.compile(r"^([A-Za-z])(?:_\{?[A-Za-z0-9]\}?)?=[0-9.]+$")
+
+
+def _is_unmentioned_parameter_value(item: dict, source_text: str) -> bool:
+    """第 15 周: 1 文字記号に数値を置いただけの式（``N = 15``）で、本文がその記号に
+    触れていないものは付録「この節で使う数式」に足さない。
+
+    式自体は正しい式として残す（IK-0429 の判定・content_blocks は非改変）。付録は
+    「本文で使う式」の一覧なので、本文に出てこない設定値を末尾に貼らない。
+    """
+    compact = _compact_math(_equation_body_text(item)).rstrip(".,;:")
+    match = _PARAMETER_VALUE_RE.match(compact)
+    if not match:
+        return False
+    symbol = match.group(1)
+    body = re.sub(r"!\[\[[^\]]*\]\]", " ", str(source_text or ""))
+    return not _text_mentions_bare_symbol(body, symbol)
+
+
+#: 記号の前に付くと「別の記号」になる書体・修飾の命令（``\mathcal{N}`` は ``N`` ではない）。
+_SYMBOL_DECORATION_RE = re.compile(
+    r"\\(?:mathcal|mathrm|mathbf|mathit|mathsf|mathscr|mathfrak|boldsymbol|bm|hat|tilde|bar|vec|dot|ddot)\s*\{$"
+)
+
+
+def _text_mentions_bare_symbol(body: str, symbol: str) -> bool:
+    """本文が 1 文字記号そのもの（添字・書体の付かない ``N``）に触れているか（IK-0872 t11）。
+
+    ``N_c`` / ``N_{\\rm TOV}`` / ``\\mathcal{N}_{\\mathrm{TOV}}`` は別の記号なので数えない
+    （学習回数の ``N = 15`` を、本文の ``N_c`` を理由に付録「この節で使う数式」へ選ばない）。
+    """
+    for found in re.finditer(re.escape(symbol), body):
+        start, end = found.span()
+        before = body[start - 1] if start > 0 else ""
+        after = body[end] if end < len(body) else ""
+        if before.isascii() and (before.isalpha() or before == "\\"):
+            continue
+        if after and after.isascii() and (after.isalpha() or after in "_^"):
+            continue
+        if _SYMBOL_DECORATION_RE.search(body[max(0, start - 16):start]):
+            continue
+        return True
+    return False
+
+
+#: 付録の式の名前の最後の段（IK-0872）。
+APPENDIX_GENERIC_EQUATION_NAME = "この節の式"
+
+#: TeX の ``\\label`` キー（``eq:modified_dcf`` / ``sec:intro:a``）。人が読む名前ではない（IK-0872）。
+_TEX_LABEL_KEY_RE = _dp.TEX_LABEL_KEY_RE  # 正本は display_projection（IK-0858 で移設）
+
+
+def is_tex_label_key(text: object) -> bool:
+    """文字列が TeX の ``\\label`` キー（``eq:acf``）か（IK-0872）。"""
+    return bool(_TEX_LABEL_KEY_RE.match(str(text or "").strip()))
+
+
+def _appendix_equation_label(item: dict, eq_id: str, inline: str = "") -> str:
+    """付録の1行目に出す式の名前（抽出段の内部 ID は出さない — IK-0454）。
+
+    順に 印字番号（「式 (12)」。label が数字だけのときもここで「式 (N)」になる）→
+    人が付けた ``label``（TeX のラベルキー・内部 ID・数字だけは除く）→ 短い原文 →
+    ID（内部 ID・TeX キーでなければ）→ 固定文「この節の式」（IK-0872）。
+    """
+    printed = _equation_printed_label(item)
+    if printed:
+        return printed
+    label = str(item.get("label") or "").strip()
+    if (
+        label and label != eq_id and not is_internal_equation_id(label) and not is_tex_label_key(label)
+        and not labels_mod.is_internal_id_like(label)
+    ):
+        return label
+    if eq_id and labels_mod.looks_like_paper_equation_number(eq_id):
+        return labels_mod.format_equation_number(eq_id)
+    if inline:
+        return inline
+    # 第 25 周 第 5 波（IK-0872 ②）: 番号も名前も無い式は、定める記号から名前を付ける
+    # （「$\\mathcal{L}_4$ を定める式」）。何の式かを言わない「この節の式」に落とさない。
+    symbol = _equation_defined_symbol(item)
+    if symbol:
+        return APPENDIX_SYMBOL_EQUATION_NAME.format(symbol=symbol)
+    # 式 ID（``eq_dcf`` のような TeX ラベル由来の名前を含む）は人が読む名前ではない。
+    return APPENDIX_GENERIC_EQUATION_NAME
+
+
+#: 定める記号から付ける付録の式の名前（第 25 周 第 5 波・IK-0872 ②）。
+APPENDIX_SYMBOL_EQUATION_NAME = "${symbol}$ を定める式"
+
+#: 左辺が「記号」とみなせない印（演算・積分・和・分数・括弧の式）。
+_DEFINED_SYMBOL_REJECT_RE = re.compile(r"[+*/<>|]|\\(?:int|sum|prod|frac|left|right|begin|lim)(?![A-Za-z])|\s-\s")
+
+
+def _equation_defined_symbol(item: dict) -> str:
+    """式が ``記号 = …`` の形なら左辺の記号（LaTeX）を返す。記号とみなせなければ空。
+
+    決定論・非LLM。左辺が短く（24 文字以内）、演算・積分・和・分数を含まないときだけ記号と
+    みなす（``\\mathcal{L}_4`` / ``c_s^2`` / ``S``）。
+    """
+    if not isinstance(item, dict):
+        return ""
+    latex = ""
+    for key in ("latex", "latex_canonical", "normalized_latex"):
+        latex = str(item.get(key) or "").strip()
+        if latex:
+            break
+    if "=" not in latex:
+        return ""
+    lhs = latex.split("=", 1)[0].strip().strip("$").strip()
+    lhs = re.sub(r"\\(?:,|;|!|quad|qquad)(?![A-Za-z])", "", lhs).strip()
+    if not lhs or len(lhs) > 24 or _DEFINED_SYMBOL_REJECT_RE.search(lhs):
+        return ""
+    if lhs.count("{") != lhs.count("}") or "(" in lhs or "[" in lhs:
+        return ""
+    return lhs
+
+
+#: 本文が式を「ここでは扱わない」と言う語（IK-0872 ②）。
+_DECLINE_RE = re.compile(r"追わ|扱わ|立ち入ら|深入りし|触れ(?:ない|ず)|省略|割愛")
+
+
+def _symbol_family_key(symbol: str) -> str:
+    """記号の添字を外した族の鍵（``\\mathcal{L}_4`` → ``\\mathcal{L}``）。"""
+    return _compact_math(re.split(r"[_^]", symbol, maxsplit=1)[0])
+
+
+def _text_declines_equation(text: str, item: dict) -> bool:
+    """本文がこの式を「ここでは追わない」と言っているか（同じ文の中・決定論・IK-0872 ②）。
+
+    文（「。」と改行で区切る）に扱わない語があり、その文がこの式の印字番号・定める記号・
+    その添字の族（``\\mathcal{L}_i`` は ``\\mathcal{L}_4`` の族）に触れているときだけ True。
+    """
+    body = re.sub(r"!\[\[[^\]]*\]\]", " ", str(text or ""))
+    if not body.strip():
+        return False
+    symbol = _equation_defined_symbol(item)
+    family = _symbol_family_key(symbol) if symbol else ""
+    printed = _equation_printed_label(item)
+    for sentence in re.split(r"[。\n]", body):
+        if not _DECLINE_RE.search(sentence):
+            continue
+        compact = _compact_math(sentence)
+        if printed and _compact_math(printed) in compact:
+            return True
+        if symbol and _compact_math(symbol) in compact:
+            return True
+        if family and re.search(re.escape(family) + r"_", compact) and (
+            family != _compact_math(symbol) and len(family) >= 2
+        ):
+            return True
+    return False
+
+
+def _text_mentions_equation(text: str, item: dict) -> bool:
+    """文がこの式に触れているか（印字番号・人が付けた名前・式の本体・ID のいずれか）。
+
+    付録の対象の判定（IK-0872）に使う。埋め込み記法の中は数えない。
+    """
+    body = re.sub(r"!\[\[[^\]]*\]\]", " ", str(text or ""))
+    if not body.strip():
+        return False
+    printed = _equation_printed_label(item)
+    if printed:
+        number = re.escape(printed[len("式 ("):-1])
+        if re.search(rf"(?:式|Eq\.?|eq\.?|equation)\s*[（(]?\s*{number}\s*[)）]?(?![0-9.])", body):
+            return True
+    label = str(item.get("label") or "").strip()
+    if (
+        len(label) >= 2 and not printed and not is_internal_equation_id(label)
+        and not is_tex_label_key(label) and label in body
+    ):
+        return True
+    compact_body = _compact_math(body)
+    for key in ("latex", "plain_text", "raw_text"):
+        formula = _compact_math(item.get(key) or "")
+        if len(formula) >= 6 and formula in compact_body:
+            return True
+    eq_id = str(item.get("equation_id") or "").strip()
+    return bool(eq_id) and re.search(r"(?<![A-Za-z0-9_])" + re.escape(eq_id) + r"(?![A-Za-z0-9_])", body) is not None
 
 
 def _equation_has_renderable_body(item: dict) -> bool:
@@ -2905,11 +6484,22 @@ def _equation_has_renderable_body(item: dict) -> bool:
 
 
 def _equation_material_description(item: dict) -> str:
-    for key in ("summary", "description", "semantic_summary", "role", "meaning", "plain_text", "reading"):
+    """付録の式に添える説明。根拠のある説明（要約・意味）が無ければ空（IK-0872）。
+
+    読み下し（``plain_text`` / ``reading``）は日本語の文のときだけ使う（英語の読み下し
+    「S equals the spacetime integral …」は式の言い換えで、説明の行に並べない）。根拠の無い
+    固定文（「中心的な関係式です」）は書かない。
+    """
+    for key in ("summary", "description", "semantic_summary", "semantic_kind", "meaning", "plain_text", "reading"):
         text = str(item.get(key) or "").strip()
-        if text and not _looks_like_tex_source(text):
-            return _short_excerpt(text, limit=120)
-    return "この節の説明で参照する中心的な関係式です。"
+        if not text or _looks_like_tex_source(text) or not _explanatory_text(text):
+            continue
+        # 第 25 周 第 4 波（IK-0872 ②）: 付録は日本語の見出しの下に並ぶ説明なので、英語の
+        # 要約（「Background dark-energy pressure is defined …」）も採らない（読み下しと同じ規則）。
+        if not _CJK_RE.search(text):
+            continue
+        return _short_excerpt(text, limit=120)
+    return ""
 
 
 def _looks_like_tex_source(text: str) -> bool:
@@ -2940,6 +6530,8 @@ def _looks_like_tex_source(text: str) -> bool:
 
 
 def _required_equation_items(topic: dict, limit: int = 5) -> list[dict]:
+    # IK-0429: 軸目盛り・式の断片・重複は「この節で使う数式」にも確認問題にも出さない。
+    dropped = _unpresentable_equation_ids(topic)
     by_id: dict[str, dict] = {}
     for block in topic.get("content_blocks") or []:
         if not isinstance(block, dict) or block.get("type") != "equations":
@@ -2948,11 +6540,14 @@ def _required_equation_items(topic: dict, limit: int = 5) -> list[dict]:
             if not isinstance(item, dict):
                 continue
             eq_id = str(item.get("equation_id") or item.get("id") or "").strip()
-            if eq_id and eq_id not in by_id:
+            if eq_id and eq_id not in by_id and eq_id not in dropped:
                 normalized = dict(item)
                 normalized["equation_id"] = eq_id
                 by_id[eq_id] = normalized
-    ordered_ids = [str(eq_id) for eq_id in topic.get("linked_equation_ids") or [] if str(eq_id)]
+    ordered_ids = [
+        str(eq_id) for eq_id in topic.get("linked_equation_ids") or []
+        if str(eq_id) and str(eq_id) not in dropped
+    ]
     for eq_id in ordered_ids:
         by_id.setdefault(eq_id, {"equation_id": eq_id, "label": eq_id})
     ordered_ids.extend(eq_id for eq_id in by_id if eq_id not in ordered_ids)
@@ -3013,7 +6608,12 @@ def _ensure_required_figures_in_material(result: dict, topic: dict) -> None:
         material = {"source_format": "eg-markdown-v1", "source_text": str(material or "")}
         result["student_material"] = material
     material["source_format"] = material.get("source_format") or "eg-markdown-v1"
-    source_text = str(material.get("source_text") or "").strip()
+    # IK-0427: 前の生成で付いた「この節で参照する図」を持ち越さない（数式の付録は
+    # ``_ensure_required_equations_in_material`` がいまのトピックから付け直したもの
+    # なので残す）。
+    source_text = strip_generated_reference_appendix(
+        str(material.get("source_text") or ""), headings=(GENERATED_FIGURES_HEADING,)
+    ).strip()
     required = _required_figure_items(topic)
     missing = [
         item for item in required
@@ -3023,7 +6623,7 @@ def _ensure_required_figures_in_material(result: dict, topic: dict) -> None:
         material["source_text"] = source_text
         return
     lines = [source_text] if source_text else []
-    lines.extend(["", "### この節で参照する図"])
+    lines.extend(["", GENERATED_FIGURES_HEADING])
     for item in missing:
         figure_id = str(item.get("figure_id") or "")
         caption = str(item.get("caption") or "").strip()
@@ -3033,12 +6633,72 @@ def _ensure_required_figures_in_material(result: dict, topic: dict) -> None:
     material["source_text"] = "\n".join(line for line in lines if line is not None).strip()
 
 
+def reattach_generated_appendix(
+    topic: dict,
+    source_text: str | None = None,
+    cautions: object = None,
+) -> dict:
+    """末尾の決定論付録を、いまのトピックの根拠から付け直した本文を返す（純関数・LLM なし）。
+
+    第 25 周 面 D 第 2 周（IK-0872 / IK-0880 の残り）: 保存済みの付録は読み時に付け直さない
+    （スライド境界・音声キャッシュの番号が黙って動くため）。教員の明示操作「付録を付け直す」と
+    G層の道案内だけがこの関数を呼ぶ。生成時と同じ ``_ensure_required_*_in_material`` を通すので
+    付録の規則は 1 箇所（名前の段・対象・図の段落化）のまま。
+
+    戻り値 ``{source_text, changed, had_appendix, outcome}``（``outcome`` は
+    ``replaced`` / ``removed`` / ``added`` / ``unchanged`` — IK-1032）。入力を mutate しない。
+    """
+    topic = topic or {}
+    material = topic.get("student_material") if isinstance(topic.get("student_material"), dict) else {}
+    text = str(source_text if source_text is not None else (material.get("source_text") or ""))
+    had_appendix = strip_generated_reference_appendix(text).rstrip() != text.rstrip()
+    result = {
+        "student_material": {
+            "source_format": material.get("source_format") or "eg-markdown-v1",
+            "source_text": text,
+        },
+        "cautions": cautions if cautions is not None else (topic.get("cautions") or []),
+    }
+    _ensure_required_equations_in_material(result, topic)
+    _ensure_required_figures_in_material(result, topic)
+    new_text = str(result["student_material"].get("source_text") or "")
+    changed = new_text.strip() != text.strip()
+    has_appendix = strip_generated_reference_appendix(new_text).rstrip() != new_text.rstrip()
+    # 第 25 周 第 6 波（IK-1032）: 結果の分岐を語で返す（知らせを分岐ごとに言い分けるため）。
+    if not changed:
+        outcome = "unchanged"
+    elif had_appendix and not has_appendix:
+        outcome = "removed"
+    elif has_appendix and not had_appendix:
+        outcome = "added"
+    else:
+        outcome = "replaced"
+    return {
+        "source_text": new_text,
+        "changed": changed,
+        "had_appendix": had_appendix,
+        "outcome": outcome,
+    }
+
+
+def topic_appendix_is_stale(topic: dict | None) -> bool:
+    """保存済みの付録が、いまの根拠から作る形と違うか（付録の無いトピックは False）。
+
+    教員が付録を消したトピック（付録の見出しが無い）は対象にしない — 消した判断を覆さない。
+    """
+    outcome = reattach_generated_appendix(topic or {})
+    return bool(outcome["had_appendix"] and outcome["changed"])
+
+
 def _ensure_check_question_details(result: dict, topic: dict) -> None:
     result["check_questions"] = _detailed_check_questions(result.get("check_questions"), topic)
 
 
 def _detailed_check_questions(value: object, topic: dict) -> list[dict]:
     questions = _normalize_check_question_items(value)
+    # IK-0484: 前の下書きの水増し（重要概念を全問の末尾に足した要件）をモデルが写しても、
+    # 保存する確認問題には残さない（要件はその問いの答えの要素だけ）。
+    questions = strip_padded_requirements(questions, _topic_concept_texts(topic))
     for item in questions:
         _fill_check_question_detail(item, topic)
     if not questions:
@@ -3083,42 +6743,688 @@ def _normalize_check_question_items(value: object) -> list[dict]:
     return questions[:4]
 
 
+# ---------------------------------------------------------------------------
+# 水増しされた要件の検出（IK-0484。IK-0462 の残り）
+# ---------------------------------------------------------------------------
+#
+# 旧実装（IK-0462 以前）は要件の末尾にトピックの重要概念・学習目標を足していた。
+# 足したのは**そのときの**重要概念で、次の生成で重要概念の言い回しが変わる
+# （「M_PISN（対不安定性に関係する質量スケール）」→「M_PISN（対不安定型超新星の質量閾値）」）
+# と、いまの重要概念との完全一致では外せない。水増しの形は2つで見分ける — ①同じ要件が
+# 同じトピックの2問以上に現れる ②要件の見出し（括弧の前）が重要概念・学習目標の見出しと
+# 一致する。どちらの場合も、その問いの模範解答（と問い）に要件の見出しが現れるなら残す
+# （答えに根ざした要件は水増しではない）。決定論・非LLM。
+
+_REQUIREMENT_PAREN_RE = re.compile(r"\s*[（(].*$")
+_GROUNDING_TEX_CMD_RE = re.compile(r"\\(?:mathrm|rm|text|mathit|operatorname|mathbf|bf)\b")
+_GROUNDING_STRIP_RE = re.compile(r"[\s$\\{}]+")
+
+
+def _grounding_norm(text: object) -> str:
+    return _GROUNDING_STRIP_RE.sub("", _GROUNDING_TEX_CMD_RE.sub("", str(text or ""))).casefold()
+
+
+def _requirement_head(text: object) -> str:
+    """要件・概念の見出し（括弧書きの前）を正規化したもの。"""
+    return _grounding_norm(_REQUIREMENT_PAREN_RE.sub("", str(text or "").strip()))
+
+
+def _requirement_grounded(requirement: str, question: dict) -> bool:
+    ground = _grounding_norm(
+        str(question.get("model_answer") or "") + " " + str(question.get("question") or "")
+    )
+    if not ground:
+        return False
+    head = _requirement_head(requirement)
+    full = _grounding_norm(requirement)
+    return bool((head and head in ground) or (full and full in ground))
+
+
+def _topic_concept_texts(topic: dict) -> list[str]:
+    return _as_str_list(topic.get("key_concepts")) + _as_str_list(topic.get("learning_objectives"))
+
+
+def strip_padded_requirements(questions: list, concept_texts: list[str]) -> list:
+    """確認問題の要件から水増し（全問に同じ要件・重要概念の見出し）を外す（IK-0484）。
+
+    ``questions`` は dict の列（他の型はそのまま返す）。入力を書き換えず、写しを返す。
+    """
+    dict_questions = [q for q in questions if isinstance(q, dict)]
+    counts: dict[str, int] = {}
+    for q in dict_questions:
+        for key in {_grounding_norm(r) for r in _clean_str_list(q.get("answer_requirements"))}:
+            if key:
+                counts[key] = counts.get(key, 0) + 1
+    concept_heads = {_requirement_head(c) for c in concept_texts if _requirement_head(c)}
+    out: list = []
+    for q in questions:
+        if not isinstance(q, dict):
+            out.append(q)
+            continue
+        kept = []
+        for req in _clean_str_list(q.get("answer_requirements")):
+            repeated = counts.get(_grounding_norm(req), 0) >= 2
+            concept = _requirement_head(req) in concept_heads
+            if (repeated or concept) and not _requirement_grounded(req, q):
+                continue
+            kept.append(req)
+        out.append({**q, "answer_requirements": kept})
+    return out
+
+
 def _fill_check_question_detail(item: dict, topic: dict) -> None:
     summary = str(topic.get("summary") or topic.get("content") or "").strip()
     objectives = _as_str_list(topic.get("learning_objectives"))[:3]
-    concepts = _as_str_list(topic.get("key_concepts"))[:3]
     equation_items = _required_equation_items(topic, limit=3)
-    equation_labels = [
-        str(eq.get("label") or eq.get("equation_id") or "").strip()
-        for eq in equation_items
-        if eq.get("label") or eq.get("equation_id")
+    question_text = str(item.get("question") or "")
+    # IK-0428: 数式の要件は「その問いが式を参照しているとき」だけ足し、式は論文の
+    # 印字番号（式 (12)）で呼ぶ。内部 ID（eq_blk_003_0055 等）を学習者向けの要件に
+    # 書かない（PL7）。前の生成で付いた旧形式の行と内部 ID を含む行は外す。
+    requirements = [
+        req for req in _clean_str_list(item.get("answer_requirements"))
+        if not _is_generated_requirement(req) and not contains_learner_internal_id(req)
     ]
-    requirements = item.get("answer_requirements") or []
-    for value in concepts + objectives:
-        if value and value not in requirements:
-            requirements.append(value)
-    for label in equation_labels:
-        req = f"数式 {label} の意味または役割に触れる"
+    # IK-0462: 要件は問いの答えの要素だけ。トピックの重要概念・学習目標で埋めない
+    # （確認問題の講評が問いと無関係な要素を「触れていない」と返していた）。
+    referenced_equations = [eq for eq in equation_items if _question_references_equation(question_text, eq)]
+    for eq in referenced_equations:
+        printed = _equation_printed_label(eq)
+        req = (
+            f"{printed} の意味または役割に触れる" if printed
+            else QUESTION_EQUATION_REQUIREMENT
+        )
         if req not in requirements:
             requirements.append(req)
     if not requirements:
         requirements.append("この節の中心概念を自分の言葉で説明する")
     item["answer_requirements"] = requirements[:5]
-    if not item.get("model_answer"):
-        if summary:
-            item["model_answer"] = _short_excerpt(summary, limit=260)
+    model_answer = strip_learner_internal_ids(str(item.get("model_answer") or ""))
+    if not model_answer:
+        # IK-0428: トピックの要約は解析由来の英文のことがある。日本語の問いの模範解答に
+        # 英文の要約をそのまま置かない（日本語を含む要約だけを使う）。
+        if summary and _CJK_RE.search(summary) and not contains_learner_internal_id(summary):
+            model_answer = _short_excerpt(summary, limit=260)
         elif objectives:
-            item["model_answer"] = "、".join(objectives)
+            model_answer = "、".join(objectives)
         else:
-            item["model_answer"] = "この節で扱った定義・関係式・前提を結び付けて説明する。"
+            model_answer = "この節で扱った定義・関係式・前提を結び付けて説明する。"
+    item["model_answer"] = model_answer
     if not item.get("explanation"):
-        if equation_labels:
+        if referenced_equations:
             item["explanation"] = (
                 "根拠となる数式を単独で読むのではなく、各記号が何を表し、"
                 "その式が次の議論にどのように使われるかを確認する。"
             )
         else:
             item["explanation"] = "用語の暗記ではなく、前提、中心概念、結論のつながりを確認する。"
+
+
+# ---------------------------------------------------------------------------
+# 生成物の付録・確認問題の要件（IK-0427 / IK-0428）
+# ---------------------------------------------------------------------------
+
+#: 生成のたびに決定論的に付け直す付録の見出し（``_ensure_required_*_in_material``）。
+GENERATED_EQUATIONS_HEADING = "### この節で使う数式"
+GENERATED_FIGURES_HEADING = "### この節で参照する図"
+_GENERATED_APPENDIX_LINE_RE = re.compile(
+    r"^(?:-\s.*|(?:!\[\[\s*(?:equation|figure):[^\]]+\]\]\s*)+)$"
+)
+_APPENDIX_FIGURE_EMBED_RE = re.compile(r"!\[\[\s*figure:[^\]]+\]\]")
+
+#: 問いが式を参照しているが印字番号が無いときの要件（内部 ID を出さない）。
+QUESTION_EQUATION_REQUIREMENT = "問いにある数式の意味または役割に触れる"
+
+# 旧実装が付けた「数式 <ID またはラベル> の意味または役割に触れる」。
+_LEGACY_EQUATION_REQUIREMENT_RE = re.compile(r"^数式\s+.+\s+の意味または役割に触れる$")
+
+# 学習者向けの文に出してはならない内部 ID（PL7）。eq_* / comp_* / claim_* /
+# synth_claim_* / ev_* / UUID。論文の印字番号（式 (12)）は対象外。
+_LEARNER_INTERNAL_ID_RE = _dp.COURSE_CONTENT_LEARNER_INTERNAL_ID_RE  # 正本は display_projection（DP2）
+_EMBED_SYNTAX_RE = re.compile(r"!?\[\[[^\]]*\]\]")
+
+# 印字番号として読めるラベル（``12`` / ``(12)`` / ``3a`` / ``A.1`` / ``2.7``）。
+_PRINTED_EQUATION_NUMBER_RE = re.compile(r"^\(?\s*([A-Z]?\d+[a-z]?(?:[.\-]\d+[a-z]?)*)\s*\)?$")
+
+
+def strip_generated_reference_appendix(
+    text: str,
+    *,
+    headings: tuple[str, ...] = (GENERATED_EQUATIONS_HEADING, GENERATED_FIGURES_HEADING),
+) -> str:
+    """本文末尾の決定論付録（見出し + ``- 説明`` 行 + 埋め込み行だけの塊）を外す。
+
+    末尾の塊が付録の形（見出し・箇条・埋め込み・空行だけ）のときに限って外す。
+    モデルが本文中で同じ見出しを使い、その後に本文が続く場合は外さない。
+    """
+    if not text:
+        return text
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if line.strip() not in headings:
+            continue
+        tail = lines[index:]
+        if all(
+            not row.strip()
+            or row.strip() in (GENERATED_EQUATIONS_HEADING, GENERATED_FIGURES_HEADING)
+            or _GENERATED_APPENDIX_LINE_RE.match(row.strip())
+            for row in tail
+        ):
+            body = "\n".join(lines[:index]).rstrip()
+            # IK-0880: 教員が付録の行に続けて差し込んだ図（1 行に埋め込みが 2 つ以上ある行の
+            # 図）は付録と一緒に消さず、本文の段落として残す（付け直しで重ならないよう本文側へ）。
+            kept = [
+                embed
+                for row in tail
+                if len(re.findall(r"!\[\[[^\]]+\]\]", row)) >= 2
+                for embed in _APPENDIX_FIGURE_EMBED_RE.findall(row)
+                if embed not in body
+            ]
+            if kept:
+                body = (body + "\n\n" if body else "") + "\n\n".join(dict.fromkeys(kept))
+            return body
+    return text
+
+
+def _is_generated_requirement(text: str) -> bool:
+    """旧実装が自動で足した「数式 … の意味または役割に触れる」か。"""
+    return bool(_LEGACY_EQUATION_REQUIREMENT_RE.match(str(text or "").strip()))
+
+
+def contains_learner_internal_id(text: object) -> bool:
+    return bool(_LEARNER_INTERNAL_ID_RE.search(str(text or "")))
+
+
+def strip_learner_internal_ids(text: str) -> str:
+    """学習者向けの文から埋め込み記法と内部 ID を取り除く（前後の空白を詰める）。"""
+    if not text:
+        return ""
+    cleaned = _EMBED_SYNTAX_RE.sub("", text)
+    cleaned = _LEARNER_INTERNAL_ID_RE.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+def _equation_printed_label(eq: dict) -> str:
+    """論文に印字された式番号から「式 (12)」を作る。読めなければ空。"""
+    label = str(eq.get("label") or "").strip()
+    match = _PRINTED_EQUATION_NUMBER_RE.match(label)
+    if not match:
+        return ""
+    return f"式 ({match.group(1)})"
+
+
+#: 公開名（学習チャットの式の事実行 ``core/formula_facts.py`` が使う。IK-0577）。
+equation_printed_label = _equation_printed_label
+
+
+def _compact_math(text: str) -> str:
+    return re.sub(r"\s+", "", str(text or ""))
+
+
+def _question_references_equation(question: str, eq: dict) -> bool:
+    """問いの文がこの式を参照しているか（印字番号・式の本体・ID のいずれか）。"""
+    if not question:
+        return False
+    printed = _equation_printed_label(eq)
+    if printed:
+        number = re.escape(printed[len("式 ("):-1])
+        if re.search(rf"式\s*[（(]\s*{number}\s*[)）]", question):
+            return True
+    compact_question = _compact_math(question)
+    for key in ("latex", "plain_text", "raw_text"):
+        body = _compact_math(eq.get(key) or "")
+        if len(body) >= 6 and body in compact_question:
+            return True
+    eq_id = str(eq.get("equation_id") or "").strip()
+    return bool(eq_id) and eq_id in question
+
+
+# ---------------------------------------------------------------------------
+# プロンプトに渡さない「数式」（IK-0429）
+# ---------------------------------------------------------------------------
+
+# 図の座標軸の目盛り（赤経 ``22h58m00s``・赤緯 ``62°42'00"``・``40'00"``・裸の数値）。
+_AXIS_TICK_RE = re.compile(
+    r"^[+\-−]?(?:\d+(?:\.\d+)?(?:h|m|s|d|°|'|′|\"|″|”))+$|^[+\-−]?\d+(?:\.\d+)?$"
+)
+# ``J=3`` のような短い断片（``13CO J=3–2`` の一部）。
+_SHORT_ASSIGNMENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]?=[0-9.]+$")
+# 見た目だけの TeX（空白・大きさ指定）。重複判定の正規化で落とす。
+_TEX_COSMETIC_RE = re.compile(
+    r"\\(?:left|right|[bB]igg?[lr]?|middle)(?![A-Za-z])|\\[,;:! ]|\\q?quad(?![A-Za-z])"
+)
+
+
+def _equation_body_text(item: dict) -> str:
+    for key in ("latex", "latex_canonical", "normalized_latex", "plain_text", "raw_text"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def is_unpresentable_equation_text(text: str) -> bool:
+    """「重要な数式」として出さない本体か（軸目盛り・短い断片）。空は対象外。"""
+    compact = _compact_math(text)
+    if not compact:
+        return False
+    if all(_AXIS_TICK_RE.match(part) for part in str(text).split() if part):
+        return True
+    compact = compact.rstrip(".,;:")
+    return len(compact) < 4 and bool(_SHORT_ASSIGNMENT_RE.match(compact))
+
+
+# ---------------------------------------------------------------------------
+# 式として読めない候補（IK-0459。IK-0429 の軸目盛り判定を1つの述語へ広げる）
+# ---------------------------------------------------------------------------
+#
+# 解析は PDF の文字層から「式らしい」区画を式の候補として取り込むので、arXiv の見出し行・
+# 図の軸ラベル・天体名・番号だけの空の式・本文の文・置換文字を含む断片・1つの式が
+# 区画ごとに割れた断片が「この節で使う数式」として出ていた。ここでは**本体の形だけ**で
+# 決める（A層の自由文 semantic_kind の語は見ない）。落とすのはプロンプト・付録・要件・
+# 参照一覧の材料だけで、保存する content_blocks と A層の artifact には触れない（P4。
+# 外した事実は ``junk_equation_candidates`` の理由付きで status に残す）。
+
+#: 外した理由の語彙（``is_junk_equation_candidate`` の返り値）。
+JUNK_EQUATION_REASONS = (
+    "axis_ticks",        # 軸の目盛り・短い代入の断片（IK-0429）
+    "document_header",   # arXiv の見出し行
+    "axis_label",        # 図の軸ラベル（``m1 [M⊙]``）
+    "empty_body",        # 式番号と句読点しか無い（``,\n(30)``）
+    "replacement_char",  # 文字化け（U+FFFD）を含む断片
+    "no_relation",       # 関係・演算の記号を1つも持たない（天体名・記号の断片）
+    "prose",             # 本文の文
+    "split_fragment",    # 1つの式が区画ごとに割れた断片の並び
+)
+
+_ARXIV_HEADER_RE = re.compile(r"arXiv:\s*\d{4}\.\d{4,5}", re.IGNORECASE)
+_EQUATION_NUMBER_ONLY_RE = re.compile(r"\(\s*[A-Z]?\d+[a-z]?(?:[.\-]\d+[a-z]?)*\s*\)")
+_BODY_PUNCT_RE = re.compile(r"[\s,.;:()\[\]{}]+")
+#: 関係・演算の記号（1つでもあれば式の形とみなす）。
+_EQUATION_OPERATOR_RE = re.compile(r"[=<>≤≥≈∝≡∼~≲≳≪≫±∓+\-−–*/×·÷^_∫∑∏√∂∇→⇒↦|]")
+_AXIS_LABEL_LINE_RE = re.compile(r"^[^=<>≤≥≈∝\n]{1,24}?\s*[\[(][^\[\]()]{1,12}[\])]$")
+_PROSE_WORD_RE = re.compile(r"(?<![A-Za-z\\])[A-Za-z]{4,}(?![A-Za-z])")
+_MATH_WORDS = frozenset({
+    "log", "ln", "exp", "sin", "cos", "tan", "sinh", "cosh", "tanh", "lim", "max", "min",
+    "det", "sup", "inf", "arg", "mod", "erf", "sign", "diag", "const", "sgn", "prob",
+})
+_PROSE_MIN_WORDS = 4
+_SPLIT_FRAGMENT_BLOCK_RE = re.compile(r"^eq_blk_(\d+)_(\d+)$")
+_SPLIT_FRAGMENT_MAX_GAP = 2
+_SPLIT_FRAGMENT_MIN_RUN = 3
+
+
+def _equation_latex(item: dict) -> str:
+    for key in ("latex", "latex_canonical", "normalized_latex"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _equation_source_text(item: dict) -> str:
+    """原文（PDF の文字層）側の本体。無ければ plain_text。"""
+    for key in ("raw_text", "text", "plain_text", "reading"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _is_axis_label_body(text: str) -> bool:
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    if not lines or _EQUATION_OPERATOR_RE.search(text.replace("-", "").replace("−", "")):
+        return False
+    labels = [ln for ln in lines if _AXIS_LABEL_LINE_RE.match(ln)]
+    ticks = [ln for ln in lines if all(_AXIS_TICK_RE.match(p) for p in ln.split())]
+    if not labels or len(labels) + len(ticks) != len(lines):
+        return False
+    # 目盛りを伴うか、括弧の中が単位の記号（``[M⊙]`` / ``(km/s)``）のときだけ軸ラベル。
+    # 「HD 217086 (O7)」のような名前の括弧書きは軸ラベルにしない（no_relation で落ちる）。
+    return bool(ticks) or any(
+        section_title_rejection_reason(ln.replace("[", "(").replace("]", ")")) == "axis_label"
+        for ln in labels
+    )
+
+
+def _is_prose_body(text: str) -> bool:
+    words = [w for w in _PROSE_WORD_RE.findall(text) if w.casefold() not in _MATH_WORDS]
+    return len(words) >= _PROSE_MIN_WORDS
+
+
+#: 記号1つ（英字1〜3文字 + 添字の数字）と数値1つを関係記号でつないだだけの短い条件。
+_SHORT_VALUE_CONDITION_RE = re.compile(
+    r"^[A-Za-zα-ωΑ-Ω]{1,3}\d?\s*(?:=|<|>|≤|≥|≈|≃|∼|~|≲|≳)\s*[+\-−]?\d+(?:\.\d+)?\s*[.,;:]?$"
+)
+_FRAGMENT_TAIL_RE = re.compile(r"(?:=|∝|<|>|≤|≥|≈|\+|−|-)\s*[.,;:]?$")
+
+
+def _is_short_value_condition(text: str) -> bool:
+    return bool(_SHORT_VALUE_CONDITION_RE.match(" ".join(str(text or "").split())))
+
+
+def _raw_is_fragment(raw: str) -> bool:
+    """原文が式の切れ端か（式番号と句読点を除いて6文字未満・関係記号で終わる）。"""
+    raw = str(raw or "").strip()
+    if not raw:
+        return True
+    core = _BODY_PUNCT_RE.sub("", _EQUATION_NUMBER_ONLY_RE.sub("", raw))
+    return len(core) < _RECONSTRUCTION_RAW_MIN_CHARS or bool(_FRAGMENT_TAIL_RE.search(raw))
+
+
+def is_junk_equation_candidate(record: object) -> str | None:
+    """式の候補が「式として読めない」なら理由の語を、読めるなら None を返す（IK-0459）。
+
+    決定論・非LLM。``record`` は content_blocks の式項目・evidence_links の式・
+    equation_semantics の record のどれでもよい（``latex`` / ``plain_text`` /
+    ``raw_text`` / ``equation_id`` を見る）。復元された LaTeX がある式は、原文が
+    見出し行でない限り落とさない（原文が短いことは ``reconstruction_beyond_raw`` の
+    注記で示す — 落とすと教材の式が消える）。
+    """
+    if not isinstance(record, dict):
+        return None
+    latex = _equation_latex(record)
+    source = _equation_source_text(record)
+    body = latex or source
+    if not body:
+        return None
+    if _ARXIV_HEADER_RE.search(source) or _ARXIV_HEADER_RE.search(latex):
+        return "document_header"
+    if is_unpresentable_equation_text(latex or source):
+        return "axis_ticks"
+    if latex and _UNKNOWN_PLACEHOLDER_RE.search(latex) and _raw_is_fragment(source):
+        # IK-0485: 原文は割れた式の切れ端（``GW}) =`` / ``d ({ΘGW})) ∝``）で、復元した
+        # LaTeX にも「[unknown …]」の穴がある。原文の式としても復元の式としても読めない。
+        return "split_fragment"
+    if latex:
+        return None
+    # ここから下は復元された LaTeX の無い式（原文だけ）。
+    if "\ufffd" in source:
+        return "replacement_char"
+    if _is_axis_label_body(source):
+        return "axis_label"
+    stripped = _BODY_PUNCT_RE.sub("", _EQUATION_NUMBER_ONLY_RE.sub("", source))
+    if not stripped:
+        return "empty_body"
+    if _is_prose_body(source):
+        return "prose"
+    if _is_short_value_condition(source):
+        # IK-0485: 記号1つと数値1つだけの短い条件（``z < 2`` / ``wa = 0`` / ``z ≈0``）は、
+        # 本文中の値の言及で「重要な数式」ではない（IK-0429 の短い代入の断片と同じ類）。
+        # 本文へ短い原文として書く経路（IK-0454 の inline_formula_text）は content_blocks を
+        # 使うので変わらない。落とすのは参照一覧・付録・要件の材料だけ。
+        return "axis_ticks"
+    has_operator = bool(_EQUATION_OPERATOR_RE.search(source))
+    if not has_operator and len(source.split()) >= 2:
+        # 複数の語で、関係・演算の記号が1つも無い（「HD 217086 (O7)」「2α2\nB」）。
+        # 1語の記号（``w0`` / ``αK``）は本文中の記号の言及として残す（IK-0454）。
+        return "no_relation"
+    # 本文中の短い式候補（``J=3–2`` / ``z < 2``）は落とさない — IK-0454 の経路が本文へ
+    # 短い原文として書く。「重要な数式」の行に ID だけで出る問題は ``_drop_equation_lines``。
+    return None
+
+
+def junk_equation_candidates(records: list[dict]) -> dict[str, str]:
+    """式の候補の並びから ``equation_id -> 理由`` を返す（1件ずつの判定 + 割れた並び）。
+
+    割れた並び: 同じ頁の ``eq_blk_{頁}_{区画}`` が区画番号の差 2 以内で3件以上続き、
+    どれも復元された LaTeX を持たないとき、その並び全体を1つの式の断片とみなす
+    （1つの式が5つの ID に割れて出ていた。IK-0459）。
+    """
+    reasons: dict[str, str] = {}
+    unrecovered: list[tuple[int, int, str]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        eq_id = str(record.get("equation_id") or record.get("id") or record.get("target_id") or "").strip()
+        if not eq_id or eq_id in reasons:
+            continue
+        reason = is_junk_equation_candidate(record)
+        if reason:
+            reasons[eq_id] = reason
+        match = _SPLIT_FRAGMENT_BLOCK_RE.match(eq_id)
+        if match and not _equation_latex(record) and _equation_source_text(record):
+            unrecovered.append((int(match.group(1)), int(match.group(2)), eq_id))
+    unrecovered.sort()
+    run: list[tuple[int, int, str]] = []
+
+    def flush() -> None:
+        if len(run) >= _SPLIT_FRAGMENT_MIN_RUN:
+            for _page, _block, eq_id in run:
+                reasons.setdefault(eq_id, "split_fragment")
+
+    for entry in unrecovered:
+        if run and (entry[0] != run[-1][0] or entry[1] - run[-1][1] > _SPLIT_FRAGMENT_MAX_GAP):
+            flush()
+            run = []
+        run.append(entry)
+    flush()
+    return reasons
+
+
+def normalized_equation_key(text: str) -> str:
+    """重複判定の正規化（空白と見た目だけの TeX を落とす）。"""
+    return _compact_math(_TEX_COSMETIC_RE.sub("", str(text or "")))
+
+
+def _topic_equation_records(topic: dict) -> list[dict]:
+    """トピックが式として差し出す候補（content_blocks の式 → evidence_links の式の順）。"""
+    records: list[dict] = []
+    seen: set[str] = set()
+    for block in topic.get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "equations":
+            continue
+        for item in block.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            eq_id = str(item.get("equation_id") or item.get("id") or "").strip()
+            if eq_id and eq_id not in seen:
+                seen.add(eq_id)
+                records.append({**item, "equation_id": eq_id})
+    for link in topic.get("evidence_links") or []:
+        if not (isinstance(link, dict) and link.get("kind") == "equation"):
+            continue
+        eq_id = str(link.get("target_id") or "").strip()
+        if eq_id and eq_id not in seen:
+            seen.add(eq_id)
+            records.append({**link, "equation_id": eq_id})
+    return records
+
+
+def topic_junk_equation_reasons(topic: dict) -> dict[str, str]:
+    """トピックの式の候補のうち、式として読めないものの ``id -> 理由``（IK-0459）。"""
+    return junk_equation_candidates(_topic_equation_records(topic))
+
+
+_DIGIT_RUN_RE = re.compile(r"\d+")
+_RECONSTRUCTION_RAW_MIN_CHARS = 6
+_UNKNOWN_PLACEHOLDER_RE = re.compile(r"\[\s*unknown\b", re.IGNORECASE)
+
+
+def reconstruction_beyond_raw(item: object) -> bool:
+    """復元された LaTeX が原文（PDF の文字層）に無い中身を持つか（IK-0460。決定論）。
+
+    原文が式番号と句読点を除いて6文字未満（``,\n(6)`` / ``S =``）、原文が ``=`` で
+    終わる、LaTeX の数字の並びが原文に無い（``Mmax = 2`` → ``2.06^{+0.07}_{-0.09}``）、
+    LaTeX に「[unknown …]」の穴がある、のいずれか。LaTeX が無い・復元でない式は False。
+    """
+    if not isinstance(item, dict) or not _equation_is_reconstructed(item):
+        return False
+    latex = _equation_latex(item)
+    raw = str(item.get("raw_text") or item.get("text") or "").strip()
+    if not latex:
+        return False
+    if _UNKNOWN_PLACEHOLDER_RE.search(latex):
+        return True
+    if raw and normalized_equation_key(latex) == normalized_equation_key(raw):
+        # IK-0485: LaTeX が原文そのまま（``N = 15``）。先まで復元したものではない。
+        return False
+    core = _BODY_PUNCT_RE.sub("", _EQUATION_NUMBER_ONLY_RE.sub("", raw))
+    if len(core) < _RECONSTRUCTION_RAW_MIN_CHARS or raw.rstrip().endswith("="):
+        return True
+    raw_digits = set(_DIGIT_RUN_RE.findall(_EQUATION_NUMBER_ONLY_RE.sub("", raw)))
+    latex_digits = set(_DIGIT_RUN_RE.findall(latex))
+    return bool(latex_digits - raw_digits)
+
+
+def topic_reconstructed_equation_ids(topic: dict) -> list[str]:
+    """トピックが差し出す（式として読める）式のうち、AI が復元した式の ID（出現順。IK-0460）。"""
+    dropped = _unpresentable_equation_ids(topic)
+    return [
+        str(record["equation_id"]) for record in _topic_equation_records(topic)
+        if str(record["equation_id"]) not in dropped and _reference_shows_reconstructed_latex(record)
+    ]
+
+
+def excluded_equation_candidates_record(topics: list[dict]) -> list[dict]:
+    """全トピックで外した式の候補（``topic_id`` / ``equation_id`` / ``reason``。IK-0459）。"""
+    out: list[dict] = []
+    for topic in topics:
+        if not isinstance(topic, dict):
+            continue
+        for eq_id, reason in topic_junk_equation_reasons(topic).items():
+            out.append({"topic_id": str(topic.get("id") or ""), "equation_id": eq_id, "reason": reason})
+    return out
+
+
+def _unpresentable_equation_ids(topic: dict) -> set[str]:
+    """トピックの式のうち、プロンプト・付録・要件・参照一覧に出さない ID。
+
+    式として読めない候補（``is_junk_equation_candidate`` / 割れた並び。IK-0459）に加え、
+    同じ式（正規化した本体が一致）の2件目以降（IK-0429）。
+    """
+    dropped: set[str] = set(topic_junk_equation_reasons(topic))
+    seen: set[str] = set()
+    for block in topic.get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "equations":
+            continue
+        for item in block.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            eq_id = str(item.get("equation_id") or item.get("id") or "").strip()
+            if not eq_id or eq_id in dropped:
+                continue
+            body = _equation_body_text(item)
+            key = normalized_equation_key(item.get("latex") or item.get("latex_canonical")
+                                          or item.get("normalized_latex") or body)
+            if not key:
+                continue
+            if key in seen:
+                dropped.add(eq_id)
+            else:
+                seen.add(key)
+    return dropped
+
+
+def _prompt_equation_item(item: object) -> object:
+    """プロンプトに渡す式項目の写し（IK-0460: 原文より先まで復元した式に注記を添える）。"""
+    if not isinstance(item, dict) or not reconstruction_beyond_raw(item):
+        return item
+    return {
+        **item,
+        "raw_text": str(item.get("raw_text") or item.get("text") or ""),
+        "reconstruction_note": label_vocab.RECONSTRUCTED_BEYOND_RAW_NOTE,
+    }
+
+
+def _prompt_content_blocks(blocks: list, dropped_equation_ids: set[str]) -> list:
+    out: list = []
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "equations":
+            items = [
+                _prompt_equation_item(item) for item in (block.get("items") or [])
+                if not (isinstance(item, dict)
+                        and str(item.get("equation_id") or item.get("id") or "") in dropped_equation_ids)
+            ]
+            if not items:
+                continue
+            block = {**block, "items": items}
+        elif isinstance(block, dict) and block.get("type") == "components":
+            # 部品の document_id（UUID）はモデルが使えない内部 ID なので写しから外す
+            # （保存する content_blocks は変えない）。
+            block = {
+                **block,
+                "items": [
+                    {k: v for k, v in item.items() if k != "document_id"} if isinstance(item, dict) else item
+                    for item in (block.get("items") or [])
+                ],
+            }
+        out.append(block)
+    return out
+
+
+def _drop_equation_lines(content: str, topic: dict, dropped_equation_ids: set[str]) -> str:
+    """``_compose_topic_content`` の「重要な数式」の行のうち、落とした式の行を外す。"""
+    if not content:
+        return content
+    # 行の見出しは ``label or equation_id``（``_compose_topic_content``）。
+    names = set(dropped_equation_ids)
+    for block in topic.get("content_blocks") or []:
+        if isinstance(block, dict) and block.get("type") == "equations":
+            for item in block.get("items") or []:
+                if isinstance(item, dict) and str(item.get("equation_id") or "") in dropped_equation_ids:
+                    label = str(item.get("label") or "").strip()
+                    if label:
+                        names.add(label)
+    prefixes = tuple(f"- {name}:" for name in names)
+    def internal_id_without_body(line: str) -> bool:
+        # IK-0459: 「- eq_eqcand_…: 」のように抽出段の内部 ID だけで本体の無い行。
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            return False
+        name, _sep, value = stripped[2:].partition(":")
+        return is_internal_equation_id(name.strip()) and not value.strip()
+
+    # IK-0486: 保存済みの content に残る「- 27: 」（本体の空の行）は、その式の本体
+    # （content_blocks の latex → plain_text → raw_text）で埋める。埋められなければ外す。
+    bodies: dict[str, str] = {}
+    for block in topic.get("content_blocks") or []:
+        if isinstance(block, dict) and block.get("type") == "equations":
+            for item in block.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                eq_id = str(item.get("equation_id") or item.get("id") or "").strip()
+                if not eq_id or eq_id in dropped_equation_ids:
+                    continue
+                body = " ".join(_equation_body_text(item).split())
+                if body:
+                    for name in (eq_id, str(item.get("label") or "").strip()):
+                        if name:
+                            bodies.setdefault(name, body)
+
+    def empty_equation_row(line: str) -> str | None:
+        """本体の空の行なら、その式の名前を返す。"""
+        stripped = line.strip()
+        if stripped.startswith("- ") and stripped.endswith(":") and ":" not in stripped[2:-1]:
+            return stripped[2:-1].strip()
+        return None
+
+    kept: list[str] = []
+    in_equations = False
+    for line in content.split("\n"):
+        if line.strip() == "重要な数式":
+            in_equations = True
+        elif not line.strip().startswith("- "):
+            in_equations = False
+        if prefixes and line.strip().startswith(prefixes):
+            continue
+        if line.strip() in {f"- {name}" for name in names} or internal_id_without_body(line):
+            continue
+        empty_name = empty_equation_row(line) if in_equations else None
+        if empty_name is not None:
+            if not bodies.get(empty_name):
+                continue
+            line = f"- {empty_name}: {bodies[empty_name]}"
+        kept.append(line)
+    # IK-0459: 行を外して「重要な数式」の見出しだけが残ったら、見出しも外す。
+    out: list[str] = []
+    for index, line in enumerate(kept):
+        if line.strip() == "重要な数式":
+            following = next((row for row in kept[index + 1:] if row.strip()), "")
+            if not following.strip().startswith("- "):
+                continue
+        out.append(line)
+    return "\n".join(out)
 
 
 def _fallback_check_question(topic: dict) -> str:
@@ -3137,18 +7443,199 @@ def _clean_str_list(value: object) -> list[str]:
     return []
 
 
-def _set_content_status(course: dict, status: str, message: str = "", extra: dict | None = None) -> None:
+def _content_status_payload(status: str, message: str = "", extra: dict | None = None) -> dict:
     payload = dict(extra or {})
     payload.update({
         "status": status,
         "message": message,
         "updated_at": _dt.datetime.now(_dt.UTC).isoformat(),
     })
-    course["course_content_status"] = payload
+    return payload
 
 
-def _save_course(session, course_id: str, course: dict) -> None:
-    clean_course = _strip_nuls(course)
+def _set_content_status(course: dict, status: str, message: str = "", extra: dict | None = None) -> None:
+    course["course_content_status"] = _content_status_payload(status, message, extra)
+
+
+#: コース内容の生成が途中で失敗したときの事実文（IK-0375。数値・例外文は載せない）。
+CONTENT_BUILD_FAILED_MESSAGE = (
+    "コース内容の生成が途中で止まりました。原稿スタジオの「コース内容を生成」でやり直せます。"
+)
+
+#: 生成中に別の操作が同じトピックの生成対象の項目を保存していたため、その保存を残したときの
+#: 事実文（IK-0374。``course_content_status`` に載る。件数は書かない）。
+CONCURRENT_EDITS_KEPT_NOTE = (
+    "生成中に保存された項目があったため、その項目は生成結果で上書きしていません。"
+)
+
+#: ``build_course_content`` が**コース直下に**書くキー（IK-0374）。書き戻しはこれだけを
+#: live 行へ反映する。``cartridge_id`` / ``course_focus`` / ``llm_models`` /
+#: ``atlas_binding_pending`` / ``chapters`` / ``sources`` 等は builder の持ち物ではない。
+BUILDER_OWNED_COURSE_KEYS = frozenset({"course_content_status"})
+
+#: ``build_course_content`` が**各トピックに**書くキー（``_enrich_topics`` /
+#: ``_generate_course_topic_drafts`` / ``_apply_deterministic_topic_draft_fallback``）。
+#: 書き戻しはこのキーだけを、``id`` で突き合わせた live のトピックへ重ねる。
+#: ``atlas_node_id`` / ``title`` / ``prerequisites`` / ``chapter_index`` 等は他の経路の
+#: 持ち物で、ここに入れない。新しいキーを書くときはここへ足す（ガードレール
+#: ``test_ik0374_content_writeback_merge.py`` が書き込みキーとの一致を検査する）。
+BUILDER_OWNED_TOPIC_KEYS = frozenset({
+    # _enrich_topics
+    "summary",
+    "content",
+    "content_blocks",
+    "learning_objectives",
+    "prerequisite_concepts",
+    "blackbox_policy",
+    "assessment_prompts",
+    "expected_misconceptions",
+    "linked_component_ids",
+    "linked_equation_ids",
+    "linked_claim_ids",
+    "source_evidence_ids",
+    "evidence_links",
+    "teaching_takeaways",
+    "material_chunk_ids",
+    "source_excerpt",
+    "content_source",
+    "content_confidence",
+    "narrative",
+    "grounding_note",
+    "coverage",
+    "units",
+    # _generate_course_topic_drafts / _apply_deterministic_topic_draft_fallback
+    "key_concepts",
+    "student_material",
+    "spoken_script",
+    "cautions",
+    "check_questions",
+    "draft_source",
+    "draft_reference_key",
+})
+
+_MISSING = object()
+
+
+def _topic_identity(topic: dict) -> tuple[str, str] | None:
+    """トピックの突き合わせキー。``id`` が正本で、無いときだけ題名に落とす。"""
+    topic_id = str(topic.get("id") or topic.get("topic_id") or "").strip()
+    if topic_id:
+        return ("id", topic_id)
+    title = str(topic.get("title") or "").strip()
+    if title:
+        return ("title", title)
+    return None
+
+
+def _index_topics(topics: list) -> dict[tuple[str, str], dict]:
+    """突き合わせキー → トピック。キーが重複するトピックは曖昧なので索引に入れない。"""
+    index: dict[tuple[str, str], dict] = {}
+    ambiguous: set[tuple[str, str]] = set()
+    for topic in topics or []:
+        if not isinstance(topic, dict):
+            continue
+        key = _topic_identity(topic)
+        if key is None:
+            continue
+        if key in index:
+            ambiguous.add(key)
+            continue
+        index[key] = topic
+    for key in ambiguous:
+        index.pop(key, None)
+    return index
+
+
+def _merge_built_topic(live_topic: dict, snapshot_topic: dict | None, built_topic: dict) -> tuple[dict, bool]:
+    """1トピックの三方向マージ。戻り値は (マージ後のトピック, 生成中の保存を残したか)。
+
+    builder の持ち物のキーだけを見る。live の値が開始時点の写しと違う（＝生成中に別の
+    操作が保存した）キーは live を残す — 後から保存された人の操作を、開始時点の材料で
+    作った生成結果で上書きしない。それ以外は生成結果を採る。
+    """
+    merged = dict(live_topic)
+    kept_concurrent = False
+    snapshot_topic = snapshot_topic or {}
+    for key in BUILDER_OWNED_TOPIC_KEYS:
+        if key not in built_topic:
+            continue
+        built_value = built_topic[key]
+        live_value = live_topic.get(key, _MISSING)
+        if live_value != snapshot_topic.get(key, _MISSING):
+            if live_value != built_value:
+                kept_concurrent = True
+            continue
+        merged[key] = built_value
+    return merged, kept_concurrent
+
+
+def merge_built_course_into_live(live: dict, snapshot: dict, built: dict) -> dict:
+    """生成結果を live 行の ``data`` に重ねた新しい dict を返す（IK-0374。純関数）。
+
+    - コース直下は ``BUILDER_OWNED_COURSE_KEYS`` だけを生成結果から採り、他は live のまま。
+    - ``topics`` は live のリスト（順序・非 dict 要素・生成中に足されたトピック）を保ち、
+      ``id`` で突き合わせたトピックに ``_merge_built_topic`` を当てる。生成中に消された
+      トピックは復活させない。位置では突き合わせない。
+    """
+    merged = dict(live)
+    for key in BUILDER_OWNED_COURSE_KEYS:
+        if key in built:
+            merged[key] = copy.deepcopy(built[key])
+
+    live_topics = live.get("topics")
+    built_index = _index_topics(course_topics(built))
+    snapshot_index = _index_topics(course_topics(snapshot))
+    kept_concurrent = False
+    if isinstance(live_topics, list) and built_index:
+        new_topics: list = []
+        for live_topic in live_topics:
+            if not isinstance(live_topic, dict):
+                new_topics.append(live_topic)
+                continue
+            key = _topic_identity(live_topic)
+            built_topic = built_index.get(key) if key else None
+            if built_topic is None:
+                new_topics.append(live_topic)
+                continue
+            merged_topic, kept = _merge_built_topic(live_topic, snapshot_index.get(key), built_topic)
+            kept_concurrent = kept_concurrent or kept
+            new_topics.append(merged_topic)
+        merged["topics"] = new_topics
+
+    status = merged.get("course_content_status")
+    if kept_concurrent and isinstance(status, dict):
+        status = dict(status)
+        status["concurrent_edits_note"] = CONCURRENT_EDITS_KEPT_NOTE
+        merged["course_content_status"] = status
+    return merged
+
+
+def _save_course(session, course_id: str, course: dict, *, snapshot: dict) -> None:
+    """生成結果を live 行へ重ねて保存する（IK-0374）。
+
+    書き戻す時点で行を ``FOR UPDATE`` で読み直し、``merge_built_course_into_live`` で
+    builder の持ち物だけを重ねる。開始時点の dict を丸ごと書き戻さない（生成中に保存
+    された地図の割り当て・議論テーマ・モデル指定・トピックの編集を消さないため）。
+    行が dict として読めないとき（行が消えた等）だけ、従来どおり生成結果をそのまま書く
+    （行が無ければ UPDATE は0行で終わる）。
+    """
+    row = session.execute(
+        sa_text("""
+            SELECT data
+            FROM learning_courses
+            WHERE id = :course_id
+            FOR UPDATE
+        """),
+        {"course_id": course_id},
+    ).fetchone()
+    live = row[0] if row else None
+    if isinstance(live, str):
+        try:
+            live = json.loads(live)
+        except ValueError:
+            live = None
+    target = merge_built_course_into_live(live, snapshot, course) if isinstance(live, dict) else course
+    clean_course = _strip_nuls(target)
     session.execute(
         sa_text("""
             UPDATE learning_courses
@@ -3162,6 +7649,29 @@ def _save_course(session, course_id: str, course: dict) -> None:
             "title": str(clean_course.get("title") or course_id).replace("\x00", "").replace("\\u0000", ""),
             "data": _json_dumps(clean_course),
         },
+    )
+    session.commit()
+
+
+def _persist_content_status(session, course_id: str, status_payload: dict) -> None:
+    """``data.course_content_status`` だけを原子的に書く（IK-0375）。
+
+    ``jsonb_set`` の1文で、行の他のキーには触れない（読み直し→書き戻しをしないので
+    同時に保存された値を消さない）。``title`` 列・``updated_at`` 列は更新しない
+    （状態の記帳であってコースの編集ではない。状態の時刻は payload の ``updated_at``）。
+    """
+    session.execute(
+        sa_text("""
+            UPDATE learning_courses
+            SET data = jsonb_set(
+                COALESCE(data, '{}'::jsonb),
+                '{course_content_status}',
+                CAST(:status AS jsonb),
+                true
+            )
+            WHERE id = :course_id
+        """),
+        {"course_id": course_id, "status": _json_dumps(status_payload)},
     )
     session.commit()
 
@@ -3217,3 +7727,55 @@ def _overlap_score(left: str, right: str) -> float:
     if not left_tokens or not right_tokens:
         return 0.0
     return len(left_tokens & right_tokens) / max(len(left_tokens), 1)
+
+
+def course_component_anchor_refs(course_data: dict | None) -> list[tuple[str, str]]:
+    """コースのトピックに置かれた部品の ⚓ の参照を ``(正規化 ID, document_id)`` で返す（IK-1126）。
+
+    学生が部品（とその説明）へ辿り着く画面の道は、トピックの ⚓（``![[component:…]]`` の埋め込み・
+    出典タブの論理要素）だけ。その材料は :func:`build_topic_evidence_items` の component 項目と
+    同じ集合なので、ここもそれを通す（判定の規則を作り直さない）。``document_id`` は保存済みの
+    rich 投影にあるときだけ（無ければ空文字 = 論文までは確かめられない）。章ネストも走査する。
+    """
+    from core.course_data import iter_all_topics
+
+    refs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for topic in iter_all_topics(course_data or {}):
+        if not isinstance(topic, dict):
+            continue
+        try:
+            items = build_topic_evidence_items(topic)
+        except Exception:  # noqa: BLE001 — 壊れたトピックは数えない（fail-soft）
+            logger.debug("component anchor refs: topic evidence items failed", exc_info=True)
+            continue
+        for item in items:
+            if item.get("kind") != "component":
+                continue
+            norm = normalize_evidence_id(item.get("id"))
+            if not norm:
+                continue
+            key = (norm, str(item.get("document_id") or "").strip())
+            if key not in seen:
+                seen.add(key)
+                refs.append(key)
+    return refs
+
+
+def course_has_component_anchor(
+    course_data: dict | None, *, component_keys: set[str], document_id: str,
+) -> bool:
+    """コースのどこかのトピックに、この部品の ⚓ があるか（IK-1126・純関数）。
+
+    ``component_keys`` は部品の突合キー（DB UUID ∪ ``source_scope.legacy_ids``）。⚓ の参照が
+    論文を持つときは論文も一致させる（agent ID は論文をまたいで衝突しうる）。
+    """
+    keys = {normalize_evidence_id(k) for k in component_keys if str(k or "").strip()}
+    keys.discard("")
+    if not keys:
+        return False
+    doc = str(document_id or "").strip()
+    for ref_id, ref_doc in course_component_anchor_refs(course_data):
+        if ref_id in keys and (not ref_doc or not doc or ref_doc == doc):
+            return True
+    return False

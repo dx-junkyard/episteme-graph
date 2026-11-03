@@ -286,6 +286,8 @@ class TestListUsers:
         assert set(row) == {
             "id", "username", "email", "role", "status",
             "created_at", "last_login_at", "last_seen_at",
+            # migration 094（IK-1007）: 本人が登録した人に見せる名前（additive・空 = 登録なし）。
+            "profile_name",
         }
         # username は display_name、role はアプリ語彙（DB 語彙を外に出さない）
         assert row["username"] == "gakusei"

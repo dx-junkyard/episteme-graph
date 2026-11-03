@@ -1,0 +1,49 @@
+id: s-trace-one-hop
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、分からない語の ⚓ から要素文脈→上位→隣の要素→旅と 1 hop ずつ辿る'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- seed_questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.component.context
+  note: 分からない語の ⚓ を開く
+- repeat:
+    until: persona_decides_to_stop or steps > 4
+    max: 4
+    do: learning.component.context_hop
+    note: 上位・下位レーンや隣の要素へ 1 hop 移る
+- do: learning.chat.ask
+  with:
+    message: '{{seed_questions | next}}'
+  note: 辿った先で分かったことを確かめる
+- choose:
+  - do: learning.personal_network.journey
+    note: 自分の問いから旅をたどる
+  - do: learning.personal_network.nearby
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#material-element-anchor
+- manual: student/02-student.md#personal-map
+watch_for:
+- 各 hop で前の文脈（どこから来たか）が失われない
+- 移れない要素は移れないことが分かり、押しても何も起きない要素にならない
+- 上位の関係が無い要素では推測で埋めず、特定できていないことが事実文で出る

@@ -1,0 +1,44 @@
+id: s-sim-english-meaning
+population: students
+runner:
+- api
+# 第 22 周 (j)。実行済みの run を開いたまま（app.js の screen_context.selection.simulation_run_id）、英語で
+# 段階の言葉と共有の意味を学習チャットに聞く。第 21 周は英語の問いにマニュアルの目次（日本語）が返った。
+goal: '{{goal_text}} のために、自分の実行の記録を開いたまま、結果の言葉と共有の意味を英語で聞く'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- questions
+preconditions:
+- 同じ学生が、このトピックの論文で実行を少なくとも 1 つ持っている（同じ周の s-sim-share-measured の後に走らせる）
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+  note: 「🧪 動かして確かめる」を開き、これまでの実行の最新の 1 件を開いた状態にする
+- repeat:
+    until: persona_decides_to_stop or steps > 2
+    max: 2
+    do: learning.chat.ask
+    with:
+      message: '{{questions | next}}'
+      simulation_run_id: latest
+    note: 開いている実行について英語で聞く（画面は開いている実行の id だけを AI に渡す）
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-levels
+- manual: student/02-student.md#simulation-lab-share
+watch_for:
+- 「unmeasured」を英語で聞いたとき、使い方マニュアルの目次ではなく、開いている実行のどの軸が測れていないかの答えが返る
+- 共有の意味を英語で聞いたとき、誰に何が見えて、そのあと教員が判断することが英語で返る
+- 答えが実行の数値を検証の結果として言い換えない

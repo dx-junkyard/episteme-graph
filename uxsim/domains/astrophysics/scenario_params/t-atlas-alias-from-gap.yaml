@@ -1,0 +1,5 @@
+scenario: t-atlas-alias-from-gap
+domain: astrophysics
+params:
+  domain_hint: astrophysics
+  alias_hint: auto

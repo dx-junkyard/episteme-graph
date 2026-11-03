@@ -126,8 +126,12 @@ class TestCandidateConfirmationFlow:
 
     def test_assumption_confirm_creates_ledger_row_untested(self):
         block = re.search(r"def confirm_assumption[\s\S]+?\n@admin_router", _SRC).group(0)
-        assert "INSERT INTO epistemic_ledger" in block
-        assert "'untested'" in block
+        # IK-0899: 台帳行の作成は行キー（論文込み）を守る共通の補助関数に寄せた。
+        assert "_insert_assumption_ledger_row(" in block
+        helper = re.search(r"def _insert_assumption_ledger_row[\s\S]+?\n\n\n", _SRC).group(0)
+        assert "INSERT INTO epistemic_ledger" in helper
+        assert "'untested'" in helper
+        assert "epistemic_ledger_document_target_key" in helper
 
     def test_assumption_confirm_requires_reason(self):
         block = re.search(r"def confirm_assumption[\s\S]+?\n@admin_router", _SRC).group(0)

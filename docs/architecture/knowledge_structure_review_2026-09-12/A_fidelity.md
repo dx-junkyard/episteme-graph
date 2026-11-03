@@ -109,6 +109,7 @@ summary も機械文（`"Reusable theory unit (transform_representation) within 
 - **示唆**: (a) 上限を切り捨てでなく**複数バッチ反復**に。(b) 打ち切るなら**節単位の層化サンプリング**にし、未処理節を `stage_outputs` に正直に残す。(c) `page` が信用できない経路ではソートキーを `order` のみに。
 
 ### F-2. 永続化される claim は「too_broad と自己判定された段落」で、atomic claim は捨てられる 🔴
+→ **2026-09-13 解消**（Phase 1 P1-2: claim object 全件（親 `claim_object` / atomic 子 / 式由来）を `origin` / `parent_claim_id` / `claim_tier` 付きで行化。2026-09-19 の[再現性レビュー](../knowledge_reproduction_review_2026-09-19.md) §4 で実データ確認）
 - 論文A **9/9 が `too_broad`**、論文B 14/17。`claim_object_builder.claims` は A 132 / B 107 だが `db.claims` は 9 / 17 で本文は span 全文（平均772字・最大1,338字）。
 - 承認・疑義・再構成・反証条件の対象単位が段落になる。段落単位 claim に「検証されているか」と問うのは原理的に意味を持たない。
 - **示唆**: `persist_qualified_claims` が `claim_object_builder` の出力を親子2階層（`parent_claim_id`）で保存する。
@@ -124,6 +125,7 @@ summary も機械文（`"Reusable theory unit (transform_representation) within 
 - **示唆**: span_id を `{block_id}:{n}` で一意化し、claim_id をそこから決定論導出。参照形式を全ステージで1方式に統一。
 
 ### F-5. 意味のある component 名が決定論的 refinement で破壊される 🟠
+→ **2026-09-19 是正**（[再現性レビュー](../knowledge_reproduction_review_2026-09-19.md) E-12 / IK-0337: 子部品名を「親 label — 責務」に。親行の一級化は未着手）
 - 親 label が子では `"{Operation}: {親label}"` に置換。21件中16件がこの形。学習トピック一覧が「Transform representation: …」で埋まる。
 - **示唆**: 分割は**構造（親子）として持ち、名前は親を維持**。operation は属性で表す。
 
@@ -142,6 +144,7 @@ summary も機械文（`"Reusable theory unit (transform_representation) within 
 - **示唆**: cartridge 名と実内容の乖離を解消。分野選択の入口で論文と cartridge の適合度を事実として提示。
 
 ### F-9. 図・表が知識構造に入らない 🔴
+→ **2026-09-19 部分是正**（同レビュー E-4 / IK-0332: GROBID の back/annex・body 直下の figure/table・REVTeX caption を読む。表本体はテキストとして保持。表のセル構造化と TeX 図の画像化は §5.2 で保留）
 - 論文A: `figures: [], tables: []`。原本には figure 3・table 4 があり、**表は主結果の数値係数そのもの**。学習者は「三本の関係式がある」と知れるが**中身を一切見られない**。
 - 論文B: 図86件 caption 取得済みだが `interpretation` 非空 **0/86**、`linked_claim_ids` 非空 4/86。表は 0。
 - **示唆**: TeX 経路の figure/table パース（少なくとも表を本文テキストとして取り込む）。図の意味付けを `analyze_images` オプトインに依存させない非LLM最低経路。
@@ -160,6 +163,7 @@ summary も機械文（`"Reusable theory unit (transform_representation) within 
 - **示唆**: DSL 層を「学習者に見せる骨格」の候補に昇格。node_value を概念レジストリへ解決すれば論文間の共通語彙になる。
 
 ### F-13. 説明（element_explanations）の9割が対象に到達できない 🔴
+→ **2026-09-19 判定: 原因が入れ替わった**（ID 解決は Phase 1 で 100%。生成自体が日次上限で 0 件になる問題は同レビュー E-5 / IK-0333）
 - live の theory_claim 説明の element_id 解決: **A 1/26・B 1/22**。component は A 21/34（13件は前回 run の ID 体系 `comp_003__r1`）。
 - **示唆**: 紐付けは永続化された対象の ID に対してのみ。解決できないものは `status='unresolved'` として正直に数える。
 
@@ -173,6 +177,7 @@ summary も機械文（`"Reusable theory unit (transform_representation) within 
 - **示唆**: 引用・相互参照をインラインマーカーで残す。インライン数式は `$...$` を保つ。
 
 ### F-16. チャンクと式の対応が失われている 🟠
+→ **2026-09-19 解消**（同レビュー IK-0336: `_merge_equation_previews_for_chunk` を block_id 一致優先に）
 - A は 19チャンクすべてが同一の53式全部を保持。B は196中60が同じ71式集合、残り136は0件。
 - **示唆**: `formulas` は `block_ids` から導出したそのチャンクの式だけに。
 

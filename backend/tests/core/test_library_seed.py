@@ -73,6 +73,9 @@ def bundled(tmp_path, monkeypatch):
     monkeypatch.setattr(cartridges_module, "list_cartridges", lambda: [_Summary("particle_physics")])
     monkeypatch.setattr(cartridges_module, "cartridge_directory", lambda cid: tmp_path / cid)
 
+    # 共通部品（backend/library_common）は件数を固定するテストの外に置く。
+    monkeypatch.setattr(library_seed, "LIBRARY_COMMON_DIR", tmp_path / "no_library_common")
+
     session = _NullSession()
     monkeypatch.setattr(library_seed, "get_session", lambda: session)
     return session
@@ -237,3 +240,28 @@ class TestErrorResultShape:
         assert result["frozen"] == 0
         assert result["freeze_failed"] == 0
         assert "no cartridges" in result["error"]
+
+
+class TestLibraryCommonDirectory:
+    """``backend/library_common/*.json`` は ``domain_key='unassigned'`` で同じ規則に乗る。"""
+
+    def test_common_parts_are_imported_as_unassigned(self, bundled, monkeypatch, tmp_path):
+        common = tmp_path / "library_common"
+        common.mkdir()
+        (common / "parts.json").write_text(
+            '[{"entry_type": "noise_source", "name": "ガウス雑音", "body": {"noise_kind": "gaussian"}}]',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(library_seed, "LIBRARY_COMMON_DIR", common)
+        calls = _patch_store(monkeypatch)
+
+        result = library_seed.import_bundled_library()
+
+        assert result["imported"] == 2
+        domains = sorted(c["domain_key"] for c in calls["create"])
+        assert domains == ["particle_physics", "unassigned"]
+        assert len(calls["freeze"]) == 2
+
+    def test_repository_common_dir_resolves_next_to_cartridges(self):
+        backend = Path(__file__).resolve().parents[2]
+        assert library_seed.LIBRARY_COMMON_DIR == backend / "library_common"

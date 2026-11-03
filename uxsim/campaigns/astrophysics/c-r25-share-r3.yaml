@@ -1,0 +1,53 @@
+id: c-astro-r25-share-r3
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 1bad7d9f
+personas:
+  teachers: [te-02-veteran-intro, te-05-delegator-lab]
+  students: [st-09-d2-from-datasci, st-04-intl-exoplanet]
+scenarios:
+  teacher: [t-share-bind-versions, t-share-explain-write, t-share-explain-endorse-cite, t-share-labels-atlas]
+  student: [s-share-symbol-concept, s-share-part-chip]
+runner: api
+flags: {}
+budget: {product_llm_calls: 10, persona_llm_calls: 320, wall_clock_minutes: 220}
+notes: |
+  第 25 周 share の第 3 周（judge_share_r2.md §5 の組を基本にする）。審判の提案は te-04 × (a')・st-06 × (d)(e)・st-09 × (d)・
+  te-05 × (b1)・te-04 × (b2)・te-05 × (c) がすべて第 1・2 周と同じ組なので、意図（何を確かめるか）はそのままにペルソナを替えた
+  （P-0025）: (a') と (b1) と (c) は te-02（行動型 = 速く進む。share の面は初めて）、(b2) は te-05、(e) は st-09、(d) は st-04。
+
+  ── 周の前に指揮者が用意するもの（この順）──
+   1. 是正の前提: **IK-0890（共通部品の検索の分野）・IK-0891（説明の course_id）・IK-0892（学習者の説明の焦点）の是正後にだけ回す**。
+      是正前は (a')(b1)(b2)(d) が第 2 周と同じ所で止まる。IK-0893（記号の吹き出しの定義）・IK-0897（ラベルの足し直しの outcome）の
+      是正の有無も run の記録に残す（是正前なら (e)(c) は現状の確認になる）。
+   2. 投影の同期（H10〜H19）と投影の自己検査（応答の facts / *_note / *_label が観察に出ること）を終えておく。直さないと第 3 周も
+      同じ偽 STILL を読む。
+   3. editor 共有: te-02 に PINN（Neutron Star Equation of State via Physics Informed Neural Network）の TeX 版・PDF 版の教材の
+      editor 共有を与える（uxsim/sandbox/grant_document_editors.py・所有者の共有 API）。無いと (a') の候補作成と確定が 404 になる。
+   4. 砂場の残り: 第 1・2 周の「TOV 方程式（静水圧平衡）」エントリ・別名・結び付きが残っていればそのまま使う（runner は同名の
+      エントリがあれば新規作成しない）。reset するなら対象に library_entries / library_entry_labels / element_identity_links /
+      component_explanations 系が入ることを確かめる。(c) は第 2 周に te-05 が足した別名が残っている前提の「足し直し」の場面。
+      残っていなければ 1 回目の追加が通常の追加になり、足し直しは同じ周の 2 回目の手で見る。
+   5. te-05 の (b2) の引用先は te-05 自身のコース（教員の /api/admin/courses の先頭）。種まき済みのコースが残っていなければ
+      引用先の選択で止まる — その場合は周の前に te-05 にコース 1bad7d9f の editor 共有を与える。
+   6. 学生は campaign の固定コース 1bad7d9f（TeX 版）を受講する（judge_share_r2 §5 の「A の inconsistent」）。
+
+  ── レーンの順（--persona X --scenario Y で 1 場面ずつ。→ は続けて、⇢ は他レーンを待つ）──
+   1. te-02: (a') t-share-bind-versions — PINN の TeX 版 ⇄ PDF 版で「TOV network map」を共通部品に結び、両方確定。最後に
+      **必須の 1 手**として Copilot に「確定すると学生に何が見えるか」を問う（H21・IK-0865 の確認）。
+   2. st-09: ⇢ 1 ⇢ (e) s-share-symbol-concept — r・P（散文の意味）・F_EOS（定義式）・L_BC（登録なし）の 4 記号を全部タップ
+      （第 3 周から 4 手を必須にした）。IK-0893 の是正後は r・P が主張の言及として出所付きで出るかを見る。
+   3. st-04: ⇢ 1 ⇢ (d) s-share-part-chip — 確定した結び付きがある状態の「共通部品として」と concept_ref の見え方（非母語話者）。
+   4. te-02: ⇢ 3 ⇢ (b1) t-share-explain-write（共有 ON まで）。
+   5. te-05: ⇢ 4 ⇢ (b2) t-share-explain-endorse-cite（承認・引用。承認の段階ラベルと改訂原則 4 の関係を問う材料 —
+      judge_share_r1 §5-2 の保留）。
+   6. te-02: (c) t-share-labels-atlas — 既にある別名をもう一度足す 1 手を入れ、IK-0897 の outcome の書き分けを見る。
+      ラベルの見送りの行為は runner に無いので「見送り済みのラベルの足し直し」は扱わない。
+  依存: (d)(e) は (a') の確定の後でだけ前後比較が成立する。(b2) は (b1) の共有 ON の後。
+
+  LLM 予算の見積り: 製品の LLM は (d) の選択質問 1〜2 回・共通部品の検索の埋め込み 2 回・Copilot 1 回・(e) の記号は 0 回 =
+  4〜5 回（余裕を見て 10）。ペルソナ頭脳は 6 場面 × 45〜55 手。外部 API は呼ばない。
+
+  ── 投影の同期（第 2 波・projection_sync_wave2.md）──
+  共通部品の検索で「探す分野:」の選択欄が出たら admin.deliberation.shared_part_domain（domain_hint）で選び直せる
+  （t-share-bind-versions に任意の 1 手として入れた）。Copilot の 1 手は tab: knowledge-library で送る（審判 A10・A11）。

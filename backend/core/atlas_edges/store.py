@@ -49,7 +49,8 @@ logger = logging.getLogger(__name__)
 
 _DECISION_COLUMNS_SQL = """
     id::text, edge_key, status, edge_kind, review_note, applied_version,
-    decided_by::text, decided_at, created_at, updated_at
+    decided_by::text, decided_at, created_at, updated_at,
+    COALESCE(from_node_id, ''), COALESCE(to_node_id, '')
 """
 
 #: この系統の状態語彙（``superseded`` は持たない — 候補は行として保存しないので
@@ -103,6 +104,9 @@ def _decision_row_to_dict(row: Any) -> dict:
         "created_at": _iso(row[8]) or "",
         "updated_at": _iso(row[9]) or "",
         "status_label": schema.decision_status_label(status),
+        # IK-1149（migration 096）: 教員が採用のときに選んだ記載の向き。'' = 向きの記録なし。
+        "from_node_id": (row[10] if len(row) > 10 else "") or "",
+        "to_node_id": (row[11] if len(row) > 11 else "") or "",
     }
 
 
@@ -129,6 +133,50 @@ def _fetch_decisions(session: Any, edge_keys: Iterable[str]) -> dict[str, dict]:
     for row in rows or []:
         record = _decision_row_to_dict(row)
         out[record["edge_key"]] = record
+    return out
+
+
+#: 判断の ``mapping_justification`` → 候補の出所（``origins`` の語彙）。採用の時点で
+#: route が候補の origin から変換して記録したものを逆に引く（IK-0939: 導出から外れた・
+#: 凍結を止めている判断にも「何を根拠にした採用か」を言うため。推測で埋めない）。
+_ORIGIN_BY_JUSTIFICATION = {
+    "vector_similarity": schema.ORIGIN_VECTOR,
+    "corpus_cooccurrence": schema.ORIGIN_CO_OCCURRENCE,
+}
+
+
+def origins_for_decisions(session: Any, edge_keys: Iterable[str]) -> dict[str, list[str]]:
+    """``edge_key -> [origin]``（判断行の ``mapping_justification`` から。記録なしはキーなし）。
+
+    空入力では SQL を発行しない。列が無い古い DB・照会失敗は空 dict（fail-soft —
+    根拠の一文が出ないだけで、判断も凍結のゲートも変わらない）。
+    """
+    keys = sorted({_clean(k) for k in (edge_keys or []) if _clean(k)})
+    if not keys:
+        return {}
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT edge_key, COALESCE(mapping_justification, '')
+                  FROM atlas_edge_decisions
+                 WHERE edge_key = ANY(:keys)
+                """
+            ),
+            {"keys": keys},
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas edges: justification lookup failed (non-fatal)", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return {}
+    out: dict[str, list[str]] = {}
+    for row in rows or ():
+        origin = _ORIGIN_BY_JUSTIFICATION.get(_clean(row[1]))
+        if origin:
+            out[_clean(row[0])] = [origin]
     return out
 
 
@@ -250,6 +298,10 @@ def _make_apply_status(session: Any) -> Callable[..., dict | None]:
                        mapping_justification = CASE WHEN :mapping_justification <> ''
                             THEN :mapping_justification
                             ELSE atlas_edge_decisions.mapping_justification END,
+                       from_node_id = CASE WHEN :from_node_id <> ''
+                            THEN :from_node_id ELSE atlas_edge_decisions.from_node_id END,
+                       to_node_id = CASE WHEN :to_node_id <> ''
+                            THEN :to_node_id ELSE atlas_edge_decisions.to_node_id END,
                        review_note = CASE WHEN :review_note <> ''
                             THEN :review_note ELSE atlas_edge_decisions.review_note END,
                        decided_by = CAST(:actor_id AS uuid),
@@ -265,6 +317,8 @@ def _make_apply_status(session: Any) -> Callable[..., dict | None]:
                 "new_status": new_status,
                 "edge_kind": _clean(payload.get("edge_kind")),
                 "mapping_justification": _clean(payload.get("mapping_justification")),
+                "from_node_id": _clean(payload.get("from_node_id")),
+                "to_node_id": _clean(payload.get("to_node_id")),
                 "review_note": _clean(reason),
                 "actor_id": _clean(actor_id),
             },
@@ -286,6 +340,7 @@ def decide(
     review_note: str = "",
     edge_kind: str = "",
     mapping_justification: str | None = None,
+    from_node_id: str = "",
     record_audit: Callable[..., Any],
 ) -> dict | None:
     """辺候補への教員の判断（``accept`` / ``dismiss`` / ``restore``）。
@@ -300,6 +355,11 @@ def decide(
       立てられたか」の記録で、候補の ``origin``（vector / co_occurrence）から route が
       変換して渡す。``None``（既定）のときは**書かない** — 既存値も消さない
       （記録が無いことを推測で埋めない）。
+
+    - ``from_node_id``（IK-1149・migration 096）は採用のときに教員が選んだ記載の始点
+      （依存では「依存する側」）。edge_key の 2 端点のどちらかでなければ ``ValueError``。
+      空なら向きは記録しない（既存値も消さない — 推測で埋めない）。``to_node_id`` は
+      もう一方の端点として導出する（呼び出し側に申告させない）。
 
     ``record_audit`` は呼び出し側が注入する監査記帳 callable（core は ``services`` を
     import しない）。``entity_type`` / ``entity_id`` / ``action`` / ``old_status`` /
@@ -332,6 +392,14 @@ def decide(
             f"(must be one of {atlas_module.EDGE_KINDS!r})"
         )
 
+    direction: tuple[str, str] | None = None
+    if _clean(from_node_id):
+        if act != schema.ACTION_ACCEPT:
+            raise ValueError("向きは採用のときだけ記録できます。")
+        direction = schema.oriented_pair(key, from_node_id)
+        if direction is None:
+            raise ValueError("向きの始点は、この関係の 2 つの項目のどちらかを指定してください。")
+
     if act == schema.ACTION_RESTORE:
         # 見送りを取り消す対象が無いなら行を作らない（restore は既存の判断への操作）。
         current = get_decision(session, key)
@@ -362,6 +430,11 @@ def decide(
         metadata={
             **({"edge_kind": kind} if kind else {}),
             **({"mapping_justification": justification} if justification else {}),
+            **(
+                {"from_node_id": direction[0], "to_node_id": direction[1]}
+                if direction
+                else {}
+            ),
         },
     )
     out = dict(result)
@@ -435,17 +508,11 @@ def stamp_applied_versions(
     return [_clean(r[0]) for r in (rows or [])]
 
 
-def list_pending_for_freeze(
-    session: Any, *, domain_key: str, draft_edge_pairs: Iterable[Any]
-) -> list[dict]:
-    """公開前チェック用「採用済みでまだ次版の下書きに入っていない辺」（§5）。
+def list_unapplied_accepted(session: Any, *, domain_key: str) -> list[dict]:
+    """当該ドメインの ``accepted`` かつ ``applied_version=''`` の判断行（凍結のゲートの母集合）。
 
-    対象は当該ドメインの ``status='accepted'`` かつ ``applied_version=''`` のうち、
-    無向ペアが現在の下書きの edges に**無い**もの。``draft_edge_pairs`` が空なら
-    「下書きに辺が1本も無い」ので該当する採用済み候補はすべて未反映として返す。
-
-    各要素は ``{edge_key, from_id, to_id, edge_kind, review_note}``。**件数ではなく
-    ラベルの列挙**で提示するための形（RE4。ラベルの解決は骨格を持つ route 側）。
+    IK-0884 と同じ構造: 候補一覧は読み時導出に判断を重ねるので、導出から外れた採用は
+    一覧から消えるのにゲートには残る。一覧の別枠はこの行から作る。
     """
     domain = _clean(domain_key)
     if not domain:
@@ -465,35 +532,104 @@ def list_pending_for_freeze(
             "accepted": schema.DECISION_STATUS_ACCEPTED,
         },
     ).fetchall()
-    if not rows:
+    return [_decision_row_to_dict(row) for row in rows or ()]
+
+
+def list_pending_for_freeze(
+    session: Any, *, domain_key: str, draft_edge_pairs: Iterable[Any]
+) -> list[dict]:
+    """公開前チェック用「採用済みでまだ次版の下書きに入っていない辺」（§5）。
+
+    対象は当該ドメインの ``status='accepted'`` かつ ``applied_version=''`` のうち、
+    無向ペアが現在の下書きの edges に**無い**もの。``draft_edge_pairs`` が空なら
+    「下書きに辺が1本も無い」ので該当する採用済み候補はすべて未反映として返す。
+
+    各要素は ``{edge_key, from_id, to_id, edge_kind, review_note, decision}``。**件数ではなく
+    ラベルの列挙**で提示するための形（RE4。ラベルの解決は骨格を持つ route 側）。
+    """
+    domain = _clean(domain_key)
+    if not domain:
+        return []
+    decisions = list_unapplied_accepted(session, domain_key=domain)
+    if not decisions:
         return []
 
     draft_keys = _pair_keys(domain, draft_edge_pairs)
     out: list[dict] = []
-    for row in rows:
-        decision = _decision_row_to_dict(row)
+    for decision in decisions:
         key = decision["edge_key"]
         if key in draft_keys:
             continue
-        _, from_id, to_id = schema.parse_edge_key(key)
+        # IK-1149: 教員が選んだ記載の向き（無ければ従来の並び + ``direction_recorded=False``）。
+        from_id, to_id, recorded = schema.decision_direction(key, decision)
         out.append(
             {
                 "edge_key": key,
                 "from_id": from_id,
                 "to_id": to_id,
                 "edge_kind": decision["edge_kind"],
+                "direction_recorded": recorded,
                 "review_note": decision["review_note"],
+                # 帰属（IK-0939）。表示名への写しは route が行う（UUID を応答に出さない）。
+                "decision": decision,
             }
         )
+    return out
+
+
+def direction_unrecorded_pairs(session: Any, domain_key: str) -> set[frozenset]:
+    """向きを持つ種別で採用されたが、記載の向きが選ばれていない判断の無向ペア（IK-1149）。
+
+    migration 096 より前の採用（向きを選ぶ手が無かった）が対象。表示はこの組の向きを
+    「選ばれた記録がない」と事実で添える。教員が下書きに手で書いた辺（判断行なし）は含まない。
+    fail-soft: 列が無い古い DB・照会失敗は空集合（添え書きが出ないだけ）。
+    """
+    from core.label_vocab import EDGE_DIRECTED_KINDS
+
+    domain = _clean(domain_key)
+    if not domain:
+        return set()
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT edge_key FROM atlas_edge_decisions
+                 WHERE starts_with(edge_key, :domain_prefix)
+                   AND status = :accepted
+                   AND edge_kind = ANY(:kinds)
+                   AND COALESCE(from_node_id, '') = ''
+                """
+            ),
+            {
+                "domain_prefix": schema.edge_key_domain_prefix(domain),
+                "accepted": schema.DECISION_STATUS_ACCEPTED,
+                "kinds": sorted(EDGE_DIRECTED_KINDS),
+            },
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas edges: direction lookup failed (non-fatal)", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return set()
+    out: set[frozenset] = set()
+    for row in rows or ():
+        _d, left, right = schema.parse_edge_key(_clean(row[0]))
+        if left and right:
+            out.add(frozenset((left, right)))
     return out
 
 
 __all__ = [
     "VOCABULARY",
     "decide",
+    "direction_unrecorded_pairs",
     "dismissed_edge_keys",
     "get_decision",
     "list_pending_for_freeze",
+    "list_unapplied_accepted",
     "merge_decisions_into",
+    "origins_for_decisions",
     "stamp_applied_versions",
 ]

@@ -99,7 +99,7 @@ class TestFourBypassPoints:
 
     def test_chat_feature_tag_has_discuss_branch(self):
         source = _read(LEARNING)
-        block = source.split("messages.append({\"role\": \"user\", \"content\": body.message})")[1][:400]
+        block = source.split("messages.append({\"role\": \"user\", \"content\": _turn_question})")[1][:400]
         assert "if _is_discuss:" in block
         assert '_chat_feature = "learning:chat_discuss"' in block
         assert 'elif _is_casual:' in block
@@ -248,7 +248,7 @@ class TestDiscussScaffoldMessages:
 
     def test_scaffold_branches_on_discuss(self):
         branch = self._scaffold_branch()
-        assert "_scaffold_assistant_ack" in branch
+        assert "_scaffold_user_instruction" in branch
         assert "else:" in branch
 
     def test_discuss_scaffold_is_not_a_qa_frame(self):
@@ -262,18 +262,25 @@ class TestDiscussScaffoldMessages:
     def test_non_discuss_scaffold_is_unchanged(self):
         else_part = self._scaffold_branch().split("else:")[1]
         assert "以下の質問に答えてください" in else_part
-        assert "はい、「{topic_title}」についてですね。お答えします。" in else_part
 
     def test_messages_use_the_scaffold_variables(self):
         source = _read(LEARNING)
         block = source.split(self._BRANCH_END)[1][:700]
         assert 'f"{_scaffold_user_instruction}"' in block
-        assert '"content": _scaffold_assistant_ack' in block
+
+    def test_no_fabricated_assistant_ack_turn(self):
+        """IK-0495: 足場の直後にモデルが言っていない assistant ターン（「お答えします」）を置かない。"""
+        source = _read(LEARNING)
+        assert "_scaffold_assistant_ack" not in source
+        assert "についてですね。お答えします。" not in source
+        block = source.split(self._BRANCH_END)[1].split("window_history(")[0]
+        assert '"role": "assistant"' not in block
 
     def test_history_window_unchanged(self):
-        """設計 §8-② の保留どおり、履歴ウィンドウ（20 messages / 2000 chars）は変えない。"""
+        """履歴ウィンドウは 20 messages のまま。1件の上限は IK-0394（2026-09-28）で
+        2000 → 4000 字に上げ、境界で切る（途中で切れた回答を再注入しない）。"""
         source = _read(LEARNING)
-        assert "window_history(body.history, max_messages=20, max_chars=2000)" in source
+        assert "window_history(_prompt_history, max_messages=20, max_chars=4000, trim_at_boundary=True)" in source
 
 
 class TestDiscussSelectedBeforeCasualForPrompt:
@@ -341,10 +348,14 @@ class TestScopeResolution:
 
 class TestOutOfSourceNoticeKeptForDiscuss:
     def test_out_of_source_notice_condition_unchanged_and_documented(self):
-        """out_of_source notice は discuss で意図的に維持（DM1）。既存条件式は不変。"""
+        """out_of_source notice は discuss で意図的に維持（DM1）。
+
+        IK-0378（2026-09-28）: 付与条件は「採用した根拠が1つも無い（model_generated）」に
+        変わった（最弱集約の tier ではなく）。casual で省く点・discuss で維持する点は不変。
+        """
         source = _read(LEARNING)
         assert "discuss では意図的にこの明示を維持する（DM1: 出所の正直さを弱めない）。" in source
-        assert "if overall_tier == TIER_OUT_OF_SOURCE and not _is_casual:" in source
+        assert "if _no_adopted_grounding and not _is_casual and not degraded" in source
 
 
 class TestEntryModeTrace:

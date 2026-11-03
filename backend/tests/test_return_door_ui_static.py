@@ -130,8 +130,11 @@ class TestLeaveNoteInDiscussJs:
 
     def test_save_failure_keeps_input(self):
         """失敗時は本人が書いた文章を消さない（saveReflection と同型）。"""
-        block = _extract_function_body(_read(DISCUSS_JS), "async function saveLeaveNote() {")
-        assert "保存できませんでした。入力はそのまま残しています。" in block
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "async function saveLeaveNote() {")
+        # 第 23 波 F1: 失敗時の作法は共通関数 showSaveFailed に寄せた（文言はその定数）。
+        assert "showSaveFailed(box, btn);" in block
+        assert 'var SAVE_FAILED_FACT = "保存できませんでした。入力はそのまま残しています。";' in js
 
     def test_tray_fetches_todays_words_once_on_open(self):
         block = _extract_function_body(_read(DISCUSS_JS), "async function loadTodaysWordsOnce() {")
@@ -275,20 +278,29 @@ class TestMarginMarks:
         block = _extract_function_body(_read(APP_JS), "function isMarginMarksOn(courseId) {")
         assert '!== "0"' in block
 
-    def test_confirmed_tension_statuses_mirror_owned_statuses(self):
-        """確定 tension の status 語彙は正本 core/tension/schema.py の
-        TENSION_OWNED_STATUSES と逐語一致させる（test_doubt_vocab_mirror.py 型。
-        リテラル再掲を許すのはフロントのみで、正本を変えたらこのテストが落ちる）。"""
-        from core.tension.schema import TENSION_OWNED_STATUSES
-
+    def test_confirmed_tension_statuses_are_judged_on_the_server(self):
+        """第 23 波 F1: 確定 tension の status 判定はサーバ（build_margin_marks）が
+        正本 TENSION_OWNED_STATUSES を読んで行う。フロントに status 表を写さない。"""
         js = _read(APP_JS)
-        m = re.search(r"const MARGIN_TENSION_STATUSES\s*=\s*\[([^\]]*)\]", js)
-        assert m, "app.js に MARGIN_TENSION_STATUSES 配列リテラルがありません"
-        js_statuses = set(re.findall(r'"([^"]+)"', m.group(1)))
-        assert js_statuses == set(TENSION_OWNED_STATUSES), (
-            "app.js の MARGIN_TENSION_STATUSES が正本 TENSION_OWNED_STATUSES と"
-            f" 不一致: js={sorted(js_statuses)} / 正本={sorted(TENSION_OWNED_STATUSES)}"
-        )
+        assert "MARGIN_TENSION_STATUSES" not in js
+        derive = (ROOT / "backend" / "core" / "cycle" / "derive.py").read_text(encoding="utf-8")
+        assert "TENSION_OWNED_STATUSES" in derive
+
+    def test_marks_are_read_from_the_margin_marks_endpoint(self):
+        """第 23 波 F1: 問いの軌跡（interest-traces）を流用しない — 印（anchor_mark）が
+        軌跡から除外されているため欄外の印に一度も出なかった。"""
+        block = _extract_function_body(_read(APP_JS), "async function loadMarginMarks() {")
+        assert '"/cycle/margin-marks"' in block
+        assert "interest-traces" not in block
+
+    def test_marks_refresh_right_after_marking_or_confirming(self):
+        js = _read(APP_JS)
+        assert "function refreshMarginMarks() {" in js
+        post = _extract_function_body(js, "async function postCycleAnchor(payload) {")
+        assert "refreshMarginMarks()" in post
+        for fn in ("async function confirmTension(traceId, learnerText) {",
+                   "async function confirmAnchor(traceId, doubtType) {"):
+            assert "refreshMarginMarks()" in _extract_function_body(js, fn)
 
 
 class TestLearnerHelpAnchor:

@@ -1,0 +1,27 @@
+id: rookie_follows_todo
+population: teachers
+summary: 初めて使う。「次にやること」に素直に従う
+habits:
+  reads_manual: when_stuck
+  patience: medium
+  device: desktop
+  session_length: medium
+  returns_later: "yes"
+  language_mix: ja_only
+  demands_out_of_principle: rarely
+  uses_copilot: when_stuck
+  follows_next_steps: always
+  reviews_before_publish: skims
+  edits_explanations: rarely
+  rejects_candidates: rarely
+  reads_confirmations: reads
+  manages_accounts: sometimes
+voice: |
+  着任したばかりで、この画面を触るのは初めて。まず「次にやること」を開き、上から順に「案内する」を押す。
+  案内の先で何をすればよいか分からないと、画面の「使い方」を開いてから操作する。
+  自分の判断で飛ばすことはせず、案内が消えたら次の案内に進む。
+gives_up_when: |
+  案内に従って移動した先に、案内が指していた入力箇所が見当たらないとき。
+  案内が消えないのに、何をすれば消えるのかが分からないとき。
+asks_out_of_principle:
+  - 学生ごとの理解度の一覧を見せてほしい

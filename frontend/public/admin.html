@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Episteme Graph — 管理画面</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <link rel="stylesheet" href="/css/styles.css?v=graph-layout-20260917-1">
+  <link rel="stylesheet" href="/css/styles.css?v=radar-wave2-20261016">
   <script defer src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
@@ -21,6 +21,7 @@
         <a href="/" style="color:var(--color-text-info);text-decoration:none;font-size:12px">学習画面へ</a>
         <span style="opacity:.3">|</span>
         <span id="admin-username"></span>
+        <button id="admin-profile-name-btn" data-profile-name-btn data-ui-anchor="header.profile-name" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="ほかの教員・学生に見せる名前を登録します">👤 名前</button>
         <button id="admin-next-steps-toggle" data-ui-anchor="header.next-steps" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="状態から導出した次のタスク">📋 次にやること</button>
         <!-- header.notifications / versioning.inbox: 通知タブ企画がドキュメント2系統
              (共通ヘッダー節 + V層版管理節) から同じボタンを参照しているため、
@@ -169,6 +170,11 @@
           公開済みの版は直接変更せず、新しい版として編集します。
         </p>
         <div id="atlas-frozen-info" style="font-size:12.5px;color:var(--color-text-secondary);margin-bottom:12px"></div>
+        <!-- IK-0992（第 25 周 第 5 波）: 下書きが無いとき、公開中の版の項目・関係を読み取り専用で読み返す -->
+        <details id="atlas-published-view" data-ui-anchor="atlas.published-contents" style="display:none;font-size:12.5px;margin-bottom:12px">
+          <summary id="atlas-published-summary" style="cursor:pointer">公開中の版の項目と関係を見る</summary>
+          <div id="atlas-published-preview" style="margin-top:6px"></div>
+        </details>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px" data-ui-anchor="atlas.generate">
           <button id="atlas-generate" data-ui-anchor="atlas.generate" class="admin-action-btn">次版の編集を始める</button>
           <!-- M層 Phase 3（§6.5）: 骨格生成モデルのチップ。中身は AdminLlmModels.createModelChip が描画 -->
@@ -324,6 +330,16 @@
           <span id="upload-domain-note" style="color:var(--color-text-tertiary);font-size:11.5px;margin-left:6px" hidden></span>
         </div>
         <div id="upload-domain-panel" hidden></div>
+        <!-- 生成する言語（run options.language, discuss_opening_authoring_design.md §14）:
+             既定は「指定しない」。選択はこの解析にだけ効く（保存しない）。 -->
+        <div id="upload-language-summary" data-ui-anchor="materials.upload-language" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:6px">
+          <label for="upload-language-select">生成する言語:</label>
+          <select id="upload-language-select" style="margin-left:6px;font-size:12.5px">
+            <option value="" selected>指定しない</option>
+            <option value="ja">日本語</option>
+            <option value="en">英語</option>
+          </select>
+        </div>
         <!-- M層（LLM モデル選択, migration 061）: 解析モデルの1行サマリ + 変更パネル。
              中身は admin-llm-models.js が描画（AdminLlmModels.initMaterialsPanel）。 -->
         <div id="llm-model-summary" data-ui-anchor="materials.llm-model-change" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:8px">
@@ -681,6 +697,7 @@
                 <span id="ls-rewrite-model-chip"></span>
               </div>
               <button id="ls-rewrite-btn" class="admin-action-btn" disabled>AIで提案</button>
+              <button id="ls-rewrite-copy-btn" class="admin-action-btn" type="button" hidden data-ui-anchor="lecture-studio.rewrite-copy">案をコピー</button>
             </div>
           </div>
         </div>
@@ -770,6 +787,8 @@
           <div id="library-domains-panel" style="min-width:180px;max-width:220px;flex:0 0 200px">
             <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">分野</div>
             <button type="button" id="library-atlas-derive-btn" data-ui-anchor="knowledge-library.identity-derive" class="admin-action-btn" style="width:100%;margin-bottom:6px;font-size:11.5px;padding:3px 8px">地図との対応を導出</button>
+            <!-- IK-0864: 導出の結果の事実文（サーバの facts をそのまま描く・事実の段落なので data-ui-anchor なし） -->
+            <div id="library-atlas-derive-facts" style="font-size:11px;color:var(--color-text-secondary);margin-bottom:6px" hidden></div>
             <div id="library-domains-list" data-ui-anchor="knowledge-library.domains-list" style="display:flex;flex-direction:column;gap:4px">
               <div style="padding:8px;color:var(--color-text-tertiary);font-size:12.5px">読み込み中...</div>
             </div>
@@ -981,13 +1000,13 @@
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
   <!-- 要素種別の表示名の正本（admin_ux_issues_2026-08-01.md §3.3 Phase 0）。
        これを参照する全スクリプト（admin-lecture-studio.js / deliberation.js / admin.js）より前。 -->
-  <script src="/js/element-vocab.js?v=element-vocab-20260801-2"></script>
+  <script src="/js/element-vocab.js?v=wave14-20260929-1"></script>
   <!-- 統一パーツカード（admin_ux_issues_2026-08-01.md §3.2 / Phase 1）。element-vocab.js
        へ委譲するので後、これを使う全スクリプト（deliberation.js / admin-lecture-studio.js /
        admin.js）より前。カード自身は fetch も data-ui-anchor 直書きもしない。 -->
-  <script src="/js/element-card.js?v=element-card-20260801-1"></script>
+  <script src="/js/element-card.js?v=share-r2-20261023-1"></script>
   <!-- D層（Doubt Layer）管理 UI — 「分野の地図」(atlas-*) とは別機能 -->
-  <script src="/js/doubt-atlas.js?v=gap-fixes-20260716-1"></script>
+  <script src="/js/doubt-atlas.js?v=round25-doubt-20261031-doubt11"></script>
   <!-- Field Atlas 骨格エディタ改善: ビジュアルプレビュー + AIアシスト編集 -->
   <script src="/js/atlas-draft-preview.js?v=atlas-editor-20260707-1"></script>
   <script src="/js/atlas-assist-panel.js?v=atlas-editor-20260707-1"></script>
@@ -995,23 +1014,23 @@
        admin-assistant.js の usage_help 連携（support_action/ui_anchor）より前に読み込む。 -->
   <script src="/js/admin-help-inspect.js?v=admin-help-inspect-20260729-1"></script>
   <!-- 横断ユーティリティ層（Admin Copilot）— 統合 AI アシスタント -->
-  <script src="/js/admin-assistant.js?v=gap-fixes-20260716-3"></script>
+  <script src="/js/admin-assistant.js?v=gap-fixes-20260716-3-share4"></script>
   <!-- G層（ガイダンス層）— 状態導出型 Next Steps バッジ + パネル -->
   <script src="/js/admin-next-steps.js?v=copilot-fab-20260716-1"></script>
   <!-- V層（共有物のバージョン管理 + 更新通知 + 削除猶予, migration 037）-->
-  <script src="/js/versioning.js?v=copilot-fab-20260716-1"></script>
+  <script src="/js/versioning.js?v=copilot-fab-20260716-1-studio7-studio9-studio10"></script>
   <!-- 教材図スタジオ（Teaching Figure Studio）— 図の生成・調整・挿入モーダル。
        原稿スタジオ（admin-lecture-studio.js）の init() から init される。 -->
-  <script src="/js/admin-figure-studio.js?v=teaching-figure-studio-20260731-1"></script>
+  <script src="/js/admin-figure-studio.js?v=teaching-figure-studio-20260731-1-studio4"></script>
   <!-- 可視性6軸の常設事実文（disclosure_axes_design.md, DA2）— AI 対話の入力欄のそばに
        「何が外部の AI プロバイダへ送られるか」を1行で置く共通部品。Copilot・W層・
        グラフレビュー・コースビルダーが window.DisclosureNote.mount() を呼ぶため、
        それらより前に読み込む。 -->
   <script src="/js/disclosure-note.js?v=disclosure-20260910-1"></script>
   <!-- 原稿スタジオ（Lecture Script Studio, Issue #70）— admin.js から分離（Tier 3-17b） -->
-  <script src="/js/admin-lecture-studio.js?v=graph-layout-20260917-1"></script>
+  <script src="/js/admin-lecture-studio.js?v=round25-share-r3-20261023-1-studio3-share4-studio4-share5-studio5-studio6-share6-studio7-share7-studio8-share9-studio9-studio10"></script>
   <!-- W層（要素検討ワークスペース, Phase 0）— 「深く検討」統合パネル -->
-  <script src="/js/deliberation.js?v=gap-fixes-20260716-1"></script>
+  <script src="/js/deliberation.js?v=share-r3-20261023-1-share4-share7-share8-share9-share10"></script>
   <!-- 制度指標カタログ（indicator_governance_design.md, IG1）— 計器の定義の1行表示。
        計器パネル（admin-llm-usage / admin-discuss-observation / admin.js の関心集約）が
        window.AdminIndicators.mount() を呼ぶため、それらより前に読み込む。 -->
@@ -1029,22 +1048,27 @@
   <script src="/js/admin-cartridge-fit.js?v=cartridge-fit-20260913-1"></script>
   <!-- リリース前の確認（release_review_flow_design.md）— AI が作った地図を提示し
        「次へ」で承認、そのまま公開まで進めるウィザード。admin.js から init/open される。 -->
-  <script src="/js/admin-release-review.js?v=release-review-20260805-1"></script>
+  <script src="/js/admin-release-review.js?v=ik0942-atlas-r3-20261023-studio3-atlas4"></script>
   <!-- 論文ディスカバリー層（paper_discovery_design.md PD1〜PD8）— arXiv 分野購読と
        候補一覧。取り込みは教員の明示承認のみで、受理後は既存アップロード経路へ合流する。 -->
-  <script src="/js/admin-paper-discovery.js?v=paper-discovery-20260916-1"></script>
+  <script src="/js/admin-paper-discovery.js?v=paper-discovery-20261016-4"></script>
   <!-- 論文レーダー（paper_radar_design.md PR1〜PR8）— 教材1件を起点に距離を選んで
        arXiv から候補を探す。取り込みはディスカバリーと同じ既存の弁へ合流する。 -->
-  <script src="/js/admin-paper-radar.js?v=paper-radar-20260916-1"></script>
+  <script src="/js/admin-paper-radar.js?v=paper-radar-20261022-wave24"></script>
   <!-- 管理画面向けハンズフリー音声対話エンジン（DOM 非依存）。これを使う
        admin-graph-review.js より前に読み込む。 -->
   <script src="/js/admin-voice-chat.js?v=admin-voice-chat-20260829-1"></script>
   <!-- グラフ対話レビュー（graph_dialogue_review_design.md）。LectureStudio.graphView に
        依存するため admin-lecture-studio.js より後・admin.js より前に読み込む -->
-  <script src="/js/admin-graph-review.js?v=graph-layout-20260917-1"></script>
+  <script src="/js/admin-graph-review.js?v=theory-modules-analysis-degradation-20261022"></script>
+  <!-- 検証シミュレーション（simulation_bridge_design.md §7）— 教材行の「⋯」から開く 4 区画の
+       フルモーダル（グラフレビューのモーダル CSS を再利用）。admin-indicators.js と
+       admin-llm-models.js に任意で依存し、admin.js から DI 注入するため admin.js より前。 -->
+  <script src="/js/admin-simulation-bridge.js?v=simulation-bridge-20261004-round22"></script>
   <!-- 束の取り込み（knowledge_transfer_design.md §4.3）— 教材行の「⋯」から開く
        dry-run → 確定の 2 段モーダル。admin.js から DI 注入するため admin.js より前。 -->
   <script src="/js/admin-knowledge-import.js?v=knowledge-transfer-20260913-1"></script>
-  <script src="/js/admin.js?v=material-domain-entry-20260910-1"></script>
+  <script src="/js/admin.js?v=round25-share-r3-20261023-2-db3-atlas3-studio3-atlas4-doubt4-share4-atlas5-share5-name5-atlas6-share6-atlas7-share7-atlas8-share8-share9-atlas10-share10-share11-atlas11"></script>
+  <script src="/js/profile-name.js?v=round25-name5"></script>
 </body>
 </html>

@@ -1,0 +1,50 @@
+id: c-astro-r25-studio-r4
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 6be229e1
+personas:
+  teachers: [te-02-veteran-intro, te-05-delegator-lab]
+  students: [st-10-d3-21cm-receiver, st-06-skeptic-bao]
+scenarios:
+  teacher: [t-studio-split-save, t-studio-figure-adopt, t-studio-rewrite-shared]
+  student: [s-studio-lecture-pages, s-lecture-then-trace]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 16, persona_llm_calls: 260, wall_clock_minutes: 260}
+notes: |
+  第 25 周 面 D（原稿スタジオ → 学生の受講）の第 4 周（judge_studio_r3.md §5 の組）。組はすべて第 1〜3 周と別（P-0025）:
+  te-02 × (a) split-save → (c) figure-adopt / te-05 × (b') rewrite-shared / st-10 × (d) lecture-pages / st-06 × (d') lecture-then-trace。
+  教員 2 × 学生 2・4 場面。
+
+  ── 周の前に指揮者が用意するもの（この順）──
+   1. 砂場（H12）: 固定コース 6be229e1 のトピック t0 / t16 を第 1 周以前の状態に戻すか、snapshot を取り直す（share の用意 2 と同じ
+      取り直しで足りる）。te-03 の 74ca9b48 は非公開に戻す（学生の一覧に第 3 のコースを出さない）。
+   2. **pin_course.py はこの周では走らせない**（H21・IK-0945）: 学生の 2 場面に `pin_course: true` を足したので、runner が
+      campaign の course_id=6be229e1 に固定する。1bad7d9f を非公開にする必要が無く、非公開化で受講中の学生が読めなくなる状態
+      （IK-0945）を意図せず作らない。どうしても走らせるなら、他の 3 面の学生レーンがすべて終わった後（studio は最後）。
+   3. te-02 のコース（H12・judge_studio_r3 §5）: 原稿スタジオの保存・図の採用は所有者だけができる（course_data_for_owner）。
+      te-02 の /api/admin/courses の先頭に、te-02 が所有し**コース内容を生成済み**のコースがあること。前の周の種まきのコースが
+      あればコース内容の生成まで済ませておき、無ければ t-v5-register-own-course（LLM 2〜3 回）→ コース内容の生成を先に行う
+      （1bad7d9f の複製は作らない — 他の 3 面の固定コースに触れない）。
+   4. editor 共有（(b') の前）: te-01 として 6be229e1 を te-05 の入ったグループへ editor で共有する（第 3 周の te-04 と同じ手順:
+      グループ作成 → 招待コードで参加 → POST /api/admin/courses/6be229e1/groups {permission: editor}）。
+   5. 是正と投影の同期: (b') は IK-0950（editor の書き換えの知らせと案の持ち出し）・IK-0948 の是正後。(a)(c) は IK-0914 / 0915 /
+      0949 / 0947 の是正後。st-06 の (d') は IK-0944（スライドの式）の是正後と、IK-0945 のオーナー判断の後（判断の前なら受講ゲートの
+      食い違いは既知の残存として記録する）。審判 T8 は H22 の是正後、T7〜T11 は同期後の読み取り区画で数える。
+   6. 講義の送り: 新行為 learning.lecture.next を s-studio-lecture-pages（最大 8 枚）と s-lecture-then-trace（4 枚 + 再開後 8 枚）に
+      入れた。音声ゼロのトピックではタイマー送りの終端（IK-0879 の残り）まで見る。
+
+  ── 場面の組とレーンの順（--persona X --scenario Y で 1 場面ずつ・この順で）──
+   1. te-02-veteran-intro × t-studio-split-save → t-studio-figure-adopt（自分の所有コース。公開中のコースでの保存の届き方
+      （IK-0915）・区切りの notes（IK-0914）・採用図の根拠の印（IK-0949）・公開が「確認して公開」経由か（IK-0947））
+   2. te-05-delegator-lab × t-studio-rewrite-shared（用意 4 の後。6be229e1 で書き換え → 保存の事前表示・知らせと案の持ち出し。
+      editor の保存は通らないので 6be229e1 は変わらない）
+   3. st-10-d3-21cm-receiver × s-studio-lecture-pages（atlas の学生レーンの後。6be229e1 の先頭トピックを講義で最後まで送る —
+      S1〜S3・X1〜X4 の初評価）
+   4. st-06-skeptic-bao × s-lecture-then-trace（atlas の学生レーンの後。PINN の t11 で講義のスライドの式と教材の式・記号 → ⚓ → 質問）
+  学生の 2 本は教員の保存と交わらない（te-02 は自分のコース、te-05 は保存しない）ので、教員レーンを待たなくてよいが、同じ学生が
+  atlas の面に出るため atlas の学生レーンの後に回す。
+
+  LLM 予算の見積り: 種まき 0〜3 + コース内容の生成 0〜2 + 図スタジオ 1〜3（+ 図の提案 0〜1）+ 書き換え 1 + 学生のチャット 最大 3 =
+  最大 13 回（余裕を見て 16）。TTS は呼ばない。ペルソナ頭脳は 4 場面 × 50〜60 手 ≒ 200〜240（上限 260）。

@@ -1,0 +1,80 @@
+id: s-sim-rewire-revise
+population: students
+runner:
+- api
+# 場面 (d)。実験機の配線を組み替えて差を見る。改訂案は AI の提案（未確認）として参考表示されるだけかを見る。
+# この経路だけが改訂案（learning.simlab.propose_revision）を 1 回呼ぶ。
+goal: '{{goal_text}} のために、{{topic_hint}} の理論のまとまりを、配線を組み替えた模擬の観測に通して差を見比べる'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_hint
+- input_hints
+- wiring_names
+- wiring_parts
+- wiring_params
+- questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+- do: learning.simlab.generate
+  note: コードの下書きを AI に作らせる（この経路で 1 回だけ）
+- do: learning.simlab.adopt
+- do: learning.simlab.wiring_save
+  with:
+    name: '{{wiring_names | next}}'
+    parts: '{{wiring_parts | next}}'
+    params: '{{wiring_params | next}}'
+  note: 1 つ目の配線（雑音だけ）を保存する
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    wiring: '{{wiring_names | current}}'
+  note: 入力の記号は io_contract.inputs に合わせて置き換える
+- do: learning.simlab.wiring_save
+  with:
+    name: '{{wiring_names | next}}'
+    parts: '{{wiring_parts | next}}'
+    params: '{{wiring_params | next}}'
+  note: 2 つ目の配線（雑音のあとに平均化）を保存する
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    wiring: '{{wiring_names | current}}'
+  note: 同じ入力で動かし、1 つ目の実行と段階の言葉・ばらつきを見比べる
+- do: learning.simlab.propose_revision
+  note: 部品の組み替えの提案を AI に求める（この経路で 1 回だけ）。提案が採用済みの扱いになっていないかを見る
+- choose:
+  - do: learning.chat.ask
+    with:
+      message: '{{questions | next}}'
+    note: 2 つの実行の差が何から来たのか、提案をどう扱えばよいかを聞く
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-steps
+- manual: student/02-student.md#simulation-lab-share
+- manual: student/02-student.md#simulation-lab-not-verification
+watch_for:
+- 配線の部品が名前で並び、各部品の値が既定値から始まる
+- 配線が保存できないときは、どの部品のつなぎ方が問題かが事実文で出る
+- 2 つの実行の段階の言葉とばらつきを並べて見比べられる
+- 改訂案は「AI の提案（未確認）」として並ぶだけで、配線が勝手に置き換わらない
+- 改訂案の部品は部品目録にある名前で示され、目録に無い部品は外されたことが分かる
+- 模擬観測と理論の出力が近くても、論文の主張が確かめられたという言い方にならない

@@ -1,0 +1,24 @@
+id: s-v5-records-export
+population: students
+runner: [api, browser]
+session: 1
+goal: '{{goal_text}} のために、自分がこのシステムに何を残したかを一通り確かめ、手元に持ち出す'
+params_required: [goal_text]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.open
+  - do: learning.records.mine
+    note: わたしの記録を開き、自分の痕跡が種類と状態の名前付きで読めるかを見る
+  - do: learning.records.export
+    note: 「持ち出す」で手元に落とす
+  - do: learning.traces.list
+    note: 問いの軌跡と、わたしの記録の違いを見比べる
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#my-records
+  - manual: student/02-student.md#progress-tab
+watch_for:
+  - わたしの記録が 1 操作で開け、どの記録が誰に見えるか（自分だけ・教員の集約の対象）が系統ごとに書かれている
+  - 件数・進捗率が出ない
+  - 持ち出しが 1 操作で始まり、失敗したらそう言われる

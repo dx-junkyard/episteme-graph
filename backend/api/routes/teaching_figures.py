@@ -52,6 +52,7 @@ from services import record_review_event
 from core import llm_policy
 from core.config import get_settings
 from core.course_content_builder import build_topic_evidence_items
+from core.label_vocab import RECONSTRUCTED_EQUATION_NOTE
 from core.course_data import (
     course_title as _course_title,
     find_course_topic,
@@ -396,6 +397,9 @@ def _build_grounding(
                     "label": item.get("title") or "",
                     "latex": item.get("latex") or "",
                     "plain_text": item.get("plain_text") or "",
+                    # IK-0977: 復元の印を資料に運ぶ（印の判定は build_topic_evidence_items が
+                    # learner_context_common の正本から付けたものをそのまま使う）。
+                    "reconstructed": bool(item.get("reconstructed")),
                 })
             elif kind == "claim" and len(claims) < _GROUNDING_MAX_CLAIMS:
                 claims.append({
@@ -449,7 +453,11 @@ def _grounding_to_text(grounding: dict) -> str:
         for eq in equations:
             body = eq.get("latex") or eq.get("plain_text") or ""
             label = eq.get("label") or eq.get("id") or ""
-            lines.append(f"- {label}: {body}".rstrip(": "))
+            line = f"- {label}: {body}".rstrip(": ")
+            if eq.get("reconstructed"):
+                # IK-0977: 原文と未照合の式であることを資料の行に書く（文言の正本は label_vocab）。
+                line += f"（{RECONSTRUCTED_EQUATION_NOTE}）"
+            lines.append(line)
     claims = grounding.get("claims") or []
     if claims:
         lines.append("関係する主張（claim）:")

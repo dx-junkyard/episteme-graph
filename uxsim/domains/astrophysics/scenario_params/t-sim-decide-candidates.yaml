@@ -1,0 +1,18 @@
+scenario: t-sim-decide-candidates
+domain: astrophysics
+# 第 22 周 (g') te-03（meticulous）/ te-04（copilot・コース所有）。(e'') st-04 が共有した Cepheus B 論文の実行。
+# 確定・見送りの主張は (e'') の claim_hints と同じラベルの部分一致。te-03 を先に走らせると te-04 は判断済みの状態を読む周になる。
+params:
+  goal_text: 学生が共有した検証シミュレーションの実行の台帳の候補を、自分で 1 件確定し 1 件見送ること
+  material_hint: Cepheus B  # 教材一覧の題名の部分一致（同じ論文の PDF 版 2605.26810v1 は題名が arXiv 番号なので当たらない）
+  confirm_claim_hint: polarization angle dispersion
+  dismiss_claim_hint: velocity dispersion of the 13CO
+  dismiss_reason: この実行は速度分散を入力として与えただけで、速度分散の測定そのものを確かめる形になっていないため。
+  copilot_questions:
+  - どういう実行なら台帳の候補になるのですか？
+  - 候補を確定・見送りしたことは、共有した学生から見えますか？
+per_archetype:
+  meticulous_reviewer:
+    copilot_questions:
+    - 比較が測れていない実行は台帳の候補になりますか？ どういう実行なら候補になるのですか？
+    - 確定や見送りは、共有した学生の画面にどう出ますか？ 見送りの理由も学生に見えますか？

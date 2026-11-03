@@ -90,7 +90,7 @@ class TestCycleModeWiring:
         source = _read(LEARNING)
         assert '"elicit": "learning:cycle_elicit"' in source
         assert '"diff": "learning:cycle_diff"' in source
-        block = source.split('messages.append({"role": "user", "content": body.message})')[1][:500]
+        block = source.split('messages.append({"role": "user", "content": _turn_question})')[1][:500]
         assert "if _cycle_chat_feature:" in block
         assert "_chat_feature = _cycle_chat_feature" in block
         # 既存の discuss/casual 分岐は壊れていない（test_discuss_mode.py が別途検査）。

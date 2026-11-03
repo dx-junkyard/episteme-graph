@@ -1,0 +1,4 @@
+scenario: s-v5-records-after-retraction
+domain: astrophysics
+params:
+  goal_text: 取り消したことが本当に自分の手で取り消せているかを確かめること

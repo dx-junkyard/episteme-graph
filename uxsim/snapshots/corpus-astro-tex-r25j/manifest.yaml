@@ -1,0 +1,7 @@
+# --- snapshot record (appended by snapshot.py) ---
+snapshot_record:
+  name: corpus-astro-tex-r25j
+  created_at: 2026-10-31T06:25:42+00:00
+  git_commit: b7bbb628
+  migration_head: '095'
+  note: "第 11 周の前提後（第 10 波 deploy・migration 095・版 7 = HEAD・atlas 2026.7 下書きなし・記号候補 5 本 revoked のまま）"

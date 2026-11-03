@@ -54,6 +54,7 @@ KNOWN_FEATURES = (
     "pipeline:blueprint",
     "pipeline:export_validation",
     "pipeline:persist_claims_components_graph",
+    "pipeline:theory_modules",
     "pipeline:identity_candidates",
     "pipeline:extractor",
     # --- 学習（routes/learning.py の各チャット経路・音声） ---
@@ -138,9 +139,18 @@ KNOWN_FEATURES = (
     # アブストラクトの比較分析（1リクエスト = 1コール）。発見層で**テキスト**生成を
     # 使う唯一の地点で、教員の明示ボタンでのみ発火する（PR5）。
     "discovery:compare",
+    # --- 検証シミュレーション層（SB層、正本 docs/features/simulation_bridge_design.md §5.1 / §5.4）---
+    "simulation:codegen",
+    "simulation:revision",
+    # v1.1（§14.3）: 学習者が「動かして確かめる」から起動する生成・改訂提案（教員の操作と帰属を分ける）
+    "learning:simulation_codegen",
+    "learning:simulation_revision",
     # --- 埋め込み ---
     "embedding:chunks",
     "embedding:library_search",
+    # W層「共通部品と結びつける」の検索（IK-0928。core/library/search.py の
+    # FEATURE_SHARED_PART_SEARCH。embedding: プレフィックスで scene 対象外 = M5）。
+    "embedding:shared_part_search",
     # help_kb ベクトル補助層（Phase 3 ①、正本 docs/features/manual_help_kb_design.md
     # §5）。core/help_kb/vector.py::sync_manual_vectors が凍結節を埋め込む際に使う。
     "admin:help_kb_embed",

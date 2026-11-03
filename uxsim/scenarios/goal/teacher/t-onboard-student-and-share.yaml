@@ -1,0 +1,48 @@
+id: t-onboard-student-and-share
+population: teachers
+runner: [api, browser]
+preconditions:
+  - このペルソナが所有するコースと教材が少なくとも 1 本ずつある（snapshot course-astro-v1）
+goal: "研究室の新入生（{{persona.teaching.audience}}）がコースを受講できるように、アカウントとグループを用意して教材とコースを共有する"
+params_required: [student_usernames, student_email_domain, group_name, copilot_question]
+steps:
+  - do: auth.login
+  - do: admin.next_steps.list
+  - choose:
+      - do: admin.copilot.chat
+        with: {message: "{{copilot_question}}"}
+      - do: admin.help.inspect
+        with: {anchor_id: students.student-form}
+    optional: true
+  - repeat:
+      until: "persona_decides_to_stop or steps > 3"
+      max: 3
+      do: admin.users.create_student
+      with: {username: "{{student_usernames | next}}", email: "{{student_usernames | current}}@{{student_email_domain}}"}
+  - do: admin.groups.create
+    with: {name: "{{group_name}}"}
+  - repeat:
+      until: "persona_decides_to_stop or steps > 3"
+      max: 3
+      do: admin.groups.add_member
+      with: {username: "{{student_usernames | next}}"}
+  - do: admin.materials.list
+  - do: admin.materials.visibility
+    with: {visibility: group}
+    note: 教材をこのグループにだけ見せる
+  - do: admin.course.visibility
+    with: {visibility: group}
+    note: コースもこのグループに共有する
+  - do: admin.next_steps.list
+    note: 共有した後、学生に何が見えているかを確かめる手段を探す
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/16-admin-students.md#student-form
+  - manual: teacher/15-admin-groups.md#create-form
+  - manual: teacher/15-admin-groups.md#invite-btn
+  - manual: teacher/13-admin-course-management.md#visibility-apply
+watch_for:
+  - 学生アカウントを作った後に、学生に何を伝えればよいか（ログインの仕方）が画面かマニュアルに書かれている
+  - 教員が学生の初期パスワードの扱いで迷わない。パスワードの平文が監査や一覧に残らない
+  - 開示範囲を変えたとき、誰に見えるようになったかが事実文で示される
+  - 学生の学習内容や個人の記録を見られる画面が教員側に現れない（ペルソナが求めても出ない）

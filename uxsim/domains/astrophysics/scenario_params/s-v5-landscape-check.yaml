@@ -1,0 +1,4 @@
+scenario: s-v5-landscape-check
+domain: astrophysics
+params:
+  goal_text: コースの論文が分野のどこに位置づくかをつかむこと

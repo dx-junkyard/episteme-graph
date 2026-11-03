@@ -1,0 +1,19 @@
+scenario: s-discuss-backbone
+domain: astrophysics
+params:
+  goal_text: 担当論文の支持構造を自分の立場から説明できるようになること
+  discussion_opening_stance: 私はこの論文の支えは「kineticity α_K と braiding α_B を音速から結びつけた導出」だと読みました。そこが崩れると主結果も崩れますか？
+  seed_questions:
+  - α_K ∝ α_B という関係は、仮定ですか、導かれた結果ですか？
+  - 音速 c_s^2 = 1 を置くのは、どの段の簡略化ですか？
+  - 著者が確かめていないとされていることのうち、主結果に一番効くのはどれですか？
+  - 安定性の制約を外したら、µ > 1 の結論は変わりますか？
+per_archetype:
+  confident_theorist:
+    discussion_opening_stance: 支持構造のうち braiding の導出は、準静的近似の範囲でしか成り立たないと私は考えます。論文はその範囲を明示していますか？
+  non_native:
+    goal_text: being able to explain the support structure of my paper
+    discussion_opening_stance: I read the backbone as the derivation linking kineticity α_K and braiding α_B through the sound speed. Does the main result fall if that breaks?
+    seed_questions:
+    - Is α_K ∝ α_B an assumption or a derived result?
+    - Which unverified point matters most for the main result?

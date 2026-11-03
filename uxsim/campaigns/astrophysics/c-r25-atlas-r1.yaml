@@ -1,0 +1,32 @@
+id: c-astro-r25-atlas-r1
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 1bad7d9f
+personas:
+  teachers: [te-03-meticulous-seminar, te-04-copilot-intro]
+  students: [st-05-night-solarwind, st-01-m1-radio]
+scenarios:
+  teacher: [t-atlas-gap-review, t-atlas-alias-from-gap, t-atlas-edge-review, t-atlas-freeze-impact-read]
+  student: [s-atlas-threads-and-placement, s-atlas-sea-map]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 3, persona_llm_calls: 260, wall_clock_minutes: 180}
+notes: |
+  第 25 周 面 C「分野の地図の運用」第 1 周（正本: uxsim/runs/round25/design_atlas.md → 設計書 §22.x）。
+  product_llm_calls は embedding の従量の上限（llm_cost=product の行為の実行回数）: この周で当たるのは
+  (b) の別名の登録 1〜2 回（製品がその 1 項目の索引を裏で作り直す）だけ。製品のチャット LLM は呼ばない
+  （候補の導出・取り込みの patch・凍結の影響はすべて決定論）。索引の再構築と凍結は第 2 周だけ。arXiv は呼ばない。
+  予算が 0 だと開始時点で尽きる（Budget.exhausted は spent >= limit）ので、従量が無い周でも 1 以上にする。
+  場面の組（runner は全組を走らせるので、運転は --persona X --scenario Y で 1 場面ずつ・この順で）:
+   (a) te-03-meticulous-seminar × t-atlas-gap-review（精読: 題名と逐語で判断・採用 1・理由付きの却下 1・戻す）
+   (c) te-03-meticulous-seminar × t-atlas-edge-review（採用 1（関連）・見送り 1・下書きが無いときの反映の確認）
+   (b) te-04-copilot-intro × t-atlas-alias-from-gap（注記のある候補を別名に。注記は索引が要るので、
+       砂場に索引が無ければ注記は出ず「別名として登録」は precondition で止まる — それ自体を事実として記録する）
+   (d1) te-04-copilot-intro × t-atlas-freeze-impact-read（下書きを作り、取り込みの確認と凍結の影響を読むまで。
+       保存・凍結はしない。下書きは第 2 周に残る — 次の周の前に snapshot から戻すかどうかを記録する）
+   (e) st-05-night-solarwind × s-atlas-threads-and-placement（教員レーンの後。見送った関係が糸に出ないか）
+   (f) st-01-m1-radio × s-atlas-sea-map
+  前提の事実: 骨格は astrophysics 2026.1（凍結済み）。候補（ギャップ・辺）は読み時導出で、砂場の 4 論文
+  （landscape_placements の live 配置・gap 信号）次第で 0 件のこともある（そのときの事実文も投影する）。
+  学生の地図はコース 1bad7d9f の割り当てに依る（割り当てが無ければ地図は出ず、その事実を記録する）。

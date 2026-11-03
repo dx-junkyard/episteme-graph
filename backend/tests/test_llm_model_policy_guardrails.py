@@ -171,6 +171,7 @@ class TestFeatureCoverage:
             UNATTRIBUTED,
             "embedding:chunks",
             "embedding:library_search",
+            "embedding:shared_part_search",
             "admin:help_kb_embed",
             # 論文ディスカバリーの関連度ランキング（Phase 3）。実体は embedding 呼び出し
             # なので、他の embedding 系と同じくモデル選択の対象外（M5）。

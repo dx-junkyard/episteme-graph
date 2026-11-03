@@ -314,7 +314,15 @@ class TestThreadLimits:
             "from_label",
             "to_label",
             "nearness_label",
+            "basis_line",
         )
+
+    def test_thread_basis_line_names_the_pair_without_numbers(self):
+        """IK-0887: 糸ごとの根拠の一文は組の名前で言い、数値を含まない。"""
+        line = threads.thread_basis_line("宇宙膨張", "暗黒エネルギー")
+        assert "「宇宙膨張」と「暗黒エネルギー」" in line
+        assert "論文の配置の根拠はありません" in line
+        assert not any(ch.isdigit() for ch in line)
 
     def test_threads_carry_the_skeleton_version(self):
         """RE2 出所必須: 推定の糸は必ず骨格版を伴う。"""

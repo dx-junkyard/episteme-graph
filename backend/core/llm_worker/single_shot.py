@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
@@ -45,6 +46,44 @@ _FENCE_TAIL_RE = re.compile(r"\s*```$")
 _OUTER_OBJECT_RE = re.compile(r"\{[\s\S]*\}")
 #: JSON が許す escape 以外の単独バックスラッシュ（LaTeX の ``\Lambda`` 等）を2重化する。
 _LONE_BACKSLASH_RE = re.compile(r'\\(?!["\\/bfnrtu])')
+
+
+#: JSON モードの要求値（IK-0452）。JSON を取り出す経路（``json_call`` /
+#: ``structured_call`` のテキスト降格 / ``BaseJSONLLMClient.complete_json``）が
+#: ``generate_text(..., response_format=JSON_MODE)`` として渡す唯一の値。
+#: ``core.llm.generate_text`` は openai 経路でだけ API へ渡し、messages に "JSON" の
+#: 語が無ければ要求を落とす（OpenAI の規則。``core.llm.json_mode_response_format``）。
+JSON_MODE: dict[str, str] = {"type": "json_object"}
+
+
+def accepts_response_format(fn: Callable[..., Any]) -> bool:
+    """``fn`` が ``response_format`` キーワードを受けられるか（署名から判定）。
+
+    呼び出し側は自モジュールの ``generate_text`` を注入し、単体テストはそれを
+    狭い署名の fake に差し替える。受けられない fake には JSON モードを渡さない
+    （渡すと TypeError で「呼び出し失敗」になり、テストの意図と違う経路へ落ちる）。
+    署名が取れないものは渡さない（慎重側）。
+    """
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    for parameter in signature.parameters.values():
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "response_format" and parameter.kind in (
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            return True
+    return False
+
+
+def json_mode_kwargs(fn: Callable[..., Any], *, enabled: bool = True) -> dict:
+    """``fn`` が受けられるときだけ ``{"response_format": JSON_MODE}`` を返す。"""
+    if enabled and accepts_response_format(fn):
+        return {"response_format": dict(JSON_MODE)}
+    return {}
 
 
 class LLMSingleShotError(RuntimeError):
@@ -198,6 +237,7 @@ def json_call(
     repair_backslashes: bool = False,
     recover_truncated: bool = False,
     log_label: str = "llm",
+    json_mode: bool = True,
 ) -> Any:
     """テキスト生成を1回（必要なら修復でもう1回だけ）呼び、JSON dict を返す。
 
@@ -216,6 +256,11 @@ def json_call(
         指定時のみ、失敗後に **1回だけ** 同じ会話へこの指示を足して再呼び出しする。
     degraded:
         指定時は最終失敗で例外を投げずこの値を返す（``None`` も有効な縮退値）。
+    json_mode:
+        既定 True。``call`` が受けられるなら ``response_format=JSON_MODE`` を渡す
+        （IK-0452: JSON をプロンプトの文面でしか求めておらず、何も強制していなかった）。
+        取り出しは従来どおり :func:`extract_json` が行う（JSON モードは補助で、
+        フェンス・前後プロースへの耐性は落とさない）。
 
     Raises
     ------
@@ -230,6 +275,7 @@ def json_call(
         max_tokens=max_tokens,
         reasoning_effort=reasoning_effort,
     )
+    kwargs.update(json_mode_kwargs(call_fn, enabled=json_mode))
 
     attempts: list[list[dict]] = [messages]
     if repair_prompt:
@@ -309,7 +355,11 @@ def structured_call(
     text = text_fn or _default_text_call
     raw: str | None = None
     try:
-        raw = text(messages=messages, **_forwarded(model=model, reasoning_effort=reasoning_effort))
+        raw = text(
+            messages=messages,
+            **_forwarded(model=model, reasoning_effort=reasoning_effort),
+            **json_mode_kwargs(text),
+        )
         return extract_json(
             raw,
             repair_backslashes=repair_backslashes,
@@ -325,9 +375,12 @@ def structured_call(
 
 
 __all__ = [
+    "JSON_MODE",
     "LLMSingleShotError",
+    "accepts_response_format",
     "extract_json",
     "json_call",
+    "json_mode_kwargs",
     "strip_code_fence",
     "structured_call",
 ]

@@ -54,7 +54,8 @@ class TestHumanOnlyVocabularyGuard:
 
     def test_upsert_is_idempotent(self):
         """再実行しても行が重複しない（ON CONFLICT による UPSERT）。"""
-        assert "ON CONFLICT (target_id, target_type) DO UPDATE" in _SRC
+        # IK-0899（migration 092）: 行キーは (document_id, target_type, target_id)。
+        assert "ON CONFLICT ON CONSTRAINT epistemic_ledger_document_target_key DO UPDATE" in _SRC
 
     def test_debug_layer_nodes_excluded(self):
         assert re.search(r'if layer == "debug":\s*\n\s*continue', _SRC)

@@ -42,6 +42,10 @@ class SyncResult:
     remaps: list[tuple[str, str, str]] = field(default_factory=list)
     key_remaps: list[tuple[str, str, str]] = field(default_factory=list)
     stats: dict[str, int] = field(default_factory=lambda: {"updated": 0, "inserted": 0, "superseded": 0})
+    #: この同期で superseded にした旧 live 行の UUID / 新規 INSERT した行の UUID
+    #: （第 6 波・IK-1012: 版をまたぐ同一性の付け替えの材料。呼び出し側が使わなければ無視される）。
+    superseded_ids: list[str] = field(default_factory=list)
+    inserted_ids: list[str] = field(default_factory=list)
 
 
 def _strip_nuls(value: Any) -> Any:
@@ -363,6 +367,8 @@ def sync_live_rows(
         ).fetchone()
         new_id = str(row[0]) if row else ""
         result.stats["inserted"] += 1
+        if new_id:
+            result.inserted_ids.append(new_id)
         if agent_id and new_id:
             result.id_map[agent_id] = new_id
 
@@ -391,5 +397,6 @@ def sync_live_rows(
             params,
         )
         result.stats["superseded"] = len(stale_ids)
+        result.superseded_ids = list(stale_ids)
 
     return result

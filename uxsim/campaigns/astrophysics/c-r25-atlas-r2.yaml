@@ -1,0 +1,30 @@
+id: c-astro-r25-atlas-r2
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 1bad7d9f
+personas:
+  teachers: [te-02-veteran-intro, te-01-rookie-seminar]
+  students: [st-04-intl-exoplanet, st-07-m1-grb-voice]
+scenarios:
+  teacher: [t-atlas-gap-review, t-atlas-edge-review, t-atlas-alias-from-gap, t-atlas-draft-freeze]
+  student: [s-atlas-threads-and-placement, s-atlas-sea-map]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 5, persona_llm_calls: 320, wall_clock_minutes: 240}
+notes: |
+  第 25 周 面 C 第 2 周（第 1 周とペルソナを入れ替える）。product_llm_calls は embedding の従量の上限
+  （索引の再構築 1 回 + 別名の登録 1〜2 回 + 凍結 1 回 = 凍結の後に製品が裏で始める新しい版の索引の構築）。製品のチャット LLM は呼ばない。arXiv は呼ばない。
+  場面の組（--persona X --scenario Y で 1 場面ずつ・この順で）:
+   (a') te-01-rookie-seminar × t-atlas-gap-review（新人: 題名だけで判断しがち。理由の短い却下）
+   (b') te-01-rookie-seminar × t-atlas-alias-from-gap
+   (c') te-02-veteran-intro × t-atlas-edge-review（採用 1（依存）・見送り 1）
+   (d2) te-02-veteran-intro × t-atlas-draft-freeze（索引を再構築 → 下書きに候補と関係を反映 → 凍結の影響 →
+        凍結 2026.2。**この周で 1 名・1 回だけ**。凍結は取り消せず、砂場の骨格の版が上がる。削除が無いので
+        コースの割り当ては外れない見込みだが、外れたら次にやることの「割り当てが古い」を watch_for として読む。
+        周の後は snapshot corpus-astro-tex-r23 から戻す）
+   (e') st-04-intl-exoplanet × s-atlas-threads-and-placement（凍結の後: 版が上がり糸に新しい版が付くか）
+   (e'') st-07-m1-grb-voice × s-atlas-threads-and-placement（音声中心だが地図は音声の外なので文字で読む）
+   (f') st-07-m1-grb-voice × s-atlas-sea-map
+  第 1 周の (d1) が作った下書きが残っていれば、(d2) の from-frozen は 409（下書きが既にある）の事実文になり、
+  残っている下書きに反映して凍結する。

@@ -1,0 +1,12 @@
+scenario: s-sim-share-only
+domain: astrophysics
+params:
+  goal_text: 階層ベイズ推定の一部を動かした結果を、担当の先生に見せること
+  topic_hint: ソース分割と階層ベイズ推定（連星合体の遅延時間分布のサブ母集団の論文）
+  topic_hint_terms:
+  - 階層ベイズ
+  - ソース分割
+  claim_hint: GW source  # 観測系の主張の一覧（ラベルは論文の英語のまま）の部分一致
+per_archetype:
+  non_native:
+    goal_text: showing my teacher the result of running part of the hierarchical Bayesian inference

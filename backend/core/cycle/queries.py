@@ -152,30 +152,35 @@ def fetch_last_owned_tension(user_id: str, course_id: str) -> dict | None:
     }
 
 
-def fetch_todays_user_words(user_id: str, course_id: str, limit: int = 30) -> list[dict]:
-    """直近24時間のやり取りに含まれる本人発話（user ロールのみ）の逐語を返す
+def fetch_todays_user_words(
+    user_id: str, course_id: str, limit: int = 30, *, today_start=None
+) -> list[dict]:
+    """日本時間の「今日」のやり取りに含まれる本人発話（user ロールのみ）の逐語を返す
     （「今日のあなたの言葉」トレイ, return_door_design.md §2.2）。
 
-    **「当日」フィルタは直近24時間窓 × 行 ``updated_at`` による近似**:
-    ``learning_chat_history`` は (user, course, topic) ごとに履歴全体を 1 行の JSONB で
-    持ち、各メッセージにタイムスタンプが無い。そのため「当日 ≒ 行の ``updated_at`` が
-    直近24時間（＝直近にやり取りのあったトピック）」で近似し、当該行の履歴に含まれる
-    それ以前のメッセージも混ざりうる（各要素の ``created_at`` も行の ``updated_at`` の
-    近似値）。``CURRENT_DATE``（DB タイムゾーンの暦日）でなく ``now() - interval
-    '24 hours'`` の相対窓なのは、DB=UTC のとき JST 等の学習者の朝の発話が同日昼に
-    消えるのを避けるため（TZ 非依存。``fetch_landing_candidates`` と同型）。
+    **発話の時刻は、その発話が記録した痕跡（``interest_traces.payload.message_id``）の
+    ``created_at``**（IK-0417）。``learning_chat_history`` は (user, course, topic) ごとに
+    履歴全体を 1 行の JSONB で持ち、各メッセージにタイムスタンプが無い。旧実装は行の
+    ``updated_at``（最後にやり取りした時刻）を全メッセージの時刻として使い、直近24時間に
+    やり取りのあったトピックの**それ以前の発話**まで「今日」に混ぜていた（同じ時刻の発話が
+    並ぶのはそのため）。痕跡の無い発話は時刻が分からないので**載せない**（今日と言えない
+    ものを今日と言わない）。
+
+    「今日」は日本時間の 0 時以降（``core.learner_time.learner_today_start_utc``）。
+    ``today_start`` はテスト用の注入口（UTC の aware datetime）。
 
     role フィルタは SQL 内で ``'user'`` に固定する — assistant ロール行を返す経路を
     作らない（RD1。二重防御として ``derive.build_todays_words`` でも再検査する）。
     空白のみの発話は SQL 段階（``btrim``）で除外し、``limit + 1`` 方式の truncated
-    判定を正確にする（derive 側の空文字スキップは二重防御として残る）。
-    並びは新しい順（行 ``updated_at`` 降順 → 行内の後方メッセージ優先）。truncated
-    判定のため ``limit + 1`` 件まで返す（切り詰めは derive 側の責務）。
+    判定を正確にする。並びは発話の時刻の新しい順。truncated 判定のため ``limit + 1``
+    件まで返す（切り詰めは derive 側の責務）。
     """
     from sqlalchemy import text as sa_text
 
+    from core.learner_time import learner_today_start_utc
     from core.postgres import get_session as _pg_session
 
+    start = today_start or learner_today_start_utc()
     session = _pg_session()
     try:
         rows = session.execute(
@@ -183,18 +188,32 @@ def fetch_todays_user_words(user_id: str, course_id: str, limit: int = 30) -> li
                 SELECT h.topic_id,
                        m.msg->>'role' AS role,
                        m.msg->>'content' AS content,
-                       h.updated_at
+                       tr.created_at AS said_at
                 FROM learning_chat_history h
                 CROSS JOIN LATERAL jsonb_array_elements(h.history)
                     WITH ORDINALITY AS m(msg, ord)
+                JOIN LATERAL (
+                    SELECT t.created_at
+                    FROM interest_traces t
+                    WHERE t.user_id = h.user_id AND t.course_id = h.course_id
+                      AND t.payload->>'message_id' = m.msg->>'id'
+                    ORDER BY t.created_at ASC
+                    LIMIT 1
+                ) tr ON TRUE
                 WHERE h.user_id = CAST(:uid AS uuid) AND h.course_id = :cid
-                  AND h.updated_at >= now() - interval '24 hours'
+                  AND h.updated_at >= :today_start
                   AND m.msg->>'role' = 'user'
                   AND btrim(coalesce(m.msg->>'content', '')) <> ''
-                ORDER BY h.updated_at DESC, m.ord DESC
+                  AND tr.created_at >= :today_start
+                ORDER BY tr.created_at DESC, m.ord DESC
                 LIMIT :lim
             """),
-            {"uid": user_id, "cid": course_id, "lim": int(limit) + 1},
+            {
+                "uid": user_id,
+                "cid": course_id,
+                "today_start": start,
+                "lim": int(limit) + 1,
+            },
         ).fetchall()
     except Exception:
         logger.warning(
@@ -320,6 +339,57 @@ def fetch_landing_candidates(user_id: str, course_id: str, since_hours: int = 24
             {"uid": user_id, "cid": course_id, "hours": since_hours},
         ).fetchall()
     except Exception:
+        rows = []
+    finally:
+        session.close()
+    return [
+        {
+            "id": str(r[0]),
+            "kind": r[1],
+            "status": r[2],
+            "payload": _payload_dict(r[3]),
+            "created_at": _to_iso(r[4]),
+        }
+        for r in rows
+    ]
+
+
+def fetch_margin_mark_traces(
+    user_id: str, course_id: str, kinds, limit: int = 60
+) -> list[dict]:
+    """「欄外の印」の生データ（第 23 波 F1 / return_door_design.md §2.3）。
+
+    母集合の kind は呼び出し側が ``core.trace_registry.MARGIN_MARK_KINDS``（登録簿の
+    ``margin_marks`` 宣言）を渡す — ここに kind のリテラルを書かない（読み手ごとの
+    母集合を登録簿 1 箇所で決める）。差し替え・取り消し済み（``superseded``）と
+    「地図には反映しない」にした行（``payload.map_excluded``）は SQL で落とす。
+    kind ごとの絞り込み（確定済みの問い・引き受けた引っかかり・取り消していない印）と
+    件数の上限は ``core.cycle.derive.build_margin_marks`` の責務。新しい順。
+    """
+    from sqlalchemy import text as sa_text
+
+    from core.postgres import get_session as _pg_session
+
+    kind_list = sorted(str(k) for k in (kinds or ()))
+    if not kind_list:
+        return []
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id, kind, status, payload, created_at
+                FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  AND kind = ANY(:kinds)
+                  AND status <> 'superseded'
+                  AND COALESCE(payload->>'map_excluded', 'false') NOT IN ('true', '1')
+                ORDER BY created_at DESC
+                LIMIT :lim
+            """),
+            {"uid": user_id, "cid": course_id, "kinds": kind_list, "lim": int(limit)},
+        ).fetchall()
+    except Exception:
+        logger.warning("fetch_margin_mark_traces failed (fail-open to no marks)", exc_info=True)
         rows = []
     finally:
         session.close()

@@ -1,0 +1,38 @@
+id: s-v5-anchor-dismiss
+population: students
+runner: [api, browser]
+session: 1
+goal: '{{goal_text}} のために質問を重ね、AI が付けた「問いの帰属」の候補が違うと思ったら外して、外したものが記録にどう残るかを確かめる'
+params_required: [goal_text, topic_hint_terms, seed_questions]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.enroll
+    note: 受講中でなければ受講を始める
+  - do: learning.course.open
+  - do: learning.topic.open
+    with: {topic_hint_terms: '{{topic_hint_terms}}'}
+  - repeat:
+      until: "persona_decides_to_stop or steps > 2"
+      max: 2
+      do: learning.chat.ask
+      with: {message: '{{seed_questions | next}}'}
+  - do: learning.anchors.digest
+    note: 進捗タブの帰属の候補を見る（まだ候補が出ていなければその事実を書き留める）
+  - choose:
+      - do: learning.anchors.dismiss
+        note: 違うと思う帰属の候補を外す
+      - do: learning.tension.dismiss
+        note: 違うと思う引っかかりの候補を外す
+    optional: true
+  - do: learning.records.mine
+    note: 外した候補が、外した状態で残っているかを見る
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#selection-ask
+  - manual: student/02-student.md#tension-digest
+  - manual: student/02-student.md#my-records
+watch_for:
+  - 外した候補が消えずに、外した状態の名前付きでわたしの記録に残る
+  - 候補の確からしさが数値で出ない
+  - 外す操作の近くに、外したら何が起きるか（記録には残る・教員の集約に入らない等）が書かれている

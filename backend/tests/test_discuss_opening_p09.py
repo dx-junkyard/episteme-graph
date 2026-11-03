@@ -159,7 +159,7 @@ class TestBuildOpeningWiring:
         monkeypatch.setattr(opening, "_claim_label_index", lambda doc, arts: {})
         monkeypatch.setattr(opening, "_load_graph_nodes", lambda doc: [])
         monkeypatch.setattr(opening, "_load_approved_discussion_seeds", lambda doc: [])
-        monkeypatch.setattr(opening, "_compile_open_assumptions", lambda course: [])
+        monkeypatch.setattr(opening, "_compile_open_assumptions", lambda course, **_kw: [])
 
     def test_chapter_skeleton_is_served_with_its_truncation_flag(self, monkeypatch):
         self._patch(

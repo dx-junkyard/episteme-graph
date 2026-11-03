@@ -1,0 +1,22 @@
+id: c-astro-r25-studio-r11
+domain: astrophysics
+snapshot: corpus-astro-tex-r25j
+course_id: 6be229e1
+personas:
+  teachers: [te-01-rookie-seminar]
+  students: [st-01-m1-radio, st-08-m1-rprocess-lecture]
+scenarios:
+  teacher: [t-studio-split-save]
+  student: [s-studio-lecture-pages, s-lecture-then-trace]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 6, persona_llm_calls: 200, wall_clock_minutes: 240}
+notes: |
+  第 25 周 面 D の第 11 周（judge_studio_r10.md §7・r11_prereqs.md・harness_fixes_r10_summary.md の H43〜H45）。第 10 波の是正後（IK-1127 宛先別の届き方・IK-1081 残り・
+  0571 定義・件数なし・記号の別の論文の題名）。周の前の実測（r11_prereqs）: 版 7 = HEAD。X1 は **t18**（t17 は版 7 に区切りがある）。付け直す材料は今は無いので
+  reattach-all は外した（IK-1081 の外す手は作らない = オーナー判断の規律）。教員 1 × 学生 2・3 レーン:
+  te-01 × (a) t-studio-split-save（t18 を区切って保存 → prepublish の学生読み → 版の管理モーダルで受講者への届き方（`audience_note` / `changed_topic_titles`）を読んで発行）→
+  atlas の ST01 を待って st-01 × s-studio-lecture-pages（t1・t4 の注が受講者向けから外れたか IK-1081）→ doubt の ST08 を待って st-08 × s-lecture-then-trace（定義の文のある記号 N_c で
+  「（原文）」IK-0571・⚓ の摘要行に件数が無いか・記号の「別の論文」の題名）→ 審判 after。
+  組の例外（P-0025）: 3 組とも第 10 周と同じ組（是正の前後比較・審判の指定）。

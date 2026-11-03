@@ -399,6 +399,7 @@ def purge_user(user_id: str, *, scheduled_by: Optional[str] = None) -> bool:
                 UPDATE users
                 SET email = :email,
                     display_name = :display_name,
+                    profile_name = NULL,
                     password_hash = :password_hash,
                     token_generation = token_generation + 1,
                     status = 'deleted',

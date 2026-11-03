@@ -593,3 +593,73 @@ Fable 5 指揮 + Opus 5 / Sonnet 5 の4並列実装。バックエンド全テ�
   5. `services.py` は変更不要だった（`record_review_event` をそのまま利用）。
   6. `docs/backend/api.md` は新設ルーター無しのため更新対象外（admin.py / auth.py /
      llm_usage.py の拡張のみ）。
+
+---
+
+## §16 2026-10-27 第 5 波の追補 — 人に見せる名前（migration 094・IK-0848 / IK-1007）
+
+**状態: 実装済み（2026-10-27）**。§15 までの本文は凍結のまま、本節だけを追補する。
+
+### §16.1 課題とオーナー判断
+
+`users.display_name` はログインの照合列を兼ねる（`routes/auth.py` の `auth_login` は
+`WHERE display_name = :username`）。帰属・所有者名・査読者名・記帳者名としてこの列を出していた経路は、
+人の名前ではなく**ログイン ID を他の利用者へ開示**していた（IK-1007: 原稿スタジオの「このコースの所有者」と
+［案をコピー］の宛先 / IK-0848: 分野の地図の採用・見送りの帰属）。
+
+オーナー判断（推奨どおり実装）: **ログイン ID は見せない。人に見せる名前の列を足し、空なら名前なしの事実文に戻す。**
+
+### §16.2 決めたこと
+
+- **AL11 人に見せる名前は `users.profile_name` だけ**（migration 094・`TEXT NULL`）。本人が登録する。既存行は
+  バックフィルしない（空 = 「名前の登録がありません」）。ログインの照合には使わない — 照合列と判定順序
+  （資格情報 → status）は §4.1 のまま不変。
+- **AL12 帰属の表示はログイン ID へフォールバックしない**。読みの正本は `core/account_display.py`
+  （`display_label(user_row) -> str | None` は `profile_name` だけを読み、空・削除済みは `None` /
+  `label_or_unregistered` / `fetch_display_labels` / `profile_name_sql`）。名前なしの事実文は
+  `core/label_vocab.py` の `ACCOUNT_NAME_UNREGISTERED`（欄）/ `ACCOUNT_NAME_UNREGISTERED_ACTOR`（文の主語）。
+- **本人の登録口**: `GET|PATCH /api/me/profile`（`routes/my_profile.py`・本人のみ・200 字超は 422・制御文字を除き
+  空白を畳む・空で消す・監査 `AUDIT_ENTITY_USER_ACCOUNT` は登録の有無だけ）。UI は学習画面・管理画面の
+  ヘッダの「👤 名前」（`frontend/public/js/profile-name.js`・アンカー `topbar.profile-name` /
+  `header.profile-name`・マニュアル `student/02-student.md#profile-name` / `teacher/10-admin-common.md#profile-name`）。
+- **管理者の一覧**: `GET /api/admin/users` の行に `profile_name` を additive（`username` はログイン ID のまま）。
+- **墓標化**（§8.4）は `profile_name = NULL` も同時に行う（AL1: 行は消さない）。
+- 可視性 6 軸（`core/disclosure_axes.py` の `account`）の第 2 軸「名前の開示」を現物に合わせて書き換えた。
+
+### §16.3 置き換えた経路
+
+| 面 | 経路 | 以前 | 以後 |
+|---|---|---|---|
+| 分野の地図 | `core/atlas_review_display.py::fetch_actor_labels` / `project_decision_for_response` | `display_name`・トークンの利用者名 | `profile_name`（無ければ「名前を登録していない利用者」） |
+| 分野の地図 | `core/atlas_reports.py`（修正報告の報告者・changelog の credits） | `display_name`、無ければ UUID | `reporter_label`。credits は名前の無い報告者を載せない |
+| 分野の地図 | `core/atlas_state.py`（説明の作者） | `display_name` | `profile_name`（空は数えない） |
+| 原稿スタジオ | `routes/lecture_studio/topics.py`（`owner_display_name` / 案のコピー） | `display_name` | `profile_name`。空なら IK-0978 の名前なしの文 |
+| 教材管理 | `routes/admin.py::_material_role_fields`（`edit_request_note`） | `display_name` | `profile_name`。空なら `MATERIAL_EDIT_REQUEST_UNKNOWN` |
+| 教材管理 | `routes/admin.py` つまずきデータの `student_name` | `display_name` | `profile_name`、無ければ「名前の登録がありません」 |
+| D層 | `routes/doubt.py`（記帳者・疑義の提出者・検証提案者・反実仮想の所有者）/ `core/doubt/open_assumptions.py`（ゼミ前ブリーフ・合意リストの `challengers`） | `display_name` | `profile_name` / 名前なしの事実語 |
+| C層 | `routes/theory_components.py`（説明の作者・承認者・引用者）/ `routes/learning.py`（学習者向けの説明の作者） | `display_name` | `profile_name` / 名前なしの事実語（標準の説明は空） |
+| 共有部品 | `core/component_context.py`（学習者向け `link.confirmed_by`） | `display_name` | `profile_name` / 名前なしの事実語 |
+| SB層 | `routes/simulation_bridge.py`（共有した学習者） | `display_name` | `profile_name` / 名前なしの事実語 |
+
+`display_name` を SQL で読んでよい経路は `backend/tests/test_account_display_guardrails.py` の allowlist
+（ログイン照合・アカウント管理・`course_builder_sessions` の同名列・グループ招待・SYSTEM_ADMIN の運用統計・墓標化）
+だけで、それ以外の経路が読むと赤になる。
+
+### §16.4 設計時の検査（pre-mortem）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 人に見せる名前と認証の識別子が同じ列 | `id-namespace-conflated` | 列を分け、表示は `profile_name` だけ。フォールバック禁止をガードレールで固定 |
+| 同型の是正が 10 面にわたる | `rule-enforced-per-surface` | 読みを `core/account_display.py` 1 箇所に寄せ、全 SQL 文字列を走査する検査（`route-all-surfaces-through-one-point`） |
+| 新しい面が `display_name` を読み直す | `guardrail-does-not-cover-new-path` | allowlist 方式の AST 走査（docstring を除く SQL 文字列と `"display_name"` キー） |
+| 文書と現物のずれ | `doc-drifts-from-code` | 可視性 6 軸の `account` の第 2 軸を現物に合わせて書き換えた |
+
+当たらない族: 再実行と削除（列追加のみ・既存行を書き換えない）。
+
+### §16.5 残した課題
+
+- **グループの参加者一覧と招待**（`routes/groups.py`）は招待をログイン名で行う設計のため、参加者・招待者に
+  ログイン名が見える（可視性 6 軸の第 1 軸に事実として明記）。名前の表示をここにも足すかは別課題。
+- **SYSTEM_ADMIN の運用統計・利用実績**（`get_materials_stats` / `llm_usage`）はアカウント運用の画面として
+  ログイン名のまま。
+- 既存アカウントは名前の登録が無いので、帰属は当面「名前を登録していない利用者」と出る（バックフィルしない判断）。

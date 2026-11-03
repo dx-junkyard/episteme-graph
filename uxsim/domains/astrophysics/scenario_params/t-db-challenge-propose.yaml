@@ -1,0 +1,27 @@
+scenario: t-db-challenge-propose
+domain: astrophysics
+params:
+  goal_text: 前提の弱いところを型で指摘し、確かめる手立てがあるものは検証の提案にすること
+  course_hint: ""
+  material_hint: Cepheus
+  node_hint: "1"
+  challenge_reason: 等分配の仮定が成り立つ範囲より外の領域にまで、この推定を当てはめているように読める。
+  second_reason: 「乱流」の定義が節によって揺れていて、根拠からこの主張が出てくるつながりが読み取れない。
+  proposal_text: 乱れの大きい領域を分けて偏光角の分散を取り直し、等分配の仮定が崩れる範囲で推定がどう変わるかを比べる。
+  external_check: コーパス外で DCF 法の適用範囲を論じたレビュー論文を確認し、乱れの大きい領域での補正の議論があることを確かめた。
+  # 第 3 周（IK-0900 の確認）: このペルソナが編集権限を持たない教材。指揮者は te-05 に Cepheus（TeX 版）だけ editor 共有し、
+  # PINN には共有しない（共有の有無は周の前に確かめる）
+  foreign_material_hint: Neutron Star Equation of State via Physics Informed Neural Network
+  foreign_scope_condition: 状態方程式が単調に増える範囲で
+per_archetype:
+  veteran_clicks_through:
+    challenge_reason: 適用範囲の外挿。
+    second_reason: 定義が曖昧。
+    external_check: レビューを確認した。
+personas:
+  te-04-copilot-intro:
+    course_hint: 1bad7d9f
+  te-05-delegator-lab:
+    # 第 3 周: 自分のコース（種まき済みなら一覧の先頭）で歩く。疑義は式・部品の台帳から支える主張の台帳へ移って残す（IK-0904 の是正後）
+    challenge_reason: この推定の当てはめが、仮定の範囲より広い気がします。
+    second_reason: 言葉の定義があいまいに見えます。

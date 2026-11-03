@@ -232,7 +232,8 @@ class TestFactStatements:
         block = _fn_block(seg, "function _landscapeFooterHtml(data, groups, placements) {")
         assert "LANDSCAPE_CORPUS_NOTICE" in block
         assert '"最終生成: " + formatDateTime(generated)' in block
-        assert "使用した骨格" in block
+        assert "使用した地図" in block
+        assert "atlasVersionText(version)" in block  # IK-0942
 
     def test_skeleton_version_is_never_invented(self):
         """版が取れないときは版の行を出さない（推測しない）。"""

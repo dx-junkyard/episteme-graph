@@ -1127,8 +1127,13 @@ class TestCacheBuster:
     def test_admin_html_bumps_both_arxiv_script_cache_busters(self):
         """JS を直しても `?v=` を上げ忘れると、教員のブラウザは古い JS のまま。"""
         src = _read(ADMIN_HTML)
-        assert "js/admin-paper-discovery.js?v=paper-discovery-20260916-1" in src
-        assert "js/admin-paper-radar.js?v=paper-radar-20260916-1" in src
+        # 版の値はハードコードしない（波ごとに上がる）。両スクリプトに 2026-10-16 以降の
+        # 版が付いていること、radar 側の版が同日の discovery 側より前に戻っていないことを見る。
+        import re as _re
+        disc = _re.search(r'js/admin-paper-discovery\.js\?v=paper-discovery-(\d{8})-(\w+)', src)
+        radar = _re.search(r'js/admin-paper-radar\.js\?v=paper-radar-(\d{8})-(\w+)', src)
+        assert disc and radar
+        assert disc.group(1) >= "20261016" and radar.group(1) >= "20261016"
 
 
 # ---------------------------------------------------------------------------
@@ -1194,3 +1199,69 @@ class TestSourceFormatSwitch:
     def test_no_client_side_url_building(self):
         assert "arxiv.org/src" not in self.code
         assert "arxiv.org/pdf" not in self.code
+
+
+import pytest  # noqa: E402
+
+
+class TestIngestLanguageSelect:
+    """取り込みモーダルの生成言語（2026-10-01 レビュー m6）— 同期の /ingest だけに送る。"""
+
+    @pytest.mark.parametrize("path,prefix,anchor", [
+        (DISCOVERY_JS, "pd", "materials.arxiv-discovery-language"),
+        (FRONTEND_DIR / "js" / "admin-paper-radar.js", "pr", "materials.radar-language"),
+    ])
+    def test_select_defaults_to_unspecified_and_is_sent_only_for_sync_ingest(self, path, prefix, anchor):
+        src = _read(path)
+        assert f'id="{prefix}-language-row" data-ui-anchor="{anchor}"' in src
+        assert f'<select id="{prefix}-language-select"' in src
+        assert '<option value="" selected>指定しない</option>' in src
+        assert "if (!batch && ingestLanguage) payload.language = ingestLanguage;" in src
+
+
+class TestIngestDomainSelect:
+    """取り込みモーダルの「解析の分野」（2026-10-16・migration 090）— 同期・キューの両方に送る。"""
+
+    @pytest.mark.parametrize("path,prefix,anchor", [
+        (DISCOVERY_JS, "pd", "materials.arxiv-discovery-ingest-domain"),
+        (FRONTEND_DIR / "js" / "admin-paper-radar.js", "pr", "materials.radar-ingest-domain"),
+    ])
+    def test_select_has_anchor_and_unspecified_first(self, path, prefix, anchor):
+        src = _read(path)
+        assert f'id="{prefix}-ingest-domain-row" data-ui-anchor="{anchor}"' in src
+        assert f'<select id="{prefix}-ingest-domain-select"' in src
+        assert "ingestDomainRowHtml() +" in src
+        assert "'<option value=\"\" selected>指定しない</option>' +" in src
+
+    @pytest.mark.parametrize("path", [
+        DISCOVERY_JS, FRONTEND_DIR / "js" / "admin-paper-radar.js",
+    ])
+    def test_sends_cartridge_id_for_both_paths_and_not_domain_key_as_domain(self, path):
+        src = _read(path)
+        # 「指定しない」は "" として常に送る（同期・キューの両方）。
+        assert "payload.cartridge_id = selectedIngestDomain();" in src
+        assert "if (!batch) payload.cartridge_id" not in src
+
+    @pytest.mark.parametrize("path", [
+        DISCOVERY_JS, FRONTEND_DIR / "js" / "admin-paper-radar.js",
+    ])
+    def test_options_come_from_the_shared_loader_and_skip_retired(self, path):
+        src = _read(path)
+        assert "deps.loadDomainOptions()" in src
+        assert 'lifecycles[key] === "retired"' in src
+
+    def test_admin_injects_the_loader_and_seed_domain(self):
+        admin = _read(FRONTEND_DIR / "js" / "admin.js")
+        assert admin.count("loadDomainOptions: loadDomainOptions,") >= 2
+        assert 'data-analysis-cartridge-id="' in admin
+        assert '{ cartridgeId: this.getAttribute("data-analysis-cartridge-id") || "" }' in admin
+
+    def test_discovery_default_follows_the_selected_subscription(self):
+        src = _read(DISCOVERY_JS)
+        assert "applyIngestDomainDefault(state.domainKey);" in src
+        assert "loadIngestDomainOptions(state.domainKey);" in src
+
+    def test_radar_default_is_the_seed_material_domain(self):
+        src = _read(FRONTEND_DIR / "js" / "admin-paper-radar.js")
+        assert "loadIngestDomainOptions(state.seedCartridgeId);" in src
+        assert "function openModal(documentId, title, options)" in src

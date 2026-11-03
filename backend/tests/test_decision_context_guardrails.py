@@ -156,6 +156,24 @@ class TestBulkRoutesRecordContext:
         assert "list_for_documents" in src
         assert "STATUS_INFERRED" in src
 
+    def test_release_review_presented_is_the_viewed_set_not_the_editable_set(self):
+        """第 23 周 F5: 提示集合は「画面に出ていた」閲覧できる全論文の inferred で組む。
+
+        edit できる document だけで組むと、閲覧のみの教員の「次へ」が
+        ``presented == applied == []`` で「一致」と記帳される。適用できなかった行は
+        ``skipped_ids`` で別キーに残し、0 件の確定でも監査を 1 行残す（DC1）。
+        """
+        src = extract_function_source(
+            LANDSCAPE_SRC, "accept_course_landscape_placements"
+        )
+        listing = src[src.index("presented_rows = landscape_store.list_for_documents(") :]
+        listing = listing[: listing.index(")") + 1]
+        assert "sorted(viewable)" in listing
+        assert "editable_ids" not in listing
+        assert "skipped_ids=" in src
+        assert "if not updated:" in src
+        assert src.count("services.record_review_event(") >= 2
+
     def test_explanation_bulk_review_builds_and_attaches_context(self):
         src = extract_function_source(
             EXPLANATION_SRC, "bulk_review_element_explanations"
@@ -279,7 +297,7 @@ class TestReleaseReviewFrontend:
     def test_match_facts_do_not_carry_numbers(self):
         for fact in (
             "表示されていた配置と確認した配置は一致しています",
-            "表示と確認した配置に差がありました（画面を再読み込みしてください）",
+            "表示と確認した配置に差がありました。下の「ステップ 2 に戻って確かめる」で最新の配置を表示し直せます",
         ):
             assert fact in RELEASE_JS
             assert "%" not in fact

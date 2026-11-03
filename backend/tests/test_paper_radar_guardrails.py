@@ -555,3 +555,38 @@ class TestArxivBlockedMarker:
         )
         blocked_return = fn.index("result[\"closed_world_note\"] = blocked_note")
         assert fn.index("touch_last_checked") > blocked_return
+
+
+class TestWave2Guardrails:
+    """第 2 波（paper_radar_design.md §19）の構造的な約束。"""
+
+    def test_radar_does_not_use_the_global_ingested_set(self):
+        """「取り込み済み」は可視性つきの判定だけを使う（IK-0701 — 見えない教材で塞がない）。"""
+        assert "ingested_arxiv_ids(" not in _RADAR_SRC
+        assert "visible_ingested_documents(" in _RADAR_SRC
+
+    def test_route_injects_the_viewer_visibility(self):
+        body = _ROUTE_SRC[_ROUTE_SRC.index("def radar_search("):]
+        body = body[: body.index("\n@router.")]
+        assert "visible_document_ids=services.list_visible_document_ids(" in body
+
+    def test_facts_and_title_note_carry_no_numbers(self):
+        sys.path.insert(0, str(BACKEND))
+        from core.paper_discovery import radar
+
+        for text in (
+            radar.FACT_RELATION_NO_DOMAIN,
+            radar.FACT_RELATION_NO_ANCHORS,
+            radar.FACT_NO_APPROVED_COMPONENTS,
+            radar.NOTE_SEED_TITLE_IS_FILENAME,
+        ):
+            assert not re.search(r"[0-9０-９]", text)
+
+    def test_relation_labels_live_on_the_server(self):
+        """compare の関係ラベル（日本語）は JS に持たない（§18.4 — 素通し）。"""
+        js = (ROOT / "frontend" / "public" / "js" / "admin-paper-radar.js").read_text(encoding="utf-8")
+        sys.path.insert(0, str(BACKEND))
+        from core.paper_discovery import compare
+
+        for label in compare.RELATION_LABELS.values():
+            assert label not in js

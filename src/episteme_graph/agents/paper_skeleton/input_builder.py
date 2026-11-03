@@ -4,12 +4,25 @@
 - 全文投入ではなく骨格判断に必要な代表コンテキストを圧縮して渡す
 - abstract → section headers → major section 代表 → conclusion の優先順序
 - appendix は基本的に低優先度
+
+P0-1 と同じ是正（`docs/architecture/knowledge_structure_review_2026-09-12.md` §4）:
+
+1. **既定では節を打ち切らない**。従来は ``_MAX_SECTIONS = 12`` で level-1 節の
+   **先頭 12 件**しか骨格判断に見せていなかった。既定は上限なし（0）で、
+   上限を敷きたい運用だけが ``config["max_sections"]`` か env
+   ``PAPER_SKELETON_MAX_SECTIONS`` で明示する。
+2. **上限がある場合も先頭切り捨てにしない**。先頭節と結論節を必ず含めたうえで、
+   残り枠を文書全体へ等間隔に配る（結論・限界が骨格から丸ごと落ちない）。
+3. **取りこぼしの量を報告する**。:meth:`compute_section_coverage` が母集合
+   （level-1 節）・処理数・理由（``max_sections`` / ``appendix_excluded``）を返し、
+   orchestrator が stage payload の ``coverage`` に載せる。
 """
 from __future__ import annotations
 
 import re
 
 from episteme_graph.agents.document_structure.schema import DocumentStructureResult, TypedBlock
+from episteme_graph.agents.stratified_sampling import resolve_limit
 
 from .schema import CartridgeContext, SkeletonLLMInput
 
@@ -20,8 +33,14 @@ _APPENDIX_TITLES = re.compile(r"appendix|supplementary|付録", re.IGNORECASE)
 
 _MAX_ABSTRACT_BLOCKS = 8
 _MAX_REP_BLOCKS_PER_SECTION = 2
-_MAX_SECTIONS = 12
+# 0 = 上限なし（既定）。かつての 12 打ち切りは廃止した。
+_DEFAULT_MAX_SECTIONS = 0
+_MAX_SECTIONS_ENV = "PAPER_SKELETON_MAX_SECTIONS"
 _MAX_CONCLUSION_BLOCKS = 6
+
+_COVERAGE_UNIT = "sections"
+_TRUNCATION_REASON = "max_sections"
+_APPENDIX_REASON = "appendix_excluded"
 
 
 class SkeletonInputBuilder:
@@ -34,16 +53,22 @@ class SkeletonInputBuilder:
         config: dict | None = None,
     ) -> SkeletonLLMInput:
         cfg = config or {}
-        max_sections: int = cfg.get("max_sections", _MAX_SECTIONS)
+        max_sections = resolve_limit(
+            cfg, "max_sections", _MAX_SECTIONS_ENV, default=_DEFAULT_MAX_SECTIONS
+        )
 
         blocks = structure.blocks
         sections = structure.sections
 
         title = structure.metadata.title
 
+        selected = self._select_sections(sections, max_sections)
         abstract_blocks = self._extract_abstract(blocks, sections)
-        section_headers = self._extract_section_headers(sections, max_sections)
-        representative_blocks = self._extract_representative_blocks(blocks, sections, max_sections)
+        # 頁を持たない経路（TeX 取り込みは ``metadata.pages == 0`` で全節 page_start=1）では
+        # 頁を出さない — 既定値が実在の頁に見える（IK-0799）。
+        has_pages = bool(getattr(structure.metadata, "pages", 0) or 0)
+        section_headers = self._section_headers(selected, sections, has_pages=has_pages)
+        representative_blocks = self._extract_representative_blocks(blocks, selected, sections)
         conclusion_blocks = self._extract_conclusion_blocks(blocks, sections)
         normalized_terms = self._build_normalized_terms(cartridge) if cartridge else None
 
@@ -109,37 +134,177 @@ class SkeletonInputBuilder:
 
         return []
 
-    def _extract_section_headers(self, sections: list, max_sections: int) -> list[dict]:
-        non_appendix = [
-            s for s in sections
+    # ------------------------------------------------------------------
+    # section selection (P0-1: 先頭切り捨てにしない)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _top_level_sections(sections: list) -> list:
+        return [s for s in sections if s.level == 1]
+
+    @classmethod
+    def _candidate_sections(cls, sections: list) -> list:
+        """骨格判断の対象になる節（level-1 かつ appendix でない）。"""
+        return [
+            s for s in cls._top_level_sections(sections)
             if not _APPENDIX_TITLES.search(s.title or "")
         ]
-        top_level = [s for s in non_appendix if s.level == 1][:max_sections]
-        return [
-            {
+
+    @classmethod
+    def _select_sections(cls, sections: list, max_sections: int) -> list:
+        """上限のもとで見せる節を決定論的に選ぶ。
+
+        先頭切り捨てにしない: ①先頭節 ②結論・議論・まとめの節（末尾側から）を必ず
+        含め、残り枠は文書順に等間隔で配る。出力は文書順。
+        """
+        candidates = cls._candidate_sections(sections)
+        if max_sections <= 0 or len(candidates) <= max_sections:
+            return candidates
+
+        chosen: set[int] = set()
+        # ① 先頭節（導入）
+        chosen.add(0)
+        # ② 結論系の節（末尾側を優先。上限を超えない範囲で）
+        conclusion_positions = [
+            idx for idx, s in enumerate(candidates)
+            if _CONCLUSION_TITLES.search(s.title or "")
+        ]
+        for idx in reversed(conclusion_positions):
+            if len(chosen) >= max_sections:
+                break
+            chosen.add(idx)
+        # ③ 残り枠を等間隔に
+        remaining = max_sections - len(chosen)
+        if remaining > 0:
+            total = len(candidates)
+            step = total / (remaining + 1)
+            for k in range(1, remaining + 1):
+                pos = min(int(round(step * k)), total - 1)
+                while pos in chosen and pos < total - 1:
+                    pos += 1
+                while pos in chosen and pos > 0:
+                    pos -= 1
+                chosen.add(pos)
+        # ④ 端数調整（重複で埋まらなかった分を文書順に補う）
+        if len(chosen) < max_sections:
+            for idx in range(len(candidates)):
+                if len(chosen) >= max_sections:
+                    break
+                chosen.add(idx)
+        return [candidates[idx] for idx in sorted(chosen)[:max_sections]]
+
+    def compute_section_coverage(
+        self,
+        structure: DocumentStructureResult,
+        config: dict | None = None,
+    ) -> dict:
+        """節の母集合・処理数の**事実**を返す（``build_coverage_report`` の引数）。
+
+        母集合は level-1 節（appendix を含む）。appendix は設計として除外するが、
+        「見ていない」ことは理由コード ``appendix_excluded`` で正直に残す。
+        報告そのものを組み立てないのは、orchestrator 側の ``_attach_coverage`` だけが
+        ``coverage`` キーを作るという規律を保つため。
+        """
+        cfg = config or {}
+        max_sections = resolve_limit(
+            cfg, "max_sections", _MAX_SECTIONS_ENV, default=_DEFAULT_MAX_SECTIONS
+        )
+        sections = structure.sections or []
+        top_level = self._top_level_sections(sections)
+        candidates = self._candidate_sections(sections)
+        selected = self._select_sections(sections, max_sections)
+        selected_ids = {s.section_id for s in selected}
+
+        reasons: list[str] = []
+        if len(candidates) > len(selected):
+            reasons.append(_TRUNCATION_REASON)
+        if len(top_level) > len(candidates):
+            reasons.append(_APPENDIX_REASON)
+
+        details: dict = {"scope": "level_1_sections"}
+        unprocessed = [
+            {"section_id": s.section_id, "title": s.title}
+            for s in top_level
+            if s.section_id not in selected_ids
+        ]
+        if unprocessed:
+            details["unprocessed_sections"] = unprocessed
+        return {
+            "population": len(top_level),
+            "processed": len(selected),
+            "reasons": reasons,
+            "unit": _COVERAGE_UNIT,
+            "details": details,
+        }
+
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _descendant_ids(section_id: str, sections: list) -> list[str]:
+        """``section_id`` の下位節 ID（文書順・孫以下を含む）。"""
+        children: dict[str, list[str]] = {}
+        for s in sections:
+            if s.parent_section_id:
+                children.setdefault(s.parent_section_id, []).append(s.section_id)
+        out: list[str] = []
+        stack = list(reversed(children.get(section_id, [])))
+        while stack:
+            sid = stack.pop()
+            out.append(sid)
+            stack.extend(reversed(children.get(sid, [])))
+        return out
+
+    @classmethod
+    def _section_headers(
+        cls, selected_sections: list, all_sections: list | None = None, *, has_pages: bool = True
+    ) -> list[dict]:
+        """骨格判断の対象節（level-1）。下位節は ``subsections`` に入れ子で添える（IK-0799 —
+        本文の「Sec. 2.1」と ``sec_N`` を対応させる材料。節の母集合・件数は level-1 のまま）。"""
+        by_id = {s.section_id: s for s in (all_sections or [])}
+
+        def header(s) -> dict:
+            item = {
                 "section_id": s.section_id,
                 "title": s.title,
                 "level": s.level,
-                "page_start": s.page_start,
+                "page_start": s.page_start if has_pages else None,
                 "parent_section_id": s.parent_section_id,
             }
-            for s in top_level
-        ]
+            number = getattr(s, "section_number", None)
+            if number:
+                item["section_number"] = number
+            return item
+
+        result: list[dict] = []
+        for s in selected_sections:
+            item = header(s)
+            subs = [header(by_id[sid]) for sid in cls._descendant_ids(s.section_id, all_sections or [])
+                    if sid in by_id]
+            if subs:
+                item["subsections"] = subs
+            result.append(item)
+        return result
+
+    @staticmethod
+    def _is_prose_block(b: TypedBlock) -> bool:
+        """本文の段落か（表本体 ``raw.in_table`` は代表・結論ブロックに使わない — R-4）。"""
+        if b.block_type != "body_paragraph":
+            return False
+        raw = b.raw or {}
+        return not (raw.get("in_table") or raw.get("from_table"))
 
     def _extract_representative_blocks(
-        self, blocks: list[TypedBlock], sections: list, max_sections: int
+        self, blocks: list[TypedBlock], selected_sections: list, all_sections: list | None = None
     ) -> list[dict]:
-        """各 major section の先頭・末尾 body_paragraph を収集する。"""
-        top_sections = [
-            s for s in sections
-            if s.level == 1 and not _APPENDIX_TITLES.search(s.title or "")
-        ][:max_sections]
+        """各 major section（下位節を含む）の先頭・末尾 body_paragraph を収集する。"""
+        top_sections = selected_sections
 
         result: list[dict] = []
         for section in top_sections:
+            scope = {section.section_id, *self._descendant_ids(section.section_id, all_sections or [])}
             sec_blocks = [
                 b for b in blocks
-                if b.section_id == section.section_id and b.block_type == "body_paragraph"
+                if b.section_id in scope and self._is_prose_block(b)
             ]
             if not sec_blocks:
                 continue
@@ -165,7 +330,7 @@ class SkeletonInputBuilder:
         result = [
             self._block_to_dict(b)
             for b in blocks
-            if b.section_id in conclusion_section_ids and b.block_type == "body_paragraph"
+            if b.section_id in conclusion_section_ids and self._is_prose_block(b)
         ]
         return result[:_MAX_CONCLUSION_BLOCKS]
 

@@ -17,10 +17,13 @@
 |---|---|
 | このシステムの**思想・設計原則**を知りたい | [ビジョンと思想（正本）](vision.md) — ミッション / 知識観・学習観 / AIの役割 / 横断14原則（2026-09-04 改訂版）/ 機能群マップ |
 | **なぜこのシステムが必要か**を知りたい（外部ステークホルダー向け） | [サービスデザイン](service_design.md) — 現状認識 → 課題 → gap → UX → 機能への対応表 |
+| **vision → UX → feature のつながりをヒアリングし、機能を見直したい** | [機能見直しとヒアリング](feature_review.md) — 利用場面・質問の順序・既存機能と検証の限界・未決の判断点・回答の記録様式 |
 | **どの層が何の機能で、どの migration か**を知りたい | [レイヤー索引表](architecture/layer_registry.md) |
 | 開発ルール・各層の実装規約を知りたい | [CLAUDE.md](../CLAUDE.md)（リポジトリルート） |
 | 過去の課題が**どんな原因の型**で、**どう見つかり・どう解かれたか**を引きたい | [課題ナレッジ](issue_knowledge/README.md) — 4 軸の座標（処理・構造・接続・統制）・発見観点・解決観点・型の辞書・索引 |
 | コーディングエージェントが回す**改善サイクル**の段・規律・自律と人の線引きを知りたい | [改善サイクル（運用規約）](architecture/improvement_cycle.md) — 発見 → 選別 → 設計 → 実装 → 検証 → 是正 → 記録 → 体系の育成。サイクル自身の課題も課題ナレッジへ |
+| 課題ナレッジが**本当に効いているか**（蓄積と活用の検証・想起シートの導入）を知りたい | [課題ナレッジの効果検証 2026-10-02](architecture/issue_knowledge_effectiveness_review_2026-10-02.md) — 記録から確認できた蓄積と活用の差・導入した読み込み経路（`issue_knowledge/recall.md`・設計書の pre-mortem 節・索引 §14.5） |
+| 立場の異なる**ペルソナ集団に実物のコースを通しで受講させて UX を確かめる**仕組みを知りたい | [ペルソナ通し受講テスト（設計中）](architecture/persona_enactment_testing_design.md) — 砂場・宇宙物理コーパスの snapshot・学生／教員ペルソナ・API／ブラウザ実行器・5 系統の審判・課題ナレッジへの起票と改善サイクル接続 |
 
 ---
 
@@ -38,7 +41,7 @@
 | 2. 学びの対話と講義 | 構造の上での RAG チャット・論文との議論・音声講義 | discuss / casual音声 / レクチャー / コーパス回遊（論文の海） |
 | 3. 理解の産出と痕跡 | 予測・再構成・違和感・問いを本人の痕跡として育てる | R層 / 理解サイクル / tension / わたしの地図 / わたしの記録 / 帰還の扉 / 構造の降下路 |
 | 4. 地図と位置づけ | 分野の中の「いまここ」と論文の位置づけ | Field Atlas / ランドスケープ / カテゴリギャップ / VA層（ベクトル係留）/ RE層（辺候補・推定の糸） |
-| 5. 疑いと検証 | 合意と検証を分離した認識的地位の台帳 | D層 / SL層（賭け金の台帳）/ ゼミ前ブリーフ |
+| 5. 疑いと検証 | 合意と検証を分離した台帳と、学習者自身の試行 | D層 / SL層（賭け金の台帳）/ ゼミ前ブリーフ / SB層（検証シミュレーション・自分で確かめた試行） |
 | 6. 教員の検討と共同体 | 説明の並存・承認・要素検討・共通部品化 | C層 / W層 / ライブラリ / 図スタジオ / グラフ対話レビュー（+論文層） |
 | 7. 運営基盤 | 権限・アカウント・版管理・通知・ガイダンス・AI運用・コーパスの成長 | V層 / G層 / Copilot / U層 / M層 / help_kb / アカウントライフサイクル / URL取得 / 論文ディスカバリー・レーダー |
 
@@ -133,6 +136,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
 - [段階ラベル辞書の正本](features/label_vocab_design.md) — 生値→段階ラベルの境界と共有語彙表（`core/label_vocab.py`）
 - [新機能 PR チェックリスト](development_checklist.md) — docs 3点セット・境界回帰テスト・アンカー整合
 - [改善サイクル（コーディングエージェントの運用規約）](architecture/improvement_cycle.md) — 段の宣言・各段の規律・サイクル自身の課題の記帳・自律と人の線引き・索引 §14 の計器の読み方
+- [ペルソナ通し受講テスト（UX 検証の刷新・設計中）](architecture/persona_enactment_testing_design.md) — 不変条項 PE1〜PE10・砂場と snapshot・ペルソナ 2 集団・行為レジストリ・審判 A〜E・改善サイクルへの接続・段階導入 Phase 0〜4・オーナー判断 D1〜D3
 
 ### バックエンド
 
@@ -152,12 +156,14 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
 - [図解析の反証型反復検証（#499）](features/contextual_figure_analysis_iterative_verification.md)
 - [教員指示付き図再解析](features/guided_figure_reanalysis_design.md)
 - [図⇄概念構造の接続](features/figure_concept_linking_design.md)
+- [生成言語を A層の生成文へ運ぶ（run options `language`・IK-0571）](features/generation_language_design.md)
 
 ### 群2: 学びの対話と講義
 
 - [学習機能（学生UI）](features/learning.md) — 3パネルUI、RAGチャット、音声会話、レクチャー
 - [「論文と話す」discuss モード](features/discussion_mode_design.md)
   ／[対話の歩調合わせ](features/discuss_dialogue_alignment_design.md)
+  ／[応答の骨格（答え→確認→問い返し1つ・鏡は核心語のみ）](features/dialogue_response_shape_design.md)
   ／[開幕素材のオーサリング](features/discuss_opening_authoring_design.md)
   ／[観測基盤](features/discuss_observation_design.md)
   ／[コーパス回遊層（コース無し議論・コーパス地図・地図の端）](features/corpus_roaming_design.md)
@@ -215,6 +221,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
   ／[要素インベントリ](features/element_inventory_design.md)
   ／[グラフ対話レビュー（教材起点のグラフ確認・承認画面）](features/graph_dialogue_review_design.md)
   ／[グラフの論文層（フレームに論文を肉付けする層）](features/graph_paper_layer_design.md)
+  ／[理論モジュール層（式の操作に「接点の狭さ」で境目を入れる中間層）と claim チェーンの位置づけ（**設計中**・オーナー判断待ち）](features/theory_module_layer_design.md)
   ／[知識オブジェクト層（構造化成果を stable_key 付きの一級の行にし、再解析を supersede 遷移にする層。知識構造の見直し Phase 1）](features/knowledge_objects_design.md)
   ／[学ぶ単位の一級化（論文の「教える単位」を `learning_units` の行にし、コース topic をその並びにする層。知識構造の見直し Phase 2）](features/learning_units_design.md)
   ／[概念レジストリ（`library_entries` を軸に、概念を SKOS 語彙でリンクする層。同一性候補・別名・関係・地図との対応。知識構造の見直し Phase 3）](features/concept_registry_design.md)
@@ -240,8 +247,11 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
 - [論文ディスカバリー層（arXiv 分野購読とコーパス成長ループ）](features/paper_discovery_design.md)
   ／[論文レーダー（教材起点の類似論文探索と比較分析）](features/paper_radar_design.md)
   ／[コーパスを補う論文（地図の薄い領域・検証記録の無い前提・基盤論文）](features/corpus_complement_design.md)
+  ／[論文レーダーの自律周回（探す → ペルソナの審判 → 取り込む → 確かめる、を bridge で回す検証の方式と実施記録）](features/paper_radar_autonomous_loop_design.md)
 - [制度指標カタログ（indicator governance）](features/indicator_governance_design.md) — 運営者・教員向け集約計器の定義・目的・宛先・粒度・非利用（ランキング / 成績 / 推薦 / 自動ゲート禁止）を一箇所に宣言し `GET /api/indicators` で全当事者に公開。vision.md §6.1 原則4 改訂（2026-09-04）の実装
 - [可視性6軸の宣言（disclosure axes）](features/disclosure_axes_design.md) — データ種別ごとに「誰に見えて、名前が出るか、引用できるか、評価に使うか、**外部の AI に渡るか**、いつ撤回できるか」を宣言し `GET /api/disclosure` で全当事者に公開。各対話 UI の入力欄には常設の事実文1行。vision.md §5.4（可視性を一軸に畳まない）の実装（2026-09-10）
+- [焦点論文（focus document）](features/focus_document_design.md) — 「いまの会話・操作はどの論文についてか」を `core/focus_document.py` の1関数（段順: 明示 → トピック → 直前の引用 → 画面の選択）と1規則（優先）・1規則（ID 衝突は fail-closed）で決め、RAG・前提の説明・画面文脈・記号・要素/部品文脈・降下路・範囲表示・構造帰属が同じ値を受け取る（2026-09-30）
+- [表示投影層（display projection）](features/display_projection_design.md) — 学習者向けの全ルート（`/api/learning` / `/api/me` / `/api/atlas`）の戻り値を1つの射影に通し、解析層の内部 ID・生の数値・英語の生成ラベル文を画面に出さない。遮断語彙の正本を `core/display_projection.py` 1箇所に集約（2026-09-30）
 
 - [共有物のバージョン管理（V層）](features/shared_versioning_design.md)
 - [状態管理・通知基盤](features/status_notification_design.md)
@@ -274,6 +284,8 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
   ／[再調査 2026-07-17（🔧/💬 全件解消済み）](architecture/vision_ux_gap_survey_2026-07-17.md)
 - [ビジョン×UXギャップ調査「六つのレンズ」2026-09-10（§9 非参照・6観点・是正11 + 提案30 + 着手の地図。詳細は architecture/six_lenses_2026-09-10/）](architecture/vision_ux_gap_six_lenses_2026-09-10.md)
 - [知識構造の見直し提案 2026-09-12（実論文2本の原本⇄構造化成果を照合。正本の所在・ID 安定性・学ぶ単位・概念同一性・外部標準の5観点で診断し、「知識オブジェクトの一級化 + 版非依存キー + 概念レジストリ」の段階案を提示。付属調査 A〜E は architecture/knowledge_structure_review_2026-09-12/）](architecture/knowledge_structure_review_2026-09-12.md)
+- [論文の再現性レビュー 2026-09-19（Phase 0〜4 実装後の再照合。実論文 12 本で「文章層と学ぶ単位は忠実・式/導出/図表は PDF 経路で未再現」を実測し、打ち切り・式の信頼連鎖・文書構造・接続・計器の是正を第 1 波として実装）](architecture/knowledge_reproduction_review_2026-09-19.md)
+- [根の是正 2026-09-30（60 件超の個別修正が当たっていた 4 つの根 — 表示投影の分散・焦点論文の不在・PDF 経路の上流品質・対話の型のプロンプト任せ — を、全ルートが通る 1 箇所と横断ガードレールに畳んだ記録）](architecture/root_cause_consolidation_2026-09-30.md)
 - [知識コンポーネントと抽象化の研究展望 2026-09-15（知識部品の利用契約・概要⇄詳細の対応検査・同一性/同値性/類似性の区別・段階的形式化・理解の測り方の5方針。文献調査 + 現行コードの静的確認で、実装提案ではなく研究展望）](architecture/knowledge_components_research_2026-09-15.md)
 - [対ユーザー支援エージェント調査（推奨1〜6 実施済み）](architecture/user_assistant_agents_survey_2026-07.md)
 - [AI アシスタント UX ロードマップ 2026-09-12（入口統合 → 構造 grounding（SA層 Phase 4） → ストリーミング の3段。順序の根拠・依存・受け入れ条件）](architecture/assistant_ux_roadmap_2026-09-12.md)

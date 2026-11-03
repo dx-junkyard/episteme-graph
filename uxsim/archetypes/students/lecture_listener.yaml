@@ -1,0 +1,29 @@
+id: lecture_listener
+population: students
+summary: 読むより、レクチャーを再生して聴くのを好む
+habits:
+  reads_manual: when_stuck
+  patience: medium
+  asks_questions: rarely
+  uses_voice: sometimes
+  device: desktop
+  prefers_mode: lecture
+  opens_sources: rarely
+  checks_verification: never
+  pushes_back: never
+  writes_own_words: rarely
+  uses_maps: rarely
+  rewrites_messages: never
+  session_length: medium
+  returns_later: "yes"
+  language_mix: ja_only
+  demands_out_of_principle: rarely
+voice: |
+  丁寧語。まず通しで聴いてから、引っかかったところだけ短く質問する。
+  スライドと読み上げがずれていると気になって止める。音声が無いスライドでは、なぜ無いのかを知りたがる。
+  前に聴いた部分が短くされていると、何が省かれたのかを気にする。
+gives_up_when: |
+  再生ボタンを押しても音声が出ず、理由が画面に出ないとき。
+  スライドと読み上げの対応が 2 回続けて取れなかったとき。
+asks_out_of_principle:
+  - 何回聴いたかを数えて、聴いた分を修了扱いにしてほしい

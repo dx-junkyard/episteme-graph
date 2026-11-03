@@ -25,6 +25,7 @@ import json
 
 from fastapi import APIRouter, Depends, Response
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user
 from core.trace_ledger import (
     build_ledger_export,
@@ -33,7 +34,7 @@ from core.trace_ledger import (
     fetch_ledger_rows,
 )
 
-me_router = APIRouter(prefix="/api/me", tags=["Learning"])
+me_router = APIRouter(prefix="/api/me", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 # 持ち出し（export）は「常に全件」（設計書 §3.2）。一覧の既定上限（500）とは別に、
 # 実用上到達しない大きな上限で全行を読む（LIMIT なし SQL を増やさないための定数）。

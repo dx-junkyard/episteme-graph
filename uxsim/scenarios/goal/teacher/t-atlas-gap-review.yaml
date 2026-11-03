@@ -1,0 +1,47 @@
+id: t-atlas-gap-review
+population: teachers
+runner: [api, browser]
+goal: "分野の地図タブで「論文の解析から見つかった候補」を読み、触れている論文の題名と逐語で判断して、1 件を採用し、1 件を理由を書いて却下し、見送り済みの表示から戻せることを確かめる"
+params_required: [domain_hint, accept_hint, dismiss_hint, dismiss_reason]
+steps:
+  - do: auth.login
+  - do: admin.atlas.open
+    with: {domain_hint: "{{domain_hint}}"}
+    note: 公開中の版・編集中の次版・修正報告の要約と、候補・関係の候補・索引・別名の区画を一通り読む
+  - do: admin.atlas.gaps.list
+    note: 候補ごとに、触れている論文の題名・理由・原文の逐語・近い既存項目の注記を読む（件数ではなく題名で判断する）
+  # 第 25 周 第 2 波（IK-0884）: 候補の条件から外れた採用済みの判断の別枠があれば、読んで候補へ戻すか判断する
+  - choose:
+      - {do: admin.atlas.gaps.orphaned_restore}
+      - {do: admin.atlas.gaps.list}
+    optional: true
+  - do: admin.atlas.gaps.accept
+    with: {gap_hint: "{{accept_hint}}"}
+    note: カテゴリとして妥当と判断した候補を採用する（下書きはこの操作では変わらない）
+  - do: admin.atlas.gaps.dismiss
+    with: {gap_hint: "{{dismiss_hint}}", reason: "{{dismiss_reason}}"}
+    note: 地図の項目にしない候補を、理由を書いて却下する
+  - do: admin.atlas.gaps.dismissed_filter
+    with: {show: true}
+    note: 「見送り済みも表示」をオンにして、却下した候補が残っているかを見る
+  - do: admin.atlas.gaps.restore
+    with: {gap_hint: "{{dismiss_hint}}"}
+    note: 却下を取り消せることを確かめる（行は消えず未判断に戻る）
+  - choose:
+      - {do: admin.atlas.gaps.dismiss, with: {gap_hint: "{{dismiss_hint}}", reason: "{{dismiss_reason}}"}}
+      - {do: admin.atlas.gaps.list}
+    optional: true
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/17-admin-atlas.md#gap-candidates
+  - manual: teacher/17-admin-atlas.md#gap-accept
+  - manual: teacher/17-admin-atlas.md#gap-dismiss
+  - manual: teacher/17-admin-atlas.md#gap-dismissed-filter
+  - manual: teacher/17-admin-atlas.md#gap-restore
+watch_for:
+  - 支持論文は題名の列挙で出て、件数のバッジや確からしさの数値が出ない
+  - 却下は理由が要り、理由が空のままでは送られない（画面は「却下には理由が必要です」と言う）
+  - 採用しても次版の下書きは変わらず、そのことを画面が事実文で言う
+  - 却下した候補は見送り済みの表示に理由付きで残り、戻すと未判断に戻る（行は消えない）
+  - 候補が 1 件も無い分野では「いまレビューする候補はありません。」と事実で言い、候補ゼロの理由を一文で添える（IK-0851）
+  - 導出から外れた採用済みの判断は別枠に出て、［候補へ戻す］か取り込みの入口がある（IK-0884）

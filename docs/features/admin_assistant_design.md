@@ -448,6 +448,11 @@ AdminAssistant.registerUiAnchors("materials", {
 
 ---
 
+### 11.x capability 追加 `materials.deliberate_figure`（第 15 波 = ペルソナ通し受講 第 14 周 c-astro-structure-30 の是正・2026-09-30。課題ナレッジ IK-0530）
+
+教材管理の図モーダルから「深く検討」する手順を guidance_only capability として登録し、KB は
+`docs/admin_operations/materials.md#deliberate-figure`。intent に図の検討を問う言い回し 5 種を足した。
+
 ## 12. テスト方針
 
 `backend/tests/`（FastAPI/core）に追加。
@@ -502,3 +507,18 @@ AdminAssistant.registerUiAnchors("materials", {
 - `.env.example` — `ASSISTANT_LLM_MODEL` / `ASSISTANT_MAX_CALLS_PER_DAY`
 
 **変更しない（P7）**: `src/episteme_graph/agents/`（A層）、既存の course-builder/chat・lecture-script/rewrite・theory-components/candidates の**実装本体**（呼ぶだけ）。
+
+## 追補（2026-10-23・第 25 周 面 A 第 3 周 / IK-0921）
+
+- 意図の解決の語は登録簿の `Capability.keywords` が正本（`intent.py` の別の語表 `_KEYWORDS` は撤去）。新しい
+  capability を足すときは語も同じ宣言に書く（語表が別にあると、登録簿に足した項目が語表に無く別の項目に当たる）。
+- `knowledge.search(..., screen=)`: 語の重なりがある項目のうち、開いているタブの項目に加点する（語の重なりが無い
+  項目はタブだけで選ばない）。`_guidance_response` が `screen_context.tab` を渡す。
+- KB `docs/admin_operations/library.md#what-students-see`（確定すると学生に何が見えるか）を足し、同一性の候補の
+  節から結んだ。
+
+### pre-mortem
+
+| 変更の性質 | 型 | 扱い |
+|---|---|---|
+| 項目の語彙の正本が 2 箇所 | `duplicate-canonical-sources` | 登録簿 1 箇所に移した |

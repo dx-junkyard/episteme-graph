@@ -1,0 +1,29 @@
+id: non_native
+population: students
+summary: 英語で入力する
+habits:
+  reads_manual: when_stuck
+  patience: medium
+  asks_questions: sometimes
+  uses_voice: "no"
+  device: desktop
+  prefers_mode: sequential
+  opens_sources: often
+  checks_verification: sometimes
+  pushes_back: rarely
+  writes_own_words: sometimes
+  uses_maps: sometimes
+  rewrites_messages: often
+  session_length: medium
+  returns_later: "yes"
+  language_mix: en_only
+  demands_out_of_principle: rarely
+voice: |
+  Writes in English, short and polite. Reads Japanese slowly and relies on the English original
+  wherever it is shown. When a reply comes back in Japanese, asks "Could you explain this in English?"
+  Rewrites a message when the reply seems to have misunderstood it.
+gives_up_when: |
+  When a screen shows only Japanese text and the English original cannot be found.
+  When two replies in a row come back in a language they did not write in.
+asks_out_of_principle:
+  - Please tell me my score so I can report progress to my supervisor

@@ -151,7 +151,7 @@ class TestLandscapeStatusFallbackMirror:
     `admin-release-review.js::STATUS_FALLBACK_LABELS` はバイト一致の2表。
     どちらも「相手ファイルが未読み込みでも成立する」ことが目的なので共有参照には
     せず（fail-soft の意味が失われる）、一致だけをここで固定する。
-    正本はサーバの `core/landscape/schema.py::STATUS_LABELS`。
+    正本はサーバの `core/label_vocab.py::LANDSCAPE_STATUS_LABELS`（第 23 波 F5）。
     """
 
     def _table(self, filename: str, var_name: str) -> dict[str, str]:
@@ -169,20 +169,22 @@ class TestLandscapeStatusFallbackMirror:
         release = self._table("admin-release-review.js", "STATUS_FALLBACK_LABELS")
         assert admin == release
 
-    def test_ai_related_fallback_labels_are_the_server_provenance_labels(self):
-        """出所ラベル（AC-005）はフォールバックでも崩さない。
+    def test_fallback_labels_are_the_server_status_labels(self):
+        """フォールバック表はサーバの教員向け状態名（``status_label``）と逐語一致させる。
 
-        フォールバック表は状態ラベルと出所ラベルの折衷（``rejected`` /
-        ``superseded`` は画面用の短縮語）だが、**AI 推定を教員確認済みに見せない**
-        という一線はサーバの `PROVENANCE_LABELS` と逐語一致させる。
+        第 23 波 F5（2026-10-09）: 以前は学習者向けの出所ラベル（「確認待ち（AI推定）」）を
+        混ぜており、行のボタン「再検討」を押した結果がサーバ応答では「再検討中」・
+        フォールバックでは「確認待ち（AI推定）」と別の語になっていた。正本は
+        ``core/label_vocab.py::LANDSCAPE_STATUS_LABELS``（``landscape/schema.py::STATUS_LABELS``
+        はその別名）。AC-005 の一線（AI 推定を教員確認済みに見せない）は保つ。
         """
         from core.landscape import schema as ls
 
         admin = self._table("admin.js", "LANDSCAPE_STATUS_FALLBACK_LABELS")
-        for key in ("confirmed", "inferred", "review_required"):
-            assert admin[key] == ls.PROVENANCE_LABELS[key], key
-        # 残りは画面用の短縮語（サーバの状態ラベルとは別文言でよい）。
-        assert admin["rejected"] and admin["superseded"]
+        assert admin == dict(ls.STATUS_LABELS)
+        assert "未確認" in admin["inferred"]
+        for key in ("inferred", "review_required", "rejected", "superseded"):
+            assert "確認済み" not in admin[key], key
 
 
 class TestLectureStudioGenericTitlesMirror:

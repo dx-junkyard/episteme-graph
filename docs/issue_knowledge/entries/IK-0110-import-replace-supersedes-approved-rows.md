@@ -56,6 +56,15 @@ resolution:
   landed_in:
     - backend/core/knowledge_import/apply.py
     - docs/features/knowledge_transfer_design.md §14.1
+  principles:
+    - principle: sync-by-stable-key-and-protect-human-decisions
+      use: extracted
+      note: >-
+        採った部品は ③の派生形（人が確定した行を取り込み側で合流させてから同期に渡す）。固有の差分: 同期そのものは非改変で、事前確認が「外れる／外さない」の内訳を返す。
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 実 DB（docker）での束の取り込みの往復 E2E（docker 復帰後）
 related: [IK-0108, IK-0111]
 view_of: []
 history:

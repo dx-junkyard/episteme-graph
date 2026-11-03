@@ -402,6 +402,19 @@ class CartridgeContext:
   `detail` に載せない。UI アンカーは `materials.url-upload{,-modal,-submit}` +
   `llm-models.url-fetch-domain{s,-add,-remove}` の6件（件数の正はテスト）。
 - ガードレールは `test_url_fetch_{core,api,guardrails,ui_static}.py`。
+- **arXiv は TeX が既定・PDF は同期フォールバック（2026-09-30、`paper_radar_design.md` §15.9）**:
+  `pd_schema.DEFAULT_SOURCE_FORMAT = "tex"`。取得方針の正本は `api/source_resolution.py`
+  （`/src/` → マジックが PDF なら 1 回で終わり / gzip は `tex_archive.load_tex_archive` で**受理前に**
+  読めるか確かめ、読めない・404 のときだけ `/pdf/` = **1 件あたり最大 2 回**・**429
+  （`url_fetch.RateLimitedError`）では 2 回目を取らない**）。`/ingest`・キュー worker・汎用
+  「URLから取得」の arXiv URL（abs / pdf / src を書き換え）が通る。`documents.source_url` は実際に
+  バイト列を返した URL、応答に `effective_format` / `fell_back`。解析 run の生成言語
+  `options.language`（`ja` / `en`、再解析は継承）は discuss_opening・contextual_explanation の
+  指示だけを変え LLM 呼び出しを増やさない（`discuss_opening_authoring_design.md` §14）。
+  2026-10-01 に paper_skeleton / thesis_reconstruction / narrative_annotator / component_assembly の
+  生成文にも拡張（正本 `agents/generation_language.py`・orchestrator は `_run_language(ctx)`。未指定なら
+  prompt は 1 バイトも不変。決定論の後段が英語キーワードで読む component の label / summary と
+  equation_semantics は対象外 — `generation_language_design.md`）。
 
 ### 論文ディスカバリー層（arXiv 分野購読, migration 071/072, 2026-08-27）
 
@@ -1299,6 +1312,12 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
 
 ### 利用者マニュアル KB（help_kb, migration 058/059, 2026-07-25）
 
+- **マニュアル検索の是正（2026-10-04・第 22 周・正本は設計書 §9）**: 目次節（リンクの並びだけの節 — 構造で判定）は検索の候補から外す
+  （索引からは外さない）/ マニュアル検索だけ語の切り方を漢字・カタカナ 1 字 + かな漢字 2 字 n-gram に（ひらがな 1 字は数えない・Copilot KB
+  の `tokenize` は不変）/ かな・漢字を含まない問いは語の照合を使わずベクトル補助層 → 開いているパネルの節（英語の前置き 1 行・LLM 0 回）/
+  「🧪 動かして確かめる」のパネルが開いていて実行結果の言葉（`simulation_bridge.schema.mentions_simulation_result`）を含む問いは
+  pre-route でも分類の USAGE_HELP でも HELP に回さず DOMAIN_RAG へ（型付き `usage_help` は HELP のまま）。
+
 docs/manual を AI アシスタントの知識源にする非ベクトル KB。正本は
 `docs/features/manual_help_kb_design.md`。ベクトル RAG は建てない（97KB・70節に埋め込み
 基盤は過剰。無ヒット率の計器が要求してから Phase 3 で検討）。**chunks テーブルへの
@@ -1409,7 +1428,10 @@ docs/manual を AI アシスタントの知識源にする非ベクトル KB。�
 - **エンジン**: `backend/core/admin_assistant/next_steps.py`（FastAPI / LLM 非 import）。
   `compute_next_steps(session, user)` がルールカタログ（**正本は同ファイルの `RULE_CATALOG` /
   `_RULE_EVALUATORS`** — 件数をここに書き写さない）を本人所有の教材・コースに対して評価:
-  `materials.none` / `material.analysis_failed` / `material.no_course`（required）、
+  `materials.none`（本人所有ゼロかつ可視な教材もゼロのときだけ）/ `material.analysis_failed` / `material.no_course`（required）、
+  `materials.shared_available`（所有ゼロ・共有教材あり → コースビルダーへ。IK-0363）/ `material.analysis_llm_failed`
+  （採用 run の `stage_outputs.llm_failures` あり = 解析中に AI 提供元の呼び出しが失敗。IK-0362。要約は
+  `core/llm_usage/run_failures.py`、orchestrator が完了時に書く）、
   `course.not_published` / `course.no_atlas_binding` / `course.atlas_binding_ready` /
   `course.atlas_binding_stale` / `figure.unreviewed_modes`（未レビューの図分類が残る教材）/
   `course.discuss_opening_unreviewed` / `manual.help_gaps_pending`（recommended）、
@@ -1544,8 +1566,22 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   `analyze_images`（既定 false）。`document_analysis_runs.options JSONB`（migration 041）に
   run 単位で保存（`stage_outputs` への相乗り禁止）。
 - **`figure_image_extraction`**（`core/document_pipeline/figure_images.py`、非LLM・**常時実行**、
-  `document_structure` 直後）: PyMuPDF 埋め込み画像抽出 + caption 近傍の領域レンダリング
-  fallback（`extraction_method='embedded'|'region_render'`）。MinIO `figure-images` バケット +
+  `document_structure` 直後）: 図領域は `figure_regions.py` が決める（2026-09-24 改訂・設計書 §17）—
+  障害物（本文・見出し・番号付き式・他の caption・柱）を**組版と幾何から**判定し（reading order を
+  使わない）、caption の上（空なら下）の障害物に挟まれた帯に掛かる**インクの連結成分**を集める。
+  成分は帯の外へはみ出してよい（切り抜き境界の向こうへ連続する要素を取り込む）。「図 → 短い文字塊 →
+  図」と連続していれば文字塊を障害物から外してやり直し、阻まれたままの辺は artifact の
+  `quality[].truncated_edges` に残す。図領域の 90% 以上を1つの画像配置が覆うときだけ `embedded`、
+  それ以外（ベクター図・部品画像入りの図）は `region_render`（どちらも配置を描き直す・180dpi 以上）。
+  情報量（インク比・エッジ密度）の乏しい画像は図として提示しない（caption 付きは画像なしの failed 行、
+  caption 無しは保存せず `skipped` に数える）。**caption 幅や reading order で図領域を決める実装に
+  戻さない**（`extraction_method='embedded'|'region_render'`）。
+  **2026-09-25 追補（設計書 §18・migration 087）**: 絵の無いものは行を作らない（`skipped` / `not_saved`
+  に残す）。抽出が最後まで通ったら今回作られなかった前回までの行を `status='superseded'` にし（行は
+  消さない）、図・画像一覧・検出要素・G層・二層説明の入力は `figure_images.is_listed_figure`
+  （`status='extracted'`）だけを使う。**caption の位置の正本は PDF の文字層**
+  （`figure_regions.anchor_caption`。構造化の頁・位置は当てにしない — GROBID 経路は頁違い・本文段落の
+  誤認・bbox なしが起こる）。文書構造に無い caption は文字層から足す（`caption_block_id` なし）。MinIO `figure-images` バケット +
   `document_figures` テーブル（`UNIQUE(document_id, figure_key)` upsert）。caption 対応が
   取れない画像も `caption_block_id=NULL` で保持（P4）。図単位の失敗は `status='failed'` で
   非致命。**図中ラベル抽出（migration 051）**: 図領域内のテキストスパンを
@@ -1811,6 +1847,9 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
 完全に空なら `model_generated`。判定は `search_chunks_with_metadata` が返す
 `material_id` を使うため、この関数のクエリを変更する際は `material_id` の SELECT を
 落とさないこと。
+第 17 周（2026-10-01）: 表示中トピックの出典チャンク（`material_chunk_ids`）も `[出典N]（表示中の教材の出典）` として登録し
+（`_topic_source_rows`・可視性は `get_chunks_for_prompt` で強制・最大3件）、式の印字番号と AI復元の印を文脈に1行で添える
+（`core/formula_facts.py`・IK-0577）。答え方のメタ語（一言・根拠・短く…）は内容語に数えない。
 
 ### component 根拠カードの引用チップ化 + コーススコープ component 文脈API（2026-07-21）
 
@@ -1840,6 +1879,12 @@ role/confidence（`_best_mapping` の照合来歴 `exact_title|title_similarity|
   null で枠ごと非表示）+ `graph`（W層 context_lens の 1-hop を candidate 除外で射影・
   失敗時 null 縮退。フロントは SVG 表示 + component ノードクリックで再フェッチ=「旅」）。
   confidence キーは再帰除去（W8 相当）。
+- **トピック優先解決（2026-09-30）**: 式 ⚓ などの要素文脈は表示中トピックの論文で優先解決し、複数の論文に当たれば未解決にする
+  （IK-0553）。component 文脈の依存先は同一論文の live component に解決して辿れる項目にする（IK-0554）。
+  **2026-09-30 以降この優先は焦点論文（下記「焦点論文」節・`core/focus_document.py`）に一本化** — 部品本体の
+  解決もコース横断 `LIMIT 1` をやめ、焦点の論文 → スコープ内で一意 → それ以外は未解決（FD4）。
+- **主張の宛先（2026-10-01）**: 新しい freeze は `![[claim:…]]` を論文内で一意な形（DB UUID → `{block_id}:{agent_claim_id}`）で書き
+  （`course_content_builder.assign_claim_addresses`）、`element_context._resolve_claim` は UUID / block 付き / 素の番号の順に狭める。素の番号が論文内で曖昧なら事実文（`ambiguous_claim_number`）。教材の document は常に `document_id`（UUID）で渡し、両形の突き合わせは `_resolve_document` / `core/document_refs.py` だけ（IK-0550）。
 - **ガバナンス**: コース公開（freeze）= ソース文書内 1-hop 近傍の露出承認（設計書 §6）。
 - ガードレール: `test_component_context_{core,api}.py` /
   `test_component_evidence_chips_ui_static.py` / `test_component_evidence_admin_ui_static.py`。
@@ -1947,6 +1992,29 @@ DO1〜DO6: 本文非含有/仮名化/学習者に数値非表示/削除APIなし
   `test_discuss_phase2_ui_static.py`（可視性 fail-closed・無断フォールバック禁止・
   生成プロンプト必須要素・数値非表示・`_discussion` 痕跡動作・U層タグ分離・k=3 正本）。
 
+### 応答の骨格（Dialogue Response Shape, migration なし, 2026-09-30）
+
+学習チャット RAG 応答の**区画**（答え → 確認 → 問い返し 1 つ → 前提の逆質問）を生成後にサーバが組み立てる層。
+正本は `docs/features/dialogue_response_shape_design.md`（RS1〜RS5・課題 IK-0548 / IK-0575 / IK-0576）。
+
+- **RS1 先に答える / RS2 確認は後ろ・1 往復に 1 つまで**（前提の逆質問か鏡があれば `anchor_confirm` を出さない）/
+  **RS3 問い返しは 1 つまで**（末尾に連なる問いは最後の 1 つだけ・確認のあるターンは問い返しなし・本文が問いだけなら
+  組み替えない）/ **RS4 鏡は核心語のみ**（同意・挨拶・前置きは映さない・核心語が残らなければ鏡を出さない）/
+  **RS5 保存文の形は不変**（本文 → `\n\n---\n\n` + `PREREQUISITE_GATE_ANSWERED_MARKER` + 逆質問。履歴の判定器 4 本が依存）。
+- 正本は `backend/core/dialogue_shape.py`（純関数・FastAPI / LLM 非 import。`assemble` / `render_answer_text` /
+  `split_closing_question` / `mirror_core` / `shape_dto` / `previous_correction_fact`）。`_learning_chat_core` は
+  `assemble` を `persist_chat_history` の前で 1 回だけ呼び、鏡は既存 `extract_mirror` の直後に `mirror_core`（冪等）。
+- DTO `LearningChatResponse.shape = {closing_question, has_gate, mirror_kept}`（数値なし）。フロントは `renderAiContent` が
+  末尾の問い返しを `.closing-question` の独立段落に切り分ける。ストリーミングは `final` が区画済み本文で置き換える。
+- IK-0576: 直前の assistant 往復の訂正文（逐語・200 字）を `[前の往復での訂正]` として system 末尾に持ち越し、
+  撤回するなら撤回と明示させる（`_anchor_ladder_hint` の直後。casual / elicit では持ち越さない）。
+- **応答の順序・問いの数・鏡の範囲を新しい固定文の継ぎ足しで制御しない — `core/dialogue_shape.py` を通す**。
+  プロンプトは区画の中身を埋めるだけ（discuss ルール 2 の核心語の 1 文・ルール 6 の「問いは 1 つ」の 1 文は同じことを言う補助）。
+- **詰まりの区画（第 17 周）**: 「わからない」とだけ返した往復（`is_stuck_reply`・casual / discuss / 楽屋を除く）は
+  `assemble(stuck=True)` が足場 1 つ（3 文まで）・問い返しなしにし、前提の逆質問は次の往復へ回す（提示の記帳もしない）。
+  RS3 の問いの検出は「か。」で終わる日本語の問いも拾う（`test_dialogue_shape_stuck.py`）。
+- ガードレール: `test_dialogue_shape_{core,guardrails,route}.py`。
+
 ### discuss 開幕素材のオーサリング（投影是正 + AI生成 + 教員添削, migration 062, 2026-07-30）
 
 discuss 開幕画面の情報を「主語で分けて全部出す」層。正本は
@@ -2053,6 +2121,30 @@ Phase 1。Phase 2 = 構造 grounding（SA層 §11）/ Phase 3 = ストリーミ�
   再構成・楽屋の入口統合 / ストリーミング（= Phase 3）。**Phase 2（学習チャットへの構造
   grounding）は 2026-09-12 実装済み** — 上記「画面文脈アダプター（SA層）」節の Phase 4。
   **Phase 3 の 3-a も同日実装済み** — 下記「LLM 応答のストリーミング」節。
+
+### 焦点論文（Focus Document, migration なし, 2026-09-30）
+
+「いまの会話・操作はどの論文についてか」を**1つの解決器と1つの優先規則**で決める層。正本は
+`docs/features/focus_document_design.md`（FD1〜FD5）。**「どの論文か」を決める条件式を新しく書かない —
+`core/focus_document.py` を通す。**
+
+- **段順（FD1）**: `resolve_focus_document` = ①明示（document 直付け discuss の単一 document・タップ位置のチャンク）→
+  ②トピックの論文 → ③直前の回答が引用した論文 → ④画面で選んだ論文（discuss 開幕の起点チップ / トピック教材の
+  `TopicMaterialResponse.document_id`）。各段はスコープとの積だけ（FD2 = DM1。範囲を広げない）。
+- **優先規則（FD3）**: `prefer_focus` — 採用の下限（`>= 0.30`）を満たす焦点の行があれば、焦点の外は焦点内の最良より
+  **厳密に高い（`>`）**ものだけ残す。旧 `_prefer_topic_documents` / `_drop_off_topic_chunks` は薄い委譲。
+- **ID 衝突（FD4）**: `resolve_in_focus` — 焦点の段をまとまりで見て候補を持つ焦点の論文がちょうど1つ → 焦点に無ければ
+  スコープ内で一意 → それ以外は `None`（2本束ねたトピックの両方に `eq_5` があれば `None`。コース横断 `LIMIT 1` 禁止）。element_context / component_context / descent / symbol_lookup が使う。
+- **配線**: chat core は `resolve_focus_document(` を**1回だけ**呼び、RAG の並べ替え・画面文脈の要素解決・痕跡の
+  `cited_chunk_ids` が同じ値を受け取る。前提の説明と非チャットの操作（記号・要素/部品文脈・降下路。`topic_id` /
+  `document_id` クエリ）は `services.learner_focus_document`（③段は `services.previous_cited_document_ids` =
+  保存済み出典メタの `document_id`）。チャット内の前提の説明（LEARNING_ADVICE）は chat core の1回とは別に
+  `learner_focus_document` を呼ぶが、④段（`screen_context.selection.document_id`）まで同じ段順を渡す。
+  **段の条件（FD-note）**: document 直付けで `all_visible` を明示したときは単一 document を①段に入れない /
+  ③段は議論（discuss・`_discussion`）だけ。範囲表示（`nearby`）は③段で `_discussion` の痕跡をコース全体へ広げない。
+- **FD5**: 痕跡に焦点の document_id 列を焼かない（記録してよいのは `source` の enum のみ）。
+- 対応する課題: IK-0513 / 0552 / 0553 / 0554 / 0556（前提の説明が議論中の論文を受け取っていなかった件を含む）。
+- ガードレール: `test_focus_document_{guardrails,core}.py`（1回呼び出し・独自比較の禁止・消費者の import・段順・衝突）。
 
 ### LLM 応答のストリーミング（Phase 3-a, migration なし, 2026-09-12）
 
@@ -2255,8 +2347,10 @@ UC9 数値を見せない / UC10 既存層は非改変。
 - **派生痕跡の後始末（P4 情報を落とさない）**: 取り除いたメッセージ id を `payload.message_id` に
   持つ `interest_traces` は **削除せず** `status='superseded'` にする。以降 tension/anchor の
   worker（`_fetch_pending_*`）と各 digest・問いの軌跡ビューは `status <> 'superseded'` で除外する。
-  ※ 誤解記録（`personal_layer.misconceptions_by_topic`）は message_id リンクを持たないため、
-  現状は個別 supersede しない（既知の限界。将来 message_id 紐づけを付けてから対応）。
+  誤解記録（`personal_layer.misconceptions_by_topic`）も同じトランザクションで `candidate` の行だけ
+  `superseded` + `superseded_reason` に遷移する（2026-10-09 第 23 波。`graph_data.supersede_misconceptions_for_messages`。
+  本人が確定・却下した行と message_id の無い旧行は動かさない）。取り消しの理由は `payload.superseded_reason`
+  （`rewrite` / `delete`・正本 `label_vocab.TRACE_SUPERSEDED_REASONS`）で、わたしの記録が言い分ける。
 - **フロント（app.js）**: user バブルに ✏️/🗑。書き直しは本文を入力欄へ戻し `editingMessageId` を
   立て、送信で `_replace_message_id`（内部）→ クライアント履歴も同位置で truncate。削除は確認の上
   DELETE API を呼び、成功時にクライアント履歴を truncate。トピック切替で編集状態は解除する。
@@ -2575,6 +2669,11 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   禁止）。UI は `deliberation.js` の上位/中心/下位レーン＋パンくず中心移動（モーダル非破棄）。
   dialogue grounding にも同じ focus/upper/lower を注入する。文脈上の役割は要素の固定属性に
   保存しない。
+- **図の文脈の可読性（2026-09-25・migration なし）**: 図を参照する本文の文（メンション文）を
+  `placement.mentions` で出して主役にする（抽出は `core/deliberation/figure_mentions.py`・A層非改変）。
+  段落メンション由来の主張は `cited_for_claim`「を述べる本文で参照される」・group `mention_claim`
+  （証拠関係 `provides_evidence_for` は caption 由来のみ）/ 親子 claim は親へ畳む / ITEM `full_text` /
+  カードの語順は「ITEM → 関係語」（全要素共通）。正本は `element_context_presentation_redesign.md` §11。
 - **ガードレール**: `test_deliberation_guardrails.py` / `test_deliberation_positioning.py` /
   `test_deliberation_ui_static.py` / `test_deliberation_annotations.py`（FastAPI 非 import・
   candidate-only・削除 API 不在・権限ゲート・confidence 生値非漏洩・A層非改変）。
@@ -2684,8 +2783,27 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   一意なので層で分けない・上限600）に控え、描画時に自動レイアウトへ重ねる。**サーバへ送らない**
   （端末で見るときの都合であって共有物ではない — 保存 API も列も作らない）。出口は
   「配置を元に戻す」（アンカー `graph-review.reset-layout`）。保存できない環境では黙って自動配置。
+- **対話の読みやすさ — 論文の事実と処理の記録を分ける（§18 追補・2026-09-22・migration / API /
+  LLM コールいずれも増やさない）**: 応答冒頭に「AIの読み（未確認）：」が二重に出て読み上げも
+  そこから始まり、末尾に「未レビューのノードや式詳細は多数ありますが…」が付いていた
+  （オーナー報告）。原因は**材料の混在** — grounding が「論文自体についての事実」と「システムが
+  論文を処理したときの記録」（レビュー状態・検証記録・展開しなかった層・省略・件数）を1つの
+  平らな一覧で渡し、未レビュー欄には式の詳細層のノード名まで数十行並べていた。**混ざる材料を
+  渡さないのが先で、プロンプトの禁止はその後**。①`graph_grounding_to_text` を2区画に分割 —
+  `[この論文の理論構成]` / `[構成どうしの関係]` / `[グラフの読み方]`（**原文の裏付けはここに
+  残す** = 推定を確定として語らせない）と `[解析・レビューの記録（…教員がこの点を尋ねたときだけ
+  使ってください）]`。名前で挙げる未レビューは**論文区画と同じ母集合（主グラフ）だけ**、詳細層は
+  1行に集約、**数（ノード数・残り件数）は渡さない**（「多数ありますが」の出所）。②プロンプトは
+  禁止の列挙ではなく区画の使い分けを宣言（「既定では前者だけを使って答えてください」+ 概要志向
+  「全体像をおおづかみに」「5文程度」）。§15 の契約フレーズは逐語のまま。③ラベルは「画面が
+  自動で表示します。返答本文にラベルを書かないでください」+ `core/llm_worker/chat_turn.py::
+  strip_stance_prefix` が `reply` / `spoken` の**先頭**の `stance_label` を落とす（要素対話にも
+  効く・文中は残す）。④網羅性の常在表示は会話の最後の1枚のラベル
+  `label_vocab.REVIEW_PENDING_LABEL` =「未レビューの要素あり」（JS は逐語ミラー・グラフ状態
+  からの読み時導出・保存しない・件数なし）。**新しい AI 対話の grounding を作るときは、論文の
+  事実と処理・レビューの記録を同じ区画に混ぜない。**
 - **ガードレール**: `test_graph_review_{core,api,guardrails,ui_static}.py` +
-  `test_graph_review_voice_api.py`。
+  `test_graph_review_voice_api.py` + `test_llm_worker_stance_prefix.py`。
 - **非スコープ（v1）**: 一括承認 / edge の承認 / equation・evidence ノードの承認 /
   G層 To-Do ルール（恒常点灯するため運用実測後に判断）/ 学習者向け表示。
 
@@ -2768,7 +2886,8 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   `label_vocab.WM_INTERACTION` 3段・縮退文はサーバ fact `WM_DEGRADED_NOTICE` に一本化）。
 - **Phase 5 ゼミ前ブリーフと鏡面化**（`seminar_brief_mirroring_design.md`）:
   `core/doubt/seminar_brief.py`（4区画 `fragile_assumptions` / `single_support_lines` /
-  `clear_skies` / `learner_handoff`、SL1 閉世界語彙のガードレール対象）+ `routes/seminar_brief.py`
+  `clear_skies` / `learner_handoff`、SL1 閉世界語彙のガードレール対象。2026-10-01: 同文面の項目は式名で区別するか 1 行に畳み・
+  自分の主張を自分の支持線に数えない・`learner_handoff` は k-匿名の素朴な問いの集約（名前とレンジのみ）を出す — IK-0593）+ `routes/seminar_brief.py`
   （GET 1本・権限2段ゲート）+ 教材行 ⋯ メニュー「ゼミ前ブリーフ…」。鏡面化は
   `_get_discuss_system_prompt` の 〔鏡〕 契約 + `core/discuss/mirroring.py::extract_mirror`
   （鏡文中の**すべて**の「」引用が学習者の直前発話の逐語部分文字列であること・最短2文字・
@@ -2892,6 +3011,39 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   （引き受けの段）・第2軸の帰属と開示の分離・第3軸の条件付き再利用（**宣言**の層であって
   可視性の選択肢を増やす層ではない）。
 
+### 表示投影層（Display Projection, migration なし, 2026-09-30）
+
+学習者向けの全ルートの戻り値を**1つの射影**に通し、解析層の内部 ID（`eq_blk_*` / `eq_tex_*` /
+`claim_span_*` / `theory_op_*` / `ev_*` / `synth_claim_*` / `sym_N` / `k1:` / UUID ラベル）・生の数値
+（confidence / weight / score / 件数）・英語の生成ラベル文を画面に出さない層。正本は
+`docs/features/display_projection_design.md`（DP1〜DP6・§6 実装記録）。
+
+- **語彙の正本は `backend/core/display_projection.py`**（FastAPI / sqlalchemy / LLM / pydantic 非 import）:
+  統合語彙 `INTERNAL_ID_TOKEN_RE`（論文の式番号 `eq_12` / `eq_2_7` は除外）・`FORBIDDEN_KEYS_LEARNER` /
+  `FORBIDDEN_KEYS_TEACHER`・番地キー `ID_KEY_RE`（値を遮断しない）・表示キー・`LABEL_KEYS`（英語生成文の
+  置換対象）・`UNIDENTIFIED_ELEMENT_TEXT`・`project_for_learner` / `project_for_teacher`。旧遮断器
+  （learner_context_common / deliberation.labels / theory_modules.schema / graph_paper_layer.schema /
+  course_content_builder / reference_health / discuss.opening / doubt.seminar_brief）は判定を変えずに
+  ここの系統別定数を参照する（ガードレールが同一オブジェクトを検査）。
+- **`backend/api/display_route.py::LearnerDisplayRoute`**: ルーター 15 本が `route_class=` に持ち、
+  エンドポイントの戻り値を直列化の前に射影する（Response・None は素通し・射影失敗は元の値 = DP6）。
+  SSE の `final` は `project_learner_model` を通す（`_sse_frame("final", response.model_dump())` の字面は不変）。
+- 値全体が 1 トークンの内部 ID は**表示キーでだけ**置き換え、`chain` / `edges` / `footprints` のような
+  番地の列は残す（DP3）。本文中の埋め込み参照（`![[component:comp_001]]` / `![[equation: [[eq_x]] ]]` /
+  `[[FORMULA_3]]`、`EMBED_MARKER_RE`）の内側と、`*_url` / `*_src` / `*_href` / `*_path` キー・`/api/` か
+  `http(s)://` で始まる値は番地として遮断しない（図の画像・教材の埋め込みが引けなくなるため）。
+  英語生成文の置換は `LABEL_KEYS` かつ定型の目印を持ち、既知の `element_type` を持つ項目だけ
+  （論文タイトルは残す・`response_space` / `next_actions` / `sources` / `options` の選択肢は畳まない）。
+  応答本文が置き換わるため、履歴の出典メタの復元（`_rehydrate_history_sources`）は assistant `id` →
+  `reply_to_id` → 本文の順に突き合わせる。
+- **新しい学習者向けルートは `LearnerDisplayRoute` を持つルーターに置く・遮断語彙（内部 ID の正規表現・
+  禁止キー集合）を再定義しない**。対象外は auth / groups / export / indicators / disclosure。
+- **教員向け（DP7, 2026-10-01）: 名指しの面（グラフレビュー・論文の順・理論モジュール・ゼミ前ブリーフ・W層の要素文脈・
+  グラフ全体対話）は `project_for_teacher` を通す** — 専用ルーターは `route_class=TeacherDisplayRoute`、admin ルーターに
+  同居する面はエンドポイントで `project_teacher_dto` / `_teacher_view` を呼ぶ（admin ルーター全体には掛けない）。
+- ガードレール: `test_display_projection_{guardrails,core}.py`（全学習者ルートの route class・
+  response_model・語彙・純粋性・委譲の同一性・リーク走査）。
+
 ### 画面文脈アダプター（Assistant Screen Adapter, SA層, migration なし, 2026-09-06）
 
 各画面の AI 対話（テキスト・音声）に「教員がいま画面で選んでいるもの」を渡す層。**画面は
@@ -2926,7 +3078,7 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
 - **Phase 4 = 学習チャット（`screen="learning"`, 2026-09-12 実装・migration なし・新エンドポイント
   なし・LLM 回数不変）**: 正本は同設計書 §11（実装記録 §11.15）。段階導入のうち **4-a（選択
   テキストの注入）/ 4-b（`element` + `view`）/ 4-d（`verification` + `placement`）が出荷済みで、
-  4-c（`topic` / `visible`）は保留**（ガードレールが「登録 kind は element/verification/
+  4-c（`topic` / `visible`）は保留（2026-09-30 再確認: スライド位置・復元式の印が grounding に載らない件は IK-0577 で未解決）**（ガードレールが「登録 kind は element/verification/
   placement/view の4つだけ・`resolve_topic` / `resolve_visible` が定義されていない」ことを AST で
   固定。フロントは `visible_entities` を契約どおり送るがサーバは正規化して捨てる）。
   core は `resolvers/learning.py`（4解決器。`learner_context_common` からは
@@ -2948,6 +3100,12 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   観測は `discuss_metric_events` の `structured_grounding_present`（種別だけ・payload 空・
   サーバ側記録）。ガードレールは `test_assistant_context_learning_{core,guardrails,route}.py` +
   `test_learning_screen_context_ui_static.py`。
+- **4-e `simulation`（2026-10-03・第 21 波・migration なし）**: 学習者が「🧪 動かして確かめる」で開いている実行の記録を
+  `screen_context.selection.simulation_run_id` で渡し、`resolvers/learning.py::resolve_simulation` が**本人所有**の run だけ
+  （`simulation_store.get_run` / `is_owner`・grounding の範囲内）を事実 8 行（入力・理論の出力・模擬観測・予想は当否なし・段階ラベル・
+  FACT_NOT_VERIFICATION・比較の事実）にする。SB1 の行が載ったときだけ system 末尾に `LEARNING_SIMULATION_OUTPUT_CONSTRAINT`。
+  casual では出さず elicit では引かない。登録 kind は 6 つ（`resolve_topic` / `resolve_visible` の不在は固定のまま）。
+  学習 route が SB 層から呼んでよいのは `get_run` / `is_owner` / `ledger_decisions_for_run`（SELECT のみ・第 22 周）だけ（`test_simulation_bridge_guardrails.py`）。
 - **横展開（設計予約、着手時に設計書へ §追加）**: Phase 2 = W層要素モーダル / Phase 3 = Admin
   Copilot（既存 `collectScreenContext()` に `screen` を足して同じ語彙へ）。**新しい画面に AI 対話を
   置くときは、画面テキストを送らず、この規約で参照を渡して解決器を1本足す。**
@@ -3081,7 +3239,9 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   `protected_when_touched=("text","normalized_text")`（教員が直した本文を AI 出力で上書きしない）。
   ⑧**KO6 の読み替え**: artifact は「1 run × 1 stage・最後の書き込みが勝つ」生成ログ。**後段のステージ・フックは
   他ステージの artifact を書き換えない**（概念接地フックの `claim_object_builder` 上書きは撤去）。
-  ⑨起動時 backfill は `BACKFILL_LOCK_KEY` の advisory lock 配下、`load_run_artifacts` の except は rollback、
+  ⑨起動時 backfill は `BACKFILL_LOCK_KEY` の advisory lock 配下（**`pg_advisory_xact_lock`**。ORM Session で
+  セッションスコープの `pg_advisory_lock` / `unlock` を使うと commit 後の unlock が別接続に乗ってロックが残留する —
+  2026-09-21 是正）、`load_run_artifacts` の except は rollback、
   079 の blob 剥がしは `jsonb_typeof = 'object'` の行のみ。⑩`persist_learning_units` の失敗は
   `stage_outputs.knowledge_objects.learning_units.failed` に記録し run は completed を維持。
   後続課題: sync の N+1・3 系統の別トランザクション（設計書 §12.2）。
@@ -3180,7 +3340,8 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - **P3-5 記号 → 概念**: 概念参照は `symbol` instance の `element_identity_links`（confirmed のみ DTO に載る）。学習者 API
   `GET /api/learning/courses/{id}/symbols/lookup?symbol=&equation_id=&chunk_id=`（`core/symbol_lookup.py`・コース sources に `ANY(:doc_ids)` 強制・
   **ScholarPhi 規則 = タップ位置より前の最も近い定義**・無ければ後方 / 定義なしを事実文・LLM 0 回・quota 非消費）。UI は `app.js` の KaTeX 記号
-  クリック → `#symbol-lookup-popover`（アンカー `material.symbol-lookup`）。
+  クリック → `#symbol-lookup-popover`（アンカー `material.symbol-lookup`）。記号は互換字形（µ→μ 等）を正規化して照合し、
+  レジストリに無い記号は `chunks.formulas` から決定論フォールバック（`registered:false`・印字番号のみ・IK-0518）。探索は**「この論文」に限る**（chunk の document → 焦点論文（`core/focus_document.py`: トピック → 議論で直前に引用した論文）。`topic_id` を受ける。別論文の同記号・不在は事実文・IK-0552）。
 - **P3-7 cartridge の形の宣言**: `backend/cartridges/<id>/shape.json`（`covers` / `does_not_cover` / `expects.{entry_types,component_types,
   claim_types}` / `atlas_domain_key`。読み手は `core/cartridge_shape.py`・A層は読まない・起動時 validator は fail-open）。`particle_physics` は
   `description` / `target_domain` を実内容（フレーバー物理）に訂正（`cartridge_id` は不変）。適合事実 `GET /api/admin/cartridges/{id}/fit?
@@ -3266,8 +3427,8 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - **P4-2 RAG の構造 1 hop**（SA層 kind `retrieved_structure`・`resolvers/learning.py`）: 採用 chunk（score ≥ 0.30・当該ターンの
   `allowed_document_ids` を `ANY(:doc_ids)` で強制）→ `theory_claims_live(chunk_id)` → 理論操作グラフ **main 層**ノードを決定論で解決し、
   画面文脈ブロックの直後に事実文ブロック（`BLOCK_HEADER_RETRIEVED`・出典ごと 2 主張・全体 8 行）を足す。`screen_context` が無くても働く。
-  casual / `cycle_mode=elicit` では出さない。**LLM 呼び出し箇所は増えない**（ガードレールで固定）。登録 kind は 5 つ
-  （element / verification / placement / view / retrieved_structure。`resolve_topic` / `resolve_visible` は引き続き作らない）。
+  casual / `cycle_mode=elicit` では出さない。**LLM 呼び出し箇所は増えない**（ガードレールで固定）。登録 kind は 6 つ
+  （element / verification / placement / view / retrieved_structure / simulation（2026-10-03・第 21 波 4-e）。`resolve_topic` / `resolve_visible` は引き続き作らない）。
   ノード事実文は stage の日本語ラベル（`element_vocab`）+ `display_label` の理論対象で、英語の stage 名（内部表示名）は学習者に出さない。
   観測は既存 `structured_grounding_present` に相乗り。docs は SA層設計書 §11.16 / `rag-chat.md` ④-b' / `learning.md`。
 - **P4-3 参照の健全性**（`core/reference_health.py`・FastAPI 非 import・live ビューのみ）: グラフノード → 主張 / component → 主張・式 /
@@ -3308,6 +3469,213 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   `claim_without_chunk` の対象外（常時 broken の解消）。⑦D層 evidence-lines の POST/PATCH は**対象教材の編集権限**
   （`_require_editable_ledger_target`）が必要 — `_require_teacher` だけでは足りない。⑧SA層 `retrieved_structure` の
   事実文は `learner_context_common.safe_text` を通し生 TeX を出さない。nginx の `client_max_body_size` は 55m。
+
+### 理論モジュール層（グラフの中間層 — 式の操作に「接点の狭さ」で境目を入れる, migration 086, 2026-09-23）
+
+グラフレビューの「主グラフ（stage 固定語彙で最大 7）」と「式の詳細（数百）」の間を埋める**読み時導出・
+非LLM の中間層**。正本は `docs/features/theory_module_layer_design.md`（TM1〜TM15・§5 導出規則・
+§7 claim チェーンの位置づけ・§9 オーナー判断・§12 実装記録・§13 Phase 1 設計）。Phase 0（表示）と
+Phase 1（保存・同一性候補）は同日に実装済み。目的は**理論の構造を見抜き、共通構造を
+抽象化して他への転用を楽にする**こと（コース側で束ねる用途 = 学ぶ単位や、論文の章立て = 論文層とは別）。
+
+- **実測が出発点**: 2609.15375v1（PDF 経路）の「式の詳細 470」は全部 claim チェーン（章ごとに主張を出現順に
+  並べた 15 本の path）で式チェーンは 0 本。式 64 個は consistency policy で全件除外。**構造がデータに無いので
+  構造で切っても章分けに戻る**。同一論文を TeX（arXiv e-print）で取り込み直すと式チェーン 13 本・一意な式 step
+  35 が立ち、claim チェーン由来のノードが detail の約 300 を占めたまま残る（§3.1〜3.3）。**構造層の議論・試作は
+  TeX 経路の教材で行い、PDF 経路の detail 数を式の量と読まない。**
+- **モジュール = 少数の入力式と前提を受けて少数の結果式を返す部分系**。式操作 DAG（重複除去済み・`chain_type ∈
+  {equation_chain, mixed_chain}` の step のみ・claim_chain は成員にしない）で、隣接 step を「接点（外から受ける式 +
+  外へ出す式）≤ k」を保つ限り接点最小の対から貪欲に併合する。外枠 `OUTER_INTERFACE_LIMIT = 3`・内側
+  内側は**分岐点と循環で切る**（外枠の中で 2 つ以上の単位に消費される式を生む単位と循環群を起点にし、起点へ入る
+  受け渡しを切る。`INNER_HUB_MIN_CONSUMERS = 2` / `INNER_INTERFACE_LIMIT = 2`。接点 ≤ 2 の貪欲併合は閉じた本体で
+  止まらず開いた本体で 1 step に割れた — §12.3 の 9 候補比較）。**共有の基礎**（入次数を問わず 4 step 以上に消費
+  される式 = `SHARED_FOUNDATION_MIN_CONSUMERS`）は接点に数えない（配線でいう電源レール）。system_level の一括操作
+  は成員でなく**結果の吸い込み口（sink）**。循環は強連結成分ごとに 1 初期モジュールにまとめて事実文で報告。k と
+  閾値はコード定数で env から読まない（値を変えるときは設計書に実測を足す）。
+- **正本**: `backend/core/theory_modules/{schema,builder}.py`（FastAPI / sqlalchemy / LLM 非 import の純関数
+  `build_theory_modules(document_id=, artifacts=, graph_json=)`。入力を mutate しない・例外を外に出さない・式 step 0
+  は `available:false` + 事実文）。API は `GET /api/admin/documents/{document_id}/theory-modules`
+  （`routes/theory_components.py`・TEACHER + `_ensure_document_viewable`・既存 `component-graph` 不変）。ラベルは
+  「工程の動詞列（`element_vocab.OPERATION_LABELS`）+ 理論対象」。理論対象は本文由来の atomic claim を先に、無ければ
+  式から合成した主張（`equation_claim_synthesis` の定型文）から**記号だけ**を取り出して列挙（実測では本文由来の主張は
+  `equation_ids` を持たないため実際は記号になる）。ノード用 `visual_label` は `$…$` をプレーンテキストに落としたもの。
+  内部 ID（`eq_op_*` / `eq_tex_*` / `module_key`）を表示しない（TM10）。k・接点本数・モジュール数・指紋は DTO と
+  UI に出さない（TM6）。
+- **claim チェーンの位置づけ（O-2 = (b-読)・A層非改変）**: DTO の `claim_sequence_node_ids` を目印に、グラフ
+  レビューの「式の詳細」「すべて」層は claim チェーン由来の詳細ノードとその辺をキャンバスから外す（主張の並びは論文層
+  「論文の順」で見る）。判定はサーバの射影で、フロントは目印だけを見る。`graph_json` と他の消費者は不変。A層側で順序を
+  `required_claim_ids` に書くのをやめる案（b-A）は別の判断として保留。
+- **主グラフは残す（O-3 = (b)）**: `graph_json` の main 層と #308 のラベル規律は不変。グラフレビューの初期表示だけ、
+  モジュールが導出できる教材ではモジュール図（`state.moduleView`。`getScreenContext` は非変更）。UI は
+  `admin-graph-review.js` の層トグル「理論モジュール」（件数なし）・モジュール図（共有の基礎の受け渡しは点線・sink への
+  辺）・詳細ペイン（工程 / 理論対象 / 段階 / 接点 / 共通に使う式 / 要求される前提 / 部品との照合「照合用（AI の原案）」
+  / 内側モジュール / 成員 step → 式の詳細へ `focusNodeOnce`）。描画は `graphView` 委譲（GR8）。アンカーは
+  `graph-review.module-view` / `graph-review.module-member` + `docs/manual/teacher/26-admin-graph-review.md#theory-modules`
+  （件数の正本は `test_admin_help_ui_anchors.py`）。
+- **保存（Phase 1・O-1 = (c)・§13.2〜13.6）**: 表示は読み時導出のまま（保存行は表示の正本ではない = TM11）、
+  同一性の参照先として外枠・内側の両方を `knowledge_theory_modules`（migration 086・`_live` ビュー・DELETE なし）に
+  行で持つ。stable_key の材料は document_id + 規則版 + 段 + **生む式の stable_key 集合**（`RULE_VERSION = "m2"`。
+  `module_key` も同材料で、route は `equation_stable_key_map` を builder に渡す）。書くのは新ステージ
+  **`theory_modules`**（`_PIPELINE_STEPS` の `persist_claims_components_graph` と `identity_candidates` の間・
+  非LLM・非致命）だけで、純関数は `core/knowledge_objects/theory_modules.py`、SQL は
+  `persistence.sync_theory_modules`（`sync_live_rows` 経由）。式の手順 0 は「それが今回の結果」として旧行を
+  superseded に（TM14）。**起動時バックフィルなし** — 既存教材の行は再解析か `target_stage=theory_modules`
+  （教材行「パイプラインを実行 ▼」）で作る。基表を読むのは persistence のみ（KO5 の allowlist）。
+- **構造の指紋と同一性候補（Phase 1・§13.4 / §13.8）**: 指紋 = 工程の型の多重集合 + 外から受ける式の本数 + 外へ出す式の
+  本数 + 前提の有無（`m2|outer|ops=…|in=…|out=…|premise=…`）。**内部表現で DTO・UI に出さない（TM12）**。
+  `identity_candidates` ステージの規則 ⑤（`core/library/identity_candidates.py::run_structural_module_rule`）が
+  当該 document の live 外枠（`identity_eligible` = 成員 ≥ 3・汎用でない工程の型 ≥ 2 種）と他 document の指紋
+  **完全一致**を candidate entry（`candidate_key = "cand|tm|" + sha256`・`domain_key='unassigned'`・名前は工程の
+  動詞のみ = TM15）+ `element_identity_links` candidate 2 本（`instance_element_type='theory_module'`・
+  `mapping_justification='structural_match'`）にする。上限は別枠 env `IDENTITY_MODULE_CANDIDATES_MAX_PER_DOCUMENT`
+  （既定 10）。見送り・リンク済みは再提案しない。候補の置き場は概念レジストリの **O-6 に従属**（否なら書き込み先と
+  一覧の読み先だけ差し替え）。**確定は人間**（TM7・TM13）。`theory_module` は W層 ElementRef の要素型にしない
+  （symbol の前例どおり identity link の instance 型だけ）。学習者の旅の相手 document 列挙からは除外。
+- **related（§13.7）**: `GET /api/admin/documents/{id}/theory-modules/related` が外枠モジュールごとに「同じ構造の
+  外枠を持つ論文」を**タイトル列挙**（可視性 fail-closed・`hidden` は真偽値のみ・保存行なし / 規則版不一致 /
+  閲覧不可の相手にもある の 3 事実文・教員が見送った組は出さない）。組み立ては `core/theory_modules/related.py`
+  （SQL なし）、読み出しは `core/library/structural_matches.py`（`_live` ビューのみ）。
+- **オーナー判断の残り**: O-5（規則版を上げたとき確定済み同一性リンクを新版の行へ付け替えるか — 推奨「付け替えない」で
+  実装）/ O-4 は O-6 従属。
+- **ガードレール**: `test_theory_module_{core,guardrails,api,ui_static,store,identity}.py`。fixture は
+  `backend/tests/fixtures/theory_modules/`（arXiv-2407.01221v2 = 外枠 8・内側 5 / 2609.15375v1 TeX = 外枠 10・内側 4 /
+  同 PDF = `available:false` のゴールデン。2 論文間に指紋一致なし）。
+- **非スコープ**: 学習者向け表示 / SA層解決器（`view.layer = "module"`）/ 辺の承認 / LLM による命名・境目提案 /
+  全論文横断の一枚図（原則 6）/ 直線チェーン（分岐も循環も無い長い連なり）の内側分割。
+
+### 検証シミュレーション層（Simulation Bridge, SB層 — 理論⇔シミュレーション⇔実験の翻訳層, migration 088, 2026-10-02）
+
+理論モジュール（式の部分系）を**数値で走らせ、実験機のモデルを通し、論文が言う観測量が見えるか**を
+確かめる製品機能。**主語は学習者**（学生が作って試す。試行に承認ゲートを置かず、教員の弁は共有物＝台帳・部品へ
+入るときだけ — 2026-10-03 是正・設計書 §14 SB11〜SB15・migration 089）。正本は `docs/features/simulation_bridge_design.md`（SB1〜SB10・§4 データモデル・
+§5 規則・§6 API・§12 実装記録）。uxsim（開発用のペルソナ通し受講テスト）から借りたのは「実行・審判・
+是正者を分けて所見を記帳する」運転の型だけで、本層は教員・研究者が自分の教材に対して使い、結果は
+D層の台帳へ**候補**として戻る。
+
+- **不変条項の要点**: SB1 **シミュレーションの一致は検証ではない**（vision §2.8 の「分析妥当性」の候補。
+  台帳では `indirectly_supported` 止まり・`directly_verified` にしない・閉世界「このモデルと配線のもとでは」）/
+  SB2 3 部品の独立（理論プログラムは装置を知らず、配線は理論を知らず、比較器だけが両方を読む）/ SB3 コードは
+  候補・実行は隔離（サーバ側 AST 許可リスト `ast_guard` + 別コンテナ `sim-runner`。**api-server プロセス内で
+  `exec` しない**）/ SB4 比較器は決定論 / SB5 是正者は L層**凍結版**の部品の組み替えだけ（目録外は drop）/
+  SB6 数値は教員向け計器として制度指標カタログ `simulation-agreement` に登録して出す・学習者向け経路なし /
+  SB7 runs は append-only・programs / wirings は status 遷移・DELETE なし / SB8 A層非改変 / SB9 LLM は生成と
+  改訂提案だけ・各 1 コール + 日次 CostGate・自動反復なし / SB10 復元式（`must_not_treat_as_source_extracted`）
+  の印を program → run → 台帳候補まで写す。
+- **3 部品**: 理論シミュレータ `simulation_programs`（LLM 候補 → 教員確定。`simulate(inputs, params) -> dict`）/
+  実験機シミュレータ `instrument_wirings`（L層 `library_entries` の新 entry_type 3 種 `instrument_model` /
+  `noise_source` / `signal_processing` を一本の信号経路に配線。`instrument.compose_instrument` が決定論で
+  `simulate_instrument(signal, params, seed)` を合成）/ 比較器 `comparator.compare`（相対差・分離比・論文の
+  記載値との差 → `label_vocab.SIMULATION_AGREEMENT_LABELS` / `SIMULATION_SEPARATION_LABELS` の段階ラベル +
+  事実文 + `metrics`）。
+- **core**（`backend/core/simulation_bridge/`、FastAPI 非 import）: `schema.py`（語彙・契約・事実文の正本）/
+  `ast_guard.py` / `sandbox.py`（`SandboxClient`・transport 注入・未設定 / 不達は事実文の failed）/
+  `codegen.py`（untrusted 区画 + structured_call・同一コール内修復 1 回）/ `instrument.py` / `comparator.py` /
+  `revision.py` / `catalog.py`（凍結版部品の目録）/ `store.py`（`candidate_flow` 経由の遷移・台帳
+  `simulation_candidates` の追記と確定）。sandbox 本体は `simrunner/`（リポジトリ直下・`backend/Dockerfile`
+  は COPY しない・compose `sim-runner` は `internal: true` のネットワークのみ・`SIM_RUNNER_URL`）。
+- **DB（088）**: `simulation_programs` / `instrument_wirings` / `simulation_runs` + `epistemic_ledger.
+  simulation_candidates` + `knowledge_entry_types` 3 件のシード。`created_by` は TEXT（users FK なし）。
+  同梱部品は `backend/library_common/instrument_parts.json`（`domain_key='unassigned'`・`seed.py` が
+  cartridges と併せて走査・初版凍結）。
+- **API**（`routes/simulation_bridge.py`・main.py 直接登録・`/api/admin/simulation/...`・閲覧 = viewable /
+  生成・配線・実行・記帳 = editable）+ `routes/doubt.py` の `simulation-candidates/{cid}/confirm|dismiss`。
+  監査 `AUDIT_ENTITY_SIMULATION`。U層 feature `simulation:codegen` / `simulation:revision`、scene
+  `simulation`、env `SIM_RUNNER_URL` / `SIMULATION_RUN_TIMEOUT_SECONDS` / `SIMULATION_LLM_MODEL` /
+  `SIMULATION_{CODEGEN,REVISION}_MAX_CALLS_PER_DAY`。可視性 6 軸の AI 通過点 2 件を `course_materials` に宣言。
+- **学習者側（v1.1）**: `routes/simulation_lab.py`（`/api/learning/.../simulation/...`・`LearnerDisplayRoute`・本人所有のみ・
+  他人の行は 404）。生成 → 自分で編集 → 採用 → 配線 → 予想（並置のみ・採点しない）→ 実行 → 「共有する」で
+  `shared_at` + 台帳候補。痕跡は kind `verification_attempt`（本人のみ）。学習画面は教材区画「🧪 動かして確かめる」
+  （`simulation-lab.js`・アンカー `material.simulation-lab`）。学習者 DTO は記号キーの写像をリストで返す。
+- **UI（教員側）**: 教材管理の行 ⋯ メニュー「検証シミュレーション…」→ `admin-simulation-bridge.js`（ES5・
+  `window.SimulationBridge`・DI 注入）。4 区画（理論モジュール / 配線 / 実行 / 記帳と改訂）。段階ラベルは
+  サーバが解決した日本語を素通し（JS に表をミラーしない）。アンカー `materials.row-simulation` +
+  `simulation.*`（件数の正本は `test_admin_help_ui_anchors.py`）+ `docs/manual/teacher/27-admin-simulation-bridge.md`。
+- **運用上の前提**: PDF 経路の式は復元由来が多いので **TeX 経路の教材で使う**（再現性レビュー E-1）。
+- **ガードレール**: `test_simulation_bridge_{store,migration,ast_guard,sandbox,codegen,instrument,comparator,
+  revision,api,guardrails,ui_static}.py` + `test_simrunner_harness.py`。
+- **第 21 周 = uxsim 8 場面による UX 検証と是正（2026-10-03・migration なし）**: 正本は
+  `persona_enactment_testing_design.md` §19（場面 (a)〜(h)・行為 13・審判 `uxsim/oracles/simulation.py`）と設計書 §12.4。
+  学生 6・教員 2 を砂場（TeX 4 本）に通し、課題 IK-0608〜0628 を起票。是正: 段階ラベルは「軸名: 段階」（軸名の正本
+  `label_vocab.SIMULATION_AXIS_LABELS`）/ ゼロ出力は記号を名指し / 配線なしの `observed` は理論値（std None） / 生成 facts の
+  `role=` は日本語化・残れば落とす / 重なりの事実文は両方の記号を名指し / adopt 応答に `FACT_ADOPTED`（本人の選択・教員の承認ではない）/
+  観測系の主張の候補から本文の無い・内部 ID 形のラベルを外す（`service.is_readable_target_label` の 1 箇所・候補ゼロは
+  `FACT_NO_OBSERVATION_TARGETS`）/ **SB13 の読み替え**: 3 軸とも未測定の run は共有しても台帳の候補を作らない
+  （`FACT_SHARED_UNMEASURED`）/ overview の modules に `equations`（成員の式）と `to_sink` を additive 追加 /
+  式の表示ラベルは論文層の正本（`graph_paper_layer.schema.equation_display_label` = 印字番号 → LaTeX の先頭 → 定義する記号 → 平文。
+  `theory_modules/schema.py` の複製は委譲）/ SA層 4-e `simulation`（上記 SA層の節）。UI・アンカー・マニュアル・Copilot KB は第 2 波。
+- **第 22 周 = 第 21 周の残根と通せなかった経路（2026-10-04・migration なし）**: 正本は `persona_enactment_testing_design.md` §19.6 と
+  設計書 §12.5 / §14.5。砂場の運転は reset（SB層 3 表と台帳候補の要素も対象・`--exclude-persona` で (l) のレーンだけ残す）→ pin →
+  snapshot、教員への editor 共有は所有者の共有 API（`uxsim/sandbox/grant_document_editors.py`）。core: 理論モジュールに
+  `input_symbols` / `output_symbols`（受け取る記号 → 定める記号。`clean_symbol_name` / `symbol_match_key` が正本・`codegen.normalize_symbol`
+  は委譲・指紋不変 = TM12）と `subtitle` / `output_symbols_note`（`FACT_NO_OUTPUT_SYMBOLS`）/ 適性判定 `suitability.assess_module`
+  （損失・目的関数のまとまりは `simulable: false` + `FACT_NOT_SIMULABLE`・判定できなければ None・試行は止めない）/ codegen の資料は
+  記号の名前だけ・英語要約は `summary`・記号表はこの式群の記号だけ・`io_contract.cannot_compute` + `FACT_CANNOT_COMPUTE` /
+  学習者 run DTO に `ledger_decision {status, fact}`（§14.5・教員名と理由は出さない）/ `store.display_metrics`（配線なしの相対差・分離比は
+  None・データ不変）/ 教員の記帳経路にも `is_unmeasured_run` → 422 / 台帳 GET に `simulation_candidates_decided`（`dismiss_reason`）/
+  比較器のゼロの名指しは配線ありのときだけ・記載値の単位と出所を `FACT_REFERENCE_INPUT` と SA層の事実文に / **「平均化（N 回）」を
+  実装**（`instrument._is_averaging_part` = 宣言の形で見分け、上流の段を n 回引き直して平均。分散 1/n・系統ずれ不変）/ 改訂案なしの理由
+  （`FACT_NO_PROPOSAL_NONE` / `_ALL_DROPPED`）/ `separation_ratio` の表示名は「理論の出力と模擬観測のばらつきの比」。学習チャット:
+  開いている実行についての問い（結果の語 + 共有・配線・前の実行 / share・run・wiring）は HELP に回さず RAG へ、解決器が
+  `FACT_SHARE_MEANING_*` と `ledger_decision.fact` を渡す（`manual_help_kb_design.md` §9）。UI（第 2 波）: 「受け取る記号 → 定める記号」・
+  副題・適性の文・`ledger_decision.fact`・判断済みの候補の折りたたみ（見送りの理由・日時）・権限の無い教員はボタン無効 + 理由
+  （teacher overview の `can_decide_ledger`）・アンカー `simulation.ledger-candidate-decided`。ハーネスの投影は UI と同じ欄・同じ形
+  （IK-0634）。課題 IK-0629〜0648。**オーナー判断の候補（推奨どおり実装・§14.5）**: 見送り理由の学習者開示（推奨: 出さない）/
+  「担当教員」= 教材の編集者（推奨: そのまま）/ 英語 HELP に LLM を使うか（推奨: 使わない）。
+- **非スコープ（v1.1）**: 自動反復 / 複数配線の自動探索 / Python 以外 / 実測データの取り込み /
+  装置候補から `instrument_model` への自動昇格 / `evidence_lines` への記帳。
+
+### 論文の再現性レビューと是正（migration なし, 2026-09-19）
+
+Phase 0〜4 実装後の**再照合**（実論文 12 本の原本 ⇄ 成果）。正本は
+`docs/architecture/knowledge_reproduction_review_2026-09-19.md`（E-0〜E-12・判断 J-1〜J-4・
+§5.2 改善しきれないものの理由・§7 実装記録。課題ナレッジ IK-0328〜IK-0343）。結論: 文章層と
+学ぶ単位（section_block）は忠実、**式・導出・図表の層は PDF 経路で未再現**だった。以下は現行の姿。
+
+- **打ち切りの既定は「上限なし」**（E-2 / J-3）。並び順・節単位の層化サンプリング・上限解決の正本は
+  `src/episteme_graph/agents/stratified_sampling.py`（rhetorical_role は委譲）。上限を敷く運用は env
+  `CLAIM_QUALIFICATION_MAX_SPANS` / `EQUATION_SEMANTICS_MAX_EQUATIONS` /
+  `EQUATION_SEMANTICS_MAX_INLINE_EQUATIONS`（inline だけ既定 32）/ `PAPER_SKELETON_MAX_SECTIONS` で明示
+  （`RHETORICAL_ROLE_MAX_BLOCKS` と同じ「値の正本は env」パターン）。**新しい入力 builder に `_MAX_*` の
+  先頭切り捨てを書かない**。paper_skeleton / claim_qualification / equation_semantics（母集合 = 式ブロック +
+  inline 候補）/ thesis_reconstruction に coverage が付き、**resume 経路でも artifact 由来の被覆を
+  `details.source="artifact"` 付きで報告する**（E-7。`upsert_analysis_run` は stage の dict を丸ごと置換する）。
+- **PDF 由来の数式の信頼連鎖**（E-1）: prompt は原文を隠さず untrusted 区画で提示（J-2）。導出の veto は
+  その式固有の疑い（mismatch / ラベル不一致 / corrupted）に限定し、`pdf_text_layer_untrusted` だけなら既存の
+  救済条件（`reconstruction.confidence >= 0.7` 等）で判定（J-1。`EquationConsistency.untrusted_pdf_only()`）。
+  救われても `must_not_treat_as_source_extracted` / `can_support_claim=False` は不変で、復元由来しか backing の
+  無い node / edge / step は **`partially_source_backed` 止まり**（`RECONSTRUCTION_BACKED_REASON`。正本は
+  `derivation_chain/schema.py`、印はローカル chain と system 導出の**両方**の step が書く — R-1）。mismatch かつ
+  低信頼の record は label を退避し `semantic_status='unknown'` に降格。導出は式 chain と claim chain の併走。
+  `chunks.formulas[].reconstructed` / `latex_source`、学習者向け事実文は `label_vocab.RECONSTRUCTED_EQUATION_NOTE`
+  （DTO `latex_note` / `label_note`・JS にミラーしない）。
+- **文書構造**（E-4）: GROBID の `<back>/annex` を歩く・body/back 直下の `<figure>` / `<figure type="table">` を
+  caption block に・表本体は行テキストで保持・`head/@n` から level / parent・REVTeX `FIG. 1.` caption・走り込み
+  見出し。`Section.section_number` / `is_appendix`、`metadata.structure_recovery`。
+- **役割判定**（E-3）: span のオフセットは LLM に要求せずサーバ側で決定論解決（`repair.py::resolve_span_offsets`、
+  検証基準は不変。訂正したときは本文のスライスを `span.text` にする — R-2）。修復失敗・unknown 比率は `summary_stats`。
+  表本体（`raw.in_table`）は役割判定・主張採否の母集合に入れない（R-4）。
+- **接続**（E-8〜E-10）: node↔部品は claim 交差でも突合。辺に `graph_layer`。導出 step は裸 ID と合成 ID
+  `{derivation_id}:{step_id}` を併記（A層は `knowledge` 層の語を書かない・一致はテストで固定）。claim 参照の
+  `claim:` 正規化の正本は `backend/core/knowledge_objects/references.py`（discuss opening / theory_components /
+  export gate が使う）。承認ゲートは `claim_ids` / `equation_ids` を出典として読み時受理し `source_chunks` は
+  根拠 claim の chunk から導出（弁は維持）。**PUT 経路（`_validate_for_review`）と approve 経路
+  （`_component_approval_problems`）は同じ補助関数で読む**。復元由来の式（採用 run の `equation_semantics`
+  artifact の `must_not_treat_as_source_extracted`）だけを指す `equation_ids` は出典に数えない（R-3）。学ぶ単位は 3 種別に `section_ids` を伝播し候補順は章順。
+- **計器**（E-5 / E-6 / E-11）: `reference_health` は破断の検査種別 9 + 欠落（空層・打ち切り・skip・完全性理由・
+  主グラフに吊られていない式の詳細ノード `detail_node_parent` — 破断ではなく欠落なので status を変えない、R-5）の
+  事実文（`core/coverage_facts.py`）。「ok」の文言は「検査した参照はすべて解決しています」で、旧文言のスナップ
+  ショットは未確認扱い（教材行チップも同じ）。永続化の要約は `stage_outputs.knowledge_objects` に必ず書く。
+  G層 `material.explanations_skipped`（recommended）/ `material.ingest_incomplete`（optional）— 道案内先は
+  capability `materials.rerun_pipeline`（guidance_only・行の「パイプラインを実行 ▼」。再実行は代行しない）。
+  グラフレビューは説明の出所 `explanation_element` と主張・式の行単位の説明を描き、辺は自分の `graph_layer` で
+  層トグルに従う（第 2 波・§7.2）。
+- **LLM 回数の計器**（R-6）: 上限を撤廃したステージは呼び出し回数が母集合に比例する。共通 JSON クライアント
+  `ProviderJSONLLMClient.calls` を計器に、claim_qualification は `summary_stats.llm_calls` / stage payload `llm_calls`
+  に run ごとの回数を残す（実測の正本は U層）。学習者向けの復元式の印は `label_vocab.RECONSTRUCTED_EQUATION_MARK` を
+  `core/lecture.annotate_reconstructed_formulas` が `reconstructed_mark` / `reconstructed_note` として載せる
+  （JS に直書きしない）。
+- **改善しきれないもの**（§5.2）: 表のセル構造化 / PDF 数式の vision OCR / main グラフの集約粒度 /
+  日次予算の run 按分（O-A）/ 既定 cartridge の運用 / 旧 run の再生（再解析はオーナー操作）/ TeX 図の画像化。
 
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
@@ -3422,7 +3790,7 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   レーン上限・ITEM 射影・内部 ID / 生 TeX 遮断・`navigable` fail-closed・
   `strip_confidence`）。`component_context.py` / `element_context.py` は再エクスポートで
   これに委譲する。**学習者向け文脈の射影・遮断を再実装しない**（agent ID トークン遮断は
-  component レーンのみ＝claim/equation への拡張はオーナー判断待ち。DTO は component=旧6キー /
+  2026-09-30 の第 15 波で claim / equation レーンにも拡張済み（IK-0517）。DTO は component=旧6キー /
   element=ITEM v2 の意図的世代差を維持）。
 - **`backend/core/course_units.py` / `core/course_prerequisites.py` / `core/knowledge_objects/learning_units.py`**（2026-09-13 新設、
   正本設計書 `docs/features/learning_units_design.md`） — 学ぶ単位の候補提示・handle 解決・freeze 向けの読み / 前提の ID 解決と
@@ -3525,6 +3893,13 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - domain-specific なロジックをagent内にハードコードしない（cartridgeから読む）
 
 ### 8. 課題の記録（課題ナレッジ, `docs/issue_knowledge/`, 2026-09-18）
+- **設計・実装に着手する前に `docs/issue_knowledge/recall.md`（想起シート・機械生成・短い 1 枚）を読む**（2026-10-02）。
+  変更の語から当てる族・繰り返し出ている型の見分け方と確かめ方・解決原理が載っている。新しい `*_design.md`
+  （`docs/features` / `docs/architecture`）には見出しに `pre-mortem` を含む節を置き、当たる型の slug か「該当なし」を
+  書く（無いと `test_issue_knowledge_guardrails.py` が落ちる。レガシーは allowlist・減らす方向のみ）。実装後のエントリは
+  `resolution.principles` を `use: consulted` で残す。予告した型と実際に出た型は索引 §14.5 が突き合わせる。
+  索引・辞書・原理は 2026-10-02 の効果検証で「書かれたが設計前に読まれていない」ことが分かったため、読み込み経路に
+  この 1 枚を置く（正本は `docs/architecture/issue_knowledge_effectiveness_review_2026-10-02.md`）
 - 調査記録・レビュー文書・是正リストに課題を載せたとき／解消したときは、`docs/issue_knowledge/entries/`
   に 1 課題 = 1 エントリで記帳する（正本は `docs/issue_knowledge/README.md`・分類体系は `taxonomy.md`）
 - 分類は **4 軸の座標**（処理 `processing` / 構造 `structure` / 接続 `connection` / 統制 `governance`。各軸 1〜2 値か
@@ -3537,6 +3912,17 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   `dictionary.md` の `####` 見出し。辞書は族 `###` → 型 `####` の 2 段）を必ず書く。層は `layers.md` の語彙のみ
 - **AI が起こした分類は `classification.review: candidate`**。人が読んで `confirmed` + `reviewed_by/at` を書くまで
   型の成立（確定 2 件以上）に数えない。解決済みの `landed_in` には実在するコードのパスかコミットを最低 1 つ
+- 解決済みには `resolution.verification`（確かめた方法 `methods` / 確かめていない範囲 `unverified`。語彙は
+  taxonomy §8）を残す。省略は「記録なし」、確かめていないなら `not_verified` 単独。数値（件数・率・時間）は書かない。
+  辞書の各型の「確かめ方」行が処方、索引 §14.4「型ごとの確かめ方」が実績で、次に同じ型を直すときの検証計画の下書き
+  （読んで選ぶのはエージェント・点数による自動選択はしない。人は問題が明らかになったときだけ介入する）
+- **解決原理**（`docs/issue_knowledge/principles.md`・taxonomy §9・索引 §15、2026-09-27）: 型を横断する条件付きの
+  解決知識（守る条件 = 不変条項 ID / 破られる条件 / 当たる型 / 併用する部品 = 補完 / 派生形 = 選択 / 非適用 / 反例 /
+  正本）。設計時の pre-mortem で型を当てたら、結びついた原理の部品・派生形・非適用を読んで設計書に書き、エントリには
+  `resolution.principles`（`principle` / `use` = 設計前に読んだ `consulted` か後付けの `extracted` / `note` = 固有の差分）
+  を残す。読んで当てるのはエージェントで人の確定を待たない（人は問題が明らかになったときだけ介入）。成立は
+  `consulted` が別々の型から 2 件以上・適用後の同型の見逃しなし、を索引が導く。参照の無い原理は置かない・「原理」行に
+  機能名を書かない・自動推薦を作らない・`consulted` が現れない原理は統合か廃止（撤退条件）
 - `index.md` は `backend/scripts/issue_knowledge_index.py` の機械生成（手編集しない）。ガードレールは
   `backend/tests/test_issue_knowledge_guardrails.py`（語彙の taxonomy ⇄ モジュール一致・索引同期・
   辞書の型実在・sources のリンク実在）
@@ -3546,7 +3932,9 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   `docs/architecture/improvement_cycle.md`（製品機能ではなくエージェント向けの運用規約。Python 実装は無い）。
   段を飛ばすときは「未実施」と書く（無言のスキップだけを禁じる）
 - **選別**: オーナーに問うのは①不変条項の解釈変更 ②人の権利・制度・法 ③後戻りしにくい構造 の 3 種だけ。
-  推奨を付け、同じ原因の項目は 1 つの判断に束ねる。**実装**: 第 1 波 = UI なしを並列 / 第 2 波 = UI・アンカー・
+  推奨を付け、同じ原因の項目は 1 つの判断に束ねる。 着手の地図の見出しに**この波が前提とする利用状況**を 1 行
+  宣言し、各項目に候補比較 6 観点（目的への寄与 / 利用状況での必要性 / 放置時に起きること / 負担 / 前提関係 /
+  まだ分かっていないこと）を事実文で書く。点数・順位にしない（同文書 §2.2）。**実装**: 第 1 波 = UI なしを並列 / 第 2 波 = UI・アンカー・
   マニュアルを 1 体に集約。サブエージェントには `git stash`・実 DB の破壊的操作・外部 API の live 呼び出しの
   禁止を明記。**検証**: 実行経路が複数あるなら CI は全経路を流す
 - **サイクル自身の課題も課題ナレッジに記帳する**（層は `layers.md` の `cycle_*`。段の名前を分類根拠にしない）。
@@ -3635,7 +4023,8 @@ Neo4j 非依存で、コースデータの `topic.prerequisites` のみを参照
 
 （※**2026-09-10 是正 F4**（六つのレンズ 提案6・migration 不要）: 上記2の「チャット履歴の有無で
 習得を判定」は撤去した。接触の痕跡（質問した・開いた）は理解の根拠にならず、履歴による自動
-スキップは沈黙適応（UC5 / §3.6）だったため。現行の判定は**本人が明示的に「理解している」と
+スキップは沈黙適応（UC5 / §3.6）だったため。逆質問は 1 コース×トピック×学習者で一度だけ
+（`progress_data.prerequisite_gates_presented`）・ゲートのターンでも元の質問に答える（2026-09-30・IK-0509）。現行の判定は**本人が明示的に「理解している」と
 答えた記録**（`learning_states.progress_data.acknowledged_prerequisites`。書き込みは
 `services.record_prerequisite_acknowledgement`・否定形を含む発話は記帳しない）だけを見る。
 前提の**説明**は3段解決 — ①同コース topic → ②本人が閲覧できる document のチャンク

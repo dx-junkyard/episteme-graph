@@ -1,0 +1,15 @@
+scenario: s-check-then-reconstruct
+domain: astrophysics
+params:
+  goal_text: µ(a) と音速への制約の章の理解を確かめ、違っていたら式を追い直すこと
+  topic_hint: 主結果：µ(a)と音速への制約（暗黒エネルギーと修正重力の音速を扱う論文）
+  topic_hint_terms:
+  - 音速
+  - µ(a)
+  - 暗黒エネルギー
+  - 修正重力
+  wrong_answer_to_give: 音速は µ(a) の制約に効かず、µ = 1 からのずれは成長率だけで決まる
+per_archetype:
+  non_native:
+    goal_text: checking my understanding of the constraints on µ(a) and the sound speed
+    wrong_answer_to_give: The sound speed does not affect the constraint on µ(a); the deviation from µ = 1 is set by the growth rate alone

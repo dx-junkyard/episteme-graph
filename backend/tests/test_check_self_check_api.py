@@ -6,7 +6,7 @@
 ここで固定するのは
   - `/check` は完了を書かない（`record_topic_check_pass` を呼ばない）・合否を返さない
   - LLM 例外時は 200 + `degraded=true` + 固定文（文字数フォールバックで判定しない）
-  - 完了を書けるのは `/check/self-check` の agreed / disagreed だけ
+  - 完了を書けるのは `/check/self-check` の agreed だけ（IK-0399: disagreed は記録のみ）
   - `verdict_wrong` は記録するが完了させない（かつ進行を止めない）
   - 語彙外の self_check は 422、受講外コース・不明トピックは 404
 
@@ -239,7 +239,7 @@ class TestCheckDegradation:
 
 
 class TestSelfCheck:
-    @pytest.mark.parametrize("value", ["agreed", "disagreed"])
+    @pytest.mark.parametrize("value", ["agreed"])
     def test_advancing_values_record_completion(self, env, value):
         resp = learning_mod.self_check_topic_understanding(
             "course-1", "topic-1",
@@ -252,6 +252,18 @@ class TestSelfCheck:
         assert resp.course_completed is True
         assert resp.completed_topic_ids == ["topic-1"]
         assert env["record"] == [(CURRENT_USER["id"], "course-1", "topic-1")]
+
+    def test_disagreed_records_nothing_and_does_not_complete(self, env):
+        """IK-0399: 「違っていた」は本人の見立てが要件と合わなかった申告で、完了にしない。"""
+        resp = learning_mod.self_check_topic_understanding(
+            "course-1", "topic-1",
+            LearningCheckSelfCheckRequest(self_check="disagreed"),
+            current_user=CURRENT_USER,
+        )
+
+        assert resp.topic_completed is False
+        assert env["record"] == []
+        assert resp.notice
 
     def test_verdict_wrong_records_nothing_and_does_not_complete(self, env):
         resp = learning_mod.self_check_topic_understanding(

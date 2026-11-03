@@ -1,0 +1,35 @@
+id: t-atlas-freeze-impact-read
+population: teachers
+runner: [api, browser]
+goal: "採用済みの候補を次版に入れる準備として、現在の版から次版の下書きを作り、取り込みの確認と凍結の影響を読むところまで進める（下書きには保存せず、凍結もしない）"
+params_required: [domain_hint, accept_hint]
+steps:
+  - do: auth.login
+  - do: admin.atlas.open
+    with: {domain_hint: "{{domain_hint}}"}
+  - do: admin.atlas.gaps.list
+  - choose:
+      - {do: admin.atlas.gaps.accept, with: {gap_hint: "{{accept_hint}}"}}
+      - {do: admin.atlas.gaps.list}
+    optional: true
+    note: 採用済みの候補が無ければ 1 件を採用する
+  - do: admin.atlas.gaps.draft_from_frozen
+    note: 現行の凍結版を複製して次版の下書きを作る（学習者には表示されない）。既に下書きがあれば画面が何と言うかを読む
+  - do: admin.atlas.gaps.incorporate_preview
+    note: 取り込むと何が追加されるか（名前・親領域・検証）を読む。ここでは[下書きに追加する]を押さない
+  - do: admin.atlas.freeze_impact
+    with: {version: "{{freeze_version}}"}
+    note: 版数を入れて[公開（凍結）]を押し、凍結したら何が起きるか（削除される項目・外れるコース・前の版のノードとの対応、無ければ公開前チェック）を読み、キャンセルする
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/17-admin-atlas.md#gap-draft-from-frozen
+  - manual: teacher/17-admin-atlas.md#gap-incorporate
+  - manual: teacher/17-admin-atlas.md#freeze
+  - manual: teacher/17-admin-atlas.md#freeze-correspondence
+watch_for:
+  - 下書きの作成は LLM を使わず現行版の複製で、学習者の地図は変わらない（学生レーンで版が変わらないこと — 審判 B6）
+  - 取り込みの確認は下書きを書かず、検証の結果を事実文で並べる
+  - 凍結の影響は、削除が無いときに「対応」の区画を出さず、件数を足したり言い換えたりしない
+  - 採用したまま下書きに反映していない候補がある状態で凍結しようとすると止まる、ということが事前に読める（凍結はしない）
+  # 第 9 波（sync_keys_wave9 面 C・IK-1072）
+  - 凍結の影響の関係の行で、依存の関係は「A — B（依存: 「A」が「B」に依存する）」と向きの文で読め、隣接・関連は「A — B（隣接）」のまま

@@ -451,6 +451,15 @@ touched でないノードを淡色（`untouched`）にする。凡例は
 - 供給側の根治（G層 To-Do `course.topics_unlinked` — 全トピックで結線が空のコースを教員に
   提示しコース内容生成の再実行を促す）は**別 issue** として切り出し済み。
 
+### 11.5 焦点の段で止める・議論の出口（第 17 周追補, 2026-10-01）
+
+- 範囲モードで焦点（この問いへの回答が引用した論文）があるときは、その論文にグラフが無くても**コース全体へ広げない**。
+  `available:false` + `NOTICE_CITED_DOCUMENTS_NO_GRAPH` + 論文名の事実文で止める（コース範囲は焦点が無いときだけ）。
+- 議論（`_discussion`）由来の痕跡の出口は `FACT_DISCUSS_SHARPEN`（帰属カード / 開幕の支持構造。`sharpen_fact_for`）。
+  discuss には選べる教材テキストが無いので `FACT_RANGE_SHARPEN` を案内しない。
+- 旅（`journey_for_person_node`）も topic 縮退で対応が引けないとき同じ焦点の段（`_cited_range_for_node`・論文単位の対応・
+  touched なし・fail-closed）を [1'] の入口にし、空の旅の出口も同じ出し分け。テストは `test_personal_map_focus_tier.py`。
+
 ---
 
 ## §12 ノード情報の拡充 — 代表 claim 逐語と検証ラベルの差分表示（2026-08-23）

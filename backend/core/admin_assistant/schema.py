@@ -115,6 +115,9 @@ class Capability:
     api: Optional[dict] = None     # action のとき参考情報（method/path）。実行は actions/ が担う
     revert: Optional[dict] = None  # reversible=True のときの取り消し方法メモ
     locate_steps: tuple = ()       # 道案内の点灯手順（LocateStep のタプル）
+    # 意図の解決で当てる語（IK-0921: 語表を intent.py に別に持たず登録簿に置く = 正本は 1 つ）。
+    # 単体の語が他の項目の語に部分一致する場合は複合語にする（「図」→「図・画像」等）。
+    keywords: tuple = ()
 
     # --- 派生・シリアライズ ---
 
@@ -163,7 +166,7 @@ class LLMIntentResponse(BaseModel):
     capability_id を返しても、サーバ側 registry で再検証して fail-closed に落とす（P1）。
     """
 
-    intent: str = Field(default=INTENT_CLARIFY, description="guidance | locate | action | clarify")
+    intent: str = Field(default=INTENT_CLARIFY, description="guidance | locate | action | clarify | status_query")
     capability_id: str = Field(default="", description="解決した capability id（無ければ空）")
     answer: str = Field(default="", description="ユーザーへの自然言語応答")
     needs_clarification: bool = Field(default=False)

@@ -1,0 +1,22 @@
+scenario: s-sim-failure-recovery
+domain: astrophysics
+# 場面 (f) st-10（newcomer・D3・21cm 受信機）。Cepheus B 論文の主結果のトピック。
+# 「代入・定義: M_J」は入力の式が 2 つあるモジュール（復元式を含む）。
+params:
+  goal_text: ジーンズ質量を求めるまとまりを動かし、入力を間違えたときに自力で立て直せるかを確かめること
+  topic_hint: 主結果：フィードバックに形づくられた磁化フィラメント（Cepheus B の磁場トポロジーと星形成の論文）
+  topic_hint_terms:
+  - 主結果
+  - 磁化フィラメント
+  module_hint: M_J
+  input_hints_partial:
+    T: 15.0
+  input_hints:
+    T: 15.0
+    n: 10000.0
+  questions:
+  - いまの実行が失敗したのは、どの入力が足りなかったからですか？ 次に何を入れればよいですか？
+personas:
+  st-10-d3-21cm-receiver:
+    questions:
+    - 受信機の設定で入力が欠けたときのように、どの入力が足りないのかを教えてください。次に何を入れれば動きますか？

@@ -51,13 +51,18 @@ class _FakeSession:
         self.statements: list[str] = []
         self.committed = 0
         self.closed = 0
+        # 保存の DELETE が消した音声キャッシュの行数（IK-0877: 応答と監査に運ぶ）。
+        self.deleted_audio_rows = 0
 
     def execute(self, stmt, params=None):
         sql = " ".join(str(stmt).split())
         self.statements.append(sql)
         if "SELECT user_id" in sql:
             return _Rows([(self._owner,)] if self._owner is not None else [])
-        return _Rows([])
+        rows = _Rows([])
+        if "DELETE FROM topic_lecture_audio_cache" in sql:
+            rows.rowcount = self.deleted_audio_rows
+        return rows
 
     def commit(self):
         self.committed += 1
@@ -122,7 +127,10 @@ class TestTopicSaveIsAudited:
                 "spoken_script": "読み上げ原稿",
             },
         )
-        assert out == {"course_id": COURSE_ID, "topic_id": TOPIC_ID, "status": "edited"}
+        # IK-0877: 音声を消したかを応答に運ぶ（この fake では消した行なし）。
+        assert out == {
+            "course_id": COURSE_ID, "topic_id": TOPIC_ID, "status": "edited", "audio_invalidated": False,
+        }
         assert len(recorded) == 1
         entity_type, entity_id, old_status, new_status, actor, metadata = recorded[0]
         assert entity_type == AUDIT_ENTITY_COURSE_TOPIC
@@ -178,9 +186,14 @@ class TestTopicSaveIsAudited:
     def test_audio_invalidation_side_effect_is_recorded(
         self, monkeypatch, session, recorded
     ):
-        """保存が音声キャッシュを消す事実も残す（教員には保存前に告知される副作用）。"""
-        _save(monkeypatch, {"spoken_script": "x"})
+        """保存が音声キャッシュを消した事実を残し、応答でも告げる（IK-0877）。"""
+        from core import lecture_studio_state as studio_state
+
+        session.deleted_audio_rows = 2
+        out = _save(monkeypatch, {"spoken_script": "x"})
         assert recorded[0][5]["topic_audio_cache_invalidated"] is True
+        assert out["audio_invalidated"] is True
+        assert out["notice"] == studio_state.TOPIC_AUDIO_INVALIDATED_NOTICE
         assert any("DELETE FROM topic_lecture_audio_cache" in s for s in session.statements)
 
     def test_audit_comes_after_the_commit(self, monkeypatch, session, recorded):

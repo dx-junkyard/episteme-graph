@@ -1,0 +1,69 @@
+id: c-r25-doubt-r8
+domain: astrophysics
+snapshot: corpus-astro-tex-r25g
+course_id: 6be229e1
+personas:
+  teachers: [te-01-rookie-seminar, te-03-meticulous-seminar, te-02-veteran-intro]
+  students: [st-05-night-solarwind, st-07-m1-grb-voice]
+scenarios:
+  teacher: [t-db-ledger-readonly-probe, t-db-challenge-from-node, t-db-assumption-review]
+  student: [s-db-ledger-lines, s-db-map-ask-en]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 12, persona_llm_calls: 300, wall_clock_minutes: 260}
+notes: |
+  第 25 周・面 B の第 8 周（judge_doubt_r7.md §4・r8_prereqs.md の面 doubt と共通 1〜5・harness_fixes_r7_summary.md の H43〜H47）。前提状態を変える
+  周の 2 回目。教員 3 × 学生 2・5 場面:
+  te-02 × t-db-assumption-review（確定済みの前提の一覧 → カードの［台帳を開く］（H44 で場面に入った）→ スコープ → 地図・合意リストへの載り方 —
+  7 周未到達）/ te-03 × t-db-challenge-from-node（第 7 周に取り下げた疑義 2 がある主張から入り、取り下げ済みの折りたたみ（H44 で場面に入った）の
+  中身・提案の状態）/ te-01 × t-db-ledger-readonly-probe（PINN の viewer のまま、末尾の不完全な body（admin.doubt.scope_record_raw_incomplete・H43）で
+  権限が入力より先に返るか IK-0999 の残り）/ （te-05 × t-db-ledger-readonly-probe = 閲覧もできない教員の日本語の 404 は、周の前の実測で砂場では成り立たないと分かったので組から外した）/ st-07 × s-db-map-ask-en
+  （**音声のまま** — IK-1049 の是正後に地図で選んだ場所が音声の往復に届くか）/ st-05 × s-db-ledger-lines（固定コースの ⚓ が開くか — IK-1051 の
+  是正後。開かなければ「記帳なし」の見え方）。
+  **固定コースは 6be229e1**（r8_prereqs.md「周の前の実測」: 1bad7d9f は学習者の API で ⚓（部品）が 0 個。6be229e1 は ⚓ があり、旧 freeze の部品を読み時に
+  後継へつなぐ IK-1051 の是正を当てられる）。学生 2 人とも 6be229e1 で歩く（st-07 の地図の問いも 6be229e1 の地図 — 第 7 周の atlas の st-03 が
+  6be229e1 の地図を開いた）。教員の場面は campaign の course_id を使わない（前提の地図のコースは course_hint か本人所有の先頭 — te-02 は 1bad7d9f）。
+  組の例外（P-0025）: te-02 × assumption-review・te-03 × challenge-from-node・te-01 × probe・st-07 × map-ask は第 7 周と同じ組（審判 §4 の指定 — 場面に
+  手が入った後・是正の後の前後比較）。st-05 × ledger-lines は
+  第 6 周と同じ組（固定コースの ⚓ の是正の後）。
+  学生の面: st-07 は doubt と share の (d)（2 面）。st-05 は doubt だけ。3 面に出る学生はいない（指揮者の組の st-07 × studio は st-08 に替えた —
+  c-astro-r25-share-r8 の notes）。
+
+  一括の確かめと用意: `backend/.venv/bin/python uxsim/runs/round25/r8_prereqs.py --dry-run`（= r5_prereqs.py --round 8。役の既定 ROUND_DEFAULTS[8]）。
+
+  ── 周の前に指揮者が用意するもの（この順。r8_prereqs の項目名）──
+   1. 製品の第 7 波（IK-1048〜1051 の是正を含む）→ 投影の同期 → この前提 → 周（共通 1）。snapshot は corpus-astro-tex-r25g。persona_profile_names
+      （共通 2）。コース 1bad7d9f が公開のまま。
+   2. doubt_support_line_compare（実測済み）: Cepheus TeX の台帳 1924 行中 98 行で段階が変わる（single → none が主）= IK-1048 の仮説を実データで確認。
+      場面の前提には関係しない（記録のみ）。
+   3. pinn_editor_removed（te-01 = PINN の viewer。share の (a) と共通）。PINN のノード "1" の台帳行が r25g に残っているか（場面の expect_row）。
+   4. doubt_no_view_teacher（実測済み）: te-05 の PINN 共有グループ 2 つを外しても viewer のまま（6be229e1 の editor 経由で sources が見える）。砂場の
+      5 教員は全員がコース経由で PINN を閲覧できるので「閲覧もできない教員」は**砂場では作れない** — te-05 の 404 の場面は walk しない（face スクリプトから
+      外した）。te-01 × 閲覧のみは不完全な body（権限が先）の確認まで。**日本語の 404 の文は未評価のまま**。
+   5. cepheus_editor → manual_assumption（te-02・第 7 周と同じ。同文の旧い前提は残したまま）。check が選んだコースが 1bad7d9f でなければ、その id で
+      scenario_params の te-02 の course_hint を差し替える。te-03 の Cepheus TeX の editor（`--only cepheus_editor --cepheus-teacher te-03-meticulous-seminar`）。
+   6. 第 7 周の te-03 の run が残した取り下げ済みの疑義 2 と未完了の提案が r25g にあること（無ければ te-03 は取り下げを先に作り直す — 場面の手のまま）。
+   7. share_fixed_course_anchors（実測済み）: 1bad7d9f の ⚓ は 0 個 → 固定コースを 6be229e1 にした。st-05 の topic_hint は第 6 周と同じ t13（主結果：R1.4と
+      音速の軟化）で、6be229e1 に同じ題名のトピックが無ければ t11（二重ネットワークとTOV方程式の課し方）に差し替える。ledger_lines_unmoved_component
+      （第 7 周の項目）で 6be229e1 の ⚓ が開く部品に台帳スコープを記帳し、「s-db-ledger-lines の学生の topic_hint へ写す」で st-05 の topic_hint /
+      topic_hint_terms を差し替える。記帳できなければ st-05 の台帳の行は「記帳なし」の見え方の再確認 — run の記録に書く。
+
+  ── レーンの順（face_doubt_r8.sh。--persona X --scenario Y で 1 場面ずつ）──
+   1. （te-05 × 閲覧もできない教員は walk しない — 用意 4）
+   2. te-01-rookie-seminar × t-db-ledger-readonly-probe（viewer・不完全な body）→ mailbox_doubt/PROBE_DONE_R8（記録のみ）
+   3. te-03-meticulous-seminar × t-db-challenge-from-node
+   4. te-02-veteran-intro × t-db-assumption-review
+   5. st-05-night-solarwind × s-db-ledger-lines → mailbox_doubt/ST05_DONE_R8（記録のみ）
+   6. ⇢ mailbox_share/ST07_DONE_R8（share の st-07 の (d) の後 — 同じ学生の run を同時に走らせない）⇢ st-07-m1-grb-voice × s-db-map-ask-en（音声）
+      → mailbox_doubt/ST07_DONE_R8
+  最後に mailbox_doubt/LANE_DONE_R8。教員の run は他の面（te-01 share / atlas / studio・te-02 share・te-03 share）と並走してよい。
+
+  場面に足りない手（ハーネスへの申し送り・この campaign では足していない）:
+   - t-db-challenge-from-node の提案の状態は「検証に着手」だけで、審判の［完了を記録］（admin.doubt.proposal_status の completed）の手が steps に無い。
+   - 閲覧もできない教員は砂場で作れない（用意 4）。作れる砂場でも、教材の一覧に PINN が出ないので画面の手（studio_node_ledger）では当たらず、画面を
+     経ない記帳（scope_record_raw / _incomplete）が PINN の document を引けるかに依る。
+   - 前提候補の確定・却下は砂場では候補が立たない（IK-0970・材料の追加は外部 API が要る）— te-02 は確定済みの前提から。
+
+  LLM 予算の見積り: 学生の質問（st-05 2〜3 回・st-07 2 回 + 音声の文字起こし・読み上げ各 2 回）= 6〜9 回 + 前提マイニング（任意・非同期 0〜2）=
+  最大 11 回（余裕を見て 12）。台帳・前提の地図・疑義・再計算・権限の拒否は LLM を呼ばない。ペルソナ頭脳は 5 場面 × 35〜60 手 ≒ 220〜290（上限 300）。外部 API は呼ばない。

@@ -653,7 +653,7 @@ class TestLectureStudioModelParam:
         import routes.lecture_studio._shared as shared_mod
         import routes.lecture_studio.topics as topics_mod
 
-        course_data = {"id": "course-1", "title": "コース", "topics": [{"id": "topic-1", "title": "T"}]}
+        course_data = {"id": "course-1", "title": "コース", "topics": [{"id": "topic-1", "title": "T", "summary": "要約"}]}
         # 権限ゲートの seam は _shared._course_data_for_studio_editable（教材図スタジオ §8 で共有化）。
         monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: course_data)
         monkeypatch.setattr(topics_mod, "consume_lecture_rewrite_quota", lambda *a, **k: None)
@@ -678,7 +678,7 @@ class TestLectureStudioModelParam:
         import routes.lecture_studio._shared as shared_mod
         import routes.lecture_studio.topics as topics_mod
 
-        course_data = {"id": "course-1", "title": "コース", "topics": [{"id": "topic-1", "title": "T"}]}
+        course_data = {"id": "course-1", "title": "コース", "topics": [{"id": "topic-1", "title": "T", "summary": "要約"}]}
         # 権限ゲートの seam は _shared._course_data_for_studio_editable（教材図スタジオ §8 で共有化）。
         monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: course_data)
         monkeypatch.setattr(topics_mod, "consume_lecture_rewrite_quota", lambda *a, **k: None)
@@ -711,7 +711,7 @@ class TestLectureStudioModelParam:
         import routes.lecture_studio._shared as shared_mod
         import routes.lecture_studio.topics as topics_mod
 
-        course_data = {"id": "course-1", "title": "コース", "topics": [{"id": "topic-1", "title": "T"}]}
+        course_data = {"id": "course-1", "title": "コース", "topics": [{"id": "topic-1", "title": "T", "summary": "要約"}]}
         # 権限ゲートの seam は _shared._course_data_for_studio_editable（教材図スタジオ §8 で共有化）。
         monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: course_data)
         monkeypatch.setattr(topics_mod, "consume_lecture_rewrite_quota", lambda *a, **k: None)

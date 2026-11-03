@@ -14,6 +14,8 @@
 - モジュール側の語彙定数と taxonomy.md の語彙表が一致する（片方だけ変えると落ちる）。
 - 分類の確定状態（candidate / confirmed）・観点は最大 2・層は layers.md の語彙・
   解決済みの着地先にコードが 1 つ以上・辞書は族（###）→ 型（####）の 2 段。
+- 解決原理（principles.md / taxonomy §9）: 参照の無い原理は置かない・行の見出しは固定・
+  「当たる型」は辞書に実在・``resolution.principles`` の原理は実在し ``use`` は語彙内。
 """
 
 from __future__ import annotations
@@ -48,12 +50,12 @@ def taxonomy_text() -> str:
 
 class TestLayout:
     def test_core_documents_exist(self):
-        for path in (README_DOC, TEMPLATE_DOC, ik.TAXONOMY_DOC, ik.DICTIONARY_DOC, ik.INDEX_DOC, ik.LAYERS_DOC):
+        for path in (README_DOC, TEMPLATE_DOC, ik.TAXONOMY_DOC, ik.DICTIONARY_DOC, ik.INDEX_DOC, ik.LAYERS_DOC, ik.PRINCIPLES_DOC):
             assert path.exists(), f"{path.relative_to(ROOT)} が無い"
         assert ik.ENTRIES_DIR.is_dir()
 
     def test_reference_documents_declare_state(self):
-        for path in (README_DOC, ik.TAXONOMY_DOC, ik.DICTIONARY_DOC, ik.INDEX_DOC, ik.LAYERS_DOC):
+        for path in (README_DOC, ik.TAXONOMY_DOC, ik.DICTIONARY_DOC, ik.INDEX_DOC, ik.LAYERS_DOC, ik.PRINCIPLES_DOC):
             head = path.read_text(encoding="utf-8")[:1500]
             assert re.search(r"(?m)^.*(状態|ステータス):", head), (
                 f"{path.relative_to(ROOT)} の冒頭にラベル付き状態行が無い（development_checklist §5-2）"
@@ -72,7 +74,7 @@ class TestVocabularyMirrorsTaxonomy:
 
     @staticmethod
     def _backticked(text: str) -> set[str]:
-        return set(re.findall(r"`([a-z_]+(?:\.[a-z_]+)?)`", text))
+        return set(re.findall(r"`([a-z0-9_]+(?:\.[a-z_]+)?)`", text))
 
     def test_every_module_token_is_defined_in_taxonomy(self, taxonomy_text):
         defined = self._backticked(taxonomy_text)
@@ -88,6 +90,8 @@ class TestVocabularyMirrorsTaxonomy:
             ik.GENERALIZATION_LEVELS,
             ik.DISCOVERY_PERSPECTIVES,
             ik.RESOLUTION_PERSPECTIVES,
+            ik.VERIFICATION_METHODS,
+            ik.PRINCIPLE_USES,
         ):
             missing = [t for t in group if t not in defined]
             assert missing == [], f"taxonomy.md に定義の無い語彙（モジュール側だけにある）: {missing}"
@@ -114,6 +118,17 @@ class TestVocabularyMirrorsTaxonomy:
             f"解決観点が食い違う: doc-only={res - set(ik.RESOLUTION_PERSPECTIVES)} "
             f"module-only={set(ik.RESOLUTION_PERSPECTIVES) - res}"
         )
+
+    def test_every_taxonomy_verification_method_is_known_to_module(self, taxonomy_text):
+        """検証方法（taxonomy §8）の表とモジュールの語彙は一致する。§5 の解決観点とは別の節に置く（混ぜない）。"""
+        ver = set(re.findall(r"(?m)^\| `([a-z0-9_]+)` \|", ik_section(taxonomy_text, "## 8.")))
+        assert ver == set(ik.VERIFICATION_METHODS), (
+            f"検証方法が食い違う: doc-only={ver - set(ik.VERIFICATION_METHODS)} "
+            f"module-only={set(ik.VERIFICATION_METHODS) - ver}"
+        )
+        assert ik.VERIFICATION_NOT_VERIFIED in ik.VERIFICATION_METHODS
+        res = set(re.findall(r"(?m)^\| `([a-z_]+)` \|", ik_section(taxonomy_text, "## 5.")))
+        assert not (res & set(ik.VERIFICATION_METHODS)), "検証方法の語彙が解決観点の節に混入している"
 
 
 def ik_section(text: str, heading_prefix: str) -> str:
@@ -297,3 +312,370 @@ class TestModulePurity:
         for forbidden in ("fastapi", "sqlalchemy", "core", "api", "openai"):
             hits = [ln for ln in import_lines if re.search(rf"\b{forbidden}\b", ln)]
             assert hits == [], f"issue_knowledge_index.py はアプリコード（{forbidden}）を import しない: {hits}"
+
+
+class TestVerificationRecord:
+    """`resolution.verification`（taxonomy §8）— 未観測と良好を分ける欄。省略は記録なし、確かめていないなら not_verified。"""
+
+    @staticmethod
+    def _resolved_meta(entries) -> dict:
+        import copy
+        base = next(e for e in entries if e.meta.get("status") == "resolved")
+        meta = copy.deepcopy(base.meta)
+        meta["resolution"].pop("verification", None)
+        return meta
+
+    @staticmethod
+    def _errors(entries, dictionary_text, meta, **overrides) -> list[str]:
+        import copy
+        meta = copy.deepcopy(meta)
+        meta.update(overrides)
+        base = next(e for e in entries if e.meta.get("status") == "resolved")
+        entry = ik.Entry(path=base.path, meta=meta, body=base.body)
+        patterns = set(ik.dictionary_patterns(dictionary_text))
+        known = {str(e.meta.get("id")) for e in entries}
+        errs = ik.validate_entry(entry, patterns=patterns, known_ids=known, layers=set(ik.layer_vocabulary()))
+        return [e for e in errs if "verification" in e]
+
+    def test_absent_verification_is_allowed_as_no_record(self, entries, dictionary_text):
+        meta = self._resolved_meta(entries)
+        assert self._errors(entries, dictionary_text, meta) == []
+
+    def test_well_formed_verification_passes(self, entries, dictionary_text):
+        meta = self._resolved_meta(entries)
+        meta["resolution"]["verification"] = {"methods": ["scratch_db", "guardrail"], "unverified": ["同時実行"]}
+        assert self._errors(entries, dictionary_text, meta) == []
+        meta["resolution"]["verification"] = {"methods": ["not_verified"], "unverified": []}
+        assert self._errors(entries, dictionary_text, meta) == []
+
+    def test_verification_only_on_resolved(self, entries, dictionary_text):
+        meta = self._resolved_meta(entries)
+        meta["status"] = "open"
+        meta["resolved_at"] = None
+        meta["resolution"]["perspective"] = ["pending"]
+        meta["resolution"]["verification"] = {"methods": ["guardrail"], "unverified": []}
+        assert any("status=resolved" in e for e in self._errors(entries, dictionary_text, meta))
+
+    def test_vocabulary_and_shape_are_enforced(self, entries, dictionary_text):
+        meta = self._resolved_meta(entries)
+        cases = {
+            "語彙外": {"methods": ["eyeballed"], "unverified": []},
+            "not_verified 単独": {"methods": ["not_verified", "guardrail"], "unverified": []},
+            "methods 空": {"methods": [], "unverified": []},
+            "unverified 欠落": {"methods": ["guardrail"]},
+            "数値の記述": {"methods": ["guardrail"], "unverified": ["3 件のケースは未確認"]},
+            "未知キー": {"methods": ["guardrail"], "unverified": [], "coverage": 0.8},
+        }
+        for label, ver in cases.items():
+            meta["resolution"]["verification"] = ver
+            assert self._errors(entries, dictionary_text, meta), f"{label} が通ってしまう: {ver}"
+
+    def test_dictionary_types_declare_how_to_verify(self, dictionary_text):
+        """辞書の型は「確かめ方」（処方）を持つ。実績は索引 §14.4。"""
+        for slug in ik.dictionary_patterns(dictionary_text):
+            table = ik_section(dictionary_text, f"#### {slug}").split("\n###", 1)[0]
+            m = re.search(r"(?m)^\| 確かめ方 \| (.+?) \|\s*$", table)
+            assert m and m.group(1).strip(), f"dictionary.md の型 `{slug}` に「確かめ方」の行が無い"
+            assert not re.search(r"\d+\s*(件|%|％)", m.group(1)), f"型 `{slug}` の確かめ方に件数・率がある"
+
+    def test_index_renders_verification_cooccurrence(self, entries, dictionary_text):
+        rendered = ik.render_index(entries, dictionary_text)
+        assert "### 14.4 型ごとの確かめ方" in rendered
+        verified = [e for e in entries if e.meta.get("status") == "resolved" and ik.verification_of(e)]
+        for e in verified:
+            assert e.rel in rendered.split("### 14.4", 1)[1].split("## 10.", 1)[0], f"{e.id} が §14.4 に載っていない"
+        assert "確かめていないと記録されたエントリ" in rendered
+
+
+class TestSolutionPrinciples:
+    """principles.md（taxonomy §9）— 型を横断する条件付きの解決知識。参照の無い原理は置かない。"""
+
+    @pytest.fixture(scope="class")
+    def principles_text(self) -> str:
+        return ik.PRINCIPLES_DOC.read_text(encoding="utf-8")
+
+    def test_principles_doc_has_at_least_one_principle(self, principles_text):
+        assert ik.principle_slugs(principles_text), "principles.md に原理（#### 見出し）が無い"
+
+    def test_every_principle_declares_required_rows_and_existing_types(self, principles_text, dictionary_text):
+        patterns = set(ik.dictionary_patterns(dictionary_text))
+        sections = ik.principle_sections(principles_text)
+        for slug in ik.principle_slugs(principles_text):
+            body = sections[slug]
+            for row in ik.PRINCIPLE_REQUIRED_ROWS:
+                m = re.search(rf"(?m)^\| {re.escape(row)} \| (.+?) \|\s*$", body)
+                assert m and m.group(1).strip(), f"原理 `{slug}` に「{row}」の行が無い"
+            types = ik.principle_types(principles_text)[slug]
+            assert types, f"原理 `{slug}` の「当たる型」が空"
+            assert set(types) <= patterns, f"原理 `{slug}` の「当たる型」に辞書に無い型: {set(types) - patterns}"
+            principle_row = re.search(r"(?m)^\| 原理 \| (.+?) \|\s*$", body).group(1)
+            for pat in ik.FORBIDDEN_GENERAL_FORM_PATTERNS:
+                assert not pat.search(principle_row), f"原理 `{slug}` の「原理」行にファイル名・パス・コード片（{pat.pattern}）"
+            assert not re.search(r"\d+\s*(件|%|％)", principle_row), f"原理 `{slug}` の「原理」行に件数・率"
+
+    def test_every_principle_is_referenced_by_an_entry(self, entries, principles_text):
+        used = {str(x.get("principle")) for e in entries for x in ik.principles_of(e)}
+        missing = sorted(set(ik.principle_slugs(principles_text)) - used)
+        assert missing == [], f"参照するエントリの無い原理: {missing}"
+
+    def test_entry_references_are_validated(self, entries, dictionary_text):
+        import copy
+        base = next(e for e in entries if ik.principles_of(e))
+        good = copy.deepcopy(base.meta)
+        patterns = set(ik.dictionary_patterns(dictionary_text))
+        known = {str(x.meta.get("id")) for x in entries}
+        principles = set(ik.principle_slugs(ik.PRINCIPLES_DOC.read_text(encoding="utf-8")))
+
+        def errors(meta) -> list[str]:
+            entry = ik.Entry(path=base.path, meta=meta, body=base.body)
+            return [
+                err for err in ik.validate_entry(entry, patterns=patterns, known_ids=known, principles=principles)
+                if "principles" in err
+            ]
+
+        assert errors(good) == []
+        cases = {
+            "原理が実在しない": [{"principle": "no-such-principle", "use": "consulted", "note": "x"}],
+            "use が語彙外": [{"principle": good["resolution"]["principles"][0]["principle"], "use": "applied", "note": "x"}],
+            "note が空": [{"principle": good["resolution"]["principles"][0]["principle"], "use": "consulted", "note": ""}],
+            "note に件数": [{"principle": good["resolution"]["principles"][0]["principle"], "use": "consulted", "note": "3 件で確認"}],
+            "重複": [
+                {"principle": good["resolution"]["principles"][0]["principle"], "use": "consulted", "note": "x"},
+                {"principle": good["resolution"]["principles"][0]["principle"], "use": "extracted", "note": "y"},
+            ],
+            "未知キー": [{"principle": good["resolution"]["principles"][0]["principle"], "use": "consulted", "note": "x", "score": 1}],
+        }
+        for label, items in cases.items():
+            meta = copy.deepcopy(good)
+            meta["resolution"]["principles"] = items
+            assert errors(meta), f"{label} が通ってしまう: {items}"
+
+    def test_index_renders_principles_section(self, entries, dictionary_text, principles_text):
+        rendered = ik.render_index(entries, dictionary_text, principles_text)
+        assert "## 15. 解決原理別" in rendered
+        section = rendered.split("## 15.", 1)[1].split("## 10.", 1)[0]
+        for slug in ik.principle_slugs(principles_text):
+            assert f"#### `{slug}`" in section
+        for e in entries:
+            if ik.principles_of(e):
+                assert e.rel in section, f"{e.id} が §15 に載っていない"
+        assert "`consulted`" in section
+
+    def test_taxonomy_and_docs_describe_the_principles_layer(self, taxonomy_text):
+        assert "## 9. 解決原理" in taxonomy_text
+        readme = README_DOC.read_text(encoding="utf-8")
+        assert "principles.md" in readme
+        checklist = (ROOT / "docs" / "development_checklist.md").read_text(encoding="utf-8")
+        assert "principles.md" in checklist
+        cycle = ik.IMPROVEMENT_CYCLE_DOC.read_text(encoding="utf-8")
+        assert "principles.md" in cycle
+
+    def test_establishment_is_derived_from_forward_use_not_human_confirmation(self, entries, principles_text):
+        """成立 = consulted が別々の型から 2 件以上・適用後の同型の見逃しなし（taxonomy §9）。review: confirmed は条件にしない。"""
+        import copy
+        slug = ik.principle_slugs(principles_text)[0]
+        base = next(e for e in entries if e.meta.get("status") == "resolved")
+
+        def fake(ident: str, pattern: str, use: str | None, *, recorded: str, resolved: str | None, related=()) -> ik.Entry:
+            meta = copy.deepcopy(base.meta)
+            meta.update({"id": ident, "pattern": pattern, "recorded_at": recorded, "resolved_at": resolved,
+                         "related": list(related), "view_of": [], "status": "resolved" if resolved else "open"})
+            meta["classification"]["review"] = "candidate"
+            meta["resolution"]["principles"] = [{"principle": slug, "use": use, "note": "x"}] if use else []
+            return ik.Entry(path=base.path, meta=meta, body=base.body)
+
+        # 後付けだけ → 暫定（確定エントリがあっても成立しない）
+        only_extracted = [fake("IK-9001", "a", "extracted", recorded="2026-01-01", resolved="2026-01-02"),
+                          fake("IK-9002", "b", "extracted", recorded="2026-01-01", resolved="2026-01-02")]
+        for e in only_extracted:
+            e.meta["classification"]["review"] = "confirmed"
+        assert ik.principle_state(slug, only_extracted)[0].startswith("暫定")
+        # 同じ型から 2 件 → 暫定
+        same_type = [fake("IK-9001", "a", "consulted", recorded="2026-01-01", resolved="2026-01-02"),
+                     fake("IK-9002", "a", "consulted", recorded="2026-01-03", resolved="2026-01-04")]
+        assert ik.principle_state(slug, same_type)[0].startswith("暫定")
+        # 別々の型から 2 件・見逃しなし → 成立（review は candidate のまま）
+        two_types = [fake("IK-9001", "a", "consulted", recorded="2026-01-01", resolved="2026-01-02"),
+                     fake("IK-9002", "b", "consulted", recorded="2026-01-03", resolved="2026-01-04")]
+        assert ik.principle_state(slug, two_types)[0] == "成立"
+        # 適用後に同型の見逃し（consulted を related で指す同じ型の後発エントリ）→ 暫定
+        miss = two_types + [fake("IK-9003", "a", None, recorded="2026-02-01", resolved=None, related=["IK-9001"])]
+        state, _, misses = ik.principle_state(slug, miss)
+        assert state.startswith("暫定") and [m.id for m in misses] == ["IK-9003"]
+        # 別の型からの後発参照は見逃しに数えない
+        other = two_types + [fake("IK-9003", "c", None, recorded="2026-02-01", resolved=None, related=["IK-9001"])]
+        assert ik.principle_state(slug, other)[0] == "成立"
+
+    def test_docs_do_not_say_humans_select_principles(self, taxonomy_text):
+        readme = README_DOC.read_text(encoding="utf-8")
+        cycle = ik.IMPROVEMENT_CYCLE_DOC.read_text(encoding="utf-8")
+        for name, text in {"taxonomy": taxonomy_text, "README": readme, "improvement_cycle": cycle}.items():
+            # 訂正の記録行（旧文を引用する行）は除く
+            live = [ln for ln in text.splitlines() if "訂正" not in ln and "撤回" not in ln]
+            hits = [ln for ln in live if "選ぶのは人" in ln]
+            assert hits == [], f"{name}: 人は選ばない（問題が明らかになったときだけ介入する）: {hits}"
+        assert "問題が明らかになったとき" in taxonomy_text
+
+# ---------------------------------------------------------------------------
+# 想起シート（recall.md）と設計書の pre-mortem 節 — 「思い出させる」経路（2026-10-02）
+# ---------------------------------------------------------------------------
+
+# pre-mortem 節を持たないレガシー設計書。新しい `*_design.md` には節を必須とするため、
+# この allowlist は**減らす方向のみ**（新しい設計書をここに足してはならない）。
+_PREMORTEM_LEGACY_ALLOWLIST = frozenset(
+    {
+        "assistant_common_infra_design.md",
+        "assistant_screen_adapter_design.md",
+        "atlas_binding_lifecycle_design.md",
+        "atlas_node_correspondence_design.md",
+        "atlas_relation_edges_design.md",
+        "atlas_vector_anchoring_design.md",
+        "candidate_flow_design.md",
+        "category_gap_candidates_design.md",
+        "claim_concept_grounding_design.md",
+        "corpus_complement_design.md",
+        "corpus_roaming_design.md",
+        "decision_context_design.md",
+        "dialogue_response_shape_design.md",
+        "disclosure_axes_design.md",
+        "discuss_dialogue_alignment_design.md",
+        "discuss_observation_design.md",
+        "discuss_opening_authoring_design.md",
+        "discussion_mode_design.md",
+        "display_projection_design.md",
+        "element_context_lens_design.md",
+        "element_deliberation_workspace_design.md",
+        "element_inventory_design.md",
+        "equation_context_panel_display_design.md",
+        "equation_hover_content_design.md",
+        "exposition_layer_design.md",
+        "figure_concept_linking_design.md",
+        "generation_language_design.md",
+        "graph_dialogue_review_design.md",
+        "graph_paper_layer_design.md",
+        "guidance_layer_design.md",
+        "guided_figure_reanalysis_design.md",
+        "hierarchical_context_explanation_design.md",
+        "image_pipeline_knowledge_library_design.md",
+        "indicator_governance_design.md",
+        "knowledge_landscape_design.md",
+        "knowledge_transfer_design.md",
+        "label_vocab_design.md",
+        "learner_element_context_design.md",
+        "learning_chat_entry_unification_design.md",
+        "learning_ui_inspect_hover_design.md",
+        "learning_units_design.md",
+        "llm_model_selection_design.md",
+        "llm_response_streaming_design.md",
+        "llm_usage_metering_design.md",
+        "manual_help_kb_design.md",
+        "personal_knowledge_network_design.md",
+        "personal_map_curiosity_design.md",
+        "personal_map_nearby_design.md",
+        "reconstruction_loop_design.md",
+        "release_review_flow_design.md",
+        "return_door_design.md",
+        "seminar_brief_mirroring_design.md",
+        "shared_versioning_design.md",
+        "status_notification_design.md",
+        "structure_descent_design.md",
+        "teacher_triage_instruments_design.md",
+        "teaching_figure_studio_design.md",
+        "trace_registry_sovereignty_ledger_design.md",
+        "understanding_cycle_design.md",
+        "url_material_upload_design.md",
+    }
+)
+
+_RECALL_READERS = (
+    ROOT / "CLAUDE.md",
+    ROOT / "docs" / "development_checklist.md",
+    ROOT / "docs" / "architecture" / "improvement_cycle.md",
+    README_DOC,
+    ROOT / ".claude" / "skills" / "episteme-graph-dev" / "SKILL.md",
+    ROOT / ".claude" / "skills" / "episteme-graph-knowledge" / "SKILL.md",
+)
+
+
+class TestRecallSheet:
+    """辞書・原理は「開きに行かないと読まれない」。短い想起シートを読み込み経路に置き、設計書に型を写させる。"""
+
+    def test_recall_doc_exists_and_matches_generator(self, entries, dictionary_text):
+        assert ik.RECALL_DOC.exists(), "docs/issue_knowledge/recall.md が無い（生成器で作る）"
+        rendered = ik.render_recall(entries, dictionary_text) + "\n"
+        assert ik.RECALL_DOC.read_text(encoding="utf-8") == rendered, (
+            "recall.md が生成器の出力と一致しない。再生成すること: "
+            "backend/.venv/bin/python backend/scripts/issue_knowledge_index.py"
+        )
+
+    def test_recall_doc_is_short(self):
+        n = len(ik.RECALL_DOC.read_text(encoding="utf-8").splitlines())
+        assert n <= ik.RECALL_MAX_LINES, f"recall.md が {n} 行。読み込み経路に置く 1 枚は {ik.RECALL_MAX_LINES} 行以内"
+
+    def test_recall_lists_bounded_patterns_with_detection_and_verification(self, entries, dictionary_text):
+        pats = ik.recall_patterns(entries, dictionary_text)
+        assert 0 < len(pats) <= ik.RECALL_MAX_PATTERNS
+        rows = ik.dictionary_type_rows(dictionary_text)
+        for pat in pats:
+            assert rows[pat].get("見分け方") and rows[pat].get("確かめ方"), f"辞書の型 `{pat}` に見分け方・確かめ方が無い"
+
+    def test_trigger_families_exist_in_dictionary(self, dictionary_text):
+        families = set(ik.dictionary_families(dictionary_text))
+        for _words, fam in ik.PREMORTEM_TRIGGERS:
+            assert fam in families, f"引き金の族 `{fam}` が辞書に無い"
+
+    def test_trigger_table_is_canonical_in_module(self):
+        # README §3.3b は表を持たず recall.md（生成器の PREMORTEM_TRIGGERS）を指す。表を 2 箇所に持たない。
+        readme = README_DOC.read_text(encoding="utf-8")
+        assert "recall.md" in readme
+        assert "| 変更に含まれる語 | 先に当てる族 |" not in readme, "引き金の表は生成器（recall.md）だけが持つ"
+
+    def test_recall_is_in_the_reading_path(self):
+        for path in _RECALL_READERS:
+            assert "recall.md" in path.read_text(encoding="utf-8"), f"{path.relative_to(ROOT)} が recall.md を参照していない"
+
+    def test_new_design_docs_declare_premortem(self, dictionary_text):
+        missing = []
+        for path in ik.design_docs():
+            if path.name in _PREMORTEM_LEGACY_ALLOWLIST:
+                continue
+            decl = ik.premortem_declaration(path.read_text(encoding="utf-8"), dictionary_text)
+            if decl is None or not (decl["slugs"] or decl["none"]):
+                missing.append(path.relative_to(ROOT).as_posix())
+        assert missing == [], (
+            f"pre-mortem 節（見出しに pre-mortem・本文に辞書の型 slug か「{ik.PREMORTEM_NONE_TEXT}」）が無い設計書: {missing}。"
+            "書き方は docs/issue_knowledge/recall.md §4"
+        )
+
+    def test_premortem_legacy_allowlist_has_no_stale_entries(self, dictionary_text):
+        names = {p.name for p in ik.design_docs()}
+        stale = sorted(n for n in _PREMORTEM_LEGACY_ALLOWLIST if n not in names)
+        assert stale == [], f"存在しない設計書が allowlist に残っている: {stale}"
+        graduated = sorted(
+            p.name for p in ik.design_docs()
+            if p.name in _PREMORTEM_LEGACY_ALLOWLIST and ik.premortem_section(p.read_text(encoding="utf-8")) is not None
+        )
+        assert graduated == [], f"pre-mortem 節を得た設計書は allowlist から外す: {graduated}"
+
+    def test_premortem_slugs_in_design_docs_exist(self, dictionary_text):
+        known = set(ik.dictionary_patterns(dictionary_text))
+        for path in ik.design_docs():
+            sec = ik.premortem_section(path.read_text(encoding="utf-8"))
+            if sec is None:
+                continue
+            # 節の中でバッククォートされた slug 形の語のうち、族でも型でもないものは typo の疑い
+            families = set(ik.dictionary_families(dictionary_text))
+            for tok in ik._BACKTICK_SLUG_RE.findall(sec):
+                if "-" in tok and tok not in known and tok not in families:
+                    # 原理 slug・識別子（snake_case は対象外）は許す
+                    assert tok in set(ik.principle_slugs(ik.principles_text_or_empty())), (
+                        f"{path.name} の pre-mortem 節に辞書に無い slug `{tok}`"
+                    )
+
+    def test_index_renders_premortem_hits(self, entries, dictionary_text):
+        text = ik.render_index(entries, dictionary_text)
+        assert "### 14.5 pre-mortem の的中" in text
+        hits = ik.premortem_hits(entries, dictionary_text)
+        assert hits, "pre-mortem 節を持つ設計書が 1 つも無い"
+        for h in hits:
+            assert set(h["hit"]) <= set(h["predicted"])

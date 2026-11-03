@@ -507,3 +507,23 @@ class TestEquationVisionFunctionalAttribution:
         assert event.image_count == 1
         assert event.document_id == "doc-1"
         assert event.user_id == "teacher-1"
+
+
+def test_rag_retrieval_embedding_is_attributed_to_the_same_chat_feature():
+    """IK-0364: 質問文の埋め込み（検索）が usage_context の外で走り unattributed になっていた。
+
+    検索の直前で `_retrieval_feature` を `_chat_feature` と同じ順序（cycle > discuss > casual > chat）で
+    決め、検索を usage_context の内側で呼ぶことを固定する。
+    """
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1].joinpath("api", "routes", "learning.py").read_text(encoding="utf-8")
+    core = src.split("def _learning_chat_core(")[1]
+    idx = core.index("chunk_results = search_chunks_with_metadata(")
+    before = core[max(0, idx - 900):idx]
+    assert "_retrieval_feature = _cycle_chat_feature or (" in before
+    assert '"learning:chat_discuss" if _is_discuss' in before
+    assert '"learning:chat_casual" if _is_casual' in before
+    assert 'with usage_context(_retrieval_feature, user_id=current_user["id"], course_id=course_id):' in before
+    # 検索は with の内側（インデントが 1 段深い）
+    assert "\n        chunk_results = search_chunks_with_metadata(" in core

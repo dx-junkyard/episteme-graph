@@ -1,0 +1,21 @@
+id: s-atlas-sea-map
+population: students
+runner: [api, browser]
+session: 1
+goal: '{{goal_text}} のために、論文の海で分野の地図を開き、どの領域に論文が厚く、どこが地図の端かを読む'
+params_required: [goal_text]
+steps:
+  - do: auth.login
+  - do: learning.corpus.domains
+  - do: learning.atlas.sea_map
+    note: 領域の塗り（なし / 少しある / 蓄積あり / 厚い）とアンカーの円の大きさ、地図の端（縁・外）の事実文を読む
+  - do: learning.corpus.documents
+    note: 閲覧できる論文の一覧を読み、地図の厚みと合っているかを見る
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#corpus-sea
+  - manual: student/02-student.md#corpus-sea-map
+watch_for:
+  - 厚みは段階の言葉と円の大きさだけで示され、論文の件数・割合・閾値が出ない
+  - 縁の事実文は現行の凍結版にある領域だけを言い、教員の判断（採用・却下）を出さない
+  - 外の事実文は教員が検索したかどうかだけを言い、候補の件数を出さない

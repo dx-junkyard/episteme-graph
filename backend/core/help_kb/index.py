@@ -40,6 +40,64 @@ def tokenize(text: str) -> set:
     return set(m.group(0).lower() for m in WORD_RE.finditer(text or ""))
 
 
+# マニュアル検索専用の語の切り方（第 22 周 A2・IK-0611 派生）。
+#
+# ``tokenize`` は日本語を 1 字ずつに割るので、「と・は・何・で・す・か」のような
+# 機能語の字が長い節（目次・概要）ほど多く重なり、問いの核心の語（「未測定」）を持つ
+# 短い節より上に来ていた。マニュアル検索だけは、かな・漢字の連なりを
+# ①漢字・カタカナの 1 字 ②隣り合う 2 字（ひらがな同士の 2 字は除く）に割り、
+# ひらがな 1 字は語に数えない。ASCII の語は ``tokenize`` と同じ。
+# Copilot KB（``admin_assistant/knowledge.py``）は ``tokenize`` のまま（挙動を変えない）。
+_ASCII_WORD_RE = re.compile(r"[0-9A-Za-z]+")
+_CJK_RUN_RE = re.compile(r"[぀-ヿ一-鿿]+")
+_HIRAGANA_RE = re.compile(r"[぀-ゟ]")
+
+
+def _is_hiragana(ch: str) -> bool:
+    return bool(_HIRAGANA_RE.fullmatch(ch))
+
+
+def tokenize_cjk_ngrams(text: str) -> set:
+    """マニュアル検索用の語集合（ASCII の語 + 漢字・カタカナの 1 字 + かな漢字の隣接 2 字）。"""
+    raw = text or ""
+    out = set(m.group(0).lower() for m in _ASCII_WORD_RE.finditer(raw))
+    for m in _CJK_RUN_RE.finditer(raw):
+        run = m.group(0)
+        for ch in run:
+            if not _is_hiragana(ch):
+                out.add(ch)
+        for i in range(len(run) - 1):
+            pair = run[i : i + 2]
+            if _is_hiragana(pair[0]) and _is_hiragana(pair[1]):
+                continue
+            out.add(pair)
+    return out
+
+
+def _token_weight(token: str) -> int:
+    """隣接 2 字（かな漢字）は 1 字より強い手掛かりとして 2 と数える。"""
+    return 2 if len(token) == 2 and _CJK_RUN_RE.fullmatch(token) else 1
+
+
+_NAV_LINE_RE = re.compile(
+    r"^\s*(?:[-*+]|\d+[.)])?\s*\[[^\]]+\]\([^)]*\)\s*$"
+)
+
+
+def is_navigation_section(section: dict) -> bool:
+    """本文が「リンクの並び」だけの節（目次）か。
+
+    目次は節の名前を並べただけで、どの問いにも答えていないのに、多くの語を含むので
+    語彙重なりで上位に来る（第 21 周: 英語の問いにも使い方の問いにも目次が返った）。
+    マニュアル検索はこの節を答えの候補に入れない。索引からは外さない（リンクの検証が
+    ``#toc`` を引くため）。判定は本文の構造だけで決める（見出しの語や anchor 名に頼らない）。
+    """
+    lines = [ln for ln in str(section.get("body") or "").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    return all(_NAV_LINE_RE.match(ln) for ln in lines if ln.strip() != "---")
+
+
 def strip_front_matter(lines: list[str]) -> list[str]:
     """front-matter を解釈せず読み飛ばすだけ（admin_operations の現行挙動）。"""
     if lines and lines[0].strip() == "---":
@@ -274,6 +332,8 @@ def score_sections(
     *,
     limit: int = 3,
     screen: Optional[str] = None,
+    cjk_ngrams: bool = False,
+    prefer_anchor: Optional[str] = None,
 ) -> list[dict]:
     """節（title/body を持つ dict）を query との語彙重なりでスコアリングして返す。
 
@@ -282,19 +342,42 @@ def score_sections(
     検索ランキングの第一候補にする。語彙が一切重ならない（スコア0の）節は
     screen 一致だけでは決して浮上しない — 元のスコアリング条件は不変。
     ``screen=None`` は完全に従来どおりスコア降順のみ（後方互換）。
+
+    ``cjk_ngrams=True``（マニュアル検索だけが使う）は :func:`tokenize_cjk_ngrams` で語を切り、
+    かな漢字の隣接 2 字を 2 と数える。``prefer_anchor`` を渡すと、その anchor の節と
+    ``{prefer_anchor}-`` で始まる子節（例: 開いているパネルの節の一族）をスコアが正の節の
+    中で先頭に並べる（``screen`` と同じく、語が重ならない節を浮かせない）。どちらも既定は
+    従来どおり（Copilot KB の挙動を変えない）。
     """
-    q_tokens = tokenize(query)
-    scored: list[tuple[int, float, dict]] = []
+    if not cjk_ngrams:
+        q_tokens = tokenize(query)
+    else:
+        q_tokens = tokenize_cjk_ngrams(query)
+    scored: list[tuple[int, int, float, dict]] = []
     for sec in sections:
         title = sec.get("title", "")
         body = sec.get("body", "")
-        hay = tokenize(f"{title} {body}")
-        overlap = len(q_tokens & hay)
-        title_bonus = 2 if q_tokens & tokenize(title) else 0
+        if not cjk_ngrams:
+            hay = tokenize(f"{title} {body}")
+            overlap = len(q_tokens & hay)
+            title_bonus = 2 if q_tokens & tokenize(title) else 0
+        else:
+            hay = tokenize_cjk_ngrams(f"{title} {body}")
+            overlap = sum(_token_weight(t) for t in q_tokens & hay)
+            title_bonus = 2 * sum(
+                _token_weight(t) for t in q_tokens & tokenize_cjk_ngrams(title)
+            )
         score = overlap + title_bonus
         if score <= 0:
             continue
         screen_match = 1 if screen is not None and sec.get("screen") == screen else 0
-        scored.append((screen_match, float(score), sec))
-    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
-    return [sec for _, _, sec in scored[: max(1, limit)]]
+        anchor = str(sec.get("anchor") or "")
+        anchor_match = (
+            1
+            if prefer_anchor
+            and (anchor == prefer_anchor or anchor.startswith(prefer_anchor + "-"))
+            else 0
+        )
+        scored.append((anchor_match, screen_match, float(score), sec))
+    scored.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
+    return [sec for _, _, _, sec in scored[: max(1, limit)]]

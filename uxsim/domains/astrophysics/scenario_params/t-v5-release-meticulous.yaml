@@ -1,0 +1,6 @@
+scenario: t-v5-release-meticulous
+domain: astrophysics
+params:
+  # 一覧の番号（1 始まり）。概念の名前は砂場の配置を見てから差し替えてよい（UUID は書かない）
+  reject_hint: "2"
+  reconsider_hint: "3"

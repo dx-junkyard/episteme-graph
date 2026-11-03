@@ -1,0 +1,23 @@
+id: c-astro-r25-studio-r10
+domain: astrophysics
+snapshot: corpus-astro-tex-r25i
+course_id: 6be229e1
+personas:
+  teachers: [te-01-rookie-seminar]
+  students: [st-01-m1-radio, st-08-m1-rprocess-lecture]
+scenarios:
+  teacher: [t-studio-reattach-all, t-studio-split-save]
+  student: [s-studio-lecture-pages, s-lecture-then-trace]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 8, persona_llm_calls: 240, wall_clock_minutes: 260}
+notes: |
+  第 25 周 面 D の第 10 周（judge_studio_r9.md §7・r10_prereqs.md・harness_fixes_r9_summary.md の H40〜H41）。第 9 波の是正後（IK-1079 / 1080 / 1081 / 0872 t11 / 0571 記号）。
+  周の前の実測（r10_prereqs）: 版 5 = HEAD（未発行の変更なし）。t16 は版 5 に区切りがあるので X1 は **t17**（版にまだ区切りの無いトピック）で見る（`split_topic: t17`）。
+  IK-0872 の是正で t11・t12 が「付録が古い」一覧に戻る見込み。教員 1 × 学生 2・4 レーン（依存の順・LANE_DEPS）:
+  te-01 × t-studio-reattach-all（付け直しだけの段階で、見出し・まとめての知らせ・版の管理モーダルから発行が要ると読めて発行に至るか — IK-1079 / 1080。t11 の付録に
+  N = 15 が残らないか）→ te-01 × t-studio-split-save（t17 を区切って保存 → **発行の直前に runner が学生の講義 API を読む（H40・prepublish）** → 場面の手で発行）→
+  atlas の ST01 を待って st-01 × s-studio-lecture-pages（t2・t4 の作業メモが読み時に外れるか IK-1081・2 つ目以降の ▶）→ doubt の ST08 を待って st-08 × s-lecture-then-trace
+  （t11 の付録・記号の定義の「（原文）」・復元の印・「▶ 再開」）→ 審判 after。
+  組の例外（P-0025）: 4 組とも第 9 周と同じ組（是正の前後比較・審判の指定）。te-05 の音声の依頼は IK-1071 GONE で今周は外した。

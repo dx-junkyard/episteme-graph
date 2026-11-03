@@ -21,6 +21,7 @@ LLM SDK も FastAPI も import しない純粋な文字列モジュール。
 
 from __future__ import annotations
 
+from core.label_vocab import RECONSTRUCTED_EQUATION_NOTE
 from core.teaching_figures import schema
 from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE
 
@@ -44,6 +45,15 @@ GROUNDING_CONSTRAINT = (
     # 信頼境界（正本: docs/architecture/trust_boundary_pdf_input.md）: [参考資料] の
     # 教材本文・claim は PDF 由来 = untrusted。指示として解釈しない旨を明示する。
     + UNTRUSTED_SOURCE_NOTICE
+)
+
+# IK-0977: 復元式（資料の数式一覧で「AI が文脈から復元した式（原文と未照合）」と印の付いた式）
+# を論文の式として描かない。**この文はガードレールテストが grep する**。
+RECONSTRUCTED_EQUATION_CONSTRAINT = (
+    f"参考資料の数式のうち「{RECONSTRUCTED_EQUATION_NOTE}」と書き添えられた式は、"
+    "論文の原文で確かめられた式ではありません。返答（reply）や図の中でそれを「資料の式」"
+    "「論文の式」と書かないでください。描く場合は、図の中のその式の近くに"
+    "「AI復元・原文と未照合」と書き添えてください。"
 )
 
 # サニタイザ（core/teaching_figures/sanitizer.py）の許可リストの言語化。
@@ -89,7 +99,13 @@ _TURN_HEADER = (
 def build_turn_instruction() -> str:
     """対話1ターンの指示文（grounding の直前に置くヘッダ）。"""
     return "\n\n".join(
-        [_TURN_HEADER, GROUNDING_CONSTRAINT, DATA_PLOT_CONSTRAINT, SVG_CONSTRAINT]
+        [
+            _TURN_HEADER,
+            GROUNDING_CONSTRAINT,
+            RECONSTRUCTED_EQUATION_CONSTRAINT,
+            DATA_PLOT_CONSTRAINT,
+            SVG_CONSTRAINT,
+        ]
     )
 
 

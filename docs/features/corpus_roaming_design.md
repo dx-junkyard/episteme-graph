@@ -101,6 +101,12 @@
   landscape`）は非改変で並置。
 - `GET /api/learning/corpus/documents?domain_key=` — 可視論文のリスト（title / authors /
   year / 配置済みか / 出所ラベル / 議論入口の可否）。ソートは新しい順のみ（数値スコアなし）。
+  **一覧に出ない閲覧可能な論文**（この分野の地図との関係づけ — 配置・gap 信号 — が無い論文。
+  学習中のコースの論文を含みうる）は optional キー `facts` に題名の列挙1行で言う
+  （2026-09-28・IK-0414 / CR4。上限8題名 +「ほか」・件数なし・地図の位置には置かない。
+  正本は `corpus_view.list_unrelated_visible_titles` / `unrelated_documents_fact`）。
+  `domains[].domain_name` は表示名が未登録なら内部キーでなく「名前が登録されていない分野」
+  （IK-0413。`atlas_state.learner_domain_label`）。
 
 実装は `backend/core/corpus_view.py`（FastAPI 非 import・読み時導出・保存物なし）+
 `backend/api/routes/corpus.py`（main.py 直接登録・認証は学習者本人）。可視性交差は SQL 内
@@ -391,3 +397,32 @@ L1 骨格（`nodes[].region`）から**クライアント側で決定論導出**
   `backend/tests/test_corpus_roaming_ui_static.py`（凡例文言・段階クラス・比例描画と
   件数表示の不在を静的検査で固定）。CR5（バッジ・自動表示なし・ポーリング禁止）と
   CR1（可視論文のみが密度に寄与）は不変。
+
+## 14. 第 25 周の是正（2026-10-23 追補・migration なし・IK-0846 / 0847）
+
+論文の海の論文リストと配置は、同じ論文の重複取り込み（PDF 版と TeX 版）を 1 本に畳む —
+`corpus_view._domain_paper_representatives` がリストと同じ母集合（配置あり ∪ 置けなかった信号あり）から
+`core/document_refs.py` の同一性キーで代表（読める題名を持つ取り込み）を選び、厚みの集合とアンカーの絞り込みが
+リストの行と一致する。地図の霧は骨格側の被覆（`r.kind`）ではなく**海自身の配置**から決め（配置の無い領域だけが
+霧）、L1 に概念ノードが出ない配置は配置の `region_id` の箱に円を並べる。コース側の分野の地図の霧の意味は
+変えない（CR2）。段階ビン・件数非表示（CR3）は不変。
+
+### 14.1 第 2 周の是正（2026-10-23 追補・IK-0846 残り）
+
+「縁」（`_visible_gap_signals` / `_build_fringe`）も信号の `document_id` を `_domain_paper_representatives` の
+代表へ寄せ、代表の題名で列挙する（同じ論文の PDF 版の arXiv 番号の行と TeX 版の行が並ばない）。旧形の
+2 列の行は題名の文字列で畳む（従来どおり）。
+
+### 14.2 第 3 周の是正（2026-10-23 追補・第 3 波・IK-0940 / IK-0941）
+
+- 論文の海の円の名前は領域アンカーなら領域そのものの名前（`anchorLabel` が `regionById` を先に引く）。
+  分野の地図の API も霧の状態を領域の名前に焼かなくなった（状態は pill が言う）。
+- コースの地図 L1 の霧も生きている配置を数えるようになり、海と同じ状態集合（`LEARNER_VISIBLE_STATUSES`）で
+  決まる（正本 `atlas_state` — `field_atlas_overlay_spec.md` §15）。海は本人が閲覧できる論文だけ、L1 は
+  ドメイン単位という差は残る。
+
+### 14.3 第 5 周の是正（2026-10-27 追補・第 5 波・IK-0990）
+
+- 縁（`_build_fringe`）は信号の `normalized_label` が現行凍結版で解消済み（`atlas_gaps.store.resolved_label_set` = 教員側の
+  候補キューと同じ判定）なら出さない。教員の判断（decisions）は読まない（§6.1 不変）。信号の行は残る（P4）。
+- pre-mortem は `field_atlas_overlay_spec.md` §17.1。

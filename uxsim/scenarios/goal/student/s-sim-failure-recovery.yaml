@@ -1,0 +1,61 @@
+id: s-sim-failure-recovery
+population: students
+runner:
+- api
+# 場面 (f)。入力を 1 つ欠いた実行が失敗したとき、次に何をすべきかが分かって復帰できるかを見る。
+goal: '{{goal_text}} のために、{{topic_hint}} の入力が 2 つ以上ある理論のまとまりを動かし、失敗したら直して動かし直す'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_hint
+- input_hints_partial
+- input_hints
+- questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+  note: 入力の式が 2 つ以上あるまとまりを選ぶ
+- do: learning.simlab.generate
+  note: コードの下書きを AI に作らせる（この経路で 1 回だけ）
+- do: learning.simlab.adopt
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints_partial}}'
+    wiring: none
+  note: うっかり入力の値を 1 つ入れ忘れたまま動かす（入力の記号は io_contract.inputs に合わせ、1 つだけ欠かす）
+- choose:
+  - do: learning.chat.ask
+    with:
+      message: '{{questions | next}}'
+    note: 失敗の表示だけで次に何をすればよいか分からなければ聞く
+  optional: true
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    wiring: none
+  note: 失敗の表示を読んで、欠けていた入力を足して動かし直す
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-steps
+- manual: student/02-student.md#simulation-lab-unavailable
+watch_for:
+- 失敗した実行には、何が足りなかったか・次に何をすればよいかの事実文が 1 つ以上出る
+- 失敗の文に内部の例外文（Traceback や英語のエラー名）がそのまま出ない
+- 入力を揃えて動かし直すと、前の失敗した実行も記録として残ったまま新しい実行が並ぶ
+- 実行する場所が無い環境なら、その旨が一行で出て実行ボタンが押せない

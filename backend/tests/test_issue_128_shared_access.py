@@ -106,6 +106,16 @@ class TestAdminMaterialsSharedAccess:
         body = m.group(0)
         assert "visibility = 'public'" in body
 
+    def _visibility_helper(self) -> str:
+        """一覧・詳細が共有する可視性の 3 条件（IK-0595 で 1 関数に寄せた）。"""
+        m = re.search(
+            r"def _material_visibility_clauses\b.*?return group_clause, course_mat_clause, doc_perm_clause",
+            self.src,
+            re.DOTALL,
+        )
+        assert m, "_material_visibility_clauses が抽出できない"
+        return m.group(0)
+
     def test_list_materials_includes_group_visibility(self):
         """list_materials のクエリが visibility='group' と user_groups 参照を含む。"""
         m = re.search(
@@ -113,7 +123,8 @@ class TestAdminMaterialsSharedAccess:
             self.src,
             re.DOTALL,
         )
-        body = m.group(0)
+        assert "_material_visibility_clauses(" in m.group(0)
+        body = m.group(0) + self._visibility_helper()
         assert "visibility = 'group'" in body
         assert "user_groups" in body or "get_user_group_ids" in body
 
@@ -124,7 +135,8 @@ class TestAdminMaterialsSharedAccess:
             self.src,
             re.DOTALL,
         )
-        body = m.group(0)
+        assert "_material_visibility_clauses(" in m.group(0)
+        body = m.group(0) + self._visibility_helper()
         assert "object_group_permissions" in body
         assert "object_type = 'course'" in body
         assert "jsonb_array_elements" in body
@@ -154,7 +166,8 @@ class TestAdminMaterialsSharedAccess:
             re.DOTALL,
         )
         assert m, "get_material 関数本体が抽出できない"
-        body = m.group(0)
+        assert "_material_visibility_clauses(" in m.group(0)
+        body = m.group(0) + self._visibility_helper()
         assert "visibility = 'public'" in body
         assert "object_group_permissions" in body
 

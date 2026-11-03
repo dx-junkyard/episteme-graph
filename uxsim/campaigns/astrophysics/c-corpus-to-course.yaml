@@ -1,0 +1,18 @@
+id: c-astro-corpus-to-course
+domain: astrophysics
+snapshot: corpus-astro-v1
+personas:
+  teachers: [te-04-copilot-intro]
+  students: [st-03-d1-from-particle, st-04-intl-exoplanet]
+scenarios:
+  teacher: [t-build-course-from-corpus]
+  student: [s-enroll-and-first-topic, s-maps-and-records]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 200, persona_llm_calls: 300, wall_clock_minutes: 60}
+notes: |
+  コースの無い snapshot から始め、教員段が作って公開したコースを学生段がそのまま受講する。
+  学生段は教員段が公開に成功した後にだけ走る（公開できなかった run では学生段を「未実施」と記録する）。
+  この campaign の成功した run の末尾が course-astro-v1 の作り方になる（manifest の planned_snapshots）。
+  学生は隣接分野から来た院生と英語で入力する留学生で、入門コースの説明の添え方と地図の当てはまり方を見る。

@@ -55,6 +55,9 @@ resolution:
     - backend/tests/test_docs_registry_guardrails.py
     - docs/development_checklist.md §5-6
     - docs/architecture/data-model.md
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0221, IK-0219]
 view_of: []
 pattern: duplicate-canonical-sources

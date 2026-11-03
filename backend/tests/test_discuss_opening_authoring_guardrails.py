@@ -667,7 +667,7 @@ def _patch_opening_reads(monkeypatch, opening, *, seeds_by_document=None, thesis
     monkeypatch.setattr(opening, "_equations_index_for", lambda document_id, artifacts=None: {})
     monkeypatch.setattr(opening, "_load_graph_nodes", lambda document_id: [])
     monkeypatch.setattr(opening, "_claim_label_index", lambda document_id, artifacts: {})
-    monkeypatch.setattr(opening, "_compile_open_assumptions", lambda course_id: [])
+    monkeypatch.setattr(opening, "_compile_open_assumptions", lambda course_id, **_kw: [])
     monkeypatch.setattr(
         opening, "_load_approved_discussion_seeds",
         lambda document_id: list(seeds_by_document.get(document_id) or []),

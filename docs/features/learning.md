@@ -92,14 +92,22 @@ select を元の値へ戻し、失敗時はモーダル内にエラー表示し�
 いる / 触れられていない可能性 / 不明」の観点を並置し、模範解答・解説を開示するだけで、
 `passed` フィールドは存在しない。トピック完了の確定は本人の 1 タップ
 `POST .../topics/{tid}/check/self-check`（body `self_check ∈ {agreed, disagreed, verdict_wrong}`、
-語彙外は 422）に移り、`agreed` / `disagreed`（＝本人が見比べて先へ進むと決めた）のときだけ
-サーバーが `services.record_topic_check_pass()` で **`learning_states.progress_data`** に永続化する:
+語彙外は 422）に移り、`agreed`（「合っていた」）のときだけサーバーが
+`services.record_topic_check_pass()` で **`learning_states.progress_data`** に永続化する
+（2026-09-28 是正 IK-0399: `disagreed`「違っていた」は本人の見立てが要件と合わなかったという申告で、
+完了にしない。レスポンスの `notice` に事実文 `label_vocab.CHECK_SELF_CHECK_DISAGREED_NOTICE` を返す。
+当初の「違っていたが先へ進むと決めた」という読みはボタンの文言から読み取れなかった）:
 
 - `progress_data.completed_topics`（topic_id → 確認を終えた時刻 ISO8601。既存タイムスタンプは上書きしない）
 - 全トピックを終えたときに `progress_data.course_completed_at` を一度だけ設定
 
-`verdict_wrong`（「観点がおかしい」）は完了させず進行も止めない（本人が改めて他の 2 択を押せば
-進める）。LLM 失敗時は 200 + `degraded: true` + 固定文「AI の観点提示ができませんでした。出題の
+`disagreed` / `verdict_wrong`（「観点がおかしい」）は完了させず進行も止めない（トピックはロック
+表示でも開ける。本人が書き直して改めて「合っていた」を押せば完了する）。観点は出題の**全要素に
+1件ずつ**付く（IK-0409: LLM が一部しか返さなくても `check_review.fill_missing_requirements` が
+`unclear` +「この要素についての観点は得られませんでした。」で補う）。観点文・解答例・解説は受講者の
+回答と同じ言語で書かせ（ラテン文字が大半の回答には「英語で書く」を明示）、英語の判定語
+（correct / wrong / score / grade 等）も日本語の判定語と同じく観点文から落とす。並置の固定文
+（「あなたは「…」と述べました。」等）は UI の言語（日本語）のまま。LLM 失敗時は 200 + `degraded: true` + 固定文「AI の観点提示ができませんでした。出題の
 要件と自分の回答を見比べてください。」に縮退し、**判定を生まない**（旧「40 字以上で合格」の
 フォールバックは撤去）。不合格時に回答逐語を `student_stumble_events` へ記帳していた経路も撤去した
 （AI の判定を学習者の属性として書かない）。
@@ -615,6 +623,28 @@ Phase 1 で行になった `knowledge_symbols` / `knowledge_equations` / `knowle
 - UI アンカーは `material.symbol-lookup`（マニュアル節
   `student/02-student.md#symbol-lookup`）。ガードレールは
   `backend/tests/test_symbol_lookup_{core,api,ui_static}.py`。
+
+## 3.14 動かして確かめる（検証シミュレーション層 v1.1）
+
+論文の理論モジュール 1 つを、学習者が**自分でシミュレーションに起こして走らせ**、出力の予想と
+理論の出力・模擬観測を並べて見る導線（正本:
+[simulation_bridge_design.md](simulation_bridge_design.md) §14 / SB11〜SB15）。
+
+- **主体は学習者**（SB11）: コードを生成（AI 1 コール）するか自分で書き、**本人が採用**して実行する。
+  教員の承認は要らない。安全の弁は AST 検査と隔離実行（sim-runner）で、実行前に毎回やり直す。
+- **所有・可視は本人**（SB12）: programs / wirings / runs は本人の所有物で、他の学習者にも教員にも
+  見えない。教員に見えるのは本人が「共有する」を押した run だけ（表示名つき）。評価に使わない。
+- **共有は 1 操作**（SB13）: 共有すると、選んだ観測系の主張の台帳に「確かめた結果の候補」が入る。
+  確定するのは教員で、確定しても「間接的な支持」止まり（一致は検証ではない = SB1）。
+- **予想は並置**（SB14）: 実行前に書いた予想は、結果の横にそのまま並べるだけで採点しない。
+  一致の段階ラベルが付くのは理論の出力と模擬観測の間だけ。本人には自分の run の数値（相対差・
+  分離比）も見せる。
+- **痕跡**（SB15）: 成功した run ごとに `interest_traces` の kind `verification_attempt` を 1 行
+  （「わたしの記録」に出る・問いの軌跡 / 教員集約 / わたしの地図には出ない・payload に数値なし）。
+- **API**: `routes/simulation_lab.py`（`/api/learning/courses/{course_id}/simulation/...` と
+  `/api/learning/simulation/...`。一覧は [api.md](../backend/api.md) の「動かして確かめる」節）。
+  教材は焦点論文（`services.learner_focus_document`）が既定で、コースの sources の外は 404。
+- ガードレールは `backend/tests/test_simulation_lab_{api,guardrails}.py`。
 
 ---
 

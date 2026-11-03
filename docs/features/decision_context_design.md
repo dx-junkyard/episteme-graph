@@ -108,6 +108,11 @@
   開いた/描かれたの2値のみで、滞在時間・回数・視線は測らない（原則5: 監視しない）。
   1件も開かずに確定した事実は**空配列としてそのまま残る**（確定は止めない）。
 
+- **`skipped`**（optional・2026-10-09 追加 — §8.4）— 提示はされていたが**この確定者には適用できなかった**対象。
+  `skipped_ids` を渡したときだけ足すブロックで（`count` / `ids` / `truncated` は `presented` と同じ形 +
+  `document_ids`（親の id・同じ上限で切る）/ `reason`（例 `not_editable`））、渡さない経路の形は上の固定キーのまま。
+  `presented_matches_applied` の導出は変えない（skipped を applied に数えない — 見たが確認しなかった事実が不一致として残る）。
+
 `attach_decision_context(metadata, ctx)` は**新しい dict** を返す（引数を破壊しない）。
 1リクエストで複数行を記帳する一括確定で、同じ ctx を安全に使い回すため。
 
@@ -138,7 +143,8 @@
 | 項目 | 値 |
 |---|---|
 | `basis` | `release_review.placements` |
-| `presented_ids` | **サーバ導出**。更新前に `landscape_store.list_for_documents(..., statuses=[inferred])` で edit 権限のある document の live な `inferred` を取り直す（クライアント申告に依存しない — DC2） |
+| `presented_ids` | **サーバ導出**。更新前に `landscape_store.list_for_documents(..., statuses=[inferred])` で live な `inferred` を取り直す（クライアント申告に依存しない — DC2）。対象は **閲覧できる全ソース論文**（GET `.../placements` と同じ集合。2026-10-09 是正 — 以前は edit 権限のある document だけで組み、閲覧のみの教員の「次へ」が「一致」と記帳されていた。§8.4） |
+| `skipped_ids` | 提示集合のうち edit 権限の無い document の行（`skipped_reason="not_editable"`・2026-10-09 追加） |
 | `applied_ids` | `accept_inferred_for_documents` が実際に遷移させた行 |
 | `alternatives` | `reject` / `reconsider` / `skip_step`（各行の [却下] [再検討] とステップの「あとで」— RR4 / RR1） |
 | `reopen` | `PATCH /api/admin/landscape/placements/{placement_id}` / `rejected`・`review_required` |
@@ -152,7 +158,7 @@ body（`AcceptPlacementsRequest`）に optional の `presented_placement_ids` /
 出せるようにした（既存キー `course_id` / `confirmed` / `skipped_documents` は不変。
 GET のエンベロープは非改変）。
 
-ゼロ件確認では従来どおり監査を1件も出さない（記帳する確定が無い）。
+~~ゼロ件確認では従来どおり監査を1件も出さない（記帳する確定が無い）。~~ **2026-10-09 に変更**: 0 件でもコース単位の監査を 1 行残す（`entity_id=course_id`・`metadata.no_transition: true`・本ブロック付き — §8.4）。
 
 ### 4.2 説明レビューキューの一括承認・一括却下
 
@@ -451,3 +457,24 @@ vision §9 は本層を「段階適用中」と位置づけている。v1 で入
    削除（不可逆）が必要なので、記帳の対象に含めるほうが答責性の実装として一貫すると判断した。
 5. **公開だけに付けた** — `group` / `private` への遷移は可逆で「一度出たら戻らない」性質を
    持たないので、従来の記帳のままにした（確定文脈の意味を薄めない）。
+
+### 8.4 追記（2026-10-09・第 23 周）— 見たが確認しなかった対象の記帳
+
+uxsim 第 23 周（[ペルソナ通し受講テスト](../architecture/persona_enactment_testing_design.md) §20）で、教材の閲覧権限だけを
+持つ教員がリリース前の確認で「次へ」を押すと、画面には未確認の配置が出ていたのに、`presented == applied == []` で
+`presented_matches_applied: true` が導かれ、確定が 0 件なので監査も 1 行も残らなかった（IK-0688）。提示集合を「適用できる
+もの」で組んでいたことが原因で、DC2 の集合比較そのものは正しく動いていた（比べる集合が画面とずれていた）。
+
+- **`skipped` ブロックの additive 追加**（§3）: `build_decision_context(..., skipped_ids=, skipped_document_ids=,
+  skipped_reason=)`。指定したときだけ足すので、適用済みの他経路（§4.2〜§4.7）の記帳の形は変わらない。
+- **リリース前の確認（§4.1）**: 提示集合を閲覧できる全ソース論文の `inferred` に広げ、edit 権限の無い論文の行を `skipped` に
+  残す。0 件の確定でもコース単位の 1 行を記帳する（old / new とも `inferred`・`no_transition: true`。遷移の無い事実を遷移と
+  偽らない）。応答は不一致のときだけ `decision_note`（「表示された{presented}件のうち確認したのは{applied}件です。」+ 対象外の
+  教材の本数。件数はサーバ導出の `presented` / `applied` / `skipped` から取る）を足す（[リリース前の確認](release_review_flow_design.md) §7）。
+- **判断**: `skipped` を `applied` 側に数えて「一致」にする案は取らなかった。閲覧のみの教員は確認していないので、
+  「見たが確認しなかった」ことが不一致として残るのが DC2 の意図どおりである。理由（`reason`）は権限の切り分けの語だけを持つ。
+- **未着手**: その場で却下・再検討にした行が提示集合に入らない（`presented` は「次へ」を押した時点の未確認だけ — IK-0679）/
+  記帳を教員が後から読む画面（IK-0659）。
+- テスト: `test_decision_context.py`（`skipped` が既定で無い・指定すると適用されなかった対象を残す）/
+  `test_decision_context_guardrails.py`（提示集合が閲覧できる集合で組まれ、0 件でも記帳されること）/
+  `test_release_review.py`（閲覧のみの教員の「次へ」が「一致」と記帳されない）。

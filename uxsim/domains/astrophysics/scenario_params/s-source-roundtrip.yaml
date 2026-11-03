@@ -1,0 +1,22 @@
+scenario: s-source-roundtrip
+domain: astrophysics
+# 第 15 波: 部品とグラフのある論文（2606.02318v1 = 7954db7d）のトピックへ向け直した
+params:
+  goal_text: 回答の根拠が原文のどこにあるかを確かめること
+  topic_hint: 主結果：3つのDTDサブ母集団（連星ブラックホールの遅延時間分布の論文）
+  topic_hint_terms:
+  - DTD
+  - サブ母集団
+  - 遅延時間
+  seed_questions:
+  - 3つのサブ母集団に分けたという結果は、どのデータと推定法から出ていますか？
+  - サブ母集団ごとの遅延時間の違いは、原文ではどう書かれていますか？
+per_archetype:
+  night_parttime:
+    goal_text: サブ母集団の結果の根拠だけ確かめる
+    seed_questions:
+    - 3つに分かれるという根拠はどこ？
+  non_native:
+    goal_text: checking where in the source the answer's evidence is
+    seed_questions:
+    - Which data and method give the three sub-populations?

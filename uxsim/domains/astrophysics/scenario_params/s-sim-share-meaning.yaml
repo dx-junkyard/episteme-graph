@@ -1,0 +1,25 @@
+scenario: s-sim-share-meaning
+domain: astrophysics
+# 場面 (e) st-04（non_native・英語話者）。遅延時間分布のサブ母集団の論文の階層ベイズのトピック。
+# claim_hint は観測系の主張のラベルの部分一致（日本語の表示ラベルで引く。ペルソナの言語とは別）。
+params:
+  goal_text: 階層ベイズ推定の一部を動かした結果を、担当の先生に見せてよいかを判断すること
+  topic_hint: ソース分割と階層ベイズ推定（連星合体の遅延時間分布のサブ母集団の論文）
+  topic_hint_terms:
+  - 階層ベイズ
+  - ソース分割
+  module_hint: L(D|Λ)
+  input_hints:
+    m_1: "10.0, 20.0, 35.0"
+    q: 0.8
+    z: 0.3
+  claim_hint: GW source  # 観測系の主張の一覧（ラベルは論文の英語のまま）の部分一致
+  questions:
+  - 共有すると、誰に何が見えて、そのあと何が起きますか？
+  - 共有した実行は、成績や評価に使われますか？
+per_archetype:
+  non_native:
+    goal_text: deciding whether I can show my teacher the result of running part of the hierarchical Bayesian inference
+    questions:
+    - If I share this run, who will see what, and what happens next?
+    - Will the shared run be used for grading or evaluation?

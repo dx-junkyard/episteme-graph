@@ -41,8 +41,10 @@ from core.element_explanations import (
     STATUS_APPROVED,
     list_for_document,
 )
+from core import display_projection as _dp
 from core import element_vocab
-from core.label_vocab import SUPPORT_SECTION_LABELS
+from core.knowledge_objects.references import claim_ref_variants, normalize_claim_ref
+from core.label_vocab import SUPPORT_SECTION_LABELS, VERIFICATION_PROPOSAL_PRESENCE_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +162,9 @@ _REVIEW_REASON_FACT_PHRASES = {
     "generic_operation": "どんな操作なのかをまだ具体的に特定できていません",
     "orphan_detail_node": "全体像のどこに位置づくかをまだ対応づけできていません",
     "empty_main_node": "この段階にあたる式の手順をまだ取れていません",
+    # 復元由来の式しか根拠が無い箇所（式が論文から取り出せず、前後の文脈から
+    # 組み立て直されている）。コードのまま学習者に出さない。
+    "reconstructed_equation_backing": "関係する式を論文から取り出せず、前後の文脈から組み立て直しています",
 }
 
 # 「まだ確認できていないところ」の前置き。主語がシステム（解析）であることを文面で明示する
@@ -167,7 +172,7 @@ _REVIEW_REASON_FACT_PHRASES = {
 _SYSTEM_UNCONFIRMED_PREFIX = "解析がこの箇所の裏付けをまだ取れていません"
 
 # 数値を一切見せない（W8/DM6）。射影後も念のため再帰的に除去するキー。
-_FORBIDDEN_NUMERIC_KEYS = ("confidence", "load_score", "score")
+_FORBIDDEN_NUMERIC_KEYS = _dp.DISCUSS_OPENING_FORBIDDEN_NUMERIC_KEYS  # 正本は display_projection（DP2）
 
 
 # ---------------------------------------------------------------------------
@@ -189,9 +194,18 @@ def _dedupe_ids(raw_ids: Any) -> list[str]:
 def _claim_ref_item(claim_id: str, claim_label_index: dict[str, str]) -> dict[str, str]:
     """claim_id → {"id","label"}。解決できない id は id 文字列そのものを label にする
     （設計書: 情報を落とさない）。
+
+    thesis_reconstruction の claim 参照は ``claim:{block_id}:{span_id}`` と接頭辞付きで、
+    ``theory_claims.source_scope.legacy_ids`` は接頭辞なしで持つ。素の文字列で引くと
+    同じ claim を指しているのに解決できず、内部 ID が学習者の画面へ出てしまうので、
+    綴りの異形（正本 ``core/knowledge_objects/references.py``）でも引く。
     """
-    label = str(claim_label_index.get(claim_id) or "").strip() or claim_id
-    return {"id": claim_id, "label": label}
+    label = ""
+    for key in claim_ref_variants(claim_id):
+        label = str(claim_label_index.get(key) or "").strip()
+        if label:
+            break
+    return {"id": claim_id, "label": label or claim_id}
 
 
 def _equation_label(record: dict[str, Any] | None) -> str:
@@ -231,6 +245,24 @@ def _skeleton_entry_text(skeleton: dict[str, Any] | None, key: str) -> str:
     if isinstance(entry, dict):
         return str(entry.get("text") or "").strip()
     return str(entry or "").strip()
+
+
+#: 解析が値を埋められなかったときの代替語（IK-1013）。この語だけの欄は中身として扱わない。
+_UNFILLED_VALUE_TOKENS = frozenset({"unknown", "none", "null", "n/a", "na", "unspecified", "不明"})
+
+#: 中心の問いが解析で整理されていないときの事実文（IK-1013・2026-10-28 第 7 波）。
+CENTRAL_QUESTION_UNSETTLED_NOTE = "この論文の中心の問いはまだ整理されていません。"
+
+
+def is_unfilled_value(text: Any) -> bool:
+    """解析の代替語（生の "unknown" 等）だけの値か（IK-1013・純関数）。"""
+    value = str(text or "").strip().strip(".。").strip().casefold()
+    return bool(value) and value in _UNFILLED_VALUE_TOKENS
+
+
+def _filled(text: Any) -> str:
+    value = str(text or "").strip()
+    return "" if is_unfilled_value(value) else value
 
 
 def project_thesis(
@@ -328,19 +360,22 @@ def project_thesis(
             continue
         alternatives.append({"text": text, "attribution_label": _ALTERNATIVE_ATTRIBUTION_LABEL})
 
-    return {
-        # 「この論文が答えようとした問い」（主語=論文）。thesis artifact の
-        # central_question を優先し、無ければ paper_skeleton の同名エントリへ縮退する。
-        "central_question": (
-            str(thesis.get("central_question") or "").strip()
-            or _skeleton_entry_text(skeleton, "central_question")
-        ),
-        "paper_goal": _skeleton_entry_text(skeleton, "paper_goal"),
+    # 「この論文が答えようとした問い」（主語=論文）。thesis artifact の
+    # central_question を優先し、無ければ paper_skeleton の同名エントリへ縮退する。
+    # 生の "unknown" 等（解析が埋められなかった代替語）は問いとして出さない（IK-1013）。
+    raw_question = (
+        str(thesis.get("central_question") or "").strip()
+        or _skeleton_entry_text(skeleton, "central_question")
+    )
+    central_question = _filled(raw_question) or _filled(_skeleton_entry_text(skeleton, "central_question"))
+    projected = {
+        "central_question": central_question,
+        "paper_goal": _filled(_skeleton_entry_text(skeleton, "paper_goal")),
         # 「この論文の主張」（主語=論文）。agent が合成した命題文。無ければ
         # headline_claim（同じく合成値）へ縮退する。claim の生ラベルは
         # central_claims 側に従来どおり残す（置き換えない）。
         "central_thesis_text": (
-            str(central.get("text") or "").strip() or str(thesis.get("headline_claim") or "").strip()
+            _filled(central.get("text")) or _filled(thesis.get("headline_claim"))
         ),
         "central_claims": central_claims,
         "central_equations": central_equations,
@@ -348,6 +383,10 @@ def project_thesis(
         # 「別の見方（AI の提示）」。出典を持たないため attribution_label 付き（OA7）。
         "alternatives": alternatives,
     }
+    if not central_question and raw_question:
+        # 代替語しか無かった = 問いの区画は出さず事実文 1 行（キーは代替語のときだけ足す）。
+        projected["central_question_note"] = CENTRAL_QUESTION_UNSETTLED_NOTE
+    return projected
 
 
 def _thesis_is_empty(thesis: dict[str, Any] | None) -> bool:
@@ -465,8 +504,17 @@ def project_backbone(
     def _node_id(node: dict[str, Any]) -> str:
         return str(node.get("component_id") or node.get("id") or node.get("node_id") or "")
 
+    def _stage_of(node: dict[str, Any]) -> str:
+        # IK-0426: A層の main ノードは stage キーを持たず、label が stage の英語表示名
+        # そのもの（#308）。stage が無ければ label から stage キーを逆引きする
+        # （element_vocab.theory_stage_key が正本。未知は ""）。
+        explicit = str(node.get("stage") or "").strip()
+        if explicit:
+            return explicit
+        return element_vocab.theory_stage_key(node.get("label"))
+
     def _sort_key(node: dict[str, Any]) -> tuple[int, str]:
-        stage = str(node.get("stage") or "")
+        stage = _stage_of(node)
         idx = _STAGE_ORDER.index(stage) if stage in _STAGE_ORDER else len(_STAGE_ORDER)
         return (idx, _node_id(node))
 
@@ -475,13 +523,23 @@ def project_backbone(
 
     projected: list[dict[str, Any]] = []
     for node in main_nodes[:limit]:
-        stage = str(node.get("stage") or "")
+        stage = _stage_of(node)
         node_id = _node_id(node)
         review_reasons = [str(r) for r in (node.get("review_reasons") or []) if str(r or "").strip()]
+        raw_label = str(node.get("label") or "").strip()
+        # 英語の stage 表示名だけの label（"Theory basis" 等）は日本語の stage ラベルに置き換える。
+        # 内部 ID（node_id）を表示ラベルへ縮退させない（PL7）。
+        if not raw_label or (stage and element_vocab.theory_stage_key(raw_label) == stage
+                             and raw_label.lower() in element_vocab.THEORY_STAGE_DISPLAY_TO_KEY):
+            display = _stage_label(stage) or str(node.get("display_label") or "").strip() or raw_label
+        else:
+            display = raw_label
         projected.append(
             {
+                # node_id は表示しない。学習画面が「ここから話す」の構造帰属（経路A）の
+                # anchor id として送り返す参照キー（discuss.js anchorAttrs）なので DTO に残す。
                 "node_id": node_id,
-                "label": str(node.get("label") or "").strip() or _stage_label(stage) or node_id,
+                "label": display,
                 "stage": stage,
                 "stage_label": _stage_label(stage),
                 "description": str(node.get("description") or ""),
@@ -491,6 +549,30 @@ def project_backbone(
             }
         )
     return projected, truncated
+
+
+def learner_backbone_node(node: dict[str, Any]) -> dict[str, Any]:
+    """``project_backbone`` の1ノード → 学習者向け開幕 DTO のノード（第 23 周）。
+
+    ``project_backbone`` の戻り値は脆い箇所の導出（``_is_fragile_backbone_node`` /
+    ``_backbone_fact_line``）の入力なので内部語を持ったまま残し、学習者へ返す直前に
+    ここで絞る:
+
+    - ``stage`` / ``review_status`` / ``source_backing_status`` / ``review_reasons`` は
+      解析の内部語（``theory_basis`` / ``source_backed`` / ``missing_atomic_claim``）で、
+      学習者の画面に出す語ではない → 落とす。画面が使う区別は ``backed``（根拠が原文で
+      確認されているか）の真偽1つにする。
+    - ``description`` は理論操作グラフの集約ノードの説明（解析の中間文・論文の逐語では
+      なく、生成言語の対象外 = 英語のまま）→ 出さない（論文の内容は thesis / 支持構造 /
+      章の骨格の区画が逐語の出典つきで出す — DM8 の「言語を変換しない」に反しない）。
+    - ``node_id`` は「ここから話す」の構造帰属（経路A）の参照キーとして残す（表示しない）。
+    """
+    return {
+        "node_id": str(node.get("node_id") or ""),
+        "label": str(node.get("label") or ""),
+        "stage_label": str(node.get("stage_label") or ""),
+        "backed": str(node.get("source_backing_status") or "") == "source_backed",
+    }
 
 
 def project_chapter_skeleton(
@@ -615,6 +697,15 @@ def _assumption_fact_line(item: dict[str, Any]) -> str:
         else:
             base = "検証状況の記録がある前提です。"
 
+    # 第 25 周 第 10 波（IK-1121）: 出典タブの一覧と同じ「検証提案あり（完了）」の語を、開幕の
+    # 「確かめていないこと」にも添える（同じ主張の進み具合を画面ごとに食い違わせない — 語の正本は
+    # ``label_vocab.VERIFICATION_PROPOSAL_PRESENCE_LABELS``・件数は言わない）。
+    proposal_label = str(item.get("verification_proposal_label") or "").strip()
+    if not proposal_label and bool(item.get("has_verification_proposal")):
+        proposal_label = VERIFICATION_PROPOSAL_PRESENCE_LABELS["open"]
+    if proposal_label:
+        base = _join_fact_sentences(base, f"{proposal_label}です。")
+
     if "has_falsification_condition" not in item and "falsification_not_formulable" not in item:
         return base
 
@@ -663,7 +754,8 @@ def project_fragile_points(
                 "subject": FRAGILE_SUBJECT_PAPER,
                 "label": label,
                 "fact_line": _assumption_fact_line(item),
-                "document_id": None,
+                # IK-0935: 台帳行の論文（各論文の区画へ振り分ける材料）。無ければ None（コース全体）。
+                "document_id": (str(item.get("document_id") or "").strip() or None),
             }
         )
 
@@ -675,7 +767,8 @@ def project_fragile_points(
         for node in nodes or []:
             if not isinstance(node, dict) or not _is_fragile_backbone_node(node):
                 continue
-            label = str(node.get("label") or node.get("node_id") or "").strip()
+            # IK-0426: 表示ラベルを内部 ID（node_id）へ縮退させない（PL7）。
+            label = str(node.get("label") or node.get("stage_label") or "").strip()
             if not label:
                 continue
             backbone_points.append(
@@ -748,13 +841,7 @@ def _strip_numeric_keys(value: Any) -> Any:
     （W8/DM6 相当。``core/component_context.py::_strip_confidence`` と同型の安全網。
     射影関数はそもそもホワイトリストで組み立てているため通常は何も落とさない）。
     """
-    if isinstance(value, dict):
-        return {
-            k: _strip_numeric_keys(v) for k, v in value.items() if k not in _FORBIDDEN_NUMERIC_KEYS
-        }
-    if isinstance(value, list):
-        return [_strip_numeric_keys(v) for v in value]
-    return value
+    return _dp.strip_keys(value, _FORBIDDEN_NUMERIC_KEYS)
 
 
 # ---------------------------------------------------------------------------
@@ -863,6 +950,9 @@ def _claim_label_index(document_id: str, artifacts: dict[str, Any]) -> dict[str,
             key = str(legacy_id or "").strip()
             if key:
                 index.setdefault(key, label)
+                # 索引側に接頭辞付きの綴りが混ざっていても引けるようにする
+                # （引く側の `_claim_ref_item` と両方向で吸収する）。
+                index.setdefault(normalize_claim_ref(key), label)
         span_id = scope.get("span_id")
         if span_id:
             index.setdefault(str(span_id), label)
@@ -933,11 +1023,13 @@ def _load_approved_discussion_seeds(document_id: str) -> list[dict[str, Any]]:
             session.close()
 
 
-def _compile_open_assumptions(course_id: str) -> list[dict[str, Any]]:
+def _compile_open_assumptions(course_id: str, *, document_ids) -> list[dict[str, Any]]:
     """D層台帳の未検証合意リスト（``core.doubt.open_assumptions.compile_open_assumptions``）
     を学習者向け設定（``include_challenger_names=False``。既存の学習者向け
     ``GET /api/learning/courses/{course_id}/open-assumptions`` と同じ呼び出し方）で読む。
-    台帳未記帳コースでは空リスト（fail-closed。エラーにしない）。
+
+    範囲は ``document_ids``（必須・IK-0852。呼び出し側がコースの教材から求めた集合）。
+    台帳の course_id 列では絞らない。範囲が空・台帳未記帳では空リスト（fail-closed）。
     """
     from core.postgres import get_session
 
@@ -945,7 +1037,9 @@ def _compile_open_assumptions(course_id: str) -> list[dict[str, Any]]:
 
     session = get_session()
     try:
-        return compile_open_assumptions(session, course_id, include_challenger_names=False)
+        return compile_open_assumptions(
+            session, course_id, document_ids=document_ids, include_challenger_names=False,
+        )
     except Exception:  # noqa: BLE001
         logger.warning("discuss opening: open assumptions read failed for course %s", course_id, exc_info=True)
         return []
@@ -1050,8 +1144,16 @@ def build_opening(
 
         documents.append(document_dto)
 
-    assumption_items = _compile_open_assumptions(course_id)
+    assumption_items = _compile_open_assumptions(course_id, document_ids=ids)
     fragile_points, fragile_truncated = project_fragile_points(assumption_items, backbone_by_document)
+    # 第 23 周（st-02・st-05）: 脆い箇所の導出が済んだら、学習者に返すバックボーンからは
+    # 解析の内部語（stage キー・review_status・source_backing_status・review_reasons）と
+    # 英語の解析中間文（description）を落とす。画面が要るのは表示ラベルと「根拠が
+    # 確認されているか」の真偽だけ（learner_backbone_node）。
+    for document_dto in documents:
+        document_dto["backbone"] = [
+            learner_backbone_node(n) for n in document_dto.get("backbone") or []
+        ]
 
     focus = str(course_focus or "").strip()
     result = {
@@ -1063,4 +1165,76 @@ def build_opening(
         "fragile_points": fragile_points,
         "truncated": fragile_truncated,
     }
+    # IK-0853: 「この論文が確かめていないこと」に載る前提が無いとき、区画を消さず閉世界の
+    # 一文を添える（無いのか・出していないのかを区別させる）。文言は core/doubt/scope.py。
+    if ids and not any(
+        isinstance(f, dict) and f.get("kind") == "assumption" for f in fragile_points
+    ):
+        # IK-0972: 区画専用の文（記帳の不在を言う）。汎用の「該当がありません」は見出しの
+        # 否定（確かめていないこと）と重なって「すべて確かめた」に読めるので使わない。
+        from core.doubt.scope import OPENING_UNVERIFIED_EMPTY_NOTE
+
+        result["paper_unverified_empty_note"] = OPENING_UNVERIFIED_EMPTY_NOTE
     return _strip_numeric_keys(result)
+
+
+# ---------------------------------------------------------------------------
+# document 直付け議論の要旨ブロック（IK-0436）
+# ---------------------------------------------------------------------------
+#
+# 「この論文の最も重要な結果は？」のような要約の問いは、チャンク検索では当たらないことが
+# ある（本文のどの一節とも近くない）。開幕画面が既に出している論文の問い・目的・主張
+# （``project_thesis`` の投影）を、会話の文脈にも事実行として渡す。読み取りのみ・LLM 0 回。
+# 番号付き出典ではない（``cited_sources`` に数えない）。言語は変換しない（DM8）。
+
+#: 事実行の見出し（主語=論文。解析結果であることを明示する）。
+_THESIS_FACT_LABELS = (
+    ("central_question", "この論文が答えようとした問い"),
+    ("paper_goal", "この論文の目的"),
+    ("central_thesis_text", "この論文の主張（解析で再構成した文）"),
+)
+#: 支持構造から添える文の上限（要旨ブロックを有界にする）。
+_MAX_THESIS_SUPPORT_LINES = 3
+_MAX_THESIS_FACT_CHARS = 400
+
+
+def _clip_fact(text: str) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= _MAX_THESIS_FACT_CHARS else text[: _MAX_THESIS_FACT_CHARS - 1] + "…"
+
+
+def document_thesis_fact_lines(document_id: str) -> list[str]:
+    """1 document の問い・目的・主張を事実行にする（fail-soft・無ければ空リスト）。"""
+    doc_id = str(document_id or "").strip()
+    if not doc_id:
+        return []
+    try:
+        artifacts = document_run_artifacts(doc_id)
+        artifacts = artifacts if isinstance(artifacts, dict) else {}
+    except Exception:  # noqa: BLE001
+        logger.warning("discuss thesis facts: artifact read failed for %s", doc_id, exc_info=True)
+        return []
+    thesis_artifact = artifacts.get("thesis_reconstruction")
+    skeleton_artifact = artifacts.get("paper_skeleton")
+    if not isinstance(thesis_artifact, dict) and not isinstance(skeleton_artifact, dict):
+        return []
+    thesis = project_thesis(
+        thesis_artifact if isinstance(thesis_artifact, dict) else {},
+        {},
+        {},
+        skeleton_artifact if isinstance(skeleton_artifact, dict) else None,
+    ) or {}
+    lines: list[str] = []
+    for key, label in _THESIS_FACT_LABELS:
+        value = _clip_fact(thesis.get(key) or "")
+        if value:
+            lines.append(f"- {label}: {value}")
+    support_lines = 0
+    for section in thesis.get("support_sections") or []:
+        for entry in section.get("entries") or []:
+            text = _clip_fact(entry.get("text") or "")
+            if not text or support_lines >= _MAX_THESIS_SUPPORT_LINES:
+                continue
+            lines.append(f"- {section.get('label') or ''}: {text}")
+            support_lines += 1
+    return lines

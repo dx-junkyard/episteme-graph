@@ -25,6 +25,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text as sa_text
 
+from core.document_refs import resolve_document_refs
+
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user, _require_teacher
 from services import _resolve_document, get_accessible_course_data, record_review_event, user_can_view_course
 from core import teacher_triage
@@ -40,6 +43,8 @@ from core.reconstruction.schema import (
     DELIVERABLE_STATUSES,
     ENTITY_ITEM,
     ENTITY_RESPONSE,
+    FACT_NO_DELIVERABLE_ITEM,
+    FACT_NO_SOURCE_MATERIAL,
     ITEM_STATUSES,
     SELF_CHECK_VALUES,
     SOURCE_BACKED,
@@ -49,7 +54,7 @@ from core.reconstruction.worker import run_item_authoring_for_document
 logger = logging.getLogger(__name__)
 
 # main.py で直接 include される学習者向け router
-learning_router = APIRouter(prefix="/api/learning", tags=["Learning"])
+learning_router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 # admin.router（prefix=/api/admin）に include される教員向け router（prefix なし）
 admin_router = APIRouter(tags=["Reconstruction"])
 
@@ -96,13 +101,12 @@ def _course_scope(session, course_data: dict, topic_id: str | None = None) -> di
     doc_refs: list[str] = []
     if material_ids:
         try:
-            rows = session.execute(
-                sa_text("SELECT id::text FROM documents WHERE source_path = ANY(:mids) OR id::text = ANY(:mids)"),
-                {"mids": material_ids},
-            ).fetchall()
-            for r in rows:
-                if r[0] and r[0] not in doc_refs:
-                    doc_refs.append(r[0])
+            # 両形（source_path / documents.id）の突き合わせは core.document_refs が正本（IK-0550）。
+            resolved = resolve_document_refs(session, material_ids)
+            for ref in material_ids:
+                doc_id = (resolved.get(str(ref)) or {}).get("document_id")
+                if doc_id and doc_id not in doc_refs:
+                    doc_refs.append(doc_id)
         except Exception:
             logger.debug("document resolution failed", exc_info=True)
 
@@ -232,7 +236,7 @@ def get_next_item(
     try:
         scope = _course_scope(session, course_data, topic_id)
         if not scope["material_ids"] and not scope["doc_refs"]:
-            return {"item": None, "exhausted": True}
+            return {"item": None, "exhausted": True, "facts": [FACT_NO_SOURCE_MATERIAL]}
 
         deprioritize_derivation = False
         try:
@@ -305,7 +309,8 @@ def get_next_item(
         session.close()
 
     if not row:
-        return {"item": None, "exhausted": True}
+        # IK-0410: exhausted だけでは「無い」理由が読めない。事実文を1つ持たせる（数値なし）。
+        return {"item": None, "exhausted": True, "facts": [FACT_NO_DELIVERABLE_ITEM]}
 
     item = {
         "id": row[0],
@@ -372,7 +377,7 @@ def _submit_response(
                 (user_id, course_id, item_id, claim_id, response, machine_verdict, revision_of)
                 VALUES (CAST(:uid AS uuid), :cid, CAST(:item_id AS uuid), CAST(:claim_id AS uuid),
                         CAST(:response AS jsonb), :verdict,
-                        CASE WHEN :rev = '' THEN NULL ELSE CAST(:rev AS uuid) END)
+                        CAST(NULLIF(:rev, '') AS uuid))
                 RETURNING id::text
             """),
             {

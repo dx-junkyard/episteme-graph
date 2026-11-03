@@ -1,0 +1,32 @@
+scenario: s-symbols-chain
+domain: astrophysics
+params:
+  goal_text: 式に出てくる記号の意味を順に押さえ、主結果の式を読めるようになること
+  topic_hint: 主結果：µ(a)と音速への制約（暗黒エネルギーと修正重力の音速を扱う論文）
+  topic_hint_terms:
+  - 音速
+  - µ(a)
+  - 暗黒エネルギー
+  - 修正重力
+  symbol_hints:
+  - \mu(a)
+  - \alpha_B
+  - \alpha_K
+  - c_s^2
+  - \Sigma
+  seed_questions:
+  - µ と Σ は、それぞれ何に対する重力の強さのずれなんですか？
+  - α_B が 0 のときは、何が起きていないことになりますか？
+  - c_s^2 が小さいと µ にどう効くのか、式のどこを見ればいいですか？
+per_archetype:
+  non_native:
+    goal_text: understanding the symbols in the equations one by one
+    seed_questions:
+    - What do µ and Σ each measure a deviation of?
+    - What does α_B = 0 mean physically?
+    - Where in the equations does a small c_s^2 affect µ?
+  newcomer:
+    seed_questions:
+    - µ(a) の a は何ですか？スケール因子のことですか？
+    - α という記号がたくさん出てきますが、全部同じ種類の量ですか？
+    - c_s^2 の s は何の略ですか？

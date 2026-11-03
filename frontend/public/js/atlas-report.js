@@ -109,7 +109,7 @@
     meta.textContent =
       "対象: " + (detail.node_label || detail.node_id) +
       " ／ レベル" + detail.level +
-      " ／ 骨格 " + (detail.skeleton_version || "—") + " に自動添付";
+      " ／ 地図 版 " + (detail.skeleton_version || "—") + " に自動添付";
     form.appendChild(meta);
 
     const row = document.createElement("div");
@@ -202,7 +202,7 @@
   function resultMessage(report) {
     if (report.status === "accepted") {
       return report.applied_version
-        ? "地図の修正報告が採用され、骨格 " + report.applied_version + " に反映されました"
+        ? "地図の修正報告が採用され、地図 版 " + report.applied_version + " に反映されました"
         : "地図の修正報告が採用されました（次版で反映予定）";
     }
     if (report.status === "declined") {

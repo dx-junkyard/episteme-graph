@@ -84,14 +84,43 @@ def _mark_created_from(session, assumption_id: str, patch: dict) -> None:
     )
 
 
-def run_assumption_mining(course_id: str = "") -> dict:
-    """検出 + 登録 + 正規化を 1 バッチ実行する（同期実行本体）。"""
+# IK-0853（第 4 周）: 予約したマイニングが「まだ走っている」のか「終わって候補が無かった」のかを
+# 前提の一覧が言い分けるための、コースごとの最終実行の状態（プロセス内・永続化しない）。
+# 再起動後は状態が無い（""）— その時は「いま範囲に候補が無い」という事実だけを言う。
+MINING_STATE_RUNNING = "running"
+MINING_STATE_FINISHED = "finished"
+MINING_STATE_FAILED = "failed"
+_mining_states: dict[str, str] = {}
+_mining_states_lock = threading.Lock()
+
+
+def _set_mining_state(course_id: str, state: str) -> None:
+    key = str(course_id or "")
+    if not key:
+        return
+    with _mining_states_lock:
+        _mining_states[key] = state
+
+
+def mining_state(course_id: str) -> str:
+    """コースの最終のマイニング実行の状態（running / finished / failed / ""＝記録なし）。"""
+    with _mining_states_lock:
+        return _mining_states.get(str(course_id or ""), "")
+
+
+def run_assumption_mining(*, document_ids, course_id: str = "") -> dict:
+    """検出 + 登録 + 正規化を 1 バッチ実行する（同期実行本体）。
+
+    範囲は ``document_ids``（必須・IK-0852）。``course_id`` は前提候補の出所と U層の帰属にだけ使う。
+    """
     bind_usage_context("doubt:assumption_normalize", course_id=course_id or None)
     session = get_session()
     registered = 0
     normalized = 0
+    failed = False
+    _set_mining_state(course_id, MINING_STATE_RUNNING)
     try:
-        clusters = detect_gap_clusters(session, course_id=course_id)
+        clusters = detect_gap_clusters(session, document_ids=document_ids)
         registered = register_candidates(session, clusters, course_id=course_id)
 
         # 検出時のクラスタテキストを cluster_key で引けるようにしておく
@@ -152,10 +181,12 @@ def run_assumption_mining(course_id: str = "") -> dict:
             _mark_created_from(session, assumption_id, {"normalized": True})
             session.commit()
     except Exception:
+        failed = True
         session.rollback()
         logger.warning("assumption mining failed (course=%s)", course_id or "-", exc_info=True)
     finally:
         session.close()
+        _set_mining_state(course_id, MINING_STATE_FAILED if failed else MINING_STATE_FINISHED)
 
     logger.info(
         "assumption mining done: registered=%d normalized=%d (course=%s)",
@@ -164,11 +195,15 @@ def run_assumption_mining(course_id: str = "") -> dict:
     return {"registered": registered, "normalized": normalized}
 
 
-def maybe_schedule_assumption_mining(course_id: str = "") -> bool:
-    """非同期バッチをデーモンスレッドで起動する（P6）。"""
-    return SYSTEM.spawn(
+def maybe_schedule_assumption_mining(*, document_ids, course_id: str = "") -> bool:
+    """非同期バッチをデーモンスレッドで起動する（P6）。範囲は document 集合（IK-0852）。"""
+    started = SYSTEM.spawn(
         run_assumption_mining,
         thread_factory=threading.Thread,
         thread_name="doubt-assumption-mining",
+        document_ids=list(document_ids or []),
         course_id=course_id,
     )
+    if started:
+        _set_mining_state(course_id, MINING_STATE_RUNNING)
+    return started

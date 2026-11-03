@@ -24,8 +24,10 @@ import re
 __all__ = [
     "excerpt",
     "first_sentence",
+    "is_untranslated_text",
     "looks_like_tex_math",
     "normalize_whitespace",
+    "split_sentences",
 ]
 
 
@@ -62,6 +64,24 @@ _TEX_TOKEN_RE = re.compile(r"\\[A-Za-z]+")
 
 _CJK_RE = re.compile(r"[　-ヿ一-鿿＀-￯]")
 _ASCII_WORD_RE = re.compile(r"[A-Za-z]+")
+
+
+_LINE_HYPHEN_RE = re.compile(r"([A-Za-z])-[ \t]*\n[ \t]*([a-z])")
+_SINGLE_NEWLINE_RE = re.compile(r"(?<!\n)[ \t]*\n(?!\n)[ \t]*")
+
+
+def normalize_source_line_breaks(text: object) -> str:
+    """PDF 由来テキストの行分割を表示用に畳む（翻訳・言い換えはしない）。
+
+    - 行末ハイフン + 改行 + 小文字（``Interest-\ningly``）は語の分割なので結合する。
+    - 段落区切り（空行）は残し、単独の改行は半角空白にする（1 語ごとの改行を畳む）。
+    改行を失ったあとのハイフン（``Interest-ingly``）は複合語と区別できないので触らない。
+    """
+    raw = str(text if text is not None else "")
+    if "\n" not in raw:
+        return raw
+    joined = _LINE_HYPHEN_RE.sub(r"\1\2", raw)
+    return _SINGLE_NEWLINE_RE.sub(" ", joined).strip()
 
 
 def normalize_whitespace(text: object) -> str:
@@ -135,7 +155,37 @@ def _tex_safe_cut(body: str, cut: int) -> int:
     return cut
 
 
-def excerpt(text: object, limit: int, *, ellipsis: str = "…") -> str:
+def _dollar_safe_cut(body: str, cut: int) -> int:
+    """``body[:cut]`` が ``$…$`` の数式区間の内側で終わるなら、区間の開始位置へ戻す。
+
+    ``\\$``（エスケープされた ``$``）は区切りに数えない。``$$`` も同じ扱い（開始の
+    ``$`` の並びの手前まで戻す）。後退の結果 0 なら「安全に切れる位置が無い」。
+    """
+    count = 0
+    index = 0
+    while index < cut:
+        char = body[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "$":
+            count += 1
+        index += 1
+    if count % 2 == 0:
+        return cut
+    opening = body.rfind("$", 0, cut)
+    while opening > 0 and body[opening - 1] == "$":
+        opening -= 1
+    return opening
+
+
+def excerpt(
+    text: object,
+    limit: int,
+    *,
+    ellipsis: str = "…",
+    keep_dollar_math: bool = False,
+) -> str:
     """``text`` を最大 ``limit`` 文字へ切り詰める（CP5 の唯一の実装）。
 
     手順:
@@ -149,6 +199,8 @@ def excerpt(text: object, limit: int, *, ellipsis: str = "…") -> str:
       5. どの位置も TeX コマンドトークンの途中に掛かる場合は、そのトークンの手前へ
          後退させる。安全に切れる位置が無ければ**空文字**を返す（壊れた TeX を
          出すくらいなら何も出さない）。
+      6. ``keep_dollar_math=True`` のときは ``$…$`` の数式区間の途中でも切らない
+         （区間の手前へ後退させる。既定 False = 従来どおり）。
     """
     body = normalize_whitespace(text)
     if not body:
@@ -176,6 +228,8 @@ def excerpt(text: object, limit: int, *, ellipsis: str = "…") -> str:
 
     for candidate in candidates:
         safe = _tex_safe_cut(body, candidate)
+        if keep_dollar_math and safe > 0:
+            safe = _dollar_safe_cut(body, safe)
         if safe <= 0:
             continue
         head = body[:safe].rstrip(_TRAILING_STRIP_CHARS)
@@ -198,6 +252,31 @@ def first_sentence(text: object) -> str:
             continue
         return body[: match.end()].strip()
     return body
+
+
+def split_sentences(text: object) -> list[str]:
+    """空白正規化した ``text`` を文に分ける（各文は文末記号を含む）。
+
+    文境界の規則は ``first_sentence`` / ``excerpt`` と同じ ``_is_sentence_boundary``
+    （数値表記・略語ピリオド・``Fig. 1.1`` の番号を文末にしない）で、第2の文境界
+    実装を作らない。文境界が無ければ全体を1文として返す。空なら空リスト。
+    """
+    body = normalize_whitespace(text)
+    if not body:
+        return []
+    sentences: list[str] = []
+    start = 0
+    for match in _SENTENCE_END_RE.finditer(body):
+        if not _is_sentence_boundary(body, match.start(), match.group()):
+            continue
+        sentence = body[start : match.end()].strip()
+        if sentence:
+            sentences.append(sentence)
+        start = match.end()
+    tail = body[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
 
 
 # ── TeX 数式判定（course_content_builder から移設した正本）────────────────────
@@ -227,3 +306,52 @@ def looks_like_tex_math(text: str) -> bool:
         return False
     covered = sum(len(cmd) + 1 for cmd in commands)
     return covered >= max(10, int(len(t) * 0.2))
+
+
+_PAREN_INLINE_MATH_RE = re.compile(r"\\\((.+?)\\\)", re.DOTALL)
+_DOLLAR_INLINE_MATH_RE = re.compile(r"\$([^$]+)\$")
+_PROSE_WORD_RE = re.compile(r"[A-Za-z]{2,}|[぀-ヿ㐀-鿿]")
+
+
+def normalize_inline_math_delimiters(text: object) -> str:
+    """``\\(…\\)`` のインライン数式を ``$…$`` に正規化する（IK-0898・決定論）。"""
+    return _PAREN_INLINE_MATH_RE.sub(lambda m: "$" + m.group(1) + "$", str(text or ""))
+
+
+def is_prose_with_delimited_math(text: object) -> bool:
+    """地の文に ``$…$``（または ``\\(…\\)``）で区切られた数式を含む文か（IK-0898）。
+
+    TeX 命令がすべて数式区間の内側にあり、区間の外に散文（英語 2 字以上の語か和文）が
+    残るときだけ True。生の TeX 数式（:func:`looks_like_tex_math` が真の本文）と違い、
+    数式区間を数式として描けば読める文なので、見出しから捨てない・剥がさない。
+    """
+    body = normalize_inline_math_delimiters(text).strip()
+    if "$" not in body or body.count("$") % 2:
+        return False
+    if not _DOLLAR_INLINE_MATH_RE.search(body):
+        return False
+    outside = _DOLLAR_INLINE_MATH_RE.sub(" ", body)
+    if _TEX_MATH_ENV_RE.search(outside) or _TEX_COMMAND_RE.search(outside) or "$" in outside:
+        return False
+    return bool(_PROSE_WORD_RE.search(outside))
+
+
+# ── 原文の言語のままの文（第 25 周 第 7 波・IK-0571 の studio 側）────────────────
+
+_JAPANESE_CHAR_RE = re.compile(r"[\u3040-\u30FF\u3400-\u9FFF]")
+_LATIN_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+_MATH_SPAN_RE = re.compile(r"\$[^$]*\$")
+
+
+def is_untranslated_text(text: object) -> bool:
+    """日本語の画面に原文（英語など）のまま出る文か（決定論・翻訳しない）。
+
+    数式区間（``$…$``）を除いた本文に和文の文字が 1 つも無く、英字の語（2 字以上）が
+    あるとき True。記号だけ・数式だけの文は False（「原文」の印を付ける対象ではない）。
+    呼び出し側はこの判定で「（原文）」の印を添える（印の文字列の正本は
+    ``label_vocab.ORIGINAL_TEXT_MARK``）。
+    """
+    body = _MATH_SPAN_RE.sub(" ", normalize_inline_math_delimiters(text))
+    if _JAPANESE_CHAR_RE.search(body):
+        return False
+    return bool(_LATIN_WORD_RE.search(body))

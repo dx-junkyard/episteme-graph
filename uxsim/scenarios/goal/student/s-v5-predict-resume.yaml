@@ -1,0 +1,28 @@
+id: s-v5-predict-resume
+population: students
+runner: [api, browser]
+session: 2
+preconditions:
+  - 前のセッションでこのペルソナは予想を書いただけで並置の前にやめている（s-v5-predict-pause の翌日）
+goal: '{{goal_text}} の続きで、昨日書いた予想を見つけて、出典と並べる'
+params_required: [goal_text, prediction_text]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.open
+  - do: learning.cycle.return_door
+    note: 扉に昨日の予想の手がかりが出るかを見る（書き置きを残していないので出ないかもしれない）
+  - do: learning.discuss.opening
+  - do: learning.chat.history
+    with: {topic_id: _discussion}
+    note: 議論の会話に昨日の予想が残っているかを見る
+  - do: learning.chat.cycle
+    with: {cycle_mode: diff, message: '{{prediction_text}}'}
+    note: 昨日の予想を出典と並べる
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#understanding-cycle
+  - manual: student/02-student.md#return-door
+watch_for:
+  - 昨日書いた予想に 1 操作以内でたどり着ける（たどり着けないなら、どこを探したかを残す）
+  - 翌日の画面に経過日数・督促・「続けましょう」が出ない

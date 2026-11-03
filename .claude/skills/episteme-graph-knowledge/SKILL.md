@@ -13,6 +13,12 @@ description: >
 ---
 # Episteme Graph — ナレッジグラフ開発スキル
 
+## 着手前に読む（必須）
+
+- `docs/issue_knowledge/recall.md` — 課題ナレッジの**想起シート**（機械生成・短い 1 枚）。変更に含まれる語から
+  当てる族、繰り返し出ている型の見分け方・確かめ方、解決原理。新しい設計書には pre-mortem 節（型の slug か
+  「該当なし」）を置く（ガードレールあり）。実装後のエントリの `resolution.principles` は `use: consulted`。
+
 ## 概要
 
 教材知識の DSL 変換とナレッジグラフ管理に関する開発ルールを定義するスキル。

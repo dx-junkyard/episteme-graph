@@ -1,0 +1,45 @@
+id: s-misconception-mirror
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、自分の理解を前提にして質問し、訂正を受け止める'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- misconception_questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- repeat:
+    until: persona_decides_to_stop or steps > 4
+    max: 4
+    do: learning.chat.ask
+    with:
+      message: '{{misconception_questions | next}}'
+    note: 自分では正しいと思っている理解を前提に聞く
+- choose:
+  - do: learning.progress
+    note: 誤解メモに何が書かれたかを確かめる
+  - do: learning.source_chunk.open
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#ai-chat
+- manual: student/02-student.md#misconception-review
+watch_for:
+- 言い直しが本人の言葉を逐語で引く
+- 訂正が断定ではなく出典を示して行われる
+- 誤解メモが AI の提案であり本人が確定・却下できることが分かる

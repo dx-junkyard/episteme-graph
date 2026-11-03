@@ -13,9 +13,15 @@ narrower than a typical agent input_builder:
 2. Defensively bound each element's text so a single batch cannot blow the
    prompt budget (a caller could hand over an unbounded number of context
    items or an oversized library excerpt).
+3. Strip internal identifiers (``tex_b80`` / ``eq_tex_b78`` …) from the prose
+   material (IK-0819). Upstream generated text — e.g. an equation_semantics
+   summary used as ``local_text`` — can carry block ids the LLM copied from its
+   own material; showing them here would invite the explanation to repeat them.
+   ``element_id`` itself is kept (it is the address the output is matched by).
 """
 from __future__ import annotations
 
+from ..internal_id_text import strip_internal_ids
 from .schema import DEFAULT_MAX_ELEMENTS_PER_CALL, ElementExplanationInput
 
 # Defensive prompt-size bounds. These are intentionally generous — the goal
@@ -52,7 +58,7 @@ class ContextualExplanationInputBuilder:
         return {
             "element_id": item.element_id,
             "element_type": item.element_type,
-            "local_text": _truncate(item.local_text, MAX_LOCAL_TEXT_CHARS),
+            "local_text": _prose(item.local_text, MAX_LOCAL_TEXT_CHARS),
             "upper_context": self._bounded_context(item.upper_context),
             "lower_context": self._bounded_context(item.lower_context),
             "library_excerpt": self._bounded_excerpt(item.library_excerpt),
@@ -67,7 +73,7 @@ class ContextualExplanationInputBuilder:
             bounded.append({
                 "relation": str(entry.get("relation") or ""),
                 "kind": str(entry.get("kind") or ""),
-                "text": _truncate(str(entry.get("text") or ""), MAX_CONTEXT_ITEM_CHARS),
+                "text": _prose(str(entry.get("text") or ""), MAX_CONTEXT_ITEM_CHARS),
             })
         return bounded
 
@@ -79,11 +85,16 @@ class ContextualExplanationInputBuilder:
             "entry_id": str(excerpt.get("entry_id") or ""),
             "version_no": excerpt.get("version_no"),
             "name": str(excerpt.get("name") or ""),
-            "summary": _truncate(str(excerpt.get("summary") or ""), MAX_LIBRARY_EXCERPT_CHARS),
-            "body_excerpt": _truncate(
+            "summary": _prose(str(excerpt.get("summary") or ""), MAX_LIBRARY_EXCERPT_CHARS),
+            "body_excerpt": _prose(
                 str(excerpt.get("body_excerpt") or ""), MAX_LIBRARY_EXCERPT_CHARS
             ),
         }
+
+
+def _prose(text: str, limit: int) -> str:
+    """Prose material for the prompt: internal ids stripped, then bounded."""
+    return _truncate(strip_internal_ids(text), limit)
 
 
 def _truncate(text: str, limit: int) -> str:

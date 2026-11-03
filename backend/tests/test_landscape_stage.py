@@ -613,12 +613,12 @@ class TestPersistence:
             "perspective": "subject",
             "weight": 0.85,
             "reason": "論文の対象は宇宙背景放射から再構成した振幅である。",
-            "evidence": [{"quote": _THESIS, "claim_id": None}],
+            "evidence": [{"quote": _THESIS, "claim_id": None, "source": "paper_summary"}],
             "provenance": "llm",
             "created_by": "pipeline",
         }
         assert second["node_kind"] == "region"
-        assert second["evidence"] == [{"quote": _CLAIM_TEXT, "claim_id": "c_1"}]
+        assert second["evidence"] == [{"quote": _CLAIM_TEXT, "claim_id": "c_1", "source": "claim"}]
         assert payload["created"] == 2
         assert stage_env.session.committed is True
         assert stage_env.session.closed is True

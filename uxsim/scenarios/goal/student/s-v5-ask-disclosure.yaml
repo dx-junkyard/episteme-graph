@@ -1,0 +1,33 @@
+id: s-v5-ask-disclosure
+population: students
+runner: [api, browser]
+session: 1
+goal: '{{goal_text}} の前に、自分の発言がどこに記録され、外部の AI に渡るのかを確かめる'
+params_required: [goal_text, disclosure_question, usage_question]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.open
+  - do: learning.disclosure.view
+    note: 入力欄の下の記録の扱いの一行を読む
+  - do: learning.chat.ask
+    with: {message: '{{disclosure_question}}'}
+    note: チャットで同じことを聞く
+  - choose:
+      - do: learning.chat.usage_help
+        with: {message: '{{usage_question}}'}
+        note: 使い方として聞き直す
+      - do: learning.help.inspect
+        with: {anchor_id: topbar.my-records}
+        note: 「？」で「わたしの記録」の説明を見る
+    optional: true
+  - do: learning.records.mine
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#disclosure
+  - manual: student/02-student.md#disclosure-external
+  - manual: student/02-student.md#my-records
+watch_for:
+  - 入力欄の下の一行と、チャットの答えが食い違わない（外部の AI に何が渡るか・成績に使うか）
+  - 答えが分からないときは捏造せず、どこに書いてあるかを示す
+  - 答えにモデル名・トークン数・金額が出ない

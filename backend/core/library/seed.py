@@ -1,6 +1,8 @@
 """カートリッジ同梱ライブラリの起動時シード取込（`core/atlas_store.py` のシードパターンを踏襲）。
 
-`backend/cartridges/<id>/library/*.json`（任意）を走査し、
+`backend/cartridges/<id>/library/*.json`（任意）と、分野に紐づかない共通部品
+`backend/library_common/*.json`（``domain_key='unassigned'``・検証シミュレーション層の
+実験機部品など）を走査し、
 (domain_key, name, entry_type) が未存在の組み合わせのみ ``store.create_entry`` 経由で
 取り込む（冪等）。ファイルが無ければ何もしない。DB 接続不可時も起動を止めない
 （例外を握って warning ログ + エラー情報を戻り値に含める）。
@@ -33,6 +35,13 @@ from core.postgres import get_session
 from . import schema, store
 
 logger = logging.getLogger(__name__)
+
+#: 分野に紐づかない共通部品の同梱先（検証シミュレーション層の実験機部品など。
+#: ``simulation_bridge_design.md`` §4.1）。``backend/library_common/*.json`` を
+#: ``domain_key = schema.DOMAIN_KEY_UNASSIGNED`` で取り込む。解決はモジュール相対
+#: （リポジトリでは ``backend/library_common``・コンテナでは ``/app/library_common`` —
+#: ``backend/Dockerfile`` が COPY する。cartridges / atlas_domains と同じ作法）。
+LIBRARY_COMMON_DIR = Path(__file__).resolve().parent.parent.parent / "library_common"
 
 # 同梱シード由来であることの目印（``library_entries.created_by`` / 版の発行者）。
 SEED_CREATED_BY = "bundled_import"
@@ -161,13 +170,17 @@ def import_bundled_library() -> dict:
 
     try:
         candidates: list[dict] = []
+        sources: list[tuple[str, Path]] = []
         for summary in summaries:
             domain_key = summary.cartridge_id
             try:
-                directory = cartridge_directory(domain_key) / "library"
+                sources.append((domain_key, cartridge_directory(domain_key) / "library"))
             except FileNotFoundError:
                 continue
+        # 分野に紐づかない共通部品（同じ冪等規則・同じ初版凍結で取り込む）。
+        sources.append((schema.DOMAIN_KEY_UNASSIGNED, LIBRARY_COMMON_DIR))
 
+        for domain_key, directory in sources:
             for entry in _iter_bundled_entries(directory):
                 entry_type = str(entry.get("entry_type") or "").strip()
                 name = str(entry.get("name") or "").strip()

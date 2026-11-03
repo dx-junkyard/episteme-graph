@@ -25,6 +25,12 @@ DELIVERABLE_STATUSES = ("auto", "confirmed")
 MACHINE_VERDICTS = ("match", "mismatch", "na")
 SELF_CHECK_VALUES = ("agreed", "disagreed", "verdict_wrong")
 
+# 出題できる item が無いときの事実文（``GET .../reconstruction/next`` の ``facts``。
+# IK-0410。IK-0386 の同族 — ``exhausted: true`` だけでは「無いのか・取れなかったのか」が分からない）。
+# 数値・督促は入れない（P7）。
+FACT_NO_SOURCE_MATERIAL = "このコースには、再構成の問いを出せる教材がまだ結び付いていません。"
+FACT_NO_DELIVERABLE_ITEM = "このトピックの再構成の問いは、いまは出題できるものがありません。"
+
 # 監査 entity_type（theory_review_events）。R層の追加語彙。値の正本は
 # core/schema.py の AUDIT_ENTITY_TYPES カタログ（全層横断の唯一の正本）。
 ENTITY_ITEM = core_schema.AUDIT_ENTITY_RECONSTRUCTION_ITEM

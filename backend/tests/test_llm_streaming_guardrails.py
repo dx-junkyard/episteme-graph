@@ -152,7 +152,7 @@ class TestSeam:
 
     def test_core_verbatim_anchors_unchanged(self):
         """ST7: 既存ガードレールが固定する逐語3点（生成器化の回帰検出）。"""
-        assert "window_history(body.history, max_messages=20, max_chars=2000)" in _LEARNING_SRC
+        assert "window_history(_prompt_history, max_messages=20, max_chars=4000, trim_at_boundary=True)" in _LEARNING_SRC
         assert "if _is_discuss:\n        _scaffold_user_instruction = (" in _LEARNING_SRC
         assert "messages: list[dict] = [" in _LEARNING_SRC
 

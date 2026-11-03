@@ -29,8 +29,10 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from core import display_projection as _dp
 from core.element_vocab import (
     chain_type_label,
+    claim_tier_label,
     claim_type_label,
     definition_missing_fact,
     definition_status_label,
@@ -40,11 +42,19 @@ from core.element_vocab import (
     theory_stage_key,
     theory_stage_label,
 )
-from core.text_excerpt import excerpt, first_sentence, looks_like_tex_math, normalize_whitespace
+from core.text_excerpt import (
+    excerpt,
+    first_sentence,
+    is_prose_with_delimited_math,
+    looks_like_tex_math,
+    normalize_inline_math_delimiters,
+    normalize_whitespace,
+)
 
 # 記号の表記ゆれ照合キー（A層 normalize_symbol）は core/symbol_notation.py の
 # seam 経由で読む（core/deliberation は A層 direct import 禁止 — W1 ガードレール。
 # element_vocab 経由の間接依存と同じ公認パターン）。表示用変種の同一性判定に使う。
+from core.latex_display import delimit_bare_tex
 from core.symbol_notation import normalize_symbol
 
 __all__ = [
@@ -97,6 +107,9 @@ class Label:
         来歴。教員向けにのみ出す（学習者射影で落とす）。
     unresolved
         ラダーが尽き一般名で代替したことの明示（カードが淡色表示に使う）。
+    full_text
+        ``text`` が切り詰めのときだけ持つ全文（空白正規化のみ）。同一なら空（§11.3）。
+        現在は主張（``claim_label``）だけが設定する。
     """
 
     text: str = ""
@@ -104,6 +117,7 @@ class Label:
     qualifier: str = ""
     label_source: str = ""
     unresolved: bool = False
+    full_text: str = ""
 
 
 # ── 内部 ID / 式番号の判定 ────────────────────────────────────────────────────
@@ -112,49 +126,22 @@ class Label:
 # _EMBEDDED_INTERNAL_ID_RE）と整合させる。あちらは「最後の砦」として維持し、
 # こちらは**生成時点で**候補から外すための判定（EC3′）。
 
-_UUID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-)
+# 語彙の正本は ``core/display_projection.py``（DP2）。判定の中身は従来と同一。
+_UUID_RE = _dp.UUID_ANY_RE
 
 # ラベル先頭が裸の内部 ID である形。
-_INTERNAL_ID_PREFIX_RES = (
-    re.compile(r"^ev(?:idence)?_[0-9]", re.IGNORECASE),       # ev_0001
-    re.compile(r"^synth_", re.IGNORECASE),                     # synth_claim_0001
-    re.compile(r"^claim_", re.IGNORECASE),                     # claim_span_001
-    re.compile(r"^span_[0-9]", re.IGNORECASE),                 # span_001
-    re.compile(r"^support:"),                                  # support:<section>:<idx>
-    re.compile(r"^node_", re.IGNORECASE),                      # graph node id
-    re.compile(r"^comp_", re.IGNORECASE),                      # component id
-    re.compile(r"^theory_op_", re.IGNORECASE),                 # main graph node id
-    re.compile(r"^eq_op_", re.IGNORECASE),                     # equation_detail node id
-    re.compile(r"^step_[0-9]", re.IGNORECASE),                 # step_001
-    re.compile(r"^sys_[0-9]+_step_[0-9]+", re.IGNORECASE),
-    re.compile(r"^(?:system_)?derivation_", re.IGNORECASE),
-)
+_INTERNAL_ID_PREFIX_RES = _dp.DELIBERATION_INTERNAL_ID_PREFIX_RES
 
 # 文中に**埋め込まれた**内部 ID（「導出「derivation_eq_tex_b16」のステップ
 # 「step_001」」のような機械連結文を候補から外す）。
-_EMBEDDED_INTERNAL_ID_RES = (
-    re.compile(r"derivation_[A-Za-z0-9_]+", re.IGNORECASE),
-    re.compile(r"system_derivation_[0-9]+", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])sys_[0-9]+_step_[0-9]+", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])step_[0-9]+", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])theory_op_[0-9]+", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])eq_op_[0-9]+", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])(?:ev|evidence)_[0-9]{3,}", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])synth_[A-Za-z0-9_]*[0-9]", re.IGNORECASE),
-    re.compile(r"(?:^|[^A-Za-z0-9])span_[0-9]{3,}", re.IGNORECASE),
-)
+_EMBEDDED_INTERNAL_ID_RES = _dp.DELIBERATION_EMBEDDED_INTERNAL_ID_RES
 
 # 論文の式番号の**厳密形**: ``eq_2_7`` / ``eq.3.14`` / ``(3.14)`` / ``2.7``。
 # 合成 ID ``eq_tex_b14`` は「eq の直後が数字でない」ため一致しない（§5.1）。
-_PAPER_EQUATION_NUMBER_RE = re.compile(
-    r"^\(?\s*(?:eq\.?|equation|式)?[\s_\-.]?([0-9]+(?:[._\-][0-9]+)*)\s*\)?$",
-    re.IGNORECASE,
-)
+_PAPER_EQUATION_NUMBER_RE = _dp.PAPER_EQUATION_NUMBER_RE
 
 # 文中の式 ID トークン（``eq_tex_b16`` / ``eq_2_7``）。
-_EQUATION_ID_TOKEN_RE = re.compile(r"(?:^|[^A-Za-z0-9])(eq[_\-.][A-Za-z0-9_.\-]+)", re.IGNORECASE)
+_EQUATION_ID_TOKEN_RE = _dp.DELIBERATION_EQUATION_ID_TOKEN_RE
 
 
 def looks_like_paper_equation_number(value: object) -> bool:
@@ -245,18 +232,23 @@ def _finalize(
     qualifier: str = "",
     label_source: str = "",
     unresolved: bool = False,
+    full_text: str = "",
 ) -> Label:
     """``text == sublabel`` を作らない（CP1）で Label を組み立てる。"""
     head = _text(text)
     sub = _text(sublabel)
     if sub and sub == head:
         sub = ""
+    whole = _text(full_text)
+    if whole == head:
+        whole = ""
     return Label(
         text=head,
         sublabel=sub,
         qualifier=_text(qualifier),
         label_source=_text(label_source),
         unresolved=bool(unresolved),
+        full_text=whole,
     )
 
 
@@ -820,17 +812,112 @@ _CLAIM_QUOTE_LIMIT = 70
 _GENERIC_CLAIM_LABEL = "主張"
 
 
+# ── 式から合成した主張の見出し（IK-0898）──────────────────────────────────────
+# A層の ``equation_claim_synthesis`` は英語の定型文に ``$…$`` の記号を埋めて主張を作る
+# （A層は非改変）。数式区間ごと捨てると見出しが種類名「主張」だけになり、学習者には
+# 記号の抜けた切れ端が残っていた。定型を読み時に和文へ置き換え、数式区間は保つ。
+_SYNTH_DEFINES_RE = re.compile(
+    r"^(?:Equation \((?P<label>[^()]{1,12})\)|An equation of this paper) defines (?P<target>\$[^$]+\$)\.?$"
+)
+_SYNTH_DEPENDS_RE = re.compile(
+    r"^In (?:equation \((?P<label>[^()]{1,12})\)|an equation of this paper), "
+    r"(?P<target>\$[^$]+\$) depends on (?P<inputs>(?:\$[^$]+\$)(?:, \$[^$]+\$)*)\.?$"
+)
+
+
+def synthesized_claim_japanese(text: Any) -> str:
+    """式から合成した英語の定型主張を、数式区間を保った和文にする（該当しなければ ""）。"""
+    raw = normalize_whitespace(normalize_inline_math_delimiters(_text(text)))
+    if not raw:
+        return ""
+    match = _SYNTH_DEFINES_RE.match(raw)
+    if match:
+        where = f"式 ({match.group('label')})" if match.group("label") else "この論文の式"
+        return f"{where}が {match.group('target')} を定めます"
+    match = _SYNTH_DEPENDS_RE.match(raw)
+    if match:
+        where = f"式 ({match.group('label')})では" if match.group("label") else "この論文の式では"
+        inputs = "、".join(part.strip() for part in match.group("inputs").split(", "))
+        return f"{where} {match.group('target')} が {inputs} に依存します"
+    return ""
+
+
+def _first_usable_with_math(candidates: list[Any], limit: int) -> str:
+    """数式区間（``$…$``）を含む散文を、区間を割らずに切った見出しにする（IK-0898）。"""
+    for candidate in candidates:
+        raw = normalize_inline_math_delimiters(_text(candidate))
+        if not raw or is_internal_id_like(raw) or not is_prose_with_delimited_math(raw):
+            continue
+        cut = excerpt(raw, limit, keep_dollar_math=True)
+        if cut and is_prose_with_delimited_math(cut):
+            return cut
+    return ""
+
+
+def _claim_full_text(data: dict[str, Any]) -> str:
+    """ラベルの元になった主張の全文（``text`` → ``normalized_text`` の最初の可用文）。"""
+    for candidate in (data.get("text"), data.get("normalized_text")):
+        raw = _text(candidate)
+        delimited = delimit_bare_tex(raw)
+        if delimited != raw and is_prose_with_delimited_math(normalize_inline_math_delimiters(delimited)):
+            return normalize_whitespace(delimited)  # IK-0898: 区切った全文（数式区間を保つ）
+        if _usable(raw):
+            return normalize_whitespace(raw)
+    return ""
+
+
+def _claim_kind_label(data: dict[str, Any]) -> str:
+    """補足行の種別語（§11.3）: claim_type 訳 → claim_tier 訳 → ""。
+
+    ``claim_type='unknown'`` は「不明」と訳さない（意味の無いラベルを裸で出さない —
+    §11.2。atomic 子主張は unknown でも tier を持っている）。
+    """
+    claim_type = _text(data.get("claim_type"))
+    if claim_type and claim_type != "unknown":
+        translated = claim_type_label(claim_type)
+        if translated:
+            return translated
+    return claim_tier_label(data.get("claim_tier"))
+
+
 def claim_label(row_or_record: dict[str, Any] | None) -> Label:
-    """主張のラベル（§5.5）。``theory_claims`` の DB 行と ClaimObjectRecord の両対応。"""
+    """主張のラベル（§5.5 / §11.3）。``theory_claims`` の DB 行と ClaimObjectRecord の両対応。
+
+    ``text`` は 60 字の見出し（他画面の互換）。切り詰めたときだけ ``full_text`` に全文を
+    載せる（カードは全文を主文に描く）。
+    """
     data = _dict(row_or_record)
-    text = _first_usable([data.get("text"), data.get("normalized_text")], _CLAIM_TEXT_LIMIT)
+    synthesized = synthesized_claim_japanese(data.get("text"))
+    if synthesized:
+        text = excerpt(synthesized, _CLAIM_TEXT_LIMIT, keep_dollar_math=True)
+    else:
+        # IK-0898（第 3 周）: 区切りの無い TeX（``P(\\rho)`` / ``\\mathcal{N}_\\mathrm{TOV}``）は
+        # 切り詰めの**前に** ``$…$`` で区切る（上流で 1 箇所 — 学習者・教員どちらの見出しも
+        # 同じ値になる）。区切った文は数式区間を割らない切り詰めで見出しにする。
+        raw_candidates = [_text(data.get("text")), _text(data.get("normalized_text"))]
+        delimited = [delimit_bare_tex(c) for c in raw_candidates]
+        text = ""
+        if delimited != raw_candidates:
+            text = _first_usable_with_math(delimited, _CLAIM_TEXT_LIMIT)
+        if not text:
+            text = _first_usable([data.get("text"), data.get("normalized_text")], _CLAIM_TEXT_LIMIT)
+        if not text:
+            # IK-0898: TeX を含む文を捨てず、数式区間を保って見出しにする。
+            text = _first_usable_with_math(
+                [data.get("text"), data.get("normalized_text")], _CLAIM_TEXT_LIMIT
+            )
     unresolved = False
     source = LABEL_SOURCE_TEXT
+    full_text = ""
     if not text:
         text, source, unresolved = _GENERIC_CLAIM_LABEL, LABEL_SOURCE_GENERIC, True
+    else:
+        whole = _claim_full_text(data)
+        if whole and whole != text:
+            full_text = whole
 
     claim_type = _text(data.get("claim_type"))
-    parts = [claim_type_label(claim_type)]
+    parts = [_claim_kind_label(data)]
     quote = first_sentence(data.get("evidence_text") or data.get("evidence_quote"))
     if _usable(quote):
         cut = excerpt(quote, _CLAIM_QUOTE_LIMIT)
@@ -843,6 +930,7 @@ def claim_label(row_or_record: dict[str, Any] | None) -> Label:
         qualifier=claim_type,
         label_source=source,
         unresolved=unresolved,
+        full_text=full_text,
     )
 
 

@@ -147,6 +147,8 @@ def _step(step_id: str, *, outputs: list[str], inputs=("eq_in",), required=()) -
         step_id=step_id,
         input_equation_ids=list(inputs),
         operation="eliminate_second_order_parameter",
+        # 消去対象の記号が無い eliminate は generic に落ちる（2026-10-16 是正）。
+        eliminated_symbols=["b2"],
         output_equation_ids=list(outputs),
         required_claim_ids=list(required),
         review_status="teacher_review_required",

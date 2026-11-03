@@ -98,7 +98,10 @@ class TestRoutes:
     def test_learner_explanations_endpoint_returns_only_approved(self):
         source = _read(LEARNING)
         assert '"/courses/{course_id}/components/{component_id}/explanations"' in source
-        assert "review_status = 'teacher_approved'" in source
+        # IK-0926: 配信条件の正本は core/explanation_governance.py（learning.py は参照する）。
+        assert "_explanation_governance.LEARNER_EXPLANATION_SCOPE_SQL" in source
+        from core import explanation_governance
+        assert "review_status = 'teacher_approved'" in explanation_governance.LEARNER_EXPLANATION_SCOPE_SQL
 
 
 class TestEndorsementLabel:
@@ -107,10 +110,11 @@ class TestEndorsementLabel:
         return tc._endorsement_label(summary)
 
     def test_zero_is_unendorsed(self):
-        assert self._label(endorser_count=0) == "未承認"
+        # IK-0924: 支持の軸は「支持」の語で言う（査読の「承認」と分ける）。
+        assert self._label(endorser_count=0) == "まだ教員の支持はありません"
 
     def test_provisional_only(self):
-        assert self._label(endorser_count=1, provisional_count=1) == "暫定的に1名が承認"
+        assert self._label(endorser_count=1, provisional_count=1) == "暫定的に1名の教員が支持"
 
     def test_strong_and_breadth_are_reflected(self):
         label = self._label(endorser_count=3, strong_count=1, provisional_count=0, expertise_breadth=2)
@@ -254,8 +258,10 @@ class TestEndorserListUI:
     def test_shows_stage_labels_not_numeric_scores(self):
         src = _read(ADMIN_LS_JS)
         label_fn = _js_fn(src, "lsEndorseLevelLabel", "lsLoadEndorsers")
-        for label in ("強い承認", "暫定", "承認"):
-            assert label in label_fn
+        # IK-0924: 段階の語は「支持」（正本 label_vocab の EXPLANATION_SUPPORT_LEVEL_LABELS のミラー）。
+        assert "EXPLANATION_SUPPORT_LEVEL_LABELS[level]" in label_fn
+        for label in ("強い支持", "暫定の支持"):
+            assert label in src
         # 個別一覧の描画は集計の数値フィールドを表示しない（段階ラベルのみ）
         body = _js_fn(src, "lsLoadEndorsers", "lsOpenCiteSelector")
         for numeric_field in ("endorser_count", "strong_count", "provisional_count", "expertise_breadth"):

@@ -1,6 +1,7 @@
 # episteme-graph サービスデザイン — ビジョンから UX への展開
 
 **作成日:** 2026-08-23
+**改訂:** 2026-10-16（vision・現行の開示仕様との整合、ヒアリングへの接続）
 **想定読者:** 外部ステークホルダー（研究室・大学・教育機関・資金提供者など、
 本システムの背景と提供価値を初めて知る方）
 **位置づけ:** [ビジョンと思想（正本）](vision.md) が「なぜこう設計するか（思想）」の正本、
@@ -8,6 +9,10 @@
 対し、本書はその**間**を埋める: どのような現状認識・課題があり、ビジョンとの間にどんな
 ギャップ（gap）を認め、それをどのような UX（体験）で解消しようとしているのかを、
 一本の因果の鎖として整理する。
+
+**機能を見直す打ち合わせは [vision・UX・feature ヒアリング](feature_review.md) から始める。**
+利用場面 → 目指す変化 → 操作の流れ → 既存機能 → 未確認点 → 判断の順に確認できる。
+本書の G1〜G7 は課題と提供価値の対応であり、実装完了や UX 検証合格の一覧ではない。
 
 読み進める順序は次のとおり。
 
@@ -42,8 +47,9 @@ UX              gap を埋めるために提供する体験     → §5
 - **知識は近傍との関係でのみ成り立つ** — 「全体の完成形」は存在せず、俯瞰の神の視点も作らない
 - **検証と合意は別の軸** — 「みんなが認めている」と「確かめられている」を混同させない
 - **理解は産出から始まる** — 開示の前に学習者自身の予測・再構成を挟む
-- **AIは候補まで、確定は人間** — AI の出力は常に候補であり、確定の権限は学習者本人と教員に留保する
+- **AIは候補まで、確定は再構成可能な人間の判断手続に** — 根拠・代替・拒否権・再審経路を伴い、クリックだけで判断したことにしない（vision §4・§6 原則1）
 - **学習者は主権者** — 学習の痕跡は本人のみのもの。監視・評価には使わない
+- **学習は可逆な循環** — 仮説・比較・確認・改訂を行き来し、公開しない学びも正規の経路とする。学習記録・研究記録・制度監査は分離してリンクする（vision §3.7・§5.4）
 
 ---
 
@@ -113,6 +119,7 @@ UX              gap を埋めるために提供する体験     → §5
 ## §4 Gap — ビジョンと現状の隙間
 
 課題を「ビジョンが描く状態」と突き合わせると、埋めるべき gap は次の7つになる。
+表の「現状」は §2 の環境認識を指す。製品に当該機能がまだ無いという意味ではない。
 
 | ID | ビジョンが描く状態 | 現状 | gap（埋めるべき隙間） |
 |---|---|---|---|
@@ -130,6 +137,8 @@ UX              gap を埋めるために提供する体験     → §5
 
 各 gap に対して、episteme-graph は次の体験を提供する。機能名ではなく
 「利用者に何が起きるか」で記述する（対応する機能・設計書は §6 の表）。
+以下は体験の設計意図と適用範囲であり、全経路の実証済み宣言ではない。
+実装と検証の限界は [ヒアリング用の機能見直し](feature_review.md) §2 を参照。
 
 ### G1 → 「地図の上で学ぶ」
 
@@ -137,15 +146,16 @@ PDF をアップロードするだけで、論文は概念・主張・数式・�
 自動的に構造化される。学習者は分野の地図（教員がレビューして凍結した骨格）の上で
 「いまここ」を見ながら学び、論文がその地図のどこに置かれるかを確かめられる。
 複数の論文に現れる同じ部品は「実は同じもの」としてリンクされ（各論文の表記は
-書き換えない）、あるノードから隣の論文・分野の骨格・自分の過去の問いへと
+書き換えない）、あるノードから、リンクのある隣の論文・分野の骨格・自分の過去の問いへと
 **一歩ずつたどる「旅」**として探索できる。全体を一枚に描く俯瞰画面は意図的に作らない —
 踏破率やカバー率の数値も出さない。地図は正解ではなく投影であり、「地図に置けない論文」は
 エラーではなく、地図を育てる**発見の信号**として扱われる。
 
 ### G2 → 「開示の前に、自分の予測を置く」
 
-学習者が望んだときだけ（明示的な精読モード）、続きを読む前に「次に何が導かれるか」を
-予測として置ける。開示後の突き合わせは**採点しない** — 正解・点数・正答率は出さず、
+学習者が望んだときだけ（明示的な精読モード）、議論の開幕で「次に何が導かれるか」を
+予測として置ける。現行の精読モードは教材本文の主結果を隠す機能ではない。
+開示後の突き合わせは**採点しない** — 正解・点数・正答率は出さず、
 本人の予測と出典の記述を並置し、「食い違いの可能性」を仮説の文体で示すだけである。
 権威は常に出典（原文）にあり、AI の判定にはない。論文とは教材の順序に縛られず最初から
 議論することもでき（「論文と話す」）、対話は答えの配布ではなく、学習者の解釈の
@@ -156,20 +166,24 @@ PDF をアップロードするだけで、論文は概念・主張・数式・�
 
 学習中の質問は、質問文の保存ではなく「提示された構造の**どこに・どう**引っかかったか」
 として記録される。AI は対話ログから「理解した上での引っかかり（違和感）」の候補を
-見つけて提案するが、**それを違和感として確定するのは本人だけ**である。確定された問い・
-違和感・再構成の成功は、本人だけが見られる「わたしの地図」に自動的に積み重なり、
+見つけて提案するが、**それを違和感として確定するのは本人だけ**である。本人が残した問い・
+違和感・再構成の記録のうち、登録簿で地図への反映対象とされるものが、本人だけが見られる
+「わたしの地図」に積み重なる。記録一覧と地図への反映対象は同一ではない。
 過去の問いから今の学びへつながる道が示される。この地図は成績評価には使われない —
 その注記が画面に常設される。
 
 ### G4 → 「何が確かめられ、何が前提かが読める」
 
-すべての主張には「どの条件・どの範囲で確かめられたか」の台帳が付く。検証は○×の
+主張について「どの条件・どの範囲で確かめられたか」を台帳に記録できる。検証は○×の
 一bitではなく**範囲の記述**であり、「証明済み」という全称の断定は構造的に書けない。
 さらに「何が起これば覆るか」（反証条件）、「覆ればどこまで影響が届くか」、
 「どこが一点の支持に吊られているか」まで記帳できる。台帳が言えるのは常に
 「**このコーパスの中では**検証記録がない」までであり、「誰も検証していない」とは
 言わない — 空欄は警告ではなく、次の検証提案・研究対話の出発点として提示される。
-学習者にはこれらが読み取り専用の事実文として、未検証と検証済みを同じ精度で併記される。
+学習者には台帳を読み取り専用の事実文として、未検証と検証済みを同じ精度で併記する。
+また [検証シミュレーション](features/simulation_bridge_design.md) では、学習者自身が
+プログラムを作って実行し、予想と結果を並べ、成功した実行の痕跡を本人の記録に残せる。
+共有する run は本人が選び、共有候補の台帳での確定は教員が行う。
 
 ### G5 → 「AIは候補を出し、教員が弁を握る」
 
@@ -181,13 +195,20 @@ AI の出力 — 抽出された主張、説明文、図の解析、地図への
 支える。同じ概念への複数の教員の説明は上書きではなく**並存**し、承認は説明の
 バージョン単位で記録される。
 
-### G6 → 「本人のみ可視、教員には匿名の集約だけ」
+### G6 → 「痕跡の主権と、データごとの開示範囲を確かめられる」
 
-学習者の痕跡（問い・違和感・予測・意図）は本人のみが見られる。教員に届くのは
-匿名化された集約だけで、該当者が少数の場合はそもそも表示されない（k-匿名の構造的
-強制）。人数も正確な数値ではなく範囲で示す。個別の学習履歴を閲覧する経路は
-存在せず、記録の削除も「消す」のではなく本人の意思表示（地図に反映しない等）の
-状態遷移として保持される — 情報を落とさないことと本人の主権を両立する。
+学習者の痕跡（問い・違和感・予測・意図）は本人のみ可視を原則とし、教員向けの痕跡集約は
+k-匿名で少人数セルを表示せず、人数は範囲で示す。ただし**会話・質問の全経路が匿名集約だけに
+なるわけではない**。現行実装では「教材から答えられなかった質問」は表示名と本文が担当教員の
+一覧に載り、会話を削除してもその一覧からは外れない。本人のみ可視の原則との判断点は
+[ヒアリング](feature_review.md) §3 を参照。公開の宣言は告知であり、同意取得を意味しない。
+
+地図から外す・候補を見送る・会話を書き直す・会話を削除する操作は効果が異なる。
+痕跡の状態遷移と本文の物理削除を同じ「取り消し」として約束しない。
+人に関するデータは知識オブジェクトの履歴保全とは別に扱い、消去・匿名化を認める
+（vision §6 原則3）。データ別の閲覧・撤回・保持・外部 AI 送信の現行仕様は
+[可視性6軸](features/disclosure_axes_design.md) と
+[利用者向けの説明](manual/student/02-student.md#disclosure) を参照。
 
 ### G7 → 「共有には版があり、公開の前に確認がある」
 
@@ -195,8 +216,10 @@ AI の出力 — 抽出された主張、説明文、図の解析、地図への
 読む — 作り手が下書きを編集しても、発行するまで受け手には見えない。削除には猶予期間が
 あり、受け手に事前通知される。コースの公開前には「AI が作ったものがこのまま学習者に
 提示される」ことを教員が目で確認するステップが挟まり、確認の1操作が承認として
-帰属付きで記録される。確認を飛ばしてもリリースは止まらない — ただし何が未確認かは
-正直に示される。
+帰属付きで記録される。一括確認では、提示された根拠・代替・拒否可能性・再審経路を
+[確定文脈](features/decision_context_design.md) として残す。確認画面を飛ばしても
+その画面自体は公開を止めるゲートにならないが、権限検査を省略する意味ではない。
+未確認の配置は未確認のまま示し、閲覧のみの対象を確認済みに昇格させない。
 
 ---
 
@@ -209,13 +232,13 @@ AI の出力 — 抽出された主張、説明文、図の解析、地図への
 |---|---|---|---|---|
 | G1 | 地図の上で学ぶ | 群1 知の構造化 / 群4 地図と位置づけ / 群2 学びの対話 | PDF 解析パイプライン / 分野の地図（+ ベクトル係留・関係表示）/ 知識ランドスケープ / カテゴリギャップ候補 / 共通部品ライブラリ / コーパス回遊（論文の海） | [pipeline/overview.md](pipeline/overview.md) / [field_atlas_overlay_spec.md](features/field_atlas_overlay_spec.md) / [knowledge_landscape_design.md](features/knowledge_landscape_design.md) / [category_gap_candidates_design.md](features/category_gap_candidates_design.md) / [atlas_vector_anchoring_design.md](features/atlas_vector_anchoring_design.md) / [atlas_relation_edges_design.md](features/atlas_relation_edges_design.md) / [image_pipeline_knowledge_library_design.md](features/image_pipeline_knowledge_library_design.md) / [corpus_roaming_design.md](features/corpus_roaming_design.md) |
 | G2 | 開示の前に、自分の予測を置く | 群3 理解の産出と痕跡 / 群2 学びの対話と講義 | 理解サイクル / 再構成ループ / 「論文と話す」ディスカッション | [understanding_cycle_design.md](features/understanding_cycle_design.md) / [reconstruction_loop_design.md](features/reconstruction_loop_design.md) / [discussion_mode_design.md](features/discussion_mode_design.md) / [discuss_dialogue_alignment_design.md](features/discuss_dialogue_alignment_design.md) |
-| G3 | 問いと違和感が、わたしの地図になる | 群3 理解の産出と痕跡 | tension（違和感）/ 構造帰属型の問い記録 / 個人知識ネットワーク（わたしの地図・旅） | [structure-anchored-questions.md](features/structure-anchored-questions.md) / [personal_knowledge_network_design.md](features/personal_knowledge_network_design.md) / [personal_map_nearby_design.md](features/personal_map_nearby_design.md) |
-| G4 | 何が確かめられ、何が前提かが読める | 群5 疑いと検証の制度 | 認識的地位の台帳（D層）/ 賭け金の台帳（反証条件・晴れ間） | [doubt_layer_issues.md](features/doubt_layer_issues.md) / [stakes_ledger_design.md](features/stakes_ledger_design.md) |
-| G5 | AIは候補を出し、教員が弁を握る | 群6 教員の検討と共同体 / 群7 運営基盤 | 承認・説明の並存（C層）/ 要素検討ワークスペース / グラフ対話レビュー（+ 論文層）/ 管理 AI アシスタント / 次にやること / 論文取り込みの弁（ディスカバリー・レーダー） | [endorsement-sharing.md](features/endorsement-sharing.md) / [element_deliberation_workspace_design.md](features/element_deliberation_workspace_design.md) / [graph_dialogue_review_design.md](features/graph_dialogue_review_design.md) / [graph_paper_layer_design.md](features/graph_paper_layer_design.md) / [admin_assistant_design.md](features/admin_assistant_design.md) / [guidance_layer_design.md](features/guidance_layer_design.md) / [candidate_flow_design.md](features/candidate_flow_design.md) / [paper_discovery_design.md](features/paper_discovery_design.md) |
-| G6 | 本人のみ可視、教員には匿名の集約だけ | 横断（群3/群5 ほか全群に適用） | k-匿名集約 / 痕跡の主権台帳 / 訂正主権（地図に反映しない） | [personal_knowledge_network_design.md](features/personal_knowledge_network_design.md) / [trace_registry_sovereignty_ledger_design.md](features/trace_registry_sovereignty_ledger_design.md) |
+| G3 | 問いと違和感が、わたしの地図になる | 群3 理解の産出と痕跡 | tension（違和感）/ 構造帰属型の問い記録 / 個人知識ネットワーク（わたしの地図・旅） | [structure-anchored-questions.md](features/structure-anchored-questions.md) / [personal_knowledge_network_design.md](features/personal_knowledge_network_design.md) / [personal_map_nearby_design.md](features/personal_map_nearby_design.md) / [return_door_design.md](features/return_door_design.md) / [trace_registry_sovereignty_ledger_design.md](features/trace_registry_sovereignty_ledger_design.md) |
+| G4 | 何が確かめられ、何が前提かが読める | 群5 疑いと検証の制度 | 認識的地位の台帳（D層）/ 賭け金の台帳（反証条件・晴れ間）/ 検証シミュレーション（自分で確かめた試行） | [doubt_layer_issues.md](features/doubt_layer_issues.md) / [stakes_ledger_design.md](features/stakes_ledger_design.md) / [simulation_bridge_design.md](features/simulation_bridge_design.md) |
+| G5 | AIは候補を出し、教員が弁を握る | 群6 教員の検討と共同体 / 群7 運営基盤 | 承認・説明の並存（C層）/ 要素検討ワークスペース / グラフ対話レビュー（+ 論文層）/ 管理 AI アシスタント / 次にやること / 論文取り込みの弁（ディスカバリー・レーダー） | [endorsement-sharing.md](features/endorsement-sharing.md) / [element_deliberation_workspace_design.md](features/element_deliberation_workspace_design.md) / [graph_dialogue_review_design.md](features/graph_dialogue_review_design.md) / [graph_paper_layer_design.md](features/graph_paper_layer_design.md) / [admin_assistant_design.md](features/admin_assistant_design.md) / [guidance_layer_design.md](features/guidance_layer_design.md) / [candidate_flow_design.md](features/candidate_flow_design.md) / [paper_discovery_design.md](features/paper_discovery_design.md) / [paper_radar_design.md](features/paper_radar_design.md) / [decision_context_design.md](features/decision_context_design.md) |
+| G6 | 痕跡の主権とデータごとの開示範囲を確かめられる | 横断（群3/群5 ほか全群に適用） | k-匿名集約 / 痕跡の主権台帳 / 訂正主権（地図に反映しない） | [personal_knowledge_network_design.md](features/personal_knowledge_network_design.md) / [trace_registry_sovereignty_ledger_design.md](features/trace_registry_sovereignty_ledger_design.md) / [disclosure_axes_design.md](features/disclosure_axes_design.md) |
 | G7 | 共有には版があり、公開の前に確認がある | 群7 運営基盤 | 共有物のバージョン管理（V層）/ リリース前の確認 / 監査記録 / アカウントの停止・削除も状態遷移（所有物は移管してから purge） | [shared_versioning_design.md](features/shared_versioning_design.md) / [release_review_flow_design.md](features/release_review_flow_design.md) / [account_lifecycle_management_design.md](features/account_lifecycle_management_design.md) |
 
-補: 横断的な設計原則（数値を見せない・情報を落とさない・fail-closed 等の14原則）は
+補: 横断的な設計原則（数値の用途と粒度の統治・知識オブジェクトの履歴保全・fail-closed 等の14原則）は
 [vision.md](vision.md) §6 に（2026-09-04 改訂版。原則4 は「数値の用途と粒度の統治」へ）、機能と実装（データベース migration）の対応は
 [レイヤー索引表](architecture/layer_registry.md) にまとまっている。
 
@@ -235,8 +258,9 @@ AI の出力 — 抽出された主張、説明文、図の解析、地図への
 
 なお本プロジェクトの開発の型は「討論・調査（発散）→ UX 検討 → 専用設計書（不変条項の
 明文化）→ 実装 → 設計書末尾に実装記録を追記」であり（[vision.md](vision.md) §7）、
-設計書は実装後も仕様の正本として維持される。ドキュメントと実装の一致は機械検証
-（ガードレールテスト）で構造的に守られている。
+設計書は実装後も追補を含めて仕様の正本として維持される。機械検証は参照実在・一覧の網羅などを
+検査するが、文の意味と実際の体験の一致までは保証しない。原則・現行仕様・画面の読み合わせと、
+利用場面を通した検証を併用する。
 
 ---
 
@@ -248,3 +272,6 @@ AI の出力 — 抽出された主張、説明文、図の解析、地図への
   個別機能の追加は §6 の表への行・リンク追記で足りる。
 - 本書は思想（[vision.md](vision.md)）と仕様（各設計書）の内容を**複製しない**。
   重複しそうになったら、リンクに置き換える。
+- vision の改訂・開示や撤回の仕様変更・機能間の導線変更時は、§1・§5・§6 と
+  [ヒアリング](feature_review.md) の該当場面を同じ変更で照合する。回答と推奨を区別して記録し、
+  未回答を合意として扱わない。

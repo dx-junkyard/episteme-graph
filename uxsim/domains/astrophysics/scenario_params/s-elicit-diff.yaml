@@ -1,0 +1,19 @@
+scenario: s-elicit-diff
+domain: astrophysics
+params:
+  goal_text: µ(a) と音速への制約について、自分の予想と論文の結果を比べること
+  topic_hint: 主結果：µ(a)と音速への制約（暗黒エネルギーと修正重力の音速を扱う論文）
+  topic_hint_terms:
+  - 音速
+  - µ(a)
+  - 暗黒エネルギー
+  - 修正重力
+  prediction_text: 音速が光速より小さいと、µ は 1 より大きい方向にずれて見え、データは µ_0 ≈ 1.1 程度を好むと予想する。
+  seed_questions:
+  - 並べてみて、私の予想と論文の結果のずれはどこにありますか？
+per_archetype:
+  confident_theorist:
+    prediction_text: α_K ∝ α_B の仮定の下では c_s^2 が小さいほど µ − 1 が増え、2σ 程度で µ > 1 が好まれると予想する。
+  non_native:
+    goal_text: comparing my prediction with the paper's result
+    prediction_text: If the sound speed is below the speed of light, µ appears to deviate above 1, and the data prefer µ_0 around 1.1.

@@ -54,8 +54,15 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "atlas.domain-retire",
         "atlas.edge-candidates",
         "atlas.edge-dismissed-filter",
+        "atlas.edge-draft-from-frozen",
+        "atlas.draft-relations",
+        "atlas.published-contents",
         "atlas.edge-incorporate",
+        "atlas.edge-direction",
+        "atlas.edge-orphaned",
+        "atlas.edge-show-all",
         "atlas.freeze",
+        "atlas.freeze-blocked-goto",
         "atlas.freeze-correspondence",
         "atlas.freeze-correspondence-manual",
         "atlas.gap-accept",
@@ -65,6 +72,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "atlas.gap-dismissed-filter",
         "atlas.gap-draft-from-frozen",
         "atlas.gap-incorporate",
+        "atlas.gap-orphaned",
         "atlas.gap-restore",
         "atlas.generate",
         "atlas.overview-action",
@@ -110,6 +118,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "deliberation.figure-reanalyze",
         "deliberation.identity-link-create",
         "deliberation.identity-link-decide",
+        "deliberation.identity-link-revoke",
+        "deliberation.identity-link-restore",
         "deliberation.inventory-bulk-review",
         "deliberation.inventory-filter",
         "deliberation.mode-save",
@@ -122,6 +132,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "doubt-atlas.assumption-confirm",
         "doubt-atlas.assumption-dismiss",
         "doubt-atlas.assumption-filter",
+        # 第 25 周 面 B 第 6 波（IK-1028）: 確定済みの前提のカードから台帳を開く。
+        "doubt-atlas.assumption-open-ledger",
         "doubt-atlas.audit-run",
         # 知識の転用層 P4-5（knowledge_transfer_design.md §8）: 疑義の向き（direct /
         # undercut）と、根拠の線（人間の記帳専用）の一覧・追加フォーム。
@@ -143,6 +155,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "doubt-atlas.record-scope",
         "doubt-atlas.record-verification-status",
         "doubt-atlas.refresh",
+        # 第 25 周 面 B 第 5 波（IK-0998）: 取り下げ済みの疑義の折りたたみ（読み取りのみ）。
+        "doubt-atlas.withdrawn-challenges",
         "error-analysis.clear-selection",
         "error-analysis.copy-format",
         "error-analysis.copy-selected",
@@ -160,6 +174,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "graph-review.graph-chat",
         "graph-review.layer",
         "graph-review.modal",
+        "graph-review.module-member",
+        "graph-review.module-view",
         "graph-review.new-chat",
         "graph-review.next-unreviewed",
         "graph-review.open-deliberation",
@@ -185,12 +201,17 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "header.logout",
         "header.next-steps",
         "header.notifications",
+        "header.profile-name",
         "header.tab-bar",
         "interest-dashboard.bridge-insights-section",
         "interest-dashboard.course-select",
         "interest-dashboard.dashboard-body",
         "interest-dashboard.refresh-btn",
+        "knowledge-library.atlas-link-manual",
         "knowledge-library.atlas-links",
+        "knowledge-library.bound-parts",
+        "knowledge-library.bound-part-decide",
+        "knowledge-library.bound-symbols",
         "knowledge-library.detail-deliberate",
         "knowledge-library.detail-freeze",
         "knowledge-library.detail-restore",
@@ -203,10 +224,14 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "knowledge-library.identity-candidates",
         "knowledge-library.identity-derive",
         "knowledge-library.include-retired",
+        "knowledge-library.label-restore",
         "knowledge-library.labels",
+        "knowledge-library.labels-dismissed",
         "knowledge-library.new-entry-btn",
+        "knowledge-library.relation-decision-reason",
         "knowledge-library.relations",
         "knowledge-library.search",
+        "knowledge-library.symbol-derive",
         "lecture-studio.ai-assistant-btn",
         "lecture-studio.assistant-modal",
         "lecture-studio.audio-all-btn",
@@ -214,9 +239,17 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.component-approve",
         "lecture-studio.component-deliberate",
         "lecture-studio.component-endorse",
+        "lecture-studio.explanation-evidence-open",
+        "lecture-studio.explanation-second-review",
+        # 第 25 周 第 7 波（IK-1012 の残り）: 再解析前の部品に付いたままの説明を読み取り専用で開く。
+        "lecture-studio.explanation-stranded-open",
         "lecture-studio.component-insert",
         "lecture-studio.component-open",
         "lecture-studio.component-reject",
+        # 第 25 周 第 3 波（IK-0950）: 共有コースで試した書き換えの案を写す。
+        "lecture-studio.rewrite-copy",
+        # 第 25 周 第 8 波（IK-1071）: 共有コースで音声を所有者に頼む文を写す。
+        "lecture-studio.audio-request-copy",
         # 知識の転用層 P4-5（knowledge_transfer_design.md §8）: 別コースで引用するときの
         # 「引用の意図」（任意・未選択は記録なし）。
         "lecture-studio.cite-intent",
@@ -245,6 +278,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.figure-suggestions-generate",
         "lecture-studio.insert-figure",
         "lecture-studio.insert-slide-marker-btn",
+        "lecture-studio.insert-slide-marker-both",
+        "lecture-studio.align-slide-markers",
         "lecture-studio.more-menu",
         "lecture-studio.nav-components",
         "lecture-studio.nav-course",
@@ -252,11 +287,16 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.recon-item-restore",
         "lecture-studio.recon-review-btn",
         "lecture-studio.recon-review-sort",
+        "lecture-studio.reattach-appendix",
+        "lecture-studio.reattach-appendix-all",
+        "lecture-studio.appendix-stale-list",
+        "lecture-studio.open-versions",
         "lecture-studio.refresh-graph-btn",
         "lecture-studio.right-pane-toggle",
         "lecture-studio.save-btn",
         "lecture-studio.settings-btn",
         "lecture-studio.slide-wm-label",
+        "lecture-studio.slides-indicator",
         "lecture-studio.stumble-tab-evidence",
         "lecture-studio.stumble-tab-figures",
         "lecture-studio.stumble-tab-stumble",
@@ -295,6 +335,10 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.arxiv-discovery-order",
         # 取得する形式（TeX ソース / PDF）— レーダー側の materials.radar-format と同型。
         "materials.arxiv-discovery-format",
+        # 生成する言語（同期の取り込みだけに効く）— レーダー側の materials.radar-language と同型。
+        "materials.arxiv-discovery-language",
+        # 解析の分野（cartridge_id。同期・キューの両方に効く — 2026-10-16・migration 090）。
+        "materials.arxiv-discovery-ingest-domain",
         "materials.arxiv-discovery-queue",
         "materials.arxiv-discovery-queue-refresh",
         "materials.arxiv-discovery-search",
@@ -315,10 +359,18 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.radar-distance",
         # 取得する形式（TeX ソース / PDF）— arXiv の「Access Paper」の選択肢に対応。
         "materials.radar-format",
+        "materials.radar-language",
+        # 解析の分野（cartridge_id。既定は seed 教材の採用 run の分野 — 2026-10-16）。
+        "materials.radar-ingest-domain",
         "materials.radar-ingest",
         "materials.radar-modal",
         "materials.radar-provenance",
         "materials.radar-search",
+        # 取り込み済み候補の導線と連鎖（paper_radar_design.md §19 C — 2026-10-16）。
+        "materials.radar-ingested-open-material",
+        "materials.radar-ingested-graph-review",
+        "materials.radar-ingested-landscape",
+        "materials.radar-chain-seed",
         "materials.library-entry-merge-target",
         "materials.library-entry-modal",
         "materials.llm-model-change",
@@ -351,12 +403,16 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-resume-analysis",
         "materials.row-retry-stage",
         "materials.row-seminar-brief",
+        # 検証シミュレーション層（simulation_bridge_design.md §7）: 「⋯」メニューの入口。
+        "materials.row-simulation",
         "materials.row-share",
         "materials.row-version",
         "materials.seminar-brief-modal",
         "materials.upload-domain",
+        "materials.upload-language",
         "materials.upload-zone",
         "materials.url-upload",
+        "materials.url-upload-format",
         "materials.url-upload-modal",
         "materials.url-upload-submit",
         "release-review.evidence",
@@ -387,6 +443,17 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "stumbles.course-select",
         "stumbles.refresh-btn",
         "stumbles.table",
+        # 検証シミュレーション層（simulation_bridge_design.md §7）: モーダルの4区画。
+        "simulation.generate",
+        "simulation.ledger-candidate",
+        "simulation.ledger-candidate-decide",
+        "simulation.ledger-candidate-decided",
+        "simulation.modal",
+        "simulation.program-decide",
+        "simulation.propose-revision",
+        "simulation.run",
+        "simulation.wiring-decide",
+        "simulation.wiring-new",
         "system-stats.generate-audio",
         "system-stats.generate-script",
         "system-stats.refresh",
@@ -446,10 +513,23 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "atlas.edge-candidates": "teacher/17-admin-atlas.md#edge-candidates",
     # 見送り済みも表示（辺候補）
     "atlas.edge-dismissed-filter": "teacher/17-admin-atlas.md#edge-dismissed-filter",
+    # 関係（辺）の区画の［現在の版から次版の下書きを作る］（IK-1044・下書きが無いときだけ）
+    "atlas.edge-draft-from-frozen": "teacher/17-admin-atlas.md#edge-draft-from-frozen",
+    # 下書きプレビューの「関係（辺）」の節（IK-0886）
+    "atlas.draft-relations": "teacher/17-admin-atlas.md#draft-relations",
+    # 公開中の版の項目と関係（下書きが無いときの読み取り専用の一覧 — IK-0992）
+    "atlas.published-contents": "teacher/17-admin-atlas.md#published-contents",
     # 次版の下書きへ反映…（採用済みの辺候補にだけ押せる）
     "atlas.edge-incorporate": "teacher/17-admin-atlas.md#edge-incorporate",
+    "atlas.edge-direction": "teacher/17-admin-atlas.md#edge-direction",
+    # 候補の条件から外れた採用済みの関係（IK-0884 と同じ構造）
+    "atlas.edge-orphaned": "teacher/17-admin-atlas.md#edge-orphaned",
+    # すべて表示（畳んだ近さだけの辺候補 — IK-0887）
+    "atlas.edge-show-all": "teacher/17-admin-atlas.md#edge-show-all",
     # 公開前チェック
     "atlas.freeze": "teacher/17-admin-atlas.md#freeze",
+    # 止めている候補を見る（凍結を止める条件があるときの確認 — IK-0885）
+    "atlas.freeze-blocked-goto": "teacher/17-admin-atlas.md#freeze-blocked-goto",
     # 前の版のノードとの対応（凍結の影響モーダル内の区画。チェックは既定オフ）
     "atlas.freeze-correspondence": "teacher/17-admin-atlas.md#freeze-correspondence",
     # 対応先（候補が見つからなかった項目に手で対応づける select）
@@ -468,6 +548,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "atlas.gap-draft-from-frozen": "teacher/17-admin-atlas.md#gap-draft-from-frozen",
     # 次版の下書きに取り込む…
     "atlas.gap-incorporate": "teacher/17-admin-atlas.md#gap-incorporate",
+    # 候補の条件から外れた採用済みの判断（IK-0884）
+    "atlas.gap-orphaned": "teacher/17-admin-atlas.md#gap-orphaned",
     # 見送りから戻す
     "atlas.gap-restore": "teacher/17-admin-atlas.md#gap-restore",
     # 次版の編集を始める
@@ -564,6 +646,9 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "deliberation.identity-link-create": "teacher/24-admin-deliberation.md#identity-link-create",
     # 同一性リンクを確定・却下する
     "deliberation.identity-link-decide": "teacher/24-admin-deliberation.md#identity-link-decide",
+    # 同一性リンクの確定を取り消す（IK-0953）
+    "deliberation.identity-link-revoke": "teacher/24-admin-deliberation.md#identity-link-revoke",
+    "deliberation.identity-link-restore": "teacher/24-admin-deliberation.md#identity-link-restore",
     # 説明レビューキュー：選択した項目を承認・却下
     "deliberation.inventory-bulk-review": "teacher/24-admin-deliberation.md#inventory-bulk-review",
     # 検出要素の一覧: 種別・キーワードで絞り込む
@@ -592,6 +677,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "doubt-atlas.assumption-dismiss": "teacher/18-admin-doubt-atlas.md#assumption-dismiss",
     # 前提候補の表示フィルタ
     "doubt-atlas.assumption-filter": "teacher/18-admin-doubt-atlas.md#assumption-filter",
+    # 確定済みの前提の台帳を開く（IK-1028）
+    "doubt-atlas.assumption-open-ledger": "teacher/18-admin-doubt-atlas.md#assumption-open-ledger",
     # コーパス監査実行
     "doubt-atlas.audit-run": "teacher/18-admin-doubt-atlas.md#audit-run",
     # 疑義の向き（direct = 主張そのものへ / undercut = 主張と根拠のつながりへ。P4-5）
@@ -630,6 +717,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "doubt-atlas.record-verification-status": "teacher/18-admin-doubt-atlas.md#record-verification-status",
     # 再読込
     "doubt-atlas.refresh": "teacher/18-admin-doubt-atlas.md#refresh",
+    # 取り下げ済みの疑義（読み取りのみ・IK-0998）
+    "doubt-atlas.withdrawn-challenges": "teacher/18-admin-doubt-atlas.md#withdrawn-challenges",
 
     # --- error-analysis.* — エラーログタブ（SYSTEM_ADMIN 限定） ------------------------------
     # 選択解除
@@ -662,6 +751,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "graph-review.graph-chat": "teacher/26-admin-graph-review.md#graph-chat",
     "graph-review.layer": "teacher/26-admin-graph-review.md#layer-toggle",
     "graph-review.modal": "teacher/26-admin-graph-review.md#graph-review-modal",
+    "graph-review.module-member": "teacher/26-admin-graph-review.md#theory-module-member",
+    "graph-review.module-view": "teacher/26-admin-graph-review.md#theory-modules",
     "graph-review.new-chat": "teacher/26-admin-graph-review.md#new-chat",
     "graph-review.next-unreviewed": "teacher/26-admin-graph-review.md#next-unreviewed",
     "graph-review.open-deliberation": "teacher/26-admin-graph-review.md#open-deliberation",
@@ -670,6 +761,18 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "graph-review.reject": "teacher/26-admin-graph-review.md#node-reject",
     "graph-review.reset-layout": "teacher/26-admin-graph-review.md#reset-layout",
     "graph-review.voice": "teacher/26-admin-graph-review.md#voice-chat",
+
+    # --- simulation.* — 検証シミュレーション（simulation_bridge_design.md §7） ----------
+    "simulation.generate": "teacher/27-admin-simulation-bridge.md#simulation-generate",
+    "simulation.ledger-candidate": "teacher/27-admin-simulation-bridge.md#simulation-ledger-candidate",
+    "simulation.ledger-candidate-decide": "teacher/27-admin-simulation-bridge.md#simulation-ledger-candidate-decide",
+    "simulation.ledger-candidate-decided": "teacher/27-admin-simulation-bridge.md#simulation-ledger-candidate-decided",
+    "simulation.modal": "teacher/27-admin-simulation-bridge.md#simulation-modal",
+    "simulation.program-decide": "teacher/27-admin-simulation-bridge.md#simulation-program-decide",
+    "simulation.propose-revision": "teacher/27-admin-simulation-bridge.md#simulation-propose-revision",
+    "simulation.run": "teacher/27-admin-simulation-bridge.md#simulation-run",
+    "simulation.wiring-decide": "teacher/27-admin-simulation-bridge.md#simulation-wiring-decide",
+    "simulation.wiring-new": "teacher/27-admin-simulation-bridge.md#simulation-wiring-new",
 
     # --- groups.* — グループタブ --------------------------------------------------------
     # グループを作成
@@ -708,6 +811,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "header.next-steps": "teacher/10-admin-common.md#next-steps",
     # 🔔 通知
     "header.notifications": "teacher/10-admin-common.md#notifications",
+    # 👤 名前（人に見せる名前の登録。IK-1007）
+    "header.profile-name": "teacher/10-admin-common.md#profile-name",
     # タブナビゲーション（グループ別プルダウン）
     "header.tab-bar": "teacher/10-admin-common.md#tab-groups",
 
@@ -724,6 +829,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- knowledge-library.* — 分野別ナレッジライブラリタブ（L層 + 概念レジストリ） -----------------
     # 分野の地図との対応（概念レジストリ, migration 082）
     "knowledge-library.atlas-links": "teacher/19-admin-knowledge-library.md#atlas-links",
+    # 地図の概念を名前で探して手で対応を付ける（IK-0927）
+    "knowledge-library.atlas-link-manual": "teacher/19-admin-knowledge-library.md#atlas-link-manual",
     # 深く検討
     "knowledge-library.detail-deliberate": "teacher/19-admin-knowledge-library.md#detail-deliberate",
     # 凍結（版発行）
@@ -738,6 +845,14 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "knowledge-library.domains-list": "teacher/19-admin-knowledge-library.md#domains-list",
     # エントリ一覧
     "knowledge-library.entries-list": "teacher/19-admin-knowledge-library.md#entries-list",
+    # 結びついた教材の部品（確定した同一性リンクの読み手。IK-0920）
+    "knowledge-library.bound-parts": "teacher/19-admin-knowledge-library.md#bound-parts",
+    # 結び付きの候補を詳細で確認・見送り（IK-0982 — エントリを確定しても残る未決のリンク）
+    "knowledge-library.bound-part-decide": "teacher/19-admin-knowledge-library.md#bound-part-decide",
+    # 結びついた記号（記号 → 概念のリンク。IK-0983）
+    "knowledge-library.bound-symbols": "teacher/19-admin-knowledge-library.md#bound-symbols",
+    # 記号の候補を探す（IK-0983。決定論・LLM 0 回）
+    "knowledge-library.symbol-derive": "teacher/19-admin-knowledge-library.md#symbol-derive",
     # この概念の扱い（候補 / 確定 / 見送り）
     "knowledge-library.entry-review": "teacher/19-admin-knowledge-library.md#entry-review",
     # 種別で絞り込む
@@ -750,10 +865,16 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "knowledge-library.include-retired": "teacher/19-admin-knowledge-library.md#include-retired",
     # 別名・隠しラベル
     "knowledge-library.labels": "teacher/19-admin-knowledge-library.md#labels",
+    # 見送り済みのラベル（IK-1024）
+    "knowledge-library.labels-dismissed": "teacher/19-admin-knowledge-library.md#labels-dismissed",
+    # 見送りを取り消す（IK-1024）
+    "knowledge-library.label-restore": "teacher/19-admin-knowledge-library.md#label-restore",
     # 新規エントリ作成
     "knowledge-library.new-entry-btn": "teacher/19-admin-knowledge-library.md#new-entry-btn",
     # 関係
     "knowledge-library.relations": "teacher/19-admin-knowledge-library.md#relations",
+    # 確定の理由を書き足す（第 25 周 第 10 波）
+    "knowledge-library.relation-decision-reason": "teacher/19-admin-knowledge-library.md#relation-decision-reason",
     # 名称・別名で検索
     "knowledge-library.search": "teacher/19-admin-knowledge-library.md#search",
 
@@ -762,8 +883,12 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.ai-assistant-btn": "teacher/14-admin-lecture-studio.md#ai-assistant-btn",
     # AI アシスタント（書き換え）モーダル
     "lecture-studio.assistant-modal": "teacher/14-admin-lecture-studio.md#assistant-modal",
+    # 案をコピー（共有コースで書き換えを試したとき — IK-0950）
+    "lecture-studio.rewrite-copy": "teacher/14-admin-lecture-studio.md#rewrite-copy",
     # 音声生成
     "lecture-studio.audio-all-btn": "teacher/14-admin-lecture-studio.md#audio-all-btn",
+    # 依頼の文をコピー（共有コースで音声を所有者に頼むとき — IK-1071）
+    "lecture-studio.audio-request-copy": "teacher/14-admin-lecture-studio.md#audio-request-copy",
     # 音声を生成します（言語選択モーダル）
     "lecture-studio.audio-lang-modal": "teacher/14-admin-lecture-studio.md#audio-lang-modal",
     # 承認
@@ -772,6 +897,12 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.component-deliberate": "teacher/14-admin-lecture-studio.md#component-deliberate",
     # 説明・承認の共有
     "lecture-studio.component-endorse": "teacher/14-admin-lecture-studio.md#component-endorse",
+    # 標準の説明の根拠の主張を深く検討で開く（IK-0960）
+    "lecture-studio.explanation-evidence-open": "teacher/14-admin-lecture-studio.md#explanation-evidence-open",
+    # もう一人の査読者として標準の説明を査読する（IK-0984）
+    "lecture-studio.explanation-second-review": "teacher/14-admin-lecture-studio.md#explanation-second-review",
+    # 再解析前の部品に付いたままの説明を読み取り専用で開く（IK-1012 の残り・第 7 波）
+    "lecture-studio.explanation-stranded-open": "teacher/14-admin-lecture-studio.md#explanation-stranded-open",
     # 原稿に挿入
     "lecture-studio.component-insert": "teacher/14-admin-lecture-studio.md#component-insert",
     # 開く
@@ -830,6 +961,10 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.insert-figure": "teacher/14-admin-lecture-studio.md#insert-figure",
     # + スライド区切りを挿入
     "lecture-studio.insert-slide-marker-btn": "teacher/14-admin-lecture-studio.md#insert-slide-marker-btn",
+    # + 両方の欄に区切りを挿入（第 25 周 第 5 波・IK-0878）
+    "lecture-studio.insert-slide-marker-both": "teacher/14-admin-lecture-studio.md#insert-slide-marker-both",
+    # 読み上げ欄の区切りを教材欄に揃える（統合の告知の「揃える」導線・IK-0878）
+    "lecture-studio.align-slide-markers": "teacher/14-admin-lecture-studio.md#align-slide-markers",
     # コース設定 ▼
     "lecture-studio.more-menu": "teacher/14-admin-lecture-studio.md#more-menu",
     # コンポーネント（左ペインタブ）
@@ -854,6 +989,14 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.settings-btn": "teacher/14-admin-lecture-studio.md#settings-btn",
     # スライドの負荷ラベル（WMレンズ）
     "lecture-studio.slide-wm-label": "teacher/14-admin-lecture-studio.md#slide-wm-label",
+    "lecture-studio.slides-indicator": "teacher/14-admin-lecture-studio.md#slides-indicator",
+    "lecture-studio.reattach-appendix": "teacher/14-admin-lecture-studio.md#reattach-appendix",
+    # 付録をまとめて付け直す（コース見出し・所有者だけ — 第 25 周 第 6 波）
+    "lecture-studio.reattach-appendix-all": "teacher/14-admin-lecture-studio.md#reattach-appendix-all",
+    # 付録が古いトピックの一覧（折りたたみ・1 行 1 題名 — 第 25 周 第 7 波 IK-1054）
+    "lecture-studio.appendix-stale-list": "teacher/14-admin-lecture-studio.md#appendix-stale-list",
+    # 版の管理を開く（版ありのコースで保存の届き方の下・所有者だけ — 第 25 周 第 7 波 IK-1053）
+    "lecture-studio.open-versions": "teacher/14-admin-lecture-studio.md#open-versions",
     # 根拠リンク
     "lecture-studio.stumble-tab-evidence": "teacher/14-admin-lecture-studio.md#stumble-tabs",
     # 図の提案（右ペイン第3トグル）
@@ -929,6 +1072,9 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # 取得する形式（TeX ソース / PDF）— 既定は TeX ソース。TeX を公開していない
     # 論文では arXiv が返した PDF をそのまま取り込む（形式の判定はサーバ側）
     "materials.arxiv-discovery-format": "teacher/11-admin-materials.md#arxiv-discovery-format",
+    "materials.arxiv-discovery-language": "teacher/11-admin-materials.md#arxiv-discovery-language",
+    # 解析の分野（「指定しない」= 分野固有の語彙・検証を使わない）
+    "materials.arxiv-discovery-ingest-domain": "teacher/11-admin-materials.md#arxiv-discovery-ingest-domain",
     # 選択した論文を取り込む（許可ドメイン未設定・未選択のときは無効）
     "materials.arxiv-discovery-ingest": "teacher/11-admin-materials.md#arxiv-discovery-ingest",
     # 学習者の関心（コーパス回遊 Phase D。k-匿名レンジの事実行だけ・行が無ければ区画ごと非表示）
@@ -972,6 +1118,9 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # 取得する形式（TeX ソース / PDF）— 既定は TeX ソース。TeX を公開していない
     # 論文では arXiv が返した PDF をそのまま取り込む（形式の判定はサーバ側）
     "materials.radar-format": "teacher/11-admin-materials.md#radar-format",
+    "materials.radar-language": "teacher/11-admin-materials.md#radar-language",
+    # 解析の分野（レーダー。既定は起点教材の解析分野）
+    "materials.radar-ingest-domain": "teacher/11-admin-materials.md#radar-ingest-domain",
     # 選択した論文を取り込む（レーダー）— 取り込みの弁は既存 ingest と同一
     "materials.radar-ingest": "teacher/11-admin-materials.md#radar-ingest",
     # 論文レーダーモーダル（起点の教材 / 距離と検索条件 / 候補一覧 / 取り込み）
@@ -981,6 +1130,12 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.radar-provenance": "teacher/11-admin-materials.md#radar-provenance",
     # この条件で検索（レーダー）— arXiv のメタデータのみ・テキスト LLM 不使用
     "materials.radar-search": "teacher/11-admin-materials.md#radar-search",
+    # 取り込み済み・受理直後の候補の導線（§19 C）— 教材の行へ / グラフレビュー /
+    # 位置づけ / この論文を起点に探す（解析完了までは理由付きで無効）
+    "materials.radar-ingested-open-material": "teacher/11-admin-materials.md#radar-ingested-open-material",
+    "materials.radar-ingested-graph-review": "teacher/11-admin-materials.md#radar-ingested-graph-review",
+    "materials.radar-ingested-landscape": "teacher/11-admin-materials.md#radar-ingested-landscape",
+    "materials.radar-chain-seed": "teacher/11-admin-materials.md#radar-chain-seed",
     # 統合先ラジオ（新規作成 / 既存エントリへ統合）+ 例示画像を含めるチェックボックス
     "materials.library-entry-merge-target": "teacher/11-admin-materials.md#library-entry-merge-target",
     # ライブラリへ昇格モーダル
@@ -1037,6 +1192,7 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-retry-stage": "teacher/11-admin-materials.md#row-retry-stage",
     # ゼミ前ブリーフ…（seminar_brief_mirroring_design.md §1: 輪講前の read-only 合成ビュー）
     "materials.row-seminar-brief": "teacher/11-admin-materials.md#seminar-brief-open",
+    "materials.row-simulation": "teacher/27-admin-simulation-bridge.md#row-simulation",
     # 共有設定
     "materials.row-share": "teacher/11-admin-materials.md#row-share",
     # 版の管理
@@ -1045,10 +1201,14 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.seminar-brief-modal": "teacher/11-admin-materials.md#seminar-brief-modal",
     # 分野（この教材をどの分野として解析するか。既定は「指定しない」= 分野中立）
     "materials.upload-domain": "teacher/11-admin-materials.md#upload-domain",
+    # 生成する言語（解析が生成する文章の言語。既定は「指定しない」。再解析モーダルにも同じ担体）
+    "materials.upload-language": "teacher/11-admin-materials.md#upload-language",
     # アップロードゾーン（ドラッグ&ドロップ / ファイルを選択）
     "materials.upload-zone": "teacher/11-admin-materials.md#upload-zone",
     # URLから取得（arXiv など）— アップロードゾーン内のリンク（migration 070）
     "materials.url-upload": "teacher/11-admin-materials.md#url-upload",
+    # URLから取得モーダルの「取得する形式」（arXiv の論文 URL のときだけ出る。既定 TeX）
+    "materials.url-upload-format": "teacher/11-admin-materials.md#url-upload-format",
     # URLから教材を取得モーダル
     "materials.url-upload-modal": "teacher/11-admin-materials.md#url-upload-modal",
     # モーダルの「アップロード」（許可リストが空のときは無効）

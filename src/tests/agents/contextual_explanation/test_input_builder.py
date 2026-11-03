@@ -96,3 +96,17 @@ def test_prepare_for_prompt_bounds_library_excerpt_text():
     assert prepared["library_excerpt"]["entry_id"] == "lib_1"
     assert len(prepared["library_excerpt"]["summary"]) < 2000
     assert len(prepared["library_excerpt"]["body_excerpt"]) < 2000
+
+
+def test_prepare_for_prompt_strips_internal_ids_from_prose_material():
+    """IK-0819: 式要約由来の local_text に紛れた ``(tex_b80)`` を材料から外す。"""
+    item = _element(
+        "eq_tex_b78",
+        element_type="equation",
+        local_text="Defines the scale factor (tex_b80).",
+        upper_context=[{"relation": "r", "kind": "claim", "text": "Uses eq_tex_b78 and eq_12."}],
+    )
+    rendered = ContextualExplanationInputBuilder().prepare_for_prompt(item)
+    assert rendered["element_id"] == "eq_tex_b78"  # 番地は残す
+    assert rendered["local_text"] == "Defines the scale factor."
+    assert rendered["upper_context"][0]["text"] == "Uses and eq_12."

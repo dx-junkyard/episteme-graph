@@ -1,0 +1,76 @@
+id: c-astro-r25-share-r7
+domain: astrophysics
+snapshot: corpus-astro-tex-r25f
+course_id: 1bad7d9f
+personas:
+  teachers: [te-05-delegator-lab, te-02-veteran-intro, te-04-copilot-intro]
+  students: [st-05-night-solarwind, st-04-intl-exoplanet]
+scenarios:
+  teacher: [t-share-identity-queue, t-share-labels-atlas, t-share-explain-endorse-cite]
+  student: [s-share-part-chip, s-share-symbol-concept]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 10, persona_llm_calls: 300, wall_clock_minutes: 240}
+notes: |
+  第 25 周 share の第 7 周（judge_share_r6.md §6 と r7_prereqs.md の面 share・共通 1〜6）。全組が既出なので、組ではなく前提状態を変える周。
+  教員 3 × 学生 2・5 場面:
+  te-05 × (a) t-share-identity-queue（H39 で段を分けた場面で「確認 → 詳細 → ［確定を取り消す］（理由）」と別のリンクの理由付きの見送り —
+  IK-0953 の初評価）/ te-02 × (c) t-share-labels-atlas（前提②の記号リンクの確定 → 凍結の後の確定済みエントリ・見送り済みラベルの読み直し
+  IK-1024・地図との対応）/ te-04 × (b2) t-share-explain-endorse-cite（著者として、te-02 が 2 人目の査読者として査読した後の自分の説明を読み、
+  te-01 のコース 6be229e1 へ引用する — IK-1023・IK-0985 の残り）/ st-05 × (d) s-share-part-chip テキスト（前提①の凍結版の共通部品・te-05 の
+  取り消しの後）/ st-04 × (e) s-share-symbol-concept テキスト（前提②の後の記号の概念名 IK-0983 の学生側・F_EOS IK-1022）。
+  組の差し替え（P-0025）: 審判の st-07 × (e) は、st-07 が doubt の地図の問い（s-db-map-ask-en）と studio の (d')（s-lecture-then-trace）にも
+  出るので、同じ学生を 3 面に出さないよう (e) 未担当の st-04 に替えた（(e) を歩いていない学生は st-04・st-05・st-07 で、st-05 は (d) を担う）。
+  st-04 は英語のペルソナで、記号のタップは言語に依らない（材料 goal_text を英語にした）。
+  組の例外: te-05 × (a) は第 2 周と同じ組（審判 §6 は「(a) 未担当」としたが、第 2 周の run に te-05 × t-share-identity-queue がある）。第 2 周は
+  確定の取り消しの手（第 4 波 IK-0953）も段を分けた場面（H39）も無かったので、取り消しの初評価という観察は重ならない。
+  te-02 × (c) は第 3 周と同じ組（第 3 周の te-02 は別名の足し直しを見た）。今回は前提①②で確定・凍結したエントリで、見送り済みの
+  ラベルの読み直しと地図との対応を見るので観察が重ならない。te-04 × (b2) は第 2 周と同じ組（(b2) は 5 教員とも既出）だが、今回は著者として
+  2 人目の査読の後を読む（第 2 周は他人の説明の支持）。
+
+  一括の確かめと用意: `backend/.venv/bin/python uxsim/runs/round25/r7_prereqs.py --dry-run`（= r5_prereqs.py --round 7。役の既定
+  ROUND_DEFAULTS[7] = share_confirmer te-03・pinn_editor_teacher te-02・b2_teacher te-04 はこの campaign の組と一致）→ 書き込みは
+  `--allow-*` を指揮者が明示したときだけ。
+
+  ── 周の前に指揮者が用意するもの（この順。r7_prereqs の項目名）──
+   1. 製品の第 6 波（IK-1017〜1034 の是正）→ 投影の同期 → この前提 → 周（共通 1）。share の前提は IK-1020〜1022・IK-1024〜1026 と IK-1023
+      （著者以外の査読者）の是正。4 面とも snapshot は corpus-astro-tex-r25f。
+   2. persona_profile_names（共通 2）: 教員 5・学生 10 の名前の登録。帰属・確定者・査読者の欄にログイン ID が出たら残存として記録する。
+   3. share_pair_frozen（前提①・te-03）: PINN の TeX ⇄ PDF の対（10 番）の両リンクを確定 → エントリを確定 → 凍結（state に entry_id）。
+   4. share_symbol_link_frozen（前提②・te-03）: 対のエントリで［記号の候補を探す］→ 記号リンクを 1 本確定 → 凍結し直す。候補 0 件なら記号の
+      定義に概念の名前・別名が無い事実を返す（別名を足すかは指揮者の判断 — 足さなければ st-04 の (e) は概念名の欠けの再確認になる）。
+   5. pinn_editor（前提③・te-02）: te-02 に PINN 2 版の editor（2 人目の査読者になるため）。
+   6. **te-05 に PINN 2 版の editor**（r7_prereqs の既定に無い — `--only pinn_editor --pinn-editor-teacher te-05-delegator-lab` をもう 1 回）。
+      無いと (a) の確認・見送り・取り消しが 404 で止まる（第 6 周の te-03 と同じ前提）。この周の doubt の閲覧だけの教員は te-01 なので
+      te-05 に editor を与えても doubt と衝突しない。
+   7. **te-02 の 2 人目の査読**（r7_prereqs の項目に無い・場面にも手が無い）: IK-1023 の是正で教員の説明に［もう一人の査読者として査読する］が
+      出るなら、te-04 の (b2) の前に te-02 として te-04 の説明「AI と下書きした説明 — TOV の残差損失」（TeX 版の部品「TOV residual loss at
+      collocation points」・コース 1bad7d9f）に PATCH /api/admin/explanations/{id}（second_review）を 1 回送り、mailbox_share/TE02_REVIEW_R7 を
+      出す。ボタンが出ない（是正が入っていない）なら押さずに mailbox_share/TE02_REVIEW_SKIP_R7 を出す — te-04 はその状態を読む。
+   8. te-04 に 6be229e1 の editor（第 6 周の studio_course_editor）が残っていること（(b2) の引用先）。説明が live の部品に付いたままで
+      あること（第 6 周の前に書き直した説明 — r6_prereqs.md「再解析の実測」）。
+   9. コース 1bad7d9f が公開のまま（学生は固定コースを受講する）。
+
+  ── レーンの順（face_share_r7.sh。--persona X --scenario Y で 1 場面ずつ。⇢ は他の用意・合図を待つ）──
+   1. te-05: (a) t-share-identity-queue — 根拠の読めるリンクを 1 本確認 → 詳細を開く（必須の段）→ そのリンクを理由付きで［確定を取り消す］→
+      別のリンクを理由付きで見送り。凍結済みの 10 番の対は取り消さない（取り消すと st-05 の (d) の前提が変わる — 材料の注記）。
+   2. st-05: (d) s-share-part-chip — 1 の後。凍結版の共通部品が「共通部品として」に出るか・旅が共通部品を通るか・取り消したリンクが出ないか。
+   3. te-02: (c) t-share-labels-atlas — 前提①②の後の確定済み・凍結版のあるエントリで。
+   4. st-04: (e) s-share-symbol-concept — 前提②の後に 4 記号を全部タップ。
+   5. te-04: ⇢ TE02_REVIEW_R7 か TE02_REVIEW_SKIP_R7 ⇢ (b2) t-share-explain-endorse-cite。
+  最後に mailbox_share/LANE_DONE_R7。学生 st-05・st-04 は他の面に出ないので、他の面へ出す合図は無い。教員の run は学習の状態を持たないので、
+  te-05（atlas・studio）・te-02（doubt・atlas）・te-04（atlas）は他の面のレーンと並走してよい。
+  H41（学生の「記録がまだありません」）は規則どおりで審判の検査の対象外。
+
+  場面に足りない手（ハーネスへの申し送り・この campaign では足していない）:
+   - (c) t-share-labels-atlas に［記号の候補を探す］（admin.library.symbol_derive）と地図の対応を手で付ける手（admin.library.atlas_link_manual）
+     が無い。審判の「te-02 × (c) で記号の候補 → 確定 → 凍結、地図との対応を手で付ける（IK-0927 の押した先）」は、記号の側を前提②の
+     指揮者の手で代え、地図の手動の対応は観察できない。
+   - (b2) に 2 人目の査読（admin.explanations.update の second_review）の手が無い — 用意 7 で代える。6be229e1 の学生に引用した説明が
+     届くかを見る学生の場面も無い（学生が 6be229e1 の部品の説明を開く手は s-share-part-chip にあるが、campaign の固定コースは 1bad7d9f）。
+   - (a) の確認と見送りは最初の choose で 1 つだけ。別のリンクの見送りは詳細の後の任意の段で見る（H39）。
+
+  LLM 予算の見積り: 製品の LLM は (d) の選択質問 1〜2 回・共通部品の検索の埋め込み 1〜2 回・Copilot 0〜2 回（(a) の任意の手）・(c)(e)(b2) は
+  0 回 = 2〜6 回（余裕を見て 10）。前提①②③・用意 6・7 は LLM を使わない。ペルソナ頭脳は 5 場面 × 45〜60 手 ≒ 230〜290（上限 300）。
+  外部 API は呼ばない。

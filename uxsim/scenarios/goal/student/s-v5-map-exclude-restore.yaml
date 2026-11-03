@@ -1,0 +1,46 @@
+id: s-v5-map-exclude-restore
+population: students
+runner: [api, browser]
+session: 1
+goal: '{{goal_text}} のために残した問いのうち、地図に出したくないものを外し、また戻して、旅・近傍・記録がどう変わるかを確かめる'
+params_required: [goal_text, topic_hint_terms, selection_question, tension_text]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.enroll
+    note: 受講中でなければ受講を始める
+  - do: learning.course.open
+  - do: learning.topic.open
+    with: {topic_hint_terms: '{{topic_hint_terms}}'}
+  - do: learning.chat.ask_selection
+    with: {message: '{{selection_question}}', selection_ref: '0:1'}
+    note: 教材の一文を選んで質問する（どこについての問いかが記録に残る）
+  - do: learning.tension.digest
+  - choose:
+      - do: learning.tension.confirm
+        with: {learner_text: '{{tension_text}}'}
+        note: 引っかかりの候補があれば自分の言葉で引き受ける
+    optional: true
+  - do: learning.personal_network.mine
+    note: わたしの地図に自分の問い・引っかかりが出ているかを見る
+  - do: learning.traces.map_exclude
+    note: 地図に出したくない問いを「地図には反映しない」にする
+  - do: learning.personal_network.mine
+  - do: learning.personal_network.journey
+  - do: learning.personal_network.nearby
+  - do: learning.traces.list
+    note: 問いの軌跡に、外した問いが「地図に戻す」付きで残っているかを見る
+  - do: learning.traces.map_restore
+    note: 「地図に戻す」で戻す
+  - do: learning.personal_network.mine
+  - do: learning.records.mine
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#personal-map
+  - manual: student/02-student.md#progress-tab
+  - manual: student/02-student.md#my-records
+watch_for:
+  - 地図に反映しないにしても、問いそのものは消えず、問いの軌跡とわたしの記録に残っていると画面が言う
+  - 外したあとの地図・旅・近傍から、その問いが起点として消える
+  - 戻す操作が問いの軌跡のすぐ近くにあり、戻すと地図に再び出る
+  - わたしの記録の「地図には出していません」が、外している間だけ付く

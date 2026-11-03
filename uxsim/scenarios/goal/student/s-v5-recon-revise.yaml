@@ -1,0 +1,35 @@
+id: s-v5-recon-revise
+population: students
+runner: [api, browser]
+session: 1
+goal: '{{goal_text}} のために再構成に挑戦し、判定がおかしいと感じたらそう言い、もう一度挑戦して、前の答えとの関係を確かめる'
+params_required: [goal_text, topic_hint_terms, first_answer, revised_answer]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.enroll
+    note: 受講中でなければ受講を始める
+  - do: learning.course.open
+  - do: learning.topic.open
+    with: {topic_hint_terms: '{{topic_hint_terms}}'}
+  - do: learning.reconstruction.next
+  - do: learning.reconstruction.submit
+    with: {response: {text: '{{first_answer}}'}}
+  - do: learning.reconstruction.self_check
+    with: {result: verdict_wrong}
+    note: 照合の判定がおかしいと感じたら「判定がおかしい」を押す
+  - do: learning.reconstruction.revise
+    with: {response: {text: '{{revised_answer}}'}}
+    note: 「もう一度挑戦」で答え直す
+  - do: learning.reconstruction.self_check
+    with: {result: agreed}
+  - do: learning.records.mine
+    note: 再構成の答えと答え直しが、わたしの記録に残るかを見る（残らないならその事実を書き留める）
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#reconstruction-challenge
+  - manual: student/02-student.md#my-records
+watch_for:
+  - 「判定がおかしい」を押しても、押したことを責めたり点数が下がったりする文が出ない
+  - もう一度挑戦しても前の答えは消えず、どこで前の答えとの関係が読めるかが画面か記録で分かる（分からないならその事実を残す）
+  - 照合の結果が正誤・点数ではなく、食い違いの可能性として語られる

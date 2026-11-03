@@ -1,0 +1,13 @@
+scenario: s-v5-leave-nothing
+domain: astrophysics
+params:
+  goal_text: 担当論文の主結果を自分の言葉で言えるようになること
+  seed_questions:
+    - この論文の主結果は、どの観測量から言えるんですか？
+    - 今日はここまでにします。いま話したことの要点だけ教えてください。
+per_archetype:
+  night_parttime:
+    goal_text: 仕事のあとの 30 分で、担当論文の主結果をつかむこと
+    seed_questions:
+      - 短く教えてください。この論文の主結果は何ですか？
+      - 今日はもう時間がないので、ここまでにします。

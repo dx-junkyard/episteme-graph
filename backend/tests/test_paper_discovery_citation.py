@@ -69,6 +69,14 @@ class FakeSession:
                               "sources": [{"material_id": "m1"}]},)])
         if "paper_discovery_dismissals" in sql:
             return _Result([(a,) for a in sorted(self.dismissed)])
+        if "FROM documents" in sql and "ANY(:refs)" in sql:
+            # core.document_refs（両形の突き合わせの正本・IK-0550）。行は mapping で返す。
+            refs = set(p.get("refs") or [])
+            return _Result([
+                {**d, "source_path": d.get("source_path") or ""}
+                for d in self.documents
+                if d["id"] in refs or d.get("source_path") in refs
+            ])
         if "FROM documents" in sql and "COALESCE(title" in sql:
             # corpus.domain_document_rows: (id, title, source_url)
             return _Result(

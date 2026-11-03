@@ -16,6 +16,21 @@ import logging
 import re
 from dataclasses import asdict, dataclass, field
 
+try:  # pragma: no cover - 分岐は環境依存（下のフォールバックの理由はコメント参照）
+    from core.knowledge_objects.references import CLAIM_REF_PREFIX, normalize_claim_ref
+except ImportError:  # pragma: no cover
+    # このモジュールは A層のテストから importlib で直接ロードされることがあり、その
+    # ときは ``core`` パッケージが sys.path に無い。ゲートは stdlib だけで動くのが
+    # 前提なので、正本（core/knowledge_objects/references.py）が引けない環境では
+    # 同じ規則の純関数へ縮退する（規則の一致はテストで固定する）。
+    CLAIM_REF_PREFIX = "claim:"
+
+    def normalize_claim_ref(value: object) -> str:
+        text = str(value or "").strip()
+        if not text.startswith(CLAIM_REF_PREFIX):
+            return text
+        return text[len(CLAIM_REF_PREFIX):].strip() or text
+
 logger = logging.getLogger(__name__)
 
 
@@ -2549,7 +2564,13 @@ class ExportValidationGate:
                     continue
                 policy = eq.get("confidence_policy")
                 policy = policy if isinstance(policy, dict) else {}
-                usable = bool(policy.get("can_be_used_in_derivation"))
+                # 復元由来の式（本文から取り出せず文脈から組み立て直した式）は、
+                # 導出に使えるようになっても「論文がそう書いている」とは言えない。
+                # 入力リンクの欠落を error（= failed_validation）にすると、復元が
+                # 効くほど解析が落ちることになるので review_item に留める
+                # （情報は落とさない・人が見る列に残す）。
+                reconstructed = bool(policy.get("must_not_treat_as_source_extracted"))
+                usable = bool(policy.get("can_be_used_in_derivation")) and not reconstructed
                 entry = ValidationEntry(
                     code="EQ_RESULT_RELATION_WITHOUT_INPUT",
                     message=(
@@ -2656,8 +2677,13 @@ class ExportValidationGate:
         node_ids: set[str] = {n.node_id for n in (dsl.nodes or [])}
 
         # Known id universe for dangling-ref detection.
+        # DSLLinkingAgent writes claim references as ``claim:{block_id}:{span_id}``
+        # while ClaimObjectBuilder's ids carry no prefix, so a literal comparison
+        # reported every prefixed reference as dangling. Compare on the normalized
+        # spelling (canonical rule: core/knowledge_objects/references.py); a
+        # reference that resolves under either spelling is not dangling.
         known_claim_ids = {
-            str(getattr(c, "claim_id", "") or "")
+            normalize_claim_ref(getattr(c, "claim_id", ""))
             for c in (getattr(claim_objects, "claims", []) or [])
             if getattr(c, "claim_id", None)
         }
@@ -2707,7 +2733,10 @@ class ExportValidationGate:
             else:
                 dangling: list[str] = []
                 if known_claim_ids:
-                    dangling += [r for r in claim_refs if r not in known_claim_ids]
+                    dangling += [
+                        r for r in claim_refs
+                        if normalize_claim_ref(r) not in known_claim_ids
+                    ]
                 if known_equation_ids:
                     dangling += [r for r in equation_refs if r not in known_equation_ids]
                 if dangling:
@@ -3038,8 +3067,15 @@ class ExportValidationGate:
                 ))
             evidence = edge.get("evidence") if isinstance(edge.get("evidence"), dict) else {}
             evidence_claims = edge.get("evidence_claims") or evidence.get("evidence_claims") or []
+            # GraphNormalizer writes the claim backing of an edge into
+            # ``evidence_claim_ids`` (``evidence_claims`` stays empty on the derivation
+            # path, see normalizer._main_edges_from_groups). Reading only the latter
+            # reported every derivation-backed edge as evidence-less.
+            evidence_claim_ids = (
+                edge.get("evidence_claim_ids") or evidence.get("evidence_claim_ids") or []
+            )
             evidence_equations = edge.get("evidence_equation_ids") or evidence.get("evidence_equation_ids") or []
-            if not evidence_claims and not evidence_equations:
+            if not evidence_claims and not evidence_claim_ids and not evidence_equations:
                 warnings.append(ValidationEntry(
                     code="COMPONENT_GRAPH_EDGE_NO_EVIDENCE",
                     message=f"component graph edge {edge.get('edge_id') or idx!r} has no claim/equation evidence",

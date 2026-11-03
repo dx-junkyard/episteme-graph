@@ -39,6 +39,9 @@ from sqlalchemy import bindparam
 from sqlalchemy import text as sa_text
 
 from core import atlas_placement
+from core import label_vocab
+# IK-0926: 支持の人数は著者を除き取り消しを除いた数（正本は core/explanation_governance.py）。
+from core.explanation_governance import COUNTED_ENDORSEMENT_SUMMARY_SQL
 from core.course_data import course_cartridge_id, course_source_material_ids, course_topics
 
 logger = logging.getLogger(__name__)
@@ -54,6 +57,8 @@ STATUS_ASSUMED = "assumed"      # 暗黙の前提
 STATUS_CONTESTED = "contested"  # 解釈が分かれる
 STATUS_VERIFIED = "verified"    # ソースバッキング + evidence
 STATUS_UNKNOWN = "unknown"      # コーパス由来の状態なし (seed も無い)
+# 学習者に返す ledger_status の「台帳に記帳なし」(IK-0412。値の正本は label_vocab)
+STATUS_UNRECORDED = label_vocab.ATLAS_LEDGER_STATUS_UNRECORDED
 
 NODE_STATUSES = (STATUS_GAP, STATUS_ASSUMED, STATUS_CONTESTED, STATUS_VERIFIED, STATUS_UNKNOWN)
 
@@ -108,11 +113,92 @@ PILL_LABELS = {
     STATUS_UNKNOWN: "記帳なし",
     "unvisited": "未訪問",
     "now": "いまここ",
+    # IK-0412: 台帳に記帳が無い場所（骨格 seed の初期表示・コーパス由来の状態なし）。
+    STATUS_UNRECORDED: label_vocab.ATLAS_PILL_UNRECORDED,
 }
+
+
+def learner_ledger_status(
+    status: str, status_source: str | None = None, evidence_count: int | None = None
+) -> str:
+    """学習者に返す ``ledger_status``（台帳の状態）を、検証行の文と食い違わない値にする。
+
+    IK-0412: 骨格 seed の ``display_seed_status``（教員レビュー済みの骨格が付けた初期表示）
+    は台帳の記帳ではない。seed 由来の行・コーパス由来の状態が無い行・原文の引用が 0 本の
+    verified は、検証行が「台帳に記帳なし」と言うのに ``ledger_status`` だけ ``verified``
+    を名乗っていた。これらを :data:`STATUS_UNRECORDED` に寄せる。表示状態（``status``）と
+    ノードの色はフロント互換のため変えない（色は骨格の初期表示のまま）。
+    """
+    if status_source == STATUS_SOURCE_SEED:
+        return STATUS_UNRECORDED
+    if status == STATUS_UNKNOWN:
+        return STATUS_UNRECORDED
+    if status == STATUS_VERIFIED and evidence_count is not None and evidence_count <= 0:
+        return STATUS_UNRECORDED
+    return status
+
+
+def learner_pill(status: str, ledger_status: str) -> str:
+    """詳細パネルのピル文言。seed が「原文に裏付け」を初期表示に使う場所を言い換える。"""
+    if status == STATUS_VERIFIED and ledger_status == STATUS_UNRECORDED:
+        return label_vocab.ATLAS_PILL_SEED_VERIFIED
+    return PILL_LABELS.get(status, status)
+
+
+def pill_note_for(status: str, ledger_status: str) -> str:
+    """ピルの意味を1行で言う事実文（無ければ空文字）。正本は ``label_vocab.ATLAS_PILL_NOTES``。"""
+    notes = label_vocab.ATLAS_PILL_NOTES
+    return notes.get(status) or notes.get(ledger_status) or ""
+
+
+def domain_display_name(session, domain_key: str) -> str:
+    """分野（atlas ドメイン）の学習者向け表示名。内部キーを表示名の代わりに出さない。
+
+    順に ``atlas_domain_meta.name`` → 同梱 ``atlas_domains/<key>/domain.json`` の name。
+    どちらも無ければ ``label_vocab.ATLAS_DOMAIN_UNNAMED_LABEL``。fail-soft（例外は握る）。
+    """
+    key = str(domain_key or "").strip()
+    if not key:
+        return label_vocab.ATLAS_DOMAIN_UNNAMED_LABEL
+    try:
+        from core import atlas_store
+
+        meta = atlas_store.load_domain_meta(session, key) if session is not None else None
+        name = str((meta or {}).get("name") or "").strip()
+        if not name:
+            bundled = atlas_store._bundled_domain_meta(key) or {}
+            name = str(bundled.get("name") or "").strip()
+    except Exception:  # noqa: BLE001 — 表示名が引けないだけで地図は出す
+        logger.warning("atlas domain display name lookup failed for %s", key, exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        name = ""
+    return learner_domain_label(name, key)
+
+
+def learner_domain_label(name: str | None, domain_key: str | None) -> str:
+    """表示名が空・内部キーそのものなら、登録なしの呼び名に倒す（純関数）。"""
+    text = str(name or "").strip()
+    if not text or text == str(domain_key or "").strip():
+        return label_vocab.ATLAS_DOMAIN_UNNAMED_LABEL
+    return text
 
 # 霧領域の定型文 (§6.2 — 事実の提示のみ。投入の指示・催促はしない)
 FOG_VERIFY_LINE = "この領域はAIの一般知識による地形。台帳に根拠の記帳がありません。"
 FOG_ENDORSE_LINE = "論文を追加すると、この領域に灯りがつきます。"
+# 論文の位置づけ（landscape_placements）だけで霧が晴れた領域の検証行（IK-0940）。
+# 台帳（検証の記録）はまだ無いことを正直に言う — 件数は書かない（CR3 / LS5）。
+REGION_PLACED_ONLY_VERIFY_LINE = (
+    "この領域には論文が置かれています（論文の位置）。検証の記録（台帳）はまだありません。"
+)
+
+# 骨格 seed 由来の検証行 (コーパス由来の状態が無い概念の弱い初期表示)
+#: IK-0942: 学習者に見える語は「骨格」ではなく「分野の地図」（版の呼び名の正本と揃える）。
+SEED_VERIFY_LINE = "検証: 台帳に記帳なし。分野の地図（教員レビュー済）の初期表示。"
+# verified だが原文の引用が 0 本のとき (IK-0368 — 「原文0本に裏付け」を組まない)
+VERIFIED_WITHOUT_EVIDENCE_LINE = "検証: 原文の引用は台帳に記録されていません。"
 
 # 行間ステップの定型文 (§12)
 GAP_VERIFY_LINE = "原文に対応する記述が見つからず、導出を繋ぐためにAIが補完した行間です。"
@@ -239,12 +325,21 @@ def verify_line_for(status: str, signals: ConceptSignals) -> str:
             line += f"原文{signals.evidence_count}本に記帳あり{_refs_fragment(signals.evidence_refs)}。"
         return line
     if status == STATUS_VERIFIED:
-        line = f"検証: 原文{signals.evidence_count}本に裏付け{_refs_fragment(signals.evidence_refs)}。"
+        if signals.evidence_count <= 0:
+            # IK-0368: 根拠 0 本で verified になるのは、コーパス由来の状態が無い概念に
+            # 骨格（教員レビュー済）の seed_status=verified を弱い初期表示として使った場合。
+            # 「原文0本に裏付け」という自己矛盾の文を組まず、verified の由来を事実で書く。
+            if signals.seed_status and not signals.has_corpus_state:
+                line = SEED_VERIFY_LINE
+            else:
+                line = VERIFIED_WITHOUT_EVIDENCE_LINE
+        else:
+            line = f"検証: 原文{signals.evidence_count}本に裏付け{_refs_fragment(signals.evidence_refs)}。"
         if signals.scope_text:
             line += f"スコープ: {signals.scope_text}。"
         return line
     if signals.seed_status and not signals.has_corpus_state:
-        return "検証: 台帳に記帳なし。骨格（教員レビュー済）の初期表示。"
+        return SEED_VERIFY_LINE
     return "検証: 台帳に記帳がありません。"
 
 
@@ -267,9 +362,24 @@ def endorse_line_for(status: str, signals: ConceptSignals) -> str:
         return f"承認: 標準の説明と{authors}の説明が並存"
     if signals.standard_explanation or signals.personal_shared_count >= 1:
         return "承認: 標準の説明"
-    if status == STATUS_ASSUMED:
-        return "承認: 承認記録なし — 台帳のスコープ欄は空欄"
-    return "承認: 承認記録なし"
+    # IK-1018: 承認の行は承認だけを言う（内部の欄名を学習者に出さない）。
+    # IK-1056（第 25 周 第 8 波）: 記録が無いことは状態に依らず 1 つの閉世界の文で言う。
+    return label_vocab.ATLAS_ENDORSE_NONE_LINE
+
+
+def learner_endorse_line(line: str) -> str:
+    """状態キャッシュに残る旧い承認行を、学習者向けの文へ読み時に置き換える（IK-1018）。
+
+    キャッシュ（``atlas_overlay_cache``）は版ごとに作られ、是正前に作った行が残る。
+    書き換えずに読む側で置き換える（キャッシュの再計算を待たない）。
+    """
+    text = str(line or "")
+    if text in (
+        label_vocab.ATLAS_ENDORSE_LEGACY_SCOPE_LINE,
+        label_vocab.ATLAS_ENDORSE_LEGACY_NONE_LINE,  # IK-1056: 状態で言い分けていた旧い短い文
+    ):
+        return label_vocab.ATLAS_ENDORSE_NONE_LINE
+    return text
 
 
 def actions_for(status: str) -> tuple[bool, bool]:
@@ -334,13 +444,13 @@ _GRAPHS_SQL = """
 
 _EXPLANATIONS_SQL = """
     SELECT e.component_id::text, e.id::text, e.kind, e.shared, e.review_status,
-           COALESCE(u.display_name, '') AS author_name,
+           COALESCE(NULLIF(BTRIM(u.profile_name), ''), '') AS author_name,  -- IK-1007: 人に見せる名前のみ
            COALESCE(s.endorser_count, 0) AS endorser_count,
            COALESCE(s.strong_count, 0) AS strong_count,
            COALESCE(s.expertise_breadth, 0) AS expertise_breadth
       FROM component_explanations e
       LEFT JOIN users u ON u.id = e.author_id
-      LEFT JOIN component_explanation_endorsement_summary s ON s.explanation_id = e.id
+      LEFT JOIN """ + COUNTED_ENDORSEMENT_SUMMARY_SQL + """ s ON s.explanation_id = e.id
      WHERE e.component_id IN (
            SELECT tc.id FROM theory_components_live tc
              JOIN document_analysis_runs r
@@ -372,6 +482,9 @@ class CorpusSnapshot:
     graphs: list[dict] = field(default_factory=list)
     explanations: list[dict] = field(default_factory=list)
     vectors: dict[str, list[float]] = field(default_factory=dict)
+    # 論文の位置づけ（landscape_placements）が生きている node id（現行版へ読み替え済み）。
+    # 霧の判定を論文の海と同じ材料に揃える（IK-0940）。真偽だけを使い件数は持たない。
+    placed_node_ids: set[str] = field(default_factory=set)
 
 
 def load_corpus_snapshot(session, cartridge_id: str) -> CorpusSnapshot:
@@ -433,7 +546,61 @@ def load_corpus_snapshot(session, cartridge_id: str) -> CorpusSnapshot:
         vector = atlas_placement.parse_vector(row[1])
         if vector:
             snapshot.vectors[row[0]] = vector
+    snapshot.placed_node_ids = _load_placed_node_ids(session, cartridge_id)
     return snapshot
+
+
+#: 霧の判定に数える配置の状態（論文の海・学習者の「論文の位置」と同じ集合 = IK-0940）。
+#: 教員が却下（rejected）した配置・置換済み（superseded）は数えない。
+_PLACED_NODE_IDS_SQL = """
+    SELECT DISTINCT node_id
+      FROM landscape_placements
+     WHERE domain_key = :cartridge_id
+       AND status = ANY(:statuses)
+"""
+
+
+def _load_placed_node_ids(session, cartridge_id: str) -> set[str]:
+    """生きている配置の node id（旧版の id は現行版へ読み替える — NC5。fail-soft）。"""
+    from core.landscape import schema as landscape_schema
+
+    try:
+        rows = session.execute(
+            sa_text(_PLACED_NODE_IDS_SQL),
+            {
+                "cartridge_id": cartridge_id,
+                "statuses": list(landscape_schema.LEARNER_VISIBLE_STATUSES),
+            },
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas snapshot: placements query failed (treated as empty)", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return set()
+    node_ids = {str(r[0] or "").strip() for r in rows or () if str(r[0] or "").strip()}
+    if not node_ids:
+        return set()
+    try:
+        from core import atlas_correspondence
+        from core import atlas_store
+
+        resolver = atlas_correspondence.build_node_resolver(
+            atlas_store.load_frozen_history(session, cartridge_id)
+        )
+        resolved = set()
+        for node_id in node_ids:
+            current = str(resolver.resolve(node_id).get("current_node_id") or "")
+            resolved.add(current or node_id)
+        return resolved
+    except Exception:  # noqa: BLE001 — 読み替えられなければ保存された id のまま
+        logger.debug("atlas snapshot: node resolver unavailable", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return node_ids
 
 
 def _claim_concept_labels(claim: dict) -> list[str]:
@@ -697,7 +864,11 @@ _SIGNATURE_SQL = """
          JOIN component_explanations e ON e.id = en.explanation_id
          JOIN theory_components_live tc ON tc.id = e.component_id
          JOIN document_analysis_runs r ON r.document_id = tc.document_id
-        WHERE r.cartridge_id = :cartridge_id AND r.status = 'completed')
+        WHERE r.cartridge_id = :cartridge_id AND r.status = 'completed'),
+      -- 論文の位置づけの変化も霧の判定に効く（IK-0940）
+      (SELECT COALESCE(max(lp.updated_at)::text, '')
+         FROM landscape_placements lp
+        WHERE lp.domain_key = :cartridge_id)
 """
 
 
@@ -1125,13 +1296,25 @@ def compute_overlay_rows(
         )
 
     # --- 領域の被覆状態 (fog / lit) ---
+    placed_nodes = getattr(snapshot, "placed_node_ids", None) or set()
     for region in skeleton.regions:
         coverage = placed_count_by_region.get(region.id, 0)
         for concept in region.concepts:
             signals = concept_signal_map.get(concept.id)
             if signals is not None and (signals.has_corpus_state or signals.has_binding):
                 coverage += 1
-        status = derive_region_status(coverage)
+        # 霧 = 「論文の配置も解析成果もない領域」（IK-0940 — 論文の海と同じ判定）。
+        # 配置は真偽だけを使い、記帳の件数（coverage）には足さない。
+        has_placement = region.id in placed_nodes or any(
+            concept.id in placed_nodes for concept in region.concepts
+        )
+        status = derive_region_status(coverage + (1 if has_placement else 0))
+        if status == STATUS_FOG:
+            region_verify = FOG_VERIFY_LINE
+        elif coverage > 0:
+            region_verify = f"検証: この領域に{coverage}件の記帳あり。"
+        else:
+            region_verify = REGION_PLACED_ONLY_VERIFY_LINE
         rows.append(
             {
                 "entry_type": "region",
@@ -1140,7 +1323,7 @@ def compute_overlay_rows(
                 "label": region.label,
                 "status": status,
                 "status_source": STATUS_SOURCE_DERIVED,
-                "verify_line": FOG_VERIFY_LINE if status == STATUS_FOG else f"検証: この領域に{coverage}件の記帳あり。",
+                "verify_line": region_verify,
                 "endorse_line": FOG_ENDORSE_LINE if status == STATUS_FOG else "",
                 "learn_enabled": status != STATUS_FOG,
                 "evid_enabled": status != STATUS_FOG,

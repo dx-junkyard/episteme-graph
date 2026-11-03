@@ -73,7 +73,7 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
   （/cartridges 配下）/ `atlas_vectors`（/cartridges 配下）/ `atlas_edges`（/cartridges 配下）/
   `doubt.admin_router`（/doubt）/ `admin_assistant.admin_router`（/assistant）/
   `reconstruction.admin_router` / `seminar_brief.admin_router`（/documents 配下）/
-  `discuss_observation.admin_router` / `course_prerequisites`（/course-builder/prerequisite-check）/
+  `discuss_observation.admin_router` / `simulation_bridge.admin_router`（/simulation）/ `course_prerequisites`（/course-builder/prerequisite-check）/
   `cartridge_shape`（/cartridges/{id}/fit。cartridge の形の宣言に対する適合事実の読み取り専用1本）/ `reference_health`（/documents/{id}/reference-health。DB live 行の参照整合の読み取り専用1本）/ `versioning` / `status`
   （/status）/ `notifications`（/notifications）/ `deliberation`（/deliberation）/ `teaching_figures` /
   `landscape.router`（/landscape）/ `admin_assistant.help_kb_router`（/help-kb）
@@ -152,7 +152,8 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
 | GET | `/api/learning/courses/{cid}/topics/{tid}/material` | 所有者 or 受講者 | トピック教材（`student_material` 最優先 → content/summary → PDF チャンク） |
-| POST | `/api/learning/courses/{cid}/topics/{tid}/check` | 所有者 or 受講者 | 確認問題の LLM 採点（不合格は誤解記録、合格はトピック完了を永続化） |
+| POST | `/api/learning/courses/{cid}/topics/{tid}/check` | 所有者 or 受講者 | 確認問題の回答を出題の要件と並置（合否を返さない・完了も確定しない — 是正 F1。観点は全要素に1件ずつ = IK-0409） |
+| POST | `/api/learning/courses/{cid}/topics/{tid}/check/self-check` | 所有者 or 受講者 | 自己確認の1タップ。`agreed` のときだけトピック完了を永続化（`disagreed` / `verdict_wrong` は記録のみ・`disagreed` は `notice` に事実文 = IK-0399） |
 | POST | `/api/learning/courses/{cid}/topics/{tid}/chat` | 所有者 or 受講者 | RAG チャット（意図分類・casual モード・書き直し `replace_message_id`・tier/grounding 判定・tension/anchor 痕跡記録を内包） |
 | POST | `/api/learning/courses/{cid}/topics/{tid}/chat/stream` | 所有者 or 受講者（上の `/chat` と同一ゲート） | 同じコア（`_learning_chat_core`）の SSE 版。`start`（`stance` のみ）→ `delta`（本文の部分文字列）→ `final`（`LearningChatResponse` と同値）。`LEARNING_CHAT_STREAMING_ENABLED`（既定 false）が off なら **404**。権限・422・429 は最初のバイトより前に通常の HTTP ステータスで返る。中断した往復は履歴・痕跡に残さない（quota は消費済みのまま） |
 | GET | `/api/learning/client-features` | 要ログイン | クライアントが使ってよい経路の配布。`{"chat_streaming": <bool>}` の bool 1キーのみ（数値・上限・モデル名は載せない）。取得失敗時フロントは false 扱い |
@@ -226,6 +227,12 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
 | GET | `/api/learning/courses/{cid}/anchors/digest` | 本人のみ | llm_candidate の帰属候補（最大3件・数値なし）+ 遅延マイニング起動 |
 | POST | `/api/learning/anchors/{trace_id}/confirm` | 本人の行のみ | 帰属の確定/訂正（未生成なら segment 縮退アンカーを新規作成） |
 | POST | `/api/learning/anchors/{trace_id}/dismiss` | 本人の llm_candidate 帰属のみ | `structure_anchor.status='dismissed'`（問い自体は保持） |
+
+confirm / dismiss の応答は許可リストの射影（IK-0411, 2026-09-28）: `{ok, trace_id, status, notice,
+anchor_label?, anchor_type_label?, doubt_type?, doubt_type_label?, related_assumption?: {statement}}`。
+保存した `structure_anchor` の `confidence`（生の数値）・`reason`（LLM の理由文）・`anchor_id`・
+`detector_version`・前提の ID は返さない（P3 / P7 / KO10）。tension の confirm / dismiss / connect も
+`{ok, trace_id, status}` の許可リスト。
 
 #### ハンズフリー音声会話・インスペクト・C層学習者向け
 
@@ -361,6 +368,20 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 > このルーターは**読み取り専用**（書き込み・削除・封印メソッドを作らないことを
 > `test_trace_registry_guardrails.py` で固定。TR4）。封印は v2 の専用設計書を経る。
 > `{user_id}` パスパラメータは作らない — 対象は常に認証ユーザー本人。
+
+### 人に見せる名前（`routes/my_profile.py`、本人のみ・migration 094）
+
+`users.display_name` はログインの照合列を兼ねる（`routes/auth.py`）ので、帰属・所有者名・査読者名の
+表示には使わない。人に見せる名前は本人が登録する `users.profile_name` だけで、読みの正本は
+`core/account_display.py`（`display_label` — 空なら `None`、ログイン ID へフォールバックしない）。
+正本は `docs/features/account_lifecycle_management_design.md` 2026-10-27 第 5 波の追補（IK-0848 / IK-1007）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/me/profile` | 本人のみ | `{profile_name, label, note, message}`。未登録なら `profile_name` は空・`label` は「名前の登録がありません」 |
+| PATCH | `/api/me/profile` | 本人のみ | body `{profile_name}`（制御文字除去・空白を畳む・200 字超は 422・空文字で消す）。監査 `AUDIT_ENTITY_USER_ACCOUNT`（名前の本文は載せず登録の有無だけ） |
+
+> `{user_id}` パスパラメータは作らない。ログイン ID・パスワード・トークン世代には触れない。
 
 ### 構造の降下路（`routes/descent.py`、読み取り専用）
 
@@ -649,6 +670,8 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 | GET | `/api/admin/documents/{id}/sections/{sid}/components` | TEACHER + document 閲覧権 | セクション単位の theory_components（0件ならドキュメント全体にフォールバック） |
 | GET | `/api/admin/documents/{id}/component-graph` | TEACHER + document 閲覧権 | 保存済み TheoryOperationGraph の正規化返却（無ければ決定論的に構築） |
 | GET | `/api/admin/documents/{id}/paper-layer` | TEACHER + document 閲覧権 | 理論操作グラフの論文層（フレーム→論文 / 論文→フレーム / 被覆）の読み時射影。LLM 0回・保存なし |
+| GET | `/api/admin/documents/{id}/theory-modules` | TEACHER + document 閲覧権 | 理論モジュール（式の操作に「接点の狭さ」で境目を入れた外枠・内側のモジュール・共有の基礎・結果の吸い込み口・主張の並びの目印）の読み時導出。LLM 0回・保存なし。導出できない教材は `available:false` + 事実文で 200。正本は [理論モジュール層](../features/theory_module_layer_design.md) |
+| GET | `/api/admin/documents/{id}/theory-modules/related` | TEACHER + document 閲覧権 | 保存済みの外枠モジュールごとに、構造の指紋（工程の型と受け渡す式の形）が完全一致するモジュールを持つ**閲覧できる**論文のタイトルを列挙。閲覧できない論文にもある事実は `hidden`（真偽値）と事実文だけ・件数と指紋は返さない・教員が見送った組は出さない。LLM 0回・書き込みなし。保存行が無い / 規則の版が違うときは `available:false` + 事実文。正本は [理論モジュール層](../features/theory_module_layer_design.md) §13.7 |
 | PATCH | `/api/admin/claims/{claim_id}` | TEACHER + document 編集権 | claim の全項目更新（review_status 遷移は監査、rejected は伝播、承認時は R層 item オーサリングを非同期起動） |
 | POST | `/api/admin/claims/{claim_id}/review` | TEACHER + document 編集権 | **遷移専用**（本文フィールドを一切変更しない）。グラフ対話レビュー画面の claim 承認の実体で、フル upsert の PATCH を画面から使うと同時編集を巻き戻すため分離した。`review_status` は許可4語彙のみ（語彙外 422）、非 UUID の claim_id は 404。副作用（監査 / 却下伝播 / 承認時の R層オーサリング起動）は PATCH と共通 |
 
@@ -850,9 +873,9 @@ SL1 の固定文に限る（CC5）。候補・レンズ判定は保存せず（P
 | GET | `/api/admin/discovery/subscriptions/{domain_key}/keyphrase-candidates` | TEACHER | 分野語彙（骨格概念 / カートリッジ ontology / 承認済み理論部品）からのキーフレーズ候補を出所付きで返す（PD3）。購読行には書かない |
 | POST | `/api/admin/discovery/search` | TEACHER | 購読条件（body で上書き可）で arXiv を検索。副作用は `last_checked_at` の更新のみ。`query` / `closed_world_note` を必ず同梱し、条件ゼロなら arXiv を呼ばず空（PD6）。`max_results` はサーバ側で 1〜100 に丸める。arXiv 到達失敗は 502 + 事実文（空一覧に化けさせない）。`order`（`date` 既定 / `relevance`、語彙外は 422・空文字は既定）で並べ替えを指定でき、`relevance` のときだけ `order` と `ranking: {available, note?}` を足して候補を並べ替え、各候補に `relevance_label`（「関連: 高 / 中 / 低」）を付ける。並べ替え不能（コーパス無し / embedding 失敗 / 日次上限）は `ranking.available=false` + 事実文で**新着順のまま**返す。既定の `date` では `order` / `ranking` キー自体を付けない（Phase 1〜2 と完全に同一） |
 | POST | `/api/admin/discovery/citation-search` | TEACHER | 取り込み済み論文（`documents.source_url` から arXiv ID が取れるもの・新しい順に最大5件）をシードに、引用グラフ API の推薦から候補を導出する（Phase 3）。**候補提示のみで取り込みはしない**（PD1）ため副作用ゼロ・監査記帳なし。`{"enabled", "available", "candidates": [{...arXiv メタデータ, status, derived_from: [{arxiv_id, title}]}], "seeds": [...], "closed_world_note"}`。`externalIds.ArXiv` を持つ推薦のみ返す（既存の取得経路に乗るもの — PD2）。オプトイン未設定は 403/404 ではなく `{"enabled": false, "note": ...}`、シードゼロは `available:false` + 事実文、外部 API 到達不能は 502 + 固定事実文（内部情報を載せない） |
-| POST | `/api/admin/discovery/ingest` | TEACHER | 選択した候補を取得し既存アップロード経路へ流す（`_accept_material_source`、`documents.source_url` に PDF URL を保存）。**1リクエスト5件まで**（超過・空は 422）。1件ごとの取得失敗は `failed[{arxiv_id, detail}]` に積み残りを続行、許可ドメイン未設定のみ全体を 422。レスポンスは `{"accepted": [upload と同形 + arxiv_id], "failed": [...]}`。監査 `action='ingest'` |
+| POST | `/api/admin/discovery/ingest` | TEACHER | 選択した候補を取得し既存アップロード経路へ流す（`_accept_material_source`。optional `cartridge_id` = 解析の分野で upload と同じ検証・同じ意味（None = 未指定 / `""` = 「指定しない」/ 語彙外 422。2026-10-16）、`documents.source_url` に PDF URL を保存）。**1リクエスト5件まで**（超過・空は 422）。1件ごとの取得失敗は `failed[{arxiv_id, detail}]` に積み残りを続行、許可ドメイン未設定のみ全体を 422。レスポンスは `{"accepted": [upload と同形 + arxiv_id], "failed": [...]}`。監査 `action='ingest'` |
 | POST | `/api/admin/discovery/dismiss` / `/restore` | TEACHER | 候補の見送り / 復帰（`revoked` 遷移。行削除しない）。復帰対象の記録が無ければ 404。監査 `action='dismiss'` / `'restore'` |
-| POST | `/api/admin/discovery/ingest-batch` | TEACHER | 選択した候補を取り込みキューへ積む（Phase 2）。**1リクエスト50件まで**（超過・空は 422）。`models` はここで fail-closed 検証し、worker は再検証しない。202 + `{"queued": [{item_id, arxiv_id, title}], "skipped": [{arxiv_id, detail}]}`。積まない条件は「ID 不正 / 取り込み済み / 既にキュー内」の3つで、いずれも事実文つきで返す。arXiv が許可リストに無くても**受理はする**が `notice` に事実文を添える（PD6）。監査 `action='ingest_batch'` |
+| POST | `/api/admin/discovery/ingest-batch` | TEACHER | 選択した候補を取り込みキューへ積む（Phase 2）。optional `cartridge_id`（`/ingest` と同じ検証・キュー行 `cartridge_id` 列（migration 090）に保存し worker が受理へ渡す）。**1リクエスト50件まで**（超過・空は 422）。`models` はここで fail-closed 検証し、worker は再検証しない。202 + `{"queued": [{item_id, arxiv_id, title}], "skipped": [{arxiv_id, detail}]}`。積まない条件は「ID 不正 / 取り込み済み / 既にキュー内」の3つで、いずれも事実文つきで返す。arXiv が許可リストに無くても**受理はする**が `notice` に事実文を添える（PD6）。監査 `action='ingest_batch'` |
 | GET | `/api/admin/discovery/ingest-queue` | TEACHER | 取り込みキューを新しい順に返す。`?domain_key=` / `?limit=`（1〜500、既定50）。`{"items": [{item_id, domain_key, arxiv_id, title, status, detail, material_id, task_id, attempts, requested_at, ...}]}`。`status ∈ {queued, fetching, accepted, failed}` |
 | POST | `/api/admin/discovery/ingest-queue/{item_id}/retry` | TEACHER | 失敗した項目を `queued` へ戻す（前回の `detail` は消さない）。`failed` 以外・不在は 422。`{"item": {...}}`。監査 `action='ingest_retry'` |
 | GET | `/api/admin/discovery/ingest-estimate` | TEACHER | 取り込み前のトークン目安（`?count=` 既定1・上限200）。`llm_usage_events` の `feature LIKE 'pipeline:%'` を document 単位に合算した直近実績から導出し、**実測（reported）と推計（estimated）を分離**して `per_document` / `batch` の `total_tokens_range: [low, high]` を返す（U1）。**点推定・金額は返さない**（U5）。実績ゼロは `{"available": false, "note": ...}`（捏造しない） |
@@ -970,6 +993,72 @@ SL層 `support_paths` + claim つまづきサマリー（k-匿名集約の再利
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
 | GET | `/api/admin/documents/{document_ref}/seminar-brief` | TEACHER + document 閲覧権（`_ensure_document_viewable`・404 fail-closed） | 4区画の合成ビュー: ①脆い前提（未検証×下流影響「高」。`dependent_count` 等の生数値は落とし、load 段階ラベル・challenge_count_label・SL 4キーの段階表示のみ・上位8件）②一点吊りの支持線（`level=single` の事実文・上限5）③晴れ間（「このコーパスの中では検証記録が見つかりません。」の閉世界固定文, SL1・上限8）④学習者からの問い（v1 は空欄予約, SB3）。document / course 対応が解決できないときは `{available: false, reason}` の正直縮退で 200 |
+
+### 検証シミュレーション（`routes/simulation_bridge.py` admin_router）
+
+理論モジュール 1 つを LLM が Python の理論プログラム候補に翻訳し、教員が組んだ実験機の配線（L層の凍結版部品）と
+合わせて `sim-runner`（隔離コンテナ）で実行し、決定論の比較器で理論の出力と模擬観測を突き合わせる
+（正本: [features/simulation_bridge_design.md](../features/simulation_bridge_design.md) §6、不変条項 SB1〜SB10）。
+main.py が `prefix="/api/admin"` で直接登録する。全エンドポイント `_require_teacher`、ルーターは
+本層専用の `route_class=SimulationDisplayRoute`（`TeacherDisplayRoute` は記号 `k` 等のキーを落とすため使わない —
+落とすのは `schema.FORBIDDEN_DTO_KEYS` だけ）。生成コードは api-server で実行しない（SB3: 実行前にサーバ側 AST 検査を毎回やり直す）。
+LLM を呼ぶのは generate / propose-revision の 2 本だけ（各 1 コール + 日次 CostGate
+`SIMULATION_CODEGEN_MAX_CALLS_PER_DAY` / `SIMULATION_REVISION_MAX_CALLS_PER_DAY`。超過は 429 事実文）。
+監査は `AUDIT_ENTITY_SIMULATION`（コミット後に記帳）。DELETE ルートは無い（SB7）。差の数値は計器
+`simulation-agreement`（制度指標カタログ・教員向け `per_item_no_person`）として runs の DTO に出る。
+v1.1（§14）以降、一覧に出るのは**教員本人の行 + 所有者の無い v1 の旧行 + 学習者が本人の操作で共有した run**
+（run の DTO に `shared: bool`、他者が共有した run には `shared_by_label` = 表示名。学習者の user id は出さない）。
+学習者の program / wiring / 共有していない run は見えず、id を指定しても 404。手順の正本は
+`core/simulation_bridge/service.py`（学習者向けルーターと共有）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/simulation/documents/{document_id}/overview` | TEACHER + document 閲覧権 | 理論モジュール（`has_equation_text` / `reconstructed_inputs` / 最新の `program`）・programs・wirings・runs・観測系 claim・部品目録・`sandbox_configured` を 1 画面分 |
+| POST | `/api/admin/simulation/documents/{document_id}/programs/generate` | TEACHER + document 編集権 + 日次上限 | body `{module_key, model?}` → LLM 1 コール → `candidate` 行（AST 検査に落ちた下書きも `provenance.ast_ok=false` で候補として残す）。式の本文が無いモジュールは LLM を呼ばず 422 |
+| POST | `/api/admin/simulation/programs/{program_id}/decide` | 編集権（プログラムの document） | `{action: confirm \| dismiss, note?}`。`ast_ok=false` の確定は 422 |
+| GET | `/api/admin/simulation/parts` | TEACHER | 凍結版の部品目録（`instrument_model` / `noise_source` / `signal_processing`・active・最新版） |
+| GET / POST | `/api/admin/simulation/documents/{document_id}/wirings` | 閲覧権 / 編集権 | 一覧（教材の配線 + 汎用配線）/ 教員が組む（`instrument.validate_wiring` 通過時のみ・`confirmed` で作成） |
+| POST | `/api/admin/simulation/wirings/{wiring_id}/decide` | 編集権（汎用配線は SYSTEM_ADMIN か作成者） | 改訂候補の confirm / dismiss |
+| POST | `/api/admin/simulation/documents/{document_id}/runs` | 編集権 | 確定したプログラム（と確定した配線）を sim-runner で同期実行 → 比較 → append-only の 1 行。AST 不通過は `rejected`、実行環境の不達・失敗は `failed`（どちらも 200 で行を返す） |
+| GET | `/api/admin/simulation/documents/{document_id}/runs` / `/api/admin/simulation/runs/{run_id}` | 閲覧権 | 実行記録（`result.comparison.metrics` と段階ラベル・閉世界の事実文） |
+| POST | `/api/admin/simulation/runs/{run_id}/ledger-candidate` | 編集権 | 成功した run を観測系 claim ごとに台帳 `simulation_candidates` へ候補として追記 |
+| POST | `/api/admin/simulation/runs/{run_id}/propose-revision` | 編集権 + 日次上限 | 配線の改訂案（凍結版部品の組み替えのみ・`origin=llm_candidate` の候補配線） |
+
+台帳候補の判断は D層ルーター（`routes/doubt.py`）に置く:
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/admin/doubt/ledger/{target_type}/{target_id}/simulation-candidates/{candidate_id}/confirm` | `_require_editable_ledger_target` | 確定。スコープ 1 件（`system` = 配線名・`condition` = 入力条件）を足し、`untested` / `unknown` のときだけ `indirectly_supported` に上げる（SB1: それ以上は上げない）。処理済みは 422 |
+| POST | `/api/admin/doubt/ledger/{target_type}/{target_id}/simulation-candidates/{candidate_id}/dismiss` | `_require_editable_ledger_target` | 見送り（配列内の status 遷移・削除しない） |
+
+教員向け台帳 GET（`/api/admin/doubt/ledger/{target_type}/{target_id}`）は未処理の `simulation_candidates` も返す。学習者向け台帳 GET には載せない。
+
+### 動かして確かめる — 学習者向け（`routes/simulation_lab.py` learning_router、SB層 v1.1）
+
+学習者が理論モジュールのシミュレーションを**作って試す**経路（正本: [features/simulation_bridge_design.md](../features/simulation_bridge_design.md) §14、
+SB11〜SB15）。`learning_router = APIRouter(prefix="/api/learning", route_class=LearnerDisplayRoute)` を main.py が直接 include する
+（cycle / descent と同型）。全エンドポイント `_get_current_user`（`_require_teacher` を置かない = SB11: 試行に承認ゲートを置かない。
+安全の弁は AST 検査と sim-runner）。受講ゲートは `get_accessible_course_data`、教材はコースの sources
+（`list_course_source_document_ids`）に限り外は 404。`document_id` を省くと焦点論文（`services.learner_focus_document` = FD1）。
+programs / wirings / runs の読み書きは**本人所有の行だけ**（他者の行は存在を明かさず 404 = SB12）。LLM を呼ぶのは generate /
+propose-revision の 2 本（feature `learning:simulation_codegen` / `learning:simulation_revision`・scene `simulation`・本人キーの
+日次 CostGate `SIMULATION_LEARNER_MAX_CALLS_PER_DAY` 既定 20 を 2 本で共有・学習者はモデルを選ばない）。本人の試行は監査記帳しない。
+DTO は射影が記号キーを落とさないよう `[{symbol, value}]` / `[{symbol, mean, std}]` / `[{name, value}]` のリストで返し、
+所有者・作成者の user id・confidence を載せない。成功した run ごとに `interest_traces` kind `verification_attempt` を 1 行
+（payload は run_id / document_id / module_key / agreement_level / separation_level / shared のみ・数値なし = SB15）。DELETE ルートは無い。
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| GET | `/api/learning/courses/{course_id}/simulation/overview?document_id=&topic_id=` | 焦点論文の理論モジュール（`program` = 本人の最新）+ 本人の programs / wirings / runs + 観測系の主張 + 部品目録 + `documents`（コースの論文一覧）。教材が決まらなければ `available:false` + 事実文 |
+| POST | `/api/learning/courses/{course_id}/simulation/programs/generate` | `{module_key, document_id?, topic_id?}` → 本人所有の candidate（LLM 1 コール） |
+| POST | `/api/learning/simulation/programs/{program_id}/edit` | `{source_code}` → 本人の新版（AST 検査・本人の旧版を superseded。不合格も `ast_ok=false` で保存） |
+| POST | `/api/learning/simulation/programs/{program_id}/adopt` | 本人の採用（`confirmed`）。AST 不合格は 422 |
+| GET | `/api/learning/simulation/parts` | 凍結版の部品目録（`params: [{name, default, unit, min, max}]`） |
+| GET / POST | `/api/learning/courses/{course_id}/simulation/wirings` | 本人の配線の一覧 / 本人が組む（`origin='learner'`・`confirmed` で作成・`parts[].params` は `[{name, value}]` か写像） |
+| POST | `/api/learning/courses/{course_id}/simulation/runs` | `{program_id, wiring_id?, prediction?, values, params, instrument_params?, reference?, seed?, observation_claim_ids?, topic_id?}`。本人の採用済みプログラム（と本人の confirmed 配線）だけ。数値以外は 422・`observation_claim_ids` はこの論文の観測系の主張だけ |
+| GET | `/api/learning/courses/{course_id}/simulation/runs` / `/api/learning/simulation/runs/{run_id}` | 本人の run だけ |
+| POST | `/api/learning/simulation/runs/{run_id}/share` | 共有（`shared_at` を刻む・冪等）。初回だけ、成功した run の観測系の主張の台帳に `simulation_candidates` を追記（`created_by` = 学習者・確定は教員 = SB13） |
+| POST | `/api/learning/simulation/runs/{run_id}/propose-revision` | 本人の配線の改訂候補（`origin='llm_candidate'`・本人所有の candidate。学習者向けの確定経路は v1.1 では持たない） |
 
 ### W層 — 要素検討ワークスペース `/api/admin/deliberation`（`routes/deliberation.py`）
 

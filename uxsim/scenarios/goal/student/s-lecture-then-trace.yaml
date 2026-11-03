@@ -1,0 +1,77 @@
+id: s-lecture-then-trace
+population: students
+runner:
+- api
+- browser
+# 第 25 周 第 4 周（studio H21）: 同名の別コースではなく campaign の固定コースで歩く
+pin_course: true
+goal: '{{goal_text}} のために、{{topic_hint}} のレクチャーを聴き、分からない箇所で止めて記号→⚓→質問と辿る'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- symbol_hints
+- interrupt_questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.lecture.audio_status
+- do: learning.lecture.sequence
+  note: 最初から聴く
+# 第 25 周 第 4 周（studio H16 の残り）: 講義はスライドを 1 枚ずつ出す。分からない式に当たるまで ▶ で送る
+- repeat:
+    until: persona_decides_to_stop or steps > 4 or lecture_at_end
+    max: 4
+    steps:
+    - do: learning.lecture.next
+      note: ▶ で次のスライドへ送る（スライドの式が教材の式と同じ表示か）
+- do: learning.symbol.lookup
+  with:
+    symbol: '{{symbol_hints | next}}'
+  note: 止めて、聞き取れなかった記号の定義を確かめる
+# 第 25 周第 5 周 studio H29: ⚓ は「チップがあれば」の条件付き。部品・主張のチップが 1 つも無いトピック（t16 など）では
+# 式 → 記号 → ⚓ が成り立たないので、無ければ飛ばしてチャットへ進む（行為が行われなかったことを辿りの途切れに数えない）。
+# 既定のトピック（t11 = 二重ネットワークとTOV方程式）にはチップがある
+- choose:
+  - do: learning.component.context
+    note: いまのスライドに ⚓（部品・主張のチップ）があれば開く
+  optional: true
+- repeat:
+    until: persona_decides_to_stop or steps > 3
+    max: 3
+    do: learning.chat.ask
+    with:
+      message: '{{interrupt_questions | next}}'
+# 第 25 周 第 6 周 studio H33: 講義中に質問を送ると講義は一時停止し、モードバーに「▶ 再開」が出る。続きから聴く手を置く
+- choose:
+  - do: learning.lecture.resume
+    note: モードバーの「▶ 再開」で、止めたスライドから続きを聴く
+  - do: learning.lecture.sequence
+    note: 🎙 講義をもう一度押して最初から聴く
+- repeat:
+    until: persona_decides_to_stop or steps > 8 or lecture_at_end
+    max: 8
+    steps:
+    - do: learning.lecture.next
+      note: 最後まで ▶ で送る（音声の無いスライドのタイマー送りの終端・止めた位置から再開できたか）
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#interactive-lecture
+- manual: student/02-student.md#symbol-lookup
+- manual: student/02-student.md#material-element-anchor
+watch_for:
+- スライドの分割で論理の流れ（前提→式→結果）が追える
+- スライドの表示と読み上げが同じ箇所を指している
+- 復元由来の式にはその印が付く
+- 止めて質問した後、どこから再開するのかが分かる

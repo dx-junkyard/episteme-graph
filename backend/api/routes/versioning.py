@@ -231,7 +231,16 @@ def get_version_state(
     uid = _uid(current_user)
     badges = resolver.view_badges(object_type, canonical, uid)
     perms = _permission_flags(object_type, canonical, uid)
-    return {**badges, **perms}
+    out = {**badges, **perms}
+    # 第 25 周 第 9 波（IK-1079）: コースの所有者には、いまの内容が受講者の版と同じか・発行の後に
+    # 保存した変更があるかの事実文（原稿スタジオの保存の届き方と同じ比較・同じ文の正本）。
+    # 第 10 波（IK-1127）: コースでは全員に宛先ごとの届き方（audience_note）、所有者には加えて
+    # 受講者の見ている版の文と、発行の後に変わったトピックの題名（件数なし）。
+    if object_type == vschema.OBJECT_TYPE_COURSE:
+        from core import lecture_studio_state as studio_state
+
+        out.update(studio_state.version_state_course_facts(canonical, is_owner=bool(perms.get("is_owner"))))
+    return out
 
 
 # ---------------------------------------------------------------------------

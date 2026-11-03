@@ -54,6 +54,15 @@ resolution:
   landed_in:
     - backend/db/084_claim_chunk_fk_set_null.sql
     - backend/core/document_pipeline/persistence.py
+  principles:
+    - principle: sync-by-stable-key-and-protect-human-decisions
+      use: extracted
+      note: >-
+        採った部品は ②の派生形（位置キーの upsert と FK の SET NULL）。固有の差分: 対象が成果表ではなく区画（派生物）で、位置キーが同一性を担うため安定キー①は要らない。
+  verification:
+    methods: [guardrail, scratch_db]
+    unverified:
+      - 複製ではない開発 DB 本体・本番 DB への適用
 related: [IK-0108, IK-0112]
 view_of: [IK-0002, IK-0108]
 history:

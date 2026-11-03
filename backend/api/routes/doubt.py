@@ -29,22 +29,38 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
-from dependencies import _get_current_user, _require_system_admin, _require_teacher
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
+from dependencies import ROLE_SYSTEM_ADMIN, _get_current_user, _require_system_admin, _require_teacher
 # オブジェクトスコープ権限（P0）の正本ゲート。`_require_teacher` は「TEACHER 以上」しか
 # 保証しないため、course_id 直指定の経路は編集権限ゲートを必ず通す
 # （不在・権限なしはどちらも 404・detail 同一。admin.py の既存5経路と同型）。
 from routes.admin import _require_editable_course_or_404, _require_editable_document_or_404
+from core import account_display as _account_display  # IK-1007: 人に見せる名前の正本
 from core.doubt.assumption_mining.corpus_audit import run_corpus_audit
-from core.doubt.assumption_mining.worker import maybe_schedule_assumption_mining
-from core.doubt.counterfactual import compute_counterfactual, snapshot_subgraphs
+from core.doubt.assumption_mining.worker import (
+    MINING_STATE_FAILED,
+    MINING_STATE_FINISHED,
+    MINING_STATE_RUNNING,
+    maybe_schedule_assumption_mining,
+    mining_state,
+)
+from core.doubt.counterfactual import (
+    OBSERVATION_OUTSIDE_SCOPE_WARNING_PREFIX,
+    compute_counterfactual,
+    snapshot_subgraphs,
+)
 from core.doubt.falsification_conditions.worker import maybe_schedule_falsification_candidates
 from core.doubt.load_calculator import load_percentiles, recompute_load_scores
 from core.doubt.metrics import collect_doubt_metrics
 from core.doubt.naive_signal import aggregate_naive_signals, has_naive_signal
 from core.doubt.observation_targets import observation_claim_targets
-from core.doubt.open_assumptions import compile_open_assumptions, target_label
+from core.doubt.open_assumptions import compile_open_assumptions
+from core.doubt.population import CLAIM_CHAIN_EXCLUDED_NOTE, ClaimChainExclusion
+from core.doubt.target_labels import LedgerTargetLabels, ledger_target_label
 from core.doubt.schema import (
     CHALLENGE_MODES,
+    CHALLENGE_STATUS_LABELS,
+    PROPOSAL_STATUS_LABELS,
     EVIDENCE_LINE_KINDS,
     ChallengeStatus,
     ChallengeType,
@@ -55,6 +71,7 @@ from core.doubt.schema import (
     REACHABILITY_LEVELS,
     TargetType,
     VerificationStatus,
+    COVERAGE_LABELS as SCOPE_COVERAGE_LABELS,
     load_level_for_score,
     scope_coverage_level,
 )
@@ -65,28 +82,89 @@ from core.doubt.seminar_brief import (
     _FORBIDDEN_NUMERIC_KEYS as LEARNER_FORBIDDEN_NUMERIC_KEYS,
     _strip_numeric_keys as strip_learner_numeric_keys,
 )
+from core.doubt.ledger_targets import (
+    LEDGER_ATTRIBUTION_CHECK_NOTE,
+    LEDGER_DOCUMENT_REQUIRED_NOTE,
+    LEDGER_COMPONENT_VIA_NODE_NOTE,
+    LEDGER_COMPONENT_VIA_NODE_NOTE_UNNAMED,
+    LedgerDocumentRequired,
+    ledger_row_filter,
+    normalize_document_id,
+    resolve_component_ledger_target,
+    resolve_ledger_document_id,
+    supporting_claims_for_target,
+    target_requires_document,
+)
+from core.doubt.scope import (
+    ASSUMPTION_MINING_NOTES,
+    FALSIFICATION_REFRESH_SCOPE_NOTE,
+    CHALLENGE_TARGETS_NONE_NOTE,
+    CHALLENGE_TARGETS_NOTE,
+    LEDGER_READ_ONLY_NOTE,
+    RECORDER_UNKNOWN_LABEL,
+    SCOPE_DUPLICATE_NOTE,
+    VERIFICATION_STATUS_CHANGED_NOTE,
+    VERIFICATION_STATUS_UNCHANGED_NOTE,
+    ATLAS_EMPTY_NOTE,
+    BATCH_SCHEDULED_NOTE,
+    CORPUS_AUDIT_NOTES,
+    LEARNER_OPEN_ASSUMPTIONS_EMPTY_NOTE,
+    LOAD_RECOMPUTED_NOTE,
+    OPEN_ASSUMPTIONS_EMPTY_NOTE,
+    SCOPE_NO_DOCUMENTS_NOTE,
+    STUDIO_LEDGER_HINT,
+)
 from core.doubt.support_paths import compute_support_lines
 from core.label_vocab import VERIFICATION_STATUS_LABELS_LEDGER
+from core.label_vocab import LEDGER_SCOPE_AXIS_LABELS
 # P4-5（知識の転用層 §8）の表示ラベル。語彙（enum）の正本は core/doubt/schema.py /
 # core/schema.py、ラベルの正本は core/label_vocab.py（ここでは再定義しない）。
-from core.label_vocab import CHALLENGE_MODE_LABELS, EVIDENCE_LINE_KIND_LABELS
+from core.label_vocab import CHALLENGE_MODE_LABELS, EVIDENCE_LINE_KIND_LABELS, SHARED_SCOPE_LABELS
+# 第 25 周 面 B 第 5 波（IK-0998 / 1002 / 1003）: 欄の出所・支える主張の印・取り下げの事実文。
+from core.label_vocab import (
+    ASSUMPTION_ATLAS_UNPLOTTED_HEADING,
+    assumption_unplotted_detail_line,
+    ASSUMPTION_LOAD_UNCOMPUTABLE_NOTE,
+    CHALLENGE_DUPLICATE_NOTE,
+    CHALLENGE_WITHDRAWN_NOTE,
+    LEDGER_FIELD_LABELS,
+    OPEN_ASSUMPTIONS_SUPPORT_SCOPE_NOTE,
+    PROPOSAL_COMPLETED_STATUS_UNCHANGED_NOTE,
+    proposal_completed_line,
+    proposal_completion_note_line,
+    LEDGER_FIELD_SOURCES_NOTE,
+    LEDGER_STATUS_UNRECORDED_WITH_SCOPES_NOTE,
+    SUPPORTING_CLAIM_CHALLENGE_STATE_LABELS,
+    SUPPORTING_CLAIMS_CHALLENGED_NOTE,
+    WITHDRAWN_CHALLENGES_HEADING,
+    challenge_record_line,
+    learner_atlas_wording,
+)
 from core.postgres import get_session as _pg_session
+from core.text_hygiene import strip_control_sequences
 from core.status import cross_layer_notify
 from core.schema import (
     AUDIT_ENTITY_ASSUMPTION,
     AUDIT_ENTITY_CHALLENGE,
     AUDIT_ENTITY_COUNTERFACTUAL_SESSION,
     AUDIT_ENTITY_LEDGER,
+    AUDIT_ENTITY_SIMULATION,
     AUDIT_ENTITY_VERIFICATION_PROPOSAL,
 )
-from services import get_accessible_course_data, record_review_event
+from core.simulation_bridge import store as simulation_store
+from services import (
+    get_accessible_course_data,
+    list_course_source_document_ids,
+    record_review_event,
+    resolve_document_access,
+)
 
 logger = logging.getLogger(__name__)
 
 # admin.router（prefix=/api/admin）に include される
 admin_router = APIRouter(prefix="/doubt", tags=["Doubt Layer"])
 # main.py で直接 include される学習者向け読み取り専用 router
-learning_router = APIRouter(prefix="/api/learning", tags=["Learning"])
+learning_router = APIRouter(prefix="/api/learning", tags=["Learning"], route_class=LearnerDisplayRoute)
 
 _LEDGER_TARGET_TYPES = tuple(t.value for t in TargetType)
 _VERIFICATION_STATUSES = tuple(s.value for s in VerificationStatus)
@@ -163,38 +241,259 @@ def _jsonb_dict(value: Any) -> dict:
     return {}
 
 
-def _fetch_ledger_row(session, target_type: str, target_id: str):
+def _fetch_ledger_row(session, target_type: str, target_id: str, *, document_id: str | None):
+    """台帳行 1 行（行キーは (document_id, target_type, target_id) — IK-0899・migration 092）。
+
+    ``document_id`` は必須のキーワード引数。論文の中でしか一意でない対象（グラフのノード id・
+    式の agent ID）で document が分からなければ 422 で閉じる（推測で別の論文の行を引かない）。
+    """
     # falsification_conditions（row[13]）/ falsification_candidates（row[14]）は
     # SL-1（賭け金の台帳）用に末尾へ追加（既存インデックス 0-12 は不変）。
     # evidence_lines（row[15]）は P4-5（根拠の線・migration 083）用にさらに末尾へ追加。
+    # attribution_check_needed（row[16]）は migration 092（IK-0899）用にさらに末尾へ追加。
+    try:
+        where, params = ledger_row_filter(
+            target_type=target_type, target_id=target_id, document_id=document_id
+        )
+    except LedgerDocumentRequired as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return session.execute(
-        sa_text("""
+        sa_text(f"""
             SELECT id::text, target_id, target_type, document_id::text AS document_id, course_id,
                    verification_status, verification_scopes, scope_candidates,
                    consensus_explicit, consensus_behavioral, load_score,
                    created_at, updated_at, falsification_conditions, falsification_candidates,
-                   evidence_lines
+                   evidence_lines, attribution_check_needed
             FROM epistemic_ledger
-            WHERE target_id = :tid AND target_type = :ttype
+            WHERE {where}
         """),
-        {"tid": target_id, "ttype": target_type},
+        params,
     ).fetchone()
 
 
-def _get_or_create_ledger_row(session, target_type: str, target_id: str):
-    row = _fetch_ledger_row(session, target_type, target_id)
+def _row_attribution_check_needed(row) -> bool:
+    """migration 092 より前の共有キーで人の記帳が入った行か（row[16]・無ければ False）。"""
+    try:
+        return bool(row[16]) if len(row) > 16 else False
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ledger_route_document(session, target_type: str, target_id: str, document_id: str | None) -> str | None:
+    """経路が扱う対象の document（IK-0899）。論文の中でしか一意でない対象で無ければ 422。"""
+    try:
+        return resolve_ledger_document_id(
+            session, target_type=target_type, target_id=target_id, document_id=document_id
+        )
+    except LedgerDocumentRequired as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _get_or_create_ledger_row(session, target_type: str, target_id: str, *, document_id: str | None):
+    row = _fetch_ledger_row(session, target_type, target_id, document_id=document_id)
     if row is not None:
         return row
-    session.execute(
-        sa_text("""
-            INSERT INTO epistemic_ledger (target_id, target_type)
-            VALUES (:tid, :ttype)
-            ON CONFLICT (target_id, target_type) DO NOTHING
-        """),
-        {"tid": target_id, "ttype": target_type},
-    )
+    # migration 080 以降 document_id は UUID NOT NULL（既定なし）。対象から引いて入れる。
+    from core.doubt.ledger_targets import ensure_ledger_row
+
+    try:
+        ensure_ledger_row(
+            session, target_type=target_type, target_id=target_id, document_id=document_id
+        )
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     session.commit()
-    return _fetch_ledger_row(session, target_type, target_id)
+    return _fetch_ledger_row(session, target_type, target_id, document_id=document_id)
+
+
+def _challenge_entry(session, target_type: str, target_id: str, document_id: str) -> dict:
+    """疑義の区画に添える入口（IK-0904）。前提・主張は ``challenge_allowed`` だけ。"""
+    if target_type in _CHALLENGE_TARGET_TYPES:
+        return {"challenge_allowed": True}
+    try:
+        claims = supporting_claims_for_target(
+            session, document_id=document_id, target_type=target_type, target_id=target_id
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("supporting claims lookup failed", exc_info=True)
+        claims = []
+    # IK-1003: 支える主張ごとの疑義・提案の段階語（件数なし）。ノードへは事実文 1 行で集約する。
+    states = _supporting_claim_challenge_states(session, [str(c.get("claim_id") or "") for c in claims])
+    out_claims = []
+    for claim in claims:
+        item = dict(claim)
+        state = states.get(str(claim.get("claim_id") or ""))
+        if state:
+            item["challenge_state"] = state
+            item["challenge_state_label"] = SUPPORTING_CLAIM_CHALLENGE_STATE_LABELS[state]
+        out_claims.append(item)
+    return {
+        "challenge_allowed": False,
+        "challenge_note": CHALLENGE_TARGETS_NOTE if claims else CHALLENGE_TARGETS_NONE_NOTE,
+        "supporting_claims": out_claims,
+        **({"supporting_challenge_note": SUPPORTING_CLAIMS_CHALLENGED_NOTE} if states else {}),
+    }
+
+
+def supporting_claim_challenge_state(statuses: list[tuple[str, list[str]]]) -> str | None:
+    """1 主張の疑義の状態の並びから段階語のキーを決める（IK-1003・純関数）。
+
+    ``statuses`` は ``(疑義の status, [その疑義の検証提案の status, ...])`` の並び。取り下げた
+    疑義・取り下げた提案は数えない。優先は 着手済み > 提案あり > 疑義あり。
+    """
+    has_challenge = has_proposal = in_progress = False
+    for challenge_status, proposal_statuses in statuses:
+        if str(challenge_status or "") == ChallengeStatus.WITHDRAWN.value:
+            continue
+        has_challenge = True
+        for proposal_status in proposal_statuses or []:
+            proposal_status = str(proposal_status or "")
+            if proposal_status == ProposalStatus.WITHDRAWN.value:
+                continue
+            has_proposal = True
+            if proposal_status in (ProposalStatus.IN_PROGRESS.value, ProposalStatus.COMPLETED.value):
+                in_progress = True
+    if in_progress:
+        return "in_progress"
+    if has_proposal:
+        return "proposed"
+    if has_challenge:
+        return "challenged"
+    return None
+
+
+def _supporting_claim_challenge_states(session, claim_ids: list[str]) -> dict[str, str]:
+    """支える主張の疑義・提案の状態（IK-1003）。失敗は fail-soft（印なし = 従来どおり）。"""
+    claim_ids = [c for c in claim_ids if c]
+    if not claim_ids:
+        return {}
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT c.target_id, c.id::text, c.status, p.status
+                FROM challenges c
+                LEFT JOIN verification_proposals p ON p.challenge_id = c.id
+                WHERE c.target_type = 'claim' AND c.target_id = ANY(:ids)
+            """),
+            {"ids": claim_ids},
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        logger.debug("supporting claim challenge states failed", exc_info=True)
+        return {}
+    grouped: dict[str, dict[str, tuple[str, list[str]]]] = {}
+    for row in rows or []:
+        try:
+            claim_id, challenge_id, challenge_status, proposal_status = (
+                str(row[0] or ""), str(row[1] or ""), str(row[2] or ""), row[3]
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        per_claim = grouped.setdefault(claim_id, {})
+        entry = per_claim.setdefault(challenge_id, (challenge_status, []))
+        if proposal_status:
+            entry[1].append(str(proposal_status))
+    states: dict[str, str] = {}
+    for claim_id, by_challenge in grouped.items():
+        state = supporting_claim_challenge_state(list(by_challenge.values()))
+        if state:
+            states[claim_id] = state
+    return states
+
+
+#: 行の無い台帳（IK-0931）で画面が出す空欄の事実文（空欄は発見 — 警告色にしない）。
+LEDGER_NOT_YET_RECORDED_NOTE = "この対象の台帳はまだ記帳されていません。"
+
+
+def _target_exists_for_ledger(session, target_type: str, target_id: str, document_id: str) -> bool:
+    """行の無い台帳 GET で、対象がその論文に実在するか（IK-0931）。
+
+    論文の中でしか一意でない対象（グラフのノード id・式の agent ID）は
+    ``_scoped_target_in_document``。全体で一意の対象（主張・部品の UUID・前提）は、閲覧ゲートが
+    対象の行から document を引けたこと（``_target_document_ids`` が空でない）を実在とみなす。
+    """
+    if target_requires_document(target_type, target_id):
+        doc = normalize_document_id(document_id)
+        return bool(doc) and _scoped_target_in_document(session, target_type, target_id, doc)
+    return bool(document_id)
+
+
+def _empty_ledger_entry(
+    session, target_type: str, target_id: str, *, document_id: str, can_edit: bool,
+) -> dict:
+    """台帳行の無い対象の GET 応答（``exists: false``・IK-0931）。実在しなければ 404。"""
+    if not _target_exists_for_ledger(session, target_type, target_id, document_id):
+        raise HTTPException(status_code=404, detail="Ledger entry not found")
+    return {
+        "exists": False,
+        "not_recorded_note": LEDGER_NOT_YET_RECORDED_NOTE,
+        "target_id": target_id,
+        "target_type": target_type,
+        "target_label": ledger_target_label(
+            session, document_id=document_id, target_type=target_type, target_id=target_id
+        ),
+        "document_id": document_id,
+        **_document_title_entry(session, document_id),
+        "verification_status": "unknown",
+        "verification_scopes": [],
+        "scope_candidates": [],
+        "challenges": [],
+        "evidence_lines": [],
+        "falsification_conditions": [],
+        "falsification_candidates": [],
+        "simulation_candidates": [],
+        "simulation_candidates_decided": [],
+        **(_challenge_entry(session, target_type, target_id, document_id)),
+        "can_edit": bool(can_edit),
+        **({"can_edit_note": LEDGER_READ_ONLY_NOTE} if not can_edit else {}),
+        "falsification_refresh_note": FALSIFICATION_REFRESH_SCOPE_NOTE,
+    }
+
+
+#: 確定済みの前提のカードに添える、結ばれた論文の事実文（IK-1028 残り・2026-10-28 第 7 波）。
+ASSUMPTION_LINKED_DOCUMENT_LINE = "結ばれた論文: 『{title}』（［台帳を開く］はこの論文の台帳の行を開きます）"
+
+#: 論文の題名が引けないときの置き換え語（IK-0934。ファイル名・arXiv 番号を題名にしない）。
+DOCUMENT_TITLE_UNKNOWN_LABEL = "題名を引けない論文"
+
+
+def _document_title_entry(session, document_id: str) -> dict:
+    """台帳の見出しに添える論文の題名（IK-0934・``{"document_title": ...}``）。"""
+    doc = normalize_document_id(document_id)
+    if not doc:
+        return {}
+    title = ""
+    try:
+        # 表示題名の正本（ファイル名様の教材名は arXiv の写しの題名へ。API は呼ばない）。
+        from core.library.structural_matches import load_display_titles
+
+        titles, _notes = load_display_titles(session, [doc])
+        title = str(titles.get(doc) or "").strip()
+        from core.paper_discovery.radar import title_looks_like_filename
+
+        if title and title_looks_like_filename(title):
+            title = ""
+    except Exception:  # noqa: BLE001
+        logger.debug("document title lookup failed", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+    return {"document_title": title or DOCUMENT_TITLE_UNKNOWN_LABEL}
+
+
+def _user_display_names(session, user_ids: list[str]) -> dict[str, str]:
+    """記帳者 id → 表示名（IK-0905。引けないものはキーごと欠落・失敗は空 dict）。
+
+    IK-1007: 表示名は本人が登録した名前（``users.profile_name``）だけ。登録が無ければ名前なしの
+    事実語（ログイン ID へフォールバックしない）。読みは ``core/account_display.py`` が正本。
+    """
+    ids = sorted({str(u or "").strip() for u in user_ids} - {""})
+    ids = [u for u in ids if normalize_document_id(u)]  # UUID 形のみ（形が違えば引かない）
+    if not ids:
+        return {}
+    labels = _account_display.fetch_display_labels(session, ids)
+    return {uid: (label or _account_display.NAME_UNREGISTERED_ACTOR) for uid, label in labels.items()}
 
 
 def _scope_out(scope: dict) -> dict:
@@ -253,6 +552,59 @@ def _falsification_candidate_out(candidate: dict) -> dict:
         "reason": str(candidate.get("reason") or ""),
         "status": str(candidate.get("status") or "candidate"),
     }
+
+
+def _simulation_candidate_out(candidate: dict) -> dict:
+    """検証シミュレーションの台帳候補（SB層）の API 表現。confidence は持たない（SB6）。"""
+    return {
+        "candidate_id": str(candidate.get("candidate_id") or ""),
+        "run_id": str(candidate.get("run_id") or ""),
+        "program_id": str(candidate.get("program_id") or ""),
+        "wiring_id": str(candidate.get("wiring_id") or ""),
+        "wiring_name": str(candidate.get("wiring_name") or ""),
+        "condition": str(candidate.get("condition") or ""),
+        "statement": str(candidate.get("statement") or ""),
+        "level": str(candidate.get("level") or ""),
+        "facts": [str(f) for f in candidate.get("facts") or [] if str(f or "").strip()],
+        "reconstructed_inputs": bool(candidate.get("reconstructed_inputs")),
+        "status": str(candidate.get("status") or "candidate"),
+        "created_at": str(candidate.get("created_at") or ""),
+        # 判断済みの候補の控え（教員向け。判断した人の user id は出さない — 帰属は監査に残る）。
+        "decided_at": str(candidate.get("confirmed_at") or candidate.get("dismissed_at") or ""),
+        "dismiss_reason": str(candidate.get("dismiss_reason") or ""),
+    }
+
+
+def _simulation_candidates_for(
+    session, target_type: str, target_id: str, *, decided: bool = False,
+    document_id: str | None = None,
+) -> list[dict]:
+    """``epistemic_ledger.simulation_candidates`` を列名で引く（fail-soft）。
+
+    既定は未処理の候補のみ（``simulation_candidates`` キー）。``decided=True`` は確定・見送り済みの
+    候補（``simulation_candidates_decided`` キー。見送りの理由を読めるようにする = RE5）。
+    """
+    try:
+        where, params = ledger_row_filter(
+            target_type=target_type, target_id=target_id, document_id=document_id
+        )
+        row = session.execute(
+            sa_text(f"""
+                SELECT simulation_candidates
+                FROM epistemic_ledger
+                WHERE {where}
+            """),
+            params,
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — 列が無い旧 DB でも台帳の他の情報は返す
+        logger.debug("simulation candidates unavailable", exc_info=True)
+        return []
+    if row is None:
+        return []
+    return [
+        _simulation_candidate_out(c) for c in _jsonb_list(row[0])
+        if isinstance(c, dict) and (str(c.get("status") or "candidate") == "candidate") != decided
+    ]
 
 
 def _validate_falsification_condition_fields(
@@ -396,13 +748,33 @@ def _challenge_target_recorder(target_type: str, target_id: str) -> str | None:
         session.close()
 
 
-def _load_level_for_row(session, course_id: str, load_score: Any) -> str:
+def _load_level_for_row(session, document_ids: list[str], load_score: Any) -> str:
+    """台帳 1 行の負荷段階。基準は対象の document の範囲（IK-0852: course_id 列は使わない）。"""
     if load_score is None:
         return ""
-    if not course_id:
+    if not document_ids:
         return ""
-    p50, p90, p99 = load_percentiles(session, course_id)
+    # IK-0970: 地図・合意リストと同じ母集団（導出の手順を外した後）で段を決める。
+    p50, p90, p99 = load_percentiles(
+        session, document_ids=document_ids, exclusion=ClaimChainExclusion(session)
+    )
     return load_level_for_score(float(load_score), p50, p90, p99)
+
+
+def _course_scope_document_ids(course_id: str, current_user: dict) -> list[str]:
+    """コース単位ルートのゲートと範囲の正本（IK-0852 / IK-0857, 2026-10-23）。
+
+    1. 編集権限ゲート（``_require_editable_course_or_404`` — 不在と権限なしは同一の 404）。
+    2. 範囲 = そのコースの教材（sources）から求めた document 集合
+       （``services.list_course_source_document_ids``）。成果の行の course_id 列は
+       「どのコースの画面で記帳したか」の出所に退き、範囲には使わない。
+
+    `/courses/{course_id}/...` の admin ルートはすべてここを通す（ガードレールが AST で固定）。
+    空集合のとき core は SQL を出さない（fail-closed）。
+    """
+    course_data = _require_editable_course_or_404(course_id, current_user)
+    return sorted(list_course_source_document_ids(course_data))
+
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +802,70 @@ class ScopePatchRequest(BaseModel):
     reason: str | None = None
 
 
+def _proposals_by_challenge(session, challenge_ids: list[str]) -> dict[str, list[dict]]:
+    """疑義 id → その疑義から昇格した検証提案の一覧（IK-0968・台帳 GET が常設するため）。
+
+    本文・コーパス外の確認・到達可能性・状態を、表示用の日本語ラベルと提案者の表示名つきで返す
+    （UUID の提案者 id は出さない）。取り下げた提案も状態つきで残す（P4）。失敗は空（fail-soft）。
+    """
+    ids = [str(c or "").strip() for c in challenge_ids if str(c or "").strip()]
+    if not ids:
+        return {}
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT vp.id::text, vp.challenge_id::text, vp.proposal, vp.external_check,
+                       vp.reachability, vp.status, COALESCE(NULLIF(BTRIM(u.profile_name), ''), ''), vp.created_at,
+                       COALESCE(NULLIF(BTRIM(cu.profile_name), ''), ''), vp.completed_at, vp.completion_note
+                FROM verification_proposals vp
+                LEFT JOIN users u ON u.id = vp.proposer_id
+                LEFT JOIN users cu ON cu.id = vp.completed_by
+                WHERE vp.challenge_id::text = ANY(:ids)
+                ORDER BY vp.created_at ASC
+            """),
+            {"ids": ids},
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        logger.debug("verification proposals lookup failed", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return {}
+    out: dict[str, list[dict]] = {}
+    for row in rows or []:
+        status = str(row[5] or ProposalStatus.PROPOSED.value)
+        reachability = str(row[4] or "unassessed")
+        out.setdefault(str(row[1]), []).append({
+            "id": str(row[0]),
+            "proposal": str(row[2] or ""),
+            "external_check": str(row[3] or ""),
+            "reachability": reachability,
+            "reachability_label": REACHABILITY_LABELS.get(reachability, REACHABILITY_LABELS["unassessed"]),
+            "status": status,
+            "status_label": PROPOSAL_STATUS_LABELS.get(status, status),
+            "proposer_name": _account_display.label_or_unregistered(row[6]),  # IK-1007
+            "created_at": str(row[7] or ""),
+            # IK-1121: 完了の帰属・日時・根拠（取り下げた疑義の IK-1060 と同じ「誰が・いつ」の形）と、
+            # 完了しても検証状態は変わらないことの事実文。完了以外の状態ではキー自体を付けない。
+            **(_proposal_completion_fields(row) if status == "completed" else {}),
+        })
+    return out
+
+
+def _proposal_completion_fields(row) -> dict:
+    """完了した提案の帰属の 1 行・根拠の 1 行・検証状態との関係の事実文（IK-1121）。"""
+    completed_at = row[9] if len(row) > 9 else None
+    name = _account_display.label_or_unregistered(row[8] if len(row) > 8 else None)
+    note = row[10] if len(row) > 10 else ""
+    return {
+        "completed_at": str(completed_at or ""),
+        "status_line": proposal_completed_line(name, completed_at),
+        "completion_note_line": proposal_completion_note_line(note),
+        "status_note": PROPOSAL_COMPLETED_STATUS_UNCHANGED_NOTE,
+    }
+
+
 class VerificationStatusRequest(BaseModel):
     verification_status: str
     reason: str = ""
@@ -439,16 +875,37 @@ class VerificationStatusRequest(BaseModel):
 def get_ledger_entry(
     target_type: str,
     target_id: str,
+    document_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """台帳行 + スコープ配列 + 出所 + 合意の 2 軸 + 学習者シグナル + 疑義。"""
+    """台帳行 + スコープ配列 + 出所 + 合意の 2 軸 + 学習者シグナル + 疑義。
+
+    ``document_id``（query）は開いている論文。グラフのノード id・式の agent ID は論文の中でしか
+    一意でないので必須（IK-0899）。閲覧できない論文の台帳は 404。``can_edit`` は記帳できるか
+    （IK-0900。画面は偽のとき記帳ボタンを無効にして理由を出す）。
+    """
     _require_ledger_target_type(target_type)
+    access = _ledger_target_access(target_type, target_id, current_user, document_id=document_id)
+    row_document = document_id if target_requires_document(target_type, target_id) else access["document_id"]
     session = _pg_session()
     try:
-        row = _fetch_ledger_row(session, target_type, target_id)
+        row = _fetch_ledger_row(session, target_type, target_id, document_id=row_document)
         if row is None:
-            raise HTTPException(status_code=404, detail="Ledger entry not found")
+            # IK-0931: 行が無いのは「まだ記帳されていない」という事実。閲覧ゲート（上）と
+            # 対象の実在の確認を通れば 200 で、対象についての事実（名前・疑義の入口・can_edit）を
+            # 行の有無と切り離して返す。404 は対象が実在しない・閲覧できないときだけ。
+            return _empty_ledger_entry(
+                session, target_type, target_id,
+                document_id=str(row_document or access["document_id"] or ""),
+                can_edit=bool(access["can_edit"]),
+            )
         scopes = [_scope_out(s) for s in _jsonb_list(row[6]) if isinstance(s, dict)]
+        # IK-0905: 記帳者は UUID ではなく名前で（取れなければ「記帳者を引けません」）。
+        recorder_names = _user_display_names(session, [s["recorded_by"] for s in scopes])
+        for scope_item in scopes:
+            scope_item["recorded_by_label"] = (
+                recorder_names.get(scope_item["recorded_by"]) or RECORDER_UNKNOWN_LABEL
+            )
         candidates = [
             _candidate_out(c) for c in _jsonb_list(row[7])
             if isinstance(c, dict) and str(c.get("status") or "candidate") == "candidate"
@@ -468,11 +925,22 @@ def get_ledger_entry(
         evidence_lines = [
             _evidence_line_out(line) for line in _jsonb_list(row[15]) if isinstance(line, dict)
         ]
+        # SB層（検証シミュレーション, migration 088）: 台帳候補は列名で引く（位置に頼らない）。
+        simulation_candidates = _simulation_candidates_for(
+            session, target_type, target_id, document_id=row_document
+        )
+        simulation_candidates_decided = _simulation_candidates_for(
+            session, target_type, target_id, decided=True, document_id=row_document
+        )
         # SL-3: 独立支持経路（数値非公開・導出失敗はキー自体を付けない fail-soft）。
+        # 範囲は対象の document（IK-0852: 台帳行の course_id 列では絞らない）。
+        scope_ids = [document_id] if document_id else _target_document_ids(
+            session, target_type, target_id, document_id=row_document
+        )
         support_lines = None
         try:
             support_lines = compute_support_lines(
-                session, target_type, target_id, course_id=course_id, document_id=document_id,
+                session, target_type, target_id, document_ids=scope_ids,
             )
         except Exception:  # noqa: BLE001
             logger.warning(
@@ -483,8 +951,8 @@ def get_ledger_entry(
         challenge_rows = session.execute(
             sa_text("""
                 SELECT c.id::text, c.challenge_type, c.reason, c.status,
-                       COALESCE(u.display_name, ''), c.created_at,
-                       c.challenge_mode, c.target_element_ref
+                       COALESCE(NULLIF(BTRIM(u.profile_name), ''), ''), c.created_at,
+                       c.challenge_mode, c.target_element_ref, c.updated_at
                 FROM challenges c
                 LEFT JOIN users u ON u.id = c.challenger_id
                 WHERE c.target_type = :ttype AND c.target_id = :tid
@@ -492,24 +960,50 @@ def get_ledger_entry(
             """),
             {"ttype": target_type, "tid": target_id},
         ).fetchall() if target_type in _CHALLENGE_TARGET_TYPES else []
+        # IK-0968: 疑義から昇格した検証提案は、疑義の下に常設する（作成応答だけで描かない）。
+        proposals_by_challenge = _proposals_by_challenge(
+            session, [str(c[0]) for c in challenge_rows]
+        )
 
         return {
+            "exists": True,
             "target_id": str(row[1]),
             "target_type": str(row[2]),
-            "target_label": target_label(session, target_type, target_id),
+            # IK-0901: 表示名の正本（式は印字番号・ノードは段の日本語名 + 根拠の主張。読めなければ
+            # 「名前を引けない対象」。内部 ID を出さない）。
+            "target_label": ledger_target_label(
+                session, document_id=str(row[3] or ""), target_type=target_type, target_id=target_id
+            ),
             "document_id": str(row[3] or ""),
+            # IK-0934: 見出し「論文の題名 › 対象の名前」の材料（同じ番号の対象を論文で見分ける）。
+            **_document_title_entry(session, str(row[3] or "")),
             "course_id": course_id,
             "verification_status": str(row[5] or "unknown"),
             "verification_status_label": _VERIFICATION_STATUS_LABELS.get(
                 str(row[5] or "unknown"), str(row[5] or "unknown")
             ),
             "verification_scopes": scopes,
+            # IK-1002: 状態が未記帳のままスコープだけがあるときは、状態とスコープの関係を言う。
+            **(
+                {"verification_status_note": LEDGER_STATUS_UNRECORDED_WITH_SCOPES_NOTE}
+                if str(row[5] or "unknown") == "unknown" and scopes else {}
+            ),
+            # IK-1002: 欄名で出所を言い分ける（正本は core/label_vocab.py）。
+            "field_labels": dict(LEDGER_FIELD_LABELS),
+            "field_sources_note": LEDGER_FIELD_SOURCES_NOTE,
+            # IK-0998: 取り下げた疑義は challenges[] に残る。画面は折りたたみで読み取りのみ描く。
+            "withdrawn_challenges_heading": WITHDRAWN_CHALLENGES_HEADING,
             "scope_coverage": scope_coverage_level(len(scopes)),
             "scope_candidates": candidates,
             # 合意の 2 軸は検証とは別フィールド（混同不可能に）
             "consensus_explicit_label": _endorsement_label(consensus_explicit),
             "consensus_behavioral_dependents": int(row[9] or 0),
-            "load_level": _load_level_for_row(session, course_id, row[10]),
+            "load_level": _load_level_for_row(session, scope_ids, row[10]),
+            # IK-1058: 手で記帳した前提は依存の広がりを計算できない（値が無いことを黙らせない）。
+            **(
+                {"load_note": ASSUMPTION_LOAD_UNCOMPUTABLE_NOTE}
+                if target_type == "assumption" and row[10] is None else {}
+            ),
             "naive_signal": {
                 "present": has_naive_signal(target_type, target_id, course_id)
                 if target_type in ("claim", "equation", "component") else False,
@@ -520,20 +1014,45 @@ def get_ledger_entry(
                     "challenge_type": str(c[1]),
                     "reason": str(c[2]),
                     "status": str(c[3]),
-                    "challenger_name": str(c[4]),
+                    "status_label": CHALLENGE_STATUS_LABELS.get(str(c[3]), str(c[3])),
+                    "challenger_name": _account_display.label_or_unregistered(c[4]),  # IK-1007
                     "challenge_mode": str(c[6] or "direct"),
                     "challenge_mode_label": CHALLENGE_MODE_LABELS.get(
                         str(c[6] or "direct"), str(c[6] or "direct")
                     ),
                     "target_element_ref": _normalize_target_element_ref(_jsonb_dict(c[7])),
+                    "proposals": proposals_by_challenge.get(str(c[0]), []),
+                    # IK-1060: 誰が・いつ（取り下げ済みなら取り下げの日時と取り下げた人）。
+                    "created_at": str(c[5] or ""),
+                    **(
+                        {"withdrawn_at": str(c[8] or "") if len(c) > 8 else ""}
+                        if str(c[3]) == "withdrawn" else {}
+                    ),
+                    "record_line": challenge_record_line(
+                        _account_display.label_or_unregistered(c[4]), c[5], c[3],
+                        c[8] if len(c) > 8 else None,
+                    ),
                 }
                 for c in challenge_rows
             ],
             "evidence_lines": evidence_lines,
+            # IK-0904: 疑義の入口（前提・主張）へ辿る道。式・部品の台帳では支える主張を並べる。
+            **(_challenge_entry(session, target_type, target_id, str(row[3] or ""))),
             "falsification_conditions": falsification_conditions,
             "falsification_candidates": falsification_candidates,
+            "simulation_candidates": simulation_candidates,
+            "simulation_candidates_decided": simulation_candidates_decided,
             **({"support_lines": support_lines} if support_lines is not None else {}),
             "updated_at": str(row[12] or ""),
+            # IK-0900: この教員が記帳できるか（真偽値のみ）。偽なら画面は記帳ボタンを無効にする。
+            "can_edit": bool(access["can_edit"]),
+            **({"can_edit_note": LEDGER_READ_ONLY_NOTE} if not access["can_edit"] else {}),
+            "falsification_refresh_note": FALSIFICATION_REFRESH_SCOPE_NOTE,
+            # IK-0899: 論文ごとに分かれる前に共有キーで残った記帳は、どの論文のものか確かめさせる。
+            **(
+                {"attribution_note": LEDGER_ATTRIBUTION_CHECK_NOTE}
+                if _row_attribution_check_needed(row) else {}
+            ),
         }
     finally:
         session.close()
@@ -544,23 +1063,32 @@ def add_ledger_scope(
     target_type: str,
     target_id: str,
     body: ScopeCreateRequest,
+    document_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """検証スコープの記帳（帰属・根拠つきの正式な学術行為）。
 
     必須: 4 軸のうち 1 つ以上 + 根拠（evidence_ids または evidence_quote）+ reason。
+
+    IK-0999: 対象の解決と編集権限（閲覧のみ・不在は同一の 404）を入力の検査（422）より先に
+    確かめる。権限の無い教員に「入力を直せば通る」と読める拒否を返さない。
     """
     _require_ledger_target_type(target_type)
+    # IK-0900: 対象の教材の編集権限（閲覧のみの教員は書けない）。IK-0899: 行キーの論文。
+    doc = _require_editable_ledger_target(
+        target_type, target_id, current_user, document_id=document_id
+    )
     axes = [body.condition.strip(), body.domain.strip(), body.precision.strip(), body.system.strip()]
     if not any(axes):
+        # IK-0905: 欄名は画面の語（正本は core/label_vocab.py::LEDGER_SCOPE_AXIS_LABELS）。
         raise HTTPException(
             status_code=422,
-            detail="condition / domain / precision / system のうち 1 つ以上が必要です",
+            detail="・".join(LEDGER_SCOPE_AXIS_LABELS.values()) + "のうち 1 つ以上を入力してください。",
         )
     if not body.evidence_ids and not body.evidence_quote.strip():
-        raise HTTPException(status_code=422, detail="根拠（evidence_ids または evidence_quote）が必要です")
+        raise HTTPException(status_code=422, detail="根拠（原文の引用など）を入力してください。")
     if not body.reason.strip():
-        raise HTTPException(status_code=422, detail="reason が必要です")
+        raise HTTPException(status_code=422, detail="理由（reason）を入力してください。")
 
     scope = {
         "scope_id": str(uuid.uuid4()),
@@ -576,17 +1104,26 @@ def add_ledger_scope(
     }
     session = _pg_session()
     try:
-        row = _get_or_create_ledger_row(session, target_type, target_id)
+        row = _get_or_create_ledger_row(session, target_type, target_id, document_id=doc)
         if row is None:
             raise HTTPException(status_code=500, detail="Failed to create ledger entry")
+        # IK-0905: 同じ 4 軸・同じ根拠のスコープが既にあれば、受けたうえで事実文を添える
+        # （別の教員の独立の判断として残す意味がある — 弾かない）。
+        duplicate = any(
+            all(
+                str(existing.get(k) or "").strip() == str(scope.get(k) or "").strip()
+                for k in ("condition", "domain", "precision", "system", "evidence_quote")
+            )
+            for existing in _jsonb_list(row[6]) if isinstance(existing, dict)
+        )
         session.execute(
             sa_text("""
                 UPDATE epistemic_ledger
                 SET verification_scopes = verification_scopes || CAST(:scope AS jsonb),
                     updated_at = now()
-                WHERE target_id = :tid AND target_type = :ttype
+                WHERE id = CAST(:lid AS uuid)
             """),
-            {"scope": json.dumps([scope], ensure_ascii=False), "tid": target_id, "ttype": target_type},
+            {"scope": json.dumps([scope], ensure_ascii=False), "lid": row[0]},
         )
         session.commit()
     except HTTPException:
@@ -601,9 +1138,14 @@ def add_ledger_scope(
     _record_doubt_event(
         AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "", "scope_added",
         current_user.get("id"),
-        {"action": "scope_add", "scope_id": scope["scope_id"], "reason": scope["reason"]},
+        {"document_id": doc, "action": "scope_add", "scope_id": scope["scope_id"], "reason": scope["reason"]},
     )
-    return {"ok": True, "scope": _scope_out(scope)}
+    return {
+        "ok": True,
+        "scope": _scope_out(scope),
+        "duplicate": duplicate,
+        **({"note": SCOPE_DUPLICATE_NOTE} if duplicate else {}),
+    }
 
 
 @admin_router.patch("/ledger/{target_type}/{target_id}/scopes/{scope_id}")
@@ -612,13 +1154,18 @@ def patch_ledger_scope(
     target_id: str,
     scope_id: str,
     body: ScopePatchRequest,
+    document_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """スコープの訂正（履歴は review_events に残す）。"""
     _require_ledger_target_type(target_type)
+    # IK-0900: 対象の教材の編集権限（閲覧のみの教員は書けない）。IK-0899: 行キーの論文。
+    doc = _require_editable_ledger_target(
+        target_type, target_id, current_user, document_id=document_id
+    )
     session = _pg_session()
     try:
-        row = _fetch_ledger_row(session, target_type, target_id)
+        row = _fetch_ledger_row(session, target_type, target_id, document_id=doc)
         if row is None:
             raise HTTPException(status_code=404, detail="Ledger entry not found")
         scopes = [s for s in _jsonb_list(row[6]) if isinstance(s, dict)]
@@ -653,9 +1200,9 @@ def patch_ledger_scope(
             sa_text("""
                 UPDATE epistemic_ledger
                 SET verification_scopes = CAST(:scopes AS jsonb), updated_at = now()
-                WHERE target_id = :tid AND target_type = :ttype
+                WHERE id = CAST(:lid AS uuid)
             """),
-            {"scopes": json.dumps(scopes, ensure_ascii=False), "tid": target_id, "ttype": target_type},
+            {"scopes": json.dumps(scopes, ensure_ascii=False), "lid": row[0]},
         )
         session.commit()
     except HTTPException:
@@ -670,7 +1217,7 @@ def patch_ledger_scope(
     _record_doubt_event(
         AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "scope_updated", "scope_updated",
         current_user.get("id"),
-        {"action": "scope_patch", "scope_id": scope_id, "old": old_scope},
+        {"document_id": doc, "action": "scope_patch", "scope_id": scope_id, "old": old_scope},
     )
     return {"ok": True, "scope": _scope_out(target_scope)}
 
@@ -680,18 +1227,24 @@ def put_verification_status(
     target_type: str,
     target_id: str,
     body: VerificationStatusRequest,
+    document_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """検証状態の変更。directly_verified への昇格はスコープ 1 件以上のときのみ
     （= 全称検証の構造的禁止, 422）。"""
     _require_ledger_target_type(target_type)
+    # IK-0900: 対象の教材の編集権限（閲覧のみの教員は書けない）。IK-0899: 行キーの論文。
+    # IK-0999: 権限は入力の検査より先。
+    doc = _require_editable_ledger_target(
+        target_type, target_id, current_user, document_id=document_id
+    )
     new_status = str(body.verification_status or "").strip()
     if new_status not in _VERIFICATION_STATUSES:
         raise HTTPException(status_code=422, detail=f"invalid verification_status: {new_status}")
 
     session = _pg_session()
     try:
-        row = _get_or_create_ledger_row(session, target_type, target_id)
+        row = _get_or_create_ledger_row(session, target_type, target_id, document_id=doc)
         if row is None:
             raise HTTPException(status_code=500, detail="Failed to create ledger entry")
         old_status = str(row[5] or "unknown")
@@ -706,9 +1259,9 @@ def put_verification_status(
             sa_text("""
                 UPDATE epistemic_ledger
                 SET verification_status = :status, updated_at = now()
-                WHERE target_id = :tid AND target_type = :ttype
+                WHERE id = CAST(:lid AS uuid)
             """),
-            {"status": new_status, "tid": target_id, "ttype": target_type},
+            {"status": new_status, "lid": row[0]},
         )
         session.commit()
     except HTTPException:
@@ -723,9 +1276,16 @@ def put_verification_status(
     _record_doubt_event(
         AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", old_status, new_status,
         current_user.get("id"),
-        {"action": "verification_status", "reason": body.reason or ""},
+        {"document_id": doc, "action": "verification_status", "reason": body.reason or ""},
     )
-    return {"ok": True, "verification_status": new_status}
+    # IK-0905: 同じ値の記帳し直しを無反応にしない（変わったかどうかを言い分ける）。
+    changed = old_status != new_status
+    return {
+        "ok": True,
+        "verification_status": new_status,
+        "changed": changed,
+        "note": VERIFICATION_STATUS_CHANGED_NOTE if changed else VERIFICATION_STATUS_UNCHANGED_NOTE,
+    }
 
 
 @admin_router.post("/ledger/{target_type}/{target_id}/scope-candidates/{candidate_id}/confirm")
@@ -734,6 +1294,7 @@ def confirm_scope_candidate(
     target_id: str,
     candidate_id: str,
     body: ScopePatchRequest = Body(default=None),
+    document_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """LLM スコープ候補の確定。候補の値を **教員の帰属で** verification_scopes に転記する。
@@ -741,9 +1302,13 @@ def confirm_scope_candidate(
     候補行自体は昇格せず status='confirmed' で保持（確定なしに本体へ入らない構造）。
     """
     _require_ledger_target_type(target_type)
+    # IK-0900: 対象の教材の編集権限（閲覧のみの教員は書けない）。IK-0899: 行キーの論文。
+    doc = _require_editable_ledger_target(
+        target_type, target_id, current_user, document_id=document_id
+    )
     session = _pg_session()
     try:
-        row = _fetch_ledger_row(session, target_type, target_id)
+        row = _fetch_ledger_row(session, target_type, target_id, document_id=doc)
         if row is None:
             raise HTTPException(status_code=404, detail="Ledger entry not found")
         candidates = [c for c in _jsonb_list(row[7]) if isinstance(c, dict)]
@@ -792,13 +1357,12 @@ def confirm_scope_candidate(
                 SET verification_scopes = verification_scopes || CAST(:scope AS jsonb),
                     scope_candidates = CAST(:candidates AS jsonb),
                     updated_at = now()
-                WHERE target_id = :tid AND target_type = :ttype
+                WHERE id = CAST(:lid AS uuid)
             """),
             {
                 "scope": json.dumps([scope], ensure_ascii=False),
                 "candidates": json.dumps(candidates, ensure_ascii=False),
-                "tid": target_id,
-                "ttype": target_type,
+                "lid": row[0],
             },
         )
         session.commit()
@@ -814,7 +1378,7 @@ def confirm_scope_candidate(
     _record_doubt_event(
         AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "candidate", "scope_added",
         current_user.get("id"),
-        {"action": "scope_candidate_confirm", "candidate_id": candidate_id, "scope_id": scope["scope_id"]},
+        {"document_id": doc, "action": "scope_candidate_confirm", "candidate_id": candidate_id, "scope_id": scope["scope_id"]},
     )
     return {"ok": True, "scope": _scope_out(scope)}
 
@@ -824,13 +1388,18 @@ def dismiss_scope_candidate(
     target_type: str,
     target_id: str,
     candidate_id: str,
+    document_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """LLM スコープ候補の却下（P4: 行は dismissed で保持）。"""
     _require_ledger_target_type(target_type)
+    # IK-0900: 対象の教材の編集権限（閲覧のみの教員は書けない）。IK-0899: 行キーの論文。
+    doc = _require_editable_ledger_target(
+        target_type, target_id, current_user, document_id=document_id
+    )
     session = _pg_session()
     try:
-        row = _fetch_ledger_row(session, target_type, target_id)
+        row = _fetch_ledger_row(session, target_type, target_id, document_id=doc)
         if row is None:
             raise HTTPException(status_code=404, detail="Ledger entry not found")
         candidates = [c for c in _jsonb_list(row[7]) if isinstance(c, dict)]
@@ -848,9 +1417,9 @@ def dismiss_scope_candidate(
             sa_text("""
                 UPDATE epistemic_ledger
                 SET scope_candidates = CAST(:candidates AS jsonb), updated_at = now()
-                WHERE target_id = :tid AND target_type = :ttype
+                WHERE id = CAST(:lid AS uuid)
             """),
-            {"candidates": json.dumps(candidates, ensure_ascii=False), "tid": target_id, "ttype": target_type},
+            {"candidates": json.dumps(candidates, ensure_ascii=False), "lid": row[0]},
         )
         session.commit()
     except HTTPException:
@@ -865,7 +1434,7 @@ def dismiss_scope_candidate(
     _record_doubt_event(
         AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "candidate", "dismissed",
         current_user.get("id"),
-        {"action": "scope_candidate_dismiss", "candidate_id": candidate_id},
+        {"document_id": doc, "action": "scope_candidate_dismiss", "candidate_id": candidate_id},
     )
     return {"ok": True, "candidate_id": candidate_id, "status": "dismissed"}
 
@@ -878,21 +1447,25 @@ def get_ledger_summary(
     """コース単位の台帳サマリ（内部/教員向けのみ）。
 
     空欄は欠陥ではなく事実として返す（文言・警告色にしないのは UI 側の責務）。
+    範囲はコースの教材の document 集合（IK-0852）。
     """
+    document_ids = _course_scope_document_ids(course_id, current_user)
     session = _pg_session()
     try:
-        rows = session.execute(
-            sa_text("""
-                SELECT target_type,
-                       COUNT(*),
-                       COUNT(*) FILTER (WHERE verification_scopes <> '[]'::jsonb),
-                       COUNT(*) FILTER (WHERE verification_scopes = '[]'::jsonb)
-                FROM epistemic_ledger
-                WHERE course_id = :course
-                GROUP BY target_type
-            """),
-            {"course": course_id},
-        ).fetchall()
+        rows = []
+        if document_ids:
+            rows = session.execute(
+                sa_text("""
+                    SELECT target_type,
+                           COUNT(*),
+                           COUNT(*) FILTER (WHERE verification_scopes <> '[]'::jsonb),
+                           COUNT(*) FILTER (WHERE verification_scopes = '[]'::jsonb)
+                    FROM epistemic_ledger
+                    WHERE document_id::text = ANY(:doc_ids)
+                    GROUP BY target_type
+                """),
+                {"doc_ids": document_ids},
+            ).fetchall()
         by_type = {
             str(r[0]): {
                 "targets": int(r[1] or 0),
@@ -916,9 +1489,15 @@ def refresh_scope_candidates(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """スコープ候補の非同期リフレッシュ（P6: 同期パスに LLM を入れない）。"""
-    maybe_schedule_scope_candidates(course_id=course_id)
-    return {"ok": True, "scheduled": True}
+    """スコープ候補の非同期リフレッシュ（P6: 同期パスに LLM を入れない）。
+
+    範囲はコースの教材の document 集合（IK-0852）。範囲が空なら起動しない（IK-0853）。
+    """
+    document_ids = _course_scope_document_ids(course_id, current_user)
+    if not document_ids:
+        return {"ok": True, "scheduled": False, "reason": "no_documents", "note": SCOPE_NO_DOCUMENTS_NOTE}
+    maybe_schedule_scope_candidates(course_id=course_id, document_ids=document_ids)
+    return {"ok": True, "scheduled": True, "note": BATCH_SCHEDULED_NOTE}
 
 
 # ---------------------------------------------------------------------------
@@ -957,10 +1536,16 @@ def add_falsification_condition(
     target_type: str,
     target_id: str,
     body: FalsificationConditionCreateRequest,
+    document_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """反証条件の手動記帳（人間専用の記帳先, SL-1/SL-3）。"""
     _require_ledger_target_type(target_type)
+    # IK-0900: 対象の教材の編集権限（閲覧のみの教員は書けない）。IK-0899: 行キーの論文。
+    # IK-0999: 権限は入力の検査より先。
+    doc = _require_editable_ledger_target(
+        target_type, target_id, current_user, document_id=document_id
+    )
     _validate_falsification_condition_fields(
         body.statement, body.kind, body.reason, body.evidence_ids, body.evidence_quote,
         body.reachability,
@@ -979,7 +1564,7 @@ def add_falsification_condition(
     }
     session = _pg_session()
     try:
-        row = _get_or_create_ledger_row(session, target_type, target_id)
+        row = _get_or_create_ledger_row(session, target_type, target_id, document_id=doc)
         if row is None:
             raise HTTPException(status_code=500, detail="Failed to create ledger entry")
         session.execute(
@@ -987,9 +1572,9 @@ def add_falsification_condition(
                 UPDATE epistemic_ledger
                 SET falsification_conditions = falsification_conditions || CAST(:cond AS jsonb),
                     updated_at = now()
-                WHERE target_id = :tid AND target_type = :ttype
+                WHERE id = CAST(:lid AS uuid)
             """),
-            {"cond": json.dumps([condition], ensure_ascii=False), "tid": target_id, "ttype": target_type},
+            {"cond": json.dumps([condition], ensure_ascii=False), "lid": row[0]},
         )
         session.commit()
     except HTTPException:
@@ -1004,7 +1589,7 @@ def add_falsification_condition(
     _record_doubt_event(
         AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "", "falsification_added",
         current_user.get("id"),
-        {"action": "falsification_add", "condition_id": condition["condition_id"], "reason": condition["reason"]},
+        {"document_id": doc, "action": "falsification_add", "condition_id": condition["condition_id"], "reason": condition["reason"]},
     )
     return {"ok": True, "condition": _falsification_condition_out(condition)}
 
@@ -1015,13 +1600,18 @@ def patch_falsification_condition(
     target_id: str,
     condition_id: str,
     body: FalsificationConditionPatchRequest,
+    document_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """反証条件の訂正（訂正後も必須項目を再検証する）。"""
     _require_ledger_target_type(target_type)
+    # IK-0900: 対象の教材の編集権限（閲覧のみの教員は書けない）。IK-0899: 行キーの論文。
+    doc = _require_editable_ledger_target(
+        target_type, target_id, current_user, document_id=document_id
+    )
     session = _pg_session()
     try:
-        row = _fetch_ledger_row(session, target_type, target_id)
+        row = _fetch_ledger_row(session, target_type, target_id, document_id=doc)
         if row is None:
             raise HTTPException(status_code=404, detail="Ledger entry not found")
         conditions = [c for c in _jsonb_list(row[13]) if isinstance(c, dict)]
@@ -1054,12 +1644,11 @@ def patch_falsification_condition(
             sa_text("""
                 UPDATE epistemic_ledger
                 SET falsification_conditions = CAST(:conditions AS jsonb), updated_at = now()
-                WHERE target_id = :tid AND target_type = :ttype
+                WHERE id = CAST(:lid AS uuid)
             """),
             {
                 "conditions": json.dumps(conditions, ensure_ascii=False),
-                "tid": target_id,
-                "ttype": target_type,
+                "lid": row[0],
             },
         )
         session.commit()
@@ -1075,7 +1664,7 @@ def patch_falsification_condition(
     _record_doubt_event(
         AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "falsification_updated", "falsification_updated",
         current_user.get("id"),
-        {"action": "falsification_patch", "condition_id": condition_id, "old": old_condition},
+        {"document_id": doc, "action": "falsification_patch", "condition_id": condition_id, "old": old_condition},
     )
     return {"ok": True, "condition": _falsification_condition_out(target_condition)}
 
@@ -1086,6 +1675,7 @@ def confirm_falsification_candidate(
     target_id: str,
     candidate_id: str,
     body: FalsificationCandidateConfirmRequest = Body(default=None),
+    document_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """反証条件候補の確定。scope-candidates confirm（543行目）の完全な写し:
@@ -1093,9 +1683,13 @@ def confirm_falsification_candidate(
     :class:`FalsificationCondition` を発行する（確定なしに本体へ入らない構造, SL2/SL3）。
     """
     _require_ledger_target_type(target_type)
+    # IK-0900: 対象の教材の編集権限（閲覧のみの教員は書けない）。IK-0899: 行キーの論文。
+    doc = _require_editable_ledger_target(
+        target_type, target_id, current_user, document_id=document_id
+    )
     session = _pg_session()
     try:
-        row = _fetch_ledger_row(session, target_type, target_id)
+        row = _fetch_ledger_row(session, target_type, target_id, document_id=doc)
         if row is None:
             raise HTTPException(status_code=404, detail="Ledger entry not found")
         candidates = [c for c in _jsonb_list(row[14]) if isinstance(c, dict)]
@@ -1147,13 +1741,12 @@ def confirm_falsification_candidate(
                 SET falsification_conditions = falsification_conditions || CAST(:cond AS jsonb),
                     falsification_candidates = CAST(:candidates AS jsonb),
                     updated_at = now()
-                WHERE target_id = :tid AND target_type = :ttype
+                WHERE id = CAST(:lid AS uuid)
             """),
             {
                 "cond": json.dumps([condition], ensure_ascii=False),
                 "candidates": json.dumps(candidates, ensure_ascii=False),
-                "tid": target_id,
-                "ttype": target_type,
+                "lid": row[0],
             },
         )
         session.commit()
@@ -1170,6 +1763,7 @@ def confirm_falsification_candidate(
         AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "candidate", "falsification_added",
         current_user.get("id"),
         {
+            "document_id": doc,
             "action": "falsification_candidate_confirm",
             "candidate_id": candidate_id,
             "condition_id": condition["condition_id"],
@@ -1183,13 +1777,18 @@ def dismiss_falsification_candidate(
     target_type: str,
     target_id: str,
     candidate_id: str,
+    document_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """反証条件候補の却下（P4: 行は dismissed で保持する）。"""
     _require_ledger_target_type(target_type)
+    # IK-0900: 対象の教材の編集権限（閲覧のみの教員は書けない）。IK-0899: 行キーの論文。
+    doc = _require_editable_ledger_target(
+        target_type, target_id, current_user, document_id=document_id
+    )
     session = _pg_session()
     try:
-        row = _fetch_ledger_row(session, target_type, target_id)
+        row = _fetch_ledger_row(session, target_type, target_id, document_id=doc)
         if row is None:
             raise HTTPException(status_code=404, detail="Ledger entry not found")
         candidates = [c for c in _jsonb_list(row[14]) if isinstance(c, dict)]
@@ -1207,9 +1806,9 @@ def dismiss_falsification_candidate(
             sa_text("""
                 UPDATE epistemic_ledger
                 SET falsification_candidates = CAST(:candidates AS jsonb), updated_at = now()
-                WHERE target_id = :tid AND target_type = :ttype
+                WHERE id = CAST(:lid AS uuid)
             """),
-            {"candidates": json.dumps(candidates, ensure_ascii=False), "tid": target_id, "ttype": target_type},
+            {"candidates": json.dumps(candidates, ensure_ascii=False), "lid": row[0]},
         )
         session.commit()
     except HTTPException:
@@ -1224,9 +1823,107 @@ def dismiss_falsification_candidate(
     _record_doubt_event(
         AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "candidate", "dismissed",
         current_user.get("id"),
-        {"action": "falsification_candidate_dismiss", "candidate_id": candidate_id},
+        {"document_id": doc, "action": "falsification_candidate_dismiss", "candidate_id": candidate_id},
     )
     return {"ok": True, "candidate_id": candidate_id, "status": "dismissed"}
+
+
+class _SimulationAuditAdapter:
+    """SB層 store の ``record_audit(**kw)`` を ``_record_doubt_event`` へ写す（コミット後に記帳）。"""
+
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def __call__(self, **kwargs: Any) -> None:
+        self.events.append(dict(kwargs))
+
+    def flush(self) -> None:
+        for event in self.events:
+            metadata = dict(event.get("metadata") or {})
+            metadata.setdefault("action", event.get("action"))
+            _record_doubt_event(
+                AUDIT_ENTITY_SIMULATION,
+                str(event.get("entity_id") or ""),
+                str(event.get("old_status") or ""),
+                str(event.get("new_status") or ""),
+                event.get("actor_id"),
+                metadata,
+            )
+
+
+def _decide_simulation_candidate(
+    target_type: str, target_id: str, candidate_id: str, action: str, current_user: dict, *, reason: str = "",
+    document_id: str | None = None,
+) -> dict:
+    _require_ledger_target_type(target_type)
+    doc = _require_editable_ledger_target(target_type, target_id, current_user, document_id=document_id)
+    audit = _SimulationAuditAdapter()
+    session = _pg_session()
+    try:
+        try:
+            outcome = simulation_store.decide_ledger_candidate(
+                session,
+                target_type=target_type,
+                target_id=target_id,
+                candidate_id=candidate_id,
+                action=action,
+                actor_id=str(current_user.get("id") or ""),
+                record_audit=audit,
+                reason=reason,
+                document_id=doc,
+            )
+        except simulation_store.SimulationNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc) or "台帳候補が見つかりません。") from exc
+        except simulation_store.SimulationStateError as exc:
+            session.rollback()
+            raise HTTPException(status_code=422, detail=str(exc) or "この候補は既に処理済みです。") from exc
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to decide simulation candidate for %s/%s", target_type, target_id)
+        raise HTTPException(status_code=500, detail="台帳候補の判断を保存できませんでした。")
+    finally:
+        session.close()
+    audit.flush()
+    return {
+        "candidate": _simulation_candidate_out(outcome.get("candidate") or {}),
+        "verification_status": str(outcome.get("verification_status") or ""),
+    }
+
+
+@admin_router.post("/ledger/{target_type}/{target_id}/simulation-candidates/{candidate_id}/confirm")
+def confirm_simulation_candidate(
+    target_type: str,
+    target_id: str,
+    candidate_id: str,
+    document_id: str | None = None,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """検証シミュレーションの台帳候補の確定（SB1: indirectly_supported 止まり）。"""
+    return _decide_simulation_candidate(
+        target_type, target_id, candidate_id, "confirm", current_user, document_id=document_id
+    )
+
+
+@admin_router.post("/ledger/{target_type}/{target_id}/simulation-candidates/{candidate_id}/dismiss")
+def dismiss_simulation_candidate(
+    target_type: str,
+    target_id: str,
+    candidate_id: str,
+    body: dict | None = Body(default=None),
+    document_id: str | None = None,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """検証シミュレーションの台帳候補の見送り（配列内の status 遷移・削除しない）。
+
+    body の ``reason`` を候補に残す（第 21 周 (g): 見送りの理由の置き場が無かった。空でもよい — 教員側の弁を増やさない）。
+    """
+    reason = str((body or {}).get("reason") or "") if isinstance(body, dict) else ""
+    return _decide_simulation_candidate(
+        target_type, target_id, candidate_id, "dismiss", current_user, reason=reason, document_id=document_id
+    )
 
 
 @admin_router.post("/courses/{course_id}/falsification-candidates/refresh")
@@ -1234,9 +1931,15 @@ def refresh_falsification_candidates(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """反証条件候補の非同期リフレッシュ（P6: 同期パスに LLM を入れない）。"""
-    maybe_schedule_falsification_candidates(course_id=course_id)
-    return {"ok": True, "scheduled": True}
+    """反証条件候補の非同期リフレッシュ（P6: 同期パスに LLM を入れない）。
+
+    範囲はコースの教材の document 集合（IK-0852）。範囲が空なら起動しない（IK-0853）。
+    """
+    document_ids = _course_scope_document_ids(course_id, current_user)
+    if not document_ids:
+        return {"ok": True, "scheduled": False, "reason": "no_documents", "note": SCOPE_NO_DOCUMENTS_NOTE}
+    maybe_schedule_falsification_candidates(course_id=course_id, document_ids=document_ids)
+    return {"ok": True, "scheduled": True, "note": BATCH_SCHEDULED_NOTE}
 
 
 # ---------------------------------------------------------------------------
@@ -1247,17 +1950,28 @@ def refresh_falsification_candidates(
 @admin_router.get("/courses/{course_id}/observation-targets")
 def get_observation_targets(
     course_id: str,
+    document_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """観測系 claim の一覧（「観測を仮に倒す」の選択肢。identified_via 併記・数値なし）。
 
     course_id 直指定なので、集約の前に編集権限ゲートを通す（P0 fail-closed）。
+    範囲はコースの教材の document 集合（IK-0852）。``document_id``（query・IK-0903）を
+    渡すと、開いているグラフの論文 1 件に絞る（コースの教材に含まれる論文だけ。外なら 404）。
     """
-    _require_editable_course_or_404(course_id, current_user)
+    document_ids = _course_scope_document_ids(course_id, current_user)
+    wanted = normalize_document_id(document_id)
+    if document_id:
+        if not wanted or wanted not in {d.lower() for d in document_ids}:
+            raise HTTPException(status_code=404, detail="Document not found in course")
+        document_ids = [wanted]
     session = _pg_session()
     try:
-        targets = observation_claim_targets(session, course_id=course_id)
-        return {"targets": targets}
+        targets = observation_claim_targets(session, document_ids=document_ids)
+        return {
+            "targets": targets,
+            **({} if document_ids else {"reason": "no_documents", "note": SCOPE_NO_DOCUMENTS_NOTE}),
+        }
     finally:
         session.close()
 
@@ -1291,9 +2005,20 @@ def recompute_course_load(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """負荷度の再計算（決定論的バッチ）。レスポンスに生スコアは含めない。"""
-    result = recompute_load_scores(course_id=course_id)
-    return {"ok": not result.get("failed", False), "updated": int(result.get("updated") or 0)}
+    """負荷度の再計算（決定論的バッチ）。レスポンスに生スコアは含めない。
+
+    範囲はコースの教材の document 集合（IK-0852）。
+    """
+    document_ids = _course_scope_document_ids(course_id, current_user)
+    result = recompute_load_scores(document_ids=document_ids)
+    out = {
+        "ok": not result.get("failed", False),
+        "updated": int(result.get("updated") or 0),
+        "note": LOAD_RECOMPUTED_NOTE,
+    }
+    if not document_ids:
+        out.update({"reason": "no_documents", "note": SCOPE_NO_DOCUMENTS_NOTE})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1339,20 +2064,45 @@ _ASSUMPTION_SELECT = """
 """
 
 
+def _insert_assumption_ledger_row(session, assumption_id: str, *, course_id: str, document_id: str) -> None:
+    """確定した前提の台帳行（既定 'untested'・スコープ空欄）。document が無ければ作らない。"""
+    if not normalize_document_id(document_id):
+        return
+    session.execute(
+        sa_text("""
+            INSERT INTO epistemic_ledger
+                (target_id, target_type, document_id, course_id, verification_status)
+            VALUES (:tid, 'assumption', CAST(:doc AS uuid), :course, 'untested')
+            ON CONFLICT ON CONSTRAINT epistemic_ledger_document_target_key DO NOTHING
+        """),
+        {"tid": assumption_id, "doc": normalize_document_id(document_id), "course": course_id},
+    )
+
+
 @admin_router.get("/courses/{course_id}/assumptions")
 def list_assumptions(
     course_id: str,
     status: str = "candidate",
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """前提一覧（出所つき）。dismissed もフィルタで確認できる（P4: 消えない）。"""
+    """前提一覧（出所つき）。dismissed もフィルタで確認できる（P4: 消えない）。
+
+    範囲（IK-0852）: コースの教材の document に掛かる前提（``document_ids`` が重なる）∪
+    このコースの画面で記帳された前提（出所の course_id）∪ どの論文・コースにも
+    結ばれていない前提（記帳時に範囲を持たなかったもの。従来どおり見せる — P4）。
+    """
+    document_ids = _course_scope_document_ids(course_id, current_user)
     allowed = ("candidate", "confirmed", "operationalized", "dismissed", "all")
     if status not in allowed:
         raise HTTPException(status_code=422, detail=f"invalid status filter: {status}")
     session = _pg_session()
     try:
-        filters = ["(course_id = :course OR course_id = '')"]
-        params: dict[str, Any] = {"course": course_id}
+        filters = [
+            "(course_id = :course"
+            " OR document_ids ?| CAST(:doc_ids AS text[])"
+            " OR (course_id = '' AND jsonb_array_length(document_ids) = 0))"
+        ]
+        params: dict[str, Any] = {"course": course_id, "doc_ids": document_ids}
         if status != "all":
             filters.append("status = :status")
             params["status"] = status
@@ -1368,10 +2118,67 @@ def list_assumptions(
             item["has_naive_signal"] = any(
                 has_naive_signal("component", nid, course_id) for nid in node_ids[:5]
             )
+            # IK-1028: 出所・段階は画面の語で返す（JS に日本語表を持たない）。確定済みの前提は
+            # 台帳を開く手を持つ — 台帳行は論文単位なので、結ばれた論文（コースの範囲を優先）の
+            # 先頭を行キーに使う。論文に結ばれていなければ台帳行が無いことを事実文で添える。
+            item["origin_label"] = assumption_origin_label(item["origin"])
+            item["status_label"] = assumption_status_label(item["status"])
+            if item["status"] in ("confirmed", "operationalized"):
+                linked = [str(d) for d in item["document_ids"] if str(d or "").strip()]
+                in_scope = [d for d in linked if d in set(document_ids)]
+                ledger_doc = (in_scope or linked or [""])[0]
+                if ledger_doc:
+                    item["ledger_document_id"] = ledger_doc
+                    # IK-1028 残り（第 7 波）: 同じ文面の確定済みの前提を見分けられるよう、結ばれた論文の
+                    # 題名を事実文で添える。題名を引くのはコースの範囲の論文だけ（範囲外は名前を出さない）。
+                    if ledger_doc in set(document_ids):
+                        title = _document_title_entry(session, ledger_doc).get("document_title") or ""
+                        if title:
+                            item["ledger_document_line"] = ASSUMPTION_LINKED_DOCUMENT_LINE.format(title=title)
+                else:
+                    item["ledger_note"] = ASSUMPTION_NOT_LINKED_TO_DOCUMENT_NOTE
             items.append(item)
-        return {"course_id": course_id, "status": status, "items": items}
+        # IK-0853 / IK-0904: マイニングの結果を受付だけで終わらせない（範囲にマイニング由来の
+        # 候補があるかを、一覧を読むたびに事実で添える）。
+        mined_present = session.execute(
+            sa_text(
+                "SELECT 1 FROM assumption_nodes WHERE origin = 'mined_gap' AND status = 'candidate'"
+                " AND (course_id = :course OR document_ids ?| CAST(:doc_ids AS text[])) LIMIT 1"
+            ),
+            {"course": course_id, "doc_ids": document_ids},
+        ).fetchone() is not None
+        # IK-0853 残り③: 確定済み・却下の表示ではマイニングの候補の文を出さない
+        # （候補の有無はその表示の中身ではない）。候補・すべての表示だけに添える。
+        show_mining = status in ("candidate", "all")
+        return {
+            "course_id": course_id,
+            "status": status,
+            "items": items,
+            "mining_note": (
+                ASSUMPTION_MINING_NOTES[_mining_note_key(mined_present, course_id)]
+                if show_mining else None
+            ),
+        }
     finally:
         session.close()
+
+
+def _mining_note_key(mined_present: bool, course_id: str) -> str:
+    """前提の一覧に添えるマイニングの事実の語（IK-0853 第 4 周）。
+
+    候補があればそれを言う。無ければ、このプロセスで予約したマイニングの状態
+    （実行中 / 終わって候補なし / 失敗）を言い分け、記録が無ければ範囲の事実だけを言う。
+    """
+    if mined_present:
+        return "found"
+    state = mining_state(course_id)
+    if state == MINING_STATE_RUNNING:
+        return "running"
+    if state == MINING_STATE_FINISHED:
+        return "finished_none"
+    if state == MINING_STATE_FAILED:
+        return "failed"
+    return "none_in_scope"
 
 
 @admin_router.post("/assumptions")
@@ -1380,6 +2187,13 @@ def create_assumption_manual(
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """手動登録（origin='manual'）。教員の直接明示化なので即 confirmed になる。"""
+    # IK-0900: 結ぶコース・論文は編集できるものだけ（不在と権限なしは同一の 404）。
+    # IK-0999: 権限は入力の検査より先。
+    if body.course_id:
+        _require_editable_course_or_404(body.course_id, current_user)
+    for doc in body.document_ids:
+        if str(doc or "").strip():
+            _require_editable_document_or_404(str(doc), current_user)
     if not body.statement.strip():
         raise HTTPException(status_code=422, detail="statement が必要です")
     if not body.reason.strip():
@@ -1405,14 +2219,13 @@ def create_assumption_manual(
             },
         ).fetchone()
         assumption_id = str(row[0])
-        # 確定と同時に台帳行を自動生成（既定 untested・スコープ空欄）
-        session.execute(
-            sa_text("""
-                INSERT INTO epistemic_ledger (target_id, target_type, course_id, verification_status)
-                VALUES (:tid, 'assumption', :course, 'untested')
-                ON CONFLICT (target_id, target_type) DO NOTHING
-            """),
-            {"tid": assumption_id, "course": body.course_id or ""},
+        # 確定と同時に台帳行を自動生成（既定 untested・スコープ空欄）。
+        # 行キー (document_id, target_type, target_id)（IK-0899）。前提の行の document は
+        # 結ばれた論文の先頭（ledger_targets と同じ規則）。論文に結ばれていない前提は、
+        # document の無い行を作らない（記帳の時に作る）。
+        _insert_assumption_ledger_row(
+            session, assumption_id, course_id=body.course_id or "",
+            document_id=next((str(d) for d in body.document_ids if str(d or "").strip()), ""),
         )
         session.commit()
     except HTTPException:
@@ -1432,6 +2245,44 @@ def create_assumption_manual(
     return {"ok": True, "assumption_id": assumption_id, "status": "confirmed"}
 
 
+def _require_editable_assumption(assumption_id: str, current_user: dict) -> None:
+    """前提の確定・却下の権限（IK-0900）。
+
+    前提が結ばれたコース（出所）か論文のどれかを編集できる教員だけ。どのコースにも論文にも
+    結ばれていない前提（手動の記帳）は TEACHER 以上なら扱える（従来どおり）。不在と権限なしは
+    同一の 404。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT course_id, document_ids FROM assumption_nodes WHERE id::text = :aid"),
+            {"aid": assumption_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Assumption not found")
+    course_id = str(row[0] or "").strip()
+    document_ids = [str(d) for d in _jsonb_list(row[1]) if str(d or "").strip()]
+    if not course_id and not document_ids:
+        return
+    if current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        return
+    if course_id:
+        try:
+            _require_editable_course_or_404(course_id, current_user)
+            return
+        except HTTPException:
+            pass
+    for doc in document_ids:
+        try:
+            _require_editable_document_or_404(doc, current_user)
+            return
+        except HTTPException:
+            continue
+    raise HTTPException(status_code=404, detail="Assumption not found")
+
+
 @admin_router.post("/assumptions/{assumption_id}/confirm")
 def confirm_assumption(
     assumption_id: str,
@@ -1439,6 +2290,8 @@ def confirm_assumption(
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """候補の確定 = 「専門家が確かにこれは暗黙の前提だと引き受ける」行為。reason 必須。"""
+    # IK-0999: 権限（不在と同一の 404）は入力の検査より先。
+    _require_editable_assumption(assumption_id, current_user)
     if not body.reason.strip():
         raise HTTPException(status_code=422, detail="reason が必要です")
     session = _pg_session()
@@ -1466,14 +2319,12 @@ def confirm_assumption(
             """),
             {"statement": statement, "uid": current_user.get("id"), "aid": assumption_id},
         )
-        # 確定時に台帳行を自動生成（既定 untested・スコープ空欄）
-        session.execute(
-            sa_text("""
-                INSERT INTO epistemic_ledger (target_id, target_type, course_id, verification_status)
-                VALUES (:tid, 'assumption', :course, 'untested')
-                ON CONFLICT (target_id, target_type) DO NOTHING
-            """),
-            {"tid": assumption_id, "course": course_id},
+        # 確定時に台帳行を自動生成（既定 untested・スコープ空欄。行キーは IK-0899）。
+        _insert_assumption_ledger_row(
+            session, assumption_id, course_id=course_id,
+            document_id=resolve_ledger_document_id(
+                session, target_type="assumption", target_id=assumption_id, document_id=None
+            ) or "",
         )
         session.commit()
     except HTTPException:
@@ -1499,6 +2350,7 @@ def dismiss_assumption(
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """候補の却下。dismissed で保持する（P4: 削除しない）。"""
+    _require_editable_assumption(assumption_id, current_user)
     session = _pg_session()
     try:
         row = session.execute(
@@ -1540,9 +2392,15 @@ def run_assumption_mining_route(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """経路A（導出の隙間の反転）の非同期実行。"""
-    maybe_schedule_assumption_mining(course_id=course_id)
-    return {"ok": True, "scheduled": True}
+    """経路A（導出の隙間の反転）の非同期実行。
+
+    範囲はコースの教材の document 集合（IK-0852）。範囲が空なら起動しない（IK-0853）。
+    """
+    document_ids = _course_scope_document_ids(course_id, current_user)
+    if not document_ids:
+        return {"ok": True, "scheduled": False, "reason": "no_documents", "note": SCOPE_NO_DOCUMENTS_NOTE}
+    maybe_schedule_assumption_mining(document_ids=document_ids, course_id=course_id)
+    return {"ok": True, "scheduled": True, "note": BATCH_SCHEDULED_NOTE}
 
 
 @admin_router.post("/courses/{course_id}/corpus-audit/run")
@@ -1550,19 +2408,70 @@ def run_corpus_audit_route(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """経路B（コーパス横断の監査）の実行（非LLM・同期でも軽量）。"""
-    result = run_corpus_audit(course_id=course_id)
-    return {
+    """経路B（コーパス横断の監査）の実行（非LLM・同期でも軽量）。
+
+    範囲はコースの教材の document 集合（IK-0852）。``reason`` は実行しなかった理由の語彙
+    （``no_documents`` = 教材が無い / ``no_analysis`` = 教材に解析グラフが無い /
+    ``corpus_too_small`` = 論文が少ない）。画面はこれを事実文にする（IK-0853）。
+    """
+    document_ids = _course_scope_document_ids(course_id, current_user)
+    result = run_corpus_audit(document_ids=document_ids, course_id=course_id)
+    out = {
         "ok": not result.get("failed", False),
         "skipped": bool(result.get("skipped")),
         "documents": int(result.get("documents") or 0),
         "registered": int(result.get("registered") or 0),
     }
+    if result.get("reason"):
+        out["reason"] = str(result["reason"])
+    if result.get("failed"):
+        note_key = "failed"
+    elif out["skipped"]:
+        note_key = out.get("reason") or "corpus_too_small"
+    else:
+        note_key = "registered" if out["registered"] else "none_found"
+    out["note"] = CORPUS_AUDIT_NOTES.get(note_key, "")
+    return out
 
 
 # ---------------------------------------------------------------------------
 # D2-3: 前提の地図（Assumption Atlas）
 # ---------------------------------------------------------------------------
+
+
+def _attach_unplotted_detail_lines(session, unplotted: list[dict]) -> None:
+    """IK-1074: 「計算できない前提」の各行に、被覆の段・論文・記帳の日時の 1 行を添える（fail-soft）。
+
+    散布図の点は横の位置で被覆を運ぶが、この区画は位置を持たないので文で運ぶ。同じ文面の前提が
+    並んでも、スコープを記帳したものと日時・論文で見分けられる。
+    """
+    if not unplotted:
+        return
+    created: dict[str, object] = {}
+    ids = sorted({p["target_id"] for p in unplotted if p.get("target_type") == "assumption"})
+    if ids:
+        try:
+            rows = session.execute(
+                sa_text("SELECT id::text, created_at FROM assumption_nodes WHERE id::text = ANY(:ids)"),
+                {"ids": ids},
+            ).fetchall()
+            created = {str(r[0]): r[1] for r in rows or [] if r}
+        except Exception:  # noqa: BLE001 — 日時が引けなくても行は出す
+            logger.debug("assumption created_at lookup failed", exc_info=True)
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+    titles: dict[str, str] = {}
+    for point in unplotted:
+        doc = str(point.get("document_id") or "")
+        if doc and doc not in titles:
+            titles[doc] = str(_document_title_entry(session, doc).get("document_title") or "")
+        point["detail_line"] = assumption_unplotted_detail_line(
+            SCOPE_COVERAGE_LABELS.get(str(point.get("scope_coverage") or ""), ""),
+            titles.get(doc, ""),
+            created.get(str(point.get("target_id") or "")),
+        )
 
 
 @admin_router.get("/courses/{course_id}/assumption-atlas")
@@ -1574,27 +2483,39 @@ def get_assumption_atlas(
 
     レスポンスに評価語・生スコア数値を含めない。空欄（スコープ 0 件）の点は
     unscoped=true（UI は塗りなし・点線輪郭で描く）。
+    範囲はコースの教材の document 集合（IK-0852。台帳行の course_id 列では絞らない）。
     """
+    document_ids = _course_scope_document_ids(course_id, current_user)
     session = _pg_session()
     try:
-        p50, p90, p99 = load_percentiles(session, course_id)
-        rows = session.execute(
-            sa_text("""
-                SELECT l.target_id, l.target_type, l.verification_status,
-                       l.verification_scopes, l.consensus_explicit, l.load_score,
-                       a.status
-                FROM epistemic_ledger l
-                LEFT JOIN assumption_nodes a
-                  ON l.target_type = 'assumption' AND a.id::text = l.target_id
-                WHERE l.course_id = :course
-                  AND l.load_score IS NOT NULL
-            """),
-            {"course": course_id},
-        ).fetchall()
+        exclusion = ClaimChainExclusion(session)
+        # IK-0970: 段の閾値は表示の母集団（導出の手順を外した後）で取る。
+        p50, p90, p99 = load_percentiles(session, document_ids=document_ids, exclusion=exclusion)
+        rows = []
+        if document_ids:
+            rows = session.execute(
+                sa_text("""
+                    SELECT l.target_id, l.target_type, l.verification_status,
+                           l.verification_scopes, l.consensus_explicit, l.load_score,
+                           a.status, l.document_id::text
+                    FROM epistemic_ledger l
+                    LEFT JOIN assumption_nodes a
+                      ON l.target_type = 'assumption' AND a.id::text = l.target_id
+                    WHERE l.document_id::text = ANY(:doc_ids)
+                      AND (l.load_score IS NOT NULL OR l.target_type = 'assumption')
+                """),
+                {"doc_ids": document_ids},
+            ).fetchall()
 
+        labels = LedgerTargetLabels(session)
         points = []
+        unplotted: list[dict] = []
         for row in rows:
             target_type = str(row[1])
+            row_document_id = str(row[7] or "") if len(row) > 7 else ""
+            # IK-0933: claim チェーンの導出ステップは前提ではない（理論モジュール層と同じ判定）。
+            if exclusion.excludes(target_type, str(row[0]), row_document_id):
+                continue
             assumption_status = str(row[6] or "")
             if target_type == "assumption":
                 # 地図に載るのは confirmed / operationalized の前提のみ
@@ -1608,10 +2529,27 @@ def get_assumption_atlas(
                 continue
             scopes = [s for s in _jsonb_list(row[3]) if isinstance(s, dict)]
             consensus = _jsonb_dict(row[4])
+            if row[5] is None:
+                # IK-1058: 依存の広がりを計算できない前提（手で記帳・グラフ上の要素に結ばれていない）。
+                # 縦の位置を決められないので点にせず、地図の下に並べる（黙って落とさない）。
+                unplotted.append({
+                    "target_id": str(row[0]),
+                    "target_type": target_type,
+                    "label": labels.label(target_type, str(row[0]), document_id=row_document_id),
+                    "document_id": row_document_id,
+                    "verification_status": str(row[2] or "unknown"),
+                    "scope_coverage": scope_coverage_level(len(scopes)),
+                    "unscoped": len(scopes) == 0,
+                    "load_level": "",
+                    "load_note": ASSUMPTION_LOAD_UNCOMPUTABLE_NOTE,
+                })
+                continue
             points.append({
                 "target_id": str(row[0]),
                 "target_type": target_type,
-                "label": target_label(session, target_type, str(row[0])),
+                # IK-0901: 表示名の正本。IK-0899: 行キーの論文（台帳詳細を開くときに添える）。
+                "label": labels.label(target_type, str(row[0]), document_id=row_document_id),
+                "document_id": row_document_id,
                 "verification_status": str(row[2] or "unknown"),
                 "scope_coverage": scope_coverage_level(len(scopes)),
                 "unscoped": len(scopes) == 0,
@@ -1622,12 +2560,27 @@ def get_assumption_atlas(
                     if target_type in ("claim", "equation", "component") else False
                 ),
             })
-        points.sort(key=lambda p: (p["target_type"], p["target_id"]))
+        points.sort(key=lambda p: (p["target_type"], p["target_id"], p["document_id"]))
+        _attach_unplotted_detail_lines(session, unplotted)
+        unplotted.sort(key=lambda p: (p["target_id"], p["document_id"]))
         return {
             "course_id": course_id,
+            # IK-1058: 依存の広がりを計算できない前提（点にしない・件数は出さない）。
+            **(
+                {"unplotted_points": unplotted, "unplotted_heading": ASSUMPTION_ATLAS_UNPLOTTED_HEADING}
+                if unplotted else {}
+            ),
+            # 範囲が空かどうか（IK-0853: 空の地図の理由を画面が言い分ける。件数は出さない）。
+            "has_documents": bool(document_ids),
+            **(
+                {"empty_note": (ATLAS_EMPTY_NOTE if document_ids else SCOPE_NO_DOCUMENTS_NOTE),
+                 "empty_hint": STUDIO_LEDGER_HINT}
+                if not points and not unplotted else {}
+            ),
             # 軸ラベルは事実記述のみ（ゾーン名・煽り文句を持たない）
             "axes": {"x": "検証スコープの被覆", "y": "依存の広がり"},
             "points": points,
+            **({"population_note": CLAIM_CHAIN_EXCLUDED_NOTE} if exclusion.excluded else {}),
         }
     finally:
         session.close()
@@ -1655,12 +2608,29 @@ _TARGET_DOCUMENT_SQL: dict[str, str] = {
     ),
 }
 
-#: 権限が確かめられない書き込みは、不在と同じ 404 に畳む（detail も同一）。
-_LEDGER_TARGET_NOT_FOUND = "Ledger target not found"
+#: 閲覧もできない・対象が解決できない書き込みは、同一の 404 に畳む（detail も同一 = 存在の有無を
+#: 言わない）。閲覧できるが編集できない相手には 403 + 画面と同じ理由文（IK-1027）。正本は label_vocab。
+from core.label_vocab import (  # noqa: E402
+    ASSUMPTION_NOT_LINKED_TO_DOCUMENT_NOTE,
+    assumption_origin_label,
+    assumption_status_label,
+    LEDGER_READ_ONLY_NOTE as _LEDGER_WRITE_FORBIDDEN,
+    LEDGER_WRITE_TARGET_NOT_FOUND_NOTE as _LEDGER_TARGET_NOT_FOUND,
+)
 
 
-def _target_document_ids(session, target_type: str, target_id: str) -> list[str]:
-    """台帳対象が属する document の id を引く（解決できなければ空）。"""
+def _target_document_ids(
+    session, target_type: str, target_id: str, *, document_id: str | None = None
+) -> list[str]:
+    """台帳対象が属する document の id を引く（解決できなければ空）。
+
+    IK-0899: 論文の中でしか一意でない対象（グラフのノード id・式の agent ID）は、
+    指定された ``document_id`` の 1 件だけ（無ければ空 = 閉じる）。id だけで引くと
+    同じ番号の対象を持つ別の論文に着地する。
+    """
+    if target_requires_document(target_type, target_id):
+        doc = normalize_document_id(document_id)
+        return [doc] if doc else []
     ids: list[str] = []
     sql = _TARGET_DOCUMENT_SQL.get(target_type)
     if sql:
@@ -1683,38 +2653,135 @@ def _target_document_ids(session, target_type: str, target_id: str) -> list[str]
         if row and row[0]:
             ids.extend(str(v) for v in _jsonb_list(row[0]) if str(v or "").strip())
     # 台帳行に document_id が刻まれていればそれも候補にする（後付けの対象で使う）。
-    ledger = _fetch_ledger_row(session, target_type, target_id)
+    ledger = _fetch_ledger_row(session, target_type, target_id, document_id=document_id)
     if ledger is not None and ledger[3]:
         ids.append(str(ledger[3]))
     seen: set[str] = set()
     return [i for i in ids if i and not (i in seen or seen.add(i))]
 
 
-def _require_editable_ledger_target(target_type: str, target_id: str, current_user: dict) -> str:
-    """根拠の線の書き込み権限（P4-R8）。
+def _scoped_target_in_document(session, target_type: str, target_id: str, document_id: str) -> bool:
+    """論文の中でしか一意でない対象が、その論文に実在するか（IK-0899・書き込み前の確認）。
+
+    既存の台帳行・理論操作グラフのノード・式の行のどれかに現れれば実在とみなす。
+    推測で別の論文の対象に記帳させない（無ければ 404 に畳む）。
+    """
+    checks = [
+        (
+            "SELECT 1 FROM epistemic_ledger WHERE target_id = :tid AND target_type = :ttype "
+            "AND document_id = CAST(:doc AS uuid) LIMIT 1"
+        ),
+        (
+            "SELECT 1 FROM theory_component_graphs g, "
+            "jsonb_array_elements(COALESCE(g.graph_json -> 'nodes', '[]'::jsonb)) n "
+            "WHERE g.document_id = CAST(:doc AS uuid) "
+            "AND (n ->> 'component_id' = :tid OR n ->> 'id' = :tid) LIMIT 1"
+        ),
+    ]
+    if target_type == "equation":
+        checks.append(
+            "SELECT 1 FROM knowledge_equations_live WHERE document_id = CAST(:doc AS uuid) "
+            "AND agent_equation_id = :tid LIMIT 1"
+        )
+    for sql in checks:
+        try:
+            row = session.execute(
+                sa_text(sql), {"tid": target_id, "ttype": target_type, "doc": document_id}
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            logger.debug("scoped ledger target lookup failed", exc_info=True)
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            row = None
+        if row is not None:
+            return True
+    return False
+
+
+def _require_editable_ledger_target(
+    target_type: str, target_id: str, current_user: dict, *, document_id: str | None = None
+) -> str:
+    """台帳の対象単位の書き込み権限（P4-R8 → IK-0900 で全書き込みルートへ）。
 
     `_require_teacher` は「TEACHER 以上」しか保証しない。台帳への記帳は対象の
     **教材単位の編集権限**を要求する（doubt.py 冒頭の規律。course 直指定の経路が
     `_require_editable_course_or_404` を通すのと同型）。対象が解決できない・
-    編集できないはどちらも同一の 404（存在の有無を漏らさない = fail-closed）。
+    閲覧もできないは同一の 404（日本語の同じ文・存在の有無を漏らさない = fail-closed）。
+    閲覧はできるが編集できない相手には、台帳 GET が既に存在と ``can_edit_note`` を
+    見せているので 403 + 画面と同じ理由文を返す（IK-1027）。
+
+    IK-0899: 論文の中でしか一意でない対象は ``document_id`` が必須（無ければ 422）で、
+    その論文に対象が実在しなければ 404。
 
     Returns:
-        権限を確かめた document_id（監査には使わない。ログ用）。
+        権限を確かめた document_id（行キーと監査の document_id に使う）。
     """
+    if target_requires_document(target_type, target_id) and not normalize_document_id(document_id):
+        raise HTTPException(status_code=422, detail=LEDGER_DOCUMENT_REQUIRED_NOTE)
     session = _pg_session()
     try:
-        document_ids = _target_document_ids(session, target_type, target_id)
+        document_ids = _target_document_ids(
+            session, target_type, target_id, document_id=document_id
+        )
+        if (
+            document_ids
+            and target_requires_document(target_type, target_id)
+            and not _scoped_target_in_document(session, target_type, target_id, document_ids[0])
+        ):
+            document_ids = []
     finally:
         session.close()
     if not document_ids:
         raise HTTPException(status_code=404, detail=_LEDGER_TARGET_NOT_FOUND)
-    for document_id in document_ids:
+    for doc in document_ids:
         try:
-            _require_editable_document_or_404(document_id, current_user)
+            _require_editable_document_or_404(doc, current_user)
         except HTTPException:
             continue
-        return document_id
+        return doc
+    user_id = str(current_user.get("id") or "")
+    for doc in document_ids:
+        try:
+            access = resolve_document_access(user_id, doc)
+        except Exception:  # noqa: BLE001 — 判定できない = 閉じる（404）
+            continue
+        if access.found and access.can_view:
+            raise HTTPException(status_code=403, detail=_LEDGER_WRITE_FORBIDDEN)
     raise HTTPException(status_code=404, detail=_LEDGER_TARGET_NOT_FOUND)
+
+
+def _ledger_target_access(
+    target_type: str, target_id: str, current_user: dict, *, document_id: str | None = None
+) -> dict:
+    """台帳 GET の閲覧ゲートと ``can_edit``（IK-0900）。
+
+    閲覧できない（対象の document を 1 つも閲覧できない）なら 404。``can_edit`` は対象の
+    document のどれかを編集できるか（SYSTEM_ADMIN は常に真）。``document_id`` は
+    行キーに使う document（閲覧できたもの）。
+    """
+    if target_requires_document(target_type, target_id) and not normalize_document_id(document_id):
+        raise HTTPException(status_code=422, detail=LEDGER_DOCUMENT_REQUIRED_NOTE)
+    session = _pg_session()
+    try:
+        document_ids = _target_document_ids(
+            session, target_type, target_id, document_id=document_id
+        )
+    finally:
+        session.close()
+    viewable: str | None = None
+    for doc in document_ids:
+        access = resolve_document_access(str(current_user.get("id") or ""), doc)
+        if not access.found:
+            continue
+        if access.can_edit or current_user.get("role") == ROLE_SYSTEM_ADMIN:
+            return {"document_id": doc, "can_edit": True}
+        if access.can_view and viewable is None:
+            viewable = doc
+    if viewable is None:
+        raise HTTPException(status_code=404, detail="Ledger entry not found")
+    return {"document_id": viewable, "can_edit": False}
 
 
 class EvidenceLineCreateRequest(BaseModel):
@@ -1738,16 +2805,19 @@ def add_evidence_line(
     target_type: str,
     target_id: str,
     body: EvidenceLineCreateRequest,
+    document_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """根拠の線の手動記帳（人間専用の記帳先, P4-5）。帰属は認証ユーザー。"""
     _require_ledger_target_type(target_type)
-    # 形の検証は DB を開く前（不正な本文は対象の有無に関わらず 422）。
+    # P4-R8: TEACHER であることだけでは足りない（対象教材の編集権限を要求する）。
+    # IK-0999: 権限は形の検証より先（権限の無い教員に「直せば通る」と読める 422 を返さない）。
+    doc = _require_editable_ledger_target(
+        target_type, target_id, current_user, document_id=document_id
+    )
     _validate_evidence_line_fields(
         body.line_kind, body.reason, body.evidence_ids, body.claim_ids, body.equation_ids,
     )
-    # P4-R8: TEACHER であることだけでは足りない（対象教材の編集権限を要求する）。
-    _require_editable_ledger_target(target_type, target_id, current_user)
     line = {
         "line_id": str(uuid.uuid4()),
         "line_kind": body.line_kind,
@@ -1761,7 +2831,7 @@ def add_evidence_line(
     }
     session = _pg_session()
     try:
-        row = _get_or_create_ledger_row(session, target_type, target_id)
+        row = _get_or_create_ledger_row(session, target_type, target_id, document_id=doc)
         if row is None:
             raise HTTPException(status_code=500, detail="Failed to create ledger entry")
         session.execute(
@@ -1769,9 +2839,9 @@ def add_evidence_line(
                 UPDATE epistemic_ledger
                 SET evidence_lines = evidence_lines || CAST(:line AS jsonb),
                     updated_at = now()
-                WHERE target_id = :tid AND target_type = :ttype
+                WHERE id = CAST(:lid AS uuid)
             """),
-            {"line": json.dumps([line], ensure_ascii=False), "tid": target_id, "ttype": target_type},
+            {"line": json.dumps([line], ensure_ascii=False), "lid": row[0]},
         )
         session.commit()
     except HTTPException:
@@ -1786,7 +2856,7 @@ def add_evidence_line(
     _record_doubt_event(
         AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "", "evidence_line_added",
         current_user.get("id"),
-        {"action": "evidence_line_add", "line_id": line["line_id"], "line_kind": line["line_kind"]},
+        {"document_id": doc, "action": "evidence_line_add", "line_id": line["line_id"], "line_kind": line["line_kind"]},
     )
     return {"ok": True, "evidence_line": _evidence_line_out(line)}
 
@@ -1797,15 +2867,18 @@ def patch_evidence_line(
     target_id: str,
     line_id: str,
     body: EvidenceLinePatchRequest,
+    document_id: str | None = None,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """根拠の線の訂正（訂正後も必須項目を再検証する。削除はしない, KT5）。"""
     _require_ledger_target_type(target_type)
     # P4-R8: 記帳と同じ編集権限ゲート（訂正も書き込み）。
-    _require_editable_ledger_target(target_type, target_id, current_user)
+    doc = _require_editable_ledger_target(
+        target_type, target_id, current_user, document_id=document_id
+    )
     session = _pg_session()
     try:
-        row = _fetch_ledger_row(session, target_type, target_id)
+        row = _fetch_ledger_row(session, target_type, target_id, document_id=doc)
         if row is None:
             raise HTTPException(status_code=404, detail="Ledger entry not found")
         lines = [line for line in _jsonb_list(row[15]) if isinstance(line, dict)]
@@ -1842,12 +2915,11 @@ def patch_evidence_line(
             sa_text("""
                 UPDATE epistemic_ledger
                 SET evidence_lines = CAST(:lines AS jsonb), updated_at = now()
-                WHERE target_id = :tid AND target_type = :ttype
+                WHERE id = CAST(:lid AS uuid)
             """),
             {
                 "lines": json.dumps(lines, ensure_ascii=False),
-                "tid": target_id,
-                "ttype": target_type,
+                "lid": row[0],
             },
         )
         session.commit()
@@ -1863,7 +2935,7 @@ def patch_evidence_line(
     _record_doubt_event(
         AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "evidence_line_updated",
         "evidence_line_updated", current_user.get("id"),
-        {"action": "evidence_line_patch", "line_id": line_id, "old": old_line},
+        {"document_id": doc, "action": "evidence_line_patch", "line_id": line_id, "old": old_line},
     )
     return {"ok": True, "evidence_line": _evidence_line_out(target_line)}
 
@@ -1893,6 +2965,10 @@ def create_challenge(
     """疑義の作成（型 + 理由必須・匿名不可）。"""
     if target_type not in _CHALLENGE_TARGET_TYPES:
         raise HTTPException(status_code=422, detail=f"invalid target_type: {target_type}")
+    # IK-0900: 疑義は帰属必須の公開の学術行為なので、対象の論文を**閲覧できる**教員なら
+    # 残せる（編集権限までは求めない）。閲覧できない対象は不在と同じ 404。
+    # IK-0999: 権限は本文の検査より先。
+    _ledger_target_access(target_type, target_id, current_user)
     if body.challenge_type not in _CHALLENGE_TYPES:
         raise HTTPException(status_code=422, detail=f"invalid challenge_type: {body.challenge_type}")
     if body.challenge_mode not in CHALLENGE_MODES:
@@ -1926,6 +3002,23 @@ def create_challenge(
         ).fetchone()
         session.commit()
         challenge_id = str(row[0])
+        # 第 9 波（軽）: 同じ対象・同じ型・同じ理由の未取り下げの疑義が先にあるか（記帳は止めない・告知だけ）。
+        duplicate = False
+        try:
+            duplicate = bool(session.execute(
+                sa_text("""
+                    SELECT 1 FROM challenges
+                    WHERE target_type = :ttype AND target_id = :tid
+                      AND challenge_type = :ctype AND status <> 'withdrawn'
+                      AND BTRIM(reason) = :reason AND id::text <> :new_id
+                    LIMIT 1
+                """),
+                {"ttype": target_type, "tid": target_id, "ctype": body.challenge_type,
+                 "reason": body.reason.strip(), "new_id": challenge_id},
+            ).fetchone())
+        except Exception:  # noqa: BLE001 — 告知の材料。引けなければ告知しない
+            logger.debug("duplicate challenge lookup failed", exc_info=True)
+            duplicate = False
     except HTTPException:
         raise
     except Exception:
@@ -1966,6 +3059,7 @@ def create_challenge(
             body.challenge_mode, body.challenge_mode
         ),
         "target_element_ref": element_ref,
+        **({"duplicate_note": CHALLENGE_DUPLICATE_NOTE} if duplicate else {}),
     }
 
 
@@ -1983,7 +3077,7 @@ def list_challenges(
         rows = session.execute(
             sa_text("""
                 SELECT c.id::text, c.challenge_type, c.reason, c.status,
-                       COALESCE(u.display_name, ''), c.created_at::text,
+                       COALESCE(NULLIF(BTRIM(u.profile_name), ''), ''), c.created_at::text,
                        c.challenge_mode, c.target_element_ref
                 FROM challenges c
                 LEFT JOIN users u ON u.id = c.challenger_id
@@ -2001,7 +3095,7 @@ def list_challenges(
                     "challenge_type": str(r[1]),
                     "reason": str(r[2]),
                     "status": str(r[3]),
-                    "challenger_name": str(r[4]),
+                    "challenger_name": _account_display.label_or_unregistered(r[4]),  # IK-1007
                     "created_at": str(r[5]),
                     # P4-5: 疑義の向き（既存行は DB の DEFAULT どおり direct）。
                     "challenge_mode": str(r[6] or "direct"),
@@ -2055,7 +3149,11 @@ def withdraw_challenge(
         AUDIT_ENTITY_CHALLENGE, challenge_id, old_status, "withdrawn",
         current_user.get("id"), {"action": "withdraw"},
     )
-    return {"ok": True, "challenge_id": challenge_id, "status": "withdrawn"}
+    # IK-0998: 取り下げは status 遷移（行は残る）。画面が消えたと読まないよう事実文を返す。
+    return {
+        "ok": True, "challenge_id": challenge_id, "status": "withdrawn",
+        "note": CHALLENGE_WITHDRAWN_NOTE,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2074,6 +3172,48 @@ class ProposalCreateRequest(BaseModel):
 class ProposalPatchRequest(BaseModel):
     status: str | None = None
     reachability: str | None = None
+    # IK-1121: 完了の根拠（何を確かめたか・任意）。status="completed" のときだけ記帳する。
+    completion_note: str | None = None
+
+
+#: 完了の根拠の上限（字）。台帳の 1 行に収まる長さ。
+_PROPOSAL_COMPLETION_NOTE_MAX = 600
+
+
+def _require_viewable_challenge_target(challenge_id: str, current_user: dict) -> None:
+    """疑義の対象の論文を閲覧できるか（IK-0900）。疑義が無い・閲覧できないは同一の 404。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT target_type, target_id FROM challenges WHERE id::text = :cid"),
+            {"cid": challenge_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Challenge not found")
+    try:
+        _ledger_target_access(str(row[0]), str(row[1]), current_user)
+    except HTTPException as exc:
+        raise HTTPException(status_code=404, detail="Challenge not found") from exc
+
+
+def _require_viewable_proposal_target(proposal_id: str, current_user: dict) -> None:
+    """検証提案の疑義の対象を閲覧できるか（IK-0999）。提案が無い・閲覧できないは同一の 404。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT challenge_id::text FROM verification_proposals WHERE id::text = :pid"),
+            {"pid": proposal_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Verification proposal not found")
+    try:
+        _require_viewable_challenge_target(str(row[0] or ""), current_user)
+    except HTTPException as exc:
+        raise HTTPException(status_code=404, detail="Verification proposal not found") from exc
 
 
 @admin_router.post("/challenges/{challenge_id}/proposals")
@@ -2087,6 +3227,9 @@ def create_verification_proposal(
     SL-8: コーパス外の文献確認の記帳（external_check）を必須化。取り下げ済み
     （withdrawn）の疑義からの昇格は記帳整合性バグとして 422 に是正する（§6.2）。
     """
+    # IK-0900: 疑義と同じく、対象の論文を閲覧できる教員なら昇格できる。
+    # IK-0999: 権限（不在と同一の 404）は本文の検査より先。
+    _require_viewable_challenge_target(challenge_id, current_user)
     if not body.proposal.strip():
         raise HTTPException(status_code=422, detail="proposal が必要です")
     if not body.external_check.strip():
@@ -2167,7 +3310,10 @@ def patch_verification_proposal(
 ) -> dict:
     """検証提案のステータス遷移（proposed→in_progress→completed の前進 +
     任意時点から withdrawn）+ reachability の更新（§6.2、§2-8 の既存欠落を埋める）。
+
+    IK-0999: 提案の疑義の対象を閲覧できる教員だけ（不在と同一の 404）。権限は本文の検査より先。
     """
+    _require_viewable_proposal_target(proposal_id, current_user)
     session = _pg_session()
     try:
         row = session.execute(
@@ -2192,6 +3338,15 @@ def patch_verification_proposal(
                 )
             updates.append("status = :status")
             params["status"] = new_status
+            if new_status == "completed":
+                # IK-1121: 完了の帰属（誰が・いつ・何を確かめたか）を行に残す。検証状態は変えない（SL2）。
+                updates.append("completed_by = CAST(:completed_by AS uuid)")
+                updates.append("completed_at = now()")
+                updates.append("completion_note = :completion_note")
+                params["completed_by"] = str(current_user.get("id") or "") or None
+                params["completion_note"] = strip_control_sequences(
+                    str(body.completion_note or "")
+                ).strip()[:_PROPOSAL_COMPLETION_NOTE_MAX]
         if body.reachability is not None:
             reachability = str(body.reachability).strip()
             if reachability not in REACHABILITY_LEVELS:
@@ -2232,11 +3387,36 @@ def get_open_assumptions(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """未検証合意リスト（台帳の投影・編集不可）。高負荷 × 低検証の自動編纂。"""
+    """未検証合意リスト（台帳の投影・編集不可）。高負荷 × 低検証の自動編纂。
+
+    範囲はコースの教材の document 集合（IK-0852）。
+    """
+    document_ids = _course_scope_document_ids(course_id, current_user)
     session = _pg_session()
     try:
-        items = compile_open_assumptions(session, course_id, include_challenger_names=True)
-        return {"course_id": course_id, "items": items}
+        exclusion = ClaimChainExclusion(session)
+        items = compile_open_assumptions(
+            session, course_id, document_ids=document_ids, include_challenger_names=True,
+            exclusion=exclusion,
+            # IK-1058: 手で記帳した前提（依存の広がりを計算できない）も計算できない段で載せる。
+            include_uncomputable_assumptions=True,
+        )
+        return {
+            "course_id": course_id,
+            "has_documents": bool(document_ids),
+            "items": items,
+            # IK-1002: 欄名で出所を言い分ける（「検証」と「支持」は別の記録）。
+            "field_labels": dict(LEDGER_FIELD_LABELS),
+            "field_sources_note": LEDGER_FIELD_SOURCES_NOTE,
+            # IK-1120: 支持線の範囲は台帳と同じ（各行の対象の論文）であることの事実文。
+            "support_scope_note": OPEN_ASSUMPTIONS_SUPPORT_SCOPE_NOTE,
+            # IK-0933: 導出の手順を外したことの事実文（行は台帳に残る — 情報を落とさない）。
+            **({"population_note": CLAIM_CHAIN_EXCLUDED_NOTE} if exclusion.excluded else {}),
+            **(
+                {"empty_note": OPEN_ASSUMPTIONS_EMPTY_NOTE if document_ids else SCOPE_NO_DOCUMENTS_NOTE}
+                if not items else {}
+            ),
+        }
     finally:
         session.close()
 
@@ -2290,6 +3470,27 @@ def _observation_claim_ids(observations: list) -> list[str]:
     return ids
 
 
+def _counterfactual_scope_document_ids(body: "CounterfactualComputeRequest", current_user: dict) -> list[str]:
+    """反実仮想の範囲（IK-0852）。
+
+    document_id があればその 1 件（閲覧権限を確かめる。course_id では絞らない — 依存グラフは
+    document の成果なので）。無ければ course_id のコースの教材（編集権限ゲート付き）。
+    どちらも無ければ空（グラフは空・全トグルが warnings に載る = 失敗を隠さない）。
+    """
+    document_ref = str(body.document_id or "").strip()
+    if document_ref:
+        access = resolve_document_access(current_user["id"], document_ref)
+        if not access.found or not (
+            access.can_view or current_user.get("role") == ROLE_SYSTEM_ADMIN
+        ):
+            raise HTTPException(status_code=404, detail="Document not found")
+        return [str(access.document_id)]
+    course_id = str(body.course_id or "").strip()
+    if course_id:
+        return _course_scope_document_ids(course_id, current_user)
+    return []
+
+
 def _require_at_least_one_toggle(assumption_ids: list[str], observations: list) -> None:
     """既存の「toggled_assumption_ids 空 → 422」を「両方空 → 422」に緩和（§4.2）。"""
     if not assumption_ids and not observations:
@@ -2297,6 +3498,42 @@ def _require_at_least_one_toggle(assumption_ids: list[str], observations: list) 
             status_code=422,
             detail="toggled_assumption_ids または toggled_observations のいずれかが必要です",
         )
+
+
+def _compute_with_observation_scope(
+    session, assumption_ids: list, observation_claim_ids: list[str], scope_ids: list[str]
+) -> dict:
+    """反実仮想の試算（IK-0903: 範囲の外の観測は倒さず、warnings に事実文で残す）。
+
+    倒した観測がこの範囲（開いているグラフの論文）の観測系主張に無いときは、伝播に渡さない。
+    主張の agent ID は論文をまたいで同じ番号になりうるので、渡すと別の論文の主張を倒してしまう。
+    """
+    in_scope: set[str] = set()
+    if observation_claim_ids and scope_ids:
+        try:
+            for item in observation_claim_targets(session, document_ids=scope_ids):
+                in_scope.add(str(item.get("claim_id") or ""))
+        except Exception:  # noqa: BLE001
+            logger.debug("observation scope lookup failed", exc_info=True)
+    outside = [c for c in observation_claim_ids if c not in in_scope]
+    inside = [c for c in observation_claim_ids if c in in_scope]
+    payload = compute_counterfactual(
+        session,
+        toggled_assumption_ids=[str(a) for a in assumption_ids] + inside,
+        document_ids=scope_ids,
+    )
+    if outside:
+        names = []
+        for claim_id in outside:
+            name = ledger_target_label(
+                session, document_id=None, target_type="claim", target_id=claim_id
+            )
+            if name not in names:
+                names.append(name)
+        warnings = list(payload.get("warnings") or [])
+        warnings.append(OBSERVATION_OUTSIDE_SCOPE_WARNING_PREFIX + "、".join(names))
+        payload["warnings"] = warnings
+    return payload
 
 
 @admin_router.post("/counterfactual/compute")
@@ -2312,13 +3549,11 @@ def compute_counterfactual_route(
     """
     _require_at_least_one_toggle(body.toggled_assumption_ids, body.toggled_observations)
     observation_claim_ids = _observation_claim_ids(body.toggled_observations)
+    scope_ids = _counterfactual_scope_document_ids(body, current_user)
     session = _pg_session()
     try:
-        return compute_counterfactual(
-            session,
-            toggled_assumption_ids=[str(a) for a in body.toggled_assumption_ids] + observation_claim_ids,
-            course_id=body.course_id or "",
-            document_id=body.document_id or "",
+        return _compute_with_observation_scope(
+            session, body.toggled_assumption_ids, observation_claim_ids, scope_ids
         )
     finally:
         session.close()
@@ -2339,11 +3574,9 @@ def save_counterfactual_session(
 
     session = _pg_session()
     try:
-        payload = compute_counterfactual(
-            session,
-            toggled_assumption_ids=[str(a) for a in body.toggled_assumption_ids] + observation_claim_ids,
-            course_id=body.course_id or "",
-            document_id=body.document_id or "",
+        payload = _compute_with_observation_scope(
+            session, body.toggled_assumption_ids, observation_claim_ids,
+            _counterfactual_scope_document_ids(body, current_user),
         )
         collapsed, surviving, indeterminate = snapshot_subgraphs(payload)
         toggled_observations_json = json.dumps(
@@ -2400,14 +3633,19 @@ def save_counterfactual_session(
             "toggled_observation_count": len(body.toggled_observations),
         },
     )
-    return {"ok": True, "session_id": session_id, "result": payload}
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "shared_scope_label": SHARED_SCOPE_LABELS.get(body.shared_scope, body.shared_scope),
+        "result": payload,
+    }
 
 
 def _counterfactual_session_out(row) -> dict:
     return {
         "id": str(row[0]),
         "owner_id": str(row[1] or ""),
-        "owner_name": str(row[2] or ""),
+        "owner_name": _account_display.label_or_unregistered(row[2]),  # IK-1007
         "course_id": str(row[3] or ""),
         "document_id": str(row[4] or ""),
         "toggled_assumption_ids": _jsonb_list(row[5]),
@@ -2416,6 +3654,10 @@ def _counterfactual_session_out(row) -> dict:
         "indeterminate_subgraph": _jsonb_dict(row[8]),
         "notes": str(row[9] or ""),
         "shared_scope": str(row[10] or "private"),
+        # IK-0854: 画面は内部値ではなくこの日本語を出す（既存の Visibility 語彙）。
+        "shared_scope_label": SHARED_SCOPE_LABELS.get(
+            str(row[10] or "private"), str(row[10] or "private")
+        ),
         "group_id": str(row[11] or ""),
         "created_at": str(row[12] or ""),
         # SL-2: 観測トグルの記録（P4: 情報を落とさない。row[13] は末尾追加のため既存
@@ -2425,7 +3667,7 @@ def _counterfactual_session_out(row) -> dict:
 
 
 _CF_SELECT = """
-    SELECT s.id::text, s.owner_id::text, COALESCE(u.display_name, ''),
+    SELECT s.id::text, s.owner_id::text, COALESCE(NULLIF(BTRIM(u.profile_name), ''), ''),
            s.course_id, s.document_id::text AS document_id, s.toggled_assumption_ids,
            s.collapsed_subgraph, s.surviving_subgraph, s.indeterminate_subgraph,
            s.notes, s.shared_scope, COALESCE(s.group_id::text, ''), s.created_at::text,
@@ -2555,16 +3797,19 @@ def _learner_fact_line(target_type: str, status: str, scopes: list[dict]) -> str
              if str(first.get(k) or "").strip()),
             "",
         )
+        # 第 25 周 第 10 波: 学習者の語は見出しと同じ「検証の記録」「記録された条件」（「検証スコープ」を
+        # 学習者に出さない — label_vocab.ATLAS_LEARNER_WORDING と同じ方針。出典カード・行の札・
+        # 画面文脈（SA層 kind verification）が同じ文を使う）。
         if status == "directly_verified" and axis:
-            return f"この内容は「{axis}」の範囲で検証されたと記帳されています。"
+            return f"この内容は「{axis}」の範囲で検証されたと記録されています。"
         if axis:
-            return f"この内容には「{axis}」の範囲の検証スコープが記帳されています。"
-        return "この内容には検証スコープが記帳されています。"
+            return f"この内容には検証の記録（記録された条件: 「{axis}」）があります。"
+        return "この内容には検証の記録があります。"
     if status == "indirectly_supported":
-        return "この内容は出典に記載がありますが、検証スコープはまだ記帳されていません。"
+        return "この内容は出典に記載がありますが、検証の記録はまだありません。"
     if status == "refuted":
-        return "この内容には反証の記帳があります。"
-    return "この内容の検証スコープはまだ記帳されていません。"
+        return "この内容には反証の記録があります。"
+    return "この内容の検証の記録はまだありません。"
 
 
 def _learner_falsification_conditions(conditions: list[dict]) -> list[dict]:
@@ -2609,6 +3854,7 @@ def learner_ledger_line(
     target_type: str,
     target_id: str,
     *,
+    document_id: str | None,
     include_support_lines: bool = True,
 ) -> dict | None:
     """台帳の学習者向け投影1件（読み取り専用）。台帳行が無ければ ``None``。
@@ -2620,8 +3866,33 @@ def learner_ledger_line(
 
     ``session`` の open/close は呼び出し側の責務（既存エンドポイントの
     ``try/finally`` 規約をそのまま使う）。
+
+    component（IK-0855）: 部品チップ・画面文脈は theory_components の UUID を、台帳は理論操作
+    グラフのノード id を持つ。どちらで来ても ``ledger_targets.resolve_component_ledger_target``
+    が台帳を引く対象へ写す（唯一の解決点）。ノードへ写したときは ``target_note`` で
+    「どの段の記録か」を 1 行添える。
     """
-    row = _fetch_ledger_row(session, target_type, target_id)
+    target_note = ""
+    # IK-0899: ``document_id`` は開いている論文（必須）。グラフのノード id・式の agent ID は
+    # 論文の中でしか一意でないので、分からなければ台帳を引かない（None = 一行を出さない）。
+    if target_requires_document(target_type, target_id) and not normalize_document_id(document_id):
+        return None
+    if target_type == "component":
+        resolved = resolve_component_ledger_target(session, target_id, document_id=document_id)
+        if resolved is None:
+            return None
+        document_id = str(resolved.get("document_id") or document_id or "")
+        if resolved.get("via_graph_node"):
+            node_label = str(resolved.get("node_label") or "").strip()
+            target_note = (
+                LEDGER_COMPONENT_VIA_NODE_NOTE.format(label=node_label)
+                if node_label else LEDGER_COMPONENT_VIA_NODE_NOTE_UNNAMED
+            )
+        target_id = str(resolved["target_id"])
+    try:
+        row = _fetch_ledger_row(session, target_type, target_id, document_id=document_id)
+    except HTTPException:
+        return None
     if row is None:
         return None
     status = str(row[5] or "unknown")
@@ -2642,9 +3913,11 @@ def learner_ledger_line(
     support_fact_line = ""
     if include_support_lines:
         try:
+            # 範囲は台帳行の document（IK-0852: course_id 列では絞らない）。
+            row_document = str(row[3] or "")
             support_lines = compute_support_lines(
                 session, target_type, target_id,
-                course_id=str(row[4] or ""), document_id=str(row[3] or ""),
+                document_ids=[row_document] if row_document else [],
             )
             if support_lines:
                 support_fact_line = str(support_lines.get("fact_line") or "")
@@ -2654,9 +3927,19 @@ def learner_ledger_line(
                 exc_info=True,
             )
             support_fact_line = ""
-    return {
+    # IK-0901: 出典タブの行の主語（式は印字番号 / 主張は本文。TeX のラベルや空の主語を出さない）。
+    try:
+        target_label = ledger_target_label(
+            session, document_id=document_id, target_type=target_type, target_id=target_id
+        )
+    except Exception:  # noqa: BLE001
+        target_label = ""
+    from core.doubt.target_labels import UNNAMED_TARGET_LABEL as _UNNAMED
+
+    return _learner_wording({
         "target_id": target_id,
         "target_type": target_type,
+        **({"target_label": target_label} if target_label and target_label != _UNNAMED else {}),
         "verification_status": status,
         "verification_status_label": _VERIFICATION_STATUS_LABELS.get(status, status),
         "scopes": learner_scopes,
@@ -2665,7 +3948,25 @@ def learner_ledger_line(
         "falsification_conditions": falsification_conditions,
         **({"support_fact_line": support_fact_line} if support_fact_line else {}),
         **({"evidence_lines_fact": evidence_lines_fact} if evidence_lines_fact else {}),
-    }
+        **({"target_note": target_note} if target_note else {}),
+    })
+
+
+#: IK-1059: 学習者向け台帳の一行で、学習者の語へ読み替える文の欄（正本は
+#: ``label_vocab.learner_atlas_wording`` — 地図のパネルと同じ 1 つの表）。画面文脈（SA層 kind
+#: ``verification``）もこの投影を通るので、AI の材料と出典タブの文が同じ語になる。
+_LEARNER_WORDING_LINE_KEYS = (
+    "fact_line", "support_fact_line", "evidence_lines_fact", "target_note",
+    "verification_status_label",
+)
+
+
+def _learner_wording(line: dict) -> dict:
+    for key in _LEARNER_WORDING_LINE_KEYS:
+        value = line.get(key)
+        if isinstance(value, str) and value:
+            line[key] = learner_atlas_wording(value)
+    return line
 
 
 @learning_router.get("/courses/{course_id}/ledger/{target_type}/{target_id}")
@@ -2673,25 +3974,140 @@ def get_learner_ledger_line(
     course_id: str,
     target_type: str,
     target_id: str,
+    document_id: str | None = None,
     current_user: dict = Depends(_get_current_user),
 ) -> dict:
     """台帳の正直表示（読み取り専用）。スコープと段階ラベルのみ。
 
-    生スコア・疑義の生一覧は返さない。台帳行が無ければ 404
-    （UI はセクション自体を出さない fail-closed）。
+    生スコア・疑義の生一覧は返さない。台帳行が無くても、対象がこのコースの教材に実在すれば
+    200（``exists: false`` と「まだ記帳されていません」の一行・IK-0971）。404 は対象が無い・
+    教材外のときだけ。
+
+    ``document_id``（query）は開いている論文。グラフのノード id・式の agent ID は論文の中でしか
+    一意でないので、その対象では必須（無ければ 404 — 別の論文の行を出さない。IK-0899）。
     """
     _require_ledger_target_type(target_type)
     course = get_accessible_course_data(str(current_user.get("id")), course_id)
     if course is None:
         raise HTTPException(status_code=404, detail="Course not found")
+    # IK-0857: 対象がこのコースの教材に属するときだけ読む（コースの教材 ∩ 対象の document）。
+    # 受講中のコースの URL で、教材外（閲覧できない）論文の台帳を読ませない。外なら不在と同じ 404。
+    course_documents = list_course_source_document_ids(course)
     session = _pg_session()
     try:
-        line = learner_ledger_line(session, target_type, target_id)
+        if target_requires_document(target_type, target_id) and not normalize_document_id(document_id):
+            raise HTTPException(status_code=404, detail="Ledger entry not found")
+        row_document = normalize_document_id(document_id) or None
+        target_documents = set(
+            _target_document_ids(session, target_type, target_id, document_id=row_document)
+        )
+        if target_type == "component":
+            resolved = resolve_component_ledger_target(session, target_id, document_id=row_document)
+            if resolved is not None and resolved.get("document_id"):
+                target_documents.add(str(resolved["document_id"]))
+        if not (target_documents & course_documents):
+            raise HTTPException(status_code=404, detail="Ledger entry not found")
+        line_document = row_document or next(iter(sorted(target_documents & course_documents)), None)
+        # IK-0971: 対象はこのコースの教材に実在する（上のゲートを通った）。行が無いのは
+        # 「まだ記帳されていない」という事実なので 200（exists:false）で同じ一行を返す
+        # （教員側 IK-0931 と同じ責任の移し方。404 は対象が無い・教材外のときだけ）。
+        # IK-1147: 行なしの一行は画面文脈と共通の正本（learner_ledger_line_or_unrecorded）から。
+        line = learner_ledger_line_or_unrecorded(
+            session, target_type, target_id, document_id=line_document
+        )
         if line is None:
             raise HTTPException(status_code=404, detail="Ledger entry not found")
         return line
     finally:
         session.close()
+
+
+def learner_ledger_line_or_unrecorded(
+    session,
+    target_type: str,
+    target_id: str,
+    *,
+    document_id: str | None,
+) -> dict | None:
+    """台帳の学習者向け一行。行が無ければ「まだ記帳されていない」の一行（IK-0971 / IK-1147）。
+
+    学習者の台帳 GET と学習チャットの画面文脈（kind ``verification``）の共通正本。
+    **呼び出し側は対象がこのコースの教材に実在することを先に確かめる**（GET はコース教材の
+    ゲート、画面文脈は grounding の範囲で要素が解決できたこと）。論文が要る対象で
+    ``document_id`` が無いときだけ ``None``（別の論文の行を言わない = IK-0899）。
+    """
+    if target_requires_document(target_type, target_id) and not normalize_document_id(document_id):
+        return None
+    line = learner_ledger_line(session, target_type, target_id, document_id=document_id)
+    if line is None:
+        return _learner_unrecorded_line(session, target_type, target_id, document_id=document_id)
+    return {"exists": True, **line}
+
+
+def learner_unrecorded_ledger_line(
+    session,
+    target_type: str,
+    target_id: str,
+    *,
+    document_id: str | None,
+) -> dict | None:
+    """行の無い台帳の学習者向け一行の公開入口（IK-1147・画面文脈が呼ぶ）。
+
+    論文が要る対象で ``document_id`` が無いときは ``None``（IK-0899）。呼び出し側は対象が
+    このコースの教材に実在することを先に確かめる。
+    """
+    if target_requires_document(target_type, target_id) and not normalize_document_id(document_id):
+        return None
+    return _learner_unrecorded_line(session, target_type, target_id, document_id=document_id)
+
+
+def _learner_unrecorded_line(session, target_type: str, target_id: str, *, document_id: str | None) -> dict:
+    """行の無い台帳の学習者向け一行（IK-0971）。記帳者・数値は持たない。"""
+    from core.doubt.target_labels import UNNAMED_TARGET_LABEL as _UNNAMED
+
+    try:
+        target_label = ledger_target_label(
+            session, document_id=document_id, target_type=target_type, target_id=target_id
+        )
+    except Exception:  # noqa: BLE001
+        target_label = ""
+    return _learner_wording({
+        "exists": False,
+        "target_id": target_id,
+        "target_type": target_type,
+        **({"target_label": target_label} if target_label and target_label != _UNNAMED else {}),
+        "verification_status": "unknown",
+        "verification_status_label": _VERIFICATION_STATUS_LABELS.get("unknown", "unknown"),
+        "scopes": [],
+        "scope_coverage": scope_coverage_level(0),
+        "fact_line": _learner_fact_line(target_type, "unknown", []),
+        "falsification_conditions": [],
+    })
+
+
+def _fold_learner_open_assumptions(items: list[dict]) -> list[dict]:
+    """学習者向けの未検証の前提一覧の整理（IK-0901）。
+
+    - 同じ文面（表示名）の行は先頭の 1 件にまとめ ``merged_note``（ゼミ前ブリーフと同じ規約
+      IK-0593 の事実文）を添える。
+    - 名前を引けない行は一覧の後ろへ回す（先頭に「名前を引けない対象」を並べない）。
+    並びは投影元の決定論順を保つ。件数は出さない。
+    """
+    from core.doubt.seminar_brief import MERGED_INDISTINCT_NOTE
+    from core.doubt.target_labels import UNNAMED_TARGET_LABEL
+
+    seen: dict[tuple, dict] = {}
+    named: list[dict] = []
+    unnamed: list[dict] = []
+    for item in items:
+        statement = str(item.get("statement") or "")
+        key = (statement, str(item.get("target_type") or ""))
+        if statement and key in seen:
+            seen[key]["merged_note"] = MERGED_INDISTINCT_NOTE
+            continue
+        seen[key] = item
+        (unnamed if statement in ("", UNNAMED_TARGET_LABEL) else named).append(item)
+    return named + unnamed
 
 
 @learning_router.get("/courses/{course_id}/open-assumptions")
@@ -2710,9 +4126,21 @@ def get_learner_open_assumptions(
     course = get_accessible_course_data(str(current_user.get("id")), course_id)
     if course is None:
         raise HTTPException(status_code=404, detail="Course not found")
+    # 範囲はコースの教材の document 集合（IK-0852。台帳行の course_id 列では絞らない）。
+    document_ids = sorted(list_course_source_document_ids(course))
     session = _pg_session()
     try:
-        items = compile_open_assumptions(session, course_id, include_challenger_names=False)
-        return strip_learner_numeric_keys({"course_id": course_id, "items": items})
+        exclusion = ClaimChainExclusion(session)
+        items = _fold_learner_open_assumptions(compile_open_assumptions(
+            session, course_id, document_ids=document_ids, include_challenger_names=False,
+            exclusion=exclusion,
+        ))
+        return strip_learner_numeric_keys({
+            "course_id": course_id,
+            "has_documents": bool(document_ids),
+            "items": items,
+            **({"population_note": CLAIM_CHAIN_EXCLUDED_NOTE} if exclusion.excluded else {}),
+            **({"empty_note": LEARNER_OPEN_ASSUMPTIONS_EMPTY_NOTE} if not items else {}),
+        })
     finally:
         session.close()

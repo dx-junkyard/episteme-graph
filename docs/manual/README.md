@@ -28,11 +28,11 @@
 | ディレクトリ | ファイル | 内容 |
 |---|---|---|
 | teacher/ | `10-admin-common.md` | 管理画面の共通操作（ヘッダー・タブ・確認モーダル） |
-| teacher/ | `11-admin-materials.md` 〜 `26-admin-graph-review.md` | 教材管理・コースビルダー・コース管理・原稿スタジオ・グループ・学生管理・分野の地図・前提の地図・ナレッジライブラリ・つまづき・関心ダッシュボード・スキーマ提案・スキーマ・要素検討・共有版・グラフレビュー |
+| teacher/ | `11-admin-materials.md` 〜 `27-admin-simulation-bridge.md` | 教材管理・コースビルダー・コース管理・原稿スタジオ・グループ・学生管理・分野の地図・前提の地図・ナレッジライブラリ・つまづき・関心ダッシュボード・スキーマ提案・スキーマ・要素検討・共有版・グラフレビュー・検証シミュレーション |
 | system_admin/ | `10-admin-teachers.md` | 教員管理（アカウント作成とアカウントライフサイクル運用） |
 | system_admin/ | `11-admin-system-stats.md` 〜 `17-admin-url-fetch-domains.md` | システム統計・エラー解析・LLM使用量・マニュアル編集・discuss観測・AIモデル・URL取得の許可ドメイン |
 
-（2026-09-05 時点のファイル構成: student/ 2 件、teacher/ 18 件、system_admin/ 10 件。
+（2026-10-02 時点のファイル構成: student/ 2 件、teacher/ 19 件、system_admin/ 10 件。
 リファレンスの節と管理画面の UI 部品の対応は `backend/core/help_kb/admin_ui_anchors.py` が
 正本で、対応の網羅は `backend/tests/test_admin_help_ui_anchors.py` が検証します。）
 

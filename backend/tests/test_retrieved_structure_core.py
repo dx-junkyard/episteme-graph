@@ -105,6 +105,46 @@ class TestFactWording:
         )
         assert facts == ["[出典2] の箇所には次の主張が構造化されています: 「ある主張。」"]
 
+    def test_claim_type_unknown_omits_the_type_line(self):
+        # IK-0500: 「主張の種類: 不明」は情報の無い行なので出さない。
+        for value in ("unknown", "UNKNOWN", " unknown "):
+            facts = _facts(
+                _sources({"index": "3", "claims": [{"text": "ある主張。", "claim_type": value}]})
+            )
+            assert facts == ["[出典3] の箇所には次の主張が構造化されています: 「ある主張。」"]
+            assert "不明" not in facts[0]
+
+    def test_truncated_duplicate_of_a_claim_is_folded_into_the_full_one(self):
+        # IK-0501: 同じ引用文の全文と途中で切れた版は 1 行にし、長い方を残す。
+        full = "The spectral index of the primordial fluctuations is slightly below unity."
+        truncated = "The spectral index of the primordial fluctuations is slightly…"
+        for order in ((truncated, full), (full, truncated)):
+            facts = _facts(
+                _sources(
+                    {
+                        "index": "1",
+                        "claims": [{"text": t, "claim_type": "result"} for t in order],
+                    }
+                )
+            )
+            claim_facts = [f for f in facts if f.startswith("[出典1]")]
+            assert len(claim_facts) == 1
+            assert full in claim_facts[0]
+
+    def test_distinct_claims_of_one_source_are_both_kept(self):
+        facts = _facts(
+            _sources(
+                {
+                    "index": "1",
+                    "claims": [
+                        {"text": "主張Aの本文。", "claim_type": "result"},
+                        {"text": "主張Bの本文。", "claim_type": "result"},
+                    ],
+                }
+            )
+        )
+        assert len([f for f in facts if f.startswith("[出典1]")]) == 2
+
     def test_node_without_a_theory_object_states_only_the_stage(self):
         facts = _facts(
             _sources(

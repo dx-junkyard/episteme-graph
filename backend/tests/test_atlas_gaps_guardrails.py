@@ -726,7 +726,11 @@ class TestSkeletonApplicationWiring:
 
     def test_freeze_checks_pending_candidates_before_freezing(self):
         freeze = _function_code(ATLAS_ROUTE_SRC, "freeze_atlas_skeleton")
-        assert "_pending_gap_candidates(" in freeze
+        # 凍結の可否は freeze-impact と同じ 1 関数を読む（IK-0885）。
+        assert "_freeze_readiness(" in freeze
+        assert "_pending_gap_candidates(" in _function_code(
+            ATLAS_ROUTE_SRC, "_freeze_readiness"
+        )
         assert "pending_labels" in freeze
         # 件数ではなくラベルの列挙で示す（LS5）。
         assert "len(pending_gaps" not in freeze

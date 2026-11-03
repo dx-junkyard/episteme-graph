@@ -33,7 +33,9 @@ import re
 import uuid
 from typing import Any, Callable
 
-from core.text_excerpt import looks_like_tex_math
+from core import display_projection as _dp
+from core.label_vocab import RECONSTRUCTED_EQUATION_NOTE
+from core.text_excerpt import is_prose_with_delimited_math, looks_like_tex_math
 from core.deliberation.schema import (
     CONTEXT_STATUS_CANDIDATE,
     ELEMENT_DERIVATION,
@@ -89,11 +91,12 @@ def strip_confidence(value: Any) -> Any:
     学習者向け文脈 API 共通のヘルパー。component / claim / equation の各 API が
     同じ規則を使うため、正本はここ1箇所に置く（W8 の実装をコピペしない）。
     """
-    if isinstance(value, dict):
-        return {k: strip_confidence(v) for k, v in value.items() if k != "confidence"}
-    if isinstance(value, list):
-        return [strip_confidence(v) for v in value]
-    return value
+    return _dp.strip_keys(value, _CONFIDENCE_ONLY)
+
+
+#: ``strip_confidence`` が落とすキー（W8。学習者向けルート全体の禁止キーは
+#: ``display_projection.FORBIDDEN_KEYS_LEARNER`` が別途落とす）。
+_CONFIDENCE_ONLY = frozenset({"confidence"})
 
 
 # ---------------------------------------------------------------------------
@@ -135,77 +138,38 @@ def scoped_id_match_sql(
 # W層は変更しない（LE6）ので、学習者向け射影の時点で「裸の内部 ID 形」を検出し
 # 一般ラベルへ置換する。
 
-_UUID_LABEL_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
+# 語彙（正規表現・一般ラベル表）の正本は ``core/display_projection.py``（DP2）。
+# ここでは学習者向け要素文脈の遮断層として使う名前を割り当てるだけで、判定の中身
+# （先頭一致 / 文中埋め込み / 役割文 / agent 側 ID）は従来と同一である。
+_UUID_LABEL_RE = _dp.UUID_FULL_RE
 
-_INTERNAL_ID_LABEL_RES = (
-    re.compile(r"^ev(?:idence)?_[0-9]", re.IGNORECASE),   # evidence_registry: ev_0001
-    re.compile(r"^synth_", re.IGNORECASE),               # 合成 claim: synth_claim_0001
-    re.compile(r"^claim_", re.IGNORECASE),                # claim 生ID: claim_span_001 / claim_0004
-    re.compile(r"^span_[0-9]", re.IGNORECASE),           # rhetorical_role: span_001
-    re.compile(r"^support:"),                             # thesis support node: support:<section>:<idx>
-    re.compile(r"^node_", re.IGNORECASE),                 # graph node id
-)
+_INTERNAL_ID_LABEL_RES = _dp.LEARNER_INTERNAL_ID_LABEL_RES
 
 # ラベル**全体**ではなく「内部 ID を埋め込んだ事実文」も遮る（EC3。
 # equation_context_panel_display_design.md §1.5）。W層 ``_derivation_membership_facts``
 # は「導出「derivation_eq_tex_b16」のステップ「step_001」」のような文をラベルにするため、
-# 先頭一致の ``_INTERNAL_ID_LABEL_RES`` では検出できない。関係の意味（relation_label
-# 「の導出に属する」）は保持したまま、ラベルだけ一般ラベルへ置換する。
-_EMBEDDED_INTERNAL_ID_RE = re.compile(
-    r"derivation_[A-Za-z0-9_]+"
-    r"|system_derivation_[0-9]+"
-    r"|(?:^|[^A-Za-z0-9])sys_[0-9]+_step_[0-9]+"
-    r"|(?:^|[^A-Za-z0-9])step_[0-9]+",
-    re.IGNORECASE,
-)
+# 先頭一致の ``_INTERNAL_ID_LABEL_RES`` では検出できない。
+_EMBEDDED_INTERNAL_ID_RE = _dp.LEARNER_EMBEDDED_INTERNAL_ID_RE
 
 # ``eq_2_7`` 形は論文の式番号由来で学習者にも可読なため v1 では置換しない（設計書 §4 の裁定）。
-_EQUATION_NUMBER_LABEL_RE = re.compile(r"^eq[_\-.]?[0-9]", re.IGNORECASE)
+_EQUATION_NUMBER_LABEL_RE = _dp.LEARNER_EQUATION_NUMBER_LABEL_RE
 
 # element_type 別の一般ラベル（内部 ID を出す代わりの事実文。関係語
 # （``relation_label``）は保持するので「図 / を根拠とする」の形で意味は残る）。
-_GENERIC_ITEM_LABELS = {
-    ELEMENT_THEORY_CLAIM: "関連する主張",
-    ELEMENT_THEORY_COMPONENT: "関連する論理要素",
-    ELEMENT_EQUATION: "関連する数式",
-    "figure": "図",
-    "evidence": "本文の根拠箇所",
-    "section": "掲載セクション",
-    "thesis": "中心命題",
-    "derivation": "導出の流れ",
-    "symbol": "記号",
-    "stage": "理論の段階",
-    "part": "構成部品",
-}
-_GENERIC_ITEM_LABEL_FALLBACK = "関連する要素"
+_GENERIC_ITEM_LABELS = _dp.GENERIC_ITEM_LABELS
+_GENERIC_ITEM_LABEL_FALLBACK = _dp.GENERIC_LABEL_FALLBACK
 
 # ``focus.contextual_role`` は上位項目のラベルから合成される（W層
 # ``_derive_contextual_role``）ため、内部 ID がそのまま役割文に混ざり得る
-# （「synth_claim_0001を定量化する」等）。含まれていたら role をキーごと落とす
-# （candidate / unidentified と同じ「推測で穴埋めしない」縮退）。
-ROLE_INTERNAL_TOKEN_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-    r"|synth_[A-Za-z0-9_]*[0-9]"
-    r"|claim_span_[0-9]"
-    r"|claim_[0-9]{3,}"
-    r"|ev(?:idence)?_[0-9]{3,}"
-    r"|span_[0-9]{3,}"
-    r"|support:",
-    re.IGNORECASE,
-)
+# （「synth_claim_0001を定量化する」等）。含まれていたら role をキーごと落とす。
+ROLE_INTERNAL_TOKEN_RE = _dp.LEARNER_ROLE_INTERNAL_TOKEN_RE
 # 後方互換 alias（共有契約の公開名は ROLE_INTERNAL_TOKEN_RE）。
 _ROLE_INTERNAL_TOKEN_RE = ROLE_INTERNAL_TOKEN_RE
 
 # TheoryOperationGraph のノード ID（``theory_op_0001`` / ``eq_op_0007``）と
 # コンポーネントの agent 側 ID。ITEM v2 の ``sublabel`` / ``intrinsic`` の事実文は
 # ラベルと違い自由文なので、**文中のどこに現れても**遮断する。
-_EXTRA_INTERNAL_TOKEN_RE = re.compile(
-    r"(?:^|[^A-Za-z0-9])(?:theory_op|eq_op)_[0-9]"
-    r"|(?:^|[^A-Za-z0-9])comp_[0-9]",
-    re.IGNORECASE,
-)
+_EXTRA_INTERNAL_TOKEN_RE = _dp.LEARNER_EXTRA_INTERNAL_TOKEN_RE
 
 # W層 ITEM の表示専用 element_type（``deliberation/schema.py`` の解決対象語彙には無い）。
 ITEM_TYPE_SYMBOL = "symbol"
@@ -221,6 +185,7 @@ ITEM_GROUPS = (
     "stage",
     "thesis",
     "claim",
+    "mention_claim",
     "section",
     "symbol_defined",
     "symbol_used",
@@ -420,6 +385,9 @@ def equation_focus_label(label: str, element_id: str) -> str:
     ``eq_tex_b14`` のような合成 ID は見出しにしない（空 = 種別チップのみ）。
     """
     text = str(label or "").strip()
+    # IK-0681（第 9 波）: TeX の label キー（``eq:tovnet``）は印字番号ではない — 見出しにしない。
+    if text and _dp.is_tex_label_key(text):
+        text = ""
     if text and not looks_like_tex_math(text) and not is_internal_id_label(
         text, ELEMENT_EQUATION, element_id
     ):
@@ -428,6 +396,382 @@ def equation_focus_label(label: str, element_id: str) -> str:
     if raw_id and _EQUATION_NUMBER_LABEL_RE.match(raw_id):
         return raw_id
     return ""
+
+
+_LATEX_COMPARE_NOISE_RE = re.compile(
+    r"\\(?:left|right|nonumber|notag|displaystyle|,|;|!|:|quad|qquad)(?![A-Za-z])|\\label\{[^{}]*\}"
+)
+
+
+def normalize_latex_for_comparison(latex: Any) -> str:
+    """原文の LaTeX と復元した LaTeX を突き合わせるための正規化（決定論）。
+
+    空白・間隔命令（``\\,`` ``\\quad`` 等）・``\\left`` / ``\\right``・``\\label{…}``・
+    末尾の句読点を落とす。意味の比較ではなく「同じ文字列を書いているか」の比較。
+    """
+    text = str(latex or "")
+    if not text.strip():
+        return ""
+    text = _LATEX_COMPARE_NOISE_RE.sub("", text)
+    text = re.sub(r"\s+", "", text)
+    return text.rstrip(".,;")
+
+
+def reconstruction_matches_source(reconstructed_latex: Any, source_latex: Any) -> bool:
+    """復元した LaTeX が原文の LaTeX と（正規化後に）一致するか（IK-0895）。
+
+    TeX 経路では原文に LaTeX があるので、``equation_semantics`` が reconstruction を
+    付けても本文が原文そのものなら「AI が文脈から復元した式」ではない。
+    """
+    rec = normalize_latex_for_comparison(reconstructed_latex)
+    src = normalize_latex_for_comparison(source_latex)
+    return bool(rec) and rec == src
+
+
+def equation_latex_is_reconstructed(record: Any) -> bool:
+    """この式の LaTeX が「AI が文脈から復元したもの」か（決定論・非LLM）。
+
+    **復元の印の判定の正本**（IK-0895。教材の式一覧・部品の文脈・要素文脈・
+    ``course_content_builder`` が通る）。``record`` は equations.json の export 形・
+    ``equation_semantics`` artifact のレコード形・``chunks.formulas`` の平坦形の
+    いずれでもよい。
+
+    - ``reconstruction.status`` が ``none`` 以外で、復元本文（latex / plain_text）が
+      実在するときだけ True。復元が空なら False（事実文も付かない）。
+    - 復元本文が原文の LaTeX（``source_extraction.latex``）と正規化後に一致するなら
+      False（TeX 経路で原文どおりの式に印を付けない）。
+    - 平坦形（``reconstructed`` 真偽値のみ）はその値を尊重する。
+    """
+    data = json_dict(record)
+    # 第 25 周 第 6 波（IK-0895）: 写し（凍結した content_blocks・根拠リンク）が生きた式の記録から
+    # 引いた状態を持つときは、それが答え（:func:`overlay_equation_reconstruction` が読み時に、
+    # 新しい freeze が書くときに付ける）。写しの文字と原文の照合では引き直さない。
+    if data.get(RECONSTRUCTION_CHECKED_KEY) is True:
+        return data.get("reconstructed") is True
+    reconstruction = json_dict(data.get("reconstruction"))
+    if not reconstruction:
+        if data.get("reconstructed") is not True:
+            return False
+        # 第 25 周 第 4 波（IK-0977 / IK-0895）: 平坦形（``chunks.formulas`` の旧い run）にも
+        # 「原文と一致する復元には印を付けない」を効かせる。原文の LaTeX（``source_latex``）か
+        # 原文（``raw_text``）と正規化後に一致するなら、表示する式は原文そのもの。
+        flat_latex = data.get("latex")
+        for source_key in ("source_latex", "raw_text"):
+            if reconstruction_matches_source(flat_latex, data.get(source_key)):
+                return False
+        return True
+    status = str(reconstruction.get("status") or "none").strip()
+    if not status or status == "none":
+        return False
+    rec_latex = str(reconstruction.get("latex") or "").strip()
+    if not (rec_latex or str(reconstruction.get("plain_text") or "").strip()):
+        return False
+    source = json_dict(data.get("source_extraction"))
+    source_latex = source.get("latex") if source else data.get("source_latex")
+    if rec_latex and reconstruction_matches_source(rec_latex, source_latex):
+        return False
+    return True
+
+
+_COPY_LATEX_KEYS = ("latex", "latex_canonical", "normalized_latex")
+
+
+def reconstructed_latex_keys(records: Any) -> set[str]:
+    """復元の印が付く式の LaTeX を、写しと突き合わせるための鍵の集合にする（IK-0977）。
+
+    生成した教材本文の ``$…$``・記号の吹き出し・教材図スタジオの資料は式の記録の番地を
+    持たない写しなので、写しの LaTeX をこの鍵と（正規化後の完全一致で）照らして印を
+    引き直す。判定は :func:`equation_latex_is_reconstructed` だけを通す（印の正本は 1 つ）。
+    """
+    keys: set[str] = set()
+    for record in records or []:
+        if not isinstance(record, dict) or not equation_latex_is_reconstructed(record):
+            continue
+        for key in _COPY_LATEX_KEYS:
+            normalized = normalize_latex_for_comparison(record.get(key))
+            if normalized:
+                keys.add(normalized)
+    return keys
+
+
+def latex_copy_is_reconstructed(latex: Any, keys: set[str] | None) -> bool:
+    """式の写し（LaTeX）が、復元の印の付く式の記録と同じ式か（正規化後の完全一致・IK-0977）。
+
+    部分一致・近似一致は取らない（印を付け過ぎない側に倒す）。
+    """
+    if not keys:
+        return False
+    normalized = normalize_latex_for_comparison(latex)
+    return bool(normalized) and normalized in keys
+
+
+# ---------------------------------------------------------------------------
+# 生きた式の記録から引く復元の状態（第 25 周 第 6 波・IK-0895）
+# ---------------------------------------------------------------------------
+#
+# 凍結した写し（content_blocks の式・根拠リンク・講義の式）は、凍結の時点で式の記録が持って
+# いた復元の状態を載せていないことがある（旧い freeze）。部品の文脈とチャットは生きた記録
+# （採用 run の equation_semantics artifact・chunks.formulas）を読むので、画面ごとに印が
+# 食い違った。ここでは生きた記録の判定（:func:`equation_latex_is_reconstructed`）を式の id・
+# 印字番号・正規化した LaTeX の鍵で引ける索引にし、写しの判定はこの索引の答えを使う。
+
+#: 写しが「生きた式の記録から状態を引いた」ことを示すキー（値は ``reconstructed`` の真偽）。
+RECONSTRUCTION_CHECKED_KEY = "reconstruction_checked"
+
+_EQUATION_ID_KEYS = ("equation_id", "id", "target_id")
+_EQUATION_LATEX_KEYS = ("latex", "latex_canonical", "normalized_latex")
+
+
+def _equation_key_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if text.lower().startswith("equation:"):
+        text = text.split(":", 1)[1].strip()
+    if not text or text.startswith("[[") or text.upper().startswith("TOPIC_FORMULA_"):
+        return ""
+    return text
+
+
+def _equation_printed_key(record: dict) -> str:
+    """印字番号（``label`` — TeX の ``\\label`` キーは番号ではない）を鍵にする。"""
+    label = str(record.get("label") or "").strip().strip("()（）").strip()
+    if not label or _dp.is_tex_label_key(label) or len(label) > 12:
+        return ""
+    return label
+
+
+def _equation_latex_keys(record: dict, extra: Any = None) -> set[str]:
+    keys: set[str] = set()
+    values: list[Any] = [record.get(k) for k in _EQUATION_LATEX_KEYS]
+    reconstruction = json_dict(record.get("reconstruction"))
+    source = json_dict(record.get("source_extraction"))
+    values.extend([reconstruction.get("latex"), source.get("latex"), record.get("source_latex"), extra])
+    for value in values:
+        normalized = normalize_latex_for_comparison(value)
+        if normalized:
+            keys.add(normalized)
+    return keys
+
+
+class EquationReconstructionIndex:
+    """生きた式の記録（document 単位）の復元の判定を、写しの鍵で引く索引（純データ・DB 非依存）。
+
+    鍵は式の id → 印字番号 → 正規化した LaTeX の順に引く。同じ鍵の記録が複数あれば、
+    どれかが復元なら復元（式の単位の OR）。document が分からない写しで、鍵が論文ごとに
+    違う答えを持つときはその鍵では決めない（次の鍵へ）。どの鍵でも決まらなければ ``None``。
+    """
+
+    def __init__(self) -> None:
+        self._by_kind: dict[str, dict[str, dict[str, bool]]] = {"id": {}, "number": {}, "latex": {}}
+
+    def add(self, document_id: Any, record: Any) -> None:
+        if not isinstance(record, dict):
+            return
+        try:
+            answer = equation_latex_is_reconstructed(record)
+        except Exception:  # noqa: BLE001 — 判定できない記録は索引に入れない
+            return
+        doc = str(document_id or "").strip()
+        keys: dict[str, set[str]] = {
+            "id": {k for k in (_equation_key_id(record.get(n)) for n in _EQUATION_ID_KEYS) if k},
+            "number": {k for k in [_equation_printed_key(record)] if k},
+            "latex": _equation_latex_keys(record),
+        }
+        for kind, values in keys.items():
+            table = self._by_kind[kind]
+            for key in values:
+                per_doc = table.setdefault(key, {})
+                per_doc[doc] = per_doc.get(doc, False) or answer
+
+    def __bool__(self) -> bool:
+        return any(self._by_kind[k] for k in self._by_kind)
+
+    def _answer(self, kind: str, key: str, document_id: str) -> bool | None:
+        per_doc = self._by_kind[kind].get(key)
+        if not per_doc:
+            return None
+        if document_id and document_id in per_doc:
+            return per_doc[document_id]
+        answers = set(per_doc.values())
+        return answers.pop() if len(answers) == 1 else None
+
+    def lookup(self, record: Any, *, latex: Any = None, document_id: Any = None) -> bool | None:
+        data = json_dict(record)
+        doc = str(document_id or data.get("document_id") or "").strip()
+        for name in _EQUATION_ID_KEYS:
+            key = _equation_key_id(data.get(name))
+            if key:
+                found = self._answer("id", key, doc)
+                if found is not None:
+                    return found
+        number = _equation_printed_key(data)
+        if number:
+            found = self._answer("number", number, doc)
+            if found is not None:
+                return found
+        for key in sorted(_equation_latex_keys(data, latex)):
+            found = self._answer("latex", key, doc)
+            if found is not None:
+                return found
+        return None
+
+
+def build_equation_reconstruction_index(
+    records_by_document: dict[str, list[dict]] | None,
+) -> EquationReconstructionIndex:
+    """``{document_id: [式の記録…]}``（artifact の式・chunks.formulas の平坦形）から索引を作る。"""
+    index = EquationReconstructionIndex()
+    for document_id, records in (records_by_document or {}).items():
+        for record in records or []:
+            index.add(document_id, record)
+    return index
+
+
+def equation_is_reconstructed(
+    record: Any,
+    *,
+    latex: Any = None,
+    index: EquationReconstructionIndex | None = None,
+    document_id: Any = None,
+) -> bool:
+    """式 1 つが「AI が文脈から復元した式」か — 本文・講義・付録・部品の文脈・チャットの共通の答え。
+
+    索引（生きた式の記録）で鍵が引ければその答え、引けなければ記録自身の判定
+    （:func:`equation_latex_is_reconstructed`）。
+    """
+    if index:
+        try:
+            found = index.lookup(record, latex=latex, document_id=document_id)
+        except Exception:  # noqa: BLE001
+            found = None
+        if found is not None:
+            return found
+    try:
+        return equation_latex_is_reconstructed(record)
+    except Exception:  # noqa: BLE001 — 印が決まらないなら付けない
+        return False
+
+
+def overlay_equation_reconstruction(topic: Any, index: EquationReconstructionIndex | None) -> Any:
+    """トピックの写し（content_blocks の式・式の根拠リンク）に、索引から引いた状態を載せた複製を返す。
+
+    入力は mutate しない。索引で決まらない写しはそのまま（新しい freeze が書いた状態か、
+    写し自身の判定に任せる）。保存データは書き換えない（読み時だけ）。
+    """
+    if not isinstance(topic, dict) or not index:
+        return topic
+
+    def _stamp(item: dict) -> dict:
+        found = index.lookup(item)
+        if found is None:
+            return item
+        return {**item, "reconstructed": bool(found), RECONSTRUCTION_CHECKED_KEY: True}
+
+    out = dict(topic)
+    blocks = topic.get("content_blocks")
+    if isinstance(blocks, list):
+        new_blocks = []
+        for block in blocks:
+            if isinstance(block, dict) and block.get("type") == "equations":
+                block = {
+                    **block,
+                    "items": [
+                        _stamp(item) if isinstance(item, dict) else item
+                        for item in block.get("items") or []
+                    ],
+                }
+            new_blocks.append(block)
+        out["content_blocks"] = new_blocks
+    links = topic.get("evidence_links")
+    if isinstance(links, list):
+        out["evidence_links"] = [
+            _stamp(link) if isinstance(link, dict) and link.get("kind") == "equation" else link
+            for link in links
+        ]
+    return out
+
+
+#: 式として描けない壊れ方の印（置換文字・PDF の箇条書きの点）。第 25 周 第 5 波（IK-1008）で
+#: 箇条書きの点（結果の値の列挙が式の候補に入った形）を加えた。
+_BROKEN_LATEX_CHARS = frozenset("\ufffd\u2022")
+
+
+def is_broken_reconstructed_latex(latex: object) -> bool:
+    """AI 復元の LaTeX が表示に耐えない壊れ方をしているか（決定論・TRIAGE14）。
+
+    置換文字（U+FFFD）・箇条書きの点（U+2022）・C0 制御文字を含む / 数式本体が空で
+    ``\\tag{..}`` や句読点の断片だけ、を壊れているとみなす。判断に迷うものは壊れていない
+    側に倒す（情報を落とさない）。正本はここ（``core.lecture`` は再エクスポート）。
+    """
+    text = str(latex or "")
+    if not text.strip():
+        return True
+    if any(ch in _BROKEN_LATEX_CHARS for ch in text):
+        return True
+    if any(ord(ch) < 32 and ch not in "\n\t\r" for ch in text):
+        return True
+    body = re.sub(r"\\tag\*?\{[^}]*\}", "", text)
+    body = re.sub(r"[\s;,.:]", "", body)
+    return not body
+
+
+def equation_display_fields(
+    record: Any,
+    *,
+    latex: Any = None,
+    reconstructed: bool | None = None,
+    index: "EquationReconstructionIndex | None" = None,
+    document_id: Any = None,
+) -> dict:
+    """式 1 つの（確からしさの印・表示の可否）の組を返す正本（第 25 周 第 5 波・IK-1008 / IK-0895）。
+
+    記号の吹き出し・講義・読む表示・本文の写し・根拠の式・図スタジオの資料は、印と
+    「式として描いてよいか」をこの 1 関数から**式の単位で**受け取る（印だけを借りて
+    伏せる規則を借りない、を構造的に塞ぐ）。
+
+    - ``reconstructed`` を渡さなければ :func:`equation_latex_is_reconstructed` で判定する
+      （同じ式の記録が複数あるときは、呼び出し側が式の単位で OR を取って渡す）。
+      ``index`` を渡すと生きた式の記録（採用 run の artifact・chunks.formulas）から引く（第 6 波）。
+    - 復元でなければ空 dict（キーを足さない）。
+    - 復元なら ``reconstructed`` / ``reconstructed_mark`` / ``reconstructed_note``。
+      描く LaTeX（``latex``、省略時は ``record["latex"]``）が壊れていれば
+      ``latex: ""`` と ``latex_withheld: True`` も返す（事実文だけを残す）。
+    """
+    from core.label_vocab import RECONSTRUCTED_EQUATION_MARK  # 循環 import を避ける
+
+    if reconstructed is None:
+        # 第 6 波（IK-0895）: 生きた式の記録の索引があればその答え（:func:`equation_is_reconstructed`）。
+        reconstructed = equation_is_reconstructed(
+            record, latex=latex, index=index, document_id=document_id
+        )
+    if not reconstructed:
+        return {}
+    out: dict[str, Any] = {
+        "reconstructed": True,
+        "reconstructed_mark": RECONSTRUCTED_EQUATION_MARK,
+        "reconstructed_note": RECONSTRUCTED_EQUATION_NOTE,
+    }
+    target = latex if latex is not None else json_dict(record).get("latex")
+    if is_broken_reconstructed_latex(target):
+        out["latex"] = ""
+        out["latex_withheld"] = True
+    return out
+
+
+def reconstructed_equation_note(
+    record: Any,
+    *,
+    index: "EquationReconstructionIndex | None" = None,
+    document_id: Any = None,
+) -> str | None:
+    """復元式に添える学習者向けの事実文（1行・数値なし）。該当しなければ ``None``。
+
+    文言の正本は ``core/label_vocab.RECONSTRUCTED_EQUATION_NOTE``（JS 側にミラー
+    しない）。confidence・一致度などの数値は**出さない** — 出るのはこの1文だけ。
+    判定は :func:`equation_is_reconstructed`（第 6 波・索引があれば生きた記録の答え）。
+    """
+    if not equation_is_reconstructed(record, index=index, document_id=document_id):
+        return None
+    return RECONSTRUCTED_EQUATION_NOTE
 
 
 def learner_navigable(element_type: Any, element_id: Any) -> bool:
@@ -487,10 +831,16 @@ def project_item(
 
     label = str(item.get("label") or "")
     unresolved = bool(item.get("unresolved"))
+    # TRIAGE14: claim / equation レーン（ITEM v2）にも agent 側 ID トークンの遮断を広げる
+    # （component レーンは従来どおり呼び出し側が指定する）。
+    if not legacy_keys_only:
+        include_agent_id_tokens = True
     # EC1/EC2: レーンの相手ラベルにも生 TeX が混ざり得る（equation は式番号があれば
     # それを、無ければ一般ラベルへ）。記号だけは TeX でも遮断しない（§5.4）。
     is_symbol = element_type == ITEM_TYPE_SYMBOL
-    if not is_symbol and looks_like_tex_math(label):
+    # IK-0898: 地の文に $…$ の数式区間を含む見出し（式から合成した主張の和文など）は
+    # 生 TeX ではない — 画面が数式区間を数式で描く。一般ラベルへ落とさない。
+    if not is_symbol and looks_like_tex_math(label) and not is_prose_with_delimited_math(label):
         replacement = (
             equation_focus_label("", str(element_id or ""))
             if element_type == ELEMENT_EQUATION
@@ -514,18 +864,58 @@ def project_item(
             "relation_status": item.get("relation_status"),
             "navigable": learner_navigable(element_type, element_id),
         }
+    navigable = learner_navigable(element_type, element_id)
+    sublabel = safe_text(item.get("sublabel"))
+    if element_type == ELEMENT_DERIVATION:
+        # W層の導出ノードの label は英語の生成文と件数（"Logical progression through
+        # 41 claims in section…"）、sublabel は操作名の全列挙になる（TRIAGE14）。
+        # 学習者には一般ラベル + 重複を畳んだ操作名（先頭から最大
+        # ``DERIVATION_OPERATION_LIMIT``）だけを出す（件数は出さない）。
+        if not _CJK_RE.search(label):
+            label = generic_item_label(element_type)
+        sublabel = _condensed_operation_line(sublabel)
     return {
-        "id": element_id,
+        # 学習者が開けない項目の内部 ID（ev_0280 / fig_6 / derivation_claim_0014）は出さない（KO10）。
+        "id": element_id if navigable or not _looks_like_internal_item_id(element_id) else None,
         "element_type": item.get("element_type"),
         "label": label,
-        "sublabel": safe_text(item.get("sublabel")),
+        "sublabel": sublabel,
         "qualifier": qualifier,
         "group": normalized_group(item.get("group")),
         "unresolved": unresolved,
         "relation_label": item.get("relation_label"),
         "relation_status": item.get("relation_status"),
-        "navigable": learner_navigable(element_type, element_id),
+        "navigable": navigable,
     }
+
+
+#: 導出ノードの操作名を学習者に並べる上限。
+DERIVATION_OPERATION_LIMIT = 4
+
+_OPERATION_PREFIX = "操作:"
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
+_ITEM_ID_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+$")
+
+
+def _condensed_operation_line(sublabel: str) -> str:
+    """「操作: a → b → a → c …」を重複なしの先頭 N 件（「操作: a → b → c」）に畳む。"""
+    text = str(sublabel or "").strip()
+    if not text:
+        return ""
+    body = text[len(_OPERATION_PREFIX):] if text.startswith(_OPERATION_PREFIX) else text
+    ops = [op.strip() for op in body.split("→") if op.strip()]
+    if len(ops) <= 1 and not text.startswith(_OPERATION_PREFIX):
+        return "" if re.search(r"[0-9]", text) else text
+    unique = list(dict.fromkeys(ops))[:DERIVATION_OPERATION_LIMIT]
+    return _OPERATION_PREFIX + " " + " → ".join(unique) if unique else ""
+
+
+def _looks_like_internal_item_id(value: Any) -> bool:
+    """ITEM の id が内部 ID 形か（UUID / ``snake_case_数字`` 形の agent ID）。"""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return bool(_UUID_LABEL_RE.match(text) or _ITEM_ID_TOKEN_RE.match(text) or contains_internal_id(text))
 
 
 def is_learner_visible_relation(item: Any) -> bool:

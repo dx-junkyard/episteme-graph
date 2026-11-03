@@ -37,7 +37,7 @@ class TestGetCourseComponentContextGating:
         with pytest.raises(HTTPException) as exc:
             get_course_component_context("c1", "comp-1", {"id": "u1"})
         assert exc.value.status_code == 404
-        assert exc.value.detail == "Course not found"
+        assert exc.value.detail == "このコースは見つからないか、閲覧できません。"
 
     @patch("api.routes.learning.build_component_context", return_value=None)
     @patch("api.routes.learning._course_document_ids", return_value=["doc-1"])
@@ -126,11 +126,16 @@ class TestGetCourseComponentContextGating:
         mock_doc_ids.return_value = ["doc-a", "doc-b"]
         mock_build.return_value = None
 
-        with pytest.raises(HTTPException):
-            get_course_component_context("c1", "comp-1", {"id": "u1"})
+        with patch("api.routes.learning.list_visible_document_ids", return_value=["doc-z"]):
+            with pytest.raises(HTTPException):
+                get_course_component_context("c1", "comp-1", {"id": "u1"})
 
         mock_doc_ids.assert_called_once_with(course_data)
-        mock_build.assert_called_once_with("comp-1", "c1", {"doc-a", "doc-b"})
+        # IK-0920: 「共通部品として」の他の論文はコースの sources ∪ 本人の可視集合から列挙する。
+        mock_build.assert_called_once_with(
+            "comp-1", "c1", {"doc-a", "doc-b"},
+            readable_document_ids={"doc-a", "doc-b", "doc-z"},
+        )
 
 
 class TestFirstApprovedComponentExplanationQueryShape:
@@ -139,7 +144,13 @@ class TestFirstApprovedComponentExplanationQueryShape:
         スコープ・単一行制限が含まれることを静的に確認する(実 DB を使わない軽量な回帰)。"""
         from api.routes.learning import _first_approved_component_explanation
 
+        from api.routes import learning as learning_mod
+
         source = inspect.getsource(_first_approved_component_explanation)
-        assert "review_status = 'teacher_approved'" in source
-        assert "e.course_id = :course_id" in source
+        assert "_LEARNER_EXPLANATION_SCOPE_SQL" in source
+        scope = learning_mod._LEARNER_EXPLANATION_SCOPE_SQL
+        assert "review_status = 'teacher_approved'" in scope
+        # IK-0861: 共有 OFF の説明だけが書いたコース（出所）に限られる。
+        assert "e.course_id = :course_id" in scope
+        assert "e.shared = TRUE" in scope
         assert "LIMIT 1" in source

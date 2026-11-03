@@ -1,0 +1,28 @@
+id: t-v5-register-own-course
+population: teachers
+runner: [api, browser]
+preconditions:
+  - 砂場に解析済みの教材（TeX 経路の 4 本・public）があり、このペルソナが閲覧できる（snapshot corpus-astro-tex-v1）
+goal: "{{persona.teaching.course_subject}} のコースを取り込み済みの教材から作って登録する（公開はまだしない）（依頼文: {{persona.course_brief}}）"
+params_required: [course_title, builder_messages]
+steps:
+  - do: auth.login
+  - do: admin.materials.list
+  - do: admin.course_builder.session_create
+    with: {title: "{{course_title}}"}
+  - do: admin.course_builder.chat
+    with: {message: "{{persona.course_brief}}"}
+    note: 依頼文をそのまま貼って、章立ての案を出してもらう
+  - repeat:
+      until: "persona_decides_to_stop or steps > 2"
+      max: 2
+      do: admin.course_builder.chat
+      with: {message: "{{builder_messages | next}}"}
+  - do: admin.course_builder.register
+    with: {title: "{{course_title}}"}
+    note: 登録する（公開は「確認して公開」でこのあと行う）
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/12-admin-course-builder.md#approve-btn
+watch_for:
+  - 登録したコースがコース管理に自分の所有として並ぶ

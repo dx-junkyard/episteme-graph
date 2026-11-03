@@ -1,0 +1,32 @@
+id: c-astro-r25-share-r1
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 1bad7d9f
+personas:
+  teachers: [te-03-meticulous-seminar, te-01-rookie-seminar]
+  students: [st-02-m2-lensing-theory, st-03-d1-from-particle]
+scenarios:
+  teacher: [t-share-identity-queue, t-share-bind-versions, t-share-explain-write, t-share-explain-endorse-cite, t-share-labels-atlas]
+  student: [s-share-part-chip, s-share-symbol-concept]
+runner: api
+flags: {}
+budget: {product_llm_calls: 12, persona_llm_calls: 260, wall_clock_minutes: 180}
+notes: |
+  第 25 周「空白の 4 面」の共有・転用の面（face=share）第 1 周。正本は uxsim/runs/round25/design_share.md
+  （設計書 §22 に合流予定）と CLAUDE.md の概念レジストリ層・C層・パイプライン成果のグループ共有・
+  component 根拠カード・個人知識ネットワーク・P3-5 記号 → 概念。
+  砂場の事実（指揮者の実測 2026-10-22）: identity_candidates を TeX 4 本で再実行して同一性候補は真の 0 件。
+  library_entries は 14 件すべて装置系（confirmed）・概念系 0・候補 0。8 教材は同じ 4 論文の TeX 版 / PDF 版の対。
+  よって (a) は「候補ゼロの事実文」を読む場面で始まり、確定のある経路は (a') で教員が自分で作る。
+  runner は「ペルソナ × 経路の全組」を走らせるので、運転は --persona X --scenario Y で 1 場面ずつ。
+  レーン（→ は続けて走らせる順。⇢ は他レーンを待つ）:
+   te-01（新人・editor なし）: (a) t-share-identity-queue（候補ゼロの文を読む = 前）
+   te-03（精読・editor あり）: (a') t-share-bind-versions（PINN の TeX ⇄ PDF。PDF 側は却下）→ (b1) t-share-explain-write
+   st-02（理論）: (d) s-share-part-chip（前 — 教員の確定より前の見え方）⇢ te-03 の (a')(b1) ⇢ (d) もう一度 → (e) s-share-symbol-concept
+   te-01: ⇢ te-03 の (b1) ⇢ (b2) t-share-explain-endorse-cite（自分のコース 6be229e1 へ引用）→ (a) もう一度（候補が立ったか）→ (c) t-share-labels-atlas
+   st-03（隣接分野から）: ⇢ te-01 の (b2) ⇢ (d) s-share-part-chip → (e)
+  依存: (d) の前後比較は st-02 だけ。(b2) は (b1) の共有 ON の後（前に走らせると「共有されていない説明は引用できない」を見る場面になる）。
+  te-01 は教材の編集権限が無いので、(a) の確認・見送りと (a') 系の作成は 404 になり得る — それ自体を所見として読む。
+  外部 API は呼ばない。製品の LLM は (d) の選択質問 1〜2 回と、共通部品の検索の埋め込み（チャット検索と同じ経路）だけ。
+  エントリの凍結（版発行）は埋め込みの計算を伴い取り消せないので行為にしていない（共通部品の結び付きに凍結は要らない —
+  検索は draft の active エントリも拾い、学生の「共通部品として」は active なエントリで出る）。

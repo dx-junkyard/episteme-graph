@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Callable
 
 # Lower value = selected first. Unknown tiers rank with background.
 TIER_PRIORITY = {
@@ -71,12 +72,21 @@ def select_claim_rows(
     stage: str,
     thesis_claim_ids: set[str] | None = None,
     headline_text: str | None = None,
+    section_key_of: Callable[[dict], str] | None = None,
 ) -> ClaimSelection:
     """Apply the shared importance-based limit to claim input rows.
 
     ``rows`` are the fully built claim input dicts (must carry ``claim_id``;
     ``claim_tier``, ``confidence``, and token overlap with ``headline_text``
     are used for ranking when present).
+
+    ``section_key_of`` (optional) stratifies the limit by section: every section
+    gets at least one slot (when the limit allows) and the rest is shared in
+    proportion to the section sizes, the importance order deciding *which*
+    claims of a section are kept. Without it the ranking is global, which let
+    the many paper_core result claims crowd out every claim of the
+    formalism / model sections (component_assembly, 2026-10-17). The split of
+    slots is the shared ``stratified_sampling.select_indices`` rule.
     """
     rows = list(rows or [])
     if limit <= 0 or len(rows) <= limit:
@@ -102,7 +112,19 @@ def select_claim_rows(
         )
 
     ranked = sorted(range(len(rows)), key=_priority)
-    keep = set(ranked[:limit])
+    if section_key_of is None:
+        keep = set(ranked[:limit])
+    else:
+        from episteme_graph.agents.stratified_sampling import select_indices
+
+        ranked_rows = [rows[i] for i in ranked]
+        picked = select_indices(
+            ranked_rows,
+            range(len(ranked_rows)),
+            limit,
+            section_key_of=lambda row: str(section_key_of(row) or ""),
+        )
+        keep = {ranked[pos] for pos in picked}
     selected = [rows[i] for i in range(len(rows)) if i in keep]
 
     thesis_ids = {str(v) for v in (thesis_claim_ids or set()) if v}

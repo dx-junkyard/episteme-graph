@@ -2,6 +2,10 @@
 
 [← ドキュメント目次](../README.md)
 
+> **更新注記（2026-09-23）:** §2 に理論モジュールの保存ステージ `theory_modules`（30 番・
+> `persist_claims_components_graph` の直後、`identity_candidates` の直前）を追記し、名前付き
+> 31 ステージ・`_PIPELINE_STEPS` 35 要素に更新した（正本は `theory_module_layer_design.md` §13.5 / §12.4）。
+>
 > **更新注記（2026-09-13）:** §2 に主張の概念接地のフック `_hook_claim_concept_grounding`
 > （`dsl_linking` の直後）を追記し、フック列を 4 件・`_PIPELINE_STEPS` を 34 要素に更新した
 > （正本は `claim_concept_grounding_design.md`）。
@@ -35,10 +39,10 @@
 
 ---
 
-## 2. パイプライン 30 ステージ
+## 2. パイプライン 31 ステージ
 
-`orchestrator.py` の `_PIPELINE_STEPS` は 34 要素 = **名前付き 30 ステージ**（`PIPELINE_STAGES`
-の 31 要素から終端マーカー `completed` を除いた分）+ between-stage 決定論的後処理の
+`orchestrator.py` の `_PIPELINE_STEPS` は 35 要素 = **名前付き 31 ステージ**（`PIPELINE_STAGES`
+の 32 要素から終端マーカー `completed` を除いた分）+ between-stage 決定論的後処理の
 `_hook_*` フック 4 件（`PIPELINE_STAGES` に対応エントリを持たない = `name=None`。
 `report_start` / `finish_target_stage` を持たず、artifact ゲートも通らない）。
 
@@ -57,7 +61,7 @@
 | 1 | `save_pdf` | 入力バイト列を一時ファイルへ | Det | — |
 | 2 | `grobid_parse` | GROBID で TEI-XML 抽出（失敗時 PyMuPDF へフォールバック、非致命的） | Det | TEI-XML |
 | 3 | `document_structure` | **DocumentStructureAgent** 文書構造復元 | Det（structure-first） | DocumentStructureResult（blocks, sections, metadata） |
-| 4 | `figure_image_extraction` | PyMuPDF 埋め込み画像抽出 + caption 近傍の領域レンダリング fallback（常時実行） | Det | document_figures（MinIO `figure-images`） |
+| 4 | `figure_image_extraction` | caption ごとに障害物（本文・見出し・柱）に挟まれた帯のインク連結成分から図領域を決め、埋め込み画像が図のほぼ全体を覆うときだけ embedded・それ以外は領域レンダリング（情報量の乏しい画像は提示しない。常時実行・設計書 §17） | Det | document_figures（MinIO `figure-images`） |
 | 5 | `source_chunking` | ブロックからチャンク生成 | Det | チャンク |
 | 6 | `source_embedding` | チャンクを pgvector へ保存 | Emb | — |
 | 7 | `paper_skeleton` | **PaperSkeletonAgent** 論文 backbone 仮説化 | LLM | PaperSkeletonResult |
@@ -87,7 +91,8 @@
 | 27 | `blueprint` | **BlueprintAgent** ナラティブアーク合成 | Det | Blueprint |
 | 28 | `export_validation` | **ExportValidationGate** 最終検証ゲート | Det | 検証結果 |
 | 29 | `persist_claims_components_graph` | claims/components/graph を PostgreSQL へ永続化 | Det | — |
-| 30 | `identity_candidates` | 同一性候補の生成（概念レジストリ P3-6。正規化ラベル一致・他 document の live 親 component・**保存済み** `chunks.embedding` の近傍だけを見る決定論。LLM / embedding 0 回・非致命） | Det | `library_entries`（candidate）/ `element_identity_links`（candidate）/ `theory_components.duplicate_candidates` |
+| 30 | `theory_modules` | 理論モジュール（外枠・内側）の保存（理論モジュール層 Phase 1・`theory_module_layer_design.md` §13.5）。採用 run の artifact と保存済み `graph_json` を `build_theory_module_records` に通し、`knowledge_theory_modules` へ `sync_live_rows` で同期（DELETE なし・supersede）。素材欠落（導出の解析結果が無い・今回グラフを保存していない）は SQL を発行しない。保存行は表示の正本ではない（画面は読み時導出のまま）。LLM / embedding 0 回・非致命 | Det | `knowledge_theory_modules`（`stage_outputs.theory_modules` に件数と `rule_version`） |
+| 31 | `identity_candidates` | 同一性候補の生成（概念レジストリ P3-6。正規化ラベル一致・他 document の live 親 component・**保存済み** `chunks.embedding` の近傍だけを見る決定論。LLM / embedding 0 回・非致命） | Det | `library_entries`（candidate）/ `element_identity_links`（candidate）/ `theory_components.duplicate_candidates` |
 | — | `completed` | ラン完了マーク | — | — |
 
 > **入力の種別**: `source_kind` は `"pdf"` と `"tex_archive"`（arXiv の TeX ソース `.tar.gz`）の
@@ -167,12 +172,68 @@ PDF
 （`truncated` は `population - processed` の導出値。`reasons` は理由コードの列で数値を載せない。
 `details` に件数キーを入れない）。orchestrator では `_attach_coverage` だけがこのキーを組み立てる
 （ガードレール `backend/tests/test_pipeline_coverage_report.py`）。対象は rhetorical_role
-（agent の `summary_stats.coverage` がそのまま落ちる）/ figure_image_extraction / equation_semantics /
-figure_table_semantics / apparatus_semantics / contextual_explanation / discuss_opening /
-landscape_placement / identity_candidates（母集合 = 当該 document の live 親 component 数。
-`core/library/identity_candidates.py` が組み立てる）。`claim_qualification` は母集合を事実で
-導けないため未付与（保留）。
-resume で artifact を再利用したステージには新規計算しない。
+（agent の `summary_stats.coverage` がそのまま落ちる）/ **paper_skeleton**（母集合 = level-1 節・reasons
+`max_sections` / `appendix_excluded`）/ **claim_qualification**（母集合 = 役割判定済み span・reasons
+`max_spans`。agent の `summary_stats.coverage`。2026-09-19 追加）/ equation_semantics（母集合 =
+式ブロック **+ inline 候補**・unit `equation_candidates`・reasons `max_equations` / `max_inline_equations`）/
+**thesis_reconstruction**（文脈サンプリングの上限 32/16/16 を unit `context_items` で報告）/
+figure_image_extraction / figure_table_semantics / apparatus_semantics / contextual_explanation /
+discuss_opening / landscape_placement / identity_candidates（母集合 = 当該 document の live 親 component 数。
+`core/library/identity_candidates.py` が組み立てる）。
+**打ち切りの既定は「上限なし」**（2026-09-19 [再現性レビュー](../architecture/knowledge_reproduction_review_2026-09-19.md)
+E-2 / J-3。上限を敷く運用は env `RHETORICAL_ROLE_MAX_BLOCKS` / `CLAIM_QUALIFICATION_MAX_SPANS` /
+`EQUATION_SEMANTICS_MAX_EQUATIONS` / `EQUATION_SEMANTICS_MAX_INLINE_EQUATIONS`（inline だけは既定 32）/
+`PAPER_SKELETON_MAX_SECTIONS` で明示し、上限があるときは先頭切り捨てではなく節単位の層化サンプリング —
+正本 `src/episteme_graph/agents/stratified_sampling.py`）。
+**resume で artifact を再利用したステージ**には今回の母集合を捏造せず、**前回 run の artifact から導ける
+事実だけ**を `details.source="artifact"` 付きで報告する（`upsert_analysis_run` は stage の dict を丸ごと
+置換するため、無報告だと前回の coverage が消える — 同レビュー E-7）。
+**`reasons` は実際に効いた弁だけ**を書く（equation_semantics で inline 上限だけが効いたときに `max_equations` を
+並べない。2026-09-19 レビュー是正）。**表本体**（GROBID の表を行テキストで残した `body_paragraph`・`raw.in_table`）
+は役割判定・主張採否の母集合に入れず、除外した block ID を `details.excluded_table_block_ids` に残す（件数なし）。
+**LLM 呼び出し回数**: 上限を撤廃したステージでは呼び出し回数が母集合に比例する（主張採否は 1 span = 1 コール +
+修復・参照再試行）。共通 JSON クライアント `ProviderJSONLLMClient.calls` を計器に、claim_qualification は
+`summary_stats.llm_calls`（run ごとの差分）に残し、orchestrator が stage payload の `llm_calls` に写す
+（実測の正本は U層 `llm_usage_events` — こちらは agent 側の自己申告）。
+
+### 理論操作グラフの縮退はノード単位（2026-10-16・IK-0727）
+
+export_validation が component_graph に hard error を出したとき、従来はグラフ全体を保存しなかった
+（`skip_graph_persist`）。1 ノードの欠陥で全ノード・全辺が教材から消えるのを避けるため、次の 2 段にした。
+
+- **生成側（normalizer）**: `eliminate` を宣言しながら `eliminated_symbols` が空の derivation step は、記号を推測で
+  補わず generic（`transform`）として扱う。宣言された操作は `review_reason` に、理由コード
+  `elimination_target_unresolved` を `review_reasons` に残す。式 backing（入力・出力の両方）があれば式の詳細層に
+  `partially_source_backed`、無ければ debug 層（#361 と同じ規則）。main 層の elimination stage は作らない（#308）。
+- **保存側（orchestrator）**: component_graph の error が**すべて**ノード単位で降格により解消できる規則
+  （`core/document_pipeline/graph_demotion.py::DEMOTABLE_RULE_IDS` — main 層でだけ error になる規則と、降格時に
+  中和できる規則）なら、該当ノードを `graph_layer="debug"` / `source_backing_status="review_required"` /
+  `review_reasons += ["validation_demoted"]` に降格し、触れる辺も debug 層に移して ComponentGraphValidator で
+  **再検証**する。error がゼロのときだけ降格版を保存し、降格したノード ID を
+  `stage_outputs.persist_claims_components_graph.graph_demoted_node_ids` に残す。列挙外の error（依存の循環・gate 自身の
+  参照検査など）が 1 件でもあれば従来どおりグラフを保存しない。
+- **P4 と #306 / #308 の両立**: ノードも辺も 1 つも削らない（P4）。降格したノードは debug 層・review_required で
+  確定扱いせず、main 層にも置かない（#306 / #308）。validator の hard error の規則は変えない。component_graph の
+  artifact は書き換えず（KO6）、降格は persist の時点で毎回決定論的に再計算する。
+
+### 解析の縮退の可視化（2026-10-22・IK-0715）
+
+A層 agent の LLM 呼び出しが打ち切り（`AGENT_LLM_WALL_TIMEOUT_SECONDS`）や提供元障害で失敗すると、ステージは
+決定論の代替（`*_deterministic_fallback`）か空の成果（`*_failed`）に落ちて**成功として**終わり、run は
+`completed` になる。完了判定は変えず、縮退の事実を 1 つの投影 `backend/core/analysis_degradation.py::
+summarize_run_degradation(stage_outputs, *, artifacts=None) -> {status: ok|degraded|unchecked, facts, stages, details}`
+にまとめ、教材行のチップ（`MaterialOut.analysis_degradation`）・グラフレビューのバナー
+（`ComponentGraphResponse.analysis_degradation`）・G層 `material.analysis_llm_failed` がすべてこれを通す。
+読む信号は agent が書くものだけ — artifact の `validation_issues[].rule_id`（表 `FALLBACK_RULE_KINDS`）/
+`paper_skeleton.review_notes` の `Skeleton generation failed:` / `component_assembly` の `diagnostics.fallback_reason`
+と `components[].maturity_source="deterministic_fallback"`（完了ペイロード `fallback: true` も）/
+`skipped_reason ∈ {llm_call_failed, repair_failed}`（項目単位は一部欠落）/ `stage_outputs.llm_failures`。
+打ち切りは U層に失敗行を残さない（壁時計の打ち切りは呼び出し側で投げる）ため、`llm_failures` だけでは
+点かなかったのが IK-0715 の穴だった。上限・素材なしの `skipped_*` は参照の健全性（`core/coverage_facts.py`）が
+報告するので含めない。完了時に orchestrator が in-memory の artifact から `stage_outputs.analysis_degradation`
+を書き（新しいステージにはしない）、教材一覧はそのスナップショットを読む（無い旧 run は軽い信号だけで判定し、
+見つからなければ `unchecked` = 行には出さない）。グラフレビューは採用 run の artifact から読み時に導く。
+事実文に数字・例外文を書かず、件数は `details` にだけ置く。
 
 ### artifact の run 選択（2026-09-12 P0-8）
 
@@ -205,6 +266,20 @@ resume 判定・前回 run の options 継承（orchestrator / `routes/admin.py`
 - **使用モデルの記録（M7）** — 実際に実行した LLM ステージ（`LLM_STAGE_NAMES`）だけ、解決済みモデル名を
   `stage_outputs._stage_models` に記録する。artifact を再利用したステージは前回の記録がそのまま残り、
   skip されたステージは記録しない。
+- **役割判定の窓判定とステージ内チェックポイント（2026-10-22・IK-0699 / IK-0710）** — rhetorical_role は同じ節の
+  連続する本文ブロックを窓（既定 6 ブロック・本文 6000 字まで。`config["blocks_per_call"]` /
+  `config["window_max_chars"]` > env `RHETORICAL_ROLE_BLOCKS_PER_CALL` / `RHETORICAL_ROLE_WINDOW_MAX_CHARS` >
+  既定、`blocks_per_call` が 1 以下なら従来どおり 1 ブロック = 1 コール）にまとめて 1 コールで判定し、ブロック ID
+  ごとの答えをブロックごとの `BlockRoleAnnotation`（出力の形は従来と同じ）に戻す。span のオフセットはブロックごとに
+  サーバ側で解決する（IK-0331）。窓の答えに欠けた・検証に落ちたブロックは窓の修復 1 回の後に 1 ブロックの経路
+  （従来の修復ループと全体 `unknown` の代替つき）で問い直し、ブロックを落とさない。回数は
+  `summary_stats.llm_calls` / `windows` / `window_fallback_windows` / `window_fallback_blocks` に残る。
+  窓を 1 つ終えるごとに agent の作業状態を `stage_outputs._stage_checkpoints.rhetorical_role` に書き
+  （進捗の `stage_outputs.rhetorical_role` には載せない — タスクのポーリング応答に展開されるため）、**resume
+  （`start_stage` なし）**では前回 run のその状態を agent に渡して、ブロックの指紋（ID + 本文 + 形式の版）と分野が
+  一致する判定済みブロックを問い直さない（`summary_stats.resumed_blocks`。提供元障害で `unknown` になったブロックは
+  引き継がず問い直す）。artifact は従来どおり完了時に 1 回だけ書き（KO6）、チェックポイントは完了時と、引き継がない
+  run（restart・新規）の最初に外す。
 
 ---
 

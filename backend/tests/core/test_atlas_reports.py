@@ -189,7 +189,8 @@ class TestCreditsAndMigrations:
             _report(reporter_name="hanako"),
             _report(reporter_name="", reporter_id="u-9"),
         ]
-        assert atlas_reports.credits_from_reports(reports) == ["hanako", "taro", "u-9"]
+        # IK-1007: 名前の登録が無い報告者はクレジットに載せない（UUID・ログイン ID へフォールバックしない）。
+        assert atlas_reports.credits_from_reports(reports) == ["hanako", "taro"]
 
     def test_migration_map_filters_by_version(self):
         migrations = (

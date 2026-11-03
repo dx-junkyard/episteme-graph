@@ -33,11 +33,31 @@ _REFS_HEADER_RE = re.compile(
 # Reference entry: [1] ... or [Smith, 2020] ...
 _REF_ENTRY_RE = re.compile(r"^\[[\w,\.&\s\d]+\]")
 
-# Figure caption: "Figure 1.", "Fig. 1", "FIG. 1", "図 1"
-_FIGURE_RE = re.compile(r"^(Figure|Fig\.?|FIG\.?|図)\s*\d+", re.IGNORECASE)
+# Figure caption: "Figure 1.", "Fig. 1", "FIG. 1", "図 1", 付録の "Figure E.1" / "Fig. S2"
+_FIGURE_RE = re.compile(r"^(Figure|Fig\.?|FIG\.?|図)\s*(?:[A-Z]\.?)?\d+", re.IGNORECASE)
 
-# Table caption: "Table 1", "TABLE 1", "表 1"
-_TABLE_RE = re.compile(r"^(Table|TABLE|表)\s*\d+", re.IGNORECASE)
+# Table caption: "Table 1", "TABLE 1", "表 1", 付録の "Table A.2"
+_TABLE_RE = re.compile(r"^(Table|TABLE|表)\s*(?:[A-Z]\.?)?\d+", re.IGNORECASE)
+
+# ラベルの直後に小文字の語が続くものは本文中の図表参照（"Figure 1.2 shows ..."）で
+# あって caption ではない（2026-09-24 実測: 学位論文で本文段落が caption に誤分類され、
+# 図として二重に切り出されていた）。
+_CAPTION_LABEL_RE = re.compile(
+    r"^(?:Figure|Fig\.?|FIG\.?|図|Table|TABLE|Tab\.?|表)\s*(?:[A-Z]\.?)?\d+(?:[.\-]\d+)*[A-Za-z]?",
+    re.IGNORECASE,
+)
+# 空白の無い文字層（語を位置だけで並べた PDF）では "Figure5.19showsthe..." になるので、
+# ラベル直後に小文字が 2 文字以上続く場合も本文とみなす（"Figure 3a:" の枝番 1 文字は caption）。
+_PROSE_CONTINUATION_RE = re.compile(r"^,?(?:\s+(?:and\s+\d|[a-z])|[a-z]{2,})")
+
+
+def looks_like_caption_label(text: str) -> bool:
+    """図表ラベルで始まる text が caption らしいか（本文中の参照なら False）。"""
+    raw = (text or "").strip()
+    match = _CAPTION_LABEL_RE.match(raw)
+    if not match:
+        return False
+    return not _PROSE_CONTINUATION_RE.match(raw[match.end():])
 
 # High-density math: common math / Greek symbols
 _MATH_SYMBOLS = frozenset(
@@ -151,11 +171,11 @@ class BlockClassifier:
             return self._classify_in_references(block, text)
 
         # --- Figure caption ---
-        if _FIGURE_RE.match(text):
+        if _FIGURE_RE.match(text) and looks_like_caption_label(text):
             return "figure_caption", 0.95
 
         # --- Table caption ---
-        if _TABLE_RE.match(text):
+        if _TABLE_RE.match(text) and looks_like_caption_label(text):
             return "table_caption", 0.95
 
         # --- Footnote ---

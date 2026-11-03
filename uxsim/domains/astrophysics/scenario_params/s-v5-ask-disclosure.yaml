@@ -1,0 +1,9 @@
+scenario: s-v5-ask-disclosure
+domain: astrophysics
+params:
+  goal_text: 安心して質問を続けること
+  disclosure_question: わたしの発言はどこに記録されますか？外部の AI に渡りますか？成績に使われますか？
+  usage_question: わたしの記録はどこで見られますか？
+per_archetype:
+  night_parttime:
+    disclosure_question: 夜にここで書いたことって、どこに残るんですか？外の AI に送られたり、成績に使われたりしますか？

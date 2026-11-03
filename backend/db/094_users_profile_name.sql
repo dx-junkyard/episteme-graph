@@ -1,0 +1,21 @@
+-- Migration 094: 人に見せる名前の列 users.profile_name（IK-0848 / IK-1007）
+--
+-- 課題: IK-1007（第 25 周 面 D 第 5 周）/ IK-0848（面 A の帰属の名前）。users.display_name は
+--   ログインの照合列を兼ねている（routes/auth.py の auth_login は WHERE display_name = :username）。
+--   帰属・所有者名・査読者名としてこの列を出すと、人の名前ではなくログイン ID を他の利用者へ
+--   開示していた。
+-- 正本の設計: docs/features/account_lifecycle_management_design.md「2026-10-27 第 5 波の追補」。
+-- このファイルが DDL の正本。適用は backend/core/migrations.py のランナーが起動時に行う
+-- （冪等・毎起動・番号順に全ファイルを再実行）。
+--
+-- 何をするか:
+--   users に profile_name TEXT NULL を足す（本人が登録する、人に見せる名前）。
+--
+-- 設計上の要点:
+--   - ログインの照合には使わない（照合は display_name のまま。判定順序も不変）。
+--   - 既存行はバックフィルしない。空（NULL）は「名前の登録がない」で、帰属の表示は
+--     名前なしの事実文に戻る（ログイン ID へフォールバックしない）。
+--   - 行を消さない（AL1）。本ファイルに DELETE 文は無い。
+--   - SQL 本文は psql で読める plain SQL。
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_name TEXT NULL;

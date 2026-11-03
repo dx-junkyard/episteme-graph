@@ -55,6 +55,9 @@ resolution:
     - backend/core/privacy.py
     - backend/core/status/projector.py
     - docs/architecture/consolidation_survey_2026-07.md
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0315, IK-0321]
 view_of: [IK-0222]
 history:

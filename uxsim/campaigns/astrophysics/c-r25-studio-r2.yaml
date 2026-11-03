@@ -1,0 +1,55 @@
+id: c-astro-r25-studio-r2
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 6be229e1
+personas:
+  teachers: [te-01-rookie-seminar, te-02-veteran-intro]
+  students: [st-08-m1-rprocess-lecture, st-07-m1-grb-voice]
+scenarios:
+  teacher: [t-studio-split-save, t-studio-figure-adopt, t-studio-rewrite-panes, t-studio-rewrite-shared]
+  student: [s-studio-lecture-pages, s-lecture-then-trace]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 30, persona_llm_calls: 280, wall_clock_minutes: 260}
+notes: |
+  第 25 周 面 D（原稿スタジオ → 学生の受講）の第 2 周。正本は uxsim/runs/round25/design_studio.md（§22.4・§22.5.5）と
+  第 1 周の審判の報告 uxsim/runs/round25/judge_studio_r1.md §4（この組はその提案どおり）。ハーネスの直しは
+  uxsim/runs/round25/harness_fixes_studio.md（H1〜H10）。面の審判 uxsim/oracles/studio.py に T7〜T9 を足してある。
+
+  ── 指揮者が周の前に用意するもの（この順。どれかを飛ばすと S1〜S3・X1〜X4 がまた評価外になる）──
+   1. 同名コースの封じ（H4・既存 IK-0407）: 周の前に必ず
+        backend/.venv/bin/python -m uxsim.sandbox.pin_course --campaign uxsim/campaigns/astrophysics/c-r25-studio-r2.yaml --yes
+      を走らせ、6be229e1 と同じ題名の公開コース（第 1 周で学生が取り違えた 1bad7d9f）を private にする。
+      実行後の確かめ（管理者の GET /api/learning/courses で、その題名の受講可能なコースが 6be229e1 だけ）を出力で読む。
+      6be229e1 は te-01 の (c) の公開まで private なので、pin_course は「固定したコースが公開されていない」と
+      警告するが、それで正しい（同名の別コースだけを閉じる）。
+   2. editor 共有（H8・(b') の前）: te-01 として 6be229e1 を te-02 の入ったグループへ editor で共有する
+      （製品の API: te-01 がグループを作り → te-02 が招待コードで参加 → POST /api/admin/courses/6be229e1/groups
+      {group_id, permission: editor}。uxsim/sandbox/grant_document_editors.py は教材（document）の共有だけで、
+      コースの共有はしない — コースの共有はこの手順を手で踏むか、同スクリプトにコース共有を足してから使う）。
+   3. 頭脳の待ち（H7・IK-0825 と同じ型）: 教材図スタジオの turn は製品頭脳の応答まで数百秒かかる。
+      砂場の製品側のタイムアウトを延ばすか、製品頭脳の lane を他の面と直列化しないで走らせる。wall_clock の
+      120 秒を超えた A 所見は頭脳の遅延で、製品の欠陥ではない（審判は頭脳ノートの応答時刻と突き合わせて落とす）。
+
+  ── 場面の組とレーンの順（runner は全組を走らせるので --persona X --scenario Y で 1 場面ずつ、この順に）──
+   (a)  te-01 × t-studio-split-save      — 再演。H1（スライドタブは開いているトピックのチャンク）・H2（読み上げ欄の
+        区切りは教材欄の区切りに最も近い文の境目）を直した runner で、区切りを揃えたときに 2 枚に分かれることと、
+        保存後の音声の事実文（IK-0877 の是正後）を見る（LLM 0 回）
+   (c)  te-01 × t-studio-figure-adopt    — H3: 図を教材欄の 2 番目の見出しの直後に入れる（after_heading）。保存 → 公開
+        （LLM 1〜3 回）。**学生レーン (d)(d') はこの公開の後に始める**
+   (d)  st-08 × s-studio-lecture-pages   — (c) の直後。固定コースの同じトピックで、採用した図が解決されること（X3・X4）と、
+        教材の区画数・スライド数（S1・X1）を te-01 の保存と突き合わせる（LLM 0 回）
+   (b)  te-02 × t-studio-rewrite-panes   — 種まき（t-v5-register-own-course）で自分のコースを作ってから。コース内容生成前の
+        トピックなので、IK-0874 の是正後は「AI を呼ばずに事実文」になるはず（審判 T9 が根拠の空で AI が呼ばれたかを見る）
+        （LLM 種まき 2〜3 + 0〜1 回）
+   (b') te-02 × t-studio-rewrite-shared  — 用意 2 の editor 共有の後。6be229e1 のコース内容生成済みトピックで書き換えの
+        品質を見て、保存を試みる（原稿スタジオの保存は所有者だけ — 設計時の疑い 6 = editor の保存失敗の実測）（LLM 1 回）。
+        書き換えは保存されないので te-01 のコースは変わらない
+   (d') st-07 × s-lecture-then-trace     — **IK-0879 の是正（音声ゼロでもタイマー送りで講義に入れる）が入ってから**。講義の
+        流れと教材の区画の比較（S2）を見る。是正前なら回さない（第 1 周と同じく講義に入れず S2 が評価外になる）
+        （チャットで LLM 最大 3 回）
+
+  第 1 周からの変更点: 固定コースを 6be229e1 に戻した（第 1 周の r2 草案の 1bad7d9f は同名の別コースで、教員の保存と
+  交わらない）・te-03 / st-01 / st-04 の組は第 3 周以降に回す（第 2 周は第 1 周で評価外だった面をまたぐ突き合わせを
+  先に成立させる）。読み上げ言語の切り替えは行為にしない（音声生成モーダルの中にしかなく、原稿の再生成と TTS を起こす）。

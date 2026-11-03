@@ -16,6 +16,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from core import display_projection as _dp
+from core.latex_display import delimit_bare_tex, looks_like_bare_tex, truncate_latex
+from core.text_excerpt import excerpt
 from core.text_hygiene import strip_control_sequences
 
 # ---------------------------------------------------------------------------
@@ -86,22 +89,11 @@ TEXT_SNIPPET_MAX = 200
 #: display_label 用の短い本文上限（PL7 の「番号なし: 本文先頭」）。
 LABEL_SNIPPET_MAX = 40
 
-#: PL4: DTO に載せてはいけないキー（ガードレールが再帰走査する）。
-FORBIDDEN_KEYS: tuple[str, ...] = (
-    "confidence",
-    "weight",
-    "candidate_score",
-    "qualification_reason",
-)
+#: PL4: DTO に載せてはいけないキー（ガードレールが再帰走査する）。正本は display_projection（DP2）。
+FORBIDDEN_KEYS: tuple[str, ...] = _dp.PAPER_LAYER_FORBIDDEN_KEYS
 
 #: PL7: display_label に出してはいけない内部 ID のプレフィックス（テスト用）。
-INTERNAL_ID_PREFIXES: tuple[str, ...] = (
-    "eq_op_",
-    "theory_op_",
-    "eq_",
-    "ev_",
-    "claim_",
-)
+INTERNAL_ID_PREFIXES: tuple[str, ...] = _dp.PAPER_LAYER_INTERNAL_ID_PREFIXES
 
 #: coverage の ``unbound_claims`` に載せる claim の条件（§3.2）。
 UNBOUND_CLAIM_SUPPORT_STATUS = "source_backed"
@@ -109,6 +101,19 @@ UNBOUND_CLAIM_SUPPORT_STATUS = "source_backed"
 #: contextual 説明の採用順（approved が無ければ candidate。dismissed / superseded は
 #: 呼び出し側が問い合わせの時点で除外する）。
 EXPLANATION_STATUS_PRIORITY: tuple[str, ...] = ("approved", "candidate")
+
+#: 論文層が読む contextual 説明の ``element_type``。語彙の正本は
+#: ``core/element_explanations.py``（本表はそのうち論文層が扱う3種の部分集合）。
+#: component だけを読んでいたため、component の説明が無い論文ではノードの
+#: 「論文での対応」が空になっていた — 実データでは説明行の多数が claim / 式に付く。
+EXPLANATION_ELEMENT_COMPONENT = "theory_component"
+EXPLANATION_ELEMENT_CLAIM = "theory_claim"
+EXPLANATION_ELEMENT_EQUATION = "equation"
+EXPLANATION_ELEMENT_TYPES: tuple[str, ...] = (
+    EXPLANATION_ELEMENT_COMPONENT,
+    EXPLANATION_ELEMENT_CLAIM,
+    EXPLANATION_ELEMENT_EQUATION,
+)
 
 #: DSL エッジの極性（P0-9）。語彙の正本は
 #: ``src/episteme_graph/agents/dsl_linking/schema.py::POLARITIES``（``+`` / ``-`` /
@@ -197,7 +202,9 @@ def truncate_snippet(text: Any, limit: int = TEXT_SNIPPET_MAX) -> str:
     （``[0m`` 等）が混ざることがあるため、丸める前に除去する
     （2026-09-10・graph_dialogue_review_design.md §15）。
     """
-    value = strip_control_sequences(str(text or ""))
+    # 裸の TeX（``\\overset{…}{…}`` が ``$`` の外にある引用）は先に ``$…$`` で囲む。囲まずに
+    # 切ると、波括弧の途中で切れた生の TeX が残る（2026-10-10・正本は core.latex_display）。
+    value = delimit_bare_tex(strip_control_sequences(str(text or "")))
     if len(value) <= limit:
         return value
     cut = value[:limit]
@@ -238,19 +245,126 @@ def equation_body(record: Any) -> dict:
     }
 
 
+#: 式の本文スニペット（``member_equations[].latex_snippet``）の上限。表示ラベルより長く取る。
+LATEX_SNIPPET_MAX = 120
+
+#: 定義する記号を表示ラベルに並べる上限。
+LABEL_SYMBOLS_MAX = 3
+
+# 表示用 LaTeX から落とす語（数式環境の枠・番号付けの制御。KaTeX のインラインで描けない／意味を持たない）。
+_LATEX_ENV_RE = re.compile(
+    r"\\(?:begin|end)\{(?:equation|align|eqnarray|gather|multline|split|aligned|gathered|displaymath|math)\*?\}"
+)
+_LATEX_LABEL_RE = re.compile(r"\\(?:label|tag)\*?\{[^{}]*\}")
+_LATEX_NOISE_RE = re.compile(r"\\(?:nonumber|notag)\b")
+_LATEX_OUTER_DELIMS = (("$$", "$$"), ("\\[", "\\]"), ("\\(", "\\)"), ("$", "$"))
+
+
+def _clean_latex(latex: str) -> str:
+    """表示用に LaTeX を整える（環境の枠・``\\label``・``&``・外側の区切りを落とし空白を畳む）。"""
+    text = strip_control_sequences(str(latex or "")).strip()
+    for opener, closer in _LATEX_OUTER_DELIMS:
+        if len(text) >= len(opener) + len(closer) and text.startswith(opener) and text.endswith(closer):
+            text = text[len(opener):len(text) - len(closer)].strip()
+            break
+    text = re.sub(r"(?<!\\)%[^\n]*", " ", text)  # LaTeX のコメント
+    text = _LATEX_ENV_RE.sub(" ", text)
+    text = _LATEX_LABEL_RE.sub(" ", text)
+    text = _LATEX_NOISE_RE.sub(" ", text)
+    text = text.replace("&", " ").replace("\\\\", " ").replace("$", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _cut_latex(text: str, limit: int) -> tuple[str, bool]:
+    """``limit`` 字前後で、式の**原子の境目で**切る（正本は ``core.latex_display.truncate_latex``）。
+
+    文字数で切ってから壊れた末尾を削る旧方式は、``\\begin{cases}`` の ``\\end`` 欠け・
+    ``\\bigg[`` の区切り欠け・``\\frac1`` / ``\\overset`` の引数欠けを取りこぼしていた
+    （2026-10-10）。原子（コマンド + 引数・群・環境・``\\left…\\right``）の境目でしか切らない。
+    """
+    return truncate_latex(text, limit)
+
+
+def equation_latex_snippet(record: Any, limit: int = LATEX_SNIPPET_MAX) -> str:
+    """式本文（LaTeX）の表示用スニペット ``$…$``（切ったときは後ろに ``…``）。本文が無ければ ""。"""
+    body = equation_body(record)
+    text = _clean_latex(body["latex"])
+    if not text:
+        return ""
+    cut, truncated = _cut_latex(text, limit)
+    if not cut:
+        return ""
+    return f"${cut}$" + ("…" if truncated else "")
+
+
+def equation_display_latex(record: Any, limit: int = 400) -> str:
+    """式本文（LaTeX・区切りなし）を表示用に整えて返す（原子の境目で切る）。本文が無ければ ""。
+
+    部品の文脈の式が教材の式に解決できないとき、画面が式本文を数式として描くための値
+    （IK-0894）。切ったときは末尾に ``…`` を付けない（数式として描くため）。
+    """
+    text = _clean_latex(equation_body(record)["latex"])
+    if not text:
+        return ""
+    cut, _truncated = _cut_latex(text, limit)
+    return cut or ""
+
+
+def equation_defined_symbols(record: Any) -> list[str]:
+    """式が定義する記号名（``semantics.defined_symbols`` → 無ければ式レコード直下の同名キー）。
+
+    dict 形は ``definition_status`` が ``defined`` / ``redefined``（または ``defined_here``）の
+    ものだけを数える（``equation_semantics`` の export と同じ規則）。推測しない。
+    """
+    rec = record if isinstance(record, dict) else {}
+    semantics = rec.get("semantics") if isinstance(rec.get("semantics"), dict) else {}
+    raws: list = []
+    for source in (semantics.get("defined_symbols"), rec.get("defined_symbols")):
+        if isinstance(source, list):
+            raws.extend(source)
+    out: list[str] = []
+    for raw in raws:
+        name = ""
+        if isinstance(raw, str):
+            name = raw.strip()
+        elif isinstance(raw, dict):
+            if raw.get("defined_here") or str(raw.get("definition_status") or "") in ("defined", "redefined"):
+                name = str(raw.get("symbol") or "").strip()
+        name = strip_control_sequences(name).strip().strip("$").strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
 def equation_display_label(record: Any) -> str:
-    """式の表示ラベル（PL7）。印字番号があれば ``式 (12)``、無ければ本文先頭。
+    """式の表示ラベル（PL7）。
+
+    印字番号があれば ``式 (12)``。無ければ ``番号なし: `` に続けて、
+    ①式本文の先頭（``$…$``・``LABEL_SNIPPET_MAX`` 字）②定義する記号の列挙
+    ③どちらも無いときだけ平文（A層の英語要約になりうる）の先頭、の順。
+    第 21 周: TeX 経路の式で ③ が先に出て、一覧が英語の断片で埋まっていた。
 
     ``equation_id`` は**決して**ラベルに使わない。
     """
     rec = record if isinstance(record, dict) else {}
     label = str(rec.get("label") or "").strip()
-    if label:
+    # TeX の \label キー（eq:mod_dcf）は印字番号ではないので番号として出さない（IK-0858）。
+    if label and not _dp.is_tex_label_key(label.strip("()").strip()):
         return f"式 ({label})"
-    body = equation_body(rec)
-    snippet = _first_text(body["plain_text"], body["latex"])
+    snippet = equation_latex_snippet(rec, LABEL_SNIPPET_MAX)
     if snippet:
-        return f"番号なし: {snippet[:LABEL_SNIPPET_MAX]}"
+        return f"番号なし: {snippet}"
+    symbols = equation_defined_symbols(rec)
+    if symbols:
+        listed = "、".join(f"${sym}$" for sym in symbols[:LABEL_SYMBOLS_MAX])
+        more = " ほか" if len(symbols) > LABEL_SYMBOLS_MAX else ""
+        return f"番号なし: {listed}{more} を定義する式"
+    plain = _first_text(equation_body(rec)["plain_text"])
+    # 平文が実は LaTeX のとき（PDF 経路の記録で多い）は、文字数で切った生の TeX を出さない。
+    if plain and not looks_like_bare_tex(plain):
+        cut = excerpt(plain, LABEL_SNIPPET_MAX)
+        if cut:
+            return f"番号なし: {cut}"
     return "番号なし"
 
 
@@ -282,7 +396,7 @@ def figure_display_label(
         return f"{prefix} {number}"
     caption_text = str(caption or "").strip()
     if caption_text:
-        return caption_text[:LABEL_SNIPPET_MAX]
+        return excerpt(caption_text, LABEL_SNIPPET_MAX, keep_dollar_math=True) or caption_text[:LABEL_SNIPPET_MAX]
     return "表" if kind == "table" else "図"
 
 

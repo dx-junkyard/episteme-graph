@@ -34,11 +34,15 @@ from core.llm_policy import (
     resolve_scene_model,
 )
 from core.llm_usage.context import bind_usage_context, set_current_feature
+from core.llm_usage.run_failures import LLM_FAILURES_KEY
 from core.llm_worker.cost_gate import CostGate, today_str
 from episteme_graph.agents.coverage_report import (
     COVERAGE_REPORT_KEY,
     build_coverage_report,
+    is_coverage_report,
 )
+from core.theory_modules import build_theory_module_records
+from core.theory_modules.schema import RULE_VERSION as THEORY_MODULE_RULE_VERSION
 
 from .chunker import build_source_chunks
 from .dsl_text import dsl_result_to_search_text
@@ -49,6 +53,8 @@ from .persistence import (
     set_active_analysis_run,
     load_source_chunk_index,
     delete_component_graph,
+    equation_stable_key_map,
+    load_stored_component_graph_json,
     persist_component_graph,
     persist_components,
     persist_document_embedding,
@@ -57,6 +63,7 @@ from .persistence import (
     persist_learning_units,
     persist_qualified_claims,
     persist_source_chunks,
+    persist_theory_modules,
     upsert_analysis_run,
 )
 from .tex_archive import build_structure_from_tex_archive
@@ -77,6 +84,11 @@ ARTIFACTS_KEY = "_artifacts"
 # ---------------------------------------------------------------------------
 
 STAGE_MODELS_KEY = "_stage_models"
+
+# IK-0710: ステージ内チェックポイントの置き場（``{stage: agent が決めた形の状態}``）。
+# 進捗の ``stage_outputs[stage]`` には載せない（タスクのポーリング応答に展開されるため）。
+# ``_`` 始まりなので coverage の欠落走査の対象外。ステージ完了時に当該ステージ分を外す。
+STAGE_CHECKPOINTS_KEY = "_stage_checkpoints"
 
 # ---------------------------------------------------------------------------
 # ステージ属性の語彙（`PipelineStageDef` の宣言フィールド）。
@@ -181,8 +193,10 @@ def _attach_coverage(
     一切変更せず、読み手が段階的に移行できるようにする（後方互換）。
 
     呼び出し規約:
-    - **resume で artifact を再利用したステージには足さない**（前回 run の母集合を
-      今回の報告として捏造しない）。
+    - **今回の入力から母集合をでっち上げない**。resume で artifact を再利用した
+      ステージは、**前回 run の artifact から導ける事実だけ**を報告し、
+      ``details["source"] = "artifact"`` を必ず添えて「前回 run 由来」と明示する
+      （導けないなら足さない）。
     - 母集合・処理数が事実として導けないステージには足さない（でっち上げない）。
     - 報告の組み立てで例外を出してステージを落とさない（fail-soft）。
     """
@@ -197,6 +211,102 @@ def _attach_coverage(
     except Exception:  # pragma: no cover - 防御的（報告でステージを止めない）
         logger.warning("failed to build coverage report (non-fatal)", exc_info=True)
     return payload
+
+
+#: resume で artifact を再利用したステージの coverage に必ず添える印。
+#: 「今回の入力から数え直した母集合」ではなく「前回 run の記録から導いた事実」。
+_COVERAGE_SOURCE_ARTIFACT = {"source": "artifact"}
+
+
+def _coverage_details(base: dict[str, Any] | None, *, resumed: bool) -> dict[str, Any]:
+    """coverage の ``details`` を組み立てる（resume なら出所を明示する）。"""
+    details = dict(base or {})
+    if resumed:
+        details.update(_COVERAGE_SOURCE_ARTIFACT)
+    return details
+
+
+def _attach_existing_coverage(payload: dict, report: Any, *, resumed: bool) -> dict:
+    """A層 agent が既に組み立てた coverage を stage payload に移す。
+
+    agent の ``summary_stats`` に coverage が入って来る（rhetorical_role /
+    claim_qualification）ステージ用。数値は agent が出した事実のまま触らず、
+    resume のときだけ ``details.source = "artifact"``（前回 run 由来）を足す。
+    """
+    if not is_coverage_report(report):
+        return payload
+    return _attach_coverage(
+        payload,
+        population=report.get("population", 0),
+        processed=report.get("processed", 0),
+        reasons=report.get("reasons") or [],
+        unit=report.get("unit"),
+        details=_coverage_details(report.get("details"), resumed=resumed),
+    )
+
+
+def _restamp_resumed_coverage(payload: dict, *, resumed: bool) -> dict:
+    """payload に載っている coverage に、resume なら前回 run 由来の印を足す。"""
+    if not resumed:
+        return payload
+    return _attach_existing_coverage(
+        payload, payload.get(COVERAGE_REPORT_KEY), resumed=True
+    )
+
+
+def _input_builder_for(ctx: Any, agent_key: str, probe: str) -> Any | None:
+    """ステージ agent の input_builder を取り出す（fail-soft）。
+
+    coverage の母集合は「その agent が何を入力にし得たか」なので、上限の値・選抜規則を
+    orchestrator に写経せず A層の input_builder に聞く（二重管理の防止）。
+
+    ``probe`` は必要なメソッド名。注入された agent（テスト用モックなど）がそれを
+    持たない場合は A層の既定 input_builder を直接作って使う — 母集合の計算は LLM を
+    呼ばない純粋な処理なので、agent の差し替えで報告が消えるのは正直さの後退になる。
+    """
+    try:
+        agent_class = (getattr(ctx, "agent_classes", None) or {}).get(agent_key)
+        if agent_class is not None:
+            builder = getattr(_instantiate(agent_class), "_input_builder", None)
+            if builder is not None and hasattr(builder, probe):
+                return builder
+    except Exception:  # pragma: no cover - 防御的（agent の生成で報告を落とさない）
+        logger.warning("failed to instantiate %s for coverage", agent_key, exc_info=True)
+    try:
+        factory = _DEFAULT_INPUT_BUILDERS.get(agent_key)
+        return factory() if factory else None
+    except Exception:  # pragma: no cover - 防御的（報告でステージを止めない）
+        logger.warning("failed to resolve input builder for %s", agent_key, exc_info=True)
+        return None
+
+
+def _default_paper_skeleton_input_builder() -> Any:
+    from episteme_graph.agents.paper_skeleton.input_builder import SkeletonInputBuilder
+
+    return SkeletonInputBuilder()
+
+
+def _default_equation_semantics_input_builder() -> Any:
+    from episteme_graph.agents.equation_semantics.input_builder import (
+        EquationSemanticsInputBuilder,
+    )
+
+    return EquationSemanticsInputBuilder()
+
+
+def _default_thesis_input_builder() -> Any:
+    from episteme_graph.agents.thesis_reconstruction.input_builder import (
+        ThesisReconstructionInputBuilder,
+    )
+
+    return ThesisReconstructionInputBuilder()
+
+
+_DEFAULT_INPUT_BUILDERS: dict[str, Any] = {
+    "PaperSkeletonAgent": _default_paper_skeleton_input_builder,
+    "EquationSemanticsAgent": _default_equation_semantics_input_builder,
+    "ThesisReconstructionAgent": _default_thesis_input_builder,
+}
 
 
 def _blocks_of_type(structure: Any, block_type: str) -> list[Any]:
@@ -259,6 +369,9 @@ PIPELINE_STAGES = [
     "blueprint",
     "export_validation",
     "persist_claims_components_graph",
+    # 理論モジュール層 Phase 1（theory_module_layer_design.md §13.5）。保存済みグラフを読むので
+    # 永続化の**後**、規則 ⑤ が live 行を読むので identity_candidates の**前**。決定論・非LLM・非致命。
+    "theory_modules",
     # 概念レジストリ P3-6（concept_registry_design.md §6.2）。永続化の**後**に置く
     # ことで、同一性候補は確定済みの component 行・stable_key を材料にできる。
     # 決定論・非LLM・非致命。
@@ -366,6 +479,9 @@ class PipelineContext:
     should_use_artifact: Callable | None = None
     finish_target_stage: Callable | None = None
     all_artifacts: Callable | None = None
+    # IK-0710: 中断した run のステージ内チェックポイント（``stage_outputs["_stage_checkpoints"]``）。
+    # resume（start_stage なし）のときだけ前回 run から引き継ぎ、restart・新規 run では空。
+    resume_stage_checkpoints: dict = field(default_factory=dict)
 
     # ステージ間で受け渡される可変状態
     pdf_path: str | None = None
@@ -395,6 +511,8 @@ class PipelineContext:
     skip_graph_persist: bool = False
     skip_component_persist: bool = False
     degraded_stages: list = field(default_factory=list)
+    # ノード単位の降格で保存できたときの降格ノード ID（graph_demotion.py）。
+    graph_demoted_node_ids: list = field(default_factory=list)
 
 
 @dataclass
@@ -723,6 +841,8 @@ def run_document_pipeline(
         if target_stage != stage:
             return False
         result.final_stage = stage
+        # IK-0362: 単一ステージ実行でも、この run の提供元障害の事実を残す。
+        target_llm_failures = _completion_llm_failures_outputs(run_id)
         upsert_analysis_run(
             run_id=run_id,
             document_id=document_id,
@@ -730,7 +850,12 @@ def run_document_pipeline(
             cartridge_id=cartridge_id,
             status="completed",
             current_stage=stage,
-            stage_outputs={stage: payload or {"status": "completed", "progress": 100}},
+            stage_outputs={
+                **target_llm_failures,
+                # IK-0715: 縮退の事実も完了経路と同じ投影で残す。
+                **_completion_degradation_outputs(previous_artifacts, target_llm_failures),
+                stage: payload or {"status": "completed", "progress": 100},
+            },
         )
         return True
 
@@ -777,6 +902,8 @@ def run_document_pipeline(
     ctx.should_use_artifact = should_use_artifact
     ctx.finish_target_stage = finish_target_stage
     ctx.all_artifacts = all_artifacts
+    if start_index is None:
+        ctx.resume_stage_checkpoints = dict(previous_outputs.get(STAGE_CHECKPOINTS_KEY) or {})
 
     def _record_stage_model_if_used(stage_name: str, had_artifact_before: bool) -> None:
         # M7: 実際に実行した（artifact 再利用ではない）LLM ステージのみ、使用モデルを
@@ -874,8 +1001,10 @@ def _stage_save_pdf(ctx: PipelineContext) -> bool:
 def _stage_grobid_parse(ctx: PipelineContext) -> bool:
     # ── Stage 2: grobid_parse ──────────────────────────────────────────
     grobid_artifact = ctx.artifact("grobid_parse")
+    fallback_reason: str | None = None
     if ctx.should_use_artifact("grobid_parse"):
         ctx.tei_xml = (grobid_artifact or {}).get("tei_xml") or None
+        fallback_reason = (grobid_artifact or {}).get("fallback_reason")
         logger.info("Resuming document pipeline: loaded grobid_parse artifact for document %s", ctx.document_id)
     elif ctx.source_kind == "tex_archive":
         ctx.save_artifact("grobid_parse", {
@@ -886,25 +1015,24 @@ def _stage_grobid_parse(ctx: PipelineContext) -> bool:
         })
     else:
         ctx.report_start("grobid_parse", total=1, unit="document")
-        try:
-            ctx.tei_xml = _run_grobid_parse(ctx.pdf_bytes)
-        except Exception:
-            logger.warning(
-                "grobid_parse failed (non-fatal); will use PyMuPDF fallback: document=%s",
-                ctx.document_id,
-                exc_info=True,
-            )
-            ctx.tei_xml = None
+        ctx.tei_xml, fallback_reason, attempts = _grobid_parse_with_retry(ctx.pdf_bytes, ctx.document_id)
         ctx.save_artifact("grobid_parse", {
             "status": "ok" if ctx.tei_xml else "fallback",
             "tei_bytes": len(ctx.tei_xml.encode()) if ctx.tei_xml else 0,
             "tei_xml": ctx.tei_xml,
+            # 落ちた理由を残す（IK-0421: 砂場の 4 論文中 3 本が理由不明の fallback で、題名・式・図の層が
+            # 丸ごと PyMuPDF 経路になっていた）。secrets を含まない例外の型と先頭だけ
+            "fallback_reason": fallback_reason,
+            "attempts": attempts,
         })
     grobid_status = "skipped" if ctx.source_kind == "tex_archive" else ("ok" if ctx.tei_xml else "fallback")
-    ctx.report_done("grobid_parse", {
+    done_payload: dict[str, Any] = {
         "status": grobid_status,
         "tei_bytes": len(ctx.tei_xml.encode()) if ctx.tei_xml else 0,
-    })
+    }
+    if grobid_status == "fallback":
+        done_payload["fallback_reason"] = fallback_reason
+    ctx.report_done("grobid_parse", done_payload)
     return ctx.finish_target_stage("grobid_parse", {"status": grobid_status})
 
 
@@ -1049,50 +1177,125 @@ def _stage_source_embedding(ctx: PipelineContext) -> bool:
 def _stage_paper_skeleton(ctx: PipelineContext) -> bool:
     # ── Stage 5: paper_skeleton ────────────────────────────────────────
     skeleton_artifact = ctx.artifact("paper_skeleton")
-    if ctx.should_use_artifact("paper_skeleton"):
+    resumed_from_artifact = ctx.should_use_artifact("paper_skeleton")
+    if resumed_from_artifact:
         ctx.skeleton = _from_agent_dict("paper_skeleton", skeleton_artifact)
         logger.info("Resuming document pipeline: loaded paper_skeleton artifact for document %s", ctx.document_id)
     else:
         ctx.report_start("paper_skeleton", total=1, unit="llm_call")
         try:
             ps_agent = _instantiate(ctx.agent_classes["PaperSkeletonAgent"])
-            ctx.skeleton = ps_agent.run(structure=ctx.structure, cartridge_id=ctx.cartridge_id)
+            ctx.skeleton = ps_agent.run(
+                structure=ctx.structure, cartridge_id=ctx.cartridge_id,
+                **_language_run_kwargs(ps_agent, ctx),
+            )
         except Exception as exc:
             logger.exception("paper_skeleton stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
             raise PipelineStageError("paper_skeleton", str(exc), cause=exc) from exc
         ctx.save_artifact("paper_skeleton", ctx.skeleton)
-    ctx.report_done("paper_skeleton", {"document_id": ctx.document_id, "total": 1, "processed": 1})
-    return ctx.finish_target_stage("paper_skeleton", {"document_id": ctx.document_id, "total": 1, "processed": 1})
+    skeleton_done_payload: dict[str, Any] = {
+        "document_id": ctx.document_id, "total": 1, "processed": 1,
+    }
+    # P0-10: 母集合 = document_structure の level-1 節。骨格判断に見せた節だけが
+    # processed で、appendix 除外・上限（既定は上限なし）の取りこぼしを理由コードで残す。
+    # resume でも structure artifact から同じ事実が導けるので報告する（source=artifact）。
+    skeleton_builder = _input_builder_for(ctx, "PaperSkeletonAgent", "compute_section_coverage")
+    if skeleton_builder is not None and getattr(ctx, "structure", None) is not None:
+        try:
+            facts = skeleton_builder.compute_section_coverage(ctx.structure)
+        except Exception:  # pragma: no cover - 防御的
+            logger.warning("failed to compute paper_skeleton coverage", exc_info=True)
+        else:
+            _attach_coverage(
+                skeleton_done_payload,
+                population=facts["population"],
+                processed=facts["processed"],
+                reasons=facts["reasons"],
+                unit=facts["unit"],
+                details=_coverage_details(facts.get("details"), resumed=resumed_from_artifact),
+            )
+    ctx.report_done("paper_skeleton", skeleton_done_payload)
+    return ctx.finish_target_stage("paper_skeleton", skeleton_done_payload)
+
+
+def _write_stage_checkpoint(ctx: PipelineContext, stage: str, state: dict | None) -> None:
+    """ステージ内チェックポイントを run に書く（``state=None`` で当該ステージ分を外す）。
+
+    artifact（1 run × 1 stage の生成ログ = KO6）とは別物で、中断した run を resume した
+    ときに完了済みの LLM 呼び出しをやり直さないための作業状態（IK-0710）。書き込み失敗は
+    ステージを止めない（チェックポイントが無いだけで、resume は最初からやり直す）。
+    """
+    checkpoints = dict(ctx.resume_stage_checkpoints or {})
+    if state is None:
+        # 引き継がなかった（restart の）run 行にも前回の状態が残り得るので、手元に無くても書く。
+        checkpoints.pop(stage, None)
+    else:
+        checkpoints[stage] = state
+    ctx.resume_stage_checkpoints = checkpoints
+    try:
+        upsert_analysis_run(
+            run_id=ctx.run_id,
+            document_id=ctx.document_id,
+            material_id=ctx.material_id,
+            cartridge_id=ctx.cartridge_id,
+            status="running",
+            current_stage=stage,
+            stage_outputs={STAGE_CHECKPOINTS_KEY: checkpoints},
+        )
+    except Exception:  # noqa: BLE001 — チェックポイントはステージを止めない
+        logger.warning("failed to write stage checkpoint for %s (non-fatal)", stage, exc_info=True)
 
 
 def _stage_rhetorical_role(ctx: PipelineContext) -> bool:
     # ── Stage 6: rhetorical_role ───────────────────────────────────────
     roles_artifact = ctx.artifact("rhetorical_role")
-    if ctx.should_use_artifact("rhetorical_role"):
+    resumed_from_artifact = ctx.should_use_artifact("rhetorical_role")
+    if resumed_from_artifact:
         ctx.roles = _from_agent_dict("rhetorical_role", roles_artifact)
         logger.info("Resuming document pipeline: loaded rhetorical_role artifact for document %s", ctx.document_id)
     else:
         ctx.report_start("rhetorical_role", total=_agent_input_count("rhetorical_role", ctx.agent_classes, ctx.structure, ctx.skeleton, ctx.cartridge_id), unit="blocks")
         try:
             rr_agent = _instantiate(ctx.agent_classes["RhetoricalRoleAgent"])
+            run_kwargs: dict[str, Any] = {}
+            # IK-0710: ブロック（窓）ごとの結果をチェックポイントに残し、resume では
+            # 未処理のブロックだけを LLM に渡す。注入された agent が受けないなら渡さない。
+            try:
+                run_params = inspect.signature(rr_agent.run).parameters
+            except (TypeError, ValueError):
+                run_params = {}
+            if "checkpoint" in run_params and "checkpoint_callback" in run_params:
+                run_kwargs["checkpoint"] = (ctx.resume_stage_checkpoints or {}).get("rhetorical_role")
+                if run_kwargs["checkpoint"] is None:
+                    # restart で引き継がない run 行に残った古い状態を、最初の窓より前に外す。
+                    _write_stage_checkpoint(ctx, "rhetorical_role", None)
+                run_kwargs["checkpoint_callback"] = lambda state: _write_stage_checkpoint(ctx, "rhetorical_role", state)
             ctx.roles = rr_agent.run(
                 structure=ctx.structure,
                 skeleton=ctx.skeleton,
                 cartridge_id=ctx.cartridge_id,
                 progress_callback=lambda processed, total: ctx.report_item("rhetorical_role", processed, total, "blocks"),
+                **run_kwargs,
             )
         except Exception as exc:
             logger.exception("rhetorical_role stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
             raise PipelineStageError("rhetorical_role", str(exc), cause=exc) from exc
         ctx.save_artifact("rhetorical_role", ctx.roles)
-    ctx.report_done("rhetorical_role", getattr(ctx.roles, "summary_stats", {}) or {})
-    return ctx.finish_target_stage("rhetorical_role", getattr(ctx.roles, "summary_stats", {}) or {})
+        # 成果は artifact になった。作業状態のチェックポイントは外す（IK-0710）。
+        _write_stage_checkpoint(ctx, "rhetorical_role", None)
+    role_done_payload: dict[str, Any] = dict(getattr(ctx.roles, "summary_stats", {}) or {})
+    # coverage は agent（input_builder）が summary_stats に載せて来る。resume では
+    # それが前回 run の記録であることを印で明示する。
+    _restamp_resumed_coverage(role_done_payload, resumed=resumed_from_artifact)
+    ctx.report_done("rhetorical_role", role_done_payload)
+    return ctx.finish_target_stage("rhetorical_role", role_done_payload)
 
 
 def _stage_claim_qualification(ctx: PipelineContext) -> bool:
     # ── Stage 7: claim_qualification ───────────────────────────────────
     qualified_artifact = ctx.artifact("claim_qualification")
-    if ctx.should_use_artifact("claim_qualification"):
+    resumed_from_artifact = ctx.should_use_artifact("claim_qualification")
+    if resumed_from_artifact:
         ctx.qualified = _from_agent_dict("claim_qualification", qualified_artifact)
         logger.info("Resuming document pipeline: loaded claim_qualification artifact for document %s", ctx.document_id)
     else:
@@ -1108,10 +1311,79 @@ def _stage_claim_qualification(ctx: PipelineContext) -> bool:
             logger.exception("claim_qualification stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
             raise PipelineStageError("claim_qualification", str(exc), cause=exc) from exc
         ctx.save_artifact("claim_qualification", ctx.qualified)
-    ctx.report_done("claim_qualification", {
+    claim_done_payload: dict[str, Any] = {
         "qualified_count": len(ctx.qualified.qualified_spans),
-    })
-    return ctx.finish_target_stage("claim_qualification", {"qualified_count": len(ctx.qualified.qualified_spans)})
+    }
+    # 上限撤廃後の呼び出し回数（agent の自己申告。無い＝旧 run / テストの stub）。
+    claim_llm_calls = (getattr(ctx.qualified, "summary_stats", None) or {}).get("llm_calls")
+    if isinstance(claim_llm_calls, int) and not isinstance(claim_llm_calls, bool):
+        claim_done_payload["llm_calls"] = claim_llm_calls
+    # P0-10: 母集合 = rhetorical_role が出した採否判定対象の span。agent
+    # （input_builder）が summary_stats["coverage"] に載せて来るので、それを
+    # stage payload へ移す。前回 run の artifact に coverage が無い場合だけ、
+    # roles artifact と採否結果の件数から導き直す（source=artifact）。
+    claim_coverage = (getattr(ctx.qualified, "summary_stats", None) or {}).get(
+        COVERAGE_REPORT_KEY
+    )
+    if is_coverage_report(claim_coverage):
+        _attach_existing_coverage(
+            claim_done_payload, claim_coverage, resumed=resumed_from_artifact
+        )
+    else:
+        facts = _claim_qualification_coverage_from_roles(ctx)
+        if facts is not None:
+            _attach_coverage(
+                claim_done_payload,
+                population=facts["population"],
+                processed=facts["processed"],
+                reasons=facts["reasons"],
+                unit=facts["unit"],
+                details=_coverage_details(
+                    facts.get("details"), resumed=resumed_from_artifact
+                ),
+            )
+    ctx.report_done("claim_qualification", claim_done_payload)
+    return ctx.finish_target_stage("claim_qualification", claim_done_payload)
+
+
+def _claim_qualification_coverage_from_roles(ctx: Any) -> dict | None:
+    """agent が coverage を出さなかった場合に、roles と採否結果から事実を導く。
+
+    母集合 = rhetorical_role が出した採否判定対象 span、処理数 = accepted /
+    rejected / deferred に振り分けられた span。resume ではどちらも前回 run の
+    artifact の記録なので、呼び出し側が ``details.source = "artifact"`` を足す。
+    導けない（roles が無い）ときは ``None`` を返して報告を足さない（でっち上げない）。
+    """
+    roles = getattr(ctx, "roles", None)
+    annotations = getattr(roles, "role_annotations", None)
+    if not annotations:
+        return None
+    try:
+        from episteme_graph.agents.claim_qualification.input_builder import (
+            ClaimQualificationInputBuilder,
+        )
+
+        population = 0
+        for annotation in annotations:
+            for span in getattr(annotation, "span_annotations", None) or []:
+                if ClaimQualificationInputBuilder._should_include(span, True):
+                    population += 1
+        qualified = ctx.qualified
+        processed = (
+            len(getattr(qualified, "qualified_spans", []) or [])
+            + len(getattr(qualified, "rejected_spans", []) or [])
+            + len(getattr(qualified, "deferred_spans", []) or [])
+        )
+    except Exception:  # pragma: no cover - 防御的
+        logger.warning("failed to derive claim_qualification coverage", exc_info=True)
+        return None
+    return {
+        "population": population,
+        "processed": min(processed, population),
+        "reasons": ["max_spans"],
+        "unit": "spans",
+        "details": {},
+    }
 
 
 def _stage_equation_semantics(ctx: PipelineContext) -> bool:
@@ -1145,31 +1417,28 @@ def _stage_equation_semantics(ctx: PipelineContext) -> bool:
     equation_done_payload: dict[str, Any] = {
         "equations": len(getattr(ctx.equations, "equations", []) or []),
     }
-    if not resumed_from_artifact:
-        # P0-10: 母集合 = document_structure の式ブロック、処理数 = そのうち
-        # 候補化まで到達したブロック（EquationSemanticsInputBuilder は式ブロックを
-        # 先頭から順に候補化し `max_equations`（既定 64）で打ち切る）。上限に当たった
-        # 論文では「原本 176 式 → records 64」の切断がここまでどこにも現れなかった
-        # （F-18 / 定量サマリ）。inline math 由来の候補は式ブロック母集合の外なので
-        # 数えない（母集合と処理数の単位を混ぜない）。
-        equation_block_ids = {
-            str(getattr(b, "block_id", "") or "")
-            for b in _blocks_of_type(ctx.structure, "equation_block")
-        }
-        equation_block_ids.discard("")
-        covered_block_ids: set[str] = set()
-        for candidate in getattr(ctx.equations, "equation_candidates", []) or []:
-            location = getattr(candidate, "source_location", None) or {}
-            block_id = str((location.get("block_id") if isinstance(location, dict) else "") or "")
-            if block_id in equation_block_ids:
-                covered_block_ids.add(block_id)
-        _attach_coverage(
-            equation_done_payload,
-            population=len(equation_block_ids),
-            processed=len(covered_block_ids),
-            reasons=["max_equations"],
-            unit="equation_blocks",
-        )
+    # P0-10: 母集合 = **display の equation_block + inline 数式候補**、処理数 = 実際に
+    # 候補化された件数。かつては式ブロックだけを母集合に数えていたため、上限 64 の枠を
+    # 式ブロックと inline で分け合った論文（式ブロック 37 + inline 27 = 64）で inline の
+    # 切り捨てが `truncated: 0` と報告されていた。母集合・選抜規則の正本は A層の
+    # input_builder（`compute_candidate_coverage`）に置き、ここに写経しない。
+    # resume でも structure artifact と前回の候補から同じ事実が導ける（source=artifact）。
+    equation_builder = _input_builder_for(ctx, "EquationSemanticsAgent", "compute_candidate_coverage")
+    if equation_builder is not None and getattr(ctx, "structure", None) is not None:
+        try:
+            facts = equation_builder.compute_candidate_coverage(ctx.structure)
+        except Exception:  # pragma: no cover - 防御的
+            logger.warning("failed to compute equation_semantics coverage", exc_info=True)
+        else:
+            observed = len(getattr(ctx.equations, "equation_candidates", []) or [])
+            _attach_coverage(
+                equation_done_payload,
+                population=facts["population"],
+                processed=min(observed, facts["population"]),
+                reasons=facts["reasons"],
+                unit=facts["unit"],
+                details=_coverage_details(facts.get("details"), resumed=resumed_from_artifact),
+            )
     ctx.report_done("equation_semantics", equation_done_payload)
     return ctx.finish_target_stage("equation_semantics", equation_done_payload)
 
@@ -1565,6 +1834,7 @@ def _stage_figure_table_semantics(ctx: PipelineContext) -> bool:
                 # (works both freshly-run and resumed: _stage_claim_qualification
                 # restores ctx.qualified from the artifact via from_dict).
                 qualified=ctx.qualified,
+                language=_run_language(ctx),
             )
         except Exception as exc:
             logger.exception(
@@ -1671,7 +1941,8 @@ def _stage_apparatus_semantics(ctx: PipelineContext) -> bool:
 def _stage_thesis_reconstruction(ctx: PipelineContext) -> bool:
     # ── Stage 9: thesis_reconstruction ─────────────────────────────────
     thesis_artifact = ctx.artifact("thesis_reconstruction")
-    if ctx.should_use_artifact("thesis_reconstruction"):
+    resumed_from_artifact = ctx.should_use_artifact("thesis_reconstruction")
+    if resumed_from_artifact:
         ctx.thesis = _from_agent_dict("thesis_reconstruction", thesis_artifact)
         logger.info("Resuming document pipeline: loaded thesis_reconstruction artifact for document %s", ctx.document_id)
     else:
@@ -1681,13 +1952,38 @@ def _stage_thesis_reconstruction(ctx: PipelineContext) -> bool:
             ctx.thesis = th_agent.run(
                 skeleton=ctx.skeleton, qualified_claims=ctx.qualified, equations=ctx.equations,
                 cartridge_id=ctx.cartridge_id, claim_objects=ctx.claim_objects,
+                **_language_run_kwargs(th_agent, ctx),
             )
         except Exception as exc:
             logger.exception("thesis_reconstruction stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
             raise PipelineStageError("thesis_reconstruction", str(exc), cause=exc) from exc
         ctx.save_artifact("thesis_reconstruction", ctx.thesis)
-    ctx.report_done("thesis_reconstruction", {"total": 1, "processed": 1})
-    return ctx.finish_target_stage("thesis_reconstruction", {"total": 1, "processed": 1})
+    thesis_done_payload: dict[str, Any] = {"total": 1, "processed": 1}
+    # P0-10: 上限（claim 32 / equation 16 / logical_block 16）は中心命題の再構成に
+    # 必要な文脈サンプリングとして残すが、**どれだけ渡さなかったか**は報告する。
+    # 単位が違う 3 種を合算した母集合で、どれが上限に当たったかは理由コードで示す。
+    thesis_builder = _input_builder_for(ctx, "ThesisReconstructionAgent", "compute_input_coverage")
+    if thesis_builder is not None and getattr(ctx, "qualified", None) is not None:
+        try:
+            facts = thesis_builder.compute_input_coverage(
+                ctx.skeleton,
+                ctx.qualified,
+                equations=ctx.equations,
+                claim_objects=getattr(ctx, "claim_objects", None),
+            )
+        except Exception:  # pragma: no cover - 防御的
+            logger.warning("failed to compute thesis_reconstruction coverage", exc_info=True)
+        else:
+            _attach_coverage(
+                thesis_done_payload,
+                population=facts["population"],
+                processed=facts["processed"],
+                reasons=facts["reasons"],
+                unit=facts["unit"],
+                details=_coverage_details(facts.get("details"), resumed=resumed_from_artifact),
+            )
+    ctx.report_done("thesis_reconstruction", thesis_done_payload)
+    return ctx.finish_target_stage("thesis_reconstruction", thesis_done_payload)
 
 
 def _stage_dsl_linking(ctx: PipelineContext) -> bool:
@@ -1850,6 +2146,7 @@ def _stage_component_assembly(ctx: PipelineContext) -> bool:
                         "accept apparatus_semantics yet; skipping (document=%s)",
                         ctx.document_id,
                     )
+            ca_kwargs.update(_language_run_kwargs(ca_agent, ctx))
             ctx.component_result = ca_agent.run(**ca_kwargs)
         except Exception as exc:
             logger.exception("component_assembly stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
@@ -2065,11 +2362,13 @@ def _stage_narrative_annotator(ctx: PipelineContext) -> bool:
         try:
             from episteme_graph.agents.narrative_annotator.agent import NarrativeAnnotator
 
-            ctx.narrative = NarrativeAnnotator().run(
+            narrative_agent = NarrativeAnnotator()
+            ctx.narrative = narrative_agent.run(
                 ctx.component_graph_result,
                 thesis=ctx.thesis,
                 derivations=ctx.derivations,
                 cartridge_id=ctx.cartridge_id,
+                **_language_run_kwargs(narrative_agent, ctx),
             )
             ctx.save_artifact("narrative_annotator", ctx.narrative)
         except Exception as exc:
@@ -2154,6 +2453,8 @@ def _stage_discuss_opening(ctx: PipelineContext) -> bool:
                 artifacts=ctx.all_artifacts(),
                 derivations=ctx.derivations,
                 equations=ctx.equations,
+                # 解析 run の生成言語（options.language）。env より優先する。
+                language=_run_generation_language(ctx.effective_options),
             )
         except Exception as exc:
             logger.warning(
@@ -2315,7 +2616,10 @@ def _stage_export_validation(ctx: PipelineContext) -> bool:
 # ユーザーを完全に詰まらせてはならない。
 #
 # エラーの種類に応じて persist をスキップし、completed（機能縮退）で完了する:
-#   component_graph エラー   → graph のみスキップ、claims + components は保存
+#   component_graph エラー   → ノード単位で解消できる error だけなら、該当ノードを
+#                              debug / review_required に降格して再検証し、error が
+#                              ゼロならグラフを保存する（graph_demotion.py・P4）。
+#                              それ以外は graph のみスキップ、claims + components は保存
 #   no_components /
 #   deterministic_fallback   → components + graph スキップ、claims は保存
 #   その他の品質エラー       → すべて保存（review_required フラグのみ）
@@ -2344,6 +2648,7 @@ def _compute_persist_degradation_flags(ctx: PipelineContext) -> None:
     ctx.skip_graph_persist = False
     ctx.skip_component_persist = False
     ctx.degraded_stages = []
+    ctx.graph_demoted_node_ids = []
     if ctx.validation_result_dict.get("status") == "failed_validation":
         all_val_errors = ctx.validation_result_dict.get("errors") or []
         component_skip_errors = [e for e in all_val_errors if e.get("code") in _COMPONENT_SKIP_CODES]
@@ -2358,6 +2663,14 @@ def _compute_persist_degradation_flags(ctx: PipelineContext) -> None:
                 "ExportValidationGate: コンポーネント生成不可 (%d error(s)) — "
                 "claims のみ保存して completed に移行: document=%s material=%s",
                 len(all_val_errors), ctx.document_id, ctx.material_id,
+            )
+        elif graph_errors and _try_node_demotion(ctx, graph_errors):
+            # ノード単位の降格で再検証を通った: グラフを保存する（降格ノードは debug 層）。
+            logger.warning(
+                "ExportValidationGate: component_graph エラー (%d) — %d ノードを debug に"
+                "降格して graph を保存: document=%s material=%s",
+                len(graph_errors), len(ctx.graph_demoted_node_ids),
+                ctx.document_id, ctx.material_id,
             )
         elif graph_errors:
             # graph のみスキップ、claims + components は保存
@@ -2376,6 +2689,26 @@ def _compute_persist_degradation_flags(ctx: PipelineContext) -> None:
                 "全アーティファクトを保存して completed に移行: document=%s material=%s",
                 len(all_val_errors), ctx.document_id, ctx.material_id,
             )
+
+
+def _try_node_demotion(ctx: PipelineContext, graph_errors: list) -> bool:
+    """component_graph の hard error をノード単位の降格で解消できれば True。
+
+    降格版は ``ctx.component_graph_result`` に差し替える（component_graph の artifact は
+    書き換えない = KO6。降格は persist の時点で毎回決定論的に再計算される）。
+    """
+    from .graph_demotion import try_demote_graph
+
+    try:
+        demoted, node_ids = try_demote_graph(ctx.component_graph_result, graph_errors)
+    except Exception:  # noqa: BLE001 - 降格に失敗したら従来どおりスキップ
+        logger.exception("component_graph node demotion failed: document=%s", ctx.document_id)
+        return False
+    if demoted is None:
+        return False
+    ctx.component_graph_result = demoted
+    ctx.graph_demoted_node_ids = list(node_ids)
+    return True
 
 
 def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
@@ -2510,6 +2843,8 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                 "graph_skipped": ctx.skip_graph_persist or ctx.skip_component_persist,
                 "components_skipped": ctx.skip_component_persist,
                 "degraded_stages": ctx.degraded_stages,
+                # ノード単位で debug に降格して保存したノード（空なら降格なし）。
+                "graph_demoted_node_ids": list(ctx.graph_demoted_node_ids),
                 # 知識オブジェクト（式・根拠・導出・記号）の保存件数（KO4）。
                 "knowledge_objects": knowledge_stats,
             })
@@ -2527,8 +2862,97 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
     return ctx.finish_target_stage("persist_claims_components_graph", {"claims": ctx.result.claim_count, "components": ctx.result.component_count, "total": 3, "processed": 3})
 
 
+#: パイプラインステージ ``theory_modules`` が builder に渡す artifact（§13.5）。
+_THEORY_MODULE_INPUT_ARTIFACTS: tuple[str, ...] = (
+    "derivation_chain",
+    "equation_semantics",
+    "claim_object_builder",
+    "component_assembly",
+)
+
+#: ``theory_modules`` の skip 語彙（``persistable: false`` の ``skip_reason`` に加わるもの）。
+THEORY_MODULES_SKIP_GRAPH_NOT_PERSISTED = "graph_not_persisted"
+
+
+def _build_and_persist_theory_modules(ctx: PipelineContext) -> dict:
+    """``theory_modules`` の本体（非致命）。戻り値はステージの artifact / stage_outputs。
+
+    - 今回グラフが保存されていない（``skip_graph_persist`` / ``skip_component_persist``）→
+      保存済みグラフは古い run のものなので SQL を発行しない（TM14）。
+    - builder が ``persistable: false`` → その ``skip_reason`` で SQL を発行しない。
+    - それ以外は ``persist_theory_modules`` で同期（``records: []`` なら全 live 行を superseded）。
+    - 例外は warning に落として ``failed`` を記録し、run は completed のまま。
+
+    件数は内部の報告で、教員 UI には出さない（既存の知識行と同じ）。構造の指紋は載せない（TM12）。
+    """
+    if ctx.skip_graph_persist or ctx.skip_component_persist:
+        return {
+            "status": "completed",
+            "skipped_reason": THEORY_MODULES_SKIP_GRAPH_NOT_PERSISTED,
+            "rule_version": THEORY_MODULE_RULE_VERSION,
+        }
+    try:
+        artifacts = {
+            name: ctx.artifact(name)
+            for name in _THEORY_MODULE_INPUT_ARTIFACTS
+            if ctx.artifact(name) is not None
+        }
+        equation_keys = equation_stable_key_map(ctx.document_id, artifacts.get("equation_semantics"))
+        graph_json = load_stored_component_graph_json(ctx.document_id)
+        module_records = build_theory_module_records(
+            document_id=ctx.document_id,
+            artifacts=artifacts,
+            graph_json=graph_json,
+            equation_stable_keys=equation_keys,
+        )
+        if not module_records.get("persistable"):
+            return {
+                "status": "completed",
+                "skipped_reason": str(module_records.get("skip_reason") or ""),
+                "rule_version": str(module_records.get("rule_version") or THEORY_MODULE_RULE_VERSION),
+            }
+        summary = persist_theory_modules(
+            document_id=ctx.document_id,
+            run_id=ctx.run_id,
+            module_records=module_records,
+        )
+        return {"status": "completed", **summary}
+    except Exception as exc:  # noqa: BLE001 - 派生表の失敗で run を落とさない
+        logger.warning(
+            "theory_modules stage failed (non-fatal): document=%s material=%s error=%s",
+            ctx.document_id, ctx.material_id, exc, exc_info=True,
+        )
+        return {
+            "status": "completed",
+            "failed": True,
+            "error": str(exc)[:500],
+            "rule_version": THEORY_MODULE_RULE_VERSION,
+        }
+
+
+def _stage_theory_modules(ctx: PipelineContext) -> bool:
+    # ── Stage 30: theory_modules (theory_module_layer_design.md §13.5).
+    # Deterministic, non-LLM, non-fatal. Reads the stored graph_json (so it must
+    # run after persist_claims_components_graph) and writes live rows that rule ⑤
+    # of identity_candidates reads (so it must run before identity_candidates).
+    # The stored rows are NOT the display source (TM11): GET .../theory-modules
+    # stays a read-time derivation.
+    if ctx.should_use_artifact("theory_modules"):
+        payload = dict(ctx.artifact("theory_modules") or {})
+        logger.info(
+            "Resuming document pipeline: loaded theory_modules artifact for document %s",
+            ctx.document_id,
+        )
+    else:
+        ctx.report_start("theory_modules", total=1, unit="builder")
+        payload = _build_and_persist_theory_modules(ctx)
+        ctx.save_artifact("theory_modules", payload)
+    ctx.report_done("theory_modules", dict(payload))
+    return ctx.finish_target_stage("theory_modules", dict(payload))
+
+
 def _stage_identity_candidates(ctx: PipelineContext) -> bool:
-    # ── Stage 30: identity_candidates (concept_registry_design.md §6.2).
+    # ── Stage 31: identity_candidates (concept_registry_design.md §6.2).
     # Registered at the very end, after persist_claims_components_graph: the
     # component rows / stable_keys / knowledge_symbols must already exist before
     # we can propose "this component is the same concept as that one". The stage
@@ -2592,8 +3016,76 @@ def _reference_health_snapshot(document_id: str) -> dict:
                 pass
 
 
+def _llm_failures_snapshot(run_id: str | None) -> dict | None:
+    """この run で失敗した LLM 呼び出しの事実（IK-0362）。失敗が無ければ ``None``。
+
+    各ステージは AI 提供元の障害（課金残高切れ・利用上限など）を自分の縮退語彙で吸収し、
+    run は completed になる。**完了判定は変えず**、U層の台帳（``llm_usage_events``）に
+    残ったこの run の失敗行を集計して ``stage_outputs["llm_failures"]`` に残すだけ。
+    G層 ``material.analysis_llm_failed`` がこれを読んで教員に再実行を道案内する。
+
+    ``_reference_health_snapshot`` と同じく新しいステージにはしない best-effort の後処理で、
+    どんな例外も run の状態を変えない（``None`` = 何も書かない）。
+    """
+    from core.llm_usage.run_failures import summarize_run_llm_failures
+    from core.postgres import get_session as _pg_session
+
+    session = None
+    try:
+        session = _pg_session()
+        return summarize_run_llm_failures(session, run_id)
+    except Exception:  # noqa: BLE001 — 要約は pipeline を止めない
+        logger.warning("llm failure summary skipped for run=%s", run_id, exc_info=True)
+        return None
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _completion_llm_failures_outputs(run_id: str | None) -> dict:
+    """完了記録の ``stage_outputs`` に足すブロック（失敗があるときだけ ``llm_failures`` キー）。"""
+    try:
+        block = _llm_failures_snapshot(run_id)
+    except Exception:  # noqa: BLE001
+        block = None
+    if not block:
+        return {}
+    return {LLM_FAILURES_KEY: block}
+
+
+def _completion_degradation_outputs(artifacts: Any, llm_failures_outputs: dict) -> dict:
+    """完了記録の ``stage_outputs`` に足す縮退のスナップショット（IK-0715）。
+
+    A層 agent が打ち切り・提供元障害で決定論の代替／空の成果に落ちた事実を、in-memory の
+    artifact から ``core.analysis_degradation`` の 1 投影で導いて残す（教材一覧が大きな
+    artifact を読み直さずに済むように）。新しいステージにはしない best-effort の後処理で、
+    失敗しても何も書かない（読み手は「未確認」として扱う）。
+    """
+    try:
+        from core.analysis_degradation import DEGRADATION_KEY, summarize_run_degradation
+
+        summary = summarize_run_degradation(
+            dict(llm_failures_outputs or {}),
+            artifacts=artifacts if isinstance(artifacts, dict) else {},
+        )
+        return {DEGRADATION_KEY: summary}
+    except Exception:  # noqa: BLE001 — 投影は pipeline を止めない
+        logger.warning("analysis degradation snapshot skipped", exc_info=True)
+        return {}
+
+
 def _stage_completed(ctx: PipelineContext) -> None:
     # ── Stage 14: completed ────────────────────────────────────────────
+    # IK-0362: AI 提供元の障害で欠けた呼び出しの事実（失敗が無ければ空 dict = 何も書かない）。
+    llm_failures_outputs = _completion_llm_failures_outputs(ctx.run_id)
+    # IK-0715: 決定論の代替・空の成果に落ちたステージの事実（llm_failures も同じ投影に入る）。
+    degradation_outputs = _completion_degradation_outputs(
+        ctx.all_artifacts() if callable(getattr(ctx, "all_artifacts", None)) else {},
+        llm_failures_outputs,
+    )
     upsert_analysis_run(
         run_id=ctx.run_id,
         document_id=ctx.document_id,
@@ -2602,6 +3094,8 @@ def _stage_completed(ctx: PipelineContext) -> None:
         status="completed",
         current_stage="completed",
         stage_outputs={
+            **llm_failures_outputs,
+            **degradation_outputs,
             "completed": {
                 "chunks": ctx.result.chunk_count,
                 "claims": ctx.result.claim_count,
@@ -2645,7 +3139,7 @@ def _stage_completed(ctx: PipelineContext) -> None:
     try:
         from core.doubt.load_calculator import recompute_load_scores
 
-        recompute_load_scores(document_id=ctx.document_id)
+        recompute_load_scores(document_ids=[ctx.document_id])
     except Exception:
         logger.warning(
             "load score recompute skipped for document=%s", ctx.document_id, exc_info=True
@@ -2768,6 +3262,11 @@ _PIPELINE_STEPS: list[PipelineStageDef] = [
     PipelineStageDef(
         "persist_claims_components_graph", _stage_persist_claims_components_graph,
         progress_unit="tables",
+    ),
+    # 理論モジュール層 Phase 1（§13.5）。決定論（llm_kind=none / model_policy=False）。
+    # 保存済みグラフを読み、規則 ⑤ のために identity_candidates より前に live 行を揃える。
+    PipelineStageDef(
+        "theory_modules", _stage_theory_modules, progress_unit="builder",
     ),
     # 概念レジストリ P3-6。決定論（llm_kind=none / model_policy=False）で、読むのは
     # 保存済みベクトルだけ（embedding API を呼ばない = KR5）。
@@ -3596,6 +4095,7 @@ def _build_figure_table_semantics(
     evidence: Any,
     claim_objects: Any,
     qualified: Any = None,
+    language: str | None = None,
 ):
     from episteme_graph.agents.figure_table_semantics.agent import (
         FigureTableSemanticsAgent,
@@ -3662,6 +4162,8 @@ def _build_figure_table_semantics(
         cartridge_id=cartridge_id,
         evidence_index=evidence_index,
         claim_link_index=claim_link_index,
+        # IK-0571: 図表の teaching_takeaway（決定論のテンプレート文）の言語。未指定なら渡さない。
+        **_language_kwargs_for(agent, language),
     )
 
 
@@ -4149,7 +4651,15 @@ def _build_contextual_explanation(
 
     from episteme_graph.agents.contextual_explanation.agent import ContextualExplanationAgent
 
-    agent = ContextualExplanationAgent(llm_model=_ctxexpl_model(effective_options))
+    run_language = _run_generation_language(effective_options)
+    if run_language:
+        # 生成言語が run で指定されたときだけ渡す（未指定は従来どおり素材の言語に合わせる）。
+        agent = ContextualExplanationAgent(
+            llm_model=_ctxexpl_model(effective_options), language=run_language
+        )
+        payload["language"] = run_language
+    else:
+        agent = ContextualExplanationAgent(llm_model=_ctxexpl_model(effective_options))
     result = agent.run(elements, cartridge_id=cartridge_id)
     # Real usage is only known after the batched+repaired run completes (a
     # single stage run may cost more than 1 LLM call); book it post-hoc
@@ -4240,9 +4750,60 @@ def _discuss_opening_max_calls_per_day() -> int:
         return 20
 
 
-def _discuss_opening_language() -> str:
-    """生成言語（設計書 §4.1）。``lecture_language`` は使わない — 同じ論文が言語設定の
-    違うコースに載りうるため、document 単位の生成物は env 1つで決める。"""
+#: 解析 run の生成言語（``document_analysis_runs.options.language``）の語彙。
+RUN_GENERATION_LANGUAGES = ("ja", "en")
+
+
+def _run_generation_language(effective_options: dict | None) -> str | None:
+    """run options の ``language``（``ja`` / ``en``）。語彙外・未指定は ``None``。
+
+    教員がアップロード / URL 取得 / 再解析で選んだ生成物の言語。``None`` のときは
+    各ステージの従来の既定（discuss_opening = env、contextual_explanation = 素材の言語）。
+    """
+    raw = (effective_options or {}).get("language")
+    text = str(raw or "").strip().lower()
+    return text if text in RUN_GENERATION_LANGUAGES else None
+
+
+def _run_language(ctx: "PipelineContext") -> str | None:
+    """この run の生成言語（``ja`` / ``en`` / ``None``）を読む唯一の入口（IK-0571）。
+
+    run options の ``language`` を語彙で絞った値。discuss_opening / contextual_explanation /
+    paper_skeleton / thesis_reconstruction / component_assembly / narrative_annotator /
+    figure_table_semantics（決定論テンプレートの言語）が使う。
+    """
+    return _run_generation_language(getattr(ctx, "effective_options", None))
+
+
+def _language_run_kwargs(agent: Any, ctx: "PipelineContext") -> dict[str, Any]:
+    """agent.run() に渡す ``language`` kwarg（指定があり、run が受け取れるときだけ）。
+
+    **未指定なら空 dict** — 呼び出しは従来と 1 文字も変わらない（A層の既定の挙動を変えない）。
+    差し替えられたテスト用 agent が ``language`` を受けないときも渡さない
+    （apparatus_semantics と同じ防御的な渡し方）。
+    """
+    return _language_kwargs_for(agent, _run_language(ctx))
+
+
+def _language_kwargs_for(agent: Any, language: str | None) -> dict[str, Any]:
+    """``_language_run_kwargs`` の本体（ctx を持たない builder からも使う）。"""
+    if not language:
+        return {}
+    try:
+        params = inspect.signature(agent.run).parameters
+    except (TypeError, ValueError, AttributeError):
+        return {}
+    accepts = "language" in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    return {"language": language} if accepts else {}
+
+
+def _discuss_opening_language(run_language: str | None = None) -> str:
+    """生成言語（設計書 §4.1 / §14）。``lecture_language`` は使わない — 同じ論文が言語設定の
+    違うコースに載りうるため、document 単位の生成物は run options → env の順で決める。"""
+    if run_language in RUN_GENERATION_LANGUAGES:
+        return str(run_language)
     return (os.getenv("DISCUSS_OPENING_LANGUAGE", "") or "ja").strip() or "ja"
 
 
@@ -4271,6 +4832,7 @@ def _build_discuss_opening(
     artifacts: dict,
     derivations: Any,
     equations: Any,
+    language: str | None = None,
 ) -> dict:
     """discuss_opening ステージ本体（``discuss_opening_authoring_design.md`` §4.1）。
 
@@ -4300,7 +4862,7 @@ def _build_discuss_opening(
     )
 
     max_items = _discuss_opening_max_items_per_document()
-    language = _discuss_opening_language()
+    language = _discuss_opening_language(language)
 
     payload: dict[str, Any] = {
         "status": "completed",
@@ -4622,6 +5184,53 @@ def _empty_blueprint_result(document_id: str, course_id: str | None):
         review_notes=[],
         validation_issues=[],
     )
+
+
+# GROBID は同時要求がプールを超えると 503 を返す（砂場の一括投入で 4 本中 3 本が fallback になった原因の
+# 有力候補）。接続失敗・5xx は短い間隔で数回だけやり直し、理由を artifact に残す。
+GROBID_RETRY_DELAYS_S: tuple[float, ...] = (5.0, 20.0)
+
+
+def _grobid_failure_reason(exc: BaseException) -> str:
+    text = str(exc).strip().replace("\n", " ")
+    return f"{type(exc).__name__}: {text[:200]}" if text else type(exc).__name__
+
+
+def _grobid_retryable(exc: BaseException) -> bool:
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int):
+        return status in (429, 502, 503, 504)
+    # requests 系の接続失敗・タイムアウトだけを対象にする（組み込み ConnectionError 等は即縮退）
+    module = type(exc).__module__ or ""
+    return module.startswith("requests") and type(exc).__name__ in (
+        "ConnectionError", "Timeout", "ReadTimeout", "ConnectTimeout")
+
+
+def _grobid_parse_with_retry(pdf_bytes: bytes, document_id: str, *, sleep=None) -> tuple[str | None, str | None, int]:
+    """GROBID を呼び、(tei_xml, fallback_reason, attempts) を返す。失敗は非致命（PyMuPDF 経路へ）。"""
+    import time as _time
+
+    _sleep = sleep or _time.sleep
+    reason: str | None = None
+    attempts = 0
+    for i in range(len(GROBID_RETRY_DELAYS_S) + 1):
+        attempts = i + 1
+        try:
+            tei = _run_grobid_parse(pdf_bytes)
+            if tei:
+                return tei, None, attempts
+            reason = "empty_response"
+        except Exception as exc:  # noqa: BLE001 — 理由を artifact に残して縮退する
+            reason = _grobid_failure_reason(exc)
+            if not _grobid_retryable(exc):
+                break
+        if i < len(GROBID_RETRY_DELAYS_S):
+            _sleep(GROBID_RETRY_DELAYS_S[i])
+    logger.warning(
+        "grobid_parse failed (non-fatal); will use PyMuPDF fallback: document=%s reason=%s attempts=%d",
+        document_id, reason, attempts,
+    )
+    return None, reason, attempts
 
 
 def _run_grobid_parse(pdf_bytes: bytes) -> str | None:

@@ -1,0 +1,50 @@
+id: s-source-roundtrip
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、回答の出典チップから原文→主張の参照へ進み、教材へ戻る'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- seed_questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.chat.ask
+  with:
+    message: '{{seed_questions | next}}'
+- do: learning.source_chunk.open
+  note: 回答の出典チップから原文を開く
+- do: learning.chunk.claim_refs
+  note: 原文のその箇所がどの主張に使われているかを見る
+- choose:
+  - do: learning.element.context
+    note: 主張の文脈へ移り、教材に戻る
+  - do: learning.component.context
+  optional: true
+- choose:
+  - do: learning.chat.ask
+    with:
+      message: '{{seed_questions | next}}'
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#answer-origin-badge
+- manual: student/02-student.md#context-tab
+watch_for:
+- 出典の番号が往復のあいだ安定している
+- 主張の参照が原文の位置を指している
+- 途中でやめても、どこまで記録されたかが事実文で分かる

@@ -590,3 +590,19 @@ def validate_migrations(
             IdMigration(from_id=from_id, to_id=to_id, version=str(version or ""))
         )
     return out
+
+
+#: 第 25 周 第 10 波（te-01）: 凍結で消えるノードが無いとき、前の版のノードとの対応の区画が出ない理由の一文。
+FACT_NO_CORRESPONDENCE_NEEDED = (
+    "この凍結で消えるノードはないため、前の版のノードとの対応を付ける必要はありません。"
+)
+
+
+def no_correspondence_needed_fact(correspondence: dict | None, frozen) -> str:
+    """対応の区画が出ないとき（候補・未対応・宣言済みのいずれも無い）の事実文。初回凍結は空文字。"""
+    if frozen is None:
+        return ""
+    data = correspondence if isinstance(correspondence, dict) else {}
+    if data.get("candidates") or data.get("unmatched_removed") or data.get("already_declared"):
+        return ""
+    return FACT_NO_CORRESPONDENCE_NEEDED

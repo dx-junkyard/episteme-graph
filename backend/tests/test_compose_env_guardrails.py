@@ -122,6 +122,7 @@ def test_compose_environment_entries_are_documented_choices() -> None:
         "DATABASE_URL",  # ② DB_* から合成
         "GOOGLE_APPLICATION_CREDENTIALS",  # ① コンテナ内 /app/.gcp/... が既定
         "GROBID_URL",  # ① コンテナ間はサービス名 grobid:8070
+        "SIM_RUNNER_URL",  # ① コンテナ間はサービス名 sim-runner:8080（Settings の既定は空 = 未構成）
     }
     unexpected = sorted(set(env) - allowed)
     assert not unexpected, (

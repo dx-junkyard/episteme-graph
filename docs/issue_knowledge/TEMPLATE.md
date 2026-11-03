@@ -1,6 +1,6 @@
 # 課題エントリの記入様式
 
-[← 課題ナレッジの入口](README.md) ｜ [分類体系](taxonomy.md) ｜ [辞書](dictionary.md)
+[← 課題ナレッジの入口](README.md) ｜ [分類体系](taxonomy.md) ｜ [辞書](dictionary.md) ｜ [解決原理](principles.md)
 
 1 課題 = 1 ファイル。`docs/issue_knowledge/entries/IK-NNNN-*.md`（`NNNN` は 4 桁ゼロ埋め・`*` は slug・
 連番・欠番可。slug は英小文字とハイフン）。front-matter は YAML で、機械検査
@@ -51,6 +51,14 @@ resolution:
   landed_in:            # 着地先。resolved は実在するコードのパスかコミットハッシュを最低 1 つ（文書だけは不可）
     - backend/core/knowledge_objects/sync.py
     - docs/features/knowledge_objects_design.md §12
+  # principles:          # 解決原理（principles.md / taxonomy §9）に当たるときだけ。省略 = 該当なし
+  #   - principle: sync-by-stable-key-and-protect-human-decisions   # principles.md の #### 見出しの slug
+  #     use: consulted    # consulted = 直す前に読んで選んだ / extracted = 直した後に抽出・後付け
+  #     note: 採った部品・派生形と固有の差分（件数・率は書かない）
+  # verification:        # 解決済みのときだけ書ける（taxonomy §8）。省略 = 記録なし
+  #   methods: [scratch_db, guardrail]   # 確かめた方法。確かめていなければ [not_verified] 単独
+  #   unverified:                        # 確かめていない範囲（無いと判断したなら []）。件数・率は書かない
+  #     - 同時実行
 related: [IK-0001]      # ゆるい関連（無ければ空リスト）
 view_of: []             # 同じ原因の別視点にあたるエントリ（taxonomy §6.2。無ければ空リスト）
 history: []             # 分類・確度・状態を変えたときの記録 [{date, field, from, to, reason}]
@@ -86,4 +94,6 @@ history: []             # 分類・確度・状態を変えたときの記録 [{
 - **未確定は隠さない**。原因が仮説なら `cause_status: hypothesis` とし、本文でも「仮説」と書く。
 - **数値で分類しない**。行数・件数・規模は分類の根拠にならない（taxonomy §1.2）。
 - **解決したら書き換えではなく追記**。分類が変わったら `history` に残す。
+- **未観測と良好を分ける**。解決したら `resolution.verification` に確かめた方法と確かめていない範囲を書く。
+  省略は「記録なし」、確かめていないなら `not_verified`。「問題が見つかっていない」を「問題が無い」と書かない。
 - **出典は docs 内に実在する文書**（`sources` のパスは機械検査でリンク実在を確認する）。

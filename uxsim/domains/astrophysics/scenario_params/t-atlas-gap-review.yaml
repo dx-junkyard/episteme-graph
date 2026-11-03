@@ -1,0 +1,27 @@
+scenario: t-atlas-gap-review
+domain: astrophysics
+params:
+  domain_hint: astrophysics
+  accept_hint: "1"
+  dismiss_hint: "2"
+  dismiss_reason: 既存の領域の言い換えで、地図に新しい項目として立てるほどの主題ではないため
+personas:
+  te-03-meticulous-seminar:
+    # 第 6 周（judge_atlas_r5 §8）: 5 教員とも歩き済み。候補ゼロの見込みで、行き止まりの読み方（候補ゼロの理由と置けなかった主題の
+    # 所在 IK-0995）を確かめる。同主題の 2 本目の論文を入れるかは指揮者の判断（入れなければ空の説明の再確認）
+    dismiss_reason: 触れている論文の逐語を読むと、既存の概念の一部を言い換えたもので、独立した項目にはならないため
+  te-01-rookie-seminar:
+    dismiss_reason: 地図の他の項目と重なって見えるため、いまは立てない
+  te-05-delegator-lab:
+    # 第 3 周: 候補ゼロの理由の一文（IK-0851）と、導出から外れた採用判断の別枠（IK-0884）を読む
+    dismiss_reason: 今は立てない
+  te-02-veteran-intro:
+    # 第 4 周（judge_atlas_r3 §5）: 外れた判断の別枠を根拠付きで読み（IK-0937 の是正後）、ベテランが戻す・取り込むを決める
+    dismiss_reason: 既存の項目の言い換え。立てない
+  te-04-copilot-intro:
+    # 第 7 周（judge_atlas_r6 §6・材料を足せない場合）: 現行の凍結版 2026.3・下書きなし・候補 0 件の見込みで、候補ゼロの理由と
+    # 置けなかった主題の所在（IK-0995）を読み、次版の下書きを自分で作れるかを確かめる。製品の［現在の版から次版の下書きを作る］は
+    # 候補カード（採用済み・外れた判断）にしか出ず、この場面の steps にも作成の手が無い（campaign notes の「場面に足りない手」）
+    # 第 5 周（judge_atlas_r4 §6 の te-01 × gap は第 2 周と同じ組なので te-04 に替えた）。候補ゼロの理由と外れた枠を読めるか
+    # （この砂場では 2 本以上の反復が立たず候補は出ない見込み — campaign notes）
+    dismiss_reason: 既存の項目と重なるため、いまは立てない

@@ -80,8 +80,12 @@ def section_for_howto(howto_doc: str) -> Optional[dict]:
     return _load_index().get(_normalize_howto(howto_doc))
 
 
-def search(query: str, capabilities: list, limit: int = 3) -> list[dict]:
+def search(query: str, capabilities: list, limit: int = 3, screen: Optional[str] = None) -> list[dict]:
     """role で絞り込み済みの capability 群から、query に最も近い KB 節を返す。
+
+    ``screen``（開いているタブ）を渡すと、そのタブの項目に小さな加点をする（IK-0921:
+    ライブラリのタブで尋ねた「確定」が地図の凍結の節に当たっていた）。語の重なりが
+    無い項目には加点しない（関係の無い節をタブだけで選ばない）。
 
     各結果: ``{capability_id, title, body, citation}``。KB に節が無い capability は
     citation を持つが body="" の「未整備」マーカーとして返しうる（呼び出し側で扱う）。
@@ -99,6 +103,8 @@ def search(query: str, capabilities: list, limit: int = 3) -> list[dict]:
         score = overlap + title_bonus
         if score <= 0:
             continue
+        if screen and cap.screen == screen:
+            score += 1.5
         scored.append(
             (
                 float(score),

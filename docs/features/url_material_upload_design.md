@@ -1,7 +1,8 @@
 # URL指定による教材取得（URL Material Upload）
 
 > **状態: 実装済み（正本）**（2026-08-25 起票・同日実装。migration は **070**
-> `url_fetch_domains` で採番済み。以後は §8 実装記録のみ追記する）
+> `url_fetch_domains` で採番済み。以後は §8 実装記録のみ追記する。2026-09-30 の
+> arXiv URL の書き換えとフォールバックは §10）
 
 **正本**: 本ドキュメント。
 **関連**: `docs/features/image_pipeline_knowledge_library_design.md`（`analyze_images`
@@ -206,3 +207,126 @@ v1 を同日中に実装した。
 - **非同期取得（バックグラウンドジョブ化）**: v1 はリクエスト内同期。大きなファイルで
   タイムアウトが問題になるなら別途検討する。
 - **取得先ごとの取得回数・帯域の上限**: 許可リスト自体が主要な制御で、レート制限は設けない。
+
+## 10. 追補 — arXiv URL の書き換えとフォールバック（2026-09-30・migration / env なし）
+
+> **状態: 実装済み**。正本の詳細は `paper_radar_design.md` §15.9。
+
+- `UploadFromUrlRequest.source_format`（`tex` / `pdf`・空は指定なし・語彙外 422）と
+  `language`（`ja` / `en`）を追加。
+- URL が arXiv の論文 URL（ホスト `arxiv.org` / `www.arxiv.org` / `export.arxiv.org`・パス
+  `abs` / `pdf` / `src` / `e-print`）のときだけ、`api/source_resolution.fetch_url_source` が
+  形式を「明示の `source_format` > URL のパス > 既定（TeX）」で決め、同じ論文の `/src/` か
+  `/pdf/` を取り直す。TeX が読めなければ同じリクエストの中で `/pdf/` へ倒す。
+  **呼び出し予算は 1 件あたり ≤ 2 回**（429 では 2 回目を取らない）。
+- arXiv 以外の URL は従来どおり 1 回そのまま取る（UF1〜UF6 は非改変。取得は引き続き
+  `fetch_source_from_url` の唯一の公開関数 — 許可リスト照合・各ホップの再検証・マジック判定）。
+- `url_fetch` の公開面に `RateLimitedError`（HTTP 429・`FetchFailedError` の部分型）を追加。
+  写像は 502（上流の制限を本アプリのコスト上限 429 と同じ形にしない）。
+- `documents.source_url` は実際にバイト列を返した URL。レスポンスに `effective_format` /
+  `fell_back` を足した（アップロード API と同形のキーは不変・追加のみ）。
+- **ホストを保つ（2026-10-01 是正 m10）**: 書き換えるのは**パスだけ**で、ホストは貼られた URL の
+  ものを保つ（`export.arxiv.org/abs/<id>` → `export.arxiv.org/src/<id>`、フォールバックも
+  `export.arxiv.org/pdf/<id>`）。許可リストが `export.arxiv.org` だけのとき、元の URL なら通るのに
+  書き換えで不許可になる食い違いを作らない。
+- **429 停止規則（2026-10-01 是正 M6）**: 429 を受けたら同じ操作の中で arXiv を再び呼ばない
+  （URL 指定取得は 1 件なので 2 回目を取らないだけ。複数件の `/ingest`・キューの扱いは
+  `paper_radar_design.md` §15.9 のレビュー是正）。
+- UI: モーダルは arXiv の URL を入力したときだけ「取得する形式」を出す
+  （アンカー `materials.url-upload-format`）。生成する言語はアップロード欄の選択を引き継ぐ。
+
+## 11. 追補 — TeX 取り込みの平文化の是正（2026-10-16・migration / env / API なし）
+
+> **状態: 実装済み**。TeX 取り込み（`core/document_pipeline/tex_archive.py`）の先行の設計記録は
+> `paper_radar_design.md` §15.4 だが、同文書は並行作業中のため本節に記録する。課題は
+> IK-0696 / IK-0697 / IK-0698（論文レーダー自律周回 1 周目で役割判定の入力を読んで見つかった）。
+
+- **参照を空文字にしない（IK-0697）**: 地の文の `\ref` / `\eqref` / `\cref` / `\autoref` は読める代用に置く。
+  ラベル → 印字番号の対応は取り込み時に `_build_label_map` が本文から決定論で数える（式: 番号付き環境の
+  行単位・`\nonumber` / `\notag` / `\tag` / subequations の 4a・4b、節: section 系・`\appendix` 以降は A・B、
+  図・表: `\caption` の出現順）。`\numberwithin` / `\theequation` の再定義 / カウンタの直接設定 / 付録の式は
+  **数えずラベルを残す**（違う番号を出すより正直）。表示は「式 (3)」「§2」「図 1」「表 2」、直前の語が
+  「Eq.」「Section」「Fig.」「Table」なら番号だけ（「Eq. (3)」）、`Eq.~(\ref{…})` は括弧を二重にしない。
+  `\cite` 系は固定の目印を 1 つ（著者・年は作らない。目印は §11.1 で `[ref]` に変更）。数えられた式番号は式ブロックの
+  `raw.printed_numbers` にも載る（IK-0681 の表示名への配線は未着手）。
+- **環境の残骸を本文ブロックにしない（IK-0696）**: 数式・図表以外の環境は開始・終了の印と幅・列指定だけを
+  落として中身を残す。`tabular` 系は「セル | セル」の行の並びの表本体（`raw.in_table` — GROBID 経路と同じ形で、
+  役割判定・主張採否の母集合から外れる。`table` 環境の中の表本体も同様に残す）、`itemize` / `enumerate` /
+  `description` は 1 項目 1 行の 1 ブロック（`raw.container_type="list"`）。前付け（`\title` / `\author` /
+  `\affiliation` / `\email` / ORCID 等のコマンド、最初の節より前の ORCID・連絡先を含む段落・center 環境）は
+  `block_type="unknown"` + `raw.front_matter` で残す。`\\` / `\\[10pt]` / `\vspace*` 等のレイアウト残骸は語の
+  区切りにし、記号・句読点だけの断片はブロックにしない。件数は `metadata.structure_recovery`
+  （`table_bodies` / `lists` / `front_matter_blocks` / `punctuation_only_fragments` / `footnotes`）に残す。
+- **脚注を本文の語へ密着させない（IK-0698）**: `\footnote{…}` は「（脚注: …）」で区切る（中の数式も保つ）。
+  「centre → node」の化けは `tex_archive.py` の置換規則からは起きないことを確かめた（素の語は書き換えない・
+  論文のマクロは制御綴だけを展開する）。原因の特定には当該論文の TeX ソースが要り、外部取得をしない方針の
+  ため未確定のまま課題に残す。
+- テスト: `test_latex_display.py::TestTexIngestKeepsReferencesAndFootnotes` / `TestTexLabelMap` /
+  `test_document_pipeline.py::test_tex_archive_keeps_environment_content_without_residue_blocks`。
+
+### 11.1 実論文での再演と追加の是正（2026-10-16・2610.08908）
+
+論文レーダー自律周回で TeX 経路の 2610.08908（赤方偏移空間の銀河トライスペクトル）を読んだ頭脳が、要旨の欠落・
+`$\begin{eqnarray}$` に包まれて `\partial` 等が剥がれた式・段落見出しの混入・`subequations` の残骸・空の参照を報告した。
+取り込み済みの tarball を MinIO から読み出して `build_structure_from_tex_archive` を直接通し（LLM・DB なし）、切り分けた。
+
+- **切り分け**: この論文は是正後のコードで取り込まれていた（`\cite` は当時の目印 `[引用]`）。「Eq. to any」「In we show」
+  「derived in and」は PN 論文（古い `document_structure` artifact を resume で再利用）由来で、現行コードに PN 論文の
+  tarball を通すと残らない。トライスペクトル論文の崩れは別の原因だった。
+- **環境の別名マクロ**: `\newcommand{\be}{\begin{equation}}` / `\beqa` / `\bseq` を地の文の数式マクロとして展開して
+  いたため、式の中身が平文化されていた。置き換え先が環境の印か節見出し 1 つだけの引数なしマクロを、切り出しの前に
+  本文で戻す（`_expand_structural_aliases`。数式の数え上げ `tex_equation_inventory` も同じ版を見る）。`flalign` /
+  `alignat` も式ブロックにする。
+- **同梱 .sty**: `\usepackage{style}` の `style.sty` が tar にあれば前付けの位置に読み込む（マクロ・番号付け・
+  `\acknowledgments` の定義がここにある）。本文の候補にはしない。
+- **要旨**: JHEP 系の `\abstract{…}`（前付けのコマンド形）や前付けの abstract 環境を、`\maketitle` の直後（最初の
+  節より前）の本文ブロックに置き `raw.abstract` を付ける（骨格の「要旨」欄が導入の段落にならない）。
+- **節番号**: `Section.section_number`（「2.1」・付録は「A」）/ `parent_section_id` / `is_appendix` を `\appendix`
+  から決定論で付ける（星付きの節は番号なし）。節の一覧に subsection が無いのは paper_skeleton が level-1 だけを
+  候補にする設計で、TeX 経路の欠落ではない。頁は TeX からは分からないので従来どおり 1（推測しない）。
+- **段落見出し**: `\paragraph{…}` は本文の頭に混ぜず `subsection_heading` + `raw.paragraph_heading` のブロックにする
+  （節は作らない）。
+- **後付け**: 謝辞（`\section*{Acknowledgments}` / `\paragraph{Acknowledgments}` / `acknowledgments` 環境 /
+  `\acknowledgments`）は次の節・段落見出し・`\appendix` までを `block_type="unknown"` + `raw.back_matter`、
+  `thebibliography` は `\bibitem` ごとの `reference_entry` にする（役割判定の母集合に入れない）。
+- **式番号**: `\numberwithin{equation}{section}`（と `\@addtoreset{equation}{section}`・
+  `\theequation` を `\thesection.\arabic{equation}` にする再定義）は「節.通し番号」（付録「A.1」）で数える。前付け
+  （同梱 .sty を含む）の宣言も見る。それ以外の再定義は従来どおり数えない。「Sec.\,\ref」の細い空白も語の区切りとし、
+  直前の語が別の種類を言う参照（「Appendix \ref{…}」が組版上は式を指す）は番号だけを置く。
+- **式のつなぎ語**: 数式ブロック直前の 3 語以下・文末記号なしの断片（「with」「as follows」）は `unknown` +
+  `raw.equation_connective`（落とさない）。
+- 件数は `structure_recovery` の `back_matter_blocks` / `paragraph_headings` / `equation_connectives`。
+- **引用の目印（F0 seq 1218）**: 英語の本文に日本語の `[引用]` を混ぜない。目印は言語に依らない `[ref]`、
+  `\citet` 系と文頭の引用は主語として読める既定の語「the authors of [ref]」（文頭は大文字）、前置詞の後と
+  `\citeyear` は `[ref]` のみ。著者名・年は作らない。主語の位置は段落全体で判断する（数式で区切った断片では
+  判断しない）。
+- **参照の前置きの言語（G2 seq 1340）**: 直前に `Eq.` / `Eqn.` / `Sec.` / `Fig.` / `Tab.` / `Appendix` 等の語があれば番号だけ、
+  無ければ段落に日本語の文字（かな・漢字。脚注の区切りの目印は除く）が無いとき英語の前置き（`Eq. (5.5)` /
+  `Sec. 2` / `Fig. 1` / `Tab. 1`）、日本語の段落のときだけ「式 (5.5)」「§2」「図 1」「表 2」。TeX の引用符
+  ````…''`` / ```…'`` は `"…"` / `'…'` にする。
+- **色の引数（F2 seq 1172）**: `\textcolor{blue}{blue}` は色の引数を落として本文だけ残す（`blueblue` にしない）。
+  `\colorbox` / `\color{…}` も同様。
+- **図表ラベルの二重定義**: 同じ図表の中で caption の前後に同じラベルを書いた場合は、LaTeX と同じく後の定義
+  （caption の後 = 表の番号）を採る（「Tab. tab:priors」→「Tab. 1」）。
+- **脚注の中の表示式（G1 seq 1297・2610.20589）**: 脚注に `\begin{equation}` / `\[…\]` / `$$…$$` があると切り出しが
+  脚注を割り、脚注の括弧が崩れて後ろの表示式が前の段落に連結していた（「reducing toAnother advantage」・
+  「operator.To get」）。番号付けは脚注の中の式も数えたうえで、切り出しでは脚注の中の表示式をインライン数式に
+  する（`_inline_footnote_display_math`）。残る「projection.Such」「parameters.The」は TeX 原文どおり（著者の空白欠落）。
+  語と参照の密着（`Eq.\eqref{…}`）は空白を 1 つ挟む（「Eq. (3.1)」）。
+- **段落見出しのラベル（G1 seq 1243）**: `\paragraph{…}\label{app:x}` は囲んでいる節の番号を採る（「Appendix A」。
+  LaTeX の組版上は直前の式の番号になるが、著者の意図を採る）。番号の付かない式の行（`\nonumber` / 星付き）の
+  ラベルは参照先を進めない。
+- **アクセント記法（I2 seq 1658）**: `Schr\"odinger` / `\'e` / `\`a` / `\^o` / `\~n` / `\c{c}` / `\H{o}` / `\ss` /
+  `\o` 等を Unicode（NFC）にする（`_tex_accents`。本文・節見出し・題名・著者・参考文献の全経路。数式の中は対象外）。
+- **ラベルのキーの空白・マクロ展開の語境界（J0）**: `\label{eq: tri-def}` / `\ref{eq: tri-def}` のキーは空白を除いて
+  正規化する（`eq:tri-def` → 式 ID `eq_tri-def`。以前は検証で落ちて `eq_tex_bNN`）。マクロ展開で制御語と英字が
+  詰まらないよう空白を 1 つ挟む（`\to\gsc` → `\to G_\text{scalar}`）。
+- **式の意味づけの文脈（J0 / J1・`equation_semantics/input_builder.py`）**: 前後文脈は同じ節の中だけ（付録の式の前に結論を
+  入れない）。抜粋は `context_excerpt` が `$…$` と語の途中で切らずに作り、前文脈は式に近い末尾側を残す（LLM 回数は不変）。
+- **「node of inertia」（J0）**: 2610.20589 の TeX 原文の語（l.443 ほか「(i.e., node of inertia)」）で、取り込みの化けではない。
+- **再演で再現しなかった所見**: 「Thus a genera」の途中切れと itemize / enumerate の環境名の残留は、現行コードに
+  2610.20589 の tarball を通すと起きない（段落は式の直前の語で終わり、環境名は残らない）。古い artifact 由来。
+- **参照の範囲・列挙（O0・2610.19001）**: `Appendices~\ref{B}--\ref{F}` / `Figs.~\ref{a}, \ref{b} and \ref{c}` の 2 つ目以降は、先に並んだ参照と継ぎ目（`--` / `-` / `,` / `and` / `or` / `to`）を剥がして連なりの先頭の語で判断し、先頭の語がある限り番号だけを置く（`_strip_ref_chain`。「B--Sec. F」にしない。先頭の語が無い並びは従来どおり各参照に前置き）。
+- **役割判定の入力の本文上限（O0 seq 2220）**: 語の途中で切っていたのは取り込みではなく `rhetorical_role/input_builder.py` の 1,800 字の先頭切り。文境界（. ! ?・略語と数式の中は除く）が上限の半分より後ろにあればそこで、無ければ語境界（`context_excerpt`）で切って「…」を付け、切った block の ID を coverage `details.truncated_text_block_ids` に残す（LLM 回数・母集合は不変）。
+- テスト: `test_document_pipeline.py` の `test_tex_*`（論文の形を写した小さな TeX 断片・tarball はリポジトリに入れない）/
+  `test_latex_display.py::TestTexLabelMap::test_section_wise_equation_numbering_is_counted`。

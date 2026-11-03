@@ -600,7 +600,65 @@ class TestCoursePlacementsAccept:
         )
         assert response.status_code == 200
         assert response.json()["confirmed"] == 0
-        assert env["events"] == []
+        # 第 23 周 F5: 0 件でも「次へ」の手続はコース単位の 1 行で残す（DC1）。
+        assert len(env["events"]) == 1
+        args, _kwargs = env["events"][0]
+        assert args[1] == _COURSE
+        assert args[2] == args[3] == landscape_schema.STATUS_INFERRED
+        assert args[5]["action"] == routes.RELEASE_ACCEPT_ACTION
+        assert args[5]["no_transition"] is True
+        assert "decision_context" in args[5]
+        # 提示も適用も空なら一致（事実文は出さない）。
+        assert "decision_note" not in response.json()
+
+    def test_view_only_teacher_next_is_not_reported_as_matched(
+        self, client_and_teacher, env
+    ):
+        """第 23 周 F5（te-02 の実測）: 閲覧のみの教材の配置を見て「次へ」→ 0 件確認。
+
+        提示集合は閲覧できる全ソース論文の inferred で組み、確認できなかった行は
+        ``skipped`` に残し、一致を偽らず、監査を 1 行残す。
+        """
+        client, teacher = client_and_teacher
+        routes = env["routes"]
+        seen: dict = {}
+
+        def _list(_s, ids, statuses=()):
+            seen["ids"] = list(ids)
+            return [
+                _placement_row(id=_PLACEMENT_2, document_id=_DOC_LOCKED),
+            ]
+
+        env["monkeypatch"].setattr(routes.landscape_store, "list_for_documents", _list)
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "accept_inferred_for_documents",
+            lambda *a, **k: [],
+        )
+        response = client.post(
+            f"/api/admin/landscape/courses/{_COURSE}/placements/accept",
+            headers={"Authorization": "Bearer " + teacher},
+            json={"presented_placement_ids": [_PLACEMENT_2]},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        # 提示集合は閲覧できる document すべて（編集できない教材を含む）。
+        assert sorted(seen["ids"]) == sorted([_DOC, _DOC_LOCKED])
+        ctx = body["decision_context"]
+        assert ctx["presented"]["ids"] == [_PLACEMENT_2]
+        assert ctx["applied"]["ids"] == []
+        assert ctx["presented_matches_applied"] is False
+        assert ctx["skipped"]["ids"] == [_PLACEMENT_2]
+        assert ctx["skipped"]["document_ids"] == [_DOC_LOCKED]
+        assert ctx["skipped"]["reason"] == "not_editable"
+        assert body["decision_note"] == (
+            "表示された1件のうち確認したのは0件です"
+            "（編集権限の無い教材1本の位置づけは対象外）。"
+        )
+        assert "一致しています" not in body["decision_note"]
+        assert len(env["events"]) == 1
+        args, _kwargs = env["events"][0]
+        assert args[1] == _COURSE
+        assert args[5]["decision_context"]["skipped"]["ids"] == [_PLACEMENT_2]
 
     def test_unknown_course_is_404(self, client_and_teacher, env):
         client, teacher = client_and_teacher

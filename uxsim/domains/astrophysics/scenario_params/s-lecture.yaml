@@ -1,0 +1,21 @@
+scenario: s-lecture
+domain: astrophysics
+params:
+  goal_text: 講義の前に、この章の流れを一度通して聴いておくこと
+  topic_hint: 宇宙背景放射
+  interrupt_questions:
+    - いまのスライドの「晴れ上がり」というのは、何が晴れたんですか？
+    - 温度ゆらぎの大きさがとても小さいのに、そこから構造ができたというのはどういうことですか？
+    - 音響ピークの位置で何が分かるのか、もう一度短く教えてください。
+per_archetype:
+  lecture_listener:
+    interrupt_questions:
+      - いまのところ、読み上げとスライドの式が合っていない気がします。どの式の話でしたか？
+      - 晴れ上がりというのは、光が電子に散乱されなくなったということですか？
+      - 最初の音響ピークの位置から、宇宙の曲率が分かるのはなぜですか？
+  non_native:
+    goal_text: listening to this chapter once before the lecture
+    interrupt_questions:
+      - What does "recombination" on this slide actually mean?
+      - How can such tiny temperature fluctuations grow into structures?
+      - Could you briefly explain again what the position of the acoustic peaks tells us?

@@ -502,3 +502,33 @@ class TestIssueRetention:
         _result, errors, _w = _validate(_raw(_placement(perspective="vibes")))
         assert errors
         assert all(":" in message for message in errors)
+
+
+# ---------------------------------------------------------------------------
+# IK-0967: 理由が引用の範囲を越える固有の語は warning（配置は落とさない・LS4 は不変）
+# ---------------------------------------------------------------------------
+
+
+class TestReasonScope:
+    def test_term_beyond_quote_is_a_warning_not_an_error(self):
+        raw = _raw(_placement(reason="論文は BAO と CMB の振幅を比べている。"))
+        result, errors, warnings = _validate(raw)
+        assert errors == []
+        assert len(result.placements) == 1
+        assert any("placement_reason_terms_beyond_quote" in w for w in warnings)
+
+    def test_reason_within_quote_has_no_warning(self):
+        raw = _raw(_placement(reason="論文は温度と偏光の振幅の関係を示す。"))
+        _result, errors, warnings = _validate(raw)
+        assert errors == []
+        assert not any("placement_reason_terms_beyond_quote" in w for w in warnings)
+
+    def test_reason_scope_helper(self):
+        from episteme_graph.agents.landscape_placement.reason_scope import (
+            reason_terms_beyond_quote,
+        )
+
+        assert reason_terms_beyond_quote("BAO と Ia を用いる", ["DESI BAO data"]) == ["Ia"]
+        # 部分文字列一致にしない（語境界付き）
+        assert reason_terms_beyond_quote("SM の拡張", ["cosmological model"]) == ["SM"]
+        assert reason_terms_beyond_quote("BAO", []) == []

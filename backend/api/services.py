@@ -9,6 +9,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -16,7 +17,17 @@ from dataclasses import dataclass
 from sqlalchemy import text as sa_text
 
 from core import candidate_flow
-from core.course_data import course_llm_models, course_source_material_ids, course_sources, course_topics
+from core import document_refs as _document_refs
+from core.course_data import (
+    course_llm_models,
+    course_source_material_ids,
+    course_sources,
+    course_topics,
+    find_course_topic,
+)
+from core.display_projection import mask_internal_ids
+from core.element_vocab import claim_type_label
+from core.focus_document import FocusDocument, resolve_focus_document
 from core.lecture import normalize_to_placeholder_format as _normalize_formulas
 from core.llm import generate_text, generate_text_with_structured_output, generate_embeddings, get_embedding_dim
 from core.llm_worker.single_shot import json_call
@@ -241,6 +252,102 @@ def get_active_task_for_course(course_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class CourseEntry:
+    """学習者のコースへの入場判定（第 25 周 第 3 波・IK-0945）。
+
+    「どのコースに入れるか」の条件式の**唯一の正本**。``get_course_data`` /
+    ``get_accessible_course_data`` / 受講開始（``enroll_course``）/ コース一覧の事実文は
+    すべてこの判定を読み、経路ごとに入場の規則を書かない。
+
+    - ``is_owner``: 所有者。
+    - ``is_enrolled``: 受講の行（``learning_states``）がある。**受講中のコースが後から
+      非公開になっても、受講者は読み続けられる**（オーナー判断の推奨どおり。学習者の記録と
+      途中の学習を所有者の操作で黙って切らない）。
+    - ``open_for_enrollment``: いま新規の受講を受け付けている（公開テンプレート / 所属
+      グループへの共有 / object_group_permissions の viewer・editor）。非公開化で止まるのは
+      ここだけ（＝新規の受講開始）。
+    """
+
+    exists: bool
+    data: dict | None
+    is_owner: bool = False
+    is_enrolled: bool = False
+    open_for_enrollment: bool = False
+
+    @property
+    def readable(self) -> bool:
+        return self.exists and (self.is_owner or self.is_enrolled or self.open_for_enrollment)
+
+
+def course_open_for_enrollment(
+    user_id: str,
+    course_id: str,
+    *,
+    visibility: str | None,
+    group_id: object | None,
+    is_published: bool,
+    is_template: bool,
+) -> bool:
+    """コースがいまこの利用者の新規の受講を受け付けているか（入場判定の正本の一部）。"""
+    if (visibility or "private") == "public" and is_published and is_template:
+        return True
+    if visibility == "group" and group_id and user_can_access_group(user_id, str(group_id)):
+        return True
+    return user_can_view_course(user_id, course_id)
+
+
+def resolve_course_entry(user_id: str, course_id: str, *, check_open: bool = False) -> CourseEntry:
+    """学習者の入場判定を 1 回で解決する（IK-0945）。
+
+    ``check_open=False`` のときは所有者・受講者について受付状態を調べない（チャット等の
+    毎メッセージの経路で余計な問い合わせをしない）。受講の行も所有もない利用者については
+    常に受付状態を調べる（それが入場の唯一の根拠になるため）。
+    """
+    session = _pg_session()
+    try:
+        record = session.execute(
+            sa_text("""
+                SELECT data, user_id, COALESCE(visibility, 'private'),
+                       group_id, COALESCE(is_published, false), COALESCE(is_template, false)
+                FROM learning_courses
+                WHERE id = :course_id
+                LIMIT 1
+            """),
+            {"course_id": course_id},
+        ).fetchone()
+        if not record or not record[0]:
+            return CourseEntry(exists=False, data=None)
+        data_raw, owner_id, visibility, group_id, is_published, is_template = tuple(record)[:6]
+        data = data_raw if isinstance(data_raw, dict) else json.loads(data_raw)
+        is_owner = str(owner_id) == str(user_id)
+        is_enrolled = False
+        if not is_owner:
+            state_row = session.execute(
+                sa_text("""
+                    SELECT 1 FROM learning_states
+                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                    LIMIT 1
+                """),
+                {"user_id": user_id, "course_id": course_id},
+            ).fetchone()
+            is_enrolled = bool(state_row)
+    finally:
+        session.close()
+
+    open_ = False
+    if check_open or not (is_owner or is_enrolled):
+        open_ = course_open_for_enrollment(
+            user_id, course_id,
+            visibility=visibility, group_id=group_id,
+            is_published=bool(is_published), is_template=bool(is_template),
+        )
+    return CourseEntry(
+        exists=True, data=data, is_owner=is_owner, is_enrolled=is_enrolled,
+        open_for_enrollment=open_,
+    )
+
+
 def get_course_data(user_id: str, course_id: str) -> dict | None:
     """LearningCourse のマスターデータを返す（オーナー or 受講者）。
 
@@ -248,45 +355,24 @@ def get_course_data(user_id: str, course_id: str) -> dict | None:
     アクセスし、一般学生と同じ学習体験を得る。
     - オーナーが learning_states を持っていない場合は自動作成する。
     - マスターデータのみを返す（個人レイヤーは get_personal_layer() で別途取得）。
+
+    入場判定は :func:`resolve_course_entry`（IK-0945 の正本）。この経路は受講の行を要する
+    （受講を開始していない公開コースはここでは開けない — 受講開始は enroll の経路）。
+    受講中のコースは非公開になった後も読める。
     """
-    session = _pg_session()
-    try:
-        record = session.execute(
-            sa_text("""
-                SELECT data, user_id FROM learning_courses
-                WHERE id = :course_id
-                LIMIT 1
-            """),
-            {"course_id": course_id},
-        ).fetchone()
-        if not record or not record[0]:
-            return None
-
-        data = record[0] if isinstance(record[0], dict) else json.loads(record[0])
-        owner_id = record[1]
-
-        if str(owner_id) == str(user_id):
-            # Issue #145: オーナーも learning_states を保持する（自動作成）
-            enroll_user_in_course(user_id, course_id)
-            return data  # 所有者は HEAD（working copy）
-
-        # 受講者チェック
-        state_row = session.execute(
-            sa_text("""
-                SELECT 1 FROM learning_states
-                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
-                LIMIT 1
-            """),
-            {"user_id": user_id, "course_id": course_id},
-        ).fetchone()
-        if not state_row:
-            return None
-    finally:
-        session.close()
+    entry = resolve_course_entry(user_id, course_id)
+    if not entry.exists:
+        return None
+    if entry.is_owner:
+        # Issue #145: オーナーも learning_states を保持する（自動作成）
+        enroll_user_in_course(user_id, course_id)
+        return entry.data  # 所有者は HEAD（working copy）
+    if not entry.is_enrolled:
+        return None
 
     # V層（migration 037）: 受講学習者（非所有者）の主経路も発行版に追従させる。
     # editor は HEAD、純 viewer・学習者は有効な版のスナップショット（未発行なら live）。
-    return _apply_course_version_view(course_id, user_id, data)
+    return _apply_course_version_view(course_id, user_id, entry.data)
 
 
 def get_course_live_llm_models(course_id: str) -> dict:
@@ -377,11 +463,14 @@ def user_is_enrolled(user_id: str, course_id: str) -> bool:
         session.close()
 
 
-def enroll_user_in_course(user_id: str, course_id: str) -> None:
-    """learning_states に受講レコードを作成する（UNIQUE で二重受講を防止）。"""
+def enroll_user_in_course(user_id: str, course_id: str) -> bool:
+    """learning_states に受講レコードを作成する（UNIQUE で二重受講を防止）。
+
+    戻り値は「新しい受講記録を作ったか」。既に受講中なら False（ON CONFLICT DO NOTHING）。
+    """
     session = _pg_session()
     try:
-        session.execute(
+        result = session.execute(
             sa_text("""
                 INSERT INTO learning_states (id, user_id, course_id)
                 VALUES (gen_random_uuid(), CAST(:user_id AS uuid), :course_id)
@@ -390,6 +479,8 @@ def enroll_user_in_course(user_id: str, course_id: str) -> None:
             {"user_id": user_id, "course_id": course_id},
         )
         session.commit()
+        rowcount = getattr(result, "rowcount", None)
+        return not (isinstance(rowcount, int) and rowcount == 0)
     except Exception:
         session.rollback()
         raise
@@ -578,6 +669,32 @@ def get_course_completion(user_id: str, course_id: str, course_data: dict) -> di
     }
 
 
+def list_learner_touched_topic_ids(user_id: str, course_id: str) -> list[str]:
+    """本人がそのコースで会話した（往復が残っている）トピックの id を返す（第 23 周）。
+
+    コース目次の状態表示（``in_progress`` = 学習中）にだけ使う。接触は理解の根拠に
+    ならないので、完了（``completed``）の判定には使わない（是正 F4 / UC5 — 提示内容は
+    変えず、本人の操作を状態表示に反映するだけ）。``_`` で始まる疑似トピック
+    （``_discussion`` 等）は除く。読み取り専用。
+    """
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT topic_id FROM learning_chat_history
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                  AND jsonb_typeof(history) = 'array'
+                  AND jsonb_array_length(history) > 0
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchall()
+    finally:
+        session.close()
+    return sorted(
+        {str(r[0]) for r in rows if r and r[0] and not str(r[0]).startswith("_")}
+    )
+
+
 def _fetch_course_data_row(course_id: str) -> dict | None:
     """course_id だけから data 本体を取得する内部ヘルパ。"""
     session = _pg_session()
@@ -648,51 +765,20 @@ def _apply_course_version_view(course_id: str, viewer_id: str, live_data: dict |
 
 
 def get_accessible_course_data(user_id: str, course_id: str) -> dict | None:
-    """visibility を考慮して、アクセス可能な LearningCourse データを返す。
+    """アクセス可能な LearningCourse データを返す（入場判定の正本は :func:`resolve_course_entry`）。
 
-    - オーナー本人: 常に可
-    - visibility='public' かつ is_published かつ is_template: 可
-    - visibility='group' かつ自分がそのグループのメンバー: 可
+    - オーナー本人: 常に可（HEAD）
+    - 受講の行がある学習者: 可（**非公開化の後も読み続けられる** — IK-0945）
+    - いま受講を受け付けている（公開テンプレート / 所属グループ / object_group_permissions）: 可
     """
-    session = _pg_session()
-    try:
-        record = session.execute(
-            sa_text("""
-                SELECT data, user_id, COALESCE(visibility, 'private'),
-                       group_id, COALESCE(is_published, false), COALESCE(is_template, false)
-                FROM learning_courses
-                WHERE id = :course_id
-                LIMIT 1
-            """),
-            {"course_id": course_id},
-        ).fetchone()
-        if not record or not record[0]:
-            return None
-
-        data_raw, owner_id, visibility, group_id, is_published, is_template = record
-        data = data_raw if isinstance(data_raw, dict) else json.loads(data_raw)
-
-        # オーナーは HEAD（working copy）。非オーナーの受講者・共有先は発行版に追従する。
-        # editor（グループ）は _apply_course_version_view 内で HEAD 扱いとなる
-        # （get_viewable_course_data と同じ owner/editor→HEAD 判定に揃える）。
-        if str(owner_id) == str(user_id):
-            return data
-        if visibility == "public" and is_published and is_template:
-            return _apply_course_version_view(course_id, user_id, data)
-        if visibility == "group" and group_id:
-            row = session.execute(
-                sa_text("""
-                    SELECT 1 FROM group_members
-                    WHERE group_id = :gid AND user_id = CAST(:uid AS uuid)
-                    LIMIT 1
-                """),
-                {"gid": group_id, "uid": user_id},
-            ).fetchone()
-            if row:
-                return _apply_course_version_view(course_id, user_id, data)
+    entry = resolve_course_entry(user_id, course_id)
+    if not entry.readable:
         return None
-    finally:
-        session.close()
+    # オーナーは HEAD（working copy）。非オーナーの受講者・共有先は発行版に追従する。
+    # editor（グループ）は _apply_course_version_view 内で HEAD 扱いとなる。
+    if entry.is_owner:
+        return entry.data
+    return _apply_course_version_view(course_id, user_id, entry.data)
 
 
 def course_deletion_notice(course_id: str) -> dict | None:
@@ -1019,7 +1105,12 @@ def user_can_access_group(user_id: str, group_id: str | None) -> bool:
 
 
 def _resolve_document(document_ref: str) -> dict | None:
-    """document_ref（documents.id UUID か source_path=material_id）から doc メタを解決する。"""
+    """document_ref（documents.id UUID か source_path=material_id）から doc メタを解決する。
+
+    2つの ID 体系を突き合わせる**単数の正本**（複数は ``core.document_refs.resolve_document_refs``。
+    IK-0550 — ガードレール ``test_document_refs.py``）。同じ ref が一方の id と
+    別の行の source_path に当たるときは id 一致を採る。
+    """
     if not document_ref:
         return None
     session = _pg_session()
@@ -1032,6 +1123,7 @@ def _resolve_document(document_ref: str) -> dict | None:
                        group_id::text
                 FROM documents
                 WHERE id::text = :ref OR source_path = :ref
+                ORDER BY (id::text = :ref) DESC
                 LIMIT 1
             """),
             {"ref": document_ref},
@@ -1541,6 +1633,9 @@ def list_visible_document_ids(user_id: str) -> set[str]:
                              AND gm3.user_id = CAST(:uid AS uuid)
                        )
                        OR d.source_path IN (SELECT material_id FROM course_material_ids)
+                       -- sources[].material_id に documents.id（UUID）を入れたコースもある
+                       -- （list_course_source_document_ids と同じ両形の意味論・IK-0550）。
+                       OR d.id::text IN (SELECT material_id FROM course_material_ids)
                 """),
                 {"uid": user_id},
             ).fetchall()
@@ -1550,6 +1645,75 @@ def list_visible_document_ids(user_id: str) -> set[str]:
     except Exception as exc:
         logger.warning("list_visible_document_ids failed (fail-closed, empty set): %s", exc)
         return set()
+
+
+def topic_source_document_ids(topic: dict | None) -> set[str]:
+    """トピックが束ねる論文（document.id のテキスト表現）の集合（IK-0472・読み取り専用）。
+
+    ``topic.document_id`` / ``topic.units[].document_id`` / ``topic.evidence_links[].document_id``
+    の明示値と、``topic.material_chunk_ids`` のチャンクが属する document の和集合。
+    取れなければ空集合（呼び出し側は並べ替えをしない — fail-soft）。
+    """
+    if not isinstance(topic, dict):
+        return set()
+    ids: set[str] = set()
+    explicit = [topic.get("document_id")]
+    for key in ("units", "evidence_links"):
+        for item in topic.get(key) or []:
+            if isinstance(item, dict):
+                explicit.append(item.get("document_id"))
+    ids.update(str(v).strip() for v in explicit if v and str(v).strip())
+    chunk_ids = [str(c).strip() for c in (topic.get("material_chunk_ids") or []) if str(c or "").strip()]
+    if chunk_ids:
+        try:
+            session = _pg_session()
+            try:
+                rows = session.execute(
+                    sa_text("""
+                        SELECT DISTINCT document_id::text FROM chunks
+                        WHERE id::text = ANY(:ids) AND document_id IS NOT NULL
+                    """),
+                    {"ids": chunk_ids[:200]},
+                ).fetchall()
+            finally:
+                session.close()
+            ids.update(str(r[0]) for r in rows if r and r[0])
+        except Exception:  # noqa: BLE001 — 並べ替えは補助。読めなければ並べ替えない。
+            logger.debug("topic_source_document_ids failed", exc_info=True)
+    return ids
+
+
+def topic_equation_reconstruction_index(topic: dict | None, course_data: dict | None = None):
+    """トピックの論文の生きた式の記録の索引（第 25 周 第 6 波・IK-0895。正本は
+    ``core.equation_reconstruction``）。論文はトピックが束ねる論文（無ければコースの論文）。"""
+    from core.equation_reconstruction import load_equation_reconstruction_index
+
+    try:
+        ids = topic_source_document_ids(topic)
+        if not ids and course_data:
+            ids = list_course_source_document_ids(course_data)
+        return load_equation_reconstruction_index(ids)
+    except Exception:  # noqa: BLE001 — 索引が無ければ写し自身の判定に戻る
+        logger.debug("topic equation reconstruction index failed", exc_info=True)
+        return None
+
+
+def overlay_topic_equation_reconstruction(topic: dict | None, course_data: dict | None = None):
+    """トピックの式の写しに、生きた式の記録から引いた復元の状態を載せた複製を返す（IK-0895）。
+
+    本文・講義・付録（教材本文の式）・チャットの「表示中の教材」はこの複製を読む（保存データは
+    書き換えない）。正本は ``learner_context_common.overlay_equation_reconstruction``。
+    """
+    from core.learner_context_common import overlay_equation_reconstruction
+
+    if not isinstance(topic, dict):
+        return topic
+    index = topic_equation_reconstruction_index(topic, course_data)
+    try:
+        return overlay_equation_reconstruction(topic, index)
+    except Exception:  # noqa: BLE001
+        logger.debug("topic equation reconstruction overlay failed", exc_info=True)
+        return topic
 
 
 def list_course_source_document_ids(course_data: dict | None) -> set[str]:
@@ -1582,11 +1746,10 @@ def list_course_source_document_ids(course_data: dict | None) -> set[str]:
     try:
         session = _pg_session()
         try:
-            rows = session.execute(
-                sa_text("SELECT id::text FROM documents WHERE source_path = ANY(:mids)"),
-                {"mids": list(material_ids)},
-            ).fetchall()
-            resolved_ids = {str(row[0]) for row in rows if row[0]}
+            # ``sources[].material_id`` に documents.id（UUID）が入っているコースもある
+            # （教材一覧の document_id で選んだ等）。両形を同じ document に着地させる（IK-0550）。
+            resolved = _document_refs.resolve_document_refs(session, material_ids)
+            resolved_ids = {entry["document_id"] for entry in resolved.values() if entry.get("document_id")}
         finally:
             session.close()
     except Exception as exc:
@@ -1619,22 +1782,379 @@ def resolve_course_source_titles(course_data: dict | None) -> dict[str, str]:
     try:
         session = _pg_session()
         try:
+            resolved = _document_refs.resolve_document_refs(session, material_ids)
+            doc_ids = sorted({e["document_id"] for e in resolved.values() if e.get("document_id")})
             rows = session.execute(
-                sa_text(
-                    "SELECT source_path, title FROM documents WHERE source_path = ANY(:mids)"
-                ),
-                {"mids": list(material_ids)},
-            ).fetchall()
+                sa_text("SELECT id::text, title FROM documents WHERE id::text = ANY(:ids)"),
+                {"ids": doc_ids},
+            ).fetchall() if doc_ids else []
+            # IK-0664（第 25 周 第 7 波）: arXiv 番号のままの題名は、arXiv メタデータの写し
+            # （外部事実のキャッシュの読みだけ）から読める題名を引く（無ければ番号のまま）。
+            paper_titles = _document_refs.resolve_paper_titles(session, doc_ids)
         finally:
             session.close()
     except Exception as exc:  # noqa: BLE001 — fail-soft
         logger.warning("resolve_course_source_titles failed: %s", exc)
         return {}
-    return {
-        str(row[0]): str(row[1]).strip()
-        for row in rows
-        if row[0] and str(row[1] or "").strip()
+    title_by_doc = {
+        str(row[0]): str(row[1]).strip() for row in rows if row[0] and str(row[1] or "").strip()
     }
+    for doc_id, readable in (paper_titles or {}).items():
+        if doc_id in title_by_doc and _document_refs.title_is_readable(readable):
+            title_by_doc[doc_id] = readable
+    # キーは保存された ``material_id`` のまま（source_path でも documents.id でも。IK-0550）。
+    return {
+        ref: title_by_doc[entry["document_id"]]
+        for ref, entry in resolved.items()
+        if entry.get("document_id") in title_by_doc
+    }
+
+
+def course_source_document_id_map(course_data: dict | None) -> dict[str, str]:
+    """コースの ``sources[].material_id`` → ``documents.id``（両形を受ける。fail-soft で空）。"""
+    if not isinstance(course_data, dict):
+        return {}
+    material_ids = course_source_material_ids(course_data)
+    if not material_ids:
+        return {}
+    try:
+        session = _pg_session()
+        try:
+            resolved = _document_refs.resolve_document_refs(session, material_ids)
+        finally:
+            session.close()
+    except Exception as exc:  # noqa: BLE001 — fail-soft
+        logger.warning("course_source_document_id_map failed: %s", exc)
+        return {}
+    return {ref: entry["document_id"] for ref, entry in resolved.items() if entry.get("document_id")}
+
+
+def with_course_source_document_ids(data: dict) -> dict:
+    """``sources[]`` に ``document_id``（documents.id）を足したコピーを返す（IK-0550）。
+
+    クライアントへ document を渡すキーは常に ``document_id``（UUID）。``material_id`` は
+    アップロード時の ID（documents.source_path）としてそのまま残す。既に ``document_id`` を
+    持つ source は触らない。解決できなければ何も足さない（保存データは変えない）。
+    """
+    if not isinstance(data, dict) or not data.get("sources"):
+        return data
+    mapping = course_source_document_id_map(data)
+    if not mapping:
+        return data
+    sources: list = []
+    changed = False
+    for src in data.get("sources") or []:
+        if isinstance(src, dict) and not src.get("document_id"):
+            doc_id = mapping.get(str(src.get("material_id") or "").strip())
+            if doc_id:
+                src = {**src, "document_id": doc_id}
+                changed = True
+        sources.append(src)
+    if not changed:
+        return data
+    return {**data, "sources": sources}
+
+
+_FORMULA_PLACEHOLDER_RE = re.compile(r"\[\[FORMULA_\d+\]\]")
+_LOCATION_SECTION_CHARS = 30
+_LOCATION_HEAD_CHARS = 40
+# 小文字・句読点で始まる短い ASCII 断片（前のチャンクから続く語の後半）+ 直後の空白
+_LEADING_WORD_FRAGMENT_RE = re.compile(r"^[a-z0-9,;:'\)\]\.-]{1,12}\s+")
+
+
+#: 段落頭の走り込み見出し（REVTeX の「Four-phase training.—」）。語 1〜8 個 + ピリオド + ダッシュで本文に
+#: 続く形だけ（決定論・文の途中は見ない）。出典の行（routes/learning.py の _source_section_note）と出典の
+#: 一覧の手がかり（chunk_location_hint）の共通正本（第 25 周 第 11 波・IK-1144 の再発）。
+RUN_IN_HEADING_RE = re.compile(
+    r"^([A-Z][A-Za-z0-9\-]*(?:[ \t][A-Za-z0-9\-()]+){0,7})\.[—―]"
+)
+
+
+def run_in_heading(text: object) -> str:
+    """抜粋の頭の走り込み見出し（無ければ ``""``）。"""
+    match = RUN_IN_HEADING_RE.match(strip_control_sequences(str(text or "")).lstrip())
+    return match.group(1).strip() if match else ""
+
+
+def chunk_location_hint(*, section_title: object, text: object) -> str:
+    """出典チャンクの「論文の中のどこか」を表す短い手がかり（IK-0381）。
+
+    同じ論文から複数の出典が引かれると、文書の題名だけでは区別できない。chunk 行が
+    既に持つ情報だけで作る（追加クエリなし）: 節の見出し（``source_metadata.section_title``。
+    あれば）と、その区画の冒頭の文。数値（類似度・順位・区画番号）は入れない。
+    PDF 由来の文字列なので表示前に制御文字を除く（信頼境界 TB）。切り詰めは
+    ``core.text_excerpt.excerpt`` の1実装を使う。
+    """
+    from core.course_content_builder import section_title_rejection_reason
+    from core.text_excerpt import excerpt
+
+    # 見出しの妥当性は IK-0370 と同じ判定（GROBID 由来の「K」「DE」のような断片を節名にしない）
+    raw_section = strip_control_sequences(str(section_title or ""))
+    if section_title_rejection_reason(raw_section) is not None:
+        raw_section = ""
+    if not raw_section.strip():
+        # IK-1144 の再発（第 25 周 第 11 波）: 節の無いチャンクは走り込み見出しを節として添える
+        # （本文の出典行 _source_section_note と一覧の手がかりを揃える）。
+        raw_section = run_in_heading(text)
+    section = excerpt(raw_section, _LOCATION_SECTION_CHARS)
+    body = _FORMULA_PLACEHOLDER_RE.sub("（数式）", strip_control_sequences(str(text or ""))).lstrip()
+    # チャンクの切れ目が語の途中のことがある（'s was assumed…'）。ラテン文字の断片で始まるときは
+    # 最初の空白まで捨ててから「冒頭」を取る（第 9 周: 語の途中から始まる冒頭が出典ラベルに出た）
+    body = _LEADING_WORD_FRAGMENT_RE.sub("", body, count=1)
+    head = excerpt(body, _LOCATION_HEAD_CHARS)
+    parts: list[str] = []
+    if section:
+        parts.append(f"節「{section}」")
+    if head:
+        parts.append(f"冒頭「{head}」")
+    return "・".join(parts)
+
+
+#: 検索結果から外す「本文ではない節」の見出し（IK-0390）。
+#:
+#: 参考文献・データの所在・謝辞は、論文の内容についての問いの出典にならない（書誌の
+#: 羅列を「出典1」として学習者に見せ、``[出典N]`` の引用先にしてしまう）。照合は
+#: 見出しを ``btrim`` → 先頭の節番号（``6`` / ``6.1.`` など）を除去 → ``lower`` した
+#: **完全一致**と、``acknowledg`` / ``data availability`` の前方一致だけ。部分一致は
+#: 使わない（「References to prior work」のような本文見出しを誤って落とさないため）。
+#: 付録（Appendix）は本文の続きなので対象にしない。見出しの無いチャンク（空文字）は
+#: **落とさない**（見出し不明を非本文と見なさない）。分野語は含めない。
+NON_CONTENT_SECTION_TITLES: tuple[str, ...] = (
+    "references",
+    "reference",
+    "bibliography",
+    "literature cited",
+    "works cited",
+    "data availability",
+    "data availability statement",
+    "acknowledgements",
+    "acknowledgments",
+    "acknowledgement",
+    "acknowledgment",
+    "参考文献",
+    "引用文献",
+    "文献",
+    "謝辞",
+)
+#: 前方一致で落とす見出し（``Acknowledgements and funding`` / ``Data Availability Statement`` 等）。
+NON_CONTENT_SECTION_PREFIXES: tuple[str, ...] = ("acknowledg", "data availability")
+
+# 見出しの正規化（SQL 側）。節番号の除去は数字と点だけ（ローマ数字は ``i`` 始まりの語を
+# 壊すので扱わない）。
+_SECTION_TITLE_NORMALIZED_SQL = (
+    r"lower(regexp_replace(btrim(COALESCE(c.source_metadata->>'section_title', '')), "
+    r"'^[0-9]+(\.[0-9]+)*\.?\s*', ''))"
+)
+_NON_CONTENT_SECTION_FILTER_SQL = (
+    f"AND NOT ({_SECTION_TITLE_NORMALIZED_SQL} = ANY(CAST(:non_content_titles AS text[])) "
+    + " ".join(
+        f"OR {_SECTION_TITLE_NORMALIZED_SQL} LIKE :non_content_prefix_{i}"
+        for i in range(len(NON_CONTENT_SECTION_PREFIXES))
+    )
+    + ")"
+)
+
+_YEAR_RE = re.compile(r"\b(?:1[6-9]|20)\d{2}[a-z]?\b")
+_VOLUME_PAGE_RE = re.compile(r"\b\d{1,4},\s*[A-Z]?\d{1,6}\b")
+_ET_AL_RE = re.compile(r"\bet\s+al\.?", re.IGNORECASE)
+_NUMERIC_TOKEN_RE = re.compile(r"^[-−+±~≈<>]?\d+(?:[.,]\d+)*(?:[%°′″hms]|deg)?$")
+_URL_RE = re.compile(r"(?:https?://|www\.|doi\.org/)\S+", re.IGNORECASE)
+#: IK-0445: 番号付き書誌の項目の頭（行頭の ``[12] A. Name``）。
+_REF_ENTRY_RE = re.compile(r"(?m)^\s*\[\d{1,3}\]\s+\S")
+#: IK-0445: 書誌にだけ現れる形（``(2022)`` の括弧年・``arXiv:2203.06142`` の ID）。本文の引用
+#: ``(Houde et al. 2009)`` / ``[1–6]`` はどちらにも当たらない。
+_REF_SIGNAL_RE = re.compile(
+    r"\(\s*(?:1[6-9]|20)\d{2}[a-z]?\s*\)|\barXiv:\s*\d{4}\.\d{4,5}", re.IGNORECASE
+)
+#: IK-0445: 所属機関の行（表題・著者の区画）。
+_AFFILIATION_LINE_RE = re.compile(
+    r"\b(?:University|Universit[àäé]|Institute|Institut|Department|Dept\.|Observatory|"
+    r"Laborator(?:y|ies)|Cent(?:er|re) for|School of|Faculty of|College)\b|@[\w.-]+\.\w+|"
+    r"\bzip\b|大学|研究所|研究科|学部",
+)
+#: IK-0445: チャンクの先頭に現れたら本文ではない区画とみなす見出し（節の見出しが
+#: ``section_title`` に入らず本文の先頭に残った場合）。:data:`NON_CONTENT_SECTION_TITLES` に加える。
+_NON_CONTENT_HEAD_TITLES: tuple[str, ...] = (
+    "software", "code availability", "funding", "author contributions", "conflict of interest",
+    "conflicts of interest", "competing interests",
+)
+_HEAD_NUMBERING_RE = re.compile(r"^(?:[0-9]+(?:\.[0-9]+)*\.?|(?:[IVXLC]+|[A-Z])\.)(?:\s+|$)")
+
+
+def _non_content_heading_at_head(raw: str) -> bool:
+    """チャンク先頭の数行に、参考文献・データの所在・謝辞などの見出しがあるか（IK-0445）。"""
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    for line in lines[:3]:
+        normalized = _HEAD_NUMBERING_RE.sub("", line).strip().lower()
+        if not normalized:
+            continue  # ``V.`` のような番号だけの行
+        # 「Data Availability Statement: …」のように見出しと本文が同じ行でも、前方一致は効かせる。
+        if any(normalized.startswith(prefix) for prefix in NON_CONTENT_SECTION_PREFIXES):
+            return True
+        if len(line.split()) > 6:
+            return False
+        normalized = normalized.rstrip(":.：").strip()
+        if normalized in NON_CONTENT_SECTION_TITLES or normalized in _NON_CONTENT_HEAD_TITLES:
+            return True
+    return False
+
+
+#: 謝辞の定型（語境界付き）。2つ以上で謝辞の区画とみなす。
+_ACK_SIGNAL_RE = re.compile(
+    r"\b(?:we\s+(?:gratefully\s+)?acknowledge|(?:are|is|am)\s+grateful\s+to|we\s+thank|"
+    r"(?:is|was|were|are)\s+(?:partly\s+|partially\s+)?supported\s+by|funded\s+by|"
+    r"grant\s+(?:no\.|number|nos?\.)|project\s+identification|acknowledg(?:e|es|ing)\s+(?:the\s+)?support)\b",
+    re.IGNORECASE,
+)
+#: 表題行（組版の刻印）。
+_TITLE_BLOCK_RE = re.compile(
+    r"\b(?:typeset\s+using\s+latex|draft\s+version\s+\w+\s+\d{1,2},\s*\d{4}|preprint\s+typeset)\b",
+    re.IGNORECASE,
+)
+#: 論文の構成を述べる文（章立て文）。
+_OUTLINE_SENTENCE_RE = re.compile(
+    r"\b(?:this\s+paper\s+is\s+organi[sz]ed\s+as\s+follows|the\s+(?:rest|remainder)\s+of\s+"
+    r"(?:this|the)\s+paper|the\s+paper\s+is\s+structured\s+as\s+follows)\b|本論文の構成|以下の構成",
+    re.IGNORECASE,
+)
+_SECTION_REF_RE = re.compile(r"\bSec(?:tion)?s?\.?\s*\d|第\s*\d+\s*章|\d+\s*節", re.IGNORECASE)
+#: 第 25 周 第 5 波（IK-0987）: TeX の ``\ref`` が解決されず番号の落ちた節参照（``in Sec. .``）。
+_SECTION_WORD_RE = re.compile(r"\bSec(?:tion)?s?\b\.?", re.IGNORECASE)
+
+
+def _is_paper_outline_paragraph(raw: str, words: int) -> bool:
+    """論文の構成を述べる定型段落（「This paper is organized as follows …」）か（IK-0987）。
+
+    どの論文にもある段落で、問いの内容を答える材料にならない（焦点の外の論文から類似度だけで
+    出典に混ざる）。構成の文が無ければ偽。あれば ①節参照（番号付き、または TeX の参照が
+    落ちて番号の無い ``Sec.``）が 2 つ以上、または ②構成の文から後ろが段落の過半、の
+    どちらかで真。長い段落（本文の導入に構成の 1 文が付いた区画）は落とさない。
+    """
+    if words > 150:
+        return False
+    match = _OUTLINE_SENTENCE_RE.search(raw)
+    if not match:
+        return False
+    if len(_SECTION_REF_RE.findall(raw)) + len(_SECTION_WORD_RE.findall(raw)) >= 2 and words <= 90:
+        return True
+    return len(raw[match.start():].split()) / max(1, words) >= 0.5
+
+
+def non_content_chunk_reason(text: object) -> str | None:
+    """見出しでは捕まらない「本文ではないチャンク」の判定（IK-0390・決定論・安価）。
+
+    返り値は理由の語（``bibliography`` / ``numeric_labels`` / ``url_only``）か None。
+    どれも「多数派が非文」のときだけ真にする（引用の多い本文段落・数値を含む本文を
+    落とさない）:
+
+    * ``bibliography`` — 年の表記が4つ以上・語数に対する密度が高い・かつ
+      「巻, ページ」形（``846, 122``）が2つ以上（書誌の列。本文の ``(Houde et al. 2009)``
+      型の引用は巻・ページを伴わないので当たらない）。
+    * ``numeric_labels`` — 8語以上で半数以上が数値だけの語（軸の目盛り・一語一行に
+      割れた図のキャプション）。
+    * ``url_only`` — 空白以外の文字の半分以上が URL（脚注の URL だけの区画）。
+    * ``too_short`` — 4語以下かつ空白以外が 40 字未満（「2」「II. THEORY」のような見出し・
+      ページ番号だけの区画。第 14 周: 本文「2」だけのチャンクが出典1 に採用された）。
+      和文の短い文（かな・漢字 10 字以上）は落とさない。
+    """
+    raw = str(text or "")
+    tokens = raw.split()
+    if not tokens:
+        return None
+    words = len(tokens)
+    if (
+        words <= 4
+        and len("".join(tokens)) < 40
+        and len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", raw)) < 10
+    ):
+        return "too_short"
+    years = len(_YEAR_RE.findall(raw))
+    volume_pages = len(_VOLUME_PAGE_RE.findall(raw))
+    et_al = len(_ET_AL_RE.findall(raw))
+    if years >= 4 and years / words >= 0.05 and volume_pages >= 2 and (et_al + volume_pages) >= 4:
+        return "bibliography"
+    # IK-0445: 番号付き書誌の連なり。項目の頭が2つ以上・書誌だけの形（括弧年・arXiv ID）が
+    # 3つ以上で、最初の項目から後ろがチャンクの過半を占めるとき（付録の段落や図の説明の
+    # 末尾に書誌がつながった区画も、書誌が大半なら落とす）。本文の引用はどちらの形も伴わない。
+    entries = list(_REF_ENTRY_RE.finditer(raw))
+    ref_signals = len(_REF_SIGNAL_RE.findall(raw))
+    if len(entries) >= 2 and ref_signals >= 3:
+        tail = raw[entries[0].start():]
+        if len(tail.split()) / words >= 0.5:
+            return "bibliography"
+    # 項目の頭が1つ以下でも（途中から始まる書誌の区画）、書誌だけの形が密なら書誌とみなす。
+    if ref_signals >= 5 and ref_signals / words >= 0.02 and (et_al + volume_pages) >= 3:
+        return "bibliography"
+    if _non_content_heading_at_head(raw):
+        return "non_content_heading"
+    # 第 15 周: 見出しの無い謝辞・表題行・論文の構成の説明文（本文の内容を持たない区画）。
+    if words <= 150 and len(_ACK_SIGNAL_RE.findall(raw)) >= 2:
+        return "acknowledgments"
+    if words <= 80 and _TITLE_BLOCK_RE.search(raw):
+        return "title_block"
+    if _is_paper_outline_paragraph(raw, words):
+        return "outline"
+    # IK-0445: 表題・著者・所属の区画（所属機関の行が3つ以上・行の4分の1以上）。
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    affiliation_lines = sum(1 for ln in lines if _AFFILIATION_LINE_RE.search(ln))
+    if affiliation_lines >= 3 and affiliation_lines / max(1, len(lines)) >= 0.25:
+        return "affiliation"
+    numeric = sum(1 for tok in tokens if _NUMERIC_TOKEN_RE.match(tok.strip("()[],;:")))
+    if words >= 8 and numeric / words >= 0.5:
+        return "numeric_labels"
+    compact = "".join(tokens)
+    url_chars = sum(len(m.group(0)) for m in _URL_RE.finditer(raw))
+    if compact and url_chars / len(compact) >= 0.5:
+        return "url_only"
+    return None
+
+
+_FORMULA_REF_RE = re.compile(r"\[\[\s*FORMULA_(\d+)\s*\]\]")
+#: 数式の LaTeX が引けなかったプレースホルダーの置き換え（IK-0391）。
+FORMULA_UNRESOLVED_TEXT = "（数式）"
+_LATEX_ERROR_MARKER = "[LaTeX extraction error"
+
+
+def resolve_formula_placeholders(text: object, formulas: object) -> str:
+    """チャンク本文の ``[[FORMULA_i]]`` を ``$<latex>$`` に解決する（IK-0391）。
+
+    ``chunks.formulas`` は ``[{"id": "[[FORMULA_0]]", "latex": ...}, ...]``。``id`` が
+    一致する要素を優先し、``id`` の無い要素は位置で引く。LaTeX が空・抽出エラーの
+    目印のとき・対応する要素が無いときは :data:`FORMULA_UNRESOLVED_TEXT` に置き換え、
+    LLM に中身の無い記号を読ませない。LaTeX は PDF 由来の untrusted 入力なので制御文字を
+    除き、改行を含む式は1行に畳む（一つの式が行ごとに割れて渡るのを防ぐ）。
+    """
+    body = str(text or "")
+    if "FORMULA_" not in body:
+        return body
+    items = formulas
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except Exception:  # noqa: BLE001
+            items = []
+    if not isinstance(items, list):
+        items = []
+    by_id: dict[int, str] = {}
+    by_index: dict[int, str] = {}
+    for position, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        latex = " ".join(strip_control_sequences(str(item.get("latex") or "")).split())
+        latex = latex.strip().strip("$").strip()
+        if not latex or latex.startswith(_LATEX_ERROR_MARKER):
+            latex = ""
+        by_index.setdefault(position, latex)
+        match = _FORMULA_REF_RE.fullmatch(str(item.get("id") or "").strip())
+        if match:
+            by_id.setdefault(int(match.group(1)), latex)
+
+    def _replace(match: re.Match) -> str:
+        index = int(match.group(1))
+        latex = by_id[index] if index in by_id else by_index.get(index, "")
+        return f"${latex}$" if latex else FORMULA_UNRESOLVED_TEXT
+
+    return _FORMULA_REF_RE.sub(_replace, body)
 
 
 def search_chunks_with_metadata(
@@ -1642,6 +2162,8 @@ def search_chunks_with_metadata(
     top_k: int = 8,
     *,
     allowed_document_ids: "set[str] | list[str] | None",
+    prefer_document_ids: "tuple[str, ...] | list[str] | set[str]" = (),
+    prefer_chunk_ids: "tuple[str, ...] | list[str] | set[str]" = (),
 ) -> list[dict]:
     """システム全域の chunks をベクトル検索し、出典情報を付けて返す。
 
@@ -1654,6 +2176,17 @@ def search_chunks_with_metadata(
 
     `allowed_document_ids` が空集合（非 None）の場合は SQL を発行せず即座に `[]` を返す
     （fail-closed）。
+
+    IK-0390: 参考文献・データの所在・謝辞の節（:data:`NON_CONTENT_SECTION_TITLES`）は
+    同じ1本の SQL の述語で除外し、見出しで捕まらない書誌の列・数値ラベル・URL だけの
+    区画は :func:`non_content_chunk_reason` で後段で落とす（そのため ``top_k * 2`` 件を
+    引いてから ``top_k`` 件に詰める）。
+    IK-0391: 返す ``text`` は ``[[FORMULA_i]]`` を ``chunks.formulas`` の LaTeX で解決した
+    本文（:func:`resolve_formula_placeholders`）。解決前の本文は ``raw_text`` に残す。
+    第 25 周 第 5 波（IK-0996）: 同じ論文の別の版（TeX 版と PDF 版）の同じ箇所は
+    ``core.source_versions.collapse_paper_versions`` で 1 行に畳む（``prefer_document_ids`` =
+    焦点の論文の版を先に残し、次に AI が復元した式の少ない版）。畳んだ行は ``version_note``
+    （事実文）を持つ。
     """
     if allowed_document_ids is not None and len(allowed_document_ids) == 0:
         return []
@@ -1668,7 +2201,14 @@ def search_chunks_with_metadata(
         session = _pg_session()
         try:
             dim = get_embedding_dim()
-            params: dict = {"query_vector": str(query_vector), "limit": top_k}
+            params: dict = {
+                "query_vector": str(query_vector),
+                # 後段の非本文フィルタで減る分を見込んで多めに引く（IK-0390）。
+                "limit": max(int(top_k), 0) * 2,
+                "non_content_titles": list(NON_CONTENT_SECTION_TITLES),
+            }
+            for _i, _prefix in enumerate(NON_CONTENT_SECTION_PREFIXES):
+                params[f"non_content_prefix_{_i}"] = f"{_prefix}%"
             doc_filter_sql = ""
             if allowed_document_ids is not None:
                 # chunks.document_id は UUID 列（theory_components.document_id 等の TEXT 列とは
@@ -1683,11 +2223,17 @@ def search_chunks_with_metadata(
                            COALESCE(d.title, '') AS source_title,
                            COALESCE(d.filename, '') AS source_file,
                            1 - (c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))) AS score,
-                           c.material_id
+                           c.material_id,
+                           COALESCE(c.source_metadata->>'section_title', '') AS section_title,
+                           c.formulas,
+                           c.document_id,
+                           COALESCE(d.source_url, '') AS source_url,
+                           COALESCE(d.source_path, '') AS source_path
                     FROM chunks c
                     LEFT JOIN documents d ON c.document_id = d.id
                     WHERE c.embedding IS NOT NULL
                     {doc_filter_sql}
+                    {_NON_CONTENT_SECTION_FILTER_SQL}
                     ORDER BY c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))
                     LIMIT :limit
                 """),
@@ -1695,18 +2241,51 @@ def search_chunks_with_metadata(
             ).fetchall()
             from core.learning_experience import attach_tiers, approved_chunk_ids
 
+            kept_rows = [
+                row for row in rows
+                if row[1] and non_content_chunk_reason(row[1]) is None
+            ]
             results = [
                 {
                     "id": str(row[0]),
-                    "text": row[1],
+                    # IK-0391: LLM と出典表示が読むのは数式を解決した本文。
+                    "text": resolve_formula_placeholders(
+                        row[1], row[7] if len(row) > 7 else None
+                    ),
+                    "raw_text": row[1],
                     "source_title": row[2] or row[3] or "不明な教材",
                     "source_file": row[3],
                     "score": float(row[4]),
                     "material_id": str(row[5]) if row[5] else "",
+                    "section_title": (row[6] if len(row) > 6 else "") or "",
+                    # IK-0472: トピックの論文を優先する並べ替えに使う（学習者 DTO には載せない）。
+                    "document_id": str(row[8]) if len(row) > 8 and row[8] else "",
+                    # IK-0577: 出典ポップアップが描く式の事実（印字番号・AI復元の印）を
+                    # チャットの文脈にも渡す1行（学習者 DTO には載せない）。
+                    "formula_facts": _formula_fact_line(
+                        row[7] if len(row) > 7 else None,
+                        str(row[8]) if len(row) > 8 and row[8] else None,
+                    ),
+                    # 第 6 波: 版をまたいだ照合に使う式の記録（返す前に外す・DTO に載せない）。
+                    "_formulas": row[7] if len(row) > 7 else None,
+                    # 同じ論文の出典どうしを見分ける箇所の手がかり（IK-0381）。
+                    "location_hint": chunk_location_hint(
+                        section_title=(row[6] if len(row) > 6 else "") or "",
+                        text=row[1],
+                    ),
                 }
-                for row in rows
-                if row[1]
+                for row in kept_rows
             ]
+            results = _collapse_search_paper_versions(
+                results, kept_rows,
+                prefer_document_ids=prefer_document_ids,
+                prefer_chunk_ids=prefer_chunk_ids,
+            )[: max(int(top_k), 0)]
+            # 第 25 周 第 6 波（IK-1009 の残り）: 同じ式 (N) が PDF 版の抜粋で［AI復元］・TeX 版の
+            # 教材で原文、と食い違わないよう、同じ論文の別の版の原文の式で照合し直す。
+            results = confirm_formula_facts_across_versions(
+                results, allowed_document_ids=allowed_document_ids
+            )
             # L1 信頼性: 教員承認(teacher_reviewed)に紐づく chunk へ approved を付与してから tier 判定。
             approved = approved_chunk_ids(session, [r["id"] for r in results])
             for r in results:
@@ -1716,6 +2295,305 @@ def search_chunks_with_metadata(
             session.close()
     except Exception as exc:
         logger.warning("System-wide pgvector search failed: %s", exc)
+        return []
+
+
+def _collapse_search_paper_versions(
+    results: list[dict],
+    rows: list,
+    *,
+    prefer_document_ids: "tuple[str, ...] | list[str] | set[str]" = (),
+    prefer_chunk_ids: "tuple[str, ...] | list[str] | set[str]" = (),
+) -> list[dict]:
+    """検索結果の同じ論文の別の版の同じ箇所を畳む（IK-0996。正本は ``core.source_versions``）。
+
+    行のメタ（題名・ファイル名・source_url・source_path）と式の復元の数（並べ替えにだけ使う
+    内部値で、返す dict には残さない）を組み、失敗したら畳まずにそのまま返す。
+    """
+    try:
+        from core.learner_context_common import equation_latex_is_reconstructed
+        from core.source_versions import collapse_paper_versions
+
+        meta: dict[str, dict] = {}
+        counts: dict[str, int] = {}
+        for row in rows:
+            doc_id = str(row[8]) if len(row) > 8 and row[8] else ""
+            if doc_id and doc_id not in meta:
+                meta[doc_id] = {
+                    "title": row[2] or "",
+                    "filename": row[3] or "",
+                    "source_url": (row[9] if len(row) > 9 else "") or "",
+                    "source_path": (row[10] if len(row) > 10 else "") or "",
+                }
+            formulas = row[7] if len(row) > 7 else None
+            if isinstance(formulas, str):
+                try:
+                    formulas = json.loads(formulas)
+                except Exception:  # noqa: BLE001
+                    formulas = None
+            counts[str(row[0])] = sum(
+                1 for f in (formulas or []) if isinstance(f, dict) and equation_latex_is_reconstructed(f)
+            )
+        if len(meta) < 2:
+            return results
+        staged = [dict(r, _reconstructed_formula_count=counts.get(r["id"], 0)) for r in results]
+        collapsed = collapse_paper_versions(
+            staged, meta,
+            prefer_document_ids=tuple(prefer_document_ids or ()),
+            prefer_chunk_ids=tuple(prefer_chunk_ids or ()),
+            reconstructed_key="_reconstructed_formula_count",
+        )
+        for r in collapsed:
+            r.pop("_reconstructed_formula_count", None)
+        return collapsed
+    except Exception:  # noqa: BLE001 - 畳めなければ従来どおり（検索を止めない）
+        logger.debug("paper version collapse failed", exc_info=True)
+        return results
+
+
+def _formula_fact_line(formulas: object, document_id: object = None) -> str:
+    """チャンクの式の事実1行（IK-0577。正本は ``core.formula_facts``）。失敗は空。
+
+    第 25 周 第 6 波（IK-0895）: チャンクの論文の生きた式の記録の索引から印を引く
+    （本文・講義・付録・部品の文脈と同じ答え）。
+    """
+    try:
+        from core.formula_facts import formula_fact_line
+
+        index = None
+        if document_id and formulas and formulas not in ("[]", "null"):
+            try:
+                from core.equation_reconstruction import load_equation_reconstruction_index
+
+                index = load_equation_reconstruction_index([document_id])
+            except Exception:  # noqa: BLE001
+                index = None
+        return formula_fact_line(formulas, index=index, document_id=document_id)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def paper_version_siblings(
+    document_ids: "Iterable[str]",
+    *,
+    allowed_document_ids: "set[str] | list[str] | None",
+) -> dict[str, set[str]]:
+    """``document_ids`` の各 document と同じ論文の別の版（スコープ内）の集合（第 25 周 第 6 波）。
+
+    同じ論文かの判定は正本 ``core.library.identity_candidates.same_paper``（IK-0919）。
+    スコープ（``allowed_document_ids``）の外の版は返さない（範囲を広げない = DM1 / FD2）。
+    ``None`` / 空のスコープ・失敗は ``{}``（fail-closed — 版を足さない）。自分自身は含めない。
+    """
+    wanted = sorted({str(d).strip() for d in (document_ids or []) if str(d or "").strip()})
+    allowed = sorted({str(d).strip() for d in (allowed_document_ids or []) if str(d or "").strip()})
+    if not wanted or not allowed or allowed_document_ids is None:
+        return {}
+    try:
+        from core.library.identity_candidates import same_paper
+
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text(
+                    """
+                    SELECT id::text, title, filename, source_url, source_path
+                      FROM documents
+                     WHERE id = ANY(CAST(:document_ids AS uuid[]))
+                    """
+                ),
+                {"document_ids": allowed},
+            ).fetchall()
+        finally:
+            session.close()
+        meta = {
+            str(r[0]): {"title": r[1], "filename": r[2], "source_url": r[3], "source_path": r[4]}
+            for r in rows
+            if r and r[0]
+        }
+        out: dict[str, set[str]] = {}
+        for doc in wanted:
+            mine = meta.get(doc)
+            if mine is None:
+                continue
+            siblings = {
+                other for other, row in meta.items()
+                if other != doc and same_paper(dict(mine), dict(row))
+            }
+            if siblings:
+                out[doc] = siblings
+        return out
+    except Exception:  # noqa: BLE001 - 版が引けなければ足さない
+        logger.debug("paper version siblings failed", exc_info=True)
+        return {}
+
+
+def paper_original_formula_latex(
+    document_ids: "Iterable[str]",
+    *,
+    allowed_document_ids: "set[str] | list[str] | None",
+) -> dict[str, list[str]]:
+    """``document_ids`` の各 document について、同じ論文の別の版の**原文の式**の LaTeX（第 6 波）。
+
+    同じ式 (N) が TeX 版では原文、PDF 版では復元（［AI復元］）と判定され、教材と出典の抜粋で
+    印が食い違う（IK-1009 の残り）。復元の印の判定材料を揃えるため、スコープ内の別の版の
+    チャンクの式のうち印の付かない式（``equation_latex_is_reconstructed`` が偽）の LaTeX を返す。
+    版が無い document はキーを持たない。失敗は ``{}``（印は従来どおり — 情報を落とさない側）。
+    """
+    siblings = paper_version_siblings(document_ids, allowed_document_ids=allowed_document_ids)
+    if not siblings:
+        return {}
+    every = sorted({d for group in siblings.values() for d in group})
+    try:
+        from core.learner_context_common import equation_latex_is_reconstructed
+
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text(
+                    """
+                    SELECT document_id::text, formulas
+                      FROM chunks
+                     WHERE document_id = ANY(CAST(:document_ids AS uuid[]))
+                       AND formulas IS NOT NULL
+                    """
+                ),
+                {"document_ids": every},
+            ).fetchall()
+        finally:
+            session.close()
+        originals_by_doc: dict[str, list[str]] = {}
+        for doc_id, formulas in rows:
+            if isinstance(formulas, str):
+                try:
+                    formulas = json.loads(formulas)
+                except Exception:  # noqa: BLE001
+                    continue
+            for formula in formulas or []:
+                if not isinstance(formula, dict) or equation_latex_is_reconstructed(formula):
+                    continue
+                latex = str(formula.get("latex") or "").strip()
+                if latex:
+                    originals_by_doc.setdefault(str(doc_id), []).append(latex)
+        out: dict[str, list[str]] = {}
+        for doc, group in siblings.items():
+            merged: list[str] = []
+            for other in sorted(group):
+                for latex in originals_by_doc.get(other, []):
+                    if latex not in merged:
+                        merged.append(latex)
+            if merged:
+                out[doc] = merged
+        return out
+    except Exception:  # noqa: BLE001
+        logger.debug("paper original formulas failed", exc_info=True)
+        return {}
+
+
+def confirm_formula_facts_across_versions(
+    rows: "list[dict]",
+    *,
+    allowed_document_ids: "set[str] | list[str] | None",
+) -> "list[dict]":
+    """検索結果の ``formula_facts`` を、同じ論文の別の版の原文の式で照合し直す（第 6 波）。
+
+    ``_formulas`` を持つ行のうち、印の付いた式を含む行だけを対象にし、照合できた式の印を外した
+    事実行に置き換える。``_formulas`` は返す前に必ず外す（学習者 DTO・プロンプトに載せない）。
+    """
+    try:
+        from core.formula_facts import has_reconstructed_fact
+
+        targets = [r for r in rows if has_reconstructed_fact(str(r.get("formula_facts") or ""))]
+        if targets:
+            originals = paper_original_formula_latex(
+                {str(r.get("document_id") or "") for r in targets},
+                allowed_document_ids=allowed_document_ids,
+            )
+            if originals:
+                from core.formula_facts import formula_fact_line
+
+                for r in targets:
+                    confirmed = originals.get(str(r.get("document_id") or ""))
+                    if confirmed:
+                        r["formula_facts"] = formula_fact_line(
+                            r.get("_formulas"), confirmed_latex=confirmed
+                        )
+    except Exception:  # noqa: BLE001 - 照合できなければ従来の事実行のまま
+        logger.debug("formula facts cross-version check failed", exc_info=True)
+    for r in rows:
+        r.pop("_formulas", None)
+    return rows
+
+
+def get_chunks_for_prompt(
+    chunk_ids: "list[str]",
+    *,
+    allowed_document_ids: "set[str] | list[str] | None",
+) -> list[dict]:
+    """指定したチャンクを ``search_chunks_with_metadata`` と同じ形で返す（IK-0475・読み取り専用）。
+
+    前の往復で回答が引用したチャンクを、次の往復の文脈へ元の番号で戻すための読み出し。
+    可視性は検索と同じ意味論で SQL 内に強制する（``allowed_document_ids`` 必須・空集合は
+    SQL 非発行で ``[]`` = fail-closed・``None`` はテスト専用）。返す順は ``chunk_ids`` の順で、
+    見つからない・見えない id は黙って落とす。``score`` は持たない（検索ではない）。
+    失敗は ``[]``（会話を止めない）。
+    """
+    ids = [str(c).strip() for c in (chunk_ids or []) if str(c or "").strip()]
+    if not ids:
+        return []
+    if allowed_document_ids is not None and len(allowed_document_ids) == 0:
+        return []
+    try:
+        session = _pg_session()
+        try:
+            params: dict = {"ids": ids}
+            doc_filter_sql = ""
+            if allowed_document_ids is not None:
+                doc_filter_sql = "AND c.document_id = ANY(CAST(:doc_ids AS uuid[]))"
+                params["doc_ids"] = list(allowed_document_ids)
+            rows = session.execute(
+                sa_text(f"""
+                    SELECT c.id,
+                           c.text,
+                           COALESCE(d.title, '') AS source_title,
+                           COALESCE(d.filename, '') AS source_file,
+                           c.material_id,
+                           COALESCE(c.source_metadata->>'section_title', '') AS section_title,
+                           c.formulas,
+                           c.document_id
+                    FROM chunks c
+                    LEFT JOIN documents d ON c.document_id = d.id
+                    WHERE c.id = ANY(CAST(:ids AS uuid[]))
+                    {doc_filter_sql}
+                """),
+                params,
+            ).fetchall()
+            from core.learning_experience import attach_tiers, approved_chunk_ids
+
+            by_id = {}
+            for row in rows:
+                if not row[1]:
+                    continue
+                by_id[str(row[0])] = {
+                    "id": str(row[0]),
+                    "text": resolve_formula_placeholders(row[1], row[6]),
+                    "raw_text": row[1],
+                    "source_title": row[2] or row[3] or "不明な教材",
+                    "source_file": row[3],
+                    "material_id": str(row[4]) if row[4] else "",
+                    "section_title": row[5] or "",
+                    "document_id": str(row[7]) if row[7] else "",
+                    "formula_facts": _formula_fact_line(row[6], str(row[7]) if row[7] else None),
+                    "location_hint": chunk_location_hint(section_title=row[5] or "", text=row[1]),
+                }
+            results = [by_id[c] for c in ids if c in by_id]
+            approved = approved_chunk_ids(session, [r["id"] for r in results])
+            for r in results:
+                r["approved"] = r["id"] in approved
+            return attach_tiers(results)
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning("get_chunks_for_prompt failed: %s", exc)
         return []
 
 
@@ -2056,44 +2934,66 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
     )
 
     sessions_list = []
+    # IK-0416: コースのソース論文に直付けした議論（``_doc:{document_id}``。コース外の
+    # 会話コンテキスト）も、その論文の題名付きでこのコースの履歴に並べる。
+    from core.discuss.context import document_context_id, parse_document_context
+
+    doc_context_ids: list[str] = []
+    try:
+        for doc_id in sorted(list_course_source_document_ids(course_data)):
+            if str(doc_id or "").strip():
+                doc_context_ids.append(document_context_id(str(doc_id)))
+    except Exception:  # noqa: BLE001 — 直付け議論が引けないだけでコースの履歴は出す
+        logger.warning("calculate_progress: course source documents unavailable", exc_info=True)
+        doc_context_ids = []
+    doc_titles: dict[str, str] = {}
     pg_session = _pg_session()
     try:
         records = pg_session.execute(
             sa_text("""
-                SELECT topic_id, history, updated_at
+                SELECT topic_id, history, updated_at, course_id
                 FROM learning_chat_history
-                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                WHERE user_id = CAST(:user_id AS uuid)
+                  AND (course_id = :course_id OR course_id = ANY(:doc_context_ids))
                 ORDER BY updated_at DESC
                 LIMIT 10
             """),
-            {"user_id": user_id, "course_id": course_id},
+            {
+                "user_id": user_id,
+                "course_id": course_id,
+                "doc_context_ids": doc_context_ids,
+            },
         ).fetchall()
+        doc_ids_in_rows = sorted({
+            parse_document_context(r[3]) for r in records
+            if len(r) > 3 and parse_document_context(r[3])
+        })
+        if doc_ids_in_rows:
+            title_rows = pg_session.execute(
+                sa_text("""
+                    SELECT id::text, COALESCE(NULLIF(title, ''), NULLIF(filename, ''), '')
+                    FROM documents WHERE id::text = ANY(:ids)
+                """),
+                {"ids": doc_ids_in_rows},
+            ).fetchall()
+            doc_titles = {str(t[0]): str(t[1] or "") for t in title_rows}
     finally:
         pg_session.close()
 
     for r in records:
         topic_id_val = r[0]
         history = r[1] if isinstance(r[1], list) else []
+        row_course_id = r[3] if len(r) > 3 else course_id
 
-        topic_name = topic_id_val
-        for t in topics:
-            if t.get("id") == topic_id_val:
-                topic_name = t.get("title", topic_name)
-                break
+        topic_name = _progress_session_topic_label(
+            topics, row_course_id, topic_id_val, doc_titles
+        )
 
         msg_count = len(history)
         duration_min = max(5, msg_count * 2)
 
-        date_str = ""
-        if r[2]:
-            try:
-                dt = r[2]
-                date_str = f"{dt.month}/{dt.day}"
-            except Exception:
-                pass
-
         sessions_list.append({
-            "date": date_str or "---",
+            "date": learner_date_label(r[2]) or "---",
             "topic": topic_name,
             "duration": f"{duration_min}分",
         })
@@ -2107,6 +3007,44 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
         "completed_topic_ids": completion["completed_topic_ids"],
         "course_completed": completion["course_completed"],
     }
+
+
+def _progress_session_topic_label(
+    topics: list, row_course_id, topic_id_val, doc_titles: dict[str, str]
+) -> str:
+    """進捗の学習履歴1行の見出し（IK-0416）。内部 id を学習者に出さない。
+
+    順に: 実在トピックの題名 → 予約疑似トピック（``_discussion``）の表示名
+    （``core.topic_labels`` が正本・直付け議論なら「論文との議論（コース外）」）に
+    論文の題名を添える → 見つからなければ予約語でない topic_id をそのまま（旧挙動）。
+    """
+    from core.discuss.context import parse_document_context
+    from core.topic_labels import reserved_topic_label
+
+    for t in topics or []:
+        if isinstance(t, dict) and t.get("id") == topic_id_val:
+            return str(t.get("title") or topic_id_val or "")
+    reserved = reserved_topic_label(row_course_id, topic_id_val)
+    if reserved:
+        doc_id = parse_document_context(row_course_id)
+        title = doc_titles.get(str(doc_id or ""), "") if doc_id else ""
+        return f"{reserved}: {title}" if title else reserved
+    return str(topic_id_val or "")
+
+
+def learner_date_label(value) -> str:
+    """学習者向けの日付表示「M/D」を日本時間（JST, UTC+9）で作る（IK-0416）。
+
+    DB の timestamptz は UTC で返るため、そのまま月日を取ると日本の朝の学習が前日に
+    見える。JST は夏時間が無いので固定オフセットで変換する（新しい env は足さない）。
+    naive datetime は UTC とみなす。取れなければ空文字。
+    """
+    from core.learner_time import to_learner_local
+
+    local = to_learner_local(value)
+    if local is None:
+        return ""
+    return f"{local.month}/{local.day}"
 
 
 # 2026-09-05: `calculate_streak`（連続学習日数）を撤去した。理解サイクルの不変条項
@@ -2143,6 +3081,41 @@ _PREREQ_ACK_PHRASES = (
     "学習済み",
 )
 _PREREQ_ACK_NEGATIONS = ("ない", "ません", "無い", "不安")
+#: IK-0424: 英語で答えた受講者の「理解している」（逆質問に英語で答えた往復が記帳されず、
+#: 同じ逆質問が後で戻っていた）。小文字化した発話に語として含まれるかで見る。
+_PREREQ_ACK_PHRASES_EN = (
+    "i understand",
+    "i think i understand",
+    "i already understand",
+    "i know that",
+    "i know this",
+    "i know it",
+    "i already know",
+    "i'm familiar with",
+    "i am familiar with",
+    "understood",
+)
+#: 英語の否定形（含むなら記帳しない。``n't`` は don't / haven't / isn't 等を覆う）。
+_PREREQ_ACK_NEGATIONS_EN_RE = re.compile(
+    r"n't\b|n’t\b|\b(?:no|not|never|cannot|dont|please explain)\b"
+)
+
+
+#: IK-0469: 逆質問への「はい、〜は読みました／学びました」。完了形の動詞だけでは
+#: 「私は…と読みました。合っていますか？」（解釈の表明）と区別できないので、発話が
+#: 肯定の返事で**始まる**ときだけ認める（否定形を含む発話は従来どおり記帳しない）。
+_PREREQ_ACK_AFFIRMATIVE_LEADS = ("はい", "ええ", "うん", "yes", "yeah", "yep")
+_PREREQ_ACK_COMPLETION_PHRASES = (
+    "読みました", "読んでいます", "読みます", "学びました", "学んでいます", "学習しました",
+    "勉強しました", "習いました", "理解しました", "わかります", "分かります", "大丈夫です",
+)
+#: IK-0469: 英語の「読んだ・学んだ」（``i read`` は現在形とも読めるので肯定の返事で始まる
+#: ときだけ。完了形 ``i have read`` / ``i've studied`` などは単独でも認める）。
+_PREREQ_ACK_PHRASES_EN_PERFECT = (
+    "i have read", "i've read", "i have studied", "i've studied", "i have learned",
+    "i've learned", "i have learnt", "i've learnt", "i already read", "i already studied",
+)
+_PREREQ_ACK_PHRASES_EN_AFTER_YES = ("i read", "i studied", "i learned", "i learnt", "i know")
 
 
 def normalize_prerequisite_name(name: str) -> str:
@@ -2157,7 +3130,28 @@ def _is_explicit_prerequisite_acknowledgement(message: str) -> bool:
         return False
     if any(neg in msg for neg in _PREREQ_ACK_NEGATIONS):
         return False
-    return any(phrase in msg for phrase in _PREREQ_ACK_PHRASES)
+    if any(phrase in msg for phrase in _PREREQ_ACK_PHRASES):
+        return True
+    lowered = msg.casefold()
+    affirmative_lead = any(
+        re.match(re.escape(lead) + r"(?![a-z])", lowered) for lead in _PREREQ_ACK_AFFIRMATIVE_LEADS
+    )
+    if affirmative_lead and any(phrase in msg for phrase in _PREREQ_ACK_COMPLETION_PHRASES):
+        return True
+    if _PREREQ_ACK_NEGATIONS_EN_RE.search(lowered):
+        return False
+    en_phrases = _PREREQ_ACK_PHRASES_EN + _PREREQ_ACK_PHRASES_EN_PERFECT + (
+        _PREREQ_ACK_PHRASES_EN_AFTER_YES if affirmative_lead else ()
+    )
+    return any(
+        re.search(r"(?<![a-z])" + re.escape(phrase) + r"(?![a-z])", lowered)
+        for phrase in en_phrases
+    )
+
+
+def prerequisite_topic_key(topic_id: str) -> str:
+    """topic_id で結ばれた前提の記帳キー（IK-0469。名前のキーと並べて持つ追加の鍵）。"""
+    return f"topic:{str(topic_id or '').strip()}"
 
 
 def get_acknowledged_prerequisites(user_id: str, course_id: str) -> set[str]:
@@ -2181,6 +3175,89 @@ def get_acknowledged_prerequisites(user_id: str, course_id: str) -> set[str]:
     if not isinstance(acknowledged, dict):
         return set()
     return {normalize_prerequisite_name(k) for k in acknowledged.keys() if str(k).strip()}
+
+
+PROGRESS_PREREQUISITE_GATES_PRESENTED_KEY = "prerequisite_gates_presented"
+
+
+def get_prerequisite_gate_presented(user_id: str, course_id: str, topic_key: str) -> bool:
+    """このトピックの前提確認を本人に既に一度提示したか（読み取り専用・TRIAGE14）。
+
+    「提示した」という事実の記録であって、理解度・能力の推定ではない（UC5）。
+    読めないときは False（従来どおり1回は提示される側に倒す）。
+    """
+    key = str(topic_key or "").strip()
+    if not key:
+        return False
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT progress_data FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    progress_raw = row[0] if row and row[0] is not None else {}
+    progress = progress_raw if isinstance(progress_raw, dict) else json.loads(progress_raw)
+    presented = progress.get(PROGRESS_PREREQUISITE_GATES_PRESENTED_KEY) or {}
+    return isinstance(presented, dict) and key in presented
+
+
+def record_prerequisite_gate_presented(user_id: str, course_id: str, topic_key: str) -> None:
+    """前提確認をこのトピックで提示した事実を記帳する（upsert のみ・既存値は上書きしない, P4）。"""
+    key = str(topic_key or "").strip()
+    if not key:
+        return
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO learning_states (id, user_id, course_id)
+                VALUES (gen_random_uuid(), CAST(:user_id AS uuid), :course_id)
+                ON CONFLICT (user_id, course_id) DO NOTHING
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        )
+        row = session.execute(
+            sa_text("""
+                SELECT progress_data FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+        progress_raw = row[0] if row and row[0] is not None else {}
+        progress = progress_raw if isinstance(progress_raw, dict) else json.loads(progress_raw)
+        presented_raw = progress.get(PROGRESS_PREREQUISITE_GATES_PRESENTED_KEY) or {}
+        presented = dict(presented_raw) if isinstance(presented_raw, dict) else {}
+        if key in presented:
+            return
+        presented[key] = now_iso
+        progress[PROGRESS_PREREQUISITE_GATES_PRESENTED_KEY] = presented
+        session.execute(
+            sa_text("""
+                UPDATE learning_states
+                SET progress_data = CAST(:progress AS jsonb),
+                    updated_at = now()
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+            """),
+            {
+                "user_id": user_id,
+                "course_id": course_id,
+                "progress": json.dumps(progress, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def record_prerequisite_acknowledgement(
@@ -2294,6 +3371,9 @@ def check_prerequisites(
         # 名前で別の topic_id を指す前提が2つあるとき後勝ちで片方の題名が消える。
         # 記帳キー（名前）が重複していても、要素ごとの対応は失わない）。
         prereq_entries: list[tuple[str, str]] = []  # (記帳・突合キー, 表示名)
+        # IK-0469: topic_id で結ばれた前提は、名前のほかに ``topic:{id}`` の鍵も記帳・突合する
+        # （同じトピックを別の名前で前提にする別トピックでも、本人の「理解している」を守る）。
+        prereq_topic_keys: dict[str, str] = {}
         for prereq in prereqs:
             if isinstance(prereq, dict):
                 prereq_name = str(prereq.get("name") or "").strip()
@@ -2312,6 +3392,8 @@ def check_prerequisites(
             if not prereq_name:
                 continue
             prereq_entries.append((prereq_name, display or prereq_name))
+            if prereq_topic_id:
+                prereq_topic_keys[prereq_name] = prerequisite_topic_key(prereq_topic_id)
 
         if not prereq_entries:
             return None
@@ -2327,7 +3409,12 @@ def check_prerequisites(
         # なくこの記帳だけを根拠にする）。記帳に失敗しても会話は止めない。
         if _is_explicit_prerequisite_acknowledgement(user_message):
             try:
-                record_prerequisite_acknowledgement(user_id, course_id, prereq_names)
+                record_prerequisite_acknowledgement(
+                    user_id, course_id,
+                    prereq_names
+                    + [display for _name, display in prereq_entries if display not in prereq_names]
+                    + list(prereq_topic_keys.values()),
+                )
             except Exception:
                 logger.warning("Failed to record prerequisite acknowledgement", exc_info=True)
             return None
@@ -2342,10 +3429,43 @@ def check_prerequisites(
             return None
 
         acknowledged = get_acknowledged_prerequisites(user_id, course_id)
+        # IK-0398: 前提が同コースのトピック（topic_id で結ばれる、または題名が一致する）で、
+        # 本人がそのトピックを確認問題で完了しているなら、その前提は聞き直さない
+        # （本人の明示的な確認の記録 = 完了も、接触の痕跡ではなく本人の判断に基づく）。
+        # 記帳キーは変えない（読み時の判定だけ）。完了の取得に失敗しても会話は止めない。
+        try:
+            completed_ids = set(
+                get_course_completion(user_id, course_id, course_data).get("completed_topic_ids") or []
+            )
+        except Exception:
+            logger.warning("Failed to read course completion for prerequisites", exc_info=True)
+            completed_ids = set()
+        completed_titles = {
+            normalize_prerequisite_name(str(t.get("title") or ""))
+            for t in course_topics(course_data)
+            if str(t.get("id") or "") in completed_ids and t.get("title")
+        }
+        completed_linked: set[str] = set()
+        for prereq in prereqs:
+            if isinstance(prereq, dict) and str(prereq.get("topic_id") or "").strip() in completed_ids:
+                completed_linked.add(str(prereq.get("name") or "").strip())
 
         unlearned: list[str] = []
         for prereq_name, display in prereq_entries:
-            if normalize_prerequisite_name(prereq_name) in acknowledged:
+            if (
+                normalize_prerequisite_name(prereq_name) in acknowledged
+                or normalize_prerequisite_name(display) in acknowledged
+                or (
+                    prereq_name in prereq_topic_keys
+                    and normalize_prerequisite_name(prereq_topic_keys[prereq_name]) in acknowledged
+                )
+            ):
+                continue
+            if (
+                prereq_name in completed_linked
+                or normalize_prerequisite_name(prereq_name) in completed_titles
+                or normalize_prerequisite_name(display) in completed_titles
+            ):
                 continue
             if display not in unlearned:  # 表示の重複は並べない（順序は保存順）
                 unlearned.append(display)
@@ -2448,6 +3568,136 @@ def persist_chat_history(
     }
 
 
+def load_stored_chat_history(user_id: str, course_id: str, topic_id: str) -> list[dict]:
+    """サーバが保存している (user, course, topic) の会話履歴を読む（IK-0432・読み取り専用）。
+
+    出典番号を会話の中で安定させるために、保存済み assistant メッセージの ``sources``
+    （``persist_chat_history`` の ``assistant_meta``）を引く。クライアントが履歴を
+    ``{role, content}`` だけで送り返しても、番号の対応を失わないための読み出し。
+    失敗・行なし・形の崩れは空リスト（fail-soft — 会話を止めない）。
+    """
+    try:
+        session = _pg_session()
+        try:
+            record = session.execute(
+                sa_text("""
+                    SELECT history FROM learning_chat_history
+                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id AND topic_id = :topic_id
+                    LIMIT 1
+                """),
+                {"user_id": user_id, "course_id": course_id, "topic_id": topic_id},
+            ).fetchone()
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — 番号の安定化は補助。読めなければ従来の連番に倒れる。
+        logger.debug("load_stored_chat_history failed for topic=%s", topic_id, exc_info=True)
+        return []
+    if not record:
+        return []
+    history = record[0]
+    if not isinstance(history, list):
+        return []
+    return [m for m in history if isinstance(m, dict)]
+
+
+def previous_cited_document_ids(user_id: str, course_id: str, topic_id: str) -> list[str]:
+    """保存済みの会話で直前の回答が引用した論文（焦点論文の「直前の引用」段の入力）。
+
+    正本設計書 ``docs/features/focus_document_design.md``（FD1）。直前の assistant ターンの
+    ``sources``（本文で引用していない ``cited: False`` は除く）を引用順に見て、保存時に
+    焼き込んだ ``document_id`` を使う。旧履歴で ``document_id`` を持たない出典だけ、
+    チャンク id から1回の SQL で解決する。読み取り専用・失敗は空リスト（fail-soft）。
+    スコープとの積は呼び出し側（``core.focus_document.resolve_focus_document``）が取る。
+    """
+    history = load_stored_chat_history(user_id, course_id, topic_id)
+    turn = next(
+        (m for m in reversed(history) if isinstance(m, dict) and m.get("role") == "assistant"),
+        None,
+    )
+    if not turn:
+        return []
+    ordered: list[str] = []
+    missing_chunks: list[str] = []
+    slots: list[tuple[str, str]] = []  # (document_id or "", chunk_id)
+    for source in turn.get("sources") or []:
+        if not isinstance(source, dict) or source.get("cited") is False:
+            continue
+        document_id = str(source.get("document_id") or "").strip()
+        chunk_id = str(source.get("chunk_id") or "").strip()
+        slots.append((document_id, chunk_id))
+        if not document_id and chunk_id:
+            missing_chunks.append(chunk_id)
+    resolved: dict[str, str] = {}
+    if missing_chunks:
+        try:
+            session = _pg_session()
+            try:
+                rows = session.execute(
+                    sa_text("""
+                        SELECT id::text, document_id::text FROM chunks
+                        WHERE id::text = ANY(:ids) AND document_id IS NOT NULL
+                    """),
+                    {"ids": missing_chunks[:50]},
+                ).fetchall()
+            finally:
+                session.close()
+            resolved = {str(r[0]): str(r[1]) for r in rows if r and r[1]}
+        except Exception:  # noqa: BLE001 — 焦点は補助。読めなければ段を空にする。
+            logger.debug("previous_cited_document_ids: chunk resolution failed", exc_info=True)
+    for document_id, chunk_id in slots:
+        value = document_id or resolved.get(chunk_id, "")
+        if value and value not in ordered:
+            ordered.append(value)
+    return ordered
+
+
+def learner_focus_document(
+    current_user: dict,
+    course_data: dict,
+    course_id: str,
+    topic_id: str | None,
+    *,
+    explicit_document_id: "str | None" = None,
+    allowed_document_ids: "set[str] | list[str] | None" = None,
+    opening_document_id: "str | None" = None,
+) -> FocusDocument:
+    """学習者の非チャット操作（記号・要素文脈・部品文脈・降下路・前提の説明）の焦点論文。
+
+    正本は ``core.focus_document.resolve_focus_document``（FD1）。スコープは既定で
+    コースの sources（``allowed_document_ids`` で差し替え可・広げない = FD2）。段の入力:
+    明示（タップ位置の論文など）→ 表示中トピックの論文 → 保存済みの会話で直前の回答が
+    引用した論文（**``_discussion`` の議論のときだけ** — 通常のトピックでは使わない
+    FD-note 2）→ 画面で選んだ論文（``opening_document_id``。チャット内の前提の説明が
+    ``screen_context.selection.document_id`` を渡す）。直前の引用は上位の段が空のときだけ
+    読む（保存済み履歴の読み出しを必要な操作に限る）。
+    """
+    allowed = (
+        set(allowed_document_ids)
+        if allowed_document_ids is not None
+        else set(list_course_source_document_ids(course_data))
+    )
+    tid = str(topic_id or "").strip()
+    topic = find_course_topic(course_data, tid) if tid and tid != "_discussion" else None
+    topic_docs = topic_source_document_ids(topic) if isinstance(topic, dict) else set()
+    previous: list[str] = []
+    explicit_inside = bool(explicit_document_id) and str(explicit_document_id) in allowed
+    # FD-note 2: 直前の引用の段は議論（``_discussion``）だけ。通常のトピックで束ねる論文が
+    # スコープに無いときに前回引用した論文へ張り付かせない。
+    if tid == "_discussion" and not explicit_inside and not (topic_docs & allowed):
+        try:
+            previous = previous_cited_document_ids(current_user["id"], course_id, tid)
+        except Exception:  # noqa: BLE001 — 焦点は補助（段を空にする）
+            logger.debug("learner focus: previous citation unavailable", exc_info=True)
+            previous = []
+    return resolve_focus_document(
+        allowed_document_ids=allowed,
+        explicit_document_id=explicit_document_id,
+        topic_document_ids=topic_docs,
+        previous_cited_document_ids=previous,
+        opening_document_id=opening_document_id,
+    )
+
+
 def _split_history_at(history: list, from_message_id: str):
     """``history`` を ``from_message_id`` の位置で分割する（純粋関数・DB非依存）。
 
@@ -2467,13 +3717,79 @@ def _split_history_at(history: list, from_message_id: str):
     return truncated, removed, removed_ids
 
 
+#: assistant ターンに焼き込む累積の「チャンク → 出典番号」の対応表のキー（IK-0444）。
+#: 正本はここ（routes/learning.py は import して使う）。
+CITATION_MAP_KEY = "citation_map"
+
+
+def merged_citation_map(history: list | None) -> dict[str, int]:
+    """履歴の全 assistant ターンから「チャンク → 出典番号」を集める（純関数・IK-0466）。
+
+    各ターンの ``citation_map``（累積の控え）と ``sources`` を読み、同じチャンクは最初に
+    見た番号を正とする。**別のチャンクがすでに持つ番号は割り当てない**（番号→チャンクの
+    一対一を保つ）。履歴を切り詰める前にこれを取り、切り詰め後の履歴に控えとして残せば、
+    取り除いた往復で出した番号が後で別のチャンクへ振り直されない。
+    """
+    by_chunk: dict[str, int] = {}
+    owner: dict[int, str] = {}
+
+    def _take(chunk_id: object, raw_index: object) -> None:
+        try:
+            index = int(raw_index or 0)
+        except (TypeError, ValueError):
+            return
+        cid = str(chunk_id or "").strip()
+        if index <= 0 or not cid or cid in by_chunk or index in owner:
+            return
+        by_chunk[cid] = index
+        owner[index] = cid
+
+    for turn in history or []:
+        if not isinstance(turn, dict) or turn.get("role") != "assistant":
+            continue
+        citation_map = turn.get(CITATION_MAP_KEY)
+        if isinstance(citation_map, dict):
+            for chunk_id, raw_index in citation_map.items():
+                _take(chunk_id, raw_index)
+        for source in turn.get("sources") or []:
+            if isinstance(source, dict):
+                _take(source.get("chunk_id"), source.get("index"))
+    return by_chunk
+
+
+def _carry_citation_map_onto(truncated: list, mapping: dict[str, int]) -> list:
+    """切り詰め後の履歴の最後の assistant ターンに対応表の控えを載せる（IK-0466）。"""
+    if not mapping:
+        return truncated
+    out = list(truncated)
+    for i in range(len(out) - 1, -1, -1):
+        turn = out[i]
+        if isinstance(turn, dict) and turn.get("role") == "assistant":
+            carried = dict(turn)
+            existing = carried.get(CITATION_MAP_KEY)
+            merged = dict(existing) if isinstance(existing, dict) else {}
+            for chunk_id, index in mapping.items():
+                merged.setdefault(chunk_id, index)
+            carried[CITATION_MAP_KEY] = merged
+            out[i] = carried
+            break
+    return out
+
+
 def truncate_chat_and_supersede(
     user_id: str,
     course_id: str,
     topic_id: str,
     from_message_id: str,
+    *,
+    reason: str = "rewrite",
 ) -> dict | None:
     """機能3: ``from_message_id`` 以降の往復を履歴から取り除き、派生痕跡を supersede する。
+
+    ``reason`` は ``rewrite``（✏️ 書き直し）か ``delete``（🗑 取り消し）。派生痕跡の
+    ``payload.superseded_reason`` に残し、「わたしの記録」が「書き直しで差し替え」と
+    「取り消し」を言い分けられるようにする（第 23 波 F2。語彙の正本は
+    ``core.label_vocab.TRACE_SUPERSEDED_REASONS``。未知の値は ``rewrite`` に倒さず拒否する）。
 
     - ``learning_chat_history.history`` から ``from_message_id`` の位置以降（当該メッセージを
       含む）を切り詰める（空になれば行削除）。
@@ -2484,6 +3800,10 @@ def truncate_chat_and_supersede(
     戻り値 ``{"truncated_history": [...], "removed_ids": [...], "removed_count": n}``。
     ``from_message_id`` が履歴に無ければ ``None``（呼び出し側が 404 等を返す）。
     """
+    from core.label_vocab import TRACE_SUPERSEDED_REASONS
+
+    if reason not in TRACE_SUPERSEDED_REASONS:
+        raise ValueError(f"unknown supersede reason: {reason!r}")
     session = _pg_session()
     try:
         record = session.execute(
@@ -2499,6 +3819,9 @@ def truncate_chat_and_supersede(
         truncated, removed, removed_ids = _split_history_at(history, from_message_id)
         if truncated is None:
             return None
+        # IK-0466: 取り除く往復で出した出典番号も会話の対応表に残す（番号は単調増加で、
+        # 一度出した番号を別のチャンクへ振り直さない）。控えは残る最後の assistant ターンへ。
+        truncated = _carry_citation_map_onto(truncated, merged_citation_map(history))
 
         if truncated:
             session.execute(
@@ -2522,24 +3845,34 @@ def truncate_chat_and_supersede(
         # 派生痕跡を supersede（削除せず保持。P4）。worker/digest は superseded を拾わない。
         if removed_ids:
             ph = ", ".join(f":rid_{i}" for i in range(len(removed_ids)))
-            params = {"uid": user_id, "cid": course_id}
+            params = {"uid": user_id, "cid": course_id, "reason": reason}
             for i, rid in enumerate(removed_ids):
                 params[f"rid_{i}"] = rid
             session.execute(
                 sa_text(f"""
                     UPDATE interest_traces
-                    SET status = 'superseded', last_seen_at = now()
+                    SET status = 'superseded', last_seen_at = now(),
+                        payload = COALESCE(payload, '{{}}'::jsonb)
+                                  || jsonb_build_object('superseded_reason', CAST(:reason AS text))
                     WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
                       AND payload->>'message_id' IN ({ph})
                       AND status <> 'superseded'
                 """),
                 params,
             )
+            # 第 23 周（st-06）: 取り除いた往復から生まれた誤解の**候補**も同じ理由で
+            # superseded にする（personal_graph の誤解メモは message_id を持つ。行は消さない。
+            # 本人が確定・却下したメモは人の判断なので動かさない）。
+            _supersede_misconceptions_in_session(
+                session, user_id, course_id, removed_ids, reason=reason
+            )
         session.commit()
         return {
             "truncated_history": truncated,
             "removed_ids": removed_ids,
             "removed_count": len(removed),
+            # IK-0466: 採番器が取り除いた往復の番号も予約できるように返す（読み取り専用）。
+            "removed_history": removed,
         }
     except Exception:
         session.rollback()
@@ -2550,6 +3883,46 @@ def truncate_chat_and_supersede(
         raise
     finally:
         session.close()
+
+
+def _supersede_misconceptions_in_session(
+    session, user_id: str, course_id: str, message_ids, *, reason: str
+) -> int:
+    """呼び出し元トランザクション内で、誤解メモの候補を message_id で supersede する。
+
+    ``learning_states`` 行が無い・誤解メモが無いときは何もしない（SQL は SELECT 1 本）。
+    遷移が 0 件なら UPDATE を発行しない。戻り値は遷移した件数。
+    """
+    row = session.execute(
+        sa_text("""
+            SELECT personal_graph FROM learning_states
+            WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+            LIMIT 1
+            FOR UPDATE
+        """),
+        {"uid": user_id, "cid": course_id},
+    ).fetchone()
+    if not row or row[0] is None:
+        return 0
+    raw = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    data = personal_graph_data.parse_personal_graph(raw)
+    updated, changed = personal_graph_data.supersede_misconceptions_for_messages(
+        data, message_ids, reason=reason
+    )
+    if changed:
+        session.execute(
+            sa_text("""
+                UPDATE learning_states
+                SET personal_graph = CAST(:personal AS jsonb), updated_at = now()
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+            """),
+            {
+                "uid": user_id,
+                "cid": course_id,
+                "personal": json.dumps(personal_graph_data.to_jsonb(updated), ensure_ascii=False),
+            },
+        )
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -3020,6 +4393,37 @@ def record_cycle_anchor_mark(
     )
 
 
+def mark_verification_attempt_shared(user_id: str, run_id: str) -> bool:
+    """「動かして確かめた」痕跡（kind ``verification_attempt``）の payload に ``shared: true`` を刻む。
+
+    検証シミュレーション層 v1.1（simulation_bridge_design.md §14 SB13 / SB15）。本人が run を
+    共有したことを本人の記録にも残すだけで、行は増やさず消さない（P4）。本人の行だけを対象に
+    する（``user_id`` で絞る）。失敗しても共有そのものは止めない（best-effort・戻り値で通知）。
+    """
+    if not str(user_id or "").strip() or not str(run_id or "").strip():
+        return False
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                   SET payload = jsonb_set(payload, '{shared}', 'true'::jsonb, true)
+                 WHERE user_id = CAST(:uid AS uuid)
+                   AND kind = 'verification_attempt'
+                   AND payload->>'run_id' = :rid
+            """),
+            {"uid": user_id, "rid": run_id},
+        )
+        session.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.warning("mark_verification_attempt_shared failed: %s", exc)
+        return False
+    finally:
+        session.close()
+
+
 def recent_duplicate_ui_anchor_event(
     user_id: str, help_anchor: str, *, window_minutes: int = 30,
 ) -> bool:
@@ -3083,6 +4487,9 @@ def get_interest_traces(user_id: str, course_id: str, topic_id: str | None = Non
                   -- コーパス回遊層（§7）: frontier_interest は「地図の端の先を知りたい」の
                   -- 1タップであって発話ではない。「問いの軌跡」には出さない（台帳には出る）
                   AND kind <> 'frontier_interest'
+                  -- 検証シミュレーション層 v1.1（SB15）: verification_attempt は「動かして確かめた」
+                  -- 試行の記録であって発話ではない。「問いの軌跡」には出さない（台帳には出る）
+                  AND kind <> 'verification_attempt'
                 ORDER BY
                     CASE status WHEN 'revisited' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
                     created_at DESC
@@ -3118,9 +4525,11 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
     # frontier_interest（コーパス回遊層 §7）はコース非依存の1タップで、専用の
     # k-匿名集約（aggregate_frontier_interest）だけが読む — コース単位の本集計には
     # 混ぜない（センチネル course_id のため実際には一致しないが、除外を明示する）。
+    # verification_attempt（検証シミュレーション層 v1.1 SB12/SB15）は本人の試行の記録で、
+    # 教員向け集約を作らない（作るなら k-匿名 + 指標カタログ）。
     _dashboard_excluded_kinds = (
         "('help_usage', 'intention', 'anchor_mark', 'backstage_question', "
-        "'frontier_interest')"
+        "'frontier_interest', 'verification_attempt')"
     )
     session = _pg_session()
     try:
@@ -3343,7 +4752,8 @@ def get_chunk_passage(
             params["doc_ids"] = list(allowed_document_ids)
         row = session.execute(
             sa_text(f"""
-                SELECT c.text, c.display_text, c.formulas, c.chapter, c.section,
+                SELECT c.text, c.display_text, c.formulas, c.chapter,
+                       COALESCE(NULLIF(c.section, ''), c.source_metadata->>'section_title') AS section,
                        COALESCE(d.title, d.filename, '') AS source_title, d.filename
                 FROM chunks c
                 LEFT JOIN documents d ON c.document_id = d.id
@@ -3367,7 +4777,9 @@ def get_chunk_passage(
     raw_text = strip_control_sequences(row[1] or row[0] or "")
     raw_formulas = row[2] if row[2] else []
     text, formulas = _normalize_formulas(raw_text, raw_formulas)
-    section = " · ".join([s for s in [row[3], row[4]] if s])
+    # 節はパイプライン経路では chunks.source_metadata.section_title にしか無い（旧 section 列は
+    # 空）ため、出典チップの箇所の手がかり（IK-0381）と同じ出所で補う。PDF 由来なので衛生を通す。
+    section = " · ".join([strip_control_sequences(str(s)) for s in [row[3], row[4]] if s])
     return {
         "chunk_id": str(chunk_id),
         "text": text,
@@ -3442,7 +4854,10 @@ def get_chunk_claim_refs(
         claims.append({
             "id": str(row[0]),
             "claim_type": row[1] or "",
-            "label": label,
+            # 表示は日本語の種別名（語彙表の正本は core/element_vocab。未知は空）。
+            "claim_type_label": claim_type_label(row[1]),
+            # 内部 ID が混ざった本文は読める語に置き換える（表示投影層 DP2）。
+            "label": mask_internal_ids(label),
         })
     return claims
 
@@ -3538,9 +4953,19 @@ def get_tension_digest(user_id: str, course_id: str) -> dict:
             "paraphrase": payload.get("paraphrase", ""),
             "evidence_quote": payload.get("text", ""),
             "tension_type_label": TENSION_TYPE_LABELS.get(ttype, TENSION_TYPE_LABELS["unclassified"]),
-            "context_label": payload.get("context_label", ""),
+            # 旧行は予約 topic id（``_discussion``）を context_label に焼き込んでいる。
+            # 読み時に表示名へ変換する（行は書き換えない）。
+            "context_label": _learner_context_label(course_id, payload.get("context_label", "")),
         })
     return {"course_id": course_id, "items": items}
+
+
+def _learner_context_label(course_id: str | None, label) -> str:
+    """学習者向け context_label の読み時変換（予約 topic id を表示名へ。行は書き換えない）。"""
+    from core.topic_labels import reserved_topic_label
+
+    text = str(label or "")
+    return reserved_topic_label(course_id, text) or text
 
 
 def confirm_tension_trace(user_id: str, trace_id: str, learner_text: str = "") -> dict | None:
@@ -5228,25 +6653,41 @@ def reanalyze_course_structure_background(
     updated_chunks = 0
     errors: list[str] = []
 
+    # sources[].material_id には documents.id（UUID）が入っているコースもある。両形の
+    # 突き合わせは core/document_refs に 1 回で委ねる（IK-0550）。解決に失敗したら
+    # 各教材は「見つからない」として errors に残る（推測で別の教材を引かない）。
+    resolved_docs: dict[str, dict] = {}
+    try:
+        session = _pg_session()
+        try:
+            resolved_docs = _document_refs.resolve_document_refs(session, material_ids)
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001
+        logger.warning("reanalyze_course_structure: document ref resolution failed", exc_info=True)
+
     for material_id in material_ids:
         try:
-            session = _pg_session()
-            try:
-                row = session.execute(
-                    sa_text("""
-                        SELECT d.id, COALESCE(d.title, d.filename, d.source_path, '') AS title,
-                               string_agg(c.text, E'\n\n' ORDER BY c.chunk_index) AS full_text,
-                               COUNT(c.id) AS chunk_count
-                        FROM documents d
-                        LEFT JOIN chunks c ON c.document_id = d.id
-                        WHERE d.source_path = :material_id
-                        GROUP BY d.id, d.title, d.filename, d.source_path
-                        LIMIT 1
-                    """),
-                    {"material_id": material_id},
-                ).fetchone()
-            finally:
-                session.close()
+            resolved_doc = resolved_docs.get(material_id)
+            row = None
+            if resolved_doc:
+                session = _pg_session()
+                try:
+                    row = session.execute(
+                        sa_text("""
+                            SELECT d.id, COALESCE(d.title, d.filename, d.source_path, '') AS title,
+                                   string_agg(c.text, E'\n\n' ORDER BY c.chunk_index) AS full_text,
+                                   COUNT(c.id) AS chunk_count
+                            FROM documents d
+                            LEFT JOIN chunks c ON c.document_id = d.id
+                            WHERE d.id = CAST(:document_id AS uuid)
+                            GROUP BY d.id, d.title, d.filename, d.source_path
+                            LIMIT 1
+                        """),
+                        {"document_id": resolved_doc["document_id"]},
+                    ).fetchone()
+                finally:
+                    session.close()
 
             if not row:
                 raise RuntimeError(f"material not found: {material_id}")

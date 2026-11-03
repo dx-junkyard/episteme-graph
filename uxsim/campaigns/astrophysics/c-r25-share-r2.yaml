@@ -1,0 +1,33 @@
+id: c-astro-r25-share-r2
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 1bad7d9f
+personas:
+  teachers: [te-04-copilot-intro, te-05-delegator-lab]
+  students: [st-06-skeptic-bao, st-09-d2-from-datasci]
+scenarios:
+  teacher: [t-share-bind-versions, t-share-identity-queue, t-share-labels-atlas, t-share-explain-write, t-share-explain-endorse-cite]
+  student: [s-share-symbol-concept, s-share-part-chip]
+runner: api
+flags: {}
+budget: {product_llm_calls: 12, persona_llm_calls: 260, wall_clock_minutes: 180}
+notes: |
+  第 25 周 share の第 2 周（judge_share_r1.md §6 の組・harness_fixes_share.md H1〜H9 の是正後）。第 1 周の結び付き・別名・
+  「TOV 方程式（静水圧平衡）」のエントリが残った砂場で走らせる（消すなら reset の対象に library_entries / library_entry_labels /
+  element_identity_links / component_explanations 系が入ることを運転前に確かめる）。
+  runner は「ペルソナ × 経路の全組」を走らせるので、運転は --persona X --scenario Y で 1 場面ずつ、次の順を守る。
+  レーン（→ は続けて、⇢ は他レーンを待つ）:
+   1. te-04（Copilot 依存・コース 1bad7d9f の所有者）: (a') t-share-bind-versions — PINN の TeX 版 ⇄ PDF 版で
+      「TOV network map」（主グラフに無いので教材行の［検出要素］から開く）を共通部品に結び、**両方確定**。
+      最後に Copilot へ「確定すると学生に何が見えるか」を問う（IK-0865 の是正の確認）。
+   2. st-06（懐疑）: ⇢ 1 ⇢ (e) s-share-symbol-concept（PINN の「二重ネットワークと TOV」トピック）→ (d) s-share-part-chip。
+      記号は r・P（本文に定義の文）/ F_EOS（定義式だけ）/ 登録の無い記号を 1 つずつ（IK-0869 / 0870 の 3 状態）。
+   3. st-09（データサイエンスから）: ⇢ 1 ⇢ (d) s-share-part-chip（確定した結び付きがある状態の「共通部品として」を読む）。
+      (d) の前後比較はこの順（te-04 の確定の後）でだけ成立する。
+   4. te-05（委任）: (a) t-share-identity-queue（IK-0864 の是正の確認に絞る — 事実文が 1 回・見送り済みを含めた文・
+      候補の出所の一文）→ (c) t-share-labels-atlas（関係の相手「状態方程式」を先に作ってから関係を記録する）。
+   5. (b1) t-share-explain-write（te-05）→ (b2) t-share-explain-endorse-cite（te-04）は **IK-0861 の是正後にだけ**回す
+      （是正前は第 1 周と同じ 404 を読むだけ）。原稿スタジオのコースは教員自身の /api/admin/courses から選ぶ
+      （te-05 の一覧が空なら precondition:studio_course で止まる — その場合は campaign の前に te-05 へコース 1bad7d9f の
+      editor 共有を与える）。
+  外部 API は呼ばない。製品の LLM は (d) の選択質問 1〜2 回・共通部品の検索の埋め込み・Copilot の 1 回だけ。

@@ -231,12 +231,30 @@ class TestChallengeMode:
 # ===========================================================================
 
 
+
+@pytest.fixture(autouse=True)
+def _open_ledger_gates(request, monkeypatch):
+    """IK-0899 / IK-0900 の対象単位ゲートを開ける（このファイルは分岐ロジックの単体）。
+
+    ゲートそのものは ``test_doubt_ledger_gates_round25.py`` と、このファイルの
+    ``TestEvidenceLineRequiresDocumentEdit``（``real_ledger_gates = True``）が検査する。
+    """
+    if getattr(request.cls, "real_ledger_gates", False):
+        return
+    monkeypatch.setattr(doubt, "_require_editable_ledger_target", lambda *a, **k: "doc-1")
+    monkeypatch.setattr(
+        doubt, "_ledger_target_access", lambda *a, **k: {"document_id": "doc-1", "can_edit": True}
+    )
+    monkeypatch.setattr(doubt, "_require_viewable_challenge_target", lambda *a, **k: None)
+    monkeypatch.setattr(doubt, "_require_editable_assumption", lambda *a, **k: None)
+
+
 def _allow_ledger_target(monkeypatch):
     """P4-R8 の編集権限ゲートを通す（本テストは語彙・検証の単体で、権限は
     ``test_stakes_ledger_api.py`` が検査する）。"""
     monkeypatch.setattr(
         doubt, "_require_editable_ledger_target",
-        lambda target_type, target_id, current_user: "doc-1",
+        lambda target_type, target_id, current_user, **_kw: "doc-1",
     )
 
 
@@ -423,7 +441,7 @@ class TestLedgerProjection:
         session = _FakeSession([(_is_ledger_select, [row])])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
         monkeypatch.setattr(doubt, "compute_support_lines", lambda *a, **kw: None)
-        monkeypatch.setattr(doubt, "target_label", lambda *a, **kw: "label")
+        monkeypatch.setattr(doubt, "ledger_target_label", lambda *a, **kw: "label")
         monkeypatch.setattr(doubt, "has_naive_signal", lambda *a, **kw: False)
         monkeypatch.setattr(doubt, "_load_level_for_row", lambda *a, **kw: "low")
 
@@ -449,9 +467,9 @@ class TestLedgerProjection:
         ])
         session = _FakeSession([(_is_ledger_select, [row])])
         line = doubt.learner_ledger_line(
-            session, "claim", "target-1", include_support_lines=False,
+            session, "claim", "target-1", document_id=None, include_support_lines=False,
         )
-        assert line["evidence_lines_fact"] == "根拠の線が記帳されています（種類: 観測・導出）。"
+        assert line["evidence_lines_fact"] == "根拠の線が記録されています（種類: 観測・導出）。"  # IK-1059 学習者の語
         assert "evidence_lines" not in line
         serialized = json.dumps(line, ensure_ascii=False)
         assert "teacher-1" not in serialized
@@ -461,7 +479,7 @@ class TestLedgerProjection:
     def test_learner_projection_omits_the_key_when_nothing_is_recorded(self, monkeypatch):
         session = _FakeSession([(_is_ledger_select, [_ledger_row()])])
         line = doubt.learner_ledger_line(
-            session, "claim", "target-1", include_support_lines=False,
+            session, "claim", "target-1", document_id=None, include_support_lines=False,
         )
         assert "evidence_lines_fact" not in line
 

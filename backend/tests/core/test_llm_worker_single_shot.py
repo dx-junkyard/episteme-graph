@@ -150,9 +150,11 @@ class TestJsonCall:
     def test_omits_kwargs_the_caller_did_not_pass(self):
         call = _Recorder('{"ok": true}')
         json_call("q", call=call, temperature=0.1)
+        # response_format は JSON モードの既定要求（IK-0452。json_mode=False で外せる）。
         assert call.calls[0] == {
             "messages": [{"role": "user", "content": "q"}],
             "temperature": 0.1,
+            "response_format": {"type": "json_object"},
         }
 
     def test_forwards_an_explicit_none(self):

@@ -461,7 +461,7 @@ class TestInferenceNeverChangesScopeOrMode:
         """様相の推定で検索範囲（allowed_document_ids）が変わらない（DM1 / LC1）。"""
         seen: dict = {}
 
-        def _search(message, *, top_k, allowed_document_ids):
+        def _search(message, *, top_k, allowed_document_ids, **_kwargs):
             seen["allowed"] = allowed_document_ids
             return []
 

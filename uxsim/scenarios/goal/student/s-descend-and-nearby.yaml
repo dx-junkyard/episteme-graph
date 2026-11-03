@@ -1,0 +1,51 @@
+id: s-descend-and-nearby
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、降下路・楽屋・いまここの周りを使って、どこで分からなくなったかを絞る'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- seed_questions
+- backstage_question
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.chat.ask
+  with:
+    message: '{{seed_questions | next}}'
+- do: learning.descent.ladder
+  note: ヒントを一段ずつ引く
+- do: learning.chat.backstage
+  with:
+    message: '{{backstage_question}}'
+- do: learning.personal_network.nearby
+  note: いまここの周りで、依存の向きと確かめられているかを見る
+- choose:
+  - do: learning.chat.ask
+    with:
+      message: '{{seed_questions | next}}'
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#descent-ladder
+- manual: student/02-student.md#descent-backstage
+- manual: student/02-student.md#personal-map
+watch_for:
+- いまここの周りでは依存の向きだけが描かれ、推測の辺が無い
+- 検証の記録が無いときは区別ごと出さず、その事実が一文で出る
+- 検証ラベルは差がある場合にだけ出る
+- 楽屋の質問が集計に入らないことが楽屋の画面に書かれている

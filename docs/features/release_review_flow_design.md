@@ -123,7 +123,7 @@ accept_inferred_for_documents(session, document_ids, *, reviewer_id, note="") ->
 | メソッド・パス | 役割 |
 |---|---|
 | `GET /api/admin/landscape/courses/{course_id}/placements` | コースのソース論文の live 配置をまとめて返す（document 別・DTO は既存 `admin_placement_dto`）。`unplaced_domains`・骨格版・`pending_count`（未確認件数）・`hidden_count`（閲覧不可 document 由来の件数）を同梱。 |
-| `POST /api/admin/landscape/courses/{course_id}/placements/accept` | 「次へ」の実体。**edit 権限のある** document の `inferred` を一括 `confirmed` にし、1件ごとに監査記帳（`action="accept_on_release"`）。戻り値は `{course_id, confirmed, skipped_documents, decision_context}`（`decision_context` は 2026-09-04 追補 — §6）。 |
+| `POST /api/admin/landscape/courses/{course_id}/placements/accept` | 「次へ」の実体。**edit 権限のある** document の `inferred` を一括 `confirmed` にし、1件ごとに監査記帳（`action="accept_on_release"`）。戻り値は `{course_id, confirmed, skipped_documents, decision_context}`（`decision_context` は 2026-09-04 追補 — §6。2026-10-09 に `skipped_note` / `decision_note` を条件付きで追加 — §7）。 |
 
 - コースのゲートは `services.get_accessible_course_data`、document のゲートは
   `services.resolve_document_access`（read=view / accept=edit）。権限の無い document は
@@ -240,7 +240,7 @@ zone）に置くだけであり、RR3（出所を偽らない）の趣旨にも�
   止めない（RR7）。
 - **監査**: per-row の payload に `decision_context` を添付（既存キー `action` /
   `course_id` / `document_id` と `action="accept_on_release"` は不変）。ゼロ件確認で
-  監査を出さない挙動も不変。
+  監査を出さない挙動も不変（**2026-10-09 に変更** — 0 件でもコース単位の 1 行を残す。§7.2）。
 - **画面の事実文**: 「次へ」の意味に続けて「確認後も、教材管理の『位置づけ（分野マップ）』
   から個別に再検討・却下へ戻せます。」を常時表示する。
 
@@ -250,3 +250,61 @@ zone）に置くだけであり、RR3（出所を偽らない）の趣旨にも�
 `{course_id, confirmed, skipped_documents}`）。2026-09-04 の追加分と併せて
 `{course_id, confirmed, skipped_documents, decision_context}` に是正した。
 
+## 7. 追補（2026-10-09・第 23 周）— 閲覧のみの教員の「次へ」と、ウィザードの読みやすさ
+
+uxsim 第 23 周（[ペルソナ通し受講テスト](../architecture/persona_enactment_testing_design.md) §20）で、
+教材の閲覧権限しか無い教員（te-02）が「次へ」を押すと、確認した配置が 0 件なのに「表示されていた配置と確認した配置は
+一致しています」と出て、監査にも 1 行も残らなかった（IK-0688）。あわせて、ステップ 3 の要約が「次へ」で確認済みにした
+配置を「未確認」と数えていた（IK-0649）。是正はいずれも migration なし。
+
+### 7.1 提示集合 = 画面に出ていた未確認の配置の全部
+
+accept の `presented` は、GET `.../placements` と同じく**閲覧できる全ソース論文**の live な `inferred` で組む
+（以前は edit できる論文だけで組んでいたため、閲覧のみの教員では `presented == applied == []` で「一致」になった）。
+適用できなかった行（編集権限の無い論文の配置）は `decision_context.skipped`（`count` / `ids` / `truncated` /
+`document_ids` / `reason="not_editable"`）に別キーで残す（[確定文脈](decision_context_design.md) §8.4）。
+提示と適用が一致しないときだけ、応答に `decision_note`（「表示された{presented}件のうち確認したのは{applied}件です。」+
+編集権限の無い教材の本数の補足。文言の正本は `core/label_vocab.py::RELEASE_DECISION_PARTIAL_NOTE` /
+`RELEASE_DECISION_NOT_EDITABLE_SUFFIX`）を足し、画面はそれをそのまま描く。件数は提示・適用という事実で、RR6 が隠す
+weight / confidence ではない。
+
+### 7.2 0 件の「次へ」も手続として残す
+
+`updated` が空でも、コース単位の監査を 1 行残す（`entity_id=course_id`・old / new とも `inferred`・
+`metadata.no_transition: true`・`action="accept_on_release"`・`decision_context` 付き）。「見たが確認しなかった」ことを
+後から再構成できるようにするためで（DC1）、遷移の無い事実を遷移と偽らない。1 件以上確認したときは従来どおり行ごとの記帳。
+
+### 7.3 ステップ 3 の要約は取り直した配置から
+
+「次へ」の書き込みの後は配置を GET で**取り直してから**ステップ 3 を描く（確認前の `pending_count` で「未確認 N件」と
+要約しない）。取り直せなかったときは件数を出さず「確認を記録しました。最新の位置づけを読み込めなかったため、件数の要約は
+表示していません。」とだけ言う。提示と適用に差があったときの出口は「画面の再読み込み」ではなく、ウィザードの中で
+**「ステップ 2 に戻って確かめる」**（最新の配置を取り直す）にした（再読み込みはウィザードごと消える）。
+ステップ 3 の先頭には「ステップ 2 で確認として記録したもの」（確認済みにした配置・根拠を開いて読んだ配置・却下や再検討に
+した配置の**件数**）を出す。材料は accept 応答の `decision_context`（`applied` と `client_reported` の根拠を開いた行）と
+このウィザードで却下・再検討にした行で、何も記録していなければ区画ごと出さない。
+
+### 7.4 見た目（第 2 波）
+
+- 「次へ」の意味（「表示されている内容を確認したものとして記録します」）は**主ボタンの直上に 1 行**で置く（脚注に埋めない — RR2）。
+  脚注は再審の経路・件数・骨格版だけ。
+- ステップ表示は 1 行の文字列連結をやめ、済み・現在・未が見て分かる 3 段の部品にした（状態は class と `aria-current`。語は足さない）。
+- ステップ 2 の各行は状態を左罫の色（`data-status`）と状態チップで区別する。語はサーバの `status_label`。教員向けの
+  状態名の正本は `core/label_vocab.py::LANDSCAPE_STATUS_LABELS`（`landscape/schema.py::STATUS_LABELS` はその別名）で、
+  管理画面の JS フォールバック 2 か所（`admin.js` の位置づけモーダル・`admin-release-review.js`）は逐語ミラー
+  （`test_landscape_status_vocab_mirror.py`）。[再検討] を押した結果は押したボタンと同じ語「再検討中」で読める（IK-0657）。
+- ステップ 1 の「あとで」は割り当て画面が描けたら主ボタン「この対応で次へ」の隣へ移す（`atlasBindingRenderEditor` の
+  `options.onRendered` が描画後の保存ボタンを受け取り、その行に並べる。既定は不変）。
+- 見た目は `styles.css` の `release-review-*` クラスが持ち（inline style をやめた）、幅は `min(600px, 96vw)`。
+
+### 7.5 未解決（課題として記帳済み）
+
+閲覧権限だけの論文があることがステップ 2 で押す前に出ない（IK-0674）/ コースに無関係な分野の配置不能の文（IK-0675）/
+却下の理由を書く欄とその場の取り消しが無い（IK-0676）/ 根拠に原文の逐語と解析の生成文が区別なく並ぶ（IK-0677）/
+公開済みでも行の入口が「確認して公開」（IK-0678）/ 提示集合がその場で判断した行を含まない（IK-0679）/
+ステップ 3 の「位置づけ N 件を受講者に表示します」が却下の行を含む・確認する配置が 0 件のときの事実文が無い（第 23 周の再演）/
+確定の記帳を教員が後から読む画面が無い（IK-0659）。
+
+テスト: `test_release_review.py`（閲覧のみの教員の「次へ」が「一致」と記帳されない・0 件でも 1 行）/
+`test_release_review_ui_static.py` / `test_decision_context_guardrails.py`（提示集合が閲覧できる集合であること）/
+`test_landscape_status_vocab_mirror.py`。

@@ -460,7 +460,9 @@ class TestLegacySynthClaimMathDelimiting:
             )
             entry = self._index(monkeypatch, artifacts, ref_id=claim_id)
             assert entry["origin"] in ("atomic_rewrite", "claim_object")
-            assert entry["text"] == text
+            # 合成 claim 用の概念名の区切り付けは掛けない。裸の TeX は共通の規則
+            # （core.latex_display.delimit_bare_tex）で ``$…$`` に囲まれる（2026-10-10）。
+            assert entry["text"] == r"$P_{\rm L}(k)$ grows with the scale factor."
 
     def test_truncation_does_not_split_a_math_span(self, monkeypatch):
         symbol = "\\alpha_{" + "x" * 60 + "}"

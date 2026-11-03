@@ -34,6 +34,9 @@ class RawBlock:
     font_name: str | None = None
     is_bold: bool = False
     is_centered: bool = False
+    # 文字数で重み付けした最頻の文字サイズ（題名の大きさの判定用・IK-0420）。
+    # ``font_size`` は span の単純平均なので、題名に付く小さな脚注記号で下がる。
+    dominant_font_size: float | None = None
 
 
 @dataclass
@@ -61,6 +64,11 @@ class Section:
     page_start: int
     page_end: int | None = None
     parent_section_id: str | None = None
+    # 見出し番号（"3" / "3.1" / "A.2"）。TEI の @n か head 本文の先頭から
+    # 決定論的に読んだ値で、無ければ None（推測して付けない）。
+    section_number: str | None = None
+    # 付録（GROBID の ``<back><div type="annex">``）由来かどうか。
+    is_appendix: bool = False
 
 
 @dataclass
@@ -77,12 +85,25 @@ class DocumentMetadata:
     # authors came from (grobid_tei / tex_author / pdf_front_matter / none),
     # with confidence + needs_review. None for legacy artifacts.
     author_extraction: dict | None = None
+    # Title provenance (IK-0420): which deterministic signal the title came from
+    # (tei / font_size / none), mirroring ``author_extraction``'s shape
+    # (source / confidence / needs_review / review_reasons / candidate_sources).
+    # ``title`` itself is always a single-line string or None. None for legacy
+    # artifacts.
+    title_extraction: dict | None = None
     # TeX equation inventory (issue #420): a deterministic count of display math
     # blocks + symbolic labels computed from the expanded TeX at ingest time, so
     # completeness / coverage can detect TeX math without re-storing the (large)
     # source. Shape: {"display_math_blocks": int, "labels": [str], "label_count": int}.
     # None for non-TeX or legacy artifacts.
     tex_equation_inventory: dict | None = None
+    # TEI 構造回収の内訳（GROBID 経路のみ）。付録・本文直下の図表・表本体・
+    # 走り込み見出しを何件拾ったかの事実だけを持つ。None は旧 artifact。
+    # Shape: {"appendix_sections": int, "appendix_blocks": int,
+    #         "figure_captions": int, "table_captions": int,
+    #         "table_bodies": int, "container_level_figures": int,
+    #         "run_in_headings": int}
+    structure_recovery: dict | None = None
 
 
 @dataclass

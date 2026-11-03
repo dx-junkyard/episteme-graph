@@ -71,7 +71,12 @@ _FIGURE_ROW = _Row(
     page=5,
     caption_text="装置の模式図",
 )
-_EXPLANATION_ROW = _Row(element_id="comp_0001", body="この論文では…", status="approved")
+_EXPLANATION_ROW = _Row(
+    element_id="comp_0001",
+    element_type="theory_component",
+    body="この論文では…",
+    status="approved",
+)
 
 
 def _install_common(monkeypatch, *, artifacts=None, sessions=None, graph=None, builder=None):
@@ -197,7 +202,13 @@ class TestBuilderInputs:
             }
         ]
         assert captured["explanation_rows"] == [
-            {"element_id": "comp_0001", "body": "この論文では…", "status": "approved"}
+            {
+                "element_id": "comp_0001",
+                # claim / 式の説明も同じ経路で渡すので、どの要素の説明かを添える。
+                "element_type": "theory_component",
+                "body": "この論文では…",
+                "status": "approved",
+            }
         ]
 
     def test_artifacts_loaded_once(self, monkeypatch):
@@ -250,14 +261,17 @@ class TestBuildPaperLayerForDocument:
     def test_route_delegates_to_the_shared_builder(self, monkeypatch):
         seen = {}
 
-        def _fake(doc):
+        def _fake(doc, **kwargs):
+            # 表示投影が同じ artifact を使うための受け皿（artifacts_sink）だけを受け取る。
             seen["doc"] = doc
+            seen["kwargs"] = set(kwargs)
             return {"available": True}
 
         monkeypatch.setattr(tc, "_ensure_document_viewable", lambda doc, user: None)
         monkeypatch.setattr(tc, "build_paper_layer_for_document", _fake)
         result = tc.get_document_paper_layer(_DOC, current_user=_TEACHER)
         assert seen["doc"] == _DOC
+        assert seen["kwargs"] <= {"artifacts_sink"}
         assert result == {"available": True}
 
     def test_shared_builder_has_no_permission_gate_of_its_own(self, monkeypatch):

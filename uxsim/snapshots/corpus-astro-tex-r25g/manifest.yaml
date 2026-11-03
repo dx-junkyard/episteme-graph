@@ -1,0 +1,7 @@
+# --- snapshot record (appended by snapshot.py) ---
+snapshot_record:
+  name: corpus-astro-tex-r25g
+  created_at: 2026-10-27T22:21:45+00:00
+  git_commit: b7bbb628
+  migration_head: '094'
+  note: "第 8 周の前提（2026-10-28）: 対 67727cb0 = PDF 側の再確定 1 本・前提スクリプトの自動確定 4 本は全て取り消し（人の判断を経ない確定を残さない）・記号候補は TeX 版に残し te-03 が画面で確定する / te-05 の PINN 共有グループを外す（コース経由の閲覧は残る）/ te-02 の Cepheus 前提は第 7 周分 / t16 区切りなし / 6be229e1 は版 2 まで発行済み / atlas 2026.4・下書きなし / support-line の比較を記録"

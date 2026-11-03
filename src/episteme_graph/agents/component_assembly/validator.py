@@ -848,7 +848,17 @@ class ComponentAssemblyValidator:
         return issues
 
     def _check_operation(self, component: ComponentRecord) -> list[ValidationIssue]:
-        """Derivation-path components should declare a single main operation (issue #300)."""
+        """Derivation-path components should declare a single main operation (issue #300).
+
+        IK-0754: an operation outside the theory graph's vocabulary
+        (``component_graph.schema.classify_operation``) is reported as a warning —
+        never an error; the word is kept so no information is dropped.
+        """
+        issues = _operation_vocabulary_issues(component)
+        issues += self._check_operation_present(component)
+        return issues
+
+    def _check_operation_present(self, component: ComponentRecord) -> list[ValidationIssue]:
         deriv_like = component.component_type in {
             "RelationComponent",
             "PaperRelationComponent",
@@ -1102,3 +1112,24 @@ def _meta_prior_evidence_ratio(component: ComponentRecord) -> float:
         return 0.0
     bad = sum(1 for v in values if "prior" in v or "meta" in v)
     return bad / len(values)
+
+
+def _operation_vocabulary_issues(component: ComponentRecord) -> list[ValidationIssue]:
+    """Warn when operation / primary_operation is outside the graph vocabulary (IK-0754)."""
+    from episteme_graph.agents.component_graph.schema import classify_operation
+
+    issues: list[ValidationIssue] = []
+    for field_name in ("operation", "primary_operation"):
+        value = str(getattr(component, field_name, "") or "").strip()
+        if not value:
+            continue
+        _label, _edge_type, is_generic = classify_operation(value)
+        if is_generic:
+            issues.append(ValidationIssue(
+                "operation_outside_graph_vocabulary",
+                "warning",
+                f"{component.component_id} {field_name} {value!r} is not in the theory "
+                "graph's operation vocabulary; it will be treated as generic",
+                f"components[{component.component_id}].{field_name}",
+            ))
+    return issues

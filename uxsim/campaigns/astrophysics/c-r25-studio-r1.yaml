@@ -1,0 +1,34 @@
+id: c-astro-r25-studio-r1
+domain: astrophysics
+snapshot: corpus-astro-tex-r23
+course_id: 6be229e1
+personas:
+  teachers: [te-01-rookie-seminar, te-05-delegator-lab]
+  students: [st-08-m1-rprocess-lecture, st-07-m1-grb-voice]
+scenarios:
+  teacher: [t-studio-split-save, t-studio-rewrite-panes, t-studio-figure-adopt]
+  student: [s-studio-lecture-pages, s-lecture-then-trace]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 24, persona_llm_calls: 260, wall_clock_minutes: 240}
+notes: |
+  第 25 周 面 D（原稿スタジオ → 学生の受講）の第 1 周。正本は uxsim/runs/round25/design_studio.md（§22.4）。
+  行為は uxsim/actions/studio_actions.py、実行と投影は uxsim/runner/studio_exec.py、審判は uxsim/oracles/studio.py。
+  学生の learning.lecture.audio_status / sequence も studio_exec が投影する（音声の無いトピックでは「🎙 講義」が
+  押せない画面をそのまま出す — 砂場には TTS が無いので、音声が用意済みのトピックが無ければ講義は始まらない）。
+
+  コース: te-01 は 6be229e1（private・未公開）を所有する。te-05 は所有コースが無いので、前提 owns_course が欠けると
+  種まき経路 t-v5-register-own-course（コースビルダーで LLM 2〜3 回 → 登録）を先に歩く。原稿スタジオでの保存・図の採用は
+  コースの所有者だけができる（course_data_for_owner）ので、te-05 は自分の新しいコースで歩く（学生レーンとは交わらない）。
+  学生は 6be229e1 に固定（course_id）。6be229e1 は te-01 の (c) の最後の公開まで private なので、学生レーンは
+  te-01 の (c) の後に走らせる（先に走らせると受講登録できない）。
+
+  場面の組とレーンの順（runner は全組を走らせるので --persona X --scenario Y で 1 場面ずつ）:
+   (a)  te-01 × t-studio-split-save    — 長いトピックに === を 1 つ入れて保存 → 音声の準備状態（LLM 0 回）
+   (c)  te-01 × t-studio-figure-adopt  — 先頭トピックの図の提案 → 1〜2 ターン → 採用 → 保存 → 公開（LLM 1〜3 回）
+   (b)  te-05 × t-studio-rewrite-panes — 種まきで自分のコース → 根拠・つまづき → AI 書き換え（LLM 種まき 2〜3 + 1 回）
+   (d)  st-08 × s-studio-lecture-pages — (c) の後。先頭トピックの教材の図と講義ボタン → 次のトピック（LLM 0 回）
+   (d') st-07 × s-lecture-then-trace   — (c) の後。既存の経路（チャットで LLM 最大 3 回）。審判 S1〜S3 / X1〜X4 が
+        同じ run の te-01 の保存・採用と突き合わせる
+  第 2 周は c-r25-studio-r2.yaml（ペルソナを入れ替える）。

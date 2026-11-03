@@ -1,0 +1,24 @@
+scenario: s-sim-first-open-io
+domain: astrophysics
+# 第 22 周 (a') st-01（newcomer・電波/分子雲）。Cepheus B 論文（TeX 経路）の DCF 法のトピック t2。
+# 一覧は上から番号で選び（module_numbers）、最後は σ_ξ を含むまとまり（外枠「結果を導出・定義: σ_ξ、σ²_{A_{c,e}}」）を選び直す。
+# 砂場 DB で確かめた: knowledge_theory_modules_live（document 1771872a…）に σ_ξ の外枠モジュールがある。
+params:
+  goal_text: ゼミで扱う論文の理論が、何を受け取って何を出す計算なのかを、コードを作る前に自分の言葉で言えるようになること
+  topic_hint: DCF法による磁場強度の推定（Cepheus B の磁場トポロジーと星形成の論文）
+  topic_hint_terms:
+  - DCF法
+  - 磁場強度
+  module_numbers:
+  - "1"
+  - "2"
+  - "3"
+  module_hint: σ_ξ
+  questions:
+  - このまとまりが受け取る記号はどこから来ますか？ 論文のどの量を入れればよいですか？
+  - 定める記号は、論文のどの結果につながる量ですか？
+personas:
+  st-01-m1-radio:
+    questions:
+    - このまとまりが受け取る記号は、電波観測で私が測る量のどれに当たりますか？ どこから来る値ですか？
+    - 私の言葉で言うと「偏光角のばらつきから何かの大きさを出す計算」で合っていますか？ 定める記号は何を表しますか？

@@ -1,0 +1,11 @@
+scenario: s-v5-recon-revise
+domain: astrophysics
+params:
+  goal_text: µ(a) と音速の論文の主結果を自分で再構成できること
+  topic_hint_terms: [音速, µ(a), 暗黒エネルギー, 修正重力]
+  first_answer: 音速が小さいと µ は 1 より小さくなる
+  revised_answer: 音速が小さいと µ は 1 より大きい方向にずれて見える
+per_archetype:
+  night_parttime:
+    first_answer: µ が小さくなる？
+    revised_answer: µ は 1 より大きくなる方向

@@ -1,0 +1,45 @@
+id: s-discuss-backbone
+population: students
+runner:
+- api
+- browser
+goal: '{{goal_text}} のために、議論の開幕画面で中心命題・支持構造・確かめていないことを読み、支持構造の一つを議論する'
+params_required:
+- goal_text
+- discussion_opening_stance
+- seed_questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない。痕跡リセット後の周でも同じ経路で歩けるように）
+- do: learning.course.open
+- do: learning.discuss.opening
+  note: 中心命題→支持構造→確かめていないことの順に読み、誰が言っていることかを見分ける
+- do: learning.discuss.ask
+  with:
+    message: '{{discussion_opening_stance}}'
+  note: 支持構造の一つを選び、自分の読みを述べる
+- repeat:
+    until: persona_decides_to_stop or steps > 5
+    max: 5
+    do: learning.discuss.ask
+    with:
+      message: '{{seed_questions | next}}'
+- choose:
+  - do: learning.component.context
+    note: 議論に出てきた要素の文脈を開く
+  - do: learning.source_chunk.open
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#discuss-opening
+- manual: student/02-student.md#discuss-end
+watch_for:
+- 開幕画面で、論文が確かめていないことと、システムが確認できていないことが別の区画に分かれている
+- 議論の応答が論文の支持構造のどこについての話かに係留している
+- 応答の末尾の問いが直前の自分の発言を拾っている

@@ -1,0 +1,25 @@
+scenario: s-read-backbone
+domain: astrophysics
+# 第 15 波: 部品とグラフのある論文（Neutron Star EoS PINN = 7ef9e487）のトピックへ向け直した（t18 の論文は部品が fallback のみ）
+params:
+  goal_text: この論文が何を主張し、それを何で支えているかをつかむこと
+  topic_hint: 主結果：R1.4と音速の軟化（PINN による中性子星状態方程式の論文）
+  topic_hint_terms:
+  - R1.4
+  - 音速
+  - 軟化
+  seed_questions:
+  - この論文の中心の主張は、推定した状態方程式で音速が高密度側で軟化する、ということで合っていますか？
+  - R1.4 の推定を支えているのは、どの観測データと、どの構造の制約ですか？
+  - TOV 方程式を学習の中に組み込むことは、主結果のどの段を支えているんですか？
+per_archetype:
+  non_native:
+    goal_text: understanding how the main result of the paper is supported
+    seed_questions:
+    - Is the central claim that the sound speed softens at high density in the inferred EOS?
+    - Which observations and which structural constraint support the R1.4 estimate?
+  skeptic:
+    seed_questions:
+    - この主張のうち、観測で直接決まっている部分とネットワークの設計から出ている部分はどこで分かれますか？
+    - R1.4 の値の根拠は、原文のどこに書いてありますか？
+    - 非パラメトリックな EOS という前提は、どう確かめられていますか？

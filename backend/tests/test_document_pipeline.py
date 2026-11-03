@@ -2741,3 +2741,390 @@ def test_single_stage_run_still_hard_errors_on_missing_artifact():
 
     assert exc_info.value.stage == "document_structure"
     assert "single-stage run" in str(exc_info.value)
+
+
+def test_tex_archive_keeps_environment_content_without_residue_blocks():
+    """IK-0696 / IK-0697 / IK-0698（2026-10-16）: 環境名・列指定・記号だけの断片を本文ブロックに
+    しない。前付けは unknown 型で残し、表組みは表本体（in_table）・箇条書きは 1 項目 1 行・
+    参照は読める代用・脚注は区切り付きで残す（情報を落とさない）。"""
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    archive = _make_tex_archive({
+        "main.tex": r"""
+            \documentclass[prd]{revtex4-2}
+            \begin{document}
+            \title{Two-body problem in AdS}
+            \author{Jane Roe\orcidlink{0000-0002-1825-0097}}
+            \affiliation{Institute of Physics, Somewhere}
+            \begin{abstract}
+            We study things.
+            \end{abstract}
+            \maketitle
+            \section{Introduction}\label{sec:intro}
+            In \cite{a,b}, we use Table~\ref{tab:notation}.\footnote{We remind the reader of this.} See Sec.~\ref{sec:res}.
+            \begin{center}
+            \begin{tabular}{@{}p{0.24\linewidth}p{0.70\linewidth}@{}}
+            \hline
+            $m$ & mass \\
+            $G$ & Newton constant \\
+            \hline
+            \end{tabular}
+            \end{center}
+            \begin{itemize}
+            \item First point about $x$.
+            \item Second point.
+            \end{itemize}
+            \begin{subequations}
+            \begin{align}
+            a &= b \label{eq:a}\\
+            c &= d \label{eq:c}
+            \end{align}
+            \end{subequations}
+            ,
+            \begin{equation} e = f \label{eq:e}\end{equation}
+            where Eqs.~\eqref{eq:a} and \eqref{eq:e} hold.\\[10pt]
+            \section{Results}\label{sec:res}
+            \begin{table}\caption{Notation}\label{tab:notation}
+            \begin{tabular}{ll} $a$ & b \\ \end{tabular}\end{table}
+            \end{document}
+        """,
+    })
+    structure = build_structure_from_tex_archive(
+        archive, document_id="doc-env", source_file="paper.tar.gz"
+    )
+    body = [b for b in structure.blocks if b.block_type == "body_paragraph"]
+    texts = [b.text for b in body]
+    joined = "\n".join(texts)
+
+    for residue in ("center", "tabular", "itemize", "subequations", "@p0.24", "10pt", "\\"):
+        assert all(residue not in text for text in texts if not text.startswith("$")), residue
+    assert "," not in texts and "." not in texts
+    assert "In [ref], we use Table 1.（脚注: We remind the reader of this.） See Sec. 2." in texts
+    assert "where Eqs. (1a) and (2) hold." in texts
+    assert "- First point about $x$.\n- Second point." in texts
+    tables = [b for b in body if b.raw.get("in_table")]
+    # 結果節に書かれた表（tab:notation）は導入節の本文だけが参照するので、最初に参照する段落の直後へ
+    # 寄せられる（U1 seq 3100 / 3109 — float を書かれた位置ではなく参照する節で並べる）。
+    assert [t.text for t in tables] == ["$a$ | b", "$m$ | mass\n$G$ | Newton constant"]
+    front = [b for b in structure.blocks if b.raw.get("front_matter")]
+    assert all(b.block_type == "unknown" for b in front)
+    assert any("ORCID: 0000-0002-1825-0097" in b.text for b in front)
+    assert "Institute of Physics" not in joined
+    equations = [b for b in structure.blocks if b.block_type == "equation_block"]
+    assert equations[-1].raw.get("printed_numbers") == ["2"]
+    recovery = structure.metadata.structure_recovery
+    assert recovery["parser_source"] == "tex_archive"
+    assert recovery["punctuation_only_fragments"] >= 1
+    assert recovery["front_matter_blocks"] >= 2
+
+
+# --- 2610.08908（赤方偏移空間の銀河トライスペクトル）の形を写した TeX 断片 -------------------
+# 実論文の tarball はリポジトリに入れない。崩れの原因になった書き方だけを小さく写す:
+# 同梱 .sty の \numberwithin・環境の別名マクロ（\be / \beqa / \bseq）・前付けの \abstract{…}・
+# \paragraph の段落見出し・\paragraph{Acknowledgments}・\appendix・「Sec.\,\ref」。
+
+_TRISPECTRUM_STY = r"""
+\newcommand\acknowledgments{\section*{Acknowledgments}}
+\renewcommand{\abstract}[1]{\gdef\@abstract{#1}}
+\renewcommand{\theequation}{\thesection.\arabic{equation}}
+\numberwithin{equation}{section}
+"""
+
+_TRISPECTRUM_TEX = r"""
+\documentclass[12pt,a4paper]{article}
+\usepackage{style}
+\usepackage{amsmath}
+\renewcommand{\d}{\partial}
+\newcommand{\be}{\begin{equation}}
+\newcommand{\ee}{\end{equation}}
+\newcommand{\beqa}{\begin{eqnarray}}
+\newcommand{\eeqa}{\end{eqnarray}}
+\newcommand{\bseq}{\begin{subequations}}
+\newcommand{\eseq}{\end{subequations}}
+\newcommand\G{\mathcal{G}}
+\newcommand\vk{\vec k}
+\title{Full-Shape Analysis of the Galaxy Trispectrum}
+\abstract{\small
+The effective field theory program has been successful for the power spectrum. We extend it to the trispectrum.
+}
+\begin{document}
+\maketitle
+\section{Introduction}\label{sec:intro}
+Cosmological information is distributed across correlators \cite{a,b}.
+In Sec.\,\ref{sec:model} we present the model.
+\section{The Galaxy Trispectrum}\label{sec:model}
+\subsection{Theoretical Model}
+\paragraph{Deterministic Contributions.}
+The Galileon operators are defined by
+\beqa
+\G_2(\Phi_g) &\equiv& \nabla_i\nabla_j \Phi_g\nabla^i\nabla^j\Phi_g-(\nabla^2\Phi_g)^2 \,, \label{eq:g2} \\
+\G_3(\Phi_g) &\equiv& -\frac{1}{2}\left[\d_i \Phi_g\right] \nonumber
+\eeqa
+with
+\be
+\delta_g(\vk) = \int d\vec x\, e^{-i\vk\cdot\vec x}\,\delta(\vec x) \label{eq:rsd}
+\ee
+\bseq
+\begin{align}
+a &= 1 \label{eq:sa} \\
+b &= 2
+\end{align}
+\eseq
+Expanding Eq.~\eqref{eq:g2} and Eq.~\eqref{eq:sa} gives the kernels.
+\paragraph{Acknowledgments}
+We thank Jane Doe for discussions. This work was supported by grant DE-SC0001.
+\appendix
+\section{Perturbation Theory Kernels}\label{app:kernels}
+\be
+K_1 = b_1 \label{eq:k1}
+\ee
+\end{document}
+"""
+
+
+def _trispectrum_structure():
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    archive = _make_tex_archive({"trispectrum.tex": _TRISPECTRUM_TEX, "style.sty": _TRISPECTRUM_STY})
+    return build_structure_from_tex_archive(
+        archive, document_id="doc-trispectrum", source_file="2610.08908.tar.gz"
+    )
+
+
+def test_tex_environment_alias_macros_become_equation_blocks():
+    """``\\beqa … \\eeqa`` を地の文の ``$\\begin{eqnarray}$`` にせず、式ブロックとして切り出す。
+
+    旧実装は別名マクロを地の文の数式マクロとして展開し、式の中身を平文化して ``\\partial`` /
+    ``\\Phi`` を剥がした断片（``$\\mathcal{G}$_2(_g) && _i_j``）を本文ブロックに残していた。
+    """
+    structure = _trispectrum_structure()
+    equations = [b for b in structure.blocks if b.block_type == "equation_block"]
+    assert len(equations) == 4
+    galileon = equations[0].text
+    assert galileon.startswith(r"\begin{aligned}")
+    assert r"\nabla_i\nabla_j \Phi_g" in galileon and r"\partial_i" in galileon
+    assert r"\mathcal{G}_2" in galileon
+    body = [b.text for b in structure.blocks if b.block_type == "body_paragraph"]
+    for text in body:
+        assert "&&" not in text
+        assert r"\begin" not in text and "subequations" not in text
+        assert "eqnarray" not in text
+
+
+def test_tex_command_form_abstract_is_placed_before_first_section():
+    """``\\abstract{…}``（前付けのコマンド形）を要旨として最初の節より前の本文ブロックに置く。"""
+    structure = _trispectrum_structure()
+    first = structure.blocks[0]
+    assert first.block_type == "body_paragraph"
+    assert first.section_id is None
+    assert first.raw.get("abstract") is True
+    assert first.text.startswith("The effective field theory program")
+    assert r"\small" not in first.text
+
+
+def test_tex_sections_carry_numbers_parents_and_appendix_flag():
+    structure = _trispectrum_structure()
+    rows = [(s.title, s.level, s.section_number, s.is_appendix) for s in structure.sections]
+    assert rows == [
+        ("Introduction", 1, "1", False),
+        ("The Galaxy Trispectrum", 1, "2", False),
+        ("Theoretical Model", 2, "2.1", False),
+        ("Perturbation Theory Kernels", 1, "A", True),
+    ]
+    model = structure.sections[2]
+    assert model.parent_section_id == structure.sections[1].section_id
+
+
+def test_tex_paragraph_heading_is_not_glued_to_body_text():
+    structure = _trispectrum_structure()
+    headings = [b for b in structure.blocks if b.raw.get("paragraph_heading")]
+    assert [b.text for b in headings][:1] == ["Deterministic Contributions"]
+    assert headings[0].block_type == "subsection_heading"
+    body = [b.text for b in structure.blocks if b.block_type == "body_paragraph"]
+    assert not any(text.startswith("Deterministic Contributions") for text in body)
+    # 段落見出しは節にしない（節の一覧・番号は section 系だけ）。
+    assert "Deterministic Contributions" not in [s.title for s in structure.sections]
+
+
+def test_tex_acknowledgments_are_not_body_paragraphs():
+    """謝辞（人名・助成番号）を役割判定・主張採否の母集合（body_paragraph）に入れない。"""
+    structure = _trispectrum_structure()
+    thanks = [b for b in structure.blocks if "Jane Doe" in b.text]
+    assert len(thanks) == 1
+    assert thanks[0].block_type == "unknown"
+    assert thanks[0].raw.get("back_matter") is True
+    assert thanks[0].raw.get("back_matter_kind") == "acknowledgments"
+    assert structure.metadata.structure_recovery["back_matter_blocks"] == 1
+    # 付録に入ったら本文に戻る。
+    appendix_section = structure.sections[-1].section_id
+    assert not any(b.raw.get("back_matter") for b in structure.blocks if b.section_id == appendix_section)
+
+
+def test_tex_section_wise_equation_numbers_from_bundled_style():
+    """同梱 .sty の ``\\numberwithin{equation}{section}`` を読み、地の文の参照を「(2.1)」にする。"""
+    structure = _trispectrum_structure()
+    text = " ".join(b.text for b in structure.blocks if b.block_type == "body_paragraph")
+    assert "Expanding Eq. (2.1) and Eq. (2.3a) gives the kernels." in text
+    assert "In Sec. 2 we present the model." in text
+    assert "[ref]" in text
+    eq_k1 = next(b for b in structure.blocks if b.equation_label == "eq:k1")
+    assert eq_k1.raw.get("printed_numbers") == ["A.1"]
+
+
+def test_tex_equation_connective_fragment_is_not_a_body_paragraph():
+    """式の前置きだけの「with」を本文の文として数えない（落とさず unknown に残す）。"""
+    structure = _trispectrum_structure()
+    connective = [b for b in structure.blocks if b.text == "with"]
+    assert len(connective) == 1
+    assert connective[0].block_type == "unknown"
+    assert connective[0].raw.get("equation_connective") is True
+    lead = next(b for b in structure.blocks if b.text == "The Galileon operators are defined by")
+    assert lead.block_type == "body_paragraph"
+
+
+@pytest.mark.parametrize(
+    "back_matter",
+    [
+        r"\section*{Acknowledgments} We thank Jane Doe. Supported by grant DE-SC0001.",
+        r"\begin{acknowledgments} We thank Jane Doe. Supported by grant DE-SC0001. \end{acknowledgments}",
+        r"\acknowledgments We thank Jane Doe. Supported by grant DE-SC0001.",
+    ],
+)
+def test_tex_acknowledgment_forms_and_bibliography_are_back_matter(back_matter):
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    tex = (
+        "\\documentclass{article}\n\\begin{document}\n\\section{Results}\nWe find a signal.\n\n"
+        + back_matter
+        + "\n\n\\begin{thebibliography}{9}\n\\bibitem{a} A. Author, Journal 1 (2020).\n"
+        "\\bibitem{b} B. Author, Journal 2 (2021).\n\\end{thebibliography}\n\\end{document}\n"
+    )
+    structure = build_structure_from_tex_archive(
+        _make_tex_archive({"main.tex": tex}), document_id="doc-ack", source_file="x.tar.gz"
+    )
+    body = [b.text for b in structure.blocks if b.block_type == "body_paragraph"]
+    assert body == ["We find a signal."]
+    thanks = [b for b in structure.blocks if "Jane Doe" in b.text]
+    assert thanks and all(b.raw.get("back_matter_kind") == "acknowledgments" for b in thanks)
+    refs = [b for b in structure.blocks if b.block_type == "reference_entry"]
+    assert [b.text for b in refs] == ["A. Author, Journal 1 (2020).", "B. Author, Journal 2 (2021)."]
+
+
+def test_tex_enumerate_before_paragraph_leaves_no_env_names_or_cut_words():
+    """2610.20589 の形: enumerate の直後の段落が語の途中で切れず、環境名も本文に残らない（F2 seq 1169）。"""
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    tex = r"""
+\documentclass{article}
+\begin{document}
+\section{Spinning particles}
+To construct the state we proceed as follows:
+\begin{enumerate}
+\item We first place the particle at the origin.\footnote{This is a choice of frame.}
+\item We can then time-evolve the particle by AdS time evolution.
+\end{enumerate}
+Thus a general state of the particle is characterised by the triple $(x^i,\pi^i,s^{ij})$, and the charges in such a state is summarised by the matrix
+\begin{equation}
+\mathbb J^{AB}\equiv \Gamma_t\Gamma_x
+\end{equation}
+\begin{itemize}
+\item first point
+\end{itemize}
+\end{document}
+"""
+    structure = build_structure_from_tex_archive(
+        _make_tex_archive({"main.tex": tex}), document_id="doc-enum", source_file="x.tar.gz"
+    )
+    texts = [b.text for b in structure.blocks]
+    assert not any("enumerate" in t or "itemize" in t or r"\item" in t for t in texts)
+    general = next(t for t in texts if t.startswith("Thus a general state"))
+    assert general.endswith("is summarised by the matrix")
+    lists = [b for b in structure.blocks if b.raw.get("container_type") == "list"]
+    assert len(lists) == 2
+
+
+def test_tex_footnote_with_display_math_does_not_split_the_paragraph():
+    """2610.20589（G1 seq 1297）: 脚注の中の表示式で脚注が割れ、後の表示式が消えて次の文と連結した。"""
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    tex = r"""
+\documentclass{article}
+\begin{document}
+\section{Scalar field}
+\begin{equation}\label{eq:scalar field action} S = \int \phi \end{equation}
+with the scalar field action Eq.\eqref{eq:scalar field action} reducing to\footnote{Another advantage of this is the simple form
+\begin{equation}
+\Delta_{\pm}=\frac{D}{2}\pm\mu .
+\end{equation}},
+\begin{equation}\label{eq:reduced}\begin{split}
+\mathcal{S}^{\phi}=&-\frac{1}{2}\int_{x}\left(\partial\phi\right)^{2}.
+\end{split}\end{equation}
+Since the scalar field mass is small, the potential is Newtonian.
+
+The last definition mimics the number operator.\footnote{To get the definitions for dS, we take
+\[ \omega \rightarrow i H \]
+everywhere.} The next sentence follows.
+\end{document}
+"""
+    structure = build_structure_from_tex_archive(
+        _make_tex_archive({"main.tex": tex}), document_id="doc-fn", source_file="x.tar.gz"
+    )
+    texts = [b.text for b in structure.blocks]
+    lead = next(t for t in texts if t.startswith("with the scalar field action"))
+    # 文の途中の脚注は文の終わりへ寄せる（IK-0713）。この段落は式へ続いて文末が無いのでブロック末尾。
+    assert lead.startswith("with the scalar field action Eq. (1) reducing to,（脚注: Another advantage")
+    assert r"$\Delta_{\pm}=\frac{D}{2}\pm\mu .$）" in lead
+    equations = [b for b in structure.blocks if b.block_type == "equation_block"]
+    assert [b.equation_label for b in equations] == ["eq:scalarfieldaction", "eq:reduced"]
+    assert r"\mathcal{S}^{\phi}" in equations[1].text
+    assert equations[1].raw.get("printed_numbers") == ["3"]  # 脚注の中の式も番号を数える
+    after = texts[texts.index(equations[1].text) + 1]
+    assert after.startswith("Since the scalar field mass")
+    oscillator = next(t for t in texts if t.startswith("The last definition"))
+    assert "operator.（脚注: To get the definitions for dS, we take $\\omega \\rightarrow i H$ everywhere.） The next" in oscillator
+
+
+def test_tex_title_keeps_inline_math_and_paper_macros_as_plain_symbols():
+    """IK-0801: 題名の ``$\\Mpc$`` / ``$\\Mpch$``（論文マクロ）を中身ごと落とさない。
+
+    ``documents.title`` は平文で読まれるので数式は記号を残した平文にする。
+    """
+    from core.document_pipeline.tex_archive import load_tex_archive
+
+    archive = _make_tex_archive({
+        "main.tex": r"""
+\documentclass{article}
+\newcommand{\Mpc}{{\rm Mpc}}
+\newcommand{\Mpch}{{\rm Mpc}/h}
+\title{Mitigating prior-volume effects by adopting $\Mpc$ over $\Mpch$ units and $h^{-1}\,\mathrm{Mpc}$ scales with $\Lambda$CDM}
+\begin{document}
+\maketitle
+\section{Intro}
+Body.
+\end{document}
+""",
+    })
+    source = load_tex_archive(archive, source_file="t.tar.gz")
+    assert source.title == (
+        "Mitigating prior-volume effects by adopting Mpc over Mpc/h units "
+        "and h^-1Mpc scales with ΛCDM"
+    )
+    assert "$" not in source.title and "\\" not in source.title
+
+
+def test_tex_title_without_math_is_unchanged():
+    from core.document_pipeline.tex_archive import load_tex_archive
+
+    archive = _make_tex_archive({
+        "main.tex": r"""
+\documentclass{article}
+\title{Kinetic Theory of the EFTofLSS: A Halo-based Approach}
+\begin{document}
+\maketitle
+Body.
+\end{document}
+""",
+    })
+    assert load_tex_archive(archive, source_file="t.tar.gz").title == (
+        "Kinetic Theory of the EFTofLSS: A Halo-based Approach"
+    )

@@ -1,0 +1,36 @@
+id: t-paper-order-coverage
+population: teachers
+runner:
+- api
+- browser
+preconditions:
+- 砂場に解析済みの教材（グラフ・論文層あり）が入っていて、このペルソナがそれを閲覧できる。教材の取り込み・コース登録・公開はしない
+goal: '{{goal_text}} のために、論文の順で章からノードを追い、グラフに掛かっていない章を見つける'
+params_required:
+- goal_text
+- material_hint
+- graph_questions
+steps:
+- do: auth.login
+- do: admin.materials.list
+- do: admin.graph_review.open
+  note: '{{material_hint}} の行からグラフ画面を開く'
+- do: admin.paper_layer.view
+  note: 章→ノード→式・図表の順に読む
+- choose:
+  - do: admin.graph_review.chat
+    with:
+      message: '{{graph_questions | next}}'
+  - do: admin.next_steps.list
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: teacher/26-admin-graph-review.md#paper-view
+- manual: teacher/26-admin-graph-review.md#paper-facing
+watch_for:
+- 掛かっていない章が事実文で示される
+- 章は見出しで、式は印字番号で語られる

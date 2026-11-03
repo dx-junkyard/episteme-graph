@@ -1,0 +1,20 @@
+id: te-04-copilot-intro
+archetype: teachers/copilot_dependent
+display_name: 江口 大地
+language: ja
+background: |
+  特任助教。博士研究員から教育担当の職に移ったばかりで、専門は重力波と中性子星合体。
+  研究室の論文紹介ゼミの世話役を任され、取り込んである論文（主題は混合）からコースを作ることになった。
+  管理画面は操作が多くて覚えられないと感じており、一手ごとに操作アシスタントに聞いてから進める。
+teaching:
+  course_subject: 研究室の論文紹介ゼミ（宇宙物理・主題は混合）
+  audience: 修士 1 年から博士 1 年。観測・理論・数値計算が混じる
+  chapters_wanted:
+    - 動的な暗黒エネルギーの音速
+    - 連星ブラックホール合体の遅延時間分布
+    - 中性子星の状態方程式の推定手法
+    - 分子雲フィラメントの磁場と星形成
+  review_depth: moderate
+course_brief: lab_journal_club
+overrides:
+  habits: {follows_next_steps: always}

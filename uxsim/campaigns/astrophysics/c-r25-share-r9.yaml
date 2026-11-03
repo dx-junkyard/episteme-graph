@@ -1,0 +1,30 @@
+id: c-astro-r25-share-r9
+domain: astrophysics
+snapshot: corpus-astro-tex-r25h
+course_id: 1bad7d9f
+personas:
+  teachers: [te-05-delegator-lab, te-03-meticulous-seminar, te-04-copilot-intro]
+  students: [st-04-intl-exoplanet, st-07-m1-grb-voice]
+scenarios:
+  teacher: [t-share-identity-queue, t-share-labels-atlas, t-share-explain-endorse-cite]
+  student: [s-share-symbol-concept, s-share-part-chip]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 12, persona_llm_calls: 340, wall_clock_minutes: 260}
+notes: |
+  第 25 周 share の第 9 周（judge_share_r8.md §6・r9_prereqs.md・harness_fixes_r8_summary.md）。第 8 波の是正後（IK-1061〜1064・1050 残り・0980）。
+  **固定コースは 1bad7d9f（TeX 版）に戻す** — 周の前の実測: 第 8 周の「1bad7d9f の ⚓ が 0 個」は前提スクリプトの読み違い（master_course を剥がして
+  いなかった）で、実際は t1・t5・t6・t8・t11・t13 に ⚓ があり PINN の t11・t13 の 3 個だけ開かない。1bad7d9f の sources は前提の論文（確定リンクの
+  部品・説明の部品 = ce667c63）を含む（6be229e1 は PDF 版で含まない = H48 の原因）。再凍結はしない（学生の版に触れる）— (d) は ⚓ が開く t1 / t5 で組む。
+  教員 3 × 学生 2・5 場面（依存の順）:
+  te-05 × (a) t-share-identity-queue（取り消し済み・見送り済みのリンクを［候補に戻す］（IK-1062 の是正）→ 確定の通し。対 67727cb0 の PDF 版リンクは
+  revoked のまま置いてある — 前提スクリプトは確定しない）/ te-03 × (c) t-share-labels-atlas（記号の候補を探す → 記号の確定 → 凍結を**場面の手で**
+  （第 8 波で手を足した）・関係の確定の記録 IK-1063。記号候補は全て revoked なので (a) の後に候補に戻す手が要る — 場面の手に無ければ頭脳は事実を記す）/
+  st-04 × (e) s-share-symbol-concept（(c) の凍結の後に L_TOV の概念名 — IK-0983・3 周目）/ te-04 × (b2) t-share-explain-endorse-cite（引用先 cite_course_id は
+  1bad7d9f = 部品の論文を含む側。含まない側 6be229e1 への引用も手があれば 2 回目に — IK-1061 の言い分け）/ st-07 × (d) s-share-part-chip（voice:false で文字・
+  1bad7d9f の t1 → ⚓ → 部品の文脈 →「共通部品として」→ 別の論文（IK-0920）→ 選択質問（IK-1041）→「この部品の説明は誰が書いたか」（IK-1064））。
+  閲覧だけの教員は砂場に作れない（全教員がコース経由の editor — H47）ので viewer の (a) は組まない（IK-0999 は GONE）。
+  組の例外（P-0025）: te-03 × (c)・st-04 × (e)・st-07 × (d) は第 8 周と同じ組（是正の前後比較・審判の指定）。te-05 × (a)・te-04 × (b2) は新しい組。
+  学生の面: st-07 は share だけ（第 9 周は doubt の地図の問いを st-08 に替えた）。st-04 は share だけ。
+  一括の確かめと用意: `backend/.venv/bin/python uxsim/runs/round25/r9_prereqs.py --dry-run`。

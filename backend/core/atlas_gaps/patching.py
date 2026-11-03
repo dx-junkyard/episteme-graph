@@ -239,8 +239,10 @@ def build_gap_patch(
             "node_id": node_id,
             "layer": layer,
             "parent_region_id": "",
+            "parent_region_label": "",
             "node": value,
-            "summary": f"「{label}」を新しい領域として追加します（id: {node_id}）。",
+            # 確認文に内部の id を埋め込まない（IK-0850。id は保存の内部値で判断に要らない）。
+            "summary": f"「{label}」を新しい領域として追加します。",
         }
 
     parent_id = _clean(parent_region_id)
@@ -284,11 +286,10 @@ def build_gap_patch(
         "node_id": node_id,
         "layer": layer,
         "parent_region_id": parent_id,
+        # 確認画面は親領域を名前で言う（IK-0850。英字キーとの二重表記にしない）。
+        "parent_region_label": parent_label,
         "node": value,
-        "summary": (
-            f"「{label}」を領域「{parent_label}」の概念として追加します"
-            f"（id: {node_id}）。"
-        ),
+        "summary": f"「{label}」を領域「{parent_label}」の概念として追加します。",
     }
 
 

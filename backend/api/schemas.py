@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer
 
 # 画面文脈アダプター（assistant_screen_adapter_design.md §4.2 / §11.2）: 上限の正本は
 # core 側の定数（SA7: 予算はコード定数・env で緩めない）。leaf モジュールを直接 import
@@ -32,6 +32,11 @@ class ScreenContextPayload(BaseModel):
     Phase 1（W層・グラフレビュー）と Phase 4（学習チャット）の**共通の受け口**なので、
     ここ（``api/schemas.py``）に置く。``routes/deliberation.py`` は後方互換のため
     再エクスポートする。
+
+    ``selection`` は自由形の参照の袋で、キーの語彙は core 側が持つ。学習画面の
+    ``selection.simulation_run_id``（4-e・§11.17 — 学習者が開いている自分の検証
+    シミュレーションの実行記録の ID）もここに入る（additive・型の追加なし。UUID の形で
+    なければ core の ``selected_simulation_run_id`` が捨てる）。
     """
 
     model_config = {"extra": "forbid"}
@@ -131,6 +136,15 @@ class MaterialOut(BaseModel):
     # （切れている参照の列挙は詳細 API 側。行に件数バッジを作らない = T-3）。
     # run が無い / 検査の事実が無い教材は ``{"status": "unchecked"}``。
     reference_health: dict | None = None
+    # 解析の縮退（IK-0715）。A層 agent が AI の応答を得られず決定論の代替・空の成果に
+    # 落ちたステージの事実を ``core/analysis_degradation.py`` の 1 投影から
+    # ``{status, facts}`` **だけ**で返す（facts は数字なし。details は行に出さない）。
+    analysis_degradation: dict | None = None
+    # 閲覧者にとっての役割（IK-0974）。owner / editor / viewer と表示語。閲覧のみの行には
+    # 編集の共有を頼む先（所有者の表示名を含む事実文・教員向け一覧のみ）を添える。
+    role: str | None = None
+    role_label: str | None = None
+    edit_request_note: str | None = None
     # --- メタデータ（教材選択UIの情報提示用。documents 列から常時付与）---
     authors: list[str] = Field(default_factory=list)
     year: int | None = None
@@ -142,6 +156,10 @@ class MaterialOut(BaseModel):
     top_concepts: list[str] = Field(default_factory=list)  # legacy knowledge_graph 概念名
     section_outline: list[str] = Field(default_factory=list)  # 文書構造のセクション見出し
     has_course: bool = False  # 自分がこの教材からコースを作成済みか（コース未作成リスト用）
+    # 第 25 周 第 10 波（IK-0956 の面）: 取り込み元の形式（``TeX 版`` / ``PDF 版`` / 空文字）。
+    # 同じ題名の PDF 版と TeX 版を共有画面の見出しで区別する。判定の正本は
+    # ``core.deliberation.identity_links.document_format_label``（ファイル名だけで決める）。
+    format_label: str | None = None
 
 
 class VisibilityUpdateRequest(BaseModel):
@@ -173,6 +191,9 @@ class LearningTopic(BaseModel):
     title: str
     chapter_index: int
     status: str = "locked"  # completed | in_progress | locked
+    # 第 23 周: ``status`` の表示語（正本 ``core/label_vocab.py::TOPIC_STATUS_LABELS``）。
+    # locked は推奨順であって禁止ではないことを言う。学習者向け応答でだけ埋まる。
+    status_label: str = ""
     prerequisites: list[LearningPrerequisite] = Field(default_factory=list)
     misconceptions: list[LearningMisconception] = Field(default_factory=list)
     # learning_units_design.md §6.1 (P2-3): このトピックが束ねた「学ぶ単位」。
@@ -230,6 +251,14 @@ class ChunkContent(BaseModel):
 class TopicMaterialResponse(BaseModel):
     topic_id: str
     chunks: list[ChunkContent]
+    # IK-0375: 解説（student_material）がまだ無く、論文の本文をそのまま返すときだけ
+    # 付く事実文（正本 ``core/label_vocab.py`` の MATERIAL_PREPARING_NOTICE /
+    # MATERIAL_NOT_GENERATED_NOTICE）。数字を含まない。解説があるときは None。
+    preparation_notice: str | None = None
+    # 焦点論文（docs/features/focus_document_design.md）: このトピックの教材が束ねる論文が
+    # **ちょうど1つ**のときだけその document_id（画面文脈 ``selection.document_id`` の入力）。
+    # 複数・不明なら None（推測で1つに決めない）。
+    document_id: str | None = None
 
 
 class LearningChapter(BaseModel):
@@ -250,7 +279,9 @@ class LearningSource(BaseModel):
     subtitle: str = ""
     license: str = ""
     used_section: str = ""
-    material_id: str = ""  # アップロード教材と紐付ける場合
+    material_id: str = ""  # アップロード教材と紐付ける場合（documents.source_path = アップロード時の ID）
+    # documents.id（UUID）。クライアントへ document を渡すキーは常にこれ（IK-0550）。
+    document_id: str = ""
 
 
 class LearningReferencedSection(BaseModel):
@@ -305,6 +336,29 @@ class LearningCourseOut(BaseModel):
     visibility: str = "private"
     group_id: str | None = None
     description: str = ""
+    # IK-0945: 受講中のコースが新規の受講を受け付けなくなったときの事実文
+    # （正本 core/label_vocab.py::COURSE_ENROLLED_BUT_CLOSED_NOTICE）。それ以外は空。
+    enrollment_notice: str = ""
+
+
+class LearningCourseCreateOut(LearningCourseOut):
+    """コース作成（``POST /courses``）の応答。題名に生の TeX 記法が残るときの知らせ（IK-0951）。"""
+
+    title_notice: str = ""
+    raw_tex_titles: list[str] = []
+
+
+class LearningEnrollOut(LearningCourseOut):
+    """受講登録（``POST /courses/{id}/enroll``）の応答（IK-0385）。
+
+    一覧行と同じ投影（``LearningCourseOut``）に、登録が成立した事実を足す。
+    ``is_enrollable`` は「まだ受講していない公開コースか」の意味なので登録後は False に
+    なり、それだけを見た読み手は「受講できなかった」と読む。成否は ``enrolled`` と
+    ``notice``（正本 ``core/label_vocab.py::COURSE_ENROLLED_NOTICE``・数字なし）で言う。
+    """
+
+    enrolled: bool = True
+    notice: str = ""
 
 
 class LearningCourseDetail(BaseModel):
@@ -446,10 +500,16 @@ class SourceTierItem(BaseModel):
     chunk_id: str = ""  # 該当チャンク（ポップアップで全文取得）
     source_title: str = ""
     tier: str = "out_of_source"  # approved | source | out_of_source
-    score: float = 0.0
+    # 類似度（cosine）の生値は学習者に返さない（IK-0433・数値非表示の原則）。tier の判定は
+    # search_chunks_with_metadata の内側で済んでいる。旧履歴の "score" キーは読み捨てる。
     quote: str = ""   # 根拠本文の抜粋（出典カードの引用）
     meta: str = ""    # 出典メタ（ファイル名/節など）
     origin: str = "other_material"  # course_material（このコースの教材）| other_material（別の資料）
+    # 回答本文が [出典N] で引用したか（第 14 周）。False は「出所を決めたが本文では引用していない」。
+    cited: bool = True
+    # 第 25 周 第 5 波（IK-0996）: 同じ論文の別の版（TeX 版・PDF 版）の同じ箇所を 1 件に畳んだ
+    # ときの事実文（数値なし）。畳んでいなければ空。
+    version_note: str = ""
 
 
 class LearningChatResponse(BaseModel):
@@ -481,6 +541,11 @@ class LearningChatResponse(BaseModel):
     # AI 由来であることを本人発話と視覚区別して描画するための構造化フィールドで、
     # 痕跡・専用テーブルへは保存しない（窓外持ち出しの禁止）。
     mirror: dict | None = None
+    # 応答の骨格（docs/features/dialogue_response_shape_design.md RS1〜RS5）: サーバが
+    # 区画へ分けた結果の事実だけ。キーは固定 3 つ（closing_question: 末尾に残した
+    # 問い返し 1 つ or None / has_gate: 前提の逆質問を添えたか / mirror_kept: 鏡を出したか）。
+    # 数値（落とした問いの数など）は載せない。RAG 応答の最終 return だけが設定する。
+    shape: dict | None = None
     # 学生 HELP ルート（設計 docs/features/manual_help_kb_design.md §1-3）: docs/manual の
     # 出典（ヒット時のみ設定）。各要素は {file, anchor, title}。既存 sources/tier には
     # 相乗りしない（_TIER_STRENGTH が未知 tier を out_of_source=0 に落とすため）。
@@ -498,6 +563,12 @@ class LearningChatResponse(BaseModel):
     #    "label": "<core/label_vocab.py の LEARNING_STANCE_LABELS>"}
     # confidence・一致度・スコアのような数値キーは絶対に入れない。
     stance: dict | None = None
+    # IK-0545（回答の逐語引用と出典本文の一致検査、core/citation_check.py）: 本文の
+    # 「…」[出典N] の逐語引用を出典 N のチャンク本文と突き合わせた事実。検査した引用が無い
+    # 往復は None。{"checked": ["1", ...], "unmatched": [{"citation": "N", "quotes": [...],
+    # "note": "<事実文>"}]}。番号は本文の [出典N] の N。件数・一致度の数値は入れない。
+    # RAG 応答の最終 return だけが設定する（保存文・履歴メタには焼き込まない）。
+    citation_check: dict | None = None
 
 
 class LearningChatHistoryResponse(BaseModel):
@@ -562,10 +633,13 @@ class LearningCheckSelfCheckRequest(BaseModel):
 
 class LearningCheckSelfCheckResponse(BaseModel):
     self_check: str
-    #: agreed / disagreed のときだけトピック完了を記録する（verdict_wrong は記録のみ）。
+    #: agreed のときだけトピック完了を記録する（IK-0399: disagreed / verdict_wrong は記録のみ）。
     topic_completed: bool = False
     course_completed: bool = False
     completed_topic_ids: list[str] = Field(default_factory=list)
+    #: 完了にしなかった理由の事実文（``disagreed`` のとき。正本
+    #: ``core/label_vocab.py::CHECK_SELF_CHECK_DISAGREED_NOTICE``・数字なし）。それ以外は空。
+    notice: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -755,6 +829,12 @@ class LectureFormulaItem(BaseModel):
     source_location: dict | None = None
     needs_math_review: bool = False
     review_reason: list[str] = Field(default_factory=list)
+    # IK-0977: 復元の印（core/lecture.annotate_reconstructed_formulas が載せる。文言の正本は
+    # label_vocab）。以前はこの DTO が落としていたので、講義のスライドだけ印が出なかった。
+    reconstructed: bool = False
+    reconstructed_mark: str | None = None
+    reconstructed_note: str | None = None
+    latex_withheld: bool = False
 
 
 class LectureFigureItem(BaseModel):
@@ -801,6 +881,11 @@ class LectureSegment(BaseModel):
     segment_mode: str = "full"
     slides: list[LectureSlide] = []
     language: str = "ja"  # このセグメントの spoken_language（無指定は "ja"）
+    # IK-0458: 受講画面（ChunkContent.evidence_items）と同じ読み取り専用 evidence DTO
+    # （core.course_content_builder.build_topic_evidence_items）。スライド本文の
+    # ``![[component|claim|source|equation|figure:id]]`` を受講画面と同じ規則で解決する材料。
+    # トピック教材経路のセグメントだけが持つ（チャンク経路は従来どおり空）。
+    evidence_items: list[dict] = []
     # 注記フラグ（是正 F3）: この区画が「以前に触れた前提概念だけを扱う短い区画」と
     # 判定された事実。提示内容は変わらない。画面側の「短く聴く」トグル（既定 OFF）が
     # ON のときだけ、本人の操作でこの区画を畳める（消さずに畳む）。
@@ -1080,6 +1165,12 @@ class TheoryIOItem(BaseModel):
     evidence_claims: list[str] = Field(default_factory=list)
     source_refs: list[TheorySourceRef] = Field(default_factory=list)
     needs_source: bool = False
+    # パイプラインが書く項目単位の出典参照。ComponentAssemblyAgent は各項目の根拠を
+    # ``claim_ids``（claim の DB UUID）/ ``equation_ids``（agent 側 equation_id）で持つ
+    # のに、モデルがこの2キーを持たず読み出しで落としていたため、承認可能性の判定は
+    # 「出典の無い項目」と読んでいた。落とさずに通す（情報を落とさない）。
+    claim_ids: list[str] = Field(default_factory=list)
+    equation_ids: list[str] = Field(default_factory=list)
 
 
 class TheoryConditionItem(BaseModel):
@@ -1090,6 +1181,10 @@ class TheoryConditionItem(BaseModel):
     evidence_claims: list[str] = Field(default_factory=list)
     source_refs: list[TheorySourceRef] = Field(default_factory=list)
     needs_source: bool = False
+    # TheoryIOItem と同じ理由（preconditions / constraints も ``claim_ids`` /
+    # ``equation_ids`` を持つ）。
+    claim_ids: list[str] = Field(default_factory=list)
+    equation_ids: list[str] = Field(default_factory=list)
 
 
 class TheoryBlackboxPolicy(BaseModel):
@@ -1270,7 +1365,9 @@ class ComponentGraphEdge(BaseModel):
     target_component_id: str
     relation: str = "RELATED_TO"
     edge_type: str = "explicit_connector"
-    confidence: float = 0.5
+    # 第 18 周（G3）: 教員向けの表示投影（DP7）は数値キーを落とす。既定値で 0.5 を埋め戻さない
+    # よう None 既定にし、None のときは応答からキーごと外す（下の serializer）。
+    confidence: float | None = None
     support_status: str = "design_inferred"
     # Same backing vocabulary as nodes (issue #311 criterion 6).
     source_backing_status: str = ""
@@ -1283,6 +1380,13 @@ class ComponentGraphEdge(BaseModel):
     # NarrativeAnnotator の edge_narratives と突合するための辺 ID（論文層が使う。
     # 旧 graph_json では空文字）。
     edge_id: str = ""
+
+    @model_serializer(mode="wrap")
+    def _drop_absent_confidence(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("confidence") is None:
+            data.pop("confidence", None)
+        return data
 
 
 class ComponentGraphResponse(BaseModel):
@@ -1300,7 +1404,7 @@ class ComponentGraphResponse(BaseModel):
     # Reference index for evidence-link resolution: node/edge payloads carry
     # pipeline-internal IDs (atomic claim IDs, ev_NNNN evidence IDs,
     # derivation/step IDs) that have no DB table of their own and cannot be
-    # resolved by the frontend on its own. This maps only the referenced IDs
+    # resolved by the frontend on its own. This maps only the cited IDs
     # (never the whole stage_outputs) to a short human-readable snippet:
     # {"claims": {id: {"claim_id", "text"}}, "evidence": {id: {"text",
     # "block_id"}}, "derivations": {id: {"label", "kind", "operation"}}}.
@@ -1310,6 +1414,10 @@ class ComponentGraphResponse(BaseModel):
     # パイプライン修正は再解析まで既存グラフに反映されない — その古さを教員が
     # 判断できるようにする事実（表示・注意文は UI 側）。
     graph_updated_at: str = ""
+    # 解析の縮退（IK-0715）。採用 run で AI の応答が得られず決定論の代替・空の成果に
+    # 落ちた段の事実 ``{status, facts}``（``core/analysis_degradation.py`` が正本・数字なし）。
+    # UI は ``status == "degraded"`` のときだけバナー 1 行を出す。
+    analysis_degradation: dict = Field(default_factory=dict)
 
 
 class LectureStudioSettings(BaseModel):
@@ -1404,8 +1512,20 @@ class CourseGroupPermissionOut(BaseModel):
     group_id: str
     group_name: str = ""
     permission: str = "viewer"  # viewer | editor
+    # 権限の表示語（IK-0911。正本は label_vocab.COURSE_SHARE_PERMISSION_LABELS）。
+    permission_label: str = Field(default="", validate_default=True)
     created_at: str = ""
     updated_at: str = ""
+
+    @field_validator("permission_label", mode="before")
+    @classmethod
+    def _default_permission_label(cls, value, info):  # noqa: ANN001
+        if value:
+            return value
+        from core.label_vocab import COURSE_SHARE_PERMISSION_LABELS
+
+        permission = str((info.data or {}).get("permission") or "")
+        return COURSE_SHARE_PERMISSION_LABELS.get(permission, permission)
 
 
 class CourseGroupPermissionUpsertRequest(BaseModel):
@@ -1420,8 +1540,20 @@ class DocumentGroupPermissionOut(BaseModel):
     group_id: str
     group_name: str = ""
     permission: str = "viewer"  # viewer | editor
+    # 権限の表示語（IK-0866。正本は label_vocab.DOCUMENT_SHARE_PERMISSION_LABELS）。
+    permission_label: str = Field(default="", validate_default=True)
     created_at: str = ""
     updated_at: str = ""
+
+    @field_validator("permission_label", mode="before")
+    @classmethod
+    def _default_permission_label(cls, value, info):  # noqa: ANN001
+        if value:
+            return value
+        from core.label_vocab import DOCUMENT_SHARE_PERMISSION_LABELS
+
+        permission = str((info.data or {}).get("permission") or "")
+        return DOCUMENT_SHARE_PERMISSION_LABELS.get(permission, permission)
 
 
 class DocumentGroupPermissionUpsertRequest(BaseModel):
@@ -1671,6 +1803,8 @@ class UserListItem(BaseModel):
     created_at: Optional[str] = None
     last_login_at: Optional[str] = None
     last_seen_at: Optional[str] = None
+    #: migration 094: 本人が登録した人に見せる名前（空 = 登録なし。``username`` はログイン ID）。
+    profile_name: str = ""
 
 
 class UserListResponse(BaseModel):

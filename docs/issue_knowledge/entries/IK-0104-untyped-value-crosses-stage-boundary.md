@@ -53,6 +53,9 @@ resolution:
   landed_in:
     - src/episteme_graph/agents/component_assembly/schema.py
     - docs/architecture/knowledge_structure_review_2026-09-12.md §4 Phase 0 実装記録
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0103, IK-0105]
 view_of: []
 history:

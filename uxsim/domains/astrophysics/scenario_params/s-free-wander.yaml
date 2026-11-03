@@ -1,0 +1,23 @@
+scenario: s-free-wander
+domain: astrophysics
+params:
+  goal_text: 自分の研究テーマが宇宙論のどこにつながっているのかを、このシステムを使って自由に探ること
+  wander_hint: 決まった順番は無い。気になった画面を開き、気になったことを聞き、飽きたらやめてよい
+  seed_questions:
+    - 自分の研究（観測や計算）と、この論文の結果はどこでつながりますか？
+    - この論文で一番確かめられていないのはどこですか？
+    - この分野で最近いちばん議論になっているのは何ですか？
+    - 自分と同じような立場の人は、この論文のどこでつまずきますか？
+    - 他の受講者と比べて、自分の理解はどのくらいですか？
+    - このコースを全部終えるまで、あとどれくらいかかりますか？
+  symbol_hint: "H_0"
+per_archetype:
+  non_native:
+    goal_text: freely exploring how my research topic connects to cosmology using this system
+    wander_hint: There is no fixed order. Open screens you are curious about, ask what you want, and stop when you are done.
+    seed_questions:
+      - Where does my own research connect with the result of this paper?
+      - Which part of this paper is least tested?
+      - What is the most debated topic in this field recently?
+      - Compared with other students, how well do I understand this?
+      - How long will it take to finish the whole course?

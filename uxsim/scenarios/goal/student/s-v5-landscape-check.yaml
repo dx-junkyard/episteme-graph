@@ -1,0 +1,18 @@
+id: s-v5-landscape-check
+population: students
+runner: [api, browser]
+session: 1
+goal: '{{goal_text}} のために、コースの論文が分野の地図のどこに位置づくかを確かめる'
+params_required: [goal_text]
+steps:
+  - do: auth.login
+  - do: learning.course.list
+  - do: learning.course.open
+  - do: learning.landscape.view
+    note: 出典タブの「分野の中の位置づけ」を見る。誰が確かめた位置づけかのラベルを読む
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: student/02-student.md#paper-placement
+watch_for:
+  - 位置づけごとに「AIによる推定（未確認）」か「教員確認済み」かが付き、数値が出ない
+  - 教員が別のコースのリリース前の確認を飛ばして公開しても、この表示は変わらない（前後の run を並べて読む）

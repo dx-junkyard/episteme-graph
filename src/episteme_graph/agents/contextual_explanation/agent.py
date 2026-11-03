@@ -49,10 +49,14 @@ class ContextualExplanationAgent:
         cartridge_base_dir: str | None = None,
         llm_model: str | None = None,
         max_elements_per_call: int = DEFAULT_MAX_ELEMENTS_PER_CALL,
+        language: str | None = None,
     ) -> None:
         self._cartridge_loader = CartridgeLoader(cartridge_base_dir)
         self._input_builder = ContextualExplanationInputBuilder()
-        self._prompt_factory = ContextualExplanationPromptFactory(self._input_builder)
+        # language: 解析 run の生成言語（ja / en）。None は従来どおり素材の言語に合わせる。
+        self._prompt_factory = ContextualExplanationPromptFactory(
+            self._input_builder, language=language
+        )
         self._llm_client = ContextualExplanationLLMClient(model=llm_model)
         self._validator = ContextualExplanationValidator()
         self._repairer = ContextualExplanationRepairer()

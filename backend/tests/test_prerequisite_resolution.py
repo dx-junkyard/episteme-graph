@@ -170,7 +170,7 @@ class TestStageTwoVisibleChunks:
     def test_search_is_gated_by_visible_documents(self, monkeypatch):
         seen: dict = {}
 
-        def _search(query, top_k=8, allowed_document_ids=None):
+        def _search(query, top_k=8, allowed_document_ids=None, **_kw):
             seen["query"] = query
             seen["allowed"] = allowed_document_ids
             return []
@@ -264,6 +264,8 @@ class TestAdviceSourceContextWiring:
             learning_mod, "search_chunks_with_metadata",
             lambda *a, **k: [_chunk("mat-other", "グリーン関数の定義。")],
         )
+        # IK-0494: 見せる出典は本文が引用したものだけ。
+        monkeypatch.setattr(learning_mod, "generate_text", lambda **kwargs: "前提知識の説明本文 [出典1]")
 
         body = LearningChatRequest(
             message="前提知識を確認したい", history=[], support_action="check_prerequisites",

@@ -1,0 +1,64 @@
+id: t-share-explain-endorse-cite
+population: teachers
+runner: [api]
+preconditions:
+  - 同じ周の別の教員（t-share-explain-write）が部品の説明を書き、共有を ON にしている
+# 第 25 周 share (b) の読み手。
+# 第 5 周 H36: 説明を開くコースは任意材料 studio_course_id（短縮 id）で固定する。同題名の 2 コースは題名で区別できない（IK-0407）。
+#   材料が無ければ引数を渡さない（従来どおりセッションのコース → 一覧の先頭）。別の教員が共有した説明を読み、承認し、自分のコースに引用する。
+goal: '{{goal_text}} のために、別の教員が共有した部品「{{component_hint}}」の説明を読み、納得できれば承認して自分のコースに引用する'
+params_required: [goal_text, component_hint, expertise_tag, citation_intent, course_hint]
+steps:
+  - do: auth.login
+  - do: admin.courses.list
+  - do: admin.explanations.open
+    with: {component_hint: '{{component_hint}}', course_id: '{{studio_course_id}}'}
+    note: 同じ部品の「説明・承認の共有」を開き、説明バージョンのカードを読む
+  - choose:
+      - do: admin.explanations.endorse
+        with: {level: endorsed, expertise_tag: '{{expertise_tag}}'}
+        note: 共有された説明を専門タグ付きで承認する
+      - do: admin.explanations.endorse
+        with: {level: provisional}
+        note: まだ確信が無いので暫定の承認にとどめる
+    optional: true
+  # 第 25 周 第 8 周 share H52: 2 人目の査読（第 7・8 周は指揮者が代行した）を場面の手に入れる。ボタンはもう一人の査読を
+  # 待つ標準の説明にだけ出る（出ていなければ runner が送らずに事実を残す）
+  - choose:
+      - do: admin.explanations.update
+        with: {what: second_review}
+        note: もう一人の査読を待つ説明があれば［もう一人の査読者として査読する］を押し、知らせの文（何が変わり、どこへ届くか）を読む
+    optional: true
+  # 第 25 周 第 10 波（judge_share_r10 §6・H56 の残り）: 別の教員が共有した説明が無いときは、自分の説明を書いて共有を ON にし、
+  # その説明を引用する（説明を書くか・共有するかはペルソナの判断。材料 own_explanation_* が無い教員はこの 2 手を飛ばす）
+  - choose:
+      - do: admin.explanations.add
+        with: {title: '{{own_explanation_title}}', body: '{{own_explanation_body}}'}
+        note: 引用したい説明が無ければ、自分の言葉で説明を書いて追加する（既に自分の説明があれば飛ばす）
+    optional: true
+  - choose:
+      - do: admin.explanations.update
+        with: {what: share_on, explanation_hint: '{{own_explanation_title}}'}
+        note: 書いた説明を他の教員が引用できるよう［共有ON］を押す（共有しない判断なら飛ばす）
+    optional: true
+  - do: admin.explanations.cite
+    with: {course_hint: '{{course_hint}}', cite_course_id: '{{cite_course_id}}', citation_intent: '{{citation_intent}}',
+           explanation_hint: '{{cite_explanation_hint}}'}
+    note: 「別コースで引用」で自分の別のコースを選び、引用の意図を添えて引用する
+  - do: admin.explanations.open
+    with: {component_hint: '{{component_hint}}', course_id: '{{studio_course_id}}'}
+    note: もう一度開き、承認の段階ラベルと引用の記録がどう変わったかを見る
+  # 第 25 周 第 4 周（judge_share_r3 §6・H28）: 段階ラベルだけでなく、誰が支持したかを一覧で確かめる
+  - do: admin.explanations.endorsers
+    note: 説明カードの「支持した教員の一覧」を開き、自分の承認が名前付きで載ったか・作者の自己承認がどう扱われるかを読む
+stop_when: [gave_up, blocked, budget_exhausted, persona_stop]
+expects:
+  - manual: teacher/14-admin-lecture-studio.md#endorsement-card
+  - manual: teacher/14-admin-lecture-studio.md#endorsement-cite
+  - manual: teacher/14-admin-lecture-studio.md#cite-intent
+watch_for:
+  - 共有された説明だけが引用でき、共有されていない説明では引用できない理由が分かる
+  - 引用先に出るのは自分が編集できる別のコースだけで、無ければ無いことが事実文で出る
+  - 承認しても数値のスコアは出ず、段階ラベルだけが変わる
+  - 他人の説明の共有・査読承認を押したときに、作者でないので変えられないことが日本語で分かる
+  - 支持した教員の一覧は名前の列挙で、数値のスコア・順位が出ない

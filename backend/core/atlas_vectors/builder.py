@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any, Iterable, Mapping, Optional
 
 from sqlalchemy import text as sa_text
@@ -41,6 +42,38 @@ _gate = CostGate()
 _DAILY_KEY_PREFIX = "atlas_vectors"
 
 # skip 理由の語彙（呼び出し側の分岐・テストが読む。事実のみ・数値を含めない）。
+# ---------------------------------------------------------------------------
+# 構築中の印（IK-0993・第 25 周 第 5 波）
+# ---------------------------------------------------------------------------
+# 凍結が裏（daemon thread）で始める索引の構築の途中を、状態表示と関係の候補が
+# 「再構築してください」「理由なしに空」と言わないための印。プロセス内のみ（DB に
+# 書かない・失敗しても印は必ず外す）。複数プロセスでは別プロセスの構築は見えない
+# （その場合は従来どおりの文に縮退する — 誤って「作っています」とは言わない）。
+_BUILD_LOCK = threading.Lock()
+_BUILDS_IN_PROGRESS: dict[str, str] = {}
+
+
+def mark_build_started(domain_key: str, version: str) -> None:
+    key = str(domain_key or "").strip()
+    if not key:
+        return
+    with _BUILD_LOCK:
+        _BUILDS_IN_PROGRESS[key] = str(version or "")
+
+
+def mark_build_finished(domain_key: str) -> None:
+    key = str(domain_key or "").strip()
+    with _BUILD_LOCK:
+        _BUILDS_IN_PROGRESS.pop(key, None)
+
+
+def build_in_progress(domain_key: str) -> bool:
+    """この分野の索引を（このプロセスで）作っている最中か。"""
+    key = str(domain_key or "").strip()
+    with _BUILD_LOCK:
+        return key in _BUILDS_IN_PROGRESS
+
+
 SKIP_NO_FROZEN_SKELETON = "no_frozen_skeleton"
 SKIP_DAILY_LIMIT = "daily_call_limit_reached"
 SKIP_NO_NODES = "no_skeleton_nodes"
@@ -238,6 +271,56 @@ def build_anchor_embeddings(
     )
 
 
+def _attach_source_hashes(session: Any, domain: str, specs: list[dict]) -> None:
+    """プロトタイプ合成テキストと ``source_hash`` を specs に付ける（決定論・embedding なし）。
+
+    正本は ``schema.build_anchor_source_text``。再構築（:func:`_build_anchor_embeddings`）と
+    索引の状態（:func:`material_changed_node_ids`）が**同じこの関数**で要否を判定する
+    （IK-0965: 状態は行の本数、再構築は材料の指紋で判定して食い違っていた）。
+    """
+    aliases = store.confirmed_aliases_by_node(session, domain)
+    quotes = collect_evidence_quotes(session, domain)
+    for spec in specs:
+        spec["source_text"] = schema.build_anchor_source_text(
+            spec["label"],
+            aliases=aliases.get(spec["node_id"]),
+            region_label=spec["region_label"],
+            child_labels=spec["child_labels"],
+            evidence_quotes=quotes.get(spec["node_id"]),
+        )
+        spec["source_hash"] = schema.source_hash(spec["source_text"])
+
+
+def material_changed_node_ids(session: Any, domain_key: str) -> list[str]:
+    """索引済みの行のうち、説明の材料が変わった項目の node_id（骨格の順・IK-0965）。
+
+    再構築と同じ ``source_hash`` の比較で決める（**embedding を呼ばない**）。索引の
+    行が無い項目（未索引）は含めない — それは「索引の無い項目」として別に言う。
+    凍結骨格が無い・材料が空の項目は空。
+    """
+    from core import atlas_store  # 遅延 import（core の依存を入口で重くしない）
+
+    domain = _clean(domain_key)
+    if not domain:
+        return []
+    skeleton = atlas_store.load_frozen_skeleton(session, domain)
+    if skeleton is None:
+        return []
+    version = _clean(getattr(skeleton, "version", ""))
+    specs = _skeleton_node_specs(skeleton)
+    if not version or not specs:
+        return []
+    _attach_source_hashes(session, domain, specs)
+    known_hashes = store.stored_hashes(session, domain, version)
+    return [
+        spec["node_id"]
+        for spec in specs
+        if spec["source_text"]
+        and spec["node_id"] in known_hashes
+        and known_hashes.get(spec["node_id"]) != spec["source_hash"]
+    ]
+
+
 def _build_anchor_embeddings(
     session: Any,
     domain_key: str,
@@ -260,19 +343,7 @@ def _build_anchor_embeddings(
     if not version or not specs:
         return {"status": "skipped", "skipped_reason": SKIP_NO_NODES}
 
-    aliases = store.confirmed_aliases_by_node(session, domain)
-    quotes = collect_evidence_quotes(session, domain)
-
-    # プロトタイプ合成（決定論。正本は schema.build_anchor_source_text）。
-    for spec in specs:
-        spec["source_text"] = schema.build_anchor_source_text(
-            spec["label"],
-            aliases=aliases.get(spec["node_id"]),
-            region_label=spec["region_label"],
-            child_labels=spec["child_labels"],
-            evidence_quotes=quotes.get(spec["node_id"]),
-        )
-        spec["source_hash"] = schema.source_hash(spec["source_text"])
+    _attach_source_hashes(session, domain, specs)
 
     known_hashes = store.stored_hashes(session, domain, version)
     known_vectors = store.stored_vectors(session, domain, version)
@@ -307,6 +378,25 @@ def _build_anchor_embeddings(
             spec["embedding"] = list(vector) if vector else None
             embedded += 1
 
+    # 頭脳 NEW（第 25 周 第 9 波）: 埋め込む項目が無く、保存済みの行と項目・合成テキストが完全に一致する
+    # ときは書き直さない（全置換の now() で「最後に作成」が進み、「そのまま使った」と食い違っていた）。
+    if (
+        not targets
+        and subset is None
+        and set(known_hashes) == {spec["node_id"] for spec in specs}
+        and all(known_hashes.get(spec["node_id"]) == spec["source_hash"] for spec in specs)
+    ):
+        return {
+            "status": "completed",
+            "domain_key": domain,
+            "skeleton_version": version,
+            "total_nodes": len(specs),
+            "embedded": 0,
+            "reused": sum(1 for spec in specs if spec["node_id"] in known_vectors),
+            "embedded_node_ids": [],
+            "unchanged": True,
+        }
+
     # 全置換書き込み: 今回埋め込まなかったノードは保存済みベクトルを引き継ぐ
     # （設計書 §4 — 変化分のみ embed → 全置換保存）。
     rows: list[dict] = []
@@ -337,6 +427,8 @@ def _build_anchor_embeddings(
         "total_nodes": len(specs),
         "embedded": embedded,
         "reused": reused,
+        # 今回新しく索引した項目（IK-0965。結果文が名前で言う・件数は表示しない）。
+        "embedded_node_ids": [spec["node_id"] for spec in targets],
     }
 
 

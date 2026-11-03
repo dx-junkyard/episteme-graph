@@ -518,7 +518,7 @@ class TestCourseFocusAccessor:
 
     def test_build_opening_includes_course_focus(self, monkeypatch):
         monkeypatch.setattr(opening, "_document_titles", lambda ids: {})
-        monkeypatch.setattr(opening, "_compile_open_assumptions", lambda course_id: [])
+        monkeypatch.setattr(opening, "_compile_open_assumptions", lambda course_id, **_kw: [])
         result = opening.build_opening("course1", [], course_focus="  このコースで議論したいこと  ")
         assert result["course_focus"] == "このコースで議論したいこと"
         # 教員の入力だけでも画面は成立する（投影が空でも黙って落とさない）。
@@ -526,7 +526,7 @@ class TestCourseFocusAccessor:
 
     def test_build_opening_course_focus_defaults_to_empty(self, monkeypatch):
         monkeypatch.setattr(opening, "_document_titles", lambda ids: {})
-        monkeypatch.setattr(opening, "_compile_open_assumptions", lambda course_id: [])
+        monkeypatch.setattr(opening, "_compile_open_assumptions", lambda course_id, **_kw: [])
         result = opening.build_opening("course1", [])
         assert result["course_focus"] == ""
         assert result["available"] is False
@@ -608,7 +608,10 @@ class TestOpeningUiSubjectSections:
         assert "この論文が答えようとした問い" in fn
         assert "thesis.central_question" in fn
         assert "thesis.paper_goal" in fn
-        assert 'if (!question && !goal) return ""' in fn
+        # IK-1013（第 25 周 第 7 波）: 問いも目標も無いときは、サーバの事実文（解析の代替語だった
+        # ときだけ central_question_note が付く）を 1 行だけ描き、無ければ何も描かない。
+        assert "if (!question && !goal) {" in fn
+        assert "thesis.central_question_note" in fn
 
     def test_thesis_section_renders_synthesised_statement(self):
         fn = _extract_js_function(_DISCUSS_JS, "function renderThesisSection(doc) {")
@@ -617,9 +620,12 @@ class TestOpeningUiSubjectSections:
         assert "central_claims" in fn
 
     def test_two_fragile_sections_split_by_kind(self):
-        paper_fn = _extract_js_function(_DISCUSS_JS, "function renderPaperUnverifiedSection(fragilePoints) {")
+        paper_fn = _extract_js_function(
+            _DISCUSS_JS,
+            "function renderPaperUnverifiedSection(fragilePoints, emptyNote, documentId, restDocIds, heading) {",
+        )
         system_fn = _extract_js_function(_DISCUSS_JS, "function renderSystemUnconfirmedSection(fragilePoints, documentId) {")
-        assert 'f.kind === "assumption"' in paper_fn
+        assert 'f.kind !== "assumption"' in paper_fn
         assert "この論文が確かめていないこと" in paper_fn
         assert 'f.kind === "backbone_node"' in system_fn
         assert "まだ確認できていないところ" in system_fn
@@ -628,14 +634,19 @@ class TestOpeningUiSubjectSections:
         assert "解析" in system_fn
 
     def test_course_level_assumptions_are_reachable_outside_the_documents_loop(self):
-        """D層台帳由来の項目は document_id を持たないため、document 一致フィルタの中に
-        置くと画面に一度も出ない（旧実装の欠落）。OA7: 到達できない情報を作らない。"""
+        """D層台帳由来の項目のうち document_id を持たないものは、document 一致フィルタの中に
+        置くと画面に一度も出ない（旧実装の欠落）。OA7: 到達できない情報を作らない。
+
+        IK-0935（第 25 周 第 3 波）: document_id を持つ前提は各論文の区画へ振り分け、ループの外には
+        どの論文の区画にも入らない前提だけを残す（restDocIds）。
+        """
         block = _extract_js_function(_DISCUSS_JS, "function buildOpeningHtml(data) {")
-        idx_loop_end = block.index("renderPaperUnverifiedSection(fragile)")
+        idx_loop_end = block.index("renderPaperUnverifiedSection(fragile, data.paper_unverified_empty_note")
         idx_docs = block.index("docs.forEach(")
         assert idx_docs < idx_loop_end
         docs_loop = block[idx_docs:idx_loop_end]
-        assert "renderPaperUnverifiedSection" not in docs_loop
+        assert 'renderPaperUnverifiedSection(fragile, "", doc.document_id)' in docs_loop
+        assert "docIds" in block[idx_loop_end - 400:idx_loop_end + 200]
 
     def test_alternatives_section_labels_the_source(self):
         fn = _extract_js_function(_DISCUSS_JS, "function renderAlternativesSection(thesis) {")

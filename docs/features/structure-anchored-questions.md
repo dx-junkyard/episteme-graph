@@ -220,3 +220,8 @@ tension の方式に倣い `interest_traces.payload` の拡張で足りる。
    → **2026-09-03 に決着**（解消注記 2026-09-10）: 粒度は `anchor_type` × `doubt_type`
    （`anchor_type == "stage"` の行だけ stage 別セルに割る。個別要素まで割らない）、
    k は既存レイヤーと同じ **k=3**（`core/privacy.py` が正本）。
+
+## 追補（2026-09-30・ペルソナ通し受講 第 16 波）
+
+- **相槌は帰属の対象にしない**（IK-0561）: `_is_contentless_reply` が内容の無い発話を除く。
+- **anchor_confirm の手掛かり**（IK-0562）: 確認プロンプトに `excerpt`（問いの冒頭 40 字）と `prompt`（`ANCHOR_CONFIRM_PROMPT`）を載せる。

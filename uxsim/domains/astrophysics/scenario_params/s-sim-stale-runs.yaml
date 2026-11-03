@@ -1,0 +1,18 @@
+scenario: s-sim-stale-runs
+domain: astrophysics
+# 第 22 周 (l) st-06（skeptic）。第 21 周 (d) の自分の実行（音速の論文 document 910101fb… の t17・ξ_±・配線 2 種）が残っている前提。
+# 砂場 DB で確かめた: simulation_runs に st-06 の行が 2（第 21 周）。周の前の reset では --exclude-persona st-06-skeptic-bao。
+params:
+  goal_text: 前に自分が動かした記録を、今日これから動かすものと取り違えずに見分けること
+  topic_hint: GRとMGでの観測量への影響（暗黒エネルギーと修正重力の音速の論文）
+  topic_hint_terms:
+  - 観測量
+  - GR
+  - MG
+  module_hint: ξ_±
+  questions:
+  - 一番新しい実行の記録は、いつ、どの配線で動かしたものですか？
+per_archetype:
+  skeptic:
+    questions:
+    - ここに並んでいる実行の記録は本当に私のもので、いつのものですか？ 前回の配線のままですか？

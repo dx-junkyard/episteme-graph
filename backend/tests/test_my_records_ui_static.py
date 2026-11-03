@@ -40,7 +40,7 @@ ANCHOR_ID = "topbar.my-records"
 FORBIDDEN_WORDS = ("踏破", "達成率", "ランキング", "獲得", "成長しました", "おすすめ", "スコア")
 
 PRIVACY_NOTE = "この記録はあなたにだけ表示されます。成績評価には使用されません。"
-SEAL_NOTE = "封印の仕組みは、封印したという事実を残したまま内容を読めなくする形で設計中です。"
+SEAL_NOTE = "この画面でできるのは、一覧を見ることと持ち出すことです。記録の内容を読めなくする（封印する）操作はありません。"
 
 
 def _read(path: Path) -> str:
@@ -67,7 +67,8 @@ class TestMyRecordsModule:
         assert "textContent = PRIVACY_NOTE" in src
 
     def test_seal_note_verbatim(self):
-        """封印準備中の正直な事実文が逐語で存在する（TR5: 偽のボタン・先取りの約束なし）。"""
+        """封印が無いことを現物の事実として言う文が逐語で存在する（TR5: 偽のボタン・
+        先取りの約束なし。第 23 波 F4 で「設計中です」の設計メモ調をやめた）。"""
         src = _read(MY_RECORDS_JS)
         assert SEAL_NOTE in src
 
@@ -231,7 +232,7 @@ class TestLearnerHelpAnchor:
         # 常設注記・持ち出し・封印の正直な説明がマニュアル側にもある
         assert "成績評価には使用されません" in md
         assert "持ち出す" in md
-        assert "封印したという事実を残したまま内容を読めなくする形で設計中" in md
+        assert "読めなくする（封印する）操作はありません" in md
 
     def test_frontend_anchor_values_are_all_known(self):
         html = _read(INDEX_HTML)
@@ -242,3 +243,22 @@ class TestLearnerHelpAnchor:
         assert not (used - set(KNOWN_UI_ANCHOR_IDS)), (
             f"KNOWN_UI_ANCHOR_IDS に無いアンカーID: {used - set(KNOWN_UI_ANCHOR_IDS)}"
         )
+
+
+class TestRound23LedgerReadability:
+    """第 23 波 F4: 空の系統を畳む・置き換えられた行を状態として描く・設計メモ調をやめる。"""
+
+    def test_empty_systems_fold_into_one_line(self):
+        src = _read(MY_RECORDS_JS)
+        assert "この系統の記録はまだありません。" not in src
+        assert "EMPTY_SYSTEMS_PREFIX" in src
+        assert "my-records-empty-systems" in src
+
+    def test_seal_note_has_no_design_memo_tone(self):
+        src = _read(MY_RECORDS_JS)
+        assert "設計中" not in src.split("const SEAL_NOTE")[1].split(";")[0]
+
+    def test_superseded_and_candidate_rows_have_styles(self):
+        css = (ROOT / "frontend" / "public" / "css" / "styles.css").read_text(encoding="utf-8")
+        assert ".my-records-item-superseded" in css
+        assert ".my-records-item-candidate" in css

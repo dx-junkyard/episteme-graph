@@ -1,0 +1,44 @@
+id: t-sim-review-shared
+population: teachers
+runner:
+- api
+preconditions:
+- 同じ campaign の学生ペルソナが、この教材の実行を少なくとも 1 つ担当教員に共有している（c-simulation-lab を先に走らせる）。教材の取り込み・コース登録・公開はしない
+# 場面 (g)。教員が学生の共有した実行を見て、台帳の候補を確定するかを自分で決める。
+goal: '{{goal_text}} のために、学生が共有した検証シミュレーションの実行を読み、関係する主張の台帳の候補を確かめてから確定する'
+params_required:
+- goal_text
+- material_hint
+- copilot_questions
+steps:
+- do: auth.login
+- do: admin.materials.list
+- do: admin.simulation.open
+  with:
+    material_hint: '{{material_hint}}'
+  note: '題名に {{material_hint}} を含む教材の行の ⋯ メニューから「検証シミュレーション…」を開く'
+- do: admin.simulation.review_shared_run
+  note: 共有された実行（共有した学生の表示名付き）を開いて、条件・結果・段階の言葉を読む
+- choose:
+  - do: admin.simulation.ledger_candidate_confirm
+    note: 実行の条件と結果に納得できたら、関係する主張の台帳の候補を確定する
+  - do: admin.copilot.chat
+    with:
+      message: '{{copilot_questions | next}}'
+    note: 台帳の候補をどこで確定するのか、確定すると何が起きるのかを AI アシスタントに聞く
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: teacher/27-admin-simulation-bridge.md#simulation-overview
+- manual: teacher/27-admin-simulation-bridge.md#simulation-run
+- manual: teacher/27-admin-simulation-bridge.md#simulation-ledger-candidate
+watch_for:
+- 共有された実行には共有した学生の表示名だけが付き、メールアドレスやユーザー名などの個人情報が出ない
+- 共有されていない実行・予想の下書きは教員に見えない
+- 台帳の候補は確定するまで候補のままで、確定は教員の操作でだけ起きる
+- 確定しても、シミュレーションの一致が検証ではなく分析の妥当性の候補であることが失われない
+- 候補が無いときは、無いことが事実文で分かる

@@ -51,6 +51,10 @@ resolution:
   landed_in:
     - frontend/public/js/admin-llm-models.js
     - docs/architecture/admin_ux_issues_2026-08-01.md §1.5
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E（docker 復帰後）
 related: [IK-0218]
 view_of: []
 pattern: duplicate-canonical-sources

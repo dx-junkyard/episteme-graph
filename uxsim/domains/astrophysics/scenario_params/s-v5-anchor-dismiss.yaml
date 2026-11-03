@@ -1,0 +1,13 @@
+scenario: s-v5-anchor-dismiss
+domain: astrophysics
+params:
+  goal_text: µ(a) と音速の論文で、自分の疑問がどこについての疑問かを整理すること
+  topic_hint_terms: [音速, µ(a), 暗黒エネルギー, 修正重力]
+  seed_questions:
+    - この制約は本当にデータから来ているんですか？模型の仮定から来ていませんか？
+    - 安定性の条件を外したら、結論はどう変わりますか？
+per_archetype:
+  skeptic:
+    seed_questions:
+      - この結論のうち、模型の仮定から出ている部分はどこですか？
+      - 安定性の条件は、データで確かめられているんですか、それとも仮定ですか？

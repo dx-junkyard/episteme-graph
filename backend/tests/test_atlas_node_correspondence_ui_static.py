@@ -171,7 +171,11 @@ class TestIdMigrationsWiring:
     def test_impact_modal_replaces_browser_confirm_for_freeze(self):
         """従来の confirm() を小さなモーダルに置き換える（§7）。"""
         src = _read(ADMIN_JS)
-        assert "function openFreezeImpactModal(summaryLines, correspondenceHtml, onProceed) {" in src
+        # 第 25 周 第 6 波（IK-1019）: 止めている候補の番地（pendingItems）を 5 番目に受ける。
+        assert (
+            "function openFreezeImpactModal(summaryLines, correspondenceHtml, onProceed, blocked, pendingItems) {"
+            in src
+        )
         assert 'overlay.id = "atlas-freeze-impact-modal";' in src
         assert "この対応で凍結" in src
         # 上段の既存の事実文はそのまま（removed / affected / facts）。

@@ -146,6 +146,14 @@ class FakeSession:
             return _Result(self._ledger_rows("assumption", self.assumptions, p))
         if "JOIN theory_claims" in sql:
             return _Result(self._ledger_rows("claim", self.claims, p))
+        if "FROM documents" in sql and "ANY(:refs)" in sql:
+            # core.document_refs（両形の突き合わせの正本・IK-0550）。行は mapping で返す。
+            refs = set(p.get("refs") or [])
+            return _Result([
+                {**d, "source_path": d.get("source_path") or ""}
+                for d in self.documents
+                if d["id"] in refs or d.get("source_path") in refs
+            ])
         if "FROM documents" in sql and "document_ids" in p:
             wanted = set(p.get("document_ids") or [])
             return _Result(

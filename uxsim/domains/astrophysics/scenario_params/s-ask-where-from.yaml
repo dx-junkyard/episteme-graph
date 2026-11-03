@@ -1,0 +1,30 @@
+scenario: s-ask-where-from
+domain: astrophysics
+# 第 15 波: 部品とグラフのある論文（7ef9e487）のトピックへ向け直した
+params:
+  goal_text: この論文の式がどこから出てきたかを説明できるようになること
+  topic_hint: 二重ネットワークとTOV方程式の課し方（PINN による中性子星状態方程式）
+  topic_hint_terms:
+  - TOV
+  - 二重ネットワーク
+  - 状態方程式
+  seed_questions:
+  - EOS ネットワークの入力 x の式を教えてください。
+  where_from_questions:
+  - この式はどこから出てきたんですか？
+  - 前の回答のどこが根拠ですか？
+  - ε_join で x が 0 になるというのは、どの段で決めていますか？
+  - その段の前提は、論文のどの主張ですか？
+per_archetype:
+  skeptic:
+    where_from_questions:
+    - それはどこに書いてありますか？
+    - 前の回答の根拠の出典番号は、原文のどの節ですか？
+    - その正規化は導かれたものですか、設計上の選択ですか？どこに書いてありますか？
+  non_native:
+    goal_text: explaining where an equation of the paper comes from
+    seed_questions:
+    - Please show the equation for the input x of the EOS network.
+    where_from_questions:
+    - Where does this equation come from?
+    - Which part of your previous answer is the evidence?

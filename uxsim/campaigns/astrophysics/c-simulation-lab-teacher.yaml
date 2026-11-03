@@ -1,0 +1,17 @@
+id: c-astro-simulation-lab-teacher
+domain: astrophysics
+snapshot: corpus-astro-tex-v1
+course_id: 1bad7d9f
+personas:
+  teachers: [te-03-meticulous-seminar, te-04-copilot-intro]
+  students: []
+scenarios:
+  teacher: [t-sim-review-shared]
+runner: api
+flags: {}
+budget: {product_llm_calls: 10, persona_llm_calls: 80, wall_clock_minutes: 60}
+notes: |
+  検証シミュレーション層の教員場面 (g)。学生の共有の後に走らせる（c-simulation-lab.yaml の (e) st-04 × s-sim-share-meaning
+  などで実行が担当教員に共有されていること）。共有が無いまま走らせると、共有された実行が無いことの事実文だけを見る周になる。
+  教材の取り込み・コース登録・公開はしない。te-04 はコース 1bad7d9f の所有者。
+  場面の組: (g) te-03-meticulous-seminar × t-sim-review-shared / te-04-copilot-intro × t-sim-review-shared

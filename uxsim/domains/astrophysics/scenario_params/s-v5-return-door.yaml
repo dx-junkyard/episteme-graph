@@ -1,0 +1,11 @@
+scenario: s-v5-return-door
+domain: astrophysics
+params:
+  goal_text: µ(a) と音速の論文の続き
+  revisit_answer_text: 一晩考えて、準静的近似が崩れるのは音速が小さく、ホライズンに近い尺度だと思う。そこでは µ と音速の関係はそのままでは使えない。
+  seed_questions:
+    - 昨日の持ち越しの問いの続きとして、準静的近似が崩れる尺度はどこですか？
+per_archetype:
+  night_parttime:
+    goal_text: 昨日の 30 分の続き
+    revisit_answer_text: 昨日の問いは、たぶん準静的近似の範囲の話。今日は図を見て確かめる。

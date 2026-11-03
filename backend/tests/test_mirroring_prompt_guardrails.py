@@ -120,7 +120,7 @@ class TestExistingDiscussContractsUnchanged:
         assert "messages: list[dict] = [" in _LEARNING_SRC
 
     def test_history_window_literal_unchanged(self):
-        assert "window_history(body.history, max_messages=20, max_chars=2000)" in _LEARNING_SRC
+        assert "window_history(_prompt_history, max_messages=20, max_chars=4000, trim_at_boundary=True)" in _LEARNING_SRC
 
 
 # ===========================================================================

@@ -12,8 +12,8 @@ W2「確定は人間・AI は候補のみ」/ W3「evidence-based」/ W4「情�
 
   1. ``interpretation`` → C層 ``component_explanations``（``kind='personal'``）。
      ``theory_component`` のみ対応（component_explanations は component_id 必須のため）。
-     component の ``course_id`` が NULL（document のみに紐づき、コース未登録）の場合は
-     コミット不可（component_explanations.course_id は NOT NULL の FK）。
+     component の ``course_id`` が空（document のみに紐づき、コース未登録）の場合は出所の
+     コースなし（NULL）でコミットする（IK-0891・migration 091 で course_id は NULL 許容）。
   2. ``meaning``/``decomposition`` → ``theory_components.summary``/``teacher_notes`` の更新。
      ``theory_component`` のみ対応。
   3. ``identity`` → W-β ``core.deliberation.identity_links.create_candidate``（confidence
@@ -255,13 +255,8 @@ def _commit_interpretation(annotation: dict, current_user_id: str | None) -> dic
         session.close()
     if not row:
         raise CommitRoutingError(f"theory_component not found: {component_id}", kind="not_found")
-    course_id = row[0]
-    if not course_id:
-        raise CommitRoutingError(
-            "この theory_component はコースに紐づいていないため、"
-            "解釈のコミット先（component_explanations）を作成できません",
-            kind="unsupported",
-        )
+    # course_id は出所（IK-0891・migration 091 で NULL 許容）。コース外の部品は NULL で入れる。
+    course_id = str(row[0] or "").strip() or None
 
     body_text = str((annotation.get("body") or {}).get("text") or "")
 

@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import urllib.parse
 from pathlib import Path
 
@@ -133,6 +134,25 @@ def _iter_repo_markdown() -> list[Path]:
         for p in ROOT.rglob("*.md")
         if not (set(p.parts) & _EXCLUDED_DIR_PARTS)
     )
+
+
+def _tracked_markdown_names() -> set[str]:
+    """git が追跡している ``.md`` のベースネーム集合。
+
+    作業ツリーを ``rglob`` すると、.gitignore 対象（``uxsim/runs/``）や未コミットの
+    手元ファイルまで「実在」と数えてしまい、作者の手元では通って CI のクリーンな
+    チェックアウトでだけ落ちる（2026-10-24）。実在の判定はコミットされたものに揃える。
+    git が使えない環境（tarball 展開など）だけ作業ツリーに縮退する。
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z", "--", "*.md"],
+            check=True,
+            capture_output=True,
+        ).stdout.decode("utf-8")
+    except (OSError, subprocess.CalledProcessError):
+        return {path.name for path in _iter_repo_markdown()}
+    return {Path(rel).name for rel in out.split("\0") if rel}
 
 
 def _iter_checked_markdown() -> list[Path]:
@@ -304,7 +324,7 @@ class TestBacktickMarkdownReferences:
     """
 
     def test_backtick_md_references_exist_in_repo(self):
-        known = {path.name for path in _iter_repo_markdown()}
+        known = _tracked_markdown_names()
         missing: list[str] = []
         targets = [CLAUDE_DOC] + [
             p for p in sorted(DOCS_DIR.rglob("*.md")) if not (set(p.parts) & _EXCLUDED_DIR_PARTS)

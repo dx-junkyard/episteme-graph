@@ -362,9 +362,63 @@ class TestRevealRung:
 
 
 class TestAvailability:
-    def test_unresolved_element_returns_available_false_only(self, monkeypatch):
+    def test_unresolved_element_returns_available_false_with_reason(self, monkeypatch):
         monkeypatch.setattr(engine, "resolve_element", lambda et, eid, cd: None)
-        assert build_ladder({}, "course-1", "equation", "eq_x") == {"available": False}
+        monkeypatch.setattr(engine, "explain_unresolved", lambda *a, **k: engine.UNRESOLVED_NOT_FOUND)
+        ladder = build_ladder({}, "course-1", "equation", "eq_x")
+        assert ladder["available"] is False and "rungs" not in ladder
+        assert ladder["reason"] == engine.UNRESOLVED_NOT_FOUND
+        assert ladder["facts"] == [
+            engine.UNRESOLVED_FACTS[engine.UNRESOLVED_NOT_FOUND],
+            engine.UNRESOLVED_EXIT_EQUATION,
+        ]
+
+    def test_unresolved_reason_lines_for_each_step(self, monkeypatch):
+        monkeypatch.setattr(engine, "resolve_element", lambda et, eid, cd, **k: None)
+        for reason in (
+            engine.UNRESOLVED_NO_DOCUMENTS, engine.UNRESOLVED_AMBIGUOUS,
+            engine.UNRESOLVED_NOT_IN_FOCUS, engine.UNRESOLVED_NOT_FOUND,
+        ):
+            monkeypatch.setattr(engine, "explain_unresolved", lambda *a, _r=reason, **k: _r)
+            ladder = build_ladder({}, "c", "claim", "cl-1", preferred_document_ids=("d1",))
+            assert ladder["facts"][0] == engine.UNRESOLVED_FACTS[reason]
+            assert ladder["facts"][1] == engine.UNRESOLVED_EXIT_OTHER
+            assert not any(ch.isdigit() for f in ladder["facts"] for ch in f)
+
+    def test_diagnosis_failure_still_gives_exit(self, monkeypatch):
+        monkeypatch.setattr(engine, "resolve_element", lambda et, eid, cd: None)
+
+        def _boom(*a, **k):
+            raise RuntimeError("x")
+
+        monkeypatch.setattr(engine, "explain_unresolved", _boom)
+        ladder = build_ladder({}, "course-1", "equation", "eq_x")
+        assert ladder["facts"][-1] == engine.UNRESOLVED_EXIT_EQUATION
+
+
+class TestExplainUnresolved:
+    def _patch(self, monkeypatch, hits):
+        from core.descent import resolve
+        monkeypatch.setattr(resolve, "course_document_ids", lambda cd: {"da", "db"})
+        monkeypatch.setattr(resolve, "_documents_with_equation", lambda eid, docs: list(hits))
+        return resolve
+
+    def test_ambiguous(self, monkeypatch):
+        resolve = self._patch(monkeypatch, ["da", "db"])
+        assert resolve.explain_unresolved("equation", "eq_5", {}) == resolve.UNRESOLVED_AMBIGUOUS
+
+    def test_not_in_focus(self, monkeypatch):
+        resolve = self._patch(monkeypatch, [])
+        assert (
+            resolve.explain_unresolved("equation", "eq_5", {}, preferred_document_ids=("db",))
+            == resolve.UNRESOLVED_NOT_IN_FOCUS
+        )
+
+    def test_not_found_and_no_documents(self, monkeypatch):
+        resolve = self._patch(monkeypatch, [])
+        assert resolve.explain_unresolved("equation", "eq_5", {}) == resolve.UNRESOLVED_NOT_FOUND
+        monkeypatch.setattr(resolve, "course_document_ids", lambda cd: set())
+        assert resolve.explain_unresolved("equation", "eq_5", {}) == resolve.UNRESOLVED_NO_DOCUMENTS
 
     def test_resolved_but_material_less_ladder_is_still_available(self, monkeypatch):
         """解決済みで素材ゼロなら骨格（想起 + 空リビール）で成立（隠さない）。"""
@@ -509,3 +563,35 @@ class TestBackstagePath:
         blob = str(path)
         for hidden in ("候補の説明", "文脈説明", "議論のきっかけ"):
             assert hidden not in blob, f"非承認/対象外の説明 {hidden!r} が漏れている"
+
+
+class TestLadderTargetAndEmptyReason:
+    """第 14 周: どの要素の段か（target_label）と、導出が空になった理由を出す。"""
+
+    def test_target_label_is_returned_when_given(self):
+        reveal = {"kind": "reveal", "items": [], "note": REVEAL_NOTE_EMPTY}
+        ladder = compose_ladder(
+            "claim", stage_label="", stage_description="", symbol_items=[],
+            reveal=reveal, target_label="暗黒エネルギーは修正重力で記述できる",
+        )
+        assert ladder["target_label"].startswith("暗黒エネルギー")
+
+    def test_no_target_label_key_when_empty(self):
+        reveal = {"kind": "reveal", "items": [], "note": REVEAL_NOTE_EMPTY}
+        ladder = compose_ladder(
+            "claim", stage_label="", stage_description="", symbol_items=[], reveal=reveal,
+        )
+        assert "target_label" not in ladder
+
+    def test_empty_reveal_reason_distinguishes_missing_equation_link(self):
+        from core.descent.engine import (
+            REVEAL_REASON_NO_EQUATION_LINK, REVEAL_REASON_NO_STEP, _reveal_rung,
+        )
+        assert _reveal_rung([], [], {})["reason"] == REVEAL_REASON_NO_EQUATION_LINK
+        assert _reveal_rung([], ["eq_1"], {})["reason"] == REVEAL_REASON_NO_STEP
+
+    def test_reveal_with_items_has_no_reason(self):
+        from core.descent.engine import _reveal_rung
+        chains = [{"steps": [{"input_equation_ids": ["eq_1"], "output_equation_ids": [],
+                              "operation": "derive", "reason": "r"}]}]
+        assert "reason" not in _reveal_rung(chains, ["eq_1"], {})

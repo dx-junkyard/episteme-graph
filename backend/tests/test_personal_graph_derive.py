@@ -889,3 +889,15 @@ class TestMalformedPayloadFailsClosed:
         """縮退の追加で既存の map_excluded 判定を壊していないこと。"""
         row = _trace(id_="t1", kind="tension", status="open", payload={"map_excluded": True})
         assert build_network([row], [], _ATLAS).nodes == []
+
+
+def test_discussion_topic_anchor_gets_canonical_label():
+    """第 14 周: discuss の疑似トピックの痕跡は題名が引けないので正本の表示名を入れる。"""
+    from core.discuss.context import DISCUSSION_TOPIC_ID, DISCUSSION_TOPIC_LABEL
+    from core.personal_graph import derive
+
+    assert derive._DISCUSSION_TOPIC_ID == DISCUSSION_TOPIC_ID
+    assert derive._DISCUSSION_TOPIC_LABEL == DISCUSSION_TOPIC_LABEL
+    anchor = derive._topic_anchor(DISCUSSION_TOPIC_ID, {}, {})
+    assert anchor.anchor_label == DISCUSSION_TOPIC_LABEL
+    assert derive._topic_anchor("t9", {}, {}).anchor_label == ""

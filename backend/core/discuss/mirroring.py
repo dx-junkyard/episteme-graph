@@ -25,11 +25,25 @@ import re
 
 # 鏡文の固定マーカー（DOTALL: 鏡文が改行を含んでも1個の鏡として扱う）
 _MIRROR_RE = re.compile(r"〔鏡〕(.+?)〔/鏡〕", re.DOTALL)
-# 鏡文中の逐語引用スパン（「」内。入れ子は想定しない — 契約プロンプトが単純引用を指示する）
-_QUOTE_RE = re.compile(r"「([^「」]+)」")
+# 鏡文中の逐語引用スパン（「」内。入れ子は想定しない — 契約プロンプトが単純引用を指示する）。
+# IK-0468: 英語の会話では鏡が "…" / “…” で引用する（「」だけを見ると英語の鏡が引用ゼロ＝
+# 不合格になり、言い直しが本文に残っていた）。3種の引用をすべて同じ逐語検査にかける。
+_QUOTE_RE = re.compile(r"「([^「」]+)」|“([^“”]+)”|\"([^\"]+)\"")
 
 # 逐語証拠として認める引用の最短長（1文字の一致は偶然一致しやすく証拠として弱すぎる）
 _MIN_QUOTE_CHARS = 2
+
+#: 鏡を本文の途中・末尾から取り出したとき、元の位置に残す事実文（IK-0400）。
+#: 鏡は学習画面では回答の先頭の「AIによる言い直し」枠（app.js ``renderMirrorBlock`` の
+#: ラベルと同じ語）に出るので、本文が「次に、あなたの言い直しについてです。」のような
+#: 前置きで終わると、その先が消えたように読める。また会話履歴（クライアントが送り返す
+#: 本文）には鏡文そのものは含めない（EX-3b ④）ので、この1文が無いと次のターンの AI は
+#: 自分の前置きの先が「途切れた」と誤認し、存在しない表示不具合を詫びる（第 8 周の実測）。
+#: 鏡文の中身は写さない（窓の外へ持ち出さない）— 在処だけを言う。
+MIRROR_MOVED_NOTE = "（言い直しは、この回答の「AIによる言い直し」の枠に示しています。）"
+#: 英語の会話で使う同じ事実文（IK-0468。言語の選び方は呼び出し側 — 学習者の直前の発話に
+#: かな・漢字が無ければ英語。定型文の言語選択 IK-0450 と同じ規則）。
+MIRROR_MOVED_NOTE_EN = "(The restatement is shown in the \"AI restatement\" box of this answer.)"
 
 
 def _has_verbatim_quote(mirror_text: str, learner_message: str) -> bool:
@@ -44,7 +58,10 @@ def _has_verbatim_quote(mirror_text: str, learner_message: str) -> bool:
     learner_message = str(learner_message or "")
     if not learner_message:
         return False
-    quotes = [q.strip() for q in _QUOTE_RE.findall(mirror_text or "")]
+    quotes = [
+        next((part for part in groups if part), "").strip()
+        for groups in _QUOTE_RE.findall(mirror_text or "")
+    ]
     if not quotes:
         return False
     return all(len(q) >= _MIN_QUOTE_CHARS and q in learner_message for q in quotes)
@@ -55,12 +72,15 @@ def _strip_markers(text: str) -> str:
     return text.replace("〔鏡〕", "").replace("〔/鏡〕", "")
 
 
-def extract_mirror(answer: str, learner_message: str) -> tuple[str, dict | None]:
+def extract_mirror(
+    answer: str, learner_message: str, *, moved_note: str = MIRROR_MOVED_NOTE
+) -> tuple[str, dict | None]:
     """回答本文から鏡文を決定論抽出する（最初の1個のみ）。
 
     Returns:
         ``(clean_answer, mirror)``。鏡が有効なら ``mirror = {"text": 鏡文}`` で本文から
-        当該スパンを除去。マーカーが無い・verbatim 検査に不合格なら ``mirror = None`` で、
+        当該スパンを除去（鏡の前に本文があるときは、元の位置に :data:`MIRROR_MOVED_NOTE`
+        を残す — 鏡の後ろの本文はそのまま続く）。マーカーが無い・verbatim 検査に不合格なら ``mirror = None`` で、
         後者はマーカーだけ剥がして中身を本文に残す（縮退・再生成なし）。
         閉じマーカー欠落等でペアが成立しない場合も、マーカー断片だけは剥がして返す
         （生マーカーを学習者に見せない）。2個目以降のマーカーは常にマーカーのみ剥がして
@@ -81,7 +101,14 @@ def extract_mirror(answer: str, learner_message: str) -> tuple[str, dict | None]
         # verbatim 不合格: 鏡扱いせずマーカーだけ剥がして本文に残す（P4/P6）。
         return _strip_markers(answer), None
 
-    clean_answer = (answer[: match.start()] + answer[match.end():]).strip()
+    before = answer[: match.start()]
+    after = answer[match.end():]
+    if before.strip():
+        # 鏡が本文の先頭に無い（前置きの後ろ・末尾に出た）ときは、元の位置に在処の事実文を
+        # 残す。先頭の鏡は学習画面でも先頭の枠に出るので何も残さない（従来どおり）。
+        clean_answer = (before.rstrip() + "\n\n" + moved_note + "\n\n" + after.lstrip()).strip()
+    else:
+        clean_answer = (before + after).strip()
     # 2個目以降（LLM が契約に反して複数出した場合）はマーカーのみ除去して本文に残す。
     clean_answer = _strip_markers(clean_answer)
     return clean_answer, {"text": mirror_text}

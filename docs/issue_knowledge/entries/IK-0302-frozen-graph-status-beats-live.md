@@ -54,6 +54,15 @@ resolution:
     - backend/core/deliberation/graph_dialogue.py
     - backend/api/routes/theory_components.py
     - docs/features/graph_dialogue_review_design.md §11.1
+  principles:
+    - principle: sync-by-stable-key-and-protect-human-decisions
+      use: extracted
+      note: >-
+        採った部品は ④の派生形（読み時の合流: 人の語彙だけ現在値を優先し、解析由来の語彙は焼き込み値を保つ）。固有の差分: 対象が投影（graph_json）で、焼き込み値を捨てると解析時点の根拠が読めなくなるため書き換えない。
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E（グラフ描画・対話・承認の通し確認）
 related: [IK-0301, IK-0307]
 view_of: []
 history:

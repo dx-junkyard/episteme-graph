@@ -1,0 +1,60 @@
+id: s-sim-first-open-io
+population: students
+runner:
+- api
+# 第 22 周 (a')。第 21 周 (a) で「入力・出力が — → —」で諦めた場面の再設計。まとまりの一覧に
+# 「受け取る記号 → 定める記号」（DTO の input_symbols / output_symbols）と副題が出る前提で、3 つ読み比べて 1 つ選び、
+# コードを生成する前に「何を入れて何が出るか」を自分の言葉で言えるかを見る。LLM 生成なし。
+goal: '{{goal_text}} のために、{{topic_hint}} で「動かして確かめる」を開き、まとまりを読み比べて、生成の前に何を入れて何が出るかを自分の言葉で言う'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_numbers
+- module_hint
+- questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+  note: 教材の下の「🧪 動かして確かめる」を押してパネルを開く。一覧の各まとまりの「受け取る記号 → 定める記号」を読む
+- repeat:
+    until: persona_decides_to_stop or steps > 3
+    max: 3
+    do: learning.simlab.select_module
+    with:
+      module_hint: '{{module_numbers | next}}'
+    note: 上から順に 3 つのまとまりを選び、受け取る記号・定める記号・副題・前提を読み比べる
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+  note: 読み比べた中から、何を入れて何が出るかをいちばん言えそうなまとまりを 1 つ選び直す。生成は押さない
+- repeat:
+    until: persona_decides_to_stop or steps > 2
+    max: 2
+    do: learning.chat.ask
+    with:
+      message: '{{questions | next}}'
+    note: 選んだまとまりの受け取る記号がどこから来て、定める記号が何を表すかを確かめる。自分の言葉で言い直してから聞いてよい
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab
+- manual: student/02-student.md#simulation-lab-modules
+- manual: student/02-student.md#simulation-lab-not-verification
+watch_for:
+- 各まとまりに「受け取る記号 → 定める記号」が並び、生成する前に何を入れて何が出るかが読める
+- 受け取る記号・定める記号が無いまとまりが「— → —」のような空の行で埋まっていない
+- 同じ名前のまとまりが副題で区別できる
+- 記号は名前だけで出て、内部の番号・英語の生成ラベル・辞書の書式（{'symbol': …}）が混じらない
+- 学習・最適化の手続（損失・目的関数）のまとまりには、動かしても予言の確かめにならないことが一行で出る

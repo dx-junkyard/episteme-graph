@@ -55,6 +55,11 @@ resolution:
     - backend/tests/test_issue_448_450_detail_panel.py
     - backend/tests/test_revision_pg_integration.py
     - .github/workflows/test.yml
+  verification:
+    methods: [guardrail, ci_all_paths]
+    unverified:
+      - docker で組み上げた実機での E2E
+      - node が無い開発機での既定実行（pip 配布の node で代替して走らせた）
 related: [IK-0324, IK-0326, IK-0105]
 view_of: []
 history: []

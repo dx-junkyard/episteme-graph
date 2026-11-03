@@ -61,6 +61,7 @@ _REGISTRY: list[Capability] = [
     # --- 教材 (materials) ---
     Capability(
         id="materials.upload",
+        keywords=('アップロード', '取り込', '教材を追加', 'pdf', 'tex', 'ファイル'),
         screen="materials",
         title="教材（PDF / TeX）をアップロードする",
         required_role=ROLE_TEACHER,
@@ -74,6 +75,7 @@ _REGISTRY: list[Capability] = [
     ),
     Capability(
         id="materials.set_visibility",
+        keywords=('教材', '開示', '公開範囲', '可視性', 'visibility', '限定', '共有範囲'),
         screen="materials",
         title="教材の開示範囲を変更する",
         required_role=ROLE_TEACHER,
@@ -99,6 +101,7 @@ _REGISTRY: list[Capability] = [
     ),
     Capability(
         id="materials.delete",
+        keywords=('教材', '削除', '消'),
         screen="materials",
         title="教材を削除する",
         required_role=ROLE_TEACHER,
@@ -176,6 +179,28 @@ _REGISTRY: list[Capability] = [
                   precondition="material_selected"),
         ),
     ),
+    # 再現性レビュー 第 2 波（knowledge_reproduction_review_2026-09-19.md §7）: G層の
+    # material.explanations_skipped / material.ingest_incomplete の解消手段は「パイプラインを
+    # 再実行する」こと。再実行は LLM を数百回呼ぶ操作なので Copilot の代行には載せず、
+    # 行の「パイプラインを実行 ▼」までの道案内に留める（P8: 誘導まで。押すのは本人）。
+    Capability(
+        id="materials.rerun_pipeline",
+        screen="materials",
+        title="解析パイプラインを再実行する（全実行 / 個別ステージ）",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#rerun-pipeline",
+        description="解析済みの教材に対して、行の「パイプラインを実行 ▼」から全実行または個別ステージの"
+                    "再実行を選ぶ。要素の説明が日次上限で作られなかった教材や、取り込みの完全性チェックが"
+                    "「完全ではない」と記録した教材の解消手段。再実行は LLM を多数回呼ぶため、開始は教員の操作だけ。",
+        api={"method": "POST", "path": "/api/admin/materials/{material_id}/document-pipeline/run"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_pipeline_run_button",
+                  "行の「パイプラインを実行 ▼」を押し、全実行か個別ステージを選びます",
+                  precondition="material_selected"),
+        ),
+    ),
     # 知識ランドスケープ（knowledge_landscape_design.md LS2）: AI 配置は inferred 止まりで、
     # 確定は教員の操作だけ。代行は登録せず道案内に留める。
     Capability(
@@ -240,6 +265,7 @@ _REGISTRY: list[Capability] = [
     # 多ターンチャットのため apply/revert を持たせず、道案内・説明に留める（P1 の段階登録）。
     Capability(
         id="course_builder.open",
+        keywords=('コース', '設計', '構築', 'ビルダー', 'コースを作'),
         screen="course-builder",
         title="AI とコースを設計する（コース構築チャット）",
         required_role=ROLE_TEACHER,
@@ -254,6 +280,7 @@ _REGISTRY: list[Capability] = [
     # --- 原稿スタジオ (lecture-studio) ---
     Capability(
         id="lecture_studio.rewrite_chunk_script",
+        keywords=('原稿', 'スクリプト', '書き換え', '書き直', 'リライト', '修正', 'チャンク', 'ナレーション', '台本'),
         screen="lecture-studio",
         title="チャンクの原稿を AI で書き換える",
         required_role=ROLE_TEACHER,
@@ -293,6 +320,7 @@ _REGISTRY: list[Capability] = [
     # --- コース管理 (course-management) ---
     Capability(
         id="course.set_visibility",
+        keywords=('コース', '開示', '公開範囲', '可視性', '限定', '共有範囲'),
         screen="course-management",
         title="コースの開示範囲を変更する",
         required_role=ROLE_TEACHER,
@@ -311,6 +339,7 @@ _REGISTRY: list[Capability] = [
     ),
     Capability(
         id="course.publish",
+        keywords=('コース', '公開', '学生に', '受講', '出す', 'リリース'),
         screen="course-management",
         title="コースを学生に公開する",
         required_role=ROLE_TEACHER,
@@ -333,6 +362,7 @@ _REGISTRY: list[Capability] = [
     ),
     Capability(
         id="course.delete",
+        keywords=('コース', '削除', '消'),
         # 2026-09-03 是正: コース管理タブにコース削除の UI は無い。削除ボタンは
         # 「コース構築」タブの「既存コースを読込」モーダル内の行にしかないため、
         # screen / locate_steps とも到達可能な経路（course-builder）に合わせる。
@@ -400,6 +430,7 @@ _REGISTRY: list[Capability] = [
     # --- 分野の地図 (atlas) ---
     Capability(
         id="atlas.generate_skeleton",
+        keywords=('地図', '骨格', '生成', 'スケルトン', 'atlas', 'スケルトン生成'),
         screen="atlas",
         title="分野の地図の骨格を生成する",
         required_role=ROLE_TEACHER,
@@ -417,6 +448,7 @@ _REGISTRY: list[Capability] = [
     ),
     Capability(
         id="atlas.freeze_skeleton",
+        keywords=('地図', '骨格', '凍結', '確定', 'freeze'),
         screen="atlas",
         title="分野の地図の骨格を凍結する",
         required_role=ROLE_TEACHER,
@@ -470,6 +502,7 @@ _REGISTRY: list[Capability] = [
     # 従来 screen="groups" だったため道案内が実在しないフォームを指していた。
     Capability(
         id="users.create_student",
+        keywords=('学生', '受講者', 'アカウント', '作成', '登録'),
         screen="students",
         title="学生アカウントを作成する",
         required_role=ROLE_TEACHER,
@@ -486,6 +519,7 @@ _REGISTRY: list[Capability] = [
     ),
     Capability(
         id="users.create_teacher",
+        keywords=('教員', '先生', '教師', 'アカウント', '作成'),
         screen="teachers",
         title="教員アカウントを作成する",
         required_role=ROLE_SYSTEM_ADMIN,  # 教員作成は SYSTEM_ADMIN のみ
@@ -668,6 +702,7 @@ _REGISTRY: list[Capability] = [
     # --- システム (SYSTEM_ADMIN 専用・説明のみ) ---
     Capability(
         id="system.view_stats",
+        keywords=('統計', 'stats', '状況', '件数'),
         screen="system-stats",
         title="システム統計を見る",
         required_role=ROLE_SYSTEM_ADMIN,
@@ -678,6 +713,7 @@ _REGISTRY: list[Capability] = [
     ),
     Capability(
         id="system.view_error_logs",
+        keywords=('エラー', 'ログ', 'error', '障害'),
         screen="error-analysis",
         title="エラーログを見る",
         required_role=ROLE_SYSTEM_ADMIN,
@@ -783,6 +819,7 @@ _REGISTRY: list[Capability] = [
     # --- L層（分野別ナレッジライブラリ, knowledge-library） ---
     Capability(
         id="library.view_and_freeze",
+        keywords=('ナレッジライブラリ', 'ライブラリ', 'エントリ', '凍結', '版を発行', '版発行', '共通部品'),
         screen="knowledge-library",
         title="ナレッジライブラリのエントリを参照・凍結する",
         required_role=ROLE_TEACHER,
@@ -793,6 +830,112 @@ _REGISTRY: list[Capability] = [
         locate_steps=(
             _step("knowledge-library", "library_domain_list", "分野を選び、参照したいエントリを開きます"),
             _step("knowledge-library", "library_entry_freeze_button", "「凍結（版発行）」を押します",
+                  precondition="entry_selected"),
+        ),
+    ),
+    # 概念レジストリ（concept_registry_design.md）の 4 区画 — 案内専用（IK-0865・2026-10-23）。
+    # 以前は knowledge-library の項目が凍結の 1 つだけで、同一性の候補・別名・関係・地図との
+    # 対応を尋ねると装置の参照・凍結の手順が返っていた。
+    Capability(
+        id="library.identity_candidates",
+        keywords=('同一性', '同じもの', '結びつけ', '結び付け', '共通部品', '候補', '確定', '学生', '学生の画面', '見送'),
+        screen="knowledge-library",
+        title="同一性の候補を確認する・見送る",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/library.md#identity-candidates",
+        description="教材の解析が見つけた「ほかの論文の部品と同じもの」の候補を、支持する論文の"
+                    "題名を見て 1 件ずつ確認または見送る。候補が無いときの理由と作り直す道も案内する。",
+        locate_steps=(
+            _step("knowledge-library", "library_identity_candidates",
+                  "タブ上部の「同一性の候補」で、候補ごとに「確認」か「見送り」を押します"),
+        ),
+    ),
+    # IK-0958: 「凍結していなくても学生に見えるか」「確定の取り消しはどこから」に答える節。
+    Capability(
+        id="library.what_students_see",
+        keywords=('学生に見え', '見える', '学生の画面に', '凍結していな', '凍結しないと', '届く', '学生に出'),
+        screen="knowledge-library",
+        title="確定すると学生に何が見えるか",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/library.md#what-students-see",
+        description="同一性リンクの確定・見送り・取り消し、エントリの凍結で、学生の画面に何が"
+                    "届くか（学生に出るのは凍結した版だけ）を案内する。",
+        locate_steps=(
+            _step("knowledge-library", "library_entries_list", "エントリ一覧から対象のエントリを開きます"),
+            _step("knowledge-library", "library_bound_parts_section",
+                  "詳細の「結びついた教材の部品」で、確定した結び付きを確かめます",
+                  precondition="entry_selected"),
+        ),
+    ),
+    Capability(
+        id="library.revoke_identity_link",
+        keywords=('取り消', '取消', '撤回', '確定を取り消', '確定を戻', '間違えて確定'),
+        screen="knowledge-library",
+        title="確定した結び付きを取り消す",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/library.md#revoke-identity-link",
+        description="誤って確定した同一性リンクを、エントリの詳細の「結びついた教材の部品」か"
+                    "部品の「深く検討」から、理由を書いて取り消す（行と記録は残る）。",
+        locate_steps=(
+            _step("knowledge-library", "library_entries_list", "エントリ一覧から対象のエントリを開きます"),
+            _step("knowledge-library", "library_bound_parts_section",
+                  "詳細の「結びついた教材の部品」で、確定の行の「確定を取り消す」を押します",
+                  precondition="entry_selected"),
+        ),
+    ),
+    Capability(
+        id="library.labels",
+        keywords=('別名', '隠しラベル', 'ラベル', '表記ゆれ'),
+        screen="knowledge-library",
+        title="エントリに別名・隠しラベルを足す",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/library.md#labels",
+        description="エントリの詳細の「別名・隠しラベル」区画で、表示にも検索にも使う別名と、"
+                    "検索だけで拾う隠しラベルを足す・外す。",
+        locate_steps=(
+            _step("knowledge-library", "library_entries_list", "エントリ一覧から対象のエントリを開きます"),
+            _step("knowledge-library", "library_labels_section",
+                  "詳細の「別名・隠しラベル」区画で種類を選んで追加します",
+                  precondition="entry_selected"),
+        ),
+    ),
+    Capability(
+        id="library.relations",
+        keywords=('関係', '上位', '関連', '近い'),
+        screen="knowledge-library",
+        title="エントリどうしの関係を記録する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/library.md#relations",
+        description="エントリの詳細の「関係」区画で、相手のエントリを名前で検索して選び、"
+                    "上位・関連・同一・近い の関係と根拠の種類を記録する。",
+        locate_steps=(
+            _step("knowledge-library", "library_entries_list", "エントリ一覧から対象のエントリを開きます"),
+            _step("knowledge-library", "library_relations_section",
+                  "詳細の「関係」区画で相手を検索して選び、関係を記録します",
+                  precondition="entry_selected"),
+        ),
+    ),
+    Capability(
+        id="library.atlas_links",
+        keywords=('地図との対応', '分野の地図との対応', '対応を導出', '対応', '地図の概念'),
+        screen="knowledge-library",
+        title="分野の地図との対応を導出・確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/library.md#atlas-links",
+        description="分野を選んで「地図との対応を導出」を押し、分野の地図の概念とエントリの対応の"
+                    "候補を作る。候補はエントリの詳細の「分野の地図との対応」区画で確定・見送りする。",
+        locate_steps=(
+            _step("knowledge-library", "library_domain_list", "左の一覧から分野を選びます"),
+            _step("knowledge-library", "library_atlas_derive_button",
+                  "「地図との対応を導出」を押します（結果はボタンの下に事実文で出ます）"),
+            _step("knowledge-library", "library_atlas_links_section",
+                  "エントリの詳細の「分野の地図との対応」区画で候補を確定・見送りします",
                   precondition="entry_selected"),
         ),
     ),
@@ -902,6 +1045,7 @@ _REGISTRY: list[Capability] = [
     # --- 図・画像の分類レビュー (#496, materials) ---
     Capability(
         id="materials.review_figures",
+        keywords=('図・画像', '図の分類', '画像の分類', '図分類'),
         screen="materials",
         title="図・画像の分類を確認する",
         required_role=ROLE_TEACHER,
@@ -916,6 +1060,28 @@ _REGISTRY: list[Capability] = [
                   precondition="material_selected"),
             _step("materials", "material_figures_button", "「図・画像」を押してモーダルを開きます",
                   precondition="material_menu_open"),
+        ),
+    ),
+    # --- 図を深く検討する（W層・materials。第 14 周: 分類確認と別の入口が無かった） ---
+    Capability(
+        id="materials.deliberate_figure",
+        keywords=('図を深く検討', '図の深く検討', '深く検討', '図を検討', '図について対話'),
+        screen="materials",
+        title="図を深く検討する（要素検討モーダル）",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#deliberate-figure",
+        description="教材の図を1つ選び、内訳・文脈を確かめながら AI と対話する要素検討モーダルを開く。"
+                    "対話の解釈は候補のまま（確定は教員）。",
+        api={"method": "POST", "path": "/api/admin/deliberation/sessions"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材を選びます"),
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
+                  precondition="material_selected"),
+            _step("materials", "material_figures_button", "「図・画像」を押して図モーダルを開きます",
+                  precondition="material_menu_open"),
+            _step("materials", "figure_deliberate_button", "検討したい図の「深く検討」を押します",
+                  precondition="figures_modal_open"),
         ),
     ),
     # discuss_opening_authoring_design.md §6.2: 開幕素材（議論のきっかけ）のレビュー。
@@ -948,6 +1114,7 @@ _REGISTRY: list[Capability] = [
     # --- つまづきデータ (stumbles) ---
     Capability(
         id="stumbles.view",
+        keywords=('つまづき', 'つまずき', '未回答', '答えられなかった'),
         screen="stumbles",
         title="学生のつまづきデータを確認する",
         required_role=ROLE_TEACHER,
@@ -971,6 +1138,7 @@ _REGISTRY: list[Capability] = [
     # --- スキーマ提案 (schema-proposals) ---
     Capability(
         id="schema_proposals.review",
+        keywords=('スキーマ提案', 'スキーマ拡張', 'shadow testing', 'シャドーテスト'),
         screen="schema-proposals",
         title="スキーマ提案を確認・承認する",
         required_role=ROLE_TEACHER,
@@ -1147,6 +1315,35 @@ _REGISTRY: list[Capability] = [
             _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
                   precondition="material_selected"),
             _step("materials", "seminar_brief_button", "「ゼミ前ブリーフ…」を押します",
+                  precondition="material_menu_open"),
+        ),
+    ),
+    # 検証シミュレーション（simulation_bridge_design.md §7）: 道案内のみ。コード生成・改訂案は
+    # LLM コストを伴い、確定は教員の明示ボタンのため Copilot の代行に載せない（SB1 / SB9）。
+    Capability(
+        id="materials.simulation_bridge",
+        screen="materials",
+        title="理論モジュールを検証シミュレーションで走らせる",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#simulation-bridge",
+        description="理論モジュールを AI にコード化させ（候補）、確定したコードを実験機の配線"
+                    "（ナレッジライブラリの部品）に通して模擬観測と比べる。学習者が共有した実行も"
+                    "ここに並び、その台帳の候補をこの画面で確定・見送る（見送りは理由が必要）。"
+                    "台帳の候補になるのは、比較が 1 つでも測れた成功した実行だけ（配線を通して"
+                    "模擬観測と比べた、または論文の記載値を入力して比べた実行。配線なしで記載値も"
+                    "無い実行は候補にならない）。一致は検証ではなく、確定しても「間接的に支持」より"
+                    "上には上がらない。共有した学習者には、自分の実行の判断の状態（判断待ち・"
+                    "台帳に記録された・記録しないと判断された）だけが見え、教員名と見送りの理由は"
+                    "見えない。見送りの理由は台帳の候補の記録に残る。確定・見送りには教材の編集権限"
+                    "（所有者か編集者として共有された教員）が要り、コースの所有者でも教材を編集"
+                    "できなければ判断できない。",
+        api={"method": "GET", "path": "/api/admin/simulation/documents/{document_id}/overview"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
+                  precondition="material_selected"),
+            _step("materials", "simulation_bridge_button", "「検証シミュレーション…」を押します",
                   precondition="material_menu_open"),
         ),
     ),

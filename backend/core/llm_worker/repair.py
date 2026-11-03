@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 MAX_REPAIR_ATTEMPTS = 2
 
+# JSON として読めなかった生の応答を repair プロンプトへ添えるときの上限（入力肥大の防止）。
+_MAX_UNREADABLE_CHARS = 6000
+
 T = TypeVar("T")
 
 
@@ -67,6 +70,8 @@ def run_with_repair(
     """
     previous_raw = ""
     errors: list[str] = []
+    # previous_raw に対応する検証エラー（読めなかった試行の後に、その前の出力を渡し直すとき使う）
+    previous_errors: list[str] = []
     for attempt in range(1 + max_attempts):
         if attempt == 0:
             content = base_content
@@ -76,11 +81,24 @@ def run_with_repair(
             data = call(content) if call is not None else llm_client.complete_json(content)
         except Exception as exc:
             errors = [f"output was not valid JSON: {exc}"]
-            previous_raw = ""
+            # IK-0402: 読めなかった出力を捨てて空の「previous output」を渡さない。
+            # 生の応答が取れればそれを（長すぎるものは切り詰めて）渡し、取れない（空・
+            # タイムアウト等）ときは、それより前に読めた出力をそのまま残す。
+            unreadable = str(getattr(exc, "raw_text", "") or "").strip()
+            if unreadable:
+                previous_raw = unreadable[:_MAX_UNREADABLE_CHARS]
+                previous_errors = []
+            elif previous_raw:
+                errors.append(
+                    "your last reply was empty or could not be read; the output shown "
+                    "below is your last readable output"
+                )
+                errors.extend(previous_errors)
             logger.warning("%s LLM attempt %d failed to parse: %s", log_label, attempt + 1, exc)
             continue
         previous_raw = _raw_text(data)
         result, errors, _warnings = validate(data)
+        previous_errors = list(errors)
         if result is not None:
             return result
         logger.info("%s attempt %d failed validation: %s", log_label, attempt + 1, errors)

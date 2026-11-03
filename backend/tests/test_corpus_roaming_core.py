@@ -458,3 +458,30 @@ class TestFrontierInterestServices:
 
         monkeypatch.setattr(services, "_pg_session", lambda: _Boom())
         assert services.aggregate_frontier_interest("astrophysics") == []
+
+
+class TestUnrelatedVisibleTitles:
+    """IK-0414（CR4）: 一覧に出ない閲覧可能な論文を題名で言う（件数なし・位置に置かない）。"""
+
+    def test_titles_and_more_flag(self):
+        session = FakeSession(documents=[(f"論文{i}",) for i in range(10)])
+        titles, more = corpus_view.list_unrelated_visible_titles(
+            session, "astrophysics", {"d1"}, limit=8
+        )
+        assert titles == [f"論文{i}" for i in range(8)]
+        assert more is True
+        sql = session.sqls()[0]
+        assert "NOT EXISTS" in sql and "d.id::text = ANY(:doc_ids)" in sql
+
+    def test_empty_visible_set_issues_no_sql(self):
+        session = FakeSession()
+        assert corpus_view.list_unrelated_visible_titles(session, "astrophysics", set()) == ([], False)
+        assert session.sqls() == []
+
+    def test_fact_lists_titles_without_counts(self):
+        fact = corpus_view.unrelated_documents_fact(["A", "B"], True)
+        assert "「A」「B」ほか" in fact
+        assert not any(ch.isdigit() for ch in fact)
+        for banned in ("世界初", "誰も", "この分野には論文がない", "未踏"):
+            assert banned not in fact
+        assert corpus_view.unrelated_documents_fact([], False) == ""

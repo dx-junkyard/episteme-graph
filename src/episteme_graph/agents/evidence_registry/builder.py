@@ -9,8 +9,7 @@ DocumentStructureResult の block.text の原文範囲のみを採用する。
 """
 from __future__ import annotations
 
-import re
-
+from ..sentence_split import split_sentence_spans
 from .schema import (
     EVIDENCE_ROLES,
     EvidenceRecord,
@@ -305,42 +304,12 @@ class EvidenceRegistryBuilder:
 # Sentence splitting (issue #363) — deterministic, no LLM.
 # ---------------------------------------------------------------------------
 
-# Abbreviations that end with a period but do not end a sentence. General
-# scholarly notation only — no field-specific vocabulary.
-_NON_TERMINAL_ABBREVIATIONS = (
-    "eq", "eqs", "fig", "figs", "tab", "ref", "refs", "sec", "secs",
-    "e.g", "i.e", "cf", "vs", "et al", "al", "no", "dr", "prof", "etc",
-)
-
-_SENTENCE_BOUNDARY = re.compile(r"[.!?。！？]")
-
-
+# The splitter itself is the shared canonical implementation
+# (``episteme_graph.agents.sentence_split``, IK-0393); this name is kept as the
+# registry's public entry point.
 def split_sentences_with_offsets(text: str) -> list[tuple[int, int]]:
     """Return (start, end) character offsets of the sentences in ``text``."""
-    text = str(text or "")
-    spans: list[tuple[int, int]] = []
-    start = 0
-    for match in _SENTENCE_BOUNDARY.finditer(text):
-        end = match.end()
-        if end < len(text) and not text[end].isspace():
-            continue  # mid-token period like "3.14" or "v2.0"
-        prefix = text[start:match.start()].rstrip()
-        last_token = prefix.split()[-1].lower().rstrip(".") if prefix.split() else ""
-        if match.group() == "." and last_token in _NON_TERMINAL_ABBREVIATIONS:
-            continue
-        stripped_start = start
-        while stripped_start < end and text[stripped_start].isspace():
-            stripped_start += 1
-        if end > stripped_start and text[stripped_start:end].strip():
-            spans.append((stripped_start, end))
-        start = end
-    rest = text[start:].strip()
-    if rest:
-        stripped_start = start
-        while stripped_start < len(text) and text[stripped_start].isspace():
-            stripped_start += 1
-        spans.append((stripped_start, len(text)))
-    return spans
+    return split_sentence_spans(text)
 
 
 def check_span_alignment(roles_result, registry_result) -> list[ValidationIssue]:

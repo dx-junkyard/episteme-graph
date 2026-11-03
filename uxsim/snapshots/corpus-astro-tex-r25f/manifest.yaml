@@ -1,0 +1,7 @@
+# --- snapshot record (appended by snapshot.py) ---
+snapshot_record:
+  name: corpus-astro-tex-r25f
+  created_at: 2026-10-27T17:12:19+00:00
+  git_commit: b7bbb628
+  migration_head: '094'
+  note: "第 7 周の前提（2026-10-28）: 対 67727cb0 の 2 リンク確定・凍結 + 別名 TOV で記号リンク 1 本確定・凍結し直し / te-02 PINN editor・te-01 viewer・te-05 PINN editor / te-02 の手動前提を Cepheus TeX に / 4 コース load 再計算（IK-1030 後）/ t16 区切りなし / 6be229e1 に共有版 1 / 1bad7d9f を astrophysics に 8 トピック binding + st-03 の足跡 1 / te-02 が te-04 の説明を 2 人目として査読"

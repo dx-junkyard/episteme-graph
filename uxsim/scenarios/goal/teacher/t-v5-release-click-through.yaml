@@ -1,0 +1,29 @@
+id: t-v5-release-click-through
+population: teachers
+runner: [api, browser]
+preconditions:
+  - text: このペルソナは自分が所有するコースを持っている（t-v5-release-skip-step2 で公開したもので良い）
+    check: owns_course
+seed_scenarios: [t-v5-register-own-course]
+goal: "自分のコースの「確認して公開」を、表示を読まずに「次へ」で進めて公開する"
+params_required: []
+steps:
+  - do: auth.login
+  - do: admin.courses.list
+    note: コース管理で自分のコースの「確認して公開」を押す
+  - do: admin.release_review.placements
+    note: ステップ 2 の画面はほとんど読まない
+  - do: admin.release_review.accept
+    note: 「この配置で次へ」を押す
+  - do: admin.course.visibility
+    with: {visibility: public}
+    note: 「公開する」を押す
+stop_when: [gave_up, blocked, budget_exhausted]
+expects:
+  - manual: teacher/13-admin-course-management.md#release-review-next
+  - manual: teacher/13-admin-course-management.md#release-review-publish
+watch_for:
+  - 「次へ」が何を確定として記録するのかが、押す前の画面に書かれている
+  - このペルソナは 4 本の教材の編集権限を持たない。「次へ」を押したとき、確認できなかった論文があったこととその理由が事実文で出て、確定が 0 件でも失敗のようには見えない（RR7）
+  - 「次へ」のあとに、表示されていた配置と確認した配置が一致したかが事実文で出る
+  - 読まずに押したことは記録の上で「根拠を開かなかった」として残る（審判 E6 が監査の行を読む）

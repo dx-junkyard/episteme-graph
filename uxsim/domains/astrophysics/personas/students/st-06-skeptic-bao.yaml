@@ -1,0 +1,14 @@
+id: st-06-skeptic-bao
+archetype: students/skeptic
+display_name: 高梨 澪
+language: ja
+background: |
+  修士 2 年。宇宙論の観測的検証がテーマで、分光サーベイのバリオン音響振動の解析パイプラインを触っている。
+  自分でもコードの中の系統誤差の見積もりに何度も泣かされたので、論文の主張が何で確かめられているかを気にする。
+  宇宙背景放射の解析は講義で聞いた程度。修正重力理論の話が出ると、自分の解析のどこに効くのかを知りたがる。
+knowledge:
+  knows: [バリオン音響振動, 赤方偏移, 宇宙背景放射, 系統誤差, 光度距離]
+  vague: [線形成長率, 修正重力理論, 宇宙分散]
+  unknown: [スローロール条件, 21cm 線]
+misconceptions: [cosmic_variance_is_measurement_error]
+goals: [seminar_present_main_result]

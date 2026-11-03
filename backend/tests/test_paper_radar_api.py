@@ -179,6 +179,14 @@ def env(monkeypatch):
         routes.services, "resolve_document_access",
         lambda user_id, ref: state["access"],
     )
+    # 「取り込み済み」の可視性（§19 C）。route が本人の可視集合を core へ注入する。
+    state["visible_calls"] = []
+
+    def _visible(user_id):
+        state["visible_calls"].append(user_id)
+        return {"doc-1", "doc-visible"}
+
+    monkeypatch.setattr(routes.services, "list_visible_document_ids", _visible)
 
     def _resolve_seed(session, document_id, **kwargs):
         state["seed_calls"].append(kwargs)
@@ -344,6 +352,26 @@ class TestRadarSeed:
         assert seed["arxiv_id"] == "2608.20293"
         assert seed["categories_source"] == "arxiv"
 
+    def test_keyphrase_supply_is_passed_through(self, env):
+        """§16: 供給の出所と事実文は route が加工せず素通しする（PD3 / PR7）。"""
+        from core.paper_discovery import radar as core_radar
+
+        env["seed"] = dict(
+            _SEED,
+            keyphrase_candidates=[{"text": "kurtosis", "source": "concept", "enabled": True}],
+            keyphrase_supply={
+                "sources": ["concept"],
+                "note": core_radar.NOTE_KEYPHRASE_SUPPLY_WITHOUT_APPROVED,
+            },
+        )
+        res = env["client"].get(_SEED_PATH, headers=_auth(env, "teacher"))
+        seed = res.json()["seed"]
+        assert seed["keyphrase_supply"] == {
+            "sources": ["concept"],
+            "note": core_radar.NOTE_KEYPHRASE_SUPPLY_WITHOUT_APPROVED,
+        }
+        assert seed["keyphrase_candidates"][0]["source"] == "concept"
+
     def test_lookup_error_is_404(self, env):
         env["seed_error"] = LookupError("document not found")
         res = env["client"].get(_SEED_PATH, headers=_auth(env, "teacher"))
@@ -389,6 +417,63 @@ class TestRadarSeed:
 
 
 class TestRadarSearch:
+    def test_injects_the_viewer_visibility_into_ingested_judgement(self, env):
+        """「取り込み済み」は本人に見える教材だけで判定する（§19 C・IK-0701）。"""
+        res = env["client"].post(
+            _SEARCH_PATH,
+            json={"document_ref": "doc-1", "distance": "near"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 200
+        _document_id, kwargs = env["search_calls"][0]
+        assert kwargs["visible_document_ids"] == {"doc-1", "doc-visible"}
+        assert env["visible_calls"] == [_TEACHER]
+
+    def test_facts_pass_through(self, env):
+        env["search_result"] = {
+            "seed": dict(env["seed"]),
+            "query": "(cat:astro-ph.CO)",
+            "distance": "mid",
+            "total": 0,
+            "start": 0,
+            "candidates": [],
+            "banding": {"available": False},
+            "closed_world_note": env["routes"].pd_search.CLOSED_WORLD_NOTE,
+            "facts": [env["routes"].pd_radar.FACT_NO_APPROVED_COMPONENTS],
+        }
+        res = env["client"].post(
+            _SEARCH_PATH,
+            json={"document_ref": "doc-1", "distance": "mid"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.json()["facts"] == [env["routes"].pd_radar.FACT_NO_APPROVED_COMPONENTS]
+
+    def test_keyphrase_hits_and_reading_note_pass_through(self, env):
+        """§20 A / B / D: 当たり外れ（真偽だけ）と読み方の事実文をそのまま返す。"""
+        radar = env["routes"].pd_radar
+        env["search_result"] = {
+            "seed": dict(env["seed"]),
+            "query": "(cat:astro-ph.CO) AND (all:\"kurtosis\")",
+            "distance": "near",
+            "total": 1,
+            "start": 0,
+            "candidates": [],
+            "banding": {"available": True},
+            "closed_world_note": env["routes"].pd_search.CLOSED_WORLD_NOTE,
+            "keyphrase_hits": [{"text": "kurtosis", "hit": False, "widens": False}],
+            "keyphrase_hits_note": radar.NOTE_KEYPHRASES_NOT_HIT_HEAD + "kurtosis",
+            "reading_note": radar.READING_NOTE_BANDS_AND_RELATIONS + radar.READING_NOTE_NEAR_ORDER,
+        }
+        res = env["client"].post(
+            _SEARCH_PATH,
+            json={"document_ref": "doc-1", "distance": "near"},
+            headers=_auth(env, "teacher"),
+        )
+        body = res.json()
+        assert body["keyphrase_hits"] == [{"text": "kurtosis", "hit": False, "widens": False}]
+        assert body["keyphrase_hits_note"].endswith("kurtosis")
+        assert body["reading_note"].startswith(radar.READING_NOTE_BANDS_AND_RELATIONS)
+
     @pytest.mark.parametrize("distance", ["near", "mid", "far"])
     def test_accepts_the_vocabulary(self, env, distance):
         res = env["client"].post(
@@ -431,6 +516,33 @@ class TestRadarSearch:
         assert body["query"]
         assert body["closed_world_note"]
         assert body["banding"] == {"available": True}
+
+    def test_keyphrase_note_is_passed_through(self, env):
+        """§16: キーフレーズ無しの near がカテゴリの新着であることを黙らせない。"""
+        from core.paper_discovery import radar as core_radar
+
+        env["search_result"] = {
+            "seed": dict(env["seed"]),
+            "query": "(cat:astro-ph.CO)",
+            "distance": "near",
+            "total": 1,
+            "start": 0,
+            "candidates": [],
+            "banding": {"available": False},
+            "relation_context": {"available": False},
+            "closed_world_note": "この一覧は検索条件に一致した範囲のみを示します。",
+            "keyphrase_note": core_radar.NOTE_SEARCH_WITHOUT_KEYPHRASES,
+            "arxiv_blocked": False,
+        }
+        res = env["client"].post(
+            _SEARCH_PATH,
+            json={"document_ref": "doc-1", "distance": "near", "keyphrases": []},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["keyphrase_note"] == core_radar.NOTE_SEARCH_WITHOUT_KEYPHRASES
+        assert body["closed_world_note"]
 
     def test_no_raw_numbers_in_the_candidate_dto(self, env):
         res = env["client"].post(
@@ -614,6 +726,48 @@ class TestRadarCompare:
         assert item["overlaps"][0]["evidence_quote"] == "the equation of state"
         # 後方互換キーもそのまま残る（overlaps 空の旧レスポンスへ縮退できる）。
         assert item["common_ground"] == "どちらも状態方程式を扱っているようです。"
+
+    def test_visible_documents_are_injected_into_compare(self, env):
+        """IK-0818: 取り込み済み候補の解析結果を使うため可視集合を core へ注入する。"""
+        res = self._post(env, {"document_ref": "doc-1", "arxiv_ids": ["2608.00002"]})
+        assert res.status_code == 200
+        _doc, _ids, kwargs = env["compare_calls"][-1]
+        assert kwargs["visible_document_ids"] == {"doc-1", "doc-visible"}
+        assert env["visible_calls"], "route が本人の可視集合を引く"
+
+    def test_analysis_keys_pass_through(self, env):
+        env["compare_result"] = {
+            "items": [
+                {
+                    "arxiv_id": "2608.00002",
+                    "title": "候補",
+                    "relation_kind": "shared_subject",
+                    "relation_label": "同じ対象を扱う",
+                    "common_ground": "",
+                    "overlaps": [
+                        {
+                            "component_label": "VDG damping",
+                            "statement": "重なりそうです。",
+                            "evidence_quote": "small-scale",
+                            "side": "candidate",
+                            "evidence_source": "thesis",
+                            "source_note": "候補側の解析結果から（部品）",
+                        }
+                    ],
+                    "differences": [],
+                    "caveat": env["routes"].pd_compare.CAVEAT,
+                    "candidate_analysis_used": True,
+                    "analysis_note": env["routes"].pd_compare.NOTE_CANDIDATE_ANALYSIS_USED,
+                }
+            ],
+            "skipped": [],
+            "notes": [],
+        }
+        res = self._post(env, {"document_ref": "doc-1", "arxiv_ids": ["2608.00002"]})
+        item = res.json()["items"][0]
+        assert item["overlaps"][0]["side"] == "candidate"
+        assert item["overlaps"][0]["source_note"] == "候補側の解析結果から（部品）"
+        assert item["caveat"] == env["routes"].pd_compare.CAVEAT
 
     def test_empty_selection_is_422(self, env):
         res = self._post(env, {"document_ref": "doc-1", "arxiv_ids": []})
@@ -965,3 +1119,144 @@ class TestArxivBlocked:
         assert body["seed"]["arxiv_blocked_note"] == env["routes"].pd_radar.NOTE_ARXIV_BLOCKED
         assert body["seed"]["metadata_failure"] == "rate_limited"
         assert body["seed"]["provenance"]["can_register"] is True
+
+
+class TestRadarIngestCarriesDomain:
+    """レーダーの取り込みは ``/ingest`` / ``/ingest-batch`` を再利用する（PR3）。
+
+    分野（cartridge_id）の受け渡し・検証の振る舞いは ``test_paper_discovery_api.py::
+    TestIngestCartridgeId`` が固定する。ここではレーダーが送る項目が要求モデルに
+    あること（未知フィールドとして黙って捨てられないこと）を固定する（2026-10-16）。
+    """
+
+    def test_request_models_accept_cartridge_id(self):
+        if not _HAS_FASTAPI:
+            pytest.skip("fastapi not installed")
+        import routes.paper_discovery as routes
+
+        assert routes.IngestRequest(items=[], cartridge_id="").cartridge_id == ""
+        assert routes.IngestRequest(items=[]).cartridge_id is None
+        assert routes.IngestBatchRequest(items=[], cartridge_id="astrophysics").cartridge_id == "astrophysics"
+
+
+# ---------------------------------------------------------------------------
+# §24（IK-0706 / IK-0760 / IK-0761）
+# ---------------------------------------------------------------------------
+
+
+class TestWave24SearchNotesPassThrough:
+    def test_band_population_and_dominant_notes_pass_through(self, env):
+        radar = env["routes"].pd_radar
+        env["search_result"] = {
+            "seed": dict(_SEED),
+            "candidates": [{"arxiv_id": "2608.00002", "status": "new", "distance_label": "近い"}],
+            "banding": {"available": True},
+            "band_population_note": radar.NOTE_BAND_POPULATION,
+            "keyphrase_dominant_note": radar.NOTE_KEYPHRASE_DOMINANT_TEMPLATE.format(text="Full-Shape"),
+        }
+        body = env["client"].post(
+            _SEARCH_PATH, json={"document_ref": "doc-1", "distance": "near"},
+            headers=_auth(env, "teacher"),
+        ).json()
+        assert body["band_population_note"] == radar.NOTE_BAND_POPULATION
+        assert body["keyphrase_dominant_note"].startswith("「Full-Shape」")
+
+
+class TestSeedLineageRoute:
+    def test_seed_route_injects_the_viewer_visibility(self, env, monkeypatch):
+        calls: list = []
+
+        def _lineage(session, document_id, *, visible_document_ids):
+            calls.append((document_id, set(visible_document_ids)))
+            return {
+                "lineage": [{"document_id": "doc-0", "title": "元の起点"},
+                            {"document_id": "doc-1", "title": "起点論文"}],
+                "lineage_line": "この起点の系譜: 元の起点 → 起点論文",
+                "lineage_note": env["routes"].pd_radar.NOTE_LINEAGE_SCOPE,
+            }
+
+        monkeypatch.setattr(env["routes"].pd_radar, "seed_lineage", _lineage)
+        body = env["client"].get(_SEED_PATH, headers=_auth(env, "teacher")).json()
+        assert calls == [("doc-1", {"doc-1", "doc-visible"})]
+        assert body["seed"]["lineage_line"].endswith("元の起点 → 起点論文")
+        # 監査の記帳をしない（読み取り専用 — PR5）。
+        assert env["audits"] == []
+
+    def test_seed_route_without_records_has_no_lineage_key(self, env):
+        body = env["client"].get(_SEED_PATH, headers=_auth(env, "teacher")).json()
+        assert "lineage" not in body["seed"]
+
+
+class TestIngestRecordsTheSeed:
+    """§24 D: 取り込みの監査に起点 document を残す（閲覧できる値だけ・正規化して）。"""
+
+    def _stub_batch(self, env, monkeypatch):
+        routes = env["routes"]
+        monkeypatch.setattr(routes, "_visible_ingested_documents", lambda user_id: {})
+        monkeypatch.setattr(routes, "_arxiv_fetch_allowed", lambda session: True)
+        monkeypatch.setattr(
+            routes.pd_queue, "enqueue_items",
+            lambda session, items, **kw: {
+                "queued": [{"item_id": "i-0", "arxiv_id": "2608.00002", "title": ""}],
+                "skipped": [],
+            },
+        )
+
+    def test_batch_audit_carries_the_canonical_seed(self, env, monkeypatch):
+        self._stub_batch(env, monkeypatch)
+        res = env["client"].post(
+            "/api/admin/discovery/ingest-batch",
+            json={"items": [{"arxiv_id": "2608.00002"}], "seed_document_id": "mat-1"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 202
+        metadata = env["audits"][-1][5]
+        assert metadata["action"] == "ingest_batch"
+        assert metadata["seed_document_id"] == "doc-1", "material_id を document.id に正規化する"
+
+    def test_unviewable_seed_is_not_recorded(self, env, monkeypatch):
+        self._stub_batch(env, monkeypatch)
+        env["access"] = env["services"].DocumentAccess(
+            document_id="doc-x", source_path="mat-x", uploaded_by=_ADMIN,
+            is_owner=False, can_view=False, can_edit=False,
+        )
+        env["client"].post(
+            "/api/admin/discovery/ingest-batch",
+            json={"items": [{"arxiv_id": "2608.00002"}], "seed_document_id": "doc-x"},
+            headers=_auth(env, "teacher"),
+        )
+        assert "seed_document_id" not in env["audits"][-1][5]
+
+    def test_sync_ingest_audit_carries_the_seed(self, env, monkeypatch):
+        routes = env["routes"]
+        monkeypatch.setattr(routes, "_visible_ingested_documents", lambda user_id: {})
+        monkeypatch.setattr(routes.url_fetch, "list_url_fetch_domains", lambda session: [{"domain": "arxiv.org"}])
+        fetched = routes.url_fetch.FetchedSource(
+            content=b"%PDF-1.4", source_kind="pdf", filename="2608.00002.pdf",
+        )
+        monkeypatch.setattr(
+            routes.source_resolution, "fetch_arxiv_source",
+            lambda arxiv_id, **kw: routes.source_resolution.ResolvedSource(
+                fetched=fetched, source_url="https://arxiv.org/pdf/2608.00002",
+                effective_format="pdf", fell_back=False,
+            ),
+        )
+        monkeypatch.setattr(routes, "_accept_material_source", lambda **kw: {"material_id": "mat-new"})
+        res = env["client"].post(
+            "/api/admin/discovery/ingest",
+            json={"items": [{"arxiv_id": "2608.00002"}], "seed_document_id": "doc-1"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 202, res.text
+        metadata = env["audits"][-1][5]
+        assert metadata["action"] == "ingest"
+        assert metadata["seed_document_id"] == "doc-1"
+
+    def test_missing_seed_keeps_the_old_metadata_shape(self, env, monkeypatch):
+        self._stub_batch(env, monkeypatch)
+        env["client"].post(
+            "/api/admin/discovery/ingest-batch",
+            json={"items": [{"arxiv_id": "2608.00002"}]},
+            headers=_auth(env, "teacher"),
+        )
+        assert "seed_document_id" not in env["audits"][-1][5]

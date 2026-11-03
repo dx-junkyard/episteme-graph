@@ -162,7 +162,8 @@ def test_llm_failure_returns_unknown_fallback_span():
     assert span.confidence == 0.0
 
 
-def test_prior_work_and_section_meta_are_reject_candidates():
+def test_section_meta_is_reject_candidate_but_prior_work_is_not():
+    """IK-0803: 先行研究の言及は reject 候補にしない（文脈として後段に残す）。"""
     agent = RhetoricalRoleAgent()
     structure = DocumentStructureResult(
         document_id="doc_test",
@@ -196,7 +197,9 @@ def test_prior_work_and_section_meta_are_reject_candidates():
 
     spans = {a.block_id: a.span_annotations[0] for a in result.role_annotations}
     assert "prior_work" in spans["b1"].role_labels
-    assert spans["b1"].is_reject_candidate is True
+    assert spans["b1"].is_reject_candidate is False
+    assert spans["b1"].is_claim_candidate is False
+    assert "IK-0803" in spans["b1"].reason
     assert "section_meta" in spans["b2"].role_labels
     assert spans["b2"].is_reject_candidate is True
 

@@ -421,3 +421,103 @@ class TestValidator:
         )
         monkeypatch.setattr(kb_validator, "manual_root", lambda: root)
         assert kb_validator.validate_manual() == []
+
+
+# ---------------------------------------------------------------------------
+# 第 22 周 A2（IK-0611 派生）: 目次が答えにならない・日本語の語の切り方
+# ---------------------------------------------------------------------------
+
+
+class TestManualSearchRanking:
+    def test_navigation_section_detected_by_structure(self):
+        toc = {"body": "1. [ログイン](#login)\n   - [音声](#voice)\n2. [地図](#atlas)"}
+        prose = {"body": "1. [ログイン](#login) から入ります。"}
+        assert kb_index.is_navigation_section(toc) is True
+        assert kb_index.is_navigation_section(prose) is False
+        assert kb_index.is_navigation_section({"body": ""}) is False
+
+    def test_toc_never_returned_by_search_manual(self, tmp_path, monkeypatch):
+        root = tmp_path / "manual"
+        _write(root / "student" / "a.md", (
+            "---\naudience: student\n---\n"
+            "## 目次 {#toc}\n\n1. [共有する](#share)\n2. [見え方](#seen)\n\n"
+            "## 共有する {#share}\n\n共有すると担当の教員に見えます。\n"
+        ))
+        monkeypatch.setattr(kb_manual, "manual_root", lambda: root)
+        hits = kb_manual.search_manual("共有すると誰に見えますか", audience="student", limit=3)
+        assert [h["anchor"] for h in hits] == ["share"]
+
+    def test_core_term_beats_function_characters(self, tmp_path, monkeypatch):
+        """「と・は・何・で・す・か」の字が多い長い節より、核心の語を持つ節が先に来る。"""
+        root = tmp_path / "manual"
+        long_body = "これは何ですかとはどういうことですか。" * 20
+        _write(root / "student" / "a.md", (
+            "---\naudience: student\n---\n"
+            f"## 概要 {{#overview}}\n\n{long_body}\n\n"
+            "## 段階の言葉 {#levels}\n\n未測定は、比べる材料が無かったという意味です。\n"
+        ))
+        monkeypatch.setattr(kb_manual, "manual_root", lambda: root)
+        hits = kb_manual.search_manual("未測定とは何ですか", audience="student", limit=2)
+        assert hits[0]["anchor"] == "levels"
+
+    def test_prefer_anchor_raises_panel_family_only_when_scored(self, tmp_path, monkeypatch):
+        root = tmp_path / "manual"
+        _write(root / "student" / "a.md", (
+            "---\naudience: student\n---\n"
+            "## 誰に見えるか {#disclosure-audience}\n\n共有した記録は教員に見えます。誰に見えるかの表。\n\n"
+            "## 動かす {#simulation-lab}\n\nパネルを開きます。\n\n"
+            "### 共有する {#simulation-lab-share}\n\n共有すると教員に見えます。\n\n"
+            "## 無関係 {#simulation-labx}\n\n地図。\n"
+        ))
+        monkeypatch.setattr(kb_manual, "manual_root", lambda: root)
+        hits = kb_manual.search_manual(
+            "誰に見えるか", audience="student", limit=3, prefer_anchor="simulation-lab",
+        )
+        anchors = [h["anchor"] for h in hits]
+        assert anchors[0] == "simulation-lab-share"
+        assert "simulation-labx" not in anchors  # 一族は anchor と "{anchor}-" 始まりだけ
+
+    def test_copilot_tokenize_unchanged(self):
+        """Copilot KB（admin_operations）が使う ``tokenize`` は従来どおり 1 字単位。"""
+        assert kb_index.tokenize("未測定") == {"未", "測", "定"}
+        assert "未測" in kb_index.tokenize_cjk_ngrams("未測定")
+        assert "と" not in kb_index.tokenize_cjk_ngrams("未測定とは")
+
+    def test_real_student_manual_answers_simulation_level_questions(self):
+        """実マニュアル: SB の結果の言葉は定義の節が、共有は共有の節が先頭に来る（目次は出ない）。"""
+        cases = {
+            "未測定とは何ですか": "simulation-lab-levels",
+            "未測定って何": "simulation-lab-levels",
+            "一致と分離は何と何を比べた言葉ですか": "simulation-lab-levels",
+            "予想は点数になるか": "simulation-lab-prediction",
+            "共有すると誰に見えますか": "simulation-lab-share",
+        }
+        for query, anchor in cases.items():
+            hits = kb_manual.search_manual(query, audience="student", limit=3)
+            assert hits and hits[0]["anchor"] == anchor, (query, [h["anchor"] for h in hits])
+            assert all(h["anchor"] != "toc" for h in hits)
+
+
+class TestSimulationResultTerms:
+    def test_terms_derive_from_label_vocab(self):
+        from core import label_vocab
+        from core.simulation_bridge.schema import simulation_result_terms_ja
+
+        terms = simulation_result_terms_ja()
+        for value in label_vocab.SIMULATION_AGREEMENT_LABELS.values():
+            assert value in terms
+        assert "記載値" in terms
+
+    @pytest.mark.parametrize("text,expected", [
+        ("未測定って何", True),
+        ("What does unmeasured mean?", True),
+        ("Is the agreement good?", True),
+        ("I disagree with this", False),
+        ("共有すると誰に見えますか", True),  # 第 22 周 (j): 開いている実行の共有の意味は実行の事実文で答える
+        ("予想は点数になりますか", False),
+        ("", False),
+    ])
+    def test_mentions_simulation_result(self, text, expected):
+        from core.simulation_bridge.schema import mentions_simulation_result
+
+        assert mentions_simulation_result(text) is expected

@@ -296,3 +296,84 @@ backend フルスイート 5,237 pass / 20 skipped(node あり環境では 5,248
 - docker 実機での E2E(実コース+実パイプライン成果での表示確認)
 - 中期課題: component_assembly の日本語 teaching_takeaway(英語露出の根治)
 - document 成果閲覧の版ピン留め(V層)と context API の整合は現状 HEAD 読み(既知の限界)
+
+## 追補（2026-09-30・ペルソナ通し受講 第 16 波）
+
+- **要素文脈はトピックの論文で優先解決する**（IK-0553）: 式 ⚓ の `equation_id` は文書内でしか一意でないため、`_resolve_equation` は
+  表示中トピックの論文を先に引き、なお複数の論文に当たるときは未解決（`available:false`）にする。記号・要素文脈の要求は `topic_id` を持つ。
+- **依存先を辿れる項目にする**（IK-0554）: component 文脈の依存先は同一論文の live component に解決し（`_dependency_lane_items` /
+  `_merge_lane`）、navigable な項目として返す。上位レーン（中心命題・支持構造）の項目が id を持たない件は未解決（IK-0570）。
+
+- **主張の宛先を論文内で一意にする**（2026-10-01）: `![[claim:…]]` の素の agent ID（`claim_span_007`）は span_id が block ごとに
+  振り直されるため論文内でも曖昧だった。新しい freeze は宛先を DB UUID（着地できないときは `{block_id}:{agent_claim_id}`）で書き、
+  学習者の文脈 API は UUID / block 付き / 素の番号の3形を受けてこの順に狭める。素の番号が論文内で曖昧なときは推測せず
+  「同じ番号の主張が論文内に複数あるため特定できません」を返す。既存コースは再生成するまで素の番号のまま（正本は
+  `focus_document_design.md` §追補「主張の宛先」）。
+
+- **出典カードの見出しと、移った先から戻る道**（2026-10-01・IK-0584 / IK-0588 / IK-0570）: `build_topic_evidence_items` の
+  source は component と同じく見出しに引用を流用しない（見出しは掲載節の見出し `section_label` / `label` だけ。新しい freeze は
+  evidence の `source.section_id` から節見出しを解決して載せる。見出しが無い・引用と同じ文なら `title` を持たせず、学習カードは
+  引用だけを描く — 旧教材にも読み時で効く）。component 文脈の graph は、上位に分割の親（`parent_agent_component_id` →
+  同じ論文の live 行・「の構成要素である」。親が行として残らない分割では原案の表示名だけを id なしで出す）と依存元
+  （「に利用される」）を、下位に分割の子（「を構成要素として含む」）を足し、子 → 親 → 子・依存先 → 依存元で往復できる
+  （関係語は `context_lens.RELATION_LABELS` の既存語・レーン上限は不変）。中心命題・支持構造の項目は `id` キーを持たず
+  （`id=None` を描かせない）、そのレーンに1回だけ `graph.exits` の事実文「議論の開幕画面で中心命題と支持構造を読めます」を添える。
+
+## 追補（2026-10-23・第 25 周 面 A 第 1 周の是正 — C層の説明の権限単位）
+
+ペルソナ通し受講（「uxsim/runs/round25/judge_share_r1.md」）で、説明バージョン（C層）が教員・学生の
+両側で開けないことが分かった（IK-0861）。部品の所有単位が document に移った後も、説明の権限と絞り込みだけが
+部品の `course_id`（パイプライン由来の部品では空）を読んでいた。
+
+- **教員側の権限は部品の document 単位**: 説明の一覧・追加・承認・承認一覧は `routes/theory_components.py::
+  _ensure_component_viewable`（`_ensure_component_editable` と同型・document → course の順）/
+  `_ensure_explanation_viewable` を通す。`course_id` は**範囲ではなく出所**（どのコースで書いたか）として残し、
+  追加の body に optional `course_id` を受ける（本人が閲覧できるコースのときだけ記録。原稿スタジオは選択中の
+  コースを送る）。
+- **学生側は受講ゲート + 共有範囲**（オーナー判断の推奨どおり）: `GET /api/learning/courses/{id}/components/
+  {component_id}/explanations` は `get_accessible_course_data` を通し、部品をコースの教材の document の中で
+  DB UUID に解決してから引く（`component_context.resolve_course_component_id` — agent ID を CAST しない）。
+  届く説明は `_LEARNER_EXPLANATION_SCOPE_SQL` の 1 箇所が正本: 承認済みに限り、**標準の説明と共有 ON の説明は
+  コースをまたいで届き、共有 OFF の説明は書いたコースの学生にだけ届く**。部品文脈の `instance.explanation`
+  も同じ条件。空のときは `note`（「この部品には、承認済みの説明がまだありません。」）、コースの教材に無い
+  部品は 404 + 事実文で、画面は取得失敗と分けて描く。
+- 「共通部品として」が出ないときは DTO の `shared_part_note`（閉世界の一文・候補の有無は出さない — IK-0863）。
+- 式の表示名は `graph_paper_layer.schema.equation_display_label` に委譲し、記録の無い式は内部 ID ではなく
+  一般ラベル。解析層の方針語（`semantic_hint_only` 等）を含む注意は学習者に出さない（IK-0862）。
+- 中心命題への関係語は「を支持する」（相手の種類名を関係語に入れない）、項目名は中心命題の本文の要約（IK-0871）。
+
+## pre-mortem（2026-10-23 追補の設計時の検査）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 所有単位の移行後に一部の経路だけ旧いキーで判定 | `rule-enforced-per-surface` | 説明の全経路を 1 つのゲート関数に寄せ、学生の範囲は SQL 断片 1 つに置く |
+| 権限・範囲の条件の伝達 | `condition-not-propagated` | 範囲は SQL の内側で強制（コースの document 集合で部品を解決してから引く） |
+| agent ID と UUID の混同 | `id-namespace-conflated` | UUID に解決してから引く・解決できなければ 404 |
+
+## 追補（2026-10-23・第 25 周 面 A 第 2 周の是正）
+
+- **説明の `course_id` は NULL 許容**（IK-0891・migration 091）: NOT NULL を外し、FK を `ON DELETE SET NULL` に
+  張り替えた（出所のコースが消えても説明・承認・引用の履歴は残す）。出所が無い説明（コース外のパイプライン部品）は
+  NULL で入る。標準の説明を用意できなかったときは一覧の応答ヘッダ `X-Explanation-Fact`（percent-encode した固定文
+  `STANDARD_EXPLANATION_UNAVAILABLE_FACT`・一覧の形は不変）で事実文にし、追加の失敗は日本語の事実文 detail。
+  原稿スタジオは両方を描く。
+- **学生の説明は焦点論文で解決**（IK-0892）: `GET .../components/{component_id}/explanations` は optional の
+  `topic_id` / `document_id` を受け、部品の文脈と同じ `learner_focus_document` で `resolve_course_component_id(...,
+  preferred_document_ids=)` に渡す。コースの複数の論文に当たって決められないときは
+  `COMPONENT_EXPLANATIONS_AMBIGUOUS`（「どの論文の部品か特定できませんでした」）で、不在の文と分ける。
+- **部品の文脈の式に式本文**（IK-0894）: `equations[]` に `latex`（`graph_paper_layer.schema.equation_display_latex`）を
+  同梱し、教材の式に解決できない式も数式で描く。表示名の `$…$` は数式区間として描く。
+- **復元の印の判定の正本**（IK-0895）: `learner_context_common.equation_latex_is_reconstructed` が原文の LaTeX と
+  正規化後に一致する復元に印を付けない。`course_content_builder` とパイプラインの `chunks.formulas` が委譲する。
+- **レーンの見出しの数式**（IK-0898）: 式から合成した英語の定型主張は数式区間を保った和文（`labels.
+  synthesized_claim_japanese`）、TeX を含む散文は `excerpt(keep_dollar_math=True)` で見出しにし、学習者の射影は
+  数式区間付きの散文を一般ラベルへ落とさない。`element-card.js` は `$…$` 区間だけを数式で描く。
+- 本文の無い中心命題の項目名は「問い「…」に答える中心命題」か「この論文の中心命題（本文の記録なし）」（IK-0871）。
+
+### pre-mortem（第 2 周の是正の設計時の検査）
+
+| 変更の性質 | 型 | 本書での扱い |
+|---|---|---|
+| 範囲の単位を移したのに表の制約が旧い単位のまま | `contract-changed-one-side` | migration で表の契約を出所（NULL 許容）に揃える |
+| ある経路だけ焦点（曖昧さを解く文脈）を受け取らない | `condition-not-propagated` | 焦点の解決を部品の文脈と同じ正本に通す |
+| 復元の判定が記録ごとに別 | `duplicate-canonical-sources` | 判定を 1 か所に置き委譲する |

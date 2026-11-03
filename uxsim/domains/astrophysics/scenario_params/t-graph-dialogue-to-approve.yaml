@@ -1,0 +1,11 @@
+scenario: t-graph-dialogue-to-approve
+domain: astrophysics
+params:
+  goal_text: 理論構成を確かめ、根拠の主張を承認すること
+  material_hint: グラフと論文層がある教材（「Neutron Star Equation of State via Physics Informed Neural Network」か「2606.02318v1」の行。どちらかを開く）
+  graph_questions:
+  - この論文の理論構成をおおづかみに説明してください。
+  node_questions:
+  - このノードの根拠になっている原文はどこですか？
+  - この主張は観測で確かめられたものですか、仮定ですか？
+  - このノードと下流のノードの関係は論文のどこから来ていますか？

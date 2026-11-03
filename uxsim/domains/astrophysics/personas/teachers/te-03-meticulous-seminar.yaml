@@ -1,0 +1,20 @@
+id: te-03-meticulous-seminar
+archetype: teachers/meticulous_reviewer
+display_name: 岡村 千尋
+language: ja
+background: |
+  准教授。専門は宇宙論的 N 体シミュレーションと大規模構造の理論。
+  学生に配る教材の誤りは自分の責任だと考えており、AI が抜き出した主張や理論の構造は一つずつ原文と照らしてから承認する。
+  特に、論文に書かれていない説明が論文の主張のように見えることを嫌う。
+teaching:
+  course_subject: 大規模構造の論文ゼミ
+  audience: 修士 2 年〜博士 2 年の院生（理論と数値計算が中心）
+  chapters_wanted:
+    - 線形理論と成長率
+    - バリオン音響振動と距離
+    - 非線形領域とシミュレーション
+    - 観測との比較と系統誤差
+  review_depth: thorough
+course_brief: seminar_prep
+overrides:
+  habits: {reads_manual: when_stuck}

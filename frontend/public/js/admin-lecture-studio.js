@@ -418,6 +418,8 @@
       lsSaveScript();
     });
 
+    var rewriteCopyBtn = document.getElementById("ls-rewrite-copy-btn");
+    if (rewriteCopyBtn) rewriteCopyBtn.addEventListener("click", lsCopyRewriteProposal);
     rewriteBtn.addEventListener("click", function () {
       lsRewriteScript();
     });
@@ -936,6 +938,13 @@
         if (lsState.courseId !== courseId) return;
         lsState.structureLoaded = true;
         lsState.courseStructure = data || null;
+        // IK-0873: 注意点の表示用投影（cautions_display）が対応する保存時の値を控える
+        // （編集で topic.cautions が変わったら投影は使わず入力のまま見せる）。
+        ((data && data.chapters) || []).forEach(function (chapter) {
+          ((chapter && chapter.topics) || []).forEach(function (t) {
+            if (t) t.cautions_saved = (t.cautions || []).slice();
+          });
+        });
         // 教材図スタジオ（§7.3）: コース単位の figures_index を保持する。
         // 未対応バックエンドでは空オブジェクトに縮退する（プレビューは従来どおり
         // evidence_links 由来の図のみ解決する）。
@@ -950,6 +959,78 @@
         lsUpdateCourseControls();
         if (lsState.leftTab === "course") lsRenderCourseStructure();
       });
+  }
+
+  // IK-0908: 閲覧者がトピックを保存できるか（正本はサーバの course-structure.can_save —
+  // 保存 API と同じ所有者判定。値が無い旧応答では従来どおり保存を試せる）。
+  function lsCourseCanSave() {
+    var cs = lsState.courseStructure || {};
+    return cs.can_save !== false;
+  }
+
+  function lsCourseSaveNotice() {
+    return (lsState.courseStructure || {}).save_notice || "";
+  }
+
+  // FastAPI の detail（文字列 or 配列）を画面に出せる文にする。
+  function lsApiDetailText(body) {
+    var detail = body && body.detail;
+    if (!detail) return "";
+    if (typeof detail === "string") return detail;
+    if (detail.message) return String(detail.message);
+    return "";
+  }
+
+  // IK-0910: 当該トピックのサーバ派生の値（根拠リンク・根拠の状態・付録の状態・音声）だけを
+  // course-structure から取り直す。options.keepDraft のときは編集中の本文に触れず、右ペインと
+  // 根拠のチップだけ描き直す（採用直後 = 保存前）。それ以外（保存後）はトピックを描き直す。
+  var LS_TOPIC_SERVER_KEYS = [
+    "evidence_items", "evidence_state", "cautions_display", "document_ids", "has_topic_audio",
+    "uses_topic_material", "evidence_links", "linked_figure_ids", "appendix_state", "coverage",
+    "work_note_state"
+  ];
+  function lsRefreshTopicServerFacts(topic, options) {
+    var courseId = lsState.courseId;
+    if (!courseId || !topic) return;
+    var keepDraft = !!(options && options.keepDraft);
+    apiFetch("/admin/courses/" + courseId + "/lecture-studio/course-structure")
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (!data || lsState.courseId !== courseId) return;
+        var fresh = null;
+        ((data.chapters) || []).forEach(function (chapter) {
+          ((chapter && chapter.topics) || []).forEach(function (t) {
+            if (t && t.id === topic.id) fresh = t;
+          });
+        });
+        if (!fresh) return;
+        LS_TOPIC_SERVER_KEYS.forEach(function (key) {
+          if (Object.prototype.hasOwnProperty.call(fresh, key)) topic[key] = fresh[key];
+          else if (key === "appendix_state" || key === "work_note_state") topic[key] = null;
+        });
+        if (!keepDraft) topic.cautions_saved = (fresh.cautions || []).slice();
+        // コース単位の値（保存の可否・届き方・図マップ）も新しい応答に揃える。
+        if (lsState.courseStructure) {
+          ["can_save", "save_notice", "share_mark", "owner_notice", "owner_display_name",
+            "proposal_copy_notice", "figure_adopt_notice_parts", "delivery", "figures_index",
+            "unpublished_changes_note", "versions_entry", "audio_generate_notice", "audio_request"].forEach(function (key) {
+            if (Object.prototype.hasOwnProperty.call(data, key)) lsState.courseStructure[key] = data[key];
+            else delete lsState.courseStructure[key];
+          });
+        }
+        lsState.figuresIndex = data.figures_index || lsState.figuresIndex || {};
+        var selected = lsGetSelectedCourseTopic();
+        if (!selected || selected.id !== topic.id) return;
+        if (keepDraft) {
+          var chips = document.querySelector(".ls-course-draft .ls-course-evidence-chips");
+          if (chips) chips.innerHTML = lsCourseEvidenceChipsHtml(topic);
+          lsUpdateTopicDeliveryBlock();
+          lsRenderRightPaneForTopic(topic);
+        } else {
+          lsRenderSelectedCourseTopic(topic);
+        }
+      })
+      .catch(function () { /* 取り直せなくても保存・採用の結果は変わらない（fail-soft） */ });
   }
 
   function lsLoadCourseComponents(courseId) {
@@ -971,6 +1052,13 @@
       });
   }
 
+  // IK-0952: 章題が既に「第N章」で始まるなら番号を重ねない（「第1章: 第1章 …」にしない）。
+  function lsChapterHeading(index, title) {
+    var t = String(title || "").trim();
+    if (/^第\s*[0-9０-９一二三四五六七八九十]+\s*章/.test(t)) return t;
+    return "第" + (index + 1) + "章: " + t;
+  }
+
   function lsRenderCourseStructure() {
     var el = document.getElementById("ls-course-list");
     if (!el) return;
@@ -983,11 +1071,76 @@
       return;
     }
     var s = lsState.courseStructure;
-    var statusLabel = { draft: "未着手", partial: "一部生成", generated: "生成済み", audio_generated: "音声生成済み", no_chunks: "チャンクなし" };
+    // IK-0952: 内部語「チャンク」を見出しに出さない（旧い状態語の落ち先）。
+    var statusLabel = { draft: "未着手", partial: "一部生成", generated: "生成済み", audio_generated: "音声生成済み", no_chunks: "教材がまだありません" };
+    // IK-0877: トピック教材で配信するコースでは、チャンクの数ではなくトピックの音声の
+    // 揃い方を事実文で出す（サーバの topic_audio_status = core/lecture_studio_state）。
+    // IK-0952: トピック教材がまだ無い（no_topics）ときもサーバの事実文を出す。
+    var topicAudio = s.topic_audio_status || null;
+    var metaHtml = (topicAudio && topicAudio.status && topicAudio.message)
+      ? '<div class="ls-doc-meta">' + escHtml(topicAudio.message) + '</div>'
+      : '<div class="ls-doc-meta">' + escHtml(statusLabel[s.course_status] || s.course_status || "") +
+        (s.total_chunks > 0 ? ' (' + (s.generated_chunks || 0) + '/' + s.total_chunks + ')' : '') + '</div>';
+    // IK-0950: 保存できない閲覧者（editor 共有）にはトピックを開く前に共有の印を出す（サーバの語）。
+    var shareMarkHtml = s.share_mark
+      ? '<div class="ls-doc-meta" data-share-mark="1">' + escHtml(s.share_mark) +
+        // IK-0978: 案を渡す相手（所有者の表示名。サーバの事実文をそのまま描く）。
+        (s.owner_notice ? ' <span data-owner-notice="1">' + escHtml(s.owner_notice) + '</span>' : '') +
+        '</div>'
+      : '';
+    // IK-0951: 題名に生の TeX 記法が残るならサーバの事実文と該当の題名を出す。
+    var titleNoticeHtml = s.title_notice
+      ? '<div class="ls-doc-meta" data-title-notice="1">' + escHtml(s.title_notice) +
+        ((s.raw_tex_titles || []).length ? '（' + escHtml((s.raw_tex_titles || []).join(" / ")) + '）' : '') + '</div>'
+      : '';
+    // 第 25 周 第 6 波（オーナー判断 1）: 付録がいまの根拠と違うトピックを題名で知らせ、所有者の
+    // 明示操作［付録をまとめて付け直す］を出す（システムは保存済みの付録を書き直さない。文はサーバ）。
+    // 第 25 周 第 7 波（IK-1054）: 対象のトピックは文の括弧に連結せず、折りたたみの一覧（1 行 1 題名・
+    // 「章.トピック」番号付き）で並べ、各項目からそのトピックを開ける。
+    var staleAppendixTopics = s.appendix_stale_topics || [];
+    var appendixStaleHtml = (staleAppendixTopics.length && s.appendix_stale_course_notice)
+      ? '<div class="ls-doc-meta ls-course-appendix-stale-all" data-appendix-stale-all="1">' +
+          escHtml(s.appendix_stale_course_notice) +
+          lsAppendixStaleListHtml(s, staleAppendixTopics) +
+          ' <button type="button" id="ls-course-reattach-all-btn" class="ls-mini-tab" data-ui-anchor="lecture-studio.reattach-appendix-all"' +
+            (s.appendix_reattach_all_notice ? ' disabled title="' + escHtml(s.appendix_reattach_all_notice) + '"' : '') +
+          '>付録をまとめて付け直す</button>' +
+          (s.appendix_reattach_all_notice
+            ? '<div class="ls-course-muted" data-appendix-reattach-all-notice="1">' + escHtml(s.appendix_reattach_all_notice) + '</div>'
+            : '') +
+        '</div>'
+      : '';
+    // 第 25 周 第 9 波（IK-1079）: 所有者には、発行の後に保存した変更があればコースの見出しにも
+    // 事実文と［版の管理を開く］（トピックの区画と同じ部品）。
+    var unpublishedHtml = lsCourseCanSave() ? lsUnpublishedChangesHtml(s.delivery, true) : "";
+    if (unpublishedHtml) unpublishedHtml = '<div class="ls-doc-meta" data-course-unpublished-changes="1">' + unpublishedHtml + '</div>';
+    // 第 25 周 第 9 波（IK-1081）: 古い生成規則の作業メモが残るトピックを題名の一覧で（文はサーバ）。
+    var workNoteTopics = s.work_note_topics || [];
+    // 第 10 波（IK-1081 の残り）: 一覧を残っている場所（本文の注 / 注意点だけ）で分ける（件数なし）。
+    var workNoteSummaries = s.work_note_list_summaries || {};
+    var workNoteBody = workNoteTopics.filter(function (t) { return t && (t.places || []).indexOf("body") >= 0; });
+    var workNoteCautions = workNoteTopics.filter(function (t) { return t && (t.places || []).indexOf("body") < 0; });
+    var workNoteListsHtml = (workNoteSummaries.body
+      ? lsAppendixStaleListHtml(s, workNoteBody, workNoteSummaries.body) +
+        lsAppendixStaleListHtml(s, workNoteCautions, workNoteSummaries.cautions)
+      : lsAppendixStaleListHtml(s, workNoteTopics, s.work_note_list_summary));
+    var workNoteHtml = (workNoteTopics.length && s.work_note_course_notice)
+      ? '<div class="ls-doc-meta" data-work-note-course-notice="1">' + escHtml(s.work_note_course_notice) +
+          workNoteListsHtml + '</div>'
+      : '';
     var html = '<div class="ls-course-header">' +
       '<div class="ls-doc-title">' + escHtml(s.title || "コース") + '</div>' +
-      '<div class="ls-doc-meta">' + escHtml(statusLabel[s.course_status] || s.course_status || "") +
-      (s.total_chunks > 0 ? ' (' + (s.generated_chunks || 0) + '/' + s.total_chunks + ')' : '') + '</div>' +
+      shareMarkHtml +
+      metaHtml +
+      unpublishedHtml +
+      titleNoticeHtml +
+      appendixStaleHtml +
+      workNoteHtml +
+      // 第 25 周 第 7 波（IK-1051）: 再解析で置き換わり後継の決まらない部品を指す ⚓ があることと、
+      // 凍結し直しの案内（文はサーバ。自動では凍結し直さない）。
+      (s.frozen_anchor_notice
+        ? '<div class="ls-doc-meta" data-frozen-anchor-notice="1">' + escHtml(s.frozen_anchor_notice) + '</div>'
+        : '') +
       lsReconReviewBadgeHtml() +
       lsCourseInventoryButtonHtml() +
       '</div>';
@@ -1002,7 +1155,7 @@
 
     s.chapters.forEach(function (chapter, ci) {
       html += '<div class="ls-course-chapter">' +
-        '<span class="ls-doc-title">第' + (ci + 1) + '章: ' + escHtml(chapter.title || "") + '</span>' +
+        '<span class="ls-doc-title">' + escHtml(lsChapterHeading(ci, chapter.title)) + '</span>' +
         '</div>';
       (chapter.topics || []).forEach(function (topic, ti) {
         var statusCls = "ls-topic-status-" + (topic.status || "draft");
@@ -1016,6 +1169,10 @@
     el.innerHTML = html;
     lsBindReconReviewButtons();
     lsBindCourseInventoryButtons();
+    lsBindReattachAllAppendicesButton();
+    lsBindAppendixStaleList(el);
+    var unpublishedRow = el.querySelector("[data-course-unpublished-changes]");
+    if (unpublishedRow) lsBindOpenVersionsButton(unpublishedRow);
 
     el.querySelectorAll(".ls-course-topic").forEach(function (item) {
       item.addEventListener("click", function () {
@@ -1070,6 +1227,143 @@
       '<button type="button" class="admin-action-btn ls-menu-trigger ls-course-inventory-trigger">検出要素 ▼</button>' +
       '<div class="ls-menu ls-course-inventory-menu" hidden>' + menuItems + '</div>' +
     '</div>';
+  }
+
+  // 第 25 周 第 7 波（IK-1054）: 付録が古いトピックの一覧（折りたたみ・1 行 1 題名）。番号は
+  // 左のトピック一覧と同じ「章.トピック」。各項目は左の一覧の該当トピックを開く（同じ選択の経路）。
+  // IK-1081: 作業メモの一覧も同じ部品（summary だけ差し替え・アンカーは付録の一覧のときだけ）。
+  function lsAppendixStaleListHtml(s, staleTopics, summaryText) {
+    var pos = {};
+    (s.chapters || []).forEach(function (chapter, ci) {
+      (chapter.topics || []).forEach(function (topic, ti) {
+        if (topic && topic.id) pos[topic.id] = { ci: ci, ti: ti };
+      });
+    });
+    var items = staleTopics.map(function (t) {
+      if (!t) return "";
+      var p = pos[t.id];
+      var label = (p ? (p.ci + 1) + "." + (p.ti + 1) + " " : "") + (t.title || "");
+      return '<li>' + (p
+        ? '<button type="button" class="ls-link-btn" style="background:none;border:none;padding:0;color:var(--color-text-info,#06c);cursor:pointer;text-align:left;font-size:inherit" data-ls-stale-topic-chapter="' + p.ci +
+            '" data-ls-stale-topic-index="' + p.ti + '">' + escHtml(label) + '</button>'
+        : escHtml(label)) + '</li>';
+    }).filter(Boolean).join("");
+    if (!items) return "";
+    return '<details class="ls-course-appendix-stale-list"' +
+      (summaryText ? '' : ' data-ui-anchor="lecture-studio.appendix-stale-list"') + '>' +
+      '<summary>' + escHtml(summaryText || s.appendix_stale_list_summary || "付録が古いトピックの一覧") + '</summary>' +
+      '<ul style="margin:4px 0 4px 18px;padding:0">' + items + '</ul>' +
+    '</details>';
+  }
+
+  function lsBindAppendixStaleList(el) {
+    if (!el) return;
+    el.querySelectorAll("[data-ls-stale-topic-chapter]").forEach(function (btn) {
+      btn.onclick = function () {
+        var ci = btn.getAttribute("data-ls-stale-topic-chapter");
+        var ti = btn.getAttribute("data-ls-stale-topic-index");
+        var row = el.querySelector('.ls-course-topic[data-chapter="' + ci + '"][data-topic="' + ti + '"]');
+        if (row) {
+          row.click();
+          if (row.scrollIntoView) row.scrollIntoView({ block: "nearest" });
+        }
+      };
+    });
+  }
+
+  // 第 25 周 第 7 波（IK-1053・オーナー判断: 発行は所有者の明示操作のまま）: 保存の届き方の文に、
+  // 未発行の変更があるかの事実（サーバの文）と、所有者には［版の管理を開く］（V層の版の管理
+  // モーダル）への入口だけを添える。自動発行・督促はしない。
+  function lsTopicDeliveryInnerHtml() {
+    var cs = lsState.courseStructure || {};
+    var delivery = cs.delivery || {};
+    if (!lsCourseCanSave() || !delivery.message) return "";
+    return '<p class="ls-course-muted" data-topic-delivery-notice="1">' + escHtml(delivery.message) + '</p>' +
+      lsUnpublishedChangesHtml(delivery, false);
+  }
+
+  // 第 25 周 第 9 波（IK-1079）: 未発行の変更の事実文（サーバの delivery.unpublished_changes_note）と
+  // ［版の管理を開く］を描く部品は 1 つ。トピックの区画・コースの見出し（所有者・変更ありのとき）が
+  // これを通す（一括付け直しの後もトピックを開かずに発行が要るかが読める）。
+  function lsUnpublishedChangesHtml(delivery, onlyWhenChanged) {
+    delivery = delivery || {};
+    if (onlyWhenChanged && delivery.unpublished_changes !== true) return "";
+    var entry = delivery.versions_entry || null;
+    return (delivery.unpublished_changes_note
+        ? '<p class="ls-course-muted" data-topic-unpublished-changes="' + (delivery.unpublished_changes ? "1" : "0") + '">' +
+            escHtml(delivery.unpublished_changes_note) + '</p>'
+        : '') +
+      (entry && window.Versioning && window.Versioning.openModal
+        ? '<button type="button" class="ls-mini-tab" data-ls-open-versions="1" data-ui-anchor="lecture-studio.open-versions">' +
+            escHtml(entry.label || "版の管理を開く") + '</button>'
+        : '');
+  }
+
+  function lsUpdateTopicDeliveryBlock() {
+    var block = document.querySelector("[data-topic-delivery-block]");
+    if (!block) return;
+    block.innerHTML = lsTopicDeliveryInnerHtml();
+    lsBindOpenVersionsButton(block);
+  }
+
+  function lsBindOpenVersionsButton(root) {
+    var btn = (root || document).querySelector("[data-ls-open-versions]");
+    if (!btn) return;
+    btn.onclick = function () {
+      var courseId = lsState.courseId;
+      var cs = lsState.courseStructure || {};
+      if (!courseId || !window.Versioning) return;
+      window.Versioning.openModal("course", courseId, cs.title || "", {
+        // 閉じた後に、未発行の変更の事実を取り直す（発行したかはサーバが比べる）。
+        onClose: function () {
+          if (lsState.courseId !== courseId) return;
+          var topic = lsGetSelectedCourseTopic();
+          if (topic) lsRefreshTopicServerFacts(topic, { keepDraft: true });
+          else lsLoadCourseStructure(courseId);
+        }
+      });
+    };
+  }
+
+  // 第 25 周 第 6 波（オーナー判断 1）: ［付録をまとめて付け直す］— 一覧（サーバの
+  // appendix_stale_topics）を提示した集合として送り、所有者の 1 操作で付け直して保存する
+  // （サーバが decision_context を記帳）。押す前に音声・区切りが動くことをサーバの文で確かめる。
+  function lsBindReattachAllAppendicesButton() {
+    var btn = document.getElementById("ls-course-reattach-all-btn");
+    if (!btn) return;
+    btn.onclick = function () {
+      if (btn.disabled) return;
+      var s = lsState.courseStructure || {};
+      var confirmText = s.appendix_reattach_all_confirm || "";
+      if (confirmText && !window.confirm(confirmText)) return;
+      var courseId = lsState.courseId;
+      btn.disabled = true;
+      apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/lecture-studio/appendix/reattach-all", {
+        method: "POST",
+        body: JSON.stringify({
+          topic_ids: (s.appendix_stale_topics || []).map(function (t) { return (t && t.id) || ""; }).filter(Boolean)
+        })
+      })
+        .then(function (res) {
+          return res.json().catch(function () { return {}; }).then(function (body) {
+            if (!res.ok) throw new Error(lsApiDetailText(body) || "付録を付け直せませんでした");
+            return body;
+          });
+        })
+        .then(function (data) {
+          var parts = [(data && data.notice) || ""];
+          if (data && data.audio_notice) parts.push(data.audio_notice);
+          if (data && data.delivery && data.delivery.message) parts.push(data.delivery.message);
+          // IK-1079: 未発行の変更の事実もトピックの区画と同じサーバの文で添える（入口はコースの見出し）。
+          if (data && data.delivery && data.delivery.unpublished_changes_note) parts.push(data.delivery.unpublished_changes_note);
+          lsShowActionStatus(parts.filter(Boolean).join(" "), data && data.changed ? "success" : "info");
+          if (courseId) lsLoadCourseStructure(courseId);
+        })
+        .catch(function (err) {
+          lsShowActionStatus((err && err.message) || "付録を付け直せませんでした", "error");
+          btn.disabled = false;
+        });
+    };
   }
 
   function lsBindCourseInventoryButtons() {
@@ -1752,7 +2046,11 @@
 
     lsRenderRightPaneForTopic(topic);
     var saveBtn = document.getElementById("ls-save-btn");
-    if (saveBtn) saveBtn.disabled = false;
+    // IK-0908: 保存は所有者だけ。editor 共有では押せないことと理由を、押す前に示す。
+    if (saveBtn) {
+      saveBtn.disabled = !lsCourseCanSave();
+      saveBtn.title = lsCourseCanSave() ? "" : lsCourseSaveNotice();
+    }
     var rewriteBtn = document.getElementById("ls-rewrite-btn");
     if (rewriteBtn) rewriteBtn.disabled = true;
     lsApplyRightPaneVisibility();
@@ -2105,6 +2403,9 @@
       figuresIndex: lsState.figuresIndex,
       documentIds: lsCourseDocumentIds(),
       countTopicReferences: lsCountTopicsReferencingFigure,
+      // IK-0979: 採用の知らせは保存側と同じ値（音声の有無・届き方）から組む。
+      adoptNoticeParts: (lsState.courseStructure || {}).figure_adopt_notice_parts || null,
+      hasTopicAudio: !!(topic && topic.has_topic_audio),
       onInsert: function (figureId, embedText, result) {
         if (!materialEl) return;
         lsApplyFigureInsert(topic, materialEl, recorded, figureId, embedText, result);
@@ -2188,9 +2489,13 @@
 
   // つまづきサマリーを document 単位で取得（キャッシュ）し、トピックの claim に絞って描画。
   function lsLoadStumbleSummary(topic, container) {
-    var documentId = lsCurrentDocumentId() || lsCoursePrimaryDocumentId();
+    // IK-0876: トピックの論文（course-structure の topic.document_ids）を使う。選択中の
+    // チャンクや原稿一覧の先頭の論文には頼らない（トピックと無関係な論文を集計しない）。
+    var documentId = lsTopicDocumentId(topic) || lsCoursePrimaryDocumentId();
     if (!documentId) {
-      container.innerHTML = '<div class="ls-course-muted">このコースに紐づく解析済みドキュメントが見つかりません。</div>';
+      container.innerHTML = '<div class="ls-course-muted">' +
+        escHtml((lsState.courseStructure || {}).topic_document_unresolved_notice ||
+          "このトピックの論文が決まっていません。") + '</div>';
       return;
     }
     var cached = lsState.stumbleByDocument[documentId];
@@ -2210,9 +2515,23 @@
       });
   }
 
-  // コースの主ドキュメント id（sources[].material_id）を返す（chunk 由来が取れない場合の保険）。
+  // トピックの論文（サーバが units / 部品 / 教材チャンクから決めた topic.document_ids の先頭）。
+  function lsTopicDocumentId(topic) {
+    var ids = (topic && topic.document_ids) || [];
+    return ids.length ? String(ids[0] || "") : "";
+  }
+
+  // コースの主ドキュメント id。①選択中のコーストピックの論文 ②コースの論文が 1 本だけなら
+  // その 1 本（course-structure の documents。IK-0876）③旧応答の sources[].material_id。
+  // 応答に無い sources を読んで空になる契約の片側（IK-0876）を作らない。
   function lsCoursePrimaryDocumentId() {
     var course = lsState.courseStructure || {};
+    var selected = (lsState.selectedScope && lsState.selectedScope.type === "course_topic")
+      ? lsGetSelectedCourseTopic() : null;
+    var fromTopic = lsTopicDocumentId(selected);
+    if (fromTopic) return fromTopic;
+    var documents = course.documents || [];
+    if (documents.length === 1 && documents[0] && documents[0].document_id) return documents[0].document_id;
     var sources = course.sources || (course.data && course.data.sources) || [];
     for (var i = 0; i < sources.length; i++) {
       if (sources[i] && sources[i].material_id) return sources[i].material_id;
@@ -2641,22 +2960,31 @@
       });
   }
 
+  // 根拠の状態の正本はサーバ（course-structure の topic.evidence_state =
+  // core/lecture_studio_state.topic_evidence_state。IK-0875）。中央の見出し・一覧の見出し・
+  // 書き換えの事前判定が同じ値を読む。判定と文言をここに再実装しない（何も無いときに
+  // 「根拠候補はあります」と言っていた既定の分裂を作らない）。
+  function lsTopicEvidenceState(topic) {
+    var state = (topic && topic.evidence_state) || null;
+    if (state && state.status) return state;
+    return { status: "none", label: "", message: "" };
+  }
+
   function lsTopicCoverageStatus(topic) {
-    if (topic.coverage && topic.coverage.status) return topic.coverage.status;
-    if (topic.content_source === "source_excerpt" && topic.content_confidence === "none") return "missing";
-    if (topic.content_confidence === "none") return "weak";
-    if (topic.content_confidence) return "sufficient";
-    return (topic.linked_component_ids && topic.linked_component_ids.length) ? "sufficient" : "weak";
+    return lsTopicEvidenceState(topic).status;
   }
 
   function lsTopicCoverageMessage(topic) {
-    if (topic.coverage && topic.coverage.message) return topic.coverage.message;
-    var status = lsTopicCoverageStatus(topic);
-    if (status === "missing") {
-      return "このトピックに対応するClaimまたはコンポーネントの対応付けが弱いため、本文説明を自動生成するには確認が必要です。";
-    }
-    if (status === "weak") return "根拠候補はありますが、授業用ドラフトとして使う前に教員確認が必要です。";
-    return "授業用ドラフトを支える根拠候補があります。";
+    return lsTopicEvidenceState(topic).message || "";
+  }
+
+  // 注意点の表示用テキスト（読み取り専用）。編集欄の値が保存時の値と同じときだけ、
+  // サーバの cautions_display（教員向け投影済み）を使う。編集中は教員の入力をそのまま見せる。
+  function lsCautionsDisplayText(topic, cautionsText) {
+    var display = topic && topic.cautions_display;
+    if (!Array.isArray(display)) return cautionsText;
+    if (lsListText(topic.cautions_saved || topic.cautions) !== cautionsText) return cautionsText;
+    return lsListText(display);
   }
 
   function lsTopicStudentMaterialSource(topic) {
@@ -2754,16 +3082,25 @@
         '<div class="ls-course-slide-tools-row"' + editHidden + '>' +
           '<button type="button" id="ls-course-insert-slide-marker-btn" class="ls-mini-tab" data-ui-anchor="lecture-studio.insert-slide-marker-btn" ' +
             'title="最後にフォーカスしていた入力欄（教材 or 本文説明）のカーソル位置に区切りを挿入します。もう一方には自動挿入されないため、対応する位置には手動で追加してください。">+ スライド区切りを挿入</button>' +
+          // 第 25 周 第 5 波（IK-0878）: 教材欄のカーソル位置に区切りを入れ、読み上げ欄にも
+          // 同じ数の区切りを（教材欄での位置に近い段落の境目へ）入れる 1 操作。
+          '<button type="button" id="ls-course-insert-slide-marker-both-btn" class="ls-mini-tab" data-ui-anchor="lecture-studio.insert-slide-marker-both" ' +
+            'title="教材欄のカーソル位置に区切りを入れ、読み上げ欄にも同じ数の区切りを段落の境目に入れます（位置は保存の前に確かめてください）。">+ 両方の欄に区切りを挿入</button>' +
+          // IK-0878: 区切りの数が合わず 1 枚に統合されるときだけ出す「揃える」導線。
+          '<button type="button" id="ls-course-align-slide-markers-btn" class="ls-mini-tab" data-ui-anchor="lecture-studio.align-slide-markers" hidden ' +
+            'title="読み上げ欄の区切りを外し、教材欄の区切りと同じ数を、教材欄での位置に近い段落の境目へ入れ直します。">読み上げ欄の区切りを教材欄に揃える</button>' +
           // 教材図スタジオ（teaching_figure_studio_design.md §6.2-1）: 教材欄の
           // カーソル位置に図を挿入する。読み上げ原稿にフォーカス中は無効化する
           // （図は読み上げから除去されるため、入口で無意味な操作を塞ぐ）。
           '<button type="button" id="ls-course-insert-figure-btn" class="ls-mini-tab" data-ui-anchor="lecture-studio.insert-figure">🖼 図を挿入</button>' +
-          '<span id="ls-course-slides-indicator" class="ls-slides-indicator ls-slides-indicator-inline"></span>' +
+          '<span id="ls-course-slides-indicator" class="ls-slides-indicator ls-slides-indicator-inline" data-ui-anchor="lecture-studio.slides-indicator"></span>' +
         '</div>' +
         '<section class="ls-course-draft-section">' +
           '<div class="ls-course-draft-label">注意点</div>' +
           '<textarea id="ls-course-cautions" class="ls-course-small-textarea"' + editHidden + ' placeholder="誤解しやすい点や適用条件を1行ずつ入力">' + escHtml(cautionsText) + '</textarea>' +
-          '<div id="ls-course-cautions-preview" class="ls-course-field-preview"' + previewHidden + '>' + lsRenderCourseListPreview(cautionsText, topic, "注意点はまだ入力されていません。") + '</div>' +
+          // 注意点のプレビュー（読み取り専用の区画）は、編集前の値なら教員向け投影を通した
+          // cautions_display（内部 ID を式の名前へ写したもの・IK-0873）を描く。編集欄は原文のまま。
+          '<div id="ls-course-cautions-preview" class="ls-course-field-preview"' + previewHidden + '>' + lsRenderCourseListPreview(lsCautionsDisplayText(topic, cautionsText), topic, "注意点はまだ入力されていません。") + '</div>' +
         '</section>' +
         '<section class="ls-course-draft-section">' +
           '<div class="ls-course-draft-label">確認問題</div>' +
@@ -2775,10 +3112,45 @@
         '</section>' +
         '<section class="ls-course-draft-section">' +
           '<div class="ls-course-draft-label">根拠リンク</div>' +
-          '<div class="ls-coverage-pill ls-coverage-' + escHtml(status) + '">' + escHtml(status) + '</div>' +
+          // pill は内部の英語の状態名ではなくサーバが返す短いラベル（IK-0875）。
+          (lsTopicEvidenceState(topic).label
+            ? '<div class="ls-coverage-pill ls-coverage-' + escHtml(status) + '">' + escHtml(lsTopicEvidenceState(topic).label) + '</div>'
+            : '') +
           '<p class="ls-course-muted">' + escHtml(lsTopicCoverageMessage(topic)) + '</p>' +
-          '<div class="ls-course-evidence-chips">' + lsCourseEvidenceChipsHtml(topic) + '</div>' +
+          // IK-1010: 教員が加えた資料（教材図）と解析が拾った候補を区画で分ける。見出しは
+          // それぞれの区画にだけ掛ける（解析の候補の見出しを教員の図に掛けない）。
+          lsCourseEvidenceChipsHtml(topic) +
         '</section>' +
+        // 第 25 周 第 9 波（IK-1081）: 古い生成規則の作業メモが保存済みの本文・注意点に残るときの
+        // 事実文（文はサーバの work_note_state.message。保存物は書き直さない — 外すのは教員の編集）。
+        (topic.work_note_state && topic.work_note_state.message
+          ? '<p class="ls-course-muted" data-work-note-state="1">' + escHtml(topic.work_note_state.message) + '</p>' +
+            // 第 10 波（IK-1081）: 注意点の「埋め込んでいません」がいまの本文の埋め込みと食い違うときの事実文。
+            (topic.work_note_state.embed_conflict_note
+              ? '<p class="ls-course-muted" data-work-note-embed-conflict="1">' + escHtml(topic.work_note_state.embed_conflict_note) + '</p>'
+              : '')
+          : '') +
+        // IK-0872 / IK-0880: 保存済みの付録がいまの根拠から作る形と違うときだけ、事実文と
+        // 明示の操作を出す（読み時には付け直さない。文はサーバの appendix_state.message）。
+        (topic.appendix_state && topic.appendix_state.message
+          ? '<div class="ls-course-appendix-state" data-appendix-stale="1">' +
+              '<p class="ls-course-muted">' + escHtml(topic.appendix_state.message) + '</p>' +
+              '<button type="button" id="ls-course-reattach-appendix-btn" class="ls-mini-tab" data-ui-anchor="lecture-studio.reattach-appendix"' +
+                (lsCourseCanSave() ? '' : ' disabled title="' + escHtml(lsCourseSaveNotice()) + '"') +
+              '>付録を付け直す</button>' +
+            '</div>'
+          : '') +
+        // IK-0908: 保存できない閲覧者（editor 共有）には、保存の前から理由と出口を言う。
+        (!lsCourseCanSave()
+          ? '<p class="ls-course-muted" data-topic-save-notice="1">' + escHtml(lsCourseSaveNotice()) + '</p>'
+          : '') +
+        // IK-0915: 保存がいつ受講者に届くか（版なし = すぐ / 版あり = 発行するまで届かない）。
+        // 第 25 周 第 7 波（IK-1053）: 未発行の変更の事実と［版の管理を開く］も同じ区画に。
+        '<div data-topic-delivery-block="1">' + lsTopicDeliveryInnerHtml() + '</div>' +
+        // IK-0877: 音声のあるトピックでは、保存で音声が作り直しになることを保存の前から常に言う。
+        (topic.has_topic_audio && (lsState.courseStructure || {}).topic_audio_save_notice
+          ? '<p class="ls-course-muted" data-topic-audio-save-notice="1">' + escHtml(lsState.courseStructure.topic_audio_save_notice) + '</p>'
+          : '') +
         '<div class="ls-course-draft-toolbar">' +
           '<div class="ls-course-help">数式は $...$ / $$...$$、埋め込みは ![[equation:id]]・![[figure:id]]・![[source:id]]・![[claim:id]]・![[component:id]] で記述できます。</div>' +
           '<div class="ls-course-draft-tabs">' +
@@ -2856,9 +3228,24 @@
       var seq = ++courseSlideRequestSeq;
       // コーストピックは受講側と同じ自動ページ分割で数える（教材図スタジオ §7.5:
       // 図1個=200字換算でページ境界が動くため、`===` 無しのトピックでも実際の枚数を出す）。
-      lsFetchSplitSlides(dText, sText, [], true).then(function (split) {
+      lsFetchSplitSlides(dText, sText, [], true, null, {
+        courseId: lsState.courseId,
+        topicId: topic.id || "",
+        chapterIndex: (lsState.selectedScope || {}).chapterIndex,
+        topicIndex: (lsState.selectedScope || {}).topicIndex,
+      }).then(function (split) {
         if (seq !== courseSlideRequestSeq) return; // 古いレスポンスは無視
         lsRenderSlideIndicatorEl(indicatorEl, split);
+        // IK-0878: 統合の告知には「揃える」導線を添える（数が合っていれば隠す）。
+        var alignBtnEl = document.getElementById("ls-course-align-slide-markers-btn");
+        if (alignBtnEl) alignBtnEl.hidden = !(split.mismatch && !split.error);
+        // IK-0878: 統合で配信される状態のまま保存するときに 1 回だけ確かめるための控え。
+        lsState.courseSlideSplit = {
+          topicId: topic.id || "",
+          signature: String(dText || "") + "\u0000" + String(sText || ""),
+          mismatch: !!split.mismatch,
+          notes: split.notes || [],
+        };
       });
     }
     var courseSlideIndicatorTimer = null;
@@ -2872,6 +3259,84 @@
     if (materialEl) materialEl.addEventListener("input", scheduleCourseSlideIndicatorUpdate);
     if (spokenScriptEl) spokenScriptEl.addEventListener("input", scheduleCourseSlideIndicatorUpdate);
     updateCourseSlideIndicator();
+
+    // IK-1053: ［版の管理を開く］（所有者・版ありのときだけ描かれる）。
+    lsBindOpenVersionsButton(document.querySelector("[data-topic-delivery-block]"));
+
+    // IK-0872 / IK-0880: [付録を付け直す] — サーバが付け直した本文を編集欄に入れる（保存は
+    // 既存の [原稿を保存] だけ）。音声と区切りが動くことを押す前に確かめる（文はサーバの正本）。
+    var reattachBtn = document.getElementById("ls-course-reattach-appendix-btn");
+    if (reattachBtn) {
+      reattachBtn.addEventListener("click", function () {
+        if (reattachBtn.disabled) return;
+        var confirmText = (lsState.courseStructure || {}).appendix_reattach_confirm || "";
+        if (confirmText && !window.confirm(confirmText)) return;
+        reattachBtn.disabled = true;
+        apiFetch("/admin/courses/" + encodeURIComponent(lsState.courseId) +
+          "/lecture-studio/course-topics/" + encodeURIComponent(topic.id || "") + "/appendix/reattach", {
+          method: "POST",
+          body: JSON.stringify({
+            chapter_index: lsState.selectedScope.chapterIndex,
+            topic_index: lsState.selectedScope.topicIndex,
+            student_material: {
+              source_format: "eg-markdown-v1",
+              source_text: materialEl ? materialEl.value : lsTopicStudentMaterialSource(topic)
+            },
+            cautions: lsSplitLines((document.getElementById("ls-course-cautions") || {}).value)
+          })
+        })
+          .then(function (res) {
+            return res.json().catch(function () { return {}; }).then(function (body) {
+              if (!res.ok) throw new Error(lsApiDetailText(body) || "付録を付け直せませんでした");
+              return body;
+            });
+          })
+          .then(function (data) {
+            if (data && data.changed && data.student_material) {
+              topic.student_material = data.student_material;
+              topic.appendix_state = null;
+              lsRenderSelectedCourseTopic(topic);
+            }
+            lsShowActionStatus((data && data.notice) || "", data && data.changed ? "success" : "info");
+          })
+          .catch(function (err) {
+            lsShowActionStatus((err && err.message) || "付録を付け直せませんでした", "error");
+            reattachBtn.disabled = false;
+          });
+      });
+    }
+
+    // 第 25 周 第 5 波（IK-0878）: 両方の欄に区切り / 読み上げ欄を教材欄に揃える。
+    function applyAlignedSpoken() {
+      if (!materialEl || !spokenScriptEl) return null;
+      var aligned = lsAlignSpokenSlideMarkers(materialEl.value || "", spokenScriptEl.value || "");
+      spokenScriptEl.value = aligned.text;
+      spokenScriptEl.dispatchEvent(new Event("input"));
+      updateTopic();
+      updateCourseSlideIndicator();
+      if (aligned.placed < aligned.wanted) {
+        lsShowActionStatus(
+          "読み上げ欄に区切りを入れられる段落の境目が足りないため、" +
+          "一部の区切りを入れられませんでした。読み上げ欄に段落を分けてから、もう一度揃えてください。",
+          "error"
+        );
+      }
+      return aligned;
+    }
+    var courseInsertBothBtn = document.getElementById("ls-course-insert-slide-marker-both-btn");
+    if (courseInsertBothBtn) {
+      courseInsertBothBtn.addEventListener("click", function () {
+        if (!materialEl) return;
+        lsInsertSlideMarkerIntoTextarea(materialEl);
+        applyAlignedSpoken();
+      });
+    }
+    var courseAlignBtn = document.getElementById("ls-course-align-slide-markers-btn");
+    if (courseAlignBtn) {
+      courseAlignBtn.addEventListener("click", function () {
+        applyAlignedSpoken();
+      });
+    }
 
     var courseInsertMarkerBtn = document.getElementById("ls-course-insert-slide-marker-btn");
     if (courseInsertMarkerBtn) {
@@ -2909,10 +3374,16 @@
           figuresIndex: lsState.figuresIndex,
           documentIds: lsCourseDocumentIds(),
           countTopicReferences: lsCountTopicsReferencingFigure,
+          // IK-0979: 採用の知らせは保存側と同じ値（音声の有無・届き方）から組む。
+          adoptNoticeParts: (lsState.courseStructure || {}).figure_adopt_notice_parts || null,
+          hasTopicAudio: !!(topic && topic.has_topic_audio),
           onInsert: function (figureId, embedText, result) {
             lsApplyFigureInsert(topic, materialEl, recorded, figureId, embedText, result);
             updateTopic();
             updateCourseSlideIndicator();
+            // IK-0910: 採用はサーバ側でトピックの根拠（evidence_links）に図を登録する。根拠リンクの
+            // 一覧はサーバの派生（evidence_items）なので、編集中の本文は残したまま取り直す。
+            lsRefreshTopicServerFacts(topic, { keepDraft: true });
           },
           onClose: lsRestoreDeferredTextareaFocus
         });
@@ -2934,7 +3405,8 @@
       }
       recorded.consumed = true;
     }
-    lsInsertTextAtCursor(materialEl, embedText || ("![[figure:" + figureId + "]]"));
+    lsMoveCursorBeforeGeneratedAppendix(materialEl);
+    lsInsertTextAtCursor(materialEl, lsAsParagraph(materialEl, embedText || ("![[figure:" + figureId + "]]")));
 
     if (result) {
       if (result.evidence_link) {
@@ -2952,6 +3424,39 @@
       }
     }
     lsRefreshCourseMaterialPreview(topic, materialEl);
+  }
+
+  // IK-0880: 図の埋め込みは段落として差し込む（前後が改行でなければ空行を補う）。
+  // 付録の最後の式と同じ行に連結されると、付録の付け直し・判定が外れる。
+  function lsAsParagraph(el, text) {
+    var value = (el && el.value) || "";
+    var start = typeof el.selectionStart === "number" ? el.selectionStart : value.length;
+    var end = typeof el.selectionEnd === "number" ? el.selectionEnd : start;
+    var before = value.slice(0, start);
+    var after = value.slice(end);
+    var lead = !before ? "" : (/\n\n$/.test(before) ? "" : (/\n$/.test(before) ? "\n" : "\n\n"));
+    var trail = !after ? "\n" : (/^\n\n/.test(after) ? "" : (/^\n/.test(after) ? "\n" : "\n\n"));
+    return lead + String(text || "") + trail;
+  }
+
+  // IK-0880: カーソルが決定論付録（見出しはサーバの generated_appendix_headings）の中・末尾に
+  // あるときは、付録の見出しの直前へ寄せる（図を付録の中に置かない）。
+  function lsMoveCursorBeforeGeneratedAppendix(el) {
+    if (!el) return;
+    var headings = (lsState.courseStructure || {}).generated_appendix_headings || [];
+    var value = el.value || "";
+    var pos = typeof el.selectionStart === "number" ? el.selectionStart : value.length;
+    var first = -1;
+    headings.forEach(function (heading) {
+      if (!heading) return;
+      var re = new RegExp("(^|\n)" + heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "[ \t]*(\n|$)");
+      var m = re.exec(value);
+      if (!m) return;
+      var at = m.index + m[1].length;
+      if (first < 0 || at < first) first = at;
+    });
+    if (first < 0 || pos < first) return;
+    el.selectionStart = el.selectionEnd = first;
   }
 
   // 教材プレビュー区画だけを再描画する（ドラフト全体を作り直すと textarea の
@@ -3007,6 +3512,20 @@
     var sources = course.sources || (course.data && course.data.sources) || [];
     var ids = [];
     var seen = {};
+    // IK-0876: トピックの論文を先頭に、コースの論文（course-structure の documents）を続ける。
+    var selected = (lsState.selectedScope && lsState.selectedScope.type === "course_topic")
+      ? lsGetSelectedCourseTopic() : null;
+    ((selected && selected.document_ids) || []).forEach(function (id) {
+      if (!id || seen[id]) return;
+      seen[id] = true;
+      ids.push(id);
+    });
+    (course.documents || []).forEach(function (doc) {
+      var id = doc && doc.document_id;
+      if (!id || seen[id]) return;
+      seen[id] = true;
+      ids.push(id);
+    });
     sources.forEach(function (source) {
       var id = source && (source.material_id || source.document_id);
       if (!id || seen[id]) return;
@@ -3206,8 +3725,11 @@
           summary: sSummary,
           latex: sLatex,
           plain_text: spokenText(raw.plain_text),
+          // 第 25 周 第 6 波（IK-1034）: サーバが別名を alt_ids に畳んで返す（項目は 1 つ）。
+          alt_ids: (raw.alt_ids || []).map(function (a) { return String(a || ""); }).filter(Boolean),
           document_id: String(raw.document_id || ""),
           role: String(raw.role || ""),
+          teaching: !!raw.teaching || String(raw.role || "") === "teaching_figure",
           confidence: String(raw.confidence || ""),
           server_item: true
         };
@@ -3278,10 +3800,12 @@
           figure_id: link.figure_id || figId,
           figure_key: link.figure_key || "",
           document_id: link.document_id || "",
-          title: "図: " + lsShortSummary(link.caption || figId || "図", 40),
+          // IK-0949: 種類の印は描く側（lsEvidenceItemKindText）が 1 箇所で付ける。
+          title: lsShortSummary(link.caption || figId || "図", 40),
           summary: link.caption || "",
           caption: link.caption || "",
-          role: link.support_role || "figure",
+          teaching: !!((link.extra && link.extra.teaching) || link.teaching),
+          role: ((link.extra && link.extra.teaching) || link.teaching) ? "teaching_figure" : (link.support_role || "figure"),
           confidence: link.confidence || "",
         });
         return;
@@ -3405,14 +3929,67 @@
     }) || null;
   }
 
+  // IK-0949: 種類の印の 1 箇所。教員が作った説明図はサーバの印（origin_label）で区別する。
+  function lsEvidenceItemKindText(item) {
+    return (item && item.origin_label) || lsEvidenceKindLabel(item && item.kind);
+  }
+
+  // 第 25 周 第 5 波（IK-1010）: 教員が加えた資料（教材図スタジオで採用した図）か。
+  function lsEvidenceItemIsTeacherAdded(item) {
+    return !!(item && (item.teaching || item.role === "teaching_figure"));
+  }
+
+  // 根拠の項目を「教員が加えた資料」と「解析が拾った候補」に分ける。教員の資料は教材欄に
+  // 埋め込んだ順（本文の位置）に並べ、埋め込みの無いものは末尾（元の並びを保つ）。
+  function lsSplitTeacherAddedEvidence(topic, items) {
+    var teacher = [];
+    var machine = [];
+    (items || []).forEach(function (item) {
+      if (lsEvidenceItemIsTeacherAdded(item)) teacher.push(item);
+      else machine.push(item);
+    });
+    var text = String(lsTopicStudentMaterialSource(topic) || "");
+    var positioned = teacher.map(function (item, idx) {
+      var figId = String(item.figure_id || item.id || "");
+      var pos = figId ? text.indexOf("![[figure:" + figId) : -1;
+      return { item: item, pos: pos < 0 ? Number.MAX_VALUE : pos, idx: idx };
+    });
+    positioned.sort(function (a, b) { return (a.pos - b.pos) || (a.idx - b.idx); });
+    return { teacher: positioned.map(function (p) { return p.item; }), machine: machine };
+  }
+
   function lsCourseEvidenceChipsHtml(topic) {
     var items = lsTopicEvidenceItems(topic);
-    if (!items.length) return '<span class="ls-course-muted">根拠リンク候補はまだありません。</span>';
-    return items.map(function (item) {
-      return '<button type="button" class="ls-evidence-chip" data-evidence-ref="' + escHtml(item.key) + '">' +
-        escHtml(lsEvidenceKindLabel(item.kind)) + ': ' + escHtml(item.title) +
-      '</button>';
-    }).join("");
+    if (!items.length) {
+      return '<div class="ls-course-evidence-chips"><span class="ls-course-muted">根拠リンク候補はまだありません。</span></div>';
+    }
+    var state = lsTopicEvidenceState(topic);
+    var split = lsSplitTeacherAddedEvidence(topic, items);
+    function lsCourseEvidenceChipButtons(list) {
+      return list.map(function (item) {
+        return '<button type="button" class="ls-evidence-chip" data-evidence-ref="' + escHtml(item.key) + '">' +
+          escHtml(lsEvidenceItemKindText(item)) + ': ' + escHtml(item.title) +
+        '</button>';
+      }).join("");
+    }
+    var html = "";
+    if (split.teacher.length) {
+      html += '<div class="ls-course-draft-label" data-evidence-section="teacher_added">' +
+        escHtml(state.teacher_added_heading || "") + '</div>' +
+        '<div class="ls-course-evidence-chips" data-evidence-section-body="teacher_added">' +
+        lsCourseEvidenceChipButtons(split.teacher) + '</div>';
+    }
+    if (split.machine.length) {
+      // 第 25 周 第 6 波（IK-1010 の残り）: 根拠ありのトピックでも、教員の資料の区画があれば
+      // 解析の候補の区画にサーバの見出し（analysis_heading）を付けて区別する。
+      html += (state.unmapped_heading
+          ? '<div class="ls-course-draft-label" data-evidence-section="unmapped">' + escHtml(state.unmapped_heading) + '</div>'
+          : (split.teacher.length && state.analysis_heading
+            ? '<div class="ls-course-draft-label" data-evidence-section="analysis">' + escHtml(state.analysis_heading) + '</div>'
+            : '')) +
+        '<div class="ls-course-evidence-chips">' + lsCourseEvidenceChipButtons(split.machine) + '</div>';
+    }
+    return html;
   }
 
   // 太字ヘッダ（title）を描くかどうか。title が本文（summary）の抜粋・同一文の場合は
@@ -3431,12 +4008,32 @@
     // CP9: トピック↔論文の対応付け来歴はペインの見出し行に1回だけ（カードには出さない）。
     var mappingNote = lsTopicMappingNoteHtml(topic);
     if (!items.length) {
+      // IK-0875: 右ペインも中央と同じ根拠の状態（サーバの evidence_state）の文で言う。
       return mappingNote +
-        '<div class="ls-course-evidence-empty">このトピックに対応する根拠リンク候補はまだありません。</div>';
+        '<div class="ls-course-evidence-empty">' +
+        escHtml(lsTopicCoverageMessage(topic) || "このトピックに対応する根拠リンク候補はまだありません。") +
+        '</div>';
     }
     // Phase 2: 論理要素（component）が1つ以上あるトピックは、その配下に主張・数式を
     // 束ねた構造アウトラインで描く。component アイテムが無いトピックは
     // 従来どおりフラットなカードリスト（グループバーなし）。
+    // IK-1010: 教員が加えた資料は先頭の区画に（見出しはサーバの teacher_added_heading）、
+    // 解析が拾った候補はその後ろに従来どおり。
+    var split = lsSplitTeacherAddedEvidence(topic, items);
+    var teacherHtml = split.teacher.length
+      ? '<div class="ls-course-evidence-teacher" data-evidence-section="teacher_added">' +
+          '<div class="ls-course-draft-label">' + escHtml(lsTopicEvidenceState(topic).teacher_added_heading || "") + '</div>' +
+          split.teacher.map(function (item) { return lsCourseEvidenceCardHtml(topic, item); }).join("") +
+        '</div>'
+      : "";
+    items = split.machine;
+    // 第 6 波（IK-1010 の残り）: 右ペインも、教員の区画があるとき解析の区画に見出しを付ける。
+    var analysisHeading = lsTopicEvidenceState(topic).analysis_heading;
+    if (split.teacher.length && items.length && analysisHeading) {
+      teacherHtml += '<div class="ls-course-draft-label" data-evidence-section="analysis">' + escHtml(analysisHeading) + '</div>';
+    }
+    mappingNote = [mappingNote, teacherHtml].join("");
+    if (!items.length) return mappingNote;
     var groups = lsGroupCourseEvidenceItems(topic, items);
     if (!groups) {
       return mappingNote + '<div class="ls-course-evidence-list">' + items.map(function (item) {
@@ -3459,7 +4056,7 @@
         // ヘッダは開閉トグル（クリックで文脈の遅延読み込み + 左ドラフトの該当箇所へ）。
         '<button type="button" class="ls-course-evidence-head" data-evidence-toggle="' + escHtml(item.key) + '"' +
           ' data-ui-anchor="lecture-studio.evidence-context" aria-expanded="false">' +
-          '<span class="ls-evidence-kind">' + escHtml(lsEvidenceKindLabel(item.kind)) + '</span>' +
+          '<span class="ls-evidence-kind">' + escHtml(lsEvidenceItemKindText(item)) + '</span>' +
           (lsEvidenceCardShowsTitle(item) ? '<strong>' + escHtml(item.title) + '</strong>' : '') +
           '<span class="ls-course-evidence-caret" aria-hidden="true">▸</span>' +
         '</button>' +
@@ -4099,13 +4696,18 @@
   function lsRenderCourseMaterialPreview(text, topic) {
     var formulas = lsTopicFormulas(topic);
     var formulaById = {};
-    formulas.forEach(function (formula, idx) {
-      var normalizedId = lsNormalizeEvidenceId(formula.id || ("FORMULA_" + idx));
+    // IK-0944: id の鍵を優先し、並び順の鍵（FORMULA_i）は空いているときだけ（学習画面と同じ規則）。
+    formulas.forEach(function (formula) {
+      if (!formula || !formula.id) return;
+      var normalizedId = lsNormalizeEvidenceId(formula.id);
       formulaById[String(formula.id)] = formula;
       formulaById[normalizedId] = formula;
       formulaById["[[" + normalizedId + "]]"] = formula;
-      formulaById["FORMULA_" + idx] = formula;
-      formulaById["[[" + "FORMULA_" + idx + "]]"] = formula;
+    });
+    formulas.forEach(function (formula, idx) {
+      if (!formula) return;
+      if (!Object.prototype.hasOwnProperty.call(formulaById, "FORMULA_" + idx)) formulaById["FORMULA_" + idx] = formula;
+      if (!Object.prototype.hasOwnProperty.call(formulaById, "[[FORMULA_" + idx + "]]")) formulaById["[[FORMULA_" + idx + "]]"] = formula;
     });
     var embedBlocks = [];
     var mathBlocks = [];
@@ -4228,7 +4830,11 @@
         if (evidenceItem.kind === "component" || evidenceItem.kind === "claim") {
           return '<button type="button" class="ls-material-evidence-chip" data-evidence-ref="' + escHtml(key) + '" data-evidence-kind="' + escHtml(evidenceItem.kind) + '">' +
             '<span class="ls-material-evidence-chip-icon">⚓</span>' +
-            '<span class="ls-material-evidence-chip-label">' + escHtml(evidenceItem.title || evidenceItem.id) + '</span>' +
+            // 第 25 周 第 7 波（IK-0571）: 受講画面と同じく表示名を優先し、原文のままならサーバの印。
+            '<span class="ls-material-evidence-chip-label">' + escHtml(evidenceItem.display_label || evidenceItem.title || evidenceItem.id) + '</span>' +
+            (evidenceItem.title_original_mark
+              ? '<span class="original-text-mark" style="margin-left:4px;font-size:0.85em;opacity:0.75">' + escHtml(evidenceItem.title_original_mark) + '</span>'
+              : '') +
           '</button>';
         }
         // 数式（equation_quote の source 等）は生 LaTeX 文字列を切り詰めて出さず、
@@ -4502,15 +5108,19 @@
     var promptEl = document.getElementById("ls-rewrite-prompt");
     var btn = document.getElementById("ls-rewrite-btn");
     if (!label || !promptEl || !btn) return;
+    var copyBtn = document.getElementById("ls-rewrite-copy-btn");
     if (lsState.selectedScope && lsState.selectedScope.type === "course_topic") {
       label.textContent = "授業用ドラフトへの提案:";
       promptEl.placeholder = "例: 根拠リンクを踏まえて教材欄に数式を追加して";
       promptEl.disabled = false;
       btn.textContent = "AIで提案";
       btn.disabled = false;
+      // IK-0950: 保存できない閲覧者（editor 共有）には、試した案を所有者に渡す［案をコピー］。
+      if (copyBtn) copyBtn.hidden = lsCourseCanSave();
       lsUpdateAssistantOpenButton();
       return;
     }
+    if (copyBtn) copyBtn.hidden = true;
     var view = lsState.view || "edit";
     var config = {
       compare: {
@@ -5130,7 +5740,13 @@
     var visibleEdges = edges.filter(function (edge) {
       var source = edge.source_component_id || edge.source || edge.from;
       var target = edge.target_component_id || edge.target || edge.to;
-      return visibleIds[source] && visibleIds[target];
+      if (!(visibleIds[source] && visibleIds[target])) return false;
+      // 辺自身の層（2026-09-19 再現性レビュー E-8 で辺に graph_layer が付いた）。層を
+      // 持つ辺はその層で判定し、持たない旧グラフの辺は端点の可視性だけで判定する。
+      var edgeLayer = String((edge && edge.graph_layer) || "").toLowerCase();
+      if (!edgeLayer) return true;
+      if (filter === "main") return edgeLayer === "main";
+      return edgeLayer === "equation_detail" || edgeLayer === "debug";
     });
     return Object.assign({}, graph, { nodes: visible, edges: visibleEdges });
   }
@@ -5946,7 +6562,8 @@
     // D層 (D1-4/D1-5/D3-1): 認識的地位台帳セクションを静かに追記する。
     // fail-closed — 取得失敗時はセクション自体を出さず既存表示を壊さない。
     if (window.DoubtAtlas && nodeId) {
-      window.DoubtAtlas.renderNodeLedgerSection(detail, "component", nodeId);
+      // IK-0899: ノード id は論文の中でしか一意でない — 開いているグラフの論文を添える。
+      window.DoubtAtlas.renderNodeLedgerSection(detail, "component", nodeId, lsGraphActiveDocumentId() || "");
     }
     lsGraphLoadNodeContext(node, graph, localDto);
   }
@@ -6997,12 +7614,51 @@
     el.style.color = kind === "error" ? "#c00" : kind === "success" ? "#0a7" : "#666";
   }
 
+  // IK-0924: 説明カードの 2 軸（学生への公開 = 査読 / 教員の支持）を別の語で言う。
+  // 正本は backend/core/label_vocab.py の EXPLANATION_* 表（逐語ミラー。
+  // test_share_round25_explanations.py が一致を固定）。
+  var EXPLANATION_AXIS_LABELS = {
+    review: "学生への公開",
+    support: "教員の支持",
+    citation: "引用"
+  };
+  var EXPLANATION_REVIEW_STATUS_LABELS = {
+    teacher_approved: "公開可（査読済み）",
+    teacher_review_required: "査読待ち",
+    needs_revision: "要修正（公開しない）",
+    rejected: "却下（公開しない）"
+  };
+  var EXPLANATION_ACTION_LABELS = {
+    approve: "学生に公開してよいと査読する",
+    endorse: "支持する",
+    revoke: "支持を取り消す",
+    second_review: "もう一人の査読者として査読する"
+  };
+  var EXPLANATION_SUPPORT_LEVEL_LABELS = {
+    provisional: "暫定の支持",
+    endorsed: "支持",
+    strong: "強い支持"
+  };
+
   function lsExpLevelSelect(id) {
     return '<select data-exp-level="' + escHtml(id) + '">' +
-      '<option value="provisional">暫定</option>' +
-      '<option value="endorsed" selected>承認</option>' +
-      '<option value="strong">強い承認</option>' +
+      '<option value="provisional">' + escHtml(EXPLANATION_SUPPORT_LEVEL_LABELS.provisional) + '</option>' +
+      '<option value="endorsed" selected>' + escHtml(EXPLANATION_SUPPORT_LEVEL_LABELS.endorsed) + '</option>' +
+      '<option value="strong">' + escHtml(EXPLANATION_SUPPORT_LEVEL_LABELS.strong) + '</option>' +
       '</select>';
+  }
+
+  // IK-0924: 引用は件数ではなく、引用先コースの題名・意図・引用者・日時を列挙する。
+  function lsRenderExplanationCitations(exp) {
+    var items = exp.citations || [];
+    if (!items.length) return "";
+    var rows = items.map(function (c) {
+      var course = c.course_title ? "『" + c.course_title + "』" : "";
+      var intent = c.citation_intent_label ? "（" + c.citation_intent_label + "）" : "";
+      var who = [c.citer_name || "", (c.cited_at || "").slice(0, 10)].filter(function (v) { return v; }).join("・");
+      return '<li>' + escHtml(course + intent) + (who ? ' <span class="ls-theory-muted">' + escHtml(who) + '</span>' : "") + '</li>';
+    }).join("");
+    return '<div class="ls-exp-citations"><span class="ls-theory-muted">' + escHtml(EXPLANATION_AXIS_LABELS.citation) + ':</span><ul>' + rows + '</ul></div>';
   }
 
   // 直近に読み込んだ説明バージョンのキャッシュ（claim 紐づけ更新時に
@@ -7058,34 +7714,86 @@
       '</div>';
   }
 
+  // IK-0960: 標準の説明（部品の要約）の根拠の主張と［根拠を開く］（既存の要素文脈＝深く検討へ）。
+  function lsRenderStandardEvidence(exp) {
+    if (exp.kind !== "standard") return "";
+    var items = exp.evidence_claims || [];
+    if (!items.length) {
+      return exp.evidence_note ? '<div class="ls-theory-muted ls-exp-evidence-note">' + escHtml(exp.evidence_note) + '</div>' : "";
+    }
+    var rows = items.map(function (c) {
+      return '<li class="ls-exp-evidence-row">' + escHtml(c.text || "") +
+        (window.Deliberation
+          ? ' <button class="admin-action-btn" data-exp-evidence-open="' + escHtml(c.claim_id || "") + '"' +
+            ' data-exp-evidence-doc="' + escHtml(exp.evidence_document_id || "") + '"' +
+            ' data-ui-anchor="lecture-studio.explanation-evidence-open">根拠を開く</button>'
+          : '') +
+        '</li>';
+    }).join("");
+    return '<div class="ls-exp-evidence"><span class="ls-theory-muted">この説明（部品の要約）の根拠の主張:</span><ul>' + rows + '</ul></div>';
+  }
+
   function lsRenderExplanationCard(exp) {
     var kindLabel = exp.kind === "standard" ? "標準の説明" : ("教員: " + (exp.author_name || "不明"));
-    var reviewLabel = exp.review_status === "teacher_approved" ? "承認済み" :
-      exp.review_status === "rejected" ? "却下" :
-      exp.review_status === "needs_revision" ? "要修正" : "査読待ち";
+    // IK-0924: 学生への公開（査読）と教員の支持を別の語で並べる。
+    var reviewLabel = EXPLANATION_REVIEW_STATUS_LABELS[exp.review_status] || EXPLANATION_REVIEW_STATUS_LABELS.teacher_review_required;
+    // サーバの事実文（著者だけが変えられる / 著者の支持は数えない / 届く先 / 前の本文への査読）は素通しする。
+    // IK-1023 の残り（第 7 波）: 誰がいつ査読したか（サーバの review_line）を届く先の前に出す。
+    var notes = [exp.body_note, exp.review_line, exp.delivery_note, exp.support_note].filter(function (v) { return v; });
+    var notesHtml = notes.map(function (n) { return '<div class="ls-theory-muted ls-exp-note">' + escHtml(n) + '</div>'; }).join("");
+    // IK-0925: 公開・共有の設定は著者（と管理者）だけ。押せない操作を出さない。
+    // IK-0984: 標準の説明（著者なし）は論文を編集できる教員も査読できる（can_review）。
+    // IK-0985: 査読済みには査読ボタンを出さない。標準の説明は共有の ON / OFF を届く範囲に
+    // 使わない（査読者の人数で決まる）ので共有の切り替えを出さない。
+    var canReview = exp.can_edit || exp.can_review;
+    var editControls = canReview
+      ? (exp.review_status !== "teacher_approved"
+          ? '<button class="admin-action-btn" data-exp-action="approve">' + escHtml(EXPLANATION_ACTION_LABELS.approve) + '</button>'
+          : '') +
+        (exp.second_review_available
+          ? '<button class="admin-action-btn" data-exp-action="second-review" data-ui-anchor="lecture-studio.explanation-second-review">' + escHtml(EXPLANATION_ACTION_LABELS.second_review) + '</button>'
+          : '') +
+        // IK-1023: もう一人の査読者（著者以外）には共有の切り替えを出さない（共有は著者だけ）。
+        (exp.kind !== "standard" && exp.can_edit
+          ? '<button class="admin-action-btn" data-exp-action="share">' + (exp.shared ? "共有OFF" : "共有ON") + '</button>'
+          : '')
+      : "";
+    // サーバが出した事実文はそのまま出す（もう一人の査読者にも「公開・共有の設定は著者だけ」を言う）。
+    var editNote = exp.edit_note ? '<div class="ls-theory-muted ls-exp-edit-note">' + escHtml(exp.edit_note) + '</div>' : "";
     return '<div class="ls-exp-card kind-' + escHtml(exp.kind) + '" data-exp-id="' + escHtml(exp.id) + '">' +
       '<div class="ls-exp-head">' +
         '<div><span class="ls-exp-badge">' + escHtml(kindLabel) + '</span> <strong>' + escHtml(exp.title || "(無題)") + '</strong></div>' +
-        '<span class="ls-exp-label">' + escHtml(exp.endorsement_label || "未承認") + '</span>' +
+        '<span class="ls-exp-label">' + escHtml(EXPLANATION_AXIS_LABELS.support) + ': ' + escHtml(exp.endorsement_label || "") + '</span>' +
       '</div>' +
       '<div class="ls-exp-body">' + escHtml(exp.body || "") + '</div>' +
-      '<div class="ls-theory-muted">状態: ' + escHtml(reviewLabel) + ' / 共有: ' + (exp.shared ? "ON" : "OFF") +
-        ' / 引用: ' + escHtml(String(exp.citation_count || 0)) + '</div>' +
+      '<div class="ls-theory-muted">' + escHtml(EXPLANATION_AXIS_LABELS.review) + ': ' + escHtml(reviewLabel) + ' / 共有: ' + (exp.shared ? "ON" : "OFF") + '</div>' +
+      notesHtml +
+      lsRenderExplanationCitations(exp) +
+      lsRenderStandardEvidence(exp) +
       lsRenderBackingClaims(exp) +
-      // N30: 承認者個別一覧（名前+専門タグ+段階ラベルのみ。数値スコアは出さない）。
+      // N30: 支持した教員の一覧（名前+専門タグ+段階ラベルのみ。数値スコアは出さない）。
       '<details class="ls-exp-endorsers" data-exp-endorsers="' + escHtml(exp.id) + '">' +
-        '<summary>承認者一覧</summary>' +
+        '<summary>支持した教員の一覧</summary>' +
         '<div class="ls-exp-endorsers-body ls-theory-muted">開くと読み込みます...</div>' +
       '</details>' +
+      editNote +
       '<div class="ls-exp-controls">' +
         lsExpLevelSelect(exp.id) +
         '<input type="text" data-exp-tag="' + escHtml(exp.id) + '" placeholder="専門タグ (例: 統計物理)" />' +
-        '<button class="admin-action-btn" data-exp-action="endorse">承認する</button>' +
-        '<button class="admin-action-btn" data-exp-action="revoke">承認取消</button>' +
-        '<button class="admin-action-btn" data-exp-action="approve">査読承認</button>' +
-        '<button class="admin-action-btn" data-exp-action="share">' + (exp.shared ? "共有OFF" : "共有ON") + '</button>' +
-        '<button class="admin-action-btn" data-exp-action="cite">別コースで引用</button>' +
+        '<button class="admin-action-btn" data-exp-action="endorse">' + escHtml(EXPLANATION_ACTION_LABELS.endorse) + '</button>' +
+        // IK-0925: ［支持を取り消す］は本人の有効な支持があるときだけ。
+        (exp.my_support
+          ? '<button class="admin-action-btn" data-exp-action="revoke">' + escHtml(EXPLANATION_ACTION_LABELS.revoke) + '</button>'
+          : '') +
+        editControls +
+        // IK-1077: 引用できない説明（共有 OFF・著者でない）にはボタンを出さず、サーバの事実文を出す。
+        (exp.can_cite === false
+          ? ''
+          : '<button class="admin-action-btn" data-exp-action="cite">別コースで引用</button>') +
       '</div>' +
+      (exp.can_cite === false && exp.cite_note
+        ? '<div class="ls-theory-muted ls-exp-cite-note" data-exp-cite-note>' + escHtml(exp.cite_note) + '</div>'
+        : '') +
       // N35: 引用先コースのインライン選択エリア（window.prompt の置換）。
       '<div class="ls-exp-cite-area" data-cite-area="' + escHtml(exp.id) + '" hidden></div>' +
       '</div>';
@@ -7104,15 +7812,27 @@
           var tag = (card.querySelector("[data-exp-tag]") || {}).value || "";
           lsEndorseExplanation(component, expId, { level: level, expertise_tag: tag, note: "" });
         } else if (action === "revoke") {
-          lsCallExplanation(component, "/admin/explanations/" + expId + "/endorse", "DELETE", null, "承認を取り消しました");
-        } else if (action === "approve") {
-          lsCallExplanation(component, "/admin/explanations/" + expId, "PATCH", { review_status: "teacher_approved" }, "査読承認しました");
+          lsCallExplanation(component, "/admin/explanations/" + expId + "/endorse", "DELETE", null, "支持を取り消しました");
+        } else if (action === "approve" || action === "second-review") {
+          // IK-0985: 知らせはサーバの outcome_fact（何が変わり、どこへ届くか）を優先する。
+          lsCallExplanation(component, "/admin/explanations/" + expId, "PATCH", { review_status: "teacher_approved" }, "学生に公開してよいと査読しました");
         } else if (action === "share") {
           var turnOn = this.textContent.indexOf("ON") >= 0;
-          lsCallExplanation(component, "/admin/explanations/" + expId, "PATCH", { shared: turnOn }, "共有設定を更新しました");
+          lsCallExplanation(component, "/admin/explanations/" + expId, "PATCH", { shared: turnOn }, turnOn ? "共有を ON にしました" : "共有を OFF にしました");
         } else if (action === "cite") {
           // N35: コースIDの手入力(window.prompt)ではなく、管理コース一覧からの選択。
           lsOpenCiteSelector(component, expId, card);
+        }
+      });
+    });
+    // IK-0960: 根拠の主張を要素文脈（深く検討）で開く。
+    list.querySelectorAll("[data-exp-evidence-open]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (window.Deliberation) {
+          window.Deliberation.openElement("theory_claim", this.getAttribute("data-exp-evidence-open"), {
+            documentId: this.getAttribute("data-exp-evidence-doc") || "",
+            title: ""
+          });
         }
       });
     });
@@ -7170,7 +7890,7 @@
   }
 
   function lsEndorseLevelLabel(level) {
-    return level === "strong" ? "強い承認" : level === "provisional" ? "暫定" : "承認";
+    return EXPLANATION_SUPPORT_LEVEL_LABELS[level] || EXPLANATION_SUPPORT_LEVEL_LABELS.endorsed;
   }
 
   // N30: 個別承認者リスト（名前 + 専門タグ + 段階ラベル）。数値スコアは表示しない。
@@ -7180,25 +7900,27 @@
     body.textContent = "読み込み中...";
     apiFetch("/admin/explanations/" + expId + "/endorsements")
       .then(function (res) {
-        if (!res.ok) throw new Error("承認者一覧の取得に失敗しました");
+        if (!res.ok) throw new Error("支持した教員の一覧の取得に失敗しました");
         return res.json();
       })
       .then(function (data) {
         detailsEl.setAttribute("data-endorsers-loaded", "1");
         var items = (data && data.endorsements) || [];
         if (!items.length) {
-          body.innerHTML = '<div class="ls-theory-muted">承認者はまだいません。</div>';
+          body.innerHTML = '<div class="ls-theory-muted">支持した教員はまだいません。</div>';
           return;
         }
         body.innerHTML = items.map(function (en) {
           var name = en.endorser_name || "不明";
           var tag = en.expertise_tag ? "（専門: " + en.expertise_tag + "）" : "";
+          // IK-0926: 著者自身の支持はサーバの語（role_label）で印を付ける（人数には数えない）。
+          var role = en.role_label ? ' <span class="ls-theory-muted">' + escHtml(en.role_label) + '</span>' : "";
           return '<div class="ls-exp-endorser-row">' + escHtml(name) + escHtml(tag) +
-            ' <span class="ls-exp-badge">' + escHtml(lsEndorseLevelLabel(en.level)) + '</span></div>';
-        }).join("");
+            ' <span class="ls-exp-badge">' + escHtml(lsEndorseLevelLabel(en.level)) + '</span>' + role + '</div>';
+        }).join("") + (data.support_note ? '<div class="ls-theory-muted">' + escHtml(data.support_note) + '</div>' : "");
       })
       .catch(function (err) {
-        body.textContent = err.message || "承認者一覧の取得に失敗しました";
+        body.textContent = err.message || "支持した教員の一覧の取得に失敗しました";
       });
   }
 
@@ -7263,7 +7985,7 @@
   }
 
   function lsEndorseExplanation(component, expId, payload) {
-    lsCallExplanation(component, "/admin/explanations/" + expId + "/endorse", "POST", payload, "承認しました");
+    lsCallExplanation(component, "/admin/explanations/" + expId + "/endorse", "POST", payload, "支持しました");
   }
 
   function lsCallExplanation(component, path, method, body, okMsg) {
@@ -7277,28 +7999,88 @@
         }
         return res.json();
       })
-      .then(function () {
-        lsSetEndorseStatus(okMsg || "完了しました", "success");
+      .then(function (data) {
+        // IK-0985: サーバの知らせ（方向と届く先）があればそれを出す。
+        lsSetEndorseStatus((data && data.outcome_fact) || okMsg || "完了しました", "success");
         lsReloadExplanations(component);
       })
       .catch(function (err) { lsSetEndorseStatus(err.message || "処理に失敗しました", "error"); });
   }
 
+  // IK-0891: 説明 API の応答を読む。失敗時はサーバの detail（日本語の事実文）を投げる。
+  // 一覧の X-Explanation-Fact ヘッダ（標準の説明を用意できなかった事実）も控える。
+  var lsLastExplanationFact = "";
+  function lsResponseJsonOrDetail(res) {
+    lsLastExplanationFact = "";
+    try {
+      var raw = res.headers && res.headers.get ? res.headers.get("X-Explanation-Fact") : "";
+      if (raw) lsLastExplanationFact = decodeURIComponent(raw);
+    } catch (e) { lsLastExplanationFact = ""; }
+    if (res.ok) return res.json();
+    return res.json().catch(function () { return {}; }).then(function (body) {
+      var detail = body && typeof body.detail === "string" ? body.detail : "";
+      throw new Error(detail || "処理に失敗しました");
+    });
+  }
+
   function lsReloadExplanations(component) {
     var list = document.getElementById("ls-endorse-list");
     if (!list) return;
+    var standardFact = "";
     apiFetch("/admin/theory-components/" + component.id + "/explanations")
-      .then(function (res) { if (!res.ok) throw new Error("読み込みに失敗しました"); return res.json(); })
+      .then(lsResponseJsonOrDetail)
       .then(function (data) {
         var items = data || [];
         lsExplanationCache = {};
         items.forEach(function (it) {
           if (it && it.id) lsExplanationCache[it.id] = it;
         });
-        list.innerHTML = items.length ? items.map(lsRenderExplanationCard).join("") : '<div class="ls-empty-state">説明バージョンがありません。</div>';
+        // IK-0891: 標準の説明を用意できなかった事実はサーバの文（X-Explanation-Fact）をそのまま描く。
+        standardFact = lsLastExplanationFact;
+        var factHtml = standardFact ? '<div class="ls-empty-state">' + escHtml(standardFact) + '</div>' : "";
+        // IK-1012 の残り（第 7 波）: 再解析前の部品に付いたままの説明を読み取り専用で開く手。
+        if (standardFact && standardFact.indexOf("再解析前の部品に付いたままの説明") !== -1) {
+          factHtml += '<div class="ls-exp-stranded">' +
+            '<button type="button" class="admin-action-btn" id="ls-exp-stranded-open" data-ui-anchor="lecture-studio.explanation-stranded-open">再解析前の説明を開く（読み取り専用）</button>' +
+            '<div id="ls-exp-stranded-list" hidden></div>' +
+          '</div>';
+        }
+        list.innerHTML = factHtml + (items.length ? items.map(lsRenderExplanationCard).join("") : '<div class="ls-empty-state">説明バージョンがありません。</div>');
         lsBindExplanationActions(component);
+        lsBindStrandedExplanations(component);
       })
       .catch(function (err) { list.innerHTML = '<div class="ls-empty-state">' + escHtml(err.message || "読み込みに失敗しました") + '</div>'; });
+  }
+
+  // IK-1012 の残り: 再解析前の部品に付いたままの説明を読み取り専用で並べる（編集・査読の操作は出さない）。
+  // 事実文・案内の文はサーバ（GET .../stranded-explanations の facts と各行の rewrite_note）。
+  function lsBindStrandedExplanations(component) {
+    var btn = document.getElementById("ls-exp-stranded-open");
+    var box = document.getElementById("ls-exp-stranded-list");
+    if (!btn || !box) return;
+    btn.addEventListener("click", function () {
+      if (!box.hidden) { box.hidden = true; return; }
+      box.hidden = false;
+      box.innerHTML = '<div class="ls-theory-muted">読み込み中...</div>';
+      apiFetch("/admin/theory-components/" + component.id + "/stranded-explanations")
+        .then(lsResponseJsonOrDetail)
+        .then(function (data) {
+          var facts = (data && data.facts) || [];
+          var items = (data && data.items) || [];
+          var html = facts.map(function (f) { return '<div class="ls-theory-muted ls-exp-note">' + escHtml(f) + '</div>'; }).join("");
+          html += items.map(function (it) {
+            return '<div class="ls-exp-card ls-exp-card-readonly" data-exp-stranded="1">' +
+              '<div class="ls-exp-head"><strong>' + escHtml(it.kind_label || "") + '</strong>' +
+                (it.title ? ' — ' + escHtml(it.title) : '') + '</div>' +
+              '<div class="ls-theory-muted">' + escHtml(it.origin_line || "") + '</div>' +
+              '<div class="ls-exp-body">' + escHtml(it.body || "") + '</div>' +
+              (it.rewrite_note ? '<div class="ls-theory-muted ls-exp-note">' + escHtml(it.rewrite_note) + '</div>' : '') +
+            '</div>';
+          }).join("");
+          box.innerHTML = html || '<div class="ls-theory-muted">再解析前の部品に付いたままの説明はありません。</div>';
+        })
+        .catch(function (err) { box.innerHTML = '<div class="ls-theory-muted">' + escHtml(err.message || "読み込みに失敗しました") + '</div>'; });
+    });
   }
 
   function lsAddExplanation(component) {
@@ -7308,9 +8090,10 @@
     lsSetEndorseStatus("追加中...", "info");
     apiFetch("/admin/theory-components/" + component.id + "/explanations", {
       method: "POST",
-      body: JSON.stringify({ title: title, body: body, shared: false }),
+      // course_id は書いたコースの出所（IK-0861）。共有 OFF の説明はこのコースの学生にだけ届く。
+      body: JSON.stringify({ title: title, body: body, shared: false, course_id: lsState.courseId || "" }),
     })
-      .then(function (res) { if (!res.ok) throw new Error("追加に失敗しました"); return res.json(); })
+      .then(lsResponseJsonOrDetail)
       .then(function () {
         document.getElementById("ls-new-exp-title").value = "";
         document.getElementById("ls-new-exp-body").value = "";
@@ -7346,10 +8129,11 @@
     overlay.innerHTML =
       '<div class="ls-endorse-modal">' +
         '<div class="ls-exp-head">' +
-          '<h3>説明バージョンと承認 — ' + escHtml(component.name || "無題") + '</h3>' +
+          // IK-0924: 見出し・説明文もカードと同じ 2 軸（学生への公開 = 査読 / 教員の支持）で言う。
+          '<h3>説明と、その支持・学生への公開 — ' + escHtml(component.name || "無題") + '</h3>' +
           '<button class="admin-action-btn" id="ls-endorse-close">閉じる</button>' +
         '</div>' +
-        '<div class="ls-endorse-sub">承認は説明バージョン単位。承認の厚みは段階ラベルで表示(点数化しない)。</div>' +
+        '<div class="ls-endorse-sub">説明ごとに、学生に公開してよいかの査読（著者が設定）と、ほかの教員の支持を別々に記録します。支持の厚みは段階ラベルで表示します（点数化しません）。</div>' +
         '<div id="ls-endorse-status" class="ls-endorse-status"></div>' +
         '<div id="ls-endorse-list"><div class="ls-empty-state">読み込み中...</div></div>' +
         '<div class="ls-endorse-form">' +
@@ -7496,17 +8280,19 @@
     var formulasSource = chunk ? (chunk.formulas || []) : lsTopicFormulas(selectedTopic);
     var formulaById = {};
     var usedFormulas = new Set();
-    formulasSource.forEach(function (f, idx) {
-      var fallbackId = "FORMULA_" + idx;
-      var legacyMathId = "LS_MATH_" + idx;
-      var id = f.id || fallbackId;
-      var bareId = String(id).replace(/^\[\[/, "").replace(/\]\]$/, "");
-      formulaById[id] = f;
+    // IK-0944: id の鍵を優先し、並び順の鍵は空いているときだけ埋める。
+    formulasSource.forEach(function (f) {
+      if (!f || !f.id) return;
+      var bareId = String(f.id).replace(/^\[\[/, "").replace(/\]\]$/, "");
+      formulaById[f.id] = f;
       formulaById[bareId] = f;
       formulaById[("[[" + bareId + "]]")] = f;
-      formulaById[fallbackId] = f;
-      formulaById[("[[" + fallbackId + "]]")] = f;
-      formulaById[legacyMathId] = f;
+    });
+    formulasSource.forEach(function (f, idx) {
+      if (!f) return;
+      [("FORMULA_" + idx), ("[[FORMULA_" + idx + "]]"), ("LS_MATH_" + idx)].forEach(function (key) {
+        if (!Object.prototype.hasOwnProperty.call(formulaById, key)) formulaById[key] = f;
+      });
     });
     var mathBlocks = [];
     var theoryChips = [];
@@ -7566,15 +8352,19 @@
 
   function lsRenderTextWithFormulas(text, formulas) {
     var formulaById = {};
-    (formulas || []).forEach(function (f, idx) {
-      var fallbackId = "FORMULA_" + idx;
-      var id = f.id || fallbackId;
-      var bareId = String(id).replace(/^\[\[/, "").replace(/\]\]$/, "");
-      formulaById[id] = f;
+    // IK-0944: id の鍵を優先し、並び順の鍵は空いているときだけ埋める。
+    (formulas || []).forEach(function (f) {
+      if (!f || !f.id) return;
+      var bareId = String(f.id).replace(/^\[\[/, "").replace(/\]\]$/, "");
+      formulaById[f.id] = f;
       formulaById[bareId] = f;
       formulaById[("[[" + bareId + "]]")] = f;
-      formulaById[fallbackId] = f;
-      formulaById[("[[" + fallbackId + "]]")] = f;
+    });
+    (formulas || []).forEach(function (f, idx) {
+      if (!f) return;
+      [("FORMULA_" + idx), ("[[FORMULA_" + idx + "]]")].forEach(function (key) {
+        if (!Object.prototype.hasOwnProperty.call(formulaById, key)) formulaById[key] = f;
+      });
     });
     var mathBlocks = [];
     function preserveMath(expr, display) {
@@ -7768,7 +8558,7 @@
   // auto_paginate_slides）を通した結果を返す（教材図スタジオ設計書 §7.5: 図を入れると
   // ページ境界が動くため、コーストピックのスライド枚数インジケータは実際の配信と
   // 一致させる）。既定 false で従来の呼び出し（チャンク編集）は不変。
-  function lsFetchSplitSlides(displayText, spokenText, formulas, autoPaginate, documentId) {
+  function lsFetchSplitSlides(displayText, spokenText, formulas, autoPaginate, documentId, topicContext) {
     // WMレンズ（teacher_triage_instruments_design.md §3.2）: 現在編集中チャンクの
     // 文書 ID が取れる場合のみ optional で渡す（サーバ側は既定 None・既存呼び出し不変）。
     var payload = {
@@ -7778,6 +8568,18 @@
       auto_paginate: !!autoPaginate,
     };
     if (documentId) payload.document_id = documentId;
+    // IK-0975: コーストピックは配信と同じ入力の正規化（式・図の埋め込みの解決）をサーバで通す
+    // ための番地を渡す（本文は編集欄の未保存の値のまま。分割はサーバの正本だけ）。
+    if (topicContext && topicContext.courseId) {
+      payload.course_id = topicContext.courseId;
+      if (topicContext.topicId) payload.topic_id = topicContext.topicId;
+      if (topicContext.chapterIndex !== undefined && topicContext.chapterIndex !== null) {
+        payload.chapter_index = topicContext.chapterIndex;
+      }
+      if (topicContext.topicIndex !== undefined && topicContext.topicIndex !== null) {
+        payload.topic_index = topicContext.topicIndex;
+      }
+    }
     return apiFetch("/admin/lecture-studio/preview-split", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -7799,6 +8601,9 @@
           spokenCount: data.spoken_segment_count || 0,
           autoPaginated: !!data.auto_paginated,
           spokenDegraded: !!data.spoken_degraded,
+          // IK-0878: 区切りが自動ページ分割を止めた事実と、理由・揃え方の事実文（サーバの文）。
+          autoPaginateSuppressed: !!data.auto_paginate_suppressed,
+          notes: Array.isArray(data.notes) ? data.notes : [],
         };
       })
       .catch(function (err) {
@@ -7833,7 +8638,8 @@
       el.classList.add("ls-slides-indicator-warn");
     } else if (split.mismatch) {
       el.textContent = "⚠ 表示 " + split.displayCount + " / 読み上げ " + split.spokenCount +
-        " — 1枚に統合して配信されます";
+        " — 1枚に統合して配信されます" +
+        (split.notes && split.notes.length ? "。" + split.notes.join(" ") : "");
       el.classList.add("ls-slides-indicator-warn");
     } else if (split.spokenDegraded) {
       // 教材図スタジオ設計書 §7.5 の事実文（自動ページ分割で読み上げが同数に割れない）。
@@ -7842,11 +8648,14 @@
         "（=== で明示分割すると解消できます）";
       el.classList.add("ls-slides-indicator-warn");
     } else if (split.spokenCount === 0) {
-      el.textContent = "表示 " + split.displayCount + " 枚 / 読み上げ未入力";
+      // IK-0914（第 3 波）: 読み上げ欄が空でも、区切りの説明（先頭・末尾の区切りは数えない等）は描く。
+      el.textContent = "表示 " + split.displayCount + " 枚 / 読み上げ未入力" +
+        (split.notes && split.notes.length ? " — " + split.notes.join(" ") : "");
     } else {
       el.textContent = "表示 " + split.displayCount + " 枚" +
         (split.autoPaginated ? "（自動ページ分割）" : "") +
-        " / 読み上げ " + split.spokenCount + " 区切り ✓";
+        " / 読み上げ " + split.spokenCount + " 区切り ✓" +
+        (split.notes && split.notes.length ? " — " + split.notes.join(" ") : "");
       el.classList.add("ls-slides-indicator-ok");
     }
   }
@@ -8087,6 +8896,72 @@
   // \n===\n を挿入する。もう一方の textarea には挿入しない（対応位置の自動推定は不確実）。
   function lsInsertSlideMarkerIntoTextarea(el) {
     lsInsertTextAtCursor(el, "\n===\n");
+  }
+
+  // 第 25 周 第 5 波（IK-0878）: 単独行の区切り（===）の位置（区切りを除いた本文での文字位置）。
+  function lsSlideMarkerOffsets(text) {
+    var offsets = [];
+    var plainLength = 0;
+    String(text || "").split("\n").forEach(function (line) {
+      if (line.trim() === "===") {
+        offsets.push(plainLength);
+        return;
+      }
+      plainLength += line.length + 1;
+    });
+    return { offsets: offsets, length: Math.max(plainLength - 1, 0) };
+  }
+
+  // 読み上げ欄の区切りを外し、教材欄の区切りと同じ数を、教材欄での相対位置に近い段落の
+  // 境目（無ければ文の境目）へ入れ直す。先頭・末尾は区切りにならないので使わない。
+  // 戻り値 {text, wanted, placed}（数は画面に出さない — 足りないときの事実文の判定だけ）。
+  function lsAlignSpokenSlideMarkers(displayText, spokenText) {
+    var display = lsSlideMarkerOffsets(displayText);
+    var interior = display.offsets.filter(function (off) {
+      return off > 0 && off < display.length;
+    });
+    var plain = String(spokenText || "").split("\n").filter(function (line) {
+      return line.trim() !== "===";
+    }).join("\n").replace(/\n{3,}/g, "\n\n");
+    var wanted = interior.length;
+    if (!wanted || !plain.trim()) return { text: plain, wanted: wanted, placed: 0 };
+    var candidates = [];
+    var re = /\n\s*\n/g;
+    var m;
+    while ((m = re.exec(plain)) !== null) {
+      var at = m.index + m[0].length;
+      if (at > 0 && at < plain.length && plain.slice(at).trim()) candidates.push(at);
+    }
+    if (candidates.length < wanted) {
+      var sentenceRe = /[。．！？]\s*/g;
+      while ((m = sentenceRe.exec(plain)) !== null) {
+        var end = m.index + m[0].length;
+        if (end > 0 && end < plain.length && plain.slice(end).trim() && candidates.indexOf(end) < 0) {
+          candidates.push(end);
+        }
+      }
+      candidates.sort(function (a, b) { return a - b; });
+    }
+    var chosen = [];
+    var last = -1;
+    interior.forEach(function (off) {
+      var target = (off / Math.max(display.length, 1)) * plain.length;
+      var best = -1;
+      candidates.forEach(function (c) {
+        if (c <= last) return;
+        if (best < 0 || Math.abs(c - target) < Math.abs(best - target)) best = c;
+      });
+      if (best >= 0) {
+        chosen.push(best);
+        last = best;
+      }
+    });
+    var out = plain;
+    for (var i = chosen.length - 1; i >= 0; i--) {
+      var pos = chosen[i];
+      out = out.slice(0, pos).replace(/\s+$/, "") + "\n===\n" + out.slice(pos).replace(/^\s+/, "");
+    }
+    return { text: out, wanted: wanted, placed: chosen.length };
   }
 
   function lsInsertSlideMarker() {
@@ -8334,6 +9209,8 @@
     if (!lsState.courseId) return "no_course";
     if (lsState.generating) return "busy";
     if (!lsState.scriptsLoaded || !lsState.structureLoaded) return "loading";
+    // 第 25 周 第 6 波（オーナー判断 2）: 音声生成はトピックの保存と同じく所有者だけ（サーバも 403）。
+    if (!lsCourseCanSave()) return "owner_only";
     if (!lsIsCourseContentComplete() || !(lsState.chunks && lsState.chunks.length)) return "content_incomplete";
     if (!lsAllChunksHaveSpokenText()) return "script_incomplete";
     return "ready";
@@ -8355,6 +9232,15 @@
         return { reason: "スライドの準備が完了していません", action: "コース内容生成を行う" };
       case "script_incomplete":
         return { reason: "読み上げ原稿が未生成のスライドがあります", action: "原稿生成を行う" };
+      case "owner_only":
+        // 理由の文はサーバの正本（audio_generate_notice — 頼む相手の名前入り）。
+        // 第 25 周 第 8 波（IK-1071）: 押せない「→ 所有者に依頼する」をやめ、頼む中身を写す
+        // ［依頼の文をコピー］（［案をコピー］と同じ受け渡し・部品はサーバの audio_request）を置く。
+        return {
+          reason: (lsState.courseStructure || {}).audio_generate_notice || lsCourseSaveNotice(),
+          action: "",
+          request: (lsState.courseStructure || {}).audio_request || null
+        };
       default:
         return null;
     }
@@ -8377,8 +9263,55 @@
       return;
     }
     if (reasonEl) reasonEl.textContent = guidance.reason;
-    if (actionEl) actionEl.textContent = guidance.action ? "→ " + guidance.action : "";
+    if (actionEl) {
+      actionEl.textContent = guidance.action ? "→ " + guidance.action : "";
+      if (guidance.request && guidance.request.label) {
+        var copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "ls-mini-tab";
+        copyBtn.setAttribute("data-ui-anchor", "lecture-studio.audio-request-copy");
+        copyBtn.textContent = guidance.request.label;
+        copyBtn.addEventListener("click", lsCopyAudioRequest);
+        actionEl.appendChild(copyBtn);
+      }
+    }
     note.hidden = false;
+  }
+
+  // 第 25 周 第 8 波（IK-1071）: 共有教員が所有者に音声を頼む文をクリップボードへ写す（DB 非変更・
+  // 通知は送らない）。中身はコース名・お願いの 1 文・読み上げの言語・音声の状態（サーバの事実文）・
+  // 音声の無いトピックの題名。見出しの語・知らせ（宛先の名前入り）はサーバの audio_request。
+  function lsCopyAudioRequest() {
+    var cs = lsState.courseStructure || {};
+    var req = cs.audio_request || null;
+    if (!req) return;
+    var labels = req.section_labels || {};
+    var langLabels = req.language_labels || {};
+    var lang = lsCourseLectureLanguage();
+    var missing = [];
+    (cs.chapters || []).forEach(function (chapter) {
+      ((chapter && chapter.topics) || []).forEach(function (t) {
+        if (t && t.uses_topic_material !== false && !t.has_topic_audio && t.title) missing.push("- " + t.title);
+      });
+    });
+    var parts = [];
+    function add(key, body) {
+      if (!body) return;
+      parts.push("【" + (labels[key] || key) + "】\n" + body);
+    }
+    add("course", cs.title || "");
+    add("request", req.request_line || "");
+    add("language", langLabels[lang] || lang);
+    add("audio_state", (cs.topic_audio_status && cs.topic_audio_status.message) || "");
+    add("topics", missing.join("\n"));
+    var text = parts.join("\n\n");
+    var done = function () { lsShowActionStatus(req.copy_notice || "", "success"); };
+    var fail = function () { lsShowActionStatus("クリップボードに写せませんでした。", "error"); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, fail);
+    } else {
+      fail();
+    }
   }
 
   function lsPipelineStepVisual(step, state) {
@@ -8970,6 +9903,15 @@
       cautions: lsSplitLines((document.getElementById("ls-course-cautions") || {}).value),
       check_questions: lsCollectCheckQuestions(),
     };
+    // IK-0878: 教材欄と読み上げ欄の区切りの数が合わず 1 枚に統合されて配信される状態なら、
+    // 同じ内容につき 1 回だけ確かめる（文はプレビューの分割応答の事実文）。
+    var splitState = lsState.courseSlideSplit;
+    var signature = String(payload.student_material.source_text || "") + "\u0000" + String(payload.spoken_script || "");
+    if (splitState && splitState.mismatch && splitState.topicId === (topic.id || "") &&
+        splitState.signature === signature && lsState.courseSlideConfirmed !== signature) {
+      if (!window.confirm((splitState.notes || []).join("\n") || "このまま保存すると 1 枚に統合して配信されます。")) return;
+      lsState.courseSlideConfirmed = signature;
+    }
     document.getElementById("ls-save-btn").disabled = true;
     lsShowActionStatus("保存中...", "info");
     apiFetch("/admin/courses/" + encodeURIComponent(lsState.courseId) +
@@ -8978,24 +9920,38 @@
       body: JSON.stringify(payload),
     })
       .then(function (res) {
-        if (!res.ok) throw new Error("Save failed");
-        return res.json();
+        // IK-0908: 失敗の理由（403 = 保存は所有者だけ 等）はサーバの detail をそのまま言う。
+        return res.json().catch(function () { return {}; }).then(function (body) {
+          if (!res.ok) throw new Error(lsApiDetailText(body) || "保存に失敗しました");
+          return body;
+        });
       })
-      .then(function () {
+      .then(function (data) {
         topic.key_concepts = payload.key_concepts;
         topic.student_material = payload.student_material;
         topic.spoken_script = payload.spoken_script;
         topic.cautions = payload.cautions;
         topic.check_questions = payload.check_questions;
         topic.status = "generated";
-        lsShowActionStatus("授業用ドラフトを保存しました", "success");
+        // IK-0877: 保存がこのトピックの音声を消したときは、その事実（サーバの文）を告げる。
+        if (data && data.audio_invalidated) topic.has_topic_audio = false;
+        lsShowActionStatus(
+          "授業用ドラフトを保存しました" + (data && data.notice ? "。" + data.notice : "") +
+            // IK-0915: この保存がいつ受講者に届くか（サーバの事実文）。
+            (data && data.delivery && data.delivery.message ? " " + data.delivery.message : "") +
+            // IK-1053: 版ありなら、発行の後に保存した変更がある事実（サーバの文）。
+            (data && data.delivery && data.delivery.unpublished_changes_note ? " " + data.delivery.unpublished_changes_note : ""),
+          "success"
+        );
         lsRenderCourseStructure();
+        // IK-0910: 根拠リンク・付録の状態などサーバの派生を取り直す。
+        lsRefreshTopicServerFacts(topic);
       })
-      .catch(function () {
-        lsShowActionStatus("保存に失敗しました", "error");
+      .catch(function (err) {
+        lsShowActionStatus((err && err.message) || "保存に失敗しました", "error");
       })
       .finally(function () {
-        document.getElementById("ls-save-btn").disabled = false;
+        document.getElementById("ls-save-btn").disabled = !lsCourseCanSave();
       });
   }
 
@@ -9107,12 +10063,30 @@
         return res.json();
       })
       .then(function (data) {
+        // IK-0874: 根拠が無く AI を呼ばなかった（skipped）ときは下書きに触れず、事実文だけ出す。
+        if (data && data.skipped) {
+          lsShowActionStatus(data.notice || "AI提案を実行しませんでした", "info");
+          return;
+        }
         topic.key_concepts = data.key_concepts || [];
         topic.student_material = data.student_material || { source_format: "eg-markdown-v1", source_text: "" };
         topic.spoken_script = data.spoken_script || "";
         topic.cautions = data.cautions || [];
         topic.check_questions = lsNormalizeCheckQuestions(data.check_questions || []);
-        lsShowActionStatus("提案を反映しました。保存すると確定します。", "success");
+        // IK-0948: 教員宛ての申し送りは注意点に入れず、知らせに並べる（学生には見せない）。
+        var handoff = (data.handoff_notes || []).filter(function (t) { return !!t; });
+        // IK-0978: ［案をコピー］が申し送りも写せるよう、案と一緒に画面の状態に持っておく。
+        lsState.rewriteHandoff = { topicId: topic.id || "", notes: handoff.slice() };
+        // 応答が下書きを変えなかったときは「反映しました」と言わない（サーバの notice を出す）。
+        // IK-0909: 根拠を省いて渡したときはその事実を添える。IK-0950: 保存できない閲覧者には
+        // サーバが notice 自体を置き換えるので、保存不可の文（save_notice）は継ぎ足さない。
+        var extra = [data.grounding_notice, data.can_save === false ? "" : data.save_notice]
+          .concat(handoff.length ? ["申し送り: " + handoff.join(" / ")] : [])
+          .filter(function (t) { return !!t; }).join(" ");
+        lsShowActionStatus(
+          (data.notice || "提案を反映しました。保存すると確定します。") + (extra ? " " + extra : ""),
+          data.changed === false ? "info" : "success"
+        );
         lsRenderSelectedCourseTopic(topic);
       })
       .catch(function () {
@@ -9121,6 +10095,55 @@
       .finally(function () {
         document.getElementById("ls-rewrite-btn").disabled = false;
       });
+  }
+
+  // IK-0950: 保存できない閲覧者が試した案（編集欄の中身）をクリップボードへ写す（DB 非変更）。
+  // IK-0978: 写す区画は教材欄・読み上げ原稿・注意点・確認問題・申し送り。知らせは写した区画の名前と
+  // 渡す相手（所有者の表示名）を言う（文の正本はサーバの proposal_copy_notice）。
+  function lsCopyRewriteProposal() {
+    var parts = [];
+    var names = [];
+    var material = (document.getElementById("ls-course-material-text") || {}).value || "";
+    var spoken = (document.getElementById("ls-course-spoken-script") || {}).value || "";
+    var cautions = (document.getElementById("ls-course-cautions") || {}).value || "";
+    var questions = [];
+    try {
+      questions = (lsCollectCheckQuestions() || []).map(function (q, i) {
+        var text = (q && q.question) || "";
+        var answer = (q && q.model_answer) || "";
+        return text ? (i + 1) + ". " + text + (answer ? "\n   答えの要点: " + answer : "") : "";
+      }).filter(function (t) { return !!t; });
+    } catch (e) {
+      questions = [];
+    }
+    var topic = lsGetSelectedCourseTopic() || {};
+    var handoffState = lsState.rewriteHandoff || {};
+    var handoff = handoffState.topicId === (topic.id || "") ? (handoffState.notes || []) : [];
+    function add(name, body) {
+      if (!body) return;
+      parts.push("【" + name + "】\n" + body);
+      names.push(name);
+    }
+    add("教材欄", material);
+    add("読み上げ原稿", spoken);
+    add("注意点", cautions);
+    add("確認問題", questions.join("\n"));
+    add("申し送り", handoff.join("\n"));
+    var text = parts.join("\n\n");
+    if (!text) {
+      lsShowActionStatus("写す案がありません", "info");
+      return;
+    }
+    var template = (lsState.courseStructure || {}).proposal_copy_notice ||
+      "{sections}をクリップボードに写しました。所有者に渡してください。";
+    var doneText = template.replace("{sections}", names.join("・"));
+    var done = function () { lsShowActionStatus(doneText, "success"); };
+    var fail = function () { lsShowActionStatus("クリップボードに写せませんでした。編集欄から選んで写してください。", "error"); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, fail);
+    } else {
+      fail();
+    }
   }
 
   function lsApplyTheorySuggestions(components) {

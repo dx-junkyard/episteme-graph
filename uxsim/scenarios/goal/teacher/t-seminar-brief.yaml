@@ -1,0 +1,30 @@
+id: t-seminar-brief
+population: teachers
+runner:
+- api
+- browser
+preconditions:
+- 砂場に解析済みの教材（グラフ・論文層あり）が入っていて、このペルソナがそれを閲覧できる。教材の取り込み・コース登録・公開はしない
+goal: '{{goal_text}} のために、ゼミ前ブリーフを開き、学生の詰まりの引き継ぎを読む'
+params_required:
+- goal_text
+- material_hint
+steps:
+- do: auth.login
+- do: admin.materials.list
+- do: admin.seminar_brief.view
+  note: '{{material_hint}} の行からブリーフを開く'
+- choose:
+  - do: admin.next_steps.list
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: teacher/11-admin-materials.md#seminar-brief
+- manual: teacher/11-admin-materials.md#seminar-brief-modal
+watch_for:
+- 確かめられていないことが「このコーパスの中では」の範囲で語られる
+- 学生の詰まりは k-匿名の段階表示で数値が出ない

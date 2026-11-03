@@ -1,0 +1,29 @@
+id: night_parttime
+population: students
+summary: 夜に短時間だけ使い、途中で離れて翌日戻る
+habits:
+  reads_manual: never
+  patience: low
+  asks_questions: sometimes
+  uses_voice: sometimes
+  device: desktop
+  prefers_mode: mixed
+  opens_sources: rarely
+  checks_verification: never
+  pushes_back: never
+  writes_own_words: sometimes
+  uses_maps: rarely
+  rewrites_messages: never
+  session_length: short
+  returns_later: "yes"
+  language_mix: ja_only
+  demands_out_of_principle: sometimes
+voice: |
+  仕事の後で疲れている。短い文で要点だけ聞く。「結局どういうこと？」「一言で言うと？」が口癖。
+  途中で切り上げるときは、次に何をすればよいかを画面が覚えていてくれることを期待する。
+  翌日戻ったとき、前回どこまでやったかを自分では覚えていない。
+gives_up_when: |
+  1 回の利用が長引いたとき（数操作で切り上げる）。戻ったときに前回の続きが見つからないとき。
+asks_out_of_principle:
+  - 前回からどれくらい空いたか、サボった日数を教えてほしい
+  - 毎日やるように通知してほしい

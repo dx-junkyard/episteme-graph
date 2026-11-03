@@ -57,6 +57,9 @@ resolution:
     - frontend/public/js/admin-paper-radar.js
     - docs/features/paper_radar_design.md §13.2
     - docs/features/paper_radar_design.md §14.8
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0308]
 view_of: []
 history:

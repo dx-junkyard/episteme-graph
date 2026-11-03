@@ -157,7 +157,7 @@ def stage_env(monkeypatch):
     session = _FakeSession([("t1", "assumption", "untested")])
     monkeypatch.setattr("core.postgres.get_session", lambda: session)
     monkeypatch.setattr(
-        "core.doubt.open_assumptions.target_label", lambda s, t, i: _STATEMENT
+        "core.doubt.open_assumptions.target_label", lambda s, t, i, **_kw: _STATEMENT
     )
     _FakeAgent.last_payload = None
     _FakeAgent.result_factory = None
@@ -330,7 +330,7 @@ class TestAuthoringHelpers:
         session = _FakeSession([("t1", "assumption", "untested"), ("t2", "claim", "unknown")])
         monkeypatch.setattr(
             "core.doubt.open_assumptions.target_label",
-            lambda s, t, i: _STATEMENT if i == "t1" else "",
+            lambda s, t, i, **_kw: _STATEMENT if i == "t1" else "",
         )
 
         items = authoring.collect_untested_assumptions(session, _DOCUMENT_ID)
@@ -407,7 +407,7 @@ class TestOpaqueLedgerRowsAreNotMaterial:
         # 実挙動の再現: target_label は equation の分岐を持たず、claim の引き当て
         # 空振り時も target_id をそのまま返す。
         monkeypatch.setattr(
-            "core.doubt.open_assumptions.target_label", lambda s, t, i: i
+            "core.doubt.open_assumptions.target_label", lambda s, t, i, **_kw: i
         )
         stats: dict = {}
 
@@ -422,7 +422,7 @@ class TestOpaqueLedgerRowsAreNotMaterial:
             (_UUID, "claim", "unknown"),
         ]
         monkeypatch.setattr(
-            "core.doubt.open_assumptions.target_label", lambda s, t, i: i
+            "core.doubt.open_assumptions.target_label", lambda s, t, i, **_kw: i
         )
 
         payload = _run(derivations={"chains": []})
@@ -441,7 +441,7 @@ class TestOpaqueLedgerRowsAreNotMaterial:
         session = self._session(rows)
         monkeypatch.setattr(
             "core.doubt.open_assumptions.target_label",
-            lambda s, t, i: i if t == "equation" else f"{_STATEMENT} ({i})",
+            lambda s, t, i, **_kw: i if t == "equation" else f"{_STATEMENT} ({i})",
         )
         stats: dict = {}
 
@@ -460,7 +460,7 @@ class TestOpaqueLedgerRowsAreNotMaterial:
         ]
         monkeypatch.setattr(
             "core.doubt.open_assumptions.target_label",
-            lambda s, t, i: _STATEMENT if i == "t1" else i,
+            lambda s, t, i, **_kw: _STATEMENT if i == "t1" else i,
         )
 
         payload = _run(derivations={"chains": []})

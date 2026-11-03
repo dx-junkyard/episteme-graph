@@ -7,6 +7,8 @@ from .context_lint import find_unresolved_reference
 from .schema import (
     ATOMIC_CLAIM_ATOMICITY,
     ATOMIC_CLAIM_LEADING_CONNECTORS,
+    CAUSAL_REWRITE_GUIDANCE,
+    leading_connector_list_text,
     ATOMIC_CLAIM_STATUSES,
     CLAIM_TIERS,
     CORE_CLAIM_TYPE_FALLBACKS,
@@ -266,7 +268,10 @@ class ClaimQualificationValidator:
                             severity="error",
                             message=(
                                 f"{path} starts with connector {first[0]!r}; "
-                                "an atomic claim must be a standalone proposition"
+                                "an atomic claim must be a standalone proposition. "
+                                "Forbidden leading words: "
+                                f"{leading_connector_list_text()}. "
+                                f"{CAUSAL_REWRITE_GUIDANCE}"
                             ),
                             field=f"{path}.text",
                         ))

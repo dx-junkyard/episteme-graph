@@ -1,0 +1,23 @@
+scenario: s-sim-voice-result
+domain: astrophysics
+# 第 22 周 (k) st-07（voice_first・GRB）。Cepheus B 論文の主結果のトピック t3・「代入・定義: M_J」の外枠（第 21 周 (f) で
+# 入力 T / n で実行が通った）。第 21 周 (h) の PINN の L_TOV は損失のまとまりなので（第 22 周 A3 の適性判定で動かす対象から外れる）
+# ここでは使わない。音声のペルソナは runner が intent_mode=casual + screen_mode=voice で送る。
+params:
+  goal_text: 移動の合間に、自分で動かしたジーンズ質量の結果が何を言っているのかを耳で理解すること
+  topic_hint: 主結果：フィードバックに形づくられた磁化フィラメント（Cepheus B の磁場トポロジーと星形成の論文）
+  topic_hint_terms:
+  - 主結果
+  - 磁化フィラメント
+  module_hint: M_J
+  input_hints:
+    T: 15.0
+    n: 10000.0
+  questions:
+  - いま動かした結果の「未測定」って、どういう意味？
+  - じゃあ、その結果って論文の主張が正しいってことになる？
+per_archetype:
+  voice_first:
+    questions:
+    - えっと、いま動かした結果に「未測定」ってあったけど、あれどういう意味？
+    - じゃあさ、それって論文の言ってることが合ってたってことになるの？

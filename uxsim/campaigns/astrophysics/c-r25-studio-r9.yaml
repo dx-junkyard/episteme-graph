@@ -1,0 +1,28 @@
+id: c-astro-r25-studio-r9
+domain: astrophysics
+snapshot: corpus-astro-tex-r25h
+course_id: 6be229e1
+personas:
+  teachers: [te-01-rookie-seminar, te-05-delegator-lab]
+  students: [st-01-m1-radio, st-08-m1-rprocess-lecture]
+scenarios:
+  teacher: [t-studio-split-save, t-studio-reattach-all, t-studio-rewrite-shared]
+  student: [s-studio-lecture-pages, s-lecture-then-trace]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 8, persona_llm_calls: 240, wall_clock_minutes: 260}
+notes: |
+  第 25 周 面 D の第 9 周（judge_studio_r8.md §7・r9_prereqs.md・harness_fixes_r8_summary.md の H36〜H39）。第 8 波の是正後（IK-1070・1071・0976 残り・0571 印）。
+  周の前の用意（指揮者）: HEAD と版 3 の t16 に区切りがあった（H36）ので、t16 の区切りを外して保存（--allow-topic-write・音声キャッシュは消える）→ 版 4 を
+  発行（studio_course_release）→ snapshot。周は「版 4 = HEAD・区切りなし」で始まる。
+  教員 2 × 学生 2・5 レーン:
+  te-01 × (a) t-studio-split-save（区切りを入れて保存 →「変更あり」+ 指示文（IK-1070 の是正後は「同じです」と同時に出ない）→［版の管理を開く］→
+  **発行はペルソナの手**（H39 で場面に入った）→ 閉じて「同じです」）。学生レーンは te-01 の保存の後・発行の前に st-01 を 1 本（発行前の枚数 ⇄ 所有者の
+  枚数）、発行の後に cross after）/ te-01 × t-studio-reattach-all（所有者の［付録をまとめて付け直す］— 判断 1 の初観察。学生 API で t0 の J=3・t1 の
+  座標目盛り・t11 の英語の項目名が消えるか）/ te-05 × (b') t-studio-rewrite-shared（音声の依頼の出口 = ［依頼の文をコピー］に所有者名と中身が揃うか — IK-1071）/
+  st-01 × (d) s-studio-lecture-pages（t0・t1 — 文中の式を含む 2 文の解説が式・箇条書きと同じ枚か・2 つ目のトピックでも ▶（H38））/
+  st-08 × (d') s-lecture-then-trace（t11 の ⚓ が属する節の枚に残るか・復元の印 5 か所・「▶ 再開」）。
+  組の例外（P-0025）: 5 組とも第 8 周と同じ組（是正の前後比較・審判の指定。reattach-all は新しい場面）。学生の面: st-01 は atlas（先）と studio・
+  st-08 は doubt と studio。
+  発行の順: 第 8 周と同じく share / doubt の学生が 6be229e1 を読まない（今周は 1bad7d9f）ので、studio の学生レーンの後に発行してよい。

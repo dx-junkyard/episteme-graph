@@ -1,0 +1,16 @@
+id: c-astro-quota-edge
+domain: astrophysics
+snapshot: course-astro-v1
+personas:
+  students: [st-01-m1-radio, st-04-intl-exoplanet]
+scenarios:
+  student: [s-quota-edge]
+runner: api
+flags:
+  LEARNING_CHAT_MAX_CALLS_PER_DAY: "8"    # 砂場だけで日次上限を小さくする（既定のままだと上限まで製品側の費用がかかる）
+  LEARNING_CHAT_STREAMING_ENABLED: "false"
+sessions_per_student: 1
+budget: {product_llm_calls: 40, persona_llm_calls: 120, wall_clock_minutes: 30}
+notes: |
+  上限に達したとき本人に何が伝わるか（汎用文に潰れないか・数値を出さないか・マニュアルに説明があるか）を見る。
+  上限の値は flags で砂場の環境変数として下げるだけで、製品コードは変えない。

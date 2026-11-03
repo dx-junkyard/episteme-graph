@@ -54,6 +54,9 @@ resolution:
     - backend/api/routes/lecture_studio/topics.py
     - backend/core/lecture.py
     - docs/development_checklist.md §3
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0207, IK-0209]
 view_of: []
 pattern: stale-derivative-served

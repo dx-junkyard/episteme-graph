@@ -56,6 +56,9 @@ resolution:
     - backend/core/assistant_context/resolvers/graph_review.py
     - docs/features/assistant_screen_adapter_design.md §10
     - docs/features/assistant_screen_adapter_design.md §11.15
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0304, IK-0312]
 view_of: []
 history:

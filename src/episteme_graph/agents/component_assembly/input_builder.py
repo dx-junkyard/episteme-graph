@@ -1,6 +1,10 @@
 """Build ComponentAssemblyAgent LLM input."""
 from __future__ import annotations
 
+import json
+
+from episteme_graph.agents.coverage_report import build_coverage_report
+from episteme_graph.agents.stratified_sampling import select_indices
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult
 from episteme_graph.agents.dsl_linking.schema import DSLLinkingResult
 from episteme_graph.agents.equation_semantics.schema import EquationSemanticsResult
@@ -30,6 +34,14 @@ _MAX_EQUATIONS = 24
 _MAX_DSL_NODES = 48
 _MAX_DSL_EDGES = 64
 _MAX_THESIS_NODES = 24
+# Character budget of the rendered input materials + available_* lists (JSON,
+# indent=2 as in prompt.py). A 404KB single call was observed (2610.08751,
+# available_claims ≈ 280KB, 2026-10-17). Over budget, only the *displayed*
+# available_claims are reduced (accepted_claims duplicates and non-atomic rows
+# first, then a section-stratified subset); the full list stays the ID
+# whitelist. What was cut is reported in ``input_coverage``. A code constant —
+# not an env knob — so the prompt size is reviewable in one place.
+MAX_INPUT_CHARS = 200_000
 
 
 class ComponentAssemblyInputBuilder:
@@ -71,7 +83,7 @@ class ComponentAssemblyInputBuilder:
             accepted_claims=accepted_claims,
             thesis_nodes=thesis_nodes,
         ).to_dict()
-        return ComponentAssemblyLLMInput(
+        llm_input = ComponentAssemblyLLMInput(
             document_id=qualified_claims.document_id,
             cartridge_id=cartridge.cartridge_id if cartridge else qualified_claims.cartridge_id,
             accepted_claims=accepted_claims,
@@ -101,6 +113,12 @@ class ComponentAssemblyInputBuilder:
             claim_centered_plan=claim_centered_plan,
             excluded_from_pipeline_input=claim_selection.excluded,
         )
+        _fit_input_budget(
+            llm_input,
+            int(cfg.get("max_input_chars", MAX_INPUT_CHARS)),
+            claim_sections=_claim_section_index(claim_objects),
+        )
+        return llm_input
 
     @staticmethod
     def allowed_component_types(cartridge: CartridgeContext | None) -> list[str]:
@@ -179,6 +197,9 @@ class ComponentAssemblyInputBuilder:
             stage="component_assembly",
             thesis_claim_ids=thesis_claim_id_set(thesis),
             headline_text=headline_text_for_selection(thesis=thesis),
+            # Stratify by section so result-heavy papers keep formalism /
+            # model claims in the accepted set (2026-10-17).
+            section_key_of=lambda row: str(row.get("section_id") or ""),
         )
 
     @staticmethod
@@ -502,3 +523,97 @@ def _claim_object_row(claim: object) -> dict:
     }
     _attach_claim_object_metadata(row, claim)
     return row
+
+
+def _claim_section_index(claim_objects) -> dict[str, str]:
+    return {
+        str(getattr(claim, "claim_id", "") or ""): str(getattr(claim, "section_id", "") or "")
+        for claim in list(getattr(claim_objects, "claims", []) or [])
+        if getattr(claim, "claim_id", None)
+    }
+
+
+def _rendered_size(llm_input: ComponentAssemblyLLMInput, available_claims: list[dict]) -> int:
+    payload = {
+        "document_id": llm_input.document_id,
+        "accepted_claims": llm_input.accepted_claims,
+        "equations": llm_input.equations,
+        "thesis_nodes": llm_input.thesis_nodes,
+        "dsl_nodes": llm_input.dsl_nodes,
+        "dsl_edges": llm_input.dsl_edges,
+        "normalized_terms": llm_input.normalized_terms,
+        "claim_centered_plan": llm_input.claim_centered_plan,
+        "available_claims": available_claims,
+        "available_evidence": llm_input.available_evidence,
+        "available_equations": llm_input.available_equations,
+        "available_dsl_nodes": llm_input.available_dsl_nodes,
+        "available_dsl_edges": llm_input.available_dsl_edges,
+        "available_derivation_ids": llm_input.available_derivation_ids,
+    }
+    return len(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _fit_input_budget(
+    llm_input: ComponentAssemblyLLMInput,
+    max_chars: int,
+    *,
+    claim_sections: dict[str, str],
+) -> None:
+    """Keep the rendered input under ``max_chars`` by thinning the displayed claims.
+
+    Only ``available_claims`` is thinned (it is the bulk of the input and a
+    reference list). Steps, each applied only while still over budget:
+    1. drop rows already shown in ``accepted_claims`` (their IDs stay valid);
+    2. drop non-atomic rows (they cannot back a component — #345);
+    3. keep a section-stratified subset (``stratified_sampling.select_indices``)
+       sized from the remaining budget.
+    The full ``available_claims`` list is untouched (validation whitelist), and
+    the cut is reported as a coverage report in ``llm_input.input_coverage``.
+    """
+    full = list(llm_input.available_claims or [])
+    if max_chars <= 0 or not full or _rendered_size(llm_input, full) <= max_chars:
+        return
+    reasons: list[str] = ["max_input_chars"]
+    accepted_ids = {str(c.get("claim_id") or "") for c in llm_input.accepted_claims}
+    shown = [row for row in full if str(row.get("claim_id") or "") not in accepted_ids]
+    if _rendered_size(llm_input, shown) > max_chars:
+        shown = [row for row in shown if row.get("is_atomic", True) is not False]
+    if _rendered_size(llm_input, shown) > max_chars and shown:
+        base = _rendered_size(llm_input, [])
+        per_row = max(1, (_rendered_size(llm_input, shown) - base) // len(shown))
+        keep_n = max(0, (max_chars - base) // per_row)
+        while True:
+            picked = select_indices(
+                shown,
+                range(len(shown)),
+                keep_n,
+                section_key_of=lambda row: claim_sections.get(str(row.get("claim_id") or ""), ""),
+            ) if keep_n > 0 else []
+            candidate = [shown[i] for i in picked]
+            if keep_n <= 0 or _rendered_size(llm_input, candidate) <= max_chars:
+                shown = candidate
+                break
+            keep_n = int(keep_n * 0.9)
+    shown_ids = {str(row.get("claim_id") or "") for row in shown}
+    omitted = [
+        str(row.get("claim_id") or "")
+        for row in full
+        if str(row.get("claim_id") or "") not in shown_ids
+        and str(row.get("claim_id") or "") not in accepted_ids
+    ]
+    omitted_sections: list[str] = []
+    for cid in omitted:
+        sec = claim_sections.get(cid, "")
+        if sec not in omitted_sections:
+            omitted_sections.append(sec)
+    llm_input.prompt_available_claims = shown
+    llm_input.input_coverage = build_coverage_report(
+        population=len(full),
+        processed=len(full) - len(omitted),
+        reasons=reasons,
+        unit="available_claim",
+        details={
+            "omitted_claim_ids": omitted,
+            "omitted_sections": omitted_sections,
+        } if omitted else None,
+    )

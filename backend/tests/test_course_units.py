@@ -40,9 +40,13 @@ def _candidate_row(
     label: str,
     summary: str = "",
     order_index: int = 0,
+    section_ids: list[str] | None = None,
 ):
     """``list_unit_candidates`` の SELECT 列順のタプル。"""
-    return (unit_id, document_id, stable_key, unit_kind, label, summary, order_index)
+    return (
+        unit_id, document_id, stable_key, unit_kind, label, summary, order_index,
+        list(section_ids or []),
+    )
 
 
 def _session_returning(rows):

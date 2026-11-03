@@ -1,0 +1,64 @@
+id: c-astro-r25-share-r6
+domain: astrophysics
+snapshot: corpus-astro-tex-r25e
+course_id: 1bad7d9f
+personas:
+  teachers: [te-03-meticulous-seminar, te-04-copilot-intro, te-01-rookie-seminar]
+  students: [st-08-m1-rprocess-lecture, st-01-m1-radio]
+scenarios:
+  teacher: [t-share-identity-queue, t-share-labels-atlas, t-share-explain-endorse-cite]
+  student: [s-share-part-chip, s-share-symbol-concept]
+runner: api
+flags: {}
+budget: {product_llm_calls: 10, persona_llm_calls: 300, wall_clock_minutes: 240}
+notes: |
+  第 25 周 share の第 6 周（judge_share_r5.md §6・§7 と r6_prereqs.md の面 share・共通 1〜4）。教員 3 × 学生 2・5 場面:
+  te-03 × (a) 候補レビュー（確認 → 理由付きの見送り → 確定の取り消し IK-0953）/ te-04 × (c) ラベルと地図 / te-01 × (b2) 支持・引用 /
+  st-08 × (d) テキスト / st-01 × (e)。審判の総括どおり (a) のリンクの判断と (b2) の連なりを主に見る。
+  組の差し替え（P-0025）: 審判の提案の st-09 × (e) は第 3 周と同じ組（第 3 周 st-09 は s-share-symbol-concept を歩いた）なので、
+  (e) 未担当の st-01 に替えた（(e) を歩いていない学生は st-01・st-04・st-05・st-07。st-05 は doubt / studio、st-07 は音声中心）。
+  組の例外: te-01 × (b2) は第 1 周の te-01 の経路に載っていたが、説明の画面が「読み込みに失敗しました」で止まり支持・引用に
+  届いていない。(b2) は 5 教員とも経路に載せ済みで、未到達の te-01 に回す。
+
+  一括の確かめと用意: `backend/.venv/bin/python uxsim/runs/round25/r6_prereqs.py --dry-run`（= r5_prereqs.py --round 6。役の既定
+  ROUND_DEFAULTS[6] はこの campaign の組と一致）→ 書き込みは `--allow-reanalyze`（LLM）/ `--allow-confirmed-assumption` /
+  `--allow-topic-write` を指揮者が明示したときだけ。identity_rerun の記録の鍵はこの campaign の snapshot 名（r25e）。
+
+  ── 周の前に指揮者が用意するもの（この順）──
+   1. 砂場（共通 1・H38）: PINN の TeX 版（arXiv-2605.31198v1）を再解析 → snapshot を corpus-astro-tex-r25e として取り直し、manifest の
+      note に再解析した教材を書く → PINN の TeX 版・PDF 版で identity_candidates を再実行 → te-04 の部品一覧で「TOV network map」が
+      完全一致 1 件か確かめる（te04_tov_part。変われば t-share-explain-endorse-cite の te-01 節の component_hint を差し替える）。
+      4 面とも同じ snapshot 名。
+   2. 製品の第 5 波 → 投影の同期（sync_keys_wave5.md）→ 周の順（共通 2）。(a) の前提は IK-0980 / IK-0982 の是正、(e) の前提は
+      IK-0983（記号を概念に結ぶ入口）の是正。IK-0983 が入っていなければ st-01 の場面を s-share-part-chip に振り替える
+      （(e) は 5 周とも構造的に未達で、同じ観察を繰り返さない）。
+   3. 名前の登録（共通 3・persona_profile_names）: 教員 5・学生 10 が本人でペルソナ定義の表示名を登録している。帰属に
+      ログイン ID（uxsim_te_0N_…）が出たら残存として記録する。
+   4. 権限: te-03 に PINN の TeX 版・PDF 版の教材の editor 共有がある（無いと (a) の確認・見送り・取り消しが 404）。te-01 に
+      コース 1bad7d9f の editor（b2_course_editor）。コース 1bad7d9f は題名で指さない — 「所有者 te-04 のゼミ（TeX 版の PINN）」
+      （同題名 2 行は題名で区別できない — IK-0407）。説明を開く入口は場面の材料 studio_course_id: 1bad7d9f（H36）。部品が無いときは
+      同題名のほかのコースが観察に出て止まる（blocked にしない）。引用先は te-01 自身のコース 6be229e1。
+   5. (b2) の支持・引用の対象: te-04 が第 5 周に「TOV network map」へ書いて共有した独自解釈は、TeX 版の再解析で部品名が変わり
+      （旧部品は superseded）、live な TeX 版の部品のどれにも付いていない（IK-1012・r6_prereqs.md「再解析の実測」）。
+      2026-10-27 に te-04 として TeX 版の「TOV residual loss at collocation points」へ独自解釈「AI と下書きした説明 — TOV の残差損失」を
+      製品 API で書き直し、共有 ON・自己査読（teacher_approved）・自己支持（宇宙論。著者の支持は人数に数えない）まで進めた。
+      snapshot を取り直す前にこの状態であることを確かめる（再解析をもう一度走らせると同じ消失が起きうる — その時は書き直す）。
+   6. コース 1bad7d9f が公開のまま（学生は固定コースを受講する）。
+   7. (a) の場面は確認と見送りが同じ choose に並ぶため、1 run ではどちらか一方しか押せない（場面に足りない手）。頭脳には
+      「根拠の読めるリンクを確認 → 取り消し」の筋を先に選ばせ、見送りは選ばれなかった場合の観察とする。
+
+  ── レーンの順（face_share_r6.sh。--persona X --scenario Y で 1 場面ずつ。→ は続けて、⇢ は他レーン・用意を待つ）──
+   1. te-03: (a) t-share-identity-queue — 再実行後の候補を読み、リンクを 1 本確認 → 開き直して［確定を取り消す］（理由付き）。
+      リンクは「リンク1」でも「1」でも選べる（H35）。
+   2. te-04: (c) t-share-labels-atlas — 見送り済みラベルの足し直し（IK-0897）と地図との対応の手動の入口（IK-0927）。
+   3. st-08: ⇢ 1 ⇢ (d) s-share-part-chip — (a) の確定・取り消しの後の「共通部品として」の見え方（凍結版だけが届く IK-0954 の学生側）。
+      終わったら mailbox_share/ST08_DONE_R6 を出す（atlas の st-08 がこれを待つ — 同じ学生の run を同時に走らせない）。
+   4. st-01: (e) s-share-symbol-concept — r・P・F_EOS・L_BC の 4 記号を全部タップ（IK-0983 の是正後）。
+   5. te-01: (b2) t-share-explain-endorse-cite — te-04 の説明を支持・引用し、支持した教員の一覧を開く（2 人目の査読 IK-0984・
+      引用の列挙 IK-0924）。
+  依存: 再解析 → snapshot → 段の再実行 → (a) → (d)。(e)(c)(b2) は (a) と独立。
+  te-01 は doubt・atlas・studio のレーンにも出る（教員の run は学習の状態を持たないので並走してよい — 第 5 周の te-04 と同じ）。
+
+  LLM 予算の見積り: 製品の LLM は (d) の選択質問 1〜2 回・共通部品の検索の埋め込み 1〜2 回・Copilot 0〜2 回（(a) の任意の手と
+  te-04 の (c)）・(e) の記号は 0 回・(b2) は 0 回 = 2〜6 回（余裕を見て 10）。PINN の再解析は周の前の指揮者の手で、この予算の外。
+  ペルソナ頭脳は 5 場面 × 45〜60 手 ≒ 230〜290（上限 300）。外部 API は呼ばない。

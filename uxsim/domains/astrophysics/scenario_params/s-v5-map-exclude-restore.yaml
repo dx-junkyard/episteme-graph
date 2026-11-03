@@ -1,0 +1,11 @@
+scenario: s-v5-map-exclude-restore
+domain: astrophysics
+params:
+  goal_text: µ(a) と音速の論文で自分が引っかかった点を、自分の地図に整理すること
+  topic_hint_terms: [音速, µ(a), 暗黒エネルギー, 修正重力]
+  selection_question: この一文の前提は、どこで確かめられていますか？
+  tension_text: 準静的近似を前提にしているのに、音速が小さい場合まで結論を広げている点が引っかかる
+per_archetype:
+  confident_theorist:
+    selection_question: この一文は準静的近似を暗に仮定していませんか？
+    tension_text: 準静的近似の適用範囲が音速の小さい領域まで保証されていない

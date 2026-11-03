@@ -1,0 +1,24 @@
+scenario: s-descend-and-nearby
+domain: astrophysics
+# 第 15 波: 部品とグラフのある論文（7ef9e487）のトピックへ向け直した
+params:
+  goal_text: 学習の手順のどこで分からなくなったかを絞ること
+  topic_hint: 学習損失と4段階の交互最適化（PINN による中性子星状態方程式）
+  topic_hint_terms:
+  - 学習損失
+  - 交互最適化
+  - 4段階
+  seed_questions:
+  - 4段階のうち、構造ネットワークだけを学習する段はどれですか？
+  - TOV の損失が効くのは、どの段ですか？
+  backstage_question: 初歩的ですが、「損失」は小さいほど良い量という意味ですか？
+per_archetype:
+  confident_theorist:
+    seed_questions:
+    - 事前学習にランダムなポリトロープを使う前提は、どの程度確かめられていますか？
+    - 交互最適化の収束について、検証の記録があるのはどの段ですか？
+  non_native:
+    goal_text: narrowing down where I got lost
+    seed_questions:
+    - Which phase trains only the structure network?
+    backstage_question: 'Basic question: is a loss something that should be small?'

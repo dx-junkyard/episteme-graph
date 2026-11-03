@@ -1,0 +1,41 @@
+id: t-structure-layers
+population: teachers
+runner:
+- api
+- browser
+preconditions:
+- 砂場に解析済みの教材（グラフ・論文層あり）が入っていて、このペルソナがそれを閲覧できる。教材の取り込み・コース登録・公開はしない
+goal: '{{goal_text}} のために、グラフ画面で主グラフ・式の詳細・理論モジュール・論文の順を切り替えて全体像をつかむ'
+params_required:
+- goal_text
+- material_hint
+- graph_questions
+steps:
+- do: auth.login
+- do: admin.materials.list
+- do: admin.graph_review.open
+  note: '{{material_hint}} の行からグラフ画面を開く'
+- do: admin.theory_modules.view
+  note: 初期表示のモジュール図を読む
+- do: admin.theory_modules.related
+- do: admin.paper_layer.view
+  note: 論文の順に切り替える
+- choose:
+  - do: admin.graph_review.chat
+    with:
+      message: '{{graph_questions | next}}'
+  - do: admin.help.inspect
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: teacher/26-admin-graph-review.md#layer-toggle
+- manual: teacher/26-admin-graph-review.md#theory-modules
+- manual: teacher/26-admin-graph-review.md#paper-view
+watch_for:
+- 層ごとのラベルが短い段階名で、内部 ID が出ない
+- 件数が出ない
+- 初期表示のモジュール図で迷わない

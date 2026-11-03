@@ -34,8 +34,10 @@ import json
 import logging
 from dataclasses import dataclass, field
 
+from ..theory_operations import UNKNOWN_OPERATION
 from ..theory_operations import operation_family as _generic_operation_family
 from .equation_role_classifier import EquationRoleClassifier
+from .granularity_analyzer import suggested_child_name
 from .responsibility import CANONICAL_RESPONSIBILITY_TYPES, canonical_responsibility_type
 from .schema import (
     ComponentAssemblyLLMInput,
@@ -137,6 +139,10 @@ class ComponentRefiner:
         # Per-component refinement trace populated during a single refine() call
         # (issue #324). Reset at the start of refine().
         self._traces: dict[str, dict] = {}
+        # IK-0728: owner component of each derivation step key, computed once per
+        # refine() so a step shared by several parents (e.g. a system-level step
+        # with a dozen input equations) becomes a child of exactly one parent.
+        self._step_owner: dict[tuple, str] = {}
 
     def refine(
         self,
@@ -150,6 +156,7 @@ class ComponentRefiner:
         derivation_index = _derivation_index(chains)
         report = RefinementReport()
         self._traces = {}
+        self._step_owner = _assign_step_owners(result.components, chains)
 
         originals = {c.component_id: c for c in result.components}
         original_order = [c.component_id for c in result.components]
@@ -460,10 +467,7 @@ class ComponentRefiner:
                 candidate=candidate,
                 eq_index=eq_index,
                 dependencies=[],
-                reason=(
-                    f"Isolated single theoretical operation '{candidate.operation}' "
-                    f"from parent component {component.component_id}."
-                ),
+                reason="Isolated a single theoretical operation from a broader component.",
             )
             children.append(child)
 
@@ -482,8 +486,7 @@ class ComponentRefiner:
             operations=[c.operation for c in children],
             reason=(
                 f"Component bundled {len(family_steps)} distinct reusable theory "
-                "units; split into one component per theory-operation family "
-                "(issue #308/#319)."
+                "units; split into one component per theory-operation family."
             ),
         ))
         return children
@@ -578,7 +581,7 @@ class ComponentRefiner:
             nxt.dependencies.append({
                 "dependency_type": "depends_on",
                 "component_refs": [prev.component_id],
-                "reason": "Sequential responsibility dependency from ComponentRefiner (#324).",
+                "reason": "Sequential responsibility dependency from ComponentRefiner.",
             })
 
         review_reasons: list[str] = []
@@ -610,7 +613,7 @@ class ComponentRefiner:
             reason=(
                 "Consumed Step 1 suggested_split plan; reassigned links and "
                 "recomputed concepts into one single-responsibility component "
-                "per suggested child (#324)."
+                "per suggested child."
             ),
         ))
         return children
@@ -670,10 +673,24 @@ class ComponentRefiner:
                 operation = str(getattr(step, "operation", "") or "").strip()
                 if not operation:
                     continue
-                if _is_generic_operation(operation):
-                    generic_steps.append(step)
+                # IK-0728: the same (operation, input equations, output
+                # equations) becomes a child of one parent only — the owner
+                # chosen by _assign_step_owners. Other parents that merely share
+                # the equations do not duplicate it.
+                owner = self._step_owner.get(_step_key(step))
+                if (
+                    owner
+                    and owner != component.component_id
+                    and component.component_type in _DERIVATION_TYPES
+                ):
                     continue
                 family = _operation_group_key(operation)
+                # An unrecognised operation (``unknown_specific_operation``) is
+                # as generic as ``transform``: it never names its own child, so
+                # the machine word never reaches a component name (IK-0728).
+                if _is_generic_operation(operation) or family == UNKNOWN_OPERATION:
+                    generic_steps.append(step)
+                    continue
                 groups.setdefault(family, []).append(step)
         return groups, generic_steps
 
@@ -735,7 +752,19 @@ class ComponentRefiner:
         # subject) qualified by the reusable unit's family — not a bare operation
         # name like "Transform" / "Relate" (issue #308).
         label = _theory_unit_label(raw_operation, parent, eliminated or retained)
-        summary = _theory_unit_summary(label, broad_family, parent, len(steps))
+        # IK-0755: the parent's (LLM-written, run-language) summary is kept as the
+        # human-facing text. The split provenance (operation family, steps,
+        # equations) is structured data in ``derivation_refs`` — never a sentence
+        # with issue numbers or step counts in a text field.
+        summary = _child_summary(parent)
+        derivation_refs = _derivation_refs(
+            parent,
+            component_id=component_id,
+            split_rule="theory_operation",
+            operation_family=broad_family,
+            derivation_step_ids=_step_ids(steps),
+            equation_ids=all_eqs,
+        )
 
         internal_flow = _build_internal_flow(steps, family)
         review_required = bool(classification.review_required_equation_ids) or any(
@@ -799,6 +828,7 @@ class ComponentRefiner:
             split_recommendation=_no_split_recommendation(),
             **_child_support_fields(parent, _responsibility_for_operation(raw_operation)),
             operation=broad_family,
+            derivation_refs=derivation_refs,
         )
 
     def _responsibility_children(
@@ -1016,14 +1046,21 @@ def _build_responsibility_component(
         component_id=component_id,
         component_type=parent.component_type,
         label=str(spec.get("label") or parent.label),
-        summary=_responsibility_summary(spec, parent),
+        summary=_child_summary(parent),
         inputs=_responsibility_io("input", spec, parent),
         outputs=_responsibility_io("output", spec, parent),
         preconditions=list(parent.preconditions),
         cautions=list(parent.cautions),
         dependencies=[],
         evidence_refs=evidence_refs,
-        reason=f"Split from oversized component {parent.component_id} by responsibility.",
+        reason="Split from a broader component by responsibility.",
+        derivation_refs=_derivation_refs(
+            parent,
+            component_id=component_id,
+            split_rule="responsibility",
+            operation_family=operation,
+            equation_ids=eq_ids,
+        ),
         confidence=parent.confidence,
         review_notes=list(parent.review_notes),
         internal_flow=(
@@ -1047,7 +1084,8 @@ def _build_responsibility_component(
         equation_confidence_summary=dict(parent.equation_confidence_summary or {}),
         confidence_gate=_confidence_gate(_blocked_equation_ids(eq_ids, eq_index)),
         review_status=review_status,
-        teaching_takeaway=_responsibility_takeaway(spec),
+        # IK-0755: keep the parent's (LLM-written) takeaway, not a machine sentence.
+        teaching_takeaway=str(parent.teaching_takeaway or ""),
         source_scope=copy.deepcopy(parent.source_scope or {}),
         assumptions=list(parent.assumptions),
         approximations=list(parent.approximations),
@@ -1092,9 +1130,51 @@ def _derivation_responsibility_slices(component: ComponentRecord, chains: list) 
     return specs
 
 
-def _responsibility_summary(spec: dict, parent: ComponentRecord) -> str:
-    label = str(spec.get("label") or parent.label)
-    return f"{label} isolated as a reusable {spec.get('responsibility_type')} component."
+def _child_summary(parent: ComponentRecord) -> str:
+    """Human-facing summary of a refined child (IK-0755).
+
+    The parent's summary is written by the LLM in the run's generation language;
+    a child keeps it verbatim rather than a deterministic English sentence that
+    carries issue numbers, operation names and step counts.
+    """
+    return str(parent.summary or "")
+
+
+def _step_ids(steps) -> list[str]:
+    ids: list[str] = []
+    for step in steps or []:
+        sid = step.get("step_id") if isinstance(step, dict) else getattr(step, "step_id", "")
+        if sid and str(sid) not in ids:
+            ids.append(str(sid))
+    return ids
+
+
+def _derivation_refs(
+    parent: ComponentRecord,
+    *,
+    component_id: str,
+    split_rule: str,
+    operation_family: str = "",
+    derivation_step_ids: list[str] | None = None,
+    equation_ids: list[str] | None = None,
+) -> dict:
+    """Structured split provenance for a refined child (IK-0755).
+
+    What used to be written into text fields as "… (#324)" / "covers N equation
+    step(s)" is kept here as data, so nothing is lost and the human-facing
+    fields stay prose (or empty).
+    """
+    refs = {
+        "split_from": parent.component_id,
+        "split_rule": split_rule if component_id != parent.component_id else f"{split_rule}_rebuild",
+        "derivation_step_ids": list(derivation_step_ids or []),
+        "equation_ids": list(equation_ids or []),
+    }
+    if operation_family:
+        refs["operation_family"] = operation_family
+    return refs
+
+
 
 
 def _child_support_fields(parent: ComponentRecord, responsibility_type: str) -> dict:
@@ -1148,9 +1228,6 @@ def _secondary_operations(steps: list, primary: str) -> list[str]:
     )
 
 
-def _responsibility_takeaway(spec: dict) -> str:
-    label = str(spec.get("label") or "component")
-    return f"{label} has one clear input/output responsibility."
 
 
 def _responsibility_io(direction: str, spec: dict, parent: ComponentRecord) -> list[dict]:
@@ -1222,20 +1299,6 @@ def _source_backed_status(parent_status: str) -> str:
     return "source_backed"
 
 
-def _component_text(component: ComponentRecord) -> str:
-    parts = [
-        component.label,
-        component.summary,
-        component.reason,
-        component.teaching_takeaway,
-    ]
-    for collection in (component.inputs, component.outputs, component.preconditions, component.cautions):
-        for item in collection or []:
-            if isinstance(item, dict):
-                parts.extend(str(item.get(k) or "") for k in ("name", "label", "text", "role"))
-    return " ".join(parts).lower()
-
-
 def _equation_text(eq_id: str, eq_index: dict[str, dict]) -> str:
     eq = eq_index.get(eq_id) or {}
     fields = [
@@ -1260,6 +1323,11 @@ def _responsibility_named_in_text(label: str, text: str) -> bool:
 
 
 def _infer_operation_from_text(component: ComponentRecord) -> str:
+    # IK-0571: primary_operation（語彙値）を宣言していればそれを読み、summary
+    # （生成言語で書かれる散文）には落ちない。
+    declared = str(component.primary_operation or "").strip()
+    if declared:
+        return _operation_family(declared)
     text = " ".join([
         str(component.label or ""),
         str(component.summary or ""),
@@ -1309,12 +1377,6 @@ def _explicit_theory_unit_label(operation: str) -> str:
     return ""
 
 
-def _theory_unit_summary(label: str, family: str, parent: ComponentRecord, step_count: int) -> str:
-    subject = str(parent.label or "").strip() or "the parent theory unit"
-    return (
-        f"Reusable theory unit ({family}) within {subject}; "
-        f"covers {step_count} equation step(s)."
-    )
 
 
 def _build_internal_flow(steps: list, family: str) -> list[dict]:
@@ -1462,6 +1524,61 @@ def _item_is_equation_like(item: object) -> bool:
         return True
     text = str(item.get("name") or item.get("label") or item.get("text") or "")
     return text.startswith("eq_") or text.lower().startswith("equation ")
+
+
+def _step_key(step) -> tuple:
+    """Identity of a derivation step for de-duplication across parents (IK-0728).
+
+    Two steps with the same operation and the same input / output equation sets
+    are the same theoretical operation, whether they are one shared step object
+    or copies in different chains.
+    """
+    return (
+        str(getattr(step, "operation", "") or "").strip().lower(),
+        frozenset(_step_field(step, "input_equation_ids")),
+        frozenset(_step_field(step, "output_equation_ids")),
+    )
+
+
+def _assign_step_owners(components: list[ComponentRecord], chains: list) -> dict[tuple, str]:
+    """Choose one owning derivation-type component per step key (IK-0728).
+
+    A step is relevant to a component when its chain is linked to the component
+    or it shares an equation with it (the same rule as ``_operation_groups``).
+    The owner is the relevant component with the strongest tie: a direct chain
+    link counts first, then the number of shared equations; ties go to the
+    earliest component in the assembly order. Only components that can be split
+    by operation (``_DERIVATION_TYPES``) compete — other components never split
+    on derivation steps.
+    """
+    best: dict[tuple, tuple[tuple[int, int, int], str]] = {}
+    for order, component in enumerate(components):
+        if component.component_type not in _DERIVATION_TYPES:
+            continue
+        component_eqs = set(_all_equation_ids(component))
+        linked_ids = set(component.linked_derivation_ids or [])
+        for chain in chains:
+            chain_id = getattr(chain, "derivation_id", None)
+            linked_components = set(getattr(chain, "linked_component_ids", []) or [])
+            chain_linked = bool(
+                (chain_id and chain_id in linked_ids)
+                or (component.component_id in linked_components)
+            )
+            for step in getattr(chain, "steps", []) or []:
+                if not str(getattr(step, "operation", "") or "").strip():
+                    continue
+                step_eqs = set(_step_field(step, "input_equation_ids")) | set(
+                    _step_field(step, "output_equation_ids")
+                )
+                overlap = len(step_eqs & component_eqs)
+                if not chain_linked and not overlap:
+                    continue
+                score = (1 if chain_linked else 0, overlap, -order)
+                key = _step_key(step)
+                current = best.get(key)
+                if current is None or score > current[0]:
+                    best[key] = (score, component.component_id)
+    return {key: owner for key, (_, owner) in best.items()}
 
 
 def _step_field(step, name: str) -> list[str]:
@@ -1755,6 +1872,75 @@ def _equation_is_high_confidence(eq: dict) -> bool:
         and not bool(policy.get("must_not_treat_as_source_extracted"))
         and policy.get("allowed_downstream_use") not in {"blocked", "semantic_hint_only"}
     )
+
+
+def _rejudge_reason(subject: str, checks: list[str]) -> str:
+    """Routing reason naming the checks that sent an artifact to re-judgement.
+
+    IK-0792: the reason used to be a fixed "low-confidence …" sentence while
+    the same payload carried confidence 0.85, so the downstream LLM received
+    contradictory signals. The reason now lists the gate checks that actually
+    failed (the same checks as ``_*_is_high_confidence``).
+    """
+    if not checks:
+        return f"{subject} needs re-judgement"
+    return f"{subject} needs re-judgement: " + "; ".join(checks)
+
+
+def _equation_rejudge_checks(eq: dict) -> list[str]:
+    checks: list[str] = []
+    policy = eq.get("confidence_policy") if isinstance(eq.get("confidence_policy"), dict) else {}
+    if _safe_float(eq.get("confidence")) < _DETERMINISTIC_CONFIDENCE_THRESHOLD:
+        checks.append(f"confidence below {_DETERMINISTIC_CONFIDENCE_THRESHOLD}")
+    status = str(eq.get("semantic_status") or "")
+    if status != "source_backed":
+        checks.append(f"semantic_status is {status or 'missing'}")
+    flags = eq.get("review_flags")
+    if flags:
+        names = flags if isinstance(flags, list) else [flags]
+        checks.append("review flags: " + ", ".join(str(f) for f in names))
+    if eq.get("needs_math_review"):
+        checks.append("needs math review")
+    if eq.get("reconstruction_status") not in (None, "", "none"):
+        checks.append("reconstructed equation")
+    if policy.get("must_not_treat_as_source_extracted"):
+        checks.append("not treated as source-extracted")
+    if policy.get("allowed_downstream_use") in {"blocked", "semantic_hint_only"}:
+        checks.append(f"downstream use is {policy.get('allowed_downstream_use')}")
+    return checks
+
+
+def _claim_rejudge_checks(info: dict) -> list[str]:
+    checks: list[str] = []
+    if _safe_float(info.get("confidence")) < _DETERMINISTIC_CONFIDENCE_THRESHOLD:
+        checks.append(f"confidence below {_DETERMINISTIC_CONFIDENCE_THRESHOLD}")
+    support_status = str(info.get("support_status") or "")
+    if support_status not in {"source_backed", "equation_backed", "derived_from_linked_artifacts"}:
+        checks.append(f"support_status is {support_status or 'missing'}")
+    review_status = str(info.get("review_status") or "")
+    if review_status in {"review_required", "teacher_review_required", "needs_verification"}:
+        checks.append(f"review_status is {review_status}")
+    return checks
+
+
+def _derivation_rejudge_checks(info: dict) -> list[str]:
+    if not info:
+        return ["derivation metadata missing"]
+    checks: list[str] = []
+    confidence = _safe_float(info.get("confidence"))
+    step_confidences = list(info.get("step_confidences") or [])
+    effective = confidence or (min(step_confidences) if step_confidences else 0.0)
+    if effective < _DETERMINISTIC_CONFIDENCE_THRESHOLD:
+        checks.append(f"confidence below {_DETERMINISTIC_CONFIDENCE_THRESHOLD}")
+    if info.get("review_required"):
+        checks.append("review required")
+    statuses = {
+        str(info.get("review_status") or ""),
+        *(str(value or "") for value in (info.get("step_review_statuses") or [])),
+    } & {"review_required", "teacher_review_required", "needs_verification"}
+    if statuses:
+        checks.append("review_status is " + ", ".join(sorted(statuses)))
+    return checks
 
 
 def _claim_is_high_confidence(info: dict) -> bool:
@@ -2063,7 +2249,7 @@ def _redistribute_links(
                 "artifact_type": "equation",
                 "artifact_id": eq_id,
                 "reason": (
-                    "low-confidence equation semantics"
+                    _rejudge_reason("equation semantics", _equation_rejudge_checks(eq))
                     if not _equation_is_high_confidence(eq)
                     else "ambiguous or missing responsibility match"
                 ),
@@ -2123,7 +2309,7 @@ def _redistribute_links(
                 "artifact_type": "claim",
                 "artifact_id": cid,
                 "reason": (
-                    "low-confidence claim classification"
+                    _rejudge_reason("claim classification", _claim_rejudge_checks(info))
                     if not _claim_is_high_confidence(info)
                     else (
                         "claim equation overlap is tied across responsibilities"
@@ -2179,7 +2365,7 @@ def _redistribute_links(
                 "artifact_type": "derivation",
                 "artifact_id": d_id,
                 "reason": (
-                    "low-confidence derivation semantics"
+                    _rejudge_reason("derivation semantics", _derivation_rejudge_checks(info))
                     if not _derivation_is_high_confidence(info)
                     else (
                         "derivation equation overlap is tied across responsibilities"
@@ -2323,19 +2509,35 @@ def _suggested_io(direction: str, spec: dict, eq_ids: list[str], parent: Compone
     return [{"name": f"{name} {direction}".strip(), "role": f"responsibility_{direction}"}]
 
 
-def _suggested_summary(spec: dict, parent: ComponentRecord) -> str:
-    return (
-        f"{spec.get('name') or parent.label} isolated as a reusable "
-        f"{spec.get('responsibility_type')} component (#324)."
-    )
+def _suggested_child_label(spec: dict, parent: ComponentRecord) -> str:
+    """Label for a suggested child — the parent's theory object stays visible.
+
+    ``suggested_split`` names its children after the responsibility alone
+    (``"Definition"`` / ``"Application"`` / ``"Equation System"``). Used as-is
+    that erases the parent's meaningful label and puts machine words into course
+    topic titles. A bare responsibility name is therefore qualified with the
+    parent label here as well, so a plan coming from anywhere else (an LLM
+    ``split_recommendation``) gets the same treatment as the analyzer's
+    (2026-09-19).
+    """
+    name = str(spec.get("name") or "").strip()
+    responsibility = canonical_responsibility_type(spec.get("responsibility_type"))
+    if not name:
+        return suggested_child_name(parent.label, responsibility) or str(parent.label or "")
+    if _is_bare_responsibility_name(name):
+        return suggested_child_name(parent.label, responsibility or name) or name
+    return name
 
 
-def _suggested_takeaway(spec: dict, equation_count: int) -> str:
-    name = spec.get("name") or "Component"
-    return (
-        f"{name}: a single {spec.get('responsibility_type')} responsibility "
-        f"covering {equation_count} equation(s)."
-    )
+def _is_bare_responsibility_name(name: str) -> bool:
+    normalized = str(name or "").strip().lower().replace("_", " ")
+    return normalized in {
+        str(responsibility).replace("_", " ") for responsibility in RESPONSIBILITY_TYPES
+    }
+
+
+
+
 
 
 def _add_note(notes: list[str], note: str) -> None:
@@ -2399,17 +2601,23 @@ def _build_suggested_component(
     return ComponentRecord(
         component_id=component_id,
         component_type=parent.component_type,
-        label=str(spec.get("name") or parent.label),
-        summary=_suggested_summary(spec, parent),
+        label=_suggested_child_label(spec, parent),
+        # IK-0755: keep the parent's summary / takeaway; the machine description
+        # of the split goes to ``reason``.
+        summary=_child_summary(parent),
         inputs=_suggested_io("input", spec, eq_ids, parent),
         outputs=_suggested_io("output", spec, eq_ids, parent),
         preconditions=list(parent.preconditions),
         cautions=list(parent.cautions),
         dependencies=[],
         evidence_refs=evidence_refs,
-        reason=(
-            f"Split from oversized component {parent.component_id} via Step 1 "
-            "suggested_split (#324)."
+        reason="Split from a broader component by the suggested split plan.",
+        derivation_refs=_derivation_refs(
+            parent,
+            component_id=component_id,
+            split_rule="suggested_split",
+            operation_family=operation,
+            equation_ids=eq_ids,
         ),
         confidence=parent.confidence,
         review_notes=review_notes,
@@ -2436,7 +2644,7 @@ def _build_suggested_component(
         equation_confidence_summary=dict(parent.equation_confidence_summary or {}),
         confidence_gate=_confidence_gate(blocked),
         review_status=review_status,
-        teaching_takeaway=_suggested_takeaway(spec, len(eq_ids)),
+        teaching_takeaway=str(parent.teaching_takeaway or ""),
         source_scope=copy.deepcopy(parent.source_scope or {}),
         assumptions=list(parent.assumptions),
         approximations=list(parent.approximations),

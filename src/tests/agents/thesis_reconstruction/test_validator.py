@@ -85,3 +85,12 @@ def test_cartridge_terms_warning_when_absent():
     cartridge = CartridgeContext("test", {}, {}, aliases={"R Lambda c": ["RΛc"]})
     r = _result(central_thesis={**_result().central_thesis, "text": "A relation is established."})
     assert any(i.rule_id == "cartridge_terms_not_reflected" for i in VALIDATOR.validate(r, cartridge))
+
+
+def test_japanese_generated_prose_is_accepted():
+    """生成言語 ja（IK-0571）: 日本語の中心命題・支持の文は error にならない。"""
+    result = _result()
+    result.central_thesis = dict(result.central_thesis, text="和則が R Lambda c と RD、RD* を結びつける。", reason="中心の関係式")
+    result.support_structure["direct_supports"][0]["text"] = "導出がこの関係を与える。"
+    result.alternative_theses = [{"text": "別の定式化として、比の関係を主張している。", "reason": "代替", "confidence": 0.4}]
+    assert not [i for i in VALIDATOR.validate(result) if i.severity == "error"]

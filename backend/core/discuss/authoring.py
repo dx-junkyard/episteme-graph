@@ -394,7 +394,7 @@ def collect_untested_assumptions(
     for row in rows:
         target_id = str(row[0] or "")
         target_type = str(row[1] or "")
-        statement = _text(target_label(session, target_type, target_id))
+        statement = _text(target_label(session, target_type, target_id, document_id=str(document_id)))
         if is_opaque_statement(statement, target_id):
             # 引き当てできない行（空 / 生 ID / UUID / `eq_2_7` 等）は素材にしない。
             opaque_skipped += 1

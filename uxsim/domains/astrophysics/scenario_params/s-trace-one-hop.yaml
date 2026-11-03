@@ -1,0 +1,22 @@
+scenario: s-trace-one-hop
+domain: astrophysics
+# 第 15 波: 部品とグラフのある論文（7ef9e487）のトピックへ向け直した
+params:
+  goal_text: 分からない語が論文のどの構造にぶら下がっているかを辿って理解すること
+  topic_hint: 二重ネットワークとTOV方程式の課し方（PINN による中性子星状態方程式）
+  topic_hint_terms:
+  - TOV
+  - 二重ネットワーク
+  - 状態方程式
+  seed_questions:
+  - 辿った結果、構造ネットワークは EOS ネットワークの結果を受け取る側にあると分かりましたが、合っていますか？
+  - この要素の上にある要素は、論文の中心の主張ですか？
+per_archetype:
+  adjacent_field:
+    seed_questions:
+    - 自動微分で TOV 方程式を課すというのは、物理の拘束を損失関数の罰則項に入れるということですか？
+    - この要素の上位にあたるものが見つからないのは、論文に書かれていないからですか？
+  non_native:
+    goal_text: tracing where an unknown term hangs in the structure of the paper
+    seed_questions:
+    - Is the structure network downstream of the EOS network?

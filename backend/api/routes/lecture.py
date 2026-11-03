@@ -17,6 +17,7 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text as sa_text
 
+from display_route import LearnerDisplayRoute  # DP1: 学習者向けルートは表示投影を必ず通る
 from dependencies import _get_current_user
 from schemas import (
     LectureFigureItem,
@@ -30,6 +31,7 @@ from schemas import (
     LectureTTSResponse,
 )
 from services import (
+    overlay_topic_equation_reconstruction,
     detect_and_record_misconception,
     get_course_data,
     list_course_source_document_ids,
@@ -47,12 +49,18 @@ from core.lecture import (
     build_topic_slides,
     compute_material_audio_readiness,
     compute_topic_audio_readiness,
+    lecture_availability_note,
     generate_spoken_text_and_formulas,
     get_course_lecture_language,
     get_user_mastered_concepts,
     lecture_uses_topic_material,
     normalize_to_placeholder_format,
     split_slides,
+)
+from core.course_content_builder import (
+    build_topic_evidence_items,
+    topic_with_claim_origins,
+    drop_unresolved_evidence_embeds,
 )
 from core.learning_support_agent import extract_inline_actions
 from core.llm import generate_text, get_llm_params
@@ -66,7 +74,7 @@ from core import element_explanations
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/learning/lecture", tags=["Lecture"])
+router = APIRouter(prefix="/api/learning/lecture", tags=["Lecture"], route_class=LearnerDisplayRoute)
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +114,8 @@ def get_lecture_sequence(
     # build_topic_slides）。
     topic_segment = None
     if lecture_uses_topic_material(topic_info):
+        # 第 25 周 第 6 波（IK-0895）: 講義の式の印は、教材本文と同じく生きた式の記録から引く。
+        topic_info = overlay_topic_equation_reconstruction(topic_info, course_data)
         topic_segment = _build_topic_draft_segment(course_id, topic_id, topic_info, course_data)
     if topic_segment:
         return LectureSequenceResponse(
@@ -396,11 +406,33 @@ def generate_tts(
     )
 
 
+AUDIO_NOT_GENERATED_NOTE = (
+    "このトピックの読み上げ音声はまだ用意されていません。レクチャーは表示だけで進みます。"
+)
+AUDIO_STALE_LANGUAGE_NOTE = (
+    "このトピックの読み上げ音声は、いまの講義言語に合わせてまだ作り直されていません。"
+)
+
+
 @router.get("/courses/{course_id}/topics/{topic_id}/audio-status")
 def get_topic_audio_status(
     course_id: str,
     topic_id: str,
     current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """音声の有無に、無いときの事実文 ``note`` を添える（TRIAGE14 st-08・数値でなく文）。"""
+    payload = _topic_audio_status_payload(course_id, topic_id, current_user)
+    if not payload.get("has_audio"):
+        payload["note"] = (
+            AUDIO_STALE_LANGUAGE_NOTE if payload.get("stale_language") else AUDIO_NOT_GENERATED_NOTE
+        )
+    return payload
+
+
+def _topic_audio_status_payload(
+    course_id: str,
+    topic_id: str,
+    current_user: dict,
 ) -> dict:
     """トピックに再生可能（キャッシュ済み）な音声があるかを軽量に判定する。
 
@@ -427,6 +459,10 @@ def get_topic_audio_status(
         "total_slides": 0,
         "language": lecture_language,
         "stale_language": False,
+        # IK-0947: この分岐（トピック教材も論文の資料も無い）では読む教材も無い。
+        "lecture_note": lecture_availability_note(
+            has_audio=False, total_slides=0, has_reading_material=False,
+        ),
     }
 
     # トピック教材ベースのレクチャー（表示＝非レクチャー教材表示と一致）は、
@@ -453,6 +489,10 @@ def get_topic_audio_status(
             "total_slides": readiness["total_slides"],
             "language": lecture_language,
             "stale_language": readiness["stale_language"],
+            # IK-0879: 音声ゼロでもスライドがあれば講義に入れる（タイマー送り）。その事実文。
+            "lecture_note": lecture_availability_note(
+                has_audio=ready_slides > 0, total_slides=readiness["total_slides"],
+            ),
         }
 
     material_ids = course_source_material_ids(course_data)
@@ -477,6 +517,11 @@ def get_topic_audio_status(
         "total_slides": readiness["total_slides"],
         "language": lecture_language,
         "stale_language": readiness["stale_language"],
+        "lecture_note": lecture_availability_note(
+            has_audio=readiness["ready_slides"] > 0, total_slides=readiness["total_slides"],
+            # IK-0947: 論文の区画も無ければ読む教材も無い（空の「読む」へ誘導しない）。
+            has_reading_material=readiness["total_chunks"] > 0,
+        ),
     }
 
 
@@ -572,10 +617,14 @@ def lecture_interrupt_chat(
 
     # 誤解検出
     course_update = None
+    # 第 23 周: 誤解候補と永続履歴に同じ user メッセージ id を焼き込む（書き直し・
+    # 取り消しで候補を supersede できるように）。
+    _user_message_id = str(uuid.uuid4())
     if topic_info and any(kw in answer for kw in ["訂正：", "訂正:", "【訂正】"]):
         course_update = detect_and_record_misconception(
             current_user["id"], course_id, course_data, topic_id,
             body.message, answer,
+            message_id=_user_message_id,
         )
 
     # 本文中のドリルダウンマーカーは構造化アクションへ正規化する（フロントは
@@ -586,6 +635,7 @@ def lecture_interrupt_chat(
     persist_chat_history(
         current_user["id"], course_id, topic_id,
         body.history, body.message, clean_answer,
+        user_message_id=_user_message_id,
     )
 
     return LectureInterruptResponse(
@@ -872,12 +922,19 @@ def _build_topic_draft_segment(
         figures_by_id,
     )
 
+    # IK-0458: 受講画面（get_topic_material）と同じ読み取り専用 evidence DTO を運ぶ。
+    # スライド本文の ``![[component|claim|source:id]]`` をフロントが受講画面と同じ規則で
+    # 解決できるようにし、引けない埋め込みは表示本文から外す（学習者に内部 ID を見せない）。
+    # 外すのはスライド分割の**後**の表示本文だけ（build_topic_slides のページ境界・
+    # slide_index・読み上げ原稿は変えない）。
+    evidence_items = build_topic_evidence_items(topic_with_claim_origins(topic))  # IK-1155
+
     # 各スライドの音声は topic_lecture_audio_cache から解決する（教員が生成済みなら has_audio=True）。
     topic_audio_map = _get_topic_slide_audio_map(course_id, topic_id)
     slides = [
         LectureSlide(
             slide_index=sd["slide_index"],
-            display_text=sd["display_text"],
+            display_text=drop_unresolved_evidence_embeds(sd["display_text"], evidence_items)[0],
             spoken_text=sd["spoken_text"],
             formulas=[LectureFormulaItem(**f) for f in sd["formulas"]],
             figures=[LectureFigureItem(**f) for f in sd.get("figures", [])],
@@ -894,10 +951,11 @@ def _build_topic_draft_segment(
     return LectureSegment(
         chunk_id=f"topic:{topic_id}",
         chunk_index=int(topic.get("topic_index") or 0),
-        text=display_text,
+        text=drop_unresolved_evidence_embeds(display_text, evidence_items)[0],
         spoken_text=spoken_text,
         formulas=[LectureFormulaItem(**f) for f in formulas],
         figures=[LectureFigureItem(**f) for f in segment_figures],
+        evidence_items=evidence_items,
         has_audio=bool(topic_audio_map),
         duration_ms=0,
         segment_mode="full",

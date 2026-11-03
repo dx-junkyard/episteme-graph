@@ -1,0 +1,58 @@
+id: s-sim-reference-value
+population: students
+runner:
+- api
+# 第 22 周 (i)。論文に記載値（reported value）がある量を出すまとまりを動かし、記載値を入れて「記載値との一致」の軸が測られるかを見る。
+goal: '{{goal_text}} のために、{{topic_hint}} の理論のまとまりを動かし、論文の記載値と並べて比べる'
+params_required:
+- goal_text
+- topic_hint
+- topic_hint_terms
+- module_hint
+- input_hints
+- reference_hint
+- questions
+steps:
+- do: auth.login
+- do: learning.course.list
+- do: learning.course.enroll
+  note: 受講中でなければ受講を始める（受講済みなら何も変わらない）
+- do: learning.course.open
+- do: learning.topic.open
+  with:
+    topic_hint_terms: '{{topic_hint_terms}}'
+  note: '{{topic_hint}} に合うトピックを開く'
+- do: learning.simlab.open
+- do: learning.simlab.select_module
+  with:
+    module_hint: '{{module_hint}}'
+  note: 論文が値を書いている量を定めるまとまりを選ぶ。受け取る記号・定める記号を読む
+- do: learning.simlab.generate
+  note: コードの下書きを AI に作らせる（この経路で 1 回だけ）
+- do: learning.simlab.adopt
+- do: learning.simlab.run
+  with:
+    values: '{{input_hints}}'
+    reference: '{{reference_hint}}'
+    wiring: none
+  note: 入力の記号は io_contract.inputs に、記載値の記号は io_contract.outputs に合わせて置き換える。記載値の単位は理論の出力の単位に合わせて換算する（コードが G で返すなら μG の値を 1e-6 倍する）
+- choose:
+  - do: learning.chat.ask
+    with:
+      message: '{{questions | next}}'
+      simulation_run_id: latest
+    note: 記載値との一致の段階の言葉が何と何を比べたものかを聞く
+  optional: true
+stop_when:
+- gave_up
+- blocked
+- budget_exhausted
+- persona_stop
+expects:
+- manual: student/02-student.md#simulation-lab-levels
+- manual: student/02-student.md#simulation-lab-not-verification
+watch_for:
+- 記載値を入れた実行では「記載値との一致」の軸が段階の言葉で出る（未測定のままにならない）
+- 配線なしの実行で、理論の出力と模擬観測の相対差が 0 として「一致」に読めない
+- 記載値と理論の出力が近くても、論文が確かめられたという言い方にならない
+- 記載値の単位の取り違えがあれば、段階の言葉が大きく外れたことが読める

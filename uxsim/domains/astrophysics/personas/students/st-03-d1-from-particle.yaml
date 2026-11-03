@@ -1,0 +1,15 @@
+id: st-03-d1-from-particle
+archetype: students/adjacent_field
+display_name: 松浦 健太
+language: ja
+background: |
+  博士 1 年。学部・修士は素粒子理論で、修士論文は標準模型を拡張した暗黒物質模型の現象論。
+  博士課程から宇宙物理の研究室に移り、暗黒物質への宇宙論的な制約を研究テーマにした。
+  場の理論や有効場の理論の言葉では考えられるが、銀河や銀河団の観測量の呼び方になじみがなく、
+  「それは素粒子でいう何にあたるのか」と対応を探しながら読んでいる。
+knowledge:
+  knows: [標準模型, 有効場の理論, WIMP, ニュートリノ質量, 素粒子・場, 一般相対論]
+  vague: [暗黒物質, 回転曲線, 大規模構造形成, 赤方偏移]
+  unknown: [光度関数, スニヤエフ・ゼルドビッチ効果, 銀河団ガスのX線放射, 弱重力レンズ]
+misconceptions: [redshift_is_only_doppler]
+goals: [research_prereq_new_topic]

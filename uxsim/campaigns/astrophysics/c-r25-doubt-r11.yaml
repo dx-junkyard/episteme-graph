@@ -1,0 +1,22 @@
+id: c-r25-doubt-r11
+domain: astrophysics
+snapshot: corpus-astro-tex-r25j
+course_id: 1bad7d9f
+personas:
+  teachers: [te-02-veteran-intro, te-03-meticulous-seminar]
+  students: [st-05-night-solarwind, st-08-m1-rprocess-lecture]
+scenarios:
+  teacher: [t-db-assumption-review, t-db-challenge-from-node]
+  student: [s-db-ledger-lines, s-db-map-ask-en]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 10, persona_llm_calls: 260, wall_clock_minutes: 240}
+notes: |
+  第 25 周・面 B の第 11 周（judge_doubt_r10.md §4・r11_prereqs.md・harness_fixes_r10_summary.md の H59〜H61）。第 10 波の是正後（IK-1120 / 1121 / 1122 + 語の残り・
+  migration 095）。固定コースは 1bad7d9f（3 周連続 — 同じ対象での前後比較）。教員 2 × 学生 2・4 場面:
+  te-02 × t-db-assumption-review（同じ前提で合意リスト末尾の行（H59 の投影）の属性が記帳後に変わるか）/ te-03 × t-db-challenge-from-node（完了の帰属の 1 行 IK-1121・
+  同じ主張 42c4e2e8 の行の支持線が台帳と同じ段階か IK-1120・到達可能性の欄名・重複の告知は H60 の材料で 1 回）/ st-05 × s-db-ledger-lines（**t1** に替えた — 後継の決まる
+  ⚓ の記帳ありの部品の一行 H37 の 11 周目・まだ一度も届いていない）/ st-08 × s-db-map-ask-en（IK-1122 の是正後に地図の場所の問いの構造帰属が seg_0 に結ばれないか — 製品頭脳の要求で見る。
+  地図の場所の問いはその往復だけ `selection.atlas_node_id`）。
+  組の例外（P-0025）: 4 組とも第 10 周と同じ組（是正の前後比較・審判の指定。st-05 はトピックを t11 → t1 に替えた）。

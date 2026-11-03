@@ -75,6 +75,8 @@ _AUTOMATED_WRITER_PATHS = (
     _DOUBT_DIR / "assumption_mining" / "worker.py",
     _DOUBT_DIR / "load_calculator.py",
     _DOUBT_DIR / "support_paths.py",
+    # 検証シミュレーション層の台帳候補（SB1: evidence_lines には書かない）。
+    _BACKEND / "core" / "simulation_bridge" / "store.py",
 )
 
 

@@ -222,7 +222,59 @@ class TestAdminUiAnchorsModule:
         #    doubt-atlas.evidence-lines / doubt-atlas.evidence-line-add /
         #    lecture-studio.cite-intent。
         #   docs/features/knowledge_transfer_design.md §4.3 / §6 / §8。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 353
+        # + 2026-09-23: 理論モジュール層（Phase 0 UI）の2件 —
+        #   graph-review.module-view（層トグルの「理論モジュール」。件数なし = TM6）/
+        #   graph-review.module-member（モジュール詳細の成員 step → 式の詳細の当該ノードへ）。
+        #   docs/features/theory_module_layer_design.md §8.1。
+        # + 2026-09-30: arXiv の TeX 既定と生成言語の2件 —
+        #   materials.url-upload-format（URLから取得モーダルの取得形式。arXiv の論文 URL のときだけ）/
+        #   materials.upload-language（生成する言語。アップロード欄と再解析モーダル）。
+        #   docs/features/paper_radar_design.md §15.9 / discuss_opening_authoring_design.md §14。
+        # + 2026-10-01: 論文の取り込みモーダルの生成言語の2件 —
+        #   materials.arxiv-discovery-language / materials.radar-language（同期の取り込みだけに効く）。
+        #   docs/features/paper_radar_design.md §15.9。
+        # + 2026-10-02: 検証シミュレーション層の9件 —
+        #   materials.row-simulation（教材行「⋯」の「検証シミュレーション…」）/
+        #   simulation.modal / simulation.generate / simulation.program-decide /
+        #   simulation.wiring-new / simulation.wiring-decide / simulation.run /
+        #   simulation.ledger-candidate / simulation.propose-revision。
+        #   docs/features/simulation_bridge_design.md §7。
+        # 第 21 波（2026-10-03）: +1 = simulation.ledger-candidate-decide（学習者が共有した実行の
+        #   台帳候補を確定・見送る。simulation_bridge_design.md §12.4）。
+        # 第 22 周（2026-10-04）: +1 = simulation.ledger-candidate-decided（共有された実行の判断済みの
+        #   候補と見送りの理由を読む折りたたみ）。
+        # 2026-10-16: +2 = materials.arxiv-discovery-ingest-domain / materials.radar-ingest-domain
+        #   （取り込みの「解析の分野」。paper_discovery_design.md §12 / paper_radar_design.md §16）。
+        # 第 25 周 面 C 第 2 波（2026-10-23）: +5 = atlas.gap-orphaned / atlas.edge-orphaned
+        #   （導出から外れた採用済みの判断 — IK-0884）/ atlas.edge-show-all（畳んだ辺候補 — IK-0887）/
+        #   atlas.freeze-blocked-goto（凍結を止める条件 — IK-0885）/ atlas.draft-relations（IK-0886）。
+        # 第 25 周 面 D 第 2 波（2026-10-23）: +2 = lecture-studio.slides-indicator（分割インジケータ —
+        #   IK-0913）/ lecture-studio.reattach-appendix（付録を付け直す — IK-0872 / IK-0880）。
+        # 第 25 周 面 A 第 3 周（2026-10-23）: +1 = knowledge-library.bound-parts（結びついた教材の部品 — IK-0920）。
+        # 同上: +1 = knowledge-library.atlas-link-manual（地図の概念を選んで手で対応を付ける — IK-0927）。
+        # 第 25 周 面 A 第 4 周（2026-10-25）: +1 = deliberation.identity-link-revoke（確定した同一性リンクを
+        #   理由を書いて取り消す — IK-0953。深く検討の同一性リンク区画とライブラリの結びついた教材の部品）。
+        #   +1 = lecture-studio.explanation-evidence-open（標準の説明の根拠の主張を開く — IK-0960）。
+        # 第 25 周 面 C 第 5 波（2026-10-27）: +1 = atlas.published-contents（下書きが無いとき公開中の版の
+        #   項目と関係を読み取り専用で読み返す — IK-0992）。
+        # 第 25 周 面 A 第 5 波（2026-10-27）: +4 = knowledge-library.bound-part-decide（詳細で未決の結び付きを
+        #   確認・見送り — IK-0982）/ knowledge-library.bound-symbols・symbol-derive（記号 → 概念 — IK-0983）/
+        #   lecture-studio.explanation-second-review（標準の説明のもう一人の査読者 — IK-0984）。
+        # 第 25 周 面 B 第 5 波（2026-10-27）: +1 = doubt-atlas.withdrawn-challenges（取り下げ済みの疑義を
+        #   台帳の疑義区画で読み取りのみ畳んで読む — IK-0998）。
+        # 第 25 周 面 D 第 5 波（2026-10-27）: +2 = lecture-studio.insert-slide-marker-both（両方の欄に
+        #   区切りを挿入）/ lecture-studio.align-slide-markers（読み上げ欄の区切りを教材欄に揃える — IK-0878）。
+        # 第 25 周 面 B 第 6 波（2026-10-27）: +1 = doubt-atlas.assumption-open-ledger（確定済みの前提の
+        #   カードから台帳を開く — IK-1028）。
+        # 第 25 周 面 D 第 6 波（2026-10-27）: +1 = lecture-studio.reattach-appendix-all（付録を
+        #   まとめて付け直す — 所有者の一括確定・オーナー判断 1）。
+        # 第 25 周 面 D 第 7 波（2026-10-28）: +2 = lecture-studio.appendix-stale-list（付録が古い
+        #   トピックの折りたたみの一覧 — IK-1054）/ lecture-studio.open-versions（版の管理を開く — IK-1053）。
+        # 第 25 周 面 A 第 8 波（2026-10-28）: +1 = deliberation.identity-link-restore（見送り・確定を
+        #   取り消した同一性リンクを理由を書いて候補に戻す — IK-1062）。
+        # 第 25 周 面 D 第 8 波（2026-10-28）: +1 = lecture-studio.audio-request-copy（共有コースで
+        #   音声を所有者に頼む文を写す — IK-1071）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 409
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

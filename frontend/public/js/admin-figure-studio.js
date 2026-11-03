@@ -56,10 +56,17 @@
     retired: "回収済み"
   };
 
-  // 採用直後に出す事実文（設計書 §6.1 / §7.5）。煽らず、起きることだけを書く。
-  var ADOPT_NOTICE =
-    "保存するとこのトピックの生成済み音声は作り直しになります。" +
-    "トピックを保存するまで学習者には表示されません。";
+  // 採用直後に出す事実文（設計書 §6.1 / §7.5・IK-0979）。文の正本はサーバ
+  // （lecture_studio_state.figure_adopt_notice_parts — 原稿スタジオの course-structure が渡す）で、
+  // 音声の有無とコースの届き方を見て組む。部品が渡らないときは先頭の文だけにする。
+  function _adoptNotice() {
+    var parts = (studio && studio.adoptNoticeParts) || {};
+    var lines = [];
+    if (parts.lead) lines.push(parts.lead);
+    if (studio && studio.hasTopicAudio && parts.audio) lines.push(parts.audio);
+    if (parts.delivery) lines.push(parts.delivery);
+    return lines.join(" ");
+  }
 
   var DRAFT_NOTICE = "下書きとして保存しました。教材には挿入していません（既存の図から選ぶタブに出ます）。";
 
@@ -598,7 +605,7 @@
         if (figureId && typeof studio.onInsert === "function") {
           studio.onInsert(figureId, "![[figure:" + figureId + "]]", data || null);
         }
-        _setStatus(ADOPT_NOTICE + snapshotNote);
+        _setStatus(_adoptNotice() + snapshotNote);
       })
       .catch(function (err) {
         _setStatus(_errorText(err, "保存に失敗しました"));
@@ -988,7 +995,7 @@
       studio.onInsert(item.id, "![[figure:" + item.id + "]]", result || null);
     }
     studio.insertedIds[item.id] = true;
-    _setStatus(ADOPT_NOTICE);
+    _setStatus(_adoptNotice());
   }
 
   function _insertExisting(item) {
@@ -1102,6 +1109,9 @@
       typeof opts.countTopicReferences === "function" ? opts.countTopicReferences : null;
     studio.figuresIndex = opts.figuresIndex || {};
     studio.documentIds = opts.documentIds || [];
+    // IK-0979: 採用の知らせの部品（サーバの文）とトピックの音声の有無。
+    studio.adoptNoticeParts = opts.adoptNoticeParts || null;
+    studio.hasTopicAudio = !!opts.hasTopicAudio;
     studio.tab = studio.existingOnly ? "existing" : "generate";
     if (studio.preset) {
       studio.figureKind = studio.preset.figureKind || "";

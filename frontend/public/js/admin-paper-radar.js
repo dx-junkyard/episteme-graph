@@ -15,7 +15,7 @@
  *   PR7 閉世界の正直さ（検索条件と closed_world_note を候補一覧の上に常時出す）
  *
  * ES5 で書く（開発ルール5。admin.js / admin-paper-discovery.js と同じ流儀）。
- * DI は init(deps)。deps = { apiFetch, escHtml, onUploadAccepted }。
+ * DI は init(deps)。deps = { apiFetch, escHtml, onUploadAccepted, loadDomainOptions }。
  */
 (function () {
   "use strict";
@@ -23,10 +23,16 @@
   var deps = null;
 
   // PD3: 供給元の日本語ラベル（キーフレーズチップの title 属性に出す）。
+  // 正本は core/label_vocab.py の KEYPHRASE_SOURCE_LABELS（逐語ミラー。
+  // test_paper_radar_ui_static.py が一致を固定する）。
   var SOURCE_LABELS = {
     skeleton: "分野の地図の概念から",
     cartridge: "カートリッジ語彙から",
     component: "承認済み理論部品から",
+    alias: "教員が確定した別名から",
+    concept: "主張の概念から",
+    title: "題名から",
+    thesis: "論文の中心命題・要旨から",
     manual: "手動"
   };
 
@@ -48,6 +54,8 @@
     subscription: "分野購読の条件から取得",
     manual: "カテゴリを入力してください"
   };
+  var CATEGORY_PRIMARY_TITLE = "論文の主カテゴリ（クリックで外す/戻す）";
+  var CATEGORY_TOGGLE_TITLE = "副カテゴリ（クリックで条件に足す/外す）";
   var NO_ARXIV_NOTICE =
     "この教材は arXiv 由来として登録されていないため、カテゴリを指定してください。";
 
@@ -81,7 +89,16 @@
   // （TeX ソースを投稿していない論文では arXiv が PDF を返す。判定はサーバが
   // 取得したバイト列で行うので、ここで先回りして「TeX です」と名乗らせない）。
   var FORMAT_NOTICE =
-    "TeX ソースが公開されていない論文では、arXiv が返した PDF をそのまま取り込みます。";
+    "TeX ソースが公開されていない論文や、TeX ソースとして読めない論文では、PDF を取り込みます。";
+  // 生成する言語はキュー登録（6件以上）には載らない事実を、選ぶ前に言っておく。
+  var LANGUAGE_NOTICE = "キュー登録（6件以上）の取り込みには適用されません。";
+  var GENERATION_LANGUAGES = { ja: true, en: true };
+
+  function selectedLanguage() {
+    var node = el("pr-language-select");
+    var value = node ? String(node.value || "") : "";
+    return GENERATION_LANGUAGES[value] ? value : "";
+  }
 
   // PD1: 取り込み前に必ず出す事実文（何が起きるかを省略しない）。
   // 分野購読モーダルと同一の文言・同一の境界（相互 import できないので同型に書く）。
@@ -184,6 +201,56 @@
     "比較する論文を選択してください（チェックボックスで選びます）。";
   var COMPARE_LIMIT_NOTICE_HEAD = "一度に比較できるのは ";
   var COMPARE_LIMIT_NOTICE_TAIL = " 件までです。選択を減らしてください。";
+  // 関係の種類（relation_kind）。ラベルはサーバの compare.RELATION_LABELS が正本で、
+  // ここには日本語を持たない（relation_label を素通しする — 設計書 §18.4 / §19 D）。
+  var RELATION_NONE_KIND = "no_notable_common_ground";
+  // 直前の検索で、取得した候補のどれにも当たらなかった有効な語のチップに添える印（§20 A）。
+  // 外した語の打ち消し表示とは別（外したのではなく、当たらなかった）。
+  var KEYPHRASE_MISS_MARK = "当たらず";
+  var KEYPHRASE_MISS_TITLE = "直前の検索で、取得した候補のどれにも当たらなかった語です。";
+  // 直前の検索で網を広げる語と判定された有効な語のチップに添える印（§20 B / §23.5）。当たらずの印と
+  // 同じ添え方で、外すかどうかは教員のクリック（自動では外さない — PD3）。チップの title は
+  // サーバの widens_note（無ければ widening の既定文）を素通しする。
+  var KEYPHRASE_WIDENS_MARK = "網を広げる";
+  var KEYPHRASE_WIDENS_TITLE = "直前の検索で、取得した候補のすべてに当たった語です。";
+  // 網を広げる語のチップの操作の案内（§24 A）。チップのクリックで外し、探し直すのは
+  // 教員が「検索」を押したとき（自動では外さない・押すまで arXiv を呼ばない — PD3）。
+  var KEYPHRASE_WIDENS_ACTION_TITLE = "クリックで外せます（外したあと「検索」で探し直します）";
+  var RELATION_CHIP_STYLE =
+    "color:var(--color-text-secondary);background:var(--color-bg-tertiary);border:1px solid var(--color-border)";
+
+  // ── 取り込み済み・受理直後の候補から先へ進む導線（§19 C・IK-0700 / IK-0701）────
+  // 教材一覧の行・グラフレビュー・位置づけ・この論文を起点に探す（連鎖）。解析が終わって
+  // いないあいだは押せない理由を title に書く（ボタンを黙って隠さない）。解析の完了は
+  // 教材一覧の再読込（既存のタスク追跡）で知る — この画面からポーリングしない（PR5）。
+  var INGESTED_OPEN_MATERIAL_LABEL = "この教材の行へ";
+  var INGESTED_GRAPH_REVIEW_LABEL = "グラフレビュー";
+  var INGESTED_LANDSCAPE_LABEL = "位置づけ（分野マップ）";
+  var CHAIN_SEED_LABEL = "この論文を起点に探す";
+  var INGESTED_NOT_READY_REASON = "解析が終わると使えます（進捗は教材一覧で確認できます）。";
+  var INGESTED_FAILED_REASON = "解析が失敗しています。教材一覧の行から再実行できます。";
+  var ACCEPTED_CHAIN_NOTICE = "解析が終わったらこの論文を起点に探せます。";
+  var ANALYSIS_COMPLETED = "completed";
+
+  // ── 取り込み済み候補の配置の対比・構造照合の成立条件（§21 B / C）────────
+  // 項目と出所ラベル（「AIによる推定（未確認）」/「教員確認済み」）はサーバの値を素通し。
+  // 件数・weight は描かない（PR2 / LS5）。
+  var CONTRAST_SHARED_HEAD = "起点と同じ面: ";
+  var CONTRAST_SEED_ONLY_HEAD = "起点にだけある面: ";
+  var CONTRAST_CANDIDATE_ONLY_HEAD = "この論文にだけある面: ";
+  var CONTRAST_NONE = "なし";
+  // 対比の粒度（§22 C）。骨格の領域とその中の概念を分けて示す。
+  var CONTRAST_LAYER_REGION = "〔領域〕";
+  var CONTRAST_LAYER_CONCEPT = "〔概念〕";
+  var CONTRAST_VERSION_HEAD = "分野の地図 版";
+  // 連鎖（§21 D）。前の起点は JS 内の呼び出し履歴だけで描く（保存しない）。
+  var PREVIOUS_SEED_HEAD = "前の起点: ";
+  var PREVIOUS_SEED_TAIL = "（この論文はその『近い論文』として取り込まれました）";
+  // 取り込み済み候補も「違いを分析」の対象に選べる（§24 C・IK-0759）。取り込みの対象には
+  // ならない（selectedIngestIds が status "new" だけに絞る）。結果は保存しない（PR4）。
+  var INGESTED_COMPARE_HINT =
+    "起点との関係の種類は、この候補を選んで「違いを分析」で確かめられます（結果は保存されません）。";
+  var INGESTED_COMPARE_ONLY_TITLE = "比較の対象として選びます（取り込み済みのため取り込みの対象にはなりません）";
 
   var state = {
     open: false,
@@ -203,11 +270,36 @@
     candidates: [],
     query: "",
     closedWorldNote: "",
+    // キーフレーズの供給の事実文（seed.keyphrase_supply.note）と、キーフレーズ無しで
+    // 検索した事実文（search の keyphrase_note）。どちらもサーバ文言の素通し（§16）。
+    keyphraseSupplyNote: "",
+    keyphraseNote: "",
     total: null,
     banding: null,
     // 重なり・着地の下地が使えたか（サーバの relation_context）。使えなかったときは
     // 未測定の注記も出さない（無い下地の説明を候補ごとに繰り返さない）。
     relationContext: null,
+    // 近さの根拠が出ない理由の事実文（サーバの facts の素通し — §19 A）。
+    facts: [],
+    // 直前の検索で各キーフレーズが候補に当たったか（サーバの keyphrase_hits — 真偽だけ・
+    // 件数なし = PD4）と、当たり外れの事実文（サーバ文言の素通し — §20 A / B）。
+    keyphraseHits: {},
+    keyphraseHitsNote: "",
+    keyphraseWideningNote: "",
+    // 1 つの語が取得した候補の多くに当たっている事実文（サーバ文言の素通し — §24 A）。
+    keyphraseDominantNote: "",
+    // 帯の母集団の事実文（サーバの band_population_note。帯が出るときは常に — §24 B）。
+    bandPopulationNote: "",
+    // 起点の系譜（サーバの seed.lineage_line / lineage_note の素通し — §24 D）。seed の
+    // 差し替え（検索・出所登録）で消えないよう seed とは別に持つ。
+    lineageLine: "",
+    lineageNote: "",
+    // 帯と関係の種類の読み方（サーバの reading_note）。比較結果（関係の種類）が描かれた
+    // ときだけ #pr-facts に出す（帯と関係ラベルが同時に出るときだけ — §20 D）。
+    readingNote: "",
+    // 同期取り込みを受理した候補（arxiv_id → {material_id, title}）。教材一覧の再読込で
+    // 解析状態を引き直し、完了したら連鎖のボタンを押せるようにする（§19 C）。
+    acceptedById: {},
     searched: false,
     searching: false,
     // 教員が開いた帯は開いたまま保つ（比較結果の描き直しで畳まない）。
@@ -324,6 +416,71 @@
   }
 
   // 既存アップロード欄と同じ入力から解析オプションを引き継ぐ（第2の設定 UI を作らない）。
+  // ── 解析の分野（cartridge_id）────────────────────────────────────────
+  // 取り込んだ論文の解析に使う分野。意味は教材アップロードの「分野」行と同一
+  // （「指定しない」= 分野固有の語彙・検証を注入しない分野中立の解析）。
+  // 選択肢は admin.js の loadDomainOptions()（教材アップロードと同じ合成の1本）を
+  // DI で受け取り、廃止済み（retired）の分野は出さない。値はそのまま送り、語彙外は
+  // サーバが 422 で拒否する（フロントの絞り込みを信頼しない）。
+  // 既定は seed 教材の採用 run の分野（教材一覧の analysis_cartridge_id）。
+  var INGEST_DOMAIN_NOTICE =
+    "「指定しない」は、分野固有の語彙・検証を使わずに解析します。";
+
+  function ingestDomainRowHtml() {
+    return (
+      '<div id="pr-ingest-domain-row" data-ui-anchor="materials.radar-ingest-domain" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">' +
+        '<label for="pr-ingest-domain-select" style="font-size:12px;color:var(--color-text-secondary)">解析の分野</label>' +
+        '<select id="pr-ingest-domain-select" style="font-size:12px">' +
+          '<option value="" selected>指定しない</option>' +
+        "</select>" +
+        '<span style="font-size:11.5px;color:var(--color-text-tertiary)">' +
+          esc(INGEST_DOMAIN_NOTICE) +
+        "</span>" +
+      "</div>"
+    );
+  }
+
+  // 選択肢を読み込み、preferredKey が選択肢に実在すればそれを既定にする
+  // （無ければ「指定しない」のまま）。取得失敗時は「指定しない」だけを残す。
+  function loadIngestDomainOptions(preferredKey) {
+    state.ingestDomainKeys = {};
+    state.ingestDomainPreferred = preferredKey || "";
+    if (!deps || !deps.loadDomainOptions) return;
+    deps.loadDomainOptions()
+      .then(function (opts) {
+        var node = el("pr-ingest-domain-select");
+        if (!node || !state.open) return;
+        var keys = (opts && opts.keys) || [];
+        var names = (opts && opts.names) || {};
+        var lifecycles = (opts && opts.lifecycles) || {};
+        for (var i = 0; i < keys.length; i++) {
+          var key = keys[i];
+          if (!key || lifecycles[key] === "retired") continue;
+          var option = document.createElement("option");
+          option.value = key;
+          option.textContent = names[key] ? names[key] + " (" + key + ")" : key;
+          node.appendChild(option);
+          state.ingestDomainKeys[key] = true;
+        }
+        applyIngestDomainDefault(state.ingestDomainPreferred);
+      })
+      .catch(function () { /* 選択肢が読めなければ「指定しない」のまま */ });
+  }
+
+  function applyIngestDomainDefault(preferredKey) {
+    state.ingestDomainPreferred = preferredKey || "";
+    var node = el("pr-ingest-domain-select");
+    if (!node) return;
+    var keys = state.ingestDomainKeys || {};
+    node.value = preferredKey && keys[preferredKey] ? preferredKey : "";
+  }
+
+  // 送る値（「指定しない」は ""）。
+  function selectedIngestDomain() {
+    var node = el("pr-ingest-domain-select");
+    return node ? String(node.value || "") : "";
+  }
+
   function uploadOptions() {
     var checkbox = el("upload-analyze-images");
     var analyzeImages = !!(checkbox && checkbox.checked);
@@ -421,6 +578,9 @@
           '<div id="pr-keyphrase-section" style="margin-bottom:8px">' +
             '<div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:3px">キーフレーズ<span style="color:var(--color-text-tertiary);font-size:11px">（クリックで外す/戻す。外したものも条件として保持されます）</span></div>' +
             '<div id="pr-keyphrases" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px"></div>' +
+            '<div id="pr-keyphrase-supply-note" style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:4px"></div>' +
+            // 直前の検索で当たらなかった語・全件に当たった語（サーバ文言の素通し — §20 A / B）。
+            '<div id="pr-keyphrase-hits-note" style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:4px;display:none"></div>' +
             '<div style="display:flex;gap:6px">' +
               '<input type="text" id="pr-keyphrase-input" placeholder="キーフレーズを追加" ' +
                 'style="padding:3px 7px;font-size:12px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-primary);color:var(--color-text-primary);min-width:220px">' +
@@ -438,6 +598,8 @@
 
         // ④ 候補一覧（PR7: 検索条件と閉世界注記を常に上に出す）
         '<div id="pr-query-note" style="font-size:11.5px;color:var(--color-text-tertiary);padding-bottom:4px"></div>' +
+        // 近さの根拠が出ない理由（地図・承認済み部品が無い等）。サーバの事実文の素通し（§19 A）。
+        '<div id="pr-facts" style="font-size:11.5px;color:var(--color-text-secondary);padding-bottom:4px;display:none"></div>' +
         '<div style="font-size:11.5px;color:var(--color-text-tertiary);border-bottom:1px solid var(--color-border-tertiary);padding-bottom:6px;margin-bottom:6px">' +
           esc(SOURCE_URL_NOTICE) +
         "</div>" +
@@ -454,6 +616,21 @@
               esc(FORMAT_NOTICE) +
             "</span>" +
           "</div>" +
+          // 生成する言語（run options.language）。既定は「指定しない」。同期の取り込み（5件以下）
+          // にだけ効く — キュー登録（6件以上）は言語を持たない（migration なしの非スコープ）。
+          '<div id="pr-language-row" data-ui-anchor="materials.radar-language" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">' +
+            '<label for="pr-language-select" style="font-size:12px;color:var(--color-text-secondary)">生成する言語</label>' +
+            '<select id="pr-language-select" style="font-size:12px">' +
+              '<option value="" selected>指定しない</option>' +
+              '<option value="ja">日本語</option>' +
+              '<option value="en">英語</option>' +
+            '</select>' +
+            '<span style="font-size:11.5px;color:var(--color-text-tertiary)">' +
+              esc(LANGUAGE_NOTICE) +
+            "</span>" +
+          "</div>" +
+          // 解析の分野（cartridge_id）。同期・キュー登録の両方に効く（キュー行が運ぶ — migration 090）。
+          ingestDomainRowHtml() +
           '<div id="pr-ingest-summary" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
           '<div id="pr-ingest-result" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
           '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
@@ -468,13 +645,17 @@
     );
   }
 
-  function openModal(documentId, title) {
+  function openModal(documentId, title, options) {
     if (!deps) return;
     if (!documentId) return;
     close();
     state.open = true;
+    // 取り込みの「解析の分野」の既定（seed 教材の採用 run の分野。空 = 「指定しない」）。
+    state.seedCartridgeId = (options && options.cartridgeId) ? String(options.cartridgeId) : "";
     state.documentId = String(documentId);
     state.title = title || "";
+    // 連鎖で開き直したときの前の起点（呼び出し側が渡したときだけ・保存しない — §21 D）。
+    state.previousSeedTitle = (options && options.previousSeedTitle) ? String(options.previousSeedTitle) : "";
     state.seed = null;
     state.seedError = "";
     state.provenance = null;
@@ -487,9 +668,21 @@
     state.candidates = [];
     state.query = "";
     state.closedWorldNote = "";
+    state.keyphraseSupplyNote = "";
+    state.keyphraseNote = "";
     state.total = null;
     state.banding = null;
     state.relationContext = null;
+    state.facts = [];
+    state.keyphraseHits = {};
+    state.keyphraseHitsNote = "";
+    state.keyphraseWideningNote = "";
+    state.keyphraseDominantNote = "";
+    state.bandPopulationNote = "";
+    state.lineageLine = "";
+    state.lineageNote = "";
+    state.readingNote = "";
+    state.acceptedById = {};
     state.searched = false;
     state.searching = false;
     state.openBands = {};
@@ -511,6 +704,7 @@
       "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
     overlay.innerHTML = modalHtml();
     document.body.appendChild(overlay);
+    loadIngestDomainOptions(state.seedCartridgeId);
 
     overlay.addEventListener("click", function (event) {
       if (event.target === overlay) close();
@@ -669,10 +863,14 @@
   function applySeed(seed) {
     state.seed = seed;
     state.seedError = "";
+    state.lineageLine = (seed && seed.lineage_line) || "";
+    state.lineageNote = (seed && seed.lineage_note) || "";
     state.provenance = (seed && seed.provenance) || null;
-    state.categories = seed && seed.categories ? seed.categories.slice(0) : [];
+    state.categories = categoryChipsFromSeed(seed);
     state.categoriesSource = (seed && seed.categories_source) || "";
     state.keyphrases = [];
+    state.keyphraseSupplyNote =
+      (seed && seed.keyphrase_supply && seed.keyphrase_supply.note) || "";
     var candidates = (seed && seed.keyphrase_candidates) || [];
     for (var i = 0; i < candidates.length; i++) {
       var entry = candidates[i] || {};
@@ -700,11 +898,38 @@
     var node = el("pr-seed");
     if (!node) return;
     var seed = state.seed;
-    var title = (seed && seed.title) || state.title || "";
+    // 教材名がファイル名のままのときはサーバが display_title（arXiv の題名）を返す（§19 E）。
+    var title = (seed && (seed.display_title || seed.title)) || state.title || "";
     var html =
       '<div style="font-size:13px;color:var(--color-text-primary)">起点の論文: ' +
       esc(title) +
       "</div>";
+    if (state.lineageLine) {
+      // 起点の系譜（サーバが取り込みの監査から導出した 1 行の素通し — §24 D）。
+      html +=
+        '<div id="pr-seed-lineage" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' +
+        esc(state.lineageLine) +
+        "</div>";
+      if (state.lineageNote) {
+        html +=
+          '<div id="pr-seed-lineage-note" style="font-size:11px;color:var(--color-text-tertiary);margin-top:1px">' +
+          esc(state.lineageNote) +
+          "</div>";
+      }
+    } else if (state.previousSeedTitle) {
+      html +=
+        '<div id="pr-seed-previous" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' +
+        esc(PREVIOUS_SEED_HEAD + state.previousSeedTitle + PREVIOUS_SEED_TAIL) +
+        "</div>";
+    }
+    if (seed && seed.title_note) {
+      html +=
+        '<div id="pr-seed-title-note" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' +
+        esc(seed.title_note) +
+        " " +
+        esc(PROV_DOCUMENT_TITLE_HEAD + String(seed.title || "")) +
+        "</div>";
+    }
 
     if (state.seedError) {
       html +=
@@ -923,17 +1148,30 @@
     }
     var html = "";
     for (var i = 0; i < state.categories.length; i++) {
+      var chip = state.categories[i] || {};
+      // 主カテゴリだけ既定で有効・副カテゴリは打ち消し表示（クリックで足す — §19 B / PD3）。
       html +=
         '<span style="' +
-        chipStyle(true) +
+        chipStyle(chip.enabled) +
         ';display:inline-flex;align-items:center;gap:5px;cursor:default">' +
-        esc(state.categories[i]) +
+        '<button type="button" class="pr-category-chip" data-value="' +
+        esc(chip.text) +
+        '" title="' +
+        esc(chip.primary ? CATEGORY_PRIMARY_TITLE : CATEGORY_TOGGLE_TITLE) +
+        '" style="background:none;border:none;color:inherit;cursor:pointer;padding:0;font-size:inherit;text-decoration:inherit">' +
+        esc(chip.text) +
+        "</button>" +
         '<button type="button" class="pr-category-remove" data-value="' +
-        esc(state.categories[i]) +
+        esc(chip.text) +
         '" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;padding:0;font-size:12px">&times;</button>' +
         "</span>";
     }
     node.innerHTML = html;
+    bindAll(node, ".pr-category-chip", function (button) {
+      var index = indexOfText(state.categories, button.getAttribute("data-value"));
+      if (index >= 0) state.categories[index].enabled = !state.categories[index].enabled;
+      renderCategoryChips();
+    });
     bindAll(node, ".pr-category-remove", function (button) {
       var index = indexOfText(state.categories, button.getAttribute("data-value"));
       if (index >= 0) state.categories.splice(index, 1);
@@ -941,7 +1179,64 @@
     });
   }
 
+  // seed の category_candidates（主カテゴリだけ enabled）からチップを作る。古いサーバ
+  // （候補キーなし）では categories をすべて有効として並べる（後方互換）。
+  function categoryChipsFromSeed(seed) {
+    var out = [];
+    var candidates = (seed && seed.category_candidates) || [];
+    var i;
+    if (candidates.length) {
+      for (i = 0; i < candidates.length; i++) {
+        var entry = candidates[i] || {};
+        if (!entry.text) continue;
+        out.push({ text: entry.text, enabled: entry.enabled !== false, primary: !!entry.primary });
+      }
+      return out;
+    }
+    var categories = (seed && seed.categories) || [];
+    for (i = 0; i < categories.length; i++) {
+      if (categories[i]) out.push({ text: String(categories[i]), enabled: true, primary: false });
+    }
+    return out;
+  }
+
+  function enabledCategories() {
+    var out = [];
+    for (var i = 0; i < state.categories.length; i++) {
+      var chip = state.categories[i] || {};
+      if (chip.enabled && chip.text) out.push(chip.text);
+    }
+    return out;
+  }
+
+  // 供給の事実文（承認済み部品が無い・何も取れなかった）を 1 行で出す（§16 / PD6）。
+  // 文言はサーバの keyphrase_supply.note をそのまま描く（クライアントで作らない）。
+  function renderKeyphraseSupplyNote() {
+    var node = el("pr-keyphrase-supply-note");
+    if (!node) return;
+    node.textContent = state.keyphraseSupplyNote || "";
+    node.style.display = state.keyphraseSupplyNote ? "" : "none";
+  }
+
+  // 直前の検索の当たり外れ（サーバの keyphrase_hits_note / keyphrase_widening_note の素通し）。
+  function renderKeyphraseHitsNote() {
+    var node = el("pr-keyphrase-hits-note");
+    if (!node) return;
+    var lines = [];
+    if (state.keyphraseHitsNote) lines.push(state.keyphraseHitsNote);
+    if (state.keyphraseWideningNote) lines.push(state.keyphraseWideningNote);
+    if (state.keyphraseDominantNote) lines.push(state.keyphraseDominantNote);
+    var html = "";
+    for (var i = 0; i < lines.length; i++) {
+      html += '<div class="pr-keyphrase-hit-fact">' + esc(String(lines[i])) + "</div>";
+    }
+    node.innerHTML = html;
+    node.style.display = lines.length ? "" : "none";
+  }
+
   function renderKeyphraseChips() {
+    renderKeyphraseSupplyNote();
+    renderKeyphraseHitsNote();
     var node = el("pr-keyphrases");
     if (!node) return;
     if (!state.keyphrases.length) {
@@ -953,15 +1248,34 @@
     for (var i = 0; i < state.keyphrases.length; i++) {
       var entry = state.keyphrases[i] || {};
       var sourceLabel = SOURCE_LABELS[entry.source] || SOURCE_LABELS.manual;
+      var hitInfo = state.keyphraseHits[String(entry.text || "").toLowerCase()];
+      var missed = !!(entry.enabled && hitInfo && hitInfo.hit === false);
+      var widens = !!(entry.enabled && hitInfo && (hitInfo.widens === true || hitInfo.dominant === true));
+      var chipTitle = sourceLabel;
+      if (missed) chipTitle = sourceLabel + " ／ " + KEYPHRASE_MISS_TITLE;
+      else if (widens) {
+        chipTitle = sourceLabel + " ／ " +
+          (hitInfo.widensNote || hitInfo.dominantNote || KEYPHRASE_WIDENS_TITLE) +
+          " ／ " + KEYPHRASE_WIDENS_ACTION_TITLE;
+      }
+      var markText = missed ? KEYPHRASE_MISS_MARK : widens ? KEYPHRASE_WIDENS_MARK : "";
+      var markClass = missed ? "pr-keyphrase-miss" : "pr-keyphrase-widens";
       html +=
         '<button type="button" class="pr-keyphrase-chip" data-value="' +
         esc(entry.text) +
         '" title="' +
-        esc(sourceLabel) +
+        esc(chipTitle) +
         '" style="' +
         chipStyle(entry.enabled) +
         '">' +
         esc(entry.text) +
+        (markText
+          ? ' <span class="' +
+            markClass +
+            '" style="font-size:10.5px;color:var(--color-text-tertiary);border-left:1px solid var(--color-border);padding-left:5px;margin-left:2px">' +
+            esc(markText) +
+            "</span>"
+          : "") +
         "</button>";
     }
     node.innerHTML = html;
@@ -986,7 +1300,9 @@
     var input = el("pr-category-input");
     var value = input ? input.value.trim() : "";
     if (!value) return;
-    if (indexOfText(state.categories, value) < 0) state.categories.push(value);
+    var existing = indexOfText(state.categories, value);
+    if (existing >= 0) state.categories[existing].enabled = true;
+    else state.categories.push({ text: value, enabled: true, primary: false });
     if (input) input.value = "";
     renderCategoryChips();
   }
@@ -1047,7 +1363,8 @@
     var payload = {
       document_ref: state.documentId,
       distance: state.distance,
-      categories: state.categories,
+      // 有効なチップだけを送る（打ち消し表示の副カテゴリは条件に入れない — §19 B）。
+      categories: enabledCategories(),
       // 「近い」以外はキーフレーズを条件に使わない（UI の非表示と挙動を一致させる）。
       keyphrases: state.distance === "near" ? enabledKeyphrases() : []
     };
@@ -1067,10 +1384,33 @@
         state.candidates = (data && data.candidates) || [];
         state.query = (data && data.query) || "";
         state.closedWorldNote = (data && data.closed_world_note) || "";
+        state.keyphraseNote = (data && data.keyphrase_note) || "";
         state.total = data && typeof data.total === "number" ? data.total : null;
         state.banding = (data && data.banding) || null;
         // 古いレスポンス（キーなし）でも壊れない。null なら未測定注記を出さない。
         state.relationContext = (data && data.relation_context) || null;
+        state.facts = (data && data.facts) || [];
+        state.keyphraseHits = {};
+        var hits = (data && data.keyphrase_hits) || [];
+        for (var h = 0; h < hits.length; h++) {
+          var hit = hits[h] || {};
+          if (hit.text) {
+            state.keyphraseHits[String(hit.text).toLowerCase()] = {
+              hit: hit.hit === true,
+              widens: hit.widens === true,
+              // この語だけに一致した候補が多い語の事実文（サーバ文言の素通し・§23.5）。
+              widensNote: hit.widens === true && hit.widens_note ? String(hit.widens_note) : "",
+              // 取得した候補の多くに当たる語（サーバ文言の素通し・§24 A）。
+              dominant: hit.dominant === true,
+              dominantNote: hit.dominant === true && hit.dominant_note ? String(hit.dominant_note) : ""
+            };
+          }
+        }
+        state.keyphraseHitsNote = (data && data.keyphrase_hits_note) || "";
+        state.keyphraseWideningNote = (data && data.keyphrase_widening_note) || "";
+        state.keyphraseDominantNote = (data && data.keyphrase_dominant_note) || "";
+        state.bandPopulationNote = (data && data.band_population_note) || "";
+        state.readingNote = (data && data.reading_note) || "";
         state.searched = true;
         // 制限中の 200 応答（候補ゼロ + arxiv_blocked）は「近い論文が無い」ではない。
         applyArxivBlocked(
@@ -1085,6 +1425,7 @@
         state.compareNotes = [];
         setNotice("");
         renderQueryNote();
+        renderKeyphraseChips();
         renderCandidates();
         renderCompareControl();
         renderIngestSummary();
@@ -1108,9 +1449,15 @@
     // 検索経路は arXiv を取り直さない（サーバは条件が明示されていれば fetch を省く）。
     // note が付いていないのは「解消した」ではなく「確かめ直していない」なので、
     // 手元の事実文を消さない（provenance と同じ「減る方向の上書きをしない」規律）。
-    var previousNote = state.seed && state.seed.note;
+    var previous = state.seed || {};
+    var previousNote = previous.note;
     state.seed = seed;
     if (!seed.note && previousNote) state.seed.note = previousNote;
+    // 見出しの arXiv 題名も「確かめ直していない」だけなので消さない（§19 E）。
+    if (!seed.display_title && previous.display_title) {
+      state.seed.display_title = previous.display_title;
+      state.seed.title_note = previous.title_note;
+    }
     var incoming = seed.provenance;
     if (incoming && (incoming.status === "registered" || !state.provenance)) {
       state.provenance = incoming;
@@ -1135,6 +1482,8 @@
     }
     if (state.total !== null) parts.push("該当件数: " + String(state.total));
     if (state.closedWorldNote) parts.push(state.closedWorldNote);
+    // キーフレーズ無しの near はカテゴリの新着（§16）。「近い論文」と読ませない。
+    if (state.keyphraseNote) parts.push(state.keyphraseNote);
     // PR2: 帯分けができなかったことを黙らない（サーバの note を優先して出す）。
     if (state.banding && state.banding.available === false) {
       parts.push(
@@ -1142,6 +1491,32 @@
       );
     }
     node.textContent = parts.join(" ／ ");
+    renderFacts();
+  }
+
+  // 近さの根拠が出ない理由（サーバの facts。文言はサーバが持つ — §19 A / PR7）。
+  function renderFacts() {
+    var node = el("pr-facts");
+    if (!node) return;
+    var facts = (state.facts || []).slice();
+    // 帯と関係の種類の読み方は、関係ラベル（比較結果）が描かれているときだけ（§20 D）。
+    if (state.readingNote && hasRelationLabels()) facts.push(state.readingNote);
+    var html = "";
+    for (var i = 0; i < facts.length; i++) {
+      html += '<div class="pr-fact">' + esc(String(facts[i])) + "</div>";
+    }
+    node.innerHTML = html;
+    node.style.display = facts.length ? "" : "none";
+  }
+
+  // 比較結果のうち、いま一覧にある候補に関係ラベルが付いているか。
+  function hasRelationLabels() {
+    for (var i = 0; i < state.candidates.length; i++) {
+      var candidate = state.candidates[i] || {};
+      var item = state.compareById[candidate.arxiv_id];
+      if (item && item.relation_label) return true;
+    }
+    return false;
   }
 
   // ── 重なり・差分の描画 ────────────────────────────────────────────────
@@ -1240,6 +1615,18 @@
     return false;
   }
 
+  // 帯の母集団の事実文（§24 B・IK-0706）。帯が出るときに凡例の近くへ1回だけ。
+  // 文言はサーバ（radar.NOTE_BAND_POPULATION）の素通し。帯分けできなかったときは出さない。
+  function bandPopulationNoteHtml() {
+    if (!state.bandPopulationNote) return "";
+    if (state.banding && state.banding.available === false) return "";
+    return (
+      '<div id="pr-band-population-note" style="font-size:11.5px;color:var(--color-text-tertiary);padding-bottom:6px">' +
+      esc(state.bandPopulationNote) +
+      "</div>"
+    );
+  }
+
   function relationLegendHtml() {
     if (!hasRelationSignals()) return "";
     return (
@@ -1247,6 +1634,207 @@
       esc(RELATION_LEGEND) +
       "</div>"
     );
+  }
+
+  // ── 取り込み済み・受理直後の候補の導線（§19 C）──────────────────────────
+  // 候補に紐づく教材（見える教材だけがサーバから来る — IK-0701）。受理直後の候補は
+  // サーバの判定がまだ無いので、受理応答の material_id を手元で覚えておく。
+  function candidateMaterial(candidate) {
+    var arxivId = (candidate && candidate.arxiv_id) || "";
+    var accepted = state.acceptedById[arxivId] || null;
+    var materialId = (candidate && candidate.material_id) || (accepted && accepted.material_id) || "";
+    var documentId = (candidate && candidate.document_id) || "";
+    var status = (candidate && candidate.analysis_status) || "";
+    var title = (candidate && candidate.title) || "";
+    // 教材一覧の最新の行（admin.js が保持）があればそちらの状態を優先する。
+    var row = materialId && deps && deps.getMaterial ? deps.getMaterial(materialId) : null;
+    if (row) {
+      if (row.document_id) documentId = String(row.document_id);
+      if (row.status) status = String(row.status);
+      if (row.title) title = String(row.title);
+    }
+    if (!materialId && !documentId) return null;
+    return {
+      materialId: materialId,
+      documentId: documentId,
+      status: status,
+      title: title,
+      cartridgeId: (row && row.analysis_cartridge_id) || "",
+      accepted: !!accepted
+    };
+  }
+
+  function ingestedActionButtonHtml(cls, anchor, label, enabled, reason, material) {
+    return (
+      '<button type="button" class="admin-action-btn ' +
+      cls +
+      '" data-ui-anchor="' +
+      anchor +
+      '" data-material-id="' +
+      esc(material.materialId) +
+      '" data-document-id="' +
+      esc(material.documentId) +
+      '" data-title="' +
+      esc(material.title) +
+      '" data-cartridge-id="' +
+      esc(material.cartridgeId) +
+      '"' +
+      (enabled ? "" : ' disabled title="' + esc(reason) + '"') +
+      ' style="font-size:11px;padding:1px 7px">' +
+      esc(label) +
+      "</button>"
+    );
+  }
+
+  // 配置の対比の 1 項目（ラベル + 出所）。
+  function contrastItemText(item) {
+    return String(item.label) + (item.provenance_label ? "〈" + String(item.provenance_label) + "〉" : "");
+  }
+
+  // 観点ごとに並べる（§22 C）。観点はサーバが解決した日本語（perspective_label）をそのまま使い、
+  // JS に観点の表を持たない。観点の無い項目は先頭にまとめる。
+  function contrastByPerspective(items) {
+    var order = [];
+    var groups = {};
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i] || {};
+      if (!item.label) continue;
+      var head = item.perspective_label ? String(item.perspective_label) : "";
+      if (!groups.hasOwnProperty(head)) {
+        groups[head] = [];
+        order.push(head);
+      }
+      groups[head].push(contrastItemText(item));
+    }
+    var parts = [];
+    for (var j = 0; j < order.length; j++) {
+      var key = order[j];
+      parts.push((key ? key + ": " : "") + groups[key].join("、"));
+    }
+    return parts.join(" ／ ");
+  }
+
+  // 領域と概念を分けて描く（§22 C — 粒度の違う面を同じ列に混ぜない）。
+  function contrastItemsText(items) {
+    if (!items || !items.length) return CONTRAST_NONE;
+    var regions = [];
+    var concepts = [];
+    var others = [];
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i] || {};
+      if (!item.label) continue;
+      if (item.layer === "region") regions.push(item);
+      else if (item.layer === "concept") concepts.push(item);
+      else others.push(item);
+    }
+    var parts = [];
+    if (regions.length) parts.push(CONTRAST_LAYER_REGION + contrastByPerspective(regions));
+    if (concepts.length) parts.push(CONTRAST_LAYER_CONCEPT + contrastByPerspective(concepts));
+    if (others.length) parts.push(contrastByPerspective(others));
+    return parts.length ? parts.join(" ／ ") : CONTRAST_NONE;
+  }
+
+  // 配置の対比（3 行）と構造照合の成立条件（1 行）。キーが無ければ何も描かない。
+  function placementContrastHtml(candidate) {
+    if (!candidate) return "";
+    var style = "font-size:11.5px;color:var(--color-text-secondary);margin-top:2px";
+    var html = "";
+    var contrast = candidate.placement_contrast;
+    if (contrast && typeof contrast === "object") {
+      html += '<div class="pr-placement-contrast" style="margin-top:3px">';
+      html += '<div style="' + style + '">' + esc(CONTRAST_SHARED_HEAD + contrastItemsText(contrast.shared)) + "</div>";
+      html += '<div style="' + style + '">' + esc(CONTRAST_SEED_ONLY_HEAD + contrastItemsText(contrast.seed_only)) + "</div>";
+      html += '<div style="' + style + '">' + esc(CONTRAST_CANDIDATE_ONLY_HEAD + contrastItemsText(contrast.candidate_only)) + "</div>";
+      // 片側にだけ配置のある観点の事実文（§22.4）。サーバの文面をそのまま描く（数は無い）。
+      var perspectiveFacts = Array.isArray(contrast.perspective_facts) ? contrast.perspective_facts : [];
+      for (var pf = 0; pf < perspectiveFacts.length; pf++) {
+        if (!perspectiveFacts[pf]) continue;
+        html += '<div class="pr-placement-perspective-fact" style="' + style + '">' + esc(String(perspectiveFacts[pf])) + "</div>";
+      }
+      if (contrast.skeleton_version) {
+        html += '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:1px">' +
+          esc((String(contrast.skeleton_version).indexOf("版") >= 0 ? "分野の地図: " : CONTRAST_VERSION_HEAD) +
+            String(contrast.skeleton_version)) + "</div>";
+      }
+      html += "</div>";
+    } else if (candidate.placement_contrast_note) {
+      html += '<div class="pr-placement-contrast-note" style="' + style + '">' + esc(candidate.placement_contrast_note) + "</div>";
+    }
+    if (candidate.module_match_note) {
+      html += '<div class="pr-module-match-note" style="' + style + '">' + esc(candidate.module_match_note) + "</div>";
+    }
+    return html;
+  }
+
+  function ingestedActionsHtml(candidate) {
+    var material = candidateMaterial(candidate);
+    if (!material) return "";
+    var ready = material.status === ANALYSIS_COMPLETED && !!material.documentId;
+    var reason = material.status === "failed" ? INGESTED_FAILED_REASON : INGESTED_NOT_READY_REASON;
+    var html = "";
+    if (material.accepted && !ready) {
+      html +=
+        '<div class="pr-accepted-note" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:3px">' +
+        esc(ACCEPTED_CHAIN_NOTICE) +
+        "</div>";
+    }
+    html += '<div class="pr-ingested-actions" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">';
+    if (material.materialId) {
+      html += ingestedActionButtonHtml(
+        "pr-ingested-open-material", "materials.radar-ingested-open-material",
+        INGESTED_OPEN_MATERIAL_LABEL, true, "", material
+      );
+    }
+    html += ingestedActionButtonHtml(
+      "pr-ingested-graph-review", "materials.radar-ingested-graph-review",
+      INGESTED_GRAPH_REVIEW_LABEL, ready, reason, material
+    );
+    html += ingestedActionButtonHtml(
+      "pr-ingested-landscape", "materials.radar-ingested-landscape",
+      INGESTED_LANDSCAPE_LABEL, ready, reason, material
+    );
+    html += ingestedActionButtonHtml(
+      "pr-chain-seed", "materials.radar-chain-seed",
+      CHAIN_SEED_LABEL, ready, reason, material
+    );
+    return html + "</div>";
+  }
+
+  // 導線の配線。グラフレビュー・位置づけはこのモーダルを閉じてから開く（全画面の
+  // モーダルを重ねない）。連鎖は同じモーダルを別の起点で開き直す（openModal が状態を初期化）。
+  function bindIngestedActions(root) {
+    bindAll(root, ".pr-ingested-open-material", function (button) {
+      var materialId = button.getAttribute("data-material-id");
+      close();
+      if (deps && deps.focusMaterialRow) deps.focusMaterialRow(materialId);
+    });
+    bindAll(root, ".pr-ingested-graph-review", function (button) {
+      var documentId = button.getAttribute("data-document-id");
+      var title = button.getAttribute("data-title");
+      close();
+      if (deps && deps.openGraphReview) deps.openGraphReview(documentId, title);
+    });
+    bindAll(root, ".pr-ingested-landscape", function (button) {
+      var documentId = button.getAttribute("data-document-id");
+      var title = button.getAttribute("data-title");
+      close();
+      if (deps && deps.openLandscape) deps.openLandscape(documentId, title);
+    });
+    bindAll(root, ".pr-chain-seed", function (button) {
+      var previous = (state.seed && (state.seed.display_title || state.seed.title)) || state.title || "";
+      openModal(
+        button.getAttribute("data-document-id"),
+        button.getAttribute("data-title"),
+        { cartridgeId: button.getAttribute("data-cartridge-id") || "", previousSeedTitle: previous }
+      );
+    });
+  }
+
+  // 教材一覧が再読込されたとき（admin.js の renderMaterials）に呼ばれる。解析状態が
+  // 変わっていれば候補カードを描き直す。ここから API は呼ばない（PR5 — ポーリングなし）。
+  function onMaterialsUpdated() {
+    if (!state.open || !state.candidates.length) return;
+    renderCandidates();
   }
 
   // ── 候補一覧 ──────────────────────────────────────────────────────────
@@ -1271,6 +1859,16 @@
       html +=
         '<input type="checkbox" class="pr-select" data-arxiv-id="' +
         esc(arxivId) +
+        '"' +
+        (state.selected[arxivId] ? " checked" : "") +
+        ' style="margin-top:3px">';
+    } else if (status === "ingested") {
+      // 取り込み済みは比較の対象にだけ選べる（§24 C・IK-0759）。
+      html +=
+        '<input type="checkbox" class="pr-select pr-select-compare-only" data-compare-only="1" data-arxiv-id="' +
+        esc(arxivId) +
+        '" title="' +
+        esc(INGESTED_COMPARE_ONLY_TITLE) +
         '"' +
         (state.selected[arxivId] ? " checked" : "") +
         ' style="margin-top:3px">';
@@ -1327,6 +1925,14 @@
         '<div class="pr-status-label" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:3px">' +
         esc(INGESTED_STATUS_LINE) +
         "</div>";
+      html += placementContrastHtml(candidate);
+      if (!state.compareById[arxivId]) {
+        html +=
+          '<div class="pr-ingested-compare-hint" style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px">' +
+          esc(INGESTED_COMPARE_HINT) +
+          "</div>";
+      }
+      html += ingestedActionsHtml(candidate);
     }
     if (candidate && candidate.abs_url) {
       html +=
@@ -1383,6 +1989,18 @@
     );
   }
 
+  // IK-0818 / §22.5: 取り込み済み候補では、重なり・違いが候補側の解析結果（部品・
+  // 中心命題）から来たことがある。出所の文言はサーバの source_note を素通しする
+  // （クライアントに語彙表を持たない・承認前を承認済みに見せない）。
+  function compareSourceNoteHtml(note) {
+    if (!note) return "";
+    return (
+      '<div class="pr-compare-source-note" style="font-size:11px;color:var(--color-text-tertiary);margin-top:1px">' +
+      esc(String(note)) +
+      "</div>"
+    );
+  }
+
   // PR4: 比較結果は候補カード内の一時的な注釈。出所ラベルとサーバの caveat を
   // そのまま添える（クライアントで注意書きを作らない・断定に書き換えない）。
   // 「重なり」と「違い」は主語が別なので区画を分けて見出しを付ける
@@ -1395,6 +2013,21 @@
       '<div style="font-size:11.5px;color:var(--color-text-secondary)">' +
       esc(COMPARE_HEAD) +
       "</div>";
+
+    // 関係の種類（§18.4 / §19 D）。目立った共通点が無いときは、その事実を1行で言う
+    // （空欄にも警告色にもしない）。文言はサーバの relation_label を素通しする。
+    var isNone = item.relation_kind === RELATION_NONE_KIND;
+    if (item.relation_label && isNone) {
+      html +=
+        '<div class="pr-compare-relation-none" style="font-size:12px;color:var(--color-text-secondary);margin-top:3px">' +
+        esc(item.relation_label) +
+        "</div>";
+    } else if (item.relation_label) {
+      html +=
+        '<div class="pr-compare-relation" style="margin-top:3px">' +
+        compareItemChipHtml(String(item.relation_label), RELATION_CHIP_STYLE) +
+        "</div>";
+    }
 
     var overlaps = item.overlaps || [];
     if (overlaps.length) {
@@ -1413,10 +2046,11 @@
         }
         html += esc(overlap.statement || "");
         html += compareQuoteHtml(overlap.evidence_quote);
+        html += compareSourceNoteHtml(overlap.source_note);
         html += "</li>";
       }
       html += "</ul>";
-    } else if (item.common_ground) {
+    } else if (item.common_ground && !isNone) {
       // overlaps を返さないサーバ（旧レスポンス）では従来どおり共通点を出す。
       html +=
         '<div style="font-size:12px;color:var(--color-text-secondary);margin-top:3px">' +
@@ -1437,13 +2071,21 @@
         }
         html += esc(diff.statement || "");
         html += compareQuoteHtml(diff.evidence_quote);
+        html += compareSourceNoteHtml(diff.source_note);
         html += "</li>";
       }
       html += "</ul>";
-    } else if (!overlaps.length && !item.common_ground) {
+    } else if (!overlaps.length && !item.common_ground && !isNone) {
       html +=
         '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:3px">' +
         esc(COMPARE_EMPTY_NOTICE) +
+        "</div>";
+    }
+
+    if (item.analysis_note) {
+      html +=
+        '<div class="pr-compare-analysis-note" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">' +
+        esc(String(item.analysis_note)) +
         "</div>";
     }
 
@@ -1552,6 +2194,7 @@
 
     // 凡例は帯見出しより前に1回だけ（記号の意味を先に置く）。
     var html = relationLegendHtml();
+    html += bandPopulationNoteHtml();
     if (state.banding && state.banding.available === false) {
       // 帯分けができなかったときは帯を作らず、新着順のまま一覧にする（PR2）。
       for (var i = 0; i < state.candidates.length; i++) {
@@ -1586,6 +2229,7 @@
 
     node.innerHTML = html;
     bindBandToggles(node);
+    bindIngestedActions(node);
     bindAll(node, ".pr-select", function (input) {
       var arxivId = input.getAttribute("data-arxiv-id");
       if (input.checked) state.selected[arxivId] = true;
@@ -1621,6 +2265,18 @@
       if (Object.prototype.hasOwnProperty.call(state.selected, key) && state.selected[key]) {
         out.push(key);
       }
+    }
+    return out;
+  }
+
+  // 取り込みの対象は新着の候補だけ（取り込み済みは比較のためだけに選べる — §24 C）。
+  function selectedIngestIds() {
+    var ids = selectedIds();
+    var out = [];
+    for (var i = 0; i < ids.length; i++) {
+      var candidate = findCandidate(ids[i]);
+      if (candidate && candidate.status && candidate.status !== "new") continue;
+      out.push(ids[i]);
     }
     return out;
   }
@@ -1703,6 +2359,7 @@
     }
     state.compareNotes = notes;
     setNotice("");
+    renderFacts();
     renderCandidates();
     renderCompareControl();
   }
@@ -1716,7 +2373,7 @@
     var summary = el("pr-ingest-summary");
     var button = el("pr-ingest-btn");
     if (!summary || !button) return;
-    var ids = selectedIds();
+    var ids = selectedIngestIds();
     var overLimit = ids.length > BATCH_INGEST_MAX;
     var lines = [];
     if (overLimit) {
@@ -1748,7 +2405,7 @@
     if (state.ingesting) return;
     var button = el("pr-ingest-btn");
     if (button && button.disabled) return;
-    var ids = selectedIds();
+    var ids = selectedIngestIds();
     if (!ids.length) return;
     if (ids.length > BATCH_INGEST_MAX) {
       // サーバも 422 で拒否する。ここでは先回りして事実文を出すだけ。
@@ -1772,8 +2429,16 @@
     payload.items = items;
     // 取得する形式は教員が選んだ値をそのまま送る（サーバが語彙を検証する）。
     payload.source_format = state.sourceFormat;
+    // 生成する言語: 選んだときだけ送る（同期の /ingest のみ。キューは言語を持たない）。
+    var ingestLanguage = selectedLanguage();
+    if (!batch && ingestLanguage) payload.language = ingestLanguage;
+    // 解析の分野: 常に送る（「指定しない」は ""）。domain_key は監査の帰属で、解析には効かない。
+    payload.cartridge_id = selectedIngestDomain();
     // 監査の帰属は seed の分野（引けなければサーバ側の既定に落ちる）。
     if (seedDomainKey()) payload.domain_key = seedDomainKey();
+    // 起点の系譜（§24 D）: どの起点のレーダーから取り込んだかを監査に残す。サーバが
+    // 閲覧権限を確かめてから記録する（申告をそのまま信用しない）。
+    payload.seed_document_id = (state.seed && state.seed.document_id) || state.documentId;
 
     state.ingesting = true;
     if (button) button.disabled = true;
@@ -1820,6 +2485,13 @@
       var candidate = findCandidate(arxivId);
       // 直前に取り込んだ事実の反映（サーバ側の判定は次回検索で読み時導出される）。
       if (candidate) candidate.status = "ingested";
+      // 受理応答の material_id を覚えておく（教材の行・連鎖の導線に使う — §19 C）。
+      if (arxivId && item.material_id) {
+        state.acceptedById[arxivId] = {
+          material_id: String(item.material_id),
+          title: item.title || ""
+        };
+      }
       delete state.selected[arxivId];
     }
 
@@ -1877,6 +2549,7 @@
       deps = injected || null;
     },
     openModal: openModal,
-    close: close
+    close: close,
+    onMaterialsUpdated: onMaterialsUpdated
   };
 })();

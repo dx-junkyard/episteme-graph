@@ -1,0 +1,18 @@
+id: c-astro-corpus-to-course-x2
+domain: astrophysics
+snapshot: corpus-astro-v1
+personas:
+  teachers: [te-01-rookie-seminar, te-04-copilot-intro]
+  students: [st-01-m1-radio, st-03-d1-from-particle, st-04-intl-exoplanet, st-06-skeptic-bao]
+scenarios:
+  teacher: [t-build-course-from-corpus]
+  student: [s-enroll-and-first-topic, s-ask-until-confused, s-discuss-one-paper, s-maps-and-records]
+runner: api
+flags: {}
+sessions_per_student: 1
+budget: {product_llm_calls: 600, persona_llm_calls: 900, wall_clock_minutes: 240}
+notes: |
+  c-corpus-to-course の倍化版（2026-09-27 第 5 周）: 台本 5（教員 1 + 学生 4）、教員 2 名・学生 4 名。
+  教員 2 名がそれぞれコースを作って公開し、学生 4 名はどちらかを選んで受講する。
+  学生の 4 経路は「受講→最初のトピック」「詰まるまで質問」「論文と議論」「地図と記録」で、
+  第 4 周まで一度も走らなかったトピック内チャットを必ず踏む（停止条件は連続 2 回の blocked に緩和済み）。

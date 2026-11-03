@@ -33,8 +33,16 @@ from typing import Any, Optional
 #: ``skeleton`` = atlas 骨格の概念ラベル / ``cartridge`` = カートリッジ ontology /
 #: ``alias`` = 教員が確定した骨格ノードの別名
 #: （``docs/features/atlas_vector_anchoring_design.md`` §7 の還流2）/
-#: ``component`` = 承認済み理論部品のラベル / ``manual`` = 教員が自分で足したもの。
-KEYPHRASE_SOURCES = ("skeleton", "cartridge", "component", "alias", "manual")
+#: ``component`` = 承認済み理論部品のラベル /
+#: ``concept`` = 論文レーダーの起点教材の live 主張（``theory_claims_live.concepts``）の
+#: 概念名（記号・文のような名前は除く）/ ``title`` = 起点教材の題名の名詞句 /
+#: ``thesis`` = 起点教材の中心命題（``thesis_reconstruction``）の名詞句
+#: （``docs/features/paper_radar_design.md`` §17）/ ``manual`` = 教員が自分で足したもの。
+#: ``manual`` は末尾に置く（供給元ではなく落とし所）。表示ラベルの正本は
+#: ``core.label_vocab.KEYPHRASE_SOURCE_LABELS``。
+KEYPHRASE_SOURCES = (
+    "skeleton", "cartridge", "component", "alias", "concept", "title", "thesis", "manual",
+)
 
 #: 供給元が不明・不正だったキーフレーズの落とし所（教員が足したものと同じ扱い）。
 DEFAULT_KEYPHRASE_SOURCE = "manual"
@@ -64,9 +72,11 @@ SOURCE_FORMAT_TEX = "tex"
 SOURCE_FORMAT_PDF = "pdf"
 SOURCE_FORMATS = (SOURCE_FORMAT_TEX, SOURCE_FORMAT_PDF)
 
-#: 形式が指定されなかったときの落とし所。**既存の呼び出し側の挙動を変えないための値**で、
-#: 「この画面の既定」ではない（レーダー画面の既定は TeX で、フロントが明示的に送る）。
-DEFAULT_SOURCE_FORMAT = SOURCE_FORMAT_PDF
+#: 形式が指定されなかったときの落とし所。**2026-09-30 に TeX へ変更**（論文レーダー設計書
+#: §15.9）: PDF 経路は組版結果から式・導出・図表を復元する損失が上流にあり、表示側では
+#: 隠せない（理論モジュール層の実測では同一論文の式チェーンが PDF 0 本 / TeX 13 本）。
+#: TeX が使えない論文は取得層（``api/source_resolution.py``）が同期で PDF に倒す。
+DEFAULT_SOURCE_FORMAT = SOURCE_FORMAT_TEX
 
 #: 引用グラフ API の宛先ホスト（Phase 3 / 設計書 §6。PD7 — arXiv と同じ規律で固定値。
 #: スロットルは**ホストごとに独立**なので arxiv_client とは共有しない）。

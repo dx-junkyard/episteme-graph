@@ -18,19 +18,21 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from core.abbreviations import (  # noqa: F401 — 旧名（private）の互換エイリアス
+    ABBR_AFTER_FULL_RE as _ABBR_AFTER_FULL_RE,
+    FULL_AFTER_ABBR_RE as _FULL_AFTER_ABBR_RE,
+    extract_abbreviations as _extract_abbreviations_from_texts,
+    initials_match as _initials_match,
+    register_abbreviation as _maybe_register,
+    trim_full_to_match as _trim_full_to_match,
+)
+
 from .figure_images import _blocks_from_structure
 
 # 図番号らしき数値・ドット区切り表記（"5.2" / "12" / "3.2a"）を figure_label から拾う。
 _LABEL_NUM_RE = re.compile(r"([0-9]+(?:\.[0-9A-Za-z]+)*)")
 
-# 「フル表記 (略語)」。略語側の末尾 's' は複数形として別扱い（group 3）。
-_ABBR_AFTER_FULL_RE = re.compile(
-    r"\b([A-Za-z][A-Za-z\-/ ]{2,80}?)\s*\(\s*([A-Z][A-Za-z0-9\-]{1,11}?)(s)?\s*\)"
-)
-# 「略語 (フル表記)」。
-_FULL_AFTER_ABBR_RE = re.compile(
-    r"\b([A-Z][A-Za-z0-9\-]{1,11})\s*\(\s*([a-z][^)]{3,80})\s*\)"
-)
+# 「フル表記 (略語)」「略語 (フル表記)」の規則の正本は core/abbreviations.py（論文レーダーと共有）。
 
 # nearby_text 候補プールから除外する block_type（caption 自身は別途 id/identity で除外）。
 _CAPTION_BLOCK_TYPES = ("figure_caption", "table_caption")
@@ -241,70 +243,9 @@ def _apply_budget(
 # ---------------------------------------------------------------------------
 
 
-def _initials_match(full: str, abbr: str) -> bool:
-    """abbr が full の頭字語として妥当か（先頭文字一致 + 部分列としての整合）を判定する。"""
-    abbr_chars = re.sub(r"[^A-Za-z0-9]", "", abbr).upper()
-    if not abbr_chars or not full:
-        return False
-    full_upper = full.upper()
-    if full_upper[0] != abbr_chars[0]:
-        return False
-    idx = 0
-    for ch in full_upper:
-        if idx < len(abbr_chars) and ch == abbr_chars[idx]:
-            idx += 1
-    return idx == len(abbr_chars)
-
-
-def _maybe_register(result: dict[str, str], abbr: str, full: str) -> None:
-    full = full.strip().rstrip(".,;:　 ")
-    if not full or not abbr:
-        return
-    if not _initials_match(full, abbr):
-        return
-    if abbr in result:
-        return  # first-wins（同一キーは最初の定義を保持）
-    result[abbr] = full
-
-
-def _trim_full_to_match(full: str, abbr: str) -> str | None:
-    """full 句の先頭語を1つずつ落とした接尾辞のうち、最初に initials が一致する最長のものを返す。
-
-    「フル表記 (略語)」パターンは文字クラスに空白を含むため、
-    "The setup uses an external cavity diode laser (ECDL)" のように定義が文中に埋まると
-    先行する無関係な語まで group(1) に飲み込まれる。initials 検査を通る最長接尾辞へ
-    決定論的に縮めることで、文中定義（実際の論文で大半）を落とさない。
-    全接尾辞が不一致なら None（従来どおり棄却）。
-    """
-    words = full.strip().split()
-    for start in range(len(words)):
-        candidate = " ".join(words[start:])
-        if _initials_match(candidate, abbr):
-            return candidate
-    return None
-
-
 def _extract_abbreviations(sorted_blocks: list[dict]) -> dict[str, str]:
-    """全ブロック text から「フル表記(略語)」「略語(フル表記)」の2パターンを抽出する。"""
-    result: dict[str, str] = {}
-    for b in sorted_blocks:
-        text = b.get("text") or ""
-        if not text.strip():
-            continue
-        for m in _ABBR_AFTER_FULL_RE.finditer(text):
-            abbr = m.group(2)
-            has_plural = m.group(3) == "s"
-            full = _trim_full_to_match(m.group(1), abbr)
-            if full is None:
-                continue
-            _maybe_register(result, abbr, full)
-            if has_plural:
-                _maybe_register(result, abbr + "s", full)
-        for m in _FULL_AFTER_ABBR_RE.finditer(text):
-            abbr = m.group(1)
-            full = m.group(2)
-            _maybe_register(result, abbr, full)
-    return result
+    """全ブロック text から「フル表記(略語)」「略語(フル表記)」の2パターンを抽出する（正本 core/abbreviations）。"""
+    return _extract_abbreviations_from_texts(b.get("text") or "" for b in sorted_blocks)
 
 
 def _label_matches_key(label_texts: list[str], key: str) -> bool:

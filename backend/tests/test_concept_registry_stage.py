@@ -63,7 +63,10 @@ class TestStageRegistration:
     def test_stage_is_the_last_named_step(self):
         named = [step.name for step in orch._PIPELINE_STEPS if step.name]
         assert named[-1] == STAGE
-        assert named[-2] == "persist_claims_components_graph"
+        # 理論モジュール層 Phase 1（theory_module_layer_design.md §13.5）: 規則 ⑤ が読む
+        # knowledge_theory_modules の live 行を揃える theory_modules が直前に入る。
+        assert named[-2] == "theory_modules"
+        assert named[-3] == "persist_claims_components_graph"
 
     def test_stage_is_in_pipeline_stages_before_completed(self):
         stages = orch.PIPELINE_STAGES

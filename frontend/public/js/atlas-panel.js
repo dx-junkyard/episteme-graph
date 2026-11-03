@@ -54,13 +54,30 @@
     // 実データ (E系) 移行後も同じフィールドで供給される。
     const verify = document.createElement("p");
     verify.className = "atlas-panel-verify";
-    verify.textContent = info.verify || "台帳の記帳情報がありません。";
+    // IK-1018 残り（第 25 周 第 7 波）: 学習者に「台帳」「記帳」を出さない（label_vocab.ATLAS_LEARNER_WORDING）。
+    verify.textContent = info.verify || "検証の記録がありません。";
     body.appendChild(verify);
 
     const endorse = document.createElement("p");
     endorse.className = "atlas-panel-endorse";
     endorse.textContent = info.endorse || "—";
     body.appendChild(endorse);
+
+    // IK-1072（第 25 周 第 9 波）: この概念に結ばれた確定済みの関係（名前の列挙・件数なし・文はサーバ）。
+    if (info.relations) {
+      const relations = document.createElement("p");
+      relations.className = "atlas-panel-relations";
+      relations.textContent = String(info.relations);
+      body.appendChild(relations);
+    }
+
+    // 第 25 周 第 10 波: ここに置かれたこのコースの論文の名前（出所ラベル付き・件数なし・文はサーバ）。
+    if (info.papers) {
+      const papers = document.createElement("p");
+      papers.className = "atlas-panel-papers";
+      papers.textContent = String(info.papers);
+      body.appendChild(papers);
+    }
 
     // アクション行 (§6.2 の表示規則)
     const row = document.createElement("div");

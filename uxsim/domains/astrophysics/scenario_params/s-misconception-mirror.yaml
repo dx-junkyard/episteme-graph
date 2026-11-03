@@ -1,0 +1,19 @@
+scenario: s-misconception-mirror
+domain: astrophysics
+params:
+  goal_text: 自分の理解が正しいかを質問を通じて確かめること
+  topic_hint: 主結果：µ(a)と音速への制約
+  topic_hint_terms:
+  - µ(a)
+  - 音速
+  - 制約
+  misconception_questions:
+  - z < 2 で µ = 1 から 2σ を超えてずれたということは、一般相対論が破れていることが確定したんですよね？
+  - だとすると、k-essence 型で µ0 ≈ 1.04 になったのも、観測がそう決めたからですよね？
+  - それなら事前分布を変えても µ0 は変わらないということでいいですか？
+per_archetype:
+  non_native:
+    goal_text: checking my understanding through questions
+    misconception_questions:
+    - A deviation from µ = 1 at over 2σ for z < 2 means GR is definitely ruled out, right?
+    - So µ0 ≈ 1.04 for the k-essence-like case is fixed by the data alone?

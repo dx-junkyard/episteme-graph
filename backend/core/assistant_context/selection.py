@@ -34,8 +34,58 @@ def _match_key(text: str) -> str:
     return _WHITESPACE_RE.sub("", text)
 
 
+#: 選択に添える式の上限（第 25 周 第 10 波・SA7 の予算はコード定数）。
+MAX_SELECTION_FORMULAS = 3
+MAX_SELECTION_FORMULA_CHARS = 200
+SELECTION_FORMULA_HEADING = "選択箇所に出てくる式（教材の式の記録）:"
+_SYMBOL_KEY_RE = re.compile(r"[^0-9A-Za-z\u0370-\u03ff]+")
+_TEX_COMMAND_RE = re.compile(r"\\(?:mathcal|mathrm|mathbf|mathit|operatorname|text|rm|bf|cal)\b")
+_TEX_COMMAND_ANY_RE = re.compile(r"\\[A-Za-z]+")
+
+
+def _symbol_key(text: str) -> str:
+    text = _TEX_COMMAND_RE.sub("", text or "")
+    text = _TEX_COMMAND_ANY_RE.sub("", text)
+    return _SYMBOL_KEY_RE.sub("", text).casefold()
+
+
+def selection_formula_lines(selection_text: str | None, formulas) -> list[str]:
+    """選択テキストに定める記号（式の左辺）が現れる式の行を返す（決定論・最大 3 件）。
+
+    ``formulas`` は表示中の教材の式の記録（``latex`` / 任意の ``label``（「式 (4)」等）/
+    任意の ``mark``（「［AI復元］」等））。KaTeX の選択は記号が崩れて写るので、照合は英数字だけの
+    キー（``L_{\\mathrm{TOV}}`` → ``ltov``）で行う。2 文字未満の記号は誤一致が多いので使わない。
+    """
+    try:
+        key = _symbol_key(strip_control_sequences(str(selection_text or "")))
+        if not key:
+            return []
+        out: list[str] = []
+        for formula in formulas or []:
+            if len(out) >= MAX_SELECTION_FORMULAS or not isinstance(formula, dict):
+                break
+            latex = strip_control_sequences(str(formula.get("latex") or "")).strip()
+            if not latex or "=" not in latex:
+                continue
+            lhs = _symbol_key(latex.split("=", 1)[0])
+            if len(lhs) < 2 or lhs not in key:
+                continue
+            label = str(formula.get("label") or "").strip()
+            mark = str(formula.get("mark") or "").strip()
+            line = f"{label}{mark}: ${latex}$" if label else f"${latex}${mark}"
+            if len(line) > MAX_SELECTION_FORMULA_CHARS:
+                continue
+            if line not in out:
+                out.append(line)
+        return out
+    except Exception:  # pragma: no cover - 防御的（SA2 fail-soft）
+        return []
+
+
 def render_selection_block(
-    selection_text: str | None, material_text: str | None = None
+    selection_text: str | None,
+    material_text: str | None = None,
+    formula_lines: list[str] | None = None,
 ) -> str:
     """選択逐語のブロックを描画する。選択が無ければ ``""``。
 
@@ -60,6 +110,9 @@ def render_selection_block(
             return ""
         quoted = [f"> {line}" for line in lines]
         marker = SELECTION_MATCH_CONFIRMED if matched else SELECTION_MATCH_UNCONFIRMED
-        return "\n".join([SELECTION_BLOCK_HEADER, marker, *quoted])
+        # 第 25 周 第 10 波（製品頭脳 A 4313）: 選択に出てくる式の LaTeX を添える（逐語の 600 字とは別枠）。
+        formulas = [str(x) for x in (formula_lines or [])[:MAX_SELECTION_FORMULAS] if str(x or "").strip()]
+        extra = [SELECTION_FORMULA_HEADING, *[f"- {line}" for line in formulas]] if formulas else []
+        return "\n".join([SELECTION_BLOCK_HEADER, marker, *quoted, *extra])
     except Exception:  # pragma: no cover - 防御的（SA2 fail-soft）
         return ""

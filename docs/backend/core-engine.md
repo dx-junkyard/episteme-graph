@@ -153,7 +153,7 @@ tier 付き chunk 検索ユーティリティ（`search_chunks()` / `_embed_quer
 | `chunker.py` | ブロックからチャンク生成（決定論的） |
 | `persistence.py` | 成果物の PostgreSQL 永続化 |
 | `export_validation_gate.py` | 最終検証ゲート（成果物完全性・ソースバッキング整合性） |
-| `figure_images.py` | **L層**: `figure_image_extraction` ステージ本体（非LLM）。PyMuPDF の埋め込み画像抽出 + caption 近傍の領域レンダリング fallback、図中ラベル（`inner_labels`）抽出。保存先は MinIO `figure-images` + `document_figures` |
+| `figure_images.py` | **L層**: `figure_image_extraction` ステージ本体（非LLM）。図領域の推定は `figure_regions.py`（障害物に挟まれた帯のインク連結成分・境界の連続性検査・情報量判定。設計書 §17）、図中ラベル（`inner_labels`）抽出。保存先は MinIO `figure-images` + `document_figures` |
 | `figure_context.py` | **L層**: 図ごとの周辺本文（caption 直近 / `Fig. N` 参照メンション / 同一セクション本文）と略語辞書を決定論的に収集し、`apparatus_semantics` の LLM 入力にする |
 | `contextual_explanation_inputs.py` | `contextual_explanation` ステージの入力構築。components / claims / equations / figures / thesis から**不透明 ID を解決済みテキストに展開**した `ElementExplanationInput` を組む（設計原則 E4） |
 | `completeness.py` / `dsl_text.py` / `tex_archive.py` / `revision/` | 完全性チェック、DSL テキスト化、TeX アーカイブ処理、リビジョン |

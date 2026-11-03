@@ -24,6 +24,7 @@ from episteme_graph.agents.equation_semantics.schema import (
 from episteme_graph.agents.theory_operations import classify_operation
 
 from .schema import DerivationChainRecord, DerivationStep
+from .schema import RECONSTRUCTION_BACKED_REASON
 
 
 # Domain-neutral operation labels for grouped operations (issue #386).
@@ -80,6 +81,25 @@ def _operation_for_group(members: list[EquationRecord], result: EquationRecord |
     if result is not None and _is_result(result):
         return "constrain"
     return "solve"
+
+
+def reconstruction_backed_reason(
+    equation_ids: Iterable[str],
+    eq_by_id: dict[str, EquationRecord],
+) -> str:
+    """step に関わる式のどれかが復元由来なら :data:`RECONSTRUCTION_BACKED_REASON` を返す。
+
+    ``EquationRecord.confidence_policy.must_not_treat_as_source_extracted`` が真の式は
+    「AI が文脈から復元した式」であって原文の引用ではない。ローカル chain と system 導出の
+    両方がこの判定を通り、下流（理論操作グラフ）は step の ``review_reason`` だけを見て
+    ``source_backed`` への昇格を止める。復元式が 1 本も無ければ空文字。
+    """
+    for eq_id in equation_ids:
+        record = eq_by_id.get(str(eq_id))
+        policy = getattr(record, "confidence_policy", None) if record is not None else None
+        if getattr(policy, "must_not_treat_as_source_extracted", False):
+            return RECONSTRUCTION_BACKED_REASON
+    return ""
 
 
 def detect_system_level_derivations(
@@ -237,6 +257,13 @@ def detect_system_level_derivations(
 
         review_required = bool(review_reasons) or classification.review_required
 
+        # 復元由来の式に支えられた system 導出であることを step に残す（R-1）。
+        # ローカル chain（agent._build_steps）と同じ印で、理論操作グラフはこれだけを見て
+        # 復元式しか backing の無いノード・辺を ``partially_source_backed`` に留める。
+        # 復元式は「原文の引用ではない」事実であって疑いではないので（J-1）、chain の
+        # ``review_reasons`` には積まない（``review_required`` の導出を変えない）。
+        step_review_reason = reconstruction_backed_reason(member_ids, by_id)
+
         step = DerivationStep(
             step_id=f"sys_{index:03d}_step_1",
             input_equation_ids=input_equation_ids,
@@ -249,6 +276,7 @@ def detect_system_level_derivations(
             assumption_ids=assumptions,
             source_evidence_ids=evidence_ids,
             review_status="teacher_review_required",
+            review_reason=step_review_reason,
             eliminated_symbols=eliminated,
             retained_symbols=retained,
         )

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from core.reconstruction.claim_context import normalize_claim_text, symbol_names
 from core.reconstruction.schema import subject_driver_concepts
 
 
@@ -17,18 +18,20 @@ def build_user_content(claim: dict[str, Any]) -> str:
     equation = claim.get("equation") if isinstance(claim.get("equation"), dict) else {}
     payload = {
         "claim_type": str(claim.get("claim_type") or ""),
-        "text": str(claim.get("text") or ""),
-        "normalized_text": str(claim.get("normalized_text") or ""),
+        # PDF の行末ハイフネーション・改行を畳んで渡す（IK-0481）。
+        "text": normalize_claim_text(claim.get("text")),
+        "normalized_text": normalize_claim_text(claim.get("normalized_text")),
         "subject_driver_concepts": subject_driver_concepts(claim),
         "all_concepts": _concept_names(claim.get("concepts")),
         "equation": {
             "label": str(equation.get("label") or ""),
             "latex": str(equation.get("latex") or ""),
-            "defined_symbols": [str(s) for s in (equation.get("defined_symbols") or [])],
+            "defined_symbols": symbol_names(equation.get("defined_symbols")),
+            "symbols": symbol_names(equation.get("symbols")),
             "relation_type": str(equation.get("relation_type") or ""),
         },
         "source_scope": _scope_context(claim.get("source_scope")),
-        "evidence_text": str(claim.get("evidence_text") or "")[:600],
+        "evidence_text": normalize_claim_text(claim.get("evidence_text"))[:600],
     }
     return "答えキー（claim）:\n" + json.dumps(payload, ensure_ascii=False, indent=2)
 

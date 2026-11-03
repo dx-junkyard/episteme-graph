@@ -10,6 +10,7 @@ import threading
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
@@ -27,6 +28,7 @@ from dependencies import (
     ROLE_TEACHER,
 )
 from quota import consume_daily_quota
+import source_resolution
 from schemas import (
     ApproveWithScopeRequest,
     AuthEventOut,
@@ -92,7 +94,16 @@ from core import account_lifecycle
 from core import account_status
 from core import auth_events as auth_events_module
 from core import decision_context
+from core import document_refs as _document_refs
+from core.paper_discovery import schema as pd_schema
 from core.config import get_settings
+from core.label_vocab import COURSE_ROLE_LABELS, atlas_binding_coverage_label
+from core.label_vocab import ACCOUNT_NAME_UNREGISTERED  # IK-1007: 名前の登録なしの事実文
+from core.label_vocab import (
+    MATERIAL_EDIT_REQUEST_TEMPLATE,
+    MATERIAL_EDIT_REQUEST_UNKNOWN,
+    MATERIAL_ROLE_LABELS,
+)
 from core.course_data import (
     course_cartridge_id,
     course_chapters,
@@ -104,12 +115,14 @@ from core.course_data import (
     is_symbol_concept_name,
 )
 from core.course_units import (
+    candidate_key_table,
     list_unit_candidates,
+    normalize_draft_unit_refs,
     render_unit_candidates_block,
     unit_concept_terms_by_document,
     unit_kind_label,
 )
-from core.document_pipeline.figure_images import load_document_figures
+from core.document_pipeline.figure_images import is_listed_figure, load_document_figures
 from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE, strip_control_sequences
 from core.document_pipeline.orchestrator import PIPELINE_STAGES, VISION_STAGE_NAMES
 from core.document_pipeline.persistence import (
@@ -132,6 +145,7 @@ from core.meta_analyzer import (
     reject_proposal,
 )
 from core.postgres import get_session as _pg_session
+from core import analysis_degradation as analysis_degradation_core
 from core import reference_health as reference_health_core
 from core.reextractor import enqueue_reextraction, get_jobs as get_reextraction_jobs
 from core.schema import (
@@ -530,6 +544,23 @@ def _validate_cartridge_option(value: str | None) -> str | None:
     return text
 
 
+#: 生成物の言語（run options ``language``）の語彙。表示ラベルはフロントの select が持つ。
+#: 正本はここ（``api/schemas.py`` の lecture_language と同じ ``ja`` / ``en``）。
+GENERATION_LANGUAGES = ("ja", "en")
+
+
+def _validate_language_option(value: str | None) -> str | None:
+    """multipart で届く ``language`` を語彙へ畳む（空・未指定は None、語彙外は 422）。"""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text not in GENERATION_LANGUAGES:
+        raise HTTPException(status_code=422, detail="生成する言語は日本語（ja）か英語（en）を指定してください。")
+    return text
+
+
 def _accept_material_source(
     *,
     source_bytes: bytes,
@@ -540,6 +571,7 @@ def _accept_material_source(
     current_user: dict,
     source_url: str | None = None,
     cartridge_id: str | None = None,
+    language: str | None = None,
 ) -> dict:
     """教材ソース（実バイト）を受理して解析パイプラインを起動する共通処理。
 
@@ -609,6 +641,10 @@ def _accept_material_source(
     upload_options: dict = {"analyze_images": bool(analyze_images)}
     if models_option:
         upload_options["models"] = models_option
+    # 生成物の言語（run 単位・``ja`` / ``en``）。未指定はキー自体を入れない
+    # （orchestrator は env → 既定の順で決める。値の検証は入口の Literal / _validate_language_option）。
+    if language:
+        upload_options["language"] = language
 
     thread = threading.Thread(
         target=process_material_background,
@@ -642,6 +678,7 @@ def upload_material(
     analyze_images: bool = Form(False),
     models: str | None = Form(None),
     cartridge_id: str | None = Form(None),
+    language: str | None = Form(None),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """PDF/TeX教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
@@ -683,6 +720,8 @@ def upload_material(
     # 分野（提案 C1）: 未指定/空は None に畳む（アップロードは継承元が無いので
     # 「未指定」と「指定しない」を区別する必要がなく、env 既定の余地を残す）。
     cartridge_option = _validate_cartridge_option(cartridge_id) or None
+    # 生成物の言語（run 単位）。未指定は env → 既定（原則12: 必須入力にしない）。
+    language_option = _validate_language_option(language)
 
     source_bytes = file.file.read()
     if len(source_bytes) == 0:
@@ -696,6 +735,7 @@ def upload_material(
         models_option=models_option,
         current_user=current_user,
         cartridge_id=cartridge_option,
+        language=language_option,
     )
 
 
@@ -727,6 +767,11 @@ class UploadFromUrlRequest(BaseModel):
     analyze_images: bool = False
     models: dict[str, str] | None = None
     cartridge_id: str | None = None
+    #: arXiv の論文 URL のときだけ効く取得形式（``tex`` / ``pdf``）。空・未指定は
+    #: URL のパスが示す形式 → 既定（TeX）の順。arXiv 以外の URL では無視する。
+    source_format: str = ""
+    #: 生成物の言語（``ja`` / ``en``。``None`` = 指定なし → env → 既定）。
+    language: Literal["ja", "en"] | None = None
 
 
 @router.get("/url-fetch-domains")
@@ -814,6 +859,8 @@ _URL_FETCH_ERROR_STATUS: dict[type, int] = {
     url_fetch.UnsupportedContentError: 422,
     url_fetch.TooLargeError: 413,
     url_fetch.FetchFailedError: 502,
+    # 上流のアクセス制限。本アプリ自身のコスト上限（429）と同じ形にしない（§13）。
+    url_fetch.RateLimitedError: 502,
 }
 
 
@@ -831,6 +878,15 @@ def upload_material_from_url(
     if body.models:
         models_option = _validate_models_option(body.models)
     cartridge_option = _validate_cartridge_option(body.cartridge_id) or None
+    source_format_text = str(body.source_format or "").strip()
+    source_format: str | None = None
+    if source_format_text:
+        source_format = pd_schema.normalize_source_format(source_format_text)
+        if source_format is None:
+            raise HTTPException(
+                status_code=422,
+                detail="取得する形式は TeX ソース（tex）か PDF（pdf）を指定してください。",
+            )
 
     session = _pg_session()
     try:
@@ -838,8 +894,13 @@ def upload_material_from_url(
     finally:
         session.close()
 
+    # arXiv の論文 URL（abs / pdf / src）は形式を解決して取り直す（TeX 既定・PDF への
+    # 同期フォールバック・最大 2 回・429 では 2 回目を取らない）。それ以外の URL は
+    # 従来どおり 1 回取得する。方針の正本は api/source_resolution.py。
     try:
-        fetched = url_fetch.fetch_source_from_url(body.url, allowed)
+        resolved = source_resolution.fetch_url_source(
+            body.url, source_format=source_format, allowed_domains=allowed,
+        )
     except url_fetch.UrlFetchError as exc:
         status = _URL_FETCH_ERROR_STATUS.get(type(exc), 502)
         logger.info(
@@ -848,16 +909,23 @@ def upload_material_from_url(
         )
         raise HTTPException(status_code=status, detail=str(exc)) from exc
 
-    return _accept_material_source(
+    fetched = resolved.fetched
+    result = _accept_material_source(
         source_bytes=fetched.content,
         filename=fetched.filename,
         source_kind=fetched.source_kind,
         analyze_images=body.analyze_images,
         models_option=models_option,
         current_user=current_user,
-        source_url=body.url,
+        # 実際にバイト列を返した URL を出所として記帳する（arXiv 以外は body.url そのもの）。
+        source_url=resolved.source_url,
         cartridge_id=cartridge_option,
+        language=body.language,
     )
+    payload = dict(result or {})
+    payload["effective_format"] = resolved.effective_format
+    payload["fell_back"] = bool(resolved.fell_back)
+    return payload
 
 
 class ReanalyzeRequest(BaseModel):
@@ -882,6 +950,10 @@ class ReanalyzeRequest(BaseModel):
     analyze_images: bool | None = None
     models: dict[str, str] | None = None
     cartridge_id: str | None = None
+    #: 生成物の言語（``ja`` / ``en``）。``None`` は前回 run の ``options.language`` を
+    #: 引き継ぐ（``models`` / ``analyze_images`` と同じ流儀）。空文字 ``""`` は
+    #: 「指定しない」への**解除**（``cartridge_id`` と同じ約束 — 2026-10-01 レビュー m6）。
+    language: Literal["ja", "en", ""] | None = None
 
 
 def _previous_run_options(document_id: str, material_id: str) -> dict:
@@ -979,6 +1051,17 @@ def reanalyze_document(
             detail="Document has no material_id; cannot fetch PDF for reanalysis",
         )
 
+    # 同じ教材の解析がこのプロセスで走っている間は重ねて起動しない（IK-0702）。
+    # resume は走行中の run を同じ run id で拾うため、重ねると旧スレッド（前回の分野・
+    # オプション）が並走し続け、run 行と LLM 呼び出しに前回の分野が残る。
+    with _material_lock:
+        _running = (_material_status.get(material_id) or {}).get("status") == "processing"
+    if _running:
+        raise HTTPException(
+            status_code=409,
+            detail="この教材の解析が実行中です。完了してから再解析してください。",
+        )
+
     filename_kind = _uploaded_source_kind(filename)
     object_candidates = []
     if filename_kind:
@@ -1030,6 +1113,7 @@ def reanalyze_document(
     models_option: dict | None = None
     if body is not None and body.models:
         models_option = _validate_models_option(body.models)
+    language_option = body.language if body is not None else None
 
     # 分野（提案 C1）: 明示があれば上書き（"" = 「指定しない」への解除）、無ければ
     # 前回 run の分野を引き継ぐ。継承値は env へフォールバックさせない
@@ -1045,7 +1129,7 @@ def reanalyze_document(
     # （レビュー指摘 J1: models 未指定 + analyze_images 明示のとき、前回 run の
     # `options.models` が黙って捨てられ、モーダルが「前回と同じ」と表示しながら
     # 実 run はモデル指定を失っていた。逆方向だけ温存されている非対称も解消する）。
-    if models_option is None and analyze_images is None:
+    if models_option is None and analyze_images is None and language_option is None:
         # どちらも未指定: options=None を渡し、orchestrator の「前回 run の options を
         # そのまま引き継ぐ」分岐に委ねる（従来どおり・DB 読み出しも増やさない）。
         options = None
@@ -1058,6 +1142,12 @@ def reanalyze_document(
         if models_option is not None:
             options["models"] = models_option
         # models 未指定なら前回 run の `models` はそのまま温存される（コピー済み）。
+        if language_option == "":
+            # 「指定しない」への解除: 前回 run の言語を持ち越さない（env → 既定で決まる）。
+            options.pop("language", None)
+        elif language_option is not None:
+            options["language"] = language_option
+        # language 未指定なら前回 run の `language` はそのまま温存される（コピー済み）。
 
     thread = threading.Thread(
         target=process_material_background,
@@ -1117,6 +1207,12 @@ def _material_reference_health(stage_outputs: dict | None) -> dict:
     snapshot = (stage_outputs or {}).get("reference_health")
     if not isinstance(snapshot, dict):
         return {"status": reference_health_core.STATUS_UNCHECKED}
+    # 2026-09-19 以前の「参照の切れはありません。」は検査対象が 6 種しか無かった頃の
+    # 記録で、層が空でも ok と言っていた。詳細 API と同じく再検査対象＝未確認として
+    # 出す（旧 ok を根拠に「壊れていない」と読ませない。再解析か「再確認」で更新される）。
+    facts = snapshot.get("facts")
+    if isinstance(facts, (list, tuple)) and reference_health_core.LEGACY_FACT_OK in facts:
+        return {"status": reference_health_core.STATUS_UNCHECKED}
     status = str(snapshot.get("status") or "").strip()
     if status not in (
         reference_health_core.STATUS_OK,
@@ -1129,6 +1225,88 @@ def _material_reference_health(stage_outputs: dict | None) -> dict:
     if checked_at:
         projected["checked_at"] = checked_at
     return projected
+
+
+def _material_analysis_degradation(stage_outputs: dict | None) -> dict:
+    """run の ``stage_outputs`` から教材行用の縮退の投影 ``{status, facts}`` を作る（IK-0715）。
+
+    完了時に orchestrator が書いた ``stage_outputs.analysis_degradation`` を優先し、
+    それが無い旧 run でも ``llm_failures`` / ``component_assembly`` の完了ペイロードから
+    縮退が見つかれば ``degraded``。何も確かめられなければ ``unchecked``（行には出さない）。
+    判定は ``core.analysis_degradation`` の 1 関数だけが持つ（面ごとに判定を書かない）。
+    """
+    summary = analysis_degradation_core.summarize_run_degradation(stage_outputs or {})
+    return analysis_degradation_core.public_view(summary)
+
+
+def _material_visibility_clauses(user_groups: list, params: dict) -> tuple[str, str, str]:
+    """教材一覧・詳細（list_materials / get_material）が共有する可視性の 3 条件。
+
+    返すのは ``(group_clause, course_mat_clause, doc_perm_clause)``。グループのプレースホルダ
+    （``:g_{i}``）は ``params`` に足す。コース経由の開示は ``sources[].material_id`` が
+    source_path 形でも documents.id（UUID）形でも同じ教材に効かせる
+    （``services.list_visible_document_ids`` と同じ両形の意味論・IK-0550）。
+    """
+    if not user_groups:
+        return "FALSE", "FALSE", "FALSE"
+    gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
+    for i, gid in enumerate(user_groups):
+        params[f"g_{i}"] = gid
+    group_clause = f"(d.visibility = 'group' AND d.group_id IN ({gph}))"
+    course_source_refs = f"""
+        SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
+        FROM learning_courses lc
+        JOIN object_group_permissions cgp
+            ON cgp.object_type = 'course' AND cgp.object_id = lc.id
+        JOIN group_members gm ON gm.group_id = cgp.group_id
+        WHERE gm.user_id = CAST(:user_id AS uuid)
+          AND cgp.group_id IN ({gph})
+          AND cgp.permission IN ('viewer', 'editor')
+          AND lc.data IS NOT NULL
+          AND jsonb_typeof(lc.data->'sources') = 'array'
+    """
+    course_mat_clause = (
+        f"(d.source_path IN ({course_source_refs}) OR d.id::text IN ({course_source_refs}))"
+    )
+    # migration 044: 解析成果をグループへ直接共有（object_group_permissions object_type='document' 経由）
+    doc_perm_clause = f"""
+        d.id::text IN (
+            SELECT dgp.object_id
+            FROM object_group_permissions dgp
+            JOIN group_members gm ON gm.group_id = dgp.group_id
+            WHERE dgp.object_type = 'document'
+              AND gm.user_id = CAST(:user_id AS uuid)
+              AND dgp.group_id IN ({gph})
+              AND dgp.permission IN ('viewer', 'editor')
+        )
+    """
+    return group_clause, course_mat_clause, doc_perm_clause
+
+
+def _material_role_fields(record, current_user: dict) -> dict:
+    """教材一覧の行の役割（IK-0974）。判定は ``user_can_edit_document`` と同じ条件
+    （所有者 / document の editor 共有 / SYSTEM_ADMIN は台帳の記帳と同じく編集可）を一括で読む。
+    行が古い形（列が無い）なら何も足さない（fail-soft）。
+    """
+    try:
+        is_owner = bool(record[13])
+        is_editor = bool(record[14])
+        owner_name = str(record[15] or "").strip()
+    except (IndexError, TypeError):
+        return {}
+    if is_owner:
+        role = "owner"
+    elif is_editor or current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        role = "editor"
+    else:
+        role = "viewer"
+    out = {"role": role, "role_label": MATERIAL_ROLE_LABELS.get(role, "")}
+    if role == "viewer":
+        out["edit_request_note"] = (
+            MATERIAL_EDIT_REQUEST_TEMPLATE.format(owner=owner_name)
+            if owner_name else MATERIAL_EDIT_REQUEST_UNKNOWN
+        )
+    return out
 
 
 @router.get("/materials", response_model=list[MaterialOut])
@@ -1152,41 +1330,9 @@ def list_materials(
     user_groups = get_user_group_ids(current_user["id"])
 
     params: dict = {"user_id": current_user["id"]}
-    group_clause = "FALSE"
-    course_mat_clause = "FALSE"
-    doc_perm_clause = "FALSE"
-
-    if user_groups:
-        gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
-        for i, gid in enumerate(user_groups):
-            params[f"g_{i}"] = gid
-        group_clause = f"(d.visibility = 'group' AND d.group_id IN ({gph}))"
-        course_mat_clause = f"""
-            d.source_path IN (
-                SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
-                FROM learning_courses lc
-                JOIN object_group_permissions cgp
-                    ON cgp.object_type = 'course' AND cgp.object_id = lc.id
-                JOIN group_members gm ON gm.group_id = cgp.group_id
-                WHERE gm.user_id = CAST(:user_id AS uuid)
-                  AND cgp.group_id IN ({gph})
-                  AND cgp.permission IN ('viewer', 'editor')
-                  AND lc.data IS NOT NULL
-                  AND jsonb_typeof(lc.data->'sources') = 'array'
-            )
-        """
-        # migration 044: 解析成果をグループへ直接共有（object_group_permissions object_type='document' 経由）
-        doc_perm_clause = f"""
-            d.id::text IN (
-                SELECT dgp.object_id
-                FROM object_group_permissions dgp
-                JOIN group_members gm ON gm.group_id = dgp.group_id
-                WHERE dgp.object_type = 'document'
-                  AND gm.user_id = CAST(:user_id AS uuid)
-                  AND dgp.group_id IN ({gph})
-                  AND dgp.permission IN ('viewer', 'editor')
-            )
-        """
+    group_clause, course_mat_clause, doc_perm_clause = _material_visibility_clauses(
+        user_groups, params
+    )
 
     session = _pg_session()
     try:
@@ -1196,8 +1342,18 @@ def list_materials(
                        COALESCE(d.visibility, 'private'), d.group_id,
                        COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count,
                        d.id::text AS document_id,
-                       COALESCE(d.authors, '{{}}') AS authors, d.year, d.doc_type
+                       COALESCE(d.authors, '{{}}') AS authors, d.year, d.doc_type,
+                       (d.uploaded_by = CAST(:user_id AS uuid)) AS is_owner,
+                       EXISTS (
+                           SELECT 1 FROM object_group_permissions rp
+                           JOIN group_members rgm ON rgm.group_id = rp.group_id
+                           WHERE rp.object_type = 'document' AND rp.permission = 'editor'
+                             AND rp.object_id = d.id::text
+                             AND rgm.user_id = CAST(:user_id AS uuid)
+                       ) AS is_editor,
+                       COALESCE(NULLIF(BTRIM(owner_u.profile_name), ''), '') AS owner_name
                 FROM documents d
+                LEFT JOIN users owner_u ON owner_u.id = d.uploaded_by
                 LEFT JOIN (
                     SELECT material_id, COUNT(*) AS chunk_count
                     FROM chunks
@@ -1342,6 +1498,8 @@ def list_materials(
         # 最新 run に残った**検査時点の事実**から状態と時刻だけを投影する（facts /
         # details は行に出さない = T-3）。run が無い / 事実が無い教材は「未確認」。
         reference_health = _material_reference_health(stage_outputs)
+        # 解析の縮退（IK-0715）: AI の応答が得られず決定論の代替で作られた段の事実。
+        analysis_degradation = _material_analysis_degradation(stage_outputs)
 
         # Tier3-16: run の有無・状態からの status 合成は projector に一本化する
         # （get_material と同一ロジック。一覧と詳細の status を一致させる）。
@@ -1398,6 +1556,7 @@ def list_materials(
                         section_outline.append(str(sec_title))
 
         uploaded_at = r[4].isoformat() if r[4] else ""
+        role_fields = _material_role_fields(r, current_user)
         materials.append(MaterialOut(
             material_id=mid,
             document_id=r[9],
@@ -1423,6 +1582,8 @@ def list_materials(
                 str(run_data.get("cartridge_id") or "") if run else None
             ),
             reference_health=reference_health,
+            analysis_degradation=analysis_degradation,
+            **role_fields,
             authors=authors,
             year=year,
             doc_type=doc_type,
@@ -1432,9 +1593,27 @@ def list_materials(
             top_concepts=top_concepts[:6],
             section_outline=section_outline,
             has_course=has_course,
+            format_label=_material_format_label(r[1]),
         ))
 
     return materials
+
+
+
+def _material_has_source_object(material_id: str) -> bool:
+    """原本（PDF / TeX 束）が MinIO にあるか。一覧側の existing_pdf_ids と同じ判定を 1 件に絞って行う。
+
+    MinIO 不達は False（一覧と同じ縮退）。
+    """
+    if not material_id:
+        return False
+    try:
+        for obj_name in get_storage_client().list_objects("raw-papers", f"uploads/{material_id}"):
+            if obj_name in (f"uploads/{material_id}.pdf", f"uploads/{material_id}.tar.gz", f"uploads/{material_id}.tgz"):
+                return True
+    except Exception:  # noqa: BLE001 — 一覧側と同じく MinIO 不達は has_pdf=False
+        return False
+    return False
 
 
 @router.get("/materials/{material_id}", response_model=MaterialOut)
@@ -1449,67 +1628,46 @@ def get_material(
     user_groups = get_user_group_ids(current_user["id"])
 
     params: dict = {"user_id": current_user["id"], "material_id": material_id}
-    group_clause = "FALSE"
-    course_mat_clause = "FALSE"
-    doc_perm_clause = "FALSE"
-
-    if user_groups:
-        gph = ", ".join(f"CAST(:g_{i} AS uuid)" for i in range(len(user_groups)))
-        for i, gid in enumerate(user_groups):
-            params[f"g_{i}"] = gid
-        group_clause = f"(d.visibility = 'group' AND d.group_id IN ({gph}))"
-        course_mat_clause = f"""
-            d.source_path IN (
-                SELECT (jsonb_array_elements(lc.data->'sources')->>'material_id')
-                FROM learning_courses lc
-                JOIN object_group_permissions cgp
-                    ON cgp.object_type = 'course' AND cgp.object_id = lc.id
-                JOIN group_members gm ON gm.group_id = cgp.group_id
-                WHERE gm.user_id = CAST(:user_id AS uuid)
-                  AND cgp.group_id IN ({gph})
-                  AND cgp.permission IN ('viewer', 'editor')
-                  AND lc.data IS NOT NULL
-                  AND jsonb_typeof(lc.data->'sources') = 'array'
-            )
-        """
-        # migration 044: 解析成果のグループ直接共有（object_group_permissions object_type='document' 経由）
-        doc_perm_clause = f"""
-            d.id::text IN (
-                SELECT dgp.object_id
-                FROM object_group_permissions dgp
-                JOIN group_members gm ON gm.group_id = dgp.group_id
-                WHERE dgp.object_type = 'document'
-                  AND gm.user_id = CAST(:user_id AS uuid)
-                  AND dgp.group_id IN ({gph})
-                  AND dgp.permission IN ('viewer', 'editor')
-            )
-        """
+    group_clause, course_mat_clause, doc_perm_clause = _material_visibility_clauses(
+        user_groups, params
+    )
 
     session = _pg_session()
     try:
-        record = session.execute(
-            sa_text(f"""
-                SELECT d.source_path, d.filename, d.title, d.status, d.created_at, d.knowledge_graph,
-                       COALESCE(d.visibility, 'private'), d.group_id,
-                       COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count
-                FROM documents d
-                LEFT JOIN (
-                    SELECT material_id, COUNT(*) AS chunk_count
-                    FROM chunks
-                    GROUP BY material_id
-                ) cs ON cs.material_id = d.source_path
-                WHERE d.source_path = :material_id
-                  AND (
-                      d.uploaded_by = CAST(:user_id AS uuid)
-                      OR d.visibility = 'public'
-                      OR {group_clause}
-                      OR {course_mat_clause}
-                      OR {doc_perm_clause}
-                  )
-                LIMIT 1
-            """),
-            params,
-        ).fetchone()
+        # 教材一覧の document_id（UUID）でも開けるよう、両形の突き合わせは core/document_refs に
+        # 委ね（IK-0550・第 15 周 te-04 seq25: 一覧の ID で詳細が 404 になった）、可視性の判定は
+        # 解決した documents.id 1 行に対して行う。
+        resolved = _document_refs.resolve_document_row(session, material_id)
+        record = None
+        if resolved:
+            params["document_id"] = resolved["document_id"]
+            record = session.execute(
+                sa_text(f"""
+                    SELECT d.source_path, d.filename, d.title, d.status, d.created_at, d.knowledge_graph,
+                           COALESCE(d.visibility, 'private'), d.group_id,
+                           COALESCE(d.chunk_count, cs.chunk_count, 0) AS chunk_count,
+                           d.id::text AS document_id
+                    FROM documents d
+                    LEFT JOIN (
+                        SELECT material_id, COUNT(*) AS chunk_count
+                        FROM chunks
+                        GROUP BY material_id
+                    ) cs ON cs.material_id = d.source_path
+                    WHERE d.id = CAST(:document_id AS uuid)
+                      AND (
+                          d.uploaded_by = CAST(:user_id AS uuid)
+                          OR d.visibility = 'public'
+                          OR {group_clause}
+                          OR {course_mat_clause}
+                          OR {doc_perm_clause}
+                      )
+                    LIMIT 1
+                """),
+                params,
+            ).fetchone()
+        # 以降は material_id（source_path）に揃える（_material_status のキー・応答の形は不変）。
+        if record and record[0]:
+            material_id = str(record[0])
         # Tier3-16: list_materials と同じ projector 導出で run を反映する
         # （従来 get_material は run を一切見ておらず、一覧と詳細の status が
         # 食い違うバグがあった。同一セッション内で1回だけ追加で投影する）。
@@ -1518,7 +1676,10 @@ def get_material(
         session.close()
 
     if not record:
-        raise HTTPException(status_code=404, detail="Material not found")
+        raise HTTPException(
+            status_code=404,
+            detail="指定された教材が見つからないか、閲覧できる教材ではありません。",
+        )
 
     kg = record[5] if record[5] else None
 
@@ -1534,6 +1695,9 @@ def get_material(
     uploaded_at = record[4].isoformat() if record[4] else ""
     return MaterialOut(
         material_id=record[0] or "",
+        # 一覧（list_materials）と同じく document_id / has_pdf を返す（IK-0361 / IK-0367: 詳細だけ欠けていた）
+        document_id=(str(record[9]) if len(record) > 9 and record[9] else None),
+        has_pdf=_material_has_source_object(record[0] or ""),
         filename=record[1] or "",
         title=record[2] or "",
         status=status,
@@ -1542,7 +1706,18 @@ def get_material(
         knowledge_graph=kg,
         visibility=record[6] or "private",
         group_id=str(record[7]) if record[7] else None,
+        format_label=_material_format_label(record[1]),
     )
+
+
+def _material_format_label(filename: object) -> str:
+    """教材の取り込み元の形式（``TeX 版`` / ``PDF 版`` / 空文字・第 10 波 IK-0956 の面）。fail-soft。"""
+    try:
+        from core.deliberation.identity_links import document_format_label
+
+        return document_format_label(filename)
+    except Exception:  # noqa: BLE001 — 見出しの補助（言えなければ言わない）
+        return ""
 
 
 @router.get("/materials/{material_id}/pdf")
@@ -1687,16 +1862,23 @@ def update_material_visibility(
 
     session = _pg_session()
     try:
+        # 一覧の document_id（UUID）でも material_id でも同じ教材に着地させる（IK-0550）。
+        # 両形の突き合わせは core/document_refs に委ね、以降は documents.id 1 行で判定する。
+        resolved = _document_refs.resolve_document_row(session, material_id)
+        if not resolved:
+            raise HTTPException(status_code=404, detail="Material not found")
+        if resolved.get("material_id"):
+            material_id = resolved["material_id"]
         # 旧 visibility は監査記帳のために同一トランザクション内で読む
         # （どこから どこへ 開いたかを記録するため。UPDATE の 404 判定は不変）。
         previous = session.execute(
             sa_text("""
                 SELECT COALESCE(visibility, 'private')
                 FROM documents
-                WHERE source_path = :material_id
+                WHERE id = CAST(:document_id AS uuid)
                   AND uploaded_by = CAST(:user_id AS uuid)
             """),
-            {"material_id": material_id, "user_id": current_user["id"]},
+            {"document_id": resolved["document_id"], "user_id": current_user["id"]},
         ).fetchone()
         result = session.execute(
             sa_text("""
@@ -1704,18 +1886,20 @@ def update_material_visibility(
                 SET visibility = :visibility,
                     group_id = CAST(:group_id AS uuid),
                     updated_at = now()
-                WHERE source_path = :material_id
+                WHERE id = CAST(:document_id AS uuid)
                   AND uploaded_by = CAST(:user_id AS uuid)
                 RETURNING id
             """),
             {
                 "visibility": body.visibility,
                 "group_id": body.group_id if body.visibility == "group" else None,
-                "material_id": material_id,
+                "document_id": resolved["document_id"],
                 "user_id": current_user["id"],
             },
         ).fetchone()
         session.commit()
+    except HTTPException:
+        raise
     except Exception:
         session.rollback()
         raise
@@ -1793,7 +1977,7 @@ def update_course_visibility(
                     is_template = CASE WHEN :visibility = 'public' THEN true ELSE is_template END,
                     updated_at = now()
                 WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
-                RETURNING id
+                RETURNING id, data
             """),
             {
                 "visibility": body.visibility,
@@ -1860,7 +2044,28 @@ def update_course_visibility(
         "course_id": course_id,
         "visibility": body.visibility,
         "group_id": body.group_id if body.visibility == "group" else None,
+        # IK-0947: 学習者へ開いた（public / group）のに本文の無いトピックが残るなら、その事実文。
+        "readiness_note": (
+            _course_empty_topics_note(result[1] if len(tuple(result)) > 1 else None)
+            if body.visibility in ("public", "group") else ""
+        ),
     }
+
+
+def _course_empty_topics_note(data_raw) -> str:
+    """コースに本文の無いトピックがあれば公開時の事実文を返す（IK-0947・件数なし）。"""
+    from core.course_data import iter_all_topics
+    from core.label_vocab import COURSE_PUBLISHED_WITH_EMPTY_TOPICS_NOTICE
+    from core.lecture import topic_student_material
+
+    try:
+        data = data_raw if isinstance(data_raw, dict) else json.loads(data_raw or "{}")
+        for topic in iter_all_topics(data):
+            if not str(topic_student_material(topic) or "").strip():
+                return COURSE_PUBLISHED_WITH_EMPTY_TOPICS_NOTICE
+    except Exception:  # noqa: BLE001 — 事実文が付かないだけ（公開は止めない）
+        logger.warning("empty-topic check failed on publish", exc_info=True)
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1917,17 +2122,23 @@ def delete_material(
     """
     session = _pg_session()
     try:
-        # 1) 教材の存在確認 & タイトル照合
-        doc = session.execute(
-            sa_text("""
-                SELECT id, title, filename, source_path
-                FROM documents
-                WHERE source_path = :material_id
-                  AND uploaded_by = CAST(:user_id AS uuid)
-                LIMIT 1
-            """),
-            {"material_id": material_id, "user_id": current_user["id"]},
-        ).fetchone()
+        # 1) 教材の存在確認 & タイトル照合。一覧の document_id（UUID）でも material_id でも
+        #    同じ教材に着地させる（両形の突き合わせは core/document_refs・IK-0550）。
+        resolved = _document_refs.resolve_document_row(session, material_id)
+        doc = None
+        if resolved:
+            if resolved.get("material_id"):
+                material_id = resolved["material_id"]
+            doc = session.execute(
+                sa_text("""
+                    SELECT id, title, filename, source_path
+                    FROM documents
+                    WHERE id = CAST(:document_id AS uuid)
+                      AND uploaded_by = CAST(:user_id AS uuid)
+                    LIMIT 1
+                """),
+                {"document_id": resolved["document_id"], "user_id": current_user["id"]},
+            ).fetchone()
 
         if not doc:
             raise HTTPException(status_code=404, detail="Material not found")
@@ -2095,6 +2306,9 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
   - 1つのトピックには 1〜3 個の handle を選ぶ。適切な候補が無ければ空配列 [] にする
   - 同じ handle を複数のトピックに置いてよい（同じ単位を別の角度から扱う場合）
   - 候補区画そのものが無い場合は units を空配列 [] にする
+  - handle は JSON の units にだけ書く。回答本文（区切り文字より前の文章）では handle（U1 等）を書かず、単位の名前で言う
+- 回答本文で式に触れるときは、教材コンテキストに添えた印字番号（「式 (12)」）か式の短い原文で言う。Component ID・Claim ID などの番地は回答本文に書かない
+- コースタイトル・章タイトル・トピック名には数式の記法（`\\alpha` のようなバックスラッシュの命令、`c_s^2` のような添字・べき、`$…$`）を書かない。題名は学生の画面で素の文字列として表示されるので、記号は言葉で言う（例: 「有効音速の2乗」「μ が 1 を超える領域」）
 - domain フィールドは教材の分野情報（コンポーネントや旧ナレッジグラフの「**分野:**」）から引き継ぐこと
   - 教材の分野情報がなければ、コースの内容を踏まえて適切な専門分野名を設定する
 - sources フィールドは常に空配列 [] のままにすること（教材はシステムが自動的に設定する）"""
@@ -2153,12 +2367,164 @@ _MAX_GRAPH_EDGES_PER_MATERIAL = 80
 _MAX_CONCEPT_TERMS_PER_MATERIAL = 12
 
 
+def _graph_edge_endpoint(edge: dict, *keys: str) -> str:
+    for key in keys:
+        value = edge.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _component_dependency_lines(
+    graph_json: dict,
+    *,
+    component_names: dict[str, str] | None = None,
+    limit: int = _MAX_GRAPH_EDGES_PER_MATERIAL,
+) -> list[str]:
+    """理論操作グラフの辺を「名前 (ID) -> 名前 (ID)」の行にする（IK-0379）。
+
+    - 端点は保存形 ``source_component_id`` / ``target_component_id`` を先に読み、
+      旧形・テスト形の ``source`` / ``from`` / ``target`` / ``to`` へ落とす。
+    - 名前はグラフ自身のノード（``display_label`` → ``label``）→ theory_components の
+      ``name`` の順で引く。名前が引けなければ ID だけを書く（推測で埋めない）。
+    - 両端のどちらかが空のままの辺は行にしない。
+    """
+    if not isinstance(graph_json, dict):
+        return []
+    names: dict[str, str] = {
+        str(k): str(v).strip()
+        for k, v in (component_names or {}).items()
+        if k and v and str(v).strip()
+    }
+    for node in graph_json.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        label = _graph_edge_endpoint(node, "display_label", "label", "name")
+        if not label:
+            continue
+        for key in ("component_id", "id", "agent_component_id"):
+            node_id = node.get(key)
+            if node_id and str(node_id).strip():
+                names.setdefault(str(node_id).strip(), label)
+
+    def render(endpoint_id: str) -> str:
+        name = names.get(endpoint_id, "")
+        if name and name != endpoint_id:
+            return f"{name} ({endpoint_id})"
+        return endpoint_id
+
+    lines: list[str] = []
+    for edge in graph_json.get("edges") or []:
+        if len(lines) >= limit:
+            break
+        if not isinstance(edge, dict):
+            continue
+        src = _graph_edge_endpoint(edge, "source_component_id", "source", "from")
+        tgt = _graph_edge_endpoint(edge, "target_component_id", "target", "to")
+        if not src or not tgt:
+            continue
+        etype = _graph_edge_endpoint(edge, "type", "relation", "edge_type")
+        evidence = edge.get("evidence") if isinstance(edge.get("evidence"), dict) else {}
+        reason = _graph_edge_endpoint(edge, "reason", "label") or _graph_edge_endpoint(
+            evidence, "reason"
+        )
+        line = f"- {render(src)} -> {render(tgt)}"
+        if etype:
+            line += f"  (Type: {etype})"
+        if reason:
+            line += f"  Reason: {reason}"
+        lines.append(line)
+    return lines
+
+
+_UNIT_HANDLE_IN_TEXT_RE = re.compile(r"(?<![A-Za-z0-9_])U(\d+)(?![A-Za-z0-9_])")
+
+
+def _replace_unit_handles_in_answer(answer: str, candidates: list | None) -> str:
+    """回答本文の handle（``U141``）を候補表の名前「…」へ置き換える（IK-0883）。
+
+    候補表に無い ``U\\d+`` は触らない（単位以外の語かもしれない）。JSON（区切り文字以降）は
+    ``_extract_course_draft_from_answer`` が既に外した後の本文だけに掛ける。
+    """
+    if not answer or not candidates:
+        return answer
+    names: dict[str, str] = {}
+    for candidate in candidates:
+        handle = str(getattr(candidate, "handle", "") or "").strip().upper()
+        label = str(getattr(candidate, "label", "") or "").strip()
+        if handle and label:
+            names[handle] = label
+
+    def _sub(match: "re.Match[str]") -> str:
+        label = names.get(f"U{match.group(1)}")
+        return f"「{label}」" if label else match.group(0)
+
+    return _UNIT_HANDLE_IN_TEXT_RE.sub(_sub, answer)
+
+
+#: 教材コンテキストの式の短い原文の上限（IK-0883）。
+_MATERIAL_EQUATION_SNIPPET_MAX = 60
+
+
+def _material_equation_names(analysis_run: dict | None) -> dict[str, str]:
+    """``equation_id`` → 「式 (12)」/「式 (12) `a=b`」/ 短い原文（教材コンテキスト用・IK-0883）。
+
+    印字番号も短い原文も無い式は載せない（内部 ID を名前に使わない）。取れなければ空（fail-soft）。
+    """
+    from core.course_content_builder import _equation_printed_label, is_tex_label_key
+
+    try:
+        stage_outputs = (analysis_run or {}).get("stage_outputs") or {}
+        payload = (stage_outputs.get("_artifacts") or {}).get("equation_semantics") or {}
+        records = payload.get("records") or payload.get("equations") or []
+    except Exception:  # noqa: BLE001
+        return {}
+    names: dict[str, str] = {}
+    for record in records if isinstance(records, list) else []:
+        if not isinstance(record, dict) or not record.get("equation_id"):
+            continue
+        printed = _equation_printed_label(record)
+        body = ""
+        for key in ("latex", "latex_canonical", "raw_text", "text"):
+            value = " ".join(str(record.get(key) or "").split())
+            if value and len(value) <= _MATERIAL_EQUATION_SNIPPET_MAX and not is_tex_label_key(value):
+                body = value
+                break
+        if printed and body:
+            names[str(record["equation_id"])] = f"{printed} `{body}`"
+        elif printed or body:
+            names[str(record["equation_id"])] = printed or f"`{body}`"
+    return names
+
+
+def _material_field_text(values: list, equation_names: dict[str, str]) -> str:
+    """部品の属性（ComponentFieldRef の列）を本文だけの文に（IK-0883）。"""
+    parts: list[str] = []
+    for value in values or []:
+        if isinstance(value, dict):
+            text = str(value.get("text") or value.get("label") or value.get("name") or "").strip()
+            eq_names = [
+                equation_names[str(eq_id)]
+                for eq_id in (value.get("equation_ids") or [])
+                if str(eq_id) in equation_names
+            ]
+            if eq_names:
+                joined = "、".join(dict.fromkeys(eq_names))
+                text = f"{text}（{joined}）" if text else joined
+        else:
+            text = str(value or "").strip()
+        if text:
+            parts.append(text)
+    return "・".join(parts)
+
+
 def _build_material_context(
     material_ids: list[str],
     pg_session_factory=None,
     *,
     user_id: str | None = None,
     unit_candidates_out: list | None = None,
+    unit_candidate_objects_out: list | None = None,
 ) -> str | None:
     """選択された教材のAgent解析済み理論コンポーネントを主入力としてコンテキスト文字列を構築する。
 
@@ -2174,6 +2540,10 @@ def _build_material_context(
     ``unit_candidates_out`` を渡すと、そこに「学ぶ単位」の候補
     （``{"handle", "kind", "kind_label", "label"}``）を追記する。戻り値の型は
     変えない（呼び出し面・パッチ面を保つ）。
+
+    ``unit_candidate_objects_out`` を渡すと、同じ候補表を ``UnitCandidate`` のまま
+    追記する（IK-0371: 草案に handle → 参照キーの対応表を同梱するための材料。
+    プレビュー用の ``unit_candidates_out`` の形は変えない）。
 
     Returns None if no usable context could be built.
     """
@@ -2354,6 +2724,7 @@ def _build_material_context(
             )
 
         # ---- 主入力: 理論コンポーネント ----
+        doc_equation_names = _material_equation_names(analysis_run)
         if doc_components:
             sections.append("#### 理論コンポーネント")
             for comp in doc_components[:_MAX_COMPONENTS_PER_MATERIAL]:
@@ -2374,14 +2745,17 @@ def _build_material_context(
                     lines.append(f"  Type: {ctype}")
                 if summary:
                     lines.append(f"  Summary: {summary}")
-                if inputs:
-                    lines.append(f"  Inputs: {', '.join(str(x) for x in inputs[:5])}")
-                if outputs:
-                    lines.append(f"  Outputs: {', '.join(str(x) for x in outputs[:5])}")
-                if preconditions:
-                    lines.append(f"  Preconditions: {', '.join(str(x) for x in preconditions[:5])}")
-                if cautions:
-                    lines.append(f"  Cautions: {', '.join(str(x) for x in cautions[:3])}")
+                # IK-0883: 属性は本文（text）だけを「・」で並べ、式は印字番号と短い原文で
+                # 添える（Python の辞書表記・claim_ids / equation_ids の内部 ID を材料にしない）。
+                for field_label, values, limit in (
+                    ("Inputs", inputs, 5),
+                    ("Outputs", outputs, 5),
+                    ("Preconditions", preconditions, 5),
+                    ("Cautions", cautions, 3),
+                ):
+                    field_text = _material_field_text(values[:limit], doc_equation_names)
+                    if field_text:
+                        lines.append(f"  {field_label}: {field_text}")
                 if review:
                     lines.append(f"  Review: {review}")
                 if maturity:
@@ -2391,22 +2765,17 @@ def _build_material_context(
         # ---- 主入力: コンポーネント依存関係グラフ ----
         if doc_graphs:
             graph_json = doc_graphs[0][1] if isinstance(doc_graphs[0][1], dict) else {}
-            edges = graph_json.get("edges", [])
-            if edges:
+            # IK-0379: 端点は保存形（``source_component_id`` / ``target_component_id``。
+            # persistence.persist_component_graph）から読み、名前へ解決する。端点が
+            # 空のまま残る辺は行にしない（``-  ->   (Type: derives)`` を渡さない）。
+            dependency_lines = _component_dependency_lines(
+                graph_json,
+                component_names={str(c[0]): str(c[2] or "") for c in doc_components},
+                limit=_MAX_GRAPH_EDGES_PER_MATERIAL,
+            )
+            if dependency_lines:
                 sections.append("#### コンポーネント依存関係")
-                for edge in edges[:_MAX_GRAPH_EDGES_PER_MATERIAL]:
-                    if not isinstance(edge, dict):
-                        continue
-                    src = edge.get("source", edge.get("from", ""))
-                    tgt = edge.get("target", edge.get("to", ""))
-                    etype = edge.get("type", edge.get("relation", ""))
-                    reason = edge.get("reason", edge.get("label", ""))
-                    line = f"- {src} -> {tgt}"
-                    if etype:
-                        line += f"  (Type: {etype})"
-                    if reason:
-                        line += f"  Reason: {reason}"
-                    sections.append(line)
+                sections.extend(dependency_lines)
 
         # ---- 補助入力: 根拠Claim ----
         doc_claims = [r for r in claim_rows if r[1] == doc_uuid]
@@ -2524,6 +2893,8 @@ def _build_material_context(
     # 候補表（handle → 種別・名前）を呼び出し側へ返す。プレビューで ``U3`` ではなく
     # 単位の名前を出すための材料（P2-R10）。数値（件数・order_index・confidence）は
     # 載せない（LU5）。表示テキストは untrusted 由来なので制御シーケンスを落とす。
+    if unit_candidate_objects_out is not None:
+        unit_candidate_objects_out.extend(unit_candidates)
     if unit_candidates_out is not None:
         for candidate in unit_candidates:
             unit_candidates_out.append({
@@ -2561,6 +2932,105 @@ _COURSE_BUILDER_DEGRADED_MESSAGE = (
     "AI 応答を生成できませんでした。しばらくしてからもう一度お試しください。"
 )
 
+# IK-0365: 提供元の利用上限・残高切れは待っても直らない（恒常的な失敗）。教員向けの
+# コースビルダーだけ、取るべき行動（管理者に知らせる）が分かる事実文に分ける。
+# 数値・提供元の生メッセージ・URL は載せない。学習者向けの文面は変えない。
+_COURSE_BUILDER_PROVIDER_QUOTA_MESSAGE = (
+    "AI 提供元の利用上限または残高の制限で応答を生成できませんでした。"
+    "システム管理者に提供元の設定・残高の確認を依頼してください。"
+)
+
+#: 提供元の利用上限・残高切れを示すメッセージ断片（小文字で照合）。
+_PROVIDER_QUOTA_MESSAGE_MARKERS = ("insufficient_quota", "credit", "billing")
+
+
+def _is_provider_quota_error(exc: BaseException | None) -> bool:
+    """LLM 提供元の利用上限・残高切れによる失敗か（IK-0365）。
+
+    判定は例外の型名に ``RateLimit`` を含むか、メッセージに
+    ``insufficient_quota`` / ``credit`` / ``billing`` を含むか。``core.llm`` が包んで
+    投げ直す場合に備え、``__cause__`` / ``__context__`` を数段たどる。判定材料の
+    生メッセージは画面へ出さない（呼び出し側は固定の事実文を返す）。
+    """
+    seen: set[int] = set()
+    current = exc
+    depth = 0
+    while current is not None and depth < 6 and id(current) not in seen:
+        seen.add(id(current))
+        if "ratelimit" in type(current).__name__.lower():
+            return True
+        try:
+            message = str(current).lower()
+        except Exception:  # noqa: BLE001 — str() が落ちる例外は判定材料にしない
+            message = ""
+        if any(marker in message for marker in _PROVIDER_QUOTA_MESSAGE_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+        depth += 1
+    return False
+
+
+def _course_builder_degraded_message(exc: BaseException | None) -> str:
+    """コースビルダーの縮退文（失敗の種類で分ける。IK-0365）。"""
+    if _is_provider_quota_error(exc):
+        return _COURSE_BUILDER_PROVIDER_QUOTA_MESSAGE
+    return _COURSE_BUILDER_DEGRADED_MESSAGE
+
+
+def _attach_unit_identity_to_draft(course_draft: dict, candidates: list) -> None:
+    """草案に「このターンの候補表」の handle → 参照キーを同梱する（IK-0371）。
+
+    handle（``U3``）はこのターンの教材集合を並べた候補表の位置で、登録時の sources が
+    違うと別の単位を指す。そこで ①``course_draft["unit_candidate_keys"]`` に対応表を置き
+    ②``chapters[].topics[].units``（と ``topics[].units``）の handle を、このターンの
+    候補表で引けるものだけ ``{"handle", "stable_key"}`` に直す。引けない handle は文字列の
+    まま残す（参照キーを作らない = 捏造ガード）。LLM が履歴から写した
+    ``unit_candidate_keys`` は信用せず、サーバの候補表で上書きする（候補表が無いターンは
+    キーごと外す）。入力 dict をその場で更新する。
+    """
+    course_draft.pop("unit_candidate_keys", None)
+    if not candidates:
+        return
+    course_draft["unit_candidate_keys"] = candidate_key_table(candidates)
+
+    def _normalize_topics(topics: object) -> None:
+        if not isinstance(topics, list):
+            return
+        for topic in topics:
+            if isinstance(topic, dict) and isinstance(topic.get("units"), list):
+                topic["units"] = normalize_draft_unit_refs(candidates, topic["units"])
+
+    chapters = course_draft.get("chapters")
+    if isinstance(chapters, list):
+        for chapter in chapters:
+            if isinstance(chapter, dict):
+                _normalize_topics(chapter.get("topics"))
+    _normalize_topics(course_draft.get("topics"))
+
+
+def _canonical_selected_material_ids(refs: list[str]) -> list[str]:
+    """選択教材の ref（material_id / documents.id の混在可）を material_id の並びへ揃える。
+
+    解決は ``core.document_refs``（両形の突き合わせの正本）に委ねる。解決できない ref は
+    元の値のまま残す（後段の可視性ゲート・存在確認がそのまま効く。DB 不達でも従来どおり）。
+    """
+    try:
+        session = _pg_session()
+        try:
+            resolved = _document_refs.resolve_document_refs(session, refs)
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — fail-soft（従来の値で続ける）
+        logger.warning("course builder: material ref canonicalization failed", exc_info=True)
+        return list(refs)
+    out: list[str] = []
+    for ref in refs:
+        text = str(ref or "").strip()
+        material_id = (resolved.get(text) or {}).get("material_id") or text
+        if material_id and material_id not in out:
+            out.append(material_id)
+    return out
+
 
 @router.post(
     "/course-builder/chat",
@@ -2595,14 +3065,22 @@ def course_builder_chat(
         {"role": "system", "content": _COURSE_BUILDER_SYSTEM_PROMPT},
     ]
 
+    # 選択教材は material_id（source_path）でも documents.id（教材一覧の document_id）でも
+    # 受ける。以降の経路は source_path を前提に書かれているので、ここで1回だけ揃える
+    # （IK-0550: documents.id で選ぶと教材コンテキストも sources も空になっていた）。
+    if body.selected_material_ids:
+        body.selected_material_ids = _canonical_selected_material_ids(body.selected_material_ids)
+
     # 選択教材のナレッジグラフ・チャンクテキストを含む詳細コンテキストを注入
     unit_candidates_out: list[dict] = []
+    unit_candidate_objects: list = []
     if body.selected_material_ids:
         try:
             material_context = _build_material_context(
                 body.selected_material_ids,
                 user_id=current_user["id"],
                 unit_candidates_out=unit_candidates_out,
+                unit_candidate_objects_out=unit_candidate_objects,
             )
             if material_context:
                 messages.append({
@@ -2636,12 +3114,22 @@ def course_builder_chat(
                 temperature=0.4,
                 model=resolve_model("course_builder_llm_model", fallback="analysis"),
             )
-    except Exception:
+    except Exception as exc:
         logger.exception("Course builder chat LLM call failed")
         degraded = True
-        answer = _COURSE_BUILDER_DEGRADED_MESSAGE
+        answer = _course_builder_degraded_message(exc)
     else:
         answer, course_draft = _extract_course_draft_from_answer(raw_answer)
+        # IK-0883（置換の後ろ盾）: プロンプトで禁じても回答本文に handle（U141）が残ったら、
+        # このターンの候補表の名前へ置き換える（handle は教員に意味を持たない番地）。
+        answer = _replace_unit_handles_in_answer(answer, unit_candidate_objects)
+
+        # IK-0371: 草案の handle をこのターンの候補表の参照キーに結び付けて運ぶ。
+        if course_draft is not None:
+            try:
+                _attach_unit_identity_to_draft(course_draft, unit_candidate_objects)
+            except Exception:  # noqa: BLE001 — 失敗しても草案は返す（登録側が最終の弁）
+                logger.warning("Failed to attach unit identity to course_draft", exc_info=True)
 
         # 選択教材の正しい material_id を確定的に course_draft["sources"] に注入する
         if course_draft is not None and body.selected_material_ids:
@@ -2654,7 +3142,7 @@ def course_builder_chat(
                         params[f"mid_{i}"] = mid
                     records = pg_session.execute(
                         sa_text(f"""
-                            SELECT source_path, title, filename
+                            SELECT source_path, title, filename, id::text
                             FROM documents
                             WHERE source_path IN ({placeholders}) AND status = 'completed'
                         """),
@@ -2665,11 +3153,15 @@ def course_builder_chat(
 
                 sources = []
                 for r in records:
-                    sources.append({
+                    source = {
                         "material_id": r[0] or "",
                         "title": r[1] or r[2] or "",
                         "subtitle": "",
-                    })
+                    }
+                    # document は常に document_id（documents.id）で運ぶ（IK-0550）。
+                    if len(r) > 3 and r[3]:
+                        source["document_id"] = str(r[3])
+                    sources.append(source)
                 course_draft["sources"] = sources
             except Exception:
                 logger.warning("Failed to inject material sources into course_draft", exc_info=True)
@@ -2991,6 +3483,7 @@ def list_teacher_courses(
         session.close()
 
     result = []
+    _domain_label_cache: dict[str, str] = {}
     for r in records:
         data = r[7] if len(r) > 7 and isinstance(r[7], dict) else {}
         topics = [t for t in course_topics(data) if isinstance(t, dict)]
@@ -3003,12 +3496,17 @@ def list_teacher_courses(
             "created_at": r[4].isoformat() if r[4] else "",
             "updated_at": r[5].isoformat() if r[5] else "",
             "role": r[6],  # "owner" | "editor" | "viewer"
+            # IK-0911: 役割の表示語（正本は label_vocab.COURSE_ROLE_LABELS。画面に英語を出さない）。
+            "role_label": COURSE_ROLE_LABELS.get(str(r[6] or ""), ""),
             # Atlas operations dashboard projection.  These additive fields do
             # not expose course content; they only let the UI identify courses
             # whose map placement needs attention.
             "atlas_cartridge_id": course_cartridge_id(data),
             "atlas_topic_count": bound_topics,
             "topic_count": len(topics),
+            # IK-0929: 画面は内部キーと比ではなく、分野の表示名と段階の語で描く。
+            "atlas_domain_label": _course_atlas_domain_label(course_cartridge_id(data), _domain_label_cache),
+            "atlas_binding_coverage_label": atlas_binding_coverage_label(bound_topics, len(topics)),
             # G1-1/G5-2: 公開状態・開示範囲を管理画面のコース管理テーブルで確認できるようにする。
             "visibility": (r[8] if len(r) > 8 else None) or "private",
             "group_id": str(r[9]) if len(r) > 9 and r[9] else None,
@@ -3426,7 +3924,7 @@ def list_document_figures(
     chunks = _ensure_document_viewable(document_id, current_user)
     canonical_document_id = _canonical_document_id(chunks, document_id)
 
-    rows = load_document_figures(canonical_document_id)
+    rows = [row for row in load_document_figures(canonical_document_id) if is_listed_figure(row)]
 
     # 採用 run の apparatus_semantics artifact から figure_id 単位の候補を拾う
     # （無ければ空リスト。apparatus_semantics は常に review_required 系の
@@ -3618,7 +4116,7 @@ def list_unanswered_queries(
         rows = session.execute(
             sa_text("""
                 SELECT uql.id, uql.topic_id, uql.question, uql.asked_at,
-                       u.display_name AS student_name
+                       COALESCE(NULLIF(BTRIM(u.profile_name), ''), '') AS student_name
                 FROM unanswered_query_logs uql
                 JOIN users u ON uql.user_id = u.id
                 WHERE uql.course_id = :course_id
@@ -3635,7 +4133,8 @@ def list_unanswered_queries(
             "topic_id": r[1],
             "question": r[2],
             "asked_at": r[3].isoformat() if r[3] else "",
-            "student_name": r[4] or "",
+            # IK-1007: 学生の名前は本人が登録した名前だけ（ログイン ID を教員へ出さない）。
+            "student_name": r[4] or ACCOUNT_NAME_UNREGISTERED,
         }
         for r in rows
     ]
@@ -3865,7 +4364,8 @@ _MAX_GRACE_DAYS = 365
 
 _USER_COLUMNS_SQL = """
     id::text, display_name, email, role, status,
-    created_at, last_login_at, last_seen_at, status_reason, purge_after
+    created_at, last_login_at, last_seen_at, status_reason, purge_after,
+    profile_name
 """
 
 
@@ -3892,6 +4392,8 @@ def _user_row_to_dict(row) -> dict:
         "last_seen_at": _iso(row[7]),
         "status_reason": row[8] or "",
         "purge_after": _iso(row[9]),
+        # migration 094: 本人が登録した人に見せる名前（空 = 登録なし。ログインの照合列とは別）。
+        "profile_name": (row[10] or "") if len(row) > 10 else "",
     }
 
 
@@ -4141,6 +4643,7 @@ def list_users(
             id=item["id"], username=item["username"], email=item["email"], role=item["role"],
             status=item["status"], created_at=item["created_at"],
             last_login_at=item["last_login_at"], last_seen_at=item["last_seen_at"],
+            profile_name=item["profile_name"],
         ))
     return UserListResponse(users=users, total=int(total_row[0]) if total_row else 0)
 
@@ -4906,3 +5409,25 @@ def get_anchor_insights(
 # api/main.py から `app.include_router(<router>, prefix="/api/admin")` で
 # 直接マウントするフラット構造に統一した（URL・認可・レスポンスは不変）。
 # ---------------------------------------------------------------------------
+
+
+def _course_atlas_domain_label(cartridge_id: str, cache: dict) -> str:
+    """コース管理の一覧の分野の表示名（IK-0929。atlas_state.domain_display_name が正本・fail-soft）。"""
+    key = str(cartridge_id or "").strip()
+    if not key:
+        return ""
+    if key in cache:
+        return cache[key]
+    label = ""
+    try:
+        from core.atlas_state import domain_display_name
+
+        session = _pg_session()
+        try:
+            label = domain_display_name(session, key)
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — 表示語が引けなくても一覧は返す
+        logger.debug("course atlas domain label unavailable for %s", key, exc_info=True)
+    cache[key] = label
+    return label

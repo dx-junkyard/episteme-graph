@@ -153,10 +153,13 @@ class TestVocabulary:
         """コード側語彙と DB の CHECK 集合が一致すること（二重管理の防止）。
 
         CHECK の正本は migration 048（初版）+ 082（概念レジストリが ``symbol`` を追加、
-        concept_registry_design.md §4.7）に分かれるので、両方を合わせて突き合わせる。
+        concept_registry_design.md §4.7）+ 086（理論モジュール層が ``theory_module`` を追加）に
+        分かれるので、全部を合わせて突き合わせる。
         """
         sql = (BACKEND / "db" / "048_element_identity_links.sql").read_text(encoding="utf-8")
         sql += (BACKEND / "db" / "082_concept_registry.sql").read_text(encoding="utf-8")
+        # 086 = 理論モジュール層 Phase 1 が 'theory_module' を足す（theory_module_layer_design.md §13.8）。
+        sql += (BACKEND / "db" / "086_theory_modules.sql").read_text(encoding="utf-8")
         for element_type in IDENTITY_LINKABLE_ELEMENT_TYPES:
             assert f"'{element_type}'" in sql, element_type
         # §16「できないこと」: evidence / derivation は共通部品化の単位ではないので、

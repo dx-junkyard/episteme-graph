@@ -18,6 +18,7 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core.doubt.assumption_mining.schema import GapCluster
+from core.doubt.scope import document_scope_clause, normalize_document_ids
 
 logger = logging.getLogger(__name__)
 
@@ -57,19 +58,21 @@ def _cluster_key(operation: str, review_reasons: list[str]) -> str:
     return f"gap|{op}|{reasons}"
 
 
-def detect_gap_clusters(session, course_id: str = "") -> list[GapCluster]:
-    """コーパス横断で補完ステップをクラスタリングし、候補条件を満たすものを返す。"""
-    filters = ["TRUE"]
-    params: dict[str, Any] = {}
-    if course_id:
-        filters.append("course_id = :course")
-        params["course"] = course_id
+def detect_gap_clusters(session, *, document_ids) -> list[GapCluster]:
+    """範囲（document 集合, IK-0852）で補完ステップをクラスタリングし、候補条件を満たすものを返す。
+
+    範囲が空なら SQL を出さずに空を返す（fail-closed）。
+    """
+    clause = document_scope_clause(document_ids)
+    if clause is None:
+        return []
+    where, params = clause
 
     rows = session.execute(
         sa_text(f"""
             SELECT document_id::text AS document_id, graph_json
             FROM theory_component_graphs
-            WHERE {' AND '.join(filters)}
+            WHERE {where}
         """),
         params,
     ).fetchall()
@@ -112,8 +115,8 @@ def detect_gap_clusters(session, course_id: str = "") -> list[GapCluster]:
 
     candidates = [c for c in clusters.values() if c.is_candidate()]
     logger.info(
-        "gap cluster detection: clusters=%d candidates=%d (course=%s)",
-        len(clusters), len(candidates), course_id or "-",
+        "gap cluster detection: clusters=%d candidates=%d (documents=%d)",
+        len(clusters), len(candidates), len(normalize_document_ids(document_ids)),
     )
     return candidates
 

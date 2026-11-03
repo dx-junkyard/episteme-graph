@@ -615,7 +615,9 @@ class TestProjection:
         # 教員にも生数値は出さない（LS5）
         assert not _collect_keys(dto) & set(schema.FORBIDDEN_NUMERIC_KEYS)
         # 教員 DTO は claim 参照を保つ（根拠へ遡れる・LS4）
-        assert dto["evidence"] == [{"quote": "q", "claim_id": "c1"}]
+        assert dto["evidence"] == [
+            {"quote": "q", "claim_id": "c1", "source_label": "論文の主張からの引用"}
+        ]  # IK-0677: 出所の印
 
     def test_admin_dto_keeps_unknown_node_visible(self, db):
         row = db.seed(node_id="retired_region")

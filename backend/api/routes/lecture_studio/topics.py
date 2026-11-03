@@ -27,10 +27,21 @@ from core.course_data import (
 )
 from core import llm_policy
 from core.course_content_builder import (
+    GENERATED_EQUATIONS_HEADING,
+    GENERATED_FIGURES_HEADING,
+    TOPIC_DRAFT_FIELD_RULES,
+    TOPIC_DRAFT_HANDOFF_RULE,
+    _appendix_equation_label,
     _ensure_required_figures_in_material,
     _required_figure_items,
     build_topic_evidence_items,
+    reattach_generated_appendix,
+    split_cautions_and_handoff,
 )
+from core import lecture_studio_state as studio_state
+from core.course_units import load_units_for_documents
+from core.display_projection import project_for_teacher
+from core.lecture import get_course_lecture_language, lecture_uses_topic_material
 from core.document_pipeline.persistence import resolve_artifact_runs
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.llm_usage.context import usage_context
@@ -101,6 +112,8 @@ def get_lecture_studio_course_structure(
     finally:
         session.close()
     course_title = (row[0] if row else None) or _course_title(course_data)
+    # IK-0908 / IK-0915: 閲覧者が保存できるか・保存がいつ受講者に届くかを 1 つの値で返す。
+    save_facts = _topic_save_facts_for(course_id, current_user)
 
     # --- チャンクのステータス集計 ---
     chunks = _get_course_chunks(course_data)
@@ -138,6 +151,11 @@ def get_lecture_studio_course_structure(
     # --- 章・トピック構造を構築 ---
     chapters_raw = course_chapters(course_data)
     topics_raw = course_topics(course_data)
+
+    # 第 25 周 面 D（IK-0874〜0877）: コース内容生成の前後で何が揃っているかを
+    # 1 度に返す（コースの論文・各トピックの論文・根拠の状態・音声の有無）。
+    # どれも読み取りだけで、取れなければ空のまま返す（構造取得自体は止めない = fail-soft）。
+    studio_facts = _load_course_studio_facts(course_id, course_data, topics_raw)
 
     # topics_raw が chapter_index でグループ化されている形式に対応
     chapter_topics: dict[int, list] = {}
@@ -177,18 +195,40 @@ def get_lecture_studio_course_structure(
                 "source_evidence_ids": t.get("source_evidence_ids", []),
                 "linked_chunk_ids": t.get("linked_chunk_ids", []) or t.get("material_chunk_ids", []),
                 "status": "generated" if (t.get("content") or t.get("summary")) else "draft",
+                "units": t.get("units", []),
                 # 根拠リンクの正本（element_context_presentation_redesign.md §6 S3-1 / RC8）:
                 # 学習画面と**同一の純関数**が組み立てた evidence DTO を同梱する。原稿スタジオの
                 # `lsTopicEvidenceItems` はこれを優先して使い、同じ根拠が画面ごとに別の見出し・
                 # 別の欠落で表示される並行実装を終わらせる。DB 追加アクセスなし（トピックに
                 # 公開済みの参照だけを読む純関数）。既存キーは不変・純増。
-                "evidence_items": build_topic_evidence_items(t),
+                **_topic_studio_view(t, studio_facts),
             })
         chapters_out.append({
             "chapter_index": ci,
             "title": ch.get("title", ""),
             "topics": topics_out,
         })
+
+    # 第 25 周 第 6 波（オーナー判断 1）: 付録がいまの根拠と違うトピックを、コースの見出しで
+    # 題名ごとに知らせる（システムは保存済みの付録を書き直さない。付け直しは所有者の明示操作）。
+    appendix_stale_topics = [
+        {"id": t.get("id"), "title": t.get("title") or ""}
+        for ch_out in chapters_out for t in ch_out.get("topics") or []
+        if t.get("appendix_state")
+    ]
+
+    # 第 25 周 第 9 波（IK-1081）: 古い生成規則の作業メモが残るトピックを見出しで題名ごとに知らせる
+    # （保存物は書き直さない。本文の注の段落は受講者への配信の読み時に外している）。
+    work_note_topics = [
+        {
+            "id": t.get("id"),
+            "title": t.get("title") or "",
+            # 第 10 波（IK-1081）: 残っている場所（body / cautions）で一覧を分ける。
+            "places": list((t.get("work_note_state") or {}).get("place_keys") or []),
+        }
+        for ch_out in chapters_out for t in ch_out.get("topics") or []
+        if t.get("work_note_state")
+    ]
 
     # 図マップ（教材図スタジオ設計書 §7.3）: 学習画面と同じ解決規則で
     # figure_id -> {caption, image_url(admin 経路), document_id, teaching} を返す。
@@ -201,16 +241,279 @@ def get_lecture_studio_course_structure(
         logger.warning("Failed to build figures_index for course %s", course_id, exc_info=True)
         figures_index = {}
 
+    # 第 25 周 第 7 波（IK-1051・オーナー判断）: 再解析で置き換わり後継の決まらない部品を指す ⚓ が
+    # あれば、所有者に凍結し直しの案内を出す（凍結した本文は変えない・自動で凍結し直さない・
+    # G層 To-Do は作らない）。読み取りだけで、失敗は何も足さない（fail-soft）。
+    frozen_anchor_facts = _frozen_anchor_stale_facts(course_data, bool(save_facts.get("can_save")))
+
     return {
         "course_id": course_id,
         "title": course_title,
         "course_status": course_status,
+        **frozen_anchor_facts,
+        # IK-0876: コースの論文（つまづき・図スタジオの論文の選び先）。
+        "documents": studio_facts["documents"],
+        # IK-0877: トピック教材の経路の音声の揃い方（チャンクの数ではなくトピック単位）。
+        "topic_audio_status": studio_facts["topic_audio_status"],
+        "topic_audio_save_notice": studio_state.TOPIC_AUDIO_SAVE_NOTICE,
+        # IK-0951: 題名に生の TeX 記法が残っていれば、その事実文と該当の題名（見出しに出す）。
+        **_raw_tex_title_facts(course_data),
+        "topic_document_unresolved_notice": studio_state.TOPIC_DOCUMENT_UNRESOLVED_NOTICE,
+        # IK-0908: 保存は所有者だけ（editor は書き換えまで）。IK-0915: 保存の届き方。
+        **save_facts,
+        # IK-0979: 図の採用の知らせの部品（保存の届き方と音声の文を保存側と同じ正本から）。
+        "figure_adopt_notice_parts": studio_state.figure_adopt_notice_parts(save_facts.get("delivery")),
+        # IK-0872 / IK-0880: 付録の付け直しの前の確認文（音声・区切りが動くことを事前に言う）。
+        "appendix_reattach_confirm": studio_state.APPENDIX_REATTACH_CONFIRM,
+        **(
+            {
+                "appendix_stale_topics": appendix_stale_topics,
+                "appendix_stale_course_notice": studio_state.APPENDIX_STALE_COURSE_NOTICE,
+                "appendix_stale_list_summary": studio_state.APPENDIX_STALE_LIST_SUMMARY,
+                "appendix_reattach_all_confirm": studio_state.APPENDIX_REATTACH_ALL_CONFIRM,
+                **(
+                    {} if save_facts.get("can_save")
+                    else {"appendix_reattach_all_notice": studio_state.APPENDIX_REATTACH_ALL_OWNER_ONLY_NOTICE}
+                ),
+            }
+            if appendix_stale_topics else {}
+        ),
+        **(
+            {
+                "work_note_topics": work_note_topics,
+                "work_note_course_notice": studio_state.WORK_NOTE_COURSE_NOTICE,
+                "work_note_list_summary": studio_state.WORK_NOTE_LIST_SUMMARY,
+                "work_note_list_summaries": studio_state.work_note_list_summaries(),
+            }
+            if work_note_topics else {}
+        ),
+        # IK-0880: 決定論付録の見出し（図の挿入位置を付録の前へ寄せる判定に使う。正本は
+        # course_content_builder — JS に文字列をミラーしない）。
+        "generated_appendix_headings": [GENERATED_EQUATIONS_HEADING, GENERATED_FIGURES_HEADING],
         "course_content_status": course_data.get("course_content_status") or {},
         "total_chunks": total_chunks,
         "generated_chunks": generated_chunks,
         "audio_chunks": audio_chunks,
         "chapters": chapters_out,
         "figures_index": figures_index,
+    }
+
+
+def _frozen_anchor_stale_facts(course_data: dict, can_save: bool) -> dict:
+    """凍結の ⚓ が後継の決まらない部品を指していれば ``frozen_anchor_notice`` と名前の列挙。"""
+    try:
+        from services import list_course_source_document_ids
+        from core.frozen_component_refs import (
+            frozen_anchor_stale_notice,
+            stale_frozen_component_labels,
+        )
+
+        doc_ids = sorted(list_course_source_document_ids(course_data))
+        session = _pg_session()
+        try:
+            names = stale_frozen_component_labels(session, course_data, doc_ids)
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — 案内の補助（構造取得は止めない）
+        logger.debug("frozen anchor stale facts unavailable", exc_info=True)
+        return {}
+    notice = frozen_anchor_stale_notice(names, can_save=can_save)
+    if not notice:
+        return {}
+    return {"frozen_anchor_notice": notice, "frozen_anchor_stale_labels": names}
+
+
+def _topic_save_facts_for(course_id: str, current_user: dict) -> dict:
+    """保存 API と同じ所有者判定 + V層の版の有無から、保存の可否と届き方を返す（fail-soft）。"""
+    is_owner = False
+    delivered = False
+    owner_display_name = None
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT c.user_id, COALESCE(c.visibility, 'private'), COALESCE(c.is_published, false),
+                       c.group_id, COALESCE(NULLIF(BTRIM(u.profile_name), ''), '')
+                FROM learning_courses c
+                LEFT JOIN users u ON u.id::text = c.user_id::text
+                WHERE c.id = :course_id LIMIT 1
+            """),
+            {"course_id": course_id},
+        ).fetchone()
+        if row:
+            is_owner = str(row[0]) == str(current_user.get("id"))
+            delivered = studio_state.course_is_delivered(
+                visibility=row[1], is_published=bool(row[2]), group_id=row[3]
+            )
+            # IK-0978: 共有された教員に所有者の表示名を見せる（オーナー判断 §6-1 の推奨どおり）。
+            # IK-1007: 名前は本人が登録した profile_name だけ。空なら名前なしの文に戻る（ログイン ID を出さない）。
+            owner_display_name = (row[4] if len(row) > 4 else "") or None
+    except Exception:  # noqa: BLE001
+        session.rollback()
+        logger.debug("course ownership unavailable for studio", exc_info=True)
+    finally:
+        session.close()
+    # 第 25 周 第 9 波（IK-1079）: 受講者の版と HEAD の比較は core の 1 本（版の管理モーダルと共有）。
+    release_version_no, unpublished_changes = studio_state.course_release_comparison(course_id)
+    return studio_state.topic_save_facts(
+        is_owner=is_owner,
+        is_system_admin=current_user.get("role") == ROLE_SYSTEM_ADMIN,
+        delivered=delivered,
+        release_version_no=release_version_no,
+        owner_display_name=owner_display_name,
+        unpublished_changes=unpublished_changes,
+    )
+
+
+def _course_document_rows(course_data: dict) -> list[dict]:
+    """コースの論文（``sources`` から解決した document）の ``[{document_id, title}]``。"""
+    from services import list_course_source_document_ids
+
+    try:
+        doc_ids = sorted(list_course_source_document_ids(course_data))
+    except Exception:  # noqa: BLE001 — fail-soft
+        return []
+    if not doc_ids:
+        return []
+    titles: dict[str, str] = {}
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("SELECT id::text, title FROM documents WHERE id::text = ANY(:ids)"),
+            {"ids": doc_ids},
+        ).fetchall()
+        titles = {str(r[0]): str(r[1] or "") for r in rows}
+    except Exception:  # noqa: BLE001
+        logger.debug("course document titles unavailable", exc_info=True)
+    finally:
+        session.close()
+    # 題名を引けた document だけを返す（題名の取得自体が失敗したときは ID だけでも返す）。
+    out = [{"document_id": did, "title": titles.get(did, "")} for did in doc_ids if did in titles or not titles]
+    out.sort(key=lambda row: (row["title"], row["document_id"]))
+    return out
+
+
+def _load_course_studio_facts(course_id: str, course_data: dict, topics: list[dict]) -> dict:
+    """course-structure がトピックごとに読む事実（論文・学ぶ単位・チャンクの論文・音声）を1度に読む。"""
+    documents = _course_document_rows(course_data)
+    doc_ids = [row["document_id"] for row in documents]
+    unit_rows: dict = {}
+    chunk_docs: dict[str, str] = {}
+    audio_topics: set[str] = set()
+    language = get_course_lecture_language(course_data)
+    chunk_ids = list(dict.fromkeys(cid for t in topics for cid in studio_state.topic_chunk_ids(t)))
+    session = _pg_session()
+    try:
+        if doc_ids and any(studio_state.topic_has_units(t) for t in topics):
+            try:
+                unit_rows = load_units_for_documents(session, doc_ids)
+            except Exception:  # noqa: BLE001
+                session.rollback()
+                logger.debug("learning units unavailable for studio", exc_info=True)
+        if chunk_ids:
+            try:
+                rows = session.execute(
+                    sa_text("SELECT id::text, document_id::text FROM chunks WHERE id::text = ANY(:ids)"),
+                    {"ids": chunk_ids},
+                ).fetchall()
+                chunk_docs = {str(r[0]): str(r[1] or "") for r in rows}
+            except Exception:  # noqa: BLE001
+                session.rollback()
+                logger.debug("chunk documents unavailable for studio", exc_info=True)
+        try:
+            rows = session.execute(
+                sa_text("""
+                    SELECT DISTINCT topic_id FROM topic_lecture_audio_cache
+                    WHERE course_id = :course_id AND COALESCE(language, 'ja') = :language
+                """),
+                {"course_id": course_id, "language": language},
+            ).fetchall()
+            audio_topics = {str(r[0]) for r in rows}
+        except Exception:  # noqa: BLE001
+            session.rollback()
+            logger.debug("topic audio cache unavailable for studio", exc_info=True)
+    finally:
+        session.close()
+
+    topic_material = [t for t in topics if lecture_uses_topic_material(t)]
+    with_audio = [t for t in topic_material if str(t.get("id") or "") in audio_topics]
+    if not topic_material:
+        audio_key = "no_topics"
+    elif not with_audio:
+        audio_key = "none"
+    elif len(with_audio) == len(topic_material):
+        audio_key = "all"
+    else:
+        audio_key = "partial"
+    return {
+        "documents": documents,
+        "document_ids": doc_ids,
+        "unit_rows": unit_rows,
+        "chunk_docs": chunk_docs,
+        "audio_topics": audio_topics,
+        "topic_audio_status": {
+            "status": audio_key,
+            "message": studio_state.TOPIC_AUDIO_STATUS_MESSAGES[audio_key],
+        },
+    }
+
+
+def _studio_equation_replacer(topic: dict):
+    """教員向け射影の ``token_replacer``: トピックの式の内部 ID を付録と同じ名前の段
+    （印字番号 → 人が付けた名前 → 「この節の式」）へ（IK-0873。内部 ID を名前にしない）。"""
+    records: dict[str, dict] = {}
+    for block in topic.get("content_blocks") or []:
+        if isinstance(block, dict) and block.get("type") == "equations":
+            for item in block.get("items") or []:
+                if isinstance(item, dict):
+                    eq_id = str(item.get("equation_id") or item.get("id") or "").strip()
+                    if eq_id:
+                        records.setdefault(eq_id, item)
+
+    def _replace(token: str) -> str | None:
+        key = str(token or "").rstrip("_.-")
+        record = records.get(key)
+        if record is not None:
+            return _appendix_equation_label(record, key)
+        return None
+
+    return _replace
+
+
+def _topic_studio_view(topic: dict, facts: dict) -> dict:
+    """トピックごとの読み取り専用の区画（根拠リンク・注意点の表示・根拠の状態・論文・音声）。
+
+    DP7 の読み替え（2026-10-23・第 25 周 面 D の指揮判断）: **編集欄の本文には投影を掛けない**
+    （埋め込み記法を教員が編集するため）。読み取り専用の区画だけを ``project_for_teacher`` に
+    通し、内部 ID を式の名前へ写す。編集欄の値（``cautions`` 等）はそのまま返す。
+    """
+    evidence_items = build_topic_evidence_items(topic)
+    replacer = _studio_equation_replacer(topic)
+    try:
+        projected_items = studio_state.studio_equation_titles(
+            project_for_teacher(evidence_items, token_replacer=replacer)
+        )
+        cautions_display = project_for_teacher(_clean_str_list(topic.get("cautions")), token_replacer=replacer)
+    except Exception:  # noqa: BLE001 — DP6
+        logger.warning("studio teacher projection failed", exc_info=True)
+        projected_items, cautions_display = evidence_items, _clean_str_list(topic.get("cautions"))
+    topic_id = str(topic.get("id") or "")
+    return {
+        "evidence_items": projected_items,
+        "cautions_display": cautions_display,
+        "evidence_state": studio_state.topic_evidence_state(topic, evidence_items),
+        "document_ids": studio_state.topic_document_ids(
+            topic,
+            course_document_ids=facts.get("document_ids") or [],
+            unit_rows_by_key=facts.get("unit_rows") or {},
+            chunk_document_by_id=facts.get("chunk_docs") or {},
+        ),
+        "uses_topic_material": lecture_uses_topic_material(topic),
+        "has_topic_audio": topic_id in (facts.get("audio_topics") or set()),
+        # IK-0872 / IK-0880: 保存済みの付録がいまの根拠から作る形と違うときだけ。
+        **({"appendix_state": appendix} if (appendix := studio_state.topic_appendix_state(topic)) else {}),
+        # IK-1081: 是正前の生成規則の作業メモが保存済みの本文・注意点に残るときだけ。
+        **({"work_note_state": work_note} if (work_note := studio_state.topic_work_note_state(topic)) else {}),
     }
 
 
@@ -412,7 +715,8 @@ def save_lecture_studio_course_topic(
         if not row:
             raise HTTPException(status_code=404, detail="Course not found")
         if str(row[0]) != str(current_user["id"]) and current_user.get("role") != ROLE_SYSTEM_ADMIN:
-            raise HTTPException(status_code=403, detail="Forbidden")
+            # IK-0908: 理由と出口（所有者へ依頼）を日本語の事実文で返す。画面は detail を描く。
+            raise HTTPException(status_code=403, detail=studio_state.TOPIC_SAVE_FORBIDDEN_DETAIL)
         session.execute(
             sa_text("""
                 UPDATE learning_courses
@@ -428,13 +732,18 @@ def save_lecture_studio_course_topic(
         # トピックの授業用教材（student_material）/読み上げ原稿（spoken_script）が変わったため、
         # 生成済みのトピック音声を無効化する（原稿編集時のチャンク音声無効化と同じ方針。
         # 次回の音声生成で作り直される）。表示スライドと音声スライドの食い違いを防ぐ。
-        session.execute(
+        deleted = session.execute(
             sa_text("""
                 DELETE FROM topic_lecture_audio_cache
                 WHERE course_id = :course_id AND topic_id = :topic_id
             """),
             {"course_id": course_id, "topic_id": topic_id},
         )
+        # IK-0877: 消したかどうかを応答に運ぶ（元から音声が無ければ何も告げない）。
+        try:
+            audio_invalidated = bool(int(getattr(deleted, "rowcount", 0) or 0) > 0)
+        except (TypeError, ValueError):
+            audio_invalidated = False
         session.commit()
     except HTTPException:
         raise
@@ -460,11 +769,31 @@ def save_lecture_studio_course_topic(
             "action": "topic_draft_saved",
             "topic_id": topic_id,
             "changed_fields": changed_fields,
-            # 保存の副作用（教員には保存前に告知される）も事実として残す。
-            "topic_audio_cache_invalidated": True,
+            # 保存の副作用を事実として残す（実際に消した行があったときだけ True）。
+            # 教員には、音声のあるトピックでは保存ボタンの近くに常時の事実文
+            # （TOPIC_AUDIO_SAVE_NOTICE）が出ており、保存後は応答の notice で告げる（IK-0877）。
+            "topic_audio_cache_invalidated": audio_invalidated,
         },
     )
-    return {"course_id": course_id, "topic_id": topic_id, "status": "edited"}
+    notice = {"notice": studio_state.TOPIC_AUDIO_INVALIDATED_NOTICE} if audio_invalidated else {}
+    # IK-0915: この保存がいつ受講者に届くか（版なし = すぐ / 版あり = 発行するまで届かない）。
+    delivery = _topic_save_facts_for(course_id, current_user).get("delivery")
+    return {"course_id": course_id, "topic_id": topic_id, "status": "edited",
+            "audio_invalidated": audio_invalidated, **notice,
+            **({"delivery": delivery} if delivery else {})}
+
+
+def _raw_tex_title_facts(course_data: dict) -> dict:
+    from core import label_vocab
+    from core.course_data import course_titles_with_raw_tex
+
+    try:
+        titles = course_titles_with_raw_tex(course_data)
+    except Exception:  # noqa: BLE001 — 知らせが付かないだけ
+        return {}
+    if not titles:
+        return {}
+    return {"title_notice": label_vocab.COURSE_TITLE_RAW_TEX_NOTICE, "raw_tex_titles": titles}
 
 
 _COURSE_TOPIC_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフト作成を支援するアシスタントです。
@@ -480,8 +809,11 @@ _COURSE_TOPIC_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフト
 - ブロック数式は `$$...$$`
 - `\\(...\\)` や `\\[...\\]` は使わず、必ず `$...$` / `$$...$$` を使う
 - 埋め込みは `![[equation:id]]`, `![[figure:id]]`, `![[source:id]]`, `![[claim:id]]`, `![[component:id]]`
+- 本文に書く埋め込みはバッククォート（`）で囲まない（ここでの `…` は表記の説明。埋め込みはコードではない）
 - `![[figure:id]]` は根拠候補の `figures` に列挙された `figure_id` のみ使用可（一覧に無い id を発明しない）
 
+欄の用途（コース内容生成と同じ規則表 — core/course_content_builder.py::TOPIC_DRAFT_FIELD_RULES）:
+""" + TOPIC_DRAFT_FIELD_RULES + TOPIC_DRAFT_HANDOFF_RULE + """
 必ずJSONのみを返してください。
 JSON文字列内のLaTeXバックスラッシュは必ず `\\Lambda` のように二重化してください。
 形式:
@@ -489,7 +821,8 @@ JSON文字列内のLaTeXバックスラッシュは必ず `\\Lambda` のよう�
   "key_concepts": ["重要概念"],
   "student_material": {{"source_format": "eg-markdown-v1", "source_text": "学生に見せる教材"}},
   "spoken_script": "教員が話せる自然文。音声読み上げ対象。",
-  "cautions": ["注意点"],
+  "cautions": ["学生に見せる注意点"],
+  "handoff_notes": ["教員への申し送り（学生には見せない）"],
   "check_questions": [
     {{
       "question": "確認問題",
@@ -524,6 +857,7 @@ class CourseTopicDraftLLMResponse(BaseModel):
     student_material: CourseTopicStudentMaterialDraft = Field(default_factory=CourseTopicStudentMaterialDraft)
     spoken_script: str = ""
     cautions: list[str] = Field(default_factory=list)
+    handoff_notes: list[str] = Field(default_factory=list)
     check_questions: list[dict] = Field(default_factory=list)
 
 
@@ -547,6 +881,32 @@ def _normalize_course_topic_draft_response(parsed: object) -> dict:
         "cautions": _clean_str_list(parsed.get("cautions")),
         "check_questions": _normalize_check_questions(parsed.get("check_questions")),
     }
+
+
+def _rewrite_prompt_draft(topic: dict, draft: dict) -> dict:
+    """書き換えの材料に渡す「現在の授業用ドラフト」（IK-1081・製品頭脳 A の所見）。
+
+    是正前の生成規則で保存された作業メモ（本文の「注」の段落・注意点の内部 ID / 作業記録）と、
+    旧い規則の付録（定型文「中心的な関係式です」・本文に現れない式）をモデルに写させない:
+    付録はいまの根拠から付け直した形に、注の段落と注意点の作業メモは外して渡す。
+    応答の比較（``draft_changed``）と保存物は元の ``draft`` のまま（ここはプロンプト用の写し）。
+    """
+    from core.course_content_builder import is_work_note_text, split_work_note_paragraphs
+
+    out = dict(draft or {})
+    material = out.get("student_material")
+    if isinstance(material, dict):
+        text = str(material.get("source_text") or "")
+        try:
+            reattached = reattach_generated_appendix(topic or {}, text)
+            # 教員が付録を外した下書きに付録を足さない（付録のあるものだけ今の規則に揃える）。
+            if reattached.get("had_appendix"):
+                text = reattached["source_text"]
+        except Exception:  # noqa: BLE001 — 付け直せなければ本文のまま
+            logger.debug("rewrite prompt appendix reattach failed", exc_info=True)
+        out["student_material"] = {**material, "source_text": split_work_note_paragraphs(text)[0]}
+    out["cautions"] = [item for item in _clean_str_list(out.get("cautions")) if not is_work_note_text(item)]
+    return out
 
 
 @router.post("/courses/{course_id}/lecture-studio/course-topics/{topic_id}/draft/rewrite")
@@ -580,15 +940,36 @@ def rewrite_lecture_studio_course_topic(
         "content_blocks": topic.get("content_blocks", []),
         "coverage": topic.get("coverage", {}),
         "content_confidence": topic.get("content_confidence", ""),
+        # IK-0874: 教員がコースビルダーで選んだ学ぶ単位の中身（コース内容生成の前でも
+        # 書き換えの根拠になる。freeze と同じ live 行の読み）。
+        "units": _rewrite_unit_grounding(course_data, topic),
     }
+    if (
+        studio_state.rewrite_grounding_is_empty(evidence)
+        and not topic.get("linked_figure_ids")
+        and not studio_state.draft_has_body(draft)
+    ):
+        # 根拠が全部空で、下書きも見出しだけなら LLM を呼ばず、日次上限も消費しない
+        # （空の材料で走って「学ぶ単位を紐づけてから」と済んだ操作を求める応答を作らない）。
+        # 教員が本文を書いた下書きは、その本文が書き換えの材料になるので通す。
+        return {
+            **_normalize_course_topic_draft_response(draft),
+            "skipped": True,
+            "changed": False,
+            "notice": studio_state.REWRITE_NO_GROUNDING_NOTICE,
+            "figures_restored": False,
+        }
+    compact_evidence, trimmed_keys = studio_state.compact_rewrite_evidence(evidence)
     prompt = _COURSE_TOPIC_DRAFT_PROMPT.format(
         topic_json=json.dumps({
             "id": topic.get("id", ""),
             "title": topic.get("title", ""),
             "prerequisites": topic.get("prerequisites", []),
         }, ensure_ascii=False, indent=2)[:3000],
-        evidence_json=json.dumps(evidence, ensure_ascii=False, indent=2)[:8000],
-        draft_json=json.dumps(draft, ensure_ascii=False, indent=2)[:6000],
+        # IK-0909: 直列化してから頭で切らない（末尾の学ぶ単位が落ち JSON も壊れる）。
+        # キーごとに予算を配り、学ぶ単位は必ず残し、失敗状態の文は材料から外す。
+        evidence_json=json.dumps(compact_evidence, ensure_ascii=False, indent=2),
+        draft_json=json.dumps(_rewrite_prompt_draft(topic, draft), ensure_ascii=False, indent=2)[:6000],
         instructor_prompt=str(body.get("prompt") or "")[:2000],
     )
 
@@ -633,6 +1014,19 @@ def rewrite_lecture_studio_course_topic(
             )
             raise HTTPException(status_code=502, detail="AI draft generation failed")
     result = _normalize_course_topic_draft_response(parsed)
+    # IK-0948: 教員宛ての申し送りは注意点に入れず別キーで返す。モデルが注意点に紛れ込ませた
+    # 作業メモ（内部 ID・材料の欄名）も決定論で申し送りへ移す（落とさない）。
+    kept_cautions, moved_notes = split_cautions_and_handoff(result["cautions"])
+    result["cautions"] = kept_cautions
+    raw_handoff = parsed.get("handoff_notes") if isinstance(parsed, dict) else getattr(parsed, "handoff_notes", None)
+    result["handoff_notes"] = list(dict.fromkeys(_clean_str_list(raw_handoff) + moved_notes))
+    # IK-1011: 申し送りが挙げる根拠は教員の画面で読める材料に限る。画面の文と照合できない
+    # 引用・引用の無い取り下げには「根拠の表示なし」の事実文を添える（項目は落とさない）。
+    try:
+        visible = studio_state.teacher_visible_texts(topic, draft, build_topic_evidence_items(topic))
+    except Exception:  # noqa: BLE001 — 照合先が組めなければ下書きと題名だけで照らす
+        visible = studio_state.teacher_visible_texts(topic, draft, [])
+    result["handoff_notes"] = studio_state.qualify_handoff_basis(result["handoff_notes"], visible)
     if not any([
         result["key_concepts"],
         result["student_material"]["source_text"].strip(),
@@ -648,7 +1042,222 @@ def rewrite_lecture_studio_course_topic(
     # ``![[figure:id]]`` が黙って消えることがある。消えていたら決定論的に末尾へ復元し、
     # 「位置がリセットされた」ことをフロントへ正直に伝える（黙って直さない）。
     result["figures_restored"] = _restore_missing_figure_embeds(result, topic)
+    # IK-0874: 応答が下書きを変えたかを返し、変えなかったら「反映しました」と言わない。
+    changed = studio_state.draft_changed(_normalize_course_topic_draft_response(draft), result)
+    result["changed"] = changed or bool(result["figures_restored"])
+    result["notice"] = (
+        studio_state.REWRITE_APPLIED_NOTICE if result["changed"] else studio_state.REWRITE_UNCHANGED_NOTICE
+    )
+    # IK-0909: 根拠を予算に収めるために省いた材料があれば、そのことを記録して言う。
+    if trimmed_keys:
+        result["grounding_trimmed"] = list(trimmed_keys)
+        result["grounding_notice"] = studio_state.rewrite_grounding_trimmed_notice(trimmed_keys)
+    # IK-0908: 保存できない閲覧者（editor）には、書き換えの結果が保存されないことを添える。
+    save_facts = _topic_save_facts_for(course_id, current_user)
+    if not save_facts.get("can_save"):
+        result["save_notice"] = save_facts.get("save_notice") or studio_state.TOPIC_SAVE_OWNER_ONLY_NOTICE
+        # IK-0950: 既定の成功文（「保存すると確定します」）に継ぎ足さず置き換える。
+        result["can_save"] = False
+        if result["changed"]:
+            result["notice"] = studio_state.REWRITE_PROPOSAL_UNSAVABLE_NOTICE
     return result
+
+
+@router.post("/courses/{course_id}/lecture-studio/course-topics/{topic_id}/appendix/reattach")
+def reattach_lecture_studio_topic_appendix(
+    course_id: str,
+    topic_id: str,
+    body: dict,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """末尾の決定論付録を、いまの根拠から付け直した本文を返す（DB 非変更・LLM なし）。
+
+    IK-0872 / IK-0880 の残り: 保存済みの付録は読み時に付け直さない。教員がこの操作で
+    付け直した本文を編集欄に入れ、[原稿を保存] で確定する（保存は所有者だけ・保存で音声は
+    作り直しになる — 既存の保存経路のまま）。``body.source_text`` があれば編集中の本文を使う。
+    """
+    course_data = _course_data_for_studio_editable(course_id, current_user)
+    topic = _find_course_topic(course_data, topic_id, body.get("chapter_index"), body.get("topic_index"))
+    if topic is None:
+        raise HTTPException(status_code=404, detail="Topic not found")
+    material = body.get("student_material") if isinstance(body.get("student_material"), dict) else {}
+    source_text = material.get("source_text") if "source_text" in material else body.get("source_text")
+    cautions = body.get("cautions") if body.get("cautions") is not None else None
+    outcome = reattach_generated_appendix(
+        topic,
+        None if source_text is None else str(source_text),
+        _clean_str_list(cautions) if cautions is not None else None,
+    )
+    return {
+        "course_id": course_id,
+        "topic_id": topic_id,
+        "student_material": {"source_format": "eg-markdown-v1", "source_text": outcome["source_text"]},
+        "changed": bool(outcome["changed"]),
+        # 第 25 周 第 6 波（IK-1032）: 結果の分岐（replaced / removed / added / unchanged）と、
+        # 分岐ごとの知らせ（サーバの 1 箇所 ``appendix_reattach_notice``）。
+        "outcome": outcome.get("outcome") or ("replaced" if outcome["changed"] else "unchanged"),
+        "notice": studio_state.appendix_reattach_notice(
+            outcome.get("outcome") or ("replaced" if outcome["changed"] else "unchanged")
+        ),
+    }
+
+
+@router.post("/courses/{course_id}/lecture-studio/appendix/reattach-all")
+def reattach_all_lecture_studio_topic_appendices(
+    course_id: str,
+    body: dict,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """一覧のトピックの末尾の付録を、いまの根拠から付け直して**保存する**（所有者の一括確定）。
+
+    第 25 周 第 6 波（オーナー判断 1）: 保存済みの付録はシステムが書き直さない。所有者が
+    原稿スタジオのコース見出しで題名の一覧を見て、この 1 操作で付け直す。保存は所有者 /
+    SYSTEM_ADMIN だけ（トピックの保存と同じ判定）。``body.topic_ids`` は画面に提示した一覧で、
+    いま付録が古いトピックとの積だけを付け直す。付け直したトピックの音声は作り直しになる
+    （トピックの保存と同じ）。一括確定なので ``decision_context`` を記帳する（DC1）。
+    """
+    from core import decision_context
+    from core.course_content_builder import topic_appendix_is_stale
+    from core.course_data import iter_all_topics
+
+    course_data = _course_data_for_studio(course_id, current_user)
+    presented = [str(x).strip() for x in (body.get("topic_ids") or []) if str(x or "").strip()]
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT user_id FROM learning_courses WHERE id = :course_id LIMIT 1"),
+            {"course_id": course_id},
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Course not found")
+        if str(row[0]) != str(current_user["id"]) and current_user.get("role") != ROLE_SYSTEM_ADMIN:
+            raise HTTPException(
+                status_code=403, detail=studio_state.APPENDIX_REATTACH_ALL_OWNER_ONLY_NOTICE
+            )
+        applied: list[str] = []
+        titles: list[str] = []
+        outcomes: dict[str, str] = {}
+        seen: set[int] = set()
+        for topic in iter_all_topics(course_data):
+            if id(topic) in seen:
+                continue
+            seen.add(id(topic))
+            topic_id = str(topic.get("id") or "")
+            if not topic_id or topic_id not in presented or topic_id in applied:
+                continue
+            try:
+                if not topic_appendix_is_stale(topic):
+                    continue
+                outcome = reattach_generated_appendix(topic)
+            except Exception:  # noqa: BLE001 — 付け直せないトピックは触らない
+                logger.warning("appendix reattach failed: course=%s topic=%s", course_id, topic_id, exc_info=True)
+                continue
+            if not outcome.get("changed"):
+                continue
+            material = topic.get("student_material") if isinstance(topic.get("student_material"), dict) else {}
+            topic["student_material"] = {
+                "source_format": material.get("source_format") or "eg-markdown-v1",
+                "source_text": outcome["source_text"],
+            }
+            applied.append(topic_id)
+            titles.append(str(topic.get("title") or ""))
+            outcomes[topic_id] = str(outcome.get("outcome") or "replaced")
+        audio_invalidated = False
+        if applied:
+            session.execute(
+                sa_text("""
+                    UPDATE learning_courses
+                    SET data = CAST(:data AS jsonb), updated_at = now()
+                    WHERE id = :course_id
+                """),
+                {"course_id": course_id, "data": json.dumps(course_data, ensure_ascii=False)},
+            )
+            deleted = session.execute(
+                sa_text("""
+                    DELETE FROM topic_lecture_audio_cache
+                    WHERE course_id = :course_id AND topic_id = ANY(:topic_ids)
+                """),
+                {"course_id": course_id, "topic_ids": applied},
+            )
+            try:
+                audio_invalidated = bool(int(getattr(deleted, "rowcount", 0) or 0) > 0)
+            except (TypeError, ValueError):
+                audio_invalidated = False
+            session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to reattach appendices: course_id=%s", course_id)
+        raise HTTPException(status_code=500, detail="Failed to reattach appendices")
+    finally:
+        session.close()
+
+    if applied:
+        ctx = decision_context.build_decision_context(
+            basis=decision_context.BASIS_LECTURE_STUDIO_APPENDIX_REATTACH_ALL,
+            presented_ids=presented,
+            applied_ids=applied,
+            alternatives=[decision_context.ALT_DESELECT, decision_context.ALT_EDIT, decision_context.ALT_SKIP_STEP],
+            reopen_path="PUT /api/admin/courses/{course_id}/lecture-studio/course-topics/{topic_id}",
+            evidence_shown=None,
+            skipped_ids=[t for t in presented if t not in applied],
+            skipped_reason="not_stale_or_unchanged",
+        )
+        record_review_event(
+            AUDIT_ENTITY_COURSE_TOPIC,
+            course_id,
+            "",
+            "edited",
+            current_user.get("id"),
+            decision_context.attach_decision_context(
+                {
+                    "action": "topic_appendix_reattached_all",
+                    "topic_ids": applied,
+                    "outcomes": outcomes,
+                    "changed_fields": ["student_material"],
+                    "topic_audio_cache_invalidated": audio_invalidated,
+                },
+                ctx,
+            ),
+        )
+    delivery = _topic_save_facts_for(course_id, current_user).get("delivery")
+    # IK-1080: 結果の分岐（外した / 作り直した / 新しく付けた）ごとに段を分けて題名を言う。
+    outcome_items = [(outcomes.get(tid, "replaced"), title) for tid, title in zip(applied, titles)]
+    notice = studio_state.appendix_reattach_all_notice(outcome_items)
+    return {
+        "course_id": course_id,
+        "applied_topic_ids": applied,
+        "outcomes": outcomes,
+        "outcome_groups": studio_state.appendix_reattach_all_outcome_groups(outcome_items),
+        "changed": bool(applied),
+        "audio_invalidated": audio_invalidated,
+        "notice": notice,
+        **({"audio_notice": studio_state.TOPIC_AUDIO_INVALIDATED_NOTICE} if audio_invalidated else {}),
+        **({"delivery": delivery} if delivery and applied else {}),
+    }
+
+
+def _rewrite_unit_grounding(course_data: dict, topic: dict) -> list[dict]:
+    """``topic.units`` をコースの論文の live 行で解決した中身（読めなければ選んだ名前だけ）。"""
+    if not studio_state.topic_has_units(topic):
+        return []
+    from services import list_course_source_document_ids
+
+    rows: dict = {}
+    try:
+        doc_ids = sorted(list_course_source_document_ids(course_data))
+    except Exception:  # noqa: BLE001
+        doc_ids = []
+    if doc_ids:
+        session = _pg_session()
+        try:
+            rows = load_units_for_documents(session, doc_ids)
+        except Exception:  # noqa: BLE001 — fail-soft（選んだ名前だけで続ける）
+            logger.debug("learning units unavailable for rewrite", exc_info=True)
+        finally:
+            session.close()
+    return studio_state.unit_grounding_for_prompt(topic, rows)
 
 
 def _restore_missing_figure_embeds(result: dict, topic: dict) -> bool:

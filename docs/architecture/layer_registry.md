@@ -22,7 +22,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（2026-09-14 時点で **086 以降**。044〜085 は使用済み — §3 参照。
+  着手時は次の空き番号（2026-10-31 時点で **098 以降**。044〜097 は使用済み — §3 参照。
   採番前に必ず `ls backend/db/` で確認する）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
@@ -66,6 +66,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | **M層** | 場面別 LLM モデル選択（LLM Model Selection） | `docs/features/llm_model_selection_design.md`（M1〜M10） | `backend/core/llm_policy.py` / `llm_policy_store.py` + `routes/llm_models.py` + `admin-llm-models.js` | 061 | 実装済み（Phase 0〜4。ユーザー別保存が正・tier名/金額は UI 非表示） |
 | **R層** | 再構成ループ（Reconstruction Loop） | `docs/features/reconstruction_loop_design.md` | `backend/core/reconstruction/` + `routes/reconstruction.py` + `reconstruction.js` | 036 | 実装済み |
 | **S層**（便宜ラベル） | 分野の地図（Field Atlas） | `field_atlas_overlay_spec.md`（オーバーレイ仕様の正本。原本消失のため **2026-08-14 の再構成版**が現行 — [不具合報告](doc_review_findings_2026-08-13.md) §1-1 は解消済み）+ `field_atlas_*.md`（骨格 / バインディング / 修正報告 / DB管理化 / 詳細パネル / 骨格エディタ）+ `atlas_binding_lifecycle_design.md` + 追補 [ノード版間対応](../features/atlas_node_correspondence_design.md)（NC1〜NC8。凍結時に教員が確定した `id_migrations` で版をまたいだ node_id を読み替える。migration なし） | `backend/core/atlas*.py` + `routes/atlas.py` / `atlas_view.py` + `atlas-*.js` | 023, 024, 026, 027, 028, 046, **057（ドメイン lifecycle）** | 実装済み |
+| **SB層** | 検証シミュレーション層（Simulation Bridge — 理論⇔シミュレーション⇔実験の翻訳層） | `features/simulation_bridge_design.md`（SB1〜SB10） | `backend/core/simulation_bridge/` | 088 / 089 | v1 実装済み（2026-10-02）・v1.1「主語は学習者」実装済み（2026-10-03・学習者 API `routes/simulation_lab.py`） |
 | **SL層** | 賭け金の台帳（Stakes Ledger）＝理解サイクル Phase 3 | `docs/features/stakes_ledger_design.md`（SL1〜SL10・§15 実装記録） | `backend/core/doubt/` 配下の SL 系モジュール + `routes/doubt.py` 拡張（D層の双対拡張・既存意味論は非改変） | 067 | 実装済み（SL-1〜SL-5） |
 | **U層** | LLM トークン使用量推計（Usage Metering） | `docs/features/llm_usage_metering_design.md` | `backend/core/llm_usage/` + `routes/llm_usage.py` | 043, **069（ユーザー別集計軸）** | 実装済み |
 | **（運営基盤）** | アカウントライフサイクル管理（一覧・停止・削除・リセット・最終ログイン・利用実績照会） | `docs/features/account_lifecycle_management_design.md`（AL1〜AL10） | `backend/core/account_status.py` / `auth_events.py` / `account_lifecycle.py` + `routes/admin.py` User Management 節 + `routes/auth.py` | 068, 069 | 実装済み（Phase 0〜3） |
@@ -83,7 +84,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | カテゴリギャップ候補 | 分野マップを論文から育てる層 | `docs/features/category_gap_candidates_design.md`（§10 実装記録） | `backend/core/atlas_gaps/` + `routes/atlas_gaps.py` | 066 | 実装済み（v1-a〜v1-d） |
 | VA層 | ベクトル係留（アンカー埋め込み・別名レジストリ・配置プレフィルタ・着地予測） | `docs/features/atlas_vector_anchoring_design.md`（VA1〜VA9・§12 実装記録） | `backend/core/atlas_vectors/` + `routes/atlas_vectors.py` | 074 | 実装済み（v1） |
 | RE追補 | 分野マップの関係表示（辺候補レビュー + 学習者向け「推定の糸」） | `docs/features/atlas_relation_edges_design.md`（RE1〜RE8・§11 実装記録）・親: [表示原則の討議記録](field_map_display_principles_2026-08-29.md) | `backend/core/atlas_edges/` + `routes/atlas_edges.py` + `atlas-threads-layer.js` | 076 | 実装済み（v1） |
-| 論文ディスカバリー層 | arXiv 分野購読による論文発見と、教員の明示承認による取り込み（+ バッチ取り込みキュー・関連度ランキング・引用グラフ拡張口） | `docs/features/paper_discovery_design.md`（PD1〜PD8・§10 実装記録） | `backend/core/paper_discovery/` + `routes/paper_discovery.py` + `backend/api/ingest_worker.py` + `admin-paper-discovery.js` | 071, 072 | 実装済み（Phase 1〜3） |
+| 論文ディスカバリー層 | arXiv 分野購読による論文発見と、教員の明示承認による取り込み（+ バッチ取り込みキュー・関連度ランキング・引用グラフ拡張口） | `docs/features/paper_discovery_design.md`（PD1〜PD8・§10 実装記録） | `backend/core/paper_discovery/` + `routes/paper_discovery.py` + `backend/api/ingest_worker.py` + `admin-paper-discovery.js` | 071, 072, 090 | 実装済み（Phase 1〜3） |
 | 論文レーダー | 教材（seed）起点の類似論文探索・距離3択・AI 比較分析・arXiv 出所の後付け登録 | `docs/features/paper_radar_design.md`（PR1〜PR8・§10〜§12 実装記録。PD1〜PD8 を全継承） | `backend/core/paper_discovery/`（radar.py / compare.py ほか）+ `routes/paper_discovery.py` + `admin-paper-radar.js` | 不要（既存表の読み + `documents.source_url` の記帳のみ） | 実装済み（v1 + 重なり・差分提示） |
 | コーパス回遊層 | 論文の海（コーパス地図）・コース無しの論文議論・地図の端・関心信号 | `docs/features/corpus_roaming_design.md`（CR1〜CR10・§12 実装記録） | `backend/core/corpus_view.py` + `core/discuss/context.py` + `routes/corpus.py` + `corpus-sea.js` | 073 | 実装済み（Phase A〜D） |
 | コーパスを補う論文 | 「近さ」ではなく「コーパスに何が足されるか」で候補を選ぶ第3の探し方（レンズA 地図の薄い領域 / レンズB 検証記録の無い前提 / レンズC 基盤論文）。3レンズとも決定論・LLM 0回で、embedding は既存の関連度バッチに相乗りする | `docs/features/corpus_complement_design.md`（CC1〜CC8・§11 実装記録。PD1〜PD8 を全継承） | `backend/core/paper_discovery/`（complement.py / foundation.py / reference_cache.py）+ `routes/paper_discovery.py`（complement/*）+ `admin-paper-discovery.js` | 077 | 実装済み（v1） |
@@ -121,7 +122,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   `backend/tests/test_admin_help_ui_anchors.py`（管理側の網羅・双方向整合は同テストと
   `test_admin_help_inspect_ui_static.py` が構造的に守る）。
 
-## 3. migration 帰属一覧（init〜085、2026-09-14 時点）
+## 3. migration 帰属一覧（init〜090、2026-10-16 時点）
 
 `backend/db/` の実ファイルを正とした全 migration の帰属。
 
@@ -194,8 +195,20 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 083 | `083_doubt_citation_vocab` | **知識の転用層（P4-5）**（`challenges.challenge_mode` / `target_element_ref`・`epistemic_ledger.evidence_lines`・`component_citations.citation_intent` の列追加のみ。新テーブルなし） |
 | 084 | `084_claim_chunk_fk_set_null` | **知識オブジェクト層の是正**（`theory_claims.chunk_id` の FK を `ON DELETE SET NULL` に張り替え = 再解析の chunks 掃除で claim 行が消えていた穴を塞ぐ。`chunks(document_id, chunk_index)` の一意索引つき） |
 | 085 | `085_paper_discovery_arxiv_metadata_cache` | **論文ディスカバリー層 / 論文レーダー**（arXiv メタデータの外部事実キャッシュ1表。候補・教員の判断は保存しない。正本は `docs/features/paper_radar_design.md` §14） |
+| 086 | `086_theory_modules` | **理論モジュール層 Phase 1**（新表 `knowledge_theory_modules` + `knowledge_theory_modules_live`、`element_identity_links` の instance 型に `theory_module`、`knowledge_mapping_justifications` に `structural_match`。保存行は表示の正本ではない。正本は `docs/features/theory_module_layer_design.md` §13） |
+| 087 | `087_document_figures_superseded` | **L層 図画像レジストリ**（`document_figures.status` の CHECK に `superseded` を追加。最新の抽出で作られなかった前回までの行を消さずに一覧から外す。正本は `docs/features/image_pipeline_knowledge_library_design.md` §18） |
+| 088 | `088_simulation_bridge` | **検証シミュレーション層（SB層）**（新表 `simulation_programs`（LLM 生成の理論シミュレータ候補・再生成は superseded）/ `instrument_wirings`（L層部品の配線・改訂提案は `parent_wiring_id`）/ `simulation_runs`（append-only）、`epistemic_ledger.simulation_candidates` JSONB、語彙表 `knowledge_entry_types` に `instrument_model` / `noise_source` / `signal_processing`。DELETE 文なし・users 参照なし。正本は `docs/features/simulation_bridge_design.md`） |
+| 089 | `089_simulation_learner` | **検証シミュレーション層 v1.1「主語は学習者」**（`simulation_programs` / `instrument_wirings` / `simulation_runs` に `owner_user_id UUID`（users FK なし）・`course_id TEXT`、`simulation_runs` に `shared_at`（本人の明示共有）・`prediction JSONB`（予想）、`instrument_wirings.origin` の CHECK に `learner`、`knowledge_equations_live` ビュー（078 で欠けていた KO5 の live ビュー）。列追加のみ・DELETE 文なし。正本は `docs/features/simulation_bridge_design.md` §14） |
+| 090 | `090_paper_discovery_ingest_cartridge` | 論文ディスカバリー層 — 取り込みキュー `paper_discovery_ingest_items` に `cartridge_id TEXT NULL`（解析の分野。NULL = 未指定・`''` = 「指定しない」の明示。列追加のみ。正本は `docs/features/paper_discovery_design.md` §12） |
+| 091 | `091_component_explanations_course_optional` | 承認・共有レイヤー(C層) — `component_explanations.course_id` の NOT NULL を外し、FK を `ON DELETE SET NULL` に張り替える（course_id は範囲ではなく出所。IK-0891。正本は `docs/features/component_evidence_redesign.md` 2026-10-23 追補） |
+| 092 | `092_epistemic_ledger_document_key` | D層 — 台帳の行キーに論文を含める（`(document_id, target_type, target_id)`・旧キーで人の記帳が入った衝突行には `attribution_check_needed` の印。IK-0899。正本は `docs/features/stakes_ledger_design.md` §16） |
+| 093 | `093_identity_link_revoke` | W層・概念レジストリ — 同一性リンクの確定を取り消す遷移 `confirmed → revoked`（理由必須・取り消した人と日時の列・確定者は残す。IK-0953。正本は `docs/features/concept_registry_design.md` 第 4 波の追補） |
+| 094 | `094_users_profile_name` | アカウントライフサイクル — `users.profile_name`（人に見せる名前。ログイン ID の開示をやめる。IK-0848 / IK-1007。正本は `docs/features/account_lifecycle_management_design.md` 2026-10-27 第 5 波の追補） |
+| 095 | `095_verification_proposal_completion` | D層 / SL層 — `verification_proposals.completed_by` / `completed_at` / `completion_note`（検証提案の完了の帰属・日時・根拠。既存の完了行は監査から 1 回だけ埋める。完了しても検証状態は変えない。IK-1121・第 25 周 第 10 波。正本は `docs/features/stakes_ledger_design.md`） |
+| 096 | `096_atlas_edge_decision_direction` | 分野の地図 RE層 — `atlas_edge_decisions.from_node_id` / `to_node_id`（採用のときに教員が選ぶ有向の関係の記載の向き。edge_key は無向のまま・既存行は NULL = 向きの記録なし。IK-1149・第 25 周 第 11 波。正本は `docs/features/atlas_relation_edges_design.md`） |
+| 097 | `097_verification_proposal_reachability_by_document` | D層 / SL層 — `verification_proposals.reachability` の CHECK に `by_document`（本文・文献の読み直しで確かめられる）を足す（067 の自動名の CHECK を名前付きに置き換え・既存行は不変。語彙の正本は `core/doubt/schema.py::REACHABILITY_LEVELS`。IK-1148・第 25 周 第 11 波。正本は `docs/features/stakes_ledger_design.md`） |
 
-次の空き番号は **086**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **098**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。
 
@@ -216,10 +229,13 @@ PROV-O の 2 語で宣言する。**コード変更はゼロ**（宣言だけ）
 | `atlas_skeletons`（`domain_key`, `version`）の凍結版 + `id_migrations` | revision | 分野の地図（骨格）の凍結版。`id_migrations` は revision 間の node 対応（K-6。`atlas_node_correspondence_design.md`）。`atlas_overlay_cache` / `atlas_anchor_embeddings.skeleton_version` はその版への刻印 | `field_atlas_overlay_spec.md` |
 | `library_entry_versions`（L層の凍結版） | revision | ナレッジライブラリ エントリの凍結版。パイプラインが読むのは凍結版だけ | `image_pipeline_knowledge_library_design.md` §6 |
 | 知識行の `produced_by_run_id` / `superseded_at` / `superseded_by_run_id`（`theory_claims` / `theory_components` / `knowledge_*` / `learning_units`） | revision | 解析 run による改訂。**同一性は `stable_key`、版は run**。live ビューは「現在の版」の射影 | `knowledge_objects_design.md`（KO3） |
+| `knowledge_theory_modules`（`stable_key` / `superseded_at`・`rule_version`） | revision | 理論モジュール（外枠・内側）の解析 run による改訂。同一性は `stable_key`（材料は生む式の stable_key 集合 + 段 + **規則の版**）で、規則の版を上げたときも revision として旧行を残す（確定済み同一性リンクの付け替えはしない前提 — 設計書 §9 O-5）。保存行は同一性リンクの参照先と構造の指紋の照合の索引で、**表示の正本ではない**（表示は読み時導出） | `theory_module_layer_design.md` §13 |
+| `simulation_programs`（`review_status` superseded・`superseded_by_id`） | revision | 再生成は旧行を superseded にして新行 | `simulation_bridge_design.md` §4.2 |
+| `instrument_wirings`（`parent_wiring_id`） | revision | 改訂提案は親を指す新行 | 同 §4.4 |
 | `element_explanations` / `landscape_placements` / `landscape_gap_signals` / `element_annotations` の `superseded` 遷移 | revision | 候補の改訂（再解析で inferred / candidate だけが倒れ、確定は残る） | 各層の設計書（LS3 / OA 系） |
 | `document_analysis_runs`（同一 document の run 列・`documents.active_analysis_run_id`） | revision | 解析そのものの改訂。採用 run が「現在の版」。artifact は 1 run × 1 stage の生成ログ | `knowledge_objects_design.md`（KO6） |
 | `element_id_remap` | revision 間の対応表 | 旧 ID → 新 ID（同一 stable_key の別 run）。「解決済み」フラグではなく事実の記録 | `knowledge_objects_design.md`（KO8） |
-| `element_identity_links`（instance ↔ shared_part / symbol） | **alternate** | 同じ概念の別表現（論文側の局所表現と共通部品）。統合・書き換えなし | `knowledge_network_vision.md`（KN-2） |
+| `element_identity_links`（instance ↔ shared_part / symbol / theory_module） | **alternate** | 同じ概念の別表現（論文側の局所表現と共通部品）。統合・書き換えなし | `knowledge_network_vision.md`（KN-2） |
 | `library_entry_relations`（`exact_match` / `close_match`） | **alternate** | 2 つのレジストリ行を並存させたまま「同じ / 近いが別」を記録する SKOS の関係語彙（`broader` / `related` は版でも同一性でもない構造語） | `concept_registry_design.md`（KR3） |
 | `library_atlas_node_links` | **alternate** | レジストリ行と骨格 node の同一概念関係。版非依存キー（`skeleton_version` を持たない） | `concept_registry_design.md`（KR9） |
 | `atlas_anchor_aliases` | **alternate** | 骨格 node の教員確定別名（版非依存） | `atlas_vector_anchoring_design.md`（VA6） |

@@ -214,11 +214,12 @@ class TestAgentIdLabelBlockingScope:
                 raw, "theory_component", None
             ), raw
 
-    def test_claim_equation_api_output_is_unchanged(self):
+    def test_claim_equation_lanes_also_block_agent_id_labels(self):
+        """TRIAGE14: claim / equation レーン（ITEM v2）にも agent ID 遮断を広げた。"""
         for raw in self._AGENT_IDS:
             projected = element_context._visible_items([_item(label=raw)])[0]
-            assert projected["label"] == raw, raw
-            assert projected["unresolved"] is False, raw
+            assert projected["label"] != raw, raw
+            assert projected["unresolved"] is True, raw
 
     def test_component_lane_replaces_agent_id_labels_end_to_end(self):
         for raw in self._AGENT_IDS:

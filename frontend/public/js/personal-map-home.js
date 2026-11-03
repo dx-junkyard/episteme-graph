@@ -577,10 +577,27 @@
     });
 
     const h = NB.pad * 2 + 24 + rows.length * NB.rowH - 30;
+    const shown = [];
+    rows.forEach((row) => { (row.nodes || []).forEach((n) => shown.push(n)); });
     return (
       '<div class="pm-home-nb-graph"><svg viewBox="0 0 ' + NB.w + " " + h +
-      '" role="img" aria-label="いまここの前後の関係">' + lanes + links + chips + "</svg></div>"
+      '" role="img" aria-label="いまここの前後の関係">' + lanes + links + chips + "</svg></div>" +
+      nearbyScopeLinesHtml(shown)
     );
+  }
+
+  // IK-0932: 札（直接検証・間接的な支持・反証）の下に、記帳された条件の 1 行を出す。
+  // 文言はサーバの verification.scope_line をそのまま描く（JS に文言を持たない・数値なし）。
+  function nearbyScopeLinesHtml(nodes) {
+    let html = "";
+    (nodes || []).forEach((n) => {
+      const line = n && n.verification && n.verification.scope_line;
+      if (!line) return;
+      html +=
+        '<li class="pm-home-nb-scope-line" data-pm-home-scope-line="' + esc(n.component_id) + '">' +
+        "<b>" + esc(n.label) + "</b>（" + esc(n.verification.label) + "）— " + esc(line) + "</li>";
+    });
+    return html ? '<ul class="pm-home-nb-scope-lines">' + html + "</ul>" : "";
   }
 
   // 記号は atlas.css の .personal-map-dot-* と同じ形・色を共有する（コースビューと統一）。
@@ -607,7 +624,7 @@
     let html = '<div class="pm-home-nb-legend">';
     if (dto.ledger_available) {
       html +=
-        '<span class="pm-home-nb-lg"><i class="pm-home-nb-sw solid"></i>検証の記帳がある</span>' +
+        '<span class="pm-home-nb-lg"><i class="pm-home-nb-sw solid"></i>検証の記録がある</span>' +
         '<span class="pm-home-nb-lg"><i class="pm-home-nb-sw dash"></i>このコーパスの中では検証記録がない</span>';
     }
     if (isRange && !dto.range_fallback) {
@@ -742,7 +759,8 @@
     const h = top - NBR.gap + NBR.pad;
     return (
       '<div class="pm-home-nb-graph pm-home-nb-range-graph"><svg viewBox="0 0 ' + NBR.w + " " + h +
-      '" role="img" aria-label="この話題が触れている理論構成">' + links + chips + "</svg></div>"
+      '" role="img" aria-label="この話題が触れている理論構成">' + links + chips + "</svg></div>" +
+      nearbyScopeLinesHtml(nodes)
     );
   }
 
@@ -1350,10 +1368,28 @@
     if (state.overlayEl && !state.overlayEl.hidden) renderPanel();
   }
 
+  // 第 25 周 第 10 波（IK-1113）: 画面文脈アダプターに渡す「いま見ている場所」の参照だけ
+  // （本人の痕跡ノード id と点ビューの中心。名前・札・条件の文は送らない = SA1。事実はサーバが
+  // 近傍関係ビューの正本で引く）。パネルが閉じている・「いまここの周り」以外のタブなら null。
+  function getScreenContext() {
+    try {
+      if (!state.overlayEl || state.overlayEl.hidden) return null;
+      if (state.activeTab !== "nearby" || !state.nearbyCenterNodeId) return null;
+      const out = { personal_map_node_id: String(state.nearbyCenterNodeId).slice(0, 160) };
+      if (state.nearbyCenterComponentId) {
+        out.personal_map_center_component_id = String(state.nearbyCenterComponentId).slice(0, 160);
+      }
+      return out;
+    } catch (_) {
+      return null;
+    }
+  }
+
   window.PersonalMapHome = {
     init,
     open,
     close,
     invalidate,
+    getScreenContext,
   };
 })();

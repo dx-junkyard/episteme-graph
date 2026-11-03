@@ -24,6 +24,7 @@ from .schema import (
     EquationSemanticsResult,
     EquationSourceExtraction,
     ValidationIssue,
+    demote_unverifiable_equation_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -246,7 +247,7 @@ def _parse_record(
     if candidate:
         candidate_trace_ids = [candidate.candidate_id]
 
-    return EquationRecord(
+    record = EquationRecord(
         equation_id=final_eq_id,
         document_id=llm_input.document_id,
         label=final_label,
@@ -257,6 +258,11 @@ def _parse_record(
         confidence_policy=confidence_policy,
         equation_consistency=equation_consistency,
     )
+    # 決定論の後処理: 食い違ったまま確度も低い復元に印字番号を名乗らせない
+    # （validator / repair の流れは変えない。ここは LLM 出力の採否ではなく、
+    #  すでに組み上がったレコードの降格だけを行う）。
+    demote_unverifiable_equation_label(record)
+    return record
 
 
 def _fallback_record(

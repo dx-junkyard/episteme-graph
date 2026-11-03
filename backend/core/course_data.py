@@ -31,6 +31,7 @@ sources[].document_id も同様に書き手が見当たらない読み取り専�
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -367,6 +368,40 @@ def topic_unit_keys(topic: dict | None) -> list[str]:
     return list(dict.fromkeys(str(u["stable_key"]).strip() for u in topic_units(topic)))
 
 
+def topic_material_chunk_ids(topic: dict | None) -> list[str]:
+    """トピック教材の出典チャンク id（``material_chunk_ids`` → ``linked_chunk_ids``）。
+
+    順序保持・重複除去・空と非文字列は落とす。学習チャットが表示中の教材の出典を
+    番号付き出典として登録するときの入力（IK-0577 / 第 17 周）。可視性はここでは
+    判定しない（読み出し側が ``allowed_document_ids`` で強制する）。
+    """
+    if not isinstance(topic, dict):
+        return []
+    out: list[str] = []
+    for key in ("material_chunk_ids", "linked_chunk_ids"):
+        values = topic.get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            cid = str(value or "").strip() if isinstance(value, (str, int)) else ""
+            if cid and cid not in out:
+                out.append(cid)
+    return out
+
+
+def topic_key_concepts(topic: dict | None) -> list[str]:
+    """``topic.key_concepts`` を名前の列で返す（記号様の名前は落とす・順序保持・重複除去）。"""
+    if not isinstance(topic, dict):
+        return []
+    out: list[str] = []
+    for item in topic.get("key_concepts") or []:
+        name = item.get("name") if isinstance(item, dict) else item
+        name = str(name or "").strip()
+        if name and not is_symbol_concept_name(name) and name not in out:
+            out.append(name)
+    return out
+
+
 def learner_topic_units_projection(topic: dict | None) -> list[dict]:
     """学習者向け DTO 用の ``topic.units`` 射影（``kind`` / ``label`` だけ）。
 
@@ -437,6 +472,27 @@ def course_cartridge_id(data: dict | None) -> str:
     return str(data.get("cartridge_id") or "").strip()
 
 
+# 第 25 周 第 3 波（IK-0951）: 表示名（コース・章・トピックの題名）に生の TeX 記法が残っているか。
+# 題名は学生の一覧・各所の見出しで素の文字列として描かれる（数式として描かれない）ので、
+# 生成指示で書かせず、保存・表示の時に検出して教員に知らせる。
+_RAW_TEX_IN_TITLE_RE = re.compile(r"\\[A-Za-z]+|\$|\^|_\{|(?<![A-Za-z0-9])[A-Za-z]_[A-Za-z0-9]")
+
+
+def title_has_raw_tex(title: object) -> bool:
+    return bool(_RAW_TEX_IN_TITLE_RE.search(str(title or "")))
+
+
+def course_titles_with_raw_tex(data: dict | None) -> list[str]:
+    """コース・章・トピックの題名のうち生の TeX 記法を含むもの（出現順・重複なし）。"""
+    data = data or {}
+    titles: list[str] = [str(data.get("title") or "")]
+    for chapter in course_chapters(data):
+        if isinstance(chapter, dict):
+            titles.append(str(chapter.get("title") or ""))
+    titles.extend(str(t.get("title") or "") for t in iter_all_topics(data) if isinstance(t, dict))
+    return list(dict.fromkeys(t for t in titles if t and title_has_raw_tex(t)))
+
+
 def course_title(data: dict | None, default: str = "") -> str:
     """``data.title`` を返す（無ければ ``default``）。
 
@@ -471,6 +527,32 @@ def course_focus(data: dict | None) -> str:
     if not isinstance(data, dict):
         return ""
     return str(data.get("course_focus") or "").strip()
+
+
+#: 解説の生成がまだ終わっていない（走っている・順番待ち）ことを表す
+#: ``course_content_status.status`` の値。書き手は
+#: ``core/course_content_builder.py::_set_content_status`` とコース登録経路。
+COURSE_CONTENT_PREPARING_STATUSES = frozenset({"pending", "queued", "processing"})
+
+
+def course_content_state(data: dict | None) -> str:
+    """``data.course_content_status.status`` を trim 済み文字列で返す（無ければ ``""``）。
+
+    ``course_content_status`` は ``_set_content_status()`` が任意キーを足す free-form
+    dict（``CourseData`` の docstring 参照）なので、ここでは ``status`` だけを読む。
+    ``""`` は「記録が無い」であって「完了」ではない（読み手が推測で補わない）。
+    """
+    if not isinstance(data, dict):
+        return ""
+    status = data.get("course_content_status")
+    if not isinstance(status, dict):
+        return ""
+    return str(status.get("status") or "").strip()
+
+
+def course_content_is_preparing(data: dict | None) -> bool:
+    """コースの解説生成がまだ終わっていないと記録されているときだけ True。"""
+    return course_content_state(data) in COURSE_CONTENT_PREPARING_STATUSES
 
 
 def excluded_symbol_concepts(data: dict | None) -> list[str]:

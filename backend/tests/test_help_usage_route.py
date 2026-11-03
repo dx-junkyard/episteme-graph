@@ -584,3 +584,212 @@ class TestScreenModeBridging:
 
         assert captured["screen"] is None
         assert _HIT["body"] in resp.answer
+
+
+# ===========================================================================
+# 10. 第 22 周 A2（IK-0611 派生）: 検証シミュレーションのパネルを開いたままの問い
+# ===========================================================================
+
+_RUN_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+_SIM_HIT = {
+    "file": "02-student.md",
+    "anchor": "simulation-lab-levels",
+    "title": "段階の言葉の読み方（一致・分離・記載値・未測定）",
+    "body": "**未測定**は、比べる材料が無かったので測っていない、という意味です。",
+    "audience": "student",
+    "citation": "manual/student/02-student.md#simulation-lab-levels",
+    "documented": True,
+}
+
+
+def _panel_context(run_id: str = _RUN_ID) -> dict:
+    return {"screen": "learning", "selection": {"simulation_run_id": run_id}}
+
+
+class _ReachedRag(Exception):
+    """DOMAIN_RAG 経路（前提知識チェック）に到達した目印。"""
+
+
+class TestSimulationPanelRouting:
+    def test_result_term_question_with_open_run_goes_to_rag_not_help(
+        self, classifier_help_env, monkeypatch
+    ):
+        """分類が USAGE_HELP でも、開いている実行の結果の言葉を問うなら HELP に回さない。"""
+        monkeypatch.setattr(learning_mod, "_classify_intent", lambda *a, **k: "USAGE_HELP")
+
+        def _unexpected_usage_help(*a, **k):
+            raise AssertionError("実行の結果の言葉を問う発話が HELP に回ってはならない")
+
+        monkeypatch.setattr(learning_mod, "_usage_help_response", _unexpected_usage_help)
+
+        def _reached(*a, **k):
+            raise _ReachedRag()
+
+        monkeypatch.setattr(learning_mod, "check_prerequisites", _reached)
+        body = _make_body(
+            message="What does unmeasured mean for this run?",
+            screen_context=_panel_context(),
+        )
+        with pytest.raises(_ReachedRag):
+            learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+
+    def test_result_term_question_without_open_run_keeps_help(self, classifier_help_env, monkeypatch):
+        """パネルを開いていない（run の参照が無い）ときは従来どおり HELP に委譲する。"""
+        _set_search_manual(monkeypatch, [_SIM_HIT])
+        monkeypatch.setattr(learning_mod, "_classify_intent", lambda *a, **k: "USAGE_HELP")
+        body = _make_body(message="未測定とは何ですか")
+        resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+        assert _SIM_HIT["body"] in resp.answer
+
+    def test_policy_question_with_open_run_stays_help(self, classifier_help_env, monkeypatch):
+        """結果の言葉を含まない問い（予想の採点）はパネルが開いていても HELP のまま。
+        （「共有」は第 22 周 (j) で結果の語に加えた — 開いている実行の共有の意味は実行の事実文で答える。）"""
+        captured: dict = {}
+
+        def _fake_search_manual(query, *, audience, limit=3, screen=None, prefer_anchor=None):
+            captured["prefer_anchor"] = prefer_anchor
+            return [_SIM_HIT]
+
+        monkeypatch.setattr(learning_mod, "_search_manual", _fake_search_manual)
+        monkeypatch.setattr(learning_mod, "_classify_intent", lambda *a, **k: "USAGE_HELP")
+        body = _make_body(message="予想は点数になりますか", screen_context=_panel_context())
+        resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+        assert _SIM_HIT["body"] in resp.answer
+        # 開いているパネルの節の一族を検索の先頭に寄せる（画面の明示状態だけを使う）。
+        assert captured["prefer_anchor"] == "simulation-lab"
+
+    def test_share_question_with_open_run_goes_to_rag(self, classifier_help_env, monkeypatch):
+        """第 22 周 (j): 開いている実行について「共有すると」を問う発話は HELP に回さない（実行の事実文で答える経路へ）。"""
+        monkeypatch.setattr(learning_mod, "_classify_intent", lambda *a, **k: "USAGE_HELP")
+
+        def _unexpected_usage_help(*a, **k):
+            raise AssertionError("開いている実行の共有の問いが HELP に回ってはならない")
+
+        monkeypatch.setattr(learning_mod, "_usage_help_response", _unexpected_usage_help)
+
+        def _reached(*a, **k):
+            raise _ReachedRag()
+
+        monkeypatch.setattr(learning_mod, "check_prerequisites", _reached)
+        body = _make_body(message="共有すると誰に見えますか", screen_context=_panel_context())
+        with pytest.raises(_ReachedRag):
+            learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+
+    def test_pre_route_does_not_capture_result_question_with_open_run(self, help_env, monkeypatch):
+        """非LLM の pre-route も、開いている実行の結果の言葉を問う発話は拾わない。"""
+        monkeypatch.setattr(learning_mod, "_is_usage_question", lambda message, **kwargs: True)
+
+        class _ReachedClassifier(Exception):
+            pass
+
+        def _classify(*a, **k):
+            raise _ReachedClassifier()
+
+        monkeypatch.setattr(learning_mod, "_classify_intent", _classify)
+        body = _make_body(message="画面の未測定はどこで見る", screen_context=_panel_context())
+        with pytest.raises(_ReachedClassifier):
+            learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+
+    def test_typed_usage_help_still_wins_with_open_run(self, help_env, monkeypatch):
+        """明示の usage_help（型付きアクション）は推定に勝つ（LC2）。"""
+        _set_search_manual(monkeypatch, [_SIM_HIT])
+        body = _make_body(
+            message="未測定とは", support_action="usage_help", screen_context=_panel_context(),
+        )
+        resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+        assert _SIM_HIT["body"] in resp.answer
+
+
+class TestEnglishUsageQuestion:
+    def test_english_question_skips_keyword_search_and_says_guide_is_japanese(
+        self, help_env, monkeypatch
+    ):
+        """英語の問いは日本語マニュアルに語で当たらない（偶然の重なりで目次が返った）。
+        語の照合を使わず、開いているパネルの節を返し、本文が日本語であることを一行で言う。"""
+
+        def _unexpected_search(*a, **k):
+            raise AssertionError("英語の問いで語の照合を使ってはならない")
+
+        monkeypatch.setattr(learning_mod, "_search_manual", _unexpected_search)
+        body = _make_body(
+            message="What happens when I share this run? Who can see it?",
+            support_action="usage_help",
+            screen_context=_panel_context(),
+        )
+        resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+        assert resp.answer.startswith(learning_mod._USAGE_HELP_JA_ONLY_NOTE_EN)
+        assert learning_mod._USAGE_HELP_FOOTER_EN in resp.answer
+        assert resp.manual_citations and resp.manual_citations[0]["anchor"] == "simulation-lab"
+
+    def test_english_question_prefers_vector_hit_in_open_panel_family(self, help_env, monkeypatch):
+        other = {**_HIT, "anchor": "disclosure-audience", "title": "誰に見えるか"}
+        share = {**_SIM_HIT, "anchor": "simulation-lab-share", "title": "共有する（教員に見せる）"}
+        monkeypatch.setattr(learning_mod, "_search_manual", lambda *a, **k: [])
+        monkeypatch.setattr(learning_mod, "_vector_search_manual", lambda *a, **k: [other, share])
+        body = _make_body(
+            message="Who can see my shared run?", support_action="usage_help",
+            screen_context=_panel_context(),
+        )
+        resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+        assert resp.manual_citations[0]["anchor"] == "simulation-lab-share"
+
+    def test_english_question_without_panel_and_no_hit_is_english_fixed_text(
+        self, help_env, monkeypatch
+    ):
+        monkeypatch.setattr(learning_mod, "_search_manual", lambda *a, **k: [_HIT])
+        body = _make_body(message="How do I use this?", support_action="usage_help")
+        resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+        assert learning_mod._USAGE_HELP_NOT_DOCUMENTED_EN in resp.answer
+        assert "目次" not in resp.answer
+
+
+# ===========================================================================
+# IK-0936（第 25 周 第 3 波）: 英語の問いが分類で USAGE_HELP に回り、日本語マニュアルに該当節が
+# 無いとき、固定文で終えず通常の RAG 経路へ戻す（型付き usage_help の明示は従来どおり固定文）。
+# ===========================================================================
+
+
+class TestEnglishClassifierUsageHelpFallsBackToRag:
+    def _rag_env(self, monkeypatch):
+        settings = _fake_settings()
+        monkeypatch.setattr(learning_mod, "get_settings", lambda: settings)
+        monkeypatch.setattr(llm_policy_mod, "get_settings", lambda: settings)
+        monkeypatch.setattr(learning_mod, "_learning_chat_cost_gate", CostGate())
+        monkeypatch.setattr(learning_mod, "get_course_data", lambda user_id, course_id: _course_data())
+        monkeypatch.setattr(learning_mod, "_is_usage_question", lambda message, **kwargs: False)
+        monkeypatch.setattr(learning_mod, "search_chunks_with_metadata", lambda *a, **k: [])
+        monkeypatch.setattr(learning_mod, "log_unanswered_query", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "check_prerequisites", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "_atlas_topic_attribution", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "check_and_count_confirm_prompt", lambda *a, **k: False)
+        monkeypatch.setattr(learning_mod, "maybe_schedule_tension_mining", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "maybe_schedule_anchor_mining", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "persist_chat_history", MagicMock(return_value={"user_message_id": "msg-1"}))
+        trace = MagicMock(return_value="trace-1")
+        monkeypatch.setattr(learning_mod, "record_interest_trace", trace)
+        monkeypatch.setattr(learning_mod, "detect_and_record_misconception", MagicMock(return_value=None))
+        monkeypatch.setattr(learning_mod, "generate_text", lambda **kwargs: "The paper places this result in the observation model.")
+        monkeypatch.setattr(learning_mod, "_classify_intent", lambda *a, **k: "USAGE_HELP")
+        monkeypatch.setattr(learning_mod, "_search_manual", lambda *a, **k: [])
+        monkeypatch.setattr(learning_mod, "_vector_search_manual", lambda *a, **k: [])
+        return trace
+
+    def test_english_map_question_with_no_manual_hit_goes_to_rag(self, monkeypatch):
+        trace = self._rag_env(monkeypatch)
+        body = _make_body(message=(
+            "Where is the Cepheus B paper on the field map? Every region looks empty to me. "
+            "What do the tags on the map mean?"
+        ))
+        resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+        assert learning_mod._USAGE_HELP_NOT_DOCUMENTED_EN not in resp.answer
+        assert "observation model" in resp.answer
+        assert not resp.manual_citations
+        # 使い方の無ヒットとしては記録しない（内容の問いとして答えた — G層の需要信号を汚さない）。
+        kinds = [c.kwargs.get("kind") for c in trace.call_args_list]
+        assert "help_usage" not in kinds
+
+    def test_japanese_classifier_no_hit_keeps_fixed_text(self, monkeypatch):
+        self._rag_env(monkeypatch)
+        body = _make_body(message="これはどこで確認すればいいですか")
+        resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+        assert learning_mod._USAGE_HELP_NOT_DOCUMENTED in resp.answer

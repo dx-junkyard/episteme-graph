@@ -55,6 +55,9 @@ resolution:
     - backend/core/paper_discovery/arxiv_client.py
     - backend/db/085_paper_discovery_arxiv_metadata_cache.sql
     - docs/features/paper_radar_design.md §14.4
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0307, IK-0318]
 view_of: []
 history:

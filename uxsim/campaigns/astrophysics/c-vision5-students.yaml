@@ -1,0 +1,68 @@
+id: c-astro-vision5-students
+domain: astrophysics
+snapshot: corpus-astro-tex-v1
+course_id: 1bad7d9f
+personas:
+  teachers: []
+  students: [st-02-m2-lensing-theory, st-05-night-solarwind, st-06-skeptic-bao]
+scenarios:
+  student:
+    # F1 帰還の扉・持ち越し（vision §3.4・UC4）
+    - {id: s-v5-leave-nothing, sessions: [1]}
+    - {id: s-v5-empty-door, sessions: [2]}
+    - {id: s-v5-leave-and-carry, sessions: [1]}
+    - {id: s-v5-return-door, sessions: [2]}
+    - {id: s-v5-revisit-rewrite, sessions: [2]}
+    # F2 撤回・訂正主権（§3.7・§5.2・P4）
+    - {id: s-v5-rewrite-delete, sessions: [1]}
+    - {id: s-v5-map-exclude-restore, sessions: [1]}
+    - {id: s-v5-recon-revise, sessions: [1]}
+    - {id: s-v5-anchor-dismiss, sessions: [1]}
+    # F3 精読モード・理解サイクル（§3.1・UC1/UC2）
+    - {id: s-v5-precision-elicit, sessions: [1]}
+    - {id: s-v5-predict-pause, sessions: [1]}
+    - {id: s-v5-predict-resume, sessions: [2]}
+    - {id: s-v5-predict-no-grading, sessions: [1]}
+    # F4 わたしの記録と開示（§5.2・§5.4）
+    - {id: s-v5-records-export, sessions: [1]}
+    - {id: s-v5-ask-disclosure, sessions: [1]}
+    - {id: s-v5-records-after-retraction, sessions: [1]}
+    # F5 の学習者側（RR1 の前後比較）
+    - {id: s-v5-landscape-check, sessions: [1]}
+runner: api
+flags: {}
+sessions_per_student: 2
+budget: {product_llm_calls: 80, persona_llm_calls: 500, wall_clock_minutes: 300}
+notes: |
+  第 23 周（vision 5 機能の通し — F1 帰還の扉 / F2 撤回・訂正 / F3 精読・理解サイクル / F4 わたしの記録と開示 /
+  F5 リリース前の確認と確定文脈の学習者側）。正本は docs/architecture/persona_enactment_testing_design.md と
+  各機能の設計書（return_door / understanding_cycle / trace_registry_sovereignty_ledger / disclosure_axes /
+  release_review_flow / decision_context）。合格基準は原則違反が無いことに加えて「その画面で利用者が確認したいことが
+  1 操作以内で確認できるか」（各経路の watch_for）。
+  コース 1bad7d9f（te-04 所有・public・TeX 4 本）固定。周の前に pin_course --yes。arXiv は呼ばない。
+  runner は「ペルソナ × 経路の全組」を走らせるので、運転は --persona X --scenario Y で 1 場面ずつ（run23_lane.sh）。
+  session 2 は別の起動で再ログインする（「翌日」の近似）。session の番号は経路の session: で決まる。
+  周の前の reset: reset_learner_state --yes で st-02 / st-05 / st-06 の痕跡を空にする（(1b) は扉が空であることが前提）。
+
+  レーン（誰 × 経路 × session の順。→ は同じレーンで続けて走らせる順）:
+   st-05（夜・社会人）: (1b) s-v5-leave-nothing[s1] → (1b) s-v5-empty-door[s2] → (5c 前) s-v5-landscape-check[s1]
+          ⇢ 教員レーン te-02 の (5c) t-v5-release-skip-step2 が終わるのを待つ ⇢ (5c 後) s-v5-landscape-check[s1] をもう一度
+          → (1a) s-v5-leave-and-carry[s1] → (1a) s-v5-return-door[s2] → (2c) s-v5-recon-revise[s1]
+          → (3b) s-v5-predict-pause[s1] → (3b) s-v5-predict-resume[s2] → (4b) s-v5-ask-disclosure[s1]
+   st-02（理論・自信）: (2b) s-v5-map-exclude-restore[s1] → (3a) s-v5-precision-elicit[s1]（持ち越しを 1 つ選んで終える）
+          → (1c) s-v5-revisit-rewrite[s2]（前提 carryover は (3a) が残す。欠ければ s-v5-leave-and-carry を種まき）
+   st-06（懐疑）: (2a) s-v5-rewrite-delete[s1] → (2d) s-v5-anchor-dismiss[s1] → (3c) s-v5-predict-no-grading[s1]
+          → (4a) s-v5-records-export[s1] → (4c) s-v5-records-after-retraction[s1]
+
+  依存:
+   - (1b) は (1a) より前（(1a) の書き置き・持ち越しが残ると扉が空でなくなる）。(1b) の 2 本は reset 直後に走らせる。
+   - (5c) の前後比較: st-05 の s-v5-landscape-check を te-02 の t-v5-release-skip-step2 の前と後に 1 回ずつ。
+     te-03 の t-v5-release-meticulous（editor あり・配置を却下 / 再検討 / 確認済みにする）は**その後**に走らせる
+     （te-03 の確定は教材単位なので、学習者側の位置づけ表示を変える — (5c) の「変わらない」の比較を汚さない）。
+   - (4c) は (2a)(2d) の後。審判 E8 は (2a)(2b)(2d) の取り消しを、E7 は 3 人の学生の非 LLM 応答の構造を比べる
+     （1 場面ずつの運転では run が分かれるので python -m uxsim.oracles.differential <run...> で束ねて読む）。
+
+  LLM 予算（製品側・学習チャット等の目安。上限であって目標ではない）:
+   st-05: (1b) 2 + (1a) 3 + (1a') 0〜1 + (3b) 2 + (4b) 1〜2 ≈ 10 / st-02: (2b) 1 + (3a) 2 + (1c) 2 ≈ 5 /
+   st-06: (2a) 4 + (2d) 2 + (3c) 2〜3 ≈ 9。種まき（s-v5-leave-and-carry）が走れば +3。精読トグルは API では押せない
+   （learning.cycle.precision_toggle は unsupported・runner_note に「トグルは議論モードの帯にだけある」）。

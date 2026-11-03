@@ -59,6 +59,9 @@ resolution:
     - backend/tests/test_docs_registry_guardrails.py
     - docs/features/learning.md
     - docs/backend/rag-chat.md
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0220, IK-0219, IK-0203]
 view_of: [IK-0016]
 pattern: doc-drifts-from-code

@@ -51,6 +51,9 @@ resolution:
   landed_in:
     - backend/core/course_content_builder.py
     - docs/architecture/knowledge_structure_review_2026-09-12.md §4 Phase 0 実装記録
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0113, IK-0102]
 view_of: []
 history:

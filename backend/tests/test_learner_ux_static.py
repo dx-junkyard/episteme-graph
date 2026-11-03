@@ -551,9 +551,10 @@ class TestSourcesTabClaimLedgerLine:
         """equation と claim を合算した配列に対して 1回だけ 3行上限を適用する。"""
         src = _read(APP_JS)
         card_fn = _extract_function(src, "annotateOneSourceCardLedger")
-        assert "count < 3" in card_fn
+        # IK-0971: 同じ事実文を畳んだ後の行数で 3 行に抑える（上限の判定は 1 箇所）。
+        assert "groups.length >= 3" in card_fn
         # equation・claim それぞれ独立に 3件ループする旧実装には戻さない
-        assert card_fn.count("< 3") == 1
+        assert card_fn.count(">= 3") == 1 and "< 3" not in card_fn
 
     def test_claim_fetch_is_independently_fail_closed(self):
         """claim-refs 取得の失敗は equation 側の結果に影響しない（個別 try/catch）。"""

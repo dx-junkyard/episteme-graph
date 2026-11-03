@@ -57,10 +57,7 @@ explanation, skipped_reason MUST be set (never leave everything empty with
 no reason).
 
 ## Language
-Write contextual_explanation / generic_explanation / reason in the SAME
-language as the element's local_text (and library_excerpt, if used). Do not
-translate. If the material is Japanese, answer in Japanese; if English,
-answer in English; match whatever language the source material uses.
+{language_section}
 
 ## Hard output rules
 - Return ONLY valid JSON matching the schema below. No prose, no markdown fences.
@@ -89,9 +86,38 @@ _OUTPUT_SCHEMA = {
 }
 
 
+#: 言語の指定が無いとき（既定）の指示。従来の本文と逐語で同じ（既定の挙動を変えない）。
+_LANGUAGE_MATCH_SOURCE = """\
+Write contextual_explanation / generic_explanation / reason in the SAME
+language as the element's local_text (and library_excerpt, if used). Do not
+translate. If the material is Japanese, answer in Japanese; if English,
+answer in English; match whatever language the source material uses."""
+
+#: 解析 run で生成言語が指定されたとき（run options ``language``）の指示。
+#: evidence_quote は逐語引用なので翻訳させない（捏造ガードの verbatim 検査を壊さない）。
+_LANGUAGE_NAMES = {"ja": "Japanese (日本語)", "en": "English"}
+_LANGUAGE_FIXED = """\
+Write contextual_explanation / generic_explanation / reason in {language_name},
+regardless of the language of the source material. evidence_quote stays a
+verbatim quote in the source material's own language (never translate it)."""
+
+
+def language_section(language: str | None) -> str:
+    """``## Language`` 節の本文（``language`` が語彙外・未指定なら従来の「素材の言語に合わせる」）。"""
+    name = _LANGUAGE_NAMES.get(str(language or "").strip().lower())
+    if not name:
+        return _LANGUAGE_MATCH_SOURCE
+    return _LANGUAGE_FIXED.format(language_name=name)
+
+
 class ContextualExplanationPromptFactory:
-    def __init__(self, input_builder: ContextualExplanationInputBuilder | None = None) -> None:
+    def __init__(
+        self,
+        input_builder: ContextualExplanationInputBuilder | None = None,
+        language: str | None = None,
+    ) -> None:
         self._input_builder = input_builder or ContextualExplanationInputBuilder()
+        self._language = language
 
     def build_messages(
         self,
@@ -132,6 +158,7 @@ class ContextualExplanationPromptFactory:
         return _SYSTEM_CONTENT.format(
             max_contextual=MAX_CONTEXTUAL_EXPLANATION_CHARS,
             max_generic=MAX_GENERIC_EXPLANATION_CHARS,
+            language_section=language_section(self._language),
         )
 
     def _build_user_content(

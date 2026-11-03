@@ -603,3 +603,23 @@ Fable 5 が指揮・設計・統合、Opus 5 サブエージェントが実装�
   （UI アンカー `materials.row-landscape` / `landscape-modal` / `landscape-propose`）。
 - 本層の上に積まれた後続層（いずれも別設計書が正本）: カテゴリギャップ候補（migration 066）・
   VA層の配置プレフィルタ（074）。
+
+### 15.x 第 25 周 第 4 波の追補（2026-10-25・migration なし・IK-0967 / IK-0677）
+
+- **LS4 の意味は狭めない**（verbatim 検査は従来どおり。照合先に解析の再構成文が含まれる事実は変えない）。代わりに出所を見せる:
+  保存時に `evidence[].source`（`claim` / `paper_summary`。正本 `core/landscape/schema.py::evidence_source_for`）を記録し、
+  DTO は `evidence[].source_label`（正本 `label_vocab.LANDSCAPE_EVIDENCE_SOURCE_LABELS`）を返す。出所の記録が無い旧行で
+  `claim_id` も無い引用は「論文全体の記述からの引用（原文の逐語とは限りません）」（再構成文と断定しない）。
+- 理由文は AI の要約: DTO に `reason_label`「AIの要約」、理由の**固有の語**（ラテン文字の略語・固有名。照合の正本は
+  `agents/landscape_placement/reason_scope.py`・語境界付き）が引用に無いときだけ `reason_note`。validator は同じ照合で
+  warning `placement_reason_terms_beyond_quote`（hard error にしない = 配置を落とさない・P4）、プロンプトに「理由は引用が言う範囲に限る」の 1 行。
+  日本語の語は v1 では照合しない（未照合として残す）。配置層自身の agent への変更で、LS2（A層成果を読むだけ）には当たらない。
+- 表示: 学習者の地図「論文の位置」・出典タブ・教員の位置づけモーダル・リリース前の確認が、サーバの文を素通しで描く（JS に表を持たない）。
+- ガードレール: `backend/tests/test_atlas_review_round25_r4.py` / `src/tests/agents/landscape_placement/test_validator.py::TestReasonScope`。
+
+### 15.y 第 25 周 第 5 波の追補（2026-10-27・migration なし・IK-0967 残り）
+
+- `reason_note` に挙げる語を固有の語（大文字か数字を含む: `BAO` / `Ia` / `Cepheus` / `DR2`）に絞る（`schema._is_proper_term`）。
+  要約が英語の句を混ぜただけの小文字の普通の語（`dynamical` / `dark` / `energy`）は挙げない。照合の正本（A層 `reason_scope`）と
+  validator の warning は変えず、表示の段で絞る。
+- pre-mortem は `field_atlas_overlay_spec.md` §17.1。
